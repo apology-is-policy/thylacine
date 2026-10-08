@@ -22,6 +22,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- cooperative yield to the SQPOLL kthread
+#include <thylacine/spoor.h>   // Spoor.ref -- the register rollback observation
 #include <thylacine/thread.h>  // THREAD_SLEEPING -- the F2 park observation
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -52,6 +53,7 @@ void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
 void test_loom_sqpoll_parks_on_cq_full(void);
+void test_loom_sqpoll_join_held_through_forced_close(void);
 
 void test_loom_register_buffers(void);
 void test_loom_register_buffers_rejects(void);
@@ -255,18 +257,35 @@ void test_loom_register_rejects(void) {
     hidx_t one[1] = { rd };
     // Unsupported op (BUFFERS reserved for Loom-6).
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1),
-                   -1, "LOOM_REGISTER_BUFFERS rejected");
+                   -T_E_INVAL, "LOOM_REGISTER_BUFFERS rejected");
     // nargs over the table cap.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, one,
                                               LOOM_MAX_REG_HANDLES + 1u),
-                   -1, "nargs over cap rejected");
+                   -T_E_INVAL, "nargs over cap rejected");
     // A non-KOBJ_SPOOR fd (the loom fd itself) is rejected.
     hidx_t bad[1] = { loom_fd };
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1),
-                   -1, "non-Spoor fd rejected");
+                   -T_E_INVAL, "non-Spoor fd rejected");
+    // An fd that is not open is EBADF, after an open one was resolved and must
+    // be rolled back: its Spoor's ref count is what it was. (Both readings
+    // include the one ref the reading handle_get holds.)
+    struct Handle rh;
+    TEST_ASSERT(handle_get(p, rd, &rh) == 0, "handle_get(rd)");
+    int ref0 = __atomic_load_n(&((struct Spoor *)rh.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&rh);
+    hidx_t gone[2] = { rd, (hidx_t)999 };
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, gone, 2),
+                   -T_E_BADF, "an unopened fd is EBADF");
+    TEST_ASSERT(handle_get(p, rd, &rh) == 0, "handle_get(rd) after");
+    int ref1 = __atomic_load_n(&((struct Spoor *)rh.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&rh);
+    TEST_EXPECT_EQ(ref1, ref0, "and the resolved fd's ref was rolled back");
     // A bogus loom_fd is rejected.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1),
-                   -1, "bad loom_fd rejected");
+                   -T_E_BADF, "bad loom_fd is EBADF");
+    // A Spoor fd named as the ring is EINVAL: open, but not a Loom.
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, rd, LOOM_REGISTER_HANDLES, one, 1),
+                   -T_E_INVAL, "a non-Loom loom_fd is EINVAL");
 
     test_proc_drop(p);
 }
@@ -369,11 +388,11 @@ void test_loom_register_buffers_rejects(void) {
     struct loom_buf_reg um   = { .va = 0x1000,   .len = PAGE_SIZE };       // unmapped low VA
 
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &one,
-                   LOOM_MAX_REG_BUFFERS + 1u), -1, "n over cap rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -1, "len 0 rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -1, "OOB len rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -1, "unmapped VA rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -1, "bad loom_fd rejected");
+                   LOOM_MAX_REG_BUFFERS + 1u), -T_E_INVAL, "n over cap rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -T_E_INVAL, "len 0 rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -T_E_INVAL, "OOB len rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -T_E_INVAL, "unmapped VA rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -T_E_BADF, "bad loom_fd is EBADF");
 
     // Every reject is atomic: the table stays empty + no ref leaked.
     struct Handle h;
@@ -920,6 +939,64 @@ void test_loom_sqpoll_setup_and_teardown(void) {
     test_proc_drop(p);
     TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1,
                    "ring freed (kthread joined) exactly once on teardown");
+}
+
+// ARCH 7.9.1 part B: loom_free's join of its SQPOLL kthread sleeps through a
+// kill that forces the final close. A join a death could end would return from
+// every sleep at once and spin until the kthread exited -- in a non-preemptible
+// syscall body, forever at -smp 1. The kthread is held before its terminal, so
+// the joiner is caught inside the join; the owner Proc outlives the free.
+static struct Loom       *g_jf_loom;
+static u64                g_jf_slept;
+static struct test_dying  g_jf_thread;
+
+static void jf_drop(void *arg) {
+    (void)arg;
+    struct Thread *self = current_thread();
+    __atomic_or_fetch(&self->proc->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED,
+                      __ATOMIC_RELEASE);
+    self->exit_close_active = true;
+    u64 n0 = self->nsleeps;
+    loom_unref(g_jf_loom);
+    g_jf_slept = self->nsleeps - n0;
+    self->exit_close_active = false;
+}
+
+void test_loom_sqpoll_join_held_through_forced_close(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct loom_params kp;
+    hidx_t fd = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd), 0,
+                   "SQPOLL setup succeeds");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, fd, &h) == 0, "handle_get(loom fd)");
+    struct Loom *l = (struct Loom *)h.obj;
+    TEST_ASSERT(l->sqpoll != NULL, "SQPOLL kthread spawned");
+    loom_ref(l);                                  // the dying thread's, its last
+    handle_put(&h);
+    TEST_EXPECT_EQ(handle_close(p, fd), 0, "close the loom fd");
+    u64 destroyed0 = loom_total_destroyed();
+
+    loom_sqpoll_hold_exit_for_test(true);
+    g_jf_loom  = l;
+    g_jf_slept = 0;
+    bool started = test_dying_start(&g_jf_thread, jf_drop, NULL, /*dead_now=*/true);
+    TEST_YIELD_UNTIL_SOFT(!started || test_dying_parked(&g_jf_thread) ||
+                          test_dying_done(&g_jf_thread));
+    bool parked = started && test_dying_parked(&g_jf_thread);
+    loom_sqpoll_hold_exit_for_test(false);
+    if (started) {
+        TEST_YIELD_UNTIL(test_dying_done(&g_jf_thread));
+        test_dying_reap(&g_jf_thread);
+    }
+    u64 destroyed = loom_total_destroyed() - destroyed0;
+    test_proc_drop(p);
+
+    TEST_ASSERT(started, "a dying thread drops the last reference");
+    TEST_ASSERT(parked, "its join sleeps through the forced close");
+    TEST_ASSERT(g_jf_slept >= 1, "it blocked rather than spun");
+    TEST_EXPECT_EQ(destroyed, (u64)1, "and the ring was freed once the kthread left");
 }
 
 // Zero-syscall drain. On an SQPOLL ring the user stages SQEs + bumps sq_tail; an

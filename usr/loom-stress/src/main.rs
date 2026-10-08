@@ -1,8 +1,8 @@
 // /loom-stress -- the concurrent + cross-Proc-death SMP stress harness for the
 // native libthyla_rs::loom ring API (Loom-6d-2). The OWED harness carried since
 // #841 across all five Loom closed lists: it drives the kernel's concurrent
-// async paths (the #841 elected-reader, the per-ring borrow-guard
-// loom_first_inflight_client, the Loom-4b CQ wait-list, and the #898
+// async paths (the #841 elected-reader, the fan-in waiter's borrow-guard
+// on every client in flight, the Loom-4b CQ wait-list, and the #898
 // quiesce-on-Proc-death) from real userspace threads, under -smp 4/8 via the
 // ci-smp-gate multi-boot -- turning what the Loom audits could only reason about
 // into something exercised under real SMP scheduling.

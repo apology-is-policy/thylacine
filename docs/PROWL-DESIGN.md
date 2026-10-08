@@ -201,7 +201,9 @@ is a legitimate call — surfaced as the fork.
 ### 3.5 The visibility gate
 
 `OQ-4` — **who may read what.** Today `/ctl/procs` lists *every* pid's state
-(Plan 9 all-pids-visible; visibility-not-authority; #57a). Extending it with
+(Plan 9 all-pids-visible; visibility-not-authority; #57a) -- to every reader but
+one running as `none`, which Plan 9 also walls off and which sees only its own row
+(IDENTITY-DESIGN's reserved ids, operator vote 2026-10-06). Extending it with
 name + %CPU keeps that posture — coarse metadata stays all-visible, which is what
 a whole-system monitor needs. The **deep** per-process view (`/proc/<pid>/sched`,
 per-thread internals, another proc's `cpu_ns` detail) is the question: Plan 9
@@ -212,6 +214,20 @@ internals follow an owner-or-`CAP_HOSTOWNER` gate** (a full-system monitor is th
 operator's tool; a confined user still sees the overview + full detail on its own
 processes). This composes I-1 (isolation) + the existing `/ctl` posture; it adds
 no new §28 invariant.
+
+**Amended 2026-10-06: %CPU left the all-visible summary** (operator votes "Gate
+CPU time to the owner" and "Restrict it too"; `dec-2026-10-06-cpu-time-gate`).
+A counter that grows with each key the trusted episode's authority handles
+publishes the secret's length and cadence (IMPERIUM-DESIGN 11.3 item 10). A
+Proc's `cpu_ns`, in `/proc/<pid>/status` and `/ctl/procs`, is shown exactly to
+its owner or a `CAP_HOSTOWNER` holder and as `-` to anyone else. The
+system-wide counters belong to the system principal: `/ctl/cpu`'s `idle_ns`,
+`ctxt` and `intr`, and `/ctl/sched`'s `runnable:` and work-conservation lines,
+read as `-` to a reader that is neither `PRINCIPAL_SYSTEM` nor a
+`CAP_HOSTOWNER` holder. `cpus:`, `created:`, the capacity class and every
+Proc's name, state and memory stay all-visible. `ps` and `prowl` show `-`
+where the kernel does, and `prowl`'s per-CPU meters show `-` to an ordinary
+user, who still sees %CPU for their own processes.
 
 ---
 

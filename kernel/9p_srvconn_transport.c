@@ -11,6 +11,8 @@
 
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_srvconn_transport.h>
+#include <thylacine/errno.h>
+#include <thylacine/poll.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 
@@ -72,33 +74,33 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     //    0 -- EOF (the SrvConn is torn and no residual bytes remain);
     //          transport core surfaces this as recv-side ERROR. The
     //          p9_client maps "transport EOF mid-handshake" to -P9_E_IO.
-    //   -1 -- deadline lapsed (srvconn_client_timed_out true) or
-    //          bad args. The p9_client maps to -P9_E_IO; SYS_ATTACH_
+    //   -1 -- deadline lapsed (the handshake's) or bad args. The p9_client maps to -P9_E_IO; SYS_ATTACH_
     //          9P_SRV folds that into the syscall's -1 return.
     long n = srvconn_client_recv(st->cn, buf, (long)cap);
     if (n < 0) return -1;
     return (int)n;
 }
 
-// #841 + Loom-4: the steady-state deadline is caller-set, NOT auto-armed (see
-// srvconn_transport_recv). These NULL-permitted ops let the Loom SQPOLL reader
-// arm a frame-boundary idle deadline (LOOM.md §8.6): the deadline-aware pump
-// arms before the FIRST recv of a frame (a timeout there consumes no bytes ->
-// no desync) and disarms for the rest of the frame.
-static void srvconn_transport_set_recv_deadline(void *ctx, u64 deadline_ns) {
+// s2c bytes, or its EOF: a torn connection's recv returns at once. The hook
+// goes on cn->poll_list, which every ring mutation walks (srvconn_poll), so an
+// s2c fill reaches it.
+static bool srvconn_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
     struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
-    if (!st)                                     return;
-    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return;
-    if (!st->cn)                                 return;
-    srvconn_set_client_deadline(st->cn, deadline_ns);
+    if (!st || st->magic != P9_SRVCONN_TRANSPORT_MAGIC || !st->cn) return true;
+    short rev = srvconn_poll(st->cn, /*client=*/true, POLLIN, pw);
+    return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
 }
 
-static bool srvconn_transport_recv_timed_out(void *ctx) {
+static int srvconn_transport_recv_now(void *ctx, u8 *buf, size_t cap) {
     struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
-    if (!st)                                     return false;
-    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return false;
-    if (!st->cn)                                 return false;
-    return srvconn_client_timed_out(st->cn);
+    if (!st)                                     return -1;
+    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return -1;
+    if (!st->cn)                                 return -1;
+    if (!buf || cap == 0)                        return -1;
+    long n = srvconn_client_recv_now(st->cn, buf, (long)cap);
+    if (n == -(long)T_E_AGAIN) return P9_TRANSPORT_EAGAIN;
+    if (n < 0) return -1;
+    return (int)n;
 }
 
 static int srvconn_transport_close(void *ctx) {
@@ -137,6 +139,16 @@ static int srvconn_transport_close(void *ctx) {
     return 0;
 }
 
+// EOF on both rings, every party woken: the server's worker leaves its serve
+// loop. Spinlocks and wakes only, and it frees nothing -- the adapter's ref
+// stays for close, whose own teardown is then a no-op.
+static void srvconn_transport_hangup(void *ctx) {
+    struct p9_srvconn_transport *st = (struct p9_srvconn_transport *)ctx;
+    if (!st)                                     return;
+    if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return;
+    if (st->cn) srvconn_teardown(st->cn);
+}
+
 // =============================================================================
 // Public API.
 // =============================================================================
@@ -169,8 +181,9 @@ struct p9_transport_ops p9_srvconn_transport_ops(struct p9_srvconn_transport *st
     ops.send              = srvconn_transport_send;
     ops.recv              = srvconn_transport_recv;
     ops.close             = srvconn_transport_close;
-    ops.set_recv_deadline = srvconn_transport_set_recv_deadline;
-    ops.recv_timed_out    = srvconn_transport_recv_timed_out;
+    ops.recv_ready        = srvconn_transport_recv_ready;
+    ops.recv_now          = srvconn_transport_recv_now;
+    ops.hangup            = srvconn_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;
 }

@@ -1,7 +1,7 @@
 ---
 id: sub-lantern
 type: sub
-title: "lantern -- the Beacon deck presenter: a folder of manual sections shown one at a time"
+title: "lantern -- the Beacon deck presenter: a folder of manual sections and pictures shown one at a time"
 parent: moc-userspace-shell-tui
 code:
   - usr/lantern/src/lib.rs
@@ -13,19 +13,21 @@ code:
   - tools/interactive/lantern.exp
   - tools/interactive/ls-halcyon-lantern.exp
   - tools/interactive/ls-halcyon-lantern-haul.exp
+  - tools/interactive/gfx_frame.py
+  - tools/interactive/gfx_amber.py
 audit: light
 guarded-by: []
 validated-by: [prose, gate-interactive]
 locks: []
 hazards: []
 abis: []
-design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3"]
+design: ["docs/LANTERN-DESIGN.md", "docs/MANUAL-DESIGN.md", "docs/BEACON.md", "docs/HALCYON.md section 14.3", "docs/HALCYON.md section 14.7"]
 created: 2026-09-22
-updated: 2026-09-28
+updated: 2026-10-06
 ---
 ## Purpose
 
-`lantern` shows a directory of Markdown slides one at a time, driven by keys:
+`lantern` shows a directory of Markdown slides and pictures one at a time, driven by keys:
 a rich Beacon document under Halcyon, the same words plain on a serial console,
 and every slide at once down a pipe. It exists so a talk can be given from
 inside Thylacine with the system's own renderer doing the drawing.
@@ -34,12 +36,22 @@ inside Thylacine with the system's own renderer doing the drawing.
 checker and its Beacon realization, used unchanged. The tree therefore carries
 ONE Markdown dialect, not a second one private to slides, and that was not a
 compromise: the manual subset already accepts everything a textual slide needs
-(a title, headings, lists, tables, code fences, emphasis). What lantern adds is
+(a title, headings, lists, tables, code fences, emphasis, and since 2026-09-29
+block quotes). What lantern adds is
 only what a deck needs beyond a document -- the ORDER, the key map, the clear
 between slides, and the output cooking that clear implies.
 
+**A picture slide is `view`'s (2026-09-29, vote 3 of 2026-09-28,
+[[dec-2026-09-29-image-slide]]).** A manifest entry ending `.png`, `.jpg` or
+`.jpeg` names a picture, and lantern decodes nothing: `view --check -` validates
+it before the talk and `view --embed -` places it during the talk, each in
+`view`'s own short-lived process ([[sub-view]]). Hostile image bytes never parse
+in lantern, which holds the presenter's terminal. The deck names a picture,
+never a program.
+
 **Nothing in `[[sub-halcyond]]` changed to make this work**, which is the
-finding the arc turned on. The shape follows `[[sub-view]]` and `[[sub-manual]]`:
+finding the arc turned on. (The picture slide later added one read to
+halcyond's place channel, for `view` rather than for lantern.) The shape follows `[[sub-view]]` and `[[sub-manual]]`:
 a pure `no_std + alloc` library (host-tested, zero syscalls) and a thin
 libthyla-rs binary.
 
@@ -48,15 +60,21 @@ libthyla-rs binary.
 - `lantern <deck-directory>` -- present. Requires a terminal on **both** fd 1
   and fd 0 (`show_mode`); otherwise the deck is catted.
 - `lantern --check <deck-directory>` -- parse the manifest and check every
-  slide, print diagnostics, render nothing. Exit 1 if any slide fails.
+  slide (a text slide with `manual::format::check`, a picture with
+  `view --check -`), print diagnostics, render nothing. Exit 1 if any slide
+  fails.
 - `--beacon=auto|always|never` -- the tier flag every Beacon emitter carries;
   `resolve_tier` folds it with `$BEACON` and `SYS_FD_DEVCLASS(1)` through
   `beacon::effective_tier`, exactly as `manual` and the coreutils do.
 - `--no-footer` -- drop the `title · N / M` line.
-- Exit 2 = usage error; `-h`/`--help` prints `USAGE` to stdout and exits 0.
-- A deck directory holds `slides.toml` (`deck::MANIFEST`) and the `.md` files
-  it names. The manifest sets `slides` (required, ordered, non-empty) and
-  optionally `title` -- **and nothing else**.
+- Exit 2 = usage error; `-h`/`--help` prints `USAGE` to stdout and exits 0. An
+  empty deck name is a usage error too: joined to the manifest's name it would
+  read `/slides.toml` at the namespace root (audit IMG-SLIDE r2 F3).
+- A deck directory holds `slides.toml` (`deck::MANIFEST`) and the `.md`,
+  `.png`, `.jpg` and `.jpeg` files it names (`deck::kind`, matched exactly, as
+  `.md` always was). Every one is opened `T_ONOFOLLOW` and must be a regular
+  file (`open_deck_file`). The manifest sets `slides` (required, ordered,
+  non-empty) and optionally `title` -- **and nothing else**.
 
 ### The manifest carries content and order, never display authority
 
@@ -69,7 +87,8 @@ The parser IS the checker, in the manual format's spirit -- 13 `Problem`
 variants over `libhalcyon::toml` (the theme loader's subset, reused rather than
 a second parser written here), each naming the line to look at. A table header,
 a duplicate, an empty name, a name carrying `/`, beginning `.` or `-`, or not
-ending `.md` is refused rather than guessed at, because a deck should fail at
+ending `.md`, `.png`, `.jpg` or `.jpeg` (`Problem::SlideUnknownKind`) is refused
+rather than guessed at, because a deck should fail at
 `lantern --check` and not mid-talk. Bounds: `SLIDES_MAX` 64 (stated here rather
 than inherited silently from the TOML subset's identical cap, which is free to
 move for unrelated reasons), `MANIFEST_MAX` 64 KiB, and each slide capped at
@@ -156,6 +175,107 @@ rejects control characters in section text and the renderer sanitizes every
 value it did not produce -- and `lf_never_appears_inside_a_frame` pins that by
 walking the OSC state over every construct rather than trusting it.
 
+**A boxed slide is a block quote (2026-09-29; the operator's vote of 2026-09-28,
+`dec-2026-09-28-beacon-aside`).** lantern adds no construct for it. A slide is a
+manual section, so a box around a passage is the manual's block quote, which
+the reader renders as a Beacon `aside` ([[sub-manual]]). In a Halcyon tile the
+tier is rich, and the aside is the hairline frame around reflowed prose
+([[sub-halcyond]], HALCYON-VISUAL 8.4). Presented at a plain tier on the
+console, lantern hands the renderer the console's width (`plain_width`, from
+`/dev/winsize`, which Aurora sets), so the passage is drawn in U+2500 furniture
+at most 256 columns wide. On a tile's pts (`--beacon=never` in Halcyon), `cat`
+and a pipe get no width, by the manual's own rule (`manual::wraps_at_console`),
+and the passage is its plain text: the leaf is the console's width, not the
+tile's, and a box drawn to it tore on a narrower tile. The
+shipped deck's slide 2 ends with one block quote led by `**What it does not
+do.**`. It keeps the phrase "raw character grid", which `lantern.exp` leg (b)
+and `slide_tokens_render_contiguously` match. `lantern.exp` leg (f) presents the
+deck and expects the box's top and bottom borders between slide 2's heading and
+its footer. The patterns are built from UTF-8 bytes, because the scenario's
+expect channel reads each byte as one iso8859-1 character (lib.exp).
+`ls-halcyon-lantern` leg (9) finds the frame in the tile: `gfx_frame.py` reports
+every closed rectangle of one-pixel sides in one colour that is not the
+ground, and slide 2 must add exactly one over slide 1's (a frame both show is
+the tile's), with no fill, ink inside, and the text clear of all four sides.
+On the captures of the image before the aside it finds no frame on a slide.
+
+**A picture slide is placed before its frame, and its reference goes inside it
+(2026-09-29, LANTERN-DESIGN 14).** At the rich effective tier `paint_picture`
+calls `embed_picture`: `open_deck_file` opens the picture, and `run_view` spawns
+`view --embed -` with that `File` as its stdin and its stdout and stderr piped.
+It spawns `VIEW`, `/bin/view`: the kernel resolves a relative spawn name
+against the working directory, so a bare `view` would run a file of that name
+beside the deck. The child's cap mask is `VIEW_CAPS`, `T_CAP_CSPRNG_READ`
+alone (the kernel intersects it with lantern's): the random source `view`
+draws a placed picture's reference from, and no other capability. Identity,
+namespace and environment still cross from lantern unchanged, so the mask
+narrows what a subverted decoder may ask of the kernel, not the files it can
+reach (audit IMG-SLIDE r3 F2).
+Both pipes drain through one `PollSet`, so a child filling one pipe while
+lantern reads the other cannot deadlock; at most `VIEW_REPLY_MAX` (1 KiB) of
+each is kept and the rest read to EOF, and no byte and no exit for
+`VIEW_STALL_MS` (30 s) kills and reaps the child. Once both pipes are closed
+the reap is `try_wait` every `VIEW_REAP_STEP_MS` (10 ms) under the same 30 s,
+so a child that closes them and lives on is killed too, never waited on without
+end (audit IMG-SLIDE r3 F3). Exit 0 with
+`lantern::is_reference(out)` -- exactly one `inline-image` object, a
+32-lowercase-hex `ref`, printable non-empty text, one trailing LF, and byte-equal
+to Beacon's own re-emission (the parser accepts a BEL terminator and drops an
+unknown frame whole, so only the byte comparison refuses those) -- puts the
+reference in the slide buffer before the footer, and `show` wraps both in the
+one-write synchronized frame. The decode and the upload therefore finish before
+any frame byte, while the previous slide is still on the screen: a decode
+written into an open frame could outlast the 150 ms hold. Anything else -- a
+non-zero exit (the reason is `view`'s first stderr line, sanitized), a
+malformed reply, a stall, a failed spawn -- gives the STAND-IN, and so does
+every tier below rich, without spawning `view`. `lantern::stand_in` synthesizes
+`> Picture: <name>` (with `>` and `> Not shown: <reason>` when `view` failed),
+each ASCII punctuation character backslash-escaped after `manual::sanitize`
+(the subset honours a backslash before any ASCII punctuation), and
+`manual::render` draws it as the aside a block quote is: framed in a tile, boxed
+on a console with a width, text down a pipe. On the console Halcyon renders, the
+tier is rich but the channel orders nothing, so `view --embed` refuses at once
+and the stand-in says why. `validate` runs `check_picture`, the same spawn with
+`--check`, so what is checked and what is shown are one file and one decoder.
+
+**A deck's files are files in its directory.** `open_deck_file` opens the
+manifest, a text slide (at validation and at every paint) and a picture with
+`File::open_nofollow` (`T_OREAD | T_ONOFOLLOW`: a final-component link answers
+`T_E_LOOP`, which reads `a link; a deck's files are files in its directory`),
+and refuses anything but a regular file. The name rules keep a NAME inside the
+deck; this keeps the CONTENT there, because a deck someone else wrote -- a Haul
+mount above all -- could otherwise link a slide to one of the presenter's own
+files and put it on the projector. Intermediate components still expand, so the
+deck directory itself may be reached through a link. On a local path that link
+is the presenter's; on a Haul mount it may be the export author's. Since
+2026-10-06 the kernel resolves such a served link beneath the mount it was
+reached through (DISTRO 4.6, [[sub-kernel-stalk]]), so the author can point
+the deck path elsewhere in the export but not at another of the presenter's
+decks (audit IMG-SLIDE F6, closed). `lantern` adds no check of its own: it
+cannot tell the two kinds of link apart, and it resolves the deck path through
+the kernel, never by reading link text itself.
+
+`lantern.exp` covers the plain half on the CI image: (a) `4 slides, all valid`,
+the picture through `view --check`; (b) the cat posture's stand-in
+`Picture: 04-lantern.png` after slide three, then `4 / 4`; (g) a `fake.png`
+holding text, refused with `view`'s `not a PNG or JPEG picture`; (h) the same
+refusal with a copy of `echo` named `view` in the working directory, which a
+relative spawn would run; (i) `lantern ''` refused with `the deck directory name
+is empty`, exit 2, where a lantern that took it names `/slides.toml`; (f) `G` to
+the picture's boxed stand-in. `ls-halcyon-lantern` (10) shows the picture in a tile:
+halcyond's `session inline leaf=N 640x400` witness, then the capture's amber
+(`gfx_amber.py`: R > 200, 120 <= G < 190, B < 60, the predicate
+`the_shipped_picture_is_one_view_shows` pins against the file; blue under 60
+leaves out the ember accent 0xE07840) must exceed slide three's by 10,000, with
+slide three under 5,000. `ls-halcyon-lantern-haul` (5) refuses a relative link
+in a host-served deck: npxf's `opened` count for the link's target must stay put
+across `lantern --check` while the slide after the link is opened (the positive:
+lantern checks in manifest order, so it reached the link), and rise across `cat`
+of the same link, the control. No
+guest shell tool creates a link (Loom's `LOOM_OP_SYMLINK` is the only creator,
+and only `symlink-probe` drives it), which is why that refusal is driven over
+Haul.
+
 **The caret.** `HIDE_CARET` on entry, `SHOW_CARET` on every exit path; see
 `[[sub-halcyond]]`'s caret section for the seam the escape crosses and the test
 that pins it.
@@ -184,7 +304,8 @@ position.
 ## Data structures
 
 `Deck { title: Option<String>, slides: Vec<String> }` -- the parsed manifest;
-`slides` is never empty. `Problem` / `Diagnostic` carry the refusal and its
+`slides` is never empty. `SlideKind { Text, Picture }` is what `deck::kind`
+reads from a name. `Problem` / `Diagnostic` carry the refusal and its
 line. `Action` is the key map's output. `Out` wraps stdout with the cook flag,
 and each `put` is one write: it cooks into one buffer first.
 No shared or persistent state: a slide is re-read from the filesystem on every
@@ -192,8 +313,10 @@ paint, so an edit mid-rehearsal shows on the next keypress.
 
 ## Concurrency
 
-None. One process, one thread, one blocking read on fd 0. No locks, no waiters,
-no signals (`-isig` is set for the duration).
+One process, one thread, one blocking read on fd 0. A picture slide runs `view`
+as a child and waits for it -- both pipes drained by one poll, a stall bound,
+the child killed and reaped on a stall -- so nothing runs beside lantern's own
+state. No locks, no waiters, no signals (`-isig` is set for the duration).
 
 ## Invariants enforced
 
@@ -201,7 +324,9 @@ No §28 invariant is on this line -- lantern is an ordinary unprivileged program
 with no capability, no shared memory and no service. Its own two rules are the
 manifest's authority boundary (above) and the alt-screen exclusion, and both are
 enforced by construction rather than by a check: an unknown key is a parse
-refusal, and the alt-screen code is not linked.
+refusal, and the alt-screen code is not linked. The picture slide keeps I-47's
+decode containment: lantern never parses image bytes; `view` does, in its own
+process, for the check and for the show.
 
 ## Error paths
 
@@ -211,6 +336,13 @@ refusal, and the alt-screen code is not linked.
 - A slide missing, over `SECTION_MAX`, or failing `manual::format::check` ->
   named diagnostics; `validate` checks the WHOLE deck before anything is shown,
   so a broken slide 6 is found before slide 1 is painted.
+- A picture that is not a PNG or JPEG, is over `view`'s budget or does not
+  decode -> `<name>: <view's reason>` at validation, exit 1.
+- A deck file that is a link or not a regular file -> `<path>: a link; a deck's
+  files are files in its directory` or `<path>: not a regular file`, exit 1.
+- A picture that cannot be placed while presenting (no session channel, a
+  refusal, a stall, a malformed reply) -> the stand-in with the reason; the talk
+  continues.
 - A slide that becomes invalid while the deck is open shows its diagnostics
   **in place** rather than ending the presentation -- losing the deck on a stage
   is a far worse failure than a slide that reports what is wrong with it.
@@ -221,7 +353,8 @@ refusal, and the alt-screen code is not linked.
 ## Performance
 
 Not on any latency budget. One slide is read and rendered per keypress; a slide
-is bounded by `SECTION_MAX` and a deck by `SLIDES_MAX` = 64. Memory is one
+is bounded by `SECTION_MAX` and a deck by `SLIDES_MAX` = 64. A picture slide
+spawns `view` on every paint: a decode, a fit and an upload before the frame. Memory is one
 slide at a time -- `validate` holds one, not the deck.
 
 ## Prosecution
@@ -235,6 +368,12 @@ Low-value target, but the two places worth attacking:
   refused on three separate grounds (`/`, leading `.`, leading `-`) rather than
   one. Every diagnostic passes user bytes through `manual::sanitize` before
   printing.
+- **The picture path** (round IMG-SLIDE): the pipe reads (a child that fills
+  one pipe while lantern reads the other, EOF, a dying child, a hung one and
+  the 30 s stall), the reply bound, `is_reference`'s strictness (anything but
+  exactly one canonical reference is refused rather than written inside the
+  frame), the stand-in's escaping, and the no-follow open's coverage (the
+  manifest, both slide kinds, the re-read at every paint).
 - **The tier gate**: lantern must not emit frames into a pipe or a file. It
   resolves the tier through `beacon::effective_tier` and computes nothing
   itself; the check is that no other emission path exists.
@@ -266,6 +405,12 @@ Low-value target, but the two places worth attacking:
   `tools/interactive/ls-halcyon-lantern-haul.exp` serves a deck it writes from
   a host npxf-server, and asserts the paint, the server's `opened` log lines,
   paging, and a host edit shown after Ctrl-L (2026-09-23, both profiles).
+- `view` is a runtime dependency, spawned by name, and a dev-dependency:
+  `the_shipped_picture_is_one_view_shows` decodes the shipped picture with
+  `view`'s own lib and pins the amber the session gate counts.
+  `usr/lantern/make-deck-picture.py` (stdlib only) generates
+  `deck/04-lantern.png`; it lives outside `deck/` because the bake installs
+  every file in `deck/`.
 - `console::is_raw_command` in `[[sub-utopia-eval]]` gained `lantern`: the
   basename set is hardcoded, so membership is required for the INPUT half (raw
   mode) and is this chunk's only edit to an audit-trigger surface.
@@ -289,6 +434,12 @@ Low-value target, but the two places worth attacking:
 - Presenting requires a terminal on fd 0 AND fd 1, judged independently:
   `lantern deck | tee log` has a terminal on stdin and a pipe on stdout, and
   clearing a pipe would write escapes into a file.
+- A picture shows only in a Halcyon SESSION tile. The console renderer's
+  channel carries no reference, so there the slide is the stand-in with
+  `view`'s reason.
+- A link is refused even when it names another file of the same deck: the
+  check is `T_ONOFOLLOW` on the final component, not a containment
+  computation.
 - A deck is not a format and has no version. It is a directory; the manifest is
   its table of contents.
 - The gate tokens `tools/interactive/lantern.exp` matches are pinned by
@@ -308,3 +459,5 @@ Low-value target, but the two places worth attacking:
   the profile caveat.
 - 2026-09-22 `1319b4ba` -- the caret escapes (its claim that they did not work
   was wrong; corrected in `ae30a6b3`).
+- 2026-09-29 -- the picture slide (aux (d2), vote 3 of 2026-09-28;
+  [[dec-2026-09-29-image-slide]]).

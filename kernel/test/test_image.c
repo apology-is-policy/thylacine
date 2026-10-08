@@ -41,6 +41,7 @@
 void test_image_miss_then_hit_shares(void);
 void test_image_distinct_qid_distinct_entry(void);
 void test_image_qid_vers_bump_new_entry(void);
+void test_image_devno_full_width_distinct_entry(void);
 void test_image_distinct_offset_distinct_entry(void);
 void test_image_eviction_bounds_cache(void);
 void test_image_bad_arg_retains_spoor(void);
@@ -126,6 +127,37 @@ void test_image_qid_vers_bump_new_entry(void) {
     burrow_unref(b1);
     burrow_unref(b2);
     image_cache_evict_idle_for_test();
+    TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
+}
+
+// devno-u64: two device instances 2^32 apart with the same qid are two files.
+// A 32-bit key served the second the first's cached pages (an I-1 alias). The
+// control, one variable away: the same wide devno again HITS its own entry.
+static struct Spoor *mk_spoor_dev(u64 qpath, u32 qvers, u64 devno) {
+    struct Spoor *s = mk_spoor(qpath, qvers);
+    if (s) s->devno = devno;
+    return s;
+}
+
+void test_image_devno_full_width_distinct_entry(void) {
+    const u64 lo = 1u, hi = (1ull << 32) + 1u;
+    image_cache_evict_idle_for_test();
+    u64 hits0 = image_cache_hits_for_test();
+    struct Burrow *b1 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, lo), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    struct Burrow *b2 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    u64 gap_hits = image_cache_hits_for_test() - hits0;
+    struct Burrow *b3 = image_lookup_or_create(mk_spoor_dev(0xE000, 1, hi), 0, PAGE_SIZE, /*exec=*/true, BURROW_FILE_LIMIT_UNKNOWN);
+    bool created = b1 != NULL && b2 != NULL, distinct = b1 != b2, control = b3 == b2;
+    // Every lookup took a ref; drop them BEFORE asserting, so a failure here
+    // cannot leave live entries behind for the next test's counts.
+    if (b1) burrow_unref(b1);
+    if (b2) burrow_unref(b2);
+    if (b3) burrow_unref(b3);
+    image_cache_evict_idle_for_test();
+    TEST_ASSERT(created, "both created");
+    TEST_ASSERT(distinct, "devno 1 and 1+2^32 -> distinct Burrows");
+    TEST_EXPECT_EQ(gap_hits, 0, "no hit across the 2^32 gap");
+    TEST_ASSERT(control, "CONTROL: the same wide devno HITS its own entry");
     TEST_EXPECT_EQ(image_cache_live_count_for_test(), 0, "cleaned");
 }
 

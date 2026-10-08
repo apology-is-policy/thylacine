@@ -6,11 +6,11 @@ models: [sub-kernel-devproc]
 pins: [inv-i39]
 cfgs:
   - "debug_step.cfg -- clean: Safety (StepExactlyOne) + EventuallyAllDead + StepEventuallyReparks (146 distinct, 2 Threads)"
-  - "debug_step_buggy_runs_free.cfg -- the step exception never re-traps: StepExactlyOne (68)"
+  - "debug_step_buggy_runs_free.cfg -- the step exception never re-traps: StepExactlyOne (33 with -workers 1)"
   - "debug_step_buggy_death_lost.cfg -- the tail skips the die-check on a step re-entry: EventuallyAllDead (146)"
 gate: "any change to the step arm / re-park leg, the hardware single-step machine, or the step exception route"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-06
 ---
 ## Abstraction
 
@@ -21,8 +21,13 @@ is trigger-agnostic: it reuses that machinery unchanged. The only genuine
 protocol growth in the hardware-debug tier is the **step**, so it gets its own
 small model rather than churning an audited base's configurations.
 
-The whole model is one question: *does a step execute exactly one instruction,
-and can a death still win against one in flight?*
+The whole model is one question: *does a step execute at most one instruction,
+and can a death still win against one in flight?* At most, not exactly: a
+step-resume that meets a note with a handler runs none. The note's delivery
+clears `SPSR.SS`, the `eret` takes the step exception at once, and the step
+reports at the handler's first instruction, before it runs, which is Linux's
+rule (DEBUG-FS-DESIGN 5.5). The model has no notes; where the notes leg sits
+against the park is [[spec-tail-order]]'s.
 
 A Thread walks four states — stopped, at the tail, stepping, dead — with a
 per-Thread armed flag, a per-Thread count of instructions executed in the
@@ -50,7 +55,7 @@ routes back through the same tail.
 | Action | Site |
 |---|---|
 | `RequestStep(t)` | `kernel/devproc.c` — the `step` ctl verb: compute the step-over address from the target's breakpoint slots, set the head Thread's armed flag with a release store, then clear the stop request and wake the parked Threads |
-| `Tail(t)` | `kernel/proc.c::el0_return_stop_check` — die-check first; then, if no stop is outstanding and the armed flag is set, set `SPSR.SS` in the trapframe the return will restore. The window from arming to the return is interrupt-masked, so nothing lands between |
+| `Tail(t)` | `kernel/proc.c::el0_return_stop_check` — die-check first; then, if no stop is outstanding and the armed flag is set, set `SPSR.SS` in the trapframe the return will restore. The window from arming to the return is interrupt-masked, so nothing lands between. On the synchronous tail the notes leg follows; a note with a handler clears `SPSR.SS` before it saves the context, so that step runs no instruction (beneath the model) |
 | `StepExec(t)` | `arch/arm64/exception.c`, the software-step exception from a lower exception level, routed back to the tail; the step machine's arm and disarm live in `arch/arm64/hwdebug.c` |
 | `DeathWake(t)` | the death cascade, unchanged from the stop model — a parked Thread is woken to the tail, where the die-check terminates it |
 | `SetGflag` | `proc_group_terminate` |
@@ -104,6 +109,7 @@ usually a one-element loop, written for a future per-Thread step. The model
 quantifies over all Threads, which makes it *stronger* than the code needs
 today — a rare direction for a model to be wrong in, and the harmless one.
 
-The action-site map in the tree still describes these sites as reserved, from
-when the model landed ahead of the implementation. They landed; the map did not
-follow.
+The action-site map in the tree described these sites as reserved, from when
+the model landed ahead of the implementation, until 2026-10-05: they landed in
+August, and the map followed only when the tail-order chunk next touched the
+step.

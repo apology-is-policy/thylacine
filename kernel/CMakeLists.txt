@@ -174,6 +174,7 @@ set(KERNEL_TEST_SRCS
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
+    test/test_birth_hold.c
     test/test_cons.c
     test/test_devctl.c
     test/test_devdev.c

@@ -3,10 +3,10 @@ id: lock-9p-client-c-lock
 type: lock
 title: "c->lock (per-p9_client spinlock)"
 kind: spin
-guards: "The whole shared-client state: the tag-indexed inflight[] rpc table + the session's tag/fid/outstanding tables, out_buf staging, the reader election (reader_active, be_reader hand-off), the send-flow state (send_progress, send_waiters + list registration), done_reply_buf, and the c->dead latch."
+guards: "The whole shared-client state: the session's tag table (each active tag's registered rpc, its chunks and counters, grown under this lock) + its fid table, out_buf staging, the reader election (reader_active, be_reader hand-off), the send-flow state (send_progress, send_waiters + list registration), done_reply_buf, and the c->dead latch."
 orders-before: []
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-10-07
 ---
 ## Discipline
 
@@ -24,6 +24,15 @@ updated: 2026-07-31
   `c->lock` → `send_waiters_list.lock` → `g_timerwait.lock` → per-waiter
   rendez lock. Peer lock notes land at the registry pass; until then this
   prose is the order's home for the client surface.
+- **The transport's locks nest under it.** A send under `c->lock` takes the
+  transport's own lock: the pipe's ring lock (the frame-atomic pipe send) or
+  srvconn's `c2s.lock`. Since 2026-10-05 the death hangup (ARCH 21.10) runs
+  under it as well. `pipe_hangup_write` takes the ring lock and wakes the
+  ring's poll list after dropping it. `srvconn_teardown` takes `cn->lock`
+  around one store (nothing outside srvconn.c takes it), then `c2s.lock` and
+  `s2c.lock` nested in `srvconn_poll`'s order, and wakes outside the channel
+  locks. Neither pipe.c nor srvconn.c calls into the client, so no lock ranks
+  above `c->lock`.
 - `kmalloc`/`kfree` under it are legal (non-blocking slub/alloc_pages path —
   the `rpc.reply_buf` precedent; the spill buffer relies on this).
 - Acquisition contexts: every public op, the demux, the completion seam

@@ -78,7 +78,7 @@ extern void proc_test_unlink(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 
 static struct SrvConn *pts_make_conn(struct Proc *owner) {
-    return srvconn_create(proc_stripes(owner), owner->pid, false, 0,
+    return srvconn_create(proc_stripes(owner), owner->pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID,
                           SRVCONN_MSIZE);
 }
 

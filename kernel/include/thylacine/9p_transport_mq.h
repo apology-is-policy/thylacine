@@ -24,6 +24,7 @@
 
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>   // p9_loopback_responder
+#include <thylacine/poll.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -46,10 +47,9 @@ struct p9_mq_loopback {
     u8                     scratch[P9_MQ_SCRATCH_CAP];   // per-send synthesis
     u64                    sends;
     u64                    recvs;
-    // Deadline knob (parity with p9_loopback): an armed deadline on an empty ring
-    // returns -1 + sets timed_out (the frame-boundary-timeout model) instead of 0.
-    bool                   deadline_armed;
-    bool                   timed_out;
+    // recv_ready's hooks, walked after every reply appended and at close. An
+    // empty FIFO models a real transport's blocking recv: not ready.
+    struct poll_waiter_list ready_list;
     // Back-pressure knob (#349 regression). A test sets eagain_budget = K to make
     // the next K send calls return P9_TRANSPORT_EAGAIN (a transiently-full-but-ALIVE
     // c2s ring) and REJECT the frame -- no reply synthesized, no acceptance --

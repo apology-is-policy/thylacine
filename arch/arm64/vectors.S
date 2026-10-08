@@ -330,16 +330,20 @@ _exception_vectors:
 //   2. el0_return_die_check — I-24 group-terminate self-exit (noreturn if so),
 //      AFTER the preempt so a Proc group-terminated during the preempt-switch is
 //      caught before any EL0 instruction runs.
-//   3. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery;
-//      sp still points at the KERNEL_ENTRY trapframe here.
+//   3. el0_return_stop_check(ctx = sp) — I-39 / job-control stop park, AFTER the
+//      die-check (death wins) and BEFORE the notes (a stop wins over a note, and a
+//      note latched during the stop is taken as it clears; DEBUG-FS-DESIGN 4.2).
+//   4. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery,
+//      the last C call (it asserts the #713 mask); sp still points at the
+//      KERNEL_ENTRY trapframe here.
 // ---------------------------------------------------------------------------
 .Lel0_sync_return:
     bl      preempt_check_irq
     bl      el0_return_die_check
+    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */
+    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a stop is pending (AFTER the die-check -- death wins) */
     mov     x0, sp
-    bl      notes_deliver_at_el0_return
-    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (notes clobbered x0; SP == trapframe base here) */
-    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER die-check + notes -- death/interrupt win) */
+    bl      notes_deliver_at_el0_return  /* AFTER the stop (DEBUG-FS-DESIGN 4.2); the #713 assert */
     b       .Lexception_return
 
 .Lexception_return:
@@ -412,3 +416,55 @@ thread_fork_trampoline:
 
     b       .Lexception_return
 .size thread_fork_trampoline, . - thread_fork_trampoline
+
+// ---------------------------------------------------------------------------
+// userland_enter_held -- the birth hold (DEBUG-FS-DESIGN 5f; I-39). The first
+// EL0 entry of a SPAWN_DEBUG_HELD child: x0 = entry_pc, x1 = user_sp; never
+// returns. The held spawn thunk calls it where every other spawn calls
+// userland_enter.
+//
+// userland_enter erets straight from registers, with no frame and no stop
+// check, so nothing can stop a child before its first instruction. This
+// instead BUILDS the EL0 frame that first instruction would have been
+// interrupted with and takes the ordinary EL0-return tail over it: the preempt
+// check, the die-check, the stop leg -- here the birth park, which also holds
+// while the child is held -- then note delivery. A debugger that converts the hold
+// therefore finds a real saved frame (regs reads the entry, a regs write lands
+// in the frame, a step arms SPSR.SS in it), and KERNEL_EXIT erets from that
+// frame when the child is released.
+//
+// Why it lives HERE and not in userland.S: thread_fork_trampoline's reason. It
+// ends in the local .Lexception_return, the one audited exit, and that label
+// is deliberately unreachable from outside this file.
+//
+// The frame is carved below the caller's stack, so after the eret SP_EL1 is
+// exactly where userland_enter leaves it, and every later EL0 entry of this
+// thread lands its frame where it would have without the hold. SP stays
+// 16-aligned (EXCEPTION_CTX_SIZE is 18 x 16).
+//
+// DAIF: the frame is built with IRQs on (a plain C call, as userland_enter's
+// die-check), then everything is masked for the tail -- the precondition every
+// tail call asserts (#713) and the state KERNEL_EXIT requires. The birth park
+// comes before the notes leg, as the stop check does at the sync tail
+// (DEBUG-FS-DESIGN 4.2): neither park ends for a latched interrupt (5g), and
+// the notes leg takes the note as the park returns. The tail is straight-line;
+// the notes leg's own re-passes are bounded by its budget.
+// ---------------------------------------------------------------------------
+.globl userland_enter_held
+.type userland_enter_held, %function
+userland_enter_held:
+    bti     c
+    sub     sp, sp, #EXCEPTION_CTX_SIZE
+    mov     x2, x1                       /* user_sp */
+    mov     x1, x0                       /* entry_pc */
+    mov     x0, sp                       /* the frame */
+    bl      el0_birth_frame_init
+    msr     daifset, #0xf
+    bl      preempt_check_irq
+    bl      el0_return_die_check         /* I-24: noreturn if the Proc is group-terminating */
+    mov     x0, sp
+    bl      el0_birth_park               /* parks while held or stopped (AFTER the die-check) */
+    mov     x0, sp
+    bl      notes_deliver_at_el0_return  /* AFTER the park (DEBUG-FS-DESIGN 4.2); the #713 assert */
+    b       .Lexception_return
+.size userland_enter_held, . - userland_enter_held

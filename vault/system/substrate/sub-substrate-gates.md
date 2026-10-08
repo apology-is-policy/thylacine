@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -328,11 +328,33 @@ dead session's fids die with it, so neither prints anything
 refused rc R` is a fid the live session holds after the hand-off failed: a
 real leak until the session ends. After the banner `test.sh` fails on the
 line and prints it. Its red run injected one refusal at boot: all 1764 kernel
-tests passed and the verdict failed on the line; the clean boot prints none. The knob, and the collector
+tests passed and the verdict failed on the line; the clean boot prints none.
+Its sibling `9p: close: flush of fid N failed rc R` (2026-10-07, ARCH 7.9.1
+part C: a last close's staged bytes never reached a live server) fails the
+verdict the same way. The knob, and the collector
 mode the dev9p tests set, are released by the kernel test runner after every
 test, which prints `POLL-KNOB(...)` and fails a passing test that left one set
 (the POOL-PARKED pattern: a knob restored on a test's last line is restored
 only by a test that passes).
+
+**A fixture Proc a failing test left linked is released (2026-09-30).** A
+test that links a fabricated Proc under kproc and fails before its unlink
+leaves it in the table, and the next `while (wait_pid(&st) > 0)` drain of
+kproc's children waits on it for good, or extincts on it when it was
+fabricated a zombie (a reaped zombie must carry its exiting thread): the boot
+hung tens of tests on, and `test.sh` reported a timeout with nothing after
+the hang. The link helpers (`proc_test_link`, `proc_test_link_child`) mark
+every Proc they splice in (`PROC_FLAG_TEST_FIXTURE`) and rfork never does;
+after each test the runner unlinks every marked child of kproc, prints
+`LEAKED-PROC(pids)`, and fails a passing test that left one. A first version
+keyed on the Proc's shape (not a zombie, no thread) and missed a fabricated
+zombie and a fixture with a hand-linked thread (audit round 4). The released
+Proc stays allocated, since the failed test may still hold pointers to it.
+Its red runs make a test fail before its release: a devproc leg's thread-less
+target, a fixture fabricated a zombie, and one carrying a hand-linked thread
+are each named (`LEAKED-PROC(3809)` for the zombie) and the suite runs to its
+end, where before the mark the zombie extincted the boot mid-suite and the
+thread-bearing one hung it until `test.sh` timed out.
 
 ### The host tests (`test-rust.sh`)
 
@@ -535,4 +557,5 @@ gate changes of 2026-09-22 that landed without a dossier update recorded here:
 main's `default-smp1` row (`6e1cda16`, the loom join) and the `/webkit` floor
 path (`b70e1bfd`). 2026-09-24: the netd selftest verdict joins the exit status.
 2026-09-28: the `poll: FAILSAFE` check (#98 NP-4c). 2026-09-29: the
-`clunk of fid` refusal check (the Tclunk closer).
+`clunk of fid` refusal check (the Tclunk closer). 2026-10-07: the `flush of
+fid` loss check (the exit-close seam, part C).

@@ -8,14 +8,14 @@ code:
   - kernel/include/thylacine/loom.h
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i32]
-validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, gate-smp]
+validated-by: [spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, spec-loom-role, gate-smp]
 locks: []
 abis: []
 design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -34,7 +34,17 @@ A ring is created with a power-of-two submission depth; the kernel allocates one
 anonymous region holding a header, a submission index array, the entry array and
 the completion array, maps it into the caller read-write, and reports the
 geometry. Two more calls register the objects operations may name: a fixed table
-of open file handles, and a fixed table of pinned buffer regions.
+of open file handles, and a fixed table of pinned buffer regions. Registering a
+dev9p handle first flushes its staged write-behind run and stops it staging
+(`dev9p_loom_register`, 2026-10-07): operations drive the fid straight to the
+wire, so none may meet bytes still staged. The flush may wait on the
+registering thread; a failure fails the registration and keeps the old table,
+and so does an error an earlier flush latched, since no operation reads the
+latch. The registration returns that failure's errno (`-ENOSPC`, the
+server's `-EIO`, a caught note's `-EINTR` -- after which the run is still
+staged, so a retry flushes it). A failure part-way through the array leaves the handles before it
+flushed and writing through: a cost, not a hazard. A successful registration
+drops the file's cached pages, which the ring's writes would leave stale.
 
 Then: userspace fills entries and advances its tail; the kernel consumes them,
 and posts one completion per operation carrying the caller's opaque token and
@@ -246,6 +256,19 @@ condition fires again, and the sleep returns without ever sleeping. So the
 condition is *work pending **and** the completion ring can admit*, and the wake
 comes from the user reaping and entering.
 
+That condition reads the completion ring without the ring lock and counts only
+posted completions, which is sound only while nothing is in flight: no
+completion can post concurrently, and no slot is reserved for an operation still
+out. So the thread parks on it only when nothing is in flight. With operations
+in flight it waits the way an enter does (below): it reads for every client it
+has work on, over a ready stream only, and with nothing to read it hooks every
+one of them and the completion list, sets the enter-needed flag, and parks until
+a hook fires, a completion lands, the user produces a submission or reaps a
+completion since its loop began, or it is told to stop. Each of those is
+somebody's event, so a completion ring that cannot admit does not make it spin.
+Until 2026-10-06 it pumped one client with a 10 ms frame-boundary deadline and
+yielded in a loop while another thread held that client's role.
+
 Because the thread belongs to the immortal kernel process, it cannot exit
 normally — the normal exit path is fatal from there. It hand-rolls the tail of
 the reap protocol instead: mask interrupts, mark itself exiting, release the
@@ -423,6 +446,89 @@ lock. Between the two, a concurrent reaper plus a re-registration could free the
 operation's pinned object and with it the client. So the lookup takes an *extra*
 reference on that object, which the caller releases after the pump. A single
 reaper made this safe once; the poll thread was a second one, and it is not.
+The fan-in below takes one such reference per distinct client and holds it
+across the pumps, the hooks and the sleep, until every hook is off.
+
+**The pump budget.** One ENTER's wait pumps at most `submitted + P9_TAG_LIMIT
++ 1` frames (`loom_wait_for_completions`, the Loom-3 audit's F4), so a server
+flooding frames cannot hold a CPU inside one syscall. The frames ahead of this
+ring's own answer tags already in flight, and a session holds at most
+`P9_TAG_LIMIT` of those since its tag table grows (ARCH 21.11; the bound was the
+64-tag pool's before 2026-10-07), so a server that answers what it was sent
+never meets the budget.
+
+**Waiting for the reader role.** The reader role belongs to the 9P client, and a
+dev9p client is shared with other processes' synchronous calls. A synchronous
+reader hands the role on only to another synchronous call, because an async
+operation has no thread to read for it, so it can leave with this ring's reply
+unread and nobody reading. An ENTER whose pump finds the role held therefore
+hooks the client's role-waiter list as well as the completion wait-list, both on
+its one rendezvous, and sleeps until either fires. A handoff that leaves the role
+free with nobody designated wakes the list, and so does the session's death; the
+ENTER then pumps itself. The hook is registered under the client lock against a
+sample of the role taken there, so a release before it is seen and one after it
+finds the hook. The borrow guard's reference is kept while the hook is on the
+client's list and dropped after it comes off (LOOM.md 8.6 item 2;
+`9p_client.loom_enter_wakes_when_role_frees`).
+
+**The fan-in (2026-10-06, operator vote "waiters fan in").** That hook served
+one client: the client of the ring's newest in-flight operation. A ring's
+operations can span clients -- an event loop over a socket and files is the
+canonical use -- and a reply on any other client stayed unread while the picked
+one was held or slow. The picked client's pump also blocked in the receive
+whether or not anything was due. So the waiter now reads for **every** client it
+has an operation in flight on, and only over a ready stream. It collects the
+distinct clients under the ring lock, skipping terminal operations and ones
+parked for a re-arm, which have nothing on the wire, and pins each. It pumps
+each once with the engine's readiness-gated pump, which takes a client's role
+only when the role is free and the transport says a receive would not block.
+With nothing to read it hooks every client -- a held role on the role-waiter
+list, a free one on the transport's readiness list, never both -- then the
+completion list, and sleeps on one rendezvous over all of them. A dead client
+ends nothing: its death already posted an error completion for each of its
+operations. Only the waiter's own death or stop unwinds it. The ENTER and the
+poll thread share this set; the dev9p poll pump runs the same shape
+([[sub-kernel-ninep-dev9p-poll]]).
+
+The set lives on the stack: sixty-four entries, because operations ride
+registered handles and one table names at most sixty-four. A re-registration
+with operations still in flight can leave more clients than that in flight, so
+the set can be partial. A partial set rotates its starting point over the
+in-flight list and bounds its sleep with a 10 ms rescan, since a client left out
+has no hook to wake the waiter. The set costs about 3.5 KiB of stack, the
+precedent being the poll system call's sixty-four waiters. Witnesses:
+`9p_client.loom_enter_reads_every_client` (two clients, the newest held: the
+older one's reply ends the wait), `.loom_enter_partial_set_rescans` (a set
+capped at one client finds the other by the rescan) and
+`.loom_sqpoll_parks_on_a_held_role` (the poll thread sleeps, and does not run,
+while its only client's role is held).
+
+**The generation.** A completion that another thread reads posts its CQE before
+it records what the completion changes for the ring's driver: a multishot
+operation's re-arm, or a chain successor's gate. A waiter woken by that CQE
+could re-check before the record, find nothing to re-arm or admit, and sleep
+again with nothing left to wake it. And a sibling thread's submit can put an
+operation on a client the waiter collected before it, between its client hooks
+and its completion hook. Each ring keeps a generation, bumped under the ring
+lock (`loom_drive_moved_locked`) by the post, by the completion's state update,
+and by every operation that goes in flight: a submit's link, a re-arm claimed.
+The
+enter's sleep and the poll thread's in-flight park sample it at the top of the
+loop and sleep only if it has not moved, re-reading it under the ring lock after
+the completion hook is filed, so a completion after that read flags the hook.
+The completion window needs a completion on another CPU between its post and
+its record, and no test reproduces it deterministically (OPEN-BUGS 2026-10-06
+16:20Z). The submit window is the fan-in's own, found by its self-audit; a test
+knob (`g_loom_fanin_test_stall`) parks the waiter inside it while a sibling
+submits (`9p_client.loom_enter_sees_a_sibling_submit`). A pump never sleeps in a
+receive (the transport's `recv_now`), so a waiter's death or stop always finds
+it in its sleep; a frame found in part stays with the client.
+
+`specs/loom_role.tla` models the wait over any number of clients, its spec note
+`spec-loom-role`: `NoMissedWake` (never asleep over a readable frame on a free,
+undesignated role), `NoBlindRecv` (never in a receive with nothing due) and
+`EnterReturns` (a reply on one client ends the wait while another's is held
+forever). It does not model the generation.
 
 **The join.** Teardown stops the poll thread before anything else, because the
 thread is the only other mutator of the in-flight list. It sets the stop flag,
@@ -441,22 +547,28 @@ running, that is fatal and loud; if it is *sleeping*, it passes every gate the
 reclaim checks and frees a thread that later resumes on recycled memory — a
 silent use-after-free, and the worse half of why no abandon path exists.
 
-So the join is made uninterruptible with the mechanism the kernel already has
-rather than a new one. Closing a dying process's handle table suppresses the
-death check for its whole duration, precisely so that close hooks which must
-WAIT — the 9P clunk flush, and now this join — behave as a live thread's would.
-The join brackets itself in that same flag, saving and restoring rather than
-clearing, because on the at-exit path the close already owns it and a bare
-clear would re-arm the death legs for every later descriptor in the table.
+So the join is made uninterruptible by a flag of its own,
+`kthread_join_active`, set with save and restore around the sleep: while it is
+set no death reaches the joiner's sleeps. Until 2026-10-07 the join borrowed
+the at-exit close's `exit_close_active` instead; part B of the exit-close
+design (ARCH 7.9.1) lets a second kill lift that flag's hold so the final
+close stops waiting on its server, and a join riding it would then have
+returned from every sleep at once and spun in a non-preemptible syscall body
+-- forever at `-smp 1`, where the CPU it spins on is the one the poll thread
+needs. The join's own flag holds every death, forced or not
+(`loom.sqpoll_join_held_through_forced_close` catches the joiner inside the
+join, through a test-only hold on the poll thread's terminal, and requires it
+asleep).
 
-That inherits the flag's own residual rather than escaping it: a poll thread
-that never reaches its terminal parks the dying process unreapably instead of
-burning a CPU. It is the better failure, and it is reachable — the
-frame-boundary deadline does **not** bound a mid-frame receive, because the
-body must complete or the shared stream desyncs, so a stalled server mid-frame
-delays the stop until the frame ends. Termination rests on the servers being
-trusted and prompt. That is a trust assumption, not a mechanism, and it is the
-same one the clunk flush already rests on.
+What bounds the join is the poll thread's own work, never a server. Its pumps
+never wait inside a frame (a frame found in part stays with the client), the
+ops that would wait on a wire RPC are refused on an SQPOLL ring
+(`loom_dir_mutation_gate`), and its reap's last close never waits either: the
+thread marks itself `closes_never_wait` at entry, so its Tclunk goes to the
+closer where it would wait for a tag or ring space (part A) and a staged
+write-behind run goes to the closer as a close job (part C)
+([[sub-kernel-ninep-dev9p]]). This closes the residual
+[[seam-close-flush-unbounded]] recorded here before.
 
 **Quiescing.** Each surviving operation is abandoned through the engine under
 the client's lock, which makes it mutually exclusive with a demultiplex that
@@ -490,6 +602,15 @@ allocation failure. Cancellation for a chain successor whose predecessor failed.
 
 Enter returns `-1` only for a corrupt ring object or invalid flags — everything
 about an individual operation is reported through its completion.
+
+Register answers a negative errno since 2026-10-07
+([[dec-2026-10-07-loom-register-errno]], landed with B-2b): `-EBADF` for a ring
+or listed fd that is not open, `-EFAULT` for an argument array the kernel
+cannot read, the failed flush's own errno, and `-EINVAL` otherwise --
+`loom_register_handles` and `loom_register_buffers` themselves answer
+`-EINVAL` for bad arguments and pass `dev9p_loom_register`'s errno through.
+Before, every refusal was the bare `-1`, which libthyla-rs read as
+`InvalidArgument`, so a full disk looked like a programming error.
 
 Two counters in the header are diagnostics: dropped submissions (a bad
 indirection index) and overflowed completions (which the admission rule is meant
@@ -534,7 +655,11 @@ an exec never refunds against the successor's space (the audit's F4;
 - **The ring lock stays a leaf**, taken under the client lock and never the
   reverse.
 - **The borrow guard must be held across any pump** that dereferences a
-  borrowed client.
+  borrowed client, and across every hook filed on it until the hook is off.
+- **A waiter may sleep only over hooks on every client it waits on**, each
+  filed under the lock its list's wakers hold, and with the generation unmoved
+  since its loop top. A client left out of the hooks (a partial set) needs the
+  rescan timer; a sleep without it strands that client's reply.
 - **The poll thread must be joined before the in-flight list is touched**, and
   must never hold a ring reference.
 - **A spin inside a syscall body can never wait on a thread.** Syscall bodies

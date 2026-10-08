@@ -40,6 +40,13 @@ the guest and use that file with Haul's `-t` option. A token holder can access
 the exported tree with the server's permissions; use a separate random token
 for each separately trusted export.
 
+Haul accepts a token shorter than 16 bytes with a warning, `haul: warning: the
+token is only N bytes`. Anyone who can connect to the server can test guesses
+at the token offline: one connection gives them what they need to check each
+guess on their own computer, without contacting the server again, so a short
+or memorable token can be found by trying candidates. The `openssl rand
+-base64 32` command above writes 32 random bytes as 44 characters.
+
 For QEMU user networking on the same host, `10.0.2.2!5640` reaches this
 loopback listener. To serve another machine, bind npxf to the host's reachable
 interface address and use its dotted IPv4 address in Haul. The server requires
@@ -122,6 +129,51 @@ host to the server's account, with the group the host assigns by default.
 The host server still applies its own account's permissions. If a read fails
 with a permission error, check the file's mode on the host: its owner bits are
 the ones that apply to the user who mounted it.
+
+### Follow links in a remote tree
+
+A symbolic link stored in an exported tree is followed within the Haul mount
+through which it is reached. The server reports the link's target as text, and
+Thylacine resolves that text from the mount, so the link cannot lead a command
+outside the mount. On the host, add a directory and two links to the export
+prepared above:
+
+```sh
+mkdir -p export/releases/v3
+printf 'version 3\n' > export/releases/v3/notes.txt
+ln -s releases/v3 export/latest
+ln -s /releases/v3/notes.txt export/current
+```
+
+With the export mounted at `/tmp/remote`, each of these commands prints
+`version 3`:
+
+```sh
+cat /tmp/remote/latest/notes.txt
+cat /tmp/remote/current
+```
+
+A relative target, such as that of `latest`, is resolved from the directory
+that holds the link. An absolute target, such as that of `current`, is resolved
+from the root of the mount, so `/releases/v3/notes.txt` names
+`/tmp/remote/releases/v3/notes.txt`. A `..` in a target climbs no higher than
+the root of the mount, and the same limit applies to a `..` that follows a link
+in the path given to a command: `/tmp/remote/latest/../../..` names
+`/tmp/remote`.
+
+An absolute link therefore has different meanings on the host and in
+Thylacine. On the host, `current` names a file under the host's own
+`/releases`, which need not exist. A link that the host uses to reach a file
+outside the exported directory, such as `app.conf -> /etc/app.conf`, names
+`/tmp/remote/etc/app.conf` when Thylacine follows it, and a command that uses
+it fails as it would for a missing file unless the export holds that path. To
+make such a file available, place it within the exported directory or export
+its directory separately.
+
+Links in the guest's own files are unaffected: an absolute target of a link in
+a local directory names a path from the root of the process's namespace. How
+the kernel decides which links to resolve within a mount is described under
+How links in a remote tree resolve.
 
 ### Command reference
 
@@ -211,17 +263,22 @@ flag on the posted service, which marks every session attached through that
 service. The kernel records the declaration with the session before the mount's
 root becomes usable and does not change it for the life of the session.
 
-The mark is displayed and has no other effect. The kernel's list of a process's
-mounts ends a mount's line with the word `remote` when the mount's source belongs
-to a marked session, and `ls`, `stat`, `realm` and `ns` read that list. The same
-list names a mount's source by the file its session came over: the service in
-`/srv` that the shell's `mount` opened, or `#|`, the name of the pipe device, for
-Haul's private form, whose session runs over pipes that have no names. Name
-resolution, permission checks and caching behave identically on marked and
-unmarked sessions. Any program that attaches a session can declare it remote, so
+The mark has two effects. The kernel's list of a process's mounts ends a mount's
+line with the word `remote` when the mount's source belongs to a marked session,
+and `ls`, `stat`, `realm` and `ns` read that list. The same list names a mount's
+source by the file its session came over: the service in `/srv` that the
+shell's `mount` opened, or `#|`, the name of the pipe device, for Haul's private
+form, whose session runs over pipes that have no names. The kernel's path
+resolver also reads the mark: a symbolic link whose file belongs to a marked
+session is resolved within the mount through which it was reached, as described
+under How links in a remote tree resolve. Permission checks and caching behave
+identically on marked and unmarked sessions, and name resolution differs only
+at such links. Any program that attaches a session can declare it remote, so
 the mark reports what the attaching program stated; Haul states it because Haul
-holds the network connection. A union's own directory, which the kernel keeps as
-a member of the union, is never marked, because no program mounted it.
+holds the network connection. The mark can only narrow where links resolve, so
+a program that declares its own session remote gains no access by doing so. A
+union's own directory, which the kernel keeps as a member of the union, is
+never marked, because no program mounted it.
 
 `ls` identifies a mount point by name. It reads its own mount list, which is a
 copy of its shell's, and compares the absolute path of each entry it lists with
@@ -230,6 +287,56 @@ the mount is made, so a mount point that is listed under a different name, for
 example through a bind, shows the realm the directory has without the mount. The
 list does not quote names, and a mount point whose name contains whitespace is
 not recognized reliably.
+
+### How links in a remote tree resolve
+
+A symbolic link's target is text supplied by the file system that holds the
+link, and the kernel's path resolver expands that text while it walks a path:
+an absolute target restarts the walk from the root of the process's namespace,
+and a relative target continues from the link's directory. For a link that the
+guest's own system wrote, that is the intended meaning. The target of a link
+served over Haul is chosen by whoever controls the remote tree, and the same
+expansion would let that tree direct any walk that crosses one of its links
+into the guest's own files: an export holding `deck -> /home/u/private` would
+make `/tmp/remote/deck` a name for a directory on the guest.
+
+The resolver therefore treats a link differently when the link's file belongs
+to a session marked remote (see How a mount is marked remote). As it walks, the
+resolver records the position in the path at which it entered each mount. When
+it reaches a link on a marked session, it takes the root of the most recently
+entered mount, the mount through which the link was reached, as the boundary
+for the rest of the walk. It then restarts the walk from that root, with the
+path rewritten as the components walked below the boundary, followed by the
+link's target and then the rest of the original path; an absolute target
+replaces the components below the boundary. Because the restarted walk begins
+at the boundary, no later `..` rises above it, whether the `..` came from the
+target or from the original path. A later link on a marked session sets a new
+boundary in the same way, and each link, contained or not, counts toward the
+limit of 40 links that one walk may follow.
+
+The boundary is determined by how the link was reached. When part of an export
+is bound elsewhere in the namespace, a link reached through the bind is
+resolved within the bound directory, which is narrower than the export. A
+directory that the guest itself bound beneath a remote mount is local, and a
+link in it keeps the meaning of a local link. When the mount is a member of a
+union, the boundary is the root of that member, so that a relative target cannot
+find a name in the union's other members.
+
+The walk fails with a permission error if the resolver cannot establish the
+boundary, that is, if the mount through which the link was reached is not a
+mount of the link's own session. This can occur when the namespace changes
+while the walk is in progress.
+
+Only links on marked sessions are resolved this way. The system's own storage,
+mounted at boot, holds absolute links that must resolve from the root of the
+namespace, and the links of a local session were written on this machine.
+Resolving within the mount also keeps an export's own links working: `latest
+-> v3`, and an absolute link that names a path inside the export, resolve as
+the export's author intended. Linux offers related controls in the
+`nosymfollow` mount option, which refuses every link on a mount, and the
+`openat2` flag `RESOLVE_IN_ROOT`, which a program requests for a single call
+and which resolves links from the directory it names; the remote mark applies
+the second behaviour to every walk through the mount.
 
 ### Failure and cleanup
 
@@ -260,6 +367,23 @@ discards them. In the command form, lines
 that begin with `haul:` come from Haul and the command's own output does not
 carry that prefix; when the command exits with a non-zero status, Haul prints
 `haul: the command exited non-zero` and exits with status 1.
+
+A server that sends a reply larger than the message size (msize) agreed for
+the session breaks the session. Haul refuses the reply, reports it in two lines
+such as `haul: 10.0.2.2!5640 sent a 8203-byte reply, over the session's
+4096-byte msize -- refusing it` and `haul: the 9P session with 10.0.2.2!5640
+is broken -- the mount is dead`, and exits with status 1. Pending filesystem
+operations on the mount fail. With the encrypted channel the reply came from
+the server, and the two sizes in the first line identify the fault for its
+maintainer; on a plain connection anything on the network path could have
+sent it.
+
+When the server closes the connection, Haul prints `haul: 10.0.2.2!5640 closed
+the connection -- the mount is dead` and exits with status 1. When Thylacine
+itself ends the session -- it refused a reply that answers no request it made,
+or the mount was taken down -- Haul prints `haul: Thylacine ended the 9P
+session with 10.0.2.2!5640 -- the mount is dead` instead, and exits with status
+1: the fault lies in the session, not in the server's connection.
 
 A remote disconnect fails pending filesystem operations. The relay ends when
 its connection or elevated scope ends. Token retrieval through corvus is not

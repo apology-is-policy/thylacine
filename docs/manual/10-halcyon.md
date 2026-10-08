@@ -347,12 +347,12 @@ and `tapestryd` closes a tile on Super+Shift+Q itself, without asking.
 A session tile's terminal tells the programs it runs, through the `BEACON`
 environment variable, that it renders the rich tier. Programs that support
 Beacon, such as `ls`, `ps` and `manual`, then emit its markup alongside their
-text, and the compositor draws headings, tables, emphasis and objects from
-it. Output without markup is drawn as a terminal view, a block set in a
-fixed-width typeface on the theme's terminal background, in which columns
-line up as the
-program laid them out. The shell marks its prompts and the commands typed at
-them, and the compositor sets those in proportional type.
+text, and the compositor draws headings, tables, emphasis, framed passages
+and objects from it. Output without markup is drawn as a terminal view, a
+block set in a fixed-width typeface on the theme's terminal background, in
+which columns line up as the program laid them out. The shell marks its
+prompts and the commands typed at them, and the compositor sets those in
+proportional type.
 
 A program that switches the terminal to its alternate screen, as full-screen
 editors and monitors do, is drawn as a character grid in a fixed-width

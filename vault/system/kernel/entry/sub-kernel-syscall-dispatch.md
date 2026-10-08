@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-09-30
+updated: 2026-10-07
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -143,7 +143,10 @@ distinguishable things:
   unrelated file's operation and a dial verb written to a stranger's connection.
   The hook is deliberately not a translation row: `close` must stay a plain
   renumber that falls through, so descriptor teardown keeps exactly one
-  implementation. And a phenotyped `read`, `write`, `readv`, `writev`,
+  implementation. That implementation, `SYS_CLOSE`, returns `-EBADF` for a dead
+  descriptor and, since 2026-10-07, `-EIO` when the last close's Dev hook failed
+  (a dev9p write-behind flush) -- the descriptor gone either way
+  ([[sub-kernel-handle]]'s `handle_close_report`). And a phenotyped `read`, `write`, `readv`, `writev`,
   `pread64` or `pwrite64` on a socket whose connect a signal interrupted
   finishes that connect first
   (`viv_sock_finish_before_io`, 2026-09-30): the fd still names `ctl` until the
@@ -379,6 +382,54 @@ So the authority is enforced by *kernel-minted object type*, not by repeating a
 capability check at every touch. A re-check would be the weaker design: it has
 to be added to each new operation, and forgetting one is silent.
 
+**Since B-2a (2026-10-07) the create allocates nothing.** `sys_jit_create_region`
+mints a demand-zero code Burrow and installs both aliases; it charges nothing
+and needs no contiguous block, so its `-ENOMEM` now means a VMA, gap or slab
+failure, never "the pool could not be zeroed up front". Each page is committed
+and charged once by its first touch through either alias
+([[sub-kernel-fault]]). `SYS_JIT_DESTROY` reads the region's footprint --
+resident pages plus pagemap nodes, exact because every commit runs under
+`as->lock`, which destroy holds -- and refunds it only when both unmaps
+succeed; a surviving alias keeps the charge for a retry or for exit, where the
+count dies with the address space. `SYS_ICACHE_SYNC` walks the range slot by
+slot under `b->lock` and syncs only committed pages: an uncommitted slot holds
+nothing the caller wrote, and its own commit will invalidate it. A page it
+reads stays valid after the lock drops, because no code slot is ever emptied or
+swapped while the region lives and the call holds a ref. The walk is bounded
+by the caller's own length (`JIT_REGION_MAX` / page size slots).
+
+**Since B-2b (2026-10-07) every alias goes at a random address, and a region
+can be born sealed.** `jit_place_locked` takes a random page of the burrow
+window as its start and the first gap at or above it, wrapping to the base
+when nothing above fits; the window is about 2^34 pages, so the start cannot be
+guessed although the pick is not uniform over gaps. First-fit had put the
+writer directly below the exec alias that every return address names, the one
+mapping an exploit wants. The random words are drawn BEFORE `as->lock` (the
+CSPRNG may reseed, which is no work for a spinlock), and with the CSPRNG
+unseeded the call fails `-EAGAIN` rather than fall back to a predictable
+address. A random alias costs its own page tables while it lives; they go back
+with its last leaf ([[sub-kernel-mmu]]), so create/destroy churn does not
+accumulate them.
+
+`SYS_JIT_CREATE_SEALED` (`sys_jit_create_sealed_region` under the
+`_for_proc` copy-out, the split SYS_JIT_CREATE has, so the kernel tests drive
+the mechanism with a kernel source) checks `CAP_JIT` before any argument, then
+the length (1 .. `JIT_SEALED_MAX`) and that exactly one source is named. It
+mints a code Burrow and fills it page by page with NO lock held -- the copy
+from user memory can fault, and the fault path takes `as->lock` -- because
+nothing else can reach the Burrow yet (no handle, no mapping) and the charge
+is CAS-safe without the lock: charge one page, allocate it, give it the
+demand-zero commit's `cow_page_set_sole`, copy, sync it to the I-cache,
+install it in the slot table. Only then, under `as->lock`, is the one alias
+placed and mapped `VMA_PROT_EXEC` -- execute-only ([[sub-kernel-vma]],
+[[sub-kernel-mmu]]) -- so no state of the region has a writer or an
+EL0-readable view. Any failure frees the Burrow and refunds exactly its
+footprint (pages plus pagemap nodes), read before the free. `SYS_JIT_DESTROY`
+accepts the sealed alias's base: one unmap, and the footprint refunded iff it
+succeeds. The secret the region keeps -- a write thunk's burned-in writer base --
+holds only because every kernel copy of user memory is an unprivileged access
+([[sub-kernel-uaccess]]).
+
 ### The FS handlers carry the identity gate, and walk-open sets the handle rights
 
 Three A-3 touches live on the FS-mutation and walk-open handlers, all in this
@@ -411,6 +462,22 @@ inert — the live identity channel is `SO_PEERCRED` ([[sub-pouch-net]]) — so
 peer-cred, gated behind a recorded trust-stamp seam
 ([[seam-nuname-trust-stamp]]). Under the identity cape the attach asserts no
 identity at all: `n_uname` goes out as `PRINCIPAL_NONE` (next section).
+
+The pipe attach also stamps the session's ends for `/ctl/9p-sessions`
+([[dec-2026-10-06-9p-sessions-ends]]): the attaching Proc's principal,
+loaded with acquire, and `PRINCIPAL_INVALID` for the server, which the kernel
+cannot name behind a caller-supplied transport. The `/srv` attach stamps both
+ends inside the shared helper ([[sub-kernel-ninep-attach]]).
+
+**`SYS_CHDIR` stores where the walk landed** (2026-10-06,
+[[dec-2026-10-06-chdir-physical]]). It joins the argument to the cwd verbatim,
+resolves the join from the Territory root with `stalk_landed`, X-checks the
+directory, and stores the name the resolver reports ([[sub-kernel-stalk]]); a
+name that does not walk back to the same node fails the call. The
+name lands in the argument's own scratch buffer, which is free after the join,
+so the handler's frame does not grow. Until then the handler stored a lexically
+cleaned copy of the join, which named a different directory from the one
+validated whenever a link stood in the path.
 
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
@@ -1440,3 +1507,88 @@ lock held across an RPC. `F_SETFL` on a socket row goes through
 `viv_sock_set_nonblock` (a failed verb restores the bit); `socket()` unwinds on
 a failed verb; both answer ENOMEM for a shortage and EIO otherwise. recvmsg's
 0 is 0 whatever the mode.
+
+## The held spawn: `SPAWN_DEBUG_HELD` through the spawn body (2026-09-29)
+
+`SYS_SPAWN_FULL_ARGV`'s record carries a `debug_flags` word at offset 100
+([[sub-kernel-syscall-abi]]), whose one bit, `SPAWN_DEBUG_HELD`, asks for the
+child to be parked before its first instruction ([[sub-kernel-birth-hold]]).
+The dispatch side is four decisions.
+
+**The bit is refused twice and gated nowhere.** A bit outside
+`SPAWN_DEBUG_FLAGS_ALL` is refused with -1 by `sys_spawn_full_argv_validate_req`
+at the syscall boundary, and again at the top of the spawn body, which kernel
+tests call directly. Both run before anything is allocated. The bit has no
+entry in the spawn-permission gate: it restricts only the spawner's own child
+and confers no access to it. Reading or controlling the child still takes an
+attach through the [[inv-i39]] gate.
+
+**The request picks the entry; the child's mark decides the wait.** The body
+reads the bit into a local before `rfork`, because the argument block belongs
+to the child once `rfork` returns, and hands it to the thunk as
+`sa->debug_held`. The thunk then enters EL0 through `userland_enter_held`
+instead of `userland_enter`, after `exec_setup` and after the spawn-permission
+stamp, so the stamp still lands before any user instruction. Whether the child
+waits at its birth park is read from its live mark, `Proc.debug_birth_hold`, so
+a hold released while the child was still loading simply falls through.
+
+**The fork marks the child before it is findable.** A held spawn forks with
+`rfork_spawn_held`, which stores the UNBORN mark in the same table-lock hold that
+links the child, so no reparent, sweep or `/proc` walk sees it linked but
+unmarked. An unheld spawn keeps `rfork_with_caps` and the path it always had.
+
+**The return waits for the park, on the calling Proc's children.**
+`spawn_await_birth` returns once the child has parked, had its hold released,
+stopped being ALIVE, or left the caller's children. The parent it waits on is
+`current_thread()->proc`, the Proc `rfork` forked, which a kernel test's `p` is
+not always. A caller killed while waiting unwinds (#811), and its own death then
+kills the child through the orphan rule. `sys_spawn_full_argv_debug_for_proc`
+and its budget wrapper are the kernel-test entries, declared where the tests
+call them.
+
+## `viv_wait4` answers a caught note with EINTR (2026-10-05)
+
+`wait_pid_for` returns `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux
+`wait4`'s park ([[sub-kernel-proc]], [[chg-2026-10-05-signal7-list]]).
+`viv_wait4` maps it to `-T_E_INTR` BEFORE the `reaped < 0` line that answers
+`ECHILD`: read as `-1`, the interrupted wait would tell the guest it has no
+children, and a shell would stop waiting for a job that is still running.
+Nothing was reaped, so nothing is written to `wstatus`; the handler runs at the
+call's tail. The native `SYS_WAIT` handler and the kernel's own reaper in
+`joey.c` never see -2: neither runs with `note_interruptible` set.
+
+## The sleep rows' shells (2026-10-05, VIVARIUM 6.29)
+
+`viv_nanosleep(req, rem)` and `viv_clock_nanosleep(clk, flags, req, rem)` are
+the uaccess half of the sleep rows; the sleep itself is `vivarium_clock_sleep`
+([[sub-kernel-vivarium]]). The order is Linux's: `clock_nanosleep` judges the
+clock (`vivarium_clock_nanosleep_decide`) before it touches `req`; then
+`viv_sleep_req` validates and copies the request in (EFAULT) and judges it
+(EINVAL); then `viv_sleep` sleeps. `struct t_timespec` is Linux's timespec
+field for field, so the copy is a copy. `rem` is written only for a relative
+sleep that a caught note ended, with what was left, and through
+`uaccess_copy_out`, which takes any alignment; a faulting `rem` turns the
+`EINTR` into `EFAULT`, as Linux's copy-out does. An absolute sleep never writes
+`rem`, and a completed sleep never touches it. Both dispatch arms return the
+shell's s64 straight into `x0`, so 101 and 115 never reach the native
+`SYS_JIT_CREATE` and `SYS_PCI_IRQ_CREATE` arms for a Linux caller.
+
+## A `kill` note forces a final close already under way (2026-10-07)
+
+`SYS_POSTNOTE`'s kill cascade (`postnote_kill_cascade_locked`) terminates the
+target through `proc_group_kill`. On a target already terminating that sets
+`PROC_FLAG_EXIT_CLOSE_FORCED` before the death wake, so a final close waiting
+on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
+B, [[sub-kernel-death]]); a first kill terminates exactly as before.
+
+## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
+
+`sys_loom_register_handler` and its two `_for_proc` cores moved from the bare
+-1 set to the errno set ([[dec-2026-10-07-loom-register-errno]]): `-EBADF`
+when `handle_get` fails for the ring or for a listed fd (the rollback clunks
+the refs already taken), `-EFAULT` when the argument array fails validation or
+a byte of it faults, the errno `loom_register_handles` returns -- a failed
+write-behind flush's own, passed through from `dev9p_loom_register`
+([[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]]) -- and `-EINVAL` for the
+rest (not a Loom, an unknown op, `nargs` over the table). `nargs` is a u32 by
+the ABI, so its upper bits are ignored as before.

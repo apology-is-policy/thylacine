@@ -1518,7 +1518,8 @@ converged on (the image/placement split, explicit-format-never-sniff,
 resize-as-re-place, a bounded table) natively, without the escape-sequence hacks.
 
 **AS-DESIGNED (operator-ratified 2026-09-09; the design-conversation → scripture
-pattern).** Reserved as **I-47** (ARCH §28). Two amendments to the original prose,
+pattern).** **I-47** (ARCH §28; reserved 2026-09-09, ENFORCED 2026-09-29). Two
+amendments to the original prose,
 both from the ratifying dialogue:
 - **Decode runs in the short-lived `view`/`gallery` Proc, not in the compositor** —
   native Rust either way (the format-fuzz intent holds), but a per-invocation
@@ -1579,24 +1580,30 @@ namespace descendant of the pane's shell. See the reciprocal note in `BEACON.md 
 **path component**: `view` opens `/srv/halcyon-<user>/<hex(token)>/place`, the
 fully-resolved address the compositor wrote into that pane's
 `/env/HALCYON_PLACE` right before its spawn (per-Proc `/env`, deep-copied at
-spawn — so the child snapshots ITS pane's address, isolated from every other
-pane; the compositor removes it after the spawn so its own `/env` and the next
-tile's snapshot stay clean). The **wire is unchanged** (`inlinewire` v0 — the
-token never enters the payload; it is validated ONCE at the 9P walk, fail-closed
-`E_NOENT` on an unknown/dead token). Two authority axes: (1) the secret token
-(unguessable, only in the pane's own `/env`), and (2) a **peer-principal gate at
-accept** (`t_srv_peer`) refusing any connection whose peer is not the session's
-own user — so even a leaked token cannot let a different user place into the
-session. The DoS floor: `MAX_CONNS = 2` bounds concurrent transfers; the
-per-image cap is the heap residual divided by `MAX_CONNS` (so the aggregate
-in-flight fits the residual); the per-pane **stored** quota (live placements +
-raster bytes) is the tile transcript's own content budget (`inject_image` →
-`enforce_budget` evicts frozen blocks by `max_cost` + `max_blocks`, failing
-clean). The alternatives — a distinct 9P service per pane, and a token in the
+spawn — so the child snapshots ITS pane's address; the compositor removes it
+after the spawn so its own `/env` and the next tile's snapshot stay clean). The
+**wire is unchanged** (`inlinewire` v0 — the token never enters the payload; it
+is validated ONCE at the 9P walk, fail-closed `E_NOENT` on an unknown/dead
+token). The authority is a **peer-principal gate at accept** (`t_srv_peer`),
+refusing any connection whose peer is not the session's own user, so no other
+user places into the session; the token **routes** (unguessable, so a request
+lands only in the live pane it names). It is not a secret among one user's
+panes: any Proc of that user can read a pane's `/env` through
+`/proc/<pid>/environ`, and that user's panes are one authority domain (corrected
+2026-09-29: this paragraph first called the token an authority axis, isolated
+from every other pane; `dec-2026-09-29-inline-media-one-principal`). The DoS
+floor: `MAX_CONNS = 2` bounds concurrent transfers; the per-image cap is the heap
+residual divided by `MAX_CONNS` (so the aggregate in-flight fits the residual);
+the per-pane **stored** quota (live placements + raster bytes) is the tile
+transcript's own content budget (`inject_image` → `enforce_budget` evicts frozen
+blocks by `max_cost` + `max_blocks`, failing clean). The wire and the stored
+quota were refined on 2026-09-17 (the 14.7 integration refinement below: the
+header is `HPL2` and carries an image id, and a session tile's stored quota is
+its raster cache). The alternatives — a distinct 9P service per pane, and a token in the
 wire payload — were rejected: the former posts N services (heavier teardown, and
 §14.7.2 specifies one service); the latter bumps the wire ABI (a format break)
 and re-validates per write. Impl: `usr/halcyond/src/{paneroute,paneplace}.rs` +
-the `session.rs` wiring + `view` `open_place_write`. The console spike's global
+the `session.rs` wiring + `view`'s `connect`. The console spike's global
 `/srv/halcyon` (single-conn) remains for console mode; `view` prefers the
 session address when `/env/HALCYON_PLACE` is set and never falls back to the
 console channel inside a session.
@@ -1615,7 +1622,9 @@ text-only; inline media stays the out-of-band native seam."
 recognized image (PNG now; JPEG at the H-7-expand via `zune-jpeg`) → decode +
 place-request; **otherwise → `exec cat`** (the text fallback). `view` is native
 libthyla-rs linking the **pure-Rust `no_std`** zune codecs — native-linking-native,
-**not** the `CLAUDE.md` "native program linking a ported library" case.
+**not** the `CLAUDE.md` "native program linking a ported library" case. (Its two
+modes for programs, its exit status, and the fit to the pane's current limit: the
+2026-09-29 refinement below.)
 
 **14.7.5 `gallery` (native program — the fullscreen path B).** `gallery <img>`
 opens a **Tapestry pane surface** (the native `libtapestry` client — the same
@@ -2536,12 +2545,23 @@ for the console/test injection path.
 Each tile owns a bounded raster cache, independent of other panes. Text and
 raster retention share the existing per-tile content allowance equally.
 There are at most 64 cached images; eviction leaves the readable caption in
-place. A repeated reference does not duplicate retained raster storage. The
+place. A repeated reference does not duplicate retained raster storage, nor laid
+storage: a layout resamples each cached image once per block and size, however
+many rows name it. The
 layout resolver substitutes only a complete standalone inline-image object;
 ordinary text around an object is never silently discarded. New or evicted
 raster data invalidates the tile's layout-height cache. Restart drops both
 routing tokens and raster references. An id names presentation data only and
 confers no authority: service peer checks and per-pane routes remain the gates.
+The routes keep a request from being misrouted and from crossing a principal; they
+do not keep one principal's panes from each other. A pane's token is in its
+`/env`, which any Proc of that principal can read through `/proc/<pid>/environ`,
+and that principal's panes are already open to each other (Plan 9's rio, where
+every window's files are open to every process of the session; ptyfs's v1.0 pts
+posture) -- `dec-2026-09-29-inline-media-one-principal`. A diagnostic that a
+client can repeat at will (a connect accepted or refused, a walk to an unrouted
+token, an upload placed, refused by the cache, or orphaned by its pane closing)
+is logged at its 1st, 2nd, 4th ... occurrence, with its count.
 
 Session upload admission is capped by both the transient heap residual and the
 smallest live raster cache. Completion rechecks the current cap before replying:
@@ -2555,3 +2575,68 @@ output to scroll the caption into history, on resize, and with independent
 panes. Tests cover unavailable and evicted references, duplicate ids, invalid
 headers and quota reduction. No timing delay or forced terminal clear is an
 acceptable substitute for stream ordering.
+
+### 14.7 refinement: a raster fitted to its pane, and a reference for a caller (2026-09-29)
+
+The largest raster a pane admits is not a constant. The session channel sets it
+on every loop from two figures and takes the smaller: the heap residual (22 MiB
+less the display-sized glyph atlas, shared between the two transfers that may be
+in flight at 8 bytes a pixel) and the smallest live raster cache (half a tile's
+content allowance, 16 MiB divided by the number of panes), clamped to between
+64 Ki and 1 Mi pixels. That is 1 Mi pixels on a display up to about 1920x1200 with
+four panes or fewer, 896 Ki at 2560x1600, 384 Ki at 3840x2160, and 512 Ki with
+eight panes. An upload over the limit is refused with `E_INVAL`, the answer a
+malformed header gets, so until this refinement `view` displayed nothing larger
+than the current figure, and whether a given picture displayed depended on the
+display and on how many panes were open.
+
+**A read of `place` returns the limit.** At offset 0 a read returns the pane's
+current limit in pixels as ASCII decimal digits and a newline (`1048576\n`); a
+read at an offset inside that text returns the rest of it, and one at or past
+its end returns end of file. The session channel reports the
+figure its admission applies to a new transfer; the console channel reports its
+own. `view` decodes, reads the limit through a handle of its own (the upload's
+handle must start at offset 0), and reduces the raster to fit it, and to the
+header's bound of 8192 pixels on a side, before it writes the header, averaging
+the pixels each new pixel covers (straight alpha: each colour weighted by its
+alpha). The header and the payload are unchanged: a client that never reads is
+refused exactly as before, and a `view` that reads end of file, or text it cannot parse,
+holds its raster to the side bound alone and lets the server judge its pixel
+count. The formatter and the
+parser are `inlinewire`'s, so both ends share one definition.
+
+The limit can fall between the read and the upload (a pane opened in between);
+the upload is then refused as before, and `view` reports the refusal. The figure
+tells a pane's programs the display's size and the number of panes, which they
+can already see. On the console channel, which has no peer gate, it tells any
+principal that can open `/srv/halcyon` the same, which the console's own pixels
+show anyway.
+
+**`view`'s modes.** The interactive `view <file>` places the picture in its
+pane, writes the caption and a status line, passes a file that is not a PNG or
+JPEG to `cat`, and exits 1 when the picture was not displayed; it exited 0
+before, and a script could not tell a picture shown from one refused. Two modes
+serve programs, and neither passes anything to `cat`:
+
+- `view --check <file>` decodes the file and shows nothing. It exits 0, silent,
+  when the file is a PNG or JPEG within `view`'s decode budget that decodes whole;
+  otherwise it exits 1. `lantern` checks a deck's pictures with it before the talk
+  (LANTERN-DESIGN §8).
+- `view --embed <file>` places the picture and writes only its reference, the
+  caption object, to standard output, for its caller to write where the picture
+  belongs. It needs the pane's session channel, because the console channel
+  carries no reference, and it looks for the channel's address before it decodes.
+  It does not look at its own standard output, which is the caller's to compose.
+  `lantern` writes the reference inside a slide's synchronized frame
+  (LANTERN-DESIGN §14).
+
+In both, a file operand of `-` is standard input, so a caller can hand `view` a
+file it opened itself, and a failure is one line on standard error: the reason
+alone, without the program's name or the file's, because the caller names the
+file.
+
+**Authority is unchanged.** A reference names presentation data and confers
+nothing (the 2026-09-17 refinement above). A caller that writes it somewhere
+other than its pane leaves a raster nothing names in that pane's cache, which
+evicts it in time. `--embed` uploads over the channel its own `/env` names, as
+`view` always has.

@@ -1017,8 +1017,12 @@ blocks (the larger of the two, never the sum) — implement the collapse
 explicitly in `layout()`. Widths: H1, p, ul, pre cap at 720 (each block,
 not a centred column); H2 is uncapped. Lists: padding-left 20, items
 5/0/5 with padding-left 5. `pre`: margin 18/0, padding 15/17, the 2 px
-rule inside its box, horizontal overflow scrolls, never wraps. Terminal
-lines are `pre-wrap`. These are the Instrument `Sheet` values; the legacy
+rule inside its box, horizontal overflow scrolls, never wraps. An `aside`
+(BEACON.md §3, 2026-09-29; the kit has none): the `pre`'s margin 18/0 and
+padding 15/17 with 17 on both sides, a 1 px `border` hairline on all four
+sides and no ground; its lines are prose at the body type, wrapped at the
+frame's inner width, and the frame caps at 720 like the `pre`
+(HALCYON-VISUAL §8.4). Terminal lines are `pre-wrap`. These are the Instrument `Sheet` values; the legacy
 `Sheet` keeps HALCYON-COMPOSITION's.
 
 **Kerning (the parity gap).** Plex Sans's pair kerning lives in GPOS

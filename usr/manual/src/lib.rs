@@ -83,6 +83,14 @@ pub fn console_width(winsize: &[u8]) -> Option<usize> {
     }
 }
 
+/// Whether a plain realization wraps at `/dev/winsize`'s width (4.3): at a
+/// plain tier, and only when standard output is the console, whose width that
+/// leaf reports. A pts is a terminal with a width of its own, which the leaf
+/// does not know; at the rich tier the renderer wraps.
+pub fn wraps_at_console(tier: beacon::Tier, stdout: Option<u8>) -> bool {
+    tier != beacon::Tier::Rich && stdout == Some(beacon::DC_CONSOLE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +129,17 @@ mod tests {
             "a\u{fffd}b\u{fffd}c\u{200f}d"
         );
         assert_eq!(sanitize("\t\u{2069}", true), "\t\u{fffd}");
+    }
+
+    #[test]
+    fn only_the_console_wraps_at_its_winsize() {
+        use beacon::{Tier, DC_CONSOLE, DC_PTS};
+        assert!(wraps_at_console(Tier::None, Some(DC_CONSOLE)));
+        assert!(wraps_at_console(Tier::Cells, Some(DC_CONSOLE)));
+        // A tile's pts is a terminal, but `/dev/winsize` is the console's.
+        assert!(!wraps_at_console(Tier::None, Some(DC_PTS)));
+        assert!(!wraps_at_console(Tier::Rich, Some(DC_CONSOLE)));
+        assert!(!wraps_at_console(Tier::None, None));
     }
 
     #[test]

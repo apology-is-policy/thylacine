@@ -17,7 +17,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-09-29
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -184,6 +184,18 @@ slot is a cross-branch collision point**, invisible on either branch alone
 asserts are what make the *next* claimant disagree with the kernel loudly,
 at build time, rather than in a refused syscall.
 
+**The last reserved slot is spent, and the build now checks this mirror
+(2026-09-29).** The birth hold renamed the pad at offset 100 from `_pad_spawn2`
+to `debug_flags` ([[sub-kernel-birth-hold]]). The size and every offset are
+unchanged, so no pouch caller moves, and the patch's offset assert names the
+new field. Pouch zero-fills the record and never sets the bit: a ported program
+has no way to ask for a held spawn. `tools/check-spawn-args-mirrors.py` now
+compares this struct with the kernel's on every build, field by field, reading
+it straight out of the patch ([[sub-kernel-syscall-abi]]). That closes the half
+of the next section's lesson a build step can close, the header against the
+kernel. The other half, the header against the archive that gets linked, still
+has nothing checking it.
+
 ### The asserts all held and the binaries were wrong anyway
 
 Worth recording in full, because it is the sharpest available statement of
@@ -260,7 +272,9 @@ per process. Every `malloc` past mallocng's first is userspace-only.
   `__init_libc` and before the ctors.
 - The 104-byte spawn-args mirror against the KERNEL's struct — **size AND
   every field offset**. A size-only pin is blind to a field-order swap, and
-  the reserved slot is where independent branches collide.
+  the reserved slot is where independent branches collide. The build's mirror
+  check reads the struct out of this patch, so a hunk that renames or moves a
+  field must keep the struct parseable.
 - **An assert certifies its own artifact, not the link.** A stale archive
   substituted into the sysroot carries its own correct assert for its own
   older layout, so a mismatched binary can ship with every assertion in the

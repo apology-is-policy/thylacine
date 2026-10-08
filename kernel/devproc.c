@@ -15,8 +15,9 @@
 // proc_group_terminate. Authority is the two-axis I-26 set, enforced at the
 // WRITE site (devproc.perm_enforced stays false; the shared open chokepoint
 // hard-rejects pre-devproc.open, so the CAP_KILL axis cannot live at open):
-// the caller must be the target's OWNER (same principal_id — ctl is 0600, so
-// the owner always holds w) OR hold CAP_HOSTOWNER OR CAP_KILL. Checked
+// the caller must be the target itself or its OWNER (same principal_id — ctl is
+// 0600, so the owner always holds w; never two none Procs) OR hold CAP_HOSTOWNER
+// OR CAP_KILL. Checked
 // directly, NOT via perm_check, so CAP_DAC_OVERRIDE (the fs-rwx admin) is not
 // a kill axis — fs-admin and process-kill stay orthogonal. Containment is
 // namespace visibility (I-1). USER-REACHABILITY of /proc is a Utopia
@@ -39,6 +40,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/env.h>      // V-4b-6: env_render_environ -- /proc/<pid>/environ
+#include <thylacine/errno.h>    // T_E_SRCH -- a step whose target died (DEBUG-FS-DESIGN 5.5)
 #include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
@@ -226,7 +228,10 @@ static const char *state_name(enum proc_state s) {
 // parity (name + CPU time + parent + owner). PRECONDITION: called under
 // g_proc_table_lock (via proc_for_each -> devproc_read_cb) -- proc_cpu_ns walks
 // p->threads, and p->parent is read here, both stable only under that lock.
-static size_t format_status(struct Proc *p, char *buf, size_t cap) {
+// `caller` is the reading Proc (NULL is no one); cpu_ns is "-" unless it is
+// p's owner or a hostowner.
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
+static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
 
@@ -249,10 +254,16 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     // prowl-1: cumulative on-CPU time (ns; the reader diffs it for %CPU) + the
-    // parent pid + the owning principal/gid.
-    u64 cpu_ns = proc_cpu_ns(p);                  // caller holds g_proc_table_lock
+    // parent pid + the owning principal/gid. cpu_ns is the owner's or a
+    // hostowner's (IMPERIUM-DESIGN 11.3 item 10: the trusted episode's authority
+    // accrues it per key); anyone else reads "-".
     n = fmt_str(buf, cap, off, "cpu_ns:  ");      if (!n) return 0; off += n;
-    n = fmt_udec(buf, cap, off, (unsigned long)cpu_ns); if (!n && cpu_ns != 0) return 0; off += n;
+    if (devproc_owner_or_hostowner(caller, p)) {
+        u64 cpu_ns = proc_cpu_ns(p);              // caller holds g_proc_table_lock
+        n = fmt_udec(buf, cap, off, (unsigned long)cpu_ns); if (!n) return 0; off += n;
+    } else {
+        n = fmt_str(buf, cap, off, "-");          if (!n) return 0; off += n;
+    }
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     int ppid = p->parent ? p->parent->pid : 0;
@@ -507,13 +518,20 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
 //
 // Posture: 0444 and all-pids-visible for an UNSEALED Proc (devproc.perm_enforced
 // == false, Plan 9), refused for a dump-SEALED one (devproc_kind_is_image). The
-// ambient half is sound TODAY because Thylacine has no USER-space ASLR: every VA
-// here is either an exec.h constant or an ELF link address, so the layout is not a
-// secret. None of these are kernel VAs, so I-16 (the KASLR slide) is not
-// engaged -- unlike /proc/<pid>/kstack, which had to gate its raw addresses for
-// exactly that reason (8b-1d F1). FORWARD OBLIGATION: if user ASLR ever lands,
-// this posture must be revisited in the same chunk -- maps would then leak the
-// randomized layout, which is the whole point of the mitigation.
+// ambient half is sound only while the layout is not a secret: every VA here is an
+// exec.h constant, an ELF link address or a first-fit placement -- EXCEPT a code
+// alias's. B-2b places every alias of a code region (writer, exec, sealed) at its
+// own random address (jit_place_locked), so the writer's address is a secret, and
+// a code row's addresses go only to a reader that may see them
+// (devproc_maps_code_visible_locked: the target itself, or debug authority over it,
+// I-39). Any other reader gets each code row with both addresses and the offset as
+// 0x0 and the role "-" -- a function of its prot and share flag alone -- after every
+// other row, ordered by that class and never by address: a zeroed row left in
+// address order would still say which mappings its alias lies between, and which
+// alias of a region is the lower. None of these are kernel VAs, so I-16 (the KASLR
+// slide) is not engaged -- unlike /proc/<pid>/kstack, which had to gate its raw
+// addresses for exactly that reason (8b-1d F1). A NEW source of randomness in a
+// user layout must be weighed here in the same chunk: maps would leak it.
 static const char *maps_type_name(const struct Vma *v) {
     if (!v->burrow) return "none";           // guard VMA -- no backing object
     switch (v->burrow->type) {
@@ -542,16 +560,109 @@ static const char *maps_role_name(const struct Vma *v) {
     return "-";
 }
 
-static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
+// One row, committed to *off only once it wholly fits (the format_sched idiom).
+// `file` is the FILE Burrow whose identity fills the file column, or NULL for "-".
+static bool maps_put_row(char *buf, size_t cap, size_t *off, u64 start, u64 end,
+                         const char *perms, u64 boff, const char *type,
+                         const struct Burrow *file, const char *role) {
+    size_t row = *off, n;
+    n = fmt_hex(buf, cap, row, start);                    if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, "-");                      if (!n) return false; row += n;
+    n = fmt_hex(buf, cap, row, end);                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, perms);                    if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_hex(buf, cap, row, boff);                     if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, type);                     if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    if (file) {
+        n = fmt_hex(buf, cap, row, (u64)file->file_devno); if (!n) return false; row += n;
+        n = fmt_str(buf, cap, row, ":");                   if (!n) return false; row += n;
+        n = fmt_hex(buf, cap, row, file->file_qid_path);   if (!n) return false; row += n;
+    } else {
+        n = fmt_str(buf, cap, row, "-");                   if (!n) return false; row += n;
+    }
+    n = fmt_str(buf, cap, row, " ");                      if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, role);                     if (!n) return false; row += n;
+    n = fmt_str(buf, cap, row, "\n");                     if (!n) return false; row += n;
+    *off = row;
+    return true;
+}
+
+static bool maps_is_code(const struct Vma *v) {
+    return v->burrow && v->burrow->type == BURROW_TYPE_CODE;
+}
+
+// A row's permission class: r, w, x and the share flag as four bits, so the
+// class names the perms column exactly and nothing else about the row.
+enum { MAPS_CLASSES = 16 };
+static u32 maps_class(const struct Vma *v) {
+    return ((v->prot & VMA_PROT_READ)  ? 1u : 0u) |
+           ((v->prot & VMA_PROT_WRITE) ? 2u : 0u) |
+           ((v->prot & VMA_PROT_EXEC)  ? 4u : 0u) |
+           ((v->flags & VMA_FLAG_SHARED_IN) ? 8u : 0u);
+}
+
+static void maps_class_perms(u32 cls, char perms[5]) {
+    perms[0] = (cls & 1u) ? 'r' : '-';
+    perms[1] = (cls & 2u) ? 'w' : '-';
+    perms[2] = (cls & 4u) ? 'x' : '-';
+    perms[3] = (cls & 8u) ? 's' : 'p';
+    perms[4] = '\0';
+}
+
+static bool maps_put_vma(const struct Vma *v, char *buf, size_t cap, size_t *off) {
+    char perms[5];
+    maps_class_perms(maps_class(v), perms);
+    const struct Burrow *file =
+        (v->burrow && v->burrow->type == BURROW_TYPE_FILE) ? v->burrow : NULL;
+    return maps_put_row(buf, cap, off, v->vaddr_start, v->vaddr_end, perms,
+                        v->burrow_offset, maps_type_name(v), file, maps_role_name(v));
+}
+
+// A code row as a reader without the right to its addresses sees it.
+static bool maps_put_redacted(u32 cls, char *buf, size_t cap, size_t *off) {
+    char perms[5];
+    maps_class_perms(cls, perms);
+    return maps_put_row(buf, cap, off, 0, 0, perms, 0, "code", NULL, "-");
+}
+
+// `show_code` false withholds the code rows from the walk and prints them,
+// redacted, after it (the posture note above). They are printed only when the
+// walk reached the end of the list: a truncated listing stops at some address,
+// and printing the code rows found below it would say which aliases lie below
+// that address. A withheld row takes no buffer, so the walk counts it against a
+// budget of as many redacted rows as the buffer holds, which keeps the lock hold
+// bounded by the buffer (twice over) as above. Spending the budget stops the
+// walk, and that stop is the one place the aliases' positions can still show:
+// it takes more code aliases below the last row printed than the buffer holds
+// rows, and an address space that holds that many prints no code rows at all.
+static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap) {
     size_t off = 0, n;
     n = fmt_str(buf, cap, off, "start-end perms off type file role\n");
     if (!n) return 0;
     off += n;
+    const size_t head = off;
 
     // LINEAGE L-1: a kernel-only Proc (kproc, which the /proc walk reaches) has
     // no address space and so no mappings -- the header alone, which is exactly
     // what an empty VMA list produced before the extraction.
     if (!p->as) return off;
+
+    // Every redacted row has the same length; take it from the formatter itself.
+    // Asked of every read, whoever reads, so a row that outgrew the probe would
+    // otherwise empty every listing quietly.
+    char probe[64];
+    size_t rlen = 0;
+    if (!maps_put_redacted(0, probe, sizeof probe, &rlen))
+        extinction("format_maps: a redacted row outgrew its probe");
+    const size_t budget = (cap - head) / rlen;
+
+    u32    withheld[MAPS_CLASSES];
+    size_t nwithheld = 0;
+    bool   complete  = true;
+    for (u32 c = 0; c < MAPS_CLASSES; c++) withheld[c] = 0;
 
     irq_state_t vs = spin_lock_irqsave(&p->as->lock);
     for (struct Vma *v = p->as->vmas; v; v = v->next) {
@@ -562,38 +673,29 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
         // copy freed slab bytes into a file EL0 reads -- an I-13 leak. Loud is
         // the correct failure for a corrupted list.
         if (v->magic != VMA_MAGIC) extinction("format_maps: corrupted VMA list entry");
-        size_t row = off;                    // scratch: commit only a whole row
-        n = fmt_hex(buf, cap, row, v->vaddr_start);      if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, "-");                 if (!n) break; row += n;
-        n = fmt_hex(buf, cap, row, v->vaddr_end);        if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-
-        char perms[5];
-        perms[0] = (v->prot & VMA_PROT_READ)  ? 'r' : '-';
-        perms[1] = (v->prot & VMA_PROT_WRITE) ? 'w' : '-';
-        perms[2] = (v->prot & VMA_PROT_EXEC)  ? 'x' : '-';
-        perms[3] = (v->flags & VMA_FLAG_SHARED_IN) ? 's' : 'p';
-        perms[4] = '\0';
-        n = fmt_str(buf, cap, row, perms);               if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-        n = fmt_hex(buf, cap, row, v->burrow_offset);    if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, maps_type_name(v));   if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-
-        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE) {
-            n = fmt_hex(buf, cap, row, (u64)v->burrow->file_devno);   if (!n) break; row += n;
-            n = fmt_str(buf, cap, row, ":");                          if (!n) break; row += n;
-            n = fmt_hex(buf, cap, row, v->burrow->file_qid_path);     if (!n) break; row += n;
-        } else {
-            n = fmt_str(buf, cap, row, "-");                          if (!n) break; row += n;
+        if (!show_code && maps_is_code(v)) {
+            if (nwithheld == budget) { complete = false; break; }
+            withheld[maps_class(v)]++;
+            nwithheld++;
+            continue;
         }
-        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, maps_role_name(v));   if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, "\n");                if (!n) break; row += n;
-        off = row;                           // commit the complete row
+        if (!maps_put_vma(v, buf, cap, &off)) { complete = false; break; }
     }
     spin_unlock_irqrestore(&p->as->lock, vs);
+
+    if (nwithheld == 0 || !complete) return off;
+    // Room for the withheld rows comes from dropping whole rows off the end.
+    // nwithheld <= budget, so dropping every walked row always makes enough;
+    // running out of rows means the budget no longer bounds the walk.
+    while (off + nwithheld * rlen > cap) {
+        if (off == head) extinction("format_maps: withheld rows exceed the budget");
+        size_t i = off - 1;                 // buf[off - 1] is the last row's '\n'
+        while (i > head && buf[i - 1] != '\n') i--;
+        off = i;
+    }
+    for (u32 c = 0; c < MAPS_CLASSES; c++)
+        for (u32 k = 0; k < withheld[c]; k++)
+            if (!maps_put_redacted(c, buf, cap, &off)) return off;
     return off;
 }
 
@@ -964,6 +1066,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     p->debug_exitkill = false;                      // the mark dies with the slot
     hwdebug_bp_clear_all(p->debug_hw);              // 8a-2b-1: a dead debugger's breakpoints are disarmed (else the orphaned target re-traps forever)
     hwdebug_wp_clear_all(p->debug_hw);              // 8a-2b-3: likewise its watchpoints (else the orphaned target re-traps on the watched access forever)
+    proc_debug_cancel_steps_locked(p);              // and its pending step (else the next attacher gets a stop it never asked for)
     if (exitkill && p->state == PROC_STATE_ALIVE) {
         // 5d EXITKILL (I-39 die-with-launcher; DEBUG-FS §5d): a debugger-LAUNCHED
         // target dies with its launcher -- the Plan 9 NoStrand-resume would orphan it
@@ -989,10 +1092,12 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
         proc_group_terminate(p, "debugger exited");
         // StopImpliesOwned (debug_stop.tla; self-audit SA-1): clear the stop flag +
         // focus so they do not outlive the now-NULL owner (the spec's exitkill
-        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate so gflag is the
-        // wake the parked threads act on -- no resume-window; cosmetic cleanup of a
-        // dying target (matches proc_debug_resume's clears minus the wake, which the
-        // terminate's cascade already did).
+        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate, which is what
+        // keeps it from opening a resume window: a parked thread wakes on the
+        // terminate's cascade and dies at its loop top, and a thread mid-iteration
+        // that reads this clear sees the terminate at el0_stop_park's re-check after
+        // its wake condition (RELEASE here and in the CAS, ACQUIRE there). Matches
+        // proc_debug_resume's clears minus the wake, which the cascade already did.
         __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
     } else {
@@ -1002,7 +1107,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     return 1;                                        // matched -> stop
 }
 
-static void devproc_close(struct Spoor *c) {
+static int devproc_close(struct Spoor *c) {
     // 8a-1b (I-39, DEBUG-FS §7.2): the handle-lifetime-tied stop ownership. If
     // this ctl Spoor holds a debug attach slot (CDEBUGOWNER), releasing the fd —
     // by explicit close, or by debugger death closing its handles at exit
@@ -1017,6 +1122,7 @@ static void devproc_close(struct Spoor *c) {
         proc_for_each(devproc_debug_release_cb, &r);
     }
     dev_simple_close(c);
+    return 0;
 }
 
 // Read: dispatch by qid kind. Generates synthetic content into a stack
@@ -1053,11 +1159,13 @@ static void devproc_close(struct Spoor *c) {
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
-bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
 // Forward-declared STATIC: devproc_read_cb (below) asks devproc_read_sealed, and
 // sits above the definitions.
 static bool devproc_kind_is_image(u32 kind);
+static bool devproc_maps_code_visible_locked(const struct Proc *caller,
+                                             const struct Proc *target);
 static bool devproc_dump_sealed_against(const struct Proc *caller,
                                         const struct Proc *target);
 static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *target,
@@ -1155,7 +1263,7 @@ struct devproc_read_ctx {
     // prowl-3b (OQ-4): the reading Proc (captured before proc_for_each) + the
     // gate verdict for a gated kind. `caller` is read-only identity/caps; the
     // target is `p` found under the lock, so the gate resolves both under the
-    // lock and sets `denied` for the read() to translate to -1.
+    // lock and sets `denied` for the read() to translate to -T_E_ACCES.
     const struct Proc  *caller;
     bool                denied;
 };
@@ -1172,13 +1280,22 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
         r->denied = true;
         return 1;                             // matched + refused -> stop
     }
+    // ... and Plan 9's posture never reached none: a caller running as none reads
+    // none of another Proc's files, every kind this dispatch serves included.
+    if (devproc_none_walled(r->caller, p)) {
+        r->denied = true;
+        return 1;
+    }
     switch (r->kind) {
-    case PQS_STATUS:  r->total = format_status(p, r->buf, r->cap);  break;
+    case PQS_STATUS:  r->total = format_status(r->caller, p, r->buf, r->cap); break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
-    case PQS_MAPS:    r->total = format_maps(p, r->buf, r->cap);    break;  // V-4b-2
+    case PQS_MAPS:                             // V-4b-2; B-2b: the code rows' addresses
+        r->total = format_maps(p, devproc_maps_code_visible_locked(r->caller, p),
+                               r->buf, r->cap);
+        break;
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
@@ -1259,7 +1376,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     };
     proc_for_each(devproc_read_cb, &r);
     if (!r.found) return -1;                  // process gone since walk
-    if (r.denied) return -1;                  // OQ-4: not owner, no CAP_HOSTOWNER
+    if (r.denied) return -T_E_ACCES;          // the seal, the none wall, or an owner gate
 
     size_t total = r.total;
     if ((size_t)off >= total) return 0;       // EOF
@@ -1280,11 +1397,34 @@ static struct Block *devproc_bread(struct Spoor *c, long n, s64 off) {
 // ctl kill — cross-process termination (A-4b; IDENTITY-DESIGN.md §9.8, I-26).
 // =============================================================================
 
+// An authority refusal answers EACCES: ERRORS.md's binding rule forbids -1 for a
+// permission denial, which pouch and Go would read as EPERM. Every refusal site sets
+// -T_E_ACCES in its walk context; every other failure of a walk (not found, not
+// ALIVE, not stopped, not the slot owner, a full table) stays the generic -1.
+static long devproc_walk_fail(long result) {
+    return result == -T_E_ACCES ? -T_E_ACCES : -1;
+}
+
+// The owner relation every owner axis shares: the same principal, where
+// PRINCIPAL_NONE owns nothing. Procs that run as none are unrelated -- Plan 9 runs
+// a pre-auth server as none, one per remote client -- so two of them sharing that
+// principal are nothing to each other (Plan 9's nonone(); IDENTITY-DESIGN's
+// reserved ids). Self is each predicate's own arm, keyed on the Proc. Both
+// principals are read with ACQUIRE: proc_apply_identity is a cross-thread RELEASE
+// writer of either (a peer thread of the caller's own Proc included), so a plain
+// load is C11-racy.
+static bool devproc_same_owner(const struct Proc *caller, const struct Proc *target) {
+    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
+    if (target_principal == PRINCIPAL_NONE) return false;
+    return __atomic_load_n(&caller->principal_id, __ATOMIC_ACQUIRE) == target_principal;
+}
+
 // Two-axis authority for a kill/killgrp write to /proc/<pid>/ctl. ctl is owned
 // by the target's principal/group at mode 0600, so:
-//   - identity axis: the OWNER (same principal_id — the owner always holds the
-//     0600 w-bit) may kill (covers killing your own processes; the
-//     parent-of-same-identity-child case is expressible as ownership);
+//   - identity axis: the caller itself, or the OWNER (same principal_id — the
+//     owner always holds the 0600 w-bit; never two none Procs) may kill (covers
+//     killing your own processes; the parent-of-same-identity-child case is
+//     expressible as ownership);
 //   - capability axis: CAP_HOSTOWNER (the unified admin) OR CAP_KILL (the
 //     cross-identity override) may kill any target.
 // Checked DIRECTLY (not via perm_check): CAP_DAC_OVERRIDE — the generic fs-rwx
@@ -1294,11 +1434,12 @@ static struct Block *devproc_bread(struct Spoor *c, long n, s64 off) {
 // identities). Non-static: the kernel test suite exercises the predicate.
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
-    // ACQUIRE, as in its two siblings: proc_apply_identity is a cross-thread RELEASE
-    // writer of the target's principal, so a plain load is C11-racy. The owner axis
-    // itself stays UNCONDITIONAL (I-26) -- this is load hygiene, not a new condition.
-    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
-    if (caller->principal_id == target_principal)      return true;   // owner-rwx on 0600
+    // Self, always: a none Proc owns no other Proc, but it still owns itself, as
+    // nonone() lets Plan 9's none write its own ctl.
+    if (caller == target)                              return true;
+    // The owner axis stays UNCONDITIONAL (I-26) for every principal but none, which
+    // owns nothing (devproc_same_owner).
+    if (devproc_same_owner(caller, target))            return true;   // owner-rwx on 0600
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of caller->caps since A-4a; a plain load is C11-racy (CAP_KILL is clearance-grantable).
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_KILL))
@@ -1344,18 +1485,30 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (caller == target)                              return true;   // self, always
-    // The target's principal is read with ACQUIRE, not plainly: proc_apply_identity
-    // is a cross-thread RELEASE writer of it, so a plain load is C11-racy exactly as
-    // the caller's caps were before RW-5 F2. That is ALL this load is for. It does
-    // not order the seal: the seal is stamped under g_proc_table_lock (proc_seal),
-    // which every caller of this predicate holds.
-    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
-    if (caller->principal_id == target_principal)      return true;   // owner
+    // devproc_same_owner's acquire loads are load hygiene only. They do not order
+    // the seal: the seal is stamped under g_proc_table_lock (proc_seal), which every
+    // caller of this predicate holds.
+    if (devproc_same_owner(caller, target))            return true;   // owner, never none
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
     // of caller->caps; CAP_HOSTOWNER is clearance-grantable, so a plain load is racy.
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER)
         return true;                                                   // host owner
     return false;
+}
+
+// Plan 9's nonone() for the files every other reader may read: a caller running
+// as none reads no other Proc's per-Proc file (IDENTITY-DESIGN's reserved ids).
+// The owner-gated files need no call, since devproc_same_owner already refuses
+// none, so this covers status, cmdline, ns, exe, cwd, maps and the read side of
+// ctl, and the rows of /ctl/procs. CAP_HOSTOWNER buys through it, as eve does
+// through nonone(). Keyed on the CALLER: a none target stays as visible to a real
+// reader as any other Proc. A NULL caller is a kernel-internal read, which no wall
+// applies to. Non-static: devctl and the test suite ask it.
+bool devproc_none_walled(const struct Proc *caller, const struct Proc *target) {
+    if (!caller || caller == target)                   return false;
+    if (__atomic_load_n(&caller->principal_id, __ATOMIC_ACQUIRE) != PRINCIPAL_NONE)
+        return false;
+    return (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER) == 0;
 }
 
 // The EXTRACTION axis -- the dump seal (PROC_FLAG_NODUMP), DEBUG-FS-DESIGN 3.2.
@@ -1401,8 +1554,11 @@ static bool devproc_dump_sealed_against(const struct Proc *caller,
 // kernel's own execution state (kstack) belong to NOTRACE, through
 // devproc_debug_authorized. One predicate, asked through devproc_read_sealed at every
 // read site -- the dispatch and each walk with its own read path -- so a file is
-// classified here or not at all. cmdline carries no argv yet; it is in the set so
-// that argv arrives sealed. `name` -- the exe path's basename, stamped at exec -- is
+// classified here or not at all. cmdline carries no argv yet, and its place here
+// seals argv only if argv is rendered from a per-Proc kernel copy, as environ is:
+// argv read off the stack would read through a vfork child sharing that stack
+// under its own, unsealed Proc, unless cmdline also joins mem and maps in
+// devproc_read_sealed. `name` -- the exe path's basename, stamped at exec -- is
 // ledger: status, sched and /ctl/procs carry it, as Linux keeps a non-dumpable
 // process's comm public.
 static bool devproc_kind_is_image(u32 kind) {
@@ -1439,7 +1595,8 @@ static bool devproc_read_sealed(const struct Proc *caller, const struct Proc *ta
     // never reached -- hands out the sealed image byte for byte. The rest
     // (cmdline, ns, exe, cwd, environ and the register files) are per-Proc or
     // per-Thread state that no sharer holds a copy of, so for those the target's
-    // own bit is the whole answer.
+    // own bit is the whole answer -- cmdline only while it renders no argv off the
+    // shared stack (devproc_kind_is_image).
     // PRECONDITION for the join below: g_proc_table_lock is held. Every caller
     // satisfies it today -- the read dispatch and each walk with its own read
     // path all run inside proc_for_each -- and devproc_extract_authorized, the
@@ -1473,7 +1630,8 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 // Two-axis authority for the /proc/<pid> debug surface (attach + the mem/regs/
 // wait reads in later sub-chunks), the I-26 kill-gate analog. ctl is 0600
 // (owner rw), so:
-//   - identity axis: the OWNER (same principal_id) may debug its own target, but
+//   - identity axis: the OWNER (same principal_id, never two none Procs:
+//     devproc_same_owner) may debug its own target, but
 //     ONLY while its own caps COVER the target's (the capability-cover rule,
 //     DEBUG-FS-DESIGN §3.1) — debug is total control, so same-principal is
 //     necessary and NOT sufficient. This is where debug deliberately diverges
@@ -1490,14 +1648,14 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
 // (I-22 — the cap axes are capabilities, never identities). kproc (debugging it
 // would stop the kernel) and a PROC_FLAG_NOTRACE target (the SYS_SET_TRACEABLE(0)
 // no-trace seam — e.g. the login session Proc, DEBUG-FS-DESIGN §8) are refused
-// BEFORE the authority axes: no cap holder can debug either. Non-static: the
+// whatever the authority axes say: kproc before them, the seam after, and no cap
+// holder can debug either. Non-static: the
 // kernel test suite exercises the predicate.
 static bool devproc_debug_authorized_locked(const struct Proc *caller,
                                             const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (target == kproc())                             return false;   // kernel: undebuggable
-    // The target's principal is read with ACQUIRE (proc_apply_identity is a
-    // cross-thread RELEASE writer of it; a plain load is C11-racy), and the no-trace
+    // The principals are read with ACQUIRE (devproc_same_owner), and the no-trace
     // seam is tested last. The ORDER no longer carries the safety. Every caller holds
     // g_proc_table_lock and proc_seal stamps NOTRACE under it, so the seam load sees
     // the target wholly sealed or wholly not -- including a spawn whose identity
@@ -1506,7 +1664,6 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
     // once carried the safety, and held only for a reader admitted BECAUSE it saw
     // the new principal). Refusing last is identical in OUTCOME to refusing first:
     // no cap holder may debug a NOTRACE target either.
-    u32 target_principal = __atomic_load_n(&target->principal_id, __ATOMIC_ACQUIRE);
     // BOTH caps words are read ATOMICALLY (RW-5 F2): proc_become_legate is a
     // cross-thread writer of a RUNNING Proc's caps, so a plain load is C11-racy.
     // That now covers the TARGET's set too, not just the caller's.
@@ -1525,7 +1682,7 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
         // between them could refuse a Proc access to ITSELF (reachable -- kstack
         // and wait carry no stopped-only requirement). Cannot widen anything.
         axis = true;
-    } else if (caller->principal_id == target_principal) {              // owner-rwx on 0600
+    } else if (devproc_same_owner(caller, target)) {   // owner-rwx on 0600, never none
         // The capability-cover rule (DEBUG-FS-DESIGN 3.1, scripture 389c06b9;
         // Linux's cap_ptrace_access_check): the owner axis admits only when the
         // caller's authority COVERS the target's. A debug attach is TOTAL
@@ -1539,7 +1696,9 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
         // those bytes are somebody else's too -- a Proc whose caps the I-2 carve
         // stripped is a LOWER-authority door to a HIGHER-authority image, which
         // is precisely the shape musl's posix_spawn creates on every call. So
-        // the caller must cover every mapper, not merely the one it named.
+        // the caller must cover every mapper, not merely the one it named --
+        // and the image's own code aliases, which the join counts as CAP_JIT
+        // because they outlive the Proc that held it (proc_image_join_locked).
         caps_t target_caps = __atomic_load_n(&target->caps, __ATOMIC_ACQUIRE);
         axis = ((target_caps | image.caps) & ~caller_caps) == 0;
     }
@@ -1562,6 +1721,25 @@ static bool devproc_debug_authorized_locked(const struct Proc *caller,
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target) {
     irq_state_t s = proc_table_lock_acquire();
     bool ok = devproc_debug_authorized_locked(caller, target);
+    proc_table_lock_release(s);
+    return ok;
+}
+
+// May `caller` see where `target`'s code aliases lie (format_maps)? Debug
+// authority over it, or the target itself: the reflexive case is stated rather
+// than left to the I-39 predicate, which refuses a NOTRACE Proc even to itself,
+// and a Proc reading its own layout discloses it to no one.
+// PRECONDITION: g_proc_table_lock is held (the image join).
+static bool devproc_maps_code_visible_locked(const struct Proc *caller,
+                                             const struct Proc *target) {
+    if (!caller || !target) return false;
+    return caller == target || devproc_debug_authorized_locked(caller, target);
+}
+
+// The kernel tests' entry: takes the lock the image join needs.
+bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target) {
+    irq_state_t s = proc_table_lock_acquire();
+    bool ok = devproc_maps_code_visible_locked(caller, target);
     proc_table_lock_release(s);
     return ok;
 }
@@ -1674,7 +1852,7 @@ struct devproc_mem_ctx {
     void        *kbuf;       // the kernel staging buffer (syscall-bounced)
     long         len;        // clamped to <= DEBUG_MEM_CHUNK
     bool         is_write;
-    long         result;     // >=0 bytes moved (short at a hole/RO), -1 denied/not-found
+    long         result;     // >=0 bytes moved (short at a hole/RO), -T_E_ACCES refused, -1 not-found / not stopped
 };
 
 // Resolve + I-39 gate + stopped-only gate + the cross-Proc copy, all under
@@ -1686,13 +1864,13 @@ struct devproc_mem_ctx {
 static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     struct devproc_mem_ctx *m = (struct devproc_mem_ctx *)arg;
     if (target->pid != m->target_pid) return 0;   // keep walking
-    if (target == kproc())                              { m->result = -1; return 1; }
-    if (!devproc_debug_authorized_locked(m->caller, target))   { m->result = -1; return 1; }  // I-39
+    if (target == kproc())                              { m->result = -T_E_ACCES; return 1; }
+    if (!devproc_debug_authorized_locked(m->caller, target))   { m->result = -T_E_ACCES; return 1; }  // I-39
     // The dump seal refuses EXTRACTION, and reading a target's memory is the largest
     // extraction there is (DEBUG-FS-DESIGN 3.2). A write is CONTROL -- NOTRACE's, via
     // the gate above -- so a NODUMP-only target's debugger may still write it.
     if (!m->is_write
-        && devproc_read_sealed(m->caller, target, PQS_MEM)) { m->result = -1; return 1; }
+        && devproc_read_sealed(m->caller, target, PQS_MEM)) { m->result = -T_E_ACCES; return 1; }
     if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
 
     irq_state_t vs = spin_lock_irqsave(&target->as->lock);
@@ -1726,7 +1904,7 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
         .result     = -1,
     };
     proc_for_each(devproc_mem_walk_cb, &m);
-    return m.result;   // -1 not-found / denied; else bytes moved (0 = a hole at off)
+    return m.result;   // -T_E_ACCES refused, -1 not-found / not stopped; else bytes moved (0 = a hole at off)
 }
 
 // =============================================================================
@@ -1885,18 +2063,18 @@ struct devproc_regs_ctx {
     long         n;
     s64          off;       // byte offset into the register struct
     bool         is_write;
-    long         result;    // >=0 bytes moved (0 = off past EOF), -1 denied/not-found
+    long         result;    // >=0 bytes moved (0 = off past EOF), -T_E_ACCES refused, -1 not-found / not stopped
 };
 
 static int devproc_regs_walk_cb(struct Proc *target, void *arg) {
     struct devproc_regs_ctx *r = (struct devproc_regs_ctx *)arg;
     if (target->pid != r->target_pid) return 0;
-    if (target == kproc())                              { r->result = -1; return 1; }
-    if (!devproc_debug_authorized_locked(r->caller, target))   { r->result = -1; return 1; }  // I-39
+    if (target == kproc())                              { r->result = -T_E_ACCES; return 1; }
+    if (!devproc_debug_authorized_locked(r->caller, target))   { r->result = -T_E_ACCES; return 1; }  // I-39
     // regs/fpregs/kregs READS are extraction (the dump seal; kregs carries tpidr_el0,
     // an EL0 register); writes are control -- NOTRACE's, through the gate above.
     if (!r->is_write
-        && devproc_read_sealed(r->caller, target, r->kind)) { r->result = -1; return 1; }
+        && devproc_read_sealed(r->caller, target, r->kind)) { r->result = -T_E_ACCES; return 1; }
     if (!devproc_target_fully_stopped(target))          { r->result = -1; return 1; }  // stopped-only
 
     // Build the current struct, apply the [off,off+n) slice (write) or copy it
@@ -2123,7 +2301,7 @@ static bool parse_ctl_hwwatch(const char *s, long n, u8 *flags, u64 *addr, u32 *
 }
 
 // proc_for_each context for the kill walk. result: 0 = target pid not found
-// (cb never matched), +1 = killed, -1 = found but denied / not-ALIVE.
+// (cb never matched), +1 = killed, -T_E_ACCES = refused (kproc included), -1 = not-ALIVE.
 struct devproc_kill_ctx {
     int          target_pid;
     struct Proc *caller;
@@ -2144,10 +2322,13 @@ static int devproc_kill_walk_cb(struct Proc *target, void *arg) {
     // kproc (the kernel proc, pid 0) is unkillable -- terminating it would take
     // down the kernel. Refuse regardless of caller authority, BEFORE the
     // authority check (a CAP_KILL holder cannot kill the kernel either).
-    if (target == kproc())                         { k->result = -1; return 1; }
+    if (target == kproc())                         { k->result = -T_E_ACCES; return 1; }
+    // Authority before liveness: the other order answers an unauthorized caller
+    // -1 for a ZOMBIE and EACCES for an ALIVE target, a liveness bit about a Proc
+    // whose status it may not read (the none wall).
+    if (!devproc_kill_authorized(k->caller, target)) { k->result = -T_E_ACCES; return 1; }
     if (target->state != PROC_STATE_ALIVE)         { k->result = -1; return 1; }
-    if (!devproc_kill_authorized(k->caller, target)) { k->result = -1; return 1; }
-    proc_group_terminate(target, "killed");
+    proc_group_kill(target);
     k->result = 1;
     return 1;
 }
@@ -2170,14 +2351,14 @@ struct devproc_job_ctx {
     int          target_pid;
     struct Proc *caller;
     bool         resume;      // false = suspend (job-stop), true = resume (job-cont)
-    int          result;      // 0 = pid not found, +1 = applied, -1 = denied / not-ALIVE / kproc
+    int          result;      // 0 = pid not found, +1 = applied, -T_E_ACCES = refused (kproc included), -1 = not-ALIVE
 };
 static int devproc_job_walk_cb(struct Proc *target, void *arg) {
     struct devproc_job_ctx *j = (struct devproc_job_ctx *)arg;
     if (target->pid != j->target_pid)                return 0;   // keep walking
-    if (target == kproc())                         { j->result = -1; return 1; }
+    if (target == kproc())                         { j->result = -T_E_ACCES; return 1; }
+    if (!devproc_kill_authorized(j->caller, target)) { j->result = -T_E_ACCES; return 1; }   // before liveness, as kill
     if (target->state != PROC_STATE_ALIVE)         { j->result = -1; return 1; }
-    if (!devproc_kill_authorized(j->caller, target)) { j->result = -1; return 1; }
     if (j->resume) proc_job_cont_proc(target);
     else           proc_job_stop_proc(target);
     j->result = 1;
@@ -2197,7 +2378,7 @@ static int devproc_job_walk_cb(struct Proc *target, void *arg) {
 // at v1.0-alpha nothing parks yet, so release is a bare slot clear.
 
 // proc_for_each context for the attach/detach walk. result: 0 = target pid not
-// found, +1 = success, -1 = denied / Einuse / not-ALIVE / not-the-owner.
+// found, +1 = success, -T_E_ACCES = refused, -1 = Einuse / not-ALIVE / not-the-owner.
 struct devproc_debug_ctx {
     int           target_pid;
     struct Proc  *caller;
@@ -2211,10 +2392,12 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != d->target_pid) return 0;   // keep walking
 
     if (d->verb == CTL_VERB_ATTACH) {
-        // Refuse a non-ALIVE target, then the I-39 gate (kproc / NOTRACE /
-        // owner-or-CAP_DEBUG), then Einuse: a non-NULL slot is already claimed.
+        // The I-39 gate (kproc / NOTRACE / owner-or-CAP_DEBUG), then a non-ALIVE
+        // target, then Einuse: a non-NULL slot is already claimed. Authority first,
+        // as kill, so a refused caller learns nothing of the target's liveness; the
+        // wait scan already asks the gate of a dying target.
+        if (!devproc_debug_authorized_locked(d->caller, target)) { d->result = -T_E_ACCES; return 1; }
         if (target->state != PROC_STATE_ALIVE)            { d->result = -1; return 1; }
-        if (!devproc_debug_authorized_locked(d->caller, target)) { d->result = -1; return 1; }
         if (target->debug_owner != NULL)                  { d->result = -1; return 1; }  // Einuse
         // The claim is what taints, not the first write, and the difference is
         // the point: an attach IS the authority to stop, step and rewrite this
@@ -2243,6 +2426,15 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         // proc_free) so the ctx-switch reader never derefs freed memory.
         hwdebug_bp_clear_all(target->debug_hw);
         hwdebug_wp_clear_all(target->debug_hw);    // 8a-2b-3: likewise the watchpoints
+        // A pending step dies with the slot, as at a whole-Proc stop: left
+        // armed, the head's step trap would stop the target for whoever
+        // attached next (a spurious step EC after this is benign).
+        proc_debug_cancel_steps_locked(target);
+        // 5f: an explicit detach is the debugger's choice to run the target, so
+        // it releases a birth hold too (before the resume's wake). The IMPLICIT
+        // release -- the ctl fd closing without detach -- deliberately does not
+        // (devproc_debug_release_cb): the hold is the spawner's, not the slot's.
+        proc_birth_hold_release_locked(target);
         proc_debug_resume(target);                 // 8a-1b-beta: clear the stop + wake parked threads (ReleaseSlot -> NoStrand)
         d->result = 1;
     } else {
@@ -2281,8 +2473,20 @@ static int devproc_runctl_walk_cb(struct Proc *target, void *arg) {
     if (target->pid != rc->target_pid) return 0;   // keep walking
     if (target->debug_owner != rc->ctl) { rc->result = -1; return 1; }  // not the slot owner
     switch (rc->op) {
-        case DBG_RC_STOP:     proc_debug_stop_deliver(target); break;
-        case DBG_RC_START:    proc_debug_resume(target);       break;
+        // DEBUG-FS-DESIGN 5f, the birth hold. STOP converts a held target:
+        // deliver first, then convert, so the birth park -- which reads the
+        // hold before the stop flags -- always sees one of them and the child
+        // never runs in between (the conversion refuses without a pending stop,
+        // so the reverse order leaves the child held). START releases: clear
+        // first, so the resume's wake finds the hold already gone.
+        case DBG_RC_STOP:
+            proc_debug_stop_deliver(target);
+            proc_birth_hold_convert_locked(target);
+            break;
+        case DBG_RC_START:
+            proc_birth_hold_release_locked(target);
+            proc_debug_resume(target);
+            break;
         case DBG_RC_WAITSTOP: break;   // no mutation; the block is outside the lock
         // 5d EXITKILL (I-39 die-with-launcher): mark the target killed-on-debugger-
         // death. Just records intent (a plain store under g_proc_table_lock,
@@ -2314,13 +2518,13 @@ struct devproc_hwbp_ctx {
     bool             add;       // true = hwbreak, false = hwrmbreak
     u64              va;
     struct debug_hw *spare;     // pre-allocated table (add only); NULLed if installed
-    int              result;    // 0 not found, +1 ok, -1 denied / full / not-present / not-stopped
+    int              result;    // 0 not found, +1 ok, -T_E_ACCES refused, -1 full / not-present / not-stopped / not the slot owner
 };
 static int devproc_hwbp_walk_cb(struct Proc *target, void *arg) {
     struct devproc_hwbp_ctx *h = (struct devproc_hwbp_ctx *)arg;
     if (target->pid != h->target_pid) return 0;                                    // keep walking
-    if (target == kproc())                            { h->result = -1; return 1; } // undebuggable
-    if (!devproc_debug_authorized_locked(h->caller, target)) { h->result = -1; return 1; } // I-39
+    if (target == kproc())                            { h->result = -T_E_ACCES; return 1; } // undebuggable
+    if (!devproc_debug_authorized_locked(h->caller, target)) { h->result = -T_E_ACCES; return 1; } // I-39
     if (target->debug_owner != h->ctl)                { h->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { h->result = -1; return 1; } // stopped-only (quiescent)
 
@@ -2357,13 +2561,13 @@ struct devproc_hwwatch_ctx {
     u32              len;        // 1..8 (add only)
     u8               flags;      // DEBUG_WP_R|W (add only)
     struct debug_hw *spare;     // pre-allocated table (add only); NULLed if installed
-    int              result;    // 0 not found, +1 ok, -1 denied / full / bad / not-present / not-stopped
+    int              result;    // 0 not found, +1 ok, -T_E_ACCES refused, -1 full / bad / not-present / not-stopped / not the slot owner
 };
 static int devproc_hwwatch_walk_cb(struct Proc *target, void *arg) {
     struct devproc_hwwatch_ctx *h = (struct devproc_hwwatch_ctx *)arg;
     if (target->pid != h->target_pid) return 0;                                    // keep walking
-    if (target == kproc())                            { h->result = -1; return 1; } // undebuggable
-    if (!devproc_debug_authorized_locked(h->caller, target)) { h->result = -1; return 1; } // I-39
+    if (target == kproc())                            { h->result = -T_E_ACCES; return 1; } // undebuggable
+    if (!devproc_debug_authorized_locked(h->caller, target)) { h->result = -T_E_ACCES; return 1; } // I-39
     if (target->debug_owner != h->ctl)                { h->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { h->result = -1; return 1; } // stopped-only (quiescent)
 
@@ -2402,13 +2606,13 @@ struct devproc_step_ctx {
     int           target_pid;
     struct Proc  *caller;   // I-39
     struct Spoor *ctl;      // must == target->debug_owner (slot ownership)
-    int           result;   // 0 not found, +1 armed+resumed, -1 denied / not-stopped / no-thread
+    int           result;   // 0 not found, +1 armed+resumed, -T_E_ACCES refused, -1 not-stopped / no-thread / not the slot owner
 };
 static int devproc_step_walk_cb(struct Proc *target, void *arg) {
     struct devproc_step_ctx *s = (struct devproc_step_ctx *)arg;
     if (target->pid != s->target_pid) return 0;                                    // keep walking
-    if (target == kproc())                            { s->result = -1; return 1; } // undebuggable
-    if (!devproc_debug_authorized_locked(s->caller, target)) { s->result = -1; return 1; } // I-39
+    if (target == kproc())                            { s->result = -T_E_ACCES; return 1; } // undebuggable
+    if (!devproc_debug_authorized_locked(s->caller, target)) { s->result = -T_E_ACCES; return 1; } // I-39
     if (target->debug_owner != s->ctl)                { s->result = -1; return 1; } // slot owner
     if (!devproc_target_fully_stopped(target))        { s->result = -1; return 1; } // stopped-only
     struct Thread *head = devproc_focus_thread(target);   // 8c-2 #95: the M at the stop (step targets it), else head
@@ -2456,8 +2660,32 @@ static int devproc_stopscan_cb(struct Proc *target, void *arg) {
     struct devproc_stopscan_ctx *s = (struct devproc_stopscan_ctx *)arg;
     if (target->pid != s->target_pid) return 0;    // keep walking
     if (target->debug_owner != s->ctl) { s->state = 2; return 1; }  // slot released -- abort the wait
-    s->state = devproc_all_threads_parked(target) ? 1 : 0;   // gamma-shared "fully parked" predicate
+    // A dying target is gone to the wait: its stop will never take (a dying
+    // group is never asked to park, proc_stop_requested) and the stopped-only
+    // surface refuses it (devproc_target_fully_stopped). Its last thread may
+    // still be closing its handles, for as long as a 9P server takes to
+    // answer, so waiting for it to read as parked would be waiting for the exit.
+    if (__atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        s->state = -1;
+        return 1;
+    }
+    // A DEBUG stop is what stop and waitstop wait for. Parked threads alone may
+    // be a job stop or a birth hold, and neither opens the stopped-only surface
+    // (devproc_target_fully_stopped reads debug_stop_req for the same reason),
+    // so reporting them as stopped hands the debugger a refusal on its next read.
+    s->state = (__atomic_load_n(&target->debug_stop_req, __ATOMIC_ACQUIRE) != 0 &&
+                devproc_all_threads_parked(target)) ? 1 : 0;   // + the gamma-shared "fully parked" predicate
     return 1;
+}
+
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): one pass of the scan stop and waitstop
+// poll, since waitstop itself would block on a target that never stops.
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl);
+int devproc_debug_stop_state_for_test(int pid, struct Spoor *ctl) {
+    struct devproc_stopscan_ctx s = { .target_pid = pid, .ctl = ctl, .state = -1 };
+    proc_for_each(devproc_stopscan_cb, &s);
+    return s.state;
 }
 
 // tsleep cond for the stop-wait poll: never wakes on the cond (only the deadline
@@ -2474,7 +2702,7 @@ static int devproc_debug_poll_never(void *arg) { (void)arg; return 0; }
 // (single-waiter -- only the caller ever sleeps here); the deadline is the sole
 // wake source. tsleep is death-interruptible, so a debugger killed while waiting
 // unwinds (and its ctl-fd close then resumes the target). Returns +1 stopped,
-// 0 gone / slot-released, -1 caller death-interrupted.
+// 0 gone (reaped or dying) / slot-released, -1 caller death-interrupted.
 #define DEBUG_STOP_POLL_NS  (2ull * 1000ull * 1000ull)   // 2 ms between scans
 static int devproc_debug_wait_stopped(int pid, struct Spoor *ctl) {
     struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
@@ -2598,15 +2826,15 @@ struct devproc_kstack_ctx {
     char        *buf;
     size_t       cap;
     size_t       total;
-    int          result;   // 0 not found, +1 built, -1 denied / no-thread
+    int          result;   // 0 not found, +1 built, -T_E_ACCES refused, -1 no-thread
 };
 
 static int devproc_kstack_walk_cb(struct Proc *target, void *arg) {
     struct devproc_kstack_ctx *k = (struct devproc_kstack_ctx *)arg;
     if (target->pid != k->target_pid) return 0;   // keep walking
-    if (target == kproc())                            { k->result = -1; return 1; }
-    if (!devproc_debug_authorized_locked(k->caller, target)) { k->result = -1; return 1; }   // I-39
-    if (devproc_read_sealed(k->caller, target, PQS_KSTACK)) { k->result = -1; return 1; }
+    if (target == kproc())                            { k->result = -T_E_ACCES; return 1; }
+    if (!devproc_debug_authorized_locked(k->caller, target)) { k->result = -T_E_ACCES; return 1; }   // I-39
+    if (devproc_read_sealed(k->caller, target, PQS_KSTACK)) { k->result = -T_E_ACCES; return 1; }
     // 8b: the SETTLED-thread inspect -- NO debug-stop required (unlike mem/regs/
     // kregs/wait, which keep the fully_stopped gate). devproc_format_kstack gates
     // the head on on_cpu==false; the walk is bounded to the thread's own kstack
@@ -2642,7 +2870,7 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
         .result     = 0,
     };
     proc_for_each(devproc_kstack_walk_cb, &k);
-    if (k.result != 1) return -1;   // not found / denied / not-stopped
+    if (k.result != 1) return devproc_walk_fail(k.result);   // refused, or not found / no thread
 
     size_t total = k.total;
     if ((size_t)off >= total) return 0;   // EOF
@@ -2668,8 +2896,8 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
 // (mode 0400 plus a ptrace_may_access check) -- composed with the seal in
 // devproc_extract_authorized.
 //
-// A denial is -1, formatting nothing: no partial leak, and the same shape the
-// sched gate returns. devproc.perm_enforced is false, so the 0400 mode is
+// A refusal is -T_E_ACCES, formatting nothing: no partial leak, and the same
+// shape the sched gate returns. devproc.perm_enforced is false, so the 0400 mode is
 // documentation and THIS is the enforcement.
 //
 // A NOTE FOR PROXIES (VIVARIUM section 6.2). The gate keys on the READER, so a
@@ -2679,7 +2907,7 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
 // reason about both:
 //
 //   * it may be denied where its client would be allowed (the shared boot
-//     diorama is SYSTEM, so a user-principal client's environ reads -1). Benign:
+//     diorama is SYSTEM, so a user-principal client's environ is refused). Benign:
 //     the client loses a file, gains nothing.
 //   * it may be ALLOWED WHERE ITS CLIENT WOULD BE DENIED -- a SYSTEM proxy can
 //     read any SYSTEM Proc's environ and hand the bytes to a client of any
@@ -2696,14 +2924,14 @@ struct devproc_environ_ctx {
     void        *buf;
     long         n;
     s64          off;
-    long         result;   // bytes copied, or -1 (not found / denied)
+    long         result;   // bytes copied, -T_E_ACCES refused, or -1 not found
 };
 
 static int devproc_environ_walk_cb(struct Proc *target, void *arg) {
     struct devproc_environ_ctx *k = (struct devproc_environ_ctx *)arg;
     if (target->pid != k->target_pid) return 0;                 // keep walking
     if (!devproc_extract_authorized(k->caller, target)) {
-        k->result = -1;                                          // denied: no bytes
+        k->result = -T_E_ACCES;                                  // refused: no bytes
         return 1;
     }
     // Renders under target->env's lock, nested inside the g_proc_table_lock
@@ -2757,36 +2985,99 @@ static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off) {
 // =============================================================================
 
 struct devproc_waitscan_ctx {
-    int          target_pid;
-    struct Proc *caller;
-    int          state;   // -2 denied (I-39/kproc), -1 gone/exited, 0 not-yet, 1 stopped
+    int           target_pid;
+    struct Proc  *caller;
+    struct Spoor *ctl;     // step: the slot owner's ctl; /proc/<pid>/wait: NULL (not slot-bound)
+    int           state;   // -2 refused (I-39/kproc/the seal), -1 gone/exited, 0 not-yet, 1 stopped, 2 slot released
 };
 static int devproc_waitscan_cb(struct Proc *target, void *arg) {
     struct devproc_waitscan_ctx *w = (struct devproc_waitscan_ctx *)arg;
     if (target->pid != w->target_pid) return 0;   // keep walking -> not found -> stays -1
+    // A step's wait ends when its slot is released: a detach written on the
+    // same ctl by another thread resumes the target and cancels its step, so
+    // it would never re-stop for it. A close of the ctl fd cannot release the
+    // slot meanwhile: the step's own write holds the Spoor (#844), and the
+    // close hook runs at the last clunk, after the step returns.
+    if (w->ctl && target->debug_owner != w->ctl)      { w->state = 2; return 1; }
     if (target == kproc())                            { w->state = -2; return 1; }  // undebuggable
     if (!devproc_debug_authorized_locked(w->caller, target)) { w->state = -2; return 1; }  // I-39
     if (devproc_read_sealed(w->caller, target, PQS_WAIT)) { w->state = -2; return 1; }
     if (target->state != PROC_STATE_ALIVE)            { w->state = -1; return 1; }  // exiting/zombie -> "exited"
+    // A step waits for a re-stop, and a dying target never stops: it is gone
+    // to the step as to stop and waitstop (devproc_stopscan_cb), so the step
+    // does not wait out the exit close. /proc/<pid>/wait waits for the exit.
+    if (w->ctl && __atomic_load_n(&target->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        w->state = -1;
+        return 1;
+    }
     w->state = devproc_target_fully_stopped(target) ? 1 : 0;   // debug_stop_req + all parked
     return 1;
 }
 
-// Block until a wait event. Returns +1 stopped, 0 exited/gone, -1 denied /
-// caller death-interrupted. Same bounded-poll cadence as devproc_debug_wait_stopped.
-static int devproc_wait_block(int pid, struct Proc *caller) {
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): one pass of the scan /proc/<pid>/wait
+// (ctl NULL) and step (the slot owner's ctl) poll.
+int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl);
+int devproc_wait_state_for_test(int pid, struct Proc *caller, struct Spoor *ctl) {
+    struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .ctl = ctl,
+                                      .state = -1 };
+    proc_for_each(devproc_waitscan_cb, &w);
+    return w.state;
+}
+
+// The wait's verdict on one scan state: +1 stopped, 0 exited/gone,
+// DEVPROC_WAIT_RELEASED for a step's wait whose slot was released, -T_E_ACCES refused,
+// DEVPROC_WAIT_POLL for a live target not yet stopped (re-scan).
+enum { DEVPROC_WAIT_POLL = 2, DEVPROC_WAIT_RELEASED = 3 };
+static int devproc_wait_verdict(int state) {
+    if (state == 1)  return 1;                       // stopped
+    if (state == -1) return 0;                       // exited/gone
+    if (state == 2)  return DEVPROC_WAIT_RELEASED;   // the step's slot released
+    if (state == -2) return -T_E_ACCES;              // refused (I-39 / kproc / the seal)
+    return DEVPROC_WAIT_POLL;                        // 0: ALIVE, not yet stopped
+}
+
+// Test hook (the *_for_test convention: absent from the header, extern-declared
+// by the harness, no production caller): the verdict for one scan state.
+int devproc_wait_verdict_for_test(int state);
+int devproc_wait_verdict_for_test(int state) {
+    return devproc_wait_verdict(state);
+}
+
+// Block until a wait event. Returns +1 stopped, 0 exited/gone,
+// DEVPROC_WAIT_RELEASED (a step's wait, ctl set) slot released, -T_E_ACCES
+// refused, -1 caller death-interrupted. Same
+// bounded-poll cadence as devproc_debug_wait_stopped.
+static int devproc_wait_block(int pid, struct Proc *caller, struct Spoor *ctl) {
     struct Rendez pollr = RENDEZ_INIT;   // caller-private, single-waiter
     for (;;) {
-        struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .state = -1 };
+        struct devproc_waitscan_ctx w = { .target_pid = pid, .caller = caller, .ctl = ctl,
+                                          .state = -1 };
         proc_for_each(devproc_waitscan_cb, &w);
-        if (w.state == 1)  return 1;    // stopped
-        if (w.state == -1) return 0;    // exited/gone
-        if (w.state == -2) return -1;   // denied (I-39 / kproc)
+        int v = devproc_wait_verdict(w.state);
+        if (v != DEVPROC_WAIT_POLL) return v;
         // state 0: ALIVE, not yet stopped -- sleep ~2 ms, then re-scan.
         u64 deadline = timer_now_ns() + DEBUG_STOP_POLL_NS;
         if (tsleep(&pollr, devproc_debug_poll_never, NULL, deadline) == TSLEEP_INTR)
             return -1;   // caller death-interrupted
     }
+}
+
+// The step write's return on its wait's verdict. Only a re-stop completes the
+// step. A target that is gone, or one this ctl no longer holds (a detach on the
+// same ctl resumed it and cancelled the step), fails it with -T_E_SRCH, as
+// ptrace(2) answers ESRCH for a tracee that does not exist or is not traced by
+// the caller. A refusal is -T_E_ACCES; -1 is the caller's own death interrupt.
+static long devproc_step_result(int ev, long n) {
+    if (ev == 1) return n;
+    if (ev == 0 || ev == DEVPROC_WAIT_RELEASED) return -T_E_SRCH;
+    return devproc_walk_fail(ev);
+}
+
+// Test hook (the *_for_test convention): the step write's return for a verdict.
+long devproc_step_result_for_test(int ev, long n);
+long devproc_step_result_for_test(int ev, long n) {
+    return devproc_step_result(ev, n);
 }
 
 static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
@@ -2796,9 +3087,9 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
 
-    int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc);
-    if (ev < 0) return -1;   // denied or caller death-interrupted
-    const char *msg = ev ? "stopped\n" : "exited\n";
+    int ev = devproc_wait_block(proc_qid_pid(c->qid.path), t->proc, NULL);
+    if (ev < 0) return devproc_walk_fail(ev);   // refused, or caller death-interrupted
+    const char *msg = (ev == 1) ? "stopped\n" : "exited\n";
 
     size_t total = 0; while (msg[total]) total++;
     if ((size_t)off >= total) return 0;   // EOF
@@ -2884,7 +3175,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
             .result     = 0,
         };
         proc_for_each(devproc_debug_walk_cb, &d);
-        return (d.result == 1) ? n : -1;
+        return (d.result == 1) ? n : devproc_walk_fail(d.result);
     }
 
     if (v == CTL_VERB_STOP || v == CTL_VERB_START || v == CTL_VERB_WAITSTOP ||
@@ -2908,11 +3199,11 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // 8a-2b-2: single-step the head thread one instruction. Arm + resume under
         // the lock, then block (outside the lock) until the target re-stops (the
         // step completed) / exits / the slot is released; -1 only if the CALLER was
-        // death-interrupted.
+        // death-interrupted, -T_E_SRCH if the target died or the slot went first.
         int pid = proc_qid_pid(c->qid.path);
         struct devproc_step_ctx s = { .target_pid = pid, .caller = t->proc, .ctl = c, .result = 0 };
         proc_for_each(devproc_step_walk_cb, &s);
-        if (s.result != 1) return -1;
+        if (s.result != 1) return devproc_walk_fail(s.result);
         // Block until the step COMPLETES + the target RE-stops. Must poll
         // devproc_target_fully_stopped (which checks debug_stop_req, re-set by the
         // EC 0x32 handler) via devproc_wait_block -- NOT devproc_debug_wait_stopped
@@ -2922,7 +3213,11 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         // resumes from sleep(), so all_threads_parked reads "still parked" before
         // the step even runs. fully_stopped's debug_stop_req==0 gate rejects that
         // window and waits for the real re-stop.
-        return (devproc_wait_block(pid, t->proc) >= 0) ? n : -1;
+        //
+        // A target that died during the step fails the write, never succeeds
+        // (DEBUG-FS-DESIGN 5.5): the tail delivers notes after the stop clears, so
+        // a terminating note can end it on the very resume.
+        return devproc_step_result(devproc_wait_block(pid, t->proc, c), n);
     }
 
     if (v == CTL_VERB_HWBREAK || v == CTL_VERB_HWRMBREAK) {
@@ -2947,7 +3242,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         };
         proc_for_each(devproc_hwbp_walk_cb, &h);
         if (h.spare) kfree(h.spare);   // not installed (target had a table / gate failed)
-        return (h.result == 1) ? n : -1;
+        return (h.result == 1) ? n : devproc_walk_fail(h.result);
     }
 
     if (v == CTL_VERB_HWWATCH || v == CTL_VERB_HWRMWATCH) {
@@ -2978,7 +3273,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         };
         proc_for_each(devproc_hwwatch_walk_cb, &h);
         if (h.spare) kfree(h.spare);   // not installed (target had a table / gate failed)
-        return (h.result == 1) ? n : -1;
+        return (h.result == 1) ? n : devproc_walk_fail(h.result);
     }
 
     if (v == CTL_VERB_SUSPEND || v == CTL_VERB_RESUME) {
@@ -2993,7 +3288,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
             .result     = 0,
         };
         proc_for_each(devproc_job_walk_cb, &j);
-        return (j.result == 1) ? n : -1;
+        return (j.result == 1) ? n : devproc_walk_fail(j.result);
     }
 
     struct devproc_kill_ctx k = {
@@ -3002,7 +3297,7 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         .result     = 0,
     };
     proc_for_each(devproc_kill_walk_cb, &k);
-    return (k.result == 1) ? n : -1;
+    return (k.result == 1) ? n : devproc_walk_fail(k.result);
 }
 
 static long devproc_bwrite(struct Spoor *c, struct Block *bp, s64 off) {

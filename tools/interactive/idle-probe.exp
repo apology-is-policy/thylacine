@@ -3,7 +3,11 @@
 # delta) + /ctl/procs (states). Classifies the HVF idle-spin mechanism:
 # park-then-woken storm (parks climbs, idle_ms climbs) vs a never-sleeping
 # runnable thread (runnable > 1, parks flat). NOT a pass/fail test -- the
-# transcript carries the numbers.
+# transcript carries the numbers. Since 2026-10-06 the scheduler's counters are
+# the system principal's (IMPERIUM-DESIGN 11.3 item 10), so an ordinary login
+# reads "-" for them here; the numbers come from a system or hostowner reader
+# (joey's cpubench idle mode at boot). It stays a TCG anchor for its boot,
+# login and idle settle.
 source [file join [file dirname [info script]] lib.exp]
 
 lc_boot

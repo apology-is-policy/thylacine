@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -30,6 +30,18 @@ It is three files saying the same thing in three languages, and nothing in the
 build checks that they agree.
 
 ## Contract
+
+**`SPAWN_DEBUG_HELD` (the birth hold, 2026-09-29).** The spawn record's last
+forward-compat slot, `_pad_spawn2` at offset 100, becomes `debug_flags`, with
+`SPAWN_DEBUG_HELD = 1 << 0` and the mask `SPAWN_DEBUG_FLAGS_ALL`. A bit outside
+the mask is refused with -1, at the record validator and again at the top of
+the spawn body. The record stays 104 bytes and a caller that zero-fills it is
+unchanged, so this is additive, not an ABI break. The in-tree mirrors rename the
+slot in the same commit: libt's `T_SPAWN_DEBUG_HELD`, libthyla-rs's
+`TSpawnArgs.debug_flags` with `T_SPAWN_DEBUG_HELD` and `Command::debug_held`,
+and the pouch process patch. The Go fork's `spawnArgs` waits on the operator,
+with wiring `SysProcAttr` to the flag. What the flag does is
+[[sub-kernel-birth-hold]]'s.
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
@@ -124,6 +136,12 @@ of this dossier carries the two records.
 incremented: **124** live numbers, the span runs to 126 with the same three
 holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
 are empty.
+
+**B-2b append (2026-10-07).** `SYS_JIT_CREATE_SEALED` = 127; `SYS__NATIVE_TOP`
+is 128 and `VIV_NATIVE_CEILING` 127. Re-measured on this tree, not
+incremented: **125** live numbers, the span runs to 127 with the same three
+holes, `syscall_dispatch_body` has exactly 125 arms, and both set differences
+are empty. The section at the end of this dossier carries the record.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -220,6 +238,22 @@ counts across the two mirrors plus the poll header. A case-*sensitive* count of
 `MUST mirror` gives 11, which read against a case-insensitive predecessor looks
 like the phrase halving. It did not — nothing in this census shrank.)
 
+**One record is now pinned (2026-09-29).** `tools/check-spawn-args-mirrors.py`,
+run by `tools/build.sh` before any target, lays the spawn record out from the
+kernel's field list, cross-checks that layout against the header's own offset
+and size assertions, and requires every mirror to match: libt, libthyla-rs and
+the pouch patch by name, offset and size, and the Go fork by offset and size
+when it is present. It stops the build on a mismatch, on a field without an
+offset assertion, on a mirror it cannot parse, and on any Rust repr but one
+plain `#[repr(C)]`, however it is spelled (one inside `cfg_attr`, on one line
+or several, counts). It also proves it can fail before it passes, by mutating each
+source in memory and requiring the comparison to catch every mutation. It was
+built because this record had already drifted: the aux-2 merge grew it to 104
+bytes, and a mirror left at 96 passed its own assertion while the kernel read
+eight bytes past it (#100). The Go fork's committed copy is still that 96-byte
+record, and its builds are right only because they compile an uncommitted fix.
+Every other record on this surface is pinned by nothing but its comments.
+
 ### And the hazard is not only drift; it is concurrent allocation
 
 The sharpest demonstration is a collision that did happen. Two branches
@@ -265,9 +299,9 @@ space between them. The rule binds allocation *from* a released ABI; it cannot
 adjudicate two branches that allocated concurrently from the same free list.
 Nothing prevents the recurrence except that the free list is now shorter.
 
-There is no generator, no shared header, and no build step that reads one file
-and checks the other — `tools/build.sh` never mentions either mirror. The
-enforcement is that a human wrote MUST in a comment.
+Apart from the spawn record's check, there is no generator, no shared header,
+and no build step that reads one file and checks the other. For every other
+record, the enforcement is that a human wrote MUST in a comment.
 
 The clearest statement of this is the poll ABI's slim header, which is worth
 quoting because it is entirely correct and draws no conclusion:
@@ -285,8 +319,9 @@ the same C layout.
 
 ### Growth is by appended field into a reserved slot, and it has worked
 
-The spawn argument record has grown four times — an identity block, a hardware
-allowance block, a page budget, a phenotype-flags word — from 56 bytes to 104,
+The spawn argument record has grown five times — an identity block, a hardware
+allowance block, a page budget, a phenotype-flags word, a debug-flags word —
+from 56 bytes to 104,
 and every existing caller kept working, because each growth either appended past
 the end or claimed a field that was already reserved and required to be zero. The
 page budget is the best case: it took over the tail padding slot (`_pad_allow`,
@@ -308,16 +343,26 @@ pad at 100 — and the offset assertion on it records that history verbatim, so 
 reader is not surprised by a struct that is 104 rather than 96. A `_Static_assert`
 at the point of the hazard, again, is the whole mechanism.
 
+**The fifth growth spent the last reserved slot (2026-09-29).** The debug-flags
+word of the birth hold took the pad the aux-2 merge had opened at offset 100, so
+the struct stayed 104 bytes and a zero-filling caller keeps the old behaviour.
+There is no reserved slot left. The next field appends past the end and grows
+the struct, and every mirror with it, and it is the first growth the mirror
+check will see.
+
 `t_stat` is the same story in the other growth mode. It has grown twice — uid+gid
 (A-2a) took it from 72 to 80, then a per-instance device number plus pad (#100)
 from 80 to 88 — both **appended past the end**, because a stat result is written
-into the caller's buffer and there was no reserved slot to reuse. Its size
-assertion is unusually loud about the consequence: the kernel writes `sizeof(88)`
-bytes, so a mirror left at 80 *overflows the caller's buffer*, and the message
-names all four copies that must grow in lockstep — libt, libthyla-rs, the pouch
-stat patch, and the go-thylacine `Stat_t`. Four mirrors, not two: the drift hazard
-is wider here than anywhere else on the surface, and nothing but that comment binds
-them.
+into the caller's buffer and there was no reserved slot to reuse. The device
+number is 64 bits, laid over what was the pad after it, so no offset moved and
+a reader of the low 32 bits at 80 reads what it always did
+([[dec-2026-09-28-t-stat-devno-u64]]); a width assertion pins it. Its size
+assertion is unusually loud about the consequence of a growth: the kernel writes
+`sizeof(88)` bytes, so a mirror left short *overflows the caller's buffer*, and
+the message names the copies that must change in lockstep — libt, libthyla-rs,
+the four pouch patches that read the record, and the go-thylacine `Stat_t`
+([[abi-t-stat]] keeps the list). The drift hazard is wider here than anywhere
+else on the surface, and nothing but that comment binds them.
 
 ### The all-or-nothing rule, stated twice and broken once
 
@@ -347,6 +392,14 @@ offset assertions plus the size assertion, the most-grown record at 104 bytes),
 the stat result (88 bytes after two growths), the hardware allowance descriptor,
 the PCI info block and its two sub-records, the debug register frames, the peer
 identity record, a timespec, and a JIT region descriptor.
+
+The JIT region descriptor and the three JIT numbers (101-103) did not change
+when B-2a (2026-10-07) made the region a reservation, but one answer did: a
+create no longer allocates or charges anything, so its `-ENOMEM` reports a VMA,
+gap or slab failure and never the size of the region. Memory is charged when
+a page is first touched, so a JIT over its budget is refused at that touch,
+which terminates the Proc as any demand-zero overcommit does (I-32), rather
+than at the create ([[sub-kernel-syscall-dispatch]]).
 
 One is pinned only transitively. The hardware window — a base/size pair — has no
 assertion naming it, but the descriptor that contains an array of eight of them
@@ -420,7 +473,10 @@ be one 4 KiB staging buffer per round trip.
   A size assertion alone passes on a field reorder.
 - **A mirror change must be made in all three files in the same commit**, because
   nothing else will catch it. The mirrors are subsets, so "not present" is
-  legitimate and indistinguishable from "forgotten".
+  legitimate and indistinguishable from "forgotten". The spawn record is the one
+  exception: its mirror check stops the build on a mirror that disagrees.
+- **A new spawn-record field needs its own offset assertion.** The mirror check
+  takes the layout from those assertions and refuses a field that has none.
 - **Enumerate mirrors by what they MEAN, not by what they CONTAIN.** A census
   that greps for the value cannot find a constant that holds the value only by
   *definition* — "the highest assigned number", "one past the last", "the same
@@ -759,8 +815,11 @@ session, in the cape's shape (HAUL-DESIGN 4.8,
   all three refusals follow without an edit, which is what the derived mask
   was built for. A static assert pins that bit 22 collides with no other perm
   bit, and `srv_client.remote_admission` pins both values.
-- A label, not an authority: nothing that resolves a path, checks permission,
-  caches or vouches for exec consults it, and the wrappers' comments say so.
+- It grants nothing. Besides the label, one decision reads it, and only to
+  narrow: the resolver contains a link the session serves beneath its mount
+  (DISTRO 4.6, 2026-10-06; [[sub-kernel-stalk]]). Nothing that checks
+  permission, caches or vouches for exec consults it, and the comments on both
+  bits, in the kernel header and in both libraries, say so.
 - Callers: Haul, on both paths ([[sub-haul]]), and `/attach-probe`, whose
   real attach now passes CAPE|REMOTE. Its unknown-bit probe moved from 0x4,
   now admitted, to 0x8. Every other in-tree `t_attach_9p` caller passes 0.
@@ -773,3 +832,53 @@ they mint by the file its session came over, for `/proc/<pid>/ns` alone.
 name. No argument, flag or return changed; where each inner stamps is
 [[sub-kernel-syscall-dispatch]]'s, what the root carries
 [[sub-kernel-ninep-dev9p]]'s.
+
+## SYS_CHDIR's stored name; SYS_ATTACH_9P's ends (2026-10-06)
+
+No number, register or record changed; two operator votes changed what the
+calls mean ([[dec-2026-10-06-chdir-physical]],
+[[dec-2026-10-06-9p-sessions-ends]]).
+
+- `SYS_CHDIR` stores the name of where the walk landed, so `SYS_GETCWD`
+  returns a name with no `.`, `..` or link component (POSIX `getcwd`), and
+  `cd link/..` lands where `ls link/..` reads. A directory whose name does not
+  walk back to it -- a node a union member shadows, reached through a served
+  link in a later member -- fails the call, as a name past the buffer does
+  ([[sub-kernel-syscall-dispatch]], [[sub-kernel-stalk]]).
+- A session made by `SYS_ATTACH_9P` records the caller as its attaching end
+  and an unknown server, so its `/ctl/9p-sessions` counters read as numbers
+  only to the caller, the system principal and a hostowner; one made over
+  `/srv` (`SYS_ATTACH_9P_SRV`) also shows them to the connection's server
+  ([[sub-kernel-ninep-attach]], [[sub-kernel-devctl]]).
+
+## B-2b: SYS_JIT_CREATE_SEALED 127; SYS_LOOM_REGISTER answers -errno (2026-10-07)
+
+`SYS_JIT_CREATE_SEALED(src_va x0, length x1, out_va x2) -> 0 / -errno`
+(CAP_JIT, checked first): the kernel copies `length` bytes (1 ..
+`JIT_SEALED_MAX`, 1 MiB) from `src_va` into fresh pages, publishes them, and
+maps ONE execute-only alias at a random address, written as a u64 to `out_va`
+([[dec-2026-10-07-jit-sealed-thunk]]). Errors: `-EACCES`, `-EINVAL` (length),
+`-EFAULT` (source unreadable, `out_va` unwritable), `-EAGAIN` (the CSPRNG is
+unseeded), `-ENOMEM` (page budget -- a sealed region is charged at creation --
+VMA cap, gap or allocator). 127 also named astra's unlanded
+`SYS_SRV_REGISTRY_NEW` on her base; B-2 lands first and she renumbers at her
+merge, the pre-merge-collision exception under Mechanism. The ceiling is 127,
+so the next native append, 128, is the first that owes `restart_syscall` a
+decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
+
+Existing numbers whose answers changed, no number or record moved:
+
+- `SYS_JIT_CREATE` (101) also answers `-EAGAIN`: each alias goes at an
+  independent random address, and none is drawn while the CSPRNG is unseeded.
+- `SYS_JIT_DESTROY` (102) also takes a sealed region's VA, the base of its
+  one alias; an exec alias of a writable region is still refused.
+- `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-07-loom-register-errno]]): `-EBADF` for a `loom_fd` or listed
+  fd that is not open, `-EFAULT` for an argument array the kernel cannot read,
+  a failed write-behind flush's own errno (`-ENOSPC`, the server's `-EIO`, a
+  caught note's `-EINTR`, after which the run is still staged), `-EINVAL` for
+  the rest. A caller that tested `rc < 0` is unaffected; `libthyla_rs`'s
+  `register_handles` / `register_buffers` now map the value through
+  `Error::from_syscall_return` instead of answering `InvalidArgument` for
+  every failure. Mirrors: `thyla_jit.h`, `libthyla_rs` (`T_SYS_JIT_CREATE_SEALED`,
+  `t_jit_create_sealed`, `jit::SealedRegion`).

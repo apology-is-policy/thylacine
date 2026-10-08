@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -84,8 +84,12 @@ load-bearing: `qid.path` is unique only *within* a `(dc, devno)`
 instance, and every dev9p session shares `dc == '9'` with root
 `qid.path == 0` — so `(dc, qid.path)` alone collides corvus against a
 per-user stratum-fs. `devno` (minted per attach by `spoor_next_devno`)
-is what separates them. This is the stalk-2 re-key; before it the target
-was an abstract `path_id_t`.
+is what separates them. It is 64 bits and never reused
+([[sub-kernel-spoor]]), so the triple stays an identity for the life of
+the boot; `territory_mount.devno_full_width` holds two points and two
+sources 2^32 mints apart distinct, each refusal paired with its control.
+This is the stalk-2 re-key; before it the target was an abstract
+`path_id_t`.
 
 **`SYS_MOUNT`/`SYS_UNMOUNT` resolve with `STALK_MOUNT`** — resolve, do
 NOT cross the final mount, do NOT open. That carve-out is what makes
@@ -152,61 +156,60 @@ discharged as a sequence of Unmounts. Skipping it is
 and *cleaning* it are two jobs, and running them as one was a resolution
 bug.
 
-`cwd_lexical_resolve` is a pure, allocation-free, lock-free resolver: it
-seeds from `dot` for a relative input (an absolute input ignores the
-cwd), then walks components resolving `.` and `..` LEXICALLY, popping at
-`olen` with a hard floor at 0 so excess `..` nets to `"/"`.
+Until #83 one lexical resolver did both jobs. It seeded from `dot`, then
+popped `.` and `..` LEXICALLY. A lexical `..` pops a component without proving
+it exists, so a cwd-relative path through a directory that was not there
+resolved and handed back a working descriptor. The change-directory check then
+tested directory-ness against the parent it had already massaged the path
+into. The absolute spelling of the same path answered correctly, because it
+went through the resolver's gates. Two code paths for one question, disagreeing.
 
-**It is no longer on the resolution path.** A lexical `..` pops a component
-without proving it exists, so a cwd-relative path that traversed a directory
-that was not there resolved successfully and handed back a working descriptor
-— and the change-directory check validated the wrong object entirely, testing
-directory-ness against the parent it had already massaged the path into. The
-absolute spelling of the same path answered correctly, because it went through
-the resolver's gates. Two code paths for one question, disagreeing.
+**`cwd_join` -- resolution.** It emits the cwd, a separator and the input
+**verbatim**. A `.`, a `..` and a trailing separator all survive into the path
+the resolver receives, so a cwd-relative path gets exactly the gates its
+absolute spelling gets. The entry point was renamed from *resolve* to *join*,
+because the old name described the bug.
 
-The repair separates the jobs rather than adding a fourth gate:
+**The stored name comes from the resolver, not from cleaning text**
+(2026-10-06, [[dec-2026-10-06-chdir-physical]]). From #83 to 2026-10-06 the
+canonicalizer kept one role, computing the string change-directory stored, and
+its comment argued that with no symlinks its lexical pop matched the
+resolver's trail pop. Symlinks then landed and the argument quietly stopped
+holding. `cd link/..` stored the link's lexical parent while the resolver's
+`..` had climbed out of the link's target, so the cwd named a different
+directory from the one validated. A retargeted link also moved a cwd entered
+through it. Change-directory now joins verbatim, resolves with `stalk_landed`
+and stores the name the resolver reports for where it landed
+([[sub-kernel-stalk]]). That name holds no `.`, `..` or link component, and it
+is what was validated: the resolver builds it alongside the trail and walks it
+once more, refusing a name that lands elsewhere. The canonicalizer had no other
+production caller and was deleted.
 
-- **`cwd_join` — resolution.** Emits the cwd, a separator, and the input
-  **verbatim**. A `.`, a `..`, a trailing separator all survive into the path
-  the resolver receives, so a cwd-relative path is subject to exactly the gates
-  its absolute spelling gets.
-- **`cwd_lexical_resolve` — canonicalization.** Narrowed to one production
-  role: computing the string change-directory stores.
-
-The entry point was renamed from *resolve* to *join*, because the old name
-described the bug — it implied resolving the dots, which is precisely what it
-must not do.
-
-**Change-directory is the one caller needing both**, in three ordered steps:
-join verbatim, resolve that, then canonicalize **the already-resolved join**
-with no cwd seed — so the stored string is derived from the path that was just
-validated, and a peer thread's concurrent change cannot make the two disagree.
-
-**What this does to [[inv-i28]] is worth stating precisely, because the
-dossier previously had the emphasis backwards.** Containment never rested on
-this function, and still does not — the joined path resolves from `root_spoor`
-and the resolver clamps `..` at its trail floor exactly as it does for an
-absolute path. That was true before. What changed is that the clamp used to be
-*unexercised* on cwd-relative paths, since the lexical cleaning consumed every
-`..` before the resolver saw one. It was accurate to call it a redundant safety
-net then, and it is the sole mechanism now.
+**What this does to [[inv-i28]] is worth stating precisely.** Containment
+never rested on these functions and still does not. The joined path resolves
+from `root_spoor`, and the resolver clamps `..` at its trail floor exactly as
+it does for an absolute path. Before #83 that clamp was *unexercised* on
+cwd-relative paths, because the lexical cleaning consumed every `..` first. It
+is the sole mechanism now. The stored name is only ever resolved again from
+`root_spoor`, so a wrong name could misplace a cwd but never escape.
 
 **The redundancy was itself the defect.** The cleaning that made the clamp
 look superfluous was the code popping unwalked components. Removing it
-promoted a net nobody was relying on into the thing doing the work — which is
-the good outcome, and a reason to be wary of describing a second mechanism as
-redundant when what makes it redundant is a duplicate of the first.
+promoted a net nobody was relying on into the thing doing the work. That is
+the good outcome, and a reason to be wary of calling a second mechanism
+redundant when what makes it redundant duplicates the first.
 
-Three consequences, accepted rather than fixed: a cwd-relative path spelled
-with `..` no longer takes the fused fast path (the same cost its absolute
-spelling always paid, on exactly the paths that were resolving wrongly); the
-joined path is longer, so the length bound is reached sooner, and it surfaces
-as a bare failure because the too-long errno is not in the registry yet; and a
-deleted working directory now fails relative resolution, matching POSIX.
+Accepted consequences, not fixed:
+- A cwd-relative path spelled with `..` no longer takes the fused fast path.
+  Its absolute spelling always paid that cost.
+- The joined path is longer, so the length bound is reached sooner, and the
+  failure is bare because the too-long errno is not in the registry.
+- A deleted working directory fails relative resolution, matching POSIX.
+- A stored name longer than the buffer at any point of the walk fails the
+  change-directory, even when a later `..` would have shortened it.
 
-`territory_setdot` is still fed ONLY by the canonicalizer's output, so
-`dot_path` remains cleaned.
+`territory_setdot` is fed only by `stalk_landed`'s name (SYS_CHDIR) and the
+boot's literal `/bin`, so `dot_path` stays clean.
 
 **`territory_format_ns`** renders `/proc/<pid>/ns` under `ns_lock`, one
 whole `mount <point> <source>` line at a time: snapshot `off`, rewind on
@@ -254,10 +257,12 @@ root keeping its own, and a nameless transport's device spec.
 ## Data structures
 
 `struct PgrpMount` is pinned at **40 bytes**: `source` (8) + `mp_path`
-(8) + `mp_qid_path` (8) + `mp_dc` (4) + `mp_devno` (4) + `flags` (4) +
-`_pad` (4). Two pointers first for 8-alignment; the pad gives the array
-its 8-byte stride. It was 16 bytes before stalk-2 re-keyed it and 32
-before #66b added `mp_path`.
+(8) + `mp_qid_path` (8) + `mp_devno` (8) + `mp_dc` (4) + `flags` (4).
+Two pointers first for 8-alignment, then the two u64 key halves; `mp_dc`
+and `flags` fill the last 8 bytes, so the array keeps its 8-byte stride
+with no pad. `mp_devno` and `struct mkey`'s devno are pinned by a
+`_Static_assert` to the Spoor field's width: a narrower copy would read
+instances 2^32 mints apart as one.
 
 `struct Territory` is pinned at **1400 bytes** — a 24-byte header
 (`magic`, `ref`, `nbinds`, `nmounts`, `_pad`), `root_spoor` at 24,

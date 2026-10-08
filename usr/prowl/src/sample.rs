@@ -28,10 +28,13 @@ pub struct ProcRow {
     /// The page-table share of `pages` (prowl-6; the kernel charges a space's
     /// tables to it), so the data view is pages - tables.
     pub tables: u32,
-    pub cpu_ns: u64,
+    /// None when the kernel withholds it ("-"): another principal's CPU time is
+    /// its owner's or a hostowner's (IMPERIUM-DESIGN 11.3 item 10).
+    pub cpu_ns: Option<u64>,
     /// Per-poll CPU usage in tenths of a percent (100% == one core). Filled by
-    /// `Sampler::update` from the cpu_ns delta; 0 on the first sighting of a pid.
-    pub cpu_pct_x10: u64,
+    /// `Sampler::update` from the cpu_ns delta; 0 on the first sighting of a pid,
+    /// None while the CPU time is withheld.
+    pub cpu_pct_x10: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,8 +102,8 @@ pub fn parse_procs(text: &str) -> Vec<ProcRow> {
             threads: threads.parse().unwrap_or(0),
             pages: pages.parse().unwrap_or(0),
             tables: tables.parse().unwrap_or(0),
-            cpu_ns: cpu_ns.parse().unwrap_or(0),
-            cpu_pct_x10: 0,
+            cpu_ns: cpu_ns.parse().ok(),
+            cpu_pct_x10: None,
         });
     }
     rows
@@ -262,25 +265,33 @@ impl Sampler {
     /// frame). A pid unseen last poll, or one whose cpu_ns went backward (pid
     /// reuse), reads 0% this frame and corrects on the next.
     pub fn update(&mut self, rows: &mut [ProcRow], elapsed_ns: u64) {
-        if elapsed_ns > 0 {
-            for r in rows.iter_mut() {
-                if let Some(&(_, old)) = self.prev.iter().find(|&&(pid, _)| pid == r.pid) {
-                    let delta = r.cpu_ns.saturating_sub(old);
+        for r in rows.iter_mut() {
+            r.cpu_pct_x10 = r.cpu_ns.map(|now| {
+                match self.prev.iter().find(|&&(pid, _)| pid == r.pid) {
                     // (delta / elapsed) is the fraction of one core; * 1000 ->
                     // tenths of a percent. delta <= elapsed * ncpus, so
                     // delta * 1000 stays far within u64.
-                    r.cpu_pct_x10 = delta.saturating_mul(1000) / elapsed_ns;
+                    Some(&(_, old)) if elapsed_ns > 0 => {
+                        now.saturating_sub(old).saturating_mul(1000) / elapsed_ns
+                    }
+                    _ => 0,
                 }
-            }
+            });
         }
         self.prev.clear();
-        self.prev.extend(rows.iter().map(|r| (r.pid, r.cpu_ns)));
+        self.prev.extend(rows.iter().filter_map(|r| r.cpu_ns.map(|ns| (r.pid, ns))));
     }
 
-    /// Total %CPU across all rows, in tenths of a percent (approaches
-    /// ncpus * 1000 when every core is busy).
+    /// Total %CPU across the rows whose CPU time is visible, in tenths of a
+    /// percent (approaches ncpus * 1000 when every core is busy).
     pub fn total_pct_x10(rows: &[ProcRow]) -> u64 {
-        rows.iter().map(|r| r.cpu_pct_x10).sum()
+        rows.iter().filter_map(|r| r.cpu_pct_x10).sum()
+    }
+
+    /// Whether the kernel withheld any row's CPU time, so the total is the
+    /// reader's own processes rather than the machine's.
+    pub fn any_withheld(rows: &[ProcRow]) -> bool {
+        rows.iter().any(|r| r.cpu_ns.is_none())
     }
 }
 
@@ -296,10 +307,12 @@ impl Sampler {
 /// util is derived per-poll from the idle_ns delta (see CpuSampler).
 pub struct CpuRow {
     pub cpu: usize,
-    pub idle_ns: u64,
+    /// None when the kernel withholds it ("-" to a reader that is neither the
+    /// system principal nor a hostowner).
+    pub idle_ns: Option<u64>,
     /// Per-poll utilization in tenths of a percent (1000 == fully busy). Filled
-    /// by CpuSampler::update; 0 until the first delta.
-    pub util_x10: u64,
+    /// by CpuSampler::update; 0 until the first delta, None while withheld.
+    pub util_x10: Option<u64>,
 }
 
 /// Parse /ctl/cpu into per-CPU rows. The "cpus: N" line and the "cpu idle_ns
@@ -316,7 +329,7 @@ pub fn parse_cpu(text: &str) -> Vec<CpuRow> {
             Ok(v) => v,
             Err(_) => continue, // the "cpu idle_ns capacity" header lands here
         };
-        rows.push(CpuRow { cpu, idle_ns: b.parse().unwrap_or(0), util_x10: 0 });
+        rows.push(CpuRow { cpu, idle_ns: b.parse().ok(), util_x10: None });
     }
     rows
 }
@@ -335,17 +348,19 @@ impl CpuSampler {
     /// fully-busy CPU reads ~100% (no idle delta). `.min(1000)` on the idle
     /// fraction keeps util in [0, 1000] against clock-domain skew.
     pub fn update(&mut self, rows: &mut [CpuRow], elapsed_ns: u64) {
-        if elapsed_ns > 0 {
-            for r in rows.iter_mut() {
-                if let Some(&(_, old)) = self.prev.iter().find(|&&(c, _)| c == r.cpu) {
-                    let didle = r.idle_ns.saturating_sub(old);
-                    let idle_x10 = (didle.saturating_mul(1000) / elapsed_ns).min(1000);
-                    r.util_x10 = 1000 - idle_x10;
+        for r in rows.iter_mut() {
+            r.util_x10 = r.idle_ns.map(|now| {
+                match self.prev.iter().find(|&&(c, _)| c == r.cpu) {
+                    Some(&(_, old)) if elapsed_ns > 0 => {
+                        let didle = now.saturating_sub(old);
+                        1000 - (didle.saturating_mul(1000) / elapsed_ns).min(1000)
+                    }
+                    _ => 0,
                 }
-            }
+            });
         }
         self.prev.clear();
-        self.prev.extend(rows.iter().map(|r| (r.cpu, r.idle_ns)));
+        self.prev.extend(rows.iter().filter_map(|r| r.idle_ns.map(|ns| (r.cpu, ns))));
     }
 }
 

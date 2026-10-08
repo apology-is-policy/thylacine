@@ -5,6 +5,7 @@ parent: moc-kernel-introspection
 title: "/proc — per-process state and the debug control surface"
 code:
   - kernel/devproc.c
+  - kernel/test/test_devproc.c
 audit: hard
 guarded-by: [inv-i26, inv-i39]
 validated-by: [spec-debug-stop, spec-pty-stop, prose, gate-smp]
@@ -15,8 +16,10 @@ design:
   - "docs/IDENTITY-DESIGN.md section 9.8"
   - "docs/PROWL-DESIGN.md OQ-4"
   - "docs/VIVARIUM.md section 6.2"
+  - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
+  - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -31,6 +34,23 @@ The largest single file in the kernel tree. Its size is almost entirely the debu
 surface: the original P4-C Dev was `status`/`cmdline`/`ctl`/`ns`.
 
 ## Contract
+
+**none owns nothing but itself (2026-10-06, operator vote "Plan 9's nonone";
+[[dec-2026-10-06-none-owns-nothing]]).** Every owner axis asks
+`devproc_same_owner`: the same principal, false whenever the target runs as
+`PRINCIPAL_NONE`. So two Procs running as none are nothing to each other on the
+kill gate, the I-39 owner axis and `devproc_owner_or_hostowner` (environ, sched,
+imperium, status's `cpu_ns`). Self is each predicate's own arm, keyed on the
+Proc; the kill gate gained the self arm its two siblings already had, so a none
+Proc still kills itself through its own `ctl`. `devproc_none_walled` (the
+caller runs as none, is not the target, holds no `CAP_HOSTOWNER`) refuses every
+kind `devproc_read_cb` serves -- status, cmdline, ns, exe, cwd, maps, ctl's read
+side, and sched and imperium, which the owner gate refuses as well -- and
+devctl asks it for each `/ctl/procs` row. The wall is keyed on the CALLER: a
+real reader of a none Proc sees it like any other. The capability axes are
+unchanged (`CAP_HOSTOWNER` everywhere, `CAP_KILL` on kill, `CAP_DEBUG` on
+debug), as Plan 9's `nonone()` exempts eve. What stays visible is Plan 9's set:
+the pid under `/proc` and its stat.
 
 
 **The debug predicate's read order is for legibility, not safety ((U) F1 round 2, 2026-09-23; superseded by the seal's lock, 2026-09-24).**
@@ -100,8 +120,12 @@ composes its owner-or-hostowner gate with the seal in `devproc_extract_authorize
 mem and regs walks refuse reads (writes are control, NOTRACE's); `kstack` and `wait` ask
 too and sit outside the set. `name`, the exe's basename, is ledger (`status`, `sched`,
 `/ctl/procs`), as Linux keeps a non-dumpable process's comm public. `devproc_owner_or_hostowner`
-keeps its old meaning with NO seal and gates `sched` and `imperium`; `status` is
-ungated.
+keeps its old meaning with NO seal and gates `sched`, `imperium` and, since
+2026-10-06, the `cpu_ns` line of `status`; the rest of `status` is ungated. `cmdline` renders no argv yet, and its place in the set seals argv only if
+argv comes from a per-Proc kernel copy, as `environ` does: argv read off the stack would
+read through a vfork child sharing that stack under its own, unsealed Proc, unless
+`cmdline` also joins `mem` and `maps` in the image join (H3+C Fable pass F1; the
+cmdline-argv work owes the choice).
 
 **The set took two corrections, and they are the part worth reading.** The first cut put
 the seal inside `devproc_owner_or_hostowner`, wrong in both directions: it MISSED `maps`
@@ -254,7 +278,13 @@ the bytes mean*, and a monitor or a Linux `/proc` shim breaks if they drift:
   diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel
   keeps no instantaneous-rate state. It deliberately excludes the running
   thread's in-flight slice since its last switch-in (under one slice, negligible
-  over a poll).
+  over a poll). **It is owner-only since 2026-10-06** (IMPERIUM-DESIGN 11.3
+  item 10): a reader that is neither the Proc's owner nor a `CAP_HOSTOWNER`
+  holder reads `cpu_ns: -`, because the trusted episode's authority accrues CPU
+  time once per key and the number would publish a typed secret's cadence.
+  `format_status` takes the caller to ask `devproc_owner_or_hostowner`, the
+  predicate the `CPU_NS` column of `/ctl/procs` uses too ([[sub-kernel-devctl]]
+  has the reasoning and the system-wide counters).
 - **`name` is unforgeable.** It is the basename of the *resolved* binary path
   (from the Spoor's #66 namespace name via `exec_setup_from_spoor`), never the
   caller-controlled `argv[0]` — so a process cannot spoof its own name in
@@ -332,11 +362,89 @@ counterexample resumes even a launched target). The SA-1 ordering — clear the
 stop flag and focus **after** the terminate — keeps the stop from outliving the
 now-NULL owner.
 
+That ordering had a window, and it was not in this file (2026-09-29). A parked
+thread that had just passed its park's death check, before the terminate
+landed, would then read the cleared stop and `eret` into a group that was
+already dying. A `start` sent after a `kill` has the same shape. The park now
+re-checks death after its wake condition passes. The terminate is stored before
+the clear the wake condition reads, both RELEASE, so the ACQUIRE re-check sees
+it and the thread dies without reaching EL0 ([[sub-kernel-death]]). The spec's
+clean held configuration found it, and `BUGGY_NO_DEATH_RECHECK` and its tail
+twin keep it found. The release keeps terminate-then-clear. The order is sound
+because of the re-check, and the code comment at the release says so.
+
+### The birth hold: stop converts, start and detach release, a close keeps
+
+(2026-09-29, [[sub-kernel-birth-hold]].) A child spawned with
+`SPAWN_DEBUG_HELD` is parked in front of its first instruction when its
+launcher attaches. The run-control verbs treat that hold by their own meaning:
+
+- **`stop` converts.** `proc_debug_stop_deliver` first, then the hold is
+  cleared (`proc_birth_hold_convert_locked`), in one `g_proc_table_lock`
+  section. The birth park reads the hold before the stop flags, so it sees one
+  of the two at every instant, and the child never runs between the writes.
+  The conversion refuses when no stop is pending and leaves the hold standing,
+  so a verb that cleared before it delivered would leave the child held rather
+  than open an instant nothing could observe. From then on it is an ordinary
+  debug stop.
+- **`start` releases.** The hold is cleared first, so the resume's wake finds it
+  already gone.
+- **An explicit `detach` releases.** Detach is the debugger's deliberate choice
+  to run the target, so it clears the hold before its resume.
+- **The implicit release keeps the hold.** The ctl fd closing without `detach`
+  (`devproc_debug_release_cb`) clears the stop, or terminates under exitkill,
+  and leaves the hold alone. The hold is the spawner's, not the attach slot's.
+  A debugger that dies after attaching but before stopping leaves the child
+  parked, and the spawner's death then kills it by the orphan rule.
+
+A held child that has not been converted has no debug stop pending, so it is
+not fully stopped, and `mem` and `regs` refuse it until the `stop` lands. The
+debugger's first `stop` is therefore both the conversion and the gate opening.
+`waitstop` alone does not return for a held child: the scan that `stop` and
+`waitstop` wait on (`devproc_stopscan_cb`) counts a target stopped only when
+`debug_stop_req` is set and every thread is parked. A birth hold, or a job
+stop, parks every thread with no debug stop, and reporting it as stopped would
+hand the debugger a refusal on its next read (audit round 1, F2). A dying
+target (`group_exit_msg` set) reads as gone, and the wait ends: its stop will
+never take, the stopped-only surface refuses it anyway, and its last thread
+no longer parks for a stop while it closes its handles (DEBUG-FS-DESIGN 5g),
+so waiting for it to read as parked would last the whole close. A `stop` at a
+dying target sets nothing: a dying Proc takes no new stop
+(`proc_debug_stop_deliver` refuses it under the table lock).
+
+`step` waits on its own scan (`devproc_waitscan_cb`, given the slot owner's
+ctl), and a released slot ends that wait too. A `detach` from another thread
+of the debugger resumes the target, whose step trap then finds no owner and
+delivers no stop, so a wait for the re-stop would last until the target exited
+(audit round 2, F6, 2026-09-30). A close of the ctl fd cannot land mid-step:
+the writer holds its Spoor for the whole write, and the close hook runs only on
+the last drop (#844). A dying target reads as gone to the step's scan as to
+`stop`'s (audit round 3). The scan's state reaches the wait only through
+`devproc_wait_verdict`: stopped, gone, released and denied end it, and
+anything else polls on (`devproc.debug_stop_start_resume` legs (g) and (f)).
+Only a re-stop completes the step: the write returns its byte count for
+stopped, and fails with `T_E_SRCH` for gone and for released, as ptrace(2)
+answers `ESRCH` for a tracee that does not exist or is not traced by the
+caller; a denial fails it as well (`devproc_step_result`, which leg (g) asserts
+through its test hook). Until 2026-10-05 a step whose slot a `detach` released
+returned success.
+`/proc/<pid>/wait` is not slot-bound: it passes no ctl and waits for a stop or
+the exit.
+
+A step belongs to its slot. A whole-Proc stop cancels a pending step (8a-2c
+F1), and so do a `detach` and the close's release: each calls
+`proc_debug_cancel_steps_locked`, which clears every thread's armed step and
+step-over, so the next attacher never meets a stop it did not ask for (audit
+round 3, RF7; `devproc.debug_release_cancels_step`).
+
 ### Two stop owners, one park
 
 A thread parks on its own `debug_rendez` for either of two independent reasons:
 the debugger's `debug_stop_req`, or job control's `job_stop_req`. The park
-predicate is their disjunction; each owner clears only its own flag.
+predicate is their disjunction; each owner clears only its own flag. A held
+child also parks there, at its birth, but the hold is deliberately not a third
+owner. It stays out of the disjunction and is read only by the birth park
+([[sub-kernel-birth-hold]]).
 
 The debug-fs surface deliberately reads **`debug_stop_req` alone**. A Ctrl-Z'd
 process is parked on the same rendez, but it is not debugger-stopped, and must
@@ -557,7 +665,9 @@ and its ctl-fd close then resumes the target.
 ## Invariants enforced
 
 [[inv-i26]] (cross-process control is explicitly two-axis) — enforced here and
-nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`.
+nowhere else, by the kill gate, for both `kill`/`killgrp` and `suspend`/`resume`;
+its owner axis is the caller itself or `devproc_same_owner`, which never pairs
+two none Procs.
 
 [[inv-i39]] (debug authority is namespace-plus-two-axis -- the owner half
 capability-COVERED since 2026-09-24, and every image guard JOINED over the
@@ -581,12 +691,17 @@ short-circuits and the capability axes stay separable per gate.
 
 ## Error paths
 
-Everything is `-1`. There is no errno on this surface: a denial, a
-not-found, a not-stopped target, a malformed verb and an unknown file all return
-the same value, and the debugger distinguishes them by which operation it
-attempted. The blocking verbs return `-1` only when the *caller* was
-death-interrupted — a target that exits or releases the slot ends the wait
-successfully.
+An authority refusal answers `-T_E_ACCES` (2026-10-06; ERRORS.md's binding rule
+for a permission denial -- before it answered `-1`, which pouch and Go read as
+`EPERM`). That covers every refusal site: the I-39 gate, kproc, either seal, the
+kill and job gates, the owner-or-hostowner reads and the none wall. Each walk
+context carries the refusal as its result and `devproc_walk_fail` passes it on,
+so a refusal stays distinguishable from every other failure, which is still the
+generic `-1`: a target that is gone or not ALIVE, a target not stopped, a ctl
+that does not hold the debug slot, a full breakpoint table, a malformed verb, an
+unknown file. A step whose target is gone answers `-T_E_SRCH`. The blocking
+verbs return `-1` only when the *caller* was death-interrupted — a target that
+exits or releases the slot ends the wait successfully.
 
 A denial formats **nothing** — the gated reads return zero bytes rather than a
 truncated render, so there is no partial-disclosure path.
@@ -610,6 +725,12 @@ performance backlog.
 
 ## Prosecution
 
+- **none owns nothing on any owner axis, and the wall is the caller's.** A new
+  owner predicate, or a new caller comparing principals directly, must go
+  through `devproc_same_owner`; a new per-Proc read path must either sit behind
+  an owner-axis predicate or ask `devproc_none_walled`. Keying the wall on the
+  target, or the self arm on the principal, is the bug. A new refusal must set
+  `-T_E_ACCES`, never `-1`.
 - **The four gates must not converge.** Each near-miss is a decision:
   `CAP_DAC_OVERRIDE` on none, `CAP_KILL` on kill only, `CAP_DEBUG` on debug only,
   slot ownership stricter than I-39. Widening any gate to "reuse" another is the
@@ -619,7 +740,8 @@ performance backlog.
   reaches the same verdict.
 - **The stopped-only predicate must stay a conjunction**, and must keep reading
   `debug_stop_req` alone. Generalizing it to the job-stop flag makes a Ctrl-Z'd
-  process debugger-readable.
+  process debugger-readable. The stop scan that `stop` and `waitstop` wait on
+  must read it too: parked threads alone may be a job stop or a birth hold.
 - **The park predicate keeps all three terms.** Registration alone is stale
   between a wake and its dispatch, because the waker cannot clear it — only the
   owning thread may, and the death cascade reads it. Dropping the state term
@@ -638,6 +760,10 @@ performance backlog.
   Resuming it orphans it to init to run forever (the launched-orphan leak); an
   explicit `detach` must clear the mark first, and the release must disarm the
   target's breakpoints and watchpoints or the orphan re-traps forever.
+- **On a held target, `stop` delivers before it clears the hold, and `start`
+  and `detach` clear the hold before they resume.** Reverse the conversion and
+  the birth park can read neither the hold nor the stop and run the child. The
+  implicit release must not clear the hold at all.
 - **SPSR must never be written.** Any new register-write path re-inherits this.
 - **No Proc pointer may be held across a lock drop.** The re-resolve-by-pid
   discipline is the lifetime argument for the entire file.
@@ -668,9 +794,13 @@ performance backlog.
   itself — which cuts both ways, and the dangerous direction is a system-principal
   proxy handing a system Proc's environment to a client of any principal. Until
   the mandate mechanism exists, a proxy must serve only its own peer.
-- **`maps` is ungated on the argument that Thylacine has no userspace ASLR.**
-  If user ASLR ever lands, this posture must be revisited in the same chunk —
-  the file would then disclose exactly what the mitigation randomizes.
+- **`maps` is ambient because nothing in it but a code alias is random.** Every
+  other address is an `exec.h` constant, an ELF link address or a first-fit
+  placement. A new source of randomness in a user layout has to be weighed here
+  in the same chunk, as B-2b's random code aliases were (below).
+- **A truncated `maps` shows a reader without debug authority no code rows at
+  all.** A listing the buffer cut short cannot say which aliases lie below the
+  cut, so it prints none of them; the owner still sees them in place.
 
 ## Caveats
 
@@ -697,4 +827,83 @@ performance backlog.
 
 ## Provenance
 
-[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption).
+[[chg-2026-08-02-introspection-sweep]], [[chg-2026-08-16-devproc-park-predicate]] · [[chg-2026-09-06-devproc-atomic-cdebugowner]] · [[chg-2026-09-06-debug-fs-doc-absorb]] (the die-with-launcher exitkill release, folded at the 134-debug-fs absorption) · [[chg-2026-10-06-cpu-time-gate]].
+
+## The ctl `kill` forces a final close already under way (2026-10-07)
+
+The `kill` verb terminates through `proc_group_kill` instead of
+`proc_group_terminate(target, "killed")`. The termination is the same; the
+difference is a target already terminating: there the kill sets
+`PROC_FLAG_EXIT_CLOSE_FORCED` before its death wake, so a final close waiting
+on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
+B, [[sub-kernel-death]]). The debugger-exited and launcher-exited (`exitkill`)
+terminations keep the wrapper: only an explicit kill forces.
+
+## `maps` withholds where the code aliases lie (2026-10-07; B-2b audit F2)
+
+B-2b places every alias of a code region -- writer, exec, sealed -- at its own
+random address, so the writer's address is a secret and `maps`, ambient to every
+Proc, would hand it out ([[dec-2026-10-07-maps-code-redaction]]).
+`devproc_maps_code_visible_locked` decides who may see it: the target itself, or a
+reader with debug authority over it (the I-39 predicate, image join included). The
+reflexive case is written out because I-39 refuses a NOTRACE Proc even to itself,
+and a Proc reading its own layout tells no one else anything.
+
+`format_maps(p, show_code, ...)` prints the table exactly as before when it may.
+Otherwise a code row takes no buffer during the walk: it is counted by permission
+class (r, w, x and the share flag, `maps_class`) and printed after the walk as
+`0x0-0x0 <perms> 0x0 code - -`, grouped by class. Each such row is a function of
+its class alone, so the listing holds the same bytes whichever addresses the
+aliases drew. Its place is never its address order, which would say which
+mappings an alias lies between and which alias of a region is the lower.
+
+Two rules keep a truncated listing from placing the aliases. The zeroed rows are
+printed only when the walk reached the end of the list, because a listing cut at
+some address would otherwise say which aliases lie below the cut. And a withheld
+row is counted against a budget of as many zeroed rows as the buffer holds, which
+keeps the lock hold bounded by the buffer, at most twice over. Running out of
+budget stops the walk; that is the one place left where the aliases' positions
+can show. It takes more code aliases below the last printed row than the buffer
+holds rows, and such an address space prints no code rows. When the zeroed rows
+do not fit after a complete walk, whole rows are dropped from the end to make
+room: how much is dropped depends on the count alone.
+
+Witnesses: `devproc.maps_code_visible` (the predicate's axes, the NOTRACE self
+case against I-39's own refusal as control), `devproc.maps_code_redacted` (owner
+sees every alias's address; a foreign reader sees none, gets one zeroed row per
+alias after an anon page at the window's top, in class order, and the SAME bytes
+after the region is recreated at new addresses while the owner's listing
+changes), `devproc.maps_code_truncated` (a cluster of rows above the aliases
+truncates both listings; the owner sees both aliases below the cut, the foreign
+reader no code row).
+
+**Round 2 (2026-10-07).** Two silent failures now extinct: the probe that
+measures a zeroed row, if the row ever outgrows it (every reader's listing would
+otherwise empty quietly), and the trim loop, if it runs out of rows (what a
+broken budget looks like; it would otherwise scan below the buffer). And the
+cover sees an orphaned region: the image join counts a code alias as `CAP_JIT`
+([[sub-kernel-proc]]), so an RFMEM child that kept its creator's aliases is not
+covered by a capless owner. That is also what bounds the diorama, which reads
+every pid's `maps` as itself for clients of any principal: holding no
+elevation-only cap, it is shown every foreign code row zeroed, and it checks
+that before it serves ([[sub-diorama]]). The two end-to-end witnesses above now
+read with `CAP_JIT` held, the target a live holder. New witnesses:
+`devproc.maps_code_trimmed` (fifty anon rows leave 13 bytes; the foreign listing
+drops the top two whole and carries all three zeroed rows),
+`devproc.maps_code_budget_stop` (one alias more than the budget of 77 zeroed
+rows, all below the top row, the count derived from the row's length: the foreign
+reader gets the header alone, the owner a listing cut among the aliases),
+`devproc.debug_cover_counts_code` (the orphan, with the before-the-region,
+after-the-destroy and `CAP_JIT`-caller controls).
+
+**A residual this section does not close.** `status` prints `tables:` (and
+`pages:`, which includes them), and the `/ctl/procs` table carries the same
+count, ambient to every reader. A page table is allocated per 512 GiB, 1 GiB
+and 2 MiB of address space actually mapped, so the count tells a reader how
+many of those spans the aliases occupy -- whether two aliases, or an alias and
+another mapping, share one -- and never where a span lies. The one case that
+places an alias is a shared top-level table with the low mappings below the
+window: an alias in the window's first 508 GiB (about 0.8% of placements)
+saves a table, and that says which 512 GiB it is in, about 7 of its 34 bits.
+Linux's world-readable `VmPTE` is the same channel. Stated rather than closed
+(B-2b audit r2, self-found SF-1).

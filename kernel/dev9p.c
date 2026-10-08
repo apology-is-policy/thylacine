@@ -12,6 +12,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/cons.h>
+#include <thylacine/notes.h>   // thread_death_reaches: may the clunk wait
 #include <thylacine/proc.h>    // G-2: the mapping Proc's vma_lock + pid
 #include <thylacine/sched.h>   // sched() -- the wb single-flight yield-wait
 #include <thylacine/thread.h>  // G-2: current_thread for the clunk-unmap pid match
@@ -33,9 +34,14 @@ _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
 // the closer through the session's owner. A fid still held by a live session
 // after that is a leak, reported; on a dead session it died with the session,
 // and a fid that was never bound (a failed walk's) had nothing to leak.
+// A thread no kill can pull out of a wait -- a kernel thread, an exit close --
+// never waits for the server here: where the clunk would wait for a tag or
+// for room in the request ring, the fid goes to the closer (ARCH 8.8.1.1).
 static void dev9p_clunk_fid(struct p9_client *cl, struct p9_attached *owner,
                             u32 fid) {
-    int rc = p9_client_clunk_async(cl, fid);
+    int rc = thread_death_reaches(current_thread())
+                 ? p9_client_clunk_async(cl, fid)
+                 : p9_client_clunk_nowait(cl, fid);
     if (rc == 0) return;
     if (rc == -P9_E_AGAIN && owner && p9_attached_defer_clunk(owner, fid) == 0)
         return;
@@ -332,6 +338,21 @@ void dev9p_wb_budget_bias_for_test(s64 n) {
     __atomic_fetch_add(&g_wb_budget_used, (u64)n, __ATOMIC_RELAXED);
 }
 
+// Write a run as msize-max Twrites. 0 or a negative errno.
+static int wb_write_run(struct p9_client *cl, u32 fid, u64 off, u32 total,
+                        const u8 *buf) {
+    u32 done = 0;
+    while (done < total) {
+        u32 acc = 0;
+        int rc = p9_client_write(cl, fid, off + (u64)done, total - done,
+                                 buf + done, &acc);
+        if (rc != 0)  return rc;           // already a -errno
+        if (acc == 0) return -P9_E_IO;     // no progress: fail, don't spin
+        done += acc;
+    }
+    return 0;
+}
+
 // Flush the visible run over the wire as msize-max Twrites. The caller HOLDS
 // wb_lock; returns still holding it (the lock is dropped across the wire I/O
 // -- blocking 9P never under a spinlock, #360). Returns 0 or a negative
@@ -358,8 +379,23 @@ void dev9p_wb_budget_bias_for_test(s64 n) {
 //
 // On failure the run is DROPPED and the errno latched (the voted NFS-async
 // posture: the bytes are lost, the latch reports it via every subsequent
-// write/fsync -- retry-forever would wedge close). The buffer itself stays
-// allocated (freed at dev9p_close).
+// write/fsync and the last close -- retry-forever would wedge close). The
+// buffer itself stays allocated (freed at dev9p_close). A thread dying inside
+// the flush is the exception: a death refuses its send or abandons its Twrite,
+// which says nothing about the server, and write() already reported those
+// bytes written. The run stays staged and nothing is latched, so the next
+// flusher -- the last close at the latest -- sends it; a prefix that landed
+// is rewritten with the same bytes at the same offsets.
+// Was this flush's EINTR a caught note cancelling the Twrite? Every caught-note
+// unwind takes the note's claim (thread_caught_note_unwinds), held until the
+// thread's EL0-return tail, so a claim marks the client's flush(5) cancellation.
+// A server that answers Rlerror(EINTR) itself reaches here as the same value
+// with no claim: that is the server failing the write, and it latches.
+static bool wb_note_cancelled(int err) {
+    struct Thread *t = current_thread();
+    return err == -P9_E_INTR && t && t->note_claim != 0;
+}
+
 static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     while (p->wb_flushers != 0) {
         spin_unlock(&p->wb_lock);
@@ -373,16 +409,7 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     p->wb_flushers++;
     spin_unlock(&p->wb_lock);
 
-    int err = 0;
-    u32 done = 0;
-    while (done < total) {
-        u32 acc = 0;
-        int rc = p9_client_write(p->client, p->fid, off + (u64)done,
-                                 total - done, buf + done, &acc);
-        if (rc != 0) { err = rc; break; }          // already a -errno
-        if (acc == 0) { err = -P9_E_IO; break; }   // no progress: fail, don't spin
-        done += acc;
-    }
+    int err = wb_write_run(p->client, p->fid, off, total, buf);
     // Own-write invalidates move per-write -> per-FLUSH (fs_cache.tla
     // OwnWrite realized at the wire moment). The attr drops on BOTH arms
     // (size/mtime/cvers changed server-side even on a partial land). Pages:
@@ -417,6 +444,12 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     spin_lock(&p->wb_lock);
     p->wb_flushers--;
     if (err) {
+        // Neither a death nor a caught note is the server failing the write:
+        // the one refused or abandoned the Twrite, the other had it cancelled
+        // (flush(5): EINTR means never applied). The run stays staged for the
+        // next flusher; resending a landed prefix rewrites the same bytes.
+        if (wb_note_cancelled(err) || thread_die_pending(current_thread()))
+            return err;
         if (p->wb_err == 0) p->wb_err = (int)(-(long)err);   // positive errno
         p->wb_len   = 0;
         p->wb_known = false;
@@ -429,6 +462,18 @@ static int wb_flush_locked(struct dev9p_priv *p, u64 qid_path) {
     if (p->wb_len == total && p->wb_off == off)
         p->wb_len = 0;
     return 0;
+}
+
+// Staging has stopped for good (the anchor is gone, never set again) and no
+// run is left, so the buffer can never be used again: give it and its budget
+// share back now, not at the last close. Every reader of wb_buf is gated on
+// wb_len > 0. Holds wb_lock (kfree under it: the Larder leaf -> buddy order).
+static void wb_release_dead_locked(struct dev9p_priv *p) {
+    if (p->wb_known || p->wb_len || p->wb_flushers || !p->wb_buf) return;
+    kfree(p->wb_buf);
+    wb_budget_uncharge((u64)p->wb_cap);
+    p->wb_buf = NULL;
+    p->wb_cap = 0;
 }
 
 // The dev9p_write staging decision. Returns:
@@ -448,8 +493,8 @@ static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
         }
         // The append anchor for this write: the live run's end, else the
         // known base. No known anchor -> never stages (an opened-existing
-        // file; a post-truncate priv). A live run implies wb_known (runs
-        // only start at a known anchor; wstat flushes before clearing it).
+        // file; a post-truncate priv). A run can outlive the anchor (a death
+        // kept it through a wstat): its end anchors while it lives.
         bool anchored  = p->wb_len ? true : p->wb_known;
         u64 append_at  = p->wb_len ? (p->wb_off + (u64)p->wb_len) : p->wb_base;
         bool stageable = anchored && offset == append_at &&
@@ -487,7 +532,8 @@ static long wb_write_prepare(struct dev9p_priv *p, struct Spoor *c,
         }
         // Cap: a full run flushes inline, then the loop retries the stage
         // into the emptied run (wb_base advanced to exactly this write's
-        // offset by the flush).
+        // offset by the flush; with the anchor gone the retry writes
+        // through).
         if ((u64)p->wb_len + (u64)count > (u64)DEV9P_WB_CAP) {
             int fe = wb_flush_locked(p, c->qid.path);
             if (fe != 0) {
@@ -653,6 +699,30 @@ int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fi
     if (!p) return -1;
     if (out_client) *out_client = p->client;
     if (out_fid)    *out_fid    = p->fid;
+    return 0;
+}
+
+int dev9p_loom_register(struct Spoor *c) {
+    // A Loom op drives the fid straight to the wire, past every write-behind
+    // path, so a registered priv never stages: flush the run and drop the
+    // append anchor, as a metadata write does (dev9p_wstat_native). A latched
+    // flush error fails the registration: the ring's ops would never report
+    // it, and the registered ref keeps the user's close from being the last.
+    // wb_eligible stays set -- it gates the latch's report on write and fsync.
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !p->wb_eligible) return 0;
+    spin_lock(&p->wb_lock);
+    int fe = p->wb_err ? -(p->wb_err) : 0;
+    if (!fe && (p->wb_len || p->wb_flushers)) fe = wb_flush_locked(p, c->qid.path);
+    if (!fe) {                       // a failure leaves the priv as it was
+        p->wb_known = false;
+        wb_release_dead_locked(p);
+    }
+    spin_unlock(&p->wb_lock);
+    if (fe != 0) return fe;
+    // The flush installed the run's pages as our own; the ring's WRITEs bypass
+    // the Larder and would leave them stale for every opener of the file.
+    larder_page_invalidate(&p->client->larder, c->qid.path);
     return 0;
 }
 
@@ -1592,9 +1662,70 @@ static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
     return c;
 }
 
-static void dev9p_close(struct Spoor *c) {
+// The rest of a last close that may not wait for its server (ARCH 7.9.1 part
+// C): a closer writes the staged run, then clunks the fid. The job owns the
+// run's buffer and its budget charge until released.
+struct dev9p_close_job {
+    struct p9_close_job job;     // first: the closer hands back this pointer
+    u8                 *buf;
+    u32                 cap;
+    u32                 len;
+    u64                 off;
+    u64                 qid_path;
+};
+
+static int dev9p_close_job_run(struct p9_close_job *job, struct p9_client *c,
+                               u32 fid) {
+    struct dev9p_close_job *j = (struct dev9p_close_job *)job;
+    int err = wb_write_run(c, fid, j->off, j->len, j->buf);
+    // Dropped, never installed as the flush installs them: this write lands
+    // after the close returned, unordered with the file's later writers.
+    larder_attr_invalidate(&c->larder, j->qid_path);
+    larder_page_invalidate(&c->larder, j->qid_path);
+    return err;
+}
+
+static void dev9p_close_job_release(struct p9_close_job *job) {
+    struct dev9p_close_job *j = (struct dev9p_close_job *)job;
+    kfree(j->buf);
+    wb_budget_uncharge((u64)j->cap);
+    kfree(j);
+}
+
+// May a last close wait for its server? Not on a thread a death has reached
+// (its sends are refused), nor on a kernel thread something joins without
+// bound (closes_never_wait: nothing would end the wait).
+static bool close_may_wait(void) {
+    struct Thread *t = current_thread();
+    return t && !t->closes_never_wait && !thread_die_pending(t);
+}
+
+// Hand the staged run, and with it the fid's clunk, to a closer: 0, or a
+// negative errno when it cannot -- the priv owns no fid or no session
+// reference (a test's bare client), or no memory.
+static int wb_close_hand_off(struct dev9p_priv *p, u64 qid_path) {
+    if (!p->fid_owned || !p->attached_owner) return -T_E_IO;
+    struct dev9p_close_job *j = kmalloc(sizeof(*j), 0);
+    if (!j) return -T_E_NOMEM;
+    j->job.run     = dev9p_close_job_run;
+    j->job.release = dev9p_close_job_release;
+    j->buf         = p->wb_buf;
+    j->cap         = p->wb_cap;
+    j->len         = p->wb_len;
+    j->off         = p->wb_off;
+    j->qid_path    = qid_path;
+    if (p9_attached_defer_close(p->attached_owner, p->fid, &j->job) != 0) {
+        kfree(j);
+        return -T_E_NOMEM;
+    }
+    p->wb_buf = NULL;
+    p->wb_len = 0;
+    return 0;
+}
+
+static int dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
-    if (!p) return;
+    if (!p) return 0;
 
     // net-6b-2b + #294: release the readiness poll-state (if this was a netd
     // `ready` file). A registered poller holds the Spoor obj-ref, so poll_list is
@@ -1662,15 +1793,27 @@ static void dev9p_close(struct Spoor *c) {
     // below (the fid must be live for the flush Twrites -- a Tclunk racing
     // ahead would write to a dead fid). LAST-ref runs here (the cached-open/
     // weft invariant), so no concurrent op exists on this priv: the plain
-    // wb_len read and the uncontended flush are sound; wb_flushers is 0. A
-    // flush failure latches + drops -- the Dev.close slot is void at v1.0
-    // (documented seam; fsync is the reliable error channel). Then release
-    // the buffer + the global budget (unconditional on wb_buf: a wstat-
-    // de-eligibilized priv still owns its buffer).
-    if (p->wb_len) {
+    // wb_len/wb_err reads and the uncontended flush are sound; wb_flushers is
+    // 0. The close returns this flush's failure, or the one the latch kept
+    // from an earlier flush, and close(2) reports it as EIO (ARCH 21.11).
+    // A close that may not wait never flushes here, and a death that ends
+    // the flush keeps the run: a run still staged after this step goes to a
+    // closer with the fid's clunk (ARCH 7.9.1 part C), and is no loss yet.
+    // Then release the buffer + the global budget (unconditional on wb_buf:
+    // a priv that stopped staging may still own its buffer).
+    int  crc    = 0;
+    bool handed = false;
+    if (p->wb_len && close_may_wait()) {
         spin_lock(&p->wb_lock);
-        (void)wb_flush_locked(p, c->qid.path);
+        crc = wb_flush_locked(p, c->qid.path);
         spin_unlock(&p->wb_lock);
+    } else if (!p->wb_len && p->wb_err) {
+        crc = -(p->wb_err);
+    }
+    if (p->wb_len) {
+        crc    = wb_close_hand_off(p, c->qid.path);
+        handed = crc == 0;
+        if (!handed) p9_close_flush_failed(p->fid, crc);
     }
     if (p->wb_buf) {
         kfree(p->wb_buf);
@@ -1699,7 +1842,7 @@ static void dev9p_close(struct Spoor *c) {
     // Pre-fix the root branch ran p9_attached_destroy IMMEDIATELY and
     // tore down the adapter — walked privs closing afterward UAF'd via
     // their stale client pointer (R15 F236).
-    if (p->fid_owned) {
+    if (p->fid_owned && !handed) {
         // Walk-derived Spoor: clunk the fid. FID-LIFECYCLE async-clunk -- the
         // normal close path fires the Tclunk fire-and-forget (the submitter is
         // not parked for the clunk RTT; the fid unbinds at send + its number is
@@ -1756,6 +1899,7 @@ static void dev9p_close(struct Spoor *c) {
     p->magic = 0;
     kfree(p);
     c->aux = NULL;
+    return crc;
 }
 
 static long dev9p_read(struct Spoor *c, void *buf, long n, s64 off) {
@@ -1931,8 +2075,8 @@ static long dev9p_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // F1 write-behind (LARDER-DESIGN section 12): stage a small pure-append
     // write on an eligible priv instead of paying a wire RPC per bufio
     // chunk. wb_eligible is a fast-path hint (set pre-share at create/
-    // OTRUNC; cleared by wstat) -- every real decision re-runs under
-    // wb_lock inside.
+    // OTRUNC, never cleared; staging stops by dropping the anchor) -- every
+    // real decision re-runs under wb_lock inside.
     if (p->wb_eligible) {
         long staged = wb_write_prepare(p, c, count, offset, (const u8 *)buf);
         if (staged != 0) return staged;
@@ -2272,7 +2416,10 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
     // F1 write-behind: a metadata write is a non-append op -- flush the
     // staged run FIRST (the staged bytes are older; a truncate must land
     // after them), then STOP staging on this priv (a size change moves the
-    // file end, so the append anchor is no longer known).
+    // file end, so the append anchor is no longer known: wb_known). The
+    // eligibility hint stays set: it gates the read overlay, fsync's flush
+    // and the write ordering of a run a death kept, and the latch's report
+    // on every write and fsync -- for another Proc sharing the fd, too.
     if (p->wb_eligible) {
         int fe = 0;
         spin_lock(&p->wb_lock);
@@ -2283,8 +2430,8 @@ static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
         // in-flight flush's Twrites -- the wait inside wb_flush_locked
         // covers it either way.
         if (p->wb_len || p->wb_flushers) fe = wb_flush_locked(p, c->qid.path);
-        p->wb_known    = false;
-        p->wb_eligible = false;
+        p->wb_known = false;
+        wb_release_dead_locked(p);
         spin_unlock(&p->wb_lock);
         if (fe != 0) return fe;
     }
@@ -2392,6 +2539,7 @@ struct Dev dev9p = {
     .rename   = dev9p_rename,
     .unlink   = dev9p_unlink,
     .readlink = dev9p_readlink,   // D-1: Treadlink (the resolver's expansion RPC)
+    .remote   = dev9p_spoor_remote,   // DISTRO 4.6: served-link containment
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

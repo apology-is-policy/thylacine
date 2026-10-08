@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**37 dossiered · 1 missing · 38 modules.**
+**41 dossiered · 0 missing · 41 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -55,6 +55,7 @@ reads as missing, which is the intended pressure.
 | loom_devgone.tla | [[spec-loom-devgone]] | dossiered |
 | loom_multishot.tla | [[spec-loom-multishot]] | dossiered |
 | loom_order.tla | [[spec-loom-order]] | dossiered |
+| loom_role.tla | [[spec-loom-role]] | dossiered |
 | net_poll.tla | [[spec-net-poll]] | dossiered |
 | net_poll_teardown.tla | [[spec-net-poll-teardown]] | dossiered |
 | pipe.tla | [[spec-pipe]] | dossiered |
@@ -69,9 +70,11 @@ reads as missing, which is the intended pressure.
 | sched_tickless.tla | [[spec-sched-tickless]] | dossiered |
 | scheduler.tla | [[spec-scheduler]] | dossiered |
 | syscall_irqs.tla | [[spec-syscall-irqs]] | dossiered |
+| tag_pool.tla | [[spec-tag-pool]] | dossiered |
+| tail_order.tla | [[spec-tail-order]] | dossiered |
 | tapestry_present.tla | [[spec-tapestry-present]] | dossiered |
 | territory.tla | [[spec-territory]] | dossiered |
-| territory_shed.tla | `spec-territory-shed` | **missing** |
+| territory_shed.tla | [[spec-territory-shed]] | dossiered |
 | tsleep.tla | [[spec-tsleep]] | dossiered |
 | weft.tla | [[spec-weft]] | dossiered |
 | weft_readiness.tla | [[spec-weft-readiness]] | dossiered |

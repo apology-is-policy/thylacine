@@ -30,6 +30,14 @@
 #      Ctrl-L repaints, and the capture differs from the one before the edit.
 #      lantern re-opens the slide on every paint, so a stale screen here would
 #      mean the guest's 9P cache served the old bytes.
+#   5. A slide that is a SYMBOLIC LINK is refused, and the file it names is
+#      never opened (LANTERN-DESIGN 8). A deck from someone else's directory is
+#      where a link really comes from: here the host holds a second deck whose
+#      first slide links to a file outside it. The slide after the link must
+#      be opened, or lantern never reached the link and the target's count
+#      proves nothing. `cat` through the same link, which follows it, is the
+#      control: it must open the target, or the server's log could not show
+#      whether lantern did.
 #
 # Captures are kept at build/lantern-haul-*.png and the server log at
 # build/lantern-haul-npxf.log, whatever the verdict.
@@ -105,6 +113,22 @@ write_file $deck/03-live.md {# Edit me on the host
 Change this file on the Mac, then press Ctrl-L in the guest. lantern reads the
 slide again on every paint.
 }
+# (5)'s deck: its first slide is a RELATIVE link to a file outside the deck, so
+# following it would make the server open private/notes.md, and log it. Its
+# second is a plain slide, which lantern opens only after dealing with the first.
+set linkdeck $export/linkdeck
+file mkdir $linkdeck $export/private
+write_file $export/private/notes.md {# Not a slide
+
+A file outside the deck, which the deck must not be able to show.
+}
+write_file $linkdeck/after.md {# After the link
+
+The slide the check reaches once the link is refused.
+}
+write_file $linkdeck/slides.toml {slides = ["notes.md", "after.md"]
+}
+exec ln -s ../private/notes.md $linkdeck/notes.md
 
 # Three -v: npxf logs each `opened <path>` only at level 3, and that line is
 # the witness that the host served the deck.
@@ -159,6 +183,15 @@ proc served {name} {
     set text [read $fh]
     close $fh
     return [regexp -all -- [string map {. \\.} $name] $text]
+}
+# How many times the log says the server OPENED a file, which reading a link's
+# text does not count as.
+proc opened {name} {
+    global srvlog
+    set fh [open $srvlog r]
+    set text [read $fh]
+    close $fh
+    return [regexp -all -line -- "opened.*[string map {. \\.} $name]" $text]
 }
 proc same {a b} {
     return [expr {[catch {exec cmp -s $a $b}] == 0}]
@@ -265,9 +298,41 @@ if {$ink_edited < 2000} {
 lc_pass "ls-halcyon-lantern-haul(4): an edit on the host is on the guest's screen at the next repaint"
 
 type "q"
+
+# (5) The link. The target's open count is read before --check, after it, and
+# after the control. lantern checks the slides in the manifest's order, so its
+# open of after.md says it has dealt with the link: a followed link would have
+# opened the target before it.
+set target_before [opened private/notes.md]
+type "lantern --check /tmp/remote/linkdeck\n"
+set reached 0
+for {set i 0} {$i < 40} {incr i} {
+    if {[opened linkdeck/after.md] > 0} { set reached 1; break }
+    after 500
+}
+set refused [capture link-refused]
+if {![served linkdeck/slides.toml]} {
+    lc_fail "npxf-server's log never names linkdeck/slides.toml: lantern did not reach the link deck (log: $srvlog)"
+}
+if {!$reached} {
+    lc_fail "npxf-server never opened linkdeck/after.md, the slide after the link: lantern did not check past the link, so the target's count proves nothing (log: $srvlog)"
+}
+set target_check [opened private/notes.md]
+type "cat /tmp/remote/linkdeck/notes.md\n"
+after 2000
+set target_cat [opened private/notes.md]
+lc_step "the server's opens of the link's target: $target_before before, $target_check after lantern --check, $target_cat after cat"
+if {$target_cat <= $target_check} {
+    lc_fail "control: cat through the link never opened its target on the host, so the log cannot show whether lantern followed it (log: $srvlog)"
+}
+if {$target_check != $target_before} {
+    lc_fail "lantern --check opened the link's target on the host: it followed a link out of the deck"
+}
+lc_pass "ls-halcyon-lantern-haul(5): a slide that is a link is refused, its target never opened while the slide after it was (cat, which follows the link, opened it)"
+
 type "exit\n"
 after 1500
 set after_exit [capture exited]
 lc_quit
-lc_pass "LS-CI ls-halcyon-lantern-haul: a deck served from the host over Haul renders, pages and follows a host edit in a Halcyon tile; captures at build/lantern-haul-*.png"
+lc_pass "LS-CI ls-halcyon-lantern-haul: a deck served from the host over Haul renders, pages, follows a host edit and refuses a linked slide in a Halcyon tile; captures at build/lantern-haul-*.png"
 exit 0

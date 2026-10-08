@@ -53,10 +53,11 @@ static struct Spoor *devnone_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
-static void devnone_close(struct Spoor *c) {
+static int devnone_close(struct Spoor *c) {
     (void)c;
     // no-op. spoor_clunk calls this unconditionally; devnone has no
     // per-Spoor resources to release.
+    return 0;
 }
 
 static long devnone_read(struct Spoor *c, void *buf, long n, s64 off) {

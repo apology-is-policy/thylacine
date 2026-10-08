@@ -143,6 +143,20 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
                         const char *path, u64 pathlen, int amode, u32 omode,
                         int *errp);
 
+// stalk_landed -- stalk_err(STALK_WALK) that also reports the name of where the
+// walk landed: "" for the Territory root, else "/c1/.../cn", NUL-terminated in
+// `name` (`cap` bytes, 2..SYS_OPEN_PATH_MAX + 1), its length in *name_len.
+// `start` must be p's Territory root, since an absolute link re-bases the name
+// there. The name is built from the components the walk consumed, never from
+// a Path (I-33): a followed link contributes its target's components and a ".."
+// removes the component it climbs out of, so it holds no ".", ".." or link
+// component (POSIX getcwd). The name is then walked once more and must land on
+// the same node; a name that does not (a node a union member shadows) or that
+// outgrows `cap` fails with T_E_INVAL. SYS_CHDIR's store (STALK-DESIGN 4.3).
+struct Spoor *stalk_landed(struct Proc *p, struct Spoor *start,
+                           const char *path, u64 pathlen, int *errp,
+                           char *name, u32 cap, u32 *name_len);
+
 // stalk_union_dissolved -- true iff `h` is a union handle whose union has
 // DISSOLVED in p's Territory (its point hosts no member). The handle is then a
 // plain handle on member[0] (ARCH 9.6.10), and *member0 receives a FRESH,

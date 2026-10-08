@@ -22,8 +22,8 @@
 //
 // State-machine guarantees:
 //
-//   1. Tag uniqueness (I-10): alloc_tag scans outstanding[] for the
-//      first inactive slot. It refuses to return a slot already
+//   1. Tag uniqueness (I-10): alloc_tag returns the lowest inactive
+//      entry of the tag table. It refuses to return an entry already
 //      `active`. The outstanding bookkeeping ensures no two in-flight
 //      ops share a tag.
 //
@@ -32,27 +32,34 @@
 //      targeting that fid fail the `fid_bound` precondition.
 //
 //   3. Out-of-order correctness: dispatch_rmsg looks up the
-//      outstanding entry by TAG (`outstanding[tag]`), not by arrival
+//      outstanding entry by TAG (`entry(s, tag)`), not by arrival
 //      order. The op_id stored in the outstanding entry pairs the
 //      Send with the correct Receive.
 //
-//   4. Flow control: alloc_tag returns -1 when no slot is available.
-//      Back-pressure surfaces as a send-side -1, never as a silent
-//      overflow.
+//   4. Flow control: alloc_tag returns -1 when the op share is full or
+//      the table cannot grow (ARCH 21.11). Back-pressure surfaces as a
+//      send-side -1, never as a silent overflow.
 
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/errno.h>     // T_E_IO for the synthetic local-failure ecode
+#include <thylacine/page.h>      // KP_ZERO
 #include <thylacine/types.h>
+
+#include "../mm/slub.h"
 
 // =============================================================================
 // Compile-time invariants.
 // =============================================================================
 
-_Static_assert(P9_SESSION_MAX_OUTSTANDING >= 1u,
-               "session must support at least 1 outstanding op");
-_Static_assert(P9_SESSION_MAX_OUTSTANDING <= 0xFFFEu,
-               "tag range must leave room for NOTAG (0xFFFF)");
+_Static_assert(P9_TAG_LIMIT <= P9_NOTAG,
+               "tags must leave room for NOTAG (0xFFFF)");
+_Static_assert(P9_TAG_CHUNK >= 1u && P9_TAG_CHUNKS * P9_TAG_CHUNK >= P9_TAG_LIMIT,
+               "the chunks must cover every tag");
+_Static_assert(2u * P9_OPS_MAX <= P9_TAG_LIMIT,
+               "a Tflush must always find a tag: flushes <= ops <= P9_OPS_MAX");
+_Static_assert(P9_ASYNC_MAX < P9_OPS_MAX,
+               "async ops must leave part of the op share to sync ops");
 _Static_assert(P9_SESSION_MAX_FIDS >= 1u,
                "session must support at least 1 bound fid (the root)");
 
@@ -108,14 +115,17 @@ static bool slot_available(const struct p9_session *s) {
     return s->n_bound_fids + s->n_reserved_slots < P9_SESSION_MAX_FIDS;
 }
 
+static struct p9_outstanding *entry(struct p9_session *s, u32 t);
+
 static void slot_reserve(struct p9_session *s, u16 t) {
-    s->outstanding[t].holds_slot = true;
+    entry(s, t)->holds_slot = true;
     s->n_reserved_slots++;
 }
 
 static void slot_release(struct p9_session *s, u16 t) {
-    if (!s->outstanding[t].holds_slot) return;
-    s->outstanding[t].holds_slot = false;
+    struct p9_outstanding *e = entry(s, t);
+    if (!e->holds_slot) return;
+    e->holds_slot = false;
     s->n_reserved_slots--;
 }
 
@@ -128,50 +138,119 @@ static int slot_bind(struct p9_session *s, u16 t, u32 fid) {
 }
 
 // =============================================================================
-// Tag pool — bitmap-like; tag value == outstanding-table index.
+// The tag table (ARCH 21.11); tag value == table index.
 // =============================================================================
 
-// Allocate the lowest free tag. Returns the tag value (0..MAX-1), or
-// -1 if the table is full (flow-control trip).
-static int alloc_tag(const struct p9_session *s) {
-    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
-        if (!s->outstanding[t].active) return (int)t;
+static struct p9_tag_chunk *chunk(struct p9_session *s, u32 k) {
+    return k == 0 ? &s->tags0 : s->tag_dir[k];
+}
+
+static struct p9_outstanding *entry(struct p9_session *s, u32 t) {
+    u32 k = t / P9_TAG_CHUNK;
+    if (k >= s->n_chunks) return NULL;
+    return &chunk(s, k)->e[t % P9_TAG_CHUNK];
+}
+
+// Owned by a sync waiter: the entries the reader handoff looks for.
+static bool sync_owned(const struct p9_outstanding *e) {
+    return e->owner != NULL && !e->async;
+}
+
+static void entry_zero(struct p9_outstanding *e) {
+    e->active         = false;
+    e->kind           = 0;
+    e->fid            = 0;
+    e->new_fid        = 0;
+    e->op_id          = 0;
+    e->awaiting_flush = false;
+    e->owner_waits    = false;
+    e->abandoned      = false;
+    e->holds_slot     = false;
+    e->flush_oldtag   = 0;
+    e->wga_nwname     = 0;
+    e->flush_tag      = 0;
+    e->async          = false;
+    e->owner          = NULL;
+}
+
+// Add a chunk and return its first tag, or -1 at tag_limit or when an
+// allocation fails. The caller holds the client's spinlock; kmalloc does not
+// sleep. The directory is allocated with the first chunk past tags0.
+static int grow(struct p9_session *s) {
+    u32 k = s->n_chunks;
+    if (k >= P9_TAG_CHUNKS || k * P9_TAG_CHUNK >= s->tag_limit) return -1;
+    if (!s->tag_dir) {
+        s->tag_dir = kmalloc(P9_TAG_CHUNKS * sizeof(*s->tag_dir), KP_ZERO);
+        if (!s->tag_dir) return -1;
     }
-    return -1;
+    struct p9_tag_chunk *ch = kmalloc(sizeof(*ch), KP_ZERO);
+    if (!ch) return -1;
+    s->tag_dir[k] = ch;
+    s->n_chunks   = k + 1;
+    return (int)(k * P9_TAG_CHUNK);
+}
+
+// Allocate the lowest free tag, growing the table when every entry is held.
+// An op needs room in the op share; a Tflush takes any free tag. Returns the
+// tag, or -1 (the share is full, or the table cannot grow).
+static int alloc_tag(struct p9_session *s, bool flush) {
+    if (!flush && s->n_active - s->n_flush >= s->ops_max) return -1;
+    for (u32 k = 0; k < s->n_chunks; k++) {
+        struct p9_tag_chunk *ch = chunk(s, k);
+        if (ch->n_active == P9_TAG_CHUNK) continue;
+        for (u32 i = 0; i < P9_TAG_CHUNK; i++) {
+            u32 t = k * P9_TAG_CHUNK + i;
+            if (t >= s->tag_limit) return -1;
+            if (!ch->e[i].active) return (int)t;
+        }
+    }
+    return grow(s);
 }
 
 // Mark tag `t` active with the given op shape. Caller validates `t` is
 // free.
 static void mark_outstanding(struct p9_session *s, u16 t,
                               u8 kind, u32 fid, u32 new_fid) {
+    struct p9_outstanding *e = entry(s, t);
     s->next_op_id++;
-    s->outstanding[t].active        = true;
-    s->outstanding[t].kind          = kind;
-    s->outstanding[t].fid           = fid;
-    s->outstanding[t].new_fid       = new_fid;
-    s->outstanding[t].op_id         = s->next_op_id;
-    s->outstanding[t].awaiting_flush = false;
-    s->outstanding[t].owner_waits   = false;
-    s->outstanding[t].abandoned     = false;
-    s->outstanding[t].holds_slot    = false;
-    s->outstanding[t].flush_oldtag  = 0;
-    s->outstanding[t].wga_nwname    = 0;
+    entry_zero(e);
+    e->active  = true;
+    e->kind    = kind;
+    e->fid     = fid;
+    e->new_fid = new_fid;
+    e->op_id   = s->next_op_id;
+    chunk(s, t / P9_TAG_CHUNK)->n_active++;
+    s->n_active++;
+    if (kind == P9_TFLUSH) s->n_flush++;
     s->total_sent++;
 }
 
 // Clear tag `t`. Caller validates `t` was active.
 static void clear_outstanding(struct p9_session *s, u16 t) {
+    struct p9_outstanding *e = entry(s, t);
     slot_release(s, t);
-    s->outstanding[t].active        = false;
-    s->outstanding[t].kind          = 0;
-    s->outstanding[t].fid           = 0;
-    s->outstanding[t].new_fid       = 0;
-    s->outstanding[t].op_id         = 0;
-    s->outstanding[t].awaiting_flush = false;
-    s->outstanding[t].owner_waits   = false;
-    s->outstanding[t].abandoned     = false;
-    s->outstanding[t].flush_oldtag  = 0;
+    if (e->kind == P9_TFLUSH) s->n_flush--;
+    if (e->async)             s->n_async--;
+    if (sync_owned(e))        chunk(s, t / P9_TAG_CHUNK)->n_sync--;
+    entry_zero(e);
+    chunk(s, t / P9_TAG_CHUNK)->n_active--;
+    s->n_active--;
     s->total_completed++;
+}
+
+// The active entry at the lowest tag >= *t, or NULL; skips idle chunks.
+static struct p9_outstanding *next_active(struct p9_session *s, u32 *t) {
+    for (u32 k = *t / P9_TAG_CHUNK; k < s->n_chunks; k++) {
+        struct p9_tag_chunk *ch = chunk(s, k);
+        u32 i = (k == *t / P9_TAG_CHUNK) ? *t % P9_TAG_CHUNK : 0;
+        if (ch->n_active == 0) continue;
+        for (; i < P9_TAG_CHUNK; i++) {
+            if (!ch->e[i].active) continue;
+            *t = k * P9_TAG_CHUNK + i;
+            return &ch->e[i];
+        }
+    }
+    return NULL;
 }
 
 // Check whether any LIVE in-flight op targets `fid` (as either `fid` or
@@ -192,17 +271,16 @@ static void clear_outstanding(struct p9_session *s, u16 t) {
 // exactly the leak the cancel-at-close was meant to close). The tag itself stays
 // reserved until its Rflush (the I-10 reuse guard) -- that is orthogonal to this
 // precondition, which is about whether a LIVE op references the fid.
-static bool any_outstanding_on_fid(const struct p9_session *s, u32 fid) {
-    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
-        if (!s->outstanding[t].active) continue;
+static bool any_outstanding_on_fid(struct p9_session *s, u32 fid) {
+    struct p9_outstanding *e;
+    for (u32 t = 0; (e = next_active(s, &t)) != NULL; t++) {
         // A Tflush acts on no fid; its entry holds root_fid only as a
         // placeholder, which would refuse a setattr of a raw attach root fd.
-        if (s->outstanding[t].kind == P9_TFLUSH) continue;
-        if (s->outstanding[t].awaiting_flush &&
-            !s->outstanding[t].owner_waits) continue;     // cancelled -> not live
-        if (s->outstanding[t].abandoned) continue;        // rolled-back abandon (#53-F1)
-        if (s->outstanding[t].fid == fid) return true;
-        if (s->outstanding[t].new_fid == fid) return true;
+        if (e->kind == P9_TFLUSH) continue;
+        if (e->awaiting_flush && !e->owner_waits) continue;   // cancelled -> not live
+        if (e->abandoned) continue;        // rolled-back abandon (#53-F1)
+        if (e->fid == fid) return true;
+        if (e->new_fid == fid) return true;
     }
     return false;
 }
@@ -223,18 +301,17 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
     for (size_t i = 0; i < P9_SESSION_MAX_FIDS; i++) s->bound_fids[i] = 0;
     s->n_bound_fids     = 0;
     s->n_reserved_slots = 0;
-    for (size_t i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) {
-        s->outstanding[i].active        = false;
-        s->outstanding[i].kind          = 0;
-        s->outstanding[i].fid           = 0;
-        s->outstanding[i].new_fid       = 0;
-        s->outstanding[i].op_id         = 0;
-        s->outstanding[i].awaiting_flush = false;
-        s->outstanding[i].owner_waits   = false;
-        s->outstanding[i].abandoned     = false;
-        s->outstanding[i].holds_slot    = false;
-        s->outstanding[i].flush_oldtag  = 0;
-    }
+    for (u32 i = 0; i < P9_TAG_CHUNK; i++) entry_zero(&s->tags0.e[i]);
+    s->tags0.n_active   = 0;
+    s->tags0.n_sync     = 0;
+    s->tag_dir          = NULL;
+    s->n_chunks         = 1;
+    s->n_active         = 0;
+    s->n_flush          = 0;
+    s->n_async          = 0;
+    s->ops_max          = P9_OPS_MAX;
+    s->async_max        = P9_ASYNC_MAX;
+    s->tag_limit        = P9_TAG_LIMIT;
     s->next_op_id       = 0;
     s->total_sent       = 0;
     s->total_completed  = 0;
@@ -251,10 +328,18 @@ void p9_session_destroy(struct p9_session *s) {
     s->state            = P9_SESS_CLOSED;
     s->n_bound_fids     = 0;
     s->n_reserved_slots = 0;
-    for (size_t i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) {
-        s->outstanding[i].active     = false;
-        s->outstanding[i].holds_slot = false;
+    for (u32 i = 0; i < P9_TAG_CHUNK; i++) entry_zero(&s->tags0.e[i]);
+    s->tags0.n_active   = 0;
+    s->tags0.n_sync     = 0;
+    if (s->tag_dir) {
+        for (u32 k = 1; k < s->n_chunks; k++) kfree(s->tag_dir[k]);
+        kfree(s->tag_dir);
+        s->tag_dir = NULL;
     }
+    s->n_chunks         = 1;
+    s->n_active         = 0;
+    s->n_flush          = 0;
+    s->n_async          = 0;
 }
 
 int p9_session_close(struct p9_session *s) {
@@ -262,9 +347,7 @@ int p9_session_close(struct p9_session *s) {
     if (s->magic != P9_SESSION_MAGIC) return -1;
     // Refuse close while ops are in flight (spec's CloseSession action
     // requires Inflight = {}).
-    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
-        if (s->outstanding[t].active) return -1;
-    }
+    if (s->n_active != 0) return -1;
     s->state            = P9_SESS_CLOSED;
     s->n_bound_fids     = 0;
     return 0;
@@ -281,20 +364,9 @@ int p9_session_send_version(struct p9_session *s,
     if (s->magic != P9_SESSION_MAGIC) return -1;
     if (s->state != P9_SESS_INIT) return -1;
     if (!out) return -1;
-    // Tversion uses NOTAG; never allocates from the tag pool. We still
-    // insert into outstanding to keep dispatch_rmsg's tag-lookup happy —
-    // but since the index range is 0..MAX-1 and NOTAG=0xFFFF, we'd
-    // overflow. Workaround: we use tag 0 as the version-in-flight slot.
-    //
-    // Hmm wait — that conflicts with normal tag allocation. Cleaner:
-    // version uses a dedicated outstanding entry tracked outside the
-    // bitmap. For simplicity at this chunk, we treat Tversion as
-    // exiting on Rversion without entering outstanding[] (the wire's
-    // NOTAG semantic — version is "out of band" relative to the
-    // normal tag pool).
-    //
-    // dispatch_rmsg handles Rversion specially: if state is INIT, it
-    // expects Rversion (not from outstanding[]).
+    // Tversion uses NOTAG and never enters the tag table: it is out of band
+    // relative to the tag pool, and dispatch_rmsg takes Rversion specially
+    // (valid only in state INIT).
     const u8 *ver = (version != NULL) ? version : P9_DEFAULT_VERSION;
     size_t    ver_len = (version != NULL) ? version_len : sizeof(P9_DEFAULT_VERSION);
     int rc = p9_build_tversion(out, cap, P9_NOTAG, s->msize, ver, ver_len);
@@ -317,7 +389,7 @@ int p9_session_send_attach(struct p9_session *s,
     if (s->magic != P9_SESSION_MAGIC) return -1;
     if (s->state != P9_SESS_VERSIONED) return -1;
     if (!out) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tattach(out, cap, (u16)t,
                               s->root_fid, P9_NOFID,
@@ -358,7 +430,7 @@ int p9_session_send_walk(struct p9_session *s,
     // 9; the old dispatch-time capacity race failed the walk with EIO after
     // the server had bound new_fid).
     if (!slot_available(s)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_twalk(out, cap, (u16)t,
                             src_fid, new_fid,
@@ -395,14 +467,14 @@ int p9_session_send_walkgetattr(struct p9_session *s,
         if (any_outstanding_on_fid(s, new_fid)) return -1;
         if (!slot_available(s)) return -1;
     }
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_twalkgetattr(out, cap, (u16)t,
                                    src_fid, new_fid, request_mask,
                                    nwname, names, name_lens);
     if (rc < 0) return -1;
     mark_outstanding(s, (u16)t, P9_TWALKGETATTR, src_fid, new_fid);
-    s->outstanding[t].wga_nwname = nwname;
+    entry(s, (u32)t)->wga_nwname = nwname;
     if (new_fid != P9_NOFID) slot_reserve(s, (u16)t);
     return rc;
 }
@@ -422,7 +494,7 @@ int p9_session_send_clunk(struct p9_session *s,
     if (fid == s->root_fid) return -1;
     // Spec's SendClunk precondition: no other in-flight op targets fid.
     if (any_outstanding_on_fid(s, fid)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tclunk(out, cap, (u16)t, fid);
     if (rc < 0) return -1;
@@ -447,26 +519,28 @@ int p9_session_send_flush(struct p9_session *s,
     if (s->magic != P9_SESSION_MAGIC) return -1;
     // Valid wherever a real-tag op can be outstanding: steady-state ops are
     // OPEN, the handshake's Tattach is VERSIONED. Tversion uses NOTAG and is
-    // never tracked in outstanding[], so it is never flushable.
+    // never in the tag table, so it is never flushable.
     if (s->state != P9_SESS_OPEN && s->state != P9_SESS_VERSIONED) return -1;
     if (!out) return -1;
-    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return -1;
-    struct p9_outstanding *victim = &s->outstanding[oldtag];
-    if (!victim->active) return -1;              // nothing in flight under oldtag
+    struct p9_outstanding *victim = entry(s, oldtag);
+    if (!victim || !victim->active) return -1;   // nothing in flight under oldtag
     if (victim->kind == P9_TFLUSH) return -1;    // never flush a flush
     if (victim->awaiting_flush) return -1;       // already being flushed
-    int t = alloc_tag(s);
-    if (t < 0) return -1;                        // pool full -> caller falls back
+    int t = alloc_tag(s, true);
+    if (t < 0) return -1;                        // no tag: the table cannot grow
     int rc = p9_build_tflush(out, cap, (u16)t, oldtag);
     if (rc < 0) return -1;
     // The flush op is fid-less; root_fid is a placeholder (matches
-    // version/attach), which any_outstanding_on_fid skips. alloc_tag skipped the active `oldtag`, so t != oldtag
-    // and the victim pointer survives mark_outstanding's write to t. Record
-    // oldtag so the Rflush can free it, and reserve oldtag against reuse until
-    // that Rflush (9P: oldtag not reusable until Rflush -- the I-10 guard).
+    // version/attach), which any_outstanding_on_fid skips. alloc_tag skipped
+    // the active `oldtag`, so t != oldtag, and a growth moves no entry, so the
+    // victim pointer survives. Record oldtag so the Rflush can free it, and
+    // reserve oldtag against reuse until that Rflush (9P: oldtag not reusable
+    // until Rflush -- the I-10 guard); the victim records the flush's tag, so
+    // an unstage finds it without a search.
     mark_outstanding(s, (u16)t, P9_TFLUSH, s->root_fid, s->root_fid);
-    s->outstanding[t].flush_oldtag = oldtag;
+    entry(s, (u32)t)->flush_oldtag = oldtag;
     victim->awaiting_flush = true;
+    victim->flush_tag      = (u16)t;
     return rc;
 }
 
@@ -478,9 +552,8 @@ int p9_session_send_flush(struct p9_session *s,
 // back-pressure -- the server has NEVER seen this tag. Clearing it is
 // therefore I-10-safe: no late reply can ever arrive for a request that was
 // never sent, so immediate reuse cannot be mis-attributed. Without this,
-// each such abort leaks one of the 64 outstanding[] slots on a LIVE shared
-// session; 64 accumulated aborts wedge every mount that resolves through
-// the client (alloc_tag fails -> every op -P9_E_IO).
+// each such abort leaks a tag of the op share on a LIVE shared session, and
+// enough of them leave every op on the mount waiting for a tag forever.
 //
 // Fail-soft guards: an inactive tag is a no-op; an awaiting_flush tag is
 // owned by the #845 flush protocol (freed only by its Rflush) and is left
@@ -490,10 +563,10 @@ int p9_session_send_flush(struct p9_session *s,
 void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
     if (!s) return;
     if (s->magic != P9_SESSION_MAGIC) return;
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
-    if (!s->outstanding[tag].active) return;
-    if (s->outstanding[tag].awaiting_flush) return;
-    if (s->outstanding[tag].abandoned) return;   // sent (rolled-back abandon) -- not ours
+    struct p9_outstanding *e = entry(s, tag);
+    if (!e || !e->active) return;
+    if (e->awaiting_flush) return;
+    if (e->abandoned) return;   // sent (rolled-back abandon) -- not ours
     clear_outstanding(s, tag);
 }
 
@@ -508,9 +581,8 @@ void p9_session_abort_unsent(struct p9_session *s, u16 tag) {
 int p9_session_retract_unsent(struct p9_session *s, u16 tag) {
     if (!s) return -1;
     if (s->magic != P9_SESSION_MAGIC) return -1;
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
-    struct p9_outstanding *op = &s->outstanding[tag];
-    if (!op->active || op->awaiting_flush || op->abandoned) return -1;
+    struct p9_outstanding *op = entry(s, tag);
+    if (!op || !op->active || op->awaiting_flush || op->abandoned) return -1;
     int rc = 0;
     if (op->kind == P9_TCLUNK) rc = slot_bind(s, tag, op->fid);
     clear_outstanding(s, tag);
@@ -529,11 +601,12 @@ int p9_session_retract_unsent(struct p9_session *s, u16 tag) {
 // a survivor's reader, or session teardown reclaims it (the documented
 // no-regression fallback the flush-BUILD-failure path already takes).
 //
-// The flush slot is found by scan: at most one flush per oldtag can exist
-// (send_flush rejects an already-awaiting_flush victim), and a real flush
-// slot is uniquely (active && kind==TFLUSH && flush_oldtag==oldtag). If the
-// victim is not awaiting_flush, or no such slot exists, the state did not
-// come from send_flush -- leave everything untouched (fail-soft).
+// The victim names its flush's tag (flush_tag): at most one flush per oldtag
+// can exist (send_flush rejects an already-awaiting_flush victim), and a real
+// flush entry is (active && kind==TFLUSH && flush_oldtag==oldtag). If the
+// victim is not awaiting_flush, or its flush_tag names no such entry, the
+// state did not come from send_flush -- leave everything untouched
+// (fail-soft).
 // #52/#53 R2-F1: the flush-BUILD-failure fallback (tag pool full at the
 // abandon instant, or a non-OPEN state) stages NO flush, so flush_rollback
 // (which requires awaiting_flush) cannot run -- yet the owner is exactly as
@@ -544,10 +617,10 @@ int p9_session_retract_unsent(struct p9_session *s, u16 tag) {
 void p9_session_mark_abandoned(struct p9_session *s, u16 tag) {
     if (!s) return;
     if (s->magic != P9_SESSION_MAGIC) return;
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return;
-    if (!s->outstanding[tag].active) return;
-    if (s->outstanding[tag].awaiting_flush) return;
-    s->outstanding[tag].abandoned = true;
+    struct p9_outstanding *e = entry(s, tag);
+    if (!e || !e->active) return;
+    if (e->awaiting_flush) return;
+    e->abandoned = true;
 }
 
 // Free the never-sent flush that send_flush staged for `oldtag` and clear
@@ -555,19 +628,16 @@ void p9_session_mark_abandoned(struct p9_session *s, u16 tag) {
 static bool flush_unstage(struct p9_session *s, u16 oldtag) {
     if (!s) return false;
     if (s->magic != P9_SESSION_MAGIC) return false;
-    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return false;
-    if (!s->outstanding[oldtag].active) return false;
-    if (!s->outstanding[oldtag].awaiting_flush) return false;
-    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
-        if (!s->outstanding[t].active) continue;
-        if (s->outstanding[t].kind != P9_TFLUSH) continue;
-        if (s->outstanding[t].flush_oldtag != oldtag) continue;
-        clear_outstanding(s, (u16)t);
-        s->outstanding[oldtag].awaiting_flush = false;
-        s->outstanding[oldtag].owner_waits    = false;
-        return true;
-    }
-    return false;
+    struct p9_outstanding *victim = entry(s, oldtag);
+    if (!victim || !victim->active || !victim->awaiting_flush) return false;
+    struct p9_outstanding *fl = entry(s, victim->flush_tag);
+    if (!fl || !fl->active || fl->kind != P9_TFLUSH || fl->flush_oldtag != oldtag)
+        return false;
+    clear_outstanding(s, victim->flush_tag);
+    victim->awaiting_flush = false;
+    victim->owner_waits    = false;
+    victim->flush_tag      = 0;
+    return true;
 }
 
 void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
@@ -577,7 +647,7 @@ void p9_session_flush_rollback(struct p9_session *s, u16 oldtag) {
     // is refused with no retry -- re-opening the #294 netd slot leak (+
     // tag accumulation on deferred-reply servers) on the exact congestion
     // path #53 targets. The late original reply still frees the tag.
-    if (flush_unstage(s, oldtag)) s->outstanding[oldtag].abandoned = true;
+    if (flush_unstage(s, oldtag)) entry(s, oldtag)->abandoned = true;
 }
 
 // The owner still waits, so the victim goes back to being an ordinary
@@ -589,10 +659,10 @@ void p9_session_flush_retract(struct p9_session *s, u16 oldtag) {
 void p9_session_flush_owner_waits(struct p9_session *s, u16 oldtag, bool waits) {
     if (!s) return;
     if (s->magic != P9_SESSION_MAGIC) return;
-    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return;
-    if (!s->outstanding[oldtag].active) return;
-    if (!s->outstanding[oldtag].awaiting_flush) return;
-    s->outstanding[oldtag].owner_waits = waits;
+    struct p9_outstanding *e = entry(s, oldtag);
+    if (!e || !e->active) return;
+    if (!e->awaiting_flush) return;
+    e->owner_waits = waits;
 }
 
 // =============================================================================
@@ -611,7 +681,7 @@ int p9_session_send_lopen(struct p9_session *s,
     if (!fid_bound(s, fid)) return -1;
     // Tlopen mutates server-side fid state; refuse concurrent ops on fid.
     if (any_outstanding_on_fid(s, fid)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tlopen(out, cap, (u16)t, fid, flags);
     if (rc < 0) return -1;
@@ -635,7 +705,7 @@ int p9_session_send_lcreate(struct p9_session *s,
     // concurrent ops on fid (the binding is observable as soon as the
     // server processes the request).
     if (any_outstanding_on_fid(s, fid)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tlcreate(out, cap, (u16)t, fid,
                                name, name_len, flags, mode, gid);
@@ -653,7 +723,7 @@ int p9_session_send_read(struct p9_session *s,
     if (!out) return -1;
     if (!fid_bound(s, fid)) return -1;
     // Tread permits concurrent ops on fid (offset is explicit on the wire).
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tread(out, cap, (u16)t, fid, offset, count);
     if (rc < 0) return -1;
@@ -672,7 +742,7 @@ int p9_session_send_write(struct p9_session *s,
     if (!fid_bound(s, fid)) return -1;
     if (count > 0 && !data) return -1;
     // Twrite permits concurrent ops on fid (offset is explicit on the wire).
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_twrite(out, cap, (u16)t, fid, offset, count, data);
     if (rc < 0) return -1;
@@ -695,7 +765,7 @@ int p9_session_send_getattr(struct p9_session *s,
     if (!out) return -1;
     if (!fid_bound(s, fid)) return -1;
     // Tgetattr is read-shaped — concurrent ops on fid permitted.
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tgetattr(out, cap, (u16)t, fid, request_mask);
     if (rc < 0) return -1;
@@ -714,7 +784,7 @@ int p9_session_send_setattr(struct p9_session *s,
     if (!attr) return -1;
     // Tsetattr mutates server-side metadata; refuse concurrent ops on fid.
     if (any_outstanding_on_fid(s, fid)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tsetattr(out, cap, (u16)t, fid, attr);
     if (rc < 0) return -1;
@@ -731,7 +801,7 @@ int p9_session_send_readdir(struct p9_session *s,
     if (!out) return -1;
     if (!fid_bound(s, fid)) return -1;
     // Treaddir permits concurrent ops on fid (offset is explicit on the wire).
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_treaddir(out, cap, (u16)t, fid, offset, count);
     if (rc < 0) return -1;
@@ -748,7 +818,7 @@ int p9_session_send_statfs(struct p9_session *s,
     if (!out) return -1;
     if (!fid_bound(s, fid)) return -1;
     // Tstatfs is read-only at the fid — concurrent permitted.
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tstatfs(out, cap, (u16)t, fid);
     if (rc < 0) return -1;
@@ -766,7 +836,7 @@ int p9_session_send_fsync(struct p9_session *s,
     if (!fid_bound(s, fid)) return -1;
     // Tfsync is a barrier; concurrent calls on the same fid are wasteful
     // but not undefined (idempotent). Permitted.
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tfsync(out, cap, (u16)t, fid, datasync);
     if (rc < 0) return -1;
@@ -794,7 +864,7 @@ int p9_session_send_symlink(struct p9_session *s,
     if (!fid_bound(s, fid)) return -1;
     if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
     if (!name) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tsymlink(out, cap, (u16)t, fid,
                                name, name_len, symtgt, symtgt_len, gid);
@@ -815,7 +885,7 @@ int p9_session_send_mknod(struct p9_session *s,
     if (!fid_bound(s, dfid)) return -1;
     if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
     if (!name) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tmknod(out, cap, (u16)t, dfid,
                              name, name_len, mode, major, minor, gid);
@@ -838,7 +908,7 @@ int p9_session_send_rename(struct p9_session *s,
     if (!name) return -1;
     // Trename mutates server-side identity of fid; refuse concurrent ops.
     if (any_outstanding_on_fid(s, fid)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_trename(out, cap, (u16)t, fid, dfid, name, name_len);
     if (rc < 0) return -1;
@@ -854,7 +924,7 @@ int p9_session_send_readlink(struct p9_session *s,
     if (s->state != P9_SESS_OPEN) return -1;
     if (!out) return -1;
     if (!fid_bound(s, fid)) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_treadlink(out, cap, (u16)t, fid);
     if (rc < 0) return -1;
@@ -874,7 +944,7 @@ int p9_session_send_link(struct p9_session *s,
     if (!fid_bound(s, fid)) return -1;
     if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
     if (!name) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tlink(out, cap, (u16)t, dfid, fid, name, name_len);
     if (rc < 0) return -1;
@@ -894,7 +964,7 @@ int p9_session_send_mkdir(struct p9_session *s,
     if (!fid_bound(s, dfid)) return -1;
     if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
     if (!name) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tmkdir(out, cap, (u16)t, dfid, name, name_len, mode, gid);
     if (rc < 0) return -1;
@@ -917,7 +987,7 @@ int p9_session_send_renameat(struct p9_session *s,
     if (oldname_len == 0 || oldname_len > P9_NAME_MAX) return -1;
     if (newname_len == 0 || newname_len > P9_NAME_MAX) return -1;
     if (!oldname || !newname) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_trenameat(out, cap, (u16)t,
                                 olddirfid, oldname, oldname_len,
@@ -939,7 +1009,7 @@ int p9_session_send_unlinkat(struct p9_session *s,
     if (!fid_bound(s, dfid)) return -1;
     if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
     if (!name) return -1;
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tunlinkat(out, cap, (u16)t, dfid, name, name_len, flags);
     if (rc < 0) return -1;
@@ -962,7 +1032,7 @@ int p9_session_send_weft(struct p9_session *s,
     // Tweft is read-shaped (returns the flow's stable share_id + geometry;
     // idempotent on the netd side, no client-side fid mutation) -- concurrent
     // ops on fid permitted.
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tweft(out, cap, (u16)t, fid);
     if (rc < 0) return -1;
@@ -982,7 +1052,7 @@ int p9_session_send_weftio(struct p9_session *s,
     // server acts on the ring in place + returns a count); no client-side fid
     // mutation -- concurrent ops on fid permitted, the elected reader demuxes
     // by tag.
-    int t = alloc_tag(s);
+    int t = alloc_tag(s, false);
     if (t < 0) return -1;
     int rc = p9_build_tweftio(out, cap, (u16)t, fid, off, len, dir);
     if (rc < 0) return -1;
@@ -1066,7 +1136,7 @@ static void zero_result(struct p9_dispatch_result *out) {
     out->weftio_count           = 0;
 }
 
-// Special path for Rversion: tag is NOTAG; not from outstanding[];
+// Special path for Rversion: tag is NOTAG; not from the tag table;
 // only valid in state INIT.
 static int dispatch_rversion(struct p9_session *s,
                               const u8 *rmsg, size_t len,
@@ -1245,9 +1315,8 @@ static int apply_rmsg(struct p9_session *s, struct p9_outstanding *op,
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         u16 oldtag = op->flush_oldtag;
-        if (oldtag < P9_SESSION_MAX_OUTSTANDING &&
-            s->outstanding[oldtag].active &&
-            s->outstanding[oldtag].awaiting_flush) {
+        struct p9_outstanding *victim = entry(s, oldtag);
+        if (victim && victim->active && victim->awaiting_flush) {
             clear_outstanding(s, oldtag);
         }
     } else if (op->kind == P9_TLOPEN) {
@@ -1421,16 +1490,15 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
     int rc = p9_peek_header(rmsg, len, &size, &type, &tag);
     if (rc < 0) return -1;
 
-    // Rversion is the only Rmsg that lives outside the outstanding[]
+    // Rversion is the only Rmsg that lives outside the tag table
     // bookkeeping (it uses NOTAG). Dispatch it specially.
     if (type == P9_RVERSION) {
         return dispatch_rversion(s, rmsg, len, out);
     }
 
     // For every other Rmsg, the tag must index a live outstanding entry.
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
-    struct p9_outstanding *op = &s->outstanding[tag];
-    if (!op->active) return -1;
+    struct p9_outstanding *op = entry(s, tag);
+    if (!op || !op->active) return -1;
 
     // A reply for a tag reserved by a pending Tflush (#845) is a LATE reply
     // for an abandoned op (its owner Proc died). Consume it WITHOUT freeing
@@ -1469,9 +1537,8 @@ int p9_session_dispatch_flushed_rmsg(struct p9_session *s,
 
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(rmsg, len, &size, &type, &tag) < 0) return -1;
-    if (tag >= P9_SESSION_MAX_OUTSTANDING) return -1;
-    struct p9_outstanding *op = &s->outstanding[tag];
-    if (!op->active || !op->awaiting_flush) return -1;
+    struct p9_outstanding *op = entry(s, tag);
+    if (!op || !op->active || !op->awaiting_flush) return -1;
     // No clear_outstanding: the tag stays reserved until the flush's Rflush
     // (the I-10 guard). The walk arms' slot_bind releases the slot, so a
     // duplicate reply reaching the ownerless arm above binds nothing. The op
@@ -1500,24 +1567,79 @@ bool p9_session_fid_bound(const struct p9_session *s, u32 fid) {
 size_t p9_session_inflight(const struct p9_session *s) {
     if (!s) return 0;
     if (s->magic != P9_SESSION_MAGIC) return 0;
-    size_t n = 0;
-    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
-        if (s->outstanding[t].active) n++;
-    }
-    return n;
+    return s->n_active;
 }
 
-// True iff a tag slot is free (a send would find a tag). A pure scan (no
-// mutation) -- the FID-LIFECYCLE async-clunk uses it to detect a full tag pool
-// (a >64-fd async-close burst) BEFORE p9_session_send_clunk's alloc_tag would
-// fail, so it can drain an ownerless reply first instead of leaking the fid.
-bool p9_session_has_free_tag(const struct p9_session *s) {
+// The client asks before a build, so a sync op waits for a tag (ARCH 21.11
+// part 3) and the async clunk drains one instead of leaking its fid. The
+// growth an alloc_tag here makes is the one the build's alloc_tag would make:
+// the chunk stays, and the build under the same lock hold finds the tag.
+bool p9_session_has_free_tag(struct p9_session *s) {
     if (!s) return false;
     if (s->magic != P9_SESSION_MAGIC) return false;
-    for (size_t t = 0; t < P9_SESSION_MAX_OUTSTANDING; t++) {
-        if (!s->outstanding[t].active) return true;
+    return alloc_tag(s, false) >= 0;
+}
+
+bool p9_session_has_flush_tag(struct p9_session *s) {
+    if (!s) return false;
+    if (s->magic != P9_SESSION_MAGIC) return false;
+    return alloc_tag(s, true) >= 0;
+}
+
+bool p9_session_async_room(const struct p9_session *s) {
+    if (!s) return false;
+    if (s->magic != P9_SESSION_MAGIC) return false;
+    return s->n_async < s->async_max;
+}
+
+struct p9_outstanding *p9_session_entry(struct p9_session *s, u32 tag) {
+    if (!s) return NULL;
+    if (s->magic != P9_SESSION_MAGIC) return NULL;
+    return entry(s, tag);
+}
+
+struct p9_outstanding *p9_session_next_active(struct p9_session *s, u32 *tag) {
+    if (!s || !tag) return NULL;
+    if (s->magic != P9_SESSION_MAGIC) return NULL;
+    return next_active(s, tag);
+}
+
+void *p9_session_owner(struct p9_session *s, u32 tag) {
+    struct p9_outstanding *e = p9_session_entry(s, tag);
+    return (e && e->active) ? e->owner : NULL;
+}
+
+bool p9_session_set_owner(struct p9_session *s, u32 tag, void *owner) {
+    struct p9_outstanding *e = p9_session_entry(s, tag);
+    if (!e || !e->active) return false;
+    struct p9_tag_chunk *ch = chunk(s, tag / P9_TAG_CHUNK);
+    if (sync_owned(e)) ch->n_sync--;
+    e->owner = owner;
+    if (sync_owned(e)) ch->n_sync++;
+    return true;
+}
+
+struct p9_outstanding *p9_session_next_sync_owned(struct p9_session *s, u32 *tag) {
+    if (!s || s->magic != P9_SESSION_MAGIC) return NULL;
+    for (u32 k = *tag / P9_TAG_CHUNK; k < s->n_chunks; k++) {
+        struct p9_tag_chunk *ch = chunk(s, k);
+        u32 i = (k == *tag / P9_TAG_CHUNK) ? *tag % P9_TAG_CHUNK : 0;
+        if (ch->n_sync == 0) continue;
+        for (; i < P9_TAG_CHUNK; i++) {
+            if (!ch->e[i].active || !sync_owned(&ch->e[i])) continue;
+            *tag = k * P9_TAG_CHUNK + i;
+            return &ch->e[i];
+        }
     }
-    return false;
+    return NULL;
+}
+
+void p9_session_mark_async(struct p9_session *s, u16 tag) {
+    struct p9_outstanding *e = p9_session_entry(s, tag);
+    if (!e || !e->active || e->async || e->kind == P9_TFLUSH) return;
+    if (sync_owned(e)) chunk(s, tag / P9_TAG_CHUNK)->n_sync--;
+    e->async = true;
+    s->n_async++;
 }
 
 size_t p9_session_n_bound_fids(const struct p9_session *s) {

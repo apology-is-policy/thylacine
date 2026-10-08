@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-09-21
+updated: 2026-10-05
 ---
 ## Graphical attention and serial posture
 
@@ -82,6 +82,28 @@ process-table lock serializes owner lifetime; its cons leaf-lock edge has no
 reverse acquisition. `docs/TRUSTED-PATH.md` and `docs/IMPERIUM-DESIGN.md §11`
 describe the episode state machine. This is serial trusted input, not an
 assertion that every graphical input path is authenticated.
+
+**Refused where it lands (2026-09-29).** A frozen caller's consctl mode write,
+and a renderer feed byte, are refused twice: by a lockless check on entry, which
+is only a fast path, and again under `g_cons.lock` in the critical section that
+would apply them -- `cons_set_mode_cmd` re-asks `cons_caller_frozen()` before it
+stores the mode word, and `cons_rx_accept(byte, is_break, feed)` refuses a feed
+byte while an episode is open (`cons_rx_input` is its `feed = false` wrapper for
+the PL011 path). BEGIN discards the ring and forces RAW under that same lock, so
+a write that passed the entry check while BEGIN ran either landed first and was
+overridden, or is refused: an in-flight `+echo` can no longer open the trusted
+prompt with ECHO on, and an in-flight feed byte can no longer be the first byte
+the trusted reader sees. A refused feed byte leaves the console unchanged, so the
+renderer's retry meets the entry check's -1. `cons_test_set_window_hook` runs a
+test function between the two checks. It exists only under `KERNEL_TESTS`; a
+production kernel compiles the call to nothing, so no indirect-call slot sits on
+a path every renderer drives (the kernel chunk's Fable round F2)
+(`cons.episode_mode_write_straddling_begin`, `cons.episode_feed_straddling_begin`).
+The echo of a feed byte accepted just before BEGIN can still reach the wire
+after it, at most `CONS_ECHO_MAX` bytes, the byte itself discarded: the same
+bounded pre-SAK output as a write's in-flight first chunk (round F1, kept).
+A SAK while an episode is open saves no owner, so the owner END restores is the
+one from before the episode began (`cons.episode_repeat_sak_keeps_saved_owner`).
 
 **Pollers across an episode (B-0 audit round 4 F1, 2026-09-21).** A frozen
 caller's `cons_poll` samples no readiness and files its hook on
@@ -249,6 +271,51 @@ A write returns **short** on either a stalled consumer (the room wait is
 deadlined) or a dying thread. Short is POSIX-legal and is the inherited
 disposition: a bounded-and-lossy console beats a wedged writer. It must never
 become a hang.
+
+### A caught note ends a Linux caller's wait (2026-10-05)
+
+Every wait a console read or write blocks in is a `noteintr` wait (ARCH 8.8.3),
+so a caught note ends it for a Linux caller inside a call on signal(7)'s list,
+and for nobody else: a native reader or writer, and the kernel's own writers,
+still ride the note out. The read side has three waits, all before the first
+byte is drained: the reader-slot wait, the episode park (an arriving frozen
+reader's, and a vacating one's), and the data wait. Each returns `-EINTR`
+having taken nothing; the vacate path is reached only with nothing drained, so
+the note never costs input. The write side has three too: the writer-role wait,
+the episode park and the room wait. The role wait and the park come before any
+byte moves and return `-EINTR`; the room wait ends the write the way the #67
+deadline does: the count of what went out, or `-EINTR` when nothing did, which
+is how Linux's tty write answers. `cons_tx_role_acquire` takes a `caught_ok`
+flag because its other caller, `cons_kernel_writer_begin`, has no EL0 to return
+`-EINTR` to: it passes false, and a caught note never ends that park. Every
+exit releases what the call took, the reader slot or the writer role.
+
+A short write means the same to both sinks. The process write taps the renderer
+drain once, after its pushes, with what went out, so the count it returns is
+what reached the serial ring and the drain alike, and a caller that sends the
+rest again reaches each sink once. Before 2026-10-05 the write tapped the whole
+staged chunk ahead of the push: the #67 deadline then left the drain holding a
+tail the caller had been told did not go out, and a caught note's short count on
+a merely full ring would have made that routine at 115200 baud. The tap is not
+per push either. The serial ring can take a chunk in two pushes with a peer's
+unit between them, and the single tap keeps the chunk one unit in the drain, the
+sink that interprets escape sequences. The operator chose this order over the
+earlier tap-first rule ([[dec-2026-10-05-console-mirror-tap-order]]). While the
+serial side is silenced, or the echo capture stands in for it, the drain is the
+only sink and takes the whole chunk at once. Echo and the diagnostic lines still
+tap first: neither is ever sent again, and both drop whole.
+
+A frozen reader keeps its place across the note. A reader frozen by a trusted
+episode re-takes the slot by waiting rather than taking the busy guard's `-1`,
+because the attached authority may still hold the slot at END. When a note ends
+a frozen wait (the door park, the vacate park, the vacate re-take, or a slot
+wait the reader took because it had been frozen), the thread records
+`cons_frozen_unwound`, and its next console read starts as a frozen reader and
+waits for the slot. The next read consumes the mark at entry. A native thread
+never sets it, because a native wait never unwinds for a note; rfork does not
+copy it, and exec clears it with the rest of the outgoing image's note state. A
+mark that outlives the episode costs one later read a wait where the guard would
+have refused it, which is how an attached reader already behaves.
 
 ### Diagnostics take the ring too
 
@@ -462,7 +529,9 @@ bytes so a new renderer never paints a dead one's tail.
 
 Four file-scope statics: the input state, the drain, the transmit ring, and the
 capture buffer. Three Rendez (data, manager, drain) plus the transmit room
-Rendez, all statics.
+Rendez, all statics. One per-thread field lives outside the file:
+`Thread.cons_frozen_unwound`, the mark a frozen reader carries across a caught
+note's unwind.
 
 **The hook lists are file-scope statics, and that is a real property, not an
 accident**: the registered-object-lifetime hazard — a sibling freeing an
@@ -502,11 +571,14 @@ poller's and the manager's.
 
 `-1` for bad arguments, for a second concurrent reader on either input ring,
 for a second drain open, and for a malformed control write. A **short** count
-from a write on a deadline or a death. `0` from a read only on a death with
-nothing buffered, or from the drain when disarmed and empty (end of file).
+from a write on a deadline, a death or a caught note. `0` from a read only on a
+death with nothing buffered, or from the drain when disarmed and empty (end of
+file). `-EINTR` (`-T_E_INTR`) when a caught note ends a Linux caller's wait
+before a byte moved — the read returns it rather than `0`, which a Linux reader
+would take for end of file.
 
-No errno distinction anywhere — the console predates the errno surface and has
-not been converted.
+Otherwise no errno distinction — the console predates the errno surface and
+has not been converted.
 
 ## Performance
 
@@ -574,6 +646,24 @@ gave up.
 - **The interactive promotion stays gated on the trusted console roles.**
   Ungating it is a starvation vector from unprivileged code.
 - **A new field read from a sleep condition must be a relaxed atomic.**
+- **A caught note ends only a wait that has moved nothing.** A read returns
+  `-EINTR` only with nothing drained and a write only with nothing written; a
+  write that moved bytes returns their count. A path that returns `-EINTR`
+  after a byte moved loses that byte to the caller's retry. And a `noteintr`
+  wait must return on `NOTEINTR`, never loop back into a wait: the note's claim
+  lasts until the EL0-return tail, so the next wait unwinds at once.
+- **A kernel writer never takes a caught-note exit.** `cons_kernel_writer_begin`
+  passes `caught_ok` false; a kernel emitter that returned early on a note
+  would drop a tooling-ABI line.
+- **The process write taps once, after its pushes, with what went out.** A byte
+  tapped before the caller learns it did not go out is shown twice when the
+  caller sends it again, and a tap per push lets a peer's unit land inside the
+  chunk on the renderer. A new exit from the room wait leaves through the one
+  tap.
+- **A frozen wait that unwinds for a note leaves `cons_frozen_unwound` set.** A
+  new frozen wait, or a new exit from one, that returns `-EINTR` without the
+  mark sends the retry to the busy guard's `-1`, which a Linux shell reads as
+  its console closing.
 
 ## Seams
 
@@ -589,7 +679,7 @@ gave up.
 - **The exclusive board-era output switch.** On a display-only board the serial
   side should be suppressed rather than mirrored; the tap composes with that
   (the selector will gate the UART emit, not the tap).
-- **Errno.** Every failure is `-1`.
+- **Errno.** Every failure but the caught-note `-EINTR` is `-1`.
 
 ## Caveats
 
@@ -649,6 +739,10 @@ superseded serial line; SAK restores it unconditionally), and `cons_termios_get`
 (C2-k1b -- the global termios word projected as a Linux `struct termios` for the
 VIVARIUM ioctl). The extinction ring-lock tearing (455c651d / 7dd5be19, both
 2026-08-18) was already the update's base -- borrowed.
+
+[[chg-2026-10-05-signal7-list]] made the console's read and write waits end
+for a caught note to a Linux caller (the section above), with the kernel
+writers' role wait kept out.
 
 [[chg-2026-09-06-cons-doc-absorb]] folded the #95 RX input-drop report (the five
 named counters, `rx_drop_modeflush` as the mode-flush drop the mode-flip section

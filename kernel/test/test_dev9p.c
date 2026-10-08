@@ -30,6 +30,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/caps.h>
 #include <thylacine/handle.h>
+#include <thylacine/loom.h>
 #include <thylacine/path.h>
 #include <thylacine/territory.h>
 
@@ -61,6 +62,7 @@ void test_dev9p_poll_retry_timer_is_a_wake(void);
 void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void);
 void test_dev9p_poll_cancel_at_close(void);
 void test_dev9p_poll_gc_flushes_with_the_unlink(void);
+void test_dev9p_poll_reads_every_client(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
 void test_dev9p_wstat_readonly_fd(void);
 void test_dev9p_wstat_size(void);
@@ -74,6 +76,14 @@ void test_dev9p_wb_coalesce_one_twrite(void);
 void test_dev9p_wb_overlay_read(void);
 void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_close_returns_flush_error(void);
+void test_dev9p_wb_dying_flush_keeps_run(void);
+void test_dev9p_wb_dying_wstat_keeps_staging(void);
+void test_dev9p_wb_wstat_keeps_the_latch(void);
+void test_dev9p_wb_dying_loom_register_keeps_staging(void);
+void test_dev9p_wb_loom_register_keeps_the_latch(void);
+void test_dev9p_wb_interrupted_flush_keeps_run(void);
+void test_dev9p_wb_server_eintr_latches(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -885,7 +895,7 @@ void test_dev9p_close_clunks_owned_fid(void) {
     size_t after_send = p9_session_inflight(&g_client.session);
     TEST_EXPECT_EQ((u64)after_send, (u64)(before + 1),
                     "async-clunk leaves the Tclunk outstanding (deferred, not synchronous)");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     size_t after_drain = p9_session_inflight(&g_client.session);
     TEST_EXPECT_EQ((u64)after_drain, (u64)before,
                     "the ownerless Rclunk drains via the reader pump (tag freed)");
@@ -1231,11 +1241,11 @@ void test_dev9p_dirfid_create_reuse_drop(void) {
     struct Spoor *opened = dev9p.create(nc2, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
     TEST_ASSERT(opened == nc2, "create");
     TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "create dropped + clunked the parked fid");
-    (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+    (void)p9_client_reader_pump_ready(&g_client);   // drain the async Rclunk
 
     g_wga_type_ov = 0; g_wga_path_base = 0x20;
     spoor_clunk(nc2);
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     teardown(root);
 }
 
@@ -1270,7 +1280,7 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     TEST_EXPECT_EQ((u64)dev9p.unlink(root, "d", SYS_UNLINK_REMOVEDIR), 0ull,
                    "rmdir d");
     TEST_EXPECT_EQ((u64)g_clunk_seen, 1ull, "rmdir dropped + clunked the parked fid");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
     struct t_stat probe; u64 s0 = 0;
     TEST_ASSERT(!larder_attr_serve(&g_client.larder, 0x20, &probe, &s0),
                 "the dead object's attr invalidated (the donate-gate event)");
@@ -1287,7 +1297,7 @@ void test_dev9p_dirfid_rmdir_drop_and_no_stale_repark(void) {
     spoor_clunk(nc2);   // staled while out -> MUST clunk, never re-park
     TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
                    "a staled checked-out fid is clunked at close");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     g_wga_type_ov = 0;
     teardown(root);
@@ -1322,7 +1332,7 @@ void test_dev9p_dirfid_suspect_not_reparked(void) {
     spoor_clunk(nc1);   // suspect -> clunk, never park
     TEST_EXPECT_EQ((u64)g_clunk_seen, (u64)pre + 1ull,
                    "a suspect fid is clunked at close, not re-parked");
-    (void)p9_client_reader_pump_once(&g_client);
+    (void)p9_client_reader_pump_ready(&g_client);
 
     g_wga_type_ov = 0;
     teardown(root);
@@ -1738,13 +1748,20 @@ static int np_responder(void *ctx, const u8 *req, size_t req_len,
 }
 
 // Hand the kthread a reply the server "sends" later: the answer to a held arm.
-static void np_inject_rread(u16 tag, u16 revents) {
+// The kthread reads only over a ready stream, so the append walks the mq's
+// readiness hooks as mq_send's does.
+static void mq_inject_rread(struct p9_mq_loopback *mq, u16 tag, u16 revents) {
     u8 frame[P9_HDR_LEN + 8];
     int n = np_rread(frame, sizeof(frame), tag, revents);
-    spin_lock(&g_np_mq.lock);
-    for (int i = 0; i < n; i++) g_np_mq.ring[g_np_mq.tail + (u32)i] = frame[i];
-    g_np_mq.tail += (u32)n;
-    spin_unlock(&g_np_mq.lock);
+    spin_lock(&mq->lock);
+    for (int i = 0; i < n; i++) mq->ring[mq->tail + (u32)i] = frame[i];
+    mq->tail += (u32)n;
+    spin_unlock(&mq->lock);
+    poll_waiter_list_wake(&mq->ready_list);
+}
+
+static void np_inject_rread(u16 tag, u16 revents) {
+    mq_inject_rread(&g_np_mq, tag, revents);
 }
 
 // The one message-queue fixture, and everything a test hangs on it, live in
@@ -1870,12 +1887,131 @@ static void np_teardown(struct np_fixture *f) {
     g_np_live = false;
 }
 
+// More readiness clients than the poll kthread once read for: seventeen
+// sessions, each with its own server and one QTPOLL file. A client is 41 KiB
+// and its transport 9 KiB, so each slot is allocated, and the runner's release
+// takes down what a failed test left (test_dev9p_np_release).
+#define NPF_CLIENTS 17
+struct npf_slot {
+    struct p9_client      client;
+    struct p9_mq_loopback mq;
+    u8                    recv_buf[8192];
+    struct Spoor         *root;
+    struct Spoor         *ready;        // the walked QTPOLL file, the slot's own
+    bool                  mq_up, client_up;
+    struct Rendez         r;
+    struct poll_waiter    pw;
+    volatile u32          arms;
+    volatile u16          arm_tag;
+};
+static struct npf_slot *g_npf[NPF_CLIENTS];
+static bool             g_npf_live;
+static u32              g_npf_ops0;
+
+// The slot's server: the handshake as np_handshake, every arm held for the test
+// to answer, a snapshot answered not-ready, flushes and clunks answered.
+static int npf_responder(void *ctx, const u8 *req, size_t req_len,
+                         u8 *resp, size_t resp_cap) {
+    struct npf_slot *s = (struct npf_slot *)ctx;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if (type == P9_TVERSION || type == P9_TATTACH || type == P9_TWALK)
+        return np_handshake(req, req_len, type, tag, resp, resp_cap);
+    if (type == P9_TREAD) {
+        if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
+        if (le64_at(req + 11) & P9_POLL_SNAPSHOT) return np_rread(resp, resp_cap, tag, 0);
+        s->arms++;
+        s->arm_tag = tag;
+        return 0;
+    }
+    if (type == P9_TFLUSH) return np_rhdr(resp, resp_cap, P9_RFLUSH, tag);
+    if (type == P9_TCLUNK) return np_rhdr(resp, resp_cap, P9_RCLUNK, tag);
+    return -1;
+}
+
+static bool npf_slot_up(u32 i) {
+    struct npf_slot *s = kmalloc(sizeof(*s), KP_ZERO);
+    if (!s) return false;
+    g_npf[i] = s;
+    rendez_init(&s->r);
+    poll_waiter_init(&s->pw, &s->r);
+    if (p9_mq_loopback_init(&s->mq, npf_responder, s) != 0) return false;
+    s->mq_up = true;
+    if (p9_client_init(&s->client, /*root_fid=*/0, 8192, p9_mq_loopback_ops_for(&s->mq),
+                       s->recv_buf, sizeof(s->recv_buf)) != 0) return false;
+    s->client_up = true;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    if (p9_client_handshake(&s->client, uname, sizeof(uname), aname, sizeof(aname), 0) != 0)
+        return false;
+    s->root = dev9p_attach_client(&s->client, /*root_fid=*/0);
+    if (!s->root) return false;
+    s->ready = spoor_clone(s->root);
+    if (!s->ready) return false;
+    const char *name = "ready";
+    struct Walkqid *w = dev9p.walk(s->root, s->ready, &name, 1);
+    if (!w || w->spoor != s->ready) {
+        if (w) walkqid_free(w);
+        return false;
+    }
+    walkqid_free(w);
+    return (s->ready->qid.type & QTPOLL) != 0;
+}
+
+static bool npf_setup(void) {
+    if (g_npf_live) return false;
+    g_npf_live = true;               // from here the teardown owns what is set up
+    g_npf_ops0 = dev9p_poll_op_count_for_test();
+    for (u32 i = 0; i < NPF_CLIENTS; i++)
+        if (!npf_slot_up(i)) return false;
+    return true;
+}
+
+// The hooks off, every file closed (its arm cancelled, which kicks the kthread
+// off its hooks on that client), the kthread parked with nothing out -- so it
+// holds no hook on any slot's lists -- and only then the clients.
+static void npf_teardown(void) {
+    for (u32 i = 0; i < NPF_CLIENTS; i++)
+        if (g_npf[i]) poll_waiter_list_unregister(&g_npf[i]->pw);
+    for (u32 i = 0; i < NPF_CLIENTS; i++) {
+        struct npf_slot *s = g_npf[i];
+        if (!s) continue;
+        if (s->ready) {
+            spoor_clunk(s->ready);
+            s->ready = NULL;
+        }
+        if (s->root) {
+            spoor_clunk(s->root);
+            s->root = NULL;
+        }
+    }
+    TEST_YIELD_UNTIL(dev9p_poll_snap_count_for_test() == 0 &&
+                     dev9p_poll_op_count_for_test() == g_npf_ops0 &&
+                     dev9p_poll_parked_for_test());
+    for (u32 i = 0; i < NPF_CLIENTS; i++) {
+        struct npf_slot *s = g_npf[i];
+        if (!s) continue;
+        if (s->client_up) p9_client_destroy(&s->client);
+        if (s->mq_up) p9_mq_loopback_destroy(&s->mq);
+        kfree(s);
+        g_npf[i] = NULL;
+    }
+    g_npf_live = false;
+}
+
 // The runner's release, after every test (test.c): a fixture a failed test left
 // up is taken down before the next test sets up. Returns whether one was.
 bool test_dev9p_np_release(void) {
-    if (!g_np_live) return false;
-    np_teardown(&g_np);
-    return true;
+    bool left = false;
+    if (g_np_live) {
+        np_teardown(&g_np);
+        left = true;
+    }
+    if (g_npf_live) {
+        npf_teardown();
+        left = true;
+    }
+    return left;
 }
 
 // A file with no readiness server (no QTPOLL; the root is QTDIR) is POSIX
@@ -2201,6 +2337,40 @@ void test_dev9p_poll_gc_flushes_with_the_unlink(void) {
     np_teardown(f);
 }
 
+// The kthread reads for every client with a read out. Seventeen arms are held,
+// one per session; the registry is LIFO, so the first armed is the oldest. Its
+// server answers, and the kthread must read that answer and wake its poller.
+// Before, the kthread pumped at most sixteen clients from the newest down: the
+// oldest was never read, and its poller slept to its own timeout. The newest
+// answers first, as a control on the fixture, and is armed again so seventeen
+// are out when the oldest answers.
+void test_dev9p_poll_reads_every_client(void) {
+    TEST_ASSERT(npf_setup(), "seventeen readiness sessions");
+    for (u32 i = 0; i < NPF_CLIENTS; i++) {
+        struct npf_slot *s = g_npf[i];
+        TEST_EXPECT_EQ((s64)dev9p_poll_arm(s->ready, (short)POLLIN, &s->pw), 1L, "armed");
+        TEST_EXPECT_EQ((u64)s->arms, (u64)1, "its arm held at the server");
+    }
+    TEST_EXPECT_EQ((u64)dev9p_poll_op_count_for_test(), (u64)(g_npf_ops0 + NPF_CLIENTS),
+                   "seventeen arms linked");
+
+    struct npf_slot *newest = g_npf[NPF_CLIENTS - 1], *oldest = g_npf[0];
+    mq_inject_rread(&newest->mq, newest->arm_tag, POLLIN);
+    TEST_YIELD_UNTIL(newest->pw.ready);
+    poll_waiter_list_unregister(&newest->pw);
+    poll_waiter_init(&newest->pw, &newest->r);
+    TEST_EXPECT_EQ((s64)dev9p_poll_arm(newest->ready, (short)POLLIN, &newest->pw), 1L,
+                   "the newest armed again");
+    TEST_EXPECT_EQ((u64)newest->arms, (u64)2, "a fresh arm went out");
+    TEST_YIELD_UNTIL(dev9p_poll_op_count_for_test() == g_npf_ops0 + NPF_CLIENTS);
+
+    mq_inject_rread(&oldest->mq, oldest->arm_tag, POLLIN);
+    TEST_YIELD_UNTIL(oldest->pw.ready);
+    for (u32 i = 1; i < NPF_CLIENTS - 1; i++)
+        TEST_ASSERT(!g_npf[i]->pw.ready, "no poller whose server stayed quiet was woken");
+    npf_teardown();
+}
+
 // =============================================================================
 // SYS_PREAD / SYS_PWRITE (#37) + SYS_WSTAT kind-gate (#47) — syscall-layer
 // tests against the loopback client (the wire-visible halves).
@@ -2463,7 +2633,7 @@ void test_dev9p_walk_attrs(void) {
         // async-clunk defers the Rclunk; drain it before the next sub-test's op
         // so the single-slot loopback is not left holding a stale reply (the real
         // system drains it via the next op's reader).
-        (void)p9_client_reader_pump_once(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client);
     }
 
     // BIND form, PARTIAL walk: the responder answers one short; the session
@@ -2851,12 +3021,11 @@ static void co_prime(struct Spoor *root, const char *name, size_t len) {
     TEST_ASSERT(w != NULL && w->spoor == nc, "co_prime bind walk");
     walkqid_free(w);
     // Drain the async Rclunk ONLY if the close actually clunked: a DIR-typed
-    // prime's close DONATES the fid (G2 -- no Tclunk), and a pump with
-    // nothing pending latches the single-slot loopback client dead.
+    // prime's close DONATES the fid (G2 -- no Tclunk).
     u32 pre_clunk = g_clunk_seen;
     spoor_clunk(nc);
     if (g_clunk_seen != pre_clunk)
-        (void)p9_client_reader_pump_once(&g_client);
+        (void)p9_client_reader_pump_ready(&g_client);
 }
 
 void test_dev9p_cached_open(void) {
@@ -3315,10 +3484,349 @@ void test_dev9p_wb_fsync_flush_and_error(void) {
     fe = dev9p.fsync(f, 0);
     TEST_EXPECT_EQ((u64)(-fe), 28ull, "subsequent fsync returns the latch");
     u32 tw_before_close = g_twrite_seen;
-    spoor_clunk(f);
+    int crc = spoor_clunk_rc(f);
     TEST_EXPECT_EQ((u64)g_twrite_seen, (u64)tw_before_close,
                    "close emits no Twrite (the run was dropped)");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
+                   "the last close returns the latched errno too");
     wb_test_end(root);
+}
+
+// The close flush's failure is the close's result. The control, one variable
+// away: the same staged run, flushed without a failure, closes with 0.
+void test_dev9p_wb_close_returns_flush_error(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (control)");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage (control)");
+    int crc = spoor_clunk_rc(f);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "the close flushed (control)");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "a close whose flush succeeds returns 0");
+    wb_test_end(root);
+
+    root = NULL;
+    f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC
+    crc = spoor_clunk_rc(f);
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "the close flushed");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
+                   "a close whose flush fails returns its errno");
+    wb_test_end(root);
+}
+
+// A thread that dies inside a flushing call cannot send: a death refuses the
+// sender. The run it was flushing stays staged and unlatched -- write()
+// already reported those bytes written -- and the last close flushes it. The
+// control, one variable away: the same fsync on a live thread flushes.
+static struct Spoor     *g_wbd_spoor;
+static int               g_wbd_rc;
+static struct test_dying g_wbd_thread;
+
+static void wbd_fsync(void *arg) {
+    (void)arg;
+    g_wbd_rc = dev9p.fsync(g_wbd_spoor, 0);
+}
+
+void test_dev9p_wb_dying_flush_keeps_run(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create (control)");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage (control)");
+    TEST_EXPECT_EQ((u64)(s64)dev9p.fsync(f, 0), 0ull, "a live fsync succeeds (control)");
+    TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "and flushes the run (control)");
+    TEST_EXPECT_EQ((u64)(s64)spoor_clunk_rc(f), 0ull, "close (control)");
+    wb_test_end(root);
+
+    root = NULL;
+    f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    TEST_ASSERT(test_dying_start(&g_wbd_thread, wbd_fsync, NULL, /*dead_now=*/true),
+                "a dying thread");
+    TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+    test_dying_reap(&g_wbd_thread);
+    u32 seen_dying = g_twrite_seen;
+    int frc        = g_wbd_rc;
+    int crc        = spoor_clunk_rc(f);
+    u32 seen       = g_twrite_seen;
+    u32 cap_len    = g_twrite_cap_len;
+    u64 cap_off    = g_twrite_cap_off;
+    wb_test_end(root);
+
+    TEST_ASSERT(frc < 0, "the dying fsync fails");
+    TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its Twrite: nothing on the wire");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "the last close flushed the kept run");
+    TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
+    TEST_EXPECT_EQ(cap_off, 0ull, "at offset 0");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
+}
+
+// A metadata write drops the append anchor, but a death that ends its flush
+// keeps the run, and the priv must go on staging it: overlaying it on read,
+// flushing it on fsync, and taking appends onto its end, for another Proc
+// sharing the fd too (the truncate was never sent). The live write and fsync
+// stand in for that sharer.
+static void wbd_truncate(void *arg) {
+    (void)arg;
+    g_wbd_rc = dev9p.wstat_native(g_wbd_spoor, T_WSTAT_SIZE, 0, 0, 0, 0);
+}
+
+void test_dev9p_wb_dying_wstat_keeps_staging(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    TEST_ASSERT(test_dying_start(&g_wbd_thread, wbd_truncate, NULL, /*dead_now=*/true),
+                "a dying thread");
+    TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+    test_dying_reap(&g_wbd_thread);
+    u32 seen_dying = g_twrite_seen;
+    long arc       = dev9p.write(f, chunk, 64, 256);
+    u32 seen_app   = g_twrite_seen;
+    int frc        = dev9p.fsync(f, 0);
+    u32 seen       = g_twrite_seen;
+    u32 cap_len    = g_twrite_cap_len;
+    int crc        = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_ASSERT(g_wbd_rc < 0, "the dying truncate fails");
+    TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its flush: nothing on the wire");
+    TEST_EXPECT_EQ((u64)arc, 64ull, "an append onto the kept run is taken");
+    TEST_EXPECT_EQ((u64)seen_app, 0ull, "and staged onto it");
+    TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "a live fsync after it succeeds");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "and flushes the run the truncate kept");
+    TEST_EXPECT_EQ((u64)cap_len, 320ull, "all 320 bytes, the append's too");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
+}
+
+// A metadata write stops staging but keeps the error latch reporting: a flush
+// the server refused dropped the run, and every later write and fsync -- not
+// only the last close -- must go on saying so (the NFS model). The latch is
+// read only on an eligible priv, so stopping staging must not clear that.
+void test_dev9p_wb_wstat_keeps_the_latch(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
+    long fe0 = dev9p.fsync(f, 0);
+    int  wrc = dev9p.wstat_native(f, T_WSTAT_MODE, 0600u, 0, 0, 0);
+    long we  = dev9p.write(f, chunk, 256, 256);
+    long fe1 = dev9p.fsync(f, 0);
+    int  crc = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
+    TEST_EXPECT_EQ((u64)(s64)wrc, 0ull, "the wstat itself succeeds");
+    TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
+    TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28, "and the last close");
+}
+
+// A Loom registration whose flush a death ends fails, with nothing installed:
+// the registered table must never name a priv with a run still staged. The
+// priv keeps the run (the live fsync, standing in for another holder of the
+// fd, flushes it) and is left as it was, so it goes on staging appends.
+static struct Loom *g_wbd_loom;
+
+static void wbd_register(void *arg) {
+    (void)arg;
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    spoor_ref(g_wbd_spoor);                       // the table would adopt it
+    g_wbd_rc = loom_register_handles(g_wbd_loom, &g_wbd_spoor, &rt, 1);
+    if (g_wbd_rc != 0) spoor_clunk(g_wbd_spoor);
+}
+
+void test_dev9p_wb_dying_loom_register_keeps_staging(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    u64 budget0 = dev9p_wb_budget_used();
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    g_wbd_loom = loom_create(8, 16, false);
+    TEST_ASSERT(g_wbd_loom != NULL, "loom_create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_wbd_spoor = f;
+    g_wbd_rc    = 0;
+    TEST_ASSERT(test_dying_start(&g_wbd_thread, wbd_register, NULL, /*dead_now=*/true),
+                "a dying thread");
+    TEST_YIELD_UNTIL(test_dying_done(&g_wbd_thread));
+    test_dying_reap(&g_wbd_thread);
+    bool empty     = g_wbd_loom->reg[0].spoor == NULL;
+    loom_unref(g_wbd_loom);
+    struct dev9p_priv *fp = dev9p_priv_of(f);
+    u32 kept       = fp ? fp->wb_len : 0;
+    u32 seen_dying = g_twrite_seen;
+    int frc        = dev9p.fsync(f, 0);
+    u32 seen       = g_twrite_seen;
+    u32 cap_len    = g_twrite_cap_len;
+    long arc       = dev9p.write(f, chunk, 64, 256);
+    u32 seen_app   = g_twrite_seen;
+    int crc        = spoor_clunk_rc(f);
+    wb_test_end(root);
+    u64 budget     = dev9p_wb_budget_used();
+
+    TEST_EXPECT_EQ((u64)(s64)g_wbd_rc, (u64)(s64)-P9_E_IO,
+                   "the dying registration returns the refused send's EIO");
+    TEST_ASSERT(empty, "and installs nothing");
+    TEST_EXPECT_EQ((u64)kept, 256ull, "the run stays staged");
+    TEST_EXPECT_EQ((u64)seen_dying, 0ull, "a death refused its flush: nothing on the wire");
+    TEST_EXPECT_EQ((u64)(s64)frc, 0ull, "a live fsync after it succeeds");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "and flushes the run the registration kept");
+    TEST_EXPECT_EQ((u64)cap_len, 256ull, "all 256 bytes");
+    TEST_EXPECT_EQ((u64)arc, 64ull, "an append after it is taken");
+    TEST_EXPECT_EQ((u64)seen_app, 1ull, "and staged: the failed registration changed nothing");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and the close reports nothing lost");
+    TEST_EXPECT_EQ(budget, budget0, "the run's budget charge came back");
+}
+
+// A Loom registration refuses a priv whose flush the server refused: the
+// ring's ops never read the latch, and a registered ref would make the ring's
+// teardown the last close, whose report nobody sees. The latch keeps reporting
+// through the sync paths and the last close, as after a metadata write.
+void test_dev9p_wb_loom_register_keeps_the_latch(void) {
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = 28;   // ENOSPC on the flush Twrite
+    long fe0 = dev9p.fsync(f, 0);
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    spoor_ref(f);                                 // the table would adopt it
+    int  rrc   = loom_register_handles(l, &f, &rt, 1);
+    if (rrc != 0) spoor_clunk(f);
+    bool empty = l->reg[0].spoor == NULL;
+    loom_unref(l);
+    int  why   = dev9p_loom_register(f);          // the refusal's own errno
+    long we  = dev9p.write(f, chunk, 256, 256);
+    long fe1 = dev9p.fsync(f, 0);
+    int  crc = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), 28ull, "the flush's ENOSPC is latched");
+    TEST_EXPECT_EQ((u64)(s64)rrc, (u64)(s64)-28,
+                   "the registration returns the latched ENOSPC");
+    TEST_EXPECT_EQ((u64)(s64)why, (u64)(s64)-28, "its dev9p half returns the latched ENOSPC");
+    TEST_ASSERT(empty, "and installs nothing");
+    TEST_EXPECT_EQ((u64)(-we), 28ull, "a write after it still returns the latch");
+    TEST_EXPECT_EQ((u64)(-fe1), 28ull, "and so does an fsync");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28, "and the last close");
+}
+
+// A caught note that interrupts a flush has its Twrite cancelled (flush(5)):
+// EINTR, never applied. The run stays staged and nothing latches, so the next
+// fsync sends it whole. The dev9p half is driven here: the thread holds a note
+// claim, as every caught-note unwind leaves it (thread_caught_note_unwinds),
+// and the flush meets -P9_E_INTR -- injected as a server Rlerror(EINTR), which
+// the client returns as the same value. The client half (a Tflush answered
+// first returns -P9_E_INTR) is 9p_client.note_flush_rflush_first_cancels.
+// The control, one variable away, is wb_server_eintr_latches: no claim.
+void test_dev9p_wb_interrupted_flush_keeps_run(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 512; i++) chunk[i] = wb_pat(i);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->note_claim == 0, "a test thread holds no claim");
+    wb_wire_reset();
+    g_twrite_pat_on = true;
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = P9_E_INTR;
+    t->note_claim = 1;                  // the claim an unwind would hold
+    long fe0    = dev9p.fsync(f, 0);
+    t->note_claim = 0;                  // what the EL0-return tail releases
+    u32  seen0  = g_twrite_seen;
+    long fe1    = dev9p.fsync(f, 0);
+    u32  seen1  = g_twrite_seen;
+    u32  len1   = g_twrite_cap_len;
+    u64  off1   = g_twrite_cap_off;
+    long we     = dev9p.write(f, chunk + 256, 256, 256);
+    int  crc    = spoor_clunk_rc(f);
+    u32  seen2  = g_twrite_seen;
+    bool pat_ok = g_twrite_pat_ok;
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), (u64)P9_E_INTR, "the interrupted fsync returns EINTR");
+    TEST_EXPECT_EQ((u64)seen0, 1ull, "its Twrite went out and was cancelled");
+    TEST_EXPECT_EQ((u64)fe1, 0ull, "the retry succeeds: nothing latched");
+    TEST_EXPECT_EQ((u64)seen1, 2ull, "the retry resends the run");
+    TEST_EXPECT_EQ((u64)len1, 256ull, "all of it");
+    TEST_EXPECT_EQ(off1, 0ull, "at its offset");
+    TEST_EXPECT_EQ((u64)we, 256ull, "a later append stages");
+    TEST_EXPECT_EQ((u64)seen2, 3ull, "the close flushes it");
+    TEST_EXPECT_EQ((u64)(s64)crc, 0ull, "and returns 0");
+    TEST_ASSERT(pat_ok, "every byte on the wire is the byte written");
+}
+
+// A server that answers a flush's Twrite with Rlerror(EINTR) has failed the
+// write: with no note claim the EINTR is the server's, not a cancellation, so
+// it latches and drops the run like ENOSPC, and the last close reports it
+// rather than handing the run to a closer and returning 0.
+void test_dev9p_wb_server_eintr_latches(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->note_claim == 0, "no note claim");
+    wb_wire_reset();
+    TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 256, 0), 256ull, "stage");
+    g_twrite_fail_ecode = P9_E_INTR;
+    long fe0  = dev9p.fsync(f, 0);
+    long fe1  = dev9p.fsync(f, 0);
+    u32  seen = g_twrite_seen;
+    int  crc  = spoor_clunk_rc(f);
+    u32  seen_close = g_twrite_seen;
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)(-fe0), (u64)P9_E_INTR, "the fsync returns the server's EINTR");
+    TEST_EXPECT_EQ((u64)(-fe1), (u64)P9_E_INTR, "and it latched: the next fsync returns it");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "nothing was resent");
+    TEST_EXPECT_EQ((u64)seen_close, 1ull, "the close sends nothing: the run was dropped");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-P9_E_INTR, "and the last close reports it");
 }
 
 // A non-append write (the Go buildid interior pwrite) flushes the staged run
@@ -3350,7 +3858,8 @@ void test_dev9p_wb_nonappend_writethrough(void) {
                    "wstat ok");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "wstat flushed the run first");
     struct dev9p_priv *fp = dev9p_priv_of(f);
-    TEST_ASSERT(fp != NULL && !fp->wb_eligible, "wstat stops staging");
+    TEST_ASSERT(fp != NULL && !fp->wb_known, "wstat stops staging (no append anchor)");
+    TEST_ASSERT(fp->wb_buf == NULL && fp->wb_cap == 0, "and gives back the dead buffer");
     wb_wire_reset();
     TEST_EXPECT_EQ((u64)dev9p.write(f, chunk, 100, 1500), 100ull, "post-wstat write");
     TEST_EXPECT_EQ((u64)g_twrite_seen, 1ull, "…goes straight through");
@@ -3843,7 +4352,7 @@ void test_dev9p_cape(void) {
         TEST_EXPECT_EQ((u64)sts[1].mode, (u64)0100644u, "caped walk: the server's mode");
         walkqid_free(w);
         spoor_clunk(nc);
-        (void)p9_client_reader_pump_once(&g_client);   // drain the async Rclunk
+        (void)p9_client_reader_pump_ready(&g_client);   // drain the async Rclunk
     }
     teardown(root);
 

@@ -14,9 +14,11 @@
 #include <thylacine/caps.h>
 #include <thylacine/errno.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>
 
 // LS-K syscall handlers (non-static in syscall.c; no public header).
 extern s64 sys_getpid_handler(u64, u64, u64, u64);
@@ -162,4 +164,213 @@ void test_clock_settime_cap_gate(void) {
         "SYS_CLOCK_SETTIME with CAP_HOSTOWNER + NULL buffer must return -EFAULT");
     TEST_ASSERT(own_mono == -T_E_INVAL,
         "SYS_CLOCK_SETTIME MONOTONIC must be EINVAL even with CAP_HOSTOWNER");
+}
+
+// ---------------------------------------------------------------------------
+// VIVARIUM 6.29: vivarium_clock_sleep, the sleep under the vivarium's
+// nanosleep and clock_nanosleep rows. Each leg runs it in a thread of a fresh
+// Proc through test_caught_run.
+// ---------------------------------------------------------------------------
+
+#define CNS_MS  1000000ull
+#define CNS_SEC 1000000000ull
+
+// A Linux leg's request is long enough that no stall between the park and the
+// post lets its deadline win, and short enough that a sleeper the note missed
+// still returns inside the fixture's 2 s release wait rather than stranding.
+// The native control rides its request out, so it is shorter.
+#define CNS_LONG (1500 * CNS_MS)
+#define CNS_CTL  (1000 * CNS_MS)
+
+static bool g_cns_wall;
+static bool g_cns_abs;
+static u64  g_cns_req;
+static u64  g_cns_rem;
+
+static void cns_set(bool wall, bool abstime, u64 req_ns) {
+    g_cns_wall = wall;
+    g_cns_abs  = abstime;
+    g_cns_req  = req_ns;
+    g_cns_rem  = 0;
+}
+
+// SIG_DFL: an interrupt posted to a Proc with this disposition arms the
+// terminate latch rather than a caught note.
+static const struct viv_ksigaction g_cns_sig_dfl = {
+    .handler = 0, .flags = 0, .restorer = 0, .mask = 0 };
+
+static long cns_sleep(void *arg) {
+    (void)arg;
+    return (long)vivarium_clock_sleep(g_cns_wall, g_cns_abs, g_cns_req, &g_cns_rem);
+}
+
+// A caught note ends a Linux sleeper before its deadline with EINTR and the time
+// left, and a native sleeper rides the note out to its deadline. A deadline
+// already past returns 0 at once even with a note pending -- the opposite of
+// pause()'s zero timeout -- and an absolute deadline of 0, tsleep's no-deadline
+// sentinel, is a past deadline, never a sleep without one.
+void test_clock_nanosleep_caught_note(void);
+void test_clock_nanosleep_caught_note(void) {
+    cns_set(false, false, CNS_LONG);
+    struct Proc *lin = test_caught_proc(true);
+    u64 l0 = timer_now_ns();
+    struct test_caught_leg leg = test_caught_run(lin, cns_sleep, NULL, NULL, NULL, false);
+    u64 leg_ns = timer_now_ns() - l0;
+    u64 leg_rem = g_cns_rem;
+    test_caught_proc_free(lin, &leg);
+
+    cns_set(false, false, CNS_CTL);
+    struct Proc *nat = test_caught_proc(false);
+    u64 t0 = timer_now_ns();
+    struct test_caught_leg ctl = test_caught_run(nat, cns_sleep, NULL, NULL, NULL, false);
+    u64 ctl_ns = timer_now_ns() - t0;
+    test_caught_proc_free(nat, &ctl);
+
+    cns_set(false, false, CNS_LONG);
+    struct Proc *pend = test_caught_proc(true);
+    u64 e0 = timer_now_ns();
+    struct test_caught_leg early = test_caught_run(pend, cns_sleep, NULL, NULL, NULL, true);
+    u64 early_ns = timer_now_ns() - e0;
+    u64 early_rem = g_cns_rem;
+    test_caught_proc_free(pend, &early);
+
+    cns_set(false, false, 0);
+    struct Proc *now = test_caught_proc(true);
+    struct test_caught_leg zero = test_caught_run(now, cns_sleep, NULL, NULL, NULL, true);
+    test_caught_proc_free(now, &zero);
+
+    cns_set(false, true, 0);
+    struct Proc *sen = test_caught_proc(false);
+    struct test_caught_leg sentinel = test_caught_run(sen, cns_sleep, NULL, NULL, NULL, false);
+    test_caught_proc_free(sen, &sentinel);
+
+    // The interrupt has no handler, so its post arms the terminate latch and
+    // the sleep unwinds as a death. A peer could still revoke the latch before
+    // the thread's tail, so the sleep must not return 0 short of its deadline.
+    cns_set(false, false, CNS_LONG);
+    struct Proc *dfl = test_caught_proc(true);
+    bool dfl_set = dfl && viv_sigtab_set(dfl->sigtab, VIV_SIGNOTE_INTERRUPT, &g_cns_sig_dfl);
+    u64 d0 = timer_now_ns();
+    struct test_caught_leg death = test_caught_run(dfl_set ? dfl : NULL, cns_sleep, NULL, NULL,
+                                                   NULL, true);
+    u64 death_ns = timer_now_ns() - d0;
+    u64 death_rem = g_cns_rem;
+    test_caught_proc_free(dfl, &death);
+
+    TEST_ASSERT(lin != NULL && nat != NULL && pend != NULL && now != NULL && sen != NULL &&
+                dfl_set, "the Procs");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+                "the Linux sleeper parked, the note posted, the sleep returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends the sleep before its deadline");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR");
+    // rem is the deadline less the clock at the note, and both ends of the
+    // sleep lie inside the leg, so it is the request less at most the leg's
+    // length: exact bounds, however slow the host.
+    TEST_ASSERT(leg_rem > 0 && leg_rem < CNS_LONG,
+                "with the time left, which is less than the request");
+    TEST_ASSERT(leg_rem + leg_ns >= CNS_LONG,
+                "and is the request less at most the time the leg took");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+                "control: the native sleeper parked, the note posted, the sleep returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native sleeper and it slept again");
+    TEST_EXPECT_EQ(ctl.rc, 0L, "control: the native sleep ends on its deadline");
+    TEST_ASSERT(ctl_ns >= CNS_CTL, "control: and not before it");
+    TEST_ASSERT(early.posted && early.on_post && early.joined,
+                "a note pending at entry ends the sleep at once");
+    TEST_EXPECT_EQ(early.rc, -(long)T_E_INTR, "EINTR, the deadline still ahead");
+    TEST_ASSERT(early_rem > 0 && early_rem <= CNS_LONG &&
+                early_rem + early_ns >= CNS_LONG,
+                "with all of the request left but the time the leg took");
+    TEST_ASSERT(zero.posted && zero.on_post && zero.joined, "a zero sleep returned at once");
+    TEST_EXPECT_EQ(zero.rc, 0L,
+                   "a zero sleep with a note pending is 0: the expiry wins (pause's is EINTR)");
+    TEST_ASSERT(!sentinel.parked && sentinel.on_post && sentinel.joined,
+                "an absolute deadline of 0 has passed: no sleep without a deadline");
+    TEST_EXPECT_EQ(sentinel.rc, 0L, "and it returns 0");
+    TEST_ASSERT(!death.parked && death.on_post && death.joined,
+                "a pending terminate note unwinds the sleep at once");
+    TEST_EXPECT_EQ(death.rc, -(long)T_E_INTR,
+                   "as EINTR, never a short 0 a surviving thread would read as a full sleep");
+    TEST_ASSERT(death_rem > 0 && death_rem <= CNS_LONG && death_rem + death_ns >= CNS_LONG,
+                "with the time left");
+}
+
+// The wall clock's offset when the step test began; each leg restores it.
+static u64 g_cnw_off0;
+static u64 g_cnw_old_dl;
+
+static void cnw_restore(void) {
+    timer_reset_wallclock_anchor_ns(timer_now_ns() + g_cnw_off0);
+}
+
+static bool cnw_step_forward(void *arg) {
+    (void)arg;
+    timer_reset_wallclock_anchor_ns(timer_realtime_ns() + 60ull * CNS_SEC);
+    return true;
+}
+
+// Step back, then outlast the monotonic deadline the instant had before the
+// step: a sleeper the step did not reach returns at it.
+static bool cnw_step_back(void *arg) {
+    (void)arg;
+    timer_reset_wallclock_anchor_ns(timer_realtime_ns() - 60ull * CNS_SEC);
+    u64 dl = g_cnw_old_dl + 200 * CNS_MS;
+    while (timer_now_ns() < dl) sched();
+    return true;
+}
+
+static void cnw_release(void *arg) {
+    (void)arg;
+    cnw_restore();
+}
+
+// TIMER_ABSTIME on CLOCK_REALTIME follows the wall clock (POSIX): a step past
+// the instant ends the sleep at once, and a step back sleeps on toward the
+// instant's new place. A relative sleep never consults the wall clock, so a step
+// leaves it alone. Native Procs: the note the fixture posts is ridden out.
+void test_clock_nanosleep_wall_step(void);
+void test_clock_nanosleep_wall_step(void) {
+    g_cnw_off0 = timer_wallclock_offset_ns_now();
+
+    // The instant is 1.5 s ahead, inside the fixture's 2 s release wait, so a
+    // sleeper the step missed returns there late rather than stranded.
+    cns_set(true, true, timer_realtime_ns() + 1500 * CNS_MS);
+    struct Proc *fp = test_caught_proc(false);
+    struct test_caught_leg fwd = test_caught_run(fp, cns_sleep, cnw_step_forward, NULL,
+                                                 NULL, false);
+    cnw_restore();
+    test_caught_proc_free(fp, &fwd);
+
+    cns_set(true, true, timer_realtime_ns() + 1 * CNS_SEC);
+    g_cnw_old_dl = timer_now_ns() + 1 * CNS_SEC;
+    struct Proc *bp = test_caught_proc(false);
+    struct test_caught_leg back = test_caught_run(bp, cns_sleep, cnw_step_back, cnw_release,
+                                                  NULL, false);
+    cnw_restore();
+    test_caught_proc_free(bp, &back);
+
+    cns_set(true, false, 300 * CNS_MS);
+    struct Proc *rp = test_caught_proc(false);
+    u64 t0 = timer_now_ns();
+    struct test_caught_leg rel = test_caught_run(rp, cns_sleep, cnw_step_forward, NULL,
+                                                 NULL, false);
+    u64 rel_ns = timer_now_ns() - t0;
+    cnw_restore();
+    test_caught_proc_free(rp, &rel);
+
+    TEST_ASSERT(fp != NULL && bp != NULL && rp != NULL, "the Procs");
+    TEST_ASSERT(fwd.parked && fwd.joined, "the absolute sleeper parked, then returned");
+    TEST_ASSERT(!fwd.prepped && !fwd.posted && fwd.on_post,
+                "a step past the instant ended the sleep at once");
+    TEST_EXPECT_EQ(fwd.rc, 0L, "with 0: the instant has passed");
+    TEST_ASSERT(back.parked && back.prepped,
+                "after a step back the sleeper still slept, past its old deadline");
+    TEST_ASSERT(back.posted && back.rode_out && !back.on_post,
+                "control: the note was ridden out");
+    TEST_ASSERT(back.joined, "the step forward to the true time ended it");
+    TEST_EXPECT_EQ(back.rc, 0L, "with 0");
+    TEST_ASSERT(rel.parked && rel.prepped, "a relative sleep slept on through the step");
+    TEST_ASSERT(rel.joined, "and returned");
+    TEST_EXPECT_EQ(rel.rc, 0L, "with 0 on its deadline");
+    TEST_ASSERT(rel_ns >= 300 * CNS_MS, "which the step did not bring forward");
 }

@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Graphical seat incarnations
 
@@ -61,6 +61,17 @@ in a way an array would not be: reparenting an orphan is a splice, not a
 re-index, and the orphan-adopter fallback (`init`, else `kproc`) is what
 keeps the tree rooted and therefore keeps every Proc findable.
 
+Every walk is a pre-order DFS stepped by `proc_walk_next`, which follows the
+child, sibling and parent links instead of recursing, so a walk costs the
+same stack however deep the tree is -- and nothing bounds the depth:
+`PROC_CHILD_MAX` caps a parent's children, not its descendants, so an EL0
+chain of single children grows as far as memory allows, and a walk that
+spent a frame per level would carry any `/proc` lookup past the 16 KiB kernel
+stack. The links hold still across a walk because it runs under
+`g_proc_table_lock`, and they are written only by fork, the reap and a dying
+Proc's own exit, never from a walk callback (`proc_for_each`'s contract
+forbids a callback re-entering rfork, exits or wait_pid).
+
 ## Contract
 
 
@@ -83,8 +94,10 @@ explicit at both ends, and the paired ACQUIRE load lives in `devproc_debug_autho
 |---|---|
 | `proc_alloc` / `proc_free` | allocate a KP_ZERO'd Proc with a fresh pid + stripes + pgtable + handle table + note queue; free one that is ZOMBIE with no threads and no children |
 | `rfork` / `rfork_with_caps` / `rfork_forked` / `rfork_forked_with_caps` | the sole Proc-creation chokepoint; `RFPROC` **or** `RFPROC\|RFMEM`, every other flag **extincts**. The `_forked_with_caps` variant is the Linux `clone`'s (syscall.c), which passes `caps_mask = CAP_ALL` -- a clone has no caps argument, so the child inherits the parent's full set minus the elevation strip |
+| `rfork_spawn_held` | `RFPROC` with the child published already marked UNBORN, for the `SPAWN_DEBUG_HELD` spawn ([[sub-kernel-birth-hold]]) |
+| `spawn_await_birth` / `spawn_birth_released` | the held spawn's synchronous return: the vfork park's discipline (`await_child_release`, shared with `vfork_await_release`) waiting until the child is not UNBORN, not ALIVE, or not in the list; the park sleeps death-only, so the caller's own latch does not return it (5g) |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
-| `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
+| `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG`; `WAIT_PID_NOTEINTR` (-2) when a caught note ends a Linux `wait4` |
 | `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | **policy only** since L-2 — "has an address space" and "is exempt"; the counters and their arithmetic live on the `AddrSpace` ([[lock-vma]] for what the lock does and does not buy) |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
@@ -178,7 +191,9 @@ the table lock. Per iteration it walks `p->children` once, applying the
 selector (`-1` any / `>0` that pid / `0` the caller's group / `< -1` group
 `-want_pid`) and collecting three facts: is there any matching child, is
 there a matching ZOMBIE, is there a matching child with a PTY-1e report
-latch. Precedence is exit > continue > stop. Then:
+latch (ALIVE and not dying: a dying child is not stopped, so its latches wait
+and its zombie reports the death, DEBUG-FS-DESIGN 5g). Precedence is
+exit > continue > stop. Then:
 
 - no match → `-1` (the POSIX `ECHILD` shape);
 - zombie → unlink under the lock, then **outside** it spin each Thread's
@@ -188,7 +203,17 @@ latch. Precedence is exit > continue > stop. Then:
 - `WNOHANG` → `0`, an unambiguous sentinel because pid 0 is never a child;
 - otherwise register a stack `poll_waiter` on `child_waiters` *inside the
   same critical section as the no-zombie scan*, release, and park on the
-  caller's own private rendez.
+  caller's own private rendez (`sleep_noteintr`). `SLEEP_INTR` returns
+  `-1`; `SLEEP_NOTEINTR` returns `WAIT_PID_NOTEINTR`, nothing reaped or
+  reported (ARCH 8.8.3, [[chg-2026-10-05-signal7-list]]). The data wins: a
+  child's exit wakes `child_waiters` (setting `pw->ready`) before it posts
+  `child_exit`, and the caught arm tests the cond first, so a wait the note
+  unwinds found no reportable child. A wake for a sibling's exit is a wake
+  like any other: the re-scan finds the wanted child still alive and
+  re-parks, and the sibling's `child_exit`, if caught, then ends the wait
+  -- a Linux `wait4` for one pid is interrupted by another child's
+  `SIGCHLD` the same way. Only a Linux `wait4` sets `note_interruptible`;
+  a native wait stays death-only.
 
 That last step is the whole of the #344 multi-waiter lift. The predicate
 (`child_wait_ready_cond`) reads **only** `pw->ready` — it touches no lineage
@@ -226,6 +251,18 @@ restriction to all of them. Both walk the table and so require
 `g_proc_table_lock`, and both skip the walk when `addrspace_ref_count == 1`,
 which is the ordinary case.
 
+**The image carries `CAP_JIT` while it holds a code alias (2026-10-07; B-2b audit
+r2).** A code region is that cap's authority, and it belongs to the image: an
+RFMEM child, born without the cap, keeps the aliases once their creator is
+reaped, and from then on no mapper's `caps` names them. So the join ORs `CAP_JIT`
+in whenever `AddrSpace.code_vmas` is nonzero, before the sole-mapper fast path
+([[sub-kernel-addrspace]]). A stale zero read beside a create is harmless -- the
+creator passed the `CAP_JIT` gate and is a live mapper -- and the count matters
+only once that creator is gone: its own exit publishes it a ZOMBIE under
+`g_proc_table_lock` after the store, a reap can only follow, and the join runs
+under the same lock. The caps union has one consumer, the debug cover rule
+([[sub-kernel-devproc]]); a new one inherits a cap no mapper may hold.
+
 `shared` is **references minus the zombies the traversal saw**, and each half of
 that earns its place. It asks whether another Proc could still *use* the image,
 and a zombie cannot -- an attach refuses a non-`ALIVE` target and the stopped-only
@@ -239,12 +276,10 @@ true -- the direction that matters, since a missed sharer at the redeem is a
 privilege question. The caps and flags union still counts zombies: their bytes are
 still in the image.
 
-The traversal is **iterative**. The recursive `proc_for_each_walk` costs one C
-frame per tree level, and the join runs inside a walk already paying that, so
-recursing would put two full-depth descents on one 16 KiB kernel stack -- on a
-path any EL0 program can drive, since `maps` is mode 0444 and its read asks the
-seal, which asks the join. Nothing bounds tree *depth*. The sibling and parent
-links already encode the return path a frame would have held.
+The traversal is **nested**: the join runs inside a walk, on a path any EL0
+program can drive, since `maps` is mode 0444 and its read asks the seal, which
+asks the join. Both walks step with `proc_walk_next`, so the nesting costs no
+stack per tree level.
 
 Publication inherits the **debug taint**, in the same lock hold as the link, so no
 gate or sweep can observe a child that is visible but not yet restricted. It must
@@ -255,6 +290,15 @@ join already refuses an `RFMEM` child by reading the parent's bit at the access,
 so inheriting would add nothing and would leave a one-way bit outliving the
 sharing onto an image the seal was never about; and at a COW fork it would settle
 decision A by accident.
+
+The **birth hold** is stored in that same lock hold (2026-09-29,
+[[sub-kernel-birth-hold]]). `rfork_internal` takes a `birth_hold` argument,
+which only `rfork_spawn_held` sets, and stores UNBORN into the child's
+`debug_birth_hold` before the child is linked, for the taint's reason: a
+reparent, a `/proc` walk or the orphan rule must never find a held child linked
+but unmarked. In the `rfork` ledger the mark is fresh: it starts NONE, is set
+only when the spawn asks, and is never copied, so a later `rfork` of a released
+child starts NONE too.
 
 ### Image replacement: what must be reset, and why those things
 
@@ -372,6 +416,25 @@ The three lifecycle states are `INVALID(0)` / `ALIVE` / `ZOMBIE`, with
 There is no REAPED state — by the time `wait_pid` returns the pid, the
 descriptor is freed and its magic clobbered.
 
+The top two bits are the final close's (2026-10-07, ARCH 7.9.1 part B,
+[[sub-kernel-death]]): `PROC_FLAG_EXIT_CLOSING` (bit 31), set by
+`proc_close_handles_at_exit` before its first close (and by `exits()` under
+`g_proc_table_lock`, just before it drops the lock for that close; the OR is
+idempotent and nothing clears it), so a kill finds an
+`exits()` close terminating although it set no group exit message; and
+`PROC_FLAG_EXIT_CLOSE_FORCED` (bit 30), set by `proc_group_kill` when it finds
+the Proc terminating, which lifts the final close's hold on death. Neither is
+inherited or ever cleared: both mark a Proc that is going.
+
+`proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
+(bit 29, above the caught-note claim field), stamped by the test link helpers (`proc_test_link`,
+`proc_test_link_child`) on every Proc they splice into the table. rfork links
+a child through `proc_link_child` directly and copies only the debug taint
+from its parent, so the mark means exactly "a test linked this", and the test
+runner's `proc_test_release_leaked` unlinks every marked child of kproc that a
+failing test left behind ([[sub-substrate-gates]]). Its assert names every
+flag below it.
+
 ## Concurrency
 
 One lock: [[lock-proc-table]], `g_proc_table_lock`, file-static in `proc.c`
@@ -454,6 +517,9 @@ child cap, narrowed-allowance parent, or any allocation failure.
 `wait_pid_for` returns `-1` for no-match **and** for "this Proc is
 group-terminating" (a `SLEEP_INTR` unwind) — the caller cannot distinguish,
 which is correct because in both cases the right move is to stop waiting.
+`WAIT_PID_NOTEINTR` (-2) is kept distinct because there the right move
+differs: `viv_wait4` answers it with `EINTR`, checked before its `ECHILD`
+line, so the guest retries rather than concluding it has no children.
 The POSIX cores use `-T_E_ACCES` for every EPERM contour (`-T_E_PERM` would
 alias the bare `-1` sentinel), `-T_E_SRCH` for no-such-process,
 `-T_E_INVAL` for a negative pgid.
@@ -501,7 +567,11 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   `proc_setsid` makes the child a session leader, never copied by `rfork`, and
   read on the death side by [[sub-kernel-death]]'s session hangup.
 - `wait_pid_for`'s register-then-observe: the waiter registration and the
-  no-zombie scan must stay in **one** critical section.
+  no-zombie scan must stay in **one** critical section. `await_child_release`
+  (the vfork suspend and the held spawn's birth wait) carries the same rule,
+  and every write of the birth-hold mark wakes `child_waiters` under the lock,
+  or a held spawn strands. Its sleep must stay death-only: a latch a peer can
+  revoke must not return a parent early (DEBUG-FS-DESIGN 5g).
 - The I-32 charge helpers hold **no** counter state here; they route to the
   address space and decide only exemption. A caller that charges without
   [[lock-vma]] does not corrupt the count — the compare-and-swap prevents a lost
@@ -560,6 +630,9 @@ creation decision.
 fork+exec work: `rfork_forked_with_caps` (the Linux clone), the PHENO_LINUX
 note-mask inheritance (#127), and Design D's phenotype commit in
 `proc_exec_replace`.
+[[chg-2026-10-05-signal7-list]] made `wait_pid_for`'s park end for a caught
+note to a Linux `wait4` (`WAIT_PID_NOTEINTR`; witness
+`rendez.caught_note_ends_wait4`).
 
 ## proc_free and the phenotype's socket cache (2026-09-29, NP-5)
 

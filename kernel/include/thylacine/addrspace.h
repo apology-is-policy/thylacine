@@ -146,6 +146,12 @@ struct AddrSpace {
     // pgtable_pages.
     u32            file_pages;
 
+    // B-2b audit r2: how many of `vmas` are aliases of a code Burrow (writer,
+    // exec or sealed). Kept by vma_insert_in / vma_remove_in under `lock` and
+    // stored atomically for the one lockless reader, the image join, which
+    // counts a space holding any as carrying CAP_JIT (struct ProcImageJoin).
+    u32            code_vmas;
+
     // B-1a' audit F4: this space's identity, for the records that outlive it.
     // The eager charge record on a Burrow names the address space that PAID
     // (Burrow.charge_as_id), never the pid: a pid survives exec and would name
@@ -157,8 +163,8 @@ struct AddrSpace {
 _Static_assert(sizeof(struct AddrSpace) == 72,
                "AddrSpace is 72 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
-               "page_budget + page_peak + pgtable_pages + file_pages (28, "
-               "padded to 32) + id (8). "
+               "page_budget + page_peak + pgtable_pages + file_pages + "
+               "code_vmas (32) + id (8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM

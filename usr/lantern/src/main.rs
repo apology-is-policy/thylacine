@@ -2,7 +2,8 @@
 // directory of Markdown slides one at a time: rich under Halcyon, the same
 // payload without frames on serial, a plain concatenation down a pipe. The
 // manifest, the key map and the navigation live in the library; this body
-// supplies the files, the tier and the keystrokes.
+// supplies the files, the tier and the keystrokes. A picture slide is shown by
+// `view` in a process of its own (LANTERN-DESIGN 14); lantern decodes nothing.
 //
 // Memory: one slide at a time. The deck is VALIDATED whole at startup (each
 // slide read, checked and dropped) and each slide is re-read when it is shown,
@@ -33,10 +34,14 @@ use libthyla_rs::eprintln;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::File;
 use libthyla_rs::io::{self, Read};
+use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::println;
+use libthyla_rs::process::{Command, Stdio};
+use libthyla_rs::time::{self, Duration};
+use libthyla_rs::T_CAP_CSPRNG_READ;
 
 use kaua::input::Parser;
-use lantern::deck::{self, Deck};
+use lantern::deck::{self, Deck, SlideKind};
 use lantern::nav::{action_for, Action};
 use manual::{format as section, sanitize, SECTION_MAX};
 
@@ -103,6 +108,11 @@ fn parse_args() -> Result<Args, i64> {
         io::err(USAGE.as_bytes());
         return Err(2);
     }
+    if operands[0].is_empty() {
+        eprintln!("lantern: the deck directory name is empty");
+        io::err(USAGE.as_bytes());
+        return Err(2);
+    }
     Ok(Args {
         dir: operands.remove(0),
         beacon,
@@ -140,11 +150,11 @@ fn show_mode() -> Show {
     }
 }
 
-/// The wrap width, as `manual` computes it: only at a plain tier, only on a
-/// terminal, only when `/dev/winsize` reports one. At the rich tier the
-/// renderer owns the width and lantern must not wrap for it.
+/// The wrap width, by `manual`'s own rule: only at a plain tier, only on the
+/// console, only when `/dev/winsize` reports one. A tile's pts is a terminal,
+/// but that leaf is the console's width, not the tile's.
 fn plain_width(tier: Tier) -> Option<usize> {
-    if tier == Tier::Rich || !is_terminal(1) {
+    if !manual::wraps_at_console(tier, libthyla_rs::fd_devclass(1)) {
         return None;
     }
     let mut f = File::open("/dev/winsize").ok()?;
@@ -168,9 +178,27 @@ fn read_capped(f: &mut File, cap: usize) -> Result<Vec<u8>, Error> {
     }
 }
 
+/// Open a file of the deck as a regular file IN the deck directory: a symbolic
+/// link is refused (`T_ONOFOLLOW`), and so is anything but a regular file. The
+/// name rules keep a slide's name inside the deck; this keeps its content there,
+/// so a deck someone else wrote cannot put the presenter's own files on the
+/// screen (LANTERN-DESIGN 8).
+fn open_deck_file(path: &str) -> Result<File, String> {
+    let shown = sanitize(path, false);
+    let f = File::open_nofollow(path).map_err(|e| match e {
+        Error::SymlinkLoop => format!("{}: a link; a deck's files are files in its directory", shown),
+        e => format!("{}: {}", shown, e),
+    })?;
+    match f.metadata() {
+        Ok(m) if m.is_file() => Ok(f),
+        Ok(_) => Err(format!("{}: not a regular file", shown)),
+        Err(e) => Err(format!("{}: {}", shown, e)),
+    }
+}
+
 fn read_text(path: &str, cap: usize) -> Result<String, String> {
     let shown = sanitize(path, false);
-    let mut f = File::open(path).map_err(|e| format!("{}: {}", shown, e))?;
+    let mut f = open_deck_file(path)?;
     let bytes = read_capped(&mut f, cap).map_err(|e| match e {
         Error::NoMemory => format!("{}: larger than {} bytes", shown, cap),
         e => format!("{}: {}", shown, e),
@@ -241,12 +269,144 @@ fn slide_source(dir: &str, name: &str) -> Result<String, Vec<String>> {
     }
 }
 
+/// The most of `view`'s standard output, and of its standard error, that is
+/// kept: a reference is under 200 bytes and a reason is one line. The rest is
+/// read and dropped, so a child that writes more cannot block on a full pipe.
+const VIEW_REPLY_MAX: usize = 1024;
+
+/// How long `view` may go without a byte or an exit before it is killed. A
+/// decode within its budget and an upload take well under a second; the bound
+/// exists so a hung child cannot freeze the talk, or the check before it,
+/// while lantern is not reading keys.
+const VIEW_STALL_MS: u32 = 30_000;
+
+/// The step of the reap once both pipes are closed: `view` exits as it closes
+/// them, so the first look nearly always finds it gone.
+const VIEW_REAP_STEP_MS: u32 = 10;
+
+/// The picture checker and placer, named by its absolute path: a spawn resolves
+/// a relative name against the working directory, never a search path, so a bare
+/// `view` would run whatever file of that name sits where lantern was started --
+/// a deck directory included.
+const VIEW: &str = "/bin/view";
+
+/// All `view` needs: the random reference it places a picture under. A decoder
+/// that a hostile picture subverts holds none of lantern's other capabilities;
+/// its identity, namespace and environment are still the presenter's.
+const VIEW_CAPS: u64 = T_CAP_CSPRNG_READ;
+
+/// Run `view <mode> -` with `picture` as its standard input, and collect its
+/// exit status, standard output and standard error, both drained together so
+/// neither pipe can fill while the other is read. `Err` when it cannot run or
+/// stalls.
+fn run_view(mode: &str, picture: File) -> Result<(i64, Vec<u8>, Vec<u8>), String> {
+    let mut child = Command::new(VIEW)
+        .caps(VIEW_CAPS)
+        .arg(mode)
+        .arg("-")
+        .stdin(Stdio::File(picture))
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+        .map_err(|e| format!("cannot run view: {}", e))?;
+    let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(String::from("cannot run view: no pipe to read its answer"));
+    };
+    let mut pipes = [out, err];
+    let mut kept: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
+    let mut open = [true, true];
+    let mut buf = [0u8; 512];
+    while open[0] || open[1] {
+        let mut ps = PollSet::new();
+        for (i, p) in pipes.iter().enumerate() {
+            if open[i] {
+                ps.add_raw(p.as_raw_fd(), PollEvents::READ);
+            }
+        }
+        let ready: Vec<i32> = match ps.poll(PollTimeout::Millis(VIEW_STALL_MS)) {
+            Ok(events) => events.map(|e| e.fd).collect(),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("cannot wait for view: {}", e));
+            }
+        };
+        if ready.is_empty() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("view made no progress for {} seconds", VIEW_STALL_MS / 1000));
+        }
+        for i in 0..2 {
+            if !open[i] || !ready.contains(&pipes[i].as_raw_fd()) {
+                continue;
+            }
+            match pipes[i].read(&mut buf) {
+                Ok(0) | Err(_) => open[i] = false,
+                Ok(n) => {
+                    let room = VIEW_REPLY_MAX - kept[i].len();
+                    kept[i].extend_from_slice(&buf[..n.min(room)]);
+                }
+            }
+        }
+    }
+    // Both pipes are closed. A child that closed them and lives on is held to
+    // the same bound as a silent one, never waited on without end.
+    let mut waited = 0;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s.code().unwrap_or(1) as i64,
+            Ok(None) if waited < VIEW_STALL_MS => {
+                let _ = time::sleep(Duration::from_millis(VIEW_REAP_STEP_MS as u64));
+                waited += VIEW_REAP_STEP_MS;
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("view made no progress for {} seconds", VIEW_STALL_MS / 1000));
+            }
+            Err(e) => return Err(format!("view: wait failed: {}", e)),
+        }
+    };
+    let [out, err] = kept;
+    Ok((status, out, err))
+}
+
+/// The first line `view` wrote on standard error: its reason, alone.
+fn view_reason(err: &[u8]) -> String {
+    let text = String::from_utf8_lossy(err);
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.is_empty() {
+        String::from("view failed without a reason")
+    } else {
+        sanitize(line, false)
+    }
+}
+
+/// Check a picture slide as the talk will show it: `view --check`, with the
+/// picture as its standard input, so what is checked and what is shown are one
+/// file and one decoder. `Err` carries the line to print.
+fn check_picture(dir: &str, name: &str) -> Result<(), String> {
+    let shown = sanitize(name, false);
+    let f = open_deck_file(&slide_path(dir, name))?;
+    match run_view("--check", f) {
+        Ok((0, _, _)) => Ok(()),
+        Ok((_, _, err)) => Err(format!("{}: {}", shown, view_reason(&err))),
+        Err(why) => Err(format!("{}: {}", shown, why)),
+    }
+}
+
 /// Validate the whole deck, holding one slide at a time. Returns the number of
 /// slides that failed, having printed every diagnostic.
 fn validate(dir: &str, d: &Deck) -> usize {
     let mut bad = 0;
     for name in &d.slides {
-        if let Err(lines) = slide_source(dir, name) {
+        let checked = match deck::kind(name) {
+            Some(SlideKind::Picture) => check_picture(dir, name).map_err(|l| alloc::vec![l]),
+            _ => slide_source(dir, name).map(|_| ()),
+        };
+        if let Err(lines) = checked {
             bad += 1;
             for l in lines {
                 eprintln!("lantern: {}", l);
@@ -254,6 +414,39 @@ fn validate(dir: &str, d: &Deck) -> usize {
         }
     }
     bad
+}
+
+/// Place a picture in this pane with `view --embed` and return the reference to
+/// write where the picture belongs, or why it could not be placed.
+fn embed_picture(dir: &str, name: &str) -> Result<Vec<u8>, String> {
+    let f = open_deck_file(&slide_path(dir, name))?;
+    let (status, out, err) = run_view("--embed", f)?;
+    if status != 0 {
+        return Err(view_reason(&err));
+    }
+    if !lantern::is_reference(&out) {
+        return Err(String::from("view answered with something other than one picture reference"));
+    }
+    Ok(out)
+}
+
+/// A picture slide: the picture itself where one can be shown, the rich tier;
+/// everywhere else, and wherever `view` could not place it, its stand-in, which
+/// then says why (LANTERN-DESIGN 14).
+fn paint_picture(out: &mut Vec<u8>, tier: Tier, width: Option<usize>, dir: &str, name: &str) {
+    let why = if tier == Tier::Rich {
+        match embed_picture(dir, name) {
+            Ok(reference) => {
+                out.extend_from_slice(&reference);
+                return;
+            }
+            Err(why) => Some(why),
+        }
+    } else {
+        None
+    };
+    let src = lantern::stand_in(name, why.as_deref());
+    manual::render::render(&src, tier, width, &mut |chunk| out.extend_from_slice(chunk));
 }
 
 /// The footer: which slide this is, and the deck's title when it has one.
@@ -284,7 +477,15 @@ fn paint(
     at: usize,
     foot: bool,
 ) {
-    match slide_source(dir, &d.slides[at]) {
+    let name = &d.slides[at];
+    if deck::kind(name) == Some(SlideKind::Picture) {
+        paint_picture(out, tier, width, dir, name);
+        if foot {
+            footer(out, tier, d, at);
+        }
+        return;
+    }
+    match slide_source(dir, name) {
         Ok(src) => {
             manual::render::render(&src, tier, width, &mut |chunk| out.extend_from_slice(chunk))
         }
@@ -430,17 +631,19 @@ pub extern "C" fn rs_main() -> i64 {
     // The whole deck is validated before anything is shown. A deck fails at
     // the start or not at all -- never on the slide the talk has reached.
     let bad = validate(&args.dir, &d);
+    let slides = if d.slides.len() == 1 { "slide" } else { "slides" };
     if bad > 0 {
         eprintln!(
-            "lantern: {} of {} slides cannot be shown",
+            "lantern: {} of {} {} cannot be shown",
             bad,
-            d.slides.len()
+            d.slides.len(),
+            slides
         );
         return 1;
     }
 
     if args.check {
-        println!("lantern: {} slides, all valid", d.slides.len());
+        println!("lantern: {} {}, all valid", d.slides.len(), slides);
         return 0;
     }
 

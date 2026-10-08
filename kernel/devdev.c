@@ -454,7 +454,7 @@ static struct Spoor *devdev_create(struct Spoor *c, const char *name, int omode,
     return NULL;
 }
 
-static void devdev_close(struct Spoor *c) {
+static int devdev_close(struct Spoor *c) {
     // G-4: the OPENED drain Spoor's close disarms the tap. The COPEN check is
     // load-bearing: devdev_close fires for every clunked devdev Spoor,
     // including never-opened walk intermediates and O_PATH navigation handles.
@@ -471,6 +471,7 @@ static void devdev_close(struct Spoor *c) {
     if (c && (u32)c->qid.path == DEV_KIND_CONSDRAIN && (c->flag & COPEN))
         cons_drain_close();
     dev_simple_close(c);
+    return 0;
 }
 
 static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {

@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i44]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
 created: 2026-08-01
-updated: 2026-09-30
+updated: 2026-10-05
 ---
 ## Purpose
 
@@ -155,12 +155,27 @@ the whole argument, which is why it reads as a changelog rather than a number.
 
 The tail is dense with single-purpose flags that each fit an existing
 padding hole: `cpu_pinned`, `exit_close_active`, `debug_ss_armed`,
-`stop_unwinds`, `stop_no_park`, `stop_unwound`, and since 2026-09-29
+`stop_unwinds`, `stop_no_park`, `stop_unwound` (the elected 9P reader holds
+the first two for its whole recv, so a stop unwinds it at any byte and the
+caught arm latches `note_unwound` for it; no die-check reads them since the
+seam-90 close, [[chg-2026-10-06-seam90-close]]), and since 2026-09-29
 `note_interruptible`: whether a caught note may unwind the thread's current
 wait, set only by the vivarium dispatcher for signal(7)'s list and cleared at
 the syscall exit and around a page-in ([[sub-kernel-notes]]); and since
 2026-09-30 `note_claim`, the caught-note families this thread has claimed, which
-only the thread itself writes and its EL0-return tail releases. `cpu_pinned` is the single
+only the thread itself writes and its EL0-return tail releases; and since
+2026-10-05 `cons_frozen_unwound`, the console's record that a caught note
+unwound one of the thread's frozen reads, so its next console read re-takes the
+reader slot by waiting; the thread sets and consumes it, and exec clears it
+([[sub-kernel-cons]]); and since 2026-10-07 two exit-close flags in the same
+hole (ARCH 7.9.1): `kthread_join_active`, which `loom_free` sets with save and
+restore around its SQPOLL kthread join so no death reaches that sleep, not
+even the kill that forces a final close ([[sub-kernel-loom]]), and
+`closes_never_wait`, which the SQPOLL kthread sets on itself at entry so its
+reap's last dev9p close hands a staged write-behind run to the closer instead
+of waiting on the server ([[sub-kernel-ninep-dev9p]]). `exit_close_active` has
+one setter again, the at-exit close. The struct size is unchanged at 1760.
+`cpu_pinned` is the single
 clean unstealability predicate that replaced the old `kstack_base != NULL`
 gate — the #860 root cause was that `g_bootcpu_idle` owned a real kstack, so
 the old gate did not exclude it.

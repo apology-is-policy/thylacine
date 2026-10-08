@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-09-30
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -225,8 +225,9 @@ liveness bug when the thing being exempted is a latch.*
 A note with a live handler must run at the return tail — but a peer thread
 blocked in a syscall reaches no return tail until something wakes it. So a caught
 note ARMS a per-Proc mask (`notes_arm_caught_note_locked`, the caught-note
-sub-field of `proc_flags`) and wakes every blocked peer (`proc_caught_note_wake`,
-under the process-table lock). `notes_post` cannot run that wake itself -- the
+sub-field of `proc_flags`) and wakes every blocked peer outside a stop park
+(`proc_caught_note_wake`, under the process-table lock; a stopped thread waits
+for the stop to clear). `notes_post` cannot run that wake itself -- the
 thread walk needs the process-table lock, which it does not take -- so it is the
 POSTER's, and every poster that holds the lock runs it: the interrupt and tty
 fans beside the terminate wake, and the posts with no terminate twin -- a
@@ -235,15 +236,17 @@ child's exit (`proc_exit_notify_parent_locked`), a caught `tty:susp`, `tty:cont`
 outside the lock: a Proc noting itself takes the lock for its wakes after the
 post, and `pipe` needs none -- it posts to the writer's own Proc from inside
 the write, which delivers at that thread's return tail, as Linux sends SIGPIPE
-to the writing thread alone. The wake reaches every blocked peer, but one caught
-note unwinds ONE of them (`thread_caught_note_claim`, the sleep arms' last test):
+to the writing thread alone. The wake reaches every blocked peer outside a stop
+park, but one caught note unwinds ONE of them (`thread_caught_note_claim`, the
+sleep arms' last test):
 the unwinding sleeper claims the note's family in a claim sub-field of
 `proc_flags` by a CAS that re-validates the caught bit and records the family as
 its own (`Thread.note_claim`), and its peers find the family claimed and re-park
 -- as Linux interrupts one thread for a process-directed signal. The claim is the
 claimant's, and it ends at the claimant's EL0-return tail whatever that tail
 delivered: `notes_deliver_at_el0_return` runs the delivery body
-(`notes_deliver_tail`) and then `notes_release_claims`, which ANDs the thread's
+(`notes_deliver_tail`), once more after each stop it applied (below), and then
+`notes_release_claims`, which ANDs the thread's
 bits out and, if the family is still caught -- the tail ended short of the note
 -- runs `proc_caught_note_wake` under the process-table lock so a parked peer
 re-reads its condition and unwinds for it. A thread's own claim stays open to
@@ -282,6 +285,34 @@ wait and the elected reader's receive) unwound for any caught note, so a
 no native syscall sets it, so natives stay where `proc_caught_note_eintr_ready`
 already put them ([[dec-2026-09-29-caught-signal-slow-calls]]).
 
+**Every kernel wait a listed call reaches opts in (2026-10-05).** The flag is
+necessary, not sufficient: the wait must opt in too, and until
+[[chg-2026-10-05-signal7-list]] only the two 9P waits did, so a listed call
+blocked anywhere else rode the note out. Now every wait a listed call can reach
+opts in, and each unwinds with nothing consumed and returns `-T_E_INTR`: a
+pipe's read and write ([[sub-kernel-pipe]], kept off an elected 9P reader's
+un-opted receive), the console's read and write waits ([[sub-kernel-cons]]),
+`ppoll`/`pselect6`'s park and its timeout-only sleep, which is musl's `pause()`
+([[sub-kernel-poll]]), `wait4` (`WAIT_PID_NOTEINTR`, [[sub-kernel-proc]]) and
+`futex` (`TORPOR_ERR_EINTR`, [[sub-kernel-torpor]]). One predicate decides,
+`thread_caught_note_unwinds`: a Linux phenotype (`proc_caught_note_eintr_ready`)
+and the claim won (`thread_caught_note_claim`, which re-runs the deliverable test
+above). A 9P reader is not excepted: it unwinds at any byte of a frame, the client
+keeping the partial frame (ARCH 8.8.1.1; until 2026-10-06 a reader mid-frame was,
+`thread_reader_blocks_death`). The
+four caught arms in `sleep_common` and `tsleep_common` call it, after the cond
+re-test, the deadline, the stop detour and the die-check, and so does poll's
+loop-level verdict, where readiness wins, then the note, then the deadline, as
+in Linux's `do_poll`. A `noteintr` caller RETURNS on `NOTEINTR`: the claim lasts
+until its EL0-return tail, so a second wait in the same call would unwind at
+once and spin. Three waits a listed call reaches stay out, each for a reason
+(ARCH 8.8.3): the 9P send side (an unwind drains nothing, so the retry spins),
+`poll`'s settle (bounded by the server's answer or the fail-safe), and the notes
+fd's read (its data is the queued note, so a post readies it). Linux restarts
+`wait4`, a pipe and `futex` under `SA_RESTART`; the kernel restarts nothing, so
+a guest that relies on the restart sees `EINTR` — the documented DEGRADED gap
+(VIVARIUM 6.22).
+
 **The claim ends at the tail, not at the drain (VIV-EINTR round-2 F1, P1).** The
 first version cleared a claim with its family's last drain, on the argument that
 the claimant's tail delivers the note on its very next EL0 return. That holds for
@@ -293,13 +324,46 @@ family, and every later wait -- the claimant's own retry included -- refused the
 claimed family and parked: Ctrl-C was dead in a blocked `recv`. Two changes close
 it. The claim is released by its owner's tail, as above. And the tail now loops
 past a discarded note to the next one, as Linux's `get_signal` does, bounded by
-`NOTE_QUEUE_DEPTH` so a flood of ignored notes cannot hold the thread there. *An
+`NOTE_QUEUE_DEPTH` so a flood of ignored notes cannot hold the thread there.
+Since 2026-10-05 it also passes over the queue again after a stop it applied,
+once the thread has parked for it, and those passes spend the same budget as
+the discards ([[spec-tail-order]]). *An
 argument from "every return delivers" must say what each return handles.*
 Witnesses: `rendez.caught_note_tail_discards_and_releases` (the reviewer's chain on
 the real tail: two ignored notes and a caught one, the tail loops to the caught
 one, and the retried wait unwinds again), `rendez.caught_note_release_wakes_peer`
 (the tail held until the peer has re-parked, so only the release's wake can
 unwind it), and `notes.caught_note_claim_once`.
+
+### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
+
+An uncaught note whose default is terminate (an `interrupt` nothing catches,
+`tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch, and its post
+wakes every blocked thread of the Proc outside a stop park
+(`proc_interrupt_terminate_wake`). An
+ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
+its return tail: `thread_die_pending` reports the latch in any family the
+thread has not masked, as well as group death. Five waits read
+`thread_group_death_pending` instead, `thread_die_pending`'s group-death leg
+alone with the same hold. They are the tail's stop park, the
+birth park, the nested stop park a sleep detours into, the vfork suspend and
+the held spawn's birth wait, all through `sleep_death_only`
+([[sub-kernel-rendez]]). `thread_death_reaches` asks the question the other
+way round, for a caller choosing whether it may start a wait at all: a death
+can end the thread's sleeps unless it is a kernel thread or held (dev9p's
+clunk, [[sub-kernel-ninep-dev9p]]). All three read one hold,
+`thread_death_held`: `loom_free`'s SQPOLL kthread join (`kthread_join_active`)
+always, and the final close (`exit_close_active`) until a kill finds the Proc
+already terminating and sets `PROC_FLAG_EXIT_CLOSE_FORCED` (ARCH 7.9.1 part B,
+[[sub-kernel-death]]). Caught delivery stays shut under either flag, forced or
+not: a forced close unwinds as a death, never for a caught note. The latch's walk passes
+the stop parks by, since they
+could only absorb its wake, and the parent suspends absorb it: a stopped thread
+stays stopped, and a suspended parent stays suspended
+(DEBUG-FS-DESIGN 5g, the operator's vote of 2026-09-30). No park consumes or
+clears the latch. The note is met at the thread's next note checkpoint once
+it runs, and a revocable latch (a peer can install a handler or open the notes
+file) can no longer return a parent while its child still borrows its stack.
 
 ### A handler that escapes its frame must not deafen the Proc (bug-2)
 
@@ -354,7 +418,23 @@ sixteen queue slots went with it. `notes_stop_note_name_locked` is the STOP-clas
 twin of the terminate scanner: the tail consults it after the terminate check
 misses, and on a hit applies the stop through `proc_job_stop_self` — the same
 primitive `SYS_NOTED(NDFLT)` uses, so the #240 freshness (`susp_stop_armed`) and
-orphan-rule guards both apply without restating. The peek only yields a note once
+orphan-rule guards both apply without restating.
+
+**A stop the leg applies is parked in the leg.** Since 2026-10-05 the tail's
+stop check runs before the notes leg (DEBUG-FS-DESIGN 4.2), so a stop the leg
+applies has no later check to park it. The thread must not run another EL0
+instruction under its own stop, so `notes_deliver_tail` reports the applied stop
+(the stop arm returns true, as the orphan discard does), and
+`notes_deliver_at_el0_return` runs the tail's die check and stop check again,
+parks, and then looks at the queue afresh. Linux does the same: `get_signal`
+parks in `do_signal_stop` and loops back for the next signal. The re-pass and
+the discard loop share one budget of `NOTE_QUEUE_DEPTH`, so the masked tail is
+bounded however the queue is flooded. `tail_order.tla` checks the order, the
+re-pass and the budget ([[spec-tail-order]]). The kernel witness is
+`rendez.tail_parks_for_the_stop_it_applies`. It runs the real leg, masked, on a
+thread with a queued `tty:susp` and asserts that the thread parks on its own
+`debug_rendez` and returns only once the stop is lifted. Its control, one
+variable away, queues a `child_exit`, which stops nothing and returns at once. The peek only yields a note once
 its family bit is *unmasked*, so the deferred stop lands exactly when the guest
 unblocks the signal; a `tty:cont` that arrived meanwhile has already disarmed the
 freshness flag, so the superseded `^Z` evaporates rather than resurrecting.
@@ -533,12 +613,31 @@ wait (item 11 -- `notes_arm_caught_note_locked` + `thread_caught_note_deliverabl
 (`vivarium_handler_mask`, `blocked|sa_mask|sig`). Already covered and borrowed:
 `SIG_IGN`-at-generation and `pipe`-as-a-TERMINATE-note.
 
+[[chg-2026-10-05-signal7-list]] opted in every kernel wait a call on signal(7)'s
+list reaches (the paragraph above), behind the one predicate
+`thread_caught_note_unwinds`.
+
 ## Tests
+
+`notes.forced_close_lifts_the_hold` (2026-10-07) pins the hold: an unforced
+exit close in a dying group holds every death (the control), the forced bit
+lifts it for all three predicates but not for caught delivery, and the kthread
+join holds every death, forced or not, inside the exit close or outside it.
 
 `notes.*` covers the queue, both paths, the masks and the fd surface, including
 the `S_IFCHR` report added when a missing metadata slot made `fstat` on a note
 fd fail. The interactive Ctrl-C scenario exercises the uncaught-`interrupt`
 terminate end to end.
+
+The caught-note waits share one fixture in `test.c` (`test_caught_*`): a
+Linux-phenotype Proc whose thread parks in the wait under test, a caught note
+posted to it, and a leg that records whether the wait parked, unwound on the
+post, or rode the note out. Fourteen witnesses use it
+(`pipe_blocking.caught_note_*`, `poll.caught_note_*`,
+`torpor.caught_note_ends_wait`, `rendez.caught_note_ends_wait4`,
+`cons.caught_note_*`); six carry a native control one variable away, and
+opening the phenotype gate turns exactly those six red. `viv-pheno-probe` legs L311-L318 drive each listed call
+from a real Linux binary and require `EINTR` with the handler run.
 
 ## Referenced by
 

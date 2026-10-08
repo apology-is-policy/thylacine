@@ -18,6 +18,10 @@
 //! could be a path or an option -- each is refused with the line to look at,
 //! never guessed at or ignored. A deck the operator will stand in front of
 //! should fail at `lantern --check`, not mid-talk.
+//!
+//! A slide's name says what kind it is: `.md` is a text slide, `.png`, `.jpg`
+//! or `.jpeg` a picture slide (LANTERN-DESIGN 14). The picture's bytes are
+//! checked before the talk by `view`, the program that will show it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -40,6 +44,26 @@ pub const SLIDES_MAX: usize = 64;
 /// The largest manifest lantern reads, in bytes. A manifest is a title and up
 /// to `SLIDES_MAX` file names; 64 KiB is far above any real one.
 pub const MANIFEST_MAX: usize = 64 * 1024;
+
+/// What a slide is, read from its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlideKind {
+    /// A Markdown file in the manual's subset, rendered by `manual`.
+    Text,
+    /// A PNG or JPEG, decoded and placed by `view`.
+    Picture,
+}
+
+/// The kind a slide name gives, or `None` for a name that is neither.
+pub fn kind(name: &str) -> Option<SlideKind> {
+    if name.ends_with(".md") {
+        Some(SlideKind::Text)
+    } else if name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".jpeg") {
+        Some(SlideKind::Picture)
+    } else {
+        None
+    }
+}
 
 /// A parsed manifest.
 pub struct Deck {
@@ -78,8 +102,8 @@ pub enum Problem {
     /// A slide name starting with `-`, which a command line would read as an
     /// option.
     SlideOption,
-    /// A slide name that is not a `.md` file.
-    SlideNotMarkdown,
+    /// A slide name that is neither a `.md` file nor a picture.
+    SlideUnknownKind,
     /// The same slide named twice. Showing one file twice in a deck is far
     /// more often a copy-paste slip than an intention.
     SlideDuplicate,
@@ -109,7 +133,9 @@ impl fmt::Display for Problem {
             SlidePath => "a slide is a file IN the deck directory; its name carries no '/'",
             SlideDotted => "a slide name does not begin with '.'",
             SlideOption => "a slide name does not begin with '-'",
-            SlideNotMarkdown => "a slide is a Markdown file, named '<something>.md'",
+            SlideUnknownKind => {
+                "a slide is a Markdown file named '<something>.md' or a picture named '<something>.png', '.jpg' or '.jpeg'"
+            }
             SlideDuplicate => "this slide is named twice",
         };
         f.write_str(m)
@@ -162,9 +188,9 @@ fn name_problem(name: &str) -> Option<Problem> {
     if name.starts_with('-') {
         return Some(Problem::SlideOption);
     }
-    // ".md" alone is a dotted name, already refused above.
-    if !name.ends_with(".md") {
-        return Some(Problem::SlideNotMarkdown);
+    // ".md" or ".png" alone is a dotted name, already refused above.
+    if kind(name).is_none() {
+        return Some(Problem::SlideUnknownKind);
     }
     None
 }
@@ -266,7 +292,7 @@ slides = [
     }
 
     #[test]
-    fn a_slide_name_is_a_markdown_file_name_and_nothing_else() {
+    fn a_slide_name_is_a_slide_file_name_and_nothing_else() {
         assert_eq!(problem_of("slides = [\"\"]"), Problem::SlideEmpty);
         assert_eq!(problem_of("slides = [\"sub/a.md\"]"), Problem::SlidePath);
         // Traversal is refused twice over, and which rule catches it depends
@@ -281,14 +307,43 @@ slides = [
         assert_eq!(problem_of("slides = [\"-rf.md\"]"), Problem::SlideOption);
         assert_eq!(
             problem_of("slides = [\"notes.txt\"]"),
-            Problem::SlideNotMarkdown
+            Problem::SlideUnknownKind
         );
         assert_eq!(
             problem_of("slides = [\"a.md.bak\"]"),
-            Problem::SlideNotMarkdown
+            Problem::SlideUnknownKind
+        );
+        // A picture's name follows the same rules as a text slide's.
+        assert_eq!(problem_of("slides = [\"sub/a.png\"]"), Problem::SlidePath);
+        assert_eq!(problem_of("slides = [\".png\"]"), Problem::SlideDotted);
+        assert_eq!(problem_of("slides = [\"-x.jpg\"]"), Problem::SlideOption);
+        assert_eq!(
+            problem_of("slides = [\"a.gif\"]"),
+            Problem::SlideUnknownKind
+        );
+        // The extension is matched exactly, like '.md'.
+        assert_eq!(
+            problem_of("slides = [\"a.PNG\"]"),
+            Problem::SlideUnknownKind
         );
         // An absolute path trips the separator rule, not the dot rule.
         assert_eq!(problem_of("slides = [\"/etc/passwd\"]"), Problem::SlidePath);
+    }
+
+    #[test]
+    fn a_name_says_what_kind_of_slide_it_is() {
+        assert_eq!(kind("01-title.md"), Some(SlideKind::Text));
+        assert_eq!(kind("arch.png"), Some(SlideKind::Picture));
+        assert_eq!(kind("photo.jpg"), Some(SlideKind::Picture));
+        assert_eq!(kind("photo.jpeg"), Some(SlideKind::Picture));
+        assert_eq!(kind("notes.txt"), None);
+        assert_eq!(kind("png"), None);
+        let d = parse("slides = [\"a.md\", \"b.png\", \"c.jpeg\"]").expect("a mixed deck");
+        let kinds: alloc::vec::Vec<_> = d.slides.iter().map(|n| kind(n)).collect();
+        assert_eq!(
+            kinds,
+            [Some(SlideKind::Text), Some(SlideKind::Picture), Some(SlideKind::Picture)]
+        );
     }
 
     #[test]

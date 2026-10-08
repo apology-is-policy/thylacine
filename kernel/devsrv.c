@@ -137,6 +137,7 @@ static void srv_clear_locked(struct SrvService *e) {
     for (u32 i = 0; i < SRV_NAME_MAX; i++) e->name[i] = 0;
     e->poster_stripes = 0;
     e->poster_pid     = 0;
+    e->poster_principal = PRINCIPAL_INVALID;
     e->ring_msize     = 0;
     e->cape           = false;
     e->remote         = false;
@@ -430,6 +431,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     for (u8 i = 0; i < name_len; i++) e->name[i] = name[i];
     e->poster_stripes = stripes;
     e->poster_pid     = poster->pid;
+    e->poster_principal = __atomic_load_n(&poster->principal_id, __ATOMIC_ACQUIRE);
     e->mode           = mode;
     e->ring_msize     = ring_msize;
     e->cape           = cape;
@@ -475,6 +477,7 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
         svc->state          = SRV_STATE_TOMBSTONED;
         svc->poster_stripes = 0;
         svc->poster_pid     = 0;
+        svc->poster_principal = PRINCIPAL_INVALID;
     }
     spin_unlock_irqrestore(&svc->reg->lock, s);
 }
@@ -590,6 +593,7 @@ static void srv_proc_exit_notify_in(struct SrvRegistry *reg, struct Proc *p) {
             e->state          = SRV_STATE_TOMBSTONED;
             e->poster_stripes = 0;
             e->poster_pid     = 0;
+            e->poster_principal = PRINCIPAL_INVALID;
             // Drain the accept backlog: no live server remains to accept
             // these connections, so each is torn down (its client wakes
             // with EOF rather than hanging on a dead server).
@@ -996,6 +1000,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     struct SrvService *svc = srv_lookup_in(reg, ref->name, ref->name_len);
     if (!svc) return NULL;
     u64           poster_stripes, generation;
+    u32           poster_principal;
     enum srv_mode service_mode;
     u32           ring_msize;
     bool          service_cape;
@@ -1007,6 +1012,7 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
                          srv_name_eq(svc->name, svc->name_len, ref->name, ref->name_len);
         generation     = svc->generation;
         poster_stripes = svc->poster_stripes;
+        poster_principal = svc->poster_principal;
         service_mode   = svc->mode;
         ring_msize     = svc->ring_msize;   // CF-3 B: the conn's ring class,
                                             // captured atomically with LIVE
@@ -1052,8 +1058,9 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
     // Proc* / SrvService* held, so neither a peer exit nor a tombstone-then-
     // rebind turns a later read into a UAF). create ref == 1.
     struct SrvConn *cn = srvconn_create(proc_stripes(p), p->pid,
+                                        __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE),
                                         proc_is_console_attached(p), poster_stripes,
-                                        ring_msize);
+                                        poster_principal, ring_msize);
     if (!cn) return NULL;
     if (service_mode == SRV_MODE_BYTE) srvconn_set_byte_mode(cn);
     if (service_cape)                  srvconn_set_cape(cn);
@@ -1150,8 +1157,8 @@ static struct Spoor *devsrv_create(struct Spoor *c, const char *name, int omode,
 // so the peer wakes, then release the reference. A Spoor with aux == NULL
 // (a failed/transient walk clone normalized in devsrv_walk) is a clean
 // no-op.
-static void devsrv_close(struct Spoor *c) {
-    if (!c || c->dc != 's' || !c->aux) return;   // root sans-reg / transient — no-op
+static int devsrv_close(struct Spoor *c) {
+    if (!c || c->dc != 's' || !c->aux) return 0;   // root sans-reg / transient — no-op
     u64 m = *(const u64 *)c->aux;
     if (m == SRV_REGISTRY_MAGIC) {
         // A /srv root instance: drop its registry ref (the last drop drains
@@ -1195,6 +1202,7 @@ static void devsrv_close(struct Spoor *c) {
         extinction("devsrv_close: Spoor aux has unknown magic (corruption)");
     }
     c->aux = NULL;
+    return 0;
 }
 
 // read — a connection Spoor's read drains the c2s ring (the bytes the

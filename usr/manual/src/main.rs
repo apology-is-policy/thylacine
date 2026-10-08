@@ -107,7 +107,7 @@ fn resolve_tier(flag: BeaconMode) -> Tier {
 /// The wrap width (4.3): only at a plain tier, only on the console, and only
 /// when `/dev/winsize` reports one.
 fn plain_width(tier: Tier) -> Option<usize> {
-    if tier == Tier::Rich || libthyla_rs::fd_devclass(1) != Some(beacon::DC_CONSOLE) {
+    if !manual::wraps_at_console(tier, libthyla_rs::fd_devclass(1)) {
         return None;
     }
     let mut f = File::open("/dev/winsize").ok()?;

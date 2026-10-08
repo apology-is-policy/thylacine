@@ -44,8 +44,16 @@ That asymmetry is the part a caller gets wrong. The function reads like a
 lookup and behaves like a transfer.
 
 The key is seven fields: device class, device number, qid path, **qid version**,
-file offset, page-rounded size, and executability. Two of those carry arguments
-worth stating.
+file offset, page-rounded size, and executability. Three of those carry
+arguments worth stating.
+
+**The device number is the whole 64-bit devno.** Two instances of one Dev reuse
+qids freely; the device number is what tells their files apart. The minter never
+wraps and never reuses a number ([[sub-kernel-spoor]]), and a `_Static_assert`
+pins the entry's copy to the Spoor field's width, because a narrower copy would
+read instances 2^32 mints apart as one file and serve one the other's cached
+pages. `image.devno_full_width_distinct_entry` holds them apart, with the same
+wide devno hitting its own entry as the control.
 
 **The qid version is what makes coherence free.** A binary replaced atomically
 gets a new version, so it is a different key and misses the old entry; a Proc

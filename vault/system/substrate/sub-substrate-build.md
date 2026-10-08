@@ -14,6 +14,7 @@ code:
   - tools/test-build-config.sh
   - tools/configure.sh
   - tools/test-configure.sh
+  - tools/check-flag-words.py
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -21,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -193,6 +194,80 @@ stdout; the control was measured — a perturbed context line applies under
 `-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
 fuzz-strict.
 
+**The spawn-args mirror check runs beside it (2026-09-29).**
+`tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the
+dispatcher, for the same one-chokepoint reason: each target builds a different
+copy of `struct sys_spawn_args` (libt, libthyla-rs, the pouch patch, and the Go
+fork when `$GOFORK` has one), so a check inside any one target would miss the
+others. It lays the record out from the kernel header, compares every copy
+field by field, and proves it can fail before it passes. It is sub-second and
+fatal, with no skip switch. Like the hunk check it refuses rather than warns,
+because the failure it guards against is silent: a copy left behind when the
+kernel record grows passes its own size assertion while the kernel reads past
+it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
+
+**The flag-word check runs after it (2026-10-05; nine words since
+2026-10-06).** `tools/check-flag-words.py` holds a table of flag words -- the
+header, the pattern a member's name matches, the width: `proc_flags`, the
+spawn permission word and the four one-bit spawn words, the walk-create mode
+word (`SYS_WALK_CREATE_*`, with DMDIR and the DMSRV bits), the 9P attach flags
+and the mount flags. It evaluates every member, resolving the header's other
+macros, and fails when two members share a bit. A member owns the bits its own
+literals contribute; a reference to another member contributes nothing, so a
+mask built from members (`TERMINATE_PENDING_MASK`, `SPAWN_PERM_ALL`) overlaps
+them freely, while the mode bits `SYS_WALK_CREATE_PERM_VALID` adds by literal
+are its own. A member that uses another other than as an operand of `|` (a
+shift, an `&`) cannot be classified and fails, and so do a member that does not
+evaluate, one outside its word, and a word with no member: an unread flag is not
+a checked one. Each flag's own `_Static_assert` names only the flags its author
+knew, so two branches each took bit 22 of `proc_flags` and both compiled; the
+header is the one source both must pass through. A passing check then proves it
+can fail: each word's header is mutated in memory (a new member on an owned bit,
+a member shifted from another, an undefined macro, a member outside the word,
+every member renamed away), and a mutation the check does not report by the rule
+it targets stops the build. It prints one line per word, then
+`check-flag-words: 9 words ok; the self-test caught all 45 mutations`. It is
+sub-second and fatal, with no skip switch. It replaced `tools/check-proc-flags.py`,
+main's single-word check, whose rule let a literal mask equal to a union of
+flags overlap them; the literal rule is stricter.
+
+**A free-space floor refuses before any target writes (2026-10-05).**
+`disk_floor_check` refuses a target, and separately the pool generate, when
+the build volume has less than `THYLACINE_MIN_FREE_GB` free (default 6; `0`
+disables it, and `clean` is never refused, since it frees space). The refusal
+names the stage, the free space, the floor and the override on one line, then
+lists the largest entries under `build/`. The reason is the failure a full
+disk causes elsewhere: a bake took the shared Mac's volume to 121 MB free
+mid-populate, and every agent's shell then failed before it ran, because the
+harness could not create its output file. A refusal while there is still room
+keeps the failure inside this build. `du` counts APFS-cloned blocks in full,
+so in a worktree with a cloned `build/` the list overstates what deleting an
+entry frees; `df` is the measure.
+
+**Both ambush builds spawn the launch target held (2026-09-30; untagged
+2026-10-06).** The Go fork's `SysProcAttr.DebugHeld` sets the spawn record's
+`debug_flags`, and ambush's `Launch` sets it, so a launched target stays parked
+until the debugger's stop ([[sub-kernel-birth-hold]]). This covers both
+builds: `build_ambush`'s ramfs copy for `/ambush-probe`, and the `/goroot/bin`
+copy that nora's `:debug` runs. While some trees' kernels lacked the hold, the
+fork made the held launch a build tag (`thylacine_held`) that this file passed.
+Main carries the hold since its aux-3 merge, and so does every tree built from
+main since, so ambush 073faaa compiles the held launch untagged. A tree whose
+kernel predates the hold gets an ambush whose launches fail loudly, since its
+kernel refuses the flag. `ambush_fork_check` guards the fork's age: it asks
+`go list` which files the build compiles. It refuses `held_off_thylacine.go`,
+the running spawn an older fork compiles untagged under a log line that says
+nothing. `held_on_thylacine.go` must declare `launchHeld = true`. A fork with
+neither file, as once the constant is deleted, must name `launchHeld` in no
+compiled file, and its `Launch` must set `DebugHeld`; a fork from before the
+held launch does not, and is refused. The check and the build run
+the same toolchain (`$GOFORK/bin/go`) with the same environment, so the file
+selection cannot change between them and the artifact needs no check of its
+own. Whether `Launch` still acts on the constant is
+behaviour, which `/ambush-probe` checks at the entry. The ramfs also carries
+`/bin/ambush-notelf`, an executable that is not an ELF image, for stage D's
+abandoned-launch leg (DELVE-PORT-DESIGN section 7 (b)).
+
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit
 target, never from `all`, so a rebuilt graphics binary does not reach the
@@ -228,7 +303,12 @@ configuration at `/lib/dosbox-x/dosbox-x.conf`, plus optional Duke3D and Tomb
 Raider fixture stages. Emulator opt-out also skips its game data. Missing
 external C++ tooling is announced as a skipped build, not emulator coverage.
 View, Gallery, Manual, Nocturne and their probes are curated into the native
-ramfs binary list. `configs/ci.config` selects a serial shell for existing
+ramfs binary list. Under either Halcyon lever (`THYLACINE_HALCYON` or
+`THYLACINE_HALCYON_SESSION`) the pool also carries the inline-media fixtures
+from `usr/view/testdata`, each readback-verified: `/test.png` and `/test.jpg`
+(the 640x400 witness card) and, since 2026-09-29, `/test-large.png` (the same
+card at 2048x1536, which a pane shows only after `view` reduces it to the
+pane's limit). `configs/ci.config` selects a serial shell for existing
 interactive scenarios; the default profile starts the Halcyon session.
 Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
 

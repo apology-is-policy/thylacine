@@ -225,12 +225,14 @@ struct SrvConn {
     // Peer identity — CORVUS-DESIGN §6.3, captured BY VALUE at create.
     u64                 peer_stripes;      // the peer Proc's stripes tag
     int                 peer_pid;          // the peer Proc's pid (diagnostics)
+    u32                 peer_principal;    // the peer Proc's principal at mint
     bool                peer_console;      // peer's console-attachment bit
 
     // Server identity — the service poster's (corvus's) stripes tag at
     // mint, by value. SYS_SRV_PEER's poster gate compares it against the
     // caller's stripes (CORVUS-DESIGN §6.3).
     u64                 server_stripes;
+    u32                 server_principal;  // the poster's principal at its post
 
     // The conn's 9P msize class (CF-3 B), captured from the SERVICE at
     // mint (SRVCONN_MSIZE default; SRVCONN_BULK_MSIZE for a DMSRVBULK
@@ -243,10 +245,8 @@ struct SrvConn {
     // Kernel-client-side blocking-recv deadline. Absolute ns on the
     // timer_now_ns timebase; 0 = no deadline (blocks indefinitely,
     // woken only by data or EOF). The op-driving path sets this before
-    // each blocking op; srvconn_set_client_deadline also clears
-    // `client_timed_out` so each op starts from a fresh signal.
+    // each blocking op.
     u64                 client_deadline_ns;
-    bool                client_timed_out;  // last client recv hit the deadline
 
     struct srvconn_chan c2s;               // kernel client → corvus
     struct srvconn_chan s2c;               // corvus → kernel client
@@ -351,9 +351,10 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // =============================================================================
 
 // srvconn_create — mint a connection. `peer_stripes` / `peer_pid` /
-// `peer_console` are the opening client Proc's kernel-stamped identity;
-// `server_stripes` is the service poster's (corvus's) stripes tag. All
-// four are captured by value. `msize` is the conn's 9P msize class
+// `peer_principal` / `peer_console` are the opening client Proc's kernel-stamped
+// identity; `server_stripes` / `server_principal` are the service poster's. All
+// six are captured by value; the two principals are the conn's ends in
+// /ctl/9p-sessions (IMPERIUM-DESIGN 11.3 item 10). `msize` is the conn's 9P msize class
 // (SRVCONN_MSIZE or SRVCONN_BULK_MSIZE, from the service's ring class --
 // CF-3 B; any other value is rejected NULL); each ring is heap-allocated
 // at 2x msize. Allocates the SrvConn + initializes its byte transport
@@ -364,7 +365,8 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // over this connection is the caller's responsibility to construct
 // (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console, u64 server_stripes,
+                               u32 peer_principal, bool peer_console,
+                               u64 server_stripes, u32 server_principal,
                                u32 msize);
 
 // srvconn_msize — the conn's 9P msize class (set at mint from the
@@ -447,17 +449,11 @@ bool srvconn_is_live(const struct SrvConn *cn);
 // =============================================================================
 
 // srvconn_set_client_deadline — set the absolute deadline (timer_now_ns
-// timebase) for the connection's next blocking client recv, and clear
-// the `client_timed_out` signal. `deadline_ns == 0` means no deadline.
-// The op-driving path calls this immediately before each blocking 9P
-// op (a3b). Extincts on a NULL / corrupted conn.
+// timebase) for the connection's next blocking client recv.
+// `deadline_ns == 0` means no deadline. The op-driving path calls this
+// immediately before each blocking 9P op (a3b). Extincts on a NULL /
+// corrupted conn.
 void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns);
-
-// srvconn_client_timed_out — true iff the most recent blocking client
-// recv ended on the deadline rather than on data or EOF. Lets the
-// op-driving path map a transport failure to -ETIMEDOUT (corvus hung)
-// vs -EIO (corvus crashed). Returns false for a NULL / corrupted conn.
-bool srvconn_client_timed_out(const struct SrvConn *cn);
 
 // =============================================================================
 // Peer identity (SYS_SRV_PEER — P5-corvus-srv-impl-a3c).
@@ -516,9 +512,12 @@ long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n);
 // deadline bounds the role wait). Returns:
 //   >0  — bytes read.
 //    0  — EOF: the connection is torn down and no residual bytes remain.
-//   -1  — the deadline passed (then srvconn_client_timed_out is true),
-//         a #811 death-interrupt, or args are bad.
+//   -1  — the deadline passed, a #811 death-interrupt, or args are bad.
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n);
+
+// srvconn_client_recv without its parks: what s2c holds now, 0 at its EOF, or
+// -T_E_AGAIN when it is empty or another reader holds the role.
+long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n);
 
 // srvconn_client_send_blocking — the BLOCKING client-side byte write
 // (CF-3 B; the c2s twin of #348's srvconn_server_send_blocking). The
@@ -616,6 +615,8 @@ u64 srvconn_total_freed(void);
 // the reply-undrained arm of the loss discriminator.
 struct srvconn_ctl_row {
     int  peer_pid;
+    u32  peer_principal;   // the conn's two ends: who may read its counters
+    u32  server_principal;
     u32  msize;
     u8   state;            // enum srvconn_state
     bool byte_mode;

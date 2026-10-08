@@ -35,6 +35,7 @@
 #include <thylacine/handle.h>       // V-5c-2: PROC_HANDLE_MAX, asserted BY NAME
 #include <thylacine/notes.h>        // V-6b: the canonical note-name literals
 #include <thylacine/proc.h>         // L-6b: WAIT_*, so the collision is asserted
+#include <thylacine/rendez.h>       // the TSLEEP_* outcomes a sleep row judges
                                     //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
 #include <thylacine/cons.h>          // C2-k1b: CONS_* flags + the cons test hooks
@@ -204,6 +205,13 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SIGALTSTACK, args, &out),
                    (int)VIV_ENOSYS,
                    "sigaltstack stays ENOSYS -- load-bearing for the 6.23 escape detector");
+
+    // VIVARIUM 6.29: the sleep rows. Until them both FORWARDed to ENOSYS, and
+    // musl's sleep() and usleep() returned at once.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_NANOSLEEP, args, &out),
+                   (int)VIV_TIER2, "nanosleep is T2 (6.29)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_CLOCK_NANOSLEEP, args, &out),
+                   (int)VIV_TIER2, "clock_nanosleep is T2 (6.29)");
 
     // V-5c. ppoll carries the whole poll family on aarch64 (no plain poll(2)),
     // so this is what musl's poll() becomes.
@@ -609,14 +617,14 @@ void test_vivarium_stat_to_linux(void) {
     in.blocks    = 9;
     in.uid       = 1001;
     in.gid       = 1002;
-    in.devno     = 42;
+    in.devno     = (1ull << 32) + 42u;   // above 2^32: the whole 64-bit devno
 
     vivarium_stat_to_linux(&in, &out);
 
     // (devno, qid.path) IS Thylacine's file identity (#100) and is already the
     // pair userspace maps onto (st_dev, st_ino) -- pouch patch 0010 does exactly
     // this. The correspondence is inherited, not invented here.
-    TEST_EXPECT_EQ(out.st_dev, (u64)42,     "st_dev <- t_stat.devno (#100)");
+    TEST_EXPECT_EQ(out.st_dev, (1ull << 32) + 42u, "st_dev <- all 64 bits of t_stat.devno");
     TEST_EXPECT_EQ(out.st_ino, (u64)0x2222, "st_ino <- t_stat.qid_path");
 
     TEST_EXPECT_EQ((u64)out.st_mode,  (u64)0100644u, "st_mode carries");
@@ -3453,6 +3461,112 @@ void test_vivarium_madvise_domain(void) {
                    (int)VIV_FORWARD, "no out-parameter: fail closed");
 }
 
+// VIVARIUM 6.29: the sleep rows' pure half -- the clock verdicts, the request,
+// and the deadline verdict, which decides the race a running kernel cannot be
+// made to hit on demand (a note landing after the deadline, before the sleeper
+// runs).
+void test_vivarium_nanosleep_domain(void);
+void test_vivarium_nanosleep_domain(void) {
+    u64  clk = 77;
+    bool abs = true;
+
+    // The clocks, against clock_gettime's map: every id that map refuses is
+    // EINVAL, every id it serves sleeps or is EOPNOTSUPP. Ids past the low byte
+    // and negative ones (the per-process and fd clocks) included.
+    static const u64 ids[] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 255, 0x7fffffffull,
+        (u64)-1ll, (u64)-2ll, (u64)-6ll, (u64)-14ll,
+    };
+    for (u32 i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        u64 g;
+        bool known = vivarium_clock_gettime_map(ids[i], &g);
+        s32 err = vivarium_clock_nanosleep_decide(ids[i], 0, &clk, &abs);
+        TEST_ASSERT((err == T_E_INVAL) == !known,
+                    "EINVAL exactly for the clocks clock_gettime does not know");
+        TEST_ASSERT(err == 0 || err == T_E_INVAL || err == T_E_OPNOTSUPP,
+                    "no other answer");
+    }
+    TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(0, 0, &clk, &abs), 0LL,
+                   "CLOCK_REALTIME sleeps");
+    TEST_EXPECT_EQ(clk, (u64)T_CLOCK_REALTIME, "on the wall clock");
+    TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(1, 0, &clk, &abs), 0LL,
+                   "CLOCK_MONOTONIC sleeps");
+    TEST_EXPECT_EQ(clk, (u64)T_CLOCK_MONOTONIC, "on the monotonic clock");
+    TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(7, 0, &clk, &abs), 0LL,
+                   "CLOCK_BOOTTIME sleeps");
+    TEST_EXPECT_EQ(clk, (u64)T_CLOCK_MONOTONIC, "BOOTTIME is MONOTONIC: no suspend");
+    for (u64 c = 4; c <= 6; c++)
+        TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(c, 0, &clk, &abs),
+                       (s64)T_E_OPNOTSUPP,
+                       "MONOTONIC_RAW and both COARSE clocks: read, never slept on");
+    TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(2, 0, &clk, &abs), (s64)T_E_INVAL,
+                   "the process CPU clock is no clock here (as clock_gettime says)");
+    TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(3, 0, &clk, &abs), (s64)T_E_INVAL,
+                   "nor the thread CPU clock (EINVAL on Linux too)");
+
+    // clockid_t is an int: the high word is ignored, by both maps.
+    u64 g = 77;
+    TEST_ASSERT(vivarium_clock_gettime_map((1ull << 32) | 1u, &g) && g == T_CLOCK_MONOTONIC,
+                "clock_gettime reads the clock id's low 32 bits");
+    TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide((1ull << 32) | 0u, 0, &clk, &abs),
+                   0LL, "so does clock_nanosleep");
+    TEST_EXPECT_EQ(clk, (u64)T_CLOCK_REALTIME, "the low word names the clock");
+
+    // Only TIMER_ABSTIME (1) counts, and flags is an int too.
+    static const struct { u64 flags; bool abs; } fl[] = {
+        { 0, false }, { 1, true }, { 2, false }, { 3, true },
+        { 1ull << 32, false }, { (1ull << 32) | 1u, true }, { 0xfffffffeull, false },
+    };
+    for (u32 i = 0; i < sizeof(fl) / sizeof(fl[0]); i++) {
+        abs = !fl[i].abs;
+        TEST_EXPECT_EQ((s64)vivarium_clock_nanosleep_decide(1, fl[i].flags, &clk, &abs),
+                       0LL, "no flag is refused");
+        TEST_ASSERT(abs == fl[i].abs, "TIMER_ABSTIME is the one bit read");
+    }
+
+    // The request: Linux's timespec64_valid, then a length that saturates.
+    u64 ns = 77;
+    TEST_ASSERT(vivarium_sleep_req_ns(0, 0, &ns) && ns == 0, "a zero request is valid");
+    TEST_ASSERT(vivarium_sleep_req_ns(1, 500000000, &ns) && ns == 1500000000ull, "1.5 s");
+    TEST_ASSERT(vivarium_sleep_req_ns(0, 999999999, &ns) && ns == 999999999ull,
+                "the largest tv_nsec");
+    TEST_ASSERT(!vivarium_sleep_req_ns(0, 1000000000, &ns), "tv_nsec 1e9 is EINVAL");
+    TEST_ASSERT(!vivarium_sleep_req_ns(0, -1, &ns), "a negative tv_nsec is EINVAL");
+    TEST_ASSERT(!vivarium_sleep_req_ns(-1, 0, &ns), "a negative tv_sec is EINVAL");
+    TEST_ASSERT(vivarium_sleep_req_ns(18446744073ll, 709551614, &ns) && ns == ~0ull - 1u,
+                "the last length below U64_MAX is exact");
+    TEST_ASSERT(vivarium_sleep_req_ns(18446744073ll, 709551616, &ns) && ns == ~0ull,
+                "one past U64_MAX saturates rather than wraps short");
+    TEST_ASSERT(vivarium_sleep_req_ns(0x7fffffffffffffffll, 999999999, &ns) && ns == ~0ull,
+                "the largest request saturates");
+
+    // The deadline verdict, on one clock: deadline 100.
+    u64 rem = 77;
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_NOTEINTR, 100, 40, &rem), -(s64)T_E_INTR,
+                   "a note before the deadline is EINTR");
+    TEST_EXPECT_EQ(rem, 60ull, "with what was left");
+    rem = 77;
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_NOTEINTR, 100, 100, &rem), 0LL,
+                   "a note at the deadline: the expiry wins");
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_NOTEINTR, 100, 150, &rem), 0LL,
+                   "a note after the deadline: the expiry wins");
+    TEST_EXPECT_EQ(rem, 77ull, "and no time left is written");
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_NOTEINTR, 100, 40, NULL), -(s64)T_E_INTR,
+                   "an absolute sleep has no rem to write");
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_TIMEDOUT, 100, 99, &rem), 1LL,
+                   "a timeout short of the deadline sleeps the rest");
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_TIMEDOUT, 100, 100, &rem), 0LL,
+                   "the deadline");
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_AWOKEN, 100, 40, &rem), 1LL,
+                   "a step wakes the sleeper to measure again");
+    rem = 77;
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_INTR, 100, 40, &rem), -(s64)T_E_INTR,
+                   "a death before the deadline is EINTR, never a short 0");
+    TEST_EXPECT_EQ(rem, 60ull, "with what was left, for a thread a revoked latch spares");
+    TEST_EXPECT_EQ(vivarium_sleep_verdict(TSLEEP_INTR, 100, 100, &rem), 0LL,
+                   "a death at the deadline: the expiry wins");
+}
+
 void test_vivarium_writev_domain(void);
 void test_vivarium_writev_domain(void) {
     u32 count = 0xFFFFFFFFu;
@@ -4547,7 +4661,7 @@ void test_vivarium_exec_drops_cloexec_sockets(void) {
 // Dev (never registered) whose close counts into a counter of that Spoor's own
 // (aux) -- so "released exactly once" is asserted of EACH Spoor, where a total
 // would let a double release of one and a leak of another cancel out.
-static void viv_ready_stub_close(struct Spoor *c) { (*(u32 *)c->aux)++; }
+static int viv_ready_stub_close(struct Spoor *c) { (*(u32 *)c->aux)++; return 0; }
 static struct Dev g_viv_ready_stub_dev = {
     .dc    = (int)'+',
     .name  = "vivreadystub",
@@ -5623,7 +5737,8 @@ void test_vivarium_intr_class(void) {
         VIV_LINUX_ACCEPT, VIV_LINUX_ACCEPT4, VIV_LINUX_CONNECT,
         VIV_LINUX_RECVFROM, VIV_LINUX_RECVMSG, VIV_LINUX_SENDTO,
         VIV_LINUX_SENDMSG, VIV_LINUX_WAIT4, VIV_LINUX_PPOLL,
-        VIV_LINUX_PSELECT6, VIV_LINUX_FUTEX, VIV_LINUX_RT_SIGSUSPEND,
+        VIV_LINUX_PSELECT6, VIV_LINUX_FUTEX, VIV_LINUX_NANOSLEEP,
+        VIV_LINUX_CLOCK_NANOSLEEP, VIV_LINUX_RT_SIGSUSPEND,
         VIV_LINUX_RT_SIGTIMEDWAIT,
     };
     for (u32 i = 0; i < sizeof(always) / sizeof(always[0]); i++)

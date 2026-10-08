@@ -44,7 +44,7 @@ it:
 | **The watch instruments** | hooks that measure the context budget, ask "is stopping a decision?", and re-inject intent after a compaction | `~/.claude/ctx-hook.sh` (PostToolUse), `tools/stop-hook.sh` (Stop), `~/.claude/resume-note.py` (SessionStart) |
 | **The change of watch** | governed self-compaction: prove the tree is clean and progress was made, write a one-shot resume note, type `/compact` into your own pane, and have a detached watcher press Enter on the far side | `tools/thyla-selfcompact.sh` + `tools/thyla-nudge-watch.sh`, tmux |
 | **The bridge telephone** | a floor-based channel between agents: calls, notes that cannot carry a decision, disputes settled by naming a measurement, presence, a human seat no agent can forge | `yip` (Go, stdlib-only; MCP server + CLI + hooks + a switchboard TUI) |
-| **The engine-room telegraph** | leases on shared machines — testimony instead of measurement, wall-clock expiry, no licence to kill | `yip hold / release / steal / resources` |
+| **The engine-room telegraph** | leases on shared machines — testimony instead of measurement, wall-clock expiry, no licence to kill; a waiter whose turn has ended is woken when its lease comes | `yip hold / release / steal / resources` + `tools/thyla-wake.sh`, tmux |
 
 Plus a **launcher** that puts one agent per worktree in a tmux pane with a
 role tag and a named conversation (`tools/thyla-tmux.sh`), and a **log
@@ -815,6 +815,84 @@ each could sort itself to the head. Tie-broken by agent name.
 **Not yet general.** The resource registry is a compiled-in list
 (`knownResources` in `resource.go`); adopting this elsewhere means editing it
 or, better, moving it to a per-line `resources.json` (§9).
+
+### 4.11 The wake — a lease that types into your pane
+
+**Why.** An agent queued for a machine has nothing to do until it is granted,
+so it ends its turn, and then nothing starts the next one. A harness
+background task can re-invoke it, but the harness stops its own tasks and a
+compaction tears the session down under them. A wake that only *watches* is not
+enough either: yip gives an available queue head a two-minute offer window, and
+a wake read at the end of a ten-minute tool call arrives after the offer has
+expired.
+
+**How** (`tools/thyla-wake.sh hold <res> <reason> [--for] [--wait] [--say]`),
+re-exec'd detached with `nohup … </dev/null &`:
+
+- **It claims, then wakes.** The watcher itself runs the blocking `yip hold`,
+  so the offer window is never the agent's to catch; the wake reports a lease
+  already taken. FIFO places survive a re-issued wait, so arming it beside an
+  existing waiter keeps the place.
+- **The line is typed into the pane only when that is safe.** The pane must
+  still exist — and *tmux answers a pane id that no longer exists with exit 0
+  and empty fields*, so "alive" means "hands back its own id". It must still
+  run the program it ran when armed: an agent that exited leaves a shell, and a
+  shell would execute the line. The input box must be visible and empty: a
+  permission dialog draws its `❯ 1. Yes` cursor where the box was, and a key
+  there answers it; an operator's half-typed line would be submitted with the
+  wake glued on. Not safe yet → flash the tmux status line, wait, look again.
+  Text drawn *dim* after the prompt is not typing: it is Claude Code's
+  suggestion for the next prompt, which an idle box shows only sometimes. The
+  capture keeps its escapes (`capture-pane -e`) so the test can tell the two
+  apart; every wait logs what the box held.
+- **A lease nobody can be told about is released.** If the pane is gone or no
+  longer runs the agent, the watcher gives the lease back rather than let it
+  block every peer for its whole TTL. If the box stays unusable for
+  `THYLA_WAKE_HELD_BOUND` seconds (default 600), it releases the lease too, then
+  types a line saying so once the box frees.
+- `watch <res>` claims nothing and wakes when the machine is free or already
+  the agent's; `cancel` stops the caller's own watchers (the state directory is
+  shared by every agent, so `cancel --all` is the operator's) and touches
+  neither a lease nor a queued request; `probe` prints what a watcher would see.
+- yip names the asker's own lease `HELD by you`, a peer's by name — the match
+  takes both.
+
+**Proven.** 48 controls (`tools/thyla-wake-test/run.sh`, run from a checkout yip
+names as an agent) against throwaway panes running a fake input box and,
+for every lease state, a fake `yip`: a shell pane and a missing pane are
+refused; an empty box is typed into once, verbatim; a half-typed line is waited
+out and never glued to; a dialog is never typed into, and the bound gives up
+with a log line; a peer's lease never fires and the agent's own does; a granted
+hold wakes and releases nothing, a refused one says so; a vanished agent's
+lease is released; `cancel` leaves nothing typed and no child alive; eight exact
+screens (one measured from an idle pane) through a stand-in tmux, including a
+colour whose parameters contain a 2, which must not read as dim; a real pane
+showing a dim suggestion is typed into; a box that stays typed past the held
+bound gets the lease released and the agent told; `cancel` leaves a peer's
+watcher alone and `--all` does not. Three of
+those controls failed on the first build, each a real bug: the `HELD by you`
+spelling would have missed every grant; trailing blank rows of a tall pane
+pushed the box out of the bottom-rows window; and the missing-pane check passed
+by luck on an empty program name. Live: 2026-10-07, `hold-returned` at
+13:19:07Z, `delivered` at 13:19:09Z, and the woken agent started its bake.
+
+**What the first version got wrong** (2026-10-07). A hold returned at 15:06Z.
+For an hour every check read the idle box as typed, the watcher gave up
+with the lease still held, and the Mac sat idle in that agent's name for 2.6 h
+while two peers queued behind it. Three captures of the idle pane showed why: the
+box held `❯` and a dim `keep going`, Claude Code's suggestion. The old test
+stripped the escapes and saw text. The fake box in the controls never drew a
+suggestion, so 28 green controls could not see it; against the old tool the new
+controls fail (a real pane with a dim suggestion reads typed, and the bound
+holds the lease). Until every watcher runs the fixed version, look at
+`yip resources` once at the start of each turn: a lease held by you that you
+did not start is a wake that never arrived.
+
+**Not yet general.** The input-box test reads Claude Code's prompt
+(`THYLA_WAKE_GLYPH` under a `THYLA_WAKE_RULE` edge); another client sets its
+own pair, and a client whose box is never recognised is never typed into.
+Nothing else is specific to this repository, so the natural home is yip itself
+— a `hold` that takes the waiter's pane.
 
 ---
 

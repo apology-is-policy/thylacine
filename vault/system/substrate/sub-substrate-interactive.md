@@ -17,6 +17,7 @@ code:
   - tools/interactive/gfx_media.py
   - tools/interactive/gfx_shift.py
   - tools/interactive/haul-npxf.exp
+  - tools/interactive/haul-links.exp
   - tools/interactive/ls-gfx-dosbox-conf.exp
   - tools/interactive/ls-gfx-dosbox-duke3d.exp
   - tools/interactive/ls-gfx-dosbox-dynarec.exp
@@ -46,7 +47,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -485,6 +486,11 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
      the compositor is spawned before the pivot to the pool, so its startup
      read of `/lib/halcyon/profile` always misses and it says `built-in` on
      every image, until a halcyond pushes the bundle.
+- `ls-gfx-session-image`'s fail-fast arm waited for `leaf=N REFUSED`, a word
+  halcyond never wrote (its line is `leaf=N cache refused`), so a refused raster
+  showed as a 60 s timeout that blamed the routing. It matches the refusal line
+  now (2026-09-29, the I-47 close); a host check of the inline gates' patterns
+  against halcyond's line formats found the old one matched nothing.
 
 ## Provenance
 
@@ -549,3 +555,56 @@ pipes, and `haul-post`'s `MOUNT /TMP/HAUL-POST /SRV/HAUL-E2E REMOTE`.
 With the kernel's two stamps removed (and the two kernel tests that catch that
 unregistered, so the boot reaches a login), each gate passed every earlier leg
 and failed there, its line reading `/` (2026-09-29).
+
+`haul-links` (2026-10-06, DISTRO 4.6) is the device witness for served-link
+containment. It provisions everything itself: an npxf server on 127.0.0.1:5643
+(`HAUL_LINKS_PORT`; `NPXF_SERVER` names the binary, absent means SKIP 77)
+exporting a read-only tree that holds links, and guest decoys at the guest
+paths those links would name if they escaped. Every line is piped through
+`tr a-z A-Z`, so an echo cannot satisfy a token, and each leg prints its own
+letter, so only its own line can answer it. Legs a-d read through the direct
+mount, leg e through a plain `mount` of a posted service. An escape is
+recorded and the scenario runs on, failing after leg e with every escaped leg
+named. The first run failed on the scenario itself: `lc_send` consumes
+nothing, so the tool-error pattern (`ut: ...`) took the login shell's own
+`ut: consctl ok` line; a `LINKS-SETUP-DONE` marker now reads past the login
+banner before the first leg, as `haul-cape` does with `id`. With dev9p's
+`.remote` line deleted (the kernel suite drives a fixture Dev, so the boot
+still reaches a login), leg A read the guest's decoy.
+
+The image slide (2026-09-29, aux (d2)): `ls-gfx-inline-view` and
+`ls-gfx-session-image` each end with a fit leg, `view /test-large.png`: the
+witness card at 2048x1536, three times the largest per-image limit a channel
+admits and exactly `view`'s decode budget. The console gate reads `view`'s
+`placed inline (WxH, reduced from 2048x1536)` and halcyond's injection line of
+the same size; the session gate reads halcyond's `session inline leaf=N WxH`,
+because `view`'s own line is tile pixels there. Neither pins the size, which
+follows the renderer's heap, the display and the pane count; both require it
+within 64 Ki to 1 Mi pixels with the card's 4:3 aspect (`|w*1536 - h*2048| <
+2048`, a pixel of rounding). Before the limit read an over-limit upload was
+refused `E_INVAL`: `view` said `not displayed` and the session gate saw no
+witness, so each leg fails without the read or the fit. `ls-gfx-inline-view`
+then runs `view note.txt` from a directory holding an executable copy of `echo`
+named `cat`: only `/bin/cat` prints the note's line (typed as two quoted words,
+so it never appears in the typed text), and the status line arriving without it
+is the red arm; `view -- -zq.txt` then shows a file whose name starts with `-`,
+which a cat handed no `--` refuses as an invalid option. `lantern.exp` leg (i)
+refuses `lantern ''` as a usage error.
+
+Haul P3a (2026-10-05, aux): a hang-up leg reads the peer's verdict instead of
+only waiting for it. `haul-hangup-peer.py` logs `guest: the other side closed`,
+`reset`, or `STILL OPEN` when its 10-second drain ends; `haul-hangup`,
+`haul-npxf`'s relay leg and `haul-post`'s remote-FIN arm wait up to 15 seconds
+for any of the three (`wait_log_re`, one alternation) and fail unless it is
+closed or reset, so a haul that keeps its side open fails where it used to
+pass. The peer's `--mode oversize-reply` answers the Tversion with the msize it
+is given (`--rversion-msize`, sent as given, even above the guest's proposal)
+and the Tattach with a directory qid, answers the next request with a frame of
+`--reply` bytes, and keeps the connection open for the verdict. The legs that
+need only a fast refusal (`haul-hangup`'s stdio and token legs,
+`haul-unreachable`'s first) dial host port 1: LS-CI runs scenarios in parallel,
+a port one scenario's port-0 peer released can be handed to another's, and a
+dial there would spend that peer's single accept. With the peer's closed and
+reset lines rewritten to STILL OPEN, each of the three hang-up legs failed and
+every leg before it passed, while `haul-unreachable` and `haul-cape`, which
+read no verdict, passed (2026-10-05).

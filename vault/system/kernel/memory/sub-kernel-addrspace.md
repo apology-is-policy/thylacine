@@ -10,7 +10,7 @@ validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -255,7 +255,10 @@ have a buggy cfg in [[spec-cow]].
 `vma_count` / `shared_map_pages` / `page_budget` / `page_peak` /
 `pgtable_pages` (B-1a' audit F1: the hardware tables inside `page_count`,
 telemetry) / `file_pages` (audit F8: the mapped FILE pages inside it,
-telemetry) / `id` (a u64 from a global counter, never reused; the eager
+telemetry) / `code_vmas` (B-2b audit r2: how many listed VMAs alias a code
+Burrow, kept by `vma_insert_in` / `vma_remove_in` under `lock`; the image join
+reads it lock-free and counts a space holding any as carrying `CAP_JIT`,
+[[sub-kernel-proc]]) / `id` (a u64 from a global counter, never reused; the eager
 charge record's key, audit F4).
 
 `context_id` lives here because **the ASID names a translation table**,

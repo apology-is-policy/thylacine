@@ -101,8 +101,8 @@ graphics.
 ## Data structures
 
 `struct pouch_tstat` — the third hand-mirrored `t_stat` in the series
-(88 bytes, `_Static_assert`-pinned), consuming only `mode` and
-`qid_path`.
+(88 bytes, `_Static_assert`-pinned, with the 64-bit `devno` at 80 as the
+kernel's, [[abi-t-stat]]), consuming only `mode` and `qid_path`.
 
 ## Concurrency
 

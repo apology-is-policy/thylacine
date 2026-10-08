@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-09-28
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -312,9 +312,29 @@ None crossing a boundary; every ABI record belongs to
 - **`Stdio` / `PreparedStdio`** — the spawn plumbing. The prepared form splits
   what the parent must hold *through* the syscall from what it keeps *after*,
   which is the distinction that gets end-of-file semantics right.
+- **`Command::debug_held`** (2026-09-29) — spawns the child held
+  ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
+  image and parked before its first instruction, and the child runs only when a
+  debugger attached to it releases it, or stops and then starts it. If the
+  spawner exits first, the child is killed. The call blocks while the child
+  loads, so a thread that serves its own child's image must not spawn it held:
+  the two would wait on each other until the spawner is killed. The builder sets
+  `T_SPAWN_DEBUG_HELD` in `TSpawnArgs.debug_flags`, a record the build now checks
+  against the kernel's layout ([[sub-kernel-syscall-abi]]).
+- **`Metadata`** (`fs/metadata.rs`) — the crate's mirror of `t_stat`
+  ([[abi-t-stat]]), size-asserted at 88 bytes and nothing more. `dev()`
+  returns the whole 64-bit device number, which with `qid_path()` names a
+  file across datasets.
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.
+- **`SealedRegion`** (B-2b, 2026-10-07) — one sealed code region: the bytes
+  the kernel copied in, mapped once, execute-only, at a random address
+  (`SYS_JIT_CREATE_SEALED`). It holds only the alias's base and length;
+  there is no writer pointer to hold. `new` hands the kernel a slice of
+  instruction words as their in-memory bytes, which is the instruction stream
+  only on a little-endian target, and a const assertion says so. `destroy`
+  reports the kernel's answer; `Drop` makes the same call and discards it.
 
 ## Concurrency
 
@@ -371,11 +391,19 @@ Uniform: every module returns the crate `Result`, and every syscall return goes
 through the one decoder. Two exceptions, one deliberate and one worth watching.
 
 The deliberate one: the JIT module defines its own small error enum with
-domain-specific names, and its own copies of three errno constants, rather than
+domain-specific names, and its own copies of four errno constants (`EAGAIN`
+joined at B-2b, as `TryAgain`: every code alias goes at a random address, and
+none is drawn while the kernel's random source is unseeded), rather than
 reporting through the crate error type. Its catch-all preserves the raw value
 the same way, so nothing is lost — but the error module's claim to be the type
 "every libthyla-rs module reports through" has an exception that does not know
 it is one.
+
+The Loom ring's `register_handles` / `register_buffers` used to be a third
+exception, answering `InvalidArgument` for every failure; since 2026-10-07
+`SYS_LOOM_REGISTER` returns a negative errno and both go through the decoder,
+so a failed write-behind flush arrives as its own kind (`Io`, `Other(28)` for
+ENOSPC, `Other(4)` for a retryable EINTR) and an unopened fd as `BadHandle`.
 
 The one to watch: the formatting macros — the crate's `print!` family — swallow
 write errors by design, so a program whose output is optional does not fail
@@ -447,6 +475,15 @@ instant, and falling back to the syscall when the page is absent.
   field and the builder hardcodes it to inherit. Nothing native can raise or
   lower a child's budget without hand-building the record, which is the one
   structure the typed layer exists to avoid.
+- **The spawn builder has no search path.** `Command::new` hands its name to
+  the kernel, which resolves it as an open does: an absolute path from the
+  Territory root, a relative one against the working directory. A bare name
+  therefore runs the file of that name in the caller's working directory,
+  where one can be executed. The shell searches its own path list before it
+  spawns, so this reaches a program that spawns another by name: it names a
+  system program absolutely, as lantern names `/bin/view` and view `/bin/cat`.
+  The `process.rs` header says the same, and that a child starts with a copy of
+  the caller's Territory (its working directory included) and environment.
 - **Small blocks freed below a live one keep their pages.** dlmalloc returns
   memory only from the top of its newest segment and from a segment it has
   wholly emptied, so a run of small blocks freed beneath one that stays live is

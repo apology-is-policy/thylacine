@@ -95,6 +95,42 @@ USR_RS_TARGET="aarch64-unknown-none"
 # so build_go_probes skips cleanly when it is missing (the Go boot probe just
 # does not get baked). Override with GOFORK=/path/to/go-thylacine.
 GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
+# Both ambush builds spawn the launch target held: this tree's kernel carries
+# the birth hold (SPAWN_DEBUG_HELD), so ambush's Launch parks its target in front
+# of the first instruction and no quick program can outrun the attach
+# (DELVE-PORT-DESIGN 8c-4 (b)). The fork made that a build tag while some trees
+# had no hold; since ambush 073faaa an untagged build compiles the held launch,
+# and an older fork built untagged compiles held_off_thylacine.go, the running
+# spawn -- under a log line that says nothing. ambush_fork_check asks the
+# toolchain which files the build compiles (go list: the build's own file
+# selection). It refuses held_off_thylacine.go; held_on_thylacine.go must declare
+# launchHeld = true (073faaa); with neither, as once the constant is deleted, no
+# compiled file may name launchHeld and Launch must set DebugHeld, which a fork
+# from before the held launch does not. Whether Launch spawns held is
+# behaviour, which /ambush-probe stage C checks at the entry. It captures before
+# it matches: under pipefail a `| grep -q` can SIGPIPE the producer and fail a
+# good build.
+ambush_fork_check() {
+    local files
+    files=$(cd "$1" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$GOFORK/bin/go" list -mod=vendor \
+        -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
+        || { echo "==> Ambush: go list of $1/pkg/proc/native FAILED" >&2; return 1; }
+    local dir="$1/pkg/proc/native" f named=""
+    [[ " $files " != *" held_off_thylacine.go "* ]] \
+        || { echo "==> Ambush: $1 compiles held_off_thylacine.go untagged (a fork from before ambush 073faaa launches running) -- update the fork" >&2; return 1; }
+    if [[ " $files " == *" held_on_thylacine.go "* ]]; then
+        grep -q '^const launchHeld = true$' "$dir/held_on_thylacine.go" \
+            || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
+        return 0
+    fi
+    for f in $files; do
+        if grep -q 'launchHeld' "$dir/$f"; then named="$named $f"; fi
+    done
+    [[ -z $named ]] \
+        || { echo "==> Ambush: $1 names launchHeld in$named without held_on_thylacine.go -- update the fork" >&2; return 1; }
+    [[ " $files " == *" proc_thylacine.go "* ]] && grep -q 'SysProcAttr{DebugHeld: true}' "$dir/proc_thylacine.go" \
+        || { echo "==> Ambush: $1's Launch does not spawn held (a fork from before ambush 69e94cd launches running) -- update the fork" >&2; return 1; }
+}
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
 LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
@@ -206,6 +242,33 @@ BUILD_LEDGER=""
 ledger() {
     BUILD_LEDGER="${BUILD_LEDGER}    - $*"$'\n'
     echo "==> [build.sh] $*"
+}
+
+# disk_floor_check <stage> -- refuse to start <stage> on a nearly full volume.
+# A stage that writes GBs (the usr/Rust builds, a pool generate + populate) does
+# not fail alone when the disk fills: on 2026-10-05 a bake took the shared Mac's
+# volume to 121 MB free mid-populate, and every agent's shell then failed before
+# it ran, because the harness could not create its output file. Refusing while
+# there is room keeps the failure inside this build.
+disk_floor_check() {
+    local stage="$1" floor="${THYLACINE_MIN_FREE_GB:-6}" dir="$BUILD_DIR" free_kb
+    if ! [[ "$floor" =~ ^[0-9]+$ ]]; then
+        echo "==> THYLACINE_MIN_FREE_GB must be a whole number of GB (got '$floor')" >&2
+        exit 1
+    fi
+    (( floor == 0 )) && return 0
+    [[ -d "$dir" ]] || dir="$REPO_ROOT"
+    free_kb="$(df -Pk "$dir" | awk 'NR == 2 { print $4 }')"
+    if ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+        echo "==> disk floor check: cannot read the free space of $dir's volume" >&2
+        exit 1
+    fi
+    (( free_kb >= floor * 1024 * 1024 )) && return 0
+    echo "==> REFUSING $stage: $(( free_kb / 1024 )) MB free on $dir's volume, below the" \
+         "${floor} GB floor -- free space, or set THYLACINE_MIN_FREE_GB=<GB> (0 disables)" >&2
+    echo "    largest entries under $BUILD_DIR (du counts APFS-cloned blocks in full):" >&2
+    { du -sh "$BUILD_DIR"/* 2>/dev/null | sort -h | tail -6 | sed 's/^/      /' >&2; } || true
+    exit 1
 }
 
 # sysroot_is_stale — true (0) iff the pouch POSIX sysroot must be rebuilt: it
@@ -430,7 +493,9 @@ print main.Sentinel
 EOF
     # Go Stage 8c-4 (launch E2E): the Ambush init script /bin/ambush-probe drives via
     # `ambush exec /bin/ambush-child --init /bin/ambush-init-exec`. Ambush spawns the child
-    # (attach-first Launch), stops it before main.main, sets a HARDWARE breakpoint
+    # held and stops it at its ELF entry (`regs` first: the probe checks the launch
+    # stop's PC against the entry, which tells a held launch from one that raced),
+    # sets a HARDWARE breakpoint
     # at main.parkLoop (I-12/I-36 route every bp to the kernel hwbreak path), then
     # `continue` runs the target INTO the breakpoint (the whole-Proc stop). The
     # inspect commands then run against the bp-stopped multi-M target; stdin EOF
@@ -438,12 +503,21 @@ EOF
     # HW-breakpoint-routing + the kernel #95 focus-thread proof: break + continue +
     # bt/print at a real HW bp on a multi-M Go target.
     cat > "$ramfs_bin/ambush-init-exec" <<'EOF'
+regs
 break main.parkLoop
 continue
 goroutines
 bt
 print main.Sentinel
 EOF
+    # Stage D's abandoned-launch leg: `ambush dap-selftest /bin/ambush-child
+    # /bin/ambush-notelf` launches this first. It is executable, so the spawn makes
+    # a child, and not an ELF image, so that child dies in its exec before it runs;
+    # the failed launch must reap it. The mode is set rather than left to the
+    # umask: without X the spawn is refused before any child exists, and the leg
+    # fails saying so.
+    printf 'not an ELF image\n' > "$ramfs_bin/ambush-notelf"
+    chmod 0755 "$ramfs_bin/ambush-notelf"
     # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
     # this and asserts the assignment + fn registration persist into the
     # caller's Env).
@@ -869,6 +943,7 @@ build_ambush() {
         return 0
     fi
     mkdir -p "$go_out"
+    ambush_fork_check "$ambush_src" || return 1
     echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$ambush_src)"
     ( cd "$ambush_src" && \
       GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -mod=vendor \
@@ -999,6 +1074,7 @@ build_go_goroot() {
     # installed").
     local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
     if [[ -d "$ambush_src/cmd/dlv" ]]; then
+        ambush_fork_check "$ambush_src" || return 1
         echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, fork=$ambush_src)"
         ( cd "$ambush_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
             "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
@@ -1149,7 +1225,12 @@ build_userspace() {
     # aarch64-unknown-none target, skip with a notice rather than
     # erroring. Native Thylacine binaries still ship via the C path;
     # Rust binaries (hello-rs, future driver crates) need the target.
-    if rustup target list --installed 2>/dev/null | grep -q "^$USR_RS_TARGET$"; then
+    # Captured before it is matched: under pipefail a `| grep -q` that exits on
+    # its match can break rustup's next write (Rust panics on EPIPE), and the
+    # failed pipeline would read as "not installed" and skip the Rust build.
+    local rs_targets
+    rs_targets=$(rustup target list --installed 2>/dev/null || true)
+    if grep -q "^$USR_RS_TARGET$" <<<"$rs_targets"; then
         echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
         ( cd "$REPO_ROOT/usr" && cargo build --release $verbose )
         echo "==> Userspace Rust built under $USR_RS_BUILD"
@@ -3283,6 +3364,28 @@ build_stratumd() {
     cp "$binary" "$progs_out/stratumd"
     echo "==> stratumd built: $progs_out/stratumd ($(wc -c < "$progs_out/stratumd" | tr -d ' ') bytes, ET_EXEC, static)"
     ledger "stratumd: BUILT (links the pouch libc -- a stale sysroot would ship a stale ABI here)"
+    # The external Stratum source is the one build input no artifact hash
+    # enumerates, so two images can ship different stratumd while every
+    # recorded hash matches. Observed 2026-10-06: two trees with an IDENTICAL
+    # .config (4fcc788d6be38b80) and the same base commit, where one image's
+    # stratumd lacked the session-DEK leases -- which failed joey's D7
+    # overlapping-login probe with `install-dek ... result=err:eaccess` and was
+    # found only by reading both CMakeCache.txt files by hand. Recording only:
+    # the pin travels with the build instead of needing archaeology. Artifact
+    # hashes identify OUTPUTS; they do not enumerate external INPUTS.
+    local stratum_head stratum_dirty
+    if stratum_head="$(git -C "$stratum_src" rev-parse --short HEAD 2>/dev/null)"; then
+        if [[ -n "$(git -C "$stratum_src" status --porcelain 2>/dev/null)" ]]; then
+            stratum_dirty=YES
+        else
+            stratum_dirty=no
+        fi
+        ledger "stratumd: built from $stratum_src @$stratum_head (dirty: $stratum_dirty)"
+    else
+        # An ABSENT line would read as "no external input", which is the wrong
+        # reading -- say the commit could not be identified instead.
+        ledger "stratumd: built from $stratum_src (NOT A GIT REPO -- commit unidentifiable)"
+    fi
 }
 
 build_stratum_host_tools() {
@@ -3516,6 +3619,7 @@ build_stratum_pool_fixture() {
             fi
         done
     fi
+    disk_floor_check "the pool generate ($pool_img, size=$pool_size)"
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
@@ -4069,6 +4173,25 @@ populate_stratum_pool() {
             echo "==> populate pool: /test.png baked + readback-verified (I-47 inline-media fixture, $(wc -c < "$testpng" | tr -d ' ') B)"
         else
             echo "==> populate pool: no usr/view/testdata/test.png -- inline-media E2E fixture skipped"
+        fi
+
+        # HALCYON.md 14.7, the 2026-09-29 refinement: the same card at 2048x1536
+        # (committed usr/view/testdata/test-large.png, `make-test-png.py large`),
+        # baked at /test-large.png. 3 Mi pixels is view's own decode budget and
+        # three times the largest per-image limit a pane admits, so the card
+        # shows only if view read the pane's limit and reduced the raster to it.
+        # Same halcyon gate + readback verify.
+        local testlarge="$REPO_ROOT/usr/view/testdata/test-large.png"
+        if [[ -f "$testlarge" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" write /test-large.png < "$testlarge" \
+                || { echo "==> populate pool: write /test-large.png FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" sync \
+                || { echo "==> populate pool: sync (test-large.png) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            "$stratum_fs_bin" -s "$sock_path" read /test-large.png | cmp -s - "$testlarge" \
+                || { echo "==> populate pool: /test-large.png readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+            echo "==> populate pool: /test-large.png baked + readback-verified (the fit-to-limit fixture, $(wc -c < "$testlarge" | tr -d ' ') B)"
+        else
+            echo "==> populate pool: no usr/view/testdata/test-large.png -- the fit-to-limit fixture skipped"
         fi
 
         # I-47 JPEG slice: the same 640x400 witness card as a JPEG (committed
@@ -7328,6 +7451,48 @@ clean() {
 # eat a function definition out of the tyrquake port patch.
 python3 "$REPO_ROOT/tools/check-patch-hunks.py" \
     || { echo "==> patch-hunk check FAILED -- a hunk would apply INCOMPLETE" >&2
+         exit 1; }
+
+# The SYS_SPAWN_FULL_ARGV argument block crosses the syscall boundary as raw
+# bytes, and every userspace copy of struct sys_spawn_args pins itself to a
+# literal size, not to the kernel: a copy left behind when the kernel grows
+# passes its own assert while the kernel reads past it (#100, and the go fork
+# again at the birth hold). Every copy -- libt, libthyla-rs, the pouch patch,
+# the go fork when present -- is compared with the kernel header field by
+# field, before any target, since each target builds a different copy. The
+# check proves it can fail before it passes. Sub-second, fatal, no skip switch.
+GOFORK="$GOFORK" python3 "$REPO_ROOT/tools/check-spawn-args-mirrors.py" \
+    || { echo "==> spawn-args mirror check FAILED -- a copy of struct" >&2
+         echo "    sys_spawn_args does not match kernel/include/thylacine/syscall.h" >&2
+         exit 1; }
+
+# Every member of a flag word (proc_flags, the spawn words, the walk-create
+# mode word, the 9P attach flags, the mount flags) must own its bits. A flag's
+# _Static_assert names the flags its author knew, so two branches can take the
+# same free bit and both compile -- it happened in proc_flags, at bit 22. This
+# check derives each set from its header instead, and proves it can fail before
+# it passes. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-flag-words.py" \
+    || { echo "==> flag-word check FAILED -- two defines share a bit of one flag" >&2
+         echo "    word, or the check could not verify itself (see above)" >&2
+         exit 1; }
+
+# The free-space floor, before any target writes; `clean` frees space.
+[[ "$target" == clean ]] || disk_floor_check "target '$target'"
+
+# The memory-protection bits cross the syscall boundary as raw values, and each
+# userspace mirror pins its own literals rather than deriving them: a bit added
+# kernel-side without its mirror leaves the two sides silently disagreeing. This
+# tree has already had two branches' flag _Static_asserts each miss the other's
+# bit, which is why the check DERIVES both sides from the headers instead of
+# matching a name list -- a guard pinned to a name is re-pointed by hand and goes
+# stale; a derived one cannot. --expect-unmirrored pins today's deliberate
+# absences (the VMA_PROT_RW and VMA_PROT_RX composites in both mirrors, and
+# BURROW_PROT_EXEC in libthyla-rs) so a NEW absence fails instead of quietly
+# joining them. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-prot-mirror.py" --expect-unmirrored 5 \
+    || { echo "==> prot-mirror check FAILED -- a kernel prot bit and its" >&2
+         echo "    userspace mirror disagree, or a new kernel bit has no mirror" >&2
          exit 1; }
 
 case "$target" in

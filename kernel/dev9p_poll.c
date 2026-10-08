@@ -26,9 +26,10 @@
 //     locked step that unlinks it (GcArm; net_poll_teardown BUGGY_SPLIT_GC). A
 //     SNAPSHOT is never collected (BUGGY_GC_SNAPSHOT): it has no hook by design,
 //     and the poller that sent it releases it itself;
-//   - pump the reader of every distinct client with an arm or a snapshot out
-//     (F1: one client's parked arm must not starve another client's reply);
-//   - park when there is none.
+//   - read for every distinct client with an arm or a snapshot out, over a
+//     ready stream only (F1: one client's parked arm must not starve another
+//     client's reply), and with nothing to read hook every one of them and park
+//     -- the fan-in of LOOM.md 8.6, which the Loom waiters run too.
 //
 // A SHORTAGE IS NOT AN ANSWER (NP-4a). p9_client_submit_async reports no free tag
 // or a full send ring as -P9_E_AGAIN and fires the completion with it; both
@@ -62,7 +63,7 @@
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
-#include "../arch/arm64/timer.h"   // timer_now_ns -- the reader-pump idle deadline
+#include "../arch/arm64/timer.h"   // timer_now_ns -- the stranded-arm GC sweep
 
 // =============================================================================
 // State.
@@ -133,25 +134,17 @@ struct dev9p_poll_state {
     int                      refs;          // atomic: priv (1) + 1 per outstanding arm
 };
 
-#define DEV9P_POLL_IDLE_NS  (20ull * 1000ull * 1000ull)   // 20ms reader-pump idle deadline
-// Distinct QTPOLL clients the kthread pumps per cycle (F1: the global pump must be
-// FAIR across clients -- pumping only one would starve a second client's pending
-// reply). v1.0 has TWO QTPOLL clients (the netd /net mount + the ptyfs /dev/pts
-// mount, item 10); the per-user-netd v1.x config a handful. With MORE than this many
-// simultaneous QTPOLL clients each holding a perpetually-parked arm, the cap is NOT
-// graceful: the registries are LIFO and the collect always walks from the head with
-// no rotation, so the >MAX clients nearest the head are pumped every cycle and a
-// TAIL client is STARVED outright (its reply never demuxed -> its pollers hang), not
-// merely delayed (R2-F1). The v1.x close (the per-client work-queue / a fair
-// round-robin cursor) must use a fair start, not this head-anchored scan.
-// Unreachable below the cap, far above the realistic per-user-netd count.
-#define DEV9P_POLL_MAX_PUMP 16
+// While a non-terminal arm is linked the kthread parks for at most this long, so
+// Phase 1 can collect an arm whose pollers have all left: a poller's departure
+// takes its hook off the list and signals nothing (OPEN-BUGS 2026-10-06, P3).
+#define DEV9P_POLL_GC_NS  (20ull * 1000ull * 1000ull)   // 20 ms
 
 static spin_lock_t              g_dev9p_poll_lock;
 static struct dev9p_poll_op    *g_dev9p_poll_ops;        // the arm registry (under g_lock)
 static u32                      g_dev9p_poll_op_count;    // its length (atomic; the park cond)
 static struct dev9p_poll_snap  *g_dev9p_poll_snaps;      // snapshots in flight (under g_lock)
-static u32                      g_dev9p_poll_snap_live;   // live snapshots (atomic; the park cond)
+static u32                      g_dev9p_poll_snap_live;   // live snapshots (atomic)
+static u32                      g_dev9p_poll_gen;         // bumped before each kick (atomic; the park cond)
 static struct Rendez            g_dev9p_poll_rendez;      // the kthread park
 static bool                     g_dev9p_poll_inited;
 static int                      g_dev9p_poll_test_gc;     // atomic; see dev9p_poll_test_gc
@@ -170,14 +163,17 @@ void dev9p_poll_init(void) {
 
 // Whether c's readiness lives in its server. A regular dev9p file (no QTPOLL on
 // its cached qid) is POSIX always-ready -- a regular file is never read by
-// poll(). The kthread drives the reads with a frame-boundary recv DEADLINE (so a
-// held arm lets it re-check its work, never blocking forever), which REQUIRES a
-// deadline-capable transport; netd's and ptyfs's mounts are srvconn, so this
-// holds in v1.0, and a hypothetical QTPOLL server without one degrades to
-// always-ready (fail-safe -- the gate the Loom SQPOLL register applies too).
+// poll().
 static bool dev9p_poll_is_remote(struct Spoor *c, struct dev9p_priv *p) {
-    return p && (c->qid.type & QTPOLL) &&
-           p9_client_recv_is_deadline_capable(p->client);
+    return p && (c->qid.type & QTPOLL);
+}
+
+// Tell the kthread there is new work: move the generation its park compares,
+// then wake it. The rendez lock orders the bump before the cond's read, so a
+// kick between the kthread's sample and its sleep is not lost.
+static void dev9p_poll_kick(void) {
+    __atomic_fetch_add(&g_dev9p_poll_gen, 1u, __ATOMIC_RELEASE);
+    (void)wakeup(&g_dev9p_poll_rendez);
 }
 
 // =============================================================================
@@ -314,7 +310,7 @@ static void dev9p_poll_arm_complete(struct p9_rpc *rpc, int status,
     if (status == -P9_E_AGAIN) return;     // never sent: its submitter frees it
     struct dev9p_poll_op *op = (struct dev9p_poll_op *)rpc;       // rpc at offset 0
     __atomic_store_n(&op->terminal, true, __ATOMIC_RELEASE);
-    (void)wakeup(&g_dev9p_poll_rendez);    // c->lock -> rendez (leaf; no cycle)
+    dev9p_poll_kick();                     // c->lock -> rendez (leaf; no cycle)
 }
 
 // =============================================================================
@@ -365,7 +361,7 @@ void dev9p_poll_snapshot(struct Spoor *c, short events, struct poll_snap *s) {
         __atomic_store_n(&s->state, (u8)POLL_SNAP_UNSENT, __ATOMIC_RELEASE);
     // Pump its client: for the answer, or -- when UNSENT -- for the replies that
     // give a tag back.
-    (void)wakeup(&g_dev9p_poll_rendez);
+    dev9p_poll_kick();
 }
 
 void dev9p_poll_snapshot_release(struct Spoor *c, struct poll_snap *s) {
@@ -388,6 +384,9 @@ void dev9p_poll_snapshot_release(struct Spoor *c, struct poll_snap *s) {
 
     if (sn->attached_owner) p9_attached_unref(sn->attached_owner);
     kfree(sn);
+    // A read went: the kthread may be parked on its client, holding the
+    // session ref and a hook on it. Let it re-collect.
+    dev9p_poll_kick();
 }
 
 int dev9p_poll_arm(struct Spoor *c, short events, struct poll_waiter *pw) {
@@ -455,7 +454,7 @@ int dev9p_poll_arm(struct Spoor *c, short events, struct poll_waiter *pw) {
         p9_client_abandon_async(abandon->client, &abandon->rpc);
         dev9p_poll_op_free(abandon);
     }
-    if (armed) (void)wakeup(&g_dev9p_poll_rendez);
+    if (armed) dev9p_poll_kick();
     return armed;
 }
 
@@ -463,60 +462,84 @@ int dev9p_poll_arm(struct Spoor *c, short events, struct poll_waiter *pw) {
 // The global poll-pump kthread (KthreadWalk).
 // =============================================================================
 
-// Add `client` to the pump set unless it is there; take an EXTRA session ref as
-// the borrow-guard (the client stays alive past the unlock + across the blocking
-// pump even if its op is freed meanwhile). `owner` NULL only on the test path
-// (the client is externally owned): store NULL + skip the unref symmetrically.
+// Put `client` on the kthread's collect list unless it is there, taking a session
+// ref as the borrow-guard (the client stays alive past g_lock and across its pump
+// and hook even if its read is freed meanwhile). `owner` NULL only on the test
+// path (the client is externally owned): store NULL and skip the unref alike.
+// The entry's fields are the kthread's alone (9p_client.h).
 static void dev9p_poll_collect_one(struct p9_client *client, struct p9_attached *owner,
-                                   struct p9_client **out_cl,
-                                   struct p9_attached **out_pin, u32 *n, u32 max) {
-    if (*n >= max) return;
-    for (u32 i = 0; i < *n; i++)
-        if (out_cl[i] == client) return;
-    out_cl[*n]  = client;
-    out_pin[*n] = owner;
+                                   struct p9_client **head) {
+    if (client->poll_listed) return;
+    client->poll_listed = true;
+    client->poll_pin    = owner;
     if (owner) p9_attached_ref(owner);
-    (*n)++;
+    poll_waiter_init(&client->poll_hook.pw, &g_dev9p_poll_rendez);
+    client->poll_hook.place = P9_HOOK_NONE;
+    client->poll_next = *head;
+    *head = client;
 }
 
-// Collect the DISTINCT clients with a read out -- a non-terminal arm or a live
-// snapshot -- whose elected readers the kthread must drive this cycle (the Loom
-// loom_first_inflight_client pattern, fanned out across clients; F1 fairness).
-// out_cl[i] / out_pin[i] are paired; returns the count (<= max). Takes
-// g_dev9p_poll_lock. v1.0 has TWO QTPOLL clients -> collects up to 2; with MORE
-// than `max` this head-anchored scan STARVES the tail (R2-F1; see
-// DEV9P_POLL_MAX_PUMP).
-static u32 dev9p_poll_collect_clients(struct p9_client **out_cl,
-                                      struct p9_attached **out_pin, u32 max) {
-    u32 n = 0;
+// Collect EVERY distinct client with a read out -- a non-terminal arm or a live
+// snapshot -- whose replies the kthread must read (F1; no cap, so no client
+// starves). *arm_out says whether a non-terminal arm is linked, which bounds the
+// park for the stranded-arm GC. Takes g_dev9p_poll_lock.
+static struct p9_client *dev9p_poll_collect_clients(bool *arm_out) {
+    struct p9_client *head = NULL;
+    bool arm = false;
     spin_lock(&g_dev9p_poll_lock);
     for (struct dev9p_poll_op *op = g_dev9p_poll_ops; op; op = op->next) {
         if (__atomic_load_n(&op->terminal, __ATOMIC_ACQUIRE)) continue;
-        dev9p_poll_collect_one(op->client, op->attached_owner, out_cl, out_pin, &n, max);
+        arm = true;
+        dev9p_poll_collect_one(op->client, op->attached_owner, &head);
     }
     for (struct dev9p_poll_snap *sn = g_dev9p_poll_snaps; sn; sn = sn->next) {
         if (!__atomic_load_n(&sn->live, __ATOMIC_ACQUIRE)) continue;
-        dev9p_poll_collect_one(sn->client, sn->attached_owner, out_cl, out_pin, &n, max);
+        dev9p_poll_collect_one(sn->client, sn->attached_owner, &head);
     }
     spin_unlock(&g_dev9p_poll_lock);
-    return n;
+    *arm_out = arm;
+    return head;
 }
 
+// Unhook every collected client and drop its session ref, the ref last: it may
+// free the client.
+static void dev9p_poll_release_clients(struct p9_client *head) {
+    while (head) {
+        struct p9_client   *next = head->poll_next;
+        struct p9_attached *pin  = head->poll_pin;
+        p9_client_reader_unhook(head, &head->poll_hook);
+        head->poll_next   = NULL;
+        head->poll_pin    = NULL;
+        head->poll_listed = false;
+        if (pin) p9_attached_unref(pin);
+        head = next;
+    }
+}
+
+// The park: a kick since the cycle began, or a hook flag (a client's role came
+// free with nothing designated, or a frame arrived on a free role). The flags
+// are set under their lists' locks and followed by a wakeup of this Rendez.
+struct dev9p_poll_wait {
+    const struct p9_client *head;
+    u32                     gen0;
+};
 static int dev9p_poll_park_cond(void *arg) {
-    (void)arg;
-    // Wake if an arm is linked (fresh or terminal) or a snapshot is live. Both
-    // counts are bumped before the submitter's wake, so the rendez lock makes the
-    // wake register-then-observe (the cons_mgr_pending discipline).
-    return (__atomic_load_n(&g_dev9p_poll_op_count, __ATOMIC_ACQUIRE) != 0u ||
-            __atomic_load_n(&g_dev9p_poll_snap_live, __ATOMIC_ACQUIRE) != 0u) ? 1 : 0;
+    const struct dev9p_poll_wait *w = (const struct dev9p_poll_wait *)arg;
+    if (__atomic_load_n(&g_dev9p_poll_gen, __ATOMIC_ACQUIRE) != w->gen0) return 1;
+    for (const struct p9_client *c = w->head; c; c = c->poll_next)
+        if (c->poll_hook.pw.ready) return 1;
+    return 0;
 }
 
 // One service+pump cycle. Reap terminal arms (walk the list + free), collect
-// stranded ones (flush + free), pump every client with a read out, or park.
+// stranded ones (flush + free), read for every client with a read out, or park.
 static void dev9p_poll_service_once(void) {
     struct dev9p_poll_op *reap = NULL;       // terminal -> walk poll_list + free
     struct dev9p_poll_op *abandon = NULL;    // stranded -> Tflush + free
     int gc_mode = __atomic_load_n(&g_dev9p_poll_test_gc, __ATOMIC_ACQUIRE);
+    // A kick from here on (an arm or snapshot sent, an arm answered) ends the
+    // park below.
+    u32 gen0 = __atomic_load_n(&g_dev9p_poll_gen, __ATOMIC_ACQUIRE);
 
     // Phase 1 (under g_lock): collect terminal + stranded arms. The empty-check is
     // NESTED under g_lock (g_lock -> poll_list lock) so it is atomic with the
@@ -583,33 +606,36 @@ static void dev9p_poll_service_once(void) {
         abandon = next;
     }
 
-    // Phase 3: pump the elected reader of EVERY distinct client with a read out
-    // (F1), else park. Each pin keeps its client alive across its pump.
-    struct p9_client   *clients[DEV9P_POLL_MAX_PUMP];
-    struct p9_attached *pins[DEV9P_POLL_MAX_PUMP];
-    u32 npump = dev9p_poll_collect_clients(clients, pins, DEV9P_POLL_MAX_PUMP);
-    if (npump == 0) {
-        // Nothing out -> park. The cond re-checks both counts under the rendez
-        // lock (register-then-observe vs a concurrent submit's wake). kproc never
-        // group-terminates, so SLEEP_INTR (a defensive death-interrupt) just
-        // re-loops -- there is no caller state to unwind.
-        (void)sleep(&g_dev9p_poll_rendez, dev9p_poll_park_cond, NULL);
-        return;
+    // Phase 3: read for EVERY distinct client with a read out, over a ready
+    // stream only; with nothing to read, hook every one and park. Each session
+    // ref keeps its client alive across its pump and its hook.
+    bool arm_out;
+    struct p9_client *head = dev9p_poll_collect_clients(&arm_out);
+    bool moved = false;
+    for (struct p9_client *c = head; c; c = c->poll_next) {
+        // PROGRESS: demuxed a frame (an answer may have landed) -> serve again.
+        // IDLE / BUSY: hooked below. DEAD: client_mark_dead_locked already
+        // completed every read in flight on it (arms terminal, snapshots
+        // answered POLLERR); an UNSENT snapshot names it until its poller
+        // resends, which kicks. A kproc never unwinds.
+        if (p9_client_reader_pump_ready(c) == P9_PUMP_PROGRESS) moved = true;
     }
-    bool yield = false;
-    for (u32 i = 0; i < npump; i++) {
-        u64 deadline = timer_now_ns() + DEV9P_POLL_IDLE_NS;
-        int rc = p9_client_reader_pump_once_deadline(clients[i], deadline);
-        if (pins[i]) p9_attached_unref(pins[i]);   // release this client's borrow-guard
-        // PROGRESS: demuxed a frame (an answer may have landed). IDLE: the
-        // boundary deadline lapsed, stream synced. BUSY: another thread holds the
-        // reader role and will demux for us. DEAD: client_mark_dead_locked already
-        // completed every read in flight on it (arms terminal, snapshots answered
-        // POLLERR); only an UNSENT snapshot can still name it, until its poller
-        // resends into the dead session -- so yield rather than spin on it.
-        if (rc == P9_PUMP_BUSY || rc == P9_PUMP_DEAD) yield = true;
+    if (!moved) {
+        bool hooked = true;
+        for (struct p9_client *c = head; c && hooked; c = c->poll_next)
+            if (p9_client_reader_hook(c, &c->poll_hook) == 0) hooked = false;
+        if (hooked) {
+            // kproc never group-terminates, so SLEEP_INTR (a defensive
+            // death-interrupt) just re-loops: there is no caller state to unwind.
+            struct dev9p_poll_wait w = { head, gen0 };
+            if (arm_out)
+                (void)tsleep(&g_dev9p_poll_rendez, dev9p_poll_park_cond, &w,
+                             timer_now_ns() + DEV9P_POLL_GC_NS);
+            else
+                (void)sleep(&g_dev9p_poll_rendez, dev9p_poll_park_cond, &w);
+        }
     }
-    if (yield) sched();
+    dev9p_poll_release_clients(head);
 }
 
 void dev9p_poll_pump_main(void) {
@@ -653,13 +679,16 @@ void dev9p_poll_priv_release(struct dev9p_priv *p) {
     spin_unlock(&g_dev9p_poll_lock);
 
     if (grabbed) {
-        // Cancel at the client (clear c->inflight[tag] + Tflush; #845) so no late
+        // Cancel at the client (drop the registration + Tflush; #845) so no late
         // completion fires on the freed arm and it does not strand awaiting a
         // reply. Then free it (drop the session + ps refs). Outside g_lock. The
         // client is alive: the priv still holds its session ref (dropped last, in
         // dev9p_close, after the Tclunk) and `grabbed` holds its own.
         p9_client_abandon_async(grabbed->client, &grabbed->rpc);
         dev9p_poll_op_free(grabbed);
+        // A read went: the kthread may be parked on this client, holding its
+        // session ref and a hook on it. Let it re-collect.
+        dev9p_poll_kick();
     }
 
     // Drop the priv's ps ref. If the kthread still owns an arm (we did not grab

@@ -153,6 +153,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"
+    "-Werror=return-type"
     "-Wstrict-prototypes"
     "-Wmissing-prototypes"
     "-Wno-unused-parameter"

@@ -1466,18 +1466,23 @@ enum {
     // bad args / non-zero flags / OOM / handle-table-full.
     SYS_LOOM_SETUP   = 66,   // arg: entries (x0), params_va (x1)
 
-    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -1   (Loom-2a)
+    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -errno   (Loom-2a)
     //   x0 = loom_fd : a KObj_Loom handle.
     //   x1 = op      : LOOM_REGISTER_HANDLES (install the fixed-handle table)
-    //                  at Loom-2a; LOOM_REGISTER_BUFFERS is reserved (Loom-6).
+    //                  or LOOM_REGISTER_BUFFERS (pin the buffer table, Loom-6).
     //   x2 = arg_va  : LOOM_REGISTER_HANDLES -> user-VA of a u32[nargs] of fds
     //                  (each must be a KOBJ_SPOOR handle in the caller). The
     //                  call REPLACES the whole table (IORING_REGISTER_FILES
     //                  semantics); each registered handle is resolved + its
     //                  rights snapshotted (the I-30 submit-time-pin substrate).
-    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES.
-    // -1 on bad loom_fd / unsupported op / nargs out of range / a non-KOBJ_SPOOR
-    // fd in the list.
+    //                  LOOM_REGISTER_BUFFERS -> a struct loom_buf_reg[nargs].
+    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES (or LOOM_MAX_REG_BUFFERS).
+    // -EBADF: loom_fd or a listed fd is not open. -EFAULT: the array is
+    // unreadable. A dev9p Spoor's write-behind flush failing, or an error an
+    // earlier flush latched, returns that errno (-ENOSPC, the server's -EIO, a
+    // caught note's -EINTR; operator vote 2026-10-07). -EINVAL otherwise:
+    // loom_fd not a Loom, an unknown op, nargs out of range, a non-KOBJ_SPOOR
+    // fd, a buffer range that is not one writable anon VMA.
     SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
 
     // SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) -> n / -1  (Loom-3)
@@ -1930,11 +1935,18 @@ enum {
     // ===================================================================
 
     // SYS_JIT_CREATE(length, out_va) -> 0 / -errno. CAP_JIT-gated.
-    //   Allocate a CODE Burrow of `length` bytes (rounded up to whole pages)
+    //   Reserve a CODE Burrow of `length` bytes (rounded up to whole pages)
     //   and install BOTH of its aliases in the caller's own address space:
     //   a WRITER alias mapped RW and an EXEC alias mapped RX, each a separate
     //   VMA over the same physical pages. Writes {writer_va, exec_va} as a
     //   `struct t_jit_region` to out_va.
+    //
+    //   The region is a RESERVATION, like SYS_BURROW_ATTACH_LAZY's memory:
+    //   create allocates and charges no page. Each page is committed, zeroed,
+    //   I-cache-invalidated and charged to the I-32 page budget ONCE, by the
+    //   first touch through either alias. A touch over the budget terminates
+    //   the Proc at the touch (I-32's clean failure); it never surfaces as an
+    //   errno here, so a JIT cannot learn its budget from create.
     //
     //   ONE syscall installs BOTH aliases, deliberately. Splitting create from
     //   map would admit a state in which an RX alias exists with no writer (or
@@ -1957,8 +1969,10 @@ enum {
     //   page traps rather than running residue.
     //
     //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX),
-    //   -ENOMEM (page budget, no VA gap, or allocator), -EFAULT (out_va not
-    //   writable by the caller).
+    //   -ENOMEM (the VMA cap, no VA gap, or the allocator), -EAGAIN (the
+    //   kernel CSPRNG is not yet seeded, so no address can be drawn: B-2b
+    //   places each alias at an independent random address), -EFAULT (out_va
+    //   not writable by the caller).
     //
     //   The denial is -T_E_ACCES (13), NOT -T_E_PERM: errno.h forbids a
     //   handler returning -T_E_PERM because its value (1) collides with the
@@ -1969,9 +1983,11 @@ enum {
 
     // SYS_JIT_DESTROY(writer_va) -> 0 / -errno.
     //   Tear down BOTH aliases of the code region whose WRITER alias starts at
-    //   writer_va, and free the backing pages. Identified by the writer VA
-    //   alone: the kernel remembers the pairing, so a caller cannot destroy
-    //   half a region or pass two VAs that name different regions.
+    //   writer_va, free the pages it committed and refund their charge.
+    //   Identified by the writer VA alone: the kernel remembers the pairing,
+    //   so a caller cannot destroy half a region or pass two VAs that name
+    //   different regions. A SEALED region (SYS_JIT_CREATE_SEALED) has no
+    //   writer, so it is named by the base of its one execute-only alias.
     //
     //   NOT CAP_JIT-gated. Destroying your own mapping is not an exercise of
     //   the emission authority, and gating it would mean a Proc whose legate
@@ -1979,8 +1995,9 @@ enum {
     //   turning a capability expiry into a memory leak. Authority to create is
     //   the scarce thing; authority to release is not.
     //
-    //   Errors: -EINVAL (writer_va is not the base of a live code region of
-    //   this Proc). Idempotent only in the sense that a second call fails
+    //   Errors: -EINVAL (writer_va is not the base of a live code region's
+    //   writer, or of a sealed region, in this Proc; an exec alias of a
+    //   writable region is refused). Idempotent only in the sense that a second call fails
     //   cleanly; it never tears down an unrelated mapping.
     SYS_JIT_DESTROY = 102,  // arg: writer_va (x0)
 
@@ -1992,7 +2009,10 @@ enum {
     //   `dsb ish` / `isb` sequence the architecture requires between a data
     //   write and an instruction fetch of the same location -- the same dance
     //   the kernel's own W1.5 alternatives-patcher performs, lifted to a
-    //   syscall.
+    //   syscall. When any CPU reports a non-PIPT I-cache, the invalidate is
+    //   `ic ialluis` instead: an invalidate by the kernel's alias of the page
+    //   is exact only on a PIPT I-cache. Pages of the range not yet committed
+    //   are skipped; their commit invalidates them.
     //
     //   The range must lie within ONE of the caller's code-region aliases
     //   (either the writer or the exec alias -- both name the same physical
@@ -2416,6 +2436,30 @@ enum {
     //   cap (-ENOMEM).
     SYS_BURROW_MAP_FILE = 126,  // arg: fd (x0), offset (x1), length (x2), prot (x3), flags (x4), addr (x5)
 
+    // SYS_JIT_CREATE_SEALED(src_va, length, out_va) -> 0 / -errno. CAP_JIT-gated.
+    //   B-2b (dec-2026-10-07-jit-sealed-thunk): a code region BORN sealed. The
+    //   kernel copies `length` bytes from src_va into a fresh code region,
+    //   commits and charges its pages (I-32), invalidates the I-cache over
+    //   them, and maps ONE alias, EXECUTE-ONLY (AP[2:1]=10, UXN=0, PXN): EL0
+    //   may fetch it and may neither load nor store it. No writer alias ever
+    //   exists. Writes the alias's VA as a u64 to out_va. The tail of the last
+    //   page past `length` is zero (UDF #0). The region is placed at a random
+    //   address, as SYS_JIT_CREATE's aliases are.
+    //
+    //   It holds code whose bytes must not be readable -- JavaScriptCore's
+    //   write thunk carries the writer alias's base as immediates. Every
+    //   kernel read on EL0's behalf is unprivileged (uaccess.S LDTR/STTR), so
+    //   a syscall cannot read the page for its caller either; /proc/<pid>/mem
+    //   refuses it. SYS_JIT_DESTROY(exec_va) releases it and refunds its
+    //   charge; SYS_ICACHE_SYNC over it is accepted and has nothing to do.
+    //
+    //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_SEALED_MAX),
+    //   -EFAULT (src_va unreadable by the caller, or out_va unwritable),
+    //   -EAGAIN (the kernel CSPRNG is not yet seeded, so no address can be
+    //   drawn), -ENOMEM (the page budget, the VMA cap, no VA gap, or the
+    //   allocator). A failure leaves nothing mapped and nothing charged.
+    SYS_JIT_CREATE_SEALED = 127,  // arg: src_va (x0), length (x1), out_va (x2)
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2491,11 +2535,17 @@ _Static_assert(sizeof(struct t_jit_region) == 16, "t_jit_region ABI: size");
 _Static_assert(__builtin_offsetof(struct t_jit_region, writer_va) == 0, "t_jit_region ABI: writer_va@0");
 _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_region ABI: exec_va@8");
 
-// Largest single code region (I-42). 64 MiB is generous for a shader/method
-// JIT while staying well inside the I-32 per-Proc page budget, so a code
-// region can never be the instrument that exhausts a Proc's memory floor --
-// the pages are charged against the page budget exactly like SYS_BURROW_ATTACH's.
+// Largest single code region (I-42): JavaScriptCore's executable pool, and
+// inside AArch64's +-128 MiB direct-branch range. The region is a reservation,
+// so the bound is on address space; the pages a JIT touches are charged one at
+// a time against the I-32 page budget, as SYS_BURROW_ATTACH_LAZY's are.
 #define JIT_REGION_MAX  (64u * 1024u * 1024u)
+
+// Largest sealed region (SYS_JIT_CREATE_SEALED). A sealed region holds a
+// thunk or a few trampolines, and the create commits and copies every page of
+// it before returning, so the bound is on that per-call work: 1 MiB is 256
+// pages, far above any thunk and far below the budget.
+#define JIT_SEALED_MAX  (1u * 1024u * 1024u)
 
 // SYS_PTY_REGISTER ops.
 #define PTY_REG_MINT   0u
@@ -2818,6 +2868,20 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 #define SPAWN_PHENO_LINUX            (1u << 0)
 #define SPAWN_PHENO_FLAGS_ALL        (SPAWN_PHENO_LINUX)
 
+// SYS_SPAWN_FULL_ARGV debug_flags (the birth hold; DEBUG-FS-DESIGN 5f; I-39).
+// SPAWN_DEBUG_HELD asks for the child to be held: the spawn returns once the
+// child has loaded its image and parked before its first instruction, and the
+// child runs nothing until a debugger's `stop` takes the hold over and resumes
+// it, or the owner's `start` / an explicit `detach` releases it. A held child
+// whose spawner exits first is killed.
+//
+// UNGATED, for the reason the phenotype is: the hold restricts only the
+// spawner's own child and hands it no access to that child -- reading or
+// controlling the held child still takes an attach through the I-39 gate.
+// Unknown bits are rejected (-1), the _pad_envp rationale.
+#define SPAWN_DEBUG_HELD             (1u << 0)
+#define SPAWN_DEBUG_FLAGS_ALL        (SPAWN_DEBUG_HELD)
+
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
 // allowance_va at it with SPAWN_ALLOWANCE_SET; the kernel uaccess-copies it,
@@ -2968,11 +3032,12 @@ _Static_assert(sizeof(struct srv_peer_info) == 40,
 // timestamps) so pouch's fstat() implementation can fill musl's
 // arch-specific `struct stat` from this without a Linux-shaped intermediate.
 //
-// 80 bytes, naturally aligned; the _Static_asserts pin every field offset
+// 88 bytes, naturally aligned; the _Static_asserts pin every field offset
 // so a userspace consumer (libt, pouch's fstat patch, libthyla-rs) decodes a
 // fixed record. A-2a (IDENTITY-DESIGN.md §9.5) appended uid + gid AFTER the
 // 72-byte 16b-gamma tail (existing offsets unchanged), the durable owner +
-// group the kernel rwx layer (A-2d) reads. There is no reserved tail today; a
+// group the kernel rwx layer (A-2d) reads; #100 appended devno at 80. There is
+// no reserved tail today; a
 // further field add extends the record again (every consumer rebuilds in
 // lockstep -- no persistent on-disk consumer of this ABI exists). devramfs
 // reports PRINCIPAL_SYSTEM / GID_SYSTEM (the boot FS is system-owned); dev9p
@@ -2993,20 +3058,23 @@ struct t_stat {
     u64 blocks;          // 64: count of 512-byte blocks
     u32 uid;             // 72: A-2a owner principal-id (PRINCIPAL_SYSTEM/NONE/real)
     u32 gid;             // 76: A-2a owning group (GID_SYSTEM/NONE/real)
-    u32 devno;           // 80: #100 -- per-instance device number (Plan 9 Chan.dev /
+    u64 devno;           // 80: #100 -- per-instance device number (Plan 9 Chan.dev /
                          //     POSIX st_dev): the mount/session identity that makes a
                          //     qid.path unambiguous ACROSS datasets. A static single-
                          //     instance Dev reports 0; dev9p mints one per attach
                          //     session (spoor_next_devno), inherited by walked/cloned
                          //     descendants. Consumers key file identity on (devno,
-                         //     qid.path) -- e.g. gopls robustio FileID.
-    u32 _pad_dev;        // 84: pad to 8-byte alignment (t_stat carries u64 members)
+                         //     qid.path) -- e.g. gopls robustio FileID. 64 bits since
+                         //     devno-u64, over the old _pad_dev at 84: the minter
+                         //     never wraps, so the pair stays an identity, and a
+                         //     reader of the low 32 bits at 80 sees what it always did.
 };
 
 _Static_assert(sizeof(struct t_stat) == 88,
                "struct t_stat is a SYS_FSTAT/SYS_STAT ABI type — pinned at 88 bytes "
-               "(A-2a appended u32 uid+gid -> 80; #100 appended u32 devno+pad -> 88). "
-               "EVERY mirror (libt, libthyla-rs, pouch patch 0010, the go-thylacine "
+               "(A-2a appended u32 uid+gid -> 80; #100 appended u32 devno+pad -> 88; "
+               "devno-u64 widened devno over the pad, still 88). "
+               "EVERY mirror (libt, libthyla-rs, pouch patches 0010/0019/0021/0024, the go-thylacine "
                "syscall.Stat_t) MUST grow in lockstep: the kernel writes sizeof(88) "
                "bytes into the caller's buffer, so a mirror left at 80 overflows it.");
 _Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at ABI offset 0");
@@ -3023,6 +3091,7 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 _Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at ABI offset 72 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at ABI offset 76 (A-2a)");
 _Static_assert(__builtin_offsetof(struct t_stat, devno)     == 80, "t_stat.devno at ABI offset 80 (#100)");
+_Static_assert(sizeof(((struct t_stat *)0)->devno)          ==  8, "t_stat.devno is 64 bits (devno-u64, in place over _pad_dev)");
 
 // 8a-1b-gamma-2 (I-39; docs/DEBUG-FS-DESIGN.md 4.5): the /proc/<pid>/regs read/
 // write format -- the saved EL0 GPR frame in the Linux arm64 `user_pt_regs`
@@ -3172,9 +3241,11 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // SYS_ATTACH_9P (x5): the remote declaration (LR-1, HAUL-DESIGN 4.8; operator
 // vote 2026-09-24). The attacher states that the session's transport leaves
 // the machine, and /proc/<pid>/ns ends the line of every mount sourced from the
-// session in " remote". A label: it grants nothing and no lookup, check, cache
-// or exec decision consults it. SYS_ATTACH_9P_SRV refuses the bit: over /srv
-// the poster declares (DMSRVREMOTE), as with the cape.
+// session in " remote". It grants nothing. The one decision that reads it
+// narrows: the resolver contains a symlink the session serves beneath the
+// mount it was reached through (DISTRO 4.6); no check, cache or exec decision
+// consults it. SYS_ATTACH_9P_SRV refuses the bit: over /srv the poster
+// declares (DMSRVREMOTE), as with the cape.
 #define SYS_ATTACH_9P_REMOTE  0x4u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE / SYS_PREAD /
@@ -3379,11 +3450,11 @@ _Static_assert(SYS_WALK_OPEN_OAPPEND == 0x40u &&
 // and every attach over the service -- SYS_ATTACH_9P_SRV on a byte conn, or
 // devsrv's own attach for a 9P-mode opener -- marks its session remote, as
 // SYS_ATTACH_9P_REMOTE does a pipe attach. Either mode admits it: DMSRVCAPE's
-// byte-mode rule rests on what the attacher could already do, and a label
-// grants nothing to restrict. Part of the service IDENTITY on a tombstone
-// rebind, like the mode, the ring class and the cape. Bit 22 is the next free
-// bit below DMSRVCAPE. Meaningful ONLY on the devsrv-post branch; a regular
-// create rejects it.
+// byte-mode rule rests on what the attacher could already do, and a
+// declaration that only narrows (DISTRO 4.6) grants nothing to restrict. Part
+// of the service IDENTITY on a tombstone rebind, like the mode, the ring class
+// and the cape. Bit 22 is the next free bit below DMSRVCAPE. Meaningful ONLY on
+// the devsrv-post branch; a regular create rejects it.
 #define SYS_WALK_CREATE_DMSRVREMOTE 0x00400000u
 // Every service-post bit: the one set a regular create refuses, so a new
 // DMSRV bit joins every refusal by joining this.
@@ -3554,11 +3625,12 @@ struct sys_spawn_args {
     // size assert below for why a per-mirror size assert cannot catch a miss.
     u32 pheno_flags;     // SPAWN_PHENO_* bits; outside SPAWN_PHENO_FLAGS_ALL -> -1
 
-    // The next forward-compat slot, replacing the one the merge consumed. Same
-    // contract as _pad_envp and the former _pad_allow: MUST be 0 at v1.0, and
-    // the handler poison-checks it, so a future kernel can tell an old caller
-    // from a new one. Also restores 8-alignment of the struct.
-    u32 _pad_spawn2;     // must be 0 at v1.0 (forward-compat slot)
+    // The birth hold (DEBUG-FS-DESIGN 5f) claims the forward-compat slot the
+    // merge left at 100. 0 -- what every earlier caller zero-fills, and what the
+    // old poison check required -- means "not held", so those callers are
+    // byte-identical. It was the LAST pad slot: the next field grows the struct,
+    // and every mirror with it.
+    u32 debug_flags;     // SPAWN_DEBUG_* bits; outside SPAWN_DEBUG_FLAGS_ALL -> -1
 };
 
 _Static_assert(sizeof(struct sys_spawn_args) == 104,
@@ -3566,15 +3638,19 @@ _Static_assert(sizeof(struct sys_spawn_args) == 104,
                "— pinned at 104 bytes (A-1a appended the identity block at "
                "56..80; the Menagerie step-5 allowance block appended at "
                "80..96: allowance_va 8 + allowance_flags 4 + page_budget 4; "
-               "the aux-2 merge appended 96..104: pheno_flags 4 + _pad_spawn2 "
-               "4, because CL-5 and VIVARIUM V-1b had independently claimed "
-               "the SAME _pad_allow slot at 92); no implicit padding.\n"
+               "the aux-2 merge appended 96..104: pheno_flags 4 + the slot at "
+               "100 the birth hold now uses as debug_flags, because CL-5 and "
+               "VIVARIUM V-1b had independently claimed the SAME _pad_allow "
+               "slot at 92); no implicit padding.\n"
                "THIS ASSERT CANNOT CATCH A STALE MIRROR. It verifies the "
                "KERNEL's own layout only; libt / libthyla-rs / the pouch "
                "0026 patch / the go fork each carry their own copy and their "
                "own size assert, and a mirror left at 96 passes ITS assert "
                "while overflowing at runtime (the #100 lesson, paid for once "
-               "already). Growing this struct means grepping every mirror.");
+               "already). tools/check-spawn-args-mirrors.py, run by every "
+               "build, compares every mirror with this struct field by "
+               "field, reading the layout from the offsetof asserts below: "
+               "a new field needs its own assert or the build stops.");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
                "sys_spawn_args.name_va at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_va) == 8,
@@ -3619,9 +3695,10 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, pheno_flags) == 96,
                "the aux-2 merge moved it here, growing the struct to 104. 0 == "
                "inherit == the pre-V-1b must-be-0 behavior, so zero-filling "
                "callers are unaffected by the move.");
-_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_spawn2) == 100,
-               "sys_spawn_args._pad_spawn2 at ABI offset 100 -- the forward-"
-               "compat slot replacing the one the merge consumed; must be 0.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, debug_flags) == 100,
+               "sys_spawn_args.debug_flags at ABI offset 100 -- the forward-"
+               "compat slot the merge left, claimed by the birth hold; 0 == "
+               "not held.");
 
 struct exception_context;
 

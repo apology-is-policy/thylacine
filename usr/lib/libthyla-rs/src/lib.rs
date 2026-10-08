@@ -217,6 +217,7 @@ pub const T_SYS_YIELD: u64            = 87;
 pub const T_SYS_JIT_CREATE: u64       = 101;    // (length, out_va) -> 0; CAP_JIT-gated
 pub const T_SYS_JIT_DESTROY: u64      = 102;    // (writer_va) -> 0
 pub const T_SYS_ICACHE_SYNC: u64      = 103;    // (vaddr, length) -> 0
+pub const T_SYS_JIT_CREATE_SEALED: u64 = 127;   // (src_va, length, out_va) -> 0; CAP_JIT-gated
 pub const T_SYS_STAT: u64             = 88;
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
 // contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
@@ -429,7 +430,9 @@ pub const T_WALK_CREATE_DMSRVCAPE: u32 = 0x0080_0000;
 // DMSRVREMOTE (HAUL-DESIGN 4.8): on a /srv service post in either mode, every
 // attach over the service is declared remote -- what T_ATTACH_9P_REMOTE does
 // to a pipe attach -- and /proc/<pid>/ns marks each mount from it ` remote`.
-// A label: it grants nothing. Mirrors SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
+// It grants nothing: the resolver reads it only to narrow, containing a link
+// the session serves beneath its mount (DISTRO 4.6). Mirrors
+// SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
 pub const T_WALK_CREATE_DMSRVREMOTE: u32 = 0x0040_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
@@ -509,7 +512,11 @@ pub struct TSpawnArgs {
     // and moved to 96 by the aux-2 merge, which grew the struct 96 -> 104
     // rather than drop either feature.
     pub pheno_flags:     u32, // 96 — T_SPAWN_PHENO_*
-    pub _pad_spawn2:     u32, // 100 — must be 0 (forward-compat slot)
+    // The birth hold (DEBUG-FS-DESIGN 5f): T_SPAWN_DEBUG_HELD asks for the child
+    // to be held before its first instruction; 0 — what every existing caller
+    // writes — is "not held". It claimed the last forward-compat slot, so the
+    // next field grows the struct and every mirror of it.
+    pub debug_flags:     u32, // 100 — T_SPAWN_DEBUG_*
 }
 // Compile-time pin matching kernel's _Static_assert(sizeof(...) == 104).
 // It pins this mirror to a LITERAL, not to the kernel -- if the kernel grows
@@ -526,7 +533,13 @@ const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_flags) == 88);
 // a live mistake, not a theoretical one -- this pin caught it once already.
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, page_budget) == 92);
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, pheno_flags) == 96);
-const _: () = assert!(core::mem::offset_of!(TSpawnArgs, _pad_spawn2) == 100);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, debug_flags) == 100);
+
+// The birth hold (mirror SPAWN_DEBUG_* in the kernel header): the spawn returns
+// once the child has loaded its image and parked before its first instruction;
+// a debugger's `stop` takes the hold over, `start` / `detach` release it, and a
+// held child whose spawner exits first is killed. Ungated.
+pub const T_SPAWN_DEBUG_HELD: u32 = 1 << 0;
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
@@ -1786,7 +1799,8 @@ pub const T_ATTACH_9P_CAPE: u64 = 0x2;
 /// SYS_ATTACH_9P flags: the remote declaration (HAUL-DESIGN 4.8). The attacher
 /// declares that the session's transport leaves the machine; `/proc/<pid>/ns`
 /// marks every mount whose source comes from the session ` remote`, and `ls`,
-/// `stat`, `realm` and `ns` read it. A label: nothing else consults it.
+/// `stat`, `realm` and `ns` read it. The resolver reads it only to narrow: a
+/// link the session serves resolves beneath its mount (DISTRO 4.6).
 /// SYS_ATTACH_9P_SRV refuses it: over /srv the poster declares
 /// ([`T_WALK_CREATE_DMSRVREMOTE`]).
 pub const T_ATTACH_9P_REMOTE: u64 = 0x4;
@@ -3184,9 +3198,33 @@ pub unsafe fn t_jit_create(length: u64, out_va: u64) -> i64 {
     x0
 }
 
+// t_jit_create_sealed — mint a SEALED code region: the kernel copies `length`
+// bytes from `src_va` into fresh pages, publishes them, and maps ONE
+// execute-only alias at a random address, written as a u64 to `out_va`. No
+// writer ever exists, and EL0 cannot read the bytes back. Returns 0, or -errno
+// (-EACCES without CAP_JIT, -EINVAL on a length of 0 or over JIT_SEALED_MAX,
+// -EFAULT on an unreadable source or unwritable out_va, -EAGAIN while the
+// kernel's random source is unseeded, -ENOMEM).
+//
+// # Safety
+// `src_va` must point to `length` readable bytes, `out_va` to 8 writable ones.
+#[inline(always)]
+pub unsafe fn t_jit_create_sealed(src_va: u64, length: u64, out_va: u64) -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") src_va => x0,
+        in("x1") length,
+        in("x2") out_va,
+        in("x8") T_SYS_JIT_CREATE_SEALED,
+        options(nostack)
+    );
+    x0
+}
+
 // t_jit_destroy — tear down BOTH aliases of the region whose WRITER alias
-// starts at `writer_va`, and free its pages. Returns 0, or -EINVAL if
-// writer_va is not the base of a live code region of this Proc.
+// starts at `writer_va`, and free its pages; a sealed region is named by its
+// one alias's base. Returns 0, or -EINVAL if the VA is neither.
 //
 // # Safety
 // Any pointer into either alias is dangling afterwards.

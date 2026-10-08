@@ -502,3 +502,54 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after both consumers freed");
 }
+
+// ---------------------------------------------------------------------------
+// torpor.caught_note_ends_wait -- signal(7)'s list (ARCH 8.8.3)
+// ---------------------------------------------------------------------------
+//
+// futex WAIT is a listed call. A caught note ends a Linux waiter's WAIT with
+// TORPOR_ERR_EINTR, distinct from the WAKE's TORPOR_OK; a native waiter rides
+// it out and ends on the WAKE.
+
+static struct Proc *g_ctw_proc;
+static u64          g_ctw_vaddr;
+
+static long ctw_wait(void *arg) {
+    (void)arg;
+    // The demand-zero word reads 0 == expected, so the WAIT sleeps.
+    return (long)sys_torpor_wait_for_proc(current_thread()->proc, g_ctw_vaddr, 0u, -1);
+}
+
+static void ctw_wake(void *arg) {
+    (void)arg;
+    (void)sys_torpor_wake_for_proc(g_ctw_proc, g_ctw_vaddr, 1u);
+}
+
+static struct test_caught_leg ctw_leg(bool linux_pheno) {
+    struct Proc *p  = test_caught_proc(linux_pheno);
+    s64          va = p ? sys_burrow_attach_for_proc(p, PAGE_SIZE) : -1;
+    g_ctw_proc  = p;
+    g_ctw_vaddr = va > 0 ? (u64)va : 0;
+    struct test_caught_leg leg = test_caught_run(va > 0 ? p : NULL, ctw_wait, NULL,
+                                                 ctw_wake, NULL, false);
+    test_caught_proc_free(p, &leg);
+    return leg;
+}
+
+void test_torpor_caught_note_ends_wait(void);
+void test_torpor_caught_note_ends_wait(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct test_caught_leg leg = ctw_leg(true);
+    struct test_caught_leg ctl = ctw_leg(false);
+
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux waiter slept on the word, the note posted, the WAIT returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends a Linux futex WAIT (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, (long)TORPOR_ERR_EINTR,
+        "TORPOR_ERR_EINTR, not the WAKE's TORPOR_OK");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native waiter slept, the note posted, the WAIT returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native waiter and it slept again");
+    TEST_EXPECT_EQ(ctl.rc, (long)TORPOR_OK, "control: the native WAIT ends on the WAKE");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}

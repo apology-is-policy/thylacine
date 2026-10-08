@@ -65,6 +65,9 @@ pub enum Open<'a> {
     Cell {
         width: usize,
     },
+    /// A block quote, realized as a Beacon `aside` (3.2): the paragraphs and
+    /// lists it holds open and close inside it.
+    Aside,
 }
 
 /// The block a line should have been separated from.
@@ -75,6 +78,7 @@ pub enum Above {
     Table,
     List,
     Paragraph,
+    Quote,
 }
 
 /// A construct the format rejects (3.1 to 3.3).
@@ -117,7 +121,12 @@ pub enum Problem {
     RowPipes,
     ParagraphIndent,
     Indented,
-    BlockQuote,
+    /// A block quote inside a block quote.
+    NestedQuote,
+    /// A heading, code block or table inside a block quote.
+    QuoteBlock,
+    /// A block quote that holds no paragraph or list.
+    EmptyQuote,
     ThematicBreak,
     Setext,
     Html,
@@ -170,6 +179,7 @@ impl fmt::Display for Problem {
                     Above::Table => "table",
                     Above::List => "list",
                     Above::Paragraph => "paragraph",
+                    Above::Quote => "block quote",
                 };
                 return write!(
                     f,
@@ -227,7 +237,9 @@ impl fmt::Display for Problem {
             Indented => {
                 "unexpected indentation; a block starts at the left margin (for code, use a ``` fence)"
             }
-            BlockQuote => "block quotes are not supported",
+            NestedQuote => "a block quote cannot hold another block quote",
+            QuoteBlock => "a block quote holds only paragraphs and lists",
+            EmptyQuote => "a block quote holds at least one paragraph or list",
             ThematicBreak => {
                 "thematic breaks are not supported; structure a section with headings"
             }
@@ -332,6 +344,15 @@ fn is_blank(line: &str) -> bool {
 
 fn leading_spaces(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
+}
+
+/// A block quote's marker (3.2): `>`, and one space after it when there is one.
+fn quote_marker_len(line: &str) -> usize {
+    match line.as_bytes() {
+        [b'>', b' ', ..] => 2,
+        [b'>', ..] => 1,
+        _ => 0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -690,6 +711,9 @@ struct Parser<'s, 'e> {
     cr_reported: bool,
     title_seen: bool,
     blocks: usize,
+    /// Inside a block quote, where its lines end: every line before this
+    /// offset begins with `>`, and `line` reads it with the marker removed.
+    quote_end: Option<usize>,
     /// Scratch space kept from block to block.
     joined: String,
     body: String,
@@ -707,6 +731,7 @@ impl<'s, 'e> Parser<'s, 'e> {
             cr_reported: false,
             title_seen: false,
             blocks: 0,
+            quote_end: None,
             joined: String::new(),
             body: String::new(),
             cell: String::new(),
@@ -718,11 +743,22 @@ impl<'s, 'e> Parser<'s, 'e> {
         if pos > len || (pos == len && len > 0) {
             return None;
         }
+        if self.quote_end.is_some_and(|end| pos >= end) {
+            return None;
+        }
         let rest = &self.src[pos..];
         let text = match rest.find('\n') {
             Some(i) => &rest[..i],
             None => rest,
         };
+        if self.quote_end.is_some() {
+            let cut = quote_marker_len(text);
+            return Some(Line {
+                text: &text[cut..],
+                no,
+                pos: pos + cut,
+            });
+        }
         Some(Line { text, no, pos })
     }
 
@@ -805,9 +841,12 @@ impl<'s, 'e> Parser<'s, 'e> {
                     next = self.paragraph(l);
                     continue;
                 }
+                Kind::Quote => {
+                    next = self.quote(l);
+                    continue;
+                }
                 Kind::BadBullet => Problem::BadBullet,
                 Kind::BadNumbered => Problem::BadNumbered,
-                Kind::Quote => Problem::BlockQuote,
                 Kind::Break(_) => Problem::ThematicBreak,
                 Kind::Setext => Problem::Setext,
                 Kind::Html => Problem::Html,
@@ -1165,6 +1204,87 @@ impl<'s, 'e> Parser<'s, 'e> {
         let text = cell_text(cell, &mut buf);
         self.inline_one(no, text, report, sink);
         self.cell = buf;
+    }
+
+    /// A block quote (3.2): the run of lines that begin with `>`. Its extent is
+    /// found first, without reporting anything, so an empty quote is reported
+    /// on its first line; then its lines are read with their markers removed,
+    /// by the same block readers as outside it.
+    fn quote(&mut self, first: Line<'s>) -> Option<Line<'s>> {
+        let content = |l: Line<'s>| !is_blank(&l.text[quote_marker_len(l.text)..]);
+        let mut last = first;
+        let mut holds = content(first);
+        let mut after = self.after(first);
+        while let Some(l) = after {
+            if !l.text.starts_with('>') {
+                break;
+            }
+            holds |= content(l);
+            last = l;
+            after = self.after(l);
+        }
+        self.open_block(Open::Aside);
+        if !holds {
+            self.problem(first.no, Problem::EmptyQuote);
+        }
+        self.quote_end = Some(last.pos + last.text.len());
+        let mut next = self.line(first.pos, first.no);
+        while let Some(l) = next {
+            if is_blank(l.text) {
+                self.check_chars(l, false);
+                next = self.after(l);
+                continue;
+            }
+            let kind = classify(l.text);
+            let rejected = match kind {
+                Kind::Bullet(_) | Kind::Numbered(..) => {
+                    next = self.list(l, kind);
+                    continue;
+                }
+                Kind::Text => {
+                    next = self.paragraph(l);
+                    continue;
+                }
+                // Never wrapped (4.3), so no box could hold one; read as
+                // outside a quote once reported, so its own problems follow.
+                Kind::Heading(level, text) => {
+                    self.problem(l.no, Problem::QuoteBlock);
+                    next = self.heading(l, level, text);
+                    continue;
+                }
+                Kind::Fence => {
+                    self.problem(l.no, Problem::QuoteBlock);
+                    next = self.fence(l);
+                    continue;
+                }
+                Kind::BadFence => {
+                    self.problem(l.no, Problem::QuoteBlock);
+                    next = self.bad_fence(l);
+                    continue;
+                }
+                Kind::TableRow => {
+                    self.problem(l.no, Problem::QuoteBlock);
+                    next = self.table(l);
+                    continue;
+                }
+                Kind::Quote => Problem::NestedQuote,
+                Kind::BadBullet => Problem::BadBullet,
+                Kind::BadNumbered => Problem::BadNumbered,
+                Kind::Break(_) => Problem::ThematicBreak,
+                Kind::Setext => Problem::Setext,
+                Kind::Html => Problem::Html,
+                Kind::LinkDef => Problem::LinkDefinition,
+                Kind::Footnote => Problem::Footnote,
+                Kind::Indented => Problem::Indented,
+            };
+            self.check_chars(l, false);
+            self.problem(l.no, rejected);
+            next = self.after(l);
+        }
+        self.quote_end = None;
+        self.events.close();
+        self.expect_blank(after, Above::Quote);
+        after
     }
 
     fn paragraph(&mut self, first: Line<'s>) -> Option<Line<'s>> {
@@ -1732,6 +1852,7 @@ pub(crate) mod tree {
             header: Vec<Vec<Inline>>,
             rows: Vec<Vec<Vec<Inline>>>,
         },
+        Aside(Vec<Block>),
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1763,6 +1884,7 @@ pub(crate) mod tree {
         Code(Vec<String>),
         Table(Vec<Align>, Vec<usize>, Vec<Vec<Vec<Inline>>>),
         Row(Vec<Vec<Inline>>),
+        Aside(Vec<Block>),
     }
 
     struct Builder {
@@ -1795,21 +1917,23 @@ pub(crate) mod tree {
 
         fn open(&mut self, block: Open<'_>) {
             let top_level = self.stack.is_empty();
+            // A block quote holds blocks; no other block does.
+            let block_level = top_level || matches!(self.stack.last(), Some(Frame::Aside(_)));
             let frame = match block {
                 Open::Title => {
                     assert!(top_level);
                     Frame::Runs(Open::Title, Vec::new())
                 }
                 Open::Heading(level) => {
-                    assert!(top_level && (level == 2 || level == 3));
+                    assert!(block_level && (level == 2 || level == 3));
                     Frame::Runs(Open::Heading(level), Vec::new())
                 }
                 Open::Paragraph => {
-                    assert!(top_level);
+                    assert!(block_level);
                     Frame::Runs(Open::Paragraph, Vec::new())
                 }
                 Open::Bullets | Open::Numbered => {
-                    assert!(top_level);
+                    assert!(block_level);
                     Frame::List(block == Open::Numbered, Vec::new())
                 }
                 Open::Item(n) => {
@@ -1820,11 +1944,11 @@ pub(crate) mod tree {
                     Frame::Runs(Open::Item(n), Vec::new())
                 }
                 Open::Code => {
-                    assert!(top_level);
+                    assert!(block_level);
                     Frame::Code(Vec::new())
                 }
                 Open::Table { align, widths } => {
-                    assert!(top_level);
+                    assert!(block_level);
                     assert_eq!(widths.len(), if self.measure { align.len() } else { 0 });
                     Frame::Table(align.to_vec(), widths.to_vec(), Vec::new())
                 }
@@ -1836,6 +1960,10 @@ pub(crate) mod tree {
                     assert!(matches!(self.stack.last(), Some(Frame::Row(_))));
                     self.cell_width.push(width);
                     Frame::Runs(Open::Cell { width }, Vec::new())
+                }
+                Open::Aside => {
+                    assert!(top_level);
+                    Frame::Aside(Vec::new())
                 }
             };
             self.stack.push(frame);
@@ -1904,8 +2032,12 @@ pub(crate) mod tree {
                         rows,
                     }
                 }
+                Frame::Aside(blocks) => Block::Aside(blocks),
             };
-            self.blocks.push(block);
+            match self.stack.last_mut() {
+                Some(Frame::Aside(blocks)) => blocks.push(block),
+                _ => self.blocks.push(block),
+            }
         }
 
         fn run(&mut self, kind: Run, text: &str) {
@@ -2214,6 +2346,97 @@ mod tests {
         ok("# T\n\nLast line");
     }
 
+    // --- block quotes (3.2) ------------------------------------------------
+
+    #[test]
+    fn a_block_quote_holds_paragraphs_and_lists() {
+        let d = ok("# T\n\n> A quoted\n> paragraph.\n>\n> - one\n>   more\n> - two\n>\n> 1. first\n\nAfter.\n");
+        assert_eq!(
+            d.blocks,
+            vec![
+                Block::Title(vec![t("T")]),
+                Block::Aside(vec![
+                    Block::Paragraph(vec![t("A quoted paragraph.")]),
+                    Block::Bullets(vec![vec![t("one more")], vec![t("two")]]),
+                    Block::Numbered(vec![vec![t("first")]]),
+                ]),
+                Block::Paragraph(vec![t("After.")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_block_quote_marker_takes_one_optional_space() {
+        let quoted = |src: &str| ok(src).blocks[1].clone();
+        let one = Block::Aside(vec![Block::Paragraph(vec![t("Text.")])]);
+        assert_eq!(quoted("# T\n\n> Text.\n"), one);
+        assert_eq!(quoted("# T\n\n>Text.\n"), one);
+        // Empty lines of the quote before and after its content are its own.
+        assert_eq!(quoted("# T\n\n>\n> Text.\n>\n"), one);
+        assert_eq!(quoted("# T\n\n> \n> Text.\n> \n"), one);
+        // A second space is indentation, which no block allows.
+        rejects("# T\n\n>  Text.\n", 3, "unexpected indentation");
+    }
+
+    #[test]
+    fn a_block_quote_holds_inline_forms_and_may_end_the_section() {
+        assert_eq!(
+            ok("# T\n\n> *Emph* and `code`.").blocks[1],
+            Block::Aside(vec![Block::Paragraph(vec![
+                Inline::Emph(String::from("Emph")),
+                t(" and "),
+                Inline::Code(String::from("code")),
+                t("."),
+            ])])
+        );
+    }
+
+    #[test]
+    fn a_blank_line_ends_a_block_quote() {
+        let d = ok("# T\n\n> One.\n\n> Two.\n");
+        assert_eq!(
+            d.blocks[1..],
+            [
+                Block::Aside(vec![Block::Paragraph(vec![t("One.")])]),
+                Block::Aside(vec![Block::Paragraph(vec![t("Two.")])]),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_block_quote_errors() {
+        rejects("# T\n\n> > nested\n", 3, "cannot hold another block quote");
+        rejects(
+            "# T\n\n> Text.\n>\n> > nested\n",
+            5,
+            "cannot hold another block quote",
+        );
+        rejects("# T\n\n>\n", 3, "at least one paragraph or list");
+        rejects("# T\n\n>\n> \n>\n", 3, "at least one paragraph or list");
+        // A line without the marker is not part of the quote, and a quote
+        // directly after a paragraph is not part of the paragraph.
+        rejects("# T\n\n> Text\nmore.\n", 4, "from the block quote above");
+        rejects("# T\n\nText.\n> Quote.\n", 4, "from the paragraph above");
+        // Constructs rejected anywhere are rejected inside a quote.
+        rejects("# T\n\n> ---\n", 3, "thematic breaks");
+        rejects("# T\n\n> Text.\n>\n> <div>x</div>\n", 5, "raw HTML");
+    }
+
+    /// A heading, code block or table cannot be kept inside the box (MANUAL-
+    /// DESIGN.md 4.3). Once reported, it is read as it is outside a quote, so
+    /// its own problems follow.
+    #[test]
+    fn a_block_quote_rejects_a_heading_code_block_or_table() {
+        let only = "holds only paragraphs and lists";
+        rejects("# T\n\n> ## H\n", 3, only);
+        rejects("# T\n\n> ```\n> code\n> ```\n", 3, only);
+        rejects("# T\n\n> | a |\n> | --- |\n> | b |\n", 3, only);
+        rejects("# T\n\n> Text.\n>\n> ### H\n", 5, only);
+        diagnoses("# T\n\n> ## H ##\n", &[(3, only), (3, "closing hashes")]);
+        diagnoses("# T\n\n> # Again\n", &[(3, only), (3, "only the title")]);
+        diagnoses("# T\n\n> ```\n> code\n", &[(3, only), (3, "not closed")]);
+    }
+
     // --- rejected constructs (3.2, 3.3) -----------------------------------
 
     #[test]
@@ -2237,7 +2460,7 @@ mod tests {
 
     #[test]
     fn rejects_block_constructs() {
-        rejects("# T\n\n> quoted\n", 3, "block quotes");
+        rejects("# T\n\n> > quoted\n", 3, "cannot hold another block quote");
         rejects("# T\n\n---\n", 3, "thematic breaks");
         rejects("# T\n\n* item\n", 3, "begins with '- '");
         rejects("# T\n\n+ item\n", 3, "begins with '- '");
@@ -2543,10 +2766,10 @@ mod tests {
     #[test]
     fn diagnostics_are_in_line_order() {
         diagnoses(
-            "# T\n\nA <b>.\n\n> q\n\n## H ##\n",
+            "# T\n\nA <b>.\n\n> > q\n\n## H ##\n",
             &[
                 (3, "inside a code span"),
-                (5, "block quotes"),
+                (5, "cannot hold another block quote"),
                 (7, "closing hashes"),
             ],
         );

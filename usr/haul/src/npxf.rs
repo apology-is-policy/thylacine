@@ -122,6 +122,16 @@ pub fn trim_token_file(b: &mut Vec<u8>) {
     }
 }
 
+/// Shorter than this, haul warns that the token is weak.
+///
+/// npxf is not a PAKE. The server proves possession first, so its flight 2 lets
+/// anyone who can connect test token guesses offline, as fast as they can
+/// compute HMACs (HAUL-DESIGN 3.1, 5), and only a token with a key's entropy
+/// survives that: sixteen random bytes is 128 bits. A length is all haul can
+/// measure -- sixteen bytes of a dictionary phrase is still weak -- so this
+/// catches the short token, not every guessable one.
+pub const TOKEN_WARN_BELOW: usize = 16;
+
 /// Turn an arbitrary-length token into the 32-byte pre-shared key.
 pub fn derive_psk(token: &[u8]) -> Result<[u8; 32], Error> {
     if token.is_empty() {

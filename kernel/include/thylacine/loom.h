@@ -440,6 +440,15 @@ struct Loom {
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
     // from the shared header (which userspace can corrupt -> an OOB kernel write).
     u32 cq_tail;
+    // Bumped under `lock` (loom_drive_moved_locked) by every CQE post, every
+    // completion's state update (a re-arm flagged, a chain result, an op
+    // terminal) and every op that goes in flight (a submit's link, a re-arm
+    // claimed). A waiter that read it before driving the ring and finds it
+    // moved when it would sleep re-drives instead: a completion read by another
+    // thread posts its CQE before it records the re-arm or the chain result,
+    // and a sibling's submit can put an op on a client the waiter has not
+    // hooked (LOOM.md 8.6). Read lock-free (acquire) at a waiter's loop top.
+    u32 drive_gen;
     // Loom-3. Kernel-PRIVATE authoritative submission-queue head (under `lock`):
     // the SQ-index ring slot the kernel consumes next. The shared
     // loom_ring_hdr.sq_head is a userspace-READABLE mirror; the consume index is
@@ -515,15 +524,13 @@ struct Loom {
     // once at setup (before the handle is returned to userspace) and never
     // rewritten while alive. `sqpoll_stopping` / `sqpoll_exited` are the
     // single-writer flags of the join handshake (release/acquire paired). The
-    // kthread is gated to a deadline-capable transport (loom_register_handles
-    // rejects a NULL-deadline dev9p client into an SQPOLL ring) so its
-    // frame-boundary idle-deadline lets a BETWEEN-FRAMES recv re-check
-    // `sqpoll_stopping`. That is not "the join always terminates", which this
-    // said until 2026-09-22: a MID-FRAME recv is deliberately NOT deadline-
-    // bounded (the body must complete or the shared stream desyncs, #841), so
-    // a Byzantine server mid-frame delays the stop until the frame ends or
-    // EOFs. Termination rests on the v1.0 servers being trusted and prompt --
-    // a trust assumption, not a mechanism.
+    // kthread reads only over a ready stream and parks on readiness hooks
+    // (LOOM.md 8.6), so its pump never waits in a recv and the stop's wake
+    // reaches its park. Nor does a reap's last close wait for a server: no
+    // death reaches a kernel thread, so its Tclunk goes to the closer where it
+    // would wait for a tag or ring space (ARCH 8.8.1.1), and a staged
+    // write-behind run goes to the closer as a close job (closes_never_wait,
+    // ARCH 7.9.1 part C). The join's bound is the kthread's own work.
     struct Thread          *sqpoll;          // the kthread (NULL = no SQPOLL)
     bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
     bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)
@@ -580,9 +587,13 @@ void loom_unref(struct Loom *l);
 // Replace the registered-handle table with the `n` (<= LOOM_MAX_REG_HANDLES)
 // Spoors in `spoors` (with their rights snapshots in `rights`). ADOPTS the
 // caller's ref on each spoor[i] on SUCCESS (the table releases them at
-// loom_unref / the next re-register); on failure (n out of range) the caller
-// retains its refs. Any previously-registered Spoors are clunked (outside the
-// lock). Returns 0 / -1.
+// loom_unref / the next re-register); on failure (n out of range, or a dev9p
+// Spoor's write-behind flush failed or had latched an error:
+// dev9p_loom_register, which may wait) the caller retains its refs and the old
+// table stands, though the Spoors before the failing one stay flushed and no
+// longer stage (a cost only). Any previously-registered Spoors are clunked
+// (outside the lock). Returns 0, the failed flush's negative errno, or
+// -T_E_INVAL for bad arguments.
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
 
@@ -594,7 +605,8 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // registered buffer. On SUCCESS any previously-registered buffers are unref'd
 // (outside the lock) and the new set installed atomically; on FAILURE (any
 // range invalid / OOB / non-anon / not writable / n out of range) NOTHING is
-// changed and every Burrow ref taken so far is rolled back. Returns 0 / -1.
+// changed and every Burrow ref taken so far is rolled back. Returns 0 /
+// -T_E_INVAL.
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 
@@ -628,6 +640,9 @@ short loom_poll(struct Loom *l, short events, struct poll_waiter *pw);
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);
 
+// Tests: hold every SQPOLL kthread before its terminal until released.
+void loom_sqpoll_hold_exit_for_test(bool hold);
+
 // Loom-4c: the SQPOLL poll-thread entry + its lifecycle (LOOM.md 8.6). The
 // kthread is a kproc() thread (the console_mgr precedent) that drains the SQ +
 // drives the elected reader. loom_start_sqpoll spawns + readies it (sets
@@ -636,6 +651,17 @@ u64 loom_total_destroyed(void);
 // to its caller). Both touch only the still-allocated `struct Loom`.
 void loom_sqpoll_main(void *arg);
 int  loom_start_sqpoll(struct Loom *l);
+
+// Test knob: a nonzero value caps a fan-in waiter's client set below
+// LOOM_MAX_REG_HANDLES, so a test can drive the partial set's timed rescan
+// with two clients. 0 in production.
+extern u32 g_loom_fanin_test_cap;
+
+// Test knob: while nonzero, a fan-in ENTER that has hooked its clients stops
+// before it hooks the CQ, raising g_loom_fanin_test_stalled, so a test can put
+// a sibling's submit in that window. 0 in production.
+extern volatile u32 g_loom_fanin_test_stall;
+extern volatile u32 g_loom_fanin_test_stalled;
 
 // Testable setup inner (the spoor_stat_native pattern -- fills a KERNEL
 // loom_params; the SVC handler does the user copy-in/out). Creates the Loom,
@@ -670,12 +696,12 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
 //   - every other in-range opcode posts -ENOSYS (the payload opcodes land with
 //     Loom-6's registered-buffer surface), out-of-range posts -EINVAL.
 // Then, if min_complete > 0 and not LOOM_ENTER_NONBLOCK, wait for completions:
-// the caller either DRIVES the elected reader itself (blocking on recv, death-
-// interruptible #811) or -- when a sibling thread of the same Proc already holds
-// the reader role -- sleeps on the ring's CQ wait-list until that reader posts a
-// CQE (Loom-4; resolves the Loom-3 "concurrent ENTER returns what's posted"
-// limitation). Waits until at least min_complete CQEs are available OR no async
-// op remains in flight. Finally reap completed-op containers. Returns the number
+// on a non-SQPOLL ring the caller reads for every 9P client the ring has an op
+// in flight on, over a ready stream only, and otherwise sleeps on hooks on all
+// of them and on the ring's CQ wait-list (LOOM.md 8.6; death-interruptible,
+// #811); on an SQPOLL ring it sleeps on the CQ wait-list while the kthread
+// reads. Waits until at least min_complete CQEs are available OR no async op
+// remains in flight. Finally reap completed-op containers. Returns the number
 // of SQEs consumed (>= 0), or -1 on bad args
 // (NULL/corrupt l, invalid flags). The caller (SYS_LOOM_ENTER handler) holds a
 // loom ref across this call, so loom_free cannot run concurrently.

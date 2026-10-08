@@ -95,7 +95,7 @@ void test_srvconn_create_destroy(void) {
     u64 want_stripes = proc_stripes(p);
     int want_pid     = p->pid;
 
-    struct SrvConn *cn = srvconn_create(want_stripes, want_pid, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(want_stripes, want_pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
     TEST_EXPECT_EQ(srvconn_total_created(), created0 + 1,
         "create bumps the created counter");
@@ -123,7 +123,7 @@ void test_srvconn_create_destroy(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_roundtrip(void) {
-    struct SrvConn *cn = srvconn_create(0x1111u, 11, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x1111u, 11, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     u8 out[64];
@@ -192,7 +192,7 @@ static bool sc_recv_verify_chunked(struct SrvConn *cn, long total, u8 seed) {
 }
 
 void test_srvconn_ring_capacity(void) {
-    struct SrvConn *cn = srvconn_create(0x2222u, 22, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x2222u, 22, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // Fill c2s to capacity; one further byte is refused (0 accepted —
@@ -246,7 +246,7 @@ static void sc_recv_consumer(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_recv_blocks_then_wakes(void) {
-    struct SrvConn *cn = srvconn_create(0x3333u, 33, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x3333u, 33, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_sc_conn = cn;
@@ -313,7 +313,7 @@ static void ss_send_producer(void) {
 }
 
 void test_srvconn_server_send_blocks_then_drain_wakes(void) {
-    struct SrvConn *cn = srvconn_create(0x6666u, 66, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x6666u, 66, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_ss_conn   = cn;
@@ -399,25 +399,16 @@ void test_srvconn_server_send_blocks_then_drain_wakes(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_recv_deadline_timeout(void) {
-    struct SrvConn *cn = srvconn_create(0x4444u, 44, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x4444u, 44, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // deadline_ns == 1 — a timestamp long in the past. The s2c ring is
     // empty, so client_recv must time out at once rather than block.
     srvconn_set_client_deadline(cn, 1);
-    TEST_ASSERT(srvconn_client_timed_out(cn) == false,
-        "setting a deadline clears the timed-out signal");
 
     u8 in[16];
     TEST_EXPECT_EQ(srvconn_client_recv(cn, in, sizeof in), -1L,
         "client_recv past its deadline returns -1");
-    TEST_ASSERT(srvconn_client_timed_out(cn) == true,
-        "the timed-out signal is set after a deadline expiry");
-
-    // A fresh deadline clears the signal again.
-    srvconn_set_client_deadline(cn, 0);
-    TEST_ASSERT(srvconn_client_timed_out(cn) == false,
-        "a fresh deadline clears the timed-out signal");
 
     srvconn_unref(cn);
 }
@@ -427,7 +418,7 @@ void test_srvconn_recv_deadline_timeout(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_teardown_eofs(void) {
-    struct SrvConn *cn = srvconn_create(0x5555u, 55, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x5555u, 55, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // Buffer residual bytes in BOTH directions, then tear down. The
@@ -475,7 +466,7 @@ void test_srvconn_teardown_eofs(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_teardown_wakes_blocked(void) {
-    struct SrvConn *cn = srvconn_create(0x6666u, 66, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x6666u, 66, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_sc_conn = cn;
@@ -521,12 +512,12 @@ void test_srvconn_teardown_wakes_blocked(void) {
 
 void test_srvconn_bulk_ring_class(void) {
     // The two-point policy: anything else is refused.
-    TEST_ASSERT(srvconn_create(1, 1, false, 0, 12345u) == NULL,
+    TEST_ASSERT(srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, 12345u) == NULL,
         "an arbitrary ring msize is rejected");
-    TEST_ASSERT(srvconn_create(1, 1, false, 0, 0u) == NULL,
+    TEST_ASSERT(srvconn_create(1, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, 0u) == NULL,
         "a zero ring msize is rejected");
 
-    struct SrvConn *cn = srvconn_create(0x7777u, 77, false, 0,
+    struct SrvConn *cn = srvconn_create(0x7777u, 77, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID,
                                         SRVCONN_BULK_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create(bulk)");
     TEST_EXPECT_EQ(srvconn_msize(cn), SRVCONN_BULK_MSIZE,
@@ -594,7 +585,7 @@ void test_srvconn_bulk_ring_class(void) {
     }
 
     // A default conn still reports the default class.
-    struct SrvConn *dn = srvconn_create(0x7778u, 78, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *dn = srvconn_create(0x7778u, 78, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(dn != NULL, "srvconn_create(default)");
     TEST_EXPECT_EQ(srvconn_msize(dn), SRVCONN_MSIZE,
         "default conn reports the default msize");
@@ -640,7 +631,7 @@ static void rp_send_producer_b(void) {
 }
 
 void test_srvconn_role_park_second_writer(void) {
-    struct SrvConn *cn = srvconn_create(0x8888u, 88, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x8888u, 88, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_rp_conn = cn;
@@ -748,7 +739,7 @@ static void rr_recv_consumer_b(void) {
 }
 
 void test_srvconn_role_park_second_reader(void) {
-    struct SrvConn *cn = srvconn_create(0x9999u, 99, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0x9999u, 99, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_rp_conn = cn;
@@ -826,7 +817,7 @@ static void cs_send_producer(void) {
 }
 
 void test_srvconn_client_send_blocking_backpressure(void) {
-    struct SrvConn *cn = srvconn_create(0xAAAAu, 110, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0xAAAAu, 110, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_rp_conn  = cn;
@@ -959,7 +950,7 @@ static void pe_writer(void) {
 }
 
 void test_srvconn_client_send_blocking_poll_edge(void) {
-    struct SrvConn *cn = srvconn_create(0xBBBBu, 111, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0xBBBBu, 111, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_pe_conn = cn;
@@ -1074,7 +1065,7 @@ static bool sc_ctl_cb(const struct srvconn_ctl_row *row, void *arg) {
 }
 
 void test_srvconn_ctl_counters(void) {
-    struct SrvConn *cn = srvconn_create(0xAAAAu, 4242, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0xAAAAu, 4242, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // One whole 71-byte "reply frame" through s2c: blocking server send
@@ -1119,7 +1110,7 @@ void test_srvconn_ctl_counters(void) {
 // a 16-byte nonblocking write must return three without parking the seat loop.
 void test_srvconn_nonblocking_backpressure(void);
 void test_srvconn_nonblocking_backpressure(void) {
-    struct SrvConn *cn = srvconn_create(123, 11, false, 456, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(123, 11, PRINCIPAL_INVALID, false, 456, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "nonblocking connection");
     struct Spoor *sp = devsrv_make_conn_spoor(cn);
     TEST_ASSERT(sp != NULL, "server endpoint");

@@ -73,6 +73,8 @@ void test_9p_session_flushed_reply_honoured_for_waiting_owner(void);
 void test_9p_session_flush_retract_restores_live_op(void);
 void test_9p_session_flush_owner_waits_keeps_fid_live(void);
 void test_9p_session_flush_names_no_fid(void);
+void test_9p_session_flush_headroom_grows_table(void);
+void test_9p_session_sync_owner_index(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
@@ -1937,4 +1939,114 @@ void test_9p_session_flush_rollback_restores_victim(void) {
     TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "all reclaimed");
 
     p9_session_destroy(&s);
+}
+
+// Fill `s`'s op share with Tgetattrs on the root fid; the first tag in *first.
+static u32 fill_op_share(struct p9_session *s, u32 n, u16 *first) {
+    u32 held = 0;
+    for (u32 i = 0; i < n; i++) {
+        int len = p9_session_send_getattr(s, g_buf, sizeof(g_buf), 0, P9_GETATTR_BASIC);
+        if (len <= 0) break;
+        u32 sz; u8 ty; u16 t;
+        if (p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t) < 0) break;
+        if (held == 0) *first = t;
+        held++;
+    }
+    return held;
+}
+
+// ARCH 21.11 parts 1 and 2: with the op share full an op finds no tag, but a
+// Tflush still does -- on a chunk the table grows for it -- and its Rflush
+// frees both tags. One variable away, a table that cannot grow past the share
+// (tag_limit at the share: a failed chunk allocation) leaves the Tflush none,
+// the flush-less abandon the headroom exists to prevent.
+void test_9p_session_flush_headroom_grows_table(void) {
+    const u32 share = P9_TAG_CHUNK;
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "open");
+    s.ops_max = share;
+    u16 first = P9_NOTAG;
+    u32 held = fill_op_share(&s, share, &first);
+    bool op_refused = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 0,
+                                              P9_GETATTR_BASIC) < 0;
+    bool no_op_tag  = !p9_session_has_free_tag(&s);
+    int  flen = p9_session_send_flush(&s, g_buf, sizeof(g_buf), first);
+    u32 sz; u8 ty; u16 ft = P9_NOTAG;
+    if (flen > 0) (void)p9_peek_header(g_buf, (size_t)flen, &sz, &ty, &ft);
+    u32 chunks = s.n_chunks;
+    int rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, ft, NULL, 0);
+    struct p9_dispatch_result r;
+    int drc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r);
+    u64 after = p9_session_inflight(&s);
+    p9_session_destroy(&s);
+
+    struct p9_session c;
+    TEST_EXPECT_EQ(drive_session_open(&c, 0), 0, "open (control)");
+    c.ops_max   = share;
+    c.tag_limit = share;
+    u16 cfirst = P9_NOTAG;
+    u32 cheld  = fill_op_share(&c, share, &cfirst);
+    int cflen  = p9_session_send_flush(&c, g_buf, sizeof(g_buf), cfirst);
+    p9_session_destroy(&c);
+
+    TEST_EXPECT_EQ((u64)held, (u64)share, "the op share filled");
+    TEST_ASSERT(op_refused && no_op_tag, "an op finds no tag");
+    TEST_ASSERT(flen > 0, "a Tflush finds one");
+    TEST_EXPECT_EQ((u64)ft, (u64)share, "on the first tag of a grown chunk");
+    TEST_EXPECT_EQ((u64)chunks, 2ull, "the table grew one chunk");
+    TEST_EXPECT_EQ(drc, 0, "the Rflush dispatches");
+    TEST_EXPECT_EQ(after, (u64)(share - 1), "and frees the flush and its victim");
+    TEST_EXPECT_EQ((u64)cheld, (u64)share, "control: the share filled");
+    TEST_ASSERT(cflen < 0, "control: capped at the share, the Tflush finds no tag");
+}
+
+// The reader handoff walks only the entries a sync waiter owns, skipping every
+// chunk whose count of them is zero. An undercount hides a waiter -- the role
+// is never handed to it -- so the walk must find a sync owner in a grown chunk,
+// pass over an async op's owner, and lose the owner when it is dropped or its
+// tag is freed, every count back at zero.
+void test_9p_session_sync_owner_index(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, 0), 0, "open");
+    u16 first = P9_NOTAG;
+    u32 held = fill_op_share(&s, 2u * P9_TAG_CHUNK + 1u, &first);
+    int async_tok = 0, sync_tok = 0;
+    u32 at = (u32)first + 5u;
+    u32 st = (u32)first + 2u * P9_TAG_CHUNK;
+    p9_session_mark_async(&s, (u16)at);
+    bool areg = p9_session_set_owner(&s, at, &async_tok);
+    bool sreg = p9_session_set_owner(&s, st, &sync_tok);
+    bool idle = !p9_session_set_owner(&s, (u32)first + held, &sync_tok);
+
+    u32 t = 0;
+    struct p9_outstanding *e = p9_session_next_sync_owned(&s, &t);
+    bool found = e != NULL && t == st && e->owner == &sync_tok;
+    u32 t2 = t + 1u;
+    bool only = found && p9_session_next_sync_owned(&s, &t2) == NULL;
+
+    (void)p9_session_set_owner(&s, st, NULL);
+    u32 t3 = 0;
+    bool gone_dropped = p9_session_next_sync_owned(&s, &t3) == NULL;
+
+    (void)p9_session_set_owner(&s, st, &sync_tok);
+    u32 t4 = 0;
+    bool back = p9_session_next_sync_owned(&s, &t4) != NULL && t4 == st;
+    p9_session_abort_unsent(&s, (u16)st);
+    u32 t5 = 0;
+    bool gone_freed = p9_session_next_sync_owned(&s, &t5) == NULL;
+    u32 chunks = s.n_chunks;
+    u32 n_sync = s.tags0.n_sync;
+    for (u32 k = 1; k < s.n_chunks; k++) n_sync += s.tag_dir[k]->n_sync;
+    p9_session_destroy(&s);
+
+    TEST_EXPECT_EQ((u64)held, (u64)(2u * P9_TAG_CHUNK + 1u), "three chunks of ops");
+    TEST_EXPECT_EQ((u64)chunks, 3ull, "the table grew to three chunks");
+    TEST_ASSERT(areg && sreg, "both owners register on active tags");
+    TEST_ASSERT(idle, "an owner does not register on a tag with no op");
+    TEST_ASSERT(found, "the walk finds the sync owner in the grown chunk");
+    TEST_ASSERT(only, "and nothing else: the async op's owner is not a sync waiter");
+    TEST_ASSERT(gone_dropped, "a dropped owner is gone from the walk");
+    TEST_ASSERT(back, "a re-registered owner is found again");
+    TEST_ASSERT(gone_freed, "freeing its tag drops it");
+    TEST_EXPECT_EQ((u64)n_sync, 0ull, "every chunk's count is back at zero");
 }

@@ -6,7 +6,7 @@ kind: spin
 orders-before: []
 guards: "one Territory's dot_path pointer (the cwd string; NULL == \"/\")"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-06
 ---
 ## Discipline
 
@@ -18,9 +18,11 @@ new string under the lock and `kfree` the old one OUTSIDE it. Two
 concurrent `setdot`s capture distinct olds, so neither double-frees nor
 leaks.
 
-`cwd_lexical_resolve` runs UNDER the lock in `territory_resolve_cwd`.
-That is safe and deliberate: it is bounded CPU with no allocation and no
-block, so holding across it costs less than copying the cwd out first.
+`cwd_join` runs UNDER the lock in `territory_join_cwd`. That is safe and
+deliberate: it is bounded CPU with no allocation and no block, so holding
+across it costs less than copying the cwd out first. (Until 2026-10-06 this
+note named `cwd_lexical_resolve` and a `territory_resolve_cwd`; #83 had
+already renamed the join, and the canonicalizer is gone.)
 
 `kmalloc` under the lock is legal (`territory_clone` duplicates the
 parent's cwd that way): SLUB is non-sleeping and knows nothing of

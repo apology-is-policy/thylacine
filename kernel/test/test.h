@@ -141,6 +141,38 @@ bool test_dying_done(const struct test_dying *d);
 void test_dying_kill(struct test_dying *d);
 void test_dying_reap(struct test_dying *d);
 
+// A thread of a fresh Proc blocked in a kernel wait that a Linux call on
+// signal(7)'s list reaches, and a caught interrupt posted to its Proc (ARCH
+// 8.8.3). The thread runs `call` with note_interruptible set, as the vivarium
+// dispatcher sets it for a listed call. test_caught_run posts once the call
+// blocks -- or before the thread starts, with `pre_post` -- and reports what
+// the note did. A wait that opted in returns at once (`on_post`). One that
+// rode the note out ran and slept again (`rode_out`), and `release` ends it;
+// it runs only when the call has not returned. `prep`, when set, runs once the
+// call blocks and before the post, to move it into the wait under test.
+//
+// A Linux Proc catches the interrupt with a handler. The native control is
+// self-managing, so the same post arms the same caught latch and only the
+// phenotype differs. Use a fresh Proc per leg: a claim lasts until the call's
+// EL0 tail, which a kernel thread never reaches. Bodies in kernel/test/test.c.
+struct test_caught_leg {
+    bool parked;     // the call blocked (with pre_post: with the note pending)
+    bool prepped;    // `prep` moved it, or there was none
+    bool posted;     // the interrupt queued and armed the caught latch
+    bool on_post;    // the call returned with no release
+    bool rode_out;   // the thread ran after the post and slept again
+    bool joined;     // the call returned and its thread was reclaimed
+    bool stranded;   // it never returned and is left asleep: keep what it uses
+    long rc;         // what the call returned
+};
+struct Proc *test_caught_proc(bool linux_pheno);
+void test_caught_proc_free(struct Proc *p, const struct test_caught_leg *leg);
+bool test_caught_post(struct Proc *p);
+struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
+                                       bool (*prep)(void *arg),
+                                       void (*release)(void *arg), void *arg,
+                                       bool pre_post);
+
 // TEST_YIELD_UNTIL(cond) — wait for a PEER-THREAD observable, bounded.
 //
 // The thread_create / ready / sched pattern assumes one sched() runs the peer

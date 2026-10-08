@@ -702,6 +702,601 @@ Verification: new kernel tests `dev9p.origin_format_ns`, `sys_attach_9p.names_ro
 `9p_srvconn_transport.srv_attach_names_root`; coreutils host test `a_session_root_reads_by_the_file_it_came_over`.
 Sabotage: nine kernel mutants over six boots, each red on exactly the assertion written down before the first boot (thirteen FAIL lines, no other red); the coreutils mutant (`#|` dropped from the `9p` arm) red on its host test. Device, CI image: `haul-npxf` (40 s), `haul-post` (39 s) and `ergo-1` (38 s) green; with both stamps removed, both Haul gates failed at their `ns` leg, reading `/` -- once the two attach tests were unregistered in the red build, since with them the boot's kernel suite extincted before a login. Default image: `tools/test.sh` 1753/1753, zero `[skip]` (boot banner, L-6c and D-5 PASS); `tools/test-rust.sh` 29 crates, 2142 tests, 0 failing (libutopia's 69 stranded tests are the standing OPEN-BUGS item); `ci-smp-gate` (default-smp4 and ubsan-smp4, N=10) 10 + 10 boots PASS, no corruption, external kill, timing or other. No spec models the touched code (`territory.tla` maps bind, mount, unmount and clone, not the ns render).
 
+## The Beacon aside: a block quote the renderer frames — 2026-09-29
+
+Operator vote 2 of 2026-09-28 (option 1, "a block the renderer draws"): the Markdown block quote, which the manual's
+checker rejected, becomes a Beacon `aside`, a passage set apart from the flow. Scripture f8b2c361 (BEACON 3, 12.1 rule 5,
+12.2 and the version note; MANUAL-DESIGN 3.2, 4.2-4.4, 8.1 and the 256-column box cap; LANTERN-DESIGN 2 and 5.1;
+HALCYON-VISUAL 8.4, new; HALCYON-INSTRUMENT 7.5; `dec-2026-09-28-beacon-aside`). Code 40781e17.
+
+- **Beacon.** `aside` is a paired block op with no arguments that names a role, never a layout. It nests no block op,
+  and its payload flows: each line reflowed, an empty line a paragraph break.
+- **The manual.** A block quote is the run of lines that begin `>`; it holds paragraphs and flat lists, and the checker
+  rejects a nested quote, a heading, code block or table inside, and a quote with no content. At the rich tier it is
+  an `aside` with only `em` frames inside; at a plain tier it is boxed in U+2500 furniture, at most 256 columns wide,
+  only where the reader wraps (the console, at `/dev/winsize`'s width); elsewhere it is its text. `manual` and
+  `lantern` ask one function, `manual::wraps_at_console`, whether they wrap.
+- **The deck.** Slide 2 of the shipped deck ends with one block quote; `lantern.exp` leg (f) presents it on the serial
+  console and expects the box.
+- **halcyond.** A line carries the episode of the `pre` or aside it was written in (`Line.episode`); an aside is not an
+  item. A tile's cells carry `TAG_ASIDE`, and a registry of 32 block specs maps a rebuilt line to its block's episode,
+  or to one shared `UNKNOWN_EPISODE` once the spec has gone. `frames_of` frames an episode with four `sheet.rule`
+  hairlines and no ground, at a `pre`'s margins and padding (both sides), capped at the measure, and bridges the blank
+  rows a tile splits a block at. That bridge also closes an OPEN-BUGS item: a code block with a blank line in it showed
+  as two islands in a tile. Found while writing the tests: two code blocks on adjacent rows showed as one; a pre line
+  now joins only a pre of its own episode.
+
+Audit (the H-2 and KT-1 rows, ASIDE addenda), 1 round: Fable 5.1 reviewing Opus 5.5 (cross-family), MODEL start == end.
+0 P0 / 0 P1 / 0 P2 / 4 P3, and 2 P3 found by the implementer while it ran; clean. Fixed: a forgotten block whose rows
+carry different serials fragmented into a frame per row (F1: the shared `UNKNOWN_EPISODE`); MANUAL-DESIGN 3.2 named
+only a bare `>` as a separator (F2); lantern wrapped and boxed at the console's width on a tile's pts (F3, pre-existing:
+`manual::wraps_at_console`); an inline image in an aside was laid across the hairlines (S1); a `pre` or an aside opened
+inside a heading swallowed the heading's close (S2). Recorded, not fixed: on the byte-fed console the line pending
+inside an open aside lays outside the frame until its LF (F4, cosmetic; OPEN-BUGS, sub-halcyond Caveats). Closed list:
+memory `audit_aside_closed_list.md`.
+
+Verification: host beacon 40, manual 82, lantern 25, halcyond 442. Sabotage, every red set predicted before its run:
+14 mutants over beacon, the manual and lantern (all red; 10 exactly as predicted, 4 on more or other tests), 25 over
+halcyond (each as predicted, after one test was sharpened) and 9 over the close's fixes (all red; 8 as predicted, C8
+on the cells-mode registry test rather than the byte-fed one, whose contiguity the intact close guards preserve). A
+differential fuzz, 160,000 sections over four seeds (about 39,600 accepted by the checker): no panic, strip(rich)
+equals the unwrapped plain output, the plain tiers agree, and every box is whole at every width a reader wraps at.
+Device, CI image: `lantern.exp` 46 s and `manual.exp` 46 s, both PASS; leg (f) matches the box by regex, because
+macOS's expect 5.45 faults (SIGBUS in `expMatchProcess`) on an `-ex` match of bytes above 0x7f, which a host-only
+script reproduces. Instrument session image: `ls-halcyon-lantern` 99 s PASS, leg (9) finding the one unfilled hairline
+frame slide two adds, (38,178) to (757,282), against slide one. The chunk sits on main 26e8d367 (the Tclunk closer),
+merged before its gates. No kernel change, so no sanitizer run or spec is owed.
+
+## The I-47 close: one raster per block, a token that routes — 2026-09-29
+
+Operator vote 3 of 2026-09-28 pulled forward the owed Fable-diversity pass on inline media and the I-47 flip. The pass
+(FABLE-1: 0 P0 / 1 P1 / 1 P2 / 4 P3) is closed here, all but F5, which belongs to (d2), the image slide. Scripture 8698a926
+(ARCH 28 I-47 rewritten and ENFORCED; the HPL2 AUDIT-TRIGGERS row; HALCYON 14.7 and 14.7.2; BEACON 10; AUX-ROADMAP;
+`dec-2026-09-29-inline-media-one-principal`). Code 040450a6.
+
+- **One raster per block (F1, P1).** A block keeps one resampled raster per (image id, display size) in
+  `LaidBlock.blobs`; a `LaidImage` is a placement shown at its raster's size, and `render_block` adds each raster to
+  the frame once. A block lays at most twice the tile's raster cache (the page's width and an aside's) plus its
+  transcript images, however many rows name a picture.
+- **The token routes (F2, P2, a decision).** Any Proc of the session's principal can read a pane's token from
+  `/proc/<pid>/environ`; ptyfs serves every pts 0666, and a covering debugger can drive a pane's shell. So one
+  principal's panes are one authority domain (Plan 9's rio): the peer-principal gate at accept is the authority and
+  the token routes. The ARCH row, HALCYON 14.7.2 and the code's headers say so. Option (ii), an inherited fd, would
+  protect nothing those leave open.
+- **Quiet diagnostics (F3).** Every place-path line a client can repeat (a connect accepted or refused, a walk to an
+  unrouted token, an upload placed, refused by the cache or orphaned) is written at its 1st, 2nd, 4th ... occurrence
+  with its count (`paneroute::Quiet`), on the session and the console channels.
+- **The rest.** The wire comments say 32 bytes, `HPL2` (F4). `view` narrows a 16-bit PNG in zune's buffer, and view's
+  and gallery's budget comments state each format's true peak (F6, corrected by the close's round).
+  `ls-gfx-session-image`'s fail-fast arm matches the refusal line halcyond writes. Three dead-code warnings removed.
+
+Audit: FABLE-1 (Fable 5.1, read-only on 84edfca5) opened the chunk. The close's own round, I47-CLOSE (Fable 5.1
+reviewing Opus 5.5, MODEL start == end): 0 P0 / 0 P1 / 1 P2 / 3 P3, all fixed, and it ruled for option (i). Fixed: the
+retracted token wording in the headers, 14.7.2 and the dossier (F1); the PNG peak figures (F2); four unthrottled
+lines (F3); the untested size half of the raster key, and a placement size its raster could contradict (F4). Found by
+the implementer in parallel: F1 and F3, `Quiet` inside `place_tail`'s doc comment, and the gate's dead fail-fast arm.
+Closed list: memory `audit_inline_media_closed_list.md`.
+
+Verification: host halcyond 445, view 12, gallery 11, inlinewire 2; guest build clean. Mutants, each red set predicted
+before its run: no raster reuse, a copy per placement, `Quiet` always open, no strip, a size-less key and an id-less
+key, all red as predicted. Device: on the console image, `ls-gfx-inline-view` 42 s, `ls-gfx-jpeg` 40 s and
+`ls-gfx-gallery` 39 s, all PASS; on the Instrument session image, `ls-gfx-session-image` 51 s (+194,115 px in the
+tile) and `ls-halcyon-session-media` 75 s, both PASS, each witness line in its new form (`leaf=3 640x400 (1 so far)`).
+No kernel change, so no sanitizer run or spec is owed.
+
+## The birth hold: a spawned child parked before its first instruction — 2026-09-29
+
+Delve's launch raced its child: the probe's program reached its loop before the debugger's attach and stop landed, so
+an entry breakpoint never fired (DELVE-PORT-DESIGN 8c-4, closure (b), "it bit"). The operator voted the shape on
+2026-09-29: a spawn flag, and a held child whose spawner dies before taking it over is killed. Scripture 269207b5
+(DEBUG-FS-DESIGN 5f and section 6; DELVE-PORT-DESIGN 8c-4 (b); the ARCH I-39 row and spec-table row). Code
+a9596fb5.
+
+- **The flag.** `SPAWN_DEBUG_HELD` in `sys_spawn_args.debug_flags`, the record's last reserved slot (offset 100; the
+  record stays 104 bytes). A bit outside `SPAWN_DEBUG_FLAGS_ALL` refuses the spawn. Old callers pass zero.
+- **The hold.** `Proc.debug_birth_hold` (offset 404): none, unborn or parked. `rfork_internal` marks it unborn in the
+  publication lock hold, before the child can run. Only its setters write it, under `g_proc_table_lock`, and every
+  write wakes the parent's `child_waiters`.
+- **A synchronous spawn.** The held spawn returns the pid only once the child has loaded and parked, or was released
+  or died (`spawn_await_birth`, the vfork park's discipline).
+- **The birth park.** `userland_enter_held` builds the child's first frame (every GPR zero, the entry, the stack)
+  below the thunk's stack and runs a straight-line tail over it: preempt, die check, notes, `el0_birth_park`, the
+  ordinary exception return. The park shares `el0_stop_park` with the stop tail and waits on `birth_park_wake_cond`,
+  which reads the hold first. `regs`, `step` and `hwbreak` see the frame, so a debugger can set a breakpoint on the
+  entry.
+- **Conversion and release.** The owner's `stop` delivers the stop, then converts the hold; the conversion refuses
+  without a pending stop, so the order is tested (round 1, F4). `start` and an explicit `detach` release it. Closing
+  the ctl fd without `detach` leaves the hold for the orphan rule.
+- **The orphan rule.** When the spawner becomes a zombie, every live child still held is terminated, "launcher
+  exited", before the reparent.
+- **Death wins at every way out of the park.** `el0_stop_park` re-reads group death after its wake condition (the
+  model's first held run found the window: the EXITKILL release terminates and only then clears the stop), and its
+  latch exit re-reads it too (round 1, F8).
+- **A latched interrupt at the birth park ends the child** (`birth_park_terminate`, round 1, F1). The latch is armed
+  only for a note whose default applies, a held child's thread masks nothing, and the child exits with the note's
+  name, which the tests now check.
+- **`waitstop` waits for a debug stop.** A held, unconverted target no longer counts as stopped (round 1, F2).
+- **The mirror check.** `tools/check-spawn-args-mirrors.py`, run by `build.sh` before any target, derives the record
+  from the kernel's static asserts and checks libt, libthyla-rs and pouch, and the Go fork by offsets and sizes when
+  it can read it. It accepts only one plain `#[repr(C)]`, however another repr is spelled, `cfg_attr` included (round
+  1, F6; round 2, R2-F4), and it was proven red on a sabotaged mirror.
+- **Userspace.** `Command::debug_held` (libthyla-rs), `T_SPAWN_DEBUG_HELD` (libt), the pouch 0026 patch, the viv and
+  pty-probe records, and debug-probe's held phase, the device witness.
+- **Still open.** The Go fork's `SysProcAttr{DebugHeld}` and ambush's `Launch` wait on the operator, so Delve's launch
+  races until they land. A third party with debug authority can still stop a loading child mid-exec, with no frame to
+  read (a Seam in the dossier). A spawner that execs keeps its held children held until it exits. A latched interrupt
+  defeats a debug or job stop of a compute-bound thread: pre-existing, and an OPEN-BUGS design call. And the parent
+  suspend that vfork and the held spawn share can return early when a peer thread revokes the caller's own terminate
+  latch: pre-existing, in OPEN-BUGS beside that design call.
+
+Audit: round 1 (Fable 5.1 reviewing Opus 5.5, MODEL start == end, on 9e2e28a2..750724a4): 0 P0 / 1 P1 / 0 P2 / 7 P3,
+all fixed or closed. F1, the P1: the first draft answered an interrupt latched at the birth park by re-running the
+checkpoint in place, and note delivery declines a frame whose stack pointer it does not trust, which a debugger can
+write. The re-run then spun with interrupts masked and took its CPU. Round 2 (Fable 5.1 reviewing Opus 5.5, MODEL
+start == end, on the round-1 fixes): 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed, a clean close. It sharpened the claims (the
+park honours a thread's note mask, and a held child's thread masks nothing), pinned the exit message in the tests,
+stated a vacuous test premise, and closed a mirror-check gap (a repr inside `cfg_attr`). Found in parallel: the "no
+handler" argument re-argued from the latch's arming rule, and a parent suspend that returns early on a revoked latch
+(pre-existing, OPEN-BUGS). Closed list: memory `audit_birth_hold_closed_list.md`.
+
+Verification: kernel tests `birth_hold.*` (7) and `devproc.debug_birth_hold_ctl`; `tools/test.sh` 1782/1782 PASS;
+debug-probe `held ok` three times (a late attach whose entry breakpoint fires; attach, exitkill and stop at once; a
+close without detach that keeps the hold). Sabotage, each its own bake: no orphan rule, no conversion, no validation
+and a park that runs free, together five FAILs; a lost wake, one; a free-running park with the kernel legs removed,
+the device witness's "the stopped PC is not the ELF entry"; the stop's two steps swapped (F4) and the stop scan
+without the stop flag (F2), each its test's FAIL; the re-run restored (F1), a hung boot, 34,359,738,368 masked re-runs
+in 300 seconds; round 2's two name witnesses, an exit with no name (leg (b)'s FAIL) and the fallback name on a
+debugger-written frame (leg (b) passes, leg (c) FAILs). TLC, one worker, all 17 `debug_stop` cfgs as expected (the
+counts are in `specs/SPEC-TO-CODE.md`). `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4
+and 8, UBSan at -smp 4 and 8, ten boots each); `tools/test-fault.sh` 8/8; `tools/check-v80-floor.py` OK (220 ELFs,
+5,323 LSE instructions, all runtime-gated); and the interactive scenarios that share the stop park, the interrupt path
+or the debugger (`pty-4`, `pty-susp-pouch`, `item10-ctrlc`, `viv-console-ctrlc`, `dap-nora`, `nora-demo`) PASS, one
+attempt each.
+
+## The held launch: ambush spawns held where the kernel has the hold — 2026-09-30
+
+The birth hold's userspace half. With the kernel half landed (the section above), ambush still spawned its target
+running, so the race stayed live: on 2026-09-30 the image-slide branch's CI `manual` gate died in `/ambush-probe`
+stage C, the race's third boot-fatal sighting. The operator said yes to changing and committing the Go fork and ambush
+on 2026-09-30. Scripture 9bfa3041 (DELVE-PORT-DESIGN section 7 (b) and section 12). Code f4924564.
+
+- **The forks.** Local commits in the forks the build reads, shared with main. go-thylacine: aaf21fb commits the
+  104-byte record its builds had compiled from an uncommitted working tree; e8b4bcf adds `SysProcAttr.DebugHeld`,
+  which sets `SPAWN_DEBUG_HELD` in `debug_flags`; 83b46ad makes the record's five user-address fields pointer-typed;
+  26b9b29 has a spawn without a `Dir` take `spawnDirMu`'s read side; 4aba404 names everything the `Dir` window
+  exposes. Ambush: 69e94cd spawns held when built with `-tags thylacine_held`, and writes `exitkill` before `stop`;
+  aba36e0 reaps an abandoned child only after its kill lands; 074dca0 adds dap-selftest's two reap legs; ce9154d reaps
+  a child that is already dead when the kernel refuses its kill, in `Launch`'s failure paths and in the debugger's own
+  kill.
+- **The tag.** Both ambush builds, the ramfs copy for `/ambush-probe` and the `/goroot/bin` copy nora's `:debug` runs,
+  take `-tags thylacine_held` from one variable, because this tree's kernel has the hold. A kernel without it refuses
+  the flag before any child exists, so a fork shared with main cannot spawn held unconditionally. `ambush_fork_check`
+  asks `go list` which of the held pair the tagged build compiles and refuses anything but the held file, and
+  `ambush_artifact_check` reads the tags back from each binary. The tag goes when every tree carries the hold.
+- **The order.** `Launch` writes `exitkill` before `stop`, on the tagged and the untagged path: the stop converts the
+  hold, and the orphan rule covers a held child only while the hold lasts.
+- **The witnesses.** `/ambush-probe` stage C prints `regs` at the launch stop, and the probe requires the PC to be
+  `/bin/ambush-child`'s ELF entry. A held child is parked there. A launch that raced has always left it, and a child
+  spawned running reads at the entry only when an interrupt is already pending at its first eret, so the marker fails
+  every raced launch, and a build that spawns running on all but a sliver of boots; the race itself bites about once
+  in 160. Stage D launches `/bin/ambush-notelf`, an executable that is not an ELF image, and requires the failed
+  launch to reap the child that died loading: a held spawn hands that child back already dead, and the kernel refuses
+  to kill it. Its second leg kills a stopped `/bin/ambush-child` from outside, waits for the zombie, and requires the
+  debugger's own kill to succeed and reap it, the same leak one function over, older than this chunk.
+- **The spawn record.** `startProcess` kept the record's name, argv and fd-list addresses as integers across the calls
+  that honour `ProcAttr.Dir`, and those calls can move the goroutine stack the buffers may live on, leaving the kernel
+  to read the freed old stack. The fields are pointers now, and `tools/check-spawn-args-mirrors.py` requires a pointer
+  type at every kernel `*_va` offset, and a classification for every 8-byte kernel field, address or not.
+- **Still open.** The Go fork honours `Dir` by moving the whole parent, so during a spawn the rest of the process sees
+  `Dir`, a `Chdir` it makes is undone, and a restore that fails leaves it in `Dir`. The fix, a spawn record that
+  carries the child's cwd, is an ABI change, queued in OPEN-BUGS for the operator's vote.
+- **The proof.** One 8-CPU boot per arm, the same 20-launch harness, and a 500 ms pause between the spawn and the
+  attach: held, the breakpoint on `main.parkLoop`'s entry fired 20/20, every launch stop landing before the child had
+  run anything; with `launchHeld` switched off in the same build, 0/20 fired, and all 20 stops found the child past
+  its entry, in `time.Sleep`.
+- **Audit.** Round 1, Fable 5.1: 0 P0 / 0 P1 / 2 P2 / 4 P3. The P2s: nora's `/goroot/bin` ambush was built untagged
+  (fixed: one `AMBUSH_TAGS`, and a check that reads the tags back from each binary), and the Go fork held the spawn
+  record's addresses as integers across calls that can move the stack (fixed: pointer-typed fields, required by the
+  mirror check). The P3s: a failed kill in `Launch` followed by a blocking reap, an old fork silently taking the tag,
+  a spawn without `Dir` catching a `Dir` spawn's cwd (all fixed), and an unreadable EPERM (closed: it waits on the
+  spawn returning a real errno, #102). Round 2, Fable 5.1, on the fixes: 0 / 0 / 0 / 5 P3. My kill-then-reap fix never
+  reaped a child that died loading (fixed with a non-blocking reap and a stage D leg), and checking that fix against
+  the kernel turned up the same leak in the debugger's own kill, older than this chunk (the same reap, and a second
+  leg; on the fork with the legs and no fix, one boot failed both, `reaped=0 killed=0`); the stage C comment claimed
+  more than the kernel gives (restated); the fork check trusted a declaration (it asks `go list` now); the checker's
+  address rule trusted the `_va` suffix (every 8-byte kernel field is classified now); and the fork's `Dir` window has
+  three residuals (documented; the fix is an ABI change, queued for a vote). My own review found three of round 2's
+  five before its report.
+- **Verification.** `tools/test.sh` 1782/1782 PASS; the debug probe's three held legs ok, and `/ambush-probe` stages A
+  to D green -- stage C's launch stop at the ELF entry (0x75440), stage D `reaped=1 killed=1` with every round-trip
+  marker; `dap-nora` and `nora-demo` PASS; `tools/ci-smp-gate.sh` 5 rows x 10/10, 0 corruption.
+
+## The image slide: a deck names a picture, view shows it — 2026-09-30
+
+Operator vote 3 of 2026-09-28, "manifest names it, view shows it". Closes FABLE-1 F5, the finding the I-47 close left
+to this chunk. Scripture 5ea03715 (LANTERN-DESIGN 5, 8 and the new 14; HALCYON 14.7's 2026-09-29 refinement; ARCH 28's
+I-47 row; the HPL2 AUDIT-TRIGGERS row's addendum; the index line; `dec-2026-09-29-image-slide`). Code 2f2cff77.
+
+- **view's program modes (F5).** `--check` decodes and shows nothing; `--embed` places the picture and prints only its
+  reference. Neither passes a file to `cat`; each exits 0 only on success and reports one bare reason line. The
+  interactive `view` exits 1 when the picture is not displayed.
+- **The pane's limit.** A read of `place` at offset 0 answers the live per-image cap as ASCII decimal and LF, on the
+  session and the console servers (`inlinewire::limit_text`, `limit_read`, `parse_limit`). `view` reads it on a handle
+  of its own and area-averages its raster to it, and to 8192 on a side, before the header; a failed read leaves only
+  the side bound.
+- **The picture slide.** A manifest entry ending `.png`, `.jpg` or `.jpeg` is a picture. `lantern --check` has
+  `view --check -` decode it; a presentation at the rich tier runs `view --embed -` before the frame (both pipes
+  drained, a 30 s stall bound) and writes the reference inside the slide's one-write frame. Elsewhere, or when `view`
+  fails, a Markdown stand-in names the picture and the reason, every punctuation character escaped. The demo deck gains
+  `04-lantern.png`, from a committed stdlib generator.
+- **No file of a deck through a link.** The manifest and both slide kinds are opened with `T_ONOFOLLOW` as regular
+  files, at startup and at every show. The text-slide path had followed links since it landed.
+- **Gates.** `lantern.exp` (four slides, the stand-in in both postures, a fake picture refused with view's reason);
+  `ls-halcyon-lantern` (10), the picture's upload witness and its amber against the text slide;
+  `ls-halcyon-lantern-haul` (5), a linked slide refused, the target's open count unchanged, the slide after it opened,
+  `cat` the control; the fit legs of `ls-gfx-inline-view` and `ls-gfx-session-image` on the new 2048x1536
+  `/test-large.png`.
+
+Audit: IMG-SLIDE (Fable 5.1 reviewing Opus 5.5, read-only on 4ae7f9e8, MODEL start == end, the transcript all Fable):
+0 P0 / 0 P1 / 0 P2 / 7 P3. Fixed: two HALCYON 14.7 sentences the side bound and the read's tests had overtaken (F1,
+F2); `usr/lantern/src/lib.rs` missing from the audit row and the index (F3); the Haul leg's positive (F4, also
+self-found); a silent exit 1 when the caption write fails (F5); the fit's grid test asserts the aspect, and
+LANTERN-DESIGN 14 lists the cap's fall between read and upload (F7). Tracked: F6, a link served by a Haul export
+redirecting the deck directory, a Haul design item in OPEN-BUGS. Self-found in parallel: F4, and `run_view` reporting
+a poll error as a stall. Closed list: memory `audit_inline_media_closed_list.md`. After the round, the device gates: a
+P0 it missed, lantern spawning `view` by a bare name that a spawn resolves against the working directory (the picture
+check failed outside /bin, and an executable `view` there ran in its place; fixed: /bin/view, leg (h), seen red both
+ways); the manual section check refusing a wrap (fixed); `1 slides` (fixed). Then IMG-SLIDE r2 (Fable 5.1, read-only
+on d8c0f52b, the transcript all Fable), on the class the first round missed: F1, `view`'s text fallback spawning a
+bare `cat` (rated P2, re-rated P0: `view notes.txt` failed outside a directory holding a `cat` and ran a planted one;
+fixed: /bin/cat and the ls-gfx-inline-view text-fallback leg, seen red on the old image); F2 [P3], the stale
+`process.rs` header (fixed); F3 [P3], `lantern ""` reading `/slides.toml` (fixed: a usage error, lantern.exp leg (i),
+seen red). Observations taken: `view` spawned with the CSPRNG capability alone; the 30 s bound stated as a silence
+bound. Self-found: a leading-dash file name reaching `cat` as an option (fixed: `--`). Then IMG-SLIDE r3 (Fable 5.1,
+read-only on 1cf587a3, the transcript all Fable): 0 P0 / 0 P1 / 0 P2 / 4 P3 -- F1 the leading-dash name (the
+self-found `--`); F2 the capability mask described as confining the presenter's authority (reworded: capabilities
+only); F3 an unbounded wait on a child that closed both pipes (fixed: the reap is bounded by the same 30 s); F4 the
+census blind to raw spawns (viv's manifest `args[0]`, tracked in OPEN-BUGS).
+
+Verification: the host suite (tools/test-rust.sh) at the final tree runs 2185 tests in 29 crates and fails none --
+view 16, lantern 30, inlinewire 5, halcyond 445 -- and the three bakes built every guest crate. Fourteen sabotages of
+the new code and data (S1-S14) each turned exactly its predicted tests red, and so did three of four on the side bound
+(SB1, SB3, SB4); SB2 also reddened fit_averages, whose 4x1 case at side 2 is width-bound, a wrong prediction rather
+than a gap; on the device, a spawn that tried the working directory first turned lantern.exp's leg (h) red both ways;
+and each leg added after the audit rounds was red on the image before its fix: the text fallback ran a planted `cat`
+from the working directory (the status arrived without the note), `lantern ''` opened `/slides.toml` at the root, and
+`view -- -zq.txt` refused the name as an invalid option. Device: three bakes at the final tree, eight gates green on
+one attempt each -- the CI image (`lantern` 41 s, `manual` 41 s), the session instrument image (`ls-halcyon-lantern`
+99 s, `ls-halcyon-lantern-haul` 74 s, `ls-gfx-session-image` 56 s, `ls-halcyon-session-media` 76 s) and the console
+Halcyon image (`ls-gfx-inline-view` 44 s, `ls-gfx-jpeg` 42 s) -- and the kernel suite on the CI image, 1782 of 1782,
+with debug-probe's three held legs and ambush-probe's stages C and D. No kernel change, so no sanitizer run or spec is
+owed.
+
+## The kernel chunk: the trusted episode's lock re-checks, and walks without recursion — 2026-09-30
+
+Item (5) of the 2026-09-28 work order: the kernel findings of the owed Fable-diversity passes (IM-1..2 and H3+C,
+read-only on aux-3 9e2e28a2). Scripture 29f74063 (IMPERIUM 11.3 refinement 9, 11.4 refinement 2 and 11.5; DEBUG-FS-DESIGN's
+cmdline sentence; AUDIT-TRIGGERS row 158). Code 6c0c4b36.
+
+- **The episode's lock re-checks (IM F1 P1, F2 P2).** A consctl mode write and a renderer feed byte are refused where
+  they land, under `g_cons.lock`, the lock BEGIN takes; a `+echo` or a feed byte in flight at BEGIN no longer reaches
+  the episode.
+- **A repeated SAK keeps the saved owner (F5).** The pre-SAK owner is saved only when no episode is active.
+- **devcap's writer-caps loads (F6).** Acquire loads; `seam-devcap-plain-caps-read` is closed.
+- **Walks without recursion (H3+C F2, re-rated a P1 candidate).** `proc_walk_next` steps the table walk, the pid lookup
+  and the image visit, so an EL0 fork chain of any depth cannot carry a walk into the kernel stack's guard.
+- **Stale promises (H3+C F1, IM F4).** cmdline's seal comment; IMPERIUM's imperium set names `CAP_POST_SERVICE`.
+- **The episode fixture tears down.** `ep_setup`'s failure paths run `ep_teardown`.
+
+Audit: the kernel round (Fable 5.1 reviewing Opus 5.5, read-only on c62c7c4d, the transcript all Fable): 0 P0 / 0 P1
+/ 0 P2 / 3 P3, clean -- F2 the straddle hook under `KERNEL_TESTS`, F3 row 158's count, F1 the pre-BEGIN echo residue
+kept with row 155's (an operator vote on both narrowings). main reviewed the diff: no findings.
+
+Verification: six new kernel tests, each red first for its predicted reason (the three cons straddle/SAK assertions;
+the boot-stack guard in `proc.walk_deep_chain`, 2048 deep; "the walk visits each node once"; "a failed setup leaves no
+trusted authority"). `tools/test.sh` 1788/1788 after merging aux-3 9f0aec83. tools/ci-smp-gate.sh at the merged tip
+b0002334: 50 of 50 boots PASS across default-smp1, default-smp4, default-smp8, ubsan-smp4 and ubsan-smp8 (N=10 each),
+0 corruption.
+
+## Stay stopped: a stopped thread keeps its stop, and death wins in the exit close — 2026-09-30
+
+The operator's vote of 2026-09-30 05:11Z ("Stay stopped"; DEBUG-FS-DESIGN 5g). Scripture
+51cc0abd (DEBUG-FS-DESIGN 5g and 5.5; ARCHITECTURE 8.8.2; AUDIT-TRIGGERS row 199 + its index line, row 118's addendum; the
+dec note). Code 87eef7c3.
+
+- **One death-only park sleep.** `sleep_death_only` unwinds for group death alone; the tail's stop park, the birth
+  park, the nested sleeper park, the vfork suspend and the held spawn's birth wait use it, so a stopped thread keeps
+  its stop through a latched interrupt and a parent suspend returns only on the child's release or group death.
+- **A stop park is woken by a resume or death alone.** The latch's, a caught note's and a second stop's wake walks
+  pass a thread on its own `debug_rendez` by (round 1 F1, and the stop walk found by the part-2 rewrite).
+- **Death wins in the exit close.** `proc_stop_requested` is false once `group_exit_msg` is set, so a dying Proc's
+  closer never parks for a stop; the tail reads the raw owners (`proc_stop_owned`).
+- **A dying Proc is not stopped to any reader.** Both delivers refuse it; a parent's wait reports neither latch;
+  `stop`, `waitstop` and a step's wait read it as gone; the orphan rule does not count it; `/ctl/procs` does not show
+  it STOPPED (rounds 2 and 3).
+- **A step belongs to its slot.** The whole-Proc stop, `detach` and the ctl-fd close's release cancel a pending
+  step; the step's wait ends on a released slot (round 2 F6, round 3 RF7).
+- **The runner releases a leaked fixture Proc.** `LEAKED-PROC`: a failing test that left a fabricated Proc linked
+  hung the boot at the next drain of kproc's children. The link helpers mark every Proc they splice in
+  (`PROC_FLAG_TEST_FIXTURE`, which rfork never sets); after each test the runner unlinks every marked child of kproc,
+  names it and fails a passing test that left one.
+- `debug_stop.tla`: the latch on any target and on the spawner; three new buggy cfgs, `birth_latch_rerun` retired.
+
+Audit: four rounds, Opus 5.5 reviewing Opus 5.5 (Fable 5.1 out) for rounds 1-3: r1 0/0/0/7 P3, r2 0/0/0/6, r3 0/0/0/7
+(clean); r4 Fable 5.1 reviewing Opus 5.5 (cross-family), 0/0/0/2 P3, both in the runner's release (a fabricated
+zombie, a fixture with a thread), closed by the fixture mark.
+
+Verification: reds on e7d1c0b4, each its own bake, restored clean, each failing exactly its own assertions and running
+to the end of the suite: rleak (devproc (f) + `LEAKED-PROC(1803)`, where dfe25031 hung on the same leak), r1
+(7f9b0634's park code: the death-only tests, the birth wait's latch, the held child's interrupt; the device legs with
+those unregistered), r2 and r2c (the latch walk skip, the STOPPED column, birth-hold (b) and (c)), r3 (the stop walk
+skip), r4 and r4d (the predicate: both exit-close tests, devproc (f), the 9P handoff's dying leg, jc-probe killst), r5
+(the job refusal, the orphan rule, the step's slot, the report arm), r6 (the debug refusal, the step's dying check),
+r7 and r7b (the verdict map, the detach's and the release's cancel); the mark before and after (85c8afa6, 78b34682): a
+leaked zombie fixture extincted the boot and a thread-bearing one hung it, and both are now named and the boot
+completes 1797/1798. `tools/test.sh` 1798/1798 on 78b34682 with debug-probe and jc-probe PASS. TLC: debug_stop 19 cfgs
+as claimed (clean 12830 and 17330), pty_stop 4 cfgs as claimed. `tools/ci-smp-gate.sh` on 47cddabb: PASS, 50 boots and
+0 corruption (default at -smp 1, 4 and 8, UBSan at -smp 4 and 8, ten boots each, every boot PASS).
+
+## Haul P3a: replies held to the session's msize, a short-token warning, and hang-up gates that read the verdict — 2026-10-05
+
+The 2026-09-29 Haul Fable pass's F1 (the haul half), F3, F4 and F5 (OPEN-BUGS 2026-09-29 ~14:57Z). Scripture
+eb2377da (HAUL-DESIGN 2.2, 3.1, 4.1, 4.2 and 5; AUDIT-TRIGGERS row 168's P3a addendum). Code dd65af73.
+
+- **Replies held to the session's msize.** `frame::ReplyBound`: the up pump stores every Tversion's msize before it
+  forwards the frame, the down pump asks only once a whole reply has arrived, and an Rversion lowers the bound and
+  never raises it. Read from the session, not pinned at 4 KiB: a posted service's mount proposes 32 KiB.
+- **The refusal says so, and blames no one.** A reply over the bound ends the down pump with `STOP_REFUSED`, closing
+  the reply pipe as a hang-up does; haul names the server and both sizes, then says the 9P session is broken and the
+  mount dead, and exits non-zero. The posted loop and the `-v` mount check branch on it (round 1 F2).
+- **A warning for a short token.** Below 16 bytes (`npxf::TOKEN_WARN_BELOW`): the server proves first, so the
+  handshake is an offline guessing oracle (HAUL-DESIGN 3.1, 5); a PAKE is a wire change and joins the vote batch.
+- **Hang-up legs read the peer's verdict (F5).** `haul-hangup`, `haul-npxf`'s relay leg and `haul-post`'s remote-FIN
+  arm fail on `STILL OPEN`. Two oversize legs each leave one half of the bound as the only defence (round 1 F1);
+  refusal-only legs dial host port 1 (round 1 F3).
+- **Stale claims corrected (F4).** HAUL-DESIGN 4.1 and 4.2, two comments in `main.rs`, one in `haul-npxf.exp`.
+
+Not covered: a reply the kernel refuses for another reason still kills the session out of haul's sight (P3b, the kernel
+half); npxf's pre-auth slots are P3c, in npxf.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/1/3, clean, all fixed.
+
+Verification: `cargo test -p haul --lib` on the host: 59 passed, 1 ignored (the live-server interop test); frame.rs 7/7. Each frame.rs rule sabotaged on the host fails its own test: fetch_min replaced by a store (the Rversion test), the MSG_MAX ceiling dropped (the ceiling test), the type check dropped (the Twalk test and the Rversion test's wrong-direction leg); restored, 7/7. main 4630aef7 merged into the WIP branch (only the generated view-code-coverage conflicted; re-rendered); the CI-image bake of that tree is clean. tools/test.sh 1847/1847 PASS (banner; 0 FAIL, 0 EXTINCTION, 0 LEAKED-PROC; ambush-probe stage C fired at the entry). haul-hangup (46 s), haul-unreachable (61 s), haul-npxf, haul-post and haul-cape (45 s each) PASS, each on its first attempt, against npxf-server built from the operator's tree (connection-log-default). each its own bake, haul-hangup once (LS_CI_ATTEMPTS=1), restored: S1 without REPLY.up -- oversize leg 1 red ("mount check: CANNOT read" for /tmp/big1), the hang-up leg green; S2 without REPLY.down -- leg 1 green, leg 2 red the same way (/tmp/big2); S3 with the warning below 15 bytes -- the 15-byte leg red (no warning in 90 s); S4 below 17 -- the 16-byte control red (warned). S5 (the peer reports STILL OPEN whatever haul did, no bake): haul-hangup's hang-up leg, haul-npxf's relay leg and haul-post's remote-FIN arm each red ("did not close its side"), every leg before them green, and haul-unreachable and haul-cape, which read no verdict, green. Re-baked clean after.
+
+## Tail order: the EL0-return tail stops before it delivers notes — 2026-10-05
+
+The operator's vote of 2026-10-05 ("Stop before notes"; OPEN-BUGS 2026-09-30 10:05Z). Scripture, code, witnesses,
+model and dossiers in one commit bbc7ab90, the squash of `aux-3-tail-order`.
+
+- **die -> stop -> notes.** `.Lel0_sync_return` and the birth tail (`userland_enter_held`) run the stop leg before
+  the notes leg (DEBUG-FS-DESIGN 4.2), as Plan 9's `notify` runs `procctl` first and Linux's signal-delivery-stop
+  precedes the handler frame. A note posted during a stop is taken as the stop clears. The IRQ tail is unchanged and
+  still delivers no notes.
+- **A stop the notes leg applies is parked in the leg.** The stop arm returns true; `notes_deliver_at_el0_return`
+  runs the die check and the stop check again, then passes over the queue afresh, inside one `NOTE_QUEUE_DEPTH`
+  budget shared with the discard loop.
+- **A step meets a note at the handler's entry.** Both frame builders clear `SPSR_EL1_SS` before they save the
+  context (DEBUG-FS-DESIGN 5.5, Linux's rule), so the step reports at the handler's first instruction and no saved
+  context carries the bit.
+- **Only a re-stop completes a step.** A step whose target died, or whose slot a `detach` released, fails with
+  `T_E_SRCH` (`devproc_step_result`; round 1 F3).
+- **The #713 assert** sits in each tail's last C call.
+- `specs/tail_order.tla` (new): 2 clean and 5 buggy cfgs, gated by `specs/check-tail-order.sh`; `debug_step.tla`'s
+  prose says a step runs at most one instruction.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/6 P3, clean. F1-F4 and F6 fixed; F5 (the
+Linux-phenotype builder's SS clear has no witness) tracked in OPEN-BUGS 2026-10-05 22:45Z.
+
+Verification: `tools/test.sh` 1865/1865 with debug-probe's resume, death-step and caught-step legs, on the WIP merge
+292ccb2b4 and again after round 1 (1864601e7). Sabotages, one bake each, each red where designed: the old order
+(resume), the native builder keeping SS (caught-step), the stop arm returning false (the kernel test), a gone target
+read as success (death-step), a released slot read as success (devproc leg (g)), a witness that never continues the
+job (named by the leak check, no extinction). `specs/check-tail-order.sh` ALL CFGS AS CLAIMED; debug_stop 19 cfgs,
+debug_step 3 and death_wake 2 as claimed. `tools/ci-smp-gate.sh` on fa526f09 (with Haul P3b): PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8, UBSan at 4 and 8). `tools/test.sh` on fa526f09: 1872/1872.
+
+## Haul P3b: a dead 9P session hangs up its transport, and haul names Thylacine — 2026-10-05
+
+The 2026-09-29 Haul Fable pass's F1, the kernel half (OPEN-BUGS 2026-09-29 ~14:57Z), after P3a's haul half. Scripture,
+code, witnesses, model and dossiers in one commit fa526f09, the squash of `aux-3-p3b`.
+
+- **A death hangs up** (ARCH 21.10). `client_mark_dead_locked` calls the transport's new `hangup` op once, on the
+  edge of the session's death, under `c->lock`: `pipe_hangup_write` on a pipe's tx, `srvconn_teardown` on a srvconn,
+  a count on the loopback, nothing on the mq or the closer test's stall wrapper. `p9_transport_hangup` skips a NULL op
+  and a CLOSED transport.
+- **A hung-up write end** (ARCH 10.3) is EOF without the close: the reader drains and then reads EOF, both write arms
+  refuse, the end polls POLLERR, and the ring ref stays with its holder.
+- **A mounted queue posts no `pipe` note.** The CNBFRAME arm refuses with EPIPE alone, which closes the 2026-08-17
+  bug of a SIGPIPE-shaped note when a pipe-mounted server died.
+- **haul names Thylacine.** `STOP_KERNEL` prints `haul: Thylacine ended the 9P session with ADDR -- the mount is
+  dead`; `kernel_ended` asks the pipe before haul closes its own copy, so the attach tells `attach (Thylacine refused
+  the server's reply)` from `attach (9P handshake refused)`.
+- `specs/pipe.tla`: `HangupWrite`, the action property `NoByteAfterEof`, two buggy cfgs.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, clean, all fixed (F3 by the two attach
+legs).
+
+Verification: `tools/test.sh` 1871/1871 before and after round 1; every haul leg PASS on the first attempt. Sabotages,
+one bake each, each red exactly on its designed tests (SA-SF); the hangup removed on a `TESTS=n` image turns the
+stray-reply and stray-attach legs red, and haul asking after its close turns the refuse-attach leg red, 3 attempts of
+3 each. TLC pipe: 2 clean and 7 buggy cfgs as claimed. `tools/ci-smp-gate.sh` on fa526f09 (with the tail order): PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8, UBSan at 4 and 8). On fa526f09: `tools/test.sh` 1872/1872 and the five haul legs PASS on the first attempt.
+
+## Served links: a link a remote session serves resolves beneath its mount — 2026-10-06
+
+The operator's vote of 2026-10-05, "Contain beneath mount" (DISTRO 4.6), which closes lantern's IMG-SLIDE F6. Scripture
+a24b0212b; code, witnesses and dossiers in one commit, 1434415da, the squash of `aux-3-contain`.
+
+- **A served link** is one whose Dev answers the new NULL-permitted `remote` slot. dev9p fills it with
+  `dev9p_spoor_remote`, which reads the declaration Haul makes on both paths (`SYS_ATTACH_9P_REMOTE`, `DMSRVREMOTE`).
+- **The anchor** is the root of the innermost mount crossed on the way to the link: `struct stalk_anchors` keeps a bit
+  per crossing beside the trail, with its logical offset and phenotype. Through a union it is the member holding the
+  link, found again by name; with no crossing it is the base, a union handle in its walkable form. It must answer remote
+  and be on the link's own session (its Dev and `devno`), or the link is refused `T_E_ACCES`.
+- **The restart** rebuilds the path as the components walked below the anchor (none for an absolute target), the
+  target and the rest, and resolves from the anchor. Every served link restarts, so no later `..` falls back below the
+  anchor; the phenotype carries.
+- Nine `stalk.served_*` kernel tests; `tools/interactive/haul-links.exp` on the device (an npxf export's links over
+  both Haul forms, a guest decoy at every path a link names).
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/1 P3, clean. F1, the same-session check's `devno`
+half untested, is fixed by `served_same_session`'s third leg (the same Dev, its own `devno`). Self-found before the
+round: a union-handle anchor's failed clone answered `T_E_ACCES` (now `T_E_IO`), and three arms no test reached (three
+tests); during it, S1, a comment rewrapped.
+
+Verification, on the landing tree (main 9dc80bb37 + the squash; a `--config ci` bake with ambush 073faaa): `tools/test.sh`
+1885/1885 and boot OK. Sabotages: the same-session check's devno clause dropped turns only `served_same_session`'s
+same-Dev leg red, and its dc clause dropped only its other-Dev leg (1884/1885 each). haul-links, haul-hangup,
+haul-unreachable, haul-cape, haul-npxf and haul-post PASS on the first attempt, the last two against an npxf-p3c server.
+dev9p's `remote` slot removed (a kernel-only rebuild): haul-links reports legs A, B, C and E escaped and fails, and
+leg D still resolves. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
+## Flag words, the KAT gate and the untagged held launch — 2026-10-06
+
+Three small changes land with the served links.
+
+- **`tools/check-flag-words.py`** replaces main's `check-proc-flags.py`. It derives nine bit-allocated words from their
+  headers (proc_flags, the five spawn words, the walk-create mode word, the 9P attach flags and the mount flags). A
+  member owns the bits its own literals add, and 45 in-memory mutations prove the check can fail before it reports a
+  pass. Commit a711116f6; `chg-2026-10-06-flag-words`.
+- **The KAT gate** (`make test-haul-kat`) builds against OpenSSL-based npxf again: libcrypto's flags come from
+  pkg-config, and a present npxf without libcrypto fails rather than skips. Commit ff819d5bb.
+- **The held launch needs no build tag.** Ambush 073faaa compiles it untagged, and build.sh's fork check asks the
+  untagged file list, refusing an older fork. Step 1 of 2; step 2 deletes `launchHeld` after main merges this.
+  Commit 16348c645; `chg-2026-10-06-held-untagged`.
+- Decision notes for the other four votes of 2026-10-05. Commit 535833ee5.
+
+Verification: the bake prints `check-flag-words: 9 words ok; the self-test caught all 45 mutations`. The KAT passes
+against npxf b8854ee and npxf-p3c 7064e33, and a flipped vector fails with rc 1. ambush-probe passes stage C
+(`launch_at_entry=1`) and stage D; dap-nora PASS (nora's `:debug` launches its target through `/goroot`'s Ambush). The fork check refuses ce9154d ("does not compile held_on_thylacine.go untagged") and passes 073faaa.
+
+## CPU time and the scheduler's counters have owners — 2026-10-06
+
+The operator's votes of 2026-10-06, "Gate CPU time to the owner" and "Restrict it too" (IMPERIUM-DESIGN 11.3 item 10),
+which close the imperium Fable pass's F3: a key typed into the trusted episode wakes its authority, and any counter that
+moves once per wake on a quiet machine publishes the secret's length and cadence. Scripture 61ec2488d; code, witnesses
+and dossiers in one commit, 614a94c3b.
+
+- **A Proc's CPU time** (`/ctl/procs`'s `CPU_NS`, `/proc/<pid>/status`'s `cpu_ns`) is shown to its owner or a
+  `CAP_HOSTOWNER` holder, the rule `/proc/<pid>/sched` already used (`devproc_owner_or_hostowner`).
+- **The machine's counters** -- `/ctl/cpu`'s per-CPU `idle_ns`, `ctxt` and `intr`, and `/ctl/sched`'s `runnable`, `wc:`
+  and `wc-tickless:` -- are shown to `PRINCIPAL_SYSTEM` or a `CAP_HOSTOWNER` holder (`devctl_system_counters_readable`).
+  `devctl_read` resolves the reader once and threads it through every leaf's formatter.
+- **A withheld value renders `-`, never 0.** ps prints `-`, prowl draws the per-CPU bars dashed and totals only the
+  reader's own CPU time, cpubench reports `n/a`. The shared boot diorama runs as the system principal and anyone may
+  mount it, so it serves the counters withheld to every client (VIVARIUM 6.2); in a Linux vivarium `/proc/stat`'s cpu
+  lines carry zeros in their positional columns and the `intr` and `ctxt` lines are omitted (VIVARIUM 6.17, amended).
+- The kernel tests `devctl.counters_gated` (an rfork child under its own principal reads every surface, then as a
+  hostowner; kproc reads as the system principal) and `devctl.procs_rows_whole`; `tools/interactive/cpu-gate.exp`, and
+  a dashed-bar check in `prowl.exp`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, and one self-found P3; clean. F1, the unit
+test checked two of the nine work-conservation values, now checks all nine. F2, a `/ctl/procs` row cut mid-field when
+the buffer filled (pre-existing), is fixed in `/ctl/procs` and `/ctl/kstack` alike: a row is committed whole, and
+`devctl.procs_rows_whole` witnesses it. F3, the owner predicates load the caller's principal with acquire. F4,
+`/ctl/9p-sessions` shows every reader per-message counters, so a secret typed into a pty-served terminal shows its
+cadence; the trusted episode does not cross that leaf, so item 10 holds, and the leaf waits on an operator decision.
+F5, comments true of an older version, reworded. S5, prowl's aggregate meter reads `CPU (own)` when rows are withheld.
+Self-found before the round: the shared diorama as a deputy, a ps leg that could not fail, cpubench's 0, and diorama's
+`intr 0` and `ctxt 0`.
+
+Verification, on aux-3-land ff76575cc + this chunk (a `--config ci` bake): `tools/test.sh` 1887/1887 and boot OK, with
+diorama's selftest and diorama-probe passing; cpu-gate, prowl and idle-probe PASS. Eight kernel sabotages, each red on
+its own assertion alone (1886/1887): the owner check dropped from `/ctl/procs` and from status, the system gate dropped
+from `/ctl/cpu` and from `/ctl/sched`, the system principal's arm and the hostowner's arm removed, one work-conservation
+field ungated, the whole-row rollback removed. With the suite's gate test unregistered, cpu-gate fails on the device at
+the matching assertion for the first four and the ungated field. ps without its `-` case fails cpu-gate at the box
+count; prowl drawing a withheld CPU as an empty meter fails prowl.exp; the shared diorama relaying the kernel's view
+fails diorama-probe and the boot. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
+UBSan at 4 and 8).
+
+## 9P counters belong to a row's two ends; chdir stores where the walk landed — 2026-10-06
+
+Two operator votes of 2026-10-06. "Per-row owner" for `/ctl/9p-sessions` (IMPERIUM-DESIGN 11.3 item 10; re-asked at
+15:38Z after the first question misstated the cost, superseding "Gate it") closes the CPU-time gate audit's F4.
+"Physical" for chdir (STALK-DESIGN 4.3). Scripture f33605135; code, witnesses and dossiers in one commit, 0051c458e.
+
+- **A 9P row's counters belong to its two ends.** A connection records the connecting Proc's principal and the
+  poster's at the post. A session records its attacher and, over `/srv`, the connection's server. Both are recorded by
+  value when the row is made. `ctl_9p_shown` shows the counters to either end, the system principal or a hostowner;
+  everyone else reads `-`. An end the kernel does not know matches no reader, and a reader running as `none` is no end.
+  A user keeps the counters of the sessions that serve them: the login's home proxy is a server end.
+- **chdir stores the name of where the walk landed.** stalk builds the name alongside its trail and never reads it or
+  a Path (I-33). `stalk_landed` then walks the name once more and requires the same node: a served link resolved from
+  a union member past the first can land on a node an earlier member shadows, and such a node has no name. The
+  lexical canonicalizer is deleted. ut's `cd` and builtin `pwd` stay logical in the shell; `/bin/pwd` asks the kernel.
+- Witnesses: the kernel tests `devsrv.conn_ends`, `stalk.landed_name` (22 legs), `stalk.landed_roots`,
+  `stalk.landed_identity`, and new legs in `devctl.read_9p_sessions_format` and `p9_attached.ctl_registry`; four
+  `/ctl/9p-sessions` legs in `tools/interactive/cpu-gate.exp`; leg (f) of `haul-links.exp`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/0/5 P3, and one self-found before the gate; clean.
+S0, the union-shadow case, found in review before the gate, is fixed by the second walk. F1: a `none` reader matched a
+`none` end; none is now no end, and the `/proc` owner predicate's view of none is enqueued separately. F2: two stale
+comments. F3: no leg had a Path to read back, and `stalk.landed_roots` chroots below a Path-seeded attach. F4: the
+second walk's Dev and devno terms had no witness, and `stalk.landed_identity` mounts a same-qid replacement mid-walk.
+F5: a served Territory root, a mount over the root and two absolute served targets now have legs. The base-cross push
+cannot be shown red: `end[]` starts zeroed.
+
+Verification, on hunt, `--config ci` bakes. At 0c3eab1e7, before the audit fixes: `tools/test.sh` 1888/1888 and boot OK;
+cpu-gate, haul-links, prowl and idle-probe PASS. Twelve kernel sabotages, each red on exactly its own assertions: no
+principal end matching (three tests), the unknown-end guard dropped, the connection row's server end dropped (two),
+the post's poster principal dropped, every reader shown every row (three), a `..` pop leaving the name, a served
+re-anchor not re-basing it, a crossing's name not taken, a union point's name not taken, the second walk ignored, an
+absolute link not re-basing to the root. With the suite's tests unregistered, cpu-gate fails on the device at its
+counted connection leg (no end matches) and at its withheld leg (every row shown), and haul-links at leg (f) (a
+served re-anchor not re-basing). A `/srv` session's server end dropped leaves the suite green and fails cpu-gate's
+counted session leg: michael is that session's server end, through the home proxy. Storing the raw join is caught
+at boot by joey's probe83 (the cwd stays canonical). At the final tree e9204e086: 1890/1890 and boot OK, the four
+legs PASS; a `none` reader matching a `none` end, the second walk without its devno term, without its Dev term, and
+the name read back from the Path are each red on their own assertion; a no-crossing anchor's name taken from the
+current length is red on `stalk.landed_roots` and on `landed_name`'s `/smnt/d/n1`, whose second served link
+re-anchors at the base too; the cleaned lexical store, the behaviour before the vote and one probe83 accepts,
+leaves the suite green and fails haul-links at leg (f). `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption
+(default at -smp 1, 4 and 8; UBSan at 4 and 8).
+
+## None owns nothing but itself; a /proc refusal answers EACCES — 2026-10-06
+
+Operator vote of 2026-10-06 19:58Z, "Plan 9's nonone" (IDENTITY-DESIGN's reserved ids; ARCH 28 I-26 and I-39 amended).
+It closes the `/proc` owner predicate item the 9P-ends audit enqueued. Scripture 9daf0a50a; code, witnesses and dossiers
+in one commit, ed65c9a86.
+
+- **No owner axis admits a `none` caller for any Proc but itself.** `devproc_same_owner` is the one owner relation, and
+  it is false for a none target. Two unrelated Procs running as `none` could kill each other, debug each other whenever
+  their caps covered (two bare none Procs always do), and read each other's `environ`, `sched`, `imperium` and `cpu_ns`.
+  The kill gate gains the self arm its siblings had.
+- **The read wall.** `devproc_none_walled` refuses a none caller every other Proc's `status`, `cmdline`, `ns`, `exe`,
+  `cwd`, `maps` and the read side of `ctl`. `/ctl/procs` lists it only its own row, and `/ctl/9p-sessions` no row at all.
+  `CAP_HOSTOWNER` buys through, as Plan 9's `nonone()` exempts eve; `CAP_KILL` and `CAP_DEBUG` still admit on their own
+  axes. A pid's existence, its stat and `getpgid`/`getsid` stay visible, as in Plan 9.
+- **A refusal answers `EACCES`.** Every `/proc` authority refusal and `/ctl`'s two gated leaves answered a bare -1, which
+  ERRORS.md forbids for a denial and pouch and Go read as `EPERM`. The other failures (no such Proc, not ALIVE, not
+  stopped, a claimed slot, a full table) stay -1, an owned residual. Kill, suspend and attach ask authority before
+  liveness, so a refused caller learns nothing of whether its target is alive.
+- Witnesses: the kernel tests `devproc.none_owns_nothing` and `devproc.none_walled`; new legs in
+  `devctl.read_9p_sessions_format`, `p9_attached.ctl_registry`, `devctl.read_kernel_base_format`,
+  `devctl.kstack_gated`, and three ZOMBIE legs in `test_devproc`; seventeen refusal expectations moved to `-T_E_ACCES`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5 (cross-family): 0/0/1/4; clean. F1 [P2]: no witness had run; the gate
+below closes it. F2: `/ctl/9p-sessions` rows showed a none reader other Procs' connections; hidden. F3: `/ctl`
+`kernel-base` and `kstack` refused with -1; `EACCES`, with a real-path witness each. F4: stale prose in devproc, prowl
+and libthyla-rs. F5: kill, suspend and attach asked liveness first; reordered, with the ZOMBIE legs.
+
+Verification, on hunt, `--config ci` bakes, at b1e18996d (the landing's kernel and userspace trees, plus untag 2a):
+`tools/test.sh` 1903/1903 and boot OK; cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata and dap-nora PASS.
+Nineteen kernel sabotages, each red on exactly its own assertions: the owner relation without its none test, the I-39
+owner axis and the owner-or-hostowner reads comparing principals raw, kill without its self arm, the wall never
+walling, the wall keyed on the target, CAP_HOSTOWNER not buying through it, `/ctl/procs` listing every row to none,
+the read path not asking the wall, a refused read, kill, wait scan, environ read and attach each answering -1,
+`/ctl/9p-sessions` showing none every row, kill, suspend and attach each asking liveness first, and the `/ctl` refusal
+answering -1. The runbook flagged five of them as mismatches: their FAIL lines carry the harness's `LEAKED-PROC(n)`
+prefix (a failing test returns before freeing its fixture), which its matcher did not accept; re-judged from the saved
+boot logs, all nineteen match. `tools/ci-smp-gate.sh` PASS, 50 boots and 0 corruption (default at -smp 1, 4 and 8;
+UBSan at 4 and 8).
+
+Landed beside it: **untag step 2a** (cf296caa1). `tools/build.sh`'s `ambush_fork_check` accepts a fork without
+`launchHeld`: it still refuses `held_off_thylacine.go` and still asks `held_on_thylacine.go` for `launchHeld = true`,
+and a fork with neither must name `launchHeld` nowhere and set `DebugHeld` in `Launch`. Controls on fork snapshots:
+accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half step; the gate's bake ran it against
+073faaa. Main agreed on yip 0177; step 2b, the shared fork's commit, waits for main's merge and word.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

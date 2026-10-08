@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/EXEC-LOAD-DESIGN.md", "docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -20,6 +20,17 @@ updated: 2026-09-25
 loadable segment, add a stack and a guard page and the shared clock page, write
 the System V startup frame a C runtime expects, and hand back an entry PC and a
 stack pointer. It never transitions to userspace itself — the caller does that.
+
+The caller's transition is `userland_enter` for every spawn but one kind. A
+child spawned with `SPAWN_DEBUG_HELD` has its thunk call `userland_enter_held`,
+declared beside it in `exec.h` (2026-09-29, [[sub-kernel-birth-hold]]). It
+builds an EL0 frame from the entry PC and stack pointer that exec handed back,
+and parks the child in front of the first instruction until the debugger that
+launched it takes it over ([[sub-kernel-exception]] has the frame). Exec's
+output is the same either way. The load is finished before the hold matters,
+which is why a held spawn can return with the image loaded and none of it
+executed, and why an exec failure still reaches the spawner as the child's exit
+status.
 
 Creation in this tree is two steps, and this is the second one.
 

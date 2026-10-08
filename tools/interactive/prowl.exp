@@ -43,6 +43,12 @@ sleep 2
 
 # The banner "procs: N   cpus: N" (proves launch + the /ctl/sched ncpus read).
 lc_expect "cpus:" "prowl banner rendered"
+# The header's second row, one bar per CPU. michael is neither the system
+# principal nor a hostowner, so the kernel withholds every CPU's idle time
+# (IMPERIUM-DESIGN 11.3 item 10) and prowl draws each bar in dashes, one
+# same-styled run with its brackets. A prowl that read the withheld value as 0
+# would draw an empty meter here instead, which this cannot match.
+lc_expect_re {\[-+\]} "the per-CPU bars are dashed: an ordinary user's idle time is withheld"
 # prowl-6: the header's third row, the user-pool meter from /ctl/memory. The
 # label alone would render over a dead read (zeros), so the leg asserts the
 # FIGURES -- "<charged>/<pool> pg  free <free>" with a non-zero pool and free

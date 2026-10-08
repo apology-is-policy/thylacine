@@ -47,7 +47,7 @@ struct image_entry {
     bool           used;
     bool           exec;            // #45 audit F1: key discriminator (X-ness)
     int            dc;
-    u32            devno;
+    u64            devno;
     u64            qid_path;
     u32            qid_vers;
     u64            file_offset;
@@ -90,6 +90,8 @@ static size_t page_round(size_t length) {
 // Key match against an input (spoor, file_offset, page-rounded size, exec). Read
 // under g_image_lock. `exec` (#45 audit F1) splits an R+X segment from an R-only
 // segment sharing a file window so one FILE Burrow is never dual-prot.
+_Static_assert(sizeof(((struct image_entry *)0)->devno) == sizeof(((struct Spoor *)0)->devno),
+               "the Image cache key carries the whole devno");
 static bool key_match(const struct image_entry *e, const struct Spoor *s,
                       u64 file_offset, size_t size, bool exec) {
     return e->used &&

@@ -388,12 +388,16 @@ struct poll_snap {
 // preemption point this loop used to cross on every re-loop.
 //
 // A dying caller returns 0 from any pass (the thread dies at its EL0-return
-// tail). A stopped caller parks inside the call and resumes the same poll
-// against the same deadline: with no hook listed when the loop's own check
-// catches the stop, and STILL LISTED when tsleep's detour catches it first --
-// a walk then only sets a flag the resumed tsleep reads. A caller kept awake by
-// noise crosses a preemption point each re-loop, where its CPU takes every
-// pending interrupt (ARCH 23.3; specs/poll.tla Point / IrqLatencyBounded).
+// tail). A Linux caller in a listed call returns -T_E_INTR for a caught note
+// (ARCH 8.8.3) from a pass that found nothing ready -- at or past its deadline
+// too, Linux's order -- or from a park the note unwound; a native caller's
+// waits stay death-only. A
+// stopped caller parks inside the call and resumes the same poll against the
+// same deadline: with no hook listed when the loop's own check catches the
+// stop, and STILL LISTED when tsleep's detour catches it first -- a walk then
+// only sets a flag the resumed tsleep reads. A caller kept awake by noise yields
+// its CPU each re-loop; the syscall body runs interrupts-on throughout (ARCH
+// 8.12), so no re-loop holds off an interrupt.
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms);
 
@@ -408,11 +412,13 @@ struct Spoor;
 s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
                              s32 timeout_ms, struct Spoor *const *pre);
 
-// Park the caller for `timeout_ms` (negative ⇒ indefinitely), then return 0.
+// Park the caller for `timeout_ms` (negative ⇒ indefinitely), then return 0,
+// or -T_E_INTR when a caught note ends the wait or is pending as it ends -- a
+// zero timeout included (ARCH 8.8.3, Linux's order).
 //
 // This is poll's slow path with the fd array removed: a private Rendez nothing
 // can signal, a cond that is never true, and the same deadline arithmetic — so
-// it always ends on the deadline (or on death), never on a wake.
+// it ends on the deadline, on death or on a caught note, never on another wake.
 //
 // IT EXISTS BECAUSE ZERO-FD WAITS ARE A REAL POSIX IDIOM. `select(0, NULL, NULL,
 // NULL, &tv)` is the classic portable sleep and `poll(NULL, 0, ms)` is its twin;
@@ -422,9 +428,10 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
 // native ABI a native caller may rely on. This is a separate entry point rather
 // than a relaxation of that one.
 //
-// Death-interruptible by construction: the wait is a plain `tsleep`, so a
-// group-terminate returns TSLEEP_INTR (#811) and the caller unwinds at the EL0
-// tail like any other blocked syscall. Nothing is held across the sleep — no
+// Death-interruptible by construction: a group-terminate returns TSLEEP_INTR
+// (#811) and the caller unwinds at the EL0 tail like any other blocked syscall.
+// Its callers are all Linux calls on signal(7)'s list (ppoll, pselect6), so the
+// wait also opts in to the caught-note unwind. Nothing is held across the sleep — no
 // lock, no handle, no ref — and the Rendez is stack-local, so nothing can
 // reference it after the return.
 s64 sys_poll_sleep_for(s32 timeout_ms);

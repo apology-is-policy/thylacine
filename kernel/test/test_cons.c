@@ -36,6 +36,7 @@
 #include "../../arch/arm64/gic.h"    // tx_unit_smp_no_tear: IPI_RESCHED to the secondaries
 #include <thylacine/smp.h>           // tx_unit_smp_no_tear: smp_cpu_count
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>   // A-5a: struct Handle / handle_get / KOBJ_SPOOR / RIGHT_*
 #include <thylacine/notes.h>
 #include <thylacine/poll.h>     // LS-8a: cons_poll + poll_waiter
@@ -96,6 +97,10 @@ void test_cons_episode_gate(void);
 void test_cons_episode_relinquish_ends(void);
 void test_cons_episode_trusted_death_ends(void);
 void test_cons_episode_saved_owner_death(void);
+void test_cons_episode_mode_write_straddling_begin(void);
+void test_cons_episode_feed_straddling_begin(void);
+void test_cons_episode_repeat_sak_keeps_saved_owner(void);
+void test_cons_episode_fixture_fails_clean(void);
 void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
@@ -1846,7 +1851,25 @@ void test_cons_stat_native_qid_contract(void) {
     // I-13: the poisoned pad bytes were overwritten by the zero-fill.
     TEST_ASSERT(st._pad_qid[0] == 0 && st._pad_qid[1] == 0 && st._pad_qid[2] == 0,
                 "qid pad zero-filled");
-    TEST_ASSERT(st._pad_blksize == 0 && st._pad_dev == 0, "tail pads zero-filled");
+    TEST_ASSERT(st._pad_blksize == 0, "blksize pad zero-filled");
+    TEST_ASSERT(st.devno == 0, "all 64 bits of devno zero (a static Dev; no poison in the high half)");
+
+    spoor_unref(cs);
+}
+
+// devno-u64: t_stat.devno is 64 bits (widened in place over the old _pad_dev),
+// so the stamp spoor_stat_native applies after a clean fill carries a devno
+// above 2^32 whole: a 32-bit field cannot hold `wide`.
+void test_cons_stat_devno_full_width(void) {
+    struct Spoor *cs = devcons.attach(NULL);
+    TEST_ASSERT(cs != NULL, "devcons attach");
+    const u64 wide = (1ull << 32) + 5u;
+    cs->devno = wide;
+
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;  // poison
+    TEST_EXPECT_EQ((long)spoor_stat_native(cs, &st), 0L, "spoor_stat_native fills");
+    TEST_ASSERT(st.devno == wide, "all 64 bits of the Spoor's devno reach t_stat");
 
     spoor_unref(cs);
 }
@@ -3172,15 +3195,22 @@ struct ep_fixture {
     struct Proc *owner;
 };
 
+static void ep_teardown(struct ep_fixture *f);
+
+// Set only by the fixture's own test: fail once everything below has run,
+// the most a failed setup can leave behind.
+static bool ep_setup_fail_late;
+
 // The post-SAK steady state, minus the SAK: a live trusted authority
 // (attached only through the SAK itself), optionally a live attached owner
 // (the session shell), optionally ARMED through the production op core.
+// A failure tears down what it built: every caller asserts on the result, and
+// the assert returns, so nothing after it would.
 static bool ep_setup(struct ep_fixture *f, bool with_owner, bool armed) {
     cons_test_reset();
     f->trusted = proc_alloc();
     f->owner   = with_owner ? proc_alloc() : NULL;
-    if (!f->trusted || (with_owner && !f->owner)) return false;
-    if (!f->trusted->notes) return false;
+    if (!f->trusted || (with_owner && !f->owner) || !f->trusted->notes) goto fail;
     f->trusted->state = PROC_STATE_ALIVE;
     proc_set_console_trusted(f->trusted);
     if (f->owner) {
@@ -3188,8 +3218,12 @@ static bool ep_setup(struct ep_fixture *f, bool with_owner, bool armed) {
         proc_mark_console_attached(f->owner);
         proc_set_console_owner(f->owner);
     }
-    if (armed && proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_ARM) != 0) return false;
+    if (armed && proc_console_episode(f->trusted, SYS_CONSOLE_EPISODE_ARM) != 0) goto fail;
+    if (ep_setup_fail_late) goto fail;
     return true;
+fail:
+    ep_teardown(f);
+    return false;
 }
 
 // Order matters: clearing the trusted authority abandons an open episode AND
@@ -3850,6 +3884,123 @@ void test_cons_episode_saved_owner_death(void) {
     TEST_ASSERT(err == NULL, err ? err : "saved owner death");
 }
 
+// A consctl mode write and a feed byte each check the episode locklessly and
+// apply under g_cons.lock. The window hook opens an episode between the two, the
+// interleaving a writer racing a SAK can produce; each test's control runs the
+// same call with the hook inert and sees it land.
+static bool g_window_sak;
+static void window_open_episode(void) {
+    if (!g_window_sak) return;
+    g_window_sak = false;
+    cons_test_sak_dispatch();
+}
+
+// A write that passed the check while BEGIN ran must not store its bits over the
+// episode's RAW word: ECHO on under the trusted prompt sends every key to the
+// wire and to the renderer's drain.
+void test_cons_episode_mode_write_straddling_begin(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(CONS_ICANON);                  // cooked, ECHO off
+    cons_test_set_window_hook(window_open_episode);
+    const char *err = NULL;
+    g_window_sak = false;
+    if (cons_set_mode_cmd("+echo", 5, true) != 5L)      err = "control: the write lands with no episode in its window";
+    else if ((cons_test_termios() & CONS_ECHO) == 0u)  err = "control: ECHO is set";
+    if (!err) {
+        cons_test_set_termios(CONS_ICANON);
+        g_window_sak = true;
+        long rv = cons_set_mode_cmd("+echo", 5, true);
+        if (g_window_sak)                               err = "the hook ran inside the write";
+        else if (!cons_episode_active())                err = "the episode opened inside the window";
+        else if (rv != -1L)                             err = "the write that straddled BEGIN is refused";
+        else if ((cons_test_termios() & CONS_ECHO) != 0u)
+                                                        err = "ECHO stays off under the trusted prompt";
+    }
+    if (!err) {
+        // The attached authority is not frozen: its write lands during the episode.
+        proc_mark_console_attached(kproc());
+        long arv = cons_set_mode_cmd("+echo", 5, true);
+        u32 atio = cons_test_termios();
+        proc_revoke_console_attached(kproc());
+        if (arv != 5L || (atio & CONS_ECHO) == 0u)      err = "the attached authority's write lands during the episode";
+    }
+    cons_test_set_window_hook(NULL);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "mode write straddling BEGIN");
+}
+
+// A feed byte that passed the check while BEGIN ran must not become the first
+// byte the trusted reader sees.
+void test_cons_episode_feed_straddling_begin(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_set_termios(0u);                           // raw: a fed byte lands in the ring as itself
+    cons_test_set_window_hook(window_open_episode);
+    const char *err = NULL;
+    g_window_sak = false;
+    if (cons_feed_write("ab", 2) != 2L)                 err = "control: the feed lands with no episode in its window";
+    else if (cons_test_rx_count() != 2u)                err = "control: two bytes in the ring";
+    if (!err) {
+        g_window_sak = true;
+        long rv = cons_feed_write("c", 1);
+        if (g_window_sak)                               err = "the hook ran inside the feed";
+        else if (!cons_episode_active())                err = "the episode opened inside the window";
+        else if (rv != 0L)                              err = "the byte that straddled BEGIN is refused (a short write of 0)";
+        else if (cons_test_rx_count() != 0u)            err = "the ring holds nothing for the trusted reader";
+    }
+    cons_test_set_window_hook(NULL);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "feed straddling BEGIN");
+}
+
+// A SAK repeated during an open episode must not replace the saved pre-SAK
+// owner. S1 is unseated by the first SAK; S2 takes the empty owner slot
+// mid-episode; the second SAK unseats S2 and must leave S1 saved, so END hands
+// the Ctrl-C target back to S1.
+void test_cons_episode_repeat_sak_keeps_saved_owner(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, true, true), "fixture (armed, owner)");
+    struct Proc *s2 = proc_alloc();
+    if (!s2) ep_teardown(&f);
+    TEST_ASSERT(s2 != NULL, "a second owner");
+    s2->state = PROC_STATE_ALIVE;
+    const char *err = NULL;
+    cons_test_sak_dispatch();
+    if (!cons_episode_active())                                 err = "episode open";
+    else if (proc_test_console_owner_pre_sak() != f.owner)      err = "the first SAK saved S1";
+    if (!err) {
+        proc_mark_console_attached(s2);
+        proc_set_console_owner(s2);
+        cons_test_sak_dispatch();
+        if (proc_test_console_owner() != NULL)                  err = "the repeat SAK unseated S2";
+        else if (proc_test_console_owner_pre_sak() != f.owner)  err = "the repeat SAK kept S1 saved";
+    }
+    if (!err && proc_console_episode(f.trusted, SYS_CONSOLE_EPISODE_END) != 0) err = "END accepted";
+    if (!err && proc_test_console_owner() != f.owner)           err = "END handed the Ctrl-C target back to S1";
+    proc_console_relinquish(s2);
+    s2->state = PROC_STATE_ZOMBIE;
+    proc_free(s2);
+    ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "repeat SAK keeps the saved owner");
+}
+
+// The fixture's own failure path: a setup that fails after the ARM leaves the
+// tests after it no trusted authority, no owner and no arm.
+void test_cons_episode_fixture_fails_clean(void) {
+    struct ep_fixture f;
+    ep_setup_fail_late = true;
+    bool built = ep_setup(&f, true, true);
+    ep_setup_fail_late = false;
+    const char *err = NULL;
+    if (built)                                       err = "the forced failure is reported";
+    else if (proc_test_console_trusted() != NULL)    err = "a failed setup leaves no trusted authority";
+    else if (proc_test_console_owner() != NULL)      err = "a failed setup leaves no console owner";
+    else if (cons_episode_armed())                   err = "a failed setup leaves the console unarmed";
+    if (built) ep_teardown(&f);
+    TEST_ASSERT(err == NULL, err ? err : "fixture fails clean");
+}
+
 // Graphical endpoint tests exercise the same role, generation and visibility
 // gates as the syscall, without claiming physical GPU/input qualification.
 #include <thylacine/seat.h>
@@ -4243,4 +4394,454 @@ cleanup:
     ep_teardown(&f);
     TEST_ASSERT(err == NULL, err ? err : "graphical seat service death");
 #undef SEAT_CHECK
+}
+
+// =============================================================================
+// signal(7)'s list (ARCH 8.8.3). The console's read and write are waits a
+// listed Linux call reaches. A caught note ends a Linux caller's wait with
+// -T_E_INTR: on the read side the data wait, the reader slot and the episode
+// park at either way in; on the write side the episode park, the writer role
+// and the ring-room wait, where a write the note ends after some bytes went
+// out returns the count. A native reader rides the note out. Each leg releases
+// what it holds before it is judged.
+// =============================================================================
+
+static u8 g_ccr_buf[4];
+
+static long ccr_read(void *arg) {
+    (void)arg;
+    return cons_input_read(g_ccr_buf, (long)sizeof(g_ccr_buf));
+}
+
+static void ccr_feed(void *arg) {
+    (void)arg;
+    (void)cons_rx_input((u8)'z', false);
+}
+
+void test_cons_caught_note_ends_read(void);
+void test_cons_caught_note_ends_read(void) {
+    cons_test_reset();
+    struct Proc *lin = test_caught_proc(true);
+    struct test_caught_leg leg = test_caught_run(lin, ccr_read, NULL, ccr_feed, NULL, false);
+    bool slot_held = cons_test_reader_busy();
+    test_caught_proc_free(lin, &leg);
+    cons_test_reset();
+    struct Proc *nat = test_caught_proc(false);
+    struct test_caught_leg ctl = test_caught_run(nat, ccr_read, NULL, ccr_feed, NULL, false);
+    test_caught_proc_free(nat, &ctl);
+    cons_test_reset();
+
+    TEST_ASSERT(lin != NULL && nat != NULL, "the Linux and the native Proc");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux reader waited for input, the note posted, the read returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends a Linux console read (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not 0 (EOF to a Linux reader)");
+    TEST_ASSERT(!slot_held, "the interrupted read released the reader slot");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native reader waited, the note posted, the read returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native reader and it slept again");
+    TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native read ends on the fed byte");
+}
+
+static void cce_end_and_feed(void *arg) {
+    (void)arg;
+    (void)cons_episode_end();
+    (void)cons_rx_input((u8)'z', false);
+}
+
+// The reader is waiting for data when the episode begins: it vacates the slot
+// and parks on the episode list.
+static bool cce_begin(void *arg) {
+    (void)arg;
+    cons_test_sak_dispatch();
+    if (!cons_episode_active()) return false;
+    TEST_YIELD_UNTIL_SOFT(cons_test_episode_parked() == 1u && !cons_test_reader_busy());
+    return cons_test_episode_parked() == 1u && !cons_test_reader_busy();
+}
+
+void test_cons_caught_note_ends_frozen_read(void);
+void test_cons_caught_note_ends_frozen_read(void) {
+    // At the door: a non-attached reader that starts while an episode is open.
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_sak_dispatch();
+    bool began = cons_episode_active();
+    struct Proc *p1 = test_caught_proc(true);
+    struct test_caught_leg door = test_caught_run(began ? p1 : NULL, ccr_read, NULL,
+                                                  cce_end_and_feed, NULL, false);
+    u32  door_parked = cons_test_episode_parked();
+    bool door_slot   = cons_test_reader_busy();
+    (void)cons_episode_end();
+    test_caught_proc_free(p1, &door);
+    ep_teardown(&f);
+
+    // In the loop: a reader already waiting for data when the episode begins.
+    struct ep_fixture g;
+    bool set = ep_setup(&g, false, true);
+    struct Proc *p2 = test_caught_proc(true);
+    struct test_caught_leg vac = test_caught_run(set ? p2 : NULL, ccr_read, cce_begin,
+                                                 cce_end_and_feed, NULL, false);
+    u32  vac_parked = cons_test_episode_parked();
+    bool vac_slot   = cons_test_reader_busy();
+    (void)cons_episode_end();
+    test_caught_proc_free(p2, &vac);
+    if (set) ep_teardown(&g);
+
+    TEST_ASSERT(began && set && p1 != NULL && p2 != NULL, "fixtures");
+    TEST_ASSERT(door.parked && door.posted && door.joined,
+        "door: the reader parked on the episode, the note posted, the read returned");
+    TEST_ASSERT(door.on_post, "a caught note ends a frozen Linux reader's park");
+    TEST_EXPECT_EQ(door.rc, -(long)T_E_INTR, "door: EINTR");
+    TEST_EXPECT_EQ(door_parked, 0u, "door: nothing left on the episode list");
+    TEST_ASSERT(!door_slot, "door: the reader never took the slot");
+    TEST_ASSERT(vac.parked && vac.prepped && vac.posted && vac.joined,
+        "vacate: the reader vacated onto the episode list, the note posted, the read returned");
+    TEST_ASSERT(vac.on_post, "a caught note ends a vacated Linux reader's park");
+    TEST_EXPECT_EQ(vac.rc, -(long)T_E_INTR, "vacate: EINTR, nothing drained");
+    TEST_EXPECT_EQ(vac_parked, 0u, "vacate: nothing left on the episode list");
+    TEST_ASSERT(!vac_slot, "vacate: the slot stays free");
+}
+
+static void ccs_free_and_feed(void *arg) {
+    (void)arg;
+    cons_test_set_reader_busy(false);      // wakes the slot's waiters
+    (void)cons_rx_input((u8)'z', false);
+}
+
+void test_cons_caught_note_ends_slot_wait(void);
+void test_cons_caught_note_ends_slot_wait(void) {
+    // An ATTACHED reader during an episode waits for a busy slot, where any
+    // other reader would fail BUSY.
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_sak_dispatch();
+    bool began = cons_episode_active();
+    struct Proc *p = test_caught_proc(true);
+    if (p) proc_mark_console_attached(p);
+    cons_test_set_reader_busy(true);
+    struct test_caught_leg leg = test_caught_run(began ? p : NULL, ccr_read, NULL,
+                                                 ccs_free_and_feed, NULL, false);
+    bool still_held = cons_test_reader_busy();
+    cons_test_set_reader_busy(false);
+    (void)cons_episode_end();
+    if (p && !leg.stranded) proc_revoke_console_attached(p);
+    test_caught_proc_free(p, &leg);
+    ep_teardown(&f);
+
+    TEST_ASSERT(began && p != NULL, "fixture");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the attached reader waited for the slot, the note posted, the read returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends a Linux reader's wait for the slot");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR");
+    TEST_ASSERT(still_held, "the slot stayed its holder's: the interrupted waiter never took it");
+}
+
+static long ccw_write1(void *arg) {
+    (void)arg;
+    return cons_output_write(" ", 1);
+}
+
+static long ccw_write2(void *arg) {
+    (void)arg;
+    return cons_output_write("  ", 2);
+}
+
+static void ccw_drop_role(void *arg) {
+    (void)arg;
+    cons_test_tx_role_drop();
+}
+
+static void ccw_end_episode(void *arg) {
+    (void)arg;
+    (void)cons_episode_end();
+}
+
+void test_cons_caught_note_ends_write_waits(void);
+void test_cons_caught_note_ends_write_waits(void) {
+    u8 got[8];
+
+    // The writer role, held by another writer mid-call. Capture is the sink.
+    struct Proc *p1 = test_caught_proc(true);
+    cons_test_echo_capture(true);
+    cons_test_tx_role_hold();
+    struct test_caught_leg role = test_caught_run(p1, ccw_write1, NULL, ccw_drop_role,
+                                                  NULL, false);
+    if (cons_test_tx_role_held()) cons_test_tx_role_drop();
+    u32 role_emitted = cons_test_echo_captured(got, sizeof got);
+    cons_test_echo_capture(false);
+    cons_settle_mgr();
+    test_caught_proc_free(p1, &role);
+
+    // The episode park: a non-attached writer parks BEFORE the role.
+    struct ep_fixture f;
+    bool set = ep_setup(&f, false, true);
+    if (set) cons_test_sak_dispatch();
+    bool began = set && cons_episode_active();
+    struct Proc *p2 = test_caught_proc(true);
+    cons_test_echo_capture(true);
+    struct test_caught_leg frozen = test_caught_run(began ? p2 : NULL, ccw_write1, NULL,
+                                                    ccw_end_episode, NULL, false);
+    u32 frozen_emitted = cons_test_echo_captured(got, sizeof got);
+    cons_test_echo_capture(false);
+    (void)cons_episode_end();
+    cons_settle_mgr();
+    test_caught_proc_free(p2, &frozen);
+    if (set) ep_teardown(&f);
+
+    TEST_ASSERT(p1 != NULL && began && p2 != NULL, "fixtures");
+    TEST_ASSERT(role.parked && role.posted && role.joined,
+        "role: the writer waited for the role, the note posted, the write returned");
+    TEST_ASSERT(role.on_post, "a caught note ends a Linux writer's wait for the role");
+    TEST_EXPECT_EQ(role.rc, -(long)T_E_INTR, "role: EINTR");
+    TEST_EXPECT_EQ(role_emitted, 0u, "role: nothing was written");
+    TEST_ASSERT(frozen.parked && frozen.posted && frozen.joined,
+        "episode: the writer parked, the note posted, the write returned");
+    TEST_ASSERT(frozen.on_post, "a caught note ends a frozen Linux writer's park");
+    TEST_EXPECT_EQ(frozen.rc, -(long)T_E_INTR, "episode: EINTR");
+    TEST_EXPECT_EQ(frozen_emitted, 0u, "episode: nothing was written");
+}
+
+// The room wait is bounded (CONS_TX_ROOM_WAIT_NS), so the note is posted
+// before the write starts: the wait's own first look claims it, and neither
+// the deadline nor the #67 drop that ends a stalled write is reached. The
+// drop counter is what tells the two apart, not the time taken.
+void test_cons_caught_note_ends_room_wait(void);
+void test_cons_caught_note_ends_room_wait(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cap + 64u <= TXW_FILL_MAX, "filler must exceed the ring -- grow TXW_FILL_MAX");
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    for (u32 i = 0; i < TXW_FILL_MAX; i++) g_txw_fill[i] = (u8)' ';
+    cons_test_tx_ring_free(cap, true);
+
+    // A full ring: the one byte waits for room and the note ends the wait.
+    struct Proc *p1 = test_caught_proc(true);
+    u32 drops0 = cons_test_tx_dropped();
+    uart_test_tx_stall(true);
+    long fill1  = cons_output_write(g_txw_fill, (long)cap);
+    u32  waits1 = cons_test_tx_room_waits();
+    struct test_caught_leg full = test_caught_run(fill1 == (long)cap ? p1 : NULL, ccw_write1,
+                                                  NULL, NULL, NULL, true);
+    u32 waited1 = cons_test_tx_room_waits() - waits1;
+    u32 drops1  = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    uart_test_tx_stall(false);
+    test_caught_proc_free(p1, &full);
+
+    // One slot left: the first of two bytes goes out, the note ends the wait
+    // for the second, and the write returns the count.
+    struct Proc *p2 = test_caught_proc(true);
+    uart_test_tx_stall(true);
+    long fill2  = cons_output_write(g_txw_fill, (long)(cap - 1u));
+    u32  waits2 = cons_test_tx_room_waits();
+    struct test_caught_leg part = test_caught_run(fill2 == (long)(cap - 1u) ? p2 : NULL,
+                                                  ccw_write2, NULL, NULL, NULL, true);
+    u32 waited2 = cons_test_tx_room_waits() - waits2;
+    u32 drops2  = cons_test_tx_dropped();
+    cons_test_tx_ring_free(cap, true);
+    uart_test_tx_stall(false);
+    test_caught_proc_free(p2, &part);
+    cons_settle_mgr();
+
+    TEST_ASSERT(p1 != NULL && p2 != NULL, "the Linux Procs");
+    TEST_EXPECT_EQ(fill1, (long)cap, "full: the ring filled");
+    TEST_ASSERT(full.posted && full.on_post && full.joined,
+        "full: the write returned with no release");
+    TEST_EXPECT_EQ(waited1, 1u, "full: the write reached the room wait");
+    TEST_EXPECT_EQ(full.rc, -(long)T_E_INTR, "full: EINTR, nothing written");
+    TEST_EXPECT_EQ(drops1, drops0, "full: the note ended the wait, not the #67 deadline");
+    TEST_EXPECT_EQ(fill2, (long)(cap - 1u), "partial: the ring filled to one slot");
+    TEST_ASSERT(part.posted && part.on_post && part.joined,
+        "partial: the write returned with no release");
+    TEST_EXPECT_EQ(waited2, 1u, "partial: the write reached the room wait");
+    TEST_EXPECT_EQ(part.rc, 1L, "partial: the byte that went out is the count");
+    TEST_EXPECT_EQ(drops2, drops1, "partial: no #67 drop");
+}
+
+// A write cut short mirrors to the renderer's drain only what the serial ring
+// took. The count tells the caller what to send again, so a drain that already
+// holds the rest shows it twice once the caller retries. Three cuts, each with
+// the drain armed and the serial side loud: a caught note with nothing out
+// (EINTR), a caught note with one byte out, and the #67 deadline with one byte
+// out. The filler goes in before the drain arms, so it is never mirrored.
+void test_cons_short_write_mirrors_what_went_out(void);
+void test_cons_short_write_mirrors_what_went_out(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cap + 64u <= TXW_FILL_MAX, "filler must exceed the ring -- grow TXW_FILL_MAX");
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    TEST_ASSERT(!cons_test_serial_silent(), "serial must be loud, or the drain takes all");
+    for (u32 i = 0; i < TXW_FILL_MAX; i++) g_txw_fill[i] = (u8)' ';
+    cons_test_tx_ring_free(cap, true);
+
+    // A caught note, nothing out.
+    struct Proc *p1 = test_caught_proc(true);
+    uart_test_tx_stall(true);
+    long fill1 = cons_output_write(g_txw_fill, (long)cap);
+    int  arm1  = cons_drain_open();
+    u32  d1a   = cons_test_drain_count();
+    struct test_caught_leg full = test_caught_run(fill1 == (long)cap && arm1 == 0 ? p1 : NULL,
+                                                  ccw_write1, NULL, NULL, NULL, true);
+    u32  d1    = cons_test_drain_count() - d1a;
+    if (arm1 == 0) cons_drain_close();
+    cons_test_tx_ring_free(cap, true);
+    uart_test_tx_stall(false);
+    test_caught_proc_free(p1, &full);
+
+    // A caught note, one byte out.
+    struct Proc *p2 = test_caught_proc(true);
+    uart_test_tx_stall(true);
+    long fill2 = cons_output_write(g_txw_fill, (long)(cap - 1u));
+    int  arm2  = cons_drain_open();
+    u32  d2a   = cons_test_drain_count();
+    struct test_caught_leg part = test_caught_run(fill2 == (long)(cap - 1u) && arm2 == 0 ? p2 : NULL,
+                                                  ccw_write2, NULL, NULL, NULL, true);
+    u32  d2    = cons_test_drain_count() - d2a;
+    if (arm2 == 0) cons_drain_close();
+    cons_test_tx_ring_free(cap, true);
+    uart_test_tx_stall(false);
+    test_caught_proc_free(p2, &part);
+
+    // The #67 deadline, one byte out: this thread writes, and no note is posted.
+    uart_test_tx_stall(true);
+    long fill3 = cons_output_write(g_txw_fill, (long)(cap - 1u));
+    int  arm3  = cons_drain_open();
+    u32  d3a   = cons_test_drain_count();
+    long rc3   = cons_output_write("  ", 2);
+    u32  d3    = cons_test_drain_count() - d3a;
+    if (arm3 == 0) cons_drain_close();
+    cons_test_tx_ring_free(cap, true);
+    uart_test_tx_stall(false);
+    cons_settle_mgr();
+
+    TEST_ASSERT(p1 != NULL && p2 != NULL, "the Linux Procs");
+    TEST_ASSERT(arm1 == 0 && arm2 == 0 && arm3 == 0, "the drain armed for each cut");
+    TEST_ASSERT(fill1 == (long)cap && fill2 == (long)(cap - 1u) && fill3 == (long)(cap - 1u),
+        "the filler went in");
+    TEST_ASSERT(full.posted && full.on_post && full.joined, "note, nothing out: the write returned");
+    TEST_EXPECT_EQ(full.rc, -(long)T_E_INTR, "note, nothing out: EINTR");
+    TEST_EXPECT_EQ(d1, 0u, "note, nothing out: the drain mirrored nothing");
+    TEST_ASSERT(part.posted && part.on_post && part.joined, "note, one out: the write returned");
+    TEST_EXPECT_EQ(part.rc, 1L, "note, one out: a count of 1");
+    TEST_EXPECT_EQ(d2, 1u, "note, one out: the drain mirrored the byte that went out, not the "
+        "one the caller sends again");
+    TEST_EXPECT_EQ(rc3, 1L, "#67: one byte went out and the rest was dropped");
+    TEST_EXPECT_EQ(d3, 1u, "#67: the drain mirrored only the byte that went out");
+}
+
+// A write the serial ring takes in two pushes is still one unit in the drain.
+// The ring has room for two of the writer's four bytes; the writer pushes them,
+// parks for room, and a diagnostic line lands while it waits. Tapped per push,
+// the line would sit inside the four bytes on the renderer -- the tear ARCH
+// 23.5.2's unit atomicity closed, back on the one sink that interprets escape
+// sequences. The filler goes in before the drain arms, and every byte the test
+// pushes is discarded before the UART runs again.
+static volatile u32  g_cdw_ran;
+static volatile long g_cdw_ret;
+static volatile bool g_cdw_exited;
+
+static void cdw_writer(void) {
+    g_cdw_ran++;
+    g_cdw_ret = cons_output_write("WXYZ", 4);
+    g_cdw_ran++;
+    test_kthread_park_terminal(&g_cdw_exited);
+}
+
+void test_cons_congested_write_whole_in_drain(void);
+void test_cons_congested_write_whole_in_drain(void) {
+    const u32 cap = cons_test_tx_ring_capacity();
+    TEST_ASSERT(cap + 64u <= TXW_FILL_MAX, "filler must exceed the ring -- grow TXW_FILL_MAX");
+    TEST_ASSERT(cons_test_tx_armed(), "TX ring must be armed or this test is vacuous");
+    TEST_ASSERT(!cons_test_serial_silent(), "serial must be loud, or the drain takes all");
+    for (u32 i = 0; i < TXW_FILL_MAX; i++) g_txw_fill[i] = (u8)' ';
+    cons_test_tx_ring_free(cap, true);
+    g_cdw_ran = 0u;
+    g_cdw_ret = -999;
+    g_cdw_exited = false;
+
+    struct cons_diag_line l;
+    cons_diag_line_init(&l);
+    cons_diag_line_puts(&l, "q\n");
+
+    uart_test_tx_stall(true);
+    long fill   = cons_output_write(g_txw_fill, (long)(cap - 2u));
+    int  arm    = cons_drain_open();
+    u32  waits0 = cons_test_tx_room_waits();
+    struct Thread *w = (fill == (long)(cap - 2u) && arm == 0)
+                     ? thread_create(kproc(), cdw_writer) : NULL;
+    bool parked = false;
+    if (w != NULL) {
+        ready(w);
+        TEST_YIELD_UNTIL_SOFT(cons_test_tx_room_waits() != waits0 || g_cdw_ran >= 2u);
+        parked = cons_test_tx_room_waits() != waits0 && g_cdw_ran == 1u;
+        (void)cons_diag_line_emit(&l);        // tapped whole; the full ring drops it
+        cons_test_tx_ring_free(cap, true);    // room, and the wake
+        TEST_YIELD_UNTIL_SOFT(g_cdw_ran >= 2u);
+    }
+    cons_test_tx_ring_free(cap, true);        // the writer's bytes never reach the wire
+    uart_test_tx_stall(false);
+    u8   got[32];
+    long gn = 0;
+    if (arm == 0) {
+        if (cons_test_drain_count() > 0u) gn = cons_drain_read(got, (long)sizeof got);
+        cons_drain_close();
+    }
+    bool done = w != NULL && g_cdw_ran >= 2u;
+    if (done) test_kthread_join_free(w, &g_cdw_exited);
+    cons_settle_mgr();
+
+    bool whole = false;
+    for (long i = 0; i + 4 <= gn; i++) {
+        if (got[i] == 'W' && got[i + 1] == 'X' && got[i + 2] == 'Y' && got[i + 3] == 'Z')
+            whole = true;
+    }
+    TEST_ASSERT(fill == (long)(cap - 2u) && arm == 0 && w != NULL, "fixtures");
+    TEST_ASSERT(parked, "the writer parked for room with two bytes out");
+    TEST_ASSERT(done, "the writer finished once the ring had room");
+    TEST_EXPECT_EQ(g_cdw_ret, 4L, "the write completed");
+    TEST_EXPECT_EQ(gn, 7L, "the drain holds the line and the write, once each");
+    TEST_ASSERT(whole, "the writer's four bytes are one unit in the drain, the line outside them");
+}
+
+// IM-1 across a caught note (signal7 audit round 1 F1). A frozen reader re-takes
+// the slot by waiting, because the attached authority may still be mid-read at
+// END and the guard's -1 reads to a shell as its console going away. A reader
+// that a caught note sent back to EL0 from its frozen park re-takes it the same
+// way: here the episode ends while the slot is held, and the retry must wait for
+// the holder. The mask stands in for the handler having run, so the note that
+// is still queued (a kernel thread has no EL0 tail to deliver it) leaves the
+// retry's wait alone.
+static volatile long g_cfr_rc1;
+
+static long cfr_read_retry(void *arg) {
+    (void)arg;
+    g_cfr_rc1 = cons_input_read(g_ccr_buf, (long)sizeof(g_ccr_buf));
+    current_thread()->note_mask |= 1ull << NOTE_BIT_INTERRUPT;
+    cons_test_set_reader_busy(true);           // the authority, mid-read
+    (void)cons_episode_end();
+    return cons_input_read(g_ccr_buf, (long)sizeof(g_ccr_buf));
+}
+
+void test_cons_caught_note_frozen_retry_waits(void);
+void test_cons_caught_note_frozen_retry_waits(void) {
+    struct ep_fixture f;
+    TEST_ASSERT(ep_setup(&f, false, true), "fixture (armed)");
+    cons_test_sak_dispatch();
+    bool began = cons_episode_active();
+    struct Proc *p = test_caught_proc(true);
+    g_cfr_rc1 = 0x7fffffff;
+    struct test_caught_leg leg = test_caught_run(began ? p : NULL, cfr_read_retry, NULL,
+                                                 ccs_free_and_feed, NULL, false);
+    bool still_held = cons_test_reader_busy();
+    cons_test_set_reader_busy(false);
+    (void)cons_episode_end();
+    test_caught_proc_free(p, &leg);
+    ep_teardown(&f);
+
+    TEST_ASSERT(began && p != NULL, "fixture");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the reader parked on the episode, the note posted, the call returned");
+    TEST_EXPECT_EQ((long)g_cfr_rc1, -(long)T_E_INTR, "the note ended the frozen park: EINTR");
+    TEST_ASSERT(leg.rode_out && !leg.on_post,
+        "the retry after END waited for the held slot rather than taking the guard's -1");
+    TEST_EXPECT_EQ(leg.rc, 1L, "once the holder let go, the retry took the slot and read the byte");
+    TEST_ASSERT(!still_held, "the retry released the slot");
 }

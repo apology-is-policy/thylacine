@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-10-07
 ---
 ## Graphical grant commit
 
@@ -101,7 +101,7 @@ so any tile program covered it exactly. It is sealed now.
 
 **And the sweeping form of this rule did not survive its own audit.** The draft said a
 `SPAWN_PERM_*` granted to a user-running Proc *must* carry `SEAL`, and claimed both of
-login's spawn sites obeyed. There are **three**: the session shell (`main.rs:1341`,
+login's spawn sites obeyed. There are **three**: the session shell (login's `rs_main`,
 `CONSOLE_OWNER | SESSION_HANGUP`) is deliberately unsealed, because neither bit is
 onward-conferrable by `ut` and a same-principal peer can already end the session by
 killing it, so sealing would make the user's own shell undebuggable and buy nothing.
@@ -169,6 +169,14 @@ CAP_ALL` — a clone carries no caps argument — so a Linux-phenotype child inh
 the parent's whole fork-grantable set, and the `& ~CAP_ELEVATION_ONLY` strip
 still applies, so I-2's monotonic reduction holds on the phenotype path exactly
 as on the native one.
+
+`rfork_spawn_held`, the fork behind a `SPAWN_DEBUG_HELD` spawn (2026-09-29,
+[[sub-kernel-birth-hold]]), is `RFPROC` through the same `rfork_internal` with
+the same carve. Only the birth-hold mark differs. The ask weighs no capability,
+deliberately: it restricts the spawner's own child and grants nothing over it.
+Reading or controlling the held child still takes an attach through the
+[[inv-i39]] gate, cover included, so the flag cannot be used to reach a Proc
+the caller could not already debug.
 
 ## Mechanism
 
@@ -354,13 +362,10 @@ handful of times per boot. Not a hot surface.
   only ever see a hostowner grant.
 - A failed gate must not consume the grant.
 - Any future cap mutation must be atomic on `p->caps`; it has a cross-thread
-  writer.
+  writer. Every gate reads it with an acquire load, the two `/grant` register
+  gates included since 2026-09-29 ([[seam-devcap-plain-caps-read]], closed).
 
 ## Seams
-
-[[seam-devcap-plain-caps-read]] — the two `/grant` register gates still read
-`writer->caps` with a plain load, the last two stragglers of a sweep that
-converted every other capability gate in the tree.
 
 `caps.h` records a forward-looking obligation for the day a cap-drop syscall
 lands: it must refuse with `-EBUSY` if dropping `CAP_HW_CREATE` would leave
@@ -378,6 +383,12 @@ so the invariant holds trivially today.
   "non-rfork-grantable" beside it and I-42's own "non-heritable" clause. The
   header says in as many words: do not "fix" this bit toward `CAP_ALL` on
   the strength of that phrase.
+- **`CAP_JIT` is the one cap an IMAGE can hold without any Proc holding it**
+  (2026-10-07; B-2b audit r2). Non-heritable means an `RFMEM` child is born
+  without it, yet it maps its parent's code aliases, and keeps them once the
+  parent is reaped. So the I-39 image join counts a space holding a code alias
+  as carrying `CAP_JIT` ([[sub-kernel-proc]]); a debugger without the cap does
+  not cover the child. Every other cap still lives only in a `caps` word.
 - **The comment drift this dossier once flagged is now fixed** (`830817c4`).
   Both enumerations had lagged their macros — the `CAP_ELEVATION_ONLY` comment
   said "All five" and then listed six; the `CAP_ALL` comment enumerated four

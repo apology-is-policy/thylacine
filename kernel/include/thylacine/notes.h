@@ -595,6 +595,17 @@ void notes_mark_self_managing(struct Proc *p);
 // those sites.
 bool thread_die_pending(struct Thread *t);
 
+// thread_die_pending's group-death leg alone, with the same holds (the exit
+// close until forced, the kthread join): never a terminate latch. The
+// predicate of sleep_death_only (DEBUG-FS-DESIGN §5g).
+bool thread_group_death_pending(struct Thread *t);
+
+// Can a death end this thread's sleeps? Not a kernel thread's (no death
+// reaches kproc), not one inside an exit close until a kill forces it, and not
+// loom_free's kthread join: a wait either one starts ends only when its event
+// comes.
+bool thread_death_reaches(struct Thread *t);
+
 // item 11 (ARCH §8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note (a handler is installed OR the Proc self-manages its
 // notes fd) of a family UNMASKED for `t` is queued -- so `t`'s caught-note-
@@ -643,6 +654,16 @@ bool thread_note_handler_escaped(const struct Thread *t, u64 sp_el0);
 // reader's opted-in sleep degrades to death-only (the note delivers late, the
 // pre-item-11 behavior -- no regression). Widens to native per-reader at 11c.
 bool proc_caught_note_eintr_ready(struct Proc *p);
+
+// ARCH 8.8.3: the caught-note unwind decision, all but the wait's own condition
+// (a wake that carries data wins, so a caller tests `!cond` first): `t`'s reader
+// handles EINTR, and `t` holds or takes the claim -- last, because a claim is taken
+// only by a sleeper that then unwinds. The sleep primitives' four caught arms
+// ask it, and so does a wait loop whose sleep a producer can keep satisfied
+// (poll's verdict), so the rule has one spelling. A caller that sees true
+// RETURNS -T_E_INTR; it never sleeps again in the same call, where its own claim
+// would unwind every sleep at once.
+bool thread_caught_note_unwinds(struct Thread *t);
 
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write

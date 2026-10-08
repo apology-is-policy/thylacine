@@ -309,6 +309,7 @@ Every other gate, and what each one proves: `docs/agent/GATES.md`.
 - **Stratum is in scope**: fix Stratum-side bugs directly in `~/projects/stratum/v2` (branch `main`) -- ASCII commits, no force-push, the user pushes, `third_party/` stays pristine; Stratum format/ABI breaks escalate. Integration contract: `docs/agent/STRATUM-COORDINATION.md`.
 - **Native vs ported**: a program authored in Thylacine uses native libthyla-rs; ported foreign code uses Pouch; first-party `std` Rust on Pouch is sanctioned for new programs. Decision rule: `docs/agent/NATIVE-VS-PORTED.md`.
 - **The aux track** works `../thylacine-aux` (read its branch off the worktree). The shared surfaces are `kernel/`, `tools/`, `docs/reference/`; coordinate via yip. Host contention can explain wall-clock only, never a wrong value -- announce the resource and the uncertainty, not a duration. Detail: `docs/agent/AUX-TRACK.md`.
+- **Waiting for a shared machine** (yip's `mac` and `pi` leases): from your tmux pane, arm `tools/thyla-wake.sh hold <res> "<reason>"`, then work on or end the turn. It queues for you, takes the lease when your turn comes, and types a `[thyla-wake]` line into your pane; then set the lease's phase and pids, and release the moment the cores free. Never poll `yip resources`, and never block in a long `yip hold`. Detail: `docs/WATCHKEEPING.md` 4.11.
 - **Ship fallback**: v1.0-rc.1 (Phase 7) is the shippable fallback; Halcyon is last and may slip to v1.1. Take no Halcyon-blocking risks in Phase 7.
 
 ---

@@ -47,6 +47,31 @@ pub struct Raster {
 /// length overflow.
 pub const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 
+/// The compressed-input cap, held alongside the decode peak it is counted with
+/// (VIEW_MAX_PIXELS below).
+pub const READ_CAP: usize = 16 * 1024 * 1024;
+
+/// view's own decode pixel budget, bounding the decode peak + the held compressed
+/// input, checked from the headers BEFORE decode so an image past it is a clean
+/// report, never a death at a page fault when the system runs out of memory
+/// mid-decode. The peak per pixel depends on the format. A PROGRESSIVE JPEG
+/// holds a full-image coefficient buffer per input component (~2 B * components
+/// * npx, up to 4 for CMYK, zune mcu_prog.rs) beside its output, ~12 B/px; a
+/// baseline one ~8. A PNG (zune-png 0.4.10) holds its whole inflated stream
+/// beside its output buffer, both at the sample width: ~8 B/px for 8-bit RGBA,
+/// ~16 for 16-bit, and an interlaced image a third buffer (~12, ~24); a stream
+/// longer than its dimensions doubles zune-inflate's buffer before it is refused
+/// (~32 B/px for 16-bit, transiently), and a PNG counts its input twice, held
+/// and its IDAT data copied. So at 3M pixels: 12*3M + 16 MiB = 52 MiB for a
+/// JPEG, 80 MiB for a 16-bit PNG, 104 MiB interlaced, 128 MiB for a malformed
+/// one. The heap grows from the user pool (B-1c), so these are what a decode may
+/// draw from it, not a wall; the 3M was set when the heap was a fixed 64 MiB,
+/// where the former 6M (88 MiB) OOM-exited a progressive JPEG (holotype F1).
+/// halcyond caps the CHANNEL downstream (display-adaptive, at most 1 Mpx), and
+/// view reduces a larger raster to that cap before it uploads; this bounds
+/// view's local decode.
+pub const VIEW_MAX_PIXELS: u64 = 3 * 1024 * 1024;
+
 /// Read a PNG's pixel dimensions from its headers WITHOUT decoding the image.
 /// Callers use this to reject an over-budget image (a clean error) BEFORE the
 /// full decode, whose peak working set (samples + argb + the compressed input)
@@ -70,17 +95,102 @@ pub fn within_pixel_budget(w: u32, h: u32, max: u64) -> bool {
     (w as u64) * (h as u64) <= max
 }
 
+/// The largest `w' x h'` with the aspect of `w x h` holding at most `max_px`
+/// pixels and at most `max_side` on either side, or `None` when `w x h` already
+/// fits both. Never larger than the source and never zero in either dimension:
+/// an extreme aspect keeps one row or column.
+pub fn fitted_size(w: u32, h: u32, max_px: u64, max_side: u32) -> Option<(u32, u32)> {
+    let (w64, h64, side) = (w as u64, h as u64, max_side.max(1) as u64);
+    if w == 0 || h == 0 || (w64 * h64 <= max_px && w64 <= side && h64 <= side) {
+        return None;
+    }
+    let max_px = max_px.max(1);
+    // The width each bound allows; the narrowest wins. `by_h` is the width at
+    // which the height reaches the side bound.
+    let by_px = isqrt(max_px.saturating_mul(w64) / h64);
+    let by_h = side.saturating_mul(w64) / h64;
+    let mut tw = by_px.min(by_h).min(side).clamp(1, w64);
+    let mut th = (tw * h64 / w64).clamp(1, h64.min(side));
+    th = th.min((max_px / tw).max(1));
+    tw = tw.min((max_px / th).max(1));
+    Some((tw as u32, th as u32))
+}
+
+/// The integer square root, rounded down.
+fn isqrt(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let mut x = n;
+    let mut y = n / 2 + (n & 1);
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// Reduce `r` to at most `max_px` pixels and `max_side` on a side, keeping its
+/// aspect. Each new pixel is
+/// the average of the source pixels it covers, colour weighted by alpha (the
+/// raster is straight alpha), so a thin line fades rather than vanishing, as it
+/// can under nearest-pixel sampling, and a transparent pixel lends a neighbour no
+/// colour. A raster that fits comes back as it was.
+pub fn fit(r: Raster, max_px: u64, max_side: u32) -> Raster {
+    let Some((tw, th)) = fitted_size(r.w, r.h, max_px, max_side) else {
+        return r;
+    };
+    let (w, h, tw64, th64) = (r.w as u64, r.h as u64, tw as u64, th as u64);
+    if r.argb.len() as u64 != w * h {
+        return r;
+    }
+    let mut out = Vec::with_capacity(tw as usize * th as usize);
+    for dy in 0..th64 {
+        let y0 = dy * h / th64;
+        let y1 = ((dy + 1) * h / th64).max(y0 + 1);
+        for dx in 0..tw64 {
+            let x0 = dx * w / tw64;
+            let x1 = ((dx + 1) * w / tw64).max(x0 + 1);
+            let (mut sa, mut sr, mut sg, mut sb) = (0u64, 0u64, 0u64, 0u64);
+            for y in y0..y1 {
+                let row = (y * w) as usize;
+                for &p in &r.argb[row + x0 as usize..row + x1 as usize] {
+                    let a = u64::from(p >> 24);
+                    sa += a;
+                    sr += a * u64::from((p >> 16) & 0xFF);
+                    sg += a * u64::from((p >> 8) & 0xFF);
+                    sb += a * u64::from(p & 0xFF);
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            let px = if sa == 0 {
+                0
+            } else {
+                let c = |s: u64| (s + sa / 2) / sa;
+                (((sa + n / 2) / n) << 24) | (c(sr) << 16) | (c(sg) << 8) | c(sb)
+            };
+            out.push(px as u32);
+        }
+    }
+    Raster { w: tw, h: th, argb: out }
+}
+
 /// Decode a PNG to opaque-or-alpha ARGB. zune expands sub-8-bit and palette
 /// images and reports the resulting colorspace; we normalize every case
 /// (Luma / LumaA / RGB / RGBA, 8- or 16-bit) to 0xAARRGGBB. 16-bit samples are
-/// taken high-byte (>> 8); a Luma channel replicates across R/G/B; a missing
+/// taken high-byte, by the decoder in its own buffer; a Luma channel replicates across R/G/B; a missing
 /// alpha is opaque. cartoon's Op::Image composites the alpha over the pane
 /// ground, so a transparent PNG shows the pane through -- correct for inline.
 pub fn decode_png(bytes: &[u8]) -> Result<Raster, &'static str> {
+    use zune_core::options::DecoderOptions;
     use zune_core::result::DecodingResult;
     use zune_png::PngDecoder;
 
-    let mut dec = PngDecoder::new(bytes);
+    // zune narrows a 16-bit image to its high bytes in its own output buffer, so
+    // no 16-bit copy reaches this function. The decode's peak is zune's; the
+    // callers' pixel budgets bound it (view's main.rs states it per format).
+    let opts = DecoderOptions::default().png_set_strip_to_8bit(true);
+    let mut dec = PngDecoder::new_with_options(bytes, opts);
     dec.decode_headers().map_err(|_| "png: malformed headers")?;
     let (w, h) = dec.get_dimensions().ok_or("png: no dimensions")?;
     let cs = dec.get_colorspace().ok_or("png: unknown colorspace")?;
@@ -93,10 +203,10 @@ pub fn decode_png(bytes: &[u8]) -> Result<Raster, &'static str> {
         return Err("png: image empty or over the pixel bound");
     }
 
-    // Decode to 8-bit samples in the native (post-expansion) colorspace.
+    // Decode to 8-bit samples in the native (post-expansion) colorspace; the
+    // strip above makes every depth arrive as 8-bit.
     let samples: Vec<u8> = match dec.decode().map_err(|_| "png: decode failed")? {
         DecodingResult::U8(v) => v,
-        DecodingResult::U16(v) => v.iter().map(|&s| (s >> 8) as u8).collect(),
         _ => return Err("png: unsupported sample type"),
     };
 
@@ -188,6 +298,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn isqrt_rounds_down_everywhere_it_is_asked() {
+        for n in (0u64..20_000).chain([u64::MAX, u64::MAX - 1, 1 << 62, (1 << 32) - 1]) {
+            let r = u128::from(isqrt(n));
+            assert!(r * r <= u128::from(n) && (r + 1) * (r + 1) > u128::from(n), "n={}", n);
+        }
+    }
+
+    #[test]
+    fn a_fitted_size_keeps_the_aspect_under_the_limit() {
+        const SIDE: u32 = 8192;
+        assert_eq!(fitted_size(640, 400, 1 << 20, SIDE), None, "a raster that fits is left alone");
+        assert_eq!(fitted_size(1024, 1024, 1 << 20, SIDE), None, "exactly at the limit fits");
+        assert_eq!(fitted_size(2048, 1536, 1 << 20, SIDE), Some((1182, 886)));
+        // An extreme aspect keeps one row or one column.
+        assert_eq!(fitted_size(8192, 1, 100, SIDE), Some((100, 1)));
+        assert_eq!(fitted_size(1, 8192, 100, SIDE), Some((1, 100)));
+        // Within the pixel limit but past a side: held to the side, aspect kept.
+        assert_eq!(fitted_size(10000, 100, 1 << 20, SIDE), Some((8192, 81)));
+        assert_eq!(fitted_size(100, 10000, 1 << 20, SIDE), Some((81, 8100)));
+        let sides = [1u32, 2, 3, 7, 640, 1000, 4001, 8192, 10000];
+        for &w in &sides {
+            for &h in &sides {
+                for max in [1u64, 2, 3, 64 * 1024, 1 << 20, u64::MAX] {
+                    for side in [1u32, 3, 4000, SIDE] {
+                        let at = alloc::format!("{}x{} max {} side {}", w, h, max, side);
+                        match fitted_size(w, h, max, side) {
+                            None => {
+                                assert!(u64::from(w) * u64::from(h) <= max && w <= side && h <= side, "{}", at)
+                            }
+                            Some((tw, th)) => {
+                                assert!(tw >= 1 && th >= 1 && tw <= w && th <= h, "{}", at);
+                                assert!(tw <= side && th <= side, "{}", at);
+                                assert!(u64::from(tw) * u64::from(th) <= max, "{}", at);
+                                // The aspect, to a pixel of rounding, unless a
+                                // side is down to its one row or column.
+                                if tw > 1 && th > 1 {
+                                    let (a, b) = (u64::from(tw) * u64::from(h), u64::from(th) * u64::from(w));
+                                    assert!(a.abs_diff(b) < u64::from(w), "aspect: {}", at);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fit_averages_what_each_new_pixel_covers() {
+        // White beside black, reduced to one pixel: the average is grey, where
+        // nearest-pixel sampling would return one of the two.
+        let r = fit(Raster { w: 2, h: 1, argb: alloc::vec![0xFFFF_FFFF, 0xFF00_0000] }, 1, 8192);
+        assert_eq!((r.w, r.h), (1, 1));
+        assert_eq!(r.argb, [0xFF80_8080]);
+        // Opaque red beside transparent green: alpha averages, and the colour is
+        // red alone, because a transparent pixel carries no colour.
+        let r = fit(Raster { w: 2, h: 1, argb: alloc::vec![0xFFFF_0000, 0x0000_FF00] }, 1, 8192);
+        assert_eq!(r.argb, [0x80FF_0000]);
+        let r = fit(Raster { w: 2, h: 2, argb: alloc::vec![0x00FF_FFFF; 4] }, 1, 8192);
+        assert_eq!(r.argb, [0], "an all-transparent block is transparent black");
+        // A raster that fits comes back untouched.
+        let r = fit(Raster { w: 2, h: 1, argb: alloc::vec![1, 2] }, 2, 8192);
+        assert_eq!((r.w, r.h, r.argb.as_slice()), (2, 1, &[1u32, 2][..]));
+        // A raster within the pixel limit but past the side bound is reduced
+        // to it: each pair of pixels becomes one.
+        let r = fit(Raster { w: 4, h: 1, argb: alloc::vec![0xFF00_000A, 0xFF00_001E, 0xFF00_0032, 0xFF00_0046] }, u64::MAX, 2);
+        assert_eq!((r.w, r.h, r.argb.as_slice()), (2, 1, &[0xFF00_0014u32, 0xFF00_003C][..]));
+    }
+
+    #[test]
+    fn fit_tiles_the_source_exactly() {
+        // A 6x4 raster of 2x2 blocks, each a distinct opaque grey, reduced to
+        // 3x2: each new pixel must be exactly its own block, never a blend of two.
+        let mut argb = Vec::new();
+        for y in 0..4u32 {
+            for x in 0..6u32 {
+                let v = (y / 2) * 3 + x / 2;
+                argb.push(0xFF00_0000 | (v * 20) << 16 | (v * 20) << 8 | v * 20);
+            }
+        }
+        let r = fit(Raster { w: 6, h: 4, argb }, 6, 8192);
+        assert_eq!((r.w, r.h), (3, 2));
+        for (i, &p) in r.argb.iter().enumerate() {
+            let v = i as u32 * 20;
+            assert_eq!(p, 0xFF00_0000 | v << 16 | v << 8 | v, "block {}", i);
+        }
+    }
+
+    #[test]
     fn sniff_reads_magic_not_extension() {
         assert_eq!(sniff(&PNG_MAGIC), Kind::Png);
         assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00]), Kind::Jpeg);
@@ -229,6 +428,16 @@ mod tests {
         assert_eq!(r.argb[10 * 640 + 600], 0xFFE0_20E0, "magenta bar");
         // (100,350): the bottom luminance ramp, v = 100*255/639 = 39 -> gray.
         assert_eq!(r.argb[350 * 640 + 100], 0xFF27_2727, "gradient gray");
+    }
+
+    #[test]
+    fn decode_png_takes_the_top_byte_of_a_16_bit_sample() {
+        // testdata/make-rgba16-png.py: a 2x2 RGBA PNG at 16 bits a sample, each
+        // sample's low byte unlike its high one, so a narrowing that kept the
+        // wrong byte reads as a different colour.
+        let r = decode_png(include_bytes!("testdata/rgba16.png")).expect("decode 16-bit");
+        assert_eq!((r.w, r.h), (2, 2));
+        assert_eq!(r.argb, [0xFFE0_2020, 0xFF20_E020, 0x8012_569A, 0x0000_0000]);
     }
 
     #[test]

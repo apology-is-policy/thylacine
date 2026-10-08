@@ -1215,6 +1215,16 @@ void notes_mark_self_managing(struct Proc *p) {
     spin_unlock(&q->lock);
 }
 
+// No death reaches this thread's sleeps: loom_free's kthread join always, and
+// the final close until a kill forces it (ARCH 7.9.1 part B).
+static bool thread_death_held(const struct Thread *t) {
+    if (t->kthread_join_active) return true;
+    if (!t->exit_close_active) return false;
+    const struct Proc *p = t->proc;
+    return !(p && (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                   PROC_FLAG_EXIT_CLOSE_FORCED));
+}
+
 // The widened #811 death predicate (ARCH 8.8.1 + 8.8.2). LOCK-FREE: atomic
 // loads of group_exit_msg + proc_flags, and the OWNER-read note_mask (`t` is
 // always the calling thread at every site -- sleep/tsleep's register-then-
@@ -1238,22 +1248,18 @@ bool thread_die_pending(struct Thread *t) {
     // Tclunk sends short-circuited (client_self_dying), silently dropping
     // staged writes and leaking server-side fids on every normal
     // multi-thread exit AND every Ctrl-C'd default-terminate. The gate
-    // suppresses BOTH death legs while set. While the flag is set the
-    // closer's sends/waits behave like a live thread's; the wedged-server
-    // strand this re-admits is the pre-#68 reap-time exposure RELOCATED
-    // from the parent's wait_pid onto the already-dying Proc -- and,
-    // unlike the old strand, NOT breakable by a further kill (a wedged
-    // flagged close parks the dying Proc unreapably; precondition = a
-    // wedged trusted server, an already system-degraded state -- the
-    // bounded/abortable close-flush is the recorded v1.x seam). The window
-    // is one bounded close pass; only the owning thread sets/clears it, and
-    // every caller passes self, so the read needs no synchronization. TWO
-    // setters since 2026-09-22 -- proc_close_handles_at_exit (the original)
-    // and loom_free's SQPOLL kthread join, which has the identical
-    // obligation (abandoning it frees a live Thread) and nests inside the
-    // first on the at-exit path, so it saves and restores rather than
-    // clearing. See thread.h's field comment for the rule a third would owe.
-    if (t->exit_close_active) return false;
+    // suppresses BOTH death legs while set, so the final close's
+    // sends/waits behave like a live thread's and the parent's wait returns
+    // after the flush (I-38). A server that never answers would park the
+    // dying Proc there; a kill that finds the Proc already terminating sets
+    // PROC_FLAG_EXIT_CLOSE_FORCED (proc_group_kill), and from then on the
+    // death legs reach the close again, which hands what it cannot finish
+    // to the closer (ARCH 7.9.1 parts B and C). loom_free's SQPOLL kthread
+    // join is held against every death, forced or not: abandoning it frees a
+    // live Thread (kthread_join_active). Only the owning thread sets or
+    // clears either flag and every caller passes self, so the reads need no
+    // synchronization; the forced bit is published before the death wake.
+    if (thread_death_held(t)) return false;
     struct Proc *p = t->proc;
     if (!p) return false;
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL)
@@ -1289,6 +1295,19 @@ bool thread_die_pending(struct Thread *t) {
     return false;
 }
 
+bool thread_death_reaches(struct Thread *t) {
+    return t && t->proc && t->proc != kproc() && !thread_death_held(t);
+}
+
+// A stopped thread keeps its stop when an interrupt arrives, and a parent
+// suspend must not return on a latch a peer can revoke (DEBUG-FS-DESIGN 5g), so
+// the waits that honour that ask only this: group death, which nothing revokes.
+bool thread_group_death_pending(struct Thread *t) {
+    if (!t || thread_death_held(t)) return false;
+    struct Proc *p = t->proc;
+    return p && __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL;
+}
+
 // item 11 (ARCH 8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note of a family UNMASKED for THIS thread is queued -- so
 // a caught-note-interruptible sleep should unwind SLEEP_NOTEINTR, return
@@ -1298,15 +1317,16 @@ bool thread_die_pending(struct Thread *t) {
 // notes_arm_caught_note_locked's RELEASE arm), OWNER-read note_mask (written
 // only by the owning thread -- see the thread_die_pending contract). The
 // caught-note sub-field is per-family; `& ~note_mask` drops the families this
-// thread deferred. Gated off for kproc + the exit_close_active finalization
-// window (a closing thread must not EINTR-unwind its orderly handle close) --
-// the same two gates thread_die_pending applies. DISJOINT from thread_die_-
+// thread deferred. Gated off for kproc, for the exit_close_active finalization
+// window (a closing thread must not EINTR-unwind its orderly handle close) even
+// once a kill forces it -- a forced close unwinds as a death, never for a caught
+// note -- and for loom_free's kthread join. DISJOINT from thread_die_-
 // pending by construction: a caught bit is armed ONLY for a caught note, which
 // the terminate arm refuses -- so no note ever sets both a terminate latch and
 // a caught bit, and death (checked FIRST at every sleep site) always wins.
 bool thread_caught_note_deliverable(struct Thread *t) {
     if (!t) return false;
-    if (t->exit_close_active) return false;
+    if (t->exit_close_active || t->kthread_join_active) return false;
     // ARCH 8.8.3 (signal(7)'s list): only a wait whose syscall is one a signal
     // may interrupt unwinds for a caught note. Every other wait -- socket(),
     // open(), a regular file's read(), any page-in -- rides the note out and
@@ -1409,6 +1429,10 @@ bool proc_caught_note_eintr_ready(struct Proc *p) {
     return p && p->phenotype == PHENO_LINUX;
 }
 
+bool thread_caught_note_unwinds(struct Thread *t) {
+    return t && proc_caught_note_eintr_ready(t->proc) && thread_caught_note_claim(t);
+}
+
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
 //
 // Enters with q->lock HELD and the note still queued; ALWAYS releases it. The
@@ -1498,6 +1522,9 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     }
     spin_unlock(&q->lock);
 
+    // SS first: a step-resume that meets this note stops at the handler's
+    // entry, and the saved context never carries the bit (DEBUG-FS-DESIGN 5.5).
+    ctx->spsr &= ~SPSR_EL1_SS;
     // The kernel-side save that makes the frame read-only in effect.
     for (u32 i = 0; i < 31; i++) t->note_saved_regs[i] = ctx->regs[i];
     t->note_saved_sp_el0 = ctx->sp;
@@ -1559,14 +1586,14 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     ctx->regs[30] = act->restorer;   // vivarium_sigaction_decide required it
     ctx->sp       = sigframe;
     ctx->elr      = act->handler;
-    // spsr unchanged: the handler runs at EL0 with the PSTATE the syscall
-    // entered with, exactly as the Plan 9 note path leaves it.
+    // spsr unchanged but for SS: the handler runs at EL0 with the PSTATE the
+    // syscall entered with, exactly as the Plan 9 note path leaves it.
 }
 
-static void notes_deliver_tail(struct exception_context *ctx) {
-    if (!ctx) return;
+static bool notes_deliver_tail(struct exception_context *ctx, u32 *passes) {
+    if (!ctx) return false;
     struct Thread *t = current_thread();
-    if (!t || !t->proc || !t->proc->notes) return;
+    if (!t || !t->proc || !t->proc->notes) return false;
     struct Proc *p = t->proc;
     struct NoteQueue *q = p->notes;
 
@@ -1585,14 +1612,13 @@ static void notes_deliver_tail(struct exception_context *ctx) {
     // sane -- a misbehaving user can't escape kill, but kill cannot do
     // its work either. That's acceptable: a user with corrupted sp is
     // about to fault anyway.
-    if (ctx->sp == 0)                              return;
-    if (ctx->sp >= UACCESS_USER_VA_TOP)             return;
-    if (ctx->sp < (u64)NOTE_NAME_MAX)               return;
+    if (ctx->sp == 0)                              return false;
+    if (ctx->sp >= UACCESS_USER_VA_TOP)             return false;
+    if (ctx->sp < (u64)NOTE_NAME_MAX)               return false;
 
     // F9 audit close: acquire-load handler_va so a multi-thread Proc
     // observes a coherent value vs a concurrent SYS_NOTIFY's store.
     u64 handler_va = __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE);
-    u32 discarded  = 0;
 
 again:
     // Peek under q->lock to identify the dispatcher candidate.
@@ -1600,7 +1626,7 @@ again:
     struct Note candidate;
     if (!notes_peek_locked(p, t, &candidate)) {
         spin_unlock(&q->lock);
-        return;
+        return false;
     }
 
     // R2-F2 audit close: kill is non-catchable and MUST bypass the
@@ -1623,7 +1649,7 @@ again:
         if (!kill_got) {
             // Defense-in-depth: peek returned kill, dequeue under same
             // lock must return kill too. Reaching here would be a bug.
-            return;
+            return false;
         }
         irq_state_t s = proc_table_lock_acquire();
         int live_peers = proc_count_live_peers_locked(p, t);
@@ -1653,7 +1679,7 @@ again:
                            "kill failed (queue full) -- N-2/N-4 violation; "
                            "kernel-fatal rather than silently lose kill");
             }
-            return;
+            return false;
         }
         exits("killed");
         // unreachable
@@ -1673,7 +1699,7 @@ again:
     // running. (R2-F2: kill bypasses this check above.)
     if (t->in_handler) {
         spin_unlock(&q->lock);
-        return;
+        return false;
     }
 
     // -----------------------------------------------------------------------
@@ -1739,13 +1765,13 @@ again:
             // pending, so a caught note queued behind this one is delivered on
             // this return, not a later one. Bounded by the ring, so a flood of
             // ignored notes cannot hold the thread here.
-            if (++discarded < NOTE_QUEUE_DEPTH) goto again;
-            return;
+            if (++*passes < NOTE_QUEUE_DEPTH) goto again;
+            return false;
         }
 
         if (have_handler) {
             notes_deliver_linux_locked(ctx, p, t, q, sn, &act);
-            return;                     // the helper owns the unlock either way
+            return false;               // the helper owns the unlock either way
         }
 
         // SIG_DFL with a TERMINATING Linux default: act here, on the
@@ -1823,18 +1849,23 @@ again:
         // two calls means two gate lists and two scans that must agree, and
         // "must agree" is a property a reader has to check. One call cannot
         // disagree with itself.
+        //
+        // The stop check ran before this leg, so the caller parks for the stop
+        // before the thread runs another EL0 instruction, and passes over the
+        // queue again after it (DEBUG-FS-DESIGN 4.2). A stop the orphan rule
+        // discards asks for the same re-pass: the next note is still owed.
         struct Note stop_note;
         if (notes_stop_dequeue_locked(p, t, &stop_note)) {
             spin_unlock(&q->lock);
             (void)proc_job_stop_self(p);
-            return;
+            return true;
         }
 
         // Otherwise leave the note queued for the fd-read path (a self-managing
         // Proc, or a non-interrupt note). The Proc that did SYS_NOTE_OPEN +
         // read on the fd will see it.
         spin_unlock(&q->lock);
-        return;
+        return false;
     }
 
     // Async-handler delivery. Pop under the SAME q->lock as the peek so
@@ -1848,7 +1879,7 @@ again:
         // same lock must return the same note. Reaching here would be a
         // queue-mutation bug. Drop the lock and bail.
         spin_unlock(&q->lock);
-        return;
+        return false;
     }
 
     // Compute new_sp under lock. Defense-in-depth on alignment-down.
@@ -1861,7 +1892,7 @@ again:
         // handler, so the re-arm sets the bit (arm re-checks handler/self-mgmt).
         notes_arm_caught_note_locked(p, popped.name);
         spin_unlock(&q->lock);
-        return;
+        return false;
     }
 
     // Push the note name into the user-stack frame. uaccess_store_u8
@@ -1874,12 +1905,14 @@ again:
             (void)notes_reenqueue_head_locked(q, &popped);
             notes_arm_caught_note_locked(p, popped.name);  // item 11 (round F2)
             spin_unlock(&q->lock);
-            return;
+            return false;
         }
     }
 
     spin_unlock(&q->lock);
 
+    // SS first, as in notes_deliver_linux_locked (DEBUG-FS-DESIGN 5.5).
+    ctx->spsr &= ~SPSR_EL1_SS;
     // Save the current user context into the Thread (inline cache; the
     // SYS_NOTED(NCONT) restore copies these back).
     for (u32 i = 0; i < 31; i++) {
@@ -1913,14 +1946,16 @@ again:
     ctx->regs[1] = (u64)popped.arg;
     ctx->sp      = new_sp;     // sp_el0 saved back to exception frame's sp
     ctx->elr     = handler_va;
-    // spsr unchanged — the handler runs at EL0 with the same PSTATE the
-    // syscall entered with.
+    // spsr unchanged but for SS -- the handler runs at EL0 with the same
+    // PSTATE the syscall entered with.
+    return false;                   // the handler runs next; the tail ends, as the Linux arm's does
 }
 
 // ARCH 8.8.3: an unwind claim (thread_caught_note_claim) lasts until the
 // claimant's EL0-return tail, whatever the tail delivered. The tail runs at most
-// one handler and can end short of the claimed note -- at a stop, or at a frame
-// that would not build -- so the claim cannot wait for that note to drain: the
+// one handler and can end short of the claimed note -- at a frame that would not
+// build, or with its pass budget spent -- so the claim cannot wait for that note
+// to drain: the
 // claimant may block again before it does, and every peer's wait refuses a
 // claimed family. Released, the family is open to this thread's next wait and
 // to a peer's; if its note is still queued, the peers' waits re-read their
@@ -1940,11 +1975,24 @@ static void notes_release_claims(struct Thread *t) {
     proc_table_lock_release(s);
 }
 
+// The last leg of the synchronous and birth tails (DEBUG-FS-DESIGN 4.2). A stop
+// this leg applies itself must park before the thread runs another EL0
+// instruction, so it parks through the tail's own die and stop checks and then
+// passes over the queue afresh, as Linux's get_signal parks in do_signal_stop
+// and loops. One budget bounds every pass and every discard, so a flooded queue
+// cannot hold the masked tail.
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 void notes_deliver_at_el0_return(struct exception_context *ctx) {
-    notes_deliver_tail(ctx);
+    u32 passes = 0;
+    while (notes_deliver_tail(ctx, &passes)) {
+        el0_return_die_check();
+        el0_return_stop_check(ctx);
+        if (++passes >= NOTE_QUEUE_DEPTH) break;
+    }
     struct Thread *t = current_thread();
     if (t && t->proc) notes_release_claims(t);
+    ASSERT_IRQS_MASKED("the EL0-return tail's last leg is about to reach "
+                       "KERNEL_EXIT, which inherits its mask (#713)");
 }
 
 // Test hook: the release a claimant's tail makes, for a Thread with no tail.

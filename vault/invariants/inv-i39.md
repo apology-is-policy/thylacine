@@ -55,10 +55,11 @@ and then write their context outside the table lock — from reading as stopped.
 
 **Death wins, everywhere.** The EL0-return tail checks death *before* the stop, so
 a death unwinds a Thread while a stop parks and re-parks it. The one place this
-had to be re-established rather than inherited is the elected 9P reader: its
-receive is frame-atomic, so a stop unwinds it only at a frame boundary and blocks
-through mid-frame — an unwind with a partial frame consumed would desync the
-shared stream for every other Proc on that client.
+had to be re-established rather than inherited is the elected 9P reader: a stop
+unwinds its receive instead of parking it, since a parked reader holds the role
+and freezes every other Proc on that client. It unwinds at any byte, the client
+keeping the partial frame for the next reader (ARCH 8.8.1.1; until 2026-10-06 a
+reader mid-frame blocked through the stop).
 
 **The privilege guard** is that an edited register frame writes the general
 registers, the stack pointer and the resume address, and never the saved program

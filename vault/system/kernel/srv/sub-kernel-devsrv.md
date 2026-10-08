@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-06
 ---
 ## Nonblocking endpoints
 
@@ -239,9 +239,11 @@ fix is a generation in the mount key, tracked in OPEN-BUGS).
 **open=connect** (`devsrv_open_connect`): global soft cap
 (`created − freed ≥ SRV_MAX_CONNS` fails fast; the hard bound is the
 per-service backlog under the lock) → resolve the service and capture
-`poster_stripes` + `mode` + `ring_msize` + `cape` under the registry
-lock ATOMICALLY with the LIVE check → `srvconn_create` (identity by value;
-create ref 1) → byte-mode flag and cape mark if selected
+`poster_stripes` + `poster_principal` + `mode` + `ring_msize` + `cape` under
+the registry lock ATOMICALLY with the LIVE check → `srvconn_create` (identity
+by value, the connector's principal and the poster's among it -- the conn's
+two ends in `/ctl/9p-sessions`, [[dec-2026-10-06-9p-sessions-ends]]; create
+ref 1) → byte-mode flag and cape mark if selected
 (`srvconn_set_byte_mode` / `srvconn_set_cape`, both before publication)
 → +1 ref
 for the backlog slot → `srv_backlog_push_locked` (re-checks LIVE
@@ -299,7 +301,8 @@ guard's third site). Roots and svc-refs report no events.
 `struct SrvRegistry` — magic @0 (`SRV_REGISTRY_MAGIC`), atomic ref,
 irqsave lock, 16 entries. `struct SrvService` — magic @0
 (`SRV_SERVICE_MAGIC`, permanent), state, name (not NUL-terminated;
-`name_len` authoritative), poster stripes/pid by value, `mode`
+`name_len` authoritative), poster stripes/pid/principal by value (the
+principal taken at the post, cleared with the rest at a tombstone), `mode`
 (9P/byte) + `ring_msize` (the CF-3 B class) + `cape` (the identity cape;
 all three rebind-identity, reset by `srv_clear_locked`), the
 bounded accept FIFO (`backlog[16]` + head/tail/count), `accept_rendez`

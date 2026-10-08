@@ -487,7 +487,8 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         switch (r) {
         case FAULT_HANDLED:
             // #107: the EL0-return tail -- preempt_check_irq ->
-            // el0_return_die_check (I-24) -> notes_deliver_at_el0_return -- now
+            // el0_return_die_check (I-24) -> el0_return_stop_check ->
+            // notes_deliver_at_el0_return (DEBUG-FS-DESIGN 4.2) -- now
             // runs at the VECTOR level (vectors.S .Lel0_sync_return), AFTER this
             // handler returns and its halls frame is closed. That clean-frame
             // preempt mirrors the 0x480 IRQ slot and avoids the mid-handler steal
@@ -557,8 +558,10 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // this_cpu_sched() read -- so this preempt no longer risks the
         // mid-handler steal/leak); (2) el0_return_die_check -- I-24, AFTER the
         // preempt so a Proc group-terminated during the preempt-switch is caught
-        // before any EL0 instruction runs; (3) notes_deliver_at_el0_return -- the
-        // P6-pouch-signals async note delivery. SYS_EXITS / a die path do not
+        // before any EL0 instruction runs; (3) el0_return_stop_check -- the stop
+        // park; (4) notes_deliver_at_el0_return -- the P6-pouch-signals async
+        // note delivery, after the stop (DEBUG-FS-DESIGN 4.2). SYS_EXITS / a die
+        // path do not
         // return here (kernel exits() + sched()).
         return;
 

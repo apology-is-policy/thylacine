@@ -611,13 +611,13 @@ strength: spec
 No wakeup is lost between a sleeper's condition check and its sleep. This
 includes the death-wake generalization (register-then-observe under the
 per-Thread `wait_lock`), the terminate-`interrupt` extension, and the
-frame-atomic refinement for the elected 9P reader: a mid-frame death defers
-its unwind to the next frame boundary.
+elected 9P reader's recv, which unwinds at any byte while the client keeps the
+partial frame.
 
 ## Enforcement
 `sleep`/`tsleep` (register-then-observe contract) · `torpor_wait` (lock-order
-serialized) · `poll_waiter_list` discipline · `reader_recv_frame`
-(frame-atomicity) · …
+serialized) · `poll_waiter_list` discipline · `do_reader_recv_frame`
+(the partial frame kept) · …
 
 ## Validation
 Eight spec modules (above); the torpor leg is prose-validated —
@@ -711,8 +711,8 @@ C, user-voted. The capability is holding the namespace-gated flow fid
 Frontmatter as §5.1 (audit: hard; guarded-by I-9/I-10/I-11; validated-by
 spec-9p-client [clean + 5 buggy cfgs], gate-smp; hazards
 single-waiter-rendez, shared-stream-desync). Body carries the present-tense
-mechanism (elected reader, tag demux, flow control with spill, frame-atomic
-recv) and the Prosecution section absorbed from today's CLAUDE.md row — while
+mechanism (elected reader, tag demux, flow control with spill, a partial
+frame kept by the client) and the Prosecution section absorbed from today's CLAUDE.md row — while
 the #841→#845→#349→#375→#52/#53→#89/#90 saga lives entirely in `record/` and
 `lin-9p-client`, reachable from the generated Provenance section. This split
 is the schema's acid test: today that row interleaves both planes in one

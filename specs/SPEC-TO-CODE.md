@@ -1033,11 +1033,11 @@ script accepts that wording only from a cfg that checks that one property.
 
 | Config | Flags | Checked | Result | Distinct |
 |---|---|---|---|---|
-| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 3562 |
-| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 1206 |
-| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 3562 |
-| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1206 |
-| `poll_local.cfg`                       | `Remote = {}` (every fd local) | `Invariants` | clean | 3242 |
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 7156 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 2446 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 7156 |
+| `poll_liveness_notimeout.cfg`          | `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 2446 |
+| `poll_local.cfg`                       | `Remote = {}` (every fd local) | `Invariants` | clean | 6534 |
 | `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation | — |
 | `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation | — |
 | `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation | — |
@@ -1047,10 +1047,13 @@ script accepts that wording only from a cfg that checks that one property.
 | `poll_buggy_no_loop_stop_check.cfg`    | `BUGGY_NO_LOOP_STOP_CHECK`, poll(-1), `Spec_Live` | `StopHonoured` | violation | — |
 | `poll_buggy_verdict_before_settle.cfg` | `BUGGY_VERDICT_BEFORE_SETTLE` | `NoFalseNotReady` | violation (`MakeReady MakeReady Register EvaluateFirst`: both fds ready, the local one decides, the socket goes unreported) | — |
 | `poll_buggy_sweep_leaves_snapshot.cfg` | `BUGGY_SWEEP_LEAVES_SNAPSHOT` | `NoSnapshotOutlivesCall` | violation (`Register Die SettleDeath`) | — |
-| `poll_armfail.cfg`                     | `ARM_MAY_FAIL`, `Fds = {f1, f2, f3}`, `Remote = {f2, f3}` | `Invariants` | clean | 38844 |
-| `poll_armfail_liveness.cfg`            | `ARM_MAY_FAIL`, `Spec_Live` | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 4306 |
-| `poll_armfail_liveness_notimeout.cfg`  | `ARM_MAY_FAIL`, `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` | clean | 1304 |
+| `poll_armfail.cfg`                     | `ARM_MAY_FAIL`, `Fds = {f1, f2, f3}`, `Remote = {f2, f3}` | `Invariants` | clean | 77732 |
+| `poll_armfail_liveness.cfg`            | `ARM_MAY_FAIL`, `Spec_Live` | `Invariants` + `PollTerminates` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 8640 |
+| `poll_armfail_liveness_notimeout.cfg`  | `ARM_MAY_FAIL`, `HAS_TIMEOUT=FALSE`, `Spec_Live` | `Invariants` + `StableReadyReturns` + `DeathTerminates` + `StopHonoured` + `CaughtTerminates` | clean | 2642 |
 | `poll_buggy_no_retry.cfg`              | `ARM_MAY_FAIL`, `BUGGY_NO_RETRY` | `NoMissedPoll` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit MakeReady`: the socket's arm is not sent, the park has no timer, and the socket readies) | — |
+| `poll_buggy_no_loop_caught_check.cfg`  | `BUGGY_NO_LOOP_CAUGHT_CHECK`, poll(-1), `Spec_Live` | `CaughtTerminates` | violation (a stop, a note, then `MakeReady`/`Retract` noise keeps every `TSleepCommit` returning on a set flag: the park's caught arm is never reached and the loop has no check of its own) | — |
+| `poll_buggy_caught_before_ready.cfg`   | `BUGGY_CAUGHT_BEFORE_READY` | `EintrNotOverReady` | violation (`MakeReady Register NotePost SnapshotAnswer EvaluateFirst`: the pass found the fd ready, and the note answered first) | — |
+| `poll_buggy_deadline_before_caught.cfg` | `BUGGY_DEADLINE_BEFORE_CAUGHT` | `NoZeroOverCaught` | violation (`AdvanceTime Register SnapshotAnswer NotePost EvaluateFirst`: the deadline lapsed with the note pending, and the call returned 0) | — |
 | `poll_buggy_retry_is_timeout.cfg`      | `ARM_MAY_FAIL`, `BUGGY_RETRY_IS_TIMEOUT` | `NoSpuriousZero` | violation (`Register SnapshotAnswer EvaluateFirst Arm TSleepCommit RetryWake FinalSample SnapshotAnswer EvaluateFinal`: the timer's expiry takes the final pass, and the call returns 0 before its deadline) | — |
 
 Both liveness properties were shown able to FAIL before being trusted
@@ -1078,6 +1081,9 @@ Spec action ↔ impl mapping:
 | `LoopCheck` / `ParkDeath` / `StopResume` | `kernel/poll.c::sys_poll_for_proc` (the loop's `thread_die_pending` + `proc_stop_requested` -> `proc_stop_sleeper_park`) | With every hook off. `SLEEP_INTR` from the park is `ParkDeath`. |
 | `Resample` / `FinalSample` | `kernel/poll.c::sys_poll_for_proc` (the re-registering `poll_scan_one(..., expired ? NULL : &waiters[i], &held[i], &snaps[i])` loop) | The first scan's install-and-sample again, and a fresh snapshot per remote fd. A pass that begins past the deadline -- timeout 0, or the pass after the park timed out -- passes a NULL hook (`ScanHooks`: sample-only). |
 | `Die` / `StopRequest` waking a sleeper | `kernel/proc.c::proc_group_terminate`'s cascade; `proc_stop_wake_sleepers_locked` | Wake the private rendez; tsleep re-loops through `TSleepCommit`. |
+| `NotePost` (ARCH 8.8.3) | `kernel/notes.c::notes_post` arms the caught latch (`notes_arm_caught_note_locked`); `kernel/proc.c::proc_caught_note_wake` wakes each thread's `rendez_blocked_on` except its `debug_rendez` | The wake re-loops tsleep exactly as `Die`'s does. The stop parks are skipped, so both ride the note out. |
+| `TSleepCommit`'s caught branch | `kernel/sched.c::tsleep_common`'s caught arm (`caught_ok && !cond && thread_caught_note_unwinds`), reached through poll's `tsleep_noteintr` | Last in tsleep's order, after the die-check. `TSLEEP_NOTEINTR` goes straight to the sweep and returns `-T_E_INTR`: the thread holds the note's claim, so it never parks again in the call. |
+| `CaughtNow` / `Eintr` in the three verdicts | `kernel/poll.c::sys_poll_for_proc_spoors`: `thread_caught_note_unwinds(t)` between `ready_count > 0` and `poll_expired`; `sys_poll_sleep_for` asks it after a `TIMEDOUT` and at timeout 0 | Linux do_poll's order: readiness, then the signal, then the deadline (`EintrNotOverReady`, `NoZeroOverCaught`). Without it a producer that keeps a flag set keeps the poller from tsleep's arm (`CaughtTerminates`). |
 | `EvaluateWake` | `kernel/poll.c::sys_poll_for_proc` (the same verdict, on every pass after a park) | Every tsleep return goes round (a flag is a hint; TIMEDOUT may be the retry timer's): unhook, die/stop checks, scan, settle, collect, then ready -> return, `poll_expired` -> return 0, else count a re-sleep (`g_poll_resleeps`), `sched_yield_hint`, arm and park again. (The noise backstop this row used to name is gone with the preemption point, ARCH 8.12.) |
 | `SnapshotAnswer(f)` | the send: `poll_scan_one` -> `Dev.poll_snapshot` (`kernel/dev9p_poll.c::dev9p_poll_snapshot`); the answer: `dev9p_poll_snap_complete` (under `c->lock`, from the kthread's demux) | The answer writes the poller's `struct poll_snap` slot, stores `POLL_SNAP_ANSWERED` (RELEASE), and wakes the poller's rendez. `MayDecide` is `kernel/poll.c::poll_settle` (+ `poll_cond_settled`): no SENT or UNSENT slot; `poll_collect` then releases every snapshot (the `c->lock` barrier) before it reads one. |
 | `Arm` | `kernel/poll.c::poll_arm_remote` -> `Dev.poll_arm` (`kernel/dev9p_poll.c::dev9p_poll_arm`) | Only when the call will park, after the verdict: the hook on the poll-state's list FIRST, then an arm on the wire (a covering one reused, else a union arm, linked only once its submit returned 0). Returns 0 when a shortage, a dead session or no memory left the fd uncovered. |
@@ -1088,7 +1094,7 @@ Spec action ↔ impl mapping:
 | `Retract(f)` | any competing consumer: a second reader of the pipe / the connection | No walk. |
 | `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
 | `NoStaleHook` / `NoSnapshotOutlivesCall` (the sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label -> `poll_release_snaps`, then `poll_unhook_all`) | Every exit path goes through the sweep; it is idempotent over a pass that already released and unhooked. |
-| the eleven `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, abandon every unanswered one at the sweep, bound a park any arm failed to cover by the retry timer, and never take that timer's expiry for the call's timeout. |
+| the fourteen `BUGGY_*` | (none) | The disciplines the impl upholds: register-then-observe in every `.poll`; a walk at every readiness site; the unconditional sweep; clear-THEN-sample (a hook goes back on clear); sleep again on an empty re-sample; the loop's own die-check and stop park; and, from NP-4, settle every snapshot before deciding, abandon every unanswered one at the sweep, bound a park any arm failed to cover by the retry timer, and never take that timer's expiry for the call's timeout; and, from ARCH 8.8.3, ask for a caught note in every pass that found nothing, after the readiness and before the deadline. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
@@ -1201,12 +1207,12 @@ scope (its SCOPE block), audited at PTY-1g against real code.
 
 | Spec action | Code site (as-built, PTY-1f) | Invariant pinned |
 |---|---|---|
-| `StopJob` (the uncaught-default job stop takes effect; the abstract stop) | `kernel/proc.c::proc_job_stop_one_locked` (set `job_stop_req` RELEASE + `stop_report_pending` + `proc_stop_wake_cascade_locked` + the parent `child_waiters` wake), driven by `proc_job_stop_pgrp` (the `SYS_TTY_SIGNAL` TSTP fan; the catchability gate `proc_tty_susp_would_stop_locked` + the orphaned-group discard are the reachability filters, OUT of the model's scope) | the job owner is INDEPENDENT of the debug owner (`stopOwners ∪ {"job"}`). |
-| `StopDebug` (the debugger stop entry, I-39) | `kernel/proc.c::proc_debug_stop_deliver` (set `debug_stop_req` RELEASE + the shared `proc_stop_wake_cascade_locked`) | the debug owner is INDEPENDENT (`∪ {"debug"}`). |
+| `StopJob` (the uncaught-default job stop takes effect; the abstract stop) | `kernel/proc.c::proc_job_stop_one_locked` (set `job_stop_req` RELEASE + `stop_report_pending` + `proc_stop_wake_cascade_locked` + the parent `child_waiters` wake), driven by `proc_job_stop_pgrp` (the `SYS_TTY_SIGNAL` TSTP fan; the catchability gate `proc_tty_susp_would_stop_locked` + the orphaned-group discard are the reachability filters, OUT of the model's scope) | the job owner is INDEPENDENT of the debug owner (`stopOwners ∪ {"job"}`). The `~gflag` guard: `proc_job_stop_one_locked` refuses a Proc whose `group_exit_msg` is set, under `g_proc_table_lock` (the terminate CAS's lock), so a dying Proc takes no stop and latches no stop report; one latched before the kill is not reported either, since the wait's report arm skips a dying child (DEBUG-FS-DESIGN 5g; `proc.dying_takes_no_stop`, `proc.wait_pid_for_report_not_reap`). |
+| `StopDebug` (the debugger stop entry, I-39) | `kernel/proc.c::proc_debug_stop_deliver` (set `debug_stop_req` RELEASE + the shared `proc_stop_wake_cascade_locked`) | the debug owner is INDEPENDENT (`∪ {"debug"}`). The `~gflag` guard: `proc_debug_stop_deliver` refuses a dying Proc the same way and returns false (`proc.dying_takes_no_stop`). |
 | `ResumeJob` (SIGCONT — clears ONLY "job") | `kernel/proc.c::proc_job_resume_one_locked` (clear `job_stop_req` RELEASE-before-walk + `cont_report_pending` + the `debug_rendez` wake walk), driven by `proc_job_cont_pgrp` (`SYS_TTY_CONT` / the F8 teardown fan / the orphan-rule cont) | `StopCompatI39`: a job resume NEVER clears the debug owner. `BUGGY_DOUBLE_STOP` = a job resume clears ALL owners (a tty:cont running a debugger-stopped thread). |
 | `ResumeDebug` (the debug stop's OWN resume — clears ONLY "debug") | `kernel/proc.c::proc_debug_resume` (clear `debug_stop_req` only; `job_stop_req` untouched) | `StopCompatI39` twin: a debug resume never clears the job owner. |
 | the park PREDICATE (`stopOwners = {} ⇒ proceed`) | `kernel/proc.c::proc_stop_requested` (the `debug\|job` disjunction) read at `el0_return_stop_check` / `stop_park_wake_cond` / the `sleep`/`tsleep` detours / `client_stop_pending` — a woken thread re-parks while EITHER owner holds | both owners must clear to run (the per-owner clear realized). |
-| `SetGflag` / `GroupDie` (death wins over the stop) | `kernel/proc.c::proc_group_terminate` (`group_exit_msg`) + every stop path's death check (`el0_return_stop_check` loop top; the `sleep`/`tsleep` `thread_die_pending` bail; the recv-loop dying check) | `DeathWinsOverJobStop` (`gflag ~> grpDead`): a group-terminate reaps even a job-stopped group. `BUGGY_DEATH_BLOCKED` = `GroupDie` gated on `~stopped`. |
+| `SetGflag` / `GroupDie` (death wins over the stop) | `kernel/proc.c::proc_group_terminate` (`group_exit_msg`) + every stop path's death check (the `el0_stop_park` loop top, and its re-check after the wake condition, which `debug_stop.tla` models as `NoEretIntoDeath`; the `sleep`/`tsleep` `thread_die_pending` bail; the recv-loop dying check) | `DeathWinsOverJobStop` (`gflag ~> grpDead`): a group-terminate reaps even a job-stopped group. `BUGGY_DEATH_BLOCKED` = `GroupDie` gated on `~stopped`. |
 
 Pre-commit gate: `pty_stop.cfg` + `pty_stop_liveness.cfg` clean GREEN + both
 buggy cfgs confirmed, on any change to the stop-ownership protocol (the
@@ -1267,12 +1273,12 @@ Liveness: TLC-clean (`EventuallyCompletes` + `CqWaiterReturns`, `ALLOW_TEARDOWN 
 | `UserRegister` | **Loom-2a**: `kernel/loom.c::loom_register_handles` + `kernel/syscall.c::sys_loom_register_for_proc` (`SYS_LOOM_REGISTER` LOOM_REGISTER_HANDLES) | install / replace a registered-handle table slot (a clunk + reuse is a replace); the held `spoor_ref` + the rights snapshot are the I-30 pin SUBSTRATE. |
 | `Consume` | **Loom-3**: `kernel/loom.c::loom_submit_one` (SQE consume in `loom_enter` / `SYS_LOOM_ENTER`) | the submit-time snapshot + pin: copy the SQE to a kernel `struct loom_sqe` (ring TOCTOU), validate (opcode / flags / handle_idx), resolve + rights-check the registered handle (RIGHT_WRITE for FSYNC — I-2 / I-6), take an independent `spoor_ref` (the pin), allocate a 9P tag via `p9_client_submit_async` (I-10 bound). |
 | `Dispatch` | **Loom-3**: `kernel/loom.c::loom_build_fsync` (the `build` thunk) + `kernel/9p_client.c::p9_client_submit_async` | issue the 9P Tmsg on the pinned (client, fid) + the snapshot args. The async submit entry (Loom-2b) drives the per-opcode `build`; the op acts on the kernel snapshot, never re-reading the shared SQE (`ArgPinnedToSnapshot`). |
-| `ReplyArrives` | **Loom-2b**: `kernel/9p_client.c::demux_frame_locked` (the async `on_complete != NULL` branch) → **Loom-3** `kernel/loom.c::loom_async_complete` | the #841 elected-reader demux fires the pluggable POST_CQE action (`on_complete` = `loom_async_complete`) instead of WAKE_RENDEZ (docs/LOOM.md §8.4); the reap-side reader is `p9_client_reader_pump_once`, driven by `loom_enter`. |
+| `ReplyArrives` | **Loom-2b**: `kernel/9p_client.c::demux_frame_locked` (the async `on_complete != NULL` branch) → **Loom-3** `kernel/loom.c::loom_async_complete` | the #841 elected-reader demux fires the pluggable POST_CQE action (`on_complete` = `loom_async_complete`) instead of WAKE_RENDEZ (docs/LOOM.md §8.4); the reap-side reader is `p9_client_reader_pump_ready`, driven by the fan-in waiters (`loom_enter`, the SQPOLL kthread). `ReplyArrives`' weak fairness presumes a thread reads the reply; on a shared client the reader role can be another Proc's sync call, and `loom_role.tla` discharges the premise for the waiters' own pumps over every in-flight client. |
 | `PostCqe` (+ the Loom-4 wake) | **Loom-2b** (the writer): `kernel/loom.c::loom_post_cqe`; **Loom-3** call site: `loom_async_complete` (async) + `loom_submit_one` (inline error/NOP CQEs); **Loom-4b** the wake: `loom_post_cqe` calls `poll_waiter_list_wake(&l->cq_waiters)` after publishing the CQE + releasing `l->lock` | write the `loom_cqe` (user_data + mapped result) into the CQ ring; back-pressure on a full CQ (`overflow` counter, never overwrite). The op never re-resolves the registered handle at completion (`ObjPinnedToSnapshot`). A successful post wakes the CQ wait-list (a refused full-CQ post does NOT — `CqWaitFlagSound`); the wake is below `l->lock` in the lock order + does not sleep, so it composes with the `c->lock` the async path holds (`CqFlagTracksCq` / `NoMissedCqWake`). |
 | `Reap` | **Loom-3**: userspace CQ-head bump (native API at Loom-6) + the kernel container reclaim `kernel/loom.c::loom_reap_terminal` (run by `loom_enter` after the wait) | userspace consumes a CQE; permitted post-teardown for already-posted CQEs. The kernel reaps terminal-op containers (clunk pin + free) outside `l->lock`. |
-| `Teardown` | **Loom-3**: `kernel/loom.c::loom_free` quiesce → `kernel/9p_client.c::p9_client_abandon_async` (the #845 Tflush-on-abandon, #898); the session-death CQ-waiter wake is realized at **Loom-4b** (`client_mark_dead_locked` posts an error CQE per in-flight async op → `loom_post_cqe` → wake); **Loom-4c** realizes the SQPOLL-kthread teardown: `loom_free` JOINS the kthread FIRST (set `sqpoll_stopping` + wake `sqpoll_park` + spin `sqpoll_exited` + `thread_free`) before the quiesce, then makes the spec's `Teardown`-wakes-the-wait-list action LITERAL via `poll_waiter_list_wake(&l->cq_waiters)` | quiesce every in-flight async op before freeing the ring Burrow: under the client's `c->lock`, clear `inflight[tag]` (no future `on_complete`) + Tflush (a late reply is discarded ownerless); then clunk the pin + free the container; free the loom last (`NoStaleCompletion`). At **Loom-4b/4c** `NoStrandedWaiter` holds **vacuously**: a `loom_enter` caller holds a loom ref for its whole duration, so `loom_free` cannot run while a CQ-waiter sleeps; and `KObj_Loom` is per-Proc + non-transferable, so all concurrent ENTERs are sibling threads that group-terminate together (`SLEEP_INTR`). The SQPOLL kthread holds no loom ref and is joined by the explicit `sqpoll_exited` handshake, not the wait-list. |
+| `Teardown` | **Loom-3**: `kernel/loom.c::loom_free` quiesce → `kernel/9p_client.c::p9_client_abandon_async` (the #845 Tflush-on-abandon, #898); the session-death CQ-waiter wake is realized at **Loom-4b** (`client_mark_dead_locked` posts an error CQE per in-flight async op → `loom_post_cqe` → wake); **Loom-4c** realizes the SQPOLL-kthread teardown: `loom_free` JOINS the kthread FIRST (set `sqpoll_stopping` + wake `sqpoll_park` + spin `sqpoll_exited` + `thread_free`) before the quiesce, then makes the spec's `Teardown`-wakes-the-wait-list action LITERAL via `poll_waiter_list_wake(&l->cq_waiters)` | quiesce every in-flight async op before freeing the ring Burrow: under the client's `c->lock`, drop the tag's registration (no future `on_complete`) + Tflush (a late reply is discarded ownerless); then clunk the pin + free the container; free the loom last (`NoStaleCompletion`). At **Loom-4b/4c** `NoStrandedWaiter` holds **vacuously**: a `loom_enter` caller holds a loom ref for its whole duration, so `loom_free` cannot run while a CQ-waiter sleeps; and `KObj_Loom` is per-Proc + non-transferable, so all concurrent ENTERs are sibling threads that group-terminate together (`SLEEP_INTR`). The SQPOLL kthread holds no loom ref and is joined by the explicit `sqpoll_exited` handshake, not the wait-list. |
 | `CqWaitRegister` / `BuggyCqWaitCheck` / `BuggyCqWaitRegisterLate` | **Loom-4b**: `kernel/loom.c::loom_wait_for_completions` (driven by `loom_enter`) — install a `poll_waiter` on `l->cq_waiters` AND re-sample `loom_cq_ready` in one `l->lock`-held step (register-then-observe), then `sleep(&r, loom_cqw_cond, &pw)` (death-interruptible, #811) | the `ENTER` waiter (`min_complete >= 1`) that finds a sibling holding the reader role blocks for completions; the cross-lock flag is the wait-list hook (`pw->ready`). `BuggyCqWait*` model the check-before-register order (the bug `CqFlagTracksCq` forbids). |
-| `CqWaitCommitOrSleep` | **Loom-4b**: the `loom_cqw_cond` flag read in `sleep()` + the `loom_cq_ready >= min_complete` / `async_inflight == 0` give-up arms in `loom_wait_for_completions` | the evaluate point: flag set -> return; nothing more can complete -> return; else sleep on the CQ wait-list. The wake co-fires with `PostCqe` (`loom_post_cqe` walks the wait-list after publishing) (`NoMissedCqWake`). |
+| `CqWaitCommitOrSleep` | **Loom-4b**: the `loom_cqw_cond` flag read in `sleep()` -- `loom_fanin_cond` over the CQ hook and every client hook when anything is in flight (the fan-in, 2026-10-06; the client half is `loom_role.tla`), entered only while `l->drive_gen` has not moved since the loop top -- + the `loom_cq_ready >= min_complete` / `async_inflight == 0` give-up arms in `loom_wait_for_completions` | the evaluate point: flag set -> return; nothing more can complete -> return; else sleep on the CQ wait-list. The wake co-fires with `PostCqe` (`loom_post_cqe` walks the wait-list after publishing) (`NoMissedCqWake`). |
 | `BuggyDoublePost` / the seven `BUGGY_*` flags | (none — these are the disciplines the impl upholds) | snapshot-not-reread; pin-not-re-resolve-at-completion; one-CQE-per-op; never-post-into-a-full-CQ; quiesce-on-teardown; **register-the-wait-hook-before-sampling-the-CQ**; **wake-the-wait-list-on-every-post-and-on-teardown** (`CqFlagTracksCq` / `NoMissedCqWake` / `NoStrandedWaiter`). |
 
 cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
@@ -1435,19 +1441,24 @@ the `wait_lock`/`rendez_blocked_on` protocol, or `proc_group_terminate`'s cascad
 ## pipe.tla — P5-pipe (section added at RW-10; the spec landed P5)
 
 Models the two-direction pipe wait/wake state machine (I-9 specialized):
-bounded ring + reader/writer sleep/wake pairs + EOF/EPIPE on close. Clean cfg
-+ 4 buggy cfgs (`read_no_wake_writer` / `write_no_wake_reader` /
-`close_read_no_wake_writer` / `close_write_no_wake_reader`), each dropping
-one wake edge.
+bounded ring + reader/writer sleep/wake pairs + EOF/EPIPE on close and on
+the hangup. Two clean cfgs (`pipe.cfg`, two threads; `pipe_multi.cfg`, three,
+so two sleep on one side) + 7 buggy cfgs: four that each drop one wake edge
+(`read_no_wake_writer` / `write_no_wake_reader` / `close_read_no_wake_writer`
+/ `close_write_no_wake_reader`), `wake_one_reader` (a write wakes one chosen
+reader, the single-waiter wakeup the multi-waiter lift retired), and the
+hangup's two (`hangup_no_wake_writer`, `hangup_takes_bytes`).
 
 | Spec action | Code site | Invariant pinned |
 |---|---|---|
-| `ReadDrain` / `ReadEof` / `ReadSleep` | `kernel/pipe.c::pipe_read` (drain under the pipe lock; EOF when write end closed + ring empty; sleep on the read Rendez otherwise) | a reader sleeps only when the ring is empty AND the write end is open |
-| `WriteAppend` / `WriteEpipe` / `WriteSleep` | `kernel/pipe.c::pipe_write` (append under the lock; `-1` + the synthetic `pipe` note when the read end is closed; sleep when full) | a writer sleeps only when the ring is full AND the read end is open |
+| `ReadDrain` / `ReadEof` / `ReadSleep` | `kernel/pipe.c::pipe_read` (drain under the pipe lock; EOF when write end closed or hung up + ring empty; sleep on the ring's poll list otherwise, `pipe_block_locked`) | a reader sleeps only when the ring is empty AND the write end is open |
+| `WriteAppend` / `WriteEpipe` / `WriteSleep` | `kernel/pipe.c::pipe_write` (append under the lock; `-T_E_PIPE` when the read end is closed or the write end hung up, with the synthetic `pipe` note except on the CNBFRAME arm; sleep when full) | a writer sleeps only when the ring is full AND the read end is open |
 | `CloseRead` / `CloseWrite` | `kernel/pipe.c` close paths (wake the OPPOSITE side's sleepers on every close) | the buggy cfgs prove dropping any close-wake edge strands a sleeper |
+| `HangupWrite` (P3b; `writeOpen` tracks the held end) | `kernel/pipe.c::pipe_hangup_write` (write_eof under the lock, then the one wake; no ref drop) + both write arms refusing on `write_eof` | `NoStuckWriter` (`hangup_no_wake_writer`: a hangup that wakes readers only strands a writer) + the action property `NoByteAfterEof` (`hangup_takes_bytes`) |
 
-Pre-commit gate: `pipe.cfg` clean + the 4 buggy cfgs on any change to
-`kernel/pipe.c`'s wait/wake or close paths.
+Pre-commit gate: `pipe.cfg` + `pipe_multi.cfg` clean + every
+`pipe_buggy_*.cfg` (7) violated, on any change to `kernel/pipe.c`'s
+wait/wake, close or hangup paths.
 
 ---
 
@@ -1555,7 +1566,7 @@ BEFORE the impl (spec `6db71fa`).
 | `ReplyComplete(o)` | `kernel/9p_client.c::demux_frame_locked` -> `loom_async_complete` -> `loom_post_cqe` (the #841 demux + the CQE post, one `c->lock` step) | (the ok terminal) |
 | `SessionDies(devgone)` | `kernel/9p_client.c::client_mark_dead_locked(c, true)` (each in-flight async op `on_complete(-P9_E_NODEV)`) -- reached automatically via `reader_recv_frame` returning `0` (peer-gone EOF) at the 3 reader sites, or explicitly via `p9_client_mark_devgone` | DeathResultFaithful (the devgone reason -> `err_devgone`), SessionDeathCompletes (no op left in-flight) |
 | `SessionDies(transport)` | `client_mark_dead_locked(c, false)` (the existing ~8 protocol/error sites + `reader_recv_frame` returning `-1`) | DeathResultFaithful (a transport death -> `err_transport`, the unchanged `-EIO`) |
-| `LateReply(o)` (buggy double) | the impl forecloses it: `demux_frame_locked` clears `inflight[tag]` BEFORE completing, so a late reply on a death-completed op dispatches OWNERLESS (no 2nd CQE) | NoDoubleTerminal |
+| `LateReply(o)` (buggy double) | the impl forecloses it: `demux_frame_locked` drops the tag's registration BEFORE completing, so a late reply on a death-completed op dispatches OWNERLESS (no 2nd CQE) | NoDoubleTerminal |
 | `Reap(o)` | userspace advances `cq_head` | (drains the CQ) |
 
 Invariants: DeathResultFaithful (the headline -- a death-completed op carries its
@@ -1571,6 +1582,179 @@ NoDoubleTerminal]) confirmed failing on any change to the death-reason threading
 the `reader_recv_frame` EOF-vs-error split, or the `loom_async_complete` terminal.
 
 ---
+
+## loom_role.tla — a waiter reads for every 9P client it waits on (waiters-stops 2026-09-30; generalised to N clients for the multi-client P2, 2026-10-06, spec-first)
+
+A Loom ENTER waiting for the CQE of any of its ring's async ops, in flight on
+several SHARED 9P clients: a client's replies are read only by its role holder,
+which can be another Proc's synchronous call that hands the role on only to a
+synchronous waiter. The waiter scans every in-flight client and pumps one whose
+role is free AND whose transport is ready (`p9_client_reader_pump_ready`); with
+nothing to pump it hooks each client -- a held role on the role-waiter list, a
+free one with nothing to read on the transport's readiness list -- and the CQ
+list, and sleeps on one Rendez (LOOM.md 8.6, the 2026-10-06 amendment; ARCH
+21.10). The ENTER stands for all three fan-in waiters (the non-SQPOLL ENTER, the
+SQPOLL kthread, the dev9p poll pump). A FOCUSED module: `loom.tla`'s
+`ReplyArrives` (weak fairness) presumes a reader, and this module discharges
+that premise. It is also the model of the handoff, so it carries the two stop
+rules the waiter's wake depends on (the `stop_parked` skip and the stopped
+designee's re-handoff). History: the 09-30 module (one client, written AFTER
+the impl in the waiters-stops round-1 close) modelled the first-client pick and
+an unready pump; both are buggy cfgs now (`BUGGY_FIRST_CLIENT_ONLY`,
+`BUGGY_UNREADY_PUMP`), and the old (E) `Blind` carve-out in `EnterReturns` is
+gone: `NoBlindRecv` is an invariant.
+
+Ops are `Clients \X 0..NSYNC`: `<<c, 0>>` is the ring's async op on client c,
+`<<c, i>>` a foreign sync call. `Deferred` clients may hold their async reply
+forever (a parked socket read, a QTPOLL arm): no fairness on that reply, and
+`EnterReturns` must hold anyway.
+
+Safety + liveness (TLC 2026.10.04, `-workers 1`; `specs/check-loom-role.sh`
+pins every count): one client, `NSYNC = 2`, `MAX_STOPS = 1` -- 32296 distinct
+states; `NSYNC = 3` -- 1297291 (`loom_role_wide.cfg`, a two-link designation
+chain); two clients, `NSYNC = 1`, `Deferred = {c1}` -- 118774
+(`loom_role_multi.cfg`, the OPEN-BUGS 2026-10-05 07:52Z strand's shape, clean).
+Also checked at spec time, not pinned: `MAX_STOPS = 0` (3715) and `MAX_STOPS = 2`
+(102168) on one client, both clean with `EnterReturns`; two clients at
+`NSYNC = 2`, safety only, STOPPED BOUNDED (2026-10-06, `-workers 4`): 79,010,570
+distinct states to depth 28 with 12,509,489 still queued and no violation -- a
+bounded result, not an exhaustive one. Every buggy cfg's counterexample was read: each violates
+through the defect it names (first-client-only: the ENTER hooks only the deferred
+c1 while c2's reply sits on a free role; ready-hook-when-held: the holder parks
+on a stop over a frame that had already arrived). Positive controls (expected
+VIOLATED, run on the multi universe): the ENTER sleeps with one client
+readiness-hooked and the other role-hooked; returns through c2 with c1's reply
+still deferred; a sync reader posts an async CQE; the hook aborts to a rescan;
+a role wake and a readiness wake each reach the sleeping ENTER.
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `loom_role.cfg` | all FALSE, `Clients = {c1}`, `NSYNC = 2` | `Invariants` (7) | clean | 32296 |
+| `loom_role_liveness.cfg` | `Spec_Live` | `Invariants` + `EnterReturns` | clean | 32296 |
+| `loom_role_wide.cfg` | `Spec_Live`, `NSYNC = 3` | `Invariants` + `EnterReturns` | clean | 1297291 |
+| `loom_role_multi.cfg` | `Spec_Live`, `Clients = {c1, c2}`, `NSYNC = 1`, `Deferred = {c1}` | `Invariants` + `EnterReturns` | clean | 118774 |
+| `loom_role_buggy_no_role_hook.cfg` | `BUGGY_NO_ROLE_HOOK` (the pre-09-30 ENTER) | `EnterReturns` alone (proves the liveness check discriminates) | violation | 34870 |
+| `loom_role_buggy_first_client_only.cfg` | `BUGGY_FIRST_CLIENT_ONLY` (the pre-10-06 pick), multi universe | `EnterReturns` alone | violation | 33864 |
+| `loom_role_buggy_unready_pump.cfg` | `BUGGY_UNREADY_PUMP` (the pre-10-06 `pump_once`) | `NoBlindRecv` | violation | — |
+| `loom_role_buggy_late_register.cfg` | `BUGGY_ROLE_LATE_REGISTER` | `NoMissedWake` | violation | — |
+| `loom_role_buggy_no_role_wake.cfg` | `BUGGY_NO_ROLE_WAKE` | `NoMissedWake` | violation | — |
+| `loom_role_buggy_designates_parked.cfg` | `BUGGY_DESIGNATES_PARKED` | `NoMissedWake` | violation | — |
+| `loom_role_buggy_stop_keeps_designation.cfg` | `BUGGY_STOP_KEEPS_DESIGNATION` | `NoMissedWake` | violation | — |
+| `loom_role_buggy_no_ready_hook.cfg` | `BUGGY_NO_READY_HOOK` | `NoMissedWake` | violation | — |
+| `loom_role_buggy_ready_late_register.cfg` | `BUGGY_READY_LATE_REGISTER` | `NoMissedWake` | violation | — |
+| `loom_role_buggy_ready_hook_when_held.cfg` | `BUGGY_READY_HOOK_WHEN_HELD` | `NoMissedWake` | violation | — |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Start(s)` / `Elect(s)` | `kernel/9p_client.c::client_wait`: entry clears `sending`; the loop top returns on `done`, elects on `!c->reader_active` (`be_reader = false`), else clears a stale `be_reader` (F7) and sleeps on `rpc->rendez` (`rpc_wait_cond`) | sending is folded into `Start`: the handoff skips a sender, and a sender self-elects on arrival |
+| `ReadFrame(s, o)` | `client_wait`'s reader loop: `reader_recv_frame` + `demux_frame_locked`; its own reply ends the loop, then `reader_active = false` and `client_handoff_reader_locked(c, rpc)` in the same `c->lock` hold | |
+| `StopReader(s)` | the reader's recv unwound at a frame boundary (`stop_unwound`): release, hand off, `client_debug_stop_park` -- one `c->lock` hold | stands for every early departure: a caught note (`noteintr`), a death-interrupted recv (the reader loop's `client_self_dying()` break), the send path's one-frame self-pump (`client_pump_or_park_locked`) |
+| `StopWaiter(s)` / `Resume(s)` | `client_wait`'s stop arm: a designee re-hands off (`be_reader` cleared), then `client_debug_stop_park` sets `rpc->stop_parked` under `c->lock` and clears it when the park returns | the non-reader sleep unwinds on a stop (`stop_unwinds`) to reach the arm. The designee branch also stands for F6 (a dying designee hands the role on at the loop top) and the caught-note bounce after the non-reader sleep: each leaves without parking, which is a park whose resume never comes |
+| `Handoff(...)` | `client_handoff_reader_locked`: designate a not-done, not-designated, sync, not-`sending`, not-`stop_parked` op and wake it; else `if (!c->reader_active && c->role_waiters) poll_waiter_list_wake(&c->role_waiters_list)` | the spec takes ANY candidate (the code: the lowest tag) |
+| `ServerReply(o)` | the server's reply reaching the client's stream; the backend walks its readiness list after the fill (`srvconn` `cn->poll_list`; the pipe's poll list) | a SET over-approximates the FIFO |
+| `EnterTop` | `kernel/loom.c::loom_wait_for_completions`: the `ready >= min_complete` / `inflight + admitting == 0` sample, then the in-flight client set (deduped, pinned under `l->lock`) | min_complete is one: both give-up arms read a posted CQE |
+| `EnterScan(c)` / `EnterRead(o)` | `p9_client_reader_pump_ready`: under `c->lock`, dead -> DEAD, `reader_active` -> BUSY, `!recv_ready` -> IDLE; else take the role, read what is waiting (`recv_now`, never sleeping) toward one frame + demux it if whole, release, `client_handoff_reader_locked(c, NULL)` | `BUGGY_UNREADY_PUMP` = the old `pump_once`, which took a free role whatever the stream held A frame found in part stays with the client (`rx_got`) and the pump is IDLE: below the model's grain, whose wire holds whole frames -- the part is a frame not yet waiting, whose rest walks the readiness list like any arrival (2026-10-06, S-3). |
+| `EnterScanned` / `EnterHooked` | the end of the scan loop / of the hook loop | |
+| `EnterHook(c)` | `p9_client_reader_hook` under `c->lock`: dead -> `-P9_E_IO`; held -> the role list (`role_waiters++`); free -> `recv_ready(pw)` registers on the backend's readiness list with its sample: ready -> unregister, 0 (scan again); else hooked | one hook per client: `BUGGY_READY_HOOK_WHEN_HELD` hooks readiness for a held role |
+| `EnterCqReg` | `poll_waiter_list_register(&l->cq_waiters, &pw)` + the `do_sleep` sample under `l->lock` (`loom.tla`'s `CqWaitRegister`), which also requires `l->drive_gen` to equal its loop-top sample | the generation is outside the model: a completion read by another thread posts its CQE before it records a re-arm or a chain gate (OPEN-BUGS 2026-10-06 16:20Z), and a sibling thread's submit links an op on a client the waiter has not hooked (the S-1 self-audit finding; `loom_enter_sees_a_sibling_submit`); the model has none of the three, so every op link and re-arm claim bumps it too |
+| `EnterSleep` | `loom_fanin_sleep`: `sleep()` over the CQ hook and every client hook on one Rendez (`loom_fanin_cond`: any flag set); a PARTIAL set (more clients than `LOOM_FANIN_MAX`) `tsleep`s with the 10 ms rescan instead | poll.c's `poll_cond_any_flagged` shape. The SQPOLL kthread's park (`loom_sqpoll_fanin_park`) adds stop and an `sq_tail` / `cq_head` move to the cond |
+| `EnterUnhook` | `poll_waiter_list_unregister(&pw)` + `p9_client_reader_unhook` for each client (then the pins' clunk) | |
+
+Invariants: NoMissedWake (the headline, I-9 over the role and readiness lists:
+never asleep while some client has a frame waiting, a free role and no designee;
+stated without the hooks, so every buggy ENTER can violate it), NoBlindRecv
+(the waiter holds a role only over a waiting frame), NoMissedCqWake,
+RoleConsistent, HooksConsistent, SleepingUnflagged, TypeOK. NoMissedWake is
+discriminated by seven buggy cfgs, NoBlindRecv by one, `EnterReturns` by two;
+the rest hold by construction of the actions and guard the model text.
+`EnterReturns` is `<>(eph = "returned")`, claimed when some client's async reply
+is answered. The model has no stop-flag state, so a resume-then-re-stop is not
+representable; `9p_client.handoff_skips_restopped_owner` and
+`.stop_parked_owner_not_owed` cover it in code. Out of scope: session death
+(`loom_devgone.tla`; `client_mark_dead_locked` also wakes the role list, and a
+dead client's hook returns `-P9_E_IO`), a stop of the waiter's own thread, the
+flood budget, a second waiter (independent hooks on the same lists, poll.tla's
+argument), a frame whose bytes have only started (the trusted-server bound),
+and an EL0 holder of a pipe transport's read end stealing the ready bytes.
+
+Pre-commit gate: `specs/check-loom-role.sh` (every cfg's verdict and pinned
+count) on any change to the reader election, the handoff,
+`client_debug_stop_park`, the role-waiter list, `recv_ready`, the pumps, or a
+fan-in waiter's scan, hooks and sleep (`loom_wait_for_completions`,
+`loom_sqpoll_main`, `dev9p_poll_service_once`).
+
+---
+
+## reader_frame.tla — the elected 9P reader's recv unwinds at any byte (#90; rewritten for the seam-90 close, 2026-10-06, model-first)
+
+One frame of N chunks, a server with NO fairness in `Spec` (it may stop for good
+mid-frame: any process can serve a mount over pipes), two readers: A holds the
+role and is the one a death, stop or caught note reaches (`interrupted`); B
+waits on the same session. `rx` is the client's resume count (`c->rx_got`),
+`pos` the wire position. ARCH 8.8.1.1; `dec-2026-10-06-seam90-unwind-any-byte`.
+Until 2026-10-06 the module modelled the frame-atomic block-through (one
+reader, a boundary-guarded die-check, a fair server); that rule is now the
+`BUGGY_BLOCK_THROUGH` cfg.
+
+TLC 2026-10-06 23:36Z (`-workers 1 -deadlock -lncheck final`;
+`specs/check-reader-frame.sh` pins every count, the buggy cfg's at its halt), N = 3: `reader_frame.cfg` (Safety + EventuallyUnwinds, no
+server fairness) 39 distinct states; `reader_frame_delivery.cfg` (FairServerSpec:
++ FrameDelivered) 39; `reader_frame_blockthrough_fair.cfg` (the superseded rule
+under a fair server -- the 2026-07-19 model's claim, a control) 34, clean.
+Buggy, each counterexample read: `reader_frame_buggy.cfg` violates `NoDesync`
+(41 states) -- A reads a chunk, unwinds and discards the count, B parses from 0
+with the wire at 1; `reader_frame_blockthrough.cfg` violates `EventuallyUnwinds`
+with Safety intact (34 states) -- A is two chunks into the frame when
+interrupted, the server stops, and the trace stutters with A in its recv (the
+seam-90 hang).
+
+| Spec | Code |
+|---|---|
+| `Read(X)` | `kernel/9p_client.c::do_reader_recv_frame`'s two recv loops, resuming at `c->rx_got`; `rx + 1 = N` is the frame complete (`rx_got = 0`, demux) |
+| `UnwindA` | the die-checks in `kernel/sched.c` `sleep_common`/`tsleep_common` (register-then-observe + prompt), the stop detour's `stop_unwinds` branch (held for the whole recv by `reader_recv_frame`), the four caught arms; `rx' = rx` is `do_reader_recv_frame`'s `incomplete:` exit |
+| `ElectB` | `client_handoff_reader_locked` and every later election (`client_wait`, the send-path self-pump, `p9_client_reader_pump_ready`) |
+| `BUGGY_DISCARD` | a frame-local count (the pre-loom-mc reader) |
+| `BUGGY_BLOCK_THROUGH` | the deleted `thread_reader_blocks_death` guard |
+
+Outside the model: the transport recv (each returns the bytes it copied or
+none -- `srvconn_client_recv`, the pipe read; loopback and mq never sleep),
+the srvconn reading role (released on every recv exit by `chan_role_release`),
+tags and the dying op's flush (`9p_client.tla`, I-10), more than one frame.
+Regressions: `rendez.reader_recv_unwinds_death` / `_death_sleep` /
+`_caught_note`; `9p_srvconn_transport.reader_unwinds_mid_frame_death` /
+`_stop` (a real SrvConn; the server stops 20 bytes into a 160-byte Rgetattr).
+
+## tag_pool.tla — the 9P tag pool: shares, the wait for a tag, the reader applying every reply (2026-10-07; model-first)
+
+Written before the code for `dec-2026-10-07-tag-pool` (ARCH 21.11), because
+the design's central claim is liveness: a sync op that waits for a tag gets
+one. One session, tags counted (`9p_client.tla` owns tag identity, I-10).
+Two sync threads (fair server replies; a stop may last forever; a death
+abandons with a Tflush), two async issuers (replies deferrable forever).
+`Limit = 2 * OpsMax` in the clean cfg: the headroom argument at its tight
+case (the kernel's 65535 tags are 2 * 32767 + 1).
+
+| Spec action | Implementation site |
+|---|---|
+| `Take(s)` | a sync op's `alloc_tag(s, false)` in `p9_session_send_*`, behind `client_await_tag_locked` -> `client_drain_until_free_tag` (TP-2) |
+| `ReplySync(s)` | `demux_frame_locked` dispatching a sync reply into the op's result (TP-1) |
+| `Die(s)` / `Rflush(s)` | `client_run`'s `CLIENT_WAIT_DIED` abandon (`p9_session_send_flush`) / the ownerless Rflush arm of `demux_frame_locked` |
+| `Submit(a)` / `ReplyAsync(a)` | `p9_client_submit_async` (refused `-P9_E_AGAIN` past `P9_ASYNC_MAX`, TP-3) / the async arm of `demux_frame_locked` |
+| `OpRoom` | `alloc_tag`'s op-share check, `n_active - n_flush < ops_max` (`P9_OPS_MAX`); a Tflush (`alloc_tag(s, true)`) skips it and takes any free entry, growing the table (TP-3) |
+
+| Cfg | Verdict | States |
+|---|---|---|
+| `tag_pool.cfg` | clean: TypeOK, TagsFit, FlushAlwaysFits; SyncProgress | 268 distinct |
+| `tag_pool_buggy_no_async_cap.cfg` | SyncProgress violated (two deferred async ops hold the op share; a sync op waits forever) | 304 distinct |
+| `tag_pool_buggy_waiter_applies.cfg` | SyncProgress violated (a stored reply waits on a thread that stays stopped) | 360 distinct |
+| `tag_pool_buggy_no_flush_headroom.cfg` | FlushAlwaysFits violated (a death finds no tag for its Tflush) | 127 distinct (at the halt) |
+
+TLC 2026-10-07, `-workers 1 -lncheck final`. Checker: `specs/check-tag-pool.sh`
+(verdicts by name, counts pinned). Regressions: `9p_client.full_pool_sync_op_gets_a_tag`
+(part 3), `.stopped_owner_reply_frees_tag` (part 4), `.tag_table_grows` (part 1),
+`.abandon_flush_fits_full_share` + `9p_session.flush_headroom_grows_table`
+(`FlushAlwaysFits`), `.async_share_leaves_sync_tags` + `.async_full_tag_pool_is_eagain`
+(the async share).
 
 ## net_poll.tla — net-6b (the dev9p.poll readiness bridge); rewritten for #98 (the SAMPLE/ARM split, 2026-09-28; spec-first re-enabled, model-first)
 
@@ -1773,6 +1957,17 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   (`kernel/9p_attach.c`), which queues it with a session reference.
   `NO_CLOSER` is the path before 2026-09-28: the build unbound the fid and the
   send was refused.
+  Since 2026-10-07 (`dec-2026-10-07-exit-close`, part A) it also stands for a
+  close by a thread no death reaches (a kernel thread, an exit close under
+  `exit_close_active`): `dev9p_clunk_fid` sends through
+  `p9_client_clunk_nowait`, which takes the same -P9_E_AGAIN where it would
+  wait for a tag or ring space; where it would not, the close is `UserClose`.
+  Part C maps here too: a dev9p last close that may not wait (a die-pending
+  thread, a `closes_never_wait` kernel thread) with a staged write-behind run
+  hands the fid with a close job (`p9_attached_defer_close`); the spec's fid
+  is that entry, and the job's Twrites are not modelled (they precede the
+  Tclunk on the same closer, so `CloserSend` still clunks each entry once).
+  That is the safety half; the liveness half weakens (below).
 - `CloserSend` = `closer_serve` -> `closer_send` -> `p9_client_clunk_async` on a
   closer thread (kproc, never dying); the entry's session reference keeps the
   client alive until it is dropped after the send. Its weak fairness is the
@@ -1785,6 +1980,12 @@ Spec action ↔ impl mapping (`kernel/dev9p_poll.c` unless noted):
   that spawn was failing is covered by the spawn's own retry, up to three
   attempts (`p9_closer.hand_off_inside_failed_spawn_retried`); a closer spawn
   that keeps failing (memory exhausted) is outside the fairness assumption.
+  Since part C a close job's Twrites run ahead of its entry's Tclunk and
+  wait for their Rwrites, so `WF_vars(CloserSend)` for that entry, and for
+  every entry queued behind it on the session, also assumes the server
+  ANSWERS those writes, where before it needed only the server to read. A
+  server that reads and never answers holds its own session's clunks behind
+  a job; by the voted design (no deadline) its hangup is the way out.
 
 NOT modeled (caught by the kernel test `dev9p.poll_cancel_at_close`, not the
 spec): the abandon's Tflush leaves the readiness oldtag `awaiting_flush`, which
@@ -2158,10 +2359,16 @@ docs/DEBUG-FS-DESIGN.md section 6) -- the 6th instance of re-enabling point (a).
 Written + TLC-green BEFORE the 8a-1 impl. Models the stop/continue/step state
 machine and its composition with the death path (#811/#68) -- an SMP wait/wake
 race on the most bug-prone lineage in the tree, the class the runtime tests are
-blind to (the death_wake / loom / asid / allowance precedent). Clean cfg
-TLC-green (Safety = NoLostStop + NoEL0AfterStopped + ExactlyOnceResume;
-PROPERTIES EventuallyAllDead [DeathWinsOverStop] + EventuallyResumed [NoStrand]);
-4 buggy cfgs, each a minimal counterexample on its named property.
+blind to (the death_wake / loom / asid / allowance precedent). Two clean cfgs
+TLC-green -- `debug_stop.cfg` (Safety = NoLostStop + NoEL0AfterStopped +
+ExactlyOnceResume + StopImpliesOwned + NoEL0WhileHeld + SpawnReturnsAfterBirth
+[the birth two vacuous without HELD]; PROPERTIES EventuallyAllDead
+[DeathWinsOverStop] + EventuallyResumed [NoStrand] + EventuallyLaunchedDies +
+EventuallyStopSettles + NoEretIntoDeath + ParkEndsOnlyInDeath) and
+`debug_stop_held.cfg` (the birth hold, DEBUG-FS-DESIGN 5f: the same plus
+EventuallyHoldResolved + BirthWaitReleases + HoldMonotone) -- and 17 buggy
+cfgs, each a counterexample on its named property. `specs/check-debug-stop.sh`
+runs all 19 and checks each verdict.
 
 **The stop machinery LANDED at 8a-1b-beta** -- the code sites below are as-built
 (the mapping was a reservation at 8a-1a). The impl faithfully realizes the model:
@@ -2173,64 +2380,159 @@ they read a stopped frame, off the race surface).
 
 | Config | Flag | Invariant / Property | Result | Distinct |
 |---|---|---|---|---|
-| `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` + `EventuallyLaunchedDies` + `EventuallyStopSettles` | clean | 5633 |
-| `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 296 |
-| `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | -- |
-| `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | -- |
-| `debug_stop_buggy_strand_on_debugger_death.cfg` | `BUGGY_STRAND_ON_CLOSE` | `EventuallyResumed` | violation | 276 |
-| `debug_stop_buggy_fault_stop_ungated.cfg` | `BUGGY_FAULT_STOP_UNGATED` | `StopImpliesOwned` | violation | -- |
-| `debug_stop_buggy_stop_skips_sleeper.cfg` | `BUGGY_STOP_SKIPS_SLEEPER` | `EventuallyStopSettles` | violation | -- |
-| `debug_stop_buggy_exitkill_ignored.cfg` | `BUGGY_EXITKILL_IGNORED` | `EventuallyLaunchedDies` | violation | 714 |
+| `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` + `EventuallyLaunchedDies` + `EventuallyStopSettles` + `NoEretIntoDeath` + `ParkEndsOnlyInDeath` | clean | 12830 |
+| `debug_stop_held.cfg` | `HELD` (1 Thread) | the above + `EventuallyHoldResolved` + `BirthWaitReleases` + `HoldMonotone` | clean | 17330 |
+| `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 1480 |
+| `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | 128 |
+| `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | 720 |
+| `debug_stop_buggy_strand_on_debugger_death.cfg` | `BUGGY_STRAND_ON_CLOSE` | `EventuallyResumed` | violation | 1338 |
+| `debug_stop_buggy_fault_stop_ungated.cfg` | `BUGGY_FAULT_STOP_UNGATED` | `StopImpliesOwned` | violation | 4 |
+| `debug_stop_buggy_stop_skips_sleeper.cfg` | `BUGGY_STOP_SKIPS_SLEEPER` | `EventuallyStopSettles` | violation | 12830 |
+| `debug_stop_buggy_exitkill_ignored.cfg` | `BUGGY_EXITKILL_IGNORED` | `EventuallyLaunchedDies` | violation | 1516 |
+| `debug_stop_buggy_held_runs_free.cfg` | `HELD` + `BUGGY_HELD_RUNS_FREE` | `NoEL0WhileHeld` | violation | 883 |
+| `debug_stop_buggy_convert_clears_first.cfg` | `HELD` + `BUGGY_CONVERT_CLEARS_FIRST` | `NoEL0WhileHeld` | violation | 3003 |
+| `debug_stop_buggy_orphan_hold_strands.cfg` | `HELD` + `BUGGY_ORPHAN_HOLD_STRANDS` | `EventuallyHoldResolved` | violation | 17872 |
+| `debug_stop_buggy_birth_wait_unwoken.cfg` | `HELD` + `BUGGY_BIRTH_WAIT_UNWOKEN` | `BirthWaitReleases` | violation | 19678 |
+| `debug_stop_buggy_no_death_recheck.cfg` | `HELD` + `BUGGY_NO_DEATH_RECHECK` | `NoEL0WhileHeld` | violation | 8816 |
+| `debug_stop_buggy_no_death_recheck_tail.cfg` | `BUGGY_NO_DEATH_RECHECK` (2 Threads) | `NoEretIntoDeath` | violation | 124 |
+| `debug_stop_buggy_birth_latch_erets.cfg` | `HELD` + `BUGGY_BIRTH_LATCH_ERETS` | `NoEL0WhileHeld` | violation | 1817 |
+| `debug_stop_buggy_tail_latch_erets.cfg` | `BUGGY_TAIL_LATCH_ERETS` (1 Thread) | `NoLostStop` | violation | 679 |
+| `debug_stop_buggy_latch_ends_stop.cfg` | `HELD` + `BUGGY_LATCH_ENDS_STOP` | `ParkEndsOnlyInDeath` | violation | 1817 |
+| `debug_stop_buggy_spawner_latch_returns.cfg` | `HELD` + `BUGGY_SPAWNER_LATCH_RETURNS` | `SpawnReturnsAfterBirth` | violation | 133 |
+
+Distinct counts are TLC with `-workers 1` (re-measured 2026-09-30 by
+`specs/check-debug-stop.sh`). A multi-worker run stops a safety violation at a
+scheduling-dependent count. The death re-check changes transitions, not the
+reachable set: the clean cfg and the pre-5f model (`BUGGY_NO_DEATH_RECHECK` on,
+`NoEretIntoDeath` off) both reach 12830 distinct / 65457 generated states, and `NoEretIntoDeath` is what
+tells them apart. Every count moved on 2026-09-30, when the stay-stopped rule
+(DEBUG-FS-DESIGN 5g) let the latch land on any live target and gave the
+spawner a latch of its own (`slatch`).
 
 | Spec action | Code site (as-built, 8a-1b-beta) | Invariant pinned |
 |---|---|---|
-| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` + `notes_deliver`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
-| `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`) | `kernel/proc.c::el0_return_stop_check` parks via `sleep(&t->debug_rendez, debug_stop_wake_cond, p)` -- `kernel/sched.c::sleep` takes the per-Thread `wait_lock`, registers `rendez_blocked_on = &t->debug_rendez` + `THREAD_SLEEPING`, re-checks the cond BEFORE sleeping | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. |
+| `TailStep` (die-check FIRST, then the stop handshake) | `arch/arm64/vectors.S` EL0-return tail: `.Lel0_sync_return` (`bl el0_return_stop_check` AFTER `el0_return_die_check` and BEFORE `notes_deliver_at_el0_return`, whose re-pass runs both again for a stop the notes leg applies -- `tail_order.tla`) + the `0x480` IRQ slot (AFTER `el0_return_die_check`). The leg is `kernel/proc.c::el0_return_stop_check` (fast-path load, else the park loop) | `EventuallyAllDead` (DeathWinsOverStop): the die-check precedes the stop-check; the loop re-checks `group_exit_msg` (-> `thread_exit_self`) on every wake so a resume never eret-s a dying Thread. `BUGGY_STOP_BEFORE_DIE` = the leg ordered before the die-check. |
+| `Acquire` / `RegisterObserve` (register-then-observe UNDER `wlock`; proceed only while no death is published; a latch at the handshake parks the Thread all the same) | `kernel/proc.c::el0_stop_park` (the loop both stop legs share; the tail's leg `el0_return_stop_check` passes `stop_park_wake_cond`) parks via `sleep_death_only(&t->debug_rendez, wake_cond, p)` -- `kernel/sched.c::sleep_common` in its death-only mode takes the per-Thread `wait_lock`, registers `rendez_blocked_on = &t->debug_rendez` + `THREAD_SLEEPING`, re-checks the cond BEFORE sleeping, and returns early only for `group_exit_msg` (`thread_group_death_pending`), never for a latch. The proceed path re-checks `group_exit_msg` (ACQUIRE) after `wake_cond` passes | `NoLostStop` (I-9): a Thread the debugger confirms is genuinely parked. `NoEretIntoDeath`: the EXITKILL release (`devproc_debug_release_cb`) terminates and THEN clears the stop, both RELEASE, so a Thread that read the cleared flag sees the terminate at the re-check. `BUGGY_NO_DEATH_RECHECK` = no re-check (`no_death_recheck_tail`). The pre-5g exits for a latch (`LatchExit`) are knobs here and on `ResumeThread`. |
 | `RegisterBuggy` (observe BEFORE register, OUTSIDE the lock) | (none -- the anti-pattern the impl does NOT do; the buggy cfg only) | `BUGGY_OBSERVE_BEFORE_REGISTER` makes `NoLostStop` fail. |
-| `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `parked && on_cpu==false`. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
+| `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `debug_stop_req` is set (the model's `sflag`) and every thread is `parked && on_cpu==false` (a job stop or a birth hold parks threads too, and neither is a debug stop). A dying target (`group_exit_msg` set) reads gone and ends the wait instead: its closer no longer parks for a stop (DEBUG-FS-DESIGN 5g), and the model's death is its Threads reaching `dead`, below this. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
 | `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/proc.c::proc_debug_resume` walk (waking only `rendez_blocked_on == &peer->debug_rendez` peers) + the `proc_group_terminate` death cascade. The per-Thread `debug_rendez` is single-waiter, and `wakeup` re-validates `r->waiter` under `r->lock`; all resume paths are serialized under `g_proc_table_lock` | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
-| `ResumeThread(t)` (woken park -> re-run the tail) | `kernel/proc.c::el0_return_stop_check` loop -- a woken parked Thread re-checks `group_exit_msg` (death wins) then the stop flag; returns to the tail (-> eret) only when cleared | a resume never resumes a dead Thread; death wins on the re-run. |
+| `ResumeThread(t)` (woken park -> re-run the tail; a wake by the latch alone, with the park's condition false and no death published, is ABSORBED: the Thread stays parked, and confirmed) | `kernel/proc.c::el0_stop_park` loop -- a woken parked Thread re-checks `group_exit_msg` (death wins) then the stop flags; returns to the tail (-> eret) only when both owners are clear and death is still unpublished. The latch's wake (`proc_interrupt_terminate_wake`) never returns the park: `sleep_death_only` re-checks and sleeps again (DEBUG-FS-DESIGN 5g) | a resume never resumes a dead Thread; death wins on the re-run. `ParkEndsOnlyInDeath`: a parked Thread ends only in a group death. `BUGGY_TAIL_LATCH_ERETS` = the latch returns the park and the tail erets with the stop set (the pre-5g leg; `tail_latch_erets`, `NoLostStop`); `BUGGY_LATCH_ENDS_STOP` = the park ends the Thread for the latch (the pre-5g birth rule; `latch_ends_stop`). |
+| `BirthArrive` / `BirthMark` (the held child's head Thread reaches its birth tail; `unborn` -> `parked`, waking the spawner) | `arch/arm64/vectors.S::userland_enter_held` (the zeroed first-entry frame from `kernel/proc.c::el0_birth_frame_init`, then the birth tail, straight-line: preempt check, die-check, `el0_birth_park`, note delivery, `.Lexception_return`) + `kernel/proc.c::el0_birth_park` -> `proc_birth_hold_mark_parked_locked` under `g_proc_table_lock` (every write of the mark wakes the parent's `child_waiters`) | `BirthWaitReleases`: the arrival releases the spawner's wait. |
+| `BirthLoop` / `BirthAcquire` / `BirthRegisterObserve` / `BirthResume` (the birth park: proceed only with the hold AND both stop owners clear, then only while no death is published; a latch's wake is absorbed as at the tail) | `kernel/proc.c::el0_stop_park(ctx, t, p, birth_park_wake_cond)` -- the tail's loop with a wider condition; `birth_park_wake_cond` reads the hold FIRST (ACQUIRE), then `proc_stop_requested`. A latched interrupt's wake is absorbed by `sleep_death_only`: the child stays held, and meets the note at its first checkpoint after the release (DEBUG-FS-DESIGN 5g) | `NoEL0WhileHeld` + `NoEretIntoDeath` + `ParkEndsOnlyInDeath`. `BUGGY_BIRTH_LATCH_ERETS` = the latch returns the park and the birth tail erets (`birth_latch_erets`); `BUGGY_LATCH_ENDS_STOP` = the park ends the child (`latch_ends_stop`). `BUGGY_HELD_RUNS_FREE` = the park returns at once; `BUGGY_NO_DEATH_RECHECK` = no re-check after the wake condition (`no_death_recheck`, the finding the clean held cfg made against the first draft). The re-run knob of audit round 1 (F1, a masked spin once note delivery declined a frame) retired with the old rule: the park consults no note delivery, so nothing re-runs. |
+| `PostInterrupt` + `WakeFrom(t, "intr")` (an interrupt-terminate latched on any live target; its post wakes either park) | the LS-5c latch, armed on the note's commit when nothing would catch the note, and `kernel/proc.c::proc_interrupt_terminate_wake`, which wakes each peer's `rendez_blocked_on` except a Thread's own `debug_rendez`: the kernel passes a stop park by, where the model's wake reaches it and is absorbed. The absorb changes no variable, so the kernel's runs are among the model's, with steps left out (the caught note's walk and a second stop's sleeper walk skip the same way). A `sleep_death_only` sleep still absorbs any wake that reaches it (re-check, re-sleep); the note stays queued until the stop clears; the sync and birth tails then take it as the park ends, their notes leg following the stop leg (`tail_order.tla` `MeetsQueue`), and the IRQ tail and the nested parks at the next checkpoint | `ParkEndsOnlyInDeath` + `NoLostStop` (the tail) + `NoEL0WhileHeld` (the birth park). |
+| `RequestStop` on a held target + `ConvertFinish` (deliver the stop, THEN clear the hold: two stores in one lock section) | `kernel/devproc.c` `DBG_RC_STOP`: `proc_debug_stop_deliver(target)` then `proc_birth_hold_convert_locked(target)` (which leaves the hold standing when no stop is pending), under `g_proc_table_lock` | `NoEL0WhileHeld`: the park's hold-first read sees at least one of them. `BUGGY_CONVERT_CLEARS_FIRST` = the other order. A dying target takes no stop in the kernel (`proc_debug_stop_deliver` refuses it, so the conversion leaves the hold standing, and the held child dies at a death check: the birth park's once it has parked, or the birth tail's, before the park, while it is still loading); `RequestStop` and `FaultStop` carry no `~gflag` guard, so the refusal only removes runs (DEBUG-FS-DESIGN 5g). |
+| `StartRelease` + `ReleaseSlot`'s detach branch (RELEASE: clear the hold, THEN the resume's wake) and the implicit close (KEEPS the hold) | `kernel/devproc.c` `DBG_RC_START` and the explicit `detach` in `devproc_debug_walk_cb`: `proc_birth_hold_release_locked` then `proc_debug_resume`; `devproc_debug_release_cb` (the ctl fd closing without detach) leaves the hold | `EventuallyHoldResolved`; `licensed` only on a deliberate release (`NoEL0WhileHeld`). |
+| `SpawnerScan` / `SpawnerWakeUp` (the synchronous held spawn) | `kernel/syscall.c` spawn body -> `kernel/proc.c::spawn_await_birth` -> `await_child_release` (the vfork park generalized, on `child_waiters`) with `spawn_birth_released` (the child parked, released, not ALIVE, or gone) | `BirthWaitReleases`. `BUGGY_BIRTH_WAIT_UNWOKEN` = clearing the hold does not wake the spawner. |
+| `PostSpawnerInterrupt` / `SpawnerLatchReturn` (the spawner's own latch while it waits: the ghost `slatch`) | `kernel/proc.c::await_child_release` sleeps in `sleep_death_only`, so the spawner's latch returns neither `spawn_await_birth` nor the vfork suspend (`cow.tla` has no interrupts; `birth_hold.birth_wait_survives_latch` is the shared park's witness) | `SpawnReturnsAfterBirth`. `BUGGY_SPAWNER_LATCH_RETURNS` = the wait returns on the latch, as a plain sleep's `SLEEP_INTR` made it (`spawner_latch_returns`). |
+| `SpawnerDie` (the orphan rule) | `kernel/proc.c::proc_become_zombie_locked` -> `proc_birth_hold_orphan_rule_locked`, before the reparent: every ALIVE child whose hold is still set is `proc_group_terminate`d ("launcher exited") | `EventuallyHoldResolved`. `BUGGY_ORPHAN_HOLD_STRANDS` = no rule. |
 | `MarkExitkill` (the `exitkill` verb -> mark a launched target die-with-launcher; 5d) | `kernel/devproc.c`: the `exitkill` ctl verb (`devproc_debug_walk_cb` / `CTL_VERB_EXITKILL`) sets `target->debug_exitkill = true`, owner-gated (`target->debug_owner == c`, under `g_proc_table_lock`). Ambush: `pkg/proc/native/proc_thylacine.go::Launch` sends it after attach+stop; `Attach` does not | (the mark; the invariant it feeds is `EventuallyLaunchedDies` on `ReleaseSlot`). |
 | `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume, OR terminate a launched target) | `kernel/devproc.c`: the `detach` verb branch (`devproc_debug_walk_cb`, which CLEARS `debug_exitkill` -> resume) + the ctl-fd close hook (`devproc_close` -> `devproc_debug_release_cb`, incl. #68/#926 close-at-exit) clear `debug_owner`; the close hook branches on `debug_exitkill`: an `exitkill`-marked ALIVE target is `proc_group_terminate`d (5d, the EXITKILL refinement -- the #811 cascade wakes the debug-parked threads to die at the die-check), else `proc_debug_resume` (clear the stop + wake all parked) | `EventuallyResumed` (NoStrand) for an attached target + `EventuallyLaunchedDies` for a launched one: the handle-lifetime-tied slot resumes-OR-terminates the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes; `BUGGY_EXITKILL_IGNORED` = a launched target is resumed (orphaned) instead of terminated. |
 | `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads via `rendez_blocked_on`). |
 
-Pre-commit gate: `debug_stop.cfg` clean GREEN + the 4 buggy cfgs confirmed, on
-any change to the EL0-return tail stop leg (`el0_return_stop_check`), the
-stop-park register-then-observe (`sleep` on `debug_rendez`), the stop-delivery
-cascade (`proc_debug_stop_deliver`), the resume cascade (`proc_debug_resume`),
-or the ctl-fd-close resume (`devproc_close`). v1.0 corner (documented, off the
-model's death abstraction): a SOFT interrupt-terminate latch (LS-5c, no
-`group_exit_msg`) that lands while a Thread is parked bails the park to the tail
-so `notes_deliver` delivers it at the next checkpoint (necessary to avoid a
-sleep()-SLEEP_INTR livelock; the target is dying anyway). The model's death =
-`group_exit_msg` (the hard, N-4 path), which the loop handles airtight.
+Pre-commit gate: `debug_stop.cfg` + `debug_stop_held.cfg` clean GREEN + all 17
+buggy cfgs confirmed (`specs/check-debug-stop.sh`), on any change to the
+EL0-return tail stop leg (`el0_return_stop_check`), the shared park loop
+(`el0_stop_park`, its register-then-observe `sleep_death_only` on
+`debug_rendez` and its death re-check), the death-only sleep itself
+(`sleep_common`'s `SLEEP_UNWIND_DEATH` mode, `thread_group_death_pending`), the
+stop-delivery cascade (`proc_debug_stop_deliver`), the resume cascade
+(`proc_debug_resume`), the ctl-fd-close resume (`devproc_close`), the birth
+park (`userland_enter_held`, `el0_birth_park`, `birth_park_wake_cond`), the
+hold's writers (`proc_birth_hold_*_locked`), the STOP / START / detach handling
+of the hold, the birth wait (`spawn_await_birth`, `await_child_release`), or
+the orphan rule, or to the park predicate (`proc_stop_requested` and its death
+gate, the tail's `proc_stop_owned`) and the walks that pass a stop park by
+(`proc_interrupt_terminate_wake`, `proc_caught_note_wake`,
+`proc_stop_wake_sleepers_locked`). Both parks' answer to a latched interrupt is
+modelled (2026-09-30, DEBUG-FS-DESIGN 5g): the wake is absorbed, and the note
+waits until the stop clears (where the Thread then meets it is `tail_order.tla`'s,
+below, whose gate a change to the tails' leg order also runs). `ParkEndsOnlyInDeath`
+and `SpawnReturnsAfterBirth` restate the clean model's own guards, so the clean
+run cannot fail them: each earns its place by the buggy cfg that puts a pre-5g
+exit back and violates it, and the kernel tests hold the code to it. The model
+has no note delivery and no closer, so what a Thread does with its latch once it
+runs again, and a dying Proc's exit close, are the tests' to show
+(`rendez.death_only_*`, `rendez.stopped_sleeper_holds_latch`,
+`rendez.{latch,stop}_wake_skips_stop_park`, `rendez.exit_close_*`,
+`birth_hold.birth_wait_survives_latch`, `birth_hold.held_spawn_death_wins`,
+`devproc.debug_stop_start_resume` (f), debug-probe's intr leg and held leg 4,
+and jc-probe's `killst` rung, where a killed job-stopped child holding a staged
+9P write is reaped with no resume). A compute-bound Thread meets the
+note only at a syscall's tail -- the IRQ tail delivers no notes, a seam shared
+by every running Thread. The model's death = `group_exit_msg` (the hard, N-4
+path), which the loop handles airtight.
 
 ## debug_step.tla — Go IDE Stage 8a-2b (the single-step machine; spec-first, model-first)
 
 A SIBLING of `debug_stop.tla` (NOT an extension -- `debug_stop`'s 4 buggy cfgs
 are the landed gate, and a breakpoint-fired stop is trigger-agnostic so it reuses
 that machinery unchanged). The ONLY genuine protocol growth in 8a-2 is the STEP:
-a `step` resumes a stopped Thread for EXACTLY ONE EL0 instruction, then re-parks;
+a `step` resumes a stopped Thread for AT MOST ONE EL0 instruction (none when the
+resume meets a note with a handler, DEBUG-FS-DESIGN 5.5), then re-parks;
 the death composition rides the SAME tail die-check-first (the loom_multishot /
 loom_order sibling precedent). Landed model-first at **8a-2b-alpha**; the impl
-sites land at **8a-2b-2** (this is a RESERVATION until then).
+sites landed at **8a-2b-2**.
 
 | cfg | knob(s) | checks | outcome | distinct |
 |---|---|---|---|---|
 | `debug_step.cfg` | all knobs FALSE (2 Threads) | `Safety` (StepExactlyOne) + `EventuallyAllDead` + `StepEventuallyReparks` | clean | 146 |
-| `debug_step_buggy_runs_free.cfg` | `BUGGY_STEP_RUNS_FREE` | `Safety` | violation (StepExactlyOne) | 68 |
+| `debug_step_buggy_runs_free.cfg` | `BUGGY_STEP_RUNS_FREE` | `Safety` | violation (StepExactlyOne) | 33 (`-workers 1`) |
 | `debug_step_buggy_death_lost.cfg` | `BUGGY_STEP_DEATH_LOST` | `EventuallyAllDead` | violation | 146 |
 
-| Spec action | Code site (RESERVED -- lands at 8a-2b-2) | Invariant pinned |
+| Spec action | Code site | Invariant pinned |
 |---|---|---|
 | `RequestStep(t)` (arm a step, wake to the tail) | the `step` ctl verb (`kernel/devproc.c`) -> a per-Thread step-armed flag + the debug-rendez wake (`proc_debug_resume`-shaped) | -- |
-| `Tail(t)` (die-check FIRST, then arm SS or re-park) | `kernel/proc.c::el0_return_stop_check` extended: after the die-check, if a step is armed set `MDSCR.SS` + `SPSR.SS` in the resumed frame (arm one instruction) else re-park | `EventuallyAllDead` (death wins over a step); the die-check-first ordering. `BUGGY_STEP_DEATH_LOST` = the SS EC auto-continues bypassing the tail die-check. |
+| `Tail(t)` (die-check FIRST, then arm SS or re-park) | `kernel/proc.c::el0_return_stop_check` -> `el0_stop_park`: after the die-check, a park left with the step armed sets `SPSR.SS` in the resumed frame (`MDSCR.SS` is the per-thread debug state `hwdebug.c` loads), else it re-parks. On the synchronous tail the notes leg follows, and a note with a handler clears `SPSR.SS` again, so that step runs no instruction and reports at the handler's entry (DEBUG-FS-DESIGN 5.5; beneath this model, which has no notes) | `EventuallyAllDead` (death wins over a step); the die-check-first ordering. `BUGGY_STEP_DEATH_LOST` = the SS EC auto-continues bypassing the tail die-check. |
 | `StepExec(t)` (one EL0 instruction -> SS EC -> tail) | `arch/arm64/exception.c` EC 0x32 (software step) route -> return to the EL0-return tail (re-park); `arch/arm64/hwdebug.c` the SS-machine arm/disarm + the step-over-breakpoint dance (disable the bp E-bit, step, re-enable) | `StepExactlyOne` (one instruction per step window). `BUGGY_STEP_RUNS_FREE` = the SS EC never re-traps (the SPSR.SS/MDSCR.SS stuck/missing-re-trap family). |
 | `SetGflag` / `DeathWake` | `kernel/proc.c::proc_group_terminate` + the death cascade (unchanged from `debug_stop`) | death completes even against a step in flight. |
 
 Pre-commit gate (from 8a-2b-2): `debug_step.cfg` clean GREEN + the 2 buggy cfgs
 confirmed, on any change to the step arm/re-park (`el0_return_stop_check` step
 leg), the SS-machine (`hwdebug.c`), or the EC 0x32 route (`exception.c`).
+
+## tail_order.tla — the EL0-return tails' leg order (operator vote 2026-10-05, "Stop before notes"; DEBUG-FS-DESIGN 4.2, 5.5, 5g)
+
+A companion to `debug_stop.tla`, which verifies the park itself and has no note
+delivery. This model abstracts the park to one step (death if the group is
+dying; hold while a stop owner or the birth hold is set; proceed otherwise) and
+checks where the tails call it: the die-check, the stop leg, the notes leg, and
+the notes leg's re-pass for a stop it applies, all inside one budget. It landed
+with the tail-order chunk's audit round 1 (F6: the re-pass was outside every
+model, and the debug row's model gate reads on any change to where a park is
+called).
+
+| cfg | knob(s) | checks | outcome | distinct (`-workers 1`) |
+|---|---|---|---|---|
+| `tail_order.cfg` | none; DEPTH 3 | `TypeOK` + `MeetsQueue` + `NoEretUnderOwnStop` + `TailEnds` | clean | 23146 |
+| `tail_order_birth.cfg` | `BIRTH` | the same | clean | 45272 |
+| `tail_order_buggy_notes_first.cfg` | `BUGGY_NOTES_FIRST` | the invariants | violation (`MeetsQueue`) | 3146 |
+| `tail_order_buggy_birth_notes_first.cfg` | `BUGGY_NOTES_FIRST` + `BIRTH` | the invariants | violation (`MeetsQueue`, on the birth tail) | 3390 |
+| `tail_order_buggy_no_repass.cfg` | `BUGGY_NO_REPASS` | the invariants | violation (`NoEretUnderOwnStop`) | 649 |
+| `tail_order_buggy_budget_first.cfg` | `BUGGY_BUDGET_FIRST` | the invariants | violation (`NoEretUnderOwnStop`) | 4368 |
+| `tail_order_buggy_no_budget.cfg` | `BUGGY_NO_BUDGET` | the invariants + `TailEnds` | violation (`TailEnds`; the invariants hold) | 9022 |
+
+| Spec action | Code site (as-built) | Invariant pinned |
+|---|---|---|
+| `Enter` / `DieCheck` / `StopLeg` / `Park` (the first two legs; the park as one step) | `arch/arm64/vectors.S` `.Lel0_sync_return`: `bl el0_return_die_check`, `bl el0_return_stop_check`, `bl notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, `notes_deliver_at_el0_return` | `MeetsQueue`: the stop leg runs before the notes leg, so a note posted during a stop is met as the stop ends. `BUGGY_NOTES_FIRST` = the order before the vote (the S1 sabotage's shape). |
+| `NotesLeg` (`"plain"` / `"caught"` / `"term"` / `"susp"`) | `kernel/notes.c::notes_deliver_tail`: the discard loop (`if (++*passes < NOTE_QUEUE_DEPTH) goto again; return false;`), a frame build (returns false), a terminating default (`exits`), the stop arm (`notes_stop_dequeue_locked` -> `proc_job_stop_self`, returns true, as does the orphan rule's discard) | -- |
+| `Repass` + `Proceed` at `leg = "repass"` (the die-check, the stop leg, then `++passes`) | `kernel/notes.c::notes_deliver_at_el0_return`: `while (notes_deliver_tail(ctx, &passes)) { el0_return_die_check(); el0_return_stop_check(ctx); if (++passes >= NOTE_QUEUE_DEPTH) break; }` | `NoEretUnderOwnStop`. `BUGGY_NO_REPASS` = the stop arm returns false (the S3 sabotage's shape); `BUGGY_BUDGET_FIRST` = the budget break before the die-check and the stop leg. |
+| `Spend` (one budget for the passes and the discards) | `notes_deliver_tail`'s `*passes` and the loop's `++passes` | `TailEnds`: a flood cannot hold the masked tail. `BUGGY_NO_BUDGET` = neither counts. |
+| `Post` / `DebugStop` / `DebugResume` / `JobStop` / `JobCont` / `Kill` / `Release` | `notes_post`; `proc_debug_stop_deliver` / `proc_debug_resume`; the job stop and continue (`proc_job_stop_self`, `proc_job_cont_proc`); `proc_group_terminate`; `proc_birth_hold_release_locked` | -- |
+
+Abstracted, said so the green reads no larger: the park (`debug_stop.tla`'s);
+the IRQ tail, which delivers no notes; a note posted in the masked window
+between the notes leg's last decision and the eret, which waits for the next
+checkpoint (`seam-el0-irq-tail-no-notes`); notes left for a self-managing Proc's
+fd reader; and registers (that each pass re-reads the handler, `sp` and the
+sigtab is the kernel tests' and round 1's W3). The kernel test
+`rendez.tail_parks_for_the_stop_it_applies` and debug-probe's resume,
+death-step and caught-step legs hold the code to the model.
+
+Pre-commit gate: `specs/check-tail-order.sh` (the 2 clean cfgs at their pinned
+counts, the 5 buggy cfgs violating their named properties), on any change to
+the tails' leg order (`.Lel0_sync_return`, `userland_enter_held`), to
+`notes_deliver_at_el0_return`'s loop, to what `notes_deliver_tail` returns or
+spends, or to `NOTE_QUEUE_DEPTH` as the tail's budget.
 
 ## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
 

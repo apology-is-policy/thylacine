@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-09-30
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -123,6 +123,11 @@ exit and a kill alike:
   consumed there) — [[sub-kernel-jobctl]] owns it, and the ordering is the
   whole trick: it asks "orphaned once I am gone" while the answer is still
   computable;
+- the birth-hold orphan rule, also **before** the reparent and for the same
+  reason: every ALIVE child whose birth hold is still set, neither converted by
+  a debugger's `stop` nor released, is group-terminated with "launcher exited"
+  ([[sub-kernel-birth-hold]]; operator vote 2026-09-29). A held child whose
+  launcher died would otherwise sit parked, adopted by init, forever;
 - reparenting orphans to init, else `kproc` — and NAMING each one on the
   uart (#80): `proc: orphan pid=N name="X" (parent pid=M name="Y" exiting)
   -> adopted by pid=A`. This is the one point where the kernel still holds
@@ -194,6 +199,42 @@ whole finding: `group_exit_msg` is set on *every* `SYS_EXIT_GROUP` — a clean
 "dying" and every sleep-capable hook short-circuited, silently dropping the
 dev9p write-behind flush and skipping the close-time Tclunk.
 
+A second kill ends that hold (ARCH 7.9.1 part B, `dec-2026-10-07-exit-close`).
+`proc_group_kill` -- the `kill` note's cascade (syscall.c) and the `/proc` ctl
+`kill` (devproc.c), never a hangup, `EXITKILL` or a legate scope's end, which
+keep the string wrapper -- runs the same core as every termination, and when
+its CAS on `group_exit_msg` loses (the group is already terminating), or the
+Proc carries `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`, so
+an `exits()` close, which sets no group exit message, counts as terminating;
+`exits()` publishes it first, under `g_proc_table_lock` before it drops the
+lock for the close, so no kill falls between the exit's commitment and the
+mark -- witness `p9_closer.first_kill_forces_exits_close`),
+it ORs `PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the
+wake loop.
+notes.c's `thread_death_held` then reads the hold as lifted: the final close's
+send is refused, its wait unwinds through Tflush, and what it could not finish
+goes to the closer ([[sub-kernel-ninep-dev9p]], part C). The first kill never
+forces, so an orderly exit close still has its flush reply before the parent's
+`wait` returns (I-38). `loom_free`'s SQPOLL join does not ride
+`exit_close_active` any more: it sets its own `kthread_join_active`, which
+holds every death, forced or not ([[sub-kernel-loom]]).
+
+Because the closer reads no death, a stop must not park it either: group death
+clears no stop owner, and a closer parked for a stop would hold the dying Proc
+until the stop cleared (read from the code: a `kill` of a Ctrl-Z'd job with a
+dirty 9P file would live on until `tty:cont`, and a debugger that killed its
+stopped target and waited for the exit before closing its ctl fd would
+deadlock with it). So the park predicate, `proc_stop_requested`, reads false
+once `group_exit_msg` is set, and the closer's sleeps never detour into a stop
+park (DEBUG-FS-DESIGN 5g). A closer that parked while its group still lived,
+as an `exits()` close honours a stop, leaves the park when the group dies: the
+death cascade's wake finds the predicate false. A dying Proc is not stopped to
+anything else either: both stop delivers refuse it, a parent's wait reports
+neither its stop nor its continue, `stop`, `waitstop` and a step's wait read it
+as gone, the orphan rule does not count it as a stopped member, and
+`/ctl/procs` does not show it STOPPED ([[sub-kernel-jobctl]],
+[[sub-kernel-devproc]]).
+
 **The territory release rides the same window** (arm-6 Part D, IDENTITY-DESIGN
 9.9.1; extends #926/#68 from the handle table to the namespace). A Proc's
 Territory — its per-Proc mounts + name-based cwd — was released only at reap
@@ -262,15 +303,54 @@ suspended", and the reason is this dossier's recurring one: a test would be a
 second place that has to agree with the park about who is waiting. A spurious
 wake costs a re-scan.
 
+**The held spawn shares the park, and is the exception to its principle
+(2026-09-29).** A spawn asked with `SPAWN_DEBUG_HELD` suspends its caller until
+the child has parked in front of its first instruction
+([[sub-kernel-birth-hold]]). The waiting discipline now lives once, in
+`await_child_release`, and the vfork suspend and the birth wait differ only in
+the release predicate each passes. Death releases both for free, through the
+same chokepoint wake. Here the release condition *is* a record, because
+nothing already written down says "the child has finished loading": the
+child's birth-hold mark. The principle above is kept by the next best means.
+Every write of that mark goes through one setter pair that wakes
+`child_waiters` under the lock, so no path out of UNBORN can skip the wake.
+Since 2026-09-30 the park sleeps in `sleep_death_only` (DEBUG-FS-DESIGN 5g),
+so only the caller's group death returns it early. Its own terminate latch is
+revocable, since a peer can install a handler or open the notes file, and a
+parent that returned on it could live on with a vfork child still on its stack
+or a held child still loading.
+
 **The stop park.** Two independent owners can park a thread —
 `debug_stop_req` (I-39) and `job_stop_req` (I-20) — and they share one park
 (`el0_return_stop_check`, the `sleep`/`tsleep` detour, and each Thread's own
 `debug_rendez`). Each resume clears **only its own owner**; the park
-predicate is the disjunction. Death overrides both: the stop-check runs
-*after* the die-check at the tail, and the park loop re-checks
-`group_exit_msg` on every wake, so a kill racing a stop terminates the
-thread inside the park rather than eret-ing to EL0. The second owner and its
-fans are [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
+predicate is the disjunction, false in a dying group. Death overrides both:
+the stop-check runs *after* the die-check at the tail (and before the notes
+leg, so a stop in turn wins over a note), and reads the owners'
+flags (`proc_stop_owned`), not the predicate, so a thread killed between the
+two still enters the park; the park loop re-checks `group_exit_msg` on every
+wake, so a kill racing a stop terminates the thread inside the park rather
+than eret-ing to EL0. Only death does: the park
+sleeps in `sleep_death_only`, so a terminate latch's wake is absorbed and a
+stopped thread stays stopped. Once a resume lets it run, it meets the note as
+the park returns, in the notes leg that follows on the synchronous and birth
+tails; a park on the IRQ tail, which delivers no notes, leaves it to the next
+checkpoint (DEBUG-FS-DESIGN 4.2, 5g). The second owner and its fans are
+[[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
+
+The loop checks death twice per pass since 2026-09-29: at the top, and again
+after the wake condition passes. The second check is for a release that
+follows a terminate. The debugger's exitkill release terminates the group and
+only then clears the stop, and a `start` sent after a `kill` clears after the
+kill. A thread that passed the top check just before the terminate would read
+the cleared flags and `eret` into a group already dying. Both clears are
+RELEASE stores ordered after the terminate's, so the ACQUIRE re-check sees it.
+The held model of [[spec-debug-stop]] found the gap on its first run, and it
+was never specific to the birth hold. The birth park runs the same loop with
+its own wake condition. The model's action property `NoEretIntoDeath` states
+the rule for both parks, and two buggy cfgs remove the check, one at each
+park: `no_death_recheck` at the birth park and `no_death_recheck_tail` at the
+stop park.
 
 ## Data structures
 
@@ -315,7 +395,8 @@ target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
   sleeper's cond-check and its sleep, for **every** rendez sleep. Extended
   by LS-5 to the terminate-disposition `interrupt` latch, which is read
   lock-free by the sleep predicate precisely because the sleep path can
-  never take the notes-queue lock.
+  never take the notes-queue lock. The five death-only waits read group death
+  alone and register for the death wake exactly as every other sleep does.
 - I-39/I-20 compatibility (`StopCompatI39`): neither resume may clear the
   other's owner.
 - #713 composition: the die-check runs *before* the DAIF-masked
@@ -369,15 +450,20 @@ What a change **must** re-establish:
   death path belongs in `proc_become_zombie_locked`, not in `exits()`;
 - the close window's three properties, and that `exit_close_active` stays
   owner-set, bounded to the one close pass, and checked *first* in
-  `thread_die_pending`;
-- death winning over both stop owners at every branch.
+  `thread_die_pending` (through `thread_death_held`);
+- that only a kill sets `PROC_FLAG_EXIT_CLOSE_FORCED` -- on a lost CAS or a
+  set `PROC_FLAG_EXIT_CLOSING` -- and before the wake loop (a close that
+  re-checks after the wake must see it);
+- death winning over both stop owners at every branch, the exit close
+  included (a dying group is never asked to park).
 
 ## Seams
 
 - [[seam-exiting-tails-never-sleep]] — the recorded property a future
   anon-COW/pageout must re-establish.
-- [[seam-close-flush-unbounded]] — a wedged trusted server can strand a
-  flagged close, unbreakable by a further kill.
+- [[seam-close-flush-unbounded]] — a server that never answers held a flagged
+  close; parts A-C (2026-10-07) bound it: the clunk never waits, and a second
+  kill forces the close and hands the rest to the closer.
 - [[seam-death-cascade-smp-harness]] — the 3-way interleaving no
   deterministic test reaches.
 
@@ -391,10 +477,12 @@ What a change **must** re-establish:
 - **`group_exit_msg` set does not mean "killed".** A clean `exit_group(0)`
   sets it too. Treating the two as the same was #68 R1-F1
   ([[fnd-68-r1-f1]]) and cost silent data loss.
-- **The re-admitted strand is not breakable.** `exit_close_active` suppresses
-  both death legs, so a wedged flagged close parks the dying Proc unreapably.
-  That is a deliberate trade (the alternative was the parent hanging), whose
-  precondition is an already-degraded system.
+- **The re-admitted strand breaks on a second kill, not on the first.**
+  `exit_close_active` suppresses both death legs, so a server that never
+  answers holds the final close until a kill forces it (part B); the first
+  kill, an `exit_group`, a hangup or `EXITKILL` never force. A forced exit's
+  parent can read the file before the closer's write lands: the I-38 window
+  the second kill buys.
 - The interrupt-terminate wake deliberately omits both
   `torpor_wake_all_for_proc` and `smp_resched_others` — the former because
   torpor waiters are reachable via `rendez_blocked_on` anyway, the latter

@@ -36,11 +36,17 @@ pub fn fit(content_vis: usize, title: &str, right: &str, label: &str) -> usize {
 }
 
 /// A top border of total visible width `total`: `┌─ {title} ─..─ {right} ─┐`.
-/// `right` empty -> `┌─ {title} ─..─┐`. Fill is >= 1 (the caller sizes via `fit`).
+/// `right` empty -> `┌─ {title} ─..─┐`; both empty -> a plain `┌─..─┐` rule, as
+/// `bottom` gives for an empty label. Fill is >= 1 (the caller sizes via `fit`).
 pub fn top(total: usize, title: &str, right: &str) -> String {
     let t = title.chars().count();
     let mut s = String::new();
     s.push(TL);
+    if title.is_empty() && right.is_empty() {
+        s.extend(core::iter::repeat_n(H, total.saturating_sub(2)));
+        s.push(TR);
+        return s;
+    }
     s.push(H);
     s.push(' ');
     s.push_str(title);
@@ -119,6 +125,18 @@ mod tests {
         let line = top(30, "title", "");
         assert_eq!(vis(&line), 30);
         assert!(line.ends_with('┐'));
+    }
+
+    #[test]
+    fn top_with_nothing_to_name_is_a_plain_rule() {
+        // The frame of an untitled box: a bare rule of the same width as its
+        // bottom, never the `┌─  ─` gap a titled border leaves for its title.
+        let line = top(12, "", "");
+        assert_eq!(vis(&line), 12);
+        assert_eq!(line, "┌──────────┐");
+        assert_eq!(vis(&top(12, "", "")), vis(&bottom(12, "")));
+        // A title alone still reserves its gap.
+        assert!(top(12, "t", "").starts_with("┌─ t "));
     }
 
     #[test]

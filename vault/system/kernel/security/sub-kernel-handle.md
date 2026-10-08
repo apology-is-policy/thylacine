@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -32,6 +32,13 @@ word is the answer to "and what may it do with this particular reference".
 index, or `-1`. The caller must **already** have accounted for one reference
 on `obj` (the `burrow_create_anon`-consumed-reference convention);
 `handle_close` releases it.
+
+`handle_close_report(p, h, &close_rc)` is `handle_close` that also returns
+what the object's last close reported: for a Spoor, its Dev close hook's
+result (0 or negative, [[sub-kernel-dev]]); 0 for every other kind. Only
+`SYS_CLOSE` asks, to map a negative to `EIO` with the fd already gone
+(2026-10-07, ARCH section 21.11); `handle_close` and its other callers keep
+the 0 / -1 contract.
 
 `handle_get(p, h, out)` returns a **by-value snapshot** with the object's
 refcount already bumped; `handle_put` drops that borrowed reference. The

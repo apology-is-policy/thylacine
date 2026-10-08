@@ -433,6 +433,13 @@ case "$result" in
             grep -a '9p: close: clunk of fid' "$LOG_FILE" >&2 || true
             exit 1
         fi
+        # A last close's staged bytes that never reached a live server: bytes
+        # write() reported written are lost (ARCH 7.9.1 part C).
+        if grep -aq '9p: close: flush of fid' "$LOG_FILE"; then
+            echo "==> FAIL: a last close lost its staged bytes (9p: close: flush of fid)." >&2
+            grep -a '9p: close: flush of fid' "$LOG_FILE" >&2 || true
+            exit 1
+        fi
         # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
         # verdict. Both soft-skip when their external Alpine bundle is absent,
         # which is right, but nothing carried the skip into the exit status --

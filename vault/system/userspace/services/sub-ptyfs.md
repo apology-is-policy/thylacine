@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-09-28
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -362,12 +362,12 @@ The global FRAME coalescing that a compositor needs has no analogue here
   but the halves need not agree.
 - **A parked write (or read) pins a shared kernel 9P tag** until
   `poll_writes`/`poll_reads` replies, and every Proc reaches ptyfs through
-  ONE `/dev/pts` client, so enough simultaneously-parked ops (~64) exhaust
-  the kernel's `P9_SESSION_MAX_OUTSTANDING` (64) tag pool for *all* pts
-  users — a pre-existing class the parked reads already carried, now shared
-  by the writes. `MAX_FIDS` caps only one `Conn`'s contribution, not the
-  shared pool. The real fix is a kernel per-Proc outstanding-tag quota;
-  enqueued (the s7 F3 audit's lone P2), not closed here.
+  ONE `/dev/pts` client. Until 2026-10-07 ~64 simultaneously-parked ops
+  exhausted the kernel's 64-tag pool for *all* pts users and every further
+  op failed `EIO`. Since ARCH 21.11 the tag table grows, an op that finds the
+  op share (`P9_OPS_MAX`, 32767) full waits for a tag instead of failing, and
+  parked ops are threads waiting, so filling the share takes that many of
+  them. `MAX_FIDS` caps only one `Conn`'s contribution, not the shared pool.
 
 ## Provenance
 

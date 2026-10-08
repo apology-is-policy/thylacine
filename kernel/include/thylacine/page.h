@@ -169,9 +169,11 @@ static inline paddr_t kva_to_pa(const void *kva) {
 // the D-cache to the point-of-unification then invalidate the I-cache to PoU
 // over the range (ARM ARM B2.4). Required whenever bytes written via the data
 // path will subsequently be EXECUTED -- freshly demand-paged or copied text
-// (REVENANT: the file fault arm + exec's eager-from-file fallback). Strides by
-// the implemented line sizes from CTR_EL0; `addr`'s PA is the PoU line (D/I
-// caches are PIPT on ARMv8), so cleaning + invalidating the same VA suffices.
+// (REVENANT: the file fault arm + exec's eager-from-file fallback; I-42's code
+// pages). Strides by the implemented line sizes from CTR_EL0. `addr` may be any
+// alias of the bytes, typically the direct map: on an I-cache that aliases
+// (anything but PIPT, hw_icache_aliasing) the invalidate covers the whole
+// I-cache, so the lines fetched through the user's VA go too.
 // Defined in arch/arm64/mmu.c.
 void arch_icache_sync_range(const void *addr, size_t len);
 

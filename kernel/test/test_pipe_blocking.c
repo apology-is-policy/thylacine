@@ -84,6 +84,8 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_pipe_blocking_hangup_wakes_reader_with_eof(void);
+void test_pipe_blocking_hangup_wakes_writer_with_epipe(void);
 
 // =============================================================================
 // Consumer entries. Each: do one blocking op; publish the result (RELEASE, after
@@ -295,6 +297,66 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
     spoor_clunk(g_wr);
 }
 
+// The hangup (ARCH 21.10) wakes what the close of the write end wakes: a reader
+// blocked on the empty ring returns EOF, and a writer blocked on the full ring
+// is refused, because a hung-up write end takes no more bytes. Each is observed
+// before anything is closed; a sleeper the hangup failed to wake is then
+// released by a close's own wake, on the end the sleeper is not using, so a
+// RED run frees nothing under it.
+void test_pipe_blocking_hangup_wakes_reader_with_eof(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    g_consumer_result = -999; g_consumer_exited = false;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+
+    struct Thread *consumer = thread_create(kproc(), consumer_read_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+
+    bool hung = pipe_hangup_write(g_wr);
+    bool woke = consumer->state != THREAD_SLEEPING;
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    long rc = __atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE);
+    spoor_clunk(g_wr);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    test_kthread_join_free(consumer, &g_consumer_exited);
+    spoor_clunk(g_rd);
+
+    TEST_ASSERT(hung, "the write end hung up");
+    TEST_ASSERT(woke, "the hangup woke the reader blocked on the empty ring");
+    TEST_EXPECT_EQ(rc, 0L, "the woken reader reads EOF");
+}
+
+void test_pipe_blocking_hangup_wakes_writer_with_epipe(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    g_consumer_result = -999; g_consumer_exited = false;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+
+    static u8 fill[PIPE_BUF_SIZE];
+    TEST_EXPECT_EQ(dev_write(g_wr, fill, (long)PIPE_BUF_SIZE), (long)PIPE_BUF_SIZE,
+        "fill the ring");
+    struct Thread *consumer = thread_create(kproc(), consumer_write_one_byte_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create");
+    ready(consumer);
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
+
+    bool hung = pipe_hangup_write(g_wr);
+    bool woke = consumer->state != THREAD_SLEEPING;
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    long rc = __atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE);
+    spoor_clunk(g_rd);
+    TEST_YIELD_UNTIL_SOFT(__atomic_load_n(&g_consumer_result, __ATOMIC_ACQUIRE) != -999);
+    test_kthread_join_free(consumer, &g_consumer_exited);
+    spoor_clunk(g_wr);
+
+    TEST_ASSERT(hung, "the write end hung up");
+    TEST_ASSERT(woke, "the hangup woke the writer blocked on the full ring");
+    TEST_EXPECT_EQ(rc, (long)(-T_E_PIPE),
+        "the woken writer is refused: no byte follows EOF");
+}
+
 // THREE readers blocked on one empty pipe -- the fork/dup/thread-shared
 // endpoint shape. Proves three properties in one run:
 //   * NO SECOND-SLEEPER EXTINCTION: all three reach SLEEPING. On the retired
@@ -433,4 +495,158 @@ void test_pipe_blocking_multi_writers_share_one_full_pipe(void) {
     TEST_EXPECT_EQ(epipe_count, 2,
         "WAKE-ALL: one close edge released BOTH remaining writers with EPIPE "
         "(a wake-one bug strands one on the full ring forever)");
+}
+
+// =============================================================================
+// signal(7)'s list (ARCH 8.8.3). A pipe's read and write are waits a listed
+// Linux call reaches: a caught interrupt ends a Linux caller's blocked read or
+// write with -T_E_INTR, nothing moved. A native caller's wait rides it out and
+// ends on the data (natives never caught-unwind). The 9P byte-pipe transport
+// receives through the same wait, so an elected reader's receive opts in only
+// where its client opted that receive in -- srvconn's rule (recv_caught_ok).
+// =============================================================================
+
+static long caught_pipe_read(void *arg) {
+    (void)arg;
+    return dev_read(g_rd, g_consumer_buf, (long)sizeof(g_consumer_buf));
+}
+
+static void caught_pipe_feed(void *arg) {
+    (void)arg;
+    static const u8 byte = 0x5a;
+    (void)dev_write(g_wr, &byte, 1L);
+}
+
+void test_pipe_blocking_caught_note_ends_read(void);
+void test_pipe_blocking_caught_note_ends_read(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+    struct Proc *lin = test_caught_proc(true);
+    struct test_caught_leg leg = test_caught_run(lin, caught_pipe_read, NULL,
+                                                 caught_pipe_feed, NULL, false);
+    struct Proc *nat = test_caught_proc(false);
+    struct test_caught_leg ctl = test_caught_run(nat, caught_pipe_read, NULL,
+                                                 caught_pipe_feed, NULL, false);
+    test_caught_proc_free(lin, &leg);
+    test_caught_proc_free(nat, &ctl);
+    if (!leg.stranded && !ctl.stranded) {
+        spoor_clunk(g_rd);
+        spoor_clunk(g_wr);
+    }
+
+    TEST_ASSERT(lin != NULL && nat != NULL, "the Linux and the native Proc");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux reader blocked on the empty pipe, the note posted, the read returned");
+    TEST_ASSERT(leg.on_post,
+        "a caught note ends a Linux read blocked on an empty pipe (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not the byte the release fed");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native reader blocked, the note posted, the read returned");
+    TEST_ASSERT(ctl.rode_out, "control: the note woke the native reader and it slept again");
+    TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native read ends on the fed byte");
+}
+
+static long caught_pipe_write(void *arg) {
+    (void)arg;
+    static const u8 byte = 0x5b;
+    return dev_write(g_wr, &byte, 1L);
+}
+
+static void caught_pipe_take_one(void *arg) {
+    (void)arg;
+    u8 b;
+    (void)dev_read(g_rd, &b, 1L);
+}
+
+void test_pipe_blocking_caught_note_ends_write(void);
+void test_pipe_blocking_caught_note_ends_write(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+    for (u32 i = 0; i < PIPE_BUF_SIZE; i++) g_consumer_buf[i] = 0x11;
+    long filled = dev_write(g_wr, g_consumer_buf, (long)PIPE_BUF_SIZE);
+    struct Proc *lin = test_caught_proc(true);
+    struct test_caught_leg leg =
+        test_caught_run(filled == (long)PIPE_BUF_SIZE ? lin : NULL, caught_pipe_write,
+                        NULL, caught_pipe_take_one, NULL, false);
+    // The ring after the call: a write the note ended moved nothing.
+    long held = leg.stranded ? -1L
+                             : dev_read(g_rd, g_consumer_buf, (long)sizeof(g_consumer_buf));
+    u8 last = held > 0 ? g_consumer_buf[held - 1] : 0;
+    test_caught_proc_free(lin, &leg);
+    if (!leg.stranded) {
+        spoor_clunk(g_rd);
+        spoor_clunk(g_wr);
+    }
+
+    TEST_ASSERT(lin != NULL, "the Linux Proc");
+    TEST_EXPECT_EQ(filled, (long)PIPE_BUF_SIZE, "the pipe filled");
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux writer blocked on the full pipe, the note posted, the write returned");
+    TEST_ASSERT(leg.on_post,
+        "a caught note ends a Linux write blocked on a full pipe (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR: the write moved nothing");
+    TEST_EXPECT_EQ(held, (long)PIPE_BUF_SIZE, "the ring still holds the fill");
+    TEST_EXPECT_EQ((long)last, 0x11L, "and only the fill: the interrupted byte never landed");
+}
+
+// An elected 9P reader at a frame boundary, receiving from the byte-pipe
+// transport's rx pipe: reader_recv_frame's flags, with recv_caught_ok as the
+// client opted the receive in (client_wait's election: true; a send-path pump:
+// false, where an unwind drains nothing and the send retry would spin).
+struct caught_recv {
+    bool caught_ok;
+    bool note_unwound;
+};
+
+static long caught_pipe_recv(void *arg) {
+    struct caught_recv *cr = (struct caught_recv *)arg;
+    struct Thread *t = current_thread();
+    t->stop_no_park   = true;
+    t->stop_unwinds   = true;
+    t->note_unwound   = false;
+    t->recv_caught_ok = cr->caught_ok;
+    long r = dev_read(g_rd, g_consumer_buf, 1L);
+    cr->note_unwound  = t->note_unwound;
+    t->stop_no_park   = false;
+    t->stop_unwinds   = false;
+    t->note_unwound   = false;
+    t->recv_caught_ok = false;
+    return r;
+}
+
+void test_pipe_blocking_caught_note_scoped_to_reader_recv(void);
+void test_pipe_blocking_caught_note_scoped_to_reader_recv(void) {
+    g_rd = NULL;
+    g_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&g_rd, &g_wr), 0, "create");
+    struct caught_recv pump = { false, false };
+    struct caught_recv elect = { true, false };
+    struct Proc *p1 = test_caught_proc(true);
+    struct test_caught_leg a = test_caught_run(p1, caught_pipe_recv, NULL,
+                                               caught_pipe_feed, &pump, false);
+    struct Proc *p2 = test_caught_proc(true);
+    struct test_caught_leg b = test_caught_run(p2, caught_pipe_recv, NULL,
+                                               caught_pipe_feed, &elect, false);
+    test_caught_proc_free(p1, &a);
+    test_caught_proc_free(p2, &b);
+    if (!a.stranded && !b.stranded) {
+        spoor_clunk(g_rd);
+        spoor_clunk(g_wr);
+    }
+
+    TEST_ASSERT(p1 != NULL && p2 != NULL, "the two Linux Procs");
+    TEST_ASSERT(a.parked && a.posted && a.joined,
+        "pump: the receive blocked, the note posted, the receive returned");
+    TEST_ASSERT(a.rode_out && !a.on_post,
+        "a receive its client did not opt in rides the note out");
+    TEST_EXPECT_EQ(a.rc, 1L, "...and ends on the frame's byte");
+    TEST_ASSERT(!pump.note_unwound, "...with no note_unwound for the classifier");
+    TEST_ASSERT(b.parked && b.posted && b.joined,
+        "election: the receive blocked, the note posted, the receive returned");
+    TEST_ASSERT(b.on_post, "a receive its client opted in unwinds for the note");
+    TEST_EXPECT_EQ(b.rc, -(long)T_E_INTR, "EINTR from the transport's read");
+    TEST_ASSERT(elect.note_unwound,
+        "note_unwound is set, so client_wait hands the reader role off");
 }

@@ -96,6 +96,54 @@ fn echo_block(tag: &str, bytes: &[u8]) {
     }
 }
 
+// The launched program's ELF entry: e_entry, the little-endian u64 at offset 24
+// of an ELF64 header.
+fn elf_entry(path: &str) -> Option<u64> {
+    let mut f = File::open(path).ok()?;
+    let mut h = [0u8; 32];
+    let mut got = 0;
+    while got < h.len() {
+        match f.read(&mut h[got..]) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => got += n,
+        }
+    }
+    if !h.starts_with(b"\x7fELF") || h[4] != 2 {
+        return None;
+    }
+    let mut e = [0u8; 8];
+    e.copy_from_slice(&h[24..32]);
+    Some(u64::from_le_bytes(e))
+}
+
+// The PC in ambush's first `regs` listing. Delve prints one register per line as
+// `<name> = 0x<hex>` with the names right-aligned, so the line reads
+// `PC = 0x...` once its leading blanks go.
+fn first_pc(out: &[u8]) -> Option<u64> {
+    for line in out.split(|&b| b == b'\n') {
+        let start = line
+            .iter()
+            .position(|&b| b != b' ' && b != b'\t')
+            .unwrap_or(line.len());
+        if let Some(hex) = line[start..].strip_prefix(b"PC = 0x") {
+            let mut v: u64 = 0;
+            let mut digits = 0;
+            for &b in hex {
+                let d = match b {
+                    b'0'..=b'9' => b - b'0',
+                    b'a'..=b'f' => b - b'a' + 10,
+                    b'A'..=b'F' => b - b'A' + 10,
+                    _ => break,
+                };
+                v = v.checked_mul(16)?.checked_add(d as u64)?;
+                digits += 1;
+            }
+            return if digits > 0 { Some(v) } else { None };
+        }
+    }
+    None
+}
+
 // --- Stage A: version smoke (gated) ---
 fn version_smoke() -> Result<(), &'static str> {
     let mut child = match Command::new("/bin/ambush")
@@ -272,8 +320,10 @@ fn attach_e2e() -> bool {
 }
 
 // --- Stage C: launch E2E (the 8c-4 + fork-8c-2 + kernel-#95 HW-breakpoint proof) ---
-// `ambush exec /bin/ambush-child`: Ambush SPAWNS the child (attach-first Launch),
-// stops it before main.main, sets a HARDWARE breakpoint at main.parkLoop, then
+// `ambush exec /bin/ambush-child`: Ambush SPAWNS the child held (the birth hold,
+// DELVE-PORT-DESIGN 7 (b)), attaches and stops it in front of its first
+// instruction -- `regs` must show the PC at the ELF entry -- sets a HARDWARE
+// breakpoint at main.parkLoop, then
 // `continue` runs the target INTO the breakpoint (a HW code bp fires with PC ==
 // the bp'd instruction, on whichever M runs the migrated goroutine -- kernel #95
 // focuses that M). The inspect commands run against the bp-stopped multi-M
@@ -362,12 +412,32 @@ fn launch_e2e() -> bool {
     // 0 -- neither of which is the arm line.
     let saw_parkloop = line_with(&out, b"parkLoop", &[b"Breakpoint 1 set at"]);
     let saw_sentinel = contains(&out, b"768901734683508737");
+    // The held launch: the init script's first command is `regs`, run at the
+    // launch stop before anything resumes the target. A held child is parked in
+    // front of its first instruction, so its PC is the ELF entry. A child spawned
+    // running enters EL0 without looking for a stop, so a stop lands at its first
+    // trap -- a syscall or an interrupt -- once it has run at least one
+    // instruction, unless an interrupt is already pending at that first eret (a
+    // window of a few dozen instructions), which stops it at the entry having run
+    // nothing. So a launch that raced always fails this marker, and a build that
+    // spawns running fails it on all but a sliver of boots, where the race itself
+    // bites about once in 160.
+    let entry = elf_entry("/bin/ambush-child");
+    let pc = first_pc(&out);
+    let launch_at_entry = entry.is_some() && pc == entry;
     t_putstr(&format!(
-        "ambush-probe: stage C markers -- bp_set={} bt={} parkloop={} sentinel={}\n",
-        saw_bp_set as u8, saw_bt as u8, saw_parkloop as u8, saw_sentinel as u8
+        "ambush-probe: stage C markers -- launch_at_entry={} (entry {:#x}, pc {:#x}) \
+         bp_set={} bt={} parkloop={} sentinel={}\n",
+        launch_at_entry as u8,
+        entry.unwrap_or(0),
+        pc.unwrap_or(0),
+        saw_bp_set as u8,
+        saw_bt as u8,
+        saw_parkloop as u8,
+        saw_sentinel as u8
     ));
 
-    saw_bp_set && saw_bt && saw_parkloop && saw_sentinel
+    launch_at_entry && saw_bp_set && saw_bt && saw_parkloop && saw_sentinel
 }
 
 // --- Stage D: DAP round-trip E2E (the 8c-4b in-process DAP-server proof) ---
@@ -378,15 +448,22 @@ fn launch_e2e() -> bool {
 // #95 focus-thread paths as stage C, driven through the standard DAP request set
 // a real editor (VS Code / Nora-8e) speaks. Unlike the REPL stages, dap-selftest
 // exits 0 on PASS / non-zero on any failed step, so this gates on BOTH the PASS
-// marker AND the exit code. Returns true on PASS or a legitimate SKIP (fork
-// absent); false when it ran but a round-trip step is missing (a real regression).
+// marker AND the exit code. Its second program, /bin/ambush-notelf (executable,
+// not an ELF image), is launched first: the spawn makes a child that dies in its
+// exec, and the failed launch must reap it, because a held spawn hands that child
+// back already dead and the kernel refuses to kill a dead Proc -- a reap that
+// waited for a landed kill would leave one zombie per attempt in a long-lived
+// `ambush dap`. Then /bin/ambush-child is launched, killed from outside while the
+// launch stop holds it, and killed again by the debugger once it is a zombie: that
+// refused kill must reap it and succeed. Returns true on PASS or a legitimate SKIP
+// (fork absent); false when it ran but a step is missing (a real regression).
 fn dap_e2e() -> bool {
     if !DAP_ENABLED {
         t_putstr("ambush-probe: stage D DISABLED (DAP_ENABLED=false)\n");
         return true;
     }
     let mut amb = match Command::new("/bin/ambush")
-        .args(["dap-selftest", "/bin/ambush-child"])
+        .args(["dap-selftest", "/bin/ambush-child", "/bin/ambush-notelf"])
         .stdin(Stdio::Piped)
         .stdout(Stdio::Piped)
         .stderr(Stdio::Piped)
@@ -402,11 +479,12 @@ fn dap_e2e() -> bool {
     // no init file, no stdin. Close our write end so it never blocks on a read.
     let _ = amb.stdin.take();
 
-    // Bounded wait (~30s): launch spawns + attaches + stops-at-entry + arms the bp
-    // + a `continue` that must reach main.parkLoop + re-stop + inspect.
+    // Bounded wait (~60s): the two reap legs (a failed launch; a launch, an outside
+    // kill and the debugger's kill), then launch spawns + attaches + stops-at-entry
+    // + arms the bp + a `continue` that must reach main.parkLoop + re-stop + inspect.
     let mut exited = false;
     let mut code_ok = false;
-    for _ in 0..300 {
+    for _ in 0..600 {
         match amb.try_wait() {
             Ok(Some(s)) => {
                 t_putstr(&format!(
@@ -424,7 +502,7 @@ fn dap_e2e() -> bool {
         }
     }
     if !exited {
-        t_putstr("ambush-probe: stage D -- dap-selftest did not exit in ~30s; killing\n");
+        t_putstr("ambush-probe: stage D -- dap-selftest did not exit in ~60s; killing\n");
         let _ = amb.kill();
         let _ = amb.wait();
     }
@@ -444,8 +522,12 @@ fn dap_e2e() -> bool {
     let saw_stack = contains(&out, b"dap: stack parkLoop");
     let saw_sentinel = contains(&out, b"768901734683508737");
     let saw_pass = contains(&out, b"dap-selftest: PASS");
+    let saw_reaped = contains(&out, b"dap: abandoned launch reaped");
+    let saw_killed = contains(&out, b"dap: killed target reaped");
     t_putstr(&format!(
-        "ambush-probe: stage D markers -- init={} bp={} stop={} stack={} sentinel={} pass={} code_ok={}\n",
+        "ambush-probe: stage D markers -- reaped={} killed={} init={} bp={} stop={} stack={} sentinel={} pass={} code_ok={}\n",
+        saw_reaped as u8,
+        saw_killed as u8,
         saw_init as u8,
         saw_bp as u8,
         saw_stop as u8,
@@ -455,7 +537,15 @@ fn dap_e2e() -> bool {
         code_ok as u8
     ));
 
-    saw_init && saw_bp && saw_stop && saw_stack && saw_sentinel && saw_pass && code_ok
+    saw_reaped
+        && saw_killed
+        && saw_init
+        && saw_bp
+        && saw_stop
+        && saw_stack
+        && saw_sentinel
+        && saw_pass
+        && code_ok
 }
 
 // killgrp + reap the parking target (its loop is unbounded).
@@ -491,10 +581,12 @@ pub extern "C" fn rs_main() -> i64 {
     // break/continue (markers missing) returns false.
     if !launch_e2e() {
         t_putstr(
-            "ambush-probe: stage C FAIL -- ambush exec ran but the HW-breakpoint \
-             markers (Breakpoint set / parkLoop bt frame / Sentinel) are missing (a \
-             break/continue regression -- did the bp reach the kernel hwbreak path, \
-             and does the debug-fs focus the firing M? kernel #95)\n",
+            "ambush-probe: stage C FAIL -- ambush exec ran but a marker is missing: \
+             launch_at_entry (the launch stop's PC is not the ELF entry -- was ambush \
+             built without the held launch?) or the HW-breakpoint markers (Breakpoint \
+             set / parkLoop bt frame / Sentinel: a break/continue regression -- did \
+             the bp reach the kernel hwbreak path, and does the debug-fs focus the \
+             firing M? kernel #95)\n",
         );
         unsafe { t_exits(1) }
     }
@@ -503,17 +595,20 @@ pub extern "C" fn rs_main() -> i64 {
     // a non-zero exit) returns false.
     if !dap_e2e() {
         t_putstr(
-            "ambush-probe: stage D FAIL -- dap-selftest ran but the DAP round-trip \
-             markers (initialized / bp set / stopped at breakpoint / parkLoop stack \
-             frame / Sentinel via evaluate / PASS + exit 0) are missing (a DAP-layer \
-             or backend-integration regression)\n",
+            "ambush-probe: stage D FAIL -- dap-selftest ran but a marker is missing: \
+             the abandoned launch reaped (a failed launch left its dead child \
+             unreaped), the killed target reaped (the debugger's kill of a target \
+             already killed from outside failed or left it unreaped), or the DAP \
+             round-trip markers (initialized / bp set / stopped \
+             at breakpoint / parkLoop stack frame / Sentinel via evaluate / PASS + \
+             exit 0: a DAP-layer or backend-integration regression)\n",
         );
         unsafe { t_exits(1) }
     }
     t_putstr(
         "ambush-probe: PASS (stage A: ambush runs; stage B: multi-thread Go attach + \
-         goroutines + bt + print; stage C: launch + HW breakpoint + continue + bt + \
-         print; stage D: in-process DAP round-trip -- initialize/launch/breakpoint/\
+         goroutines + bt + print; stage C: held launch at the entry + HW breakpoint + \
+         continue + bt + print; stage D: in-process DAP round-trip -- initialize/launch/breakpoint/\
          continue/stackTrace/variables/evaluate)\n",
     );
     unsafe { t_exits(0) }

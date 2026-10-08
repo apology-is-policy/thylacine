@@ -12,12 +12,13 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-09-23
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
-The per-page slot table of the two SPARSE Burrow types, `BURROW_TYPE_FILE` and
-`BURROW_TYPE_ANON_LAZY` ([[sub-kernel-burrow]]): which slots of a reservation
+The per-page slot table of the SPARSE Burrow types, `BURROW_TYPE_FILE`,
+`BURROW_TYPE_ANON_LAZY` and, since B-2a (2026-10-07), `BURROW_TYPE_CODE`
+([[sub-kernel-burrow]]): which slots of a reservation
 hold a physical page. It replaced the flat `struct page *filepages[]` array --
 eight uncharged kernel bytes per RESERVED page, allocated whole at create --
 which was what pinned every lazy reservation to a byte cap
@@ -177,9 +178,10 @@ bug, not a race. `dst` must have the same `count` (hence the same `depth`)
 and be empty; an inline source copies its leaf pointer by pointer; a radix
 source with no root mirrors to an empty map.
 
-**The lifecycle, by site.** Init: `burrow_create_file` and
-`burrow_create_anon_lazy` (`pagemap_init(&v->pm, page_count)`; a failure
-frees the struct and returns NULL). Install: the ANON_LAZY miss in
+**The lifecycle, by site.** Init: `burrow_create_file`,
+`burrow_create_anon_lazy` and `burrow_create_code` (`pagemap_init(&v->pm,
+page_count)`; a failure frees the struct and returns NULL). Install: the
+ANON_LAZY/CODE miss in
 `demand_page_locked` ([[sub-kernel-fault]]) with `p->as` and
 `proc_resource_exempt(p)`; the FILE page-in's `file_install_locked` and
 `file_install_cluster_locked` with `as = NULL`; `burrow_lazy_populate` (exec's
@@ -191,8 +193,13 @@ per-mapping release the range detach ([[sub-kernel-vma]]) and
 break's commit. Mirror: `burrow_clone_cow` (Plan 9's `dupseg`), under
 `src->lock`, with `clone_take_share` as the hook. Destroy:
 `burrow_free_internal`'s FILE arm (`file_put_page`: a plain `free_pages`)
-and ANON_LAZY arm (`lazy_put_page`: `cow_page_put`, the buddy only from the
-last holder), and `burrow_clone_cow`'s two failure arms.
+and ANON_LAZY/CODE arm (`lazy_put_page`: `cow_page_put`, the buddy only from
+the last holder), and `burrow_clone_cow`'s two failure arms. A CODE map is
+never taken from, swapped or mirrored: every take, take-next, swap and mirror
+site above checks for ANON_LAZY and refuses CODE, so a
+code slot, once filled, holds its page until the region is destroyed --
+which is what lets `SYS_ICACHE_SYNC` read a slot and use its page after
+dropping `v->lock`.
 
 ## Data structures
 

@@ -15,7 +15,7 @@ hazards: []
 abis: []
 design: ["docs/HALCYON.md"]
 created: 2026-09-09
-updated: 2026-09-24
+updated: 2026-09-29
 ---
 ## Purpose
 
@@ -74,10 +74,13 @@ than panics.
 The decode runs on libthyla-rs's growable heap ([[sub-thyla-heap]], B-1c): each
 large buffer is a lazy mapping of its own, detached when freed, and pages are
 charged to the per-AddrSpace page budget (I-32) only as they are touched. The
-WORST decode mode is a PROGRESSIVE JPEG, which holds a full-image coefficient
-buffer per input component (~2 B * components * npx, zune mcu_prog.rs) alongside
-the output, so its peak ~= READ_CAP + 12*npx (vs baseline/PNG ~8*npx) -- 12*12M +
-16 MiB = 160 MiB at the cap. `GALLERY_MAX_PIXELS` (12 Mpx) is checked BEFORE
+draw per pixel depends on the format: a PROGRESSIVE JPEG holds a full-image
+coefficient buffer per input component (~2 B * components * npx, zune
+mcu_prog.rs) alongside the output, ~READ_CAP + 12*npx -- 160 MiB at the cap; a
+PNG holds its whole inflated stream beside its output and counts its input twice
+-- 224 MiB at the cap for a 16-bit PNG, 320 MiB interlaced, 416 MiB for a
+malformed 16-bit one ([[sub-view]] derives the figures). `GALLERY_MAX_PIXELS`
+(12 Mpx) is checked BEFORE
 decode, so an image past it is a clean error, never a death at a page fault when
 the system runs out of memory mid-decode. The 12 Mpx figure was sized to the
 fixed 192 MiB heap the program declared until B-1c (the pre-JPEG 128 MiB
@@ -125,7 +128,8 @@ Nearest-neighbor scale is one `dst`-pixel iteration: O(dw*dh), independent of th
 source size (a huge source only changes the sample stride). The compressed input
 is `drop`ped after decode, so only the raster (<= `GALLERY_MAX_PIXELS`*4 bytes,
 ~48 MiB at the 12 Mpx cap) is held for the viewer's lifetime -- below the
-transient DECODE peak (~160 MiB for a progressive JPEG at the cap), and bounded by
+transient DECODE peak (160 MiB for a progressive JPEG at the cap, up to 416 MiB
+for a malformed 16-bit PNG), and bounded by
 the per-AddrSpace page budget (I-32).
 Present is once (a `Static` surface), plus one repaint per CONFIGURE.
 

@@ -112,8 +112,11 @@ struct HandleTable *handle_table_alloc(void) {
 // R5-F F54 close: explicit `default:` extincts on out-of-enum kind to
 // catch memory corruption (the static_assert defends at compile time;
 // the default arm defends at runtime).
-static void handle_release_obj(enum kobj_kind kind, void *obj) {
-    if (!obj) return;
+//
+// Returns what a Spoor's last close reported (spoor_clunk_rc); 0 for every
+// other kind.
+static int handle_release_obj(enum kobj_kind kind, void *obj) {
+    if (!obj) return 0;
     switch (kind) {
     case KOBJ_BURROW:
         burrow_unref((struct Burrow *)obj);
@@ -145,8 +148,7 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // then unrefs the Spoor; ref hits 0 → underlying Spoor freed.
         // Closing one end of a pipe through the handle table now
         // exercises the full lifecycle end-to-end.
-        spoor_clunk((struct Spoor *)obj);
-        break;
+        return spoor_clunk_rc((struct Spoor *)obj);
     case KOBJ_SRV: {
         // A KObj_Srv handle's obj is discriminated by the magic word at
         // offset 0. Post-stalk-3c a KObj_Srv handle is ONLY a service
@@ -212,6 +214,7 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
     }
+    return 0;
 }
 
 // Per-kind acquire of the underlying kernel object reference. Called
@@ -465,9 +468,10 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
     return h;   // -1 if the table is full
 }
 
-int handle_close(struct Proc *p, hidx_t h) {
+int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
+    *close_rc = 0;
     if (h < 0 || h >= PROC_HANDLE_MAX)  return -1;
 
     // #844: capture + zero the slot UNDER the table lock; run the per-kind
@@ -496,8 +500,13 @@ int handle_close(struct Proc *p, hidx_t h) {
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    handle_release_obj(kind, obj);
+    *close_rc = handle_release_obj(kind, obj);
     return 0;
+}
+
+int handle_close(struct Proc *p, hidx_t h) {
+    int close_rc;
+    return handle_close_report(p, h, &close_rc);
 }
 
 // VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in

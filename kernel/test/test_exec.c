@@ -1539,6 +1539,16 @@ void test_exec_reset_follows_decided_phenotype(void) {
     proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
     bool sm_after_native = proc_is_self_managing_notes(p);
 
+    // signal7 audit round 2 F3: the frozen-console mark (cons.c) is the OLD
+    // image's read; carried across exec, the new image's first console read
+    // would wait for a slot the single-reader guard should refuse it.
+    th.cons_frozen_unwound = true;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
+    bool cfu_after_linux = th.cons_frozen_unwound;
+    th.cons_frozen_unwound = true;
+    proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
+    bool cfu_after_native = th.cons_frozen_unwound;
+
     th.proc = NULL;                     // the static outlives proc_free
     drop_proc(p);
 
@@ -1559,6 +1569,10 @@ void test_exec_reset_follows_decided_phenotype(void) {
         "(a Linux image carrying it has its delivery switched off)");
     TEST_ASSERT(!sm_after_native,
         "F1: exec into a NATIVE image clears it too (the mark is the image's)");
+    TEST_ASSERT(!cfu_after_linux,
+        "exec into a LINUX image clears the frozen-console mark");
+    TEST_ASSERT(!cfu_after_native,
+        "exec into a NATIVE image clears the frozen-console mark");
 }
 
 // B-1d (ARCH 6.5 "Dynamic loading"; DISTRO D-4 amended): the PT_INTERP rewrite

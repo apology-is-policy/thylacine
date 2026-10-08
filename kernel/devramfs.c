@@ -558,8 +558,9 @@ static struct Spoor *devramfs_create(struct Spoor *c, const char *name,
     return NULL;
 }
 
-static void devramfs_close(struct Spoor *c) {
+static int devramfs_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 long ramfs_table_read(const struct ramfs_table *t, u64 qid_path, void *buf, long n,

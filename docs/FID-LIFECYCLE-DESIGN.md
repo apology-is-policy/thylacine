@@ -87,7 +87,8 @@ submitter's thread is parked for the clunk RTT on every file close.
 
 **The ONE residual hazard = the tag (the `outstanding[]` slot, I-10).** `alloc_tag`
 returns the lowest free of `P9_SESSION_MAX_OUTSTANDING = 64` slots; the slot is
-freed only when its reply is dispatched. A fire-and-forget Tclunk whose Rclunk is
+freed only when its reply is dispatched. (Since 2026-10-07 the table grows to
+65535 tags and an op waits for one when the op share is full: ARCH 21.11.) A fire-and-forget Tclunk whose Rclunk is
 never reaped permanently burns a slot → tag-pool exhaustion → the client stalls.
 
 **The design:** send the Tclunk **without blocking** — `mark_outstanding` the tag
@@ -465,8 +466,8 @@ threads, Plan 9's `closeproc`.
 The rule this section adds: while a session lives, every fid the server holds
 is known to the client, and the client clunks it once nobody uses it.
 
-**The hand-off contract.** `p9_client_clunk_async` and `p9_client_clunk`
-return `-P9_E_AGAIN` when a Tclunk could not be sent and the session is live.
+**The hand-off contract.** `p9_client_clunk_async`, `p9_client_clunk_nowait`
+and `p9_client_clunk` return `-P9_E_AGAIN` when a Tclunk could not be sent and the session is live.
 It means nothing reached the wire, the tag is free, and the fid is still
 bound. The caller hands the fid to the closer and returns without waiting
 (I-24).
@@ -478,6 +479,14 @@ bound. The caller hands the fid to the closer and returns without waiting
   the fid bound again.
 - A live caller whose spill buffer cannot be allocated under back-pressure
   gets the same answer.
+- A caller no death can pull out of a wait, a kernel thread or the last
+  thread's exit close (`exit_close_active`), does not wait for the server at
+  all (`dec-2026-10-07-exit-close`, part A; 2026-10-07). dev9p's clunk sends
+  through `p9_client_clunk_nowait` for it, which gets the same answer where
+  `p9_client_clunk_async` would wait: no tag is free in the op share, so
+  nothing is built, or the request ring is full, so the Tclunk is taken back
+  whole. The closer's own sends still wait: waiting on its session's server
+  is the closer's job.
 - A dead session keeps today's answer, `-P9_E_IO`. Its fids died with it.
 - The root fid is never clunked by the client: `p9_session_send_clunk` refuses
   it, and the session's transport close releases it on the server.
@@ -514,6 +523,14 @@ session (operator vote 2026-09-29).
   `-P9_E_IO`. Its fids died with it, and the entry is dropped quietly.
 - If a spare cannot be spawned, the queued sessions wait for a closer to
   finish. Nothing is lost.
+- A queued entry is a fid, or a close job (2026-10-07,
+  `dec-2026-10-07-exit-close` part C): the rest of a dev9p last close whose
+  write-behind flush may not wait (a die-pending thread's, or a kernel
+  thread's that something joins without bound, `closes_never_wait`; ARCH
+  7.9.1). The closer writes the staged run with Twrites,
+  waiting as long as the server takes, drops the file's cached attributes and
+  pages, sends the Tclunk, and frees the run and its budget charge. A session
+  that died meanwhile takes the run with it, as it takes its fids.
 
 **A flushed request's reply is honoured** (flush(5)). The client flushes a
 request only when its owner has died or been interrupted by a note, so

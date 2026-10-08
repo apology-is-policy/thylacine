@@ -41,7 +41,9 @@
 // PER AEAD RECORD and so needs message boundaries, and framing lets a hostile
 // or confused peer's absurd length claim be refused HERE rather than handed
 // inward. That is what made the npxf layer a swap of the pump's read/write pair
-// rather than a rewrite of it.
+// rather than a rewrite of it. Replies are held to the msize the session
+// negotiated as well (`frame::ReplyBound`): a larger one is what the kernel
+// answers by killing the session, where haul would never see it.
 //
 // THE SECURE CHANNEL (`-t` / `--token-env`). With a token, haul runs npxf's
 // three-flight handshake on the socket before anything else and then carries
@@ -66,7 +68,9 @@
 // connection, so Haul is the program that knows the session leaves the
 // machine: the direct mount adds T_ATTACH_9P_REMOTE and --post adds
 // DMSRVREMOTE, and `ls -l`, `stat`, `realm` and `ns` then show the mount as
-// `remote`, whichever program mounts it.
+// `remote`, whichever program mounts it. The kernel also resolves a link the
+// export serves beneath the mount it was reached through (DISTRO 4.6), so an
+// export's absolute link names a path in the export.
 
 #![no_std]
 #![no_main]
@@ -77,6 +81,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use haul::frame::{self, MSG_MAX, MSG_MIN};
 use haul::{cmdline, npxf};
 use libthyla_rs::env::{self, Args};
 use zeroize::{Zeroize, Zeroizing};
@@ -144,33 +149,6 @@ macro_rules! step {
     }};
 }
 
-/// The largest 9P message haul will relay in either direction.
-///
-/// A 9P message is `size[4]` INCLUDING those four bytes, so this bounds the
-/// whole frame. It is a shim-side ceiling, not the negotiated msize: haul does
-/// not parse Tversion (it is a transport, not a client), so it cannot know what
-/// the two ends agreed on.
-///
-/// The number is chosen against what the two ends CAN agree on. This transport
-/// is the pipe attach, whose msize is the fixed `SYS_ATTACH_DEFAULT_MSIZE`
-/// (4 KiB, kernel/syscall.c) -- the kernel proposes it, caps its own recv at it,
-/// and there is no path by which a larger frame is legitimate here. 64 KiB
-/// therefore leaves sixteen-fold headroom for a future msize bump while keeping
-/// the worst case a hostile server can drive to two 64 KiB buffers, one per
-/// pump.
-///
-/// It was 1 MiB, which was described as "far below a length a hostile peer could
-/// use to make us allocate the heap". When the heap was a fixed 4 MiB, two of
-/// those were a quarter of it, and on exhaustion the panic handler calls
-/// `t_exits(1)` -- so a bound written to prevent a denial of service was set
-/// where it could deliver one.
-const MSG_MAX: u32 = 64 * 1024;
-
-/// A 9P message is at minimum `size[4] type[1] tag[2]`. npxf's server refuses
-/// anything shorter as a runt; matching it here means a malformed frame dies at
-/// the transport instead of being handed to a parser on either side.
-const MSG_MIN: u32 = 7;
-
 /// Per-pump stack. One page is ample -- a pump's frame is a buffer pointer and
 /// a few counters; the message buffer itself is heap.
 const PUMP_STACK: u64 = 64 * 1024;
@@ -181,8 +159,17 @@ const PUMP_STACK: u64 = 64 * 1024;
 static STOPPED: AtomicU32 = AtomicU32::new(0);
 
 const STOP_NONE: u32 = 0;
-const STOP_UP: u32 = 1; // kernel -> server direction ended
-const STOP_DOWN: u32 = 2; // server -> kernel direction ended
+const STOP_UP: u32 = 1; // a write to the server failed
+const STOP_DOWN: u32 = 2; // the server's side ended: EOF or an error reading it
+const STOP_REFUSED: u32 = 3; // haul refused what came down; the down pump said what
+/// The kernel's end of the c2s pipe closed: Thylacine ended the session -- it
+/// hung up a session it killed (ARCHITECTURE 21.10), or the mount was taken
+/// down. Never the peer, which is why it is not STOP_UP.
+const STOP_KERNEL: u32 = 4;
+
+/// The largest reply the kernel will take: written by the up pump as the
+/// Tversion goes by, read by the down pump as each reply arrives.
+static REPLY: frame::ReplyBound = frame::ReplyBound::new();
 
 /// Read exactly `buf.len()` bytes, or report short. A single `read` on either a
 /// pipe or a TCP stream may return less than asked for, and a 9P frame that is
@@ -322,30 +309,26 @@ fn write_exact(fd: i64, r: Ready, buf: &[u8]) -> bool {
     true
 }
 
-/// Decode the 9P `size[4]` little-endian prefix and validate it.
-///
-/// Returns the TOTAL frame length (header included), or None if the peer
-/// claimed a size that cannot be a 9P message. Refusing here is what keeps a
-/// bad length from becoming a giant allocation or an inward-handed lie.
-fn frame_len(hdr: &[u8; 4]) -> Option<u32> {
-    let size = u32::from_le_bytes(*hdr);
-    if !(MSG_MIN..=MSG_MAX).contains(&size) {
-        return None;
-    }
-    Some(size)
+/// What one read from a pump's source produced.
+enum In {
+    /// `buf[..n]` holds one whole 9P message.
+    Message(usize),
+    /// The channel ended: EOF, or a read error.
+    Ended,
+    /// Bytes no 9P peer may send. The reader has said what they were.
+    Refused,
 }
 
 /// Read one complete 9P message from `src` into `buf` (header included).
 ///
-/// Returns false at end of channel or on a length the peer had no business
-/// claiming. Refusing the length HERE is what stops it becoming a giant
-/// allocation or a lie handed to the next layer.
-fn read_frame(src: i64, buf: &mut Vec<u8>) -> bool {
+/// Refusing a length the peer had no business claiming HERE is what stops it
+/// becoming a giant allocation or a lie handed to the next layer.
+fn read_frame(src: i64, buf: &mut Vec<u8>) -> In {
     let mut hdr = [0u8; 4];
     if !read_exact(src, &mut hdr) {
-        return false;
+        return In::Ended;
     }
-    let size = match frame_len(&hdr) {
+    let size = match frame::frame_len(&hdr) {
         Some(s) => s,
         None => {
             say!(
@@ -353,13 +336,17 @@ fn read_frame(src: i64, buf: &mut Vec<u8>) -> bool {
                 u32::from_le_bytes(hdr),
                 MSG_MAX
             );
-            return false;
+            return In::Refused;
         }
     };
     buf.clear();
     buf.extend_from_slice(&hdr);
     buf.resize(size as usize, 0);
-    read_exact(src, &mut buf[4..])
+    if read_exact(src, &mut buf[4..]) {
+        In::Message(size as usize)
+    } else {
+        In::Ended
+    }
 }
 
 /// Everything the kernel->server pump needs. Passed by pointer through
@@ -383,27 +370,32 @@ struct DownCtx {
     dst_ready: Ready,
     opener: Option<npxf::Opener>,
     close_on_finish: bool, // pipe writer is private; a posted connection is shared
+    /// The server's address as the operator wrote it, for a refusal to name.
+    peer: String,
 }
 
-/// The kernel -> server pump ended: record it and exit the thread, closing
-/// nothing. `finish_down` explains why this direction has nothing it may close.
-fn finish_up() -> ! {
-    let _ = STOPPED.compare_exchange(STOP_NONE, STOP_UP, Ordering::AcqRel, Ordering::Acquire);
+/// The kernel -> server pump ended: record how (`stop`) and exit the thread,
+/// closing nothing. `finish_down` explains why this direction has nothing it
+/// may close.
+fn finish_up(stop: u32) -> ! {
+    let _ = STOPPED.compare_exchange(STOP_NONE, stop, Ordering::AcqRel, Ordering::Acquire);
     unsafe { libthyla_rs::t_thread_exit() };
 }
 
-/// The server -> kernel pump ended: record it, close the pipe end the kernel's
-/// replies arrive through, and exit the thread.
+/// The server -> kernel pump ended: record how (`stop`), close the pipe end the
+/// kernel's replies arrive through, and exit the thread.
 ///
 /// THE CLOSE IS WHAT MAKES A DEAD SERVER AN ERROR RATHER THAN A HANG. The kernel
-/// reads replies with no deadline (the Spoor transport's `set_recv_deadline` is
-/// NULL), so while `s2c_wr` is open, a request whose reply can no longer come
-/// waits forever. The main thread bounds that only from a loop that watches
-/// STOPPED, and it is in no such loop while it sits inside a synchronous 9P
-/// call -- `t_attach_9p`, or the `-v` listing. A server that hung up straight
-/// after the handshake used to leave haul inside the attach for good. EOF on
-/// `s2c_rd` is a transport break the kernel's 9P client latches as a dead
-/// session, failing every waiter, so the call returns an error instead.
+/// reads replies with no deadline, so while `s2c_wr` is open, a request whose
+/// reply can no longer come waits forever. The main thread bounds that only
+/// from a loop that watches STOPPED, and it is in no such loop while it sits
+/// inside a synchronous 9P call -- `t_attach_9p`, or the `-v` listing. A server
+/// that hung up straight after the handshake used to leave haul inside the
+/// attach for good. EOF on `s2c_rd` is a transport break the kernel's 9P client
+/// latches as a dead session, failing every waiter, so the call returns an
+/// error instead. A reply haul refuses ends this direction the same way: the
+/// kernel meets EOF at a frame boundary, never the refused frame, and main
+/// learns the session is over.
 ///
 /// A PUMP MAY CLOSE ONLY AN FD NO OTHER THREAD CAN BE USING. The hazard is one
 /// thread's close landing on another thread's in-flight use of the same fd,
@@ -418,12 +410,10 @@ fn finish_up() -> ! {
 /// used under its old meaning. STOPPED is set first,
 /// so by the time the kernel can see the EOF, main's diagnosis names this side.
 ///
-/// The up pump's end, `c2s_rd`, is just as exclusive and still stays open.
-/// Closing it would send the kernel's next write into the pipe's read-EOF arm,
-/// which posts a `pipe` note to whichever Proc issued that 9P call
-/// (`kernel/pipe.c`, the CNBFRAME branch): a transport event delivered as that
-/// Proc's own write on a closed pipe. Nor is it needed, because a call is stuck
-/// only while its REPLY direction is. Inside main's synchronous calls, every way
+/// The up pump's end, `c2s_rd`, is just as exclusive and still stays open; main
+/// only polls it (`kernel_ended`), never reads or closes it. Closing it is not
+/// needed, because a call is stuck only while its REPLY direction is. Inside
+/// main's synchronous calls, every way
 /// the up pump can end either follows the kernel's own teardown (EOF on
 /// `c2s_rd`), cannot happen with the kernel's frames (a refused length, a payload
 /// over MSG_MAX, a spent record counter), or comes with netd or the connection
@@ -432,10 +422,34 @@ fn finish_up() -> ! {
 /// against a live peer that stopped reading, needs a full TCP send buffer
 /// (netd's is 64 KiB), and those calls send a few hundred bytes. Outside them,
 /// main watches STOPPED.
-fn finish_down(ctx: &DownCtx) -> ! {
-    let _ = STOPPED.compare_exchange(STOP_NONE, STOP_DOWN, Ordering::AcqRel, Ordering::Acquire);
+fn finish_down(ctx: &DownCtx, stop: u32) -> ! {
+    let _ = STOPPED.compare_exchange(STOP_NONE, stop, Ordering::AcqRel, Ordering::Acquire);
     if ctx.close_on_finish { let _ = unsafe { t_close(ctx.dst) }; }
     unsafe { libthyla_rs::t_thread_exit() };
+}
+
+/// Whether Thylacine ended the session, rather than the peer or haul: the up
+/// pump recorded the kernel's EOF, or nothing is recorded yet and the kernel's
+/// end of c2s is already hung up. The kernel hangs that pipe up as it marks the
+/// session dead (ARCHITECTURE 21.10), before the call that met the death
+/// returns, and the up pump that records it may not have run yet -- so main
+/// asks the pipe instead of waiting for the pump. A pump that stopped for the
+/// peer or for haul recorded that before the kernel could see anything, so a
+/// recorded side always wins.
+fn kernel_ended(c2s_rd: i64) -> bool {
+    match STOPPED.load(Ordering::Acquire) {
+        STOP_KERNEL => true,
+        STOP_NONE => {
+            let mut pfd = libthyla_rs::TPollFd {
+                fd: c2s_rd as i32,
+                events: libthyla_rs::T_POLLIN,
+                revents: 0,
+            };
+            let n = unsafe { libthyla_rs::t_poll(&mut pfd, 1, 0) };
+            n > 0 && pfd.revents & libthyla_rs::T_POLLHUP != 0
+        }
+        _ => false,
+    }
 }
 
 /// kernel -> server. Reads T-messages the kernel wrote into its pipe and puts
@@ -449,7 +463,15 @@ extern "C" fn pump_up(arg: u64) {
     let mut msg: Vec<u8> = Vec::new();
     let mut rec: Vec<u8> = Vec::new();
 
-    while read_frame(ctx.src, &mut msg) {
+    let stop = loop {
+        match read_frame(ctx.src, &mut msg) {
+            In::Message(_) => {}
+            // The source is the kernel's pipe, so its end is the kernel's.
+            In::Ended => break STOP_KERNEL,
+            In::Refused => break STOP_REFUSED,
+        }
+        // Before the frame leaves, never after: see ReplyBound::up.
+        REPLY.up(&msg);
         let ok = match ctx.sealer.as_mut() {
             None => write_exact(ctx.dst, ctx.dst_ready, &msg),
             Some(s) => match s.seal(&msg, &mut rec) {
@@ -461,10 +483,10 @@ extern "C" fn pump_up(arg: u64) {
             },
         };
         if !ok {
-            break;
+            break STOP_UP;
         }
-    }
-    finish_up();
+    };
+    finish_up(stop);
 }
 
 /// server -> kernel. Takes R-messages off the wire and writes them into the
@@ -475,28 +497,36 @@ extern "C" fn pump_down(arg: u64) {
     let ctx = unsafe { &mut *(arg as *mut DownCtx) };
     let mut buf: Vec<u8> = Vec::new();
 
-    loop {
-        let ok = match ctx.opener.as_mut() {
+    let stop = loop {
+        let got = match ctx.opener.as_mut() {
             // Plain: the stream IS 9P, so the same framed relay as the other
             // direction.
-            None => read_frame(ctx.src, &mut buf) && write_exact(ctx.dst, ctx.dst_ready, &buf),
-            Some(o) => match read_record(ctx.src, o, &mut buf) {
-                RecordIn::Message(n) => write_exact(ctx.dst, ctx.dst_ready, &buf[..n]),
-                RecordIn::Ended => false,
-            },
+            None => read_frame(ctx.src, &mut buf),
+            Some(o) => read_record(ctx.src, o, &mut buf),
         };
-        if !ok {
-            break;
+        let n = match got {
+            In::Message(n) => n,
+            In::Ended => break STOP_DOWN,
+            In::Refused => break STOP_REFUSED,
+        };
+        // Asked now that the reply is here, never before: see ReplyBound::fits.
+        if let Err(max) = REPLY.fits(n) {
+            say!(
+                "haul: {} sent a {}-byte reply, over the session's {}-byte msize -- refusing it",
+                ctx.peer,
+                n,
+                max
+            );
+            break STOP_REFUSED;
         }
-    }
-    finish_down(ctx);
-}
-
-enum RecordIn {
-    /// `buf[..n]` holds one decrypted 9P message.
-    Message(usize),
-    /// Clean EOF, a refused length, or a failed tag -- all terminal.
-    Ended,
+        REPLY.down(&buf[..n]);
+        // The destination is the kernel's end, so a write it refuses means the
+        // kernel let go of the session -- not that the server did.
+        if !write_exact(ctx.dst, ctx.dst_ready, &buf[..n]) {
+            break STOP_KERNEL;
+        }
+    };
+    finish_down(ctx, stop);
 }
 
 /// Read one AEAD record and decrypt it in place.
@@ -506,10 +536,10 @@ enum RecordIn {
 /// we enforce it here because the kernel reads a BYTE STREAM: a payload whose
 /// declared size disagreed with its length would silently desync the pipe
 /// rather than fail.
-fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> RecordIn {
+fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> In {
     let mut hdr = [0u8; npxf::RECORD_HDR];
     if !read_exact(src, &mut hdr) {
-        return RecordIn::Ended;
+        return In::Ended;
     }
     let body = match o.body_len(&hdr) {
         Ok(n) => n,
@@ -519,14 +549,14 @@ fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> RecordIn {
                 u32::from_le_bytes(hdr),
                 e
             );
-            return RecordIn::Ended;
+            return In::Refused;
         }
     };
 
     buf.clear();
     buf.resize(body, 0);
     if !read_exact(src, buf) {
-        return RecordIn::Ended;
+        return In::Ended;
     }
 
     let n = match o.open(&hdr, buf) {
@@ -535,15 +565,15 @@ fn read_record(src: i64, o: &mut npxf::Opener, buf: &mut Vec<u8>) -> RecordIn {
             // A tag failure is tampering, reordering or truncation. The session
             // is already poisoned by `open`; say so plainly and end.
             say!("haul: record authentication failed ({:?}) -- the channel is over", e);
-            return RecordIn::Ended;
+            return In::Refused;
         }
     };
 
     if n < MSG_MIN as usize || u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize != n {
         say!("haul: a record's 9P size field disagrees with the record length");
-        return RecordIn::Ended;
+        return In::Refused;
     }
-    RecordIn::Message(n)
+    In::Message(n)
 }
 
 /// A pump's writes to a closed pipe come back as EPIPE, never as the `pipe`
@@ -642,11 +672,6 @@ struct Parsed {
     cmd: Vec<String>,
 }
 
-/// Read a token from a file, dropping ONE trailing newline.
-///
-/// npxf does the same on its side, and it has to: a token file written by any
-/// ordinary editor ends in a newline, and a byte of difference is a different
-/// pre-shared key and a handshake that fails with no clue why.
 /// The largest token file this will read.
 ///
 /// npxf reads into a `Bytes buf(4096)` and fails when `n == buf.size()`
@@ -717,6 +742,12 @@ fn read_token_env(name: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     })
 }
 
+/// Read a token from a file, dropping the newlines that end it -- a run of `\n`
+/// and `\r`, `npxf::trim_token_file`.
+///
+/// npxf does the same on its side, and it has to: a token file written by any
+/// ordinary editor ends in a newline, and a byte of difference is a different
+/// pre-shared key and a handshake that fails with no clue why.
 fn read_token_file(path: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     read_token_bytes(path, TokenRead {
         trim: true,
@@ -794,6 +825,15 @@ fn read_token_bytes(path: &str, m: TokenRead) -> Result<Zeroizing<Vec<u8>>, &'st
     }
     if buf.is_empty() {
         return Err(m.empty_msg);
+    }
+    // Warned, not refused, for the reason the mode check gives;
+    // npxf::TOKEN_WARN_BELOW says why a short token is weak.
+    if buf.len() < npxf::TOKEN_WARN_BELOW {
+        say!(
+            "haul: warning: the token is only {} bytes -- anyone who can reach the server can test guesses at it offline; use {} or more random bytes",
+            buf.len(),
+            npxf::TOKEN_WARN_BELOW
+        );
     }
     Ok(buf)
 }
@@ -958,7 +998,9 @@ fn dial(addr: SocketAddrV4, shown: &str) -> Result<TcpStream, String> {
 fn run(argv: Args) -> Result<(), String> {
     let mut args = parse_args(argv)?;
 
-    // THE COMMAND FORM REFUSES TO START WITHOUT STDIO, before it opens anything.
+    // THE COMMAND FORM REFUSES TO START WITHOUT STDIO, before it opens anything
+    // that stays open. (parse_args has read the token file by now, but its fd
+    // closed when the read was done, so the slot it borrowed is empty again.)
     // The kernel hands out the LOWEST free fd, so with slots 0-2 empty the
     // connection's own fds -- ctl, data, ready, and then the pipes -- would
     // land in them, and the command inherits exactly slots 0-2 as its stdio
@@ -1029,11 +1071,20 @@ fn run(argv: Args) -> Result<(), String> {
         let conn = accept_owner(listener)?;
         spawn_pump(UpCtx { src: conn, dst: tcp_fd, dst_ready: tcp_ready, sealer })?;
         spawn_pump(DownCtx { src: tcp_fd, dst: conn, dst_ready: Ready(conn),
-                             opener, close_on_finish: false })?;
+                             opener, close_on_finish: false, peer: args.addr.clone() })?;
         say!("haul: /srv/{} serving one mount", args.mountpoint);
         step!("watching the posted connection and listener");
         loop {
-            if STOPPED.load(Ordering::Acquire) != STOP_NONE {
+            let stop = STOPPED.load(Ordering::Acquire);
+            if stop == STOP_REFUSED {
+                // As in the park form: haul ended the session, and the down
+                // pump has said what it refused.
+                return Err(alloc::format!(
+                    "the 9P session with {} is broken -- the posted mount is dead",
+                    args.addr
+                ));
+            }
+            if stop != STOP_NONE {
                 return Err("posted connection ended".into());
             }
             // The remote 9P session belongs to the first client. Never splice
@@ -1069,6 +1120,7 @@ fn run(argv: Args) -> Result<(), String> {
         dst_ready: Ready(s2c_wr),
         opener,
         close_on_finish: true,
+        peer: args.addr.clone(),
     })?;
     step!("pumps up; attaching (Tversion + Tattach run inside the syscall)");
 
@@ -1085,6 +1137,12 @@ fn run(argv: Args) -> Result<(), String> {
             T_ATTACH_9P_CAPE | T_ATTACH_9P_REMOTE,
         )
     };
+    // Asked before our copy of c2s_wr closes: while it holds the pipe's write
+    // end open, only the kernel's hangup can put POLLHUP on c2s_rd, which tells
+    // a session the kernel killed over the server's reply from a refusal the
+    // server sent. After the close both look alike, since a failed attach drops
+    // the kernel's refs too.
+    let killed = root < 0 && kernel_ended(c2s_rd);
     let _ = unsafe { t_close(c2s_wr) };
     let _ = unsafe { t_close(s2c_rd) };
     if root < 0 {
@@ -1094,6 +1152,8 @@ fn run(argv: Args) -> Result<(), String> {
         return Err(String::from(match STOPPED.load(Ordering::Acquire) {
             STOP_UP => "attach (the connection closed while sending)",
             STOP_DOWN => "attach (the server closed without replying)",
+            STOP_REFUSED => "attach (haul refused the server's reply)",
+            _ if killed => "attach (Thylacine refused the server's reply)",
             _ => "attach (9P handshake refused)",
         }));
     }
@@ -1144,6 +1204,12 @@ fn run(argv: Args) -> Result<(), String> {
                     n += 1;
                 }
                 step!("mount check: {} entr(y/ies) here, first {:?}", n, first);
+            }
+            Err(_) if STOPPED.load(Ordering::Acquire) == STOP_REFUSED => {
+                step!("mount check: haul refused the server's reply during the listing")
+            }
+            Err(_) if kernel_ended(c2s_rd) => {
+                step!("mount check: Thylacine ended the 9P session during the listing")
             }
             Err(_) if STOPPED.load(Ordering::Acquire) != STOP_NONE => {
                 step!("mount check: the connection ended during the listing")
@@ -1208,11 +1274,26 @@ fn run(argv: Args) -> Result<(), String> {
                 Err(_) => return Err("waiting for the command".into()),
                 Ok(None) => {}
             }
-            if STOPPED.load(Ordering::Acquire) != STOP_NONE {
-                say!(
-                    "haul: {} closed the connection while the command was running",
-                    args.addr
-                );
+            let stop = STOPPED.load(Ordering::Acquire);
+            if stop != STOP_NONE {
+                // A refusal ended the session from this side, and the down
+                // pump has already said what it refused.
+                if stop == STOP_REFUSED {
+                    say!(
+                        "haul: the 9P session with {} broke while the command was running",
+                        args.addr
+                    );
+                } else if stop == STOP_KERNEL {
+                    say!(
+                        "haul: Thylacine ended the 9P session with {} while the command was running",
+                        args.addr
+                    );
+                } else {
+                    say!(
+                        "haul: {} closed the connection while the command was running",
+                        args.addr
+                    );
+                }
                 return Err("the connection ended under the command".into());
             }
             let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(50));
@@ -1230,12 +1311,22 @@ fn run(argv: Args) -> Result<(), String> {
     // pumps ARE the transport, so exiting would tear the session down under
     // whoever is walking the tree. Park until a pump reports the channel ended.
     loop {
-        if STOPPED.load(Ordering::Acquire) != STOP_NONE {
-            say!("haul: {} closed the connection -- the mount is dead", args.addr);
+        let stop = STOPPED.load(Ordering::Acquire);
+        if stop != STOP_NONE {
             // NOT Ok(()). A supervisor that restarts on a non-zero exit would
             // read success for a mount that is gone, and the command form's twin
             // above already returns Err for the same event.
-            return Err("the peer closed the connection".into());
+            return Err(if stop == STOP_REFUSED {
+                // As in the command form: the down pump has said what.
+                say!("haul: the 9P session with {} is broken -- the mount is dead", args.addr);
+                "the 9P session is broken".into()
+            } else if stop == STOP_KERNEL {
+                say!("haul: Thylacine ended the 9P session with {} -- the mount is dead", args.addr);
+                "Thylacine ended the session".into()
+            } else {
+                say!("haul: {} closed the connection -- the mount is dead", args.addr);
+                "the peer closed the connection".into()
+            });
         }
         let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(200));
     }

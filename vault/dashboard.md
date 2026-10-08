@@ -38,11 +38,9 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 90
+## Open seams: 84
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
-- [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
-- [[seam-223-pump-tail-starvation]] (sub-kernel-ninep-dev9p-poll)
 - [[seam-240-lo-redial]] (sub-netd-server)
 - [[seam-242-selftest-nonfatal]] (sub-netd-nic)
 - [[seam-350-async-eagain]] (sub-kernel-ninep-client)
@@ -54,18 +52,15 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-841-mi-harness]] (sub-kernel-ninep-client)
 - [[seam-845-untrusted-server]] (sub-kernel-ninep-client)
 - [[seam-87-disk-write-proof]] (sub-substrate-interactive, sub-substrate-gates)
-- [[seam-90-hung-server]] (sub-kernel-ninep-client)
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
-- [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
+- [[seam-9p-async-share-poll-reserve]] (sub-kernel-ninep-client)
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
 - [[seam-boot-banner-coupdate-list]] (sub-substrate-gates)
 - [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
-- [[seam-close-flush-unbounded]] (sub-kernel-death)
 - [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
 - [[seam-console-chrome-on-handoff]] (sub-tapestryd)
 - [[seam-cwg-parenthetical-refuted]] (sub-kernel-boot-sequence)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
-- [[seam-devcap-plain-caps-read]] (sub-kernel-caps)
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
@@ -129,16 +124,15 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
-- [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
-- 2026-09-29 [[chg-2026-09-29-layout-notice]] — A session's layout notice is no longer lost with the surface that carried it
-- 2026-09-29 [[chg-2026-09-29-ns-session-root-names]] — /proc/<pid>/ns names a 9P session root by the file its session came over -- a display-only origin on the root's dev9p priv
-- 2026-09-29 [[chg-2026-09-29-session-workspaces]] — A session's workspaces are the session's: the owner stamp, fresh panes that wait to be asked, the kept last pane, the departure and the takeover
-- 2026-09-29 [[chg-2026-09-29-tile-selection-bands]] — A session tile draws its whole selection, as the console renderer does
-- 2026-09-28 [[chg-2026-09-28-f2-share-move]] — A backgrounded leaf is transparent to a newcomer's share and to a move: the mean over the divided siblings, the nearest visible neighbour
-- 2026-09-28 [[chg-2026-09-28-fl1-sync-output]] — FL-1: a synchronized frame (DEC ?2026) holds the paint -- the vt tracks and reports the mode, the kaua seam carries it as sync_begin/sync_end, halcyond and aurora hold the paint, and lantern writes one frame per slide
-- 2026-09-28 [[chg-2026-09-28-lr1-la-realm]] — LR-1: a remote mount says so -- the declaration rides the 9P session, /proc/<pid>/ns ends its lines in remote, and ls/stat/realm/ns read it
-- 2026-09-25 [[chg-2026-09-25-b1d-dlopen]] — B-1d (dlopen): SYS_BURROW_MAP_FILE, PT_INTERP for native execs, libc.so as the loader, the initrd's bin/ and lib/, /lib as a union, and the device witness
+- 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
+- 2026-10-07 [[chg-2026-10-07-b2-jit]] — The code region is a reservation, and its writer is hardened: random placement, a thunk born sealed and execute-only, unprivileged user copies, maps withholding code addresses, and an image join that counts code as CAP_JIT; Loom registration returns -errno
+- 2026-10-07 [[chg-2026-10-07-exit-close]] — The at-exit close no longer waits on a server no death can interrupt: the clunk never waits, a kill forces the final close, the closer finishes it; and a Loom registration flushes dev9p's staged run
+- 2026-10-07 [[chg-2026-10-07-tag-pool]] — The 9P tag table grows to the 16-bit tag space, each kind of op has a share, a sync op waits for a tag, and close(2) reports a failed write-behind flush
+- 2026-10-06 [[chg-2026-10-06-9p-sessions-ends]] — /ctl/9p-sessions shows a row's counters only to its two ends
+- 2026-10-06 [[chg-2026-10-06-chdir-physical]] — chdir stores the name of where the walk landed
+- 2026-10-06 [[chg-2026-10-06-cpu-time-gate]] — CPU time goes owner-only, and the scheduler's counters become the system principal's
+- 2026-10-06 [[chg-2026-10-06-devno-u64]] — devno-u64: the kernel's device number is 64 bits and never reused; t_stat.devno carries all of it
 <!-- generated:end -->

@@ -3,7 +3,7 @@ id: sub-kernel-stalk
 type: sub
 title: "stalk — the per-Proc pathname resolver"
 parent: moc-kernel-namespace
-code: ["kernel/stalk.c", "kernel/include/thylacine/stalk.h"]
+code: ["kernel/stalk.c", "kernel/include/thylacine/stalk.h", "kernel/test/test_stalk.c"]
 audit: hard
 guarded-by: [inv-i28, inv-i33]
 validated-by: [gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -426,6 +426,131 @@ a trailing slash overrides it (POSIX 4.13: `link/` names the directory the link
 resolves to). **Mount membership wins over a symlink** at a component that is
 both.
 
+### Served links — contained beneath their mount (DISTRO 4.6)
+
+A link whose Spoor's Dev answers `remote` is **served**: a remote server wrote
+it, so the caller's own root (the boundary above) is the wrong one for it — an
+export could otherwise serve `talks -> /home/u` or `deck -> ../../../etc` and
+steer any guest resolution that crossed the link. dev9p answers from the
+session's remote declaration (`dev9p_spoor_remote`, HAUL-DESIGN 4.8), which
+Haul sets on its direct mount (`SYS_ATTACH_9P_REMOTE`) and on `--post`
+(`DMSRVREMOTE`, stamped on every attach over the service). `stalk_expand_link`
+hands a served link to `stalk_expand_served`, which always RESTARTS, from the
+link's **anchor**:
+
+- **The anchor** is the root of the innermost mount crossed on the way to the
+  link. `stalk_core` keeps `struct stalk_anchors` beside the trail: a bit per
+  entry that a crossing produced (the base cross, a descent cross), set where
+  the crossing happens and cleared by the `..` pop and at `restart:`, so no bit
+  ever stands at or above `depth`. A union child sets its bit in `umask` too:
+  its member's root never stands on the trail, so `stalk_expand_served` finds
+  it again by the child's name with `stalk_union_member_holding` — the remove
+  path's own first-hit selection, so it lands on the member the walk took. A
+  link walked through the union at the tip (`from_union`, not on the trail yet)
+  uses its own name: at a union's top level the anchor is the member holding
+  the link, never the union point, where a relative target would search the
+  other members first. With no crossing on the trail the anchor is the base (a
+  dirfd inside the served tree); a union handle's base anchors at its walkable
+  form (`clone_walk_zero`), never with its union.
+- **The rebuild** is the components walked below the anchor, then the target
+  (an absolute one drops those components), then the rest, and the restart
+  begins FROM the anchor — so its `..` stops there, the target's and the
+  caller's alike. The components come from the LOGICAL stream (the consumed
+  record, then the current buffer) at the offset the crossing recorded
+  (`loff`), which survives a splice because a splice never moves a consumed
+  component. A `..`-free relative served target takes the restart too, not the
+  in-place splice: every later restart — a local link's `..` rebuild included —
+  then begins at the anchor, where a restart from an earlier base would re-walk
+  an earlier target's `..` with nothing to stop it (the nested trap the design
+  pass found; `stalk.served_contain`'s `n1 -> ../d2/n2` leg).
+- **Fail-closed.** No anchor, an anchor whose Dev does not answer remote, or
+  one on a different session than the link (`dc`/`devno` differ: a union member
+  found again after the namespace changed under the walk) refuses the link with
+  `T_E_ACCES`. In a consistent namespace the anchor is always on the link's own
+  session — everything after the innermost crossing is walked inside it — so
+  the check only ever fires on an inconsistency, and fires closed. A union
+  handle's walkable clone that fails to mint is `T_E_IO`, the failure a
+  crossing reports, never the refusal.
+- **Lifetime.** The anchor is ref-held in `owned_anchor` until
+  `stalk_expand_free`; a new one is referenced before the old one is let go,
+  since a second served link with no crossing since the first re-anchors at the
+  same Spoor. Every expansion counts toward `STALK_MAX_FOLLOWS`.
+
+The remote declaration only NARROWS: a false one, by an attacher about its own
+session or a poster about its own service, can only confine resolutions through
+it. Not every 9P mount is contained — the boot's pool mounts carry absolute
+links that must resolve at the caller's root (`sh -> /viv/abin/sh`). The edges
+(a local bind of part of an export anchors narrower; a local bind beneath a
+remote mount is not remote; `/n/haul/deck/../..` with `deck` served stops at
+`/n/haul`) are DISTRO 4.6's. So is the scope limit: containment is the
+resolver's, and `readlink` still returns the server's text verbatim, so a
+program that re-resolves that text itself (musl's `realpath(3)` runs its own
+readlink loop) gets the Linux answer, an absolute target from the caller's
+root.
+
+### The landed name (`stalk_landed`, SYS_CHDIR's store)
+
+Since 2026-10-06 ([[dec-2026-10-06-chdir-physical]]; STALK-DESIGN 4.3)
+`stalk_landed` reports the name of where a `STALK_WALK` landed, relative to
+its start: `""` for the start itself, else `/c1/.../cn`. Change-directory
+stores it ([[sub-kernel-territory]]), so the cwd holds no `.`, `..` or link
+component, and `cd link/..` lands where `ls link/..` reads.
+
+The name is built the way the trail is, in a `struct stalk_name` that
+`stalk_core` takes as an optional argument (NULL for every other caller):
+- a push appends the components its entry consumed, the same names the
+  entry's `Path` gets: one for a per-component hop, the whole run for a
+  pounced or split run, none for a base cross;
+- a `..` pop truncates to the entry below;
+- a crossing in place keeps the name, because a mount point's namespace name is
+  the mounted root's;
+- a restart truncates to the new base's name: the root's (`""`) for an
+  absolute target, unchanged for a `..`-rebuild, and for a served link the
+  anchor's, which is the name of the crossing entry it stands on or of the
+  union point its member covers.
+
+`end[d]` records the length once `trail[d]` stands, and `base` the current
+base's length. Nothing in the resolver reads the name. It is never taken from a
+Spoor's `Path` either: I-33 makes a Path non-load-bearing, a Path may be
+absent, and under a chroot a Path carries the outer prefix. A name that
+outgrows the caller's buffer latches `overflow` and the walk fails with
+`T_E_INVAL`, even if a later `..` would have shortened it.
+
+The name is then walked once more from the same start, and the result must be
+the same node (Dev class, instance and qid path, the mount table's identity) or
+the call fails with `T_E_INVAL`. Building the name alongside the trail makes it
+the name of the landed node everywhere but one place: a served link resolved
+from a union member re-anchors at that member, so it can land on a node that an
+earlier member shadows at the same name, and such a node has no name in the
+caller's namespace. The check also makes `start` a contract: an absolute link
+re-bases the name at the Territory root, so a start other than the root fails
+it.
+
+`stalk.landed_name` names each landing: plain, `.`, a trailing separator,
+`..`, an in-place splice, the absolute and `..`-rebuild restarts, a chain, a
+mount crossing, three served links (contained at the anchor), and the same
+`d/up` link run local as the control that climbs out. Through the union
+`[uL, uR]` two served links in `uR` are named from the union point, at the top
+level and one level down, and a served link that lands on a node `uL` shadows
+is refused, while the same link run local is named. An absolute local link
+reached below a served anchor (`phx` mounted over the export's `d2`) re-bases
+the name at the root, and absolute served targets are named from the
+crossing. A buffer overflow fails with EINVAL.
+
+`stalk.landed_roots` stands on roots the battery does not: a Territory
+chrooted below an attach whose root names itself `/`, where every Path
+carries the outer prefix (`/a/deep`) and the landed name must not (the I-33
+negative); a served Territory root, where a served link with no crossing on
+its trail names from the base; and a mount over the Territory root, crossed
+at the base. `stalk.landed_identity` replaces a crossing's mount while the
+walk follows a served link in it, so the name walks into the replacement:
+the same source again is named, while one on another Dev or from another
+attach, each holding the same qid path, is refused. The base-cross push
+(`stalk_name_push` with no components) has no witness that can turn red:
+`end[]` starts zeroed, which is the base's length on a first pass, so only a
+base cross after a served re-anchor (an anchor that is itself a mount point)
+could tell, and no fixture builds one.
+
 ### The phenotype accumulator (Design D)
 
 `crossed_pheno` is a **set-only** boolean the exec resolver threads through the
@@ -449,6 +574,16 @@ I-43's shape-not-authority kept at the resolver: stalk decides which ABI
 numbering the exec'd image will present, never what it may do; the enforcement
 half is [[sub-kernel-syscall-dispatch]]'s execve re-decision and
 [[sub-kernel-proc]]'s commit.
+
+A served re-anchor (above) is the one restart that is not a departure: the
+resolution stays beneath the anchor, so the mounts crossed to REACH the anchor
+still stand above the final location. `stalk_anchors.pmask` records the
+accumulator at each crossing, the expansion stores the anchor's in
+`anchor_pheno`, and the seed ORs it in while the anchor is the base (`base ==
+owned_anchor`; a later local absolute link moves the base to the Territory root
+and drops it). Without the carry a relative served link inside a Linux-declared
+export would lose the phenotype it kept before containment, when it spliced in
+place (`stalk.served_pheno`, whose sabotage run turned exactly that leg red).
 
 ### The POUNCE (fused component batching)
 
@@ -552,10 +687,15 @@ into transport failure. [[sub-kernel-ninep-dev9p]] owns the per-open record.
 None persistent. Per call: `struct Spoor *trail[STALK_MAX_DEPTH]` (40
 pointers), `char namebuf[SYS_WALK_OPEN_NAME_MAX + 1]` per component, and
 the POUNCE run arrays (`names`/`lens`/`ends[16]` + `struct t_stat sts[16]`
-≈ 1.6 KiB) — all on the 16 KiB kernel stack. Symlink expansion allocates a
+≈ 1.6 KiB), and `struct stalk_anchors` (three `u64` masks + 40 `u16`
+logical offsets = 104 B, the served-link anchor record) — all on the 16 KiB
+kernel stack. `stalk_landed` adds a `struct stalk_name` on its own frame (40
+`u16` ends + the caller's buffer pointer, ~104 B); the name buffer is the
+caller's. Symlink expansion allocates a
 `struct stalk_expand` on demand (`kmalloc`; the double path buffer it flips
-between, a target scratch, a consumed-prefix record, the follow counter, and
-the ref-held `owned_base` re-anchor root) — freed at `stalk_expand_free`;
+between, a target scratch, a consumed-prefix record, the follow counter, the
+ref-held `owned_base` re-anchor root, and the ref-held `owned_anchor` served
+re-anchor with its `anchor_pheno`) — freed at `stalk_expand_free`;
 resolutions that never cross a symlink allocate nothing. A union component
 snapshots its member sources into a stack `struct Spoor *srcs[PGRP_MAX_MOUNTS]`.
 The mount-table entry
@@ -596,7 +736,11 @@ The X-search is open-time-only: perms are snapshotted at resolve time;
   an absolute target re-anchors at the caller's OWN Territory root, never a
   global one, so a confined Proc's absolute link resolves inside its container
   by construction; expanded components re-enter the per-component gate family;
-  follows are bounded at 40.
+  follows are bounded at 40. A **served** link (DISTRO 4.6) is contained
+  narrower still: the resolution re-anchors at the root of the mount it was
+  reached through and restarts from there, so neither an absolute target nor a
+  `..` (the target's or the caller's) leaves the export; a served link with no
+  remote anchor on its own session is refused (`T_E_ACCES`).
 - **[[inv-i33]]** — the resolver is WRITE-ONLY to `Spoor.path`
   (`spoor_path_extend` / `spoor_path_transplant` at the walk/cross/adopt
   hooks); no resolution or permission decision reads it; a path-alloc
@@ -654,6 +798,13 @@ resolve locally.
 Standing obligations for any change (the ARCH §25.4 POUNCE row is the
 authoritative audit-trigger copy):
 
+- **Every trail push, pop and restart moves the landed name with it.** A new
+  push site without `stalk_name_push`, or a new re-anchor without setting
+  `nm->base`, stores a cwd that names a different directory from the one the
+  walk validated. The name is write-only inside the resolver; nothing may
+  branch on it. `stalk_landed`'s second walk is the backstop, so a change that
+  weakens it (a looser identity, a skipped walk for some case) reopens the
+  union-shadow case.
 - **The fail-ordering invariant**: an X-denial at component k masks
   everything past k including a deeper miss — ACCES never NOENT. Pinned
   by `stalk.pounce_acces_masks_noent`.
@@ -676,6 +827,23 @@ authoritative audit-trigger copy):
 - **`..` containment**: the pop guard (`depth > 0`) and the borrowed-start
   no-op are I-28's floor; the #957 single-hop crosses must stay
   symmetric with stalk's base/quarry crosses.
+- **The served-link anchor record (DISTRO 4.6)**: a site that pushes or
+  replaces a trail entry by CROSSING must set its `stalk_anchors` bit at the
+  crossing's logical offset, and a site that pops must clear it. A missed set
+  anchors a served link at an outer mount (wider, or refused); a missed clear
+  leaves a bit above `depth` for a later push to inherit. A served link must
+  never take the in-place splice (the nested trap). Pinned by nine
+  `stalk.served_*` tests, each run both ways: with the declaration ignored the
+  first six turn red; with the phenotype carry or the union re-derivation
+  removed, their own legs do. The other three, from the pre-audit self-review,
+  each turn red alone under their own sabotage: `served_handle_base` (a union
+  handle's index-0 point), `served_handle_popped` (the walkable-form anchor
+  after a `..`, and the `T_E_IO` of a killed clone) and `served_same_session`
+  (a readlink hook swaps the union's members for another session's mid-walk:
+  one leg differs from the link's session in its Dev alone, one in its
+  `devno` alone -- the only difference between two dev9p sessions, which
+  share a Dev -- so each half of the check turns red alone; audit round 1's
+  F1 found the `devno` half untested). On the device, `haul-links`.
 - **Type before permission, at every gate.** A non-directory answers
   `ENOTDIR`, never `EACCES` — the x bit on a non-directory says nothing
   about traversability, so a permission-first order answers the wrong

@@ -98,8 +98,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_getgid, t_getuid, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo, T_OPATH,
-    T_OREAD, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_getgid, t_getpid, t_getuid, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo,
+    T_OPATH, T_OREAD, T_WALK_OPEN_FROM_ROOT,
 };
 
 // --- V-7: the vivarium (per-container) mode --------------------------------
@@ -314,6 +314,19 @@ static NODES: [Node; N_COUNT as usize] = [
 //     refuses any other reader: no new authority, section 6.2 intact. A refused
 //     read renders as an EMPTY file where Linux answers EACCES (tracked); Name:
 //     comes from the native ledger `name:` line, which the seal leaves readable.
+//   * One part of `maps` answers by READER, not by target: a code row's
+//     addresses go only to the target itself or to a reader with debug
+//     authority over it (I-39; DEBUG-FS-DESIGN 3.1), and every other reader
+//     gets the row zeroed (B-2b). Read as this server, a row this server may
+//     see would reach a client who may not -- so the server must be the
+//     weakest reader. Debug authority over an image holding code takes
+//     CAP_JIT (the kernel counts the aliases as that cap), CAP_HOSTOWNER or
+//     CAP_DEBUG, all elevation-only, and `deputy_check` refuses to serve
+//     while this Proc holds any elevation-only cap. Both dioramas are spawned
+//     with none, so the kernel zeroes every foreign code row before we see it.
+//     The cost falls on /self only: a peer holding code (a native JIT, never a
+//     Linux guest -- the phenotype has no code-region syscall) sees its own
+//     code rows zeroed here, where its native read would not.
 //   * What it does NOT do is scope the pid set to a container, because THERE IS
 //     NO SUCH SCOPING NATIVELY YET -- /ctl/procs lists every Proc on the box.
 //
@@ -676,7 +689,9 @@ impl Render {
 // ---------------------------------------------------------------------------
 // Native sources. Each is a plain read of a file the CALLING Proc could open
 // itself -- that is the section 6.2 property, and it is why the diorama needs no
-// privilege of its own.
+// privilege of its own. Where the answer depends on who reads (environ, a code
+// row in maps), the read is this server's: it serves no per-pid environ, and
+// holds no authority that would show it a code address (`deputy_check`).
 // ---------------------------------------------------------------------------
 
 /// Read a whole native file into `out`. Returns the byte count, or None if the
@@ -752,6 +767,22 @@ fn native_proc_path(pid: u32, leaf: &[u8], out: &mut [u8; 64]) -> usize {
     let n = if b.len() > out.len() { out.len() } else { b.len() };
     out[..n].copy_from_slice(&b[..n]);
     n
+}
+
+/// Refuse to serve while this Proc holds any elevation-only cap: with none it
+/// has debug authority over no image holding code, so the kernel shows it every
+/// other Proc's code rows zeroed (the visibility note above the pid tables).
+/// `imperium`'s `caps` field is exactly the elevation-only set held.
+pub fn deputy_check() -> Result<(), &'static str> {
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(unsafe { t_getpid() } as u32, b"imperium", &mut pbuf);
+    let mut buf = [0u8; 160];
+    let len = read_native(&pbuf[..n], &mut buf).ok_or("cannot read my imperium")?;
+    match parse_hex_after(&buf[..len], b" caps ") {
+        Some(0) => Ok(()),
+        Some(_) => Err("holds an elevation-only cap"),
+        None => Err("no caps field in my imperium"),
+    }
 }
 
 /// Does `pid` name a live Proc? Decided by a native `O_PATH` open of
@@ -1095,17 +1126,22 @@ pub fn parse_cpu_cols(text: &[u8], want: u64) -> CpuCols {
 /// widened V-4c-2b row is ~90 B x <= 8 CPUs plus two header lines.
 const CTL_CPU_MAX: usize = 2048;
 
-/// CPU `want`'s cumulative idle-park ns (column 1), or None when the row is
-/// absent, offline, or unparseable -- never 0, which would read as a pegged
-/// 100%-busy core (the prowl-5 F2 hazard, on the other side of the boundary).
-pub fn parse_cpu_idle_ns(text: &[u8], want: u64) -> Option<u64> {
+/// CPU `want`'s cumulative idle-park ns (column 1): Some(Some(ns)) measured,
+/// Some(None) withheld -- the kernel renders "-" to a reader that is neither the
+/// system principal nor a hostowner (IMPERIUM-DESIGN 11.3 item 10) -- and None
+/// when the row is absent, offline, or unparseable. Never 0 for an unknown
+/// value, which would read as a pegged 100%-busy core (the prowl-5 F2 hazard,
+/// on the other side of the boundary).
+pub fn parse_cpu_idle_ns(text: &[u8], want: u64) -> Option<Option<u64>> {
     for line in text.split(|&c| c == b'\n') {
         let mut fields: [&[u8]; 8] = [b""; 8];
         if split_fields(line, &mut fields) < 2 {
             continue;
         }
         match parse_u64(fields[0]) {
-            Some(i) if i == want => return parse_u64(fields[1]),
+            Some(i) if i == want => {
+                return if fields[1] == b"-" { Some(None) } else { parse_u64(fields[1]).map(Some) };
+            }
             _ => continue,
         }
     }
@@ -1191,13 +1227,16 @@ fn native_procs_created() -> u64 {
 
 /// Sum a column across every CPU that reports it. Linux's `ctxt` and `intr` are
 /// system-wide totals; the kernel accounts them per-CPU (as Linux does
-/// internally), so the summation is the translation.
-pub fn sum_cpu_col(text: &[u8], ncpus: u64, pick: fn(&CpuCols) -> Option<u64>) -> u64 {
-    let mut total: u64 = 0;
+/// internally), so the summation is the translation. None when no CPU reports
+/// the column -- the kernel withholds it ("-") from a reader that is neither the
+/// system principal nor a hostowner -- so the caller omits the line rather than
+/// print a total of nothing.
+pub fn sum_cpu_col(text: &[u8], ncpus: u64, pick: fn(&CpuCols) -> Option<u64>) -> Option<u64> {
+    let mut total: Option<u64> = None;
     let mut i = 0u64;
     while i < ncpus && i <= CPU_INDEX_MAX {
         if let Some(v) = pick(&parse_cpu_cols(text, i)) {
-            total = total.saturating_add(v);
+            total = Some(total.unwrap_or(0).saturating_add(v));
         }
         i += 1;
     }
@@ -1457,11 +1496,12 @@ fn render_cwd(pid: u32, r: &mut Render) {
 //
 // Six fixed columns in, six out. The interesting translations:
 //
-//   dev    Thylacine's devno is a FLAT namespace with no major/minor split, so
-//          it renders as minor under major 00. That is not a fabrication: Linux
-//          itself uses 00:xx for every filesystem with no backing block device
-//          (tmpfs, and 9P mounts specifically), which is exactly what a Stratum
-//          mount is. An anonymous mapping is 00:00 with inode 0, as on Linux.
+//   dev    vivarium reports st_dev = devno, so the column is major(devno):
+//          minor(devno) as glibc and musl split a dev_t: on Linux it is always
+//          the MAJOR:MINOR of the device whose encoding stat returns, and a
+//          reader compares makedev(maj, min) with st_dev. A devno below 256 is
+//          00:xx, as Linux shows a filesystem with no block device (tmpfs, 9P).
+//          An anonymous mapping is 00:00 with inode 0, as on Linux.
 //   path   a FILE-backed mapping renders the executable's path. PREMISE: at
 //          v1.0 the only FILE Burrows in an address space are the exec'd
 //          binary's segments -- burrow_create_file has exactly one caller
@@ -1476,6 +1516,14 @@ fn render_cwd(pid: u32, r: &mut Render) {
 //          real reserved address space, and dropping it would make the map
 //          claim the range is free.
 // ---------------------------------------------------------------------------
+
+/// gnu_dev_major / gnu_dev_minor (musl's major() / minor()): the inverse of
+/// makedev over a 64-bit dev_t, so makedev(dev_split(d)) == d for every d.
+fn dev_split(dev: u64) -> (u64, u64) {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & 0xffff_f000);
+    let minor = (dev & 0xff) | ((dev >> 12) & 0xffff_ff00);
+    (major, minor)
+}
 
 /// Substring search over bytes -- selftest-only, so a render can be checked for
 /// a fragment without pinning the whole (padded) row.
@@ -1564,14 +1612,13 @@ fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
     r.push(b" ");
     r.push_hex(off, 8);
     r.push(b" ");
-    // <major>:<minor> identifies the DEVICE and is independent of the inode.
-    // Thylacine's devno is flat, so it is the minor under a 00 major -- the way
-    // Linux renders every filesystem with no backing block device. Folding any
-    // part of the inode in here would make two files on the SAME filesystem
-    // report different devices, breaking the st_dev comparison this column
-    // exists for.
-    r.push(b"00:");
-    r.push_hex(devno, 2);
+    // <major>:<minor> identifies the DEVICE and is independent of the inode,
+    // so no part of the inode is folded in: two files on one filesystem must
+    // report one device.
+    let (major, minor) = dev_split(devno);
+    r.push_hex(major, 2);
+    r.push(b":");
+    r.push_hex(minor, 2);
     r.push(b" ");
     r.push_dec(inode);
 
@@ -1822,12 +1869,35 @@ fn push_stat_cpu_line(r: &mut Render, label: &[u8], busy_ns: u64, idle_ns: u64) 
 fn render_stat(r: &mut Render) {
     let mut buf = [0u8; CTL_CPU_MAX];
     let got = read_ctl_cpu(&mut buf);
-    let text = &buf[..got];
-    let ncpus = parse_cpu_count(text);
-
     // Elapsed since boot IS CLOCK_MONOTONIC, and it is the denominator every
     // per-CPU busy figure is derived against.
     let (up_ns, real_ns) = clock_pair_ns();
+    render_stat_from(r, &buf[..got], up_ns, real_ns, native_procs_created(), viv_runner() == 0);
+}
+
+/// The /proc/stat render over its sources, pure so the selftest can drive it.
+///
+/// `shared` is the boot diorama, /srv/diorama: it runs as SYSTEM and serves
+/// clients of any principal. The kernel shows the per-CPU idle time, context
+/// switches and interrupts only to the system principal or a hostowner
+/// (IMPERIUM-DESIGN 11.3 item 10), so serving its own reads would hand an
+/// ordinary client what it is natively denied -- the deputy-as-authority
+/// failure VIVARIUM section 6.2 forbids (render_environ's reasoning). It serves
+/// them as withheld to every client instead. A per-container diorama runs as
+/// its container's principal, so its native reads are already its client's.
+pub fn render_stat_from(
+    r: &mut Render,
+    text: &[u8],
+    up_ns: u64,
+    real_ns: u64,
+    procs_created: u64,
+    shared: bool,
+) {
+    let ncpus = parse_cpu_count(text);
+    let idle_of = |i: u64| -> Option<Option<u64>> {
+        let v = parse_cpu_idle_ns(text, i);
+        if shared { v.map(|_| None) } else { v }
+    };
 
     // The aggregate `cpu` line is the sum over CPUs, exactly as Linux's is --
     // NOT a single-CPU figure scaled up, which would misreport a partly-idle
@@ -1836,7 +1906,7 @@ fn render_stat(r: &mut Render) {
     let mut busy_total: u64 = 0;
     let mut i = 0u64;
     while i < ncpus && i <= CPU_INDEX_MAX {
-        if let Some(idle) = parse_cpu_idle_ns(text, i) {
+        if let Some(Some(idle)) = idle_of(i) {
             idle_total = idle_total.saturating_add(idle);
             busy_total = busy_total.saturating_add(up_ns.saturating_sub(idle));
         }
@@ -1845,16 +1915,23 @@ fn render_stat(r: &mut Render) {
     push_stat_cpu_line(r, b"cpu", busy_total, idle_total);
     i = 0;
     while i < ncpus && i <= CPU_INDEX_MAX {
-        if let Some(idle) = parse_cpu_idle_ns(text, i) {
+        if let Some(idle) = idle_of(i) {
             // Whole LINES here (V-4c-3 SA-3, #72) -- the same commit discipline
             // as cpuinfo's blocks, at this file's unit. A truncated `cpuN` row
             // would hand a jiffies parser a short column count, and the lines
             // after it are what carry intr/ctxt/btime.
+            //
+            // A withheld idle time is a line of zeros: the CPU is there, the
+            // columns are positional, and Linux's format has no "-".
+            let (busy, idle) = match idle {
+                Some(v) => (up_ns.saturating_sub(v), v),
+                None => (0, 0),
+            };
             let mark = r.len();
             let mut label = Render::new();
             label.push(b"cpu");
             label.push_dec(i);
-            push_stat_cpu_line(r, label.bytes(), up_ns.saturating_sub(idle), idle);
+            push_stat_cpu_line(r, label.bytes(), busy, idle);
             if r.len() == RENDER_MAX {
                 r.truncate_to(mark);
                 break;
@@ -1863,19 +1940,27 @@ fn render_stat(r: &mut Render) {
         i += 1;
     }
 
-    r.push(b"intr ");
-    r.push_dec(sum_cpu_col(text, ncpus, |c| c.intr));
-    r.push(b"\nctxt ");
-    r.push_dec(sum_cpu_col(text, ncpus, |c| c.ctxt));
+    // intr and ctxt are whole lines, so a withheld total is omitted, not
+    // zeroed: a 0 would be a plausible count nobody measured (section 6.17).
+    for (label, pick) in [
+        (&b"intr "[..], (|c: &CpuCols| c.intr) as fn(&CpuCols) -> Option<u64>),
+        (b"ctxt ", |c: &CpuCols| c.ctxt),
+    ] {
+        if let Some(v) = if shared { None } else { sum_cpu_col(text, ncpus, pick) } {
+            r.push(label);
+            r.push_dec(v);
+            r.push(b"\n");
+        }
+    }
 
     // btime is the wall-clock second the system booted: REALTIME now minus how
     // long we have been up. Both halves are sourced (LS-K's RTC anchor and the
     // monotonic counter), so this is a derivation, not an invention.
-    r.push(b"\nbtime ");
+    r.push(b"btime ");
     r.push_dec((real_ns.saturating_sub(up_ns)) / 1_000_000_000);
 
     r.push(b"\nprocesses ");
-    r.push_dec(native_procs_created());
+    r.push_dec(procs_created);
     // procs_running/procs_blocked would each need a live state census; they are
     // omitted rather than zeroed, which is the whole-line freedom the jiffies
     // columns above do not have.
@@ -3115,8 +3200,8 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("maps_row anon shape");
     }
 
-    // A file-backed mapping takes the exe path, and the devno lands in the
-    // major-0 column the way Linux renders a device-less filesystem.
+    // A file-backed mapping takes the exe path; a devno below 256 is 00:xx,
+    // the way Linux renders a device-less filesystem.
     let mut mf = Render::new();
     let mut fr: [&[u8]; 6] = [b""; 6];
     split_fields(b"0x400000-0x452000 r-xp 0x0 file 0x3:0x12 -", &mut fr);
@@ -3127,6 +3212,28 @@ pub fn selftest() -> Result<(), &'static str> {
         || !contains_bytes(mf.bytes(), b"/bin/diorama")
     {
         return Err("maps_row file shape");
+    }
+
+    // A devno past one byte, and one past 2^32, split the way stat's st_dev
+    // does: makedev(0x12, 0x34) == 0x1234, makedev(0, 0x100005) == 2^32 + 5.
+    for (line, want) in [
+        (&b"0x400000-0x452000 r-xp 0x0 file 0x1234:0x12 -"[..], &b" 12:34 18"[..]),
+        (&b"0x400000-0x452000 r-xp 0x0 file 0x100000005:0x12 -"[..], &b" 00:100005 18"[..]),
+    ] {
+        let mut mw = Render::new();
+        let mut wr: [&[u8]; 6] = [b""; 6];
+        split_fields(line, &mut wr);
+        if !maps_row(&wr, b"/bin/diorama", &mut mw) || !contains_bytes(mw.bytes(), want) {
+            return Err("maps_row dev split");
+        }
+    }
+    for d in [0u64, 0xff, 0x100, 0xfff_ffff, 0x1_0000_0005, u64::MAX] {
+        let (ma, mi) = dev_split(d);
+        let back = ((ma & 0xffff_f000) << 32) | ((ma & 0xfff) << 8)
+            | ((mi & 0xffff_ff00) << 12) | (mi & 0xff);
+        if back != d {
+            return Err("dev_split is not makedev's inverse");
+        }
     }
 
     // The role column becomes Linux's bracket tag.
@@ -3322,6 +3429,66 @@ pub fn selftest() -> Result<(), &'static str> {
     // An unreadable source renders an EMPTY file rather than a misleading count.
     if parse_cpu_count(b"") != 0 || parse_cpu_count(b"garbage\n") != 0 {
         return Err("cpu count from a bad source");
+    }
+
+    // IMPERIUM-DESIGN 11.3 item 10: /proc/stat over a measured, a withheld and
+    // a shared render. The measured one carries the sums; the withheld one keeps
+    // each online CPU as a line of zeros and omits intr and ctxt; and the shared
+    // boot diorama serves the counters as withheld whatever its own read says,
+    // so a SYSTEM deputy cannot pass them on.
+    {
+        let hdr: &[u8] = b"cpus: 2\nhwcap: 0x0\ncpu idle_ns capacity ctxt intr cacheline midr\n";
+        let mut measured = [0u8; 256];
+        let mut withheld = [0u8; 256];
+        let rows_m: &[u8] = b"0 5000000000 1024 7 11 64 0x410fd083\n1 3000000000 1024 5 13 64 0x410fd083\n";
+        let rows_w: &[u8] = b"0 - 1024 - - 64 0x410fd083\n1 - 1024 - - 64 0x410fd083\n";
+        measured[..hdr.len()].copy_from_slice(hdr);
+        measured[hdr.len()..hdr.len() + rows_m.len()].copy_from_slice(rows_m);
+        withheld[..hdr.len()].copy_from_slice(hdr);
+        withheld[hdr.len()..hdr.len() + rows_w.len()].copy_from_slice(rows_w);
+        let measured = &measured[..hdr.len() + rows_m.len()];
+        let withheld = &withheld[..hdr.len() + rows_w.len()];
+        let up = 10_000_000_000u64;
+
+        let mut r = Render::new();
+        render_stat_from(&mut r, measured, up, 3 * up, 9, false);
+        for k in [
+            &b"cpu 0 0 1200 800 0 0 0 0 0 0\n"[..],
+            b"cpu0 0 0 500 500 0 0 0 0 0 0\n",
+            b"cpu1 0 0 700 300 0 0 0 0 0 0\n",
+            b"intr 24\n",
+            b"ctxt 12\n",
+            b"processes 9\n",
+        ] {
+            if !contains_bytes(r.bytes(), k) {
+                return Err("stat over a measured /ctl/cpu");
+            }
+        }
+        for (text, shared) in [(withheld, false), (measured, true)] {
+            let mut r = Render::new();
+            render_stat_from(&mut r, text, up, 3 * up, 9, shared);
+            for k in [
+                &b"cpu 0 0 0 0 0 0 0 0 0 0\n"[..],
+                b"cpu0 0 0 0 0 0 0 0 0 0 0\n",
+                b"cpu1 0 0 0 0 0 0 0 0 0 0\n",
+                b"processes 9\n",
+            ] {
+                if !contains_bytes(r.bytes(), k) {
+                    return Err(if shared {
+                        "the shared diorama passed on a withheld counter"
+                    } else {
+                        "stat over a withheld /ctl/cpu"
+                    });
+                }
+            }
+            if contains_bytes(r.bytes(), b"intr ") || contains_bytes(r.bytes(), b"ctxt ") {
+                return Err(if shared {
+                    "the shared diorama rendered a withheld total"
+                } else {
+                    "a withheld intr or ctxt rendered as a count"
+                });
+            }
+        }
     }
 
     Ok(())

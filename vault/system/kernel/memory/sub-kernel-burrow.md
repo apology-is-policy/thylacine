@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -36,7 +36,7 @@ Burrow with `handle_count = 1, mapping_count = 0`:
 | `burrow_create_dma` | a kernel-chosen contiguous chunk, via a held hardware object | eager, foreign |
 | `burrow_create_file` | a byte range of a file, via a pinned Spoor | **sparse** |
 | `burrow_create_anon_lazy` | anonymous, demand-zeroed | **sparse** |
-| `burrow_create_code` | one contiguous buddy chunk — identical to anon | eager |
+| `burrow_create_code` | anonymous, demand-zeroed — identical to lazy anon (B-2a, 2026-10-07; one contiguous chunk before) | **sparse** |
 
 **Refcounting** is four calls: `burrow_ref`/`burrow_unref` on the handle side,
 `burrow_acquire_mapping`/`burrow_release_mapping` on the mapping side. The
@@ -130,14 +130,29 @@ deliberately so: it is the tripwire for a future caller that frees without it.
 
 ### Eager and sparse are two different lifetimes
 
-Three types hold **one contiguous chunk** in `pages` with an `order`; the free
-arm calls `free_pages` once. Two types hold a **sparse per-page slot table** --
+Two types hold **one contiguous chunk** in `pages` with an `order`; the free
+arm calls `free_pages` once. Three types hold a **sparse per-page slot table** --
 the pagemap `pm` ([[sub-kernel-pagemap]]; B-1a' replaced the flat `filepages`
 array), each slot absent until faulted in, its nodes allocated as slots fill and
-charged to the mapping address space for ANON_LAZY (uncharged for FILE, the
+charged to the mapping address space for ANON_LAZY and CODE (uncharged for FILE, the
 Image cache's posture; a FILE map's PAGES are charged to each space that maps
 them, per leaf, by the fault -- [[sub-kernel-fault]]) -- and the free arm destroys it, putting every resident
-page (a plain free for FILE, a COW put for ANON_LAZY) and freeing the nodes.
+page (a plain free for FILE, a COW put for ANON_LAZY and CODE) and freeing the nodes.
+
+**CODE moved from the first group to the second at B-2a (2026-10-07).** A JIT
+region is a reservation -- JavaScriptCore reserves its whole pool at startup
+and fills it as it compiles -- so the eager chunk charged and zeroed the whole
+pool up front and needed a physically contiguous buddy block for it. CODE now
+shares ANON_LAZY's backing and every ANON_LAZY arm (free, acquire liveness,
+demand page, the footprint and resident counts) and stays a different
+ADMISSIBILITY: the type is still what lets a region carry an RX alias. Two
+things keep the sharing sound. A code page is released only with its region:
+`lazy_release_admits` (decommit, the range detach) still names ANON_LAZY
+alone, because a release through one alias would leave the other alias's
+leaf naming the freed page. And `SYS_JIT_DESTROY` refunds the region's
+footprint (resident pages plus nodes) before its unmaps free it, since
+`burrow_free_internal` is Proc-agnostic and cannot refund
+([[sub-kernel-syscall-dispatch]]).
 
 That split is the reason the type-dispatched free arm exists at all, and it is
 also why the per-type **liveness check** on every mapping acquire reads a
@@ -201,7 +216,8 @@ close refund against the successor's space), `charge_pages` (the
 buddy-rounded count actually billed), and `shared_out`.
 
 - **`burrow_charge_record`** stamps the payer at each eager charge — the
-  attach, the JIT create, the Loom ring.
+  attach and the Loom ring. (The JIT create stamped one until B-2a; a code
+  region now charges per touched page and is refunded by its footprint.)
 - **`burrow_charge_claim`** is a **read-and-clear**, returning what this Proc's
   ADDRESS SPACE paid or zero if it is not the recorded payer -- a record whose
   space has died is never claimed: that space's count died with it and the
@@ -348,7 +364,8 @@ charge record (`charge_as_id` / `charge_pages` / `shared_out`), B-1a's
 source's lock during one clone -- NULL at all other times), and then a
 union-by-convention of per-type fields — `pages`/`order` for contiguous
 backings, a hardware-object pointer and PA for the foreign ones, a Spoor plus
-file offset plus cache-key scalars for file-backed, the pagemap `pm` (32
+file offset plus cache-key scalars for file-backed (`file_devno` is the whole
+64-bit devno, as [[sub-kernel-image]]'s key requires), the pagemap `pm` (32
 bytes, embedded) shared between file-backed and lazy-anon
 ([[sub-kernel-pagemap]]).
 

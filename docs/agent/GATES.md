@@ -113,7 +113,9 @@ tools/test-venus-verdict.sh         # its verdict, no boot  (or: make test-venus
 # server_handshake entirely. All four sabotage cases are measured in
 # HAUL-DESIGN.md 4. SKIPs cleanly (exit 0 + a SKIP line) where npxf is absent --
 # it lives outside version control, so on any other machine this is a skip, not
-# a failure.
+# a failure. A present npxf needs OpenSSL 3's libcrypto, found by pkg-config
+# (or set OPENSSL_CFLAGS and OPENSSL_LIBS): npxf's primitives are OpenSSL's, and
+# without it the check FAILS rather than skipping.
 make test-haul-kat                  # or: usr/haul/kat/regen.sh [--write]
 
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the

@@ -41,6 +41,14 @@ the shared crate (lib + bin, `no_std`, `beacon` its only dependency), and the
 dialect already covers the use. Two Markdown dialects in one tree is how a
 format rots; there is one.
 
+**The boxed slide (operator vote, 2026-09-28).** The manual's block quote is a
+Beacon `aside`, a passage set apart from the flow, so a slide whose body is one
+block quote is a boxed slide: Halcyon frames it through its stylesheet, a
+console that reports its width draws U+2500 furniture around it with the text
+wrapped inside, and down a pipe it is its text alone. It reached slides through
+the manual, not beside it: `lantern` still adds no construct, and the frame is
+the renderer's, never the deck's (§9). `dec-2026-09-28-beacon-aside`.
+
 The one deviation: a slide is checked as an **anonymous** section
 (`format::check(None, …)`). The `TitleNumber` rule — a title must not begin with
 its section number — exists for the manual's `NN-name.md` book ordering, and a
@@ -135,7 +143,7 @@ gate `manual` and the coreutils use. `lantern` adds no new tier logic.
 
 ```toml
 title = "Beacon slides"
-slides = ["01-title.md", "02-how.md", "03-keys.md"]
+slides = ["01-title.md", "02-how.md", "03-keys.md", "04-lantern.png"]
 ```
 
 Parsed with `libhalcyon::toml` — the theme loader's existing `no_std` TOML
@@ -146,9 +154,11 @@ unstated inheritance from a constant free to move for unrelated reasons.
 
 Strict on purpose, in the manual format's spirit — the parser is the checker. An
 unknown key, a `[table]` header, a duplicate key, a slide named twice, or a
-slide name that could be a path (`/`), a traversal (`..`), a hidden file (`.`),
-an option (`-`) or not Markdown is **refused with its line**, never guessed at or
-ignored.
+slide name that could be a path (`/`), a traversal (`..`), a hidden file (`.`)
+or an option (`-`), or that names neither a Markdown file (`.md`) nor a picture
+(`.png`, `.jpg` or `.jpeg`, §14), is **refused with its line**, never guessed at or
+ignored. The name says which kind a slide is; the bytes of a picture are checked
+before the talk by the program that will show it (§8).
 
 **A manifest carries content and order, never display authority.** `scale`,
 `theme` and `font` are refused like any unknown key. Those belong to the
@@ -157,13 +167,21 @@ mails you cannot reach for them.
 
 ### 5.1 The shipped demo deck
 
-`usr/lantern/deck/` is a tracked three-slide deck, installed at **`/deck`** so
+`usr/lantern/deck/` is a tracked four-slide deck, installed at **`/deck`** so
 `lantern /deck` shows something on a fresh boot. It is installed into the
 **pool**, beside `/manual` and `/test.png` — *not* the ramfs, whose root is not
 the running system's `/` (the pool is, after the pivot), so a deck baked into the
 ramfs would simply never be found. Its slides are checked with the manual's own
 checker before the pool opens and a failure is fatal, so a demo deck that stopped
-being a valid section set cannot ship.
+being a valid section set cannot ship. Its second slide holds a block quote, so
+the shipped deck shows a boxed slide in every posture: framed in a Halcyon tile,
+in a U+2500 box on a console that reports its width, and as its text down a
+pipe. Its fourth slide is a picture (§14), so the deck shows a picture slide
+in a Halcyon tile and the picture's stand-in everywhere else. The picture is a
+generated PNG (`usr/lantern/make-deck-picture.py`, stdlib only, kept outside the
+deck directory because every file in it is installed), and a host test decodes
+it with `view`'s own decoder, so a picture `view` would refuse cannot ship
+unnoticed; `lantern --check /deck` on the device checks it the way a talk does.
 
 The check runs against a temporary directory holding only the `.md` files,
 because `manual-check` reads a whole directory and requires every entry to be
@@ -230,6 +248,41 @@ The whole deck is read and checked at startup, one slide at a time, before
 anything is shown. A deck fails at the start or not at all — never on the slide
 the talk has reached. `lantern --check <dir>` is the same pass without
 presenting, for use the day before.
+
+A picture slide is checked by `view --check`, the program that will show it,
+with the picture as its standard input: the file is read, its signature must be
+PNG or JPEG, its dimensions must fit `view`'s decode budget, and it is decoded
+whole, in `view`'s own process. One program is the authority on what a picture
+is, so the check cannot pass a file the talk would then refuse. A damaged
+picture fails here, the day before, not on the slide the talk has reached.
+lantern runs it as `/bin/view`, by its absolute path: a spawn resolves a
+relative name against the working directory, with no search path, so a bare
+name would run a file called `view` in the directory lantern was started
+from, the deck's own included. `view` gets at most one capability, the random
+source it draws a placed picture's reference from, so a decoder that a hostile
+picture subverts holds none of the presenter's other capabilities. Its identity,
+namespace and environment are still the presenter's: the mask narrows what it
+may ask of the kernel, not the files it can reach. A `view` that goes 30
+seconds with no byte on either pipe and no exit is killed and reaped, and so is
+one that closes both pipes and does not exit within the same 30 seconds. The bound
+is on silence, not on the whole run: `view` writes only at the end, once its
+work is done.
+
+Every file of a deck is opened by `lantern` itself, and opened as a file IN the
+deck directory: the open refuses a symbolic link (`T_ONOFOLLOW`) and anything
+that is not a regular file, for the manifest and for both kinds of slide. The
+name rules keep a slide's name inside the deck; a link would not keep its
+content there. A deck someone else wrote could otherwise hold `photo.png ->
+/home/<you>/private/scan.png`, and presenting it would put the presenter's own
+file on the projector. A picture reaches `view` as that already-opened file, so
+what was checked and what is shown are one file, not two lookups of one name.
+The deck directory itself is resolved as the presenter names it, links
+included. On a Haul mount a link in that path is set by the export's author.
+Such a served link resolves beneath the mount it was reached through (DISTRO
+4.6), so it can lead elsewhere in the export but never to one of the
+presenter's own decks outside it. `lantern` adds no check of its own: it cannot
+tell a served link from the presenter's own, and the containment belongs to the
+mount (audit IMG-SLIDE F6, closed by DISTRO 4.6 on 2026-10-06).
 
 Memory is one slide, whatever the deck's size: each slide is dropped after
 validation and re-read when it is shown, so the working set is `manual`'s own
@@ -349,6 +402,8 @@ session at 1280×800 and capturing, not by reading more code
   owns.
 - It does not transition, animate, or lay out. Those are either the renderer's
   or nobody's.
+- It does not decode a picture. `view` does, in a process of its own that ends
+  when the picture is placed (§14).
 
 ## 13. One frame per slide (FL-1, 2026-09-28)
 
@@ -373,3 +428,75 @@ A slide change is now ONE frame, and ONE write:
    (AURORA.md §3).
 
 Down a pipe (`Show::Cat`) nothing changes: no clear, no frame marks.
+
+## 14. Picture slides (operator vote 2026-09-28)
+
+A manifest entry that names a PNG or a JPEG is a picture slide:
+
+```toml
+slides = ["01-title.md", "02-architecture.png", "03-results.md"]
+```
+
+The operator chose this shape over a picture inside a Markdown slide and over a
+deck that names its own viewer: **the manifest names the picture, and `lantern`
+runs the fixed `view` program to show it.** A deck names content, never a
+program (§5: content and order, never display authority), which is also where
+sent puts the choice: it converts a slide's image through a filter set in its
+own `config.h`, never one the slides name. The Plan 9 form is the same split:
+`page(1)` and the `jpg(1)` family, a program that shows a picture, beside the
+text tools.
+
+**Where a picture is shown.** Only in a Halcyon session pane at the rich tier,
+because only there does a picture have an ordered place in the output (HALCYON
+14.7, the 2026-09-17 refinement): the raster is uploaded over the pane's own
+channel, and a reference to it in the output stream says where it goes. The
+console renderer is rich as well, but its channel carries no reference: a raster
+lands in the console's transcript whenever it arrives, with nothing in the stream
+to order it against the slide around it. Everywhere a picture cannot be shown,
+the slide shows its **stand-in**: the picture's file name set apart as an aside
+(§2), which is framed in a tile, drawn in a U+2500 box on a console that reports
+its width, and plain text down a pipe. When `view` was run and could not place the
+picture, the stand-in says why, on a second line. Losing a picture on a stage
+costs its slide; it never costs the talk (§8).
+
+**One frame, still one write.** `view --embed` decodes the picture, uploads the
+raster over the pane's channel and prints only its reference, the caption object
+that the ordinary `view` prints into its pane itself. `lantern` runs it before it
+writes anything, with standard output and standard error piped back to it, and
+only then writes the slide's frame (§13): the frame opens, the clear, the
+reference, the footer, the frame closes, in one write. The alternative, writing
+the frame's opening and letting `view` write its caption into the open frame
+itself, was rejected: the tile holds its paint for at most 150 ms (HALCYON 14.3),
+and a decode can take longer, so the blank screen the frame exists to hide would
+show. Run first, the decode delays the slide change instead, exactly as a slow
+read does (§13).
+
+**A picture that validates is shown at its pane's size.** The largest raster a
+pane admits moves while a deck is open: it falls as panes are added, and on a
+large display (HALCYON 14.7, the 2026-09-29 refinement). A check made the day
+before cannot know the figure on the stage. So `view` reads the pane's current
+limit from the channel just before it uploads, and reduces the picture to fit it
+and the header's bound of 8192 pixels on a side, averaging the pixels each new
+one covers. The check therefore bounds only what
+`view` can decode, which does not move, and a picture that passed it is refused
+for its size in the talk only if the limit falls between `view`'s read and its
+upload, as when a pane opens at that moment. That, a channel that is busy or
+gone, and a file edited since the check are what can still fail on the stage;
+the stand-in names each.
+
+**Memory.** The decode, up to `view`'s own budget, is in `view`'s process and is
+returned when that process exits. `lantern` holds the reference, one short line,
+and the frame. Returning to a picture slide decodes the picture again, as
+returning to a text slide reads it again, so a picture replaced during a
+rehearsal shows its new version. Each visit adds a raster to the pane's cache,
+which holds 64 and evicts its oldest; an evicted picture leaves its caption in
+the tile's history as text.
+
+**What `view` promises its caller** (`view --embed` and `view --check`, the two
+modes a program uses): nothing on standard output but the reference, and nothing
+at all from `--check`; exit status 0 only when the picture was placed (or, for
+`--check`, decoded); a file that is not a PNG or JPEG is an error, never passed
+to `cat` as the interactive `view` passes it; and on failure one line on standard
+error, the reason alone, because the caller names the file. `--embed` needs the
+pane's channel and does not look at its own standard output, which is the
+caller's to compose.

@@ -309,9 +309,9 @@ in-place translation pass.
 ## Caveats
 
 - **`87-pouch-fstat-lseek.md` (absorbed) documented `struct t_stat` as
-  80 bytes** with a 16-row table ending at `gid@76`. The struct has been
-  88 bytes since #100 added `devno@80`; all three pouch mirrors carry
-  `_Static_assert(sizeof == 88)`. The doc even states the rule it broke —
+  80 bytes** with a 16-row table ending at `gid@76`. The struct is 88
+  bytes: #100 added `devno@80`, which is 64 bits over what was the pad
+  after it; all three pouch mirrors carry `_Static_assert(sizeof == 88)`. The doc even states the rule it broke —
   "a future kernel field add MUST bump both the size and the assertions" —
   which is the #100 lesson recorded in project memory, met by a doc that
   is itself a stale mirror.

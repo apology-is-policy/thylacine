@@ -479,7 +479,9 @@ impl Ring {
     /// Install `fds` (each a `KOBJ_SPOOR` fd) into the ring's fixed-handle table.
     /// Each is resolved once to its `(client, fid)` + a rights snapshot -- the
     /// I-30 submit-time-pin substrate. Replaces any prior table. `fds.len()` must
-    /// be `<= MAX_REG_HANDLES`.
+    /// be `<= MAX_REG_HANDLES`. A dev9p file's staged writes are flushed first;
+    /// a failed flush is reported as its own error, and an interrupted one
+    /// (EINTR, `Error::Other(4)`) can be retried: the writes are still staged.
     pub fn register_handles(&self, fds: &[i32]) -> Result<()> {
         if fds.len() as u64 > MAX_REG_HANDLES as u64 {
             return Err(Error::InvalidArgument);
@@ -494,11 +496,7 @@ impl Ring {
                 fds.len() as u64,
             )
         };
-        if rc < 0 {
-            Err(Error::InvalidArgument)
-        } else {
-            Ok(())
-        }
+        Error::from_syscall_return(rc).map(|_| ())
     }
 
     /// Pin `bufs` (each a VA range within one anonymous RW VMA) for zero-copy
@@ -515,11 +513,7 @@ impl Ring {
                 bufs.len() as u64,
             )
         };
-        if rc < 0 {
-            Err(Error::InvalidArgument)
-        } else {
-            Ok(())
-        }
+        Error::from_syscall_return(rc).map(|_| ())
     }
 
     /// Place one SQE into the SQ. Returns [`Error::WouldBlock`] if the SQ is full

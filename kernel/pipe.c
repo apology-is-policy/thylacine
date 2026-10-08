@@ -52,7 +52,7 @@ struct pipe_ring {
     size_t                    head;           // next write position; mod PIPE_BUF_SIZE
     size_t                    tail;           // next read position; mod PIPE_BUF_SIZE
     bool                      read_eof;       // read end closed → writes return -T_E_PIPE
-    bool                      write_eof;      // write end closed → reads return 0 (EOF)
+    bool                      write_eof;      // write end closed or hung up → reads return 0 (EOF) after drain
     spin_lock_t               lock;           // protects count/head/tail/{read,write}_eof
     struct poll_waiter_list   poll_list;      // every waiter: pollers AND blocked readers/writers
     u8                        buf[PIPE_BUF_SIZE];
@@ -262,24 +262,35 @@ static int pipe_waiter_ready(void *arg) {
 // per Rendez by construction, however many threads share the pipe),
 // unregisters on every exit, and returns sleep()'s verdict: SLEEP_OK means
 // "re-sample" (another waiter may have consumed the edge), SLEEP_INTR means
-// the Proc is group-terminating and the caller unwinds (#811). The list lock
-// nests inside the ring lock (poll.h: object -> list), the Rendez lock inside
-// neither; a hook never outlives the call (NoStaleHook).
+// the Proc is group-terminating and the caller unwinds (#811), SLEEP_NOTEINTR
+// means a caught note interrupted the wait (ARCH 8.8.3) and the caller returns
+// -T_E_INTR, nothing moved. The list lock nests inside the ring lock (poll.h:
+// object -> list), the Rendez lock inside neither; a hook never outlives the
+// call (NoStaleHook).
+//
+// The wait opts in to the caught-note unwind (ARCH 8.8.3) unless the caller is
+// an elected 9P reader (stop_no_park) whose receive its client did not opt in:
+// the byte-pipe transport (9p_spoor_transport.c) receives through this wait,
+// and a send-path pump that unwound would drain nothing and spin its retry.
+// That is srvconn_client_recv's rule, for the same reader.
 static int pipe_block_locked(struct pipe_ring *r) {
+    struct Thread *t = current_thread();
+    bool caught_ok = !(t && t->stop_no_park) || t->recv_caught_ok;
     struct Rendez      priv;
     struct poll_waiter pw;
     rendez_init(&priv);
     poll_waiter_init(&pw, &priv);
     poll_waiter_list_register(&r->poll_list, &pw);
     spin_unlock(&r->lock);
-    int rc = sleep(&priv, pipe_waiter_ready, &pw);
+    int rc = caught_ok ? sleep_noteintr(&priv, pipe_waiter_ready, &pw)
+                       : sleep(&priv, pipe_waiter_ready, &pw);
     poll_waiter_list_unregister(&pw);
     return rc;
 }
 
-static void devpipe_close(struct Spoor *c) {
+static int devpipe_close(struct Spoor *c) {
     struct pipe_endpoint *p = priv_of(c);
-    if (!p) return;
+    if (!p) return 0;
     struct pipe_ring *r = p->ring;
     if (!r || r->magic != PIPE_RING_MAGIC) {
         extinction("pipe: close on endpoint with corrupted ring");
@@ -322,10 +333,24 @@ static void devpipe_close(struct Spoor *c) {
     p->magic = 0;
     kmem_cache_free(g_endpoint_cache, p);
     c->aux = NULL;
+    return 0;
 }
 
-static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
-    (void)off;
+bool pipe_hangup_write(struct Spoor *c) {
+    if (!c || c->dev != &devpipe) return false;
+    struct pipe_endpoint *p = priv_of(c);
+    if (!p || p->is_read_end || !p->ring) return false;
+    struct pipe_ring *r = p->ring;
+    // The close discipline without the ref drop: the flag under the lock,
+    // then the one wake (specs/pipe.tla HangupWrite).
+    spin_lock(&r->lock);
+    r->write_eof = true;
+    spin_unlock(&r->lock);
+    poll_waiter_list_wake(&r->poll_list);
+    return true;
+}
+
+static long pipe_read_common(struct Spoor *c, void *buf, long n, bool now) {
     struct pipe_endpoint *p = priv_of(c);
     // #100 (ER-3): see the devpipe_write twin for why `!p` stays a flat -1.
     if (!p)                      return -1;
@@ -366,17 +391,6 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
             spin_unlock(&r->lock);
             return 0;       // EOF
         }
-        // #811 (ARCH §8.8.1): a death-interrupted sleep means the Proc is
-        // group-terminating -- return so the Thread unwinds to its EL0-return
-        // die-check (re-looping would re-register + re-INTR = livelock).
-        // item 11 note (ARCH §8.8.3): this read is NOT yet caught-note-
-        // interruptible. 11b-core lands the MECHANISM only; opting a read into
-        // sleep_noteintr (returning -T_E_INTR on a queued caught note) is
-        // deferred to 11c, which lands it TOGETHER with the native/phenotype
-        // EINTR handling -- a native reader (libthyla-rs) is not EINTR-aware, so
-        // returning EINTR here before that handling exists breaks it (e.g. the
-        // ut shell's `$(cmd)` capture read, interrupted by the captured child's
-        // own child_exit note). See design_caught_notes_do_not_interrupt_waits.
         // O_NONBLOCK (CNONBLOCK): the pipe is empty and not at EOF -- a blocking
         // read would sleep here, so a non-blocking read returns EAGAIN instead.
         // Placed AFTER the count>0 and write_eof checks so a non-blocking read
@@ -384,15 +398,31 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         // ONLY the would-block case. It never registers a hook, so the I-9
         // wait/wake protocol (pipe.tla NoStuckReader) is untouched. `flag` is
         // an atomic read -- it is RMW'd from other lock domains (see spoor.h).
-        if (spoor_flag_get(c) & CNONBLOCK) {
+        if (now || (spoor_flag_get(c) & CNONBLOCK)) {
             spin_unlock(&r->lock);
             return -T_E_AGAIN;
         }
         // Registered under the lock we still hold; returns with it dropped.
-        if (pipe_block_locked(r) == SLEEP_INTR)
-            return -1;
+        // #811 (ARCH §8.8.1): death -> return so the Thread unwinds to its
+        // EL0-return die-check (re-looping would re-register + re-INTR =
+        // livelock). A caught note (ARCH §8.8.3) returns EINTR, and only to a
+        // Linux reader: a native one's wait stays death-only (the ut shell's
+        // `$(cmd)` capture read would break on an EINTR it does not retry).
+        int rc = pipe_block_locked(r);
+        if (rc == SLEEP_INTR)     return -1;
+        if (rc == SLEEP_NOTEINTR) return -T_E_INTR;
         // Loop: re-sample with the lock held.
     }
+}
+
+static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)off;
+    return pipe_read_common(c, buf, n, false);
+}
+
+long pipe_read_now(struct Spoor *c, void *buf, long n) {
+    if (!c || c->dev != &devpipe) return -T_E_BADF;
+    return pipe_read_common(c, buf, n, true);
 }
 
 static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
@@ -427,10 +457,11 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // concurrently -- see spoor.h; CNBFRAME itself is transport-tx-only).
     if (spoor_flag_get(c) & CNBFRAME) {
         spin_lock(&r->lock);
-        if (r->read_eof) {
+        // A mounted queue posts no `pipe` note (ARCH 10.3; Plan 9 pipewrite's
+        // CMSG rule): the writer is the kernel speaking for a session, and the
+        // thread it runs on is whichever one sent the request.
+        if (r->read_eof || r->write_eof) {
             spin_unlock(&r->lock);
-            struct Thread *t = current_thread();
-            if (t && t->proc) notes_post_pipe(t->proc);
             return -T_E_PIPE;
         }
         if ((long)(PIPE_BUF_SIZE - r->count) >= n) {
@@ -452,7 +483,10 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     // NoStuckWriter (multi-waiter form) is the invariant.
     for (;;) {
         spin_lock(&r->lock);
-        if (r->read_eof) {
+        // A hung-up write end refuses like a closed read end: EOF is final, so
+        // no byte may follow it, and a writer blocked on a full ring meets the
+        // hangup when its wake re-samples here.
+        if (r->read_eof || r->write_eof) {
             spin_unlock(&r->lock);
             // P6-pouch-signals-impl (sub-chunk 13a): synthesize the `pipe`
             // note to the writing Proc. Tolerant of NULL current thread
@@ -519,9 +553,12 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
         }
         // #811 (ARCH section 8.8.1): death-interrupted -> Proc group-
         // terminating; return so the Thread unwinds to its EL0-return
-        // die-check. Registered under the lock we still hold.
-        if (pipe_block_locked(r) == SLEEP_INTR)
-            return -1;
+        // die-check. A caught note returns EINTR having written nothing: a
+        // write blocks only before it moves a byte. Registered under the lock
+        // we still hold.
+        int rc = pipe_block_locked(r);
+        if (rc == SLEEP_INTR)     return -1;
+        if (rc == SLEEP_NOTEINTR) return -T_E_INTR;
     }
 }
 
@@ -549,8 +586,8 @@ static short devpipe_revents_under_lock(struct pipe_ring *r,
         if (r->count > 0)     revents |= POLLIN;
         if (r->write_eof)     revents |= POLLHUP;
     } else {
-        if (!r->read_eof && r->count < PIPE_BUF_SIZE) revents |= POLLOUT;
-        if (r->read_eof)      revents |= POLLERR;
+        if (!r->read_eof && !r->write_eof && r->count < PIPE_BUF_SIZE) revents |= POLLOUT;
+        if (r->read_eof || r->write_eof)                         revents |= POLLERR;
     }
     // POSIX: POLLIN/POLLOUT only set when requested; POLLERR/POLLHUP/
     // POLLNVAL always returned regardless of `events`.
