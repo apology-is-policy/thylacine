@@ -22,6 +22,57 @@ needed the operator.
 
 
 ---
+## 2026-10-08 (main, Opus 5.5, effort max) -- a VMA the list does not hold is never removed; the weft reaper holds the space it locked (landed)
+
+**What the run is for.** Corona found, in the B-2b hunks, that a second
+`vma_remove_in` of the same VMA wipes the whole list: the first remove NULLs
+both links, so the second takes the no-predecessor arm and writes
+`as->vmas = NULL`, and the clamp-safe uncharge says nothing. No path does it
+today (re-measured on main: five sites, each removes once then frees). B-2b's
+`code_vmas` underflow extinction was the one thing that would have made it
+loud, and capmark had just retired that counter, so the hazard had become
+silent. Corona asked main to take it (yip 0202); it went in before B-2c.
+
+**The guard was small; the audit found the real defect next door.**
+`vma_linked_in` asks the predecessor (or the head, for the first mapping) and
+the successor to agree, and `vma_remove_in` extincts when they do not -- Linux's
+list hardening. The links alone cannot tell the sole mapping from an unlinked
+VMA, so the head is asked too, and the insert's already-linked check had the
+same blind spot (a second insert of the sole mapping was refused as a
+self-overlap, then freed with the head still pointing at it). Fable's round 1
+then found a pre-existing P1 one file over: the weft orphan reaper locked a
+Proc's address space under the process table lock and, after dropping it,
+re-read `q->as` three times; exec swaps that pointer under the table lock
+alone, so an exec in the window had the reaper unlock the NEW space and leave
+the old one locked forever, and exec's drain then spun on it. `proc.c`'s exec
+comment claimed the opposite.
+
+**My first fix was wrong, and both of us caught it.** I pinned the space with a
+reference instead of re-reading the pointer. Round 2 (and, in parallel, my own
+read of `proc_quiesce_owned_devices`) found that the reference count is an
+oracle: the device-death quiesce reads `ref == 1` as "sole, and staying sole",
+and its comment's proof was that only an rfork takes a reference. A reaper pin
+on a dying driver's sole space would read as a sharer and skip the device
+reset, and the reaper's later unref, now the last, would drain the DMA buffers
+under an armed device. The fix went back to the lock -- which was never the
+bug -- with the find handing back the SPACE it locked. Reading the quiesce also
+turned up a pre-existing use-after-free race: it walks the list without the
+lock while the Proc is still ALIVE, and the reaper could free a VMA under it.
+The find now skips an exit-closing Proc (read under the lock), and the quiesce
+takes and drops the lock first. Round 3 was clean; its one behavioural P3 --
+the skip stranded a weave in an RFMEM survivor's space -- took the reviewer's
+own refinement (skip only a sole space), with its soundness argument.
+
+**A wrong turn of my own, twice.** A sabotage compile loop restored files with
+`git checkout --` in the primary tree and reverted my uncommitted edits to
+`weft.c` and `test.c`; an anchor that "matched 0 times" gave it away, and the
+edits were re-applied from the same scripts. The next time, my "tree clean"
+gate was `git diff --quiet`, which ignores staged changes; it was harmless only
+because the restore read the index. The gate is `git status --porcelain` now,
+and the rule (commit before any sabotage) is in memory.
+
+**RED and the land gates.** Nine sabotage runs in their own worktree (10:05-10:26Z), each red exactly where the closed list predicted: R1 and R2 (the predicate's head and successor halves) at their two assertions in `vma.linked_in_tracks_the_list`; R3 (the sweep re-reading `q->as`, the pre-fix shape) at "the space the sweep locked is the space it unlocked"; R4 (no exit-close skip) and R5 (a blanket skip) at their tests' one assertion each; M1, M3 and M5 (scratch double removes of the head and an interior mapping, a double insert of the sole mapping) extinct with the guard's own message, each inside the scratch test meant to drive it; and MX, with both guards off, the three silent corruptions as FAILs -- the head wiped twice and the sole mapping refused as an overlap with itself. Base and green 1963/1963. Then on the tip: suite 1963/1963, test-fault 8/8, and ci-smp-gate N=10 50/50 over five configurations with no corruption (10:26-11:49Z). Corona had the final diff on yip 0202 before the land. While the gates ran I verified one r2 lead in the code -- exec drains a driver's old space with no device reset, so a mapping-only DMA buffer frees under an armed device (OPEN-BUGS, now a question for the operator) -- and wrote the fix for the other (the reaper tests beside the live reaper thread), which lands next as its own chunk.
+
 ## 2026-10-08 (main, Opus 5.5, effort max) -- the image records every holder that has left it (landed)
 
 **What the run is for.** B-2b audit r3 F3 left one finding enqueued at the B-2
