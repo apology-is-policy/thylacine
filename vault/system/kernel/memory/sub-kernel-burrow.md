@@ -52,9 +52,9 @@ handle count sampled before the drop answers a different question — so the
 operation has to report its own effect. Resource accounting is its only caller.
 `burrow_unmap_in(as, ..)` / `burrow_unmap_reporting_in` are the same removal
 against an address space the caller names (2026-10-08): the Proc forms resolve
-`p->as` and call them. The weft reaper uses the space form, because it pins the
-space it found under the process table lock and an exec may have moved the Proc
-to another by the time it unmaps.
+`p->as` and call them. The weft reaper uses the space form, because it locked
+the space it found under the process table lock, and an exec may have moved the
+Proc to another by the time it unmaps.
 `burrow_map_fixed(p, ..)` / `burrow_map_fixed_in(as, exempt, payer, v, vaddr,
 length, prot, burrow_offset, &out_free)` place a mapping at a caller-chosen
 address over whatever is there (the MAP_FIXED primitive; since B-1a'

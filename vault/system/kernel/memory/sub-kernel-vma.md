@@ -633,7 +633,7 @@ fails. All three were sabotage-measured.
 
 ## Tests
 
-`kernel/test/test_vma.c` — seven unit tests exercising this file directly:
+`kernel/test/test_vma.c` — eleven unit tests exercising this file directly: the four `vma_find_gap` tests (`vma.find_gap_smoke`, `_no_fit`, `_constraints`, `_straddle`), and
 `vma.alloc_free_smoke` (alloc/free; the `vma_total_allocated`/`_freed` counters
 advance), `vma.alloc_constraints` (the rejections — zero-length, reversed,
 unaligned, `WRITE|EXEC`, null Burrow — each return NULL),

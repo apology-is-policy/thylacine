@@ -631,6 +631,15 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // is still driving. Any future change that lets a hardware handle reach a
     // second Proc must add a sole-ownership gate here, exactly like walk (b).
     bool as_sole = (addrspace_ref_count(p->as) == 1);
+    // The walk below reads the list without its lock, and the weft reaper is the
+    // one cross-Proc writer of it: it unmaps under the lock, and it no longer
+    // starts once this Proc is non-ALIVE or its exit close has begun, which it
+    // reads under that lock. Taking and dropping the lock here waits out an
+    // unmap already under way.
+    if (as_sole) {
+        spin_lock(&p->as->lock);
+        spin_unlock(&p->as->lock);
+    }
     for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
         if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
@@ -4673,9 +4682,10 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     // Every cross-Proc reader of `->as` resolves its target under
     // g_proc_table_lock. /proc/<pid>/{maps,mem} and /ctl/procs finish with it
     // inside that walk, so after the section above none of them is holding
-    // `old`. The weft reaper keeps it past the walk, but as a reference taken
-    // under the lock, never a bare pointer: its unref, not ours, drains `old`
-    // if it outlasts us. That is what makes the drop below safe rather than a
+    // `old`. The weft reaper keeps `old`'s LOCK past its walk, by the pointer
+    // it captured there, never by re-reading ours; if the drop below is the
+    // last, its drain takes that lock first and so waits for the reaper rather
+    // than freeing under it. That is what makes the drop safe rather than a
     // race.
 
     // Put the NEW translation in the hardware before touching the old one. After

@@ -253,20 +253,26 @@ threads of one guest mapping the same fid each build a binding from a distinct
 identifier; exactly one wins, and the loser tears its own down and returns the
 winner's address.
 
-**The reaper's order** is registry lock, then the process table, under which the
-find takes a *reference* on the target's address space, then that space's lock,
-taken after the table lock drops, so the per-page unmap runs with interrupts on
-rather than inside the table's interrupt-off window. The reaper holds the space,
-not the Proc: exec swaps a Proc's space under the table lock alone, so once the
-walk ends the Proc's pointer may name another one. Until 2026-10-08 the find
-took the lock and the sweep re-read the pointer three times; an exec in that
-window had it unlock the new space and leave the old one locked forever, and
-exec's drain of the old space then spun on it (vmaguard audit F1). The
-reference also keeps the space's teardown out, since a drain runs only at the
-last unref, and the reaper drops it after the registry lock, because a last
-unref drains and a drain may sleep. `weft.reap_pins_the_space_across_exec`
-swaps the space inside that window and checks the old one is unmapped, uncharged,
-unlocked and unpinned, and the new one untouched. Registration and unregistration both run lock-free. The
+**The reaper's order** is registry lock, then the process table, then the target's
+address-space lock — acquired under the table lock and *held past its release*,
+so the per-page unmap runs with interrupts on rather than inside the table's
+interrupt-off window. The held lock alone keeps the space's teardown out: every
+last unref drains through `vma_drain_in`, which takes it before the page table
+or the struct is freed. The find hands back the SPACE it locked, and the sweep
+uses only that pointer, because exec swaps a Proc's space under the table lock
+alone. Until 2026-10-08 the sweep re-read the Proc's pointer three times after
+the walk; an exec in that window had it unlock the new space and leave the old
+one locked forever, and exec's drain of the old space then spun on it (vmaguard
+audit F1). It holds a lock and not a reference because the device-death
+quiesce and the image join read the reference count as "who else holds this
+space", and a transient reaper reference read as a sharer (audit r2 F1). The
+find skips a Proc whose exit close has begun (`PROC_FLAG_EXIT_CLOSING`, read
+under the lock), and the quiesce takes and drops the lock before its lock-free
+walk ([[sub-kernel-death]]). `weft.reap_unlocks_the_space_it_locked` swaps the
+space inside that window while another party holds the new space's lock, and
+checks that the find held the old lock and took no reference, that the sweep
+unmapped and uncharged the old space and unlocked its lock, and that the other
+party's hold survived; `weft.reap_skips_an_exit_closing_proc` checks the skip. Registration and unregistration both run lock-free. The
 close path unregisters before reading the binding, and the reaper nulls the
 region pointer under the registry lock, so neither side sees a half-reclaimed
 binding.

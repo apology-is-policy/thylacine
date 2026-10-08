@@ -315,9 +315,10 @@ child starts NONE too.
 `proc_exec_replace` swaps a live process's address space in place, under the
 process table lock alone. A cross-Proc reader of `->as` either finishes inside
 its table walk (`/proc/<pid>/{maps,mem}`, `/ctl/procs`) or, like the weft
-reaper, leaves it holding a reference on the space it found, never the Proc's
-pointer ([[sub-kernel-weft]]); so the swap's own unref of the old space drains
-it only when no reader is left. The rule
+reaper, leaves it holding the LOCK of the space it found, by the pointer it
+captured there, never the Proc's ([[sub-kernel-weft]]); so if the swap's unref
+of the old space is the last, its drain takes that lock first and waits for
+the reaper. The rule
 governing everything it clears is one sentence: **the image is gone, so anything
 holding an address into it, or a disposition installed by it, is now a pointer
 into someone else's program.**

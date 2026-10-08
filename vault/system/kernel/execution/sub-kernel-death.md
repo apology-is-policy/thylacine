@@ -600,3 +600,21 @@ ALIVE). The table itself is still freed at `proc_free`
 ([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
 `proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
 (`vivarium.socktab_ready_release_paths`).
+
+## The device quiesce waits out a reaper unmap (2026-10-08, vmaguard)
+
+The device-quiesce VMA sweep reads the address space's list without its lock,
+in the exit close's RUNNING + ALIVE window and again at `proc_free`. Every
+peer has committed to EXITING by then, so the one other writer of that list is
+the weft orphan reaper, which unmaps a stale framebuffer mapping cross-Proc
+under the space's lock ([[sub-kernel-weft]]). The sweep now takes and drops
+that lock before walking, which waits out an unmap already under way, and the
+reaper no longer starts on a Proc that is non-ALIVE or carries
+`PROC_FLAG_EXIT_CLOSING`, which it reads under the same lock. Both close sites
+set the flag before the quiesce, so a reaper that takes the lock after the
+barrier sees it. Before this, a reaper unmap could free a VMA the sweep was
+about to step through. The reaper also holds the space by its lock rather than
+a reference, because this sweep reads a reference count of 1 as "no other
+holder": a transient reaper reference would have skipped a dying driver's
+device reset (vmaguard audit r2 F1).
+

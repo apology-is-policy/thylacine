@@ -88,11 +88,8 @@ void addrspace_unref(struct AddrSpace *as) {
     // sharer to die free a VMA list the survivor was still translating through.
     //
     // Nothing between the decrement and here can take a new reference: a ref is
-    // only ever taken through a holder -- rfork, from a live parent, and the
-    // weft reaper's pin, from an ALIVE Proc's current space under
-    // g_proc_table_lock, which that Proc's own reference covers until its exec
-    // swap or its reap, both under the same lock -- so reaching zero means no
-    // holder is left to hand one out.
+    // only ever taken from a Proc that already holds one (rfork, from a live
+    // parent), so reaching zero means no holder is left to hand one out.
     vma_drain_in(as);
 
     // B-1a': nothing returns to the pool here. The pool is physical -- every
@@ -110,9 +107,7 @@ void addrspace_unref(struct AddrSpace *as) {
     // again. Each caller separately owes "no CPU translates under this ASID
     // now": proc_free by having reaped + on_cpu-spun every thread,
     // proc_exec_replace by writing the new TTBR0 (a DIFFERENT ASID) and `isb`ing
-    // before it gets here; the weft reaper's pin, when its unref is the last, by
-    // coming after every holder has left in one of those two ways, from a
-    // kthread whose TTBR0 is the kernel's. See the header for the full argument -- in
+    // before it gets here. See the header for the full argument -- in
     // particular, vma_drain issues NO TLBI (measured at L-2), so an earlier
     // claim that it did was fiction and is not load-bearing anywhere.
     proc_pgtable_destroy(as->pgtable_root);
