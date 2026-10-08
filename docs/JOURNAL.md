@@ -272,8 +272,63 @@ TICKLESS-IDLE.md says a starved periodic park ends within 1 ms, which these
 numbers contradict, so it is queued to be measured (task #23) rather than
 waved off.
 
-Round 2 (Fable, on the fixes themselves) is running, and the sabotage A' run
-(the same two changes, on the new code) is in flight.
+**Sabotage A'** applied the same two changes to `3638a075`. It failed exactly
+the five predicted tests (1956/1961), each for its stated reason:
+- `exit_self_marks_exiting` and `multi_thread_reap` failed on their now-bounded
+  waits, where the first sabotage run had hung;
+- `thread_reap_churn` failed at the 256th spawn;
+- `thread_reap_inflight` failed because the reap took the in-flight Thread;
+- `thread_reap_concurrent` failed on its refused spawns.
+
+The gauge and gate tests passed, as they should under A'.
+
+### XT-3b audit round 2: the fixes, prosecuted
+
+**Round 2** (Fable 5.1, start == end, on `3638a075`) judged the code of the
+fixes sound. It found 0 P0, 0 P1, 0 P2 and 3 P3; all three were in what the
+fixes SAID.
+
+- **F1.** My restated premise was still too broad. "Reap to settle never
+  sleeps, in a syscall body or under the mask" is false in two ways:
+  - a last Thread out sleeps in its close window, and can run unmasked: the
+    `userland_enter` die-check, the spawn thunk's `exits("fail-exec")`;
+  - a kernel-mode thread of a user Proc retires from a preemptible stretch.
+
+  The bound holds anyway, for a reason none of my four texts gave: the
+  last-out never retires, and kernel-mode threads exist only in the tests. The
+  premise is now a property of RETIRING exits, with those two named as outside
+  it. I had caught the close-window half myself (`b49a372e`) without seeing
+  the unmasked half.
+- **F2.** I had called the `REAP_ROUND` coarsening "a superset of the C", and it
+  was not. In the C two reapers can split one settled set; the model's
+  take-all claim cannot. I did not just reword it: the model now has rounds
+  (`RoundMax`, a `reaploop` state). Before trusting it I checked three things:
+  - at four threads and `RoundMax = 1`, a split claim is reachable (a
+    `NoSplitClaim` probe fires);
+  - the renamed `ReapEndsOnShortRound` fires when a reap may end after a full
+    round;
+  - `ReapLoopEnds` fires when the loop cannot end.
+
+  Every safety invariant is now checked over split claims (858 and 5,994
+  states). One of the reviewer's sub-claims was wrong. A tail cut short by a
+  preemption does settle: the preempting `sched()` completes a switch, and the
+  destination clears `on_cpu`. So the gate is not what `WF(Settle)` rests on;
+  the never-sleeps seam is. The header now says exactly that.
+- **F3.** `thread_exit_self`'s last Thread out ran the /srv, /cap and weft
+  teardown AFTER its EXITING commit, where a sleep extincts, while `exits()` runs
+  the same three while RUNNING and ALIVE. Nothing in them sleeps today, but the
+  weft one is safe only because the share admission keeps FILE Burrows out, a
+  gate that has been widened before. I moved the three into the last-out window
+  rather than adding that gate to the seam's list. On both exit paths the
+  EXITING tail is now the clear-child-tid store, its wake and `sched()`. Before
+  the move I checked that none of the three reads the Proc's state (they key on
+  stripes and owner pointers), so running them while ALIVE is what `exits()`
+  already does. No test can fail without the move, because nothing sleeps
+  today; it removes a dependency instead.
+
+The close is clean by the audit-round rule: round 2 had no P0, P1 or P2, and
+its fixes are a reorder into an existing window plus documentation and model.
+No round 3 is owed.
 
 ---
 ## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)

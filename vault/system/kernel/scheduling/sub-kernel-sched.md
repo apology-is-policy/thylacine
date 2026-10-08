@@ -128,10 +128,10 @@ return, after the count and the in-syscall marker: `preempt_check_irq` never
 switches out a thread whose state is EXITING, and leaves `need_resched` pending
 as the other two do. An EXITING thread's own `sched()` is a few instructions
 away, and a switch taken before it would be the thread's last, because `sched()`
-never re-enqueues EXITING: the rest of its tail -- the clear-child-tid wake and,
-for the last thread out, the /srv, /cap and weft cleanup -- would never run, and
-nothing repeats it. The window was live at the `userland_enter` die-check, which
-runs outside a syscall with IRQs on. The gate also keeps a retired thread's
+never re-enqueues EXITING: the rest of its tail -- the clear-child-tid store and
+the wake a joiner waits on -- would never run. The window was live at the
+`userland_enter` die-check and for a kernel-mode thread of a user Proc, both
+outside a syscall with IRQs on. The gate also keeps a retired thread's
 reap-to-settle stretch unpreempted, the premise of the retired-list bound
 ([[sub-kernel-death]]). `scheduler.preempt_gate_defers_while_exiting` arms the
 flag on an EXITING thread and checks it is still pending three ticks later;

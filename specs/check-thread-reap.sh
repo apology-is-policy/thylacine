@@ -8,8 +8,10 @@
 # Each buggy cfg is built to violate exactly one named invariant.
 #
 # Counts measured 2026-10-08 on the module as committed at the XT-3b audit
-# close (round 1 split the reap into a claim and a commit: 668 -> 808 and
-# 4532 -> 5496).
+# close. Round 1 split the reap into a claim and a commit (668 -> 808,
+# 4532 -> 5496); round 2 made a reap claim in rounds of RoundMax and loop
+# until one comes back short (808 -> 858; 5496 -> 5994, at RoundMax = 1, the
+# setting at which two reapers split one settled set).
 #
 # What this script CANNOT see, said so the green reads no larger: the model
 # abstracts a Thread's memory to one "freed" state, so it proves WHO may free and
@@ -25,8 +27,8 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="thread_reap:808
-thread_reap_4:5496"
+CLEAN="thread_reap:858
+thread_reap_4:5994"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="thread_reap_buggy_no_oncpu:NoFreeInFlight

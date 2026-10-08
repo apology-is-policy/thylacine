@@ -2721,11 +2721,11 @@ void preempt_check_irq(void) {
     // An EXITING thread is never switched out involuntarily. Its own sched()
     // is a few instructions away, and a switch taken here would be its last:
     // sched() never re-enqueues EXITING, so the rest of its tail -- the
-    // clear_child_tid wake and, for the last thread out, the /srv, /cap and
-    // weft cleanup -- would never run, and nothing repeats that cleanup. The
-    // userland_enter die-check runs outside a syscall with IRQs ON, so the
-    // window is live there. Leave need_resched pending, as the gates above
-    // do; that sched() clears it at entry.
+    // clear_child_tid store and the wake a joiner waits on -- would never
+    // run. The userland_enter die-check and a kernel-mode thread of a user
+    // Proc run outside a syscall with IRQs ON, so the window is live there.
+    // Leave need_resched pending, as the gates above do; that sched() clears
+    // it at entry.
     if (t->state == THREAD_EXITING) return;
 
     // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-

@@ -35,13 +35,18 @@
 (* only from the last live Thread, every free goes through the claim its    *)
 (* freer made, and ClaimsHeldByLive says no claim outlives its claimer.     *)
 (*                                                                         *)
-(* COARSENINGS, each a superset of the C's behaviours:                      *)
+(* ROUNDS. The C claims at most REAP_ROUND Threads per round and repeats   *)
+(* while a round comes back full, dropping the lock between rounds, so two  *)
+(* reapers can split one settled set. The model does the same at a smaller  *)
+(* scale: a round claims Min(RoundMax, |reapable|) of the reapable Threads, *)
+(* chosen nondeterministically, and the reaper loops ("reaploop") until a  *)
+(* round comes back short. The action property ReapEndsOnShortRound is the  *)
+(* C's `while (n == REAP_ROUND)`.                                           *)
+(*                                                                         *)
+(* COARSENINGS, each a superset of the C's behaviours or argued equal:      *)
 (*   - Exit does not have to follow a reap. The C reaps at every exit's     *)
 (*     entry; the model lets an exit skip it, so its safety verdicts cover  *)
 (*     the C's reap-first exits.                                            *)
-(*   - Claim takes every reapable Thread at once. The C claims REAP_ROUND   *)
-(*     at a time and repeats until a round comes back short; the action     *)
-(*     property ClaimTakesAllSettled pins the sum.                          *)
 (*   - Exec claims every retired Thread at once, settled or not, and frees  *)
 (*     each once settled. The C claims settled ones round by round; no      *)
 (*     other reaper exists while the execer is alone, so the two orders     *)
@@ -54,9 +59,17 @@
 (* twice the CPU count, kernel/include/thylacine/proc.h proc_reap_retired)  *)
 (* rests on a stretch per CPU that is never switched out, which this model  *)
 (* has no CPU to state; it lets every Thread sit in its tail at once. The   *)
-(* half it can see is ClaimTakesAllSettled: a claim leaves no settled       *)
-(* Thread behind. The churn test's retired_max and /thread-torture witness  *)
-(* the bound at runtime.                                                    *)
+(* half it can see is ReapEndsOnShortRound: a reap ends only after a round  *)
+(* that took every reapable Thread. The churn test's retired_max and        *)
+(* /thread-torture witness the bound at runtime.                            *)
+(*                                                                         *)
+(* AN OBLIGATION ON THE C, not a result: WF(Settle), "every tail reaches a *)
+(* switch away". It holds because a tail never sleeps                       *)
+(* (seam-exiting-tails-never-sleep) and spins only on bounded waits. A tail *)
+(* switched out early by a preemption settles too, its work cut short; that *)
+(* lost wake (task #20, closed by preempt_check_irq's EXITING refusal) is   *)
+(* below this model, which has no joiners, and                              *)
+(* scheduler.preempt_gate_defers_while_exiting is its witness.              *)
 (*                                                                         *)
 (* NOT MODELLED, and why it needs no step here: walkers of the live list   *)
 (* (the death-wake cascade, devproc, proc_cpu_ns) run entirely under        *)
@@ -85,6 +98,7 @@ CONSTANTS
     Threads,                      \* every Thread the Proc will ever have
     Main,                         \* the one alive at the start
     MaxGen,                       \* address-space generations (exec bound)
+    RoundMax,                     \* Threads one reap round claims (REAP_ROUND)
     BUGGY_REAP_IGNORES_ONCPU,
     BUGGY_CLAIM_UNLOCKED,
     BUGGY_UNLINK_AT_CLAIM,
@@ -94,6 +108,7 @@ CONSTANTS
 
 ASSUME Main \in Threads
 ASSUME MaxGen \in Nat \ {0}
+ASSUME RoundMax \in Nat \ {0}
 
 NoThread == "none"
 Wait     == "wait"     \* wait_pid in the parent: a freer that is not a Thread of p
@@ -103,12 +118,13 @@ Wait     == "wait"     \* wait_pid in the parent: a freer that is not a Thread o
      "live"      -- RUNNING / RUNNABLE / SLEEPING: a live Thread
      "spawning"  -- live, inside the spawn after ready() (BUGGY_TID_AFTER_READY)
      "selecting" -- live, candidates chosen, not yet marked (BUGGY_CLAIM_UNLOCKED)
-     "reaping"   -- live, freeing the Threads it claimed
+     "reaping"   -- live, freeing the Threads its current round claimed
+     "reaploop"  -- live, a full round done: it must claim again or end
      "execing"   -- live, the exec drain
      "tail"      -- EXITING and still on a CPU: the tail, then the switch away
      "settled"   -- EXITING, switched away, on_cpu clear: nothing runs on it
      "freed"     -- its Thread struct and kstack are back in the allocators *)
-PCs   == {"unborn", "live", "spawning", "selecting", "reaping", "execing",
+PCs   == {"unborn", "live", "spawning", "selecting", "reaping", "reaploop", "execing",
           "tail", "settled", "freed"}
 Lists == {"none", "live", "retired"}
 
@@ -123,14 +139,15 @@ VARIABLES
     tgen,          \* [Threads -> 0..MaxGen]  the space each Thread runs in
     dead,          \* address-space generations already freed
     folded,        \* Threads whose totals were folded into the Proc's
+    nround,        \* [Threads -> Nat]  how many the reaper's current round claimed
     freeInFlight,  \* a Thread was freed while it was still in its tail
     doubleFree,    \* a Thread was freed twice
     uafRead        \* the spawner read a freed Thread
 
-vars == <<pc, list, claims, sel, pending, proc, gen, tgen, dead, folded,
+vars == <<pc, list, claims, sel, pending, proc, gen, tgen, dead, folded, nround,
           freeInFlight, doubleFree, uafRead>>
 
-Live(t)  == pc[t] \in {"live", "spawning", "selecting", "reaping", "execing"}
+Live(t)  == pc[t] \in {"live", "spawning", "selecting", "reaping", "reaploop", "execing"}
 LiveList == {t \in Threads : list[t] = "live"}
 
 TypeOk ==
@@ -144,6 +161,7 @@ TypeOk ==
     /\ tgen    \in [Threads -> 0..MaxGen]
     /\ dead    \subseteq 1..MaxGen
     /\ folded  \subseteq Threads
+    /\ nround  \in [Threads -> 0..Cardinality(Threads)]
     /\ freeInFlight \in BOOLEAN
     /\ doubleFree   \in BOOLEAN
     /\ uafRead      \in BOOLEAN
@@ -159,6 +177,7 @@ Init ==
     /\ tgen    = [t \in Threads |-> IF t = Main THEN 1 ELSE 0]
     /\ dead    = {}
     /\ folded  = {}
+    /\ nround  = [t \in Threads |-> 0]
     /\ freeInFlight = FALSE
     /\ doubleFree   = FALSE
     /\ uafRead      = FALSE
@@ -192,7 +211,7 @@ Spawn(s, n) ==
               /\ pending' = [pending EXCEPT ![s] = n]
          ELSE /\ pc'      = [pc EXCEPT ![n] = "live"]
               /\ UNCHANGED pending
-    /\ UNCHANGED <<claims, sel, proc, gen, dead, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<claims, sel, proc, gen, dead, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 (* The spawner's `return nt->tid` when it is read after ready(). *)
 ReadTid(s) ==
@@ -200,7 +219,7 @@ ReadTid(s) ==
     /\ uafRead' = (uafRead \/ pc[pending[s]] = "freed")
     /\ pc'      = [pc EXCEPT ![s] = "live"]
     /\ pending' = [pending EXCEPT ![s] = NoThread]
-    /\ UNCHANGED <<list, claims, sel, proc, gen, tgen, dead, folded, freeInFlight, doubleFree>>
+    /\ UNCHANGED <<list, claims, sel, proc, gen, tgen, dead, folded, nround, freeInFlight, doubleFree>>
 
 (* --- exit: thread_exit_self's commit, one g_proc_table_lock hold --- *)
 Exit(t) ==
@@ -211,13 +230,13 @@ Exit(t) ==
               /\ UNCHANGED list
          ELSE /\ list' = [list EXCEPT ![t] = "retired"]
               /\ UNCHANGED proc
-    /\ UNCHANGED <<claims, sel, pending, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<claims, sel, pending, gen, tgen, dead, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 (* The final switch away completes: the destination clears on_cpu. *)
 Settle(t) ==
     /\ pc[t] = "tail"
     /\ pc' = [pc EXCEPT ![t] = "settled"]
-    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead, folded,
+    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead, folded, nround,
                    freeInFlight, doubleFree, uafRead>>
 
 (* --- the live reaper (proc_reap_retired, at spawn and at exit) --- *)
@@ -226,18 +245,43 @@ Reapable(t) ==
     /\ \/ pc[t] = "settled"
        \/ BUGGY_REAP_IGNORES_ONCPU /\ pc[t] = "tail"
 
-(* The claim (proc_claim_settled_retired): marked under the lock, left on the
-   retired list. *)
-Claim(r) ==
-    /\ ~BUGGY_CLAIM_UNLOCKED
-    /\ pc[r] = "live" /\ proc = "alive"
+Min(a, b) == IF a < b THEN a ELSE b
+
+(* One round of the claim (proc_claim_settled_retired): under the lock, mark
+   Min(RoundMax, |reapable|) of the reapable Threads -- which ones is the
+   list order, here a free choice -- and leave them on the retired list. *)
+ClaimRound(r) ==
+    /\ proc = "alive"
     /\ LET cand == {t \in Threads : Reapable(t)} IN
          /\ cand # {}
-         /\ claims' = ClaimedBy(cand, r)
-         /\ IF BUGGY_UNLINK_AT_CLAIM THEN list' = Detached(cand)
-                                     ELSE UNCHANGED list
+         /\ \E S \in SUBSET cand :
+              /\ Cardinality(S) = Min(RoundMax, Cardinality(cand))
+              /\ claims' = ClaimedBy(S, r)
+              /\ nround' = [nround EXCEPT ![r] = Cardinality(S)]
+              /\ IF BUGGY_UNLINK_AT_CLAIM THEN list' = Detached(S)
+                                          ELSE UNCHANGED list
     /\ pc' = [pc EXCEPT ![r] = "reaping"]
     /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
+
+(* A reap point (a spawn, an exit's entry) starts a reap; nothing forces one. *)
+ClaimStart(r) ==
+    /\ ~BUGGY_CLAIM_UNLOCKED
+    /\ pc[r] = "live"
+    /\ ClaimRound(r)
+
+(* After a full round the reaper claims again (proc_reap_retired's loop). *)
+ClaimNext(r) ==
+    /\ pc[r] = "reaploop"
+    /\ ClaimRound(r)
+
+(* The loop's last claim finds nothing: the reap returns. *)
+LoopEnd(r) ==
+    /\ pc[r] = "reaploop"
+    /\ ~\E t \in Threads : Reapable(t)
+    /\ pc'     = [pc EXCEPT ![r] = "live"]
+    /\ nround' = [nround EXCEPT ![r] = 0]
+    /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead, folded,
+                   freeInFlight, doubleFree, uafRead>>
 
 (* BUGGY_CLAIM_UNLOCKED: chosen under the lock, marked after it, so a second
    reaper can choose the same Threads in between. *)
@@ -248,26 +292,31 @@ Select(r) ==
          /\ cand # {}
          /\ sel' = [sel EXCEPT ![r] = cand]
     /\ pc' = [pc EXCEPT ![r] = "selecting"]
-    /\ UNCHANGED <<list, claims, pending, proc, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, claims, pending, proc, gen, tgen, dead, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 Mark(r) ==
     /\ pc[r] = "selecting"
     /\ claims' = ClaimedBy(sel[r], r)
     /\ sel'    = [sel EXCEPT ![r] = {}]
     /\ pc'     = [pc EXCEPT ![r] = "reaping"]
-    /\ UNCHANGED <<list, pending, proc, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, pending, proc, gen, tgen, dead, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 (* A settled Thread needs no wait; thread_free_retired's on_cpu spin is
    defence for this freer, not a step it relies on. *)
 ReapFree(r, t) ==
     /\ pc[r] = "reaping" /\ r \in claims[t]
     /\ CommitFree(r, t)
-    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, uafRead>>
+    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, nround, uafRead>>
 
+(* The round is freed. A full round loops; a short one ends the reap. *)
 ReapDone(r) ==
     /\ pc[r] = "reaping"
     /\ \A t \in Threads : r \notin claims[t]
-    /\ pc' = [pc EXCEPT ![r] = "live"]
+    /\ IF nround[r] = RoundMax
+         THEN /\ pc'     = [pc EXCEPT ![r] = "reaploop"]
+              /\ UNCHANGED nround
+         ELSE /\ pc'     = [pc EXCEPT ![r] = "live"]
+              /\ nround' = [nround EXCEPT ![r] = 0]
     /\ UNCHANGED <<list, claims, sel, pending, proc, gen, tgen, dead, folded,
                    freeInFlight, doubleFree, uafRead>>
 
@@ -283,14 +332,14 @@ Exec(e) ==
          ELSE /\ claims' = ClaimedBy({t \in Threads : list[t] = "retired"}, e)
               /\ pc' = [pc EXCEPT ![e] = "execing"]
               /\ UNCHANGED <<gen, tgen, dead>>
-    /\ UNCHANGED <<list, sel, pending, proc, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, sel, pending, proc, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 (* The drain's wait: a claimed Thread is committed and freed once its switch
    has settled. *)
 ExecFree(e, t) ==
     /\ pc[e] = "execing" /\ e \in claims[t] /\ pc[t] = "settled"
     /\ CommitFree(e, t)
-    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, uafRead>>
+    /\ UNCHANGED <<sel, pending, proc, gen, tgen, dead, nround, uafRead>>
 
 ExecSwap(e) ==
     /\ pc[e] = "execing"
@@ -299,7 +348,7 @@ ExecSwap(e) ==
     /\ gen'  = gen + 1
     /\ tgen' = [tgen EXCEPT ![e] = gen + 1]
     /\ pc'   = [pc EXCEPT ![e] = "live"]
-    /\ UNCHANGED <<list, claims, sel, pending, proc, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<list, claims, sel, pending, proc, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 (* --- wait_pid in the parent --- *)
 WaitPid ==
@@ -310,25 +359,26 @@ WaitPid ==
          /\ list'   = Detached(take)
          /\ claims' = ClaimedBy(take, Wait)
     /\ proc' = "reaped"
-    /\ UNCHANGED <<pc, sel, pending, gen, tgen, dead, folded, freeInFlight, doubleFree, uafRead>>
+    /\ UNCHANGED <<pc, sel, pending, gen, tgen, dead, folded, nround, freeInFlight, doubleFree, uafRead>>
 
 WaitFree(t) ==
     /\ proc = "reaped" /\ Wait \in claims[t] /\ pc[t] = "settled"
     /\ FreeBy(Wait, t)
-    /\ UNCHANGED <<list, sel, pending, proc, gen, tgen, dead, folded, uafRead>>
+    /\ UNCHANGED <<list, sel, pending, proc, gen, tgen, dead, folded, nround, uafRead>>
 
 ProcFree ==
     /\ proc = "reaped"
     /\ \A t \in Threads : Wait \notin claims[t]
     /\ proc' = "freed"
     /\ dead' = dead \cup {gen}
-    /\ UNCHANGED <<pc, list, claims, sel, pending, gen, tgen, folded,
+    /\ UNCHANGED <<pc, list, claims, sel, pending, gen, tgen, folded, nround,
                    freeInFlight, doubleFree, uafRead>>
 
 Next ==
     \/ \E s, n \in Threads : Spawn(s, n)
     \/ \E t \in Threads : ReadTid(t) \/ Exit(t) \/ Settle(t)
-    \/ \E r \in Threads : Claim(r) \/ Select(r) \/ Mark(r) \/ ReapDone(r)
+    \/ \E r \in Threads : ClaimStart(r) \/ ClaimNext(r) \/ LoopEnd(r)
+                          \/ Select(r) \/ Mark(r) \/ ReapDone(r)
     \/ \E r, t \in Threads : ReapFree(r, t)
     \/ \E e \in Threads : Exec(e) \/ ExecSwap(e)
     \/ \E e, t \in Threads : ExecFree(e, t)
@@ -337,12 +387,14 @@ Next ==
     \/ ProcFree
 
 (* Fairness only on what the kernel guarantees will happen: a switch away
-   completes, a spin ends, a reaper finishes what it claimed, and a parent
-   that reaps runs to the end. Nothing forces a Thread to exit or to spawn. *)
+   completes, a spin ends, a reaper finishes what it claimed and the loop it
+   is in, and a parent that reaps runs to the end. Nothing forces a Thread to
+   exit, to spawn, or to start a reap. *)
 Fairness ==
     /\ \A t \in Threads : WF_vars(Settle(t))
     /\ \A t \in Threads : WF_vars(ReadTid(t))
     /\ \A r \in Threads : WF_vars(Mark(r)) /\ WF_vars(ReapDone(r))
+    /\ \A r \in Threads : WF_vars(ClaimNext(r)) /\ WF_vars(LoopEnd(r))
     /\ \A r, t \in Threads : WF_vars(ReapFree(r, t))
     /\ \A e, t \in Threads : WF_vars(ExecFree(e, t))
     /\ \A e \in Threads : WF_vars(ExecSwap(e))
@@ -395,11 +447,16 @@ ExecCompletes == \A e \in Threads : (pc[e] = "execing") ~> (pc[e] = "live")
 (* A claim is always freed: no reaper strands what it claimed. *)
 ClaimsDischarged == \A t \in Threads : (claims[t] # {}) ~> (pc[t] = "freed")
 
+(* A reap loop ends: a reaper in mid-loop returns to its own work. *)
+ReapLoopEnds == \A r \in Threads : (pc[r] = "reaploop") ~> (pc[r] = "live")
+
 (* --- action property --- *)
-(* A live reaper's claim leaves no settled Thread behind: the half of the
-   retired-list bound this model can state (see the header). *)
-ClaimTakesAllSettled ==
+(* The C's `while (n == REAP_ROUND)`: a reap returns only after a round that
+   came back short, which took every Thread reapable at its claim, or after a
+   claim that found none. The half of the retired-list bound this model can
+   state (see the header). *)
+ReapEndsOnShortRound ==
     [][\A r \in Threads :
-         (pc[r] = "live" /\ pc'[r] = "reaping") =>
-             \A t \in Threads : Reapable(t) => r \in claims'[t]]_vars
+         (pc[r] \in {"reaping", "reaploop"} /\ pc'[r] = "live") =>
+             (nround[r] < RoundMax \/ ~\E t \in Threads : Reapable(t))]_vars
 ====

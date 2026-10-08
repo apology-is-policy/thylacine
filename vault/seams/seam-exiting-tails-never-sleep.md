@@ -53,6 +53,14 @@ so neither turns into a hang. The other half of a tail's shape, that it is
 never switched out involuntarily, is enforced since XT-3b by
 `preempt_check_irq`'s refusal of an EXITING thread.
 
+The tail is now only the clear-child-tid store, its wake and `sched()`, on both
+exit paths. Until the XT-3b audit's round 2 (F3), `thread_exit_self`'s last
+Thread out also ran the /srv, /cap and weft teardown after its EXITING commit;
+whether those three slept rested on gates this note did not list (the weft
+share admission keeping FILE Burrows out, srvconn's spin-only teardown). They
+now run before the commit, while RUNNING and ALIVE, as `exits()` runs them, so
+this property covers the store alone.
+
 ## What closes it
 
 Either an explicit non-sleeping guarantee on the exit-tail uaccess path, or

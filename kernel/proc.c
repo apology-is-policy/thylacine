@@ -4503,6 +4503,19 @@ void thread_exit_self(void) {
         proc_release_territory_at_exit(p, &s);
         if (proc_count_live_peers_locked(p, t) != 0)
             extinction("thread_exit: peer appeared during territory release");
+        // The /srv, /cap and weft teardown, in the same window and with the
+        // lock dropped, as exits() runs it. Only the last Thread out does it:
+        // a Proc that lives on keeps its /srv posts and pending /cap grants.
+        // Here rather than after the EXITING commit below, so the tail is only
+        // the clear-child-tid handoff and sched(), and nothing in these three
+        // has to stay sleep-free for an EXITING caller.
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        srv_proc_exit_notify(p);
+        cap_proc_exit_notify(p);
+        weft_share_release_owner(p);   // Weft-6a-2: GC un-claimed per-flow shares
+        s = spin_lock_irqsave(&g_proc_table_lock);
+        if (proc_count_live_peers_locked(p, t) != 0)
+            extinction("thread_exit: peer appeared during the srv/cap/weft teardown");
         // This Thread is the last live one. Proc transitions to ZOMBIE.
         // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
         // termination is in progress, use the recorded group_exit_msg + its
@@ -4541,22 +4554,11 @@ void thread_exit_self(void) {
     // neither composes with proc_table_lock).
     thread_clear_child_tid_handoff(t, p);
 
-    // If we became zombie, also do the srv / cap notifies (the leaf-lock
-    // discipline allows them outside proc_table_lock — same as exits()).
-    // Skipped on the non-last path: a Proc still ALIVE has live /srv
-    // posts and pending /cap grants that should NOT be tombstoned.
-    if (become_zombie) {
-        srv_proc_exit_notify(p);
-        cap_proc_exit_notify(p);
-        weft_share_release_owner(p);   // Weft-6a-2: GC un-claimed per-flow shares
-        // #68: the handle close already ran ABOVE (the pre-ZOMBIE
-        // RUNNING+ALIVE window), so the EOF-on-death contract now covers
-        // multi-thread Procs AND the killed-single-thread path (both reach
-        // here) -- the #926 asymmetry is closed. proc_free's
-        // handle_table_free remains the fallback for orphan/rollback paths
-        // and for hooks a death-flagged close skipped.
-    }
-
+    // #68: the last Thread out already closed the handles ABOVE (the
+    // pre-ZOMBIE RUNNING+ALIVE window), so the EOF-on-death contract covers
+    // multi-thread Procs AND the killed-single-thread path -- the #926
+    // asymmetry is closed. proc_free's handle_table_free remains the fallback
+    // for orphan/rollback paths and for hooks a death-flagged close skipped.
     sched();
     extinction("thread_exit_self: returned from sched (impossible)");
 }

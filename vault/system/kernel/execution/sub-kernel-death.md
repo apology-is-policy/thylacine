@@ -650,13 +650,17 @@ so no `wait_pid` can reach the same Threads, and `wait_pid` extincts if a
 zombie's retired list holds a claimed Thread.
 
 **The bound** on the retired-but-allocated set rests on two premises. Every exit
-reaps first. And for a Thread that retires, the stretch from its reap to its
-settle never sleeps and is never switched out involuntarily: up to the commit
-it is a syscall body (`in_syscall`) or an IRQ-masked exit path, and after it the
-tail is EXITING, which `preempt_check_irq` refuses to preempt (XT-3b audit F2;
-task #20, below). The last Thread out may sleep in the #68 close window between
-its reap and its commit, but it becomes the zombie rather than retiring, and no
-live peer is left to retire meanwhile.
+reaps first. And a RETIRING exit -- one that leaves a live peer -- runs from its
+reap to its commit in a syscall body (`SYS_THREAD_EXIT`, `in_syscall`) or under
+the IRQ mask (the masked EL0-return die-checks, `proc_fault_terminate`), then as
+an EXITING tail that `preempt_check_irq` refuses to preempt (XT-3b audit F2;
+task #20, below), and never sleeps. Two kinds of exit fall outside that
+premise, and neither breaks the bound. The last Thread out may sleep in the #68
+close window and may run unmasked (the `userland_enter` die-check, the spawn
+thunk's `exits`), but it becomes the zombie rather than retiring, and no peer
+can retire while it runs. A kernel-mode thread of a user Proc -- only the
+in-kernel tests make them -- retires from a preemptible stretch; the bound is
+not claimed for it (audit round 2 F1).
 So each CPU holds at most one Thread in that stretch, and at most one per CPU has
 settled since the last claim: about twice the CPU count per Proc. Two residues
 stay within `PROC_THREAD_MAX`. A dying group whose Threads exit together leaves
@@ -667,12 +671,20 @@ one does. The never-sleeps premise is [[seam-exiting-tails-never-sleep]].
 
 **The EXITING preempt gate** (task #20, a hole that predates XT-3b). A switch of
 an EXITING thread is its last, since `sched()` never re-enqueues EXITING, so an
-involuntary one drops the rest of its tail: the clear-child-tid wake and, for the
-last Thread out, the /srv, /cap and weft cleanup, which nothing repeats. The
-`userland_enter` die-check runs outside a syscall with IRQs on, so a timer tick
-there could do exactly that. `preempt_check_irq` now returns early for an EXITING
-thread, leaving `need_resched` pending for the thread's own `sched()`
-([[sub-kernel-sched]]).
+involuntary one drops the rest of its tail: the clear-child-tid store and the
+wake a joiner waits on. The `userland_enter` die-check runs outside a syscall
+with IRQs on, so a timer tick there could do exactly that. `preempt_check_irq`
+now returns early for an EXITING thread, leaving `need_resched` pending for the
+thread's own `sched()` ([[sub-kernel-sched]]).
+
+**The tail is only the handoff** (audit round 2 F3). `thread_exit_self`'s last
+Thread out used to run the /srv, /cap and weft teardown AFTER its EXITING
+commit, where a sleep would extinct, while `exits()` runs the same three while
+RUNNING and ALIVE. They now run in the last-out window too, after the territory
+release and before the zombie commit, with the lock dropped and the same
+peer-appeared re-check as the handle close. On both exit paths the EXITING tail
+is the clear-child-tid handoff and `sched()`, and nothing else depends on the
+tail never sleeping.
 
 **wait_pid** takes `zombie->exited` whole in the hold that unlinks the zombie and
 frees it after the zombie's live list, spinning each `on_cpu` out.

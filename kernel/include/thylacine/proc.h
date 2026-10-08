@@ -1560,7 +1560,7 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 bool proc_thread_cap_ok(struct Proc *p);
 
 // proc_reap_retired -- free p's retired Threads whose switch away has settled
-//   (XT-3b; specs/thread_reap.tla Claim / Commit). The caller is a LIVE Thread
+//   (XT-3b; specs/thread_reap.tla ClaimRound / ReapFree). The caller is a LIVE Thread
 //   of p holding no lock: the spawn handlers call it before the cap check, and
 //   thread_exit_self / exits_code at entry. A live caller is what keeps p
 //   ALIVE through the free, so no wait_pid can reach the same Threads; the
@@ -1571,14 +1571,17 @@ bool proc_thread_cap_ok(struct Proc *p);
 //   every Thread settled at the call is taken unless another reaper holds it.
 //   A Thread still switching away stays for a later reap point.
 //   Bound, the I-32 argument for the retired list: every exit reaps first,
-//   and for a Thread that retires the stretch from its reap to its settle
-//   never sleeps and is never switched out involuntarily -- a syscall body
-//   (in_syscall) or an IRQ-masked exit path up to the commit, an EXITING tail
-//   after it (preempt_check_irq refuses EXITING). (The last Thread out may
-//   sleep in the #68 close window, but it does not retire, and no live peer
-//   is left to.) So each CPU holds at most one Thread in that stretch, at most
-//   one per CPU has settled since the last claim, and about twice the CPU
-//   count are retired-but-allocated per Proc. Two
+//   and a RETIRING exit (one that leaves a live peer) runs from its reap to
+//   its commit in a syscall body or under the IRQ mask (SYS_THREAD_EXIT, the
+//   masked EL0-return die-checks, proc_fault_terminate), then as an EXITING
+//   tail preempt_check_irq refuses to preempt, and never sleeps. The last
+//   Thread out may sleep in its close window, or run unmasked (the
+//   userland_enter die-check, the spawn thunk's exits), but it does not
+//   retire, and no peer can retire meanwhile; a kernel-mode thread of a user
+//   Proc (only the in-kernel tests) retires from a preemptible stretch and is
+//   outside the bound. So each CPU holds at most one retiring Thread in that
+//   stretch, at most one per CPU has settled since the last claim, and about
+//   twice the CPU count are retired-but-allocated per Proc. Two
 //   cases wait longer, both within PROC_THREAD_MAX: a dying Proc whose
 //   Threads exit together leaves the last stragglers to wait_pid, and a Proc
 //   whose remaining Threads never spawn or exit again keeps that small set

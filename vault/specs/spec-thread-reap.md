@@ -5,8 +5,8 @@ title: "thread_reap.tla"
 models: [sub-kernel-death, sub-kernel-thread, sub-kernel-proc]
 pins: [inv-i32, inv-i24]
 cfgs:
-  - "thread_reap.cfg -- clean, 3 Threads: Safety + EventuallyFreed / ExecCompletes / ClaimsDischarged + the action property ClaimTakesAllSettled (808 distinct states)"
-  - "thread_reap_4.cfg -- clean, 4 Threads: the same (5496 distinct states)"
+  - "thread_reap.cfg -- clean, 3 Threads, RoundMax 1: Safety + EventuallyFreed / ExecCompletes / ClaimsDischarged / ReapLoopEnds + the action property ReapEndsOnShortRound (858 distinct states)"
+  - "thread_reap_4.cfg -- clean, 4 Threads, RoundMax 1 (two reapers split one settled set): the same (5994 distinct states)"
   - "thread_reap_buggy_no_oncpu.cfg -- BUGGY_REAP_IGNORES_ONCPU: NoFreeInFlight violated"
   - "thread_reap_buggy_unlocked_claim.cfg -- BUGGY_CLAIM_UNLOCKED: OneFreerPerThread violated"
   - "thread_reap_buggy_unlink_at_claim.cfg -- BUGGY_UNLINK_AT_CLAIM (audit F1): EveryThreadCounted violated"
@@ -37,21 +37,35 @@ Thread and leaves it on the retired list; the step that frees it also unlinks it
 and records it in `folded`, the Proc's totals, so `EveryThreadCounted` can say no
 reading of those totals loses a Thread while the Proc can be read.
 
-**Coarsenings**, each a superset of the C's behaviours and stated in the module
-header: an exit need not reap first (the C always does); a claim takes every
-reapable Thread at once (the C takes `REAP_ROUND` per round and repeats until a
-round comes back short, which `ClaimTakesAllSettled` pins); exec claims every
-retired Thread at once and frees each once settled (the C claims settled ones
-round by round, indistinguishable while the execer is alone); one step folds,
-unlinks and frees (the C folds and unlinks a round in one hold and frees after
-it, when no other actor can reach the Thread).
+**Rounds** are modelled, not abstracted (audit round 2 F2): a round claims
+`Min(RoundMax, |reapable|)` of the reapable Threads, a free choice standing for
+the list order, and the reaper loops (`reaploop`) until a round comes back
+short, as `proc_reap_retired`'s `while (n == REAP_ROUND)` does. At four Threads
+and `RoundMax = 1` two reapers split one settled set, a state checked to be
+reachable, so every safety invariant holds over split claims.
+`ReapEndsOnShortRound` is the loop's exit condition, `ReapLoopEnds` its
+liveness.
+
+**Coarsenings**, each a superset of the C's behaviours or argued equal, and
+stated in the module header: an exit need not reap first (the C always does);
+exec claims every retired Thread at once and frees each once settled (the C
+claims settled ones round by round, indistinguishable while the execer is
+alone); one step folds, unlinks and frees (the C folds and unlinks a round in
+one hold and frees after it, when no other actor can reach the Thread).
 
 **What it cannot state:** the bound on retired-but-allocated Threads, about twice
 the CPU count per Proc. It rests on a per-CPU stretch from a Thread's reap to its
 settle that is never switched out ([[sub-kernel-death]]), and the model has no
-CPUs; it lets every Thread sit in its tail at once. `ClaimTakesAllSettled` is the
-half it can see: a claim leaves no settled Thread behind. The churn test's
-`retired_max` and `/thread-torture` witness the bound at runtime.
+CPUs; it lets every Thread sit in its tail at once. `ReapEndsOnShortRound` is the
+half it can see: a reap ends only after a round that took every reapable
+Thread. The churn test's `retired_max` and `/thread-torture` witness the bound
+at runtime.
+
+**An obligation, not a result:** `WF(Settle)`, every tail reaching a switch
+away. It holds because a tail never sleeps ([[seam-exiting-tails-never-sleep]])
+and spins only on bounded waits. A tail preempted early settles too, its work
+cut short; that lost wake (task #20, closed by `preempt_check_irq`'s EXITING
+refusal) is below this model, which has no joiners.
 
 **Deliberately beneath the model:**
 
@@ -76,7 +90,7 @@ half it can see: a claim leaves no settled Thread behind. The churn test's
 |---|---|
 | `Exit(t)` | `thread_exit_self` -- `t->state = THREAD_EXITING` and, with a live peer, `proc_retire_locked` in the same `g_proc_table_lock` hold |
 | `Settle(t)` | the outgoing Thread's `on_cpu` RELEASE clear in `sched()`'s resume path / `sched_finish_task_switch` |
-| `Claim(r)` / `ReapFree` / `ReapDone` | `proc_reap_retired` -> `proc_claim_settled_retired` (the `reap_claimed` mark under the lock; the Thread stays listed) + `proc_commit_reaped` (the fold and the unlink in one hold, the free lock-dropped) |
+| `ClaimStart(r)` / `ClaimNext(r)` / `ReapFree` / `ReapDone` / `LoopEnd(r)` | `proc_reap_retired`'s round loop -> `proc_claim_settled_retired` (the `reap_claimed` mark under the lock, at most `REAP_ROUND`; the Thread stays listed) + `proc_commit_reaped` (the fold and the unlink in one hold, the free lock-dropped) |
 | `Exec(e)` / `ExecFree` / `ExecSwap` | `proc_exec_replace` -> `proc_drain_retired`, then the swap and `addrspace_unref(old)` |
 | `WaitPid` / `WaitFree` / `ProcFree` | `wait_pid_for` -- `zombie->exited` taken in the `proc_unlink_child` hold; `thread_free_retired` spins each; `proc_free` |
 | `Spawn(s, n)` / `ReadTid(s)` | `sys_thread_spawn_handler` and the vivarium clone thread arm -- the tid read before `ready(nt)` |
