@@ -1,8 +1,9 @@
 #!/usr/bin/expect -f
 # tools/interactive/ls-jsc.exp -- Boosty over a real PTY: JavaScriptCore (WebKit's
 # JSCOnly port, static; B-2c: the Baseline and regexp JITs on one SYS_JIT_CREATE
-# code region, DFG and FTL off) runs as the logged-in user from the pool at
-# /webkit/jsc. docs/BROWSER-DESIGN.md; docs/browser-status.md.
+# code region; every other tier is built and held off at run time) runs as the
+# logged-in user from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md;
+# docs/browser-status.md.
 #
 # What each leg pins, and the libc defect it would have caught (all three were
 # found by running this engine, not by review):
@@ -20,11 +21,21 @@
 #           goes to the YARR interpreter (JSC says "Can't JIT" for it)
 #   loop / loop-deny   a 2e7-iteration int32 loop computes the same value both ways;
 #           each prints its time for the record (asserted: the value, never a time)
-#   sunspider / sunspider-deny   SunSpider 1.0.2 (26 tests, each checking its own
-#           result), three runs each, JIT on and denied; the totals are the record
+#   sunspider / sunspider-deny   SunSpider 1.0.2, three runs each, JIT on and
+#           denied; 23 of its 26 tests check their own result (date-format-tofte,
+#           date-format-xparb and string-validate-input check nothing); the totals
+#           are the record
 #   tiers   DFG, FTL, BBQ and OMG stay off although every one is asked for by flag;
 #           --useDollarVM=true in the same line reads on, so the flags were parsed
 #           (jscOptions() reports a bool as the number 0 or 1)
+#   dfg     the same flags, and a hot function reaches Baseline code but never DFG
+#           code: $vm.dfgTrue() stays false through 1e7 calls (with the DFG on it
+#           turns true within ~4e4 -- measured on a host jsc, one flag away)
+#   thunk / thunk-oob  pouch-hello-jitthunk runs JSC's write-thunk encoding
+#           (usr/lib/thylajit/thyla_jit_thunk.h) against the kernel: edge writes
+#           read back through the exec alias, and each out-of-bounds write dies of
+#           the thunk's brk (JSC itself never writes out of range, so only a probe
+#           reaches the bounds check)
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -47,6 +58,15 @@ if {![lc_pool_has WEBKIT]} {
           WEBKIT payload -- CHUNK_WEBKIT=n / THYLACINE_BAKE_WEBKIT unset, or a pool\
           baked before the payloads line existed)"
     exit 77
+}
+# The SunSpider legs read /webkit/sunspider, staged by the same bake; a pool baked
+# before that payload existed would fail them as a missing file, which reads as an
+# engine failure.
+if {![lc_pool_has SUNSPIDER]} {
+    puts "LS-CI FAIL: this pool holds JavaScriptCore but not SunSpider (build/pool-contents\
+          has no SUNSPIDER payload -- a pool baked before B-2c; rebake with\
+          THYLACINE_BAKE_WEBKIT=1)"
+    exit 1
 }
 
 lc_boot
@@ -104,15 +124,54 @@ lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --
     "JSCO-0-0-0-0-1-1"
 lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
 
+set dfg {function f(){return $vm.baselineJITTrue()}; function g(){return $vm.dfgTrue()}; var b=false, d=false; for(var i=0;i<1e7&&!(b&&d);i++){if(!b)b=f(); if(!d)d=g()} print("@T-"+b+"-"+d)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jscp} $dfg]' | tr a-z A-Z" \
+    "JSCP-TRUE-FALSE" {JSCP-(FALSE-|TRUE-TRUE)}
+lc_pass "ls-jsc(dfg): a hot function runs Baseline code, never DFG code"
+
+# The write thunk's bounds are what keep it from being a write-anywhere gadget.
+# Each out-of-bounds call is its own process: a Proc holding a live JIT region
+# cannot fork. The kernel names the death on the console; snare:segv would mean
+# the store ran outside the region. One leftmost regex alternation, so a fault
+# line that lands before the probe's own line is never skipped.
+lc_run_expect_hardfail_re "pouch-hello-jitthunk" "jitthunk: in bounds done" {jitthunk: FAIL[^\r\n]*|reason="snare:[a-z]+"}
+lc_pass "ls-jsc(thunk): edge writes read back through the exec alias"
+foreach {c what} {0 1@end 1 5@end-4 2 8@-8 3 size+1@0} {
+    lc_send "pouch-hello-jitthunk $c"
+    set timeout $::lc_cmd_timeout
+    set called 0
+    set reason ""
+    expect {
+        -re {jitthunk: out of bounds [^ \r\n]+ calling|jitthunk: FAIL[^\r\n]*|reason="snare:[a-z]+"} {
+            set m $expect_out(0,string)
+            if {[string match {reason=*} $m]} {
+                set reason [string range $m 8 end-1]
+            } elseif {$m eq "jitthunk: out of bounds $what calling"} {
+                set called 1
+            } else {
+                lc_fail "thunk-oob($what): \[$m\]"
+            }
+            if {!$called || $reason eq ""} exp_continue
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during thunk-oob($what)" }
+        timeout { lc_fail "timeout (${::lc_cmd_timeout}s) in thunk-oob($what): called=$called reason=$reason" }
+        eof     { lc_fail "unexpected EOF during thunk-oob($what)" }
+    }
+    if {$reason ne "snare:brk"} {
+        lc_fail "thunk-oob($what): died of $reason, not the thunk's snare:brk"
+    }
+    lc_pass "ls-jsc(thunk-oob): $what died of snare:brk"
+}
+
 lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI-820578176-"
 lc_pass "ls-jsc(loop): JSCI-820578176 (Baseline JIT)"
 lc_run_expect "/webkit/jsc --thylacine-no-cap-jit -e '[string map {@T jscj} $loop]' | tr a-z A-Z" "JSCJ-820578176-"
 lc_pass "ls-jsc(loop-deny): JSCJ-820578176 (interpreted)"
 
 lc_run_expect_hardfail "/webkit/jsc /webkit/sunspider/run.js -- jscm | tr a-z A-Z" "JSCM-OK-26-" "JSCM-FAIL"
-lc_pass "ls-jsc(sunspider): 26 of 26 with the JIT on"
+lc_pass "ls-jsc(sunspider): all 26 ran (23 self-checking) with the JIT on"
 lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit /webkit/sunspider/run.js -- jscn | tr a-z A-Z" "JSCN-OK-26-" "JSCN-FAIL"
-lc_pass "ls-jsc(sunspider-deny): 26 of 26 interpreted"
+lc_pass "ls-jsc(sunspider-deny): all 26 ran (23 self-checking) interpreted"
 
 lc_quit
 exit 0

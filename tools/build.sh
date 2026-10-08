@@ -713,7 +713,7 @@ EOF
     # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
     # -f guard in the copy loop below stages nothing when build_rust_progs
     # self-skipped off the track-R box, so this entry is inert there.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -4820,12 +4820,19 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
+        #    The JIT write-thunk probe takes the encoding JavaScriptCore uses
+        #    from usr/lib/thylajit, not a copy.
+        local extra_cflags=()
+        case "$prog" in
+            pouch-hello-jitthunk) extra_cflags=( -I"$REPO_ROOT/usr/lib/thylajit" ) ;;
+        esac
         "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
             -nostdinc -isystem "$sysroot/include" -fno-pie \
+            ${extra_cflags[@]+"${extra_cflags[@]}"} \
             -c "$src_dir/$prog.c" -o "$progs_out/$prog.o"
         # 2. link via tools/pouch-ld — it drives ld.lld directly with the
         #    pouch link line and supplies the CRT + libc.a. Per-binary
@@ -6768,8 +6775,10 @@ webkit_checkout_ok() {
 }
 
 # SunSpider 1.0.2 (the fork's PerformanceTests, in the manifest's sparse cone) and
-# its driver, staged beside jsc so the bake carries /webkit/sunspider. Each test
-# checks its own result, so the benchmark is also a correctness run.
+# its driver, staged beside jsc so the bake carries /webkit/sunspider. 23 of its 26
+# tests check their own result, so the benchmark is also a correctness run for
+# those (date-format-tofte, date-format-xparb and string-validate-input check
+# nothing).
 stage_jsc_bench() {
     local wk="$1" stage="$2" port_dir="$3"
     local src="$wk/PerformanceTests/SunSpider/tests/sunspider-1.0.2" n
@@ -6821,12 +6830,12 @@ build_jsc() {
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
             stage_jsc_bench "$wk" "$stage" "$port_dir"
-            ledger "jsc (JavaScriptCore, Baseline + YARR JIT): REUSED (cached + up-to-date)"
+            ledger "jsc (JavaScriptCore, every tier built, Baseline + YARR on): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, Baseline + YARR JIT, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built, Baseline + YARR on, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6864,7 +6873,7 @@ build_jsc() {
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
     stage_jsc_bench "$wk" "$stage" "$port_dir"
     echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
-    ledger "jsc (JavaScriptCore, Baseline + YARR JIT): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    ledger "jsc (JavaScriptCore, every tier built, Baseline + YARR on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {

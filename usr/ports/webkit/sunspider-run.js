@@ -1,7 +1,8 @@
 // SunSpider 1.0.2 under the jsc shell:
 //     jsc /webkit/sunspider/run.js -- <marker> [reps]
-// Each test checks its own result and throws on a wrong one; jsc's run() gives it a
-// fresh realm and returns its time. Prints one line per test (the mean of reps runs),
+// 23 of the 26 tests check their own result and throw on a wrong one (date-format-
+// tofte, date-format-xparb and string-validate-input check nothing); jsc's run()
+// gives each a fresh realm and returns its time. Prints one line per test (the mean of reps runs),
 // then "<marker>-ok-<tests>-<total ms>ms", or "<marker>-fail-<count>" after naming
 // each failure.
 var marker = arguments[0] || "sunspider";
