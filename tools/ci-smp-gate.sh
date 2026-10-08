@@ -89,6 +89,34 @@ set -u
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 N="${SMP_GATE_N:-10}"
 
+# Optional resource floor for shared hosts. Check between both independent
+# bakes and before each row; checking only outside this driver misses the
+# second bake. This is an admission check, not a reservation of disk space.
+MIN_FREE_MIB=${SMP_GATE_MIN_FREE_MIB:-0}
+[[ "$MIN_FREE_MIB" =~ ^[0-9]+$ ]] || { echo "invalid SMP_GATE_MIN_FREE_MIB" >&2; exit 2; }
+disk_floor() {
+    [[ "$MIN_FREE_MIB" == 0 ]] && return 0
+    local avail
+    avail=$(df -Pk "$REPO_ROOT" | awk 'NR==2 {printf "%.0f", int($4/1024)}')
+    [[ "$avail" =~ ^[0-9]+$ ]] || { echo "ci-smp-gate: disk reading unavailable" >&2; exit 3; }
+    echo "== ci-smp-gate: disk $1: $avail MiB free, floor $MIN_FREE_MIB =="
+    [[ "$avail" -ge "$MIN_FREE_MIB" ]] || { echo "ci-smp-gate: disk floor REFUSAL at $1" >&2; exit 3; }
+}
+
+# Capture exact inputs BEFORE the first boot, outside build/. Never reuse an
+# existing destination or prune a previous run. Config is shared by flavours,
+# so save each immediately after its build. Matrix boots restore the baked
+# snapshot; the live pool is deliberately not an input in this manifest.
+CAPTURE=${SMP_GATE_CAPTURE_DIR:-}
+if [[ -n "$CAPTURE" ]]; then
+    mkdir "$CAPTURE" || { echo "ci-smp-gate: capture directory must be new" >&2; exit 3; }
+fi
+capture_file() {
+    [[ -z "$CAPTURE" ]] && return 0
+    cp -c "$REPO_ROOT/$1" "$CAPTURE/$2" 2>/dev/null ||
+        cp "$REPO_ROOT/$1" "$CAPTURE/$2" || exit 3
+}
+
 # label  cpus  sanitizer  boot_timeout
 DEFAULT_MATRIX=(
     "default-smp1 1 -       300"
@@ -137,10 +165,20 @@ echo "== ci-smp-gate: bake config -- CLADE=${THYLACINE_BAKE_CLADE:-0} GOROOT=${T
 
 echo "== ci-smp-gate: building kernels (default=$need_default ubsan=$need_ubsan) =="
 if [[ $need_default -eq 1 ]]; then
+    disk_floor before-default-build
     "$REPO_ROOT/tools/build.sh" kernel || { echo "ci-smp-gate: default kernel build FAILED" >&2; exit 1; }
+    disk_floor after-default-build
+    capture_file build/.config .config-default
+    capture_file build/kernel/thylacine.elf thylacine.elf
+    capture_file build/kernel/thylacine.bin thylacine.bin
 fi
 if [[ $need_ubsan -eq 1 ]]; then
+    disk_floor before-ubsan-build
     "$REPO_ROOT/tools/build.sh" kernel --sanitize=undefined || { echo "ci-smp-gate: ubsan kernel build FAILED" >&2; exit 1; }
+    disk_floor after-ubsan-build
+    capture_file build/.config .config-undefined
+    capture_file build/kernel-undefined/thylacine.elf thylacine-undefined.elf
+    capture_file build/kernel-undefined/thylacine.bin thylacine-undefined.bin
 fi
 
 # Prove the bake actually happened rather than trusting the flag. A staged
@@ -160,11 +198,22 @@ if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
     echo "== ci-smp-gate: clade bake verified (pool.img $pool_bytes bytes) =="
 fi
 
+if [[ -n "$CAPTURE" ]]; then
+    capture_file build/ramfs.cpio ramfs.cpio
+    capture_file build/fixtures/pool.img.baked-snapshot pool.img.baked-snapshot
+    capture_file build/fixtures/system.key system.key
+    capture_file build/fixtures/system.key.baked-snapshot system.key.baked-snapshot
+    cmp "$CAPTURE/system.key" "$CAPTURE/system.key.baked-snapshot" || exit 3
+    (cd "$CAPTURE" && shasum -a 256 .config-* thylacine* ramfs.cpio pool.img.baked-snapshot system.key*) > "$CAPTURE/HASHES.txt" || exit 3
+    git -C "$REPO_ROOT" rev-parse HEAD > "$CAPTURE/SOURCE.txt" || exit 3
+    echo "== ci-smp-gate: inputs captured in $CAPTURE =="
+fi
 echo "== ci-smp-gate: multi-boot matrix (N=$N per config) =="
 fail=0
 declare -a SUMMARY=()
 for row in "${MATRIX[@]}"; do
     read -r label cpus san to <<<"$row"
+    disk_floor "before-$label"
     sanarg=""; [[ "$san" != "-" ]] && sanarg="$san"
     echo
     echo "-- $label: cpus=$cpus sanitizer=${sanarg:-none} boot_timeout=${to}s N=$N --"

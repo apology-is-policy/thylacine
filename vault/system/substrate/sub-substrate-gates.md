@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -36,6 +36,13 @@ them run on no machine at all.
 - `smp-multiboot.sh <label> <cpus> <N> [sanitizer]` → exit 0 iff
   0 CORRUPTION, 0 EXTERNAL-KILL **and** 0 OTHER across N boots.
 - `ci-smp-gate.sh` → builds each kernel once, runs the matrix, aggregates.
+  Optional `SMP_GATE_MIN_FREE_MIB` checks available disk before and after each
+  build and before each matrix row, refusing with exit 3 below the floor. It is
+  an admission check, not a space reservation. Optional `SMP_GATE_CAPTURE_DIR`
+  must name a new directory: it retains each flavour's config/ELF/flat binary,
+  then the final shared ramfs, baked pool snapshot and paired keys before any
+  boot, with full SHA256s and source commit. Missing inputs or unequal keys
+  refuse the run. Neither option changes the matrix or its classifier.
 - `check-v80-floor.py` → exit non-zero if any tracked build input asks above
   ARMv8.0-A, or any shipped userspace binary carries an ungated LSE.
 - `test-rust.sh [crate...]` (`make test-rust`) → exit 0 iff no crate FAILs:

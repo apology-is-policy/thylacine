@@ -223,3 +223,29 @@ released. This is single-agent self-review, no independent audit or full-gate
 claim. Next: final reclamation witness/remaining checkpoint obligations and
 new-source full gates, then the approved engine and MM work. No activation,
 Main integration or removal of the 128 MiB protection.
+
+
+## October 8, 20:10 pickup: current-source full gate prepared
+
+The next step is the real ci-smp-gate.sh on the current fixture: default
+smp1/4/8 and UBSan smp4/8, ten boots each, all logs retained. Final descriptor
+and page-table reclamation stays OPEN independently of this matrix. No kernel
+mechanism or fixture changed in this preparation.
+
+The driver now has opt-in disk admission checks before/after each build and
+before each row (8192 MiB for this run), plus exact boot-input capture BEFORE
+the matrix. Each flavour's config/ELF/bin is saved before the next build can
+overwrite the shared config; the final ramfs/pool snapshot/key pair is saved
+with full hashes. Existing destinations refuse and no history is pruned.
+current-source-gate.sh checks the clean source and exact clean Stratum pin,
+records Astra's lease/PID, retains the real gate's status, verifies unchanged
+inputs/source on exit and releases the Mac. It does not rerun older mutant
+legs or pretend to close the reclamation witness.
+
+Self-review: standard rows, N and classifier unchanged. Forced low-space,
+malformed-floor and existing-capture-directory controls refused with expected
+exit 3/2/3 before any build; the existing kernel hash remained unchanged.
+Shell syntax passed. Vault render/lint: 1463 notes, zero failures, one warning
+for 46 stale dossiers. Raw preflight: astra-takeover/gate-preflight.txt.
+This is single-agent self-review. The new runtime matrix is not yet qualified;
+read the unique current-gate-* directory and gate.rc/runner.rc on pickup.
