@@ -312,6 +312,13 @@ None crossing a boundary; every ABI record belongs to
 - **`Stdio` / `PreparedStdio`** — the spawn plumbing. The prepared form splits
   what the parent must hold *through* the syscall from what it keeps *after*,
   which is the distinction that gets end-of-file semantics right.
+- **`Command::current_dir`** (2026-10-06) — the child is born in `dir`. The
+  record carries the `T_SPAWN_EXT_CWD` tail (`TSpawnExtCwd`, sent in one
+  `#[repr(C)]` record with the base so the tail sits at +104, the pointer the
+  whole record's). The kernel resolves `dir` in the spawner as chdir would, so a
+  bad `dir` fails `spawn` with chdir's error and the caller's cwd never moves; a
+  relative program name is looked up from `dir`
+  ([[sub-kernel-syscall-dispatch]]).
 - **`Command::debug_held`** (2026-09-29) — spawns the child held
   ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
   image and parked before its first instruction, and the child runs only when a

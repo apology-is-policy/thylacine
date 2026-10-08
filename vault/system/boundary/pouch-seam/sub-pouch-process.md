@@ -196,6 +196,12 @@ of the next section's lesson a build step can close, the header against the
 kernel. The other half, the header against the archive that gets linked, still
 has nothing checking it.
 
+**`_pad_envp` is `ext_flags` (2026-10-06).** The record's word at offset 44
+announces tails after the record ([[sub-kernel-syscall-abi]]); the patch renames
+it and pouch still zero-fills it, so no pouch spawn sends a tail.
+`posix_spawn_file_actions_addchdir` is not wired to the cwd tail, and the
+`envp` argument would be a tail of its own ([[seam-pouch-spawn-envp]]).
+
 ### The asserts all held and the binaries were wrong anyway
 
 Worth recording in full, because it is the sharpest available statement of

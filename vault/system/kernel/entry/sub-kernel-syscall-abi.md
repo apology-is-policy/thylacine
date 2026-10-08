@@ -43,6 +43,21 @@ and the pouch process patch. The Go fork's `spawnArgs` waits on the operator,
 with wiring `SysProcAttr` to the flag. What the flag does is
 [[sub-kernel-birth-hold]]'s.
 
+**`ext_flags` and the cwd tail (2026-10-06).** The record's `_pad_envp` word at
+offset 44, which had to be 0, becomes `ext_flags`. Each bit announces a tail
+after the 104-byte record, in bit order, and the kernel reads only the tails it
+is told of; a bit outside `SPAWN_EXT_FLAGS_ALL` is refused with -1, as before.
+`SPAWN_EXT_CWD` (bit 0) announces a `struct sys_spawn_ext_cwd` at the record's
+address + 104: `cwd_va` (u64), `cwd_len` (u32, 1..`SYS_OPEN_PATH_MAX`) and
+`cwd_flags` (u32, must be 0). The record no longer grows: the Go fork, shared by
+every tree, carries a copy the mirror check holds to each tree's own kernel
+header, so a grown record breaks whichever tree it does not match until that
+tree merges. A tail moves only the trees that use it. The in-tree mirrors rename
+the word (libt, libthyla-rs, the pouch patch) and declare the tail (libt
+`T_SPAWN_EXT_CWD` + `struct t_sys_spawn_ext_cwd`; libthyla-rs `TSpawnExtCwd` and
+`Command::current_dir`); the fork needs no change until it sends one. What the
+tail does is [[sub-kernel-syscall-dispatch]]'s (STALK-DESIGN 4.3).
+
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
 `usr/lib/libt/include/thyla/syscall.h` -- alongside the kernel's `CAP_TCB_DIAL`
@@ -246,7 +261,10 @@ built because this record had already drifted: the aux-2 merge grew it to 104
 bytes, and a mirror left at 96 passed its own assertion while the kernel read
 eight bytes past it (#100). The Go fork's committed copy is still that 96-byte
 record, and its builds are right only because they compile an uncommitted fix.
-Every other record on this surface is pinned by nothing but its comments.
+Every other record on this surface is pinned by nothing but its comments. Since
+2026-10-06 the same check holds the record's tails (`EXT_TAILS`): each kernel
+tail struct's offsets asserted, its 8-byte fields named `*_va`, and its in-tree
+mirrors matched by name, offset and size, with the same mutations proving it.
 
 ### And the hazard is not only drift; it is concurrent allocation
 
@@ -340,9 +358,10 @@ at the point of the hazard, again, is the whole mechanism.
 **The fifth growth spent the last reserved slot (2026-09-29).** The debug-flags
 word of the birth hold took the pad the aux-2 merge had opened at offset 100, so
 the struct stayed 104 bytes and a zero-filling caller keeps the old behaviour.
-There is no reserved slot left. The next field appends past the end and grows
-the struct, and every mirror with it, and it is the first growth the mirror
-check will see.
+There is no reserved slot left. The next field was to append past the end and
+grow the struct, and every mirror with it; instead the record stopped growing
+(2026-10-06): `_pad_envp` became `ext_flags`, and a new field rides a tail the
+flags announce.
 
 `t_stat` is the same story in the other growth mode. It has grown twice — uid+gid
 (A-2a) took it from 72 to 80, then a per-instance device number plus pad (#100)

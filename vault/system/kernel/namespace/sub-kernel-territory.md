@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -37,7 +37,7 @@ Five structures on `struct Territory`, four of them live:
 | `mounts[32]` | `(dc, devno, qid.path) -> source Spoor` grafts; a point may hold a UNION (several members in `MBEFORE`/`MAFTER` order) | `mount_lookup` / `mount_members_snapshot` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
 | `root_spoor` | the resolution floor + FROM_ROOT walk base | `territory_root_ref`; `SYS_CHROOT`/`SYS_PIVOT_ROOT` |
 | `flags` | `TERRITORY_ROOT_PHENO_LINUX` — the namespace-level phenotype declaration (Design D) | `territory_root_pheno` from `stalk_core`'s `crossed_pheno` seed; `territory_declare_linux` at spawn |
-| `dot_path` | the cwd string (`NULL` == `"/"`) | `SYS_CHDIR`/`SYS_GETCWD`; the `SYS_OPEN` relative join |
+| `dot_path` | the cwd string (`NULL` == `"/"`) | `SYS_CHDIR`/`SYS_GETCWD`; a spawned child's thunk (the cwd tail); the `SYS_OPEN` relative join |
 | `binds[8]` | Plan 9 path-to-path edges | **nothing — see Caveats** |
 
 **The authority model is namespace-mediated, not capability-gated.** No
@@ -208,7 +208,8 @@ Accepted consequences, not fixed:
 - A stored name longer than the buffer at any point of the walk fails the
   change-directory, even when a later `..` would have shortened it.
 
-`territory_setdot` is fed only by `stalk_landed`'s name (SYS_CHDIR) and the
+`territory_setdot` is fed only by `stalk_landed`'s name (SYS_CHDIR, and a
+spawn's cwd tail in the child's thunk, [[sub-kernel-syscall-dispatch]]) and the
 boot's literal `/bin`, so `dot_path` stays clean.
 
 **`territory_format_ns`** renders `/proc/<pid>/ns` under `ns_lock`, one

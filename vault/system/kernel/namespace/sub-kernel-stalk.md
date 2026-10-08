@@ -494,7 +494,12 @@ Since 2026-10-06 ([[dec-2026-10-06-chdir-physical]]; STALK-DESIGN 4.3)
 `stalk_landed` reports the name of where a `STALK_WALK` landed, relative to
 its start: `""` for the start itself, else `/c1/.../cn`. Change-directory
 stores it ([[sub-kernel-territory]]), so the cwd holds no `.`, `..` or link
-component, and `cd link/..` lands where `ls link/..` reads.
+component, and `cd link/..` lands where `ls link/..` reads. Change-directory and
+a spawn's cwd tail reach it through one resolver, `sys_dir_landed_name`
+([[sub-kernel-syscall-dispatch]]), which adds the directory and search checks
+and answers each refusal's errno; `stalk.dir_landed_name` runs it over the
+fixture (ENOENT, ENOTDIR, the 0644 `nox` for EACCES, EINVAL, a relative path
+joined to the cwd).
 
 The name is built the way the trail is, in a `struct stalk_name` that
 `stalk_core` takes as an optional argument (NULL for every other caller):

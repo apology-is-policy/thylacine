@@ -96,6 +96,19 @@ on any machine short of 16 TiB); since the default IS the hard maximum, the
 authority refusal proper -- a narrowed parent asking above itself but below
 the maximum -- is the kernel suite's (`resource.spawn_budget_resolve`).
 
+**The spawn cwd tail, through the real ABI (2026-10-06).** `probe_spawn_cwd`
+runs after the CL-5 probe, standing joey in `/` and restoring its cwd after. It
+sends `SYS_SPAWN_FULL_ARGV` records with the `SPAWN_EXT_CWD` tail at +104 (a
+`struct scwd_record` whose offset assert pins the placement) and spawns held,
+so each child is read before it runs anything: `/bin/hello` born in `/bin`
+reads `/bin` from `/proc/<pid>/cwd`; `hello` under the cwd `/bin` spawns while
+the same name with no tail does not (from `/`, after checking there is no
+`/hello`); `/nope-cwd` answers -2, a file -20, `cwd_len` 0 -22, `cwd_flags` 1
+and an unknown `ext_flags` bit -1; joey's own cwd stays `/`. Each child is
+killed through its ctl and reaped. Boot-fatal. Probe83's chdir legs ask the
+errno too: `f/..` -20, `nope/..` -2, and `f` named whole -20 (the resolver's own
+directory check, not the walk's).
+
 **The readiness wire, read directly (#98 NP-3b, 2026-09-28).** Before its
 net-6b polls, joey reads the udp connection's `ready` file with `t_pread`, and
 pty-probe (the PTY-2e rung) does the same to `/dev/pts/<n>ready` before the

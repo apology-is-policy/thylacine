@@ -963,10 +963,8 @@ enum {
     //   - any field outside its documented bounds (name_len, argv_data_len,
     //     argc, fd_count, perm_flags, cap_mask — same as the legacy
     //     SYS_SPAWN_WITH_PERMS rejections)
-    //   - _pad_envp is nonzero (reserved for forward-compat envp_data_len
-    //     when envp pass-through lands; rejected loudly on v1.0 so a
-    //     future kernel that wires the field cannot land on a v1.0
-    //     caller that left random bytes in the slot)
+    //   - ext_flags carries a bit outside SPAWN_EXT_FLAGS_ALL (a caller
+    //     cannot announce a tail this kernel does not read)
     //   - argv_data does not end in NUL OR NUL count != argc
     //   - argc > 0 but argv_data_len == 0 (or vice versa — the two
     //     fields are tied; argc == 0 requires argv_data_len == 0 and
@@ -2828,9 +2826,23 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, shm)         == 208, "t_pci
 // UNGATED, for the reason the phenotype is: the hold restricts only the
 // spawner's own child and hands it no access to that child -- reading or
 // controlling the held child still takes an attach through the I-39 gate.
-// Unknown bits are rejected (-1), the _pad_envp rationale.
+// Unknown bits are rejected (-1), the unknown-bits rule.
 #define SPAWN_DEBUG_HELD             (1u << 0)
 #define SPAWN_DEBUG_FLAGS_ALL        (SPAWN_DEBUG_HELD)
+
+// SYS_SPAWN_FULL_ARGV record tails (sys_spawn_args.ext_flags). Each bit says a
+// tail follows the 104-byte record in the caller's memory; tails follow in bit
+// order, each present iff its bit is set, and the kernel reads none it was not
+// told of. The record itself never grows again: the go fork, shared by every
+// tree, carries a copy held to each tree's kernel header, so a grown record
+// breaks whichever tree it does not match until that tree merges.
+//
+// SPAWN_EXT_CWD: a struct sys_spawn_ext_cwd names the cwd the child is born
+// with. The spawner resolves it as SYS_CHDIR does (STALK-DESIGN 4.3), so a bad
+// cwd fails the spawn with chdir's errno and no child exists. Ungated: the cwd
+// is a name, re-resolved under the child's own identity at every use.
+#define SPAWN_EXT_CWD                (1u << 0)
+#define SPAWN_EXT_FLAGS_ALL          (SPAWN_EXT_CWD)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -3496,10 +3508,9 @@ _Static_assert((SYS_WALK_CREATE_DMSRVREMOTE &
 // user-VA in x0; the kernel uaccess-copies the struct, then each
 // referenced buffer (name, argv_data, fd_list) by walking the pointers.
 //
-// The layout is the binding ABI for the syscall — fields are 8-aligned;
-// the trailing `_pad_envp` field is reserved as a forward-compatibility
-// slot for envp pass-through (a future sub-chunk can wire envp_data_va +
-// envp_data_len without breaking the ABI by reusing this slot).
+// The layout is the binding ABI for the syscall — fields are 8-aligned.
+// The record is fixed at 104 bytes; `ext_flags` announces any tail after it
+// (SPAWN_EXT_*), which is how the record extends from here on.
 //
 // Wire fields (offsets pinned by _Static_assert below):
 //   name_va         u64  — user-VA of the binary name (no NUL required)
@@ -3514,8 +3525,9 @@ _Static_assert((SYS_WALK_CREATE_DMSRVREMOTE &
 //   fd_count        u32  — 0..SYS_SPAWN_MAX_FDS
 //   perm_flags      u32  — SPAWN_PERM_* bits; bits outside SPAWN_PERM_ALL
 //                          are rejected
-//   _pad_envp       u32  — must be 0 at v1.0; reserved for envp_data_len
-//                          when envp pass-through lands
+//   ext_flags       u32  — SPAWN_EXT_* bits, each announcing a tail after
+//                          the record; bits outside SPAWN_EXT_FLAGS_ALL are
+//                          rejected
 //   cap_mask        u64  — caps_t bits; AND'd with parent caps by
 //                          rfork_with_caps (I-2 monotonic reduction holds
 //                          structurally)
@@ -3528,7 +3540,7 @@ struct sys_spawn_args {
     u32 argc;
     u32 fd_count;
     u32 perm_flags;
-    u32 _pad_envp;
+    u32 ext_flags;      // SPAWN_EXT_* bits; outside SPAWN_EXT_FLAGS_ALL -> -1
     u64 cap_mask;
     // A-1a identity extension (append-only; 56 -> 80). Honored only when
     // identity_flags & SPAWN_IDENTITY_SET; gated FAIL-CLOSED on the
@@ -3564,7 +3576,7 @@ struct sys_spawn_args {
     // what every pre-V-1b caller zero-fills -- means "inherit", byte-identical
     // to the old must-be-0 behavior. SPAWN_PHENO_LINUX stamps the child
     // PHENO_LINUX before EL0; ungated (I-43: shape, never authority). Unknown
-    // bits are rejected (-1), the _pad_envp rationale.
+    // bits are rejected (-1), the unknown-bits rule.
     //
     // THE MERGE GREW THE STRUCT FOR THIS FIELD (96 -> 104), because CL-5 and
     // V-1b independently claimed the SAME `_pad_allow` slot at offset 92 --
@@ -3578,8 +3590,8 @@ struct sys_spawn_args {
     // The birth hold (DEBUG-FS-DESIGN 5f) claims the forward-compat slot the
     // merge left at 100. 0 -- what every earlier caller zero-fills, and what the
     // old poison check required -- means "not held", so those callers are
-    // byte-identical. It was the LAST pad slot: the next field grows the struct,
-    // and every mirror with it.
+    // byte-identical. It was the LAST pad slot: the record now extends only by
+    // the tails ext_flags announces (SPAWN_EXT_*), never by growing.
     u32 debug_flags;     // SPAWN_DEBUG_* bits; outside SPAWN_DEBUG_FLAGS_ALL -> -1
 };
 
@@ -3617,8 +3629,10 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, fd_count) == 36,
                "sys_spawn_args.fd_count at ABI offset 36");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, perm_flags) == 40,
                "sys_spawn_args.perm_flags at ABI offset 40");
-_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_envp) == 44,
-               "sys_spawn_args._pad_envp at ABI offset 44");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, ext_flags) == 44,
+               "sys_spawn_args.ext_flags at ABI offset 44 -- the slot that was "
+               "_pad_envp (must be 0), so every zero-filling caller announces "
+               "no tail.");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, cap_mask) == 48,
                "sys_spawn_args.cap_mask at ABI offset 48");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, principal_id) == 56,
@@ -3649,6 +3663,24 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, debug_flags) == 100,
                "sys_spawn_args.debug_flags at ABI offset 100 -- the forward-"
                "compat slot the merge left, claimed by the birth hold; 0 == "
                "not held.");
+
+// The SPAWN_EXT_CWD tail, at the record's address + sizeof(struct
+// sys_spawn_args) when that bit is set (the first tail).
+struct sys_spawn_ext_cwd {
+    u64 cwd_va;         // user-VA of the path (no NUL required)
+    u32 cwd_len;        // 1..SYS_OPEN_PATH_MAX; 0 -> T_E_INVAL (clear the bit to inherit)
+    u32 cwd_flags;      // must be 0 -> else -1, the unknown-bits rule
+};
+_Static_assert(sizeof(struct sys_spawn_ext_cwd) == 16,
+               "struct sys_spawn_ext_cwd is a SYS_SPAWN_FULL_ARGV ABI type -- "
+               "16 bytes, no implicit padding; tools/check-spawn-args-mirrors.py "
+               "compares its mirrors with it.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_va) == 0,
+               "sys_spawn_ext_cwd.cwd_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_len) == 8,
+               "sys_spawn_ext_cwd.cwd_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct sys_spawn_ext_cwd, cwd_flags) == 12,
+               "sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
 
 struct exception_context;
 

@@ -3302,79 +3302,95 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
 // mount-crossing is stalk-2). The arg validation + rights derivation mirror
 // sys_walk_open_handler; the resolution itself is stalk().
 // =============================================================================
+// The directory `path` names, as SYS_CHDIR and a spawn's cwd tail resolve it
+// (STALK-DESIGN 4.3). Writes the name of where the walk landed ("/" for the
+// root) to `name` and returns 0, or a negative errno: T_E_NOENT, T_E_NOTDIR,
+// T_E_ACCES, T_E_INVAL (a malformed or over-long path, or a name the walk cannot
+// name back), or a failing stat's or re-walk's own errno (T_E_IO when it carries
+// none). `joined` is scratch; `name` may alias `path`, which only the join reads. Exported for the kernel tests (stalk.dir_landed_name).
+//
+// #83: the two cwd jobs, in this order. (1) JOIN verbatim, for the physical
+// check: "."/".."/a trailing separator survive so stalk gates them -- so
+// `cd f/..` where f is a FILE, or `cd nonexistent/..`, fail rather than being
+// lexically massaged into the parent that happens to exist. (2) Resolve the
+// joined path from the Territory root, check it is a directory p can search
+// (X), and take the name of where the walk LANDED (the operator's vote of
+// 2026-10-06: the physical name). That name has no "." or ".." component and no
+// link component: a followed link contributes its target, and a ".." climbs out
+// of where the walk stands, as stalk's own trail pop does -- so `cd link/..`
+// lands where `ls link/..` reads. stalk_landed walks the name once more and
+// refuses one that lands elsewhere, so what is stored is what was validated.
+// It is relative to the root stalk started from, as dot_path is. stalk borrows
+// root (never refs/clunks it); RW-4 SA-F1: territory_root_ref takes the ref
+// ATOMICALLY under ns_lock (a plain read-then-ref raced a concurrent
+// pivot_root's swap+clunk-to-zero).
+s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+                        char *joined, u32 joined_cap,
+                        char *name, u32 name_cap) {
+    if (len == 0 || len > SYS_OPEN_PATH_MAX)         return -(s64)T_E_INVAL;
+    for (u64 i = 0; i < len; i++) {
+        if (path[i] == '\0')                         return -(s64)T_E_INVAL;   // no embedded NUL
+    }
+    int jl = territory_join_cwd(p->territory, path, len, joined, joined_cap);
+    if (jl < 0)                                      return -(s64)T_E_INVAL;
+
+    struct Spoor *root = territory_root_ref(p->territory);
+    if (!root)                                       return -(s64)T_E_NOENT;
+    int err = 0;
+    u32 nl = 0;
+    struct Spoor *q = stalk_landed(p, root, joined, (u64)jl, &err,
+                                   name, name_cap, &nl);
+    spoor_clunk(root);
+    if (!q)                                          return -(s64)(err > 0 ? err : (int)T_E_INVAL);
+    if (nl == 0) { name[0] = '/'; name[1] = '\0'; }   // the root
+
+    s64 rc = 0;
+    if (!(q->qid.type & QTDIR)) {
+        rc = -(s64)T_E_NOTDIR;
+    } else if (q->dev && q->dev->perm_enforced) {
+        // Mirror stalk's gating: a perm_enforced Dev gates the search on X for
+        // the caller's principal; a non-enforced Dev has no rwx to check.
+        struct t_stat st;
+        int sr = spoor_stat_native(q, &st);
+        if (sr != 0)                                 rc = -(s64)stalk_err_code(sr);
+        else if (perm_check(p, &st, PERM_X) != 0)    rc = -(s64)T_E_ACCES;
+    }
+    spoor_clunk(q);
+    return rc;
+}
+
 // SYS_CHDIR(path, len) -- set the per-Proc cwd (LS-4; LIFE-SUPPORT.md LS-4).
 // Resolves `path` against the current cwd (relative) or the Territory root
 // (absolute), requires the target to be a directory the caller can SEARCH (X),
 // then swaps the Territory dot_path. dot is shared by a Proc's threads and
-// inherited by children at spawn.
+// inherited by children at spawn. A failure answers its errno (ERRORS.md):
+// never the bare -1 that pouch and Go read as EPERM.
 static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
     (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p || !p->territory) return -1;
-    if (path_len_raw == 0)                           return -1;
-    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -1;
-    if (!sys_validate_user_buf(path_va, path_len_raw)) return -1;
+    if (path_len_raw == 0)                           return -(s64)T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -(s64)T_E_FAULT;
 
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     for (u64 i = 0; i < path_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)   return -1;
-        if (b == '\0')                               return -1;   // no embedded NUL
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
         path_scratch[i] = (char)b;
     }
     path_scratch[path_len_raw] = '\0';
 
-    // #83: SYS_CHDIR is the one caller that needs BOTH cwd jobs, and it needs
-    // them in this order.
-    //
-    // (1) JOIN verbatim, for the physical check. "."/".."/a trailing separator
-    // survive so stalk gates them -- so `cd f/..` where f is a FILE, or
-    // `cd nonexistent/..`, fail here rather than being lexically massaged into
-    // the parent that happens to exist.
+    // The landed name REUSES path_scratch, whose last read is the join, so the
+    // store adds no stack (the handler already carries two SYS_OPEN_PATH_MAX
+    // buffers, above a stalk() that nests its own trail).
     char joined[SYS_OPEN_PATH_MAX + 1];
-    int jl = territory_join_cwd(p->territory, path_scratch, path_len_raw,
-                                joined, sizeof(joined));
-    if (jl < 0)                                      return -1;
-
-    // (2) Resolve the joined absolute path from the Territory root to verify it
-    // exists, is a directory, and the caller holds X (search), and take the
-    // name of where the walk LANDED for the store (STALK-DESIGN 4.3, the
-    // operator's vote of 2026-10-06: chdir stores the physical name). That name
-    // has no "." or ".." component and no link component: a followed link
-    // contributes its target, and a ".." climbs out of where the walk stands,
-    // as stalk's own trail pop does -- so `cd link/..` lands where `ls link/..`
-    // reads. stalk_landed walks the name once more and refuses one that lands
-    // elsewhere, so what is stored is what was validated. It is relative to
-    // the root stalk started from, as dot_path is. stalk borrows
-    // root (never refs/clunks it); RW-4 SA-F1: territory_root_ref takes the ref
-    // ATOMICALLY under ns_lock (a plain read-then-ref raced a concurrent
-    // pivot_root's swap+clunk-to-zero).
-    //
-    // The name REUSES path_scratch, whose last read was the join in (1), so
-    // this step adds no stack (the handler already carries two
-    // SYS_OPEN_PATH_MAX buffers, above a stalk() that nests its own trail).
-    struct Spoor *root = territory_root_ref(p->territory);
-    if (!root)                                       return -1;
-    u32 nl = 0;
-    struct Spoor *q = stalk_landed(p, root, joined, (u64)jl, NULL,
-                                   path_scratch, sizeof(path_scratch), &nl);
-    spoor_clunk(root);
-    if (!q)                                          return -1;
-    if (nl == 0) { path_scratch[0] = '/'; path_scratch[1] = '\0'; }   // the root
-
-    s64 rc = -1;
-    if (q->qid.type & QTDIR) {
-        int ok = 1;
-        // Mirror stalk's gating: a perm_enforced Dev gates the search on X for
-        // the caller's principal; a non-enforced Dev has no rwx to check.
-        if (q->dev && q->dev->perm_enforced) {
-            struct t_stat st;
-            ok = (spoor_stat_native(q, &st) == 0 && perm_check(p, &st, PERM_X) == 0);
-        }
-        if (ok) rc = territory_setdot(p->territory, path_scratch);
-    }
-    spoor_clunk(q);
-    return rc;
+    s64 rc = sys_dir_landed_name(p, path_scratch, path_len_raw,
+                                 joined, sizeof(joined),
+                                 path_scratch, sizeof(path_scratch));
+    if (rc < 0)                                      return rc;
+    if (territory_setdot(p->territory, path_scratch) != 0) return -(s64)T_E_NOMEM;
+    return 0;
 }
 
 // SYS_GETCWD(buf, len) -- copy the per-Proc cwd into the user buffer (LS-4),
@@ -9170,9 +9186,9 @@ static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
 //   - argc in [0, SYS_SPAWN_ARGV_MAX].
 //   - fd_count in [0, SYS_SPAWN_MAX_FDS]; each fd a live KOBJ_SPOOR.
 //   - perm_flags subset of SPAWN_PERM_ALL; nonzero only if console-attached.
-//   - _pad_envp == 0 (reserved for forward-compat envp pass-through;
-//     reject non-zero values so a future envp wiring cannot silently land
-//     on a v1.0 kernel).
+//   - ext_flags subset of SPAWN_EXT_FLAGS_ALL. SPAWN_EXT_CWD's tail names a
+//     directory the spawner can search (cwd_flags 0, cwd_len in
+//     [1, SYS_OPEN_PATH_MAX]).
 
 // A-1a: identity bundle threaded from the spawn handler/entry into the
 // child via spawn_full_argv_args. `set` mirrors SPAWN_IDENTITY_SET; when
@@ -9317,6 +9333,11 @@ struct spawn_full_argv_args {
     // path; the child's live mark (Proc.debug_birth_hold) decides at the birth
     // park whether it still waits, so a hold released early simply falls through.
     bool           debug_held;
+    // The cwd tail's landed name (STALK-DESIGN 4.3), resolved in the PARENT; the
+    // thunk installs it as the child's dot before anything else runs. Inline,
+    // for the reason `name` is.
+    bool           cwd_set;
+    char           cwd[SYS_OPEN_PATH_MAX + 1];
 };
 
 __attribute__((noreturn))
@@ -9347,12 +9368,24 @@ static void sys_spawn_full_argv_thunk(void *arg) {
         spoors_local[i] = sa->spoors[i];
         rights_local[i] = sa->rights[i];
     }
-    kfree(sa);
 
     struct Thread *t = current_thread();
     if (!t) extinction("sys_spawn_full_argv_thunk: no current_thread");
     struct Proc *p = t->proc;
     if (!p) extinction("sys_spawn_full_argv_thunk: no proc");
+
+    // The cwd tail first, read from `sa` before it is freed: the child's
+    // Territory is its own clone (rfork), so the spawner's dot does not move.
+    // Only an allocation can fail here, and it is handled below, with the
+    // thunk's other pre-EL0 failures.
+    bool cwd_ok = !sa->cwd_set || territory_setdot(p->territory, sa->cwd) == 0;
+    kfree(sa);
+    if (!cwd_ok) {
+        for (u32 j = 0; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+        spoor_clunk(exe);
+        kfree(argv_data);
+        exits("fail-cwd");
+    }
 
     // Apply parent-vetted SPAWN_PERM_* bits BEFORE anything user-observable;
     // the parent gate-checked them in sys_spawn_full_argv_for_proc. Same
@@ -9503,7 +9536,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         u32 eff_budget,
         const struct spawn_identity *id,
         const struct spawn_allowance *want_allowance,
-        u32 pheno_flags, u32 debug_flags) {
+        u32 pheno_flags, u32 debug_flags, const char *cwd) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -9547,10 +9580,24 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // mount -- the /viv/bin subtree phenotype channel (seeded, since Design D,
     // by THIS Territory's own declaration), carried to the thunk as
     // sa->exe_pheno_linux beside the manifest bit (sa->pheno_manifest).
+    //
+    // With a cwd tail a relative name is joined to the CHILD's cwd, as a child
+    // that chdirs before it execs would resolve it (posix_spawn's addchdir, Go's
+    // Cmd.Dir).
     size_t exe_size = 0;
     bool exe_pheno_linux = false;
-    struct Spoor *exe = exec_resolve_from_namespace_ex(p, name, name_len,
-                                                       &exe_size, &exe_pheno_linux);
+    struct Spoor *exe = NULL;
+    if (cwd && name[0] != '/') {
+        char *jbuf = kmalloc(SYS_OPEN_PATH_MAX + 1u, 0);
+        int jl = jbuf ? cwd_join(cwd, name, (u64)name_len, jbuf, SYS_OPEN_PATH_MAX + 1u) : -1;
+        if (jl > 0)
+            exe = exec_resolve_from_namespace_ex(p, jbuf, (size_t)jl,
+                                                 &exe_size, &exe_pheno_linux);
+        if (jbuf) kfree(jbuf);
+    } else {
+        exe = exec_resolve_from_namespace_ex(p, name, name_len,
+                                             &exe_size, &exe_pheno_linux);
+    }
     if (!exe) {
         sys_spawn_unbump_fds(bumped, fd_count);
         return -1;
@@ -9608,6 +9655,12 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // 5f: read into a local -- `sa` belongs to the child once rfork returns.
     const bool held = (debug_flags & SPAWN_DEBUG_HELD) != 0;
     sa->debug_held = held;
+    if (cwd) {
+        u32 cl = 0;
+        while (cwd[cl] != '\0' && cl < SYS_OPEN_PATH_MAX) { sa->cwd[cl] = cwd[cl]; cl++; }
+        sa->cwd[cl] = '\0';
+        sa->cwd_set = true;
+    }
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -9640,7 +9693,12 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 // kernel tests; the identity is passed as scalars (not the internal struct
 // spawn_identity) so the test file needs no kernel-internal type. set_identity ==
 // false (the back-compat path) means the child inherits the parent's identity.
-int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+//
+// `cwd` (kernel memory, `cwd_len` bytes; NULL == inherit) is the SPAWN_EXT_CWD
+// tail's path. It is resolved here, in the spawner, after the gates and before
+// any child exists, as the image is: a bad cwd answers chdir's errno
+// (sys_dir_landed_name) and leaves nothing to reap. Every other refusal is -1.
+int sys_spawn_full_argv_cwd_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
@@ -9648,7 +9706,8 @@ int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         bool set_identity, u32 principal_id, u32 primary_gid,
         const u32 *supp_gids, u32 supp_gid_count,
         const struct spawn_allowance *want_allowance,
-        u32 req_budget, u32 pheno_flags, u32 debug_flags) {
+        u32 req_budget, u32 pheno_flags, u32 debug_flags,
+        const char *cwd, u32 cwd_len) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
     // V-1b: unknown pheno bits reject (forward-compat); the known bit needs
@@ -9705,12 +9764,48 @@ int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
         eff_id = &id;
     }
 
-    return sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
-                                                   argv_data, argv_data_len,
-                                                   argc, cap_mask, perm_flags,
-                                                   fds, fd_count, eff_budget,
-                                                   eff_id, want_allowance,
-                                                   pheno_flags, debug_flags);
+    // One block holds the join scratch and the landed name.
+    char *cwd_buf = NULL;
+    const char *landed = NULL;
+    if (cwd) {
+        cwd_buf = kmalloc(2u * (SYS_OPEN_PATH_MAX + 1u), 0);
+        if (!cwd_buf)                                  return -(int)T_E_NOMEM;
+        char *name_out = cwd_buf + SYS_OPEN_PATH_MAX + 1u;
+        s64 crc = sys_dir_landed_name(p, cwd, (u64)cwd_len,
+                                      cwd_buf, SYS_OPEN_PATH_MAX + 1u,
+                                      name_out, SYS_OPEN_PATH_MAX + 1u);
+        if (crc < 0) { kfree(cwd_buf);                 return (int)crc; }
+        landed = name_out;
+    }
+
+    int pid = sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
+                                                      argv_data, argv_data_len,
+                                                      argc, cap_mask, perm_flags,
+                                                      fds, fd_count, eff_budget,
+                                                      eff_id, want_allowance,
+                                                      pheno_flags, debug_flags,
+                                                      landed);
+    if (cwd_buf) kfree(cwd_buf);
+    return pid;
+}
+
+// Back-compat entry: no cwd tail (the child inherits the spawner's cwd).
+int sys_spawn_full_argv_debug_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget, u32 pheno_flags, u32 debug_flags) {
+    return sys_spawn_full_argv_cwd_for_proc(p, name, name_len, argv_data,
+                                            argv_data_len, argc, fds, fd_count,
+                                            cap_mask, perm_flags, set_identity,
+                                            principal_id, primary_gid, supp_gids,
+                                            supp_gid_count, want_allowance,
+                                            req_budget, pheno_flags, debug_flags,
+                                            /*cwd=*/NULL, 0u);
 }
 
 // Back-compat entry: not held (debug_flags 0). Keeps the CL-5 / V-1b signature
@@ -9791,7 +9886,7 @@ static int sys_load_spawn_args(u64 req_va, struct sys_spawn_args *out) {
 
 // R1 F1 fix: handler-side field-bound validation extracted as a
 // kernel-internal helper so kernel tests can exercise the handler's
-// distinctive checks (_pad_envp != 0, perm_flags & ~ALL, oversize fields)
+// distinctive checks (unknown ext_flags bits, perm_flags & ~ALL, oversize fields)
 // without needing an SVC instruction or a user-VA fixture. Returns 0 on
 // "all fields pass static bounds", -1 on any violation.
 //
@@ -9807,7 +9902,7 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     if (req->argc > SYS_SPAWN_ARGV_MAX)                return -1;
     if (req->fd_count > SYS_SPAWN_MAX_FDS)              return -1;
     if (req->perm_flags & ~(u32)SPAWN_PERM_ALL)         return -1;
-    if (req->_pad_envp != 0)                           return -1;
+    if (req->ext_flags & ~(u32)SPAWN_EXT_FLAGS_ALL)    return -1;
     // R1 F4 fix: reject (argc > 0, argv_data_len == 0) at the handler's
     // field-bound stage rather than waiting for the body's NUL-walk to
     // reject it. Symmetric to the existing (argc == 0, argv_data_len > 0)
@@ -9816,8 +9911,8 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     if (req->argc > 0 && req->argv_data_len == 0)      return -1;
     if (req->argc == 0 && req->argv_data_len != 0)     return -1;
     // A-1a: identity_flags must carry no unknown bits (forward-compat — a
-    // future flag cannot silently land on a v1.0 kernel; same rationale as
-    // _pad_envp). When SPAWN_IDENTITY_SET is set, bound supp_gid_count here
+    // future flag cannot silently land on a v1.0 kernel; the unknown-bits
+    // rule). When SPAWN_IDENTITY_SET is set, bound supp_gid_count here
     // (the handler's supp-gid copy loop indexes a PROC_SUPP_GIDS_MAX buffer;
     // the identity entry re-checks defense-in-depth). The id VALUE checks
     // (reserved-reject) live in the identity entry AFTER the cap gate, so an
@@ -9826,7 +9921,7 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     if ((req->identity_flags & SPAWN_IDENTITY_SET) &&
         req->supp_gid_count > PROC_SUPP_GIDS_MAX)      return -1;
     // Menagerie step 5: allowance_flags must carry no unknown bits (forward-
-    // compat, same rationale as _pad_envp); a SET request requires a non-NULL
+    // compat, the unknown-bits rule); a SET request requires a non-NULL
     // descriptor VA (the handler then copies + count-bounds it). The mmio/irq
     // count bounds + the narrowing gate are checked after the copy-in / in the
     // identity entry (so an over-count or a too-wide ask is a clean -1, never
@@ -9845,7 +9940,7 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     // field quietly taking the other's bytes. pheno_flags now lives at 96.
     // The reject set narrows from "any nonzero" to "any UNKNOWN bit" -- a
     // pre-V-1b caller (zero-fill) is byte-identical, and a future flag still
-    // cannot silently land on this kernel (the _pad_envp rationale).
+    // cannot silently land on this kernel (the unknown-bits rule).
     if (req->pheno_flags & ~(u32)SPAWN_PHENO_FLAGS_ALL) return -1;
     // ...which left 100 as the reserved slot, poison-checked so that the next
     // claimant would not inherit callers' stale stack garbage. The birth hold
@@ -9980,6 +10075,40 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             allow_kbuf.pci[i] = desc.pci[i];
     }
 
+    // SPAWN_EXT_CWD: the tail directly after the record, read only when the
+    // record announces it -- a caller that does not set the bit is never read
+    // past its 104 bytes. Copied into a kmalloc'd buffer (the frame already
+    // carries the allowance bundle); the path is resolved in the entry.
+    char *cwd_kbuf = NULL;
+    u32 cwd_len = 0;
+    if (req.ext_flags & SPAWN_EXT_CWD) {
+        u64 tail_va = req_va + sizeof(struct sys_spawn_args);
+        if (!sys_validate_user_buf(tail_va, sizeof(struct sys_spawn_ext_cwd)))
+            return -(s64)T_E_FAULT;
+        struct sys_spawn_ext_cwd ext;
+        u8 *edst = (u8 *)&ext;
+        for (u64 i = 0; i < sizeof(ext); i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(tail_va + i, &b) != 0) return -(s64)T_E_FAULT;
+            edst[i] = b;
+        }
+        if (ext.cwd_flags != 0)                        return -1;   // the unknown-bits rule
+        if (ext.cwd_len == 0 || ext.cwd_len > SYS_OPEN_PATH_MAX) return -(s64)T_E_INVAL;
+        if (!sys_validate_user_buf(ext.cwd_va, ext.cwd_len)) return -(s64)T_E_FAULT;
+        cwd_kbuf = kmalloc(ext.cwd_len + 1u, 0);
+        if (!cwd_kbuf)                                 return -(s64)T_E_NOMEM;
+        for (u32 i = 0; i < ext.cwd_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(ext.cwd_va + i, &b) != 0) {
+                kfree(cwd_kbuf);
+                return -(s64)T_E_FAULT;
+            }
+            cwd_kbuf[i] = (char)b;
+        }
+        cwd_kbuf[ext.cwd_len] = '\0';
+        cwd_len = ext.cwd_len;
+    }
+
     // Copy argv_data into a kmalloc'd buffer (NOT a kernel-stack array --
     // SYS_SPAWN_ARGV_DATA_MAX is 64 KiB, over the 16 KiB kstack). The body
     // re-copies into its own kmalloc'd region (owned by the child's thunk)
@@ -9988,17 +10117,21 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
     char *argv_kbuf = NULL;
     if (req.argv_data_len > 0) {
         argv_kbuf = kmalloc(req.argv_data_len, 0);
-        if (!argv_kbuf) return -1;
+        if (!argv_kbuf) {
+            if (cwd_kbuf) kfree(cwd_kbuf);
+            return -1;
+        }
         for (u32 i = 0; i < req.argv_data_len; i++) {
             u8 b = 0;
             if (uaccess_load_u8(req.argv_data_va + i, &b) != 0) {
                 kfree(argv_kbuf);
+                if (cwd_kbuf) kfree(cwd_kbuf);
                 return -1;
             }
             argv_kbuf[i] = (char)b;
         }
     }
-    s64 rc = (s64)sys_spawn_full_argv_debug_for_proc(
+    s64 rc = (s64)sys_spawn_full_argv_cwd_for_proc(
         p, name, (size_t)req.name_len,
         argv_kbuf, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
@@ -10008,8 +10141,10 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         set_allowance ? &allow_kbuf : NULL,
         req.page_budget,                  // CL-5: 0 == inherit
         req.pheno_flags,                  // V-1b: 0 == inherit
-        req.debug_flags);                 // 5f: 0 == not held
+        req.debug_flags,                  // 5f: 0 == not held
+        cwd_kbuf, cwd_len);               // SPAWN_EXT_CWD: NULL == inherit
     if (argv_kbuf) kfree(argv_kbuf);
+    if (cwd_kbuf) kfree(cwd_kbuf);
     return rc;
 }
 

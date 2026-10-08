@@ -209,7 +209,8 @@ it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
 **The flag-word check runs after it (2026-10-05; nine words since
 2026-10-06).** `tools/check-flag-words.py` holds a table of flag words -- the
 header, the pattern a member's name matches, the width: `proc_flags`, the
-spawn permission word and the four one-bit spawn words, the walk-create mode
+spawn permission word, the four one-bit spawn words and the spawn record's
+`ext_flags` tail word (`SPAWN_EXT_*`, 2026-10-06), the walk-create mode
 word (`SYS_WALK_CREATE_*`, with DMDIR and the DMSRV bits), the 9P attach flags
 and the mount flags. It evaluates every member, resolving the header's other
 macros, and fails when two members share a bit. A member owns the bits its own
@@ -226,7 +227,8 @@ can fail: each word's header is mutated in memory (a new member on an owned bit,
 a member shifted from another, an undefined macro, a member outside the word,
 every member renamed away), and a mutation the check does not report by the rule
 it targets stops the build. It prints one line per word, then
-`check-flag-words: 9 words ok; the self-test caught all 45 mutations`. It is
+`check-flag-words: 10 words ok; the self-test caught all 50 mutations`
+(9 and 45 before the tail word). It is
 sub-second and fatal, with no skip switch. It replaced `tools/check-proc-flags.py`,
 main's single-word check, whose rule let a literal mask equal to a union of
 flags overlap them; the literal rule is stricter.

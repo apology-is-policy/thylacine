@@ -431,6 +431,37 @@ so the handler's frame does not grow. Until then the handler stored a lexically
 cleaned copy of the join, which named a different directory from the one
 validated whenever a link stood in the path.
 
+**One resolver, its errno (2026-10-06).** `sys_dir_landed_name` is the steps
+above as one function, shared by `SYS_CHDIR` and the spawn's cwd tail (below).
+It answers each refusal's errno: `T_E_NOENT` for a missing component,
+`T_E_NOTDIR` for a target that is not a directory, `T_E_ACCES` for a refused
+search (the walk's or the final X check's), `T_E_INVAL` for an empty, over-long
+or NUL-bearing path or a name the walk cannot name back, and a failing stat's
+or re-walk's own errno (`T_E_IO` when it carries none). A Dev's walk carries no
+errno, so a 9P walk that fails for any reason -- a dead session, a caught note
+that interrupts it -- answers `T_E_NOENT`, as for `SYS_OPEN`. `SYS_CHDIR` passes
+it through, with `T_E_FAULT` for a bad buffer
+and `T_E_NOMEM` for the store; until then it answered every failure the bare -1
+that pouch and Go read as `EPERM` (ERRORS.md's binding rule). The landed name
+may overwrite the path it came from, which is how chdir keeps its frame.
+
+**The spawn's cwd tail (2026-10-06, [[dec-2026-10-06-spawn-cwd]]).** When the
+record's `ext_flags` carries `SPAWN_EXT_CWD`, `sys_spawn_full_argv_handler` reads
+the 16-byte tail at the record's address + 104 -- never otherwise -- after every
+other field's checks, refuses a nonzero `cwd_flags` with -1, a `cwd_len` of 0 or
+past `SYS_OPEN_PATH_MAX` with `T_E_INVAL`, and copies the path into a kmalloc'd
+buffer (the frame already carries the allowance bundle).
+`sys_spawn_full_argv_cwd_for_proc` is now the gate site; after the perm,
+budget, allowance and identity gates it resolves the path with
+`sys_dir_landed_name` in the spawner, so a bad cwd fails the spawn with chdir's
+errno before any child exists. The body joins a relative image name to the
+landed cwd rather than the spawner's, as a child that changed directory before
+it ran would resolve it, and carries the name inline in the spawn args (as it
+carries `name`); the thunk installs it as the child's dot first, before it frees
+the args, and an allocation failure there ends the child (`fail-cwd`) with the
+thunk's other pre-EL0 failures. The spawner's own dot never moves: the child's
+Territory is rfork's clone.
+
 ### The identity cape: one admission rule per word, a stamp before publication, two inners (2026-09-23)
 
 The cape (IDENTITY-DESIGN 3.2, HAUL-DESIGN 4.7) enters this file on two ABI
@@ -1494,9 +1525,9 @@ unmarked. An unheld spawn keeps `rfork_with_caps` and the path it always had.
 stopped being ALIVE, or left the caller's children. The parent it waits on is
 `current_thread()->proc`, the Proc `rfork` forked, which a kernel test's `p` is
 not always. A caller killed while waiting unwinds (#811), and its own death then
-kills the child through the orphan rule. `sys_spawn_full_argv_debug_for_proc`
-and its budget wrapper are the kernel-test entries, declared where the tests
-call them.
+kills the child through the orphan rule. `sys_spawn_full_argv_cwd_for_proc`,
+its no-cwd wrapper `sys_spawn_full_argv_debug_for_proc` and the budget wrapper
+under that are the kernel-test entries, declared where the tests call them.
 
 ## `viv_wait4` answers a caught note with EINTR (2026-10-05)
 

@@ -68,11 +68,13 @@ because the proxy is the asset it would expose.
 file", and it has a second member already named.** Enumerating the per-pid files
 by their gate rather than by their purpose (self-audit, (U) F1): `mem`, `regs`,
 `fpregs`, `wait`, `kregs` and `kstack` take the DEBUG gate, which is what makes
-NOTRACE sufficient today. But `environ`, `sched`, `maps`, `cwd`, `exe`, `status`,
-`cmdline` and `imperium` take **owner-or-`CAP_HOSTOWNER`**, so the user's shell
-reads all of them on the proxy right now. None leaks anything today: `environ` is
-empty because envp pass-through does not exist at v1.0 (`_pad_envp` "must be 0",
-rejected loudly), and the rest are names, addresses and counters.
+NOTRACE sufficient today. But `environ`, `sched`, `imperium` and `status`'s
+`cpu_ns` take **owner-or-`CAP_HOSTOWNER`**, and `maps`, `cwd`, `exe`, `status` and
+`cmdline` are readable by every principal but `none` (the dump seals still cover
+`cmdline` and `maps`), so the user's shell reads all of them on the proxy right
+now. None leaks anything today: `environ` is
+empty because envp pass-through does not exist at v1.0 (no spawn record tail
+carries an environment), and the rest are names, addresses and counters.
 
 The one to watch is `environ`. **When envp pass-through lands, anything login puts
 in the proxy's environment becomes readable by that user's own shell** -- so the

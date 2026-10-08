@@ -61,7 +61,7 @@ extern int sys_spawn_full_argv_for_proc(struct Proc *p,
                                         caps_t cap_mask, u32 perm_flags);
 // R1 F1 fix: handler-side field-bound validation extracted as an
 // internal helper so tests can exercise the handler's distinctive
-// checks (_pad_envp != 0, perm_flags & ~ALL, oversize fields) without
+// checks (unknown ext_flags bits, perm_flags & ~ALL, oversize fields) without
 // SVC instrumentation or a user-VA fixture.
 extern int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req);
 
@@ -75,7 +75,7 @@ void test_sys_spawn_full_argv_rejects_argc_with_zero_data_len(void);
 void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
 // R1 F1 + F11 fixes:
 void test_sys_spawn_full_argv_validate_req_golden(void);
-void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void);
+void test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits(void);
 void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
 void test_sys_spawn_full_argv_validate_req_pheno_flags(void);
 void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
@@ -231,7 +231,7 @@ void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void) {
     TEST_EXPECT_EQ(pid, -1, "argc == 0 with argv_data_len > 0 rejected");
 }
 
-// R1 F1 fix: cover the handler's distinctive field-bound + _pad_envp
+// R1 F1 fix: cover the handler's distinctive field-bound + ext_flags
 // + perm_flags-bits validation via the extracted validate_req helper.
 // The body's tests above exercise the body's invariants; these tests
 // exercise the handler's.
@@ -246,21 +246,29 @@ void test_sys_spawn_full_argv_validate_req_golden(void) {
         .argc          = 0,
         .fd_count      = 0,
         .perm_flags    = 0,
-        ._pad_envp     = 0,
+        .ext_flags     = 0,
         .cap_mask      = 0,
     };
     TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), 0,
         "golden no-argv req passes validate");
 }
 
-void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void) {
+void test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits(void) {
     struct sys_spawn_args req = {
         .name_va       = 0x1000,
         .name_len      = 5,
-        ._pad_envp     = 0xDEADBEEF,
+        .ext_flags     = SPAWN_EXT_CWD,
     };
+    // The known bit passes the field bounds (the handler then reads its tail):
+    // the control one variable away from the refusals below.
+    TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), 0,
+        "SPAWN_EXT_CWD passes validate (its tail is the handler's to read)");
+    req.ext_flags = SPAWN_EXT_FLAGS_ALL | (1u << 1);
     TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), -1,
-        "_pad_envp != 0 rejected (forward-compat poison-pattern)");
+        "an unknown ext_flags bit beside the known one is refused");
+    req.ext_flags = 0xDEADBEEEu;
+    TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), -1,
+        "a poison ext_flags word without the known bit is refused");
 }
 
 void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void) {

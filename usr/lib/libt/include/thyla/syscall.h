@@ -341,6 +341,12 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // child whose spawner exits first is killed.
 #define T_SPAWN_DEBUG_HELD             (1u << 0)
 
+// SYS_SPAWN_FULL_ARGV ext_flags (mirror SPAWN_EXT_* in the kernel header): each
+// bit says a tail follows the 104-byte record, in bit order. T_SPAWN_EXT_CWD's
+// tail is a struct t_sys_spawn_ext_cwd naming the cwd the child is born with,
+// resolved by the spawner as chdir resolves one (STALK-DESIGN 4.3).
+#define T_SPAWN_EXT_CWD                (1u << 0)
+
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 #define T_SYS_SPAWN_ARGV_MAX        512u
@@ -362,7 +368,7 @@ struct t_sys_spawn_args {
     unsigned int   argc;             // 32
     unsigned int   fd_count;         // 36
     unsigned int   perm_flags;       // 40
-    unsigned int   _pad_envp;        // 44 — must be 0 at v1.0
+    unsigned int   ext_flags;        // 44 — SPAWN_EXT_* tails after the record; 0 = none
     unsigned long  cap_mask;         // 48
     unsigned int   principal_id;     // 56 — A-1a (honored iff SPAWN_IDENTITY_SET)
     unsigned int   primary_gid;      // 60 — A-1a
@@ -412,8 +418,8 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, fd_count) == 36,
                "t_sys_spawn_args.fd_count at ABI offset 36");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, perm_flags) == 40,
                "t_sys_spawn_args.perm_flags at ABI offset 40");
-_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_envp) == 44,
-               "t_sys_spawn_args._pad_envp at ABI offset 44");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, ext_flags) == 44,
+               "t_sys_spawn_args.ext_flags at ABI offset 44");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, cap_mask) == 48,
                "t_sys_spawn_args.cap_mask at ABI offset 48");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, principal_id) == 56,
@@ -438,6 +444,22 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, pheno_flags) == 96,
                "               moved by the aux-2 merge; 0 == inherit)");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, debug_flags) == 100,
                "t_sys_spawn_args.debug_flags at ABI offset 100 (the birth hold)");
+
+// The T_SPAWN_EXT_CWD tail, directly after the record (mirror struct
+// sys_spawn_ext_cwd; tools/check-spawn-args-mirrors.py compares the two).
+struct t_sys_spawn_ext_cwd {
+    unsigned long  cwd_va;           // 0  — the path (no NUL required)
+    unsigned int   cwd_len;          // 8  — 1..1024
+    unsigned int   cwd_flags;        // 12 — must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_cwd) == 16,
+               "t_sys_spawn_ext_cwd must be 16 bytes (the kernel's tail)");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_va) == 0,
+               "t_sys_spawn_ext_cwd.cwd_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_len) == 8,
+               "t_sys_spawn_ext_cwd.cwd_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_flags) == 12,
+               "t_sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

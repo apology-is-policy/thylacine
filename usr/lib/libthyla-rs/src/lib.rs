@@ -491,7 +491,7 @@ pub struct TSpawnArgs {
     pub argc:           u32, // 32
     pub fd_count:       u32, // 36
     pub perm_flags:     u32, // 40
-    pub _pad_envp:      u32, // 44 — must be 0 at v1.0
+    pub ext_flags:      u32, // 44 — SPAWN_EXT_* tails after the record; 0 = none
     pub cap_mask:       u64, // 48
     pub principal_id:   u32, // 56 — A-1a (honored iff identity_flags & SET)
     pub primary_gid:    u32, // 60 — A-1a
@@ -539,6 +539,24 @@ const _: () = assert!(core::mem::offset_of!(TSpawnArgs, debug_flags) == 100);
 // a debugger's `stop` takes the hold over, `start` / `detach` release it, and a
 // held child whose spawner exits first is killed. Ungated.
 pub const T_SPAWN_DEBUG_HELD: u32 = 1 << 0;
+
+// SYS_SPAWN_FULL_ARGV ext_flags (mirror SPAWN_EXT_* in the kernel header): each
+// bit says a tail follows the 104-byte record, in bit order. T_SPAWN_EXT_CWD's
+// tail is a TSpawnExtCwd naming the cwd the child is born with, resolved by the
+// spawner as chdir resolves one (STALK-DESIGN 4.3).
+pub const T_SPAWN_EXT_CWD: u32 = 1 << 0;
+
+/// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
+/// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtCwd {
+    pub cwd_va:    u64, // 0 — the path (no NUL required)
+    pub cwd_len:   u32, // 8 — 1..1024
+    pub cwd_flags: u32, // 12 — must be 0
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtCwd>() == 16);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_len) == 8);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_flags) == 12);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;

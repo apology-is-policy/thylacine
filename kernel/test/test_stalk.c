@@ -139,6 +139,7 @@ void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
 void test_stalk_landed_name(void);             // STALK-DESIGN 4.3: chdir's physical name
+void test_stalk_dir_landed_name(void);         // STALK-DESIGN 4.3: the shared chdir/spawn-cwd resolver
 
 // DISTRO 4.6: a served link resolves beneath the mount that served it.
 void test_stalk_served_contain(void);
@@ -5090,4 +5091,51 @@ void test_stalk_landed_identity(void) {
     TEST_ASSERT(named[0], "control: the same uR again -- the name walks back to secret");
     TEST_ASSERT(refused[1], "the name walks into another Dev's secret (same qid path): refused");
     TEST_ASSERT(refused[2], "the name walks into another attach's secret (same Dev, qid path): refused");
+}
+
+// The directory resolver SYS_CHDIR and a spawn's cwd tail share (STALK-DESIGN
+// 4.3): the landed name, and each refusal's errno -- never the bare -1 that
+// pouch and Go read as EPERM.
+extern s64 sys_dir_landed_name(struct Proc *p, const char *path, u64 len,
+                               char *joined, u32 joined_cap,
+                               char *name, u32 name_cap);
+
+void test_stalk_dir_landed_name(void) {
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    char n_abs[SYS_OPEN_PATH_MAX + 1], n_root[SYS_OPEN_PATH_MAX + 1];
+    char n_rel[SYS_OPEN_PATH_MAX + 1], n_junk[SYS_OPEN_PATH_MAX + 1];
+    // No initializer: a literal into this array is a memcpy, which the kernel has none of.
+    char alias[SYS_OPEN_PATH_MAX + 1];
+    for (u32 i = 0; i < sizeof "/a/deep"; i++) alias[i] = "/a/deep"[i];
+    struct Proc p;
+    struct Spoor *root = served_setup(&p, false);
+    bool up = root != NULL;
+#define DLN(path, len, out) \
+    (up ? sys_dir_landed_name(&p, (path), (len), joined, sizeof joined, (out), SYS_OPEN_PATH_MAX + 1) : 1)
+    s64 r_abs  = DLN("/a/deep", 7, n_abs);
+    s64 r_root = DLN("/", 1, n_root);
+    int sd     = up ? territory_setdot(p.territory, "/a") : -1;
+    s64 r_rel  = DLN("deep", 4, n_rel);
+    s64 r_nf   = DLN("/zz", 3, n_junk);
+    s64 r_nd   = DLN("/a/b", 4, n_junk);
+    s64 r_nx   = DLN("/nox", 4, n_junk);
+    s64 r_em   = DLN("", 0, n_junk);
+    s64 r_nul  = DLN("a\0b", 3, n_junk);
+    s64 r_al   = DLN(alias, 7, alias);
+#undef DLN
+    if (p.territory) territory_unref(p.territory);
+    if (root) spoor_unref(root);
+
+    TEST_ASSERT(up, "fixture root + Territory");
+    TEST_ASSERT(r_abs == 0 && landed_eq(n_abs, 7, "/a/deep"), "an absolute directory lands on its own name");
+    TEST_ASSERT(r_root == 0 && n_root[0] == '/' && n_root[1] == '\0', "the root lands on \"/\"");
+    TEST_ASSERT(sd == 0 && r_rel == 0 && landed_eq(n_rel, 7, "/a/deep"),
+                "a relative path is joined to the cwd: deep under /a is /a/deep");
+    TEST_EXPECT_EQ(r_nf, -(s64)T_E_NOENT, "a missing directory answers ENOENT");
+    TEST_EXPECT_EQ(r_nd, -(s64)T_E_NOTDIR, "a file answers ENOTDIR");
+    TEST_EXPECT_EQ(r_nx, -(s64)T_E_ACCES, "a directory without search (X) answers EACCES");
+    TEST_EXPECT_EQ(r_em, -(s64)T_E_INVAL, "an empty path answers EINVAL");
+    TEST_EXPECT_EQ(r_nul, -(s64)T_E_INVAL, "an embedded NUL answers EINVAL");
+    TEST_ASSERT(r_al == 0 && landed_eq(alias, 7, "/a/deep"),
+                "the name may overwrite the path it was resolved from (chdir's reuse)");
 }

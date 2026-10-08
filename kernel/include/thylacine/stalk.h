@@ -128,6 +128,10 @@ struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
 // Returns the resolved Spoor (the quarry; ref == 1, opened iff STALK_OPEN) or
 // NULL on any failure (missing component, permission denied, depth overflow,
 // OOM, open failure). The caller installs the handle and derives its rights.
+// A Dev or spoor_stat_native return (0, a negative errno, or the generic -1) as a
+// positive T_E_* code: a real -errno yields its magnitude; -1 and anything else, T_E_IO.
+int stalk_err_code(int ret);
+
 struct Spoor *stalk(struct Proc *p, struct Spoor *start,
                     const char *path, u64 pathlen, int amode, u32 omode);
 

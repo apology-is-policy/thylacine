@@ -150,7 +150,7 @@ fn emulator() -> i64 {
         argc: 3,
         fd_count: 0,
         perm_flags: 0,
-        _pad_envp: 0,
+        ext_flags: 0,
         cap_mask: 0,
         principal_id: 0,
         primary_gid: 0,

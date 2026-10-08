@@ -18,7 +18,7 @@ kernel's empty envp -- today's behaviour, never a crash.
 
 /env stays the source of truth. A later setenv mutates only this in-process
 copy; writing a change back to /env (and the posix_spawn envp arg, which the
-SYS_SPAWN_FULL_ARGV _pad_envp slot reserves) are v1.x kernel-surface lifts.
+SYS_SPAWN_FULL_ARGV ext_flags tail would carry) are v1.x kernel-surface lifts.
 
 Files:
   src/env/_pouch_env.c          NEW -- __pouch_env_init(): readdir /env,

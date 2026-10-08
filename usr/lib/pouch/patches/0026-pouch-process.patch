@@ -29,7 +29,7 @@ Two translations are load-bearing:
     Linux-packed word and is forwarded verbatim.
 
 envp is inherited via the /env clone (the passed posix_spawn envp is a v1.x
-lift the SYS_SPAWN_FULL_ARGV _pad_envp slot reserves). dup2/dup3 onto a chosen
+lift: a SYS_SPAWN_FULL_ARGV ext_flags tail). dup2/dup3 onto a chosen
 target fd have NO kernel primitive (handle_dup is lowest-free only) and NO
 runtime toolchain path needs one (posix_spawn resolves file_actions
 statically) -- the onto-target case is a documented ENOSYS seam; old==new is a
@@ -113,7 +113,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +	unsigned int argc;                 /* 32 */
 +	unsigned int fd_count;             /* 36 */
 +	unsigned int perm_flags;           /* 40 */
-+	unsigned int _pad_envp;            /* 44 -- must be 0 (reserved envp_len) */
++	unsigned int ext_flags;            /* 44 -- SPAWN_EXT_* tails; 0 = none */
 +	unsigned long long cap_mask;       /* 48 */
 +	unsigned int principal_id;         /* 56 */
 +	unsigned int primary_gid;          /* 60 */
@@ -148,7 +148,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, argc)           ==  32, "argc@32");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, fd_count)       ==  36, "fd_count@36");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, perm_flags)     ==  40, "perm_flags@40");
-+_Static_assert(__builtin_offsetof(struct pouch_spawn_args, _pad_envp)      ==  44, "_pad_envp@44");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, ext_flags)      ==  44, "ext_flags@44");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, cap_mask)       ==  48, "cap_mask@48");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, principal_id)   ==  56, "principal_id@56");
 +_Static_assert(__builtin_offsetof(struct pouch_spawn_args, primary_gid)    ==  60, "primary_gid@60");
@@ -308,8 +308,8 @@ diff --color -ruN a/src/process/posix_spawn.c b/src/process/posix_spawn.c
 + * redirect onto fd 0/1/2, close a temp) resolves to {0,1,2}.
 + *
 + * envp is inherited via the kernel /env clone (env_clone_into), NOT the passed
-+ * envp -- the SYS_SPAWN_FULL_ARGV _pad_envp slot reserves the per-child
-+ * override. attr (SETSID/SETPGROUP/RESETIDS/SETSIG*) has no post-spawn child
++ * envp -- a per-child override would be a SYS_SPAWN_FULL_ARGV ext_flags
++ * tail. attr (SETSID/SETPGROUP/RESETIDS/SETSIG*) has no post-spawn child
 + * hook and is ignored: a fresh Thylacine child inherits the parent's
 + * session/pgroup/identity and starts with default note dispositions, so the
 + * toolchain's (unset) attr is satisfied by construction.

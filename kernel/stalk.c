@@ -47,7 +47,7 @@
 // -1) into a POSITIVE T_E_* code for stalk's *errp. A real -errno in [-4095,-2]
 // yields its magnitude; -1 (the generic sentinel -- and == -T_E_PERM, which must
 // never surface as errno 1) and anything else collapse to T_E_IO.
-static int err_code(int ret) {
+int stalk_err_code(int ret) {
     if (ret <= -2 && ret >= -4095) return -ret;
     return T_E_IO;
 }
@@ -133,7 +133,7 @@ static int stalk_tip_may_search(struct Proc *p, struct Spoor **trail, int depth,
         st = *carried;
     } else {
         int sr = spoor_stat_native(tip, &st);
-        if (sr != 0) return err_code(sr);
+        if (sr != 0) return stalk_err_code(sr);
     }
     return (perm_check(p, &st, PERM_X) != 0) ? T_E_ACCES : 0;
 }
@@ -690,7 +690,7 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
     // .readlink is a public NULL-permitted slot and gets the same treatment.
     long tlen = link->dev->readlink(link, ex->tgt, SYS_OPEN_PATH_MAX);
     if (tlen <= 0 || tlen > SYS_OPEN_PATH_MAX) {
-        *errp = (tlen < 0) ? err_code((int)tlen)
+        *errp = (tlen < 0) ? stalk_err_code((int)tlen)
                            : ((tlen == 0) ? T_E_NOENT : T_E_INVAL);
         return -1;
     }
@@ -1445,7 +1445,7 @@ restart:
                     pst = carried;
                 } else {
                     int sr = spoor_stat_native(parent, &pst);
-                    if (sr != 0)                         { err = err_code(sr); goto fail; }
+                    if (sr != 0)                         { err = stalk_err_code(sr); goto fail; }
                 }
                 if (perm_check(p, &pst, PERM_X) != 0)    { err = T_E_ACCES;    goto fail; }
             }
@@ -1894,7 +1894,7 @@ per_component:
             if (parent->dev && parent->dev->perm_enforced) {
                 struct t_stat st;
                 int sr = spoor_stat_native(parent, &st);
-                if (sr != 0)                         { err = err_code(sr); goto fail; }
+                if (sr != 0)                         { err = stalk_err_code(sr); goto fail; }
                 if (perm_check(p, &st, PERM_X) != 0) { err = T_E_ACCES;    goto fail; }
             }
 
@@ -2251,7 +2251,7 @@ per_component:
                 st = carried;
             } else {
                 int sr = spoor_stat_native(quarry, &st);
-                if (sr != 0)                                          { err = err_code(sr); goto fail; }
+                if (sr != 0)                                          { err = stalk_err_code(sr); goto fail; }
             }
             if (perm_check(p, &st, perm_want_for_omode(omode)) != 0)  { err = T_E_ACCES;    goto fail; }
         }
@@ -2266,7 +2266,7 @@ per_component:
         // (open did not consume its ref) -> clunk it and adopt the replacement.
         struct Spoor *opened = quarry->dev->open(quarry, (int)omode);
         if (!opened) {
-            err = err_code((int)spoor_open_errno(quarry));
+            err = stalk_err_code((int)spoor_open_errno(quarry));
             goto fail;
         }
         if (opened != quarry) {
@@ -2320,15 +2320,18 @@ struct Spoor *stalk_landed(struct Proc *p, struct Spoor *start,
     name[nm.len] = '\0';
     // The name must walk back to q. A served link resolved from a union member
     // past the first can land on a node an earlier member shadows, and that
-    // node has no name in the caller's namespace.
+    // node has no name in the caller's namespace: a re-walk that lands elsewhere
+    // or misses answers EINVAL. One that fails for its own reason (an
+    // interrupted RPC, a stat, memory) answers that errno.
+    int cerr = 0;
     struct Spoor *chk = stalk_core(p, start, nm.len ? name : "/", nm.len ? nm.len : 1,
-                                   STALK_WALK, 0, NULL, NULL, NULL, NULL, NULL, NULL);
+                                   STALK_WALK, 0, &cerr, NULL, NULL, NULL, NULL, NULL);
     bool same = chk && chk->dc == q->dc && chk->devno == q->devno &&
                 chk->qid.path == q->qid.path;
     if (chk) spoor_clunk(chk);
     if (!same) {
         spoor_clunk(q);
-        if (errp) *errp = T_E_INVAL;
+        if (errp) *errp = (!chk && cerr > 0 && cerr != T_E_NOENT) ? cerr : T_E_INVAL;
         return NULL;
     }
     *name_len = nm.len;
@@ -2380,6 +2383,6 @@ int stalk_stat(struct Proc *p, struct Spoor *start,
     // handle-table round trip.
     int sr = spoor_stat_native(q, out);
     spoor_clunk(q);
-    if (sr != 0) { if (errp) *errp = err_code(sr); return -1; }
+    if (sr != 0) { if (errp) *errp = stalk_err_code(sr); return -1; }
     return 0;
 }

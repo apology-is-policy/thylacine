@@ -1297,6 +1297,68 @@ and a fork with neither must name `launchHeld` nowhere and set `DebugHeld` in `L
 accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half step; the gate's bake ran it against
 073faaa. Main agreed on yip 0177; step 2b, the shared fork's commit, waits for main's merge and word.
 
+## A spawn names its child's cwd; chdir answers its errno — 2026-10-07
+
+Operator vote of 2026-10-06, "Add the cwd field" (the held launch's audit, round 2 F11: the Go fork borrowed the whole
+process's cwd for every spawn with a `Dir`). Scripture *(pending)*; code, witnesses and dossiers in one commit,
+*(pending)*. Cut on aux-3 62875f9df (main 25ed27f21, the exit close, plus the wake tool and its fixes), which already carries
+aux-3 61c71525f and devno-u64.
+
+- **The record does not grow.** `_pad_envp` (offset 44, had to be 0) becomes `ext_flags`; bit 0, `SPAWN_EXT_CWD`,
+  announces a 16-byte tail at record+104 (`cwd_va`, `cwd_len`, `cwd_flags`). The kernel reads it only when announced.
+  The shared Go fork's copy is held to offsets, so it needs no change until it uses the tail (cwd-b).
+- **The spawner resolves it, as chdir does.** One resolver, `sys_dir_landed_name`, serves `SYS_CHDIR` and the spawn:
+  joined to the spawner's cwd, walked by `stalk_landed`, a directory the spawner can search. A bad cwd fails the spawn
+  with that errno and no child. The child installs the landed name before its first instruction; a relative image is
+  found from the child's cwd.
+- **chdir answers its errno** (`ENOENT`, `ENOTDIR`, `EACCES`, `EINVAL`, a stat's own errno, `EFAULT`, `ENOMEM`), never the bare -1
+  pouch and Go read as `EPERM` (OPEN-BUGS 21:30Z).
+- Mirrors: libt `t_sys_spawn_ext_cwd`, libthyla-rs `TSpawnExtCwd` + `Command::current_dir`; pouch patches and three
+  programs rename the word. Checkers: `check-spawn-args-mirrors.py` holds each tail's mirrors; `check-flag-words.py`
+  owns `SPAWN_EXT_*` (10 words, 50 mutations).
+- Witnesses: `spawn_cwd.child_born_in_cwd`, `spawn_cwd.image_joins_child_cwd`, `spawn_cwd.refusals`,
+  `stalk.dir_landed_name`, `validate_req_rejects_unknown_ext_bits`; joey's `probe_spawn_cwd` drives the real ABI
+  (a poison tail behind a clear bit must be ignored), and probe83's chdir legs answer `ENOTDIR`/`ENOENT`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5: 0/0/0/6; clean. F1 joey's reap bounded; F2 the relative leg could not
+tell a root join; F3 the unannounced-tail control was benign, now a poison tail; F4 withdrawn (the checker lines were
+measured); F5 a future Go tail failed open, now derived; F6 STALK-DESIGN 4.3's wording and errno list.
+Round 2, Fable 5.1 (the merge seam and the narrowing): 0/0/0/1; clean (F1 handoff 046's no-warning line, dated); self-found
+with it: both image legs now discriminate. Round 3, Fable 5.1
+(the re-cut onto seam90, the slab count, the census): 0/0/0/2; clean. F2 a failing stat or re-walk answers its own errno, not
+EIO/EINVAL; F1 a 9P walk a caught note interrupts answers ENOENT (a Dev's walk carries no errno; tracked, stated in 4.3).
+
+Not witnessed, by design: a stat's or re-walk's own errno through the resolver (no test drives a caught note or a
+failing stat into it); the handler's own `cwd_len == 0` refusal (the resolver's `EINVAL` answers first on every
+path that reaches it) and the thunk's `fail-cwd` arm (only an allocation failure inside `territory_setdot` reaches it).
+
+**Landed beside it: the kernel builds with `-Werror=shorten-64-to-32`** (*(pending)*). Re-running devno-u64's census
+found 12 narrowings, none a device number: 11 read the `u64` `note_mask` into `u32` locals (lossless under `notes.c`'s
+`note_claim` assert), and `init_cache`'s slab object count lands in the `u32` the in-use `refcount` is compared against
+(at most 2^27). The locals are `u64`; the slab count narrows explicitly under a `_Static_assert` pinned to `MAX_ORDER`
+(`slub.o` unchanged). The census takes its units from `kernel/CMakeLists.txt`: 0 over 230 (test build), 95
+(production), the `VIV_TRACE`/`NO_TICKLESS` build and the 8 fault-test variants; a devno parameter narrowed to `u32`
+fails the bake. A first census globbed `kernel/` and `arch/arm64` and never compiled `mm/`. Main agreed on yip 0178.
+
+**Gated beside it: untag step 2b** in the shared Ambush fork, c3c7914 on branch `untag-held`: `held_on_thylacine.go`
+and the `launchHeld` guard are gone, and Launch spawns held unconditionally. The gate baked it through `AMBUSHFORK`.
+The fork's master stays at 073faaa until the peer trees carry untag 2a (cf296caa1), whose `build.sh` accepts the
+untagged fork; every peer tree predates it (main measured, yip 0177).
+
+**Landed beside it: a path in `llvm-libs.list` resolves inside the build that links** (*(pending)*). The gate's second bake
+failed at `gl-sdl-prove`: hunt's `build/`, cloned from the aux worktree, listed eight JIT archives by absolute path into
+that worktree's `build/`, which is gone, and `gl_link_program` passed them to the linker verbatim. It finds a path entry by
+its file name in this build's `clade/gl/lib`, then `clade/llvm-build/lib`, now.
+
+**Landed beside it: lantern reads one byte at a time** (*(pending)*). The gate's lantern leg (f) failed 3 times in 12:
+after `q`, the shell ran `cho lnpres $status`. A diagnostic build of ut that traced its reads found the bytes missing
+before ut ever saw them: `present()` read 64 bytes at a time and returned on `q`, dropping the rest of the read. It reads
+one byte per call now, so the quit key is the last byte it takes. Leg (j) sends `q` and the next line in one write; it
+failed in both unfixed runs that reached it. Fixed, (f) and (j) passed in 8 of 8 runs. The other raw-mode children ut runs (nora, prowl,
+quarry, ptyhost) are checked for the same loss as their own item.
+
+VERIFY_LINE
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

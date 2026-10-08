@@ -971,6 +971,9 @@ void test_birth_hold_orphan_rule(void);
 void test_birth_hold_birth_wait_survives_latch(void);
 void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
+void test_spawn_cwd_child_born_in_cwd(void);
+void test_spawn_cwd_image_joins_child_cwd(void);
+void test_spawn_cwd_refusals(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -1400,6 +1403,7 @@ void test_stalk_symlink_lifetime(void);
 void test_stalk_landed_name(void);
 void test_stalk_landed_roots(void);
 void test_stalk_landed_identity(void);
+void test_stalk_dir_landed_name(void);
 void test_stalk_served_contain(void);
 void test_stalk_served_contain_nowa(void);
 void test_stalk_served_union(void);
@@ -2136,7 +2140,7 @@ void test_sys_spawn_full_argv_rejects_nul_count_mismatch(void);
 void test_sys_spawn_full_argv_rejects_argc_with_zero_data_len(void);
 void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
 void test_sys_spawn_full_argv_validate_req_golden(void);
-void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void);
+void test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits(void);
 void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
 void test_sys_spawn_full_argv_validate_req_pheno_flags(void);
 void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
@@ -4511,7 +4515,7 @@ struct test_case g_tests[] = {
     // a fresh non-attached Proc, independent of kproc's flag state).
     { "sys_spawn_full_argv.rejects_non_console_attached_perm_flags", test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags, false, NULL },
     { "sys_spawn_full_argv.validate_req_golden",       test_sys_spawn_full_argv_validate_req_golden,       false, NULL },
-    { "sys_spawn_full_argv.validate_req_rejects_pad_envp", test_sys_spawn_full_argv_validate_req_rejects_pad_envp, false, NULL },
+    { "sys_spawn_full_argv.validate_req_rejects_unknown_ext_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_unknown_perm_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits, false, NULL },
     { "sys_spawn_full_argv.validate_req_pheno_flags", test_sys_spawn_full_argv_validate_req_pheno_flags, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_oversize_fields", test_sys_spawn_full_argv_validate_req_rejects_oversize_fields, false, NULL },
@@ -4523,6 +4527,9 @@ struct test_case g_tests[] = {
     { "birth_hold.birth_wait_survives_latch",  test_birth_hold_birth_wait_survives_latch,  false, NULL },
     { "birth_hold.held_spawn_parks",           test_birth_hold_held_spawn_parks,           false, NULL },
     { "birth_hold.held_spawn_death_wins",      test_birth_hold_held_spawn_death_wins,      false, NULL },
+    { "spawn_cwd.child_born_in_cwd",           test_spawn_cwd_child_born_in_cwd,           false, NULL },
+    { "spawn_cwd.image_joins_child_cwd",       test_spawn_cwd_image_joins_child_cwd,       false, NULL },
+    { "spawn_cwd.refusals",                    test_spawn_cwd_refusals,                    false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },
@@ -4765,6 +4772,7 @@ struct test_case g_tests[] = {
     { "stalk.landed_name",             test_stalk_landed_name,             false, NULL },
     { "stalk.landed_roots",            test_stalk_landed_roots,            false, NULL },
     { "stalk.landed_identity",         test_stalk_landed_identity,         false, NULL },
+    { "stalk.dir_landed_name",         test_stalk_dir_landed_name,         false, NULL },
     { "stalk.served_contain",          test_stalk_served_contain,          false, NULL },
     { "stalk.served_contain_nowa",     test_stalk_served_contain_nowa,     false, NULL },
     { "stalk.served_union",            test_stalk_served_union,            false, NULL },
