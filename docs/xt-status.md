@@ -31,17 +31,13 @@ The kernel never learns x86.
 | `6018e567` | build: a fresh Linux clone builds the gate image. Two vendored crate files the ignore rules dropped are restored, the pouch, SDL2 and vkQuake patch series apply under GNU patch at fuzz 0, and each patched tree is byte-identical to the old series applied leniently | suite 1955/1955 on QEMU TCG (LLVM 18) |
 | `dd0846c5` | design revised against B-2: citations re-anchored; debug authority (5.2); guest code provenance (5.4 item 4, I-48(e)); a fork carries text, not scratch (don't-fork code regions); F10 added | docs only |
 | `f350cc76` (XT-0) | RATIFIED: `dec-2026-10-08-xt-design`, `dec-2026-10-08-xt-guest-code`, `arc-xt`; ARCH section 28 I-48 RESERVED and the XT amendments paragraph; CLAUDE.md row; ERRORS.md exact-fault contract; the NOVEL.md candidate; the tenth spec-first re-enablement | `tools/check-invariants.py` 48 rows; `quaestor lint` |
-| *(pending)* (XT-3a) | `SCTLR_EL1` composed whole on every entry path: the direct EL1 entry, the EL2 drop, PSCI secondaries (`start.S` `sctlr_el1_init_base`, `0x30D40818`). EL0 `WFI` traps and `exception.c`'s `EC_WFX` arm retires it (ELR + 4; SS and BTYPE cleared); `WFE` runs; SP alignment is checked at EL0 and EL1 on every path. Each CPU records its final value (`hw_cpu_ident.sctlr_el1`). Fixes task #6 | suite 1956/1956 on QEMU TCG; `hardening.sctlr_composed` (every online CPU); `/hint-probe` 64 WFI + 64 WFE; red-first proofs and the audit round: in flight |
+| `ab768299`, `5f0e65f3`, *(close pending)* (XT-3a) | `SCTLR_EL1` composed whole on every entry path: the direct EL1 entry, the EL2 drop, PSCI secondaries (`start.S` `sctlr_el1_init_base`, `0x30D40998` after the audit). An EL0 `WFI` that would wait traps, and `exception.c`'s `EC_WFX` arm retires it (ELR + 4; SS and BTYPE cleared); `WFE` runs; SP alignment is checked at EL0 and EL1 on every path; BT1 is set with BT0. Each CPU records its final value (`hw_cpu_ident.sctlr_el1`). Fixes task #6. Audit r1 (cross-family): 0 P0 / 1 P1 / 1 P2 / 8 P3, all fixed but F10's event stream (task #15) | suite 1956/1956 on QEMU TCG (`-cpu max`); `hardening.sctlr_composed` (every online CPU, and the live register); `/hint-probe`; red-first: sabotage A fails the test, sabotage B kills the probe; `debug_step.tla` clean + 2 buggy cfgs red; SMP subset (1/4/8 CPUs, N=3): running. HVF and KVM runs owed (no such host here) |
 
 ## Next
 
 Sequence (the design's arc order, with two owned defects pulled forward):
 
-1. **XT-3a: `SCTLR_EL1` composed explicitly** (fixes task #6, study F2). EL2-entry
-   boots write `0x30D00800`, and the MMU enable only ORs in M, C and I, so the EL0
-   trap bits differ between boot paths. On the Pi, an EL0 `WFI`/`WFE` kills the
-   Proc. Compose one value for both paths, with `CTR_EL0` readable at EL0
-   (XT-K8); keep `UCI` off (B-2a).
+1. **XT-3a** is closing (audit r1 fixed; the SMP subset runs). HVF and KVM gate runs are owed by the operator's hosts.
 2. **XT-3b: thread reaping** (fixes task #7, study F3). An exited thread is
    freed only when the whole Proc is reaped (`kernel/proc.c:6075-6082`), so
    `PROC_THREAD_MAX` counts a Proc's lifetime spawns. Gate: more than 1,000
@@ -65,6 +61,13 @@ and XT-8 onward (the runtime).
   clang + lld links). Stratum fixes are pushed by the operator.
 - #14 watch: the boot stack's high-water mark is 15536/16384 B in the test
   build (LLVM 18), a margin of 848 B.
+- #15 XT-3c: enable the EL0 timer event stream (`CNTKCTL_EL1.EVNTEN`) before
+  FEX's `WFE` spin-waits need it (audit XT-3a F10).
+- #17 design: `/ctl` leaves re-render on every read, so a read-to-EOF reader
+  can see a torn tail (`cat`, `read_to_end`, Linux guests); `/ctl/procs` also
+  truncates at 4 KiB without a sign. `ps` and `cpubench` now read once
+  (`41df9a8a`, task #16's fix); the systemic choice, a snapshot per open or the
+  single-read contract, is open.
 
 ## Building in a Linux container (what this branch's gates ran on)
 
