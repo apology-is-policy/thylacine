@@ -65,6 +65,7 @@ set(KERNEL_SRCS
     image.c
     loom.c
     loom_service_pool.c
+    loom_service_pool_table.c
     loom_service_slots.c
     weft.c
     vma.c

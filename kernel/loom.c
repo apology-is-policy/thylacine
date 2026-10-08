@@ -19,6 +19,7 @@
 #include <thylacine/addrspace.h>
 #include <thylacine/loom_service_pool.h>
 #include <thylacine/loom_service_slots.h>
+#include <thylacine/loom_service_pool_table.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -367,6 +368,20 @@ u64 loom_private_retired(void) {
 #ifdef KERNEL_TESTS
 static bool g_loom_private_layout_fault;
 static bool g_loom_private_slots_fault;
+static bool g_loom_private_pools_fault;
+
+void loom_private_pools_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_pools_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_pools_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_pools_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_pools_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_pools_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
 
 void loom_private_slots_fault_arm_for_test(void) {
     __atomic_store_n(&g_loom_private_slots_fault, true, __ATOMIC_RELAXED);
@@ -399,12 +414,14 @@ static bool loom_private_layout_fault_take(void) {
 #else
 static inline bool loom_private_layout_fault_take(void) { return false; }
 static inline bool loom_private_slots_fault_take(void) { return false; }
+static inline bool loom_private_pools_fault_take(void) { return false; }
 #endif
 
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
     // Taken before any refusal, so a shot armed for this call cannot outlive it.
     bool layout_fault = loom_private_layout_fault_take();
     bool slots_fault = loom_private_slots_fault_take();
+    bool pools_fault = loom_private_pools_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -419,7 +436,10 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     // No allocator work under as->lock; unwind frees storage BEFORE its refund.
     _Static_assert(sizeof(struct loom_slot_table) <= PAGE_SIZE, "slot ledger page");
     _Static_assert(PAGE_SIZE > SLUB_MAX_OBJECT_SIZE, "slot page uses buddy kmalloc");
-    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u;
+    _Static_assert(sizeof(struct loom_service_pool_table) > SLUB_MAX_OBJECT_SIZE,
+                   "pool table uses buddy kmalloc");
+    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table));
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
@@ -427,8 +447,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     spin_unlock(&as->lock);
     if (!charged) { addrspace_private_end(as); return NULL; }
     struct loom_slot_table *slots = slots_fault ? NULL : kmalloc(PAGE_SIZE, KP_ZERO);
-    struct Loom *l = (!slots || layout_fault) ? NULL : loom_create_layout(sq, cq, exempt, receipts);
+    struct loom_service_pool_table *pools = (!slots || pools_fault) ? NULL :
+        kmalloc(sizeof(struct loom_service_pool_table), KP_ZERO);
+    struct Loom *l = (!slots || !pools || layout_fault) ? NULL :
+        loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
+        kfree(pools);
         kfree(slots);
         spin_lock(&as->lock);
         addrspace_uncharge_pages(as, metadata + backing);
@@ -437,6 +461,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
         return NULL;
     }
     l->service_slots = slots;
+    l->service_pools = pools;
     l->service_as = as;
     l->service_creator = p->stripes;
     l->service_metadata_pages = metadata;
@@ -500,6 +525,9 @@ static void loom_private_destroy(struct Loom *l) {
         if (l->service_slots->slots[i].phase != LSLOT_FREE ||
             l->service_slots->slots[i].pins)
             extinction("private Loom retained a service slot");
+    if (!loom_service_pools_empty(l->service_pools))
+        extinction("private Loom retained pool storage");
+    kfree(l->service_pools);
     kfree(l->service_slots);
 
     // One settled drop rather than claim / drop / restore. The refund is decided

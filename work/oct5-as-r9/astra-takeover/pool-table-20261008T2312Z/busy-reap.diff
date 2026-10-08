@@ -1,0 +1,11 @@
+--- kernel/loom_service_pool_table.c
++++ busy-reap.c
+@@ -71,7 +71,7 @@
+     if (!p) return -T_E_NOENT;
+     if (t->slots[ref.slot].pins) return -T_E_BUSY;
+     int rc = loom_pool_reap(&pools->bank, p);
+-    if (rc) return rc;
++    (void)rc;
+     // No streams, local writers, pending/leased payloads or metadata borrowers
+     // remain. Both slot transitions are guaranteed by the checks above and the
+     // common lock; the same identity cannot acquire a new borrower in between.

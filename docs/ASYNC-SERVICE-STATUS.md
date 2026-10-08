@@ -1496,3 +1496,51 @@ checks in each. Ten captured inputs and100 log hashes verified; minimum admissio
 10930MiB. See latest pickup and astra-takeover/current-gate-20261008T222442Z-result.json.
 Future pool/protocol ownership and guest final-allocator/Pi gaps remain open.
 Self-review only; no public activation, Main landing or128MiB removal.
+
+
+## October 8, 23:22 UTC: joint pool registration and charged owner storage
+
+The private owner now allocates a zeroed7176-byte pool table (one64-cell bank
+plus64 pool descriptors indexed by the existing shared service slot). Joint
+prepare reserves both identity and member capacity before output copyout.
+Publish rechecks both provisional phases and rejects close without half commit.
+Rollback releases both exclusions; reap refuses borrowers, streams, BUSY,
+PENDING and LEASED members before modifying either ledger. Exact payload return
+permits reap; neither CQ consumption nor slot removal returns a payload. The
+ring-global incarnation/nonce counters never reset. All calls require the same
+Loom lock and retained owner reference; backing pins are released after unlock.
+
+Construction precharges two additional buddy pages and frees pool storage before
+refund on every downstream failure. Retirement requires both tables empty and
+frees them before ring settlement, metadata refund and exact image-pin release.
+Native linked DWARF measures Loom2872bytes (one buddy page), pool table7176bytes
+(two pages), plus the deliberately whole slot page: four metadata pages total.
+Ring backing and conservative Burrow descriptor attribution remain separate.
+See astra-takeover/pool-table-layout.json and retained native link/DWARF output.
+
+Self-review: under the common lock, pool_publish cannot fail after slot_publish
+succeeds because its RESERVED precondition was already checked; rollback and
+reap likewise validate all fallible prerequisites before either ledger is freed.
+Close blocks new registration/publication without destroying retained payloads.
+The existing pre-abort committed-result delivery semantics remain intact.
+
+Bounded ASan/UBSan host evidence: pool-table-20261008T2320Z control plus7 targeted
+transaction mutants; slot-owner-20261008T231734Z nine controls plus10 charge/free/
+close mutants; final-reclaim-20261008T231743Z both owner-drop orders plus6 exact
+omission mutants. Every mutant failed its named assertion. The owner/final-drop
+fixtures use checked allocator, geometry, image, lock and VMA doubles, so these
+are call/free/order witnesses, not guest physical reclamation or race proofs.
+Lifecycle model clean5828 plus7 named counterexamples and buffer models clean464/
+6416 plus11 named counterexamples passed in pool-table-*-model-20261008T2312Z.
+
+Native build/link passes. New loom.service_pool_table shares the transaction
+fixture with host; loom.private_slot_owner now covers pool-allocation refusal,
+downstream unwind and the full metadata charge. Expected suite count1839; the
+full Mac gate is pending for this source. Prior50/50 applies only to7c184b3ef.
+
+Still owed before activation: actual authority/resolution and canonical Burrow
+pins, accepted fixed-I/O exclusion integration, parent scopes, protocol/worker/
+terminal retirement and full client payload lifecycle. These helpers do not
+authorize service syscalls. Guest final allocator reclamation and Pi/A72/KVM
+remain open. Self-review only, no independent audit. Continue async before
+MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.

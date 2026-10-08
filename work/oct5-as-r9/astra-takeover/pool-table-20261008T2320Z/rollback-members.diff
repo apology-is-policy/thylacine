@@ -1,0 +1,11 @@
+--- kernel/loom_service_pool_table.c
++++ rollback-members.c
+@@ -60,7 +60,7 @@
+     struct loom_pool *p = pool_record(t, pools, ref, LSLOT_PROVISIONAL);
+     if (!p) return -T_E_NOENT;
+     if (t->slots[ref.slot].pins) return -T_E_BUSY;
+-    (void)loom_pool_rollback(&pools->bank, p);
++
+     return loom_slot_rollback(t, ref);
+ }
+ 

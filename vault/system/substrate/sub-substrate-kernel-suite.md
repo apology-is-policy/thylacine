@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-08
+updated: 2026-10-09
 ---
 
 ## Purpose
@@ -219,3 +219,12 @@ The subsequent private-owner integration adds `loom.private_slot_owner`, testing
 actual page allocation, charge/refusal rollback, close with a retained borrow and
 retirement refund. The denominator increases by another one; derive it from the
 qualified source. This entry does not enable public service registration.
+
+
+The October8 pool-owner checkpoint registers `loom.service_pool_table` as its own
+ordinary test. Its shared host/guest fixture checks joint slot/member reservation,
+rollback and publication, stale identity rejection, busy reap preserving both
+ledgers, exact payload return and close during copyout. `loom.private_slot_owner`
+adds pool-allocation refusal and exact aggregate metadata charging. These fixtures
+exclude caller authority/protocol integration; a passing row does not activate
+private services. The next source-specific full matrix remains pending.

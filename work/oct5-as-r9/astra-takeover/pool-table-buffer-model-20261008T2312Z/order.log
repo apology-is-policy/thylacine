@@ -1,0 +1,178 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 46 and seed 4716974771223264612 with 2 workers on 8 cores with 683MB heap and 64MB offheap memory [pid: 51203] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/loom_service_buffers.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-18253839608682422011/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-18253839608682422011/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-18253839608682422011/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-18253839608682422011/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module loom_service_buffers
+Linting of module loom_service_buffers
+Starting... (2026-10-09 01:13:11)
+Implied-temporal checking--satisfiability problem has 2 branches.
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 01:13:11.
+Error: Invariant MoreBeforeFinal is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ nonce |-> 0,
+  generation |-> 1,
+  state |-> <<"AVAILABLE", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<>>,
+  id |-> <<0, 0>>,
+  bytes |-> <<0, 0>>,
+  abort |-> FALSE,
+  retired |-> FALSE,
+  final |-> FALSE,
+  peer |-> TRUE,
+  cq |-> <<>>,
+  receipts |-> <<>>,
+  history |-> {},
+  published |-> <<>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 2: <Claim(1) line 25, col 13 to line 29, col 54 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"BUSY", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<>>,
+  id |-> <<1, 0>>,
+  bytes |-> <<0, 0>>,
+  abort |-> FALSE,
+  retired |-> FALSE,
+  final |-> FALSE,
+  peer |-> TRUE,
+  cq |-> <<>>,
+  receipts |-> <<>>,
+  history |-> {},
+  published |-> <<>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 3: <Reply(1) line 30, col 13 to line 34, col 44 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"PENDING", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<[member |-> 1, nonce |-> 1, generation |-> 1]>>,
+  id |-> <<1, 0>>,
+  bytes |-> <<1, 0>>,
+  abort |-> FALSE,
+  retired |-> FALSE,
+  final |-> FALSE,
+  peer |-> TRUE,
+  cq |-> <<>>,
+  receipts |-> <<>>,
+  history |-> {},
+  published |-> <<>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 4: <Abort line 35, col 10 to line 35, col 54 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"PENDING", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<[member |-> 1, nonce |-> 1, generation |-> 1]>>,
+  id |-> <<1, 0>>,
+  bytes |-> <<1, 0>>,
+  abort |-> TRUE,
+  retired |-> FALSE,
+  final |-> FALSE,
+  peer |-> TRUE,
+  cq |-> <<>>,
+  receipts |-> <<>>,
+  history |-> {},
+  published |-> <<>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 5: <Finalize line 40, col 13 to line 44, col 61 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"PENDING", "AVAILABLE">>,
+  held |-> {},
+  pending |->
+      << [member |-> 0, nonce |-> 0, generation |-> 1],
+         [member |-> 1, nonce |-> 1, generation |-> 1] >>,
+  id |-> <<1, 0>>,
+  bytes |-> <<1, 0>>,
+  abort |-> TRUE,
+  retired |-> FALSE,
+  final |-> TRUE,
+  peer |-> TRUE,
+  cq |-> <<>>,
+  receipts |-> <<>>,
+  history |-> {},
+  published |-> <<>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 6: <Deliver line 51, col 12 to line 58, col 45 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"PENDING", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<[member |-> 1, nonce |-> 1, generation |-> 1]>>,
+  id |-> <<1, 0>>,
+  bytes |-> <<1, 0>>,
+  abort |-> TRUE,
+  retired |-> FALSE,
+  final |-> TRUE,
+  peer |-> TRUE,
+  cq |-> <<[member |-> 0, nonce |-> 0, generation |-> 1]>>,
+  receipts |-> <<[member |-> 0, nonce |-> 0, generation |-> 1]>>,
+  history |-> {},
+  published |-> <<[member |-> 0, nonce |-> 0, generation |-> 1]>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 7: <Ack line 59, col 8 to line 65, col 69 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"PENDING", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<[member |-> 1, nonce |-> 1, generation |-> 1]>>,
+  id |-> <<1, 0>>,
+  bytes |-> <<1, 0>>,
+  abort |-> TRUE,
+  retired |-> FALSE,
+  final |-> TRUE,
+  peer |-> TRUE,
+  cq |-> <<>>,
+  receipts |-> <<>>,
+  history |-> {},
+  published |-> <<[member |-> 0, nonce |-> 0, generation |-> 1]>>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+State 8: <Deliver line 51, col 12 to line 58, col 45 of module loom_service_buffers>
+s = [ nonce |-> 1,
+  generation |-> 1,
+  state |-> <<"LEASED", "AVAILABLE">>,
+  held |-> {},
+  pending |-> <<>>,
+  id |-> <<1, 0>>,
+  bytes |-> <<1, 0>>,
+  abort |-> TRUE,
+  retired |-> FALSE,
+  final |-> TRUE,
+  peer |-> TRUE,
+  cq |-> <<[member |-> 1, nonce |-> 1, generation |-> 1]>>,
+  receipts |-> <<[member |-> 1, nonce |-> 1, generation |-> 1]>>,
+  history |-> {},
+  published |->
+      << [member |-> 0, nonce |-> 0, generation |-> 1],
+         [member |-> 1, nonce |-> 1, generation |-> 1] >>,
+  late |-> FALSE,
+  badReturn |-> FALSE ]
+
+359 states generated, 183 distinct states found, 59 states left on queue.
+The depth of the complete state graph search is 9.
+Finished in 00s at (2026-10-09 01:13:11)

@@ -26,7 +26,7 @@ PRE = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <thylacine/loom_service_slots.h>
+#include <thylacine/loom_service_pool_table.h>
 typedef struct { int held; } spin_lock_t;
 #define ENTRIES_PER_TABLE 512
 #define PTE_VALID (1ull << 0)
@@ -41,8 +41,8 @@ static void spin_unlock(spin_lock_t *p) { REQUIRE(p->held,"unlock without lock")
 static void extinction(const char *s) { puts(s); exit(12); }
 struct page { void *mem; bool live; };
 static struct page pages[8];
-static int nr_pages, page_frees, as_frees, loom_frees, slot_frees, drains, refunds;
-static uintptr_t as_addr, loom_addr, slot_addr;
+static int nr_pages, page_frees, as_frees, loom_frees, slot_frees, pool_frees, drains, refunds;
+static uintptr_t as_addr, loom_addr, slot_addr, pool_addr;
 static u64 g_addrspace_next_id, g_loom_destroyed, service_retired_count;
 static struct page *alloc_pages(unsigned order, unsigned flags) {
     REQUIRE(order==0 && flags==KP_ZERO && nr_pages<8,"page allocation contract");
@@ -68,6 +68,7 @@ static void kfree(void *p) {
     if((uintptr_t)p==as_addr) { REQUIRE(!as_frees,"descriptor freed once"); as_frees++; }
     else if((uintptr_t)p==loom_addr) { REQUIRE(!loom_frees,"Loom freed once"); loom_frees++; }
     else if((uintptr_t)p==slot_addr) { REQUIRE(!slot_frees,"slot page freed once"); slot_frees++; }
+    else if((uintptr_t)p==pool_addr) { REQUIRE(!pool_frees,"pool table freed once"); pool_frees++; }
     else extinction("unexpected object free");
     free(p);
 }
@@ -76,6 +77,7 @@ DOUBLES = r'''
 struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
+    struct loom_service_pool_table *service_pools;
     u32 service_metadata_pages;
     bool sqpoll; u32 n_reg_buf, inflight_ops;
     struct { void *spoor; } reg[LOOM_MAX_REG_HANDLES];
@@ -110,10 +112,12 @@ int main(int argc,char **argv) {
     l3[0]=0xdead000|3;
     REQUIRE(addrspace_private_begin(as),"private pin admitted");
     struct Loom *l=calloc(1,sizeof(*l));REQUIRE(l,"Loom allocated");
-    loom_addr=(uintptr_t)l;l->service_as=as;l->service_metadata_pages=2;
+    loom_addr=(uintptr_t)l;l->service_as=as;l->service_metadata_pages=4;
     l->service_slots=calloc(1,4096);REQUIRE(l->service_slots,"slot page allocated");
     slot_addr=(uintptr_t)l->service_slots;
-    l->ring=(void *)1;as->page_count=5;
+    l->service_pools=calloc(1,sizeof(*l->service_pools));REQUIRE(l->service_pools,"pool table allocated");
+    pool_addr=(uintptr_t)l->service_pools;
+    l->ring=(void *)1;as->page_count=7;
     if(order==0) {
         addrspace_unref(as);
         REQUIRE(drains==1 && !as_frees && !page_frees,"private pin retains ownerless image");
@@ -127,6 +131,7 @@ int main(int argc,char **argv) {
     // No descriptor or table pointer is dereferenced beyond final drop.
     REQUIRE(as_frees==1,"final descriptor reclaimed exactly once");
     REQUIRE(page_frees==4,"all four page-table levels reclaimed exactly once");
+    REQUIRE(pool_frees==1,"pool table reclaimed exactly once");
     REQUIRE(slot_frees==1,"slot page reclaimed exactly once");
     REQUIRE(loom_frees==1 && refunds==1 && drains==1,"local retirements occur once");
     REQUIRE(service_retired_count==1 && g_loom_destroyed==1,"retirement completion published");
@@ -145,13 +150,14 @@ def main():
     assert free>=8*1024**3, f'8 GiB floor: {free/1024**3:.3f} available'
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out=ROOT/'work/oct5-as-r9/astra-takeover'/('final-reclaim-'+stamp);out.mkdir()
-    sources={n:(ROOT/n).read_text() for n in ['kernel/addrspace.c','kernel/include/thylacine/addrspace.h','arch/arm64/mmu.c','kernel/loom.c','kernel/include/thylacine/loom_service_slots.h','kernel/include/thylacine/loom_service_abi.h']}
+    sources={n:(ROOT/n).read_text() for n in ['kernel/addrspace.c','kernel/include/thylacine/addrspace.h','arch/arm64/mmu.c','kernel/loom.c','kernel/loom_service_pool_table.c','kernel/include/thylacine/loom_service_pool_table.h','kernel/include/thylacine/loom_service_pool.h','kernel/include/thylacine/loom_service_slots.h','kernel/include/thylacine/loom_service_abi.h']}
     header=sources['kernel/include/thylacine/addrspace.h'];a=header.index('struct AddrSpace {');b=header.index('\n};',a)+3
     funcs={}
     names=['clear_page_then_free','l3_walk_and_free','l2_walk_and_free','l1_walk_and_free','proc_pgtable_create','proc_pgtable_destroy']
     for n in names:funcs[n]=fun(sources['arch/arm64/mmu.c'],n)
     for n in ['addrspace_alloc','addrspace_lifetime_get','addrspace_private_begin','addrspace_lifetime_put','addrspace_unref','addrspace_private_end']:
         funcs[n]=fun(sources['kernel/addrspace.c'],n)
+    funcs['loom_service_pools_empty']=fun(sources['kernel/loom_service_pool_table.c'],'loom_service_pools_empty')
     funcs['loom_private_destroy']=fun(sources['kernel/loom.c'],'loom_private_destroy')
     def program(fs):return PRE+'\n'+header[a:b]+'\n'+DOUBLES+'\n'+'\n'.join(fs.values())+'\n'+MAIN
     control=program(funcs)
@@ -160,6 +166,7 @@ def main():
       ('omit-descriptor-free','addrspace_lifetime_put','    kfree(as);','', 'final descriptor reclaimed exactly once'),
       ('omit-table-destroy','addrspace_lifetime_put','    proc_pgtable_destroy(as->pgtable_root);','', 'all four page-table levels reclaimed exactly once'),
       ('omit-root-free','proc_pgtable_destroy','    clear_page_then_free(root);','', 'all four page-table levels reclaimed exactly once'),
+      ('omit-pool-free','loom_private_destroy','    kfree(l->service_pools);','', 'pool table reclaimed exactly once'),
       ('omit-slot-free','loom_private_destroy','    kfree(l->service_slots);','', 'slot page reclaimed exactly once')]
     cc=os.environ.get('CC','/opt/homebrew/opt/llvm@22/bin/clang')
     sdk=subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()
@@ -190,5 +197,5 @@ def main():
     result={'source_head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'source_hashes':{n:hashlib.sha256(s.encode()).hexdigest() for n,s in sources.items()},'free_bytes_before':free,'results':results,'scope':__doc__}
     (out/'result.json').write_text(json.dumps(result,indent=2)+'\n')
     print(out)
-    print('PASS: both drop orders and five distinct omission mutants; ASan/UBSan, host allocator boundary only')
+    print('PASS: both drop orders and six distinct omission mutants; ASan/UBSan, host allocator boundary only')
 if __name__=='__main__':main()

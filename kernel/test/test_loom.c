@@ -84,6 +84,12 @@ static void test_proc_drop(struct Proc *p) {
 #include "loom_receipt_fixture.h"
 #include "loom_private_fixture.h"
 #include "loom_slots_fixture.h"
+#include "loom_pool_table_fixture.h"
+
+void test_loom_service_pool_table(void) {
+    const char *error = loom_pool_table_fixture();
+    TEST_ASSERT(error == NULL, error);
+}
 
 // Private owner integration: actual allocator/charge/close/retirer, while the
 // sequential module fixture above remains independent of this owner wrapper.
@@ -111,6 +117,18 @@ static const char *loom_slot_owner_fixture(void) {
     SO_CHECK(p->as->page_count == base && !p->as->private_rings &&
              addrspace_ref_count(p->as) == refs,
              "slot storage refusal rolls back charge and image pin");
+    loom_private_pools_fault_arm_for_test();
+    l = loom_create_private(p, 3, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_pools_fault_armed_for_test(),
+             "early refusal consumes pool allocation fault");
+    loom_private_pools_fault_arm_for_test();
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_pools_fault_armed_for_test() &&
+             p->as->page_count == base && !p->as->private_rings &&
+             addrspace_ref_count(p->as) == refs,
+             "pool storage refusal rolls back prior slot allocation and charge");
     // Allocation succeeds but downstream layout fails; the new page must also
     // be released. The host allocator control measures that free separately.
     loom_private_layout_fault_arm_for_test();
@@ -122,8 +140,11 @@ static const char *loom_slot_owner_fixture(void) {
     l = loom_create_private(p, 2, 2, true);
     if (l) goal++;
     SO_CHECK(l && l->service_slots, "private owner owns its slot page");
-    SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u,
-             "slot page included in metadata charge");
+    SO_CHECK(l->service_pools && loom_service_pools_empty(l->service_pools),
+             "private owner owns zeroed pool storage");
+    SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
+             (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)),
+             "slot and pool pages included in metadata charge");
     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
              (u32)burrow_backing_pages(l->ring_size) + 1u,
              "all base storage charged before owner publication");
@@ -145,6 +166,7 @@ static const char *loom_slot_owner_fixture(void) {
              "owner close freezes new slots and retains existing borrow");
 done:
     loom_private_slots_fault_disarm_for_test();
+    loom_private_pools_fault_disarm_for_test();
     loom_private_layout_fault_disarm_for_test();
     if (l && l->service_slots && ref.incarnation) {
         spin_lock(&l->lock);

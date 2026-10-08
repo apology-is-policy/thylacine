@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extracted private constructor/close/destructor plus real slot module.
+"""Extracted private constructor/close/destructor plus real slot and pool modules.
 
 Host ASan/UBSan with checked allocator, geometry, Loom layout, image and lock
 doubles. Validates rollback/free/call ordering, not guest physical accounting,
@@ -24,7 +24,7 @@ PRE = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <thylacine/loom_service_slots.h>
+#include <thylacine/loom_service_pool_table.h>
 #include <thylacine/errno.h>
 #define PAGE_SIZE 4096
 #define SLUB_MAX_OBJECT_SIZE 2048
@@ -43,6 +43,7 @@ struct Burrow { int unused; };
 struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
+    struct loom_service_pool_table *service_pools;
     u64 service_creator;
     u32 service_metadata_pages;
     spin_lock_t lock;
@@ -53,12 +54,13 @@ struct Loom {
     char buddy_padding[3000];
 };
 struct loom_layout { u32 ring_size; };
-static bool service_retire_ready=true,layout_fault,slots_fault,alloc_fault,inner_fault;
+static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,alloc_fault,inner_fault;
 static u64 g_loom_destroyed,service_retired_count;
 static void *allocations[8];
 static int live,allocated,freed,recorded;
 static u32 ring_charge;
 static bool loom_private_layout_fault_take(void) { bool b=layout_fault;layout_fault=false;return b; }
+static bool loom_private_pools_fault_take(void) { bool b=pools_fault;pools_fault=false;return b; }
 static bool loom_private_slots_fault_take(void) { bool b=slots_fault;slots_fault=false;return b; }
 static bool loom_measure(u32 sq,u32 cq,bool receipts,struct loom_layout *g) {
     CHECK(receipts,"fixture receipts");g->ring_size=PAGE_SIZE;return sq==2 && cq==2;
@@ -121,20 +123,21 @@ int main(int argc,char **argv) {
     if(mode==4)layout_fault=true;
     if(mode==5)inner_fault=true;
     if(mode==6)slots_fault=true;
+    if(mode==8)pools_fault=true;
     struct Loom *l=loom_create_private(&p,mode==6?3:2,2,true);
-    CHECK(!slots_fault && !layout_fault,"one-shot faults consumed");
-    if(mode>=1 && mode<=6) {
+    CHECK(!slots_fault && !pools_fault && !layout_fault,"one-shot faults consumed");
+    if((mode>=1 && mode<=6) || mode==8) {
         CHECK(!l,"fault refuses publication");
-        CHECK(live==0,"rollback frees slot page");
+        CHECK(live==0,"rollback frees slot and pool pages");
         CHECK(a.pages==10,"refusal restores accounting");
         CHECK(a.refs==1 && !a.private_rings,"refusal restores lifetime");
         CHECK(!recorded,"refusal publishes no ring charge");
         puts("PASS refusal");return 0;
     }
-    CHECK(l && l->service_slots && live==2,"owner retains both allocations");
+    CHECK(l && l->service_slots && l->service_pools && live==3,"owner retains all three allocations");
     CHECK(l->service_as==&a && l->service_creator==987,"exact image and identity");
-    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1,
-          "slot page charged in metadata");
+    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools)),
+          "slot and pool pages charged in metadata");
     CHECK(a.pages==10+l->service_metadata_pages+2,"complete owner charge");
     struct loom_service_ref ref;
     spin_lock(&l->lock);
@@ -154,7 +157,7 @@ int main(int argc,char **argv) {
     CHECK(!loom_slot_reap(l->service_slots,ref),"reap after close");
     spin_unlock(&l->lock);
     loom_private_destroy(l);
-    CHECK(live==0 && freed==2,"retirement frees owner and slot page");
+    CHECK(live==0 && freed==3,"retirement frees owner and tables");
     CHECK(a.pages==10 && a.refs==1 && !a.private_rings,"retirement restores image");
     CHECK(service_retired_count==1 && g_loom_destroyed==1,"retirement published once");
     puts("PASS owner");return 0;
@@ -170,18 +173,21 @@ def main():
     assert st.f_bavail * st.f_frsize >= 8 * 1024**3
     out = Path('work/oct5-as-r9/astra-takeover') / ('slot-owner-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     out.mkdir()
-    paths = ['kernel/loom.c', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h']
+    paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h']
     sources = {p: Path(p).read_text() for p in paths}
     funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_destroy')}
     def program(fs):
         return PRE + '\n' + '\n'.join(fs.values()) + MAIN
     control = program(funcs)
-    cases = [('control', None, None, None, list(range(8)), None),
-        ('omit-slot-charge', 'loom_create_private', 'burrow_backing_pages(sizeof(struct Loom)) + 1u', 'burrow_backing_pages(sizeof(struct Loom))', [0], 'slot page charged in metadata'),
-        ('omit-unwind-free', 'loom_create_private', '        kfree(slots);', '', [4], 'rollback frees slot page'),
+    cases = [('control', None, None, None, list(range(9)), None),
+        ('omit-slot-charge', 'loom_create_private', 'burrow_backing_pages(sizeof(struct Loom)) + 1u', 'burrow_backing_pages(sizeof(struct Loom))', [0], 'slot and pool pages charged in metadata'),
+        ('omit-pool-charge', 'loom_create_private', '+ (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))', '', [0], 'slot and pool pages charged in metadata'),
+        ('omit-unwind-pool-free', 'loom_create_private', '        kfree(pools);', '', [4], 'rollback frees slot and pool pages'),
+        ('omit-retire-pool-free', 'loom_private_destroy', '    kfree(l->service_pools);', '', [0], 'retirement frees owner and tables'),
+        ('omit-unwind-free', 'loom_create_private', '        kfree(slots);', '', [4], 'rollback frees slot and pool pages'),
         ('omit-unwind-refund', 'loom_create_private', '        addrspace_uncharge_pages(as, metadata + backing);', '', [2], 'refusal restores accounting'),
         ('omit-unwind-pin', 'loom_create_private', '        addrspace_private_end(as);', '', [2], 'refusal restores lifetime'),
-        ('omit-retire-free', 'loom_private_destroy', '    kfree(l->service_slots);', '', [0], 'retirement frees owner and slot page'),
+        ('omit-retire-free', 'loom_private_destroy', '    kfree(l->service_slots);', '', [0], 'retirement frees owner and tables'),
         ('omit-close', 'loom_exec_latch', '    loom_slots_close(l->service_slots);', '', [0], 'close freezes ledger'),
         ('omit-busy-guard', 'loom_private_destroy', '            extinction("private Loom retained a service slot");', '            (void)0;', [7], 'busy retirement returned')]
     sdk = subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip()
@@ -194,7 +200,7 @@ def main():
         src = out / (name + '.c'); src.write_text(program(fs))
         (out / (name + '.diff')).write_text(''.join(difflib.unified_diff(control.splitlines(True), src.read_text().splitlines(True), fromfile='control', tofile=name)))
         exe = out / name
-        cmd = [os.environ.get('CC', '/opt/homebrew/opt/llvm@22/bin/clang'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-isysroot', sdk, '-I', str(ROOT / 'kernel/include'), str(src), 'kernel/loom_service_slots.c', '-o', str(exe)]
+        cmd = [os.environ.get('CC', '/opt/homebrew/opt/llvm@22/bin/clang'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g', '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-isysroot', sdk, '-I', str(ROOT / 'kernel/include'), str(src), 'kernel/loom_service_slots.c', 'kernel/loom_service_pool.c', 'kernel/loom_service_pool_table.c', '-o', str(exe)]
         (out / (name + '-command.json')).write_text(json.dumps(cmd) + '\n')
         with (out / (name + '-build.log')).open('wb') as log:
             subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=True)

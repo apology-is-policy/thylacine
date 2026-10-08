@@ -41,6 +41,7 @@ struct AddrSpace;
 struct loom_pool;
 struct loom_pool_bank;
 struct loom_slot_table;
+struct loom_service_pool_table;
 struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
 struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in kernel/loom.c)
 
@@ -448,6 +449,7 @@ struct Loom {
     struct AddrSpace *service_as;
     // Private-only, one separately charged buddy page; identity/borrow ledger.
     struct loom_slot_table *service_slots;
+    struct loom_service_pool_table *service_pools;
     u64 service_creator;
     u32 service_metadata_pages;
     bool service_closing;              // serialized with result commit by lock
@@ -608,6 +610,9 @@ bool loom_private_layout_fault_armed_for_test(void);
 void loom_private_slots_fault_arm_for_test(void);
 void loom_private_slots_fault_disarm_for_test(void);
 bool loom_private_slots_fault_armed_for_test(void);
+void loom_private_pools_fault_arm_for_test(void);
+void loom_private_pools_fault_disarm_for_test(void);
+bool loom_private_pools_fault_armed_for_test(void);
 // One-shot keyed to the arming thread: that thread's next loom_create_layout
 // treats its ring Burrow as refused AFTER allocating the Loom metadata, and
 // arms the large-kfree watch on that metadata.
