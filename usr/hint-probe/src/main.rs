@@ -1,9 +1,10 @@
 // /hint-probe -- the EL0 wait hints retire as hints (XT-3a). start.S writes
 // SCTLR_EL1 whole on every entry path: nTWE set, so WFE runs at EL0, and nTWI
-// clear, so WFI traps and exception.c's EC_WFX arm retires it. Every wait here
-// must come back: a WFI that killed the Proc (the EL2-entry boots before the
-// composition) fails joey's reap, and an arm that returned without advancing
-// ELR traps on the same WFI forever, so the boot never reaches its banner.
+// clear, so a WFI that would wait traps and exception.c's EC_WFX arm retires
+// it. EL0 can witness only that every wait comes back. A WFI that killed the
+// Proc (an EL2 boot or HVF before the composition, or the composition without
+// the arm) fails joey's reap; an arm that returned without advancing ELR traps
+// on the same WFI forever, so the boot never reaches its banner.
 
 #![no_std]
 #![no_main]
@@ -28,8 +29,10 @@ pub extern "C" fn rs_main() -> i64 {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
         }
         say("hint-probe: 64 WFI retired\n");
-        // SEVL sets this PE's event register, so the WFE after it consumes the
-        // event and completes without waiting on an interrupt.
+        // SEVL sets this PE's event register, so the WFE after it normally
+        // consumes the event and completes at once. An interrupt between the
+        // two can consume the event first; the WFE then waits for the next
+        // interrupt, which the scheduler tick bounds while this thread runs.
         for _ in 0..64 {
             core::arch::asm!("sevl", "wfe", options(nomem, nostack, preserves_flags));
         }

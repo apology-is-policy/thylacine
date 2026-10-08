@@ -36,13 +36,18 @@
 // sctlr_el1_init_base -- write SCTLR_EL1 whole, MMU off. Every entry path (a
 // direct EL1 entry, the EL2 drop, a PSCI secondary) runs it before anything
 // that depends on the register, so no bit is left to a reset value or to
-// firmware: QEMU, KVM and PSCI firmware each leave a different one, and before
-// this the EL2 drop and the EL1 entry ran with different EL0 controls. After
-// it, only mmu_program_this_cpu (M, C, I) and pac_apply_this_cpu (EnIA, EnIB,
-// EnDA, EnDB, BT0) change the register, each by OR-ing in its own bits.
+// firmware. QEMU TCG, KVM, HVF and PSCI firmware each leave a different one;
+// before this an EL0 WFI or WFE killed the Proc on an EL2 boot and under HVF,
+// and ran on TCG and KVM. After it only mmu_program_this_cpu (M, C, I) and
+// pac_apply_this_cpu (EnIA, EnIB, EnDA, EnDB, BT0, BT1) change the register,
+// each by OR-ing in its own bits. Bits 32-63 are written 0 here.
 //
 //   set    EOS 11, TSCXT 20, EIS 22, SPAN 23, nTLSMD 28, LSMAOE 29
-//                         RES1 on ARMv8.0 (ARM ARM D13.2.118)
+//                         RES1 on ARMv8.0 (ARM ARM D13.2.118); with FEAT_ExS,
+//                         exception entry and return stay context-synchronizing
+//          ITD 7, SED 8   RES1 where EL0 has no AArch32 (Apple cores, so HVF);
+//                         on a core that has it they only disable IT forms and
+//                         SETEND for an AArch32 EL0 this kernel never runs
 //          SA 3, SA0 4    SP alignment checked at EL1 and at EL0
 //          nTWE 18        EL0 WFE runs: a spin-wait sleeps on the event monitor
 //   clear  nTWI 16        EL0 WFI traps; exception.c retires it as the hint it
@@ -55,9 +60,17 @@
 //          EE 25, E0E 24  little-endian at EL1 and EL0
 //          WXN 19, A 1    no XN-implied-by-W, no alignment checking
 //          M 0, C 2, I 12 MMU and caches off until mmu_program_this_cpu
-//          CP15BEN, ITD, SED: AArch32-only, and there is no AArch32 EL0
+//          CP15BEN 5      RES0 where EL0 has no AArch32, inert where it has
+//          nAA 6          unaligned LSE2 accesses keep faulting (bus-probe-child)
+//          EnRCTX 10      EL0 speculation-restriction instructions are UNDEF
+//          IESB 21        no implicit error synchronization: SError extincts
+//                         whatever context it lands in
+//          MSCEn 33       EL0 MOPS traps (snare:ill) until AT_HWCAP2 offers it
+//          DSSBS 44       PSTATE.SSBS = 0 on exception entry: speculative store
+//                         bypass stays disabled
+//          EPAN 57        PAN is not used (uaccess.S copies with LDTR/STTR)
 .macro sctlr_el1_init_base tmp
-    movz    \tmp, #0x0818
+    movz    \tmp, #0x0998
     movk    \tmp, #0x30D4, lsl #16
     msr     sctlr_el1, \tmp
     isb
@@ -128,8 +141,10 @@ _real_start:
 //   3. CNTVOFF_EL2 = 0  — no virtual time offset.
 //   4. VTTBR_EL2 = 0  — no Stage 2 translation (we're not a hypervisor).
 //   5. SCTLR_EL1 = the composed base (sctlr_el1_init_base, above): MMU
-//      and caches off, little-endian, the EL0 controls set. EL1 code runs
-//      the moment eret lands, so the register must be whole before it.
+//      and caches off, little-endian, the EL0 controls set. .Lel1_main
+//      writes it again at EL1, which covers a core whose HCR_EL2.E2H
+//      cannot be cleared (an EL2 write of sctlr_el1 then lands in
+//      SCTLR_EL2).
 //   6. SPSR_EL2 = 0x3C5  — EL1h (M[3:0]=0b0101), DAIF masked
 //      (D|A|I|F = bits 9..6 = 1).
 //   7. ELR_EL2 = .Lpost_el2_drop  — return target.
@@ -142,9 +157,13 @@ _real_start:
 // dropped from EL2 — is published in the boot banner via _entered_at_el2.
 // ---------------------------------------------------------------------------
 .Lat_el2:
-    // 1. HCR_EL2.RW = 1.
+    // 1. HCR_EL2.RW = 1. The isb makes the write (E2H clear among it) take
+    //    effect before the EL1 register writes below: firmware may leave
+    //    E2H set, and until a context synchronization an EL2 write to
+    //    sctlr_el1 is redirected to SCTLR_EL2.
     mov     x1, #(1 << 31)
     msr     hcr_el2, x1
+    isb
 
     // 2. CNTHCTL_EL2.{EL1PCEN, EL1PCTEN} = 1.
     mrs     x1, cnthctl_el2
@@ -309,17 +328,21 @@ _real_start:
     //  APIA, but if Phase 2 turns on data-pointer auth or PAC-B
     //  variants, the keys are pre-seeded.
     //
-    // BTI: SCTLR_EL1.BT0 (bit 35) enables Branch Target Identification
-    //  enforcement at EL1 on ARMv8.5+. Pages with PTE.GP=1 (set by
-    //  mmu.c via PTE_KERN_TEXT) require indirect-branch targets to
-    //  match a `bti j/c/jc` marker matching PSTATE.BTYPE. The compiler
-    //  emits `bti c` at function-call landing pads under
-    //  -mbranch-protection=bti.
+    // BTI: enforcement is the page tables' GP bit, not an SCTLR enable.
+    //  On a page with PTE.GP=1 (mmu.c's PTE_KERN_TEXT; the loader's user
+    //  text) an indirect branch must land on a `bti c/j/jc` or a PACIxSP
+    //  matching PSTATE.BTYPE. The compiler emits the landing pads under
+    //  -mbranch-protection=pac-ret+bti. SCTLR_EL1.BT0 (bit 35, EL0) and
+    //  BT1 (bit 36, EL1) are the strictness knobs: set, PACIASP/PACIBSP
+    //  stop being a landing pad for a BR through a register other than
+    //  x16/x17 (BTYPE 0b11). That is Linux's setting (cpufeature.c
+    //  bti_enable); every kernel indirect call is a BLR (BTYPE 0b10), and
+    //  the compiler tail-calls through x16/x17.
     //
-    // Both EnIA (bit 31) and BT0 (bit 35) are RES0 on hardware that
-    // doesn't implement FEAT_PAuth / FEAT_BTI — writing 1 is a NOP
-    // there. So this sequence is zero-cost on ARMv8.0 and unlocks the
-    // hardening on ARMv8.3+ / 8.5+.
+    // EnIA (bit 31), BT0 and BT1 are RES0 on hardware that doesn't
+    // implement FEAT_PAuth / FEAT_BTI, and pac_apply_this_cpu gates each
+    // write on the ID registers. So this sequence is zero-cost on ARMv8.0
+    // and unlocks the hardening on ARMv8.3+ / 8.5+.
     // P2-Cb: refactored — keys derived once on primary, stored in
     // g_pac_keys[8] (BSS), then applied by pac_apply_this_cpu (also
     // called by secondary CPU bring-up so all CPUs use IDENTICAL
@@ -406,11 +429,11 @@ _real_start:
 .globl _torpor
 .type _torpor, %function
 _torpor:
-    // BTI landing pad: accept call (BTYPE=01), jump (BTYPE=10), or
-    // jump-call (BTYPE=11). All current reaches are direct branches
+    // BTI landing pad: accept a call (BTYPE=10), a jump (BTYPE=01) or a
+    // register jump (BTYPE=11). All current reaches are direct branches
     // (b _torpor / bl _torpor) which don't trigger BTI checks, but
-    // _torpor lives in a GP=1 page (PTE_KERN_TEXT) and SCTLR_EL1.BT0=1,
-    // so a future indirect dispatch (function-pointer table, panic
+    // _torpor lives in a GP=1 page (PTE_KERN_TEXT), which is what
+    // enforces BTI, so a future indirect dispatch (function-pointer table, panic
     // handler array) into _torpor would fault on the bare wfi. `bti jc`
     // is a HINT-space NOP on ARMv8.0..8.4 — zero cost, prevents the
     // class of bug at the cost of one instruction (P1-H audit F16).
@@ -516,7 +539,7 @@ pac_apply_this_cpu:
     msr     apdbkeylo_el1, x7
 
     // SCTLR_EL1 PAC-enable bits: EnIA (31), EnIB (30), EnDA (27), EnDB (13).
-    //   bits = 0x0000_0000_c800_2000  (BT0 is set separately, below)
+    //   bits = 0x0000_0000_c800_2000  (BT0 and BT1 are set below)
     mrs     x0, sctlr_el1
     movz    x1, #0x2000, lsl #0
     movk    x1, #0xc800, lsl #16
@@ -525,13 +548,14 @@ pac_apply_this_cpu:
     isb
 
 .Lpac_no_pauth:
-    // SCTLR_EL1.BT0 (bit 35): gate on FEAT_BTI (ID_AA64PFR1_EL1.BT [3:0]).
-    // RES0-safe without BTI, but gated for symmetry with the capability.
+    // SCTLR_EL1.BT0 (bit 35) and BT1 (bit 36): gate on FEAT_BTI
+    // (ID_AA64PFR1_EL1.BT [3:0]). RES0-safe without BTI, but gated for
+    // symmetry with the capability.
     mrs     x12, id_aa64pfr1_el1
     ubfx    x13, x12, #0, #4
     cbz     x13, .Lpac_done
     mrs     x0, sctlr_el1
-    movz    x1, #0x0008, lsl #32    // BT0 = bit 35
+    movz    x1, #0x0018, lsl #32    // BT0 = bit 35, BT1 = bit 36
     orr     x0, x0, x1
     msr     sctlr_el1, x0
     isb

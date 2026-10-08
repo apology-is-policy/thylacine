@@ -76,7 +76,7 @@
 //
 // The last three closed section 6.17's per-field question the way it decided:
 // GIVE THE KERNEL A SOURCE. MIDR_EL1 and CTR_EL0 are EL0-trapped (SCTLR_EL1.UCT
-// is clear in INIT_SCTLR_EL1_MMU_OFF -- an EL0 `mrs midr_el1` is snare:ill,
+// is clear in start.S's composed base -- an EL0 `mrs midr_el1` is snare:ill,
 // which is also why AT_HWCAP must never set hwcap_CPUID), and ctxt/intr had no
 // counter at all, so V-4c-2b added per-CPU columns to /ctl/cpu and this file
 // reformats them. Two fields were deliberately NOT built: BogoMIPS (no truth to
@@ -400,7 +400,7 @@ fn parse_pid(name: &[u8]) -> Option<u32> {
 // because the dirs are EMPTY. That emptiness is deliberate, not an oversight:
 // the contents Linux puts there (`cache/index0/coherency_line_size`,
 // `topology/`) are hardware facts with NO EL0 source -- CTR_EL0 is trapped for
-// EL0 (SCTLR_EL1.UCT is clear in INIT_SCTLR_EL1_MMU_OFF), exactly as MIDR_EL1
+// EL0 (SCTLR_EL1.UCT is clear in start.S's composed base), exactly as MIDR_EL1
 // is -- so serving them means either fabricating a plausible number or giving
 // the kernel a source. That is the same per-field decision section 6.15 defers
 // for cpuinfo/stat, and it is deliberately made ONCE, for all three, rather

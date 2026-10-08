@@ -159,10 +159,12 @@ boot-CPU-only read would be wrong precisely where the values matter.
 
 The slot also keeps the CPU's `SCTLR_EL1` as its bring-up left it (XT-3a,
 2026-10-08). That is the composed base [[sub-kernel-boot-entry]] writes, plus
-the MMU, PAC and BTI enables. It is configuration, not identity, but it is per
+the MMU and PAC enables and the BTI strictness bits BT0 and BT1. It is configuration, not identity, but it is per
 CPU and read at the same moment. `hardening.sctlr_composed` checks every online
 CPU's value against the base, and checks that the count of recorded CPUs is the
-online count, so a secondary cannot go unchecked.
+online count, so a secondary cannot go unchecked. It also reads the running
+CPU's live register, which must still equal its record, so a later writer that
+stores the register whole fails it.
 
 **Two cache sizes are now decoded, and they answer different questions.** The
 minimum data line is the smallest span a level will allocate — the maintenance

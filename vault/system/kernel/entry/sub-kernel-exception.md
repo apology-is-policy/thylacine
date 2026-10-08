@@ -239,8 +239,8 @@ bad indirect branch target, a breakpoint, an unknown exception class. The
 kernel does not die for a userspace mistake.
 
 **One EL0 trap is not a fault: a wait (XT-3a, 2026-10-08).** `SCTLR_EL1.nTWI`
-is clear ([[sub-kernel-boot-entry]]), so an EL0 `WFI` arrives as `EC_WFX`, and
-the arm retires it. ELR advances one instruction, and `SPSR.SS` and
+is clear ([[sub-kernel-boot-entry]]), so an EL0 `WFI` that would wait arrives as
+`EC_WFX`, and the arm retires it. ELR advances one instruction, and `SPSR.SS` and
 `SPSR.BTYPE` clear, as the PE would have left them; this is Linux's
 `arm64_skip_faulting_instruction`. Clearing `SS` completes a single-step over
 the retired instruction. Clearing `BTYPE` keeps the next instruction from being

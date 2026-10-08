@@ -58,7 +58,7 @@ struct hw_features {
 // prints a per-`processor` block in /proc/cpuinfo. A boot-CPU-only read would
 // be wrong precisely where these values earn their keep, so each CPU records
 // its own at bring-up. Neither register is EL0-readable (`SCTLR_EL1.UCT` is
-// clear in `INIT_SCTLR_EL1_MMU_OFF`, so an EL0 `mrs` is `snare:ill`), which is
+// clear in start.S's composed base, so an EL0 `mrs` is `snare:ill`), which is
 // why the diorama cannot source them without the kernel exposing them.
 struct hw_cpu_ident {
     u64  midr;          // MIDR_EL1 raw: implementer/variant/arch/part/revision
@@ -66,7 +66,7 @@ struct hw_cpu_ident {
     u32  cwg;           // bytes; CTR_EL0.CWG decoded (4 << CWG). 0 == the part
                         // declines to say (see CACHE_LINE_MAX_BYTES).
     u64  sctlr_el1;     // as this CPU's bring-up left it: start.S's composed
-                        // base plus the MMU, PAC and BTI enables
+                        // base plus the MMU and PAC enables and BT0/BT1
     bool valid;         // this CPU has run hw_cpu_ident_detect
 };
 

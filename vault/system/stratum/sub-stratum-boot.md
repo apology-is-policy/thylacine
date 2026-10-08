@@ -70,8 +70,8 @@ the pipe ([[sub-kernel-protect-witness]]).
 **XT-3a rung (2026-10-08).** After `/bus-probe-child`, joey runs
 `pouch_smoke_one("hint-probe", "hint-probe: exit 0")`. The probe executes 64 EL0
 `WFI` and 64 `SEVL; WFE` and exits 0. `start.S`'s composed `SCTLR_EL1` lets
-`WFE` run and traps `WFI` into [[sub-kernel-exception]]'s `EC_WFX` arm, which
-retires it. A `WFI` that killed the probe fails the reap. An arm that did not
+`WFE` run, and a `WFI` that would wait traps into [[sub-kernel-exception]]'s
+`EC_WFX` arm, which retires it. A `WFI` that killed the probe fails the reap. An arm that did not
 advance ELR traps on the same `WFI` forever, and the boot never reaches its
 banner. Boot-fatal like every other rung (`joey: /hint-probe FAILED`).
 

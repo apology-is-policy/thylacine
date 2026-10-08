@@ -56,16 +56,22 @@ rather than by execution.
 it, and three paths run it: a direct EL1 entry, the EL2 drop before its `eret`,
 and a PSCI secondary. After it, only two writers touch the register, each OR-ing
 in its own bits: `mmu_program_this_cpu` (M, C, I) and `pac_apply_this_cpu` (the
-PAC enables, BT0).
+PAC enables, and BT0 and BT1, the BTI strictness bits; BTI itself is enforced
+by the GP bit of the text mappings).
 
 Before this, a direct EL1 entry ran with whatever the platform reset left, and
 the EL2 drop with `0x30D00800`, so the EL0 controls depended on the entry path:
-- QEMU and KVM boots let EL0 `WFI` and `WFE` run, and checked SP alignment;
-- an EL2 boot trapped both waits (`snare:ill`, a dead Proc) and checked nothing;
+- QEMU TCG (`0x00c50838`) and KVM (`0x00C50078`) let EL0 `WFI` and `WFE` run,
+  and checked SP alignment;
+- HVF, the default accelerator on the dev host, left `0x30900180`: `nTWE`,
+  `nTWI`, `SA`, `SA0`, `EIS` and `EOS` all clear, so both waits killed the
+  Proc and no SP alignment was checked;
+- an EL2 boot trapped both waits and checked nothing;
 - a secondary kept whatever its firmware left.
 
-The composed value, `0x30D40818`:
-- sets the ARMv8.0 RES1 set, `SA`, `SA0` and `nTWE`;
+The composed value, `0x30D40998`:
+- sets the ARMv8.0 RES1 set, `ITD` and `SED` (RES1 where EL0 has no AArch32,
+  as on Apple cores; inert elsewhere), `SA`, `SA0` and `nTWE`;
 - clears `nTWI` (an EL0 `WFI` traps, and [[sub-kernel-exception]] retires it),
   plus `UMA`, `UCT`, `DZE`, `UCI`, the endianness bits, `WXN` and `A`.
 
@@ -257,6 +263,12 @@ register and written to memory only after the clear.
   no longer differs on it; the rest of the drop is still review-only.
 - The composed `SCTLR_EL1` base is a literal in two places, `start.S` and
   `hardening.sctlr_composed`. That is deliberate, so a change is made twice.
+- The EL2 drop assumes `HCR_EL2.E2H` can be cleared. On a core where it is RES1
+  (Apple silicon bare metal) its `CNTHCTL_EL2` write uses the wrong layout, and
+  its `sctlr_el1` write lands in `SCTLR_EL2`; `.Lel1_main`'s second write still
+  defines `SCTLR_EL1`. No target boots that way: Pi 5 bare metal clears `E2H`.
+- The composition has run only on QEMU TCG (`-cpu max`) so far. The HVF and KVM
+  runs, where the reset values differ most, are owed.
 
 ## Caveats
 

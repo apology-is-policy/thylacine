@@ -236,7 +236,7 @@ uaccess_store_u32_fault:
 //
 // Shape: byte head until the USER VA is 8-aligned, 8-byte body, byte
 // tail. The kernel-side ldr may be unaligned (Normal memory,
-// SCTLR_EL1.A = 0 per INIT_SCTLR_EL1_MMU_OFF = 0x30D00800). The faulting
+// SCTLR_EL1.A = 0 in start.S's sctlr_el1_init_base). The faulting
 // stores use NO writeback: on a demand-page resume the re-executed store
 // sees unchanged registers. On a mid-copy fault (page N mapped, page N+1
 // not) bytes already stored stay stored -- the caller returns -1 and the

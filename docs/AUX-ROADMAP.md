@@ -503,7 +503,7 @@ Two things the build settled that the scripture had left open:
   I-28, doing double duty.
 * **The per-field question now has a THIRD instance** with an identical shape.
   `cpuN/cache/index0/coherency_line_size` reads `CTR_EL0`, which is EL0-trapped
-  exactly as `MIDR_EL1` is (`SCTLR_EL1.UCT` clear in `INIT_SCTLR_EL1_MMU_OFF`).
+  exactly as `MIDR_EL1` is (`SCTLR_EL1.UCT` clear in `start.S`'s composed base).
   So `cpuinfo`'s MIDR, `stat`'s ctxt/intr/processes, and the `cpuN` contents all
   await **one** decision — omit, or give the kernel a source — deliberately made
   once rather than piecemeal. That is **V-4c-2**, with the per-container mount

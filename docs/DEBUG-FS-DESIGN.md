@@ -897,6 +897,14 @@ parking the thread (§4.2) instead of terminating the Proc. The kernel-side
   before the step runs (§4.2), and the step stays outstanding until the job stop
   ends, as a step of a job-stopped target does: neither stop owner can run the
   other's stop (`specs/pty_stop.tla` `StopCompatI39`).
+- **A stepped instruction the kernel retires** (XT-3a, 2026-10-08). An EL0 `WFI`
+  that would wait traps (EC `0x01`), and the arm retires it: ELR advances one
+  instruction and `SPSR.SS` and `SPSR.BTYPE` clear, as Linux's
+  `arm64_skip_faulting_instruction` does. With `MDSCR.SS` still set, the eret is
+  Active-pending, so the EC `0x32` comes at the next instruction having executed
+  nothing more. The step reports there, exactly one instruction on, and no
+  stuck-PC re-trap is possible because ELR moved. Both exceptions visit the
+  tail, so the die-check still runs first.
 - **Step-over-breakpoint** (mandatory): a thread resuming at a breakpointed PC
   re-traps forever. On resume, if the PC matches an armed breakpoint, disable
   that bp's `E` bit, single-step one instruction, re-enable it (the Linux

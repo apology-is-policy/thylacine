@@ -1790,7 +1790,7 @@ omitted: Linux sources it from a compile-time `NR_CPUS`, and Thylacine's
 equivalent (`DTB_MAX_CPUS`) is on no EL0-readable surface. The `cpuN` dirs are
 **empty**: their Linux contents (`cache/index0/coherency_line_size`, `topology/`)
 are hardware facts read from `CTR_EL0`, which is EL0-trapped exactly as
-`MIDR_EL1` is (`SCTLR_EL1.UCT` is clear in `INIT_SCTLR_EL1_MMU_OFF`). So the
+`MIDR_EL1` is (`SCTLR_EL1.UCT` is clear in `start.S`'s composed base). So the
 per-field question §6.15 raised for `cpuinfo` and `stat` now has a **third**
 instance with an identical shape, and all three await **one** decision — omit the
 unsourced fields, or give the kernel a source — deliberately made once rather

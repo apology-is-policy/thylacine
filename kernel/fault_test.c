@@ -78,12 +78,12 @@ static void provoke_wxe_violation(void) {
 // ---------------------------------------------------------------------------
 // bti_fault — indirect branch to a target without a `bti` landing pad.
 //
-// SCTLR_EL1.BT0=1 (set in start.S), kernel-text pages have PTE_GP=1
-// (PTE_KERN_TEXT), and `-mbranch-protection=bti` is on; the compiler
+// Kernel-text pages have PTE_GP=1 (PTE_KERN_TEXT), which is what enforces
+// BTI, and `-mbranch-protection=bti` is on; the compiler
 // emits `bti c` at every C function's prologue. We define a hand-
 // rolled asm target whose first instruction is `nop` (NOT `bti`).
 // Calling it via a function-pointer (which lowers to `blr`) sets
-// PSTATE.BTYPE = 01; the target's first instruction is not a matching
+// PSTATE.BTYPE = 10 (a call); the target's first instruction is not a matching
 // `bti c` / `bti jc`; ARM raises a Branch Target Exception
 // (ESR_EL1.EC = 0x0D), which exception_sync_curr_el now recognises
 // and emits extinction("BTI fault (...)").

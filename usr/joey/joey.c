@@ -5920,10 +5920,11 @@ int main(void) {
     }
 
     // === /hint-probe (XT-3a: the EL0 wait hints retire as hints) ===
-    // start.S composes SCTLR_EL1 on every entry path, so EL0 WFE runs and EL0
-    // WFI traps into exception.c's EC_WFX arm, which retires it. On an EL2-entry
-    // boot both used to kill the Proc; an arm that failed to advance ELR would
-    // re-trap the same WFI forever and this reap would never return.
+    // start.S composes SCTLR_EL1 on every entry path, so EL0 WFE runs and an
+    // EL0 WFI that would wait traps into exception.c's EC_WFX arm, which
+    // retires it. On an EL2 boot and under HVF both used to kill the Proc; an
+    // arm that failed to advance ELR would re-trap the same WFI forever and
+    // this reap would never return.
     {
         static const char hp_name[]   = "hint-probe";
         static const char hp_expect[] = "hint-probe: exit 0";
@@ -5932,7 +5933,7 @@ int main(void) {
             t_putstr("joey: /hint-probe FAILED (an EL0 WFI or WFE did not retire)\n");
             return 1;
         }
-        t_putstr("joey: /hint-probe ok (64 EL0 WFI trapped and retired; 64 WFE ran)\n");
+        t_putstr("joey: /hint-probe ok (64 EL0 WFI and 64 WFE returned)\n");
     }
 
     // === /capacity-probe (B-1a': capacity) ===
