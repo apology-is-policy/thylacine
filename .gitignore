@@ -80,3 +80,10 @@ vault/meta/quaestor/quaestor
 !third_party/rust/**/*.o
 !third_party/rust/cc/src/target/
 !third_party/rust/cc/src/target/**
+# The .vscode/ and build/ rules drop two more shipped paths, both named in their
+# crates' .cargo-checksum.json: smoltcp's .vscode/settings.json and thiserror's
+# build/probe.rs (its build script compiles it).
+!third_party/rust/**/.vscode/
+!third_party/rust/**/.vscode/**
+!third_party/rust/**/build/
+!third_party/rust/**/build/**

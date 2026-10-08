@@ -41,7 +41,14 @@ there with `patch -p1`, then configures + builds the pouch libc out-of-tree in
 `build/pouch/musl-obj/` and installs it into `build/sysroot/` — the vendored
 source is never edited.
 
-A patch that fails to apply aborts the `sysroot` build loudly. After
+A patch that fails to apply aborts the `sysroot` build loudly. The series
+applies at fuzz 0 under both GNU patch (Linux builders) and BSD patch (macOS),
+and two rules keep it so when a hunk is edited by hand. Keep its leading and
+trailing context the same length: GNU patch reads fewer trailing lines than
+leading ones as "this hunk ends the file" (and the reverse as "it starts the
+file") and refuses it anywhere else at fuzz 0, which BSD patch does not.
+And renumber the `@@` lines when an earlier patch moves the text. The check is
+the series under GNU patch: no hunk may report fuzz, an offset or FAILED. After
 re-vendoring `third_party/musl/` to a newer release, rebase the series against
 it; each patch carries a preamble describing its intent, and `0001` records the
 exact awk filter that regenerates the syscall-table retarget.

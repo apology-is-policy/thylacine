@@ -22,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -191,8 +191,23 @@ the pouch musl series is applied with `patch -F 0`: a hunk whose context does
 not match exactly fails the build. That matters on the Linux builders, whose
 GNU `patch` fuzzes up to two context lines by default and says so only on
 stdout; the control was measured — a perturbed context line applies under
-`-F 2` with exit 0 and fails under `-F 0`. The port patch loops are not yet
-fuzz-strict.
+`-F 2` with exit 0 and fails under `-F 0`. The port patch loops apply at `-F 0`
+too (r5 F7).
+
+**What `-F 0` still lets through, and what it wrongly refuses (2026-10-08).** The
+series first ran under GNU `patch` on 2026-10-08 (every earlier measurement was
+macOS BSD `patch`), which found two things.
+- **An offset passes.** A hunk whose header line numbers drifted still applies
+  wherever its context matches exactly. Seven did: pouch 0016, 0028 and 0029,
+  vkQuake 0003 and 0005, SDL2 0003.
+- **GNU refuses a hunk with uneven context, which BSD applies.** It reads fewer
+  trailing lines than leading ones as a hunk anchored at end of file, and the
+  reverse as one anchored at the start. So pouch 0012 and 0043, and SDL2 0002,
+  failed every Linux build.
+
+All are fixed, and each patched tree was verified byte-identical to the old series
+applied leniently. The rules for a hand-edited hunk are in
+`usr/lib/pouch/patches/README.md`.
 
 **The spawn-args mirror check runs beside it (2026-09-29).**
 `tools/check-spawn-args-mirrors.py` runs right after the hunk check, before the

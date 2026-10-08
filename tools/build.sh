@@ -2455,6 +2455,9 @@ build_sysroot() {
     #    apply somewhere near its target, exit 0. Measured 2026-09-21: the
     #    series applies at fuzz 0 and zero offset; a perturbed context line
     #    applies under -F 2 and fails under -F 0 (B-0 audit round 4 F6).
+    #    That measurement was BSD patch's; GNU patch 2.7.6 rejected two hunks
+    #    with uneven context and found seven at an offset until 2026-10-08
+    #    (the rules are in usr/lib/pouch/patches/README.md).
     echo "==> applying pouch patch series"
     while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
         case "$patch_line" in ''|\#*) continue ;; esac

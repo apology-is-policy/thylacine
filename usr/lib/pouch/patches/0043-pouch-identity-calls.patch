@@ -42,8 +42,7 @@ IDENTITY-DESIGN section 9.10 rather than decided here.
 diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
 --- a/src/internal/_pouch_fs.h	2026-09-22 10:00:00
 +++ b/src/internal/_pouch_fs.h	2026-09-22 10:00:00
-@@ -28,7 +28,9 @@
- #define SYS_thyla_walk_create  54   /* (parent_fd, name, len, omode, perm) */
+@@ -29,6 +29,8 @@
  #define SYS_thyla_chdir        69   /* (path, len) */
  #define SYS_thyla_getcwd       70   /* (buf, len) -> len */
  #define SYS_thyla_getpid       72   /* () -> pid */

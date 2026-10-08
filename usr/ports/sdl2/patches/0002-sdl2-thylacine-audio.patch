@@ -19,13 +19,14 @@ into src/audio/thylacine/.
 
 --- a/src/audio/SDL_sysaudio.h
 +++ b/src/audio/SDL_sysaudio.h
-@@ -198,5 +198,6 @@
+@@ -198,6 +198,7 @@
  extern AudioBootStrap HAIKUAUDIO_bootstrap;
  extern AudioBootStrap COREAUDIO_bootstrap;
  extern AudioBootStrap DISKAUDIO_bootstrap;
 +extern AudioBootStrap THYLACINEAUDIO_bootstrap;
  extern AudioBootStrap DUMMYAUDIO_bootstrap;
  extern AudioBootStrap FUSIONSOUND_bootstrap;
+ extern AudioBootStrap aaudio_bootstrap;
 --- a/src/audio/SDL_audio.c
 +++ b/src/audio/SDL_audio.c
 @@ -132,6 +132,9 @@
