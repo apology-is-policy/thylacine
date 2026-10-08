@@ -81,6 +81,15 @@ The answer was a bounded wait (the virtio pull retried for up to 2 s), then
 strict. The Pi 5's in-kernel RNG driver is queued as task #26. The lesson: a
 question's options are claims, and each needs the same verification as code.
 
+**PAC-1 landed** (`81703763`):
+- The gate before `joey_run` retries the virtio pull for up to 2 s, then
+  extincts if the CSPRNG is still unseeded.
+- exec's `AT_RANDOM` fails the exec with `-T_E_AGAIN` instead of shipping zeros.
+- The suite passes 1962/1962. On this host the pool seeded via RNDR and then
+  virtio, so the gate did not need to wait.
+- Red-first: the old `(void)kern_random_bytes` draw, restored in the worktree,
+  failed exactly `exec.setup_refuses_unseeded_rng` (1961/1962).
+
 **Next:** PAC-1, the entropy gate, then PAC-2.
 
 ---

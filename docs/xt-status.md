@@ -50,7 +50,10 @@ Sequence (the design's arc order, with two owned defects pulled forward):
 
    Chunks:
    - PAC-0: the scripture (landed);
-   - PAC-1: the entropy gate and exec's fail-closed AT_RANDOM (task #25);
+   - PAC-1: the entropy gate and exec's fail-closed AT_RANDOM (task #25).
+     Landed as `81703763`: the suite passes 1962/1962, and red-first the
+     old fail-open draw fails exactly `exec.setup_refuses_unseeded_rng`.
+     Its audit is folded into PAC-3's;
    - PAC-2: the key model;
    - PAC-3: the EL0 witness, I-49 to ENFORCED, and the audit.
 
@@ -105,7 +108,8 @@ and XT-8 onward (the runtime).
   truncates at 4 KiB without a sign. `ps` and `cpubench` now read once
   (`41df9a8a`, task #16's fix); the systemic choice, a snapshot per open or the
   single-read contract, is open.
-- #25 exec handed out an all-zero `AT_RANDOM` on an unseeded CSPRNG -> PAC-1.
+- #25 exec handed out an all-zero `AT_RANDOM` on an unseeded CSPRNG -> fixed in
+  PAC-1 (`81703763`).
 - #26 bare metal without RNDR (a Pi 5) cannot seed the CSPRNG, so under PAC-1's
   gate it cannot start userspace; it needs an in-kernel driver for the SoC's
   hardware RNG.
