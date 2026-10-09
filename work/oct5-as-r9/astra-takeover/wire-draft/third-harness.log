@@ -1,0 +1,16 @@
+PASS control PASS wire adapter: 156 checks
+PASS negotiated read negotiated bound
+PASS read-overhead read negotiated bound
+PASS write-overhead write negotiated bound
+PASS output-cap write output capacity clamp
+PASS iounit iounit bound
+PASS capacity capacity refusal before effect
+PASS overflow offset overflow refusal
+PASS open-mode open mode refusal
+PASS dac-mask complete DAC attribute mask
+PASS expect-fid nonwalk expectation identity
+PASS walk-arity copied component frame
+PASS local-proof actual accepted owner
+PASS remote-retry remote EAGAIN never replayed
+PASS capture-error malformed capture bars retry
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/wire-draft/controls-20261009T224134Z

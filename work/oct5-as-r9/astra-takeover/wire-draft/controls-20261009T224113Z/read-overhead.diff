@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ read-overhead.c
+@@ -12,7 +12,7 @@
+         // Match ordinary client limits: Rread header+count is 11 bytes;
+         // Twrite header+fid+offset+count is 23. Output capacity also bounds write.
+         u32 bound=w->kind==P9_TWRITE?(u32)cap:msize;
+-        u32 overhead=w->kind==P9_TWRITE?P9_HDR_LEN+16u:P9_HDR_LEN+4u;
++        u32 overhead=w->kind==P9_TWRITE?P9_HDR_LEN+16u:P9_HDR_LEN+3u;
+         u32 limit=bound>overhead?bound-overhead:0;
+         if(count && !limit)return -T_E_INVAL;
+         if(w->iounit && w->iounit<limit)limit=w->iounit;

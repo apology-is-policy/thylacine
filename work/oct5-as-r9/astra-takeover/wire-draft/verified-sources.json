@@ -1,0 +1,4 @@
+{
+  "kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+  "kernel/include/thylacine/loom_service_wire.h": "c3d55e55fd8f61f00cadd7343fc310ce0adef99377ef7e7e7f973b28f1e7a4f3"
+}

@@ -2527,3 +2527,11 @@ RPC-R1 requires scope abort on malformed/duplicate capture. Host50checks/21mutan
 and actual ARM64 object/layout pass; actual client submission, operation-specific
 DAC/payload admission, readiness/fairness and close integration are not implemented
 by this helper. Read rpc-draft/next-work.txt before installing any queue consumer.
+
+Astra October 10 wire adapter remains uninstalled (`wire-draft`). Single-frame
+builders use real session operations with negotiated message/output/iounit limits
+and exact reply expectations. WIRE-R1 records the submit return separately from
+callback status: a remote EAGAIN cannot license replay. Host 156 checks/14 mutants
+and ARM64 compilation pass; real native engine, ordinary DAC, payload ownership
+and close integration still require qualification. See wire-draft/self-review.txt
+for checked host boundaries and next-work.txt for coherent integration duties.

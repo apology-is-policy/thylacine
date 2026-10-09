@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ capacity.c
+@@ -8,7 +8,7 @@
+     if(cap>msize)cap=msize;
+     u32 count=w->count;
+     if(w->kind==P9_TREAD || w->kind==P9_TWRITE) {
+-        if(count>w->payload_capacity || (count && !w->payload))return -T_E_INVAL;
++        if(false || (count && !w->payload))return -T_E_INVAL;
+         // Match ordinary client limits: Rread header+count is 11 bytes;
+         // Twrite header+fid+offset+count is 23. Output capacity also bounds write.
+         u32 bound=w->kind==P9_TWRITE?(u32)cap:msize;

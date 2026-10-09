@@ -17,7 +17,7 @@ explicit byte copying, failure retained. Native operation-storage-native-
 normal/bulk allocation/quota/close-storage cases. No full new-source Mac claim.
 Mac resource released after native. Storage checkpoint e7ff5d1c7 committed with
 normal hooks. Continue RPC list/admission/callback/commit, FID/DAC/fixed/provided-buffer
-ownership and READY readiness integration per rpc-integration-plan.txt. These
+ownership and READY readiness integration per operations-draft/rpc-integration-plan.txt. These
 helpers and storage fixture do not implement dispatch. AS3/4 precede MM0-MM4.
 
 Preserve8192MiB floor, exact clean Stratum61dde37, Astra six pending/four
@@ -43,3 +43,11 @@ remains97d495fcb. Wire real per-operation programs and admission, fair READY
 progress, buffer/DAC ownership and close disposal before installing the queue.
 Old CONNECT-only close gate must drain operation owners before requiring zero
 entry pins. Mac released; no running job; no duplicate historical gates.
+
+Wire adapter is now separately verified and still uninstalled; read
+wire-draft/state.json, self-review.txt and next-work.txt. Actual client-submit
+function plus session/codec/transport/capture pass 156 checks and 14 mutants;
+ARM64 real-header object passes. WIRE-R1 distinguishes local no-wire EAGAIN from
+remote EAGAIN, preventing ambiguous write replay. Combine with RPC owner only
+with one authoritative expectation/payload copy and coherent admission/READY/
+close integration. No native queue or DAC claim. Mac released, no running gate.

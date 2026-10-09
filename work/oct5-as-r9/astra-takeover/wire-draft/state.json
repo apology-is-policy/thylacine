@@ -1,0 +1,12 @@
+{
+  "owner": "astra",
+  "state": "wire-adapter-verified-integration-next",
+  "installed": false,
+  "source_base": "9e73a5224041404b29348ce5a6954050f8de5d4f",
+  "utc": "2026-10-09T22:43:13.685775+00:00",
+  "run": "work/oct5-as-r9/astra-takeover/wire-draft/controls-20261009T224134Z",
+  "checks": 156,
+  "mutants": 14,
+  "arm64": "arm64-result.json",
+  "limits": "Uninstalled adapter; actual submit function and session/codec/transport tested with explicit host lock/wake/death boundaries. No native engine/DAC/peer/concurrency claim."
+}

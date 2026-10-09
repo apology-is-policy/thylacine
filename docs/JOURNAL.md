@@ -35597,3 +35597,21 @@ hashes rechecked. No actual client submission, authority, native runtime or
 concurrency claim. Canonical kernel unchanged. Read rpc-draft/state.json,
 self-review.txt and next-work.txt; wire/program/admission/readiness/physical-close
 integration remains next, then AS3/4 and MM0-MM4. Mac released; no activation.
+
+### Astra RPC wire adapter, October 10
+
+The uninstalled `astra-takeover/wire-draft` now builds actual GETATTR, WALK,
+LOPEN, READ, WRITE and CLUNK frames from retained kernel arguments. It enforces
+negotiated message/output/iounit bounds and records the matching reply identity.
+WIRE-R1 self-review distinguishes synchronous local EAGAIN (proved unsent) from
+a remote Rlerror(EAGAIN), which must never authorize replay of a write.
+
+156 checks and 14 targeted mutants pass ASan/UBSan with the actual submission
+function, session, codec, transport and capture code; host lock/wake/death
+boundaries and direct reply dispatch are explicitly limited. ARM64 object with
+real headers passes without libc dependencies. Raw source/binary hashes checked;
+failed harness runs preserved. This is uninstalled adapter evidence, not native
+engine or authority qualification. Canonical kernel remains unchanged; no prior
+full Mac gate is extended to this draft. Read wire-draft/self-review.txt and
+next-work.txt. Actual DAC/payload admission, fair READY progress and coherent
+close disposal remain next, then AS3/4 and MM0-MM4. Mac released. No activation.

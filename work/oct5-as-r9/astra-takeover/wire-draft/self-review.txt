@@ -1,0 +1,64 @@
+Astra single-agent self-review, October 10 Prague. No independent audit.
+Uninstalled wire adapter, based on 9e73a5224. Canonical kernel remains unchanged.
+
+This adapter translates kernel-owned, resolved operation arguments into exactly
+one actual session builder call. It does not resolve a shared SQE, grant DAC,
+pin a FID/buffer, admit a request, commit a result, publish a CQE or free storage.
+WALK uses a copied component (clone or exactly one ordinary component); reserved
+wire destination and exact local destination claim must already belong to the
+request. LOPEN accepts only mode 0/1/2. GETATTR requests mode, uid and gid for the
+future search/open authority program; sending it is not a DAC decision.
+
+Under the client lock, READ and WRITE clamp to negotiated msize, optional iounit,
+INT32_MAX and the real output capacity for WRITE. Header allowances match the
+ordinary client: Rread 11 bytes, Twrite 23. Checked retained payload capacity and
+nonzero pointer precede effects; offset addition cannot wrap. Short successful
+results remain short, not automatically replayed. Nonzero work cannot silently
+become zero because of an unusable message capacity. Wire expectations derive
+from the exact successful builder: non-WALK outstanding new_fid equals fid;
+WALK preserves destination and arity. Failed builders leave built false.
+
+WIRE-R1: callback EAGAIN alone does not prove a request was unsent. A remote
+Rlerror may carry EAGAIN after the server processed a request. The adapter stores
+the actual submit return separately, clears this proof before each new attempt,
+and permits retry only for synchronous local EAGAIN plus clean matching capture.
+The actual client returns local EAGAIN for occupied TX, tag exhaustion or an
+entirely retracted unsent legacy frame; accepted progress requests return zero.
+Late remote EAGAIN therefore stays terminal. The targeted remote-retry mutant
+proves this distinction. Invalid client/callback arguments refuse without taking
+ownership, as in the actual API: the future driver must settle that path itself.
+This adapter never synthesizes a callback whose ownership it cannot prove.
+
+All calls still require the sole scope driver and retained callback container.
+The callback must only capture, not free the operation. No Ll/client lock nesting
+is introduced. Future queue integration must recheck abort and absolute deadline
+before each submission, DAC-stage advance and success commit, preserve continuous
+request borrow through physical release, and distinguish remote errors from
+malformed capture (the latter poisons the whole scope). A wire success does not
+publish a FID or prove local quiescence. Close must drain actual callbacks and
+operation owners before requiring zero engine-entry pins.
+
+controls-20261009T224134Z: 156 clean checks and 14 targeted mutants pass LLVM22
+ASan/UBSan. The fixture uses real complete client headers (only spinlock replaced
+with a checked sequential host lock), a verbatim extracted submit_async function,
+and unchanged actual session, codec, transport and reply-capture translation
+units. Session starts in an explicit already-attached fixture state. Replies go
+through actual session dispatch and then direct capture, not production demux.
+Wake notification and client_mark_dead completion are explicit host stand-ins.
+These tests do not establish native engine, real peer, DAC, allocator, concurrent
+lock behavior or production abort-quiescence correctness. They do exercise actual
+progress TX queue registration, unsent retract, CLUNK restoration, full-tag/TX
+refusal, local-versus-remote EAGAIN, exact frames, short results and copied attrs.
+ARM64 object with real headers compiles without libc dependencies. Exact source,
+fixture, generated source and binary hashes are recorded and rechecked.
+
+Development failures retained: first harness did not initialize the real
+progress transport before expecting TX queue acceptance; fixed by calling actual
+progress_init. Second run's overlarge-write mutant was caught earlier by the
+real codec capacity check; changed it to over-reserve one header byte so the
+specific short-count assertion is the intended witness. No failure is relabelled
+as a passing run. All earlier outputs and failed harness logs remain available.
+
+Mac resource released after tests; no running gate. Disk 9117 MiB, above 8192.
+Exact clean Stratum 61dde37 and all ten Astra pending/protected hashes preserved.
+No Main landing, private user async/clipboard activation or 128 MiB change.

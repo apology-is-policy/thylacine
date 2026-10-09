@@ -1,0 +1,11 @@
+PASS control PASS wire adapter: 156 checks
+PASS negotiated read negotiated bound
+PASS read-overhead read negotiated bound
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/wire-draft/run-controls.py", line 45, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/wire-draft/run-controls.py", line 41, in main
+    assert (run.returncode==1 and run.stderr==f'FAIL {want}\n'.encode()) if want else (run.returncode==0 and not run.stderr),(name,run.returncode,run.stdout,run.stderr)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('write-overhead', 1, b'', b'FAIL write submit\n')

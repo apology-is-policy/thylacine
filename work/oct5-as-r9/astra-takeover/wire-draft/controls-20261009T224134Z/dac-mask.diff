@@ -1,0 +1,11 @@
+--- kernel/loom_service_wire.c
++++ dac-mask.c
+@@ -26,7 +26,7 @@
+     u16 names=0;
+     switch(w->kind) {
+     case P9_TGETATTR:
+-        attr_mask=P9_GETATTR_MODE|P9_GETATTR_UID|P9_GETATTR_GID;
++        attr_mask=P9_GETATTR_MODE|P9_GETATTR_UID;
+         rc=p9_session_send_getattr(s,out,cap,w->fid,attr_mask);break;
+     case P9_TWALK: {
+         u16 n=w->component_len;
