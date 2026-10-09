@@ -81,6 +81,7 @@ struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
     struct loom_service_pool_table *service_pools;
+    void *service_fixed;u32 service_fixed_count;
     u32 service_metadata_pages;
     bool sqpoll; u32 n_reg_buf, inflight_ops;
     struct loom_reg_buffer reg_buf[LOOM_MAX_REG_BUFFERS];

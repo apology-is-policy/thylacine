@@ -1,0 +1,11 @@
+--- control
++++ omit-refund
+@@ -53,7 +53,7 @@
+     (void)burrow_unref_settled_in(b, as, &refund);
+     if (refund) {
+         spin_lock(&as->lock);
+-        addrspace_uncharge_pages(as, refund);
++        if (false) addrspace_uncharge_pages(as, refund);
+         spin_unlock(&as->lock);
+     }
+ }

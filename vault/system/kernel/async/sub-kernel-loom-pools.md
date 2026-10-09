@@ -299,3 +299,14 @@ protocol/worker integration remain pending. Pi/A72/KVM, guest final allocator
 reclamation and absent optional Venus/Vulkan probes remain unqualified.
 Self-review only. Async remains ahead of MM0-MM4; no Main landing, private
 async/clipboard activation or removal of the 128 MiB protection.
+
+
+October 9: pool registration now rejects canonical overlaps with accepted private
+fixed-buffer nodes under the same Loom lock used by fixed admission to exclude
+all provisional/live pool cells. Both paths share canonical resolution. Fixed
+nodes retain their own Burrow and Loom pins through table replacement and close;
+release requires local users to end. The 40-byte node belongs in a precharged
+request, and existing CQ capacity bounds node count. No actual request/terminal
+admission or protocol caller is activated by these internal helpers. See the
+Loom dossier's fixed-reservation self-review and focused/native evidence. Full
+Mac qualification of this new source remains pending.

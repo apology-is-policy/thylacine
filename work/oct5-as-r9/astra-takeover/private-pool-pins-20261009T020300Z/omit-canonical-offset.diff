@@ -1,0 +1,11 @@
+--- control
++++ omit-canonical-offset
+@@ -78,7 +78,7 @@
+         b->len > b->burrow->size - (kva - base)) {
+         return -T_E_INVAL;
+     }
+-    *out = (struct loom_pool_extent){b->burrow,kva - base + m->offset,m->length};
++    *out = (struct loom_pool_extent){b->burrow,m->offset,m->length};
+     return 0;
+ }
+ static bool loom_private_fixed_conflicts_locked(struct Loom *l,

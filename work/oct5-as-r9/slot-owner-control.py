@@ -46,6 +46,7 @@ struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
     struct loom_service_pool_table *service_pools;
+    void *service_fixed;u32 service_fixed_count;
     u64 service_creator;
     u32 service_metadata_pages;
     spin_lock_t lock;

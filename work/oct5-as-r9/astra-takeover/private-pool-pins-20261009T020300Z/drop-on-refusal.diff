@@ -1,0 +1,11 @@
+--- control
++++ drop-on-refusal
+@@ -157,7 +157,7 @@
+     int rc = rollback ? loom_service_pool_rollback(l->service_slots,l->service_pools,ref)
+                       : loom_service_pool_reap(l->service_slots,l->service_pools,ref);
+     spin_unlock(&l->lock);
+-    if (!rc)
++    if (true)
+         for (u32 i = 0; i < count; ++i)
+             loom_private_drop_buffer(l->service_as,pins[i]);
+     return rc;

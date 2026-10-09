@@ -1,0 +1,11 @@
+--- control
++++ pool-over-fixed
+@@ -168,7 +168,7 @@
+     for (u32 i = 0; i < in->count; ++i) {
+         rc = loom_private_extent_locked(l,&in->members[i],&extents[i]);
+         if (rc) goto unlock;
+-        if (loom_private_fixed_conflicts_locked(l,extents[i])) {
++        if (loom_private_fixed_conflicts_locked(l,extents[i]) && false) {
+             rc = -T_E_BUSY; goto unlock;
+         }
+     }

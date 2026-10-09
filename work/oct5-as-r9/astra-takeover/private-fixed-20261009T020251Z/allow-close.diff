@@ -1,0 +1,11 @@
+--- control
++++ allow-close
+@@ -101,7 +101,7 @@
+     int rc = 0;
+     struct loom_pool_extent e;
+     spin_lock(&l->lock);
+-    if (l->service_closing) rc = -T_E_CANCELED;
++    if (l->service_closing && false) rc = -T_E_CANCELED;
+     else if (f->owner || f->next || f->extent.backing || f->extent.offset || f->extent.length)
+         rc = -T_E_BUSY;
+     else if (l->service_fixed_count >= l->cq_entries) rc = -T_E_AGAIN;

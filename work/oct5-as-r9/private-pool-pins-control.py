@@ -31,7 +31,9 @@ struct AddrSpace { spin_lock_t lock;u32 pages; };
 struct Burrow { u32 type;u8 *pages;u64 size;struct AddrSpace *payer;int refs; };
 struct Proc { u32 magic;struct AddrSpace *as;u64 stripes; };
 struct loom_reg_buffer { struct Burrow *burrow;u8 *kva;u32 len,_pad; };
+struct loom_private_fixed {struct loom_private_fixed *next;struct Loom *owner;struct loom_pool_extent extent;};
 struct Loom {
+ struct loom_private_fixed *service_fixed;u32 service_fixed_count;
  u32 magic;spin_lock_t lock;struct AddrSpace *service_as;u64 service_creator;
  bool service_closing;struct loom_service_pool_table *service_pools;
  struct loom_slot_table *service_slots;u32 receipt_size;
@@ -127,15 +129,15 @@ def main():
  st=os.statvfs('.');assert st.f_bavail*st.f_frsize>=8*1024**3
  out=Path('work/oct5-as-r9/astra-takeover')/('private-pool-pins-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));out.mkdir()
  source=Path('kernel/loom.c').read_text()
- funcs={n:extract.fun(source,n) for n in ['loom_private_drop_buffer','loom_private_pool_prepare','loom_private_pool_publish','loom_private_pool_remove','loom_private_pool_rollback','loom_private_pool_reap']}
+ funcs={n:extract.fun(source,n) for n in ['loom_private_drop_buffer','loom_private_extent_locked','loom_private_fixed_conflicts_locked','loom_private_pool_prepare','loom_private_pool_publish','loom_private_pool_remove','loom_private_pool_rollback','loom_private_pool_reap']}
  def program(fs):return PRE+'\n'+'\n'.join(fs.values())+'\n'+MAIN
  control=program(funcs)
  cases=[('control',None,None,None,None),
  ('omit-image','loom_private_pool_prepare','p->as != l->service_as || ','','wrong image rejected'),
  ('omit-creator','loom_private_pool_prepare',' || p->stripes != l->service_creator','','wrong creator rejected'),
  ('allow-tail','loom_private_pool_prepare','u32 i = in->count;','u32 i = LOOM_SERVICE_POOL_MEMBERS;','unused tail rejected'),
- ('omit-canonical-offset','loom_private_pool_prepare','kva - base + m->offset,m->length','m->offset,m->length','canonical alias overlap rejected'),
- ('allow-ring','loom_private_pool_prepare','b->burrow == l->ring ||','','ring backing rejected'),
+ ('omit-canonical-offset','loom_private_extent_locked','kva - base + m->offset,m->length','m->offset,m->length','canonical alias overlap rejected'),
+ ('allow-ring','loom_private_extent_locked','b->burrow == l->ring ||','','ring backing rejected'),
  ('allow-fixed-admission','loom_private_pool_prepare',' || l->admitting','','unresolved fixed admission rejected'),
  ('omit-member-pin','loom_private_pool_prepare','            burrow_ref((struct Burrow *)extents[i].backing);','            if (false) burrow_ref((struct Burrow *)extents[i].backing);','member pins acquired exactly'),
  ('omit-drop','loom_private_pool_remove','            loom_private_drop_buffer(l->service_as,pins[i]);','            if (false) loom_private_drop_buffer(l->service_as,pins[i]);','rollback drops exactly member pins'),

@@ -427,6 +427,85 @@ done:
 #undef PP_CHECK
     return error;
 }
+static const char *loom_private_fixed_fixture(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make();
+    struct Loom *l = NULL;
+    struct loom_private_fixed first = {0}, second = {0}, extra = {0};
+    struct loom_service_ref pool = {0};
+    struct loom_service_pool_create in;
+    for (u32 i=0; i<sizeof(in); ++i) ((u8 *)&in)[i]=0;
+    in.size=sizeof(in);in.version=1;in.count=1;
+    u64 goal=loom_private_retired(), va=0;
+    u32 baseline=0;
+#define FX_CHECK(c,msg) do { if (!(c)) { error=msg; goto done; } } while (0)
+    FX_CHECK(p,"fixed creator allocated");baseline=p->as->page_count;
+    l=loom_create_private(p,2,2,true);if(l)goal++;
+    FX_CHECK(l,"fixed owner allocated");
+    u32 owner_pages=p->as->page_count;
+    s64 attached=sys_burrow_attach_for_proc(p,PAGE_SIZE);
+    FX_CHECK(attached>0,"fixed backing attached");va=(u64)attached;
+    struct Burrow *b=vma_lookup(p,va)->burrow;
+    int handles=burrow_handle_count(b);
+    struct loom_buf_reg bufs[2]={{va+128,1024},{va+192,512}};
+    FX_CHECK(!loom_private_register_buffers(l,p,bufs,2),"fixed aliases registered");
+    struct loom_service_pool_member fixed={0,0,64,64};
+    FX_CHECK(!loom_private_fixed_acquire(l,p,&fixed,&first) &&
+             burrow_handle_count(b)==handles+3 && l->service_fixed_count==1 &&
+             l->refcount==2,"fixed reservation owns backing and ring");
+    FX_CHECK(loom_private_fixed_acquire(l,p,&fixed,&first)==-T_E_BUSY &&
+             burrow_handle_count(b)==handles+3,"duplicate token cannot acquire twice");
+    in.members[0]=(struct loom_service_pool_member){1,0,0,64};
+    FX_CHECK(loom_private_pool_prepare(l,p,&in,&pool)==-T_E_BUSY && !pool.incarnation,
+             "fixed alias excludes new pool");
+    in.members[0].offset=64;
+    FX_CHECK(!loom_private_pool_prepare(l,p,&in,&pool),"touching nonoverlap pool accepted");
+    fixed=(struct loom_service_pool_member){0,0,128,64};
+    FX_CHECK(loom_private_fixed_acquire(l,p,&fixed,&second)==-T_E_BUSY && !second.owner,
+             "provisional pool excludes new fixed alias");
+    fixed.offset=192;
+    FX_CHECK(!loom_private_fixed_acquire(l,p,&fixed,&second),"nonoverlap fixed accepted");
+    FX_CHECK(loom_private_fixed_acquire(l,p,&fixed,&extra)==-T_E_AGAIN && !extra.owner,
+             "fixed reservations bounded by existing CQ capacity");
+    FX_CHECK(!loom_private_pool_rollback(l,pool),"provisional pool removed");pool.incarnation=0;
+    FX_CHECK(!loom_private_register_buffers(l,p,NULL,0) &&
+             burrow_handle_count(b)==handles+2,"rebind preserves accepted fixed pins");
+    FX_CHECK(!sys_burrow_detach_for_proc(p,va,PAGE_SIZE),"fixed backing unmapped");va=0;
+    FX_CHECK(p->as->page_count==owner_pages+burrow_backing_pages(PAGE_SIZE),
+             "fixed pins retain unmapped backing charge");
+    FX_CHECK(!loom_private_fixed_release(l,&first) && l->refcount==2 &&
+             l->service_fixed_count==1,"first release drops one ring and backing pin");
+    FX_CHECK(loom_private_fixed_release(l,&first)==-T_E_NOENT && l->refcount==2,
+             "double release changes no ownership");
+    loom_exec_latch(l);
+    FX_CHECK(loom_private_fixed_acquire(l,p,&fixed,&extra)==-T_E_CANCELED,
+             "close refuses fixed admission");
+    // Last handle reference can leave while a local fixed borrower survives.
+    // Its final release settles the backing before queuing owner retirement.
+    struct Loom *borrowed=l;
+    loom_unref(l);l=NULL;
+    FX_CHECK(second.owner==borrowed && borrowed->refcount==1,
+             "fixed borrower retains owner after handle drop");
+    FX_CHECK(!loom_private_fixed_release(borrowed,&second),"final fixed release after close");
+done:
+    if (first.owner) (void)loom_private_fixed_release(first.owner,&first);
+    if (second.owner) (void)loom_private_fixed_release(second.owner,&second);
+    if (extra.owner) (void)loom_private_fixed_release(extra.owner,&extra);
+    if (l && pool.incarnation) (void)loom_private_pool_rollback(l,pool);
+    if (p && va) (void)sys_burrow_detach_for_proc(p,va,PAGE_SIZE);
+    if (l) loom_unref(l);
+    if (!lp_wait(goal) && !error) error="fixed owner retirement timed out";
+    if (p && !error && (p->as->page_count!=baseline || p->as->private_rings))
+        error="fixed retirement refunds exact image";
+    if (p) test_proc_drop(p);
+#undef FX_CHECK
+    return error;
+}
+void test_loom_private_fixed(void) {
+    const char *error=loom_private_fixed_fixture();
+    TEST_ASSERT(error==NULL,error);
+}
+
 void test_loom_private_pool_pins(void) {
     const char *error = loom_private_pool_pins_fixture();
     TEST_ASSERT(error == NULL, error);

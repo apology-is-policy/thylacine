@@ -46,6 +46,8 @@ int loom_pool_prepare(struct loom_pool_bank *, struct loom_pool *,
                       struct loom_service_ref, const struct loom_pool_extent *, u32);
 int loom_pool_publish(struct loom_pool *);
 int loom_pool_rollback(struct loom_pool_bank *, struct loom_pool *);
+// Invalid extents fail closed; otherwise compare canonical half-open intervals.
+bool loom_pool_extents_overlap(struct loom_pool_extent, struct loom_pool_extent);
 // Validated canonical fixed-buffer range overlaps even a RESERVED pool.
 bool loom_pool_conflicts(const struct loom_pool_bank *, struct loom_pool_extent);
 int loom_pool_stream_get(struct loom_pool *);

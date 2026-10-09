@@ -527,6 +527,8 @@ static void loom_private_destroy(struct Loom *l) {
     // path. A retirement must never enter blocking legacy clunk/join code.
     if (l->sqpoll || l->inflight_ops)
         extinction("private Loom reached legacy cleanup state");
+    if (l->service_fixed || l->service_fixed_count)
+        extinction("private Loom reached cleanup with fixed borrows");
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
         if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
 
@@ -1035,6 +1037,90 @@ int loom_private_register_buffers(struct Loom *l, struct Proc *p,
     return rc;
 }
 
+// Called with the retained private owner's lock held. Registration pins keep
+// the ANON direct-map base stable; no address-space lock or mapping lookup here.
+static int loom_private_extent_locked(struct Loom *l,
+                                      const struct loom_service_pool_member *m,
+                                      struct loom_pool_extent *out) {
+    if (m->reserved || m->buffer_index >= l->n_reg_buf || !m->length) {
+        return -T_E_INVAL;
+    }
+    const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
+    if (!b->burrow || b->burrow == l->ring ||
+        b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
+        m->offset > b->len || m->length > b->len - m->offset) {
+        return -T_E_INVAL;
+    }
+    // Integer subtraction avoids pointer-difference UB and overflowing
+    // user offset+length. Table pins guarantee this ANON direct-map base
+    // remains stable even after every original user mapping is detached.
+    u64 base = (u64)pa_to_kva(page_to_pa(b->burrow->pages));
+    u64 kva = (u64)b->kva;
+    if (kva < base || kva - base > b->burrow->size ||
+        b->len > b->burrow->size - (kva - base)) {
+        return -T_E_INVAL;
+    }
+    *out = (struct loom_pool_extent){b->burrow,kva - base + m->offset,m->length};
+    return 0;
+}
+
+static bool loom_private_fixed_conflicts_locked(struct Loom *l,
+                                                 struct loom_pool_extent e) {
+    for (struct loom_private_fixed *f = l->service_fixed; f; f = f->next)
+        if (loom_pool_extents_overlap(e,f->extent)) return true;
+    return false;
+}
+
+int loom_private_fixed_acquire(struct Loom *l, struct Proc *p,
+                               const struct loom_service_pool_member *m,
+                               struct loom_private_fixed *f) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !m || !f ||
+        !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    int rc = 0;
+    struct loom_pool_extent e;
+    spin_lock(&l->lock);
+    if (l->service_closing) rc = -T_E_CANCELED;
+    else if (f->owner || f->next || f->extent.backing || f->extent.offset || f->extent.length)
+        rc = -T_E_BUSY;
+    else if (l->service_fixed_count >= l->cq_entries) rc = -T_E_AGAIN;
+    else if ((rc = loom_private_extent_locked(l,m,&e)) == 0) {
+        if (loom_pool_conflicts(&l->service_pools->bank,e)) rc = -T_E_BUSY;
+        else {
+            // Existing CQ capacity bounds traversal. Actual request admission
+            // still owes its own shared terminal reservation before dispatch.
+            burrow_ref((struct Burrow *)e.backing);
+            loom_ref(l);
+            *f = (struct loom_private_fixed){l->service_fixed,l,e};
+            l->service_fixed = f;
+            ++l->service_fixed_count;
+        }
+    }
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+int loom_private_fixed_release(struct Loom *l, struct loom_private_fixed *f) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !f) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct loom_private_fixed **link = &l->service_fixed;
+    while (*link && *link != f) link = &(*link)->next;
+    if (!*link || f->owner != l) { spin_unlock(&l->lock); return -T_E_NOENT; }
+    struct Burrow *b = (struct Burrow *)f->extent.backing;
+    struct AddrSpace *as = l->service_as;
+    *link = f->next;
+    --l->service_fixed_count;
+    *f = (struct loom_private_fixed){0};
+    spin_unlock(&l->lock);
+    // A concurrent rebind can drop the last table pin after unlink. This pin
+    // still owns the pages; release it and settle before dropping the owner.
+    // No reference to f or l is used after the final Loom unref.
+    loom_private_drop_buffer(as,b);
+    loom_unref(l);
+    return 0;
+}
+
 // Internal pool transaction front-end. No public registration is enabled here.
 // The input is a single immutable kernel copy; output lives in kernel memory.
 // As for private buffer registration, the caller holds a Loom and creator Proc
@@ -1061,34 +1147,17 @@ int loom_private_pool_prepare(struct Loom *l, struct Proc *p,
     int rc = 0;
     spin_lock(&l->lock);
     if (l->service_closing) { rc = -T_E_CANCELED; goto unlock; }
-    // Private legacy dispatch is disabled. Refuse any unexpected legacy work,
-    // including held/local admission, instead of pretending its extents were
-    // checked. The future private engine must add exact accepted-fixed extent
-    // reservations under this SAME lock before it can be enabled.
+    // Private legacy dispatch is disabled. Refuse unexpected legacy work;
+    // private request callers must reserve their canonical fixed extents using
+    // the owner API above before releasing this lock for local dispatch.
     if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
         l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
     for (u32 i = 0; i < in->count; ++i) {
-        const struct loom_service_pool_member *m = &in->members[i];
-        if (m->reserved || m->buffer_index >= l->n_reg_buf || !m->length) {
-            rc = -T_E_INVAL; goto unlock;
+        rc = loom_private_extent_locked(l,&in->members[i],&extents[i]);
+        if (rc) goto unlock;
+        if (loom_private_fixed_conflicts_locked(l,extents[i])) {
+            rc = -T_E_BUSY; goto unlock;
         }
-        const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
-        if (!b->burrow || b->burrow == l->ring ||
-            b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
-            m->offset > b->len || m->length > b->len - m->offset) {
-            rc = -T_E_INVAL; goto unlock;
-        }
-        // Integer subtraction avoids pointer-difference UB and overflowing
-        // user offset+length. Table pins guarantee this ANON direct-map base
-        // remains stable even after every original user mapping is detached.
-        u64 base = (u64)pa_to_kva(page_to_pa(b->burrow->pages));
-        u64 kva = (u64)b->kva;
-        if (kva < base || kva - base > b->burrow->size ||
-            b->len > b->burrow->size - (kva - base)) {
-            rc = -T_E_INVAL; goto unlock;
-        }
-        extents[i] = (struct loom_pool_extent){b->burrow,
-                                              kva - base + m->offset,m->length};
     }
     rc = loom_service_pool_prepare(l->service_slots,l->service_pools,
                                    extents,in->count,out);

@@ -28,6 +28,7 @@
 #define THYLACINE_LOOM_H
 
 #include <thylacine/loom_service_abi.h> // reserved AS-0 surface; not enabled
+#include <thylacine/loom_service_pool.h> // canonical internal extent
 #include <thylacine/handle.h>     // rights_t
 #include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
 #include <thylacine/rendez.h>     // struct Rendez (the Loom-4c SQPOLL park)
@@ -398,6 +399,17 @@ struct loom_reg_buffer {
     u32            _pad;
 };
 
+// Embedded in a precharged private request, never user-addressable or copied.
+// The request owns this node exclusively until release returns. It survives
+// cancellation, held dispatch and completion until ALL local readers/writers
+// end. A linked node owns an independent Burrow pin and Loom reference.
+struct loom_private_fixed {
+    struct loom_private_fixed *next;
+    struct Loom *owner;
+    struct loom_pool_extent extent;
+};
+_Static_assert(sizeof(struct loom_private_fixed) == 40, "fixed extent borrow ledger");
+
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
@@ -450,6 +462,8 @@ struct Loom {
     // Private-only, one separately charged buddy page; identity/borrow ledger.
     struct loom_slot_table *service_slots;
     struct loom_service_pool_table *service_pools;
+    struct loom_private_fixed *service_fixed; // exact accepted fixed extents, under lock
+    u32 service_fixed_count; // bounded by existing CQ terminal-obligation capacity
     u64 service_creator;
     u32 service_metadata_pages;
     bool service_closing;              // serialized with result commit by lock
@@ -663,13 +677,24 @@ int loom_private_register_buffers(struct Loom *l, struct Proc *p,
 // Publish/rollback/reap are retained-Loom kernel-owner continuations; user-facing
 // authority/copyout dispatch is not enabled. Never mix these pin-owning pools
 // with raw ledger-only reservations. No fixed-I/O private engine is enabled;
-// exact accepted-fixed extent integration is still required before activation.
+// request/CQ admission and protocol integration are still required before activation.
 int loom_private_pool_prepare(struct Loom *, struct Proc *,
                               const struct loom_service_pool_create *,
                               struct loom_service_ref *);
 int loom_private_pool_publish(struct Loom *, struct loom_service_ref);
 int loom_private_pool_rollback(struct Loom *, struct loom_service_ref);
 int loom_private_pool_reap(struct Loom *, struct loom_service_ref);
+// Internal fixed-buffer reservation: immutable kernel member snapshot, retained
+// Loom and creator Proc in its stable syscall image, as for private registration.
+// Caller has precharged a request and must
+// reserve its terminal obligation before making it runnable. The zeroed node
+// stays alive through held/running/cancelled local users; release only after
+// those users end. These APIs never dispatch or publish a completion.
+int loom_private_fixed_acquire(struct Loom *, struct Proc *,
+                               const struct loom_service_pool_member *,
+                               struct loom_private_fixed *);
+int loom_private_fixed_release(struct Loom *, struct loom_private_fixed *);
+
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);

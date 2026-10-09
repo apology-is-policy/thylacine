@@ -1,0 +1,11 @@
+--- control
++++ omit-owner-drop
+@@ -136,7 +136,7 @@
+     // still owns the pages; release it and settle before dropping the owner.
+     // No reference to f or l is used after the final Loom unref.
+     loom_private_drop_buffer(as,b);
+-    loom_unref(l);
++    if(false) loom_unref(l);
+     return 0;
+ }
+ int loom_private_pool_prepare(struct Loom *l, struct Proc *p,

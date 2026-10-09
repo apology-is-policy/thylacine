@@ -1,0 +1,11 @@
+--- control
++++ allow-fixed-admission
+@@ -111,7 +111,7 @@
+     // Private legacy dispatch is disabled. Refuse unexpected legacy work;
+     // private request callers must reserve their canonical fixed extents using
+     // the owner API above before releasing this lock for local dispatch.
+-    if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
++    if (l->inflight_ops || l->async_inflight || l->chain ||
+         l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
+     for (u32 i = 0; i < in->count; ++i) {
+         rc = loom_private_extent_locked(l,&in->members[i],&extents[i]);

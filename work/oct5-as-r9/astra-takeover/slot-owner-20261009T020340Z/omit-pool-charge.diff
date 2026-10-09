@@ -1,0 +1,11 @@
+--- control
++++ omit-pool-charge
+@@ -114,7 +114,7 @@
+     _Static_assert(sizeof(struct loom_service_pool_table) > SLUB_MAX_OBJECT_SIZE,
+                    "pool table uses buddy kmalloc");
+     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+-        + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table));
++        ;
+     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
+     bool exempt = proc_resource_exempt(p);
+     spin_lock(&as->lock);

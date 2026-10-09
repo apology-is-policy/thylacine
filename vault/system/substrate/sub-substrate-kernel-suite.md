@@ -253,3 +253,10 @@ rollback identity burning, stale/busy refusal, unmap/reap/refund and close befor
 publication through the internal owner front-end. The denominator is now 1841;
 one source-and-diff recorded SMP1 boot passed. Full matrix qualification of the
 new source is pending; public service dispatch remains disabled.
+
+
+October 9 adds loom.private_fixed, checking both physical-alias exclusion
+directions, provisional pools, duplicate/capacity refusal, table replacement,
+unmap, double release and a final fixed borrower retaining the closed owner.
+The new denominator is 1842; its source-and-diff recorded SMP1 boot passed.
+Protocol/worker integration and the new source's full matrix remain pending.

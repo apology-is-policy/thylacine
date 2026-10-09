@@ -1742,3 +1742,63 @@ protocol/worker integration remain pending. Pi/A72/KVM, guest final allocator
 reclamation and absent optional Venus/Vulkan probes remain unqualified.
 Self-review only. Async remains ahead of MM0-MM4; no Main landing, private
 async/clipboard activation or removal of the 128 MiB protection.
+
+
+## October 9: internal fixed-buffer reservations and pool exclusion
+
+Private fixed-buffer borrows now use a 40-byte node embedded in a caller-owned,
+precharged request. The caller must supply an immutable kernel member snapshot
+from a retained creator in its stable syscall image. Admission resolves through
+the same canonical registered-buffer helper as pools, checks even provisional
+pool extents under the Loom lock, and takes one Burrow pin and one Loom reference.
+Pool preparation checks these accepted fixed extents under that same lock.
+Touching/disjoint intervals remain legal; different registered aliases cannot
+bypass exclusion. Duplicate nodes and reservations exceeding existing CQ
+terminal-obligation capacity are refused. This bounds list traversal without
+raising any existing limit. Actual shared terminal admission remains the future
+request engine's obligation before dispatch; this helper does not dispatch.
+
+Release requires all held/running/cancelled local readers and writers to end.
+It verifies exact node membership, unlinks/clears under the Loom lock, then drops
+backing and settles against the retained image before releasing the Loom ref.
+Wrong-owner/double release changes nothing. Rebinding the registered table does
+not lose accepted fixed pins or extents; final close cannot retire the owner
+while any fixed borrower remains. The destructor fails closed if the ledger is
+nonempty despite reaching zero references. No allocation, usercopy, worker wait
+or final object destruction occurs inside the Loom lock.
+
+Self-review: list/node ownership is kernel-only and exclusive to the retaining
+request; no user token is trusted. Backing/owner refs are acquired before list
+publication and released only after unlink. The removal path never uses the node
+or Loom after its final unref. The common extent resolver avoids divergent alias
+arithmetic; overlap uses half-open physical intervals and rejects invalid ranges.
+Worst-case pool preparation scans at most 64 members times existing CQ capacity;
+progress/latency qualification with the actual request engine remains owed.
+Native DWARF reports Loom 2888 bytes (0xb48), still one charged buddy page; fixed
+nodes must be included in future request-storage charges, not separately allocated
+by this helper. Existing four owner metadata pages remain unchanged.
+
+ASan/UBSan private-fixed-20261009T020251Z passes control plus ten exact mutations
+for image/creator, backing/owner pins, both exclusion directions, capacity, both
+release obligations and close refusal. Refreshed canonical pool owner controls
+(private-pool-pins-20261009T020300Z) pass control plus ten exact mutants. Refreshed
+slot-owner-20261009T020340Z passes nine controls and ten mutants, and
+final-reclaim-20261009T020349Z passes both owner-drop orders and six mutants.
+These use checked host doubles and do not establish concurrent protocol or
+guest allocator correctness. Existing formal models are unchanged; prior model
+results are not presented as a proof of the new C admission/retention path.
+
+Fresh native default SMP1 passed 1842/1842, including loom.private_fixed, pool
+pins/buffers/owner fixtures, D7 overlap, all twenty distinct cycles and banner.
+Evidence: astra-takeover/private-fixed-diagnostic-20261009T020341Z captures
+93db78ecd plus exact tested diff, rebuilt ELF/bin, six stable input hashes and
+raw logs. The final header change only clarifies the immutable/stable-image
+caller precondition. Native link passed; full clean-source Mac matrix remains
+pending for this new source. Previous 50/50 is limited to 6200c9de0.
+
+Remaining async work includes actual request/CQ admission and local-user
+release wiring, target/scope/fid ownership, copyout/authority dispatch and bounded
+protocol/worker retirement. No public private-service activation, Main landing,
+clipboard enablement or removal of 128 MiB protection. Pi/A72/KVM and guest final
+allocator reclamation remain open. Continue async before MM0-MM4; self-review
+only, not an independent audit.

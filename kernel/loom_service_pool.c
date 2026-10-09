@@ -17,6 +17,10 @@ static bool overlaps(struct loom_pool_extent a, struct loom_pool_extent b) {
     return a.backing == b.backing && a.offset < b.offset + b.length &&
            b.offset < a.offset + a.length;
 }
+bool loom_pool_extents_overlap(struct loom_pool_extent a, struct loom_pool_extent b) {
+    return !valid_extent(a) || !valid_extent(b) || overlaps(a,b);
+}
+
 static bool owns(const struct loom_pool_cell *c, const struct loom_pool *p) {
     return c->phase != LMEMBER_FREE && same_ref(c->pool, p->ref);
 }

@@ -1,0 +1,11 @@
+--- control
++++ omit-drop
+@@ -159,7 +159,7 @@
+     spin_unlock(&l->lock);
+     if (!rc)
+         for (u32 i = 0; i < count; ++i)
+-            loom_private_drop_buffer(l->service_as,pins[i]);
++            if (false) loom_private_drop_buffer(l->service_as,pins[i]);
+     return rc;
+ }
+ int loom_private_pool_rollback(struct Loom *l, struct loom_service_ref ref) {
