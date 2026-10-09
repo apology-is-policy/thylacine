@@ -2828,3 +2828,24 @@ are recorded; canonical implementation is now in kernel/. Protected Astra files
 and clean Stratum pin rechecked. Private activation/clipboard remain disabled,
 Main untouched,128MiB protection retained. Pi/A72/KVM, final guest allocator
 reclamation and absent optional graphics remain unqualified. Self-review only.
+
+## October 9: full protocol-preparation gate verified after TUI migration
+
+Source fa7e6c5bcdf0d8bdffecdbca7720f95e3cd1d20f passed all 50 Mac HVF boots
+in current-gate-20261009T075147Z: default SMP1/4/8 and kernel UBSan SMP4/8,
+ten each. Every boot passed 1848/1848 including loom.private_protocol,
+D7 overlap, twenty distinct login/logout cycles and boot banner. Both runner
+and gate exited zero. Verified 100 raw serial/harness logs and ten captured
+input hashes; complete generation now PINNED. Minimum recorded admission
+14708 MiB, above the unchanged 8192 MiB floor. Results are in
+astra-takeover/current-gate-20261009T075147Z-result.json.
+
+The TUI initially permitted only read-only access to these project checkouts;
+operator restored full access and the same verifier has now retained the
+canonical evidence and completed flight record. No new implementation or gate
+ran during that access interruption. The CONNECT draft remains uninstalled
+and unqualified. Continue scope/request publication, bounded progress and
+local retirement, then AS-3/4 and MM0-MM4. This gate qualifies charged
+unpublished preparation only, not active private runtime. No Main landing,
+private async/clipboard activation or 128 MiB protection change. Self-review
+only; no independent audit.
