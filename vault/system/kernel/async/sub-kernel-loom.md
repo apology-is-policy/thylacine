@@ -1859,3 +1859,24 @@ Aux checkouts. No source, release outputs, run evidence or pinned generation was
 removed. native-debug-cache-reclaim-20261009T0443Z.json inventories exact paths
 and files; measured free space rose from 8164 to 8737 MiB. Full gate admission
 will independently enforce the unchanged 8192 MiB floor.
+
+
+## October 9: charged node owner full Mac gate verified
+
+Exact source 262ff29d3fe306dd700481f36d1fa4dd40aaede0 passed 50/50 Mac HVF
+boots in current-gate-20261009T044430Z: default SMP1/4/8 and UBSan SMP4/8, ten
+each. Every boot passed 1844/1844, including charged private owner/unused-node
+cleanup and existing node/target/fixed/pool/buffer fixtures, D7 overlap, twenty
+distinct login cycles and banner. Both exits were zero; verified 100 raw logs
+and all ten input hashes, and marked inputs PINNED. Minimum recorded admission
+free space was 8208 MiB, above the unchanged 8192 floor. Mac lease released.
+Result: astra-takeover/current-gate-20261009T044430Z-result.json.
+
+This is internal owner/metadata coverage, not complete private async support.
+Actual scope/fid protocol resources and retirement, request/CQ admission,
+usercopy/authority and bounded worker progress remain next before MM0-MM4.
+Pi/A72/KVM, final guest allocator reclamation and absent optional graphics probes
+remain unqualified. Self-review only. Keep private async/clipboard disabled,
+128 MiB protection and all pinned evidence; no Main landing. Current free disk
+is only about 8 GiB: restore headroom before the next build/gate without lowering
+admission or removing canonical evidence.
