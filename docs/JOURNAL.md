@@ -1,6 +1,25 @@
 # The autonomous-run journal
 
 
+## October 9: private executor full Mac qualification
+
+Exact source f719ee4a3429f99cbd08a552dcdaedb54c5906ff passes50/50 Mac HVF
+boots in current-gate-20261009T211533Z: default SMP1/4/8 and UBSan SMP4/8,
+ten each. Every boot passes1853/1853 including the readiness executor, repaired
+close lifetime, D7 overlap,20 distinct login/logout cycles and boot banner.
+Runner and raw verifier exited0. Preserved100 serial/harness logs; ten pinned
+input hashes verified. Minimum recorded admission9133MiB, above8192MiB floor.
+Result: work/oct5-as-r9/astra-takeover/current-gate-20261009T211533Z-result.json.
+
+This qualifies only the recorded executor source. The isolated operation
+constructor/request-owner ledger and copied-SQE/reply helpers have host controls
+and ARM64 checks; native storage-owner fixture1854 is prepared but unrun.
+Next test that storage prerequisite, then integrate real RPC admission, fid and
+buffer ownership, callbacks and readiness. General private operations, AS3/4 and
+MM0-MM4 remain. No Main/private async/clipboard activation or128MiB change.
+Single-agent self-review, not independent audit; Pi/A72/KVM remain unrun.
+
+
 ## October 9: readiness-aware internal private executor
 
 The existing per-ring SQPOLL thread now has an internal private handshake

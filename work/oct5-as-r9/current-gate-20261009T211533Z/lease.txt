@@ -1,0 +1,4 @@
+mac   HELD by you for 3m, 1.9h left
+        why: Astra readiness executor install build and fresh native qualification
+pi    FREE
+disk: 9.4 GiB available at /Users/northkillpd/projects/thylacine-astra
