@@ -55,6 +55,20 @@ int loom_request_prepare(struct loom_request_table *t, struct loom_slot_table *s
     }
     return -T_E_NOSPC;
 }
+int loom_request_hold_owner(struct loom_request_table *t, struct loom_request_ref ref) {
+    struct loom_service_request *r=request_exact(t,ref);
+    if (!r) return -T_E_NOENT;
+    if (r->phase!=LREQ_PREPARED || r->owners || r->borrows) return -T_E_BUSY;
+    r->owners=1;
+    return 0;
+}
+int loom_request_drop_owner(struct loom_request_table *t, struct loom_request_ref ref) {
+    struct loom_service_request *r=request_exact(t,ref);
+    if (!r) return -T_E_NOENT;
+    if (r->owners!=1 || r->borrows || r->phase==LREQ_ACTIVE) return -T_E_BUSY;
+    r->owners=0;
+    return 0;
+}
 int loom_request_check_admit(struct loom_request_table *t, struct loom_slot_table *s,
                        struct loom_service_node_table *n, struct loom_request_ref ref, u64 now) {
     struct loom_service_request *r = request_exact(t,ref);
@@ -85,7 +99,7 @@ static int request_remove(struct loom_request_table *t, struct loom_slot_table *
                            struct loom_request_ref ref, u32 phase) {
     struct loom_service_request *r = request_exact(t,ref);
     if (!r) return -T_E_NOENT;
-    if (r->phase != phase || r->borrows) return -T_E_BUSY;
+    if (r->phase != phase || r->borrows || r->owners) return -T_E_BUSY;
     if (!t->occupied || !request_scope_held(s,r->scope)) return -T_E_INVAL;
     struct loom_service_ref scope = r->scope;
     *r = (struct loom_service_request){0};
@@ -165,7 +179,7 @@ bool loom_requests_empty(const struct loom_request_table *t) {
     for (u32 i=0;i<t->capacity;++i) {
         const struct loom_service_request *r=&t->records[i];
         if (r->phase != LREQ_FREE || r->identity || r->scope.incarnation || r->scope.slot ||
-            r->scope.reserved || r->borrows || r->user_data || r->deadline || r->result || r->reserved)
+            r->scope.reserved || r->borrows || r->user_data || r->deadline || r->result || r->owners)
             return false;
     }
     return true;

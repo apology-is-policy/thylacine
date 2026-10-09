@@ -1,0 +1,50 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:13:61: error: redefinition of 'gets' as different kind of symbol
+   13 | static int locks,refs=1,pins,pages,live,fault,freed,refunds,gets;
+      |                                                             ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/_stdio.h:262:18: note: previous definition is here
+  262 | char *_LIBC_CSTR        gets(char *_LIBC_UNSAFE_INDEXABLE) _LIBC_PTRCHECK_REPLACED(fgets);
+      |                         ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:24:133: error: 'gets' is deprecated: This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of gets(3), it is highly recommended that you use fgets(3) instead. [-Werror,-Wdeprecated-declarations]
+   24 | static int loom_engine_get(struct Loom*x,struct loom_service_ref s,struct loom_service_protocol**p){C(x==&l&&!locks,"get boundary");gets++;if(fault==2 || s.incarnation!=scope.incarnation)return -T_E_NOENT;pins++;*p=&protocol;return 0;}
+      |                                                                                                                                     ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/_stdio.h:260:1: note: 'gets' has been explicitly marked deprecated here
+  260 | __deprecated_msg("This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of gets(3), it is highly recommended that you use fgets(3) instead.")
+      | ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sys/cdefs.h:218:48: note: expanded from macro '__deprecated_msg'
+  218 |         #define __deprecated_msg(_msg) __attribute__((__deprecated__(_msg)))
+      |                                                       ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:24:137: error: cannot increment value of type 'char *(char *)'
+   24 | static int loom_engine_get(struct Loom*x,struct loom_service_ref s,struct loom_service_protocol**p){C(x==&l&&!locks,"get boundary");gets++;if(fault==2 || s.incarnation!=scope.incarnation)return -T_E_NOENT;pins++;*p=&protocol;return 0;}
+      |                                                                                                                                     ~~~~^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:136:230: error: 'gets' is deprecated: This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of gets(3), it is highly recommended that you use fgets(3) instead. [-Werror,-Wdeprecated-declarations]
+  136 | static void reset(int f){C(!live&&!pages&&!pins&&refs==1,"previous resources released");memset(&l,0,sizeof(l));memset(&slots,0,sizeof(slots));memset(&nodes,0,sizeof(nodes));memset(records,0,sizeof(records));fault=f;freed=refunds=gets=0;l.magic=LOOM_MAGIC;l.service_creator=123;l.service_as=&as;l.service_slots=&slots;l.service_nodes=&nodes;l.service_requests=(struct loom_request_table){.records=records,.capacity=2};C(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_SCOPE,(struct loom_service_ref){0},&scope),"scope prepare");C(!loom_service_node_publish(&slots,&nodes,scope),"scope publish");nodes.nodes[scope.slot].state=LOOM_SERVICE_READY;protocol=(struct loom_service_protocol){.connect_bound=true};}
+      |                                                                                                                                                                                                                                      ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/_stdio.h:260:1: note: 'gets' has been explicitly marked deprecated here
+  260 | __deprecated_msg("This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of gets(3), it is highly recommended that you use fgets(3) instead.")
+      | ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sys/cdefs.h:218:48: note: expanded from macro '__deprecated_msg'
+  218 |         #define __deprecated_msg(_msg) __attribute__((__deprecated__(_msg)))
+      |                                                       ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:136:234: error: non-object type 'char *(char *)' is not assignable
+  136 | static void reset(int f){C(!live&&!pages&&!pins&&refs==1,"previous resources released");memset(&l,0,sizeof(l));memset(&slots,0,sizeof(slots));memset(&nodes,0,sizeof(nodes));memset(records,0,sizeof(records));fault=f;freed=refunds=gets=0;l.magic=LOOM_MAGIC;l.service_creator=123;l.service_as=&as;l.service_slots=&slots;l.service_nodes=&nodes;l.service_requests=(struct loom_request_table){.records=records,.capacity=2};C(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_SCOPE,(struct loom_service_ref){0},&scope),"scope prepare");C(!loom_service_node_publish(&slots,&nodes,scope),"scope publish");nodes.nodes[scope.slot].state=LOOM_SERVICE_READY;protocol=(struct loom_service_protocol){.connect_bound=true};}
+      |                                                                                                                                                                                                                                      ~~~~^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:149:183: error: 'gets' is deprecated: This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of gets(3), it is highly recommended that you use fgets(3) instead. [-Werror,-Wdeprecated-declarations]
+  149 |  reset(0);struct loom_service_operation*op=(void*)1;C(loom_private_operation_prepare(&l,scope,0,10,10,&op)==-T_E_TIMEDOUT,"expired admission refused");C(op==(void*)1&&!pins&&!live&&!gets,"expired output untouched");
+      |                                                                                                                                                                                       ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/_stdio.h:260:1: note: 'gets' has been explicitly marked deprecated here
+  260 | __deprecated_msg("This function is provided for compatibility reasons only.  Due to security concerns inherent in the design of gets(3), it is highly recommended that you use fgets(3) instead.")
+      | ^
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/sys/cdefs.h:218:48: note: expanded from macro '__deprecated_msg'
+  218 |         #define __deprecated_msg(_msg) __attribute__((__deprecated__(_msg)))
+      |                                                       ^
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:149:183: error: address of function 'gets' will always evaluate to 'true' [-Werror,-Wpointer-bool-conversion]
+  149 |  reset(0);struct loom_service_operation*op=(void*)1;C(loom_private_operation_prepare(&l,scope,0,10,10,&op)==-T_E_TIMEDOUT,"expired admission refused");C(op==(void*)1&&!pins&&!live&&!gets,"expired output untouched");
+      |                                                                                                                                                                                      ~^~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:149:183: note: prefix with the address-of operator to silence this warning
+  149 |  reset(0);struct loom_service_operation*op=(void*)1;C(loom_private_operation_prepare(&l,scope,0,10,10,&op)==-T_E_TIMEDOUT,"expired admission refused");C(op==(void*)1&&!pins&&!live&&!gets,"expired output untouched");
+      |                                                                                                                                                                                       ^
+      |                                                                                                                                                                                       &
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T214411Z/clean.c:11:24: note: expanded from macro 'C'
+   11 | #define C(x,m) do{if(!(x)){puts(m);exit(11);}}while(0)
+      |                        ^
+7 errors generated.

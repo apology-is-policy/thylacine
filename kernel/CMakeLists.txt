@@ -69,6 +69,9 @@ set(KERNEL_SRCS
     loom_service_slots.c
     loom_service_nodes.c
     loom_service_requests.c
+    loom_service_operation.c
+    loom_service_reply.c
+    loom_service_decode.c
     loom_service_protocol.c
     loom_service_control.c
     loom_service_close_queue.c

@@ -1,0 +1,28 @@
+{
+  "owner": "astra",
+  "state": "installed-native-storage-verified",
+  "source_base": "f719ee4a3429f99cbd08a552dcdaedb54c5906ff",
+  "installed": true,
+  "files": {
+    "kernel/include/thylacine/loom_service_decode.h": "fd8e0615e111cc918e6281dc363ca689ac91ff934f30b6c6a160bf96bedec696",
+    "kernel/include/thylacine/loom_service_reply.h": "46da857bd6dacdd0576ba3f01c2f0c55bc6cbacc56ade8da1f7c7ffbd4fd2465",
+    "kernel/loom_service_decode.c": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/include/thylacine/loom_service_requests.h": "1a4138550a357d10ca02617e88d6b0caff34dfe5d6676c643dbdf96c398d0ed0",
+    "kernel/loom_service_operation.c": "4fa87ee452134a87a74af6e9000c997586166c87bfbd8ace7fe46bb623473e54",
+    "kernel/include/thylacine/loom_service_operation.h": "44d25456face934f996dab13a54fe70a13b74b48b3006b21c9af3ae4e085afc0",
+    "kernel/test/test_loom.c": "34cb71d1256614d1f6a83ccecd0dc3d94b164c000cb843147eb09fbfbe95fe99",
+    "kernel/test/test.c": "02ba8974c4294fe2e1ad5ddea9eed5291e98a3882ddc4173bfe3b5ef3dc6515d",
+    "kernel/CMakeLists.txt": "039e6a924fcc6305ffd3a2e25712fece2440f9877d5bd7d8dee68536102e02f4"
+  },
+  "decode_run": "decode-controls-20261009T211810Z",
+  "reply_run": "reply-controls-20261009T215851Z",
+  "limits": "Uninstalled helpers and PREPARED-only storage; no RPC admission/native/runtime qualification.",
+  "owner_run": "owner-controls-20261009T213908Z",
+  "request_regression": "request-regression-20261009T213932Z",
+  "operation_run": "operation-controls-20261009T215144Z",
+  "native": "CPU1 1854 tests, real normal/bulk storage lifecycle. No RPC dispatch/full Mac qualification.",
+  "reviewed_syntax": "reviewed-syntax.json",
+  "native_run": "work/oct5-as-r9/astra-takeover/operation-storage-native-20261009T215931Z"
+}

@@ -1,0 +1,2 @@
+terminal borrow prevents physical release
+Assertion failed: (0), function main, file borrowed-drop.c, line 240.

@@ -9,7 +9,7 @@ struct loom_service_request {
     struct loom_service_ref scope;
     u64 identity, user_data, deadline;
     s32 result;
-    u32 phase, borrows, reserved;
+    u32 phase, borrows, owners; // one physical RPC-storage owner, independent of completion
 };
 struct loom_request_table {
     struct loom_service_request *records;
@@ -28,6 +28,15 @@ _Static_assert(sizeof(struct loom_request_table) == 32, "request table storage")
 int loom_request_prepare(struct loom_request_table *, struct loom_slot_table *,
                          struct loom_service_node_table *, struct loom_service_ref,
                          u64 user_data, u64 deadline, u64 now, struct loom_request_ref *);
+// Attach the sole physical RPC-storage owner while PREPARED and still under Ll.
+// Hold before releasing Ll to allocate/initialize storage. Delivery/abort cannot
+// permit record reuse while this owner exists. No independent parser borrow is
+// implied. Caller keeps its Loom/protocol roots through physical destruction.
+int loom_request_hold_owner(struct loom_request_table *, struct loom_request_ref);
+// After the actual owner storage is destroyed, using a saved exact ref. Requires
+// no ACTIVE operation or remaining parser/buffer borrows; does not consume
+// terminal or rewind ID.
+int loom_request_drop_owner(struct loom_request_table *, struct loom_request_ref);
 // Same admission predicates, without mutation, for locked native publication.
 // Caller must hold the SAME lock continuously from check through admit.
 int loom_request_check_admit(struct loom_request_table *, struct loom_slot_table *,

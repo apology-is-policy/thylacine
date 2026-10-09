@@ -1,0 +1,61 @@
+Canonical f719ee4a3 is frozen for current-gate-20261009T211533Z.
+Read ../executor-current-flight.json. Runner41037, verifier41099; never build,
+edit tracked source or duplicate a gate while those jobs run. This directory is
+an isolated candidate, not installed. Read self-review.txt, kernel decoder,
+decode-controls-20261009T211810Z/result.json and syntax-result.json.
+
+Next operation integration working set:
+- docs/ASYNC-SERVICE-ABI.md:76-107 and ASYNC-SERVICE-BUFFERS.md ownership rules.
+- kernel/9p_client.c:1360-1557: submit_async already queues nonblocking TX for
+  progress clients; progress_step alternates TX/RX and demuxes at most one frame.
+  Completion callbacks run under client lock. Do not invoke Loom-lock-to-client
+  paths while allowing callback client-lock-to-Loom inversion. Use a staged
+  callback/result boundary and retain its request/parser lifetime until commit.
+- kernel/loom_service_connect.c:166-252 and kernel/loom_service_engine.c interest:
+  READY currently has no RPC progression. Extend readiness to actual pending TX,
+  expected RX and earliest active operation deadline without reviving the old
+  CONNECT timer. Preserve one-response/msize quantum and peer fairness.
+- kernel/loom_service_requests.c and loom_service_nodes.c: terminal records pin
+  exact scope; distinguish request completion/delivery/reap from protocol and
+  derived fid lifetime. Reserve terminal/destination before any Twalk bytes.
+- kernel/loom.c fixed/pool primitives: canonical backing overlap exclusion and
+  borrow release precede reuse; no user-writable index is trusted after copy.
+- Existing p9 codec/session build and DAC/stat paths: reuse wire and permission
+  checks but never call their blocking wrappers from private worker/ENTER.
+
+Implement internal operation owner before public usercopy/dispatch: charged
+bounded preallocated p9_rpc/result metadata, exact source/destination refs,
+callback handoff, fixed-buffer pin/copy boundaries, cancellation and scope-wide
+absolute timeout. LOPEN requires asynchronous stat/DAC before access publication;
+WALK creates only the pre-reserved destination with abort serialized success.
+CLUNK root is refused; derived fid retires after outstanding borrows. Abort
+never waits for a remote clunk/flush. Pooled READ claims before Tread and keeps
+payload leases independent from terminal/CQ/scope retirement, with no allocation
+in callback/abort/return. Exhaustion, close/exec, late callback, stale fid and
+fullCQ mutation witnesses are required. Do not present ABI shape tests as any
+of these runtime guarantees. General operations and AS3/4 precede MM0-MM4.
+
+Additional prepared helper: kernel/loom_service_reply.c and matching header;
+read reply-controls-20261009T212855Z/result.json and reply-syntax-result.json.
+Do not call capture under Ll or conflate captured success with committed success.
+The driver may stage into owned storage while Ll is dropped; callback never
+escapes a recv-buffer pointer. Before the next RPC/client quantum, commit or
+reject under Ll, settle exact fid/buffer/terminal ownership, then drop physical
+borrows outside locks. For abort, complete p9 abort callbacks before declaring
+protocol locally retired. A constructor/admission may synchronously callback
+with error; publish stable owner/RPC storage before invoking submit_async.
+
+New request physical-owner ledger and charged operation constructor prepared.
+See owner-controls-20261009T213908Z, request-regression-20261009T213932Z and
+operation-controls-20261009T214438Z. Actual ARM64 syntax results owner/operation
+are rc0. No canonical changes. Constructor is exclusive PREPARED-only storage:
+future operation list/admission/callback lifetime must be implemented before
+using it in dispatch. Destruction holds the request physical owner through
+free/refund; drops the exact engine entry and retained Loom/image last.
+Do not install helpers alone or run historical installers. Next header/source
+loom_service_operation.c/.h are part of this isolated reviewed draft.
+
+Read rpc-integration-plan.txt for concrete remaining Ll/client/owner/FID/readiness
+integration dependencies. This is a working plan, not implementation evidence.
+Native storage fixture is prepared with1854 tests; reviewed-syntax.json and
+operation-controls-20261009T215144Z qualify only the isolated source checks.

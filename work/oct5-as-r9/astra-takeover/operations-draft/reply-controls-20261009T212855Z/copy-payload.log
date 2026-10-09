@@ -1,0 +1,1 @@
+Assertion failed: (result.result==4 && !memcmp(src,dest,4) && dest[4]==0xcc), function main, file copy-payload.c, line 69.

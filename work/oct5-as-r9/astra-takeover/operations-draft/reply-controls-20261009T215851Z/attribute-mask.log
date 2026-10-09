@@ -1,0 +1,2 @@
+missing DAC attribute: invalid capture mutated output/payload or succeeded (0)
+Assertion failed: (0), function bad, file attribute-mask.c, line 71.

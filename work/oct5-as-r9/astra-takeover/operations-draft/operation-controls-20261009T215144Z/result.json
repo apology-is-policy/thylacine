@@ -1,0 +1,50 @@
+{
+  "source_sha256": "4fa87ee452134a87a74af6e9000c997586166c87bfbd8ace7fe46bb623473e54",
+  "cases": [
+    {
+      "case": "clean",
+      "rc": 0
+    },
+    {
+      "case": "early-owner-drop",
+      "rc": 11
+    },
+    {
+      "case": "early-refund",
+      "rc": 11
+    },
+    {
+      "case": "slab-allocation",
+      "rc": 11
+    },
+    {
+      "case": "omit-ref",
+      "rc": 11
+    },
+    {
+      "case": "omit-owner",
+      "rc": 11
+    },
+    {
+      "case": "expiry",
+      "rc": 11
+    },
+    {
+      "case": "no-postcheck",
+      "rc": 11
+    },
+    {
+      "case": "active-release",
+      "rc": 11
+    },
+    {
+      "case": "callback-release",
+      "rc": 11
+    },
+    {
+      "case": "stale-release",
+      "rc": 11
+    }
+  ],
+  "limits": "Actual constructor+ledger code with explicit host allocator/image/engine/layout doubles; no native physical accounting, scheduler or RPC integration proof."
+}

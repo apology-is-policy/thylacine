@@ -1,0 +1,13 @@
+PASS clean
+PASS source-generation
+PASS source-bound
+PASS reserved
+PASS flags
+PASS destination-generation
+PASS same-slot
+PASS buffer-overflow
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/check-decode.py", line 105, in <module>
+    assert (r.returncode==0)==(name=='clean'),(name,r.returncode)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('component-size', 0)

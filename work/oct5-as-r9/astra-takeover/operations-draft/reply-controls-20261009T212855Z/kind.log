@@ -1,0 +1,2 @@
+wrong operation: invalid capture mutated output/payload or succeeded (0)
+Assertion failed: (0), function bad, file kind.c, line 64.

@@ -1,0 +1,1 @@
+clang: error: no such sysroot directory: '/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk' [-Werror,-Wmissing-sysroot]

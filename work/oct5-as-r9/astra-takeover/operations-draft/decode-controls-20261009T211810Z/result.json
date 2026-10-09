@@ -1,0 +1,62 @@
+{
+  "source_sha256": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273",
+  "cases": [
+    {
+      "case": "clean",
+      "rc": 0
+    },
+    {
+      "case": "source-generation",
+      "rc": -6
+    },
+    {
+      "case": "source-bound",
+      "rc": -6
+    },
+    {
+      "case": "reserved",
+      "rc": -6
+    },
+    {
+      "case": "flags",
+      "rc": -6
+    },
+    {
+      "case": "destination-generation",
+      "rc": -6
+    },
+    {
+      "case": "same-slot",
+      "rc": -6
+    },
+    {
+      "case": "buffer-overflow",
+      "rc": -6
+    },
+    {
+      "case": "component-size",
+      "rc": -6
+    },
+    {
+      "case": "open-mode",
+      "rc": -6
+    },
+    {
+      "case": "pool-feature",
+      "rc": -6
+    },
+    {
+      "case": "pool-empty",
+      "rc": -6
+    },
+    {
+      "case": "path-slash",
+      "rc": -6
+    },
+    {
+      "case": "path-dot",
+      "rc": -6
+    }
+  ],
+  "limits": "Isolated uninstalled ABI shape decoder; no admission, authority, RPC, payload, native or dispatch qualification."
+}

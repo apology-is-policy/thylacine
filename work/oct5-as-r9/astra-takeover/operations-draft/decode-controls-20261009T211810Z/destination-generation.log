@@ -1,0 +1,2 @@
+destination generation: got0 want-22
+Assertion failed: (0), function check, file destination-generation.c, line 73.

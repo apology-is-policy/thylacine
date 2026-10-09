@@ -1,0 +1,1 @@
+Assertion failed: (result.attr.uid==123), function main, file copy-metadata.c, line 102.

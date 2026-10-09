@@ -1,3 +1,4 @@
+#include <thylacine/loom_service_operation.h>
 #include <thylacine/loom_service_control.h>
 #include <thylacine/loom_service_connect.h>
 #include <thylacine/srvconn.h>
@@ -2856,6 +2857,85 @@ done:
     return error;
 }
 
+
+// Real private protocol/storage owner. No general RPC submission is enabled.
+static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creator,
+    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
+    const char *error=NULL;
+    struct loom_service_ref scope={0};
+    struct loom_service_protocol *prepared=NULL,*held=NULL;
+    struct loom_service_operation *op=NULL,*other=NULL;
+    struct SrvConn *server=NULL;
+    struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
+    u32 old_budget=creator->as->page_budget;
+#define OS(c,m) do{if(!(c)){error=m;goto done;}}while(0)
+    OS(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
+       "operation storage exact scope reservation");
+    OS(!loom_private_connect_prepare(l,scope,target,901,0,0,&prepared),"operation storage protocol");
+    OS(!loom_engine_adopt(prepared,0),"operation storage adopts protocol");prepared=NULL;
+    OS(!loom_engine_get(l,scope,&held),"operation storage observes exact protocol");
+    server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
+    OS(server==held->admission.conn,"operation storage actual native peer");
+    OS(!lc_reply(server,P9_TVERSION,P9_NOTAG) && !lc_reply(server,P9_TATTACH,0),
+       "operation storage handshake replies");
+    for(u32 i=0;i<32 && l->service_nodes->nodes[scope.slot].state!=LOOM_SERVICE_READY;++i)
+        (void)loom_engine_visit(l,1+i);
+    OS(l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_READY,
+       "operation storage actual READY protocol");
+    OS(!loom_engine_put(l,scope,held),"operation storage observer release");held=NULL;
+    u32 baseline=creator->as->page_count;
+    loom_private_operation_fault_arm_for_test();
+    OS(loom_private_operation_prepare(l,scope,902,40,40,&op)==-T_E_TIMEDOUT && !op &&
+       !loom_private_operation_fault_pending_for_test() &&
+       creator->as->page_count==baseline,"operation storage expired preallocation refusal");
+    spin_lock(&creator->as->lock);creator->as->page_budget=baseline;spin_unlock(&creator->as->lock);
+    int limited=loom_private_operation_prepare(l,scope,903,0,0,&op);
+    spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+    OS(limited==-T_E_NOMEM && !op && creator->as->page_count==baseline &&
+       l->service_requests.occupied==1 && !l->service_engine->entries[scope.slot].pins,
+       "operation storage actual charge refusal releases terminal and entry");
+    loom_private_operation_fault_arm_for_test();
+    OS(loom_private_operation_prepare(l,scope,907,0,0,&op)==-T_E_NOMEM && !op &&
+       !loom_private_operation_fault_pending_for_test() && creator->as->page_count==baseline &&
+       l->service_requests.occupied==1 && !l->service_engine->entries[scope.slot].pins,
+       "operation storage actual allocation refusal refunds and unpins");
+    OS(!loom_private_operation_prepare(l,scope,904,0,0,&op),"operation storage allocates");
+    OS(creator->as->page_count==baseline+1 && l->service_requests.occupied==2 &&
+       l->service_requests.records[op->request.index].owners==1 &&
+       l->service_engine->entries[scope.slot].pins==1,
+       "operation storage exact buddy charge and physical owner");
+    OS(loom_private_operation_prepare(l,scope,905,0,0,&other)==-T_E_NOSPC && !other &&
+       creator->as->page_count==baseline+1 && l->service_engine->entries[scope.slot].pins==1,
+       "operation storage capacity refuses before allocation");
+    struct loom_request_ref old=op->request;
+    OS(!loom_private_operation_release_unused(op),"operation storage unused destruction");op=NULL;
+    OS(creator->as->page_count==baseline && l->service_requests.occupied==1 &&
+       !l->service_engine->entries[scope.slot].pins,
+       "operation storage exact page refund and pin return");
+    OS(!loom_private_operation_prepare(l,scope,906,0,0,&op) && op->request.identity!=old.identity,
+       "operation storage burns identity before slot reuse");
+    loom_handle_closed(l);
+    OS(loom_close_wait_state(l,LCLOSE_PARKED),"operation storage close parks on physical owner");
+    OS(creator->as->page_count==baseline+1 && l->service_requests.records[op->request.index].owners==1 &&
+       l->service_engine->entries[scope.slot].pins==1,
+       "operation storage close retains actual storage and owner");
+    OS(!loom_private_operation_release_unused(op),"operation storage cleanup after close");op=NULL;
+    OS(loom_close_wait_state(l,LCLOSE_DONE) && loom_engine_empty(l->service_engine) &&
+       !l->service_requests.occupied && !l->service_fixed_count,
+       "operation storage final owner release unblocks real close worker");
+done:
+    spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+    if(other)(void)loom_private_operation_release_unused(other);
+    if(op)(void)loom_private_operation_release_unused(op);
+    if(held)(void)loom_engine_put(l,scope,held);
+    if(prepared)(void)loom_private_connect_rollback(prepared);
+    loom_handle_closed(l);
+    if(!loom_close_wait_state(l,LCLOSE_DONE) && !error)error="operation storage cleanup timeout";
+    if(server)srvconn_unref(server);
+#undef OS
+    return error;
+}
+
 static const char *loom_protocol_fixture(u32 kind) {
     const char *error = NULL;
     struct Proc *p = test_proc_make(), *poster = test_proc_make();
@@ -2931,6 +3011,7 @@ static const char *loom_protocol_fixture(u32 kind) {
            "zero-reference retirer wakes joins and refunds the live private worker");
         goto done;
     }
+    if (kind==13 || kind==14) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==14],kind==14);goto done;}
     if (kind>=7) {error=loom_close_boundary_case(&l,p,poster,reg,refs[0],kind-6,goal,base);goto done;}
     if (kind>=3) {error=loom_close_cases(&l,p,poster,reg,refs,kind,goal,base);goto done;}
     u32 owner_pages = p->as->page_count;
@@ -3065,5 +3146,13 @@ void test_loom_private_executor(void) {
     const char *error=loom_protocol_fixture(11);
     TEST_ASSERT(!error,error);
     error=loom_protocol_fixture(12);
+    TEST_ASSERT(!error,error);
+}
+
+void test_loom_private_operation_storage(void);
+void test_loom_private_operation_storage(void) {
+    const char *error=loom_protocol_fixture(13);
+    TEST_ASSERT(!error,error);
+    error=loom_protocol_fixture(14);
     TEST_ASSERT(!error,error);
 }

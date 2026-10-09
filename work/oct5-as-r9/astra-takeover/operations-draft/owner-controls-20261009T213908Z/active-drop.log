@@ -1,0 +1,2 @@
+active owner cannot disappear
+Assertion failed: (0), function main, file active-drop.c, line 222.

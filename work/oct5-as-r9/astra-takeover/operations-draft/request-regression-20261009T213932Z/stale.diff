@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ stale.c
+@@ -14,7 +14,7 @@
+     if (!t || !t->records || ref.reserved || !ref.identity || ref.index >= t->capacity)
+         return NULL;
+     struct loom_service_request *r = &t->records[ref.index];
+-    return r->phase != LREQ_FREE && r->identity == ref.identity ? r : NULL;
++    return r->phase != LREQ_FREE ? r : NULL;
+ }
+ static bool request_scope_held(const struct loom_slot_table *s, struct loom_service_ref ref) {
+     if (!s || ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)

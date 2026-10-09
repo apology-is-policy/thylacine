@@ -1,0 +1,2 @@
+oversized component: got0 want-22
+Assertion failed: (0), function check, file component-size.c, line 73.

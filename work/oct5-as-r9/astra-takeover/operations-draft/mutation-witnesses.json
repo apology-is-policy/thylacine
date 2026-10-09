@@ -1,0 +1,15 @@
+{
+  "source-generation": "source generation: got0",
+  "source-bound": "source bound: got0",
+  "reserved": "reserved common: got0",
+  "flags": "unknown flag or unqualified combination: got0",
+  "destination-generation": "destination generation: got0",
+  "same-slot": "same shared slot: got0",
+  "buffer-overflow": "slice addition overflow: got0",
+  "component-size": "oversized component: got0",
+  "open-mode": "unallocated open mode: got0",
+  "pool-feature": "pool feature absent: got0",
+  "pool-empty": "pooled nonzero size: got0",
+  "path-slash": "loom_private_walk_component(bad[i],n[i])==-T_E_INVAL",
+  "path-dot": "loom_private_walk_component(bad[i],n[i])==-T_E_INVAL"
+}

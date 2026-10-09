@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/operations-draft/check-operation.py", line 79, in <module>
+    assert r.returncode==0,(name,'compile')
+           ^^^^^^^^^^^^^^^
+AssertionError: ('clean', 'compile')

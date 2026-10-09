@@ -2622,3 +2622,49 @@ Next test that storage prerequisite, then integrate real RPC admission, fid and
 buffer ownership, callbacks and readiness. General private operations, AS3/4 and
 MM0-MM4 remain. No Main/private async/clipboard activation or128MiB change.
 Single-agent self-review, not independent audit; Pi/A72/KVM remain unrun.
+
+
+## October 10: private operation storage and callback capture prerequisites
+
+The request ledger now separates its terminal obligation from physical RPC
+storage ownership. Its56-byte record reuses a reserved field for a single owner:
+Ll admits that owner only while PREPARED, and rollback/reap refuse reuse until
+physical destruction. Completion delivery/discard does not release storage.
+ACTIVE/borrowed, stale and duplicate owner drops fail; existing CONNECT uses0.
+
+The internal operation constructor retains an exact indexed READY protocol and
+the creator image through allocation and destruction. It reserves the terminal
+and physical owner under Ll before charging and allocating one full buddy page.
+Close/abort is rechecked after allocation. Refusal and exclusive unused cleanup
+free storage, refund the image, release exact request/entry pins, then drop the
+Loom last. No allocator, image/client lock, wake or final drop nests under Ll.
+The constructor does not admit or submit an RPC and cannot free an active one.
+
+Copied-SQE shape checks preserve all64-bit incarnations, reject reserved fields
+and malformed fixed/pool combinations, and validate clone/component shape.
+They grant no authority. Reply capture retains pointer-free metadata and copies
+bounded payload before callback parser storage can be reused. It never allocates,
+locks, publishes CQ or commits success; future driver admission and abort/deadline
+checks remain mandatory. Malformed type/fid/count/walk/stat shape fails closed.
+
+Host checks: shape1832cases/13mutants, reply capture13mutants, request physical
+owner9mutants plus all17 existing request mutants, and charged constructor10
+mutants pass under LLVM22 ASan/UBSan. ARM64 syntax and actual kernel link pass.
+CAP-L1: native link first caught large struct assignments emitting unavailable
+libc memcpy; explicit byte copying repaired it, and all capture mutants reran.
+The first linker log and earlier harness failures remain in operations-draft.
+
+Native operation-storage-native-20261009T215931Z passes1854/1854, D7 overlap,
+20 distinct login/logout cycles and boot banner. Real normal/bulk READY peers
+exercise expired admission, actual image quota and allocator refusals, exactly
+one-page charge/refund, terminal-capacity refusal, monotone request identity,
+and close PARKED until physical operation ownership is released, then DONE.
+Eleven reviewed source hashes, six stable inputs, HEAD+diff and rebuilt ELF/bin
+match that run. This is bounded CPU1 native storage evidence; f719ee4a3's50-boot
+executor matrix does not qualify newer source. No new full matrix for unused
+helpers. Self-review only, not independent audit.
+
+Actual RPC list/admission/callback/commit, FID/DAC and fixed/provided-buffer
+dispatch and readiness integration remain before AS3/4 and MM0-MM4. Canonical
+source supersedes the installed draft; no historical installer may be rerun.
+No Main/private async/clipboard activation or128MiB protection change.
