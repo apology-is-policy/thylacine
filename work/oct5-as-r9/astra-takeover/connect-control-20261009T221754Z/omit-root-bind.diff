@@ -1,0 +1,12 @@
+--- 
++++ 
+@@ -213,8 +213,7 @@
+             n->state=LOOM_SERVICE_READY;
+             // Handshake and terminal commit share Ll with abort. Publish only
+             // the actual attached root, never a user-supplied protocol fid.
+-            if (loom_fid_bind_root(l->service_slots,l->service_nodes,p->scope,
+-                                   p->client.session.root_fid))
++            if (0)
+                 extinction("CONNECT lost root fid publication");
+             rc=1;
+         } else {

@@ -1,3 +1,4 @@
+#include <thylacine/loom_service_fids.h>
 #include <thylacine/loom_service_operation.h>
 #include <thylacine/loom_service_control.h>
 #include <thylacine/loom_service_connect.h>
@@ -2862,7 +2863,8 @@ done:
 static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creator,
     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
     const char *error=NULL;
-    struct loom_service_ref scope={0};
+    struct loom_service_ref scope={0},child={0};
+    bool root_borrow=false;
     struct loom_service_protocol *prepared=NULL,*held=NULL;
     struct loom_service_operation *op=NULL,*other=NULL;
     struct SrvConn *server=NULL;
@@ -2882,6 +2884,9 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
         (void)loom_engine_visit(l,1+i);
     OS(l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_READY,
        "operation storage actual READY protocol");
+    OS(l->service_nodes->nodes[scope.slot].fid_flags==LFID_BOUND &&
+       l->service_nodes->nodes[scope.slot].wire_fid==held->client.session.root_fid,
+       "actual attach publishes exact root fid mapping");
     OS(!loom_engine_put(l,scope,held),"operation storage observer release");held=NULL;
     u32 baseline=creator->as->page_count;
     loom_private_operation_fault_arm_for_test();
@@ -2914,16 +2919,37 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
        "operation storage exact page refund and pin return");
     OS(!loom_private_operation_prepare(l,scope,906,0,0,&op) && op->request.identity!=old.identity,
        "operation storage burns identity before slot reuse");
+    reserve.kind=LOOM_SERVICE_FID;reserve.scope=scope;
+    OS(!loom_private_node_prepare(l,creator,&reserve,&child) && !loom_private_node_publish(l,child),
+       "root retains unused child through close");
+    u32 wire=UINT32_MAX;
+    spin_lock(&l->lock);
+    int borrowed=loom_fid_borrow(l->service_slots,l->service_nodes,scope,scope,0,&wire);
+    root_borrow=borrowed==0;
+    spin_unlock(&l->lock);
+    OS(root_borrow && wire==op->protocol->client.session.root_fid,
+       "root source borrow retains actual attached mapping");
     loom_handle_closed(l);
     OS(loom_close_wait_state(l,LCLOSE_PARKED),"operation storage close parks on physical owner");
     OS(creator->as->page_count==baseline+1 && l->service_requests.records[op->request.index].owners==1 &&
        l->service_engine->entries[scope.slot].pins==1,
        "operation storage close retains actual storage and owner");
+    spin_lock(&l->lock);
+    int put=loom_fid_put(l->service_slots,l->service_nodes,scope);
+    if(!put)root_borrow=false;
+    spin_unlock(&l->lock);
+    OS(!put,"root borrow returns after actual close abort");
     OS(!loom_private_operation_release_unused(op),"operation storage cleanup after close");op=NULL;
     OS(loom_close_wait_state(l,LCLOSE_DONE) && loom_engine_empty(l->service_engine) &&
        !l->service_requests.occupied && !l->service_fixed_count,
        "operation storage final owner release unblocks real close worker");
 done:
+    if(root_borrow) {
+        spin_lock(&l->lock);
+        (void)loom_fid_put(l->service_slots,l->service_nodes,scope);
+        spin_unlock(&l->lock);
+        loom_private_close_changed(l);
+    }
     spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
     if(other)(void)loom_private_operation_release_unused(other);
     if(op)(void)loom_private_operation_release_unused(op);

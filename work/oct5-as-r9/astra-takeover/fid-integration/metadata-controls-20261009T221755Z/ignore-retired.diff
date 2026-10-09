@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -18,7 +18,7 @@
+                     extinction("private Loom retained live derived fid");
+                 continue;
+             }
+-            if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
++            if (kinds[pass]==LOOM_SERVICE_SCOPE && false) {
+                 // Protocol/index/request cleanup precedes final zero-ref free.
+                 // Unused children were removed above; no caller can still own
+                 // a provisional child here. READY/ABORTING never use this path.

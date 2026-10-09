@@ -4,6 +4,8 @@ type: sub
 parent: moc-kernel-async
 title: "Loom — the io_uring inversion over 9P"
 code:
+  - kernel/loom_service_fids.c
+  - kernel/include/thylacine/loom_service_fids.h
   - kernel/loom_service_operation.c
   - kernel/include/thylacine/loom_service_operation.h
   - kernel/loom_service_reply.c
@@ -2505,3 +2507,15 @@ until derived identity is gone. Host89checks/24mutants, node11mutants and actual
 ARM64 page geometry pass. These checks establish only sequential helper behavior;
 root handshake binding, actual RPC/DAC/buffer/engine integration and native races
 are outstanding. See fid-draft/self-review.txt for FID-F1 and test-witness repairs.
+
+FID root/teardown integration (Astra October10): the canonical64-byte node now
+carries exact request claims, scoped wire mapping, access flags and source
+borrow count separately from aggregate lifetime pins. CONNECT binds only its
+actual session root at successful handshake commit under Ll. Final zero-ref
+cleanup retires mapped children only after parent protocol abort, no remaining
+claim/borrow, then reaps child before dropping parent. Root reap checks both
+ownership ledgers. Native1854 normal/bulk fixture holds root borrow and unused
+child through actual close with charged operation storage. CONNECT14mutants,
+metadata7mutants and kernel link pass; derived mapped metadata cases are host
+simulation only. RPC consumers/readiness/DAC/payload integration remain ahead.
+See fid-integration/self-review.txt; old uninstalled-draft note is superseded.

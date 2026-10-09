@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Integrate verified uninstalled FID mapping/claim/borrow/retirement helper with actual RPC admission/list/callback/commit, root binding, DAC, fixed/provided-buffer ownership and READY readiness. Read fid-draft/self-review.txt and operations-draft/rpc-integration-plan.txt. Canonical installed storage supersedes its old draft; no historical installer. No new-source full Mac qualification.",
+  "next": "FID helpers now installed with actual root handshake mapping and final local teardown. Read fid-integration self-review/state; canonical supersedes draft. Continue actual RPC admission/list/callback/commit/readiness and DAC/fixed/provided-buffer consumers; then AS3/4 and MM0-MM4. Current native1854 root/storage scope only, no full Mac or general RPC proof.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -23,5 +23,6 @@
   "native_pid": 36893,
   "native_rc": 0,
   "checkpoint": "e7ff5d1c7b31ed8b7069e4babe0938181b1d0edc",
-  "fid_draft": "fid-draft/state.json"
+  "fid_draft": "fid-draft/state.json",
+  "fid_integration": "fid-integration/state.json"
 }

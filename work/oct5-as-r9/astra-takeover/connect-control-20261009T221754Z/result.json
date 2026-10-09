@@ -1,0 +1,185 @@
+{
+  "scope": "Actual CONNECT + request/slot/node/CQ code, checked protocol/native boundary doubles.\nDeterministic nested entries exercise cancellation/driver ordering; no claim of\nnative wire fidelity or concurrent SMP stress from this host fixture.\n",
+  "source_head": "5dc80ba2141bb671aff7d663c7b3542688d42143",
+  "hashes": {
+    "kernel/loom_service_connect.c": "ac84691c02c756edd4a53f2e52fac1e593a9e94fe627e5cbbac3eecd1d3ed69f",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom.c": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+    "work/oct5-as-r9/connect-control.py": "6b84f57b7638cdeb4e379939708383cae28534f93a472b5c0c4d0c93c98b2483",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "kernel/include/thylacine/loom_service_fids.h": "2c480c07e64d62161bbbf402bd826e1c68dc42ff200365fd7083d15a500f927c",
+    "kernel/include/thylacine/loom_service_nodes.h": "19aacddddb54f7b9e93fcc810feb15931585698e17a329a969cb1d5ddb5fefec"
+  },
+  "results": [
+    {
+      "case": "control",
+      "mode": 0,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 1,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 2,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 3,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 4,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 5,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 6,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 7,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 8,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 9,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "control",
+      "mode": 10,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "bec645ddbb4297aa4d9e48137d31433ae1c0aec91b8a979ed8a6aecebc7aed88"
+    },
+    {
+      "case": "omit-root-bind",
+      "mode": 0,
+      "rc": 11,
+      "expected": "actual handshake binds root mapping",
+      "generated_sha256": "090873b18dd7520673ebc9c7ea75f53559eb17a3759e694317453bf1d9cd064b"
+    },
+    {
+      "case": "omit-failure-phase",
+      "mode": 5,
+      "rc": 11,
+      "expected": "protocol failure records attempted phase",
+      "generated_sha256": "03a1ce93ca05078e19ca61b7c6b37b9b3142f0de78bea351e0d766c29f427fe7"
+    },
+    {
+      "case": "omit-duplicate",
+      "mode": 0,
+      "rc": 11,
+      "expected": "terminal reserved before allocation",
+      "generated_sha256": "d20166dfc7a4260452781cd691c49fdcdcaec7003266c0b1c09b54dce234cdab"
+    },
+    {
+      "case": "omit-own-pin",
+      "mode": 0,
+      "rc": 11,
+      "expected": "two exact scope pins before allocation",
+      "generated_sha256": "eca108e2adece0d5a71c09e1a85b86e21a99880f73477bf8b7cd9d2e43a12c24"
+    },
+    {
+      "case": "omit-publish-lock",
+      "mode": 0,
+      "rc": 11,
+      "expected": "publication holds terminal reservation and lock",
+      "generated_sha256": "5243f177371fa604b0d099bd82481679a03909bffa39cd85dbeda1ed05a37174"
+    },
+    {
+      "case": "omit-publish-deadline",
+      "mode": 7,
+      "rc": 11,
+      "expected": "CONNECT publication lost terminal reservation",
+      "generated_sha256": "4e2693ec51e12d93c700c6c1dd943d9049bffb7317af74e74c9eb174ebeb990d"
+    },
+    {
+      "case": "early-ready",
+      "mode": 0,
+      "rc": 11,
+      "expected": "IO progress is not READY",
+      "generated_sha256": "b5a67e26a1bbcecd51501720b2d1413d78a96983c3572155551597bc97e2aa31"
+    },
+    {
+      "case": "persistent-deadline",
+      "mode": 0,
+      "rc": 11,
+      "expected": "deadline ends on success",
+      "generated_sha256": "5af05c7f0f1045fc722f3ff10058c8ee2098ce926ea91f616eb1ee0989977a3c"
+    },
+    {
+      "case": "omit-parser-borrow",
+      "mode": 0,
+      "rc": 11,
+      "expected": "driver owns request borrow outside lock",
+      "generated_sha256": "43f7478c8883739cf7c5504b3a73a47fee8dae056caaec93a8e59f3c47747f20"
+    },
+    {
+      "case": "omit-local-abort",
+      "mode": 1,
+      "rc": 11,
+      "expected": "actual driver abort retires",
+      "generated_sha256": "a13cccc14539fba484deb404f38f6d015a4531e4b3cf0b6b81935e553e6c66eb"
+    },
+    {
+      "case": "ignore-live-user",
+      "mode": 6,
+      "rc": 11,
+      "expected": "live abort user delays local retirement",
+      "generated_sha256": "dc5e43d7fb3f235544a11c47b584161d1f83c4fcaa14b1dc3b52c6203a5d19bb"
+    },
+    {
+      "case": "omit-delivery-gate",
+      "mode": 0,
+      "rc": 11,
+      "expected": "CONNECT lost retired ownership",
+      "generated_sha256": "dd3dd011c08510d16e645ad80ae327855f16dfb15dc24b42095fdc72d1e90115"
+    },
+    {
+      "case": "omit-close-recheck",
+      "mode": 4,
+      "rc": 11,
+      "expected": "actual driver abort retires",
+      "generated_sha256": "d9748e12e7a0a844669e6ab99cdc7175c467776be9d8cb746fc7049544b39720"
+    }
+  ]
+}

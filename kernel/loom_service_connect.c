@@ -12,6 +12,7 @@
 #include <thylacine/loom_service_connect.h>
 #include <thylacine/loom.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/loom_service_fids.h>
 #include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 
@@ -216,6 +217,11 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
                                        l->service_nodes,p->request,(s32)p->scope.slot))
                 extinction("CONNECT lost success obligation");
             n->state=LOOM_SERVICE_READY;
+            // Handshake and terminal commit share Ll with abort. Publish only
+            // the actual attached root, never a user-supplied protocol fid.
+            if (loom_fid_bind_root(l->service_slots,l->service_nodes,p->scope,
+                                   p->client.session.root_fid))
+                extinction("CONNECT lost root fid publication");
             rc=1;
         } else {
             n->state=phase <= P9_HS_VERSION_RECV ? LOOM_SERVICE_VERSION : LOOM_SERVICE_ATTACH;
@@ -287,7 +293,7 @@ int loom_private_connect_reap(struct Loom *l, struct loom_service_ref scope) {
     spin_lock(&l->lock);
     struct loom_service_node *n=connect_scope(l,scope);
     int rc=!n ? -T_E_NOENT : n->state != LOOM_SERVICE_RETIRED ||
-        l->service_slots->slots[scope.slot].pins ? -T_E_BUSY : 0;
+        l->service_slots->slots[scope.slot].pins || n->fid_claim || n->fid_borrows ? -T_E_BUSY : 0;
     if (!rc) {
         *n=(struct loom_service_node){0};
         if (loom_slot_retire(l->service_slots,scope) || loom_slot_reap(l->service_slots,scope))

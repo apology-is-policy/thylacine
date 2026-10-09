@@ -492,3 +492,10 @@ cycles/banner with eleven source/six input hashes. Implementation e7ff5d1c7 is
 covered only by this bounded CPU1 native run and recorded host/ARM64 checks;
 prior full Mac qualification does not extend to it. General RPC/FID/buffer
 dispatch and public activation remain unimplemented. Self-review only.
+
+October10 Astra: suite remains1854 registrations. private_operation_storage
+now additionally verifies actual normal/bulk root FID mapping after attach and
+root metadata borrow/unused-child retention across close until physical
+operation cleanup. CPU1 native fid-integration/native-20261009T221811Z passes
+1854/D7/20cycles with exact source/artifact evidence. It does not test submitted
+WALK/LOPEN/READ/WRITE/CLUNK RPCs or confer prior full-Mac qualification.

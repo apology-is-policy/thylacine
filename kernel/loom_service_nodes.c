@@ -112,6 +112,8 @@ bool loom_service_nodes_empty(const struct loom_service_node_table *nodes) {
         if (nodes->nodes[i].state != LOOM_SERVICE_EMPTY ||
             !node_zero_ref(nodes->nodes[i].parent) || nodes->nodes[i].reserved ||
             nodes->nodes[i].reason || nodes->nodes[i].status_flags ||
-            nodes->nodes[i].failure_phase || nodes->nodes[i].diagnostic_reserved) return false;
+            nodes->nodes[i].failure_phase || nodes->nodes[i].diagnostic_reserved ||
+            nodes->nodes[i].fid_claim || nodes->nodes[i].wire_fid ||
+            nodes->nodes[i].fid_access || nodes->nodes[i].fid_flags || nodes->nodes[i].fid_borrows) return false;
     return true;
 }

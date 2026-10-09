@@ -24,10 +24,13 @@ Preserve8192MiB floor, exact clean Stratum61dde37, Astra six pending/four
 protected drafts, all raw source-matched evidence. No Main/private user async/
 clipboard activation or128MiB change. Single-agent self-review only.
 
-Next prerequisite draft: fid-draft/state.json and self-review.txt. Uninstalled
-FID map/claim/source-borrow/open/CLUNK/abort-reap helper passes89checks/24mutants,
-node regressions11mutants and ARM64 object/layout checks. FID-F1 root aggregate
-pin exclusivity fixed before installation. No libc object dependency. Canonical
-kernel unchanged; no native or full Mac claim. Integrate coherent root binding,
-operation owner settlement and child-before-root retirement; do not treat draft
-as installed. Mac released; no running job from this step.
+FID helper now INSTALLED with coherent actual CONNECT root mapping and final
+child-before-parent teardown. Canonical sources supersede fid-draft; never
+reinstall older copies. Read fid-integration/state.json/self-review.txt.
+Real link, CONNECT11schedules/14mutants and final metadata11cases/7mutants pass.
+Native fid-integration/native-20261009T221811Z passes1854/D7/20cycles with8source
+and6artifact hashes stable. Actual normal/bulk root borrow and unused child
+retained across close with charged operation storage. Mapped derived cleanup
+has simulated host evidence only; general RPC consumers remain unimplemented.
+No full new-source Mac claim. Mac released, no running job. Continue actual RPC
+admission/list/callback/commit and READY readiness, DAC/fixed/provided buffers.

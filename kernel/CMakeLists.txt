@@ -67,6 +67,7 @@ set(KERNEL_SRCS
     loom_service_pool.c
     loom_service_pool_table.c
     loom_service_slots.c
+    loom_service_fids.c
     loom_service_nodes.c
     loom_service_requests.c
     loom_service_operation.c

@@ -3189,3 +3189,23 @@ and self-review.txt. This is helper-only evidence, not native RPC/authority or
 concurrent-engine qualification; canonical kernel unchanged. Actual RPC/root
 binding/retirement/DAC/buffer/readiness integration remains next, then AS3/4 and
 MM0-MM4. Mac released. No Main/private activation or128MiB protection change.
+
+### Astra FID root and teardown integration, October10
+
+Installed the verified FID mapping/claim/source-borrow helper. CONNECT publishes
+its actual attached root mapping with READY/terminal under Ll after abort checks.
+Final local destruction retires/reaps derived FIDs before their parent, refusing
+remaining claims or borrows; scope reap also checks the new ownership fields.
+The expanded normal/bulk native storage fixture holds an actual root metadata
+borrow and unused child across close while charged operation storage retains
+the engine entry. Close parks until physical ownership returns, then cleans up.
+
+Real kernel link, CONNECT11schedules/14mutants, final metadata11cases/7mutants
+pass. Native `fid-integration/native-20261009T221811Z` passes1854/1854 plus D7
+overlap/20cycles/banner, CPU1; eight source and six artifact hashes stay stable,
+raw evidence rechecked. Derived mapped cleanup is host-simulated, not a native
+WALK/CLUNK claim. Read `fid-integration/self-review.txt`. This bounded integration
+does not inherit the old full Mac qualification or implement general RPCs.
+Canonical sources supersede fid-draft. Mac released. Next actual RPC admission,
+callback/commit/readiness and payload/DAC consumers, then AS3/4 and MM0-MM4.
+No Main/private user async/clipboard activation or128MiB protection change.

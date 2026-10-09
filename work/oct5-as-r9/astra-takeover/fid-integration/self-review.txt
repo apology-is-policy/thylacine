@@ -1,0 +1,56 @@
+Astra single-agent self-review, October9 UTC / October10 Prague.
+Canonical integration follows isolated checkpoint5dc80ba21. No independent audit.
+
+Installed exactly the verified FID helper/node layout. CONNECT's sole driver,
+while holding Ll after a successful real attach and cancellation recheck, now
+commits READY and binds the actual client session root fid in the same critical
+section as its terminal result. Nothing outside that lock can observe a half
+published mapping. Duplicate binding or unexpected ledger failure is an invariant
+failure, not permission to fabricate a remote result. No extra I/O or allocation.
+
+Final zero-reference node cleanup handles mapped/retiring derived FIDs before
+the parent: require actual parent abort/retirement, zero claims/source borrows,
+then retire and reap exact child identity and unpin parent. Existing unused and
+provisional paths remain distinct. Scope reap and final scope destruction refuse
+remaining internal claims/borrows as well as aggregate slot pins. Mapped child
+cleanup is bounded to the same64 slots and never sends Tclunk at final free.
+
+A source metadata borrow retains slot identity, not a naked protocol pointer.
+Actual operation users must retain their exact engine entry and the Loom, as
+the charged operation owner already does. The protocol can be locally aborted
+while physical operation storage and its metadata pins remain; collection waits
+for the real engine-entry pins. This is the pre-existing separation established
+by the storage fixture, not a new early-free exemption. Future submitted RPCs
+must settle their actual callbacks and buffer ownership before that retirement
+proof is accepted. Do not infer that general RPC ownership exists yet.
+
+Native fixture extends existing operation-storage normal/bulk cases: actual
+Rattach publishes the root mapping, a metadata borrow and unused child retain
+root identity through close while a charged operation retains the protocol.
+Close parks; returning the root borrow then physical operation storage permits
+actual engine/request cleanup; outer fixture verifies destruction/refund. No
+synthetic bound WALK is claimed as a native remote operation.
+
+Evidence: real kernel build/link succeeds. connect-control-20261009T221754Z
+passes11clean schedules and13mutants including missing root bind. Extracted
+actual final metadata function with real FID/node/slot modules passes11clean
+cases and7mutants in metadata-controls-20261009T221755Z; those derived bindings
+and parent retirement are explicitly simulated, not wire/locking proof.
+Previously verified helper89checks/24mutants and reservation11mutants apply to
+byte-identical installed helper sources. Native native-20261009T221811Z passes
+1854/1854, D7 overlap,20distinct cycles and boot banner, CPU1. Source HEAD+diff,
+eight extra source hashes and six artifact hashes stable; raw serial/harness
+hashes independently rechecked. Initial directory label2220Z was renamed using
+its source-record creation time after completion; raw evidence unchanged.
+No duplicate historical matrix or installer, no new-source full Mac claim.
+
+Next: actual RPC operation admission/list/callback/commit and READY readiness,
+WALK/stat/DAC/LOPEN/fixed/provided-buffer consumers and retirement, then AS3/4 and
+MM0-MM4. Source helper installation is not private user dispatch or activation.
+No Main/private async/clipboard activation or128MiB protection change.
+
+Final provenance refinement: work/oct5-as-r9/astra-takeover/connect-control-20261009T222021Z
+uses a nonzero boundary-double root41 and rejects a hardcoded-zero publication
+mutant as well as missing publication. All11clean schedules/14mutants pass;
+source hashes rechecked. This changes only the host test, so the eight native
+source hashes remain identical to the completed1854 run. Mac released again.

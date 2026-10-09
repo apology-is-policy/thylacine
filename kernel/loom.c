@@ -22,6 +22,7 @@
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_targets.h>
 #include <thylacine/loom_service_nodes.h>
+#include <thylacine/loom_service_fids.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -672,12 +673,23 @@ static void loom_private_nodes_destroy(struct Loom *l) {
             if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
             struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
             struct loom_service_node *n=&l->service_nodes->nodes[i];
+            if (kinds[pass]==LOOM_SERVICE_FID && s->phase!=LSLOT_PROVISIONAL &&
+                n->state!=LOOM_SERVICE_RESERVED) {
+                // The engine has actually aborted the parent client before
+                // zero-reference destruction. No physical operation can still
+                // own a ring reference here. Refuse any leaked claim/borrow.
+                if (loom_fid_retire_aborted(l->service_slots,l->service_nodes,ref) ||
+                    loom_fid_reap(l->service_slots,l->service_nodes,ref))
+                    extinction("private Loom retained live derived fid");
+                continue;
+            }
             if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
                 // Protocol/index/request cleanup precedes final zero-ref free.
                 // Unused children were removed above; no caller can still own
                 // a provisional child here. READY/ABORTING never use this path.
                 if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
-                    n->parent.reserved || n->parent.incarnation || n->reserved)
+                    n->parent.reserved || n->parent.incarnation || n->reserved ||
+                    n->fid_claim || n->fid_borrows)
                     extinction("private Loom retained pinned retired scope");
                 *n=(struct loom_service_node){0};
                 if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))

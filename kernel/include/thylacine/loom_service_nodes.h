@@ -10,12 +10,16 @@ struct loom_service_node {
     u32 status_flags; // completed-driver diagnostics only; protected by Ll
     u32 failure_phase;
     u32 diagnostic_reserved;
+    // Internal protocol mapping. The engine supplies actual handshake/WALK/DAC
+    // proof; these fields alone confer no authority to send an RPC.
+    u64 fid_claim; // exact ring request identity; owns one destination slot pin
+    u32 wire_fid, fid_access, fid_flags, fid_borrows;
 };
 struct loom_service_node_table {
     struct loom_service_node nodes[LOOM_SERVICE_SLOT_COUNT];
 };
-_Static_assert(sizeof(struct loom_service_node) == 40, "scope/fid reservation ledger");
-_Static_assert(sizeof(struct loom_service_node_table) == 2560, "scope/fid table ledger");
+_Static_assert(sizeof(struct loom_service_node) == 64, "scope/fid reservation ledger");
+_Static_assert(sizeof(struct loom_service_node_table) == 4096, "scope/fid table ledger");
 // Zero once with its owner. Live calls hold the SAME ring lock as the shared
 // slot ledger and retain the ring. The zero-reference retire worker instead has
 // exclusive ownership. No allocation, usercopy, callbacks or drops.

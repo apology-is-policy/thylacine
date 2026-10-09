@@ -1,8 +1,8 @@
 {
   "owner": "astra",
-  "state": "isolated-fid-helper-verified-integration-next",
+  "state": "superseded-by-canonical-root-integration",
   "source_base": "4d9bf4faf6442acd52493a195f76f795b77224e3",
-  "installed": false,
+  "installed": true,
   "limits": "Uninstalled sequential table helper only. No native RPC, DAC, allocator, caller locking or concurrent engine proof. Integrate coherently with root binding and derived retirement; do not rerun historical installers.",
   "utc": "2026-10-09T22:13:58.065143+00:00",
   "host_result": "work/oct5-as-r9/astra-takeover/fid-draft/controls-20261009T221251Z/result.json",
@@ -10,5 +10,6 @@
   "mutants": 24,
   "node_regression": "work/oct5-as-r9/astra-takeover/fid-draft/node-regression-20261009T2218Z/result.json",
   "node_mutants": 11,
-  "arm64": "arm64-result.json"
+  "arm64": "arm64-result.json",
+  "continuation": "../fid-integration/state.json"
 }

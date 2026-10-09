@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -14,7 +14,7 @@
+                 // zero-reference destruction. No physical operation can still
+                 // own a ring reference here. Refuse any leaked claim/borrow.
+                 if (loom_fid_retire_aborted(l->service_slots,l->service_nodes,ref) ||
+-                    loom_fid_reap(l->service_slots,l->service_nodes,ref))
++                    0)
+                     extinction("private Loom retained live derived fid");
+                 continue;
+             }

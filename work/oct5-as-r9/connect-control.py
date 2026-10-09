@@ -8,11 +8,11 @@ import datetime,difflib,hashlib,importlib.util,json,os,re,subprocess
 ROOT=Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('post',Path(__file__).with_name('request-post-control.py'))
 post=importlib.util.module_from_spec(spec);spec.loader.exec_module(post)
-PRE=post.PRE.replace('struct Loom {u32 magic;', 'struct Loom {struct loom_slot_table *service_slots;struct loom_service_node_table *service_nodes;u32 magic;')+r'''
+PRE='#include <thylacine/loom_service_fids.h>\n'+post.PRE.replace('struct Loom {u32 magic;', 'struct Loom {struct loom_slot_table *service_slots;struct loom_service_node_table *service_nodes;u32 magic;')+r'''
 enum {P9_HS_VERSION_SEND,P9_HS_VERSION_RECV,P9_HS_ATTACH_SEND,P9_HS_ATTACH_RECV,P9_HS_READY};
 struct SrvConn {bool dead;};
 struct SrvConnectAdmission {struct SrvConn *conn;bool published;};
-struct p9_client {int dummy;};
+struct p9_client {struct {u32 root_fid;} session;};
 struct loom_service_protocol {
  struct Loom *owner;struct SrvConnectAdmission admission;struct p9_client client;
  struct {struct {u32 phase;} handshake;struct {bool bytes_sent;} io;} progress;
@@ -34,7 +34,7 @@ static int loom_private_protocol_prepare(struct Loom *l,struct loom_service_ref 
  CHECK(r->phase==LREQ_PREPARED && l->service_slots->slots[r->scope.slot].pins==2,"two exact scope pins before allocation");
  if(mode==10)return -T_E_NOMEM;
  allocations++;active=calloc(1,sizeof(*active));CHECK(active,"host allocation");
- active->owner=l;active->admission.conn=&cn;*out=active;return 0;
+ active->owner=l;active->client.session.root_fid=41;active->admission.conn=&cn;*out=active;return 0;
 }
 static int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
  CHECK(!held && !p->connect_bound && !p->admission.published && p->owner->service_requests.occupied==1 &&
@@ -121,6 +121,7 @@ int main(int argc,char **argv) {
  if(mode==0) {
   CHECK(!rc && records[0].phase==LREQ_ACTIVE && nodes.nodes[scope.slot].state==LOOM_SERVICE_ATTACH,"IO progress is not READY");
   CHECK(loom_private_connect_step(p,4)==1 && records[0].result==result && nodes.nodes[scope.slot].state==LOOM_SERVICE_READY,"handshake READY commits success");
+  CHECK(nodes.nodes[scope.slot].fid_flags==LFID_BOUND && nodes.nodes[scope.slot].wire_fid==p->client.session.root_fid,"actual handshake binds root mapping");
   CHECK(loom_private_connect_step(p,101)==1 && !p->abort_reason && steps==2,"deadline ends on success");
   CHECK(!loom_private_connect_abort(p,-T_E_CANCELED),"abort after success");
   rc=loom_private_connect_step(p,5);
@@ -141,6 +142,8 @@ int main(int argc,char **argv) {
 }
 '''
 MUTANTS=[
+ ('hardcoded-root','p->client.session.root_fid))','0))',0,'actual handshake binds root mapping'),
+ ('omit-root-bind','loom_fid_bind_root(l->service_slots,l->service_nodes,p->scope,\n                                   p->client.session.root_fid)','0',0,'actual handshake binds root mapping'),
  ('omit-failure-phase','p->failure_phase=attempted_phase;','(void)attempted_phase;',5,'protocol failure records attempted phase'),
  ('omit-duplicate','if (r->phase != LREQ_FREE && connect_same(r->scope,scope))','if (r->phase != LREQ_FREE && connect_same(r->scope,scope) && false)',0,'terminal reserved before allocation'),
  ('omit-own-pin','rc = loom_slot_pin(l->service_slots,scope,LOOM_SERVICE_SCOPE);','rc = 0;',0,'two exact scope pins before allocation'),
@@ -159,7 +162,7 @@ def main():
  assert re.search(r'^mac +HELD by you',subprocess.check_output(['work/oct5-as-r9/astra-yip.sh','resources'],text=True),re.M)
  st=os.statvfs('.');assert st.f_bavail*st.f_frsize>=8*1024**3
  out=Path('work/oct5-as-r9/astra-takeover')/('connect-control-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));out.mkdir()
- paths=['kernel/loom_service_connect.c','kernel/loom_service_requests.c','kernel/loom_service_slots.c','kernel/loom_service_nodes.c','kernel/loom.c',str(Path(__file__).relative_to(ROOT))]
+ paths=['kernel/loom_service_connect.c','kernel/loom_service_requests.c','kernel/loom_service_slots.c','kernel/loom_service_nodes.c','kernel/loom.c',str(Path(__file__).relative_to(ROOT)),'kernel/loom_service_fids.c','kernel/include/thylacine/loom_service_fids.h','kernel/include/thylacine/loom_service_nodes.h']
  hashes={p:hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}
  body=re.sub(r'^#include[^\n]*\n','',Path(paths[0]).read_text(),flags=re.M)
  cq=post.extract.fun(Path('kernel/loom.c').read_text(),'loom_private_post_terminal')
@@ -170,7 +173,7 @@ def main():
    assert s.count(old)==(2 if tag == 'omit-close-recheck' else 1),(tag,s.count(old));s=s.replace(old,new)
   src=out/(tag+'.c');src.write_text(PRE+s+cq+MAIN);exe=out/tag
   (out/(tag+'.diff')).write_text(''.join(difflib.unified_diff(body.splitlines(True),s.splitlines(True))))
-  cmd=['/opt/homebrew/opt/llvm@22/bin/clang','-std=c11','-O1','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-isysroot',sdk,'-I',str(ROOT/'kernel/include'),str(src),*paths[1:4],'-o',str(exe)]
+  cmd=['/opt/homebrew/opt/llvm@22/bin/clang','-std=c11','-O1','-Wall','-Wextra','-Werror','-g','-fsanitize=address,undefined','-isysroot',sdk,'-I',str(ROOT/'kernel/include'),str(src),*paths[1:4],'kernel/loom_service_fids.c','-o',str(exe)]
   (out/(tag+'-command.json')).write_text(json.dumps(cmd)+'\n')
   with (out/(tag+'-build.log')).open('wb') as log:subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
   for case in range(11) if mode is None else [mode]:
