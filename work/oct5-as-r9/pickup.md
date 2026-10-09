@@ -2899,3 +2899,20 @@ an explicit caller-lifetime contract and permits only the handshake; no external
 RPC/fid/payload borrow may escape it. No syscall/ring dispatch or private async/
 clipboard activation, Main landing, or128MiB protection change. Preserve clean
 Stratum61dde37, Astra pending/protected work, and8192MiB runner floor.
+
+## October 9: CONNECT full Mac gate verified
+
+Source b2b263e3f250ecaa42c7975a86beec7b65128f12 passed50/50 Mac HVF boots
+in current-gate-20261009T170944Z: default SMP1/4/8 and kernel UBSan SMP4/8,
+ten each. All boots passed1849/1849 including loom.private_connect, D7 overlap,
+twenty distinct login/logout cycles and boot banner. Gate/runner rc0; verified
+100 raw serial/harness logs and ten input hashes, with the complete generation
+PINNED. Minimum recorded admission 13185MiB exceeds the8192MiB floor.
+Result: work/oct5-as-r9/astra-takeover/current-gate-20261009T170944Z-result.json.
+
+This qualifies internal CONNECT publication/handshake/local retirement at that
+source. The separate owner-index draft remains native-unqualified until installed
+and tested. Pi/A72/KVM, guest allocator reclamation and absent optional graphics
+remain unqualified. Self-review only; no independent audit, Main integration,
+private async/clipboard activation or128MiB protection change. Continue the
+per-ring index checkpoint, then close queue/executor and AS-3/4/MM0-MM4.

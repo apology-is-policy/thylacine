@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "source": "b2b263e3f250ecaa42c7975a86beec7b65128f12",
+  "pid": 31170,
+  "state": "verified",
+  "launched_utc": "2026-10-09T17:09:44.776087+00:00",
+  "launcher_log": "work/oct5-as-r9/astra-takeover/connect-current-gate-launch.log",
+  "floor_mib": 8192,
+  "next": "Record verified evidence checkpoint, then install only a reviewed/tested engine draft after acquiring Astra Mac lease. No Main/private activation/128MiB change.",
+  "run": "work/oct5-as-r9/current-gate-20261009T170944Z",
+  "verifier": "work/oct5-as-r9/current-gate-20261009T170944Z/verify.py",
+  "verification_rc": 0,
+  "verified_utc": "2026-10-09T17:49:38.195247+00:00"
+}
