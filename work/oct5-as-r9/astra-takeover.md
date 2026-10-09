@@ -784,3 +784,64 @@ CQ admission, target/scope/fid ownership and protocol/worker integration remain
 open. Pi/A72/KVM, final guest allocator reclamation and absent optional graphics
 probes remain unqualified. Self-review only. Continue async before MM0-MM4; no
 Main landing, private async/clipboard activation or 128 MiB protection removal.
+
+
+## October 9: native target ownership in private rings
+
+Internal target preparation now validates one immutable 288-byte kernel snapshot,
+checks the retained creator and exact image, reserves from the shared 64-slot
+ledger, then resolves the actual registry fd with handle_get. The existing native
+capture API enforces CWALKONLY native roots, strict 9P posts, exact registry view,
+service slot and post generation; no fallback registry, peer I/O or connect
+permission is introduced. Full input tails and output fields must be zero.
+The retained registration transaction survives an unlocked capture/close race:
+close winning before publication rolls back the slot and drops captured refs.
+Provisional targets consume quota but cannot be borrowed. Copyout failure burns
+the incarnation and rolls back; publish remains an internal continuation.
+
+A 4096-byte precharged table holds 64 native 64-byte targets, indexed by the
+shared identity slots rather than adding another quota. Loom is now 2896 bytes
+(0xb50), still one buddy page; total owner metadata is five pages (Loom one,
+slots one, pool table two, target table one). A one-shot target allocation refusal
+is consumed even on invalid geometry. Every construction failure frees prior
+storage before refunding the exact retained image.
+
+Target get pins the shared live slot and Loom under the same lock. Reap refuses
+borrowers and stale identities before changing either payload or slot. Successful
+rollback/reap detaches the native reference under lock and destroys it outside.
+Put unpins before dropping the Loom outside the lock, with no subsequent owner
+access. Zero owner references therefore imply no target borrowers or retained
+registration transactions. Final retirement clears remaining live/provisional
+targets outside locks; scopes, fids and pools still require their own retirement.
+CONNECT must still capture actual caller identity and use native admission checks.
+No syscall entry or private runtime activation is included.
+
+Self-review covered close during unlocked capture, publication, stale reference
+removal, quota consumption, borrowed payload stability, final put, exact-image
+charge retention and all allocation unwinds. The native target fixture uses a
+real posted registry and navigation fd without a responder: closes the fd/root
+and poster, proves the registry remains retained, then proves the last borrower
+retires the closed ring and destroys the registry exactly once. This is an
+internal owner fixture, not protocol or public usercopy qualification.
+
+Validation: native default SMP1 passed 1843/1843, D7 overlap, twenty distinct
+cycles and banner; source 0efb3c9bb plus captured diff and new target header in
+astra-takeover/private-targets-diagnostic-20261009T025959Z, rebuilt ELF/bin and six
+stable input hashes. Final declaration-only edits reorder fault declarations, add the test forward
+prototype and clarify continuation retention. ASan/UBSan private-targets-20261009T030105Z passes
+control plus twelve exact mutations; slot-owner-20261009T025921Z passes eleven
+controls and thirteen mutants; final-reclaim-20261009T025933Z passes both owner
+drop orders and seven mutants. Host boundaries use checked doubles and establish
+neither concurrent protocol execution nor guest allocator reclamation. Two host
+harness corrections and the diagnostic marker-parser correction are recorded
+with untouched failed/raw logs. Full current-source Mac matrix is pending;
+prior 50/50 remains limited to d3563f828.
+
+Next: actual scope/fid/request/CQ admission, authority/usercopy dispatch, and
+bounded protocol/worker integration before MM0-MM4. Pi/A72/KVM and final guest
+allocator reclamation remain open. Self-review only, no independent audit.
+No Main landing, private async/clipboard activation or 128 MiB protection removal.
+
+The existing lifecycle model was rerun in private-targets-model-20261009T0303Z:
+clean 5828 states and all seven named counterexamples passed. This validates the
+existing finite abstraction, not the new C target authority/locking path.

@@ -1,0 +1,11 @@
+--- control
++++ omit-unwind-pool-free
+@@ -140,7 +140,7 @@
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+         kfree(targets);
+-        kfree(pools);
++
+         kfree(slots);
+         spin_lock(&as->lock);
+         addrspace_uncharge_pages(as, metadata + backing);

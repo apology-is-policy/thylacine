@@ -1,0 +1,11 @@
+--- control
++++ omit-owner-pin
+@@ -161,7 +161,7 @@
+     spin_lock(&l->lock);
+     struct SrvServiceTarget *t = loom_private_target_exact(l, ref, LSLOT_LIVE);
+     int rc = t ? loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_TARGET) : -T_E_NOENT;
+-    if (!rc) { loom_ref(l); *out = t; }
++    if (!rc) { if(false) loom_ref(l); *out = t; }
+     spin_unlock(&l->lock);
+     return rc;
+ }

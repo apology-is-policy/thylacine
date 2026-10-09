@@ -1,0 +1,11 @@
+--- control
++++ omit-target-unwind
+@@ -139,7 +139,7 @@
+     struct Loom *l = (!slots || !pools || !targets || layout_fault) ? NULL :
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
+-        kfree(targets);
++
+         kfree(pools);
+         kfree(slots);
+         spin_lock(&as->lock);

@@ -20,6 +20,7 @@
 #include <thylacine/loom_service_pool.h>
 #include <thylacine/loom_service_slots.h>
 #include <thylacine/loom_service_pool_table.h>
+#include <thylacine/loom_service_targets.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -369,6 +370,7 @@ u64 loom_private_retired(void) {
 static bool g_loom_private_layout_fault;
 static bool g_loom_private_slots_fault;
 static bool g_loom_private_pools_fault;
+static bool g_loom_private_targets_fault;
 
 void loom_private_pools_fault_arm_for_test(void) {
     __atomic_store_n(&g_loom_private_pools_fault, true, __ATOMIC_RELAXED);
@@ -381,6 +383,19 @@ bool loom_private_pools_fault_armed_for_test(void) {
 }
 static bool loom_private_pools_fault_take(void) {
     return __atomic_exchange_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_targets_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_targets_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_targets_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_targets_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_targets_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_targets_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
 }
 
 void loom_private_slots_fault_arm_for_test(void) {
@@ -415,6 +430,7 @@ static bool loom_private_layout_fault_take(void) {
 static inline bool loom_private_layout_fault_take(void) { return false; }
 static inline bool loom_private_slots_fault_take(void) { return false; }
 static inline bool loom_private_pools_fault_take(void) { return false; }
+static inline bool loom_private_targets_fault_take(void) { return false; }
 #endif
 
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
@@ -422,6 +438,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     bool layout_fault = loom_private_layout_fault_take();
     bool slots_fault = loom_private_slots_fault_take();
     bool pools_fault = loom_private_pools_fault_take();
+    bool targets_fault = loom_private_targets_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -438,8 +455,10 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     _Static_assert(PAGE_SIZE > SLUB_MAX_OBJECT_SIZE, "slot page uses buddy kmalloc");
     _Static_assert(sizeof(struct loom_service_pool_table) > SLUB_MAX_OBJECT_SIZE,
                    "pool table uses buddy kmalloc");
+    _Static_assert(sizeof(struct loom_service_target_table) == PAGE_SIZE, "target table page");
     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
-        + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table));
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table));
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
@@ -449,9 +468,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     struct loom_slot_table *slots = slots_fault ? NULL : kmalloc(PAGE_SIZE, KP_ZERO);
     struct loom_service_pool_table *pools = (!slots || pools_fault) ? NULL :
         kmalloc(sizeof(struct loom_service_pool_table), KP_ZERO);
-    struct Loom *l = (!slots || !pools || layout_fault) ? NULL :
+    struct loom_service_target_table *targets = (!pools || targets_fault) ? NULL :
+        kmalloc(sizeof(struct loom_service_target_table), KP_ZERO);
+    struct Loom *l = (!slots || !pools || !targets || layout_fault) ? NULL :
         loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
+        kfree(targets);
         kfree(pools);
         kfree(slots);
         spin_lock(&as->lock);
@@ -462,6 +484,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     }
     l->service_slots = slots;
     l->service_pools = pools;
+    l->service_targets = targets;
     l->service_as = as;
     l->service_creator = p->stripes;
     l->service_metadata_pages = metadata;
@@ -517,6 +540,28 @@ static void loom_private_drop_buffer(struct AddrSpace *as, struct Burrow *b) {
     }
 }
 
+// Zero Loom references prove that no target borrower or registration transaction
+// remains. TARGET owns only a native registry ref: clearing it performs no peer
+// I/O. Other record kinds still require their engine-specific retirement first.
+// The retire worker owns the ring exclusively here; no Loom lock encloses drops.
+static void loom_private_targets_destroy(struct Loom *l) {
+    if (!l->service_targets || !l->service_slots)
+        extinction("private Loom lost target storage");
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+        struct loom_service_slot *s = &l->service_slots->slots[i];
+        struct SrvServiceTarget *t = &l->service_targets->targets[i];
+        if (s->phase != LSLOT_FREE && s->kind == LOOM_SERVICE_TARGET) {
+            if (s->pins || !t->view ||
+                (s->phase != LSLOT_PROVISIONAL && s->phase != LSLOT_LIVE))
+                extinction("private Loom retained invalid target");
+            devsrv_service_target_clear(t);
+            *s = (struct loom_service_slot){0};
+        } else if (t->view) {
+            extinction("private Loom retained unowned target");
+        }
+    }
+}
+
 static void loom_private_destroy(struct Loom *l) {
     // Snapshotted before anything frees l: everything after the kfree below
     // reaches the address space through these two locals and never through l.
@@ -532,9 +577,9 @@ static void loom_private_destroy(struct Loom *l) {
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
         if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
 
-    // The engine must retire every record before handing its last owner ref to
-    // this queue. Today no service handler admits records; fail closed if an
-    // internal caller violates that boundary, rather than freeing live borrows.
+    // Targets have only local registry ownership and can retire here. Other
+    // record kinds must already be empty before the engine drops its last ref.
+    loom_private_targets_destroy(l);
     if (!l->service_slots) extinction("private Loom lost slot storage");
     for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
         if (l->service_slots->slots[i].phase != LSLOT_FREE ||
@@ -550,6 +595,7 @@ static void loom_private_destroy(struct Loom *l) {
         loom_private_drop_buffer(as, b);
     }
     l->n_reg_buf = 0;
+    kfree(l->service_targets);
     kfree(l->service_pools);
     kfree(l->service_slots);
 
@@ -1216,6 +1262,124 @@ int loom_private_pool_rollback(struct Loom *l, struct loom_service_ref ref) {
 }
 int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
     return loom_private_pool_remove(l,ref,false);
+}
+
+// TARGET transactions consume the shared slot quota before resolving the actual
+// handle. Native capture and all handle/registry drops occur outside the ring
+// lock; the caller retains l and a stable creator syscall image throughout.
+// PROVISIONAL is invisible to borrowers until successful copyout + publish.
+// These helpers are internal only. CONNECT still owes actual caller identity
+// and devsrv_service_prepare; retaining a target never grants connect authority.
+static struct SrvServiceTarget *loom_private_target_exact(struct Loom *l,
+                                      struct loom_service_ref ref, u32 phase) {
+    if (ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
+        return NULL;
+    struct loom_service_slot *s = &l->service_slots->slots[ref.slot];
+    struct SrvServiceTarget *t = &l->service_targets->targets[ref.slot];
+    return s->incarnation == ref.incarnation && s->kind == LOOM_SERVICE_TARGET &&
+           s->phase == phase && t->view ? t : NULL;
+}
+
+int loom_private_target_prepare(struct Loom *l, struct Proc *p,
+                               const struct loom_service_target *in,
+                               struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
+        in->registry_fd < 0 || !in->name_len || in->name_len > 255 ||
+        in->result.slot || in->result.reserved || in->result.incarnation)
+        return -T_E_INVAL;
+    for (u32 i = in->name_len; i < sizeof(in->name); ++i)
+        if (in->name[i]) return -T_E_INVAL;
+    struct loom_service_ref ref;
+    spin_lock(&l->lock);
+    int rc = loom_slot_reserve(l->service_slots, LOOM_SERVICE_TARGET, &ref);
+    spin_unlock(&l->lock);
+    if (rc) return rc;
+
+    struct SrvServiceTarget fresh = {0};
+    struct Handle h;
+    rc = handle_get(p, in->registry_fd, &h) ? -T_E_BADF : 0;
+    if (!rc) {
+        rc = h.kind == KOBJ_SPOOR ?
+            devsrv_service_target_init(h.obj, (const char *)in->name,
+                                       in->name_len, &fresh) : -T_E_OPNOTSUPP;
+        handle_put(&h);
+    }
+    spin_lock(&l->lock);
+    if (!rc && l->service_closing) rc = -T_E_CANCELED;
+    if (rc) {
+        // This unpublished ref is private to this retained transaction; close
+        // cannot remove it, and no borrower can pin a provisional slot.
+        (void)loom_slot_rollback(l->service_slots, ref);
+    } else {
+        l->service_targets->targets[ref.slot] = fresh;
+        *out = ref;
+    }
+    spin_unlock(&l->lock);
+    if (rc) devsrv_service_target_clear(&fresh);
+    return rc;
+}
+
+int loom_private_target_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_private_target_exact(l, ref, LSLOT_PROVISIONAL) ?
+        loom_slot_publish(l->service_slots, ref) : -T_E_NOENT;
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+static int loom_private_target_remove(struct Loom *l, struct loom_service_ref ref,
+                                      bool rollback) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    struct SrvServiceTarget detached = {0};
+    spin_lock(&l->lock);
+    struct SrvServiceTarget *t = loom_private_target_exact(l, ref,
+                                      rollback ? LSLOT_PROVISIONAL : LSLOT_LIVE);
+    int rc = !t ? -T_E_NOENT : l->service_slots->slots[ref.slot].pins ? -T_E_BUSY : 0;
+    if (!rc) {
+        // Validate phase/identity/zero pins before either ledger changes. All
+        // transitions below are then infallible under the common owner lock.
+        detached = *t;
+        *t = (struct SrvServiceTarget){0};
+        if (rollback) (void)loom_slot_rollback(l->service_slots, ref);
+        else {
+            (void)loom_slot_retire(l->service_slots, ref);
+            (void)loom_slot_reap(l->service_slots, ref);
+        }
+    }
+    spin_unlock(&l->lock);
+    if (!rc) devsrv_service_target_clear(&detached);
+    return rc;
+}
+int loom_private_target_rollback(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_target_remove(l, ref, true);
+}
+int loom_private_target_reap(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_target_remove(l, ref, false);
+}
+
+int loom_private_target_get(struct Loom *l, struct loom_service_ref ref,
+                            const struct SrvServiceTarget **out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !out) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct SrvServiceTarget *t = loom_private_target_exact(l, ref, LSLOT_LIVE);
+    int rc = t ? loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_TARGET) : -T_E_NOENT;
+    if (!rc) { loom_ref(l); *out = t; }
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_target_put(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_private_target_exact(l, ref, LSLOT_LIVE) ?
+        loom_slot_unpin(l->service_slots, ref) : -T_E_NOENT;
+    spin_unlock(&l->lock);
+    if (!rc) loom_unref(l); // may enqueue final owner; never touch l again
+    return rc;
 }
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,

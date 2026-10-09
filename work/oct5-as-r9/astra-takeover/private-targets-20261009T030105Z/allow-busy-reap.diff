@@ -1,0 +1,11 @@
+--- control
++++ allow-busy-reap
+@@ -133,7 +133,7 @@
+     spin_lock(&l->lock);
+     struct SrvServiceTarget *t = loom_private_target_exact(l, ref,
+                                       rollback ? LSLOT_PROVISIONAL : LSLOT_LIVE);
+-    int rc = !t ? -T_E_NOENT : l->service_slots->slots[ref.slot].pins ? -T_E_BUSY : 0;
++    int rc = !t ? -T_E_NOENT : l->service_slots->slots[ref.slot].pins && false ? -T_E_BUSY : 0;
+     if (!rc) {
+         // Validate phase/identity/zero pins before either ledger changes. All
+         // transitions below are then infallible under the common owner lock.

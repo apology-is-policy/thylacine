@@ -14,6 +14,8 @@
 #include "test.h"
 
 #include <thylacine/loom.h>
+#include <thylacine/loom_service_targets.h>
+#include <thylacine/spoor.h>
 #include <thylacine/burrow.h>
 #include <thylacine/errno.h>
 #include <thylacine/exec.h>
@@ -26,6 +28,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
+void test_loom_private_targets(void);
 void test_loom_create_geometry(void);
 void test_loom_create_rejects_bad_args(void);
 void test_loom_refcount_lifecycle(void);
@@ -129,6 +132,18 @@ static const char *loom_slot_owner_fixture(void) {
              p->as->page_count == base && !p->as->private_rings &&
              addrspace_ref_count(p->as) == refs,
              "pool storage refusal rolls back prior slot allocation and charge");
+    loom_private_targets_fault_arm_for_test();
+    l = loom_create_private(p, 3, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_targets_fault_armed_for_test(),
+             "early refusal consumes target allocation fault");
+    loom_private_targets_fault_arm_for_test();
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_targets_fault_armed_for_test() &&
+             p->as->page_count == base && !p->as->private_rings &&
+             addrspace_ref_count(p->as) == refs,
+             "target refusal rolls back prior tables and charge");
     // Allocation succeeds but downstream layout fails; the new page must also
     // be released. The host allocator control measures that free separately.
     loom_private_layout_fault_arm_for_test();
@@ -143,8 +158,9 @@ static const char *loom_slot_owner_fixture(void) {
     SO_CHECK(l->service_pools && loom_service_pools_empty(l->service_pools),
              "private owner owns zeroed pool storage");
     SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
-             (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)),
-             "slot and pool pages included in metadata charge");
+             (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)) +
+             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)),
+             "slot pool and target pages included in metadata charge");
     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
              (u32)burrow_backing_pages(l->ring_size) + 1u,
              "all base storage charged before owner publication");
@@ -167,6 +183,7 @@ static const char *loom_slot_owner_fixture(void) {
 done:
     loom_private_slots_fault_disarm_for_test();
     loom_private_pools_fault_disarm_for_test();
+    loom_private_targets_fault_disarm_for_test();
     loom_private_layout_fault_disarm_for_test();
     if (l && l->service_slots && ref.incarnation) {
         spin_lock(&l->lock);
@@ -1838,4 +1855,112 @@ void test_loom_wait_counts_admitting(void) {
     TEST_ASSERT(parked, "the waiter parked in the wait's sleep");
     TEST_EXPECT_EQ((u64)(h->cq_tail - h->cq_head), (u64)1, "the phantom's CQE ended the wait");
     loom_unref(l);
+}
+
+// Actual native registry + navigation handle + private owner, without a peer
+// responder. Borrowing retains both exact target identity and the retiring ring.
+static const char *loom_targets_fixture(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make(), *poster = test_proc_make();
+    struct SrvRegistry *reg = NULL;
+    struct Spoor *root = NULL;
+    struct Loom *l = NULL;
+    struct loom_service_ref ref = {0}, stale = {0}, provisional = {0};
+    const struct SrvServiceTarget *borrow = NULL;
+    bool pinned = false, owner_dropped = false;
+    u64 goal = loom_private_retired(), destroyed = srv_registry_total_destroyed();
+    u32 base = 0;
+    struct loom_service_target in;
+    for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
+#define LT_CHECK(c,msg) do { if (!(c)) { error = msg; goto done; } } while (0)
+    LT_CHECK(p && poster, "target procs allocated");
+    base = p->as->page_count;
+    proc_mark_may_post_service(poster);
+    reg = srv_registry_create();
+    LT_CHECK(reg, "target registry allocated");
+    root = devsrv_attach_registry(reg);
+    LT_CHECK(root, "target native root allocated");
+    root->flag |= CWALKONLY;
+    LT_CHECK(devsrv_post_listener(poster, root, "target", 6, SRV_MODE_9P,
+                                  false, false, false) >= 0, "target strict native post");
+    spoor_ref(root);
+    int fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, root);
+    if (fd < 0) spoor_clunk(root);
+    LT_CHECK(fd >= 0, "target navigation fd installed");
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    LT_CHECK(l, "target ring allocated");
+    in.size = sizeof(in); in.version = 1; in.registry_fd = fd; in.name_len = 6;
+    const char *name = "target";
+    for (u32 i = 0; i < 6; ++i) in.name[i] = name[i];
+    LT_CHECK(loom_private_target_prepare(l, poster, &in, &ref) == -T_E_ACCES,
+             "target foreign creator refused");
+    in.name[255] = 1;
+    LT_CHECK(loom_private_target_prepare(l, p, &in, &ref) == -T_E_INVAL,
+             "target unused input tail refused");
+    in.name[255] = 0;
+    LT_CHECK(!loom_private_target_prepare(l, p, &in, &ref), "target provisionally captured");
+    LT_CHECK(loom_private_target_get(l, ref, &borrow) == -T_E_NOENT,
+             "provisional target cannot be borrowed");
+    stale = ref;
+    LT_CHECK(!loom_private_target_rollback(l, ref), "target copyout rollback");
+    LT_CHECK(!loom_private_target_prepare(l, p, &in, &ref) &&
+             ref.incarnation > stale.incarnation, "target rollback burns identity");
+    LT_CHECK(!loom_private_target_publish(l, ref), "target publish");
+    LT_CHECK(loom_private_target_get(l, stale, &borrow) == -T_E_NOENT,
+             "stale target reference refused");
+    LT_CHECK(!loom_private_target_get(l, ref, &borrow), "target borrow accepted");
+    pinned = true;
+    LT_CHECK(borrow->view == reg && borrow->service == srv_lookup_in(reg, name, 6) &&
+             borrow->generation && borrow->name_len == 6,
+             "target keeps exact native registry post identity");
+    LT_CHECK(loom_private_target_reap(l, ref) == -T_E_BUSY,
+             "borrow prevents target reap");
+    LT_CHECK(!loom_private_target_put(l, ref), "target borrow release");
+    pinned = false;
+    LT_CHECK(!loom_private_target_reap(l, ref), "unborrowed target reaps");
+    LT_CHECK(loom_private_target_put(l, ref) == -T_E_NOENT, "stale target put changes nothing");
+    LT_CHECK(!loom_private_target_prepare(l, p, &in, &ref) &&
+             !loom_private_target_publish(l, ref), "target republished for close");
+    LT_CHECK(!loom_private_target_prepare(l, p, &in, &provisional), "second provisional target");
+    LT_CHECK(!loom_private_target_get(l, ref, &borrow), "closing target retained");
+    pinned = true;
+    LT_CHECK(!handle_close(p, fd), "original navigation handle closed");
+    spoor_clunk(root); root = NULL;
+    test_proc_drop(poster); poster = NULL;
+    srv_registry_unref(reg); reg = NULL;
+    LT_CHECK(srv_registry_total_destroyed() == destroyed,
+             "targets retain registry after navigation and poster leave");
+    loom_exec_latch(l);
+    LT_CHECK(loom_private_target_publish(l, provisional) == -T_E_CANCELED,
+             "close wins publication");
+    LT_CHECK(!loom_private_target_rollback(l, provisional), "closed target rollback progresses");
+    LT_CHECK(loom_private_target_get(l, ref, &borrow) == -T_E_CANCELED,
+             "closed owner rejects new target borrows");
+    // Drop the original owner while the borrow remains; only that borrow may
+    // now touch l. Final put enqueues cleanup of the still-live target itself.
+    loom_unref(l); owner_dropped = true;
+    LT_CHECK(loom_private_retired() < goal && borrow->view && borrow->generation,
+             "borrow retains closed owner and native target");
+    (void)loom_private_target_put(l, ref); l = NULL; pinned = false;
+    LT_CHECK(lp_wait(goal), "final target borrower retires ring");
+    LT_CHECK(srv_registry_total_destroyed() == destroyed + 1,
+             "final target cleanup destroys registry exactly once");
+    LT_CHECK(p->as->page_count == base && !p->as->private_rings,
+             "target owner refunds all metadata and backing");
+done:
+    if (l) {
+        if (pinned) (void)loom_private_target_put(l, ref);
+        if (!owner_dropped) loom_unref(l);
+    }
+    if (goal && !lp_wait(goal) && !error) error = "target cleanup retirement timeout";
+    if (root) spoor_clunk(root);
+    test_proc_drop(p); test_proc_drop(poster);
+    if (reg) srv_registry_unref(reg);
+#undef LT_CHECK
+    return error;
+}
+void test_loom_private_targets(void) {
+    const char *error = loom_targets_fixture();
+    TEST_ASSERT(!error, error);
 }

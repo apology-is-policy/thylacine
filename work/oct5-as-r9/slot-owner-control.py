@@ -26,6 +26,10 @@ PRE = r'''
 #include <string.h>
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/errno.h>
+#define THYLACINE_DEVSRV_H
+struct SrvServiceTarget { void *view,*service;u64 generation;u8 name_len;char name[32]; };
+#include <thylacine/loom_service_targets.h>
+
 #define PAGE_SIZE 4096
 #define SLUB_MAX_OBJECT_SIZE 2048
 #define KP_ZERO 1
@@ -46,6 +50,7 @@ struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
     struct loom_service_pool_table *service_pools;
+    struct loom_service_target_table *service_targets;
     void *service_fixed;u32 service_fixed_count;
     u64 service_creator;
     u32 service_metadata_pages;
@@ -58,13 +63,14 @@ struct Loom {
     char buddy_padding[3000];
 };
 struct loom_layout { u32 ring_size; };
-static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,alloc_fault,inner_fault;
+static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,targets_fault,alloc_fault,inner_fault;
 static u64 g_loom_destroyed,service_retired_count;
 static void *allocations[8];
 static int live,allocated,freed,recorded;
 static u32 ring_charge;
 static bool loom_private_layout_fault_take(void) { bool b=layout_fault;layout_fault=false;return b; }
 static bool loom_private_pools_fault_take(void) { bool b=pools_fault;pools_fault=false;return b; }
+static bool loom_private_targets_fault_take(void) { bool b=targets_fault;targets_fault=false;return b; }
 static bool loom_private_slots_fault_take(void) { bool b=slots_fault;slots_fault=false;return b; }
 static bool loom_measure(u32 sq,u32 cq,bool receipts,struct loom_layout *g) {
     CHECK(receipts,"fixture receipts");g->ring_size=PAGE_SIZE;return sq==2 && cq==2;
@@ -112,6 +118,7 @@ static bool burrow_unref_settled_in(void *ring,struct AddrSpace *a,u32 *refund) 
     CHECK(!locks && ring==(void*)1 && a->private_rings==1,"settled drop before image put");
     *refund=ring_charge;ring_charge=0;return true;
 }
+static void devsrv_service_target_clear(struct SrvServiceTarget *t) { CHECK(!locks && !t->view,"empty target clear"); }
 static bool loom_is_private(const struct Loom *l) { return l && l->service_as; }
 '''
 
@@ -128,9 +135,10 @@ int main(int argc,char **argv) {
     if(mode==5)inner_fault=true;
     if(mode==6)slots_fault=true;
     if(mode==8)pools_fault=true;
-    struct Loom *l=loom_create_private(&p,mode==6?3:2,2,true);
-    CHECK(!slots_fault && !pools_fault && !layout_fault,"one-shot faults consumed");
-    if((mode>=1 && mode<=6) || mode==8) {
+    if(mode==9 || mode==10)targets_fault=true;
+    struct Loom *l=loom_create_private(&p,(mode==6 || mode==10)?3:2,2,true);
+    CHECK(!slots_fault && !pools_fault && !targets_fault && !layout_fault,"one-shot faults consumed");
+    if((mode>=1 && mode<=6) || mode>=8) {
         CHECK(!l,"fault refuses publication");
         CHECK(live==0,"rollback frees slot and pool pages");
         CHECK(a.pages==10,"refusal restores accounting");
@@ -138,9 +146,9 @@ int main(int argc,char **argv) {
         CHECK(!recorded,"refusal publishes no ring charge");
         puts("PASS refusal");return 0;
     }
-    CHECK(l && l->service_slots && l->service_pools && live==3,"owner retains all three allocations");
+    CHECK(l && l->service_slots && l->service_pools && l->service_targets && live==4,"owner retains all four allocations");
     CHECK(l->service_as==&a && l->service_creator==987,"exact image and identity");
-    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools)),
+    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools))+burrow_backing_pages(sizeof(*l->service_targets)),
           "slot and pool pages charged in metadata");
     CHECK(a.pages==10+l->service_metadata_pages+2,"complete owner charge");
     struct loom_service_ref ref;
@@ -161,7 +169,7 @@ int main(int argc,char **argv) {
     CHECK(!loom_slot_reap(l->service_slots,ref),"reap after close");
     spin_unlock(&l->lock);
     loom_private_destroy(l);
-    CHECK(live==0 && freed==3,"retirement frees owner and tables");
+    CHECK(live==0 && freed==4,"retirement frees owner and tables");
     CHECK(a.pages==10 && a.refs==1 && !a.private_rings,"retirement restores image");
     CHECK(service_retired_count==1 && g_loom_destroyed==1,"retirement published once");
     puts("PASS owner");return 0;
@@ -179,12 +187,15 @@ def main():
     out.mkdir()
     paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h']
     sources = {p: Path(p).read_text() for p in paths}
-    funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_drop_buffer', 'loom_private_destroy')}
+    funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_drop_buffer', 'loom_private_targets_destroy', 'loom_private_destroy')}
     def program(fs):
         return PRE + '\n' + '\n'.join(fs.values()) + MAIN
     control = program(funcs)
-    cases = [('control', None, None, None, list(range(9)), None),
+    cases = [('control', None, None, None, list(range(11)), None),
         ('omit-slot-charge', 'loom_create_private', 'burrow_backing_pages(sizeof(struct Loom)) + 1u', 'burrow_backing_pages(sizeof(struct Loom))', [0], 'slot and pool pages charged in metadata'),
+        ('omit-target-charge', 'loom_create_private', '+ (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))', '', [0], 'slot and pool pages charged in metadata'),
+        ('omit-target-unwind', 'loom_create_private', '        kfree(targets);', '', [4], 'rollback frees slot and pool pages'),
+        ('omit-target-free', 'loom_private_destroy', '    kfree(l->service_targets);', '', [0], 'retirement frees owner and tables'),
         ('omit-pool-charge', 'loom_create_private', '+ (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))', '', [0], 'slot and pool pages charged in metadata'),
         ('omit-unwind-pool-free', 'loom_create_private', '        kfree(pools);', '', [4], 'rollback frees slot and pool pages'),
         ('omit-retire-pool-free', 'loom_private_destroy', '    kfree(l->service_pools);', '', [0], 'retirement frees owner and tables'),

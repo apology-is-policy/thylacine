@@ -1,0 +1,11 @@
+--- control
++++ allow-tail
+@@ -88,7 +88,7 @@
+         in->result.slot || in->result.reserved || in->result.incarnation)
+         return -T_E_INVAL;
+     for (u32 i = in->name_len; i < sizeof(in->name); ++i)
+-        if (in->name[i]) return -T_E_INVAL;
++        if (in->name[i] && false) return -T_E_INVAL;
+     struct loom_service_ref ref;
+     spin_lock(&l->lock);
+     int rc = loom_slot_reserve(l->service_slots, LOOM_SERVICE_TARGET, &ref);

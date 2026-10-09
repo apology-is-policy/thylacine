@@ -43,6 +43,8 @@ struct loom_pool;
 struct loom_pool_bank;
 struct loom_slot_table;
 struct loom_service_pool_table;
+struct loom_service_target_table;
+struct SrvServiceTarget;
 struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
 struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in kernel/loom.c)
 
@@ -462,6 +464,7 @@ struct Loom {
     // Private-only, one separately charged buddy page; identity/borrow ledger.
     struct loom_slot_table *service_slots;
     struct loom_service_pool_table *service_pools;
+    struct loom_service_target_table *service_targets;
     struct loom_private_fixed *service_fixed; // exact accepted fixed extents, under lock
     u32 service_fixed_count; // bounded by existing CQ terminal-obligation capacity
     u64 service_creator;
@@ -627,6 +630,9 @@ bool loom_private_slots_fault_armed_for_test(void);
 void loom_private_pools_fault_arm_for_test(void);
 void loom_private_pools_fault_disarm_for_test(void);
 bool loom_private_pools_fault_armed_for_test(void);
+void loom_private_targets_fault_arm_for_test(void);
+void loom_private_targets_fault_disarm_for_test(void);
+bool loom_private_targets_fault_armed_for_test(void);
 // One-shot keyed to the arming thread: that thread's next loom_create_layout
 // treats its ring Burrow as refused AFTER allocating the Loom metadata, and
 // arms the large-kfree watch on that metadata.
@@ -694,6 +700,23 @@ int loom_private_fixed_acquire(struct Loom *, struct Proc *,
                                const struct loom_service_pool_member *,
                                struct loom_private_fixed *);
 int loom_private_fixed_release(struct Loom *, struct loom_private_fixed *);
+// Internal target registration: complete immutable kernel record, retained owner
+// and creator in its stable syscall image. Resolves the actual registry_fd via
+// handle_get; navigation is not connect authority. No syscall activation.
+int loom_private_target_prepare(struct Loom *, struct Proc *,
+                                const struct loom_service_target *, struct loom_service_ref *);
+// Continuations retain the Loom across usercopy and every publish/remove call.
+int loom_private_target_publish(struct Loom *, struct loom_service_ref);
+int loom_private_target_rollback(struct Loom *, struct loom_service_ref);
+int loom_private_target_reap(struct Loom *, struct loom_service_ref);
+// Borrow only a published target. Success retains its slot and Loom until put;
+// the pointer is immutable during the borrow. Caller owns exactly one put per
+// get and never reuses a borrowed pointer after put. Future CONNECT must still
+// capture the actual caller and use devsrv_service_prepare's admission checks.
+int loom_private_target_get(struct Loom *, struct loom_service_ref,
+                            const struct SrvServiceTarget **);
+int loom_private_target_put(struct Loom *, struct loom_service_ref);
+
 
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,

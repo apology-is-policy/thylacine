@@ -260,3 +260,17 @@ directions, provisional pools, duplicate/capacity refusal, table replacement,
 unmap, double release and a final fixed borrower retaining the closed owner.
 The new denominator is 1842; its source-and-diff recorded SMP1 boot passed.
 Protocol/worker integration and the new source's full matrix remain pending.
+
+
+## October 9: native target owner witness
+
+`loom.private_targets` raises this source's registered suite to 1843. It checks
+actual native registry capture through a navigation handle, provisional rollback,
+identity burn/stale refusal, busy reap, close-before-publish, fd/poster closure,
+and final borrower retention/registry destruction without a peer responder.
+The existing slot-owner row adds target-allocation failure/unwind and its fifth
+metadata page. Default SMP1 diagnostic private-targets-diagnostic-20261009T025959Z
+passed 1843/1843 plus D7 overlap, twenty distinct cycles and banner. Full Mac
+matrix remains pending for the new source; prior d3563f828 50/50 had 1842 rows.
+Host controls use checked doubles; no protocol, Pi or guest allocator proof is
+inferred. See ASYNC-SERVICE-STATUS for hashes, harness corrections and scope.
