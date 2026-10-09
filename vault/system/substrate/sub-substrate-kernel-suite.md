@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-09
+updated: 2026-10-10
 ---
 
 ## Purpose
@@ -474,3 +474,21 @@ Full Mac matrix pending on this source. Checked host boundary doubles separately
 pass11 controls/12 named mutations; they do not constitute SMP race stress or
 an independent audit. The engine is internal, handshake-only, and requires its
 caller to retain entry storage. Private ring dispatch/activation stays disabled.
+
+
+## October 10: private executor and operation-storage evidence boundaries
+
+The1853 suite's loom.private_executor is qualified on exact f719ee4a3 by
+current-gate-20261009T211533Z:50/50 Mac default SMP1/4/8 and UBSan4/8, D7
+overlap/twenty distinct cycles in every boot. Evidence checkpoint79dfd1267
+retains100 raw logs and ten input hashes. Earlier counts remain historical.
+
+New loom.private_operation_storage raises the suite to1854 and uses real normal
+and bulk READY peers to check request physical-owner retention, exact one-page
+charge/refund, real allocator/quota refusal, terminal-capacity exhaustion,
+identity burn and close PARKED until the owner is physically destroyed.
+operation-storage-native-20261009T215931Z passes1854/1854 plus D7 overlap/twenty
+cycles/banner with eleven source/six input hashes. Implementation e7ff5d1c7 is
+covered only by this bounded CPU1 native run and recorded host/ARM64 checks;
+prior full Mac qualification does not extend to it. General RPC/FID/buffer
+dispatch and public activation remain unimplemented. Self-review only.

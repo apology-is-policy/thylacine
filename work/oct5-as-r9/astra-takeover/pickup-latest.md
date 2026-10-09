@@ -15,8 +15,8 @@ ARM64 link pass; CAP-L1 missing libc memcpy from struct assignment repaired by
 explicit byte copying, failure retained. Native operation-storage-native-
 20261009T215931Z passes1854/D7/20cycles with11source/6input hashes and real
 normal/bulk allocation/quota/close-storage cases. No full new-source Mac claim.
-Mac resource released after native. Commit pending reviewed source/docs/evidence,
-then continue RPC list/admission/callback/commit, FID/DAC/fixed/provided-buffer
+Mac resource released after native. Storage checkpoint e7ff5d1c7 committed with
+normal hooks. Continue RPC list/admission/callback/commit, FID/DAC/fixed/provided-buffer
 ownership and READY readiness integration per rpc-integration-plan.txt. These
 helpers and storage fixture do not implement dispatch. AS3/4 precede MM0-MM4.
 
