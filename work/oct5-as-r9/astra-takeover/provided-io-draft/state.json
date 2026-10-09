@@ -1,0 +1,26 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "source_base": "c45d0afd9b810ea3b3b0aa382f6ca7fa78b4e3f4",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "state": "verified-uninstalled-provided-ownership",
+  "run": "work/oct5-as-r9/astra-takeover/provided-io-draft/controls-20261009T233402Z",
+  "checks": 554,
+  "prior_fixed_checks": 268,
+  "mutants": 18,
+  "operation_bytes": 920,
+  "protocol_bytes": 42288,
+  "arm64": "arm64-result.json",
+  "dependencies": [
+    "program-draft",
+    "wire-draft",
+    "canonical FID/request/node/slot/pool/table/fixed helpers"
+  ],
+  "review": "single-agent self-review; not independent audit",
+  "utc": "2026-10-09T23:35:50.973316+00:00",
+  "next": "next-work.txt",
+  "limits": "Synthetic parsed dispatch replies; no real submit/wire. Actual CQ/receipt publication, pool/slot/request/FID ledger, capture and program transitions. Registration physical pins are fixture boundaries. Whole-ring pending discard and real READY driver remain pending. Real data headers and actual SQE preparation, fixed helper, constructor, FID allocator and ledger/program code. Host address translation, allocation, Proc snapshot, refs/wake/engine and physical backing drop boundaries. No wire dispatch; admitted destructor is manual fixture cleanup. No native frontend/driver/close/concurrency proof.",
+  "verified_input_count": 33,
+  "verified_source_binary_pairs": 19,
+  "verified_arm_objects": 6
+}

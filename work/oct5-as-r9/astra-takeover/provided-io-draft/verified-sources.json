@@ -1,0 +1,18 @@
+{
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_admission.c": "d1be069a19bca05dc8390226ef362bfe414c4f5883d7e98de4b789d67a4de438",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_operation.c": "e25d14e906ff7f107fdac7744a204615106c57657e1946a88aef1b72c1545b9f",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_rpc.c": "9d26e0371fc7abab936710ca193517f001aef48ca763da6e450e3cd7b2156ed7",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_provided.c": "fd3f8b091f2eb9af696111b27dcb3364534948bfcaf330a6dca6c4f887aeba02",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_io.c": "bc30a868c29f1ede1988da4ffff2883a442afed82d69f07ec62ef4389bab63ba",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_rpc.h": "ac57d3c6651e7579f8adc823614314e9ac94a42320112cf63cd2b64bae9a3e0d",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_operation.h": "a6ddce1e36960bbc3b018e32bec97ba991528be649b1ba5bbbe99819753ca1cd",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_provided.h": "f768a1759959793850de44bdecd8140967de6ff846db31321b947cbd992a02dd",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/fixture.c": "1359609b8af86aa2a4d1ca23fc2316ea5b24c65487158c7f8450964c3f6ab280",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/run-controls.py": "ad58fd649c6e34d099a20a969465e9c9ea8310971e8c954c7e4dcc03e9a06b49",
+  "work/oct5-as-r9/astra-takeover/provided-io-draft/check-arm64.py": "fb6a5deb4990a89b0f4bde08565a1fb7acff9a7eed3d759fd62bc8d157b16c2b"
+}

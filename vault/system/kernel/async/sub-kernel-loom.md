@@ -2573,3 +2573,14 @@ barrier bars terminal/free until backing release outside Ll completes; payload
 pointer/capacity then clear.268hostchecks/17mutants and ARM64864B owner pass.
 Actual shared-ring/READY/close and provided-buffer lifecycle remain outstanding;
 read its self-review/next-work for host boundaries. No native/activation claim.
+
+Astra October10 provided operation layer is uninstalled (`provided-io-draft`).
+Streams protect pool backing through terminal bookkeeping. Single-shot positive
+payload and terminal occupy one CQE/receipt; MORE remains active and cancellation
+cannot overtake PENDING. Rearm consumes an explicit delivered-MORE proof and checks
+fresh abort/deadline. Empty waits send nothing; leases outlive source/request until
+explicit RETURN.554hostchecks/18mutants and ARM64920B owner pass with synthetic
+parsed replies. Self-review identifies PROVIDED-R3: actual whole-ring close must
+discard pending payloads before global request detach, which waits for active
+borrows; scope abort must preserve them. READY/close/RETURN wake integration and
+native qualification remain pending. No activation; see self-review/next-work.

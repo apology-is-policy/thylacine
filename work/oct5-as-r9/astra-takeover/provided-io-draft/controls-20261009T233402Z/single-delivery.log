@@ -1,0 +1,2 @@
+PASS fixed SQE preparation: 268 checks
+FAIL committed single survives scope abort and delivers once

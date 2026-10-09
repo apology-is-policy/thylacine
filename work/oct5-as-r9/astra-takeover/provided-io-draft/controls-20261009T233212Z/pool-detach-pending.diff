@@ -1,0 +1,11 @@
+--- control.c
++++ pool-detach-pending.c
+@@ -964,7 +964,7 @@
+     o->program.wire.payload=NULL;o->program.wire.payload_capacity=0;
+ }
+ int loom_provided_detach_locked(struct loom_service_operation *o) {
+-    if(!o || !o->pool_stream || o->pool_busy || o->pool_pending ||
++    if(!o || !o->pool_stream || o->pool_busy ||
+        (o->phase!=LRPC_NEW && o->phase!=LRPC_RETIRED) || o->rpc.sending ||
+        o->rpc.on_complete)return -T_E_BUSY;
+     struct loom_pool *p=provided_pool(o->owner,o->pool);

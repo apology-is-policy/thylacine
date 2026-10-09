@@ -1,0 +1,138 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_admission.c": "d1be069a19bca05dc8390226ef362bfe414c4f5883d7e98de4b789d67a4de438",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_operation.c": "e25d14e906ff7f107fdac7744a204615106c57657e1946a88aef1b72c1545b9f",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_rpc.c": "3a74b8841a88596b899761468466ba9f1d9ed585ef5a80e92619973863a67c89",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_provided.c": "3350419fcb9b92221d4c69ee5e319e4e37a495bebc0c4578d02978193036ce52",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_io.c": "bc30a868c29f1ede1988da4ffff2883a442afed82d69f07ec62ef4389bab63ba",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_rpc.h": "ac57d3c6651e7579f8adc823614314e9ac94a42320112cf63cd2b64bae9a3e0d",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_operation.h": "168f078f1aa2862a3b2d3eab9677a79a73d110407df13d4323f5d5598329316a",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_provided.h": "f768a1759959793850de44bdecd8140967de6ff846db31321b947cbd992a02dd",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_io.h": "6c1ab37ebf9a21435f99f05437fd3b64ba5194582c6d7e4115cf0b3812843f11",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_admission.h": "a6fc230bb7405294086fb67f8ca2a3a3ac2a7223ce0307505678b8e0699ed180",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/include/thylacine/loom_service_fixed.h": "2a2245ac7c4b42384dfb3cea6fac8e68a8d75530a1ffd17361c51a77d7e3d8bd",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/fixture.c": "7739dcf638071ac7cdcc22c2d645ea9a0928a73bde352c220e1c349af235fb34",
+    "work/oct5-as-r9/astra-takeover/provided-io-draft/run-controls.py": "4893dd7d1dc2bfea2864afd2e6c3d31da6b4b5210b07677585283052b4dda963",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom.c": "20c3e4b4b01a87179d5247e8e9fd1a254b8e7b647014172b06939de139e97fbf",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+    "kernel/loom_service_decode.c": "f55b0fea8e941d3cfa789223f22695f63d037a371a60127704a5c69fa0e1b273"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "0b58fbd773f2240857b1c553d26df29327f350d4693bee653ff7f7fc4aaa4516",
+      "binary_sha256": "a71ef1a95d6aa3a8cfc1b002d51b49059d04fe272217a6b72adffe0d7224da70"
+    },
+    {
+      "case": "pool-stream-free",
+      "expected": "storage free after physical holds",
+      "rc": 1,
+      "source_sha256": "5b3dbcf538e10c65d94d0cf446216648c5cb3672cb3d6663a8af18e20db6fe09",
+      "binary_sha256": "92e6b4f234bba03e3c3c998f3fefdd1b263a8dbf397c81c21257aee2e295e770"
+    },
+    {
+      "case": "pool-detach-pending",
+      "expected": "terminal bookkeeping retains stream",
+      "rc": 1,
+      "source_sha256": "5c9b9b1be5ee5b2ada2c33fd3daa38f7624b159278d6b61266518d19866c091c",
+      "binary_sha256": "297ec060897e9e421f186289f559d0f4809b283646f7dad8d753a0920f2b07bf"
+    },
+    {
+      "case": "pool-claim-required",
+      "expected": "raw begin refuses unclaimed pool",
+      "rc": 1,
+      "source_sha256": "c361b4bbac3d57db42dbb815952e1931b00c2be738e097ae42a221474cc803f1",
+      "binary_sha256": "d24a77478abc78e5b20faf6748206af751513043489664a3b811c003f16ea3f1"
+    },
+    {
+      "case": "canonical-member",
+      "expected": "selected canonical member before read",
+      "rc": 1,
+      "source_sha256": "72571b5536bd9e8f2884419a2f3daed73261550a784fbd550896954d3b472696",
+      "binary_sha256": "362c05c23de551fa14fadce50bdc8346553efcc9d525d6dba954f6afb09f238a"
+    },
+    {
+      "case": "pending-terminal-order",
+      "expected": "cancellation cannot overtake pending MORE",
+      "rc": 1,
+      "source_sha256": "0d5d783b01fd99f8f358835849edac8e0bd2893ff6a8af0923027bfec6c9de2e",
+      "binary_sha256": "a671bf8e5d72d03e3a393c7d275388300042fc59f76b6c1ea66e0cd138a6fad7"
+    },
+    {
+      "case": "pending-rearm",
+      "expected": "undelivered MORE prevents next shot",
+      "rc": 1,
+      "source_sha256": "5eaeb839e673439270cc48bb875df3ffa51a454e1a544eac49ea39ec9fda0970",
+      "binary_sha256": "3b3a1a4e4a63faec9826f5eee385bc9c8edcf93b1c760cfae866e057f93d04f0"
+    },
+    {
+      "case": "fresh-rearm",
+      "expected": "abort preserves MORE but bars new shot",
+      "rc": 1,
+      "source_sha256": "9e0d27074976004da78f8f6be3e983d7ab43a7534ec59ba5f2546bc0c8f634ae",
+      "binary_sha256": "d68cfd7117df61674a6650b40bd6a9738fa30770a3b58a8d88ac6e61ae7c34fe"
+    },
+    {
+      "case": "cq-full",
+      "expected": "full CQ preserves committed payload",
+      "rc": 1,
+      "source_sha256": "360db95e76c9dd71379bf7403b061a6ece8b34d1377663b7a7fbca0e30a7e33b",
+      "binary_sha256": "49f8c1a455da2e0c230cc7a2890d89ff8f1ee39020a2e2c9d82e926b9232183b"
+    },
+    {
+      "case": "single-delivery",
+      "expected": "committed single survives scope abort and delivers once",
+      "rc": 1,
+      "source_sha256": "504871b82e9747976679a5998606e18a0797808cc46e56a00500c57fab03417a",
+      "binary_sha256": "0e55436b0b9e31439230140fd7d8256efb258b8b2e536aba634c62b1c772276a"
+    },
+    {
+      "case": "more-flag",
+      "expected": "MORE delivery has explicit receipt",
+      "rc": 1,
+      "source_sha256": "b3ba4c605f00dfbfec6023d24588d836a206bd321df285e20e92804fa02f8e3f",
+      "binary_sha256": "cd5d9c40b4bb7e0df9ed217435f67485abf27a60fcd4a21463cd1a37f56367f0"
+    },
+    {
+      "case": "member-view-clear",
+      "expected": "single positive commits terminal and pending payload",
+      "rc": 1,
+      "source_sha256": "f47d86ec90a4c30deb37985b840c5f950f2da4530d9ca13da2e9a2c408145325",
+      "binary_sha256": "b3dec0c677641c168dc8238393f90e3d1a8401dae52b8096ab5fbc8733441dc2"
+    },
+    {
+      "case": "nonce-reuse",
+      "expected": "return enables fresh monotone lease",
+      "rc": 1,
+      "source_sha256": "6715cad14d4961e2f7226de4d91e2fba50fd5cd845171e0f26b1752c5a4227d8",
+      "binary_sha256": "6e887a39b0845c5f41d9bbc986cb142ffb465c1dd6a3e13fe7c93f4704790495"
+    },
+    {
+      "case": "pending-return",
+      "expected": "pending payload cannot return",
+      "rc": 1,
+      "source_sha256": "14d33d0320fc790c0b7b80328a05c66d8edf5c859af6af5ace0c20fdb07c8bd3",
+      "binary_sha256": "5331739679eba40874a4ada8be170c15d1b8acb25a9fbecbe860de03856230a2"
+    }
+  ],
+  "limits": "Synthetic parsed dispatch replies; no real submit/wire. Actual CQ/receipt publication, pool/slot/request/FID ledger, capture and program transitions. Registration physical pins are fixture boundaries. Whole-ring pending discard and real READY driver remain pending. Real data headers and actual SQE preparation, fixed helper, constructor, FID allocator and ledger/program code. Host address translation, allocation, Proc snapshot, refs/wake/engine and physical backing drop boundaries. No wire dispatch; admitted destructor is manual fixture cleanup. No native frontend/driver/close/concurrency proof."
+}

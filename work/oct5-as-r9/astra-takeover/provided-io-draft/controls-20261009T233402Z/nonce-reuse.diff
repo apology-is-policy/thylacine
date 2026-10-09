@@ -1,0 +1,11 @@
+--- control.c
++++ nonce-reuse.c
+@@ -200,7 +200,7 @@
+         u32 ordinal = (p->cursor + n) % p->count;
+         struct loom_pool_cell *c = (struct loom_pool_cell *)member(b, p, ordinal);
+         if (!c || c->phase != LMEMBER_AVAILABLE) continue;
+-        c->nonce = ++b->next_nonce;
++        c->nonce = b->next_nonce?b->next_nonce:++b->next_nonce;
+         c->phase = LMEMBER_BUSY;
+         c->requested = maximum;
+         c->result = 0; c->user_data = 0; c->more = false;

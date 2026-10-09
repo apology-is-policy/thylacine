@@ -89,3 +89,15 @@ physical-drop barrier prevents terminal before backing return.268hostchecks/
 Not shared-ring or native queue proof. Next provided pools/leases/MORE/emptywait,
 READY fairness and physical close/destructor before installation. Canonical97d495;
 Mac released/no jobs/9176MiB, Stratum61dde37 and Astra10hashes intact. No activation.
+
+Current uninstalled working set provided-io-draft supersedes fixed-io copies;
+read state/self-review/next-work. Pool stream/member/lease ownership, combined
+single-shot CQE+terminal, MORE ordering and explicit delivered-MORE rearm proof
+pass554 cumulative hostchecks/18mutants; ARM64920B owner,33inputs/19binary-log pairs/
+6ARM objects reverified. Synthetic parsed replies, no native transport/driver proof.
+PROVIDED-R3 close dependency: global request detach waits zero borrows, but PENDING
+multishot still holds one. Actual whole-ring consumer/quiescence pending-disposal
+must precede global detach; scope abort never returns pending/leased payloads.
+Next coherent READY/physical close, pool RETURN wake/fairness and actual frontend,
+then native matched gates, AS3/4,MM0-MM4. Canonical97d495; Mac released/no native jobs/
+8940MiB, Stratum61dde37/Astra10hashes intact. No activation or128MiB removal.

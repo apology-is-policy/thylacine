@@ -1,0 +1,11 @@
+--- control.c
++++ pending-return.c
+@@ -252,7 +252,7 @@
+ int loom_pool_return(struct loom_pool_bank *b, const struct loom_pool *p,
+                      const struct loom_service_buffer_receipt *r) {
+     struct loom_pool_cell *c;
+-    int err = receipt_cell(b, p, r, LMEMBER_LEASED, &c);
++    int err = receipt_cell(b, p, r, LMEMBER_PENDING, &c);
+     if (err) return err;
+     c->phase = LMEMBER_AVAILABLE;
+     return 0;

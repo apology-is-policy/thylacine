@@ -1,0 +1,2 @@
+PASS fixed SQE preparation: 268 checks
+FAIL all member bounds precede stream ownership

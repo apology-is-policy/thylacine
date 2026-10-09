@@ -1,0 +1,18 @@
+Current working set provided-io-draft, exact wire-draft/program-draft dependencies.
+Next implement coherent READY/close driver and admitted physical destruction.
+Resolve PROVIDED-R3 before installation: actual whole-ring consumer close plus
+all local callback/TX users ended must allow PENDING disposal while active request
+borrows still exist; do not wait for global request detach to authorize that step.
+Scope abort MUST preserve PENDING/LEASED; only actual whole-ring close can discard.
+Then release busy/fixed physical holds, settle requests, discard/deliver terminal,
+unlink, detach stream, free storage/refund before request owner_drop/reap, then
+engine/Loom root drops. Do not require zero entry pins before draining owners.
+For single positive pool_terminal call provided_deliver once (includes request
+terminal delivery), never ordinary post_terminal. Multishot delivered-MORE proof
+permits fresh-time rearm; rotate ready streams fairly, wait on empty pool/return
+without spinning, keep earliest deadline independent of CQ/buffer availability.
+Wire register-before-recheck readiness, max one response/msize quantum per scope,
+full-CQ parking, actual RETURN wake and immutable SQE frontend. Existing engine
+CONNECT deadline must remain inactive after READY. Preserve unpublished owners.
+Normal/bulk native malformed/abort/deadline/DAC/WALK/CLUNK/fullCQ/fixed/pool/close
+fixtures and matched full gates precede AS3/4 then MM0-MM4. No activation yet.

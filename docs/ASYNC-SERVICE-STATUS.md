@@ -2836,3 +2836,32 @@ Next provided-buffer selection/leases/MORE/empty waits, then coherent READY and
 physical close cleanup before queue installation; native matched gates, AS3/4
 and MM0-MM4 follow. Mac released, no jobs,9176MiB before documentation; Stratum
 clean61dde37 and Astra10 pending/protected hashes intact. No activation.
+
+### Astra provided-buffer operation ownership, October10
+
+The uninstalled `astra-takeover/provided-io-draft` now retains pool streams through
+operation bookkeeping, selects canonical BUSY members before reads, waits locally
+on empty pools, and preserves exact leases across source retirement. Single-shot
+positive payload and terminal share one CQE/receipt publication. Multishot has one
+pending payload per request; cancellation cannot overtake it, and rearm requires
+fresh abort/deadline checks plus an explicit delivered-MORE proof. Self-review
+added that proof after finding that released BUSY alone could permit silent loss
+of an uncommitted positive reply. No CQ acknowledgement automatically returns a
+lease; EOF/errors release only unpublished BUSY members.
+
+554 cumulative sanitizer checks (268 prior fixed plus286 pool/setup/cleanup)
+and18 targeted mutants pass; ARM64 owner920B fits its charged page. Raw33inputs/
+19source-binary-log pairs and6ARM objects reverified. Synthetic parsed replies
+feed actual capture/program/ledger/CQ code; physical registration, host refs and
+manual admitted destruction are explicit fixture boundaries. This is not native
+transport, driver, concurrent-close or shared-ring-dispatch qualification.
+
+PROVIDED-R3 remains a concrete close integration dependency: global request detach
+requires zero borrows, but pending multishot keeps a borrow and cannot be cancelled
+before its committed success. Whole-ring close needs its own actual consumer/
+writer-quiescence proof and pending-disposal edge before global detach. Scope
+abort must keep pending/leased payloads intact. Complete READY/physical close and
+fair empty-pool/return wake integration coherently before installing the queue.
+Then native matched gates, AS3/4 and MM0-MM4. Canonical kernel remains97d495fcb.
+Mac released, no native job,8940MiB before docs; clean Stratum61dde37 and Astra10
+pending/protected hashes intact. Single-agent self-review; no activation.

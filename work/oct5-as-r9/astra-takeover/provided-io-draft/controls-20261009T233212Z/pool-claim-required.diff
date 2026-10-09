@@ -1,0 +1,11 @@
+--- control.c
++++ pool-claim-required.c
+@@ -562,7 +562,7 @@
+ }
+ int loom_rpc_begin_locked(struct loom_service_operation *o,u64 now) {
+     int rc=loom_rpc_check_begin_locked(o,now);if(rc)return rc;
+-    if(o->pool_stream && !o->pool_busy)return -T_E_BUSY;
++    /* omit pool guard */
+     o->callback_seen=false;o->capture_error=0;
+     o->submitted=false;o->advanced=false;
+     o->rpc.on_complete=loom_rpc_capture;o->phase=LRPC_INFLIGHT;
