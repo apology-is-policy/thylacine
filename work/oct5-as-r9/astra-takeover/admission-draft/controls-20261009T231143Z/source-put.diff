@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ source-put.c
+@@ -195,7 +195,7 @@
+     if(o->source_borrow) {
+         if(loom_fid_put(l->service_slots,l->service_nodes,o->source))
+             extinction("admission lost source borrow");
+-        o->source_borrow=false;
++        o->source_borrow=true;
+     }
+     if(o->fid_claim) {
+         struct loom_service_ref ref=o->fid_claim==P9_TWALK?o->destination:o->source;

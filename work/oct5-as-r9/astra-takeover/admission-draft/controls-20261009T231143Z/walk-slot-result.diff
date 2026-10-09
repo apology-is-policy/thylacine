@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ walk-slot-result.c
+@@ -256,7 +256,7 @@
+ }
+ int loom_admission_commit_locked(struct loom_service_operation *o,u64 now) {
+     if(!o)return -T_E_INVAL;
+-    s32 result=o->program.operation==P9_TWALK?(s32)o->destination.slot:o->program.result;
++    s32 result=o->program.operation==P9_TWALK?0:o->program.result;
+     // A negative program result belongs to cancel, including open DAC refusal.
+     if(o->program.result<0)return -T_E_INVAL;
+     int rc=loom_rpc_check_finish_locked(o,result,now);if(rc)return rc;

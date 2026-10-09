@@ -2789,3 +2789,26 @@ FID/destination and fixed/provided payload admission, READY fairness/readiness a
 physical close disposal must be completed coherently before queue installation.
 Then native/source-matched gates, AS3/4 and MM0-MM4. Mac released, no running gate;
 Stratum61dde37 and Astra10protected/pending hashes unchanged. No activation.
+
+### Astra FID admission transactions, October 10
+
+The uninstalled `astra-takeover/admission-draft` resolves exact source scopes,
+retains READ/WRITE access borrows, and claims WALK destinations or exclusive
+opens. ADMIT-R1 self-review moves the pure queue/request check before irreversible
+CLUNK retirement, retaining Ll through claim and enqueue. CLUNK submission waits
+for earlier source borrowers. Final publication, hold return and terminal commit
+share a fresh abort/deadline check under Ll. CLUNK error cleanup requires both
+scope-abort latch and externally established callback quiescence.
+
+257 cumulative sanitizer checks (160 prior owner checks plus97 new admission/setup
+assertions) and26 targeted mutants pass; constructor fault/cleanup controls add16
+mutants, including refusal to free while FID holds remain. Actual ARM64 owner816B
+still fits its charged page, protocol42288B unchanged, no libc references. Raw31
+input hashes/27 RPC pairs,17 constructor pairs and4 ARM objects rechecked. A masked
+quiescence witness was corrected; failed evidence retained. Single-agent self-review.
+
+These are actual FID/ledger transactions with explicit synthetic program success
+in the new cases, not native remote-FID/driver/close proof. Canonical kernel remains
+97d495fcb. Next immutable SQE frontend and canonical fixed/provided buffers, actual
+monotone wire-FID allocation, then coherent READY/physical close integration before
+queue installation. Native matched gates, AS3/4 and MM0-MM4 follow. No activation.

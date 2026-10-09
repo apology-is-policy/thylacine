@@ -1,0 +1,25 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "source_base": "f279318a5d8cbc62a450785d5cdfcdd7131ec7c6",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "state": "verified-uninstalled-fid-admission",
+  "run": "work/oct5-as-r9/astra-takeover/admission-draft/controls-20261009T231143Z",
+  "checks": 257,
+  "prior_owner_checks": 160,
+  "mutants": 26,
+  "constructor_run": "work/oct5-as-r9/astra-takeover/admission-draft/operation-controls-20261009T231010Z",
+  "constructor_mutants": 16,
+  "operation_bytes": 816,
+  "protocol_bytes": 42288,
+  "arm64": "arm64-result.json",
+  "dependencies": [
+    "program-draft",
+    "wire-draft",
+    "canonical FID/request/node/slot"
+  ],
+  "review": "single-agent self-review; not independent audit",
+  "utc": "2026-10-09T23:13:17.136775+00:00",
+  "next": "next-work.txt",
+  "limits": "Actual FID admission/commit transitions; synthetic successful program outcomes for new FID cases. Canonical buffer acquisition, actual frontend/driver/abort/close and native concurrency remain pending."
+}

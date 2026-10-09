@@ -1,0 +1,29 @@
+Use this admission-draft working set for the combined owner/RPC/constructor/FID
+transactions; earlier owner-program-draft and rpc-draft code are superseded only
+as working copies. Keep their evidence. Exact program-draft/wire-draft dependencies
+and canonical loom_service_fids remain in use. Nothing here is installed yet.
+
+Next add canonical buffer ownership and immutable SQE frontend. Embed a real
+loom_private_fixed in the precharged owner; acquire from retained creator Proc
+in its stable image through loom_private_fixed_acquire, never a worker's Proc.
+Convert the pinned canonical Burrow extent to its stable direct-map pointer;
+copy/validate WALK component before admission. The real fixed helper refuses
+length0, so explicit zero-length READ/WRITE policy must preserve ABI bounds and
+must not fabricate an unpinned pointer. Release provisional holds on every error.
+Use current creator/image snapshot, source scope resolution and existing storage
+constructor; no CONNECT-cached identity. WALK obtains new_fid from actual
+p9_client_alloc_fid outside Ll and burns it on all subsequent failures.
+
+Prepare program arguments, then loom_admission_enqueue_locked transfers all
+holds atomically. Drive with loom_admission_begin_locked so CLUNK cannot bypass
+earlier source borrowers. Actual payload drop is outside Ll in SETTLING, before
+loom_admission_commit_locked/cancel_locked. No partial queue installation: finish
+READY readiness/fairness/deadlines and owner destruction before zero-entry-pin
+close collection together. Propagate failed post-wire FID publication into scope
+abort, not a silent individual error. Make deadline handling independent of a
+CLUNK borrower wait. Preserve negotiated iounit behavior when integrating opens.
+
+Provided streams need real pool member claims, canonical extent pointers, empty
+pool wait, MORE/receipt ownership and late returns without automatic leases.
+Then actual normal/bulk peers, native malformed/DAC/CLUNK/deadline/abort/full-CQ/
+close-exec/fixed-pool cases and matched full gates. AS3/4 then MM0-MM4.

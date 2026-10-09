@@ -2554,3 +2554,12 @@ completed program; scope poison cannot become an isolated terminal. Host160check
 canonical-buffer admission and READY/physical close integration remain ahead;
 no native queue/progress-abort/concurrency qualification. Read its self-review
 and next-work; older RPC draft working copies are superseded, evidence retained.
+
+Astra October10 FID admission layer remains uninstalled (`admission-draft`). Pure
+queue/request checks precede CLUNK retirement under one Ll transaction; source
+access borrows and exact WALK/open claims precede transfer. CLUNK waits for earlier
+borrowers; final metadata publication/hold return/terminal share abort/deadline
+checks. Error CLUNK cleanup requires actual abort-quiescence proof from the future
+driver.257hostchecks/26mutants plusconstructor16mutants and ARM64816B owner pass;
+new FID program successes are synthetic. Canonical buffer/SQE frontend and native
+READY/close remain outstanding. See self-review/next-work; no activation claim.

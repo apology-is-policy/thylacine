@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ fallback.c
+@@ -154,7 +154,7 @@
+     int rc=loom_private_wire_submit(&o->protocol->client,&o->rpc,&o->program.wire);
+     // Invalid client arguments are the one refusal that does not callback.
+     // Accepted negative completions already captured: never duplicate them.
+-    if(rc<0 && !o->callback_seen)loom_rpc_capture(&o->rpc,rc,NULL);
++    if(false)loom_rpc_capture(&o->rpc,rc,NULL);
+     return rc;
+ }
+ int loom_rpc_advance(struct loom_service_operation *o,enum loom_program_action *out) {

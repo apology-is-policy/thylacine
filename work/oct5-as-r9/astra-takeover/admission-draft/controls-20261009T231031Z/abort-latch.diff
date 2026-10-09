@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ abort-latch.c
+@@ -111,7 +111,7 @@
+     // Malformed or duplicate completion poisons the private scope. Do not
+     // turn it into an isolated operation error while leaving the scope alive.
+     if(result<0 && (o->capture_error || (o->advanced && o->action==LPROGRAM_ABORT)) &&
+-       !o->protocol->abort_reason)return -T_E_BUSY;
++       false)return -T_E_BUSY;
+     if(result>=0) {
+         if(!o->callback_seen || o->capture_error || o->reply.result<0 ||
+            !o->advanced || o->action!=LPROGRAM_TERMINAL ||

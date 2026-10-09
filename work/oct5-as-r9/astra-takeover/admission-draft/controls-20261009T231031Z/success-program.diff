@@ -1,0 +1,12 @@
+--- kernel/loom_service_program.c
++++ success-program.c
+@@ -114,8 +114,7 @@
+        !o->protocol->abort_reason)return -T_E_BUSY;
+     if(result>=0) {
+         if(!o->callback_seen || o->capture_error || o->reply.result<0 ||
+-           !o->advanced || o->action!=LPROGRAM_TERMINAL ||
+-           o->program.phase!=LPROGRAM_DONE || o->program.result<0)return -T_E_IO;
++           false)return -T_E_IO;
+         int rc=rpc_ready(o);if(rc)return rc;
+         if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
+     }

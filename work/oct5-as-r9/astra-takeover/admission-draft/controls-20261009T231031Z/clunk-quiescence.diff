@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ clunk-quiescence.c
+@@ -289,7 +289,7 @@
+     int rc=loom_rpc_check_finish_locked(o,reason,now);if(rc)return rc;
+     struct Loom *l=o->owner;
+     if(o->fid_claim==P9_TCLUNK) {
+-        if(!abort_quiesced || !o->protocol->abort_reason)return -T_E_BUSY;
++        if(!o->protocol->abort_reason)return -T_E_BUSY;
+         rc=loom_fid_finish_clunk(l->service_slots,l->service_nodes,o->source,o->request.identity);
+         if(rc)return rc; // earlier source borrowers still retain this FID
+     }

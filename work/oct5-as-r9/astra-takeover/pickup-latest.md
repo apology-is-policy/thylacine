@@ -70,3 +70,12 @@ Raw evidence reverified. Dependencies program-draft/wire-draft stay exact.
 No native admission/progress/close proof; canonical still97d495. Next actual
 FID/destination/fixed/provided admission then coherent READY and physical close
 integration before queue installation. Mac released, no running jobs;9055MiB.
+
+Latest uninstalled working set is admission-draft (supersedes earlier combined
+owner copies, preserving evidence); read state/self-review/next-work. Actual FID
+source/destination/open/CLUNK transactions and atomic queue claim are verified:
+257checks/26mutants plusconstructor16mutants; ARM64owner816B. Source-matched hashes
+rechecked; FID test success is synthetic, not native remote/driver qualification.
+Next canonical fixed/provided buffers and immutable creator/SQE frontend, actual
+monotone wire-FID allocation, then READY and physical close disposal coherently.
+Canonical remains97d495, no installed queue/activation. Mac released; no jobs.
