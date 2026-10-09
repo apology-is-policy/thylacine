@@ -1,0 +1,15 @@
+{
+  "source_before": "a4db5197fe6fdac0d5bec95d161c4f13f914af95",
+  "utc": "2026-10-09T19:57:10.928269+00:00",
+  "files": {
+    "kernel/include/thylacine/loom_service_nodes.h": "14c14d88a571e15cee0d2d82cf0d15e92d843104f5e0c58bbe47e4a021124d0d",
+    "kernel/loom_service_nodes.c": "fd9132d8c574c52802db33bd90999b78aa36c4061a84a794e32bb2edc3feea3e",
+    "kernel/loom_service_connect.c": "25271654cfa54db4bb53104ce76b455c232050a2d59b8aafc21ef5b71e53cb73",
+    "kernel/CMakeLists.txt": "53088a1caaf9c060d825a03717ef0eb7537d3d436e59b5e4b2e0470fb34fe7e3",
+    "kernel/test/test_loom.c": "f67ff6916cc4f5e017abc1bad71671c7c058a75a1444f83426e703b7abb8cfd4",
+    "kernel/test/test.c": "7ba4149c3bffe1b71b7eb9eb9b1c8c5c016be015ed5ee5ba609732effd451cf4",
+    "work/oct5-as-r9/connect-control.py": "0bbcde8b63f7040e46034f3337d86863ac4766864e69e25899ac2d62c62d14dd",
+    "kernel/loom_service_control.c": "2bff43a06c261a2e072710eb9b0e8673aa13065e6a3008b6b9f50fffaa53e3df",
+    "kernel/include/thylacine/loom_service_control.h": "676c2917b572e252ea814bb3236cc75928649f4a01a8c8e1e895253b1daa4ff8"
+  }
+}

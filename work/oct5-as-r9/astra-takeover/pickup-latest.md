@@ -1,26 +1,25 @@
 # Astra GUI continuation
 
-Implementation: thylacine-corona, corona/async-memory. GUI-only thread
-01a121cd-4ad5-73d1-bb8f-21a4b799519e; continue checkpoints without handoff.
-Yip via work/oct5-as-r9/astra-yip.sh, internally Astra checkout/identity.
+Only active GUI thread01a121cd-4ad5-73d1-bb8f-21a4b799519e; continue autonomously.
+Implementation thylacine-corona, corona/async-memory. Yip through astra-yip.sh
+which internally uses Astra checkout/identity. No archived-thread messaging.
 
-Owner-index a978d19c3 passed50/50 Mac1850/D7; evidence28156ba02.
-Close5ab15c4d5 native1851 passed, but its full matrix was deliberately stopped
-for reproduced CLOSE-R1. Read rollback-draft/self-review.txt and
-close-current-flight.json for stopped-run facts.16 partial logs retained.
-Repair retains PREPARED request and both pins through physical unused protocol
-destruction; native rollback-native-20261009T1854Z1851/D7 passes including actual
-retirer forced visit at destruction boundary. Full repaired matrix VERIFIED50/50 on ba2ae6df3,1851/D7 each; minimum10930MiB.
-See rollback-current-flight.json and current-gate-20261009T185605Z-result.json.
-Runner/monitor exited and Mac released.
-Historical close-draft/build-draft.py,install.py,continue.py and rollback-draft/
-check.py are completed evidence; DO NOT rerun installers or overwrite evidence.
+CLOSE-R1 is repaired9b6672f7d; exact sourceba2ae6df3 passes50/50 Mac1851/D7.
+Evidence checkpoint a4db5197f; old5ab matrix intentionally stopped and retained.
 
-Next: query/reap controls and retained diagnostics.
-control-draft is UNINSTALLED; its CONNECT copy is rebased onto CLOSE-R1. Nine actual-C controls and fifteen
-mutants pass, including raw-driver bytes and post-step abort. Native coverage,
-full owner regressions, self-review and ARM64 compilation still required. Then active
-readiness executor, remaining ops/provided buffers, AS-3/4 and MM0-MM4.
+Internal copied-record query/abort/reap and persistent diagnostics now installed.
+Native control-native-20261009T2027Z passes1852/1852+D7/20cycles with exact source
+and input evidence. Nine host scenarios/15mutants plus installed CONNECT,
+node transaction, constructor and final-free regressions pass. Full new matrix
+next/in progress: read control-current-flight.json before any action. Preserve
+running source/build and do not duplicate gates. control-draft scripts/installed
+manifest are historical; do NOT rerun installers. Canonical kernel supersedes.
 
-Preserve8192MiB floor, exact clean Stratum61dde37, Astra six pending/four protected
-files. No Main/private async/clipboard activation/128MiB change. Self-review only.
+Next: verify new full matrix, then readiness-aware active executor (approved
+async lifecycle), remaining private operations/provided buffers and AS-3/4;
+MM0-MM4 follows async. No new dispatch/activation until all approved gates.
+Review owner/transport readiness and timeout/lost-wake rules before execution.
+
+Keep8192MiB disk floor, exact clean external Stratum61dde37, Astra pending six
+files/four protected drafts, retained evidence. No Main/private async/clipboard
+activation or128MiB change. Self-review only; no independent audit.

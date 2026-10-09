@@ -1,0 +1,9 @@
+{
+  "kernel/include/thylacine/loom_service_nodes.h": "8bf4865af4e913b5bdd0b39d1b357f793fa48b50767cdda5bbd2976aecea5b0b",
+  "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+  "kernel/loom_service_connect.c": "87f48585db356d4a98fd17bf7b8d3f6551506823dd3ee7868aea36e9fec224d6",
+  "kernel/CMakeLists.txt": "182ad72abfad3ed6f9147fa481f5e80c21ae0482cc43889d574f8e26d33ab47d",
+  "kernel/test/test_loom.c": "b0a2f1dfe9328e1e9e92cdb1a96aa60a853fec9f9045aa8282530e42d368e196",
+  "kernel/test/test.c": "4f16ab18abd870d07fcc0381ded6afea6ede83827da444c084724a265792f55f",
+  "work/oct5-as-r9/connect-control.py": "bd5e0912eb68ebaf7c2a45548fd60940abf73d09772ce48b1cc4b9fa05512540"
+}

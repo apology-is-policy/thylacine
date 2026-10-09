@@ -1,0 +1,54 @@
+Astra single-agent review, not independent audit.
+
+Internal QUERY/ABORT/REAP over copied ABI records. Authority is exact creator
+stripes and address-space image; worker identity cannot stand in. Caller must
+retain Loom and stable creator image. Queries validate every output-only field,
+copy no output on error, and use exact LIVE incarnation under Ll. Slot-kind
+routing handles TARGET/SCOPE/FID, with POOL left to the dedicated query ABI.
+Reap dispatch carries only exact identity, and each consuming primitive rechecks
+its current state/pins under Ll. No pointer crosses dispatch as authorization.
+TARGET/POOL final drops occur outside Ll; controls bypass SQ/CQ admission.
+
+Nodes retain first abort reason, actual failed handshake phase, completed-driver
+bytes and local retirement after index/protocol collection. Expanded node40B /
+table2560B still fits the already separately charged4096B page. Removal clears
+whole records. SCOPE snapshot counts PREPARED and ACTIVE obligations, TERMINAL
+as pending CQ publication; DELIVERED records awaiting storage collection count
+neither, but their scope pins still prohibit reap. FID parent identity retained.
+
+No query races raw progress cursor writes outside Ll. Driver publishes completed
+cursor diagnostics under Ll; concurrent driver/index or request borrow reports
+possible bytes conservatively. First raw-draft review missed unindexed borrows;
+corrected and mutation proves detection. Unindexed ABORT records node latch, and
+both publication and driver reentry honor it. Post-progress latch must be read
+again before success commit. The corresponding mutation fails even earlier in
+the request ledger's success-state assertion; initial expected-message mismatch
+is retained, followed by corrected15-mutation complete run.
+
+CLOSE-R1 retained through rebase: PREPARED/two scope pins survive physical unused
+protocol destruction, then rollback may publish diagnostic RETIRED. Native
+fixture uses actual destruction boundary to query ABORTING while storage exists.
+Unused unpinned scope aborts directly to RETIRED; existing READY children cannot
+exist on unused RESERVED scopes. Indexed retirement handles cursor/local borrows
+and keeps diagnostic metadata until explicit reap. Already ABORTING/RETIRED
+returns1. Concurrent index collection is rechecked by exact incarnation.
+
+Host nine scenarios +15 mutations pass using actual draft control/CONNECT/node,
+canonical engine/request/slot/CQ and checked protocol/native/Proc/dispatch doubles.
+First child case caught an overly strict boundary double that required every
+scope pin zero at protocol collection, including independent child pins. It now
+checks the expected retained child pin; production contract was not weakened.
+ARM64 syntax3 passes five units; initial missing test include path retained and
+fixed. Existing missing-prototype fixture warnings remain; native compiler and
+normal hooks are still required. No native/full qualification yet.
+
+Next actual fixture: creator/stale/malformed refusal, unused and unindexed abort,
+normal/bulk real handshake behind full CQ, immutable success, child pins, retained
+server endpoints, exact refunds and post-collection diagnostics. No syscall
+wiring, private activation, general RPC support, Main or128MiB change.
+
+Installed result: ARM64 build/Halls succeeds. Native control-native-20261009T2027Z
+passes1852/D7/20cycles with source/inputs stable and new control source hashes.
+Installed CONNECT, node, constructor and final-free regressions pass. Full matrix
+pending. Internal published runtime owners must be indexed; raw owner controls
+remain checked internal lifetime paths, with no user-facing dispatch activation.

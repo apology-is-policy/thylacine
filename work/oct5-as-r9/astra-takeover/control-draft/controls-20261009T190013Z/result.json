@@ -1,0 +1,15 @@
+{
+  "cases": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+  ],
+  "source_sha256": "5f5f83110be99dabf9c3b04bc2849bc44167b1737c2402a3bee5a52805a8ef02",
+  "limits": "Actual draft control+CONNECT, actual canonical engine/request/slot/CQ, draft node ledger; checked protocol/native/Proc/lock and target/pool-dispatch doubles. No native or activation qualification."
+}

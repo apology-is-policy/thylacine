@@ -2487,3 +2487,48 @@ but is not installed or native-qualified. Continue those controls and active
 readiness executor, remaining operations/buffers, AS-3/4, then MM0-MM4.
 Pi/A72/KVM and final guest allocator reclamation remain unqualified. Self-review
 only; no Main/private async/clipboard activation or128MiB protection change.
+
+
+## October 9: internal service query, abort and reap controls
+
+Creator stripes and exact address-space image authorize copied-record internal
+QUERY/ABORT/REAP. Validation rejects malformed/output-only inputs and stale
+incarnations without changing query output. A locked snapshot reports TARGET,
+SCOPE or FID state and exact parent identity; POOL retains its dedicated query.
+Reap dispatch carries only exact identity, with each consuming primitive
+rechecking state and pins under Ll and making final drops outside Ll.
+
+The existing charged node page now stores40-byte entries,2560bytes total within
+its4096-byte allocation. First reason, attempted failure phase, sent-byte state
+and actual local retirement survive protocol/index collection. QUERY counts
+PREPARED/ACTIVE obligations in active_ops and unpublished TERMINAL obligations
+in pending_terminals. DELIVERED storage awaiting collection counts neither;
+its pins still prevent reap. Query never races an unlocked protocol cursor:
+completed driver diagnostics publish under Ll, while an active driver or parser
+borrow conservatively reports possible escaped bytes.
+
+ABORT remains independent of CQ capacity and preserves a committed success.
+An unindexed constructor gets an admission-closing node latch; its publication
+and driver reentry observe it. Rollback retains CLOSE-R1's physical destruction
+barrier before marking diagnostic retirement. Unused scopes retire immediately
+only with no pins; indexed owners still require actual cursor/borrow quiescence.
+Scope metadata survives collection until children and outstanding ownership are
+gone and explicit exact reap succeeds. Published runtime ownership must use the
+index; these copied-record helpers do not install syscall/ring dispatch or an
+active executor. No general RPC/FID protocol or private userspace activation.
+
+Nine actual-C host scenarios and15 named mutations pass under LLVM22 ASan/UBSan.
+Canonical CONNECT11+12mutants, node transactions, constructor29+26mutants and
+final-free both orders+10mutants pass after installation. Evidence records the
+initial child-pin boundary-double correction, earlier expected-mutation-message
+mismatch and missing draft test include path; production controls were preserved.
+Self-review: astra-takeover/control-draft/self-review.txt, not independent audit.
+
+Native control-native-20261009T2027Z passes1852/1852, D7 overlap,20 distinct cycles
+and banner. Real normal/bulk handshakes behind full CQ preserve success through
+abort; retained child pins block reap; diagnostics survive physical collection;
+accepted server endpoints survive local refund. The actual unused-destruction
+boundary still reports ABORTING until cleanup completes. Exact HEAD+diff, new
+source hashes, six stable inputs and rebuilt ELF/bin retained. Full Mac matrix
+for these changes is pending; prior50/50 qualifies ba2ae6df3 close-only source.
+No Main/private async/clipboard activation or128MiB protection change.

@@ -36,6 +36,11 @@ static void connect_rollback_locked(struct Loom *l, struct loom_service_ref scop
     if (loom_request_rollback(&l->service_requests,l->service_slots,request) ||
         loom_slot_unpin(l->service_slots,scope))
         extinction("CONNECT lost prepared ownership");
+    struct loom_service_node *n=connect_scope(l,scope);
+    if (n && n->state==LOOM_SERVICE_ABORTING && !l->service_slots->slots[scope.slot].pins) {
+        n->state=LOOM_SERVICE_RETIRED;
+        n->status_flags|=LOOM_SERVICE_LOCAL_RETIRED;
+    }
 }
 int loom_private_connect_prepare(struct Loom *l, struct loom_service_ref scope,
     struct loom_service_ref target, u64 user_data, u64 deadline, u64 now,
@@ -112,6 +117,7 @@ int loom_private_connect_publish(struct loom_service_protocol *p, u64 now) {
     struct loom_service_node *n = connect_scope(l,p->scope);
     int rc = !p->connect_bound || p->admission.published || p->users || p->driving ?
         -T_E_BUSY : p->abort_reason ? p->abort_reason : l->service_closing ? -T_E_CANCELED :
+        n && n->state==LOOM_SERVICE_ABORTING && n->reason<0 ? n->reason :
         !n || n->state != LOOM_SERVICE_RESERVED ? -T_E_NOENT : 0;
     if (!rc) rc = loom_request_check_admit(&l->service_requests,l->service_slots,
                                            l->service_nodes,p->request,now);
@@ -130,7 +136,8 @@ int loom_private_connect_publish(struct loom_service_protocol *p, u64 now) {
 }
 static void connect_latch(struct loom_service_protocol *p, struct loom_service_node *n,
                            s32 reason) {
-    if (!p->abort_reason) p->abort_reason = reason;
+    if (!p->abort_reason) p->abort_reason = n->reason<0 ? n->reason : reason;
+    if (!n->reason) n->reason=p->abort_reason;
     if (n->state != LOOM_SERVICE_RETIRED) n->state = LOOM_SERVICE_ABORTING;
 }
 int loom_private_connect_abort(struct loom_service_protocol *p, s32 reason) {
@@ -162,6 +169,7 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
     spin_lock(&l->lock);
     struct loom_service_node *n = connect_scope(l,p->scope);
     struct loom_service_request *r = connect_request(p);
+    if (n && n->state==LOOM_SERVICE_ABORTING && n->reason<0) connect_latch(p,n,n->reason);
     if (!p->connect_bound || (!p->admission.published && !p->abort_reason) || !n || !r) {
         spin_unlock(&l->lock); return -T_E_NOENT;
     }
@@ -190,11 +198,15 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
 #endif
     int rc=aborting ? 0 : p9_client_progress_step(&p->client,now);
     spin_lock(&l->lock);
+    // Sole driver has returned: only now read its unlocked progress cursor.
+    // Query conservatively reports possible bytes while driving is true.
+    if (p->progress.io.bytes_sent) n->status_flags|=LOOM_SERVICE_BYTES_SENT;
+    if (n->state==LOOM_SERVICE_ABORTING && n->reason<0) connect_latch(p,n,n->reason);
     if (borrowed && loom_request_put(&l->service_requests,p->request))
         extinction("CONNECT lost parser borrow");
     if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);
     if (rc < 0) {
-        p->failure_phase=attempted_phase;
+        p->failure_phase=attempted_phase; n->failure_phase=attempted_phase;
         connect_latch(p,n,rc == -T_E_TIMEDOUT ? rc : -T_E_IO);
     }
     if (!p->abort_reason) {
@@ -229,7 +241,10 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
         extinction("CONNECT lost cancellation obligation");
     // A concurrent abort caller may still hold the transport during teardown.
     // Keep ABORTING until a later visit observes it gone; never free under it.
-    if (!p->users) { p->locally_retired=true; n->state=LOOM_SERVICE_RETIRED; }
+    if (!p->users) {
+        p->locally_retired=true; n->state=LOOM_SERVICE_RETIRED;
+        n->status_flags|=LOOM_SERVICE_LOCAL_RETIRED;
+    }
     p->driving=false;
     spin_unlock(&l->lock);
     if (notify) loom_private_close_changed(l);

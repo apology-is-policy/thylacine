@@ -1,0 +1,16 @@
+PASS mutant creator
+PASS mutant image
+PASS mutant query-input
+PASS mutant stale
+PASS mutant refused-output
+PASS mutant control-flags
+PASS mutant prepared-count
+PASS mutant delivered-count
+PASS mutant raw-bytes
+PASS mutant first-reason
+PASS mutant sticky-bytes
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/control-draft/control-mutants.py", line 38, in <module>
+    assert r.returncode==11 and r.stdout==want+'\n' and not r.stderr,(tag,out,r.returncode,r.stdout,r.stderr)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('late-abort', PosixPath('/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/control-draft/mutants-20261009T190052Z'), 11, 'CONNECT lost success obligation\n', '')

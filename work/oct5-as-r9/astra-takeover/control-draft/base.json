@@ -1,0 +1,6 @@
+{
+  "kernel/include/thylacine/loom_service_nodes.h": "8bf4865af4e913b5bdd0b39d1b357f793fa48b50767cdda5bbd2976aecea5b0b",
+  "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+  "kernel/loom_service_connect.c": "52c25501841b75205dfd386fa0709e044ae1855f36379efb44326d293cab880f",
+  "kernel/CMakeLists.txt": "182ad72abfad3ed6f9147fa481f5e80c21ae0482cc43889d574f8e26d33ab47d"
+}

@@ -1,0 +1,110 @@
+{
+  "cases": [
+    {
+      "case": "creator",
+      "mode": 0,
+      "expected": "foreign creator refuses untouched output",
+      "rc": 11,
+      "source_sha256": "879a5acb66d1a47c3a6f96a14188e87c6cbbe687078fcef761fb400a07055dd5"
+    },
+    {
+      "case": "image",
+      "mode": 0,
+      "expected": "foreign image denied",
+      "rc": 11,
+      "source_sha256": "9c53a6fc239967d46d9c000817dac5064e31b5539a054f6615e5d21c46ff0f42"
+    },
+    {
+      "case": "query-input",
+      "mode": 0,
+      "expected": "output fields rejected without write",
+      "rc": 11,
+      "source_sha256": "6d74f3af7287c0ac259597671b697cca244b51c3f312851796ce52bf37901a3e"
+    },
+    {
+      "case": "stale",
+      "mode": 0,
+      "expected": "stale query leaves output unchanged",
+      "rc": 11,
+      "source_sha256": "987d77da52798a5eeafe28c6dee1a131c0cfc2e738441094528a0b0aed62b4ae"
+    },
+    {
+      "case": "refused-output",
+      "mode": 0,
+      "expected": "stale query leaves output unchanged",
+      "rc": 11,
+      "source_sha256": "88e6e33efcb06f189bd376d9df30e1355937fa5b011fd64600d713790d85379d"
+    },
+    {
+      "case": "control-flags",
+      "mode": 0,
+      "expected": "unknown flags denied",
+      "rc": 11,
+      "source_sha256": "9ae2f50996a653d189176ff575b6d72069b4476ebb11639cced5a136eb5b3896"
+    },
+    {
+      "case": "prepared-count",
+      "mode": 2,
+      "expected": "PREPARED owner counted",
+      "rc": 11,
+      "source_sha256": "a341754b4cb64944eeeb8516291cefe423eaa54b1ca89d2d9b1bc18ec28b52f5"
+    },
+    {
+      "case": "delivered-count",
+      "mode": 3,
+      "expected": "DELIVERED is storage not active obligation",
+      "rc": 11,
+      "source_sha256": "36517bb1550d16ee911fcf2c3f7a83bc6268fe50048209ad8c03218c669eb551"
+    },
+    {
+      "case": "raw-bytes",
+      "mode": 4,
+      "expected": "unindexed in-flight driver reports possible bytes",
+      "rc": 11,
+      "source_sha256": "fb27b7122b384e82c8e120523cd8e6f33d52e011b5a9de3884991a49df4be5a6"
+    },
+    {
+      "case": "first-reason",
+      "mode": 3,
+      "expected": "abort retains prior success and diagnostics",
+      "rc": 11,
+      "source_sha256": "178abcc0766edc5dfa6bf7701aa7068c4c2ef39065e08fb602b5263360dbafca"
+    },
+    {
+      "case": "sticky-bytes",
+      "mode": 3,
+      "expected": "READY has retained terminal and sticky bytes",
+      "rc": 11,
+      "source_sha256": "9ee19594443970aafead1aebf8b3bd70bf7343a296a019871ae3e2ed253f38ec"
+    },
+    {
+      "case": "late-abort",
+      "mode": 4,
+      "expected": "CONNECT lost success obligation",
+      "rc": 11,
+      "source_sha256": "d6ac41108aeeaa9168bd987eb5d78441aff89837ee047c4ec6f9bf0fdfdb275b"
+    },
+    {
+      "case": "early-rollback",
+      "mode": 2,
+      "expected": "destruction boundary retains observable ownership",
+      "rc": 11,
+      "source_sha256": "eb04616958cd09c70c5ff2f0122726c1bbebf9cc3714142f014ce321318f80ee"
+    },
+    {
+      "case": "failure-phase",
+      "mode": 7,
+      "expected": "retained actual failure phase",
+      "rc": 11,
+      "source_sha256": "1c4540415c65978fa1449926c928f7d5430c8c9e63cf21f5cb5d5072623a7eac"
+    },
+    {
+      "case": "early-retired",
+      "mode": 2,
+      "expected": "abort denies raw publication",
+      "rc": 11,
+      "source_sha256": "bb7cbf06c90c8bc3404ee36f3c636a72e9512311917994a0908740373413be81"
+    }
+  ],
+  "scope": "Draft actual C mutation sensitivity, not native qualification"
+}

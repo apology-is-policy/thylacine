@@ -1,0 +1,10 @@
+{
+  "base_source": "ba2ae6df3dd815a4853985cc81e9f981ca0d1bdb",
+  "canonical_connect_sha256": "87f48585db356d4a98fd17bf7b8d3f6551506823dd3ee7868aea36e9fec224d6",
+  "changes": [
+    "Retain CLOSE-R1 physical rollback barrier",
+    "Query accounts conservatively for unindexed parser borrows",
+    "Recheck unindexed metadata abort after driver returns before committing success"
+  ],
+  "qualification": "Draft only, not installed or native-qualified"
+}

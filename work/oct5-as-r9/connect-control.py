@@ -15,7 +15,7 @@ struct SrvConnectAdmission {struct SrvConn *conn;bool published;};
 struct p9_client {int dummy;};
 struct loom_service_protocol {
  struct Loom *owner;struct SrvConnectAdmission admission;struct p9_client client;
- struct {struct {u32 phase;} handshake;} progress;
+ struct {struct {u32 phase;} handshake;struct {bool bytes_sent;} io;} progress;
  struct loom_service_ref scope;struct loom_request_ref request;u64 connect_deadline;
  s32 abort_reason;u32 users,failure_phase;bool connect_bound,driving,locally_retired,indexed;
 };
@@ -150,7 +150,7 @@ MUTANTS=[
  ('persistent-deadline','if (r->phase == LREQ_ACTIVE && p->connect_deadline && p->connect_deadline <= now)','if (p->connect_deadline && p->connect_deadline <= now)',0,'deadline ends on success'),
  ('omit-parser-borrow','borrowed=true;','borrowed=true; (void)loom_request_put(&l->service_requests,p->request);',0,'driver owns request borrow outside lock'),
  ('omit-local-abort','    p9_client_progress_abort(&p->client);','    (void)p9_client_progress_abort; /* omitted cursor retirement */',1,'actual driver abort retires'),
- ('ignore-live-user','if (!p->users) { p->locally_retired=true;','if (true) { p->locally_retired=true;',6,'live abort user delays local retirement'),
+ ('ignore-live-user','if (!p->users) {','if (true) {',6,'live abort user delays local retirement'),
  ('omit-delivery-gate','r->phase != LREQ_DELIVERED || r->borrows','r->phase == LREQ_FREE || r->borrows',0,'CONNECT lost retired ownership'),
  ('omit-close-recheck','    if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);','    /* ignore close */',4,'actual driver abort retires'),
 ]

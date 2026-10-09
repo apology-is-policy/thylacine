@@ -6,19 +6,23 @@ struct loom_service_node {
     struct loom_service_ref parent; // zero for SCOPE, exact pinned SCOPE for FID
     u32 state;
     u32 reserved;
+    s32 reason; // first scope abort reason, retained after protocol collection
+    u32 status_flags; // completed-driver diagnostics only; protected by Ll
+    u32 failure_phase;
+    u32 diagnostic_reserved;
 };
 struct loom_service_node_table {
     struct loom_service_node nodes[LOOM_SERVICE_SLOT_COUNT];
 };
-_Static_assert(sizeof(struct loom_service_node) == 24, "scope/fid reservation ledger");
-_Static_assert(sizeof(struct loom_service_node_table) == 1536, "scope/fid table ledger");
+_Static_assert(sizeof(struct loom_service_node) == 40, "scope/fid reservation ledger");
+_Static_assert(sizeof(struct loom_service_node_table) == 2560, "scope/fid table ledger");
 // Zero once with its owner. Live calls hold the SAME ring lock as the shared
 // slot ledger and retain the ring. The zero-reference retire worker instead has
 // exclusive ownership. No allocation, usercopy, callbacks or drops.
 // A private Loom owns and charges a full buddy page for this table. Last-owner
 // cleanup has exclusive access. It removes unused RESERVED children first,
 // then validates and removes protocol-RETIRED unpinned scopes in loom.c.
-// The engine alone advances state beyond RESERVED under that lock, after actual
+// The engine and authorized controls advance state under that lock after actual
 // protocol/lifetime checks. Tests may simulate READY/ABORTING; this module does
 // not provide a way to claim a handshake succeeded or a scope locally retired.
 int loom_service_node_prepare(struct loom_slot_table *, struct loom_service_node_table *,

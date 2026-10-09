@@ -1,0 +1,15 @@
+PASS control PASS node owner transactions
+PASS omit-image node owner requires exact creator image
+PASS omit-creator node owner requires exact creator incarnation
+PASS omit-size node reserve rejects malformed immutable record
+PASS omit-version node reserve rejects malformed immutable record
+PASS omit-flags node reserve rejects malformed immutable record
+PASS omit-reserved node reserve rejects malformed immutable record
+PASS omit-result-slot node reserve rejects malformed immutable record
+PASS omit-result-reserved node reserve rejects malformed immutable record
+PASS omit-result-incarnation node reserve rejects malformed immutable record
+PASS omit-prepare-lock prepare requires owner lock
+PASS omit-publish-lock publish requires owner lock
+PASS omit-rollback-lock rollback requires owner lock
+PASS omit-reap_unused-lock reap requires owner lock
+work/oct5-as-r9/astra-takeover/private-nodes-20261009T202714Z
