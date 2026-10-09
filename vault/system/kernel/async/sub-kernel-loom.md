@@ -1451,3 +1451,30 @@ runtime/full Mac qualification is pending for this changed source. Previous
 50/50 applies only to1295a25da. This is self-review, not independent audit.
 Guest final allocator reclamation and Pi/A72/KVM remain open. Continue async
 before MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.
+
+
+## October9: private-buffer native fixture failure and correction
+
+The3dcff4cb9 full matrix was stopped after six completed default-smp1 boots
+reproduced the same sole failure: loom.private_buffers / foreign mappings
+detached,1839/1840. No source qualified. Astra stopped its own process group;
+wrapper exit143 retained clean-source and input checks and released Mac. Twelve
+raw serial/harness logs, hashes and exact failed inputs are retained under
+current-gate-20261009T001138Z, marked PINNED as FAILED.
+
+Cause: the new fixture mapped foreign backing at0x60000000, below the burrow
+window accepted by SYS_BURROW_DETACH. The existing legacy foreign-payer fixture
+explicitly documents this constraint and uses0x140000000. The correction uses
+that in-window address and holds the destination image lock around the share,
+as required by the mapping API. Production buffer ownership code is unchanged.
+This was a fixture defect, not evidence of a platform timing problem.
+
+A fresh rebuilt default SMP1 diagnostic passed1840/1840, including private_buffers,
+pool/slot/owner fixtures, D7 overlap and twenty distinct completed login cycles,
+and boot banner. Recorded source is3dcff4cb9 plus the exact fixture-only diff;
+ELF/bin and input hashes are retained in
+astra-takeover/private-buffers-diagnostic-20261009T001526Z. Build/input/source
+stability checks passed. This one boot does not replace the full Mac matrix;
+a new clean-source matrix is still required. Prior pool-owner50/50 remains
+bounded to1295a25da. Self-review only; no private activation, Main landing or
+128MiB removal. Continue remaining async ownership/protocol work before MM0-MM4.

@@ -1,0 +1,18 @@
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index aca509fb9..1f55a91db 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -278,8 +278,12 @@ static const char *loom_private_buffers_fixture(void) {
+     s64 foreign_va = sys_burrow_attach_for_proc(q,PAGE_SIZE);
+     PB_CHECK(foreign_va>0, "foreign payer backing attached");
+     struct Burrow *foreign = vma_lookup(q,(u64)foreign_va)->burrow;
+-    va = 0x60000000ull;
++    // SYS_BURROW_DETACH accepts the burrow window, not arbitrary low VAs.
++    // Match the production share caller's destination-image lock contract.
++    va = 0x140000000ull;
++    spin_lock(&p->as->lock);
+     rc = burrow_share_into(p,foreign,va,VMA_PROT_RW);
++    spin_unlock(&p->as->lock);
+     if (rc) va = 0;
+     PB_CHECK(!rc, "foreign backing mapped into creator");
+     good.va = va;
