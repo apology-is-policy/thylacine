@@ -35339,3 +35339,22 @@ Astra deliberately stopped the5ab15c4d5 full matrix with SIGTERM(rc143), preserv
 qualification. The repaired source requires a fresh full matrix. Review and
 raw evidence: astra-takeover/rollback-draft; self-review only, no independent
 audit. No Main/private async/clipboard activation or128MiB protection change.
+
+
+## October 9: repaired close lifecycle full Mac qualification
+
+Exact source ba2ae6df3dd815a4853985cc81e9f981ca0d1bdb (CLOSE-R1 implementation
+9b6672f7d) passed50/50 Mac HVF boots in current-gate-20261009T185605Z:
+default SMP1/4/8 and UBSan SMP4/8, ten each. All50 pass1851/1851, including
+actual close/exec, retained owners, fairness and the forced physical rollback
+boundary, plus D7 overlap,20 distinct login/logout cycles and banner.
+Both exits zero;100 raw serial/harness logs and ten input hashes verified and
+retained/PINNED. Minimum recorded admission10930MiB, floor8192 preserved.
+Mac lease released. Result: astra-takeover/current-gate-20261009T185605Z-result.json.
+
+This qualifies that repaired internal close source. The separate query/reap
+and retained-diagnostic draft passes nine host scenarios and fifteen mutations,
+but is not installed or native-qualified. Continue those controls and active
+readiness executor, remaining operations/buffers, AS-3/4, then MM0-MM4.
+Pi/A72/KVM and final guest allocator reclamation remain unqualified. Self-review
+only; no Main/private async/clipboard activation or128MiB protection change.
