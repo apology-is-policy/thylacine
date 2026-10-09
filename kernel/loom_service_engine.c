@@ -14,8 +14,10 @@ static struct loom_engine_entry *engine_exact(struct Loom *l, struct loom_servic
 }
 static void engine_changed(struct Loom *l) {
     // Wake after changing the locked predicate. The existing SQPOLL Rendez is
-    // only a wake target here; this checkpoint does not start a private worker.
+    // only a wake target here; active private SQPOLL is not enabled. Close work
+    // separately wakes the existing reference-owning retirement queue.
     wakeup(&l->sqpoll_park);
+    loom_private_close_changed(l);
 }
 static struct loom_service_request *engine_request(struct Loom *l, struct loom_service_protocol *p) {
     if (p->request.index >= l->service_requests.capacity) return NULL;
@@ -41,6 +43,9 @@ int loom_engine_adopt(struct loom_service_protocol *p, u64 now) {
     p->indexed=true;
     ++l->service_engine->count;
     spin_unlock(&l->lock);
+#ifdef KERNEL_TESTS
+    loom_private_close_boundary_for_test(l,1); // unlocked INSTALLING owner
+#endif
     int rc=loom_private_connect_publish(p,now);
     if (rc) (void)loom_private_connect_abort(p,rc);
     spin_lock(&l->lock);
@@ -71,15 +76,18 @@ int loom_engine_get(struct Loom *l, struct loom_service_ref ref, struct loom_ser
     spin_unlock(&l->lock);
     return rc;
 }
-int loom_engine_put(struct Loom *l, struct loom_service_ref ref, struct loom_service_protocol *p) {
+static int engine_put(struct Loom *l, struct loom_service_ref ref, struct loom_service_protocol *p, bool notify) {
     if (!l || !loom_is_private(l) || !p) return -T_E_INVAL;
     spin_lock(&l->lock);
     struct loom_engine_entry *e=engine_exact(l,ref);
     int rc=!e || e->protocol != p ? -T_E_NOENT : !e->pins ? -T_E_INVAL : 0;
     if (!rc) --e->pins;
     spin_unlock(&l->lock);
-    if (!rc) engine_changed(l);
+    if (!rc && notify) engine_changed(l);
     return rc;
+}
+int loom_engine_put(struct Loom *l, struct loom_service_ref ref, struct loom_service_protocol *p) {
+    return engine_put(l,ref,p,true);
 }
 int loom_engine_abort(struct Loom *l, struct loom_service_ref ref, s32 reason) {
     if (!l || !loom_is_private(l) || reason >= 0) return -T_E_INVAL;
@@ -92,7 +100,7 @@ int loom_engine_abort(struct Loom *l, struct loom_service_ref ref, s32 reason) {
     if (loom_engine_put(l,ref,p)) extinction("engine lost abort entry pin");
     return rc;
 }
-int loom_engine_collect(struct Loom *l, struct loom_service_ref ref) {
+static int engine_collect(struct Loom *l, struct loom_service_ref ref, bool notify) {
     if (!l || !loom_is_private(l)) return -T_E_INVAL;
     spin_lock(&l->lock);
     struct loom_engine_entry *e=engine_exact(l,ref);
@@ -107,9 +115,12 @@ int loom_engine_collect(struct Loom *l, struct loom_service_ref ref) {
     --l->service_engine->count;
     p->indexed=false;
     spin_unlock(&l->lock);
-    if (loom_private_connect_release(p)) extinction("engine lost final CONNECT ownership");
-    engine_changed(l);
+    if (loom_private_connect_release_retiring(p)) extinction("engine lost final CONNECT ownership");
+    if (notify) engine_changed(l);
     return 0;
+}
+int loom_engine_collect(struct Loom *l, struct loom_service_ref ref) {
+    return engine_collect(l,ref,true);
 }
 int loom_engine_visit(struct Loom *l, u64 now) {
     if (!l || !loom_is_private(l)) return -T_E_INVAL;
@@ -132,12 +143,12 @@ int loom_engine_visit(struct Loom *l, u64 now) {
     (void)loom_engine_collect(l,ref);
     return 1;
 }
-int loom_engine_discard_closed(struct Loom *l) {
+static int engine_discard_closed(struct Loom *l, bool notify) {
     if (!l || !loom_is_private(l)) return -T_E_INVAL;
     struct loom_service_ref refs[LOOM_SERVICE_SLOT_COUNT];
     u32 count=0;
     spin_lock(&l->lock);
-    if (!l->service_closing || l->service_fixed_count) { spin_unlock(&l->lock); return -T_E_BUSY; }
+    if (!l->service_closing || l->service_fixed_count || l->service_fixed_settling) { spin_unlock(&l->lock); return -T_E_BUSY; }
     for (u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
         struct loom_engine_entry *e=&l->service_engine->entries[i];
         if (e->phase == LENGINE_EMPTY) continue;
@@ -172,7 +183,7 @@ int loom_engine_discard_closed(struct Loom *l) {
     if (rc) return rc;
     // Lookup pins may race now, delaying collection but never invalidating
     // quiescence. No new protocol operation may be admitted after close.
-    for (u32 i=0;i<count;++i) (void)loom_engine_collect(l,refs[i]);
+    for (u32 i=0;i<count;++i) (void)engine_collect(l,refs[i],notify);
     spin_lock(&l->lock);
     bool empty=loom_engine_empty(l->service_engine);
     spin_unlock(&l->lock);
@@ -185,4 +196,44 @@ bool loom_engine_empty(const struct loom_service_engine *t) {
         if (e->phase || e->protocol || e->pins || e->incarnation) return false;
     }
     return true;
+}
+
+int loom_engine_discard_closed(struct Loom *l) {
+    return engine_discard_closed(l,true);
+}
+int loom_engine_close_visit(struct Loom *l) {
+    if (!l || !loom_is_private(l)) return -T_E_INVAL;
+    struct loom_service_protocol *p=NULL;
+    struct loom_service_ref ref={0};
+    spin_lock(&l->lock);
+    if (!l->service_closing) { spin_unlock(&l->lock); return -T_E_INVAL; }
+    for (u32 n=0;n<LOOM_SERVICE_SLOT_COUNT;++n) {
+        u32 at=l->service_engine->cursor;
+        l->service_engine->cursor=(at+1u)%LOOM_SERVICE_SLOT_COUNT;
+        struct loom_engine_entry *e=&l->service_engine->entries[at];
+        if (e->phase != LENGINE_LIVE || e->pins==UINT32_MAX ||
+            e->protocol->driving || e->protocol->users || e->protocol->locally_retired) continue;
+        ++e->pins; p=e->protocol;
+        ref=(struct loom_service_ref){.slot=at,.incarnation=e->incarnation};
+        break;
+    }
+    spin_unlock(&l->lock);
+    if (p) {
+        // service_closing latches cancel before any native client step. No CQ
+        // post/readiness wait: this visit ends the actual local cursor instead.
+        (void)loom_private_connect_step_retiring(p);
+        if (engine_put(l,ref,p,false)) extinction("close driver lost entry pin");
+    }
+    if (!engine_discard_closed(l,false)) return 2;
+    spin_lock(&l->lock);
+    bool more=false;
+    for (u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_engine_entry *e=&l->service_engine->entries[i];
+        if (e->phase==LENGINE_LIVE && e->pins<UINT32_MAX &&
+            !e->protocol->locally_retired && !e->protocol->driving && !e->protocol->users) more=true;
+    }
+    spin_unlock(&l->lock);
+    // An external return between this observation and Q finish sets dirty;
+    // a return after PARKED appends it once. Internal entry returns are quiet.
+    return more ? 1 : 0;
 }

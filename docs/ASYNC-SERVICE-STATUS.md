@@ -2374,3 +2374,75 @@ The separate close queue draft still owes native and full-matrix verification.
 Self-review only; no independent audit, Main landing, private async/clipboard
 activation or128MiB protection change. Continue close queue, active executor,
 remaining private ops/provided buffers, AS-3/4 and MM0-MM4.
+
+
+## October 9: reference-owning private close queue
+
+Astra added an intrusive close node to each private Loom. Actual handle close
+latches admission and starts the node exactly once while holding the caller's
+live reference. Under the retire lock it takes one distinct queue reference,
+then wakes outside locks. Exec's earlier commit latch remains leaf Ll-only;
+forced descriptor removal starts the queue after process/handle locks are gone.
+Zero-reference final destruction calls a bare latch/wake path and cannot
+resurrect a close root. Loom is2968 bytes on ARM64, still one buddy allocation;
+its already charged setup storage contains the queue link/state and diagnostic
+visit counter. No stack, allocation or thread is created per close.
+
+The existing retirement worker pops one FIFO close quantum and one zero-reference
+final destruction per iteration. Q never encloses Ll, native work, allocator
+calls, scheduler wakes or final ref drops. One close quantum aborts at most one
+nonbusy indexed cursor and attempts bounded quiescent consumer detach/collection.
+READY success remains immutable even if close cancels later. Full CQ and stalled
+server endpoints do not prevent actual local cursor abort. A server endpoint
+retains its own transport reference independently after the ring is gone.
+
+A blocked ring parks off the runnable queue while retaining its root. Installer,
+external driver/teardown, entry-pin, raw-constructor and fixed-buffer returns
+notify after their ownership transitions. A return racing RUNNING sets dirty;
+a return after PARKED enqueues once. Internal retirement steps/puts/collection
+are quiet, avoiding perpetual self-wake loops. Completion drops the queue root
+outside Q once; DONE cannot restart. Final destruction is still serviced during
+busy close work, and scope visitation retains the existing round-robin cursor.
+
+Fixed-buffer release unlinks its reservation under Ll but increments a separate
+settling count before dropping the physical buffer pin outside Ll. Both active
+and settling counts consume admission capacity; either prevents consumer detach.
+Only after physical settlement does release decrement settling, notify close,
+and drop its retained Loom reference. Raw CONNECT rollback/release takes a
+temporary Loom root around consuming physical cleanup and the subsequent wake.
+All public engine calls still require their caller to retain Loom.
+
+Close collection leaves scope metadata while provisional FID callers can own
+parent pins. Once the last Loom reference is gone, final cleanup removes unused
+FID reservations before retired SCOPE metadata. A retired scope must be LIVE,
+unpinned, with empty parent/reserved fields. READY, ABORTING and invalid owners
+still fail closed. This does not permit freeing an in-progress constructor or
+pretending abort acknowledgement proves protocol quiescence.
+
+The native loom.private_close fixture includes actual final handle close, forced
+private exec with CLOEXEC cleared, a full CQ, independent normal/bulk peers,
+entry and fixed-buffer borrows, an unindexed constructor, unused child metadata,
+retained server endpoints and exact image refunds. Test-only unlocked boundary
+hooks also pause real INSTALLING, driving and teardown owners while the real
+retirer must park; returning those owners must wake it to completion. These are
+deterministic interleavings, not an exhaustive scheduler proof. Native and full
+matrix qualification are recorded with their exact source and artifacts below.
+
+Still internal CONNECT-only. No private syscall/ring dispatch, general RPC/fid
+operations, readiness-aware active executor, private userspace/clipboard
+activation, Main landing or128MiB protection change. AS-3/4 and MM0-MM4 remain.
+Self-review is recorded in close-draft/self-review.txt; no independent audit.
+
+Draft ASan/UBSan controls and ARM64 syntax pass; native qualification follows.
+
+
+Fresh native close-diagnostic-20261009T183912Z passes1851/1851, including
+all seven close cases and second-ring progress while the first is parked. D7
+overlap, twenty distinct login/logout cycles and boot banner also pass. Rebuilt
+ELF/bin, six input hashes, exact HEAD+diff and new queue source/header hashes
+are retained and stable. Real close/exec, full CQ, retained entry/fixed/constructor
+owners and installer/driver/teardown interleavings finish local retirement with
+exact image refunds while server endpoints remain retained. Source-matched Mac
+SMP/UBSan matrix for this new code is still pending; the earlier50/50 qualifies
+a978d19c3 index-only source. Pi/A72/KVM, final guest allocator reclamation and
+optional graphics remain unqualified. No private activation/Main/128MiB change.

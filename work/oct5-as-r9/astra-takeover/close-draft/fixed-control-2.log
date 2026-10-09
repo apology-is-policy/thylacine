@@ -1,0 +1,15 @@
+PASS control PASS fixed reservations exclude pools and retain local ownership
+PASS omit-image fixed image authority
+PASS omit-creator fixed creator authority
+PASS omit-backing-pin fixed owns canonical pin and ring
+PASS omit-ring-pin fixed owns canonical pin and ring
+PASS pool-over-fixed fixed excludes pool alias
+PASS fixed-over-pool provisional pool excludes fixed alias
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/host-tree/work/oct5-as-r9/private-fixed-control.py", line 116, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/host-tree/work/oct5-as-r9/private-fixed-control.py", line 111, in main
+    assert r.returncode==rc and text==expected+'\n',(tag,r.returncode,text)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('omit-bound', 11, 'settling fixed owner still consumes admission capacity\n')

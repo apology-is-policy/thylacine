@@ -1,0 +1,38 @@
+[
+  {
+    "path": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/loom.c",
+    "sha256": "15b84649beb8672ef7d1cc5fef4780a3a4313acc139d7cc84675d094b3d62f3d",
+    "rc": 0,
+    "diagnostics": ""
+  },
+  {
+    "path": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/loom_service_connect.c",
+    "sha256": "7f81105a4edb7e96eada44b91a68773cddf217eca4ff5a71de95837808b909ee",
+    "rc": 0,
+    "diagnostics": ""
+  },
+  {
+    "path": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/loom_service_engine.c",
+    "sha256": "8c861d1d71ef689fe646d495e4ce8c7fa1da8b505c0aee33ea0d6010c1ed9769",
+    "rc": 0,
+    "diagnostics": ""
+  },
+  {
+    "path": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/loom_service_close_queue.c",
+    "sha256": "ceaea22a952b8d675f2371449abd16630e50ea853ae623e1f917ab5251d0cda0",
+    "rc": 0,
+    "diagnostics": ""
+  },
+  {
+    "path": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c",
+    "sha256": "3041f428bd62908a9122c274311f78e85a843040f804fcb1d0d593846169de74",
+    "rc": 0,
+    "diagnostics": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:211:6: warning: no previous prototype for function 'test_loom_service_pool_table' [-Wmissing-prototypes]\n  211 | void test_loom_service_pool_table(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:211:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  211 | void test_loom_service_pool_table(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:353:6: warning: no previous prototype for function 'test_loom_private_slot_owner' [-Wmissing-prototypes]\n  353 | void test_loom_private_slot_owner(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:353:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  353 | void test_loom_private_slot_owner(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:666:6: warning: no previous prototype for function 'test_loom_private_fixed' [-Wmissing-prototypes]\n  666 | void test_loom_private_fixed(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:666:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  666 | void test_loom_private_fixed(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:671:6: warning: no previous prototype for function 'test_loom_private_pool_pins' [-Wmissing-prototypes]\n  671 | void test_loom_private_pool_pins(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:671:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  671 | void test_loom_private_pool_pins(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:676:6: warning: no previous prototype for function 'test_loom_private_buffers' [-Wmissing-prototypes]\n  676 | void test_loom_private_buffers(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:676:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  676 | void test_loom_private_buffers(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:681:6: warning: no previous prototype for function 'test_loom_service_slots' [-Wmissing-prototypes]\n  681 | void test_loom_service_slots(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:681:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  681 | void test_loom_service_slots(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:689:6: warning: no previous prototype for function 'test_loom_private_owner_lifecycle' [-Wmissing-prototypes]\n  689 | void test_loom_private_owner_lifecycle(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:689:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n  689 | void test_loom_private_owner_lifecycle(void) {\n      | ^\n      | static \n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:1667:6: warning: no previous prototype for function 'test_loom_sqpoll_charges_thread_budget' [-Wmissing-prototypes]\n 1667 | void test_loom_sqpoll_charges_thread_budget(void) {\n      |      ^\n/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test_loom.c:1667:1: note: declare 'static' if the function is not intended to be used outside of this translation unit\n 1667 | void test_loom_sqpoll_charges_thread_budget(void) {\n      | ^\n      | static \n8 warnings generated.\n"
+  },
+  {
+    "path": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/kernel/test/test.c",
+    "sha256": "4f16ab18abd870d07fcc0381ded6afea6ede83827da444c084724a265792f55f",
+    "rc": 0,
+    "diagnostics": ""
+  }
+]

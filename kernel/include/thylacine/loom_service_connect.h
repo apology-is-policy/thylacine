@@ -25,6 +25,10 @@ int loom_private_connect_publish(struct loom_service_protocol *, u64 now);
 // Step returns 0 pending, 1 READY, or negative terminal reason. It does not post
 // CQEs; use loom_private_post_terminal(owner, request), retaining on CQ full.
 int loom_private_connect_step(struct loom_service_protocol *, u64 now);
+// Internal retiring driver variants: caller retains l and entry storage; do not
+// kick the close queue for its own changes. External concurrent puts still kick.
+int loom_private_connect_step_retiring(struct loom_service_protocol *);
+int loom_private_connect_release_retiring(struct loom_service_protocol *);
 // First reason wins. 0 accepted, 1 already aborting/retired. Tears transport
 // down outside Ll; acknowledgement is NOT local retirement. reason<0 required.
 int loom_private_connect_abort(struct loom_service_protocol *, s32 reason);

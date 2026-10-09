@@ -1,0 +1,11 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/host-tree/work/oct5-as-r9/private-fixed-control.py", line 116, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/host-tree/work/oct5-as-r9/private-fixed-control.py", line 78, in main
+    out=Path('work/oct5-as-r9/astra-takeover')/('private-fixed-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));out.mkdir()
+                                                                                                                                          ~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 1011, in mkdir
+    os.mkdir(self, mode)
+    ~~~~~~~~^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'work/oct5-as-r9/astra-takeover/private-fixed-20261009T182135Z'

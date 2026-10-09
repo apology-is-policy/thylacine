@@ -1,0 +1,11 @@
+--- control
++++ omit-owner-drop
+@@ -146,7 +146,7 @@
+     --l->service_fixed_settling;
+     spin_unlock(&l->lock);
+     loom_private_close_changed(l);
+-    loom_unref(l);
++    if(false) loom_unref(l);
+     return 0;
+ }
+ int loom_private_pool_prepare(struct Loom *l, struct Proc *p,

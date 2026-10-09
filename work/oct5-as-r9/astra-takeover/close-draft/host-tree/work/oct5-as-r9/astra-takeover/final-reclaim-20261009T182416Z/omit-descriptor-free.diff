@@ -1,0 +1,11 @@
+--- control
++++ omit-descriptor-free
+@@ -343,7 +343,7 @@
+     // claim that it did was fiction and is not load-bearing anywhere.
+     proc_pgtable_destroy(as->pgtable_root);
+     as->pgtable_root = 0;
+-    kfree(as);
++
+ }
+ void addrspace_unref(struct AddrSpace *as) {
+     if (!as) return;

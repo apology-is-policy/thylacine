@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -8,7 +8,7 @@
+             if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
+             struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
+             struct loom_service_node *n=&l->service_nodes->nodes[i];
+-            if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
++            if (kinds[pass]==LOOM_SERVICE_SCOPE && (n->state==LOOM_SERVICE_RETIRED || n->state==LOOM_SERVICE_READY)) {
+                 // Protocol/index/request cleanup precedes final zero-ref free.
+                 // Unused children were removed above; no caller can still own
+                 // a provisional child here. READY/ABORTING never use this path.

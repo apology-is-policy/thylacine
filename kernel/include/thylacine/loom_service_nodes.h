@@ -16,7 +16,8 @@ _Static_assert(sizeof(struct loom_service_node_table) == 1536, "scope/fid table 
 // slot ledger and retain the ring. The zero-reference retire worker instead has
 // exclusive ownership. No allocation, usercopy, callbacks or drops.
 // A private Loom owns and charges a full buddy page for this table. Last-owner
-// cleanup has exclusive access and may discard only unused RESERVED nodes.
+// cleanup has exclusive access. It removes unused RESERVED children first,
+// then validates and removes protocol-RETIRED unpinned scopes in loom.c.
 // The engine alone advances state beyond RESERVED under that lock, after actual
 // protocol/lifetime checks. Tests may simulate READY/ABORTING; this module does
 // not provide a way to claim a handshake succeeded or a scope locally retired.
@@ -28,7 +29,7 @@ int loom_service_node_publish(struct loom_slot_table *, struct loom_service_node
 int loom_service_node_rollback(struct loom_slot_table *, struct loom_service_node_table *,
                               struct loom_service_ref);
 // Only an unused RESERVED node may be reaped here. Admitted/ready/aborting/
-// retired nodes require future engine cleanup and terminal-publication proof.
+// retired nodes require engine cleanup and terminal-publication proof.
 int loom_service_node_reap_unused(struct loom_slot_table *, struct loom_service_node_table *,
                                  struct loom_service_ref);
 bool loom_service_nodes_empty(const struct loom_service_node_table *);

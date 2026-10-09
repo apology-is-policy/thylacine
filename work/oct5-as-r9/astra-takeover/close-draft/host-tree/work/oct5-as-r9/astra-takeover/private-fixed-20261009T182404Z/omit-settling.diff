@@ -1,0 +1,11 @@
+--- control
++++ omit-settling
+@@ -135,7 +135,7 @@
+     struct AddrSpace *as = l->service_as;
+     *link = f->next;
+     --l->service_fixed_count;
+-    ++l->service_fixed_settling;
++    /* omitted */
+     *f = (struct loom_private_fixed){0};
+     spin_unlock(&l->lock);
+     // A concurrent rebind can drop the last table pin after unlink. This pin

@@ -6,8 +6,9 @@
 // cursor abort and no concurrent users, never merely an acknowledged abort.
 //
 // Internal executor primitive only. The caller supplies entry/storage lifetime
-// and prevents general RPCs escaping this handshake owner. Ring dispatch, fair
-// scheduling, close queues and user-facing activation are separate integration.
+// and prevents general RPCs escaping this handshake owner. The indexed close
+// queue uses quiet retirement variants; readiness scheduling, ring dispatch
+// and user-facing activation remain separate integration.
 #include <thylacine/loom_service_connect.h>
 #include <thylacine/loom.h>
 #include <thylacine/srvconn.h>
@@ -65,6 +66,7 @@ int loom_private_connect_prepare(struct Loom *l, struct loom_service_ref scope,
         spin_lock(&l->lock);
         connect_rollback_locked(l,scope,request);
         spin_unlock(&l->lock);
+        loom_private_close_changed(l);
         return rc;
     }
     p->scope = scope; p->request = request; p->connect_deadline = deadline;
@@ -72,7 +74,7 @@ int loom_private_connect_prepare(struct Loom *l, struct loom_service_ref scope,
     *out = p;
     return 0;
 }
-int loom_private_connect_rollback(struct loom_service_protocol *p) {
+static int connect_rollback_consume(struct loom_service_protocol *p) {
     if (!p || !p->owner) return -T_E_INVAL;
     struct Loom *l = p->owner;
     spin_lock(&l->lock);
@@ -85,6 +87,15 @@ int loom_private_connect_rollback(struct loom_service_protocol *p) {
     p->connect_bound = false;
     spin_unlock(&l->lock);
     return loom_private_protocol_release_unused(p);
+}
+int loom_private_connect_rollback(struct loom_service_protocol *p) {
+    if (!p || !p->owner) return -T_E_INVAL;
+    struct Loom *l=p->owner;
+    loom_ref(l);
+    int rc=connect_rollback_consume(p);
+    if (!rc) loom_private_close_changed(l);
+    loom_unref(l);
+    return rc;
 }
 int loom_private_connect_publish(struct loom_service_protocol *p, u64 now) {
     if (!p || !p->owner) return -T_E_INVAL;
@@ -127,13 +138,17 @@ int loom_private_connect_abort(struct loom_service_protocol *p, s32 reason) {
     ++p->users;
     connect_latch(p,n,reason);
     spin_unlock(&l->lock);
+#ifdef KERNEL_TESTS
+    loom_private_close_boundary_for_test(l,3); // teardown user owns storage
+#endif
     srvconn_teardown(p->admission.conn);
     spin_lock(&l->lock);
     --p->users;
     spin_unlock(&l->lock);
+    loom_private_close_changed(l);
     return 0;
 }
-int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
+static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
     if (!p || !p->owner) return -T_E_INVAL;
     struct Loom *l = p->owner;
     spin_lock(&l->lock);
@@ -162,6 +177,9 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
     bool aborting=p->abort_reason != 0;
     u32 attempted_phase=p->progress.handshake.phase;
     spin_unlock(&l->lock);
+#ifdef KERNEL_TESTS
+    if (notify) loom_private_close_boundary_for_test(l,2); // sole external driver
+#endif
     int rc=aborting ? 0 : p9_client_progress_step(&p->client,now);
     spin_lock(&l->lock);
     if (borrowed && loom_request_put(&l->service_requests,p->request))
@@ -185,6 +203,7 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
         }
         p->driving=false;
         spin_unlock(&l->lock);
+        if (notify) loom_private_close_changed(l);
         return rc;
     }
     s32 reason=p->abort_reason;
@@ -205,9 +224,16 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
     if (!p->users) { p->locally_retired=true; n->state=LOOM_SERVICE_RETIRED; }
     p->driving=false;
     spin_unlock(&l->lock);
+    if (notify) loom_private_close_changed(l);
     return reason;
 }
-int loom_private_connect_release(struct loom_service_protocol *p) {
+int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
+    return connect_step(p,now,true);
+}
+int loom_private_connect_step_retiring(struct loom_service_protocol *p) {
+    return connect_step(p,0,false);
+}
+int loom_private_connect_release_retiring(struct loom_service_protocol *p) {
     if (!p || !p->owner) return -T_E_INVAL;
     struct Loom *l=p->owner;
     spin_lock(&l->lock);
@@ -223,6 +249,15 @@ int loom_private_connect_release(struct loom_service_protocol *p) {
     p->connect_bound=false;
     spin_unlock(&l->lock);
     return loom_private_protocol_release_retired(p);
+}
+int loom_private_connect_release(struct loom_service_protocol *p) {
+    if (!p || !p->owner) return -T_E_INVAL;
+    struct Loom *l=p->owner;
+    loom_ref(l);
+    int rc=loom_private_connect_release_retiring(p);
+    if (!rc) loom_private_close_changed(l);
+    loom_unref(l);
+    return rc;
 }
 int loom_private_connect_reap(struct Loom *l, struct loom_service_ref scope) {
     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;

@@ -1,0 +1,62 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Warning: Please run the Java VM, which executes TLC with a throughput optimized garbage collector, by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 21 and seed 8022217002196309218 with 1 worker on 8 cores with 123MB heap and 64MB offheap memory [pid: 33762] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/close-draft/specs/loom_service_close.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-6914940366294837662/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-6914940366294837662/TLC.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-6914940366294837662/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-6914940366294837662/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module loom_service_close
+Linting of module loom_service_close
+Starting... (2026-10-09 20:00:01)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 20:00:01.
+Error: Invariant QueueRoot is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ phase |-> "new",
+  roots |-> 0,
+  linked |-> FALSE,
+  blocked |-> TRUE,
+  work |-> 2,
+  dirty |-> FALSE,
+  observed |-> FALSE,
+  more |-> FALSE,
+  done |-> FALSE,
+  internalWake |-> FALSE,
+  restarted |-> FALSE ]
+
+State 2: <Start line 10, col 10 to line 12, col 49 of module loom_service_close>
+s = [ phase |-> "ready",
+  roots |-> 1,
+  linked |-> TRUE,
+  blocked |-> TRUE,
+  work |-> 2,
+  dirty |-> FALSE,
+  observed |-> FALSE,
+  more |-> FALSE,
+  done |-> FALSE,
+  internalWake |-> FALSE,
+  restarted |-> FALSE ]
+
+State 3: <Duplicate line 13, col 14 to line 14, col 41 of module loom_service_close>
+s = [ phase |-> "ready",
+  roots |-> 2,
+  linked |-> TRUE,
+  blocked |-> TRUE,
+  work |-> 2,
+  dirty |-> FALSE,
+  observed |-> FALSE,
+  more |-> FALSE,
+  done |-> FALSE,
+  internalWake |-> FALSE,
+  restarted |-> FALSE ]
+
+3 states generated, 3 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 3.
+Finished in 00s at (2026-10-09 20:00:01)

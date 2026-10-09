@@ -352,12 +352,14 @@ static struct Rendez service_retire_wait;
 static struct Loom *service_retire_head;
 static struct Loom **service_retire_tail;
 static bool service_retire_ready;
+static struct loom_close_queue service_close_queue;
 static u64 service_retired_count;
 
 void loom_retire_init(void) {
     spin_lock_init(&service_retire_lock);
     rendez_init(&service_retire_wait);
     service_retire_tail = &service_retire_head;
+    loom_closeq_init(&service_close_queue);
     service_retire_ready = true;
 }
 
@@ -569,15 +571,33 @@ void loom_exec_latch(struct Loom *l) {
     spin_unlock(&l->lock);
 }
 
-void loom_handle_closed(struct Loom *l) {
-    if (!loom_is_private(l)) return;
+static void loom_private_close_notify(struct Loom *l) {
     loom_exec_latch(l);
     poll_waiter_list_wake(&l->cq_waiters);
     wakeup(&l->sqpoll_park);
 }
+void loom_private_close_changed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    spin_lock(&service_retire_lock);
+    bool wake=loom_closeq_kick(&service_close_queue,&l->service_close_work);
+    spin_unlock(&service_retire_lock);
+    if (wake) wakeup(&service_retire_wait);
+}
+void loom_handle_closed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    // Actual handle close retains l, outside process/handle-table locks. Exec's
+    // earlier leaf latch deliberately does not enter this scheduler path.
+    loom_private_close_notify(l);
+    spin_lock(&service_retire_lock);
+    bool started=loom_closeq_start(&service_close_queue,&l->service_close_work);
+    if (started) loom_ref(l); // caller still holds a live ref; never resurrection
+    spin_unlock(&service_retire_lock);
+    if (started) wakeup(&service_retire_wait);
+}
 
 static void loom_private_enqueue(struct Loom *l) {
-    loom_handle_closed(l);
+    // refcount is already zero. Do not call the root-taking handle-close path.
+    loom_private_close_notify(l);
     spin_lock(&service_retire_lock);
     l->service_retire_next = NULL;
     *service_retire_tail = l;
@@ -589,7 +609,7 @@ static void loom_private_enqueue(struct Loom *l) {
 static int loom_private_pending(void *unused) {
     (void)unused;
     spin_lock(&service_retire_lock);
-    int pending = service_retire_head != NULL;
+    int pending = service_retire_head != NULL || service_close_queue.head != NULL;
     spin_unlock(&service_retire_lock);
     return pending;
 }
@@ -643,6 +663,19 @@ static void loom_private_nodes_destroy(struct Loom *l) {
             struct loom_service_slot *s = &l->service_slots->slots[i];
             if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
             struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
+            struct loom_service_node *n=&l->service_nodes->nodes[i];
+            if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
+                // Protocol/index/request cleanup precedes final zero-ref free.
+                // Unused children were removed above; no caller can still own
+                // a provisional child here. READY/ABORTING never use this path.
+                if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
+                    n->parent.reserved || n->parent.incarnation || n->reserved)
+                    extinction("private Loom retained pinned retired scope");
+                *n=(struct loom_service_node){0};
+                if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))
+                    extinction("private Loom lost retired scope metadata");
+                continue;
+            }
             int rc = s->phase == LSLOT_PROVISIONAL ?
                 loom_service_node_rollback(l->service_slots, l->service_nodes, ref) :
                 loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
@@ -682,7 +715,9 @@ static void loom_private_destroy(struct Loom *l) {
         extinction("private Loom reached legacy cleanup state");
     if (!loom_engine_empty(l->service_engine))
         extinction("private Loom reached final free with indexed protocols");
-    if (l->service_fixed || l->service_fixed_count)
+    if (l->service_close_work.state!=LCLOSE_NEW && l->service_close_work.state!=LCLOSE_DONE)
+        extinction("private Loom reached final free with a close queue root");
+    if (l->service_fixed || l->service_fixed_count || l->service_fixed_settling)
         extinction("private Loom reached cleanup with fixed borrows");
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
         if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
@@ -743,17 +778,34 @@ static void loom_private_destroy(struct Loom *l) {
     __atomic_fetch_add(&service_retired_count, 1, __ATOMIC_RELEASE);
 }
 
-void loom_retirer_main(void) {
-    for (;;) {
-        (void)sleep(&service_retire_wait, loom_private_pending, NULL);
+static void loom_private_retire_one(void) {
         spin_lock(&service_retire_lock);
+        struct loom_close_work *work=loom_closeq_take(&service_close_queue);
+        if (work) {
+            struct Loom *owner=(void *)((char *)work-__builtin_offsetof(struct Loom,service_close_work));
+            ++owner->service_close_visits;
+        }
         struct Loom *l = service_retire_head;
         if (l) {
             service_retire_head = l->service_retire_next;
             if (!service_retire_head) service_retire_tail = &service_retire_head;
         }
         spin_unlock(&service_retire_lock);
+        if (work) {
+            struct Loom *closing=(void *)((char *)work-__builtin_offsetof(struct Loom,service_close_work));
+            int progress=loom_engine_close_visit(closing);
+            if (progress<0) extinction("close queue reached invalid private owner");
+            spin_lock(&service_retire_lock);
+            enum loom_close_finish action=loom_closeq_finish(&service_close_queue,work,progress==2,progress==1);
+            spin_unlock(&service_retire_lock);
+            if (action==LCLOSE_DROP) loom_unref(closing); // final drop outside Q
+        }
         if (l) loom_private_destroy(l);
+}
+void loom_retirer_main(void) {
+    for (;;) {
+        (void)sleep(&service_retire_wait, loom_private_pending, NULL);
+        loom_private_retire_one();
     }
 }
 
@@ -1245,7 +1297,7 @@ int loom_private_fixed_acquire(struct Loom *l, struct Proc *p,
     if (l->service_closing) rc = -T_E_CANCELED;
     else if (f->owner || f->next || f->extent.backing || f->extent.offset || f->extent.length)
         rc = -T_E_BUSY;
-    else if (l->service_fixed_count >= l->cq_entries) rc = -T_E_AGAIN;
+    else if (l->service_fixed_count + l->service_fixed_settling >= l->cq_entries) rc = -T_E_AGAIN;
     else if ((rc = loom_private_extent_locked(l,m,&e)) == 0) {
         if (loom_pool_conflicts(&l->service_pools->bank,e)) rc = -T_E_BUSY;
         else {
@@ -1272,12 +1324,17 @@ int loom_private_fixed_release(struct Loom *l, struct loom_private_fixed *f) {
     struct AddrSpace *as = l->service_as;
     *link = f->next;
     --l->service_fixed_count;
+    ++l->service_fixed_settling;
     *f = (struct loom_private_fixed){0};
     spin_unlock(&l->lock);
     // A concurrent rebind can drop the last table pin after unlink. This pin
     // still owns the pages; release it and settle before dropping the owner.
     // No reference to f or l is used after the final Loom unref.
     loom_private_drop_buffer(as,b);
+    spin_lock(&l->lock);
+    --l->service_fixed_settling;
+    spin_unlock(&l->lock);
+    loom_private_close_changed(l);
     loom_unref(l);
     return 0;
 }
@@ -3534,3 +3591,21 @@ int loom_start_sqpoll(struct Loom *l) {
     ready(kt);
     return 0;
 }
+
+#ifdef KERNEL_TESTS
+static void (*service_close_test_hook)(struct Loom *, u32);
+void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32)) {
+    __atomic_store_n(&service_close_test_hook,hook,__ATOMIC_RELEASE);
+}
+void loom_private_close_boundary_for_test(struct Loom *l, u32 stage) {
+    void (*hook)(struct Loom *, u32)=__atomic_load_n(&service_close_test_hook,__ATOMIC_ACQUIRE);
+    if(hook)hook(l,stage);
+}
+u32 loom_private_close_observe_for_test(struct Loom *l, u64 *visits) {
+    spin_lock(&service_retire_lock);
+    u32 state=l->service_close_work.state;
+    if (visits) *visits=l->service_close_visits;
+    spin_unlock(&service_retire_lock);
+    return state;
+}
+#endif

@@ -27,7 +27,8 @@
 #ifndef THYLACINE_LOOM_H
 #define THYLACINE_LOOM_H
 
-#include <thylacine/loom_service_abi.h> // reserved AS-0 surface; not enabled
+#include <thylacine/loom_service_abi.h>
+#include <thylacine/loom_service_close_queue.h> // reserved AS-0 surface; not enabled
 #include <thylacine/loom_service_requests.h>
 #include <thylacine/loom_service_engine.h>
 #include <thylacine/loom_service_pool.h> // canonical internal extent
@@ -472,10 +473,13 @@ struct Loom {
     struct loom_service_engine *service_engine; // separately charged buddy page
     struct loom_request_table service_requests; // CQ-sized precharged terminal storage
     struct loom_private_fixed *service_fixed; // exact accepted fixed extents, under lock
+    u32 service_fixed_settling; // physical drops outside Ll, still local borrows
     u32 service_fixed_count; // bounded by existing CQ terminal-obligation capacity
     u64 service_creator;
     u32 service_metadata_pages;
     bool service_closing;              // serialized with result commit by lock
+    u64 service_close_visits; // Q-locked diagnostic, never a reclamation deadline
+    struct loom_close_work service_close_work; // Q-locked; one root until DONE
     struct Loom *service_retire_next;  // preadmitted last-reference queue link
     // Kernel-PRIVATE authoritative completion-queue tail (under `lock`). The
     // shared `loom_ring_hdr.cq_tail` is a userspace-READABLE mirror; loom_post_cqe
@@ -656,6 +660,15 @@ void loom_layout_ring_fault_disarm_for_test(void);
 bool loom_layout_ring_fault_armed_for_test(void);
 #endif
 void loom_handle_closed(struct Loom *l);
+// External close prerequisite changed; caller retains l, no outer locks.
+// Call only AFTER ending the physical borrow; internal close puts are quiet.
+void loom_private_close_changed(struct Loom *l);
+#ifdef KERNEL_TESTS
+// Deterministic unlocked owner-boundary interleavings, test builds only.
+void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32));
+void loom_private_close_boundary_for_test(struct Loom *, u32);
+u32 loom_private_close_observe_for_test(struct Loom *, u64 *visits);
+#endif
 void loom_exec_latch(struct Loom *l); // leaf only; caller retains the table owner
 bool loom_is_private(const struct Loom *l);
 void loom_retire_init(void);

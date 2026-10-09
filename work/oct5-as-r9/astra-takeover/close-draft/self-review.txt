@@ -1,0 +1,108 @@
+Astra self-review, October9. Not an independent audit.
+
+Queue specification precedes the uninstalled C module. Bounded TLC model:
+18 reachable clean states; duplicate queue root, early drop, completed restart,
+internal wake, lost parked wake, lost RUNNING event and completion leak mutants
+produce their expected named invariant counterexamples. This does not model
+scheduler fairness, C memory ordering, full Loom reference counts or protocols.
+
+The C module is a serialized intrusive state machine. Init binds tail to head;
+append links once; take resets tail after last element, removes the popped link
+and consumes dirty. Start only NEW prevents duplicate roots/restarts; kick does
+not create a root. PARKED kick transitions to READY; RUNNING dirty survives the
+last-observation/finish interval. Finish returns a distinct DROP action only
+for complete and gives completion precedence over stale more/dirty. Otherwise
+immediate useful work or an external dirty event requeues; blocked work parks.
+The owning wrapper must acquire exactly one ref under Q before start unlock,
+keep it across READY/RUNNING/PARKED and drop outside Q after complete. No memory
+allocation, scheduler wake, callbacks, final drops or Loom lock in module.
+
+Actual draft C runs with LLVM22 ASan+UBSan. Control exercises two-ring FIFO,
+root action counts, duplicate starts/kicks, before/after park events, one recheck
+per dirty event, last-element tail repair, completion and refusal to restart.
+Ten named mutations each fail its expected assertion. Reference actions are
+simulated here: this is NOT evidence for the pending real kernel wrappers.
+
+CLOSE-HOST-1: initial clean control timed out after5s before main. Sample showed
+ASanInitializeShadowMemory -> dyld text iteration -> malloc -> recursive ASan
+StaticSpinMutex. A minimal write("MAIN") program independently reproduces with
+Appleclang17 and passes LLVM22; samples/comparison/raw logs retained in
+queue-control-1. Harness corrected to the project's established LLVM22; both
+sanitizers remain enabled. Original failure was not a kernel or queue test pass.
+
+Integration review obligations still open:
+- No root resurrection: zero-ref destroy enqueue must use latch/wake directly,
+  never call the new root-taking handle-close wrapper.
+- loom_exec_latch remains Ll-only: process/handle-table commit calls it under
+  outer locks. Actual handle-close later starts close queue outside them.
+- Engine closure must distinguish its own entry puts/collection from external
+  dependency events to prevent self-induced dirty/requeue loops. Never blanket
+  suppress RUNNING kicks: that loses actual concurrent external returns.
+- Unindexed prepared constructors and manual raw CONNECT fixtures can own a
+  request. Their rollback/release must notify after safe ownership transition,
+  with an explicit retained Loom while issuing the wake. Do not rely only on
+  engine_put (no index exists for those owners).
+- Fixed release unlinks before dropping its independent buffer pin; preserve
+  that lifetime and kick after physical settlement while its Loom ref remains.
+- Retired scope metadata may still have unused FID child reservations. Do not
+  reap its scope while child pins remain, and do not destroy a PROVISIONAL child
+  out from under an in-progress caller. Final zero-ref cleanup already removes
+  unused FIDs before scopes; arrange retired-scope cleanup consistently with
+  that order rather than prematurely dropping queue root into an extinction.
+- Real native witnesses must cover final handle/exec, stalled/full CQ peer,
+  installing/unindexed constructor, entry/fixed users, park race, retained
+  server endpoint, final refunds/image guard and multi-ring fairness.
+
+Commit hook a978d19c3 initially rejected stale generated code coverage; normal
+quaestor render changed611 owned/655 files and commit then passed normal hooks.
+No canonical changes after full matrix launch. Historical installer must never
+be rerun. GUI-only per operator; no approval/handoff needed to continue.
+
+Integration self-review completed in the separate draft, pending native tests:
+- Actual queue wrapper satisfies distinct root, no resurrection, Ll-only exec,
+  no Q/Ll nesting or scheduler/free under Q, and one final free per close quantum.
+  Real extracted wrappers plus the actual queue pass ASan/UBSan with eight
+  targeted mutants, including starvation and final drop while holding Q.
+- Actual engine+CONNECT C distinguishes quiet internal operations from external
+  prerequisite returns. Close scans one nonbusy nonretired cursor, then checks
+  installer/entry/driver/users/fixed/settling and exact request-index coverage
+  before consumer detach. An unindexed constructor parks, not falsely completes.
+  Actual-C controls cover these boundaries and seven targeted mutations.
+- Consuming raw CONNECT release/rollback carries a temporary Loom reference
+  through physical storage destruction and close_changed. Public engine caller
+  lifetime remains required. Preparation failure wakes after request rollback.
+- Fixed count moves to settling during unlocked physical buffer release; both
+  count toward capacity and block consumer detach. New physical-boundary and
+  exact-notification controls pass; twelve omission/authority mutants identified.
+- Final zero-ref metadata cleanup reaps unused children first, then exactly
+  RETIRED LIVE unpinned scopes with no parent/reserved payload. Eight boundary
+  cases and six mutants pass against actual C and slot/node ledgers. States in
+  this host fixture are simulated; the native fixture creates real protocol
+  retirement, and keeps a child pin through close before final observer return.
+- Seven native cases drafted: close/exec/fixed/unindexed constructor and real
+  INSTALLING/driver/teardown boundaries. Test-only hooks run outside Ll and are
+  one-shot for one exact Loom, preserving the real worker/pin/driver semantics.
+  No native success claimed before running rebuilt artifacts.
+- Earlier host overlay script symlinks resolved ROOT outside its overlay, so
+  output creation failed before any test. Replacing only those harness symlinks
+  with copied files repaired resolution without altering canonical source.
+- Fixed omission mutant now hits the new settling-capacity assertion before the
+  old general-capacity assertion; updated expected label, retained original run.
+- ARM64 syntax passes six translation units; the initial zero-diagnostics wrapper
+  rejected eight existing test-file missing-prototype warnings. Compared exact
+  warning messages with canonical test source: all eight match, no new warnings.
+
+
+Fresh native close-diagnostic-20261009T183912Z passes1851/1851, including
+all seven close cases and second-ring progress while the first is parked. D7
+overlap, twenty distinct login/logout cycles and boot banner also pass. Rebuilt
+ELF/bin, six input hashes, exact HEAD+diff and new queue source/header hashes
+are retained and stable. Real close/exec, full CQ, retained entry/fixed/constructor
+owners and installer/driver/teardown interleavings finish local retirement with
+exact image refunds while server endpoints remain retained. Source-matched Mac
+SMP/UBSan matrix for this new code is still pending; the earlier50/50 qualifies
+a978d19c3 index-only source. Pi/A72/KVM, final guest allocator reclamation and
+optional graphics remain unqualified. No private activation/Main/128MiB change.
+
+Raw serial/harness hashes and source diff rechecked before documentation/commit.
+No production source changed after this native run.

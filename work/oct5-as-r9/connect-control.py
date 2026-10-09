@@ -79,6 +79,11 @@ static void p9_client_progress_abort(struct p9_client *c) {
  (void)c;CHECK(!held && active->driving && !active->owner->service_requests.records[0].borrows,"local abort after parser borrow outside lock");aborts++;
 }
 '''
+PRE+=r'''
+static void loom_private_close_changed(struct Loom *l){(void)l;CHECK(!held,"close notification outside Ll");}
+static void loom_ref(struct Loom *l){(void)l;}
+static void loom_unref(struct Loom *l){(void)l;}
+'''
 MAIN=r'''
 int main(int argc,char **argv) {
  mode=argc>1?atoi(argv[1]):0;

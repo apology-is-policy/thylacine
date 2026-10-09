@@ -28,6 +28,7 @@ PRE = r'''
 #include <thylacine/loom_service_nodes.h>
 #include <thylacine/loom_service_requests.h>
 #include <thylacine/loom_service_engine.h>
+#include <thylacine/loom_service_close_queue.h>
 #include <thylacine/errno.h>
 #define THYLACINE_DEVSRV_H
 struct SrvServiceTarget { void *view,*service;u64 generation;u8 name_len;char name[32]; };
@@ -58,7 +59,7 @@ struct Loom {
     struct loom_service_engine *service_engine;
     struct loom_request_table service_requests;
     u32 cq_entries;
-    void *service_fixed;u32 service_fixed_count;
+    void *service_fixed;u32 service_fixed_count,service_fixed_settling;struct loom_close_work service_close_work;
     u64 service_creator;
     u32 service_metadata_pages;
     spin_lock_t lock;

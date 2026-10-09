@@ -1,0 +1,90 @@
+{
+  "scope": "Extract fixed reservation owners and pool owners with actual joint ledgers.\nSequential checked lock/Burrow/Loom doubles under ASan/UBSan; no protocol or\nconcurrency proof. Native fixture separately checks actual pins and retirement.\n",
+  "source_head": "a978d19c388f512a645cdcbaeea60a81a0a06727",
+  "loom_sha256": "96116fe49692b97a25c7b40da007da15ae45bc839a3982a39daf432cb63b8a52",
+  "modules": {
+    "kernel/loom_service_pool.c": "ddee8dc2e3a6221d5ea6372dcdb1097e08d9cd8bc75fa49602b1a745e5baa088",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_pool_table.c": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165"
+  },
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS fixed reservations exclude pools and retain local ownership",
+      "generated_sha256": "c8c71d251142b6cdc9a3e56e9c4354d392a1c9da41ab37f8a5e185329fdd6fed"
+    },
+    {
+      "case": "omit-image",
+      "rc": 11,
+      "expected": "fixed image authority",
+      "generated_sha256": "bba2b33b3033036337fb5427e3dbabf6218eb327b8f55303d00cb0363ac1728c"
+    },
+    {
+      "case": "omit-creator",
+      "rc": 11,
+      "expected": "fixed creator authority",
+      "generated_sha256": "3ecc481039593f4e9c31d179d7ad0b8ac7bd24915583c9533391725ab73a3833"
+    },
+    {
+      "case": "omit-backing-pin",
+      "rc": 11,
+      "expected": "fixed owns canonical pin and ring",
+      "generated_sha256": "7b535e469dc36282fb972faad378b6a0e45919207e558da7047bb784bc023ec2"
+    },
+    {
+      "case": "omit-ring-pin",
+      "rc": 11,
+      "expected": "fixed owns canonical pin and ring",
+      "generated_sha256": "676aab1fbac761c4dbc85c23dbe20e11d288cd1cf2a0548f8fd93c1bbe9735a6"
+    },
+    {
+      "case": "pool-over-fixed",
+      "rc": 11,
+      "expected": "fixed excludes pool alias",
+      "generated_sha256": "40d935f776dda5ea5afd0069bc380a522aa30ea485bdfd81bfa232a1d38b1c4d"
+    },
+    {
+      "case": "fixed-over-pool",
+      "rc": 11,
+      "expected": "provisional pool excludes fixed alias",
+      "generated_sha256": "d9a1c724b06c331e43dc697362e4023faa145ca96b843a68991d141e16d56eec"
+    },
+    {
+      "case": "omit-bound",
+      "rc": 11,
+      "expected": "settling fixed owner still consumes admission capacity",
+      "generated_sha256": "72f32780225118b37c406f74e3d3411880870101c4c9044627af7787b9d43311"
+    },
+    {
+      "case": "omit-drop",
+      "rc": 11,
+      "expected": "fixed release drops exactly one ownership pair",
+      "generated_sha256": "772f897dc830519fff95097d1617276ad55ed1160fd990f377858aabf9209122"
+    },
+    {
+      "case": "omit-owner-drop",
+      "rc": 11,
+      "expected": "fixed release drops exactly one ownership pair",
+      "generated_sha256": "dbddf3d7c137514001a79ac9234870490324430419dd0085e18d1e1bfb6f2b71"
+    },
+    {
+      "case": "omit-settling",
+      "rc": 11,
+      "expected": "physical buffer release retains settling barrier",
+      "generated_sha256": "9178a29c641c926f184bd4e0d8a1db7eb2b5e4ef6a06e86ea9b1602dd3d7e50c"
+    },
+    {
+      "case": "omit-close-notify",
+      "rc": 11,
+      "expected": "each physical fixed return notifies once",
+      "generated_sha256": "9fe7a47d15c6613f606b50cd43ff4ef250e55e01d8490232365d88162561793b"
+    },
+    {
+      "case": "allow-close",
+      "rc": 11,
+      "expected": "fixed close refusal",
+      "generated_sha256": "4da2e2370c95255cbd6a90358b65c17a227c8d9ef8e80a6595c948e628a85756"
+    }
+  ]
+}

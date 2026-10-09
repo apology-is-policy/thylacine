@@ -1,18 +1,24 @@
 # Astra GUI continuation
 
-Sole active GUI thread01a121cd-4ad5-73d1-bb8f-21a4b799519e; no handoff.
-Implementation corona/async-memory in thylacine-corona; Yip Astra through
-work/oct5-as-r9/astra-yip.sh (internally runs in thylacine-astra).
+Implementation: thylacine-corona, corona/async-memory. GUI-only thread
+01a121cd-4ad5-73d1-bb8f-21a4b799519e; continue checkpoints without handoff.
+Yip via work/oct5-as-r9/astra-yip.sh (internally thylacine-astra as Astra).
 
-Owner-index a978d19c3 passed full50/50 Mac matrix,1850/1850+D7 every boot.
-Raw current-gate-20261009T175812Z source/inputs/logs verified/PINNED.
-Close integration prepared separately and host-qualified; its latest state is
-astra-takeover/close-draft/continuation.json and status.json. Do not duplicate
-the running continuation or rerun build-draft.py / historical installers.
-Close native/full matrix still pending until their source-matched results exist.
-Then active readiness executor, query/reap, remaining ops/buffers, AS-3/4/MM0-MM4.
+Owner-index a978d19c3 passed50/50 Mac1850/D7; evidence28156ba02.
+Close queue now installed and native-qualified1851/1851+D7/20cycles in
+astra-takeover/close-diagnostic-20261009T183912Z. Model/host mutants and
+self-review retained. Read close-current-flight.json for the new full matrix
+once launched. Do not duplicate it or modify its source/build during flight.
+Close-draft/build-draft.py, install.py and continue.py are now historical:
+DO NOT rerun. Canonical kernel sources supersede the draft.
 
-Keep8192MiB floor, exact clean Stratum61dde37, Astra six pending/four protected
-files. No Main/private async/clipboard activation/128MiB change. Self-review only.
-Working set: AGENTS.md; docs/ASYNC-SERVICE-STATUS.md latest; close-draft/
-continuation.json, status.json, self-review.txt, install-manifest.json.
+Next: query/reap controls and consistent retained diagnostics; planning note
+astra-takeover/control-draft/next-review.txt. Then readiness-aware active
+executor, remaining private ops/provided buffers, AS-3/4 and MM0-MM4. No new
+private dispatch or activation until approved gates.
+
+Preserve8192MiB floor, Stratum exact clean61dde37, Astra six pending files/four
+protected drafts. No Main/private async/clipboard activation/128MiB change.
+Self-review only. Working set: AGENTS.md; latest ASYNC-SERVICE-STATUS;
+close-current-flight.json; close-draft/status.json/self-review.txt; canonical
+kernel/loom.c, loom_service_engine.c, loom_service_connect.c.

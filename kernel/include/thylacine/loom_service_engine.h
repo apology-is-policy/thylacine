@@ -37,5 +37,9 @@ int loom_engine_collect(struct Loom *, struct loom_service_ref);
 // retired, no entry/install/parser/fixed borrows. Then discard retained terminals
 // and collect their storage, independent of CQ room. No native peer wait.
 int loom_engine_discard_closed(struct Loom *);
+// One close quantum: 0 blocked on external local holders, 1 immediate work,
+// 2 complete (index/request/fixed ownership empty after consumer detach).
+// Retirer owns a queue root; its internal puts never kick its own RUNNING work.
+int loom_engine_close_visit(struct Loom *);
 bool loom_engine_empty(const struct loom_service_engine *);
 #endif

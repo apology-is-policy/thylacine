@@ -11,7 +11,13 @@ def module(name,file):
 base=module('poolpins','private-pool-pins-control.py');extract=base.extract
 PRE=base.PRE[:base.PRE.index('static void replace_table_after_unlock')]
 PRE=PRE.replace(' u32 magic;spin_lock_t lock;',' u32 magic;int refs;u32 cq_entries;spin_lock_t lock;')
+PRE=PRE.replace('u32 service_fixed_count;','u32 service_fixed_count,service_fixed_settling;')
+PRE=PRE.replace('static bool burrow_unref_settled_in(', 'static struct Loom *settling_watch;\nstatic bool burrow_unref_settled_in(')
+PRE=PRE.replace(' CHECK(!held && b->refs>0,', ' if(settling_watch) CHECK(settling_watch->service_fixed_settling==1,"physical buffer release retains settling barrier");\n CHECK(!held && b->refs>0,')
 PRE+=r'''
+static int close_notifications;
+static void loom_private_close_changed(struct Loom *l){CHECK(!held && !l->service_fixed_settling,"close notification after physical release");close_notifications++;}
+
 static int retired;
 static void loom_ref(struct Loom *l) {CHECK(held==1 && l->refs>0,"owner pin under admission lock");l->refs++;}
 static void loom_unref(struct Loom *l) {
@@ -43,13 +49,16 @@ int main(void) {
  m.offset=128;
  CHECK(loom_private_fixed_acquire(&l,&p,&m,&g)==-T_E_BUSY && !g.owner && buffer.refs==4,"provisional pool excludes fixed alias");
  m.offset=192;
+ l.service_fixed_settling=1;
+ CHECK(loom_private_fixed_acquire(&l,&p,&m,&g)==-T_E_AGAIN && !g.owner,"settling fixed owner still consumes admission capacity");
+ l.service_fixed_settling=0;
  CHECK(!loom_private_fixed_acquire(&l,&p,&m,&g) && l.service_fixed_count==2 && buffer.refs==5 && l.refs==3,"disjoint fixed accepted");
  CHECK(loom_private_fixed_acquire(&l,&p,&m,&h)==-T_E_AGAIN && !h.owner,"fixed capacity bounded");
  CHECK(!loom_private_pool_rollback(&l,pool) && buffer.refs==4,"pool rollback retains fixed pins");
  struct Loom wrong={.magic=LOOM_MAGIC,.service_as=&other};
  CHECK(loom_private_fixed_release(&wrong,&f)==-T_E_NOENT && buffer.refs==4 && l.refs==3,"wrong ring release retains pins");
  // A real rebind may remove table pins while accepted fixed users survive.
- buffer.refs-=2;l.n_reg_buf=0;
+ buffer.refs-=2;l.n_reg_buf=0;settling_watch=&l;
  CHECK(!loom_private_fixed_release(&l,&f) && !f.owner && !f.next && !f.extent.backing && !f.extent.length &&
        buffer.refs==1 && l.refs==2 && l.service_fixed_count==1,"fixed release drops exactly one ownership pair");
  CHECK(loom_private_fixed_release(&l,&f)==-T_E_NOENT && buffer.refs==1 && l.refs==2,"double release unchanged");
@@ -58,6 +67,7 @@ int main(void) {
  loom_unref(&l);
  CHECK(!retired && l.refs==1 && g.owner==&l,"fixed retains closed owner after handle leaves");
  CHECK(!loom_private_fixed_release(&l,&g) && !buffer.refs && !l.refs && a.pages==9 && retired==1,"final fixed release settles and retires");
+ CHECK(close_notifications==2,"each physical fixed return notifies once");
  CHECK(!held,"no retained lock");puts("PASS fixed reservations exclude pools and retain local ownership");return 0;
 }
 '''
@@ -77,10 +87,12 @@ def main():
  ('omit-ring-pin','loom_private_fixed_acquire','            loom_ref(l);','            if(false) loom_ref(l);','fixed owns canonical pin and ring'),
  ('pool-over-fixed','loom_private_pool_prepare','loom_private_fixed_conflicts_locked(l,extents[i])','loom_private_fixed_conflicts_locked(l,extents[i]) && false','fixed excludes pool alias'),
  ('fixed-over-pool','loom_private_fixed_acquire','loom_pool_conflicts(&l->service_pools->bank,e)','loom_pool_conflicts(&l->service_pools->bank,e) && false','provisional pool excludes fixed alias'),
- ('omit-bound','loom_private_fixed_acquire','l->service_fixed_count >= l->cq_entries','l->service_fixed_count >= l->cq_entries && false','fixed capacity bounded'),
+ ('omit-bound','loom_private_fixed_acquire','l->service_fixed_count + l->service_fixed_settling >= l->cq_entries','l->service_fixed_count + l->service_fixed_settling >= l->cq_entries && false','settling fixed owner still consumes admission capacity'),
  ('omit-drop','loom_private_fixed_release','    loom_private_drop_buffer(as,b);','    if(false) loom_private_drop_buffer(as,b);','fixed release drops exactly one ownership pair'),
  ('omit-owner-drop','loom_private_fixed_release','    loom_unref(l);','    if(false) loom_unref(l);','fixed release drops exactly one ownership pair'),
- ('allow-close','loom_private_fixed_acquire','l->service_closing) rc','l->service_closing && false) rc','fixed close refusal')]
+ ('omit-settling','loom_private_fixed_release','    ++l->service_fixed_settling;','    /* omitted */','physical buffer release retains settling barrier'),
+ ('omit-close-notify','loom_private_fixed_release','    loom_private_close_changed(l);','    if(false) loom_private_close_changed(l);','each physical fixed return notifies once'),
+ ('allow-close','loom_private_fixed_acquire' ,'l->service_closing) rc','l->service_closing && false) rc','fixed close refusal')]
  sdk=subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip();results=[]
  modules=['kernel/loom_service_pool.c','kernel/loom_service_slots.c','kernel/loom_service_pool_table.c']
  module_hashes={m:hashlib.sha256(Path(m).read_bytes()).hexdigest() for m in modules}

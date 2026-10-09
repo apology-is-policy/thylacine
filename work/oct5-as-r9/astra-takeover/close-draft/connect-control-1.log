@@ -1,0 +1,14 @@
+PASS control
+PASS omit-failure-phase
+PASS omit-duplicate
+PASS omit-own-pin
+PASS omit-publish-lock
+PASS omit-publish-deadline
+PASS early-ready
+PASS persistent-deadline
+PASS omit-parser-borrow
+PASS omit-local-abort
+PASS ignore-live-user
+PASS omit-delivery-gate
+PASS omit-close-recheck
+work/oct5-as-r9/astra-takeover/connect-control-20261009T182456Z

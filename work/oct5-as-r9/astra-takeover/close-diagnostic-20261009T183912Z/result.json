@@ -1,0 +1,50 @@
+{
+  "source_head": "28156ba02bb4b192def4b86e684dce95ea17bf8d",
+  "source_diff_sha256": "799252e3597d77c46437a730ae995300a487ac96e836dea7aee204d29c265d29",
+  "extra_sources": {
+    "kernel/loom_service_engine.c": "c28ae718559668fa84332fceea7d57348b436e69e1c6906604b79e036aead74f",
+    "kernel/include/thylacine/loom_service_engine.h": "feacf840c7ac7876ea22a9db349f2cdf67d7507ff446d1726d8dde7cdbc5777a",
+    "kernel/loom_service_close_queue.c": "ceaea22a952b8d675f2371449abd16630e50ea853ae623e1f917ab5251d0cda0",
+    "kernel/include/thylacine/loom_service_close_queue.h": "6a3fe97f5f9afeb11f731caee4f2ce87d9102e4be6b085a1fbc56d4ce06d3ea5"
+  },
+  "inputs": {
+    "build/kernel/thylacine.elf": "ca8d11ac7a1043344925a939c2ce8322c610fb4b1c6105aab7dda36ffc8b0377",
+    "build/kernel/thylacine.bin": "bd5b27c7135ba28cb905c8cafa6f1f1f231856fc2f418436369b8ff31456d757",
+    "build/ramfs.cpio": "63a46323c7cdd4481b0ce824915a623b54d63ed96daa1e93fe9c121aa7852bac",
+    "build/fixtures/pool.img.baked-snapshot": "ccb11d60ca9e73e629a8c18cbfb988416a163de979c0bd58e1e3f5ea5184e47b",
+    "build/fixtures/system.key": "17dc0517a716177472c9acc8cdcd11ff64760f21d789d0bcfa000cb79625c0dc",
+    "build/fixtures/system.key.baked-snapshot": "17dc0517a716177472c9acc8cdcd11ff64760f21d789d0bcfa000cb79625c0dc"
+  },
+  "rc": 0,
+  "source_stable": true,
+  "inputs_stable": true,
+  "extra_stable": true,
+  "all1851": true,
+  "close_owner": true,
+  "boot_banner": true,
+  "d7_overlap": true,
+  "d7_cycles": [
+    "d7user00",
+    "d7user01",
+    "d7user02",
+    "d7user03",
+    "d7user04",
+    "d7user05",
+    "d7user06",
+    "d7user07",
+    "d7user08",
+    "d7user09",
+    "d7user10",
+    "d7user11",
+    "d7user12",
+    "d7user13",
+    "d7user14",
+    "d7user15",
+    "d7user16",
+    "d7user17",
+    "d7user18",
+    "d7user19"
+  ],
+  "serial_sha256": "cd688011b81887fb95175d178ab56939f7addd5f74c0a5ce2fba507158055f73",
+  "harness_sha256": "7c676548557ee1039b0ebbdc79516528cd2ad7157c393ee285bb0c55c7e41e78"
+}

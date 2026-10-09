@@ -1,0 +1,14 @@
+{
+  "id": "CLOSE-HOST-1",
+  "state": "resolved: draft harness uses established LLVM22 ASan/UBSan toolchain",
+  "symptom": "first ASan/UBSan clean queue control timed out at five seconds with empty log",
+  "scope": "uninstalled draft; production full gate continues frozen",
+  "utc": "2026-10-09T18:02:00.203159+00:00",
+  "cause": "Apple clang17 ASan initialization recursively enters its own StaticSpinMutex via dyld text iteration and malloc before main",
+  "evidence": [
+    "queue-control-1/clean-sample.txt",
+    "queue-control-1/runtime-apple-sample.txt",
+    "queue-control-1/runtime-comparison.json"
+  ],
+  "action": "Retain initial timeout and sampled minimal reproducer. No production C changed and no sanitizer disabled."
+}

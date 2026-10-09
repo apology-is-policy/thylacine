@@ -1,0 +1,11 @@
+--- control
++++ omit-request-cleanup
+@@ -295,7 +295,7 @@
+ 
+     // Targets and unused nodes have only local ownership and can retire here.
+     // Protocol-active records must be empty before the engine drops its last ref.
+-    loom_private_requests_destroy(l);
++    if(false) loom_private_requests_destroy(l);
+     loom_private_nodes_destroy(l);
+     loom_private_targets_destroy(l);
+     if (!l->service_slots) extinction("private Loom lost slot storage");

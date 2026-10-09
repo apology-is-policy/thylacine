@@ -1,0 +1,87 @@
+{
+  "inputs": {
+    "kernel/loom_service_close_queue.c": "ceaea22a952b8d675f2371449abd16630e50ea853ae623e1f917ab5251d0cda0",
+    "kernel/include/thylacine/loom_service_close_queue.h": "6a3fe97f5f9afeb11f731caee4f2ce87d9102e4be6b085a1fbc56d4ce06d3ea5",
+    "queue-control.py": "1a5fcee24b698f6ddef7f59fa5225cedf27fd0f8f4db3b5a60f068a884dc007a"
+  },
+  "results": [
+    {
+      "case": "clean",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "bd3ade3ef5c679e61e07742dd50154a4236562793ff00496234d40565d75a2c6",
+      "log_sha256": "506e6b1b9432ee7809ac698bb80e6cc4133feadf752f0df64043e59ab614c1e0"
+    },
+    {
+      "case": "duplicate-start",
+      "expected": "duplicate start retains exactly one root",
+      "rc": 73,
+      "source_sha256": "fb02e670e12347c4f74f1dd55ec4ec6862a37bc631e81045578b8d8eec684283",
+      "log_sha256": "6f8042366c38b860e639831461e5a044bb504a79b3aa5d4f7a4a6d73054b6dd5"
+    },
+    {
+      "case": "restart",
+      "expected": "completed ring cannot restart",
+      "rc": 73,
+      "source_sha256": "c72c7b69c5584ae1b0da182a24c74dbddbf9c6d7b5d88ff730ef3612afdbb025",
+      "log_sha256": "ab1dcff95f9ccfbb4cbbfcc052f7d60505fad8c3644a92029dd2b9c0aa0ec218"
+    },
+    {
+      "case": "lost-running-kick",
+      "expected": "event between observation and park recorded",
+      "rc": 73,
+      "source_sha256": "dc7fce3ce6e7f6492d9d8347c95ed590ff0b2db9503826577664190ba36c929e",
+      "log_sha256": "df6472f96fc57ec17cff92a70fb20fcf657a7dc6f2b1d5144a47ea24937c1be7"
+    },
+    {
+      "case": "lost-parked-kick",
+      "expected": "external put wakes parked ring using same root",
+      "rc": 73,
+      "source_sha256": "46b2c9b12ece43c232e1b47c0e2ade0ab6068c96cea8a8b1a374ae4a1597ae8e",
+      "log_sha256": "758dade8e2239b21dd271ca3d8acd30902121beab36de6a50984613417135398"
+    },
+    {
+      "case": "self-wake",
+      "expected": "blocked ring parks without self wake",
+      "rc": 73,
+      "source_sha256": "c956eb37d323a2b1a70daf1b4e87fadd1fd76a2615aa81420aff11294e44b332",
+      "log_sha256": "aa00a7c49305179cd45dccc27b406587a678a5443358238c7d64617097800b0c"
+    },
+    {
+      "case": "stale-dirty",
+      "expected": "old dirty bit does not survive next take",
+      "rc": 73,
+      "source_sha256": "ad22e7377302436f7252338a870fa07a84f625562f76a92ecd0b9e61ac03e8c3",
+      "log_sha256": "36613d45b8cebf77ced1e171fcc559b211bf3ec8e4db4a5f023f9eb547a2fb31"
+    },
+    {
+      "case": "drop-early",
+      "expected": "blocked ring parks without self wake",
+      "rc": 73,
+      "source_sha256": "99fbe04dee7c4baa35d953e19849ecd544db2bc00eb58fa77aa537f8d6ca8849",
+      "log_sha256": "aa00a7c49305179cd45dccc27b406587a678a5443358238c7d64617097800b0c"
+    },
+    {
+      "case": "drop-leak",
+      "expected": "complete drops exactly one root",
+      "rc": 73,
+      "source_sha256": "fe3eef31dae835903fe3d3c76770e7545420f9e8216a3cd09c481c68ff6af60d",
+      "log_sha256": "dc684c000c1a9a5e51635d2030bba1b9d17d744bc32ce8b28a873cee0ab72bee"
+    },
+    {
+      "case": "head-steal",
+      "expected": "take transfers membership without dropping root",
+      "rc": 73,
+      "source_sha256": "a45fac8e8c95fa454c7013e68bd8e4aa9bd2a55d22b4c172160fd8a436895372",
+      "log_sha256": "29a7b06998da080d2f98ceeb502012ffbad807d1b43fbea973350cf454df481c"
+    },
+    {
+      "case": "stale-tail",
+      "expected": "tail returns to queue head after last take",
+      "rc": 73,
+      "source_sha256": "19606952b80b5a4d42394637a6f3282f8e5a3b1408054234f061e35273c87dcf",
+      "log_sha256": "3165785b8810a42ee47ea6a5ea2c72ef7dcd92c9b5548517cc383444f039cc8d"
+    }
+  ],
+  "limits": "Actual draft C queue transitions; simulated ref actions, serialized event interleavings. Kernel wrapper locks, real reference ownership, protocol retirement and native races still pending."
+}

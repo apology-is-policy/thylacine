@@ -35296,3 +35296,24 @@ The separate close queue draft still owes native and full-matrix verification.
 Self-review only; no independent audit, Main landing, private async/clipboard
 activation or128MiB protection change. Continue close queue, active executor,
 remaining private ops/provided buffers, AS-3/4 and MM0-MM4.
+
+
+## October 9: private close queue and real owner retirement
+
+Installed bounded reference-owning close queue, nonspinning dependency wakes,
+physical fixed-buffer settlement barrier and exact retired-scope cleanup.
+Actual-C ASan/UBSan queue/engine/wrapper/fixed/metadata/constructor/final-free
+controls and targeted mutations pass; model18 states/seven counterexamples.
+Self-review only, preserved in close-draft/self-review.txt.
+
+
+Fresh native close-diagnostic-20261009T183912Z passes1851/1851, including
+all seven close cases and second-ring progress while the first is parked. D7
+overlap, twenty distinct login/logout cycles and boot banner also pass. Rebuilt
+ELF/bin, six input hashes, exact HEAD+diff and new queue source/header hashes
+are retained and stable. Real close/exec, full CQ, retained entry/fixed/constructor
+owners and installer/driver/teardown interleavings finish local retirement with
+exact image refunds while server endpoints remain retained. Source-matched Mac
+SMP/UBSan matrix for this new code is still pending; the earlier50/50 qualifies
+a978d19c3 index-only source. Pi/A72/KVM, final guest allocator reclamation and
+optional graphics remain unqualified. No private activation/Main/128MiB change.

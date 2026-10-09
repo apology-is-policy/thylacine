@@ -70,6 +70,7 @@ set(KERNEL_SRCS
     loom_service_nodes.c
     loom_service_requests.c
     loom_service_protocol.c
+    loom_service_close_queue.c
     loom_service_engine.c
     loom_service_connect.c
     weft.c

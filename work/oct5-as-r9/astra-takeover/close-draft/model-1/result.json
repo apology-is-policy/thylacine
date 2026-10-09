@@ -1,0 +1,72 @@
+{
+  "results": [
+    {
+      "case": "clean",
+      "expected": null,
+      "rc": 0,
+      "states": 18,
+      "sha256": "fe99d2c8ee0d7e0e4a76d3f98ca8a8f8b81348aa056ef8294a567ede3dd6541a"
+    },
+    {
+      "case": "duplicate",
+      "expected": "QueueRoot",
+      "rc": 12,
+      "states": 3,
+      "sha256": "c3c73452fd030eb7b871e493698a9a398d3010e2bb4674cb6e295925eed3b831"
+    },
+    {
+      "case": "early",
+      "expected": "QueueRoot",
+      "rc": 12,
+      "states": 3,
+      "sha256": "264f6fbfad96a6142bf4093c3b9b1bfc02a9537c28083a129fa9866fec4db49e"
+    },
+    {
+      "case": "restart",
+      "expected": "NoRestart",
+      "rc": 12,
+      "states": 19,
+      "sha256": "198fa7ba2e9ff09413a59f1bb6ff2d4dfc4967d64c91bc4d7f2b45112c2a597c"
+    },
+    {
+      "case": "selfwake",
+      "expected": "NoInternalWake",
+      "rc": 12,
+      "states": 5,
+      "sha256": "ba2e7478a8e9491bca61f578df2206abb72abc6ee08d46600778d6a6b18a0ff1"
+    },
+    {
+      "case": "park",
+      "expected": "NoLostWake",
+      "rc": 12,
+      "states": 13,
+      "sha256": "fe4da96c2a5a018fa91faaf7350085ad8a1e0085f62b5d017849b27848b25db8"
+    },
+    {
+      "case": "lost",
+      "expected": "NoLostWake",
+      "rc": 12,
+      "states": 10,
+      "sha256": "8a74c6e107cd4bde126052fb053a1716f3f81f5c22d110f05d53b8a52fb36991"
+    },
+    {
+      "case": "leak",
+      "expected": "QueueRoot",
+      "rc": 12,
+      "states": 18,
+      "sha256": "32262fec9d182dd1075fbf4b5871a8e348c7dafaa042cc7e0b69a340e27ab87c"
+    }
+  ],
+  "inputs": {
+    "specs/loom_service_close.cfg": "fa511f775a274b19aa89b0de5f9165c5eecb84e94b2e9af80951f19af942a142",
+    "specs/loom_service_close_buggy_duplicate.cfg": "9f38c1a10ff5704fb4d27bc5d2d49af4da88872cd1515e0bd9faa3a145f50a66",
+    "specs/loom_service_close_buggy_restart.cfg": "2ef2defcbf495e8e533552eaad386a173938761f48b10bad0347e4628e554231",
+    "specs/loom_service_close_buggy_early.cfg": "e5a3fd346714650086727c94c3e9f4ae34c02a4d2413248fc9fdb5d75da0ada3",
+    "specs/loom_service_close_buggy_lost.cfg": "0a40e7c00b34ce320ed00a6607975d2aa321ccc45f1f007f12bbe6d0b483da48",
+    "specs/loom_service_close_buggy_selfwake.cfg": "88eca50f001f2e2f964b20caa1b0ea7f07aee83bada6ccd0121e843f69a50e2f",
+    "specs/loom_service_close.tla": "878f897554256466bc37c5701559816a08d96bd65af8dcd0738df97d103d3f82",
+    "specs/loom_service_close_buggy_leak.cfg": "bee4d72ed0c6467486164cde6a7c712cdae74a0e9f69995b7543c38cf80ef74f",
+    "specs/loom_service_close_buggy_park.cfg": "0586cfe00008e2ac0608e2f31396fba831814f5b7c0c994cbb89e62defd0a84a"
+  },
+  "limits": "Bounded queue-root/park event model; does not model C memory ordering, protocol retirement or scheduler fairness."
+}
