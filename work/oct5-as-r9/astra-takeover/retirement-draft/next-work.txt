@@ -1,0 +1,27 @@
+Continue Astra single-agent in corona/async-memory. This retirement-draft is the
+latest uninstalled working set; program-draft and wire-draft dependencies remain.
+Do not execute historical installers. Canonical kernel remains97d495fcb.
+
+Next coherent integration:
+1. READY driver: one exclusive p.driving claim plus separate engine/Loom root;
+   traverse bounded owners, save next before freeing, rotate fairly among pool
+   streams, submit actual wire/program work and progress one frame/msize quantum.
+   Immutable SQE copy must precede creator/FID/buffer preparation. Preserve iounit.
+2. Absolute deadlines/abort/malformed replies: actual quiesce first, release local
+   writers and commit negative terminals independently of full CQ. Preserve MORE
+   before negative delivery via retirement_post_terminal. A scope can be locally
+   retired while pool-owned PENDING/LEASED lives; transport/native users still
+   must end. Do not erase or reclaim pool data from a scope abort.
+3. Whole close visits must drain admitted operations BEFORE requiring zero entry
+   pins/global request detach. Constructor owners retain their own rollback;
+   quiesced per-owner disposal avoids the old PROVIDED-R3 cycle. Final pool helper
+   handles only actual exclusive zero-Loom-reference cleanup after all owners.
+4. Actual RETURN frontend wakes executor. Empty pools/full CQ use registration
+   before recheck, include earliest operation deadline, never spin/send/discard
+   data to compensate. Aborts/queries/returns remain independent of SQ/CQ space.
+5. Install only the coherent reviewed layer, then actual ARM64 link, native normal/
+   bulk payload, full CQ/empty pool/lease return, abort/deadline/CLUNK/close/exec
+   fixtures and source-matched applicable gates. AS3/4 then MM0-MM4 follow.
+
+Preserve exact clean Stratum61dde37, Astra6pending+4protected hashes, raw evidence,
+8192MiB floor. No Main/private async/clipboard activation or128MiB protection change.

@@ -101,3 +101,15 @@ must precede global detach; scope abort never returns pending/leased payloads.
 Next coherent READY/physical close, pool RETURN wake/fairness and actual frontend,
 then native matched gates, AS3/4,MM0-MM4. Canonical97d495; Mac released/no native jobs/
 8940MiB, Stratum61dde37/Astra10hashes intact. No activation or128MiB removal.
+
+Latest uninstalled working set retirement-draft supersedes provided-io copies;
+read state/self-review/next-work. Actual client abort TX-flag defect reproduced
+and draft-repaired; actual operation destructor and per-owner whole-close disposal
+implemented. Negative terminal COMMIT releases local borrows while PENDING MORE
+survives; DELIVER remains ordered. Final zero-reference pool helper returns physical
+pins only after all owner/writer exclusions.795cumulative checks/15mutants;39inputs,
+16raw pairs/10ARM objects reverified. Native teardown/driver/ref/allocator boundaries
+remain simulated, no native integration claim. Canonical97d495 unchanged. Mac
+released/no jobs/8843MiB; clean Stratum61dde37 and Astra10hashes intact. Next coherent
+READY scheduling, RETURN wake/immutable SQE frontend and entry-pinned close routing
+before installation/native gates. Then AS3/4,MM0-MM4. No activation; self-review only.

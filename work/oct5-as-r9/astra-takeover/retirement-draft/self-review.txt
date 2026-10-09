@@ -1,0 +1,86 @@
+Astra single-agent self-review, October 10, 2026. Not an independent audit.
+This is an UNINSTALLED working layer, based on provided-io-draft at 0bfcd2447.
+Canonical kernel remains 97d495fcb6c319111429073dedffb544c9355a1a. No activation.
+
+RETIRE-R1 (reproduced; repaired in draft, canonical install still owed): actual
+client_mark_dead_locked cleared progress.sending but left the referenced RPC's
+sending bit true. A callback then could never settle the operation. An early
+reply can remove its inflight tag while TX still retains this same owner, so
+clearing only inflight RPC flags is insufficient. Raw baseline control at
+controls-20261009T234221Z fails 'TX owner ends before abort callback'; before-fix/
+9p_client.c preserves the unchanged canonical source. The draft keeps the exact
+TX pointer until handshake/transport abort returns, then clears its sending
+hold before callbacks. Only progress mode changes; legacy blocking sender
+ownership remains unchanged. Exact mutants cover callback and early-reply cases.
+
+RETIRE-R2 (draft repaired; driver integration owed): earlier provided draft
+confused terminal COMMIT with terminal DELIVERY. PENDING MORE may survive a
+negative terminal commit and source/request borrow return. It must still deliver
+before that terminal. This releases local scope access independently of CQ room
+without discarding committed success. provided_deliver accepts SETTLING or
+TERMINAL multishot, and retirement_post_terminal refuses a pending payload.
+Single-shot payload+terminal remains one combined CQE, never duplicated. The
+future driver MUST use this operation-aware terminal gate. Raw post_terminal
+alone has no knowledge of payload ordering. These helpers need coherent routing
+before installation. No public ABI or cancellation policy change.
+
+PROVIDED-R3 (draft disposal edge implemented; engine routing owed): actual
+whole-ring consumer close plus exclusive protocol driver/client quiescence
+permits exact PENDING disposal before global request detach. Scope abort alone
+cannot do so; LEASED remains intact. discard_closed_owner requires closing
+slots, exact held scope, TERMINAL, zero borrows and one physical owner. It marks
+only that record DELIVERED and does not detach or consume other reservations.
+A fixture keeps a separate PREPARED physical owner live across this disposal.
+The existing global detach check remains unchanged. Do not fake its detached bit.
+
+Quiescence: under a separate retained engine entry and sole p.driving, native
+teardown and actual p9_client_progress_abort run outside Ll. rpc_quiesced is set
+only after TX cursor and inflight callback table are empty. The transport's
+physical native user count still gates protocol retirement separately. An abort
+latch alone is not a writer-quiescence proof. The current fixture doubles native
+teardown but runs the actual client and transport abort functions.
+
+Physical cleanup: close_operation settles callback/TX ownership; discards only
+whole-ring pending payloads; returns BUSY/fixed backing after users end; cancels
+metadata/FID borrows; marks that terminal discarded; then actual release_retired
+unlinks the exact delivered owner. Pool stream detach happens under Ll. Physical
+free precedes image charge refund, both before request physical-owner drop/reap.
+The engine pin and Loom/image lifetime end last. Retained local values alone are
+used after kfree. Destructor refuses undelivered terminal, callbacks, payloads,
+source borrows and destination claims. CLUNK may wait for older FID borrowers:
+the future driver rotates, never waits for zero engine entry pins first.
+
+Final pool destruction: only final zero-reference private Loom teardown, closing
+both latches, with empty engine/request ledger and no fixed users, can reclaim
+LEASED pool records. Validate ALL pool/slot identities, member counts/ordinals,
+no streams/pins, and AVAILABLE/LEASED-only membership before any mutation. BUSY
+or PENDING refuses the entire bank. Snapshot every physical backing pin, clear
+only exclusive-final LEASED state, use actual joint ledger rollback/reap, then
+return saved pins outside Ll while the image remains retained. User allocation
+references are separate and remain live. This is not a scope-abort lease return.
+Canonical enqueue latches close even on zero-reference construction cleanup.
+
+Validation boundaries: new retirement tests use the actual admitted destructor;
+older fixed/provided regressions retain manual fixture cleanup. Parsed successful
+replies are synthetic; submit is forbidden in this fixture. Address translation,
+Proc snapshot, allocation/image charging, ref/engine/wake, native teardown and
+physical backing drop are explicit host doubles. Actual slot/request/FID/pool,
+CQ/receipt, program/capture and transport/session/codec abort code runs. The final
+pool helper is called at simulated final references, not by an actual retirer.
+No native READY/frontend/close, scheduling fairness or concurrency qualification.
+Earlier failed compile/selector/witness runs are preserved; the slot-close guard
+witness now checks phase stayed QUEUED so later discard refusal cannot mask an
+early mutation. Full old kernel source before comment review is retained under
+before-review; pre-R2 generated C remains raw evidence. Only final matched inputs
+qualify the current state. Do not reuse old fixture results for changed code.
+
+Remaining integration owned by Astra: READY driver plus actual consumer frontend,
+source retirement with pending CQ-independent ownership, RETURN wake/fairness,
+entry-pin-before-zero-pin close routing and source-matched native tests. Existing
+full Mac evidence applies only to f719ee4a3. AS3/4 then MM0-MM4 remain unfinished.
+
+Final validation:795 cumulative host assertions (554 prior provided checks;
+241 additional/changed abort, ordering, setup and cleanup assertions),15 exact
+mutants. 39 current input hashes,16 generated-source/binary/log pairs,10
+real ARM64 objects plus transitive input hashes verified. Owner920B/protocol42288B,
+no libc copy/set/move dependency. Final run controls-20261009T235256Z.

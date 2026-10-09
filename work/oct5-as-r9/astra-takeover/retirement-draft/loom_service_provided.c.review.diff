@@ -1,0 +1,35 @@
+diff --git a/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_provided.c b/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_provided.c
+index 6c806e57e..b939193b9 100644
+--- a/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/provided-io-draft/kernel/loom_service_provided.c
++++ b/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/kernel/loom_service_provided.c
+@@ -156,7 +156,9 @@ int loom_provided_deliver(struct loom_service_operation *o) {
+         u64 user;s32 result;
+         rc=loom_request_peek(&l->service_requests,o->request,&user,&result);
+         if(rc || user!=c->user_data || result!=(s32)c->result){if(!rc)rc=-T_E_IO;goto done;}
+-    } else if(o->phase!=LRPC_SETTLING || !o->multishot){rc=-T_E_BUSY;goto done;}
++    } else if(!o->multishot || (o->phase!=LRPC_SETTLING && o->phase!=LRPC_TERMINAL)) {
++        rc=-T_E_BUSY;goto done;
++    }
+     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+     u32 tail=l->cq_tail,head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+     if((u32)(tail-head)>=l->cq_entries){rc=-T_E_AGAIN;goto done;}
+@@ -174,3 +176,19 @@ int loom_provided_deliver(struct loom_service_operation *o) {
+ done:
+     spin_unlock(&l->lock);if(!rc)poll_waiter_list_wake(&l->cq_waiters);return rc;
+ }
++
++int loom_provided_discard_closed_locked(struct loom_service_operation *o) {
++    if(!o || !o->owner || !o->protocol)return -T_E_INVAL;
++    struct Loom *l=o->owner;struct loom_service_protocol *p=o->protocol;
++    if(!l->service_closing || !l->service_slots->closing || !p->driving ||
++       !p->rpc_quiesced || !p->abort_reason || o->pool_busy ||
++       o->rpc.sending || o->rpc.on_complete ||
++       (o->phase!=LRPC_SETTLING && o->phase!=LRPC_TERMINAL))return -T_E_BUSY;
++    if(!o->pool_pending)return 0;
++    struct loom_pool_cell *c=provided_cell(o);
++    if(!o->pool_stream || !c || c->phase!=LMEMBER_PENDING)return -T_E_NOENT;
++    // Actual close has detached this consumer. All writer users ended; this
++    // exact PENDING record was never leased. Do not touch any LEASED member.
++    c->phase=LMEMBER_AVAILABLE;o->pool_pending=false;o->pool_more_delivered=false;
++    provided_clear(o);return 0;
++}

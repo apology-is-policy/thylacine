@@ -1,0 +1,2 @@
+PASS fixed SQE preparation: 289 checks
+FAIL abort commits terminal without CQ-dependent local borrow

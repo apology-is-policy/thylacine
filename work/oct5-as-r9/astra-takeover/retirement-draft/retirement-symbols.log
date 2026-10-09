@@ -1,0 +1,13 @@
+                 U extinction
+                 U loom_admission_cancel_locked
+                 U loom_private_io_drop_fixed
+                 U loom_private_operation_release_retired
+                 U loom_private_post_terminal
+                 U loom_provided_discard_closed_locked
+                 U loom_provided_release_busy_locked
+                 U loom_request_discard_closed_owner
+                 U loom_rpc_settle_locked
+                 U p9_client_progress_abort
+                 U spin_preempt_dec
+                 U spin_preempt_inc
+                 U srvconn_teardown

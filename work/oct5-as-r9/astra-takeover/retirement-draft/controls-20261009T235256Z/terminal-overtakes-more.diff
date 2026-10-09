@@ -1,0 +1,11 @@
+--- control.c
++++ terminal-overtakes-more.c
+@@ -1198,7 +1198,7 @@
+ int loom_retirement_post_terminal(struct loom_service_operation *o) {
+     if(!o || !o->owner || !o->protocol)return -T_E_INVAL;
+     struct Loom *l=o->owner;spin_lock(&l->lock);
+-    if(!o->protocol->driving || o->phase!=LRPC_TERMINAL || o->pool_pending ||
++    if(!o->protocol->driving || o->phase!=LRPC_TERMINAL ||
+        o->pool_busy || o->fixed.owner || o->fixed_dropping) {
+         spin_unlock(&l->lock);return -T_E_BUSY;
+     }

@@ -1,0 +1,11 @@
+--- control.c
++++ premature-quiescence.c
+@@ -1160,7 +1160,7 @@
+        !p->admission.conn) {spin_unlock(&l->lock);return -T_E_BUSY;}
+     bool done=p->rpc_quiesced;spin_unlock(&l->lock);if(done)return 0;
+     srvconn_teardown(p->admission.conn);
+-    p9_client_progress_abort(&p->client);
++    p->rpc_quiesced=true; p9_client_progress_abort(&p->client);
+     // Sole driver has returned from all callbacks. An abort flag by itself
+     // does not certify these cursors or RPC container users have ended.
+     spin_lock(&l->lock);

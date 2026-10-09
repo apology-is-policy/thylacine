@@ -1,0 +1,6 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234207Z/control.c:1476:111: error: logical not is only applied to the left hand side of this comparison [-Werror,-Wlogical-not-parentheses]
+ 1476 |  CHECK(!loom_retirement_quiesce(&protocol) && protocol.rpc_quiesced && o->callback_seen && !o->rpc.sending && !o->rpc.on_complete==0,"actual abort returns before owner settling");
+      |                                                                                                               ^                  ~~
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234207Z/control.c:1476:111: note: add parentheses after the '!' to evaluate the comparison first
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/retirement-draft/controls-20261009T234207Z/control.c:1476:111: note: add parentheses around left hand side expression to silence this warning
+1 error generated.

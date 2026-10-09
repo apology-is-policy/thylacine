@@ -3368,3 +3368,35 @@ fair empty-pool/return wake integration coherently before installing the queue.
 Then native matched gates, AS3/4 and MM0-MM4. Canonical kernel remains97d495fcb.
 Mac released, no native job,8940MiB before docs; clean Stratum61dde37 and Astra10
 pending/protected hashes intact. Single-agent self-review; no activation.
+
+### Astra operation retirement and pool destruction draft, October10
+
+The uninstalled `astra-takeover/retirement-draft` now supplies actual admitted
+operation destruction, client-abort quiescence and per-owner whole-ring disposal.
+RETIRE-R1 reproduced an actual client abort defect: progress.sending was cleared
+but the RPC sending flag survived, preventing settlement even after callbacks.
+The draft clears that hold after transport abort and before callbacks, including
+an early-replied RPC no longer in the inflight table. Legacy senders are unchanged.
+
+RETIRE-R2 separates terminal commit from delivery: negative commit releases local
+FID/request borrows while a committed MORE stays intact. Operation-aware delivery
+keeps MORE before its negative terminal. PROVIDED-R3's draft whole-close disposal
+now precedes global detach, without consuming another constructor reservation.
+Physical cleanup orders backing return, free, refund, request owner-drop/reap,
+then engine/Loom release. Delivered leases survive operation destruction. Only
+final zero-reference ring destruction with no writers/owners validates and reaps
+the entire pool bank, then physically drops every saved backing pin.
+
+795 cumulative ASan/UBSan checks and15 targeted mutants pass;39 current inputs,
+16 source/binary/log pairs and10 real ARM64 objects reverified. Owner920B and
+protocol42288B unchanged, no libc dependency. Raw baseline failure and harness
+failures retained. Host native teardown/ref/engine/allocation/physical-drop
+boundaries, synthetic successful replies and simulated final references remain
+explicit. Actual READY/executor routing and native close/exec qualification are
+still owed. These fixes remain uninstalled; canonical kernel remains97d495fcb.
+Read retirement-draft/state.json, self-review.txt and next-work.txt. Review is
+single-agent, not an independent audit. Prior full Mac gate qualifies only its
+recorded f719ee4a3 source. Mac released, no native jobs,8843MiB above8192floor;
+Stratum clean61dde37 and Astra10 pending/protected hashes unchanged. Next coherent
+READY/RETURN/frontend integration and matched native gates, then AS3/4 and MM0-MM4.
+No Main/private async/clipboard activation or128MiB protection change.

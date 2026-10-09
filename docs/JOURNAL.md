@@ -35738,3 +35738,20 @@ fair empty-pool/return wake integration coherently before installing the queue.
 Then native matched gates, AS3/4 and MM0-MM4. Canonical kernel remains97d495fcb.
 Mac released, no native job,8940MiB before docs; clean Stratum61dde37 and Astra10
 pending/protected hashes intact. Single-agent self-review; no activation.
+
+### Astra operation retirement draft, October10
+
+Reproduced the actual client-abort TX flag leak and repaired it in the uninstalled
+retirement-draft. Added client quiescence, actual admitted storage destruction,
+per-owner whole-ring disposal before global request detach, and exclusive final
+pool-pin reclamation. Negative terminal commit now releases local borrows without
+overtaking committed MORE delivery; source abort preserves pending/leased data.
+Free/refund/request-owner/engine-root ordering remains explicit.
+
+795 cumulative sanitizer checks/15mutants and10 ARM64 objects pass;39inputs and
+16 source-binary-log pairs reverified. Actual successful replies/native teardown,
+refs and allocator boundaries remain simulated; no native READY/close qualification.
+Retained raw baseline and failed harness runs, documented single-agent self-review.
+Canonical97d495 unchanged; no activation. Mac released,8843MiB, Stratum61dde37 and
+Astra10hashes intact. Next coherent READY/RETURN/frontend and native gates before
+AS3/4 and MM0-MM4. See retirement-draft/state.json and next-work.txt.

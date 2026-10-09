@@ -2584,3 +2584,16 @@ parsed replies. Self-review identifies PROVIDED-R3: actual whole-ring close must
 discard pending payloads before global request detach, which waits for active
 borrows; scope abort must preserve them. READY/close/RETURN wake integration and
 native qualification remain pending. No activation; see self-review/next-work.
+
+Astra October10 retirement layer remains uninstalled (`retirement-draft`). Actual
+client abort now ends TX-owner flags before callbacks, including early replies.
+Negative terminal commit returns local FID/request borrows independently of CQ;
+MORE delivery still precedes that terminal. Whole-ring quiesced per-owner discard
+breaks the global-detach dependency without touching another constructor. Actual
+admitted destructor frees/refunds before physical request-owner drop/reap and
+engine/Loom release. LEASED survives until RETURN or exclusive final zero-reference
+ring destruction, which validates all pools then physically drops saved pins.
+795hostchecks/15mutants,39inputs/16raw pairs/10ARM objects pass; native teardown,
+refs/allocator and final-reference boundaries remain simulated. Actual READY,
+entry-pinned close, RETURN/frontend/native qualification are still owed. Canonical
+kernel97d495 unchanged; no activation. See state/self-review/next-work.

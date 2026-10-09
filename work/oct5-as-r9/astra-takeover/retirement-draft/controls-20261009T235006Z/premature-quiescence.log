@@ -1,0 +1,3 @@
+PASS fixed SQE preparation: 289 checks
+PASS provided ownership: 577 checks
+FAIL transport abort precedes quiescence
