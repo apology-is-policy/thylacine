@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ early-settle.c
+@@ -91,7 +91,7 @@
+     if(!r)return -T_E_NOENT;
+     if(!o->protocol->driving || r->phase!=LREQ_ACTIVE || r->borrows!=1 ||
+        o->rpc.sending || (o->phase!=LRPC_QUEUED &&
+-         (o->phase!=LRPC_INFLIGHT || !o->callback_seen)))return -T_E_BUSY;
++         (o->phase!=LRPC_INFLIGHT)))return -T_E_BUSY;
+     // Sole driver has returned from client code. There can be no later callback
+     // before either requeue or destruction; payload/FID release may now settle.
+     o->rpc.on_complete=NULL;o->phase=LRPC_SETTLING;

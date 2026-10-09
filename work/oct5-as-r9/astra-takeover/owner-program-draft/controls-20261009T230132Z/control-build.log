@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owner-program-draft/controls-20261009T230132Z/control.c:315:12: error: unused function 'le64' [-Werror,-Wunused-function]
+  315 | static u64 le64(const u8 *b){return (u64)le32(b)|((u64)le32(b+4)<<32);}
+      |            ^~~~
+1 error generated.

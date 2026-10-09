@@ -1,0 +1,161 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/loom_service_rpc.c": "f4f0c58850c5e49ad23127ca2764ae1ff601acc25e372f7854ee295039b5000e",
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/include/thylacine/loom_service_rpc.h": "fa070b15fc278f86e281acd1999a42e3228a6b37385358730ae20ccb43ed04bc",
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/include/thylacine/loom_service_operation.h": "848abe5dfc1a47afb823103b1ee7092fbabfa9674aaba32d9d86ff43ec23b7e7",
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/fixture.c": "13833c3b5f9ba517be39d07df01db28094c3f1d267e93bbf090e5872041b77fe",
+    "work/oct5-as-r9/astra-takeover/owner-program-draft/run-controls.py": "f659dc3938c42ef3ec3662a0dc77fbd38e742a656d2a74a81a2e27dc25286690",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/loom_service_wire.c": "288fb21fb7cc303f0e43e968e11b80add43f38511d51711e7f1110db724b08e4",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+    "kernel/perm.c": "2c0153a101af4a6ec29521ee720ad2c1c35b297c05386571d2a58a0d9e598930",
+    "kernel/9p_session.c": "7753248a7cef54063047327dc13ea2aeaa6f235199c4d8487b05abfc07a36fd1",
+    "kernel/9p_wire.c": "e768be80ab0ba0c5689d7af7605aa68a22ee758d2d0110a23634c242de3fc1e8",
+    "kernel/9p_transport.c": "6c420145164464813ba8aa4ae5d2e7e2b7249c06e89992fd68e0bc310f822a96",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "work/oct5-as-r9/astra-takeover/wire-draft/kernel/include/thylacine/loom_service_wire.h": "c3d55e55fd8f61f00cadd7343fc310ce0adef99377ef7e7e7f973b28f1e7a4f3",
+    "work/oct5-as-r9/astra-takeover/program-draft/kernel/include/thylacine/loom_service_program.h": "85a744f3c29f7391ecb16303cee55861ee35ae54fe28a945c9c887e93262e969",
+    "work/oct5-as-r9/astra-takeover/program-draft/host/thylacine/spinlock.h": "04bcaa7ffc68125de57d03c53967900a1ee44c4530ae675f0e0b28fa347d636f",
+    "kernel/9p_client.c": "0a99d3d1a4f4c83b22ea024322d25a1f580a1ff7cd9da6a6c8b9e1e12c601d95",
+    "kernel/include/thylacine/9p_client.h": "0eced1c09aacd120201d689b78e03bd6f05381dc28b102f3d361a0fcbaf43c35",
+    "kernel/include/thylacine/9p_session.h": "e5e218787c4a4d25986a664eafe9ba59c6e6093de0317ce934db6b24fbdab402",
+    "kernel/include/thylacine/9p_wire.h": "03729e7a047ae83fb63bd9e3805f43f9ed263f4e517e7c76c9840b3b4f37e3ff",
+    "kernel/include/thylacine/9p_transport.h": "e378b16a654450977085ff1923eaba37c66dd96c6af0ba2680d80ffd3c098756",
+    "kernel/include/thylacine/loom_service_reply.h": "46da857bd6dacdd0576ba3f01c2f0c55bc6cbacc56ade8da1f7c7ffbd4fd2465",
+    "kernel/include/thylacine/proc.h": "37cbad04d411160469a2c910a17e131bc025cc784e7aae8baf4c53103219f3ec",
+    "kernel/include/thylacine/perm.h": "55565ef5194458234fdeb081813d39251ad7c0650894daa9395daf817db94670",
+    "kernel/include/thylacine/caps.h": "932af679d5d137e129f647d988af662fae67d0475ee240027c8e361c33bcf478"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "768fc1e85dbff7fe0a39c486085cfec2c2651ac3c7b6b3cb124293c22715a403",
+      "binary_sha256": "788ebbe70109dfc7746b50cd644badde484a11cd079e890a5ace964d6f870c61"
+    },
+    {
+      "case": "submit-once",
+      "expected": "one submission per attempt",
+      "rc": 1,
+      "source_sha256": "ada44b666718f8ce3dfe17d4e9a275eac597d9b11ae43323ac4b62668187b849",
+      "binary_sha256": "53116286c0a08b4d04b088388f7bf57012cd49bf0eeca004cd9b38b80ce3769f"
+    },
+    {
+      "case": "advance-once",
+      "expected": "one advance per callback",
+      "rc": 1,
+      "source_sha256": "2e6e1d44a73b40e5c95e05dc4492f1a989580c288e862cfeddaffa77dc257b5b",
+      "binary_sha256": "f9e34ebf7b09ff671c7a825a3aef8a65f7f7e202f7ab19745c92648c8b23ed56"
+    },
+    {
+      "case": "advance-early",
+      "expected": "no advance before submission",
+      "rc": 1,
+      "source_sha256": "02f5bcc3f4f065f1ef700db12da26cb71090cd1357b30124beb93b00c749f104",
+      "binary_sha256": "9ef00fb89213cc4f06edde5827f73b4cd93573a2f9bf21118a008a723dbc4d60"
+    },
+    {
+      "case": "advance-sender",
+      "expected": "sender blocks advance and settlement",
+      "rc": 1,
+      "source_sha256": "4e5e66e43758f90c8bac0d5250d727e00f1a8fc7b5c7bc5f45cfb81c1fbf8ba8",
+      "binary_sha256": "9bc13b4789a6126f963d6710ffb1d9961ced98a1a8c443ccefcc7238954a75b3"
+    },
+    {
+      "case": "fallback",
+      "expected": "invalid client refusal captured locally",
+      "rc": 1,
+      "source_sha256": "1d51e004afeb5625655ae3d262938c79254edef4a1533df98cab362b6858cc22",
+      "binary_sha256": "a22d5cdbb4b1ad7052fc65c10f7008ee1ed973d7c2903feb4898357047078865"
+    },
+    {
+      "case": "double-capture",
+      "expected": "synchronous refusal captured once",
+      "rc": 1,
+      "source_sha256": "ece2e0241f5453030a89423d10e89d43b926f15f6d8d3da52897453f2458d6ac",
+      "binary_sha256": "c58c7af13c2a5bafaeadbd4fcfe393f80bfa1085c2c6e3a62856fcd7e36f8504"
+    },
+    {
+      "case": "terminal-retry",
+      "expected": "terminal program never requeues",
+      "rc": 1,
+      "source_sha256": "44e8168c5b18977858ce0cd5bf539a4f5ee156d5e7362a1a00a06eb6e7da9e32",
+      "binary_sha256": "9f530b33cc045735a40463aee194bfdc86540aeea7f3a51cf37e99366b884456"
+    },
+    {
+      "case": "unadvanced-retry",
+      "expected": "no unadvanced requeue",
+      "rc": 1,
+      "source_sha256": "5f533aaa213736cc770a3bce224b7f9cc6768553e6220b6b05db9f3d9a2605bc",
+      "binary_sha256": "9c0451166c122c52eaaacc006690f9e1075fbf1901e0c98a3911db8bee4fc824"
+    },
+    {
+      "case": "retry-expiry",
+      "expected": "deadline bars next stage",
+      "rc": 1,
+      "source_sha256": "dd1b0347dc6a8006274746f4b21c8ee262b5ba4b43e257a6c5d8f391efae889f",
+      "binary_sha256": "77a35de0869215e7c3fcf726335fd039ffafca1ead9ad05f910ae648c6ad840d"
+    },
+    {
+      "case": "payload",
+      "expected": "builder and capture share retained payload",
+      "rc": 1,
+      "source_sha256": "004bd60e6aa5244b9d3b6fcaf6c64161b7efeaf6877fd6add564ecad17096040",
+      "binary_sha256": "267fbf2d359429bf212bd31d8a78c208d1dd8177fd66e57f6a27d5d31ecae812"
+    },
+    {
+      "case": "success-program",
+      "expected": "denied program cannot publish success",
+      "rc": 1,
+      "source_sha256": "2b8bad0e074802d5369b85f73937c383646b5b99b27b7425a6d00482e3f9f909",
+      "binary_sha256": "2bed218140f63595ab1cdcae3c9ad2452d1185c8424ec428adf431b5be3d0110"
+    },
+    {
+      "case": "success-advance",
+      "expected": "stat cannot bypass program advance",
+      "rc": 1,
+      "source_sha256": "7d9f3b4e8487d468f7552e2cf960375be2a6c5dfb3d7f2e8b1a3ea4519e30f93",
+      "binary_sha256": "ca1170490f5f8de24853573b18c443cb52bcf2c91c564475297dbe564c42ae2d"
+    },
+    {
+      "case": "reset-attempt",
+      "expected": "new attempt resets consumed edges",
+      "rc": 1,
+      "source_sha256": "76938196064b39db5bbc603415ee25ac98a7efdab6380d63df905ed86a50c2ea",
+      "binary_sha256": "3fa79f93e6030c56c6422206beecb48ba2c827bb85d44eb9431b3d43405637d6"
+    },
+    {
+      "case": "duplicate-callback",
+      "expected": "duplicate callback poisons scope",
+      "rc": 1,
+      "source_sha256": "68456fe775e1f7b82752d77befc61d2daac8de14037b057ca7aefa2c69fbb7db",
+      "binary_sha256": "948d6ce8ad09c92820cf48aa9ce3f90cf8b1466c7a72beaf196ba9008b010376"
+    },
+    {
+      "case": "early-settle",
+      "expected": "no early settlement",
+      "rc": 1,
+      "source_sha256": "af0477548f1a35358445a843e5fc77abc3657d8ca89b7a350b7049edf1b3dec0",
+      "binary_sha256": "57824f7061597b5350712510290f695118a0a1f35903b764a72fbc4b08f1f413"
+    },
+    {
+      "case": "finish-expiry",
+      "expected": "deadline beats success",
+      "rc": 1,
+      "source_sha256": "d307ac97aa1aa3def8b0a331e5a56f2d7c38e7cab044277ae5a4dc4254115228",
+      "binary_sha256": "6970aa074a47891aca8007b1daea259ebf5582aa07bfae0e5b62f75bbe2d2c9f"
+    },
+    {
+      "case": "abort-latch",
+      "expected": "poison cannot finish without scope abort",
+      "rc": 1,
+      "source_sha256": "b0cfb01ccfc1a01e4814bf409b5876d407bc48905091bad229c52b2a9d456412",
+      "binary_sha256": "968ad11832e8fc84aed261788fc97f67bd82a63a22f160c8be45472c147422f7"
+    }
+  ],
+  "limits": "Actual combined RPC/program/wire/perm/request/node/slot/session/codec/transport/capture, real header layouts and extracted real submit. Host minimal Loom and sequential lock/wake/death stand-ins, direct dispatch, already-attached sessions. Physical buffer ownership and actual driver/admission/close/concurrency remain unqualified."
+}

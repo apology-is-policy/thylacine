@@ -1,0 +1,22 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "source_base": "7062d37b0300d3e1b460b70762e4e16584b0f434",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "state": "verified-uninstalled-owner-program",
+  "run": "work/oct5-as-r9/astra-takeover/owner-program-draft/controls-20261009T230333Z",
+  "checks": 160,
+  "mutants": 17,
+  "constructor_run": "work/oct5-as-r9/astra-takeover/owner-program-draft/operation-controls-20261009T230226Z",
+  "constructor_mutants": 14,
+  "operation_bytes": 776,
+  "protocol_bytes": 42288,
+  "arm64": "arm64-result.json",
+  "dependencies": [
+    "program-draft",
+    "wire-draft"
+  ],
+  "review": "single-agent self-review; not independent audit",
+  "utc": "2026-10-09T23:05:13.148475+00:00",
+  "next": "next-work.txt"
+}

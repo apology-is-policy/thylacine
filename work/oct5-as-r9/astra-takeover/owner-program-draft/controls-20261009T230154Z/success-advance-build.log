@@ -1,0 +1,10 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owner-program-draft/controls-20261009T230154Z/success-advance.c:245:24: error: '&&' within '||' [-Werror,-Wlogical-op-parentheses]
+  244 |         if(!o->callback_seen || o->capture_error || o->reply.result<0 ||
+      |                                                                       ~~
+  245 |            o->advanced && o->program.result<0)return -T_E_IO;
+      |            ~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owner-program-draft/controls-20261009T230154Z/success-advance.c:245:24: note: place parentheses around the '&&' expression to silence this warning
+  245 |            o->advanced && o->program.result<0)return -T_E_IO;
+      |                        ^                     
+      |            (                                 )
+1 error generated.

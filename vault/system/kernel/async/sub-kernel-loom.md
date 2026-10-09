@@ -2544,3 +2544,13 @@ The real permission and wire path pass4608 permission combinations/15 mutants,
 with explicit host boundaries and ARM64 compilation. Constructor identity
 retention, actual FID/payload admission and READY/close integration remain ahead;
 see program-draft/self-review.txt and next-work.txt. No native runtime claim.
+
+Astra October10 combined owner remains uninstalled (`owner-program-draft`). Its
+single program.wire owns builder/capture expectations and payload. Constructor
+retains fresh creator identity; once-per-attempt submit/advance prevents replay
+and a stat-only success from bypassing the effect. Positive finish requires the
+completed program; scope poison cannot become an isolated terminal. Host160checks/
+17mutants plus constructor14mutants and real ARM64776B owner pass. Actual FID/
+canonical-buffer admission and READY/physical close integration remain ahead;
+no native queue/progress-abort/concurrency qualification. Read its self-review
+and next-work; older RPC draft working copies are superseded, evidence retained.

@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ submit-once.c
+@@ -143,7 +143,7 @@
+ // may not release storage. A callback may occur synchronously inside submit.
+ int loom_rpc_submit(struct loom_service_operation *o) {
+     if(!o || !o->protocol || !o->protocol->driving || o->phase!=LRPC_INFLIGHT ||
+-       o->rpc.on_complete!=loom_rpc_capture || o->submitted || o->callback_seen ||
++       o->rpc.on_complete!=loom_rpc_capture || o->callback_seen ||
+        o->rpc.sending)return -T_E_BUSY;
+     o->submitted=true;
+     int rc=loom_private_wire_submit(&o->protocol->client,&o->rpc,&o->program.wire);

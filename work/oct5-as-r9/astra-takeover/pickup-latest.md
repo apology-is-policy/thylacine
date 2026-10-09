@@ -60,3 +60,13 @@ value and no remote-EAGAIN replay. Next unify owner with program.wire (one
 expectation/payload copy), persist the constructor's fresh identity, then actual
 FID/buffer admission, fair READY and physical close cleanup. Canonical still
 97d495; no native queue/actual creator admission claim. Mac released, no jobs.
+
+Combined uninstalled owner now supersedes rpc-draft working copies; read
+owner-program-draft/state.json, self-review.txt and next-work.txt. Constructor
+retains fresh identity; program.wire is authoritative for builder/capture.
+Submit/advance consume once; completed program required before positive finish.
+160 sanitizer checks/17mutants +constructor14mutants; actual ARM64776B owner.
+Raw evidence reverified. Dependencies program-draft/wire-draft stay exact.
+No native admission/progress/close proof; canonical still97d495. Next actual
+FID/destination/fixed/provided admission then coherent READY and physical close
+integration before queue installation. Mac released, no running jobs;9055MiB.

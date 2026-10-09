@@ -35635,3 +35635,30 @@ lock/wake/death boundaries, not actual creator admission or native engine proof.
 Canonical kernel remains unchanged. Read program-draft/self-review.txt and
 next-work.txt for coherent owner/FID/buffer/READY/close integration next, before
 AS3/4 and MM0-MM4. Mac released; no activation or128MiB protection change.
+
+### Astra combined RPC and permission owner, October 10
+
+The uninstalled `astra-takeover/owner-program-draft` now connects the charged
+operation, actual submission/capture and staged DAC program. One program.wire
+holds the expectation and retained payload used by both builder and callback.
+The constructor retains its fresh creator/image identity value. OP-R1 self-review
+adds once-per-attempt submission/advance guards and requires a completed program
+before positive terminal publication; a stat reply cannot bypass the effect.
+Validation refusal without callback is captured locally once, while accepted
+negative callbacks remain single completions. Requeue checks the absolute deadline.
+
+ASan/UBSan:160 integrated checks and17 targeted mutants, plus constructor clean
+fault/cleanup cases and14 mutants. Interleaved operations complete in reverse
+order into distinct retained buffers. Actual ARM64 objects pass without libc:
+owner776B fits its charged page; protocol42288B retains prior allocation size.
+Raw28input hashes/18 RPC binary pairs,15 constructor pairs and3 ARM objects were
+rechecked. Host snapshot/allocator/engine and lock/wake/death boundaries remain
+explicit; no actual native admission, progress-abort or concurrent-close claim.
+Failed harness evidence retained; single-agent self-review only.
+
+Canonical kernel remains97d495fcb. Use this combined owner rather than the old
+rpc-draft copies, with exact program-draft/wire-draft dependencies. Actual full
+FID/destination and fixed/provided payload admission, READY fairness/readiness and
+physical close disposal must be completed coherently before queue installation.
+Then native/source-matched gates, AS3/4 and MM0-MM4. Mac released, no running gate;
+Stratum61dde37 and Astra10protected/pending hashes unchanged. No activation.

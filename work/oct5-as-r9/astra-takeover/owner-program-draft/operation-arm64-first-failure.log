@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owner-program-draft/kernel/loom_service_operation.c:11:10: fatal error: 'mm/slub.h' file not found
+   11 | #include "mm/slub.h"
+      |          ^~~~~~~~~~~
+1 error generated.
