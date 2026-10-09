@@ -1,0 +1,29 @@
+==> lean --production shape: builds (#228/#229 guard)
+==> Booting kernel under QEMU (timeout 420s)...
+    Log: /Users/northkillpd/projects/thylacine-corona/build/test-boot.log
+==> harness: qemu_alive_at_teardown=1
+==> PASS: boot banner observed.
+==> arc gates: 0/2 ran -- L-6c=SKIPPED D-5=SKIPPED; 2 SKIPPED (external Alpine fixture absent -- NOT a guest result, and NOT coverage)
+==> clade gates: 0/3 ran -- CL-4=SKIPPED CL-7b=SKIPPED CL-5=SKIPPED; 3 SKIPPED (no /clade bake -- NOT a guest result, and NOT coverage)
+--- log tail ---
+owner 6
+NOCTURNE-PROBE PASS (2-voice mix: 1 kHz + 2 kHz mixed; periods played)
+NOCTURNE-PROBE PASS (2-voice mix: 1 kHz + 2 kHz mixed; periods played)
+joey: nocturne-probe OK (1 kHz + 2 kHz mixed on two voices; Nocturne N-2a-1)
+joey: /srv/warp posted (the GPU seam; per-client mount)
+joey: Warp PROBE OK (warp ctl: virgl 0)
+joey: /dev/null is a character device
+joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) -- skipping
+joey: clade CL-7b GL gate: /clade/bin/osmesa-prove absent -- skipping
+joey: clade CL-5 storm: /storm absent -- skipping
+joey: CLADE-GATES cl4=SKIPPED gl=SKIPPED storm=SKIPPED
+joey: daemon registry (#80; the reaper names these on exit): stratumd=4807 corvus=4890 ptyfs=5009 diorama=5013 aurora=5070
+boot-ms: 41576
+boot-wc: parks=4462393 idle_ms=290560 starved=52371 starved_ms=13728 max_ms=34 | tickless: parks=4195703 starved=52314 starved_ms=13617 max_ms=14 wake-ipi=4119765 wake-oneshot=75938
+boot-kstack: peak=10144 usable=16384 pid=4549 tid=1627
+Thylacine boot OK
+joey: reaped adopted orphan pid=4549 status=1
+login: consctl ok (line discipline via inherited fd)
+
+Thylacine login: tapestryd: surface 0 patchwork latched (slot 1 of slots 0b111, 1 rects of 1280x800)
+----------------

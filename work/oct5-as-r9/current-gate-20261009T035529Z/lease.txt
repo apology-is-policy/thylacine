@@ -1,0 +1,4 @@
+mac   HELD by you for 4m, 1.9h left
+        why: Astra scope/fid reservation ledger validation; no private runtime activation
+pi    FREE
+disk: 8.6 GiB available at /Users/northkillpd/projects/thylacine-astra

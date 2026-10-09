@@ -1789,3 +1789,23 @@ remain open. To preserve disk headroom, 700 duplicate build archive logs were
 removed only after byte/hash equality with retained canonical verified logs;
 log-cache-reclaim-20261009T0355Z.json records every pair. No pinned input or
 canonical raw evidence was removed.
+
+
+## October 9: scope/fid metadata Mac gate verified
+
+Exact source c5abd02647e9744eb200afe65e4530b19b5cd5af passed all 50 Mac HVF
+boots in current-gate-20261009T035529Z: default SMP1/4/8 and UBSan SMP4/8,
+ten each. Every boot passed 1844/1844, including loom.service_nodes and the
+existing target/fixed/pool/buffer/owner fixtures, D7 overlap, twenty distinct
+d7user00..19 cycles and banner. Gate and runner exited zero; raw verification
+retained and hashed 100 serial/harness logs and all ten captured inputs. Inputs
+are PINNED. Minimum recorded admission free space was 8282 MiB, above 8192.
+Astra's Mac lease was released. Result: astra-takeover/
+current-gate-20261009T035529Z-result.json and the run's verify.py.
+
+This verifies metadata with explicitly simulated parent protocol states. Charged
+node owner storage, actual scope/fid protocol resources, request/CQ admission,
+usercopy/authority and worker retirement remain next, before MM0-MM4. Pi/A72/KVM,
+final guest allocator reclamation and absent optional graphics probes remain
+unqualified. Self-review only; no Main landing, private async/clipboard activation
+or removal of the 128 MiB protection. Preserve pinned artifact generations.
