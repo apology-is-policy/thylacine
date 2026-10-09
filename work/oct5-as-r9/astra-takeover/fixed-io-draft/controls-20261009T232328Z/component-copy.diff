@@ -1,0 +1,11 @@
+--- control.c
++++ component-copy.c
+@@ -657,7 +657,7 @@
+                 u8 *view;
+                 rc=io_view(o,&view);
+                 if(!rc && kind==P9_TWALK) {
+-                    for(u32 i=0;i<s->len;++i)o->program.wire.component[i]=view[i];
++                    for(u32 i=0;i<s->len;++i)o->program.wire.component[i]=view[i]&0;
+                     o->program.wire.component_len=(u16)s->len;
+                     rc=loom_private_walk_component(o->program.wire.component,s->len);
+                     if(!rc)rc=loom_private_io_drop_fixed(o); // copied name owns no remaining byte users

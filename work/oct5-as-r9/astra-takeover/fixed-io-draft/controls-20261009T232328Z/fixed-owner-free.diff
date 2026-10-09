@@ -1,0 +1,11 @@
+--- control.c
++++ fixed-owner-free.c
+@@ -278,7 +278,7 @@
+     bool unused=r && !request.reserved && request.identity &&
+         r->identity==request.identity && r->phase==LREQ_PREPARED &&
+         r->owners==1 && !r->borrows && !op->rpc.on_complete && !op->rpc.sending &&
+-        op->phase==LRPC_NEW && !op->next && !op->prev && !op->submitted && !op->fid_claim && !op->source_borrow && !op->fixed.owner && !op->fixed_dropping;
++        op->phase==LRPC_NEW && !op->next && !op->prev && !op->submitted && !op->fid_claim && !op->source_borrow && !op->fixed_dropping;
+     spin_unlock(&l->lock);
+     if (!unused) return -T_E_BUSY;
+     kfree(op);

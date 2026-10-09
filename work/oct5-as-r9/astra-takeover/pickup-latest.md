@@ -79,3 +79,13 @@ rechecked; FID test success is synthetic, not native remote/driver qualification
 Next canonical fixed/provided buffers and immutable creator/SQE frontend, actual
 monotone wire-FID allocation, then READY and physical close disposal coherently.
 Canonical remains97d495, no installed queue/activation. Mac released; no jobs.
+
+Latest uninstalled working set fixed-io-draft supersedes admission copies; read
+state/self-review/next-work. Immutable kernel SQE and exact creator preparation,
+canonical retained fixed extent/copied WALK name, monotone wire-FID burn and
+fresh publication now wired. Separate wake root avoids post-transfer owner UAF;
+physical-drop barrier prevents terminal before backing return.268hostchecks/
+17mutants, ARM64864B owner,30input/18binary-log pairs/5ARM objects reverified.
+Not shared-ring or native queue proof. Next provided pools/leases/MORE/emptywait,
+READY fairness and physical close/destructor before installation. Canonical97d495;
+Mac released/no jobs/9176MiB, Stratum61dde37 and Astra10hashes intact. No activation.

@@ -1,0 +1,12 @@
+Use fixed-io-draft as current uninstalled combined working set; preserve evidence
+and exact wire-draft/program-draft dependencies. Do not install the queue yet.
+Implement actual pool stream refs, canonical selected-member extent and payload
+leases, MORE receipts, empty-pool waiting, late receipt/return and no auto-return.
+Then coherent READY scheduling/readiness/fresh absolute deadlines/round-robin and
+full-CQ parking, actual parser/TX quiescence, fixed physical drop before terminal,
+admitted storage free/refund before owner_drop/reap and engine/Loom root drop.
+Close must drain operation owners under a retained driver pin before requiring
+zero external entries. Preserve unpublished constructors and negotiated iounit.
+Integrate immutable shared-ring copy with actual creator admission only when
+these owners are coherent. Run normal/bulk native lifecycle/failure fixtures and
+source-matched full gates before AS3/4 and MM0-MM4. No activation or128MiB removal.

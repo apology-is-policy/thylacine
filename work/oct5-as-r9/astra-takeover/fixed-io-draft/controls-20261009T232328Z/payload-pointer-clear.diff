@@ -1,0 +1,11 @@
+--- control.c
++++ payload-pointer-clear.c
+@@ -620,7 +620,7 @@
+     o->fixed_dropping=true;
+     int rc=o->fixed.owner?loom_private_fixed_release(o->owner,&o->fixed):0;
+     o->fixed_dropping=false;
+-    if(!rc){o->program.wire.payload=NULL;o->program.wire.payload_capacity=0;}
++    if(!rc){/* retain stale pointer */o->program.wire.payload_capacity=0;}
+     return rc;
+ }
+ int loom_private_io_release_prepared(struct loom_service_operation *o) {

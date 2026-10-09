@@ -1,0 +1,11 @@
+--- control.c
++++ queued-drop.c
+@@ -615,7 +615,7 @@
+ }
+ int loom_private_io_drop_fixed(struct loom_service_operation *o) {
+     if(!o || !o->owner || o->fixed_dropping || o->rpc.sending ||
+-       (o->phase!=LRPC_NEW && o->phase!=LRPC_SETTLING) || o->rpc.on_complete)
++       (o->phase!=LRPC_NEW && o->phase!=LRPC_SETTLING && o->phase!=LRPC_QUEUED) || o->rpc.on_complete)
+         return -T_E_BUSY;
+     o->fixed_dropping=true;
+     int rc=o->fixed.owner?loom_private_fixed_release(o->owner,&o->fixed):0;

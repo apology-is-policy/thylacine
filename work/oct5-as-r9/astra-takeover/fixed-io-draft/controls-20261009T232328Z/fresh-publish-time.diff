@@ -1,0 +1,11 @@
+--- control.c
++++ fresh-publish-time.c
+@@ -691,7 +691,7 @@
+     // across the unlock; no field of o is read after a successful transfer.
+     loom_ref(l);
+     spin_lock(&l->lock);
+-    int rc=loom_admission_enqueue_locked(o,o->source,o->destination,now);
++    int rc=loom_admission_enqueue_locked(o,o->source,o->destination,0);
+     spin_unlock(&l->lock);
+     if(!rc)loom_private_close_changed(l);
+     loom_unref(l);return rc;

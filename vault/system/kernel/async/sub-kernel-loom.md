@@ -2563,3 +2563,13 @@ checks. Error CLUNK cleanup requires actual abort-quiescence proof from the futu
 driver.257hostchecks/26mutants plusconstructor16mutants and ARM64816B owner pass;
 new FID program successes are synthetic. Canonical buffer/SQE frontend and native
 READY/close remain outstanding. See self-review/next-work; no activation claim.
+
+Astra October10 fixed-buffer preparation remains uninstalled (`fixed-io-draft`).
+An immutable kernel SQE yields exact creator/storage ownership, retained canonical
+fixed extent or copied WALK name and monotone wire-FID burn. Zero-byte I/O still
+validates registration/offset, without a payload pin. Publication retains an
+independent Loom wake root and never touches transferred storage. A physical-drop
+barrier bars terminal/free until backing release outside Ll completes; payload
+pointer/capacity then clear.268hostchecks/17mutants and ARM64864B owner pass.
+Actual shared-ring/READY/close and provided-buffer lifecycle remain outstanding;
+read its self-review/next-work for host boundaries. No native/activation claim.

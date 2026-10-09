@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Use admission-draft working set. Implement canonical fixed/provided buffers, immutable creator/SQE frontend and actual monotone wire-FID allocation, then fair READY and physical close disposal coherently before queue installation. Native matched gates, AS3/4, MM0-MM4 follow.",
+  "next": "Use fixed-io-draft working set. Implement provided pool member/stream/lease/MORE/empty-wait ownership, then fair READY and physical close/destruction coherently before shared-ring queue installation. Native matched gates, AS3/4, MM0-MM4 follow.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -29,5 +29,6 @@
   "wire_draft": "wire-draft/state.json",
   "program_draft": "program-draft/state.json",
   "owner_program_draft": "owner-program-draft/state.json",
-  "admission_draft": "admission-draft/state.json"
+  "admission_draft": "admission-draft/state.json",
+  "fixed_io_draft": "fixed-io-draft/state.json"
 }

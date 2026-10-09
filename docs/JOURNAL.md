@@ -35685,3 +35685,27 @@ in the new cases, not native remote-FID/driver/close proof. Canonical kernel rem
 97d495fcb. Next immutable SQE frontend and canonical fixed/provided buffers, actual
 monotone wire-FID allocation, then coherent READY/physical close integration before
 queue installation. Native matched gates, AS3/4 and MM0-MM4 follow. No activation.
+
+### Astra fixed-buffer SQE preparation, October 10
+
+The uninstalled `astra-takeover/fixed-io-draft` now prepares an immutable kernel
+SQE with exact creator identity, charged owner, canonical fixed extent or copied
+WALK component, and actual monotone wire-FID allocation. Accepted backing survives
+registered-table replacement; zero-length I/O validates index/offset without a
+payload hold. Fresh publication transfers ownership atomically with a separately
+retained wake root, avoiding operation access after the worker may consume it.
+A physical-drop barrier prevents terminal/free while an unlinked backing pin is
+still being returned outside Ll; payload pointer and capacity clear afterward.
+
+268 ASan/UBSan checks and17 targeted mutants pass. Real ARM64 owner864B still fits
+its charged page, protocol42288B unchanged. Raw30 inputs/18 source-binary-log pairs
+and5 ARM objects reverified. Masked creator-image/empty-index witnesses were
+strengthened; failed evidence retained. Single-agent self-review only.
+
+This is an internal immutable-copy API, not shared-ring dispatch or a native
+queue. Host address translation, snapshot, allocator/ref/physical-drop boundaries
+and manual admitted destruction remain explicit. Canonical kernel remains97d495.
+Next provided-buffer selection/leases/MORE/empty waits, then coherent READY and
+physical close cleanup before queue installation; native matched gates, AS3/4
+and MM0-MM4 follow. Mac released, no jobs,9176MiB before documentation; Stratum
+clean61dde37 and Astra10 pending/protected hashes intact. No activation.

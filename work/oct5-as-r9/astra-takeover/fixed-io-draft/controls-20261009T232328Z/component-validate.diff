@@ -1,0 +1,11 @@
+--- control.c
++++ component-validate.c
+@@ -659,7 +659,7 @@
+                 if(!rc && kind==P9_TWALK) {
+                     for(u32 i=0;i<s->len;++i)o->program.wire.component[i]=view[i];
+                     o->program.wire.component_len=(u16)s->len;
+-                    rc=loom_private_walk_component(o->program.wire.component,s->len);
++                    rc=0;
+                     if(!rc)rc=loom_private_io_drop_fixed(o); // copied name owns no remaining byte users
+                 } else if(!rc) {
+                     o->program.wire.payload=view;o->program.wire.payload_capacity=s->len;

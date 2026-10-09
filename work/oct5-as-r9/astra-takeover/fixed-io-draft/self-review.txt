@@ -1,0 +1,52 @@
+Astra single-agent self-review, October 10, 2026. Not an independent audit.
+
+Uninstalled fixed-I/O working set supersedes admission-draft copies, preserving
+that evidence. Canonical kernel remains97d495fcb. Fixed token40B is moved unchanged
+from loom.h into its own header to embed it in the operation; owner864B still
+fits its charged4096B page, protocol42288B and its65536B class unchanged.
+
+The caller supplies an immutable kernel SQE copy and retained real creator Proc
+in its stable syscall image. Exact AS/incarnation guards precede allocation. The
+constructor reserves charged storage and captures fresh creator identity. READ/
+WRITE retain canonical backing extent and independent physical/Loom pins; no
+worker reads registered-table identity again. WALK copies/validates its component
+once, then returns the pin before DAC. Actual monotone p9_client_alloc_fid burns
+newfid even if a later unpublished request rolls back. Zero length READ/WRITE
+still validates registered index and suboffset; it creates neither fake zero
+extent nor backing hold/payload. Provided-buffer forms remain OPNOTSUPP here.
+
+I/O-R1: publishing allows immediate worker consumption/free. Retain a separate
+Loom wake root before enqueue, and never touch o after successful transfer. Fresh
+publication time rechecks deadline/abort under Ll; failure keeps exclusive caller
+ownership for release_prepared. No wire submission occurs during preparation.
+I/O-R2: fixed_release unlinks under Ll before dropping physical backing outside
+Ll. fixed_dropping blocks terminal commit/cancel, raw unused free and recursive
+drop through this interval. Sole driver/exclusive NEW ownership remains required;
+this boolean is not a replacement for driver serialization. Only NEW or SETTLING
+with no parser/TX callback users may drop fixed. Payload pointer AND capacity are
+cleared after release. Real driver must reach SETTLING after real user quiescence.
+
+ASan/UBSan control268 checks; all17 exact targeted mutants detected. First creator
+image mutant survived because READ's actual fixed_acquire repeated the check;
+LOPEN is now the independent no-fixed witness. Empty index witness deliberately
+populates stale metadata beyond n_reg_buf, preventing a null backing check from
+masking missing registration bounds. Earlier raw failed run is retained. Exact
+current30 inputs,18 generated-source/binary/log pairs and5 ARM64 objects plus
+transitive dependencies reverified. No undefined libc copy/set/move. AArch64
+layout864B verified. Tests do not claim native frontend/driver/close concurrency.
+
+Boundaries: actual data headers, SQE validation, copied constructor/admission/RPC,
+extracted unchanged fixed helpers and monotone allocator; actual linked pool,
+FID/node/slot/request/decode/program/wire/permission/session/codec/transport/reply.
+Host virtual/physical translation, allocator, fresh Proc snapshot, engine/ref/wake
+and physical backing drop are explicit stand-ins. Async submit is an effect
+barrier, not a wire test. Admitted destruction is manual fixture cleanup. Tests
+exercise physical-drop reentry while settling, registration replacement, copied
+SQE/component, closed allocation, fault unwinds and balanced actual fixed holds.
+No prior native/full Mac qualification extends to these uninstalled sources.
+
+Remaining: actual shared-ring copy/dispatch, provided member/receipt/MORE/empty
+pool ownership, fair READY progress, real callback abort/close and admitted
+physical destruction. Drain operations before the old zero-entry close gate;
+each operation retains its own entry pin. Keep unpublished constructors distinct.
+No Main/private activation, clipboard default or128MiB protection change.
