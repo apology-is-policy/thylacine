@@ -2532,3 +2532,23 @@ boundary still reports ABORTING until cleanup completes. Exact HEAD+diff, new
 source hashes, six stable inputs and rebuilt ELF/bin retained. Full Mac matrix
 for these changes is pending; prior50/50 qualifies ba2ae6df3 close-only source.
 No Main/private async/clipboard activation or128MiB protection change.
+
+
+## October 9: internal controls full Mac qualification
+
+Exact source ade9c69d17e20a5aa5ac337bfef15d7a5e2304c4 passes50/50 Mac HVF
+boots in current-gate-20261009T203019Z: default SMP1/4/8 and UBSan SMP4/8,
+ten each. Every boot passes1852/1852, including private controls and repaired
+close lifetime, D7 overlap,20 distinct login/logout cycles and boot banner.
+Both exits zero. Verifier preserved100 raw logs and checked ten pinned input
+hashes. Minimum recorded admission9604MiB;8192MiB floor preserved.
+Result: work/oct5-as-r9/astra-takeover/current-gate-20261009T203019Z-result.json.
+
+The readiness/executor draft remains separate and not native-qualified. Its
+actual-C readiness14/17mutants, worker5/8mutants, engine18/7mutants, CONNECT,
+constructor and final-free regressions plus ARM64 syntax pass. EX-W1 missed
+scan-pin-return wake was reproduced and repaired; raw failure retained. Existing
+poll/lifecycle/index model controls and counterexamples pass, with no claim
+that they prove the new executor. Next install the reviewed draft, rebuild and
+run fresh1853 native before its own exact-source matrix. Self-review only;
+no Main/private user async/clipboard activation or128MiB protection change.
