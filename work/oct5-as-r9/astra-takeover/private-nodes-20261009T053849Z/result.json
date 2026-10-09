@@ -1,0 +1,100 @@
+{
+  "scope": "Extracted node owner transactions with the real shared slot/node modules.\nChecked sequential lock/image doubles and the shared native fixture. READY and\nABORTING are injected test states; no protocol/usercopy/concurrency claim.\n",
+  "source_head": "632705144489ae3553ed2aca2f41dda65ad2e4e9",
+  "hashes": {
+    "kernel/loom.c": "1c05ea3d852b676ffd94cef42b450d6595c3e41721b175b03c3f7fdcb587550a",
+    "kernel/include/thylacine/loom.h": "4734f392d1286101d55c96161bd9f09368c9e59590b5edbc5c476d65a96fd409",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_nodes.h": "9cfafbb971b46ce2b992d7c331cd83b06a204b05eda96d4cc8fbd550865a9c81",
+    "kernel/test/loom_node_owner_fixture.h": "f5261810c64ebb8d2e69b1fc0669b2d3d0417ab844e7c38adc2af73d3500f022",
+    "work/oct5-as-r9/private-nodes-control.py": "fa9d19ef4f170500b386c1b8caffdd5677ad55497138a0ebe94f2f2438bdc82c"
+  },
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS node owner transactions",
+      "generated_sha256": "07674398f12a11a1d0c7c514a69d921e45c3db316bdbcd1a225687d0e67acdde"
+    },
+    {
+      "case": "omit-image",
+      "rc": 11,
+      "expected": "node owner requires exact creator image",
+      "generated_sha256": "b8d49ed0a55468bbacefcfd1c274317e71744fe5b51ea4ac6b0d1975bb5f5ba4"
+    },
+    {
+      "case": "omit-creator",
+      "rc": 11,
+      "expected": "node owner requires exact creator incarnation",
+      "generated_sha256": "71316be534668cd55cbe6404420b615a8d82a16449d317f8e33302b1c83f5f43"
+    },
+    {
+      "case": "omit-size",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "42d8b030a5311b272edae48154241c19f64dfd1b6c55b3c391181c4449ba63b0"
+    },
+    {
+      "case": "omit-version",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "b75e42de14aba085dc763a60d3658a635bde5298065f04fcd5aae81324603341"
+    },
+    {
+      "case": "omit-flags",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "fe89ebdb818b11680dd17bffa25f232ffeee1603659b1ca0aef40838fc4914ac"
+    },
+    {
+      "case": "omit-reserved",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "b63e3a89eafec96be1c3bba0d6405262318e27db74d199398b65413027556aba"
+    },
+    {
+      "case": "omit-result-slot",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "9d7810ab93e645f1ae8f52ae73b4d665e47d901f186db5f8f10f48e0cc83e40b"
+    },
+    {
+      "case": "omit-result-reserved",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "2b9e938cb72440f443f01e6918e05d9ef930bbbe8dad28d54010da9ffc094976"
+    },
+    {
+      "case": "omit-result-incarnation",
+      "rc": 11,
+      "expected": "node reserve rejects malformed immutable record",
+      "generated_sha256": "2f37c52b77e149fa5ef5b3d341028d1bee7d8ed38c52107c435eab873af36846"
+    },
+    {
+      "case": "omit-prepare-lock",
+      "rc": 11,
+      "expected": "prepare requires owner lock",
+      "generated_sha256": "379700ca2bf7ac3092a590b3f612f63c77b99906dfc9fb2602058d342b2c8f6f"
+    },
+    {
+      "case": "omit-publish-lock",
+      "rc": 11,
+      "expected": "publish requires owner lock",
+      "generated_sha256": "1136e3de050c71a22caeb35fd2eccb7b29ec245e822dc822ccdd1c223aa2432d"
+    },
+    {
+      "case": "omit-rollback-lock",
+      "rc": 11,
+      "expected": "rollback requires owner lock",
+      "generated_sha256": "0927fe5722dd8f47497f5929cc1fb067fdccdec33df248eababab486620c2cb3"
+    },
+    {
+      "case": "omit-reap_unused-lock",
+      "rc": 11,
+      "expected": "reap requires owner lock",
+      "generated_sha256": "97c8a324e89e57eca52db451ec2546a4227d316bc9c6063e58170afa7e5004a6"
+    }
+  ]
+}

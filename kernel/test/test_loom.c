@@ -96,6 +96,20 @@ void test_loom_service_nodes(void) {
     TEST_ASSERT(!error, error);
 }
 
+#include "loom_node_owner_fixture.h"
+
+void test_loom_private_node_owner(void);
+void test_loom_private_node_owner(void) {
+    struct Proc *p = test_proc_make();
+    struct Loom *l = p ? loom_create_private(p,2,2,true) : NULL;
+    u64 goal = loom_private_retired() + (l ? 1 : 0);
+    const char *error = !l ? "node owner allocation" : loom_node_owner_fixture(l,p);
+    if (l) loom_unref(l);
+    if (!lp_wait(goal) && !error) error = "node owner retirement timeout";
+    if (p) test_proc_drop(p);
+    TEST_ASSERT(!error,error);
+}
+
 #include "loom_pool_table_fixture.h"
 
 void test_loom_service_pool_table(void) {

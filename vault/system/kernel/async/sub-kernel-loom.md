@@ -8,6 +8,7 @@ code:
   - kernel/loom_service_slots.c
   - kernel/loom_service_nodes.c
   - kernel/include/thylacine/loom_service_nodes.h
+  - kernel/test/loom_node_owner_fixture.h
   - kernel/test/loom_nodes_fixture.h
   - tools/host-tests/loom-service-nodes.c
   - tools/test-loom-service-nodes.py
@@ -1880,3 +1881,37 @@ remain unqualified. Self-review only. Keep private async/clipboard disabled,
 128 MiB protection and all pinned evidence; no Main landing. Current free disk
 is only about 8 GiB: restore headroom before the next build/gate without lowering
 admission or removing canonical evidence.
+
+## October 9: creator-bound scope/FID reservation transactions
+
+Internal `loom_private_node_prepare/publish/rollback/reap_unused` now front the
+charged node and shared-slot tables. Prepare accepts a complete immutable
+48-byte ABI snapshot, requires the exact creator incarnation AND address space,
+and rejects nonzero result/reserved fields, wrong version/size/flags, invalid
+kind or parent before publication. Failure leaves caller output unchanged.
+The caller owns a Loom reference and stable syscall image across prepare,
+copyout and publish-or-rollback; the helpers do not add a hidden reference or
+retain a Proc pointer. Both ledgers and close/parent-state checks use the same
+Loom lock, with no allocation, callback, usercopy or resource drop under it.
+Provisional nodes stay invisible; publication rechecks an exact READY parent.
+Rollback works after abort/close and never restores a burned incarnation.
+Only unused RESERVED nodes are reapable here; active and RETIRED protocol nodes
+still require engine retirement and completion publication proof.
+
+Self-review checked immutable-record validation, both identity comparisons,
+lock coverage of both tables, close versus copyout continuation, stale-ref
+rejection and parent-pin cleanup. This is self-review, not an independent audit.
+The shared native/host fixture explicitly injects READY/ABORTING; those states
+are not a handshake or concurrent-scheduling witness. The actual extracted
+wrapper host control passed under ASan/UBSan and killed 13 named authority,
+record-validation and lock-omission mutants in private-nodes-20261009T053849Z.
+The native diagnostic node-transactions-diagnostic-20261009T053938Z passed
+1845/1845, D7 overlap and all twenty distinct cycle users; source diff, added
+fixture hash and six inputs were stable. Lifecycle model clean5828 and all seven
+named counterexamples passed in node-transactions-model. The only subsequent
+source edit moved a header comment beside the correct declaration.
+
+This checkpoint does not activate service registration or CONNECT. Charged
+request/terminal capacity, actual protocol-owner binding, caller-authorized
+native admission, progress scheduling and local retirement remain the next
+integration work; the full current-source SMP/UBSan gate is pending.

@@ -2674,3 +2674,34 @@ canonical evidence or pinned input was removed. Exact inventory and process
 snapshot: astra-takeover/host-debug-cache-reclaim-20261009T0530Z.json. Actual free
 space rose 8217 -> 8441 MiB (APFS sharing limits logical-byte savings). Recheck
 headroom before the next heavy build; keep the 8192 MiB admission floor.
+
+## October 9 05:42 UTC: scope/FID owner transactions
+
+Implemented internal creator/image-bound prepare/publish/rollback/unused-reap
+entry points over the existing charged tables. Immutable 48-byte record
+validation and same-Loom-lock publication preserve provisional visibility,
+parent pins and burned identities across copyout failure, abort and close.
+Caller retains the Loom across every continuation; no protocol or syscall
+activation. Self-review performed (not independent).
+
+Verification: extracted actual-C ASan/UBSan control plus 13 expected named mutant
+failures (private-nodes-20261009T053849Z); native diagnostic
+node-transactions-diagnostic-20261009T053938Z passes 1845/1845, D7 overlap,
+twenty distinct d7user00..19 cycles and boot banner, with stable source diff,
+added fixture hash and six input hashes. Lifecycle model clean5828 and all seven
+named counterexamples pass (node-transactions-model). Full current-source Mac
+matrix remains pending; prior 50/50 applies only to262ff29d3.
+
+Operator cleanup removed work/oct5-as-r9 while this turn started. With explicit
+operator permission, all2698 tracked files were restored exactly from HEAD;
+large untracked artifacts were not restored. Historical logs/results remain,
+but old untracked pinned inputs and flight JSON files are absent locally; do
+not claim those historical binaries can currently be rechecked. Current build
+inputs survived and a new diagnostic retains fresh ELF/bin clones. Disk is now
+above16GiB; floor remains8192MiB. Astra's six pending files and four protected
+drafts verified unchanged; Stratum remains clean61dde37.
+
+Next: complete the current-source gate, then charged request/terminal records
+before native connection publication, actual scope/protocol ownership, bounded
+progress and local retirement. AS-3/4 and then MM0-MM4 follow. Main landing,
+private async/clipboard activation and128MiB removal remain unauthorized here.

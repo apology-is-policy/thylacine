@@ -705,6 +705,18 @@ int loom_private_fixed_acquire(struct Loom *, struct Proc *,
                                const struct loom_service_pool_member *,
                                struct loom_private_fixed *);
 int loom_private_fixed_release(struct Loom *, struct loom_private_fixed *);
+// Internal SCOPE/FID metadata transactions, not activated register handlers.
+// Input is a kernel snapshot. Caller retains l and its stable creator syscall
+// image through prepare/copyout/publish-or-rollback; these functions do not add
+// a reference. Failed prepare leaves output untouched. Publish rechecks close
+// and a FID's exact READY parent. Rollback/reap progress after close; only unused
+// RESERVED nodes can use this reap, never active or retired protocol objects.
+int loom_private_node_prepare(struct Loom *, struct Proc *,
+                              const struct loom_service_reserve *, struct loom_service_ref *);
+int loom_private_node_publish(struct Loom *, struct loom_service_ref);
+int loom_private_node_rollback(struct Loom *, struct loom_service_ref);
+int loom_private_node_reap_unused(struct Loom *, struct loom_service_ref);
+
 // Internal target registration: complete immutable kernel record, retained owner
 // and creator in its stable syscall image. Resolves the actual registry_fd via
 // handle_get; navigation is not connect authority. No syscall activation.

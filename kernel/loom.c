@@ -1313,6 +1313,52 @@ int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
     return loom_private_pool_remove(l,ref,false);
 }
 
+// SCOPE/FID reserve transactions use an immutable, already-copied ABI record.
+// The syscall owns a Loom reference and a stable creator image across prepare,
+// copyout and publish/rollback. No user pointer or Proc escapes. The same ring
+// lock protects both ledgers and the close/parent-abort publication check.
+// This only reserves metadata: it grants no protocol authority, creates no
+// client and cannot reap a node that has entered the protocol state machine.
+int loom_private_node_prepare(struct Loom *l, struct Proc *p,
+                              const struct loom_service_reserve *in,
+                              struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
+        in->flags || in->reserved || in->result.slot || in->result.reserved ||
+        in->result.incarnation) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = l->service_closing ? -T_E_CANCELED :
+        loom_service_node_prepare(l->service_slots, l->service_nodes,
+                                  in->kind, in->scope, out);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = l->service_closing ? -T_E_CANCELED :
+        loom_service_node_publish(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_rollback(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_node_rollback(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_reap_unused(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+
 // TARGET transactions consume the shared slot quota before resolving the actual
 // handle. Native capture and all handle/registry drops occur outside the ring
 // lock; the caller retains l and a stable creator syscall image throughout.

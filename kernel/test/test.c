@@ -668,6 +668,7 @@ void test_loom_create_geometry(void);
 void test_loom_private_owner_lifecycle(void);
 void test_loom_service_slots(void);
 void test_loom_service_nodes(void);
+void test_loom_private_node_owner(void);
 void test_loom_service_pool_table(void);
 void test_loom_private_slot_owner(void);
 void test_loom_private_buffers(void);
@@ -2753,6 +2754,7 @@ struct test_case g_tests[] = {
     { "loom.private_fixed",              test_loom_private_fixed,              false, NULL },
     { "loom.private_slot_owner",         test_loom_private_slot_owner,         false, NULL },
     { "loom.service_pool_table",         test_loom_service_pool_table,         false, NULL },
+    { "loom.private_node_owner",         test_loom_private_node_owner,         false, NULL },
     { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },

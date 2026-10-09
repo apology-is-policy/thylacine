@@ -398,3 +398,15 @@ remain unqualified. Self-review only. Keep private async/clipboard disabled,
 128 MiB protection and all pinned evidence; no Main landing. Current free disk
 is only about 8 GiB: restore headroom before the next build/gate without lowering
 admission or removing canonical evidence.
+
+## October 9: node owner transaction fixture
+
+The suite now contains 1845 entries. `loom.private_node_owner` creates an actual
+private Loom and exercises creator/image and ABI validation, failed-copyout
+rollback, stale continuation rejection, parent abort before child publication,
+and close before root publication. Parent READY/ABORTING states are test
+injection, not a service handshake. The fixture retains its caller reference
+until cleanup, then waits for the actual private retirer before dropping the
+creator. A diagnostic boot passed 1845/1845 plus D7 overlap and twenty cycles
+at node-transactions-diagnostic-20261009T053938Z. This single boot does not
+qualify the current source's SMP/UBSan matrix.

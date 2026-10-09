@@ -1,0 +1,47 @@
+{
+  "source_head": "632705144489ae3553ed2aca2f41dda65ad2e4e9",
+  "source_diff_sha256": "11b6dc1f2a0e16dd711d430bb23bfdbc858484cc7ddf20799073e5a52f589da3",
+  "extra_sources": {
+    "kernel/test/loom_node_owner_fixture.h": "f5261810c64ebb8d2e69b1fc0669b2d3d0417ab844e7c38adc2af73d3500f022"
+  },
+  "inputs": {
+    "build/kernel/thylacine.elf": "59cbbe1252dd05adc8b0feffb39f3920dfc67d019d98a32f6407813c4db55b8e",
+    "build/kernel/thylacine.bin": "c0dcbfa31a9a3d31b437d820aec6c13f0926056d3b704c94455c2cf9196a9369",
+    "build/ramfs.cpio": "5ca4682b29cac27541c025bdeea25d2241643556535c473a4703476f4be7ed22",
+    "build/fixtures/pool.img.baked-snapshot": "d0c5523253f45693a7c33079b5e028c813bc417514e5a17dfd2e95736dc541f3",
+    "build/fixtures/system.key": "de2b8d3e1e89e8559337068fcc65f00b4c1cfe7fe797ad25431b8e94a2ed788a",
+    "build/fixtures/system.key.baked-snapshot": "de2b8d3e1e89e8559337068fcc65f00b4c1cfe7fe797ad25431b8e94a2ed788a"
+  },
+  "rc": 0,
+  "source_stable": true,
+  "inputs_stable": true,
+  "extra_stable": true,
+  "all1845": true,
+  "node_owner": true,
+  "boot_banner": true,
+  "d7_overlap": true,
+  "d7_cycles": [
+    "d7user00",
+    "d7user01",
+    "d7user02",
+    "d7user03",
+    "d7user04",
+    "d7user05",
+    "d7user06",
+    "d7user07",
+    "d7user08",
+    "d7user09",
+    "d7user10",
+    "d7user11",
+    "d7user12",
+    "d7user13",
+    "d7user14",
+    "d7user15",
+    "d7user16",
+    "d7user17",
+    "d7user18",
+    "d7user19"
+  ],
+  "serial_sha256": "4412932d8424087d544d86342ddb55abe4104b29f4dc4ffae9469b7fd5431123",
+  "harness_sha256": "50fb234f4478f0a6dc26fcc3407c8b841d116e580bd5e7eaec914601f53a2403"
+}
