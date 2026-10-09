@@ -2705,3 +2705,27 @@ Next: complete the current-source gate, then charged request/terminal records
 before native connection publication, actual scope/protocol ownership, bounded
 progress and local retirement. AS-3/4 and then MM0-MM4 follow. Main landing,
 private async/clipboard activation and128MiB removal remain unauthorized here.
+
+## October 9 06:28 UTC: scope/FID transactions full Mac gate verified
+
+Exact source `d4825ae1e106924d67d3eb405180da7f8d5882d6` passed
+`current-gate-20261009T054208Z`: 50/50 boots, default SMP1/4/8 and kernel
+UBSan SMP4/8, ten each. All boots passed1845/1845 including the new
+`loom.private_node_owner` fixture, D7 overlap, twenty distinct d7user00..19
+login/logout cycles and the boot banner. Both gate.rc and runner.rc are0.
+The verifier retained and hashed100 raw serial/harness logs and checked all ten
+captured input hashes against the clean source/end-source and Stratum61dde37
+provenance. Lowest recorded admission headroom16194MiB;8192MiB floor intact.
+The runner released Astra's Mac lease. Result:
+`astra-takeover/current-gate-20261009T054208Z-result.json`; verifier beside run.
+Astra's pending files and four protected drafts, plus clean Stratum pin, were
+rechecked unchanged after the run. This is self-verification, not an independent
+audit. Optional graphics probes remain absent from this exact ramfs; Pi/A72/KVM
+and final guest allocator reclamation remain unqualified.
+
+This qualifies the internal reservation owner checkpoint only. Next: charged,
+bounded request records and terminal-completion obligations before native
+backlog publication, then actual scope/protocol binding, caller authority,
+bounded progress and local retirement. Private service registration/CONNECT and
+clipboard remain disabled, Main untouched,128MiB protection retained. MM0-MM4
+still follow completion of async integration and its client/consumer gates.

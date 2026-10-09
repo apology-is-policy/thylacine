@@ -1,0 +1,4 @@
+mac   HELD by you for 5m, 1.9h left
+        why: Astra scope/FID owner transactions: native fixture, sanitizer controls and lifecycle models
+pi    FREE
+disk: 16.4 GiB available at /Users/northkillpd/projects/thylacine-astra
