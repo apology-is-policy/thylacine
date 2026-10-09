@@ -1,0 +1,31 @@
+Next: one coherent retained operation + actual admission/engine integration.
+This staged program, wire-draft and rpc-draft remain uninstalled.
+
+Embed loom_service_program in the charged operation. Remove the duplicate old
+expect/component/payload fields; callback reads program.wire.expect and the same
+resolved payload that the actual builder used. Retain one pointer-free reply in
+the operation. Check the real combined ARM64 one-page bound. Constructor must
+retain its freshly captured identity.access in program.identity while NEW;
+program_start can then use that retained value, never protocol->identity from
+CONNECT or the executor's current Proc. Its copy permits source==destination.
+
+Prepare exact source/destination full-incarnation and canonical payload holds,
+initialize the program from the copied SQE, then perform one Ll admission/list
+transfer. CLUNK's local close-admission claim and request admission must be atomic.
+After RPC begin arms capture, submit outside Ll under sole p->driving. Invalid
+client argument refusal without capture must be explicitly settled locally;
+accepted requests retain their callback until actual return/abort quiescence.
+Advance program only once per callback attempt, then recheck abort/deadline in
+Ll before requeue, new wire effect, mapping/open publication and final terminal.
+
+Complete fair READY scheduling/readiness, earliest active deadline, CQ-pressure
+parking, and physical operation destruction together. Old close collection's
+zero-entry-pin test must come AFTER draining owners which hold those pins.
+Return actual fixed buffers outside Ll while SETTLING/request borrow is retained;
+free/refund operation before request owner drop and final engine/Loom puts.
+
+Actual normal/bulk peers and native fixtures must cover denied search/open,
+symlink refusal, response versus abort/deadline, full CQ, local/remote EAGAIN,
+interleaved ops, stale destination, CLUNK drain, canonical fixed/provided-pool
+lifetimes, empty pool and late receipts, close/exec. Then source-matched approved
+gates, AS3/4, MM0-MM4. Preserve all existing activation restrictions.

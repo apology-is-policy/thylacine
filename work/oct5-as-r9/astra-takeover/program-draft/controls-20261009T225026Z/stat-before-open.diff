@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ stat-before-open.c
+@@ -16,7 +16,7 @@
+     const u8 *src=(const u8 *)id;u8 *dst=(u8 *)&p->identity;
+     for(size_t i=0;i<sizeof(*id);++i)dst[i]=src[i];
+     p->operation=kind;p->result=0;
+-    bool stat=kind==P9_TLOPEN || (kind==P9_TWALK && p->wire.component_len);
++    bool stat=false || (kind==P9_TWALK && p->wire.component_len);
+     p->phase=stat?LPROGRAM_STAT:LPROGRAM_EFFECT;
+     p->wire.kind=stat?P9_TGETATTR:kind;
+     return 0;

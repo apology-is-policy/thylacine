@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/controls-20261009T225026Z/identity-copy.c:16:15: error: unused variable 'src' [-Werror,-Wunused-variable]
+   16 |     const u8 *src=(const u8 *)id;u8 *dst=(u8 *)&p->identity;
+      |               ^~~
+1 error generated.

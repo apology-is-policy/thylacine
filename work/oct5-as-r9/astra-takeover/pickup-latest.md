@@ -51,3 +51,12 @@ ARM64 real-header object passes. WIRE-R1 distinguishes local no-wire EAGAIN from
 remote EAGAIN, preventing ambiguous write replay. Combine with RPC owner only
 with one authoritative expectation/payload copy and coherent admission/READY/
 close integration. No native queue or DAC claim. Mac released, no running gate.
+
+Staged DAC program now verified but uninstalled: program-draft/state.json,
+self-review.txt and next-work.txt. Actual perm plus wire/submit path passes
+4608 DAC cases, 18711 total assertions and15 mutants; ARM64 no-libc object passes.
+Preserves directory-before-search and symlink-open refusal, captured creator
+value and no remote-EAGAIN replay. Next unify owner with program.wire (one
+expectation/payload copy), persist the constructor's fresh identity, then actual
+FID/buffer admission, fair READY and physical close cleanup. Canonical still
+97d495; no native queue/actual creator admission claim. Mac released, no jobs.

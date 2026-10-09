@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ open-flags.c
+@@ -9,7 +9,7 @@
+        id->supp_gid_count>PROC_SUPP_GIDS_MAX)return -T_E_INVAL;
+     if(kind!=P9_TWALK && kind!=P9_TLOPEN && kind!=P9_TREAD &&
+        kind!=P9_TWRITE && kind!=P9_TCLUNK)return -T_E_OPNOTSUPP;
+-    if((kind==P9_TLOPEN && p->wire.mode>2) ||
++    if((false) ||
+        (kind==P9_TWALK && p->wire.component_len>255))return -T_E_INVAL;
+     // Explicit copy avoids a freestanding libc dependency and detaches the
+     // authority from the caller's stack. Identity is never resampled on retry.

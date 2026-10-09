@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ directory.c
+@@ -47,7 +47,7 @@
+         unsigned want;
+         if(p->operation==P9_TWALK) {
+             // Match ordinary single-hop fail ordering: type before X-search.
+-            if(!(r->attr.qid.type&P9_QTDIR))
++            if(false)
+                 return program_end(p,-T_E_NOTDIR,LPROGRAM_TERMINAL);
+             want=PERM_X;
+         } else if(p->operation==P9_TLOPEN) {

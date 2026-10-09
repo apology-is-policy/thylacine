@@ -1,0 +1,26 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/controls-20261009T225003Z/control.c:1:
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/kernel/include/thylacine/loom_service_program.h:5:
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h:2090:1: error: unknown type name 'irq_state_t'
+ 2090 | irq_state_t proc_table_lock_acquire(void);
+      | ^
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h:2091:37: error: unknown type name 'irq_state_t'
+ 2091 | void        proc_table_lock_release(irq_state_t s);
+      |                                     ^
+2 errors generated.
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/controls-20261009T225003Z/fixture.c:4:
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/program-draft/kernel/include/thylacine/loom_service_program.h:5:
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h:2090:1: error: unknown type name 'irq_state_t'
+ 2090 | irq_state_t proc_table_lock_acquire(void);
+      | ^
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h:2091:37: error: unknown type name 'irq_state_t'
+ 2091 | void        proc_table_lock_release(irq_state_t s);
+      |                                     ^
+2 errors generated.
+In file included from /Users/northkillpd/projects/thylacine-corona/kernel/perm.c:2:
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h:2090:1: error: unknown type name 'irq_state_t'
+ 2090 | irq_state_t proc_table_lock_acquire(void);
+      | ^
+/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/proc.h:2091:37: error: unknown type name 'irq_state_t'
+ 2091 | void        proc_table_lock_release(irq_state_t s);
+      |                                     ^
+2 errors generated.

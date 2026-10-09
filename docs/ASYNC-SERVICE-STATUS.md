@@ -2742,3 +2742,23 @@ engine or authority qualification. Canonical kernel remains unchanged; no prior
 full Mac gate is extended to this draft. Read wire-draft/self-review.txt and
 next-work.txt. Actual DAC/payload admission, fair READY progress and coherent
 close disposal remain next, then AS3/4 and MM0-MM4. Mac released. No activation.
+
+### Astra staged WALK/open authority program, October 10
+
+The uninstalled `astra-takeover/program-draft` composes GETATTR, ordinary DAC and
+WALK/LOPEN. Component WALK checks directory type before search permission; LOPEN
+rejects symlinks before access checks, preserving the ordinary single-hop rule.
+Each program retains one admission-time identity value; retries cannot borrow a
+worker's identity or recapture later grants. Negative remote EAGAIN remains a
+terminal outcome. Program outcomes still require the owner's abort/deadline,
+physical-release and final publication gates.
+
+The actual permission implementation and wire/submission path pass 4,608 DAC
+combinations, 18,711 total assertions including setup/wire checks, and 15 targeted
+mutants under ASan/UBSan. ARM64 compilation passes without libc dependency.
+Raw source/binary hashes rechecked; a masked success-guard witness was repaired,
+and earlier failures retained. This is bounded host evidence with explicit
+lock/wake/death boundaries, not actual creator admission or native engine proof.
+Canonical kernel remains unchanged. Read program-draft/self-review.txt and
+next-work.txt for coherent owner/FID/buffer/READY/close integration next, before
+AS3/4 and MM0-MM4. Mac released; no activation or128MiB protection change.

@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Read wire-draft and rpc-draft self-review/next-work. Verified uninstalled wire adapter distinguishes local no-wire EAGAIN from remote error. Integrate one expectation/payload owner, staged DAC and FID/buffer admission, fair READY progress and close physical disposal coherently; AS3/4 then MM0-MM4.",
+  "next": "Read program-draft/next-work and self-review. Unify charged owner with staged program and single expectation/payload; persist fresh constructor identity. Complete actual FID/fixed/pool admission, fair READY and close disposal together before installation. Then native/source-matched gates, AS3/4, MM0-MM4.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -26,5 +26,6 @@
   "fid_draft": "fid-draft/state.json",
   "fid_integration": "fid-integration/state.json",
   "rpc_draft": "rpc-draft/state.json",
-  "wire_draft": "wire-draft/state.json"
+  "wire_draft": "wire-draft/state.json",
+  "program_draft": "program-draft/state.json"
 }

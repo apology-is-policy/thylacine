@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ mask.c
+@@ -38,7 +38,7 @@
+         return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+     if(p->phase==LPROGRAM_STAT) {
+         u64 needed=P9_GETATTR_MODE|P9_GETATTR_UID|P9_GETATTR_GID;
+-        if(p->wire.kind!=P9_TGETATTR || r->result || (r->attr.valid&needed)!=needed)
++        if(p->wire.kind!=P9_TGETATTR || r->result || (r->attr.valid&(needed&~P9_GETATTR_GID))!=(needed&~P9_GETATTR_GID))
+             return program_end(p,-T_E_IO,LPROGRAM_ABORT);
+         // Native private services use the local numeric authority domain.
+         // They are never foreign/cape mounts; no identity is taken from worker.

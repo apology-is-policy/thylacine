@@ -1,0 +1,7 @@
+{
+  "work/oct5-as-r9/astra-takeover/program-draft/kernel/loom_service_program.c": "63f82c07d5236e33baac33ec93e384ab782ddc4c32fec6e75588cd669ae5ba8f",
+  "work/oct5-as-r9/astra-takeover/program-draft/kernel/include/thylacine/loom_service_program.h": "85a744f3c29f7391ecb16303cee55861ee35ae54fe28a945c9c887e93262e969",
+  "work/oct5-as-r9/astra-takeover/wire-draft/kernel/include/thylacine/loom_service_wire.h": "c3d55e55fd8f61f00cadd7343fc310ce0adef99377ef7e7e7f973b28f1e7a4f3",
+  "kernel/include/thylacine/proc.h": "37cbad04d411160469a2c910a17e131bc025cc784e7aae8baf4c53103219f3ec",
+  "kernel/include/thylacine/perm.h": "55565ef5194458234fdeb081813d39251ad7c0650894daa9395daf817db94670"
+}

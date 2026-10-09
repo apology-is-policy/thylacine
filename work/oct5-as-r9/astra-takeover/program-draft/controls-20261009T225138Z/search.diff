@@ -1,0 +1,11 @@
+--- kernel/loom_service_program.c
++++ search.c
+@@ -49,7 +49,7 @@
+             // Match ordinary single-hop fail ordering: type before X-search.
+             if(!(r->attr.qid.type&P9_QTDIR))
+                 return program_end(p,-T_E_NOTDIR,LPROGRAM_TERMINAL);
+-            want=PERM_X;
++            want=PERM_R;
+         } else if(p->operation==P9_TLOPEN) {
+             // Relative private FIDs have no namespace symlink resolver. A
+             // link's permissive mode cannot authorize opening its target.

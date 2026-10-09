@@ -2535,3 +2535,12 @@ callback status: a remote EAGAIN cannot license replay. Host 156 checks/14 mutan
 and ARM64 compilation pass; real native engine, ordinary DAC, payload ownership
 and close integration still require qualification. See wire-draft/self-review.txt
 for checked host boundaries and next-work.txt for coherent integration duties.
+
+Astra October 10 staged authority program remains uninstalled (`program-draft`).
+GETATTR precedes component WALK search and LOPEN access; symlink opens refuse
+before DAC, and owner-first permission uses a per-operation captured identity.
+Program NEXT/TERMINAL/ABORT are tentative driver outcomes, not CQ or publication.
+The real permission and wire path pass4608 permission combinations/15 mutants,
+with explicit host boundaries and ARM64 compilation. Constructor identity
+retention, actual FID/payload admission and READY/close integration remain ahead;
+see program-draft/self-review.txt and next-work.txt. No native runtime claim.
