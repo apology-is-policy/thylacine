@@ -87,6 +87,14 @@ static void test_proc_drop(struct Proc *p) {
 #include "loom_receipt_fixture.h"
 #include "loom_private_fixture.h"
 #include "loom_slots_fixture.h"
+#include "loom_nodes_fixture.h"
+
+void test_loom_service_nodes(void);
+void test_loom_service_nodes(void) {
+    const char *error = loom_nodes_fixture();
+    TEST_ASSERT(!error, error);
+}
+
 #include "loom_pool_table_fixture.h"
 
 void test_loom_service_pool_table(void) {

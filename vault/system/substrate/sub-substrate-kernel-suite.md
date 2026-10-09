@@ -295,3 +295,15 @@ allocator reclamation and absent optional graphics probes remain unqualified.
 Self-review only. No Main landing, private async/clipboard activation or removal
 of the 128 MiB protection. Preserve all pinned artifact generations; current
 free disk is about 8.5 GiB, so recheck admission before further heavy work.
+
+
+## October 9: scope/fid reservation module witness
+
+`loom.service_nodes` raises the suite to 1844 and invokes the same actual metadata
+modules/fixture as the host sanitizer runner. It tests shared quota, provisional
+child parent pins, rollback, exact identities, borrow refusal, abort versus
+publication and cleanup after close. Parent protocol states are explicitly
+simulated; this is no CONNECT, authority, allocator or concurrency witness.
+The table is not yet owned by a runtime Loom. Diagnostic nodes-diagnostic-
+20261009T035230Z passed 1844/1844 and D7 overlap/twenty cycles/banner. Full Mac
+matrix is pending for this source; previous target-source50/50 had1843 rows.

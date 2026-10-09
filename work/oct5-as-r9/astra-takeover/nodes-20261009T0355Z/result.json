@@ -1,0 +1,99 @@
+{
+  "inputs": {
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/include/thylacine/loom_service_nodes.h": "2f3c3b04c0bb999efb21fea6ee6dc1a9a27082adcdea1361a7ed7d96c5257722",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_nodes_fixture.h": "34380b4d5ea2a3fe6bdb2e8bcada660e6107ce5c91378d2d0fb4bce8debb1bcb",
+    "tools/host-tests/loom-service-nodes.c": "c1cdcd32c81ef3f1c3adde57ce53f9429119f8fe47c182769e1507bc67506f5e",
+    "tools/test-loom-service-nodes.py": "f3d32fadf0d73ea55b726a9990c9184cd48175e345d9438766d10188ac2d554a",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+      "binary_sha256": "5386f83e27334067a3cfebad157d7baee60ef02485c2a0d81fa1dfa0ad63e02b"
+    },
+    {
+      "case": "parent-zero",
+      "expected": "scope parent must be zero",
+      "rc": 1,
+      "generated_sha256": "19a68b1038a9ce5ef843a36b6aa663886612dfa29a7bdde8a20ebc5a44da0200",
+      "binary_sha256": "8ce77de6a087e981e6129a3a1b2b4edaace18ef734160b4f777203a2b4917b89"
+    },
+    {
+      "case": "parent-ready",
+      "expected": "unused scope cannot authorize child",
+      "rc": 1,
+      "generated_sha256": "b098f8fa7cd682264b341194bf66d7fc6ef50dc61957dfa202a29b001dd785be",
+      "binary_sha256": "5aa7286d1437fd1449ee00aacffb57bc08c3256178b516de8e9582cb115ed6fb"
+    },
+    {
+      "case": "omit-parent-pin",
+      "expected": "provisional child retains parent",
+      "rc": 1,
+      "generated_sha256": "1faf752e2f269e61497698f9ce4367146da20622d1956990558ae08621a5fa2a",
+      "binary_sha256": "7b93b4e74ed45bf213c1c3766dd031e1d7c458d821bce239eae62b14bc7c1ca8"
+    },
+    {
+      "case": "early-visible",
+      "expected": "provisional scope cannot be borrowed",
+      "rc": 1,
+      "generated_sha256": "9892c67b90860938fdab8a434c0f609e7c5eb48c5bbc8e636c92a8be87c04eec",
+      "binary_sha256": "1e340860b861e6fee9a0036c981b0ec916541a39341c0c2a37dd9fca3e64de1a"
+    },
+    {
+      "case": "quota-parent-leak",
+      "expected": "quota refusal restores parent and output",
+      "rc": 1,
+      "generated_sha256": "dbe31cc20340e66d9b76f1a937602f49d70f1da2fd0ac606c56ba1ee1ed57407",
+      "binary_sha256": "04556bb66593080d9f600b1fb9e43b1c2b53212039c9c69e8f57dd500b9a4621"
+    },
+    {
+      "case": "omit-parent-drop",
+      "expected": "child rollback releases parent and both ledgers",
+      "rc": 1,
+      "generated_sha256": "351a1b6ad0c0683751e9f2850599f9f716226d81ca84097999e733c325b62053",
+      "binary_sha256": "2bbbcd17dbc8bd16b18599c8f4a129ab5fb2f9a47e37ac72c4733cbbdaefef40"
+    },
+    {
+      "case": "stale-remove",
+      "expected": "stale child cannot release replacement parent",
+      "rc": 1,
+      "generated_sha256": "67804ed0bc9243a7cbb2d8ab857760ac4b1b6b842d87579884d05fc25cf48ea2",
+      "binary_sha256": "4c3ca6400d2401a6b65c2ff39ebd8c2b9063f976df90f4b7347cc8da2b16ee5d"
+    },
+    {
+      "case": "allow-borrow-reap",
+      "expected": "borrowed unused child cannot be reaped",
+      "rc": 1,
+      "generated_sha256": "90b1282578d7f68b085f81a0fed95c63dc32d46b945580071732d9d248bb001b",
+      "binary_sha256": "58f5d65434d38d4077e9be02a752b6ccee8113c519547152901e4a9d77fe2608"
+    },
+    {
+      "case": "allow-ready-reap",
+      "expected": "ready scope cannot use unused reap",
+      "rc": 1,
+      "generated_sha256": "f9590f966bebb02dcf64a73a4b35bad6f735c57d450ff9a97d461a125100b1dd",
+      "binary_sha256": "e4c62fc1c22692605fcec9da91e85b9e409a64397987a3e1b373268cf51e17ab"
+    },
+    {
+      "case": "abort-publish",
+      "expected": "parent abort wins child publication without losing pins",
+      "rc": 1,
+      "generated_sha256": "3c73b05784a619ff323c431af4e20540a28df52e897e02d98d94d232fdb8de1b",
+      "binary_sha256": "51f776fd94ec8ecf7fe7d9794e5306abe395d22d1a2fb8917ed8a079bcd278b8"
+    },
+    {
+      "case": "omit-slot-reap",
+      "expected": "closed unused child cleanup releases parent",
+      "rc": 1,
+      "generated_sha256": "3adf293dd0e981b19f760d2b7b4259a654dbacd9085daa726b7ce305d71ab7fe",
+      "binary_sha256": "812c0f3f7bcdc6f40d684d54b30a8790fb0292cab249a305baf691d5e9987fa0"
+    }
+  ]
+}

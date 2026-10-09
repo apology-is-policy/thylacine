@@ -1,0 +1,97 @@
+{
+  "inputs": {
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/include/thylacine/loom_service_nodes.h": "2f3c3b04c0bb999efb21fea6ee6dc1a9a27082adcdea1361a7ed7d96c5257722",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_nodes_fixture.h": "34380b4d5ea2a3fe6bdb2e8bcada660e6107ce5c91378d2d0fb4bce8debb1bcb",
+    "tools/host-tests/loom-service-nodes.c": "c1cdcd32c81ef3f1c3adde57ce53f9429119f8fe47c182769e1507bc67506f5e",
+    "tools/test-loom-service-nodes.py": "eca20f792c8127fc7de0cfc20882cf59ba445ff3374edbcc57965696226b1dc8"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+      "binary_sha256": "c613fe14743938e250176275a214576758d7946a2fae276901860a34ded823a6"
+    },
+    {
+      "case": "parent-zero",
+      "expected": "scope parent must be zero",
+      "rc": 1,
+      "generated_sha256": "19a68b1038a9ce5ef843a36b6aa663886612dfa29a7bdde8a20ebc5a44da0200",
+      "binary_sha256": "bb2add0ab15ec81cd2be42fdc285d6280bf7066fec330034ca49022a987497fc"
+    },
+    {
+      "case": "parent-ready",
+      "expected": "unused scope cannot authorize child",
+      "rc": 1,
+      "generated_sha256": "b098f8fa7cd682264b341194bf66d7fc6ef50dc61957dfa202a29b001dd785be",
+      "binary_sha256": "e955e6de440df9608a0134082a43df5cc74b8128351f75de410679170b9c4afa"
+    },
+    {
+      "case": "omit-parent-pin",
+      "expected": "provisional child retains parent",
+      "rc": 1,
+      "generated_sha256": "1faf752e2f269e61497698f9ce4367146da20622d1956990558ae08621a5fa2a",
+      "binary_sha256": "6f882c1e826ce723220ff208667d3872c83aefce1f1e5ac1faf77714cc2c2587"
+    },
+    {
+      "case": "early-visible",
+      "expected": "provisional scope cannot be borrowed",
+      "rc": 1,
+      "generated_sha256": "9892c67b90860938fdab8a434c0f609e7c5eb48c5bbc8e636c92a8be87c04eec",
+      "binary_sha256": "2c070c6cc095b89857b11f92bdefbbfdace7d1b1ffe0d05c064fbf88fd05d299"
+    },
+    {
+      "case": "quota-parent-leak",
+      "expected": "quota refusal restores parent and output",
+      "rc": 1,
+      "generated_sha256": "dbe31cc20340e66d9b76f1a937602f49d70f1da2fd0ac606c56ba1ee1ed57407",
+      "binary_sha256": "4d06aae9d6a4c749baa821c1a3b9c1f82476ba73f49c17da2064de8f866eb8f1"
+    },
+    {
+      "case": "omit-parent-drop",
+      "expected": "child rollback releases parent and both ledgers",
+      "rc": 1,
+      "generated_sha256": "351a1b6ad0c0683751e9f2850599f9f716226d81ca84097999e733c325b62053",
+      "binary_sha256": "28ba36784bfc139ecf52d68337e0f965f5528420e929ffaf02a7e9829f3c89a2"
+    },
+    {
+      "case": "stale-remove",
+      "expected": "stale child cannot release replacement parent",
+      "rc": 1,
+      "generated_sha256": "67804ed0bc9243a7cbb2d8ab857760ac4b1b6b842d87579884d05fc25cf48ea2",
+      "binary_sha256": "c2be2262be5b9dbdd856deea8ac9a4d41f103d1d04e2e210d2264db64cdb9dc5"
+    },
+    {
+      "case": "allow-borrow-reap",
+      "expected": "borrowed unused child cannot be reaped",
+      "rc": 1,
+      "generated_sha256": "90b1282578d7f68b085f81a0fed95c63dc32d46b945580071732d9d248bb001b",
+      "binary_sha256": "0d9269f731737c1052687194889d4f8c727c688da363a18b5bea544290ffa19d"
+    },
+    {
+      "case": "allow-ready-reap",
+      "expected": "ready scope cannot use unused reap",
+      "rc": 1,
+      "generated_sha256": "f9590f966bebb02dcf64a73a4b35bad6f735c57d450ff9a97d461a125100b1dd",
+      "binary_sha256": "37550135d354858d31a52b0432e09dadd264c62b4c8306afc7966268c908df62"
+    },
+    {
+      "case": "abort-publish",
+      "expected": "parent abort wins child publication without losing pins",
+      "rc": 1,
+      "generated_sha256": "3c73b05784a619ff323c431af4e20540a28df52e897e02d98d94d232fdb8de1b",
+      "binary_sha256": "419dc2b121a734eff53ea3db9d8699edabb20e8f83a4bc334e685284754c8136"
+    },
+    {
+      "case": "omit-slot-reap",
+      "expected": "closed unused child cleanup releases parent",
+      "rc": 1,
+      "generated_sha256": "3adf293dd0e981b19f760d2b7b4259a654dbacd9085daa726b7ce305d71ab7fe",
+      "binary_sha256": "9503d4c090281e2a39cf9db8a8b139fe102e1d3f99c6e04a4bb79a661b3a4f84"
+    }
+  ]
+}

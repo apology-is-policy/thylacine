@@ -1,0 +1,431 @@
+diff --git a/kernel/CMakeLists.txt b/kernel/CMakeLists.txt
+index d5def9288..4395e4fba 100644
+--- a/kernel/CMakeLists.txt
++++ b/kernel/CMakeLists.txt
+@@ -67,6 +67,7 @@ set(KERNEL_SRCS
+     loom_service_pool.c
+     loom_service_pool_table.c
+     loom_service_slots.c
++    loom_service_nodes.c
+     weft.c
+     vma.c
+     elf.c
+diff --git a/kernel/include/thylacine/loom_service_nodes.h b/kernel/include/thylacine/loom_service_nodes.h
+new file mode 100644
+index 000000000..9d4bd3bb2
+--- /dev/null
++++ b/kernel/include/thylacine/loom_service_nodes.h
+@@ -0,0 +1,33 @@
++// Internal SCOPE/FID reservation metadata; no protocol storage or user ABI.
++#ifndef THYLACINE_LOOM_SERVICE_NODES_H
++#define THYLACINE_LOOM_SERVICE_NODES_H
++#include <thylacine/loom_service_slots.h>
++struct loom_service_node {
++    struct loom_service_ref parent; // zero for SCOPE, exact pinned SCOPE for FID
++    u32 state;
++    u32 reserved;
++};
++struct loom_service_node_table {
++    struct loom_service_node nodes[LOOM_SERVICE_SLOT_COUNT];
++};
++_Static_assert(sizeof(struct loom_service_node) == 24, "scope/fid reservation ledger");
++_Static_assert(sizeof(struct loom_service_node_table) == 1536, "scope/fid table ledger");
++// Zero once with its owner. Every call holds the SAME ring lock as the shared
++// slot ledger and retains the ring. No allocation, usercopy, callbacks or drops.
++// The eventual owner must charge this storage before use; no Loom owns it yet.
++// The engine alone advances state beyond RESERVED under that lock, after actual
++// protocol/lifetime checks. Tests may simulate READY/ABORTING; this module does
++// not provide a way to claim a handshake succeeded or a scope locally retired.
++int loom_service_node_prepare(struct loom_slot_table *, struct loom_service_node_table *,
++                             u32 kind, struct loom_service_ref parent,
++                             struct loom_service_ref *out);
++int loom_service_node_publish(struct loom_slot_table *, struct loom_service_node_table *,
++                             struct loom_service_ref);
++int loom_service_node_rollback(struct loom_slot_table *, struct loom_service_node_table *,
++                              struct loom_service_ref);
++// Only an unused RESERVED node may be reaped here. Admitted/ready/aborting/
++// retired nodes require future engine cleanup and terminal-publication proof.
++int loom_service_node_reap_unused(struct loom_slot_table *, struct loom_service_node_table *,
++                                 struct loom_service_ref);
++bool loom_service_nodes_empty(const struct loom_service_node_table *);
++#endif
+diff --git a/kernel/loom_service_nodes.c b/kernel/loom_service_nodes.c
+new file mode 100644
+index 000000000..fe411d16d
+--- /dev/null
++++ b/kernel/loom_service_nodes.c
+@@ -0,0 +1,115 @@
++// Shared quota + parent retention for unused scope/fid reservations. Under the
++// owner lock, a FID pins its exact READY parent BEFORE reserving a shared slot.
++// A provisional child already keeps that parent from being reaped. Publication
++// rechecks parent admission: abort can win during unlocked usercopy. All failure
++// paths preserve caller output and unwind the parent pin; incarnation burns are
++// never rewound. Rollback/reap validate every refusal before changing either
++// ledger; parent unpin remains legal after close/abort. This metadata module
++// proves neither protocol state nor actual allocator/refcount ownership. Owner
++// charging, usercopy, CONNECT/WALK and local retirement remain engine obligations.
++#include <thylacine/loom_service_nodes.h>
++#include <thylacine/errno.h>
++
++static struct loom_service_node *node_exact(struct loom_slot_table *t,
++                         struct loom_service_node_table *nodes,
++                         struct loom_service_ref ref, u32 phase) {
++    if (!t || !nodes || ref.reserved || !ref.incarnation ||
++        ref.slot >= LOOM_SERVICE_SLOT_COUNT) return NULL;
++    struct loom_service_slot *s = &t->slots[ref.slot];
++    if (s->phase != phase || s->incarnation != ref.incarnation ||
++        (s->kind != LOOM_SERVICE_SCOPE && s->kind != LOOM_SERVICE_FID)) return NULL;
++    return &nodes->nodes[ref.slot];
++}
++static bool node_zero_ref(struct loom_service_ref ref) {
++    return !ref.slot && !ref.reserved && !ref.incarnation;
++}
++static bool node_parent_held(struct loom_slot_table *t, struct loom_service_ref ref) {
++    if (ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
++        return false;
++    struct loom_service_slot *s = &t->slots[ref.slot];
++    return s->incarnation == ref.incarnation && s->kind == LOOM_SERVICE_SCOPE &&
++           (s->phase == LSLOT_LIVE || s->phase == LSLOT_RETIRING) && s->pins;
++}
++static bool node_parent_ready(struct loom_slot_table *t,
++                              struct loom_service_node_table *nodes,
++                              struct loom_service_ref ref) {
++    struct loom_service_node *p = node_exact(t, nodes, ref, LSLOT_LIVE);
++    return p && t->slots[ref.slot].kind == LOOM_SERVICE_SCOPE &&
++           p->state == LOOM_SERVICE_READY;
++}
++int loom_service_node_prepare(struct loom_slot_table *t,
++                              struct loom_service_node_table *nodes,
++                              u32 kind, struct loom_service_ref parent,
++                              struct loom_service_ref *out) {
++    if (!t || !nodes || !out ||
++        (kind != LOOM_SERVICE_SCOPE && kind != LOOM_SERVICE_FID)) return -T_E_INVAL;
++    if (kind == LOOM_SERVICE_SCOPE && !node_zero_ref(parent)) return -T_E_INVAL;
++    if (t->closing) return -T_E_CANCELED;
++    if (kind == LOOM_SERVICE_FID) {
++        if (!node_parent_ready(t, nodes, parent)) return -T_E_NOENT;
++        int rc = loom_slot_pin(t, parent, LOOM_SERVICE_SCOPE);
++        if (rc) return rc;
++    }
++    struct loom_service_ref ref;
++    int rc = loom_slot_reserve(t, kind, &ref);
++    if (!rc && nodes->nodes[ref.slot].state != LOOM_SERVICE_EMPTY) {
++        // A caller must not mix raw reservations with unretired node payloads.
++        (void)loom_slot_rollback(t, ref);
++        rc = -T_E_BUSY;
++    }
++    if (rc) {
++        if (kind == LOOM_SERVICE_FID) (void)loom_slot_unpin(t, parent);
++        return rc;
++    }
++    nodes->nodes[ref.slot] = (struct loom_service_node){
++        .parent = parent, .state = LOOM_SERVICE_RESERVED };
++    *out = ref;
++    return 0;
++}
++int loom_service_node_publish(struct loom_slot_table *t,
++                              struct loom_service_node_table *nodes,
++                              struct loom_service_ref ref) {
++    struct loom_service_node *n = node_exact(t, nodes, ref, LSLOT_PROVISIONAL);
++    if (!n || n->state != LOOM_SERVICE_RESERVED) return -T_E_NOENT;
++    if (t->slots[ref.slot].kind == LOOM_SERVICE_FID &&
++        !node_parent_ready(t, nodes, n->parent)) return -T_E_CANCELED;
++    return loom_slot_publish(t, ref);
++}
++static int node_remove(struct loom_slot_table *t, struct loom_service_node_table *nodes,
++                       struct loom_service_ref ref, bool rollback) {
++    struct loom_service_node *n = node_exact(t, nodes, ref,
++                                    rollback ? LSLOT_PROVISIONAL : LSLOT_LIVE);
++    if (!n) return -T_E_NOENT;
++    if (n->state != LOOM_SERVICE_RESERVED || t->slots[ref.slot].pins) return -T_E_BUSY;
++    bool child = t->slots[ref.slot].kind == LOOM_SERVICE_FID;
++    struct loom_service_ref parent = n->parent;
++    if (child ? !node_parent_held(t, parent) : !node_zero_ref(parent)) return -T_E_INVAL;
++    // Phase, incarnation and pins are stable under the common lock. These slot
++    // transitions cannot fail after validation; no freed identity is reused in
++    // between, and the parent remains retained until the child payload is gone.
++    *n = (struct loom_service_node){0};
++    if (rollback) (void)loom_slot_rollback(t, ref);
++    else {
++        (void)loom_slot_retire(t, ref);
++        (void)loom_slot_reap(t, ref);
++    }
++    if (child) (void)loom_slot_unpin(t, parent);
++    return 0;
++}
++int loom_service_node_rollback(struct loom_slot_table *t,
++                               struct loom_service_node_table *nodes,
++                               struct loom_service_ref ref) {
++    return node_remove(t, nodes, ref, true);
++}
++int loom_service_node_reap_unused(struct loom_slot_table *t,
++                                  struct loom_service_node_table *nodes,
++                                  struct loom_service_ref ref) {
++    return node_remove(t, nodes, ref, false);
++}
++bool loom_service_nodes_empty(const struct loom_service_node_table *nodes) {
++    if (!nodes) return false;
++    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
++        if (nodes->nodes[i].state != LOOM_SERVICE_EMPTY ||
++            !node_zero_ref(nodes->nodes[i].parent) || nodes->nodes[i].reserved) return false;
++    return true;
++}
+diff --git a/kernel/test/loom_nodes_fixture.h b/kernel/test/loom_nodes_fixture.h
+new file mode 100644
+index 000000000..858660a66
+--- /dev/null
++++ b/kernel/test/loom_nodes_fixture.h
+@@ -0,0 +1,104 @@
++// Real reservation and slot modules; simulated parent READY/ABORTING only.
++// No protocol, allocator, authority, usercopy or concurrent-lock claim.
++#ifndef LOOM_NODES_FIXTURE_H
++#define LOOM_NODES_FIXTURE_H
++#include <thylacine/loom_service_nodes.h>
++#include <thylacine/errno.h>
++#define LN_CHECK(c,msg) do { if (!(c)) return msg; } while (0)
++static const char *loom_nodes_fixture(void) {
++    static struct loom_slot_table slots;
++    static struct loom_service_node_table nodes;
++    static struct loom_service_ref others[LOOM_SERVICE_SLOT_COUNT];
++    for (size_t i=0;i<sizeof(slots);++i) ((u8 *)&slots)[i]=0;
++    for (size_t i=0;i<sizeof(nodes);++i) ((u8 *)&nodes)[i]=0;
++    struct loom_service_ref zero={0},scope,child,stale,second,failed={.slot=999,.incarnation=999};
++    LN_CHECK(loom_service_nodes_empty(&nodes), "initial node table empty");
++    LN_CHECK(loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_TARGET,zero,&failed)==-T_E_INVAL,
++             "target kind refused by node reservation");
++    LN_CHECK(loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_SCOPE,failed,&scope)==-T_E_INVAL,
++             "scope parent must be zero");
++    LN_CHECK(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_SCOPE,zero,&scope),
++             "scope provisional reservation");
++    LN_CHECK(loom_slot_pin(&slots,scope,LOOM_SERVICE_SCOPE)==-T_E_NOENT,
++             "provisional scope cannot be borrowed");
++    LN_CHECK(!loom_service_node_publish(&slots,&nodes,scope), "scope publication");
++    LN_CHECK(loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_FID,scope,&failed)==-T_E_NOENT,
++             "unused scope cannot authorize child");
++    // Stand-in for the future engine's successful CONNECT linearization. This
++    // assignment is deliberately NOT a production API or protocol witness.
++    nodes.nodes[scope.slot].state=LOOM_SERVICE_READY;
++    LN_CHECK(loom_service_node_reap_unused(&slots,&nodes,scope)==-T_E_BUSY,
++             "ready scope cannot use unused reap");
++    LN_CHECK(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_FID,scope,&child) &&
++             slots.slots[scope.slot].pins==1, "provisional child retains parent");
++    LN_CHECK(loom_slot_pin(&slots,child,LOOM_SERVICE_FID)==-T_E_NOENT,
++             "provisional child cannot be borrowed");
++    stale=child;
++    LN_CHECK(!loom_service_node_rollback(&slots,&nodes,child) &&
++             !slots.slots[scope.slot].pins && slots.slots[child.slot].phase==LSLOT_FREE &&
++             nodes.nodes[child.slot].state==LOOM_SERVICE_EMPTY,
++             "child rollback releases parent and both ledgers");
++    LN_CHECK(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_FID,scope,&child) &&
++             child.incarnation>stale.incarnation && child.slot==stale.slot &&
++             !loom_service_node_publish(&slots,&nodes,child), "child reuses slot with fresh identity");
++    LN_CHECK(loom_service_node_reap_unused(&slots,&nodes,stale)==-T_E_NOENT &&
++             slots.slots[scope.slot].pins==1, "stale child cannot release replacement parent");
++    LN_CHECK(!loom_slot_pin(&slots,child,LOOM_SERVICE_FID), "child metadata borrowed");
++    LN_CHECK(loom_service_node_reap_unused(&slots,&nodes,child)==-T_E_BUSY &&
++             slots.slots[scope.slot].pins==1 && nodes.nodes[child.slot].state==LOOM_SERVICE_RESERVED,
++             "borrowed unused child cannot be reaped");
++    LN_CHECK(!loom_slot_unpin(&slots,child), "child borrow released");
++    // Root metadata borrowers include children even if its engine changes state.
++    nodes.nodes[scope.slot].state=LOOM_SERVICE_RESERVED;
++    LN_CHECK(loom_service_node_reap_unused(&slots,&nodes,scope)==-T_E_BUSY,
++             "child pin prevents parent reuse");
++    nodes.nodes[scope.slot].state=LOOM_SERVICE_READY;
++    for (u32 i=0;i<LOOM_SERVICE_SLOT_COUNT-2;++i)
++        LN_CHECK(!loom_slot_reserve(&slots,LOOM_SERVICE_POOL,&others[i]) &&
++                 !loom_slot_publish(&slots,others[i]), "nodes share pool capacity");
++    u64 generation=slots.next_incarnation;
++    LN_CHECK(loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_FID,scope,&failed)==-T_E_NOSPC &&
++             slots.slots[scope.slot].pins==1 && generation==slots.next_incarnation &&
++             failed.slot==999 && failed.incarnation==999, "quota refusal restores parent and output");
++    for (u32 i=0;i<LOOM_SERVICE_SLOT_COUNT-2;++i)
++        LN_CHECK(!loom_slot_retire(&slots,others[i]) && !loom_slot_reap(&slots,others[i]), "pool cleanup");
++    LN_CHECK(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_FID,scope,&second),
++             "provisional child before parent abort");
++    nodes.nodes[scope.slot].state=LOOM_SERVICE_ABORTING;
++    LN_CHECK(loom_service_node_publish(&slots,&nodes,second)==-T_E_CANCELED &&
++             slots.slots[second.slot].phase==LSLOT_PROVISIONAL && slots.slots[scope.slot].pins==2,
++             "parent abort wins child publication without losing pins");
++    LN_CHECK(loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_FID,scope,&failed)==-T_E_NOENT,
++             "aborting parent refuses new child");
++    LN_CHECK(!loom_service_node_rollback(&slots,&nodes,second) && slots.slots[scope.slot].pins==1,
++             "rollback after abort releases parent");
++    loom_slots_close(&slots);
++    LN_CHECK(!loom_service_node_reap_unused(&slots,&nodes,child) && !slots.slots[scope.slot].pins &&
++             slots.slots[child.slot].phase==LSLOT_FREE && nodes.nodes[child.slot].state==LOOM_SERVICE_EMPTY,
++             "closed unused child cleanup releases parent");
++    LN_CHECK(loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_SCOPE,zero,&failed)==-T_E_CANCELED,
++             "close refuses node reservation");
++    // The real engine must handle ABORTING/RETIRED, with local-resource and
++    // terminal-publication proofs; this module must refuse to stand in for it.
++    LN_CHECK(loom_service_node_reap_unused(&slots,&nodes,scope)==-T_E_BUSY,
++             "aborting scope requires engine retirement");
++    nodes.nodes[scope.slot].state=LOOM_SERVICE_RETIRED;
++    LN_CHECK(loom_service_node_reap_unused(&slots,&nodes,scope)==-T_E_BUSY,
++             "retired scope requires engine retirement");
++    nodes.nodes[scope.slot].state=LOOM_SERVICE_RESERVED;
++    stale=scope;
++    LN_CHECK(!loom_service_node_reap_unused(&slots,&nodes,scope) && loom_service_nodes_empty(&nodes),
++             "unused scope cleanup empties node table");
++    // A fresh ring exercises close versus the separate copyout continuation.
++    for (size_t i=0;i<sizeof(slots);++i) ((u8 *)&slots)[i]=0;
++    LN_CHECK(!loom_service_node_prepare(&slots,&nodes,LOOM_SERVICE_SCOPE,zero,&scope),
++             "fresh scope before close");
++    loom_slots_close(&slots);
++    LN_CHECK(loom_service_node_publish(&slots,&nodes,scope)==-T_E_CANCELED &&
++             !loom_service_node_rollback(&slots,&nodes,scope) && loom_service_nodes_empty(&nodes),
++             "close wins scope publication and rollback progresses");
++    (void)stale;
++    return NULL;
++}
++#undef LN_CHECK
++#endif
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index df740bf46..986c793ae 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -667,6 +667,7 @@ void test_torpor_wake_two_waiters_count_bound(void);
+ void test_loom_create_geometry(void);
+ void test_loom_private_owner_lifecycle(void);
+ void test_loom_service_slots(void);
++void test_loom_service_nodes(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+ void test_loom_private_buffers(void);
+@@ -2752,6 +2753,7 @@ struct test_case g_tests[] = {
+     { "loom.private_fixed",              test_loom_private_fixed,              false, NULL },
+     { "loom.private_slot_owner",         test_loom_private_slot_owner,         false, NULL },
+     { "loom.service_pool_table",         test_loom_service_pool_table,         false, NULL },
++    { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
+     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
+     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
+     { "loom.create_rejects_bad_args",    test_loom_create_rejects_bad_args,    false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 9453ff99b..3fac5943c 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -87,6 +87,14 @@ static void test_proc_drop(struct Proc *p) {
+ #include "loom_receipt_fixture.h"
+ #include "loom_private_fixture.h"
+ #include "loom_slots_fixture.h"
++#include "loom_nodes_fixture.h"
++
++void test_loom_service_nodes(void);
++void test_loom_service_nodes(void) {
++    const char *error = loom_nodes_fixture();
++    TEST_ASSERT(!error, error);
++}
++
+ #include "loom_pool_table_fixture.h"
+ 
+ void test_loom_service_pool_table(void) {
+diff --git a/tools/host-tests/loom-service-nodes.c b/tools/host-tests/loom-service-nodes.c
+new file mode 100644
+index 000000000..3d0aeb05f
+--- /dev/null
++++ b/tools/host-tests/loom-service-nodes.c
+@@ -0,0 +1,8 @@
++#include <stdio.h>
++#include "../../kernel/test/loom_nodes_fixture.h"
++int main(void) {
++    const char *error = loom_nodes_fixture();
++    if (error) { fprintf(stderr,"FAIL %s\n",error); return 1; }
++    printf("PASS scope/fid reservations: %zu bytes\n",sizeof(struct loom_service_node_table));
++    return 0;
++}
+diff --git a/tools/test-loom-service-nodes.py b/tools/test-loom-service-nodes.py
+new file mode 100644
+index 000000000..4da50ac25
+--- /dev/null
++++ b/tools/test-loom-service-nodes.py
+@@ -0,0 +1,90 @@
++#!/usr/bin/env python3
++"""Actual scope/fid reservation module and shared guest/host fixture. Hold a Yip host lease.
++
++Sequential state/identity checks only: no proof of caller locking, allocation,
++authority, protocol terminality or payload accounting. Retain every mutant and
++require its named assertion, never an arbitrary crash or sanitizer diagnostic.
++"""
++import argparse
++import difflib
++import hashlib
++import json
++import os
++from pathlib import Path
++import shlex
++import subprocess
++
++ROOT = Path(__file__).resolve().parent.parent
++MUTANTS = [
++    ('parent-zero', 'kind == LOOM_SERVICE_SCOPE && !node_zero_ref(parent)', 'kind == LOOM_SERVICE_SCOPE && !node_zero_ref(parent) && false', 'scope parent must be zero'),
++    ('parent-ready', 'p->state == LOOM_SERVICE_READY;', 'p->state != LOOM_SERVICE_EMPTY;', 'unused scope cannot authorize child'),
++    ('omit-parent-pin', 'int rc = loom_slot_pin(t, parent, LOOM_SERVICE_SCOPE);', 'int rc = 0;', 'provisional child retains parent'),
++    ('early-visible', '    *out = ref;', '    (void)loom_slot_publish(t, ref);\n    *out = ref;', 'provisional scope cannot be borrowed'),
++    ('quota-parent-leak', 'if (kind == LOOM_SERVICE_FID) (void)loom_slot_unpin(t, parent);', 'if (kind == LOOM_SERVICE_FID && false) (void)loom_slot_unpin(t, parent);', 'quota refusal restores parent and output'),
++    ('omit-parent-drop', 'if (child) (void)loom_slot_unpin(t, parent);', 'if (child && false) (void)loom_slot_unpin(t, parent);', 'child rollback releases parent and both ledgers'),
++    ('stale-remove', ' || s->incarnation != ref.incarnation', '', 'stale child cannot release replacement parent'),
++    ('allow-borrow-reap', ' || t->slots[ref.slot].pins', '', 'borrowed unused child cannot be reaped'),
++    ('allow-ready-reap', 'n->state != LOOM_SERVICE_RESERVED || ', '', 'ready scope cannot use unused reap'),
++    ('abort-publish', '!node_parent_ready(t, nodes, n->parent)', '!node_parent_ready(t, nodes, n->parent) && false', 'parent abort wins child publication without losing pins'),
++    ('omit-slot-reap', '        (void)loom_slot_reap(t, ref);', '', 'closed unused child cleanup releases parent'),
++]
++
++
++
++def sha(path):
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--logs', type=Path, required=True)
++    args = parser.parse_args()
++    args.logs.mkdir(parents=True, exist_ok=False)
++    inputs = [ROOT / p for p in ('kernel/loom_service_nodes.c',
++              'kernel/include/thylacine/loom_service_nodes.h',
++              'kernel/include/thylacine/loom_service_abi.h',
++              'kernel/test/loom_nodes_fixture.h',
++              'tools/host-tests/loom-service-nodes.c',
++              'tools/test-loom-service-nodes.py', 'kernel/loom_service_slots.c',
++              'kernel/include/thylacine/loom_service_slots.h')]
++    original = inputs[0].read_text()
++    hashes = {str(p.relative_to(ROOT)): sha(p) for p in inputs}
++    results = []
++    for name, old, new, expected in [('control', None, None, None)] + MUTANTS:
++        source = original
++        if old is not None:
++            assert original.count(old) == 1, (name, original.count(old))
++            source = original.replace(old, new)
++        path = args.logs / (name + '.c')
++        path.write_text(source)
++        (args.logs / (name + '.diff')).write_text(''.join(difflib.unified_diff(
++            original.splitlines(True), source.splitlines(True),
++            fromfile='kernel/loom_service_nodes.c', tofile=name + '.c')))
++        exe = path.with_suffix('')
++        cmd = [os.environ.get('CC', 'clang'), '-std=c11', '-O1', '-Wall',
++               '-Wextra', '-Werror', '-I', str(ROOT / 'kernel/include'),
++               str(path), str(inputs[4]), str(ROOT / 'kernel/loom_service_slots.c'), '-o', str(exe),
++               '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
++        cmd += shlex.split(os.environ.get('CFLAGS', ''))
++        (args.logs / (name + '-command.json')).write_text(json.dumps(cmd) + '\n')
++        with (args.logs / (name + '-build.log')).open('wb') as out:
++            subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, check=True)
++        run = subprocess.run([str(exe.resolve())], capture_output=True,
++                             text=True, timeout=20)
++        (args.logs / (name + '.log')).write_text(run.stdout + run.stderr)
++        if expected:
++            assert run.returncode == 1 and run.stderr == f'FAIL {expected}\n', (
++                name, run.returncode, run.stdout, run.stderr)
++        else:
++            assert run.returncode == 0 and not run.stderr and run.stdout.startswith(
++                'PASS scope/fid reservations:'), (run.returncode, run.stdout, run.stderr)
++        results.append(dict(case=name, expected=expected, rc=run.returncode,
++                            generated_sha256=sha(path), binary_sha256=sha(exe)))
++        print('PASS', name, expected or run.stdout.strip(), flush=True)
++    assert hashes == {str(p.relative_to(ROOT)): sha(p) for p in inputs}
++    (args.logs / 'result.json').write_text(json.dumps(dict(
++        inputs=hashes, sanitized=True, results=results), indent=2) + '\n')
++
++
++if __name__ == '__main__':
++    main()

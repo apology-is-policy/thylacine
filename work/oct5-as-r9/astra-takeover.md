@@ -866,3 +866,50 @@ allocator reclamation and absent optional graphics probes remain unqualified.
 Self-review only. No Main landing, private async/clipboard activation or removal
 of the 128 MiB protection. Preserve all pinned artifact generations; current
 free disk is about 8.5 GiB, so recheck admission before further heavy work.
+
+
+## October 9: shared scope/fid reservation metadata
+
+The new internal loom_service_nodes module joins SCOPE/FID reservation metadata
+to the existing shared 64-slot ledger. SCOPE requires a zero parent; FID requires
+an exact published READY SCOPE. A child pins that parent before reserving its own
+slot, including while provisional across copyout. Capacity refusal unwinds the
+pin and leaves output unchanged. Rollback burns identity, clears both ledgers
+and unpins the parent. Publication rechecks parent READY, so abort during copyout
+wins without silently publishing a child. Ring close also rejects publication.
+
+Only unused RESERVED nodes with zero own borrows can use reap_unused. A parent's
+child pins prevent reuse, stale child refs cannot clear replacements, and child
+cleanup can release its parent after close/abort. READY/ADMITTED/ABORTING/RETIRED
+objects require future engine retirement with protocol/local/terminal proofs;
+this helper cannot bypass them. The module does no allocation, usercopy, callbacks
+or locking internally: all calls require the owner's shared ring lock and a
+retained owner. Each node is 24 bytes, the table 1536 bytes. It is compiled and
+fixture-tested but NOT YET allocated, charged or attached to a private Loom;
+no new runtime owner storage or private syscall activation is claimed.
+
+Self-review checked parent pin acquisition before slot publication, quota-failure
+unwind, exact parent/child incarnations, provisional invisibility, parent abort
+versus child publish, and refusal-before-mutation on reap. The shared native/host
+fixture explicitly simulates parent READY/ABORTING/RETIRED: it is not a handshake,
+authority, concurrent-lock or final-protocol-retirement witness.
+
+ASan/UBSan nodes-20261009T0355Z passes control plus eleven exact mutants; its input
+hashes include both the new module and actual shared slot source/header. The
+initial nodes-20261009T0352Z also passed, before expanding provenance coverage.
+Existing lifecycle model nodes-model-20261009T0355Z passes clean 5828 states and
+seven named counterexamples; it is the existing abstraction, not a C proof.
+Fresh default SMP1 passed 1844/1844, D7 overlap, twenty distinct cycles and banner.
+Evidence nodes-diagnostic-20261009T035230Z retains source579329177 plus exact diff,
+rebuilt ELF/bin, six stable input hashes and raw logs. Full current-source Mac
+matrix remains pending; previous 50/50 is limited to target source4ac2790ca.
+
+Next: integrate charged node storage and unused-node close cleanup into the
+private Loom, then scope/fid protocol resources, request/CQ admission, usercopy
+and bounded worker progress; continue async before MM0-MM4. Preserve the 128 MiB
+protection and disabled private async/clipboard; no Main landing. Self-review
+only, no independent audit. Pi/A72/KVM and final guest allocator reclamation
+remain open. To preserve disk headroom, 700 duplicate build archive logs were
+removed only after byte/hash equality with retained canonical verified logs;
+log-cache-reclaim-20261009T0355Z.json records every pair. No pinned input or
+canonical raw evidence was removed.
