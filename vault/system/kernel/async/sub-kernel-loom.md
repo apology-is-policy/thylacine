@@ -7,6 +7,8 @@ code:
   - kernel/loom.c
   - kernel/loom_service_slots.c
   - kernel/loom_service_requests.c
+  - kernel/loom_service_protocol.c
+  - kernel/include/thylacine/loom_service_protocol.h
   - kernel/include/thylacine/loom_service_requests.h
   - kernel/test/loom_requests_fixture.h
   - tools/host-tests/loom-service-requests.c
@@ -2001,3 +2003,69 @@ hashes and six inputs. The diagnostic's inherited `node_owner` JSON label checks
 `loom.private_requests` in its saved verifier. Lifecycle model clean5828 and
 seven named mutants pass in request-owner-model-20261009T0650Z. Full source
 SMP/UBSan qualification follows this checkpoint.
+
+
+## October 9 07:46 UTC: request gate verified; charged protocol preparation
+
+The request/terminal owner source45d26893bd8b5e16a3934eed008ae4804f5bff38
+passed all50 Mac HVF boots in current-gate-20261009T065820Z: default SMP1/4/8
+and kernel UBSan SMP4/8, ten each. All50 passed1847/1847 including request
+ledger/private CQ posting, D7 overlap, twenty distinct d7user00..19 cycles and
+banner. Both rc0; verifier retained100 raw logs and verified ten captured input
+hashes, clean source/end-source and clean Stratum61dde37. Minimum recorded
+admission15572MiB, floor8192 intact. Result:
+astra-takeover/current-gate-20261009T065820Z-result.json. Mac lease released.
+
+Continued directly into real prepublication protocol ownership. The new internal
+loom_service_protocol owner borrows an exact registered target, snapshots the
+live creator's stripes plus exact pinned image, prepares a fresh native SrvConn
+with ordinary weighted credits, and replaces the target borrow with its own
+Loom reference. It reserves the complete image page charge before allocation,
+then initializes the existing allocation-free client and exclusive native try
+adapter. Tversion is queued locally; no backlog publication or byte I/O occurs.
+Close is rechecked before returning ownership. Future CONNECT publication must
+still reserve the request/destination first and recheck deadline/abort under Ll.
+
+Native owner size42208 bytes (DWARF0xa4e0), rounded to16 buddy pages. Both RX and
+TX are separate class-sized allocations, disjoint from the client as required
+by the existing API: normal32KiB pays32 pages total, bulk128KiB pays80. This is
+additional to ring metadata and SrvConn's weighted credits, not MM0-MM4 global
+physical accounting. No bulk degradation or uncharged cache allocation at init.
+Exclusive unused release refuses a published connection unchanged. Otherwise it
+aborts/destroys the local cursor, releases native ownership, frees TX/RX/owner,
+refunds the retained exact image and drops Loom LAST, all final drops outside
+Ll/as locks. This cannot certify retirement of an admitted scope or live borrows.
+
+Self-review (not independent) is preserved in protocol-draft/self-review.txt.
+It caught and corrected an initial inline-TX alias against the preallocated
+API's disjoint-buffer contract before integration. Final actual-owner-C host
+ASan/UBSan evidence control-5 passes20 controls and11 named mutants, including
+that alias, all charge/free/ref edges, late close and published-cleanup refusal.
+Its boundary doubles are not a wire or guest physical-reclamation proof.
+
+Fresh native diagnostic protocol-owner-diagnostic-20261009T074413Z passes
+1848/1848, the actual native protocol-owner fixture on both buffer sizes,
+allocation/charge refusal, actual creator capture, absence of peer effects,
+unused cleanup and final Loom/image retention, plus D7 overlap/twenty distinct
+cycles/banner. Exact HEAD+diff, new source/header hashes, six input hashes and
+rebuilt ELF/bin retained and stable. This newer implementation still owes its
+full matrix; prior50/50 is limited to45d26893b.
+
+Failures retained and resolved: the initial native link emitted a freestanding
+memset libcall for the large fixture initializer; explicit byte-zeroing repaired
+it. Native diagnostic074015Z then failed1847/1848 because a bare proc_alloc
+fixture is absent from the kproc-rooted production identity walk. The fixture
+now uses existing proc_test_link/unlink and checks a positive identity snapshot
+before negative cases; production authority checks were not weakened. Initial
+Apple clang17 host ASan startup stalled before main; a retained process sample
+shows recursive sanitizer/dyld/malloc initialization, and the established LLVM22
+plus explicit SDK toolchain passes. No failed evidence was discarded.
+
+Continue autonomously through the new full gate and then bind prepared protocol
+ownership to exact scope/request publication, bounded executor progress and
+actual local retirement, followed by AS-3/4 and MM0-MM4. Do not rerun the completed
+protocol-draft installer/supervisor: their historical failure and manual recovery
+are recorded; canonical implementation is now in kernel/. Protected Astra files
+and clean Stratum pin rechecked. Private activation/clipboard remain disabled,
+Main untouched,128MiB protection retained. Pi/A72/KVM, final guest allocator
+reclamation and absent optional graphics remain unqualified. Self-review only.

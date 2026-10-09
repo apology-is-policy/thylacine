@@ -447,3 +447,16 @@ cleared receipt. Real owner retirement returns the charge. This is not a native
 service handshake or proof of runtime callback retirement. The diagnostic
 request-owner-diagnostic-20261009T064808Z passed1847/1847 and D7; full matrix
 qualification is pending for this newer source.
+
+
+## October 9: charged private protocol preparation fixture
+
+loom.private_protocol uses actual native target admission and preallocated client
+storage, with a process-tree-linked creator, both32/128KiB classes, three
+allocation refusal points, image budget refusal, no backlog/byte effects,
+published-owner cleanup refusal and final Loom/image retention. It exercises
+unpublished construction only, not CONNECT handshake or active retirement.
+Native protocol-owner-diagnostic-20261009T074413Z passes1848/1848 and D7; initial
+074015Z unlinked-creator fixture failure is retained with its repair. Request
+source45d26893b separately passes full50/50 at1847/1847; newer protocol source
+full matrix pending. See sub-kernel-loom and ASYNC-SERVICE-STATUS for self-review.

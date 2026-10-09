@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -81,7 +81,7 @@
+     if (msize != SRVCONN_MSIZE && msize != SRVCONN_BULK_MSIZE) {
+         devsrv_connect_release(&admission); loom_unref(l); return -T_E_INVAL;
+     }
+-    u32 pages = (u32)burrow_backing_pages(sizeof(struct loom_service_protocol)) +
++    u32 pages = 0 +
+                 (u32)burrow_backing_pages(msize);
+     if (msize > P9_CLIENT_OUT_BUF_MAX) pages += (u32)burrow_backing_pages(msize);
+     struct AddrSpace *as = l->service_as;

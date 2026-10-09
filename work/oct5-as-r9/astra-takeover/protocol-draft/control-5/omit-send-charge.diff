@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -80,7 +80,7 @@
+         devsrv_connect_release(&admission); loom_unref(l); return -T_E_INVAL;
+     }
+     u32 pages = (u32)burrow_backing_pages(sizeof(struct loom_service_protocol)) +
+-                2u * (u32)burrow_backing_pages(msize);
++                1u * (u32)burrow_backing_pages(msize);
+     struct AddrSpace *as = l->service_as;
+     spin_lock(&as->lock);
+     bool charged = addrspace_charge_pages(as, pages,

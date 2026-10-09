@@ -1,0 +1,1512 @@
+
+*** Dumping AST Record Layout
+         0 | struct p9_outstanding
+         0 |   _Bool active
+         1 |   u8 kind
+         4 |   u32 fid
+         8 |   u32 new_fid
+        12 |   u32 op_id
+        16 |   _Bool awaiting_flush
+        17 |   _Bool owner_waits
+        18 |   _Bool abandoned
+        19 |   _Bool holds_slot
+        20 |   u16 flush_oldtag
+        22 |   u16 wga_nwname
+           | [sizeof=24, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct p9_qid
+         0 |   u8 type
+         4 |   u32 version
+         8 |   u64 path
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct spin_lock
+         0 |   u32 value
+           | [sizeof=4, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct t_dma_seg
+         0 |   u64 pa
+         8 |   u64 len
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_jit_region
+         0 |   u64 writer_va
+         8 |   u64 exec_va
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_pty_interaction_state
+         0 |   u32 version
+         4 |   u32 flags
+         8 |   u64 binding_id
+        16 |   u64 pts_id
+        24 |   u64 foreground_epoch
+        32 |   u64 acknowledged_epoch
+        40 |   u64 revision
+        48 |   u32 controlling_sid
+        52 |   u32 foreground_pgid
+        56 |   u64 subject_stripes
+        64 |   u64 binder_stripes
+        72 |   u32 binder_pid
+        76 |   u32 reserved
+           | [sizeof=80, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_pty_interaction_check
+         0 |   u32 version
+         4 |   u32 size
+         8 |   u64 expected_epoch
+        16 |   u64 subject_stripes
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_timespec
+         0 |   s64 tv_sec
+         8 |   s64 tv_nsec
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_pci_bar
+         0 |   u64 pa
+         8 |   u64 size
+        16 |   u8 present
+        17 |   u8 is_64
+        18 |   u8[6] _pad
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_pci_region
+         0 |   u32 offset
+         4 |   u32 length
+         8 |   u8 bar
+         9 |   u8 present
+        10 |   u8[2] _pad
+           | [sizeof=12, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct t_pci_shm
+         0 |   u64 offset
+         8 |   u64 length
+        16 |   u8 bar
+        17 |   u8 present
+        18 |   u8 shmid
+        19 |   u8[5] _pad
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_pci_info
+         0 |   struct t_pci_bar[6] bars
+       144 |   struct t_pci_region[4] regions
+       192 |   u32 notify_off_multiplier
+       196 |   u32 intid
+       200 |   u8 intid_valid
+       201 |   u8 bus
+       202 |   u8 dev
+       203 |   u8 fn
+       204 |   u16 virtio_device_id
+       206 |   u8[2] _pad
+       208 |   struct t_pci_shm[2] shm
+           | [sizeof=256, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_hw_window
+         0 |   u64 base
+         8 |   u64 size
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_allowance_desc
+         0 |   struct t_hw_window[8] mmio
+       128 |   u32 mmio_count
+       132 |   u32 irq_count
+       136 |   u32[8] irq
+       168 |   u64 dma_max
+       176 |   u32 pci_count
+       180 |   u32[8] pci
+       212 |   u32 _pad_pci
+           | [sizeof=216, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct srv_peer_info
+         0 |   u64 stripes
+         8 |   u64 caps
+        16 |   u32 console
+        20 |   u32 alive
+        24 |   u32 principal_id
+        28 |   u32 primary_gid
+        32 |   u32 flags
+        36 |   u32 pid
+           | [sizeof=40, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_stat
+         0 |   u64 size
+         8 |   u64 qid_path
+        16 |   u64 atime_sec
+        24 |   u64 mtime_sec
+        32 |   u64 ctime_sec
+        40 |   u32 mode
+        44 |   u32 nlink
+        48 |   u32 qid_vers
+        52 |   u8 qid_type
+        53 |   u8[3] _pad_qid
+        56 |   u32 blksize
+        60 |   u32 _pad_blksize
+        64 |   u64 blocks
+        72 |   u32 uid
+        76 |   u32 gid
+        80 |   u32 devno
+        84 |   u32 _pad_dev
+           | [sizeof=88, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_user_regs
+         0 |   u64[31] regs
+       248 |   u64 sp
+       256 |   u64 pc
+       264 |   u64 pstate
+           | [sizeof=272, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct t_user_fpregs
+         0 |   u8[512] vregs
+       512 |   u32 fpsr
+       516 |   u32 fpcr
+           | [sizeof=520, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct t_kernel_regs
+         0 |   u64[10] x
+        80 |   u64 fp
+        88 |   u64 lr
+        96 |   u64 sp
+       104 |   u64 tpidr_el0
+           | [sizeof=112, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct sys_spawn_args
+         0 |   u64 name_va
+         8 |   u64 argv_data_va
+        16 |   u64 fd_list_va
+        24 |   u32 name_len
+        28 |   u32 argv_data_len
+        32 |   u32 argc
+        36 |   u32 fd_count
+        40 |   u32 perm_flags
+        44 |   u32 _pad_envp
+        48 |   u64 cap_mask
+        56 |   u32 principal_id
+        60 |   u32 primary_gid
+        64 |   u64 supp_gids_va
+        72 |   u32 supp_gid_count
+        76 |   u32 identity_flags
+        80 |   u64 allowance_va
+        88 |   u32 allowance_flags
+        92 |   u32 page_budget
+        96 |   u32 pheno_flags
+       100 |   u32 debug_flags
+           | [sizeof=104, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_dirfid_ent
+         0 |   u64 qid_path
+         8 |   u32 fid
+        12 |   _Bool valid
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct pollfd
+         0 |   s32 fd
+         4 |   s16 events
+         6 |   s16 revents
+           | [sizeof=8, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct p9_transport_try_ops
+         0 |   int (*)(void *, const u8 *, size_t) send
+         8 |   int (*)(void *, u8 *, size_t) recv
+        16 |   void (*)(void *) abort
+        24 |   void * ctx
+           | [sizeof=32, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_transport_progress
+         0 |   struct p9_transport * transport
+         8 |   struct p9_transport_try_ops ops
+         8 |     int (*)(void *, const u8 *, size_t) send
+        16 |     int (*)(void *, u8 *, size_t) recv
+        24 |     void (*)(void *) abort
+        32 |     void * ctx
+        40 |   const u8 * tx
+        48 |   size_t tx_len
+        56 |   size_t tx_sent
+        64 |   size_t rx_have
+        72 |   size_t rx_goal
+        80 |   size_t frame_limit
+        88 |   _Bool aborted
+        89 |   _Bool bytes_sent
+           | [sizeof=96, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_client_ctl::(unnamed at /Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/9p_client.h:438:5)
+         0 |   u16 tag
+         2 |   _Bool done
+         3 |   _Bool async
+         4 |   u8 kind
+         8 |   u32 fid
+           | [sizeof=12, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct srv_route
+         0 |   u32 name_len
+         4 |   u32 reserved
+         8 |   u8[32] name
+           | [sizeof=40, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct devsrv_svc_ref
+         0 |   u64 magic
+         8 |   u8 name_len
+         9 |   char[32] name
+        48 |   struct SrvRegistry * reg
+        56 |   int open_errno
+           | [sizeof=64, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct Rendez
+         0 |   struct spin_lock lock
+         0 |     u32 value
+         8 |   struct Thread * waiter
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct poll_waiter_list
+         0 |   struct spin_lock lock
+         0 |     u32 value
+         8 |   struct poll_waiter * head
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct SrvService
+         0 |   u64 magic
+         8 |   enum srv_state state
+        12 |   _Bool accept_active
+        13 |   _Bool cap_posted
+        16 |   u64 cap_scope
+        24 |   u64 generation
+        32 |   u64 qid_path
+        40 |   u8 name_len
+        41 |   char[32] name
+        80 |   u64 poster_stripes
+        88 |   int poster_pid
+        92 |   enum srv_mode mode
+        96 |   u32 ring_msize
+       100 |   _Bool cape
+       101 |   _Bool remote
+       104 |   struct SrvConn *[16] backlog
+       232 |   u32 backlog_head
+       236 |   u32 backlog_tail
+       240 |   u32 backlog_count
+       248 |   struct Rendez accept_rendez
+       248 |     struct spin_lock lock
+       248 |       u32 value
+       256 |     struct Thread * waiter
+       264 |   struct poll_waiter_list poll_list
+       264 |     struct spin_lock lock
+       264 |       u32 value
+       272 |     struct poll_waiter * head
+       280 |   struct SrvRegistry * reg
+           | [sizeof=288, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_ref
+         0 |   u32 slot
+         4 |   u32 reserved
+         8 |   u64 incarnation
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_target
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   s32 registry_fd
+        12 |   u32 name_len
+        16 |   u8[256] name
+       272 |   struct loom_service_ref result
+       272 |     u32 slot
+       276 |     u32 reserved
+       280 |     u64 incarnation
+           | [sizeof=288, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_reserve
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   u32 kind
+        12 |   u32 reserved
+        16 |   struct loom_service_ref scope
+        16 |     u32 slot
+        20 |     u32 reserved
+        24 |     u64 incarnation
+        32 |   struct loom_service_ref result
+        32 |     u32 slot
+        36 |     u32 reserved
+        40 |     u64 incarnation
+           | [sizeof=48, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_control
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   struct loom_service_ref object
+         8 |     u32 slot
+        12 |     u32 reserved
+        16 |     u64 incarnation
+        24 |   u64 reserved
+           | [sizeof=32, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_snapshot
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   struct loom_service_ref object
+         8 |     u32 slot
+        12 |     u32 reserved
+        16 |     u64 incarnation
+        24 |   u32 kind
+        28 |   u32 state
+        32 |   struct loom_service_ref scope
+        32 |     u32 slot
+        36 |     u32 reserved
+        40 |     u64 incarnation
+        48 |   u32 active_ops
+        52 |   u32 pending_terminals
+        56 |   s32 reason
+        60 |   u32 status_flags
+           | [sizeof=64, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_pool_member
+         0 |   u32 buffer_index
+         4 |   u32 reserved
+         8 |   u64 offset
+        16 |   u64 length
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_pool_create
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   u32 count
+        12 |   u32 reserved
+        16 |   struct loom_service_ref result
+        16 |     u32 slot
+        20 |     u32 reserved
+        24 |     u64 incarnation
+        32 |   struct loom_service_pool_member[64] members
+           | [sizeof=1568, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_buffer_receipt
+         0 |   struct loom_service_ref pool
+         0 |     u32 slot
+         4 |     u32 reserved
+         8 |     u64 incarnation
+        16 |   u32 member
+        20 |   u32 reserved
+        24 |   u64 lease
+           | [sizeof=32, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_buffer_return
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   struct loom_service_buffer_receipt receipt
+         8 |     struct loom_service_ref pool
+         8 |       u32 slot
+        12 |       u32 reserved
+        16 |       u64 incarnation
+        24 |     u32 member
+        28 |     u32 reserved
+        32 |     u64 lease
+           | [sizeof=40, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_pool_snapshot
+         0 |   u32 size
+         4 |   u16 version
+         6 |   u16 flags
+         8 |   struct loom_service_ref pool
+         8 |     u32 slot
+        12 |     u32 reserved
+        16 |     u64 incarnation
+        24 |   u32 members
+        28 |   u32 available
+        32 |   u32 busy
+        36 |   u32 pending
+        40 |   u32 leased
+        44 |   u32 streams
+        48 |   u64[2] reserved
+           | [sizeof=64, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct page
+         0 |   struct page * next
+         8 |   struct page * prev
+        16 |   u32 order
+        20 |   u32 flags
+        24 |   u32 refcount
+        28 |   u32 cow_share
+        32 |   void * slab_freelist
+        40 |   struct kmem_cache * slab_cache
+           | [sizeof=48, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct AddrSpace
+         0 |   int ref
+         4 |   struct spin_lock lock
+         4 |     u32 value
+         8 |   paddr_t pgtable_root
+        16 |   u64 context_id
+        24 |   struct Vma * vmas
+        32 |   u32 page_count
+        36 |   u32 vma_count
+        40 |   u32 shared_map_pages
+        44 |   u32 page_budget
+        48 |   u32 page_peak
+        52 |   u32 pgtable_pages
+        56 |   u32 file_pages
+        64 |   u64 id
+        72 |   int owners
+        76 |   u32 private_rings
+           | [sizeof=80, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct ProcAccessIdentity
+         0 |   caps_t caps
+         8 |   u32 principal_id
+        12 |   u32 primary_gid
+        16 |   u32[15] supp_gids
+        76 |   u8 supp_gid_count
+           | [sizeof=80, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct Proc
+         0 |   u64 magic
+         8 |   int pid
+        12 |   int thread_count
+        16 |   enum proc_state state
+        20 |   int exit_status
+        24 |   struct Thread * threads
+        32 |   struct Proc * parent
+        40 |   struct Proc * children
+        48 |   struct Proc * sibling
+        56 |   const char * exit_msg
+        64 |   struct poll_waiter_list child_waiters
+        64 |     struct spin_lock lock
+        64 |       u32 value
+        72 |     struct poll_waiter * head
+        80 |   struct Territory * territory
+        88 |   struct HandleTable * handles
+        96 |   struct AddrSpace * as
+       104 |   u64 caps
+       112 |   u32 proc_flags
+       116 |   u32 _reserved0
+       120 |   u64 stripes
+       128 |   struct NoteQueue * notes
+       136 |   u64 handler_va
+       144 |   u32 principal_id
+       148 |   u32 primary_gid
+       152 |   u32[15] supp_gids
+       212 |   u8 supp_gid_count
+       213 |   u8[3] _pad_identity
+       216 |   const char * group_exit_msg
+       224 |   u32 legate_session_id
+       228 |   u32 legate_scope_id
+       232 |   u64 legate_valid_until
+       240 |   u32 child_count
+       248 |   struct Allowance * allowance
+       256 |   struct Env * env
+       264 |   u64 bounce_bytes
+       272 |   struct Spoor * debug_owner
+       280 |   u32 debug_stop_req
+       284 |   u32 job_stop_req
+       288 |   struct debug_hw * debug_hw
+       296 |   struct Thread * debug_focus_thread
+       304 |   u32 sid
+       308 |   u32 pgid
+       312 |   _Bool stop_report_pending
+       313 |   _Bool cont_report_pending
+       314 |   _Bool debug_exitkill
+       315 |   u8 phenotype
+       316 |   char[32] name
+       348 |   u32 susp_stop_armed
+       352 |   struct Path * exe_path
+       360 |   u32 page_budget
+       368 |   struct viv_sigtab * sigtab
+       376 |   struct viv_socktab * socktab
+       384 |   int loom_sqpoll_count
+       388 |   int group_exit_code
+       392 |   caps_t legate_caps
+       400 |   u32 legate_flags
+       404 |   u32 debug_birth_hold
+       408 |   struct spin_lock srv_post_lock
+       408 |     u32 value
+       412 |   _Bool srv_posts_closed
+       416 |   struct SrvPostMembership * srv_post_memberships
+           | [sizeof=424, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_slot
+         0 |   u64 incarnation
+         8 |   u32 kind
+        12 |   u32 phase
+        16 |   u32 pins
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_slot_table
+         0 |   u64 next_incarnation
+         8 |   struct loom_service_slot[64] slots
+      1544 |   _Bool closing
+           | [sizeof=1552, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_node
+         0 |   struct loom_service_ref parent
+         0 |     u32 slot
+         4 |     u32 reserved
+         8 |     u64 incarnation
+        16 |   u32 state
+        20 |   u32 reserved
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_node_table
+         0 |   struct loom_service_node[64] nodes
+           | [sizeof=1536, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_request
+         0 |   struct loom_service_ref scope
+         0 |     u32 slot
+         4 |     u32 reserved
+         8 |     u64 incarnation
+        16 |   u64 identity
+        24 |   u64 user_data
+        32 |   u64 deadline
+        40 |   s32 result
+        44 |   u32 phase
+        48 |   u32 borrows
+        52 |   u32 reserved
+           | [sizeof=56, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_request_table
+         0 |   struct loom_service_request * records
+         8 |   u64 next_identity
+        16 |   u32 capacity
+        20 |   u32 occupied
+        24 |   _Bool detached
+           | [sizeof=32, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_pool_extent
+         0 |   const void * backing
+         8 |   u64 offset
+        16 |   u64 length
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_pool_cell
+         0 |   struct loom_service_ref pool
+         0 |     u32 slot
+         4 |     u32 reserved
+         8 |     u64 incarnation
+        16 |   struct loom_pool_extent extent
+        16 |     const void * backing
+        24 |     u64 offset
+        32 |     u64 length
+        40 |   u64 nonce
+        48 |   u64 user_data
+        56 |   u32 ordinal
+        60 |   u32 phase
+        64 |   u32 requested
+        68 |   u32 result
+        72 |   _Bool more
+           | [sizeof=80, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_pool_bank
+         0 |   u64 next_nonce
+         8 |   struct loom_pool_cell[64] cells
+           | [sizeof=5128, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_pool
+         0 |   struct loom_service_ref ref
+         0 |     u32 slot
+         4 |     u32 reserved
+         8 |     u64 incarnation
+        16 |   u32 phase
+        20 |   u32 count
+        24 |   u32 streams
+        28 |   u32 cursor
+           | [sizeof=32, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_pool_result
+         0 |   struct loom_service_buffer_receipt receipt
+         0 |     struct loom_service_ref pool
+         0 |       u32 slot
+         4 |       u32 reserved
+         8 |       u64 incarnation
+        16 |     u32 member
+        20 |     u32 reserved
+        24 |     u64 lease
+        32 |   u64 user_data
+        40 |   u32 length
+        44 |   _Bool more
+           | [sizeof=48, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct Handle
+         0 |   u64 magic
+         8 |   enum kobj_kind kind
+        12 |   rights_t rights
+        16 |   void * obj
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct HandleTable
+         0 |   struct spin_lock lock
+         0 |     u32 value
+         4 |   u32 _pad_lock
+         8 |   u64[16] cloexec
+       136 |   struct Handle[1024] slots
+           | [sizeof=24712, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_sqe
+         0 |   u8 opcode
+         1 |   u8 flags
+         2 |   u16 _resv0
+         4 |   u32 handle_idx
+         8 |   u64 offset
+        16 |   u32 len
+        20 |   u32 buf_idx_or_off
+        24 |   u64 user_data
+        32 |   u64[4] _resv1
+           | [sizeof=64, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_cqe
+         0 |   u64 user_data
+         8 |   s32 result
+        12 |   u32 flags
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_ring_hdr
+         0 |   u32 sq_head
+         4 |   u32 sq_tail
+         8 |   u32 sq_mask
+        12 |   u32 sq_entries
+        16 |   u32 cq_head
+        20 |   u32 cq_tail
+        24 |   u32 cq_mask
+        28 |   u32 cq_entries
+        32 |   u32 flags
+        36 |   u32 dropped
+        40 |   u32 overflow
+        44 |   u32[5] _pad
+           | [sizeof=64, align=4]
+
+*** Dumping AST Record Layout
+         0 | struct loom_params
+         0 |   u32 flags
+         4 |   u32 sq_entries
+         8 |   u32 cq_entries
+        12 |   u32 ring_size
+        16 |   u64 ring_va
+        24 |   u32 hdr_off
+        28 |   u32 sq_array_off
+        32 |   u32 sqe_off
+        36 |   u32 cqe_off
+        40 |   u32 sq_array_size
+        44 |   u32 sqe_size
+        48 |   u32 cqe_size
+        52 |   u32 _resv0
+        56 |   u64[4] _resv1
+           | [sizeof=88, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_buf_reg
+         0 |   u64 va
+         8 |   u64 len
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_private_fixed
+         0 |   struct loom_private_fixed * next
+         8 |   struct Loom * owner
+        16 |   struct loom_pool_extent extent
+        16 |     const void * backing
+        24 |     u64 offset
+        32 |     u64 length
+           | [sizeof=40, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_reg_handle
+         0 |   struct Spoor * spoor
+         8 |   rights_t rights
+           | [sizeof=16, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_reg_buffer
+         0 |   struct Burrow * burrow
+         8 |   u8 * kva
+        16 |   u32 len
+        20 |   u32 _pad
+           | [sizeof=24, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct Loom
+         0 |   u64 magic
+         8 |   int refcount
+        12 |   struct spin_lock lock
+        12 |     u32 value
+        16 |   u32 _pad
+        24 |   struct Burrow * ring
+        32 |   u8 * ring_kva
+        40 |   struct Proc * owner
+        48 |   int owner_pid
+        52 |   u32 ring_pages
+        56 |   struct Proc * ident
+        64 |   int ident_pid
+        68 |   u32 sq_entries
+        72 |   u32 cq_entries
+        76 |   u32 hdr_off
+        80 |   u32 sq_array_off
+        84 |   u32 sqe_off
+        88 |   u32 cqe_off
+        92 |   u32 sq_array_size
+        96 |   u32 sqe_size
+       100 |   u32 cqe_size
+       104 |   u32 ring_size
+       108 |   u32 receipt_off
+       112 |   u32 receipt_size
+       120 |   struct AddrSpace * service_as
+       128 |   struct loom_slot_table * service_slots
+       136 |   struct loom_service_pool_table * service_pools
+       144 |   struct loom_service_target_table * service_targets
+       152 |   struct loom_service_node_table * service_nodes
+       160 |   struct loom_request_table service_requests
+       160 |     struct loom_service_request * records
+       168 |     u64 next_identity
+       176 |     u32 capacity
+       180 |     u32 occupied
+       184 |     _Bool detached
+       192 |   struct loom_private_fixed * service_fixed
+       200 |   u32 service_fixed_count
+       208 |   u64 service_creator
+       216 |   u32 service_metadata_pages
+       220 |   _Bool service_closing
+       224 |   struct Loom * service_retire_next
+       232 |   u32 cq_tail
+       236 |   u32 sq_head
+       240 |   struct loom_async_op * inflight_ops
+       248 |   u32 async_inflight
+       252 |   u32 admitting
+       256 |   u32 rearm_pending
+       264 |   struct loom_chain_op * chain
+       272 |   struct loom_chain_op * chain_tail
+       280 |   u32 chain_len
+       288 |   struct poll_waiter_list cq_waiters
+       288 |     struct spin_lock lock
+       288 |       u32 value
+       296 |     struct poll_waiter * head
+       304 |   struct Thread * sqpoll
+       312 |   _Bool sqpoll_stopping
+       313 |   _Bool sqpoll_exited
+       320 |   struct Rendez sqpoll_park
+       320 |     struct spin_lock lock
+       320 |       u32 value
+       328 |     struct Thread * waiter
+       336 |   struct Rendez sqpoll_join
+       336 |     struct spin_lock lock
+       336 |       u32 value
+       344 |     struct Thread * waiter
+       352 |   struct Proc * sqpoll_owner
+       360 |   _Bool sqpoll_charged
+       368 |   struct loom_reg_handle[64] reg
+      1392 |   struct loom_reg_buffer[64] reg_buf
+      2928 |   u32 n_reg_buf
+           | [sizeof=2936, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct pagemap
+         0 |   size_t count
+         8 |   u32 depth
+        12 |   u32 nodes
+        16 |   size_t resident
+        24 |   void * root
+           | [sizeof=32, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct Burrow
+         0 |   u64 magic
+         8 |   enum burrow_type type
+        16 |   size_t size
+        24 |   size_t page_count
+        32 |   struct spin_lock lock
+        32 |     u32 value
+        36 |   int handle_count
+        40 |   int mapping_count
+        48 |   struct page * pages
+        56 |   unsigned int order
+        64 |   struct KObj_MMIO * kobj_mmio
+        72 |   struct KObj_DMA * kobj_dma
+        80 |   struct KObj_PCI * kobj_pci
+        88 |   u64 pa
+        96 |   u8 hostmem_mair
+       104 |   struct Spoor * spoor
+       112 |   u64 file_offset
+       120 |   u64 file_limit
+       128 |   int file_dc
+       132 |   u32 file_devno
+       136 |   u64 file_qid_path
+       144 |   u32 file_qid_vers
+       152 |   struct pagemap pm
+       152 |     size_t count
+       160 |     u32 depth
+       164 |     u32 nodes
+       168 |     size_t resident
+       176 |     void * root
+       184 |   u64 charge_as_id
+       192 |   u32 charge_pages
+       196 |   _Bool shared_out
+       200 |   struct Burrow * deferred_free_next
+       208 |   struct Burrow * clone_cursor
+           | [sizeof=216, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct srvconn_chan
+         0 |   struct spin_lock lock
+         0 |     u32 value
+         4 |   u32 cap
+         8 |   u32 count
+        12 |   u32 head
+        16 |   u32 tail
+        20 |   _Bool eof
+        21 |   _Bool reading
+        22 |   _Bool writing
+        24 |   struct Rendez rendez
+        24 |     struct spin_lock lock
+        24 |       u32 value
+        32 |     struct Thread * waiter
+        40 |   struct Rendez wrendez
+        40 |     struct spin_lock lock
+        40 |       u32 value
+        48 |     struct Thread * waiter
+        56 |   struct poll_waiter_list role_waiters
+        56 |     struct spin_lock lock
+        56 |       u32 value
+        64 |     struct poll_waiter * head
+        72 |   u8 * buf
+        80 |   u64 produced
+        88 |   u64 consumed
+           | [sizeof=96, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct SrvConn
+         0 |   u64 magic
+         8 |   int ref
+        12 |   struct spin_lock lock
+        12 |     u32 value
+        16 |   enum srvconn_state state
+        24 |   u64 peer_stripes
+        32 |   int peer_pid
+        36 |   _Bool peer_console
+        40 |   u64 server_stripes
+        48 |   u32 msize
+        52 |   u32 credit_charge
+        56 |   u64 client_deadline_ns
+        64 |   _Bool client_timed_out
+        72 |   struct srvconn_chan c2s
+        72 |     struct spin_lock lock
+        72 |       u32 value
+        76 |     u32 cap
+        80 |     u32 count
+        84 |     u32 head
+        88 |     u32 tail
+        92 |     _Bool eof
+        93 |     _Bool reading
+        94 |     _Bool writing
+        96 |     struct Rendez rendez
+        96 |       struct spin_lock lock
+        96 |         u32 value
+       104 |       struct Thread * waiter
+       112 |     struct Rendez wrendez
+       112 |       struct spin_lock lock
+       112 |         u32 value
+       120 |       struct Thread * waiter
+       128 |     struct poll_waiter_list role_waiters
+       128 |       struct spin_lock lock
+       128 |         u32 value
+       136 |       struct poll_waiter * head
+       144 |     u8 * buf
+       152 |     u64 produced
+       160 |     u64 consumed
+       168 |   struct srvconn_chan s2c
+       168 |     struct spin_lock lock
+       168 |       u32 value
+       172 |     u32 cap
+       176 |     u32 count
+       180 |     u32 head
+       184 |     u32 tail
+       188 |     _Bool eof
+       189 |     _Bool reading
+       190 |     _Bool writing
+       192 |     struct Rendez rendez
+       192 |       struct spin_lock lock
+       192 |         u32 value
+       200 |       struct Thread * waiter
+       208 |     struct Rendez wrendez
+       208 |       struct spin_lock lock
+       208 |         u32 value
+       216 |       struct Thread * waiter
+       224 |     struct poll_waiter_list role_waiters
+       224 |       struct spin_lock lock
+       224 |         u32 value
+       232 |       struct poll_waiter * head
+       240 |     u8 * buf
+       248 |     u64 produced
+       256 |     u64 consumed
+       264 |   u64 s2c_frames
+       272 |   struct SrvConn * ctl_next
+       280 |   struct SrvDomain * domain
+       288 |   struct poll_waiter_list poll_list
+       288 |     struct spin_lock lock
+       288 |       u32 value
+       296 |     struct poll_waiter * head
+       304 |   _Bool byte_mode
+       305 |   _Bool cape
+       306 |   _Bool remote
+       307 |   _Bool kernel_attached
+           | [sizeof=312, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct ProcServiceIdentity
+         0 |   struct ProcAccessIdentity access
+         0 |     caps_t caps
+         8 |     u32 principal_id
+        12 |     u32 primary_gid
+        16 |     u32[15] supp_gids
+        76 |     u8 supp_gid_count
+        80 |   u64 stripes
+        88 |   int pid
+        92 |   _Bool console_attached
+           | [sizeof=96, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct SrvConnectAdmission
+         0 |   struct SrvRegistry * view
+         8 |   struct SrvService * service
+        16 |   struct SrvConn * conn
+        24 |   u64 generation
+        32 |   _Bool published
+           | [sizeof=40, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_session
+         0 |   u32 magic
+         4 |   enum p9_session_state state
+         8 |   u32 root_fid
+        12 |   u32 msize
+        16 |   u32 negotiated_msize
+        20 |   u32[1024] bound_fids
+      4120 |   size_t n_bound_fids
+      4128 |   size_t n_reserved_slots
+      4136 |   struct p9_outstanding[64] outstanding
+      5672 |   u32 next_op_id
+      5676 |   u32 total_sent
+      5680 |   u32 total_completed
+           | [sizeof=5688, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_transport_ops
+         0 |   int (*)(void *, const u8 *, size_t) send
+         8 |   int (*)(void *, u8 *, size_t) recv
+        16 |   int (*)(void *) close
+        24 |   void (*)(void *, u64) set_recv_deadline
+        32 |   _Bool (*)(void *) recv_timed_out
+        40 |   void * ctx
+           | [sizeof=48, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_transport
+         0 |   u32 magic
+         4 |   enum p9_transport_state state
+         8 |   struct p9_transport_ops ops
+         8 |     int (*)(void *, const u8 *, size_t) send
+        16 |     int (*)(void *, u8 *, size_t) recv
+        24 |     int (*)(void *) close
+        32 |     void (*)(void *, u64) set_recv_deadline
+        40 |     _Bool (*)(void *) recv_timed_out
+        48 |     void * ctx
+        56 |   u8 * recv_buf
+        64 |   size_t recv_cap
+        72 |   size_t last_recv_len
+        80 |   u32 total_sent
+        84 |   u32 total_recvd
+        88 |   u32 total_errors
+           | [sizeof=96, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct larder
+         0 |   struct spin_lock lock
+         0 |     u32 value
+         8 |   u64 gen
+        16 |   u64[128] inval_qid
+      1040 |   u8[128] inval_hard
+      1168 |   struct larder_attr_ent * attr
+      1176 |   u32 attr_cap
+      1184 |   s32 * attr_hash
+      1192 |   u32 attr_nbuckets
+      1196 |   u32 attr_used
+      1200 |   u32 attr_hand
+      1208 |   struct larder_dentry_ent * dentry
+      1216 |   u32 dentry_cap
+      1224 |   s32 * dentry_hash
+      1232 |   u32 dentry_nbuckets
+      1236 |   u32 dentry_used
+      1240 |   u32 dentry_hand
+      1248 |   struct larder_page_ent * page
+      1256 |   u32 page_cap
+      1264 |   s32 * page_hash
+      1272 |   u32 page_nbuckets
+      1276 |   u32 page_used
+      1280 |   u32 page_hand
+      1288 |   s32 * page_qhash
+      1296 |   u32 page_qnbuckets
+      1304 |   u64 attr_hits
+      1312 |   u64 attr_misses
+      1320 |   u64 attr_installs
+      1328 |   u64 attr_install_skips
+      1336 |   u64 attr_invalidations
+      1344 |   u64 attr_downgrades
+      1352 |   u64 attr_evictions
+      1360 |   u64 inval_scope_passes
+      1368 |   u64 dentry_hits
+      1376 |   u64 dentry_neg_hits
+      1384 |   u64 dentry_misses
+      1392 |   u64 dentry_installs
+      1400 |   u64 dentry_install_skips
+      1408 |   u64 dentry_invalidations
+      1416 |   u64 dentry_evictions
+      1424 |   u64 page_hits
+      1432 |   u64 page_misses
+      1440 |   u64 page_installs
+      1448 |   u64 page_install_skips
+      1456 |   u64 page_own_installs
+      1464 |   u64 page_invalidations
+      1472 |   u64 page_evictions
+      1480 |   u64 co_snapshots
+      1488 |   u64 co_misses
+           | [sizeof=1496, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_dirfid_cache
+         0 |   struct spin_lock lock
+         0 |     u32 value
+         8 |   struct p9_dirfid_ent[64] e
+      1032 |   u32 hand
+      1040 |   u64 takes
+      1048 |   u64 donates
+      1056 |   u64 dedup_clunks
+      1064 |   u64 evict_clunks
+      1072 |   u64 drops
+           | [sizeof=1080, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_client
+         0 |   u32 magic
+         4 |   struct spin_lock lock
+         4 |     u32 value
+         8 |   struct p9_session session
+         8 |     u32 magic
+        12 |     enum p9_session_state state
+        16 |     u32 root_fid
+        20 |     u32 msize
+        24 |     u32 negotiated_msize
+        28 |     u32[1024] bound_fids
+      4128 |     size_t n_bound_fids
+      4136 |     size_t n_reserved_slots
+      4144 |     struct p9_outstanding[64] outstanding
+      5680 |     u32 next_op_id
+      5684 |     u32 total_sent
+      5688 |     u32 total_completed
+      5696 |   struct p9_transport transport
+      5696 |     u32 magic
+      5700 |     enum p9_transport_state state
+      5704 |     struct p9_transport_ops ops
+      5704 |       int (*)(void *, const u8 *, size_t) send
+      5712 |       int (*)(void *, u8 *, size_t) recv
+      5720 |       int (*)(void *) close
+      5728 |       void (*)(void *, u64) set_recv_deadline
+      5736 |       _Bool (*)(void *) recv_timed_out
+      5744 |       void * ctx
+      5752 |     u8 * recv_buf
+      5760 |     size_t recv_cap
+      5768 |     size_t last_recv_len
+      5776 |     u32 total_sent
+      5780 |     u32 total_recvd
+      5784 |     u32 total_errors
+      5792 |   struct p9_client_progress * progress
+      5800 |   u8[32768] out_buf_inline
+     38568 |   u8 * out_buf
+     38576 |   u32 out_buf_cap
+     38580 |   _Bool out_buf_owned
+     38584 |   size_t recv_cap
+     38592 |   struct p9_rpc *[64] inflight
+     39104 |   _Bool reader_active
+     39105 |   _Bool dead
+     39112 |   u64 frames_rx
+     39120 |   u64 demux_owned
+     39128 |   u64 demux_orphan
+     39136 |   u64 demux_orphan_clunk
+     39144 |   u64 demux_orphan_flush
+     39152 |   u64 demux_orphan_late
+     39160 |   u64 demux_wakes
+     39168 |   u64 flush_honoured
+     39176 |   u64 flush_cancelled
+     39184 |   p9_orphan_sink_fn orphan_sink
+     39192 |   void * orphan_sink_arg
+     39200 |   u64 orphan_handed
+     39208 |   u64 orphan_kept
+     39216 |   struct poll_waiter_list send_waiters_list
+     39216 |     struct spin_lock lock
+     39216 |       u32 value
+     39224 |     struct poll_waiter * head
+     39232 |   u64 send_progress
+     39240 |   u32 send_waiters
+     39248 |   u8 * done_reply_buf
+     39256 |   u32 next_fid
+     39260 |   _Bool wga_unsupported
+     39261 |   _Bool cacheable
+     39262 |   _Bool loose
+     39263 |   _Bool cape
+     39264 |   u32 cape_uid
+     39268 |   u32 cape_gid
+     39272 |   _Bool remote
+     39280 |   struct larder larder
+     39280 |     struct spin_lock lock
+     39280 |       u32 value
+     39288 |     u64 gen
+     39296 |     u64[128] inval_qid
+     40320 |     u8[128] inval_hard
+     40448 |     struct larder_attr_ent * attr
+     40456 |     u32 attr_cap
+     40464 |     s32 * attr_hash
+     40472 |     u32 attr_nbuckets
+     40476 |     u32 attr_used
+     40480 |     u32 attr_hand
+     40488 |     struct larder_dentry_ent * dentry
+     40496 |     u32 dentry_cap
+     40504 |     s32 * dentry_hash
+     40512 |     u32 dentry_nbuckets
+     40516 |     u32 dentry_used
+     40520 |     u32 dentry_hand
+     40528 |     struct larder_page_ent * page
+     40536 |     u32 page_cap
+     40544 |     s32 * page_hash
+     40552 |     u32 page_nbuckets
+     40556 |     u32 page_used
+     40560 |     u32 page_hand
+     40568 |     s32 * page_qhash
+     40576 |     u32 page_qnbuckets
+     40584 |     u64 attr_hits
+     40592 |     u64 attr_misses
+     40600 |     u64 attr_installs
+     40608 |     u64 attr_install_skips
+     40616 |     u64 attr_invalidations
+     40624 |     u64 attr_downgrades
+     40632 |     u64 attr_evictions
+     40640 |     u64 inval_scope_passes
+     40648 |     u64 dentry_hits
+     40656 |     u64 dentry_neg_hits
+     40664 |     u64 dentry_misses
+     40672 |     u64 dentry_installs
+     40680 |     u64 dentry_install_skips
+     40688 |     u64 dentry_invalidations
+     40696 |     u64 dentry_evictions
+     40704 |     u64 page_hits
+     40712 |     u64 page_misses
+     40720 |     u64 page_installs
+     40728 |     u64 page_install_skips
+     40736 |     u64 page_own_installs
+     40744 |     u64 page_invalidations
+     40752 |     u64 page_evictions
+     40760 |     u64 co_snapshots
+     40768 |     u64 co_misses
+     40776 |   struct p9_dirfid_cache dirfid
+     40776 |     struct spin_lock lock
+     40776 |       u32 value
+     40784 |     struct p9_dirfid_ent[64] e
+     41808 |     u32 hand
+     41816 |     u64 takes
+     41824 |     u64 donates
+     41832 |     u64 dedup_clunks
+     41840 |     u64 evict_clunks
+     41848 |     u64 drops
+     41856 |   u32 total_ops
+     41860 |   u32 total_errors
+           | [sizeof=41864, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_handshake_progress
+         0 |   struct p9_session * session
+         8 |   struct p9_transport_progress * progress
+        16 |   u8 * out
+        24 |   size_t out_cap
+        32 |   u32 principal
+        40 |   u64 deadline_ns
+        48 |   enum p9_handshake_phase phase
+        52 |   enum p9_handshake_phase failed_phase
+        56 |   int reason
+           | [sizeof=64, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct p9_client_progress
+         0 |   struct p9_transport_progress io
+         0 |     struct p9_transport * transport
+         8 |     struct p9_transport_try_ops ops
+         8 |       int (*)(void *, const u8 *, size_t) send
+        16 |       int (*)(void *, u8 *, size_t) recv
+        24 |       void (*)(void *) abort
+        32 |       void * ctx
+        40 |     const u8 * tx
+        48 |     size_t tx_len
+        56 |     size_t tx_sent
+        64 |     size_t rx_have
+        72 |     size_t rx_goal
+        80 |     size_t frame_limit
+        88 |     _Bool aborted
+        89 |     _Bool bytes_sent
+        96 |   struct p9_handshake_progress handshake
+        96 |     struct p9_session * session
+       104 |     struct p9_transport_progress * progress
+       112 |     u8 * out
+       120 |     size_t out_cap
+       128 |     u32 principal
+       136 |     u64 deadline_ns
+       144 |     enum p9_handshake_phase phase
+       148 |     enum p9_handshake_phase failed_phase
+       152 |     int reason
+       160 |   struct p9_rpc * sending
+       168 |   _Bool rx_next
+           | [sizeof=176, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct loom_service_protocol
+         0 |   struct Loom * owner
+         8 |   struct ProcServiceIdentity identity
+         8 |     struct ProcAccessIdentity access
+         8 |       caps_t caps
+        16 |       u32 principal_id
+        20 |       u32 primary_gid
+        24 |       u32[15] supp_gids
+        84 |       u8 supp_gid_count
+        88 |     u64 stripes
+        96 |     int pid
+       100 |     _Bool console_attached
+       104 |   struct SrvConnectAdmission admission
+       104 |     struct SrvRegistry * view
+       112 |     struct SrvService * service
+       120 |     struct SrvConn * conn
+       128 |     u64 generation
+       136 |     _Bool published
+       144 |   struct p9_client client
+       144 |     u32 magic
+       148 |     struct spin_lock lock
+       148 |       u32 value
+       152 |     struct p9_session session
+       152 |       u32 magic
+       156 |       enum p9_session_state state
+       160 |       u32 root_fid
+       164 |       u32 msize
+       168 |       u32 negotiated_msize
+       172 |       u32[1024] bound_fids
+      4272 |       size_t n_bound_fids
+      4280 |       size_t n_reserved_slots
+      4288 |       struct p9_outstanding[64] outstanding
+      5824 |       u32 next_op_id
+      5828 |       u32 total_sent
+      5832 |       u32 total_completed
+      5840 |     struct p9_transport transport
+      5840 |       u32 magic
+      5844 |       enum p9_transport_state state
+      5848 |       struct p9_transport_ops ops
+      5848 |         int (*)(void *, const u8 *, size_t) send
+      5856 |         int (*)(void *, u8 *, size_t) recv
+      5864 |         int (*)(void *) close
+      5872 |         void (*)(void *, u64) set_recv_deadline
+      5880 |         _Bool (*)(void *) recv_timed_out
+      5888 |         void * ctx
+      5896 |       u8 * recv_buf
+      5904 |       size_t recv_cap
+      5912 |       size_t last_recv_len
+      5920 |       u32 total_sent
+      5924 |       u32 total_recvd
+      5928 |       u32 total_errors
+      5936 |     struct p9_client_progress * progress
+      5944 |     u8[32768] out_buf_inline
+     38712 |     u8 * out_buf
+     38720 |     u32 out_buf_cap
+     38724 |     _Bool out_buf_owned
+     38728 |     size_t recv_cap
+     38736 |     struct p9_rpc *[64] inflight
+     39248 |     _Bool reader_active
+     39249 |     _Bool dead
+     39256 |     u64 frames_rx
+     39264 |     u64 demux_owned
+     39272 |     u64 demux_orphan
+     39280 |     u64 demux_orphan_clunk
+     39288 |     u64 demux_orphan_flush
+     39296 |     u64 demux_orphan_late
+     39304 |     u64 demux_wakes
+     39312 |     u64 flush_honoured
+     39320 |     u64 flush_cancelled
+     39328 |     p9_orphan_sink_fn orphan_sink
+     39336 |     void * orphan_sink_arg
+     39344 |     u64 orphan_handed
+     39352 |     u64 orphan_kept
+     39360 |     struct poll_waiter_list send_waiters_list
+     39360 |       struct spin_lock lock
+     39360 |         u32 value
+     39368 |       struct poll_waiter * head
+     39376 |     u64 send_progress
+     39384 |     u32 send_waiters
+     39392 |     u8 * done_reply_buf
+     39400 |     u32 next_fid
+     39404 |     _Bool wga_unsupported
+     39405 |     _Bool cacheable
+     39406 |     _Bool loose
+     39407 |     _Bool cape
+     39408 |     u32 cape_uid
+     39412 |     u32 cape_gid
+     39416 |     _Bool remote
+     39424 |     struct larder larder
+     39424 |       struct spin_lock lock
+     39424 |         u32 value
+     39432 |       u64 gen
+     39440 |       u64[128] inval_qid
+     40464 |       u8[128] inval_hard
+     40592 |       struct larder_attr_ent * attr
+     40600 |       u32 attr_cap
+     40608 |       s32 * attr_hash
+     40616 |       u32 attr_nbuckets
+     40620 |       u32 attr_used
+     40624 |       u32 attr_hand
+     40632 |       struct larder_dentry_ent * dentry
+     40640 |       u32 dentry_cap
+     40648 |       s32 * dentry_hash
+     40656 |       u32 dentry_nbuckets
+     40660 |       u32 dentry_used
+     40664 |       u32 dentry_hand
+     40672 |       struct larder_page_ent * page
+     40680 |       u32 page_cap
+     40688 |       s32 * page_hash
+     40696 |       u32 page_nbuckets
+     40700 |       u32 page_used
+     40704 |       u32 page_hand
+     40712 |       s32 * page_qhash
+     40720 |       u32 page_qnbuckets
+     40728 |       u64 attr_hits
+     40736 |       u64 attr_misses
+     40744 |       u64 attr_installs
+     40752 |       u64 attr_install_skips
+     40760 |       u64 attr_invalidations
+     40768 |       u64 attr_downgrades
+     40776 |       u64 attr_evictions
+     40784 |       u64 inval_scope_passes
+     40792 |       u64 dentry_hits
+     40800 |       u64 dentry_neg_hits
+     40808 |       u64 dentry_misses
+     40816 |       u64 dentry_installs
+     40824 |       u64 dentry_install_skips
+     40832 |       u64 dentry_invalidations
+     40840 |       u64 dentry_evictions
+     40848 |       u64 page_hits
+     40856 |       u64 page_misses
+     40864 |       u64 page_installs
+     40872 |       u64 page_install_skips
+     40880 |       u64 page_own_installs
+     40888 |       u64 page_invalidations
+     40896 |       u64 page_evictions
+     40904 |       u64 co_snapshots
+     40912 |       u64 co_misses
+     40920 |     struct p9_dirfid_cache dirfid
+     40920 |       struct spin_lock lock
+     40920 |         u32 value
+     40928 |       struct p9_dirfid_ent[64] e
+     41952 |       u32 hand
+     41960 |       u64 takes
+     41968 |       u64 donates
+     41976 |       u64 dedup_clunks
+     41984 |       u64 evict_clunks
+     41992 |       u64 drops
+     42000 |     u32 total_ops
+     42004 |     u32 total_errors
+     42008 |   struct p9_client_progress progress
+     42008 |     struct p9_transport_progress io
+     42008 |       struct p9_transport * transport
+     42016 |       struct p9_transport_try_ops ops
+     42016 |         int (*)(void *, const u8 *, size_t) send
+     42024 |         int (*)(void *, u8 *, size_t) recv
+     42032 |         void (*)(void *) abort
+     42040 |         void * ctx
+     42048 |       const u8 * tx
+     42056 |       size_t tx_len
+     42064 |       size_t tx_sent
+     42072 |       size_t rx_have
+     42080 |       size_t rx_goal
+     42088 |       size_t frame_limit
+     42096 |       _Bool aborted
+     42097 |       _Bool bytes_sent
+     42104 |     struct p9_handshake_progress handshake
+     42104 |       struct p9_session * session
+     42112 |       struct p9_transport_progress * progress
+     42120 |       u8 * out
+     42128 |       size_t out_cap
+     42136 |       u32 principal
+     42144 |       u64 deadline_ns
+     42152 |       enum p9_handshake_phase phase
+     42156 |       enum p9_handshake_phase failed_phase
+     42160 |       int reason
+     42168 |     struct p9_rpc * sending
+     42176 |     _Bool rx_next
+     42184 |   u8 * recv_storage
+     42192 |   u8 * bulk_send_storage
+     42200 |   u32 charged_pages
+           | [sizeof=42208, align=8]
+
+*** Dumping AST Record Layout
+         0 | struct SrvServiceTarget
+         0 |   struct SrvRegistry * view
+         8 |   struct SrvService * service
+        16 |   u64 generation
+        24 |   u8 name_len
+        25 |   char[32] name
+           | [sizeof=64, align=8]

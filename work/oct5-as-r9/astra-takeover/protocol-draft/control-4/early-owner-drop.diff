@@ -1,0 +1,13 @@
+--- 
++++ 
+@@ -50,8 +50,8 @@
+     if (p->send_storage) kfree(p->send_storage);
+     if (p->recv_storage) kfree(p->recv_storage);
+     kfree(p);
+-    protocol_refund(l, pages);
+-    loom_unref(l); // last access to l or its image
++    loom_unref(l);
++    protocol_refund(l, pages); // wrong lifetime order
+     return 0;
+ }
+ 

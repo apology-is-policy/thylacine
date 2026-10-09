@@ -1,0 +1,7 @@
+{
+  "status": "protocol_native_passed",
+  "diagnostic": "work/oct5-as-r9/astra-takeover/protocol-owner-diagnostic-20261009T074413Z",
+  "pid": 3362,
+  "prior_failure": "protocol-owner-diagnostic-20261009T074015Z: unlinked fixture creator refused by production identity walk; creator is now linked with positive identity control.",
+  "result": "work/oct5-as-r9/astra-takeover/protocol-owner-diagnostic-20261009T074413Z/result.json"
+}

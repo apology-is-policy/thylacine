@@ -69,6 +69,7 @@ set(KERNEL_SRCS
     loom_service_slots.c
     loom_service_nodes.c
     loom_service_requests.c
+    loom_service_protocol.c
     weft.c
     vma.c
     elf.c

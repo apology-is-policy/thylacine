@@ -1,0 +1,12 @@
+{
+  "source": "45d26893bd8b5e16a3934eed008ae4804f5bff38",
+  "pid": 10770,
+  "started": "2026-10-09T06:58:20.749136+00:00",
+  "launch_log": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/request-owner-current-launch.log",
+  "status": "completed",
+  "expect_tests": 1847,
+  "floor_mib": 8192,
+  "run": "work/oct5-as-r9/current-gate-20261009T065820Z",
+  "verified_at": "2026-10-09T07:38:24.984706+00:00",
+  "result": "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/current-gate-20261009T065820Z-result.json"
+}

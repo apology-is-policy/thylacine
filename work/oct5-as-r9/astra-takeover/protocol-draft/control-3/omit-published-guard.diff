@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -44,7 +44,7 @@
+     if (!p || !p->owner) return -T_E_INVAL;
+     // This primitive cannot certify retirement of an admitted scope. In
+     // particular, a transport abort alone does not end external parser borrows.
+-    if (p->admission.published) return -T_E_BUSY;
++    if (false) return -T_E_BUSY;
+     struct Loom *l = p->owner;
+     u32 pages = p->charged_pages;
+     p9_client_destroy(&p->client);

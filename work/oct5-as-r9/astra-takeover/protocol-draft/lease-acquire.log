@@ -1,0 +1,3 @@
+HELD: mac is yours for 2.0h.
+Release it the moment the RESOURCE frees, not when your workflow finishes -- pushing and writing up need no cores, and a peer idles the whole time.
+  yip release mac

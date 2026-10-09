@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -61,7 +61,7 @@
+     u32 fault = protocol_fault_take();
+     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !out)
+         return -T_E_INVAL;
+-    if (deadline && deadline <= now) return -T_E_TIMEDOUT;
++    if (((void)now, false)) return -T_E_TIMEDOUT;
+     struct ProcServiceIdentity identity;
+     if (!proc_service_snapshot_by_stripes(l->service_creator, l->service_as, &identity))
+         return -T_E_ACCES;

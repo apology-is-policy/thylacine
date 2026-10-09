@@ -1,0 +1,61 @@
+Self-review of charged protocol preparation (not an independent audit)
+
+Scope: existing approved per-scope protocol storage, creator snapshot, ordinary
+native admission credits and preallocated p9 client. Construction alone remains
+unpublished and never drives the cursor. This is not CONNECT or active scope
+retirement. Request reservation/binding and executor integration are still owed.
+
+Identity and namespace: exact registered target is pinned before dereference;
+native prepare retains its view/service generation and ordinary connection
+credits. proc_service_snapshot_by_stripes requires live actual creator and exact
+pinned AddrSpace. Only copied identity escapes; no worker Proc identity is used.
+The target pin is replaced by an independent Loom reference, so callers may reap
+the target after preparation without invalidating protocol ownership. No global
+service lookup, raw connection or route bypass.
+
+Storage: native ARM64 layout 42208 bytes rounds to16 buddy pages. RX and TX are
+separate allocations of proposed immutable class msize. Normal32KiB pays32pages
+(128KiB), bulk128KiB pays80pages(320KiB). This is in addition to ring metadata
+and ordinary native weighted credits. It does not claim MM0-MM4 global physical
+accounting. No uncharged bulk fallback or cache allocation occurs at init. The
+existing preallocated API requires disjoint storage from the entire client; the
+initial inline-TX optimization draft violated that contract and was corrected
+before installation/guest execution. The alias-inline mutant now guards it.
+
+Locking/publication: no allocator, native release, protocol destruction or Loom
+drop runs under Ll or as->lock. as->lock covers exact charge/refund. Native
+prepare is unpublished; progress_bind queues Tversion locally without byte I/O.
+Ll rechecks close after construction. Future publication must check again under
+Ll, along with exact scope/request and current absolute deadline. This helper
+does not claim that final preparation check linearizes later publication.
+
+Release: the exclusive unpublished owner has no external parser/RPC/callback
+users. p9_client_destroy aborts its local cursor before native admission release;
+native release tears down unpublished transport and drops its refs. TX/RX and
+owner storage are freed before refunding the retained exact image. Loom unref
+is last. Published objects are refused unchanged, because an abort is not a
+proof that active users stopped borrowing storage. No Tclunk, flush or peer wait.
+
+Evidence: host boundary doubles exercise20 controls and11 exact mutants under
+LLVM22 ASan/UBSan (control-5). These test actual owner C ordering, not the wire,
+guest page allocator or concurrent peer retirement. ARM64 syntax checks use
+actual project headers. Native fixture pending the preceding frozen-source gate.
+The native fixture covers real target/caller/preallocated client/storage on both
+sizes, charge refusal, all three allocation faults, dead creator, expired
+deadline, absence of backlog/protocol bytes and final Loom retention/refund.
+Its published-flag guard test explicitly simulates that flag, not active scopes.
+
+Earlier harness evidence retained: Apple clang17 ASan initialization timed out
+before main; sample proves recursive sanitizer/dyld/malloc spin, and plain same
+C control passes. Existing LLVM22+SDK toolchain passes. control-2 exposed a weak
+expired-case assertion masked by the simultaneous allocation fault; corrected
+to require TIMEDOUT before native allocation. control-3 concerns the superseded
+inline-TX draft. control-4 predates the additional alias test and runner-stability
+guard; only control-5 is the final draft witness. No guest failure dismissed.
+
+Next integration obligation: reserve request and destination before calling this
+constructor; serialize native publication and scope abort under Ll; retain
+enclosing storage during one bounded progress visit; commit READY and terminal
+under the same latch; retain committed completions through CQ pressure; implement
+closed-ring queue ownership through actual local parser/callback/fid quiescence.
+Do not certify active retirement using release_unused or zero metadata alone.
