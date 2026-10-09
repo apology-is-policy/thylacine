@@ -279,3 +279,23 @@ copyout/authority dispatch remain pending. Private legacy dispatch remains off.
 Host control plus ten exact mutants and one native 1841-test SMP1 boot passed;
 the new full Mac matrix is pending. See the October 9 loom dossier and pickup
 for exact source/diff and evidence paths. Self-review only.
+
+
+## October 9: canonical pool-pin full Mac qualification
+
+Exact source 6200c9de0121abbfa08bea719f904f20ae5a9ac6 passed all 50 Mac HVF
+boots in current-gate-20261009T011552Z. Default SMP1/4/8 and UBSan SMP4/8
+each passed ten boots, every boot 1841/1841 including loom.private_pool_pins,
+private buffers, pool/slot/owner rows, D7 overlap, twenty distinct d7user00..19
+cycles and boot banner. Gate and runner exit zero. The verifier checked all
+100 copied raw serial/harness logs and ten captured input hashes; inputs are
+PINNED. Stratum remains exact clean 61dde37. Minimum recorded admission free
+space was 9961 MiB, above the 8192 MiB floor. Astra's Mac lease was released.
+See astra-takeover/current-gate-20261009T011552Z-result.json and run verify.py.
+
+This is source-specific Mac qualification of internal canonical pool pins.
+Exact fixed-I/O extent reservations, usercopy/authority dispatch and scope/
+protocol/worker integration remain pending. Pi/A72/KVM, guest final allocator
+reclamation and absent optional Venus/Vulkan probes remain unqualified.
+Self-review only. Async remains ahead of MM0-MM4; no Main landing, private
+async/clipboard activation or removal of the 128 MiB protection.

@@ -1,0 +1,4 @@
+mac   HELD by you for 7m, 1.9h left
+        why: Astra canonical private pool ownership focused host/native qualification
+pi    FREE
+disk: 10.1 GiB available at /Users/northkillpd/projects/thylacine-astra
