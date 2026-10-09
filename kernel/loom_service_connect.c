@@ -83,10 +83,18 @@ static int connect_rollback_consume(struct loom_service_protocol *p) {
         !r || r->phase != LREQ_PREPARED || r->borrows) {
         spin_unlock(&l->lock); return -T_E_BUSY;
     }
-    connect_rollback_locked(l,p->scope,p->request);
+    struct loom_service_ref scope=p->scope;
+    struct loom_request_ref request=p->request;
     p->connect_bound = false;
     spin_unlock(&l->lock);
-    return loom_private_protocol_release_unused(p);
+    // Retain the PREPARED obligation and scope pins while real cursor/storage
+    // destruction runs unlocked. A closing worker must still see this owner.
+    // The public wrapper retains l across the consuming final protocol drop.
+    if (loom_private_protocol_release_unused(p)) extinction("CONNECT lost unused protocol ownership");
+    spin_lock(&l->lock);
+    connect_rollback_locked(l,scope,request);
+    spin_unlock(&l->lock);
+    return 0;
 }
 int loom_private_connect_rollback(struct loom_service_protocol *p) {
     if (!p || !p->owner) return -T_E_INVAL;

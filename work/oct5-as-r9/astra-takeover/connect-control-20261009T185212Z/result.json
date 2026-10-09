@@ -1,0 +1,175 @@
+{
+  "scope": "Actual CONNECT + request/slot/node/CQ code, checked protocol/native boundary doubles.\nDeterministic nested entries exercise cancellation/driver ordering; no claim of\nnative wire fidelity or concurrent SMP stress from this host fixture.\n",
+  "source_head": "5ab15c4d5e21bd7ff74ce07b7238c485c8c71f2e",
+  "hashes": {
+    "kernel/loom_service_connect.c": "87f48585db356d4a98fd17bf7b8d3f6551506823dd3ee7868aea36e9fec224d6",
+    "kernel/loom_service_requests.c": "acffb39641d25778b5c7f8b69ef6de275d77cb4e019b9969b773a8e4b6d20d81",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/loom.c": "15b84649beb8672ef7d1cc5fef4780a3a4313acc139d7cc84675d094b3d62f3d",
+    "work/oct5-as-r9/connect-control.py": "bd5e0912eb68ebaf7c2a45548fd60940abf73d09772ce48b1cc4b9fa05512540"
+  },
+  "results": [
+    {
+      "case": "control",
+      "mode": 0,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 1,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 2,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 3,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 4,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 5,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 6,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 7,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 8,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 9,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "control",
+      "mode": 10,
+      "rc": 0,
+      "expected": "PASS CONNECT control",
+      "generated_sha256": "2e6c8f3d3f9603e20e698b1b9f1e7a4c9bda7b953a618e32a5846145d905bda2"
+    },
+    {
+      "case": "omit-failure-phase",
+      "mode": 5,
+      "rc": 11,
+      "expected": "protocol failure records attempted phase",
+      "generated_sha256": "dd40a9ef25dda40bd1b5244df926f94fbdb8dab8adaa0fc7516df93596c76e9a"
+    },
+    {
+      "case": "omit-duplicate",
+      "mode": 0,
+      "rc": 11,
+      "expected": "terminal reserved before allocation",
+      "generated_sha256": "fe706bdfe5abb2be0423f1e1cdf4ecdd955bd444ae26c829e2f8d4f4cd4c1a8f"
+    },
+    {
+      "case": "omit-own-pin",
+      "mode": 0,
+      "rc": 11,
+      "expected": "two exact scope pins before allocation",
+      "generated_sha256": "2bd841b1ba205c49338a23231fb77453182129cc77e0b38d905b228adfcbed7c"
+    },
+    {
+      "case": "omit-publish-lock",
+      "mode": 0,
+      "rc": 11,
+      "expected": "publication holds terminal reservation and lock",
+      "generated_sha256": "056798f0face2177c68b1bbf655f354127c618cf5f6717e5a72b1bccf233daf4"
+    },
+    {
+      "case": "omit-publish-deadline",
+      "mode": 7,
+      "rc": 11,
+      "expected": "CONNECT publication lost terminal reservation",
+      "generated_sha256": "8522bec7ecae2095bacf342945435820a6b5213564f626e0dfd3d94e50a85f3c"
+    },
+    {
+      "case": "early-ready",
+      "mode": 0,
+      "rc": 11,
+      "expected": "IO progress is not READY",
+      "generated_sha256": "5bed7d71df567a3ab3764cef7763f3b19bdbba272855bca51b722a9c1bc537c0"
+    },
+    {
+      "case": "persistent-deadline",
+      "mode": 0,
+      "rc": 11,
+      "expected": "deadline ends on success",
+      "generated_sha256": "8a18df1d0348fcb912fa90f51e73023194481050c3581f14e7afdf23cd122c18"
+    },
+    {
+      "case": "omit-parser-borrow",
+      "mode": 0,
+      "rc": 11,
+      "expected": "driver owns request borrow outside lock",
+      "generated_sha256": "a930665be1c7b0a1ff9eb9ae22b488d3b6590594d6e38ce5cc3280cfbbc07a12"
+    },
+    {
+      "case": "omit-local-abort",
+      "mode": 1,
+      "rc": 11,
+      "expected": "actual driver abort retires",
+      "generated_sha256": "985d999cf02b332df487180773de3471bdcb0ef9effaf30725caac30c92a1cb8"
+    },
+    {
+      "case": "ignore-live-user",
+      "mode": 6,
+      "rc": 11,
+      "expected": "live abort user delays local retirement",
+      "generated_sha256": "6e9d541ec18be709459948e15400983849f3ce515f6cce37cd59ff212b5cc7d5"
+    },
+    {
+      "case": "omit-delivery-gate",
+      "mode": 0,
+      "rc": 11,
+      "expected": "CONNECT lost retired ownership",
+      "generated_sha256": "86fb94c51b42c8d642c8c604380a7791f991963babf0a6f634d83fc84fc48a6d"
+    },
+    {
+      "case": "omit-close-recheck",
+      "mode": 4,
+      "rc": 11,
+      "expected": "actual driver abort retires",
+      "generated_sha256": "e2cefe6d21cc7626643fdef76fb0b830cfa6d2b3d36c96052dbcbe27183d517e"
+    }
+  ]
+}

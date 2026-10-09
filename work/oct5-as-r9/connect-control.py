@@ -37,8 +37,9 @@ static int loom_private_protocol_prepare(struct Loom *l,struct loom_service_ref 
  active->owner=l;active->admission.conn=&cn;*out=active;return 0;
 }
 static int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
- CHECK(!held && !p->connect_bound && !p->admission.published && !p->owner->service_requests.occupied &&
-       !p->owner->service_slots->slots[p->scope.slot].pins,"rollback ledger before native release");
+ CHECK(!held && !p->connect_bound && !p->admission.published && p->owner->service_requests.occupied==1 &&
+       p->owner->service_requests.records[p->request.index].phase==LREQ_PREPARED &&
+       p->owner->service_slots->slots[p->scope.slot].pins==2,"rollback pins through native release");
  releases++;free(p);active=NULL;return 0;
 }
 static int loom_private_protocol_release_retired(struct loom_service_protocol *p) {

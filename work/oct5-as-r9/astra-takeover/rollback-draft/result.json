@@ -1,0 +1,18 @@
+{
+  "defect": "CLOSE-R1",
+  "scope": "Deterministic actual-C engine visit inside checked protocol destruction boundary; no native claim.",
+  "results": [
+    {
+      "case": "before",
+      "rc": 11,
+      "output": "rollback retains close barrier through physical protocol destruction\n",
+      "actual_connect_sha256": "52c25501841b75205dfd386fa0709e044ae1855f36379efb44326d293cab880f"
+    },
+    {
+      "case": "after",
+      "rc": 0,
+      "output": "PASS close control\n",
+      "actual_connect_sha256": "87f48585db356d4a98fd17bf7b8d3f6551506823dd3ee7868aea36e9fec224d6"
+    }
+  ]
+}

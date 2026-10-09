@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -109,7 +109,7 @@
+         -T_E_BUSY : p->abort_reason ? p->abort_reason : l->service_closing ? -T_E_CANCELED :
+         !n || n->state != LOOM_SERVICE_RESERVED ? -T_E_NOENT : 0;
+     if (!rc) rc = loom_request_check_admit(&l->service_requests,l->service_slots,
+-                                           l->service_nodes,p->request,now);
++                                           l->service_nodes,p->request,0);
+     if (!rc) rc = devsrv_connect_publish(&p->admission);
+     if (!rc) {
+         // No request/node predicate changed under Ll. Native publication does

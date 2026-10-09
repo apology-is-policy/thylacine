@@ -1,0 +1,69 @@
+{
+  "reason": "Intentional SIGTERM for CLOSE-R1 repair, not full qualification",
+  "records": [
+    {
+      "file": "default-smp1-1-harness.log",
+      "sha256": "e4b800efcc7b5eb27ffedc073bba921bb1a1a37cc979051460c1f459dd89d3df"
+    },
+    {
+      "file": "default-smp1-1.log",
+      "sha256": "7e298ae51a605a0e11a00487592f4e1b6738ce6b89f932fdff4661a3cb97d073"
+    },
+    {
+      "file": "default-smp1-2-harness.log",
+      "sha256": "87a225f738c57ccbd533e6c25ffa49e988ccab7b79d7cf50091cb5439df94242"
+    },
+    {
+      "file": "default-smp1-2.log",
+      "sha256": "2ebdfd09e5e080a4920fc61ea96c7e5725968f394cf363e4dadd91e2d55374a2"
+    },
+    {
+      "file": "default-smp1-3-harness.log",
+      "sha256": "c0f44c0fa8c8d18c743e5b653637768883dc87f765069947ce5a9b703ceb7dfc"
+    },
+    {
+      "file": "default-smp1-3.log",
+      "sha256": "7cc247cbd518b9320ee5e3fcd53f04d9c6a77d959554021a43fe2e63cd0da52e"
+    },
+    {
+      "file": "default-smp1-4-harness.log",
+      "sha256": "c21851c3eaa44c2e36b01101b3b1ce621e415145052264bb214ef9bbf1356201"
+    },
+    {
+      "file": "default-smp1-4.log",
+      "sha256": "617046fb4f9e8ad336b334581c722203bf91f42916a8422ec895b0228badc5e6"
+    },
+    {
+      "file": "default-smp1-5-harness.log",
+      "sha256": "2cdfb1605be48a17c06179ff24cd62563f3082e256f72c0467ad38773888da03"
+    },
+    {
+      "file": "default-smp1-5.log",
+      "sha256": "e225aee4e38d31a08efa38624cc1ccca704e03d4cf4eca2f93ef4fdcc8ad7d34"
+    },
+    {
+      "file": "default-smp1-6-harness.log",
+      "sha256": "9fe84df723d975a317698f325f49c786a3b65ea40441453b80093b6e6b5c6237"
+    },
+    {
+      "file": "default-smp1-6.log",
+      "sha256": "d5bb384f7859efc84d5fa453e29ec1200631ef0badb1f0bdd8aa3058b55b032b"
+    },
+    {
+      "file": "default-smp1-7-harness.log",
+      "sha256": "e7139917ac65dcda039f5fc8c92f839cef909bd9950f5a2106794b4b39a37a16"
+    },
+    {
+      "file": "default-smp1-7.log",
+      "sha256": "289c6330135bf0082ebb778cb2f661ccef7ba330b86c3bd5cc84eabe72475416"
+    },
+    {
+      "file": "default-smp1-8-harness.log",
+      "sha256": "dc7909538446526fd5227b1ec6e13214db2ac6f5fc4744f051d1717b0cd02fba"
+    },
+    {
+      "file": "default-smp1-8.log",
+      "sha256": "0dbb677ca792ada19cdd2891719ebf2acb8a8a4f231e8d22ac3e55a1478e9b35"
+    }
+  ]
+}

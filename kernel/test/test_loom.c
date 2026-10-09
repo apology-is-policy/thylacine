@@ -2367,6 +2367,27 @@ static void loom_close_boundary_hook(struct Loom *l,u32 stage) {
     if(l!=close_boundary.l || stage!=close_boundary.stage)return;
     loom_private_close_hook_for_test(NULL); // one exact owner boundary
     close_boundary.seen=true;
+    if(stage==4) {
+        // The handle is already closed. Force the actual parked worker to
+        // revisit while unused protocol destruction is suspended outside Ll.
+        u64 before=0,after=0;
+        loom_private_close_observe_for_test(l,&before);
+        loom_private_close_changed(l);
+        u64 end=timer_now_ns()+5000000000ull;
+        u32 phase=LCLOSE_NEW;
+        do {
+            phase=loom_private_close_observe_for_test(l,&after);
+            if(after>before && (phase==LCLOSE_PARKED || phase==LCLOSE_DONE))break;
+            sched();
+        } while(timer_now_ns()<end);
+        spin_lock(&l->lock);
+        bool retained=!l->service_requests.detached && l->service_requests.occupied &&
+            l->service_slots->slots[close_boundary.scope.slot].pins==2;
+        spin_unlock(&l->lock);
+        if(after<=before || phase!=LCLOSE_PARKED || !retained)
+            close_boundary.error="rollback retains close barrier through physical protocol destruction";
+        return;
+    }
     if(handle_close(close_boundary.creator,close_boundary.fd)) {
         close_boundary.error="boundary actual handle close";return;
     }
@@ -2531,7 +2552,17 @@ static const char *loom_close_cases(struct Loom **owner, struct Proc *creator,
         spin_lock(&l->lock);attached=!l->service_requests.detached;spin_unlock(&l->lock);
         CL(attached,"physical borrower or constructor preserves consumer");
         if (kind==5) CL(!loom_private_fixed_release(l,&fixed),"last fixed return resumes real close worker");
-        if (kind==6) {CL(!loom_private_connect_rollback(prepared[1]),"unindexed rollback resumes real close worker");prepared[1]=NULL;}
+        if (kind==6) {
+            close_boundary.l=l;close_boundary.stage=4;close_boundary.scope=scope[1];
+            close_boundary.seen=false;close_boundary.error=NULL;
+            loom_private_close_hook_for_test(loom_close_boundary_hook);
+            int rc=loom_private_connect_rollback(prepared[1]);
+            loom_private_close_hook_for_test(NULL);
+            if(!rc)prepared[1]=NULL;
+            CL(!rc,"unindexed rollback resumes real close worker");
+            CL(close_boundary.seen && !close_boundary.error,
+               close_boundary.error?close_boundary.error:"rollback destruction boundary reached");
+        }
     }
     CL(loom_close_wait_state(l,LCLOSE_DONE),"real close worker completes without peer or CQ progress");
     CL(loom_engine_empty(l->service_engine) && !l->service_requests.occupied &&

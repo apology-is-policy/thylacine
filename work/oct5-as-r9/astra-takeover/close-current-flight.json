@@ -1,0 +1,15 @@
+{
+  "owner": "astra",
+  "source": "5ab15c4d5e21bd7ff74ce07b7238c485c8c71f2e",
+  "pid": 24735,
+  "state": "stopped_for_repair",
+  "launched_utc": "2026-10-09T18:41:53.721000+00:00",
+  "run": "work/oct5-as-r9/current-gate-20261009T184153Z",
+  "verifier": "work/oct5-as-r9/current-gate-20261009T184153Z/verify.py",
+  "launcher_log": "work/oct5-as-r9/astra-takeover/close-current-gate-launch.log",
+  "floor_mib": 8192,
+  "next": "Repair CLOSE-R1 and run fresh native and full source-matched verification.",
+  "verification_rc": 1,
+  "verified_utc": "2026-10-09T18:49:34.597811+00:00",
+  "stop_reason": "Astra deliberately stopped own process group with SIGTERM after reproducing CLOSE-R1. rc143 is intentional cancellation; partial evidence does not qualify source."
+}

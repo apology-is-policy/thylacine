@@ -2446,3 +2446,25 @@ exact image refunds while server endpoints remain retained. Source-matched Mac
 SMP/UBSan matrix for this new code is still pending; the earlier50/50 qualifies
 a978d19c3 index-only source. Pi/A72/KVM, final guest allocator reclamation and
 optional graphics remain unqualified. No private activation/Main/128MiB change.
+
+
+## October 9: CLOSE-R1 physical rollback ordering repair
+
+Self-review found and reproduced a premature close completion: unpublished
+CONNECT rollback removed its PREPARED request and scope pins before physical
+cursor/storage destruction. References prevented final free, but a concurrent
+close worker could detach and declare DONE too soon. Rollback now retains the
+request and both pins through destruction outside Ll, then drops them under Ll.
+The public wrapper retains a temporary Loom root through cleanup and wake.
+
+Actual-C ASan/UBSan reproduction rejects the old order and accepts the repair.
+Canonical CONNECT11 controls/12 mutants and close-engine18 controls/7 mutants
+pass. Native rollback-native-20261009T1854Z passes1851/1851, D7 overlap,20 distinct
+login/logout cycles and banner, with source/input hashes and rebuilt ELF/bin.
+The extended native close fixture forces a real retirer visit while unpublished
+protocol destruction is suspended and requires the barrier still retained.
+Astra deliberately stopped the5ab15c4d5 full matrix with SIGTERM(rc143), preserving
+16 partial serial/harness logs. This was an intentional repair stop, not a full
+qualification. The repaired source requires a fresh full matrix. Review and
+raw evidence: astra-takeover/rollback-draft; self-review only, no independent
+audit. No Main/private async/clipboard activation or128MiB protection change.
