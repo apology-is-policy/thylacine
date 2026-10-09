@@ -274,3 +274,24 @@ passed 1843/1843 plus D7 overlap, twenty distinct cycles and banner. Full Mac
 matrix remains pending for the new source; prior d3563f828 50/50 had 1842 rows.
 Host controls use checked doubles; no protocol, Pi or guest allocator proof is
 inferred. See ASYNC-SERVICE-STATUS for hashes, harness corrections and scope.
+
+
+## October 9: native target full Mac qualification
+
+Exact source 4ac2790caa82653cf3a5bcf0f77aa5367c59535b passed all 50 Mac HVF
+boots in current-gate-20261009T030505Z: default SMP1/4/8 and UBSan SMP4/8,
+ten each. Every boot passed 1843/1843, including native target ownership,
+private fixed/pool/buffer/owner fixtures, D7 overlap, twenty distinct d7user00..19
+cycles and banner. Both gate and runner exit zero. Verification retained and
+hashed 100 raw serial/harness logs and all ten captured inputs; inputs PINNED.
+Minimum recorded admission free space 8786 MiB exceeds the 8192 MiB floor.
+Stratum remained exact clean 61dde37; Astra's Mac lease was released. Evidence:
+astra-takeover/current-gate-20261009T030505Z-result.json and run verify.py.
+
+This is Mac qualification of internal target ownership, not complete private
+async support. Continue scope/fid/request/CQ admission, usercopy/authority and
+bounded protocol/worker retirement before MM0-MM4. Pi/A72/KVM, final guest
+allocator reclamation and absent optional graphics probes remain unqualified.
+Self-review only. No Main landing, private async/clipboard activation or removal
+of the 128 MiB protection. Preserve all pinned artifact generations; current
+free disk is about 8.5 GiB, so recheck admission before further heavy work.
