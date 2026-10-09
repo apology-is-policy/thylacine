@@ -1,0 +1,10 @@
+--- kernel/loom_service_rpc.c
++++ unlink-count.c
+@@ -129,6 +129,6 @@
+        (o->next ? o->next->prev!=o : p->op_tail!=o))return -T_E_INVAL;
+     if(o->prev)o->prev->next=o->next;else p->op_head=o->next;
+     if(o->next)o->next->prev=o->prev;else p->op_tail=o->prev;
+-    --p->op_count;o->next=NULL;o->prev=NULL;o->phase=LRPC_RETIRED;
++    o->next=NULL;o->prev=NULL;o->phase=LRPC_RETIRED;
+     return 0;
+ }

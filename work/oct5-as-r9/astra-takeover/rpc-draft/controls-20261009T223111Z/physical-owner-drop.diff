@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ physical-owner-drop.c
+@@ -113,7 +113,7 @@
+     if(loom_request_put(&l->service_requests,o->request) ||
+        loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,o->request,result))
+         extinction("RPC lost settled terminal obligation");
+-    o->phase=LRPC_TERMINAL;
++    o->phase=LRPC_TERMINAL;l->service_requests.records[o->request.index].owners=0;
+     return 0;
+ }
+ int loom_rpc_unlink_locked(struct loom_service_operation *o) {

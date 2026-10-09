@@ -2706,3 +2706,21 @@ does not inherit the old full Mac qualification or implement general RPCs.
 Canonical sources supersede fid-draft. Mac released. Next actual RPC admission,
 callback/commit/readiness and payload/DAC consumers, then AS3/4 and MM0-MM4.
 No Main/private user async/clipboard activation or128MiB protection change.
+
+### Astra isolated RPC ownership transitions, October10
+
+Prepared an uninstalled bounded per-scope operation list and queued/inflight/
+settling/terminal/retired transitions in `astra-takeover/rpc-draft`. One exact
+request/physical owner and continuous borrow retain queued, callback and physical
+settlement work. Callback only captures; success rechecks abort/deadline. CQ
+backpressure keeps terminal owners findable, and delivery/unlink cannot drop
+physical ownership. RPC-R1 self-review added scope-abort enforcement for malformed
+or duplicate capture rather than treating it as an isolated operation failure.
+
+Actual-C50checks/21mutants pass with real request/node/slot/reply modules and
+explicit host boundary doubles under ASan/UBSan. ARM64 real-header object passes:
+640-byte operation,42288-byte protocol; no libc dependency. Raw source/binary
+hashes rechecked. No actual client submission, authority, native runtime or
+concurrency claim. Canonical kernel unchanged. Read rpc-draft/state.json,
+self-review.txt and next-work.txt; wire/program/admission/readiness/physical-close
+integration remains next, then AS3/4 and MM0-MM4. Mac released; no activation.

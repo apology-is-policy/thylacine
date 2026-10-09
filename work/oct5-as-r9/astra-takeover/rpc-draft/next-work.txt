@@ -1,0 +1,47 @@
+Next integration working set. This plan grants no runtime qualification.
+
+Preserve97d495fcb canonical root/teardown checkpoint. The uninstalled RPC draft
+contains only ownership/list transitions; compare verified-sources before use.
+Implement actual operation preparation in the charged owner: immutable SQE,
+full-incarnation source -> exact scope resolution, ordinary creator snapshot,
+source/destination FID holds, canonical fixed/pool resources and copied component.
+CLUNK closes FID admission only in the same successful request-admission interval.
+WALK must reserve destination before any remote effect; allocate monotone wirefid
+outside Ll under the actual client lock, burn on failed admission, never rewind.
+LOPEN is exclusive before asynchronous stat/DAC/open; the request identity owns
+that FID claim until physical cleanup. Preserve ordinary search/DAC semantics.
+
+Add explicit per-op program/build state. Builders run under client lock and use
+only pre-reserved metadata/payload. Use actual p9_session send functions; matching
+reply expectations must follow real session outstanding fid/newfid semantics.
+Driver begins before submit_async: accepted submit can callback synchronously
+or later, including no-wire AGAIN. Invalid submit arguments can refuse without
+callback and must not leave an INFLIGHT phantom. Capture malformed/duplicate
+response poisons scope. Honor one frame/msize quantum and fair scope/op cursor;
+list order alone is not a completed fairness mechanism. Requeue must correspond
+to a proved next program stage, not blind replay of an ambiguous side effect.
+
+READY must actually drive pending TX/RX and earliest active deadline; old CONNECT
+deadline remains finished. While p->driving, other scans skip callback fields.
+After returning from client, settle replies under Ll, rechecking absolute deadline
+and scope abort before any success/FID publication. Release real fixed buffers
+outside Ll with the request borrow still present; SETTLING bars double release.
+After drops finish, end borrow/commit terminal. Post at most reserved CQ room;
+full CQ parks terminal-only work. Explicit wake follows external admission/return.
+
+Close must abort actual client first, receiving every outstanding callback; it
+must cancel queued but unsubmitted operations too. Settle all borrows before
+locally-retired proof. The old engine_discard_closed requires zero entry pins
+and only CONNECT requests: change this coherently, because every operation owns
+an entry pin. Otherwise it permanently waits for cleanup it never drives.
+After consumer detach and all local borrows end, discard each terminal, unlink,
+free/refund actual operation, drop request owner and reap, then engine_put/Loom
+unref outside Ll. The sole driver's own entry pin retains protocol across those
+returns. Keep deferred creator/unpublished constructors distinct; do not fake
+free their unknown storage. Derived metadata cleanup precedes root reap.
+
+Actual normal/bulk native cases must cover synchronous AGAIN/errors, interleaved
+responses, full CQ, malformed reply abort, deadline/abort winner, copied payload
+lifetime, denied stat/open, clone/component publication, CLUNK drain/root refusal,
+provided-pool empty wait/late receipts and close/exec. Helpers and simulated
+metadata are insufficient. AS3/4 precede MM0-MM4; preserve existing activation gates.

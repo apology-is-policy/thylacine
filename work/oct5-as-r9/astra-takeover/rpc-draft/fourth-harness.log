@@ -1,0 +1,23 @@
+PASS control PASS RPC owner: 50 checks
+PASS malformed-scope malformed capture requires scope abort
+PASS request-identity full request identity
+PASS owner-ledger physical owner required
+PASS ready-admission admission requires READY
+PASS request-borrow enqueue owns active borrow and list
+PASS list-tail enqueue owns active borrow and list
+PASS queue-bound queue capacity refusal
+PASS driver-begin sole driver required
+PASS wire-expiry expiry before wire
+PASS callback-arm callback armed before submit
+PASS early-settle inflight callback retains owner
+PASS pending-sender pending sender blocks settlement
+PASS early-terminal callback copies bytes without terminal
+PASS duplicate-callback duplicate callback fails closed
+PASS finish-borrow all physical borrowers must end
+PASS commit-expiry deadline beats captured success
+PASS uncaptured-success queued cancellation cannot fabricate success
+PASS physical-owner-drop negative terminal ends borrow retains storage
+PASS early-unlink CQ backpressure retains discoverable owner
+PASS unlink-count middle unlink retains neighbors
+PASS retry-borrow retry preserves one obligation and borrow
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/controls-20261009T223222Z

@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ owner-ledger.c
+@@ -15,7 +15,7 @@
+     if(!t->records || o->request.index>=t->capacity)return NULL;
+     struct loom_service_request *r=&t->records[o->request.index];
+     return r->identity==o->request.identity && rpc_same(r->scope,o->scope) &&
+-           r->owners==1 ? r : NULL;
++           true ? r : NULL;
+ }
+ static int rpc_ready(struct loom_service_operation *o) {
+     struct Loom *l=o->owner;struct loom_service_protocol *p=o->protocol;

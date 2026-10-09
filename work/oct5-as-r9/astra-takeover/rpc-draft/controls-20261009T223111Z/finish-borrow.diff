@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ finish-borrow.c
+@@ -98,7 +98,7 @@
+     struct loom_service_request *r=rpc_record(o);
+     if(!r)return -T_E_NOENT;
+     if(!o->protocol->driving || o->phase!=LRPC_SETTLING ||
+-       r->phase!=LREQ_ACTIVE || r->borrows!=1 || o->rpc.on_complete || o->rpc.sending)
++       r->phase!=LREQ_ACTIVE || false || o->rpc.on_complete || o->rpc.sending)
+         return -T_E_BUSY;
+     if(result>=0) {
+         if(!o->callback_seen || o->capture_error || o->reply.result<0)return -T_E_IO;

@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/run-controls.py", line 67, in <module>
+    if __name__=='__main__':main()
+                            ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/rpc-draft/run-controls.py", line 49, in main
+    header=paths[2].read_text();declaration=header[header.index('enum loom_rpc_phase'):header.index('// Caller retains l.')]
+                                                                                       ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: substring not found

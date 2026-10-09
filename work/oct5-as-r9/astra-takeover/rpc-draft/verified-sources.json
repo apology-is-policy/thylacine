@@ -1,0 +1,6 @@
+{
+  "kernel/loom_service_rpc.c": "53d3e32ce7a0eb64e2619edba774213de01c160ae83bf4082045fd916b9323ce",
+  "kernel/include/thylacine/loom_service_rpc.h": "01bfe3a27a0981f45f88d7650279f9b643616f536d8c83a376449b776cc4615d",
+  "kernel/include/thylacine/loom_service_operation.h": "c97cbc33d0f5639d3bdebbfa050a6c5c4c64d3f2fc1a5bf58aadd7fc5920de8b",
+  "kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977"
+}

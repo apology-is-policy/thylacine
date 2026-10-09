@@ -2519,3 +2519,11 @@ child through actual close with charged operation storage. CONNECT14mutants,
 metadata7mutants and kernel link pass; derived mapped metadata cases are host
 simulation only. RPC consumers/readiness/DAC/payload integration remain ahead.
 See fid-integration/self-review.txt; old uninstalled-draft note is superseded.
+
+Next isolated layer (Astra October10): rpc-draft remains uninstalled. Its bounded
+per-scope list retains one exact request/physical owner and borrow through queued,
+callback and settlement states, then retains terminal storage behind CQ pressure.
+RPC-R1 requires scope abort on malformed/duplicate capture. Host50checks/21mutants
+and actual ARM64 object/layout pass; actual client submission, operation-specific
+DAC/payload admission, readiness/fairness and close integration are not implemented
+by this helper. Read rpc-draft/next-work.txt before installing any queue consumer.

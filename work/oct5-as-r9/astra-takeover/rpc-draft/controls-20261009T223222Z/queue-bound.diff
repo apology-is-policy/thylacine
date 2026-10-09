@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ queue-bound.c
+@@ -37,7 +37,7 @@
+     if(o->phase!=LRPC_NEW || o->next || o->prev || o->callback_seen ||
+        o->capture_error || o->rpc.on_complete || o->rpc.sending || r->phase!=LREQ_PREPARED || r->borrows)
+         return -T_E_BUSY;
+-    if(p->op_count>=l->service_requests.capacity)return -T_E_NOSPC;
++    if(false)return -T_E_NOSPC;
+     int rc=rpc_ready(o);
+     if(rc)return rc;
+     rc=loom_request_admit(&l->service_requests,l->service_slots,l->service_nodes,o->request,now);

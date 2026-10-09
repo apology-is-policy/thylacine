@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ malformed-scope.c
+@@ -102,7 +102,7 @@
+         return -T_E_BUSY;
+     // Malformed or duplicate completion poisons the private scope. Do not
+     // turn it into an isolated operation error while leaving the scope alive.
+-    if(result<0 && o->capture_error && !o->protocol->abort_reason)return -T_E_BUSY;
++    
+     if(result>=0) {
+         if(!o->callback_seen || o->capture_error || o->reply.result<0)return -T_E_IO;
+         int rc=rpc_ready(o);if(rc)return rc;

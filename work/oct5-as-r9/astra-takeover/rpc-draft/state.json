@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "state": "isolated-rpc-owner-verified-integration-next",
+  "source_base": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "installed": false,
+  "utc": "2026-10-09T22:33:48.038158+00:00",
+  "run": "work/oct5-as-r9/astra-takeover/rpc-draft/controls-20261009T223222Z",
+  "checks": 50,
+  "mutants": 21,
+  "arm64": "arm64-result.json",
+  "operation_bytes": 640,
+  "protocol_bytes": 42288,
+  "limits": "Uninstalled transitions only; actual client submission, frame programs, FID/DAC/buffer admission, physical destructor and engine progress/close integration remain mandatory. No native runtime claim."
+}

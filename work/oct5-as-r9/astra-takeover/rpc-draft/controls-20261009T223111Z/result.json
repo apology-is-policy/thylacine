@@ -1,0 +1,168 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/loom_service_rpc.c": "0e71b3c66ec7adf55ea2d54d95e2e86ee88379b0754e78a9faa6dfec21936ca0",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/include/thylacine/loom_service_rpc.h": "01bfe3a27a0981f45f88d7650279f9b643616f536d8c83a376449b776cc4615d",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/include/thylacine/loom_service_operation.h": "c97cbc33d0f5639d3bdebbfa050a6c5c4c64d3f2fc1a5bf58aadd7fc5920de8b",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/kernel/include/thylacine/loom_service_protocol.h": "1f80ec9cc06834301b6e536f9a00b8d90953067b9a0299f5d2b7c76a2fdfa977",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/fixture.c": "70711fbc654ce32ac1e4675446b43a70fe1b2f0b0f3321bc5edf308a382012a6",
+    "work/oct5-as-r9/astra-takeover/rpc-draft/run-controls.py": "e169eab9b90a09e53f27b77079f2ccb66ffff64d0373015365d58c62e75f7202",
+    "kernel/loom_service_requests.c": "9223b7d00f9e0c04e6fe0687fdf4c61b432c474691d0556bf5c8693753d42a01",
+    "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/loom_service_reply.c": "b5c0a5c1a5f729ed51df56182296e56724119f28d8d3b6e4eba81da2adbce47e",
+    "kernel/include/thylacine/loom_service_requests.h": "1a4138550a357d10ca02617e88d6b0caff34dfe5d6676c643dbdf96c398d0ed0",
+    "kernel/include/thylacine/loom_service_nodes.h": "19aacddddb54f7b9e93fcc810feb15931585698e17a329a969cb1d5ddb5fefec",
+    "kernel/include/thylacine/loom_service_reply.h": "46da857bd6dacdd0576ba3f01c2f0c55bc6cbacc56ade8da1f7c7ffbd4fd2465",
+    "kernel/include/thylacine/9p_session.h": "e5e218787c4a4d25986a664eafe9ba59c6e6093de0317ce934db6b24fbdab402"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "6313bc413adfd599ec3466b8de9bf5bc39612215ac77a610d10af2573338e6d4",
+      "binary_sha256": "ad5af0c40176978429f5b6d9fdadc93987a98e379dd86c7ce9c4f04d70a8435d"
+    },
+    {
+      "case": "request-identity",
+      "expected": "full request identity",
+      "rc": 1,
+      "source_sha256": "fa8f22c1b6a0d41d9669c18967a4b77676e4395a06fe61c29f44a0a7af945da9",
+      "binary_sha256": "10522f2015ba7fb44e4904b0b971545321fbed1a59772f2c8319f4d721539f06"
+    },
+    {
+      "case": "owner-ledger",
+      "expected": "physical owner required",
+      "rc": 1,
+      "source_sha256": "7fe2801a68d7477a84ffabc459c9c595c25b07511c5d20dca2706cc311fca7d2",
+      "binary_sha256": "ce8ef7fbdb3604399700bf48bff748f63303d88b9d45f25af841709a6d55e05e"
+    },
+    {
+      "case": "ready-admission",
+      "expected": "admission requires READY",
+      "rc": 1,
+      "source_sha256": "42dc17cd46c30ac7843f8b33a522a4518f1b7c304ac66ba1f47eb05bcadef786",
+      "binary_sha256": "0ec23bd15f4a739f9c69f58b1952bde9b1d32080e506e95123d02a1ef27d6f3c"
+    },
+    {
+      "case": "request-borrow",
+      "expected": "enqueue owns active borrow and list",
+      "rc": 1,
+      "source_sha256": "aa9f779227708ed279d12a9659dac99d28dffc43a39ac3a7d854b14ba5c22c60",
+      "binary_sha256": "a3df741a01393ea4df84a3d5d819b9a1404db51337007ed45affe294a11954f5"
+    },
+    {
+      "case": "list-tail",
+      "expected": "enqueue owns active borrow and list",
+      "rc": 1,
+      "source_sha256": "d505cf6b9a878e0cd8527a0edfd776fcfbb7775ab4932dcc476e12e98919bf43",
+      "binary_sha256": "433e57b0ac62e33eb3789c2db5486f5f343749fe8d669b62a32818527359a934"
+    },
+    {
+      "case": "queue-bound",
+      "expected": "queue capacity refusal",
+      "rc": 1,
+      "source_sha256": "165c55e38c6f8a9d9383dceef025d91b77d4340072c23d567cefe81843bbff9a",
+      "binary_sha256": "07cdef0ff814f742364195c8e22728a4245ce4b3bf498ff79254adaf858fcd8d"
+    },
+    {
+      "case": "driver-begin",
+      "expected": "sole driver required",
+      "rc": 1,
+      "source_sha256": "2967fd4735b6dcb9fc438064be60604a7579e795e702584ec3734792b2d97b24",
+      "binary_sha256": "1b7d459c4086b5a9fc4a7bd4fe992f68041a7b38e49270e8f49f5289599a4e96"
+    },
+    {
+      "case": "wire-expiry",
+      "expected": "expiry before wire",
+      "rc": 1,
+      "source_sha256": "4db7deba7a5999740738ba6d4dc6d271943abbaa8aff633c6ff728bc5a68c770",
+      "binary_sha256": "2df2333eaea3a4e9e0c60753a7d8b6834f35bf6f42c6394117b7c2acf904baf9"
+    },
+    {
+      "case": "callback-arm",
+      "expected": "callback armed before submit",
+      "rc": 1,
+      "source_sha256": "b36ab784ef0c3dab1f9f70cb3e9780363743b05bf4d4e09f089a75dc2c49489a",
+      "binary_sha256": "e6a8481519e912efa08d46b07d222161663412f98f6f390446cf70b8e2b85236"
+    },
+    {
+      "case": "early-settle",
+      "expected": "inflight callback retains owner",
+      "rc": 1,
+      "source_sha256": "16aab2c8e3e2fee54c1a577d64bb055e85830d4836b093cef90127254bed3ce3",
+      "binary_sha256": "fc76e43ab0869a8190b4795693be922fdae73a841fe01e72ae24d6cca8739e66"
+    },
+    {
+      "case": "pending-sender",
+      "expected": "pending sender blocks settlement",
+      "rc": 1,
+      "source_sha256": "78974b2f906e8f954756b82b576bd94cb98c0ce4e81f360683573d9c3fd61a0d",
+      "binary_sha256": "3c95d35ddee3956f4da24db8f0c1cc3e68f807158b8aa49951a2805ea4f807b0"
+    },
+    {
+      "case": "early-terminal",
+      "expected": "callback copies bytes without terminal",
+      "rc": 1,
+      "source_sha256": "eaed298c6d65c3178425661ebb21c2ec20e0fa1877890280eec1acacda5ec611",
+      "binary_sha256": "5e0b08e658d99d19e51b4c60b5a937678a13720e89d922c4354a6905953e6d1e"
+    },
+    {
+      "case": "duplicate-callback",
+      "expected": "duplicate callback fails closed",
+      "rc": 1,
+      "source_sha256": "819dcdf7a721e037496f93640fb5fd8f37901b813a76ef16d0ecbf912c38ee63",
+      "binary_sha256": "a1bd774eb32feb389c8881db8b5a02c0852ac6f3fa9639630ec6b71df252f2e3"
+    },
+    {
+      "case": "finish-borrow",
+      "expected": "all physical borrowers must end",
+      "rc": 1,
+      "source_sha256": "c820beb8443aa5557c681271ab5aad2e1940f1767122b5b72856ab07110eca73",
+      "binary_sha256": "02ecc3759f0e0ec988693776ce0630026c546b3ca6aa1e50c78f999e4c3d4daa"
+    },
+    {
+      "case": "commit-expiry",
+      "expected": "deadline beats captured success",
+      "rc": 1,
+      "source_sha256": "6808ba7f8b0585adc2c4ef23bf9dfff1eb4f0f4bd2db561cd5ba2d5e23a9c52f",
+      "binary_sha256": "690e424f8ad6922e3970c4e545bc3e479200d8da00386e0069c87242ce65bd65"
+    },
+    {
+      "case": "uncaptured-success",
+      "expected": "queued cancellation cannot fabricate success",
+      "rc": 1,
+      "source_sha256": "3c05c54c3b15ae7c52374ecde61fe83ecf1232d7ab05cc40e8790ae67ff837f0",
+      "binary_sha256": "19ac2e129c51f81d985f0d1f9bc0d9a3eb3a325d5910a2e8da816fe00f5f4ad2"
+    },
+    {
+      "case": "physical-owner-drop",
+      "expected": "negative terminal ends borrow retains storage",
+      "rc": 1,
+      "source_sha256": "5b0466318a76e6f1ca996b83ac8a753f9802e989dc2c8f62ca9f2903b2cc1d06",
+      "binary_sha256": "5f72d4463afae766ebd2d156a7021ec2204524e99aa0510ec6d6b591c0c95a8d"
+    },
+    {
+      "case": "early-unlink",
+      "expected": "CQ backpressure retains discoverable owner",
+      "rc": 1,
+      "source_sha256": "b1c3df4793f5af70c3fbc002cbf3106fa1a1e4fcdce2278896651caa8a96cda3",
+      "binary_sha256": "e947d72840089affc80acd37064d1a66f44ef991923cd76ce7018e25e366a561"
+    },
+    {
+      "case": "unlink-count",
+      "expected": "middle unlink retains neighbors",
+      "rc": 1,
+      "source_sha256": "af3fb9c97870a4e7ff6a5d784170fa1c0cd3f4014caa21a86209603a7a364a12",
+      "binary_sha256": "583b232a3906cc15751432e3906c2bf9da3f0cc2a65395ded8a8d7a1eda82710"
+    },
+    {
+      "case": "retry-borrow",
+      "expected": "retry preserves one obligation and borrow",
+      "rc": 1,
+      "source_sha256": "fbccf86ce6d662047dc9c62cf36a979ef112803b29809b388b5e7cb25f012a67",
+      "binary_sha256": "de3412e7d58f484447b92b834be6e8a726bc4fac4252741fe928ed7a61170c9c"
+    }
+  ],
+  "limits": "Actual RPC owner transitions and real request/node/slot/reply modules; simplified host Loom/protocol/RPC layout boundary. Sequential only. No actual client submission, authority, wire or concurrent-engine proof."
+}

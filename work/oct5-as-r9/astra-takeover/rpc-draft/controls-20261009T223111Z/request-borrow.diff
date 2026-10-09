@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ request-borrow.c
+@@ -42,7 +42,7 @@
+     if(rc)return rc;
+     rc=loom_request_admit(&l->service_requests,l->service_slots,l->service_nodes,o->request,now);
+     if(rc)return rc;
+-    if(loom_request_borrow(&l->service_requests,l->service_slots,l->service_nodes,o->request))
++    if(false)
+         extinction("RPC lost fresh request borrow");
+     o->prev=p->op_tail;
+     if(p->op_tail)p->op_tail->next=o;else p->op_head=o;

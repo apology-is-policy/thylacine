@@ -34,3 +34,12 @@ retained across close with charged operation storage. Mapped derived cleanup
 has simulated host evidence only; general RPC consumers remain unimplemented.
 No full new-source Mac claim. Mac released, no running job. Continue actual RPC
 admission/list/callback/commit and READY readiness, DAC/fixed/provided buffers.
+
+Next uninstalled layer: rpc-draft/state.json, self-review.txt, next-work.txt.
+RPC owner/list transitions pass50checks/21mutants and actual ARM64 object, with
+operation640B/protocol42288B. RPC-R1 malformed callback requires scope abort.
+No actual client submission or native queue integration yet; canonical kernel
+remains97d495fcb. Wire real per-operation programs and admission, fair READY
+progress, buffer/DAC ownership and close disposal before installing the queue.
+Old CONNECT-only close gate must drain operation owners before requiring zero
+entry pins. Mac released; no running job; no duplicate historical gates.

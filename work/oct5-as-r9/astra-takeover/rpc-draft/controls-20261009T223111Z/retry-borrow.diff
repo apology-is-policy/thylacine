@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ retry-borrow.c
+@@ -80,7 +80,7 @@
+        o->capture_error || o->rpc.sending || r->phase!=LREQ_ACTIVE || r->borrows!=1)
+         return -T_E_BUSY;
+     int rc=rpc_ready(o);if(rc)return rc;
+-    o->rpc.on_complete=NULL;o->callback_seen=false;o->phase=LRPC_QUEUED;
++    o->rpc.on_complete=NULL;o->callback_seen=false;o->phase=LRPC_QUEUED;--r->borrows;
+     return 0;
+ }
+ int loom_rpc_settle_locked(struct loom_service_operation *o) {

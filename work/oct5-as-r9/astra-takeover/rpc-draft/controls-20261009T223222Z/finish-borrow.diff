@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ finish-borrow.c
+@@ -98,7 +98,7 @@
+     struct loom_service_request *r=rpc_record(o);
+     if(!r)return -T_E_NOENT;
+     if(!o->protocol->driving || o->phase!=LRPC_SETTLING ||
+-       r->phase!=LREQ_ACTIVE || r->borrows!=1 || o->rpc.on_complete || o->rpc.sending)
++       r->phase!=LREQ_ACTIVE || false || o->rpc.on_complete || o->rpc.sending)
+         return -T_E_BUSY;
+     // Malformed or duplicate completion poisons the private scope. Do not
+     // turn it into an isolated operation error while leaving the scope alive.

@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ commit-expiry.c
+@@ -103,7 +103,7 @@
+     if(result>=0) {
+         if(!o->callback_seen || o->capture_error || o->reply.result<0)return -T_E_IO;
+         int rc=rpc_ready(o);if(rc)return rc;
+-        if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
++        (void)now;
+     }
+     return 0;
+ }

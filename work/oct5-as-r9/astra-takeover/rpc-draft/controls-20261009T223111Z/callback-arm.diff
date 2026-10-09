@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ callback-arm.c
+@@ -58,7 +58,7 @@
+     if(o->capture_error || o->callback_seen)return -T_E_IO;
+     if(r->deadline && r->deadline<=now)return -T_E_TIMEDOUT;
+     o->callback_seen=false;o->capture_error=0;
+-    o->rpc.on_complete=loom_rpc_capture;o->phase=LRPC_INFLIGHT;
++    o->rpc.on_complete=NULL;o->phase=LRPC_INFLIGHT;
+     return 0;
+ }
+ void loom_rpc_capture(struct p9_rpc *rpc,int status,struct p9_dispatch_result *reply) {

@@ -1,0 +1,11 @@
+--- kernel/loom_service_rpc.c
++++ ready-admission.c
+@@ -26,7 +26,7 @@
+     if(s->incarnation!=ref.incarnation || s->kind!=LOOM_SERVICE_SCOPE ||
+        s->phase!=LSLOT_LIVE)return -T_E_NOENT;
+     if(l->service_closing || l->service_slots->closing || l->service_requests.detached ||
+-       n->state!=LOOM_SERVICE_READY || n->reason || p->abort_reason ||
++       false || n->reason || p->abort_reason ||
+        p->locally_retired || !p->connect_bound || !p->indexed)return -T_E_CANCELED;
+     return 0;
+ }
