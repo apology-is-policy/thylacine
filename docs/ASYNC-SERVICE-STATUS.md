@@ -2357,3 +2357,20 @@ fixture counted node+request pages but omitted the new index page. Corrected
 expected physical metadata and added nonnull/zero index check; failed logs and
 artifacts retained. The full Mac matrix for this newer source remains pending;
 previous50/50 qualifies b2b263e3f internal CONNECT only.
+
+
+## October 9: full owner-index Mac gate verified
+
+Source a978d19c388f512a645cdcbaeea60a81a0a06727 passed50/50 Mac HVF boots in
+current-gate-20261009T175812Z: default SMP1/4/8 and kernel UBSan SMP4/8,
+ten each. Every boot passed1850/1850 including loom.private_engine, D7
+overlap, twenty distinct login/logout cycles and the banner. Both rc0;
+100 serial/harness logs and ten input hashes verified and retained/PINNED.
+Minimum recorded admission 11875MiB, above8192MiB.
+Result: work/oct5-as-r9/astra-takeover/current-gate-20261009T175812Z-result.json.
+
+This qualifies the internal charged index and explicit progress at that source.
+The separate close queue draft still owes native and full-matrix verification.
+Self-review only; no independent audit, Main landing, private async/clipboard
+activation or128MiB protection change. Continue close queue, active executor,
+remaining private ops/provided buffers, AS-3/4 and MM0-MM4.
