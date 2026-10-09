@@ -1,0 +1,11 @@
+--- control
++++ close-reject
+@@ -22,7 +22,7 @@
+     u64 user_data; s32 result;
+     int rc = loom_request_peek(t,ref,&user_data,&result);
+     if (rc) { spin_unlock(&l->lock); return rc; }
+-    if (t->detached) { spin_unlock(&l->lock); return -T_E_CANCELED; }
++    if (t->detached || l->service_closing) { spin_unlock(&l->lock); return -T_E_CANCELED; }
+     struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
+     u32 tail = l->cq_tail;
+     u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);

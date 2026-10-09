@@ -413,6 +413,20 @@ static bool loom_private_nodes_fault_take(void) {
     return __atomic_exchange_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
 }
 
+static bool g_loom_private_requests_fault;
+void loom_private_requests_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_requests_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_requests_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_requests_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_requests_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_requests_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_requests_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_requests_fault, false, __ATOMIC_RELAXED);
+}
+
 void loom_private_slots_fault_arm_for_test(void) {
     __atomic_store_n(&g_loom_private_slots_fault, true, __ATOMIC_RELAXED);
 }
@@ -456,6 +470,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     bool pools_fault = loom_private_pools_fault_take();
     bool targets_fault = loom_private_targets_fault_take();
     bool nodes_fault = loom_private_nodes_fault_take();
+    bool requests_fault = loom_private_requests_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -474,10 +489,14 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
                    "pool table uses buddy kmalloc");
     _Static_assert(sizeof(struct loom_service_target_table) == PAGE_SIZE, "target table page");
     _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
+    // Geometry already bounds cq to 8192. Allocate at least a buddy page even
+    // for tiny rings: the charge follows real physical allocation, not a slab.
+    size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
+    if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
-        + 1u; // node ledger occupies a whole buddy page, never a shared slab
+        + 1u + (u32)burrow_backing_pages(request_bytes);
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
@@ -491,9 +510,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
         kmalloc(sizeof(struct loom_service_target_table), KP_ZERO);
     struct loom_service_node_table *nodes = (!targets || nodes_fault) ? NULL :
         kmalloc(PAGE_SIZE, KP_ZERO);
-    struct Loom *l = (!slots || !pools || !targets || !nodes || layout_fault) ? NULL :
+    struct loom_service_request *requests = (!nodes || requests_fault) ? NULL :
+        kmalloc(request_bytes, KP_ZERO);
+    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || layout_fault) ? NULL :
         loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
+        kfree(requests);
         kfree(nodes);
         kfree(targets);
         kfree(pools);
@@ -508,6 +530,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     l->service_pools = pools;
     l->service_targets = targets;
     l->service_nodes = nodes;
+    l->service_requests = (struct loom_request_table){ .records=requests, .capacity=cq };
     l->service_as = as;
     l->service_creator = p->stripes;
     l->service_metadata_pages = metadata;
@@ -609,6 +632,23 @@ static void loom_private_nodes_destroy(struct Loom *l) {
         extinction("private Loom retained unowned node");
 }
 
+static void loom_private_requests_destroy(struct Loom *l) {
+    // Exclusive zero-reference owner. An unused pre-admission reservation has
+    // no external effects and can unwind locally. Admitted requests require the
+    // engine's terminal/local-retirement cleanup before it drops its last ref.
+    struct loom_request_table *t = &l->service_requests;
+    if (!t->records || t->capacity != l->cq_entries)
+        extinction("private Loom lost request storage");
+    for (u32 i=0;i<t->capacity;++i) {
+        struct loom_service_request *r = &t->records[i];
+        if (r->phase == LREQ_FREE) continue;
+        struct loom_request_ref ref = { .index=i, .identity=r->identity };
+        if (loom_request_rollback(t,l->service_slots,ref))
+            extinction("private Loom retained admitted request");
+    }
+    if (!loom_requests_empty(t)) extinction("private Loom retained request payload");
+}
+
 static void loom_private_destroy(struct Loom *l) {
     // Snapshotted before anything frees l: everything after the kfree below
     // reaches the address space through these two locals and never through l.
@@ -626,6 +666,7 @@ static void loom_private_destroy(struct Loom *l) {
 
     // Targets and unused nodes have only local ownership and can retire here.
     // Protocol-active records must be empty before the engine drops its last ref.
+    loom_private_requests_destroy(l);
     loom_private_nodes_destroy(l);
     loom_private_targets_destroy(l);
     if (!l->service_slots) extinction("private Loom lost slot storage");
@@ -643,6 +684,7 @@ static void loom_private_destroy(struct Loom *l) {
         loom_private_drop_buffer(as, b);
     }
     l->n_reg_buf = 0;
+    kfree(l->service_requests.records);
     kfree(l->service_nodes);
     kfree(l->service_targets);
     kfree(l->service_pools);
@@ -1630,6 +1672,40 @@ int loom_post_pool_cqe(struct Loom *l, struct loom_pool_bank *bank,
     if (rc) { spin_unlock(&l->lock); return rc; }
     l->cq_tail = tail + 1u;
     __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+    poll_waiter_list_wake(&l->cq_waiters);
+    return 0;
+}
+
+
+int loom_private_post_terminal(struct Loom *l, struct loom_request_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct loom_request_table *t = &l->service_requests;
+    u64 user_data; s32 result;
+    int rc = loom_request_peek(t,ref,&user_data,&result);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    if (t->detached) { spin_unlock(&l->lock); return -T_E_CANCELED; }
+    struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
+    u32 tail = l->cq_tail;
+    u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+    if ((u32)(tail-head) >= l->cq_entries) {
+        spin_unlock(&l->lock);
+        return -T_E_AGAIN;
+    }
+    u32 idx = tail & (l->cq_entries-1u);
+    struct loom_cqe *cq = (void *)(l->ring_kva+l->cqe_off);
+    cq[idx] = (struct loom_cqe){ .user_data=user_data, .result=result };
+    if (l->receipt_size) {
+        struct loom_service_buffer_receipt *receipts = (void *)(l->ring_kva+l->receipt_off);
+        receipts[idx] = (struct loom_service_buffer_receipt){0};
+    }
+    // No abort check here: a terminal committed before abort stays truthful.
+    // Copy, mark delivered, and publish the tail under one lock interval.
+    rc = loom_request_deliver(t,ref);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    l->cq_tail = tail+1u;
+    __atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);
     spin_unlock(&l->lock);
     poll_waiter_list_wake(&l->cq_waiters);
     return 0;

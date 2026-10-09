@@ -1,0 +1,11 @@
+--- control
++++ omit-deliver
+@@ -39,7 +39,7 @@
+     }
+     // No abort check here: a terminal committed before abort stays truthful.
+     // Copy, mark delivered, and publish the tail under one lock interval.
+-    rc = loom_request_deliver(t,ref);
++    rc = 0;
+     if (rc) { spin_unlock(&l->lock); return rc; }
+     l->cq_tail = tail+1u;
+     __atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);

@@ -28,6 +28,7 @@ PRE = r'''
 #include <string.h>
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_nodes.h>
+#include <thylacine/loom_service_requests.h>
 #define THYLACINE_DEVSRV_H
 struct SrvServiceTarget { void *view,*service;u64 generation;u8 name_len;char name[32]; };
 #include <thylacine/loom_service_targets.h>
@@ -47,8 +48,8 @@ static void spin_unlock(spin_lock_t *p) { REQUIRE(p->held,"unlock without lock")
 static void extinction(const char *s) { puts(s); exit(12); }
 struct page { void *mem; bool live; };
 static struct page pages[8];
-static int nr_pages, page_frees, as_frees, loom_frees, slot_frees, pool_frees, target_frees, node_frees, drains, refunds;
-static uintptr_t as_addr, loom_addr, slot_addr, pool_addr, target_addr, node_addr;
+static int nr_pages, page_frees, as_frees, loom_frees, slot_frees, pool_frees, target_frees, node_frees, request_frees, drains, refunds;
+static uintptr_t as_addr, loom_addr, slot_addr, pool_addr, target_addr, node_addr, request_addr;
 static u64 g_addrspace_next_id, g_loom_destroyed, service_retired_count;
 static struct page *alloc_pages(unsigned order, unsigned flags) {
     REQUIRE(order==0 && flags==KP_ZERO && nr_pages<8,"page allocation contract");
@@ -76,6 +77,7 @@ static void kfree(void *p) {
     else if((uintptr_t)p==slot_addr) { REQUIRE(!slot_frees,"slot page freed once"); slot_frees++; }
     else if((uintptr_t)p==pool_addr) { REQUIRE(!pool_frees,"pool table freed once"); pool_frees++; }
     else if((uintptr_t)p==target_addr) { REQUIRE(!target_frees,"target table freed once"); target_frees++; }
+    else if((uintptr_t)p==request_addr) { REQUIRE(!request_frees,"request page freed once");request_frees++; }
     else if((uintptr_t)p==node_addr) { REQUIRE(!node_frees,"node page freed once"); node_frees++; }
     else extinction("unexpected object free");
     free(p);
@@ -91,6 +93,8 @@ struct Loom {
     struct loom_service_pool_table *service_pools;
     struct loom_service_target_table *service_targets;
     struct loom_service_node_table *service_nodes;
+    struct loom_request_table service_requests;
+    u32 cq_entries;
     void *service_fixed;u32 service_fixed_count;
     u32 service_metadata_pages;
     bool sqpoll; u32 n_reg_buf, inflight_ops;
@@ -127,7 +131,7 @@ int main(int argc,char **argv) {
     l3[0]=0xdead000|3;
     REQUIRE(addrspace_private_begin(as),"private pin admitted");
     struct Loom *l=calloc(1,sizeof(*l));REQUIRE(l,"Loom allocated");
-    loom_addr=(uintptr_t)l;l->service_as=as;l->service_metadata_pages=6;
+    loom_addr=(uintptr_t)l;l->service_as=as;l->service_metadata_pages=7;
     l->service_slots=calloc(1,4096);REQUIRE(l->service_slots,"slot page allocated");
     slot_addr=(uintptr_t)l->service_slots;
     l->service_pools=calloc(1,sizeof(*l->service_pools));REQUIRE(l->service_pools,"pool table allocated");
@@ -136,7 +140,9 @@ int main(int argc,char **argv) {
     target_addr=(uintptr_t)l->service_targets;
     l->service_nodes=calloc(1,4096);REQUIRE(l->service_nodes,"node page allocated");
     node_addr=(uintptr_t)l->service_nodes;
-    l->ring=(void *)1;as->page_count=9;
+    l->service_requests.records=calloc(1,4096);REQUIRE(l->service_requests.records,"request page allocated");
+    l->service_requests.capacity=2;l->cq_entries=2;request_addr=(uintptr_t)l->service_requests.records;
+    l->ring=(void *)1;as->page_count=10;
     if(order==0) {
         addrspace_unref(as);
         REQUIRE(drains==1 && !as_frees && !page_frees,"private pin retains ownerless image");
@@ -150,6 +156,7 @@ int main(int argc,char **argv) {
     // No descriptor or table pointer is dereferenced beyond final drop.
     REQUIRE(as_frees==1,"final descriptor reclaimed exactly once");
     REQUIRE(page_frees==4,"all four page-table levels reclaimed exactly once");
+    REQUIRE(request_frees==1,"request page reclaimed exactly once");
     REQUIRE(node_frees==1,"node page reclaimed exactly once");
     REQUIRE(target_frees==1,"target table reclaimed exactly once");
     REQUIRE(pool_frees==1,"pool table reclaimed exactly once");
@@ -171,7 +178,7 @@ def main():
     assert free>=8*1024**3, f'8 GiB floor: {free/1024**3:.3f} available'
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     out=ROOT/'work/oct5-as-r9/astra-takeover'/('final-reclaim-'+stamp);out.mkdir()
-    sources={n:(ROOT/n).read_text() for n in ['kernel/addrspace.c','kernel/include/thylacine/addrspace.h','arch/arm64/mmu.c','kernel/loom.c','kernel/loom_service_pool_table.c','kernel/include/thylacine/loom_service_pool_table.h','kernel/include/thylacine/loom_service_pool.h','kernel/include/thylacine/loom_service_slots.h','kernel/include/thylacine/loom_service_abi.h','kernel/loom_service_nodes.c','kernel/include/thylacine/loom_service_nodes.h','kernel/loom_service_slots.c','work/oct5-as-r9/final-reclaim-control.py']}
+    sources={n:(ROOT/n).read_text() for n in ['kernel/addrspace.c','kernel/include/thylacine/addrspace.h','arch/arm64/mmu.c','kernel/loom.c','kernel/loom_service_pool_table.c','kernel/include/thylacine/loom_service_pool_table.h','kernel/include/thylacine/loom_service_pool.h','kernel/include/thylacine/loom_service_slots.h','kernel/include/thylacine/loom_service_abi.h','kernel/loom_service_nodes.c','kernel/include/thylacine/loom_service_nodes.h','kernel/loom_service_slots.c','kernel/loom_service_requests.c','kernel/include/thylacine/loom_service_requests.h','work/oct5-as-r9/final-reclaim-control.py']}
     header=sources['kernel/include/thylacine/addrspace.h'];a=header.index('struct AddrSpace {');b=header.index('\n};',a)+3
     funcs={}
     names=['clear_page_then_free','l3_walk_and_free','l2_walk_and_free','l1_walk_and_free','proc_pgtable_create','proc_pgtable_destroy']
@@ -182,6 +189,7 @@ def main():
     funcs['loom_private_drop_buffer']=fun(sources['kernel/loom.c'],'loom_private_drop_buffer')
     funcs['loom_private_targets_destroy']=fun(sources['kernel/loom.c'],'loom_private_targets_destroy')
     funcs['loom_private_nodes_destroy']=fun(sources['kernel/loom.c'],'loom_private_nodes_destroy')
+    funcs['loom_private_requests_destroy']=fun(sources['kernel/loom.c'],'loom_private_requests_destroy')
     funcs['loom_private_destroy']=fun(sources['kernel/loom.c'],'loom_private_destroy')
     def program(fs):return PRE+'\n'+header[a:b]+'\n'+DOUBLES+'\n'+'\n'.join(fs.values())+'\n'+MAIN
     control=program(funcs)
@@ -190,6 +198,7 @@ def main():
       ('omit-descriptor-free','addrspace_lifetime_put','    kfree(as);','', 'final descriptor reclaimed exactly once'),
       ('omit-table-destroy','addrspace_lifetime_put','    proc_pgtable_destroy(as->pgtable_root);','', 'all four page-table levels reclaimed exactly once'),
       ('omit-root-free','proc_pgtable_destroy','    clear_page_then_free(root);','', 'all four page-table levels reclaimed exactly once'),
+      ('omit-request-free','loom_private_destroy','    kfree(l->service_requests.records);','', 'request page reclaimed exactly once'),
       ('omit-node-free','loom_private_destroy','    kfree(l->service_nodes);','', 'node page reclaimed exactly once'),
       ('omit-target-free','loom_private_destroy','    kfree(l->service_targets);','', 'target table reclaimed exactly once'),
       ('omit-pool-free','loom_private_destroy','    kfree(l->service_pools);','', 'pool table reclaimed exactly once'),
@@ -205,7 +214,7 @@ def main():
         src=out/(tag+'.c');src.write_text(program(fs))
         (out/(tag+'.diff')).write_text(''.join(difflib.unified_diff(control.splitlines(True),src.read_text().splitlines(True),fromfile='control',tofile=tag)))
         exe=out/tag
-        cmd=[cc,'-I',str(ROOT/'kernel/include'),'-std=c11','-Wall','-Wextra','-Werror','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-isysroot',sdk,str(src),'kernel/loom_service_nodes.c','kernel/loom_service_slots.c','-o',str(exe)]
+        cmd=[cc,'-I',str(ROOT/'kernel/include'),'-std=c11','-Wall','-Wextra','-Werror','-g','-O1','-fsanitize=address,undefined','-fno-omit-frame-pointer','-isysroot',sdk,str(src),'kernel/loom_service_nodes.c','kernel/loom_service_slots.c','kernel/loom_service_requests.c','-o',str(exe)]
         r=subprocess.run(cmd,capture_output=True,text=True,timeout=60)
         (out/(tag+'-build.log')).write_text(r.stdout+r.stderr)
         assert r.returncode==0,r.stderr
@@ -223,5 +232,5 @@ def main():
     result={'source_head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'source_hashes':{n:hashlib.sha256(s.encode()).hexdigest() for n,s in sources.items()},'free_bytes_before':free,'results':results,'scope':__doc__}
     (out/'result.json').write_text(json.dumps(result,indent=2)+'\n')
     print(out)
-    print('PASS: both drop orders and eight distinct omission mutants; ASan/UBSan, host allocator boundary only')
+    print('PASS: both drop orders and nine distinct omission mutants; ASan/UBSan, host allocator boundary only')
 if __name__=='__main__':main()

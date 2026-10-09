@@ -1,0 +1,11 @@
+--- control
++++ omit-node-free
+@@ -286,7 +286,7 @@
+     }
+     l->n_reg_buf = 0;
+     kfree(l->service_requests.records);
+-    kfree(l->service_nodes);
++
+     kfree(l->service_targets);
+     kfree(l->service_pools);
+     kfree(l->service_slots);

@@ -96,6 +96,100 @@ void test_loom_service_nodes(void) {
     TEST_ASSERT(!error, error);
 }
 
+#include "loom_requests_fixture.h"
+void test_loom_service_requests(void);
+void test_loom_service_requests(void) {
+    const char *error = loom_requests_fixture();
+    TEST_ASSERT(!error,error);
+}
+
+static const char *loom_request_owner_fixture(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make();
+    struct Loom *l = NULL;
+    struct loom_service_ref scope = {0};
+    struct loom_request_ref ref = {0};
+    u64 goal = loom_private_retired();
+    u32 base = p ? p->as->page_count : 0;
+#define RO(c,m) do { if (!(c)) { error=m;goto done; } } while (0)
+    RO(p && p->as,"request owner creator");
+    loom_private_requests_fault_arm_for_test();
+    l=loom_create_private(p,3,2,true);
+    if (l) ++goal;
+    RO(!l && !loom_private_requests_fault_armed_for_test(),"early refusal consumes request fault");
+    loom_private_requests_fault_arm_for_test();
+    l=loom_create_private(p,2,2,true);
+    if (l) ++goal;
+    RO(!l && !loom_private_requests_fault_armed_for_test() && p->as->page_count==base &&
+       !p->as->private_rings,"request allocation failure unwinds tables and charge");
+    l=loom_create_private(p,2,2,true);
+    if (l) ++goal;
+    RO(l && l->service_requests.records && l->service_requests.capacity==l->cq_entries &&
+       loom_requests_empty(&l->service_requests),"CQ-sized zeroed request storage owned");
+    struct loom_service_reserve in={.size=sizeof(in),.version=1,.kind=LOOM_SERVICE_SCOPE};
+    RO(!loom_private_node_prepare(l,p,&in,&scope) && !loom_private_node_publish(l,scope),"request owner scope");
+    spin_lock(&l->lock);
+    int rc=loom_request_prepare(&l->service_requests,l->service_slots,l->service_nodes,scope,77,0,1,&ref);
+    if (!rc) rc=loom_request_admit(&l->service_requests,l->service_slots,l->service_nodes,ref,1);
+    if (!rc) rc=loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,ref,9);
+    spin_unlock(&l->lock);
+    RO(!rc,"request terminal committed");
+    RO(!loom_post_cqe(l,1,1,0) && !loom_post_cqe(l,2,2,0),"fixture fills actual CQ");
+    RO(loom_private_post_terminal(l,ref)==-T_E_AGAIN && l->cq_tail==2 &&
+       l->service_requests.records[ref.index].phase==LREQ_TERMINAL,
+       "full CQ retains terminal and private tail");
+    loom_exec_latch(l); // prior committed success may still be delivered
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    h->cq_tail=0xFFFFFFFFu;h->cq_mask=0xFFFFFFFFu;
+    __atomic_store_n(&h->cq_head,1,__ATOMIC_RELEASE);
+    struct loom_service_buffer_receipt *receipts=(void *)(l->ring_kva+l->receipt_off);
+    receipts[0].lease=999;
+    RO(!loom_private_post_terminal(l,ref) && l->cq_tail==3 && h->cq_tail==3,
+       "committed success survives close with private CQ geometry");
+    struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+    RO(cq[0].user_data==77 && cq[0].result==9 && !cq[0].flags && !receipts[0].lease,
+       "terminal CQE exact and old receipt cleared");
+    RO(loom_private_post_terminal(l,ref)==-T_E_BUSY && l->cq_tail==3,"no duplicate terminal post");
+    spin_lock(&l->lock);
+    rc=loom_request_reap(&l->service_requests,l->service_slots,ref);
+    spin_unlock(&l->lock);
+    RO(!rc && loom_requests_empty(&l->service_requests),"delivered request reaped");
+done:
+    loom_private_requests_fault_disarm_for_test();
+    if (l) {
+        // This fixture owns every request exclusively; there are no actual
+        // protocol callbacks. Drain simulated records even on assertion failure.
+        loom_exec_latch(l);
+        spin_lock(&l->lock);
+        for (u32 i=0;i<l->service_requests.capacity;++i) {
+            struct loom_service_request *r=&l->service_requests.records[i];
+            struct loom_request_ref rr={.index=i,.identity=r->identity};
+            if (r->phase==LREQ_PREPARED) (void)loom_request_rollback(&l->service_requests,l->service_slots,rr);
+            else if (r->phase!=LREQ_FREE) {
+                while (r->borrows) (void)loom_request_put(&l->service_requests,rr);
+                if (r->phase==LREQ_ACTIVE)
+                    (void)loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,rr,-T_E_CANCELED);
+                (void)loom_requests_detach(&l->service_requests,l->service_slots);
+                if (r->phase==LREQ_TERMINAL) (void)loom_request_discard(&l->service_requests,rr);
+                (void)loom_request_reap(&l->service_requests,l->service_slots,rr);
+            }
+        }
+        spin_unlock(&l->lock);
+        loom_unref(l);
+    }
+    if (!lp_wait(goal) && !error) error="request owner retirement timeout";
+    if (p && !error && (p->as->page_count!=base || p->as->private_rings))
+        error="request owner refunds exact charge";
+    test_proc_drop(p);
+#undef RO
+    return error;
+}
+void test_loom_private_requests(void);
+void test_loom_private_requests(void) {
+    const char *error=loom_request_owner_fixture();
+    TEST_ASSERT(!error,error);
+}
+
 #include "loom_node_owner_fixture.h"
 
 void test_loom_private_node_owner(void);
@@ -196,7 +290,7 @@ static const char *loom_slot_owner_fixture(void) {
              "private owner owns zeroed node storage");
     SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
              (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)) +
-             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 1u,
+             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 2u,
              "slot pool target and node pages included in metadata charge");
     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
              (u32)burrow_backing_pages(l->ring_size) + 1u,

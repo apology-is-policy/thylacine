@@ -2096,3 +2096,36 @@ backlog publication, then actual scope/protocol binding, caller authority,
 bounded progress and local retirement. Private service registration/CONNECT and
 clipboard remain disabled, Main untouched,128MiB protection retained. MM0-MM4
 still follow completion of async integration and its client/consumer gates.
+
+## October 9 06:53 UTC: request/terminal owner checkpoint
+
+Continue autonomously through checkpoints, per the operator's latest explicit
+direction; no handoff/confirmation between verified implementation steps.
+
+Added the bounded request ledger (56-byte records,32-byte table descriptor),
+CQ-sized precharged buddy storage on private Loom, allocation-fault unwind and
+unused-only zero-owner cleanup. Each record owns an exact scope pin and monotone
+request identity. Terminal commit requires local borrow count zero, rejects
+fresh success after abort/close, and preserves prior committed success across
+CQ pressure. Delivery and storage reap are separate. Detach/discard checks do
+not replace the engine's actual local-quiescence proof. Actual private terminal
+posting uses kernel CQ geometry, retains full-CQ obligations, clears receipts
+and wakes after unlock. Private syscall activation remains off.
+
+Native diagnostic request-owner-diagnostic-20261009T064808Z:1847/1847, new ledger
+and owner/CQ fixtures, D7 overlap +20 distinct cycles +banner; exact source diff,
+three added-source hashes and six inputs stable. Native Loom size2936(0xb78),
+one page; small-ring total metadata now7pages. ASan/UBSan: ledger1+13mutants,
+post1+6mutants, owner27controls+23mutants including128/8192-entry geometry and
+budget refusal, final-reclaim both orders+9mutants (host boundary only).
+Lifecycle clean5828/seven expected counterexamples pass. Initial harness-only
+unused-parameter/stale-free-count failures preserved and corrected. Self-review
+performed; no independent audit. Full current-source gate pending; previous
+50/50 belongs only to d4825ae1e.
+
+Next continue directly: reserve real per-scope protocol storage and caller
+identity, bind native devsrv prepare/publish + preallocated p9 progress to these
+request/terminal owners, wire bounded progress and retirement, then AS-3/4 and
+MM0-MM4. No Main landing, private activation, clipboard activation or128MiB
+removal. Keep8192MiB floor and clean external Stratum61dde37; preserve protected
+Astra files and operator cleanup. All earlier completed monitors stay paused.

@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ expired.c
+@@ -39,7 +39,7 @@
+                          u64 user_data, u64 deadline, u64 now, struct loom_request_ref *out) {
+     if (!t || !t->records || !t->capacity || !s || !n || !out) return -T_E_INVAL;
+     if (t->detached || s->closing) return -T_E_CANCELED;
+-    if (deadline && deadline <= now) return -T_E_TIMEDOUT;
++    if (false) return -T_E_TIMEDOUT;
+     if (!request_scope_open(s,n,scope)) return -T_E_NOENT;
+     if (t->occupied >= t->capacity || t->next_identity == UINT64_MAX) return -T_E_NOSPC;
+     for (u32 i=0;i<t->capacity;++i) {

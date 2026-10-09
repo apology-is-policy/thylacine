@@ -1,0 +1,11 @@
+--- control
++++ undersize-request-table
+@@ -135,7 +135,7 @@
+     _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
+     // Geometry already bounds cq to 8192. Allocate at least a buddy page even
+     // for tiny rings: the charge follows real physical allocation, not a slab.
+-    size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
++    size_t request_bytes = PAGE_SIZE;
+     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
+     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))

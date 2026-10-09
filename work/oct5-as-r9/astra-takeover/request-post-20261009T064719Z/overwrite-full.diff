@@ -1,0 +1,11 @@
+--- control
++++ overwrite-full
+@@ -26,7 +26,7 @@
+     struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
+     u32 tail = l->cq_tail;
+     u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+-    if ((u32)(tail-head) >= l->cq_entries) {
++    if ((u32)(tail-head) >= l->cq_entries && false) {
+         spin_unlock(&l->lock);
+         return -T_E_AGAIN;
+     }

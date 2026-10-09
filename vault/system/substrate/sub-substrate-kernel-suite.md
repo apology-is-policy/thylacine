@@ -434,3 +434,16 @@ backlog publication, then actual scope/protocol binding, caller authority,
 bounded progress and local retirement. Private service registration/CONNECT and
 clipboard remain disabled, Main untouched,128MiB protection retained. MM0-MM4
 still follow completion of async integration and its client/consumer gates.
+
+## October 9: request ledger and actual terminal CQ fixture
+
+The suite has1847 entries. `loom.service_requests` exercises the real bounded
+request ledger with synthetic scope transitions. `loom.private_requests` owns an
+actual private ring, checks request-allocation fault unwind, commits a synthetic
+request result, fills the actual CQ and proves AGAIN retains the terminal. It
+then latches close, corrupts user-writable CQ mirrors, advances the consumer and
+verifies that private geometry posts the prior result exactly once with a
+cleared receipt. Real owner retirement returns the charge. This is not a native
+service handshake or proof of runtime callback retirement. The diagnostic
+request-owner-diagnostic-20261009T064808Z passed1847/1847 and D7; full matrix
+qualification is pending for this newer source.

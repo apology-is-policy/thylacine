@@ -1,0 +1,11 @@
+--- control
++++ omit-table-destroy
+@@ -337,7 +337,7 @@
+     // before it gets here. See the header for the full argument -- in
+     // particular, vma_drain issues NO TLBI (measured at L-2), so an earlier
+     // claim that it did was fiction and is not load-bearing anywhere.
+-    proc_pgtable_destroy(as->pgtable_root);
++
+     as->pgtable_root = 0;
+     kfree(as);
+ }

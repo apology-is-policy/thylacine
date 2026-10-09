@@ -6,6 +6,11 @@ title: "Loom — the io_uring inversion over 9P"
 code:
   - kernel/loom.c
   - kernel/loom_service_slots.c
+  - kernel/loom_service_requests.c
+  - kernel/include/thylacine/loom_service_requests.h
+  - kernel/test/loom_requests_fixture.h
+  - tools/host-tests/loom-service-requests.c
+  - tools/test-loom-service-requests.py
   - kernel/loom_service_nodes.c
   - kernel/include/thylacine/loom_service_nodes.h
   - kernel/test/loom_node_owner_fixture.h
@@ -1939,3 +1944,60 @@ backlog publication, then actual scope/protocol binding, caller authority,
 bounded progress and local retirement. Private service registration/CONNECT and
 clipboard remain disabled, Main untouched,128MiB protection retained. MM0-MM4
 still follow completion of async integration and its client/consumer gates.
+
+## October 9: charged request records and terminal posting
+
+Each private owner now precharges a CQ-sized array of56-byte request records.
+Its32-byte descriptor is embedded in Loom (native DWARF size2936/0xb78,
+unchanged one-page buddy class). Records allocate at least a whole buddy page,
+then round through the actual buddy charge for larger arrays. Small-ring base
+metadata is seven pages;128 CQ entries use two record pages and8192 use128
+record pages. Geometry bounds multiplication before allocation. The request
+allocation fault is consumed before all refusals; failure frees requests and
+prior tables before refund and exact image-pin release. Zero-reference cleanup
+rolls back only PREPARED records before node cleanup, rejects admitted or orphan
+payloads, and frees record storage before the final refund. It does not silently
+throw away accepted obligations.
+
+The request ledger burns monotone kernel identities unrelated to user_data,
+retains an exact scope-slot pin, reserves bounded capacity before acceptance,
+and rechecks absolute deadlines at admission. ACTIVE borrowers prevent terminal
+commit/free; terminal commits are immutable and reject fresh success after
+scope abort or ring close. Prior committed success survives abort. CQ delivery
+and local storage release are separate transitions. Rollback/reap release the
+parent only after their exact phase/identity/borrow checks; wrap is refused.
+Consumer detach requires a closing ledger and no recorded borrowers, plus the
+engine's external proof that all protocol/local users have ended. Discard then
+replaces delivery for a locally quiescent terminal, never ordinary CQ pressure.
+
+`loom_private_post_terminal` posts a committed non-pooled final result. The
+same owner lock covers terminal peek, private-tail/mask CQ capacity check,
+CQE/zeroed-receipt copy, delivered transition and release tail publication.
+A full CQ returns AGAIN unchanged; wake occurs after unlocking. It deliberately
+does not reject an earlier success just because close has since latched.
+Provided-buffer receipts and intermediate multishot results remain in the pool
+ledger; their binding to final request obligations is still engine work.
+
+Self-review covered charge/free/refund order, bounded multiplication, shared
+scope-pin ownership, stale refs, deadline gaps, abort versus commit, borrower
+retirement, consumer detach, hostile CQ mirrors and wake ordering. No independent
+audit is claimed. Operation-specific state/DAC checks, native publication,
+actual parser/callback pinning, post-admission deadline scheduling and ownership
+of request pointers must still be wired by the engine; these helpers do not
+activate private syscalls or claim protocol quiescence from metadata alone.
+
+Evidence: request-ledger-20261009T0647Z control plus13 named mutants;
+request-post-20261009T064719Z actual posting function plus6 mutants;
+slot-owner-20261009T065009Z actual constructor/destructor27 controls plus23
+mutants, including small/128/8192-entry geometry, refusal and unused cleanup;
+final-reclaim-20261009T064547Z both drop orders plus9 mutants (host allocator
+boundary only). All host runs use ASan/UBSan. Initial test-scaffolding failures
+are retained: removing deadline checks made the mutant's now parameter unused,
+and the old owner test still expected five frees after adding the sixth
+allocation. Both harness defects were corrected; no red production result was
+suppressed. Native request-owner-diagnostic-20261009T064808Z passed1847/1847,
+D7 overlap, twenty distinct cycles and banner, with stable source/extra-source
+hashes and six inputs. The diagnostic's inherited `node_owner` JSON label checks
+`loom.private_requests` in its saved verifier. Lifecycle model clean5828 and
+seven named mutants pass in request-owner-model-20261009T0650Z. Full source
+SMP/UBSan qualification follows this checkpoint.

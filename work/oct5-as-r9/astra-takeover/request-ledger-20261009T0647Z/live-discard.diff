@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ live-discard.c
+@@ -136,7 +136,7 @@
+ int loom_request_discard(struct loom_request_table *t, struct loom_request_ref ref) {
+     struct loom_service_request *r = request_exact(t,ref);
+     if (!r) return -T_E_NOENT;
+-    if (!t->detached || r->phase != LREQ_TERMINAL || r->borrows) return -T_E_BUSY;
++    if (r->phase != LREQ_TERMINAL || r->borrows) return -T_E_BUSY;
+     r->phase = LREQ_DELIVERED;
+     return 0;
+ }
