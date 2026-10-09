@@ -193,6 +193,137 @@ void test_loom_private_slot_owner(void) {
     TEST_ASSERT(error == NULL, error);
 }
 
+// Real private table pins and exact-image settlement; no private syscall or
+// protocol admission is enabled by this internal fixture. Both Procs are idle.
+static const char *loom_private_buffers_fixture(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make(), *q = test_proc_make();
+    struct Loom *l = NULL;
+    struct loom_service_ref pool = {0};
+    u64 goal = loom_private_retired();
+    u64 va = 0, ring_va = 0;
+    u32 ring_size = 0, base = 0;
+#define PB_CHECK(c,msg) do { if (!(c)) { error = msg; goto done; } } while (0)
+    PB_CHECK(p && q, "private buffer creators allocated");
+    base = p->as->page_count;
+    l = loom_create_private(p,2,2,true);
+    if (l) goal++;
+    PB_CHECK(l, "private buffer owner allocated");
+    u32 owner_pages = p->as->page_count;
+    s64 attached = sys_burrow_attach_for_proc(p,PAGE_SIZE);
+    PB_CHECK(attached > 0, "private buffer backing attached");
+    va = (u64)attached;
+    struct Burrow *b = vma_lookup(p,va)->burrow;
+    int handles = burrow_handle_count(b);
+    struct loom_buf_reg good = {va,PAGE_SIZE};
+    PB_CHECK(loom_private_register_buffers(l,q,&good,1)==-T_E_ACCES,
+             "another creator cannot register private buffers");
+    u64 stripes = p->stripes;
+    p->stripes = stripes + 1;
+    int rc = loom_private_register_buffers(l,p,&good,1);
+    p->stripes = stripes;
+    PB_CHECK(rc==-T_E_ACCES, "creator incarnation checked independently of image");
+    struct AddrSpace *as = p->as;
+    p->as = q->as; // idle fixture only: simulate a different creator image
+    rc = loom_private_register_buffers(l,p,&good,1);
+    p->as = as;
+    PB_CHECK(rc==-T_E_ACCES, "creator image checked independently of incarnation");
+    PB_CHECK(!loom_private_register_buffers(l,p,&good,1) &&
+             l->n_reg_buf==1 && l->reg_buf[0].burrow==b &&
+             burrow_handle_count(b)==handles+1, "private table owns one real pin");
+    struct loom_buf_reg bad_pair[2] = {good,{UINT64_MAX,2}};
+    PB_CHECK(loom_private_register_buffers(l,p,bad_pair,2)==-T_E_INVAL &&
+             l->n_reg_buf==1 && l->reg_buf[0].burrow==b &&
+             burrow_handle_count(b)==handles+1,
+             "partial resolution rollback preserves old table and exact pin count");
+    ring_size = l->ring_size;
+    PB_CHECK(!burrow_map(p,l->ring,LP_RING_VA,ring_size,VMA_PROT_RW),
+             "ring mapped for self-buffer rejection");
+    ring_va = LP_RING_VA;
+    struct loom_buf_reg own_ring = {ring_va,ring_size};
+    int ring_handles = burrow_handle_count(l->ring);
+    PB_CHECK(loom_private_register_buffers(l,p,&own_ring,1)==-T_E_INVAL &&
+             burrow_handle_count(l->ring)==ring_handles && l->reg_buf[0].burrow==b,
+             "ring backing refused without retaining a pin");
+    PB_CHECK(lp_detach_settling(p,ring_va,ring_size), "self-ring test mapping detached");
+    ring_va = 0;
+    struct loom_pool_extent extent = {b,0,64};
+    spin_lock(&l->lock);
+    rc = loom_service_pool_prepare(l->service_slots,l->service_pools,&extent,1,&pool);
+    spin_unlock(&l->lock);
+    PB_CHECK(!rc, "provisional pool consumes table backing");
+    PB_CHECK(loom_private_register_buffers(l,p,&good,1)==-T_E_BUSY &&
+             burrow_handle_count(b)==handles+1 && l->reg_buf[0].burrow==b,
+             "provisional pool refuses rebinding and drops speculative pin");
+    spin_lock(&l->lock);
+    rc = loom_service_pool_publish(l->service_slots,l->service_pools,pool);
+    spin_unlock(&l->lock);
+    PB_CHECK(!rc && loom_private_register_buffers(l,p,NULL,0)==-T_E_BUSY &&
+             l->n_reg_buf==1, "live pool refuses table clear");
+    spin_lock(&l->lock);
+    rc = loom_service_pool_reap(l->service_slots,l->service_pools,pool);
+    spin_unlock(&l->lock);
+    PB_CHECK(!rc, "pool reaped before backing table");
+    pool.incarnation = 0;
+    PB_CHECK(!sys_burrow_detach_for_proc(p,va,PAGE_SIZE), "private buffer unmapped");
+    va = 0;
+    PB_CHECK(p->as->page_count==owner_pages+burrow_backing_pages(PAGE_SIZE),
+             "unmapped table pin retains backing charge");
+    u64 destroyed = burrow_total_destroyed();
+    PB_CHECK(!loom_private_register_buffers(l,p,NULL,0) && !l->n_reg_buf &&
+             p->as->page_count==owner_pages && burrow_total_destroyed()==destroyed+1,
+             "table clear frees and settles the final backing pin");
+    // Foreign SHARED_IN backing must never refund this ring's image. q's
+    // teardown owns its original mapping/charge; p holds only a borrowed pin.
+    s64 foreign_va = sys_burrow_attach_for_proc(q,PAGE_SIZE);
+    PB_CHECK(foreign_va>0, "foreign payer backing attached");
+    struct Burrow *foreign = vma_lookup(q,(u64)foreign_va)->burrow;
+    va = 0x60000000ull;
+    rc = burrow_share_into(p,foreign,va,VMA_PROT_RW);
+    if (rc) va = 0;
+    PB_CHECK(!rc, "foreign backing mapped into creator");
+    good.va = va;
+    PB_CHECK(!loom_private_register_buffers(l,p,&good,1), "foreign backing pinned");
+    PB_CHECK(!sys_burrow_detach_for_proc(q,(u64)foreign_va,PAGE_SIZE) &&
+             !sys_burrow_detach_for_proc(p,va,PAGE_SIZE), "foreign mappings detached");
+    va = 0;
+    destroyed = burrow_total_destroyed();
+    PB_CHECK(!loom_private_register_buffers(l,p,NULL,0) &&
+             burrow_total_destroyed()==destroyed+1 && p->as->page_count==owner_pages,
+             "foreign final pin freed without refunding creator image");
+    attached = sys_burrow_attach_for_proc(p,PAGE_SIZE);
+    PB_CHECK(attached>0, "retirement buffer attached");
+    va = (u64)attached;good.va = va;
+    PB_CHECK(!loom_private_register_buffers(l,p,&good,1), "retirement buffer pinned");
+    PB_CHECK(!sys_burrow_detach_for_proc(p,va,PAGE_SIZE), "retirement buffer unmapped");
+    va = 0;
+    loom_exec_latch(l);
+    PB_CHECK(loom_private_register_buffers(l,p,NULL,0)==-T_E_CANCELED &&
+             l->n_reg_buf==1, "close refuses rebinding and retains buffer for retirement");
+done:
+    if (l && pool.incarnation) {
+        spin_lock(&l->lock);
+        if (l->service_slots->slots[pool.slot].phase==LSLOT_PROVISIONAL)
+            (void)loom_service_pool_rollback(l->service_slots,l->service_pools,pool);
+        else (void)loom_service_pool_reap(l->service_slots,l->service_pools,pool);
+        spin_unlock(&l->lock);
+    }
+    if (p && va) (void)sys_burrow_detach_for_proc(p,va,PAGE_SIZE);
+    if (p && ring_va) (void)lp_detach_settling(p,ring_va,ring_size);
+    if (l) loom_unref(l);
+    if (!lp_wait(goal) && !error) error = "private buffer retirement timed out";
+    if (p && !error && (p->as->page_count!=base || p->as->private_rings))
+        error = "private buffer retirement refunds exact image";
+    if (q) test_proc_drop(q);
+    if (p) test_proc_drop(p);
+#undef PB_CHECK
+    return error;
+}
+void test_loom_private_buffers(void) {
+    const char *error = loom_private_buffers_fixture();
+    TEST_ASSERT(error == NULL, error);
+}
+
 void test_loom_service_slots(void) {
     const char *slot_error = loom_slots_fixture();
     TEST_ASSERT(slot_error == NULL, slot_error);

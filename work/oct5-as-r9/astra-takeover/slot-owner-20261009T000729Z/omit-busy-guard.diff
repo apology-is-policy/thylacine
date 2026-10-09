@@ -1,0 +1,11 @@
+--- control
++++ omit-busy-guard
+@@ -181,7 +181,7 @@
+     for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
+         if (l->service_slots->slots[i].phase != LSLOT_FREE ||
+             l->service_slots->slots[i].pins)
+-            extinction("private Loom retained a service slot");
++            (void)0;
+     if (!loom_service_pools_empty(l->service_pools))
+         extinction("private Loom retained pool storage");
+     // No pool, writer or owner borrower survives here. Detach the bounded table

@@ -1,0 +1,11 @@
+--- control
++++ omit-drop
+@@ -100,7 +100,7 @@
+     // Every refusal and replacement uses the same settled-drop primitive. An
+     // unmap can have made this pin the final holder during the unlocked gap.
+     for (u32 i = 0; i < done; ++i)
+-        loom_private_drop_buffer(as, fresh[i].burrow);
++        if (false) loom_private_drop_buffer(as, fresh[i].burrow);
+     return rc;
+ }
+ 

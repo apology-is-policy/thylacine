@@ -504,6 +504,19 @@ static int loom_private_pending(void *unused) {
     return pending;
 }
 
+// A private ring retains this exact image until AFTER all table pins settle.
+// Never rediscover a Proc or follow a post-exec p->as when retiring a buffer.
+static void loom_private_drop_buffer(struct AddrSpace *as, struct Burrow *b) {
+    if (!b) return;
+    u32 refund = 0;
+    (void)burrow_unref_settled_in(b, as, &refund);
+    if (refund) {
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, refund);
+        spin_unlock(&as->lock);
+    }
+}
+
 static void loom_private_destroy(struct Loom *l) {
     // Snapshotted before anything frees l: everything after the kfree below
     // reaches the address space through these two locals and never through l.
@@ -512,7 +525,7 @@ static void loom_private_destroy(struct Loom *l) {
 
     // Until the private engine owns its cleanup, refuse every legacy admission
     // path. A retirement must never enter blocking legacy clunk/join code.
-    if (l->sqpoll || l->n_reg_buf || l->inflight_ops)
+    if (l->sqpoll || l->inflight_ops)
         extinction("private Loom reached legacy cleanup state");
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
         if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
@@ -527,6 +540,14 @@ static void loom_private_destroy(struct Loom *l) {
             extinction("private Loom retained a service slot");
     if (!loom_service_pools_empty(l->service_pools))
         extinction("private Loom retained pool storage");
+    // No pool, writer or owner borrower survives here. Detach the bounded table
+    // before settling each pin outside locks, while the exact image is retained.
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {
+        struct Burrow *b = l->reg_buf[i].burrow;
+        l->reg_buf[i] = (struct loom_reg_buffer){0};
+        loom_private_drop_buffer(as, b);
+    }
+    l->n_reg_buf = 0;
     kfree(l->service_pools);
     kfree(l->service_slots);
 
@@ -960,6 +981,58 @@ static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
     out->_pad   = 0;
     burrow_ref(vma->burrow);     // the table's pin (released at re-register / loom_unref)
     return 0;
+}
+
+// Internal private-buffer admission only. Public setup/registration remain
+// disabled. The caller retains l and p, calls in the creator's stable syscall
+// image (exec requires its peers to leave), and supplies an immutable kernel
+// snapshot. Never call from a worker borrowing somebody else's Proc identity.
+int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+                                  const struct loom_buf_reg *bufs, u32 n) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+    struct AddrSpace *as = l->service_as;
+    if (p->as != as || p->stripes != l->service_creator) return -T_E_ACCES;
+    if (n > LOOM_MAX_REG_BUFFERS || (n && !bufs)) return -T_E_INVAL;
+
+    struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i)
+        fresh[i] = (struct loom_reg_buffer){0};
+    u32 done = 0;
+    int rc = 0;
+    // Resolve the complete set against the retained creator image. Refuse the
+    // ring itself, even when its mapping passes the ordinary ANON/RW gates.
+    spin_lock(&as->lock);
+    while (done < n) {
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done])) {
+            rc = -T_E_INVAL;
+            break;
+        }
+        if (fresh[done++].burrow == l->ring) { rc = -T_E_INVAL; break; }
+    }
+    spin_unlock(&as->lock);
+    if (!rc) {
+        spin_lock(&l->lock);
+        // Close may win while resolution runs. Both provisional and live pools
+        // forbid rebinding; the old table remains intact on either refusal.
+        if (l->service_closing) rc = -T_E_CANCELED;
+        else if (!loom_service_pools_empty(l->service_pools)) rc = -T_E_BUSY;
+        else {
+            for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {
+                struct loom_reg_buffer old = l->reg_buf[i];
+                l->reg_buf[i] = fresh[i];
+                fresh[i] = old;
+            }
+            l->n_reg_buf = n;
+            done = LOOM_MAX_REG_BUFFERS; // displaced pins, not the new table
+        }
+        spin_unlock(&l->lock);
+    }
+    // Every refusal and replacement uses the same settled-drop primitive. An
+    // unmap can have made this pin the final holder during the unlocked gap.
+    for (u32 i = 0; i < done; ++i)
+        loom_private_drop_buffer(as, fresh[i].burrow);
+    return rc;
 }
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,

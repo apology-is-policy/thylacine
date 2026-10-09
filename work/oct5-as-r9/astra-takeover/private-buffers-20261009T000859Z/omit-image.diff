@@ -1,0 +1,11 @@
+--- control
++++ omit-image
+@@ -61,7 +61,7 @@
+     if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+         !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+     struct AddrSpace *as = l->service_as;
+-    if (p->as != as || p->stripes != l->service_creator) return -T_E_ACCES;
++    if (p->stripes != l->service_creator) return -T_E_ACCES;
+     if (n > LOOM_MAX_REG_BUFFERS || (n && !bufs)) return -T_E_INVAL;
+ 
+     struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];

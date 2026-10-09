@@ -33,6 +33,7 @@ typedef struct { int held; } spin_lock_t;
 #define PTE_TYPE_TABLE (1ull << 1)
 #define KP_ZERO 1
 #define LOOM_MAX_REG_HANDLES 2
+#define LOOM_MAX_REG_BUFFERS 2
 #define REQUIRE(c, msg) do { if (!(c)) { puts(msg); exit(11); } } while (0)
 static int held_locks;
 static void spin_lock_init(spin_lock_t *p) { p->held = 0; }
@@ -74,12 +75,15 @@ static void kfree(void *p) {
 }
 '''
 DOUBLES = r'''
+struct Burrow;
+struct loom_reg_buffer { struct Burrow *burrow; void *kva; u32 len, _pad; };
 struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
     struct loom_service_pool_table *service_pools;
     u32 service_metadata_pages;
     bool sqpoll; u32 n_reg_buf, inflight_ops;
+    struct loom_reg_buffer reg_buf[LOOM_MAX_REG_BUFFERS];
     struct { void *spoor; } reg[LOOM_MAX_REG_HANDLES];
     void *ring; u32 magic;
 };
@@ -158,6 +162,7 @@ def main():
     for n in ['addrspace_alloc','addrspace_lifetime_get','addrspace_private_begin','addrspace_lifetime_put','addrspace_unref','addrspace_private_end']:
         funcs[n]=fun(sources['kernel/addrspace.c'],n)
     funcs['loom_service_pools_empty']=fun(sources['kernel/loom_service_pool_table.c'],'loom_service_pools_empty')
+    funcs['loom_private_drop_buffer']=fun(sources['kernel/loom.c'],'loom_private_drop_buffer')
     funcs['loom_private_destroy']=fun(sources['kernel/loom.c'],'loom_private_destroy')
     def program(fs):return PRE+'\n'+header[a:b]+'\n'+DOUBLES+'\n'+'\n'.join(fs.values())+'\n'+MAIN
     control=program(funcs)

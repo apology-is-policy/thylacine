@@ -258,3 +258,11 @@ integration. Guest final allocator reclamation and Pi/A72/KVM remain open.
 Next: registered-buffer ownership using the approved canonical Burrow and exact
 creator/image rules. Async work still precedes MM0-MM4. Self-review only; no
 Main landing, private async/clipboard activation or128MiB protection removal.
+
+
+October9: the internal private registered-buffer owner now rejects replacement
+while this pool table contains any provisional or live record, and settles its
+actual table pins against the retained creator image on replacement/retirement.
+This does not yet resolve user pool-member descriptors or take their independent
+canonical backing pins. See sub-kernel-loom's current registered-buffer checkpoint
+for implementation/evidence limits. Public private services remain disabled.

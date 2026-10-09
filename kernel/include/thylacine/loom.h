@@ -653,6 +653,11 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // (outside the lock) and the new set installed atomically; on FAILURE (any
 // range invalid / OOB / non-anon / not writable / n out of range) NOTHING is
 // changed and every Burrow ref taken so far is rolled back. Returns 0 / -1.
+// Internal only: retained private Loom + creator Proc in its stable syscall
+// image, immutable kernel input. Resolves/pins ANON RW buffers; no usercopy.
+// Public setup/register and private I/O activation remain disabled.
+int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+                                  const struct loom_buf_reg *bufs, u32 n);
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 

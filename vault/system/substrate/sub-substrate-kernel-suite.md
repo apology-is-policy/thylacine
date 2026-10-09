@@ -228,3 +228,11 @@ ledgers, exact payload return and close during copyout. `loom.private_slot_owner
 adds pool-allocation refusal and exact aggregate metadata charging. These fixtures
 exclude caller authority/protocol integration; a passing row does not activate
 private services. The next source-specific full matrix remains pending.
+
+
+October9 adds `loom.private_buffers`: an ordinary native row checking actual
+registered-buffer pins, creator/image authority, partial-resolution rollback,
+ring-backing refusal, provisional/live-pool replacement refusal, settled drops
+after unmap, foreign-payer handling and private retirement. It does not enable
+private service dispatch or certify unimplemented protocol/worker lifetimes.
+The new source-specific full Mac matrix is pending.

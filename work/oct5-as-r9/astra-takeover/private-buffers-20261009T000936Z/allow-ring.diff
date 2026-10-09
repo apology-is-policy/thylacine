@@ -1,0 +1,11 @@
+--- control
++++ allow-ring
+@@ -77,7 +77,7 @@
+             rc = -T_E_INVAL;
+             break;
+         }
+-        if (fresh[done++].burrow == l->ring) { rc = -T_E_INVAL; break; }
++        if ((done++, false)) { rc = -T_E_INVAL; break; }
+     }
+     spin_unlock(&as->lock);
+     if (!rc) {

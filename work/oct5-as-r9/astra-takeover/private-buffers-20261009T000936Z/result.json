@@ -1,0 +1,56 @@
+{
+  "scope": "Extract actual private table admission and settled pin-drop functions.\n\nSequential ASan/UBSan witness with checked image, lock, VMA-resolution and Burrow\nsettlement doubles. Native fixture covers real pins/charges separately. Neither\nproves concurrent protocol retirement or actual guest final allocator reclamation.\n",
+  "source_head": "f1c86c74b14e51321821b60d1e38c0ba21886113",
+  "loom_sha256": "a2013e7b422d2b057ba2b73e0ed064c76edb42ebf0590f0673c6580517a9d6a5",
+  "pool_sha256": "6285690ce4adec53f8290dc58690fa0cbfce1b72bf4fcfeb1bdd884f79f60165",
+  "results": [
+    {
+      "case": "control",
+      "rc": 0,
+      "expected": "PASS private buffer admission and pin settlement",
+      "generated_sha256": "e30022f1a444fe417deb4a40e1677c19f2081fac2b71529919bb53489b8bdd11"
+    },
+    {
+      "case": "omit-image",
+      "rc": 11,
+      "expected": "wrong image refused before pin",
+      "generated_sha256": "81143b23e48d360f4d4a09fae861ce82dfd8cf64ebf0ad4d520a286f01371a9a"
+    },
+    {
+      "case": "omit-creator",
+      "rc": 11,
+      "expected": "wrong creator refused before pin",
+      "generated_sha256": "f923a9c33f7cf2b804185136fd60f875578f25ecc130fc1c967a7cad43771535"
+    },
+    {
+      "case": "allow-ring",
+      "rc": 11,
+      "expected": "own ring refused without leak",
+      "generated_sha256": "9fafa0d35ff59e80d21815fabd358f3f54480cb5a3293769ac484a253e5fc03c"
+    },
+    {
+      "case": "allow-pool",
+      "rc": 11,
+      "expected": "provisional pool blocks replacement",
+      "generated_sha256": "c3ec1811d7ea1609e59027b11284d93b2c31ab638f6ba882799b55d93f59e9aa"
+    },
+    {
+      "case": "allow-close",
+      "rc": 11,
+      "expected": "close rejects admission and drops pin",
+      "generated_sha256": "507017e538ba614b99b03227828055d9801a8d2d3dcf7b96cf4a807b7a093f16"
+    },
+    {
+      "case": "omit-drop",
+      "rc": 11,
+      "expected": "partial refusal drops speculative pin",
+      "generated_sha256": "1d227d32b4ccd1b538825ce2a74fa9540880d0778ae955fe3a09fc6a2c214b35"
+    },
+    {
+      "case": "omit-refund",
+      "rc": 11,
+      "expected": "last pin settles creator charge",
+      "generated_sha256": "8db88574fb550421955dc4c774cce768ed6091933369f828092a4cf54498e247"
+    }
+  ]
+}

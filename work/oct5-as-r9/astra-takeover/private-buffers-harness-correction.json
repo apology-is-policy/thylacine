@@ -1,0 +1,7 @@
+{
+  "initial_run": "private-buffers-20261009T000859Z",
+  "observation": "Control passed; omit-image mutant tripped the resolver double lock assertion before the intended authority assertion. No production-source failure was observed.",
+  "correction": "Use an empty-table request in the wrong-image leg so image refusal is isolated from the separate resolver-lock obligation. Retain initial generated sources and raw logs.",
+  "corrected_run": "private-buffers-20261009T000936Z",
+  "result": "Control and all seven exact named mutants passed their expected verdicts."
+}

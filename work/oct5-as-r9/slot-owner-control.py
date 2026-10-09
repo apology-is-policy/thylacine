@@ -31,6 +31,7 @@ PRE = r'''
 #define KP_ZERO 1
 #define PROC_MAGIC 123
 #define LOOM_MAX_REG_HANDLES 2
+#define LOOM_MAX_REG_BUFFERS 2
 #define CHECK(c,msg) do { if(!(c)) { puts(msg); exit(11); } } while(0)
 typedef struct { int held; } spin_lock_t;
 static int locks;
@@ -40,6 +41,7 @@ static void extinction(const char *s) { puts(s);exit(12); }
 struct AddrSpace { spin_lock_t lock;u32 pages,budget,private_rings,refs; };
 struct Proc { u32 magic;struct AddrSpace *as;u64 stripes; };
 struct Burrow { int unused; };
+struct loom_reg_buffer { struct Burrow *burrow; void *kva; u32 len, _pad; };
 struct Loom {
     struct AddrSpace *service_as;
     struct loom_slot_table *service_slots;
@@ -49,6 +51,7 @@ struct Loom {
     spin_lock_t lock;
     bool service_closing,sqpoll;
     u32 n_reg_buf,inflight_ops;
+    struct loom_reg_buffer reg_buf[LOOM_MAX_REG_BUFFERS];
     struct { void *spoor; } reg[LOOM_MAX_REG_HANDLES];
     void *ring;u32 magic;
     char buddy_padding[3000];
@@ -175,7 +178,7 @@ def main():
     out.mkdir()
     paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h']
     sources = {p: Path(p).read_text() for p in paths}
-    funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_destroy')}
+    funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_drop_buffer', 'loom_private_destroy')}
     def program(fs):
         return PRE + '\n' + '\n'.join(fs.values()) + MAIN
     control = program(funcs)

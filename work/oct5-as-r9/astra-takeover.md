@@ -531,3 +531,53 @@ integration. Guest final allocator reclamation and Pi/A72/KVM remain open.
 Next: registered-buffer ownership using the approved canonical Burrow and exact
 creator/image rules. Async work still precedes MM0-MM4. Self-review only; no
 Main landing, private async/clipboard activation or128MiB protection removal.
+
+
+## October 9: internal private registered-buffer ownership (runtime pending)
+
+loom_private_register_buffers is an internal-only admission path. It requires a
+retained private Loom and creator Proc in its stable syscall image, checking both
+Proc incarnation and exact retained AddrSpace before resolution. Input is an
+immutable kernel snapshot; there is no new usercopy or public dispatch. Existing
+ANON/writable/contiguous single-VMA resolution takes actual Burrow pins. The
+ring's own backing is refused. The complete new set resolves before installation;
+partial refusal leaves the prior table intact. Under the Loom lock, close or any
+provisional/live pool refuses replacement. Success swaps the whole bounded table.
+Speculative or displaced pins settle outside locks against the retained image,
+never by rediscovering a Proc or following its post-exec address space.
+
+Final private retirement still requires empty service/pool ledgers and no legacy
+worker/operation/fid state. It now clears and settles registered-buffer pins
+before freeing tables, settling the ring and dropping the retained image last.
+No new allocation/charge is needed for this table: it already resides in Loom.
+Pool-member canonical resolution and independent pin adoption, accepted fixed-I/O
+exclusion and protocol/worker retirement remain separate unfinished integration.
+Public private setup, registration and I/O remain disabled.
+
+Self-review: resolution holds the exact image lock, installation the Loom lock,
+and neither encloses pin destruction. Exec's sole-thread swap latches private
+rings before replacing the image; internal callers must obey the documented
+stable-syscall-image requirement. A held Loom reference prevents final table
+retirement during admission. Existing AS-R9 settled drops determine refunds
+inside the Burrow lifetime lock; no claim/drop/restore window is introduced.
+
+Host ASan/UBSan private-buffers-20261009T000936Z passed control plus7 exact
+authority/ring/pool/close/drop/refund mutants using checked resolution, image,
+Burrow-settlement and lock doubles. The first harness attempt's wrong-image
+mutant hit its resolver-lock assertion before its intended authority assertion;
+that evidence is retained in private-buffers-20261009T000859Z. The corrected leg
+uses an empty-table request to isolate authority. See the correction JSON.
+Updated slot-owner-20261009T000729Z passes nine controls plus10 mutants;
+final-reclaim-20261009T000739Z passes both owner-drop orders plus6 mutants.
+Those destructor controls exercise empty buffer tables, with real buffer pins
+covered separately by the new native fixture. Lifecycle model clean5828 and
+all7 named counterexamples pass (private-buffers-model-20261009T0008Z).
+
+Native compile/link passes. New loom.private_buffers covers real pin counts,
+partial-resolution rollback, exact creator/image rejection, own-ring rejection,
+provisional/live-pool replacement refusal, unmap-then-clear, foreign-payer final
+pin release, close refusal and final retirement refund. Expected count1840;
+runtime/full Mac qualification is pending for this changed source. Previous
+50/50 applies only to1295a25da. This is self-review, not independent audit.
+Guest final allocator reclamation and Pi/A72/KVM remain open. Continue async
+before MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.
