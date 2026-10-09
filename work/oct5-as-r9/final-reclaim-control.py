@@ -29,6 +29,19 @@ PRE = r'''
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_nodes.h>
 #include <thylacine/loom_service_requests.h>
+// Host boundary layout only; ARM64 syntax validates the actual header/page.
+#define THYLACINE_POLL_H
+#define THYLACINE_PROC_H
+struct ProcSqpollTicket { u64 stripes; };
+struct poll_waiter {
+    u32                       magic;   // POLL_WAITER_MAGIC
+    bool                      ready;   // set under list->lock by a producer
+    struct Rendez            *rendez;  // back-ref to the poller's private Rendez
+    struct poll_waiter_list  *list;    // non-NULL while listed; NULL otherwise
+    struct poll_waiter       *next;    // singly-linked; valid only while listed
+};
+
+
 #include <thylacine/loom_service_engine.h>
 #include <thylacine/loom_service_close_queue.h>
 #define THYLACINE_DEVSRV_H
@@ -117,6 +130,14 @@ static bool burrow_unref_settled_in(void *ring, struct AddrSpace *as, u32 *refun
 static void addrspace_uncharge_pages(struct AddrSpace *as, u32 pages) {
     REQUIRE(as->lock.held && as->page_count==pages,"exact retirement refund");
     as->page_count-=pages;
+}
+'''
+DOUBLES += r'''
+// This fixture covers the no-worker constructor/final-free branch. Real worker
+// join/ticket ordering is separately exercised by executor worker-control.py.
+static void loom_private_executor_join(struct Loom *l) {
+    REQUIRE(!held_locks && !l->sqpoll && !l->service_engine->worker_ticket.stripes,
+            "no-worker final-free boundary");
 }
 '''
 MAIN = r'''

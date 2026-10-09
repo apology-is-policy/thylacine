@@ -1,0 +1,89 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 73 and seed 1882063462208493546 with 1 worker on 8 cores with 455MB heap and 64MB offheap memory [pid: 19296] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/loom.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-17693774259084265562/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-17693774259084265562/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-17693774259084265562/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module loom
+Linting of module loom
+Starting... (2026-10-09 23:02:37)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-09 23:02:37.
+Error: Invariant NoStaleCompletion is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ phase = (o1 :> "empty" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_none"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 2: <UserProduce(o1,"arg_ok") line 317, col 5 to line 322, col 103 of module loom>
+/\ phase = (o1 :> "posted" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_none"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 3: <UserRegister("obj_ok") line 347, col 5 to line 351, col 114 of module loom>
+/\ phase = (o1 :> "posted" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 4: <Consume(o1) line 362, col 5 to line 370, col 92 of module loom>
+/\ phase = (o1 :> "snap" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = FALSE
+
+State 5: <Teardown line 463, col 5 to line 480, col 91 of module loom>
+/\ phase = (o1 :> "snap" @@ o2 :> "empty")
+/\ cqe_posted = (o1 :> 0 @@ o2 :> 0)
+/\ sqe_arg = (o1 :> "arg_ok" @@ o2 :> "arg_ok")
+/\ cq = {}
+/\ reg = "obj_ok"
+/\ acted_obj = (o1 :> "obj_none" @@ o2 :> "obj_none")
+/\ snap_obj = (o1 :> "obj_ok" @@ o2 :> "obj_none")
+/\ acted_arg = (o1 :> "arg_none" @@ o2 :> "arg_none")
+/\ snap_arg = (o1 :> "arg_ok" @@ o2 :> "arg_none")
+/\ cqw = "idle"
+/\ cqw_flag = FALSE
+/\ torn = TRUE
+
+234 states generated, 102 distinct states found, 57 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 00s at (2026-10-09 23:02:37)

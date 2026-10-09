@@ -1,0 +1,86 @@
+[
+  {
+    "config": "poll_local.cfg",
+    "rc": 0,
+    "expected": "Invariants",
+    "ok": true,
+    "sha256": "d29932476023e63588308e576e30dc0c1603292d29b5ce20803b885213e6081a"
+  },
+  {
+    "config": "poll_buggy_check_before_register.cfg",
+    "rc": 12,
+    "expected": "NoMissedPoll",
+    "ok": true,
+    "sha256": "1e91e2da6f1acf13ebf6b92b0a04f5b2425fe8c1d4d55276243ad581d94d3b8b"
+  },
+  {
+    "config": "poll_buggy_clear_after_sample.cfg",
+    "rc": 12,
+    "expected": "NoMissedPoll",
+    "ok": true,
+    "sha256": "bcf140457ebacc154520224ba1004cd590ee8a802972c72867e16bd1aeb09743"
+  },
+  {
+    "config": "poll_buggy_lazy_unregister.cfg",
+    "rc": 12,
+    "expected": "NoStaleHook",
+    "ok": true,
+    "sha256": "784724515f543b8431d74be3c11ec11ad6d3948ef250107ce2e4b24d8ff76088"
+  },
+  {
+    "config": "poll_buggy_no_loop_die_check.cfg",
+    "rc": 13,
+    "expected": "DeathTerminates",
+    "ok": true,
+    "sha256": "c5378dcb362723275f5acba5d6206a5d57c95039ad63a725c50cd3ce958ff04d"
+  },
+  {
+    "config": "poll_buggy_no_loop_stop_check.cfg",
+    "rc": 13,
+    "expected": "StopHonoured",
+    "ok": true,
+    "sha256": "300f2c779ff372a1bdbb7d54bf640e2c3f12bb9dc0afc252c06cb34234c50a1a"
+  },
+  {
+    "config": "poll_buggy_no_retry.cfg",
+    "rc": 12,
+    "expected": "NoMissedPoll",
+    "ok": true,
+    "sha256": "266ca95523deb29f3c6e4e54de9cf5ea3010f62e20e31146dea0f7cd817b5a35"
+  },
+  {
+    "config": "poll_buggy_no_wake.cfg",
+    "rc": 12,
+    "expected": "NoMissedPoll",
+    "ok": true,
+    "sha256": "fa7490fcf7100339996b017bd1698379938c01607a5da18d9194738aeffa7a82"
+  },
+  {
+    "config": "poll_buggy_retry_is_timeout.cfg",
+    "rc": 12,
+    "expected": "NoSpuriousZero",
+    "ok": true,
+    "sha256": "9b6ecba248718767f9ea9be97dfb5dbe345e6a973836c8f79369d5ad37c1503c"
+  },
+  {
+    "config": "poll_buggy_return_on_wake.cfg",
+    "rc": 12,
+    "expected": "NoSpuriousZero",
+    "ok": true,
+    "sha256": "cd51808417892b483f30ea9ac80b243682d92aa082d33ab4033f9a1b03ef8fca"
+  },
+  {
+    "config": "poll_buggy_sweep_leaves_snapshot.cfg",
+    "rc": 12,
+    "expected": "NoSnapshotOutlivesCall",
+    "ok": true,
+    "sha256": "f1f7a42f812d22d4633a49d9e25383928222c6cf9b540d53ff76242e869a24aa"
+  },
+  {
+    "config": "poll_buggy_verdict_before_settle.cfg",
+    "rc": 12,
+    "expected": "NoFalseNotReady",
+    "ok": true,
+    "sha256": "cc3f0e7329d77b1b54f618c606b03e77ce4661d07cccb9c087e47075fad8d981"
+  }
+]

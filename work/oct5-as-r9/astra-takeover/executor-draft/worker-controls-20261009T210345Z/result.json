@@ -1,0 +1,101 @@
+{
+  "results": [
+    {
+      "tag": "control",
+      "case": 0,
+      "rc": 0,
+      "source_sha256": "9faabd79b671b48d01d1fcd021e89fdb750f548f4ca2dc4c8dedfd36e9cf4cc1",
+      "log_sha256": "3b97170d2b31e42cc25d1358f20f58d2ea52da16ca64ea843eb83afdf0186643"
+    },
+    {
+      "tag": "control",
+      "case": 1,
+      "rc": 0,
+      "source_sha256": "9faabd79b671b48d01d1fcd021e89fdb750f548f4ca2dc4c8dedfd36e9cf4cc1",
+      "log_sha256": "3b97170d2b31e42cc25d1358f20f58d2ea52da16ca64ea843eb83afdf0186643"
+    },
+    {
+      "tag": "control",
+      "case": 2,
+      "rc": 0,
+      "source_sha256": "9faabd79b671b48d01d1fcd021e89fdb750f548f4ca2dc4c8dedfd36e9cf4cc1",
+      "log_sha256": "3b97170d2b31e42cc25d1358f20f58d2ea52da16ca64ea843eb83afdf0186643"
+    },
+    {
+      "tag": "control",
+      "case": 3,
+      "rc": 0,
+      "source_sha256": "9faabd79b671b48d01d1fcd021e89fdb750f548f4ca2dc4c8dedfd36e9cf4cc1",
+      "log_sha256": "3b97170d2b31e42cc25d1358f20f58d2ea52da16ca64ea843eb83afdf0186643"
+    },
+    {
+      "tag": "control",
+      "case": 4,
+      "rc": 0,
+      "source_sha256": "9faabd79b671b48d01d1fcd021e89fdb750f548f4ca2dc4c8dedfd36e9cf4cc1",
+      "log_sha256": "3b97170d2b31e42cc25d1358f20f58d2ea52da16ca64ea843eb83afdf0186643"
+    },
+    {
+      "tag": "no-start-serialization",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "b6a782243ed4baa81d5ccf7d4b238d69acbfe65600fe1263d3753a0ba4c5af11",
+      "log_sha256": "494582d25126fcbb4c17fff0879369eba6483c47f6e894190e70d1f1792e8cf4"
+    },
+    {
+      "tag": "publish-after-ready",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "0c9ad4cc7fac1691a09e936308bf02a4fb21b7773679998d32070ba2c5006b60",
+      "log_sha256": "3ea843301f6f497cb05aa26e23d199ef9ff7c2d2fabee63a91587aac86248f18"
+    },
+    {
+      "tag": "forget-recheck",
+      "case": 3,
+      "rc": 11,
+      "source_sha256": "bdb332969b750cdd07b290c0574ab3d931e5b7d5e6137c3c333ab07729f0c0b2",
+      "log_sha256": "117e77db5c2fab4772ba87d315bf275981a89f767e95d82cf1681d31c955f06d"
+    },
+    {
+      "tag": "drop-thread-rollback",
+      "case": 3,
+      "rc": 11,
+      "source_sha256": "3e800a89b44f8c853a2d0a655e7744e592dcdc813e1d80b554f5f1447bd82bc7",
+      "log_sha256": "5ccd138604a271d02735bfbd873c904a410832c65944e2820971e966a16a5749"
+    },
+    {
+      "tag": "forget-stop",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "229004c4e1a9cb70daff2d4c31969939fe34ed25d463c3a0190b710259b1ff7a",
+      "log_sha256": "d80c34a3855a6bbb246fbdce5abcd182e15b44c370e498738168bb86b26ef9ca"
+    },
+    {
+      "tag": "skip-join",
+      "case": 0,
+      "rc": 11,
+      "source_sha256": "387e2cef2f7857ee932138c392bff17a33eaa6ef62c8ec0342022a4b37f89bbc",
+      "log_sha256": "5c7ca96a319ece8338854c8b65d078219b21fa31dc6340c7b2bf543b52b30cdc"
+    },
+    {
+      "tag": "skip-disarm",
+      "case": 4,
+      "rc": 11,
+      "source_sha256": "c01fe424b00e7cb57b2932c19b3ef2b3609c975e0c226e95fe64daad1aac2365",
+      "log_sha256": "76195cc3c5dda3435d2567423d80fadeb1febdcf86a3b0e99df7f20dd8fdb129"
+    },
+    {
+      "tag": "forget-announce",
+      "case": 4,
+      "rc": 11,
+      "source_sha256": "dbb433e86fd3737591b3c6f3ec8d6ee19f0470d41e8a7122fa530a207dbfb865",
+      "log_sha256": "6b3923bcf7e4711f5e1e9f43424c64805c528f4e1dfd70ff6c3d1a7493cc1d05"
+    }
+  ],
+  "inputs": {
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/kernel/loom.c": "380f7ca98c09763f07dd2be89126b800d0409d1e9a548c3a8593876d86ebff0a",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/worker-control.py": "04d9ff031ffd7eb589fcebd2f432e991e2ee3a2aff32fece55c4a1b350ed6068",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/control.py": "5116ed05f8eedf3978a1ad56ad3c8d18f7e740a8624c3a7c44bebd1467fac4a4"
+  },
+  "limits": "Extracted actual private executor admission/loop/join; actual readiness and ledgers; deterministic thread/ticket/poll boundary doubles. No native thread scheduling proof."
+}

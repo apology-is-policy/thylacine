@@ -1,0 +1,15 @@
+Astra reviewed readiness/executor draft, not yet installed.
+Read self-review.txt and verified-manifest.json. All ten host/syntax checks pass;
+read reviewed-checks-20261009T210322Z/result.json for exact runs. EX-W1 was
+reproduced and repaired; failure evidence remains. Native fixture is unrun.
+Canonical ade9c69d17 remains frozen for current-gate-20261009T203019Z.
+Read ../control-current-flight.json. Wait for verified raw50x1852 and both
+runner42917 and monitor42938 to exit. Record full controls evidence checkpoint.
+Then reacquire Astra Mac lease, run install-reviewed.py ONCE, build canonical
+kernel and regenerate Halls, and run native-diagnostic.py with fresh output dir.
+Install image is host-tree (engine includes appended readiness.inc), not the
+raw draft kernel directory. Never rerun an installed historical installer.
+Native fixture must pass1853/D7/20cycles with stable source and matched inputs;
+preserve any failure and investigate before retry. Then document invariants,
+self-review, checkpoint and launch a fresh exact-source full Mac matrix.
+No Main, user async/clipboard activation or128MiB protection change.

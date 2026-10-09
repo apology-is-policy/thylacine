@@ -27,6 +27,19 @@ PRE = r'''
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_nodes.h>
 #include <thylacine/loom_service_requests.h>
+// Host boundary layout only; ARM64 syntax validates the actual header/page.
+#define THYLACINE_POLL_H
+#define THYLACINE_PROC_H
+struct ProcSqpollTicket { u64 stripes; };
+struct poll_waiter {
+    u32                       magic;   // POLL_WAITER_MAGIC
+    bool                      ready;   // set under list->lock by a producer
+    struct Rendez            *rendez;  // back-ref to the poller's private Rendez
+    struct poll_waiter_list  *list;    // non-NULL while listed; NULL otherwise
+    struct poll_waiter       *next;    // singly-linked; valid only while listed
+};
+
+
 #include <thylacine/loom_service_engine.h>
 #include <thylacine/loom_service_close_queue.h>
 #include <thylacine/errno.h>
@@ -134,6 +147,14 @@ static void devsrv_service_target_clear(struct SrvServiceTarget *t) { CHECK(!loc
 static bool loom_is_private(const struct Loom *l) { return l && l->service_as; }
 '''
 
+PRE += r'''
+// This fixture covers the no-worker constructor/final-free branch. Real worker
+// join/ticket ordering is separately exercised by executor worker-control.py.
+static void loom_private_executor_join(struct Loom *l) {
+    CHECK(!locks && !l->sqpoll && !l->service_engine->worker_ticket.stripes,
+            "no-worker final-free boundary");
+}
+'''
 MAIN = r'''
 int main(int argc,char **argv) {
     int mode=argc>1?atoi(argv[1]):0;

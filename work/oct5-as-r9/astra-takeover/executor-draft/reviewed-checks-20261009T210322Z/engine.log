@@ -1,0 +1,9 @@
+PASS control
+PASS self-kick-put
+PASS self-kick-collect
+PASS ignore-settling
+PASS skip-cursor-abort
+PASS missing-external-put-kick
+PASS treat-busy-as-complete
+PASS spin-busy
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/engine-controls-20261009T210355Z

@@ -3074,3 +3074,54 @@ poll/lifecycle/index model controls and counterexamples pass, with no claim
 that they prove the new executor. Next install the reviewed draft, rebuild and
 run fresh1853 native before its own exact-source matrix. Self-review only;
 no Main/private user async/clipboard activation or128MiB protection change.
+
+
+## October 9: readiness-aware internal private executor
+
+The existing per-ring SQPOLL thread now has an internal private handshake
+executor. Creator stripes and the retained address-space image supply the
+existing thread-budget ticket; no asynchronous raw Proc pointer is retained.
+Ll serializes the start token across charge/allocation/publication or rollback.
+A failed start frees its never-readied thread before refund and token release.
+Ordinary private SQPOLL setup remains refused; no user dispatch is activated.
+
+Readiness visits scan at most64 entries and drive one actionable owner with
+the shared round-robin cursor. Cursor state is sampled under Ll only while no
+driver/parser user is active; real protocol steps recheck state and never wait
+for a peer. Native poll directions follow handshake phase. An exclusive wait
+sweep retains entry pins, registers native interests before checking readiness,
+then sleeps on atomic changes, CQ head, poll flags and the earliest absolute
+ACTIVE deadline. READY discards its CONNECT timer; full-CQ terminals park.
+The Rendez predicate never takes Ll or a device lock. Embedded64 poll hooks
+fit within the existing charged4096-byte index page, checked on actual ARM64.
+Every hook is unregistered before any wait pin is returned.
+
+The executor borrows the ring lifetime. The zero-reference retirer wakes, joins
+and frees the actual worker before ticket refund or table/storage destruction.
+A last protocol unref from the worker queues this cleanup; it never self-joins.
+Handle-close DONE includes start rollback and actual executor exit. Exit
+publishes EXITING/exited in the existing IRQ-masked handshake before queue/join
+wakes. Local completion is peer-independent but needs scheduler service.
+
+Self-review found EX-W1: a silent readiness-scan pin return could strand a close
+or armed collector. The actual-C witness rejects that draft; repair samples the
+dependency and decrements its pin in the same Ll interval, then wakes unlocked.
+Fourteen readiness cases/17mutants, five worker cases/8mutants, engine18/7,
+CONNECT11/12, constructor29/26 and final-free both orders/10mutants pass.
+Actual ARM64 syntax passes. Existing poll/lifecycle/index model controls and
+counterexamples pass; they do not prove the new executor or native scheduler.
+Self-review and failed witnesses: astra-takeover/executor-draft/self-review.txt.
+
+Native executor-native-20261009T2116Z passes1853/1853, D7 overlap,20 distinct
+login/logout cycles and banner with stable HEAD+diff, eight reviewed source
+hashes and six input hashes. Real normal/bulk peers exercise registration-window
+response injection, stalled-peer fairness, full CQ/drain, timeout without a new
+edge, handle-close exit and exact ticket/image refund. An empty live parked
+executor is joined by zero-reference cleanup. The2114Z capture attempt failed
+before VM launch on an obsolete filename; repaired from the reviewed manifest,
+with failure retained. Full new Mac matrix is next; ade9's50/50 qualifies only
+the older1852 controls source. Self-review only, not independent audit.
+
+General RPC/FID operations, provided-buffer dispatch and usercopy remain ahead
+of AS3/4 and MM0-MM4. No Main/private user async/clipboard activation or128MiB
+protection change. Pi/A72/KVM and final guest allocator reclamation remain open.

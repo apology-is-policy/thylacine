@@ -1,0 +1,211 @@
+{
+  "results": [
+    {
+      "case": "control",
+      "mode": 0,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 1,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 2,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 3,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 4,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 5,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 6,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 7,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 8,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 9,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 10,
+      "expected": "PASS engine control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "ce89d073567ae50c829b02542ddbf2c09375ada643cea38bad5801b6251bc695"
+    },
+    {
+      "case": "control",
+      "mode": 20,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "control",
+      "mode": 21,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "control",
+      "mode": 22,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "control",
+      "mode": 23,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "control",
+      "mode": 24,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "control",
+      "mode": 25,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "control",
+      "mode": 26,
+      "expected": "PASS close control",
+      "rc": 0,
+      "source_sha256": "2be749d382b8c1229753d35d2456055de652da4c9270ca08ca79b32860b1eb69",
+      "log_sha256": "d4544b64449eca1818975a76afdb5cee8eb0896a43a5b70d0b001573569a5a37"
+    },
+    {
+      "case": "self-kick-put",
+      "mode": 20,
+      "expected": "quiet close retires cursor without CQ or self kick",
+      "rc": 11,
+      "source_sha256": "80b1389fe072adfa3804e494845a0a471ac64c5c5cdd67c7fe0bff5533032c0e",
+      "log_sha256": "c287d0fd0505807bd069025561656e2efec1bf98cd2e67f0144511fc4a536f38"
+    },
+    {
+      "case": "self-kick-collect",
+      "mode": 20,
+      "expected": "quiet close finishes exact ownership independent of full CQ",
+      "rc": 11,
+      "source_sha256": "a5e0c7792aa2479b394bdc24942dae3b76a0ca1e9dc38efa3c8a9b6a3529903a",
+      "log_sha256": "60b23854241acd0d9ea66827162bb9aec93d2bbb8203a208ba4142df3bd99b2a"
+    },
+    {
+      "case": "ignore-settling",
+      "mode": 25,
+      "expected": "fixed physical settling or borrow prevents discard",
+      "rc": 11,
+      "source_sha256": "f957fb65562569738dd414f3bf9637a4934fec84a48fb0a8c299d01efbf62796",
+      "log_sha256": "60e6098445ac34afa75c80c40828a4ca44a90916f88d928cc0d03f272be06781"
+    },
+    {
+      "case": "skip-cursor-abort",
+      "mode": 20,
+      "expected": "quiet close retires cursor without CQ or self kick",
+      "rc": 11,
+      "source_sha256": "fdc98ed5145ff7e316eb68436df1b6aff02a946fb02abdb71198b23faf6335e5",
+      "log_sha256": "c287d0fd0505807bd069025561656e2efec1bf98cd2e67f0144511fc4a536f38"
+    },
+    {
+      "case": "missing-external-put-kick",
+      "mode": 20,
+      "expected": "external entry put notifies close",
+      "rc": 11,
+      "source_sha256": "d6d6456a2b58d7e4817587bb180fe62785331d2e66de2794521ec0cbedc2c094",
+      "log_sha256": "a48ff70b98d1114532218683f1178d4475378f64f35ab9f1dea5f72f235445f1"
+    },
+    {
+      "case": "treat-busy-as-complete",
+      "mode": 21,
+      "expected": "unindexed constructor parks close",
+      "rc": 11,
+      "source_sha256": "ab3d7596992a8bd2a9ed9d698e4b55786c832bc2f88443e72805ef97ad4f67b1",
+      "log_sha256": "d55ed076044af5beff996440acb936c228b655e664f2d18405b15d7e05965d43"
+    },
+    {
+      "case": "spin-busy",
+      "mode": 23,
+      "expected": "installer driver or teardown borrower parks without spin",
+      "rc": 11,
+      "source_sha256": "dbf46c3c19a0d0da75c2843bfca5a3f39ffcc271fd6963b960b0aabc5bf27af5",
+      "log_sha256": "d5044c18e042de67c54ec5bfb8627f1114306ba2599ad71bcf0aa0c0a9fb8a6d"
+    }
+  ],
+  "inputs": {
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/kernel/loom_service_engine.c": "ff499a7542071e5d8f0bab8df37f48edd8ad1afbf714318366c7467881901cd0",
+    "/Users/northkillpd/projects/thylacine-corona/kernel/loom_service_connect.c": "25271654cfa54db4bb53104ce76b455c232050a2d59b8aafc21ef5b71e53cb73",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/kernel/include/thylacine/loom_service_engine.h": "25a1f1d999e5e0f219ac2d58100c045db16922780178582d9883c1a0f9eb3942",
+    "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/engine-regression.py": "e283c6837afffadf02515fbbd8937710a4fadd20be02d50258c627edf3637458"
+  },
+  "limits": "Actual canonical engine and CONNECT C with production request/slot/node ledgers; deterministic boundary doubles; deterministic host controls only; native qualification recorded separately."
+}

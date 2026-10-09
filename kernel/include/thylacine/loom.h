@@ -813,6 +813,10 @@ u64 loom_total_destroyed(void);
 // to its caller). Both touch only the still-allocated `struct Loom`.
 void loom_sqpoll_main(void *arg);
 int  loom_start_sqpoll(struct Loom *l);
+// Internal private executor admission. Caller retains l across the entire call.
+// Charges the original creator/image by permanent-stripes ticket. Not called by
+// setup/syscall dispatch until the remaining private protocol gates qualify.
+int loom_private_start_executor(struct Loom *l);
 
 // Testable setup inner (the spoor_stat_native pattern -- fills a KERNEL
 // loom_params; the SVC handler does the user copy-in/out). Creates the Loom,

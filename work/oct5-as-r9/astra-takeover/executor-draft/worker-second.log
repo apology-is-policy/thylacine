@@ -1,0 +1,10 @@
+PASS control
+PASS no-start-serialization
+PASS publish-after-ready
+PASS forget-recheck
+PASS drop-thread-rollback
+PASS forget-stop
+PASS skip-join
+PASS skip-disarm
+PASS forget-announce
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/executor-draft/worker-controls-20261009T205104Z

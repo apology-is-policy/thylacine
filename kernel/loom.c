@@ -567,6 +567,9 @@ void loom_exec_latch(struct Loom *l) {
     if (!loom_is_private(l)) return;
     spin_lock(&l->lock);
     l->service_closing = true;
+    // Leaf-only exec latch: publish predicate change without entering scheduler.
+    if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+        extinction("private executor change counter exhausted");
     loom_slots_close(l->service_slots);
     spin_unlock(&l->lock);
 }
@@ -578,6 +581,11 @@ static void loom_private_close_notify(struct Loom *l) {
 }
 void loom_private_close_changed(struct Loom *l) {
     if (!loom_is_private(l)) return;
+    // Every external driver/constructor/pin return reaches this wake. The wait
+    // predicate reads only this atomic counter and poll flags, never takes Ll.
+    if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+        extinction("private executor change counter exhausted");
+    wakeup(&l->sqpoll_park);
     spin_lock(&service_retire_lock);
     bool wake=loom_closeq_kick(&service_close_queue,&l->service_close_work);
     spin_unlock(&service_retire_lock);
@@ -703,15 +711,34 @@ static void loom_private_requests_destroy(struct Loom *l) {
     if (!loom_requests_empty(t)) extinction("private Loom retained request payload");
 }
 
+static int loom_private_executor_exited(void *arg) {
+    return __atomic_load_n(&((struct Loom *)arg)->sqpoll_exited,__ATOMIC_ACQUIRE);
+}
+static void loom_private_executor_join(struct Loom *l) {
+    // Only the zero-reference retirer calls this. A protocol's final unref may
+    // originate in the executor itself; that enqueues here, never self-joins.
+    // Keep all ring/index/native storage alive until its actual thread exits.
+    if (l->sqpoll) {
+        __atomic_store_n(&l->sqpoll_stopping,true,__ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+        while (!__atomic_load_n(&l->sqpoll_exited,__ATOMIC_ACQUIRE))
+            (void)sleep(&l->sqpoll_join,loom_private_executor_exited,l);
+        thread_free(l->sqpoll);
+        l->sqpoll=NULL;
+    }
+    proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
+}
+
 static void loom_private_destroy(struct Loom *l) {
     // Snapshotted before anything frees l: everything after the kfree below
     // reaches the address space through these two locals and never through l.
     struct AddrSpace *as = l->service_as;
     u32 metadata = l->service_metadata_pages;
 
-    // Until the private engine owns its cleanup, refuse every legacy admission
-    // path. A retirement must never enter blocking legacy clunk/join code.
-    if (l->sqpoll || l->inflight_ops)
+    // The existing private retirer joins only the nonblocking private branch,
+    // before touching any owner storage. Legacy RPC/clunk cleanup stays banned.
+    loom_private_executor_join(l);
+    if (l->sqpoll || l->inflight_ops || l->service_engine->worker_starting)
         extinction("private Loom reached legacy cleanup state");
     if (!loom_engine_empty(l->service_engine))
         extinction("private Loom reached final free with indexed protocols");
@@ -3483,9 +3510,36 @@ static int loom_sqpoll_park_cond(void *arg) {
     return (loom_cq_ready(l) < l->cq_entries) ? 1 : 0;   // work pending -> wake iff the CQ can admit
 }
 
+static void loom_private_executor_loop(struct Loom *l) {
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    for (;;) {
+        spin_lock(&l->lock);
+        bool closing=l->service_closing;
+        spin_unlock(&l->lock);
+        if (closing || __atomic_load_n(&l->sqpoll_stopping,__ATOMIC_ACQUIRE)) return;
+        // Same bounded primitive as explicit progress. No legacy SQ drain or
+        // blocking client pump is reachable from this internal private branch.
+        if (loom_engine_ready_visit(l,timer_now_ns())>0) continue;
+        __atomic_fetch_or(&h->flags,LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+        u64 deadline=0;
+        int armed=loom_engine_wait_arm(l,timer_now_ns(),&deadline);
+        if (armed<0) extinction("private executor lost exclusive wait ownership");
+#ifdef KERNEL_TESTS
+        loom_private_close_boundary_for_test(l,5); // registered, before sleep
+#endif
+        (void)tsleep(&l->sqpoll_park,loom_engine_wait_changed,l,deadline);
+        loom_engine_wait_disarm(l);
+        __atomic_fetch_and(&h->flags,~(u32)LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+    }
+}
+
 void loom_sqpoll_main(void *arg) {
     struct Loom *l = (struct Loom *)arg;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    if (loom_is_private(l)) {
+        loom_private_executor_loop(l);
+        goto executor_exiting;
+    }
 
     for (;;) {
         if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) break;
@@ -3563,9 +3617,11 @@ void loom_sqpoll_main(void *arg) {
     // (thread_exit_self extincts from kproc).
     loom_reap_terminal(l);
 
+executor_exiting:
     (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
     current_thread()->state = THREAD_EXITING;
     __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
+    if (loom_is_private(l)) loom_private_close_changed(l);
     // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
     // the release it pairs with has already published state==EXITING. wakeup()
     // takes g_timerwait -> sqpoll_join->lock -> cpu_sched and we hold none of
@@ -3576,6 +3632,41 @@ void loom_sqpoll_main(void *arg) {
     wakeup(&l->sqpoll_join);
     sched();
     extinction("loom_sqpoll_main: returned from terminal sched");
+}
+
+int loom_private_start_executor(struct Loom *l) {
+    if (!l || l->magic!=LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    if (l->service_closing || l->sqpoll || l->service_engine->worker_starting) {
+        int rc=l->service_closing ? -T_E_CANCELED : -T_E_BUSY;
+        spin_unlock(&l->lock); return rc;
+    }
+    l->service_engine->worker_starting=true;
+    spin_unlock(&l->lock);
+    int rc=0;
+    struct Thread *kt=NULL;
+    if (!proc_sqpoll_ticket_charge(l->service_creator,l->service_as,
+                                  &l->service_engine->worker_ticket)) rc=-T_E_AGAIN;
+    else {
+        kt=thread_create_with_arg(kproc(),loom_sqpoll_main,l);
+        if (!kt) rc=-T_E_NOMEM;
+    }
+    spin_lock(&l->lock);
+    if (!rc && l->service_closing) rc=-T_E_CANCELED;
+    if (!rc) l->sqpoll=kt;
+    // Keep the start token across unlocked rollback/refund. Another start
+    // cannot reuse the ticket until the failed transaction fully settles.
+    spin_unlock(&l->lock);
+    if (rc) {
+        if (kt) thread_free(kt); // never readied, no running thread can use l
+        proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
+    }
+    spin_lock(&l->lock);
+    l->service_engine->worker_starting=false;
+    spin_unlock(&l->lock);
+    if (!rc) ready(kt);
+    loom_private_close_changed(l);
+    return rc;
 }
 
 int loom_start_sqpoll(struct Loom *l) {

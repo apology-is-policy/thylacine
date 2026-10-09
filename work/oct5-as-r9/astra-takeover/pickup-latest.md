@@ -8,12 +8,14 @@ Controls source ade9c69d17 qualifies50/50 Mac1852/D7/20cycles; raw100logs and
 ten inputs verified/PINNED in current-gate-20261009T203019Z. Both jobs exited.
 Read control-current-flight.json and its result. CLOSE-R1 remains repaired.
 
-Next reviewed readiness/executor draft: executor-draft/next-review.txt,
-self-review.txt, verified-manifest.json and installed.json IF present. Ten
-host/syntax checks pass; native1853 is prepared but unrun. Record full controls
-evidence, reacquire Astra Mac, run install-reviewed.py ONCE, rebuild/Halls,
-fresh native-diagnostic.py. Never rerun an installer with installed.json.
-Then document invariants and commit, followed by fresh exact-source50 matrix.
+Readiness/executor installed from verified-manifest.json; installer historical,
+NEVER rerun. Native executor-native-20261009T2116Z passes1853/D7/20cycles with
+stable sources and six inputs.2114Z failed before VM on obsolete capture path,
+repaired and retained. EX-W1 missed pin-return wake repaired and host-tested.
+Read executor-draft/self-review.txt and continuation.json. Next commit reviewed
+source/docs/evidence, then fresh exact-source50-boot matrix with1853 verifier.
+Read executor-current-flight.json IF present before starting anything; preserve
+its source/build, no duplicate gate. Canonical source supersedes draft copies.
 Remaining private operations/provided buffers and AS3/4 precede MM0-MM4.
 
 Keep8192MiB floor, exact clean Stratum61dde37, Astra six pending/four protected

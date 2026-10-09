@@ -1,0 +1,38 @@
+{
+  "owner": "astra",
+  "base": "e794ed5f1b1f00340dcc3e2d8ca0af296478b957",
+  "previous_gate": "ade9c69d17e20a5aa5ac337bfef15d7a5e2304c4",
+  "previous_gate_run": "work/oct5-as-r9/current-gate-20261009T203019Z",
+  "source_files": {
+    "kernel/loom.c": "380f7ca98c09763f07dd2be89126b800d0409d1e9a548c3a8593876d86ebff0a",
+    "kernel/loom_service_engine.c": "d955fd9b2a17035621dc84e02a578e29b858b73137e63d4aeeff628e8c15277e",
+    "kernel/include/thylacine/loom_service_engine.h": "25a1f1d999e5e0f219ac2d58100c045db16922780178582d9883c1a0f9eb3942",
+    "kernel/include/thylacine/loom.h": "d4b5a11b58c8d72b268596dff09d3b4e117eeac0d69b0e0158610d2737cb2ee9",
+    "kernel/test/test.c": "4b3327115e2e7cbb8c847697161b17f61d79f2b65a21f0d0b63e7fecc7f71721",
+    "kernel/test/test_loom.c": "3796048072d490428691ad0c3a4fbbfd1c55576b0ac68f71f69542360ec6c384",
+    "work/oct5-as-r9/slot-owner-control.py": "e8983683f33d726cf28e85224cd4188f3dc7129df033902084bb4cf5ed2e2528",
+    "work/oct5-as-r9/final-reclaim-control.py": "df537b03268e7d1cf6fe1aa9099e2f4328135e05b8ee4c88d7d18ad97418e2c0"
+  },
+  "original_files": {
+    "kernel/loom.c": "15b84649beb8672ef7d1cc5fef4780a3a4313acc139d7cc84675d094b3d62f3d",
+    "kernel/loom_service_engine.c": "c28ae718559668fa84332fceea7d57348b436e69e1c6906604b79e036aead74f",
+    "kernel/include/thylacine/loom_service_engine.h": "feacf840c7ac7876ea22a9db349f2cdf67d7507ff446d1726d8dde7cdbc5777a",
+    "kernel/include/thylacine/loom.h": "3c2987de587af90cf1e424fd92976ea48f40bfde5a2fb31eaa1a14fe1779fee5",
+    "kernel/test/test.c": "7ba4149c3bffe1b71b7eb9eb9b1c8c5c016be015ed5ee5ba609732effd451cf4",
+    "kernel/test/test_loom.c": "f67ff6916cc4f5e017abc1bad71671c7c058a75a1444f83426e703b7abb8cfd4",
+    "work/oct5-as-r9/slot-owner-control.py": "137abd9591e4e128c4f5e860f080f204532ce0731dc5076bf3b4350edf8a8aa3",
+    "work/oct5-as-r9/final-reclaim-control.py": "88dc40537d124f6a0bc4cc5a9c8283b317f8144de22458361e425d1e980e4648"
+  },
+  "installed": [
+    "kernel/loom.c",
+    "kernel/loom_service_engine.c",
+    "kernel/include/thylacine/loom_service_engine.h",
+    "kernel/include/thylacine/loom.h",
+    "kernel/test/test.c",
+    "kernel/test/test_loom.c",
+    "work/oct5-as-r9/slot-owner-control.py",
+    "work/oct5-as-r9/final-reclaim-control.py"
+  ],
+  "state": "installed-native-pending",
+  "utc": "2026-10-09T21:12:28.283701+00:00"
+}

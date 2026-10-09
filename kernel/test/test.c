@@ -675,6 +675,7 @@ void test_loom_private_connect(void);
 void test_loom_private_engine(void);
 void test_loom_private_close(void);
 void test_loom_private_control(void);
+void test_loom_private_executor(void);
 void test_loom_private_node_owner(void);
 void test_loom_service_pool_table(void);
 void test_loom_private_slot_owner(void);
@@ -2768,6 +2769,7 @@ struct test_case g_tests[] = {
     { "loom.private_connect",            test_loom_private_connect,            false, NULL },
     { "loom.private_engine",             test_loom_private_engine,             false, NULL },
     { "loom.private_control",            test_loom_private_control,            false, NULL },
+    { "loom.private_executor",           test_loom_private_executor,           false, NULL },
     { "loom.private_close",              test_loom_private_close,              false, NULL },
     { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
