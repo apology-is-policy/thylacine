@@ -266,3 +266,16 @@ actual table pins against the retained creator image on replacement/retirement.
 This does not yet resolve user pool-member descriptors or take their independent
 canonical backing pins. See sub-kernel-loom's current registered-buffer checkpoint
 for implementation/evidence limits. Public private services remain disabled.
+
+
+October 9 adds internal pin-owning front-ends in loom.c over this ledger. They
+resolve registered aliases into canonical Burrow extents under the owning ring
+lock, reserve membership, and take one independent pin per member. Successful
+rollback/reap snapshots and detaches those pins under the ledger lock and settles
+them against the retained image outside it; failed/stale/busy removal drops none.
+The raw ledger helpers remain pin-neutral and must not be mixed with this owner
+front-end for the same pool. Real accepted-fixed extent integration and public
+copyout/authority dispatch remain pending. Private legacy dispatch remains off.
+Host control plus ten exact mutants and one native 1841-test SMP1 boot passed;
+the new full Mac matrix is pending. See the October 9 loom dossier and pickup
+for exact source/diff and evidence paths. Self-review only.

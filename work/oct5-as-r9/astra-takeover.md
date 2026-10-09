@@ -630,3 +630,58 @@ Guest final allocator reclamation and Pi/A72/KVM remain open. Canonical pool
 member pin ownership, fixed-I/O exclusion and the remaining async protocol/worker
 integration precede MM0-MM4. Self-review only, not an independent audit. No Main
 landing, private async/clipboard activation or removal of the 128 MiB protection.
+
+
+## October 9: canonical private pool member pins (internal only)
+
+The internal pool front-end now validates the complete immutable create record,
+creator incarnation/image and receipt geometry, then resolves registered slices
+to canonical Burrow identities and physical byte offsets under the Loom lock.
+It uses subtraction bounds before addition, rejects ring backing and nonzero
+unused/output fields, and lets the joint ledger reject overlap even through
+different registered aliases or provisional pools. Every accepted member owns
+one independent Burrow pin before the lock is released. No allocation or
+usercopy occurs inside that lock. The buffer table remains stable while pooled.
+
+Publish is a retained-owner continuation after future copyout. Rollback/reap
+snapshot member pins under the same lock as the ledger transition; refusals
+drop none. Successful removal drops the saved pins outside the lock using the
+retained creator image's settled-drop primitive, safe even if buffer-table
+replacement wins the unlocked gap. These wrappers must only remove pools they
+created; raw ledger-only fixtures do not transfer pins to this front-end.
+
+Self-review: source and table pins keep canonical addresses alive; no Proc is
+rediscovered during removal, and no Burrow is read after dropping its pin.
+One pin is released per member, including disjoint members sharing a Burrow.
+Close rejects prepare and publication, but permits rollback/reap by a retained
+kernel owner. The unexpected-legacy-work guard rejects inflight, admitting,
+held-chain and rearm state. This is NOT the future exact fixed-I/O exclusion
+implementation: private dispatch stays disabled, and accepted fixed extents
+must be integrated under the same lock before activation. User authority at
+continuation syscalls, copyout wiring, close/worker cleanup, protocol admission
+and guest final allocator reclamation remain open. Self-review, not an audit.
+
+Host private-pool-pins-20261009T011324Z passes ASan/UBSan control plus ten exact
+mutants for image/creator, unused tail, canonical alias displacement, ring
+backing, fixed admission, member pin acquisition, rollback drops, refusal drops
+and final refund. Checked image/Burrow/lock doubles include table replacement
+after unlock; they are sequential witnesses, not a concurrent allocator proof.
+Initial harness attempts are retained: 011209Z had a misspelled ledger-close
+function; 011240Z's ring-rejection mutant hit the double's zero-pin precondition
+before the intended assertion. Giving the fake ring its real-world owner pin
+made that mutant reach the intended assertion. Neither correction changed
+production code or weakens its checks.
+
+Native loom.private_pool_pins checks actual alias overlap, canonical offsets,
+independent pin counts, provisional overlap/rebinding refusal, rollback identity
+burning, stale removal, busy reap, unmap before reap, exact final table refund
+and close before publication. Fresh default SMP1 diagnostic passed 1841/1841,
+D7 overlap, all twenty distinct cycles and boot banner. Evidence is
+astra-takeover/private-pool-pins-diagnostic-20261009T011326Z: source 1e06cc3d3
+plus captured exact diff, stable rebuilt ELF/bin and six input hashes, raw logs.
+Native link passed. Existing lifecycle/payload models and generic ledgers are
+unchanged; their prior model results are not a proof of this new C front-end.
+
+Full Mac qualification remains pending for the new source. The prior 50/50
+remains bounded to b010ace93. Continue remaining async before MM0-MM4; no Main
+landing, private async/clipboard activation or removal of the 128 MiB protection.

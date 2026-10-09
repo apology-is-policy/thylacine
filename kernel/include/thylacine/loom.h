@@ -658,6 +658,19 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // Public setup/register and private I/O activation remain disabled.
 int loom_private_register_buffers(struct Loom *l, struct Proc *p,
                                   const struct loom_buf_reg *bufs, u32 n);
+// Internal provided-buffer owner front-end. Prepare takes an immutable complete
+// kernel record and requires the same stable creator-image contract above.
+// Publish/rollback/reap are retained-Loom kernel-owner continuations; user-facing
+// authority/copyout dispatch is not enabled. Never mix these pin-owning pools
+// with raw ledger-only reservations. No fixed-I/O private engine is enabled;
+// exact accepted-fixed extent integration is still required before activation.
+int loom_private_pool_prepare(struct Loom *, struct Proc *,
+                              const struct loom_service_pool_create *,
+                              struct loom_service_ref *);
+int loom_private_pool_publish(struct Loom *, struct loom_service_ref);
+int loom_private_pool_rollback(struct Loom *, struct loom_service_ref);
+int loom_private_pool_reap(struct Loom *, struct loom_service_ref);
+
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 

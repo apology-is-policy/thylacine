@@ -1,0 +1,11 @@
+--- control
++++ allow-ring
+@@ -88,7 +88,7 @@
+             rc = -T_E_INVAL; goto unlock;
+         }
+         const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
+-        if (!b->burrow || b->burrow == l->ring ||
++        if (!b->burrow || 
+             b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
+             m->offset > b->len || m->length > b->len - m->offset) {
+             rc = -T_E_INVAL; goto unlock;

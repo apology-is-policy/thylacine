@@ -323,6 +323,115 @@ done:
 #undef PB_CHECK
     return error;
 }
+// Canonical member aliases and real independent pins; no protocol/usercopy path.
+static const char *loom_private_pool_pins_fixture(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make();
+    struct Loom *l = NULL;
+    struct loom_service_ref pool = {0}, again = {0};
+    u64 goal = loom_private_retired(), va = 0;
+    u32 baseline = 0;
+    struct loom_service_pool_create in;
+    for (u32 i = 0; i < sizeof(in); ++i) ((u8 *)&in)[i] = 0;
+    in.size = sizeof(in); in.version = 1; in.count = 2;
+#define PP_CHECK(c,msg) do { if (!(c)) { error = msg; goto done; } } while (0)
+    PP_CHECK(p, "pool pin creator allocated");
+    baseline = p->as->page_count;
+    l = loom_create_private(p,2,2,true);
+    if (l) goal++;
+    PP_CHECK(l, "pool pin owner allocated");
+    u32 owner_pages = p->as->page_count;
+    s64 attached = sys_burrow_attach_for_proc(p,PAGE_SIZE);
+    PP_CHECK(attached>0, "pool backing attached");
+    va = (u64)attached;
+    struct Burrow *b = vma_lookup(p,va)->burrow;
+    int handles = burrow_handle_count(b);
+    struct loom_buf_reg buffers[2] = {{va+128,1024},{va+192,512}};
+    PP_CHECK(!loom_private_register_buffers(l,p,buffers,2) &&
+             burrow_handle_count(b)==handles+2,"two table aliases pinned");
+    in.members[0] = (struct loom_service_pool_member){0,0,64,64};
+    in.members[1] = (struct loom_service_pool_member){1,0,0,64};
+    PP_CHECK(loom_private_pool_prepare(l,p,&in,&pool)==-T_E_INVAL &&
+             !pool.incarnation && burrow_handle_count(b)==handles+2 &&
+             loom_service_pools_empty(l->service_pools),
+             "different buffer indices cannot hide physical overlap");
+    in.members[1].offset = 64;
+    PP_CHECK(!loom_private_pool_prepare(l,p,&in,&pool) &&
+             burrow_handle_count(b)==handles+4,"disjoint members acquire independent pins");
+    struct loom_pool_cell *c = &l->service_pools->bank.cells[0];
+    PP_CHECK(c->extent.backing==b && c->extent.offset==192 && c->extent.length==64,
+             "canonical offset includes registered slice offset");
+    struct loom_service_pool_create other;
+    for (u32 i = 0; i < sizeof(other); ++i) ((u8 *)&other)[i] = 0;
+    other.size=sizeof(other);other.version=1;other.count=1;
+    other.members[0]=(struct loom_service_pool_member){1,0,0,64};
+    PP_CHECK(loom_private_pool_prepare(l,p,&other,&again)==-T_E_BUSY &&
+             !again.incarnation && burrow_handle_count(b)==handles+4,
+             "provisional canonical extent excludes competing alias");
+    PP_CHECK(loom_private_register_buffers(l,p,NULL,0)==-T_E_BUSY,
+             "provisional pool holds table binding");
+    struct loom_service_ref stale = pool;
+    PP_CHECK(!loom_private_pool_rollback(l,pool) &&
+             burrow_handle_count(b)==handles+2,"copyout rollback releases member pins");
+    pool.incarnation=0;
+    PP_CHECK(!loom_private_pool_prepare(l,p,&in,&pool) &&
+             pool.incarnation!=stale.incarnation,"rollback burns pool identity");
+    PP_CHECK(loom_private_pool_rollback(l,stale)==-T_E_NOENT &&
+             burrow_handle_count(b)==handles+4,"stale rollback cannot release new pins");
+    PP_CHECK(!loom_private_pool_publish(l,pool),"pool published after kernel continuation");
+    spin_lock(&l->lock);
+    int rc=loom_pool_stream_get(&l->service_pools->pools[pool.slot]);
+    spin_unlock(&l->lock);
+    if (!rc) {
+        int refused=loom_private_pool_reap(l,pool);
+        bool unchanged=burrow_handle_count(b)==handles+4;
+        spin_lock(&l->lock);
+        (void)loom_pool_stream_put(&l->service_pools->pools[pool.slot]);
+        spin_unlock(&l->lock);
+        PP_CHECK(refused==-T_E_BUSY && unchanged,"busy reap retains every pin");
+    }
+    PP_CHECK(!rc,"pool stream borrow acquired");
+    PP_CHECK(!sys_burrow_detach_for_proc(p,va,PAGE_SIZE),"pooled backing unmapped");
+    va=0;
+    PP_CHECK(!loom_private_pool_reap(l,pool) &&
+             burrow_handle_count(b)==handles+2,"reap drops member pins after unmap");
+    pool.incarnation=0;
+    u64 destroyed=burrow_total_destroyed();
+    PP_CHECK(!loom_private_register_buffers(l,p,NULL,0) &&
+             burrow_total_destroyed()==destroyed+1 && p->as->page_count==owner_pages,
+             "final table pins free and refund backing exactly once");
+    attached=sys_burrow_attach_for_proc(p,PAGE_SIZE);
+    PP_CHECK(attached>0,"close-race backing attached");va=(u64)attached;
+    buffers[0]=(struct loom_buf_reg){va,PAGE_SIZE};
+    PP_CHECK(!loom_private_register_buffers(l,p,buffers,1),"close-race buffer pinned");
+    in.count=1;in.members[1]=(struct loom_service_pool_member){0};
+    PP_CHECK(!loom_private_pool_prepare(l,p,&in,&pool),"close-race pool prepared");
+    loom_exec_latch(l);
+    PP_CHECK(loom_private_pool_publish(l,pool)==-T_E_CANCELED,
+             "close before publish refuses commit");
+    PP_CHECK(!loom_private_pool_rollback(l,pool),"rollback remains available after close");
+    pool.incarnation=0;
+done:
+    if (l && pool.incarnation) {
+        if (l->service_slots->slots[pool.slot].phase==LSLOT_PROVISIONAL)
+            (void)loom_private_pool_rollback(l,pool);
+        else (void)loom_private_pool_reap(l,pool);
+    }
+    if (l && again.incarnation) (void)loom_private_pool_rollback(l,again);
+    if (p && va) (void)sys_burrow_detach_for_proc(p,va,PAGE_SIZE);
+    if (l) loom_unref(l);
+    if (!lp_wait(goal) && !error) error="private pool pin retirement timed out";
+    if (p && !error && (p->as->page_count!=baseline || p->as->private_rings))
+        error="private pool pin retirement refunds creator";
+    if (p) test_proc_drop(p);
+#undef PP_CHECK
+    return error;
+}
+void test_loom_private_pool_pins(void) {
+    const char *error = loom_private_pool_pins_fixture();
+    TEST_ASSERT(error == NULL, error);
+}
+
 void test_loom_private_buffers(void) {
     const char *error = loom_private_buffers_fixture();
     TEST_ASSERT(error == NULL, error);

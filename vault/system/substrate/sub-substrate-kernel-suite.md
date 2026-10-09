@@ -245,3 +245,11 @@ and ten pinned inputs. Default SMP1/4/8 and UBSan SMP4/8 each passed ten boots.
 The earlier 3dcff4cb9 fixture-address failure remains recorded as failed; it is
 not retroactively qualified. Pi/A72/KVM, guest final allocator reclamation and
 absent optional graphics probes remain unqualified. Private dispatch stays off.
+
+
+October 9 adds loom.private_pool_pins as an ordinary native row. It exercises
+canonical registered aliases, independent backing pins, provisional overlap,
+rollback identity burning, stale/busy refusal, unmap/reap/refund and close before
+publication through the internal owner front-end. The denominator is now 1841;
+one source-and-diff recorded SMP1 boot passed. Full matrix qualification of the
+new source is pending; public service dispatch remains disabled.

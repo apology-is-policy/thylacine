@@ -1,0 +1,11 @@
+--- control
++++ omit-canonical-offset
+@@ -103,7 +103,7 @@
+             rc = -T_E_INVAL; goto unlock;
+         }
+         extents[i] = (struct loom_pool_extent){b->burrow,
+-                                              kva - base + m->offset,m->length};
++                                              m->offset,m->length};
+     }
+     rc = loom_service_pool_prepare(l->service_slots,l->service_pools,
+                                    extents,in->count,out);

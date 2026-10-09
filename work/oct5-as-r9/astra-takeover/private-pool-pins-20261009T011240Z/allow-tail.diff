@@ -1,0 +1,11 @@
+--- control
++++ allow-tail
+@@ -67,7 +67,7 @@
+         in->reserved || in->result.slot || in->result.reserved ||
+         in->result.incarnation || !in->count ||
+         in->count > LOOM_SERVICE_POOL_MEMBERS) return -T_E_INVAL;
+-    for (u32 i = in->count; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
++    for (u32 i = LOOM_SERVICE_POOL_MEMBERS; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+         const struct loom_service_pool_member *m = &in->members[i];
+         if (m->buffer_index || m->reserved || m->offset || m->length)
+             return -T_E_INVAL;

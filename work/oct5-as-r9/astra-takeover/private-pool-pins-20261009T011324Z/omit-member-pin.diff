@@ -1,0 +1,11 @@
+--- control
++++ omit-member-pin
+@@ -113,7 +113,7 @@
+         // Provisional membership already excludes table replacement and other
+         // overlapping pool registrations before this lock is released.
+         for (u32 i = 0; i < in->count; ++i)
+-            burrow_ref((struct Burrow *)extents[i].backing);
++            if (false) burrow_ref((struct Burrow *)extents[i].backing);
+     }
+ unlock:
+     spin_unlock(&l->lock);

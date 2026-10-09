@@ -1,0 +1,11 @@
+--- control
++++ allow-fixed-admission
+@@ -80,7 +80,7 @@
+     // including held/local admission, instead of pretending its extents were
+     // checked. The future private engine must add exact accepted-fixed extent
+     // reservations under this SAME lock before it can be enabled.
+-    if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
++    if (l->inflight_ops || l->async_inflight || l->chain ||
+         l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
+     for (u32 i = 0; i < in->count; ++i) {
+         const struct loom_service_pool_member *m = &in->members[i];

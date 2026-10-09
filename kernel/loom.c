@@ -1035,6 +1035,120 @@ int loom_private_register_buffers(struct Loom *l, struct Proc *p,
     return rc;
 }
 
+// Internal pool transaction front-end. No public registration is enabled here.
+// The input is a single immutable kernel copy; output lives in kernel memory.
+// As for private buffer registration, the caller holds a Loom and creator Proc
+// reference in its stable syscall image. The ring lock stabilizes the buffer
+// table through canonical resolution, member reservation and pin acquisition.
+int loom_private_pool_prepare(struct Loom *l, struct Proc *p,
+                              const struct loom_service_pool_create *in,
+                              struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (!l->receipt_size) return -T_E_OPNOTSUPP;
+    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
+        in->reserved || in->result.slot || in->result.reserved ||
+        in->result.incarnation || !in->count ||
+        in->count > LOOM_SERVICE_POOL_MEMBERS) return -T_E_INVAL;
+    for (u32 i = in->count; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+        const struct loom_service_pool_member *m = &in->members[i];
+        if (m->buffer_index || m->reserved || m->offset || m->length)
+            return -T_E_INVAL;
+    }
+    struct loom_pool_extent extents[LOOM_SERVICE_POOL_MEMBERS];
+    int rc = 0;
+    spin_lock(&l->lock);
+    if (l->service_closing) { rc = -T_E_CANCELED; goto unlock; }
+    // Private legacy dispatch is disabled. Refuse any unexpected legacy work,
+    // including held/local admission, instead of pretending its extents were
+    // checked. The future private engine must add exact accepted-fixed extent
+    // reservations under this SAME lock before it can be enabled.
+    if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
+        l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
+    for (u32 i = 0; i < in->count; ++i) {
+        const struct loom_service_pool_member *m = &in->members[i];
+        if (m->reserved || m->buffer_index >= l->n_reg_buf || !m->length) {
+            rc = -T_E_INVAL; goto unlock;
+        }
+        const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
+        if (!b->burrow || b->burrow == l->ring ||
+            b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
+            m->offset > b->len || m->length > b->len - m->offset) {
+            rc = -T_E_INVAL; goto unlock;
+        }
+        // Integer subtraction avoids pointer-difference UB and overflowing
+        // user offset+length. Table pins guarantee this ANON direct-map base
+        // remains stable even after every original user mapping is detached.
+        u64 base = (u64)pa_to_kva(page_to_pa(b->burrow->pages));
+        u64 kva = (u64)b->kva;
+        if (kva < base || kva - base > b->burrow->size ||
+            b->len > b->burrow->size - (kva - base)) {
+            rc = -T_E_INVAL; goto unlock;
+        }
+        extents[i] = (struct loom_pool_extent){b->burrow,
+                                              kva - base + m->offset,m->length};
+    }
+    rc = loom_service_pool_prepare(l->service_slots,l->service_pools,
+                                   extents,in->count,out);
+    if (!rc) {
+        // One independent pin per member, including disjoint aliases of the
+        // same Burrow. Ref cannot fail; the table's pin prevents destruction.
+        // Provisional membership already excludes table replacement and other
+        // overlapping pool registrations before this lock is released.
+        for (u32 i = 0; i < in->count; ++i)
+            burrow_ref((struct Burrow *)extents[i].backing);
+    }
+unlock:
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// These are kernel-owner continuations, not authority-bearing user entry points.
+// The caller retains l across copyout and until publish/rollback finishes.
+int loom_private_pool_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_pool_publish(l->service_slots,l->service_pools,ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// Rollback/reap may run after close or creator exec. Settlement uses the retained
+// image, never a current Proc. Only pools made by private_pool_prepare belong to
+// this front-end: do not mix raw ledger-only reservations into a private owner.
+// Snapshot pins under the same lock as the joint ledger transition; a refusal
+// drops nothing. Successful removal permits rebinding immediately, but the
+// saved independent pins keep every backing alive across that unlocked gap.
+static int loom_private_pool_remove(struct Loom *l, struct loom_service_ref ref,
+                                    bool rollback) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];
+    u32 count = 0;
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+        const struct loom_pool_cell *c = &l->service_pools->bank.cells[i];
+        if (c->phase != LMEMBER_FREE && c->pool.slot == ref.slot &&
+            c->pool.incarnation == ref.incarnation &&
+            c->pool.reserved == ref.reserved)
+            pins[count++] = (struct Burrow *)c->extent.backing;
+    }
+    int rc = rollback ? loom_service_pool_rollback(l->service_slots,l->service_pools,ref)
+                      : loom_service_pool_reap(l->service_slots,l->service_pools,ref);
+    spin_unlock(&l->lock);
+    if (!rc)
+        for (u32 i = 0; i < count; ++i)
+            loom_private_drop_buffer(l->service_as,pins[i]);
+    return rc;
+}
+int loom_private_pool_rollback(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_pool_remove(l,ref,true);
+}
+int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_pool_remove(l,ref,false);
+}
+
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n) {
     if (!l || l->magic != LOOM_MAGIC || !p)  return -1;

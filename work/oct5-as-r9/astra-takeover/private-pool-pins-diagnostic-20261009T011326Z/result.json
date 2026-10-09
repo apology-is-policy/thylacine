@@ -1,0 +1,43 @@
+{
+  "source_head": "1e06cc3d34f16b180ff7b9770701063bfd6d335e",
+  "source_diff_sha256": "ec66877ea003ed02188195bd9dc0e554ac265d507004e85b6fcc868a9168f74c",
+  "inputs": {
+    "build/kernel/thylacine.elf": "debaa6b9ebcadffe1f21d2bb980e7b0460e346fb3a06fc9d8841d8166fecd5a4",
+    "build/kernel/thylacine.bin": "5517f3d6da5a0fd00d042d6783f24ad90339f181c80bf857e8817da6b618d508",
+    "build/ramfs.cpio": "6b6d912dd1baf028d17038b178e3179493753bf444f2c6b089c44bc3609dc994",
+    "build/fixtures/pool.img.baked-snapshot": "17268a73b15bc8fffde99c2230cf2767fd6d915875bb5347317224ffe8e7a857",
+    "build/fixtures/system.key": "15dcbd62eb86aaaa4bff2c9eb882f44531fb16830d2801b6091207ae12cd57ae",
+    "build/fixtures/system.key.baked-snapshot": "15dcbd62eb86aaaa4bff2c9eb882f44531fb16830d2801b6091207ae12cd57ae"
+  },
+  "rc": 0,
+  "source_stable": true,
+  "inputs_stable": true,
+  "all1841": true,
+  "boot_banner": true,
+  "private_pool_pins": true,
+  "d7_overlap": true,
+  "d7_cycles": [
+    "d7user00",
+    "d7user01",
+    "d7user02",
+    "d7user03",
+    "d7user04",
+    "d7user05",
+    "d7user06",
+    "d7user07",
+    "d7user08",
+    "d7user09",
+    "d7user10",
+    "d7user11",
+    "d7user12",
+    "d7user13",
+    "d7user14",
+    "d7user15",
+    "d7user16",
+    "d7user17",
+    "d7user18",
+    "d7user19"
+  ],
+  "serial_sha256": "ec590458286c9302980fc6031216ad04a277155e98dd0930c1526140e576d578",
+  "harness_sha256": "d235b1f915b6e7eb7ddc927df538df745841a0fd0982ad4623637c029ee63cb1"
+}
