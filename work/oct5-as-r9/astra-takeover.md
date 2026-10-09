@@ -1004,3 +1004,25 @@ remain unqualified. Self-review only. Keep private async/clipboard disabled,
 128 MiB protection and all pinned evidence; no Main landing. Current free disk
 is only about 8 GiB: restore headroom before the next build/gate without lowering
 admission or removing canonical evidence.
+
+
+## October 9, 05:30 UTC: next integration boundary and disk headroom
+
+Readback of the existing APIs confirms that devsrv_service_prepare owns an
+unpublished connection/create ref and registry view; devsrv_connect_publish
+may run under the owner admission latch and wake runs after unlocking. The
+existing p9_client_init_preallocated/progress_bind/progress_step/progress_abort
+path supplies exclusive, nonblocking handshake/request mechanics. Binding these
+to a scope must first reserve its terminal obligation and all charged storage,
+then serialize backlog publication with close/abort. Retained creator stripes
+and exact AddrSpace feed proc_service_snapshot_by_stripes; no worker identity
+or blocking legacy handshake/close is permitted. This readback is not an
+implemented or tested scope binding. Continue that integration before MM0-MM4.
+
+Additional idle host Cargo debug caches under build/usr-rs/debug were reclaimed
+in Main, b2c, Aux-kaua and Aux-hunt under the resource grant. All were ignored,
+untracked and unused by any cargo/rustc process; no source, release output,
+canonical evidence or pinned input was removed. Exact inventory and process
+snapshot: astra-takeover/host-debug-cache-reclaim-20261009T0530Z.json. Actual free
+space rose 8217 -> 8441 MiB (APFS sharing limits logical-byte savings). Recheck
+headroom before the next heavy build; keep the 8192 MiB admission floor.
