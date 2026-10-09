@@ -1,0 +1,65 @@
+Astra close queue follow-on design, October9. NOT IMPLEMENTED/QUALIFIED.
+Depends on the reviewed owner-index draft; do not install while a gate runs.
+
+The indexed protocol retains Loom, so the existing zero-ref destroy queue
+cannot initiate close. Add a distinct intrusive close queue, with one retained
+Loom reference per membership, bounded by charged private rings. Fields live
+in the already charged Loom/index page; no stack/worker allocation on close.
+
+CRITICAL exec lock context: handle_private_exec_latch is called inside the
+process-table commit and handle table lock. Preserve loom_exec_latch as leaf
+Ll-only admission latch, without scheduler/poll/queue wakes. The forced private
+CLOEXEC close later calls loom_handle_closed OUTSIDE those locks; that is where
+the close queue root is acquired and work scheduled. Do not naively add a wake
+to exec's leaf latch. Direct raw tests must use handle_closed for queue initiation.
+Also zero-ref loom_private_enqueue currently calls handle_closed: split its
+bare latch/wake from the root-taking close path, never resurrect refcount zero.
+
+Queue state under the global retirement queue lock: NONE/READY/RUNNING/PARKED,
+plus a pending-kick bit. NONE->READY takes exactly one Loom reference while
+caller already holds a live reference. READY and PARKED hold it; pop changes
+READY->RUNNING without losing it. A kick during RUNNING records pending; a kick
+of PARKED appends once; duplicate READY kicks are no-ops. Worker finalizes under
+the queue lock: unfinished useful work or pending kick ->READY; blocked only on
+external local entries ->PARKED; complete ->NONE and drop root OUTSIDE lock.
+This closes the event-between-last-recheck-and-park gap. Parked membership need
+not busy-scan or poll a peer. Counter/watchdog metadata is diagnostic, never a
+reason to free live pointers. A new lifetime must not restart completed close.
+
+Close progress has no transport readiness dependency: mark closed, select one
+LIVE indexed owner in round robin and invoke CONNECT abort/step (actual cursor
+abort), then bounded detach/collection. Installing entries are skipped until
+the installer drops its pin and kicks. A running driver cannot be driven twice;
+it must kick after exit. Held external entry pins may prevent final collection,
+not progress of other peers. Return whether immediately useful work remains,
+not simply whether any entry exists. Engine visit's return is NOT that predicate.
+
+Avoid self-induced spin: generic engine_put/changed from the retirement driver
+must not always flag its own RUNNING queue dirty. Need distinguish internal
+borrow returns from external prerequisite changes, or compare monotone change
+sequence against an observation after internal mutations while ensuring a
+concurrent wake is retained. Explicit internal/external put is preferable to
+suppressing all kicks during RUNNING (which loses real races). Check every
+constructor unwind, external entry put, driver exit, teardown-user return,
+fixed put and terminal transition that can unblock close. Internal cleanup
+must finish detached parser/buffer access before exposing the zero-borrow
+predicate or kicking (physical drops may run outside Ll while root remains).
+
+After actual local quiescence, discard terminals independent of CQ space,
+collect protocol storage, reap RETIRED scope metadata, then drop queue root.
+Unused reservations/targets remain for zero-ref final cleanup. No general RPC,
+fid or payload owner admitted until their own local-retirement predicates join.
+Process at most one close quantum and one final-destroy item per global worker
+iteration so a stuck/live close cannot starve destruction of unrelated rings.
+Lock order: no queue lock nests Loom/p9/registry/final drop; pop then operate.
+Rendez condition reads queue heads under queue lock; producer unlocks then wakes.
+
+Required native witnesses: final handle close and exec with stalled real server,
+full CQ, installing owner, held entry/fixed borrower, retained server endpoint;
+actual final free/refund and image guard ends only after all local owners end;
+no extra worker per close; a PARKED ring consumes no busy loop; last blocking
+put resumes; event at park transition retained; multiple rings make progress.
+Deterministic actual-C queue mutation controls must detect missed kick, duplicate
+root, premature root drop, refcount-zero resurrection, scheduler wake inside
+exec commit and driver-generated perpetual rescheduling. Existing rendezvous/
+loom lifecycle models remain bounded claims, not substitutes for native races.

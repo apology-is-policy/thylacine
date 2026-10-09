@@ -29,6 +29,7 @@
 
 #include <thylacine/loom_service_abi.h> // reserved AS-0 surface; not enabled
 #include <thylacine/loom_service_requests.h>
+#include <thylacine/loom_service_engine.h>
 #include <thylacine/loom_service_pool.h> // canonical internal extent
 #include <thylacine/handle.h>     // rights_t
 #include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
@@ -468,6 +469,7 @@ struct Loom {
     struct loom_service_pool_table *service_pools;
     struct loom_service_target_table *service_targets;
     struct loom_service_node_table *service_nodes; // separately charged buddy page
+    struct loom_service_engine *service_engine; // separately charged buddy page
     struct loom_request_table service_requests; // CQ-sized precharged terminal storage
     struct loom_private_fixed *service_fixed; // exact accepted fixed extents, under lock
     u32 service_fixed_count; // bounded by existing CQ terminal-obligation capacity
@@ -637,6 +639,9 @@ bool loom_private_pools_fault_armed_for_test(void);
 void loom_private_targets_fault_arm_for_test(void);
 void loom_private_targets_fault_disarm_for_test(void);
 bool loom_private_targets_fault_armed_for_test(void);
+void loom_private_engine_fault_arm_for_test(void);
+void loom_private_engine_fault_disarm_for_test(void);
+bool loom_private_engine_fault_armed_for_test(void);
 void loom_private_requests_fault_arm_for_test(void);
 void loom_private_requests_fault_disarm_for_test(void);
 bool loom_private_requests_fault_armed_for_test(void);

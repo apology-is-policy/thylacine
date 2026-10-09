@@ -1,5 +1,9 @@
 # AS-R9 pickup -- corona, 2026-10-05
 
+**Current Astra pickup:** `work/oct5-as-r9/astra-takeover/pickup-latest.md`.
+The older sections below are preserved historical evidence; use the latest
+pickup/flight and canonical source before acting on their historical steps.
+
 Checkout `/Users/northkillpd/projects/thylacine-corona`, branch `corona/async-memory`.
 Base `5ff62b78809846af4780ec41f82d1676e7584e80` (= astra's tip; all six handoff
 `base.json` source hashes match). **HEAD is still the base: nothing committed.**
@@ -2916,3 +2920,13 @@ and tested. Pi/A72/KVM, guest allocator reclamation and absent optional graphics
 remain unqualified. Self-review only; no independent audit, Main integration,
 private async/clipboard activation or128MiB protection change. Continue the
 per-ring index checkpoint, then close queue/executor and AS-3/4/MM0-MM4.
+
+## October 9: indexed owner native checkpoint
+
+See astra-takeover/pickup-latest.md for the compact current state. New indexed
+CONNECT ownership, charged private page and exact lookup/pin/collection pass
+native1850/1850+D7/20cycles in engine-diagnostic-20261009T1752Z; full matrix
+pending. Initial1751Z metadata fixture expectation corrected with failure
+preserved. Actual-C controls/mutants,89-state index model/six counterexamples,
+5828-state lifecycle/seven counterexamples and self-review retained. Close queue
+and executor next; no private activation, Main or128MiB change.

@@ -70,6 +70,17 @@ int loom_request_admit(struct loom_request_table *t, struct loom_slot_table *s,
     if (!rc) request_exact(t,ref)->phase = LREQ_ACTIVE;
     return rc;
 }
+int loom_request_reject(struct loom_request_table *t, struct loom_slot_table *s,
+                        struct loom_request_ref ref, s32 reason) {
+    struct loom_service_request *r=request_exact(t,ref);
+    if (!r) return -T_E_NOENT;
+    if (reason >= 0) return -T_E_INVAL;
+    if (r->phase != LREQ_PREPARED || r->borrows) return -T_E_BUSY;
+    if (!request_scope_held(s,r->scope)) return -T_E_INVAL;
+    r->result=reason;
+    r->phase=LREQ_TERMINAL;
+    return 0;
+}
 static int request_remove(struct loom_request_table *t, struct loom_slot_table *s,
                            struct loom_request_ref ref, u32 phase) {
     struct loom_service_request *r = request_exact(t,ref);

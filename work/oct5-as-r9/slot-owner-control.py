@@ -27,6 +27,7 @@ PRE = r'''
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_nodes.h>
 #include <thylacine/loom_service_requests.h>
+#include <thylacine/loom_service_engine.h>
 #include <thylacine/errno.h>
 #define THYLACINE_DEVSRV_H
 struct SrvServiceTarget { void *view,*service;u64 generation;u8 name_len;char name[32]; };
@@ -54,6 +55,7 @@ struct Loom {
     struct loom_service_pool_table *service_pools;
     struct loom_service_target_table *service_targets;
     struct loom_service_node_table *service_nodes;
+    struct loom_service_engine *service_engine;
     struct loom_request_table service_requests;
     u32 cq_entries;
     void *service_fixed;u32 service_fixed_count;
@@ -68,7 +70,7 @@ struct Loom {
     char buddy_padding[3000];
 };
 struct loom_layout { u32 ring_size; };
-static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,targets_fault,nodes_fault,requests_fault,alloc_fault,inner_fault;
+static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,targets_fault,nodes_fault,requests_fault,engine_fault,alloc_fault,inner_fault;
 static u64 g_loom_destroyed,service_retired_count;
 static void *allocations[8];
 static size_t allocation_sizes[8];
@@ -76,6 +78,7 @@ static int live,allocated,freed,recorded;
 static u32 ring_charge;
 static bool loom_private_layout_fault_take(void) { bool b=layout_fault;layout_fault=false;return b; }
 static bool loom_private_pools_fault_take(void) { bool b=pools_fault;pools_fault=false;return b; }
+static bool loom_private_engine_fault_take(void) { bool b=engine_fault;engine_fault=false;return b; }
 static bool loom_private_requests_fault_take(void) { bool b=requests_fault;requests_fault=false;return b; }
 static bool loom_private_nodes_fault_take(void) { bool b=nodes_fault;nodes_fault=false;return b; }
 static bool loom_private_targets_fault_take(void) { bool b=targets_fault;targets_fault=false;return b; }
@@ -148,9 +151,10 @@ int main(int argc,char **argv) {
     if(mode==9 || mode==10)targets_fault=true;
     if(mode==11 || mode==12)nodes_fault=true;
     if(mode==19 || mode==20)requests_fault=true;
-    struct Loom *l=loom_create_private(&p,(mode==6 || mode==10 || mode==12 || mode==20)?3:2,cq,true);
-    CHECK(!slots_fault && !pools_fault && !targets_fault && !nodes_fault && !requests_fault && !layout_fault,"one-shot faults consumed");
-    if((mode>=1 && mode<=6) || (mode>=8 && mode<=12) || mode==19 || mode==20 || mode==25) {
+    if(mode==27 || mode==28)engine_fault=true;
+    struct Loom *l=loom_create_private(&p,(mode==6 || mode==10 || mode==12 || mode==20 || mode==28)?3:2,cq,true);
+    CHECK(!slots_fault && !pools_fault && !targets_fault && !nodes_fault && !requests_fault && !engine_fault && !layout_fault,"one-shot faults consumed");
+    if((mode>=1 && mode<=6) || (mode>=8 && mode<=12) || mode==19 || mode==20 || mode==25 || mode==27 || mode==28) {
         CHECK(!l,"fault refuses publication");
         CHECK(live==0,"rollback frees slot and pool pages");
         CHECK(a.pages==10,"refusal restores accounting");
@@ -158,10 +162,10 @@ int main(int argc,char **argv) {
         CHECK(!recorded,"refusal publishes no ring charge");
         puts("PASS refusal");return 0;
     }
-    CHECK(l && l->service_slots && l->service_pools && l->service_targets && l->service_nodes && l->service_requests.records && live==6,"owner retains all six allocations");
+    CHECK(l && l->service_slots && l->service_pools && l->service_targets && l->service_nodes && l->service_requests.records && l->service_engine && live==7,"owner retains all seven allocations");
     CHECK(allocation_sizes[4]==(cq*56<4096?4096:cq*56) && l->service_requests.capacity==cq,"request allocation follows CQ geometry");
     CHECK(l->service_as==&a && l->service_creator==987,"exact image and identity");
-    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools))+burrow_backing_pages(sizeof(*l->service_targets))+1+burrow_backing_pages((u64)cq*56),
+    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools))+burrow_backing_pages(sizeof(*l->service_targets))+1+burrow_backing_pages((u64)cq*56)+1,
           "slot and pool pages charged in metadata");
     CHECK(a.pages==10+l->service_metadata_pages+2,"complete owner charge");
     struct loom_service_ref ref;
@@ -212,7 +216,7 @@ int main(int argc,char **argv) {
     spin_unlock(&l->lock);
     loom_private_destroy(l);
     CHECK(mode!=17 && mode!=18,"invalid node retirement returned");
-    CHECK(live==0 && freed==6,"retirement frees owner and tables");
+    CHECK(live==0 && freed==7,"retirement frees owner and tables");
     CHECK(a.pages==10 && a.refs==1 && !a.private_rings,"retirement restores image");
     CHECK(service_retired_count==1 && g_loom_destroyed==1,"retirement published once");
     puts("PASS owner");return 0;
@@ -228,13 +232,17 @@ def main():
     assert st.f_bavail * st.f_frsize >= 8 * 1024**3
     out = Path('work/oct5-as-r9/astra-takeover') / ('slot-owner-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     out.mkdir()
-    paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h', 'kernel/loom_service_nodes.c', 'kernel/include/thylacine/loom_service_nodes.h', 'kernel/include/thylacine/loom_service_targets.h', 'kernel/loom_service_requests.c', 'kernel/include/thylacine/loom_service_requests.h', 'work/oct5-as-r9/slot-owner-control.py']
+    paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h', 'kernel/loom_service_nodes.c', 'kernel/include/thylacine/loom_service_nodes.h', 'kernel/include/thylacine/loom_service_targets.h', 'kernel/loom_service_engine.c','kernel/include/thylacine/loom_service_engine.h','kernel/loom_service_requests.c', 'kernel/include/thylacine/loom_service_requests.h', 'work/oct5-as-r9/slot-owner-control.py']
     sources = {p: Path(p).read_text() for p in paths}
     funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_drop_buffer', 'loom_private_targets_destroy', 'loom_private_nodes_destroy', 'loom_private_requests_destroy', 'loom_private_destroy')}
+    funcs['loom_engine_empty']=extract.fun(Path('kernel/loom_service_engine.c').read_text(),'loom_engine_empty')
     def program(fs):
         return PRE + '\n' + '\n'.join(fs.values()) + MAIN
     control = program(funcs)
-    cases = [('control', None, None, None, list(range(27)), None),
+    cases = [('omit-engine-charge','loom_create_private','+ (u32)burrow_backing_pages(request_bytes) + 1u;','+ (u32)burrow_backing_pages(request_bytes);',[0],'slot and pool pages charged in metadata'),
+        ('omit-engine-unwind','loom_create_private','        kfree(engine);','',[4],'rollback frees slot and pool pages'),
+        ('omit-engine-free','loom_private_destroy','    kfree(l->service_engine);','',[0],'retirement frees owner and tables'),
+        ('control', None, None, None, list(range(29)), None),
         ('omit-slot-charge', 'loom_create_private', 'burrow_backing_pages(sizeof(struct Loom)) + 1u', 'burrow_backing_pages(sizeof(struct Loom))', [0], 'slot and pool pages charged in metadata'),
         ('omit-target-charge', 'loom_create_private', '+ (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))', '', [0], 'slot and pool pages charged in metadata'),
         ('omit-target-unwind', 'loom_create_private', '        kfree(targets);', '', [4], 'rollback frees slot and pool pages'),
@@ -278,7 +286,7 @@ def main():
             r = subprocess.run([str(exe.resolve()), str(mode)], capture_output=True, text=True, timeout=15, env={**os.environ, 'ASAN_OPTIONS':'detect_leaks=0', 'UBSAN_OPTIONS':'halt_on_error=1'})
             text = r.stdout + r.stderr
             (out / f'{name}-{mode}.log').write_text(text)
-            expected = want or ('private Loom retained admitted request' if mode==22 else 'private Loom retained request payload' if mode==23 else 'private Loom retained active or invalid node' if mode in (7,17) else 'private Loom retained unowned node' if mode==18 else 'PASS refusal' if mode in (1,2,3,4,5,6,8,9,10,11,12,19,20,25) else 'PASS owner')
+            expected = want or ('private Loom retained admitted request' if mode==22 else 'private Loom retained request payload' if mode==23 else 'private Loom retained active or invalid node' if mode in (7,17) else 'private Loom retained unowned node' if mode==18 else 'PASS refusal' if mode in (1,2,3,4,5,6,8,9,10,11,12,19,20,25,27,28) else 'PASS owner')
             rc = (12 if want.startswith('private Loom retained') else 11) if want else 12 if mode in (7,17,18,22,23) else 0
             assert r.returncode == rc and text == expected + '\n', (name, mode, r.returncode, text)
             results.append(dict(case=name, mode=mode, rc=r.returncode, expected=expected, generated_sha256=hashlib.sha256(src.read_bytes()).hexdigest()))

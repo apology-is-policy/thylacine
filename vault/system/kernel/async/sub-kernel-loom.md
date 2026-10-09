@@ -8,6 +8,9 @@ code:
   - kernel/loom_service_slots.c
   - kernel/loom_service_requests.c
   - kernel/loom_service_connect.c
+  - kernel/loom_service_engine.c
+  - kernel/include/thylacine/loom_service_engine.h
+  - tools/check-loom-service-index.py
   - kernel/include/thylacine/loom_service_connect.h
   - kernel/loom_service_protocol.c
   - kernel/include/thylacine/loom_service_protocol.h
@@ -2138,3 +2141,77 @@ and tested. Pi/A72/KVM, guest allocator reclamation and absent optional graphics
 remain unqualified. Self-review only; no independent audit, Main integration,
 private async/clipboard activation or128MiB protection change. Continue the
 per-ring index checkpoint, then close queue/executor and AS-3/4/MM0-MM4.
+
+## October 9: private per-ring CONNECT ownership index
+
+Astra added a bounded 64-entry protocol-owner index under the existing Loom
+lock. Each 24-byte entry holds an exact scope incarnation, protocol pointer,
+entry pin count and INSTALLING/LIVE phase. The 1544-byte index occupies one
+separately charged private-only 4096-byte buddy allocation, including a consumed
+one-shot allocation-failure witness and complete unwind/final-free coverage.
+ARM64 Loom remains2944 bytes (one buddy page); protocol remains42264 bytes
+(16 buddy pages). Legacy rings do not allocate an index page. This is exact
+per-image metadata charging, not the pending MM0-MM4 physical accounting.
+
+Adoption transfers exclusive prepared ownership on return0, with an installation
+pin spanning native publication AND its unlocked accept wake. Ordinary exact
+lookup returns AGAIN during installation; abort can pin and cancel that state.
+Publication failure retains ownership and a negative terminal obligation: the
+actual cursor is aborted before PREPARED becomes TERMINAL. Closing/refused
+adoption before indexing leaves cleanup to the caller. Lookup+entry pin share
+Ll with removal, so no raw pointer gap opens; stale incarnations leave output
+untouched. Raw CONNECT/protocol release refuses indexed ownership.
+
+A visit advances a round-robin cursor, runs at most one real bounded client step
+and one CQ post, then releases its entry. Holding a lookup entry prevents free,
+not progress by other scopes. Collection requires LIVE, zero entry pins, actual
+local retirement, no driver/teardown users, and a delivered/discarded terminal
+with no parser borrows. It unlinks under Ll and releases/refunds outside Ll,
+dropping the protocol's Loom reference last. The caller retains Loom throughout.
+Scope metadata remains until explicit reap; final owner cleanup refuses a
+nonempty index. A prior successful CONNECT result remains immutable on abort.
+
+Whole-ring discard requires close, no fixed borrows, every indexed owner locally
+quiescent and every occupied request matched to its exact retired indexed owner
+and terminal/delivered. An unindexed constructor is therefore a blocker rather
+than evidence that the ring has no work. Consumer detach, terminal discard and
+collection then require neither CQ space nor a peer reply. A lookup racing the
+unlocked collection can delay it safely; the caller retries after the pin ends.
+
+Self-review (not independent) is in engine-draft/self-review.txt. It caught the
+initial inline-index cost doubling all Loom allocations; the separately charged
+private page repairs that cost. It also closed an unindexed-constructor detach
+gap. Raw syntax-log inspection caught a misplaced native allocation-fault block
+(kind/PO were undeclared in the request fixture), moved it into the protocol
+fixture, and retained the failure. Corrected configured ARM64 syntax passes all
+seven files. Earlier host assertion/mutation-expectation errors are preserved
+with their corrections; no failed runtime result is dismissed.
+
+Host evidence uses actual owner/CONNECT/request/slot/node/CQ C with checked
+boundary doubles: engine11 controls+9 mutants, CONNECT11+12, protocol20+11,
+private constructor29+26 and final destruction both drop orders+10 mutants.
+Shared request rejection fixture passes with17 named mutants. The lifecycle
+model passes5828 states and seven expected counterexamples; the new index
+model checks89 states and six targeted lifetime/publication counterexamples.
+These establish bounded local mechanisms, not native wire or SMP qualification.
+The source-matched native diagnostic and full matrix are recorded separately.
+
+Still internal, handshake-only and caller-driven. No private ring/syscall/SQPOLL
+activation, general RPC/fid/payload borrows, clipboard, Main landing or128MiB
+protection change. Visit's return is not a readiness/sleep predicate. A distinct
+reference-owning close queue is still required because indexed owners retain
+Loom and its zero-ref destruction cannot initiate their abort. Next: that queue,
+actual last-handle/exec cleanup and wake races, then readiness-aware executor,
+remaining private operations/provided buffers, AS-3/4 and MM0-MM4. Keep external
+Stratum clean61dde37, Astra pending/protected work, and8192MiB runner floor.
+
+Native engine-diagnostic-20261009T1752Z passes1850/1850 including the actual
+index fixture: expired indexed admission, normal/bulk independent peers with a
+stalled first peer, entry-pin lifetime, full-CQ close discard, retained server
+endpoints and exact protocol refunds/reap. D7 overlap, twenty distinct cycles
+and banner pass; HEAD+diff/new-source hashes and six input hashes are stable,
+and rebuilt ELF/bin retained. Initial1751Z failed1849/1850: the old slot-owner
+fixture counted node+request pages but omitted the new index page. Corrected
+expected physical metadata and added nonnull/zero index check; failed logs and
+artifacts retained. The full Mac matrix for this newer source remains pending;
+previous50/50 qualifies b2b263e3f internal CONNECT only.

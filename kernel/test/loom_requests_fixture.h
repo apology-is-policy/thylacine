@@ -82,6 +82,25 @@ static const char *loom_requests_fixture(void) {
     RQ(loom_request_prepare(&t,&s,&n,scope,0,0,30,&out)==-T_E_CANCELED,
        "close prevents request reservation");
     n.nodes[scope.slot].state=LOOM_SERVICE_RESERVED;
+    s.closing=false;t.detached=false;
+    RQ(!loom_request_prepare(&t,&s,&n,scope,7,0,30,&a),"rejected admission fixture setup");
+    RQ(loom_request_reject(&t,&s,stale,-T_E_IO)==-T_E_NOENT &&
+       loom_request_reject(&t,&s,a,0)==-T_E_INVAL && records[a.index].phase==LREQ_PREPARED,
+       "rejected admission validates identity and negative result");
+    records[a.index].borrows=1;
+    RQ(loom_request_reject(&t,&s,a,-T_E_IO)==-T_E_BUSY && records[a.index].phase==LREQ_PREPARED,
+       "rejected admission waits for local borrow");
+    records[a.index].borrows=0;
+    s.slots[scope.slot].pins=0;
+    RQ(loom_request_reject(&t,&s,a,-T_E_IO)==-T_E_INVAL && records[a.index].phase==LREQ_PREPARED,
+       "rejected admission retains exact scope pin");
+    s.slots[scope.slot].pins=1;
+    RQ(!loom_request_reject(&t,&s,a,-T_E_IO) && records[a.index].phase==LREQ_TERMINAL &&
+       records[a.index].result==-T_E_IO && t.occupied==1 && s.slots[scope.slot].pins==1,
+       "rejected admission reserves terminal until delivery");
+    RQ(loom_request_reject(&t,&s,a,-T_E_CANCELED)==-T_E_BUSY && records[a.index].result==-T_E_IO,
+       "rejected terminal is immutable");
+    RQ(!loom_request_deliver(&t,a) && !loom_request_reap(&t,&s,a),"rejected terminal cleanup");
     RQ(!loom_service_node_reap_unused(&s,&n,scope) && loom_requests_empty(&t),"parent cleanup after all requests");
 #undef RQ
     return NULL;

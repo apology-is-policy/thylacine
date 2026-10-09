@@ -413,6 +413,20 @@ static bool loom_private_nodes_fault_take(void) {
     return __atomic_exchange_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
 }
 
+static bool g_loom_private_engine_fault;
+void loom_private_engine_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_engine_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_engine_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_engine_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_engine_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_engine_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
+}
+
 static bool g_loom_private_requests_fault;
 void loom_private_requests_fault_arm_for_test(void) {
     __atomic_store_n(&g_loom_private_requests_fault, true, __ATOMIC_RELAXED);
@@ -456,6 +470,7 @@ static bool loom_private_layout_fault_take(void) {
     return __atomic_exchange_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
 }
 #else
+static inline bool loom_private_engine_fault_take(void) { return false; }
 static inline bool loom_private_layout_fault_take(void) { return false; }
 static inline bool loom_private_slots_fault_take(void) { return false; }
 static inline bool loom_private_pools_fault_take(void) { return false; }
@@ -471,6 +486,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     bool targets_fault = loom_private_targets_fault_take();
     bool nodes_fault = loom_private_nodes_fault_take();
     bool requests_fault = loom_private_requests_fault_take();
+    bool engine_fault = loom_private_engine_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -491,12 +507,13 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
     // Geometry already bounds cq to 8192. Allocate at least a buddy page even
     // for tiny rings: the charge follows real physical allocation, not a slab.
+    _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
     size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
-        + 1u + (u32)burrow_backing_pages(request_bytes);
+        + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
@@ -512,9 +529,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
         kmalloc(PAGE_SIZE, KP_ZERO);
     struct loom_service_request *requests = (!nodes || requests_fault) ? NULL :
         kmalloc(request_bytes, KP_ZERO);
-    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || layout_fault) ? NULL :
+    struct loom_service_engine *engine = (!requests || engine_fault) ? NULL :
+        kmalloc(PAGE_SIZE, KP_ZERO);
+    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || !engine || layout_fault) ? NULL :
         loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
+        kfree(engine);
         kfree(requests);
         kfree(nodes);
         kfree(targets);
@@ -526,6 +546,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
         addrspace_private_end(as);
         return NULL;
     }
+    l->service_engine = engine;
     l->service_slots = slots;
     l->service_pools = pools;
     l->service_targets = targets;
@@ -659,6 +680,8 @@ static void loom_private_destroy(struct Loom *l) {
     // path. A retirement must never enter blocking legacy clunk/join code.
     if (l->sqpoll || l->inflight_ops)
         extinction("private Loom reached legacy cleanup state");
+    if (!loom_engine_empty(l->service_engine))
+        extinction("private Loom reached final free with indexed protocols");
     if (l->service_fixed || l->service_fixed_count)
         extinction("private Loom reached cleanup with fixed borrows");
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
@@ -684,6 +707,7 @@ static void loom_private_destroy(struct Loom *l) {
         loom_private_drop_buffer(as, b);
     }
     l->n_reg_buf = 0;
+    kfree(l->service_engine);
     kfree(l->service_requests.records);
     kfree(l->service_nodes);
     kfree(l->service_targets);

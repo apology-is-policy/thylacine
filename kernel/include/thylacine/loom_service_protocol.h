@@ -25,6 +25,7 @@ struct loom_service_protocol {
     u32 users;
     u32 failure_phase; // handshake phase at protocol failure, before abort overwrites it
     bool connect_bound, driving, locally_retired;
+    bool indexed; // engine index owns lifetime; only its collector clears this
 };
 
 // Caller retains l. Resolves an exact registered target and snapshots the actual

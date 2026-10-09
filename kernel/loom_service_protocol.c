@@ -61,14 +61,14 @@ static void protocol_destroy(struct loom_service_protocol *p) {
 
 int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
     if (!p || !p->owner) return -T_E_INVAL;
-    if (p->admission.published || p->connect_bound || p->users || p->driving)
+    if (p->admission.published || p->connect_bound || p->indexed || p->users || p->driving)
         return -T_E_BUSY;
     protocol_destroy(p);
     return 0;
 }
 int loom_private_protocol_release_retired(struct loom_service_protocol *p) {
     if (!p || !p->owner) return -T_E_INVAL;
-    if (!p->locally_retired || p->connect_bound || p->users || p->driving)
+    if (!p->locally_retired || p->connect_bound || p->indexed || p->users || p->driving)
         return -T_E_BUSY;
     protocol_destroy(p);
     return 0;

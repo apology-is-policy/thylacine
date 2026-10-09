@@ -1,0 +1,93 @@
+Astra self-review (not independent), October9. Draft only until native install.
+
+Reviewed internal index against the approved lifecycle/ABI, request ledger,
+CONNECT state machine, native publication/wake, image charge and final destroy.
+One private-only buddy page precharged at ring creation owns 64 bounded index
+entries; no scope/thread-specific allocation at close. Canonical source remains
+b2b263e3f frozen for current-gate-20261009T170944Z while this draft is prepared.
+
+Findings and corrections:
+* Initial inline index would grow Loom from one buddy page to two, including
+  legacy rings. Replaced with private-only separately charged full page, one-shot
+  allocation fault and complete unwind/final free. ARM64 sizes now Loom2944,
+  index1544 (charged4096), protocol42264 (still16 buddy pages).
+* Consumer detach originally inspected indexed protocols only. A constructor
+  can own a PREPARED request before indexing, so zero indexed parsers does not
+  prove no other local work. Now every occupied request must match an indexed,
+  retired owner and already be terminal/delivered before detach. Named mutation
+  demonstrates refusing an unindexed constructor; its unwind permits detach.
+* Host multi-scope lifetime assertion initially assumed no object had been freed,
+  although the unpinned second owner could correctly collect. Corrected assertion
+  to allow exactly that second owner; held first owner must still remain.
+* Mutant diagnostic expectation matched the inner ledger guard, but the earlier
+  CONNECT guard correctly returned BUSY first. Require the actual named outer
+  ownership assertion. Initial logs retained. No production failure hidden.
+
+Index+pin and exact incarnation use Ll; no pointer gap before an entry is pinned.
+The index takes exclusive prepared ownership, installing pin covers publication
+and accept wake. New lookup sees AGAIN during installation. ABORT may acquire
+an installing entry and latch before publication; publisher checks that latch.
+Publication failure stays owned and gets a negative terminal from PREPARED only
+AFTER actual cursor abort. No new success or external effect is manufactured.
+Previous successful terminal remains immutable after abort. Indexed flags guard
+raw CONNECT/protocol release. Collection unlinks under Ll only when no entries,
+actual local retirement and delivered/discarded terminal, then drops outside Ll.
+The API caller retains Loom across collector's final protocol drop and wake.
+
+Each visit advances a bounded round-robin cursor and performs at most one bounded
+client step plus one CQ post. A pinned entry prevents collection, not useful
+progress of itself or independent peers. Close discard waits for entries,
+installers, teardown users, parser borrows, fixed borrows, and all matching
+terminal obligations, then detaches/discards without CQ capacity or peer waits.
+Native fixture adds two actual peers, deliberately withholding first peer reply,
+second handshake success, held entries, CQ-full close discard, retained server
+endpoints, exact refunds/reap, expired indexed publication and allocation fault.
+
+Limits: still internal and handshake-only. Caller-driven visits are NOT a
+readiness/sleep predicate; fair worker polling must register then recheck native
+interests. Automatic close queue is still required to break the indexed-owner/
+Loom reference cycle. Do not activate private syscalls, general RPCs/fids/payloads,
+SQPOLL, or clipboard on this primitive alone. Explicit fixture discard/metadata
+reap is not proof that last-handle cleanup already drives indexed protocols.
+Next checkpoint must supply the queue root and wake predicates, wire last-handle/
+exec close and wake from constructor unwind/final external entry/fixed put, and
+reap retired metadata before existing zero-reference destroy. No MM0-MM4 or
+128MiB protection change; no Main landing. No independent audit or native claim
+for these draft controls.
+
+Raw syntax-log review at17:37UTC found the allocation-failure fixture inserted
+into the request-owner function rather than the shared protocol fixture. The
+earlier arm64-syntax-2.log contains undeclared kind/PO errors, so that run was
+NOT passing. Corrected insertion in draft only; retained failed log and rerun
+syntax below. No canonical source/build changed while its full gate runs.
+
+Corrected arm64-syntax-3.log: all seven draft translation units checked with
+configured kernel flags; final rc=0. Native codegen/link/runtime remain pending.
+
+Added shared host/native request rejection checks: stale identity, nonnegative
+result, live borrow, missing exact scope pin, immutable negative terminal and
+delivery-before-reap. Four named rejection mutations. Initial shadow run1 had
+missing test directory, run2 refused ambiguous mutant text (also matched an
+existing helper), run3's existing stale mutation tripped the newly earlier
+assertion. Scoped the mutation and placed new checks after existing stale
+check; retained every failure. Production control passed throughout.
+Run4's old early-reap mutation also encountered new cleanup first. Moved the
+new rejection fixture to after the unchanged prior scenario, preserving every
+original mutation's diagnostic while separately exercising the new API.
+
+New split-publication lifetime model (index-model-1):89 clean states and six
+named counterexamples for installer root, exposing partial publication, late
+publication, dropping a pinned entry, dropping an undelivered terminal, stale
+incarnation. It refines the lifecycle model's atomic Connect interval. This
+is bounded specification evidence, not a C memory-model or fairness proof.
+Request-control-5 passes its shared fixture and all17 named mutants (13 old
+and four new). Raw lifecycle TLC logs retained in lifecycle-raw.
+
+ENGINE-NATIVE-1: installed native diagnostic1751Z failed1849/1850 in the old
+private_slot_owner accounting assertion. Its fixed +2 represented node+request
+pages and omitted the new private index; production constructor now owns and
+charges all three. Updated expected +3 and explicit nonnull/zeroed index check.
+The new engine fixture passed; raw serial/diff/ELF/bin/hashes preserve the failed
+run. No production charge or error guard weakened. Fresh native rerun follows.
+Canonical kernel/ is source of truth after this correction; original draft and
+install manifest remain historical. Do not rerun the installer.

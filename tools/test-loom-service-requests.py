@@ -16,6 +16,11 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 MUTANTS = [
+    ('reject-success', 'if (reason >= 0)', 'if (reason >= 0 && false)', 'rejected admission validates identity and negative result'),
+    ('reject-borrow', 'if (r->phase != LREQ_PREPARED || r->borrows)', 'if (r->phase != LREQ_PREPARED)', 'rejected admission waits for local borrow'),
+    ('reject-pin', 'if (!request_scope_held(s,r->scope)) return -T_E_INVAL;\n    r->result=reason;', 'if (!request_scope_held(s,r->scope) && false) return -T_E_INVAL;\n    r->result=reason;', 'rejected admission retains exact scope pin'),
+    ('reject-rewrite', 'if (r->phase != LREQ_PREPARED || r->borrows)', 'if (r->borrows)', 'rejected terminal is immutable'),
+
     ('expired', 'if (deadline && deadline <= now)', 'if (((void)now, false))', 'expired request reserves nothing'),
     ('admit-expired', 'if (r->deadline && r->deadline <= now)', 'if (((void)now, false))', 'admission rechecks absolute deadline'),
     ('omit-pin', 'int rc = loom_slot_pin(s,scope,LOOM_SERVICE_SCOPE);', 'int rc = 0;', 'prepare reserves terminal and parent'),

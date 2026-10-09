@@ -3045,3 +3045,26 @@ to loom_pool_return and Stop's member release to loom_pool_release_busy in
 kernel/loom_service_pool.c. Actual payload copy, paired shared-CQ publication,
 cancellation locking and scope Finalize/Retire remain owner integration gates.
 No new core helper reads CQ head.
+
+## loom_service_index.tla -- indexed CONNECT lifetime (October 9)
+
+The companion to loom_service.tla refines its atomic Connect/Retire transitions
+into prepared storage, index installation, native publication, accept wake,
+entry pins, local abort, terminal delivery and unlink/final release. Two
+incarnations, up to two pins and one owner yield89 reachable clean states; six
+named counterexamples detect missing installer root, exposed installing state,
+publication after abort, collection under a live entry, collection before a
+terminal is delivered and stale incarnation lookup. The existing lifecycle
+model separately checks5828 states and peer-independent retirement liveness.
+
+Prepare binds to loom_private_connect_prepare; Install/Publish/WakeDone to
+loom_engine_adopt and loom_private_connect_publish across Ll/unlocked accept
+wake; Get/Put to loom_engine_get/put; Abort to loom_engine_abort; LocalAbort to
+loom_private_connect_step after actual cursor abort; Deliver to
+loom_private_post_terminal (or detached discard); Collect/Free to
+loom_engine_collect + loom_private_connect_release; Reap to
+loom_private_connect_reap. Metadata and request pins are separately checked by
+actual-C fixtures. Run tools/check-loom-service-index.py --logs <fresh-dir>.
+No claim of C weak-memory correctness, allocator behavior, wire/parser safety,
+whole-ring close queue progress or multi-scope fairness from this finite model.
+Those require separate source review, native witnesses and runtime gates.

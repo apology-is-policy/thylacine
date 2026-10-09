@@ -1,0 +1,7 @@
+work/oct5-as-r9/astra-takeover/engine-draft/kernel/test/test_loom.c:123:9: error: use of undeclared identifier 'kind'
+  123 |     if (kind==2) {
+      |         ^~~~
+work/oct5-as-r9/astra-takeover/engine-draft/kernel/test/test_loom.c:128:9: error: call to undeclared function 'PO'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]
+  128 |         PO(!failed && !loom_private_engine_fault_armed_for_test() &&
+      |         ^
+2 errors generated.

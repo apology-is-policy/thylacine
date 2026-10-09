@@ -1,0 +1,11 @@
+--- control
++++ omit-slot-charge
+@@ -142,7 +142,7 @@
+     _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
+     size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
+     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
+-    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
++    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom))
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+         + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;

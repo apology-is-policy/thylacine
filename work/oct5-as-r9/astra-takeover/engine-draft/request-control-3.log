@@ -1,0 +1,18 @@
+PASS control PASS request terminal obligations
+PASS reject-success rejected admission validates identity and negative result
+PASS reject-borrow rejected admission waits for local borrow
+PASS reject-pin rejected admission retains exact scope pin
+PASS reject-rewrite rejected terminal is immutable
+PASS expired expired request reserves nothing
+PASS admit-expired admission rechecks absolute deadline
+PASS omit-pin prepare reserves terminal and parent
+PASS omit-unpin rollback releases capacity and pin
+PASS reuse-identity rollback burns request identity
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 98, in <module>
+    main()
+    ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 84, in main
+    assert run.returncode == 1 and run.stderr == f'FAIL {expected}\n', (
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('stale', 1, '', 'FAIL rejected admission validates identity and negative result\n')

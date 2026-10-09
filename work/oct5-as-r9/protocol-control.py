@@ -44,7 +44,7 @@ struct loom_service_protocol {
  struct Loom *owner;struct ProcServiceIdentity identity;struct SrvConnectAdmission admission;
  struct p9_client client;struct p9_client_progress progress;
  u8 *recv_storage,*send_storage;u32 charged_pages;
- bool connect_bound,driving,locally_retired;u32 users;
+ bool connect_bound,driving,locally_retired,indexed;u32 users;
 };
 static struct AddrSpace a={.pages=10,.budget=500};
 static struct Loom owner={.magic=LOOM_MAGIC,.service_creator=987,.service_as=&a,.refs=1};
@@ -170,7 +170,7 @@ MUTANTS=[
  ('alias-inline','p->recv_storage, msize, p->send_storage, msize);','p->recv_storage, msize, p->client.out_buf_inline, msize);',0,'provided buffers disjoint from client'),
  ('omit-recv-free','    if (p->recv_storage) kfree(p->recv_storage);','    /* omit receive free */',0,'refund after storage before owner drop'),
  ('omit-native-release','    devsrv_connect_release(&p->admission);','    /* omit native release */',0,'refund after storage before owner drop'),
- ('omit-published-guard','if (p->admission.published || p->connect_bound || p->users || p->driving)', 'if (false)',14,'native release outside locks and unpublished'),
+ ('omit-published-guard','if (p->admission.published || p->connect_bound || p->indexed || p->users || p->driving)', 'if (false)',14,'native release outside locks and unpublished'),
  ('omit-close-recheck','if (closed) { rc = -T_E_CANCELED; goto fail; }','if (closed && false) { rc = -T_E_CANCELED; goto fail; }',13,'refusal preserves output'),
  ('early-owner-drop','    protocol_refund(l, pages);\n    loom_unref(l); // last access to l or its image','    loom_unref(l);\n    protocol_refund(l, pages); // wrong lifetime order',15,'last Loom drop follows all releases'),
 ]

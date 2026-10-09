@@ -1,0 +1,23 @@
+{
+  "hashes": {
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_connect.c": "3c737a4f8b0dd6f4837663303f422d320508812d37df401c513929504a067e47",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_engine.c": "d3c65928f63b6ee9374e918ca71ce6e0369e13128a54cfdd7d50d41d50a8135f",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_requests.c": "acffb39641d25778b5c7f8b69ef6de275d77cb4e019b9969b773a8e4b6d20d81",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/include/thylacine/loom_service_requests.h": "d29e35fd846ea4933d58a51e603d3b1aead174656d31c8519ac362b9105b2d47",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/include/thylacine/loom_service_engine.h": "17561a3cc55d2215d9d2c23cb9d381c46f82b6d2b103f3d6466d6bca1326546b",
+    "work/oct5-as-r9/astra-takeover/engine-draft/control.py": "4d01a47788be4ff310fa50fd757f0a1c4e6114e7f1ea37bb7f5b72dae01e9379"
+  },
+  "controls": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9
+  ],
+  "limits": "actual draft engine/connect/requests/slots/nodes/CQ; checked boundary doubles, deterministic interleavings; not native qualification"
+}

@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ admit-expired.c
+@@ -61,7 +61,7 @@
+     if (!r) return -T_E_NOENT;
+     if (r->phase != LREQ_PREPARED) return -T_E_BUSY;
+     if (t->detached || !request_scope_open(s,n,r->scope)) return -T_E_CANCELED;
+-    if (r->deadline && r->deadline <= now) return -T_E_TIMEDOUT;
++    if (((void)now, false)) return -T_E_TIMEDOUT;
+     return 0;
+ }
+ int loom_request_admit(struct loom_request_table *t, struct loom_slot_table *s,

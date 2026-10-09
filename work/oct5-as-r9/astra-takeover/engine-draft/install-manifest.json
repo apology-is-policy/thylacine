@@ -1,0 +1,117 @@
+{
+  "base": "b2b263e3f250ecaa42c7975a86beec7b65128f12",
+  "sources": {
+    "kernel/CMakeLists.txt": {
+      "draft_sha256": "d2254e52688ef39fe0d86297cc008891c4e3aa411fb3e5bc3fce29a224874e00",
+      "base_sha256": "9e8bc375254946dd633e1663bc123965ff9f75c89c1521aecd373bc0f78ba7c2"
+    },
+    "kernel/include/thylacine/loom.h": {
+      "draft_sha256": "7254fc45a6a6883595ca712b551deacf455bb9bdbc67c29da05d53d4996a77a8",
+      "base_sha256": "3b8f3930ca2ec1630bf0f781a12f3c6d68c615a0b334d76f61c052df389ba22a"
+    },
+    "kernel/include/thylacine/loom_service_connect.h": {
+      "draft_sha256": "bd6564e93d9e5ff8ae1dbc61914510cfaddb7025a489785d385f5d04dcc0658a",
+      "base_sha256": "866b5dcc4d4f7debd73c63ac5920d5676aaffe54345a0e13860a602ae220f894"
+    },
+    "kernel/include/thylacine/loom_service_engine.h": {
+      "draft_sha256": "2c2f3cd2aef1cbd4df641e9fa040cacb40271aee840762b0e8a485aaa4fe12fd",
+      "base_sha256": null
+    },
+    "kernel/include/thylacine/loom_service_protocol.h": {
+      "draft_sha256": "b6c3e163127dbbd604ac56402fde3f5cbb1bd788332443887e0ad52a747e7f35",
+      "base_sha256": "2d5e77a2fc58c9af9ba773368ac82d6a0eb1419cc2202dc57eba7cf1ce1b4771"
+    },
+    "kernel/include/thylacine/loom_service_requests.h": {
+      "draft_sha256": "d29e35fd846ea4933d58a51e603d3b1aead174656d31c8519ac362b9105b2d47",
+      "base_sha256": "4bbbc5e568241c581643c3f16196f3456d5e2486b4909ffdb2b6bb7a505b4d87"
+    },
+    "kernel/loom.c": {
+      "draft_sha256": "e6ed13c4e9977899a10076fd6273c63a17bafd52f4a08b6ddeba15860abd0798",
+      "base_sha256": "b733c3a9d2c81ca3e3ce865f1e1e3d94b52d64ea63a32c4e95daa8ee3ecab067"
+    },
+    "kernel/loom_service_connect.c": {
+      "draft_sha256": "3c737a4f8b0dd6f4837663303f422d320508812d37df401c513929504a067e47",
+      "base_sha256": "685a2ba680518e18c05ccab38dfbc06e703e803c2dfc883d4628b175bc0f360b"
+    },
+    "kernel/loom_service_engine.c": {
+      "draft_sha256": "b40ce94467702873874cae331880a316853263bc96a8cc9247baa3b74765a48a",
+      "base_sha256": null
+    },
+    "kernel/loom_service_protocol.c": {
+      "draft_sha256": "a1a00a94e294abe6ecc8783c667b25b2a25f269076b37ed548b2c4af03a29206",
+      "base_sha256": "5ba0172dbfaa2792eaa52f21870dd6f49d48962b8be5e8367d7af8916ef52d87"
+    },
+    "kernel/loom_service_requests.c": {
+      "draft_sha256": "acffb39641d25778b5c7f8b69ef6de275d77cb4e019b9969b773a8e4b6d20d81",
+      "base_sha256": "a0e5c1d3233b4aec381aa6a95060a7ac6e56207bd33dadda18866969ade57a0a"
+    },
+    "kernel/test/loom_requests_fixture.h": {
+      "draft_sha256": "2e25ba6cde354047c315a6dc87d45d102988465a152ab2162c492677b9f1bddd",
+      "base_sha256": "87c0619cede4fa03d51c78bed64ce4b045a6f3e4d8c391ee579428074621c39a"
+    },
+    "kernel/test/test.c": {
+      "draft_sha256": "5e7144a7338eaf3d2c7cd639142167a6cc1773db859e60f89cb2380ca35a4702",
+      "base_sha256": "a05337b5b47a2bf06c0973f1f9737c1ac1b738b275ed01fe15629227ce5eba38"
+    },
+    "kernel/test/test_loom.c": {
+      "draft_sha256": "17593a78b3ebe1c1365d2d32ffbb265d0f79beca34703025d7aad3b3d092e403",
+      "base_sha256": "44910eb4428a2f65a7731ecc1783abc543685b7534e905aa1df0ec7f096ab7e4"
+    },
+    "specs/loom_service_index.cfg": {
+      "draft_sha256": "db97f6275292136da00d6040ac9b4c9baa64c6d278fc51928a26dfdcad8d7d8e",
+      "base_sha256": null
+    },
+    "specs/loom_service_index.tla": {
+      "draft_sha256": "13070710113ecdafc5cae6fe11118bcc70240f0b2c0198cccb01ba2e6f44711e",
+      "base_sha256": null
+    },
+    "specs/loom_service_index_buggy_expose.cfg": {
+      "draft_sha256": "4f457d0de3ff6ec234227ef9134973bb379f4a625996bd403f75aa3c717216b5",
+      "base_sha256": null
+    },
+    "specs/loom_service_index_buggy_installer.cfg": {
+      "draft_sha256": "ff169b90085b7ae4fdbbfe98b0bd6bf1f7f7b954f227ce7f231d27ce9d79251b",
+      "base_sha256": null
+    },
+    "specs/loom_service_index_buggy_late.cfg": {
+      "draft_sha256": "dcf14a8e072755a4c36cab30ec1825f3c2ccc0913f0eee849a5af380b4c081ac",
+      "base_sha256": null
+    },
+    "specs/loom_service_index_buggy_pin.cfg": {
+      "draft_sha256": "d244613ffb7c9e00c39410042f4ae325e8a52b8dca7b52e3de204f6cdc0e9177",
+      "base_sha256": null
+    },
+    "specs/loom_service_index_buggy_stale.cfg": {
+      "draft_sha256": "552784c2b4a71de70084c8c26581530775174bf4e050f72d0e57858696c3aa35",
+      "base_sha256": null
+    },
+    "specs/loom_service_index_buggy_terminal.cfg": {
+      "draft_sha256": "e066d4c3995f91178e9f4b5ab96193bee88747ca7c8e1939df7344fa7c276989",
+      "base_sha256": null
+    },
+    "tools/check-loom-service-index.py": {
+      "draft_sha256": "2492ffa232f6fdb246cf880b5a9ec9e97158f2719acabc6608cec8c375fd093c",
+      "base_sha256": null
+    },
+    "tools/test-loom-service-requests.py": {
+      "draft_sha256": "b6b5c34ee8b8c2cff5a542ed6e794db7283e1d4d55be14ac781f4328b2d2b2ad",
+      "base_sha256": "809660c8275ed9d389920701de44e6681e8331ecc25cfff13c282393247c1500"
+    },
+    "work/oct5-as-r9/connect-control.py": {
+      "draft_sha256": "2c25a332e1ffdd699e35bb02b54255c1e2dfa6a49ebb15a0cba6d4d8881f145d",
+      "base_sha256": "8079257b0535528e9d284c9579734a684fa3e3c4d6c9ab1f2cb3e52d8547394f"
+    },
+    "work/oct5-as-r9/final-reclaim-control.py": {
+      "draft_sha256": "86f85db44e2bc674b74c45a815d0fdeef4c03eda021c6e29700facab3746c2fe",
+      "base_sha256": "f78da9ebb7ee3ea8ea88a5523cd6442ecbc0c85743b196984b6e66f4e274ad56"
+    },
+    "work/oct5-as-r9/protocol-control.py": {
+      "draft_sha256": "d4e10234c93a2cb9c8c218f4aad75130e91576214ec3a3f45e14cf4df5ffa390",
+      "base_sha256": "8c6c23719e47241742ced8ed9d0d36e5d8ca2ddfd4733164694863b385540cb0"
+    },
+    "work/oct5-as-r9/slot-owner-control.py": {
+      "draft_sha256": "c06c2737bf52c26defb0cacd5b0b2a909822142768ef76bf7d4812eaec8aebc5",
+      "base_sha256": "aa2a7e4fc32e015ec76639aa3ce40eaba6077160a3ba0af8aa4390ff470555ac"
+    }
+  }
+}

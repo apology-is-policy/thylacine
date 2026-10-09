@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 98, in <module>
+    main()
+    ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 59, in main
+    hashes = {str(p.relative_to(ROOT)): sha(p) for p in inputs}
+                                        ~~~^^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 43, in sha
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+                          ~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 777, in read_bytes
+    with self.open(mode='rb', buffering=0) as f:
+         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/pathlib/__init__.py", line 771, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/kernel/test/loom_requests_fixture.h'

@@ -1,0 +1,11 @@
+--- control
++++ omit-engine-charge
+@@ -145,7 +145,7 @@
+     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+-        + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;
++        + 1u + (u32)burrow_backing_pages(request_bytes);
+     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
+     bool exempt = proc_resource_exempt(p);
+     spin_lock(&as->lock);

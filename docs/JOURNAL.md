@@ -1,5 +1,22 @@
 # The autonomous-run journal
 
+## 2026-10-09: indexed CONNECT checkpoint, self-review and native qualification
+
+The lifetime gap between lookup and retirement now has a bounded charged ring
+index. Self-review changed inline storage to a private-only page to avoid doubling
+legacy Loom allocations, and made discard account for unindexed constructors.
+A separate index model checks the publication/wake split hidden by the older
+lifecycle abstraction. Models and actual-C mutation evidence are retained in
+work/oct5-as-r9/astra-takeover/engine-draft/; these are not independent audits.
+
+Raw syntax review corrected a misplaced allocation-fault fixture. The first
+native run then caught the old metadata assertion missing the index page; the
+production charge was correct, and the fixture now checks the added page and
+zeroed index explicitly. Both failures are retained. Corrected1752Z native run
+passes1850/1850+D7/20cycles with exact artifacts. Source-specific full matrix is
+next; close queue and worker integration still owe their own qualification.
+
+
 ## October 9: CONNECT full Mac gate verified
 
 Source b2b263e3f250ecaa42c7975a86beec7b65128f12 passed50/50 Mac HVF boots

@@ -1,0 +1,738 @@
+diff --git a/kernel/CMakeLists.txt b/kernel/CMakeLists.txt
+index b251bd619..e8a263032 100644
+--- a/kernel/CMakeLists.txt
++++ b/kernel/CMakeLists.txt
+@@ -70,6 +70,7 @@ set(KERNEL_SRCS
+     loom_service_nodes.c
+     loom_service_requests.c
+     loom_service_protocol.c
++    loom_service_engine.c
+     loom_service_connect.c
+     weft.c
+     vma.c
+diff --git a/kernel/include/thylacine/loom.h b/kernel/include/thylacine/loom.h
+index 12ca3efeb..c9926cd0b 100644
+--- a/kernel/include/thylacine/loom.h
++++ b/kernel/include/thylacine/loom.h
+@@ -29,6 +29,7 @@
+ 
+ #include <thylacine/loom_service_abi.h> // reserved AS-0 surface; not enabled
+ #include <thylacine/loom_service_requests.h>
++#include <thylacine/loom_service_engine.h>
+ #include <thylacine/loom_service_pool.h> // canonical internal extent
+ #include <thylacine/handle.h>     // rights_t
+ #include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
+@@ -468,6 +469,7 @@ struct Loom {
+     struct loom_service_pool_table *service_pools;
+     struct loom_service_target_table *service_targets;
+     struct loom_service_node_table *service_nodes; // separately charged buddy page
++    struct loom_service_engine *service_engine; // separately charged buddy page
+     struct loom_request_table service_requests; // CQ-sized precharged terminal storage
+     struct loom_private_fixed *service_fixed; // exact accepted fixed extents, under lock
+     u32 service_fixed_count; // bounded by existing CQ terminal-obligation capacity
+@@ -637,6 +639,9 @@ bool loom_private_pools_fault_armed_for_test(void);
+ void loom_private_targets_fault_arm_for_test(void);
+ void loom_private_targets_fault_disarm_for_test(void);
+ bool loom_private_targets_fault_armed_for_test(void);
++void loom_private_engine_fault_arm_for_test(void);
++void loom_private_engine_fault_disarm_for_test(void);
++bool loom_private_engine_fault_armed_for_test(void);
+ void loom_private_requests_fault_arm_for_test(void);
+ void loom_private_requests_fault_disarm_for_test(void);
+ bool loom_private_requests_fault_armed_for_test(void);
+diff --git a/kernel/include/thylacine/loom_service_connect.h b/kernel/include/thylacine/loom_service_connect.h
+index d42f4dba6..d4d964aab 100644
+--- a/kernel/include/thylacine/loom_service_connect.h
++++ b/kernel/include/thylacine/loom_service_connect.h
+@@ -15,7 +15,9 @@ int loom_private_connect_rollback(struct loom_service_protocol *);
+ // the owner exclusively through publish (including its unlocked accept wake).
+ // A failure leaves PREPARED ownership for rollback; no bytes have been sent.
+ int loom_private_connect_publish(struct loom_service_protocol *, u64 now);
+-// After publication, caller keeps storage alive across ALL concurrent entries
++// An indexed installer may also accept abort before publication; it must then
++// drive rejection to a terminal CQE and retirement, not roll back that obligation.
++// Caller keeps storage alive across ALL concurrent entries
+ // and excludes new entry before final release. No raw pointer is a reference.
+ // Abort may race step. At most one step driver; returns BUSY for a second one.
+ // This checkpoint permits ONLY the handshake: no external client/RPC/fid/buffer
+diff --git a/kernel/include/thylacine/loom_service_protocol.h b/kernel/include/thylacine/loom_service_protocol.h
+index 3c15d447b..ec3c5440a 100644
+--- a/kernel/include/thylacine/loom_service_protocol.h
++++ b/kernel/include/thylacine/loom_service_protocol.h
+@@ -25,6 +25,7 @@ struct loom_service_protocol {
+     u32 users;
+     u32 failure_phase; // handshake phase at protocol failure, before abort overwrites it
+     bool connect_bound, driving, locally_retired;
++    bool indexed; // engine index owns lifetime; only its collector clears this
+ };
+ 
+ // Caller retains l. Resolves an exact registered target and snapshots the actual
+diff --git a/kernel/include/thylacine/loom_service_requests.h b/kernel/include/thylacine/loom_service_requests.h
+index fd0c0dfc6..fff3f61ed 100644
+--- a/kernel/include/thylacine/loom_service_requests.h
++++ b/kernel/include/thylacine/loom_service_requests.h
+@@ -32,6 +32,10 @@ int loom_request_prepare(struct loom_request_table *, struct loom_slot_table *,
+ // Caller must hold the SAME lock continuously from check through admit.
+ int loom_request_check_admit(struct loom_request_table *, struct loom_slot_table *,
+                              struct loom_service_node_table *, struct loom_request_ref, u64 now);
++// Negative completion for a reserved operation whose native admission failed.
++// No external effects or parser borrows may have escaped; retain CQ ownership.
++int loom_request_reject(struct loom_request_table *, struct loom_slot_table *,
++                        struct loom_request_ref, s32 reason);
+ int loom_request_admit(struct loom_request_table *, struct loom_slot_table *,
+                        struct loom_service_node_table *, struct loom_request_ref, u64 now);
+ int loom_request_rollback(struct loom_request_table *, struct loom_slot_table *, struct loom_request_ref);
+diff --git a/kernel/loom.c b/kernel/loom.c
+index 68b01c998..2bf9b3c4f 100644
+--- a/kernel/loom.c
++++ b/kernel/loom.c
+@@ -413,6 +413,20 @@ static bool loom_private_nodes_fault_take(void) {
+     return __atomic_exchange_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
+ }
+ 
++static bool g_loom_private_engine_fault;
++void loom_private_engine_fault_arm_for_test(void) {
++    __atomic_store_n(&g_loom_private_engine_fault, true, __ATOMIC_RELAXED);
++}
++void loom_private_engine_fault_disarm_for_test(void) {
++    __atomic_store_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
++}
++bool loom_private_engine_fault_armed_for_test(void) {
++    return __atomic_load_n(&g_loom_private_engine_fault, __ATOMIC_RELAXED);
++}
++static bool loom_private_engine_fault_take(void) {
++    return __atomic_exchange_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
++}
++
+ static bool g_loom_private_requests_fault;
+ void loom_private_requests_fault_arm_for_test(void) {
+     __atomic_store_n(&g_loom_private_requests_fault, true, __ATOMIC_RELAXED);
+@@ -456,6 +470,7 @@ static bool loom_private_layout_fault_take(void) {
+     return __atomic_exchange_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+ }
+ #else
++static inline bool loom_private_engine_fault_take(void) { return false; }
+ static inline bool loom_private_layout_fault_take(void) { return false; }
+ static inline bool loom_private_slots_fault_take(void) { return false; }
+ static inline bool loom_private_pools_fault_take(void) { return false; }
+@@ -471,6 +486,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts)
+     bool targets_fault = loom_private_targets_fault_take();
+     bool nodes_fault = loom_private_nodes_fault_take();
+     bool requests_fault = loom_private_requests_fault_take();
++    bool engine_fault = loom_private_engine_fault_take();
+     struct loom_layout g;
+     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
+         !loom_measure(sq, cq, receipts, &g)) return NULL;
+@@ -491,12 +507,13 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts)
+     _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
+     // Geometry already bounds cq to 8192. Allocate at least a buddy page even
+     // for tiny rings: the charge follows real physical allocation, not a slab.
++    _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
+     size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
+     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
+     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+         + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+-        + 1u + (u32)burrow_backing_pages(request_bytes);
++        + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;
+     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
+     bool exempt = proc_resource_exempt(p);
+     spin_lock(&as->lock);
+@@ -512,9 +529,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts)
+         kmalloc(PAGE_SIZE, KP_ZERO);
+     struct loom_service_request *requests = (!nodes || requests_fault) ? NULL :
+         kmalloc(request_bytes, KP_ZERO);
+-    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || layout_fault) ? NULL :
++    struct loom_service_engine *engine = (!requests || engine_fault) ? NULL :
++        kmalloc(PAGE_SIZE, KP_ZERO);
++    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || !engine || layout_fault) ? NULL :
+         loom_create_layout(sq, cq, exempt, receipts);
+     if (!l) {
++        kfree(engine);
+         kfree(requests);
+         kfree(nodes);
+         kfree(targets);
+@@ -526,6 +546,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts)
+         addrspace_private_end(as);
+         return NULL;
+     }
++    l->service_engine = engine;
+     l->service_slots = slots;
+     l->service_pools = pools;
+     l->service_targets = targets;
+@@ -659,6 +680,8 @@ static void loom_private_destroy(struct Loom *l) {
+     // path. A retirement must never enter blocking legacy clunk/join code.
+     if (l->sqpoll || l->inflight_ops)
+         extinction("private Loom reached legacy cleanup state");
++    if (!loom_engine_empty(l->service_engine))
++        extinction("private Loom reached final free with indexed protocols");
+     if (l->service_fixed || l->service_fixed_count)
+         extinction("private Loom reached cleanup with fixed borrows");
+     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
+@@ -684,6 +707,7 @@ static void loom_private_destroy(struct Loom *l) {
+         loom_private_drop_buffer(as, b);
+     }
+     l->n_reg_buf = 0;
++    kfree(l->service_engine);
+     kfree(l->service_requests.records);
+     kfree(l->service_nodes);
+     kfree(l->service_targets);
+diff --git a/kernel/loom_service_connect.c b/kernel/loom_service_connect.c
+index 7a01177dc..27f3d9748 100644
+--- a/kernel/loom_service_connect.c
++++ b/kernel/loom_service_connect.c
+@@ -77,7 +77,7 @@ int loom_private_connect_rollback(struct loom_service_protocol *p) {
+     struct Loom *l = p->owner;
+     spin_lock(&l->lock);
+     struct loom_service_request *r = connect_request(p);
+-    if (!p->connect_bound || p->admission.published || p->users || p->driving ||
++    if (!p->connect_bound || p->indexed || p->admission.published || p->users || p->driving ||
+         !r || r->phase != LREQ_PREPARED || r->borrows) {
+         spin_unlock(&l->lock); return -T_E_BUSY;
+     }
+@@ -92,7 +92,7 @@ int loom_private_connect_publish(struct loom_service_protocol *p, u64 now) {
+     spin_lock(&l->lock);
+     struct loom_service_node *n = connect_scope(l,p->scope);
+     int rc = !p->connect_bound || p->admission.published || p->users || p->driving ?
+-        -T_E_BUSY : l->service_closing ? -T_E_CANCELED :
++        -T_E_BUSY : p->abort_reason ? p->abort_reason : l->service_closing ? -T_E_CANCELED :
+         !n || n->state != LOOM_SERVICE_RESERVED ? -T_E_NOENT : 0;
+     if (!rc) rc = loom_request_check_admit(&l->service_requests,l->service_slots,
+                                            l->service_nodes,p->request,now);
+@@ -119,7 +119,7 @@ int loom_private_connect_abort(struct loom_service_protocol *p, s32 reason) {
+     struct Loom *l = p->owner;
+     spin_lock(&l->lock);
+     struct loom_service_node *n = connect_scope(l,p->scope);
+-    if (!p->connect_bound || !p->admission.published || !n) {
++    if (!p->connect_bound || !n) {
+         spin_unlock(&l->lock); return -T_E_NOENT;
+     }
+     if (p->locally_retired || p->abort_reason) { spin_unlock(&l->lock); return 1; }
+@@ -139,7 +139,7 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
+     spin_lock(&l->lock);
+     struct loom_service_node *n = connect_scope(l,p->scope);
+     struct loom_service_request *r = connect_request(p);
+-    if (!p->connect_bound || !p->admission.published || !n || !r) {
++    if (!p->connect_bound || (!p->admission.published && !p->abort_reason) || !n || !r) {
+         spin_unlock(&l->lock); return -T_E_NOENT;
+     }
+     if (p->driving) { spin_unlock(&l->lock); return -T_E_BUSY; }
+@@ -194,6 +194,9 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
+     srvconn_teardown(p->admission.conn);
+     p9_client_progress_abort(&p->client);
+     spin_lock(&l->lock);
++    if (r->phase == LREQ_PREPARED &&
++        loom_request_reject(&l->service_requests,l->service_slots,p->request,reason))
++        extinction("CONNECT lost rejected admission obligation");
+     if (r->phase == LREQ_ACTIVE &&
+         loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,p->request,reason))
+         extinction("CONNECT lost cancellation obligation");
+@@ -210,7 +213,7 @@ int loom_private_connect_release(struct loom_service_protocol *p) {
+     spin_lock(&l->lock);
+     struct loom_service_node *n=connect_scope(l,p->scope);
+     struct loom_service_request *r=connect_request(p);
+-    if (!p->connect_bound || !p->locally_retired || p->driving || p->users ||
++    if (!p->connect_bound || p->indexed || !p->locally_retired || p->driving || p->users ||
+         !n || n->state != LOOM_SERVICE_RETIRED || !r || r->phase != LREQ_DELIVERED || r->borrows) {
+         spin_unlock(&l->lock); return -T_E_BUSY;
+     }
+diff --git a/kernel/loom_service_protocol.c b/kernel/loom_service_protocol.c
+index ddf28c28c..3d153d1fa 100644
+--- a/kernel/loom_service_protocol.c
++++ b/kernel/loom_service_protocol.c
+@@ -61,14 +61,14 @@ static void protocol_destroy(struct loom_service_protocol *p) {
+ 
+ int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
+     if (!p || !p->owner) return -T_E_INVAL;
+-    if (p->admission.published || p->connect_bound || p->users || p->driving)
++    if (p->admission.published || p->connect_bound || p->indexed || p->users || p->driving)
+         return -T_E_BUSY;
+     protocol_destroy(p);
+     return 0;
+ }
+ int loom_private_protocol_release_retired(struct loom_service_protocol *p) {
+     if (!p || !p->owner) return -T_E_INVAL;
+-    if (!p->locally_retired || p->connect_bound || p->users || p->driving)
++    if (!p->locally_retired || p->connect_bound || p->indexed || p->users || p->driving)
+         return -T_E_BUSY;
+     protocol_destroy(p);
+     return 0;
+diff --git a/kernel/loom_service_requests.c b/kernel/loom_service_requests.c
+index 9dce00903..566b757eb 100644
+--- a/kernel/loom_service_requests.c
++++ b/kernel/loom_service_requests.c
+@@ -70,6 +70,17 @@ int loom_request_admit(struct loom_request_table *t, struct loom_slot_table *s,
+     if (!rc) request_exact(t,ref)->phase = LREQ_ACTIVE;
+     return rc;
+ }
++int loom_request_reject(struct loom_request_table *t, struct loom_slot_table *s,
++                        struct loom_request_ref ref, s32 reason) {
++    struct loom_service_request *r=request_exact(t,ref);
++    if (!r) return -T_E_NOENT;
++    if (reason >= 0) return -T_E_INVAL;
++    if (r->phase != LREQ_PREPARED || r->borrows) return -T_E_BUSY;
++    if (!request_scope_held(s,r->scope)) return -T_E_INVAL;
++    r->result=reason;
++    r->phase=LREQ_TERMINAL;
++    return 0;
++}
+ static int request_remove(struct loom_request_table *t, struct loom_slot_table *s,
+                            struct loom_request_ref ref, u32 phase) {
+     struct loom_service_request *r = request_exact(t,ref);
+diff --git a/kernel/test/loom_requests_fixture.h b/kernel/test/loom_requests_fixture.h
+index 1e9fb8904..2fcc0c29b 100644
+--- a/kernel/test/loom_requests_fixture.h
++++ b/kernel/test/loom_requests_fixture.h
+@@ -82,6 +82,25 @@ static const char *loom_requests_fixture(void) {
+     RQ(loom_request_prepare(&t,&s,&n,scope,0,0,30,&out)==-T_E_CANCELED,
+        "close prevents request reservation");
+     n.nodes[scope.slot].state=LOOM_SERVICE_RESERVED;
++    s.closing=false;t.detached=false;
++    RQ(!loom_request_prepare(&t,&s,&n,scope,7,0,30,&a),"rejected admission fixture setup");
++    RQ(loom_request_reject(&t,&s,stale,-T_E_IO)==-T_E_NOENT &&
++       loom_request_reject(&t,&s,a,0)==-T_E_INVAL && records[a.index].phase==LREQ_PREPARED,
++       "rejected admission validates identity and negative result");
++    records[a.index].borrows=1;
++    RQ(loom_request_reject(&t,&s,a,-T_E_IO)==-T_E_BUSY && records[a.index].phase==LREQ_PREPARED,
++       "rejected admission waits for local borrow");
++    records[a.index].borrows=0;
++    s.slots[scope.slot].pins=0;
++    RQ(loom_request_reject(&t,&s,a,-T_E_IO)==-T_E_INVAL && records[a.index].phase==LREQ_PREPARED,
++       "rejected admission retains exact scope pin");
++    s.slots[scope.slot].pins=1;
++    RQ(!loom_request_reject(&t,&s,a,-T_E_IO) && records[a.index].phase==LREQ_TERMINAL &&
++       records[a.index].result==-T_E_IO && t.occupied==1 && s.slots[scope.slot].pins==1,
++       "rejected admission reserves terminal until delivery");
++    RQ(loom_request_reject(&t,&s,a,-T_E_CANCELED)==-T_E_BUSY && records[a.index].result==-T_E_IO,
++       "rejected terminal is immutable");
++    RQ(!loom_request_deliver(&t,a) && !loom_request_reap(&t,&s,a),"rejected terminal cleanup");
+     RQ(!loom_service_node_reap_unused(&s,&n,scope) && loom_requests_empty(&t),"parent cleanup after all requests");
+ #undef RQ
+     return NULL;
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index de1fd842f..7a168e974 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -672,6 +672,7 @@ void test_loom_service_requests(void);
+ void test_loom_private_requests(void);
+ void test_loom_private_protocol(void);
+ void test_loom_private_connect(void);
++void test_loom_private_engine(void);
+ void test_loom_private_node_owner(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+@@ -2763,6 +2764,7 @@ struct test_case g_tests[] = {
+     { "loom.private_requests",           test_loom_private_requests,           false, NULL },
+     { "loom.private_protocol",           test_loom_private_protocol,           false, NULL },
+     { "loom.private_connect",            test_loom_private_connect,            false, NULL },
++    { "loom.private_engine",             test_loom_private_engine,             false, NULL },
+     { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
+     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
+     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 204f7754b..65dde8331 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -292,8 +292,10 @@ static const char *loom_slot_owner_fixture(void) {
+              "private owner owns zeroed node storage");
+     SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
+              (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)) +
+-             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 2u,
+-             "slot pool target and node pages included in metadata charge");
++             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 3u,
++             "slot pool target node request and index pages included in metadata charge");
++    SO_CHECK(l->service_engine && loom_engine_empty(l->service_engine),
++             "private owner owns a zeroed protocol index page");
+     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
+              (u32)burrow_backing_pages(l->ring_size) + 1u,
+              "all base storage charged before owner publication");
+@@ -2244,7 +2246,103 @@ done:
+     return error;
+ }
+ 
+-static const char *loom_protocol_fixture(bool connect) {
++// Native ring index keeps two real peers independent and pins entry lifetime
++// through terminal delivery, abort and CQ-independent whole-owner discard.
++static const char *loom_engine_cases(struct Loom *l, struct Proc *creator,
++                                     struct Proc *poster, struct SrvRegistry *reg,
++                                     struct loom_service_ref target[2]) {
++    const char *error=NULL;
++    struct loom_service_ref scope[2]={{0},{0}};
++    struct loom_service_protocol *p[2]={NULL,NULL},*held[2]={NULL,NULL};
++    struct SrvConn *server[2]={NULL,NULL};
++    struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
++    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
++    u32 pages=creator->as->page_count;
++#define EI(c,m) do { if (!(c)) { error=m; goto done; } } while(0)
++    // An expired indexed publication retains its negative terminal obligation.
++    EI(!loom_private_node_prepare(l,creator,&reserve,&scope[0]) &&
++       !loom_private_node_publish(l,scope[0]),"index expired scope reservation");
++    EI(!loom_private_connect_prepare(l,scope[0],target[0],11,100,1,&p[0]),"index expired prepare");
++    EI(!loom_engine_adopt(p[0],100),"index adopts expired publication as owned rejection");p[0]=NULL;
++    EI(!loom_engine_get(l,scope[0],&held[0]) && held[0]->abort_reason==-T_E_TIMEDOUT &&
++       !held[0]->admission.published,"index failed admission captured without publication");
++    EI(loom_engine_visit(l,101)==1 && held[0]->locally_retired &&
++       l->service_requests.records[held[0]->request.index].phase==LREQ_DELIVERED,
++       "index rejected request is driven and delivered");
++    EI(loom_engine_collect(l,scope[0])==-T_E_BUSY,"index entry pin blocks rejected storage free");
++    EI(!loom_engine_put(l,scope[0],held[0]),"index rejected entry release");held[0]=NULL;
++    EI(!loom_engine_collect(l,scope[0]) && !loom_private_connect_reap(l,scope[0]),
++       "index rejected scope settles");scope[0]=(struct loom_service_ref){0};
++    h->cq_head=l->cq_tail;
++    EI(creator->as->page_count==pages && loom_engine_empty(l->service_engine),
++       "index rejection refunds full protocol allocation");
++    for (u32 i=0;i<2;++i) {
++        EI(!loom_private_node_prepare(l,creator,&reserve,&scope[i]) &&
++           !loom_private_node_publish(l,scope[i]),"index peer destination");
++        EI(!loom_private_connect_prepare(l,scope[i],target[i],77+i,1000,1,&p[i]),"index peer prepare");
++        EI(!loom_engine_adopt(p[i],2),"index publication adopts owner");p[i]=NULL;
++        EI(!loom_engine_get(l,scope[i],&held[i]),"index exact peer lookup");
++        struct SrvService *svc=srv_lookup_in(reg,i?"large":"small",5);
++        EI(srv_backlog_depth(svc)==1,"index native backlog publication");
++        server[i]=srv_accept_blocking(svc,poster->stripes);
++        EI(server[i]==held[i]->admission.conn,"index real accepted peer");
++    }
++    EI(!lc_reply(server[1],P9_TVERSION,P9_NOTAG) && !lc_reply(server[1],P9_TATTACH,0),
++       "index only second peer supplies handshake replies");
++    for (u32 i=0;i<64 && l->service_nodes->nodes[scope[1].slot].state!=LOOM_SERVICE_READY;++i)
++        EI(loom_engine_visit(l,3+i)==1,"index round-robin visit");
++    EI(l->service_nodes->nodes[scope[0].slot].state==LOOM_SERVICE_VERSION &&
++       l->service_nodes->nodes[scope[1].slot].state==LOOM_SERVICE_READY,
++       "index stalled peer does not starve independent handshake");
++    EI(l->service_requests.records[held[1]->request.index].phase==LREQ_DELIVERED,
++       "index successful terminal delivered once");
++    EI(!loom_post_cqe(l,123,0,0),"index fills remaining CQ slot");
++    EI(!loom_engine_abort(l,scope[0],-T_E_CANCELED) && !loom_engine_abort(l,scope[1],-T_E_CANCELED),
++       "index abort independent of CQ space");
++    for (u32 i=0;i<4;++i) (void)loom_engine_visit(l,100);
++    EI(held[0]->locally_retired && held[1]->locally_retired &&
++       l->service_requests.records[held[0]->request.index].phase==LREQ_TERMINAL &&
++       l->service_requests.records[held[1]->request.index].phase==LREQ_DELIVERED,
++       "index local retirement with pending cancellation and earlier success");
++    loom_exec_latch(l);
++    EI(loom_engine_discard_closed(l)==-T_E_BUSY && !l->service_requests.detached,
++       "index consumer remains attached while lookup entries remain");
++    for (u32 i=0;i<2;++i) { EI(!loom_engine_put(l,scope[i],held[i]),"index final entry put");held[i]=NULL; }
++    u64 freed=srvconn_total_freed();
++    EI(!loom_engine_discard_closed(l) && l->service_requests.detached &&
++       loom_engine_empty(l->service_engine) && !l->service_requests.occupied,
++       "index close discards CQ-full terminal after actual local quiescence");
++    EI(creator->as->page_count==pages && srvconn_total_freed()==freed,
++       "index releases charged protocol while both server endpoints survive");
++    for (u32 i=0;i<2;++i) {
++        srvconn_unref(server[i]);server[i]=NULL;
++        EI(!loom_private_connect_reap(l,scope[i]),"index retired metadata reaps");
++        struct loom_service_protocol *absent=NULL;
++        EI(loom_engine_get(l,scope[i],&absent)==-T_E_NOENT && !absent,"index stale lookup cannot recover freed owner");
++        scope[i]=(struct loom_service_ref){0};
++    }
++    EI(srvconn_total_freed()==freed+2,"index native credits settle at last endpoints");
++done:
++    for (u32 i=0;i<2;++i) {
++        if (held[i]) (void)loom_engine_put(l,scope[i],held[i]);
++        if (p[i]) (void)loom_private_connect_rollback(p[i]);
++    }
++    loom_exec_latch(l);
++    for (u32 i=0;i<2;++i) if (scope[i].incarnation) (void)loom_engine_abort(l,scope[i],-T_E_CANCELED);
++    for (u32 i=0;i<4;++i) (void)loom_engine_visit(l,1001);
++    (void)loom_engine_discard_closed(l);
++    for (u32 i=0;i<2;++i) {
++        if (server[i]) srvconn_unref(server[i]);
++        if (scope[i].incarnation) {
++            (void)loom_private_connect_reap(l,scope[i]);
++            (void)loom_private_node_reap_unused(l,scope[i]);
++        }
++    }
++#undef EI
++    return error;
++}
++
++static const char *loom_protocol_fixture(u32 kind) {
+     const char *error = NULL;
+     struct Proc *p = test_proc_make(), *poster = test_proc_make();
+     struct SrvRegistry *reg = NULL;
+@@ -2280,6 +2378,15 @@ static const char *loom_protocol_fixture(bool connect) {
+     int fd = handle_alloc(p,KOBJ_SPOOR,RIGHT_READ,root);
+     if (fd < 0) spoor_clunk(root);
+     PO(fd>=0,"protocol navigation descriptor");
++    if (kind==2) {
++        u32 before=p->as->page_count;
++        loom_private_engine_fault_arm_for_test();
++        struct Loom *failed=loom_create_private(p,2,2,true);
++        if (failed) { ++goal; loom_unref(failed); }
++        PO(!failed && !loom_private_engine_fault_armed_for_test() &&
++           p->as->page_count==before && !p->as->private_rings,
++           "protocol index allocation failure unwinds every charged owner");
++    }
+     l=loom_create_private(p,2,2,true);
+     if (l) ++goal;
+     PO(l,"protocol private owner");
+@@ -2291,7 +2398,8 @@ static const char *loom_protocol_fixture(bool connect) {
+         PO(!loom_private_target_prepare(l,p,&in,&refs[n]),"protocol target prepare");
+         PO(!loom_private_target_publish(l,refs[n]),"protocol target publish");
+     }
+-    if (connect) { error=loom_connect_cases(l,p,poster,reg,refs); goto done; }
++    if (kind==1) { error=loom_connect_cases(l,p,poster,reg,refs); goto done; }
++    if (kind==2) { error=loom_engine_cases(l,p,poster,reg,refs); goto done; }
+     u32 owner_pages = p->as->page_count;
+     u64 freed = srvconn_total_freed();
+     loom_private_protocol_fault_arm_for_test(1);
+@@ -2398,3 +2506,9 @@ void test_loom_private_connect(void) {
+     const char *error=loom_protocol_fixture(true);
+     TEST_ASSERT(!error,error);
+ }
++
++void test_loom_private_engine(void);
++void test_loom_private_engine(void) {
++    const char *error=loom_protocol_fixture(2);
++    TEST_ASSERT(!error,error);
++}
+diff --git a/tools/test-loom-service-requests.py b/tools/test-loom-service-requests.py
+index 26e70f058..c3c8a9840 100644
+--- a/tools/test-loom-service-requests.py
++++ b/tools/test-loom-service-requests.py
+@@ -16,6 +16,11 @@ import subprocess
+ 
+ ROOT = Path(__file__).resolve().parent.parent
+ MUTANTS = [
++    ('reject-success', 'if (reason >= 0)', 'if (reason >= 0 && false)', 'rejected admission validates identity and negative result'),
++    ('reject-borrow', 'if (r->phase != LREQ_PREPARED || r->borrows)', 'if (r->phase != LREQ_PREPARED)', 'rejected admission waits for local borrow'),
++    ('reject-pin', 'if (!request_scope_held(s,r->scope)) return -T_E_INVAL;\n    r->result=reason;', 'if (!request_scope_held(s,r->scope) && false) return -T_E_INVAL;\n    r->result=reason;', 'rejected admission retains exact scope pin'),
++    ('reject-rewrite', 'if (r->phase != LREQ_PREPARED || r->borrows)', 'if (r->borrows)', 'rejected terminal is immutable'),
++
+     ('expired', 'if (deadline && deadline <= now)', 'if (((void)now, false))', 'expired request reserves nothing'),
+     ('admit-expired', 'if (r->deadline && r->deadline <= now)', 'if (((void)now, false))', 'admission rechecks absolute deadline'),
+     ('omit-pin', 'int rc = loom_slot_pin(s,scope,LOOM_SERVICE_SCOPE);', 'int rc = 0;', 'prepare reserves terminal and parent'),
+diff --git a/work/oct5-as-r9/connect-control.py b/work/oct5-as-r9/connect-control.py
+index a06bd66e0..665174a61 100644
+--- a/work/oct5-as-r9/connect-control.py
++++ b/work/oct5-as-r9/connect-control.py
+@@ -17,7 +17,7 @@ struct loom_service_protocol {
+  struct Loom *owner;struct SrvConnectAdmission admission;struct p9_client client;
+  struct {struct {u32 phase;} handshake;} progress;
+  struct loom_service_ref scope;struct loom_request_ref request;u64 connect_deadline;
+- s32 abort_reason;u32 users,failure_phase;bool connect_bound,driving,locally_retired;
++ s32 abort_reason;u32 users,failure_phase;bool connect_bound,driving,locally_retired,indexed;
+ };
+ static struct loom_service_protocol *active;
+ static struct SrvConn cn;
+diff --git a/work/oct5-as-r9/final-reclaim-control.py b/work/oct5-as-r9/final-reclaim-control.py
+index 2c75facbe..d4654cc6c 100644
+--- a/work/oct5-as-r9/final-reclaim-control.py
++++ b/work/oct5-as-r9/final-reclaim-control.py
+@@ -29,6 +29,7 @@ PRE = r'''
+ #include <thylacine/loom_service_pool_table.h>
+ #include <thylacine/loom_service_nodes.h>
+ #include <thylacine/loom_service_requests.h>
++#include <thylacine/loom_service_engine.h>
+ #define THYLACINE_DEVSRV_H
+ struct SrvServiceTarget { void *view,*service;u64 generation;u8 name_len;char name[32]; };
+ #include <thylacine/loom_service_targets.h>
+@@ -48,8 +49,8 @@ static void spin_unlock(spin_lock_t *p) { REQUIRE(p->held,"unlock without lock")
+ static void extinction(const char *s) { puts(s); exit(12); }
+ struct page { void *mem; bool live; };
+ static struct page pages[8];
+-static int nr_pages, page_frees, as_frees, loom_frees, slot_frees, pool_frees, target_frees, node_frees, request_frees, drains, refunds;
+-static uintptr_t as_addr, loom_addr, slot_addr, pool_addr, target_addr, node_addr, request_addr;
++static int nr_pages, page_frees, as_frees, loom_frees, slot_frees, pool_frees, target_frees, node_frees, request_frees, engine_frees, drains, refunds;
++static uintptr_t as_addr, loom_addr, slot_addr, pool_addr, target_addr, node_addr, request_addr, engine_addr;
+ static u64 g_addrspace_next_id, g_loom_destroyed, service_retired_count;
+ static struct page *alloc_pages(unsigned order, unsigned flags) {
+     REQUIRE(order==0 && flags==KP_ZERO && nr_pages<8,"page allocation contract");
+@@ -77,6 +78,7 @@ static void kfree(void *p) {
+     else if((uintptr_t)p==slot_addr) { REQUIRE(!slot_frees,"slot page freed once"); slot_frees++; }
+     else if((uintptr_t)p==pool_addr) { REQUIRE(!pool_frees,"pool table freed once"); pool_frees++; }
+     else if((uintptr_t)p==target_addr) { REQUIRE(!target_frees,"target table freed once"); target_frees++; }
++    else if((uintptr_t)p==engine_addr) { REQUIRE(!engine_frees,"engine page freed once");engine_frees++; }
+     else if((uintptr_t)p==request_addr) { REQUIRE(!request_frees,"request page freed once");request_frees++; }
+     else if((uintptr_t)p==node_addr) { REQUIRE(!node_frees,"node page freed once"); node_frees++; }
+     else extinction("unexpected object free");
+@@ -93,6 +95,7 @@ struct Loom {
+     struct loom_service_pool_table *service_pools;
+     struct loom_service_target_table *service_targets;
+     struct loom_service_node_table *service_nodes;
++    struct loom_service_engine *service_engine;
+     struct loom_request_table service_requests;
+     u32 cq_entries;
+     void *service_fixed;u32 service_fixed_count;
+@@ -131,7 +134,7 @@ int main(int argc,char **argv) {
+     l3[0]=0xdead000|3;
+     REQUIRE(addrspace_private_begin(as),"private pin admitted");
+     struct Loom *l=calloc(1,sizeof(*l));REQUIRE(l,"Loom allocated");
+-    loom_addr=(uintptr_t)l;l->service_as=as;l->service_metadata_pages=7;
++    loom_addr=(uintptr_t)l;l->service_as=as;l->service_metadata_pages=8;
+     l->service_slots=calloc(1,4096);REQUIRE(l->service_slots,"slot page allocated");
+     slot_addr=(uintptr_t)l->service_slots;
+     l->service_pools=calloc(1,sizeof(*l->service_pools));REQUIRE(l->service_pools,"pool table allocated");
+@@ -142,7 +145,9 @@ int main(int argc,char **argv) {
+     node_addr=(uintptr_t)l->service_nodes;
+     l->service_requests.records=calloc(1,4096);REQUIRE(l->service_requests.records,"request page allocated");
+     l->service_requests.capacity=2;l->cq_entries=2;request_addr=(uintptr_t)l->service_requests.records;
+-    l->ring=(void *)1;as->page_count=10;
++    l->service_engine=calloc(1,4096);REQUIRE(l->service_engine,"engine page allocated");
++    engine_addr=(uintptr_t)l->service_engine;
++    l->ring=(void *)1;as->page_count=11;
+     if(order==0) {
+         addrspace_unref(as);
+         REQUIRE(drains==1 && !as_frees && !page_frees,"private pin retains ownerless image");
+@@ -156,6 +161,7 @@ int main(int argc,char **argv) {
+     // No descriptor or table pointer is dereferenced beyond final drop.
+     REQUIRE(as_frees==1,"final descriptor reclaimed exactly once");
+     REQUIRE(page_frees==4,"all four page-table levels reclaimed exactly once");
++    REQUIRE(engine_frees==1,"engine page reclaimed exactly once");
+     REQUIRE(request_frees==1,"request page reclaimed exactly once");
+     REQUIRE(node_frees==1,"node page reclaimed exactly once");
+     REQUIRE(target_frees==1,"target table reclaimed exactly once");
+@@ -178,7 +184,7 @@ def main():
+     assert free>=8*1024**3, f'8 GiB floor: {free/1024**3:.3f} available'
+     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+     out=ROOT/'work/oct5-as-r9/astra-takeover'/('final-reclaim-'+stamp);out.mkdir()
+-    sources={n:(ROOT/n).read_text() for n in ['kernel/addrspace.c','kernel/include/thylacine/addrspace.h','arch/arm64/mmu.c','kernel/loom.c','kernel/loom_service_pool_table.c','kernel/include/thylacine/loom_service_pool_table.h','kernel/include/thylacine/loom_service_pool.h','kernel/include/thylacine/loom_service_slots.h','kernel/include/thylacine/loom_service_abi.h','kernel/loom_service_nodes.c','kernel/include/thylacine/loom_service_nodes.h','kernel/loom_service_slots.c','kernel/loom_service_requests.c','kernel/include/thylacine/loom_service_requests.h','work/oct5-as-r9/final-reclaim-control.py']}
++    sources={n:(ROOT/n).read_text() for n in ['kernel/addrspace.c','kernel/include/thylacine/addrspace.h','arch/arm64/mmu.c','kernel/loom.c','kernel/loom_service_pool_table.c','kernel/include/thylacine/loom_service_pool_table.h','kernel/include/thylacine/loom_service_pool.h','kernel/include/thylacine/loom_service_slots.h','kernel/include/thylacine/loom_service_abi.h','kernel/loom_service_nodes.c','kernel/include/thylacine/loom_service_nodes.h','kernel/loom_service_slots.c','kernel/loom_service_engine.c','kernel/include/thylacine/loom_service_engine.h','kernel/loom_service_requests.c','kernel/include/thylacine/loom_service_requests.h','work/oct5-as-r9/final-reclaim-control.py']}
+     header=sources['kernel/include/thylacine/addrspace.h'];a=header.index('struct AddrSpace {');b=header.index('\n};',a)+3
+     funcs={}
+     names=['clear_page_then_free','l3_walk_and_free','l2_walk_and_free','l1_walk_and_free','proc_pgtable_create','proc_pgtable_destroy']
+@@ -191,9 +197,11 @@ def main():
+     funcs['loom_private_nodes_destroy']=fun(sources['kernel/loom.c'],'loom_private_nodes_destroy')
+     funcs['loom_private_requests_destroy']=fun(sources['kernel/loom.c'],'loom_private_requests_destroy')
+     funcs['loom_private_destroy']=fun(sources['kernel/loom.c'],'loom_private_destroy')
++    funcs['loom_engine_empty']=fun((ROOT/'kernel/loom_service_engine.c').read_text(),'loom_engine_empty')
+     def program(fs):return PRE+'\n'+header[a:b]+'\n'+DOUBLES+'\n'+'\n'.join(fs.values())+'\n'+MAIN
+     control=program(funcs)
+-    variants=[('control',None,None,None,None),
++    variants=[('omit-engine-free','loom_private_destroy','    kfree(l->service_engine);','', 'engine page reclaimed exactly once'),
++      ('control',None,None,None,None),
+       ('omit-private-put','addrspace_private_end','    addrspace_lifetime_put(as);','', 'final descriptor reclaimed exactly once'),
+       ('omit-descriptor-free','addrspace_lifetime_put','    kfree(as);','', 'final descriptor reclaimed exactly once'),
+       ('omit-table-destroy','addrspace_lifetime_put','    proc_pgtable_destroy(as->pgtable_root);','', 'all four page-table levels reclaimed exactly once'),
+@@ -232,5 +240,5 @@ def main():
+     result={'source_head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'source_hashes':{n:hashlib.sha256(s.encode()).hexdigest() for n,s in sources.items()},'free_bytes_before':free,'results':results,'scope':__doc__}
+     (out/'result.json').write_text(json.dumps(result,indent=2)+'\n')
+     print(out)
+-    print('PASS: both drop orders and nine distinct omission mutants; ASan/UBSan, host allocator boundary only')
++    print('PASS: both drop orders and ten distinct omission mutants; ASan/UBSan, host allocator boundary only')
+ if __name__=='__main__':main()
+diff --git a/work/oct5-as-r9/protocol-control.py b/work/oct5-as-r9/protocol-control.py
+index 2a4bc878d..70f420f50 100644
+--- a/work/oct5-as-r9/protocol-control.py
++++ b/work/oct5-as-r9/protocol-control.py
+@@ -44,7 +44,7 @@ struct loom_service_protocol {
+  struct Loom *owner;struct ProcServiceIdentity identity;struct SrvConnectAdmission admission;
+  struct p9_client client;struct p9_client_progress progress;
+  u8 *recv_storage,*send_storage;u32 charged_pages;
+- bool connect_bound,driving,locally_retired;u32 users;
++ bool connect_bound,driving,locally_retired,indexed;u32 users;
+ };
+ static struct AddrSpace a={.pages=10,.budget=500};
+ static struct Loom owner={.magic=LOOM_MAGIC,.service_creator=987,.service_as=&a,.refs=1};
+@@ -170,7 +170,7 @@ MUTANTS=[
+  ('alias-inline','p->recv_storage, msize, p->send_storage, msize);','p->recv_storage, msize, p->client.out_buf_inline, msize);',0,'provided buffers disjoint from client'),
+  ('omit-recv-free','    if (p->recv_storage) kfree(p->recv_storage);','    /* omit receive free */',0,'refund after storage before owner drop'),
+  ('omit-native-release','    devsrv_connect_release(&p->admission);','    /* omit native release */',0,'refund after storage before owner drop'),
+- ('omit-published-guard','if (p->admission.published || p->connect_bound || p->users || p->driving)', 'if (false)',14,'native release outside locks and unpublished'),
++ ('omit-published-guard','if (p->admission.published || p->connect_bound || p->indexed || p->users || p->driving)', 'if (false)',14,'native release outside locks and unpublished'),
+  ('omit-close-recheck','if (closed) { rc = -T_E_CANCELED; goto fail; }','if (closed && false) { rc = -T_E_CANCELED; goto fail; }',13,'refusal preserves output'),
+  ('early-owner-drop','    protocol_refund(l, pages);\n    loom_unref(l); // last access to l or its image','    loom_unref(l);\n    protocol_refund(l, pages); // wrong lifetime order',15,'last Loom drop follows all releases'),
+ ]
+diff --git a/work/oct5-as-r9/slot-owner-control.py b/work/oct5-as-r9/slot-owner-control.py
+index 02b1e765b..d758aa1e6 100644
+--- a/work/oct5-as-r9/slot-owner-control.py
++++ b/work/oct5-as-r9/slot-owner-control.py
+@@ -27,6 +27,7 @@ PRE = r'''
+ #include <thylacine/loom_service_pool_table.h>
+ #include <thylacine/loom_service_nodes.h>
+ #include <thylacine/loom_service_requests.h>
++#include <thylacine/loom_service_engine.h>
+ #include <thylacine/errno.h>
+ #define THYLACINE_DEVSRV_H
+ struct SrvServiceTarget { void *view,*service;u64 generation;u8 name_len;char name[32]; };
+@@ -54,6 +55,7 @@ struct Loom {
+     struct loom_service_pool_table *service_pools;
+     struct loom_service_target_table *service_targets;
+     struct loom_service_node_table *service_nodes;
++    struct loom_service_engine *service_engine;
+     struct loom_request_table service_requests;
+     u32 cq_entries;
+     void *service_fixed;u32 service_fixed_count;
+@@ -68,7 +70,7 @@ struct Loom {
+     char buddy_padding[3000];
+ };
+ struct loom_layout { u32 ring_size; };
+-static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,targets_fault,nodes_fault,requests_fault,alloc_fault,inner_fault;
++static bool service_retire_ready=true,layout_fault,slots_fault,pools_fault,targets_fault,nodes_fault,requests_fault,engine_fault,alloc_fault,inner_fault;
+ static u64 g_loom_destroyed,service_retired_count;
+ static void *allocations[8];
+ static size_t allocation_sizes[8];
+@@ -76,6 +78,7 @@ static int live,allocated,freed,recorded;
+ static u32 ring_charge;
+ static bool loom_private_layout_fault_take(void) { bool b=layout_fault;layout_fault=false;return b; }
+ static bool loom_private_pools_fault_take(void) { bool b=pools_fault;pools_fault=false;return b; }
++static bool loom_private_engine_fault_take(void) { bool b=engine_fault;engine_fault=false;return b; }
+ static bool loom_private_requests_fault_take(void) { bool b=requests_fault;requests_fault=false;return b; }
+ static bool loom_private_nodes_fault_take(void) { bool b=nodes_fault;nodes_fault=false;return b; }
+ static bool loom_private_targets_fault_take(void) { bool b=targets_fault;targets_fault=false;return b; }
+@@ -148,9 +151,10 @@ int main(int argc,char **argv) {
+     if(mode==9 || mode==10)targets_fault=true;
+     if(mode==11 || mode==12)nodes_fault=true;
+     if(mode==19 || mode==20)requests_fault=true;
+-    struct Loom *l=loom_create_private(&p,(mode==6 || mode==10 || mode==12 || mode==20)?3:2,cq,true);
+-    CHECK(!slots_fault && !pools_fault && !targets_fault && !nodes_fault && !requests_fault && !layout_fault,"one-shot faults consumed");
+-    if((mode>=1 && mode<=6) || (mode>=8 && mode<=12) || mode==19 || mode==20 || mode==25) {
++    if(mode==27 || mode==28)engine_fault=true;
++    struct Loom *l=loom_create_private(&p,(mode==6 || mode==10 || mode==12 || mode==20 || mode==28)?3:2,cq,true);
++    CHECK(!slots_fault && !pools_fault && !targets_fault && !nodes_fault && !requests_fault && !engine_fault && !layout_fault,"one-shot faults consumed");
++    if((mode>=1 && mode<=6) || (mode>=8 && mode<=12) || mode==19 || mode==20 || mode==25 || mode==27 || mode==28) {
+         CHECK(!l,"fault refuses publication");
+         CHECK(live==0,"rollback frees slot and pool pages");
+         CHECK(a.pages==10,"refusal restores accounting");
+@@ -158,10 +162,10 @@ int main(int argc,char **argv) {
+         CHECK(!recorded,"refusal publishes no ring charge");
+         puts("PASS refusal");return 0;
+     }
+-    CHECK(l && l->service_slots && l->service_pools && l->service_targets && l->service_nodes && l->service_requests.records && live==6,"owner retains all six allocations");
++    CHECK(l && l->service_slots && l->service_pools && l->service_targets && l->service_nodes && l->service_requests.records && l->service_engine && live==7,"owner retains all seven allocations");
+     CHECK(allocation_sizes[4]==(cq*56<4096?4096:cq*56) && l->service_requests.capacity==cq,"request allocation follows CQ geometry");
+     CHECK(l->service_as==&a && l->service_creator==987,"exact image and identity");
+-    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools))+burrow_backing_pages(sizeof(*l->service_targets))+1+burrow_backing_pages((u64)cq*56),
++    CHECK(l->service_metadata_pages==burrow_backing_pages(sizeof(*l))+1+burrow_backing_pages(sizeof(*l->service_pools))+burrow_backing_pages(sizeof(*l->service_targets))+1+burrow_backing_pages((u64)cq*56)+1,
+           "slot and pool pages charged in metadata");
+     CHECK(a.pages==10+l->service_metadata_pages+2,"complete owner charge");
+     struct loom_service_ref ref;
+@@ -212,7 +216,7 @@ int main(int argc,char **argv) {
+     spin_unlock(&l->lock);
+     loom_private_destroy(l);
+     CHECK(mode!=17 && mode!=18,"invalid node retirement returned");
+-    CHECK(live==0 && freed==6,"retirement frees owner and tables");
++    CHECK(live==0 && freed==7,"retirement frees owner and tables");
+     CHECK(a.pages==10 && a.refs==1 && !a.private_rings,"retirement restores image");
+     CHECK(service_retired_count==1 && g_loom_destroyed==1,"retirement published once");
+     puts("PASS owner");return 0;
+@@ -228,13 +232,17 @@ def main():
+     assert st.f_bavail * st.f_frsize >= 8 * 1024**3
+     out = Path('work/oct5-as-r9/astra-takeover') / ('slot-owner-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+     out.mkdir()
+-    paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h', 'kernel/loom_service_nodes.c', 'kernel/include/thylacine/loom_service_nodes.h', 'kernel/include/thylacine/loom_service_targets.h', 'kernel/loom_service_requests.c', 'kernel/include/thylacine/loom_service_requests.h', 'work/oct5-as-r9/slot-owner-control.py']
++    paths = ['kernel/loom.c', 'kernel/loom_service_pool_table.c', 'kernel/loom_service_pool.c', 'kernel/include/thylacine/loom_service_pool_table.h', 'kernel/include/thylacine/loom_service_pool.h', 'kernel/loom_service_slots.c', 'kernel/include/thylacine/loom_service_slots.h', 'kernel/include/thylacine/loom_service_abi.h', 'kernel/loom_service_nodes.c', 'kernel/include/thylacine/loom_service_nodes.h', 'kernel/include/thylacine/loom_service_targets.h', 'kernel/loom_service_engine.c','kernel/include/thylacine/loom_service_engine.h','kernel/loom_service_requests.c', 'kernel/include/thylacine/loom_service_requests.h', 'work/oct5-as-r9/slot-owner-control.py']
+     sources = {p: Path(p).read_text() for p in paths}
+     funcs = {n: extract.fun(sources['kernel/loom.c'], n) for n in ('loom_create_private', 'loom_exec_latch', 'loom_private_drop_buffer', 'loom_private_targets_destroy', 'loom_private_nodes_destroy', 'loom_private_requests_destroy', 'loom_private_destroy')}
++    funcs['loom_engine_empty']=extract.fun(Path('kernel/loom_service_engine.c').read_text(),'loom_engine_empty')
+     def program(fs):
+         return PRE + '\n' + '\n'.join(fs.values()) + MAIN
+     control = program(funcs)
+-    cases = [('control', None, None, None, list(range(27)), None),
++    cases = [('omit-engine-charge','loom_create_private','+ (u32)burrow_backing_pages(request_bytes) + 1u;','+ (u32)burrow_backing_pages(request_bytes);',[0],'slot and pool pages charged in metadata'),
++        ('omit-engine-unwind','loom_create_private','        kfree(engine);','',[4],'rollback frees slot and pool pages'),
++        ('omit-engine-free','loom_private_destroy','    kfree(l->service_engine);','',[0],'retirement frees owner and tables'),
++        ('control', None, None, None, list(range(29)), None),
+         ('omit-slot-charge', 'loom_create_private', 'burrow_backing_pages(sizeof(struct Loom)) + 1u', 'burrow_backing_pages(sizeof(struct Loom))', [0], 'slot and pool pages charged in metadata'),
+         ('omit-target-charge', 'loom_create_private', '+ (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))', '', [0], 'slot and pool pages charged in metadata'),
+         ('omit-target-unwind', 'loom_create_private', '        kfree(targets);', '', [4], 'rollback frees slot and pool pages'),
+@@ -278,7 +286,7 @@ def main():
+             r = subprocess.run([str(exe.resolve()), str(mode)], capture_output=True, text=True, timeout=15, env={**os.environ, 'ASAN_OPTIONS':'detect_leaks=0', 'UBSAN_OPTIONS':'halt_on_error=1'})
+             text = r.stdout + r.stderr
+             (out / f'{name}-{mode}.log').write_text(text)
+-            expected = want or ('private Loom retained admitted request' if mode==22 else 'private Loom retained request payload' if mode==23 else 'private Loom retained active or invalid node' if mode in (7,17) else 'private Loom retained unowned node' if mode==18 else 'PASS refusal' if mode in (1,2,3,4,5,6,8,9,10,11,12,19,20,25) else 'PASS owner')
++            expected = want or ('private Loom retained admitted request' if mode==22 else 'private Loom retained request payload' if mode==23 else 'private Loom retained active or invalid node' if mode in (7,17) else 'private Loom retained unowned node' if mode==18 else 'PASS refusal' if mode in (1,2,3,4,5,6,8,9,10,11,12,19,20,25,27,28) else 'PASS owner')
+             rc = (12 if want.startswith('private Loom retained') else 11) if want else 12 if mode in (7,17,18,22,23) else 0
+             assert r.returncode == rc and text == expected + '\n', (name, mode, r.returncode, text)
+             results.append(dict(case=name, mode=mode, rc=r.returncode, expected=expected, generated_sha256=hashlib.sha256(src.read_bytes()).hexdigest()))

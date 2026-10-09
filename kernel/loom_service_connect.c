@@ -77,7 +77,7 @@ int loom_private_connect_rollback(struct loom_service_protocol *p) {
     struct Loom *l = p->owner;
     spin_lock(&l->lock);
     struct loom_service_request *r = connect_request(p);
-    if (!p->connect_bound || p->admission.published || p->users || p->driving ||
+    if (!p->connect_bound || p->indexed || p->admission.published || p->users || p->driving ||
         !r || r->phase != LREQ_PREPARED || r->borrows) {
         spin_unlock(&l->lock); return -T_E_BUSY;
     }
@@ -92,7 +92,7 @@ int loom_private_connect_publish(struct loom_service_protocol *p, u64 now) {
     spin_lock(&l->lock);
     struct loom_service_node *n = connect_scope(l,p->scope);
     int rc = !p->connect_bound || p->admission.published || p->users || p->driving ?
-        -T_E_BUSY : l->service_closing ? -T_E_CANCELED :
+        -T_E_BUSY : p->abort_reason ? p->abort_reason : l->service_closing ? -T_E_CANCELED :
         !n || n->state != LOOM_SERVICE_RESERVED ? -T_E_NOENT : 0;
     if (!rc) rc = loom_request_check_admit(&l->service_requests,l->service_slots,
                                            l->service_nodes,p->request,now);
@@ -119,7 +119,7 @@ int loom_private_connect_abort(struct loom_service_protocol *p, s32 reason) {
     struct Loom *l = p->owner;
     spin_lock(&l->lock);
     struct loom_service_node *n = connect_scope(l,p->scope);
-    if (!p->connect_bound || !p->admission.published || !n) {
+    if (!p->connect_bound || !n) {
         spin_unlock(&l->lock); return -T_E_NOENT;
     }
     if (p->locally_retired || p->abort_reason) { spin_unlock(&l->lock); return 1; }
@@ -139,7 +139,7 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
     spin_lock(&l->lock);
     struct loom_service_node *n = connect_scope(l,p->scope);
     struct loom_service_request *r = connect_request(p);
-    if (!p->connect_bound || !p->admission.published || !n || !r) {
+    if (!p->connect_bound || (!p->admission.published && !p->abort_reason) || !n || !r) {
         spin_unlock(&l->lock); return -T_E_NOENT;
     }
     if (p->driving) { spin_unlock(&l->lock); return -T_E_BUSY; }
@@ -194,6 +194,9 @@ int loom_private_connect_step(struct loom_service_protocol *p, u64 now) {
     srvconn_teardown(p->admission.conn);
     p9_client_progress_abort(&p->client);
     spin_lock(&l->lock);
+    if (r->phase == LREQ_PREPARED &&
+        loom_request_reject(&l->service_requests,l->service_slots,p->request,reason))
+        extinction("CONNECT lost rejected admission obligation");
     if (r->phase == LREQ_ACTIVE &&
         loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,p->request,reason))
         extinction("CONNECT lost cancellation obligation");
@@ -210,7 +213,7 @@ int loom_private_connect_release(struct loom_service_protocol *p) {
     spin_lock(&l->lock);
     struct loom_service_node *n=connect_scope(l,p->scope);
     struct loom_service_request *r=connect_request(p);
-    if (!p->connect_bound || !p->locally_retired || p->driving || p->users ||
+    if (!p->connect_bound || p->indexed || !p->locally_retired || p->driving || p->users ||
         !n || n->state != LOOM_SERVICE_RETIRED || !r || r->phase != LREQ_DELIVERED || r->borrows) {
         spin_unlock(&l->lock); return -T_E_BUSY;
     }

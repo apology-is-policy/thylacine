@@ -13,9 +13,16 @@ cfgs:
   - "loom_service_buggy_cqfull.cfg: CqBounded"
   - "loom_service_buggy_refund.cfg: CreditsRetained"
   - "loom_service_buggy_peerwait.cfg: RetirementProgress"
+  - "loom_service_index.cfg: 89 states; installation and entry lifetime"
+  - "loom_service_index_buggy_installer.cfg: InstallerPinned"
+  - "loom_service_index_buggy_expose.cfg: NoHalfPublished"
+  - "loom_service_index_buggy_late.cfg: NoLatePublication"
+  - "loom_service_index_buggy_pin.cfg: EntryRetainsStorage"
+  - "loom_service_index_buggy_terminal.cfg: TerminalRetained"
+  - "loom_service_index_buggy_stale.cfg: NoStaleEntry"
 gate: "private-service admission, cancellation, slot reuse or retirement changes"
 created: 2026-10-04
-updated: 2026-10-04
+updated: 2026-10-09
 ---
 One slot, two incarnations, connect/data requests and a one-entry CQ distinguish
 terminal-result commit from delivery. Local borrows/pins and the peer endpoint
@@ -30,3 +37,10 @@ State directories are temporary. Logs can be retained through --logs.
 Blind to actual protocol bytes, usercopy, authority/DAC checks, locks and C
 pointer lifetimes. AS-0 is model-before-runtime: the action-to-code binding is
 owed by AS-1/2 rather than asserted from abstract success.
+
+The index companion refines Connect's abstract atomic action into charged
+preparation, indexed installation, publication and unlocked accept wake.
+`tools/check-loom-service-index.py --logs <fresh-dir>` checks89 states and six
+named counterexamples. `specs/SPEC-TO-CODE.md` records exact source bindings to
+CONNECT/index/request collection. Still blind to weak memory, real allocation,
+wire/parser safety, whole-ring close queue and multi-scope scheduling fairness.

@@ -1,0 +1,38 @@
+PASS omit-engine-charge 0 slot and pool pages charged in metadata
+PASS omit-engine-unwind 4 rollback frees slot and pool pages
+PASS omit-engine-free 0 retirement frees owner and tables
+PASS control 0 PASS owner
+PASS control 1 PASS refusal
+PASS control 2 PASS refusal
+PASS control 3 PASS refusal
+PASS control 4 PASS refusal
+PASS control 5 PASS refusal
+PASS control 6 PASS refusal
+PASS control 7 private Loom retained active or invalid node
+PASS control 8 PASS refusal
+PASS control 9 PASS refusal
+PASS control 10 PASS refusal
+PASS control 11 PASS refusal
+PASS control 12 PASS refusal
+PASS control 13 PASS owner
+PASS control 14 PASS owner
+PASS control 15 PASS owner
+PASS control 16 PASS owner
+PASS control 17 private Loom retained active or invalid node
+PASS control 18 private Loom retained unowned node
+PASS control 19 PASS refusal
+PASS control 20 PASS refusal
+PASS control 21 PASS owner
+PASS control 22 private Loom retained admitted request
+PASS control 23 private Loom retained request payload
+PASS control 24 PASS owner
+PASS control 25 PASS refusal
+PASS control 26 PASS owner
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/work/oct5-as-r9/slot-owner-control.py", line 300, in <module>
+    main()
+    ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/work/oct5-as-r9/slot-owner-control.py", line 291, in main
+    assert r.returncode == rc and text == expected + '\n', (name, mode, r.returncode, text)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('control', 27, 0, 'PASS refusal\n')

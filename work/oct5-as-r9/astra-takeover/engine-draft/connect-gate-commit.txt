@@ -1,0 +1,8 @@
+Record full Mac qualification for CONNECT retirement
+
+Retain raw serial/harness evidence and source-matched inputs for all 50
+Mac boots at b2b263e3f: default SMP1/4/8 and UBSan SMP4/8, ten each.
+Each boot verifies the 1849-test suite, real internal CONNECT fixture,
+D7 overlap and twenty distinct login/logout cycles. Record the actual
+floor and exclusions without extending this result to the owner-index
+draft or claiming an independent audit.

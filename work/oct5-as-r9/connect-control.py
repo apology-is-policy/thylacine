@@ -17,7 +17,7 @@ struct loom_service_protocol {
  struct Loom *owner;struct SrvConnectAdmission admission;struct p9_client client;
  struct {struct {u32 phase;} handshake;} progress;
  struct loom_service_ref scope;struct loom_request_ref request;u64 connect_deadline;
- s32 abort_reason;u32 users,failure_phase;bool connect_bound,driving,locally_retired;
+ s32 abort_reason;u32 users,failure_phase;bool connect_bound,driving,locally_retired,indexed;
 };
 static struct loom_service_protocol *active;
 static struct SrvConn cn;

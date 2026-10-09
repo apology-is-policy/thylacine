@@ -1,0 +1,11 @@
+PASS control PASS request terminal obligations
+PASS reject-success rejected admission validates identity and negative result
+PASS reject-borrow rejected admission waits for local borrow
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 98, in <module>
+    main()
+    ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/engine-draft/host-tree/tools/test-loom-service-requests.py", line 64, in main
+    assert original.count(old) == 1, (name, original.count(old))
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ('reject-pin', 2)

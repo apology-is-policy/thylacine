@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -124,7 +124,7 @@
+     spin_lock(&l->lock);
+     bool closed = l->service_closing;
+     spin_unlock(&l->lock);
+-    if (closed) { rc = -T_E_CANCELED; goto fail; }
++    if (closed && false) { rc = -T_E_CANCELED; goto fail; }
+     *out = p;
+     return 0;
+ fail:

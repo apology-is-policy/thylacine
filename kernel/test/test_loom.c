@@ -292,8 +292,10 @@ static const char *loom_slot_owner_fixture(void) {
              "private owner owns zeroed node storage");
     SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
              (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)) +
-             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 2u,
-             "slot pool target and node pages included in metadata charge");
+             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 3u,
+             "slot pool target node request and index pages included in metadata charge");
+    SO_CHECK(l->service_engine && loom_engine_empty(l->service_engine),
+             "private owner owns a zeroed protocol index page");
     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
              (u32)burrow_backing_pages(l->ring_size) + 1u,
              "all base storage charged before owner publication");
@@ -2244,7 +2246,103 @@ done:
     return error;
 }
 
-static const char *loom_protocol_fixture(bool connect) {
+// Native ring index keeps two real peers independent and pins entry lifetime
+// through terminal delivery, abort and CQ-independent whole-owner discard.
+static const char *loom_engine_cases(struct Loom *l, struct Proc *creator,
+                                     struct Proc *poster, struct SrvRegistry *reg,
+                                     struct loom_service_ref target[2]) {
+    const char *error=NULL;
+    struct loom_service_ref scope[2]={{0},{0}};
+    struct loom_service_protocol *p[2]={NULL,NULL},*held[2]={NULL,NULL};
+    struct SrvConn *server[2]={NULL,NULL};
+    struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    u32 pages=creator->as->page_count;
+#define EI(c,m) do { if (!(c)) { error=m; goto done; } } while(0)
+    // An expired indexed publication retains its negative terminal obligation.
+    EI(!loom_private_node_prepare(l,creator,&reserve,&scope[0]) &&
+       !loom_private_node_publish(l,scope[0]),"index expired scope reservation");
+    EI(!loom_private_connect_prepare(l,scope[0],target[0],11,100,1,&p[0]),"index expired prepare");
+    EI(!loom_engine_adopt(p[0],100),"index adopts expired publication as owned rejection");p[0]=NULL;
+    EI(!loom_engine_get(l,scope[0],&held[0]) && held[0]->abort_reason==-T_E_TIMEDOUT &&
+       !held[0]->admission.published,"index failed admission captured without publication");
+    EI(loom_engine_visit(l,101)==1 && held[0]->locally_retired &&
+       l->service_requests.records[held[0]->request.index].phase==LREQ_DELIVERED,
+       "index rejected request is driven and delivered");
+    EI(loom_engine_collect(l,scope[0])==-T_E_BUSY,"index entry pin blocks rejected storage free");
+    EI(!loom_engine_put(l,scope[0],held[0]),"index rejected entry release");held[0]=NULL;
+    EI(!loom_engine_collect(l,scope[0]) && !loom_private_connect_reap(l,scope[0]),
+       "index rejected scope settles");scope[0]=(struct loom_service_ref){0};
+    h->cq_head=l->cq_tail;
+    EI(creator->as->page_count==pages && loom_engine_empty(l->service_engine),
+       "index rejection refunds full protocol allocation");
+    for (u32 i=0;i<2;++i) {
+        EI(!loom_private_node_prepare(l,creator,&reserve,&scope[i]) &&
+           !loom_private_node_publish(l,scope[i]),"index peer destination");
+        EI(!loom_private_connect_prepare(l,scope[i],target[i],77+i,1000,1,&p[i]),"index peer prepare");
+        EI(!loom_engine_adopt(p[i],2),"index publication adopts owner");p[i]=NULL;
+        EI(!loom_engine_get(l,scope[i],&held[i]),"index exact peer lookup");
+        struct SrvService *svc=srv_lookup_in(reg,i?"large":"small",5);
+        EI(srv_backlog_depth(svc)==1,"index native backlog publication");
+        server[i]=srv_accept_blocking(svc,poster->stripes);
+        EI(server[i]==held[i]->admission.conn,"index real accepted peer");
+    }
+    EI(!lc_reply(server[1],P9_TVERSION,P9_NOTAG) && !lc_reply(server[1],P9_TATTACH,0),
+       "index only second peer supplies handshake replies");
+    for (u32 i=0;i<64 && l->service_nodes->nodes[scope[1].slot].state!=LOOM_SERVICE_READY;++i)
+        EI(loom_engine_visit(l,3+i)==1,"index round-robin visit");
+    EI(l->service_nodes->nodes[scope[0].slot].state==LOOM_SERVICE_VERSION &&
+       l->service_nodes->nodes[scope[1].slot].state==LOOM_SERVICE_READY,
+       "index stalled peer does not starve independent handshake");
+    EI(l->service_requests.records[held[1]->request.index].phase==LREQ_DELIVERED,
+       "index successful terminal delivered once");
+    EI(!loom_post_cqe(l,123,0,0),"index fills remaining CQ slot");
+    EI(!loom_engine_abort(l,scope[0],-T_E_CANCELED) && !loom_engine_abort(l,scope[1],-T_E_CANCELED),
+       "index abort independent of CQ space");
+    for (u32 i=0;i<4;++i) (void)loom_engine_visit(l,100);
+    EI(held[0]->locally_retired && held[1]->locally_retired &&
+       l->service_requests.records[held[0]->request.index].phase==LREQ_TERMINAL &&
+       l->service_requests.records[held[1]->request.index].phase==LREQ_DELIVERED,
+       "index local retirement with pending cancellation and earlier success");
+    loom_exec_latch(l);
+    EI(loom_engine_discard_closed(l)==-T_E_BUSY && !l->service_requests.detached,
+       "index consumer remains attached while lookup entries remain");
+    for (u32 i=0;i<2;++i) { EI(!loom_engine_put(l,scope[i],held[i]),"index final entry put");held[i]=NULL; }
+    u64 freed=srvconn_total_freed();
+    EI(!loom_engine_discard_closed(l) && l->service_requests.detached &&
+       loom_engine_empty(l->service_engine) && !l->service_requests.occupied,
+       "index close discards CQ-full terminal after actual local quiescence");
+    EI(creator->as->page_count==pages && srvconn_total_freed()==freed,
+       "index releases charged protocol while both server endpoints survive");
+    for (u32 i=0;i<2;++i) {
+        srvconn_unref(server[i]);server[i]=NULL;
+        EI(!loom_private_connect_reap(l,scope[i]),"index retired metadata reaps");
+        struct loom_service_protocol *absent=NULL;
+        EI(loom_engine_get(l,scope[i],&absent)==-T_E_NOENT && !absent,"index stale lookup cannot recover freed owner");
+        scope[i]=(struct loom_service_ref){0};
+    }
+    EI(srvconn_total_freed()==freed+2,"index native credits settle at last endpoints");
+done:
+    for (u32 i=0;i<2;++i) {
+        if (held[i]) (void)loom_engine_put(l,scope[i],held[i]);
+        if (p[i]) (void)loom_private_connect_rollback(p[i]);
+    }
+    loom_exec_latch(l);
+    for (u32 i=0;i<2;++i) if (scope[i].incarnation) (void)loom_engine_abort(l,scope[i],-T_E_CANCELED);
+    for (u32 i=0;i<4;++i) (void)loom_engine_visit(l,1001);
+    (void)loom_engine_discard_closed(l);
+    for (u32 i=0;i<2;++i) {
+        if (server[i]) srvconn_unref(server[i]);
+        if (scope[i].incarnation) {
+            (void)loom_private_connect_reap(l,scope[i]);
+            (void)loom_private_node_reap_unused(l,scope[i]);
+        }
+    }
+#undef EI
+    return error;
+}
+
+static const char *loom_protocol_fixture(u32 kind) {
     const char *error = NULL;
     struct Proc *p = test_proc_make(), *poster = test_proc_make();
     struct SrvRegistry *reg = NULL;
@@ -2280,6 +2378,15 @@ static const char *loom_protocol_fixture(bool connect) {
     int fd = handle_alloc(p,KOBJ_SPOOR,RIGHT_READ,root);
     if (fd < 0) spoor_clunk(root);
     PO(fd>=0,"protocol navigation descriptor");
+    if (kind==2) {
+        u32 before=p->as->page_count;
+        loom_private_engine_fault_arm_for_test();
+        struct Loom *failed=loom_create_private(p,2,2,true);
+        if (failed) { ++goal; loom_unref(failed); }
+        PO(!failed && !loom_private_engine_fault_armed_for_test() &&
+           p->as->page_count==before && !p->as->private_rings,
+           "protocol index allocation failure unwinds every charged owner");
+    }
     l=loom_create_private(p,2,2,true);
     if (l) ++goal;
     PO(l,"protocol private owner");
@@ -2291,7 +2398,8 @@ static const char *loom_protocol_fixture(bool connect) {
         PO(!loom_private_target_prepare(l,p,&in,&refs[n]),"protocol target prepare");
         PO(!loom_private_target_publish(l,refs[n]),"protocol target publish");
     }
-    if (connect) { error=loom_connect_cases(l,p,poster,reg,refs); goto done; }
+    if (kind==1) { error=loom_connect_cases(l,p,poster,reg,refs); goto done; }
+    if (kind==2) { error=loom_engine_cases(l,p,poster,reg,refs); goto done; }
     u32 owner_pages = p->as->page_count;
     u64 freed = srvconn_total_freed();
     loom_private_protocol_fault_arm_for_test(1);
@@ -2396,5 +2504,11 @@ void test_loom_private_protocol(void) {
 void test_loom_private_connect(void);
 void test_loom_private_connect(void) {
     const char *error=loom_protocol_fixture(true);
+    TEST_ASSERT(!error,error);
+}
+
+void test_loom_private_engine(void);
+void test_loom_private_engine(void) {
+    const char *error=loom_protocol_fixture(2);
     TEST_ASSERT(!error,error);
 }

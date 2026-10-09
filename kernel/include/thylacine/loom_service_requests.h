@@ -32,6 +32,10 @@ int loom_request_prepare(struct loom_request_table *, struct loom_slot_table *,
 // Caller must hold the SAME lock continuously from check through admit.
 int loom_request_check_admit(struct loom_request_table *, struct loom_slot_table *,
                              struct loom_service_node_table *, struct loom_request_ref, u64 now);
+// Negative completion for a reserved operation whose native admission failed.
+// No external effects or parser borrows may have escaped; retain CQ ownership.
+int loom_request_reject(struct loom_request_table *, struct loom_slot_table *,
+                        struct loom_request_ref, s32 reason);
 int loom_request_admit(struct loom_request_table *, struct loom_slot_table *,
                        struct loom_service_node_table *, struct loom_request_ref, u64 now);
 int loom_request_rollback(struct loom_request_table *, struct loom_slot_table *, struct loom_request_ref);

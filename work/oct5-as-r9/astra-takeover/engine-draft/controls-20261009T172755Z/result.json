@@ -1,0 +1,153 @@
+{
+  "hashes": {
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_connect.c": "3c737a4f8b0dd6f4837663303f422d320508812d37df401c513929504a067e47",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_engine.c": "42e598aa0a18da82cd929cd79fc2edd995ef01838841b52618e9b202935768f1",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/loom_service_requests.c": "acffb39641d25778b5c7f8b69ef6de275d77cb4e019b9969b773a8e4b6d20d81",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/include/thylacine/loom_service_requests.h": "d29e35fd846ea4933d58a51e603d3b1aead174656d31c8519ac362b9105b2d47",
+    "work/oct5-as-r9/astra-takeover/engine-draft/kernel/include/thylacine/loom_service_engine.h": "17561a3cc55d2215d9d2c23cb9d381c46f82b6d2b103f3d6466d6bca1326546b",
+    "work/oct5-as-r9/astra-takeover/engine-draft/control.py": "81a0c5bfa76a05b49dcfc2ba5548eb073dc6066f103de3f49c746cb2278537f4"
+  },
+  "controls": [
+    {
+      "case": "control",
+      "mode": 0,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 1,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 2,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 3,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 4,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 5,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 6,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 7,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 8,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 9,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "control",
+      "mode": 10,
+      "expected": null,
+      "rc": 0,
+      "source_hash": "1cb32c4cadb90190e6a8429e090a0870d292177b039e463989f5a31aa6d39a9a"
+    },
+    {
+      "case": "ignore-unindexed-constructor",
+      "mode": 10,
+      "expected": "unindexed constructor prevents consumer detach",
+      "rc": 11,
+      "source_hash": "abd42d03fcf197ca216bd91ecbb7a5d669bf1e65608b55da41585a018305d7de"
+    },
+    {
+      "case": "omit-indexed",
+      "mode": 0,
+      "expected": "native publication has indexed lifetime",
+      "rc": 11,
+      "source_hash": "d07108e839cc80e94cbefca489d51c16da1ade19f30e7972144affad34578b26"
+    },
+    {
+      "case": "omit-installer-pin",
+      "mode": 0,
+      "expected": "installation pin covers native publication",
+      "rc": 11,
+      "source_hash": "6331534a2f11749a11bd522daa23f2eeea30e2bf0529be41277461a520639c2d"
+    },
+    {
+      "case": "expose-installing",
+      "mode": 0,
+      "expected": "accept wake retains installing lifetime",
+      "rc": 11,
+      "source_hash": "01937760fd280b7df0b8e19e69f060a7af15a16a5fe04c014f6cd1e061a54047"
+    },
+    {
+      "case": "stale-lookup",
+      "mode": 0,
+      "expected": "stale lookup leaves output unchanged",
+      "rc": 11,
+      "source_hash": "464fa23461abb229d6ced3907d1ab1627d176cf71194249f8585646f49f3ad7e"
+    },
+    {
+      "case": "drop-pinned-owner",
+      "mode": 0,
+      "expected": "external entry prevents storage release",
+      "rc": 11,
+      "source_hash": "633b2b798f273ec25dfc297a92205bfa58332219b761810b3bdfdc09b077f976"
+    },
+    {
+      "case": "detach-live-entry",
+      "mode": 5,
+      "expected": "live entry prevents consumer detach",
+      "rc": 11,
+      "source_hash": "0d380c0ab070e4a42a0c111ed7c42b38dcaf4dc4b485618ea802e8266d756212"
+    },
+    {
+      "case": "forget-round-robin",
+      "mode": 6,
+      "expected": "stalled first peer does not starve second",
+      "rc": 11,
+      "source_hash": "bf2fb5883dc6cba60d44b33477a138c8761c82eb428ae367f2c0de13564d5f08"
+    },
+    {
+      "case": "collect-undelivered",
+      "mode": 8,
+      "expected": "engine lost final CONNECT ownership",
+      "rc": 11,
+      "source_hash": "5727f8fcc8e62ce8df822b41ca42352d7873aa3002164e5ee20e9d2f9f6429da"
+    }
+  ],
+  "limits": "actual draft engine/connect/requests/slots/nodes/CQ; checked boundary doubles, deterministic interleavings; not native qualification"
+}

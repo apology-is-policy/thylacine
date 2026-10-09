@@ -15,7 +15,9 @@ int loom_private_connect_rollback(struct loom_service_protocol *);
 // the owner exclusively through publish (including its unlocked accept wake).
 // A failure leaves PREPARED ownership for rollback; no bytes have been sent.
 int loom_private_connect_publish(struct loom_service_protocol *, u64 now);
-// After publication, caller keeps storage alive across ALL concurrent entries
+// An indexed installer may also accept abort before publication; it must then
+// drive rejection to a terminal CQE and retirement, not roll back that obligation.
+// Caller keeps storage alive across ALL concurrent entries
 // and excludes new entry before final release. No raw pointer is a reference.
 // Abort may race step. At most one step driver; returns BUSY for a second one.
 // This checkpoint permits ONLY the handshake: no external client/RPC/fid/buffer
