@@ -55,15 +55,20 @@ int loom_request_prepare(struct loom_request_table *t, struct loom_slot_table *s
     }
     return -T_E_NOSPC;
 }
-int loom_request_admit(struct loom_request_table *t, struct loom_slot_table *s,
+int loom_request_check_admit(struct loom_request_table *t, struct loom_slot_table *s,
                        struct loom_service_node_table *n, struct loom_request_ref ref, u64 now) {
     struct loom_service_request *r = request_exact(t,ref);
     if (!r) return -T_E_NOENT;
     if (r->phase != LREQ_PREPARED) return -T_E_BUSY;
     if (t->detached || !request_scope_open(s,n,r->scope)) return -T_E_CANCELED;
     if (r->deadline && r->deadline <= now) return -T_E_TIMEDOUT;
-    r->phase = LREQ_ACTIVE;
     return 0;
+}
+int loom_request_admit(struct loom_request_table *t, struct loom_slot_table *s,
+                       struct loom_service_node_table *n, struct loom_request_ref ref, u64 now) {
+    int rc = loom_request_check_admit(t,s,n,ref,now);
+    if (!rc) request_exact(t,ref)->phase = LREQ_ACTIVE;
+    return rc;
 }
 static int request_remove(struct loom_request_table *t, struct loom_slot_table *s,
                            struct loom_request_ref ref, u32 phase) {

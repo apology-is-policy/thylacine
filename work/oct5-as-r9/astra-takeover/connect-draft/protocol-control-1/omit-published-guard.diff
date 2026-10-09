@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -52,7 +52,7 @@
+ 
+ int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
+     if (!p || !p->owner) return -T_E_INVAL;
+-    if (p->admission.published || p->connect_bound || p->users || p->driving)
++    if (false)
+         return -T_E_BUSY;
+     protocol_destroy(p);
+     return 0;

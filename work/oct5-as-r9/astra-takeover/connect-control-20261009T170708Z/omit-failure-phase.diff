@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -163,7 +163,7 @@
+         extinction("CONNECT lost parser borrow");
+     if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);
+     if (rc < 0) {
+-        p->failure_phase=attempted_phase;
++        (void)attempted_phase;
+         connect_latch(p,n,rc == -T_E_TIMEDOUT ? rc : -T_E_IO);
+     }
+     if (!p->abort_reason) {

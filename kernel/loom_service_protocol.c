@@ -47,11 +47,7 @@ static void protocol_refund(struct Loom *l, u32 pages) {
     spin_unlock(&as->lock);
 }
 
-int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
-    if (!p || !p->owner) return -T_E_INVAL;
-    // This primitive cannot certify retirement of an admitted scope. In
-    // particular, a transport abort alone does not end external parser borrows.
-    if (p->admission.published) return -T_E_BUSY;
+static void protocol_destroy(struct loom_service_protocol *p) {
     struct Loom *l = p->owner;
     u32 pages = p->charged_pages;
     p9_client_destroy(&p->client);
@@ -61,6 +57,20 @@ int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
     kfree(p);
     protocol_refund(l, pages);
     loom_unref(l); // last access to l or its image
+}
+
+int loom_private_protocol_release_unused(struct loom_service_protocol *p) {
+    if (!p || !p->owner) return -T_E_INVAL;
+    if (p->admission.published || p->connect_bound || p->users || p->driving)
+        return -T_E_BUSY;
+    protocol_destroy(p);
+    return 0;
+}
+int loom_private_protocol_release_retired(struct loom_service_protocol *p) {
+    if (!p || !p->owner) return -T_E_INVAL;
+    if (!p->locally_retired || p->connect_bound || p->users || p->driving)
+        return -T_E_BUSY;
+    protocol_destroy(p);
     return 0;
 }
 

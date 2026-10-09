@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -190,7 +190,7 @@
+         extinction("CONNECT lost cancellation obligation");
+     // A concurrent abort caller may still hold the transport during teardown.
+     // Keep ABORTING until a later visit observes it gone; never free under it.
+-    if (!p->users) { p->locally_retired=true; n->state=LOOM_SERVICE_RETIRED; }
++    if (true) { p->locally_retired=true; n->state=LOOM_SERVICE_RETIRED; }
+     p->driving=false;
+     spin_unlock(&l->lock);
+     return reason;

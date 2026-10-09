@@ -1,4 +1,4 @@
-#include <thylacine/loom_service_protocol.h>
+#include <thylacine/loom_service_connect.h>
 #include <thylacine/srvconn.h>
 // Loom-2a tests -- the KObj_Loom ring substrate.
 //
@@ -2114,7 +2114,137 @@ void test_loom_private_targets(void) {
 // publication, request binding, handshake progress or retirement of active work.
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
-static const char *loom_protocol_fixture(void) {
+// Real admission and real preallocated handshake. The canned responder only
+// supplies wire replies; READY, request completion and retirement use production
+// code. CQ backpressure must preserve both success and cancelled obligations.
+int canonical_responder(void *, const u8 *, size_t, u8 *, size_t);
+static int lc_reply(struct SrvConn *cn, u8 type, u16 tag) {
+    u8 req[7]={7,0,0,0,type,(u8)tag,(u8)(tag>>8)}, resp[64];
+    int n=canonical_responder(NULL,req,sizeof(req),resp,sizeof(resp));
+    return n>0 && srvconn_server_send(cn,resp,n)==n ? 0 : -1;
+}
+static const char *loom_connect_cases(struct Loom *l, struct Proc *creator,
+                                      struct Proc *poster, struct SrvRegistry *reg,
+                                      struct loom_service_ref targets[2]) {
+    const char *error=NULL;
+    struct loom_service_protocol *p=NULL, *duplicate=NULL;
+    struct SrvConn *server=NULL;
+    struct loom_service_ref scope={0};
+    struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+    u32 pages=creator->as->page_count;
+#define LC(c,m) do { if (!(c)) { error=m; goto done; } } while(0)
+    // Success in both classes; cancellation, timeout and last-owner close.
+    for (u32 mode=0;mode<6;++mode) {
+        LC(!loom_private_node_prepare(l,creator,&reserve,&scope) &&
+           !loom_private_node_publish(l,scope),"CONNECT destination reservation");
+        if (!mode) {
+            loom_private_protocol_fault_arm_for_test(1);
+            LC(loom_private_connect_prepare(l,scope,targets[0],77,1000,1,&p)==-T_E_NOMEM && !p &&
+               !l->service_requests.occupied && !l->service_slots->slots[scope.slot].pins &&
+               creator->as->page_count==pages,"CONNECT failed allocation releases request and both pins");
+            LC(!loom_private_connect_prepare(l,scope,targets[0],77,1000,1,&p),"CONNECT expired publisher prepare");
+            LC(loom_private_connect_publish(p,1000)==-T_E_TIMEDOUT && !p->admission.published &&
+               !p->admission.conn->c2s.count,"CONNECT expired publisher has no peer effects");
+            LC(!loom_private_connect_rollback(p),"CONNECT expired publisher rollback");p=NULL;
+        }
+        LC(!loom_private_connect_prepare(l,scope,targets[mode==1],77,1000,1,&p),"CONNECT bound prepare");
+        LC(l->service_slots->slots[scope.slot].pins==2 && l->service_requests.occupied==1,
+           "CONNECT request and protocol independently retain destination");
+        LC(loom_private_protocol_release_unused(p)==-T_E_BUSY,"CONNECT bound owner cannot bypass cleanup");
+        LC(loom_private_connect_prepare(l,scope,targets[0],88,1000,1,&duplicate)==-T_E_BUSY && !duplicate,
+           "CONNECT duplicate destination refused");
+        LC(!loom_private_connect_publish(p,2),"CONNECT locked admission publishes");
+        struct SrvService *svc=srv_lookup_in(reg,mode==1?"large":"small",5);
+        LC(srv_backlog_depth(svc)==1 && !p->admission.conn->c2s.count &&
+           l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_ADMITTED,
+           "CONNECT published before first byte with reserved terminal");
+        server=srv_accept_blocking(svc,poster->stripes);
+        LC(server==p->admission.conn,"CONNECT native server endpoint accepted");
+        if (mode<2) {
+            LC(!lc_reply(server,P9_TVERSION,P9_NOTAG) && !lc_reply(server,P9_TATTACH,0),
+               "CONNECT handshake wire replies");
+            int rc=0;
+            for (u32 visit=0;visit<32 && !rc;++visit) rc=loom_private_connect_step(p,3+visit);
+            LC(rc==1 && p->progress.handshake.phase==P9_HS_READY &&
+               l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_READY,
+               "CONNECT actual version and attach establish READY");
+            LC(loom_private_connect_step(p,1001)==1 && !p->abort_reason,
+               "CONNECT deadline ends after committed success");
+        }
+        if (mode==4) {
+            // Real Rlerror during version negotiation; ABI maps protocol failure
+            // to EIO while retaining the attempted handshake phase.
+            u8 denied[11]={11,0,0,0,P9_RLERROR,255,255,T_E_ACCES,0,0,0};
+            LC(srvconn_server_send(server,denied,sizeof(denied))==(long)sizeof(denied),
+               "CONNECT stages protocol error");
+            int rc=0;
+            for (u32 visit=0;visit<32 && !rc;++visit) rc=loom_private_connect_step(p,3+visit);
+            LC(rc==-T_E_IO && p->locally_retired && p->failure_phase==P9_HS_VERSION_RECV,
+               "CONNECT protocol failure records version phase and retires");
+        } else if (mode==3) {
+            LC(loom_private_connect_step(p,1000)==-T_E_TIMEDOUT && p->locally_retired,
+               "CONNECT deadline retires incomplete handshake");
+        } else {
+            if (mode==5) loom_exec_latch(l);
+            else {
+                LC(!loom_private_connect_abort(p,-T_E_CANCELED) && !p->locally_retired &&
+                   l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_ABORTING,
+                   "CONNECT abort acknowledgement is not local retirement");
+                LC(loom_private_connect_release(p)==-T_E_BUSY,"CONNECT refuses early protocol free");
+                LC(loom_private_connect_abort(p,-T_E_IO)==1 && p->abort_reason==-T_E_CANCELED,
+                   "CONNECT preserves first abort reason");
+            }
+            LC(loom_private_connect_step(p,10)==-T_E_CANCELED && p->locally_retired &&
+               l->service_nodes->nodes[scope.slot].state==LOOM_SERVICE_RETIRED,
+               "CONNECT cursor quiescence establishes local retirement");
+        }
+        struct loom_service_request *r=&l->service_requests.records[p->request.index];
+        s32 expected=mode<2?(s32)scope.slot:mode==3?-T_E_TIMEDOUT:mode==4?-T_E_IO:-T_E_CANCELED;
+        LC(r->phase==LREQ_TERMINAL && r->result==expected && !r->borrows,
+           "CONNECT terminal success or cancellation immutable after retirement");
+        // Fill the two-slot CQ with ordinary prior scalar completions.
+        LC(!loom_post_cqe(l,1,0,0) && !loom_post_cqe(l,2,0,0),"CONNECT prior CQ fill");
+        LC(loom_private_post_terminal(l,p->request)==-T_E_AGAIN && r->phase==LREQ_TERMINAL &&
+           loom_private_connect_release(p)==-T_E_BUSY,"CONNECT full CQ retains terminal and protocol owner");
+        h->cq_head=l->cq_tail;
+        u32 at=l->cq_tail & (l->cq_entries-1);
+        LC(!loom_private_post_terminal(l,p->request) && cq[at].user_data==77 && cq[at].result==expected,
+           "CONNECT retained terminal posts exact result");
+        LC(loom_private_connect_reap(l,scope)==-T_E_BUSY,"CONNECT retained protocol prevents scope reap");
+        u64 freed=srvconn_total_freed();
+        LC(!loom_private_connect_release(p),"CONNECT retired owner release");p=NULL;
+        LC(creator->as->page_count==pages && !l->service_requests.occupied &&
+           srvconn_total_freed()==freed,"CONNECT local storage refunded while server retains native endpoint");
+        srvconn_unref(server);server=NULL;
+        LC(srvconn_total_freed()==freed+1,"CONNECT last server endpoint releases native connection");
+        LC(!loom_private_connect_reap(l,scope) && loom_private_connect_reap(l,scope)==-T_E_NOENT,
+           "CONNECT exact retired scope reaps once");scope=(struct loom_service_ref){0};
+        h->cq_head=l->cq_tail;
+    }
+done:
+    loom_private_protocol_fault_arm_for_test(0);
+    if (p) {
+        if (!p->admission.published) (void)loom_private_connect_rollback(p);
+        else {
+            (void)loom_private_connect_abort(p,-T_E_CANCELED);
+            (void)loom_private_connect_step(p,0);
+            h->cq_head=l->cq_tail;
+            (void)loom_private_post_terminal(l,p->request);
+            (void)loom_private_connect_release(p);
+        }
+    }
+    if (server) srvconn_unref(server);
+    if (scope.incarnation) {
+        (void)loom_private_connect_reap(l,scope);
+        (void)loom_private_node_reap_unused(l,scope);
+    }
+#undef LC
+    return error;
+}
+
+static const char *loom_protocol_fixture(bool connect) {
     const char *error = NULL;
     struct Proc *p = test_proc_make(), *poster = test_proc_make();
     struct SrvRegistry *reg = NULL;
@@ -2161,6 +2291,7 @@ static const char *loom_protocol_fixture(void) {
         PO(!loom_private_target_prepare(l,p,&in,&refs[n]),"protocol target prepare");
         PO(!loom_private_target_publish(l,refs[n]),"protocol target publish");
     }
+    if (connect) { error=loom_connect_cases(l,p,poster,reg,refs); goto done; }
     u32 owner_pages = p->as->page_count;
     u64 freed = srvconn_total_freed();
     loom_private_protocol_fault_arm_for_test(1);
@@ -2258,6 +2389,12 @@ done:
 }
 void test_loom_private_protocol(void);
 void test_loom_private_protocol(void) {
-    const char *error=loom_protocol_fixture();
+    const char *error=loom_protocol_fixture(false);
+    TEST_ASSERT(!error,error);
+}
+
+void test_loom_private_connect(void);
+void test_loom_private_connect(void) {
+    const char *error=loom_protocol_fixture(true);
     TEST_ASSERT(!error,error);
 }

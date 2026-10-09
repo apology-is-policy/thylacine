@@ -28,6 +28,10 @@ _Static_assert(sizeof(struct loom_request_table) == 32, "request table storage")
 int loom_request_prepare(struct loom_request_table *, struct loom_slot_table *,
                          struct loom_service_node_table *, struct loom_service_ref,
                          u64 user_data, u64 deadline, u64 now, struct loom_request_ref *);
+// Same admission predicates, without mutation, for locked native publication.
+// Caller must hold the SAME lock continuously from check through admit.
+int loom_request_check_admit(struct loom_request_table *, struct loom_slot_table *,
+                             struct loom_service_node_table *, struct loom_request_ref, u64 now);
 int loom_request_admit(struct loom_request_table *, struct loom_slot_table *,
                        struct loom_service_node_table *, struct loom_request_ref, u64 now);
 int loom_request_rollback(struct loom_request_table *, struct loom_slot_table *, struct loom_request_ref);

@@ -3,7 +3,7 @@
 #define THYLACINE_LOOM_SERVICE_PROTOCOL_H
 #include <thylacine/9p_client.h>
 #include <thylacine/devsrv.h>
-#include <thylacine/loom_service_abi.h>
+#include <thylacine/loom_service_requests.h>
 #include <thylacine/proc.h>
 
 struct Loom;
@@ -16,6 +16,15 @@ struct loom_service_protocol {
     u8 *recv_storage;
     u8 *send_storage;
     u32 charged_pages;
+    // CONNECT engine owns these under owner->lock. A future executor must
+    // supply the entry/lifetime root; raw pointers do not retain this object.
+    struct loom_service_ref scope;
+    struct loom_request_ref request;
+    u64 connect_deadline;
+    s32 abort_reason;
+    u32 users;
+    u32 failure_phase; // handshake phase at protocol failure, before abort overwrites it
+    bool connect_bound, driving, locally_retired;
 };
 
 // Caller retains l. Resolves an exact registered target and snapshots the actual
@@ -27,9 +36,9 @@ struct loom_service_protocol {
 // This is an internal construction primitive, not CONNECT admission. Its future
 // scope owner must reserve the request/terminal and destination first, then
 // recheck deadline/abort and publish under the Loom lock. Until that integration
-// exists, only an unpublished object can be released by the API below. No
-// callbacks, client progress, publication or concurrent users may escape this
-// prepared owner. One caller owns it exclusively; no refcount is implied here.
+// publishes it, only unused release is legal. The CONNECT owner provides the
+// separate published-retirement path. No callbacks, client progress, publication
+// or concurrent users may escape an unbound prepared owner. One caller owns it exclusively; no refcount is implied here.
 int loom_private_protocol_prepare(struct Loom *l, struct loom_service_ref target,
                                   u64 deadline, u64 now,
                                   struct loom_service_protocol **out);
@@ -37,6 +46,10 @@ int loom_private_protocol_prepare(struct Loom *l, struct loom_service_ref target
 // local cursor, releases native ownership and frees all storage before refund
 // against the retained image. The Loom reference is dropped LAST.
 int loom_private_protocol_release_unused(struct loom_service_protocol *p);
+
+// Internal final drop after CONNECT has unbound its exact ledger pins and
+// proved local quiescence. Never turns a merely torn transport into that proof.
+int loom_private_protocol_release_retired(struct loom_service_protocol *p);
 
 #ifdef KERNEL_TESTS
 // Consume once, even when an earlier validation refuses. 1=owner,2=recv,3=send.

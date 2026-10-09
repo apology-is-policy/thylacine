@@ -460,3 +460,17 @@ Native protocol-owner-diagnostic-20261009T074413Z passes1848/1848 and D7; initia
 074015Z unlinked-creator fixture failure is retained with its repair. Request
 source45d26893b separately passes full50/50 at1847/1847; newer protocol source
 full matrix pending. See sub-kernel-loom and ASYNC-SERVICE-STATUS for self-review.
+
+## October 9: private CONNECT native fixture
+
+loom.private_connect uses real registered targets, creator snapshot, native
+admission and preallocated 9P version/attach progress for normal and bulk
+connections. It checks allocation/expired publication rollback, duplicate
+destination refusal, cancellation ordering, handshake deadlines, Rlerror phase
+diagnostics, close, full CQ retention, local storage refund with a server-held
+endpoint, and exact scope reap. connect-diagnostic-20261009T170730Z passes
+1849/1849 plus D7 overlap/twenty cycles/banner with stable source and inputs.
+Full Mac matrix pending on this source. Checked host boundary doubles separately
+pass11 controls/12 named mutations; they do not constitute SMP race stress or
+an independent audit. The engine is internal, handshake-only, and requires its
+caller to retain entry storage. Private ring dispatch/activation stays disabled.

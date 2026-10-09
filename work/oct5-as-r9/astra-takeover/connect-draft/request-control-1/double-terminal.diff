@@ -1,0 +1,11 @@
+--- kernel/loom_service_requests.c
++++ double-terminal.c
+@@ -107,7 +107,7 @@
+                         struct loom_service_node_table *n, struct loom_request_ref ref, s32 result) {
+     struct loom_service_request *r = request_exact(t,ref);
+     if (!r) return -T_E_NOENT;
+-    if (r->phase != LREQ_ACTIVE || r->borrows) return -T_E_BUSY;
++    if ((r->phase != LREQ_ACTIVE && r->phase != LREQ_TERMINAL) || r->borrows) return -T_E_BUSY;
+     if (!request_scope_held(s,r->scope)) return -T_E_INVAL;
+     if (result >= 0 && (t->detached || !request_scope_open(s,n,r->scope))) return -T_E_CANCELED;
+     r->result = result;

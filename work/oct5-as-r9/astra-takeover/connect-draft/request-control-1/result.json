@@ -1,0 +1,115 @@
+{
+  "inputs": {
+    "kernel/loom_service_requests.c": "a0e5c1d3233b4aec381aa6a95060a7ac6e56207bd33dadda18866969ade57a0a",
+    "kernel/include/thylacine/loom_service_requests.h": "4bbbc5e568241c581643c3f16196f3456d5e2486b4909ffdb2b6bb7a505b4d87",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/test/loom_requests_fixture.h": "87c0619cede4fa03d51c78bed64ce4b045a6f3e4d8c391ee579428074621c39a",
+    "tools/host-tests/loom-service-requests.c": "6c25e0ece514f53e4c8add7d4f17ea5e3e0d9223bf03594da8ad3f7f71018d49",
+    "tools/test-loom-service-requests.py": "809660c8275ed9d389920701de44e6681e8331ecc25cfff13c282393247c1500",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/loom_service_nodes.c": "af22bb07ee15b400c1cc48ebbe8bc32aaf20a8e4e251c1f58bad3c22108da89f",
+    "kernel/include/thylacine/loom_service_nodes.h": "9cfafbb971b46ce2b992d7c331cd83b06a204b05eda96d4cc8fbd550865a9c81"
+  },
+  "sanitized": true,
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "generated_sha256": "a0e5c1d3233b4aec381aa6a95060a7ac6e56207bd33dadda18866969ade57a0a",
+      "binary_sha256": "b17dc2087cecd68ca89d0c0471dac684bd57ffbfe02a4b8e69a7fee08061b09b"
+    },
+    {
+      "case": "expired",
+      "expected": "expired request reserves nothing",
+      "rc": 1,
+      "generated_sha256": "16578472ff531e2baa36577569b3278d2593a427234de9439bcc1d3329242629",
+      "binary_sha256": "789492755f1c00dc2fc990687c10c15fb721a91812311b5ea78a4aee1bcdab28"
+    },
+    {
+      "case": "admit-expired",
+      "expected": "admission rechecks absolute deadline",
+      "rc": 1,
+      "generated_sha256": "0a235d356c4bc326ab536b424e5ad5b4d400d4f2ce517ba054ec00588b75adc8",
+      "binary_sha256": "a31c3a93cf591de17a045bb9a7359ab0f5be537ee396337544c811f94f36d9ba"
+    },
+    {
+      "case": "omit-pin",
+      "expected": "prepare reserves terminal and parent",
+      "rc": 1,
+      "generated_sha256": "2d3d05477d15448681e239a3e08a20c7984e2cb184e64c58a17eade405c85c88",
+      "binary_sha256": "950054d6b34f210e5e2d67bec66526a4d2a14f822dbfd688bdf6f788cc44ea05"
+    },
+    {
+      "case": "omit-unpin",
+      "expected": "rollback releases capacity and pin",
+      "rc": 1,
+      "generated_sha256": "86f91c32ab8c9692b03b3b8db9eda9b4fba72daaf44f5ff11839f584afd05f1c",
+      "binary_sha256": "5612c1d1992666baac302cbbfa24cc6191861a0b1af44d6445a9cb105364d0a1"
+    },
+    {
+      "case": "reuse-identity",
+      "expected": "rollback burns request identity",
+      "rc": 1,
+      "generated_sha256": "b058a55982567f573f45597da9bbd01d8b5940de1220a16e62700ce487fe80a6",
+      "binary_sha256": "e11dc9189887ca39bd87a855c6bdf70bbb57e2e73638d4a268f4e98260445cde"
+    },
+    {
+      "case": "stale",
+      "expected": "stale request cannot mutate replacement",
+      "rc": 1,
+      "generated_sha256": "4789e069519c3c617e164ed4ff0396622c0296e95defa0d74f6478b7a3cd40e5",
+      "binary_sha256": "a5103a4034c6892318fbfc6be99814e796858cabff030aef26112ab61dab80e7"
+    },
+    {
+      "case": "early-terminal",
+      "expected": "live borrow blocks terminal and free",
+      "rc": 1,
+      "generated_sha256": "ee66d468b03f16fc66ad6df811c68872a5801bd8efb690e2199abce862a6e9cb",
+      "binary_sha256": "425b6adeb48e3fe90149b8248c871517d2e8256683fcbd2ce6966aa7085b0c25"
+    },
+    {
+      "case": "double-terminal",
+      "expected": "duplicate terminal refused",
+      "rc": 1,
+      "generated_sha256": "b929eb6d32e55d3f99f7a17c06a23f64172a88568b686847e9dc3c0a063880d8",
+      "binary_sha256": "648415f1b97e820361df0ae8446051bded7550361b0e16907317064dfb100190"
+    },
+    {
+      "case": "late-success",
+      "expected": "abort forbids fresh success",
+      "rc": 1,
+      "generated_sha256": "32890456eb063d819f5958a3fed006445925107ee18834255dca71b8fa9bb2ee",
+      "binary_sha256": "5f1d0405d186a813adbc0b1b7cfb586f95d744731fe9732ba307bd2019ed8949"
+    },
+    {
+      "case": "early-reap",
+      "expected": "undelivered terminal cannot be discarded or freed",
+      "rc": 1,
+      "generated_sha256": "9ec4733bf1a488ca9f140c2100ac7904c27da9e4614e6f33012d2e5355bcc53f",
+      "binary_sha256": "dc058f4bcc178c8b14d07eee31ba7a194fff9f23c7f821a0b0a8f180c888b555"
+    },
+    {
+      "case": "live-discard",
+      "expected": "undelivered terminal cannot be discarded or freed",
+      "rc": 1,
+      "generated_sha256": "c8cd6d89694e167f0c7ab4b0d044c3c898f0fdf5ae00cdbf7493885e25e40ac7",
+      "binary_sha256": "d78f5d06d4bb788e95f3dd23b40ae4da19d8d3d10bd32ea5c032a17d13076a72"
+    },
+    {
+      "case": "wrap",
+      "expected": "request identity wrap refused",
+      "rc": 1,
+      "generated_sha256": "38f130f44ed5d2b82a4f09bc5d6f631e042539cab07ad02a9c1bdbfe87c80d12",
+      "binary_sha256": "adec611f2b3ed0a90b9f6d4bb2610148190b1f683d9dd27786840d039aa78d2e"
+    },
+    {
+      "case": "detach-borrow",
+      "expected": "live borrows prevent consumer detach",
+      "rc": 1,
+      "generated_sha256": "c165e8e11283b6bd03f512346a169b75428536ad3a9b917ab09d857cc49ca67c",
+      "binary_sha256": "705c9605558ce4be94f957a11299ddedfa5e6c02a40ba9b95fadfe59c5bbeb75"
+    }
+  ]
+}

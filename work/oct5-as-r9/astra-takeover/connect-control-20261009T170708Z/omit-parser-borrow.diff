@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -151,7 +151,7 @@
+     if (!p->abort_reason) {
+         int rc=loom_request_borrow(&l->service_requests,l->service_slots,l->service_nodes,p->request);
+         if (rc) { spin_unlock(&l->lock); return rc; }
+-        borrowed=true;
++        borrowed=true; (void)loom_request_put(&l->service_requests,p->request);
+     }
+     p->driving=true;
+     bool aborting=p->abort_reason != 0;
