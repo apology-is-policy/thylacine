@@ -1,0 +1,8 @@
+PASS clean: 5828 states, retirement liveness
+PASS earlyfree: NoEarlyFree
+PASS late: NoLateSuccess
+PASS double: NoDoubleTerminal
+PASS reuse: NoStaleSlot
+PASS cqfull: CqBounded
+PASS refund: CreditsRetained
+PASS peerwait: RetirementProgress

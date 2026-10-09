@@ -21,6 +21,7 @@
 #include <thylacine/loom_service_slots.h>
 #include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_targets.h>
+#include <thylacine/loom_service_nodes.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
@@ -371,6 +372,7 @@ static bool g_loom_private_layout_fault;
 static bool g_loom_private_slots_fault;
 static bool g_loom_private_pools_fault;
 static bool g_loom_private_targets_fault;
+static bool g_loom_private_nodes_fault;
 
 void loom_private_pools_fault_arm_for_test(void) {
     __atomic_store_n(&g_loom_private_pools_fault, true, __ATOMIC_RELAXED);
@@ -396,6 +398,19 @@ bool loom_private_targets_fault_armed_for_test(void) {
 }
 static bool loom_private_targets_fault_take(void) {
     return __atomic_exchange_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_nodes_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_nodes_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_nodes_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_nodes_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_nodes_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_nodes_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
 }
 
 void loom_private_slots_fault_arm_for_test(void) {
@@ -431,6 +446,7 @@ static inline bool loom_private_layout_fault_take(void) { return false; }
 static inline bool loom_private_slots_fault_take(void) { return false; }
 static inline bool loom_private_pools_fault_take(void) { return false; }
 static inline bool loom_private_targets_fault_take(void) { return false; }
+static inline bool loom_private_nodes_fault_take(void) { return false; }
 #endif
 
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
@@ -439,6 +455,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     bool slots_fault = loom_private_slots_fault_take();
     bool pools_fault = loom_private_pools_fault_take();
     bool targets_fault = loom_private_targets_fault_take();
+    bool nodes_fault = loom_private_nodes_fault_take();
     struct loom_layout g;
     if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
         !loom_measure(sq, cq, receipts, &g)) return NULL;
@@ -456,9 +473,11 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     _Static_assert(sizeof(struct loom_service_pool_table) > SLUB_MAX_OBJECT_SIZE,
                    "pool table uses buddy kmalloc");
     _Static_assert(sizeof(struct loom_service_target_table) == PAGE_SIZE, "target table page");
+    _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
-        + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table));
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+        + 1u; // node ledger occupies a whole buddy page, never a shared slab
     u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
     bool exempt = proc_resource_exempt(p);
     spin_lock(&as->lock);
@@ -470,9 +489,12 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
         kmalloc(sizeof(struct loom_service_pool_table), KP_ZERO);
     struct loom_service_target_table *targets = (!pools || targets_fault) ? NULL :
         kmalloc(sizeof(struct loom_service_target_table), KP_ZERO);
-    struct Loom *l = (!slots || !pools || !targets || layout_fault) ? NULL :
+    struct loom_service_node_table *nodes = (!targets || nodes_fault) ? NULL :
+        kmalloc(PAGE_SIZE, KP_ZERO);
+    struct Loom *l = (!slots || !pools || !targets || !nodes || layout_fault) ? NULL :
         loom_create_layout(sq, cq, exempt, receipts);
     if (!l) {
+        kfree(nodes);
         kfree(targets);
         kfree(pools);
         kfree(slots);
@@ -485,6 +507,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     l->service_slots = slots;
     l->service_pools = pools;
     l->service_targets = targets;
+    l->service_nodes = nodes;
     l->service_as = as;
     l->service_creator = p->stripes;
     l->service_metadata_pages = metadata;
@@ -562,6 +585,30 @@ static void loom_private_targets_destroy(struct Loom *l) {
     }
 }
 
+// Last-owner retirement may discard only unused reservations, never protocol
+// state. The retiring worker has exclusive ownership (zero Loom references).
+// Reap children first: their parent pins must drain before an unused scope can
+// retire. READY and later states must already have been retired by the engine;
+// this bounded local cleanup performs no peer I/O or waiting.
+static void loom_private_nodes_destroy(struct Loom *l) {
+    if (!l->service_nodes || !l->service_slots)
+        extinction("private Loom lost node storage");
+    const u32 kinds[2] = { LOOM_SERVICE_FID, LOOM_SERVICE_SCOPE };
+    for (u32 pass = 0; pass < 2; ++pass) {
+        for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+            struct loom_service_slot *s = &l->service_slots->slots[i];
+            if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
+            struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
+            int rc = s->phase == LSLOT_PROVISIONAL ?
+                loom_service_node_rollback(l->service_slots, l->service_nodes, ref) :
+                loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+            if (rc) extinction("private Loom retained active or invalid node");
+        }
+    }
+    if (!loom_service_nodes_empty(l->service_nodes))
+        extinction("private Loom retained unowned node");
+}
+
 static void loom_private_destroy(struct Loom *l) {
     // Snapshotted before anything frees l: everything after the kfree below
     // reaches the address space through these two locals and never through l.
@@ -577,8 +624,9 @@ static void loom_private_destroy(struct Loom *l) {
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
         if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
 
-    // Targets have only local registry ownership and can retire here. Other
-    // record kinds must already be empty before the engine drops its last ref.
+    // Targets and unused nodes have only local ownership and can retire here.
+    // Protocol-active records must be empty before the engine drops its last ref.
+    loom_private_nodes_destroy(l);
     loom_private_targets_destroy(l);
     if (!l->service_slots) extinction("private Loom lost slot storage");
     for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
@@ -595,6 +643,7 @@ static void loom_private_destroy(struct Loom *l) {
         loom_private_drop_buffer(as, b);
     }
     l->n_reg_buf = 0;
+    kfree(l->service_nodes);
     kfree(l->service_targets);
     kfree(l->service_pools);
     kfree(l->service_slots);

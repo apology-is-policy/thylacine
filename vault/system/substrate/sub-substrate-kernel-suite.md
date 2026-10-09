@@ -327,3 +327,53 @@ usercopy/authority and worker retirement remain next, before MM0-MM4. Pi/A72/KVM
 final guest allocator reclamation and absent optional graphics probes remain
 unqualified. Self-review only; no Main landing, private async/clipboard activation
 or removal of the 128 MiB protection. Preserve pinned artifact generations.
+
+
+## October 9: charged node owner and unused-node retirement
+
+Private Loom now owns the 1536-byte SCOPE/FID metadata table in a separately
+allocated, zeroed 4096-byte buddy page. Charge is reserved before allocation;
+constructor failures free node/target/pool/slot storage before refunding and
+dropping the exact image pin. The node allocation fault is consumed even by
+early geometry refusal. Loom is 2904 bytes (native DWARF 0xb58), still one buddy
+page: metadata is now six pages including slot, pool, target and node storage.
+No syscall ABI or private activation changes.
+
+At zero owner references, the retire worker has exclusive access. It cleans
+unused FIDs before unused SCOPEs, using exact rollback for provisional nodes
+and unused reap for live nodes; child cleanup releases its parent pin first.
+Only RESERVED nodes with no own borrows qualify. READY/ADMITTED/ABORTING/RETIRED,
+invalid identities and orphan payloads fail closed: actual protocol retirement
+is still the engine's obligation. Node storage is freed before the final image
+refund/private_end, outside locks. There is no peer I/O, wait or usercopy here.
+
+Self-review checked whole-page charging against allocation size, all unwind
+edges, last-owner exclusivity, child-before-parent ordering, stale/borrow/state
+guards and final image lifetime. The native owner fixture checks node allocation
+refusal, zeroed storage, complete charge, automatic provisional/live unused-scope
+cleanup and restoration of image charge/refcount. Host control explicitly
+simulates parent states for child cleanup; this is not a protocol witness.
+
+Evidence: slot-owner-20261009T044245Z passes 19 controls and 18 exact ASan/UBSan
+mutants, including reversed cleanup order, omitted cleanup, charge/free/unwind
+and orphan guards. Initial slot-owner-20261009T043850Z passed 19 controls and
+16 mutants before the two extra sensitivity checks. final-reclaim-20261009T043907Z
+passes both owner-drop orders and eight omission mutants at the host allocator
+boundary. Native link succeeded; node-owner-diagnostic-20261009T044103Z passed
+1844/1844, D7 overlap, twenty distinct cycles and banner, source cfa1c5c63 plus
+its captured diff with six stable input hashes and retained ELF/bin. Existing
+lifecycle model node-owner-model-20261009T0442Z passes clean 5828 states and
+seven named counterexamples. Full Mac coverage for these owner changes is
+pending; prior 50/50 belongs to c5abd0264. No independent audit is claimed.
+
+Next: actual scope/fid protocol resources and retirement, request/CQ admission,
+usercopy/authority and bounded worker progress, then MM0-MM4. Private async and
+clipboard stay disabled; keep the 128 MiB protection and do not land Main.
+Pi/A72/KVM, final guest allocator reclamation and optional graphics remain open.
+
+Disk admission headroom was restored by reclaiming five idle, ignored, untracked
+native Cargo debug caches under the operator resource grant, from Main and old
+Aux checkouts. No source, release outputs, run evidence or pinned generation was
+removed. native-debug-cache-reclaim-20261009T0443Z.json inventories exact paths
+and files; measured free space rose from 8164 to 8737 MiB. Full gate admission
+will independently enforce the unchanged 8192 MiB floor.

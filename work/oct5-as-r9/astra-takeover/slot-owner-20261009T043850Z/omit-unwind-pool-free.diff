@@ -1,0 +1,11 @@
+--- control
++++ omit-unwind-pool-free
+@@ -149,7 +149,7 @@
+     if (!l) {
+         kfree(nodes);
+         kfree(targets);
+-        kfree(pools);
++
+         kfree(slots);
+         spin_lock(&as->lock);
+         addrspace_uncharge_pages(as, metadata + backing);

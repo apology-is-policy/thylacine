@@ -1,0 +1,11 @@
+--- control
++++ omit-node-orphan-guard
+@@ -219,7 +219,7 @@
+         }
+     }
+     if (!loom_service_nodes_empty(l->service_nodes))
+-        extinction("private Loom retained unowned node");
++        (void)0;
+ }
+ static void loom_private_destroy(struct Loom *l) {
+     // Snapshotted before anything frees l: everything after the kfree below

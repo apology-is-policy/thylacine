@@ -15,6 +15,7 @@
 
 #include <thylacine/loom.h>
 #include <thylacine/loom_service_targets.h>
+#include <thylacine/loom_service_nodes.h>
 #include <thylacine/spoor.h>
 #include <thylacine/burrow.h>
 #include <thylacine/errno.h>
@@ -152,6 +153,18 @@ static const char *loom_slot_owner_fixture(void) {
              p->as->page_count == base && !p->as->private_rings &&
              addrspace_ref_count(p->as) == refs,
              "target refusal rolls back prior tables and charge");
+    loom_private_nodes_fault_arm_for_test();
+    l = loom_create_private(p, 3, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_nodes_fault_armed_for_test(),
+             "early refusal consumes node allocation fault");
+    loom_private_nodes_fault_arm_for_test();
+    l = loom_create_private(p, 2, 2, true);
+    if (l) goal++;
+    SO_CHECK(!l && !loom_private_nodes_fault_armed_for_test() &&
+             p->as->page_count == base && !p->as->private_rings &&
+             addrspace_ref_count(p->as) == refs,
+             "node refusal rolls back prior tables and charge");
     // Allocation succeeds but downstream layout fails; the new page must also
     // be released. The host allocator control measures that free separately.
     loom_private_layout_fault_arm_for_test();
@@ -165,10 +178,12 @@ static const char *loom_slot_owner_fixture(void) {
     SO_CHECK(l && l->service_slots, "private owner owns its slot page");
     SO_CHECK(l->service_pools && loom_service_pools_empty(l->service_pools),
              "private owner owns zeroed pool storage");
+    SO_CHECK(l->service_nodes && loom_service_nodes_empty(l->service_nodes),
+             "private owner owns zeroed node storage");
     SO_CHECK(l->service_metadata_pages == (u32)burrow_backing_pages(sizeof(*l)) + 1u +
              (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table)) +
-             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)),
-             "slot pool and target pages included in metadata charge");
+             (u32)burrow_backing_pages(sizeof(struct loom_service_target_table)) + 1u,
+             "slot pool target and node pages included in metadata charge");
     SO_CHECK(p->as->page_count == base + l->service_metadata_pages +
              (u32)burrow_backing_pages(l->ring_size) + 1u,
              "all base storage charged before owner publication");
@@ -180,6 +195,15 @@ static const char *loom_slot_owner_fixture(void) {
     if (!rc) { rc = loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_SCOPE); pinned = !rc; }
     spin_unlock(&l->lock);
     SO_CHECK(!rc, "owner ledger admits exact internal borrow");
+    struct loom_service_ref unused_live = {0}, unused_provisional = {0};
+    spin_lock(&l->lock);
+    rc = loom_service_node_prepare(l->service_slots, l->service_nodes,
+                                  LOOM_SERVICE_SCOPE, (struct loom_service_ref){0}, &unused_live);
+    if (!rc) rc = loom_service_node_publish(l->service_slots, l->service_nodes, unused_live);
+    if (!rc) rc = loom_service_node_prepare(l->service_slots, l->service_nodes,
+                                  LOOM_SERVICE_SCOPE, (struct loom_service_ref){0}, &unused_provisional);
+    spin_unlock(&l->lock);
+    SO_CHECK(!rc, "unused published and provisional scopes retained until owner cleanup");
     loom_exec_latch(l);
     spin_lock(&l->lock);
     rc = loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_SCOPE);
@@ -192,6 +216,7 @@ done:
     loom_private_slots_fault_disarm_for_test();
     loom_private_pools_fault_disarm_for_test();
     loom_private_targets_fault_disarm_for_test();
+    loom_private_nodes_fault_disarm_for_test();
     loom_private_layout_fault_disarm_for_test();
     if (l && l->service_slots && ref.incarnation) {
         spin_lock(&l->lock);
