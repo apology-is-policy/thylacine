@@ -765,3 +765,22 @@ protocol/worker retirement. No public private-service activation, Main landing,
 clipboard enablement or removal of 128 MiB protection. Pi/A72/KVM and guest final
 allocator reclamation remain open. Continue async before MM0-MM4; self-review
 only, not an independent audit.
+
+
+## October 9: fixed-reservation full Mac qualification
+
+Exact source d3563f828652709ceb34cc3a94cddf9b42b6d9e0 passed all 50 Mac HVF
+boots in current-gate-20261009T020608Z. Default SMP1/4/8 and UBSan SMP4/8
+each passed ten boots, every boot 1842/1842 including loom.private_fixed,
+pool pins/buffers/slot/owner rows, D7 overlap, twenty distinct d7user00..19
+cycles and boot banner. Both runner and gate exit zero. The verifier checked
+100 copied raw serial/harness logs and ten captured input hashes; inputs are
+PINNED. Stratum remains exact clean 61dde37. Minimum recorded admission free
+space was 9355 MiB, above the 8192 MiB floor. Astra's Mac lease was released.
+See astra-takeover/current-gate-20261009T020608Z-result.json and run verify.py.
+
+This qualifies the internal fixed-reservation checkpoint on Mac. Actual request/
+CQ admission, target/scope/fid ownership and protocol/worker integration remain
+open. Pi/A72/KVM, final guest allocator reclamation and absent optional graphics
+probes remain unqualified. Self-review only. Continue async before MM0-MM4; no
+Main landing, private async/clipboard activation or 128 MiB protection removal.
