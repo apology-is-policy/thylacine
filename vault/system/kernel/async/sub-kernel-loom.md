@@ -1377,3 +1377,27 @@ terminal retirement and full client payload lifecycle. These helpers do not
 authorize service syscalls. Guest final allocator reclamation and Pi/A72/KVM
 remain open. Self-review only, no independent audit. Continue async before
 MM0-MM4; no Main landing, private async/clipboard activation or128MiB removal.
+
+
+## October 9, 00:01 UTC: pool-owner full Mac gate verified
+
+current-gate-20261008T232028Z finished with gate.rc=runner.rc=0 on exact
+1295a25da8b546498661c359523917187c01d832, tracked source clean throughout.
+All five rows passed10/10 (default smp1/4/8, UBSan smp4/8). Raw-log verification
+confirmed1839/1839 on all50, including service_pool_table, private_slot_owner,
+service_slots and private-owner normal fallthrough. Every boot passed D7 overlap
+and twenty distinct d7user00..19 completed cycles plus the boot banner.
+Ten captured input hashes verified and100 serial/harness logs retained with
+hashes; wrapper exit also matched live immutable build inputs to capture.
+External Stratum remained clean at exact61dde37. Minimum recorded admission
+10974MiB exceeds the unchanged8192MiB floor. Mac lease released; inputs PINNED.
+Optional Venus/Vulkan programs were absent from this ramfs, not qualified.
+
+Evidence: astra-takeover/current-gate-20261008T232028Z-result.json and the run's
+verify.py, verified-logs and input manifest. This source-specific Mac result
+qualifies the pool/slot storage and transaction fixtures, not the remaining
+private authority, buffer-pin/fixed-I/O exclusion, scope/protocol/worker/terminal
+integration. Guest final allocator reclamation and Pi/A72/KVM remain open.
+Next: registered-buffer ownership using the approved canonical Burrow and exact
+creator/image rules. Async work still precedes MM0-MM4. Self-review only; no
+Main landing, private async/clipboard activation or128MiB protection removal.
