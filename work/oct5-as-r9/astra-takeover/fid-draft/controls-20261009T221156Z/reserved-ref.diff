@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -6,7 +6,7 @@
+ }
+ static struct loom_service_node *fid_exact(struct loom_slot_table *t,
+     struct loom_service_node_table *n,struct loom_service_ref r,bool retiring) {
+-    if(!t || !n || r.reserved || !r.incarnation || r.slot>=LOOM_SERVICE_SLOT_COUNT)return NULL;
++    if(!t || !n || false || !r.incarnation || r.slot>=LOOM_SERVICE_SLOT_COUNT)return NULL;
+     struct loom_service_slot *s=&t->slots[r.slot];
+     if(s->incarnation!=r.incarnation || (s->phase!=LSLOT_LIVE &&
+        !(retiring && s->phase==LSLOT_RETIRING)) ||

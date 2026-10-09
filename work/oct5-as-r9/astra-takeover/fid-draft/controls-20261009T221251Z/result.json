@@ -1,0 +1,194 @@
+{
+  "inputs": {
+    "work/oct5-as-r9/astra-takeover/fid-draft/kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+    "work/oct5-as-r9/astra-takeover/fid-draft/kernel/include/thylacine/loom_service_fids.h": "2c480c07e64d62161bbbf402bd826e1c68dc42ff200365fd7083d15a500f927c",
+    "work/oct5-as-r9/astra-takeover/fid-draft/kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70",
+    "work/oct5-as-r9/astra-takeover/fid-draft/kernel/include/thylacine/loom_service_nodes.h": "19aacddddb54f7b9e93fcc810feb15931585698e17a329a969cb1d5ddb5fefec",
+    "work/oct5-as-r9/astra-takeover/fid-draft/fixture.c": "9ad4c76522696bed3039121e4ef1888be2f8b9c14013f333b49f36221b9b1104",
+    "work/oct5-as-r9/astra-takeover/fid-draft/run-controls.py": "a947c794002ef18025bd41c692e56912d4f9b8683e7347fbfe7ac43fc56f2e0d",
+    "kernel/loom_service_slots.c": "c0b8cf217e7c0ba28f653620be0ad9c5805df8a19eda8cd9373e6f54022076b5",
+    "kernel/include/thylacine/loom_service_slots.h": "a426f14761bc46832cbe9d495b425c74486d8747cdbb7f5cfc3b8eec4b632117",
+    "kernel/include/thylacine/loom_service_abi.h": "c883b9db75d63ea05f707c96fce7406050fbda100de8371b85bf7b15e8e319b0",
+    "kernel/include/thylacine/types.h": "4fc728edeca6bc776ce30875554280f5ae666f26c57fdbbfb4a26ef2fddf99ef",
+    "kernel/include/thylacine/errno.h": "ccbb068629beb2b83c3e6f5396060f69fa302e94b36d7eebee4b95bdd1c05b4a"
+  },
+  "results": [
+    {
+      "case": "control",
+      "expected": null,
+      "rc": 0,
+      "source_sha256": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+      "binary_sha256": "740a8912e0e39f0ed1c63a6af5ae8228603a3bbd8f0ec3e2070d09652cf0c249"
+    },
+    {
+      "case": "borrow-overflow",
+      "expected": "borrow saturation unchanged",
+      "rc": 1,
+      "source_sha256": "ff42b7d0fca991c39ab9d5d3fb89a10dfdc5b6fce2734e48270a92b9c330de6c",
+      "binary_sha256": "3d74ff8d6ffd4f1bce7aebced96d84535fb7139c04f54f8e922e30afa481d924"
+    },
+    {
+      "case": "abort-borrow",
+      "expected": "abort waits for source borrower",
+      "rc": 1,
+      "source_sha256": "bee716900d573e6c0922a1e8db43311f7774478d34ae5be3b02c916797ea1813",
+      "binary_sha256": "bc986e7356cf1d997d138b8c75403f3c6b1af5562d8c30b1e4556442e0b71250"
+    },
+    {
+      "case": "low-incarnation",
+      "expected": "full incarnation commit required",
+      "rc": 1,
+      "source_sha256": "e51d5872b0f8c1a3a7eaa92ac992611afb4b0601013beb21733c7eb2968dc304",
+      "binary_sha256": "96b0b5902f792356fc55679e68380c1308c31c326cc2f4e691ff3177510c8cc2"
+    },
+    {
+      "case": "reserved-ref",
+      "expected": "reserved commit ref denied",
+      "rc": 1,
+      "source_sha256": "4049dafea4ed7111e6c74047d184a8ffc061c28bf3a19ef4cad1df43bf1044d6",
+      "binary_sha256": "c781751e25618a343ff2dddcda43f90ead0a1d42c8646fac2f3928a027d28e35"
+    },
+    {
+      "case": "wrong-parent",
+      "expected": "wrong parent claim denied",
+      "rc": 1,
+      "source_sha256": "88fb4f6cb36123b492d37dacc3c5693c1df46109bb2f82acf731fe356ed99fc8",
+      "binary_sha256": "e2fa15509657d2191b73a20436f806eeb571884065d2386abf80e3f92b1b6474"
+    },
+    {
+      "case": "ignore-abort",
+      "expected": "abort beats walk commit",
+      "rc": 1,
+      "source_sha256": "fe9333bd8ef515c392b99eb0e43d67c3b8fa8f29fbeb07acf8404432cce876c5",
+      "binary_sha256": "2ef5c7806ef1a106a6caa65d0ee14bb9ec3145645991b7d44b541735aa8ee925"
+    },
+    {
+      "case": "walk-owner",
+      "expected": "wrong owner cannot publish",
+      "rc": 1,
+      "source_sha256": "9ed338600b01642d6d13541c4abe4aa6f83c3503dea025cc67b92d7483a8cad0",
+      "binary_sha256": "fc1db7f202400e828803caf25a01ee0966a177164205fde438869aed73302788"
+    },
+    {
+      "case": "root-alias",
+      "expected": "root alias denied",
+      "rc": 1,
+      "source_sha256": "6179bdcb9d36319d9c63609d79b482fc4701cbbe0e6d5cf0717f3d19dd71efa0",
+      "binary_sha256": "5282cecd64b5e841dbb4799865750040457efe188ee337a24523b44761da2020"
+    },
+    {
+      "case": "drop-owner",
+      "expected": "wrong owner cannot drop",
+      "rc": 1,
+      "source_sha256": "bc1af646d4e6405a51e15620991626440fb153c5285c58d126e4e3018c0df821",
+      "binary_sha256": "d330e550ac5696d4aecbecdfe18e7de067fa047a0c680be75f4b1e9fa06a9fee"
+    },
+    {
+      "case": "drop-pin",
+      "expected": "walk physical release",
+      "rc": 1,
+      "source_sha256": "a4e2657d290b6e588f8387a3617a131b83ddc6cd519f54fce8ad434123798a8f",
+      "binary_sha256": "55ebfb664c42bfebbbc86efcf61c66bc8f27e36bfd10c328a6dbb7fa3afecf3a"
+    },
+    {
+      "case": "borrow-claim",
+      "expected": "publication retains physical claim",
+      "rc": 1,
+      "source_sha256": "960967eb645551a164ec163d71e966999db447913461f36331bc7ea07f122c0e",
+      "binary_sha256": "01d1be35ab6f565a277ee9569b2641e90a84c71742904a8807f67e5b97d7ae10"
+    },
+    {
+      "case": "borrow-access",
+      "expected": "write permission retained",
+      "rc": 1,
+      "source_sha256": "aee7ff9898feede57839a981b96762a233329e889a995ee088d8dd7b12620e57",
+      "binary_sha256": "33f47ba6a34ecc098d46f7597ee922a6829838c0799e4153065fa197bdc657d4"
+    },
+    {
+      "case": "borrow-count",
+      "expected": "metadata borrow tracked",
+      "rc": 1,
+      "source_sha256": "c26056fa440a993cc420548c7b4d026c17cf5c48471921e15ea174225ce8a6d2",
+      "binary_sha256": "f4ca4b06e41fc7143fff7969d4798193c181202e05f03e816f95677b3675d0be"
+    },
+    {
+      "case": "put-count",
+      "expected": "borrow release exact",
+      "rc": 1,
+      "source_sha256": "ffee52a769fcf8b02064c46e661e26aae7ca789d241b053944728a8a48a1bbc7",
+      "binary_sha256": "bb8e5f4d675e7ebc290823b71fdd13087317c078f06b8184c641353325c414ba"
+    },
+    {
+      "case": "open-borrow",
+      "expected": "open waits for source borrowers",
+      "rc": 1,
+      "source_sha256": "85a73d9b0018155b1087e526e9496a1bbcd0e4c8f6018545779b1a6aee473319",
+      "binary_sha256": "21178cea95cc9be5d86562d5a37078150d6f63ff7f45c562d91c8eae9a32bbca"
+    },
+    {
+      "case": "open-owner",
+      "expected": "open exact owner",
+      "rc": 1,
+      "source_sha256": "a1234fce0150a1b4899aeaff9c12bc2827154eb1bd69aaadad640c422ad5efea",
+      "binary_sha256": "c3efc2e3697870169f3107f4d973dec5d636069e3d86fcad07d46ad153d2c12e"
+    },
+    {
+      "case": "aggregate-root-pins",
+      "expected": "root readwrite commit",
+      "rc": 1,
+      "source_sha256": "5997c2c80cd1a080742ea9b099b1d3fa2ebd17052a10dbf0adbab4ba4d1021f6",
+      "binary_sha256": "c77647a3a9c1639d7224e4c033b7054725069a9bd800dc3dce9f82097a1d4ca5"
+    },
+    {
+      "case": "clunk-admission",
+      "expected": "clunk closes admission with reader",
+      "rc": 1,
+      "source_sha256": "29cdf2159cdf59704e788cab1a3e8c195cc9cbcdd0401c73fa556f83024a79ef",
+      "binary_sha256": "c6f4251be8f5575a3d63b6e47b9780b6cab7e0c05370617b6d7cbee38a5642d4"
+    },
+    {
+      "case": "clunk-drain",
+      "expected": "clunk waits for prior reader",
+      "rc": 1,
+      "source_sha256": "80115eb2fbfe91653492c2200f3b326ad23753ca1ea563428c792ed44f1e5b7b",
+      "binary_sha256": "c17d676667beba5214bb9e28d1e80a405d12b96133a12dcce3364294e3f17fe6"
+    },
+    {
+      "case": "clunk-owner",
+      "expected": "clunk exact owner",
+      "rc": 1,
+      "source_sha256": "ded34f5f1be3bf6be5df2eb178b97ff1a3bc8d7c84be7cca491df10def296fc2",
+      "binary_sha256": "929f0389ae9b1d335f47e0c4902819f0fff4f9f794fc3433a82c87e41803de0d"
+    },
+    {
+      "case": "early-claim-release",
+      "expected": "clunk owner held until quiescent",
+      "rc": 1,
+      "source_sha256": "d17a60820b12785ada9dde046ed1c4d7585feb54e4586bae0d1af517dcf9f50e",
+      "binary_sha256": "b9cab1a8eb04b033847b6db3bf141d14a03de5214e29a5c70b0739a5e51ab2c9"
+    },
+    {
+      "case": "retiring-alias",
+      "expected": "retiring wire alias denied",
+      "rc": 1,
+      "source_sha256": "bdb77c4774db0c9cdd958b0eafcf7ef01032c3bce548600f8065d5d4f354e18c",
+      "binary_sha256": "f90d7ac6eaea00339ea0e6da1d490f334cdca7398c10f521770fdc8b274c6a56"
+    },
+    {
+      "case": "parent-leak",
+      "expected": "reap drops parent and mapping",
+      "rc": 1,
+      "source_sha256": "03006f486c6dcd17026a71cd6560a7249df674a15200542ee8d12f80c34de178",
+      "binary_sha256": "6988359164ce4f333661473a7f19e1abf8805045783c684fd69dbabd9cd57bab"
+    },
+    {
+      "case": "abort-owner",
+      "expected": "abort waits for physical claim",
+      "rc": 1,
+      "source_sha256": "35199ae38d3089a20b3ac82cc3a9d280e8253770a8d6a6354bb7836d0cdede8b",
+      "binary_sha256": "3db6d5a15c7a5e537edef47f69b8a8cea511a71716ab69f23c95c33b59618dd9"
+    }
+  ],
+  "sanitized": true,
+  "scope": "Sequential helper only. No real RPC, DAC, allocator, engine lock or concurrency proof."
+}

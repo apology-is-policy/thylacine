@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -21,7 +21,7 @@
+ }
+ static bool fid_parent(struct loom_slot_table *t,struct loom_service_node *n,
+     struct loom_service_ref ref,struct loom_service_ref scope) {
+-    return t->slots[ref.slot].kind==LOOM_SERVICE_SCOPE ? fid_same(ref,scope) : fid_same(n->parent,scope);
++    return t->slots[ref.slot].kind==LOOM_SERVICE_SCOPE ? fid_same(ref,scope) : true;
+ }
+ static bool fid_duplicate(struct loom_slot_table *t,struct loom_service_node_table *n,
+     struct loom_service_ref scope,u32 wire) {

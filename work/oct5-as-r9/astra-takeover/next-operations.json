@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Continue actual RPC/FID/DAC/fixed/provided-buffer admission, callback/commit and READY readiness integration per operations-draft/rpc-integration-plan.txt. Canonical source supersedes draft; never reinstall. New source has bounded CPU1 native1854 evidence, not full Mac qualification.",
+  "next": "Integrate verified uninstalled FID mapping/claim/borrow/retirement helper with actual RPC admission/list/callback/commit, root binding, DAC, fixed/provided-buffer ownership and READY readiness. Read fid-draft/self-review.txt and operations-draft/rpc-integration-plan.txt. Canonical installed storage supersedes its old draft; no historical installer. No new-source full Mac qualification.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -22,5 +22,6 @@
   "native_run": "work/oct5-as-r9/astra-takeover/operation-storage-native-20261009T215931Z",
   "native_pid": 36893,
   "native_rc": 0,
-  "checkpoint": "e7ff5d1c7b31ed8b7069e4babe0938181b1d0edc"
+  "checkpoint": "e7ff5d1c7b31ed8b7069e4babe0938181b1d0edc",
+  "fid_draft": "fid-draft/state.json"
 }

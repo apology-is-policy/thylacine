@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -90,7 +90,7 @@
+     if(n->fid_borrows==UINT32_MAX)return -T_E_NOSPC;
+     if(need && (!(n->fid_flags&LFID_OPEN) || (n->fid_access&need)!=need))return -T_E_ACCES;
+     int rc=loom_slot_pin(t,source,t->slots[source.slot].kind);
+-    if(!rc){++n->fid_borrows;*wire=n->wire_fid;}
++    if(!rc){(void)0;*wire=n->wire_fid;}
+     return rc;
+ }
+ int loom_fid_commit_open(struct loom_slot_table *t,struct loom_service_node_table *nodes,

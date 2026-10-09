@@ -35541,3 +35541,21 @@ boundary still reports ABORTING until cleanup completes. Exact HEAD+diff, new
 source hashes, six stable inputs and rebuilt ELF/bin retained. Full Mac matrix
 for these changes is pending; prior50/50 qualifies ba2ae6df3 close-only source.
 No Main/private async/clipboard activation or128MiB protection change.
+
+### Astra isolated FID ownership helper, October9
+
+Prepared an uninstalled kernel FID mapping helper under
+`work/oct5-as-r9/astra-takeover/fid-draft`. Exact WALK/open/CLUNK claims retain
+physical slot identity; source borrows are counted separately from root lifetime
+pins. CLUNK blocks new borrows and drains old ones; abort cleanup and child reap
+retain the exact parent until local users leave. FID-F1 self-review repaired an
+incorrect proposed aggregate-pin check for root open. The64-byte node still fits
+the existing4096-byte charged table; actual ARM64 objects add no libc dependency.
+
+Sequential actual-C89checks and24mutants pass under LLVM22 ASan/UBSan; existing
+node fixture and11mutants pass. Source hashes and raw results verified. Early
+masked mutation witnesses are preserved and repaired. Read fid-draft/state.json
+and self-review.txt. This is helper-only evidence, not native RPC/authority or
+concurrent-engine qualification; canonical kernel unchanged. Actual RPC/root
+binding/retirement/DAC/buffer/readiness integration remains next, then AS3/4 and
+MM0-MM4. Mac released. No Main/private activation or128MiB protection change.

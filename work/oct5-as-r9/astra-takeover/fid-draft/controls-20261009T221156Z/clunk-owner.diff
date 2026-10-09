@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -148,7 +148,7 @@
+     struct loom_service_node *n=fid_exact(t,nodes,source,true);
+     if(!n || t->slots[source.slot].kind!=LOOM_SERVICE_FID)return -T_E_NOENT;
+     if(n->state!=LOOM_SERVICE_ABORTING || !(n->fid_flags&LFID_CLUNKING) ||
+-       n->fid_claim!=id || !t->slots[source.slot].pins || n->fid_borrows)return -T_E_BUSY;
++       false || !t->slots[source.slot].pins || n->fid_borrows)return -T_E_BUSY;
+     *wire=n->wire_fid;return 0;
+ }
+ int loom_fid_finish_clunk(struct loom_slot_table *t,struct loom_service_node_table *nodes,

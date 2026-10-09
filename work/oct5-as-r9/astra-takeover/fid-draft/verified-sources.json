@@ -1,0 +1,6 @@
+{
+  "kernel/include/thylacine/loom_service_fids.h": "2c480c07e64d62161bbbf402bd826e1c68dc42ff200365fd7083d15a500f927c",
+  "kernel/include/thylacine/loom_service_nodes.h": "19aacddddb54f7b9e93fcc810feb15931585698e17a329a969cb1d5ddb5fefec",
+  "kernel/loom_service_fids.c": "bf8411d1f2b9d4d6c29a9383742c738ff177709532dfa64a90ffa58ac0b5cc98",
+  "kernel/loom_service_nodes.c": "921a8e7fbce5e18181b32eb7b7be9cb7bfd49afe7f8610d42fdb2b1f7620db70"
+}

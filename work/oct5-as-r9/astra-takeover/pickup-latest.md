@@ -23,3 +23,11 @@ helpers and storage fixture do not implement dispatch. AS3/4 precede MM0-MM4.
 Preserve8192MiB floor, exact clean Stratum61dde37, Astra six pending/four
 protected drafts, all raw source-matched evidence. No Main/private user async/
 clipboard activation or128MiB change. Single-agent self-review only.
+
+Next prerequisite draft: fid-draft/state.json and self-review.txt. Uninstalled
+FID map/claim/source-borrow/open/CLUNK/abort-reap helper passes89checks/24mutants,
+node regressions11mutants and ARM64 object/layout checks. FID-F1 root aggregate
+pin exclusivity fixed before installation. No libc object dependency. Canonical
+kernel unchanged; no native or full Mac claim. Integrate coherent root binding,
+operation owner settlement and child-before-root retirement; do not treat draft
+as installed. Mac released; no running job from this step.

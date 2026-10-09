@@ -2497,3 +2497,11 @@ Actual RPC list/admission/callback/commit, FID/DAC and fixed/provided-buffer
 dispatch and readiness integration remain before AS3/4 and MM0-MM4. Canonical
 source supersedes the installed draft; no historical installer may be rerun.
 No Main/private async/clipboard activation or128MiB protection change.
+
+Isolated next-operation prerequisite (Astra October9): fid-draft remains
+uninstalled. Its exact WALK/open/CLUNK request claims and separate source-borrow
+count address root lifetime-pin ambiguity; local abort/reap retains the parent
+until derived identity is gone. Host89checks/24mutants, node11mutants and actual
+ARM64 page geometry pass. These checks establish only sequential helper behavior;
+root handshake binding, actual RPC/DAC/buffer/engine integration and native races
+are outstanding. See fid-draft/self-review.txt for FID-F1 and test-witness repairs.

@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -123,7 +123,7 @@
+     if(!n)return -T_E_NOENT;
+     if(!fid_parent(t,n,source,scope) || !fid_scope_ready(t,nodes,scope))return -T_E_CANCELED;
+     if(n->state!=LOOM_SERVICE_READY || n->fid_flags!=LFID_BOUND)return -T_E_NOENT;
+-    if(n->fid_claim || n->fid_borrows)return -T_E_BUSY;
++    if(n->fid_claim)return -T_E_BUSY;
+     int rc=loom_slot_pin(t,source,t->slots[source.slot].kind);
+     if(!rc){n->fid_claim=id;n->fid_flags|=LFID_OPENING;}
+     return rc;

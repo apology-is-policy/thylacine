@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -165,7 +165,7 @@
+     struct loom_service_node *p=fid_exact(t,nodes,n->parent,true);
+     if(!p || t->slots[n->parent.slot].kind!=LOOM_SERVICE_SCOPE ||
+        (p->state!=LOOM_SERVICE_ABORTING && p->state!=LOOM_SERVICE_RETIRED))return -T_E_BUSY;
+-    if(n->fid_claim || n->fid_borrows)return -T_E_BUSY;
++    if(n->fid_claim)return -T_E_BUSY;
+     (void)loom_slot_retire(t,source);n->state=LOOM_SERVICE_RETIRED;
+     return 0;
+ }

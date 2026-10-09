@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -113,7 +113,7 @@
+     if(!n)return -T_E_NOENT;
+     if(!n->fid_borrows)return -T_E_INVAL;
+     int rc=loom_slot_unpin(t,source);
+-    if(!rc)--n->fid_borrows;
++    if(!rc)(void)0;
+     return rc;
+ }
+ int loom_fid_claim_open(struct loom_slot_table *t,struct loom_service_node_table *nodes,

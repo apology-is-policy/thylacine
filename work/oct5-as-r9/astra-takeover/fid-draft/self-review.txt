@@ -1,0 +1,57 @@
+Astra single-agent self-review, October9. No independent audit.
+Uninstalled draft based on4d9bf4faf. Canonical kernel/build unchanged.
+
+FID mapping occupies24 added bytes per node: request claim64, wirefid32,
+access32, flags32, borrowcount32. Actual ARM64 compilation confirms64-byte
+nodes and4096-byte table within the existing full-page charge. Undefined-symbol
+inspection of both node and FID objects found only existing slot/stack symbols,
+no libc memcpy/memset dependency. No kernel ABI or allocation added.
+
+Fid claim identifies the exact ring request id and retains one slot pin across
+unlocked protocol work. WALK destination is RESERVED and exact-parent READY;
+commit rechecks full incarnation, parent/close/abort, claim and scope-local wire
+uniqueness including RETIRING mappings. Wire ids must still come from the real
+client's monotone allocator; neither this helper nor user data supplies protocol
+or namespace authority. Clone/component parsing and remote response proof are
+engine obligations. Binding does not drop its physical claim prematurely.
+
+FID-F1 found during self-review: aggregate slot pins cannot establish exclusive
+LOPEN ownership, especially on root scopes whose protocol/child pins persist.
+Replaced that proposed check before installation with explicit source-borrow
+count plus exclusive open claim. Claim precedes actual asynchronous stat/open;
+all new borrows stop until physical claim release. Open commit requires exact
+request and no FID borrowers, independent of parent/protocol pins. All mode0/1/2
+access publication still requires actual ordinary DAC/stat and remote proof.
+
+CLUNK refuses roots, claims the derived FID and immediately retires admission;
+earlier source borrows may drain. Wire selection and final completion refuse
+until all prior FID borrows end. Claim cannot leave before local retirement.
+Engine must establish actual Tclunk success OR completed scope-abort callback
+quiescence before finish. Abort retirement handles remaining unclaimed children
+without peer waits. Reap requires no pins/claim/borrow and exact held parent;
+child metadata/identity clears before parent unpin. Payload leases remain
+independent. All transitions use the same caller-held Loom lock; no callback,
+I/O, allocation, usercopy or external final drop in these helpers.
+
+controls-20261009T221251Z: actual C89checks plus24 targeted mutant rejections,
+LLVM22 ASan/UBSan, all source hashes stable and rechecked from result.json.
+Existing node reservation fixture +11mutants passes with expanded metadata in
+node-regression-20261009T2218Z. That directory is a label; actual execution
+preceded22:18. ARM64 compiler command/raw logs in arm64-result.json and adjacent
+files. Object binaries are local only, no boot or full kernel-link claim.
+
+Retained test development failures: controls-20261009T221052Z and221111Z show low-incarnation and reserved-ref mutants surviving because the later
+slot pin helper independently refused the bad ref. Added direct commit-boundary
+witnesses, which exercise the FID module's own guards. Run221131Z caught the
+missing RETIRING transition only at reap because ABORTING state already blocked
+new borrows; added an immediate slot-retirement assertion. Do not count those
+earlier incomplete runs as passes. Current25cases all match named assertions.
+
+Integration still required before installing/using this draft: actual root
+mapping at handshake commit; operation admission and exclusive source/destination
+owners before wire effects; scope abort/close settlement of operation owners,
+then child FIDs before root cleanup; READY progress/readiness/deadline/CQ handling;
+fixed and provided-buffer lifecycle; real normal/bulk peer and race fixtures.
+Public dispatch, AS3/4 and MM0-MM4 remain ahead. Prior50-boot results do not
+qualify this helper. No Main/private user async/clipboard/128MiB activation.
+Mac was held as Astra for controls and released immediately after completion.
