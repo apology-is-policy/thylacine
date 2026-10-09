@@ -236,3 +236,12 @@ ring-backing refusal, provisional/live-pool replacement refusal, settled drops
 after unmap, foreign-payer handling and private retirement. It does not enable
 private service dispatch or certify unimplemented protocol/worker lifetimes.
 The new source-specific full Mac matrix is pending.
+
+
+October 9: b010ace93 passed all 50 Mac HVF boots, 1840/1840 each, including
+the corrected loom.private_buffers row, pool/slot/owner rows, both D7 legs and
+boot banner. Run current-gate-20261009T001717Z has 100 hash-verified raw logs
+and ten pinned inputs. Default SMP1/4/8 and UBSan SMP4/8 each passed ten boots.
+The earlier 3dcff4cb9 fixture-address failure remains recorded as failed; it is
+not retroactively qualified. Pi/A72/KVM, guest final allocator reclamation and
+absent optional graphics probes remain unqualified. Private dispatch stays off.

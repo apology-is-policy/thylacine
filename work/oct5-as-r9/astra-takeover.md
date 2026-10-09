@@ -608,3 +608,25 @@ stability checks passed. This one boot does not replace the full Mac matrix;
 a new clean-source matrix is still required. Prior pool-owner50/50 remains
 bounded to1295a25da. Self-review only; no private activation, Main landing or
 128MiB removal. Continue remaining async ownership/protocol work before MM0-MM4.
+
+
+## October 9: corrected private-buffer full Mac gate verified
+
+Exact source b010ace93fae59f5bb28856d7b5456200aa8e60c passed the full
+50-boot Mac HVF matrix in current-gate-20261009T001717Z: ten boots each at
+default SMP1/4/8 and UBSan SMP4/8, all 1840/1840. Every boot includes
+loom.private_buffers, the pool/slot/owner fixtures, D7 overlap, twenty distinct
+completed d7user00..19 login cycles and the boot banner. Both runner and gate
+exit zero. All 100 copied serial/harness logs and ten captured inputs were
+hash-verified; see astra-takeover/current-gate-20261009T001717Z-result.json and
+the run's verify.py. Captured inputs are PINNED. External Stratum is exact clean
+61dde3727921e70e2c72fbd3c9e2044a192f4a54. Minimum recorded admission free space
+is 10399 MiB, above the 8192 MiB floor; the runner released Astra's Mac lease.
+
+This qualifies the corrected private registered-buffer fixture and recorded
+source on Mac HVF. The failed 3dcff4cb9 run remains retained as failed evidence.
+Optional Venus/Vulkan probes were absent from this ramfs; no graphics claim.
+Guest final allocator reclamation and Pi/A72/KVM remain open. Canonical pool
+member pin ownership, fixed-I/O exclusion and the remaining async protocol/worker
+integration precede MM0-MM4. Self-review only, not an independent audit. No Main
+landing, private async/clipboard activation or removal of the 128 MiB protection.
