@@ -35852,3 +35852,29 @@ and Astra6pending/4protected hashes intact. Single-agent self-review only.
 Continue actual immutable shared frontend and pool RETURN/CQ wakes, coherent
 installation and matched native/full Mac gates, then AS3/4 and MM0-MM4. No Main,
 private async/clipboard activation or128MiB change. See drain-draft/next-work.
+
+
+### Astra exact payload return and registered wake, October10
+
+Uninstalled `return-draft` adds the creator-authorized copied-record RETURN
+control. Exact image/creator authority, negotiated receipt feature and shape
+validation precede a locked live pool-slot/LEASED receipt transition. Successful
+return wakes the existing engine predicate after Ll; it needs no SQ/CQ room,
+allocation or source protocol pointer. A parked empty-pool reader wakes even
+with full CQ, then respects backpressure before claiming a fresh lease. Pending,
+stale/double and old-incarnation returns cannot release a newer payload.
+Leases remain returnable after source protocol collection, and pool-slot reuse
+preserves the old receipt's invalidity.
+
+3125 cumulative ASan/UBSan assertions (2885 prior drain regressions) and10 exact
+fault variants pass;55inputs/11rawpairs/2ARM64 control-layout objects reverified.
+Initial fixture wrongly tried pool registration after whole-ring close; correct
+scope-only retirement/reuse test now passes, with failure retained. Native
+wake/poll/IO, parsed replies, allocation/backing/ref and final protocol destruction
+remain controlled boundaries. No syscall/shared-SQE/native scheduling claim.
+Single-agent self-review only. Canonical97d495 unchanged; Macreleased/nojobs,
+8736MiB above8192floor, clean61dde37 and Astra10hashes intact. Continue immutable
+shared-SQE/creator frontend and CQ kick, coherent install and matched native/full
+Mac gates, then AS3/4 and MM0-MM4. No activation/128MiB protection change.
+See return-draft/state,self-review,next-work; it overrides only control/header
+before the exact drain-draft overlay stack.

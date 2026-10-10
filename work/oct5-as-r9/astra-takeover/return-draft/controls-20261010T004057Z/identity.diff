@@ -1,0 +1,11 @@
+--- control.c
++++ identity.c
+@@ -2678,7 +2678,7 @@
+ static int control_owner(struct Loom *l,struct Proc *p) {
+     if(!l || l->magic!=LOOM_MAGIC || !p || p->magic!=PROC_MAGIC) return -T_E_INVAL;
+     if(!loom_is_private(l)) return -T_E_OPNOTSUPP;
+-    if(p->as!=l->service_as || p->stripes!=l->service_creator) return -T_E_ACCES;
++    if(p->as!=l->service_as) return -T_E_ACCES;
+     return 0;
+ }
+ static struct loom_service_slot *control_exact(struct Loom *l,struct loom_service_ref ref) {

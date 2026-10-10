@@ -1,0 +1,11 @@
+--- control.c
++++ wake.c
+@@ -2702,7 +2702,7 @@
+     spin_unlock(&l->lock);
+     // Ll serializes return with the next claim; wake only after releasing it.
+     // No SQ/CQ lookup, allocation, native progress or scope pointer is needed.
+-    if(!rc)loom_private_close_changed(l);
++    /* fault: no registered wake */
+     return rc;
+ }
+ static struct loom_sqe sqe(unsigned opcode) {

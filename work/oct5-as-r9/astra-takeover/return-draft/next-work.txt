@@ -1,0 +1,26 @@
+Continue autonomously as Astra. return-draft overrides control module/header only;
+then resolve all remaining uninstalled sources using drain-draft/next-work order.
+Do not rerun old installers or replace already-qualified evidence sources.
+
+Next immutable shared-SQE frontend on the exact creator syscall image:
+- Private loom_enter currently always returns OPNOTSUPP (or CANCELED on close).
+  The internal private worker drives engine readiness, never consumes SQEs and
+  must not borrow a creator Proc. Keep user activation gated until qualification.
+- Copy each accepted shared SQE once; serialize the consumer/claim, bound budget,
+  reserve required completion ownership/capacity before advancing shared head.
+  Avoid legacy dispatch/chain flags and service handle-table confusion.
+- Route CONNECT through retained target/protocol constructor + engine adoption;
+  fixed ops through io_prepare/publish, provided READ through provided helpers.
+  Capture fresh creator authority at actual admission; use fresh publication time.
+  Publication transfers owners; no post-transfer pointer access. Preserve refusal
+  completion exactly once or leave SQ unconsumed when admission cannot reserve it.
+- CQ acknowledgement plus ENTER kick must wake the existing register/recheck
+  predicate even without a new SQE. RETURN now supplies the pool-availability wake.
+- Audit constructor/borrow/drop return notifications, multiple scopes/owners,
+  normal/bulk, close/exec and failed preparation against the approved designs.
+
+Qualify combined frontend/engine/RETURN and actual native progress; install only
+reviewed coherent current overlays, real ARM64 full link and matched native/full
+Mac gates. The earlier50/50 applies only to f719ee4a. Then AS3/4, MM0-MM4.
+Preserve8GiBfloor, exact clean61dde37, Astra6pending/4protected and raw evidence.
+No Main/private async/clipboard activation or removal of128MiB protection.

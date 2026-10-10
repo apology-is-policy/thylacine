@@ -2639,3 +2639,14 @@ protocolfree boundaries remain; no native/installed scheduling claim. Canonical
 97d495 unchanged. Macreleased/nojobs/8769MiB;clean61dde37/Astra10hashes intact.
 Next immutable shared frontend and actual RETURN/CQ wake integration, coherent
 install and matched native/full Mac gates,AS3/4,MM0-MM4. No activation/128MiBchange.
+
+Newest uninstalled return-draft overrides control/header atop drain-draft. Exact
+creator/image + copied negotiated RETURN transitions only matching LEASED receipt
+under Ll, then wakes registered empty-pool work outside Ll independent of SQ/CQ
+and source scope lifetime.3125cumulativechecks/10mutants,55inputs/11rawpairs/2ARM
+objects pass. Source-retired lease and reused-pool stale receipts covered; initial
+whole-close/re-registration fixture corrected with failure retained. Host native
+wake/IO/ref/backing boundaries remain; no syscall/shared-SQE/native scheduling
+claim. Canonical97d495 unchanged;Macfree/nojobs/8736MiB,clean61dde37/Astra10hashes
+preserved. Continue return-draft/next-work immutable shared frontend/CQ kick,
+coherent install and matched native/full Mac gates,AS3/4,MM0-MM4. No activation.

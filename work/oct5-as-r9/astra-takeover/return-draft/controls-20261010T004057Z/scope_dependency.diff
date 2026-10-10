@@ -1,0 +1,10 @@
+--- control.c
++++ scope_dependency.c
+@@ -2694,6 +2694,7 @@
+        !in->receipt.pool.incarnation || in->receipt.pool.slot>=LOOM_SERVICE_SLOT_COUNT ||
+        in->receipt.member>=LOOM_SERVICE_POOL_MEMBERS)return -T_E_INVAL;
+     if(!l->receipt_size)return -T_E_OPNOTSUPP;
++    if(loom_engine_empty(l->service_engine))return -T_E_NOENT;
+     spin_lock(&l->lock);
+     struct loom_service_slot *s=control_exact(l,in->receipt.pool);
+     struct loom_pool *pool=&l->service_pools->pools[in->receipt.pool.slot];

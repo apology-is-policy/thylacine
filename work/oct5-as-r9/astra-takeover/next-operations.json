@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Follow drain-draft/next-work overlay order. Actual immutable shared frontend and pool RETURN/CQ wake integration, coherent install and matched native/full Mac gates, AS3/4 then MM0-MM4.",
+  "next": "Follow return-draft/next-work and drain-draft source overlay order: immutable shared SQE/creator frontend and CQ kick, coherent install and matched native/full Mac gates, AS3/4 then MM0-MM4.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -36,5 +36,6 @@
   "ready_draft": "ready-draft/state.json",
   "action_draft": "action-draft/state.json",
   "iounit_draft": "iounit-draft/state.json",
-  "drain_draft": "drain-draft/state.json"
+  "drain_draft": "drain-draft/state.json",
+  "return_draft": "return-draft/state.json"
 }
