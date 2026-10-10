@@ -2742,3 +2742,24 @@ Next full current-source Mac matrix without source edits, raw verification, then
 native general-operation/provided tests and AS3/4 before MM0-MM4. Prior50/50 only
 qualifiesf719ee4a. Public private ENTER remains disabled. No Main/private async/
 clipboard activation or128MiB removal. Preserve all matched evidence.
+
+
+### Astra disk-floor recovery and pinned image matrix, October10
+
+Whole-image gate current-gate-20261010T011053Z was stopped by the independent
+disk guard at8247MiB (8192floor plus64MiB stop margin), during pool rebaking.
+No matrix boots ran and no gate pass is claimed. Owned processes exited and Mac
+was released. Failed run, keys/image hashes and recovery metadata are preserved.
+Exact ramfs/pool snapshot/system key clones were restored from immutable inputs,
+verified against the successful1855 native run; recovery returned8722MiB free.
+
+Next async-integration/pinned-matrix.py rebuilds default and UBSan kernels from
+current source only, derives all five rows from ci-smp-gate, runs the actual
+10-boot multiboot harness per row, captures8matched inputs and verifies100raw
+logs,1855tests,D7/20cycles,source/protected hashes and the continuous disk guard.
+Report this as the complete matrix stage with pinned image inputs, not as a
+successful whole-image ci-smp-gate rebuild. Read the newer
+astra-takeover/async-integration-matrix-flight.json when present; do not duplicate
+its work or modify tracked files while active. Prior native/host evidence remains
+bounded; native general operations/provided traffic,AS3/4 and MM0-MM4 follow.
+No Main/private async/clipboard activation or128MiB removal; single-agent review.

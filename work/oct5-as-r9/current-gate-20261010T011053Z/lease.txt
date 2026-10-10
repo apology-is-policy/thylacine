@@ -1,0 +1,4 @@
+mac   HELD by you for 0s, 2.0h left
+        why: Astra installed async integration full source-matched Mac matrix
+pi    FREE
+disk: 8.4 GiB available at /Users/northkillpd/projects/thylacine-astra

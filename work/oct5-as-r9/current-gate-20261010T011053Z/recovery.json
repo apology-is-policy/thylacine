@@ -1,0 +1,35 @@
+{
+  "owner": "astra",
+  "reason": "Interrupted rebake before matrix; restore exact native-qualified ramfs/pool/key set via APFS clone. Only interrupted build products replaced.",
+  "saved_inputs": "work/oct5-as-r9/current-gate-20261009T211533Z/inputs",
+  "before": {
+    "build/ramfs.cpio": {
+      "sha256": "1685b4015de1a1297140e9204721ff108953353cc60658f938ac027851ecf7dd",
+      "size": 96137888
+    },
+    "build/fixtures/pool.img.baked-snapshot": {
+      "sha256": "1286a70c2c21cddb2dfe812e31e42eefd767cd5996f04f468c6296b25679eaa3",
+      "size": 2684354560
+    },
+    "build/fixtures/system.key": {
+      "sha256": "8db9d047644224deec50ef9cefb6186af080a4191ba83dce1f407874c0c849dd",
+      "size": 3656
+    },
+    "build/fixtures/system.key.baked-snapshot": {
+      "sha256": "93a1ef728b35ff74e6c84ba3eb5c01d43ca13e756e9e3b76f5c01b951e0d1c63",
+      "size": 3656
+    },
+    "build/fixtures/pool.img": {
+      "sha256": "9fcdaef3b66e621abaa7891926a7fb180faeddd9c42b2dc1462ba0cf9daa7d2a",
+      "size": 2684354560
+    }
+  },
+  "restored": {
+    "build/ramfs.cpio": "e02f5c21d03add28a39ad95fe7bbed9beab4e33798295c0a48d76413694e51bd",
+    "build/fixtures/pool.img.baked-snapshot": "e09d69e638aac77f67beea8ae9f2071d0b29aecf771f61457580879d4d1734fd",
+    "build/fixtures/system.key": "6385d8b2e2feb305437705841140902cf888db83122d5d61c78cb3537804c873",
+    "build/fixtures/system.key.baked-snapshot": "6385d8b2e2feb305437705841140902cf888db83122d5d61c78cb3537804c873"
+  },
+  "free_after_mib": 8722,
+  "verified": true
+}

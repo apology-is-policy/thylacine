@@ -10,5 +10,7 @@
   "minimum_free_mib": 8617,
   "review": "single-agent self-review; not independent",
   "limits": "Native immutable frontend CONNECT normal/bulk, malformed refusal, CQ acknowledgement and existing storage/engine/close gates. General WALK/LOPEN/READ/WRITE/provided/MORE native traffic and full Mac qualification still owed; host qualification remains bounded.",
-  "next": "Run full current-source Mac matrix without changing source; verify raw logs. Then add native general-operation/provided-payload exercises and complete AS3/4 before MM0-MM4. Never reinstall historical draft files."
+  "next": "Run pinned-matrix.py on clean committed source; it rebuilds default/UBSan kernels, uses exact native-qualified images, actual five derived matrix rows and full raw verifier. This is matrix-stage qualification, not a successful whole-image rebake. Then native general operations/provided,MORE,AS3/4,MM0-MM4.",
+  "full_gate_attempt": "work/oct5-as-r9/current-gate-20261010T011053Z",
+  "full_gate_result": "Stopped143 by disk guard at8247MiB, no matrix boots; exact native image set restored."
 }

@@ -7,6 +7,14 @@
       "problem": "Isolated draft operation includes mm/slub.h relative to kernel instead of ../mm/slub.h; canonical CMake build fails.",
       "evidence": "build.log",
       "next": "Installed ../mm/slub.h corrected canonical build; full link and native1855 gate pass."
+    },
+    {
+      "id": "INTEGRATE-GATE-DISK",
+      "state": "recovered-images-matrix-stage-next",
+      "problem": "Whole-image rebake consumed disk headroom; disk guard stopped owned process group at8247MiB before8192floor. No matrix boots ran.",
+      "evidence": "work/oct5-as-r9/current-gate-20261010T011053Z",
+      "repair": "Preserved logs/hashes of interrupted products and restored exact native-qualified ramfs/pool/key clones.8722MiB free after recovery. Rebuild both kernels only, then actual five-row matrix with continuous margin guard.",
+      "limits": "No successful ci-smp-gate whole-image rebuild claim."
     }
   ],
   "resource_note": "First brief build accidentally continued after yip hold syntax failed because shell command lacked set -e. Mac had been observed FREE. Build failed at include resolution. Preserved raw evidence; valid Astra 30-minute Mac hold obtained before continuation. No falsified lease check. Subsequent runners must assert successful hold and disk floor before compute."

@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Run full current-source Mac matrix without changing source; verify raw logs. Then add native general-operation/provided-payload exercises and complete AS3/4 before MM0-MM4. Never reinstall historical draft files.",
+  "next": "Read latest async-integration-matrix-flight.json; execute/verify pinned-image full matrix without source edits or duplicate jobs. Then native general operations/provided and AS3/4 before MM0-MM4.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
