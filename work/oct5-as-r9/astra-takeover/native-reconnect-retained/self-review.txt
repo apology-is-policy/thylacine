@@ -19,3 +19,5 @@ No production changes. This qualifies backlog-bound retries only, not all quota
 failures, every connection phase, independent media or client/clipboard adoption.
 Current source is frozen in native-reconnect smoke; this patch is not installed
 or verified. Apply only after its checkpoint, then rebuild matched artifacts.
+
+Installed and verified in smoke-20261010T025237Z: five rows1858, two1000-attempt loops, raw/source/artifact hashes reverified. Minimum9165MiB. Single-agent review; no broader qualification implied.

@@ -1,1 +1,7 @@
-{"owner":"astra","installed":false,"state":"prepared-unverified","next":"After native-reconnect run verifies and checkpoint commits, inspect/apply retained.patch. Adds1000attempts with noaccept,32retainedtorn endpoints and968backlog refusals. No production change."}
+{
+  "owner": "astra",
+  "installed": true,
+  "state": "verified-five-row-smoke",
+  "next": "Checkpoint then apply reviewed native-stages patch; broader AS3/owned clients, AS4/MM0-MM4 remain.",
+  "run": "work/oct5-as-r9/astra-takeover/native-reconnect-retained/smoke-20261010T025237Z"
+}

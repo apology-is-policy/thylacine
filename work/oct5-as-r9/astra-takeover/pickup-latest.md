@@ -127,3 +127,36 @@ Next reviewed UNINSTALLED native-reconnect-retained/retained.patch adds a second
 1000attempts with no server acceptance:32torn endpoints hold80credits and968
 backlog refusals must not grow retained storage. Verify after checkpoint. Broader
 AS3/owned clients,AS4/MM0-MM4 remain; no activation/Main/128MiB change. Mac released.
+
+## Newest retained-backlog verification in flight
+
+Checkpoint8f31d58b9 saves corrected1000reconnect evidence. The reviewed
+native-reconnect-retained/retained.patch is now APPLIED, not a future installer.
+Read native-reconnect-retained-flight.json and preserve live jobs. Same1858tests
+now include two1000-attempt loops: per-attempt late accept, then no accept during
+retry (32torn queued endpoints/80credits,968backlog refusals), followed by exact
+final drain/refund. Five smoke rows pending; tracked source/HEAD frozen until
+runner completion. Raw verification and checkpoint next, then broaderAS3 native
+stage/close/exec/exit/independent-media coverage and owned clients,AS4/MM0-MM4.
+Do not duplicate historical gates or treat old source results as this new pass.
+
+
+### Astra retained-backlog stress verified, October 10
+
+The actual private worker now completes two 1000-attempt reconnect loops per
+boot. The second accepts no peer during retries: 16 normal and 16 bulk torn
+endpoints retain exactly 80 credits, while 968 backlog refusals leave retained
+storage bounded. Each local scope retires/reaps; final late acceptance and last
+unref restore the original native endpoint/credit counts. No production change.
+
+Run native-reconnect-retained/smoke-20261010T025237Z passed five one-boot rows
+(default 1/4/8, UBSan 4/8), 1858/1858 tests, D7 overlap and 20 login cycles each.
+Source 8f31d58b9 plus diff ec849c4ad3; 10 raw logs, 41 source hashes, six inputs
+per row, cloned kernels, clean external Stratum 61dde37 and Astra's ten protected
+hashes reverified before documentation changes. Minimum free space 9165 MiB.
+This is bounded smoke evidence, not a new 50-boot qualification or AS3 completion.
+
+Single-agent self-review recorded. Next native-stages/stages.patch is reviewed,
+UNINSTALLED and unverified: cancellation after each of six complete setup
+requests, in both connection classes. Broader close/exec/exit, independent media,
+owned clients, AS4 and MM0-MM4 remain. No Main/private activation/128 MiB change.

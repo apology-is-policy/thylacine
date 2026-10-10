@@ -1,0 +1,14 @@
+Astra single-agent review of uninstalled stage fixture. Pause peer at a fully
+captured TVERSION,TATTACH,pre-WALK GETATTR,TWALK,pre-LOPEN GETATTR orTLOPEN. Prior
+exchanges use existing wire responder; no reply is injected for paused request.
+Actual private worker drives protocol; fixture only yields and services peer.
+Exact abort control must publish local retirement with retained server/entry refs,
+negative CQE with original correlation and no success flags/descriptor. CQ uses
+acquire/release and physical request/fixed owners must settle before unregister.
+No synchronous engine visits. Normal/bulk tested separately. Baseline pause0 never
+matches seen+1, preserving existing happy-path and IO/reconnect witnesses.
+
+Metadata lifetime is guaranteed by held engine pin and outer retained Loom;
+cleanup returns pin, closes/joins actualworker, then drops mapping/endpoint.
+This covers six response-stall boundaries, not partial outbound WRITE, actual
+exec/exit races or independent media throughput. Public activation remains gated.
