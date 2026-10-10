@@ -1,12 +1,12 @@
 {
   "owner": "astra",
-  "state": "native-general-provided-qualified-as3-next",
+  "state": "native-worker-smoke-verified-as3-faults-next",
   "source_base": "f719ee4a3429f99cbd08a552dcdaedb54c5906ff",
   "host_run": "work/oct5-as-r9/astra-takeover/operations-draft/decode-controls-20261009T211810Z",
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Continue AS-3: raw C/Rust client ownership boundaries and native hostile/stalled peer schedules, including general operation worker scheduling. Full new-source Mac matrix remains owed; prior 50/50 is source98dd4b618 only. AS-4 then MM0-MM4, no activation or128MiB removal.",
+  "next": "AS-3 hostile/stalled peer native schedules, then C/Rust owned-buffer/lease clients. Raw registration already unsafe. AS-4 before MM0-MM4. Full50boot gate remains source98dd4b618 only; no activation or128MiB change.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -42,5 +42,6 @@
   "frontend_connect": "frontend-connect/state.json",
   "async_integration": "async-integration/state.json",
   "matrix_run": "work/oct5-as-r9/pinned-matrix-20261010T011750Z",
-  "native_operations": "native-operations/state.json"
+  "native_operations": "native-operations/state.json",
+  "native_worker": "native-worker/state.json"
 }

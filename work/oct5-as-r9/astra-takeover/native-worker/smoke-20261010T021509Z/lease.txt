@@ -1,0 +1,4 @@
+mac   HELD by you for 2m, 57m left
+        why: Astra native worker operation and payload qualification
+pi    FREE
+disk: 8.2 GiB available at /Users/northkillpd/projects/thylacine-astra

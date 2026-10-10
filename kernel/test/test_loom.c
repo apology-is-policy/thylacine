@@ -2994,10 +2994,12 @@ done:
 
 // Real SrvConn framing and installed engine, with a deterministic wire peer.
 // The peer reads every emitted request before replying; it is not a filesystem
-// server and the fixture drives bounded engine visits instead of its worker.
+// server. The actual private worker owns progress; the fixture only yields,
+// reads peer frames and acknowledges CQEs through the creator frontend.
 struct loom_native_peer {
     u8 request[512];
     u32 used, seen;
+    struct Proc *creator;
 };
 static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *peer) {
     static const u8 sequence[]={P9_TVERSION,P9_TATTACH,P9_TGETATTR,P9_TWALK,
@@ -3040,20 +3042,30 @@ static bool loom_native_completion_flags(struct Loom *l,struct SrvConn *cn,
     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
     u64 end=timer_now_ns()+2000000000ull;
     do {
-        (void)loom_engine_visit(l,timer_now_ns());
+        sched();
         if(loom_native_peer_step(cn,peer)<0)return false;
-        if(l->cq_tail!=head) {
+        u32 tail=__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE);
+        if(tail!=head) {
             struct loom_cqe copy=cq[head&(l->cq_entries-1u)];
-            if(l->cq_tail!=head+1 || copy.user_data!=data || copy.result!=result || copy.flags!=flags)return false;
+            if(tail!=head+1 || copy.user_data!=data || copy.result!=result || copy.flags!=flags)return false;
             if(receipt) {
                 struct loom_service_buffer_receipt *paired=(void *)(l->ring_kva+l->receipt_off);
                 *receipt=paired[head&(l->cq_entries-1u)];
             }
             __atomic_store_n(&h->cq_head,head+1,__ATOMIC_RELEASE);
-            // Delivery can precede physical owner destruction. Drain bounded
-            // cleanup before admitting the next request to this two-slot ring.
-            for(u32 i=0;i<16;++i)(void)loom_engine_visit(l,timer_now_ns());
-            return true;
+            if(loom_private_submit(l,peer->creator,0)<0)return false;
+            // A visible terminal does not prove its storage has been freed.
+            // Wait for the actual worker to return the request quota. MORE
+            // keeps its owner, and a retained payload must not be returned here.
+            if(flags&LOOM_CQE_MORE)return true;
+            do {
+                spin_lock(&l->lock);
+                bool retired=l->service_requests.occupied==1 && !l->service_fixed_count;
+                spin_unlock(&l->lock);
+                if(retired)return true;
+                sched();
+            }while(timer_now_ns()<end);
+            return false;
         }
         sched();
     }while(timer_now_ns()<end);
@@ -3074,6 +3086,14 @@ static bool loom_native_submit(struct Loom *l,struct Proc *creator,struct loom_s
     sq[at].user_data=0xdead; // no completion may consult the shared copy later
     return rc==1;
 }
+static u64 loom_native_epoch(struct Loom *l) {
+    spin_lock(&l->lock);u64 epoch=l->service_engine->change;
+    spin_unlock(&l->lock);return epoch;
+}
+static bool loom_native_peer_empty(struct SrvConn *server) {
+    spin_lock(&server->c2s.lock);bool empty=!server->c2s.count;
+    spin_unlock(&server->c2s.lock);return empty;
+}
 static const char *loom_native_operations_case(struct Loom *l,struct Proc *creator,
     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
     const char *error=NULL;u64 va=0;
@@ -3081,6 +3101,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     struct loom_service_ref scope={0},child={0};
     struct loom_native_peer peer;
     for(u32 i=0;i<sizeof(peer);++i)((u8 *)&peer)[i]=0;
+    peer.creator=creator;
     struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
 #define NO(c,m) do{if(!(c)){error=m;goto done;}}while(0)
     NO(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
@@ -3090,6 +3111,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        ._resv1={0,target.incarnation,scope.incarnation,0}}),"native CONNECT submission");
     NO(!loom_engine_get(l,scope,&held),"native operation observation pin");
     server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
+    NO(!loom_private_start_executor(l),"native operation worker starts");
     NO(server==held->admission.conn && loom_native_completion(l,server,&peer,100,(s32)scope.slot),
        "native emitted version and attach complete CONNECT");
     s64 attached=sys_burrow_attach_for_proc(creator,PAGE_SIZE);
@@ -3138,8 +3160,8 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     NO(loom_private_pool_reap(l,pool)==-T_E_BUSY,"CQ consumption leaves payload leased");
     pooled.flags|=LOOM_SQE_MULTISHOT;pooled.user_data=107;
     NO(loom_native_submit(l,creator,pooled),"native MORE stream accepted with empty pool");
-    for(u32 i=0;i<32;++i)(void)loom_engine_visit(l,timer_now_ns());
-    NO(peer.seen==9 && !server->c2s.count,"empty pool emits no premature next READ");
+    for(u32 i=0;i<32;++i)sched();
+    NO(peer.seen==9 && loom_native_peer_empty(server),"empty pool emits no premature next READ");
     struct loom_service_buffer_return give={.size=sizeof(give),.version=1,.receipt=receipt};
     NO(!loom_private_service_return(l,creator,&give),"native payload return releases next shot");
     NO(loom_private_service_return(l,creator,&give)<0,"native duplicate return refused before reuse");
@@ -3147,13 +3169,13 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        receipt.lease!=give.receipt.lease,"native MORE shot acquires fresh receipt");
     give.receipt=receipt;
     NO(!loom_post_cqe(l,800,0,0) && !loom_post_cqe(l,801,0,0),"native fills CQ before RETURN");
-    u64 epoch=l->service_engine->change;
-    NO(!loom_private_service_return(l,creator,&give) && l->service_engine->change!=epoch,
+    u64 epoch=loom_native_epoch(l);
+    NO(!loom_private_service_return(l,creator,&give) && loom_native_epoch(l)!=epoch,
        "native RETURN changes wake epoch independently of full CQ");
-    for(u32 i=0;i<32;++i)(void)loom_engine_visit(l,timer_now_ns());
-    NO(peer.seen==10 && !server->c2s.count,"full CQ prevents next provided dispatch");
+    for(u32 i=0;i<32;++i)sched();
+    NO(peer.seen==10 && loom_native_peer_empty(server),"full CQ prevents next provided dispatch");
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
-    __atomic_store_n(&h->cq_head,l->cq_tail,__ATOMIC_RELEASE);
+    __atomic_store_n(&h->cq_head,__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE),__ATOMIC_RELEASE);
     NO(loom_private_submit(l,creator,0)==0 &&
        loom_native_completion_flags(l,server,&peer,107,5,LOOM_CQE_MORE|LOOM_CQE_SERVICE_BUFFER,&receipt) &&
        receipt.lease!=give.receipt.lease,"native CQ drain resumes next MORE shot");
@@ -3173,6 +3195,8 @@ done:
     if(held)(void)loom_engine_put(l,scope,held);
     loom_handle_closed(l);
     if(!loom_close_wait_state(l,LCLOSE_DONE) && !error)error="native operation close timeout";
+    if(l->sqpoll && !__atomic_load_n(&l->sqpoll_exited,__ATOMIC_ACQUIRE))
+        extinction("native operation fixture worker failed to quiesce");
     if(va)(void)sys_burrow_detach_for_proc(creator,va,PAGE_SIZE);
     if(server)srvconn_unref(server);
 #undef NO

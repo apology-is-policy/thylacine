@@ -2808,3 +2808,26 @@ is single-agent. Mac released; no public private ENTER/clipboard activation or
 128MiB change. Earlier50/50 remains source98dd4b618 only; new fixture results are
 bounded native evidence. Continue AS-3 C/Rust ownership and adversarial native
 schedules, then AS-4 and MM0-MM4.
+
+
+### Astra actual worker operation smoke verified, October 10
+
+The native general/provided probe now runs entirely through the actual private
+worker: no explicit engine visits drive it. CQ consumption uses acquire loads
+and zero-submit creator kicks; physical terminal cleanup is observed under Ll.
+Wake epoch and native channel occupancy observations take their owning locks.
+Whole-close joins the worker before peer/mapping cleanup.
+
+Five source-matched one-boot rows pass: default SMP1/4/8 and UBSan SMP4/8, each
+1856/1856,D7overlap and20login cycles. Run native-worker/smoke-20261010T021745Z
+under work/oct5-as-r9/astra-takeover. Reverified10rawlogs,41installed source hashes,
+six inputs per run with cloned kernels,Stratum clean61dde37 and Astra10preserved
+files. Minimum9056MiB. These smoke rows do not replace the50boot qualification
+of98dd4b618. The controlled peer still leaves hostile/stalled schedules and safe
+client APIs pending. Self-review is single-agent; no activation/128MiB change.
+
+Earlier smoke021509Z stopped at8255MiB before boot completion, preserving raw
+interruption evidence. Diagnostic signal handling now joins its child and saves
+interrupted results. Clearing only799MiB of rebuildable Go cache restored space;
+no source, saved binary or evidence was removed. Mac released after successful
+smoke. Continue AS-3 native faults and owned C/Rust clients, then AS-4/MM0-MM4.
