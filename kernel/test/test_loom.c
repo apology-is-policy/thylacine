@@ -3094,8 +3094,101 @@ static bool loom_native_peer_empty(struct SrvConn *server) {
     spin_lock(&server->c2s.lock);bool empty=!server->c2s.count;
     spin_unlock(&server->c2s.lock);return empty;
 }
+// Each fault starts after a real worker-driven CONNECT/WALK/LOPEN. Hold the
+// server endpoint and observation pin until local retirement is witnessed;
+// otherwise ordinary endpoint destruction could hide a stuck owner.
+static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
+    struct SrvConn *server,struct loom_service_ref scope,
+    struct loom_service_ref child,u8 *bytes,u32 fault) {
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+    u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+    bytes[64]=0xa5;bytes[68]=0x5a;
+    if(!loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
+       .handle_idx=child.slot,.len=5,.user_data=900,
+       ._resv1={64,child.incarnation,0,0}}))return "fault READ submission";
+    u8 request[64];u32 used=0,size=0;u8 type=0;u16 tag=0;
+    u64 end=timer_now_ns()+2000000000ull;
+    do {
+        long n=srvconn_server_recv(server,request+used,sizeof(request)-used);
+        if(n<0)return "fault peer lost request";
+        used+=(u32)n;
+        if(used>=P9_HDR_LEN) {
+            if(p9_peek_header(request,used,&size,&type,&tag)<0 || size>sizeof(request))
+                return "fault request framing";
+            if(used==size)break;
+        }
+        sched();
+    }while(timer_now_ns()<end);
+    if(used!=23 || type!=P9_TREAD || size!=used)return "fault waits for emitted READ";
+    u8 reply[256];int count=canonical_responder(NULL,request,used,reply,sizeof(reply));
+    if(count!=16)return "fault canonical READ shape";
+    // 1: no response, 2: partial header, 3: partial body, 4: impossible
+    // frame length, 5: unexpected reply type, 6: cancellation with full CQ.
+    int send=0;
+    if(fault==2)send=3;
+    if(fault==3)send=13;
+    if(fault==4){(void)p9_pack_u32(reply,sizeof(reply),6);send=7;}
+    if(fault==5){reply[4]=P9_RWRITE;send=count;}
+    if(send && srvconn_server_send(server,reply,send)!=send)return "fault response injection";
+    bool malformed=fault==4 || fault==5;
+    if(!malformed) {
+        // Let the real worker consume the fragment and park without a terminal.
+        for(u32 i=0;i<32;++i)sched();
+        if(__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE)!=head)
+            return "stalled response completed prematurely";
+        if(fault==6 && (loom_post_cqe(l,800,0,0) || loom_post_cqe(l,801,0,0)))
+            return "fault fills CQ";
+        struct loom_service_control control={.size=sizeof(control),.version=1,.object=scope};
+        if(loom_private_service_abort(l,creator,&control)<0)return "fault abort control";
+    }
+    struct loom_service_snapshot snap;
+    bool retired=false;
+    end=timer_now_ns()+2000000000ull;
+    do {
+        if(control_native_query(l,creator,scope,&snap))return "fault scope query";
+        retired=snap.state==LOOM_SERVICE_RETIRED && (snap.status_flags&LOOM_SERVICE_LOCAL_RETIRED);
+        if(retired)break;
+        sched();
+    }while(timer_now_ns()<end);
+    if(!retired)return "fault local retirement stalls with retained endpoint";
+    if(snap.reason>=0 || (!malformed && snap.reason!=-T_E_CANCELED))return "fault retirement reason";
+    if(fault==6) {
+        if(__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE)!=head+2 || !snap.pending_terminals)
+            return "full CQ must retain canceled operation terminal";
+        head+=2;__atomic_store_n(&h->cq_head,head,__ATOMIC_RELEASE);
+        if(loom_private_submit(l,creator,0)<0)return "fault CQ wake";
+    }
+    bool completed=false;
+    end=timer_now_ns()+2000000000ull;
+    do {
+        u32 tail=__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE);
+        if(tail!=head) {
+            struct loom_cqe value=cq[head&(l->cq_entries-1u)];
+            if(tail!=head+1 || value.user_data!=900 || value.result>=0 || value.flags ||
+               (!malformed && value.result!=-T_E_CANCELED))return "fault terminal identity or status";
+            completed=true;break;
+        }
+        sched();
+    }while(timer_now_ns()<end);
+    if(!completed)return "fault terminal not delivered";
+    __atomic_store_n(&h->cq_head,head+1,__ATOMIC_RELEASE);
+    if(loom_private_submit(l,creator,0)<0)return "fault terminal acknowledgement";
+    bool released=false;
+    do {
+        spin_lock(&l->lock);
+        released=!l->service_fixed_count && l->service_requests.occupied==1;
+        spin_unlock(&l->lock);
+        if(released)break;
+        sched();
+    }while(timer_now_ns()<end);
+    if(!released)return "fault physical READ owner retained";
+    if(bytes[64]!=0xa5 || bytes[68]!=0x5a)return "failed READ published partial payload";
+    if(loom_private_register_buffers(l,creator,NULL,0))return "fault payload unregister";
+    return NULL;
+}
 static const char *loom_native_operations_case(struct Loom *l,struct Proc *creator,
-    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
+    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk,u32 fault) {
     const char *error=NULL;u64 va=0;
     struct SrvConn *server=NULL;struct loom_service_protocol *held=NULL;
     struct loom_service_ref scope={0},child={0};
@@ -3133,6 +3226,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        .handle_idx=child.slot,.offset=2,.user_data=102,._resv1={0,child.incarnation,0,0}}) &&
        loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
     NO(l->service_nodes->nodes[child.slot].fid_iounit==4096,"native negotiated iounit retained");
+    if(fault) {error=loom_native_fault(l,creator,server,scope,child,bytes,fault);goto done;}
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
        .handle_idx=child.slot,.len=5,.user_data=103,._resv1={64,child.incarnation,0,0}}) &&
        loom_native_completion(l,server,&peer,103,5),"native fixed READ completion");
@@ -3278,7 +3372,12 @@ static const char *loom_protocol_fixture(u32 kind) {
            "zero-reference retirer wakes joins and refunds the live private worker");
         goto done;
     }
-    if (kind==17 || kind==18) {error=loom_native_operations_case(l,p,poster,reg,refs[kind==18],kind==18);goto done;}
+    if (kind>=19 && kind<=30) {
+        bool bulk=(kind-19)&1u;
+        error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,1+(kind-19)/2);
+        goto done;
+    }
+    if (kind==17 || kind==18) {error=loom_native_operations_case(l,p,poster,reg,refs[kind==18],kind==18,0);goto done;}
     if (kind==15 || kind==16) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==16],kind==16,true);goto done;}
     if (kind==13 || kind==14) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==14],kind==14,false);goto done;}
     if (kind>=7) {error=loom_close_boundary_case(&l,p,poster,reg,refs[0],kind-6,goal,base);goto done;}
@@ -3438,4 +3537,12 @@ void test_loom_private_native_operations(void) {
     const char *error=loom_protocol_fixture(17);
     if(!error)error=loom_protocol_fixture(18);
     TEST_ASSERT(!error,error);
+}
+
+void test_loom_private_native_faults(void);
+void test_loom_private_native_faults(void) {
+    for(u32 kind=19;kind<=30;++kind) {
+        const char *error=loom_protocol_fixture(kind);
+        TEST_ASSERT(!error,error);
+    }
 }

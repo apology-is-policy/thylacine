@@ -3714,3 +3714,24 @@ interruption evidence. Diagnostic signal handling now joins its child and saves
 interrupted results. Clearing only799MiB of rebuildable Go cache restored space;
 no source, saved binary or evidence was removed. Mac released after successful
 smoke. Continue AS-3 native faults and owned C/Rust clients, then AS-4/MM0-MM4.
+
+
+### Astra native READ faults verified, October 10
+
+`loom.private_native_faults` adds six worker-driven READ schedules in both normal
+and bulk classes after real CONNECT/WALK/LOPEN: silent peer, partial header/body,
+impossible frame length, wrong reply type and full-CQ cancellation. The retained
+peer endpoint and observation pin survive until local retirement. Negative CQE
+identity, fixed-owner release, unregister and unchanged failed-read payload are
+checked. Full CQ retains the cancellation terminal until creator acknowledgement.
+
+Five single-boot rows pass1857/1857,D7overlap/20cycles: default1/4/8,UBSan4/8.
+Run astra-takeover/native-faults/smoke-20261010T023045Z, sourcecc644dc6a plus
+recorded diff62dc1a57. Ten raw logs,41sources,six inputs/row,kernel clones and
+Astra10protected/pending hashes reverified; Stratum clean61dde37; minimum9221MiB.
+This is bounded smoke evidence, not50boot or completed AS3 qualification.
+Single-agent review records that fragment consumption before cancellation is
+scheduler-dependent; next change will observe actual transport drain. Prepared
+followup-write-deadline.patch is UNINSTALLED and also adds emitted WRITE abort
+and READ deadline cases. No production kernel change or activation/128MiB change.
+Mac released. Continue broader AS3 faults and owned clients, thenAS4/MM0-MM4.

@@ -1,347 +1,63 @@
-# Current installed integration (October10)
-Canonical sources now contain the coherent current async overlays. Historical
-uninstalled sections below are evidence, not installation instructions. Read
-async-integration/state.json and any newer flight before acting. Do not mutate
-sources during the next full Mac matrix. Public private ENTER remains gated.
+# Astra GUI continuation — October 10
 
-# Astra GUI continuation
+Sole active GUI conversation01a121cd-4ad5-73d1-bb8f-21a4b799519e. Work autonomously
+as Astra on corona/async-memory in thylacine-corona; do not resume/message archived
+predecessor. Yip only via work/oct5-as-r9/astra-yip.sh (Astra checkout/identity),
+call0161-operator-approved-async-lifecycle-and-memory-acc. Operator transferred
+Corona work and permits reclaiming Main/Aux/Corona resources until Monday.
+Single-agent self-review only. Preserve8192MiB floor/8256stop margin, Astra six
+pending/four protected files and exact clean external Stratum61dde37.
 
-Only active GUI thread01a121cd-4ad5-73d1-bb8f-21a4b799519e, autonomous.
-Implementation thylacine-corona, corona/async-memory. Yip only via astra-yip.sh
-in Astra checkout/identity. No archived-thread messaging.
+## Current canonical implementation
 
-Executor f719ee4a3 qualifies50/50 Mac1853/D7/20cycles. Evidence79dfd1267; raw
-100logs/10pinned inputs, minimum9133MiB. Runner41037/verifier41099 exited.
-Read executor-current-flight.json/result; never duplicate historical gates.
+fd0d8981 installed coherent async stack. Historical draft installers are obsolete:
+DO NOT rerun them. next-operations.json preserves layer/evidence links. Internal
+creator frontend and actual private worker run CONNECT/WALK/LOPEN/READ/WRITE/CLUNK,
+provided pools/MORE/RETURN and retirement. Public private ENTER stays gated.
 
-Canonical operation storage/request-owner ledger and shape/reply helpers are
-installed. NEVER reinstall old copies. Read next-operations.json and
-operations-draft/self-review.txt. Host sanitizer clean/mutant checks and real
-ARM64 link pass; CAP-L1 missing libc memcpy from struct assignment repaired by
-explicit byte copying, failure retained. Native operation-storage-native-
-20261009T215931Z passes1854/D7/20cycles with11source/6input hashes and real
-normal/bulk allocation/quota/close-storage cases. No full new-source Mac claim.
-Mac resource released after native. Storage checkpoint e7ff5d1c7 committed with
-normal hooks. Continue RPC list/admission/callback/commit, FID/DAC/fixed/provided-buffer
-ownership and READY readiness integration per operations-draft/rpc-integration-plan.txt. These
-helpers and storage fixture do not implement dispatch. AS3/4 precede MM0-MM4.
+## Evidence and scope
 
-Preserve8192MiB floor, exact clean Stratum61dde37, Astra six pending/four
-protected drafts, all raw source-matched evidence. No Main/private user async/
-clipboard activation or128MiB change. Single-agent self-review only.
+98dd4b618 qualifies50/50 pinned-image matrix1855tests (default1/4/8,UBSan4/8,
+ten boots each), run work/oct5-as-r9/pinned-matrix-20261010T011750Z. Earlier
+whole-image rebake stopped143 at8247MiB before matrix; never claim it passed.
+Restored pinned images match successful native evidence. Do not duplicate old gates.
 
-FID helper now INSTALLED with coherent actual CONNECT root mapping and final
-child-before-parent teardown. Canonical sources supersede fid-draft; never
-reinstall older copies. Read fid-integration/state.json/self-review.txt.
-Real link, CONNECT11schedules/14mutants and final metadata11cases/7mutants pass.
-Native fid-integration/native-20261009T221811Z passes1854/D7/20cycles with8source
-and6artifact hashes stable. Actual normal/bulk root borrow and unused child
-retained across close with charged operation storage. Mapped derived cleanup
-has simulated host evidence only; general RPC consumers remain unimplemented.
-No full new-source Mac claim. Mac released, no running job. Continue actual RPC
-admission/list/callback/commit and READY readiness, DAC/fixed/provided buffers.
-
-Next uninstalled layer: rpc-draft/state.json, self-review.txt, next-work.txt.
-RPC owner/list transitions pass50checks/21mutants and actual ARM64 object, with
-operation640B/protocol42288B. RPC-R1 malformed callback requires scope abort.
-No actual client submission or native queue integration yet; canonical kernel
-remains97d495fcb. Wire real per-operation programs and admission, fair READY
-progress, buffer/DAC ownership and close disposal before installing the queue.
-Old CONNECT-only close gate must drain operation owners before requiring zero
-entry pins. Mac released; no running job; no duplicate historical gates.
-
-Wire adapter is now separately verified and still uninstalled; read
-wire-draft/state.json, self-review.txt and next-work.txt. Actual client-submit
-function plus session/codec/transport/capture pass 156 checks and 14 mutants;
-ARM64 real-header object passes. WIRE-R1 distinguishes local no-wire EAGAIN from
-remote EAGAIN, preventing ambiguous write replay. Combine with RPC owner only
-with one authoritative expectation/payload copy and coherent admission/READY/
-close integration. No native queue or DAC claim. Mac released, no running gate.
-
-Staged DAC program now verified but uninstalled: program-draft/state.json,
-self-review.txt and next-work.txt. Actual perm plus wire/submit path passes
-4608 DAC cases, 18711 total assertions and15 mutants; ARM64 no-libc object passes.
-Preserves directory-before-search and symlink-open refusal, captured creator
-value and no remote-EAGAIN replay. Next unify owner with program.wire (one
-expectation/payload copy), persist the constructor's fresh identity, then actual
-FID/buffer admission, fair READY and physical close cleanup. Canonical still
-97d495; no native queue/actual creator admission claim. Mac released, no jobs.
-
-Combined uninstalled owner now supersedes rpc-draft working copies; read
-owner-program-draft/state.json, self-review.txt and next-work.txt. Constructor
-retains fresh identity; program.wire is authoritative for builder/capture.
-Submit/advance consume once; completed program required before positive finish.
-160 sanitizer checks/17mutants +constructor14mutants; actual ARM64776B owner.
-Raw evidence reverified. Dependencies program-draft/wire-draft stay exact.
-No native admission/progress/close proof; canonical still97d495. Next actual
-FID/destination/fixed/provided admission then coherent READY and physical close
-integration before queue installation. Mac released, no running jobs;9055MiB.
-
-Latest uninstalled working set is admission-draft (supersedes earlier combined
-owner copies, preserving evidence); read state/self-review/next-work. Actual FID
-source/destination/open/CLUNK transactions and atomic queue claim are verified:
-257checks/26mutants plusconstructor16mutants; ARM64owner816B. Source-matched hashes
-rechecked; FID test success is synthetic, not native remote/driver qualification.
-Next canonical fixed/provided buffers and immutable creator/SQE frontend, actual
-monotone wire-FID allocation, then READY and physical close disposal coherently.
-Canonical remains97d495, no installed queue/activation. Mac released; no jobs.
-
-Latest uninstalled working set fixed-io-draft supersedes admission copies; read
-state/self-review/next-work. Immutable kernel SQE and exact creator preparation,
-canonical retained fixed extent/copied WALK name, monotone wire-FID burn and
-fresh publication now wired. Separate wake root avoids post-transfer owner UAF;
-physical-drop barrier prevents terminal before backing return.268hostchecks/
-17mutants, ARM64864B owner,30input/18binary-log pairs/5ARM objects reverified.
-Not shared-ring or native queue proof. Next provided pools/leases/MORE/emptywait,
-READY fairness and physical close/destructor before installation. Canonical97d495;
-Mac released/no jobs/9176MiB, Stratum61dde37 and Astra10hashes intact. No activation.
-
-Current uninstalled working set provided-io-draft supersedes fixed-io copies;
-read state/self-review/next-work. Pool stream/member/lease ownership, combined
-single-shot CQE+terminal, MORE ordering and explicit delivered-MORE rearm proof
-pass554 cumulative hostchecks/18mutants; ARM64920B owner,33inputs/19binary-log pairs/
-6ARM objects reverified. Synthetic parsed replies, no native transport/driver proof.
-PROVIDED-R3 close dependency: global request detach waits zero borrows, but PENDING
-multishot still holds one. Actual whole-ring consumer/quiescence pending-disposal
-must precede global detach; scope abort never returns pending/leased payloads.
-Next coherent READY/physical close, pool RETURN wake/fairness and actual frontend,
-then native matched gates, AS3/4,MM0-MM4. Canonical97d495; Mac released/no native jobs/
-8940MiB, Stratum61dde37/Astra10hashes intact. No activation or128MiB removal.
-
-Latest uninstalled working set retirement-draft supersedes provided-io copies;
-read state/self-review/next-work. Actual client abort TX-flag defect reproduced
-and draft-repaired; actual operation destructor and per-owner whole-close disposal
-implemented. Negative terminal COMMIT releases local borrows while PENDING MORE
-survives; DELIVER remains ordered. Final zero-reference pool helper returns physical
-pins only after all owner/writer exclusions.795cumulative checks/15mutants;39inputs,
-16raw pairs/10ARM objects reverified. Native teardown/driver/ref/allocator boundaries
-remain simulated, no native integration claim. Canonical97d495 unchanged. Mac
-released/no jobs/8843MiB; clean Stratum61dde37 and Astra10hashes intact. Next coherent
-READY scheduling, RETURN wake/immutable SQE frontend and entry-pinned close routing
-before installation/native gates. Then AS3/4,MM0-MM4. No activation; self-review only.
-
-Newest addition ready-draft supplies only the uninstalled bounded READY selector,
-with retirement-draft ownership APIs still required.54checks/12mutants,17inputs/
-13raw pairs/ARM64object verified. READY-R1 later expired owner now preempts earlier
-submission. Actual action executor, engine/CONNECT/close routing, RETURN wake,
-immutable frontend and negotiated iounit persistence still owed. See state,
-self-review and explicit next-work. No native scheduler claim/canonical changes.
-Mac released/no jobs/9163MiB; Stratum61dde37/Astra10hashes intact. Continue autonomously.
-
-Newest working addition action-draft supplies actual READY action executor and
-CQ-room-corrected selector (ACTION-R1 baseline+mutant).1633sanitizerchecks/15mutants,
-45inputs/16raw pairs/2ARM objects pass. Actual submit/abort/retirement helpers;
-progress/demux/success replies/native refs/engine remain host boundaries. Requires
-separate entry+Loom root across consuming action and driver return. Read state,
-self-review,next-work. Supersedes ready-draft selector only, keeps retirement/
-program/wire dependencies. Canonical97d495 unchanged; Macfree/nojobs/8876MiB,
-Stratum clean61dde37 and Astra10hashes intact. Next IOUNIT-R1 then coherent actual
-engine/CONNECT/close/frontend/RETURN integration and matched native gates, AS3/4,
-MM0-MM4. Continue autonomously; no activation/128MiB change.
-
-Latest addition iounit-draft resolves IOUNIT-R1 atop action-draft. Node header/
-nodes/fids/admission overrides retain Rlopen u32 limit and copy it at exact
-read/write admission, preserved across MORE; zero/msize/deadline/reuse tested.
-2316cumulativechecks/11mutants,47inputs/12rawpairs/4ARMobjects,64Bnode/4096Btable/
-920Bowner unchanged. Native responses/progress/ref/engine remain host boundaries.
-Read next-work for exact overlay order and actual engine/CONNECT/close/frontend/
-RETURN integration next. Canonical97d495 unchanged, Macfree/nojobs/8838MiB,
-Stratum clean61dde37/Astra10hashes intact. No activation; self-review only.
-
-Latest uninstalled layer drain-draft overrides engine/header, CONNECT, protocol,
-READY and action; combines iounit/retirement/program/wire dependencies per next-work.
-Actual engine pins/root, CONNECT/general routing, close-after-retirement and wait
-registration collection qualified with2885hostassertions/12mutants,53inputs/13pairs/
-6ARMobjects plus unchanged lifecycle2clean/14counterexamples. DRAIN-R1 fresh IO
-expiry,DRAIN-R2 failclosedaction,DRAIN-R3 CLUNK parked shortage fixed in draft.
-Read state/self-review/findings/next-work. Host nativeIO/poll/ref/allocation/final
-protocolfree boundaries remain; no native/installed scheduling claim. Canonical
-97d495 unchanged. Macreleased/nojobs/8769MiB;clean61dde37/Astra10hashes intact.
-Next immutable shared frontend and actual RETURN/CQ wake integration, coherent
-install and matched native/full Mac gates,AS3/4,MM0-MM4. No activation/128MiBchange.
-
-Newest uninstalled return-draft overrides control/header atop drain-draft. Exact
-creator/image + copied negotiated RETURN transitions only matching LEASED receipt
-under Ll, then wakes registered empty-pool work outside Ll independent of SQ/CQ
-and source scope lifetime.3125cumulativechecks/10mutants,55inputs/11rawpairs/2ARM
-objects pass. Source-retired lease and reused-pool stale receipts covered; initial
-whole-close/re-registration fixture corrected with failure retained. Host native
-wake/IO/ref/backing boundaries remain; no syscall/shared-SQE/native scheduling
-claim. Canonical97d495 unchanged;Macfree/nojobs/8736MiB,clean61dde37/Astra10hashes
-preserved. Continue return-draft/next-work immutable shared frontend/CQ kick,
-coherent install and matched native/full Mac gates,AS3/4,MM0-MM4. No activation.
+7f3f90471 adds native general/provided operations; cc644dc6a records actual worker
+five-row smoke1856. native-worker/smoke-20261010T021745Z,min9056MiB. Earlier
+smoke021509Z stopped at8255 before first boot; raw evidence retained. Only rebuildable
+Go cache799MiB was cleared to recover space. Runner signal cleanup repaired.
 
 
-Newest uninstalled frontend-draft overrides frontend module/header plus engine/
-header ahead of return/drain overlays.3674cumulativechecks/13mutants,59inputs/
-14rawpairs/3ARMobjects and unchanged lifecycle2clean/14counterexamples reverified.
-Serialized one-copy SQ claim, fixed precharged rejection cell, CQ kick and close
-ownership covered. FRONT-R1 priority-refusal starvation reproduced and repaired
-with65-participant round robin; engine3664B still fits charged4096B page.
-Successful actual CONNECT construction/adoption and native IO/poll/wake/ref/
-backing remain unqualified by this host fixture. Read state/findings/self-review/
-next-work. Next combined CONNECT, coherent installation, matched native/full Mac
-gates thenAS3/4,MM0-MM4. Canonical97d495 unchanged,Macreleased/nojobs/8684MiB;
-clean61dde37 and Astra10hashes intact. No activation; single-agent self-review.
+### Astra native READ faults verified, October 10
 
+`loom.private_native_faults` adds six worker-driven READ schedules in both normal
+and bulk classes after real CONNECT/WALK/LOPEN: silent peer, partial header/body,
+impossible frame length, wrong reply type and full-CQ cancellation. The retained
+peer endpoint and observation pin survive until local retirement. Negative CQE
+identity, fixed-owner release, unregister and unchanged failed-read payload are
+checked. Full CQ retains the cancellation terminal until creator acknowledgement.
 
-### Astra frontend CONNECT composition, October10
+Five single-boot rows pass1857/1857,D7overlap/20cycles: default1/4/8,UBSan4/8.
+Run astra-takeover/native-faults/smoke-20261010T023045Z, sourcecc644dc6a plus
+recorded diff62dc1a57. Ten raw logs,41sources,six inputs/row,kernel clones and
+Astra10protected/pending hashes reverified; Stratum clean61dde37; minimum9221MiB.
+This is bounded smoke evidence, not50boot or completed AS3 qualification.
+Single-agent review records that fragment consumption before cancellation is
+scheduler-dependent; next change will observe actual transport drain. Prepared
+followup-write-deadline.patch is UNINSTALLED and also adds emitted WRITE abort
+and READ deadline cases. No production kernel change or activation/128MiB change.
+Mac released. Continue broader AS3 faults and owned clients, thenAS4/MM0-MM4.
 
-frontend-connect now joins actual request/scope reservation, CONNECT preparation,
-publication, rollback and engine adoption to the immutable frontend.3948 cumulative
-sanitizer checks/7exact mutants pass, with copied target/correlation, nested claim,
-success, constructor refusal, fresh expiry, close and native publication refusal.
-Adopted failure retains its one engine terminal; pre-adoption rollback preserves
-obligations through physical destruction. Production drafts unchanged. Native
-protocol allocation/init, publication effects and handshake replies remain checked
-host boundaries. Source/log/executable hashes reverified; self-review is single-agent.
-Failed fixture expectations and mutant compile diagnostics retained, not counted
-as successful fault detections. Continue coherent current-overlay install and
-matched native/full Mac gates, thenAS3/4,MM0-MM4. Prior50/50 onlyf719ee4a. No Main,
-private async/clipboard activation or128MiB removal. Macreleased; no active job.
+## Next action
 
+Inspect native-faults-flight.json and actual processes first; latest run completed0
+and released Mac. Checkpoint six-case READ coverage before applying the uninstalled
+followup patch. Rebuild matched kernels and verify newer test source. Do not mutate
+tracked source/HEAD during live verification. No50boot claim for new fixtures.
 
-### Astra coherent installed async integration, October10
-
-The current38 reviewed source/header overlays are now INSTALLED in canonical
-kernel. This supersedes earlier uninstalled pickup directions: never reinstall
-historical draft copies. INTEGRATE-R1 corrected operation's isolated relative
-slub include; full ARM64 link and symbol-table regeneration pass. Read
-astra-takeover/async-integration/state,installed-overlay,self-review,findings.
-
-New native frontend probe uses the exact creator, real target/protocol constructor
-and engine adoption for normal/bulk connections, actual handshake/root mapping,
-copied correlation, malformed refusal and CQ-acknowledgement wake, followed by
-actual charged storage/close ownership. Native1855/1855,D7overlap,20login cycles
-pass with41source/6artifact hashes stable; minimum8617MiB. Existing host regression
-3948assertions/7CONNECTmutants and3674/13frontendmutants remain bounded evidence.
-Native general WALK/LOPEN/READ/WRITE/provided/MORE traffic still needs qualification.
-Self-review is single-agent. Resource procedure error and original include failure
-are recorded honestly. Macreleased/nojobs; Stratumclean61dde37/Astra10hashes intact.
-
-Next full current-source Mac matrix without source edits, raw verification, then
-native general-operation/provided tests and AS3/4 before MM0-MM4. Prior50/50 only
-qualifiesf719ee4a. Public private ENTER remains disabled. No Main/private async/
-clipboard activation or128MiB removal. Preserve all matched evidence.
-
-
-### Astra disk-floor recovery and pinned image matrix, October10
-
-Whole-image gate current-gate-20261010T011053Z was stopped by the independent
-disk guard at8247MiB (8192floor plus64MiB stop margin), during pool rebaking.
-No matrix boots ran and no gate pass is claimed. Owned processes exited and Mac
-was released. Failed run, keys/image hashes and recovery metadata are preserved.
-Exact ramfs/pool snapshot/system key clones were restored from immutable inputs,
-verified against the successful1855 native run; recovery returned8722MiB free.
-
-Next async-integration/pinned-matrix.py rebuilds default and UBSan kernels from
-current source only, derives all five rows from ci-smp-gate, runs the actual
-10-boot multiboot harness per row, captures8matched inputs and verifies100raw
-logs,1855tests,D7/20cycles,source/protected hashes and the continuous disk guard.
-Report this as the complete matrix stage with pinned image inputs, not as a
-successful whole-image ci-smp-gate rebuild. Read the newer
-astra-takeover/async-integration-matrix-flight.json when present; do not duplicate
-its work or modify tracked files while active. Prior native/host evidence remains
-bounded; native general operations/provided traffic,AS3/4 and MM0-MM4 follow.
-No Main/private async/clipboard activation or128MiB removal; single-agent review.
-
-
-### Astra installed async matrix verified, October10 02:02 UTC
-
-The five-row pinned-image Mac matrix passed50/50 at exact clean source
-98dd4b6183c002fa2ead543b6fb350da604cdec0: default SMP1/4/8 and UBSan SMP4/8,
-ten boots each. Raw verification rechecked100serial/harness logs,1855/1855
-tests per boot,20private ownership/frontend probes,D7overlap and20login cycles,
-eight captured/current artifact hashes,clean61dde37 and Astra's10preserved files.
-Minimum free space8510MiB stayed above8192floor. Run: work/oct5-as-r9/
-pinned-matrix-20261010T011750Z. Runner exited0 and released Mac.
-
-This is kernel matrix qualification with pinned native-qualified image inputs;
-it does not convert the earlier stopped whole-image rebake into a pass.
-Single-agent self-review of source freeze, input copies and verifier assertions
-found no new discrepancy. Native general WALK/LOPEN/READ/WRITE/CLUNK and provided/
-MORE traffic remain next, then AS3/4 and MM0-MM4. No Main/private async/clipboard
-activation or128MiB protection removal. Historical installers must not be rerun.
-
-
-### Astra native general operations and provided payloads, October 10
-
-Added `loom.private_native_operations` in both normal/bulk classes. A controlled
-peer now reads emitted frames before replying through real SrvConn queues. The
-installed frontend/engine performs CONNECT, search+WALK, DAC+LOPEN, registered
-READ/WRITE and CLUNK. Accepted SQE correlation and WALK bytes remain immutable;
-read bytes and emitted write bytes match, negotiated iounit persists, and physical
-request/fixed ownership returns before unregister.
-
-Provided READ exercises a one-member pool, paired receipt, CQ consumption without
-payload return, duplicate return rejection, empty-pool parking, fresh MORE leases,
-RETURN while CQ is full, resumed dispatch after drain, EOF without an empty lease,
-and final pool reap. The fixture drives bounded engine visits; general operation
-worker scheduling and hostile/stalled-peer coverage remain AS-3 work. The peer is
-a deterministic wire responder, not a filesystem implementation.
-
-`native-operations/provided-20261010T0210Z` passes1856/1856,D7overlap/20cycles with
-41source and6artifact hashes stable; minimum8283MiB. Evidence is under
-work/oct5-as-r9/astra-takeover/native-operations. Failed freestanding aggregate
-initializer build and initial wrong CQ flag expectation are preserved with fixes.
-No production-path defect was established by those fixture failures. Self-review
-is single-agent. Mac released; no public private ENTER/clipboard activation or
-128MiB change. Earlier50/50 remains source98dd4b618 only; new fixture results are
-bounded native evidence. Continue AS-3 C/Rust ownership and adversarial native
-schedules, then AS-4 and MM0-MM4.
-
-
-### Astra worker fixture verification in flight, October 10
-
-Native general/provided sequence has been changed to use the actual private
-worker: the fixture only yields, reads peer frames and acknowledges CQ via the
-creator frontend; no explicit engine visit drives this probe. Initial native
-worker run passes1856/1856. Self-review then replaced the concurrent test wake
-epoch read with a locked snapshot and CQ-tail read with acquire publication.
-That newer fixture requires verification. Read native-worker-flight.json before
-acting: five one-boot default SMP1/4/8 and UBSan SMP4/8 smoke rows are next.
-They are bounded smoke coverage, not a replacement for the50-boot gate.
-Do not change tracked source or duplicate jobs while it is active. No public
-private async/clipboard activation or128MiB removal. After verification preserve
-raw evidence, checkpoint and continue AS-3 hostile peer and C/Rust owned-buffer
-APIs. Raw Rust register_buffers is already unsafe; inspect current clients before
-repeating historical repair directions. AS-4 and MM0-MM4 remain afterward.
-
-
-### Astra worker smoke disk stop and recovery, October 10
-
-smoke-20261010T021509Z stopped at8255MiB (64MiB guard margin above8192floor),
-before its first boot completed. No boot pass. Raw serial/harness/source/binary
-hashes preserved in interruption.json; no VM or test jobs remained. Concurrent
-wrapper shutdown had prevented the diagnostic result from being saved. The
-diagnostic now catches termination, joins its own child group in finally and
-records both interruption and guard state.
-
-Cleared only Go's rebuildable compilation cache with go clean -cache (799MiB);
-free space recovered to9060MiB. Sources, saved binaries and evidence remain.
-Restart the same five one-boot smoke rows from native-worker/run-smoke.py; consult
-native-worker-flight.json for the new run and keep source frozen. Qualification
-remains bounded; no50boot claim for this newer fixture and no activation.
-
-
-### Astra actual worker operation smoke verified, October 10
-
-The native general/provided probe now runs entirely through the actual private
-worker: no explicit engine visits drive it. CQ consumption uses acquire loads
-and zero-submit creator kicks; physical terminal cleanup is observed under Ll.
-Wake epoch and native channel occupancy observations take their owning locks.
-Whole-close joins the worker before peer/mapping cleanup.
-
-Five source-matched one-boot rows pass: default SMP1/4/8 and UBSan SMP4/8, each
-1856/1856,D7overlap and20login cycles. Run native-worker/smoke-20261010T021745Z
-under work/oct5-as-r9/astra-takeover. Reverified10rawlogs,41installed source hashes,
-six inputs per run with cloned kernels,Stratum clean61dde37 and Astra10preserved
-files. Minimum9056MiB. These smoke rows do not replace the50boot qualification
-of98dd4b618. The controlled peer still leaves hostile/stalled schedules and safe
-client APIs pending. Self-review is single-agent; no activation/128MiB change.
-
-Earlier smoke021509Z stopped at8255MiB before boot completion, preserving raw
-interruption evidence. Diagnostic signal handling now joins its child and saves
-interrupted results. Clearing only799MiB of rebuildable Go cache restored space;
-no source, saved binary or evidence was removed. Mac released after successful
-smoke. Continue AS-3 native faults and owned C/Rust clients, then AS-4/MM0-MM4.
+Continue AS3 connection-stage/WRITE/deadline/close/exec/exit/reconnect and independent
+scope schedules plus C/Rust owned payload clients. Raw Rust register_buffers is
+already unsafe; do not repeat that repair. Then AS4 clipboard/MODE whole arc,
+then MM0–MM4. No Main landing, unfinished private async/clipboard activation or
+128MiB protection removal. Pause continuation heartbeat only when transferred
+work is complete/canceled. Full historical record remains pickup.md and status.

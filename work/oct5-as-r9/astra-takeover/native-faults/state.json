@@ -1,0 +1,12 @@
+{
+  "owner": "astra",
+  "state": "six-read-faults-five-row-smoke-verified",
+  "source_base": "cc644dc6add37619c80b0fd2c7566d04801d6c21",
+  "source_diff": "62dc1a57a1a4cfaabfebc2eef63d762c20c1ce36a3343890a076a41e77b115c8",
+  "run": "work/oct5-as-r9/astra-takeover/native-faults/smoke-20261010T023045Z",
+  "tests": 1857,
+  "minimum_free_mib": 9221,
+  "next": "Apply reviewed followup-write-deadline.patch after checkpoint; update source manifest and verify. Broader AS3/clients,AS4,MM0-MM4 remain.",
+  "review": "single-agent",
+  "activation": false
+}

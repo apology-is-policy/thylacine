@@ -1,0 +1,6 @@
+mac   HELD by you for 17s, 2.0h left
+        why: --minutes --reason Astra native hostile and stalled READ fixtures
+        runner: Mac pid 20 unknown (start )
+        pids: [20] (their registered work -- not a kill list)
+pi    FREE
+disk: 9.1 GiB available at /Users/northkillpd/projects/thylacine-astra
