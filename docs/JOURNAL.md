@@ -36413,3 +36413,26 @@ executor retirement with simulated backends. Native SQ submission/integration
 and complete async qualification depend on resolving the parked item. Async-first
 then MM0-MM4 order and all activation/128MiB/Main gates remain. Heartbeat prompt
 updated with exception; its existing PAUSED status preserved.
+
+
+### Astra independent fixed-I/O ownership, October 10
+
+Uninstalled Rust/C fixed operations now share the existing ring backing owner.
+Checked reservations exclude provided pools in both directions, permit WRITE
+copy-in only before publication, and expose READ bytes only after a validated
+terminal result. Active drop requests scope cancellation while retaining storage;
+failed ENTER has no rollback path. Confirmed terminal or whole-owner retirement
+reclaims abandoned reservations. Live terminal views retain backing past wrapper
+close. One preallocated reservation per registered buffer (<=64) is a conservative
+library limit; actual request accounting still requires RequestBook integration.
+
+Rust fixed-io074052Z:20cases opt0/2,6compile-fail+control,8mutants. C fixed-io-c074317Z:
+21scenarios LLVM22ASan+UBSan/NDEBUG,8mutants. Composition074349Z:two scenarios per
+language, bothprofiles,6mutants. Five/seven/nineteen source hashes and29/25/30raw
+commands/snapshots reverified; single-agent fixed-self-review.txt records lifetime,
+callback, aliasing, cancellation and release checks. All backends, terminal and
+retirement proofs are simulated; typed futures/native request integration and
+bounded executor retirement remain. WRITE cancellation never implies remote rollback.
+Astra10hashes/cleanexternal61dde37 preserved. SQ reuse remains parked and unapplied;
+no native gates rerun, Main landing, private activation or128MiB change. Heartbeat
+remains paused as found. AS3/AS4/MM0-MM4 remain incomplete.

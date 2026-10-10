@@ -1,0 +1,10 @@
+{
+  "owner": "astra",
+  "sources": 19,
+  "commands": 30,
+  "raw_logs_verified": true,
+  "source_and_snapshot_hashes_verified": true,
+  "protected_hashes": 10,
+  "stratum_clean": true,
+  "parked_patch_unapplied": true
+}

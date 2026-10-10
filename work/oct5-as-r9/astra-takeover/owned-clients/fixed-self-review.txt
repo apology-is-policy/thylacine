@@ -1,0 +1,45 @@
+Astra single-agent self-review — fixed-I/O ownership, October10.
+Not an independent audit. Uninstalled, simulated backends only; SQ reuse remains
+parked per operator. No native private activation/integration is implied.
+
+FixedIo shares existing RingCore and its one whole-ring close authority. One
+preallocated reservation per existing registered buffer (<=64), deliberately
+conservative: simultaneous disjoint fixed operations in the same buffer are
+refused. This is a library limit, not new kernel allowance; integrated requests
+still need the existing RequestBook/CQ obligation bound and exact payer accounting.
+Reservations validate checked ranges/lengths and exclude provided pools in both
+directions. Pool creation cannot overlap a pending or completed-live fixed view.
+Prepared ownership permits copy-in for WRITE only, without mutable alias escape.
+Publish freezes access; failed ENTER has no rollback path. Unsafe Rust terminal
+acceptance/C internal precondition requires the exact correlated native terminal
+and end of local access, never merely a requested abort. Native errors preserve
+errno; oversized/unknown/duplicate/prepared terminal calls retain ownership.
+READ exposes only successful result bytes tied to &self, not the entire range.
+WRITE exposes no output view. Terminal errors keep range until handle release.
+
+Drop Prepared/Terminal releases its reservation. Drop Active marks an existing
+cell abandoned, sends scope-wide abort, and retains range until authenticated
+terminal or backend-confirmed global retirement. No allocation on drop/progress;
+progress scans at most64 fixed cells alongside existing bounded pool work.
+No abort is dispatched through an already-closed backend. Live terminal views
+retain backing past root/client drop and prevent successful owner progress.
+C opaque handles require ending all pointer uses before drop; stale consumed
+handles cannot be used. C mutations stay outside assertions, tested NDEBUG.
+
+Review checked RefCell borrow lifetimes/callback reentry, checked arithmetic,
+pool/fixed exclusion, close idempotence, cancellation vs storage ownership,
+negative results, original owner retention, and local vs remote semantics.
+Full backend teardown still relies on already-documented independent kernel pins
+and payer charges. Actual scope abort routing/retirement proof, futures and native
+request/CQ binding remain outside these tests. WRITE cancellation makes no remote
+rollback promise; phase/BYTES_SENT outcome reporting belongs to future integration.
+
+Rust074052Z:20cases (13existing+7fixed), opt0/2,6 compile failures plus positive
+control,8runtime mutants. Five source hashes/29commands verified before C changes.
+C074317Z:21scenarios (14existing+7fixed),LLVM22ASan+UBSan and optimizedNDEBUG
+core,8runtime mutants;7source hashes/25commands reverified. Cross-core composition
+074349Z:two scenarios/language,Rustopt0/2,CASan+UBSan/NDEBUG,6existingmutants;
+19source hashes/30commands reverified. All snapshots/logs preserved. No failed
+run in this checkpoint. Astra10hashes, cleanexternal61dde37 and unmodified parked
+kernel paths checked. Remaining typed futures/request integration/retirement list,
+AS3native gates/AS4/MM0-MM4 pending. Heartbeat remains paused as found.

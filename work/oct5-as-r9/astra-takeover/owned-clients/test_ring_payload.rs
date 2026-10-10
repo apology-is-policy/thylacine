@@ -5,8 +5,8 @@ mod ring_payload;
 use ring_payload::*;
 use service_abi::*;
 use std::{cell::{Cell,UnsafeCell},ptr::NonNull,rc::Rc};
-struct Probe{register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
-impl Probe{fn new()->Rc<Self>{Rc::new(Self{register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
+struct Probe{aborts:Cell<usize>,last_abort:Cell<SlotRef>,register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
+impl Probe{fn new()->Rc<Self>{Rc::new(Self{aborts:Cell::new(0),last_abort:Cell::new(id(0,0)),register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
 struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
 impl Backing{fn new(p:Rc<Probe>)->Self{let mut bytes=[0;1024];for i in 0..128{bytes[i*8..i*8+8].fill(i as u8);}Self{bytes:Box::new(UnsafeCell::new(bytes)),p}}}
 unsafe impl RingBackend for Backing{
@@ -19,6 +19,7 @@ unsafe impl RingBackend for Backing{
  fn return_buffer(&self,_:BufferReceipt)->i64{self.p.returns.set(self.p.returns.get()+1);self.p.rc.get()}
  fn retire_pool(&self,r:SlotRef){let n=&self.p.pool_retires[r.slot as usize];n.set(n.get()+1);}
  fn destroy_pool(&self,r:SlotRef)->i64{let rc=self.p.destroy_rc.get();if rc==0{let n=&self.p.destroyed[r.slot as usize];n.set(n.get()+1);}rc}
+ fn abort_scope(&self,scope:SlotRef){self.p.aborts.set(self.p.aborts.get()+1);self.p.last_abort.set(scope);}
  fn begin_retire(&self){self.p.retires.set(self.p.retires.get()+1);}fn retired(&self)->bool{self.p.retired.get()}fn close(&self){self.p.closes.set(self.p.closes.get()+1);}
 }
 impl Drop for Backing{fn drop(&mut self){assert_eq!(self.p.closes.get(),1);self.p.freed.set(self.p.freed.get()+1);}}
@@ -74,4 +75,42 @@ fn register(c:&RingClient<Backing>,ranges:&[PoolMember])->Result<Pool<Backing>,E
 }
 #[test]fn ledger_cannot_accept_unbound_or_rebind_after_return(){
  use lease_ledger::*;let mut l=LeaseLedger::prepare(&[range(0)],&[1024]).unwrap();assert!(matches!(l.accept_read(8,4,receipt(0,1,0,1)),Err(LeaseError::State)));assert!(l.bind(id(64,1)).is_err());l.bind(id(0,1)).unwrap();let t=l.accept_read(8,4,receipt(0,1,0,1)).unwrap().unwrap();l.begin_return(&t).unwrap();l.finish_return(&t,0).unwrap();assert_eq!(l.outstanding(),0);assert_eq!(l.bind(id(1,2)),Err(LeaseError::State));
+}
+
+#[test]fn fixed_read_owns_range_through_terminal_and_view(){
+ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(101,id(4,9),range(8),false).unwrap();assert!(f.bytes().is_err());
+ assert!(unsafe{r.finish_fixed(101,8)}.is_err());unsafe{f.publish().unwrap();}assert!(f.bytes().is_err());
+ assert!(unsafe{r.finish_fixed(101,9)}.is_err());assert_eq!(r.fixed_count(),1);unsafe{r.finish_fixed(101,3).unwrap();}
+ assert_eq!(f.bytes().unwrap(),&[1;3]);assert!(c.reserve_fixed(102,id(4,9),range(8),false).is_err());
+ drop(c);drop(r);assert_eq!(p.closes.get(),1);assert_eq!(p.freed.get(),0);assert_eq!(f.bytes().unwrap(),&[1;3]);drop(f);assert_eq!(p.freed.get(),1);
+}
+#[test]fn fixed_abandon_is_scope_cancel_not_refund(){
+ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(201,id(3,7),range(8),false).unwrap();unsafe{f.publish().unwrap();}drop(f);
+ assert_eq!(p.aborts.get(),1);assert_eq!(p.last_abort.get(),id(3,7));assert_eq!(r.fixed_count(),1);assert!(!r.progress());assert_eq!(r.fixed_count(),1);
+ assert!(c.reserve_fixed(202,id(3,7),range(8),false).is_err());assert!(unsafe{r.finish_fixed(999,-2)}.is_err());assert_eq!(r.fixed_count(),1);
+ unsafe{r.finish_fixed(201,-2).unwrap();}assert_eq!(r.fixed_count(),0);let f=c.reserve_fixed(202,id(3,7),range(8),false).unwrap();drop(f);assert_eq!(p.aborts.get(),1);
+}
+#[test]fn fixed_and_provided_exclude_overlaps_both_directions(){
+ let(_p,mut r,c)=fixture();let pool=attach(&c,1,8);assert!(c.reserve_fixed(301,id(0,1),range(8),false).is_err());
+ let f=c.reserve_fixed(301,id(0,1),range(0),false).unwrap();assert!(unsafe{c.attach_pool(id(2,1),&[range(0)])}.is_err());
+ assert!(c.register_pool(&[range(0)]).is_err());drop(pool);r.progress();drop(f);assert_eq!(r.fixed_count(),0);let _pool=attach(&c,2,0);
+}
+#[test]fn fixed_write_freezes_after_publish_and_error_preserves_owner(){
+ let(_p,mut r,c)=fixture();let mut f=c.reserve_fixed(401,id(0,1),range(16),true).unwrap();assert!(f.write_from(&[3;7]).is_err());f.write_from(&[3;8]).unwrap();
+ unsafe{f.publish().unwrap();}assert!(f.write_from(&[4;8]).is_err());assert!(f.bytes().is_err());assert!(unsafe{f.publish()}.is_err());
+ // A failed ENTER does not have a rollback API; reservation remains active.
+ assert_eq!(r.fixed_count(),1);unsafe{r.finish_fixed(401,-2).unwrap();}assert!(unsafe{r.finish_fixed(401,0)}.is_err());assert_eq!(r.fixed_count(),1);drop(f);assert_eq!(r.fixed_count(),0);
+ let pool=attach(&c,1,16);let a=accept(&pool,1);assert_eq!(a.bytes(),&[3;8]);drop(a);
+}
+#[test]fn fixed_retirement_reclaims_abandoned_only_after_proof(){
+ let(p,mut r,c)=fixture();let mut f=c.reserve_fixed(501,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();}drop(f);drop(c);assert!(!r.progress());assert_eq!(r.fixed_count(),1);
+ p.retired.set(true);assert!(r.progress());assert_eq!(r.fixed_count(),0);drop(r);assert_eq!(p.freed.get(),1);
+}
+#[test]fn fixed_bad_geometry_and_precise_error(){
+ let(_p,mut r,c)=fixture();for x in [PoolMember{length:0,..range(0)},PoolMember{reserved:1,..range(0)},PoolMember{offset:u64::MAX,..range(0)},PoolMember{length:2048,..range(0)},PoolMember{buffer_index:1,..range(0)}]{assert!(c.reserve_fixed(601,id(0,1),x,false).is_err());}
+ assert!(c.reserve_fixed(0,id(0,1),range(0),false).is_err());let mut f=c.reserve_fixed(601,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(601,-14).unwrap();}assert_eq!(f.bytes(),Err(Error::Backend(-14)));drop(f);assert_eq!(r.fixed_count(),0);
+}
+#[test]fn fixed_unpublished_and_closed_drop_do_not_abort(){
+ let(p,r,c)=fixture();let f=c.reserve_fixed(701,id(0,1),range(0),false).unwrap();drop(f);assert_eq!(p.aborts.get(),0);
+ let mut f=c.reserve_fixed(702,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();}drop(r);assert_eq!(p.closes.get(),1);drop(f);assert_eq!(p.aborts.get(),0);drop(c);assert_eq!(p.freed.get(),1);
 }

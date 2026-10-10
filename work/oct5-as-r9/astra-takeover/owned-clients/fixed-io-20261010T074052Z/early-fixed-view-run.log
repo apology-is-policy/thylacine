@@ -1,0 +1,37 @@
+
+running 20 tests
+test fixed_unpublished_and_closed_drop_do_not_abort ... ok
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test fixed_retirement_reclaims_abandoned_only_after_proof ... ok
+test fixed_abandon_is_scope_cancel_not_refund ... ok
+test fixed_bad_geometry_and_precise_error ... ok
+test fixed_and_provided_exclude_overlaps_both_directions ... ok
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test fixed_write_freezes_after_publish_and_error_preserves_owner ... ok
+test fixed_read_owns_range_through_terminal_and_view ... FAILED
+test last_generation_cannot_wrap_or_reuse ... ok
+test ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test overlap_and_global64_members_are_rejected ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... ok
+test registration_preflight_global_capacity_avoids_native_admission ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test registration_success_binds_actual_identity_without_late_allocation ... ok
+test stale_native_registration_keeps_precharged_reservation_until_close ... ok
+test uncertain_registration_closes_and_quarantines_with_live_payload ... ok
+
+failures:
+
+---- fixed_read_owns_range_through_terminal_and_view stdout ----
+
+thread 'fixed_read_owns_range_through_terminal_and_view' (22363435) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/mutant-early-fixed-view/test_ring_payload.rs:81:90:
+assertion failed: f.bytes().is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    fixed_read_owns_range_through_terminal_and_view
+
+test result: FAILED. 19 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

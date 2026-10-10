@@ -10,3 +10,5 @@ COMPOSED-HARNESS-R1:063431Z clean composed runs passed, but deliberately removed
 MAPPING-HARNESS-R1: initial064425Z clean mapping profiles passed; custom case3 panic rejected by overly specific diagnostic matcher. Failed run retained; final064503Z all38commands/10mutants and3compile contracts verified. Host-only owned mapping boundary; native adapter still pending.
 
 SQ-REUSE-R1: kernel publishes freed SQ slot before copying. Patch and successful source-matched smoke evidence parked unapplied for Corona per operator after reported classifier block. See native-sq-reuse/PARKED.md. Continue independent fixed I/O/cancellation/retirement; native submission integration remains gated.
+
+FIXED-OWNERSHIP: shared-core C/Rust fixed reservations host-verified; active abandonment retains range until terminal/retirement, pool overlap excluded, no view during I/O. Conservative one fixed reservation per registered buffer; future/native integration pending. SQ reuse remains parked.

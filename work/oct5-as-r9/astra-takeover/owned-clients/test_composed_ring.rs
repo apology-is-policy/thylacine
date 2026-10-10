@@ -6,8 +6,8 @@ mod paired_cq;mod request_book;
 use ring_payload::*;
 use service_abi::*;
 use std::{cell::{Cell,UnsafeCell},ptr::NonNull,rc::Rc};
-struct Probe{register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
-impl Probe{fn new()->Rc<Self>{Rc::new(Self{register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
+struct Probe{aborts:Cell<usize>,last_abort:Cell<SlotRef>,register_rc:Cell<i64>,register_id:Cell<SlotRef>,registrations:Cell<usize>,rc:Cell<i64>,destroy_rc:Cell<i64>,returns:Cell<usize>,pool_retires:[Cell<usize>;64],destroyed:[Cell<usize>;64],retires:Cell<usize>,closes:Cell<usize>,freed:Cell<usize>,retired:Cell<bool>}
+impl Probe{fn new()->Rc<Self>{Rc::new(Self{aborts:Cell::new(0),last_abort:Cell::new(id(0,0)),register_rc:Cell::new(0),register_id:Cell::new(id(0,1)),registrations:Cell::new(0),rc:Cell::new(0),destroy_rc:Cell::new(0),returns:Cell::new(0),pool_retires:std::array::from_fn(|_|Cell::new(0)),destroyed:std::array::from_fn(|_|Cell::new(0)),retires:Cell::new(0),closes:Cell::new(0),freed:Cell::new(0),retired:Cell::new(false)})}}
 struct Backing{bytes:Box<UnsafeCell<[u8;1024]>>,p:Rc<Probe>}
 impl Backing{fn new(p:Rc<Probe>)->Self{let mut bytes=[0;1024];for i in 0..128{bytes[i*8..i*8+8].fill(i as u8);}Self{bytes:Box::new(UnsafeCell::new(bytes)),p}}}
 unsafe impl RingBackend for Backing{
@@ -20,6 +20,7 @@ unsafe impl RingBackend for Backing{
  fn return_buffer(&self,_:BufferReceipt)->i64{self.p.returns.set(self.p.returns.get()+1);self.p.rc.get()}
  fn retire_pool(&self,r:SlotRef){let n=&self.p.pool_retires[r.slot as usize];n.set(n.get()+1);}
  fn destroy_pool(&self,r:SlotRef)->i64{let rc=self.p.destroy_rc.get();if rc==0{let n=&self.p.destroyed[r.slot as usize];n.set(n.get()+1);}rc}
+ fn abort_scope(&self,scope:SlotRef){self.p.aborts.set(self.p.aborts.get()+1);self.p.last_abort.set(scope);}
  fn begin_retire(&self){self.p.retires.set(self.p.retires.get()+1);}fn retired(&self)->bool{self.p.retired.get()}fn close(&self){self.p.closes.set(self.p.closes.get()+1);}
 }
 impl Drop for Backing{fn drop(&mut self){assert_eq!(self.p.closes.get(),1);self.p.freed.set(self.p.freed.get()+1);}}

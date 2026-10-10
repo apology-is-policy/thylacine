@@ -1,0 +1,23 @@
+error[E0505]: cannot move out of `f` because it is borrowed
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/fixed-borrow.rs:118:191
+    |
+118 | ...et mut f=c.reserve_fixed(901,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(901,8).unwrap();}let v=f.bytes().unwrap();drop(f);println!("{:?}",v);}
+    |       -----                                                                                                                        -                       ^                  - borrow later used here
+    |       |                                                                                                                            |                       |
+    |       |                                                                                                                            |                       move out of `f` occurs here
+    |       binding `f` declared here                                                                                                    borrow of `f` occurs here
+    |
+note: if `FixedIo<Backing>` implemented `Clone`, you could clone the value
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/ring_payload.rs:65:1
+    |
+ 65 | pub(crate) struct FixedIo<B:RingBackend>{core:Rc<Core<B>>,index:usize,cookie:u64}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+    |
+   ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T074052Z/fixed-borrow.rs:118:167
+    |
+118 | ...().unwrap();r.finish_fixed(901,8).unwrap();}let v=f.bytes().unwrap();drop(f);println!("{:?}",v);}
+    |                                                      - you could clone this value
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0505`.

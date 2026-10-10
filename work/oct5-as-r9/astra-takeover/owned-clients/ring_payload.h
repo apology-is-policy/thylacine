@@ -6,7 +6,9 @@
 #ifndef THYLA_RING_PAYLOAD_H
 #define THYLA_RING_PAYLOAD_H
 #include "lease_ledger.h"
-struct t_ring_backend{void *context;size_t(*count)(void *);size_t(*length)(void *,size_t);const unsigned char *(*buffer)(void *,size_t);int64_t(*return_buffer)(void *,struct t_loom_service_buffer_receipt);void(*retire_pool)(void *,struct t_loom_service_ref);int64_t(*destroy_pool)(void *,struct t_loom_service_ref);void(*begin_retire)(void *);int(*retired)(void *);void(*close)(void *);void(*destroy)(void *);int64_t(*register_pool)(void *,const struct t_loom_service_pool_member *,size_t,struct t_loom_service_ref *);};
+/* Backing is initialized and writable; fixed terminal proves all local access
+ * ended. abort_scope is bounded and never grants buffer reuse. */
+struct t_ring_backend{void *context;size_t(*count)(void *);size_t(*length)(void *,size_t);const unsigned char *(*buffer)(void *,size_t);int64_t(*return_buffer)(void *,struct t_loom_service_buffer_receipt);void(*retire_pool)(void *,struct t_loom_service_ref);int64_t(*destroy_pool)(void *,struct t_loom_service_ref);void(*begin_retire)(void *);int(*retired)(void *);void(*close)(void *);void(*destroy)(void *);int64_t(*register_pool)(void *,const struct t_loom_service_pool_member *,size_t,struct t_loom_service_ref *);void(*abort_scope)(void *,struct t_loom_service_ref);};
 struct t_ring_owner;struct t_ring_client;struct t_ring_pool;struct t_ring_payload;
 /* Consumes well-formed backend even on geometry/allocation failure. */
 int t_ring_create(struct t_ring_backend,struct t_ring_owner **,struct t_ring_client **);
@@ -34,4 +36,18 @@ size_t t_ring_members(const struct t_ring_owner *);
 size_t t_ring_live(const struct t_ring_owner *);
 size_t t_ring_pending(const struct t_ring_owner *);
 void t_ring_owner_drop(struct t_ring_owner *);
+/* Exclusive fixed-I/O ownership, one preallocated reservation per registered
+ * buffer. Cookie comes from this ring's request book. Do not retain/use aliases
+ * after dropping a handle. No view is available during submitted I/O.
+ * publish is paired with request activation immediately before SQ release;
+ * finish is only for an authenticated terminal CQ after local access ends.
+ * Failed ENTER and requested ABORT do not authorize finish or buffer reuse. */
+struct t_ring_fixed;
+int t_ring_fixed_reserve(struct t_ring_client *,uint64_t,struct t_loom_service_ref,struct t_loom_service_pool_member,int,struct t_ring_fixed **);
+int t_ring_fixed_write(struct t_ring_fixed *,const void *,size_t);
+int t_ring_fixed_publish(struct t_ring_fixed *);
+int t_ring_fixed_finish(struct t_ring_owner *,uint64_t,int32_t);
+int64_t t_ring_fixed_bytes(const struct t_ring_fixed *,const unsigned char **,size_t *);
+void t_ring_fixed_drop(struct t_ring_fixed *);
+size_t t_ring_fixed_count(const struct t_ring_owner *);
 #endif

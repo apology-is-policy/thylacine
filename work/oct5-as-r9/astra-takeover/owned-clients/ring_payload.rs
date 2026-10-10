@@ -12,6 +12,8 @@ use super::{lease_ledger::{LeaseLedger,LeaseToken,LeaseError},service_abi::{Slot
 /// reference remains. Ring retirement stops admission globally. `retired` proves
 /// all local writers stopped. `close` is bounded/idempotent, preserves leased
 /// bytes and independent kernel pins/payer charges beyond backend destruction.
+/// Backing is initialized and writable. Provided and fixed users must obey this
+/// owner's exclusive reservations; fixed terminal CQ ends all local access.
 /// No callback may reenter, panic, block on peers or expose mutable backing.
 pub(crate) unsafe trait RingBackend {
  /// Zero creates exactly the returned pool. Negative + all-zero output proves
@@ -25,6 +27,8 @@ pub(crate) unsafe trait RingBackend {
  fn return_buffer(&self,receipt:BufferReceipt)->i64;
  fn retire_pool(&self,pool:SlotRef);
  fn destroy_pool(&self,pool:SlotRef)->i64;
+ /// Scope-wide cancellation; bounded, idempotent, no storage reuse implied.
+ fn abort_scope(&self,scope:SlotRef);
  fn begin_retire(&self);
  fn retired(&self)->bool;
  fn close(&self);
@@ -33,7 +37,12 @@ struct PoolState {
  identity:SlotRef,ledger:LeaseLedger,ranges:Box<[PoolMember]>,
  pending:Box<[Option<LeaseToken>]>,live:usize,closing:bool,
 }
-struct State {quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum FixedPhase{Prepared,Active,Terminal(i32)}
+#[derive(Clone,Copy)]
+struct FixedState{cookie:u64,scope:SlotRef,range:PoolMember,write:bool,phase:FixedPhase,abandoned:bool}
+fn overlap(a:PoolMember,b:PoolMember)->bool{a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length}
+struct State {fixed:[Option<FixedState>;64],quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
 struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>}
 impl<B:RingBackend> Core<B>{
  fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();}}
@@ -52,6 +61,8 @@ impl<B:RingBackend> Core<B>{
 impl<B:RingBackend> Drop for Core<B>{fn drop(&mut self){self.close();}}
 pub(crate) struct RingOwner<B:RingBackend>{core:Rc<Core<B>>}
 pub(crate) struct RingClient<B:RingBackend>{core:Rc<Core<B>>}
+/// Exclusive fixed-I/O range; no view while submitted. Shares the whole-ring owner.
+pub(crate) struct FixedIo<B:RingBackend>{core:Rc<Core<B>>,index:usize,cookie:u64}
 pub(crate) struct Pool<B:RingBackend>{core:Rc<Core<B>>,identity:SlotRef}
 pub(crate) struct Payload<B:RingBackend>{core:Rc<Core<B>>,token:Option<LeaseToken>}
 #[derive(Debug,PartialEq,Eq)]
@@ -60,7 +71,7 @@ impl<B:RingBackend> RingOwner<B>{
  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
   let count=backend.buffer_count();let valid=count>0&&count<=64&&(0..count).all(|i|{let n=backend.buffer_len(i);n>0&&n<=isize::MAX as usize});
   if !valid{backend.begin_retire();backend.close();return Err(Error::Geometry);}
-  let core=Rc::new(Core{backend,state:RefCell::new(State{quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
+  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
   Ok((Self{core:core.clone()},RingClient{core}))
  }
  /// At most64 RETURN and64 pool-destroy attempts; no allocation on this path.
@@ -76,14 +87,40 @@ impl<B:RingBackend> RingOwner<B>{
     if self.core.backend.destroy_pool(identity)==0{let mut s=self.core.state.borrow_mut();let p=s.pools[slot].take().unwrap();s.members-=p.ranges.len();}
    }
   }
-  self.core.closing.get()&&self.core.state.borrow().live==0&&self.core.backend.retired()
+  let retired=self.core.backend.retired();
+  if retired{for slot in &mut self.core.state.borrow_mut().fixed{if slot.as_ref().is_some_and(|f|f.abandoned){*slot=None;}}}
+  self.core.closing.get()&&self.core.state.borrow().live==0&&self.core.state.borrow().fixed.iter().all(Option::is_none)&&retired
  }
+ /// # Safety
+ /// Only the authenticated terminal CQ for this exact ring/request after the
+ /// final local fixed-buffer access has ended. ENTER failure/ABORT is not proof.
+ pub(crate) unsafe fn finish_fixed(&mut self,cookie:u64,result:i32)->Result<(),Error>{
+  let mut s=self.core.state.borrow_mut();let slot=s.fixed.iter_mut().find(|f|f.as_ref().is_some_and(|f|f.cookie==cookie)).ok_or(Error::Stale)?;
+  let f=slot.as_mut().unwrap();if f.phase!=FixedPhase::Active{return Err(Error::Busy);}
+  if result>0&&result as u64>f.range.length{return Err(Error::Geometry);}
+  if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}Ok(())
+ }
+ pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
  pub(crate) fn members(&self)->usize{self.core.state.borrow().members}
  pub(crate) fn live(&self)->usize{self.core.state.borrow().live}
  pub(crate) fn pending(&self)->usize{self.core.state.borrow().pools.iter().flatten().map(|p|p.pending.iter().filter(|x|x.is_some()).count()).sum()}
 }
 impl<B:RingBackend> Drop for RingOwner<B>{fn drop(&mut self){self.core.close();}}
 impl<B:RingBackend> RingClient<B>{
+ /// One preallocated fixed reservation per existing registered buffer (<=64).
+ /// Cookie is allocated by this ring's RequestBook before any SQ publication.
+ /// Adapter excludes all native accesses except this request; backing is writable
+ /// and initialized, and fixed ranges cannot overlap provided-pool reservations.
+ pub(crate) fn reserve_fixed(&self,cookie:u64,scope:SlotRef,range:PoolMember,write:bool)->Result<FixedIo<B>,Error>{
+  if self.core.closing.get(){return Err(Error::Closing);}
+  let i=range.buffer_index as usize;
+  if cookie==0||scope.slot>=64||scope.reserved!=0||scope.incarnation==0||range.reserved!=0||range.length==0||range.length>i32::MAX as u64||i>=self.core.backend.buffer_count()||range.offset.checked_add(range.length).is_none_or(|end|end>self.core.backend.buffer_len(i)as u64){return Err(Error::Geometry);}
+  let mut s=self.core.state.borrow_mut();
+  if s.fixed[i].is_some()||s.fixed.iter().flatten().any(|f|f.cookie==cookie){return Err(Error::Busy);}
+  for p in s.pools.iter().flatten(){if p.ranges.iter().any(|r|overlap(*r,range)){return Err(Error::Geometry);}}
+  s.fixed[i]=Some(FixedState{cookie,scope,range,write,phase:FixedPhase::Prepared,abandoned:false});
+  Ok(FixedIo{core:self.core.clone(),index:i,cookie})
+ }
  fn prepare(&self,ranges:&[PoolMember])->Result<Box<PoolState>,Error>{
   if self.core.closing.get(){return Err(Error::Closing);}
   let s=self.core.state.borrow();
@@ -95,6 +132,7 @@ impl<B:RingBackend> RingClient<B>{
   for p in s.pools.iter().flatten(){for a in p.ranges.iter(){for b in ranges{
    if a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length{return Err(Error::Geometry);}
   }}}
+  for f in s.fixed.iter().flatten(){for r in ranges{if overlap(f.range,*r){return Err(Error::Geometry);}}}
   // Every heap allocation precedes native admission. OOM cannot orphan a pool.
   Ok(Box::new(PoolState{identity:SlotRef{slot:0,reserved:0,incarnation:0},ledger,ranges:ranges.into(),pending:(0..ranges.len()).map(|_|None).collect::<alloc::vec::Vec<_>>().into_boxed_slice(),live:0,closing:false}))
  }
@@ -155,3 +193,33 @@ impl<B:RingBackend> Payload<B>{
  pub(crate) fn try_return(mut self)->Result<(),(i64,Self)>{let token=self.token.take().unwrap();let slot=token.receipt().pool.slot as usize;match self.core.give_back(token){Ok(())=>{self.core.finish_live(slot);Ok(())},Err((rc,token))=>{self.token=Some(token);Err((rc,self))}}}
 }
 impl<B:RingBackend> Drop for Payload<B>{fn drop(&mut self){if let Some(token)=self.token.take(){self.core.abandon(token);}}}
+
+impl<B:RingBackend> FixedIo<B>{
+ fn snapshot(&self)->FixedState{let f=self.core.state.borrow().fixed[self.index].expect("live fixed owner");assert_eq!(f.cookie,self.cookie);f}
+ /// Copy input before submission; never expose a mutable backing alias.
+ pub(crate) fn write_from(&mut self,bytes:&[u8])->Result<(),Error>{
+  let f=self.snapshot();if self.core.closing.get(){return Err(Error::Closing);}
+  if !f.write||f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}
+  if bytes.len()!=f.range.length as usize{return Err(Error::Geometry);}
+  unsafe{core::ptr::copy_nonoverlapping(bytes.as_ptr(),self.core.backend.buffer(self.index).as_ptr().add(f.range.offset as usize),bytes.len());}Ok(())
+ }
+ /// # Safety
+ /// Integrator activates the matching request record and releases the SQ tail
+ /// with no fallible work after this transition. No raw/second buffer user.
+ pub(crate) unsafe fn publish(&mut self)->Result<(),Error>{
+  if self.core.closing.get(){return Err(Error::Closing);}
+  let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();
+  if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.phase=FixedPhase::Active;Ok(())
+ }
+ /// Only successful terminal READ bytes, bounded by the actual completion.
+ pub(crate) fn bytes(&self)->Result<&[u8],Error>{let f=self.snapshot();
+  if f.write{return Err(Error::Busy);}let FixedPhase::Terminal(n)=f.phase else{return Err(Error::Busy)};
+  if n<0{return Err(Error::Backend(n as i64));}
+  Ok(unsafe{core::slice::from_raw_parts(self.core.backend.buffer(self.index).as_ptr().add(f.range.offset as usize),n as usize)})
+ }
+}
+impl<B:RingBackend> Drop for FixedIo<B>{fn drop(&mut self){
+ let abort={let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();assert_eq!(f.cookie,self.cookie);
+  if f.phase==FixedPhase::Active{f.abandoned=true;Some(f.scope)}else{s.fixed[self.index]=None;None}};
+ if let Some(scope)=abort{if !self.core.closed.get(){self.core.backend.abort_scope(scope);}}
+}}

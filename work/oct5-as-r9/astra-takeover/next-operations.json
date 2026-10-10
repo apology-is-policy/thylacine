@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Independent fixed-I/O ownership, cancellation bookkeeping and bounded executor retirement with simulated backends. Native SQ reuse correction parked for Corona; native submission/integration and complete async qualification gated pending its resolution.",
+  "next": "Independent typed fixed-I/O futures/request correlation and bounded cancellation/retirement executor with simulated backends. SQ reuse remains parked; native submission/integration and complete async qualification gated.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -54,5 +54,8 @@
   "native_midwrite": "native-midwrite/state.json",
   "owned_clients": "owned-clients/state.json",
   "owned_mapping_run": "owned-clients/owned-mapping-20261010T064503Z",
-  "parked_dependency": "native-sq-reuse/PARKED.md"
+  "parked_dependency": "native-sq-reuse/PARKED.md",
+  "fixed_rust_run": "owned-clients/fixed-io-20261010T074052Z",
+  "fixed_c_run": "owned-clients/fixed-io-c-20261010T074317Z",
+  "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z"
 }
