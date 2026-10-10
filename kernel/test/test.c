@@ -680,6 +680,7 @@ void test_loom_private_operation_storage(void);
 void test_loom_private_frontend(void);
 void test_loom_private_native_operations(void);
 void test_loom_private_native_faults(void);
+void test_loom_private_native_reconnects(void);
 void test_loom_private_node_owner(void);
 void test_loom_service_pool_table(void);
 void test_loom_private_slot_owner(void);
@@ -2776,6 +2777,7 @@ struct test_case g_tests[] = {
     { "loom.private_executor",           test_loom_private_executor,           false, NULL },
     { "loom.private_native_operations", test_loom_private_native_operations, false, NULL },
     { "loom.private_native_faults", test_loom_private_native_faults, false, NULL },
+    { "loom.private_native_reconnects", test_loom_private_native_reconnects, false, NULL },
     { "loom.private_frontend", test_loom_private_frontend, false, NULL },
     { "loom.private_operation_storage",  test_loom_private_operation_storage,  false, NULL },
     { "loom.private_close",              test_loom_private_close,              false, NULL },

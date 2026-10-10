@@ -1,12 +1,12 @@
 {
   "owner": "astra",
-  "state": "eight-native-io-faults-smoke-verified",
+  "state": "1000native-reconnects-smoke-verified",
   "source_base": "f719ee4a3429f99cbd08a552dcdaedb54c5906ff",
   "host_run": "work/oct5-as-r9/astra-takeover/operations-draft/decode-controls-20261009T211810Z",
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Native1000 failed reconnects via reviewed uninstalled native-reconnect patch, then broaderAS3 schedules/owned clients,AS4/MM0-MM4. No activation.",
+  "next": "Native retained-backlog1000attempts extension, then broaderAS3 schedules/owned clients,AS4/MM0-MM4. No activation.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -17,7 +17,7 @@
   "operation_run": "work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T215144Z",
   "operation_mutants": 10,
   "native_fixture": "verified1854",
-  "expected_native_tests": 1857,
+  "expected_native_tests": 1858,
   "evidence_checkpoint": "79dfd1267c330e571c0f1516e8784276f13e9115",
   "native_run": "work/oct5-as-r9/astra-takeover/operation-storage-native-20261009T215931Z",
   "native_pid": 36893,
@@ -45,5 +45,6 @@
   "native_operations": "native-operations/state.json",
   "native_worker": "native-worker/state.json",
   "native_faults": "native-faults/state.json",
-  "native_faults_followup": "native-faults-followup/state.json"
+  "native_faults_followup": "native-faults-followup/state.json",
+  "native_reconnect": "native-reconnect/state.json"
 }

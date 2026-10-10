@@ -1,0 +1,1 @@
+{"owner":"astra","installed":false,"state":"prepared-unverified","next":"After native-reconnect run verifies and checkpoint commits, inspect/apply retained.patch. Adds1000attempts with noaccept,32retainedtorn endpoints and968backlog refusals. No production change."}

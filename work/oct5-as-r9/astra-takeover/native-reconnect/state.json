@@ -1,1 +1,15 @@
-{"owner":"astra","installed":false,"state":"prepared-unverified","next":"Only after native-faults-followup runner exits and evidence/checkpoint saved, review/apply reconnect.patch and qualify1858tests. Keep frozen source now."}
+{
+  "owner": "astra",
+  "installed": true,
+  "state": "1000reconnects-five-row-smoke-verified",
+  "source_base": "4fe965d62cf3bc3c7b947a0a6e8f6aac80905b09",
+  "diff": "408aed6b2708cc980b8b4a180829e69e993b56f84a2ebad0d1782c03703d737b",
+  "run": "work/oct5-as-r9/astra-takeover/native-reconnect/smoke-20261010T024610Z",
+  "failed_run": "work/oct5-as-r9/astra-takeover/native-reconnect/smoke-20261010T024406Z",
+  "tests": 1858,
+  "attempts": 1000,
+  "attempts_per_class": 500,
+  "minimum_free_mib": 9209,
+  "next": "Apply reviewed native-reconnect-retained/retained.patch after checkpoint then verify matched sources. BroaderAS3/owned clients,AS4/MM0-MM4 remain.",
+  "review": "single-agent"
+}

@@ -3314,6 +3314,97 @@ done:
     return error;
 }
 
+// Repeated failure before server accept returns local metadata/protocol storage.
+// The backlog endpoint remains charged until a late accept drops its last ref.
+// Alternate ordinary/bulk credits and keep
+// the same ring/worker/registry alive across all1000 attempts.
+static const char *loom_native_reconnects(struct Loom *l,struct Proc *creator,
+    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref targets[2]) {
+    if(loom_private_start_executor(l))return "reconnect worker start";
+    spin_lock(&creator->as->lock);u32 pages=creator->as->page_count;
+    spin_unlock(&creator->as->lock);
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+    struct loom_service_ref previous={0};
+    for(u32 i=0;i<1000;++i) {
+        struct loom_service_ref scope={0},target=targets[i&1u];
+        struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
+        if(loom_private_node_prepare(l,creator,&reserve,&scope) || loom_private_node_publish(l,scope))
+            return "reconnect scope reservation leaked capacity";
+        if(previous.incarnation && scope.incarnation==previous.incarnation)
+            return "reconnect reused incarnation";
+        u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+        u64 freed=srvconn_total_freed();
+        struct srv_admission_snapshot before,retained,after;
+        srv_domain_snapshot(NULL,&before);
+        if(!loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_SERVICE_CONNECT,
+           .handle_idx=target.slot,.offset=scope.slot,.user_data=10000+i,
+           ._resv1={0,target.incarnation,scope.incarnation,0}}))return "reconnect CONNECT submission";
+        struct SrvService *svc=srv_lookup_in(reg,(i&1u)?"large":"small",5);
+        if(srv_backlog_depth(svc)!=1)return "reconnect native publication before accept";
+        struct loom_service_control control={.size=sizeof(control),.version=1,.object=scope};
+        if(loom_private_service_abort(l,creator,&control)<0)return "reconnect abort before accept";
+        u64 end=timer_now_ns()+2000000000ull;bool completed=false;
+        do {
+            u32 tail=__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE);
+            if(tail!=head) {
+                struct loom_cqe value=cq[head&(l->cq_entries-1u)];
+                if(tail!=head+1 || value.user_data!=10000+i || value.result!=-T_E_CANCELED || value.flags)
+                    return "reconnect exact single canceled completion";
+                completed=true;break;
+            }
+            sched();
+        }while(timer_now_ns()<end);
+        if(!completed)return "reconnect cancellation stalls";
+        __atomic_store_n(&h->cq_head,head+1,__ATOMIC_RELEASE);
+        if(loom_private_submit(l,creator,0)<0)return "reconnect CQ acknowledgement";
+        int reaped=-T_E_BUSY;
+        do {
+            struct loom_service_snapshot snap;
+            if(control_native_query(l,creator,scope,&snap))return "reconnect retirement query";
+            if(snap.state==LOOM_SERVICE_RETIRED) {
+                if(snap.reason!=-T_E_CANCELED || !(snap.status_flags&LOOM_SERVICE_LOCAL_RETIRED))
+                    return "reconnect retirement diagnostics";
+                reaped=loom_private_service_reap(l,creator,&control);
+                if(!reaped)break;
+                if(reaped!=-T_E_BUSY)return "reconnect unexpected reap failure";
+            }
+            sched();
+        }while(timer_now_ns()<end);
+        if(reaped)return "reconnect physical protocol owner retained";
+        bool settled=false;
+        do {
+            spin_lock(&l->lock);bool empty=!l->service_requests.occupied && !l->service_engine->count;
+            spin_unlock(&l->lock);
+            spin_lock(&creator->as->lock);bool refunded=creator->as->page_count==pages;
+            spin_unlock(&creator->as->lock);
+            settled=empty && refunded;
+            if(settled)break;
+            sched();
+        }while(timer_now_ns()<end);
+        if(!settled)return "reconnect attempt leaks local protocol charge or request";
+        srv_domain_snapshot(NULL,&retained);
+        if(srvconn_total_freed()!=freed || srv_backlog_depth(svc)!=1 ||
+           retained.global_count!=before.global_count+1 ||
+           retained.global_credits!=before.global_credits+((i&1u)?4u:1u))
+            return "reconnect torn backlog must retain native charge";
+        // Local retirement must precede acceptance. The server may retain this
+        // torn endpoint; ordinary admission continues to account for it.
+        struct SrvConn *late=srv_accept_blocking(svc,poster->stripes);
+        if(!late)return "reconnect late accept";
+        bool torn=!srvconn_is_live(late);srvconn_unref(late);
+        if(!torn)return "reconnect locally retired transport remained live";
+        srv_domain_snapshot(NULL,&after);
+        if(srvconn_total_freed()!=freed+1 || srv_backlog_depth(svc) ||
+           after.global_count!=before.global_count || after.global_credits!=before.global_credits)
+            return "reconnect final endpoint must refund native charge";
+        if(loom_private_service_abort(l,creator,&control)!=-T_E_NOENT)
+            return "reconnect stale scope retains authority";
+        previous=scope;
+    }
+    return NULL;
+}
+
 static const char *loom_protocol_fixture(u32 kind) {
     const char *error = NULL;
     struct Proc *p = test_proc_make(), *poster = test_proc_make();
@@ -3389,6 +3480,7 @@ static const char *loom_protocol_fixture(u32 kind) {
            "zero-reference retirer wakes joins and refunds the live private worker");
         goto done;
     }
+    if (kind==35) {error=loom_native_reconnects(l,p,poster,reg,refs);goto done;}
     if (kind>=19 && kind<=34) {
         bool bulk=(kind-19)&1u;
         error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,1+(kind-19)/2);
@@ -3562,4 +3654,10 @@ void test_loom_private_native_faults(void) {
         const char *error=loom_protocol_fixture(kind);
         TEST_ASSERT(!error,error);
     }
+}
+
+void test_loom_private_native_reconnects(void);
+void test_loom_private_native_reconnects(void) {
+    const char *error=loom_protocol_fixture(35);
+    TEST_ASSERT(!error,error);
 }

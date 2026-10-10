@@ -1,0 +1,12 @@
+RECONNECT-FIXTURE-R1: initial smoke024406Z default1 failed1857/1858 at
+reconnect attempt settlement; remaining rows did not run. Raw failed source,
+matched binary and logs preserved. Initial fixture wrongly required native
+endpoint/backlog destruction at local scope retirement before server accept.
+Approved ASYNC-SERVICE-LIFECYCLE section5 explicitly retains connection charges
+until actual last reference; devsrv published backlog owns that server ref.
+
+Corrected witness now separately requires local parser/request/page refund,
+retained torn backlog/native global count+1 and credits+1/+4, THEN late accept of
+a torn endpoint and last unref restoring exact counts/credits. This preserves
+honest retention accounting rather than force-freeing peer-owned storage. Native
+verification of the corrected assertions pending. No production code changed.

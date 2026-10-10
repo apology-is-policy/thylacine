@@ -89,3 +89,41 @@ no production change, private activation or128MiB removal. Next reviewed but
 UNINSTALLED native-reconnect/reconnect.patch adds1000 canceled-before-accept
 attempts alternating classes with complete per-attempt ownership/accounting checks.
 Broader AS3 stage/close/exec/exit/independent-media and owned clients,AS4/MM0-MM4 remain.
+
+## Newest reconnect verification
+
+The native-reconnect/reconnect.patch is now APPLIED (do not reapply). Read
+native-reconnect-flight.json and actual jobs.1000 failed CONNECT attempts before
+accept alternate500normal/500bulk through one worker. Each must return page
+charges,endpoint,backlog,request and protocol owners; stale scope abort fails.
+Expected1858tests; five one-boot smoke rows pending. Source/HEAD frozen during
+runner. Verify then checkpoint; broaderAS3/owned clients,AS4/MM0-MM4 remain.
+
+Reconnect smoke024406Z failed1857/1858 due to an invalid fixture expectation:
+published backlog owns a charged peer reference beyond local retirement. See
+native-reconnect/findings.txt. Corrected fixture separately asserts local refund,
+retained torn endpoint/1or4credits, then late accept+last-unref exact refund.
+No production change. New run will be in native-reconnect-flight.json; verify
+that run rather than treating the preserved failed run as a pass.
+
+
+### Astra1000 failed native reconnects verified, October 10
+
+One private worker/ring now survives1000failed CONNECTs before server acceptance,
+alternating500normal/500bulk. Each exact canceled terminal precedes scope reap,
+local parser/request/page refund and stale-identity refusal. A torn backlog peer
+retains count+1 and credits+1or4; late acceptance then last-unref restores native
+count/credits exactly. Retirement does not pretend peer-held storage is free.
+
+Initial smoke024406Z failed1857/1858 because the fixture wrongly expected native
+endpoint/backlog refund before late accept. RECONNECT-FIXTURE-R1 is preserved
+with raw source/binary/logs; corrected assertions follow approved design section5.
+No production code changed. Corrected smoke024610Z passes five rows1858/1858,
+D7overlap/20cycles, default1/4/8+UBSan4/8. Source4fe965d62+diff408aed6b;
+10rawlogs/41sources/sixinputs per row/kernel clones/Astra10hashes/clean61dde37
+reverified, minimum9209MiB. Self-review is single-agent; no50boot or AS3 completion.
+
+Next reviewed UNINSTALLED native-reconnect-retained/retained.patch adds a second
+1000attempts with no server acceptance:32torn endpoints hold80credits and968
+backlog refusals must not grow retained storage. Verify after checkpoint. Broader
+AS3/owned clients,AS4/MM0-MM4 remain; no activation/Main/128MiB change. Mac released.

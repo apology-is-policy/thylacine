@@ -1,0 +1,21 @@
+Astra single-agent self-review of uninstalled retained-backlog extension.
+
+The first1000-attempt loop still drops each torn endpoint after local retirement.
+The second1000-attempt loop never accepts during retries:16normal+16bulk backlog
+references hold32endpoints/80credits; remaining968attempts fail ENOSPC at native
+backlog publication. Every attempt still reaps exact scope and restores local
+parser/request/page ownership. Each failed publication destroys its unpublished
+endpoint and refunds transient credits; held references are never force-freed.
+
+Per-attempt snapshots validate count/credit delta, actual endpoint frees and each
+class backlog depth. Final late acceptance verifies every endpoint is torn and
+last-unref restores original global count/credits; total1000allocations freed.
+Two classes remain below96local and256global credit limits, so the expected
+refusal is deterministic backlog capacity (16per service), not a quota guess.
+Worker owns progress; sharedCQ uses acquire/release; source scope incarnation
+is never reused and stale abort after reap must return NOENT.
+
+No production changes. This qualifies backlog-bound retries only, not all quota
+failures, every connection phase, independent media or client/clipboard adoption.
+Current source is frozen in native-reconnect smoke; this patch is not installed
+or verified. Apply only after its checkpoint, then rebuild matched artifacts.
