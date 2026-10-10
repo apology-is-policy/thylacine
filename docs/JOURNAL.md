@@ -36481,3 +36481,25 @@ allocation, shutdown and fair bounded progression. Protected10/cleanexternal61dd
 and parked kernel base unchanged. Event-loop wakeups/typed Future integration and
 native backend remain pending; this is not a full async executor/AS3 pass. SQ stays
 parked/unapplied. Heartbeat ACTIVE; AS4/MM0-MM4 and all activation guards remain.
+
+
+### Astra Rust fixed Futures and bounded wake registrations, October 10
+
+Uninstalled Read/Write Futures own typed requests and reserve one of64wake cells.
+Preparation errors roll back registration; Future drop unregisters without
+releasing active storage. Terminal delivery wakes a bounded snapshot; polling
+rechecks readiness and READ results retain backing. Waker clone precedes readiness
+check, replacement precedes old-Waker drop, and clone/drop/wake callbacks execute
+outside internal borrows. Root close wakes unfinished tasks while preserving
+owned storage. No internal allocation on observed Arc-waker poll/receive paths;
+arbitrary caller Waker implementations can allocate and are outside that claim.
+
+fixed-futures085203Z:12cases opt0/2,2compile-fail+control,6mutants;9hashes/21raw
+commands verified. Eleven-case085056Z pass retained before full64cell regression.
+FUTURE-REVIEW-R1 records reentrant clone/drop/wake checks and lost-wakeup mutants.
+Single-agent futures-self-review.txt; protected10/cleanexternal61dde37 and parked
+kernel base unchanged. Integration with the bounded retirement owner is next:
+notifications must escape every enclosing manager borrow before invocation.
+Native event/sleep/deadline integration remains pending; no complete async executor,
+AS3 or C callback qualification is claimed. SQ stays parked; heartbeat ACTIVE,
+AS4/MM0-MM4 and all Main/private-activation/128MiB guards remain.

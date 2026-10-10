@@ -1,0 +1,10 @@
+warning: unused variable: `hub`
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085056Z/mutant-missing-unregister/fixed_futures.rs:15:12
+   |
+15 | fn release(hub:&Rc<RefCell<Hub>>,slot:&mut Option<usize>){if let Some(i)=slot.take(){let old={{let _=i;None::<Registration>}};drop(o...
+   |            ^^^ help: if this is intentional, prefix it with an underscore: `_hub`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+

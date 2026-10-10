@@ -17,8 +17,10 @@ at operator request for Corona; read native-sq-reuse/PARKED.md before acting.
 Current build kernels contain that parked patch and are not current-source
 artifacts. Do not apply/revise/rerun this subchunk or bypass classifier restrictions.
 Typed requests and bounded retirement owners are host-verified in C/Rust.
-Continue independent Future/wakeup and local event-loop integration with simulated
-backends. Read owned-clients/retirement-self-review.txt and typed-self-review.txt. Native SQ submission/integration
+Rust typed Futures/wakeups are independently host-verified. Next compose them
+with bounded retirement ownership, delivering notifications outside ALL manager
+borrows; then local event/sleep/deadline integration. Read owned-clients/futures-self-review.txt,
+retirement-self-review.txt and typed-self-review.txt. Native SQ submission/integration
 and complete async qualification remain gated on this dependency. Heartbeat
 prompt retains this exception and is ACTIVE under latest operator authorization.
 Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
@@ -328,3 +330,25 @@ allocation, shutdown and fair bounded progression. Protected10/cleanexternal61dd
 and parked kernel base unchanged. Event-loop wakeups/typed Future integration and
 native backend remain pending; this is not a full async executor/AS3 pass. SQ stays
 parked/unapplied. Heartbeat ACTIVE; AS4/MM0-MM4 and all activation guards remain.
+
+
+### Astra Rust fixed Futures and bounded wake registrations, October 10
+
+Uninstalled Read/Write Futures own typed requests and reserve one of64wake cells.
+Preparation errors roll back registration; Future drop unregisters without
+releasing active storage. Terminal delivery wakes a bounded snapshot; polling
+rechecks readiness and READ results retain backing. Waker clone precedes readiness
+check, replacement precedes old-Waker drop, and clone/drop/wake callbacks execute
+outside internal borrows. Root close wakes unfinished tasks while preserving
+owned storage. No internal allocation on observed Arc-waker poll/receive paths;
+arbitrary caller Waker implementations can allocate and are outside that claim.
+
+fixed-futures085203Z:12cases opt0/2,2compile-fail+control,6mutants;9hashes/21raw
+commands verified. Eleven-case085056Z pass retained before full64cell regression.
+FUTURE-REVIEW-R1 records reentrant clone/drop/wake checks and lost-wakeup mutants.
+Single-agent futures-self-review.txt; protected10/cleanexternal61dde37 and parked
+kernel base unchanged. Integration with the bounded retirement owner is next:
+notifications must escape every enclosing manager borrow before invocation.
+Native event/sleep/deadline integration remains pending; no complete async executor,
+AS3 or C callback qualification is claimed. SQ stays parked; heartbeat ACTIVE,
+AS4/MM0-MM4 and all Main/private-activation/128MiB guards remain.

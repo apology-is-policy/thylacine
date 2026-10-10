@@ -16,3 +16,5 @@ FIXED-OWNERSHIP: shared-core C/Rust fixed reservations host-verified; active aba
 TYPED-REVIEW-R1 resolved: driver drop returns Closing to unfinished typed handles; ownership remains retained. Both languages regression-tested in083803Z/083816Z.
 
 RETIREMENT-HARNESS-R1: initial Rust clean profiles passed; premature-admission mutant reaches forbidden factory and panics with unreachable-code diagnostic, not assertion. Raw failed run retained; correct expected diagnostic before rerun.
+
+FUTURE-REVIEW-R1: Waker clone/drop callbacks can deliver completion; clone-before-readiness and register-before-old-drop verified, callbacks outside Hub borrow. Future/retirement composition must dispatch outside enclosing manager borrows too; next queued integration, current types cannot compose accidentally.

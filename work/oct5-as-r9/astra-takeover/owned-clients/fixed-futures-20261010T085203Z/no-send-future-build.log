@@ -1,0 +1,93 @@
+error[E0277]: `Rc<RefCell<Hub>>` cannot be sent between threads safely
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/no-send-future.rs:202:104
+    |
+202 | fn main(){fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);}
+    |                                                                                                   ---- ^ `Rc<RefCell<Hub>>` cannot be sent between threads safely
+    |                                                                                                   |
+    |                                                                                                   required by a bound introduced by this call
+    |
+    = help: within `ReadFuture<Backing>`, the trait `Send` is not implemented for `Rc<RefCell<Hub>>`
+note: required because it appears within the type `ReadFuture<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_futures.rs:32:19
+    |
+ 32 | pub(crate) struct ReadFuture<B:RingBackend>{request:ReadRequest<B>,hub:Rc<RefCell<Hub>>,slot:Option<usize>}
+    |                   ^^^^^^^^^^
+note: required by a bound in `send`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/no-send-future.rs:202:21
+    |
+202 | fn main(){fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);}
+    |                     ^^^^ required by this bound in `send`
+
+error[E0277]: `Rc<RefCell<fixed_requests::Core<Backing>>>` cannot be sent between threads safely
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/no-send-future.rs:202:104
+    |
+202 | fn main(){fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);}
+    |                                                                                                   ---- ^ `Rc<RefCell<fixed_requests::Core<Backing>>>` cannot be sent between threads safely
+    |                                                                                                   |
+    |                                                                                                   required by a bound introduced by this call
+    |
+    = help: within `ReadFuture<Backing>`, the trait `Send` is not implemented for `Rc<RefCell<fixed_requests::Core<Backing>>>`
+note: required because it appears within the type `fixed_requests::Request<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_requests.rs:13:8
+    |
+ 13 | struct Request<B:RingBackend>{core:Rc<RefCell<Core<B>>>,fixed:Option<FixedIo<B>>,cookie:u64,published:bool}
+    |        ^^^^^^^
+note: required because it appears within the type `ReadRequest<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_requests.rs:14:19
+    |
+ 14 | pub(crate) struct ReadRequest<B:RingBackend>{inner:Request<B>}
+    |                   ^^^^^^^^^^^
+note: required because it appears within the type `ReadFuture<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_futures.rs:32:19
+    |
+ 32 | pub(crate) struct ReadFuture<B:RingBackend>{request:ReadRequest<B>,hub:Rc<RefCell<Hub>>,slot:Option<usize>}
+    |                   ^^^^^^^^^^
+note: required by a bound in `send`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/no-send-future.rs:202:21
+    |
+202 | fn main(){fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);}
+    |                     ^^^^ required by this bound in `send`
+
+error[E0277]: `Rc<ring_payload::Core<Backing>>` cannot be sent between threads safely
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/no-send-future.rs:202:104
+    |
+202 | fn main(){fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);}
+    |                                                                                                   ---- ^ `Rc<ring_payload::Core<Backing>>` cannot be sent between threads safely
+    |                                                                                                   |
+    |                                                                                                   required by a bound introduced by this call
+    |
+    = help: within `ReadFuture<Backing>`, the trait `Send` is not implemented for `Rc<ring_payload::Core<Backing>>`
+note: required because it appears within the type `FixedIo<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/ring_payload.rs:65:19
+    |
+ 65 | pub(crate) struct FixedIo<B:RingBackend>{core:Rc<Core<B>>,index:usize,cookie:u64}
+    |                   ^^^^^^^
+note: required because it appears within the type `Option<FixedIo<Backing>>`
+   --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:597:10
+    |
+597 | pub enum Option<T> {
+    |          ^^^^^^
+note: required because it appears within the type `fixed_requests::Request<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_requests.rs:13:8
+    |
+ 13 | struct Request<B:RingBackend>{core:Rc<RefCell<Core<B>>>,fixed:Option<FixedIo<B>>,cookie:u64,published:bool}
+    |        ^^^^^^^
+note: required because it appears within the type `ReadRequest<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_requests.rs:14:19
+    |
+ 14 | pub(crate) struct ReadRequest<B:RingBackend>{inner:Request<B>}
+    |                   ^^^^^^^^^^^
+note: required because it appears within the type `ReadFuture<Backing>`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/fixed_futures.rs:32:19
+    |
+ 32 | pub(crate) struct ReadFuture<B:RingBackend>{request:ReadRequest<B>,hub:Rc<RefCell<Hub>>,slot:Option<usize>}
+    |                   ^^^^^^^^^^
+note: required by a bound in `send`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-futures-20261010T085203Z/no-send-future.rs:202:21
+    |
+202 | fn main(){fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);}
+    |                     ^^^^ required by this bound in `send`
+
+error: aborting due to 3 previous errors
+
+For more information about this error, try `rustc --explain E0277`.
