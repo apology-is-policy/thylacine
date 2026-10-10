@@ -36,6 +36,8 @@ size_t t_ring_members(const struct t_ring_owner *);
 size_t t_ring_live(const struct t_ring_owner *);
 size_t t_ring_pending(const struct t_ring_owner *);
 void t_ring_owner_drop(struct t_ring_owner *);
+/* Close once while retaining root bookkeeping for terminal/retirement polling. */
+void t_ring_close(struct t_ring_owner *);
 /* Exclusive fixed-I/O ownership, one preallocated reservation per registered
  * buffer. Cookie comes from this ring's request book. Do not retain/use aliases
  * after dropping a handle. No view is available during submitted I/O.

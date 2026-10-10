@@ -95,6 +95,12 @@ impl RequestBook {
         if self.entries[i].as_ref().unwrap().phase != Phase::Terminal { return Err(Error::State); }
         Ok(self.entries[i].take().unwrap().terminal.unwrap())
     }
+    /// # Safety
+    /// Whole-owner retirement proved, consumer detached, all fixed/payload
+    /// borrowers settled by the outer owner; no future completion is deliverable.
+    pub(crate) unsafe fn clear_retired(&mut self) {
+        for entry in self.entries.iter_mut() { *entry = None; }
+    }
     pub(crate) fn occupied(&self) -> usize { self.entries.iter().flatten().count() }
 }
 #[cfg(test)]

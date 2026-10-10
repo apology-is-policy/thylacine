@@ -100,3 +100,5 @@ void t_ring_fixed_drop(struct t_ring_fixed *f){
  if(f->phase==FIX_ACTIVE){f->abandoned=1;if(!c->closed)c->b.abort_scope(c->b.context,f->scope);}else{f->phase=FIX_FREE;}maybe_free(c);
 }
 size_t t_ring_fixed_count(const struct t_ring_owner *root){struct ring_core *c=root->core;assert(c->root_alive);size_t n=0;for(size_t i=0;i<64;++i)n+=c->fixed[i].phase!=FIX_FREE;return n;}
+
+void t_ring_close(struct t_ring_owner *root){assert(root->core->root_alive);close_owner(root->core);}

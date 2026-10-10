@@ -1,0 +1,76 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/request_book.c b/work/oct5-as-r9/astra-takeover/owned-clients/request_book.c
+index be9a52c2b..897ad73b5 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/request_book.c
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/request_book.c
+@@ -66,3 +66,4 @@ int t_request_exhausted_test(void){_Atomic uint64_t n=UINT64_MAX-1;uint64_t out=
+  return cookie(&n,&out)==0&&out==UINT64_MAX-1&&cookie(&n,&out)==T_REQ_EXHAUSTED&&cookie(&n,&out)==T_REQ_EXHAUSTED;
+ }
+ #endif
++void t_request_clear_retired(struct t_request_book *b){for(size_t i=0;i<b->count;++i)b->entries[i].phase=FREE;}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/request_book.h b/work/oct5-as-r9/astra-takeover/owned-clients/request_book.h
+index 6cba306bb..222858bc6 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/request_book.h
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/request_book.h
+@@ -22,6 +22,9 @@ int t_request_accept(struct t_request_book *,const struct t_paired_record *,stru
+ int t_request_abandon(struct t_request_book *,uint64_t,struct t_loom_service_ref *);
+ /* Consume after payload transfer/fixed-owner settlement; no payload return. */
+ int t_request_take_terminal(struct t_request_book *,uint64_t,struct t_owned_cqe *);
++/* Requires proven whole-owner retirement, detached consumer and settled local
++ * fixed/payload borrowers; no future completion can be delivered. */
++void t_request_clear_retired(struct t_request_book *);
+ size_t t_request_occupied(const struct t_request_book *);
+ #ifdef T_REQUEST_TEST
+ int t_request_exhausted_test(void);
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/request_book.rs b/work/oct5-as-r9/astra-takeover/owned-clients/request_book.rs
+index 8faeabb57..759cc3022 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/request_book.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/request_book.rs
+@@ -95,6 +95,12 @@ impl RequestBook {
+         if self.entries[i].as_ref().unwrap().phase != Phase::Terminal { return Err(Error::State); }
+         Ok(self.entries[i].take().unwrap().terminal.unwrap())
+     }
++    /// # Safety
++    /// Whole-owner retirement proved, consumer detached, all fixed/payload
++    /// borrowers settled by the outer owner; no future completion is deliverable.
++    pub(crate) unsafe fn clear_retired(&mut self) {
++        for entry in self.entries.iter_mut() { *entry = None; }
++    }
+     pub(crate) fn occupied(&self) -> usize { self.entries.iter().flatten().count() }
+ }
+ #[cfg(test)]
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c
+index 1c8abfb37..2828e91ef 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.c
+@@ -100,3 +100,5 @@ void t_ring_fixed_drop(struct t_ring_fixed *f){
+  if(f->phase==FIX_ACTIVE){f->abandoned=1;if(!c->closed)c->b.abort_scope(c->b.context,f->scope);}else{f->phase=FIX_FREE;}maybe_free(c);
+ }
+ size_t t_ring_fixed_count(const struct t_ring_owner *root){struct ring_core *c=root->core;assert(c->root_alive);size_t n=0;for(size_t i=0;i<64;++i)n+=c->fixed[i].phase!=FIX_FREE;return n;}
++
++void t_ring_close(struct t_ring_owner *root){assert(root->core->root_alive);close_owner(root->core);}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h
+index c2f0bad19..82264079b 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.h
+@@ -36,6 +36,8 @@ size_t t_ring_members(const struct t_ring_owner *);
+ size_t t_ring_live(const struct t_ring_owner *);
+ size_t t_ring_pending(const struct t_ring_owner *);
+ void t_ring_owner_drop(struct t_ring_owner *);
++/* Close once while retaining root bookkeeping for terminal/retirement polling. */
++void t_ring_close(struct t_ring_owner *);
+ /* Exclusive fixed-I/O ownership, one preallocated reservation per registered
+  * buffer. Cookie comes from this ring's request book. Do not retain/use aliases
+  * after dropping a handle. No view is available during submitted I/O.
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
+index 07122941c..a0f99f6be 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs
+@@ -101,6 +101,8 @@ impl<B:RingBackend> RingOwner<B>{
+   if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}Ok(())
+  }
+  pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
++ pub(crate) fn begin_retire(&mut self){self.core.retire();}
++ pub(crate) fn close(&mut self){self.core.close();}
+  pub(crate) fn members(&self)->usize{self.core.state.borrow().members}
+  pub(crate) fn live(&self)->usize{self.core.state.borrow().live}
+  pub(crate) fn pending(&self)->usize{self.core.state.borrow().pools.iter().flatten().map(|p|p.pending.iter().filter(|x|x.is_some()).count()).sum()}

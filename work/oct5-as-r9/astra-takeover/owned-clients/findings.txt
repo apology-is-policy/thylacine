@@ -12,3 +12,5 @@ MAPPING-HARNESS-R1: initial064425Z clean mapping profiles passed; custom case3 p
 SQ-REUSE-R1: kernel publishes freed SQ slot before copying. Patch and successful source-matched smoke evidence parked unapplied for Corona per operator after reported classifier block. See native-sq-reuse/PARKED.md. Continue independent fixed I/O/cancellation/retirement; native submission integration remains gated.
 
 FIXED-OWNERSHIP: shared-core C/Rust fixed reservations host-verified; active abandonment retains range until terminal/retirement, pool overlap excluded, no view during I/O. Conservative one fixed reservation per registered buffer; future/native integration pending. SQ reuse remains parked.
+
+TYPED-REVIEW-R1 resolved: driver drop returns Closing to unfinished typed handles; ownership remains retained. Both languages regression-tested in083803Z/083816Z.

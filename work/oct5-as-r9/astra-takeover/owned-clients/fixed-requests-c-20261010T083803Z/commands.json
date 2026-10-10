@@ -1,0 +1,127 @@
+[
+  {
+    "name": "clang-version",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "sanitized-fixed_requests.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "sanitized-request_book.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "sanitized-ring_payload.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "sanitized-lease_ledger.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "sanitized-link",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "sanitized-run",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "ndebug-fixed_requests.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "ndebug-request_book.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "ndebug-ring_payload.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "ndebug-lease_ledger.c-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "ndebug-link",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "ndebug-run",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "unpublished-leak-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "unpublished-leak-run",
+    "rc": -6,
+    "expected_failure": true
+  },
+  {
+    "name": "lost-abandoned-terminal-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "lost-abandoned-terminal-run",
+    "rc": -6,
+    "expected_failure": true
+  },
+  {
+    "name": "retirement-without-proof-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "retirement-without-proof-run",
+    "rc": -6,
+    "expected_failure": true
+  },
+  {
+    "name": "retired-metadata-leak-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "retired-metadata-leak-run",
+    "rc": -6,
+    "expected_failure": true
+  },
+  {
+    "name": "missing-storage-terminal-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "missing-storage-terminal-run",
+    "rc": -6,
+    "expected_failure": true
+  },
+  {
+    "name": "corrupt-keeps-open-build",
+    "rc": 0,
+    "expected_failure": false
+  },
+  {
+    "name": "corrupt-keeps-open-run",
+    "rc": -6,
+    "expected_failure": true
+  }
+]

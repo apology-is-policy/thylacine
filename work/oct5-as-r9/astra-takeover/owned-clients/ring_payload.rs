@@ -101,6 +101,8 @@ impl<B:RingBackend> RingOwner<B>{
   if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}Ok(())
  }
  pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
+ pub(crate) fn begin_retire(&mut self){self.core.retire();}
+ pub(crate) fn close(&mut self){self.core.close();}
  pub(crate) fn members(&self)->usize{self.core.state.borrow().members}
  pub(crate) fn live(&self)->usize{self.core.state.borrow().live}
  pub(crate) fn pending(&self)->usize{self.core.state.borrow().pools.iter().flatten().map(|p|p.pending.iter().filter(|x|x.is_some()).count()).sum()}

@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-fixed-io-ownership-host-verified",
-  "next": "Independent typed fixed-I/O futures/request correlation and bounded cancellation/retirement executor with simulated backends. SQ reuse remains parked; native submission/integration and complete async qualification gated.",
+  "state": "draft-typed-fixed-requests-host-verified",
+  "next": "Independent bounded cancellation/retirement executor and typed futures/wakeups with simulated backends. SQ reuse parked; native submission/integration and full async qualification gated.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -17,5 +17,7 @@
   "parked_dependency": "native-sq-reuse/PARKED.md",
   "fixed_rust_run": "owned-clients/fixed-io-20261010T074052Z",
   "fixed_c_run": "owned-clients/fixed-io-c-20261010T074317Z",
-  "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z"
+  "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z",
+  "typed_rust_run": "owned-clients/fixed-requests-20261010T083816Z",
+  "typed_c_run": "owned-clients/fixed-requests-c-20261010T083803Z"
 }

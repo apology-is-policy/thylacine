@@ -1,0 +1,18 @@
+error[E0599]: no method named `bytes` found for struct `ReadRequest<B>` in the current scope
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T083141Z/no-active-view.rs:152:86
+    |
+152 | fn main(){let (_p,d)=typed_driver(1);let r=d.read(id(0,1),range(0)).unwrap();let _=r.bytes();}
+    |                                                                                      ^^^^^ method not found in `ReadRequest<Backing>`
+    |
+   ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T083141Z/fixed_requests.rs:14:1
+    |
+ 14 | pub(crate) struct ReadRequest<B:RingBackend>{inner:Request<B>}
+    | -------------------------------------------- method `bytes` not found for this struct
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following trait defines an item `bytes`, perhaps you need to implement it:
+            candidate #1: `std::io::Read`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0599`.

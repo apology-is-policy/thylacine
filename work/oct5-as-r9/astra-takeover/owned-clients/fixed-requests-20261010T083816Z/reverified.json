@@ -1,0 +1,32 @@
+{
+  "owner": "astra",
+  "sources": 8,
+  "commands": 23,
+  "raw_logs_verified": true,
+  "source_and_diff_verified": true,
+  "log_sha256": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "979609836e0e27ca6865a4de650c2a1af59c47ad7d6026294a5aa3fbd1dfc6d7",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "92a96b4f433fda8393b982830108df66a9a32b4fe330c7f7e366fd3761724c62",
+    "no-active-view-build": "16dd98478159a2fcafce4d700ca292e76d1f3edadfb8feb8c3d9f72342d21ade",
+    "no-clone-build": "7d72e26fe90ddecd33f1b79b7e242b3b0526cef70848cdbee6e4dc66eb918920",
+    "result-borrow-build": "f257d9448f048c27cf82d4e5ceb2f43bd629230f80c6cfd2daaf9165a2ea0d68",
+    "no-mutable-result-build": "1b17e0bbd501c9ee3e817b1109bb62a1bef3198df8329d0797a5d988ffa1cffa",
+    "valid-result-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "valid-result-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unpublished-leak-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unpublished-leak-run": "e7f423ca57d9609e8b4472db49f819a8b59c2b9b6acb21dfd12e9b53fabdcfd3",
+    "lost-abandoned-terminal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-abandoned-terminal-run": "54be13a57fc43f88770d046b92b4ca439cdc3d137e7fb5fe0424681e9090304f",
+    "retirement-without-proof-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "retirement-without-proof-run": "34ce36847f495f092c0a28e0b79c85be70de0958543f2b093109495fc68467f9",
+    "retired-metadata-leak-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "retired-metadata-leak-run": "3d056a13b1929193cff4e5df3387d71ed01fee1008581adf7892b077652c5aca",
+    "missing-storage-terminal-build": "4dc17f24f425c0b6a2080a41c6950ec41847a5e7ebfd34b5499907386ae65e5e",
+    "missing-storage-terminal-run": "b9fad638263fea0c444d19e80d837ec8f174306cf172b13393218c8426b4f36c",
+    "corrupt-keeps-open-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "corrupt-keeps-open-run": "bb2cdba0be7740aebab31b90647f8c344fb2c847d4ee0ea41ad8f6d58dc79373"
+  }
+}

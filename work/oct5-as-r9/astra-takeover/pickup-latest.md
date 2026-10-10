@@ -16,11 +16,11 @@ No native/host job remains active. SQ reuse correction is PARKED and unapplied
 at operator request for Corona; read native-sq-reuse/PARKED.md before acting.
 Current build kernels contain that parked patch and are not current-source
 artifacts. Do not apply/revise/rerun this subchunk or bypass classifier restrictions.
-Fixed-I/O ownership is now host-verified in both languages. Continue independent
-typed futures/request correlation and bounded cancellation/retirement executor
-using simulated backends. Read owned-clients/fixed-self-review.txt. Native SQ submission/integration
+Typed fixed request controllers are host-verified in both languages. Continue
+independent bounded cancellation/retirement executor and futures/wakeups using
+simulated backends. Read owned-clients/typed-self-review.txt. Native SQ submission/integration
 and complete async qualification remain gated on this dependency. Heartbeat
-prompt updated with this exception; its existing PAUSED status was preserved.
+prompt retains this exception and is ACTIVE under latest operator authorization.
 Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
 not the earlier one-pool payload_owner.* historical components. Read owned-clients/implementation-notes.txt,self-review.txt and
 paired-self-review.txt, payload-self-review.txt, ring-self-review.txt, registration-self-review.txt request-self-review.txt and composed-self-review.txt. All remain UNINSTALLED;
@@ -283,3 +283,26 @@ bounded executor retirement remain. WRITE cancellation never implies remote roll
 Astra10hashes/cleanexternal61dde37 preserved. SQ reuse remains parked and unapplied;
 no native gates rerun, Main landing, private activation or128MiB change. Heartbeat
 remains paused as found. AS3/AS4/MM0-MM4 remain incomplete.
+
+
+### Astra typed fixed request controllers, October 10
+
+Uninstalled C/Rust controllers couple preallocated request metadata and fixed
+storage through exact library cookies. Preparation failures release both
+reservations; active abandonment requests scope abort once and retains ownership
+until authenticated terminal or whole-owner retirement. READ results own backing
+past driver close; WRITE results preserve actual errors. Malformed/foreign records
+close only the affected driver. No allocation in receive/completion/drop/progress.
+TYPED-REVIEW-R1 fixes prepared/active polling after driver drop to report Closing
+while retaining storage, rather than waiting indefinitely without a driver.
+
+Rust083816Z:10cases opt0/2,4compile-fail+control,6mutants,8hashes/23commands.
+C083803Z:11scenarios LLVM22ASan+UBSan/NDEBUG,6mutants,13hashes/25commands.
+Raw logs/source snapshots and current diff reverified before documentation;
+initial nine-case Rust083141Z retained. Single-agent typed-self-review.txt records
+ownership/error/retirement boundaries. Protected10/cleanexternal61dde37 and parked
+kernel base preserved. These are typed polling handles, not Future/waker/executor
+or native SQ integration. Continue bounded executor retirement/futures independently;
+SQ correction remains parked/unapplied. Heartbeat resumed ACTIVE under operator's
+latest autonomous-continuation instruction. AS3/AS4/MM0-MM4 remain incomplete;
+no Main, private activation or128MiB protection change.

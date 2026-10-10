@@ -1,0 +1,39 @@
+Astra single-agent self-review: typed fixed requests, October 10.
+Not an independent audit. Uninstalled, simulated records/backends only.
+
+One controller owns RequestBook and shared RingOwner. Preparation allocates and
+reserves before native publication; failed buffer geometry/copy rolls back both
+reservations. Private cookies link exact terminal records to fixed storage. An
+abandoned active request issues scope abort once through FixedIo, retains both
+charges, and reclaims only on authenticated terminal or whole-owner retirement.
+No ENTER or ABORT return authorizes reuse. Invalid/foreign/stale records close
+that driver while retaining active storage; existing completed views keep backing.
+Receive, completion, drop and retirement progress do not allocate. C preallocates
+read result inside request allocation; success consumes the request, result drop
+frees it. Rust result owns FixedIo; safe slices cannot outlive or mutate it.
+
+TYPED-REVIEW-R1: after driver drop, prepared/active handles previously polled None
+forever although no driver remained to deliver CQ. Both implementations now return
+Closing while preserving storage. Completed results remain consumable after normal
+begin-retire; corruption instead closes delivery. New Rust case10 and C case10
+cover driver drop before/after publication. Metadata clear requires owner.progress
+true: whole-owner retirement confirmed, no live fixed handles/views. A consumer
+must detach before global retirement proof; that remains backend precondition.
+
+Reviewed refcounts, C consumed handles, error cleanup, RefCell scopes, exact cookie
+and range identity, close-once, no mutation hidden in assert, errno/result handling,
+no completion-driven allocation, and cross-ring isolation. All calls remain on
+one creator; C requires valid opaque handles and ended pointer borrows. No raw
+SQ operation, native syscall/pin proof, waker, Future or executor is implemented
+by this controller. Backend callbacks must not reenter mutable controller state.
+Cancellation remains scope-wide and never proves remote WRITE rollback.
+
+Rust fixed-requests-20261010T083816Z:10cases opt0/2,4compile-fail contracts plus
+positive control,6mutants;8source hashes/23raw commands verified before docs.
+C fixed-requests-c-20261010T083803Z:11scenarios LLVM22ASan+UBSan and optimized
+NDEBUG core,6mutants;13source hashes/25rawcommands verified before docs.
+Initial Rust083141Z nine cases passed before closing regression was added; its
+source-matched evidence remains preserved. No failed run in this checkpoint.
+Protected ten hashes, clean external61dde37 and parked kernel base verified.
+Next bounded executor retirement/futures; native SQ remains parked. No Main,
+private activation,128MiB removal, full AS3/AS4/MM0-MM4 qualification.

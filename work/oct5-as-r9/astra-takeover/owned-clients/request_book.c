@@ -66,3 +66,4 @@ int t_request_exhausted_test(void){_Atomic uint64_t n=UINT64_MAX-1;uint64_t out=
  return cookie(&n,&out)==0&&out==UINT64_MAX-1&&cookie(&n,&out)==T_REQ_EXHAUSTED&&cookie(&n,&out)==T_REQ_EXHAUSTED;
 }
 #endif
+void t_request_clear_retired(struct t_request_book *b){for(size_t i=0;i<b->count;++i)b->entries[i].phase=FREE;}

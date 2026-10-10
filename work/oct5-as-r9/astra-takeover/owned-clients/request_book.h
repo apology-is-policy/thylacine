@@ -22,6 +22,9 @@ int t_request_accept(struct t_request_book *,const struct t_paired_record *,stru
 int t_request_abandon(struct t_request_book *,uint64_t,struct t_loom_service_ref *);
 /* Consume after payload transfer/fixed-owner settlement; no payload return. */
 int t_request_take_terminal(struct t_request_book *,uint64_t,struct t_owned_cqe *);
+/* Requires proven whole-owner retirement, detached consumer and settled local
+ * fixed/payload borrowers; no future completion can be delivered. */
+void t_request_clear_retired(struct t_request_book *);
 size_t t_request_occupied(const struct t_request_book *);
 #ifdef T_REQUEST_TEST
 int t_request_exhausted_test(void);

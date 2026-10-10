@@ -1,0 +1,150 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 9,
+  "profiles": 2,
+  "compile_fail": 4,
+  "positive_compile_control": 1,
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "9 passed; 0 failed"
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "9 passed; 0 failed"
+    },
+    {
+      "name": "no-active-view-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "no-clone-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "result-borrow-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0505"
+    },
+    {
+      "name": "no-mutable-result-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0594"
+    },
+    {
+      "name": "valid-result-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "valid-result-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "unpublished-leak-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "unpublished-leak-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "lost-abandoned-terminal-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-abandoned-terminal-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "retirement-without-proof-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "retirement-without-proof-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "retired-metadata-leak-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "retired-metadata-leak-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "missing-storage-terminal-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "missing-storage-terminal-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "corrupt-keeps-open-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "corrupt-keeps-open-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    }
+  ],
+  "limits": "Rust typed fixed request controller; simulated paired records, abort/retirement. No native SQ, wakers, std Future or executor qualification. SQ fix parked."
+}
