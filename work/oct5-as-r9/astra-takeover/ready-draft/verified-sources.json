@@ -1,0 +1,7 @@
+{
+  "work/oct5-as-r9/astra-takeover/ready-draft/kernel/loom_service_ready.c": "2987e9575c6eedf25d02171254bcba34e768ba2e659f1dc9b00b041e044bfb6c",
+  "work/oct5-as-r9/astra-takeover/ready-draft/kernel/include/thylacine/loom_service_ready.h": "46069d6587dffa141be421fc735a9aa1409273087fe2f38b0926c29d87d45ac5",
+  "work/oct5-as-r9/astra-takeover/ready-draft/fixture.c": "2a8e67247a7e58dc00bafb56bc835e03367651621198cdf16ace254e85ef2156",
+  "work/oct5-as-r9/astra-takeover/ready-draft/run-controls.py": "44eb8a5901b329ff9e125e7d87b454bf88f24452b64e5ecd709295ac0e17ae32",
+  "work/oct5-as-r9/astra-takeover/ready-draft/check-arm64.py": "dcb2d3a9a9385518cea1e40c24d50fcdd19bf06681c435d3706aea467aea5f60"
+}

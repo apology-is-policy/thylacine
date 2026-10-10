@@ -2597,3 +2597,12 @@ ring destruction, which validates all pools then physically drops saved pins.
 refs/allocator and final-reference boundaries remain simulated. Actual READY,
 entry-pinned close, RETURN/frontend/native qualification are still owed. Canonical
 kernel97d495 unchanged; no activation. See state/self-review/next-work.
+
+Astra October10 uninstalled `ready-draft` adds a bounded value-only interest scan
+and atomic driver claim/list rotation. Empty pools, occupied TX and exhausted
+tags park while active deadlines remain visible; expired owners preempt new
+submissions anywhere in the list. Local retirement retains delivery/free work.
+54hostchecks/12mutants and ARM64 object pass on synthetic readiness/ledger states.
+Actual executor/CONNECT/close/RETURN wiring and negotiated iounit metadata remain
+owned integration work, not qualified by this selector. Canonical unchanged;
+see ready-draft/state/self-review/next-work. No activation.

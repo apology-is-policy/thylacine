@@ -113,3 +113,11 @@ remain simulated, no native integration claim. Canonical97d495 unchanged. Mac
 released/no jobs/8843MiB; clean Stratum61dde37 and Astra10hashes intact. Next coherent
 READY scheduling, RETURN wake/immutable SQE frontend and entry-pinned close routing
 before installation/native gates. Then AS3/4,MM0-MM4. No activation; self-review only.
+
+Newest addition ready-draft supplies only the uninstalled bounded READY selector,
+with retirement-draft ownership APIs still required.54checks/12mutants,17inputs/
+13raw pairs/ARM64object verified. READY-R1 later expired owner now preempts earlier
+submission. Actual action executor, engine/CONNECT/close routing, RETURN wake,
+immutable frontend and negotiated iounit persistence still owed. See state,
+self-review and explicit next-work. No native scheduler claim/canonical changes.
+Mac released/no jobs/9163MiB; Stratum61dde37/Astra10hashes intact. Continue autonomously.

@@ -35755,3 +35755,23 @@ Retained raw baseline and failed harness runs, documented single-agent self-revi
 Canonical97d495 unchanged; no activation. Mac released,8843MiB, Stratum61dde37 and
 Astra10hashes intact. Next coherent READY/RETURN/frontend and native gates before
 AS3/4 and MM0-MM4. See retirement-draft/state.json and next-work.txt.
+
+### Astra bounded READY selector, October10
+
+Added uninstalled `ready-draft`, using the verified retirement ownership APIs.
+It samples no operation cursors while another driver/teardown user owns them,
+exports value-only wait interest, then rescans and atomically claims driving plus
+round-robin list rotation before returning a selected owner. Empty pool/full tag
+or TX shortages park; deadlines remain visible through full CQ. Local retirement
+does not hide pending delivery/storage owners. READY-R1 self-review repaired
+first-runnable selection so a later expired owner preempts earlier submission.
+
+54 sanitizer checks/12mutants,17input hashes/13 raw pairs and one real ARM64 object
+pass. Fixtures synthesize ledger/readiness states; actual action execution,
+engine/CONNECT/close routing, RETURN wakes and native scheduling are still owed.
+This is a selector prerequisite, not installed dispatch. IOUNIT-R1 records the
+remaining negotiated-iounit metadata/admission wiring before actual dispatch.
+Canonical97d495 unchanged; Mac released,9163MiB, Stratum clean61dde37 and Astra10
+hashes intact. Continue ready-draft/next-work; retirement-draft remains required.
+Single-agent self-review only; no activation. Native matched gates, AS3/4 and
+MM0-MM4 remain ahead.

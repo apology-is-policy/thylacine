@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -5,7 +5,7 @@
+ #include <thylacine/poll.h>
+ #include <thylacine/loom_service_pool_table.h>
+ static bool ready_member(struct loom_service_operation *o) {
+-    if(!o->pool_stream || o->pool_busy)return true;
++    if(!o->pool_stream)return true;
+     struct loom_pool_bank *b=&o->owner->service_pools->bank;
+     // Exhaustion is actionable even when no member is free: begin must report
+     // NOSPC rather than parking forever on an impossible future receipt.

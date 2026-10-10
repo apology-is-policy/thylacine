@@ -1,0 +1,27 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "state": "verified-uninstalled-ready-selector",
+  "source_base": "a94bb9ecad4f5719ecb97db42402cab86cc27e7f",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "run": "work/oct5-as-r9/astra-takeover/ready-draft/controls-20261010T000209Z",
+  "checks": 54,
+  "mutants": 12,
+  "verified_inputs": 17,
+  "verified_raw_pairs": 13,
+  "arm64": "arm64-result.json",
+  "dependencies": [
+    "retirement-draft headers and ownership APIs",
+    "canonical actual tag availability",
+    "program-draft/wire-draft"
+  ],
+  "limits": "Sequential synthetic owner/ledger/CQ/native readiness states with real kernel headers and tag availability. No actual driver action execution, submission, poll registration, RETURN wake, native scheduling or close qualification.",
+  "review": "single-agent self-review, not independent audit",
+  "utc": "2026-10-10T00:02:56.070798+00:00",
+  "issues": {
+    "READY-R1": "expired later owner must preempt earlier submit; repaired and exact mutant caught",
+    "READY-INTEGRATION": "action executor plus engine/CONNECT/close routing and native validation still owed",
+    "IOUNIT-R1": "negotiated LOPEN iounit not yet retained by node/admission; wire adapter already bounds by it; wire before actual dispatch installation"
+  },
+  "next": "next-work.txt"
+}

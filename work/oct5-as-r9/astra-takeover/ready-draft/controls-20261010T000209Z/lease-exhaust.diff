@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -9,7 +9,7 @@
+     struct loom_pool_bank *b=&o->owner->service_pools->bank;
+     // Exhaustion is actionable even when no member is free: begin must report
+     // NOSPC rather than parking forever on an impossible future receipt.
+-    if(b->next_nonce==UINT64_MAX)return true;
++    if(false)return true;
+     for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i) {
+         struct loom_pool_cell *c=&b->cells[i];
+         if(c->phase==LMEMBER_AVAILABLE && c->pool.slot==o->pool.slot &&

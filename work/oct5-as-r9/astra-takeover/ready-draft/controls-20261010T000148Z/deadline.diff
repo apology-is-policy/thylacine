@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -46,7 +46,7 @@
+         if(r->identity!=o->request.identity || r->owners!=1)
+             extinction("READY operation request changed");
+         bool active=o->phase!=LRPC_TERMINAL;
+-        if(active && r->deadline && (!a.deadline || r->deadline<a.deadline))a.deadline=r->deadline;
++        if(active && r->deadline && !a.deadline)a.deadline=r->deadline;
+         // A deadline must end possible wire effects before metadata cancellation;
+         // the executor latches the whole private scope then actually quiesces it.
+         s32 why=reason?reason:(active && r->deadline && r->deadline<=now)?-T_E_TIMEDOUT:0;

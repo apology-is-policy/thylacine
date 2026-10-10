@@ -1,0 +1,11 @@
+--- 
++++ 
+@@ -65,7 +65,7 @@
+         else if(o->phase==LRPC_QUEUED && wire && ready_member(o)) {
+             bool clunk_wait=o->fid_claim==P9_TCLUNK &&
+                 l->service_nodes->nodes[o->source.slot].fid_borrows;
+-            if(!clunk_wait)action=LREADY_SUBMIT;
++            if(clunk_wait || !clunk_wait)action=LREADY_SUBMIT;
+         }
+         // Always finish scanning for the earliest deadline, even after a pick.
+         if(action!=LREADY_NONE && (pick->action==LREADY_NONE ||
