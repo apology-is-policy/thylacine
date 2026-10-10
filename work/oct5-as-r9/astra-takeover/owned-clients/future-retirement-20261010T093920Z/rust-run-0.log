@@ -1,0 +1,11 @@
+
+running 6 tests
+test composed_drop_progress_no_internal_allocation ... ok
+test composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict ... ok
+test composed_client_drop_wake_can_access_peer_and_retire_both ... ok
+test composed_terminal_survives_client_retire_before_poll ... ok
+test composed_receive_wake_can_drop_another_client_and_poll ... ok
+test composed_payload_result_blocks_cell_until_last_view_ends ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.00s
+

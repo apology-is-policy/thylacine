@@ -1,0 +1,128 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "9 passed; 0 failed"
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "9 passed; 0 failed"
+  },
+  {
+    "name": "no-clone-client-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0599"
+  },
+  {
+    "name": "no-send-executor-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0277"
+  },
+  {
+    "name": "valid-client-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "valid-client-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "skip-expiry-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "skip-expiry-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "ignore-request-deadline-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ignore-request-deadline-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "ignore-outer-deadline-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ignore-outer-deadline-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "due-is-outer-timeout-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "due-is-outer-timeout-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "unbounded-ring-scan-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "unbounded-ring-scan-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "skip-retiring-timers-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "skip-retiring-timers-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  }
+]

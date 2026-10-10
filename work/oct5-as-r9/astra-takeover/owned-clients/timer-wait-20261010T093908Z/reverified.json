@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:39:53.565806+00:00",
+  "source_count": 11,
+  "command_count": 21,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "3c8d5e8053e70ddc691c4244b5e490a0e4a2f410d15d5a9cdac12c675d67b2c1",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "195ac82ea850477a486f1f2402964bbcb74173e3ca7788dd1b07f7e8f8241fb2",
+    "no-clone-client-build": "f7c1a4802a016fdc8ff93cbe037be324f66ef9dfff1388f853c449415228c149",
+    "no-send-executor-build": "92b6508c40bac4a044b1180d24c10a6c59ee9c428dd1fe2e40fb2d2bd9db22f2",
+    "valid-client-build": "071a873958430ed890487640cb40d5a454010254ffefa96520fdf26baf4ee47a",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-expiry-build": "a64acb8bbd7f637fc2d2ddc3c3ca56e6c0774bdaaba5dd262d4618a27a30166a",
+    "skip-expiry-run": "440988471165ff9171a6e5088d3d9a5eeae2eb923a64f171e10ea0b0c9f2ff2e",
+    "ignore-request-deadline-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ignore-request-deadline-run": "8aeb1f70c2cc140feb17fd521eeefed0bfdc8aa78f3d27c3d6ae983eb629d1b6",
+    "ignore-outer-deadline-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ignore-outer-deadline-run": "df2e5dd3bef72fb859791c6832448be76f47e0763ba04c6fa40d242a458a3dda",
+    "due-is-outer-timeout-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "due-is-outer-timeout-run": "a2671421968f86f765d101acc372974e609fb9fb0503e672e3b34830ff8d1967",
+    "unbounded-ring-scan-build": "528ca01f88a4ef7c6c38fd73aa17533180e9828600aca17fd9b534e2bf4ff4e9",
+    "unbounded-ring-scan-run": "341ac72a7fce25bcd2b41d2ea82ffa21048ec9e2faac108a7a5fc475c09f112d",
+    "skip-retiring-timers-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "skip-retiring-timers-run": "2fff4cad10d1f1fa958544723fb874269c81780a14e4a2ac42e46d6bdb76d6cf"
+  }
+}

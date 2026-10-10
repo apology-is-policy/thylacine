@@ -11,6 +11,7 @@ pub(crate) trait Retirable{
  fn write(&self,scope:SlotRef,range:PoolMember,input:&[u8])->Result<Self::Write,DriverError>;
  unsafe fn receive(&mut self,record:Record)->(Result<(),DriverError>,WakeBatch);
  fn bind_progress(&mut self,signal:ProgressSignal);
+ fn next_deadline(&self)->Option<u64>;fn expire(&mut self,now:u64,budget:usize)->usize;
  fn retire(&mut self)->WakeBatch;fn close(&mut self)->WakeBatch;fn progress(&mut self)->bool;
 }
 impl<B:RingBackend> Retirable for FixedDriver<B>{
@@ -19,6 +20,8 @@ impl<B:RingBackend> Retirable for FixedDriver<B>{
  fn write(&self,s:SlotRef,r:PoolMember,b:&[u8])->Result<Self::Write,DriverError>{FixedDriver::write(self,s,r,b)}
  unsafe fn receive(&mut self,r:Record)->(Result<(),DriverError>,WakeBatch){(unsafe{FixedDriver::receive(self,r)},WakeBatch::empty())}
  fn bind_progress(&mut self,signal:ProgressSignal){FixedDriver::bind_progress(self,signal);}
+ fn next_deadline(&self)->Option<u64>{FixedDriver::next_deadline(self)}
+ fn expire(&mut self,now:u64,budget:usize)->usize{FixedDriver::expire(self,now,budget)}
  fn retire(&mut self)->WakeBatch{self.begin_retire();WakeBatch::empty()}
  fn close(&mut self)->WakeBatch{FixedDriver::close(self);WakeBatch::empty()}
  fn progress(&mut self)->bool{FixedDriver::progress(self)}
@@ -29,12 +32,14 @@ impl<B:RingBackend> Retirable for FutureDriver<B>{
  fn write(&self,s:SlotRef,r:PoolMember,b:&[u8])->Result<Self::Write,DriverError>{FutureDriver::write(self,s,r,b)}
  unsafe fn receive(&mut self,r:Record)->(Result<(),DriverError>,WakeBatch){unsafe{self.receive_deferred(r)}}
  fn bind_progress(&mut self,signal:ProgressSignal){FutureDriver::bind_progress(self,signal);}
+ fn next_deadline(&self)->Option<u64>{FutureDriver::next_deadline(self)}
+ fn expire(&mut self,now:u64,budget:usize)->usize{FutureDriver::expire(self,now,budget)}
  fn retire(&mut self)->WakeBatch{self.retire_deferred()}
  fn close(&mut self)->WakeBatch{self.close_deferred()}
  fn progress(&mut self)->bool{FutureDriver::progress(self)}
 }
 struct Entry<D:Retirable>{driver:D,retiring:bool}
-struct State<D:Retirable>{slots:Vec<Option<Entry<D>>>,cursor:usize,open:bool,signal:ProgressSignal,scan_left:usize}
+struct State<D:Retirable>{slots:Vec<Option<Entry<D>>>,cursor:usize,deadline_cursor:usize,open:bool,signal:ProgressSignal,scan_left:usize}
 pub(crate) struct RetireQueue<D:Retirable>{state:Rc<RefCell<State<D>>>}
 pub(crate) struct Managed<D:Retirable>{state:Rc<RefCell<State<D>>>,slot:usize}
 pub(crate) type RetirementExecutor<B> = RetireQueue<FixedDriver<B>>;
@@ -46,7 +51,7 @@ impl<D:Retirable> RetireQueue<D>{
  pub(crate) fn new(capacity:usize)->Result<Self,Error>{
   if capacity==0||capacity>64{return Err(Error::Capacity);}
   let mut slots=Vec::with_capacity(capacity);slots.resize_with(capacity,||None);
-  Ok(Self{state:Rc::new(RefCell::new(State{slots,cursor:0,open:true,signal:ProgressSignal::new(),scan_left:0}))})
+  Ok(Self{state:Rc::new(RefCell::new(State{slots,cursor:0,deadline_cursor:0,open:true,signal:ProgressSignal::new(),scan_left:0}))})
  }
  /// Factory runs only after capacity check, outside the shared-state borrow.
  /// Unique &mut self and creator-thread ownership prevent concurrent admission;
@@ -83,6 +88,18 @@ impl<D:Retirable> RetireQueue<D>{
  /// Host/native adapter must call for readiness/retirement/deadline events.
  /// No OS wakeup is implied; all owned handle drops happen on this creator.
  pub(crate) fn notify_progress(&self){self.state.borrow().signal.notify();}
+ /// Full bounded minimum: at most64 drivers, each with64 fixed-owner cells.
+ /// Includes attached and retiring drivers, whose timers remain owned here.
+ pub(crate) fn next_deadline(&self)->Option<u64>{self.state.borrow().slots.iter().flatten().filter_map(|e|e.driver.next_deadline()).min()}
+ /// Independent rotating timer cursor; retirement visits cannot starve timers.
+ /// At most min(ring_budget,capacity)*min(fixed_budget,64) fixed-cell visits.
+ /// Backend abort callbacks must not reenter; no task Wakers are invoked here.
+ pub(crate) fn expire(&mut self,now:u64,ring_budget:usize,fixed_budget:usize)->usize{
+  let mut s=self.state.borrow_mut();let capacity=s.slots.len();let mut requested=0;
+  for _ in 0..ring_budget.min(capacity){let i=s.deadline_cursor;s.deadline_cursor=(i+1)%capacity;
+   if let Some(e)=s.slots[i].as_mut(){requested+=e.driver.expire(now,fixed_budget);}
+  }requested
+ }
  pub(crate) fn occupied(&self)->usize{self.state.borrow().slots.iter().filter(|e|e.is_some()).count()}
 }
 impl<D:Retirable> Drop for RetireQueue<D>{fn drop(&mut self){

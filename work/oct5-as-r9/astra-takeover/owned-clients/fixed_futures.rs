@@ -58,13 +58,19 @@ impl<B:RingBackend> FutureDriver<B>{
  pub(crate) fn retire_deferred(&mut self)->WakeBatch{
   self.driver.as_mut().unwrap().begin_retire();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
  }
+ pub(crate) fn next_deadline(&self)->Option<u64>{self.driver.as_ref().unwrap().next_deadline()}
+ pub(crate) fn expire(&mut self,now:u64,budget:usize)->usize{self.driver.as_mut().unwrap().expire(now,budget)}
  pub(crate) fn bind_progress(&mut self,signal:super::ring_payload::ProgressSignal){self.driver.as_mut().unwrap().bind_progress(signal);}
  pub(crate) fn progress(&mut self)->bool{self.driver.as_mut().unwrap().progress()}
  pub(crate) fn registrations(&self)->usize{self.hub.borrow().slots.iter().filter(|s|s.is_some()).count()}
 }
 impl<B:RingBackend> Drop for FutureDriver<B>{fn drop(&mut self){self.close();}}
-impl<B:RingBackend> ReadFuture<B>{pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
-impl<B:RingBackend> WriteFuture<B>{pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
+impl<B:RingBackend> ReadFuture<B>{pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{self.request.set_deadline(deadline)}
+ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.request.request_cancel()}
+ pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
+impl<B:RingBackend> WriteFuture<B>{pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{self.request.set_deadline(deadline)}
+ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.request.request_cancel()}
+ pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.request.publish()}}}
 impl<B:RingBackend> Future for ReadFuture<B>{type Output=Result<ReadCompletion<B>,Error>;fn poll(self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<Self::Output>{let me=self.get_mut();if me.slot.is_none(){return Poll::Ready(Err(Error::Consumed));}let waker=cx.waker().clone();let status=me.request.try_complete();finish(&me.hub,&mut me.slot,status,waker)}}
 impl<B:RingBackend> Future for WriteFuture<B>{type Output=Result<Completion,Error>;fn poll(self:Pin<&mut Self>,cx:&mut Context<'_>)->Poll<Self::Output>{let me=self.get_mut();if me.slot.is_none(){return Poll::Ready(Err(Error::Consumed));}let waker=cx.waker().clone();let status=me.request.try_complete();finish(&me.hub,&mut me.slot,status,waker)}}
 impl<B:RingBackend> Drop for ReadFuture<B>{fn drop(&mut self){release(&self.hub,&mut self.slot);}}

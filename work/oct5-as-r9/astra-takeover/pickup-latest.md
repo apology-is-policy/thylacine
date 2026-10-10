@@ -22,9 +22,11 @@ all manager borrows. Creator-local last-owner pulses now schedule bounded sweeps
 without requiring new CQ. A bounded local wait coordinator now rechecks work
 and absolute deadlines under a simulated event-source contract. Typed requests now
 support absolute deadlines and scope-wide cancellation without releasing storage.
-Next forward timers through Futures/retirement queue into the simulated wait
-coordinator, then runnable-task composition. No native OS wake is qualified.
-Read owned-clients/deadline-self-review.txt, local-wait-self-review.txt, local-progress-self-review.txt
+Timers now forward through Futures/retirement queue into the simulated wait
+coordinator, preserving bounded scans and separate outer-timeout policy. Next
+bounded runnable-task ownership/dispatch and readiness composition. No native OS
+wake is qualified. Read owned-clients/timer-wait-self-review.txt, deadline-self-review.txt,
+local-wait-self-review.txt, local-progress-self-review.txt
 and future-retirement-self-review.txt plus earlier component reviews. Native SQ submission/integration
 and complete async qualification remain gated on this dependency. Heartbeat
 prompt retains this exception and is ACTIVE under latest operator authorization.
@@ -459,3 +461,27 @@ simulated wait coordinator, then runnable tasks. Timers still require explicit
 FixedDriver expiry scans. Protected10/cleanexternal61dde37 and parked kernel base
 preserved. Native SQ stays parked; fullAS3/AS4/MM0-MM4, Main/private activation
 and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra Future/retirement timer and wait composition, October 10
+
+Uninstalled Rust Futures forward deadline/cancel to their owned typed requests.
+The retirement queue scans timers with an independent bounded rotating cursor,
+including retiring drivers. The wait adapter uses the earliest remaining request
+or outer deadline. Due requests left by a partial scan, or becoming due during
+arming, return Retry for another bounded turn; outer timeout remains separate.
+Cancellation alone never wakes a Future as completed or releases its storage.
+Publication during arming prevents waiting on an obsolete deadline.
+
+Timer-wait093908Z:9cases opt0/2,2compile-fail+control,6mutants,11hashes/21commands.
+Composition regression093920Z:6cases,10hashes/21commands; local-wait093929Z:
+9cases,11hashes/21commands, each with the same profiles/compile controls/mutants.
+All raw source/snapshot/HEAD/diff/diagnostics verified before documentation.
+Single-agent timer-wait-self-review.txt records work bounds and timer policy.
+No new failure; C unchanged. Native atomic wait remains an unimplemented adapter
+contract, and no actual sleeping-thread or complete async qualification is claimed.
+
+Next bounded runnable-task ownership/dispatch and readiness composition with the
+simulated wait coordinator. Protected10/cleanexternal61dde37 and parked kernel
+base preserved. SQ stays parked/unapplied; fullAS3/AS4/MM0-MM4, Main/private
+activation and128MiB guards remain. Heartbeat ACTIVE.

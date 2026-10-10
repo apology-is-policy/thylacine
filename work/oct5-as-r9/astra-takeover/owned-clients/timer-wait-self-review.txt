@@ -1,0 +1,46 @@
+Astra single-agent self-review: Future/retirement timer composition, October10.
+Uninstalled Rust draft, simulated sources only; not an independent audit.
+
+Future Read/Write wrappers forward prepublication absolute-deadline configuration
+and explicit scope-wide cancel to their owned typed request. Cancellation does
+not fabricate readiness or invoke task Wakers. Futures still poll Pending until
+an authenticated terminal result or actual driver failure. A successful WRITE
+completion after cancellation remains successful, not rewritten as timeout.
+
+The generic retirement queue forwards expiry/minimum for both polling and Future
+drivers. Its independent rotating timer cursor includes attached AND retiring
+drivers; retirement progress cannot repeatedly reset or bias timer visits. Bounds
+are min(ring_budget,capacity)*min(fixed_budget,64) owner-cell visits per expiry
+call. The exact deadline minimum scans at most64drivers*64cells under the current
+two Retirable implementations. No growing timer queue, callbacks, allocations
+or new native ownership capacity is introduced. Backend aborts retain their
+nonblocking/nonreentrant contract; no user Waker is invoked beneath the manager.
+
+The timed wait adapter first honors an expired outer caller deadline, then does
+one bounded expiry scan. The wait deadline is min(outer,all remaining request
+deadlines). Request expiry found after the scan or while arming produces Retry,
+allowing the next bounded scan. Partial/zero budgets do not turn due requests
+into an outer timeout or permission to sleep. Positive budgets are the caller's
+fair-progress obligation. Equal request/outer deadline keeps outer timeout policy;
+outer timeout does not imply scope abort, storage release or completion. A real
+wait wake returns control first; a subsequent timed turn handles due requests.
+
+Publication during arm signals the last local recheck, preventing a sleep with
+an obsolete deadline. EventSource still owns the atomic check/park and persistent
+readiness contract; this code does not supply a native wake primitive. Caller
+runnable/CQ dispatch is not implemented by this wait coordinator. No kernel/SQ
+changes. C remains unchanged; this is only Rust timer/retirement composition.
+
+Timer-wait093908Z:9cases opt0/2,2compile-fail+control,6mutants;11hashes/21commands.
+Future/retirement093920Z regression:6cases with same controls,10hashes/21commands.
+Local-wait093929Z regression:9cases with same controls,11hashes/21commands.
+All source/snapshot/HEAD/diff/raw diagnostics reverified before documentation.
+Tests cover Future cancel without premature wake, success after cancel, minimum
+selection, independent fair cursor, zero budgets, due-after-arm retry, separate
+outer-timeout policy, retiring timers, publication during arm and allocation-free
+polling-driver composition. No new test or harness failure in this checkpoint.
+
+Next bounded runnable-task ownership/dispatch integrated with this simulated
+wait coordinator. Native wait/timer/SQ adapters and full async qualification stay
+gated. Protected10/cleanexternal61dde37 and parked kernel base intact; native SQ
+remains parked/unapplied. AS3/AS4/MM0-MM4 and all activation guards remain.

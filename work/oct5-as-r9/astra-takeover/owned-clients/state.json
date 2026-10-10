@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-fixed-deadlines-host-verified",
-  "next": "Compose typed absolute deadline/cancellation APIs into Rust Futures and the bounded retirement queue, then the simulated wait coordinator; add runnable-task composition. Current FixedDriver timers require explicit expiry scans. Native SQ stays parked and async-first/full qualification gates remain.",
+  "state": "draft-timer-wait-composition-host-verified",
+  "next": "Implement bounded runnable-task ownership/dispatch and compose its readiness with the simulated timer/wait coordinator. Rust Future/retirement timer forwarding is host-verified. Native wait/timer/SQ adapters and full async qualification remain gated; SQ parked, async-first order preserved.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -23,8 +23,9 @@
   "retirement_rust_run": "owned-clients/retirement-executor-20261010T091311Z",
   "retirement_c_run": "owned-clients/retirement-executor-c-20261010T084418Z",
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
-  "future_retirement_run": "owned-clients/future-retirement-20261010T091254Z",
+  "future_retirement_run": "owned-clients/future-retirement-20261010T093920Z",
   "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
-  "local_wait_run": "owned-clients/local-wait-20261010T091938Z",
-  "deadline_run": "owned-clients/deadlines-20261010T092954Z"
+  "local_wait_run": "owned-clients/local-wait-20261010T093929Z",
+  "deadline_run": "owned-clients/deadlines-20261010T092954Z",
+  "timer_wait_run": "owned-clients/timer-wait-20261010T093908Z"
 }

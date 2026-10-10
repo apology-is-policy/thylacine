@@ -41,3 +41,20 @@ pub(crate) fn turn<D:Retirable,W:WaitSource>(queue:&mut RetireQueue<D>,source:&m
  drop(armed);
  Turn{progress,outcome}
 }
+
+/// Deadline-aware adapter for existing fixed-request owners. No task dispatch or
+/// native timer is implied. A due request with exhausted scan budget returns
+/// Retry; the caller must grant positive budgets in subsequent turns.
+pub(crate) struct TimedTurn{pub turn:Turn,pub cancellation_requests:usize}
+fn earliest(a:Option<u64>,b:Option<u64>)->Option<u64>{match(a,b){(Some(a),Some(b))=>Some(a.min(b)),(a,b)=>a.or(b)}}
+pub(crate) fn timed_turn<D:Retirable,W:WaitSource>(queue:&mut RetireQueue<D>,source:&mut W,progress_budget:usize,ring_budget:usize,fixed_budget:usize,outer_deadline:Option<u64>)->TimedTurn{
+ let now=source.now();
+ if expired(now,outer_deadline){return TimedTurn{turn:Turn{progress:Progress{visited:0,reclaimed:0,occupied:queue.occupied()},outcome:Outcome::Deadline},cancellation_requests:0};}
+ let cancellation_requests=queue.expire(now,ring_budget,fixed_budget);
+ let deadline=earliest(outer_deadline,queue.next_deadline());
+ let mut step=turn(queue,source,progress_budget,deadline);
+ // A request deadline is work for the next bounded expiry sweep, not an outer
+ // caller timeout. Equal outer/request deadlines preserve caller timeout policy.
+ if step.outcome==Outcome::Deadline&&deadline!=outer_deadline{step.outcome=Outcome::Retry;}
+ TimedTurn{turn:step,cancellation_requests}
+}
