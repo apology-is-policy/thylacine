@@ -1,0 +1,1 @@
+Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retirement_timers.c, line 27.

@@ -1,0 +1,148 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 6,
+  "profiles": [
+    "asan+ubsan",
+    "optimized-ndebug-core"
+  ],
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-retirement_executor.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-fixed_requests.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-request_book.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-ring_payload.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-retirement_executor.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-fixed_requests.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-request_book.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-ring_payload.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "skip-retiring-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "skip-retiring-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "skip-attached-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "skip-attached-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "ignore-inner-budget-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ignore-inner-budget-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "ignore-outer-budget-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ignore-outer-budget-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "shared-cursor-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "shared-cursor-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "wrong-earliest-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "wrong-earliest-run",
+      "rc": -6,
+      "expected_failure": true
+    }
+  ],
+  "limits": "C bounded retirement owner; simulated backend. No native SQ or event/wakeup qualification; SQ fix parked."
+}

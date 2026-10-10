@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Forward C deadline polling through the bounded retirement owner, including attached and retiring drivers with independent bounded scans; then review remaining independent shutdown/drain coverage. Native SQ/atomic wake adapters and full AS3 remain gated; no AS4/MM0-MM4 skip.",
+  "next": "Audit independent client shutdown/drain coverage against approved AS3 contracts, mapping existing tests and concrete remaining gaps before adding mechanisms. Native SQ/atomic wake adapters and complete AS3 remain gated; no AS4/MM0-MM4 skip.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -61,7 +61,7 @@
   "typed_rust_run": "owned-clients/fixed-requests-20261010T093026Z",
   "typed_c_run": "owned-clients/fixed-requests-c-20261010T101122Z",
   "retirement_rust_run": "owned-clients/retirement-executor-20261010T091311Z",
-  "retirement_c_run": "owned-clients/retirement-executor-c-20261010T101143Z",
+  "retirement_c_run": "owned-clients/retirement-executor-c-20261010T101844Z",
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
   "future_retirement_run": "owned-clients/future-retirement-20261010T093920Z",
   "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
@@ -70,5 +70,6 @@
   "timer_wait_run": "owned-clients/timer-wait-20261010T095916Z",
   "local_tasks_run": "owned-clients/local-tasks-20261010T094912Z",
   "task_loop_run": "owned-clients/task-loop-20261010T095847Z",
-  "deadline_c_run": "owned-clients/deadlines-c-20261010T101109Z"
+  "deadline_c_run": "owned-clients/deadlines-c-20261010T101109Z",
+  "retirement_timer_c_run": "owned-clients/retirement-timers-c-20261010T101819Z"
 }

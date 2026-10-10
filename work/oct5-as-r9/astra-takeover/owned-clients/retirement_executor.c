@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <assert.h>
 struct cell{struct t_fixed_driver *driver;unsigned retiring;};
-struct t_retirement_executor{struct cell cells[64];size_t capacity,cursor,refs;unsigned open;};
+struct t_retirement_executor{struct cell cells[64];size_t capacity,cursor,deadline_cursor,refs;unsigned open;};
 struct t_managed_client{struct t_retirement_executor *executor;size_t slot;};
 static void release(struct t_retirement_executor *e){assert(e->refs);if(--e->refs==0){for(size_t i=0;i<e->capacity;++i)if(e->cells[i].driver)t_fixed_driver_drop(e->cells[i].driver);free(e);}}
 int t_retirement_create(size_t capacity,struct t_retirement_executor **out){
@@ -25,6 +25,20 @@ struct t_retirement_progress t_retirement_progress(struct t_retirement_executor 
   if(c->driver&&c->retiring&&t_fixed_progress(c->driver)){t_fixed_driver_drop(c->driver);*c=(struct cell){0};++reclaimed;}
  }
  return (struct t_retirement_progress){visited,reclaimed,t_retirement_occupied(e)};
+}
+/* Include attached and retiring drivers. Timer work has its own cursor so
+ * completion cleanup cannot repeatedly move due work behind the timer scan. */
+int t_retirement_next_deadline(const struct t_retirement_executor *e,uint64_t *out){
+ assert(e->open&&out);*out=0;int found=0;
+ for(size_t i=0;i<e->capacity;++i){uint64_t when;struct t_fixed_driver *d=e->cells[i].driver;
+  if(d&&t_fixed_next_deadline(d,&when)&&(!found||when<*out)){*out=when;found=1;}
+ }return found;
+}
+size_t t_retirement_expire(struct t_retirement_executor *e,uint64_t now,size_t ring_budget,size_t fixed_budget){
+ assert(e->open);size_t visits=ring_budget<e->capacity?ring_budget:e->capacity,requested=0;
+ for(size_t n=0;n<visits;++n){size_t i=e->deadline_cursor;e->deadline_cursor=(i+1)%e->capacity;
+  struct t_fixed_driver *d=e->cells[i].driver;if(d)requested+=t_fixed_expire(d,now,fixed_budget);
+ }return requested;
 }
 void t_retirement_drop(struct t_retirement_executor *e){assert(e->open);e->open=0;for(size_t i=0;i<e->capacity;++i)if(e->cells[i].driver)t_fixed_close(e->cells[i].driver);release(e);}
 int t_managed_read(struct t_managed_client *c,struct t_loom_service_ref scope,struct t_loom_service_pool_member range,struct t_fixed_request **out){if(!c->executor->open){*out=NULL;return T_FIXED_CLOSING;}return t_fixed_read(c->executor->cells[c->slot].driver,scope,range,out);}

@@ -1208,3 +1208,27 @@ shutdown/drain coverage. No native wake/timer or completeAS3 qualification. Rust
 source unchanged; earlier Rust evidence remains scoped to its recorded snapshots.
 Protected10, exact clean external61dde37 and parked patch/restored kernel verified.
 SQ remains parked/unapplied; AS4/MM0-MM4/Main/private activation/128MiB guards remain.
+
+
+### Astra C retirement timer forwarding, October 10
+
+Uninstalled C retirement owner now polls deadlines across attached and retiring
+clients. Earliest deadline scans at most capacity*64cells. Expiry visits at most
+min(ring_budget,capacity)*min(fixed_budget,64), with a timer cursor independent
+of reclamation progress. Zero budgets issue no aborts; expiry never reclaims an
+entry or substitutes for terminal/local-retirement proof. C remains caller-polled.
+
+Host retirement-timers-c-20261010T101819Z:6scenarios, LLVM22ASan+UBSan and
+optimized NDEBUG-core,6mutants. Existing retirement regression101844Z:8scenarios,
+same profiles/6mutants. Each15source hashes/27rawcommands, snapshots and HEAD/diff
+reverified before docs. Tests cover both client states, separate cursors, zero/
+partial budgets, all64driver fairness, held READ, pending request across root
+shutdown, reused slots and no observed allocation during timer/progress rounds.
+No failures; single-agent self-review in owned-clients/c-retirement-timer-self-review.txt.
+
+Next audit remaining independent shutdown/drain coverage against approved AS3,
+mapping existing evidence before introducing mechanisms. Current C root destruction
+closes each driver and retains surviving request/result storage; it is not a native
+process-exit proof. Native SQ/atomic wait and completeAS3 remain gated. Protected10,
+clean exact external61dde37 and parked patch/restored kernel verified. No Main,
+private activation,128MiB change, AS4/MM0-MM4 advance or independent audit claim.
