@@ -1,0 +1,12 @@
+
+running 7 tests
+test local_native_retirement_requires_explicit_event_not_busy_spin ... ok
+test local_last_future_drop_schedules_after_closing_poll ... ok
+test local_pool_and_payload_release_share_noncallback_signal ... ok
+test local_result_drop_schedules_retirement_without_new_cq ... ok
+test local_terminal_cq_signals_even_without_registered_waker ... ok
+test local_pulse_drop_and_bounded_progress_do_not_allocate ... ok
+test local_zero_partial_budget_and_coalesced_events_preserve_sweep ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+

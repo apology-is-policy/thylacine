@@ -1,0 +1,31 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:13:35.356502+00:00",
+  "source_count": 10,
+  "command_count": 21,
+  "source_and_snapshot_match": true,
+  "head_and_diff_match_before_docs": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "8b99d145126a813c221214a8f65fae52d5b730624cadcdd5a8283c20f9f0bd3b",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "d32d0035f856b67653b1c694cfc3fc050b438c521688c7261448dea09cae8499",
+    "no-clone-client-build": "c083f1795b8f5798be1f7c18d4294d388255b3e5f3f2bb3a566252346c0c5408",
+    "no-send-executor-build": "5d912133749b6304babfe2b69cc85649b469f9de4e4fa5c5b9528a97e6ef3f37",
+    "valid-client-build": "10bbc7dc6e33f1aa01982d8f88a27d2ee6ec96a901db97b5334a0052556e0c6d",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "early-reclaim-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "early-reclaim-run": "c1bde44ba3a8aa6bcab27ecdcf72cbd6ebc8ff26ef02b4d48660a6e783a0e8a9",
+    "missing-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-retire-run": "43505a52e43b514750617870fcbd5f16a5d6b03be221bcf1df4bb1f5bfcda0f3",
+    "frozen-cursor-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "frozen-cursor-run": "e3f71268c74d218c9b282a9604ce9c5d72d0defb3beaefea9db37085d309b372",
+    "excess-budget-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "excess-budget-run": "b763d223b5c4ff7e2dcd1cea7a005018397945553468562efd0d1fff98e4dd0f",
+    "no-shutdown-close-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "no-shutdown-close-run": "cef254987ac2ae6aa193d8103f9544aabf348557c982ce3208ced0676ffef418",
+    "premature-admission-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "premature-admission-run": "b1bf26bd3dcc7e5c12241a79d895bb6e169e4a63ad5ebc3f6f43ea61eb993417"
+  }
+}

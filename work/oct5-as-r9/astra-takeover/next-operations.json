@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Independent local progress/event/sleep/deadline integration, including last-request/result-drop notification for retiring cells; current APIs still require caller progress. Simulated backends only; native SQ parked and full async qualification gated.",
+  "next": "Independent local event-loop/sleep/deadline integration with simulated events. Creator-local coalesced last-owner progress pulses are host-verified; caller must drive progress_notified and inspect needs_progress. No OS wake/native qualification. Native SQ remains parked; async-first gates remain.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -60,8 +60,9 @@
   "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z",
   "typed_rust_run": "owned-clients/fixed-requests-20261010T083816Z",
   "typed_c_run": "owned-clients/fixed-requests-c-20261010T083803Z",
-  "retirement_rust_run": "owned-clients/retirement-executor-20261010T090048Z",
+  "retirement_rust_run": "owned-clients/retirement-executor-20261010T091311Z",
   "retirement_c_run": "owned-clients/retirement-executor-c-20261010T084418Z",
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
-  "future_retirement_run": "owned-clients/future-retirement-20261010T090037Z"
+  "future_retirement_run": "owned-clients/future-retirement-20261010T091254Z",
+  "local_progress_run": "owned-clients/local-progress-20261010T091022Z"
 }

@@ -36,7 +36,7 @@ try:
  'wake-under-shutdown-borrow':('batch.dispatch(); // Allows task','let _borrow=self.state.borrow_mut();batch.dispatch(); // Allows task'),
  'skip-retire-notification':('batch.dispatch(); // Existing cell','drop(batch); // Existing cell'),
  'early-reclaim':('e.retiring&&e.driver.progress()','e.retiring'),
- 'close-instead-of-retire':('e.retiring=true;e.driver.retire()','e.retiring=true;e.driver.close()'),
+ 'close-instead-of-retire':('let batch=e.driver.retire();','let batch=e.driver.close();'),
  }
 
  for name,(a,b) in variants.items():

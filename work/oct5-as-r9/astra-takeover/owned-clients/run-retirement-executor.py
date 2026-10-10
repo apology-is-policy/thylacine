@@ -32,7 +32,7 @@ try:
   if not diag:cmd([run/name],name+'-run')
  variants={
  'early-reclaim':('e.retiring&&e.driver.progress()','e.retiring'),
- 'missing-retire':('e.retiring=true;e.driver.retire()','e.retiring=true;WakeBatch::empty()'),
+ 'missing-retire':('let batch=e.driver.retire();','let batch=WakeBatch::empty();'),
  'frozen-cursor':('s.cursor=(i+1)%s.slots.len();','s.cursor=i;'),
  'excess-budget':('budget.min(s.slots.len())','budget.min(s.slots.len())+1'),
  'no-shutdown-close':('e.driver.close()','e.driver.retire()'),

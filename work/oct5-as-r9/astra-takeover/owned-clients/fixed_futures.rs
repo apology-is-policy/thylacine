@@ -58,6 +58,7 @@ impl<B:RingBackend> FutureDriver<B>{
  pub(crate) fn retire_deferred(&mut self)->WakeBatch{
   self.driver.as_mut().unwrap().begin_retire();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
  }
+ pub(crate) fn bind_progress(&mut self,signal:super::ring_payload::ProgressSignal){self.driver.as_mut().unwrap().bind_progress(signal);}
  pub(crate) fn progress(&mut self)->bool{self.driver.as_mut().unwrap().progress()}
  pub(crate) fn registrations(&self)->usize{self.hub.borrow().slots.iter().filter(|s|s.is_some()).count()}
 }

@@ -4206,3 +4206,29 @@ notification when the last held result drops; callers currently drive progress
 explicitly. C unchanged. Protected10/cleanexternal61dde37 and parked kernel base
 preserved. No native SQ or full AS3 qualification; heartbeat ACTIVE, AS4/MM0-MM4
 and Main/private-activation/128MiB guards remain.
+
+
+### Astra creator-local retirement progress, October 10
+
+The uninstalled Rust owner now signals a coalesced creator-thread pulse when a
+request/result or payload releases ownership, a pool/client retires, or a fixed
+terminal completion arrives. The bounded retirement queue consumes each pulse
+as one rotating sweep; zero and partial budgets preserve pending work. Busy
+entries become quiet until another event, avoiding an idle retry loop. A held
+READ result can release the last local owner and enable retirement without a
+new CQ. Existing retirement proof and storage-lifetime requirements still apply.
+
+Local-progress091022Z:7cases opt0/2,2compile-fail+control,6mutants. Composition
+regression091254Z:6cases; polling retirement091311Z:8cases, each opt0/2 with
+2compile-fail+control and6mutants. Each run has10source hashes/21commands;
+source/snapshot/HEAD/diff and raw diagnostics verified before documentation.
+Single-agent local-progress-self-review.txt records event coalescing, bounded
+sweeps, lifetime and callback checks. No new test/harness failure. C unchanged.
+
+Next is local event-loop/sleep/deadline integration with simulated events.
+This pulse performs no OS wake and is creator-thread only. Callers still invoke
+progress_notified and check needs_progress before sleep; backend readiness and
+retirement changes need explicit notification. No native or full AS3 gate is
+claimed. Protected10/cleanexternal61dde37 and parked kernel base preserved.
+SQ stays parked/unapplied; AS4/MM0-MM4, Main/private activation and128MiB guards
+remain. Heartbeat ACTIVE under continuing operator authorization.

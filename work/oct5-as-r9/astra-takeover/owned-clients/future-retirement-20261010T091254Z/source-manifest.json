@@ -1,0 +1,12 @@
+{
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs": "4222e74e4dce1022a1d4ce19678713f0ed627ea293163b98fc6f9d03f0b271fe",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs": "7e46d33fc46bc7fa270279ec6651ed3d5a74a21ffbc8a5ccfd184b291e866d9e",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed_requests.rs": "9075ccaebc269a3bc639cfe8f68a788e9d2da9e80b8eca05cb12e2966bdd237c",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/test_future_retirement.rs": "c8f5d0849bb9b447e674e28fdce2e96c4198ae0fb367e5bddc6a759b3e591e83",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ring_payload.rs": "86e36547b020c524d4916a1a1ff2749063117a2139d081ae971f1c4a417a42c6",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request_book.rs": "a9c3d66783b7892530bb5c8a26b2f185bbf930dcb8fc88990e3b927a02f0af80",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired_cq.rs": "b1a0b1e19d5766f90a1997dfbf17082f64909250236f48a82f937861486948aa",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/lease_ledger.rs": "1f21843fa18f37085c01b3a608d6d397071a7354c339cd39e41fee93447fce9f",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/run-future-retirement.py": "dfe2b88f1000e7cdc752781f5560d175f75eac14825882930dd4974b8535d37c",
+  "/Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/loom/service_abi.rs": "fa6421ccd74893e010917dc065778176769f2bc7ee3da1b3a1450ab13bc15922"
+}

@@ -43,16 +43,28 @@ enum FixedPhase{Prepared,Active,Terminal(i32)}
 struct FixedState{cookie:u64,scope:SlotRef,range:PoolMember,write:bool,phase:FixedPhase,abandoned:bool}
 fn overlap(a:PoolMember,b:PoolMember)->bool{a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length}
 struct State {fixed:[Option<FixedState>;64],quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
-struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>}
+/// Creator-thread coalesced progress pulse. No callback, allocation, syscall or
+/// cross-thread wake; safe to notify while an enclosing owner is borrowed.
+/// The local event loop must inspect it before sleeping. Native readiness and
+/// timer events must explicitly notify the queue; this is not their adapter.
+#[derive(Clone)]pub(crate) struct ProgressSignal(Rc<Cell<bool>>);
+impl ProgressSignal{
+ pub(crate) fn new()->Self{Self(Rc::new(Cell::new(false)))}
+ pub(crate) fn notify(&self){self.0.set(true);}
+ pub(crate) fn pending(&self)->bool{self.0.get()}
+ pub(crate) fn take(&self)->bool{self.0.replace(false)}
+}
+struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>,signal:RefCell<Option<ProgressSignal>>}
 impl<B:RingBackend> Core<B>{
- fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();}}
+ fn notify(&self){if let Some(s)=self.signal.borrow().as_ref(){s.notify();}}
+ fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();self.notify();}}
  fn close(&self){self.retire();if !self.closed.replace(true){self.backend.close();}}
  fn give_back(&self,token:LeaseToken)->Result<(),(i64,LeaseToken)>{
   let mut s=self.state.borrow_mut();let p=s.pools[token.receipt().pool.slot as usize].as_mut().expect("live pool");
   let receipt=p.ledger.begin_return(&token).expect("owned exact token");let rc=self.backend.return_buffer(receipt);
   p.ledger.finish_return(&token,rc).expect("same returning token");if rc==0{Ok(())}else{Err((rc,token))}
  }
- fn finish_live(&self,slot:usize){let mut s=self.state.borrow_mut();s.pools[slot].as_mut().unwrap().live-=1;s.live-=1;}
+ fn finish_live(&self,slot:usize){let mut s=self.state.borrow_mut();s.pools[slot].as_mut().unwrap().live-=1;s.live-=1;drop(s);self.notify();}
  fn abandon(&self,token:LeaseToken){let slot=token.receipt().pool.slot as usize;
   if let Err((_,token))=self.give_back(token){let i=token.receipt().member as usize;let mut s=self.state.borrow_mut();let p=s.pools[slot].as_mut().unwrap();assert!(p.pending[i].is_none());p.pending[i]=Some(token);}
   self.finish_live(slot);
@@ -71,7 +83,7 @@ impl<B:RingBackend> RingOwner<B>{
  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
   let count=backend.buffer_count();let valid=count>0&&count<=64&&(0..count).all(|i|{let n=backend.buffer_len(i);n>0&&n<=isize::MAX as usize});
   if !valid{backend.begin_retire();backend.close();return Err(Error::Geometry);}
-  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
+  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false),signal:RefCell::new(None)});
   Ok((Self{core:core.clone()},RingClient{core}))
  }
  /// At most64 RETURN and64 pool-destroy attempts; no allocation on this path.
@@ -98,8 +110,9 @@ impl<B:RingBackend> RingOwner<B>{
   let mut s=self.core.state.borrow_mut();let slot=s.fixed.iter_mut().find(|f|f.as_ref().is_some_and(|f|f.cookie==cookie)).ok_or(Error::Stale)?;
   let f=slot.as_mut().unwrap();if f.phase!=FixedPhase::Active{return Err(Error::Busy);}
   if result>0&&result as u64>f.range.length{return Err(Error::Geometry);}
-  if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}Ok(())
+  if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}drop(s);self.core.notify();Ok(())
  }
+ pub(crate) fn bind_progress(&mut self,signal:ProgressSignal){let mut s=self.core.signal.borrow_mut();assert!(s.is_none(),"one retirement owner");*s=Some(signal);}
  pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
  pub(crate) fn begin_retire(&mut self){self.core.retire();}
  pub(crate) fn close(&mut self){self.core.close();}
@@ -189,7 +202,7 @@ impl<B:RingBackend> Pool<B>{
   if let Some(token)=token{p.live+=1;s.live+=1;Ok(Some(Payload{core:self.core.clone(),token:Some(token)}))}else{Ok(None)}
  }
 }
-impl<B:RingBackend> Drop for Pool<B>{fn drop(&mut self){let mut s=self.core.state.borrow_mut();let p=s.pools[self.identity.slot as usize].as_mut().expect("pool handle keeps slot");assert_eq!(p.identity,self.identity);p.closing=true;self.core.backend.retire_pool(self.identity);}}
+impl<B:RingBackend> Drop for Pool<B>{fn drop(&mut self){let mut s=self.core.state.borrow_mut();let p=s.pools[self.identity.slot as usize].as_mut().expect("pool handle keeps slot");assert_eq!(p.identity,self.identity);p.closing=true;self.core.backend.retire_pool(self.identity);drop(s);self.core.notify();}}
 impl<B:RingBackend> Payload<B>{
  pub(crate) fn bytes(&self)->&[u8]{let token=self.token.as_ref().unwrap();let r=token.receipt();let range=self.core.state.borrow().pools[r.pool.slot as usize].as_ref().unwrap().ranges[r.member as usize];unsafe{core::slice::from_raw_parts(self.core.backend.buffer(range.buffer_index as usize).as_ptr().add(range.offset as usize),token.length())}}
  pub(crate) fn try_return(mut self)->Result<(),(i64,Self)>{let token=self.token.take().unwrap();let slot=token.receipt().pool.slot as usize;match self.core.give_back(token){Ok(())=>{self.core.finish_live(slot);Ok(())},Err((rc,token))=>{self.token=Some(token);Err((rc,self))}}}
@@ -224,4 +237,5 @@ impl<B:RingBackend> Drop for FixedIo<B>{fn drop(&mut self){
  let abort={let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();assert_eq!(f.cookie,self.cookie);
   if f.phase==FixedPhase::Active{f.abandoned=true;Some(f.scope)}else{s.fixed[self.index]=None;None}};
  if let Some(scope)=abort{if !self.core.closed.get(){self.core.backend.abort_scope(scope);}}
+ self.core.notify();
 }}
