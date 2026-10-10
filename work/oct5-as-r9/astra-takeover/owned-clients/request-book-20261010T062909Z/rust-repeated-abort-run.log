@@ -1,0 +1,26 @@
+
+running 7 tests
+test fixed_and_control_refuse_payload_more_and_oversize ... ok
+test bounded_prepublication_and_terminal_retention ... ok
+test malformed_receipts_flags_and_lengths_leave_active ... ok
+test abandoned_future_retains_until_terminal_and_scope_abort_once ... FAILED
+test multishot_more_and_final_keep_payload_separate ... ok
+test ring_local_identity_cannot_alias_other_book_cookie ... ok
+test geometry_maximum_capacity_and_cookie_exhaustion ... ok
+
+failures:
+
+---- abandoned_future_retains_until_terminal_and_scope_abort_once stdout ----
+
+thread 'abandoned_future_retains_until_terminal_and_scope_abort_once' (22270828) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-repeated-abort/test_request_book.rs:25:245:
+assertion `left == right` failed
+  left: Some(SlotRef { slot: 3, reserved: 0, incarnation: 7 })
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    abandoned_future_retains_until_terminal_and_scope_abort_once
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+

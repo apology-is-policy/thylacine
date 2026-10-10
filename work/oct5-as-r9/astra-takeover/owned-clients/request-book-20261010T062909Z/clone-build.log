@@ -1,0 +1,18 @@
+error[E0599]: no method named `clone` found for struct `request_book::RequestBook` in the current scope
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/clone.rs:40:54
+   |
+40 | fn main(){let b=RequestBook::new(2).unwrap();let _=b.clone();}
+   |                                                      ^^^^^ method not found in `request_book::RequestBook`
+   |
+  ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/request_book.rs:26:1
+   |
+26 | pub(crate) struct RequestBook { entries: Box<[Option<Entry>]>, _creator: PhantomData<Rc<()>> }
+   | ----------------------------- method `clone` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0599`.

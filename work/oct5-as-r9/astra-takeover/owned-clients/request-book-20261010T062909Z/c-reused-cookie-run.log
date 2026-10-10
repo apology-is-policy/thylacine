@@ -1,0 +1,1 @@
+Assertion failed: (!t_request_reserve(b,id(1,1),spec(T_REQ_FIXED_WRITE,0),&c)&&a!=c), function main, file test_request_book.c, line 10.

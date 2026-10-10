@@ -1,0 +1,30 @@
+
+running 7 tests
+test abandoned_future_retains_until_terminal_and_scope_abort_once ... ok
+test malformed_receipts_flags_and_lengths_leave_active ... ok
+test multishot_more_and_final_keep_payload_separate ... ok
+test ring_local_identity_cannot_alias_other_book_cookie ... ok
+test bounded_prepublication_and_terminal_retention ... FAILED
+test fixed_and_control_refuse_payload_more_and_oversize ... FAILED
+test geometry_maximum_capacity_and_cookie_exhaustion ... ok
+
+failures:
+
+---- bounded_prepublication_and_terminal_retention stdout ----
+
+thread 'bounded_prepublication_and_terminal_retention' (22270732) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-oversized-fixed/test_request_book.rs:13:2:
+assertion failed: b.accept(rec(c, 9, 0)).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- fixed_and_control_refuse_payload_more_and_oversize stdout ----
+
+thread 'fixed_and_control_refuse_payload_more_and_oversize' (22270733) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/mutant-rust-oversized-fixed/test_request_book.rs:30:249:
+assertion failed: b.accept(rec(a, 9, 0)).is_err()
+
+
+failures:
+    bounded_prepublication_and_terminal_retention
+    fixed_and_control_refuse_payload_more_and_oversize
+
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+

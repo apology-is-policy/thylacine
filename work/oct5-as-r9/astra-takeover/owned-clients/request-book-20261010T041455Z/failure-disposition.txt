@@ -1,0 +1,1 @@
+REQUEST-BUILD-R1: C build refused misleading loop indentation with -Werror. Rust seven cases passed in this run; no C runtime or complete run pass. Preserved logs/source, split loop-end return onto separate line; retry062909Z passed.

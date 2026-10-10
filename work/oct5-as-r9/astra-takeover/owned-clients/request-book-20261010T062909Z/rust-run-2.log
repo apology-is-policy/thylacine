@@ -1,0 +1,12 @@
+
+running 7 tests
+test abandoned_future_retains_until_terminal_and_scope_abort_once ... ok
+test bounded_prepublication_and_terminal_retention ... ok
+test fixed_and_control_refuse_payload_more_and_oversize ... ok
+test malformed_receipts_flags_and_lengths_leave_active ... ok
+test multishot_more_and_final_keep_payload_separate ... ok
+test ring_local_identity_cannot_alias_other_book_cookie ... ok
+test geometry_maximum_capacity_and_cookie_exhaustion ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

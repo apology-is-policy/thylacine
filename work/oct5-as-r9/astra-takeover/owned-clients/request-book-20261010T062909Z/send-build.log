@@ -1,0 +1,40 @@
+error[E0277]: `Rc<()>` cannot be sent between threads safely
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/send.rs:40:65
+    |
+ 40 | fn main(){let b=RequestBook::new(2).unwrap();std::thread::spawn(move||drop(b));}
+    |                                              ------------------ ------^^^^^^^
+    |                                              |                  |
+    |                                              |                  `Rc<()>` cannot be sent between threads safely
+    |                                              |                  within this `{closure@send.rs:40:65}`
+    |                                              required by a bound introduced by this call
+    |
+    = help: within `{closure@send.rs:40:65}`, the trait `Send` is not implemented for `Rc<()>`
+note: required because it appears within the type `PhantomData<Rc<()>>`
+   --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/marker.rs:811:12
+    |
+811 | pub struct PhantomData<T: PointeeSized>;
+    |            ^^^^^^^^^^^
+note: required because it appears within the type `request_book::RequestBook`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/request_book.rs:26:19
+    |
+ 26 | pub(crate) struct RequestBook { entries: Box<[Option<Entry>]>, _creator: PhantomData<Rc<()>> }
+    |                   ^^^^^^^^^^^
+note: required because it's used within this closure
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/send.rs:40:65
+    |
+ 40 | fn main(){let b=RequestBook::new(2).unwrap();std::thread::spawn(move||drop(b));}
+    |                                                                 ^^^^^^
+note: required by a bound in `spawn`
+   --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/thread/functions.rs:128:8
+    |
+125 | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
+    |        ----- required by a bound in this function
+...
+128 |     F: Send + 'static,
+    |        ^^^^ required by this bound in `spawn`
+    = note: the full name for the type has been written to '/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/request-book-20261010T062909Z/send.long-type-3533751959734629725.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

@@ -830,3 +830,25 @@ owned-clients/registration-self-review.txt. Astra10hashes and clean61dde37 intac
 Native mapping/backing/syscall adapter, paired CQ/request correlation, fixed I/O,
 futures and executor retirement remain; AS3/AS4/MM0-MM4 still pending. No Main,
 private activation,128MiB change, independent audit or native-client pass claim.
+
+
+### Astra request/CQ correlation, October 10
+
+Uninstalled C/Rust request tables preallocate at existing CQ capacity (<=8192).
+Library-wide monotone cookies reject cross-ring/stale completions; exact pool,
+flags, receipt and length checks precede state changes. Prepared rollback ends at
+SQ publication; ENTER errors never authorize storage reuse. MORE remains active,
+terminal records stay charged until consumption, and payload receipts travel only
+with delivery, independently of terminal metadata. Abandon requests scope-wide
+abort once per request and retains ownership until terminal/retirement; actual
+executor and storage owners remain to be integrated.
+
+request-book-20261010T062909Z passed seven cases per language, Rustopt0/opt2,
+Clone/Send compile failures with positive control, C LLVM22ASan+UBSan and optimized
+NDEBUG core, and12runtime mutants. Ten source hashes/40raw commands reverified.
+REQUEST-BUILD-R1 initial041455Z C build refused misleading indentation; preserved
+failure, corrected loop formatting, no initial C runtime pass. Single-agent review
+in owned-clients/request-self-review.txt records CQ-only terminal retention and
+remaining native ownership boundary. Astra10hashes and cleanexternal61dde37 intact;
+disk10041MiB before run,Mac released. No complete safe-client/AS3 claim, private
+activation,Main,128MiB change or independent audit. AS4/MM0-MM4 still pending.
