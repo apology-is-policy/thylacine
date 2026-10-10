@@ -31,10 +31,10 @@ try:
   src=run/(name+'.rs');src.write_text(prefix+'\nfn main(){'+body+'}\n');cmd(['rustc','--edition=2024',src,'-o',run/name],name+'-build',bool(diag),diag)
   if not diag:cmd([run/name],name+'-run')
  variants={
- 'missing-wakeup':('wake(batch);','drop(batch);'),
+ 'missing-wakeup':('w.wake();','drop(w);'),
  'missing-unregister':('hub.borrow_mut().slots[i].take()','{let _=i;None::<Registration>}'),
  'stale-waker':('h.slots[slot.expect("pending future owns registration")].as_mut().unwrap().waker.replace(waker)','{let r=h.slots[slot.unwrap()].as_mut().unwrap();if r.waker.is_none(){r.waker=Some(waker);}None::<Waker>}'),
- 'callback-under-borrow':('let batch={self.hub.borrow_mut().batch()};wake(batch);','let mut h=self.hub.borrow_mut();wake(h.batch());'),
+ 'callback-under-borrow':('let(result,batch)=unsafe{self.receive_deferred(record)};batch.dispatch();result','let(result,batch)=unsafe{self.receive_deferred(record)};let _borrow=self.hub.borrow_mut();batch.dispatch();result'),
  'clone-after-check':('let waker=cx.waker().clone();let status=me.request.try_complete();','let status=me.request.try_complete();let waker=cx.waker().clone();'),
  'preparation-slot-leak':('Err(e)=>{release(&self.hub,&mut slot);Err(e)}','Err(e)=>{Err(e)}'),
  }

@@ -1,0 +1,138 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 12,
+  "profiles": 2,
+  "compile_fail": 2,
+  "positive_compile_control": 1,
+  "mutants_rejected": 6,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "12 passed; 0 failed"
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "12 passed; 0 failed"
+    },
+    {
+      "name": "no-clone-future-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "no-send-future-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0277"
+    },
+    {
+      "name": "valid-future-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "valid-future-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "missing-wakeup-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "missing-wakeup-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "missing-unregister-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "missing-unregister-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "stale-waker-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "stale-waker-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "callback-under-borrow-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "callback-under-borrow-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "clone-after-check-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "clone-after-check-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "preparation-slot-leak-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "preparation-slot-leak-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    }
+  ],
+  "limits": "Rust typed Future adapter with bounded wake registrations and simulated completions. No native SQ, sleeping event loop, or retirement-owner integration; SQ fix parked."
+}

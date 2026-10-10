@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Compose Rust Futures with bounded retirement ownership, dispatch Wakers outside ALL enclosing manager borrows; then local event/sleep/deadline integration. Simulated backends only; native SQ parked and full async qualification gated.",
+  "next": "Independent local progress/event/sleep/deadline integration, including last-request/result-drop notification for retiring cells; current APIs still require caller progress. Simulated backends only; native SQ parked and full async qualification gated.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -60,7 +60,8 @@
   "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z",
   "typed_rust_run": "owned-clients/fixed-requests-20261010T083816Z",
   "typed_c_run": "owned-clients/fixed-requests-c-20261010T083803Z",
-  "retirement_rust_run": "owned-clients/retirement-executor-20261010T084435Z",
+  "retirement_rust_run": "owned-clients/retirement-executor-20261010T090048Z",
   "retirement_c_run": "owned-clients/retirement-executor-c-20261010T084418Z",
-  "futures_rust_run": "owned-clients/fixed-futures-20261010T085203Z"
+  "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
+  "future_retirement_run": "owned-clients/future-retirement-20261010T090037Z"
 }

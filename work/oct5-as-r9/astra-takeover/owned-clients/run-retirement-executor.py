@@ -3,7 +3,7 @@ import subprocess,hashlib,json,datetime,os,resource,shutil
 D=Path(__file__).resolve().parent;R=D.parents[3];os.chdir(R);Y=R/'work/oct5-as-r9/astra-yip.sh'
 assert 'mac   HELD by you' in subprocess.check_output([str(Y),'resources'],text=True)
 run=D/('retirement-executor-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));run.mkdir()
-files=['retirement_executor.rs','fixed_requests.rs','test_retirement_executor.rs','ring_payload.rs','request_book.rs','paired_cq.rs','lease_ledger.rs','run-retirement-executor.py'];sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+files=['fixed_futures.rs','retirement_executor.rs','fixed_requests.rs','test_retirement_executor.rs','ring_payload.rs','request_book.rs','paired_cq.rs','lease_ledger.rs','run-retirement-executor.py'];sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 manifest={str(D/p):sha(D/p) for p in files};p=R/'usr/lib/libthyla-rs/src/loom/service_abi.rs';manifest[str(p)]=sha(p)
 (run/'source-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');(run/'source.txt').write_bytes(subprocess.check_output(['git','rev-parse','HEAD']));(run/'source.diff').write_bytes(subprocess.check_output(['git','diff','HEAD','--binary']))
 for n in files:shutil.copy2(D/n,run/n)
@@ -32,10 +32,10 @@ try:
   if not diag:cmd([run/name],name+'-run')
  variants={
  'early-reclaim':('e.retiring&&e.driver.progress()','e.retiring'),
- 'missing-retire':('e.retiring=true;e.driver.begin_retire();','e.retiring=true;'),
+ 'missing-retire':('e.retiring=true;e.driver.retire()','e.retiring=true;WakeBatch::empty()'),
  'frozen-cursor':('s.cursor=(i+1)%s.slots.len();','s.cursor=i;'),
- 'excess-budget':('let visited=budget.min(s.slots.len());','let visited=budget.min(s.slots.len())+1;'),
- 'no-shutdown-close':('e.driver.close();','e.driver.begin_retire();'),
+ 'excess-budget':('budget.min(s.slots.len())','budget.min(s.slots.len())+1'),
+ 'no-shutdown-close':('e.driver.close()','e.driver.retire()'),
  'premature-admission':('.position(Option::is_none).ok_or(Error::Full)?','.position(Option::is_none).unwrap_or(0)'),
  }
 

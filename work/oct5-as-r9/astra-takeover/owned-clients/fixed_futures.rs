@@ -13,7 +13,10 @@ impl Hub{
  fn batch(&mut self)->[Option<Waker>;64]{core::array::from_fn(|i|self.slots[i].as_mut().and_then(|r|r.waker.take()))}
 }
 fn release(hub:&Rc<RefCell<Hub>>,slot:&mut Option<usize>){if let Some(i)=slot.take(){let old={hub.borrow_mut().slots[i].take()};drop(old);}}
-fn wake(batch:[Option<Waker>;64]){for w in batch.into_iter().flatten(){w.wake();}}
+/// Invoke only after releasing every enclosing manager borrow. Dropping an
+/// undispatched batch can also invoke user Waker-drop code.
+#[must_use]pub(crate) struct WakeBatch([Option<Waker>;64]);
+impl WakeBatch{pub(crate) fn empty()->Self{Self(core::array::from_fn(|_|None))}pub(crate) fn dispatch(self){for w in self.0.into_iter().flatten(){w.wake();}}}
 fn finish<T>(hub:&Rc<RefCell<Hub>>,slot:&mut Option<usize>,status:Result<Option<T>,Error>,waker:Waker)->Poll<Result<T,Error>>{
  match status{
   Ok(Some(value))=>{release(hub,slot);Poll::Ready(Ok(value))},
@@ -42,15 +45,20 @@ impl<B:RingBackend> FutureDriver<B>{
   match self.driver.as_ref().unwrap().write(scope,range,bytes){Ok(request)=>Ok(WriteFuture{request,hub:self.hub.clone(),slot}),Err(e)=>{release(&self.hub,&mut slot);Err(e)}}
  }
  /// Same exact paired-CQ and ended local access contract as FixedDriver.receive.
- pub(crate) unsafe fn receive(&mut self,record:Record)->Result<(),Error>{
+ pub(crate) unsafe fn receive(&mut self,record:Record)->Result<(),Error>{let(result,batch)=unsafe{self.receive_deferred(record)};batch.dispatch();result}
+ /// Adapter for enclosing retirement owners: never invoke user Wakers here.
+ pub(crate) unsafe fn receive_deferred(&mut self,record:Record)->(Result<(),Error>,WakeBatch){
   let result=unsafe{self.driver.as_mut().unwrap().receive(record)};
-  if result.is_err(){self.close();}else{let batch={self.hub.borrow_mut().batch()};wake(batch);}
-  result
+  let batch=if result.is_err(){self.close_deferred()}else{WakeBatch(self.hub.borrow_mut().batch())};(result,batch)
  }
- pub(crate) fn close(&mut self){
-  self.driver.as_mut().unwrap().close();
-  let batch={let mut h=self.hub.borrow_mut();h.closed=true;h.batch()};wake(batch);
+ pub(crate) fn close(&mut self){let batch=self.close_deferred();batch.dispatch();}
+ pub(crate) fn close_deferred(&mut self)->WakeBatch{
+  self.driver.as_mut().unwrap().close();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
  }
+ pub(crate) fn retire_deferred(&mut self)->WakeBatch{
+  self.driver.as_mut().unwrap().begin_retire();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
+ }
+ pub(crate) fn progress(&mut self)->bool{self.driver.as_mut().unwrap().progress()}
  pub(crate) fn registrations(&self)->usize{self.hub.borrow().slots.iter().filter(|s|s.is_some()).count()}
 }
 impl<B:RingBackend> Drop for FutureDriver<B>{fn drop(&mut self){self.close();}}

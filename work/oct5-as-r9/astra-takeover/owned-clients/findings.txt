@@ -18,3 +18,5 @@ TYPED-REVIEW-R1 resolved: driver drop returns Closing to unfinished typed handle
 RETIREMENT-HARNESS-R1: initial Rust clean profiles passed; premature-admission mutant reaches forbidden factory and panics with unreachable-code diagnostic, not assertion. Raw failed run retained; correct expected diagnostic before rerun.
 
 FUTURE-REVIEW-R1: Waker clone/drop callbacks can deliver completion; clone-before-readiness and register-before-old-drop verified, callbacks outside Hub borrow. Future/retirement composition must dispatch outside enclosing manager borrows too; next queued integration, current types cannot compose accidentally.
+
+FUTURE-RETIRE-HARNESS-R1:090001Z clean composition passes; wake-under-drop-borrow mutant aborts during destructor cleanup after exact RefCell borrow panic, so no FAILED footer is produced. Preserve raw failure and match RefCell diagnostic for the three borrow mutants before retry.

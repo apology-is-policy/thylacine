@@ -17,10 +17,10 @@ at operator request for Corona; read native-sq-reuse/PARKED.md before acting.
 Current build kernels contain that parked patch and are not current-source
 artifacts. Do not apply/revise/rerun this subchunk or bypass classifier restrictions.
 Typed requests and bounded retirement owners are host-verified in C/Rust.
-Rust typed Futures/wakeups are independently host-verified. Next compose them
-with bounded retirement ownership, delivering notifications outside ALL manager
-borrows; then local event/sleep/deadline integration. Read owned-clients/futures-self-review.txt,
-retirement-self-review.txt and typed-self-review.txt. Native SQ submission/integration
+Rust Futures now compose with the bounded retirement queue; notifications escape
+all manager borrows. Next local progress/event/sleep/deadline integration, including
+last-result-drop notification so retirement cannot wait solely on new CQ. Read
+owned-clients/future-retirement-self-review.txt and earlier component reviews. Native SQ submission/integration
 and complete async qualification remain gated on this dependency. Heartbeat
 prompt retains this exception and is ACTIVE under latest operator authorization.
 Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
@@ -352,3 +352,28 @@ notifications must escape every enclosing manager borrow before invocation.
 Native event/sleep/deadline integration remains pending; no complete async executor,
 AS3 or C callback qualification is claimed. SQ stays parked; heartbeat ACTIVE,
 AS4/MM0-MM4 and all Main/private-activation/128MiB guards remain.
+
+
+### Astra Future/retirement ownership composition, October 10
+
+One generic Rust retirement queue now supports polling and Future drivers with
+preallocated cells. Completion, client drop and executor shutdown return deferred
+wake batches, dispatched after all enclosing borrows end. Progress detaches ready
+entries before driver destruction. Callback tests poll tasks and drop/access peer
+clients safely. Normal client retirement preserves an already-terminal WRITE
+success; held READ results still block cell reuse until their users finish.
+
+Composition090037Z:6cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands.
+Polling retirement regression090048Z:8cases,2compile-fail+control,6mutants,
+10hashes/21commands. Future regression090111Z:12cases,2compile-fail+control,
+6mutants,9hashes/21commands. Raw source/diff/logs reverified. Initial090001Z clean
+profiles passed; borrow mutant aborted during destructor cleanup after exact
+RefCell panic, so expected FAILED footer was absent. FUTURE-RETIRE-HARNESS-R1
+preserves failure and corrects expected diagnostic; complete retry passes.
+
+Single-agent future-retirement-self-review.txt records composition and remaining
+local-progress duty. Local event/sleep/deadline integration is next, including
+notification when the last held result drops; callers currently drive progress
+explicitly. C unchanged. Protected10/cleanexternal61dde37 and parked kernel base
+preserved. No native SQ or full AS3 qualification; heartbeat ACTIVE, AS4/MM0-MM4
+and Main/private-activation/128MiB guards remain.

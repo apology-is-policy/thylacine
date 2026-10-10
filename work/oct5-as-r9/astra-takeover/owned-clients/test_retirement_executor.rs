@@ -185,3 +185,5 @@ fn managed(e:&mut RetirementExecutor<Backing>)->(Rc<Probe>,retirement_executor::
 #[test]fn executor_drop_and_progress_do_not_allocate(){
  let mut e=RetirementExecutor::new(1).unwrap();let(p,c)=managed(&mut e);LATE_ALLOCS.with(|x|x.set(0));WATCH_ALLOCS.with(|x|x.set(true));drop(c);assert_eq!(e.progress(1).reclaimed,0);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);WATCH_ALLOCS.with(|x|x.set(false));assert_eq!(LATE_ALLOCS.with(|x|x.get()),0);
 }
+
+mod fixed_futures;

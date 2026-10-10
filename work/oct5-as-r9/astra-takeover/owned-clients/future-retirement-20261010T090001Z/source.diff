@@ -1,0 +1,215 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs b/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs
+index 7bb0a64aa..fe5df1e1a 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/fixed_futures.rs
+@@ -13,7 +13,10 @@ impl Hub{
+  fn batch(&mut self)->[Option<Waker>;64]{core::array::from_fn(|i|self.slots[i].as_mut().and_then(|r|r.waker.take()))}
+ }
+ fn release(hub:&Rc<RefCell<Hub>>,slot:&mut Option<usize>){if let Some(i)=slot.take(){let old={hub.borrow_mut().slots[i].take()};drop(old);}}
+-fn wake(batch:[Option<Waker>;64]){for w in batch.into_iter().flatten(){w.wake();}}
++/// Invoke only after releasing every enclosing manager borrow. Dropping an
++/// undispatched batch can also invoke user Waker-drop code.
++#[must_use]pub(crate) struct WakeBatch([Option<Waker>;64]);
++impl WakeBatch{pub(crate) fn empty()->Self{Self(core::array::from_fn(|_|None))}pub(crate) fn dispatch(self){for w in self.0.into_iter().flatten(){w.wake();}}}
+ fn finish<T>(hub:&Rc<RefCell<Hub>>,slot:&mut Option<usize>,status:Result<Option<T>,Error>,waker:Waker)->Poll<Result<T,Error>>{
+  match status{
+   Ok(Some(value))=>{release(hub,slot);Poll::Ready(Ok(value))},
+@@ -42,15 +45,20 @@ impl<B:RingBackend> FutureDriver<B>{
+   match self.driver.as_ref().unwrap().write(scope,range,bytes){Ok(request)=>Ok(WriteFuture{request,hub:self.hub.clone(),slot}),Err(e)=>{release(&self.hub,&mut slot);Err(e)}}
+  }
+  /// Same exact paired-CQ and ended local access contract as FixedDriver.receive.
+- pub(crate) unsafe fn receive(&mut self,record:Record)->Result<(),Error>{
++ pub(crate) unsafe fn receive(&mut self,record:Record)->Result<(),Error>{let(result,batch)=unsafe{self.receive_deferred(record)};batch.dispatch();result}
++ /// Adapter for enclosing retirement owners: never invoke user Wakers here.
++ pub(crate) unsafe fn receive_deferred(&mut self,record:Record)->(Result<(),Error>,WakeBatch){
+   let result=unsafe{self.driver.as_mut().unwrap().receive(record)};
+-  if result.is_err(){self.close();}else{let batch={self.hub.borrow_mut().batch()};wake(batch);}
+-  result
++  let batch=if result.is_err(){self.close_deferred()}else{WakeBatch(self.hub.borrow_mut().batch())};(result,batch)
+  }
+- pub(crate) fn close(&mut self){
+-  self.driver.as_mut().unwrap().close();
+-  let batch={let mut h=self.hub.borrow_mut();h.closed=true;h.batch()};wake(batch);
++ pub(crate) fn close(&mut self){let batch=self.close_deferred();batch.dispatch();}
++ pub(crate) fn close_deferred(&mut self)->WakeBatch{
++  self.driver.as_mut().unwrap().close();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
+  }
++ pub(crate) fn retire_deferred(&mut self)->WakeBatch{
++  self.driver.as_mut().unwrap().begin_retire();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())
++ }
++ pub(crate) fn progress(&mut self)->bool{self.driver.as_mut().unwrap().progress()}
+  pub(crate) fn registrations(&self)->usize{self.hub.borrow().slots.iter().filter(|s|s.is_some()).count()}
+ }
+ impl<B:RingBackend> Drop for FutureDriver<B>{fn drop(&mut self){self.close();}}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs b/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs
+index 8343f9492..d0452a797 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/retirement_executor.rs
+@@ -2,14 +2,42 @@
+ extern crate alloc;
+ use alloc::{rc::Rc,vec::Vec};
+ use core::cell::RefCell;
+-use super::{fixed_requests::{FixedDriver,ReadRequest,WriteRequest,Error as DriverError},ring_payload::RingBackend,paired_cq::Record,service_abi::{SlotRef,PoolMember}};
++use super::{fixed_futures::{FutureDriver,ReadFuture,WriteFuture,WakeBatch},fixed_requests::{FixedDriver,ReadRequest,WriteRequest,Error as DriverError},ring_payload::RingBackend,paired_cq::Record,service_abi::{SlotRef,PoolMember}};
+ #[derive(Debug,PartialEq,Eq)]pub(crate) enum Error{Capacity,Full,Closed,Driver(DriverError)}
+ #[derive(Debug,PartialEq,Eq)]pub(crate) struct Progress{pub visited:usize,pub reclaimed:usize,pub occupied:usize}
+-struct Entry<B:RingBackend>{driver:FixedDriver<B>,retiring:bool}
+-struct State<B:RingBackend>{slots:Vec<Option<Entry<B>>>,cursor:usize,open:bool}
+-pub(crate) struct RetirementExecutor<B:RingBackend>{state:Rc<RefCell<State<B>>>}
+-pub(crate) struct ManagedClient<B:RingBackend>{state:Rc<RefCell<State<B>>>,slot:usize}
+-impl<B:RingBackend> RetirementExecutor<B>{
++pub(crate) trait Retirable{
++ type Read;type Write;
++ fn read(&self,scope:SlotRef,range:PoolMember)->Result<Self::Read,DriverError>;
++ fn write(&self,scope:SlotRef,range:PoolMember,input:&[u8])->Result<Self::Write,DriverError>;
++ unsafe fn receive(&mut self,record:Record)->(Result<(),DriverError>,WakeBatch);
++ fn retire(&mut self)->WakeBatch;fn close(&mut self)->WakeBatch;fn progress(&mut self)->bool;
++}
++impl<B:RingBackend> Retirable for FixedDriver<B>{
++ type Read=ReadRequest<B>;type Write=WriteRequest<B>;
++ fn read(&self,s:SlotRef,r:PoolMember)->Result<Self::Read,DriverError>{FixedDriver::read(self,s,r)}
++ fn write(&self,s:SlotRef,r:PoolMember,b:&[u8])->Result<Self::Write,DriverError>{FixedDriver::write(self,s,r,b)}
++ unsafe fn receive(&mut self,r:Record)->(Result<(),DriverError>,WakeBatch){(unsafe{FixedDriver::receive(self,r)},WakeBatch::empty())}
++ fn retire(&mut self)->WakeBatch{self.begin_retire();WakeBatch::empty()}
++ fn close(&mut self)->WakeBatch{FixedDriver::close(self);WakeBatch::empty()}
++ fn progress(&mut self)->bool{FixedDriver::progress(self)}
++}
++impl<B:RingBackend> Retirable for FutureDriver<B>{
++ type Read=ReadFuture<B>;type Write=WriteFuture<B>;
++ fn read(&self,s:SlotRef,r:PoolMember)->Result<Self::Read,DriverError>{FutureDriver::read(self,s,r)}
++ fn write(&self,s:SlotRef,r:PoolMember,b:&[u8])->Result<Self::Write,DriverError>{FutureDriver::write(self,s,r,b)}
++ unsafe fn receive(&mut self,r:Record)->(Result<(),DriverError>,WakeBatch){unsafe{self.receive_deferred(r)}}
++ fn retire(&mut self)->WakeBatch{self.retire_deferred()}
++ fn close(&mut self)->WakeBatch{self.close_deferred()}
++ fn progress(&mut self)->bool{FutureDriver::progress(self)}
++}
++struct Entry<D:Retirable>{driver:D,retiring:bool}
++struct State<D:Retirable>{slots:Vec<Option<Entry<D>>>,cursor:usize,open:bool}
++pub(crate) struct RetireQueue<D:Retirable>{state:Rc<RefCell<State<D>>>}
++pub(crate) struct Managed<D:Retirable>{state:Rc<RefCell<State<D>>>,slot:usize}
++pub(crate) type RetirementExecutor<B> = RetireQueue<FixedDriver<B>>;
++pub(crate) type ManagedClient<B> = Managed<FixedDriver<B>>;
++pub(crate) type FutureExecutor<B> = RetireQueue<FutureDriver<B>>;
++impl<D:Retirable> RetireQueue<D>{
+  /// Conservative library bound, not a new kernel quota. Every admitted wrapper
+  /// reserves its retirement cell before its factory may create native resources.
+  pub(crate) fn new(capacity:usize)->Result<Self,Error>{
+@@ -21,40 +49,43 @@ impl<B:RingBackend> RetirementExecutor<B>{
+  /// Unique &mut self and creator-thread ownership prevent concurrent admission;
+  /// client callbacks can only retire their own occupied cell. Failure leaves the
+  /// free cell free and must clean any factory-owned partial resources normally.
+- pub(crate) fn admit(&mut self,make:impl FnOnce()->Result<FixedDriver<B>,DriverError>)->Result<ManagedClient<B>,Error>{
++ pub(crate) fn admit(&mut self,make:impl FnOnce()->Result<D,DriverError>)->Result<Managed<D>,Error>{
+   let slot={let s=self.state.borrow();if !s.open{return Err(Error::Closed);}s.slots.iter().position(Option::is_none).ok_or(Error::Full)?};
+   let driver=make().map_err(Error::Driver)?;
+   let mut s=self.state.borrow_mut();assert!(s.slots[slot].is_none());s.slots[slot]=Some(Entry{driver,retiring:false});
+-  Ok(ManagedClient{state:self.state.clone(),slot})
++  Ok(Managed{state:self.state.clone(),slot})
+  }
+  /// Visit at most min(budget,capacity) cells, once each, in rotating order.
+  /// No allocation/wait/retry loop. Busy entries retain their exact owner and
+  /// admission charge. The caller must arrange later progress after local events.
+  pub(crate) fn progress(&mut self,budget:usize)->Progress{
+-  let mut s=self.state.borrow_mut();let visited=budget.min(s.slots.len());let mut reclaimed=0;
+-  for _ in 0..visited{let i=s.cursor;s.cursor=(i+1)%s.slots.len();
+-   if s.slots[i].as_mut().is_some_and(|e|e.retiring&&e.driver.progress()){
+-    s.slots[i]=None;reclaimed+=1;
+-   }
++  let visited={let s=self.state.borrow();budget.min(s.slots.len())};let mut reclaimed=0;
++  for _ in 0..visited{
++   let detached={let mut s=self.state.borrow_mut();let i=s.cursor;s.cursor=(i+1)%s.slots.len();
++    if s.slots[i].as_mut().is_some_and(|e|e.retiring&&e.driver.progress()){s.slots[i].take()}else{None}};
++   if detached.is_some(){reclaimed+=1;}drop(detached); // Driver Drop outside borrow.
+   }
+-  Progress{visited,reclaimed,occupied:s.slots.iter().filter(|e|e.is_some()).count()}
++  Progress{visited,reclaimed,occupied:self.occupied()}
+  }
+  pub(crate) fn occupied(&self)->usize{self.state.borrow().slots.iter().filter(|e|e.is_some()).count()}
+ }
+-impl<B:RingBackend> Drop for RetirementExecutor<B>{fn drop(&mut self){
+- let mut s=self.state.borrow_mut();s.open=false;
+- // Executor shutdown cannot promise continued driving. Close each descriptor
+- // explicitly; independent kernel pins and owned views remain authoritative.
+- for e in s.slots.iter_mut().flatten(){e.driver.close();}
++impl<D:Retirable> Drop for RetireQueue<D>{fn drop(&mut self){
++ let capacity={let mut s=self.state.borrow_mut();s.open=false;s.slots.len()};
++ for i in 0..capacity{
++  let batch={let mut s=self.state.borrow_mut();match s.slots[i].as_mut(){Some(e)=>e.driver.close(),None=>WakeBatch::empty()}};
++  batch.dispatch(); // Allows task callbacks to drop clients without borrow conflict.
++ }
+ }}
+-impl<B:RingBackend> ManagedClient<B>{
+- pub(crate) fn read(&self,scope:SlotRef,range:PoolMember)->Result<ReadRequest<B>,Error>{let s=self.state.borrow();if !s.open{return Err(Error::Closed);}s.slots[self.slot].as_ref().unwrap().driver.read(scope,range).map_err(Error::Driver)}
+- pub(crate) fn write(&self,scope:SlotRef,range:PoolMember,input:&[u8])->Result<WriteRequest<B>,Error>{let s=self.state.borrow();if !s.open{return Err(Error::Closed);}s.slots[self.slot].as_ref().unwrap().driver.write(scope,range,input).map_err(Error::Driver)}
++impl<D:Retirable> Managed<D>{
++ pub(crate) fn read(&self,scope:SlotRef,range:PoolMember)->Result<D::Read,Error>{let s=self.state.borrow();if !s.open{return Err(Error::Closed);}s.slots[self.slot].as_ref().unwrap().driver.read(scope,range).map_err(Error::Driver)}
++ pub(crate) fn write(&self,scope:SlotRef,range:PoolMember,input:&[u8])->Result<D::Write,Error>{let s=self.state.borrow();if !s.open{return Err(Error::Closed);}s.slots[self.slot].as_ref().unwrap().driver.write(scope,range,input).map_err(Error::Driver)}
+  /// Same authenticated, locally quiescent paired-CQ contract as FixedDriver.
+- pub(crate) unsafe fn receive(&mut self,record:Record)->Result<(),Error>{let mut s=self.state.borrow_mut();if !s.open{return Err(Error::Closed);}unsafe{s.slots[self.slot].as_mut().unwrap().driver.receive(record)}.map_err(Error::Driver)}
++ pub(crate) unsafe fn receive(&mut self,record:Record)->Result<(),Error>{
++  let(result,batch)={let mut s=self.state.borrow_mut();if !s.open{return Err(Error::Closed);}unsafe{s.slots[self.slot].as_mut().unwrap().driver.receive(record)}};
++  batch.dispatch();result.map_err(Error::Driver)
++ }
+ }
+-impl<B:RingBackend> Drop for ManagedClient<B>{fn drop(&mut self){
+- let mut s=self.state.borrow_mut();let e=s.slots[self.slot].as_mut().expect("attached slot never reclaimed");
+- e.retiring=true;e.driver.begin_retire();
+- // Existing cell becomes retirement record; no allocation and no lost owner.
++impl<D:Retirable> Drop for Managed<D>{fn drop(&mut self){
++ let batch={let mut s=self.state.borrow_mut();let e=s.slots[self.slot].as_mut().expect("attached slot never reclaimed");e.retiring=true;e.driver.retire()};
++ batch.dispatch(); // Existing cell retains driver; no retirement-node allocation.
+ }}
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/run-fixed-futures.py b/work/oct5-as-r9/astra-takeover/owned-clients/run-fixed-futures.py
+index 94bbfd1f8..1157cc6f3 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/run-fixed-futures.py
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/run-fixed-futures.py
+@@ -31,10 +31,10 @@ try:
+   src=run/(name+'.rs');src.write_text(prefix+'\nfn main(){'+body+'}\n');cmd(['rustc','--edition=2024',src,'-o',run/name],name+'-build',bool(diag),diag)
+   if not diag:cmd([run/name],name+'-run')
+  variants={
+- 'missing-wakeup':('wake(batch);','drop(batch);'),
++ 'missing-wakeup':('w.wake();','drop(w);'),
+  'missing-unregister':('hub.borrow_mut().slots[i].take()','{let _=i;None::<Registration>}'),
+  'stale-waker':('h.slots[slot.expect("pending future owns registration")].as_mut().unwrap().waker.replace(waker)','{let r=h.slots[slot.unwrap()].as_mut().unwrap();if r.waker.is_none(){r.waker=Some(waker);}None::<Waker>}'),
+- 'callback-under-borrow':('let batch={self.hub.borrow_mut().batch()};wake(batch);','let mut h=self.hub.borrow_mut();wake(h.batch());'),
++ 'callback-under-borrow':('let(result,batch)=unsafe{self.receive_deferred(record)};batch.dispatch();result','let(result,batch)=unsafe{self.receive_deferred(record)};let _borrow=self.hub.borrow_mut();batch.dispatch();result'),
+  'clone-after-check':('let waker=cx.waker().clone();let status=me.request.try_complete();','let status=me.request.try_complete();let waker=cx.waker().clone();'),
+  'preparation-slot-leak':('Err(e)=>{release(&self.hub,&mut slot);Err(e)}','Err(e)=>{Err(e)}'),
+  }
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/run-retirement-executor.py b/work/oct5-as-r9/astra-takeover/owned-clients/run-retirement-executor.py
+index 61f2b2217..b14edd571 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/run-retirement-executor.py
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/run-retirement-executor.py
+@@ -3,7 +3,7 @@ import subprocess,hashlib,json,datetime,os,resource,shutil
+ D=Path(__file__).resolve().parent;R=D.parents[3];os.chdir(R);Y=R/'work/oct5-as-r9/astra-yip.sh'
+ assert 'mac   HELD by you' in subprocess.check_output([str(Y),'resources'],text=True)
+ run=D/('retirement-executor-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'));run.mkdir()
+-files=['retirement_executor.rs','fixed_requests.rs','test_retirement_executor.rs','ring_payload.rs','request_book.rs','paired_cq.rs','lease_ledger.rs','run-retirement-executor.py'];sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
++files=['fixed_futures.rs','retirement_executor.rs','fixed_requests.rs','test_retirement_executor.rs','ring_payload.rs','request_book.rs','paired_cq.rs','lease_ledger.rs','run-retirement-executor.py'];sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+ manifest={str(D/p):sha(D/p) for p in files};p=R/'usr/lib/libthyla-rs/src/loom/service_abi.rs';manifest[str(p)]=sha(p)
+ (run/'source-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');(run/'source.txt').write_bytes(subprocess.check_output(['git','rev-parse','HEAD']));(run/'source.diff').write_bytes(subprocess.check_output(['git','diff','HEAD','--binary']))
+ for n in files:shutil.copy2(D/n,run/n)
+@@ -32,10 +32,10 @@ try:
+   if not diag:cmd([run/name],name+'-run')
+  variants={
+  'early-reclaim':('e.retiring&&e.driver.progress()','e.retiring'),
+- 'missing-retire':('e.retiring=true;e.driver.begin_retire();','e.retiring=true;'),
++ 'missing-retire':('e.retiring=true;e.driver.retire()','e.retiring=true;WakeBatch::empty()'),
+  'frozen-cursor':('s.cursor=(i+1)%s.slots.len();','s.cursor=i;'),
+- 'excess-budget':('let visited=budget.min(s.slots.len());','let visited=budget.min(s.slots.len())+1;'),
+- 'no-shutdown-close':('e.driver.close();','e.driver.begin_retire();'),
++ 'excess-budget':('budget.min(s.slots.len())','budget.min(s.slots.len())+1'),
++ 'no-shutdown-close':('e.driver.close()','e.driver.retire()'),
+  'premature-admission':('.position(Option::is_none).ok_or(Error::Full)?','.position(Option::is_none).unwrap_or(0)'),
+  }
+ 
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/test_retirement_executor.rs b/work/oct5-as-r9/astra-takeover/owned-clients/test_retirement_executor.rs
+index 7f7513ddc..18eb1d726 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/test_retirement_executor.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/test_retirement_executor.rs
+@@ -185,3 +185,5 @@ fn managed(e:&mut RetirementExecutor<Backing>)->(Rc<Probe>,retirement_executor::
+ #[test]fn executor_drop_and_progress_do_not_allocate(){
+  let mut e=RetirementExecutor::new(1).unwrap();let(p,c)=managed(&mut e);LATE_ALLOCS.with(|x|x.set(0));WATCH_ALLOCS.with(|x|x.set(true));drop(c);assert_eq!(e.progress(1).reclaimed,0);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);WATCH_ALLOCS.with(|x|x.set(false));assert_eq!(LATE_ALLOCS.with(|x|x.get()),0);
+ }
++
++mod fixed_futures;
