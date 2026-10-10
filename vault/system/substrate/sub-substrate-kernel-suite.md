@@ -1232,3 +1232,28 @@ closes each driver and retains surviving request/result storage; it is not a nat
 process-exit proof. Native SQ/atomic wait and completeAS3 remain gated. Protected10,
 clean exact external61dde37 and parked patch/restored kernel verified. No Main,
 private activation,128MiB change, AS4/MM0-MM4 advance or independent audit claim.
+
+
+### Astra independent shutdown coverage audit, October 10
+
+Audit mapped approved shutdown/drop/drain contracts to existing ownership tests;
+no new blocking shutdown API is needed for the simulated slice. Two new composed
+checks cover task-owner shutdown retaining retirement charge until proof and
+retirement-root shutdown waking a real task while another held READ survives.
+Runtime implementation unchanged. Read owned-clients/shutdown-coverage.txt and
+shutdown-coverage-audit.json for contracts, exact evidence and remaining boundaries.
+
+Combined shutdown-audit-20261010T102835Z passes all94tests opt0/2,2compile-fail+
+control,3shutdown mutants. Changed-source gaps prompted focused refreshes:
+retirement102855Z8cases,deadline102904Z10cases,progress102913Z8cases, each opt0/2,
+2compile-fail+control,6mutants. 13/10/10/10source hashes and15/21/21/21rawcommands
+verified before docs;14historical manifests/logs audited without relabeling their
+source coverage. No failures. Existing current C suites were not rerun.
+
+No further concrete gap identified in the permitted independent simulated
+fixed-I/O/cancellation/retirement slice. Next dependency is native integration,
+which remains gated by parked SQ. Preserve evidence and quietly monitor call0161/
+dependency changes; do not rerun unchanged suites or invent mechanisms to stay busy.
+CompleteAS3,AS4,MM0-MM4 remain incomplete; heartbeat ACTIVE. Protected10, clean
+external61dde37 and parked patch/restored kernel preserved. Single-agent self-review,
+no independent audit, Main landing, private activation or128MiB protection change.

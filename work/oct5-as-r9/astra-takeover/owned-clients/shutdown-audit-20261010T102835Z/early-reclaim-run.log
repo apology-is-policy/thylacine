@@ -1,0 +1,22 @@
+
+running 3 tests
+test composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict ... ok
+test shutdown_retirement_root_wakes_task_and_preserves_held_read ... ok
+test shutdown_task_owner_drop_keeps_retirement_charge_until_proof ... FAILED
+
+failures:
+
+---- shutdown_task_owner_drop_keeps_retirement_charge_until_proof stdout ----
+
+thread 'shutdown_task_owner_drop_keeps_retirement_charge_until_proof' (22574911) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/shutdown-audit-20261010T102835Z/mutant-early-reclaim/test_task_loop.rs:389:51:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    shutdown_task_owner_drop_keeps_retirement_charge_until_proof
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 91 filtered out; finished in 0.00s
+

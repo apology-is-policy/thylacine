@@ -1,0 +1,26 @@
+
+running 3 tests
+test shutdown_task_owner_drop_keeps_retirement_charge_until_proof ... ok
+test composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict ... FAILED
+test shutdown_retirement_root_wakes_task_and_preserves_held_read ... FAILED
+
+failures:
+
+---- composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict stdout ----
+
+thread 'composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict' (22574650) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/shutdown-audit-20261010T102835Z/mutant-lost-shutdown-wakeup/test_task_loop.rs:212:510:
+assertion failed: flag.get()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- shutdown_retirement_root_wakes_task_and_preserves_held_read stdout ----
+
+thread 'shutdown_retirement_root_wakes_task_and_preserves_held_read' (22574651) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/shutdown-audit-20261010T102835Z/mutant-lost-shutdown-wakeup/test_task_loop.rs:398:10:
+assertion failed: tasks.ready()
+
+
+failures:
+    composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict
+    shutdown_retirement_root_wakes_task_and_preserves_held_read
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 91 filtered out; finished in 0.00s
+

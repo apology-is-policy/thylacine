@@ -1,0 +1,12 @@
+warning: unreachable expression
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/shutdown-audit-20261010T102835Z/mutant-missing-close/test_task_loop.rs:323:253
+    |
+323 | ...p();assert_eq!(a.spawn(||{panic!("full factory ran");async{}}),Err(TaskError::Full));assert!(!a.cancel(bid));assert!(a.cancel(id...
+    |                              -------------------------- ^^^^^^^ unreachable expression
+    |                              |
+    |                              any code following this expression is unreachable
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+

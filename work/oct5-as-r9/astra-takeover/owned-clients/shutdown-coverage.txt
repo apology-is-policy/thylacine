@@ -1,0 +1,75 @@
+Astra single-agent shutdown/retirement coverage audit, October10.
+Scope: permitted independent simulated fixed-I/O ownership, cancellation and
+bounded retirement; not a full AS3 completion or independent audit.
+
+Contract -> checked evidence and limit
+1. Future/task drop requests scope cancellation without storage reuse:
+   task_fixed_future_cancel_retains_storage_until_terminal and loop_cancellation_
+   does_not_reclaim_before_retirement; new shutdown_task_owner_drop_keeps_
+   retirement_charge_until_proof uses real Tasks+FutureExecutor owners. C typed
+   and retirement fixtures retain metadata until CQ or retirement. No remote
+   cancellation acknowledgement is invented.
+2. Root shutdown forbids admission, closes each driver once, wakes pending Futures:
+   composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict checks user
+   callbacks outside queue borrows. New shutdown_retirement_root_wakes_task_and_
+   preserves_held_read runs an actual Tasks-owned pending Future to Closing after
+   root destruction while a different completed READ retains its bytes. C timer
+   fixture has pending request across root drop; old retirement fixture has held
+   result across root drop. This is userspace ownership, not kernel exec/exit proof.
+3. Bounded, pre-reserved retirement and failed admission:
+   Rust executor_8cases and C retirement8cases check capacity before factory,
+   attached cells not reclaimed, bounded rotating progress, failed allocation and
+   final release. Retained request/result must end before active-owner progress
+   can reclaim. Kernel-independent pins and charges remain backend assumptions.
+4. Deadline/cancel cannot refund or hide later successful WRITE:
+   Rust deadline10cases; C deadline8cases; timer9cases and C manager timer6cases.
+   Zero/partial budgets, absolute times, fair independent cursors, scope-wide
+   cancellation and late real completion covered. No native timer/wait proof.
+5. Drain is a lifecycle predicate, not an invented blocking shutdown API:
+   request metadata only clears after existing retirement proof plus no active
+   fixed users. Last-result release schedules Rust progress without new CQ;
+   source event notification schedules backend-only changes. Busy state does not
+   self-spin. C explicitly polls. Existing Drop/bounded progress satisfy this
+   local contract; a new peer-waiting shutdown method is not required by design.
+6. Completion/readiness before sleep:
+   local wait9, timer9, task10, loop9 cover creator callback boundaries, fixed
+   budgets, self-wake, spurious events, outer timeout policy and stale task wakes.
+   Atomic flags do not implement native wake-to-park. No sleeping OS thread or
+   concurrent native event publication is qualified.
+
+Evidence audit found historical core regressions whose runtime dependencies had
+changed; older summaries were correctly snapshot-bounded, not current proofs.
+shutdown-coverage-audit.json records14run manifests, raw log hashes, expected
+statuses/diagnostics and current mismatches without rewriting historical records.
+Combined shutdown-audit-20261010T102835Z executes all94tests in test_task_loop.rs,
+unfiltered, at opt0/2, including2newshutdown tests. This covers7ring ownership,
+6registration/ledger,7fixed,10typed,12Future,6composition,7progress,9wait,9timer,
+10task,9loop and2shutdown cases. Counts sum94. It does not contain every older
+fixture test, so separately refreshed current-source executor8cases102855Z,
+deadline10cases102904Z and progress8cases102913Z (including isolated admission
+notification missing from the copied combined fixture). Each focused suite has
+6runtime mutants,2compile-fail checks and a valid control. Combined suite has
+3shutdown mutants,2compile-fail checks and a valid control. Raw verification:
+13/10/10/10source hashes;15/21/21/21commands. No runtime implementation changed,
+no failed tests. Current C regressions were read/verified, not repeated.
+
+Remaining boundary inventory
+- Native owned mapping/setup/register/control/SQ adapter and actual paired CQ
+  delivery are uninstalled. SQ publication/reuse dependency is explicitly parked.
+- Native atomic wake/park integration and actual creator/control executor wiring
+  remain unqualified, including native lifetime/payer-pin proof at process exit.
+- Full source-matched AS3 quotas/media/full-CQ/fault/whole-process exec-exit and
+  CPU/SMP/sanitizer qualification remain; old full Mac gates qualify old source only.
+- AS4 clipboard/MODE/SAK/full arc then MM0-MM4 remain in that approved order.
+- Provided-buffer/connection transaction production clients are not claimed by
+  this fixed-I/O audit; their historical foundations do not equal installed clients.
+
+No further concrete gap identified within the explicitly permitted independent
+simulated slice. Next dependency is native integration, still gated by parked SQ.
+Do not apply/revise/rerun parked patch, bypass a restriction, add speculative
+shutdown mechanisms or rerun unchanged suites merely to keep busy. Check call0161
+and dependency status quietly; resume only when concrete authorized work becomes
+available. General ownership transfer stays Astra; parked exception stays Corona.
+Heartbeat stays ACTIVE because overall transferred work is incomplete. No Main,
+private activation,128MiB change or MM advance. Protected10, clean external61dde37,
+parked patch and restored kernel verified. Single-agent self-review only.

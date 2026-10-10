@@ -1,0 +1,49 @@
+
+running 8 tests
+test local_native_retirement_requires_explicit_event_not_busy_spin ... ok
+test local_pool_and_payload_release_share_noncallback_signal ... FAILED
+test local_last_future_drop_schedules_after_closing_poll ... FAILED
+test local_terminal_cq_signals_even_without_registered_waker ... FAILED
+test local_admission_signals_before_request_publication ... ok
+test local_pulse_drop_and_bounded_progress_do_not_allocate ... FAILED
+test local_result_drop_schedules_retirement_without_new_cq ... FAILED
+test local_zero_partial_budget_and_coalesced_events_preserve_sweep ... ok
+
+failures:
+
+---- local_pool_and_payload_release_share_noncallback_signal stdout ----
+
+thread 'local_pool_and_payload_release_share_noncallback_signal' (22578256) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T102913Z/mutant-lost-owner-signal/test_local_progress.rs:240:196:
+assertion failed: signal.take()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- local_last_future_drop_schedules_after_closing_poll stdout ----
+
+thread 'local_last_future_drop_schedules_after_closing_poll' (22578254) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T102913Z/mutant-lost-owner-signal/test_local_progress.rs:228:401:
+assertion failed: e.needs_progress()
+
+---- local_terminal_cq_signals_even_without_registered_waker stdout ----
+
+thread 'local_terminal_cq_signals_even_without_registered_waker' (22578259) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T102913Z/mutant-lost-owner-signal/test_local_progress.rs:237:298:
+assertion failed: e.needs_progress()
+
+---- local_pulse_drop_and_bounded_progress_do_not_allocate stdout ----
+
+thread 'local_pulse_drop_and_bounded_progress_do_not_allocate' (22578257) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T102913Z/mutant-lost-owner-signal/test_local_progress.rs:243:267:
+assertion failed: e.needs_progress()
+
+---- local_result_drop_schedules_retirement_without_new_cq stdout ----
+
+thread 'local_result_drop_schedules_retirement_without_new_cq' (22578258) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-progress-20261010T102913Z/mutant-lost-owner-signal/test_local_progress.rs:225:482:
+assertion failed: e.needs_progress()
+
+
+failures:
+    local_last_future_drop_schedules_after_closing_poll
+    local_pool_and_payload_release_share_noncallback_signal
+    local_pulse_drop_and_bounded_progress_do_not_allocate
+    local_result_drop_schedules_retirement_without_new_cq
+    local_terminal_cq_signals_even_without_registered_waker
+
+test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+
