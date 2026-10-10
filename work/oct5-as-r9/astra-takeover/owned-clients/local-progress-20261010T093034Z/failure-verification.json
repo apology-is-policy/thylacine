@@ -1,0 +1,29 @@
+{
+  "owner": "astra",
+  "state": "failed-mutant-survived",
+  "finding": "DEADLINE-PULSE-TEST-R1",
+  "snapshot_hashes_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "85c57649d1550f6bc4b17b9167f3a2bc5c2c64bb022b45f55ec409b99ae5b1c0",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "85c57649d1550f6bc4b17b9167f3a2bc5c2c64bb022b45f55ec409b99ae5b1c0",
+    "no-clone-client-build": "6d79c96c801a77bed2c66976e0ca92cf3200895a84d606b6201e550afe896122",
+    "no-send-executor-build": "b6017dcf31e551ef365d24ca45c1131d3b46f6d8ec3fea9b77ec2f51de611ec5",
+    "valid-client-build": "706a405170aa8fc47d325a4a17d379bca828184cbba0203df545c2d717280d93",
+    "valid-client-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-owner-signal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-owner-signal-run": "1e9f04a656e4b2af038f1ff9151c0571e7a890ff1f289d4cba8a95205b95a027",
+    "missing-cq-signal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-cq-signal-run": "347c2d7b269510323977570bb19f39d1a05e9cc8b3a92d6a4560577d3f18d1bf",
+    "zero-budget-loses-event-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "zero-budget-loses-event-run": "362ae24c3219e56bca02183dbe8c6a9bb0674b1b3a25d822bbdee18a0a61302a",
+    "lost-partial-sweep-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-partial-sweep-run": "4d413a1542433665c8947f8a2ede05e066daa795ab42af1e7a527b5859eb65c2",
+    "busy-self-reschedule-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "busy-self-reschedule-run": "b76edaa460fc1f8e463c1f7680f4703e5c13051e6b4545bdc3b1dab9091f78bb",
+    "missing-admission-signal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "missing-admission-signal-run": "cc11bd7d2122485e28e2a00304035ff45372700f034c784a6b01935c2acdc787"
+  }
+}

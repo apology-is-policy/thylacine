@@ -36578,3 +36578,30 @@ Next independent bounded per-request deadline/cancellation bookkeeping and
 runnable-task composition. Protected10/cleanexternal61dde37 and parked kernel
 base preserved. SQ remains parked/unapplied, native/fullAS3 qualification gated;
 AS4/MM0-MM4, Main/private activation and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra fixed-request deadline/cancellation bookkeeping, October 10
+
+The uninstalled Rust fixed-owner cells now carry optional absolute deadlines and
+an abort-requested bit. Only prepublication configuration is allowed; active work
+cannot extend its deadline. A bounded rotating expiry scan and explicit request
+cancellation issue scope-wide abort at most once per owner. Drop after cancellation
+does not repeat that request. Completion metadata and storage remain retained;
+authentic later WRITE success is preserved. Publication signals local progress.
+
+Deadline092954Z:10cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands.
+Backing093013Z:20cases,6compile-fail+control,8mutants,5hashes/29commands. Typed
+093026Z:10cases,4compile-fail+control,6mutants,8hashes/23commands. All source,
+snapshot,HEAD/diff and raw diagnostics verified before documentation. C unchanged.
+
+DEADLINE-PULSE-TEST-R1: local-progress093034Z clean profiles passed, but the new
+publication pulse masked the missing-admission-signal mutant in combined tests.
+Added an isolated admission-before-publication assertion; retry093109Z passes
+8cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands. Failed evidence
+preserved. Single-agent deadline-self-review.txt records limits and test-gap fix.
+
+Next forward these APIs through Futures/retirement queue and compose with the
+simulated wait coordinator, then runnable tasks. Timers still require explicit
+FixedDriver expiry scans. Protected10/cleanexternal61dde37 and parked kernel base
+preserved. Native SQ stays parked; fullAS3/AS4/MM0-MM4, Main/private activation
+and128MiB guards remain. Heartbeat ACTIVE.

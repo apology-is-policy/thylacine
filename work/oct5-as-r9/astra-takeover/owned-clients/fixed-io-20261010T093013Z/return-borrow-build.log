@@ -1,0 +1,23 @@
+error[E0505]: cannot move out of `a` because it is borrowed
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T093013Z/return-borrow.rs:118:109
+    |
+118 | ...(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!("{:?}",view);}
+    |                 -                          -               ^ move out of `a` occurs here  ---- borrow later used here
+    |                 |                          |
+    |                 |                          borrow of `a` occurs here
+    |                 binding `a` declared here
+    |
+note: if `ring_payload::Payload<Backing>` implemented `Clone`, you could clone the value
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T093013Z/ring_payload.rs:91:1
+    |
+ 91 | pub(crate) struct Payload<B:RingBackend>{core:Rc<Core<B>>,token:Option<LeaseToken>}
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+    |
+   ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-io-20261010T093013Z/return-borrow.rs:118:93
+    |
+118 | fn main(){let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!...
+    |                                                                                             - you could clone this value
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0505`.

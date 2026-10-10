@@ -1,0 +1,9 @@
+error[E0594]: cannot assign to data in a `&` reference
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T093026Z/no-mutable-result.rs:157:223
+    |
+157 | ...let done=r.try_complete().unwrap().unwrap();done.bytes().unwrap()[0]=7;}
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^ cannot assign
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0594`.

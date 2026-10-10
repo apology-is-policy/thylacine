@@ -1,0 +1,49 @@
+
+running 10 tests
+test typed_driver_drop_reports_closing_to_pending_handle ... ok
+test typed_corruption_closes_without_refunding_active_storage ... ok
+test typed_foreign_cookie_fails_only_its_driver ... ok
+test typed_prepare_rolls_back_both_tables ... ok
+test typed_retire_prepared_prevents_publication ... ok
+test typed_abandon_retains_obligation_until_terminal ... FAILED
+test typed_drop_terminal_does_not_abort_or_leak ... FAILED
+test typed_read_owns_until_consumed_view_ends ... FAILED
+test typed_retirement_without_cq_keeps_metadata_until_proof ... ok
+test typed_write_and_read_errors_are_preserved ... FAILED
+
+failures:
+
+---- typed_abandon_retains_obligation_until_terminal stdout ----
+
+thread 'typed_abandon_retains_obligation_until_terminal' (22499183) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T093026Z/mutant-missing-storage-terminal/test_fixed_requests.rs:125:373:
+called `Result::unwrap()` on an `Err` value: Storage(Busy)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- typed_drop_terminal_does_not_abort_or_leak stdout ----
+
+thread 'typed_drop_terminal_does_not_abort_or_leak' (22499186) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T093026Z/mutant-missing-storage-terminal/test_fixed_requests.rs:143:203:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- typed_read_owns_until_consumed_view_ends stdout ----
+
+thread 'typed_read_owns_until_consumed_view_ends' (22499189) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T093026Z/mutant-missing-storage-terminal/test_fixed_requests.rs:122:424:
+called `Result::unwrap()` on an `Err` value: Busy
+
+---- typed_write_and_read_errors_are_preserved stdout ----
+
+thread 'typed_write_and_read_errors_are_preserved' (22499192) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/fixed-requests-20261010T093026Z/mutant-missing-storage-terminal/test_fixed_requests.rs:137:309:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    typed_abandon_retains_obligation_until_terminal
+    typed_drop_terminal_does_not_abort_or_leak
+    typed_read_owns_until_consumed_view_ends
+    typed_write_and_read_errors_are_preserved
+
+test result: FAILED. 6 passed; 4 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+

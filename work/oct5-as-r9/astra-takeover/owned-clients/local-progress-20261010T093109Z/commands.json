@@ -1,0 +1,128 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "8 passed; 0 failed"
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "8 passed; 0 failed"
+  },
+  {
+    "name": "no-clone-client-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0599"
+  },
+  {
+    "name": "no-send-executor-build",
+    "rc": 1,
+    "expected_failure": true,
+    "diagnostic": "E0277"
+  },
+  {
+    "name": "valid-client-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "valid-client-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "lost-owner-signal-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "lost-owner-signal-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "missing-cq-signal-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "missing-cq-signal-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "zero-budget-loses-event-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "zero-budget-loses-event-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "lost-partial-sweep-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "lost-partial-sweep-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "busy-self-reschedule-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "busy-self-reschedule-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  },
+  {
+    "name": "missing-admission-signal-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "missing-admission-signal-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "FAILED"
+  }
+]

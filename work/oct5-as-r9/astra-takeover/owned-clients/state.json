@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-local-wait-host-verified",
-  "next": "Independent bounded per-request deadline/cancellation bookkeeping and runnable-task composition using simulated backends. Local wait coordinator is host-verified only; native atomic wait/event adapters and SQ integration remain unqualified/parked. Preserve async-first gates.",
+  "state": "draft-fixed-deadlines-host-verified",
+  "next": "Compose typed absolute deadline/cancellation APIs into Rust Futures and the bounded retirement queue, then the simulated wait coordinator; add runnable-task composition. Current FixedDriver timers require explicit expiry scans. Native SQ stays parked and async-first/full qualification gates remain.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -15,15 +15,16 @@
   "composed_run": "owned-clients/composed-ring-20261010T063524Z",
   "mapping_run": "owned-clients/owned-mapping-20261010T064503Z",
   "parked_dependency": "native-sq-reuse/PARKED.md",
-  "fixed_rust_run": "owned-clients/fixed-io-20261010T074052Z",
+  "fixed_rust_run": "owned-clients/fixed-io-20261010T093013Z",
   "fixed_c_run": "owned-clients/fixed-io-c-20261010T074317Z",
   "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z",
-  "typed_rust_run": "owned-clients/fixed-requests-20261010T083816Z",
+  "typed_rust_run": "owned-clients/fixed-requests-20261010T093026Z",
   "typed_c_run": "owned-clients/fixed-requests-c-20261010T083803Z",
   "retirement_rust_run": "owned-clients/retirement-executor-20261010T091311Z",
   "retirement_c_run": "owned-clients/retirement-executor-c-20261010T084418Z",
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
   "future_retirement_run": "owned-clients/future-retirement-20261010T091254Z",
-  "local_progress_run": "owned-clients/local-progress-20261010T091022Z",
-  "local_wait_run": "owned-clients/local-wait-20261010T091938Z"
+  "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
+  "local_wait_run": "owned-clients/local-wait-20261010T091938Z",
+  "deadline_run": "owned-clients/deadlines-20261010T092954Z"
 }

@@ -1,0 +1,47 @@
+Astra single-agent self-review: fixed request deadlines/cancellation, October10.
+Uninstalled Rust draft with simulated backends, not an independent audit.
+
+Deadline and abort-requested bits reside in the existing 64 fixed-owner cells.
+No extra timer nodes, growing queue, borrowed request pointer or numeric handle
+is exposed. set_deadline is allowed only before local publication; after that
+neither activity nor caller replacement can extend it. None means no local timer;
+this Option is not the native zero encoding. Only active, not-yet-cancelled cells
+contribute to next_deadline. Terminal and prepared cells do not. Publication
+signals local progress so an adapter can recompute its next wait deadline.
+
+expire visits at most min(budget,64) cells, rotating its cursor. Zero budget is
+no work; it does not pretend an overdue timer was processed. A future event-loop
+must continue bounded scans while next_deadline remains due, rather than sleep.
+Cancellation checks exact owned cookie/index and marks abort-requested before
+calling the backend outside the inner cell borrow. The backend retains its
+nonblocking/nonreentrant/idempotent scope-abort contract. It may affect siblings;
+this is deliberately scope-wide, not per-request remote cancellation.
+
+Explicit cancel, expiry and active-handle drop issue at most one abort per fixed
+owner. Multiple siblings may independently request the same idempotent scope
+abort. Requests, completion metadata and backing remain owned after cancellation.
+No timer or abort acknowledgement supplies local quiescence, terminal CQ, remote
+rollback or refund. Authentic terminal completion can still return a successful
+WRITE after a cancellation request; the result is preserved. Abandoned requests
+retain correlation until CQ or whole-owner retirement. Closed owners issue no
+further backend aborts. Reused cells initialize both timer and cancellation state.
+
+Ten deadline cases092954Z pass opt0/2,2compile-fail+control,6mutants;10source
+hashes/21rawcommands. Backing regression093013Z:20cases opt0/2,6compile-fail+
+control,8mutants,5hashes/29commands. Typed regression093026Z:10cases opt0/2,
+4compile-fail+control,6mutants,8hashes/23commands. Each source/snapshot/HEAD/diff
+and raw diagnostic verified before later regression-fixture changes. Runtime
+sources are unchanged by that fixture correction. Local-progress retry093109Z:
+8cases opt0/2,2compile-fail+control,6mutants,10hashes/21commands reverified.
+
+DEADLINE-PULSE-TEST-R1: initial local-progress093034Z clean profiles passed but
+missing-admission-signal mutant survived: new publication pulse masked that
+omission in existing combined tests. Added a case observing admission before
+any request publication. Failed run retained; complete retry passes. This was
+an exposed test gap, not removal of the runtime admission requirement.
+
+This step exposes deadline/cancel on typed Rust requests and deadline scan/minimum
+on FixedDriver. Future/retirement-queue forwarding and wait composition are next;
+no automatic timer execution or wake adapter is claimed. C unchanged. Native
+SQ stays parked/unapplied. Protected10/cleanexternal61dde37 and parked kernel
+base preserved. FullAS3/AS4/MM0-MM4 and activation gates remain outstanding.

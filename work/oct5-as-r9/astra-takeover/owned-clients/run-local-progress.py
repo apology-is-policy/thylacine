@@ -19,7 +19,7 @@ def cmd(args,name,fail=False,diagnostic=None):
 try:
  cmd(['rustc','--version'],'rust-version')
  for opt in ['0','2']:
-  binary=run/('rust-tests-'+opt);cmd(['rustc','--edition=2024','--test','-C','opt-level='+opt,run/'test_local_progress.rs','-o',binary],'rust-build-'+opt);cmd([binary,'local_','--nocapture'],'rust-run-'+opt,diagnostic='7 passed; 0 failed')
+  binary=run/('rust-tests-'+opt);cmd(['rustc','--edition=2024','--test','-C','opt-level='+opt,run/'test_local_progress.rs','-o',binary],'rust-build-'+opt);cmd([binary,'local_','--nocapture'],'rust-run-'+opt,diagnostic='8 passed; 0 failed')
  prefix=(run/'test_local_progress.rs').read_text()
  cases={
  'no-clone-client':('let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();','E0599'),
@@ -45,6 +45,6 @@ try:
   src=m/target;s=src.read_text();assert s.count(a)>=1;src.write_text(s.replace(a,b));binary=m/'test'
   cmd(['rustc','--edition=2024','--test',m/'test_local_progress.rs','-o',binary],name+'-build');cmd([binary,'local_'],name+'-run',True,'FAILED')
  assert all(sha(Path(p))==h for p,h in manifest.items())
- (run/'result.json').write_text(json.dumps(dict(owner='astra',state='passed',scenarios=7,profiles=2,compile_fail=2,positive_compile_control=1,mutants_rejected=6,records=records,limits='Creator-thread coalesced progress pulses with bounded sweeps; simulated native events, no cross-thread/OS wake or sleep/deadline qualification.'),indent=2)+'\n');print(str(run),flush=True)
+ (run/'result.json').write_text(json.dumps(dict(owner='astra',state='passed',scenarios=8,profiles=2,compile_fail=2,positive_compile_control=1,mutants_rejected=6,records=records,limits='Creator-thread coalesced progress pulses with bounded sweeps; simulated native events, no cross-thread/OS wake or sleep/deadline qualification.'),indent=2)+'\n');print(str(run),flush=True)
 finally:
  (run/'commands.json').write_text(json.dumps(records,indent=2)+'\n');subprocess.run([str(Y),'release','mac'],check=False)

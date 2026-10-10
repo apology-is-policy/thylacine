@@ -1,0 +1,32 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:31:09.260834+00:00",
+  "source_count": 8,
+  "command_count": 23,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "fe7bc9bd0fb8441426ea9cf50e082dab5d851b084b89b7752d257bed2ad5976e",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "b7ec3f24ae25213910eef60c67867f86db8b4b35cd4e34c6ddf7e3a41a2db913",
+    "no-active-view-build": "5cdeea5f53f1eb68a0e5747d5c2df2415a4d54c855c8124798669a97ba10e85c",
+    "no-clone-build": "8b0271f67eb87211bf828190adcdc17c021769e0b9bdf678c574368cb2f2f804",
+    "result-borrow-build": "d05ea0dea03bbf2622a73e90b1486a6d35d3606bbc5ae709aa1d45c623ddec89",
+    "no-mutable-result-build": "549dc5db2f14df83c43b812ae80b9915068d3c55da97264f82843664318db23f",
+    "valid-result-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "valid-result-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unpublished-leak-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unpublished-leak-run": "453b420575c2363ca92f4be87517e727bf5fb2ecfb3d59f039ce94174e507292",
+    "lost-abandoned-terminal-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-abandoned-terminal-run": "a64889db8bc13ed82a9029e23af040e1a4c26fef614dd1e460f19f277a5d50b3",
+    "retirement-without-proof-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "retirement-without-proof-run": "ae8c87bf09c2b7d9de65a2295e3e2e6337861fe32cc7701de9565280f76307cf",
+    "retired-metadata-leak-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "retired-metadata-leak-run": "06910b64a90621f029553938003ff0e7defb664cac03879c7d8677664ce0193d",
+    "missing-storage-terminal-build": "a1b3441959c7bb13c287a3fa79727aa6d4f358442cbbc0749b60ced1ddd4e837",
+    "missing-storage-terminal-run": "3d57d2ce1966cdeca885791c8d552781efddff8df2b2b807116eaaa5493840bc",
+    "corrupt-keeps-open-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "corrupt-keeps-open-run": "63b3615270e85b1e26ff2105893d4e900a0b42c4506c74328684eb8ceb754847"
+  }
+}

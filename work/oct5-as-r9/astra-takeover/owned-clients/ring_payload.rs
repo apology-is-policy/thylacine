@@ -40,7 +40,7 @@ struct PoolState {
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum FixedPhase{Prepared,Active,Terminal(i32)}
 #[derive(Clone,Copy)]
-struct FixedState{cookie:u64,scope:SlotRef,range:PoolMember,write:bool,phase:FixedPhase,abandoned:bool}
+struct FixedState{cookie:u64,scope:SlotRef,range:PoolMember,write:bool,phase:FixedPhase,abandoned:bool,deadline:Option<u64>,abort_requested:bool}
 fn overlap(a:PoolMember,b:PoolMember)->bool{a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length}
 struct State {fixed:[Option<FixedState>;64],quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
 /// Creator-thread coalesced progress pulse. No callback, allocation, syscall or
@@ -54,11 +54,23 @@ impl ProgressSignal{
  pub(crate) fn pending(&self)->bool{self.0.get()}
  pub(crate) fn take(&self)->bool{self.0.replace(false)}
 }
-struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>,signal:RefCell<Option<ProgressSignal>>}
+struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>,signal:RefCell<Option<ProgressSignal>>,deadline_cursor:Cell<usize>}
 impl<B:RingBackend> Core<B>{
  fn notify(&self){if let Some(s)=self.signal.borrow().as_ref(){s.notify();}}
  fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();self.notify();}}
  fn close(&self){self.retire();if !self.closed.replace(true){self.backend.close();}}
+ /// Request scope-wide abort once per fixed owner. It never changes phase,
+ /// removes storage, or fabricates a terminal result. Backend callbacks obey
+ /// RingBackend's nonblocking/nonreentrant contract.
+ fn cancel_fixed(&self,index:usize,cookie:u64)->Result<bool,Error>{
+  if self.closed.get(){return Ok(false);}
+  let scope={let mut s=self.state.borrow_mut();let f=s.fixed[index].as_mut().ok_or(Error::Stale)?;
+   if f.cookie!=cookie{return Err(Error::Stale);}
+   if f.phase==FixedPhase::Prepared{return Err(Error::Busy);}
+   if f.phase!=FixedPhase::Active||f.abort_requested{return Ok(false);}
+   f.abort_requested=true;f.scope};
+  self.backend.abort_scope(scope);self.notify();Ok(true)
+ }
  fn give_back(&self,token:LeaseToken)->Result<(),(i64,LeaseToken)>{
   let mut s=self.state.borrow_mut();let p=s.pools[token.receipt().pool.slot as usize].as_mut().expect("live pool");
   let receipt=p.ledger.begin_return(&token).expect("owned exact token");let rc=self.backend.return_buffer(receipt);
@@ -83,7 +95,7 @@ impl<B:RingBackend> RingOwner<B>{
  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
   let count=backend.buffer_count();let valid=count>0&&count<=64&&(0..count).all(|i|{let n=backend.buffer_len(i);n>0&&n<=isize::MAX as usize});
   if !valid{backend.begin_retire();backend.close();return Err(Error::Geometry);}
-  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false),signal:RefCell::new(None)});
+  let core=Rc::new(Core{backend,state:RefCell::new(State{fixed:[None;64],quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false),signal:RefCell::new(None),deadline_cursor:Cell::new(0)});
   Ok((Self{core:core.clone()},RingClient{core}))
  }
  /// At most64 RETURN and64 pool-destroy attempts; no allocation on this path.
@@ -113,6 +125,22 @@ impl<B:RingBackend> RingOwner<B>{
   if f.abandoned{*slot=None;}else{f.phase=FixedPhase::Terminal(result);}drop(s);self.core.notify();Ok(())
  }
  pub(crate) fn bind_progress(&mut self,signal:ProgressSignal){let mut s=self.core.signal.borrow_mut();assert!(s.is_none(),"one retirement owner");*s=Some(signal);}
+ /// Absolute monotonic deadline of active, not-yet-cancelled local requests.
+ /// A terminal result or cancellation request removes timer interest, NOT ownership.
+ pub(crate) fn next_deadline(&self)->Option<u64>{
+  if self.core.closed.get(){return None;}
+  self.core.state.borrow().fixed.iter().flatten().filter(|f|f.phase==FixedPhase::Active&&!f.abort_requested).filter_map(|f|f.deadline).min()
+ }
+ /// Bounded rotating scan of the existing 64 fixed-owner cells, no timer allocation.
+ /// Expiry requests scope-wide abort; only terminal delivery/retirement ends access.
+ pub(crate) fn expire(&mut self,now:u64,budget:usize)->usize{
+  if self.core.closed.get(){return 0;}
+  let mut requested=0;
+  for _ in 0..budget.min(64){let i=self.core.deadline_cursor.get();self.core.deadline_cursor.set((i+1)%64);
+   let due={let s=self.core.state.borrow();s.fixed[i].filter(|f|f.phase==FixedPhase::Active&&!f.abort_requested&&f.deadline.is_some_and(|d|now>=d)).map(|f|f.cookie)};
+   if let Some(cookie)=due{if self.core.cancel_fixed(i,cookie).expect("same creator owns fixed cell"){requested+=1;}}
+  }requested
+ }
  pub(crate) fn fixed_count(&self)->usize{self.core.state.borrow().fixed.iter().flatten().count()}
  pub(crate) fn begin_retire(&mut self){self.core.retire();}
  pub(crate) fn close(&mut self){self.core.close();}
@@ -133,7 +161,7 @@ impl<B:RingBackend> RingClient<B>{
   let mut s=self.core.state.borrow_mut();
   if s.fixed[i].is_some()||s.fixed.iter().flatten().any(|f|f.cookie==cookie){return Err(Error::Busy);}
   for p in s.pools.iter().flatten(){if p.ranges.iter().any(|r|overlap(*r,range)){return Err(Error::Geometry);}}
-  s.fixed[i]=Some(FixedState{cookie,scope,range,write,phase:FixedPhase::Prepared,abandoned:false});
+  s.fixed[i]=Some(FixedState{cookie,scope,range,write,phase:FixedPhase::Prepared,abandoned:false,deadline:None,abort_requested:false});
   Ok(FixedIo{core:self.core.clone(),index:i,cookie})
  }
  fn prepare(&self,ranges:&[PoolMember])->Result<Box<PoolState>,Error>{
@@ -211,6 +239,14 @@ impl<B:RingBackend> Drop for Payload<B>{fn drop(&mut self){if let Some(token)=se
 
 impl<B:RingBackend> FixedIo<B>{
  fn snapshot(&self)->FixedState{let f=self.core.state.borrow().fixed[self.index].expect("live fixed owner");assert_eq!(f.cookie,self.cookie);f}
+ /// Configure before publication; activity cannot extend an absolute deadline.
+ /// None has no timer. This local Option is not the native deadline-zero encoding.
+ pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{
+  if self.core.closing.get(){return Err(Error::Closing);}
+  let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();assert_eq!(f.cookie,self.cookie);
+  if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.deadline=deadline;Ok(())
+ }
+ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.core.cancel_fixed(self.index,self.cookie)}
  /// Copy input before submission; never expose a mutable backing alias.
  pub(crate) fn write_from(&mut self,bytes:&[u8])->Result<(),Error>{
   let f=self.snapshot();if self.core.closing.get(){return Err(Error::Closing);}
@@ -224,7 +260,7 @@ impl<B:RingBackend> FixedIo<B>{
  pub(crate) unsafe fn publish(&mut self)->Result<(),Error>{
   if self.core.closing.get(){return Err(Error::Closing);}
   let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();
-  if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.phase=FixedPhase::Active;Ok(())
+  if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.phase=FixedPhase::Active;drop(s);self.core.notify();Ok(())
  }
  /// Only successful terminal READ bytes, bounded by the actual completion.
  pub(crate) fn bytes(&self)->Result<&[u8],Error>{let f=self.snapshot();
@@ -235,7 +271,7 @@ impl<B:RingBackend> FixedIo<B>{
 }
 impl<B:RingBackend> Drop for FixedIo<B>{fn drop(&mut self){
  let abort={let mut s=self.core.state.borrow_mut();let f=s.fixed[self.index].as_mut().unwrap();assert_eq!(f.cookie,self.cookie);
-  if f.phase==FixedPhase::Active{f.abandoned=true;Some(f.scope)}else{s.fixed[self.index]=None;None}};
+  if f.phase==FixedPhase::Active{if f.abort_requested{f.abandoned=true;None}else{f.abort_requested=true;f.abandoned=true;Some(f.scope)}}else{s.fixed[self.index]=None;None}};
  if let Some(scope)=abort{if !self.core.closed.get(){self.core.backend.abort_scope(scope);}}
  self.core.notify();
 }}

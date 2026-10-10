@@ -1,0 +1,53 @@
+
+running 10 tests
+test deadline_active_deadline_cannot_be_extended ... ok
+test deadline_closed_driver_does_not_issue_more_aborts ... ok
+test deadline_cancel_does_not_overwrite_later_success ... ok
+test deadline_expiry_has_no_internal_allocation ... FAILED
+test deadline_publication_notifies_local_progress ... FAILED
+test deadline_expiry_requests_once_without_refund ... FAILED
+test deadline_prepared_has_no_timer_or_scope_abort ... ok
+test deadline_reused_cell_does_not_inherit_old_timer ... ok
+test deadline_all64_cells_expire_in_bounded_rotating_visits ... FAILED
+test deadline_terminal_before_expiry_wins ... ok
+
+failures:
+
+---- deadline_expiry_has_no_internal_allocation stdout ----
+
+thread 'deadline_expiry_has_no_internal_allocation' (22495620) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-late-deadline/test_deadlines.rs:273:310:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- deadline_publication_notifies_local_progress stdout ----
+
+thread 'deadline_publication_notifies_local_progress' (22495623) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-late-deadline/test_deadlines.rs:276:288:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- deadline_expiry_requests_once_without_refund stdout ----
+
+thread 'deadline_expiry_requests_once_without_refund' (22495621) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-late-deadline/test_deadlines.rs:250:215:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- deadline_all64_cells_expire_in_bounded_rotating_visits stdout ----
+
+thread 'deadline_all64_cells_expire_in_bounded_rotating_visits' (22495617) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-late-deadline/test_deadlines.rs:267:46:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    deadline_all64_cells_expire_in_bounded_rotating_visits
+    deadline_expiry_has_no_internal_allocation
+    deadline_expiry_requests_once_without_refund
+    deadline_publication_notifies_local_progress
+
+test result: FAILED. 6 passed; 4 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

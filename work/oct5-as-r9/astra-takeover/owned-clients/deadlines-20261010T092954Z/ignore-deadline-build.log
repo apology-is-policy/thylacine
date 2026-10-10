@@ -1,0 +1,10 @@
+warning: unused variable: `now`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/deadlines-20261010T092954Z/mutant-ignore-deadline/ring_payload.rs:136:33
+    |
+136 |  pub(crate) fn expire(&mut self,now:u64,budget:usize)->usize{
+    |                                 ^^^ help: if this is intentional, prefix it with an underscore: `_now`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: 1 warning emitted
+

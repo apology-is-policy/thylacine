@@ -20,3 +20,5 @@ RETIREMENT-HARNESS-R1: initial Rust clean profiles passed; premature-admission m
 FUTURE-REVIEW-R1: Waker clone/drop callbacks can deliver completion; clone-before-readiness and register-before-old-drop verified, callbacks outside Hub borrow. Future/retirement composition must dispatch outside enclosing manager borrows too; next queued integration, current types cannot compose accidentally.
 
 FUTURE-RETIRE-HARNESS-R1:090001Z clean composition passes; wake-under-drop-borrow mutant aborts during destructor cleanup after exact RefCell borrow panic, so no FAILED footer is produced. Preserve raw failure and match RefCell diagnostic for the three borrow mutants before retry.
+
+DEADLINE-PULSE-TEST-R1: adding the legitimate publication pulse exposed a blind spot in local-progress093034Z: the missing-admission-signal mutant survived because tests observed admission only after publication. Clean profiles passed; full run failed as required. Added an isolated admission-before-publication case (eight total), retained failed evidence;093109Z passes all six mutants. Runtime admission signal unchanged.

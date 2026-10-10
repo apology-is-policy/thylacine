@@ -45,6 +45,9 @@ impl<B:RingBackend> FixedDriver<B>{
   if delivery.abandoned{c.book.take_terminal(delivery.cookie).expect("fixed terminal");}
   Ok(())
  }
+ /// Scheduling/cancellation bookkeeping only; no synthetic completion or refund.
+ pub(crate) fn next_deadline(&self)->Option<u64>{self.core.borrow().owner.next_deadline()}
+ pub(crate) fn expire(&mut self,now:u64,budget:usize)->usize{self.core.borrow_mut().owner.expire(now,budget)}
  pub(crate) fn bind_progress(&mut self,signal:super::ring_payload::ProgressSignal){self.core.borrow_mut().owner.bind_progress(signal);}
  pub(crate) fn close(&mut self){self.core.borrow_mut().fail();}
  pub(crate) fn begin_retire(&mut self){self.core.borrow_mut().retire();}
@@ -86,10 +89,20 @@ impl<B:RingBackend> Drop for Request<B>{fn drop(&mut self){
  self.fixed.take();
 }}
 impl<B:RingBackend> ReadRequest<B>{
+ pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{self.inner.fixed.as_mut().ok_or(Error::Consumed)?.set_deadline(deadline).map_err(Error::Storage)}
+ /// Cancellation is scope-wide, including siblings; success means requested,
+ /// never remote rollback, terminal delivery or permission to reuse storage.
+ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.inner.fixed.as_mut().ok_or(Error::Consumed)?.request_cancel().map_err(Error::Storage)}
+
  pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.inner.publish()}}
  pub(crate) fn try_complete(&mut self)->Result<Option<ReadCompletion<B>>,Error>{Ok(self.inner.take()?.map(|(completion,fixed)|ReadCompletion{fixed,completion}))}
 }
 impl<B:RingBackend> WriteRequest<B>{
+ pub(crate) fn set_deadline(&mut self,deadline:Option<u64>)->Result<(),Error>{self.inner.fixed.as_mut().ok_or(Error::Consumed)?.set_deadline(deadline).map_err(Error::Storage)}
+ /// Cancellation is scope-wide, including siblings; success means requested,
+ /// never remote rollback, terminal delivery or permission to reuse storage.
+ pub(crate) fn request_cancel(&mut self)->Result<bool,Error>{self.inner.fixed.as_mut().ok_or(Error::Consumed)?.request_cancel().map_err(Error::Storage)}
+
  pub(crate) unsafe fn publish(&mut self)->Result<u64,Error>{unsafe{self.inner.publish()}}
  pub(crate) fn try_complete(&mut self)->Result<Option<Completion>,Error>{Ok(self.inner.take()?.map(|(completion,_fixed)|completion))}
 }

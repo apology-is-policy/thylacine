@@ -242,3 +242,5 @@ fn future_client(e:&mut FutureExecutor<Backing>)->(Rc<Probe>,retirement_executor
 #[test]fn local_pulse_drop_and_bounded_progress_do_not_allocate(){
  let mut e=FutureExecutor::new(1).unwrap();let(p,a)=future_client(&mut e);let f=a.read(id(0,1),range(0)).unwrap();drop(a);e.progress_notified(1);assert!(!e.needs_progress());p.retired.set(true);LATE_ALLOCS.with(|x|x.set(0));WATCH_ALLOCS.with(|x|x.set(true));drop(f);assert!(e.needs_progress());assert_eq!(e.progress_notified(1).reclaimed,1);WATCH_ALLOCS.with(|x|x.set(false));assert_eq!(LATE_ALLOCS.with(|x|x.get()),0);
 }
+
+#[test]fn local_admission_signals_before_request_publication(){let mut e=FutureExecutor::new(1).unwrap();assert!(!e.needs_progress());let(_p,a)=future_client(&mut e);assert!(e.needs_progress());assert_eq!(e.progress_notified(1).visited,1);assert!(!e.needs_progress());drop(a);assert!(e.needs_progress());}
