@@ -1,0 +1,1 @@
+Assertion failed: (t_ring_attach(c,id(2,1),&m,1,&other)==T_LEASE_BUSY&&!other), function main, file test_ring_payload.c, line 21.

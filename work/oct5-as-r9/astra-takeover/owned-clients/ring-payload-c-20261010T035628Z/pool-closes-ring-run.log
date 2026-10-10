@@ -1,0 +1,1 @@
+Assertion failed: (p.pool_retires[1]==1&&!p.retires&&!p.closes), function main, file test_ring_payload.c, line 20.

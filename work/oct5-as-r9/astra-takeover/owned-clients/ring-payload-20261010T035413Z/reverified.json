@@ -1,0 +1,31 @@
+{
+  "owner": "astra",
+  "source_files": 5,
+  "command_records": 23,
+  "logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "52247ebd298b4cd57e807df07539f037cff6ea8e18311990ef75771470255526",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "f44a3c0f09c30181ec3f5a2512774e7b4a07399f66027a3a24b846fae3b4864b",
+    "return-borrow-build": "470c08c1d79659be8162d3e19b15ced0857273d383b97fe030b0c643f032fb62",
+    "mutate-view-build": "92d64cb81ed1187cf61d8080ceffe6cd365ce9eefe021f79a397b7b2a69610bc",
+    "moved-storage-build": "7d897999b8c4f9dac69b32aed899e223e2552398d9c05023fd43384d396369b3",
+    "legacy-reap-build": "e5b054ab5e62539833eced9622f43b14045df7bad3246a076e10d4a96d2690f5",
+    "valid-return-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "valid-return-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-run": "d58aaa87764ff7d4c6f0a5b4b8900e4935766a9c902ef12b60ea1dd6dd6e7c43",
+    "pool-closes-ring-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "pool-closes-ring-run": "c6ec0979b61cab739ff975461dac72a77ecd230efe68aa6f12db1d5ec8196826",
+    "global-cap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "global-cap-run": "37f01e671f606a1dde1065a134016955f2e85e526b98a7ea53bed32bd1815340",
+    "cross-pool-overlap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cross-pool-overlap-run": "cf4cb5609149b1db9675f865ec2d6948cdc75878fcf05121230ecffd097cee6f",
+    "failed-destroy-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-destroy-run": "5ef665bc63d5e34903667749d6d18532a4d249ffc924d2bfaee9e80a2775114f",
+    "stale-pool-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stale-pool-run": "0b1e899691af811b7c3708f849d3200f22276d1ed4d53f0a514734102fac9adb"
+  },
+  "limit": "First six-scenario source verified before adding explicit-return/final regression"
+}

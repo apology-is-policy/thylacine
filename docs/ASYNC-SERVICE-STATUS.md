@@ -3413,3 +3413,30 @@ one shared full-ring controller, global64-member/cross-pool exclusion, syscall/
 paired-CQ integration, fixed I/O ownership, futures and bounded executor retirement
 still remain. Do not give each native pool independent whole-ring close authority.
 Remaining AS3/AS4/MM0-MM4 pending; no Main, activation or128MiB protection change.
+
+
+### Astra shared full-ring payload owners, October 10
+
+Uninstalled C/Rust ring_payload cores replace independent one-pool retirement for
+intended integration. One backend retains all backing and whole-ring authority;
+pool drop closes only that pool. Other pools and live payloads keep their bytes.
+All pools share64member admission and cross-pool overlap exclusions. Failed/busy
+pool destroy retains slots/ranges/capacity; only zero permits reuse with a newer
+full incarnation. Pending/lease cells total at most64, allocated at admission;
+progress makes at most64RETURN and64destroy attempts without allocating.
+
+Rust ring-payload-20261010T035754Z passes seven scenarios at opt0/opt2, four
+compile-fail contracts plus positive control, and six runtime mutants. C
+ring-payload-c-20261010T035801Z passes seven scenarios under LLVM22 ASan+UBSan
+and optimized NDEBUG core plus six runtime mutants. Five/seven source hashes
+and23/21raw command records respectively reverified. Earlier six-case runs
+035413Z/035628Z retained and verified before adding explicit-return/EOF coverage.
+Astra10hashes and clean external61dde37 preserved; disk9131MiB, Mac released.
+
+Single-agent review records that separate pools need not mean independent scopes.
+Native adapter still must pre-reserve local metadata before kernel registration,
+retain failed commit cleanup, authenticate paired CQ/request identities, and bind
+owned mapping/storage, fixed I/O, futures and executor retirement. Current unsafe
+attach accepts only adapter-proven native pool identities; simulated backend tests
+do not qualify that missing boundary. Remaining AS3/AS4/MM0-MM4 pending; no Main,
+private activation,128MiB change or independent audit claim.

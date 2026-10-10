@@ -1,0 +1,31 @@
+{
+  "owner": "astra",
+  "source_files": 5,
+  "command_records": 23,
+  "logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "a4709fd75a55a6bef8ca1ff2a0f159b48f9ac4c63c23f77ff042d0d95a4c303c",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "3d94faf9b2f29732924a34c2991f20ce3f335db535b5dcda19724005a535de6b",
+    "return-borrow-build": "9a20ab873b7582bb0faa7abf6283074f14b65003bf5851f37bd155baaea5eee6",
+    "mutate-view-build": "317c29cc257a86b452077f394d94de54109e6b41ace9a7388c13051178743c7e",
+    "moved-storage-build": "b58fb5b0fc8adfcfeb139df8d398dce4c9ba185e596ed5b7d05d1ba502ae4c50",
+    "legacy-reap-build": "0a6652f813b998593dbee299dd55a66d9488252bebfdf8799773ac0c566c741f",
+    "valid-return-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "valid-return-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-run": "700fc247226c0c753ede2f5e4332d741fc77f34f7b75bc04a72f34663e7fff79",
+    "pool-closes-ring-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "pool-closes-ring-run": "39ba242b4c04625517db5a5e8d2df184d3720c27bcadbc233c6bec23ad89f566",
+    "global-cap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "global-cap-run": "64367859f893f91adb1d32dedd72a9a7ae790a070f4de41a9b2776737147ccc5",
+    "cross-pool-overlap-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "cross-pool-overlap-run": "debd6d038c87457c4fda6be05ee0e71fd19021316d839be27e76c4b5b1b3beae",
+    "failed-destroy-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-destroy-run": "c2396750a6ca70278acbde51de4312e5c11d2078f841891a08c517c55e834484",
+    "stale-pool-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stale-pool-run": "344f39872ac5017c15bcd751a0f27f7ffecd6d64b0e0fd468399eba5f90dc440"
+  },
+  "limits": "Uninstalled full-ring Rust owner with simulated backend; C/shared native adapter, provisional registration, CQ correlation, futures and executor integration pending"
+}

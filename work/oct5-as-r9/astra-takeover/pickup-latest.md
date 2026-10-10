@@ -12,12 +12,13 @@ external stratum-astra/v2 at61dde3727921e70e2c72fbd3c9e2044a192f4a54.
 
 ## Immediate continuation
 
-No native or host runner remains active after owned-payload runs034518Z/034735Z.
+No native or host runner remains active after full-ring runs035754Z/035801Z.
 Inspect processes and flight records anyway before launching. Current next work:
-unify full-ring ownership/global64-member cross-pool exclusion, bind native
-backing/syscalls and paired CQ correlation, then fixed I/O, futures and bounded
-executor retirement. One-pool payload lifetime cores now host-verified. Read owned-clients/implementation-notes.txt,self-review.txt and
-paired-self-review.txt and payload-self-review.txt. All remain UNINSTALLED;
+native provisional registration and owned backing/mapping/syscall adapter,
+paired CQ/request correlation, fixed I/O, futures and bounded executor retirement.
+Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
+not the earlier one-pool payload_owner.* historical components. Read owned-clients/implementation-notes.txt,self-review.txt and
+paired-self-review.txt, payload-self-review.txt and ring-self-review.txt. All remain UNINSTALLED;
 do not claim native safe clients or give each pool separate ring-close authority.
 Do not re-fix raw Rust register_buffers: it is already unsafe and documented.
 Do not expose Ring::reap/raw submit or mutable storage after owned transfer.
@@ -112,3 +113,30 @@ one shared full-ring controller, global64-member/cross-pool exclusion, syscall/
 paired-CQ integration, fixed I/O ownership, futures and bounded executor retirement
 still remain. Do not give each native pool independent whole-ring close authority.
 Remaining AS3/AS4/MM0-MM4 pending; no Main, activation or128MiB protection change.
+
+
+### Astra shared full-ring payload owners, October 10
+
+Uninstalled C/Rust ring_payload cores replace independent one-pool retirement for
+intended integration. One backend retains all backing and whole-ring authority;
+pool drop closes only that pool. Other pools and live payloads keep their bytes.
+All pools share64member admission and cross-pool overlap exclusions. Failed/busy
+pool destroy retains slots/ranges/capacity; only zero permits reuse with a newer
+full incarnation. Pending/lease cells total at most64, allocated at admission;
+progress makes at most64RETURN and64destroy attempts without allocating.
+
+Rust ring-payload-20261010T035754Z passes seven scenarios at opt0/opt2, four
+compile-fail contracts plus positive control, and six runtime mutants. C
+ring-payload-c-20261010T035801Z passes seven scenarios under LLVM22 ASan+UBSan
+and optimized NDEBUG core plus six runtime mutants. Five/seven source hashes
+and23/21raw command records respectively reverified. Earlier six-case runs
+035413Z/035628Z retained and verified before adding explicit-return/EOF coverage.
+Astra10hashes and clean external61dde37 preserved; disk9131MiB, Mac released.
+
+Single-agent review records that separate pools need not mean independent scopes.
+Native adapter still must pre-reserve local metadata before kernel registration,
+retain failed commit cleanup, authenticate paired CQ/request identities, and bind
+owned mapping/storage, fixed I/O, futures and executor retirement. Current unsafe
+attach accepts only adapter-proven native pool identities; simulated backend tests
+do not qualify that missing boundary. Remaining AS3/AS4/MM0-MM4 pending; no Main,
+private activation,128MiB change or independent audit claim.

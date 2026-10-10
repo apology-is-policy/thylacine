@@ -1,0 +1,53 @@
+Astra single-agent self-review, uninstalled full-ring C/Rust owners.
+These supersede the earlier one-pool payload_owner cores for intended integration.
+One backend owns all registered backing/mapping and whole-ring close authority.
+Pool handles mark only their own pool closing; they cannot set global admission
+closed or call whole-ring retirement. Actual scope-wide abort consequences must
+remain explicit in the native adapter: separate pools do not imply separate scopes.
+Ring client drop requests global retirement; controller drop closes exactly once.
+Outstanding payloads and pool handles retain backing until their last reference.
+
+Pool slots use complete identity and strictly increasing remembered incarnation;
+wrap/reused incarnation is refused. All live/closing pools share64member capacity
+and cross-pool extent exclusion. Geometry is checked before interval comparisons,
+and disjoint allocations by buffer index is a trusted owned-backend obligation.
+Busy/failed/positive pool destroy keeps slot, member count and overlap exclusion.
+Only exact zero destroys and refunds local admission. Kernel destroy must verify
+no remaining references. Failed RETURN remains queued/charged; pool destruction
+cannot be attempted while any ledger lease or user lease remains. Whole-ring
+retirement may end pending ownership only with zero live user leases and proven
+local writer retirement, followed by close; no fictitious RETURN success.
+
+Pending cells and C lease cells are allocated for actual admitted members; their
+ring-wide total never exceeds64. Progress performs at most64return attempts and
+64pool-destroy attempts. No allocation in drop/return/progress. Each pool ledger
+still has a fixed64member metadata array, so per-pool metadata can exceed actual
+membership; total remains bounded by64slots. Measure actual native metadata and
+account through existing allocator/payer before activation; no new memory quota.
+Rust immutable backend counts/lengths are checked once and never exposed mutably.
+RefCell state borrows contain only trusted bounded/non-reentrant backend calls.
+C moves a freshly initialized empty ledger into its pool exactly once; never
+copies a live ledger. Opaque C handles become invalid on consumption, even if an
+address is later reused. Client has one creator consumer, no cross-thread sharing.
+All C state changes happen outside assertions; NDEBUG objects tested separately.
+
+Seven host scenarios per language: dropping one pool preserves another/ring;
+overlap+global64 admission; failed destroy retains exclusion and blocks incarnation
+reuse;64failed returns across two pools; client/controller teardown with both live
+payloads; maximum incarnation refuses wrap; final/EOF and explicit negative and
+positive RETURN errors retain ownership. Rust opt0/opt2, four compile-fail checks
+plus positive control; C LLVM22 ASan+UBSan and optimized NDEBUG core. Six mutants
+per language reject early global retirement, pool->ring close, missing global
+capacity/overlap, error-as-destroy-success, and stale incarnation admission.
+First six-scenario runs are preserved/source-verified; final runs add explicit
+return/final regression for the refactored shared owner.
+
+Remaining safety boundary: attach_pool is unsafe/internal. Caller must own the
+exact already-created kernel pool and cleanup on error; native provisional
+reservation/preflight must precede kernel registration and serialize submissions.
+If kernel registration succeeds but local commit fails, retain reservation and
+backing until confirmed destroy or whole-owner close. Do not expose attach_pool
+as safe arbitrary-ID input or count these simulated backends as syscall/native
+qualification. Native owned mapping/buffer adapter, paired CQ request correlation,
+fixed-operation owners, futures/scope cancellation and executor scheduling remain.
+No independent audit, full AS3, private activation, Main or128MiB change.

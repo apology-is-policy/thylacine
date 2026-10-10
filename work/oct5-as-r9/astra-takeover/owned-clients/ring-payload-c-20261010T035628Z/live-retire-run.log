@@ -1,0 +1,1 @@
+Assertion failed: (!t_ring_progress(r)), function main, file test_ring_payload.c, line 24.

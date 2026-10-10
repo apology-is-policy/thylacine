@@ -45,3 +45,5 @@ Tests required before activation:
 - native wrappers in explicitly qualified image without default activation,
   followed by full source-matched CPU/SMP/sanitizer and AS4 clipboard/SAK arc.
 Do not count native kernel fixtures as these safe-client ownership tests.
+
+October10 current integration candidates: lease_ledger.*,paired_cq.*,ring_payload.*. Earlier payload_owner.* one-pool cores are historical foundations, superseded for actual ring ownership. Read ring-self-review.txt for native provisional registration/error-cleanup requirements before binding syscalls. No files are installed yet.
