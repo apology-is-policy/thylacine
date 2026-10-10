@@ -1,0 +1,11 @@
+{
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired_cq.rs": "b1a0b1e19d5766f90a1997dfbf17082f64909250236f48a82f937861486948aa",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired_cq.c": "4fefafba9d1ef27cb480294e894b213596b1c54333782fe2c158d4d4385f30f4",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/paired_cq.h": "f543437991f116967ec05483afebfe9a87006aa966e24d848b8821fff6c3300a",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/test_paired_cq.rs": "98163fb60420eae0e5d634094575318ea3bbe2a7a3dfc1db8ac3a75c383e9c84",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/test_paired_cq.c": "a45b013ed4ba7d0200fdec5611d3d126ef4f671590c3494e1b25d88f83ccbc20",
+  "/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/run-paired.py": "2e0424486a986cc801278219688580cfe56fb06dae4caf72795d7684e72df412",
+  "/Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs/src/loom/service_abi.rs": "fa6421ccd74893e010917dc065778176769f2bc7ee3da1b3a1450ab13bc15922",
+  "/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include/thyla/loom_service.h": "7f04aa8ba5033fa895f4dcd3fde9c8fb8e95efe77ecf5999da275db4cd0f5db0",
+  "/Users/northkillpd/projects/thylacine-corona/kernel/include/thylacine/loom.h": "17d51ac6bde86cd944ff6716ea02e9f11c5cd743272e9046b1af14ccf000fde6"
+}

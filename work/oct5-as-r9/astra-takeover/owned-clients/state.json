@@ -1,7 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-ledger-host-verified",
+  "state": "draft-ledger-and-paired-reader-host-verified",
   "next": "Implement owned backing, payload borrows, paired CQ, futures and bounded retirement. Metadata tests do not qualify safe clients.",
-  "run": "owned-clients/ledger-20261010T032905Z"
+  "run": "owned-clients/ledger-20261010T032905Z",
+  "paired_run": "owned-clients/paired-20261010T033551Z"
 }

@@ -3899,3 +3899,25 @@ These are metadata foundations only, without owned backing, payload borrows,
 paired CQ reap, futures, retirement or native safe-client qualification. Continue
 owned C/Rust lifetimes then remaining AS3/AS4/MM0-MM4. Single-agent self-review;
 no independent audit, Main landing, private activation or128MiB protection change.
+
+
+### Astra paired completion-reader foundations, October 10
+
+Uninstalled C/Rust paired readers now acquire CQ tail, copy the CQE and matching
+receipt, then release head exactly once. Geometry validates aligned disjoint
+header/CQE/receipt regions and bounded power-of-two entries; corrupt occupancy
+or a second head writer refuses without acknowledgement. Returned records own
+copies and survive slot reuse; this does not return or expose a payload.
+
+owned-clients/paired-20261010T033551Z passed Rust four scenarios at opt0/opt2,
+LLVM22 C ASan+UBSan, and100000 concurrent records per run across counter wrap.
+All six receipt-index/double-ack/overlap mutants compiled then failed assertions.
+Nine source hashes and20command/rawlogs reverified. Single-agent review records
+unsafe mapping/producer contracts and C no-alias/exclusive-reader obligations;
+concurrent stress is not a memory-model proof. Astra's10pending/protected hashes
+and exact clean external61dde37 preserved. Mac released; disk remains above8GiB.
+
+These helpers remain uninstalled and require owned mapping/backing, read-only
+PayloadLease, future cancellation and bounded failed-return/client retirement.
+No native safe-client qualification or complete AS3 claim. Continue those client
+lifetimes before remaining AS3/AS4/MM0-MM4; no Main, activation or128MiB change.
