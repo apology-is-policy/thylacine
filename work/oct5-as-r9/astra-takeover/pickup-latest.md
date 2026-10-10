@@ -12,10 +12,14 @@ external stratum-astra/v2 at61dde3727921e70e2c72fbd3c9e2044a192f4a54.
 
 ## Immediate continuation
 
-No native or host runner remains active after composed-ring063524Z.
-Inspect processes and flight records anyway before launching. Current next work:
-native owned backing/mapping/syscall adapter (registration transaction now host-tested),
-composition with paired CQ/request correlation, fixed I/O, futures and bounded executor retirement.
+No native/host job remains active. SQ reuse correction is PARKED and unapplied
+at operator request for Corona; read native-sq-reuse/PARKED.md before acting.
+Current build kernels contain that parked patch and are not current-source
+artifacts. Do not apply/revise/rerun this subchunk or bypass classifier restrictions.
+Continue independent fixed-I/O ownership, cancellation bookkeeping and bounded
+executor retirement using simulated backends. Native SQ submission/integration
+and complete async qualification remain gated on this dependency. Heartbeat
+prompt updated with this exception; its existing PAUSED status was preserved.
 Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
 not the earlier one-pool payload_owner.* historical components. Read owned-clients/implementation-notes.txt,self-review.txt and
 paired-self-review.txt, payload-self-review.txt, ring-self-review.txt, registration-self-review.txt request-self-review.txt and composed-self-review.txt. All remain UNINSTALLED;
@@ -230,3 +234,28 @@ records pointer/lifetime/cleanup review and remaining unsafe backend boundary.
 Astra10hashes and cleanexternal61dde37 preserved; Mac released. Native adapter,
 SQ publisher, composed controller/fixed-I/O/futures/executor remain before AS3,
 AS4 and MM0-MM4. No Main, private activation or128MiB protection change.
+
+
+### Operator-directed parking of SQ reuse correction, October 10
+
+SQ-REUSE-R1 found shared sq_head publication before SQ-index/SQE copying; a
+producer can reuse storage before the kernel snapshot. Proposed correction and
+regression are preserved, unapplied, in astra-takeover/native-sq-reuse/sq-reuse.patch
+with exact base, full patched source and PARKED.md. Operator reported a classifier
+block and requested parking for Corona. No rejection reason was visible to this
+turn; no bypass or assumption of future clearance is authorized. Only the four
+agent-authored kernel changes were restored after complete patch preservation.
+
+Already-launched native065006Z completed: five one-boot default1/4/8,UBSan4/8 rows,
+1862tests each, D7overlap/20logins, min9944MiB. Raw source/diff/input/kernel/log
+hashes reverified before restoring source. Host065053Z exact copy/release block
+passed sanitizer/optimized profiles; old-order mutant failed cookie assertion.
+Tests qualify only the parked patched source. Current build kernels include that
+patch and MUST NOT be treated as matching the restored checkout. No full50boot,
+complete AS3 or independent audit claim. Astra10hashes/cleanexternal61dde37 intact.
+
+Continue independent fixed-I/O ownership, cancellation bookkeeping and bounded
+executor retirement with simulated backends. Native SQ submission/integration
+and complete async qualification depend on resolving the parked item. Async-first
+then MM0-MM4 order and all activation/128MiB/Main gates remain. Heartbeat prompt
+updated with exception; its existing PAUSED status preserved.

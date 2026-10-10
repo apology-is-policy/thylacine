@@ -1,0 +1,3787 @@
+// Loom -- the KObj_Loom ring substrate (Loom-2a).
+//
+// Per kernel/include/thylacine/loom.h + docs/LOOM.md. This file owns the ring
+// memory + geometry + the registered-handle table + the kobj refcount. The
+// syscall inners that map the ring into a Proc + install the handle live in
+// kernel/syscall.c (the sys_burrow_attach_for_proc factoring); the engine
+// pluggable-completion seam + the SQE dispatch + the CQE post are Loom-2b /
+// Loom-3.
+//
+// The ring lives in one anonymous Burrow: a 64-byte loom_ring_hdr at offset 0,
+// then the SQ index ring (u32[sq_entries]), the SQE array, and the CQE array,
+// each 64-aligned, the whole page-rounded. The kernel reaches the bytes via the
+// Burrow's direct-map alias (exec.c precedent); userspace sees the same pages
+// through its mapping. The dual-refcount discipline (#847) keeps the pages
+// alive while EITHER the Loom (handle_count) OR the user mapping (mapping_count)
+// holds a reference.
+
+#include <thylacine/loom.h>
+#include <thylacine/addrspace.h>
+#include <thylacine/loom_service_pool.h>
+#include <thylacine/loom_service_slots.h>
+#include <thylacine/loom_service_pool_table.h>
+#include <thylacine/loom_service_targets.h>
+#include <thylacine/loom_service_nodes.h>
+#include <thylacine/loom_service_fids.h>
+#include <thylacine/9p_client.h>
+#include <thylacine/9p_session.h>
+#include <thylacine/9p_wire.h>     // WEFT_DIR_* (the Tweftio direction)
+#include <thylacine/burrow.h>
+#include <thylacine/dev.h>        // Dev::perm_enforced (the 8.5.1 gate)
+#include <thylacine/dev9p.h>
+#include <thylacine/errno.h>
+#include <thylacine/extinction.h>
+#include <thylacine/handle.h>
+#include <thylacine/page.h>
+#include <thylacine/perm.h>       // perm_check / perm_wstat_check (LOOM.md 8.5.1)
+#include <thylacine/poll.h>
+#include <thylacine/proc.h>       // kproc (the SQPOLL kthread parent)
+#include <thylacine/rendez.h>
+#include <thylacine/sched.h>      // ready / sched (the SQPOLL kthread lifecycle)
+#include <thylacine/spoor.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/syscall.h>    // T_WSTAT_GID (the create-gid rule)
+#include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
+#include <thylacine/types.h>
+#include <thylacine/vma.h>        // vma_lookup / VMA_PROT_* (Loom-6 registered buffers)
+#include <thylacine/weft.h>       // weft_binding / weft_binding_validate_rw (Weft-6c)
+
+#include "../mm/slub.h"
+#include "../arch/arm64/timer.h"  // timer_now_ns (the SQPOLL frame-boundary idle deadline)
+
+// =============================================================================
+// One in-flight async (Loom) op. Heap-allocated per dispatched SQE; owned by the
+// Loom (linked into l->inflight_ops). `rpc` is at OFFSET 0 so the engine's
+// completion callback recovers the container with a single cast from the
+// struct p9_rpc * it is handed (the same offset-0 idiom the seam tests use).
+//
+// Lifetime (Loom-3): the op holds an INDEPENDENT spoor_ref on `pinned` -- the
+// I-30 submit-time pin, held for the op's whole lifetime so a concurrent
+// re-register / clunk of the registered-handle slot cannot make completion act
+// against a different object (the io_uring credential-vs-work CVE class). The op
+// does NOT hold a loom ref: the loom outlives all its ops via the handle ref
+// during SYS_LOOM_ENTER + the loom_free quiesce (which abandons any still in
+// flight before freeing -- #898). `client` is borrowed (valid while `pinned` is
+// held: a live dev9p Spoor implies a live client). `terminal` is set by
+// loom_async_complete under l->lock and read by the reap sweep under l->lock.
+// =============================================================================
+struct loom_async_op {
+    struct p9_rpc          rpc;        // OFFSET 0 -- on_complete casts (loom_async_op *)rpc
+    struct Loom           *loom;       // owning ring (no ref held; see lifetime note)
+    struct p9_client      *client;     // engine this op rides (valid while `pinned` held)
+    struct Spoor          *pinned;     // the I-30 submit-time pin (independent spoor_ref)
+    p9_session_build_fn    build;       // the Tmsg builder -- re-run verbatim on re-arm (Loom-5)
+    u64                    user_data;  // echoed verbatim into the CQE
+    u32                    op_fid;      // resolved 9P fid (from `pinned`, at submit)
+    u32                    op_arg;      // opcode-specific scalar (FSYNC: datasync 0/1)
+    // Loom-6 payload ops (READ / WRITE). op_offset is the FILE offset, op_count
+    // the byte count. pinned_buf is an INDEPENDENT burrow_ref on the registered
+    // buffer's Burrow -- the I-30 buffer pin, symmetric with `pinned` for the fid:
+    // held for the op's whole lifetime so a concurrent LOOM_REGISTER_BUFFERS
+    // re-install / munmap cannot free the pages under an in-flight copy. Dropped
+    // (burrow_unref) at reap / abandon, never re-resolved. buf_kva points at the
+    // pinned slice in the Burrow's stable, contiguous direct map; the build thunk
+    // (WRITE) reads it, loom_async_complete (READ) writes it -- both under a lock,
+    // both pinned kernel memory (no fault, no sleep). NULL for scalar ops.
+    u64                    op_offset;   // READ/WRITE: file offset
+    u32                    op_count;    // READ/WRITE: requested byte count
+    struct Burrow         *pinned_buf;  // READ/WRITE: the I-30 buffer pin (burrow_ref)
+    u8                    *buf_kva;     // READ/WRITE: the pinned buffer slice base
+    // Loom-6b-2 metadata-MUTATION ops. The pinned buffer region (buf_kva,
+    // op_count bytes) holds the name(s) the build thunk reads (the WRITE-payload
+    // discipline) or the input struct p9_setattr. `sqe` is the TOCTOU-safe SQE
+    // snapshot the mutation build thunks decode their op-specific scalars + name
+    // sub-lengths from (they carry more fields than op_offset/op_count hold). The
+    // two-fid ops (RENAMEAT / LINK) additionally pin a SECOND registered fid:
+    // `pinned2` is its independent I-30 spoor_ref (NULL for single-fid ops),
+    // `op_fid2` its resolved 9P fid. Both fids are in the SAME p9_client (checked
+    // at submit -- a 9P renameat/link is within one session). `pinned2` is
+    // released symmetric with `pinned` at reap / abandon / loom_free.
+    struct Spoor          *pinned2;     // RENAMEAT/LINK: second I-30 pin (NULL otherwise)
+    u32                    op_fid2;      // RENAMEAT/LINK: resolved second fid
+    struct loom_sqe        sqe;          // TOCTOU snapshot (mutation build-thunk decode)
+    // Multishot (Loom-5; specs/loom_multishot.tla). A multishot op re-arms after
+    // each NON-terminal reply: loom_async_complete posts a LOOM_CQE_MORE CQE +
+    // sets `rearm`; the drive loop (loom_rearm_pending, OUTSIDE c->lock) re-issues
+    // `build` on the SAME pinned (client, fid) -- the pin is reused, NEVER
+    // re-resolved (ObjPinnedAcrossShots). `shot_limit` is the SYNTHETIC terminal
+    // bound for the FSYNC vehicle (total CQEs in the stream; Loom-6's real
+    // event-fd READ terminates on the source's EOF/error instead). `shots` counts
+    // the MORE CQEs posted so far (< shot_limit). `multishot == false` is the
+    // Loom-3 single-shot op (its lone CQE is its terminal).
+    u32                    shot_limit;  // multishot: total CQEs before the terminal (>= 1)
+    u32                    shots;       // multishot: MORE CQEs posted so far
+    bool                   multishot;   // re-arms after each non-terminal reply
+    bool                   rearm;       // a MORE shot posted; the drive loop must re-issue
+    u8                     opcode;      // LOOM_OP_*
+    // Weft-6c (NET-THROUGHPUT 6; I-37): set when this READ/WRITE was routed to the
+    // zero-copy weft fast-path -- a /net data fid whose registered buffer IS the
+    // flow's whole shared ring. A weft op issues a Tweftio (off/len/dir descriptor)
+    // via loom_build_weftio instead of a byte-copying Tread/Twrite, and its
+    // completion copies NOTHING (the bytes moved through the shared ring in place,
+    // netd side) -- loom_payload_result returns the Rweftio count with no bufcopy.
+    // A weft WRITE is a zero-copy SEND: at v1.0 netd's h_weftio copies the ring into
+    // its socket buffer, so the slice is reusable the instant Rweftio returns -- the
+    // single terminal CQE (no LOOM_CQE_MORE) is the reusability signal. The deferred
+    // F_NOTIF two-CQE (a later LOOM_CQE_F_NOTIF on the last {netd,NIC,ACK} holder
+    // release) is the v1.x true-zero-copy seam: it needs a netd-holds-the-page TX
+    // path + a netd->kernel holder-clear channel, neither of which exists at v1.0.
+    bool                   weft;
+    bool                   terminal;    // CQE posted (set under l->lock by completion)
+    // Loom-5b: when this async op backs a LINK/DRAIN chain entry, `chain` points
+    // at it (NULL for a fast-path op). On the op's TERMINAL, loom_async_complete
+    // records the result into chain->state (DONE_OK / DONE_FAIL) so the admission
+    // pass can admit / cancel the chain successors. Set at dispatch, BEFORE
+    // p9_client_submit_async, so a synchronous failure's completion sees it. A
+    // chain op is never multishot (the combo is rejected), so its terminal is its
+    // lone completion.
+    struct loom_chain_op  *chain;
+    struct loom_async_op  *next;        // l->inflight_ops chain (under l->lock)
+    // LOOM.md 8.5.1: a child-mutation op's name bytes, copied out of the
+    // registered buffer and validated at submit. Its build thunk sends THIS
+    // copy, never the shared buffer, so the name on the wire is the one checked
+    // (the sync twins' sys_copy_component). Allocated only for those six ops.
+    u8                     names[];
+};
+
+_Static_assert(__builtin_offsetof(struct loom_async_op, rpc) == 0,
+               "p9_rpc must be at offset 0 -- loom_async_complete recovers the "
+               "container by casting the struct p9_rpc * the engine hands it");
+
+// =============================================================================
+// One LINK/DRAIN chain entry (Loom-5b; specs/loom_order.tla). Heap-allocated per
+// ordering-relevant SQE; owned by the Loom (linked into l->chain). Layered ON TOP
+// of the audited loom_async_op lifecycle -- NOT unified with it: an ordering-
+// relevant op is HELD here until its admission gates open, THEN dispatched via
+// loom_submit_one (which, for an async op, creates a loom_async_op carrying a
+// back-pointer to this entry). The chain encodes the per-op `link`/`drain` flags
+// + the submission-order successor; loom_admit_chain walks it head->tail.
+//
+// State machine (loom_order.tla phase/result): HELD (submitted, gates not yet
+// open) -> INFLIGHT (dispatched; an async reply or an inline completion pending)
+// -> DONE_OK / DONE_FAIL (completed; its own CQE posted) | CANCELLED (a linked
+// predecessor failed; one -ECANCELED CQE posted, never ran). INFLIGHT is also the
+// transient claim a dispatch sets under l->lock so a concurrent admit never
+// double-dispatches; loom_submit_one immediately overwrites it with the real
+// terminal (inline) or leaves it (async, until the reply).
+// =============================================================================
+enum loom_chain_state {
+    LOOM_CHAIN_HELD = 0,    // submitted; ordering gates not yet open
+    LOOM_CHAIN_INFLIGHT,    // dispatched (async reply pending) / the dispatch claim
+    LOOM_CHAIN_DONE_OK,     // completed ok; its CQE posted
+    LOOM_CHAIN_DONE_FAIL,   // completed with -errno; its CQE posted
+    LOOM_CHAIN_CANCELLED,   // a linked predecessor failed; one -ECANCELED CQE posted
+};
+
+struct loom_chain_op {
+    struct loom_sqe        sqe;         // the kernel SQE copy (TOCTOU-safe; dispatched at admit)
+    bool                   link;        // LOOM_SQE_LINK: this op links to its successor
+    bool                   drain;       // LOOM_SQE_DRAIN: this op is a barrier
+    enum loom_chain_state  state;       // under l->lock
+    struct loom_chain_op  *chain_next;  // l->chain successor (submission order; under l->lock)
+};
+
+_Static_assert(LOOM_MAGIC == 0x4C4F4F4D52494E47ULL, "loom magic drift");
+_Static_assert((LOOM_MAX_ENTRIES & (LOOM_MAX_ENTRIES - 1u)) == 0,
+               "LOOM_MAX_ENTRIES must be a power of two");
+
+// Cumulative diagnostics (tests assert on the deltas). Atomic so the SMP
+// matrix's concurrent create/destroy don't tear the counts.
+static u64 g_loom_created;
+static u64 g_loom_destroyed;
+
+u64 loom_total_created(void)   { return __atomic_load_n(&g_loom_created, __ATOMIC_RELAXED); }
+u64 loom_total_destroyed(void) { return __atomic_load_n(&g_loom_destroyed, __ATOMIC_RELAXED); }
+
+static u32 align_up_u32(u32 x, u32 a) { return (x + (a - 1u)) & ~(a - 1u); }
+
+static bool is_pow2_u32(u32 x) { return x != 0u && (x & (x - 1u)) == 0u; }
+
+// The ring geometry, computed without allocating anything. A private owner must
+// know ring_size to reserve its storage charge BEFORE it commits to building a
+// ring, so the measurement is separated from the construction rather than
+// duplicated at the second caller.
+struct loom_layout {
+    u32 hdr_off;
+    u32 sq_array_off;
+    u32 sq_array_size;
+    u32 sqe_off;
+    u32 sqe_size;
+    u32 cqe_off;
+    u32 cqe_size;
+    u32 receipt_off;
+    u32 receipt_size;
+    u32 ring_size;
+};
+
+static bool loom_measure(u32 sq_entries, u32 cq_entries, bool receipts,
+                         struct loom_layout *g) {
+    if (!is_pow2_u32(sq_entries) || sq_entries > LOOM_MAX_ENTRIES)  return false;
+    if (!is_pow2_u32(cq_entries))                                   return false;
+    if (cq_entries < sq_entries || cq_entries > 2u * LOOM_MAX_ENTRIES) return false;
+
+    // Geometry. Each region 64-aligned (cache line); the whole ring
+    // page-rounded. All sizes are bounded (sq/cq <= 2*LOOM_MAX_ENTRIES, each
+    // entry <= 64 B) so the u32 arithmetic cannot overflow: the largest ring is
+    // ~ 16 KiB (sq index) + 256 KiB (sqes) + 256 KiB (cqes) < 1 MiB.
+    u32 hdr_off       = 0;
+    u32 sq_array_off  = align_up_u32(hdr_off + (u32)sizeof(struct loom_ring_hdr), 64u);
+    u32 sq_array_size = sq_entries * (u32)sizeof(u32);
+    u32 sqe_off       = align_up_u32(sq_array_off + sq_array_size, 64u);
+    u32 sqe_size      = sq_entries * (u32)sizeof(struct loom_sqe);
+    u32 cqe_off       = align_up_u32(sqe_off + sqe_size, 64u);
+    u32 cqe_size      = cq_entries * (u32)sizeof(struct loom_cqe);
+    u32 receipt_off  = receipts ? align_up_u32(cqe_off + cqe_size, 64u) : 0;
+    u32 receipt_size = receipts ? cq_entries * (u32)sizeof(struct loom_service_buffer_receipt) : 0;
+    u32 ring_end     = receipts ? receipt_off + receipt_size : cqe_off + cqe_size;
+    u32 ring_size     = (ring_end + (PAGE_SIZE - 1u)) & ~((u32)PAGE_SIZE - 1u);
+
+    g->hdr_off       = hdr_off;
+    g->sq_array_off  = sq_array_off;
+    g->sq_array_size = sq_array_size;
+    g->sqe_off       = sqe_off;
+    g->sqe_size      = sqe_size;
+    g->cqe_off       = cqe_off;
+    g->cqe_size      = cqe_size;
+    g->receipt_off   = receipt_off;
+    g->receipt_size  = receipt_size;
+    g->ring_size     = ring_size;
+    return true;
+}
+
+#ifdef KERNEL_TESTS
+// Keyed to the arming thread, so a Loom created on any other thread never meets
+// the fault, and a NULL current (before thread_init) never matches a disarmed
+// slot. Taken only after the metadata allocation succeeded.
+static struct Thread *g_loom_ring_fault_thread;
+
+void loom_layout_ring_fault_arm_for_test(void) {
+    struct Thread *me = current_thread();
+    if (!me) extinction("loom_layout_ring_fault_arm_for_test without a thread");
+    __atomic_store_n(&g_loom_ring_fault_thread, me, __ATOMIC_RELAXED);
+}
+
+void loom_layout_ring_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_ring_fault_thread, NULL, __ATOMIC_RELAXED);
+}
+
+bool loom_layout_ring_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_ring_fault_thread, __ATOMIC_RELAXED) != NULL;
+}
+
+static bool loom_layout_ring_fault_take(const struct Loom *l) {
+    struct Thread *me = current_thread();
+    if (!me) return false;
+    if (!__atomic_compare_exchange_n(&g_loom_ring_fault_thread, &me, NULL, false,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return false;
+    kfree_large_watch_arm_for_test(l);
+    return true;
+}
+#else
+static inline bool loom_layout_ring_fault_take(const struct Loom *l) {
+    (void)l;
+    return false;
+}
+#endif
+
+static struct Loom *loom_create_layout(u32 sq_entries, u32 cq_entries, bool exempt,
+                                        bool receipts) {
+    struct loom_layout g;
+    if (!loom_measure(sq_entries, cq_entries, receipts, &g)) return NULL;
+
+    struct Loom *l = kmalloc(sizeof(struct Loom), KP_ZERO);
+    if (!l) return NULL;
+    struct Burrow *r = loom_layout_ring_fault_take(l)
+                           ? NULL : burrow_create_anon((size_t)g.ring_size, exempt);
+    if (!r) { kfree(l); return NULL; }
+
+    l->magic    = LOOM_MAGIC;
+    l->refcount = 1;
+    spin_lock_init(&l->lock);
+    poll_waiter_list_init(&l->cq_waiters);   // Loom-4 CQ wait-list (its own lock)
+    rendez_init(&l->sqpoll_park);            // Loom-4c SQPOLL park (no kthread until loom_start_sqpoll)
+    rendez_init(&l->sqpoll_join);            // the join Rendez loom_free blocks on
+    l->ring     = r;
+    // The ring Burrow is anonymous + physically contiguous (alloc_pages chunk);
+    // its direct-map base is stable for the Burrow's lifetime (the Loom holds a
+    // handle_count ref so the pages are never freed under us). exec.c sets the
+    // precedent for kernel writes through a Burrow's direct-map alias.
+    l->ring_kva = (u8 *)pa_to_kva(page_to_pa(r->pages));
+    l->sq_entries    = sq_entries;
+    l->cq_entries    = cq_entries;
+    l->hdr_off       = g.hdr_off;
+    l->sq_array_off  = g.sq_array_off;
+    l->sqe_off       = g.sqe_off;
+    l->cqe_off       = g.cqe_off;
+    l->sq_array_size = g.sq_array_size;
+    l->sqe_size      = g.sqe_size;
+    l->cqe_size      = g.cqe_size;
+    l->ring_size     = g.ring_size;
+    l->receipt_off   = g.receipt_off;
+    l->receipt_size  = g.receipt_size;
+    l->cq_tail       = 0;   // kernel-private authoritative CQ tail (the shared mirror starts 0 too)
+
+    // Stamp the immutable geometry into the shared ring header. The Burrow pages
+    // are KP_ZERO, so the head/tail/flags/diagnostics start at 0; only the masks
+    // + entry counts are written here. A dsb ish publishes the stores to the
+    // inner-shareable domain so a secondary CPU that maps + reads the ring sees
+    // them (burrow_create_anon already dsb'd its own zeroing).
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + g.hdr_off);
+    h->sq_mask    = sq_entries - 1u;
+    h->sq_entries = sq_entries;
+    h->cq_mask    = cq_entries - 1u;
+    h->cq_entries = cq_entries;
+    __asm__ __volatile__("dsb ish" ::: "memory");
+
+    __atomic_fetch_add(&g_loom_created, 1, __ATOMIC_RELAXED);
+    return l;
+}
+
+struct Loom *loom_create(u32 sq_entries, u32 cq_entries, bool exempt) {
+    return loom_create_layout(sq_entries, cq_entries, exempt, false);
+}
+
+struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exempt) {
+    return loom_create_layout(sq_entries, cq_entries, exempt, true);
+}
+
+// The intrusive queue is bounded by already charged rings. Its lock never
+// encloses ring cleanup; an idle owner parks indefinitely rather than polling.
+static spin_lock_t service_retire_lock;
+static struct Rendez service_retire_wait;
+static struct Loom *service_retire_head;
+static struct Loom **service_retire_tail;
+static bool service_retire_ready;
+static struct loom_close_queue service_close_queue;
+static u64 service_retired_count;
+
+void loom_retire_init(void) {
+    spin_lock_init(&service_retire_lock);
+    rendez_init(&service_retire_wait);
+    service_retire_tail = &service_retire_head;
+    loom_closeq_init(&service_close_queue);
+    service_retire_ready = true;
+}
+
+bool loom_is_private(const struct Loom *l) { return l && l->service_as != NULL; }
+
+u64 loom_private_retired(void) {
+    return __atomic_load_n(&service_retired_count, __ATOMIC_ACQUIRE);
+}
+
+#ifdef KERNEL_TESTS
+static bool g_loom_private_layout_fault;
+static bool g_loom_private_slots_fault;
+static bool g_loom_private_pools_fault;
+static bool g_loom_private_targets_fault;
+static bool g_loom_private_nodes_fault;
+
+void loom_private_pools_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_pools_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_pools_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_pools_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_pools_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_pools_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_pools_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_targets_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_targets_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_targets_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_targets_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_targets_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_targets_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_targets_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_nodes_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_nodes_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_nodes_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_nodes_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_nodes_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_nodes_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_nodes_fault, false, __ATOMIC_RELAXED);
+}
+
+static bool g_loom_private_engine_fault;
+void loom_private_engine_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_engine_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_engine_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_engine_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_engine_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_engine_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_engine_fault, false, __ATOMIC_RELAXED);
+}
+
+static bool g_loom_private_requests_fault;
+void loom_private_requests_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_requests_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_requests_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_requests_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_requests_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_requests_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_requests_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_requests_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_slots_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_slots_fault, true, __ATOMIC_RELAXED);
+}
+void loom_private_slots_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_slots_fault, false, __ATOMIC_RELAXED);
+}
+bool loom_private_slots_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_slots_fault, __ATOMIC_RELAXED);
+}
+static bool loom_private_slots_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_slots_fault, false, __ATOMIC_RELAXED);
+}
+
+void loom_private_layout_fault_arm_for_test(void) {
+    __atomic_store_n(&g_loom_private_layout_fault, true, __ATOMIC_RELAXED);
+}
+
+void loom_private_layout_fault_disarm_for_test(void) {
+    __atomic_store_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+}
+
+bool loom_private_layout_fault_armed_for_test(void) {
+    return __atomic_load_n(&g_loom_private_layout_fault, __ATOMIC_RELAXED);
+}
+
+static bool loom_private_layout_fault_take(void) {
+    return __atomic_exchange_n(&g_loom_private_layout_fault, false, __ATOMIC_RELAXED);
+}
+#else
+static inline bool loom_private_engine_fault_take(void) { return false; }
+static inline bool loom_private_layout_fault_take(void) { return false; }
+static inline bool loom_private_slots_fault_take(void) { return false; }
+static inline bool loom_private_pools_fault_take(void) { return false; }
+static inline bool loom_private_targets_fault_take(void) { return false; }
+static inline bool loom_private_nodes_fault_take(void) { return false; }
+#endif
+
+struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
+    // Taken before any refusal, so a shot armed for this call cannot outlive it.
+    bool layout_fault = loom_private_layout_fault_take();
+    bool slots_fault = loom_private_slots_fault_take();
+    bool pools_fault = loom_private_pools_fault_take();
+    bool targets_fault = loom_private_targets_fault_take();
+    bool nodes_fault = loom_private_nodes_fault_take();
+    bool requests_fault = loom_private_requests_fault_take();
+    bool engine_fault = loom_private_engine_fault_take();
+    struct loom_layout g;
+    if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
+        !loom_measure(sq, cq, receipts, &g)) return NULL;
+    struct AddrSpace *as = p->as;
+    if (!addrspace_private_begin(as)) return NULL;
+    // Loom uses the buddy path of kmalloc; a conservative whole page also
+    // attributes its ring's slab descriptor for as long as ring mappings live.
+    _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
+    _Static_assert(sizeof(struct Burrow) <= PAGE_SIZE, "descriptor page attribution bounds object");
+    // Reserve an entire buddy page for the 1552-byte identity ledger. Charging
+    // that physical page avoids pretending shared slab occupancy is exact.
+    // No allocator work under as->lock; unwind frees storage BEFORE its refund.
+    _Static_assert(sizeof(struct loom_slot_table) <= PAGE_SIZE, "slot ledger page");
+    _Static_assert(PAGE_SIZE > SLUB_MAX_OBJECT_SIZE, "slot page uses buddy kmalloc");
+    _Static_assert(sizeof(struct loom_service_pool_table) > SLUB_MAX_OBJECT_SIZE,
+                   "pool table uses buddy kmalloc");
+    _Static_assert(sizeof(struct loom_service_target_table) == PAGE_SIZE, "target table page");
+    _Static_assert(sizeof(struct loom_service_node_table) <= PAGE_SIZE, "node ledger page");
+    // Geometry already bounds cq to 8192. Allocate at least a buddy page even
+    // for tiny rings: the charge follows real physical allocation, not a slab.
+    _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
+    size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
+    if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
+    u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
+        + (u32)burrow_backing_pages(sizeof(struct loom_service_target_table))
+        + 1u + (u32)burrow_backing_pages(request_bytes) + 1u;
+    u32 backing = (u32)burrow_backing_pages(g.ring_size) + 1u;
+    bool exempt = proc_resource_exempt(p);
+    spin_lock(&as->lock);
+    bool charged = addrspace_charge_pages(as, metadata + backing, exempt);
+    spin_unlock(&as->lock);
+    if (!charged) { addrspace_private_end(as); return NULL; }
+    struct loom_slot_table *slots = slots_fault ? NULL : kmalloc(PAGE_SIZE, KP_ZERO);
+    struct loom_service_pool_table *pools = (!slots || pools_fault) ? NULL :
+        kmalloc(sizeof(struct loom_service_pool_table), KP_ZERO);
+    struct loom_service_target_table *targets = (!pools || targets_fault) ? NULL :
+        kmalloc(sizeof(struct loom_service_target_table), KP_ZERO);
+    struct loom_service_node_table *nodes = (!targets || nodes_fault) ? NULL :
+        kmalloc(PAGE_SIZE, KP_ZERO);
+    struct loom_service_request *requests = (!nodes || requests_fault) ? NULL :
+        kmalloc(request_bytes, KP_ZERO);
+    struct loom_service_engine *engine = (!requests || engine_fault) ? NULL :
+        kmalloc(PAGE_SIZE, KP_ZERO);
+    struct Loom *l = (!slots || !pools || !targets || !nodes || !requests || !engine || layout_fault) ? NULL :
+        loom_create_layout(sq, cq, exempt, receipts);
+    if (!l) {
+        kfree(engine);
+        kfree(requests);
+        kfree(nodes);
+        kfree(targets);
+        kfree(pools);
+        kfree(slots);
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, metadata + backing);
+        spin_unlock(&as->lock);
+        addrspace_private_end(as);
+        return NULL;
+    }
+    l->service_engine = engine;
+    l->service_slots = slots;
+    l->service_pools = pools;
+    l->service_targets = targets;
+    l->service_nodes = nodes;
+    l->service_requests = (struct loom_request_table){ .records=requests, .capacity=cq };
+    l->service_as = as;
+    l->service_creator = p->stripes;
+    l->service_metadata_pages = metadata;
+    // The charge follows the ring Burrow, including when a mapping survives fd
+    // retirement. No raw Proc pointer is consulted by the eventual refund.
+    burrow_charge_record(l->ring, p, backing);
+    return l;
+}
+
+void loom_exec_latch(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    spin_lock(&l->lock);
+    l->service_closing = true;
+    // Leaf-only exec latch: publish predicate change without entering scheduler.
+    if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+        extinction("private executor change counter exhausted");
+    loom_slots_close(l->service_slots);
+    spin_unlock(&l->lock);
+}
+
+static void loom_private_close_notify(struct Loom *l) {
+    loom_exec_latch(l);
+    poll_waiter_list_wake(&l->cq_waiters);
+    wakeup(&l->sqpoll_park);
+}
+void loom_private_close_changed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    // Every external driver/constructor/pin return reaches this wake. The wait
+    // predicate reads only this atomic counter and poll flags, never takes Ll.
+    if (__atomic_fetch_add(&l->service_engine->change,1,__ATOMIC_RELEASE)==UINT64_MAX)
+        extinction("private executor change counter exhausted");
+    wakeup(&l->sqpoll_park);
+    spin_lock(&service_retire_lock);
+    bool wake=loom_closeq_kick(&service_close_queue,&l->service_close_work);
+    spin_unlock(&service_retire_lock);
+    if (wake) wakeup(&service_retire_wait);
+}
+void loom_handle_closed(struct Loom *l) {
+    if (!loom_is_private(l)) return;
+    // Actual handle close retains l, outside process/handle-table locks. Exec's
+    // earlier leaf latch deliberately does not enter this scheduler path.
+    loom_private_close_notify(l);
+    spin_lock(&service_retire_lock);
+    bool started=loom_closeq_start(&service_close_queue,&l->service_close_work);
+    if (started) loom_ref(l); // caller still holds a live ref; never resurrection
+    spin_unlock(&service_retire_lock);
+    if (started) wakeup(&service_retire_wait);
+}
+
+static void loom_private_enqueue(struct Loom *l) {
+    // refcount is already zero. Do not call the root-taking handle-close path.
+    loom_private_close_notify(l);
+    spin_lock(&service_retire_lock);
+    l->service_retire_next = NULL;
+    *service_retire_tail = l;
+    service_retire_tail = &l->service_retire_next;
+    spin_unlock(&service_retire_lock);
+    wakeup(&service_retire_wait);
+}
+
+static int loom_private_pending(void *unused) {
+    (void)unused;
+    spin_lock(&service_retire_lock);
+    int pending = service_retire_head != NULL || service_close_queue.head != NULL;
+    spin_unlock(&service_retire_lock);
+    return pending;
+}
+
+// A private ring retains this exact image until AFTER all table pins settle.
+// Never rediscover a Proc or follow a post-exec p->as when retiring a buffer.
+static void loom_private_drop_buffer(struct AddrSpace *as, struct Burrow *b) {
+    if (!b) return;
+    u32 refund = 0;
+    (void)burrow_unref_settled_in(b, as, &refund);
+    if (refund) {
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, refund);
+        spin_unlock(&as->lock);
+    }
+}
+
+// Zero Loom references prove that no target borrower or registration transaction
+// remains. TARGET owns only a native registry ref: clearing it performs no peer
+// I/O. Other record kinds still require their engine-specific retirement first.
+// The retire worker owns the ring exclusively here; no Loom lock encloses drops.
+static void loom_private_targets_destroy(struct Loom *l) {
+    if (!l->service_targets || !l->service_slots)
+        extinction("private Loom lost target storage");
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+        struct loom_service_slot *s = &l->service_slots->slots[i];
+        struct SrvServiceTarget *t = &l->service_targets->targets[i];
+        if (s->phase != LSLOT_FREE && s->kind == LOOM_SERVICE_TARGET) {
+            if (s->pins || !t->view ||
+                (s->phase != LSLOT_PROVISIONAL && s->phase != LSLOT_LIVE))
+                extinction("private Loom retained invalid target");
+            devsrv_service_target_clear(t);
+            *s = (struct loom_service_slot){0};
+        } else if (t->view) {
+            extinction("private Loom retained unowned target");
+        }
+    }
+}
+
+// Last-owner retirement may discard only unused reservations, never protocol
+// state. The retiring worker has exclusive ownership (zero Loom references).
+// Reap children first: their parent pins must drain before an unused scope can
+// retire. READY and later states must already have been retired by the engine;
+// this bounded local cleanup performs no peer I/O or waiting.
+static void loom_private_nodes_destroy(struct Loom *l) {
+    if (!l->service_nodes || !l->service_slots)
+        extinction("private Loom lost node storage");
+    const u32 kinds[2] = { LOOM_SERVICE_FID, LOOM_SERVICE_SCOPE };
+    for (u32 pass = 0; pass < 2; ++pass) {
+        for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i) {
+            struct loom_service_slot *s = &l->service_slots->slots[i];
+            if (s->phase == LSLOT_FREE || s->kind != kinds[pass]) continue;
+            struct loom_service_ref ref = { .slot = i, .incarnation = s->incarnation };
+            struct loom_service_node *n=&l->service_nodes->nodes[i];
+            if (kinds[pass]==LOOM_SERVICE_FID && s->phase!=LSLOT_PROVISIONAL &&
+                n->state!=LOOM_SERVICE_RESERVED) {
+                // The engine has actually aborted the parent client before
+                // zero-reference destruction. No physical operation can still
+                // own a ring reference here. Refuse any leaked claim/borrow.
+                if (loom_fid_retire_aborted(l->service_slots,l->service_nodes,ref) ||
+                    loom_fid_reap(l->service_slots,l->service_nodes,ref))
+                    extinction("private Loom retained live derived fid");
+                continue;
+            }
+            if (kinds[pass]==LOOM_SERVICE_SCOPE && n->state==LOOM_SERVICE_RETIRED) {
+                // Protocol/index/request cleanup precedes final zero-ref free.
+                // Unused children were removed above; no caller can still own
+                // a provisional child here. READY/ABORTING never use this path.
+                if (s->phase!=LSLOT_LIVE || s->pins || n->parent.slot ||
+                    n->parent.reserved || n->parent.incarnation || n->reserved ||
+                    n->fid_claim || n->fid_borrows)
+                    extinction("private Loom retained pinned retired scope");
+                *n=(struct loom_service_node){0};
+                if (loom_slot_retire(l->service_slots,ref) || loom_slot_reap(l->service_slots,ref))
+                    extinction("private Loom lost retired scope metadata");
+                continue;
+            }
+            int rc = s->phase == LSLOT_PROVISIONAL ?
+                loom_service_node_rollback(l->service_slots, l->service_nodes, ref) :
+                loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+            if (rc) extinction("private Loom retained active or invalid node");
+        }
+    }
+    if (!loom_service_nodes_empty(l->service_nodes))
+        extinction("private Loom retained unowned node");
+}
+
+static void loom_private_requests_destroy(struct Loom *l) {
+    // Exclusive zero-reference owner. An unused pre-admission reservation has
+    // no external effects and can unwind locally. Admitted requests require the
+    // engine's terminal/local-retirement cleanup before it drops its last ref.
+    struct loom_request_table *t = &l->service_requests;
+    if (!t->records || t->capacity != l->cq_entries)
+        extinction("private Loom lost request storage");
+    for (u32 i=0;i<t->capacity;++i) {
+        struct loom_service_request *r = &t->records[i];
+        if (r->phase == LREQ_FREE) continue;
+        struct loom_request_ref ref = { .index=i, .identity=r->identity };
+        if (loom_request_rollback(t,l->service_slots,ref))
+            extinction("private Loom retained admitted request");
+    }
+    if (!loom_requests_empty(t)) extinction("private Loom retained request payload");
+}
+
+static int loom_private_executor_exited(void *arg) {
+    return __atomic_load_n(&((struct Loom *)arg)->sqpoll_exited,__ATOMIC_ACQUIRE);
+}
+static void loom_private_executor_join(struct Loom *l) {
+    // Only the zero-reference retirer calls this. A protocol's final unref may
+    // originate in the executor itself; that enqueues here, never self-joins.
+    // Keep all ring/index/native storage alive until its actual thread exits.
+    if (l->sqpoll) {
+        __atomic_store_n(&l->sqpoll_stopping,true,__ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+        while (!__atomic_load_n(&l->sqpoll_exited,__ATOMIC_ACQUIRE))
+            (void)sleep(&l->sqpoll_join,loom_private_executor_exited,l);
+        thread_free(l->sqpoll);
+        l->sqpoll=NULL;
+    }
+    proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
+}
+
+// Final zero-reference worker only: no constructor, request, parser or consumer
+// can own this ring. Leases may survive scope retirement, but not exclusive
+// whole-ring destruction. Their backing allocations still have independent refs.
+static int loom_private_pools_destroy(struct Loom *l) {
+    if(!l || !l->service_pools || !l->service_slots || !l->service_engine ||
+       __atomic_load_n(&l->refcount,__ATOMIC_ACQUIRE) || !l->service_closing ||
+       !l->service_slots->closing || !loom_engine_empty(l->service_engine) ||
+       !loom_requests_empty(&l->service_requests) || l->service_fixed ||
+       l->service_fixed_count || l->service_fixed_settling)return -T_E_BUSY;
+    struct loom_service_pool_table *t=l->service_pools;
+    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];u32 count=0;
+    // Validate all records before changing any; no partially reclaimed bank.
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_pool *p=&t->pools[i];struct loom_service_slot *s=&l->service_slots->slots[i];
+        if(p->phase==LPOOL_EMPTY) {
+            if(s->phase!=LSLOT_FREE && s->kind==LOOM_SERVICE_POOL)return -T_E_INVAL;
+            continue;
+        }
+        if(p->streams || s->pins)return -T_E_BUSY;
+        if(p->ref.slot!=i || p->ref.reserved || !p->ref.incarnation ||
+           s->kind!=LOOM_SERVICE_POOL || s->incarnation!=p->ref.incarnation ||
+           !p->count || p->count>LOOM_SERVICE_POOL_MEMBERS ||
+           !((p->phase==LPOOL_RESERVED && s->phase==LSLOT_PROVISIONAL) ||
+             (p->phase==LPOOL_LIVE && s->phase==LSLOT_LIVE)))return -T_E_INVAL;
+        u32 found=0;u64 ordinals=0;
+        for(u32 j=0;j<LOOM_SERVICE_POOL_MEMBERS;++j) {
+            struct loom_pool_cell *c=&t->bank.cells[j];
+            if(c->phase==LMEMBER_FREE || c->pool.slot!=i)continue;
+            if(c->pool.reserved || c->pool.incarnation!=p->ref.incarnation ||
+               c->ordinal>=p->count || (ordinals&(1ull<<c->ordinal)) || !c->extent.backing)
+                return -T_E_INVAL;
+            if(c->phase!=LMEMBER_AVAILABLE && c->phase!=LMEMBER_LEASED)return -T_E_BUSY;
+            if(p->phase==LPOOL_RESERVED && c->phase!=LMEMBER_AVAILABLE)return -T_E_INVAL;
+            ordinals|=1ull<<c->ordinal;++found;
+        }
+        if(found!=p->count)return -T_E_INVAL;
+    }
+    for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i) {
+        struct loom_pool_cell *c=&t->bank.cells[i];if(c->phase==LMEMBER_FREE)continue;
+        if(c->pool.slot>=LOOM_SERVICE_SLOT_COUNT ||
+           t->pools[c->pool.slot].phase==LPOOL_EMPTY)return -T_E_INVAL;
+        pins[count++]=(struct Burrow *)c->extent.backing;
+    }
+    for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i)
+        if(t->bank.cells[i].phase==LMEMBER_LEASED)t->bank.cells[i].phase=LMEMBER_AVAILABLE;
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_pool *p=&t->pools[i];if(p->phase==LPOOL_EMPTY)continue;
+        int rc=p->phase==LPOOL_RESERVED?loom_service_pool_rollback(l->service_slots,t,p->ref)
+                                      :loom_service_pool_reap(l->service_slots,t,p->ref);
+        if(rc)extinction("exclusive pool destruction changed ledger");
+    }
+    // Ledger exclusions are gone but saved pins keep every backing alive until
+    // its physical settled drop. Never turn this into a metadata-only memset.
+    for(u32 i=0;i<count;++i)loom_private_drop_buffer(l->service_as,pins[i]);
+    return 0;
+}
+
+static void loom_private_destroy(struct Loom *l) {
+    // Snapshotted before anything frees l: everything after the kfree below
+    // reaches the address space through these two locals and never through l.
+    struct AddrSpace *as = l->service_as;
+    u32 metadata = l->service_metadata_pages;
+
+    // The existing private retirer joins only the nonblocking private branch,
+    // before touching any owner storage. Legacy RPC/clunk cleanup stays banned.
+    loom_private_executor_join(l);
+    if (l->sqpoll || l->inflight_ops || l->service_engine->worker_starting)
+        extinction("private Loom reached legacy cleanup state");
+    if (!loom_engine_empty(l->service_engine))
+        extinction("private Loom reached final free with indexed protocols");
+    if (l->service_close_work.state!=LCLOSE_NEW && l->service_close_work.state!=LCLOSE_DONE)
+        extinction("private Loom reached final free with a close queue root");
+    if (l->service_fixed || l->service_fixed_count || l->service_fixed_settling)
+        extinction("private Loom reached cleanup with fixed borrows");
+    for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++)
+        if (l->reg[i].spoor) extinction("private Loom retained a legacy fid");
+
+    // Targets and unused nodes have only local ownership and can retire here.
+    // Protocol-active records must be empty before the engine drops its last ref.
+    loom_private_requests_destroy(l);
+    if(loom_private_pools_destroy(l))extinction("private Loom retained active pool owner");
+    loom_private_nodes_destroy(l);
+    loom_private_targets_destroy(l);
+    if (!l->service_slots) extinction("private Loom lost slot storage");
+    for (u32 i = 0; i < LOOM_SERVICE_SLOT_COUNT; ++i)
+        if (l->service_slots->slots[i].phase != LSLOT_FREE ||
+            l->service_slots->slots[i].pins)
+            extinction("private Loom retained a service slot");
+    if (!loom_service_pools_empty(l->service_pools))
+        extinction("private Loom retained pool storage");
+    // No pool, writer or owner borrower survives here. Detach the bounded table
+    // before settling each pin outside locks, while the exact image is retained.
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {
+        struct Burrow *b = l->reg_buf[i].burrow;
+        l->reg_buf[i] = (struct loom_reg_buffer){0};
+        loom_private_drop_buffer(as, b);
+    }
+    l->n_reg_buf = 0;
+    kfree(l->service_engine);
+    kfree(l->service_requests.records);
+    kfree(l->service_nodes);
+    kfree(l->service_targets);
+    kfree(l->service_pools);
+    kfree(l->service_slots);
+
+    // One settled drop rather than claim / drop / restore. The refund is decided
+    // inside the same v->lock interval that decides whether this drop ends the
+    // ring's occupancy, so a peer holder's final drop cannot land in a gap and
+    // leave this one writing a charge record through a freed descriptor. A
+    // nonfinal drop reports zero and leaves the record for whichever drop does
+    // end the occupancy -- a ring mapping that outlives the fd settles it at VMA
+    // teardown, which is why the refund is read from the drop and not from a
+    // value claimed before it. The guards above bound LEGACY EXECUTION, BUFFER
+    // AND FID state; they say nothing about mapping references, so a second
+    // holder of this ring is not merely possible but routine, and no exclusivity
+    // argument is available here or relied on.
+    u32 refund = 0;
+    (void)burrow_unref_settled_in(l->ring, as, &refund);
+
+    l->magic = 0;
+    kfree(l);
+
+    // The pin addrspace_private_begin took is what keeps `as` addressable here,
+    // so it is released LAST: addrspace_private_end may drop the final lifetime
+    // reference and free the descriptor, and nothing may touch `as` after it.
+    spin_lock(&as->lock);
+    addrspace_uncharge_pages(as, metadata + refund);
+    spin_unlock(&as->lock);
+    addrspace_private_end(as);
+
+    __atomic_fetch_add(&g_loom_destroyed, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&service_retired_count, 1, __ATOMIC_RELEASE);
+}
+
+static void loom_private_retire_one(void) {
+        spin_lock(&service_retire_lock);
+        struct loom_close_work *work=loom_closeq_take(&service_close_queue);
+        if (work) {
+            struct Loom *owner=(void *)((char *)work-__builtin_offsetof(struct Loom,service_close_work));
+            ++owner->service_close_visits;
+        }
+        struct Loom *l = service_retire_head;
+        if (l) {
+            service_retire_head = l->service_retire_next;
+            if (!service_retire_head) service_retire_tail = &service_retire_head;
+        }
+        spin_unlock(&service_retire_lock);
+        if (work) {
+            struct Loom *closing=(void *)((char *)work-__builtin_offsetof(struct Loom,service_close_work));
+            int progress=loom_engine_close_visit(closing);
+            if (progress<0) extinction("close queue reached invalid private owner");
+            spin_lock(&service_retire_lock);
+            enum loom_close_finish action=loom_closeq_finish(&service_close_queue,work,progress==2,progress==1);
+            spin_unlock(&service_retire_lock);
+            if (action==LCLOSE_DROP) loom_unref(closing); // final drop outside Q
+        }
+        if (l) loom_private_destroy(l);
+}
+void loom_retirer_main(void) {
+    for (;;) {
+        (void)sleep(&service_retire_wait, loom_private_pending, NULL);
+        loom_private_retire_one();
+    }
+}
+
+// Last-ref teardown. No concurrent access (refcount hit 0), so no lock is
+// taken. Clunking a registered Spoor may sleep (its Dev close hook) -- safe
+// here because handle_release_obj runs OUTSIDE the handle-table lock (#844) and
+// we hold none. burrow_unref drops the ring's handle_count; if the user mapping
+// is already gone (mapping_count == 0) the pages free here, else the VMA
+// teardown frees them later (dual-refcount, #847).
+// #130: settle an I-32 page_count charge whose pages this teardown just freed.
+//
+// The uncharge belongs to the drop that ends the occupancy, and for a Loom that
+// drop can be loom_free -- which, unlike every other charge site in the tree,
+// has no Proc argument. `l->owner` supplies it.
+//
+// Why the stored pointer is safe here: KObj_Loom is neither transferable nor
+// dup-able (it is not in TRANSFERABLE_MASK, and handle_dup rejects it), so a
+// Loom is reachable ONLY through the handle table of the Proc that created it.
+// That table is torn down either by an explicit close on one of that Proc's own
+// threads, or by handle_table_free inside that Proc's own teardown -- which
+// proc_free runs while the struct is still allocated (the kmem_cache_free comes
+// later). So the Proc allocation is live whenever this runs.
+//
+// That is an ARGUMENT, not an enforced invariant, so it is backstopped rather
+// than trusted: the magic + pid pair turns any future violation of it (a
+// transferable Loom, a teardown reordered past proc_free's release) into a
+// silently skipped uncharge -- an over-charge of a dying Proc, which is inert --
+// instead of a write through a dangling pointer or a charge stolen from an
+// unrelated Proc that recycled the address. pid is monotonic, so a recycled
+// allocation cannot impersonate the original.
+//
+// #132: this returns the owner rather than performing the uncharge, because
+// "the Proc that owns this Loom" and "the Proc that paid for this region" are
+// DIFFERENT CLAIMS, and #130 asserted the second from a proof of the first. A
+// registered buffer is resolved by loom_resolve_buf out of any writable ANON
+// VMA of the owner -- and a Weft ring that netd allocated and shared into this
+// Proc is exactly that (Weft-6c-1's shipped path registers the whole ring), so
+// the owner can hold a pin on a region netd paid for. Refunding it here paid
+// back pages the owner never bought: an under-count, which INFLATES its
+// effective budget -- the direction that breaks I-32. So the caller must run
+// the charge CLAIM against the Burrow, which answers who actually paid.
+static struct Proc *loom_owner_live(struct Loom *l) {
+    struct Proc *o = l->owner;
+    if (!o)                                              return NULL;
+    if (o->magic != PROC_MAGIC || o->pid != l->owner_pid) return NULL;
+    return o;
+}
+
+// Settle one of the Loom's Burrow pins: drop the pin and settle the owner's
+// charge in the SAME lock interval, refunding only if this drop ended the
+// occupancy. The claim returns 0 for a region the owner never paid for, which
+// is what keeps a shared-in Weft ring from being refunded to its consumer.
+//
+// AS-R9: this used to claim, drop, then restore on a nonfinal drop. Another
+// holder's final drop could land in that window, so the restore wrote through a
+// freed descriptor and the record was missing when the holder that DID free the
+// region looked for it. A nonzero refund now comes only from the freeing drop.
+static void loom_drop_pin_settling(struct Loom *l, struct Burrow *b) {
+    struct Proc *o = loom_owner_live(l);
+    u32 refund = 0;
+    (void)burrow_unref_settled(b, o, &refund);
+    if (refund) proc_page_uncharge(o, refund);
+}
+
+// The join predicate. Read with ACQUIRE to pair with the kthread's terminal
+// RELEASE store, so a joiner that observes it also observes state==EXITING
+// (thread_free's not-RUNNING gate). Evaluated under sqpoll_join->lock, which
+// the kthread's wakeup() also takes -- the register-then-observe pairing
+// rendez.h requires of every cond.
+static int loom_sqpoll_exited_cond(void *arg) {
+    struct Loom *l = (struct Loom *)arg;
+    return __atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE) ? 1 : 0;
+}
+
+static void loom_free(struct Loom *l) {
+    // Loom-4c: JOIN the SQPOLL kthread FIRST -- before the #898 quiesce. The
+    // kthread is the only other mutator of inflight_ops (it submits + reaps in
+    // its loop), so it must be fully stopped before this function touches the
+    // list. The join: set sqpoll_stopping (release) so the kthread's next loop
+    // top / park-cond observes it, wake the park Rendez (an idle kthread is
+    // sleeping there; a kthread mid-recv self-returns at its frame-boundary
+    // idle-deadline and re-checks stopping -- the gate guarantees a deadline-
+    // capable transport so this terminates), then BLOCK until the kthread signals
+    // sqpoll_exited (release; pairs with the cond's acquire -> the kthread's
+    // state=EXITING write is visible) and thread_free it (which internally spins
+    // on on_cpu, the wait_pid reap discipline -- that one waits on an in-flight
+    // HARDWARE context switch, which completes with no scheduling decision, and
+    // is therefore a different animal from this join). refcount is 0 so no ENTER
+    // runs; the kthread holds no loom ref, so this join is the sole lifetime
+    // authority.
+    //
+    // THE WAIT IS A SLEEP, NOT A SPIN, and that is load-bearing rather than
+    // stylistic. loom_free runs inside a syscall body (close, SYS_LOOM_SETUP's
+    // unwind, handle-close-at-exit), and since ARCH 8.1 a syscall body runs with
+    // interrupts ON but is still NON-PREEMPTIBLE: preempt_check_irq sees
+    // Thread.in_syscall and returns WITHOUT switching. So the timer interrupt a
+    // spin here would be waiting on arrives, is serviced, and changes nothing --
+    // SERVICING AN INTERRUPT IS NOT SCHEDULING A THREAD. At -smp 1 there is no
+    // peer CPU to run the kthread either, so the old spin could never end: an
+    // unkillable hang on an ordinary close(2). Only a VOLUNTARY switch can hand
+    // the CPU to the kthread being joined, and sleep() is that. (ARCH 8.12 named
+    // this site as one interrupts-on does NOT fix, against an earlier draft that
+    // wrongly claimed it did.)
+    //
+    // THE WAIT IS ALSO UNINTERRUPTIBLE, and it borrows the mechanism the tree
+    // already has rather than inventing one. sleep() refuses to block a thread
+    // whose Proc is group-terminating -- and a peer thread closing this fd
+    // during exit_group is exactly that thread. The refusal CANNOT be honoured:
+    // abandoning the join means thread_free on a kthread that is still live.
+    // If it is RUNNING that extincts, which is merely loud; if it is SLEEPING
+    // it passes every thread_free gate (not-current, not-RUNNING, in no run
+    // tree, on_cpu false) and frees a Thread that later resumes on recycled
+    // memory -- a silent UAF, and the worse half of the reason there is no
+    // abandon path.
+    //
+    // `exit_close_active` is that mechanism: #68 F1 added it so a CLOSE that
+    // must WAIT behaves like a live thread's rather than short-circuiting --
+    // "the exit-close window is ORDERLY FINALIZATION, not duress". The 9P
+    // Tclunk flush is its first user and this join is the second; both are
+    // close hooks of the same handle table, with the same obligation. The
+    // at-exit path already arrives here with it set (proc_close_handles_at_exit
+    // wraps the whole close), so the bracket below is a no-op there and covers
+    // the peer-close race that is NOT inside that window.
+    //
+    // SAVE AND RESTORE, NEVER A BARE CLEAR. proc_close_handles_at_exit may
+    // already own the flag; clearing it unconditionally would re-arm the death
+    // legs for every LATER fd in the same table, reopening the #68 F1
+    // data-loss / fid-leak class this flag exists to close.
+    //
+    // WHAT THIS COSTS, stated rather than elided: the join inherits #68 F1's
+    // own residual. A kthread that never reaches its terminal parks the dying
+    // Proc unreapably instead of burning a CPU on a yield-loop. That is
+    // strictly the better failure -- and it is REACHABLE, because the
+    // frame-boundary deadline does NOT bound a MID-FRAME recv (the body must
+    // complete to keep the stream synced, #841; see LOOM_SQPOLL_IDLE_NS), so a
+    // Byzantine server mid-frame delays the stop until the frame finishes or
+    // EOFs. The v1.0 servers are trusted and complete promptly; the bound is a
+    // trust assumption, not a mechanism, and it is the SAME one the Tclunk
+    // flush already rests on.
+    if (l->sqpoll) {
+        __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+        struct Thread *self     = current_thread();
+        bool           prev_ecl = self->exit_close_active;
+        self->exit_close_active = true;
+        while (!__atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE))
+            (void)sleep(&l->sqpoll_join, loom_sqpoll_exited_cond, l);
+        self->exit_close_active = prev_ecl;
+        thread_free(l->sqpoll);
+        l->sqpoll = NULL;
+    }
+    // Settle the F1 thread-budget charge (keyed on the flag, NOT on
+    // l->sqpoll: a charge whose kthread never started still owes the
+    // uncharge).
+    //
+    // BACKSTOPPED THE SAME WAY THE PAGE LEDGER IS, and for a sharper reason.
+    // Both ledgers rested on one lifetime argument -- KObj_Loom is I-5
+    // non-transferable and non-dup-able, so a Loom is reachable only through
+    // its creator's handle table and is torn down while the Proc is still
+    // allocated. #130 declined to TRUST that for the page ledger. This one
+    // trusted it, ~45 lines away, and its use is a WRITE
+    // (`p->loom_sqpoll_count--`), not a read: if the argument ever stopped
+    // holding, the page ledger degrades to a skipped refund (inert, as
+    // designed) while this decrements a RECYCLED Proc's counter -- an
+    // under-count on a Proc that never charged, inflating its thread budget.
+    // That is the I-32-breaking direction, the one every other tie in this
+    // mechanism is deliberately broken away from.
+    //
+    // The two arms are NOT interchangeable, which is why this is not simply
+    // loom_owner_live(l). `owner` binds LAST in setup (after the final failure
+    // path) and `sqpoll_owner` binds FIRST (at the charge), on purpose: the
+    // rollbacks uncharge pages explicitly and must not be double-refunded,
+    // while they deliberately do NOT settle the thread charge and leave it to
+    // this function. So on a rollback `owner` is still NULL and routing through
+    // loom_owner_live would return NULL, SKIP the uncharge, and leak a thread
+    // charge for the Proc's whole life -- turning a backstop into a defect on
+    // paths that are actually exercised (sqpoll start failure, handle_alloc
+    // failure).
+    //
+    // owner == NULL is instead PROOF the Proc is alive: it means setup never
+    // reached its last stanza, so no handle exists, so the only reference is
+    // the local one in sys_loom_setup -- we are executing inside the creator's
+    // own syscall. Validate when there is something to validate; rely on the
+    // synchronous path when there is not.
+    if (l->sqpoll_charged) {
+        struct Proc *so = l->owner ? loom_owner_live(l) : l->sqpoll_owner;
+        if (so) proc_sqpoll_uncharge(so);
+        l->sqpoll_charged = false;
+    }
+
+    // specs/loom.tla Teardown-wakes-waiters (NoStrandedWaiter). VACUOUS in the
+    // impl: a SYS_LOOM_ENTER caller sleeping on cq_waiters holds a loom ref for
+    // its whole call (handle_get), so refcount cannot reach 0 -- this function
+    // cannot run -- while any cq_waiter sleeps; the list is empty here. The wake
+    // is the spec's teardown action made literal (a no-op walk of an empty list),
+    // kept as defense if that ref invariant ever weakens.
+    poll_waiter_list_wake(&l->cq_waiters);
+
+    // #898: quiesce any in-flight async op BEFORE freeing the ring. refcount hit
+    // 0 -> no SYS_LOOM_ENTER is in progress (an enter holds a loom ref via
+    // handle_get), so the inflight_ops list is not being mutated here (only
+    // submit/reap mutate it, both inside an enter). on_complete (from a demux /
+    // mark_dead on a SHARED client, driven by another Proc) does NOT touch the
+    // list -- it only sets terminal + posts a CQE under l->lock. So reading +
+    // clearing the list lock-free is safe.
+    //
+    // For each op: p9_client_abandon_async runs UNDER the client's c->lock, so it
+    // is mutually exclusive with that demux/mark_dead. If the reply has not been
+    // demuxed it clears inflight[tag] (no future on_complete can fire) + Tflushes
+    // (#845; a late original reply is discarded ownerless). If it already
+    // completed, the abandon is a no-op. A racing demux that wins c->lock first
+    // posts at-most-one CQE into the still-allocated ring (we free it only AFTER
+    // this loop), then this abandon sees the slot cleared -- no double, no stale,
+    // no UAF (the loom is alive throughout; I-29). The pin is released + the
+    // container freed only after abandon severs the engine link.
+    //
+    // F3: snapshot + clear the list under l->lock. refcount is 0 so this Loom's
+    // lock is uncontended for any SUBMIT/REAP (those only run inside a live enter,
+    // which holds a ref), but the lock SERIALIZES against a concurrent
+    // loom_async_complete on a SHARED client (which mutates async_inflight + posts
+    // a CQE under l->lock) -- removing the data race the lock-free clear would
+    // otherwise have on the shared-client path (it was UAF-safe but TSan-dirty).
+    spin_lock(&l->lock);
+    struct loom_async_op *op = l->inflight_ops;
+    l->inflight_ops = NULL;
+    l->async_inflight = 0;
+    l->admitting      = 0;
+    spin_unlock(&l->lock);
+    while (op) {
+        struct loom_async_op *next = op->next;
+        p9_client_abandon_async(op->client, &op->rpc);
+        if (op->pinned_buf) burrow_unref(op->pinned_buf);   // Loom-6: release the buffer pin
+        if (op->pinned2)    spoor_clunk(op->pinned2);        // Loom-6b-2: second fid pin
+        spoor_clunk(op->pinned);
+        kfree(op);
+        op = next;
+    }
+
+    // Loom-5b: free the LINK/DRAIN chain. refcount is 0 (the SQPOLL kthread is
+    // joined; no ENTER runs), so nothing mutates l->chain here. A HELD entry never
+    // started -- it holds no pin, no tag, no async op -- so it is abandoned
+    // silently (the ring is dying; userspace will not read its CQE). An INFLIGHT
+    // entry's backing loom_async_op was already abandoned + freed above; the chain
+    // entry never references it (only op->chain points the other way), so freeing
+    // the entry now is safe.
+    struct loom_chain_op *ce = l->chain;
+    l->chain = NULL;
+    l->chain_tail = NULL;
+    l->chain_len = 0;
+    while (ce) {
+        struct loom_chain_op *cnext = ce->chain_next;
+        kfree(ce);
+        ce = cnext;
+    }
+
+    for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++) {
+        if (l->reg[i].spoor) {
+            spoor_clunk(l->reg[i].spoor);
+            l->reg[i].spoor = NULL;
+        }
+    }
+    // Loom-6: release every registered-buffer pin (the table's burrow_refs).
+    // #130: a registered buffer is the user's own SYS_BURROW_ATTACH region, so
+    // it carries an I-32 charge. If the user already detached the VA, THIS unref
+    // is the drop that frees the pages -- and before #130 nothing uncharged
+    // there, so the Proc stayed billed for memory it no longer held.
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        if (l->reg_buf[i].burrow) {
+            // #132: settle via the charge record, never via the buffer's size.
+            // The owner may have pinned a region it did not pay for.
+            loom_drop_pin_settling(l, l->reg_buf[i].burrow);
+            l->reg_buf[i].burrow = NULL;
+        }
+    }
+    if (l->ring) {
+        // #130: same for the ring. SYS_LOOM_SETUP charged ring_pages; the Loom
+        // holds a handle_count ref for its whole life, so on the ordinary
+        // teardown order (detach the ring VA, then close the fd -- what
+        // libthyla_rs' Ring::drop does) the detach does NOT free the pages and
+        // THIS unref does. The charge is released exactly once, by whichever of
+        // the two is last -- now enforced by the claim rather than argued: the
+        // ring IS the owner's own charge, so the claim always finds it here
+        // unless the detach already settled it.
+        loom_drop_pin_settling(l, l->ring);
+        l->ring = NULL;
+    }
+    l->magic = 0;   // clobber before free (UAF defense, mirrors burrow_free_internal)
+    kfree(l);
+    __atomic_fetch_add(&g_loom_destroyed, 1, __ATOMIC_RELAXED);
+}
+
+void loom_ref(struct Loom *l) {
+    if (!l || l->magic != LOOM_MAGIC) return;
+    __atomic_fetch_add(&l->refcount, 1, __ATOMIC_ACQUIRE);
+}
+
+void loom_unref(struct Loom *l) {
+    if (!l || l->magic != LOOM_MAGIC) return;
+    if (__atomic_fetch_sub(&l->refcount, 1, __ATOMIC_RELEASE) == 1) {
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (loom_is_private(l)) loom_private_enqueue(l);
+        else loom_free(l);
+    }
+}
+
+int loom_register_handles(struct Loom *l, struct Spoor **spoors,
+                          const rights_t *rights, u32 n) {
+    if (!l || l->magic != LOOM_MAGIC)  return -1;
+    if (loom_is_private(l))            return -T_E_OPNOTSUPP;
+    if (n > LOOM_MAX_REG_HANDLES)      return -1;
+    if (n > 0 && (!spoors || !rights)) return -1;
+
+    // Loom-4c SQPOLL deadline-capable gate. On an SQPOLL ring the poll-thread
+    // block-recvs on the dev9p client of any in-flight async op, in process
+    // context with no death-interrupt (kproc never group-terminates) -- so a
+    // NULL-deadline transport would block it un-interruptibly and HANG teardown's
+    // join. Reject registering such a handle. A non-dev9p Spoor (dev9p_client_fid
+    // fails) is allowed: it can never go async (loom_submit_one -EINVALs it
+    // inline), so the kthread never recvs on it. Checked BEFORE any ref is
+    // adopted, so the caller's rollback (it retains its refs on failure) holds.
+    if (l->sqpoll) {
+        for (u32 i = 0; i < n; i++) {
+            struct p9_client *cl; u32 fid;
+            if (dev9p_client_fid(spoors[i], &cl, &fid) == 0 &&
+                !p9_client_recv_is_deadline_capable(cl)) {
+                return -1;
+            }
+        }
+    }
+
+    // Replace the whole table (IORING_REGISTER_FILES semantics). Snapshot the
+    // old Spoors + install the new under the lock, then clunk the old OUTSIDE
+    // the lock (spoor_clunk may sleep -- it cannot run under the spin_lock).
+    struct Spoor *old[LOOM_MAX_REG_HANDLES];
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++) {
+        old[i] = l->reg[i].spoor;
+        l->reg[i].spoor  = NULL;
+        l->reg[i].rights = 0;
+    }
+    for (u32 i = 0; i < n; i++) {
+        l->reg[i].spoor  = spoors[i];   // adopt the caller's ref
+        l->reg[i].rights = rights[i];
+    }
+    spin_unlock(&l->lock);
+
+    for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++) {
+        if (old[i]) spoor_clunk(old[i]);
+    }
+    return 0;
+}
+
+// Loom-6: resolve + PIN one registered-buffer VA range into *out. On success
+// fills *out (with a burrow_ref HELD on out->burrow) and returns 0; on any
+// validation failure returns -1 having taken NO ref and left *out untouched.
+// Caller holds p->vma_lock (vma_lookup needs it; lock order vma_lock ->
+// burrow->lock matches burrow_map). The range must lie within ONE anonymous
+// (CPU-accessible, contiguous), writable VMA -- the same posture io_uring's
+// IORING_REGISTER_BUFFERS pins. The kva is computed from the Burrow's stable
+// direct-map base, NOT the VA, so the pin keeps it valid past a later munmap
+// (the #847 dual-refcount).
+static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
+                            struct loom_reg_buffer *out) {
+    u64 va = b->va, len = b->len;
+    if (len == 0 || len > 0xFFFFFFFFull)              return -1;  // u32 slot; empty useless
+    if (va + len < va)                               return -1;  // VA-range wrap
+    struct Vma *vma = vma_lookup(p, va);
+    if (!vma || !vma->burrow)                        return -1;  // unmapped / guard VMA
+    // BURROW_TYPE_ANON is LOAD-BEARING beyond the device-mem reject: it is the sole
+    // guarantee that the Burrow is one physically-contiguous alloc_pages chunk, which
+    // is what makes the single-base `pa_to_kva(page_to_pa(pages)) + boff` kva valid
+    // across the whole [va, va+len) span below. 6c audit F3: do NOT widen this type
+    // gate to admit a CPU-accessible-but-scatter-gather Burrow type (a future
+    // file-backed / sg-list successor) without first making the kva computation
+    // chunk-walking -- else boff past the first physical chunk yields a wrong/OOB
+    // kernel address with no tripwire.
+    if (vma->burrow->type != BURROW_TYPE_ANON)       return -1;  // device mem (MMIO/DMA) / non-contiguous: no
+    if ((vma->prot & VMA_PROT_WRITE) == 0)           return -1;  // need RW (READ writes into it)
+    if (va < vma->vaddr_start || va + len > vma->vaddr_end) return -1;  // within ONE VMA
+    // Byte offset of the slice into the backing Burrow + its contiguous direct-map
+    // base (valid because of the BURROW_TYPE_ANON contiguity guarantee above).
+    u64 boff = vma->burrow_offset + (va - vma->vaddr_start);
+    if (boff + len > vma->burrow->size)              return -1;  // defensive (VMA invariant implies)
+    u8 *base = (u8 *)pa_to_kva(page_to_pa(vma->burrow->pages));
+    out->burrow = vma->burrow;
+    out->kva    = base + boff;
+    out->len    = (u32)len;
+    out->_pad   = 0;
+    burrow_ref(vma->burrow);     // the table's pin (released at re-register / loom_unref)
+    return 0;
+}
+
+// Internal private-buffer admission only. Public setup/registration remain
+// disabled. The caller retains l and p, calls in the creator's stable syscall
+// image (exec requires its peers to leave), and supplies an immutable kernel
+// snapshot. Never call from a worker borrowing somebody else's Proc identity.
+int loom_private_register_buffers(struct Loom *l, struct Proc *p,
+                                  const struct loom_buf_reg *bufs, u32 n) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+    struct AddrSpace *as = l->service_as;
+    if (p->as != as || p->stripes != l->service_creator) return -T_E_ACCES;
+    if (n > LOOM_MAX_REG_BUFFERS || (n && !bufs)) return -T_E_INVAL;
+
+    struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i)
+        fresh[i] = (struct loom_reg_buffer){0};
+    u32 done = 0;
+    int rc = 0;
+    // Resolve the complete set against the retained creator image. Refuse the
+    // ring itself, even when its mapping passes the ordinary ANON/RW gates.
+    spin_lock(&as->lock);
+    while (done < n) {
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done])) {
+            rc = -T_E_INVAL;
+            break;
+        }
+        if (fresh[done++].burrow == l->ring) { rc = -T_E_INVAL; break; }
+    }
+    spin_unlock(&as->lock);
+    if (!rc) {
+        spin_lock(&l->lock);
+        // Close may win while resolution runs. Both provisional and live pools
+        // forbid rebinding; the old table remains intact on either refusal.
+        if (l->service_closing) rc = -T_E_CANCELED;
+        else if (!loom_service_pools_empty(l->service_pools)) rc = -T_E_BUSY;
+        else {
+            for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; ++i) {
+                struct loom_reg_buffer old = l->reg_buf[i];
+                l->reg_buf[i] = fresh[i];
+                fresh[i] = old;
+            }
+            l->n_reg_buf = n;
+            done = LOOM_MAX_REG_BUFFERS; // displaced pins, not the new table
+        }
+        spin_unlock(&l->lock);
+    }
+    // Every refusal and replacement uses the same settled-drop primitive. An
+    // unmap can have made this pin the final holder during the unlocked gap.
+    for (u32 i = 0; i < done; ++i)
+        loom_private_drop_buffer(as, fresh[i].burrow);
+    return rc;
+}
+
+// Called with the retained private owner's lock held. Registration pins keep
+// the ANON direct-map base stable; no address-space lock or mapping lookup here.
+static int loom_private_extent_locked(struct Loom *l,
+                                      const struct loom_service_pool_member *m,
+                                      struct loom_pool_extent *out) {
+    if (m->reserved || m->buffer_index >= l->n_reg_buf || !m->length) {
+        return -T_E_INVAL;
+    }
+    const struct loom_reg_buffer *b = &l->reg_buf[m->buffer_index];
+    if (!b->burrow || b->burrow == l->ring ||
+        b->burrow->type != BURROW_TYPE_ANON || !b->burrow->pages ||
+        m->offset > b->len || m->length > b->len - m->offset) {
+        return -T_E_INVAL;
+    }
+    // Integer subtraction avoids pointer-difference UB and overflowing
+    // user offset+length. Table pins guarantee this ANON direct-map base
+    // remains stable even after every original user mapping is detached.
+    u64 base = (u64)pa_to_kva(page_to_pa(b->burrow->pages));
+    u64 kva = (u64)b->kva;
+    if (kva < base || kva - base > b->burrow->size ||
+        b->len > b->burrow->size - (kva - base)) {
+        return -T_E_INVAL;
+    }
+    *out = (struct loom_pool_extent){b->burrow,kva - base + m->offset,m->length};
+    return 0;
+}
+
+static bool loom_private_fixed_conflicts_locked(struct Loom *l,
+                                                 struct loom_pool_extent e) {
+    for (struct loom_private_fixed *f = l->service_fixed; f; f = f->next)
+        if (loom_pool_extents_overlap(e,f->extent)) return true;
+    return false;
+}
+
+int loom_private_fixed_acquire(struct Loom *l, struct Proc *p,
+                               const struct loom_service_pool_member *m,
+                               struct loom_private_fixed *f) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !m || !f ||
+        !p || p->magic != PROC_MAGIC) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    int rc = 0;
+    struct loom_pool_extent e;
+    spin_lock(&l->lock);
+    if (l->service_closing) rc = -T_E_CANCELED;
+    else if (f->owner || f->next || f->extent.backing || f->extent.offset || f->extent.length)
+        rc = -T_E_BUSY;
+    else if (l->service_fixed_count + l->service_fixed_settling >= l->cq_entries) rc = -T_E_AGAIN;
+    else if ((rc = loom_private_extent_locked(l,m,&e)) == 0) {
+        if (loom_pool_conflicts(&l->service_pools->bank,e)) rc = -T_E_BUSY;
+        else {
+            // Existing CQ capacity bounds traversal. Actual request admission
+            // still owes its own shared terminal reservation before dispatch.
+            burrow_ref((struct Burrow *)e.backing);
+            loom_ref(l);
+            *f = (struct loom_private_fixed){l->service_fixed,l,e};
+            l->service_fixed = f;
+            ++l->service_fixed_count;
+        }
+    }
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+int loom_private_fixed_release(struct Loom *l, struct loom_private_fixed *f) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !f) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct loom_private_fixed **link = &l->service_fixed;
+    while (*link && *link != f) link = &(*link)->next;
+    if (!*link || f->owner != l) { spin_unlock(&l->lock); return -T_E_NOENT; }
+    struct Burrow *b = (struct Burrow *)f->extent.backing;
+    struct AddrSpace *as = l->service_as;
+    *link = f->next;
+    --l->service_fixed_count;
+    ++l->service_fixed_settling;
+    *f = (struct loom_private_fixed){0};
+    spin_unlock(&l->lock);
+    // A concurrent rebind can drop the last table pin after unlink. This pin
+    // still owns the pages; release it and settle before dropping the owner.
+    // No reference to f or l is used after the final Loom unref.
+    loom_private_drop_buffer(as,b);
+    spin_lock(&l->lock);
+    --l->service_fixed_settling;
+    spin_unlock(&l->lock);
+    loom_private_close_changed(l);
+    loom_unref(l);
+    return 0;
+}
+
+// Internal pool transaction front-end. No public registration is enabled here.
+// The input is a single immutable kernel copy; output lives in kernel memory.
+// As for private buffer registration, the caller holds a Loom and creator Proc
+// reference in its stable syscall image. The ring lock stabilizes the buffer
+// table through canonical resolution, member reservation and pin acquisition.
+int loom_private_pool_prepare(struct Loom *l, struct Proc *p,
+                              const struct loom_service_pool_create *in,
+                              struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (!l->receipt_size) return -T_E_OPNOTSUPP;
+    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
+        in->reserved || in->result.slot || in->result.reserved ||
+        in->result.incarnation || !in->count ||
+        in->count > LOOM_SERVICE_POOL_MEMBERS) return -T_E_INVAL;
+    for (u32 i = in->count; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+        const struct loom_service_pool_member *m = &in->members[i];
+        if (m->buffer_index || m->reserved || m->offset || m->length)
+            return -T_E_INVAL;
+    }
+    struct loom_pool_extent extents[LOOM_SERVICE_POOL_MEMBERS];
+    int rc = 0;
+    spin_lock(&l->lock);
+    if (l->service_closing) { rc = -T_E_CANCELED; goto unlock; }
+    // Private legacy dispatch is disabled. Refuse unexpected legacy work;
+    // private request callers must reserve their canonical fixed extents using
+    // the owner API above before releasing this lock for local dispatch.
+    if (l->inflight_ops || l->async_inflight || l->admitting || l->chain ||
+        l->chain_len || l->rearm_pending) { rc = -T_E_BUSY; goto unlock; }
+    for (u32 i = 0; i < in->count; ++i) {
+        rc = loom_private_extent_locked(l,&in->members[i],&extents[i]);
+        if (rc) goto unlock;
+        if (loom_private_fixed_conflicts_locked(l,extents[i])) {
+            rc = -T_E_BUSY; goto unlock;
+        }
+    }
+    rc = loom_service_pool_prepare(l->service_slots,l->service_pools,
+                                   extents,in->count,out);
+    if (!rc) {
+        // One independent pin per member, including disjoint aliases of the
+        // same Burrow. Ref cannot fail; the table's pin prevents destruction.
+        // Provisional membership already excludes table replacement and other
+        // overlapping pool registrations before this lock is released.
+        for (u32 i = 0; i < in->count; ++i)
+            burrow_ref((struct Burrow *)extents[i].backing);
+    }
+unlock:
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// These are kernel-owner continuations, not authority-bearing user entry points.
+// The caller retains l across copyout and until publish/rollback finishes.
+int loom_private_pool_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_pool_publish(l->service_slots,l->service_pools,ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// Rollback/reap may run after close or creator exec. Settlement uses the retained
+// image, never a current Proc. Only pools made by private_pool_prepare belong to
+// this front-end: do not mix raw ledger-only reservations into a private owner.
+// Snapshot pins under the same lock as the joint ledger transition; a refusal
+// drops nothing. Successful removal permits rebinding immediately, but the
+// saved independent pins keep every backing alive across that unlocked gap.
+static int loom_private_pool_remove(struct Loom *l, struct loom_service_ref ref,
+                                    bool rollback) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];
+    u32 count = 0;
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LOOM_SERVICE_POOL_MEMBERS; ++i) {
+        const struct loom_pool_cell *c = &l->service_pools->bank.cells[i];
+        if (c->phase != LMEMBER_FREE && c->pool.slot == ref.slot &&
+            c->pool.incarnation == ref.incarnation &&
+            c->pool.reserved == ref.reserved)
+            pins[count++] = (struct Burrow *)c->extent.backing;
+    }
+    int rc = rollback ? loom_service_pool_rollback(l->service_slots,l->service_pools,ref)
+                      : loom_service_pool_reap(l->service_slots,l->service_pools,ref);
+    spin_unlock(&l->lock);
+    if (!rc)
+        for (u32 i = 0; i < count; ++i)
+            loom_private_drop_buffer(l->service_as,pins[i]);
+    return rc;
+}
+int loom_private_pool_rollback(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_pool_remove(l,ref,true);
+}
+int loom_private_pool_reap(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_pool_remove(l,ref,false);
+}
+
+// SCOPE/FID reserve transactions use an immutable, already-copied ABI record.
+// The syscall owns a Loom reference and a stable creator image across prepare,
+// copyout and publish/rollback. No user pointer or Proc escapes. The same ring
+// lock protects both ledgers and the close/parent-abort publication check.
+// This only reserves metadata: it grants no protocol authority, creates no
+// client and cannot reap a node that has entered the protocol state machine.
+int loom_private_node_prepare(struct Loom *l, struct Proc *p,
+                              const struct loom_service_reserve *in,
+                              struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (in->size != sizeof(*in) || in->version != LOOM_SERVICE_ABI_VERSION ||
+        in->flags || in->reserved || in->result.slot || in->result.reserved ||
+        in->result.incarnation) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = l->service_closing ? -T_E_CANCELED :
+        loom_service_node_prepare(l->service_slots, l->service_nodes,
+                                  in->kind, in->scope, out);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = l->service_closing ? -T_E_CANCELED :
+        loom_service_node_publish(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_rollback(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_node_rollback(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_node_reap_unused(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_service_node_reap_unused(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+// TARGET transactions consume the shared slot quota before resolving the actual
+// handle. Native capture and all handle/registry drops occur outside the ring
+// lock; the caller retains l and a stable creator syscall image throughout.
+// PROVISIONAL is invisible to borrowers until successful copyout + publish.
+// These helpers are internal only. CONNECT still owes actual caller identity
+// and devsrv_service_prepare; retaining a target never grants connect authority.
+static struct SrvServiceTarget *loom_private_target_exact(struct Loom *l,
+                                      struct loom_service_ref ref, u32 phase) {
+    if (ref.reserved || !ref.incarnation || ref.slot >= LOOM_SERVICE_SLOT_COUNT)
+        return NULL;
+    struct loom_service_slot *s = &l->service_slots->slots[ref.slot];
+    struct SrvServiceTarget *t = &l->service_targets->targets[ref.slot];
+    return s->incarnation == ref.incarnation && s->kind == LOOM_SERVICE_TARGET &&
+           s->phase == phase && t->view ? t : NULL;
+}
+
+int loom_private_target_prepare(struct Loom *l, struct Proc *p,
+                               const struct loom_service_target *in,
+                               struct loom_service_ref *out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) ||
+        !p || p->magic != PROC_MAGIC || !in || !out) return -T_E_INVAL;
+    if (p->as != l->service_as || p->stripes != l->service_creator)
+        return -T_E_ACCES;
+    if (in->size != sizeof(*in) || in->version != 1 || in->flags ||
+        in->registry_fd < 0 || !in->name_len || in->name_len > 255 ||
+        in->result.slot || in->result.reserved || in->result.incarnation)
+        return -T_E_INVAL;
+    for (u32 i = in->name_len; i < sizeof(in->name); ++i)
+        if (in->name[i]) return -T_E_INVAL;
+    struct loom_service_ref ref;
+    spin_lock(&l->lock);
+    int rc = loom_slot_reserve(l->service_slots, LOOM_SERVICE_TARGET, &ref);
+    spin_unlock(&l->lock);
+    if (rc) return rc;
+
+    struct SrvServiceTarget fresh = {0};
+    struct Handle h;
+    rc = handle_get(p, in->registry_fd, &h) ? -T_E_BADF : 0;
+    if (!rc) {
+        rc = h.kind == KOBJ_SPOOR ?
+            devsrv_service_target_init(h.obj, (const char *)in->name,
+                                       in->name_len, &fresh) : -T_E_OPNOTSUPP;
+        handle_put(&h);
+    }
+    spin_lock(&l->lock);
+    if (!rc && l->service_closing) rc = -T_E_CANCELED;
+    if (rc) {
+        // This unpublished ref is private to this retained transaction; close
+        // cannot remove it, and no borrower can pin a provisional slot.
+        (void)loom_slot_rollback(l->service_slots, ref);
+    } else {
+        l->service_targets->targets[ref.slot] = fresh;
+        *out = ref;
+    }
+    spin_unlock(&l->lock);
+    if (rc) devsrv_service_target_clear(&fresh);
+    return rc;
+}
+
+int loom_private_target_publish(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_private_target_exact(l, ref, LSLOT_PROVISIONAL) ?
+        loom_slot_publish(l->service_slots, ref) : -T_E_NOENT;
+    spin_unlock(&l->lock);
+    return rc;
+}
+
+static int loom_private_target_remove(struct Loom *l, struct loom_service_ref ref,
+                                      bool rollback) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    struct SrvServiceTarget detached = {0};
+    spin_lock(&l->lock);
+    struct SrvServiceTarget *t = loom_private_target_exact(l, ref,
+                                      rollback ? LSLOT_PROVISIONAL : LSLOT_LIVE);
+    int rc = !t ? -T_E_NOENT : l->service_slots->slots[ref.slot].pins ? -T_E_BUSY : 0;
+    if (!rc) {
+        // Validate phase/identity/zero pins before either ledger changes. All
+        // transitions below are then infallible under the common owner lock.
+        detached = *t;
+        *t = (struct SrvServiceTarget){0};
+        if (rollback) (void)loom_slot_rollback(l->service_slots, ref);
+        else {
+            (void)loom_slot_retire(l->service_slots, ref);
+            (void)loom_slot_reap(l->service_slots, ref);
+        }
+    }
+    spin_unlock(&l->lock);
+    if (!rc) devsrv_service_target_clear(&detached);
+    return rc;
+}
+int loom_private_target_rollback(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_target_remove(l, ref, true);
+}
+int loom_private_target_reap(struct Loom *l, struct loom_service_ref ref) {
+    return loom_private_target_remove(l, ref, false);
+}
+
+int loom_private_target_get(struct Loom *l, struct loom_service_ref ref,
+                            const struct SrvServiceTarget **out) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l) || !out) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct SrvServiceTarget *t = loom_private_target_exact(l, ref, LSLOT_LIVE);
+    int rc = t ? loom_slot_pin(l->service_slots, ref, LOOM_SERVICE_TARGET) : -T_E_NOENT;
+    if (!rc) { loom_ref(l); *out = t; }
+    spin_unlock(&l->lock);
+    return rc;
+}
+int loom_private_target_put(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_private_target_exact(l, ref, LSLOT_LIVE) ?
+        loom_slot_unpin(l->service_slots, ref) : -T_E_NOENT;
+    spin_unlock(&l->lock);
+    if (!rc) loom_unref(l); // may enqueue final owner; never touch l again
+    return rc;
+}
+
+int loom_register_buffers(struct Loom *l, struct Proc *p,
+                          const struct loom_buf_reg *bufs, u32 n) {
+    if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
+    if (loom_is_private(l))                  return -T_E_OPNOTSUPP;
+    if (n > LOOM_MAX_REG_BUFFERS)            return -1;
+    if (n > 0 && !bufs)                      return -1;
+
+    // Resolve + pin the WHOLE new set first (all-or-nothing, like
+    // loom_register_handles): under p->vma_lock so vma_lookup is stable. On any
+    // failure roll back the refs taken so far and leave the live table untouched.
+    struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        fresh[i].burrow = NULL; fresh[i].kva = NULL; fresh[i].len = 0; fresh[i]._pad = 0;
+    }
+    spin_lock(&p->as->lock);
+    u32 done = 0;
+    int rc = 0;
+    for (; done < n; done++) {
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -1; break; }
+    }
+    spin_unlock(&p->as->lock);
+    if (rc != 0) {
+        for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
+        return -1;
+    }
+
+    // Install: swap the table under l->lock, then unref the displaced pins OUTSIDE
+    // the lock (burrow_unref may free the Burrow -> never under a spin_lock).
+    struct Burrow *old[LOOM_MAX_REG_BUFFERS];
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        old[i]        = l->reg_buf[i].burrow;
+        l->reg_buf[i] = fresh[i];
+    }
+    l->n_reg_buf = n;
+    spin_unlock(&l->lock);
+
+    // #130: a displaced pin can be the drop that frees the pages -- the user
+    // may have detached the old buffer's VA while the table still held it, in
+    // which case the detach skipped its refund (correctly: nothing was freed
+    // then) and THIS unref is what ends the occupancy.
+    //
+    // #132: settle through the charge record. The comment here used to justify
+    // refunding `p` with "registering requires a loom fd from p's own table,
+    // and KObj_Loom is neither transferable nor dup-able" -- which proves p
+    // owns the LOOM, and says nothing about who paid for the BUFFER. A weft
+    // ring netd allocated and shared in satisfies every loom_resolve_buf gate
+    // (ANON, writable, one VMA), so p could be refunded for netd's pages. The
+    // claim returns 0 for exactly that case.
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        if (old[i]) {
+            u32 refund = 0;   // AS-R9: settled under the Burrow's own lock
+            (void)burrow_unref_settled(old[i], p, &refund);
+            if (refund) proc_page_uncharge(p, refund);
+        }
+    }
+    return 0;
+}
+
+int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (flags & LOOM_CQE_SERVICE_BUFFER) return -1;
+
+    spin_lock(&l->lock);
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    // The write position comes ONLY from kernel-private state -- never from the
+    // shared header, which userspace can corrupt. Reading `h->cq_tail` / `h->cq_mask`
+    // (both userspace-writable) to compute the index would let a hostile Proc
+    // (under Loom-3, when the ring is userspace-controlled) drive an out-of-bounds
+    // kernel write: e.g. cq_mask = 0xFFFFFFFF + cq_tail = 0x10000 -> idx far past
+    // the cqe array. cq_entries is a power of two (loom_create), so its mask is
+    // exact. (The ring-TOCTOU discipline, docs/LOOM.md §6.1, applied to the CQ.)
+    u32 tail = l->cq_tail;                                       // kernel-private
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);   // user-owned (advisory)
+
+    // (tail - head) is the count of posted-unreaped CQEs (free-running u32 --
+    // the subtraction is correct across wrap). A hostile `head` can only make
+    // userspace overwrite its OWN claimed-reaped CQE (the ring is the Proc's own
+    // Burrow) -- the masked index below is always in-bounds, so never an OOB.
+    if ((u32)(tail - head) >= l->cq_entries) {
+        // CQ full: never overwrite an unreaped CQE (CqNeverOverfull, I-29).
+        // Count the dropped post; Loom-3's submit-time admission makes this
+        // unreachable in production (then `overflow` is a pure diagnostic).
+        __atomic_store_n(&h->overflow, h->overflow + 1u, __ATOMIC_RELEASE);
+        spin_unlock(&l->lock);
+        return -1;
+    }
+
+    struct loom_cqe *cqe = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 idx = tail & (l->cq_entries - 1u);   // kernel-private mask -- NEVER h->cq_mask
+    cqe[idx].user_data = user_data;
+    cqe[idx].result    = result;
+    cqe[idx].flags     = flags;
+    // A non-pooled result must not inherit a prior payload receipt at a reused
+    // CQ slot. Legacy rings have no companion array and keep their old layout.
+    if (l->receipt_size) {
+        struct loom_service_buffer_receipt *r =
+            (void *)(l->ring_kva + l->receipt_off);
+        r[idx] = (struct loom_service_buffer_receipt){0};
+    }
+    // Advance the private tail, then publish it to the shared mirror with a
+    // release store (so a user-side load-acquire of cq_tail sees a fully-written
+    // slot). The mirror also overwrites any hostile value userspace wrote.
+    l->cq_tail = tail + 1u;
+    __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+
+    // Loom-4 (specs/loom.tla PostCqe-wake): the CQ is now non-empty -- wake any
+    // SYS_LOOM_ENTER thread sleeping for min_complete on the CQ wait-list. Wake
+    // AFTER releasing l->lock (the pipe.c producer precedent): the cq_tail bump
+    // above happened-before this under l->lock, so a concurrent CqWaitRegister's
+    // sample (also under l->lock) either observes the bumped CQ (and does not
+    // sleep) or is found by this list walk (and is woken) -- no missed wake
+    // (CqFlagTracksCq + NoMissedCqWake, I-9). poll_waiter_list_wake takes only the
+    // list + rendez locks (below l->lock in the global order) and does NOT sleep
+    // or re-enter p9_client_*, so it is safe under the c->lock loom_async_complete
+    // holds (the seam contract).
+    poll_waiter_list_wake(&l->cq_waiters);
+    return 0;
+}
+
+int loom_post_pool_cqe(struct Loom *l, struct loom_pool_bank *bank,
+                       struct loom_pool *pool, u32 member) {
+    if (!l || l->magic != LOOM_MAGIC || !bank || !pool) return -T_E_INVAL;
+    if (!l->receipt_size) return -T_E_OPNOTSUPP;
+    spin_lock(&l->lock);
+    struct loom_ring_hdr *h = (void *)(l->ring_kva + l->hdr_off);
+    u32 tail = l->cq_tail;
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);
+    if ((u32)(tail - head) >= l->cq_entries) {
+        spin_unlock(&l->lock);
+        return -T_E_AGAIN;
+    }
+    struct loom_pool_result result;
+    int rc = loom_pool_peek(bank, pool, member, &result);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    // Only kernel-private tail/mask/offsets choose the destination. Shared
+    // receipts are an output mirror, never authority for the pool transition.
+    u32 idx = tail & (l->cq_entries - 1u);
+    struct loom_cqe *cq = (void *)(l->ring_kva + l->cqe_off);
+    struct loom_service_buffer_receipt *receipts =
+        (void *)(l->ring_kva + l->receipt_off);
+    cq[idx] = (struct loom_cqe){ .user_data = result.user_data,
+        .result = (s32)result.length,
+        .flags = LOOM_CQE_SERVICE_BUFFER | (result.more ? LOOM_CQE_MORE : 0) };
+    receipts[idx] = result.receipt;
+    // The member must be returnable before the consumer can observe the CQE.
+    // A failed transition leaves this unadvertised slot free to overwrite;
+    // the private tail is unchanged. No callback or unlock separates these.
+    rc = loom_pool_deliver(bank, pool, &result.receipt);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    l->cq_tail = tail + 1u;
+    __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+    poll_waiter_list_wake(&l->cq_waiters);
+    return 0;
+}
+
+
+int loom_private_post_terminal(struct Loom *l, struct loom_request_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    struct loom_request_table *t = &l->service_requests;
+    u64 user_data; s32 result;
+    int rc = loom_request_peek(t,ref,&user_data,&result);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    if (t->detached) { spin_unlock(&l->lock); return -T_E_CANCELED; }
+    struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
+    u32 tail = l->cq_tail;
+    u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+    if ((u32)(tail-head) >= l->cq_entries) {
+        spin_unlock(&l->lock);
+        return -T_E_AGAIN;
+    }
+    u32 idx = tail & (l->cq_entries-1u);
+    struct loom_cqe *cq = (void *)(l->ring_kva+l->cqe_off);
+    cq[idx] = (struct loom_cqe){ .user_data=user_data, .result=result };
+    if (l->receipt_size) {
+        struct loom_service_buffer_receipt *receipts = (void *)(l->ring_kva+l->receipt_off);
+        receipts[idx] = (struct loom_service_buffer_receipt){0};
+    }
+    // No abort check here: a terminal committed before abort stays truthful.
+    // Copy, mark delivered, and publish the tail under one lock interval.
+    rc = loom_request_deliver(t,ref);
+    if (rc) { spin_unlock(&l->lock); return rc; }
+    l->cq_tail = tail+1u;
+    __atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+    poll_waiter_list_wake(&l->cq_waiters);
+    return 0;
+}
+
+
+// =============================================================================
+// Loom-3: SQE dispatch + the submit-time pin (I-30) + SYS_LOOM_ENTER.
+// =============================================================================
+
+// Map an engine completion to the CQE result for a scalar-result op (NOP /
+// FSYNC). `status` from the engine is already 0 (success) or -errno (Rlerror /
+// transport). Payload opcodes (Loom-6) will read dr->read_count etc. when
+// status == 0; for the scalar ops dr is unused.
+static s32 loom_scalar_result(int status) {
+    if (status > 0) return 0;          // defensive: scalar ops carry no positive payload
+    return (s32)status;
+}
+
+// Byte copy (the 9p_client.c client_copy precedent; no freestanding memcpy
+// symbol). Both ends are pinned kernel memory in the only caller.
+static void loom_bufcopy(u8 *dst, const u8 *src, u32 n) {
+    for (u32 i = 0; i < n; i++) dst[i] = src[i];
+}
+
+// Loom-6: the CQE result for a completed op + (for READ) the wire->buffer copy.
+// Runs UNDER c->lock from loom_async_complete; `dr` aliases the transport recv
+// buffer and is valid ONLY for that callback, so the READ copy MUST happen here.
+// The destination is the op's submit-time-pinned, contiguous direct-map slice
+// (no fault, no sleep), so the copy composes with the seam contract. An error
+// completion (status < 0) copies nothing and passes the -errno through.
+//   READ  -> copy min(reply count, the op's slice) into the buffer; result is
+//            the byte count actually read.
+//   WRITE -> result is the server-accepted byte count; the data already went out
+//            in the build thunk.
+//   else  -> the scalar mapping (NOP / FSYNC).
+// The Loom GETATTR / STATFS output ABI: the kernel copies the parsed record
+// verbatim into the registered buffer, so struct p9_attr / struct p9_statfs ARE
+// the userspace-visible output layout (the native libthyla_rs::loom side mirrors
+// them at Loom-6d). The field set mirrors 9P2000.L Rgetattr / Rstatfs (itself a
+// stable wire ABI); these asserts pin the size so a future kernel field add
+// cannot silently shift the Loom output ABI -- it trips the build instead.
+_Static_assert(sizeof(struct p9_attr) == 160, "Loom GETATTR output ABI pinned at 160 bytes");
+_Static_assert(sizeof(struct p9_statfs) == 64, "Loom STATFS output ABI pinned at 64 bytes");
+// Loom-6b-2 SETATTR INPUT ABI: userspace writes a struct p9_setattr into the
+// registered buffer; the build thunk reads it (align-safe copy). Pinned so a
+// future kernel field add cannot silently shift the input layout.
+_Static_assert(sizeof(struct p9_setattr) == 56, "Loom SETATTR input ABI pinned at 56 bytes");
+// 6c audit F4: pin the load-bearing field OFFSETS too, not just the size -- a
+// same-size field reorder (e.g. swapping two u32s) leaves sizeof unchanged but
+// silently shifts the byte-pinned Loom ABI the native libthyla_rs::loom mirror
+// reads/writes. Catch that drift at build time (CLAUDE.md compile-time invariants).
+_Static_assert(__builtin_offsetof(struct p9_attr, valid) == 0,  "Loom p9_attr.valid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, mode)  == 24, "Loom p9_attr.mode ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, uid)   == 28, "Loom p9_attr.uid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, gid)   == 32, "Loom p9_attr.gid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, size)  == 56, "Loom p9_attr.size ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, valid) == 0,  "Loom p9_setattr.valid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, mode)  == 4,  "Loom p9_setattr.mode ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, uid)   == 8,  "Loom p9_setattr.uid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, gid)   == 12, "Loom p9_setattr.gid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, size)  == 16, "Loom p9_setattr.size ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, type)    == 0,  "Loom p9_statfs.type ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, bsize)   == 4,  "Loom p9_statfs.bsize ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, blocks)  == 8,  "Loom p9_statfs.blocks ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, namelen) == 56, "Loom p9_statfs.namelen ABI offset");
+
+// 6c audit F1: map a byte COUNT to a CQE result without aliasing the error
+// region. The CQE ABI is result >= 0 = byte count, result < 0 = -errno; a count
+// that would set the sign bit (> INT32_MAX -- a multi-GiB registered buffer, or
+// an over-large server-reported write/read count) must NOT wrap to a spurious
+// -errno. The data was already placed (READ) / accepted (WRITE); only the
+// reported magnitude caps. Clamp so the s32 cast stays non-negative.
+static s32 loom_count_result(u32 got) {
+    if (got > 0x7FFFFFFFu) got = 0x7FFFFFFFu;
+    return (s32)got;
+}
+
+static s32 loom_payload_result(struct loom_async_op *op, int status,
+                               struct p9_dispatch_result *dr) {
+    if (status < 0) return (s32)status;        // error reply: -errno, no payload
+    // Weft-6c zero-copy completion: the bytes already moved through the shared ring
+    // (netd in place -- a READ's bytes are in the guest's ring slice; a WRITE's were
+    // read out of it), so the kernel copies NOTHING. The Rweftio count IS the result
+    // (the byte count netd moved). No loom_bufcopy -- that is the zero-copy property.
+    if (op->weft) return dr ? loom_count_result(dr->weftio_count) : 0;
+    switch (op->opcode) {
+    case LOOM_OP_READ: {
+        if (!dr) return 0;
+        u32 got = dr->read_count;
+        if (got > op->op_count) got = op->op_count;   // never overrun the pinned slice
+        if (got != 0 && dr->read_data && op->buf_kva)
+            loom_bufcopy(op->buf_kva, dr->read_data, got);
+        return loom_count_result(got);
+    }
+    case LOOM_OP_WRITE:
+        return dr ? loom_count_result(dr->write_count) : 0;
+    // Loom-6b read-shaped output: copy the reply payload INTO the pinned dest
+    // slice, bounded by op_count (the dest capacity) so a short buffer can never
+    // overrun. READDIR / READLINK stream bytes; GETATTR / STATFS copy the parsed
+    // fixed record. The CQE result is the byte count placed in the buffer.
+    case LOOM_OP_READDIR: {
+        if (!dr) return 0;
+        u32 got = dr->readdir_count;
+        if (got > op->op_count) got = op->op_count;
+        if (got != 0 && dr->readdir_data && op->buf_kva)
+            loom_bufcopy(op->buf_kva, dr->readdir_data, got);
+        return loom_count_result(got);
+    }
+    case LOOM_OP_READLINK: {
+        if (!dr) return 0;
+        u32 got = dr->readlink_target_len;
+        if (got > op->op_count) got = op->op_count;
+        if (got != 0 && dr->readlink_target && op->buf_kva)
+            loom_bufcopy(op->buf_kva, dr->readlink_target, got);
+        return loom_count_result(got);
+    }
+    case LOOM_OP_GETATTR: {
+        if (!dr) return 0;
+        // IDENTITY-DESIGN 3.2: userspace sees the owner the kernel's own stat
+        // reports -- on a caped session the cape's, marked valid like any
+        // server-filled field.
+        struct p9_attr a;
+        loom_bufcopy((u8 *)&a, (const u8 *)&dr->attr, (u32)sizeof(a));
+        if (op->client->cape) {
+            a.uid    = op->client->cape_uid;
+            a.gid    = op->client->cape_gid;
+            a.valid |= P9_GETATTR_UID | P9_GETATTR_GID;
+        }
+        u32 got = (u32)sizeof(struct p9_attr);
+        if (got > op->op_count) got = op->op_count;   // honor a short dest (no overrun)
+        if (got != 0 && op->buf_kva)
+            loom_bufcopy(op->buf_kva, (const u8 *)&a, got);
+        return loom_count_result(got);
+    }
+    case LOOM_OP_STATFS: {
+        if (!dr) return 0;
+        u32 got = (u32)sizeof(struct p9_statfs);
+        if (got > op->op_count) got = op->op_count;
+        if (got != 0 && op->buf_kva)
+            loom_bufcopy(op->buf_kva, (const u8 *)&dr->statfs, got);
+        return loom_count_result(got);
+    }
+    default:
+        return loom_scalar_result(status);            // NOP / FSYNC
+    }
+}
+
+// The async completion callback (the POST_CQE front-end). Runs UNDER the 9P
+// client's c->lock (invoked from demux_frame_locked / client_mark_dead_locked),
+// so it MUST NOT sleep or re-enter the p9_client_* API (the seam contract in
+// 9p_client.h). It posts exactly one CQE (loom_post_cqe -- a leaf lock, the
+// c->lock -> l->lock order) and marks the op terminal + drops the in-flight
+// count under l->lock. It does NOT free the container or clunk the pin (both may
+// sleep); the reap sweep (loom_reap_terminal, run outside any lock from the
+// SYS_LOOM_ENTER caller) does that.
+static void loom_async_complete(struct p9_rpc *rpc, int status,
+                                struct p9_dispatch_result *dr) {
+    struct loom_async_op *op = (struct loom_async_op *)rpc;   // rpc at offset 0
+    struct Loom *l = op->loom;
+
+    // Compute the CQE result + (READ) copy the reply payload into the pinned
+    // buffer NOW, while `dr` is valid (it aliases the recv buffer for this call
+    // only). For a multishot stream this runs once per shot. Scalar ops (NOP /
+    // FSYNC) fall through to the scalar mapping.
+    s32 result = loom_payload_result(op, status, dr);
+
+    // MORE vs terminal (specs/loom_multishot.tla ReplyArrives). A single-shot op
+    // (Loom-3) always terminates. A multishot op posts a LOOM_CQE_MORE shot and
+    // RE-ARMS on a successful non-terminal reply, and TERMINATES on an error reply
+    // (the stream ends on error), on reaching its shot bound, or -- defensively --
+    // if the shot CQE cannot post (submit-time admission makes that unreachable;
+    // fail-safe to terminal rather than re-arm into a lost shot). The terminal CQE
+    // clears LOOM_CQE_MORE (TerminalEndsStream -- the Tapestry recycle gate).
+    bool term;
+    if (!op->multishot)                        term = true;
+    else if (status < 0)                       term = true;   // error ends the stream
+    else if (op->shots + 1u >= op->shot_limit) term = true;   // synthetic FSYNC bound
+    else                                       term = false;  // a MORE shot -> re-arm
+
+    u32 cqe_flags = term ? 0u : LOOM_CQE_MORE;
+    int posted = loom_post_cqe(l, op->user_data, result, cqe_flags);
+
+    // Update op state under l->lock so the reap / re-arm sweeps observe a
+    // consistent (terminal | rearm, async_inflight) pair. The CQE was already
+    // posted above. This op's reservation is resolved EITHER WAY: a MORE shot
+    // re-acquires its next slot in loom_rearm_pending; a terminal needs none.
+    spin_lock(&l->lock);
+    if (l->async_inflight > 0) l->async_inflight--;
+    if (!term && posted == 0) {
+        op->shots++;
+        op->rearm = true;          // the drive loop re-issues `build` (outside c->lock)
+        __atomic_fetch_add(&l->rearm_pending, 1u, __ATOMIC_RELEASE);  // SQPOLL park-cond hint
+    } else {
+        op->terminal = true;       // terminal (or a failed MORE post -> end the stream)
+        // Loom-5b: record the chain result so the next admission pass admits the
+        // linked/post-drain successors (DONE_OK) or cancels the chain (DONE_FAIL).
+        // A chain op is never multishot, so `term` is always true here -- the
+        // guard is defensive. The state write is under l->lock, paired with the
+        // admit pass's read under l->lock (no torn read; the successor sees the
+        // result on the drive loop's next loom_admit_chain).
+        if (op->chain) {
+            op->chain->state = (status < 0) ? LOOM_CHAIN_DONE_FAIL
+                                            : LOOM_CHAIN_DONE_OK;
+        }
+    }
+    spin_unlock(&l->lock);
+}
+
+// Tmsg builder thunk for LOOM_OP_FSYNC. Invoked by p9_client_submit_async under
+// the client's c->lock; allocates the 9P tag + marks outstanding. `ctx` is the
+// loom_async_op (it carries the resolved fid + datasync).
+static int loom_build_fsync(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_fsync(s, out, cap, op->op_fid, op->op_arg);
+}
+
+// Tmsg builder thunks for the data-path ops (Loom-6). Invoked by
+// p9_client_submit_async under c->lock. READ carries no payload (the reply
+// brings the data); WRITE's payload is read FROM the pinned registered buffer
+// slice (op->buf_kva, pinned kernel memory -- no fault, no sleep). An over-msize
+// count makes p9_session_send_* return < 0, which submit_async turns into one
+// -P9_E_IO error CQE (the op is single-frame; userspace splits large I/O).
+static int loom_build_read(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_read(s, out, cap, op->op_fid, op->op_offset, op->op_count);
+}
+static int loom_build_write(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_write(s, out, cap, op->op_fid, op->op_offset,
+                                 op->op_count, op->buf_kva);
+}
+
+// Weft-6c: the zero-copy data drive (NET-THROUGHPUT 6; I-37). A READ/WRITE on a
+// /net data fid whose registered buffer is the per-flow shared ring issues a
+// Tweftio carrying the payload-relative ring offset + len + direction -- NO payload
+// rides the wire (netd moves the bytes IN PLACE in the shared ring). The direction
+// is the opcode (READ -> netd writes the recv'd bytes into the slice; WRITE -> netd
+// reads the slice + sends). The descriptor was validated + op_offset computed at
+// submit (loom_submit_payload, via weft_binding_validate_rw -- the same gate the
+// synchronous dev9p_weft_try_rw uses), so op_offset already fits the u32 ring domain.
+static int loom_build_weftio(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    u32 dir = (op->opcode == LOOM_OP_READ) ? WEFT_DIR_READ : WEFT_DIR_WRITE;
+    return p9_session_send_weftio(s, out, cap, op->op_fid, (u32)op->op_offset,
+                                  op->op_count, dir);
+}
+
+// Loom-6b read-shaped builders. READDIR mirrors READ (op_offset = dir offset,
+// op_count = byte count -> a dirent stream reply). READLINK / GETATTR / STATFS
+// carry no request count (the reply size is server-chosen): the registered
+// buffer is purely the completion-time destination, and op_count is the dest
+// capacity that bounds the copy. GETATTR's op_offset carries the request_mask.
+static int loom_build_readdir(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_readdir(s, out, cap, op->op_fid, op->op_offset, op->op_count);
+}
+static int loom_build_readlink(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_readlink(s, out, cap, op->op_fid);
+}
+static int loom_build_getattr(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_getattr(s, out, cap, op->op_fid, op->op_offset);
+}
+static int loom_build_statfs(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_statfs(s, out, cap, op->op_fid);
+}
+
+// Loom-6b-2 metadata-MUTATION builders. Each reads its name(s) FROM the pinned
+// buffer region (op->buf_kva, op->op_count bytes -- the WRITE-payload discipline)
+// and decodes its op-specific scalars + name sub-lengths from the TOCTOU SQE
+// snapshot (op->sqe). The submit gate validated every sub-length <= the pinned
+// span and SETATTR's struct span, so these reads never overrun the slice. The
+// two-fid builders pass op->op_fid2 (the second resolved fid). The reply is
+// scalar (Rsetattr / Rmkdir-with-qid-dropped / Runlinkat / ... -> the default
+// 0/-errno mapping in loom_payload_result).
+static int loom_build_setattr(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    // Copy the input out of the (possibly unaligned) pinned slice into a local:
+    // the wire encoder reads u64 fields, which need natural alignment. The submit
+    // gate checked op_count >= sizeof(struct p9_setattr), so the copy is in-bounds.
+    struct p9_setattr attr;
+    loom_bufcopy((u8 *)&attr, op->buf_kva, (u32)sizeof(attr));
+    return p9_session_send_setattr(s, out, cap, op->op_fid, &attr);
+}
+static int loom_build_unlinkat(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_unlinkat(s, out, cap, op->op_fid,
+                                    op->names, op->op_count, (u32)op->sqe.offset);
+}
+static int loom_build_mkdir(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_mkdir(s, out, cap, op->op_fid,
+                                 op->names, op->op_count,
+                                 (u32)op->sqe._resv1[1], (u32)op->sqe._resv1[2]);
+}
+static int loom_build_mknod(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_mknod(s, out, cap, op->op_fid,
+                                 op->names, op->op_count,
+                                 (u32)op->sqe._resv1[1], (u32)op->sqe._resv1[2],
+                                 (u32)op->sqe._resv1[3], (u32)op->sqe.offset);
+}
+static int loom_build_symlink(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    u32 name_len = (u32)op->sqe._resv1[1];          // the split (<= op_count, submit-checked)
+    return p9_session_send_symlink(s, out, cap, op->op_fid,
+                                   op->names, name_len,
+                                   op->buf_kva + name_len, op->op_count - name_len,
+                                   (u32)op->sqe._resv1[2]);
+}
+static int loom_build_renameat(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    u32 oldname_len = (u32)op->sqe._resv1[1];       // the split (<= op_count, submit-checked)
+    return p9_session_send_renameat(s, out, cap,
+                                    op->op_fid,  op->names, oldname_len,
+                                    op->op_fid2, op->names + oldname_len,
+                                    op->op_count - oldname_len);
+}
+static int loom_build_link(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    // dfid = op_fid (where the link lands); source inode = op_fid2; name = region.
+    return p9_session_send_link(s, out, cap, op->op_fid, op->op_fid2,
+                                op->names, op->op_count);
+}
+
+// Post a terminal CQE inline (no engine round-trip): the NOP success (result 0)
+// and every submit-time-gate failure (bad opcode / handle / rights / OOM ->
+// -errno). The SQE was consumed; userspace learns the result via the CQE, not a
+// dropped SQE (io_uring semantics).
+static void loom_complete_inline(struct Loom *l, u64 user_data, s32 result) {
+    (void)loom_post_cqe(l, user_data, result, 0);
+}
+
+// Loom-5b: record a chain entry's INLINE-completion result (a fast-path op passes
+// chain == NULL -> no-op). The async path does NOT call this -- it sets the back-
+// pointer + leaves the entry INFLIGHT, and loom_async_complete records the result
+// on the reply (under l->lock). The write is UNDER l->lock (audit F3) to match the
+// locked readers (loom_admit_chain's walk + loom_chain_drain_admits) + the locked
+// writer (loom_async_complete's chain->state store) -- a data-race-free single-
+// writer per entry (the INFLIGHT claim under l->lock serializes which driver
+// dispatches an entry, so only that driver reaches here for it).
+static void loom_chain_done(struct Loom *l, struct loom_chain_op *chain, bool ok) {
+    if (!chain) return;
+    spin_lock(&l->lock);
+    chain->state = ok ? LOOM_CHAIN_DONE_OK : LOOM_CHAIN_DONE_FAIL;
+    spin_unlock(&l->lock);
+}
+
+// Dispatch a buffer-backed payload op (READ / WRITE / READDIR / READLINK /
+// GETATTR / STATFS -- Loom-6a + 6b-1; SETATTR / MKDIR / MKNOD / SYMLINK /
+// UNLINKAT / RENAMEAT / LINK -- Loom-6b-2). Resolves + PINS the registered file
+// handle (spoor_ref) AND the registered buffer (burrow_ref) -- two independent
+// I-30 submit-time pins held for the op's whole lifetime so a concurrent
+// re-register / clunk / munmap cannot make completion act against a different
+// object or freed pages. The two-fid mutation ops (RENAMEAT / LINK) pin a THIRD
+// object -- a second registered handle (the same I-30 mechanism applied again),
+// required in the SAME 9P session as the first. Bounds-checks the buffer slice +
+// (mutation) the name sub-lengths / the SETATTR struct span, rights-gates per
+// opcode (mirroring the kernel-syscall handle-rights for the equivalent op), and
+// submits the async Tmsg. The builder + the required rights are selected
+// per-opcode; the rest of the pin / bounds / submit machinery is shared.
+// Single-shot only: a real multishot payload op needs an event-source dev
+// (post-Loom graphics), so MULTISHOT here is rejected by the caller. Every
+// failure path routes through `fail` -> releases whatever it pinned + posts one
+// CQE.
+// LOOM.md 8.5.1 -- the directory-mutation authority. The rights snapshot is
+// necessary but NOT sufficient for these ops: their directory handle is normally
+// O_PATH, born R|W with no check on its target, so its RIGHT_WRITE is hollow. The
+// sync twins (spoor_unlink_in_dir, spoor_rename_in_dirs, SYS_WALK_CREATE's parent
+// gate) re-check the DAC at the operation; these did not, and since A-3b the
+// kernel is the only rwx enforcer (IDENTITY-DESIGN 3.7) -- Stratum checks dataset
+// scope, not file bits -- so any principal that could X-search to a directory
+// could create, unlink, rename, link or symlink entries in it.
+static bool loom_op_mutates_dir(u8 opcode) {
+    switch (opcode) {
+    case LOOM_OP_MKDIR:
+    case LOOM_OP_MKNOD:
+    case LOOM_OP_SYMLINK:
+    case LOOM_OP_UNLINKAT:
+    case LOOM_OP_RENAMEAT:
+    case LOOM_OP_LINK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// One child name, shaped as the sync twins' sys_copy_component shapes it:
+// 1..SYS_WALK_OPEN_NAME_MAX bytes, no '/' or NUL, and not "." or "..".
+static bool loom_component_ok(const u8 *p, u32 n) {
+    if (n == 0 || n > SYS_WALK_OPEN_NAME_MAX)        return false;
+    for (u32 i = 0; i < n; i++)
+        if (p[i] == '/' || p[i] == '\0')             return false;
+    if (n == 1 && p[0] == '.')                       return false;
+    if (n == 2 && p[0] == '.' && p[1] == '.')        return false;
+    return true;
+}
+
+// How many leading region bytes are names: all of them, except SYMLINK's target
+// (a path, which stays in the buffer). 0 = a span no valid name set can have.
+static u32 loom_names_len(const struct loom_sqe *sqe, u32 count) {
+    u32 split = (u32)sqe->_resv1[1];
+    switch (sqe->opcode) {
+    case LOOM_OP_SYMLINK:  return split <= SYS_WALK_OPEN_NAME_MAX ? split : 0;
+    case LOOM_OP_RENAMEAT: return count <= 2u * SYS_WALK_OPEN_NAME_MAX ? count : 0;
+    default:               return count <= SYS_WALK_OPEN_NAME_MAX ? count : 0;
+    }
+}
+
+// The copied names: RENAMEAT's two halves split at _resv1[1] (0 < split < count,
+// checked at submit), SYMLINK's name before it, every other op's whole span.
+static bool loom_names_ok(const struct loom_sqe *sqe, const u8 *names, u32 count) {
+    u32 split = (u32)sqe->_resv1[1];
+    switch (sqe->opcode) {
+    case LOOM_OP_SYMLINK:  return loom_component_ok(names, split);
+    case LOOM_OP_RENAMEAT: return loom_component_ok(names, split) &&
+                                  loom_component_ok(names + split, count - split);
+    default:               return loom_component_ok(names, count);
+    }
+}
+
+// The creating Proc (l->ident), validated like loom_owner_live: a stale pointer
+// reads as absent, and absent fails the caller closed.
+static const struct Proc *loom_ident_live(const struct Loom *l) {
+    const struct Proc *who = l->ident;
+    if (!who)                                              return NULL;
+    if (who->magic != PROC_MAGIC || who->pid != l->ident_pid) return NULL;
+    return who;
+}
+
+// The sync twins' parent check, verbatim in shape: gated on perm_enforced, no
+// stat -> -EIO, no W|X -> -EACCES.
+static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
+    if (!dir->dev)                                   return -(s32)T_E_IO;
+    if (!dir->dev->perm_enforced)                    return 0;
+    struct t_stat st;
+    if (spoor_stat_native(dir, &st) != 0)            return -(s32)T_E_IO;
+    if (perm_check(who, &st, PERM_W | PERM_X) != 0)  return -(s32)T_E_ACCES;
+    return 0;
+}
+
+// The gate. Runs in the submitter's syscall context only: the caller has refused
+// an SQPOLL ring already, because its kthread must never block on a wire RPC (a
+// hung server would keep it from its stop flag and loom_free's join would hang
+// the owner's exit). `dir2` is RENAMEAT's newdir; LINK's second handle is its
+// SOURCE, which POSIX link does not ask to be writable, so it is not checked.
+// For the create ops, *gid_out is the resolved group: SQE gid 0 (GID_INVALID) is
+// the creator's primary group, as the sync create always uses; any other must be
+// one the creator may chgrp a file it owns to (perm_wstat_check, cur_uid = the
+// creator: a member group, or chown-any authority). On a caped session
+// (IDENTITY-DESIGN 3.2) the group is the cape's and the wire carries P9_NOGID, so
+// the server leaves its own alone; naming a group there is a chgrp, which the cape
+// refuses.
+static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *sqe,
+                                  const struct p9_client *cl,
+                                  struct Spoor *dir, struct Spoor *dir2,
+                                  u32 *gid_out, bool *gid_set) {
+    const struct Proc *who = loom_ident_live(l);
+    if (!who)                                        return -(s32)T_E_ACCES;
+    s32 e = loom_dir_writable(who, dir);
+    if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2);
+    if (e != 0)                                      return e;
+    if (sqe->opcode != LOOM_OP_MKDIR && sqe->opcode != LOOM_OP_MKNOD &&
+        sqe->opcode != LOOM_OP_SYMLINK)              return 0;
+    u64 raw = (sqe->opcode == LOOM_OP_MKNOD) ? sqe->offset : sqe->_resv1[2];
+    if (raw > (u64)0xFFFFFFFFu)                      return -(s32)T_E_INVAL;
+    u32 gid = (u32)raw;
+    if (cl->cape) {
+        if (gid != GID_INVALID)                      return -(s32)T_E_ACCES;
+        gid = P9_NOGID;
+    } else if (gid == GID_INVALID) {
+        gid = who->primary_gid;
+    } else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0) {
+        return -(s32)T_E_ACCES;
+    }
+    *gid_out = gid;
+    *gid_set = true;
+    return 0;
+}
+
+static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
+                                struct loom_chain_op *chain) {
+    u64 ud = sqe->user_data;
+
+    // All resolve locals declared before the first `goto fail` (no
+    // jump-bypasses-init). `fail` releases whatever is non-NULL, so the
+    // before-pin early checks route through it harmlessly (all NULL there).
+    // All locals (incl. the sqe-derived ones) declared + initialized BEFORE the
+    // first `goto fail`, so no goto bypasses an initializer (-Wjump-misses-init
+    // clean). `fail` releases whatever is non-NULL, so a before-pin early check
+    // routes through it harmlessly (sp / sp2 / buf all still NULL there).
+    p9_session_build_fn build = NULL;
+    rights_t            need1 = 0;
+    rights_t            need2 = 0;          // 0 => single-fid op
+    bool                has_second = false;
+    struct Spoor  *sp  = NULL, *sp2 = NULL; rights_t rt = 0, rt2 = 0;
+    struct Burrow *buf = NULL; u8 *buf_kva = NULL;
+    struct p9_client *cl = NULL; u32 fid = 0, fid2 = 0;
+    struct loom_async_op *op = NULL;
+    bool buf_bad = false;
+    s32  err = 0;
+    u32  idx2    = LOOM_SQE_FID2(sqe);
+    u64  buf_off = LOOM_SQE_BUF_OFF(sqe);
+    u32  count   = sqe->len;                // total pinned-region span
+    u32  bidx    = sqe->buf_idx_or_off;
+    // Weft-6c: buf_reg_len is the registered buffer's whole length (NOT the slice
+    // count) -- the whole-ring-registration check that makes buf_off ring-base-
+    // relative. is_weft / weft_off carry the routing decision down to the op fields.
+    u32  buf_reg_len = 0;
+    bool is_weft  = false;
+    u32  weft_off = 0;
+    // LOOM.md 8.5.1: a create op's resolved group, written into the op's snapshot.
+    u32  cgid     = 0;
+    bool cgid_set = false;
+
+    // Opcode -> (Tmsg builder, primary right, secondary right). need2 != 0 marks
+    // a two-fid op (RENAMEAT / LINK) whose SECOND registered-handle index lives in
+    // LOOM_SQE_FID2(sqe). The rights mirror the kernel-syscall handle gates:
+    // RIGHT_WRITE on a mutated directory / file (create / unlink / rename / wstat),
+    // RIGHT_READ on a merely-referenced source (LINK's). loom_submit_one routes
+    // exactly the buffer-backed opcodes here, so the default is unreachable.
+    switch (sqe->opcode) {
+    case LOOM_OP_WRITE:    build = loom_build_write;    need1 = RIGHT_WRITE; break;
+    case LOOM_OP_READ:     build = loom_build_read;     need1 = RIGHT_READ;  break;
+    case LOOM_OP_READDIR:  build = loom_build_readdir;  need1 = RIGHT_READ;  break;
+    case LOOM_OP_READLINK: build = loom_build_readlink; need1 = RIGHT_READ;  break;
+    case LOOM_OP_GETATTR:  build = loom_build_getattr;  need1 = RIGHT_READ;  break;
+    case LOOM_OP_STATFS:   build = loom_build_statfs;   need1 = RIGHT_READ;  break;
+    case LOOM_OP_SETATTR:  build = loom_build_setattr;  need1 = RIGHT_WRITE; break;
+    case LOOM_OP_MKDIR:    build = loom_build_mkdir;    need1 = RIGHT_WRITE; break;
+    case LOOM_OP_MKNOD:    build = loom_build_mknod;    need1 = RIGHT_WRITE; break;
+    case LOOM_OP_SYMLINK:  build = loom_build_symlink;  need1 = RIGHT_WRITE; break;
+    case LOOM_OP_UNLINKAT: build = loom_build_unlinkat; need1 = RIGHT_WRITE; break;
+    case LOOM_OP_RENAMEAT: build = loom_build_renameat; need1 = RIGHT_WRITE; need2 = RIGHT_WRITE; break;
+    case LOOM_OP_LINK:     build = loom_build_link;     need1 = RIGHT_WRITE; need2 = RIGHT_READ;  break;
+    default: err = -(s32)T_E_INVAL; goto fail;
+    }
+    has_second = (need2 != 0);
+
+    if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) { err = -(s32)T_E_INVAL; goto fail; }
+    if (has_second && idx2 >= LOOM_MAX_REG_HANDLES) { err = -(s32)T_E_INVAL; goto fail; }
+
+    // Submit-time descriptor validation on the kernel SNAPSHOT (ring TOCTOU --
+    // never re-read the shared ring after this). These are MEMORY-SAFETY gates
+    // that bound the build thunk's reads into the pinned region:
+    //   - a two-name op (SYMLINK / RENAMEAT) splits the region at _resv1[1]; that
+    //     sub-length must lie strictly inside the span -- 0 < split < count -- so
+    //     buf_kva+split stays in the slice AND both halves are non-empty (6c audit
+    //     F2: the old `> count` gate let split == count through, sending an empty
+    //     second name that SYMLINK accepted but RENAMEAT rejected -- inconsistent;
+    //     and a valid two-name op has two non-empty names, so reject both degenerate
+    //     splits uniformly here rather than diverging per-op deep in the builders);
+    //   - SETATTR's region must hold a whole struct p9_setattr.
+    // (A merely-over-msize name is caught later by the builder returning < 0 -> one
+    // error CQE; THIS check is the memory-safety gate, not the protocol one.)
+    if ((sqe->opcode == LOOM_OP_SYMLINK || sqe->opcode == LOOM_OP_RENAMEAT) &&
+        ((u32)sqe->_resv1[1] == 0 || (u32)sqe->_resv1[1] >= count)) {
+        err = -(s32)T_E_INVAL; goto fail;
+    }
+    if (sqe->opcode == LOOM_OP_SETATTR &&
+        count < (u32)sizeof(struct p9_setattr)) { err = -(s32)T_E_INVAL; goto fail; }
+
+    // Resolve + pin the primary handle, the SECOND handle (two-fid ops), AND the
+    // registered buffer TOGETHER under one l->lock, so a concurrent
+    // LOOM_REGISTER_HANDLES / LOOM_REGISTER_BUFFERS re-install cannot free any of
+    // them between the read and the ref.
+    spin_lock(&l->lock);
+    sp = l->reg[sqe->handle_idx].spoor;
+    rt = l->reg[sqe->handle_idx].rights;
+    if (sp) spoor_ref(sp);
+    if (has_second) {
+        sp2 = l->reg[idx2].spoor;
+        rt2 = l->reg[idx2].rights;
+        if (sp2) spoor_ref(sp2);
+    }
+    if (bidx < l->n_reg_buf && l->reg_buf[bidx].burrow) {
+        struct loom_reg_buffer *rb = &l->reg_buf[bidx];
+        // Slice bounds (no overflow: rb->len is u32, buf_off u64): the op's
+        // [buf_off, buf_off+count) must lie within the registered buffer.
+        if (buf_off <= (u64)rb->len && (u64)count <= (u64)rb->len - buf_off) {
+            buf         = rb->burrow;
+            buf_kva     = rb->kva + buf_off;
+            buf_reg_len = rb->len;           // Weft-6c: the whole registered length
+            burrow_ref(buf);                 // the I-30 buffer pin
+        } else {
+            buf_bad = true;
+        }
+    } else {
+        buf_bad = true;
+    }
+    spin_unlock(&l->lock);
+
+    // Failure ladder -> the single cleanup epilogue. The success path adopts
+    // sp / sp2 / buf into the op and returns BEFORE `fail`.
+    if (!sp)                          { err = -(s32)T_E_BADF;  goto fail; }   // empty primary slot
+    if (has_second && !sp2)           { err = -(s32)T_E_BADF;  goto fail; }   // empty second slot
+    if (buf_bad)                      { err = -(s32)T_E_INVAL; goto fail; }   // bad buf idx / OOB slice
+    // Submit-time rights gates (I-2 / I-6; reg in AllowedObjs). Snapshot at
+    // submit, NEVER re-checked at completion (I-30). need1/need2 were selected
+    // from the opcode above.
+    if (!(rt & need1))                { err = -(s32)T_E_ACCES; goto fail; }
+    if (has_second && !(rt2 & need2)) { err = -(s32)T_E_ACCES; goto fail; }
+    // #81 F2: an O_PATH (CWALKONLY) handle does NO byte/dir-content I/O. Reject the
+    // content opcodes (READ/WRITE/READDIR) on a CWALKONLY-pinned Spoor -- mirrors the
+    // syscall-path gate. The metadata READ opcodes (GETATTR/STATFS/READLINK) are the
+    // fstat-equivalent class, allowed on O_PATH; the CHILD-create opcodes (MKDIR/MKNOD/
+    // SYMLINK/UNLINKAT) create/remove a child OF the O_PATH directory base -- the
+    // create-from-O_PATH-base pattern. Allowed like SYS_WALK_CREATE only because,
+    // like it, they then answer to the parent's W|X (loom_dir_mutation_gate, below):
+    // the handle's RIGHT_WRITE says nothing about the directory's bits.
+    // Defense-in-depth: today an O_PATH dev9p fid is un-Tlopen'd so the server rejects
+    // Tread/Treaddir, but this makes the block in-kernel.
+    if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE ||
+         sqe->opcode == LOOM_OP_READDIR) && (sp->flag & CWALKONLY)) {
+        err = -(s32)T_E_INVAL; goto fail;
+    }
+    // T_WSTAT_SIZE audit F1/F2: LOOM_OP_SETATTR is NOT a create-from-O_PATH-base op
+    // (those create a CHILD; handled above) -- it MUTATES the TARGET the fid points
+    // at, so its authority splits by axis exactly as the sync SYS_WSTAT path
+    // (kernel/syscall.c::sys_wstat_for_proc):
+    //   * SIZE (truncate) = a CONTENT mutation; authority is the fd's RIGHT_WRITE
+    //     (POSIX write-opened-fd; need1 checked above). But an O_PATH (CWALKONLY)
+    //     handle is born RIGHT_WRITE + perm_check-EXEMPT -> its RIGHT_WRITE is HOLLOW,
+    //     so SIZE-on-CWALKONLY truncates a no-W-permission file (the async twin of the
+    //     sync O_PATH bypass). Reject it; bound size to the s64 domain (sync parity).
+    //   * MODE/UID/GID (chmod/chown) = IDENTITY authority (owner-only chmod / CAP
+    //     chown -- perm_wstat_check), which the ASYNC submit CANNOT evaluate without a
+    //     blocking owner-stat. A hollow-RIGHT_WRITE O_PATH handle would otherwise
+    //     chmod/chown ANY X-reachable file. v1.0 Loom SETATTR therefore supports ONLY
+    //     size-truncate; the identity axes are rejected FAIL-CLOSED. Async
+    //     identity-setattr is a v1.x seam (a submit-stat or a completion-recheck).
+    //   * atime/mtime (and any other bit) are unsupported -- reject (sync parity).
+    if (sqe->opcode == LOOM_OP_SETATTR) {
+        struct p9_setattr sa_chk;
+        loom_bufcopy((u8 *)&sa_chk, buf_kva, (u32)sizeof(sa_chk));
+        if (sa_chk.valid & ~(u32)(P9_SETATTR_MODE | P9_SETATTR_UID |
+                                  P9_SETATTR_GID | P9_SETATTR_SIZE)) {
+            err = -(s32)T_E_INVAL; goto fail;
+        }
+        if (sa_chk.valid & (P9_SETATTR_MODE | P9_SETATTR_UID | P9_SETATTR_GID)) {
+            err = -(s32)T_E_ACCES; goto fail;   // F2: async identity-setattr deferred
+        }
+        if (sa_chk.valid & P9_SETATTR_SIZE) {
+            if (sp->flag & CWALKONLY) { err = -(s32)T_E_INVAL; goto fail; }   // F1 P0
+            if (sa_chk.size > 0x7FFFFFFFFFFFFFFFull) {
+                err = -(s32)T_E_INVAL; goto fail;                            // s64 bound
+            }
+        }
+    }
+    if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
+    if (has_second) {
+        struct p9_client *cl2; u32 f2;
+        if (dev9p_client_fid(sp2, &cl2, &f2) != 0) { err = -(s32)T_E_INVAL; goto fail; }
+        // A 9P renameat/link names two fids in ONE fid namespace -- reject a
+        // cross-session pair (mirrors sys_rename's same-Dev/same-p9_client gate).
+        if (cl2 != cl)                             { err = -(s32)T_E_INVAL; goto fail; }
+        fid2 = f2;
+    }
+    // LOOM.md 8.5.1: the directory-mutation authority, after every rights and
+    // memory-safety gate above so those keep their answers, and before anything
+    // goes on the wire. An SQPOLL ring refuses first; then the names are copied
+    // into the op and validated like the sync twins' (the wire carries that copy,
+    // so the shared buffer cannot change them after the check); then the parent
+    // W|X and the create group.
+    if (loom_op_mutates_dir(sqe->opcode)) {
+        if (l->sqpoll)                                  { err = -(s32)T_E_OPNOTSUPP; goto fail; }
+        u32 nlen = loom_names_len(sqe, count);
+        if (nlen == 0)                                  { err = -(s32)T_E_INVAL;     goto fail; }
+        op = kmalloc(sizeof(*op) + nlen, KP_ZERO);
+        if (!op)                                        { err = -(s32)T_E_NOMEM;     goto fail; }
+        loom_bufcopy(op->names, buf_kva, nlen);
+        if (!loom_names_ok(sqe, op->names, count))      { err = -(s32)T_E_INVAL;     goto fail; }
+        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set);
+        if (err != 0) goto fail;
+    }
+    // Weft-6c fast-path (NET-THROUGHPUT 6; I-37): a READ/WRITE whose pinned /net
+    // data fid carries a weft binding AND whose registered buffer is that flow's
+    // WHOLE shared ring goes zero-copy -- a Tweftio descriptor (off/len/dir) netd
+    // acts on IN PLACE -- instead of a byte-copying Tread/Twrite. The whole-ring
+    // registration (buf is the ring Burrow AND its registered length == the ring
+    // size) makes buf_off ring-base-relative, so the slice's guest VA reconstructs
+    // as wb->guest_va + buf_off and runs the SAME bounds validator the synchronous
+    // dev9p_weft_try_rw uses (weft_binding_validate_rw -- the guest_va cancels in
+    // the validator, so only the offset WITHIN the ring is load-bearing). A non-ring
+    // buffer (or a partial-ring registration) on a weft fid falls through to the
+    // byte path -- the section-4.8 hybrid (small/control transfers stay byte-copy).
+    // An in-ring slice that lands outside the payload region is rejected (-EINVAL).
+    // The weft binding is read __atomic-acquire (a /net data fid is handle_dup-
+    // shareable, so SYS_WEFT_MAP installs it via CAS; the sync path reads it the
+    // same way). buf is non-NULL here (the buf_bad check above already fired).
+    if ((sqe->opcode == LOOM_OP_READ || sqe->opcode == LOOM_OP_WRITE) && buf) {
+        struct dev9p_priv *priv = dev9p_priv_of(sp);
+        struct weft_binding *wb = priv
+            ? __atomic_load_n(&priv->weft, __ATOMIC_ACQUIRE) : NULL;
+        if (wb && buf == wb->burrow && buf_reg_len == wb->ring_size) {
+            if (weft_binding_validate_rw(wb, wb->guest_va + buf_off, count,
+                                         &weft_off) != 0) {
+                err = -(s32)T_E_INVAL; goto fail;     // in-ring slice outside payload
+            }
+            build   = loom_build_weftio;
+            is_weft = true;
+        }
+    }
+    if (!op) op = kmalloc(sizeof(*op), KP_ZERO);   // the six ops allocated theirs above
+    if (!op) { err = -(s32)T_E_NOMEM; goto fail; }
+    op->loom        = l;
+    op->client      = cl;
+    op->pinned      = sp;                 // adopt the primary pin
+    op->pinned2     = sp2;                // adopt the second pin (NULL for single-fid)
+    op->build       = build;              // opcode-selected (above)
+    op->user_data   = ud;
+    op->op_fid      = fid;
+    op->op_fid2     = fid2;
+    // Weft-6c: a weft op's wire offset is the payload-relative RING offset computed
+    // from buf_off at submit (weft_off), NOT the SQE's file offset. A normal payload
+    // op uses sqe->offset (file/dir offset / GETATTR request_mask / op scalar).
+    op->op_offset   = is_weft ? (u64)weft_off : sqe->offset;
+    op->op_count    = count;              // wire count / dest cap / pinned-region span
+    op->pinned_buf  = buf;                // adopt the buffer pin
+    op->buf_kva     = buf_kva;
+    op->sqe         = *sqe;               // TOCTOU snapshot (mutation build-thunk decode)
+    if (cgid_set) {                       // 8.5.1: the wire carries the RESOLVED group
+        if (sqe->opcode == LOOM_OP_MKNOD) op->sqe.offset    = cgid;
+        else                              op->sqe._resv1[2] = cgid;
+    }
+    // 8.5.1: a create mode carries the rwx bits only, as the sync create's
+    // `perm & 0777` does -- setuid/setgid/sticky are never honoured and SYS_WSTAT
+    // refuses them, so a create must not be the way to plant them. MKNOD keeps
+    // its file type.
+    if (sqe->opcode == LOOM_OP_MKDIR)
+        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & 0777u;
+    else if (sqe->opcode == LOOM_OP_MKNOD)
+        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & (T_S_IFMT | 0777u);
+    op->opcode      = sqe->opcode;
+    op->weft        = is_weft;            // Weft-6c: zero-copy completion (no bufcopy)
+    op->terminal    = false;
+    op->multishot   = false;              // single-shot (no event-source dev yet)
+    op->shot_limit  = 1u;
+    op->chain       = chain;
+    op->rpc.on_complete = loom_async_complete;
+    // Link + count BEFORE submitting (the FSYNC discipline): a synchronous submit
+    // failure fires loom_async_complete, which needs the op counted + linked.
+    spin_lock(&l->lock);
+    op->next = l->inflight_ops;
+    l->inflight_ops = op;
+    l->async_inflight++;
+    spin_unlock(&l->lock);
+    (void)p9_client_submit_async(cl, &op->rpc, op->build, op);
+    return;
+
+fail:
+    if (op)  kfree(op);                   // only a mutation op's name copy: nothing adopted yet
+    if (buf) burrow_unref(buf);
+    if (sp2) spoor_clunk(sp2);
+    if (sp)  spoor_clunk(sp);
+    loom_chain_done(l, chain, false);
+    loom_complete_inline(l, ud, err);
+}
+
+// Dispatch ONE already-copied-to-kernel SQE (`sqe` is a kernel-private snapshot,
+// NEVER the shared ring slot -- ring TOCTOU, LOOM.md 6.1). Either completes
+// inline (NOP / a rejected op posts a CQE) or submits an async 9P op whose reply
+// drives loom_async_complete later. Never re-reads the shared ring.
+//
+// `chain` (Loom-5b) is non-NULL when dispatching a LINK/DRAIN chain entry: the
+// entry was claimed INFLIGHT by loom_admit_chain; this sets its real terminal
+// state on an inline completion (loom_chain_done) or wires the async back-pointer
+// + leaves it INFLIGHT (loom_async_complete records the eventual reply). The fast
+// path passes chain == NULL and behaves exactly as the Loom-3 dispatch.
+static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
+                            struct loom_chain_op *chain) {
+    u64 ud = sqe->user_data;
+
+    // Accept the multishot + ordering flags; LINK/DRAIN are consumed by the chain
+    // scheduler (loom_drain_sq routes them) and IGNORED here. Reject CQE_SKIP
+    // (Loom-5b defers it -- suppressing a success CQE breaks loom_order.tla's
+    // EveryDoneOpPosted; it needs a spec carve-out first) + any unknown bit, so a
+    // future flag is never silently ignored.
+    if (sqe->flags & ~(u32)(LOOM_SQE_MULTISHOT | LOOM_SQE_LINK | LOOM_SQE_DRAIN)) {
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+    bool multishot = (sqe->flags & LOOM_SQE_MULTISHOT) != 0;
+    // MULTISHOT may not combine with chain ordering: a chain member must be
+    // single-completion (loom_order.tla models one CQE per op). This rejects both
+    // the explicit MULTISHOT+LINK/DRAIN combo AND a bare MULTISHOT op routed into
+    // a non-empty chain. Deterministic for one batch; mixing the two across enters
+    // is the unspecced usage this declines (LOOM.md 10).
+    if (chain && multishot) {
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+
+    switch (sqe->opcode) {
+    case LOOM_OP_NOP:
+        // The io_uring smoke op: completes immediately, no engine, no handle. An
+        // inline op cannot re-arm (no async reply), so MULTISHOT degrades to a
+        // single terminal CQE here -- the mechanism is async-only (the FSYNC path).
+        loom_chain_done(l, chain, true);
+        loom_complete_inline(l, ud, 0);
+        return;
+
+    case LOOM_OP_FSYNC: {
+        if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+            return;
+        }
+        // Resolve + PIN the registered handle under l->lock so a concurrent
+        // LOOM_REGISTER_HANDLES re-install cannot free the Spoor between the read
+        // and the ref. The independent spoor_ref is the I-30 pin (held for the
+        // op's lifetime); `rights` is the snapshot the submit-time gate reads.
+        struct Spoor *sp; rights_t rt;
+        spin_lock(&l->lock);
+        sp = l->reg[sqe->handle_idx].spoor;
+        rt = l->reg[sqe->handle_idx].rights;
+        if (sp) spoor_ref(sp);
+        spin_unlock(&l->lock);
+
+        if (!sp) {                                                          // empty slot
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_BADF);
+            return;
+        }
+        // Submit-time rights gate (I-2 / I-6; the spec's reg in AllowedObjs).
+        // Fsync is a durability barrier on written data, so it requires the
+        // handle to have been opened for write (RIGHT_WRITE, omode-derived at
+        // open -- A-3 F1). A read-only registered handle is denied here, never
+        // re-checked at completion (I-30).
+        if (!(rt & RIGHT_WRITE)) {
+            spoor_clunk(sp);
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_ACCES);
+            return;
+        }
+        struct p9_client *cl; u32 fid;
+        if (dev9p_client_fid(sp, &cl, &fid) != 0) {
+            // Not a dev9p-backed Spoor (devsrv conn / devramfs / ...): no 9P
+            // engine to dispatch against.
+            spoor_clunk(sp);
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+            return;
+        }
+        struct loom_async_op *op = kmalloc(sizeof(*op), KP_ZERO);
+        if (!op) {
+            spoor_clunk(sp);
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_NOMEM);
+            return;
+        }
+        op->loom        = l;
+        op->client      = cl;
+        op->pinned      = sp;               // adopt the pin ref
+        op->build       = loom_build_fsync; // re-run verbatim on each re-arm (multishot)
+        op->user_data   = ud;
+        op->op_fid      = fid;
+        op->op_arg      = (sqe->len != 0) ? 1u : 0u;   // FSYNC: len != 0 -> datasync
+        op->opcode      = LOOM_OP_FSYNC;
+        op->terminal    = false;
+        op->multishot   = multishot;
+        op->chain       = chain;            // Loom-5b back-pointer (NULL fast path)
+        // SYNTHETIC terminal bound for the FSYNC multishot vehicle: the total
+        // number of CQEs (>= 1) the stream emits before its terminal. Carried in
+        // sqe->offset (FSYNC ignores the offset). Loom-6's real event-fd READ
+        // terminates on the event source's EOF/error, not a count.
+        op->shot_limit  = multishot
+            ? (sqe->offset == 0          ? 1u
+               : sqe->offset > 0xFFFFFFFFull ? 0xFFFFFFFFu
+               : (u32)sqe->offset)
+            : 1u;
+        op->rpc.on_complete = loom_async_complete;
+        // Link + count before submitting: a synchronous submit failure fires
+        // loom_async_complete (which decrements the count + marks terminal), so
+        // the op must already be counted + linked for that to be consistent. The
+        // reap sweep then reclaims it.
+        spin_lock(&l->lock);
+        op->next = l->inflight_ops;
+        l->inflight_ops = op;
+        l->async_inflight++;
+        spin_unlock(&l->lock);
+        // Hands ownership of &op->rpc to the engine: exactly one on_complete will
+        // fire (now, on failure, or later at demux). No further touch of `op`
+        // here -- a fast failure may already have marked it terminal.
+        (void)p9_client_submit_async(cl, &op->rpc, loom_build_fsync, op);
+        return;
+    }
+
+    case LOOM_OP_READ:
+    case LOOM_OP_WRITE:
+    case LOOM_OP_READDIR:
+    case LOOM_OP_READLINK:
+    case LOOM_OP_GETATTR:
+    case LOOM_OP_STATFS:
+    case LOOM_OP_SETATTR:
+    case LOOM_OP_MKDIR:
+    case LOOM_OP_MKNOD:
+    case LOOM_OP_SYMLINK:
+    case LOOM_OP_UNLINKAT:
+    case LOOM_OP_RENAMEAT:
+    case LOOM_OP_LINK:
+        // Buffer-backed payload ops (Loom-6a READ/WRITE + Loom-6b-1 read-shaped
+        // metadata + Loom-6b-2 metadata mutation). Each names a registered file/
+        // dir fid + a registered buffer (the names / the input struct); the
+        // two-fid ops name a second registered fid too. loom_submit_payload pins
+        // all of them (the I-30 submit-time pins) and bounds-checks every slice +
+        // sub-length. MULTISHOT needs a real event-source dev (a file fid replies
+        // once, so a multishot file op would spin re-issuing the same Tmsg) --
+        // reject the combo until that dev exists; the multishot mechanism stays
+        // validated by the synthetic FSYNC vehicle.
+        if (multishot) {
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+            return;
+        }
+        loom_submit_payload(l, sqe, chain);
+        return;
+
+    default:
+        // The remaining in-range opcodes are the fid-lifecycle / direct-
+        // descriptor ops (WALK / LOPEN / LCREATE / CLUNK) -- they mint, open, or
+        // release a fid, but our registered handles wrap already-OPEN fids, so
+        // these need the registered-slot install/release surface (the io_uring
+        // direct-descriptor analog) + its own audit: a documented post-6b seam
+        // (LOOM.md, task #916). WIRE_PASSTHROUGH stays reserved (LOOM.md 7). All
+        // post -ENOSYS; out-of-range opcodes are -EINVAL.
+        loom_chain_done(l, chain, false);
+        if (sqe->opcode < LOOM_OP_COUNT)
+            loom_complete_inline(l, ud, -(s32)T_E_NOSYS);
+        else
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+}
+
+// Count of posted-unreaped CQEs (kernel-private cq_tail minus the user-owned
+// cq_head). The kernel-private cq_tail is authoritative (the SA-1 discipline);
+// a hostile cq_head can only make this READ smaller or larger, never drive an
+// OOB -- it gates the SYS_LOOM_ENTER wait only, so a corrupt value just makes
+// the caller wait wrong (it hurts only itself). Clamped to cq_entries.
+static u32 loom_cq_ready(struct Loom *l) {
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    u32 tail = l->cq_tail;                                       // kernel-private
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);   // user-owned
+    u32 d = tail - head;
+    return (d > l->cq_entries) ? l->cq_entries : d;
+}
+
+// The CQ slots already spoken for: posted-unreaped + in flight + admitting (an
+// op between its consume/claim and its disposition). The admission gates compare
+// THIS with cq_entries; `lock` held.
+static u32 loom_cq_reserved(struct Loom *l) {
+    return loom_cq_ready(l) + l->async_inflight + l->admitting;
+}
+
+// Release one `admitting` reservation once the op's disposition landed: a posted
+// CQE (now in cq_ready), an in-flight op (now in async_inflight), or a HELD chain
+// entry (whose slot is re-reserved at admit).
+static void loom_admitted(struct Loom *l) {
+    spin_lock(&l->lock);
+    if (l->admitting > 0) l->admitting--;
+    spin_unlock(&l->lock);
+    // A waiter asleep only because this op could still post re-samples: the op
+    // posted (it was woken then too), went in flight (it may need to pump), or
+    // parked HELD. After the unlock, as loom_post_cqe wakes (I-9).
+    poll_waiter_list_wake(&l->cq_waiters);
+}
+
+// Loom-4 (KT-1.5): the KObj_Loom .poll hook -- fold a Loom ring into a poll(2)
+// set alongside pollable devs (pipes, /dev/consdrain). Register-then-observe on
+// the SAME l->cq_waiters list loom_wait_for_completions uses, under l->lock (the
+// poll.tla lineage; I-9): a CQE post between the sample and the poller's sleep
+// fires poll_waiter_list_wake(&l->cq_waiters) (loom_post_cqe + the session-death
+// path), and the woken poller re-samples -- no wake lost. Unlike the cons .poll
+// (cons_poll.tla), the CQE wake already runs in process/kthread context, so
+// there is no deferred IRQ relay: this is a plain poll_waiter_list instance.
+// POLLIN iff a CQE is ready to reap. Meaningful only on an SQPOLL ring (a kthread
+// posts CQEs without the poller calling ENTER); on a non-SQPOLL ring nothing
+// advances the CQ while the owner sleeps in poll(), so it never signals --
+// correct, not useful. POLLOUT (SQ space) is not modelled at v1.0: the
+// compositor submits via SQPOLL/ENTER and never blocks on a full SQ. The
+// keep_out ref-retention in poll_scan_one holds the loom_ref across the sleep
+// once pw lists on cq_waiters (handle_put's loom_unref pairs it).
+short loom_poll(struct Loom *l, short events, struct poll_waiter *pw) {
+    if (!l || l->magic != LOOM_MAGIC) return POLLERR;
+    short revents = 0;
+    spin_lock(&l->lock);
+    if (pw && (events & POLLIN)) {
+        poll_waiter_list_register(&l->cq_waiters, pw);
+    }
+    if ((events & POLLIN) && loom_cq_ready(l) > 0) {
+        revents |= POLLIN;
+    }
+    if (l->service_closing) revents |= POLLHUP;
+    spin_unlock(&l->lock);
+    return revents;
+}
+
+// The client of the first still-in-flight (non-terminal) async op, or NULL when
+// none remain (no further completion can arrive). To keep the borrowed client
+// alive across the caller's pump -- which runs AFTER l->lock is dropped -- this
+// takes an EXTRA ref on that op's pinned Spoor (the I-30 pin substrate: a live
+// dev9p Spoor implies a live client). F1: without it, between this unlock and the
+// caller's deref a concurrent reaper (a sibling SYS_LOOM_ENTER, or -- new at
+// Loom-4 -- the SQPOLL kthread's own next iteration) that finds the op terminal
+// AND a re-register that drops the registered-table ref could free the Spoor ->
+// the client -> a UAF in the pump. The single Loom-3 reaper (same caller, after
+// its own wait) made this safe before; Loom-4's second concurrent reaper does
+// not. The caller MUST spoor_clunk(*pin_out) after the pump (process context, may
+// sleep). *pin_out is ALWAYS written (NULL when no in-flight op; the pin + its ref
+// are set together when a client is returned), so a caller need not pre-init it.
+// Under l->lock.
+static struct p9_client *loom_first_inflight_client(struct Loom *l,
+                                                    struct Spoor **pin_out) {
+    struct p9_client *cl = NULL;
+    *pin_out = NULL;   // R2-F1: define the out-param unconditionally (footgun-proof for future callers)
+    spin_lock(&l->lock);
+    for (struct loom_async_op *op = l->inflight_ops; op; op = op->next) {
+        if (!op->terminal) {
+            cl = op->client;
+            *pin_out = op->pinned;
+            spoor_ref(op->pinned);   // borrow-guard: keep the Spoor (=> client) alive past the unlock
+            break;
+        }
+    }
+    spin_unlock(&l->lock);
+    return cl;
+}
+
+// Reclaim terminal async ops: unlink each under l->lock, then release the pin +
+// free the container OUTSIDE the lock (spoor_clunk may sleep). Idempotent; safe
+// to call when nothing is terminal.
+static void loom_reap_terminal(struct Loom *l) {
+    struct loom_async_op *done = NULL;
+    spin_lock(&l->lock);
+    struct loom_async_op **pp = &l->inflight_ops;
+    while (*pp) {
+        struct loom_async_op *op = *pp;
+        if (op->terminal) {
+            *pp = op->next;          // unlink
+            op->next = done;
+            done = op;
+        } else {
+            pp = &op->next;
+        }
+    }
+    spin_unlock(&l->lock);
+    while (done) {
+        struct loom_async_op *next = done->next;
+        if (done->pinned_buf) burrow_unref(done->pinned_buf);   // Loom-6: buffer pin
+        if (done->pinned2)    spoor_clunk(done->pinned2);        // Loom-6b-2: second fid pin
+        spoor_clunk(done->pinned);   // release the I-30 pin (may sleep)
+        kfree(done);
+        done = next;
+    }
+}
+
+// Re-arm (re-issue) every MORE-pending multishot op the CQ can admit (Loom-5;
+// specs/loom_multishot.tla PostShot -> re-arm). Runs in the drive loop OUTSIDE
+// c->lock and l->lock: p9_client_submit_async takes c->lock, and the seam
+// contract forbids loom_async_complete (which runs UNDER c->lock) from
+// re-entering it -- so the re-issue is deferred to here.
+//
+// Each re-arm reserves one CQ slot (async_inflight++) under l->lock -- the same
+// submit-time admission as loom_drain_sq -- so a MORE shot ALWAYS has a slot when
+// it completes (CqNeverOverfull; loom_post_cqe's full-CQ drop stays unreachable).
+// A rearm op the CQ cannot yet admit stays flagged (back-pressure): the next
+// enter / SQPOLL iteration re-arms it once userspace reaps a slot -- the shot is
+// HELD, never dropped.
+//
+// The pin (op->pinned) is held throughout: the op is NON-terminal here (rearm,
+// not terminal), so loom_reap_terminal never reclaims it and loom_free cannot run
+// (the drive-loop caller holds a loom ref), so the borrowed op->client stays
+// valid across the submit -- no F1 borrow-guard ref is needed. The claim (clear
+// rearm + bump async_inflight) is atomic under l->lock, so two concurrent drivers
+// (a sibling ENTER + the SQPOLL kthread) never double-issue the same op. A
+// synchronous submit failure fires loom_async_complete (status < 0 -> terminal),
+// which releases the reservation -- consistent.
+static void loom_rearm_pending(struct Loom *l) {
+    for (;;) {
+        struct loom_async_op *op = NULL;
+        spin_lock(&l->lock);
+        for (struct loom_async_op *o = l->inflight_ops; o; o = o->next) {
+            if (!o->rearm) continue;
+            if (loom_cq_reserved(l) >= l->cq_entries) continue;  // back-pressure
+            o->rearm = false;
+            __atomic_fetch_sub(&l->rearm_pending, 1u, __ATOMIC_RELEASE);  // claimed for re-arm
+            l->async_inflight++;        // reserve the next shot's CQE slot
+            op = o;
+            break;
+        }
+        spin_unlock(&l->lock);
+        if (!op) break;                 // nothing admittable -> held (or none pending)
+        (void)p9_client_submit_async(op->client, &op->rpc, op->build, op);
+    }
+}
+
+// =============================================================================
+// Loom-5b: the LINK/DRAIN held-submission chain scheduler (specs/loom_order.tla).
+// =============================================================================
+
+// True if chain entry `e` is past its DRAIN ordering gates. Called UNDER l->lock
+// (reads chain states + async_inflight). Two gates (loom_order.tla DrainAdmits):
+//   - after-drain: every EARLIER chain entry that is a drain must be done, so a
+//     post-drain op waits for the barrier;
+//   - drain-self: if `e` is itself a drain, EVERY earlier chain entry must be done
+//     AND async_inflight must be 0. The async_inflight==0 catches the prior FAST
+//     async ops (not in the chain) -- once the chain is non-empty all subsequent
+//     ops route to it, so async_inflight, when every chain-before-e is done,
+//     counts only ops submitted BEFORE the chain started. Together: a drain
+//     executes only after ALL prior submitted ops are done (the full barrier).
+static bool loom_chain_drain_admits(struct Loom *l, struct loom_chain_op *e) {
+    bool e_is_drain = e->drain;
+    for (struct loom_chain_op *j = l->chain; j && j != e; j = j->chain_next) {
+        bool j_done = (j->state == LOOM_CHAIN_DONE_OK ||
+                       j->state == LOOM_CHAIN_DONE_FAIL ||
+                       j->state == LOOM_CHAIN_CANCELLED);
+        if (j->drain && !j_done)   return false;   // after-drain: wait behind an earlier barrier
+        if (e_is_drain && !j_done) return false;   // drain-self: wait for every chain-before op
+    }
+    // Drain-self: wait for the prior FAST async ops. async_inflight counts ops with
+    // an outstanding request; rearm_pending counts a FAST MULTISHOT op that posted a
+    // MORE shot and is awaiting re-issue (a multishot op is never in the chain, so a
+    // rearm-pending op is always a prior FAST op, submitted before the chain started
+    // -- once the chain is non-empty every later op routes to it). A rearm-pending op
+    // is logically still in flight (its stream is not done), but it is momentarily
+    // NOT in async_inflight (async_inflight-- at the MORE completion, ++ at re-arm;
+    // their SUM is the op's reservation, invariant across the transition). Without
+    // the rearm_pending term a drain admitted via loom_enter's submit-phase
+    // loom_admit_chain (which has no preceding loom_rearm_pending) could jump ahead
+    // of a live FAST multishot stream (DrainOrdered violation; audit F1). The park
+    // cond reads rearm_pending the same way. `admitting` counts a prior op that a
+    // sibling driver consumed and has not disposed of yet -- neither posted nor in
+    // flight, and (LOOM.md 8.5.1) possibly a whole parent-stat RPC away from the
+    // wire. This walk precedes the admitter's own reservation, so it never waits on
+    // itself, and every release is followed by the releasing driver's own admit
+    // pass, which re-tries a drain held here.
+    if (e_is_drain && (l->async_inflight != 0 || l->admitting != 0 ||
+                       __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u))
+        return false;
+    return true;
+}
+
+// Reclaim terminal chain entries. SAFE only when NO entry is HELD: a HELD entry
+// may still read a predecessor's terminal result (the link gate admits on DONE_OK
+// / cancels on DONE_FAIL; the drain gate counts prior-done), so reclaiming a
+// terminal predecessor under a live HELD successor would lose the dependency.
+// When no entry is HELD, every entry is INFLIGHT or terminal; an INFLIGHT entry
+// was already admitted (its gates satisfied) and never re-consults predecessors,
+// so freeing the terminal entries is safe. (A non-empty chain is the routing
+// signal -- so this also lets the ring return to fast-path dispatch once the
+// chain fully settles.) Frees the loom_chain_op structs; the backing
+// loom_async_op of an INFLIGHT entry is reaped separately by loom_reap_terminal.
+static void loom_reclaim_chain(struct Loom *l) {
+    struct loom_chain_op *freelist = NULL;
+    spin_lock(&l->lock);
+    bool any_held = false;
+    for (struct loom_chain_op *e = l->chain; e; e = e->chain_next) {
+        if (e->state == LOOM_CHAIN_HELD) { any_held = true; break; }
+    }
+    if (!any_held) {
+        struct loom_chain_op **pp = &l->chain;
+        l->chain_tail = NULL;
+        while (*pp) {
+            struct loom_chain_op *e = *pp;
+            bool terminal = (e->state == LOOM_CHAIN_DONE_OK ||
+                             e->state == LOOM_CHAIN_DONE_FAIL ||
+                             e->state == LOOM_CHAIN_CANCELLED);
+            if (terminal) {
+                *pp = e->chain_next;          // unlink
+                if (l->chain_len > 0) l->chain_len--;
+                e->chain_next = freelist;
+                freelist = e;
+            } else {
+                l->chain_tail = e;            // last surviving (INFLIGHT) entry
+                pp = &e->chain_next;
+            }
+        }
+    }
+    spin_unlock(&l->lock);
+    while (freelist) {
+        struct loom_chain_op *next = freelist->chain_next;
+        kfree(freelist);
+        freelist = next;
+    }
+}
+
+// Walk the LINK/DRAIN chain head->tail and take ONE action per pass (dispatch an
+// admittable HELD op, or cancel a HELD op whose linked predecessor failed),
+// looping until nothing is actionable, then reclaim. Runs in the drive loops
+// (loom_enter after submit, loom_wait_for_completions / loom_sqpoll_main loop top)
+// OUTSIDE c->lock -- loom_submit_one re-enters the 9P engine (c->lock) for an
+// async op, which loom_async_complete (running UNDER c->lock) must NOT do, so the
+// dispatch is deferred to here (the seam contract, mirroring loom_rearm_pending).
+//
+// Each action posts exactly one CQE, so it needs CQ admission room beyond every
+// reserved completion (loom_cq_ready + async_inflight < cq_entries). No room ->
+// hold the whole chain (back-pressure; re-tried when userspace reaps + re-enters,
+// or the SQPOLL kthread wakes). A dispatch claims the entry INFLIGHT under l->lock
+// so a concurrent admit cannot double-dispatch it; loom_submit_one then sets the
+// real terminal (inline) or leaves INFLIGHT (async). The cancel-cascade is a
+// single head->tail walk: a just-cancelled victim becomes the non-ok predecessor
+// of the next iteration's walk.
+//
+// CONCURRENCY CONTRACT (audit F4): the chain scheduler's ORDERING assumes
+// EFFECTIVELY ONE admitter per ring -- the SQPOLL kthread is the sole admitter on
+// an SQPOLL ring, and a non-SQPOLL ring follows the io_uring single-producer SQ
+// contract (one submitting thread). The INFLIGHT claim makes the chain memory-safe
+// even under concurrent non-SQPOLL drivers (no UAF / double-dispatch / double-CQE),
+// and CQ admission is exact under them too: `admitting` (LOOM.md 8.5.1) holds a
+// consumed op's slot from this loop's claim until its disposition, and every room
+// check counts it, so the inherited Loom-3 over-admit window -- and the dispatch
+// leg's dropped-terminal-CQE residual it fed -- is closed. The cancel leg's
+// revert-to-HELD + retry below stays as the backstop (a cancel is never lost).
+// docs/reference/107-loom.md "Known caveats" (frozen) predates this.
+static void loom_admit_chain(struct Loom *l) {
+    for (;;) {
+        struct loom_chain_op *to_dispatch = NULL;
+        struct loom_chain_op *to_cancel = NULL;
+        u64 cancel_ud = 0;
+
+        spin_lock(&l->lock);
+        if (loom_cq_reserved(l) >= l->cq_entries) {
+            spin_unlock(&l->lock);      // CQ full -> hold (back-pressure)
+            break;
+        }
+        struct loom_chain_op *prev = NULL;
+        for (struct loom_chain_op *e = l->chain; e; prev = e, e = e->chain_next) {
+            if (e->state != LOOM_CHAIN_HELD) continue;
+            // Link cancel-cascade: an immediate LINKED predecessor that finished
+            // non-ok (fail / cancelled) cancels this op (loom_order.tla
+            // CancelVictim). `prev` is the submission-order predecessor (NULL at
+            // the chain head).
+            if (prev && prev->link &&
+                (prev->state == LOOM_CHAIN_DONE_FAIL ||
+                 prev->state == LOOM_CHAIN_CANCELLED)) {
+                e->state  = LOOM_CHAIN_CANCELLED;
+                to_cancel = e;
+                cancel_ud = e->sqe.user_data;
+                break;
+            }
+            // Link gate: a linked successor waits until its predecessor is done ok
+            // (loom_order.tla LinkAdmits). A non-linking predecessor (or none)
+            // leaves this open.
+            if (prev && prev->link && prev->state != LOOM_CHAIN_DONE_OK) continue;
+            // Drain gates (loom_order.tla DrainAdmits).
+            if (!loom_chain_drain_admits(l, e)) continue;
+            // Gates open -> claim INFLIGHT (so a concurrent admit never double-
+            // dispatches); loom_submit_one overwrites with the real state.
+            e->state    = LOOM_CHAIN_INFLIGHT;
+            to_dispatch = e;
+            break;
+        }
+        if (to_cancel || to_dispatch) l->admitting++;   // reserve until disposition
+        spin_unlock(&l->lock);
+
+        if (to_cancel) {
+            int pr = loom_post_cqe(l, cancel_ud, -(s32)T_E_CANCELED, 0);
+            loom_admitted(l);
+            if (pr != 0) {
+                // The CQ filled between the top-of-loop room check and this post
+                // (a concurrent driver consumed the reserved slot -- the inherited
+                // Loom-3 over-admit window). Do NOT drop the -ECANCELED: revert the
+                // victim to HELD so a later admit pass re-cancels + retries the post
+                // once userspace reaps a slot (EveryDoneOpPosted -- a cancel is
+                // never lost, only deferred). audit F2 (cancel leg).
+                spin_lock(&l->lock);
+                to_cancel->state = LOOM_CHAIN_HELD;
+                spin_unlock(&l->lock);
+                break;
+            }
+            continue;
+        }
+        if (to_dispatch) {
+            loom_submit_one(l, &to_dispatch->sqe, to_dispatch);
+            loom_admitted(l);
+            continue;
+        }
+        break;                          // nothing actionable
+    }
+    loom_reclaim_chain(l);
+}
+
+// Loom-4 CQ-waiter sleep predicate (specs/loom.tla CqWaitCommitOrSleep). Returns
+// 1 once the waiter's wake flag is set -- a CQE was posted (or the session died)
+// while this hook was installed on l->cq_waiters. Reads ONLY pw->ready, which
+// poll_waiter_list_wake sets under the wait-list lock and follows with
+// wakeup(pw->rendez); since this cond runs under that SAME rendez's lock (sleep's
+// discipline), the flag write is visible and no wake is lost between the flag set
+// and the sleep transition (I-9; poll.c::poll_cond_any_flagged for one waiter).
+// Reading the FLAG (not the live cq_tail, which lives behind l->lock) is the
+// cross-lock hand-off the spec pins -- and it cannot take l->lock here (the rendez
+// lock is BELOW l->lock; doing so would invert the order).
+static int loom_cqw_cond(void *arg) {
+    const struct poll_waiter *pw = (const struct poll_waiter *)arg;
+    return pw->ready ? 1 : 0;
+}
+
+// Loom-4 wait/reap phase. Block until min_complete CQEs are available, no async
+// op remains in flight, or the caller's Proc is dying. The caller either DRIVES
+// the elected reader itself (the Loom-3 behavior) or -- when a sibling thread of
+// the SAME Proc already holds the reader role -- sleeps on the ring's CQ wait-list
+// until that reader's demux posts a CQE (resolving the Loom-3 concurrent-ENTER
+// limitation). register-then-observe (poll.tla lineage) + death-interruptible
+// (#811). l->lock NOT held on entry/exit.
+//
+// Why no waiter strands at v1.0/Loom-4b: a Loom ring is mapped into exactly ONE
+// Proc (KObj_Loom is non-transferable, audited), so every concurrent ENTER is a
+// sibling THREAD of that one Proc. If the Proc group-terminates, ALL of them are
+// death-interrupted together (the sleep returns SLEEP_INTR -> break). If the 9P
+// SESSION dies, the active reader's client_mark_dead_locked posts an error CQE for
+// every in-flight async op (loom_async_complete -> loom_post_cqe -> wake), so a
+// sleeper is woken and observes async_inflight drain to 0. The explicit teardown-
+// wakes-waiter the spec models (NoStrandedWaiter) is the SQPOLL-kthread surface
+// (Loom-4c): a loom_enter caller holds a loom ref for the whole call, so loom_free
+// cannot run while a waiter sleeps here -- NoStrandedWaiter holds vacuously now.
+static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
+                                      u32 submitted) {
+    // Bound the active reader's recv spin so a hostile/buggy server flooding
+    // ownerless frames cannot burn a CPU unbounded inside one syscall (Loom-3
+    // audit F4). A trusted v1.0 server (stratumd / dev9p) completes within a
+    // frame per in-flight op, so the budget is never the limiter.
+    u32 pump_budget = submitted + (u32)P9_SESSION_MAX_OUTSTANDING + 1u;
+    u32 pumps = 0;
+
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
+
+    for (;;) {
+        // SQPOLL ring: the kthread is the SOLE driver (rearm / admit / pump). A
+        // min_complete ENTER reaches this wait even on an SQPOLL ring; it MUST NOT
+        // drive loom_rearm_pending / loom_admit_chain / the pump here -- doing so
+        // writes l->chain + l->cq_tail (under l->lock) while the parked kthread
+        // reads them lock-free in loom_sqpoll_park_cond (a data race, R4-F1), and
+        // breaks the Loom-5 F4 single-admitter premise (widening the over-admit
+        // residual to single-threaded SQPOLL+chain). Instead just sample + wait
+        // for the kthread to post CQEs. "Nothing more can complete" mirrors the
+        // park cond EXACTLY: no inflight op AND no held re-arm AND no held chain
+        // (a back-pressured kthread-owned stream resumes on the post-reap wake, so
+        // the ENTER caller must sleep on it, not give up). Reads under l->lock are
+        // race-free vs the kthread's own l->lock-held chain/rearm writes.
+        if (l->sqpoll) {
+            spin_lock(&l->lock);
+            u32 sq_ready    = loom_cq_ready(l);
+            bool sq_more    = (l->async_inflight > 0) || l->admitting > 0
+                              || __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u
+                              || l->chain != NULL;
+            spin_unlock(&l->lock);
+            if (sq_ready >= min_complete) break;
+            if (!sq_more)                 break;
+
+            pw.ready = false;
+            bool sq_sleep;
+            spin_lock(&l->lock);
+            poll_waiter_list_register(&l->cq_waiters, &pw);
+            sq_more  = (l->async_inflight > 0) || l->admitting > 0
+                       || __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u
+                       || l->chain != NULL;
+            sq_sleep = (loom_cq_ready(l) < min_complete) && sq_more;
+            spin_unlock(&l->lock);
+            if (!sq_sleep) { poll_waiter_list_unregister(&pw); continue; }
+            int ss = sleep(&r, loom_cqw_cond, &pw);
+            poll_waiter_list_unregister(&pw);
+            if (ss == SLEEP_INTR) break;   // #811: ENTER caller's Proc group-terminating
+            continue;                       // woken by a posted CQE -> re-sample
+        }
+
+        // Re-arm any MORE-pending multishot op (Loom-5) BEFORE the give-up sample:
+        // a stream that posted a MORE shot last pump (async_inflight--, rearm set)
+        // must re-issue (async_inflight++) here, else the inflight==0 give-up arm
+        // would prematurely abandon a live stream. Re-issue is outside l->lock.
+        loom_rearm_pending(l);
+
+        // Admit any newly-unblocked LINK/DRAIN chain op (Loom-5b): a completion
+        // last pump may have opened a successor's gate (predecessor done ok) or
+        // require cancelling the chain (predecessor failed). Like the re-arm, this
+        // runs BEFORE the give-up sample so a freshly-admitted op is counted as
+        // in-flight + the inflight==0 arm does not abandon a chain mid-dispatch.
+        // Dispatch is outside l->lock (the seam contract).
+        loom_admit_chain(l);
+
+        // CqWaitCommitOrSleep (the give-up arms): enough completions, or nothing
+        // more can ever complete -- in flight, or consumed by a sibling driver
+        // that has not reached its disposition yet (`admitting`: loom.tla's
+        // CanStillComplete counts that "snap" phase; LOOM.md 8.5.1 made it a
+        // wire RPC wide). Sampled under l->lock.
+        spin_lock(&l->lock);
+        u32 ready     = loom_cq_ready(l);
+        u32 inflight  = l->async_inflight;
+        u32 admitting = l->admitting;
+        spin_unlock(&l->lock);
+        if (ready >= min_complete)     break;
+        if (inflight + admitting == 0) break;
+
+        // Try to become the elected reader and drive one frame. The borrow-guard
+        // ref (F1) keeps the client alive across the pump even if a concurrent
+        // reaper + a re-register drop the op's own pin + the registered-table ref.
+        // Nothing in flight means a sibling is mid-submit: there is no reply to
+        // pump, so sleep for its disposition below instead of spinning.
+        struct Spoor *cl_pin = NULL;
+        struct p9_client *cl = inflight ? loom_first_inflight_client(l, &cl_pin) : NULL;
+        if (!cl && inflight) continue;         // raced: the op completed/reaped -> re-check
+        bool only_admitting = (cl == NULL);
+        int rc = 0;
+        if (cl) {
+            rc = p9_client_reader_pump_once(cl);
+            spoor_clunk(cl_pin);               // cl not derefed below -> release the guard now
+        }
+        if (rc == 1) {                         // demuxed a frame
+            if (++pumps >= pump_budget) {
+                // Flood budget hit. Hand the reader baton to any sleeping sibling
+                // (so it retries instead of stranding), then return what is posted
+                // (io_uring-style degradation under a Byzantine server). Death-
+                // interruptible regardless; trusted servers never reach here.
+                poll_waiter_list_wake(&l->cq_waiters);
+                break;
+            }
+            continue;
+        }
+        if (rc < 0) break;                     // session dead / self-dying -> stop
+
+        // rc == 0: a sibling thread holds the reader role, or (only_admitting)
+        // nothing is in flight yet. Sleep on the CQ wait-list until a CQE posts
+        // or a reservation is released. CqWaitRegister: install the hook AND
+        // re-sample under l->lock, so an edge just before the hook went live is
+        // caught (register-then-observe -- the live edge before register is the
+        // sample, the edge after register is the wake-flag the cond reads). The
+        // mid-submit sleep holds only while that is STILL the state: an op that
+        // went in flight meanwhile needs this thread to pump, not to sleep.
+        pw.ready = false;   // safe: pw is off all lists here (never/last-unregistered)
+        bool do_sleep;
+        spin_lock(&l->lock);
+        poll_waiter_list_register(&l->cq_waiters, &pw);
+        if (only_admitting)
+            do_sleep = (loom_cq_ready(l) < min_complete) &&
+                       l->async_inflight == 0 && l->admitting > 0;
+        else
+            do_sleep = (loom_cq_ready(l) < min_complete) && (l->async_inflight > 0);
+        spin_unlock(&l->lock);
+        if (!do_sleep) { poll_waiter_list_unregister(&pw); continue; }
+        int s = sleep(&r, loom_cqw_cond, &pw);
+        poll_waiter_list_unregister(&pw);
+        if (s == SLEEP_INTR) break;            // #811: Proc group-terminating -> unwind
+        // woken by a posted CQE -> loop, re-sample.
+    }
+    pw.magic = 0;   // defense-in-depth before the stack frame pops (poll.c idiom)
+}
+
+// Consume up to `budget` SQEs from the SQ index ring in SQ-index order, copying
+// each to kernel memory (ring TOCTOU) and either dispatching it (fast path,
+// loom_submit_one) or enqueueing it HELD in the LINK/DRAIN chain (Loom-5b).
+// Returns the number consumed. Shared by SYS_LOOM_ENTER (the non-SQPOLL submit
+// phase) and the SQPOLL kthread (zero-syscall submit). l->lock NOT held on entry.
+//
+// sq_tail is user-owned (advisory): bound the work against it but never trust it
+// for indexing. The consume position is the kernel-private sq_head; the SQ-index
+// ring slot it points at is user-written, so it is range-checked before it
+// indexes the SQE array (the SA-1 discipline on the SQ side).
+//
+// F1: each per-slot claim (the sq_head read + advance + the SQE read+copy) runs
+// under l->lock so two concurrent consumers on the same ring (two ENTERs of a
+// multi-thread Proc, or an ENTER racing the SQPOLL kthread) never read the same
+// sq_head -> never double-dispatch a slot or lose an sq_head update; each
+// iteration atomically claims exactly one slot. loom_submit_one / the chain
+// enqueue run OUTSIDE the lock (a separate, non-nested acquisition).
+//
+// Loom-5b chain routing: an SQE is ORDERING-RELEVANT -- it goes HELD in l->chain
+// rather than dispatching immediately -- iff it sets LINK/DRAIN, OR the chain is
+// already non-empty (a pending drain/link forces every subsequent op to order
+// after it; an independent op so routed just admits immediately). The chain only
+// GROWS during a drain call (loom_admit_chain/reclaim run between calls, not
+// inside), so the routing is monotone within a batch: once non-empty, every
+// later SQE in the batch joins it -- which keeps a LINK group together even when
+// split across concurrent drainers (each op's own link flag + chain order encode
+// the dependency). Independent fast-path ops (chain empty, no flags) dispatch
+// exactly as Loom-3. A drain-blocked chain is bounded at cq_entries entries so a
+// flood cannot grow it without bound (held ops don't count in async_inflight, so
+// the CQ admission alone would not bound them).
+#ifdef KERNEL_TESTS
+// Test-only producer interleaving immediately after the reuse permission. Hook
+// runs under l->lock: it may only touch shared SQ memory, never call Loom APIs.
+static void (*sq_reuse_test_hook)(struct Loom *);
+void loom_sq_reuse_hook_for_test(void (*hook)(struct Loom *)) {
+    __atomic_store_n(&sq_reuse_test_hook, hook, __ATOMIC_RELEASE);
+}
+#endif
+static u32 loom_drain_sq(struct Loom *l, u32 budget) {
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    u32 *sq_array         = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+
+    if (budget > l->sq_entries) budget = l->sq_entries;   // bound a hostile to_submit
+    u32 submitted = 0;
+    for (u32 i = 0; i < budget; i++) {
+        struct loom_sqe ksqe;
+        bool have;
+        bool to_chain;
+        spin_lock(&l->lock);
+        // Loom-5b chain back-pressure: a non-empty chain at the length cap holds
+        // further consumes until it drains (admit + reclaim free entries between
+        // drain calls). The head op is always eventually admittable, so the chain
+        // shrinks -> no deadlock. Checked before claiming a slot so sq_head is not
+        // advanced past an SQE we decline to consume.
+        if (l->chain != NULL && l->chain_len >= l->cq_entries) {
+            spin_unlock(&l->lock);
+            break;
+        }
+        u32 sq_tail = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE);
+        if (sq_tail == l->sq_head) { spin_unlock(&l->lock); break; }   // drained
+        // F2 / I-29 submit-time CQ admission (io_uring's model): consume an SQE
+        // only when the CQ can still hold one more completion beyond every
+        // already-posted-unreaped CQE AND every in-flight op's eventual CQE. This
+        // makes loom_post_cqe's full-CQ drop unreachable for a single consumer
+        // (then `overflow` is the pure diagnostic the comment promises); a
+        // non-reaping user back-pressures HERE (the SQE waits for the next enter)
+        // instead of losing a completion. It is exact for concurrent enters too:
+        // a sibling driver between its consume and its disposition holds its slot
+        // in `admitting` (LOOM.md 8.5.1), so none can over-admit, and
+        // loom_post_cqe's CqNeverOverfull guard is a backstop only. A chain op held
+        // here will need its CQ slot only when loom_admit_chain dispatches it (the
+        // admit-time gate is the load-bearing one for held ops); the consume-time
+        // gate is a conservative shared back-pressure for both paths.
+        if (loom_cq_reserved(l) >= l->cq_entries) {
+            spin_unlock(&l->lock);
+            break;
+        }
+        u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
+        u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
+        have = (sqe_idx < l->sq_entries);
+        if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
+        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+        // sq_head is permission for the producer to reuse BOTH the SQ index
+        // and its 1:1 SQE slot. Copy (or reject) first, then release that slot.
+        // l->lock excludes other consumers, but does not lock out userspace.
+        l->sq_head++;
+        __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);
+#ifdef KERNEL_TESTS
+        void (*reuse_hook)(struct Loom *) = __atomic_load_n(&sq_reuse_test_hook, __ATOMIC_ACQUIRE);
+        if (reuse_hook) reuse_hook(l);
+#endif
+        // Route under the SAME lock so the chain-non-empty test is consistent with
+        // the snapshot we just took (the chain only grows during this call).
+        to_chain = have && ((ksqe.flags & (LOOM_SQE_LINK | LOOM_SQE_DRAIN)) != 0 ||
+                            l->chain != NULL);
+        if (have) l->admitting++;                           // reserve until disposition
+        spin_unlock(&l->lock);
+        if (!have) continue;                                // bad indirection -> dropped
+
+        if (to_chain) {
+            // Ordering-relevant: enqueue HELD; loom_admit_chain dispatches it once
+            // its gates open. The allocation is OUTSIDE l->lock (kmalloc may
+            // sleep); the append re-takes the lock. An OOM here posts -ENOMEM for
+            // this op (it was consumed); a LINK predecessor that fails to enqueue
+            // leaves its successor to route as the new chain head (best-effort
+            // under memory pressure).
+            struct loom_chain_op *ce = kmalloc(sizeof(*ce), KP_ZERO);
+            if (!ce) {
+                loom_complete_inline(l, ksqe.user_data, -(s32)T_E_NOMEM);
+                loom_admitted(l);
+                submitted++;
+                continue;
+            }
+            ce->sqe   = ksqe;
+            ce->link  = (ksqe.flags & LOOM_SQE_LINK)  != 0;
+            ce->drain = (ksqe.flags & LOOM_SQE_DRAIN) != 0;
+            ce->state = LOOM_CHAIN_HELD;
+            spin_lock(&l->lock);
+            ce->chain_next = NULL;
+            if (l->chain_tail) l->chain_tail->chain_next = ce;
+            else               l->chain = ce;
+            l->chain_tail = ce;
+            l->chain_len++;
+            if (l->admitting > 0) l->admitting--;           // HELD: re-reserved at admit
+            spin_unlock(&l->lock);
+            poll_waiter_list_wake(&l->cq_waiters);          // as loom_admitted
+            submitted++;
+        } else {
+            loom_submit_one(l, &ksqe, NULL);                // fast path (Loom-3)
+            loom_admitted(l);
+            submitted++;
+        }
+    }
+    return submitted;
+}
+
+int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (flags & ~LOOM_ENTER_VALID)    return -1;
+
+    if (loom_is_private(l)) {
+        spin_lock(&l->lock);
+        bool closed = l->service_closing;
+        spin_unlock(&l->lock);
+        return closed ? -T_E_CANCELED : -T_E_OPNOTSUPP;
+    }
+
+    // --- SUBMIT phase. ---
+    // On an SQPOLL ring the poll-thread OWNS submission (LOOM.md 8.6): ENTER does
+    // NOT consume SQEs -- it WAKES the (possibly idled) kthread so it drains the
+    // SQ the caller just produced into, clearing NEED_WAKEUP. `submitted` is
+    // reported 0 (the kthread, not this call, consumes). On a non-SQPOLL ring,
+    // ENTER consumes inline.
+    u32 submitted = 0;
+    if (l->sqpoll) {
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        __atomic_fetch_and(&h->flags, ~(u32)LOOM_RING_SQ_NEED_WAKEUP, __ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+    } else {
+        submitted = loom_drain_sq(l, to_submit);
+        // Loom-5b: dispatch the chain head(s) the submit just enqueued (+ any
+        // inline LINK cancel-cascade). Done here, not only in the wait loop, so a
+        // submit-only enter (min_complete == 0 / NONBLOCK) still starts the chain
+        // -- the wait loop below runs only when blocking.
+        loom_admit_chain(l);
+    }
+
+    // --- WAIT / REAP phase (Loom-4). Block until min_complete CQEs are posted or
+    // no completion can arrive. On a non-SQPOLL ring the caller drives the elected
+    // reader itself, or -- when a sibling thread of the same Proc already holds the
+    // reader role -- sleeps on the ring's CQ wait-list until that reader posts a
+    // CQE. On an SQPOLL ring the kthread is USUALLY the reader, so a min_complete
+    // wait usually takes the sleep arm (loom_wait_for_completions tries the pump,
+    // gets P9_PUMP_BUSY=0 from the kthread's reader_active, and sleeps on
+    // cq_waiters); in the narrow window where the kthread is between frames an ENTER
+    // caller may briefly win the reader role + drive a frame itself (the kthread
+    // then yields on BUSY, SA-2). Either way a posted CQE wakes the sleeper. The
+    // wait is death-interruptible (#811) and flood-bounded. ---
+    if (min_complete > 0 && !(flags & LOOM_ENTER_NONBLOCK)) {
+        loom_wait_for_completions(l, min_complete, submitted);
+    }
+
+    loom_reap_terminal(l);
+    return (int)submitted;
+}
+
+// =============================================================================
+// Loom-4c: the SQPOLL poll-thread (LOOM.md 8.6). A per-ring kproc() kthread that
+// drains the SQ + drives the elected reader so steady-state submission is
+// zero-syscall. Spawned by loom_start_sqpoll at SYS_LOOM_SETUP; joined by
+// loom_free. Touches only the still-allocated `struct Loom` (the join is the
+// lifetime guarantee; it holds no loom ref).
+// =============================================================================
+
+// The frame-boundary idle deadline the kthread arms while draining replies: it
+// bounds how long a between-frames recv blocks before the kthread re-checks
+// sqpoll_stopping + the SQ. Short enough that teardown is prompt; long enough
+// that a busy ring isn't waking spuriously. (A mid-frame recv is NOT deadline-
+// bounded -- the body must complete to keep the stream synced, #841 -- so a
+// Byzantine server mid-frame can delay a stop until the frame finishes / EOFs;
+// the trusted v1.0 servers always complete promptly.)
+#define LOOM_SQPOLL_IDLE_NS  (10ull * 1000ull * 1000ull)   // 10 ms
+
+// Park predicate (runs under the park Rendez lock during sleep -- MUST NOT take
+// l->lock, which is above the rendez in the global order). Wake when stopping is
+// set OR there is ADMITTABLE work AND CQ room for its completion. "Work" is a
+// pending SQE (a new submission) OR a deferred re-arm (a back-pressured multishot
+// MORE shot, Loom-5). The inflight count is deliberately NOT consulted: the
+// kthread parks ONLY when async_inflight == 0 (it drained everything), and nothing
+// adds an inflight op while it sleeps (only the kthread's own loom_drain_sq /
+// loom_rearm_pending do) -- so at park time there is no in-flight request, hence no
+// concurrent loom_async_complete writing l->cq_tail; the kthread is the SOLE
+// cq_tail writer here (a back-pressured rearm op is QUIESCENT -- its reply was
+// already demuxed, it holds no tag). There is nothing to wake FOR but new SQEs, a
+// CQ slot freeing for a held re-arm, or stop.
+//
+// F2: gating on "SQ non-empty" ALONE busy-loops when the CQ is full and sq_tail is
+// pinned ahead (a non-reaping / bursting user) -- loom_drain_sq breaks on the
+// admission check, submits 0, the cond fires again, sleep returns WITHOUT blocking
+// (it never sched()s), repeat: a tight 100%-CPU spin. A full CQ frees only when the
+// user reaps (advances cq_head) and ENTER-wakes us (the NEED_WAKEUP contract), so
+// park until an admittable slot exists. Loom-5: the same admission gate covers a
+// held re-arm -- a back-pressured multishot op (rearm_pending > 0, async_inflight
+// 0) would otherwise strand, because the user reaps without a new SQE so the
+// SQE-only cond stays 0 forever; gating ALSO on rearm_pending lets the post-reap
+// ENTER-wake resume the stream. Both reads are race-free HERE: in the park branch
+// async_inflight == 0, so the kthread is the SOLE writer of l->cq_tail -- no
+// concurrent loom_post_cqe -- and sq_head is the kthread's own single-writer field.
+// cq_head is user-owned (advisory); loom_cq_ready clamps it, so a hostile value
+// only makes the kthread fill-to-cq_entries then park, never an OOB or unbounded
+// spin. Register-then-observe: an ENTER that bumped sq_tail / a completion that set
+// rearm_pending before this sample is caught here; one after is caught by the
+// ENTER's wakeup of the park (and a wake while still CQ-full re-evaluates to 0 ->
+// re-sleep, NOT a spin).
+static int loom_sqpoll_park_cond(void *arg) {
+    struct Loom *l = (struct Loom *)arg;
+    if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) return 1;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    bool has_sqe   = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE) != l->sq_head;
+    bool has_rearm = __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u;
+    // Loom-5b: a HELD chain op that could not admit for lack of CQ room (a drain
+    // or link successor back-pressured) keeps l->chain non-empty -- it resumes
+    // only when userspace reaps a slot + ENTER-wakes us. l->chain is the kthread's
+    // OWN single-writer field on an SQPOLL ring (it is the sole drainer / admitter
+    // / reclaimer; loom_async_complete touches chain->state, never the l->chain
+    // list head), so this read is same-thread + race-free. At park async_inflight
+    // is 0, so a non-empty chain here is either CQ-back-pressured-held or
+    // not-yet-reclaimed-terminal; both want a CQ-room wake (a spurious wake just
+    // re-reclaims). Without this a back-pressured chain would strand on the SQE-
+    // only park cond (the user reaps without a new SQE).
+    bool has_chain = (l->chain != NULL);
+    if (!has_sqe && !has_rearm && !has_chain) return 0;  // nothing to do -> stay parked
+    return (loom_cq_ready(l) < l->cq_entries) ? 1 : 0;   // work pending -> wake iff the CQ can admit
+}
+
+static void loom_private_executor_loop(struct Loom *l) {
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    for (;;) {
+        spin_lock(&l->lock);
+        bool closing=l->service_closing;
+        spin_unlock(&l->lock);
+        if (closing || __atomic_load_n(&l->sqpoll_stopping,__ATOMIC_ACQUIRE)) return;
+        // Same bounded primitive as explicit progress. No legacy SQ drain or
+        // blocking client pump is reachable from this internal private branch.
+        if (loom_engine_ready_visit(l,timer_now_ns())>0) continue;
+        __atomic_fetch_or(&h->flags,LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+        u64 deadline=0;
+        int armed=loom_engine_wait_arm(l,timer_now_ns(),&deadline);
+        if (armed<0) extinction("private executor lost exclusive wait ownership");
+#ifdef KERNEL_TESTS
+        loom_private_close_boundary_for_test(l,5); // registered, before sleep
+#endif
+        (void)tsleep(&l->sqpoll_park,loom_engine_wait_changed,l,deadline);
+        loom_engine_wait_disarm(l);
+        __atomic_fetch_and(&h->flags,~(u32)LOOM_RING_SQ_NEED_WAKEUP,__ATOMIC_RELEASE);
+    }
+}
+
+void loom_sqpoll_main(void *arg) {
+    struct Loom *l = (struct Loom *)arg;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    if (loom_is_private(l)) {
+        loom_private_executor_loop(l);
+        goto executor_exiting;
+    }
+
+    for (;;) {
+        if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) break;
+
+        // Zero-syscall submit: drain whatever SQEs userspace produced. NOPs
+        // complete inline; FSYNCs go async (added to inflight_ops).
+        (void)loom_drain_sq(l, l->sq_entries);
+
+        // Re-arm any MORE-pending multishot op (Loom-5): a stream that posted a
+        // MORE shot last iteration re-issues here (the kthread is the driver). Like
+        // the loom_wait_for_completions loop top, before the inflight sample so a
+        // re-armed op is seen as inflight + pumped this iteration.
+        loom_rearm_pending(l);
+
+        // Admit any newly-unblocked LINK/DRAIN chain op (Loom-5b): the kthread is
+        // the chain's driver on an SQPOLL ring -- a completion last iteration may
+        // have opened a successor's gate or require the cancel-cascade. Before the
+        // inflight sample so a freshly-dispatched chain op is pumped this iteration
+        // and the kthread does not park while the chain still has admittable work.
+        loom_admit_chain(l);
+
+        bool inflight;
+        spin_lock(&l->lock);
+        inflight = (l->async_inflight > 0);
+        spin_unlock(&l->lock);
+
+        if (inflight) {
+            // Drive the elected reader so async replies become CQEs (each post
+            // wakes cq_waiters -- a min_complete ENTER caller). The reader is
+            // gated to a deadline-capable transport (register gate), so a
+            // between-frames recv returns IDLE at the boundary within
+            // LOOM_SQPOLL_IDLE_NS, letting this loop re-check sqpoll_stopping.
+            struct Spoor *cl_pin = NULL;
+            struct p9_client *cl = loom_first_inflight_client(l, &cl_pin);
+            if (cl) {
+                u64 deadline = timer_now_ns() + LOOM_SQPOLL_IDLE_NS;
+                int rc = p9_client_reader_pump_once_deadline(cl, deadline);
+                spoor_clunk(cl_pin);   // release the F1 borrow-guard (cl not derefed below)
+                // PROGRESS: demuxed a frame (a CQE may have posted). IDLE: the
+                // boundary deadline lapsed, stream still synced. BUSY: a peer ENTER
+                // momentarily holds the reader -- yield (SA-2) instead of tight-
+                // looping until it releases the role / the frame arrives. DEAD: the
+                // session died -- client_mark_dead_locked already error-completed
+                // every inflight op (CQEs posted + cq_waiters woken), so the loop
+                // drains async_inflight to 0 next iteration and parks. All cases: loop.
+                if (rc == P9_PUMP_BUSY) sched();
+            }
+            // cl == NULL: raced (the op was reaped) -> loop, re-sample.
+        } else {
+            // No work: announce NEED_WAKEUP so userspace knows to ENTER-wake us,
+            // then park. The cond re-samples the SQ under the park Rendez lock
+            // (register-then-observe) so an SQE produced + ENTER-woken in the
+            // announce..sleep window is not missed. kproc never group-terminates,
+            // so this never returns SLEEP_INTR -- only stopping / new SQEs wake it.
+            __atomic_fetch_or(&h->flags, LOOM_RING_SQ_NEED_WAKEUP, __ATOMIC_RELEASE);
+            (void)sleep(&l->sqpoll_park, loom_sqpoll_park_cond, l);
+            __atomic_fetch_and(&h->flags, ~(u32)LOOM_RING_SQ_NEED_WAKEUP, __ATOMIC_RELEASE);
+        }
+
+        // Reclaim terminal ops so async_inflight + the container list stay bounded.
+        loom_reap_terminal(l);
+    }
+
+    // Terminal: the ring is being torn down (loom_free set sqpoll_stopping).
+    // Reap any stragglers (loom_free's #898 quiesce abandons whatever remains),
+    // then hand off to the joiner via the EXITING handshake. IRQs are masked
+    // (the idle-loop idiom, sched.c bootcpu_idle_main) across the state=EXITING
+    // write + the sqpoll_exited release so no preempt can fire between them: the
+    // joiner, on observing sqpoll_exited (acquire, pairing this release), is
+    // guaranteed to see state==EXITING and so thread_free's not-RUNNING gate
+    // holds. sched() then switches away permanently (EXITING is never
+    // re-enqueued); the joiner's thread_free spins on on_cpu (cleared by the
+    // next thread's finish-task-switch) before reclaiming. This is the wait_pid
+    // reap terminal minus the Proc-zombie bookkeeping a kproc thread cannot run
+    // (thread_exit_self extincts from kproc).
+    loom_reap_terminal(l);
+
+executor_exiting:
+    (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
+    current_thread()->state = THREAD_EXITING;
+    __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
+    if (loom_is_private(l)) loom_private_close_changed(l);
+    // Hand the joiner its wake INSIDE the masked window, after BOTH stores, so
+    // the release it pairs with has already published state==EXITING. wakeup()
+    // takes g_timerwait -> sqpoll_join->lock -> cpu_sched and we hold none of
+    // them, so the documented order holds; it is explicitly IRQ-context-safe.
+    // Waking BEFORE sched() is sound on SMP for the same reason the old spin
+    // join was: a peer CPU that picks the joiner immediately lands in
+    // thread_free's on_cpu spin, which the sched() below releases.
+    wakeup(&l->sqpoll_join);
+    sched();
+    extinction("loom_sqpoll_main: returned from terminal sched");
+}
+
+int loom_private_start_executor(struct Loom *l) {
+    if (!l || l->magic!=LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    if (l->service_closing || l->sqpoll || l->service_engine->worker_starting) {
+        int rc=l->service_closing ? -T_E_CANCELED : -T_E_BUSY;
+        spin_unlock(&l->lock); return rc;
+    }
+    l->service_engine->worker_starting=true;
+    spin_unlock(&l->lock);
+    int rc=0;
+    struct Thread *kt=NULL;
+    if (!proc_sqpoll_ticket_charge(l->service_creator,l->service_as,
+                                  &l->service_engine->worker_ticket)) rc=-T_E_AGAIN;
+    else {
+        kt=thread_create_with_arg(kproc(),loom_sqpoll_main,l);
+        if (!kt) rc=-T_E_NOMEM;
+    }
+    spin_lock(&l->lock);
+    if (!rc && l->service_closing) rc=-T_E_CANCELED;
+    if (!rc) l->sqpoll=kt;
+    // Keep the start token across unlocked rollback/refund. Another start
+    // cannot reuse the ticket until the failed transaction fully settles.
+    spin_unlock(&l->lock);
+    if (rc) {
+        if (kt) thread_free(kt); // never readied, no running thread can use l
+        proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
+    }
+    spin_lock(&l->lock);
+    l->service_engine->worker_starting=false;
+    spin_unlock(&l->lock);
+    if (!rc) ready(kt);
+    loom_private_close_changed(l);
+    return rc;
+}
+
+int loom_start_sqpoll(struct Loom *l) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (loom_is_private(l))           return -T_E_OPNOTSUPP;
+    // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
+    // group-terminates and its only exit is the stop-flag terminal above). Set
+    // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free
+    // would observe it; ready() then makes it runnable.
+    struct Thread *kt = thread_create_with_arg(kproc(), loom_sqpoll_main, l);
+    if (!kt) return -1;
+    l->sqpoll = kt;
+    ready(kt);
+    return 0;
+}
+
+#ifdef KERNEL_TESTS
+static void (*service_close_test_hook)(struct Loom *, u32);
+void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32)) {
+    __atomic_store_n(&service_close_test_hook,hook,__ATOMIC_RELEASE);
+}
+void loom_private_close_boundary_for_test(struct Loom *l, u32 stage) {
+    void (*hook)(struct Loom *, u32)=__atomic_load_n(&service_close_test_hook,__ATOMIC_ACQUIRE);
+    if(hook)hook(l,stage);
+}
+u32 loom_private_close_observe_for_test(struct Loom *l, u64 *visits) {
+    spin_lock(&service_retire_lock);
+    u32 state=l->service_close_work.state;
+    if (visits) *visits=l->service_close_visits;
+    spin_unlock(&service_retire_lock);
+    return state;
+}
+#endif

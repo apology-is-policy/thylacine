@@ -2,7 +2,7 @@
   "owner": "astra",
   "installed": false,
   "state": "draft-owned-mapping-host-verified",
-  "next": "Native original-owned setup/descriptor/backend and SQ publisher, then control/register adapter and composed controller/fixed-I/O/futures/executor. Host mapping boundary verified; public private flags remain gated.",
+  "next": "Independent fixed-I/O ownership, cancellation bookkeeping and bounded executor retirement with simulated backends. Native SQ reuse correction parked for Corona; native submission/integration and complete async qualification gated pending its resolution.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -13,5 +13,6 @@
   "registration_c_run": "owned-clients/registration-c-20261010T040751Z",
   "request_run": "owned-clients/request-book-20261010T062909Z",
   "composed_run": "owned-clients/composed-ring-20261010T063524Z",
-  "mapping_run": "owned-clients/owned-mapping-20261010T064503Z"
+  "mapping_run": "owned-clients/owned-mapping-20261010T064503Z",
+  "parked_dependency": "native-sq-reuse/PARKED.md"
 }

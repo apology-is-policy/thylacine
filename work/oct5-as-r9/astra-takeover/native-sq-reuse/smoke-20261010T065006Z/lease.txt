@@ -1,0 +1,4 @@
+mac   HELD by you for 5s, 29m left
+        why: Astra SQ reuse regression host mutation and five-row native smoke
+pi    FREE
+disk: 9.8 GiB available at /Users/northkillpd/projects/thylacine-astra

@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "base": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+  "patch_sha256": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+  "patched_files": {
+    "kernel/loom.c": "e0f4de98f104ec913896a69a968d0c398bc91c444f352b5a531b789c2dec5049",
+    "kernel/include/thylacine/loom.h": "46be5c9dda90cd45f55b045c19a0869b8f9f9a155e50c1e91090a6a5b8744123",
+    "kernel/test/test.c": "d329c82c213e15decbf9d5c279166a357c0c843ac9cad769b60f29189b43a496",
+    "kernel/test/test_loom.c": "80166f5fb116f1d2be97d1b78ad35e76f365468947642af620d1891bd787653b"
+  },
+  "native_run": "smoke-20261010T065006Z",
+  "host_run": "host-20261010T065053Z",
+  "state": "parked-unapplied-at-operator-request"
+}

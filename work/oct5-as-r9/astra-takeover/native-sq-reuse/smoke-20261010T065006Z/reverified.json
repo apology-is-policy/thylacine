@@ -1,0 +1,60 @@
+{
+  "owner": "astra",
+  "rows": [
+    {
+      "row": "default1",
+      "source": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+      "diff": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+      "serial": "a0d7fe789c3206ddbc2ffe814baa892a0e9e9c6a9a736e4d19bb1f4beb6ba6e2",
+      "harness": "da06cf0d5533ec6eacbc7cdaae859876412a0fa8e60c2de72b20703a0aa71700",
+      "minimum_free_mib": 9957
+    },
+    {
+      "row": "default4",
+      "source": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+      "diff": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+      "serial": "27850e0f8261aae0168891de5b5ea5c2de68ca926a109cde6279ceeb06333d54",
+      "harness": "e683f19641a197bb984e80e72824c6c14a8377dd6d90083acfc5362005d38ba5",
+      "minimum_free_mib": 9957
+    },
+    {
+      "row": "default8",
+      "source": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+      "diff": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+      "serial": "cb8299fc08f52a3220accff3b1b3d20923ee3ec2bf6f3806d0bae863eea1190e",
+      "harness": "214e9a18b5df211b5230ffb306df4d0006abf56f1f7f0870cd019b41abaffddc",
+      "minimum_free_mib": 9941
+    },
+    {
+      "row": "ubsan4",
+      "source": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+      "diff": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+      "serial": "d9611243972a6f8df67c6e2b52af18837abc71aa933c9a700df3b0fd27c43c88",
+      "harness": "a63bcd31a7195812a580a321d262cec9cc8190cfd9cd7055371dc0a4c91966f3",
+      "minimum_free_mib": 9955
+    },
+    {
+      "row": "ubsan8",
+      "source": "0fd8f8427a2e85536b07ecf6d384f2b3f1036a9e",
+      "diff": "e1ff7888a2a03977ae2643194cff86efe0f87a8f754dd2cee23f32d0f2da088c",
+      "serial": "1a0e0ea965c21188fa2b3156128d6eda6df8ebdef64bef354965b3c83b7be909",
+      "harness": "33519438b148097a77f1460987ed10022695f6c6318c6f536067d4532afc0d5d",
+      "minimum_free_mib": 9955
+    }
+  ],
+  "raw_logs": 10,
+  "tests": 1862,
+  "io_schedules_per_class": 9,
+  "setup_stages_per_class": 6,
+  "close_boundary_schedules": 36,
+  "isolation_classes": 2,
+  "reconnect_attempts": 2000,
+  "retained_endpoints": 32,
+  "retained_credits": 80,
+  "backlog_refusals": 968,
+  "classes": 2,
+  "protected_files": 10,
+  "stratum_clean": true,
+  "review": "single-agent",
+  "limit": "Five one-boot smoke rows; not50boot qualification or complete AS3"
+}
