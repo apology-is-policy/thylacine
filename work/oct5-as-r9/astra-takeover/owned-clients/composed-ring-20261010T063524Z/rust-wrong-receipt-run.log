@@ -1,0 +1,25 @@
+
+running 2 tests
+test composed_paired_delivery_keeps_a_across_b_final_and_teardown ... FAILED
+test composed_abandoned_stream_and_corrupt_record_retain_owned_bytes ... FAILED
+
+failures:
+
+---- composed_paired_delivery_keeps_a_across_b_final_and_teardown stdout ----
+
+thread 'composed_paired_delivery_keeps_a_across_b_final_and_teardown' (22278215) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/composed-ring-20261010T063524Z/mutant-rust-wrong-receipt/test_composed_ring.rs:92:165:
+called `Result::unwrap()` on an `Err` value: Record
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- composed_abandoned_stream_and_corrupt_record_retain_owned_bytes stdout ----
+
+thread 'composed_abandoned_stream_and_corrupt_record_retain_owned_bytes' (22278214) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/composed-ring-20261010T063524Z/mutant-rust-wrong-receipt/test_composed_ring.rs:99:100:
+called `Result::unwrap()` on an `Err` value: Record
+
+
+failures:
+    composed_abandoned_stream_and_corrupt_record_retain_owned_bytes
+    composed_paired_delivery_keeps_a_across_b_final_and_teardown
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+

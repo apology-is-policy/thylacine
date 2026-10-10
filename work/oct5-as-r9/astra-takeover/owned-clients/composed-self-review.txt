@@ -1,0 +1,38 @@
+Astra single-agent self-review, composed client cores, uninstalled.
+No independent audit, actual syscall/ABORT/future/executor qualification.
+
+Actual PairedCq/t_paired_reap read a two-entry aligned mapping with release-tail
+producer and copy the CQE/receipt before head acknowledgment. RequestBook then
+validates cookie/pool/MORE/result and produces Delivery; the real shared pool
+ledger creates Payload leases. The only unsafe Rust accept boundary is exercised
+after this explicit correlation. Tests hold different A/B bytes, return B while
+A lives, reuse CQ slot for final and consume terminal metadata; A remains intact
+with ring live count1 until after client/controller/pool and CQ mapping teardown.
+The backing allocation remains held by A independently of that CQ mapping.
+
+Second scenario marks request abandoned, copies another MORE, transfers to real
+lease then attempts return with negative error; one pending cell remains, earlier
+A and occupied request remain live. Wrong pool incarnation from paired CQ is
+acknowledged but rejected by request ledger. Simulated executor explicitly closes
+the owner; it does NOT treat malformed completion as a terminal refund. A bytes
+survive all wrapper destruction and pending-return ownership ends under whole
+owner close. Producer/backend and retired confirmation are simulated; actual
+scope ABORT dispatch, fixed-I/O storage, future Drop and native pins are not tested.
+Do not turn these scenarios into end-to-end userspace/native qualification.
+
+C uses exact existing backing fixture and core implementations, test assertions
+remain enabled with optimized NDEBUG production objects. Rust runs only two new
+composed scenarios (prior fixture cases compiled but filtered). C likewise uses
+fixture helpers without re-running renamed historical main. Both languages run
+wrong paired receipt-slot, wrong pool identity acceptance and missing global
+live-count mutants. The last Rust mutant underflows in return/destructor unwind;
+nonzero exit plus exact underflow diagnostic is its expected detection. First
+run063431Z clean profiles passed but runner expected FAILED summary and stopped
+before C mutants. COMPOSED-HARNESS-R1 retained; corrected expected diagnostic in
+063524Z passes all six mutants. No implementation change or full initial pass.
+
+19source hashes/30raw commands and copied snapshots verified. Astra10hashes and
+cleanexternal61dde37 unchanged. Remaining: owned native mapping/setup/register/
+control adapter, actual composed controller, fixed I/O/futures and bounded executor
+retirement. Keep private setup/register/ENTER gated and match eventual qualified
+image to new source before claiming native complete-client or AS3 readiness.

@@ -3139,3 +3139,24 @@ in owned-clients/request-self-review.txt records CQ-only terminal retention and
 remaining native ownership boundary. Astra10hashes and cleanexternal61dde37 intact;
 disk10041MiB before run,Mac released. No complete safe-client/AS3 claim, private
 activation,Main,128MiB change or independent audit. AS4/MM0-MM4 still pending.
+
+
+### Astra composed CQ/request/payload checks, October 10
+
+Actual C/Rust paired reader, request book and shared pool lease cores now run
+together in two host scenarios per language. CQ acknowledgment/reuse and final
+consumption preserve held A while B returns; wrapper/CQ destruction leaves A's
+owned backing intact. Abandoned MORE with failed return remains pending; malformed
+pool identity is rejected after paired copy and explicit owner close retains A.
+Producer, backing and retirement confirmation are simulated; no actual native
+syscall, scope ABORT, fixed-I/O or future/executor qualification is implied.
+
+composed-ring-20261010T063524Z passed Rustopt0/2, C LLVM22ASan+UBSan/NDEBUG and six
+runtime mutants. Nineteen source hashes/30raw commands reverified. Initial063431Z
+clean cases passed but mutant runner demanded FAILED summary when deliberately
+missing live-count accounting caused an underflow/abort; COMPOSED-HARNESS-R1 raw
+logs retained and exact expected diagnostic corrected. No full initial-suite pass.
+Single-agent composed-self-review.txt records boundaries. Astra10hashes and clean
+external61dde37 preserved; Mac released. Native owned mapping/backing/control and
+composed controller/fixed-I/O/futures/executor remain, then AS3/AS4/MM0-MM4 gates.
+No Main, private activation,128MiB protection change or independent audit claim.

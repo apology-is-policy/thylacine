@@ -4,3 +4,5 @@ PAYLOAD-FIXTURE-R1: payload-20261010T034434Z runtime six cases passed at opt0/op
 PAYLOAD-REVIEW-R1: safe constructor now derives lengths from unsafe owned backend, rejecting isize overflow; no caller-invented geometry. PAYLOAD-REVIEW-R2: C state changes moved out of assert before tests; separate NDEBUG production objects now pass controls. Both caught in single-agent review, not independent audit.
 
 REQUEST-REVIEW-R1: terminal storage keeps CQE only; paired receipt is delivered separately for one lease transfer. REQUEST-BUILD-R1:041455Z C -Werror misleading-indentation diagnostic; source/logs preserved, loop formatting fixed,062909Z passed.
+
+COMPOSED-HARNESS-R1:063431Z clean composed runs passed, but deliberately removed live count caused exact underflow panic/destructor abort rather than FAILED summary. Expected diagnostic corrected only for that mutant;063524Z full six-mutant suite passed. Initial raw evidence preserved.

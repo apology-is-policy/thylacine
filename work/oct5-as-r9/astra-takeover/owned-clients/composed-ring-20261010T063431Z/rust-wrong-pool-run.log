@@ -1,0 +1,19 @@
+
+running 2 tests
+test composed_paired_delivery_keeps_a_across_b_final_and_teardown ... ok
+test composed_abandoned_stream_and_corrupt_record_retain_owned_bytes ... FAILED
+
+failures:
+
+---- composed_abandoned_stream_and_corrupt_record_retain_owned_bytes stdout ----
+
+thread 'composed_abandoned_stream_and_corrupt_record_retain_owned_bytes' (22276711) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/composed-ring-20261010T063431Z/mutant-rust-wrong-pool/test_composed_ring.rs:102:106:
+assertion failed: book.accept(bad).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    composed_abandoned_stream_and_corrupt_record_retain_owned_bytes
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+

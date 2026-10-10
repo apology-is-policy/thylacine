@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-request-correlation-host-verified",
-  "next": "Compose paired reader, request book and pool lease owner with native mapping/backing/syscall adapter; fixed I/O/futures/executor ownership remains. No native complete-client qualification.",
+  "state": "draft-composed-cq-request-payload-host-verified",
+  "next": "Owned native mapping/backing/setup/register/control adapter and composed controller, then fixed-I/O owners/futures/executor. Host composition verified; actual native scope ABORT/pins remain unqualified.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -11,5 +11,6 @@
   "ring_c_run": "owned-clients/ring-payload-c-20261010T035801Z",
   "registration_rust_run": "owned-clients/registration-20261010T040736Z",
   "registration_c_run": "owned-clients/registration-c-20261010T040751Z",
-  "request_run": "owned-clients/request-book-20261010T062909Z"
+  "request_run": "owned-clients/request-book-20261010T062909Z",
+  "composed_run": "owned-clients/composed-ring-20261010T063524Z"
 }

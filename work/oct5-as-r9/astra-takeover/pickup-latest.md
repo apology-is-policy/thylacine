@@ -12,13 +12,13 @@ external stratum-astra/v2 at61dde3727921e70e2c72fbd3c9e2044a192f4a54.
 
 ## Immediate continuation
 
-No native or host runner remains active after request-book062909Z.
+No native or host runner remains active after composed-ring063524Z.
 Inspect processes and flight records anyway before launching. Current next work:
 native owned backing/mapping/syscall adapter (registration transaction now host-tested),
 composition with paired CQ/request correlation, fixed I/O, futures and bounded executor retirement.
 Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
 not the earlier one-pool payload_owner.* historical components. Read owned-clients/implementation-notes.txt,self-review.txt and
-paired-self-review.txt, payload-self-review.txt, ring-self-review.txt, registration-self-review.txt and request-self-review.txt. All remain UNINSTALLED;
+paired-self-review.txt, payload-self-review.txt, ring-self-review.txt, registration-self-review.txt request-self-review.txt and composed-self-review.txt. All remain UNINSTALLED;
 do not claim native safe clients or give each pool separate ring-close authority.
 Do not re-fix raw Rust register_buffers: it is already unsafe and documented.
 Do not expose Ring::reap/raw submit or mutable storage after owned transfer.
@@ -186,3 +186,24 @@ in owned-clients/request-self-review.txt records CQ-only terminal retention and
 remaining native ownership boundary. Astra10hashes and cleanexternal61dde37 intact;
 disk10041MiB before run,Mac released. No complete safe-client/AS3 claim, private
 activation,Main,128MiB change or independent audit. AS4/MM0-MM4 still pending.
+
+
+### Astra composed CQ/request/payload checks, October 10
+
+Actual C/Rust paired reader, request book and shared pool lease cores now run
+together in two host scenarios per language. CQ acknowledgment/reuse and final
+consumption preserve held A while B returns; wrapper/CQ destruction leaves A's
+owned backing intact. Abandoned MORE with failed return remains pending; malformed
+pool identity is rejected after paired copy and explicit owner close retains A.
+Producer, backing and retirement confirmation are simulated; no actual native
+syscall, scope ABORT, fixed-I/O or future/executor qualification is implied.
+
+composed-ring-20261010T063524Z passed Rustopt0/2, C LLVM22ASan+UBSan/NDEBUG and six
+runtime mutants. Nineteen source hashes/30raw commands reverified. Initial063431Z
+clean cases passed but mutant runner demanded FAILED summary when deliberately
+missing live-count accounting caused an underflow/abort; COMPOSED-HARNESS-R1 raw
+logs retained and exact expected diagnostic corrected. No full initial-suite pass.
+Single-agent composed-self-review.txt records boundaries. Astra10hashes and clean
+external61dde37 preserved; Mac released. Native owned mapping/backing/control and
+composed controller/fixed-I/O/futures/executor remain, then AS3/AS4/MM0-MM4 gates.
+No Main, private activation,128MiB protection change or independent audit claim.
