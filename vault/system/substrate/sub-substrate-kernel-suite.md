@@ -565,3 +565,22 @@ scheduler-dependent; next change will observe actual transport drain. Prepared
 followup-write-deadline.patch is UNINSTALLED and also adds emitted WRITE abort
 and READ deadline cases. No production kernel change or activation/128MiB change.
 Mac released. Continue broader AS3 faults and owned clients, thenAS4/MM0-MM4.
+
+
+### Astra emitted WRITE and deadline faults verified, October 10
+
+Expanded native fault fixture to eight schedules per normal/bulk class. Canceled
+WRITE is observed after its bytes reach the peer without acknowledgement; its
+negative terminal and retained BYTES_SENT diagnostic do not promise remote
+rollback. Silent READ expires by absolute500ms deadline and locally retires.
+Partial header/body cancellation now waits for actual s2c channel drain under
+the channel lock, establishing consumption before abort instead of yield counts.
+
+Five smoke rows pass1857/1857,D7overlap/20cycles at bdba6bc5e plus diff504cd6018,
+run native-faults-followup/smoke-20261010T023726Z. Reverified10rawlogs,41sources,
+six inputs/row,kernel clones,Stratum clean61dde37 and Astra10preserved hashes.
+Minimum9252MiB; Mac released. No50boot or completeAS3 claim. Single-agent review;
+no production change, private activation or128MiB removal. Next reviewed but
+UNINSTALLED native-reconnect/reconnect.patch adds1000 canceled-before-accept
+attempts alternating classes with complete per-attempt ownership/accounting checks.
+Broader AS3 stage/close/exec/exit/independent-media and owned clients,AS4/MM0-MM4 remain.

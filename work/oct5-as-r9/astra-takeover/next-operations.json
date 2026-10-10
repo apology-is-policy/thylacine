@@ -1,12 +1,12 @@
 {
   "owner": "astra",
-  "state": "native-read-faults-smoke-verified",
+  "state": "eight-native-io-faults-smoke-verified",
   "source_base": "f719ee4a3429f99cbd08a552dcdaedb54c5906ff",
   "host_run": "work/oct5-as-r9/astra-takeover/operations-draft/decode-controls-20261009T211810Z",
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Native emitted WRITE cancellation and READ deadline plus deterministic fragment drain; then broader AS3 faults,owned clients,AS4,MM0-MM4. No activation.",
+  "next": "Native1000 failed reconnects via reviewed uninstalled native-reconnect patch, then broaderAS3 schedules/owned clients,AS4/MM0-MM4. No activation.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -44,5 +44,6 @@
   "matrix_run": "work/oct5-as-r9/pinned-matrix-20261010T011750Z",
   "native_operations": "native-operations/state.json",
   "native_worker": "native-worker/state.json",
-  "native_faults": "native-faults/state.json"
+  "native_faults": "native-faults/state.json",
+  "native_faults_followup": "native-faults-followup/state.json"
 }

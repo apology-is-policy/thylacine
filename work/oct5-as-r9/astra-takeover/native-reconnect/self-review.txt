@@ -1,0 +1,12 @@
+Astra single-agent review of uninstalled reconnect fixture. Alternate500normal/
+500bulk failed CONNECTs before server accept through one real worker and ring.
+Each attempt must publish, cancel once, deliver exact correlation, retire, reap,
+refund creator pages, free endpoint/request/protocol entry and empty backlog;
+stale abort after reap must fail. Full incarnation changes across reuse.
+
+Review corrected a draft-only witness before application: loom_engine_empty also
+requires wait_active==false, inappropriate for a living parked worker. Use entry
+count/request ownership plus physical pages/native endpoint/backlog settlement.
+The worker must remain alive across iterations; whole-close joins it afterward.
+No production defect or completed test is claimed. All1000 are cancellation
+failures before accept, not every malformed-handshake failure schedule.

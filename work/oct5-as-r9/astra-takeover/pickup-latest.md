@@ -61,3 +61,31 @@ already unsafe; do not repeat that repair. Then AS4 clipboard/MODE whole arc,
 then MM0–MM4. No Main landing, unfinished private async/clipboard activation or
 128MiB protection removal. Pause continuation heartbeat only when transferred
 work is complete/canceled. Full historical record remains pickup.md and status.
+
+## Newer follow-up in flight
+
+The native-faults followup patch is now APPLIED to canonical test source. Read
+native-faults-followup-flight.json before acting. It adds emitted WRITE abort,
+READ deadline expiry and actual channel-drain observation before partial-frame
+abort. Eight schedules per class;1857tests. Native-faults previous six-case
+smoke remains historical. Keep tracked source/HEAD frozen while new runner lives;
+verify raw logs then checkpoint. Do not reapply the patch or duplicate gates.
+
+
+### Astra emitted WRITE and deadline faults verified, October 10
+
+Expanded native fault fixture to eight schedules per normal/bulk class. Canceled
+WRITE is observed after its bytes reach the peer without acknowledgement; its
+negative terminal and retained BYTES_SENT diagnostic do not promise remote
+rollback. Silent READ expires by absolute500ms deadline and locally retires.
+Partial header/body cancellation now waits for actual s2c channel drain under
+the channel lock, establishing consumption before abort instead of yield counts.
+
+Five smoke rows pass1857/1857,D7overlap/20cycles at bdba6bc5e plus diff504cd6018,
+run native-faults-followup/smoke-20261010T023726Z. Reverified10rawlogs,41sources,
+six inputs/row,kernel clones,Stratum clean61dde37 and Astra10preserved hashes.
+Minimum9252MiB; Mac released. No50boot or completeAS3 claim. Single-agent review;
+no production change, private activation or128MiB removal. Next reviewed but
+UNINSTALLED native-reconnect/reconnect.patch adds1000 canceled-before-accept
+attempts alternating classes with complete per-attempt ownership/accounting checks.
+Broader AS3 stage/close/exec/exit/independent-media and owned clients,AS4/MM0-MM4 remain.
