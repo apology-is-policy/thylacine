@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Implement action-draft/next-work: IOUNIT-R1 negotiated metadata then coherent engine/CONNECT/close and immutable frontend/RETURN wake integration, matched native gates, AS3/4, MM0-MM4.",
+  "next": "Follow iounit-draft/next-work exact overlay order; coherent independent-entry-pinned engine/CONNECT/close, immutable frontend and RETURN/CQ wake integration; matched native/full Mac gates, AS3/4, MM0-MM4.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -34,5 +34,6 @@
   "provided_io_draft": "provided-io-draft/state.json",
   "retirement_draft": "retirement-draft/state.json",
   "ready_draft": "ready-draft/state.json",
-  "action_draft": "action-draft/state.json"
+  "action_draft": "action-draft/state.json",
+  "iounit_draft": "iounit-draft/state.json"
 }

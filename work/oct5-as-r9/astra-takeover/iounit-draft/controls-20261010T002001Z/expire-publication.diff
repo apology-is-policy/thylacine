@@ -1,0 +1,10 @@
+--- control.c
++++ expire-publication.c
+@@ -1194,6 +1194,7 @@
+     s32 result=o->program.operation==P9_TWALK?(s32)o->destination.slot:o->program.result;
+     // A negative program result belongs to cancel, including open DAC refusal.
+     if(o->program.result<0)return -T_E_INVAL;
++    if(o->fid_claim==P9_TLOPEN)o->owner->service_nodes->nodes[o->source.slot].fid_iounit=o->reply.iounit;
+     int rc=loom_rpc_check_finish_locked(o,result,now);if(rc)return rc;
+     struct Loom *l=o->owner;
+     switch(o->program.operation) {

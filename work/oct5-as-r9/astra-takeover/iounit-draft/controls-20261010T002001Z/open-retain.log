@@ -1,0 +1,5 @@
+PASS fixed SQE preparation: 289 checks
+PASS provided ownership: 577 checks
+PASS retirement ownership: 795 checks
+PASS action executor: 1633 checks
+FAIL successful open atomically retains negotiated iounit

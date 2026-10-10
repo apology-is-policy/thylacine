@@ -1,0 +1,11 @@
+--- control.c
++++ rearm-limit.c
+@@ -1091,7 +1091,7 @@
+     int rc=loom_rpc_check_finish_locked(o,o->program.result,now);if(rc)return rc;
+     // One continuous request/source borrow across shots. Offset and identity
+     // are unchanged; only the completed attempt is reset after CQ delivery.
+-    o->pool_more_delivered=false;
++    o->pool_more_delivered=false;o->program.wire.iounit=0;
+     o->program.phase=LPROGRAM_EFFECT;o->program.result=0;
+     o->program.wire.built=false;o->program.wire.local_again=false;
+     o->callback_seen=false;o->capture_error=0;o->submitted=false;o->advanced=false;

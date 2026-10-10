@@ -132,3 +132,12 @@ program/wire dependencies. Canonical97d495 unchanged; Macfree/nojobs/8876MiB,
 Stratum clean61dde37 and Astra10hashes intact. Next IOUNIT-R1 then coherent actual
 engine/CONNECT/close/frontend/RETURN integration and matched native gates, AS3/4,
 MM0-MM4. Continue autonomously; no activation/128MiB change.
+
+Latest addition iounit-draft resolves IOUNIT-R1 atop action-draft. Node header/
+nodes/fids/admission overrides retain Rlopen u32 limit and copy it at exact
+read/write admission, preserved across MORE; zero/msize/deadline/reuse tested.
+2316cumulativechecks/11mutants,47inputs/12rawpairs/4ARMobjects,64Bnode/4096Btable/
+920Bowner unchanged. Native responses/progress/ref/engine remain host boundaries.
+Read next-work for exact overlay order and actual engine/CONNECT/close/frontend/
+RETURN integration next. Canonical97d495 unchanged, Macfree/nojobs/8838MiB,
+Stratum clean61dde37/Astra10hashes intact. No activation; self-review only.

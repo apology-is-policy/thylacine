@@ -1,0 +1,12 @@
+{
+  "owner": "astra",
+  "review": "single-agent self-review",
+  "findings": [{
+    "id": "IOUNIT-R1",
+    "state": "fixed-in-uninstalled-draft",
+    "baseline": "controls-20261010T001825Z/control.log",
+    "verification": "controls-20261010T002001Z/result.json",
+    "problem": "Rlopen iounit was captured but not retained by FID admission or copied into subsequent read/write wire contexts.",
+    "fix": "Existing64B node stores full u32; successful open and metadata publish share Ll; exact admitted source borrow snapshots limit into immutable read/write program, retained across MORE. Zero semantics and msize bound preserved."
+  }]
+}

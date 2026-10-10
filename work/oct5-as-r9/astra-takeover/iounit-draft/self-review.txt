@@ -1,0 +1,33 @@
+Astra single-agent self-review, October10. Not independent review.
+
+IOUNIT-R1 was an explicitly owned pre-installation dependency. Existing actual
+Rlopen capture kept iounit only in its owner; admission discarded it and later
+read/write wire contexts used zero. Preserved before-review admission source and
+baseline controls-20261010T001825Z/control.log reproducing lost limit after actual
+stat/LOPEN program transitions (synthetic parsed replies).
+
+Reuse internal diagnostic_reserved u32 as fid_iounit. This changes no user ABI,
+node64B/table4096B ledger or owner920B footprint. Entire-node clearing at prepare,
+rollback and reap still clears it; nodes_empty now checks the named metadata.
+Fresh root/WALK mappings initialize zero. Pure FID open helper initializes zero;
+actual admission installs validated captured iounit only after successful open
+commit within the SAME Ll critical section and fresh deadline/abort check.
+The helper's existing internal callers have no negotiated reply and retain zero.
+There is no fallible/unlocked edge between publishing open rights and its limit.
+
+READ/WRITE admission copies metadata only after exact source/access borrow
+succeeds, in the same Ll hold as publishing queued owner. Both fixed and provided
+paths share this transaction. Wire context is immutable across native dispatch;
+MORE rearm retains it. Existing builder takes min(msize overhead, iounit if
+nonzero), never widens the negotiated frame budget and never interprets zero as
+zero-length permission. Full u32 is retained (no truncation/sign reinterpretation).
+Negative or late open does not publish access/limit. Reaped/reused incarnation
+cannot inherit the old limit; physical destructor and request ownership unchanged.
+
+2316 cumulative ASan/UBSan checks (1633 action/retirement baseline plus negotiated
+cases) and11 exact mutants qualify these draft sources.47input hashes/12raw
+source-binary-log pairs and4ARM objects reverified. Actual fresh stat->LOPEN,
+owner/capture/admission/wire/ledger paths compose; native progress/demux/parsed
+responses, entry roots, allocator/image and physical backing boundaries remain
+controlled. No real remote negotiation, native engine or SMP qualification.
+No canonical install or activation. Integration is still owned and next.

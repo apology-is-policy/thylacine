@@ -1,0 +1,13 @@
+{
+  "owner": "astra",
+  "run": "work/oct5-as-r9/astra-takeover/iounit-draft/controls-20261010T002001Z",
+  "verified_input_count": 47,
+  "raw_pairs": 12,
+  "arm64_objects": 4,
+  "host_checks": 2316,
+  "mutants": 11,
+  "node_bytes": 64,
+  "node_table_bytes": 4096,
+  "operation_bytes": 920,
+  "astra_preserved_hashes": 10
+}

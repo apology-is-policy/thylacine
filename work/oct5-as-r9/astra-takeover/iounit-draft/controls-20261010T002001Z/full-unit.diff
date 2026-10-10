@@ -1,0 +1,11 @@
+--- control.c
++++ full-unit.c
+@@ -1207,7 +1207,7 @@
+                                o->request.identity,o->program.wire.mode);
+         // Publish access and negotiated limit in this one successful, freshly
+         // checked transaction. A rejected/expired open never changes metadata.
+-        if(!rc)l->service_nodes->nodes[o->source.slot].fid_iounit=o->reply.iounit;
++        if(!rc)l->service_nodes->nodes[o->source.slot].fid_iounit=(u16)o->reply.iounit;
+         break;
+     case P9_TCLUNK:
+         if(o->fid_claim!=P9_TCLUNK)return -T_E_BUSY;

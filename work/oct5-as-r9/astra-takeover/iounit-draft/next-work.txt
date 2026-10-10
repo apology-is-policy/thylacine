@@ -1,0 +1,32 @@
+Continue autonomously as Astra, single-agent on corona/async-memory.
+Qualified uninstalled working sources resolve in this order:
+  iounit-draft node header/nodes/fids/admission overrides;
+  action-draft action executor and corrected READY selector;
+  ready-draft READY header;
+  retirement-draft operation/RPC/IO/provided/retirement/request/client/loom;
+  program-draft and wire-draft program/adapter headers and modules;
+  canonical97d495 for remaining dependencies.
+Do not rerun old installers or mutate older qualifying drafts. Preserve evidence.
+
+Next coherent engine/CONNECT/close/frontend integration, before installation:
+- Every ready_step visit retains a distinct entry pin + Loom root beyond operation
+  FREE/DISCARD. Ordinary operation-owned pins cannot license driver return access.
+- engine_interest routes CONNECT ACTIVE/PREPARED to old handshake; READY/aborted
+  operation scopes to value-only ready interest, including local retirement with
+  delivery/free work. Actual native poll registers before recheck; RETURN/CQ head
+  and driver/constructor return must update the same wake predicate.
+- Old connect_step must not publish local retirement with active operation writers/
+  FID or request borrows. New scope retirement may preserve committed pending CQ
+  records/independent payload leases, but must first end actual local users.
+- engine_close_visit currently skips locally_retired and calls CONNECT-only step;
+  route operation disposal first, even after local retirement. Do not require zero
+  op-owned entry pins before draining these owners. Global detach follows drainage.
+- Actual immutable shared SQE frontend/dispatch and canonical RETURN wake.
+- Keep one bounded action / msize quantum, round-robin and fresh deadlines.
+
+Actual-source engine fixtures must cover normal/bulk/fullCQ/empty/late-buffer/
+abort/deadline/CLUNK/close/exec and waiter registration/recheck. Install coherent
+working set only after review; real ARM64 full link and matched native/full Mac
+gates remain owed. Prior50/50 qualifies f719ee4a only. AS3/4 then MM0-MM4 remain.
+Keep8GiBdiskfloor,Stratumexactclean61dde37,Astra6pending+4protected,all evidence.
+No Main/private async/clipboard activation or128MiB protection removal.

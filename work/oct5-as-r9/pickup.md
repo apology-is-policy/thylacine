@@ -3446,3 +3446,23 @@ self-review only. Mac released,8876MiB; Stratum clean61dde37 and Astra10hashes
 preserved. Continue IOUNIT-R1 negotiated metadata, then coherent entry-pinned
 engine/CONNECT/close routing, RETURN/frontend wakes and native matched gates;
 AS3/4 and MM0-MM4 follow. See action-draft/state/self-review/next-work.
+
+### Astra negotiated I/O metadata, October10
+
+Uninstalled `iounit-draft` resolves IOUNIT-R1 after actual action checkpoint
+473a54bf. A validated Rlopen limit is now retained in unused internal node space
+and published atomically with open access under Ll. Exact READ/WRITE admission
+copies it into the immutable wire program, including provided and rearmed reads.
+Zero retains no additional limit; nonzero cannot widen the negotiated frame size.
+Expiry publishes neither access nor limit, and reap/reuse clears the metadata.
+Actual baseline lost-limit failure is preserved beside the corrected sources.
+
+2316 cumulative ASan/UBSan checks and11 exact mutants pass;47inputs/12raw
+source-binary-log pairs/4ARM objects reverified. Node64B/table4096B/owner920B
+unchanged. Captured replies, native progress and engine/ref/allocation boundaries
+remain controlled; no native negotiation or integrated scheduling claim. Canonical
+kernel remains97d495. Macfree/nojobs/8838MiB; Stratum clean61dde37 and Astra10hashes
+intact. Continue coherent independent-entry-pinned engine/CONNECT/close routing,
+immutable shared frontend and RETURN/CQ wakes, then actual-source/native matched
+gates, AS3/4 and MM0-MM4. Read iounit-draft/next-work for exact working overlays.
+Single-agent self-review only; no Main/private activation or128MiB removal.

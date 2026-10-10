@@ -1,0 +1,9 @@
+                 U __stack_chk_fail
+                 U __stack_chk_guard
+                 U loom_slot_pin
+                 U loom_slot_publish
+                 U loom_slot_reap
+                 U loom_slot_reserve
+                 U loom_slot_retire
+                 U loom_slot_rollback
+                 U loom_slot_unpin

@@ -2618,3 +2618,12 @@ controlled; no installed/native scheduling claim. Next negotiated iounit metadat
 then coherent engine/CONNECT/close/frontend/RETURN integration and native gates.
 Canonical97d495 unchanged; single-agent self-review, no activation. Read draft
 state/self-review/next-work for exact dependencies and limits.
+
+Astra October10 uninstalled iounit-draft overrides node header/nodes/fids/admission:
+internal fid_iounit reuses reserved metadata in the64B node; successful open access
+and validated Rlopen limit publish under one Ll hold. Exact READ/WRITE admission
+copies it into wire context, including provided/MORE. Zero/no-extra-limit, msize
+bound, late-open refusal and reap/reuse clearing pass2316cumulativechecks/11mutants;
+47inputs/12rawpairs/4ARMobjects preserve64Bnode/4096Btable/920Bowner. No native
+negotiation or scheduling claim; coherent engine/CONNECT/close/frontend/RETURN
+integration and matched native gates remain next. Canonical97d495 unchanged.
