@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-local-progress-host-verified",
-  "next": "Independent local event-loop/sleep/deadline integration with simulated events. Creator-local coalesced last-owner progress pulses are host-verified; caller must drive progress_notified and inspect needs_progress. No OS wake/native qualification. Native SQ remains parked; async-first gates remain.",
+  "state": "draft-local-wait-host-verified",
+  "next": "Independent bounded per-request deadline/cancellation bookkeeping and runnable-task composition using simulated backends. Local wait coordinator is host-verified only; native atomic wait/event adapters and SQ integration remain unqualified/parked. Preserve async-first gates.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -24,5 +24,6 @@
   "retirement_c_run": "owned-clients/retirement-executor-c-20261010T084418Z",
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
   "future_retirement_run": "owned-clients/future-retirement-20261010T091254Z",
-  "local_progress_run": "owned-clients/local-progress-20261010T091022Z"
+  "local_progress_run": "owned-clients/local-progress-20261010T091022Z",
+  "local_wait_run": "owned-clients/local-wait-20261010T091938Z"
 }

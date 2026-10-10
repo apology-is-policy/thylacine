@@ -36554,3 +36554,27 @@ retirement changes need explicit notification. No native or full AS3 gate is
 claimed. Protected10/cleanexternal61dde37 and parked kernel base preserved.
 SQ stays parked/unapplied; AS4/MM0-MM4, Main/private activation and128MiB guards
 remain. Heartbeat ACTIVE under continuing operator authorization.
+
+
+### Astra simulated local wait/deadline coordination, October 10
+
+The uninstalled Rust coordinator performs one bounded retirement turn and at
+most one wait. It registers interest before rechecking external readiness/time,
+then checks local ownership pulses last. An armed guard cleans up every return
+path; pending partial work prevents sleep. Spurious wakes retain the original
+absolute deadline and schedule progress. Timeout reports expiry without treating
+it as terminal completion or allowing storage reuse.
+
+local-wait091938Z:9cases opt0/2,2compile-fail+control,6mutants;11source hashes and
+21rawcommands/snapshots/HEAD/diff reverified before documentation. Owner drops
+during arm/readiness, event between recheck/wait, absolute deadlines, bounded
+budgets, error cleanup and retained active ownership are covered. No new failure.
+Single-agent local-wait-self-review.txt explains the limits: simulated event
+source only, no native atomic wait or actual sleeping-thread qualification.
+The future adapter must retain events until serviced and include runnable/CQ
+work. Existing ownership cores and C code are unchanged.
+
+Next independent bounded per-request deadline/cancellation bookkeeping and
+runnable-task composition. Protected10/cleanexternal61dde37 and parked kernel
+base preserved. SQ remains parked/unapplied, native/fullAS3 qualification gated;
+AS4/MM0-MM4, Main/private activation and128MiB guards remain. Heartbeat ACTIVE.
