@@ -1,0 +1,11 @@
+--- control.c
++++ publish_deadline.c
+@@ -2740,7 +2740,7 @@
+     rc=pooled?loom_provided_prepare(l,p,s,timer_now_ns(),&o):
+               loom_private_io_prepare(l,p,s,timer_now_ns(),&o);
+     if(rc)return rc;
+-    rc=pooled?loom_provided_publish(o,timer_now_ns()):loom_private_io_publish(o,timer_now_ns());
++    rc=pooled?loom_provided_publish(o,timer_now_ns()):loom_private_io_publish(o,1);
+     if(rc) {
+         int drop=pooled?loom_provided_release_prepared(o):loom_private_io_release_prepared(o);
+         if(drop)extinction("frontend lost prepared operation rollback");

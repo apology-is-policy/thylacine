@@ -1,0 +1,28 @@
+[
+  {
+    "id": "FRONT-R1",
+    "state": "repaired-in-uninstalled-draft",
+    "problem": "Priority retained-refusal delivery could starve runnable scope visits.",
+    "baseline": "controls-20261010T005408Z/control.log",
+    "repair": "One refusal participant in the bounded 65-participant round robin; close normalizes cursor to 64 scopes.",
+    "witness": "controls-20261010T005558Z/refusal_priority.log"
+  },
+  {
+    "id": "FRONT-FIXTURE",
+    "state": "corrected-evidence-preserved",
+    "problem": "Initial ring pointer cast failed compilation; existing pool helper reset the frontend ring; ARM layout lacked engine header.",
+    "evidence": [
+      "controls-20261010T005107Z/control-build.log",
+      "controls-20261010T005131Z/control.log",
+      "layout-incomplete-type.c"
+    ],
+    "repair": "Use pointer type, restore geometry after pool setup, include engine header."
+  },
+  {
+    "id": "FRONT-MUTANT",
+    "state": "exact-witness-corrected",
+    "problem": "Removing pending reservation trips the serialized-claim invariant before the later assertion.",
+    "repair": "Require exact invariant and exit86, not a generic failure.",
+    "witness": "controls-20261010T005558Z/pending_reservation.log"
+  }
+]

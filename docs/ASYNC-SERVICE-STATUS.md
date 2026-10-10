@@ -3020,3 +3020,32 @@ shared-SQE/creator frontend and CQ kick, coherent install and matched native/ful
 Mac gates, then AS3/4 and MM0-MM4. No activation/128MiB protection change.
 See return-draft/state,self-review,next-work; it overrides only control/header
 before the exact drain-draft overlay stack.
+
+
+### Astra immutable shared frontend, October 10
+
+Uninstalled frontend-draft copies accepted shared SQEs once under a serialized
+claim, bounds budget/indices by private ring geometry, and invokes actual fixed
+or provided preparation/publication outside Ll with fresh authority/deadline
+checks. A precharged scalar refusal record preserves exactly one negative CQE
+when capacity disappears after consumption; pending refusal blocks another claim.
+Zero-budget creator ENTER kicks registered CQ work. Close waits for preparation
+and physical rollback before discarding settled refusals and draining owners.
+
+FRONT-R1 reproduced priority refusal starvation; the fixed engine gives the
+refusal one turn among64scopes and normalizes close cursor back to64. Actual host
+regressions pass3674 cumulative sanitizer assertions/13exact mutants,59inputs/
+14rawpairs. Three real ARM64 objects pass;3664Bengine fits charged4096B page.
+Existing lifecycle models2clean/14counterexamples pass, without modelling this
+new refusal record. Failed fixture/build/model evidence is retained as applicable.
+Single-agent self-review only. See frontend-draft/state,findings,self-review.
+
+CONNECT successful actual constructor/adoption is still owed: this fixture tests
+scalar routing into a controlled constructor refusal. Native IO/poll/wake/ref/
+backing/allocation/final destruction remain controlled boundaries. No installed
+syscall or native/full Mac qualification. Canonical kernel97d495 unchanged;
+prior50/50 qualifies onlyf719ee4a. Macreleased/nojobs,8684MiB above8192floor;
+Stratum clean61dde37 and Astra6pending/4protected hashes verified. Continue
+frontend-draft/next-work combined CONNECT, coherent installation and matched
+native/full gates, then AS3/4 and MM0-MM4. No Main/private async/clipboard activation
+or128MiB protection removal.

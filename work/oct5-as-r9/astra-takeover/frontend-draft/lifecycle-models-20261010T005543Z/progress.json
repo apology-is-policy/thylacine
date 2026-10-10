@@ -1,0 +1,114 @@
+[
+  {
+    "config": "loom.cfg",
+    "rc": 0,
+    "expected": "Invariants",
+    "ok": true,
+    "sha256": "d4c0db7078be84147a082aac4c7fb55982ace01103d3599fce519ce41be3df5d"
+  },
+  {
+    "config": "loom_buggy_cqwait_check_early.cfg",
+    "rc": 12,
+    "expected": "NoMissedCqWake",
+    "ok": true,
+    "sha256": "4e958b23d67ae68338473911023c79a2616780afb3c450923c2d549f1146cc53"
+  },
+  {
+    "config": "loom_buggy_cqwait_no_wake.cfg",
+    "rc": 12,
+    "expected": "NoMissedCqWake",
+    "ok": true,
+    "sha256": "34b0d7183333385f241a03e8aff7d7eb9deade710245aa15145d68ab3f731101"
+  },
+  {
+    "config": "loom_buggy_double_post.cfg",
+    "rc": 12,
+    "expected": "NoDoubleCompletion",
+    "ok": true,
+    "sha256": "00a48576199dfea58aa421a35c850a59424cf8a8f2ad14b61036a06011643ac1"
+  },
+  {
+    "config": "loom_buggy_live_sqe_reread.cfg",
+    "rc": 12,
+    "expected": "ArgPinnedToSnapshot",
+    "ok": true,
+    "sha256": "c782677551bc5f53a6275ca01c8cc8fbf5b7210ab18967730bd9d7be66e5112a"
+  },
+  {
+    "config": "loom_buggy_lost_on_full.cfg",
+    "rc": 12,
+    "expected": "CqNeverOverfull",
+    "ok": true,
+    "sha256": "ac7726ec2ab46670736236053a639bbe1877d79659050e973ffc94081d8f7c70"
+  },
+  {
+    "config": "loom_buggy_recheck_at_completion.cfg",
+    "rc": 12,
+    "expected": "ObjPinnedToSnapshot",
+    "ok": true,
+    "sha256": "e3703229c6020ebf6c44d542f2f29c9f28bf347da2a0382ca176e507469f49aa"
+  },
+  {
+    "config": "loom_buggy_stale_after_teardown.cfg",
+    "rc": 12,
+    "expected": "NoStaleCompletion",
+    "ok": true,
+    "sha256": "ea4e9c8b0e4cafb2948d8f48d5abc48d70e156bd9782e0c6d64b8130024f5748"
+  },
+  {
+    "config": "loom_service.cfg",
+    "rc": 0,
+    "expected": "TypeOK",
+    "ok": true,
+    "sha256": "78c44018163dd30f8025a61a85a09135e44a73f2bfc4695e67603888c6d1babd"
+  },
+  {
+    "config": "loom_service_buggy_cqfull.cfg",
+    "rc": 12,
+    "expected": "CqBounded",
+    "ok": true,
+    "sha256": "176d454c992f8bc3d10dddcbb8fc27002bdac89664d3ea97df566ad0dba8e7ee"
+  },
+  {
+    "config": "loom_service_buggy_double.cfg",
+    "rc": 12,
+    "expected": "NoDoubleTerminal",
+    "ok": true,
+    "sha256": "29e9cb528b7df414f576e9374b74329f2c2c7c15620a3ef82e6f0b0b86a1b9c5"
+  },
+  {
+    "config": "loom_service_buggy_earlyfree.cfg",
+    "rc": 12,
+    "expected": "NoEarlyFree",
+    "ok": true,
+    "sha256": "e19c7327660a504039abd8524b77a53704245cc884da8ff4575849604888fa25"
+  },
+  {
+    "config": "loom_service_buggy_late.cfg",
+    "rc": 12,
+    "expected": "NoLateSuccess",
+    "ok": true,
+    "sha256": "cd35b139dc96f969e602ec061e3196b9786ee2aa2e276f00dea8ea08573929e5"
+  },
+  {
+    "config": "loom_service_buggy_peerwait.cfg",
+    "rc": 13,
+    "expected": "RetirementProgress",
+    "ok": true,
+    "sha256": "a44268bdddfc15d177aa474200102d5089e51040aac0a9d92cd679f67856ba45"
+  },
+  {
+    "config": "loom_service_buggy_refund.cfg",
+    "rc": 12,
+    "expected": "CreditsRetained",
+    "ok": true,
+    "sha256": "74927078284b3caeb476c090fba2985388f312d05c08b1a5b7541431316f7d13"
+  },
+  {
+    "config": "loom_service_buggy_reuse.cfg",
+    "rc": 12,
+    "expected": "NoStaleSlot",
+    "ok": true,
+    "sha256": "ec037740c0ef42e6391a5db4f5ab9365e36dc05f73909028d13f04bc2e268ec7"
+  }
+]

@@ -1,0 +1,11 @@
+--- control.c
++++ consume_rejection.c
+@@ -2762,7 +2762,7 @@
+         struct loom_service_buffer_receipt *receipts=(void *)(l->ring_kva+l->receipt_off);
+         receipts[at]=(struct loom_service_buffer_receipt){0};
+     }
+-    e->rejected=false;e->rejected_user_data=0;e->rejected_result=0;
++    /* fault: refusal remains eligible */
+     ++l->cq_tail;__atomic_store_n(&h->cq_tail,l->cq_tail,__ATOMIC_RELEASE);
+     spin_unlock(&l->lock);
+     poll_waiter_list_wake(&l->cq_waiters);loom_private_close_changed(l);return 1;

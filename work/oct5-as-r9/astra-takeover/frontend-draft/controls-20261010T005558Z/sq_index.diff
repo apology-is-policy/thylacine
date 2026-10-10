@@ -1,0 +1,11 @@
+--- control.c
++++ sq_index.c
+@@ -2792,7 +2792,7 @@
+         }
+         u32 *indices=(void *)(l->ring_kva+l->sq_array_off);
+         u32 index=__atomic_load_n(&indices[l->sq_head&(l->sq_entries-1u)],__ATOMIC_ACQUIRE);
+-        bool valid=index<l->sq_entries;
++        bool valid=index<=l->sq_entries;
+         if(valid) {
+             const volatile u8 *from=(void *)(l->ring_kva+l->sqe_off+index*sizeof(copy));
+             u8 *to=(void *)&copy;

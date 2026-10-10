@@ -164,3 +164,16 @@ wake/IO/ref/backing boundaries remain; no syscall/shared-SQE/native scheduling
 claim. Canonical97d495 unchanged;Macfree/nojobs/8736MiB,clean61dde37/Astra10hashes
 preserved. Continue return-draft/next-work immutable shared frontend/CQ kick,
 coherent install and matched native/full Mac gates,AS3/4,MM0-MM4. No activation.
+
+
+Newest uninstalled frontend-draft overrides frontend module/header plus engine/
+header ahead of return/drain overlays.3674cumulativechecks/13mutants,59inputs/
+14rawpairs/3ARMobjects and unchanged lifecycle2clean/14counterexamples reverified.
+Serialized one-copy SQ claim, fixed precharged rejection cell, CQ kick and close
+ownership covered. FRONT-R1 priority-refusal starvation reproduced and repaired
+with65-participant round robin; engine3664B still fits charged4096B page.
+Successful actual CONNECT construction/adoption and native IO/poll/wake/ref/
+backing remain unqualified by this host fixture. Read state/findings/self-review/
+next-work. Next combined CONNECT, coherent installation, matched native/full Mac
+gates thenAS3/4,MM0-MM4. Canonical97d495 unchanged,Macreleased/nojobs/8684MiB;
+clean61dde37 and Astra10hashes intact. No activation; single-agent self-review.

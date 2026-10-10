@@ -1,0 +1,10 @@
+--- control.c
++++ refusal_priority.c
+@@ -2514,6 +2514,7 @@
+ }
+ 
+ static int engine_ready_visit(struct Loom *l, u64 now) {
++    if(loom_frontend_step(l))return 1;
+     if (!l || !loom_is_private(l)) return -T_E_INVAL;
+     for (u32 scanned=0;scanned<=LOOM_SERVICE_SLOT_COUNT;++scanned) {
+         spin_lock(&l->lock);
