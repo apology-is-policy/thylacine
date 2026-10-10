@@ -1,0 +1,1 @@
+Assertion failed: (t_ring_fixed_write(f,input,8)<0), function fixed_tests, file test_ring_payload.c, line 57.

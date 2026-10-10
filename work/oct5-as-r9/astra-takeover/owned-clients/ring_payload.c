@@ -8,8 +8,8 @@ struct t_ring_payload{struct pool_state *pool;struct t_lease_token token;unsigne
 struct member{struct t_loom_service_pool_member range;struct t_ring_payload lease;};
 struct pool_state{struct ring_core *core;struct t_loom_service_ref identity;struct t_lease_ledger ledger;size_t count,live;unsigned handle_alive,closing;struct t_ring_pool handle;struct member members[];};
 enum fixed_phase{FIX_FREE,FIX_PREPARED,FIX_ACTIVE,FIX_TERMINAL};
-struct t_ring_fixed{struct ring_core *core;struct t_loom_service_pool_member range;struct t_loom_service_ref scope;uint64_t cookie;enum fixed_phase phase;int32_t result;unsigned write,alive,abandoned;};
-struct ring_core{struct t_ring_fixed fixed[64];size_t fixed_handles;struct t_ring_backend b;struct pool_state *pools[64],*quarantine;uint64_t last[64];size_t members,live,pool_handles;unsigned closing,closed,root_alive,client_alive;struct t_ring_owner root;struct t_ring_client client;};
+struct t_ring_fixed{struct ring_core *core;struct t_loom_service_pool_member range;struct t_loom_service_ref scope;uint64_t cookie;enum fixed_phase phase;int32_t result;uint64_t deadline;unsigned write,alive,abandoned,has_deadline,abort_requested;};
+struct ring_core{struct t_ring_fixed fixed[64];size_t fixed_handles,deadline_cursor;struct t_ring_backend b;struct pool_state *pools[64],*quarantine;uint64_t last[64];size_t members,live,pool_handles;unsigned closing,closed,root_alive,client_alive;struct t_ring_owner root;struct t_ring_client client;};
 static void retire(struct ring_core *c){if(!c->closing){c->closing=1;c->b.begin_retire(c->b.context);}}
 static void close_owner(struct ring_core *c){retire(c);if(!c->closed){c->closed=1;c->b.close(c->b.context);}}
 static void maybe_free(struct ring_core *c){if(!c->root_alive&&!c->client_alive&&!c->pool_handles&&!c->fixed_handles&&!c->live){close_owner(c);for(size_t i=0;i<64;++i)free(c->pools[i]);free(c->quarantine);c->b.destroy(c->b.context);free(c);}}
@@ -83,6 +83,33 @@ int t_ring_fixed_write(struct t_ring_fixed *f,const void *bytes,size_t len){
  memcpy((unsigned char *)c->b.buffer(c->b.context,f->range.buffer_index)+(size_t)f->range.offset,bytes,len);return 0;
 }
 int t_ring_fixed_publish(struct t_ring_fixed *f){assert(f->alive);if(f->core->closing)return T_LEASE_STATE;if(f->phase!=FIX_PREPARED)return T_LEASE_BUSY;f->phase=FIX_ACTIVE;return 0;}
+/* Cancellation requests scope abort; only CQ/retirement proves reuse safe. */
+static int cancel_fixed(struct t_ring_fixed *f){
+ struct ring_core *c=f->core;if(c->closed)return 0;
+ if(f->phase==FIX_PREPARED)return T_LEASE_BUSY;
+ if(f->phase!=FIX_ACTIVE||f->abort_requested)return 0;
+ f->abort_requested=1;c->b.abort_scope(c->b.context,f->scope);return 1;
+}
+int t_ring_fixed_cancel(struct t_ring_fixed *f){assert(f->alive);return cancel_fixed(f);}
+int t_ring_fixed_deadline(struct t_ring_fixed *f,int enabled,uint64_t deadline){
+ assert(f->alive);if(f->core->closing)return T_LEASE_STATE;
+ if(f->phase!=FIX_PREPARED)return T_LEASE_BUSY;
+ f->has_deadline=!!enabled;f->deadline=deadline;return 0;
+}
+int t_ring_next_deadline(const struct t_ring_owner *root,uint64_t *out){
+ const struct ring_core *c=root->core;assert(c->root_alive&&out);*out=0;if(c->closed)return 0;
+ int found=0;for(size_t i=0;i<64;++i){const struct t_ring_fixed *f=&c->fixed[i];
+  if(f->phase==FIX_ACTIVE&&f->has_deadline&&!f->abort_requested&&(!found||f->deadline<*out)){*out=f->deadline;found=1;}
+ }return found;
+}
+size_t t_ring_expire(struct t_ring_owner *root,uint64_t now,size_t budget){
+ struct ring_core *c=root->core;assert(c->root_alive);if(c->closed)return 0;
+ size_t requested=0,visits=budget<64?budget:64;
+ for(size_t n=0;n<visits;++n){size_t i=c->deadline_cursor;c->deadline_cursor=(i+1)%64;
+  struct t_ring_fixed *f=&c->fixed[i];
+  if(f->phase==FIX_ACTIVE&&f->has_deadline&&!f->abort_requested&&now>=f->deadline){requested+=(cancel_fixed(f)==1);}
+ }return requested;
+}
 int t_ring_fixed_finish(struct t_ring_owner *root,uint64_t cookie,int32_t result){
  struct ring_core *c=root->core;assert(c->root_alive);
  for(size_t i=0;i<64;++i){struct t_ring_fixed *f=&c->fixed[i];if(f->phase==FIX_FREE||f->cookie!=cookie)continue;
@@ -97,7 +124,7 @@ int64_t t_ring_fixed_bytes(const struct t_ring_fixed *f,const unsigned char **ou
 }
 void t_ring_fixed_drop(struct t_ring_fixed *f){
  assert(f->alive);struct ring_core *c=f->core;f->alive=0;--c->fixed_handles;
- if(f->phase==FIX_ACTIVE){f->abandoned=1;if(!c->closed)c->b.abort_scope(c->b.context,f->scope);}else{f->phase=FIX_FREE;}maybe_free(c);
+ if(f->phase==FIX_ACTIVE){f->abandoned=1;(void)cancel_fixed(f);}else{f->phase=FIX_FREE;}maybe_free(c);
 }
 size_t t_ring_fixed_count(const struct t_ring_owner *root){struct ring_core *c=root->core;assert(c->root_alive);size_t n=0;for(size_t i=0;i<64;++i)n+=c->fixed[i].phase!=FIX_FREE;return n;}
 

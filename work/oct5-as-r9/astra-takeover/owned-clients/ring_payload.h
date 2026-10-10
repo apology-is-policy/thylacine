@@ -48,6 +48,16 @@ struct t_ring_fixed;
 int t_ring_fixed_reserve(struct t_ring_client *,uint64_t,struct t_loom_service_ref,struct t_loom_service_pool_member,int,struct t_ring_fixed **);
 int t_ring_fixed_write(struct t_ring_fixed *,const void *,size_t);
 int t_ring_fixed_publish(struct t_ring_fixed *);
+/* Set/clear absolute local deadline before publication only. enabled distinguishes
+ * a deadline of zero from no timer; this is not the native ABI encoding.
+ * cancel: 1 requested, 0 already requested/terminal/closed, negative if prepared.
+ * Scope-wide abort may affect siblings; neither API releases active storage.
+ * expire visits min(budget,64) rotating cells, returns newly requested count.
+ * next_deadline: 1 found, 0 none. Both exclude terminal/cancelled requests. */
+int t_ring_fixed_deadline(struct t_ring_fixed *,int enabled,uint64_t deadline);
+int t_ring_fixed_cancel(struct t_ring_fixed *);
+int t_ring_next_deadline(const struct t_ring_owner *,uint64_t *);
+size_t t_ring_expire(struct t_ring_owner *,uint64_t now,size_t budget);
 int t_ring_fixed_finish(struct t_ring_owner *,uint64_t,int32_t);
 int64_t t_ring_fixed_bytes(const struct t_ring_fixed *,const unsigned char **,size_t *);
 void t_ring_fixed_drop(struct t_ring_fixed *);

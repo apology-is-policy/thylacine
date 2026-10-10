@@ -4354,3 +4354,27 @@ is implemented or qualified. Next review independent AS3 lifecycle coverage,
 remaining non-native shutdown/drain and C/Rust parity gaps. Protected10,
 cleanexternal61dde37 and parked kernel base preserved. SQ stays parked/unapplied;
 fullAS3/AS4/MM0-MM4, Main/private activation and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra C deadline/cancellation parity, October 10
+
+Uninstalled C fixed-request owners now support prepared-only absolute deadlines,
+explicit scope-wide cancellation and bounded rotating expiry using existing64cells.
+An enabled bit distinguishes zero from no deadline. Explicit cancel, expiry and
+active-handle drop share one abort-requested bit; none releases active backing or
+request metadata. Authentic later WRITE success remains success, and completed
+READ views retain storage. Closed owners suppress backend abort; normal retirement
+continues due-work polling. These are simulated creator-thread components only.
+
+Host deadlines-c-20261010T101109Z:8cases, LLVM22ASan+UBSan and optimized NDEBUG
+core,6mutants. Typed regression101122Z:11cases/6mutants; backing101136Z:21cases/
+8mutants; retirement101143Z:8cases/6mutants, same two profiles. Source manifests,
+snapshots,HEAD/diff and all raw outcomes reverified before docs:13/13/7/15sources,
+25/25/25/27commands. No failed run. Single-agent self-review in
+owned-clients/c-deadline-self-review.txt; not an independent audit.
+
+Next forward C timers through the bounded retirement owner and review independent
+shutdown/drain coverage. No native wake/timer or completeAS3 qualification. Rust
+source unchanged; earlier Rust evidence remains scoped to its recorded snapshots.
+Protected10, exact clean external61dde37 and parked patch/restored kernel verified.
+SQ remains parked/unapplied; AS4/MM0-MM4/Main/private activation/128MiB guards remain.

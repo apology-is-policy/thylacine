@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Review independent client lifecycle coverage against approved AS3 contracts; consolidate source-matched evidence and close remaining non-native shutdown/drain and C/Rust parity gaps. Rust task/timer/retirement composition is host-verified only; native wake-to-park and SQ remain unqualified/parked. Preserve async-first gates.",
+  "next": "Forward C deadline polling through the bounded retirement owner, including attached and retiring drivers with independent bounded scans; then review remaining independent shutdown/drain coverage. Native SQ/atomic wake adapters and full AS3 remain gated; no AS4/MM0-MM4 skip.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -56,12 +56,12 @@
   "owned_mapping_run": "owned-clients/owned-mapping-20261010T064503Z",
   "parked_dependency": "native-sq-reuse/PARKED.md",
   "fixed_rust_run": "owned-clients/fixed-io-20261010T093013Z",
-  "fixed_c_run": "owned-clients/fixed-io-c-20261010T074317Z",
+  "fixed_c_run": "owned-clients/fixed-io-c-20261010T101136Z",
   "fixed_composed_run": "owned-clients/composed-ring-20261010T074349Z",
   "typed_rust_run": "owned-clients/fixed-requests-20261010T093026Z",
-  "typed_c_run": "owned-clients/fixed-requests-c-20261010T083803Z",
+  "typed_c_run": "owned-clients/fixed-requests-c-20261010T101122Z",
   "retirement_rust_run": "owned-clients/retirement-executor-20261010T091311Z",
-  "retirement_c_run": "owned-clients/retirement-executor-c-20261010T084418Z",
+  "retirement_c_run": "owned-clients/retirement-executor-c-20261010T101143Z",
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
   "future_retirement_run": "owned-clients/future-retirement-20261010T093920Z",
   "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
@@ -69,5 +69,6 @@
   "deadline_run": "owned-clients/deadlines-20261010T092954Z",
   "timer_wait_run": "owned-clients/timer-wait-20261010T095916Z",
   "local_tasks_run": "owned-clients/local-tasks-20261010T094912Z",
-  "task_loop_run": "owned-clients/task-loop-20261010T095847Z"
+  "task_loop_run": "owned-clients/task-loop-20261010T095847Z",
+  "deadline_c_run": "owned-clients/deadlines-c-20261010T101109Z"
 }

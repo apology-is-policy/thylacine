@@ -23,6 +23,16 @@ int32_t t_fixed_read_status(const struct t_fixed_read_result *);
 int64_t t_fixed_read_bytes(const struct t_fixed_read_result *,const unsigned char **,size_t *);
 /* End all result view uses before drop; never reuse a consumed handle. */
 void t_fixed_read_drop(struct t_fixed_read_result *);
+/* Cancellation is scope-wide, idempotent per request, and never completion.
+ * A later successful WRITE remains success; no remote rollback is implied.
+ * set_deadline only before publish; enabled=0 clears, enabled=1 includes zero.
+ * next_deadline/expire are caller-driven bounded polling, no native wake adapter.
+ * Due work remaining after a partial/zero budget must be serviced before sleep.
+ * See ring_payload.h for return values. Handles remain owned until completion/drop. */
+int t_fixed_set_deadline(struct t_fixed_request *,int enabled,uint64_t deadline);
+int t_fixed_cancel(struct t_fixed_request *);
+int t_fixed_next_deadline(const struct t_fixed_driver *,uint64_t *);
+size_t t_fixed_expire(struct t_fixed_driver *,uint64_t now,size_t budget);
 void t_fixed_request_drop(struct t_fixed_request *);
 void t_fixed_close(struct t_fixed_driver *);
 void t_fixed_begin_retire(struct t_fixed_driver *);

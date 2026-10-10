@@ -65,3 +65,11 @@ void t_fixed_begin_retire(struct t_fixed_driver *d){assert(d->alive);retire(d);}
 int t_fixed_progress(struct t_fixed_driver *d){assert(d->alive);if(t_ring_progress(d->owner)){t_request_clear_retired(d->book);return 1;}return 0;}
 size_t t_fixed_occupied(const struct t_fixed_driver *d){assert(d->alive);return t_request_occupied(d->book);}
 void t_fixed_driver_drop(struct t_fixed_driver *d){assert(d->alive);d->alive=0;retire(d);unref(d);}
+
+int t_fixed_set_deadline(struct t_fixed_request *r,int enabled,uint64_t deadline){
+ struct t_fixed_driver *d=r->driver;assert(d);if(d->failed||!d->client)return T_FIXED_CLOSING;
+ return t_ring_fixed_deadline(r->fixed,enabled,deadline);
+}
+int t_fixed_cancel(struct t_fixed_request *r){assert(r->driver);return t_ring_fixed_cancel(r->fixed);}
+int t_fixed_next_deadline(const struct t_fixed_driver *d,uint64_t *out){assert(d->alive);return t_ring_next_deadline(d->owner,out);}
+size_t t_fixed_expire(struct t_fixed_driver *d,uint64_t now,size_t budget){assert(d->alive);return t_ring_expire(d->owner,now,budget);}
