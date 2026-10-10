@@ -1,0 +1,37 @@
+
+running 10 tests
+test task_completion_and_root_drop_release_owned_futures ... ok
+test task_dispatch_and_wake_have_no_internal_allocation ... ok
+test task_capacity_precedes_factory_and_ids_are_owner_specific ... ok
+test task_pending_stays_quiet_until_woken ... ok
+test task_fixed_future_cancel_retains_storage_until_terminal ... ok
+test task_completed_and_cancelled_wakers_cannot_wake_reused_slot ... ok
+test task_fixed_completion_wakes_and_result_stays_owned ... ok
+test task_zero_budget_and_many_wakes_coalesce ... FAILED
+test task_self_wake_survives_poll_and_is_bounded ... FAILED
+test task_unwind_detaches_owner_and_keeps_other_tasks ... ok
+
+failures:
+
+---- task_zero_budget_and_many_wakes_coalesce stdout ----
+
+thread 'task_zero_budget_and_many_wakes_coalesce' (22526720) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-ignore-budget/test_local_tasks.rs:335:100:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- task_self_wake_survives_poll_and_is_bounded stdout ----
+
+thread 'task_self_wake_survives_poll_and_is_bounded' (22526718) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/mutant-ignore-budget/test_local_tasks.rs:329:270:
+assertion `left == right` failed
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    task_self_wake_survives_poll_and_is_bounded
+    task_zero_budget_and_many_wakes_coalesce
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.00s
+

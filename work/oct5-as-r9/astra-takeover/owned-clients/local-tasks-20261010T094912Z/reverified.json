@@ -1,0 +1,30 @@
+{
+  "owner": "astra",
+  "utc": "2026-10-10T09:49:51.774294+00:00",
+  "source_count": 12,
+  "command_count": 21,
+  "current_source_snapshot_head_diff_match": true,
+  "raw_logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "d0303a8b0d74b7e120566a6e24cc6e4d03aa1832e762533769e745d73afd8f0b",
+    "rust-run-0": "fb47f2038921dbd535540860644b7b1eb09f5164129d9562f35d6205842591df",
+    "rust-build-2": "d0303a8b0d74b7e120566a6e24cc6e4d03aa1832e762533769e745d73afd8f0b",
+    "rust-run-2": "f2fefe5ec8b7f08d5c6b90c286bff41967b1e58aedd38b52732e649e37532ded",
+    "no-clone-tasks-build": "a151e58386be3d72fba8eeedadbf83987578063714098273334bf0cfdc5ae34f",
+    "no-send-tasks-build": "d77f6b561738ab0cf606d3d4ba0e4273b69847cfd088a8a610e04f2093a172a4",
+    "valid-task-build": "1ff2f4ad33e5e0fb09d91c2b2ffd307ef16813d71608b7e3f182b90521bd3fb1",
+    "valid-task-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "lost-self-wake-build": "ebd3a4627c505f4831180dc7c8ef8650e8ba48b548970a0974f211e37e2b2a5c",
+    "lost-self-wake-run": "60121b4f3b23070b86f6189d16434ab3701108f5fed812d9394ada6023047c54",
+    "poll-quiet-tasks-build": "168b3cbde747c1bc28c6b4db5590680c8af03bc77e4fe5113f3d4c48a86e82e0",
+    "poll-quiet-tasks-run": "e6f5cf451db7ca0b57a0a8b667ee1fc8b8ba95ae877945d8056bcb4ef175c867",
+    "ignore-budget-build": "ee7b09617a05bb0dab2f0ac29d55993562b629c8a4636cbc2b61c41ab3353e72",
+    "ignore-budget-run": "b1ce039d4765a1b31737944cec579471d9984de5913280b2a13b0ca9f7ae8778",
+    "stale-cancel-build": "db656e79f149b73c4ef66bfd05fa5bfb02eaf5892896697a2d0fb3e5abcc4ab6",
+    "stale-cancel-run": "0d1e46a94c73e86bbb42146b5f0463fa3213760333bf13eca3cc6bfd56965a53",
+    "drop-pending-task-build": "9d6b49deb7ee828af03b4266f0d5b957c7e78ff75f71536488ca20fdf14b1590",
+    "drop-pending-task-run": "8f28ef927ac5d0f0a23713b2ac92fb2733fa01ee916fd53a68100fcb364e3473",
+    "lost-wake-build": "68f349fa87a67833c518751e95dd643e3e93942573937ed030a176906fb8d2e3",
+    "lost-wake-run": "58d4694a14da788922a9c39564bd07aebf8f1764a8f8070cf649ab93ca428082"
+  }
+}

@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Implement bounded runnable-task ownership/dispatch and compose its readiness with the simulated timer/wait coordinator. Rust Future/retirement timer forwarding is host-verified. Native wait/timer/SQ adapters and full async qualification remain gated; SQ parked, async-first order preserved.",
+  "next": "Compose bounded runnable-task readiness/dispatch with the simulated timer/wait coordinator, checking readiness last before wait. Task Wakers currently set atomic flags only; no OS wake or native atomic-park qualification. SQ remains parked; preserve async-first/full qualification gates.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -67,5 +67,6 @@
   "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
   "local_wait_run": "owned-clients/local-wait-20261010T093929Z",
   "deadline_run": "owned-clients/deadlines-20261010T092954Z",
-  "timer_wait_run": "owned-clients/timer-wait-20261010T093908Z"
+  "timer_wait_run": "owned-clients/timer-wait-20261010T093908Z",
+  "local_tasks_run": "owned-clients/local-tasks-20261010T094912Z"
 }

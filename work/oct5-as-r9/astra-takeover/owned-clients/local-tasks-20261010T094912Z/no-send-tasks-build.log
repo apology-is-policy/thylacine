@@ -1,0 +1,104 @@
+warning: unused import: `Error as QueueError`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:203:42
+    |
+203 | use retirement_executor::{FutureExecutor,Error as QueueError};
+    |                                          ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Outcome`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:247:40
+    |
+247 | use local_wait::{WaitSource,WakeReason,Outcome};
+    |                                        ^^^^^^^
+
+warning: unused import: `Error as TaskError`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:317:25
+    |
+317 | use local_tasks::{Tasks,Error as TaskError};
+    |                         ^^^^^^^^^^^^^^^^^^
+
+error[E0277]: `Rc<()>` cannot be sent between threads safely
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:353:39
+    |
+353 | fn main(){fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());}
+    |                                  ---- ^^^^^^^^^^^^^^^^^^^^^^ `Rc<()>` cannot be sent between threads safely
+    |                                  |
+    |                                  required by a bound introduced by this call
+    |
+    = help: within `Tasks`, the trait `Send` is not implemented for `Rc<()>`
+note: required because it appears within the type `PhantomData<Rc<()>>`
+   --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/marker.rs:811:12
+    |
+811 | pub struct PhantomData<T: PointeeSized>;
+    |            ^^^^^^^^^^^
+note: required because it appears within the type `Tasks`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/local_tasks.rs:21:19
+    |
+ 21 | pub(crate) struct Tasks{slots:Vec<Option<Entry>>,cursor:usize,_creator:PhantomData<Rc<()>>}
+    |                   ^^^^^
+note: required by a bound in `send`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:353:21
+    |
+353 | fn main(){fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());}
+    |                     ^^^^ required by this bound in `send`
+
+error[E0277]: `(dyn Future<Output = ()> + 'static)` cannot be sent between threads safely
+    --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:353:39
+     |
+ 353 | fn main(){fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());}
+     |                                  ---- ^^^^^^^^^^^^^^^^^^^^^^ `(dyn Future<Output = ()> + 'static)` cannot be sent between threads safely
+     |                                  |
+     |                                  required by a bound introduced by this call
+     |
+     = help: the trait `Send` is not implemented for `(dyn Future<Output = ()> + 'static)`
+     = note: required for `std::ptr::Unique<(dyn Future<Output = ()> + 'static)>` to implement `Send`
+note: required because it appears within the type `Box<(dyn Future<Output = ()> + 'static)>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:234:12
+     |
+ 234 | pub struct Box<
+     |            ^^^
+note: required because it appears within the type `Pin<Box<(dyn Future<Output = ()> + 'static)>>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/pin.rs:1092:12
+     |
+1092 | pub struct Pin<Ptr> {
+     |            ^^^
+note: required because it appears within the type `local_tasks::Entry`
+    --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/local_tasks.rs:14:8
+     |
+  14 | struct Entry{id:u64,ready:Arc<Ready>,future:Pin<Box<dyn Future<Output=()>+'static>>}
+     |        ^^^^^
+note: required because it appears within the type `Option<local_tasks::Entry>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:597:10
+     |
+ 597 | pub enum Option<T> {
+     |          ^^^^^^
+note: required because it appears within the type `PhantomData<Option<local_tasks::Entry>>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/marker.rs:811:12
+     |
+ 811 | pub struct PhantomData<T: PointeeSized>;
+     |            ^^^^^^^^^^^
+note: required because it appears within the type `ring_payload::alloc::raw_vec::RawVec<Option<local_tasks::Entry>>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/raw_vec/mod.rs:73:19
+     |
+  73 | pub(crate) struct RawVec<T, A: Allocator = Global> {
+     |                   ^^^^^^
+note: required because it appears within the type `Vec<Option<local_tasks::Entry>>`
+    --> /Users/northkillpd/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs:438:12
+     |
+ 438 | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+     |            ^^^
+note: required because it appears within the type `Tasks`
+    --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/local_tasks.rs:21:19
+     |
+  21 | pub(crate) struct Tasks{slots:Vec<Option<Entry>>,cursor:usize,_creator:PhantomData<Rc<()>>}
+     |                   ^^^^^
+note: required by a bound in `send`
+    --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/no-send-tasks.rs:353:21
+     |
+ 353 | fn main(){fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());}
+     |                     ^^^^ required by this bound in `send`
+
+error: aborting due to 2 previous errors; 3 warnings emitted
+
+For more information about this error, try `rustc --explain E0277`.

@@ -1,0 +1,22 @@
+warning: unused import: `Error as QueueError`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/valid-task.rs:203:42
+    |
+203 | use retirement_executor::{FutureExecutor,Error as QueueError};
+    |                                          ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Outcome`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/valid-task.rs:247:40
+    |
+247 | use local_wait::{WaitSource,WakeReason,Outcome};
+    |                                        ^^^^^^^
+
+warning: unused import: `Error as TaskError`
+   --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-tasks-20261010T094912Z/valid-task.rs:317:25
+    |
+317 | use local_tasks::{Tasks,Error as TaskError};
+    |                         ^^^^^^^^^^^^^^^^^^
+
+warning: 3 warnings emitted
+

@@ -23,9 +23,11 @@ without requiring new CQ. A bounded local wait coordinator now rechecks work
 and absolute deadlines under a simulated event-source contract. Typed requests now
 support absolute deadlines and scope-wide cancellation without releasing storage.
 Timers now forward through Futures/retirement queue into the simulated wait
-coordinator, preserving bounded scans and separate outer-timeout policy. Next
-bounded runnable-task ownership/dispatch and readiness composition. No native OS
-wake is qualified. Read owned-clients/timer-wait-self-review.txt, deadline-self-review.txt,
+coordinator, preserving bounded scans and separate outer-timeout policy. Bounded
+local task ownership/dispatch is now host-verified. Next compose task readiness
+with the final simulated pre-wait predicate. Wakers set flags only; no native OS
+wake is qualified. Read owned-clients/local-tasks-self-review.txt,
+timer-wait-self-review.txt, deadline-self-review.txt,
 local-wait-self-review.txt, local-progress-self-review.txt
 and future-retirement-self-review.txt plus earlier component reviews. Native SQ submission/integration
 and complete async qualification remain gated on this dependency. Heartbeat
@@ -485,3 +487,26 @@ Next bounded runnable-task ownership/dispatch and readiness composition with the
 simulated wait coordinator. Protected10/cleanexternal61dde37 and parked kernel
 base preserved. SQ stays parked/unapplied; fullAS3/AS4/MM0-MM4, Main/private
 activation and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra bounded local task ownership and dispatch, October 10
+
+The uninstalled Rust dispatcher owns1..64task cells, checks capacity before its
+factory, and uses exact monotonic IDs for cancellation. Each admission gets its
+own atomic Waker flag; stale Wakers cannot wake a reused cell. Readiness is
+cleared before poll, preserving self-wake, and rotating dispatch visits each
+cell at most once per bounded turn. Completion/cancellation/unwind drops the
+owned Future; cancelling fixed Futures retains active storage until real proof.
+
+local-tasks094912Z:10cases opt0/2,2compile-fail+control,6mutants;12source hashes,
+21rawcommands,snapshots,HEAD/diff reverified before documentation. Self-wake,
+quiet tasks, stale handles/Wakers, unwind, capacity and actual fixed-Future
+ownership covered. Single-agent local-tasks-self-review.txt records limitations.
+No new failure; existing components/C unchanged. External Wakers may retain old
+flag allocations beyond live-task capacity; no native memory-accounting claim.
+
+Next compose task readiness with the simulated timer/wait coordinator's final
+pre-wait predicate. Wakers only set atomic flags; no OS wake or native atomic
+park is implemented. Protected10/cleanexternal61dde37 and parked kernel base
+preserved. SQ stays parked/unapplied; fullAS3/AS4/MM0-MM4, Main/private activation
+and128MiB guards remain. Heartbeat ACTIVE.

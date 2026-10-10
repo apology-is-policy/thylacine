@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-timer-wait-composition-host-verified",
-  "next": "Implement bounded runnable-task ownership/dispatch and compose its readiness with the simulated timer/wait coordinator. Rust Future/retirement timer forwarding is host-verified. Native wait/timer/SQ adapters and full async qualification remain gated; SQ parked, async-first order preserved.",
+  "state": "draft-local-task-dispatch-host-verified",
+  "next": "Compose bounded runnable-task readiness/dispatch with the simulated timer/wait coordinator, checking readiness last before wait. Task Wakers currently set atomic flags only; no OS wake or native atomic-park qualification. SQ remains parked; preserve async-first/full qualification gates.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -27,5 +27,6 @@
   "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
   "local_wait_run": "owned-clients/local-wait-20261010T093929Z",
   "deadline_run": "owned-clients/deadlines-20261010T092954Z",
-  "timer_wait_run": "owned-clients/timer-wait-20261010T093908Z"
+  "timer_wait_run": "owned-clients/timer-wait-20261010T093908Z",
+  "local_tasks_run": "owned-clients/local-tasks-20261010T094912Z"
 }

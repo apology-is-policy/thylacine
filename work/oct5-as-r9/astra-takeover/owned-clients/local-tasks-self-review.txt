@@ -1,0 +1,43 @@
+Astra single-agent self-review: bounded local task ownership, October10.
+Uninstalled Rust dispatcher, not an independent audit or native executor gate.
+
+Tasks owns1..64preallocated optional cells. Admission checks a free cell before
+calling the Future factory or allocating the Future/Arc flag. A checked global
+monotonic ID prevents stale or foreign TaskId cancellation after reuse. Exhaustion
+fails before invoking the factory. A failed admission drops the passed closure
+normally: callers who need retry must retain inputs outside that closure. No new
+kernel allowance or MM guarantee follows from the local live-task capacity.
+
+Each task gets a distinct Arc of two atomic flags. Waker clone/wake/drop is valid
+for Rust's Send+Sync Waker contract; the !Send task body and queue stay on their
+creator. Old externally retained Wakers can keep only their old flag allocation
+alive; they cannot reference a new occupant or keep the old Future/storage alive.
+External Waker retention is not bounded by the live-task count. Native accounting
+and admission for those objects are later integration obligations, not proven here.
+Wake sets readiness only, never polls a Future, touches Rc task state or performs
+an OS wake. Cross-thread flag safety does not imply waking a sleeping executor.
+
+Dispatch visits at most min(budget,capacity) distinct rotating cells. It clears
+readiness before polling, preserving wake-during-poll. Self-waking tasks get one
+poll per visited round and cannot create an internal retry loop. Readiness is
+coalesced; quiet tasks are not polled. The exact entry is detached before poll;
+completion/cancellation/unwind disables its flag before dropping the Future.
+Panic propagates after that owner is dropped, while other queue cells remain.
+No shared RefCell borrow encloses task callbacks. Cooperative task bodies must
+not block or reenter this queue; no in-poll spawning/cancellation API is claimed.
+Task-owned fixed Futures retain existing abort/storage rules on cancellation.
+
+local-tasks094912Z:10cases opt0/2,2compile-fail+positive control,6mutants;
+12source hashes/21rawcommands,snapshots,HEAD/diff verified before documentation.
+Cases cover capacity-before-factory, stale/foreign IDs, quiet/coalesced wakes,
+self-wake fairness, stale Wakers across reuse, zero budget, completion/root drop,
+unwind ownership, allocation-free observed dispatch, cancelled fixed-Future
+storage retention until CQ, and held READ result after task completion. No new
+failure. Existing components and C code unchanged, so historical suites not rerun.
+
+This dispatcher is not yet joined to the timer/wait coordinator. Next compose
+runnable readiness into the final pre-wait check using simulated event sources;
+checking only ring progress could sleep with a ready task. Real cross-thread
+wake/atomic park integration requires a qualified native event adapter, and stays
+pending. Protected10/cleanexternal61dde37 and parked kernel base preserved.
+SQ stays parked/unapplied. FullAS3/AS4/MM0-MM4 and activation guards remain.
