@@ -1,0 +1,23 @@
+error[E0599]: no method named `clone` found for struct `owned_mapping::OwnedMapping<M>` in the current scope
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/clone-owner.rs:36:90
+   |
+36 | fn main(){let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _copy=m.clone();}
+   |                                                                                          ^^^^^
+   |
+  ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/owned_mapping.rs:44:1
+   |
+44 | pub(crate) struct OwnedMapping<M:Mapping>{reader:PairedCq,mapping:M,closed:bool}
+   | ----------------------------------------- method `clone` not found for this struct
+   |
+   = help: items from traits can only be used if the trait is implemented and in scope
+   = note: the following trait defines an item `clone`, perhaps you need to implement it:
+           candidate #1: `Clone`
+help: there is a method `close` with a similar name
+   |
+36 - fn main(){let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _copy=m.clone();}
+36 + fn main(){let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _copy=m.close();}
+   |
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0599`.

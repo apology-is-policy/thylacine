@@ -1,0 +1,244 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "rust_scenarios": 5,
+  "c_scenarios": 6,
+  "rust_profiles": 2,
+  "c_profiles": [
+    "asan+ubsan",
+    "ndebug-core"
+  ],
+  "mutants": 10,
+  "compile_failures": 3,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "5 passed; 0 failed"
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "5 passed; 0 failed"
+    },
+    {
+      "name": "sanitized-owned_mapping.c-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "sanitized-paired_cq.c-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "sanitized-link",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "sanitized-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "C six owned mapping scenarios PASS"
+    },
+    {
+      "name": "ndebug-owned_mapping.c-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "ndebug-paired_cq.c-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "ndebug-link",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "ndebug-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": "C six owned mapping scenarios PASS"
+    },
+    {
+      "name": "moved-backend",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0382"
+    },
+    {
+      "name": "clone-owner",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "no method named"
+    },
+    {
+      "name": "raw-mapping",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "private"
+    },
+    {
+      "name": "owned-control",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-sq-overlap-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-sq-overlap-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "rust-receipt-stride-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-receipt-stride-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "rust-failed-close-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-failed-close-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "rust-after-close-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-after-close-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "rust-fresh-header-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-fresh-header-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "c-sq-overlap-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "c-sq-overlap-run",
+      "rc": -6,
+      "expected_failure": true,
+      "diagnostic": "Assertion failed"
+    },
+    {
+      "name": "c-receipt-stride-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "c-receipt-stride-run",
+      "rc": -6,
+      "expected_failure": true,
+      "diagnostic": "Assertion failed"
+    },
+    {
+      "name": "c-failed-close-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "c-failed-close-run",
+      "rc": -6,
+      "expected_failure": true,
+      "diagnostic": "Assertion failed"
+    },
+    {
+      "name": "c-after-close-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "c-after-close-run",
+      "rc": -6,
+      "expected_failure": true,
+      "diagnostic": "Assertion failed"
+    },
+    {
+      "name": "c-fresh-header-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "c-fresh-header-run",
+      "rc": -6,
+      "expected_failure": true,
+      "diagnostic": "Assertion failed"
+    }
+  ],
+  "limits": "Owned mapping geometry/lifecycle with simulated backend/producer; no native setup/syscall adapter or SQ publisher yet"
+}

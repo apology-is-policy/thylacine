@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Owned native mapping/backing/setup/register/control adapter and composed controller (host CQ/request/payload composition verified), fixed-I/O/futures/executor, then remaining AS3/AS4/MM0-MM4.",
+  "next": "Owned mapping host boundary verified; next native original-owned setup/descriptor/backend, SQ publication and control/register adapter, composed controller/fixed-I/O/futures/executor; then AS3/AS4/MM0-MM4.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -52,5 +52,6 @@
   "native_stage_close": "native-stage-close/state.json",
   "native_isolation": "native-isolation/state.json",
   "native_midwrite": "native-midwrite/state.json",
-  "owned_clients": "owned-clients/state.json"
+  "owned_clients": "owned-clients/state.json",
+  "owned_mapping_run": "owned-clients/owned-mapping-20261010T064503Z"
 }

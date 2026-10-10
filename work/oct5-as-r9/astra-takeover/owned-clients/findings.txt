@@ -6,3 +6,5 @@ PAYLOAD-REVIEW-R1: safe constructor now derives lengths from unsafe owned backen
 REQUEST-REVIEW-R1: terminal storage keeps CQE only; paired receipt is delivered separately for one lease transfer. REQUEST-BUILD-R1:041455Z C -Werror misleading-indentation diagnostic; source/logs preserved, loop formatting fixed,062909Z passed.
 
 COMPOSED-HARNESS-R1:063431Z clean composed runs passed, but deliberately removed live count caused exact underflow panic/destructor abort rather than FAILED summary. Expected diagnostic corrected only for that mutant;063524Z full six-mutant suite passed. Initial raw evidence preserved.
+
+MAPPING-HARNESS-R1: initial064425Z clean mapping profiles passed; custom case3 panic rejected by overly specific diagnostic matcher. Failed run retained; final064503Z all38commands/10mutants and3compile contracts verified. Host-only owned mapping boundary; native adapter still pending.

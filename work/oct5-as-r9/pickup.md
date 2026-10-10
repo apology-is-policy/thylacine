@@ -4043,3 +4043,26 @@ Single-agent composed-self-review.txt records boundaries. Astra10hashes and clea
 external61dde37 preserved; Mac released. Native owned mapping/backing/control and
 composed controller/fixed-I/O/futures/executor remain, then AS3/AS4/MM0-MM4 gates.
 No Main, private activation,128MiB protection change or independent audit claim.
+
+
+### Astra owned mapping boundary, October 10
+
+Uninstalled C/Rust owners now consume the mapping backend and validate the full
+88-byte setup geometry before pointer access: header/SQ index/SQE/CQE/receipt
+regions, exact counts/sizes, alignment, overlap, overflow and original mapping
+identity. Fresh header checks precede exclusive paired-reader construction.
+Failures close/destroy the original owner once; successful close is idempotent
+and prevents further CQ access. No raw mapping/descriptor or clone API escapes.
+Actual native setup/control/SQ publication and kernel pin retirement remain
+trusted backend obligations, not a completed native adapter or AS3 qualification.
+
+owned-mapping-20261010T064503Z passes Rust5 cases opt0/2,C6 scenarios LLVM22
+ASan+UBSan/NDEBUG,3 ownership compile failures plus control,10 runtime mutants.
+Eleven source hashes/snapshots and38raw command logs reverified before docs.
+MAPPING-HARNESS-R1 initial064425Z clean profiles passed but custom case3 panic
+missed runner's expected literal diagnostic; preserved evidence, fixed expected
+Rust FAILED summary, full retry passed. Single-agent mapping-self-review.txt
+records pointer/lifetime/cleanup review and remaining unsafe backend boundary.
+Astra10hashes and cleanexternal61dde37 preserved; Mac released. Native adapter,
+SQ publisher, composed controller/fixed-I/O/futures/executor remain before AS3,
+AS4 and MM0-MM4. No Main, private activation or128MiB protection change.

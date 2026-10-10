@@ -1,0 +1,40 @@
+
+running 5 tests
+test post_setup_corruption_is_detected ... ok
+test min_max_copy_and_cleanup ... ok
+test every_region_pair_rejects_overlap ... FAILED
+test fresh_header_checks_and_wakeup ... FAILED
+test malformed_geometry_cleanup ... FAILED
+
+failures:
+
+---- every_region_pair_rejects_overlap stdout ----
+
+thread 'every_region_pair_rejects_overlap' (22288806) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/mutant-rust-failed-close/test_owned_mapping.rs:9:42:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- fresh_header_checks_and_wakeup stdout ----
+
+thread 'fresh_header_checks_and_wakeup' (22288807) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/mutant-rust-failed-close/test_owned_mapping.rs:9:42:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- malformed_geometry_cleanup stdout ----
+
+thread 'malformed_geometry_cleanup' (22288808) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/owned-mapping-20261010T064503Z/mutant-rust-failed-close/test_owned_mapping.rs:9:42:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    every_region_pair_rejects_overlap
+    fresh_header_checks_and_wakeup
+    malformed_geometry_cleanup
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

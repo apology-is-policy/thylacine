@@ -1,0 +1,110 @@
+[
+  {
+    "name": "rust-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "clang-version",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-build-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-0",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "5 passed; 0 failed"
+  },
+  {
+    "name": "rust-build-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-run-2",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "5 passed; 0 failed"
+  },
+  {
+    "name": "sanitized-owned_mapping.c-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-paired_cq.c-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-link",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "sanitized-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "C six owned mapping scenarios PASS"
+  },
+  {
+    "name": "ndebug-owned_mapping.c-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ndebug-paired_cq.c-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ndebug-link",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "ndebug-run",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": "C six owned mapping scenarios PASS"
+  },
+  {
+    "name": "rust-sq-overlap-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-sq-overlap-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  },
+  {
+    "name": "rust-receipt-stride-build",
+    "rc": 0,
+    "expected_failure": false,
+    "diagnostic": null
+  },
+  {
+    "name": "rust-receipt-stride-run",
+    "rc": 101,
+    "expected_failure": true,
+    "diagnostic": "assertion"
+  }
+]
