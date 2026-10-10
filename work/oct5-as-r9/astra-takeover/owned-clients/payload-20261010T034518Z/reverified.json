@@ -1,0 +1,27 @@
+{
+  "owner": "astra",
+  "source_files": 5,
+  "command_records": 19,
+  "logs": {
+    "rust-version": "4ad84f16acc2f3bdcfbc7b0788f1e74a4e649b962154a585b8f8d0b28eb0dd06",
+    "rust-build-0": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-0": "69366fb2c313012af5a4b17f49d77cbb580dc34fa9f6b40b6fe20890beba18b5",
+    "rust-build-2": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rust-run-2": "7a5b6e5ac3fce9cd2fc60c498e57c37a00856d4cb04187d6dc2ace08dfcb9163",
+    "return-borrow-build": "f60ce9e904cee67c2f8dae0f515e1c67a22478a9229d2449cd2839106bf6352a",
+    "mutate-view-build": "74e3b85b5782d25413d6cf9368092dc42c2a7d35a2e4fac36a5f0f3e200d01a9",
+    "moved-storage-build": "72caba8e6edb882f9ee7ba807878e83394cb154b3df14cc43c099c0a26836e7f",
+    "legacy-reap-build": "c3c7903cb0fadcbc76bd91139c6cc4b5e41227abe9e13424bfbd7c2417b96bdd",
+    "valid-return-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "valid-return-run": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "live-retire-run": "7cffd0e455a8c15e33a1a32ff48c8e135a8c68dabca8dabd28f481fc01553748",
+    "lost-return-build": "64f571f51de8905336a8d33dafa470f2b64cb5a917c5980daf471f51f33e3860",
+    "lost-return-run": "e8d7e48f409441ebb1d04904a7548c215386618b105ed7470c7c113ddc084c74",
+    "wrong-range-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "wrong-range-run": "63ecbcb00a94ae8086b3a846ad6e5783845454a71d23a3d0595bb57b6b52dd5c",
+    "failed-success-build": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-success-run": "fcbe9e52c1a4ca91b9dfb7eba80d0cbefdbf538bb9408462aaaa09c49133a151"
+  },
+  "limits": "Uninstalled Rust owned-payload core with simulated unsafe backend; C/syscalls/full ring-wide pool bookkeeping and executor retirement integration pending"
+}

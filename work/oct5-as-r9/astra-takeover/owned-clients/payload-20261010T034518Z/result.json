@@ -1,0 +1,126 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 6,
+  "profiles": 2,
+  "compile_fail": 4,
+  "positive_compile_control": 1,
+  "mutants_rejected": 4,
+  "records": [
+    {
+      "name": "rust-version",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-0",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-build-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "rust-run-2",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "return-borrow-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0505"
+    },
+    {
+      "name": "mutate-view-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0594"
+    },
+    {
+      "name": "moved-storage-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0382"
+    },
+    {
+      "name": "legacy-reap-build",
+      "rc": 1,
+      "expected_failure": true,
+      "diagnostic": "E0599"
+    },
+    {
+      "name": "valid-return-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "valid-return-run",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "live-retire-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "live-retire-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "lost-return-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "lost-return-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "wrong-range-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "wrong-range-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    },
+    {
+      "name": "failed-success-build",
+      "rc": 0,
+      "expected_failure": false,
+      "diagnostic": null
+    },
+    {
+      "name": "failed-success-run",
+      "rc": 101,
+      "expected_failure": true,
+      "diagnostic": "FAILED"
+    }
+  ],
+  "limits": "Uninstalled Rust owned-payload core with simulated unsafe backend; C/syscalls/full ring-wide pool bookkeeping and executor retirement integration pending"
+}

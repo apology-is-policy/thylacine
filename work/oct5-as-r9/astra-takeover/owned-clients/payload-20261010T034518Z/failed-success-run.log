@@ -1,0 +1,31 @@
+
+running 6 tests
+test controller_teardown_keeps_live_payload_mapping ... ok
+test held_a_survives_b_return_and_final ... ok
+test invalid_geometry_closes_before_backing_drop ... ok
+test failed_explicit_and_drop_returns_keep_storage ... FAILED
+test all64_failed_drop_slots_are_bounded_and_retire_without_return_success ... FAILED
+test malformed_or_duplicate_receipt_never_mints_view ... ok
+
+failures:
+
+---- failed_explicit_and_drop_returns_keep_storage stdout ----
+
+thread 'failed_explicit_and_drop_returns_keep_storage' (22125701) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/payload-20261010T034518Z/mutant-failed-success/test_payload_owner.rs:29:157:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- all64_failed_drop_slots_are_bounded_and_retire_without_return_success stdout ----
+
+thread 'all64_failed_drop_slots_are_bounded_and_retire_without_return_success' (22125699) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/payload-20261010T034518Z/mutant-failed-success/test_payload_owner.rs:30:231:
+assertion `left == right` failed
+  left: 0
+ right: 64
+
+
+failures:
+    all64_failed_drop_slots_are_bounded_and_retire_without_return_success
+    failed_explicit_and_drop_returns_keep_storage
+
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

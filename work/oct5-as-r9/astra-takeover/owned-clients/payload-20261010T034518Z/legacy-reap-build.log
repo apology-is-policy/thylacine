@@ -1,0 +1,14 @@
+error[E0599]: no method named `reap` found for struct `payload_owner::PayloadPool<B>` in the current scope
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/payload-20261010T034518Z/legacy-reap.rs:35:52
+   |
+35 | fn main(){let (_p,_root,pool)=fixture();let _=pool.reap();}
+   |                                                    ^^^^ method not found in `payload_owner::PayloadPool<Backing>`
+   |
+  ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/payload-20261010T034518Z/payload_owner.rs:65:1
+   |
+65 | pub(crate) struct PayloadPool<B:PayloadBackend>{core:Rc<Core<B>>}
+   | ----------------------------------------------- method `reap` not found for this struct
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0599`.

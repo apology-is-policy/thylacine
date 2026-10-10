@@ -1,0 +1,98 @@
+{
+  "owner": "astra",
+  "state": "passed",
+  "scenarios": 6,
+  "profiles": [
+    "asan+ubsan",
+    "optimized-ndebug-core"
+  ],
+  "mutants_rejected": 4,
+  "records": [
+    {
+      "name": "clang-version",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-payload_owner.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "sanitized-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-payload_owner.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-lease_ledger.c-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-link",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "ndebug-run",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "live-retire-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "live-retire-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "lost-return-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "lost-return-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "wrong-range-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "wrong-range-run",
+      "rc": -6,
+      "expected_failure": true
+    },
+    {
+      "name": "failed-success-build",
+      "rc": 0,
+      "expected_failure": false
+    },
+    {
+      "name": "failed-success-run",
+      "rc": -6,
+      "expected_failure": true
+    }
+  ],
+  "limits": "Uninstalled C opaque payload core; simulated backend, not native ring/controller integration"
+}

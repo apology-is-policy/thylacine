@@ -1,8 +1,10 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-ledger-and-paired-reader-host-verified",
-  "next": "Implement owned backing, payload borrows, paired CQ, futures and bounded retirement. Metadata tests do not qualify safe clients.",
+  "state": "draft-owned-payload-host-verified",
+  "next": "Unify full-ring owner/global64-member cross-pool backing; integrate syscalls, paired CQ correlation, fixed I/O, futures and bounded executor retirement. Native qualification pending.",
   "run": "owned-clients/ledger-20261010T032905Z",
-  "paired_run": "owned-clients/paired-20261010T033551Z"
+  "paired_run": "owned-clients/paired-20261010T033551Z",
+  "payload_rust_run": "owned-clients/payload-20261010T034518Z",
+  "payload_c_run": "owned-clients/payload-c-20261010T034735Z"
 }

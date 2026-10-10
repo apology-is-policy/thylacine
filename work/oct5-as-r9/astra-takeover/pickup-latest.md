@@ -12,12 +12,13 @@ external stratum-astra/v2 at61dde3727921e70e2c72fbd3c9e2044a192f4a54.
 
 ## Immediate continuation
 
-No native or host runner remains active as of paired reader verification033551Z.
+No native or host runner remains active after owned-payload runs034518Z/034735Z.
 Inspect processes and flight records anyway before launching. Current next work:
-owned C/Rust mapping/backing and PayloadLease lifetimes, compose receipt ledger
-and paired reader, then future cancellation and bounded retirement on failure or
-client drop. Read owned-clients/implementation-notes.txt,self-review.txt and
-paired-self-review.txt. Components remain UNINSTALLED; do not claim safe clients.
+unify full-ring ownership/global64-member cross-pool exclusion, bind native
+backing/syscalls and paired CQ correlation, then fixed I/O, futures and bounded
+executor retirement. One-pool payload lifetime cores now host-verified. Read owned-clients/implementation-notes.txt,self-review.txt and
+paired-self-review.txt and payload-self-review.txt. All remain UNINSTALLED;
+do not claim native safe clients or give each pool separate ring-close authority.
 Do not re-fix raw Rust register_buffers: it is already unsafe and documented.
 Do not expose Ring::reap/raw submit or mutable storage after owned transfer.
 Failed RETURN retains backing; EOF/final/CQ ack never returns earlier leases.
@@ -83,3 +84,31 @@ private async/clipboard, or remove128MiB protection before approved gates.
 Pause continue-astra-async-and-memory-work heartbeat only at transferred-work
 completion/cancel. Older monitors stay inactive. History is in pickup.md,status,
 flight records and source-matched runs; next-operations.json links all layers.
+
+
+### Astra owned payload lifetime cores, October 10
+
+Uninstalled Rust/C cores consume backing and retain it independently of CQ and
+client lifetimes. Read-only leases keep storage alive; explicit RETURN errors
+preserve exact ownership/errno. Drop/abandon uses one pre-reserved pending cell
+per member, with at most64retry attempts per progress call. Earlier A bytes survive
+B return and final/EOF. Removing the retirement record requires client closing,
+zero live leases and confirmed local retirement; controller destruction closes
+once while existing leases retain backing. Native pins remain a backend contract.
+
+Rust payload-20261010T034518Z passed six scenarios at opt0/opt2, four compile-fail
+checks (borrowed return, mutable view, moved storage, legacy reap), valid-return
+control and four runtime mutants. Initial034434Z negative fixture failed: wildcard
+let _ did not access moved storage (PAYLOAD-FIXTURE-R1); evidence preserved, actual
+field access now rejects E0382. C payload-c-20261010T034735Z passed six scenarios
+under LLVM22 ASan+UBSan and optimized NDEBUG core objects plus four runtime mutants.
+Five/seven source hashes and19/17raw command records respectively reverified.
+
+Single-agent review derived lengths from owned backend rather than caller claims
+(PAYLOAD-REVIEW-R1), and moved C state mutations outside assertions before release
+controls (R2). Astra10hashes and clean external61dde37 preserved; disk9153MiB.
+These are one-pool components with simulated backends, not native complete clients:
+one shared full-ring controller, global64-member/cross-pool exclusion, syscall/
+paired-CQ integration, fixed I/O ownership, futures and bounded executor retirement
+still remain. Do not give each native pool independent whole-ring close authority.
+Remaining AS3/AS4/MM0-MM4 pending; no Main, activation or128MiB protection change.
