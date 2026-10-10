@@ -1,8 +1,8 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-local-task-dispatch-host-verified",
-  "next": "Compose bounded runnable-task readiness/dispatch with the simulated timer/wait coordinator, checking readiness last before wait. Task Wakers currently set atomic flags only; no OS wake or native atomic-park qualification. SQ remains parked; preserve async-first/full qualification gates.",
+  "state": "draft-task-loop-composition-host-verified",
+  "next": "Review independent client lifecycle coverage against approved AS3 contracts; consolidate source-matched evidence and close remaining non-native shutdown/drain and C/Rust parity gaps. Rust task/timer/retirement composition is host-verified only; native wake-to-park and SQ remain unqualified/parked. Preserve async-first gates.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
@@ -25,8 +25,9 @@
   "futures_rust_run": "owned-clients/fixed-futures-20261010T090111Z",
   "future_retirement_run": "owned-clients/future-retirement-20261010T093920Z",
   "local_progress_run": "owned-clients/local-progress-20261010T093109Z",
-  "local_wait_run": "owned-clients/local-wait-20261010T093929Z",
+  "local_wait_run": "owned-clients/local-wait-20261010T095859Z",
   "deadline_run": "owned-clients/deadlines-20261010T092954Z",
-  "timer_wait_run": "owned-clients/timer-wait-20261010T093908Z",
-  "local_tasks_run": "owned-clients/local-tasks-20261010T094912Z"
+  "timer_wait_run": "owned-clients/timer-wait-20261010T095916Z",
+  "local_tasks_run": "owned-clients/local-tasks-20261010T094912Z",
+  "task_loop_run": "owned-clients/task-loop-20261010T095847Z"
 }

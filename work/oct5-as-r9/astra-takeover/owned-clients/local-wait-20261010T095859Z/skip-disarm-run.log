@@ -1,0 +1,72 @@
+
+running 9 tests
+test wait_timeout_is_not_terminal_storage_proof ... ok
+test wait_failures_cleanup_without_retry_loop ... FAILED
+test wait_bounded_turn_has_no_internal_allocation ... FAILED
+test wait_absolute_deadline_before_and_after_arm ... FAILED
+test wait_spurious_wakes_keep_original_deadline_and_schedule_progress ... FAILED
+test wait_native_ready_and_intervening_event_are_not_lost ... FAILED
+test wait_zero_and_partial_quantum_do_not_sleep ... ok
+test wait_ready_callback_release_is_checked_last ... FAILED
+test wait_local_release_during_arm_prevents_sleep ... FAILED
+
+failures:
+
+---- wait_failures_cleanup_without_retry_loop stdout ----
+
+thread 'wait_failures_cleanup_without_retry_loop' (22539236) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:278:282:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- wait_bounded_turn_has_no_internal_allocation stdout ----
+
+thread 'wait_bounded_turn_has_no_internal_allocation' (22539235) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:284:295:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- wait_absolute_deadline_before_and_after_arm stdout ----
+
+thread 'wait_absolute_deadline_before_and_after_arm' (22539234) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:269:272:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- wait_spurious_wakes_keep_original_deadline_and_schedule_progress stdout ----
+
+thread 'wait_spurious_wakes_keep_original_deadline_and_schedule_progress' (22539240) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:275:236:
+assertion failed: !w.armed
+
+---- wait_native_ready_and_intervening_event_are_not_lost stdout ----
+
+thread 'wait_native_ready_and_intervening_event_are_not_lost' (22539238) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:253:37:
+assertion failed: !self.armed
+
+---- wait_ready_callback_release_is_checked_last stdout ----
+
+thread 'wait_ready_callback_release_is_checked_last' (22539239) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:263:286:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- wait_local_release_during_arm_prevents_sleep stdout ----
+
+thread 'wait_local_release_during_arm_prevents_sleep' (22539237) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-disarm/test_local_wait.rs:260:292:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    wait_absolute_deadline_before_and_after_arm
+    wait_bounded_turn_has_no_internal_allocation
+    wait_failures_cleanup_without_retry_loop
+    wait_local_release_during_arm_prevents_sleep
+    wait_native_ready_and_intervening_event_are_not_lost
+    wait_ready_callback_release_is_checked_last
+    wait_spurious_wakes_keep_original_deadline_and_schedule_progress
+
+test result: FAILED. 2 passed; 7 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

@@ -1,0 +1,43 @@
+Astra single-agent self-review: task/timer/retirement wait composition, October10.
+Uninstalled Rust draft using simulated creator-thread event callbacks. No
+independent audit, native atomic wake-to-park or cross-thread sleep qualification.
+
+The new task_loop turn checks an expired outer deadline before polling, performs
+one bounded rotating task quantum, then services bounded timers and retirement.
+A self-waking runnable task therefore cannot starve expiry inside this turn.
+The wait coordinator accepts a nonblocking callback-free runnable predicate,
+sampled before arming and again after event-source readiness/time callbacks.
+Task wakeups during arm, readiness or the final clock callback are observed.
+Zero/partial task budgets retain ready work and prevent waiting; callers must
+supply positive fair budgets. Quiet tasks permit one wait. No internal retry loop.
+
+The preexisting turn/timed_turn interfaces delegate with a false runnable predicate,
+so their non-task semantics remain available. Earliest request/outer deadlines,
+request-expiry Retry and outer-timeout policy are unchanged. Completion dispatch
+is still supplied by the owner through authenticated paired CQ records. Actual
+fixed-Future tests traverse Tasks -> Future -> typed request -> owned backing,
+then held READ result -> last-owner notification -> retirement reclaim. Cancellation
+removes the task but leaves active backing until terminal/retirement proof.
+
+Atomic Waker flags remain only flags. This composition closes creator-thread
+callback races before the final predicate; a concurrent Waker after that sample
+still requires a real combined event notification/atomic park primitive. No native
+adapter exists here, and the tests neither block an OS executor nor prove that
+missing primitive. Native and full async gates remain closed. Task cooperative
+nonblocking/nonreentry contract and bounded metadata limitations remain as recorded
+in local-tasks-self-review.txt. No kernel/SQ or C implementation changed.
+
+Task-loop095847Z:9cases opt0/2,2compile-fail+control,6mutants;13source hashes,
+21rawcommands. Local-wait095859Z and timer-wait095916Z regressions each9cases
+with identical profiles/controls/mutant counts,11source hashes/21commands each.
+All source/snapshot/HEAD/diff/raw diagnostics verified before documentation.
+Tests include self-wake with due I/O timer, wake during each callback boundary,
+zero/partial budgets, no poll past outer expiry, fixed CQ/result retirement,
+cancellation retention and observed allocation-free step. Existing local-wait
+mutant anchor updated to include the newly added runnable predicate. No failures.
+
+Next review independent client lifecycle coverage against the approved AS3
+contracts, consolidating actual source evidence and remaining non-native shutdown,
+drain and C/Rust parity gaps. Do not call host composition a complete async release.
+Protected10/cleanexternal61dde37 and parked kernel base preserved. SQ remains
+parked/unapplied; AS3/AS4/MM0-MM4 and all activation guards remain outstanding.

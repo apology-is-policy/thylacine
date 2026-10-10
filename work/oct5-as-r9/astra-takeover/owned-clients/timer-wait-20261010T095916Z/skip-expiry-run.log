@@ -1,0 +1,68 @@
+
+running 9 tests
+test timer_publication_during_arm_prevents_stale_sleep ... ok
+test timer_future_cancel_waits_for_actual_terminal ... ok
+test timer_outer_deadline_keeps_separate_policy ... ok
+test timer_retiring_driver_still_owns_deadline ... FAILED
+test timer_wait_uses_earliest_and_expiry_preserves_storage ... FAILED
+test timer_polling_driver_uses_same_queue_and_no_allocation ... FAILED
+test timer_due_after_arm_retries_then_cancels ... FAILED
+test timer_zero_expiry_budgets_preserve_due_work ... FAILED
+test timer_queue_minimum_and_independent_fair_cursor ... FAILED
+
+failures:
+
+---- timer_retiring_driver_still_owns_deadline stdout ----
+
+thread 'timer_retiring_driver_still_owns_deadline' (22540229) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T095916Z/mutant-skip-expiry/test_timer_wait.rs:307:233:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- timer_wait_uses_earliest_and_expiry_preserves_storage stdout ----
+
+thread 'timer_wait_uses_earliest_and_expiry_preserves_storage' (22540230) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T095916Z/mutant-skip-expiry/test_timer_wait.rs:291:405:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- timer_polling_driver_uses_same_queue_and_no_allocation stdout ----
+
+thread 'timer_polling_driver_uses_same_queue_and_no_allocation' (22540226) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T095916Z/mutant-skip-expiry/test_timer_wait.rs:313:502:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- timer_due_after_arm_retries_then_cancels stdout ----
+
+thread 'timer_due_after_arm_retries_then_cancels' (22540223) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T095916Z/mutant-skip-expiry/test_timer_wait.rs:301:388:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- timer_zero_expiry_budgets_preserve_due_work stdout ----
+
+thread 'timer_zero_expiry_budgets_preserve_due_work' (22540231) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T095916Z/mutant-skip-expiry/test_timer_wait.rs:298:418:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- timer_queue_minimum_and_independent_fair_cursor stdout ----
+
+thread 'timer_queue_minimum_and_independent_fair_cursor' (22540228) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/timer-wait-20261010T095916Z/mutant-skip-expiry/test_timer_wait.rs:295:158:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    timer_due_after_arm_retries_then_cancels
+    timer_polling_driver_uses_same_queue_and_no_allocation
+    timer_queue_minimum_and_independent_fair_cursor
+    timer_retiring_driver_still_owns_deadline
+    timer_wait_uses_earliest_and_expiry_preserves_storage
+    timer_zero_expiry_budgets_preserve_due_work
+
+test result: FAILED. 3 passed; 6 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.00s
+

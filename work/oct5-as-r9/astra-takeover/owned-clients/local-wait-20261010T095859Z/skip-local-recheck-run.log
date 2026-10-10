@@ -1,0 +1,36 @@
+
+running 9 tests
+test wait_failures_cleanup_without_retry_loop ... ok
+test wait_spurious_wakes_keep_original_deadline_and_schedule_progress ... ok
+test wait_bounded_turn_has_no_internal_allocation ... ok
+test wait_absolute_deadline_before_and_after_arm ... ok
+test wait_timeout_is_not_terminal_storage_proof ... ok
+test wait_native_ready_and_intervening_event_are_not_lost ... ok
+test wait_zero_and_partial_quantum_do_not_sleep ... ok
+test wait_ready_callback_release_is_checked_last ... FAILED
+test wait_local_release_during_arm_prevents_sleep ... FAILED
+
+failures:
+
+---- wait_ready_callback_release_is_checked_last stdout ----
+
+thread 'wait_ready_callback_release_is_checked_last' (22538826) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-local-recheck/test_local_wait.rs:263:190:
+assertion `left == right` failed
+  left: Woke(Spurious)
+ right: Retry
+
+---- wait_local_release_during_arm_prevents_sleep stdout ----
+
+thread 'wait_local_release_during_arm_prevents_sleep' (22538824) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/local-wait-20261010T095859Z/mutant-skip-local-recheck/test_local_wait.rs:260:233:
+assertion `left == right` failed
+  left: Woke(Spurious)
+ right: Retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    wait_local_release_during_arm_prevents_sleep
+    wait_ready_callback_release_is_checked_last
+
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 55 filtered out; finished in 0.00s
+

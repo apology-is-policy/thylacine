@@ -31,7 +31,7 @@ try:
   src=run/(name+'.rs');src.write_text(prefix+'\nfn main(){'+body+'}\n');cmd(['rustc','--edition=2024',src,'-o',run/name],name+'-build',bool(diag),diag)
   if not diag:cmd([run/name],name+'-run')
  variants={
- 'skip-local-recheck':('local_wait.rs','else if queue.needs_progress(){Outcome::Retry}','else if false{Outcome::Retry}'),
+ 'skip-local-recheck':('local_wait.rs','else if queue.needs_progress()||runnable(){Outcome::Retry}','else if false{Outcome::Retry}'),
  'skip-native-recheck':('local_wait.rs','else if ready{','else if false{'),
  'skip-deadline-recheck':('local_wait.rs','let elapsed=expired(armed.source.now(),deadline);','let elapsed=false;'),
  'reset-absolute-deadline':('local_wait.rs','armed.source.wait(armed.ticket,deadline)','armed.source.wait(armed.ticket,deadline.map(|d|d+1))'),

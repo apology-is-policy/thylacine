@@ -24,9 +24,10 @@ and absolute deadlines under a simulated event-source contract. Typed requests n
 support absolute deadlines and scope-wide cancellation without releasing storage.
 Timers now forward through Futures/retirement queue into the simulated wait
 coordinator, preserving bounded scans and separate outer-timeout policy. Bounded
-local task ownership/dispatch is now host-verified. Next compose task readiness
-with the final simulated pre-wait predicate. Wakers set flags only; no native OS
-wake is qualified. Read owned-clients/local-tasks-self-review.txt,
+local task ownership/dispatch now composes with the final simulated pre-wait
+predicate. Next review independent AS3 lifecycle coverage and remaining non-native
+shutdown/drain and C/Rust parity gaps. Wakers set flags only; no native OS wake
+is qualified. Read owned-clients/task-loop-self-review.txt, local-tasks-self-review.txt,
 timer-wait-self-review.txt, deadline-self-review.txt,
 local-wait-self-review.txt, local-progress-self-review.txt
 and future-retirement-self-review.txt plus earlier component reviews. Native SQ submission/integration
@@ -510,3 +511,27 @@ pre-wait predicate. Wakers only set atomic flags; no OS wake or native atomic
 park is implemented. Protected10/cleanexternal61dde37 and parked kernel base
 preserved. SQ stays parked/unapplied; fullAS3/AS4/MM0-MM4, Main/private activation
 and128MiB guards remain. Heartbeat ACTIVE.
+
+
+### Astra local task/timer/retirement wait composition, October 10
+
+The uninstalled Rust task loop polls one bounded task quantum, then services
+bounded timers and retirement even while a task keeps itself runnable. Task
+readiness is checked before arming and after all event-source readiness/time
+callbacks. Zero/partial task budgets and wakes during those callbacks prevent
+sleep. Outer expiry prevents starting another task poll. Existing non-task wait
+interfaces retain their behavior through an empty runnable predicate.
+
+Task-loop095847Z:9cases opt0/2,2compile-fail+control,6mutants,13hashes/21commands.
+Local-wait095859Z and timer-wait095916Z regressions each9cases,11hashes/21commands,
+with the same profiles/controls/mutants. Source/snapshot/HEAD/diff/raw diagnostics
+verified before documentation. Actual fixed Futures exercise terminal delivery,
+held READ-result retirement and cancellation retention. Single-agent review in
+task-loop-self-review.txt; no failures. C/kernel/SQ unchanged.
+
+These are simulated creator-thread callback schedules. Concurrent wake after
+the last predicate still needs a native combined wake/atomic-park adapter; none
+is implemented or qualified. Next review independent AS3 lifecycle coverage,
+remaining non-native shutdown/drain and C/Rust parity gaps. Protected10,
+cleanexternal61dde37 and parked kernel base preserved. SQ stays parked/unapplied;
+fullAS3/AS4/MM0-MM4, Main/private activation and128MiB guards remain. Heartbeat ACTIVE.
