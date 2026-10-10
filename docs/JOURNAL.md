@@ -35986,3 +35986,30 @@ Single-agent self-review of source freeze, input copies and verifier assertions
 found no new discrepancy. Native general WALK/LOPEN/READ/WRITE/CLUNK and provided/
 MORE traffic remain next, then AS3/4 and MM0-MM4. No Main/private async/clipboard
 activation or128MiB protection removal. Historical installers must not be rerun.
+
+
+### Astra native general operations and provided payloads, October 10
+
+Added `loom.private_native_operations` in both normal/bulk classes. A controlled
+peer now reads emitted frames before replying through real SrvConn queues. The
+installed frontend/engine performs CONNECT, search+WALK, DAC+LOPEN, registered
+READ/WRITE and CLUNK. Accepted SQE correlation and WALK bytes remain immutable;
+read bytes and emitted write bytes match, negotiated iounit persists, and physical
+request/fixed ownership returns before unregister.
+
+Provided READ exercises a one-member pool, paired receipt, CQ consumption without
+payload return, duplicate return rejection, empty-pool parking, fresh MORE leases,
+RETURN while CQ is full, resumed dispatch after drain, EOF without an empty lease,
+and final pool reap. The fixture drives bounded engine visits; general operation
+worker scheduling and hostile/stalled-peer coverage remain AS-3 work. The peer is
+a deterministic wire responder, not a filesystem implementation.
+
+`native-operations/provided-20261010T0210Z` passes1856/1856,D7overlap/20cycles with
+41source and6artifact hashes stable; minimum8283MiB. Evidence is under
+work/oct5-as-r9/astra-takeover/native-operations. Failed freestanding aggregate
+initializer build and initial wrong CQ flag expectation are preserved with fixes.
+No production-path defect was established by those fixture failures. Self-review
+is single-agent. Mac released; no public private ENTER/clipboard activation or
+128MiB change. Earlier50/50 remains source98dd4b618 only; new fixture results are
+bounded native evidence. Continue AS-3 C/Rust ownership and adversarial native
+schedules, then AS-4 and MM0-MM4.

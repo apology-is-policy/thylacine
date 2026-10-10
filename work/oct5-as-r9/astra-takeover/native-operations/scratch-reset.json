@@ -1,0 +1,8 @@
+{
+  "owner": "astra",
+  "reason": "Reset only mutable scratch pool after completed matrix and released VM jobs; immutable inputs and all raw evidence retained.",
+  "before_sha256": "c8b71b02818e3e2b01c14c3de248ce2c2d6605fc0b8010ae6a8871cfdab8aabc",
+  "snapshot_sha256": "e09d69e638aac77f67beea8ae9f2071d0b29aecf771f61457580879d4d1734fd",
+  "after_sha256": "e09d69e638aac77f67beea8ae9f2071d0b29aecf771f61457580879d4d1734fd",
+  "free_mib": 8453
+}

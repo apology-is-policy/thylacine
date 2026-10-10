@@ -1,12 +1,12 @@
 {
   "owner": "astra",
-  "state": "installed-async-matrix-verified-native-general-operations-next",
+  "state": "native-general-provided-qualified-as3-next",
   "source_base": "f719ee4a3429f99cbd08a552dcdaedb54c5906ff",
   "host_run": "work/oct5-as-r9/astra-takeover/operations-draft/decode-controls-20261009T211810Z",
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Read async-integration/state.json and latest pickup. Completed pinned-matrix50/50 source98dd4b618. Add native general-operation/provided/MORE coverage, then AS3/4 and MM0-MM4; keep activation gated.",
+  "next": "Continue AS-3: raw C/Rust client ownership boundaries and native hostile/stalled peer schedules, including general operation worker scheduling. Full new-source Mac matrix remains owed; prior 50/50 is source98dd4b618 only. AS-4 then MM0-MM4, no activation or128MiB removal.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -17,7 +17,7 @@
   "operation_run": "work/oct5-as-r9/astra-takeover/operations-draft/operation-controls-20261009T215144Z",
   "operation_mutants": 10,
   "native_fixture": "verified1854",
-  "expected_native_tests": 1855,
+  "expected_native_tests": 1856,
   "evidence_checkpoint": "79dfd1267c330e571c0f1516e8784276f13e9115",
   "native_run": "work/oct5-as-r9/astra-takeover/operation-storage-native-20261009T215931Z",
   "native_pid": 36893,
@@ -41,5 +41,6 @@
   "frontend_draft": "frontend-draft/state.json",
   "frontend_connect": "frontend-connect/state.json",
   "async_integration": "async-integration/state.json",
-  "matrix_run": "work/oct5-as-r9/pinned-matrix-20261010T011750Z"
+  "matrix_run": "work/oct5-as-r9/pinned-matrix-20261010T011750Z",
+  "native_operations": "native-operations/state.json"
 }

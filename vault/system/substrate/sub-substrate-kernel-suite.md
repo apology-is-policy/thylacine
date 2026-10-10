@@ -508,3 +508,16 @@ existing charged storage/close exercise. CPU1 async-integration/native-
 20261010T010700Z passes1855/D7overlap/20cycles with41source/6artifact hashes stable.
 Native general-operation/provided/MORE traffic and full Mac matrix remain next;
 no private ABI/clipboard activation or128MiB protection change. Single-agent review.
+
+
+### October 10: native general operations and provided payloads
+
+The suite registers1856 tests after adding loom.private_native_operations. It
+exercises normal/bulk native CONNECT, WALK/open DAC, fixed READ/WRITE/CLUNK,
+provided leases, empty/full-CQ backpressure, independent RETURN, MORE and EOF.
+The controlled peer reads actual wire requests; explicit engine visits drive
+progress. This is not general-operation worker or real filesystem qualification.
+Raw native-operations/provided-20261010T0210Z passes1856/1856,D7overlap/20cycles,
+with41source/6artifact hashes stable. The earlier pinned-image50/50 matrix remains
+qualified only at98dd4b618 (1855tests). Failed fixture build and wrong CQ flag
+expectation are preserved. Single-agent self-review; no activation or128MiB change.

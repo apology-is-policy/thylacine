@@ -1,0 +1,17 @@
+{
+  "owner": "astra",
+  "state": "native-general-and-provided-qualified",
+  "native_run": "provided-20261010T0210Z",
+  "tests": 1856,
+  "minimum_free_mib": 8283,
+  "source_base": "3e60c3d33a31c5ab6c6b4c1ef9d94d4f7663835d",
+  "source_diff_sha256": "64823ed74bdb2077ea6ecac616a154127f3aa685d0cf0f1c685df3836c31dca7",
+  "review": "single-agent self-review",
+  "next": "Continue AS-3: raw C/Rust client ownership boundaries and native hostile/stalled peer schedules, including general operation worker scheduling. Full new-source Mac matrix remains owed; prior 50/50 is source98dd4b618 only. AS-4 then MM0-MM4, no activation or128MiB removal.",
+  "limits": [
+    "Controlled canonical wire responder, not a real filesystem server.",
+    "Native SrvConn framing, frontend, admission, engine, pool, completion and retirement; bounded explicit engine visits rather than worker-driven general operations.",
+    "Kernel internal creator calls; private user ENTER remains gated.",
+    "No Pi/A72/KVM, no new-source full matrix claimed."
+  ]
+}
