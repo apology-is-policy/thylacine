@@ -12,3 +12,5 @@ Metadata lifetime is guaranteed by held engine pin and outer retained Loom;
 cleanup returns pin, closes/joins actualworker, then drops mapping/endpoint.
 This covers six response-stall boundaries, not partial outbound WRITE, actual
 exec/exit races or independent media throughput. Public activation remains gated.
+
+Installed and raw/source/artifact verified in smoke-20261010T025901Z: five rows1859, six stages perclass; min9169MiB. No production change, independent audit or full qualification claim.

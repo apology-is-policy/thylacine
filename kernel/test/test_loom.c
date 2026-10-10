@@ -2998,7 +2998,7 @@ done:
 // reads peer frames and acknowledges CQEs through the creator frontend.
 struct loom_native_peer {
     u8 request[512];
-    u32 used, seen;
+    u32 used, seen, stop; // optional one-based request at which peer sleeps
     struct Proc *creator;
 };
 static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *peer) {
@@ -3018,6 +3018,7 @@ static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *pee
     if(type==P9_TWRITE && (size!=28 || peer->request[19]!=5 ||
        peer->request[23]!='h' || peer->request[24]!='e' || peer->request[25]!='l' ||
        peer->request[26]!='l' || peer->request[27]!='o'))return -1;
+    if(peer->stop==peer->seen+1u)return 2; // complete request observed, no reply
     u8 reply[256];
     int count=canonical_responder(NULL,peer->request,size,reply,sizeof(reply));
     if(count<=0)return -1;
@@ -3204,6 +3205,61 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
     if(loom_private_register_buffers(l,creator,NULL,0))return "fault payload unregister";
     return NULL;
 }
+// Sleep at an exact emitted protocol request while all preceding exchanges
+// use canonical replies. Cancellation must retire without this peer replying.
+static const char *loom_native_stage_cancel(struct Loom *l,struct SrvConn *server,
+    struct loom_native_peer *peer,struct loom_service_ref scope,u64 data) {
+    struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+    struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+    u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
+    u64 end=timer_now_ns()+2000000000ull;bool paused=false;
+    do {
+        sched();int step=loom_native_peer_step(server,peer);
+        if(step<0)return "stage peer request mismatch";
+        if(step==2){paused=true;break;}
+    }while(timer_now_ns()<end);
+    if(!paused || __atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE)!=head)
+        return "stage did not stop before operation completion";
+    struct loom_service_control control={.size=sizeof(control),.version=1,.object=scope};
+    if(loom_private_service_abort(l,peer->creator,&control)<0)return "stage abort";
+    bool retired=false;end=timer_now_ns()+2000000000ull;
+    do {
+        struct loom_service_snapshot snap;
+        if(control_native_query(l,peer->creator,scope,&snap))return "stage snapshot";
+        if(snap.state==LOOM_SERVICE_RETIRED) {
+            if(snap.reason!=-T_E_CANCELED || !(snap.status_flags&LOOM_SERVICE_LOCAL_RETIRED))
+                return "stage retirement reason";
+            retired=true;break;
+        }
+        sched();
+    }while(timer_now_ns()<end);
+    if(!retired || srvconn_is_live(server))return "stage local retirement failed with live peer ref";
+    bool completed=false;
+    do {
+        u32 tail=__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE);
+        if(tail!=head) {
+            struct loom_cqe value=cq[head&(l->cq_entries-1u)];
+            if(tail!=head+1 || value.user_data!=data || value.result!=-T_E_CANCELED || value.flags)
+                return "stage cancellation must not publish successful descriptor";
+            completed=true;break;
+        }
+        sched();
+    }while(timer_now_ns()<end);
+    if(!completed)return "stage cancellation terminal missing";
+    __atomic_store_n(&h->cq_head,head+1,__ATOMIC_RELEASE);
+    if(loom_private_submit(l,peer->creator,0)<0)return "stage terminal acknowledgement";
+    bool released=false;
+    do {
+        spin_lock(&l->lock);
+        released=l->service_requests.occupied==1 && !l->service_fixed_count;
+        spin_unlock(&l->lock);
+        if(released)break;
+        sched();
+    }while(timer_now_ns()<end);
+    if(!released || loom_private_register_buffers(l,peer->creator,NULL,0))
+        return "stage physical operation payload retained";
+    return NULL;
+}
 static const char *loom_native_operations_case(struct Loom *l,struct Proc *creator,
     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk,u32 fault) {
     const char *error=NULL;u64 va=0;
@@ -3211,7 +3267,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     struct loom_service_ref scope={0},child={0};
     struct loom_native_peer peer;
     for(u32 i=0;i<sizeof(peer);++i)((u8 *)&peer)[i]=0;
-    peer.creator=creator;
+    peer.creator=creator;peer.stop=fault>=9?fault-8:0;
     struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
 #define NO(c,m) do{if(!(c)){error=m;goto done;}}while(0)
     NO(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
@@ -3222,7 +3278,9 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     NO(!loom_engine_get(l,scope,&held),"native operation observation pin");
     server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
     NO(!loom_private_start_executor(l),"native operation worker starts");
-    NO(server==held->admission.conn && loom_native_completion(l,server,&peer,100,(s32)scope.slot),
+    NO(server==held->admission.conn,"stage native accepted peer identity");
+    if(fault==9 || fault==10) {error=loom_native_stage_cancel(l,server,&peer,scope,100);goto done;}
+    NO(loom_native_completion(l,server,&peer,100,(s32)scope.slot),
        "native emitted version and attach complete CONNECT");
     s64 attached=sys_burrow_attach_for_proc(creator,PAGE_SIZE);
     NO(attached>0,"native operation backing");va=(u64)attached;
@@ -3238,10 +3296,12 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        .handle_idx=scope.slot,.offset=child.slot,.len=4,.user_data=101,
        ._resv1={0,scope.incarnation,child.incarnation,0}}),"native WALK submission");
     bytes[0]='X'; // accepted WALK must own its component copy
+    if(fault==11 || fault==12) {error=loom_native_stage_cancel(l,server,&peer,scope,101);goto done;}
     NO(loom_native_completion(l,server,&peer,101,(s32)child.slot),"native search and copied WALK completion");
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_LOPEN,
-       .handle_idx=child.slot,.offset=2,.user_data=102,._resv1={0,child.incarnation,0,0}}) &&
-       loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
+       .handle_idx=child.slot,.offset=2,.user_data=102,._resv1={0,child.incarnation,0,0}}),"native LOPEN submission");
+    if(fault==13 || fault==14) {error=loom_native_stage_cancel(l,server,&peer,scope,102);goto done;}
+    NO(loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
     NO(l->service_nodes->nodes[child.slot].fid_iounit==4096,"native negotiated iounit retained");
     if(fault) {error=loom_native_fault(l,creator,server,scope,child,bytes,fault);goto done;}
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
@@ -3509,6 +3569,11 @@ static const char *loom_protocol_fixture(u32 kind) {
            "zero-reference retirer wakes joins and refunds the live private worker");
         goto done;
     }
+    if (kind>=40 && kind<=51) {
+        bool bulk=(kind-40)&1u;
+        error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,9+(kind-40)/2);
+        goto done;
+    }
     if (kind==35 || kind==36) {error=loom_native_reconnects(l,p,poster,reg,refs,kind==36);goto done;}
     if (kind>=19 && kind<=34) {
         bool bulk=(kind-19)&1u;
@@ -3690,4 +3755,12 @@ void test_loom_private_native_reconnects(void) {
     const char *error=loom_protocol_fixture(35);
     if(!error)error=loom_protocol_fixture(36);
     TEST_ASSERT(!error,error);
+}
+
+void test_loom_private_native_stages(void);
+void test_loom_private_native_stages(void) {
+    for(u32 kind=40;kind<=51;++kind) {
+        const char *error=loom_protocol_fixture(kind);
+        TEST_ASSERT(!error,error);
+    }
 }

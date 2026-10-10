@@ -1,1 +1,7 @@
-{"owner":"astra","installed":false,"state":"prepared-unverified","next":"After retained-backlog run verifies and checkpoint commits, review/apply stages.patch. Six sleeping-peer protocol stages per normal/bulk class.1859tests. No production change or activation."}
+{
+  "owner": "astra",
+  "installed": true,
+  "state": "verified-five-row-smoke",
+  "next": "Checkpoint then apply reviewed native-stage-close patch; remaining AS3/owned clients,AS4/MM0-MM4.",
+  "run": "work/oct5-as-r9/astra-takeover/native-stages/smoke-20261010T025901Z"
+}

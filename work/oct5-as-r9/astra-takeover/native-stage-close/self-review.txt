@@ -1,0 +1,17 @@
+Astra single-agent review, UNINSTALLED and UNVERIFIED.
+Six emitted setup requests x normal/bulk x final handle close, forced private exec
+close despite CLOEXEC false, and last-live-thread handle-table destruction.
+Actual private worker overlaps close. Peer does not reply; observation pin and
+peer reference stay held through local retirement, forcing LCLOSE_PARKED.
+Return observation pin then require LCLOSE_DONE, detached/empty request storage,
+fixed owners zero, engine empty and worker exited without CQ consumer progress.
+Outer creation ref protects Loom throughout; separate loom_ref is transferred
+to the real handle and exactly one production close path consumes it. Failure
+before handle publication explicitly unrefs. Standard fixture cleanup joins the
+worker before releasing mapping and peer; outer fixture verifies image refund.
+Exit boundary uses isolated process with no user threads and detaches table before
+free. It does not invoke exits(), change image or simulate a user syscall race;
+actual user exec/exit integration remains a separate gate. No production change,
+activation, independent audit or full AS3 qualification claimed.
+
+Review addition: the common outer protocol cleanup now explicitly checks original image page_count and private_rings==0 after retirement, before process destruction; previously not every early native-fixture branch checked that baseline. This assertion is part of the uninstalled patch and requires its own run.

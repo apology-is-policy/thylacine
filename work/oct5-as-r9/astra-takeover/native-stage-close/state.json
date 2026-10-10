@@ -1,0 +1,6 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "state": "prepared-unverified",
+  "next": "Review then apply only after native-stages run verified and checkpointed;36close schedules,1860 tests. Boundary witnesses, not whole userspace exec/exit calls."
+}

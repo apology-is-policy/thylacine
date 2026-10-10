@@ -2914,3 +2914,26 @@ Single-agent self-review recorded. Next native-stages/stages.patch is reviewed,
 UNINSTALLED and unverified: cancellation after each of six complete setup
 requests, in both connection classes. Broader close/exec/exit, independent media,
 owned clients, AS4 and MM0-MM4 remain. No Main/private activation/128 MiB change.
+
+
+### Astra native setup-stage cancellation verified, October 10
+
+Actual worker cancellation now passes at six complete emitted requests: VERSION,
+ATTACH, pre-WALK GETATTR, WALK, pre-LOPEN GETATTR and LOPEN, in normal/bulk
+classes. The peer sends no reply for the selected request; local retirement,
+exact negative terminal (no successful descriptor), physical request/fixed-owner
+release and unregister complete while retained peer/observation references remain.
+
+Five one-boot rows default1/4/8 and UBSan4/8 passed1859/1859 plus D7overlap and
+20login cycles each in native-stages/smoke-20261010T025901Z. Source51b95e440 plus
+diff2e6e907363;10rawlogs,41installedsources,sixinputs per row and cloned kernels
+reverified before docs changed. Clean61dde37 and Astra's10hashes preserved;
+minimum9169MiB. Single-agent self-review; no production change or full50boot claim.
+
+Next UNINSTALLED native-stage-close/stage-close.patch repeats those six requests
+with final handle close, forced private exec cleanup and exit handle-table cleanup
+(36schedules), with actual worker overlap, held references and no CQ/peer progress.
+It also adds a common explicit final image-page/private-ring refund assertion.
+These are production cleanup boundary witnesses; whole userspace exec/exit races,
+independent media/owned clients, remaining AS3,AS4/MM0-MM4 still remain.
+No Main/private activation or128MiB protection removal.
