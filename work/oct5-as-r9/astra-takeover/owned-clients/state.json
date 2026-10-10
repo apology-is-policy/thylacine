@@ -1,12 +1,14 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "draft-full-ring-payload-host-verified",
-  "next": "Native provisional registration and owned backing/mapping adapter, paired CQ/request correlation, fixed I/O, futures and bounded executor retirement. Use ring_payload cores; one-pool cores are historical foundations.",
+  "state": "draft-registration-transactions-host-verified",
+  "next": "Native owned mapping/backing/syscall adapter and paired CQ/request correlation, fixed I/O, futures and bounded executor retirement. Registration transaction host-tested; no native qualification.",
   "run": "owned-clients/ledger-20261010T032905Z",
   "paired_run": "owned-clients/paired-20261010T033551Z",
   "payload_rust_run": "owned-clients/payload-20261010T034518Z",
   "payload_c_run": "owned-clients/payload-c-20261010T034735Z",
   "ring_rust_run": "owned-clients/ring-payload-20261010T035754Z",
-  "ring_c_run": "owned-clients/ring-payload-c-20261010T035801Z"
+  "ring_c_run": "owned-clients/ring-payload-c-20261010T035801Z",
+  "registration_rust_run": "owned-clients/registration-20261010T040736Z",
+  "registration_c_run": "owned-clients/registration-c-20261010T040751Z"
 }

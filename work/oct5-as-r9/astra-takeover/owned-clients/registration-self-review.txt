@@ -1,0 +1,52 @@
+Astra single-agent self-review, October10: registration transactions (uninstalled).
+No independent audit. Read native private_pool_prepare/publish/rollback and ABI;
+public pool registration dispatch remains gated/unimplemented. Simulated backend
+results below do not establish native syscall semantics or complete safe clients.
+
+prepare validates backing geometry, cross-pool overlap and global64 admission;
+allocates every pool/range/lease/pending cell and reserves distinct ledger owner
+before calling registration. A ledger starts unbound, refuses receipt acceptance,
+and can bind only once. Returning every token does not permit rebind. Precharge
+occurs before callback; callback is synchronous, bounded and nonreentrant. All
+submission must remain serialized until local publication. C passes contiguous
+copied descriptors rather than its interleaved member/lease cells.
+
+Backend result contract is explicit, NOT inferred from an eventual raw syscall:
+negative rc plus zero output must prove no surviving native registration/pins,
+including copyout rollback. Then local precharge is refunded and exact rc returned.
+Zero with valid unused strictly newer pool identity binds/publishes without heap
+allocation or new token-owner reservation. Invalid, stale, colliding, positive,
+or negative with populated output is uncertain. REGISTRATION-REVIEW-R1: never
+attempt destroy using such identity; it may name another live pool. Retain the
+preallocated record in one quarantine cell and close whole owner once. Closing
+prevents a second quarantine admission. Global members remain charged (<=64),
+existing handles/leases keep backing, and no payload bytes are revoked. Quarantine
+is freed only with core after close and last handle/lease; kernel pins/payer refs
+remain the backend contract beyond local destruction. Progress never retries or
+reaps an uncertain identity. Actual adapter must reject calls after descriptor
+close rather than accidentally operate a subsequently reused descriptor number.
+
+C recoverable calloc failure precedes native admission and leaves output null,
+member count unchanged and callback count zero. Rust global allocator retains its
+normal abort-on-OOM policy, but every allocation is before native side effects.
+Rust allocation observer starts at callback exit; all tested success/error paths
+have zero subsequent allocations. C calloc observer/failure injection surrounds
+production objects, including NDEBUG; this measures current allocator calls, not
+an exhaustive allocator-level proof. Code review confirms no hidden post-call
+allocation. Pending/return/progress remain bounded and allocation-free.
+
+Rust13 scenarios opt0/opt2 +4compilefail/positivecontrol; C14 scenarios LLVM22
+ASan+UBSan and optimized NDEBUG objects with test assertions enabled. Includes
+7prior shared-ring cases, actual identity binding, preflight/no callback, definite
+rollback/refund/retry, globalcapacity,6uncertain result classes with live payload,
+stale returned generation, one-time ledger bind and C allocation failure. Ten
+runtime mutants per language: previous six plus omittedprecharge, uncertainno-close,
+missingrollbackrefund and acceptingnegativepopulatedoutput. All rejected by test
+assertions; raw logs/source snapshots verified before docs. No failing runs here.
+
+Remaining native adapter must implement actual eager backing/mapping, checked
+receipt geometry, exact errno/copyout/rollback classification and paired CQ/request
+correlation; fixed-operation ownership, futures/scope abort and bounded executor
+retirement pending. Attach remains unsafe historical testing boundary; new native
+adapter must use register transaction. No new ABI/limits, activation/Main/128MiB
+change, complete-client/AS3 or full Mac-gate claim.

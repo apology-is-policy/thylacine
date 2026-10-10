@@ -14,6 +14,11 @@ use super::{lease_ledger::{LeaseLedger,LeaseToken,LeaseError},service_abi::{Slot
 /// bytes and independent kernel pins/payer charges beyond backend destruction.
 /// No callback may reenter, panic, block on peers or expose mutable backing.
 pub(crate) unsafe trait RingBackend {
+ /// Zero creates exactly the returned pool. Negative + all-zero output proves
+ /// no surviving registration/pins (including copyout rollback). Any other
+ /// combination is uncertain and forces whole-owner close. No submission may
+ /// use the pool before this function returns and local publication completes.
+ fn register_pool(&self,ranges:&[PoolMember],out:&mut SlotRef)->i64;
  fn buffer_count(&self)->usize;
  fn buffer_len(&self,index:usize)->usize;
  fn buffer(&self,index:usize)->NonNull<u8>;
@@ -28,7 +33,7 @@ struct PoolState {
  identity:SlotRef,ledger:LeaseLedger,ranges:Box<[PoolMember]>,
  pending:Box<[Option<LeaseToken>]>,live:usize,closing:bool,
 }
-struct State {pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
+struct State {quarantine:Option<Box<PoolState>>,pools:[Option<Box<PoolState>>;64],last:[u64;64],members:usize,live:usize}
 struct Core<B:RingBackend>{backend:B,state:RefCell<State>,closing:Cell<bool>,closed:Cell<bool>}
 impl<B:RingBackend> Core<B>{
  fn retire(&self){if !self.closing.replace(true){self.backend.begin_retire();}}
@@ -50,12 +55,12 @@ pub(crate) struct RingClient<B:RingBackend>{core:Rc<Core<B>>}
 pub(crate) struct Pool<B:RingBackend>{core:Rc<Core<B>>,identity:SlotRef}
 pub(crate) struct Payload<B:RingBackend>{core:Rc<Core<B>>,token:Option<LeaseToken>}
 #[derive(Debug,PartialEq,Eq)]
-pub(crate) enum Error{Closing,Geometry,Busy,Stale,Ledger(LeaseError)}
+pub(crate) enum Error{Closing,Geometry,Busy,Stale,Backend(i64),Uncertain(i64),Ledger(LeaseError)}
 impl<B:RingBackend> RingOwner<B>{
  pub(crate) fn new(backend:B)->Result<(Self,RingClient<B>),Error>{
   let count=backend.buffer_count();let valid=count>0&&count<=64&&(0..count).all(|i|{let n=backend.buffer_len(i);n>0&&n<=isize::MAX as usize});
   if !valid{backend.begin_retire();backend.close();return Err(Error::Geometry);}
-  let core=Rc::new(Core{backend,state:RefCell::new(State{pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
+  let core=Rc::new(Core{backend,state:RefCell::new(State{quarantine:None,pools:core::array::from_fn(|_|None),last:[0;64],members:0,live:0}),closing:Cell::new(false),closed:Cell::new(false)});
   Ok((Self{core:core.clone()},RingClient{core}))
  }
  /// At most64 RETURN and64 pool-destroy attempts; no allocation on this path.
@@ -79,28 +84,57 @@ impl<B:RingBackend> RingOwner<B>{
 }
 impl<B:RingBackend> Drop for RingOwner<B>{fn drop(&mut self){self.core.close();}}
 impl<B:RingBackend> RingClient<B>{
- /// # Safety
- /// The native adapter must have created this exact kernel pool over ranges,
- /// own cleanup responsibility on any local error, and serialize registration
- /// with submission. Preflight/provisional registration is still to be wired.
- /// This function cannot be a public safe API accepting arbitrary pool IDs.
- pub(crate) unsafe fn attach_pool(&self,identity:SlotRef,ranges:&[PoolMember])->Result<Pool<B>,Error>{
+ fn prepare(&self,ranges:&[PoolMember])->Result<Box<PoolState>,Error>{
   if self.core.closing.get(){return Err(Error::Closing);}
-  if identity.reserved!=0||identity.incarnation==0||identity.slot>=64||ranges.is_empty()||ranges.len()>64{return Err(Error::Geometry);}
-  let mut s=self.core.state.borrow_mut();let slot=identity.slot as usize;
-  if s.pools[slot].is_some(){return Err(Error::Busy);}
-  if identity.incarnation<=s.last[slot]{return Err(Error::Stale);}
+  let s=self.core.state.borrow();
+  if ranges.is_empty()||ranges.len()>64{return Err(Error::Geometry);}
   if ranges.len()>64-s.members{return Err(Error::Busy);}
   let mut lengths=[0u64;64];let count=self.core.backend.buffer_count();
   for(i,n)in lengths[..count].iter_mut().enumerate(){*n=self.core.backend.buffer_len(i)as u64;}
-  let ledger=LeaseLedger::new(identity,ranges,&lengths[..count]).map_err(Error::Ledger)?;
-  // Same allocation, physical offset, across every live/closing pool. Unique
-  // owned backing by index is the unsafe backend's anti-alias requirement.
+  let ledger=LeaseLedger::prepare(ranges,&lengths[..count]).map_err(Error::Ledger)?;
   for p in s.pools.iter().flatten(){for a in p.ranges.iter(){for b in ranges{
    if a.buffer_index==b.buffer_index&&a.offset<b.offset+b.length&&b.offset<a.offset+a.length{return Err(Error::Geometry);}
   }}}
-  s.pools[slot]=Some(Box::new(PoolState{identity,ledger,ranges:ranges.into(),pending:(0..ranges.len()).map(|_|None).collect::<alloc::vec::Vec<_>>().into_boxed_slice(),live:0,closing:false}));
-  s.last[slot]=identity.incarnation;s.members+=ranges.len();Ok(Pool{core:self.core.clone(),identity})
+  // Every heap allocation precedes native admission. OOM cannot orphan a pool.
+  Ok(Box::new(PoolState{identity:SlotRef{slot:0,reserved:0,incarnation:0},ledger,ranges:ranges.into(),pending:(0..ranges.len()).map(|_|None).collect::<alloc::vec::Vec<_>>().into_boxed_slice(),live:0,closing:false}))
+ }
+ fn identity_ok(s:&State,identity:SlotRef)->Result<(),Error>{
+  if identity.reserved!=0||identity.incarnation==0||identity.slot>=64{return Err(Error::Geometry);}
+  let slot=identity.slot as usize;
+  if s.pools[slot].is_some(){return Err(Error::Busy);}
+  if identity.incarnation<=s.last[slot]{return Err(Error::Stale);}
+  Ok(())
+ }
+ /// Prepare/precharge -> synchronous native admission -> allocation-free bind.
+ /// Uncertain results retain reservation/backing and close globally; never reap
+ /// a malformed or colliding identity that could name an existing live pool.
+ pub(crate) fn register_pool(&self,ranges:&[PoolMember])->Result<Pool<B>,Error>{
+  let mut p=self.prepare(ranges)?;
+  let mut s=self.core.state.borrow_mut();s.members+=p.ranges.len();
+  let mut identity=SlotRef{slot:0,reserved:0,incarnation:0};
+  let rc=self.core.backend.register_pool(&p.ranges,&mut identity);
+  if rc<0&&identity==(SlotRef{slot:0,reserved:0,incarnation:0}){
+   s.members-=p.ranges.len();return Err(Error::Backend(rc));
+  }
+  if rc!=0||Self::identity_ok(&s,identity).is_err(){
+   p.identity=identity;p.closing=true;s.quarantine=Some(p);
+   // Drop state borrow before retirement callback; no error can re-open admission.
+   drop(s);self.core.close();return Err(Error::Uncertain(rc));
+  }
+  p.ledger.bind(identity).expect("fresh preallocated ledger");p.identity=identity;
+  let slot=identity.slot as usize;s.last[slot]=identity.incarnation;s.pools[slot]=Some(p);
+  Ok(Pool{core:self.core.clone(),identity})
+ }
+ /// # Safety
+ /// Historical adapter/testing boundary only: caller owns exact native pool
+ /// and cleanup on every error. New adapters use register_pool instead.
+ pub(crate) unsafe fn attach_pool(&self,identity:SlotRef,ranges:&[PoolMember])->Result<Pool<B>,Error>{
+  if self.core.closing.get(){return Err(Error::Closing);}
+  Self::identity_ok(&self.core.state.borrow(),identity)?;
+  let mut p=self.prepare(ranges)?;p.ledger.bind(identity).map_err(Error::Ledger)?;p.identity=identity;
+  let mut s=self.core.state.borrow_mut();let slot=identity.slot as usize;
+  s.members+=ranges.len();s.last[slot]=identity.incarnation;s.pools[slot]=Some(p);
+  Ok(Pool{core:self.core.clone(),identity})
  }
 }
 impl<B:RingBackend> Drop for RingClient<B>{fn drop(&mut self){self.core.retire();}}

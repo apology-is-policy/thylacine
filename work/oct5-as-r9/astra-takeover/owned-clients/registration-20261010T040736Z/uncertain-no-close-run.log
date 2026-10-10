@@ -1,0 +1,40 @@
+
+running 13 tests
+test ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test last_generation_cannot_wrap_or_reuse ... ok
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test one_pool_drop_preserves_other_pool_and_ring ... ok
+test overlap_and_global64_members_are_rejected ... ok
+test pool_destroy_error_retains_exclusion_and_incarnation ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test registration_preflight_global_capacity_avoids_native_admission ... ok
+test registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test registration_success_binds_actual_identity_without_late_allocation ... ok
+test stale_native_registration_keeps_precharged_reservation_until_close ... FAILED
+test uncertain_registration_closes_and_quarantines_with_live_payload ... FAILED
+
+failures:
+
+---- stale_native_registration_keeps_precharged_reservation_until_close stdout ----
+
+thread 'stale_native_registration_keeps_precharged_reservation_until_close' (22150010) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-uncertain-no-close/test_ring_payload.rs:73:226:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- uncertain_registration_closes_and_quarantines_with_live_payload stdout ----
+
+thread 'uncertain_registration_closes_and_quarantines_with_live_payload' (22150011) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-uncertain-no-close/test_ring_payload.rs:68:80:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    stale_native_registration_keeps_precharged_reservation_until_close
+    uncertain_registration_closes_and_quarantines_with_live_payload
+
+test result: FAILED. 11 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

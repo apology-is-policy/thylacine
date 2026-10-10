@@ -31,6 +31,7 @@ impl LeaseToken {
 
 pub(crate) struct LeaseLedger {
     owner: u64,
+    bound: bool,
     pool: SlotRef,
     members: [Member; MEMBERS],
     count: usize,
@@ -59,12 +60,30 @@ impl LeaseLedger {
             members[i].range = *range;
         }
         let owner = NEXT_OWNER.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).map_err(|_| LeaseError::Exhausted)?;
-        Ok(Self { owner, pool, members, count: ranges.len(), outstanding: 0 })
+        Ok(Self { owner, bound: true, pool, members, count: ranges.len(), outstanding: 0 })
+    }
+
+    /// Reserve geometry and unique token owner before kernel registration. An
+    /// unbound ledger cannot accept even terminal records or issue tokens.
+    pub(crate) fn prepare(ranges: &[PoolMember], lengths: &[u64]) -> Result<Self, LeaseError> {
+        let mut ledger = Self::new(SlotRef { slot: 0, reserved: 0, incarnation: 1 }, ranges, lengths)?;
+        ledger.bound = false;
+        ledger.pool = EMPTY_REF;
+        Ok(ledger)
+    }
+    /// One-time publication; no allocation or owner-id reservation here.
+    pub(crate) fn bind(&mut self, pool: SlotRef) -> Result<(), LeaseError> {
+        if self.bound { return Err(LeaseError::State); }
+        if pool.slot >= 64 || pool.reserved != 0 || pool.incarnation == 0 { return Err(LeaseError::Geometry); }
+        self.pool = pool;
+        self.bound = true;
+        Ok(())
     }
 
     /// For a pooled READ only. Non-payload terminal/error records must have a
     /// completely zero paired receipt. EOF/final never releases earlier leases.
     pub(crate) fn accept_read(&mut self, result: i32, flags: u32, receipt: BufferReceipt) -> Result<Option<LeaseToken>, LeaseError> {
+        if !self.bound { return Err(LeaseError::State); }
         if flags & !(MORE | CQE_SERVICE_BUFFER) != 0 { return Err(LeaseError::Receipt); }
         if flags & CQE_SERVICE_BUFFER == 0 {
             if flags != 0 || result > 0 || receipt.pool != EMPTY_REF || receipt.member != 0 || receipt.reserved != 0 || receipt.lease != 0 {

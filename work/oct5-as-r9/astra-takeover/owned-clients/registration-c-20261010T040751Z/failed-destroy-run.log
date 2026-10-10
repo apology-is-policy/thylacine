@@ -1,0 +1,2 @@
+Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 43.
+C seven registration transaction scenarios PASS

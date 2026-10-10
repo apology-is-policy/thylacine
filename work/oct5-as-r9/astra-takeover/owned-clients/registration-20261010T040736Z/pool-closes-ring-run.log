@@ -1,0 +1,56 @@
+
+running 13 tests
+test final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test client_and_controller_close_preserve_all_live_payloads ... ok
+test ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test last_generation_cannot_wrap_or_reuse ... FAILED
+test pool_destroy_error_retains_exclusion_and_incarnation ... FAILED
+test one_pool_drop_preserves_other_pool_and_ring ... FAILED
+test overlap_and_global64_members_are_rejected ... FAILED
+test registration_preflight_global_capacity_avoids_native_admission ... ok
+test pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test registration_success_binds_actual_identity_without_late_allocation ... ok
+test stale_native_registration_keeps_precharged_reservation_until_close ... FAILED
+test uncertain_registration_closes_and_quarantines_with_live_payload ... ok
+
+failures:
+
+---- last_generation_cannot_wrap_or_reuse stdout ----
+
+thread 'last_generation_cannot_wrap_or_reuse' (22149405) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-pool-closes-ring/test_ring_payload.rs:36:163:
+assertion failed: matches!(unsafe{c.attach_pool(id(63,1),&[range(0)])},Err(Error::Stale))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- pool_destroy_error_retains_exclusion_and_incarnation stdout ----
+
+thread 'pool_destroy_error_retains_exclusion_and_incarnation' (22149410) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-pool-closes-ring/test_ring_payload.rs:33:181:
+assertion failed: matches!(unsafe{c.attach_pool(id(4,1),&[range(0)])},Err(Error::Geometry))
+
+---- one_pool_drop_preserves_other_pool_and_ring stdout ----
+
+thread 'one_pool_drop_preserves_other_pool_and_ring' (22149407) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-pool-closes-ring/test_ring_payload.rs:31:232:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- overlap_and_global64_members_are_rejected stdout ----
+
+thread 'overlap_and_global64_members_are_rejected' (22149408) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-pool-closes-ring/test_ring_payload.rs:29:121:
+called `Result::unwrap()` on an `Err` value: Closing
+
+---- stale_native_registration_keeps_precharged_reservation_until_close stdout ----
+
+thread 'stale_native_registration_keeps_precharged_reservation_until_close' (22149414) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/mutant-pool-closes-ring/test_ring_payload.rs:73:96:
+assertion failed: matches!(register(&c,&[range(8)]),Err(Error::Uncertain(0)))
+
+
+failures:
+    last_generation_cannot_wrap_or_reuse
+    one_pool_drop_preserves_other_pool_and_ring
+    overlap_and_global64_members_are_rejected
+    pool_destroy_error_retains_exclusion_and_incarnation
+    stale_native_registration_keeps_precharged_reservation_until_close
+
+test result: FAILED. 8 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

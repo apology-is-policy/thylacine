@@ -6,10 +6,18 @@
 #ifndef THYLA_RING_PAYLOAD_H
 #define THYLA_RING_PAYLOAD_H
 #include "lease_ledger.h"
-struct t_ring_backend{void *context;size_t(*count)(void *);size_t(*length)(void *,size_t);const unsigned char *(*buffer)(void *,size_t);int64_t(*return_buffer)(void *,struct t_loom_service_buffer_receipt);void(*retire_pool)(void *,struct t_loom_service_ref);int64_t(*destroy_pool)(void *,struct t_loom_service_ref);void(*begin_retire)(void *);int(*retired)(void *);void(*close)(void *);void(*destroy)(void *);};
+struct t_ring_backend{void *context;size_t(*count)(void *);size_t(*length)(void *,size_t);const unsigned char *(*buffer)(void *,size_t);int64_t(*return_buffer)(void *,struct t_loom_service_buffer_receipt);void(*retire_pool)(void *,struct t_loom_service_ref);int64_t(*destroy_pool)(void *,struct t_loom_service_ref);void(*begin_retire)(void *);int(*retired)(void *);void(*close)(void *);void(*destroy)(void *);int64_t(*register_pool)(void *,const struct t_loom_service_pool_member *,size_t,struct t_loom_service_ref *);};
 struct t_ring_owner;struct t_ring_client;struct t_ring_pool;struct t_ring_payload;
 /* Consumes well-formed backend even on geometry/allocation failure. */
 int t_ring_create(struct t_ring_backend,struct t_ring_owner **,struct t_ring_client **);
+/* Backend register: zero means created; negative plus zero output proves no
+ * surviving registration/pins. Any other result forces close with quarantined
+ * preallocated metadata. Callbacks cannot reenter or submit before publication.
+ * Exact negative errno is returned for definite rejection. Uncertain outcomes
+ * return T_RING_UNCERTAIN, with native rc in *native_rc (also set on success).
+ * *native_rc is zero when local preflight fails; no backend call occurred. */
+#define T_RING_UNCERTAIN (-100)
+int64_t t_ring_register_pool(struct t_ring_client *,const struct t_loom_service_pool_member *,size_t,struct t_ring_pool **,int64_t *native_rc);
 /* Native adapter must already own exact kernel pool and error cleanup. Serialized
  * provisional registration/preflight is still to be wired before public use. */
 int t_ring_attach(struct t_ring_client *,struct t_loom_service_ref,const struct t_loom_service_pool_member *,size_t,struct t_ring_pool **);

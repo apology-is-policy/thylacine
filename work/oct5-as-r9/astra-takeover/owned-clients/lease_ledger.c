@@ -24,10 +24,21 @@ int t_lease_init(struct t_lease_ledger *out,struct t_loom_service_ref pool,
     uint64_t owner=atomic_load_explicit(&next_owner,memory_order_relaxed);
     do { if(owner==UINT64_MAX)return T_LEASE_EXHAUSTED; }
     while(!atomic_compare_exchange_weak_explicit(&next_owner,&owner,owner+1,memory_order_relaxed,memory_order_relaxed));
-    next.owner=owner;*out=next;return 0;
+    next.owner=owner;next.bound=1;*out=next;return 0;
+}
+/* Reserve before syscall; bind is one-time and allocation-free. */
+int t_lease_prepare(struct t_lease_ledger *out,const struct t_loom_service_pool_member *ranges,size_t n,const uint64_t *sizes,size_t count){
+    int rc=t_lease_init(out,(struct t_loom_service_ref){0,0,1},ranges,n,sizes,count);
+    if(!rc){out->bound=0;out->pool=(struct t_loom_service_ref){0};}return rc;
+}
+int t_lease_bind(struct t_lease_ledger *b,struct t_loom_service_ref pool){
+    if(!b||b->bound)return T_LEASE_STATE;
+    if(pool.slot>=64||pool.reserved||!pool.incarnation)return T_LEASE_GEOMETRY;
+    b->pool=pool;b->bound=1;return 0;
 }
 int t_lease_accept_read(struct t_lease_ledger *b,int32_t result,uint32_t flags,
     struct t_loom_service_buffer_receipt r,struct t_lease_token *out) {
+    if(b && !b->bound)return T_LEASE_STATE;
     if(!b || !out || (flags & ~(1u|T_LOOM_CQE_SERVICE_BUFFER)))return T_LEASE_RECEIPT;
     if(!(flags&T_LOOM_CQE_SERVICE_BUFFER)) {
         if(flags || result>0 || r.pool.slot || r.pool.reserved || r.pool.incarnation || r.member || r.reserved || r.lease)

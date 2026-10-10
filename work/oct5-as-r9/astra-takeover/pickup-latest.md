@@ -12,13 +12,13 @@ external stratum-astra/v2 at61dde3727921e70e2c72fbd3c9e2044a192f4a54.
 
 ## Immediate continuation
 
-No native or host runner remains active after full-ring runs035754Z/035801Z.
+No native or host runner remains active after registration runs040736Z/040751Z.
 Inspect processes and flight records anyway before launching. Current next work:
-native provisional registration and owned backing/mapping/syscall adapter,
+native owned backing/mapping/syscall adapter (registration transaction now host-tested),
 paired CQ/request correlation, fixed I/O, futures and bounded executor retirement.
 Shared full-ring payload lifetime cores now host-verified; use ring_payload.*,
 not the earlier one-pool payload_owner.* historical components. Read owned-clients/implementation-notes.txt,self-review.txt and
-paired-self-review.txt, payload-self-review.txt and ring-self-review.txt. All remain UNINSTALLED;
+paired-self-review.txt, payload-self-review.txt, ring-self-review.txt and registration-self-review.txt. All remain UNINSTALLED;
 do not claim native safe clients or give each pool separate ring-close authority.
 Do not re-fix raw Rust register_buffers: it is already unsafe and documented.
 Do not expose Ring::reap/raw submit or mutable storage after owned transfer.
@@ -140,3 +140,27 @@ owned mapping/storage, fixed I/O, futures and executor retirement. Current unsaf
 attach accepts only adapter-proven native pool identities; simulated backend tests
 do not qualify that missing boundary. Remaining AS3/AS4/MM0-MM4 pending; no Main,
 private activation,128MiB change or independent audit claim.
+
+
+### Astra pool registration transactions, October 10
+
+Uninstalled C/Rust shared-ring cores now prepare all ownership metadata and
+precharge the global64-member bound before registration. Successful publication
+binds the actual full pool identity without allocation. Confirmed negative+zero
+output rollback refunds admission and preserves errno; uncertain, malformed,
+stale or colliding results retain a quarantined reservation and close the whole
+owner while existing leases keep their bytes. No destroy uses an untrusted ID.
+Ledger bind is one-time even after all leases return. Native adapter must prove
+that negative+zero output means no surviving registration/pins; this is currently
+a trusted simulated-backend contract, not verified public syscall behavior.
+
+registration-20261010T040736Z:13Rust cases opt0/opt2,4compile-fail+positivecontrol,
+10runtime mutants. registration-c-20261010T040751Z:14C cases LLVM22ASan+UBSan and
+optimized NDEBUG core,10runtime mutants. Five/seven source hashes and31/29raw
+command records reverified; no late allocation on observed registration paths,
+C allocation failure before native admission verified. REGISTRATION-REVIEW-R1
+rejects guessed cleanup of malformed/colliding IDs; single-agent self-review in
+owned-clients/registration-self-review.txt. Astra10hashes and clean61dde37 intact.
+Native mapping/backing/syscall adapter, paired CQ/request correlation, fixed I/O,
+futures and executor retirement remain; AS3/AS4/MM0-MM4 still pending. No Main,
+private activation,128MiB change, independent audit or native-client pass claim.

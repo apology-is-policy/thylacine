@@ -1,0 +1,1 @@
+Assertion failed: (!register_checked(c,&m,1,&a,&rc)&&!rc&&p.registrations==1&&t_ring_members(r)==1), function registration_tests, file test_ring_payload.c, line 31.

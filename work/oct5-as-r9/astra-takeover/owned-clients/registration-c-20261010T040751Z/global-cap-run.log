@@ -1,0 +1,1 @@
+Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_LEASE_BUSY&&p.registrations==1), function registration_tests, file test_ring_payload.c, line 33.

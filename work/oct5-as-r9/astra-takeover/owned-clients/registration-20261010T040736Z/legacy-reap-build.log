@@ -1,0 +1,14 @@
+error[E0599]: no method named `reap` found for struct `ring_payload::RingClient<B>` in the current scope
+  --> /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/legacy-reap.rs:79:46
+   |
+79 | fn main(){let (_p,_root,c)=fixture();let _=c.reap();}
+   |                                              ^^^^ method not found in `ring_payload::RingClient<Backing>`
+   |
+  ::: /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/registration-20261010T040736Z/ring_payload.rs:54:1
+   |
+54 | pub(crate) struct RingClient<B:RingBackend>{core:Rc<Core<B>>}
+   | ------------------------------------------- method `reap` not found for this struct
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0599`.
