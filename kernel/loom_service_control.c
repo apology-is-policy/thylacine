@@ -3,6 +3,7 @@
 // Ll. Controls remain independent of SQ/CQ capacity and do not activate a worker.
 #include <thylacine/loom_service_control.h>
 #include <thylacine/loom_service_engine.h>
+#include <thylacine/loom_service_pool_table.h>
 #include <thylacine/loom_service_connect.h>
 #include <thylacine/loom.h>
 #include <thylacine/proc.h>
@@ -118,4 +119,27 @@ int loom_private_service_reap(struct Loom *l,struct Proc *p,const struct loom_se
     if(kind==LOOM_SERVICE_SCOPE && state==LOOM_SERVICE_RETIRED)return loom_private_connect_reap(l,in->object);
     if(kind==LOOM_SERVICE_SCOPE || kind==LOOM_SERVICE_FID)return loom_private_node_reap_unused(l,in->object);
     return -T_E_INVAL;
+}
+
+// RETURN uses the pool's retained backing and exact lease, never its originating
+// scope. Scope retirement (or a full CQ) must not strand a consumer-held payload.
+// Caller owns a copied record, stable creator image and Loom through the wake.
+int loom_private_service_return(struct Loom *l,struct Proc *p,
+        const struct loom_service_buffer_return *in) {
+    int rc=control_owner(l,p);if(rc)return rc;
+    if(!in || in->size!=sizeof(*in) || in->version!=LOOM_SERVICE_ABI_VERSION ||
+       in->flags || in->receipt.reserved || in->receipt.pool.reserved ||
+       !in->receipt.pool.incarnation || in->receipt.pool.slot>=LOOM_SERVICE_SLOT_COUNT ||
+       in->receipt.member>=LOOM_SERVICE_POOL_MEMBERS)return -T_E_INVAL;
+    if(!l->receipt_size)return -T_E_OPNOTSUPP;
+    spin_lock(&l->lock);
+    struct loom_service_slot *s=control_exact(l,in->receipt.pool);
+    struct loom_pool *pool=&l->service_pools->pools[in->receipt.pool.slot];
+    if(!s || s->kind!=LOOM_SERVICE_POOL)rc=-T_E_NOENT;
+    else rc=loom_pool_return(&l->service_pools->bank,pool,&in->receipt);
+    spin_unlock(&l->lock);
+    // Ll serializes return with the next claim; wake only after releasing it.
+    // No SQ/CQ lookup, allocation, native progress or scope pointer is needed.
+    if(!rc)loom_private_close_changed(l);
+    return rc;
 }

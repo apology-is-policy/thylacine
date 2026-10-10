@@ -2,16 +2,32 @@
 #ifndef THYLACINE_LOOM_SERVICE_OPERATION_H
 #define THYLACINE_LOOM_SERVICE_OPERATION_H
 #include <thylacine/loom_service_protocol.h>
-#include <thylacine/loom_service_reply.h>
+#include <thylacine/loom_service_program.h>
+#include <thylacine/loom_service_fixed.h>
+enum loom_rpc_phase { LRPC_NEW, LRPC_QUEUED, LRPC_INFLIGHT, LRPC_SETTLING, LRPC_TERMINAL, LRPC_RETIRED };
 struct loom_service_operation {
     struct Loom *owner;
     struct loom_service_protocol *protocol; // exact engine entry pin
     struct loom_request_ref request;
     struct loom_service_ref scope;
     struct p9_rpc rpc;
-    struct loom_service_reply_expect expect;
+    struct loom_service_program program;
     struct loom_service_reply reply;
-    u8 component[256];
+    // Linked under Ll; sole protocol driver owns callback capture while driving.
+    struct loom_service_operation *next, *prev;
+    u32 phase;
+    bool callback_seen;
+    s32 capture_error;
+    bool submitted, advanced;
+    enum loom_program_action action;
+    struct loom_service_ref source, destination;
+    u8 fid_claim; // 0 none, P9_TWALK / P9_TLOPEN / P9_TCLUNK
+    bool source_borrow;
+    struct loom_private_fixed fixed;
+    bool fixed_dropping;
+    struct loom_service_ref pool;
+    struct loom_service_buffer_receipt receipt;
+    bool pool_stream, pool_busy, pool_pending, pool_terminal, multishot, pool_more_delivered;
 };
 // Caller retains l; output unchanged on failure. Reserves a terminal and a
 // physical-owner flag before releasing Ll for charge/allocation. Retains l and
@@ -25,6 +41,10 @@ int loom_private_operation_prepare(struct Loom *, struct loom_service_ref,
 // Consumes on success: physical free then charge refund then exact owner/pin
 // release. Caller must not race entries or use a pointer after this call.
 int loom_private_operation_release_unused(struct loom_service_operation *);
+// Sole driver and a separate retained engine entry. Consumes only a delivered
+// TERMINAL owner with all FID/payload users settled. Unlink/drop stream under Ll,
+// then physical free/refund, exact request owner-drop/reap, engine/Loom last.
+int loom_private_operation_release_retired(struct loom_service_operation *);
 #ifdef KERNEL_TESTS
 // One-shot actual allocation fault, consumed even by an early refusal.
 void loom_private_operation_fault_arm_for_test(void);

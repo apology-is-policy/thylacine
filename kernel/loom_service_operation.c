@@ -3,6 +3,7 @@
 // close/abort driver runs during allocation or destruction outside Ll.
 #include <thylacine/loom_service_operation.h>
 #include <thylacine/loom_service_engine.h>
+#include <thylacine/loom_service_provided.h>
 #include <thylacine/loom.h>
 #include <thylacine/addrspace.h>
 #include <thylacine/page.h>
@@ -90,6 +91,10 @@ int loom_private_operation_prepare(struct Loom *l,struct loom_service_ref scope,
     struct loom_service_operation *op=fault ? NULL : kmalloc(PAGE_SIZE,KP_ZERO);
     if (!op) { rc=-T_E_NOMEM; goto fail_charge; }
     op->owner=l; op->protocol=p; op->request=request; op->scope=scope;
+    // Keep the fresh creator/image snapshot, never CONNECT or worker authority.
+    const u8 *src=(const u8 *)&identity.access;
+    u8 *dst=(u8 *)&op->program.identity;
+    for(size_t i=0;i<sizeof(identity.access);++i)dst[i]=src[i];
     spin_lock(&l->lock);
     rc=operation_scope_ready(l,scope,p);
     spin_unlock(&l->lock);
@@ -114,7 +119,8 @@ int loom_private_operation_release_unused(struct loom_service_operation *op) {
                               &l->service_requests.records[request.index] : NULL;
     bool unused=r && !request.reserved && request.identity &&
         r->identity==request.identity && r->phase==LREQ_PREPARED &&
-        r->owners==1 && !r->borrows && !op->rpc.on_complete && !op->rpc.sending;
+        r->owners==1 && !r->borrows && !op->rpc.on_complete && !op->rpc.sending &&
+        op->phase==LRPC_NEW && !op->next && !op->prev && !op->submitted && !op->fid_claim && !op->source_borrow && !op->fixed.owner && !op->pool_stream && !op->fixed_dropping;
     spin_unlock(&l->lock);
     if (!unused) return -T_E_BUSY;
     kfree(op);
@@ -122,4 +128,28 @@ int loom_private_operation_release_unused(struct loom_service_operation *op) {
     operation_unreserve(l,request);
     operation_put(l,scope,p);
     return 0;
+}
+
+int loom_private_operation_release_retired(struct loom_service_operation *op) {
+    if(!op || !op->owner || !op->protocol)return -T_E_INVAL;
+    struct Loom *l=op->owner;struct loom_service_protocol *p=op->protocol;
+    struct loom_request_ref request=op->request;struct loom_service_ref scope=op->scope;
+    spin_lock(&l->lock);
+    if(!p->driving || op->phase!=LRPC_TERMINAL || op->fid_claim ||
+       op->source_borrow || op->fixed.owner || op->fixed_dropping ||
+       op->pool_busy || op->pool_pending || op->rpc.sending || op->rpc.on_complete) {
+        spin_unlock(&l->lock);return -T_E_BUSY;
+    }
+    int rc=loom_rpc_unlink_locked(op);
+    if(!rc && op->pool_stream && loom_provided_detach_locked(op))
+        extinction("retired operation lost pool stream");
+    spin_unlock(&l->lock);if(rc)return rc;
+    kfree(op);
+    operation_refund(l);
+    spin_lock(&l->lock);
+    if(loom_request_drop_owner(&l->service_requests,request) ||
+       loom_request_reap(&l->service_requests,l->service_slots,request))
+        extinction("operation lost retired physical owner");
+    spin_unlock(&l->lock);
+    operation_put(l,scope,p);return 0;
 }

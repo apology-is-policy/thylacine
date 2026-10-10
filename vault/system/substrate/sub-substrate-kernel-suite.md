@@ -499,3 +499,12 @@ root metadata borrow/unused-child retention across close until physical
 operation cleanup. CPU1 native fid-integration/native-20261009T221811Z passes
 1854/D7/20cycles with exact source/artifact evidence. It does not test submitted
 WALK/LOPEN/READ/WRITE/CLUNK RPCs or confer prior full-Mac qualification.
+
+October10 coherent async integration adds loom.private_frontend:1855 registered
+tests. New normal/bulk cases invoke the actual creator frontend and real protocol
+constructor/engine adoption, verify copied correlation through native handshake,
+root mapping, malformed-SQE CQ refusal and zero-submit CQ wake, then retain the
+existing charged storage/close exercise. CPU1 async-integration/native-
+20261010T010700Z passes1855/D7overlap/20cycles with41source/6artifact hashes stable.
+Native general-operation/provided/MORE traffic and full Mac matrix remain next;
+no private ABI/clipboard activation or128MiB protection change. Single-agent review.

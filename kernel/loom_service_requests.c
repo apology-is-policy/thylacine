@@ -184,3 +184,12 @@ bool loom_requests_empty(const struct loom_request_table *t) {
     }
     return true;
 }
+
+int loom_request_discard_closed_owner(struct loom_request_table *t,
+    const struct loom_slot_table *s,struct loom_request_ref ref) {
+    struct loom_service_request *r=request_exact(t,ref);
+    if(!r)return -T_E_NOENT;
+    if(!s || !s->closing || !request_scope_held(s,r->scope) ||
+       r->phase!=LREQ_TERMINAL || r->borrows || r->owners!=1)return -T_E_BUSY;
+    r->phase=LREQ_DELIVERED;return 0;
+}

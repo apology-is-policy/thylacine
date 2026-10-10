@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "installed": true,
+  "state": "native-qualified-coherent-async-integration",
+  "source_base": "fff2c57b2eeb5a7576b7e47ec1c57bc1996d2b49",
+  "native_run": "work/oct5-as-r9/astra-takeover/async-integration/native-20261010T010700Z",
+  "native_tests": 1855,
+  "source_hashes": 41,
+  "input_hashes": 6,
+  "minimum_free_mib": 8617,
+  "review": "single-agent self-review; not independent",
+  "limits": "Native immutable frontend CONNECT normal/bulk, malformed refusal, CQ acknowledgement and existing storage/engine/close gates. General WALK/LOPEN/READ/WRITE/provided/MORE native traffic and full Mac qualification still owed; host qualification remains bounded.",
+  "next": "Run full current-source Mac matrix without changing source; verify raw logs. Then add native general-operation/provided-payload exercises and complete AS3/4 before MM0-MM4. Never reinstall historical draft files."
+}

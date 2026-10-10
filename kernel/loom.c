@@ -741,6 +741,63 @@ static void loom_private_executor_join(struct Loom *l) {
     proc_sqpoll_ticket_release(&l->service_engine->worker_ticket);
 }
 
+// Final zero-reference worker only: no constructor, request, parser or consumer
+// can own this ring. Leases may survive scope retirement, but not exclusive
+// whole-ring destruction. Their backing allocations still have independent refs.
+static int loom_private_pools_destroy(struct Loom *l) {
+    if(!l || !l->service_pools || !l->service_slots || !l->service_engine ||
+       __atomic_load_n(&l->refcount,__ATOMIC_ACQUIRE) || !l->service_closing ||
+       !l->service_slots->closing || !loom_engine_empty(l->service_engine) ||
+       !loom_requests_empty(&l->service_requests) || l->service_fixed ||
+       l->service_fixed_count || l->service_fixed_settling)return -T_E_BUSY;
+    struct loom_service_pool_table *t=l->service_pools;
+    struct Burrow *pins[LOOM_SERVICE_POOL_MEMBERS];u32 count=0;
+    // Validate all records before changing any; no partially reclaimed bank.
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_pool *p=&t->pools[i];struct loom_service_slot *s=&l->service_slots->slots[i];
+        if(p->phase==LPOOL_EMPTY) {
+            if(s->phase!=LSLOT_FREE && s->kind==LOOM_SERVICE_POOL)return -T_E_INVAL;
+            continue;
+        }
+        if(p->streams || s->pins)return -T_E_BUSY;
+        if(p->ref.slot!=i || p->ref.reserved || !p->ref.incarnation ||
+           s->kind!=LOOM_SERVICE_POOL || s->incarnation!=p->ref.incarnation ||
+           !p->count || p->count>LOOM_SERVICE_POOL_MEMBERS ||
+           !((p->phase==LPOOL_RESERVED && s->phase==LSLOT_PROVISIONAL) ||
+             (p->phase==LPOOL_LIVE && s->phase==LSLOT_LIVE)))return -T_E_INVAL;
+        u32 found=0;u64 ordinals=0;
+        for(u32 j=0;j<LOOM_SERVICE_POOL_MEMBERS;++j) {
+            struct loom_pool_cell *c=&t->bank.cells[j];
+            if(c->phase==LMEMBER_FREE || c->pool.slot!=i)continue;
+            if(c->pool.reserved || c->pool.incarnation!=p->ref.incarnation ||
+               c->ordinal>=p->count || (ordinals&(1ull<<c->ordinal)) || !c->extent.backing)
+                return -T_E_INVAL;
+            if(c->phase!=LMEMBER_AVAILABLE && c->phase!=LMEMBER_LEASED)return -T_E_BUSY;
+            if(p->phase==LPOOL_RESERVED && c->phase!=LMEMBER_AVAILABLE)return -T_E_INVAL;
+            ordinals|=1ull<<c->ordinal;++found;
+        }
+        if(found!=p->count)return -T_E_INVAL;
+    }
+    for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i) {
+        struct loom_pool_cell *c=&t->bank.cells[i];if(c->phase==LMEMBER_FREE)continue;
+        if(c->pool.slot>=LOOM_SERVICE_SLOT_COUNT ||
+           t->pools[c->pool.slot].phase==LPOOL_EMPTY)return -T_E_INVAL;
+        pins[count++]=(struct Burrow *)c->extent.backing;
+    }
+    for(u32 i=0;i<LOOM_SERVICE_POOL_MEMBERS;++i)
+        if(t->bank.cells[i].phase==LMEMBER_LEASED)t->bank.cells[i].phase=LMEMBER_AVAILABLE;
+    for(u32 i=0;i<LOOM_SERVICE_SLOT_COUNT;++i) {
+        struct loom_pool *p=&t->pools[i];if(p->phase==LPOOL_EMPTY)continue;
+        int rc=p->phase==LPOOL_RESERVED?loom_service_pool_rollback(l->service_slots,t,p->ref)
+                                      :loom_service_pool_reap(l->service_slots,t,p->ref);
+        if(rc)extinction("exclusive pool destruction changed ledger");
+    }
+    // Ledger exclusions are gone but saved pins keep every backing alive until
+    // its physical settled drop. Never turn this into a metadata-only memset.
+    for(u32 i=0;i<count;++i)loom_private_drop_buffer(l->service_as,pins[i]);
+    return 0;
+}
+
 static void loom_private_destroy(struct Loom *l) {
     // Snapshotted before anything frees l: everything after the kfree below
     // reaches the address space through these two locals and never through l.
@@ -764,6 +821,7 @@ static void loom_private_destroy(struct Loom *l) {
     // Targets and unused nodes have only local ownership and can retire here.
     // Protocol-active records must be empty before the engine drops its last ref.
     loom_private_requests_destroy(l);
+    if(loom_private_pools_destroy(l))extinction("private Loom retained active pool owner");
     loom_private_nodes_destroy(l);
     loom_private_targets_destroy(l);
     if (!l->service_slots) extinction("private Loom lost slot storage");

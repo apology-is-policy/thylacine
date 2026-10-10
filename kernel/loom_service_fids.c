@@ -42,7 +42,7 @@ int loom_fid_bind_root(struct loom_slot_table *t,struct loom_service_node_table 
     if(n->fid_flags || n->fid_claim || n->wire_fid || n->fid_access || n->fid_borrows ||
        !t->slots[scope.slot].pins)return -T_E_BUSY;
     if(fid_duplicate(t,nodes,scope,wire))return -T_E_BUSY;
-    n->wire_fid=wire;n->fid_flags=LFID_BOUND;
+    n->wire_fid=wire;n->fid_iounit=0;n->fid_flags=LFID_BOUND;
     return 0;
 }
 int loom_fid_claim_walk(struct loom_slot_table *t,struct loom_service_node_table *nodes,
@@ -66,7 +66,7 @@ int loom_fid_commit_walk(struct loom_slot_table *t,struct loom_service_node_tabl
     if(n->state!=LOOM_SERVICE_RESERVED || n->fid_claim!=id || n->fid_flags ||
        !t->slots[dest.slot].pins)return -T_E_BUSY;
     if(fid_duplicate(t,nodes,scope,wire))return -T_E_BUSY;
-    n->wire_fid=wire;n->fid_flags=LFID_BOUND;n->state=LOOM_SERVICE_READY;
+    n->wire_fid=wire;n->fid_iounit=0;n->fid_flags=LFID_BOUND;n->state=LOOM_SERVICE_READY;
     return 0;
 }
 int loom_fid_release_claim(struct loom_slot_table *t,struct loom_service_node_table *nodes,
@@ -103,7 +103,9 @@ int loom_fid_commit_open(struct loom_slot_table *t,struct loom_service_node_tabl
     if(!(n->fid_flags&LFID_OPENING) || (n->fid_flags&LFID_OPEN) ||
        n->fid_claim!=id || n->fid_borrows || !t->slots[source.slot].pins)return -T_E_BUSY;
     n->fid_access=mode==0?LFID_READ:mode==1?LFID_WRITE:LFID_READ|LFID_WRITE;
-    n->fid_flags|=LFID_OPEN;
+    // The admission transaction installs the captured Rlopen iounit under the
+    // same Ll hold. Direct internal callers retain the zero/unbounded default.
+    n->fid_iounit=0;n->fid_flags|=LFID_OPEN;
     return 0;
 }
 

@@ -12,4 +12,8 @@ int loom_private_service_abort(struct Loom *, struct Proc *,
     const struct loom_service_control *);
 int loom_private_service_reap(struct Loom *, struct Proc *,
     const struct loom_service_control *);
+// Exact LEASED receipt only; return is independent of SQ/CQ and source scope.
+// Caller retains Loom through unlocked wake; no pointer/Proc escapes this call.
+int loom_private_service_return(struct Loom *, struct Proc *,
+    const struct loom_service_buffer_return *);
 #endif

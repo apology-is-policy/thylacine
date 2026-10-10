@@ -1,0 +1,20 @@
+Astra single-agent integration self-review, October10; not independent.
+Installed38 exact source/header overlays in documented precedence: wire/program,
+retirement, READY, action, iounit, drain, RETURN, frontend. Recorded every source
+and prior canonical hash. Preserved all historical drafts and tests; do not rerun
+old installers. Build-list includes all10 new modules. Only production deviation
+from reviewed overlay is operation's canonical relative ../mm/slub.h include.
+INTEGRATE-R1 first full link caught that path; original failure retained and fixed.
+New internal native test calls actual creator frontend, target/protocol constructor,
+engine adoption, real normal/bulk handshake and root mapping, copied correlation,
+negative shape CQE, zero-submit epoch wake, charged storage and close lifetime.
+It does not activate public private ENTER (still OPNOTSUPP), let the worker borrow
+creator Proc, enable clipboard or remove128MiB protection. Full ARM64 link and
+symbol-table convergence pass. Native1855/D7overlap/20cycles all pass with41source/
+6artifact hashes stable, minimum8617MiB. Stratum exactclean61dde37 and Astra10hashes
+rechecked. General RPC/provided/MORE native traffic remains a separate required
+queue item before activation; host clean/mutant evidence remains bounded.
+Full Mac gates next on clean committed source; prior50/50 qualifies onlyf719ee4a.
+One resource procedure error preserved in findings: initial brief build continued
+after invalid hold syntax, while Mac observedfree. Acquired valid Astra lease
+before continuation, released immediately after native run. Do not hide or repeat.

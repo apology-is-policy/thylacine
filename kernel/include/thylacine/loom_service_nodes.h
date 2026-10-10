@@ -9,7 +9,7 @@ struct loom_service_node {
     s32 reason; // first scope abort reason, retained after protocol collection
     u32 status_flags; // completed-driver diagnostics only; protected by Ll
     u32 failure_phase;
-    u32 diagnostic_reserved;
+    u32 fid_iounit; // validated Rlopen limit; zero means no additional wire limit
     // Internal protocol mapping. The engine supplies actual handshake/WALK/DAC
     // proof; these fields alone confer no authority to send an RPC.
     u64 fid_claim; // exact ring request identity; owns one destination slot pin

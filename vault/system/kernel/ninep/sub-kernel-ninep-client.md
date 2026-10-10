@@ -651,3 +651,16 @@ abort; bulk/reinit checks, five additional storage mutants, existing eight
 progress mutants and native1830/1830 pass. Existing9p_client model197states/five
 counterexamples pass. Broad qualification and charged private-owner integration
 remain owed; no new userspace ABI is activated.
+
+## Private operation abort and TX ownership (October10)
+
+The integrated progress-mode abort now clears the sending RPC's TX hold after
+handshake/transport cursor abort and before completion callbacks can settle or
+free the RPC. This also covers an early-replied RPC removed from inflight[] but
+still borrowed by the TX cursor. The legacy blocking sender retains its existing
+ownership. The actual-client defect was reproduced and repaired in Astra's
+retirement-draft, then carried unchanged into coherent async integration.
+Host actual-source sanitizer/mutation controls exercise this transition; native
+1855/D7/20cycle integration passes with source hashes. Native general operation
+and provided-payload traffic/full Mac gates remain owed. Public private ENTER
+stays disabled; single-agent self-review is not an independent audit.

@@ -194,9 +194,15 @@ static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
     if (c->progress) {
         // Completion may free an RPC. Drop the TX pointer before callbacks;
         // terminal teardown never waits for a frame, Tflush or Tclunk.
+        struct p9_rpc *sending = c->progress->sending;
         c->progress->sending = NULL;
         p9_handshake_progress_abort(&c->progress->handshake);
         p9_transport_progress_abort(&c->progress->io);
+        // The progress cursor no longer borrows its frame. End the RPC's TX
+        // hold before callbacks can settle/free it, including an early-replied
+        // RPC already removed from inflight[]. Legacy blocking senders retain
+        // their existing ownership; this edge is progress-mode only.
+        if (sending) sending->sending = false;
     }
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];

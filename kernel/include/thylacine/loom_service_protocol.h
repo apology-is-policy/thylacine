@@ -7,6 +7,7 @@
 #include <thylacine/proc.h>
 
 struct Loom;
+struct loom_service_operation;
 struct loom_service_protocol {
     struct Loom *owner;
     struct ProcServiceIdentity identity;
@@ -25,6 +26,9 @@ struct loom_service_protocol {
     u32 users;
     u32 failure_phase; // handshake phase at protocol failure, before abort overwrites it
     bool connect_bound, driving, locally_retired;
+    bool rpc_quiesced; // set only after actual progress_abort returns under sole driver
+    struct loom_service_operation *op_head, *op_tail;
+    u32 op_count; // bounded by the ring terminal capacity, no separate allocation
     bool indexed; // engine index owns lifetime; only its collector clears this
 };
 

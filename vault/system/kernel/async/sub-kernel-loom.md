@@ -4,6 +4,29 @@ type: sub
 parent: moc-kernel-async
 title: "Loom — the io_uring inversion over 9P"
 code:
+  - kernel/loom_service_wire.c
+  - kernel/include/thylacine/loom_service_wire.h
+  - kernel/loom_service_program.c
+  - kernel/include/thylacine/loom_service_program.h
+  - kernel/loom_service_admission.c
+  - kernel/loom_service_rpc.c
+  - kernel/9p_client.c
+  - kernel/loom_service_retirement.c
+  - kernel/loom_service_provided.c
+  - kernel/loom_service_io.c
+  - kernel/include/thylacine/loom_service_rpc.h
+  - kernel/include/thylacine/loom_service_retirement.h
+  - kernel/include/thylacine/loom_service_provided.h
+  - kernel/include/thylacine/loom_service_io.h
+  - kernel/include/thylacine/loom_service_admission.h
+  - kernel/include/thylacine/loom_service_fixed.h
+  - kernel/loom_service_ready.c
+  - kernel/include/thylacine/loom_service_ready.h
+  - kernel/loom_service_action.c
+  - kernel/include/thylacine/loom_service_action.h
+  - kernel/loom_service_frontend.c
+  - kernel/include/thylacine/loom_service_frontend.h
+  - kernel/test/test.c
   - kernel/loom_service_fids.c
   - kernel/include/thylacine/loom_service_fids.h
   - kernel/loom_service_operation.c
@@ -2695,3 +2718,27 @@ Failed fixture expectations and mutant compile diagnostics retained, not counted
 as successful fault detections. Continue coherent current-overlay install and
 matched native/full Mac gates, thenAS3/4,MM0-MM4. Prior50/50 onlyf719ee4a. No Main,
 private async/clipboard activation or128MiB removal. Macreleased; no active job.
+
+
+### Astra coherent installed async integration, October10
+
+The current38 reviewed source/header overlays are now INSTALLED in canonical
+kernel. This supersedes earlier uninstalled pickup directions: never reinstall
+historical draft copies. INTEGRATE-R1 corrected operation's isolated relative
+slub include; full ARM64 link and symbol-table regeneration pass. Read
+astra-takeover/async-integration/state,installed-overlay,self-review,findings.
+
+New native frontend probe uses the exact creator, real target/protocol constructor
+and engine adoption for normal/bulk connections, actual handshake/root mapping,
+copied correlation, malformed refusal and CQ-acknowledgement wake, followed by
+actual charged storage/close ownership. Native1855/1855,D7overlap,20login cycles
+pass with41source/6artifact hashes stable; minimum8617MiB. Existing host regression
+3948assertions/7CONNECTmutants and3674/13frontendmutants remain bounded evidence.
+Native general WALK/LOPEN/READ/WRITE/provided/MORE traffic still needs qualification.
+Self-review is single-agent. Resource procedure error and original include failure
+are recorded honestly. Macreleased/nojobs; Stratumclean61dde37/Astra10hashes intact.
+
+Next full current-source Mac matrix without source edits, raw verification, then
+native general-operation/provided tests and AS3/4 before MM0-MM4. Prior50/50 only
+qualifiesf719ee4a. Public private ENTER remains disabled. No Main/private async/
+clipboard activation or128MiB removal. Preserve all matched evidence.

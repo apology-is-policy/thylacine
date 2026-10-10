@@ -1,3 +1,4 @@
+#include <thylacine/loom_service_frontend.h>
 #include <thylacine/loom_service_fids.h>
 #include <thylacine/loom_service_operation.h>
 #include <thylacine/loom_service_control.h>
@@ -2861,7 +2862,7 @@ done:
 
 // Real private protocol/storage owner. No general RPC submission is enabled.
 static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creator,
-    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk) {
+    struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk,bool frontend) {
     const char *error=NULL;
     struct loom_service_ref scope={0},child={0};
     bool root_borrow=false;
@@ -2873,8 +2874,20 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
 #define OS(c,m) do{if(!(c)){error=m;goto done;}}while(0)
     OS(!loom_private_node_prepare(l,creator,&reserve,&scope) && !loom_private_node_publish(l,scope),
        "operation storage exact scope reservation");
-    OS(!loom_private_connect_prepare(l,scope,target,901,0,0,&prepared),"operation storage protocol");
-    OS(!loom_engine_adopt(prepared,0),"operation storage adopts protocol");prepared=NULL;
+    if(frontend) {
+        struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+        struct loom_sqe *sq=(void *)(l->ring_kva+l->sqe_off);
+        u32 *indices=(void *)(l->ring_kva+l->sq_array_off);
+        sq[0]=(struct loom_sqe){.opcode=LOOM_OP_SERVICE_CONNECT,.handle_idx=target.slot,
+            .offset=scope.slot,.user_data=901,._resv1={0,target.incarnation,scope.incarnation,0}};
+        indices[0]=0;__atomic_store_n(&h->sq_tail,1,__ATOMIC_RELEASE);
+        OS(loom_private_submit(l,creator,1)==1 && l->sq_head==1 && l->service_engine->count==1,
+           "frontend real constructor and indexed adoption");
+        sq[0].user_data=999; // already copied; cannot change admitted correlation
+    } else {
+        OS(!loom_private_connect_prepare(l,scope,target,901,0,0,&prepared),"operation storage protocol");
+        OS(!loom_engine_adopt(prepared,0),"operation storage adopts protocol");prepared=NULL;
+    }
     OS(!loom_engine_get(l,scope,&held),"operation storage observes exact protocol");
     server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
     OS(server==held->admission.conn,"operation storage actual native peer");
@@ -2888,6 +2901,22 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
        l->service_nodes->nodes[scope.slot].wire_fid==held->client.session.root_fid,
        "actual attach publishes exact root fid mapping");
     OS(!loom_engine_put(l,scope,held),"operation storage observer release");held=NULL;
+    if(frontend) {
+        struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
+        struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
+        struct loom_sqe *sq=(void *)(l->ring_kva+l->sqe_off);
+        u32 *indices=(void *)(l->ring_kva+l->sq_array_off);
+        OS(l->cq_tail==1 && cq[0].user_data==901 && cq[0].result==(s32)scope.slot,
+           "frontend native handshake exact copied completion");
+        sq[1]=(struct loom_sqe){.opcode=LOOM_OP_SERVICE_CONNECT,.flags=LOOM_SQE_LINK,.user_data=902};
+        indices[1]=1;__atomic_store_n(&h->sq_tail,2,__ATOMIC_RELEASE);
+        OS(loom_private_submit(l,creator,1)==1 && l->cq_tail==2 && cq[1].user_data==902 && cq[1].result==-T_E_INVAL,
+           "frontend malformed shape returns one native CQ refusal");
+        u64 epoch=l->service_engine->change;
+        __atomic_store_n(&h->cq_head,l->cq_tail,__ATOMIC_RELEASE);
+        OS(loom_private_submit(l,creator,0)==0 && l->service_engine->change!=epoch,
+           "frontend zero-submit CQ acknowledgement changes native wait epoch");
+    }
     u32 baseline=creator->as->page_count;
     loom_private_operation_fault_arm_for_test();
     OS(loom_private_operation_prepare(l,scope,902,40,40,&op)==-T_E_TIMEDOUT && !op &&
@@ -3037,7 +3066,8 @@ static const char *loom_protocol_fixture(u32 kind) {
            "zero-reference retirer wakes joins and refunds the live private worker");
         goto done;
     }
-    if (kind==13 || kind==14) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==14],kind==14);goto done;}
+    if (kind==15 || kind==16) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==16],kind==16,true);goto done;}
+    if (kind==13 || kind==14) {error=loom_operation_storage_case(l,p,poster,reg,refs[kind==14],kind==14,false);goto done;}
     if (kind>=7) {error=loom_close_boundary_case(&l,p,poster,reg,refs[0],kind-6,goal,base);goto done;}
     if (kind>=3) {error=loom_close_cases(&l,p,poster,reg,refs,kind,goal,base);goto done;}
     u32 owner_pages = p->as->page_count;
@@ -3180,5 +3210,12 @@ void test_loom_private_operation_storage(void) {
     const char *error=loom_protocol_fixture(13);
     TEST_ASSERT(!error,error);
     error=loom_protocol_fixture(14);
+    TEST_ASSERT(!error,error);
+}
+
+void test_loom_private_frontend(void);
+void test_loom_private_frontend(void) {
+    const char *error=loom_protocol_fixture(15);
+    if(!error)error=loom_protocol_fixture(16);
     TEST_ASSERT(!error,error);
 }

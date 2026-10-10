@@ -6,7 +6,7 @@
   "cases": 1832,
   "mutants": 13,
   "installed": true,
-  "next": "Coherent current-overlay installation and new source-matched native/full Mac gates; AS3/4 then MM0-MM4.",
+  "next": "Run full current-source Mac matrix without changing source; verify raw logs. Then add native general-operation/provided-payload exercises and complete AS3/4 before MM0-MM4. Never reinstall historical draft files.",
   "utc": "2026-10-09T22:03:54.197663+00:00",
   "reply_run": "work/oct5-as-r9/astra-takeover/operations-draft/reply-controls-20261009T215851Z",
   "reply_mutants": 13,
@@ -39,5 +39,6 @@
   "drain_draft": "drain-draft/state.json",
   "return_draft": "return-draft/state.json",
   "frontend_draft": "frontend-draft/state.json",
-  "frontend_connect": "frontend-connect/state.json"
+  "frontend_connect": "frontend-connect/state.json",
+  "async_integration": "async-integration/state.json"
 }

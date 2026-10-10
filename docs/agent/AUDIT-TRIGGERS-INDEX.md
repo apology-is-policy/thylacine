@@ -244,3 +244,5 @@
 - **AS-2g preallocated private protocol storage** -- `kernel/9p_client.c`, `9p_client.h`, `private_client_fixture.h` and actual-source runner; no hidden bulk allocation, external lifetime versus heap ownership.
 
 - **AS-2h paired payload receipts** -- `kernel/loom.c`, `loom.h`, shared native/host receipt fixture; bounded optional layout and CQ/receipt/lease publication.
+
+- **Private async operation integration (October10)** -- `kernel/loom_service_{wire,program,rpc,admission,io,provided,retirement,ready,action,frontend}.c` and matching headers; immutable admission, payload/terminal lifetime and READY/close fairness.

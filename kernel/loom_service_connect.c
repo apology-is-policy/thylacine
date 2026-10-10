@@ -174,7 +174,7 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
     if (!p->connect_bound || (!p->admission.published && !p->abort_reason) || !n || !r) {
         spin_unlock(&l->lock); return -T_E_NOENT;
     }
-    if (p->driving) { spin_unlock(&l->lock); return -T_E_BUSY; }
+    if (p->driving || p->op_count || p->op_head || p->op_tail) { spin_unlock(&l->lock); return -T_E_BUSY; }
     if (p->locally_retired) { s32 why=p->abort_reason; spin_unlock(&l->lock); return why; }
     if (l->service_closing) connect_latch(p,n,-T_E_CANCELED);
     // CONNECT deadline ends once its success is committed; READY is not a
@@ -245,6 +245,7 @@ static int connect_step(struct loom_service_protocol *p, u64 now, bool notify) {
     if (r->phase == LREQ_ACTIVE &&
         loom_request_finish(&l->service_requests,l->service_slots,l->service_nodes,p->request,reason))
         extinction("CONNECT lost cancellation obligation");
+    p->rpc_quiesced=true; // actual cursor abort returned; no operation escaped this handshake
     // A concurrent abort caller may still hold the transport during teardown.
     // Keep ABORTING until a later visit observes it gone; never free under it.
     if (!p->users) {
@@ -268,7 +269,7 @@ int loom_private_connect_release_retiring(struct loom_service_protocol *p) {
     spin_lock(&l->lock);
     struct loom_service_node *n=connect_scope(l,p->scope);
     struct loom_service_request *r=connect_request(p);
-    if (!p->connect_bound || p->indexed || !p->locally_retired || p->driving || p->users ||
+    if (!p->connect_bound || p->indexed || !p->locally_retired || p->driving || p->users || p->op_count || p->op_head || p->op_tail ||
         !n || n->state != LOOM_SERVICE_RETIRED || !r || r->phase != LREQ_DELIVERED || r->borrows) {
         spin_unlock(&l->lock); return -T_E_BUSY;
     }

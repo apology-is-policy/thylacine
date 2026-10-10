@@ -1,0 +1,13 @@
+{
+  "owner": "astra",
+  "findings": [
+    {
+      "id": "INTEGRATE-R1",
+      "state": "repaired-and-linked",
+      "problem": "Isolated draft operation includes mm/slub.h relative to kernel instead of ../mm/slub.h; canonical CMake build fails.",
+      "evidence": "build.log",
+      "next": "Installed ../mm/slub.h corrected canonical build; full link and native1855 gate pass."
+    }
+  ],
+  "resource_note": "First brief build accidentally continued after yip hold syntax failed because shell command lacked set -e. Mac had been observed FREE. Build failed at include resolution. Preserved raw evidence; valid Astra 30-minute Mac hold obtained before continuation. No falsified lease check. Subsequent runners must assert successful hold and disk floor before compute."
+}

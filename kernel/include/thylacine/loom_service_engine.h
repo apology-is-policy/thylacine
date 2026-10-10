@@ -15,6 +15,12 @@ struct loom_engine_entry {
 struct loom_service_engine {
     struct loom_engine_entry entries[LOOM_SERVICE_SLOT_COUNT];
     u32 count, cursor;
+    // One serialized creator submission, with a precharged refusal record.
+    // A refused copied SQE needs no scope pin; it has made no external effects.
+    // Ll owns these fields. Pending refusal blocks the next SQ claim.
+    u64 rejected_user_data;
+    s32 rejected_result;
+    bool submitting, rejected;
     struct ProcSqpollTicket worker_ticket;
     bool worker_starting; // Ll serializes unpublished internal start attempts
     // Single wait owner, retained entry pins and embedded native hooks fit the
@@ -38,11 +44,11 @@ int loom_engine_get(struct Loom *, struct loom_service_ref, struct loom_service_
 int loom_engine_put(struct Loom *, struct loom_service_ref, struct loom_service_protocol *);
 int loom_engine_abort(struct Loom *, struct loom_service_ref, s32 reason);
 // One round-robin scope visit (one bounded client step, at most one CQ post).
-// Returns 1 if a scope was visited, 0 if none eligible. Not a sleep/readiness
-// predicate: the future executor must register native poll interest/recheck.
+// Readiness-aware alias of ready_visit; returns 1 on progress, 0 if idle.
+// The executor must still register native poll interest and recheck before sleep.
 int loom_engine_visit(struct Loom *, u64 now);
 // Removes only locally retired owners with delivered/discarded terminals and
-// zero entry pins. Final drops outside Ll. Leaves scope metadata for REAP.
+// zero operation owners and entry pins. Final drops outside Ll. Leaves scope metadata for REAP.
 int loom_engine_collect(struct Loom *, struct loom_service_ref);
 // Whole-ring-close consumer detach requires every indexed protocol locally
 // retired, no entry/install/parser/fixed borrows. Then discard retained terminals
@@ -50,11 +56,13 @@ int loom_engine_collect(struct Loom *, struct loom_service_ref);
 int loom_engine_discard_closed(struct Loom *);
 // One close quantum: 0 blocked on external local holders, 1 immediate work,
 // 2 complete (index/request/fixed ownership empty after consumer detach).
-// Retirer owns a queue root; its internal puts never kick its own RUNNING work.
+// Drains operations even after local retirement, before global detach/collection.
+// A separate visit entry pin and Loom root survive consuming an operation.
+// Ownership actions publish change wakes; internal final puts are quiet.
 int loom_engine_close_visit(struct Loom *);
 bool loom_engine_empty(const struct loom_service_engine *);
 // Readiness-aware bounded visit; no peer waits or allocation. Caller retains l.
-// Scans at most64 owners, visits at most one actionable owner round-robin.
+// Scans at most64 owners plus one precharged refusal, performing one action round-robin.
 int loom_engine_ready_visit(struct Loom *, u64 now);
 // Internal wait transaction. A nonnegative arm result owns the sweep even when
 // it reports immediate work (1); always disarm it. BUSY owns nothing. One owner

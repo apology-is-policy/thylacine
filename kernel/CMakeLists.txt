@@ -71,6 +71,16 @@ set(KERNEL_SRCS
     loom_service_nodes.c
     loom_service_requests.c
     loom_service_operation.c
+    loom_service_wire.c
+    loom_service_program.c
+    loom_service_rpc.c
+    loom_service_admission.c
+    loom_service_io.c
+    loom_service_provided.c
+    loom_service_retirement.c
+    loom_service_ready.c
+    loom_service_action.c
+    loom_service_frontend.c
     loom_service_reply.c
     loom_service_decode.c
     loom_service_protocol.c

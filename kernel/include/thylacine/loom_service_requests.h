@@ -67,6 +67,11 @@ int loom_request_deliver(struct loom_request_table *, struct loom_request_ref);
 // Closing slots and zero recorded borrows are necessary but not sufficient
 // proof of that external lifetime fact. They are checked here as backstops.
 int loom_requests_detach(struct loom_request_table *, const struct loom_slot_table *);
+// Operation-specific whole-ring close disposal BEFORE global detach. Caller
+// proves the consumer closed and this exact owner's native users quiesced.
+// Does not detach other ACTIVE/PREPARED owners or permit their destruction.
+int loom_request_discard_closed_owner(struct loom_request_table *,
+    const struct loom_slot_table *,struct loom_request_ref);
 int loom_request_discard(struct loom_request_table *, struct loom_request_ref);
 // Delivery/discard is not itself storage release. Reap only after local users
 // no longer retain a request pointer; stale continuations use exact refs.
