@@ -3208,7 +3208,8 @@ static const char *loom_native_fault(struct Loom *l,struct Proc *creator,
 // Sleep at an exact emitted protocol request while all preceding exchanges
 // use canonical replies. Cancellation must retire without this peer replying.
 static const char *loom_native_stage_cancel(struct Loom *l,struct SrvConn *server,
-    struct loom_native_peer *peer,struct loom_service_ref scope,u64 data) {
+    struct loom_native_peer *peer,struct loom_service_ref scope,u64 data,
+    struct loom_service_protocol **held,u32 close_kind) {
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
     struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
@@ -3220,6 +3221,42 @@ static const char *loom_native_stage_cancel(struct Loom *l,struct SrvConn *serve
     }while(timer_now_ns()<end);
     if(!paused || __atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE)!=head)
         return "stage did not stop before operation completion";
+    if(close_kind) {
+        // The outer fixture retains its creation ref. A separate owned handle
+        // invokes the production close/exec/exit-table path while the actual
+        // private worker has an emitted request and the peer never replies.
+        loom_ref(l);
+        hidx_t fd=handle_alloc(peer->creator,KOBJ_LOOM,RIGHT_READ|RIGHT_WRITE,l);
+        if(fd<0){loom_unref(l);return "stage close handle allocation";}
+        if(close_kind==2) {
+            if(handle_set_cloexec(peer->creator,fd,false)) {
+                (void)handle_close(peer->creator,fd);return "stage exec CLOEXEC setup";
+            }
+            handle_private_exec_latch(peer->creator);
+            if(handle_close_on_exec(peer->creator)!=1)return "stage forced private exec close";
+        } else if(close_kind==3) {
+            // Isolated fixture has no creator user threads. This is the
+            // production last-live-thread handle-table destruction boundary,
+            // not an assertion that the whole exits syscall has run.
+            struct HandleTable *table=peer->creator->handles;
+            peer->creator->handles=NULL;handle_table_free(table);
+        } else if(handle_close(peer->creator,fd))return "stage final handle close";
+        if(!loom_close_wait_state(l,LCLOSE_PARKED))return "stage close did not park on observation pin";
+        spin_lock(&l->lock);
+        bool local=(*held)->locally_retired && !l->service_requests.detached;
+        spin_unlock(&l->lock);
+        if(!local || srvconn_is_live(server))return "stage close retained a local transport borrower";
+        if(loom_engine_put(l,scope,*held))return "stage close observation return";
+        *held=NULL;
+        if(!loom_close_wait_state(l,LCLOSE_DONE))return "stage close failed without CQ or peer progress";
+        spin_lock(&l->lock);
+        bool clean=!l->service_requests.occupied && l->service_requests.detached &&
+            !l->service_fixed_count && loom_engine_empty(l->service_engine);
+        spin_unlock(&l->lock);
+        if(!clean || (l->sqpoll && !__atomic_load_n(&l->sqpoll_exited,__ATOMIC_ACQUIRE)))
+            return "stage close did not end worker and physical payload owners";
+        return NULL;
+    }
     struct loom_service_control control={.size=sizeof(control),.version=1,.object=scope};
     if(loom_private_service_abort(l,peer->creator,&control)<0)return "stage abort";
     bool retired=false;end=timer_now_ns()+2000000000ull;
@@ -3263,6 +3300,8 @@ static const char *loom_native_stage_cancel(struct Loom *l,struct SrvConn *serve
 static const char *loom_native_operations_case(struct Loom *l,struct Proc *creator,
     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk,u32 fault) {
     const char *error=NULL;u64 va=0;
+    u32 close_kind=fault>=20?1+(fault-20)/6:0;
+    if(close_kind)fault=9+(fault-20)%6;
     struct SrvConn *server=NULL;struct loom_service_protocol *held=NULL;
     struct loom_service_ref scope={0},child={0};
     struct loom_native_peer peer;
@@ -3279,7 +3318,7 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
     NO(!loom_private_start_executor(l),"native operation worker starts");
     NO(server==held->admission.conn,"stage native accepted peer identity");
-    if(fault==9 || fault==10) {error=loom_native_stage_cancel(l,server,&peer,scope,100);goto done;}
+    if(fault==9 || fault==10) {error=loom_native_stage_cancel(l,server,&peer,scope,100,&held,close_kind);goto done;}
     NO(loom_native_completion(l,server,&peer,100,(s32)scope.slot),
        "native emitted version and attach complete CONNECT");
     s64 attached=sys_burrow_attach_for_proc(creator,PAGE_SIZE);
@@ -3296,11 +3335,11 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        .handle_idx=scope.slot,.offset=child.slot,.len=4,.user_data=101,
        ._resv1={0,scope.incarnation,child.incarnation,0}}),"native WALK submission");
     bytes[0]='X'; // accepted WALK must own its component copy
-    if(fault==11 || fault==12) {error=loom_native_stage_cancel(l,server,&peer,scope,101);goto done;}
+    if(fault==11 || fault==12) {error=loom_native_stage_cancel(l,server,&peer,scope,101,&held,close_kind);goto done;}
     NO(loom_native_completion(l,server,&peer,101,(s32)child.slot),"native search and copied WALK completion");
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_LOPEN,
        .handle_idx=child.slot,.offset=2,.user_data=102,._resv1={0,child.incarnation,0,0}}),"native LOPEN submission");
-    if(fault==13 || fault==14) {error=loom_native_stage_cancel(l,server,&peer,scope,102);goto done;}
+    if(fault==13 || fault==14) {error=loom_native_stage_cancel(l,server,&peer,scope,102,&held,close_kind);goto done;}
     NO(loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
     NO(l->service_nodes->nodes[child.slot].fid_iounit==4096,"native negotiated iounit retained");
     if(fault) {error=loom_native_fault(l,creator,server,scope,child,bytes,fault);goto done;}
@@ -3569,6 +3608,11 @@ static const char *loom_protocol_fixture(u32 kind) {
            "zero-reference retirer wakes joins and refunds the live private worker");
         goto done;
     }
+    if (kind>=60 && kind<=95) {
+        bool bulk=(kind-60)&1u;
+        error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,20+(kind-60)/2);
+        goto done;
+    }
     if (kind>=40 && kind<=51) {
         bool bulk=(kind-40)&1u;
         error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,9+(kind-40)/2);
@@ -3673,6 +3717,12 @@ done:
     if (prepared) (void)loom_private_protocol_release_unused(prepared);
     if (l && !owner_dropped) loom_unref(l);
     if (!lp_wait(goal) && !error) error="protocol cleanup retirement timeout";
+    if(p && !error) {
+        spin_lock(&p->as->lock);
+        bool refunded=p->as->page_count==base && !p->as->private_rings;
+        spin_unlock(&p->as->lock);
+        if(!refunded)error="protocol cleanup leaves image pages or private ring charge";
+    }
     if (root) spoor_clunk(root);
     if (creator_linked) proc_test_unlink(p);
     test_proc_drop(p);test_proc_drop(poster);
@@ -3760,6 +3810,14 @@ void test_loom_private_native_reconnects(void) {
 void test_loom_private_native_stages(void);
 void test_loom_private_native_stages(void) {
     for(u32 kind=40;kind<=51;++kind) {
+        const char *error=loom_protocol_fixture(kind);
+        TEST_ASSERT(!error,error);
+    }
+}
+
+void test_loom_private_native_stage_close(void);
+void test_loom_private_native_stage_close(void) {
+    for(u32 kind=60;kind<=95;++kind) {
         const char *error=loom_protocol_fixture(kind);
         TEST_ASSERT(!error,error);
     }

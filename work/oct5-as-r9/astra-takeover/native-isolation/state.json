@@ -1,0 +1,6 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "state": "prepared-unverified",
+  "next": "After native-stage-close verified/checkpoint, review/apply isolation.patch;1861 tests; controlled independent byte stream, not real media application."
+}

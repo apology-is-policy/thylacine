@@ -1,0 +1,15 @@
+Astra single-agent review; UNINSTALLED and UNVERIFIED.
+One actual worker/ring owns opened byte stream plus second connection stalled
+at emitted VERSION (complete frame observed, never replied). Original READ must
+finish byte-exact while other scope stalls. Abort only that second scope,
+consume exact900/-CANCELED terminal, wait physical request return, verify local
+retirement/TORN and exact reap. Original READY scope/transport must remain live,
+and WRITE/provided READ/MORE/EOF/CLUNK continue byte-checked while torn peer held.
+Both normal and bulk classes. CQ4 is existing supported geometry, required
+for two CONNECT request owners and one IO request. Full-CQ test fills actual
+cq_entries (preserves older CQ2 scenarios). Expected owner count2 only during
+stalled coexistence,1 after cancellation; exact physical refund is still checked.
+Outer creation/observation refs cover lifetimes; errors use established whole-close
+join before unmapping payload and dropping both peers. Final outer image baseline
+assertion covers new fixture. No direct engine visits, production changes,
+real media performance or whole AS3 qualification claimed. Activation remains gated.

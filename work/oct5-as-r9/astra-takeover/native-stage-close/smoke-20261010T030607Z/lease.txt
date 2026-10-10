@@ -1,0 +1,4 @@
+mac   HELD by you for 0s, 19m left
+        why: Astra native close and exec exit cleanup boundaries
+pi    FREE
+disk: 9.0 GiB available at /Users/northkillpd/projects/thylacine-astra

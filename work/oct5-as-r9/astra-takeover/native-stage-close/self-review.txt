@@ -15,3 +15,5 @@ actual user exec/exit integration remains a separate gate. No production change,
 activation, independent audit or full AS3 qualification claimed.
 
 Review addition: the common outer protocol cleanup now explicitly checks original image page_count and private_rings==0 after retirement, before process destruction; previously not every early native-fixture branch checked that baseline. This assertion is part of the uninstalled patch and requires its own run.
+
+Installed and raw/source/artifact verified in smoke-20261010T030607Z: five rows1860,36close schedules;min9151MiB. Explicit final image baseline passes. Whole userspace exec/exit remains distinct.

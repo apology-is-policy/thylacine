@@ -2937,3 +2937,27 @@ It also adds a common explicit final image-page/private-ring refund assertion.
 These are production cleanup boundary witnesses; whole userspace exec/exit races,
 independent media/owned clients, remaining AS3,AS4/MM0-MM4 still remain.
 No Main/private activation or128MiB protection removal.
+
+
+### Astra native close-boundary schedules verified, October 10
+
+Six emitted setup requests x normal/bulk x final handle close, forced private
+exec close (CLOEXEC false), and exit handle-table destruction:36 schedules now
+pass with actual worker overlap. Retained observation pins force PARKED after
+local transport retirement; returning them permits DONE, worker join and empty
+physical request/fixed storage without CQ consumption or peer replies. The
+common protocol fixture now explicitly verifies original image page_count and
+zero private_rings after final retirement, before process destruction.
+
+native-stage-close/smoke-20261010T030607Z passed five one-boot default1/4/8 and
+UBSan4/8 rows,1860/1860tests,D7overlap/20cycles each. Sourcefc76769b1 plus
+diffc9e5b59d77;10rawlogs/41sources/sixinputs per row/cloned kernels reverified,
+clean external61dde37 and Astra10hashes preserved. Minimum9151MiB. This tests
+production cleanup boundaries, not whole userspace exec/exit syscall races.
+Single-agent review; no production changes, full50boot or AS3completion claim.
+
+Next reviewed UNINSTALLED native-isolation/isolation.patch checks one byte stream
+while a second scope stalls, then cancels only the latter and continues original
+WRITE/provided/MORE/EOF/CLUNK with torn peer retained. Controlled native isolation
+is not real media throughput. Owned clients, other AS3 integration,AS4/MM0-MM4
+remain. No Main/private activation or128MiB protection removal.

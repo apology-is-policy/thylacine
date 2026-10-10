@@ -1,6 +1,7 @@
 {
   "owner": "astra",
-  "installed": false,
-  "state": "prepared-unverified",
-  "next": "Review then apply only after native-stages run verified and checkpointed;36close schedules,1860 tests. Boundary witnesses, not whole userspace exec/exit calls."
+  "installed": true,
+  "state": "verified-five-row-smoke",
+  "next": "Checkpoint then apply reviewed native-isolation patch; remaining AS3/owned clients,AS4/MM0-MM4.",
+  "run": "work/oct5-as-r9/astra-takeover/native-stage-close/smoke-20261010T030607Z"
 }
