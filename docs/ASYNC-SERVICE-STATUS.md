@@ -3049,3 +3049,19 @@ Stratum clean61dde37 and Astra6pending/4protected hashes verified. Continue
 frontend-draft/next-work combined CONNECT, coherent installation and matched
 native/full gates, then AS3/4 and MM0-MM4. No Main/private async/clipboard activation
 or128MiB protection removal.
+
+
+### Astra frontend CONNECT composition, October10
+
+frontend-connect now joins actual request/scope reservation, CONNECT preparation,
+publication, rollback and engine adoption to the immutable frontend.3948 cumulative
+sanitizer checks/7exact mutants pass, with copied target/correlation, nested claim,
+success, constructor refusal, fresh expiry, close and native publication refusal.
+Adopted failure retains its one engine terminal; pre-adoption rollback preserves
+obligations through physical destruction. Production drafts unchanged. Native
+protocol allocation/init, publication effects and handshake replies remain checked
+host boundaries. Source/log/executable hashes reverified; self-review is single-agent.
+Failed fixture expectations and mutant compile diagnostics retained, not counted
+as successful fault detections. Continue coherent current-overlay install and
+matched native/full Mac gates, thenAS3/4,MM0-MM4. Prior50/50 onlyf719ee4a. No Main,
+private async/clipboard activation or128MiB removal. Macreleased; no active job.

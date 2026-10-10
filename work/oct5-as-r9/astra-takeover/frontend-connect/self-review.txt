@@ -1,0 +1,22 @@
+Astra single-agent self-review; not independent. Actual CONNECT prepare,
+request/scope reservation, publish, rollback and engine adoption now compose with
+the immutable frontend. New tests cover copied correlation/target across unlocked
+construction, nested SQ refusal, successful READY/root publication, constructor
+refusal, expiry before adoption, close before adoption, and native publication
+refusal. Adoption owns failed native publication terminals; frontend must neither
+roll that owner back nor duplicate its CQE. Actual unused rollback keeps request
+and scope obligations through the controlled physical protocol destructor.
+3948 cumulative sanitizer checks and7 exact mutants pass. Existing frontend ARM
+objects remain source-exact; no production source change or new ARM link claimed.
+Native protocol allocation/init and publication effects, handshake response,
+transport/ref/poll/storage destruction remain controlled. Coherent installation
+and real native matching gates remain next.
+
+Failures retained: initial fixture invented progress.bound (compile refusal);
+initial successful-handshake assertion expected TERMINAL, while actual engine
+posts in the same visit and correctly reaches DELIVERED. Corrected assertions
+also require exactly one CQE and no repeated progress. Two mutant edits produced
+unused-variable compile failures; repaired them with explicit void uses and now
+require named runtime failures, never count compile errors as mutant detection.
+No production defect found in this added composition. No activation or128MiB
+removal. Previous50/50 applies onlyf719ee4a; canonical kernel remains97d495.

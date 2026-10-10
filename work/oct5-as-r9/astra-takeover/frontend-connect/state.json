@@ -1,0 +1,13 @@
+{
+  "owner": "astra",
+  "state": "qualified-uninstalled-frontend-CONNECT-composition",
+  "run": "work/oct5-as-r9/astra-takeover/frontend-connect/controls-20261010T010344Z",
+  "checks": 3948,
+  "mutants": 7,
+  "input_hashes": 59,
+  "raw_pairs": 8,
+  "production_sources": "Unchanged frontend-draft and drain-draft CONNECT/engine source. No new production edits.",
+  "limits": "Actual CONNECT request reservation, prepare, publish, rollback and engine adoption connected to immutable frontend, with controlled protocol allocation/init/native publication effects and synthetic handshake success. Native transport/poll/ref/wake/storage destruction remain host boundaries. Prior3948 cumulative checks include frontend/return/drain/action regressions with their recorded limits. No native integration or full source gate.",
+  "next": "Coherent current-overlay installation and new source-matched native/full Mac gates; AS3/4 then MM0-MM4.",
+  "self_review": "single-agent; not independent"
+}

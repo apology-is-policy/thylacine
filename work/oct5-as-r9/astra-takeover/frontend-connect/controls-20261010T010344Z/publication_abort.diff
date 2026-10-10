@@ -1,0 +1,11 @@
+--- control.c
++++ publication_abort.c
+@@ -2400,7 +2400,7 @@
+     loom_private_close_boundary_for_test(l,1); // unlocked INSTALLING owner
+ #endif
+     int rc=loom_private_connect_publish(p,now);
+-    if (rc) (void)loom_private_connect_abort(p,rc);
++    (void)rc; /* fault: no abort on failed publication */
+     spin_lock(&l->lock);
+     // Other controls may pin this installing entry; installer drops only its
+     // own pin, never their pins, and holds storage through native accept wake.

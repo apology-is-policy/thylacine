@@ -1,0 +1,11 @@
+--- control.c
++++ accept_wake.c
+@@ -2133,7 +2133,7 @@
+         n->state = LOOM_SERVICE_ADMITTED;
+     }
+     spin_unlock(&l->lock);
+-    if (!rc) devsrv_connect_wake(&p->admission);
++    /* fault: omitted accept wake */
+     return rc;
+ }
+ static bool ready_member(struct loom_service_operation *o) {

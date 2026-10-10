@@ -1,0 +1,7 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/frontend-connect/controls-20261010T010242Z/rollback_obligation.c:2093:29: error: unused variable 'scope' [-Werror,-Wunused-variable]
+ 2093 |     struct loom_service_ref scope=p->scope;
+      |                             ^~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/frontend-connect/controls-20261010T010242Z/rollback_obligation.c:2094:29: error: unused variable 'request' [-Werror,-Wunused-variable]
+ 2094 |     struct loom_request_ref request=p->request;
+      |                             ^~~~~~~
+2 errors generated.

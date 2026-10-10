@@ -1,0 +1,4 @@
+/Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/frontend-connect/controls-20261010T010128Z/control.c:3661:20: error: no member named 'bound' in 'struct p9_client_progress'
+ 3661 |  protocol.progress.bound=true;protocol.progress.handshake.phase=P9_HS_VERSION_SEND;loom_ref(&l);
+      |  ~~~~~~~~~~~~~~~~~ ^
+1 error generated.

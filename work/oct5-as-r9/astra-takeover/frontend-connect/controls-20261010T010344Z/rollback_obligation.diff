@@ -1,0 +1,11 @@
+--- control.c
++++ rollback_obligation.c
+@@ -2099,7 +2099,7 @@
+     // The public wrapper retains l across the consuming final protocol drop.
+     if (loom_private_protocol_release_unused(p)) extinction("CONNECT lost unused protocol ownership");
+     spin_lock(&l->lock);
+-    connect_rollback_locked(l,scope,request);
++    (void)scope;(void)request; /* fault: retain consumed obligation */
+     spin_unlock(&l->lock);
+     return 0;
+ }
