@@ -1,0 +1,29 @@
+
+running 6 tests
+test malformed_receipts_do_not_mutate_ownership ... ok
+test bounded_members_and_lease_wrap ... ok
+test geometry_is_checked_before_any_receipt ... ok
+test owner_namespace_prevents_cross_ring_token_return ... ok
+test final_and_out_of_order_return_preserve_earlier_payload ... FAILED
+test stale_and_failed_returns_cannot_recycle ... FAILED
+
+failures:
+
+---- final_and_out_of_order_return_preserve_earlier_payload stdout ----
+
+thread 'final_and_out_of_order_return_preserve_earlier_payload' (22109746) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ledger-20261010T032905Z/rust-mutant-busy/test_lease_ledger.rs:19:2:
+assertion failed: matches!(b.accept_read(1,4,receipt(0,12)),Err(LeaseError::Busy))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- stale_and_failed_returns_cannot_recycle stdout ----
+
+thread 'stale_and_failed_returns_cannot_recycle' (22109750) panicked at /Users/northkillpd/projects/thylacine-corona/work/oct5-as-r9/astra-takeover/owned-clients/ledger-20261010T032905Z/rust-mutant-busy/test_lease_ledger.rs:26:2:
+assertion failed: matches!(b.accept_read(4,4,receipt(0,2)),Err(LeaseError::Busy))
+
+
+failures:
+    final_and_out_of_order_return_preserve_earlier_payload
+    stale_and_failed_returns_cannot_recycle
+
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

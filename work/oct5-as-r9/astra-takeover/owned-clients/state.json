@@ -1,6 +1,7 @@
 {
   "owner": "astra",
   "installed": false,
-  "state": "source-inspection-only",
-  "next": "Implement approved owned C/Rust clients after the remaining native hostile schedules; inspect implementation-notes.txt. No client runtime or ownership test pass claimed."
+  "state": "draft-ledger-host-verified",
+  "next": "Implement owned backing, payload borrows, paired CQ, futures and bounded retirement. Metadata tests do not qualify safe clients.",
+  "run": "owned-clients/ledger-20261010T032905Z"
 }

@@ -3870,3 +3870,32 @@ This is explicit transport pressure injection, not a valid peer transcript.
 Owned C/Rust implementation source inspection is in owned-clients/; no safe-client
 implementation/tests claimed. Remaining AS3/clients,AS4/MM0-MM4; no activation,
 Main landing or128MiB protection removal.
+
+
+### Astra partial-WRITE and client receipt ledger checkpoint, October 10
+
+The actual private worker now emits exactly five TWRITE prefix bytes into an
+explicitly pressure-filled channel, then aborts locally without peer drain.
+Both classes verify exact negative terminal/BYTES_SENT, fixed-owner release and
+unregister while peer/observation references remain. This is transport pressure
+injection, not a valid peer transcript. Nine IO fault schedules per class.
+
+native-midwrite/smoke-20261010T032012Z passed five one-boot rows1861/1861,
+D7overlap/20cycles, default1/4/8+UBSan4/8. Source00f4d736d+diff106e399f2e;
+10rawlogs,41sources,sixinputs/row,kernel clones and Astra10hashes reverified,
+clean external61dde37; minimum9148MiB. Bounded smoke, not50boot or AS3completion.
+
+Uninstalled C/Rust receipt-ledger foundations validate bounded geometry, exact
+receipts and ring-local identity, stale/double/out-of-order returns and failed
+RETURN retention. Earlier leases survive final/EOF. Self-review LEDGER-REVIEW-R1
+added a distinct library owner identity to prevent matching tuples across rings
+from returning foreign leases. Host ledger-20261010T032905Z passed Rust six cases
+at opt0/opt2 and LLVM22 C ASan+UBSan; all12mutants compiled then failed assertions.
+Eight source hashes and32command/rawlog records reverified. Initial Apple ASan
+run032712Z stalled before main; HOST-ASAN-R1 sample shows reentrant ASan startup
+spinlock. Failure evidence preserved; that C run is not a pass.
+
+These are metadata foundations only, without owned backing, payload borrows,
+paired CQ reap, futures, retirement or native safe-client qualification. Continue
+owned C/Rust lifetimes then remaining AS3/AS4/MM0-MM4. Single-agent self-review;
+no independent audit, Main landing, private activation or128MiB protection change.

@@ -1,0 +1,14 @@
+{
+  "owner": "astra",
+  "pid": 48421,
+  "state": "verified",
+  "source": "00f4d736d6d55576b3d383c6171268d3f0b4bf75",
+  "diff_sha256": "106e399f2e48f7544f9f79cc0d726aaa289f469f75bd226019b06deb36fbd735",
+  "run": "work/oct5-as-r9/astra-takeover/native-midwrite/smoke-20261010T032012Z",
+  "next": "Keep source frozen; five one-boot default1/4/8,UBSan4/8 smoke rows. Verify and checkpoint; not50boot qualification. Then AS-3 hostile peers/owned clients,AS-4,MM0-MM4. No activation.",
+  "phase": "ubsan8",
+  "minimum_free_mib": 9148,
+  "free_mib": 9157,
+  "rc": 0,
+  "finished_utc": "2026-10-10T03:24:43.278711+00:00"
+}

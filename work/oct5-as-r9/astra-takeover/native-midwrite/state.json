@@ -1,6 +1,7 @@
 {
   "owner": "astra",
-  "installed": false,
-  "state": "prepared-unverified",
-  "next": "After isolation run verifies/checkpoints, review/apply midwrite.patch. Ninth native IO fault per class; same1861tests. Explicit pressure injection, not peer transcript."
+  "installed": true,
+  "state": "verified-smoke",
+  "next": "Owned C/Rust lifetimes and remaining AS3 integration, then AS4/MM0-MM4. No full50boot claim.",
+  "run": "native-midwrite/smoke-20261010T032012Z"
 }

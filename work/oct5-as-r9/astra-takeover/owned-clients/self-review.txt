@@ -1,0 +1,25 @@
+Astra single-agent self-review of uninstalled metadata foundations.
+C/Rust ledgers validate owned-buffer range geometry, pooled READ result/flag and
+paired receipt zero rules, exact pool incarnation/member/nonzero lease, and
+per-member monotone reuse. Earlier held leases survive final/EOF/error; failed
+RETURN (including NOENT and unexpected positive return) keeps Returning state
+and outstanding charge. Out-of-order member returns and cross-member lease
+numbers are allowed. Storage cannot be inferred free from CQ acknowledgement.
+
+LEDGER-REVIEW-R1 caught before host tests: pool slot/incarnation is ring-local;
+two rings may legitimately have identical pool/member/lease tuples. Bind tokens
+to a distinct library ledger identity as well. Checked monotonic AtomicU64
+identity never wraps; exhaustion refuses construction. This is internal metadata,
+not a kernel ABI ID or new resource allowance. C outer opaque owner must not
+copy/clone an active ledger; Rust ledger is not Clone and token is not Copy/Clone.
+
+All arrays are bounded at64members. Checked range sums precede overlap comparisons.
+Only confirmed zero RETURN result marks available; begin-return does not release.
+Malformed input and rejected stale/foreign token leave all live ownership intact.
+Tests include64outstanding records and lease u64MAX followed by wrap refusal.
+
+These components contain no payload pointer access, backing owner, futures,
+retirement list, C opaque API, syscalls or paired-CQ acquire/release implementation.
+They are necessary metadata foundations, not a safe owned-client implementation.
+No Rust borrow compile-fail result or native client qualification claimed.
+Review staffing is single-agent, not an independent audit. Activation stays gated.
