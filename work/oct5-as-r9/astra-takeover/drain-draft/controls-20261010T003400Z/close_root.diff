@@ -1,0 +1,11 @@
+--- control.c
++++ close_root.c
+@@ -2602,7 +2602,7 @@
+ }
+ int loom_engine_close_visit(struct Loom *l) {
+     if(!l || !loom_is_private(l))return -T_E_INVAL;
+-    loom_ref(l);int rc=engine_close_visit(l);loom_unref(l);return rc;
++    int rc=engine_close_visit(l);return rc;
+ }
+ 
+ int loom_engine_wait_arm(struct Loom *l, u64 now, u64 *deadline) {

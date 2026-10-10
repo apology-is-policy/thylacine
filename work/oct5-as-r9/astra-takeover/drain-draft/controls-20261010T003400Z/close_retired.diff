@@ -1,0 +1,11 @@
+--- control.c
++++ close_retired.c
+@@ -2573,7 +2573,7 @@
+         struct loom_engine_entry *e=&l->service_engine->entries[at];
+         if(e->phase!=LENGINE_LIVE || e->pins==UINT32_MAX)continue;
+         struct engine_interest a=engine_interest_locked(l,e,timer_now_ns(),0);
+-        if(!a.step && !a.retire)continue;
++        if(e->protocol->locally_retired || (!a.step && !a.retire))continue;
+         ++e->pins;p=e->protocol;ref=p->scope;handshake=a.handshake;break;
+     }
+     spin_unlock(&l->lock);

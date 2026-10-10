@@ -2627,3 +2627,15 @@ bound, late-open refusal and reap/reuse clearing pass2316cumulativechecks/11muta
 47inputs/12rawpairs/4ARMobjects preserve64Bnode/4096Btable/920Bowner. No native
 negotiation or scheduling claim; coherent engine/CONNECT/close/frontend/RETURN
 integration and matched native gates remain next. Canonical97d495 unchanged.
+
+Latest uninstalled layer drain-draft overrides engine/header, CONNECT, protocol,
+READY and action; combines iounit/retirement/program/wire dependencies per next-work.
+Actual engine pins/root, CONNECT/general routing, close-after-retirement and wait
+registration collection qualified with2885hostassertions/12mutants,53inputs/13pairs/
+6ARMobjects plus unchanged lifecycle2clean/14counterexamples. DRAIN-R1 fresh IO
+expiry,DRAIN-R2 failclosedaction,DRAIN-R3 CLUNK parked shortage fixed in draft.
+Read state/self-review/findings/next-work. Host nativeIO/poll/ref/allocation/final
+protocolfree boundaries remain; no native/installed scheduling claim. Canonical
+97d495 unchanged. Macreleased/nojobs/8769MiB;clean61dde37/Astra10hashes intact.
+Next immutable shared frontend and actual RETURN/CQ wake integration, coherent
+install and matched native/full Mac gates,AS3/4,MM0-MM4. No activation/128MiBchange.

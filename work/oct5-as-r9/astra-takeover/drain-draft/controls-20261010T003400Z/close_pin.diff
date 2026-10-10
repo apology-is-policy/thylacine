@@ -1,0 +1,11 @@
+--- control.c
++++ close_pin.c
+@@ -2574,7 +2574,7 @@
+         if(e->phase!=LENGINE_LIVE || e->pins==UINT32_MAX)continue;
+         struct engine_interest a=engine_interest_locked(l,e,timer_now_ns(),0);
+         if(!a.step && !a.retire)continue;
+-        ++e->pins;p=e->protocol;ref=p->scope;handshake=a.handshake;break;
++        p=e->protocol;ref=p->scope;handshake=a.handshake;break;
+     }
+     spin_unlock(&l->lock);
+     int progress=0;

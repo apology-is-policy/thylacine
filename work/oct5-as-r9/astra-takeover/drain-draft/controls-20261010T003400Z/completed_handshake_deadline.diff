@@ -1,0 +1,11 @@
+--- control.c
++++ completed_handshake_deadline.c
+@@ -2490,7 +2490,7 @@
+     a.handshake=engine_handshake_locked(l,p);
+     if(!a.handshake) {
+         struct loom_ready_interest ready=loom_ready_interest_locked(p,now);
+-        a.step=ready.work;a.events=ready.events;a.deadline=ready.deadline;
++        a.step=ready.work;a.events=ready.events;a.deadline=p->connect_deadline;
+         a.retire=engine_retirable_locked(l,p);return a;
+     }
+     if(p->locally_retired)return a;

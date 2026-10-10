@@ -2963,3 +2963,34 @@ intact. Continue coherent independent-entry-pinned engine/CONNECT/close routing,
 immutable shared frontend and RETURN/CQ wakes, then actual-source/native matched
 gates, AS3/4 and MM0-MM4. Read iounit-draft/next-work for exact working overlays.
 Single-agent self-review only; no Main/private activation or128MiB removal.
+
+
+### Astra entry-pinned engine and close drain, October10
+
+Uninstalled `drain-draft` now routes active CONNECT through handshake handling
+and completed CONNECT through general operation readiness. Each READY/close visit
+retains a separate entry pin and Loom root through consuming operation destruction.
+Local retirement waits for actual RPC quiescence and local borrows; retained MORE
+and terminal owners remain visitable. Whole close disposes them before global
+request detach and zero-pin protocol collection. Native wait registrations retain
+entry pins until unhook, so final collection parks until their return.
+
+DRAIN-R1 reproduced stale readiness permitting IO after a request deadline; a
+fresh exclusive-driver preflight now checks time and abort/close before wire IO.
+DRAIN-R2 fails closed on unexpected internal action refusal. DRAIN-R3 parks CLUNK
+cancellation/discard while older FID borrowers remain. A surviving mutant exposed
+a weak cancellation test; its corrected witness checks actual wait-arm readiness.
+Failed runs remain preserved. Completed CONNECT deadlines and separate CONNECT
+completion quanta are covered alongside retained-wait close and pending MORE.
+
+2885 cumulative ASan/UBSan assertions and12 exact fault variants pass;53inputs,
+13raw source/binary/log pairs and6ARM64 objects reverified. Existing lifecycle
+models pass2clean/14counterexamples; unchanged models do not prove new C routing.
+Prebound engine setup, native IO/poll/teardown, parsed successes, refs/allocation/
+notification and final protocol destruction remain controlled host boundaries.
+No native scheduling/full-source gate or installed dispatch claim. Canonical
+kernel stays97d495. Mac released/no jobs,8769MiB above8192floor; clean Stratum61dde37
+and Astra6pending/4protected hashes intact. Single-agent self-review only.
+Continue actual immutable shared frontend and pool RETURN/CQ wakes, coherent
+installation and matched native/full Mac gates, then AS3/4 and MM0-MM4. No Main,
+private async/clipboard activation or128MiB change. See drain-draft/next-work.

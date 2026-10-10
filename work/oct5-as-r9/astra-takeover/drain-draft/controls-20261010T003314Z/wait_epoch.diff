@@ -1,0 +1,11 @@
+--- control.c
++++ wait_epoch.c
+@@ -2641,7 +2641,7 @@
+     *deadline=t->wait_deadline;
+     // A change during registration causes a fresh sweep even if no native edge
+     // happened. The final changed predicate runs again under Rendez at sleep.
+-    return t->wait_work || t->wait_change!=__atomic_load_n(&t->change,__ATOMIC_ACQUIRE);
++    return t->wait_work;
+ }
+ 
+ int loom_engine_wait_changed(void *arg) {

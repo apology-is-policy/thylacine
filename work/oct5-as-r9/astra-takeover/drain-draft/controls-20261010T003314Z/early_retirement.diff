@@ -1,0 +1,10 @@
+--- control.c
++++ early_retirement.c
+@@ -2442,6 +2442,7 @@
+ static bool engine_retirable_locked(struct Loom *l,struct loom_service_protocol *p) {
+     if(p->locally_retired || p->driving || p->users || !p->rpc_quiesced || !p->abort_reason)
+         return false;
++    if(p->rpc_quiesced)return true;
+     u32 count=0;
+     for(struct loom_service_operation *o=p->op_head;o;o=o->next) {
+         if(++count>p->op_count)extinction("retire operation list corrupt");
