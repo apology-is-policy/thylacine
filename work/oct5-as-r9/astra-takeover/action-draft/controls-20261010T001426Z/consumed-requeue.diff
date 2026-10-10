@@ -1,0 +1,11 @@
+--- control.c
++++ consumed-requeue.c
+@@ -1642,7 +1642,7 @@
+         if(next==LPROGRAM_NEXT) {
+             rc=loom_rpc_requeue_locked(o,timer_now_ns());
+             // Never leave an already-consumed callback selected as ADVANCE.
+-            if(rc && loom_rpc_settle_locked(o))extinction("READY requeue settle lost");
++            (void)rc;
+         } else rc=loom_rpc_settle_locked(o);
+         spin_unlock(&l->lock);
+         if(rc)return action_abort(p,rc);

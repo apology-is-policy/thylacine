@@ -121,3 +121,14 @@ submission. Actual action executor, engine/CONNECT/close routing, RETURN wake,
 immutable frontend and negotiated iounit persistence still owed. See state,
 self-review and explicit next-work. No native scheduler claim/canonical changes.
 Mac released/no jobs/9163MiB; Stratum61dde37/Astra10hashes intact. Continue autonomously.
+
+Newest working addition action-draft supplies actual READY action executor and
+CQ-room-corrected selector (ACTION-R1 baseline+mutant).1633sanitizerchecks/15mutants,
+45inputs/16raw pairs/2ARM objects pass. Actual submit/abort/retirement helpers;
+progress/demux/success replies/native refs/engine remain host boundaries. Requires
+separate entry+Loom root across consuming action and driver return. Read state,
+self-review,next-work. Supersedes ready-draft selector only, keeps retirement/
+program/wire dependencies. Canonical97d495 unchanged; Macfree/nojobs/8876MiB,
+Stratum clean61dde37 and Astra10hashes intact. Next IOUNIT-R1 then coherent actual
+engine/CONNECT/close/frontend/RETURN integration and matched native gates, AS3/4,
+MM0-MM4. Continue autonomously; no activation/128MiB change.

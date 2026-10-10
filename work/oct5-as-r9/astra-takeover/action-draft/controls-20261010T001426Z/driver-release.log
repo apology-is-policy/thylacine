@@ -1,0 +1,4 @@
+PASS fixed SQE preparation: 289 checks
+PASS provided ownership: 577 checks
+PASS retirement ownership: 795 checks
+FAIL executor submits actual frame

@@ -1,0 +1,11 @@
+--- control.c
++++ cancel-busy.c
+@@ -1607,7 +1607,7 @@
+     if(o->fid_claim==P9_TCLUNK && !p->rpc_quiesced)return action_abort(p,reason);
+     spin_lock(&l->lock);int rc=0;
+     if(o->phase==LRPC_QUEUED || o->phase==LRPC_INFLIGHT)rc=loom_rpc_settle_locked(o);
+-    if(!rc && o->pool_busy)rc=loom_provided_release_busy_locked(o);
++    (void)rc;
+     spin_unlock(&l->lock);if(rc)return rc;
+     if(o->fixed.owner || o->fixed_dropping) {
+         rc=loom_private_io_drop_fixed(o);if(rc)return rc;

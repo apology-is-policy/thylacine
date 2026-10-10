@@ -1,0 +1,48 @@
+Astra, single-agent self-review, October10. Not an independent audit.
+
+Executor retains no operation pointer beyond a consuming FREE/DISCARD action.
+Its caller MUST supply a distinct engine entry pin and Loom root: the operation
+pin is deliberately released by the destructor before driver return. Driver
+release and its wake use only that separate lifetime. Claims and list rotation
+hold Ll; native submission/teardown/client progress, physical buffer drop and
+storage free run outside Ll. Sequential fixture lock assertions are not an SMP
+proof; engine integration still has to establish these caller obligations.
+
+Fresh monotonic time at begin, successful requeue, positive commit and multishot
+rearm prevents earlier visit timestamps authorizing late effects/results. Fixed
+backing drops before the commit recheck. A failed requeue first settles the
+consumed callback, then latches scope abort; it cannot loop on ADVANCE forever.
+Malformed capture aborts scope; remote AGAIN terminates; only adapter-proven
+local no-wire AGAIN may requeue. Negative CLUNK completion must actually quiesce
+scope before releasing its retired FID. Quiescence uses actual progress abort
+and callbacks, not a dead bit; BUSY release follows that writer settlement.
+
+Terminal COMMIT can return local borrows with an older PENDING MORE retained.
+DELIVER precedes negative terminal POST; single-shot pooled results use one CQE.
+Whole-close DISCARD requires both close latches and actual rpc_quiesced, consumes
+only this operation, and never treats scope abort as ring consumer detachment.
+LEASED remains owned independently after operation destruction. No local scope
+retirement is published here: actual entry-pinned engine routing must do that
+only after all operation writers/local borrows and native users have ended.
+
+ACTION-R1: inherited READY selector omitted CQ space from submission readiness,
+contrary to approved lifecycle section7. Actual action fixture reproduced queued
+submission at full CQ. Preserved before-review source and failing generated run.
+Corrected working selector adds room to wire readiness only; deadline/abort,
+completion cleanup and already-inflight I/O remain schedulable. Exact mutant
+removes only this guard. This newer selector supersedes ready-draft for execution;
+prior evidence remains scoped to prior source.
+
+Harness repairs: initial fake transport lacked live state/magic required by real
+submission; supplied those explicit already-open fixture facts. Synthetic parsed
+reply had the wrong non-WALK new_fid; now uses the actual builder's expectation.
+All failed generated sources/logs retained. None is called a native server run.
+
+Boundaries: kernel action/selector/submit/scope-abort/callback capture/program/
+admission/retirement/ledger/codec/queue helpers are actual source; successful
+parsed responses, native progress return values, readiness, references/entry
+pins, address translation, allocation/image accounting and physical backing
+return are controlled host boundaries. Earlier regression cases use their
+recorded manual destruction; action cases use actual admitted destructor.
+Actual engine polling, native demux, shared SQE frontend, RETURN wake and SMP
+close/exec still require coherent installation and native qualification.

@@ -1,0 +1,19 @@
+{
+  "owner": "astra",
+  "state": "qualified-uninstalled-action-executor",
+  "canonical_kernel": "97d495fcb6c319111429073dedffb544c9355a1a",
+  "dependencies": [
+    "retirement-draft",
+    "program-draft",
+    "wire-draft",
+    "ready-draft/kernel/include"
+  ],
+  "supersedes": "ready-draft/kernel/loom_service_ready.c only; all prior evidence preserved",
+  "run": "work/oct5-as-r9/astra-takeover/action-draft/controls-20261010T001426Z",
+  "checks": 1633,
+  "mutants": 15,
+  "arm64_objects": 2,
+  "self_review": "single-agent; not independent",
+  "next": "next-work.txt",
+  "limits": "Action executor uses actual submit, scope abort, owner/program/admission/retirement/selector. Progress step and successful parsed responses remain explicit controlled boundaries in new action cases. Separate external driver pin/root is modeled and asserted. Actual client-mark-dead/progress-abort, transport/session/codec abort, per-owner close and physical operation destructor, final pool-destruction helper, request/FID/pool/CQ transitions. Parsed successful replies remain synthetic; prior preparation regressions never submit. Host native teardown, translation, allocator, image snapshot, ref/engine/wake and physical backing drop boundaries. Earlier preparation/provided cases retain manual fixture destruction; new retirement cases use actual destructor. Final pool helper is called at simulated zero Loom references, not actual retirer. No native READY/frontend/close/concurrency qualification."
+}

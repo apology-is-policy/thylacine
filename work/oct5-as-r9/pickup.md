@@ -3420,3 +3420,29 @@ Canonical97d495 unchanged; Mac released,9163MiB, Stratum clean61dde37 and Astra1
 hashes intact. Continue ready-draft/next-work; retirement-draft remains required.
 Single-agent self-review only; no activation. Native matched gates, AS3/4 and
 MM0-MM4 remain ahead.
+
+### Astra bounded READY action executor, October10
+
+Uninstalled `action-draft` now executes actual submission, reply advance,
+settlement, commit, cancellation, delivery, rearm and physical destruction under
+an exclusive driver claim. A separate caller-owned entry/Loom root must survive
+operation free. Fresh deadline checks follow physical drops and precede new
+attempts/commits. Failed requeue settles its consumed callback before scope abort;
+remote AGAIN stays terminal and failed CLUNK requires actual scope quiescence.
+PENDING MORE survives negative commit and precedes its terminal delivery.
+
+ACTION-R1 reproduced the older selector submitting despite full CQ, contrary to
+lifecycle section7. Corrected selector requires CQ room for new wire submission,
+while abort/deadline and already-inflight IO stay available. Preserved failing
+baseline and exact guard-removal mutant. This selector supersedes ready-draft's
+working source; action-draft still depends on retirement/program/wire drafts.
+
+1633 cumulative ASan/UBSan checks and15 exact mutants pass;45 input hashes,
+16 raw source/binary/log pairs and2 real ARM64 objects reverified. Actual native
+progress/demux, successful replies, engine pins/refs and allocation/backing-drop
+boundaries remain controlled; this is not native engine/close qualification.
+No canonical kernel change (still97d495), activation or128MiB removal. Single-agent
+self-review only. Mac released,8876MiB; Stratum clean61dde37 and Astra10hashes
+preserved. Continue IOUNIT-R1 negotiated metadata, then coherent entry-pinned
+engine/CONNECT/close routing, RETURN/frontend wakes and native matched gates;
+AS3/4 and MM0-MM4 follow. See action-draft/state/self-review/next-work.

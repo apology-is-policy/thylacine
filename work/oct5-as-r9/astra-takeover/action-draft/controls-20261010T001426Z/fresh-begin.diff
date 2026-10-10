@@ -1,0 +1,13 @@
+--- control.c
++++ fresh-begin.c
+@@ -1626,8 +1626,8 @@
+     case LREADY_CANCEL:return action_cancel(o,s.reason);
+     case LREADY_SUBMIT:
+         spin_lock(&l->lock);
+-        rc=o->pool_stream?loom_provided_begin_locked(o,timer_now_ns()):
+-                          loom_admission_begin_locked(o,timer_now_ns());
++        rc=o->pool_stream?loom_provided_begin_locked(o,0):
++                          loom_admission_begin_locked(o,0);
+         spin_unlock(&l->lock);
+         if(rc==-T_E_AGAIN || rc==-T_E_BUSY)return 0;
+         if(rc==-T_E_NOSPC)return action_cancel(o,rc);

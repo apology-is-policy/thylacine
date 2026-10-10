@@ -1,0 +1,11 @@
+--- control.c
++++ malformed-scope.c
+@@ -1646,7 +1646,7 @@
+         } else rc=loom_rpc_settle_locked(o);
+         spin_unlock(&l->lock);
+         if(rc)return action_abort(p,rc);
+-        if(next==LPROGRAM_ABORT)return action_abort(p,-T_E_IO);
++        /* lost malformed scope abort */
+         return 1;
+     case LREADY_COMMIT:
+         if(o->program.result<0)return action_cancel(o,o->program.result);

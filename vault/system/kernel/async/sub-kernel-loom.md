@@ -2606,3 +2606,15 @@ submissions anywhere in the list. Local retirement retains delivery/free work.
 Actual executor/CONNECT/close/RETURN wiring and negotiated iounit metadata remain
 owned integration work, not qualified by this selector. Canonical unchanged;
 see ready-draft/state/self-review/next-work. No activation.
+
+Astra October10 uninstalled action-draft adds one bounded action per exclusive
+READY claim with an independent driver entry/Loom root through consuming free.
+Actual submission/capture/program/settlement/admission/retirement APIs now compose;
+fresh deadlines gate begin/requeue/commit/rearm, actual abort gates failed CLUNK,
+MORE remains before negative terminal. ACTION-R1 full-CQ submission reproduced
+and fixed in the newer selector.1633hostchecks/15mutants,45inputs/16rawpairs/2ARM
+objects pass. Native progress/demux, engine pins/ref/accounting boundaries remain
+controlled; no installed/native scheduling claim. Next negotiated iounit metadata
+then coherent engine/CONNECT/close/frontend/RETURN integration and native gates.
+Canonical97d495 unchanged; single-agent self-review, no activation. Read draft
+state/self-review/next-work for exact dependencies and limits.
