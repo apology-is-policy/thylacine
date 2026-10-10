@@ -1,0 +1,14 @@
+Astra single-agent review of UNINSTALLED/UNVERIFIED midwrite fixture.
+Private progress uses p9_srvconn_progress_ops -> srvconn_io_nonblock, which can
+send partial bytes; it does not use the legacy all-or-nothing send_frame adapter.
+After real worker CONNECT/WALK/LOPEN, prefill otherwise empty c2s via existing
+client send primitive, leaving exactly5bytes. This is explicit transport-pressure
+injection, not a claim that a valid peer transcript naturally filled that queue.
+Actual private WRITE must emit exactly five bytes [28,0,0,0,TWRITE] into real
+channel (count,produced delta,wrapped byte positions checked under channel lock).
+Peer never drains; no remaining WRITE byte can fit. Abort through exact control
+then require local retirement,negative exact900terminal,conservative BYTES_SENT,
+physical request/fixed-owner release and unregister while peer/pin retained.
+Both normal/bulk. Existing eight IO faults unchanged,setup stop guard constrained
+to9..14 so new fault15 does not stall setup accidentally. No production change,
+independent audit or full AS3 claim. Remains1861tests with9IO schedules/class.

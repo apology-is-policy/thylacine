@@ -1,0 +1,216 @@
+diff --git a/kernel/test/test.c b/kernel/test/test.c
+index e1b94f952..849458f98 100644
+--- a/kernel/test/test.c
++++ b/kernel/test/test.c
+@@ -683,6 +683,7 @@ void test_loom_private_native_faults(void);
+ void test_loom_private_native_reconnects(void);
+ void test_loom_private_native_stages(void);
+ void test_loom_private_native_stage_close(void);
++void test_loom_private_native_isolation(void);
+ void test_loom_private_node_owner(void);
+ void test_loom_service_pool_table(void);
+ void test_loom_private_slot_owner(void);
+@@ -2782,6 +2783,7 @@ struct test_case g_tests[] = {
+     { "loom.private_native_reconnects", test_loom_private_native_reconnects, false, NULL },
+     { "loom.private_native_stages", test_loom_private_native_stages, false, NULL },
+     { "loom.private_native_stage_close", test_loom_private_native_stage_close, false, NULL },
++    { "loom.private_native_isolation", test_loom_private_native_isolation, false, NULL },
+     { "loom.private_frontend", test_loom_private_frontend, false, NULL },
+     { "loom.private_operation_storage",  test_loom_private_operation_storage,  false, NULL },
+     { "loom.private_close",              test_loom_private_close,              false, NULL },
+diff --git a/kernel/test/test_loom.c b/kernel/test/test_loom.c
+index 242d8c34d..d49820f55 100644
+--- a/kernel/test/test_loom.c
++++ b/kernel/test/test_loom.c
+@@ -2999,6 +2999,7 @@ done:
+ struct loom_native_peer {
+     u8 request[512];
+     u32 used, seen, stop; // optional one-based request at which peer sleeps
++    u32 owners; // expected CONNECT request owners (zero means one)
+     struct Proc *creator;
+ };
+ static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *peer) {
+@@ -3061,7 +3062,7 @@ static bool loom_native_completion_flags(struct Loom *l,struct SrvConn *cn,
+             if(flags&LOOM_CQE_MORE)return true;
+             do {
+                 spin_lock(&l->lock);
+-                bool retired=l->service_requests.occupied==1 && !l->service_fixed_count;
++                bool retired=l->service_requests.occupied==(peer->owners?peer->owners:1u) && !l->service_fixed_count;
+                 spin_unlock(&l->lock);
+                 if(retired)return true;
+                 sched();
+@@ -3300,6 +3301,9 @@ static const char *loom_native_stage_cancel(struct Loom *l,struct SrvConn *serve
+ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creator,
+     struct Proc *poster,struct SrvRegistry *reg,struct loom_service_ref target,bool bulk,u32 fault) {
+     const char *error=NULL;u64 va=0;
++    bool independent=fault==40;
++    if(independent)fault=0;
++    struct loom_service_ref stalled={0};struct SrvConn *stalled_server=NULL;
+     u32 close_kind=fault>=20?1+(fault-20)/6:0;
+     if(close_kind)fault=9+(fault-20)%6;
+     struct SrvConn *server=NULL;struct loom_service_protocol *held=NULL;
+@@ -3343,11 +3347,67 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
+     NO(loom_native_completion(l,server,&peer,102,0),"native DAC and read-write LOPEN completion");
+     NO(l->service_nodes->nodes[child.slot].fid_iounit==4096,"native negotiated iounit retained");
+     if(fault) {error=loom_native_fault(l,creator,server,scope,child,bytes,fault);goto done;}
++    if(independent) {
++        struct loom_service_reserve another={.size=sizeof(another),.version=1,.kind=LOOM_SERVICE_SCOPE};
++        NO(!loom_private_node_prepare(l,creator,&another,&stalled) && !loom_private_node_publish(l,stalled),
++           "isolation second scope reservation");
++        NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_SERVICE_CONNECT,
++           .handle_idx=target.slot,.offset=stalled.slot,.user_data=900,
++           ._resv1={0,target.incarnation,stalled.incarnation,0}}),"isolation stalled CONNECT submission");
++        stalled_server=srv_accept_blocking(srv_lookup_in(reg,bulk?"large":"small",5),poster->stripes);
++        NO(stalled_server,"isolation second peer acceptance");
++        struct loom_native_peer quiet;
++        for(u32 i=0;i<sizeof(quiet);++i)((u8 *)&quiet)[i]=0;
++        quiet.creator=creator;quiet.stop=1;
++        bool emitted=false;u64 end=timer_now_ns()+2000000000ull;
++        do {
++            sched();int step=loom_native_peer_step(stalled_server,&quiet);
++            NO(step>=0,"isolation sleeping peer wire mismatch");
++            if(step==2){emitted=true;break;}
++        }while(timer_now_ns()<end);
++        NO(emitted,"isolation second scope must actually stall on VERSION reply");
++        peer.owners=2;
++    }
+     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_READ,
+        .handle_idx=child.slot,.len=5,.user_data=103,._resv1={64,child.incarnation,0,0}}) &&
+        loom_native_completion(l,server,&peer,103,5),"native fixed READ completion");
+     NO(bytes[64]=='h' && bytes[65]=='e' && bytes[66]=='l' && bytes[67]=='l' && bytes[68]=='o',
+        "native READ lands in exact retained registered slice");
++    if(independent) {
++        struct loom_service_control abort={.size=sizeof(abort),.version=1,.object=stalled};
++        struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
++        struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
++        u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
++        NO(!loom_private_service_abort(l,creator,&abort),"isolation cancels only sleeping scope");
++        bool terminal=false;u64 end=timer_now_ns()+2000000000ull;
++        do {
++            u32 tail=__atomic_load_n(&h->cq_tail,__ATOMIC_ACQUIRE);
++            if(tail!=head) {
++                struct loom_cqe value=cq[head&(l->cq_entries-1u)];
++                NO(tail==head+1 && value.user_data==900 && value.result==-T_E_CANCELED && !value.flags,
++                   "isolation exact canceled CONNECT terminal");
++                terminal=true;break;
++            }
++            sched();
++        }while(timer_now_ns()<end);
++        NO(terminal,"isolation canceled terminal missing");
++        __atomic_store_n(&h->cq_head,head+1,__ATOMIC_RELEASE);
++        NO(loom_private_submit(l,creator,0)>=0,"isolation canceled terminal consumption");
++        bool settled=false;
++        do {
++            spin_lock(&l->lock);settled=l->service_requests.occupied==1 && !l->service_fixed_count;
++            spin_unlock(&l->lock);if(settled)break;sched();
++        }while(timer_now_ns()<end);
++        struct loom_service_snapshot dead,live;
++        NO(settled && !control_native_query(l,creator,stalled,&dead) &&
++           dead.state==LOOM_SERVICE_RETIRED && (dead.status_flags&LOOM_SERVICE_LOCAL_RETIRED) &&
++           !srvconn_is_live(stalled_server),"isolation only canceled scope locally retires");
++        NO(!control_native_query(l,creator,scope,&live) && live.state==LOOM_SERVICE_READY &&
++           srvconn_is_live(server),"isolation live media scope retains authority and transport");
++        NO(!loom_private_service_reap(l,creator,&abort),"isolation canceled scope reap");
++        peer.owners=1;
++        // Retain the torn peer during original-scope WRITE/provided/MORE/EOF/CLUNK.
++    }
+     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_WRITE,
+        .handle_idx=child.slot,.len=5,.user_data=104,._resv1={64,child.incarnation,0,0}}) &&
+        loom_native_completion(l,server,&peer,104,5),"native WRITE emits exact read bytes");
+@@ -3378,7 +3438,8 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
+     NO(loom_native_completion_flags(l,server,&peer,107,5,LOOM_CQE_MORE|LOOM_CQE_SERVICE_BUFFER,&receipt) &&
+        receipt.lease!=give.receipt.lease,"native MORE shot acquires fresh receipt");
+     give.receipt=receipt;
+-    NO(!loom_post_cqe(l,800,0,0) && !loom_post_cqe(l,801,0,0),"native fills CQ before RETURN");
++    for(u32 i=0;i<l->cq_entries;++i)
++        NO(!loom_post_cqe(l,800+i,0,0),"native fills CQ before RETURN");
+     u64 epoch=loom_native_epoch(l);
+     NO(!loom_private_service_return(l,creator,&give) && loom_native_epoch(l)!=epoch,
+        "native RETURN changes wake epoch independently of full CQ");
+@@ -3409,6 +3470,7 @@ done:
+         extinction("native operation fixture worker failed to quiesce");
+     if(va)(void)sys_burrow_detach_for_proc(creator,va,PAGE_SIZE);
+     if(server)srvconn_unref(server);
++    if(stalled_server)srvconn_unref(stalled_server);
+ #undef NO
+     return error;
+ }
+@@ -3578,7 +3640,7 @@ static const char *loom_protocol_fixture(u32 kind) {
+            p->as->page_count==before && !p->as->private_rings,
+            "protocol index allocation failure unwinds every charged owner");
+     }
+-    l=loom_create_private(p,2,2,true);
++    l=loom_create_private(p,2,(kind==100 || kind==101)?4:2,true);
+     if (l) ++goal;
+     PO(l,"protocol private owner");
+     for (u32 n=0;n<2;++n) {
+@@ -3608,6 +3670,11 @@ static const char *loom_protocol_fixture(u32 kind) {
+            "zero-reference retirer wakes joins and refunds the live private worker");
+         goto done;
+     }
++    if (kind==100 || kind==101) {
++        bool bulk=kind==101;
++        error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,40);
++        goto done;
++    }
+     if (kind>=60 && kind<=95) {
+         bool bulk=(kind-60)&1u;
+         error=loom_native_operations_case(l,p,poster,reg,refs[bulk],bulk,20+(kind-60)/2);
+@@ -3822,3 +3889,11 @@ void test_loom_private_native_stage_close(void) {
+         TEST_ASSERT(!error,error);
+     }
+ }
++
++void test_loom_private_native_isolation(void);
++void test_loom_private_native_isolation(void) {
++    for(u32 kind=100;kind<=101;++kind) {
++        const char *error=loom_protocol_fixture(kind);
++        TEST_ASSERT(!error,error);
++    }
++}
+diff --git a/work/oct5-as-r9/astra-takeover/native-isolation/self-review.txt b/work/oct5-as-r9/astra-takeover/native-isolation/self-review.txt
+index 141ce24c7..df8836d5d 100644
+--- a/work/oct5-as-r9/astra-takeover/native-isolation/self-review.txt
++++ b/work/oct5-as-r9/astra-takeover/native-isolation/self-review.txt
+@@ -13,3 +13,5 @@ Outer creation/observation refs cover lifetimes; errors use established whole-cl
+ join before unmapping payload and dropping both peers. Final outer image baseline
+ assertion covers new fixture. No direct engine visits, production changes,
+ real media performance or whole AS3 qualification claimed. Activation remains gated.
++
++First build failed at link due to implicit memset from the large peer initializer. Replaced with existing explicit byte-zero loop; raw source/logs retained under031230Z. No runtime pass implied.
+diff --git a/work/oct5-as-r9/astra-takeover/native-isolation/state.json b/work/oct5-as-r9/astra-takeover/native-isolation/state.json
+index d38ff1c01..e5073d0b9 100644
+--- a/work/oct5-as-r9/astra-takeover/native-isolation/state.json
++++ b/work/oct5-as-r9/astra-takeover/native-isolation/state.json
+@@ -1,6 +1,6 @@
+ {
+   "owner": "astra",
+-  "installed": false,
+-  "state": "prepared-unverified",
+-  "next": "After native-stage-close verified/checkpoint, review/apply isolation.patch;1861 tests; controlled independent byte stream, not real media application."
++  "installed": true,
++  "state": "installed-verification-pending",
++  "next": "Read native-isolation-flight.json;1861 tests; same-worker independent byte stream while another scope stalls/cancels. Preserve frozen source/jobs, raw verifier then checkpoint."
+ }
+diff --git a/work/oct5-as-r9/astra-takeover/pickup-latest.md b/work/oct5-as-r9/astra-takeover/pickup-latest.md
+index 48ec7f4a2..1f7d97730 100644
+--- a/work/oct5-as-r9/astra-takeover/pickup-latest.md
++++ b/work/oct5-as-r9/astra-takeover/pickup-latest.md
+@@ -231,3 +231,17 @@ while a second scope stalls, then cancels only the latter and continues original
+ WRITE/provided/MORE/EOF/CLUNK with torn peer retained. Controlled native isolation
+ is not real media throughput. Owned clients, other AS3 integration,AS4/MM0-MM4
+ remain. No Main/private activation or128MiB protection removal.
++
++
++## Newest native scope-isolation verification in flight
++
++Close-boundary evidence checkpoint5734fe538 complete. Reviewed
++native-isolation/isolation.patch is APPLIED. Original scope READ progresses with
++second scope stalled at VERSION; cancel/reap latter then original WRITE,
++provided/MORE/EOF/CLUNK continues while torn peer retained. Normal/bulk, actual
++worker and byte-checked deterministic peer; not real media throughput.1861tests.
++Read native-isolation-flight.json, preserve frozen source/HEAD and running jobs.
++After rc0 run its verify-smoke.py before tracked changes, then checkpoint.
++Remaining AS3/owned clients,AS4/MM0-MM4; no Main/private activation/128MiB change.
++
++Isolation run031230Z failed before boot: fixture initializer emitted unavailable memset. Source/log/manifest preserved; ISOLATION-FIXTURE-R1 corrected with explicit byte-zero loop. New native-isolation flight is authoritative; do not treat build failure as runtime coverage.

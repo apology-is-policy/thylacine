@@ -1,0 +1,47 @@
+Astra source inspection for AS-3 owned clients, October 10 (not implementation).
+Approved contracts: ASYNC-SERVICE-LIFECYCLE sections7-9 and
+ASYNC-SERVICE-BUFFERS client ownership and qualification sections. No new ABI,
+limits or policy approval required. Public private ENTER remains gated.
+
+Current sources:
+- usr/lib/libthyla-rs/src/loom.rs: RegisteredBuffer owns eager Burrow VA; unsafe
+  register_buffers already documents asynchronous ownership/exclusivity. Do not
+  repeat the earlier AS-R8 fix. Ring exposes ordinary reap that copies CQE only,
+  has no receipt pointer, and collapses register/enter errors to InvalidArgument.
+- usr/lib/libthyla-rs/src/loom/service_abi.rs: concrete private ABI mirrors only.
+- usr/lib/libt/include/thyla/loom_service.h: private ABI mirrors only; opaque
+  owned-client/pool/lease functions are still absent.
+
+Required implementation boundaries:
+1. Dedicated private wrapper consumes Ring and RegisteredBuffer ownership; it
+   must not expose legacy reap/raw submit or mutable backing after admission.
+   Consume owned eager storage, never treat raw integer registration as safe.
+2. Reap copies CQE and paired receipt before one release-store of CQ head;
+   preserve correlation, MORE/final, exact slot/incarnation/member/lease identity.
+   Validate geometry and result length before forming any payload slice.
+3. Owned PayloadLease retains pool/storage, offers read-only view tied to lease
+   borrow. Drop/return cannot recycle while Rust borrows live. C opaque lease has
+   explicit release and documented no-further-access obligation. CQ ack and
+   final stream completion never return previously transferred payload leases.
+4. Future drop requests scope abort, not storage reuse. Client drop retires through
+   a bounded owner list; errors retain ownership until return or demonstrated
+   whole-owner close/retirement, with kernel pins preserving actual payer budget.
+   Keep list capacity within existing admitted ring/slot bounds; no new allowance.
+5. Preserve errno categories rather than raw Ring's InvalidArgument collapse.
+   Carry phase/BYTES_SENT diagnostics; cancellation after write remains unknown
+   remote outcome, never promise rollback. Cancellation is scope-wide explicitly.
+6. Drive fixed-size pending/lease bookkeeping and retire list without blocking
+   UI or depending on peer progress. Inspect existing scheduling/client owners
+   before choosing integration mechanism; approved Halcyon control executor
+   remains the owner, no new thread or kernel ABI inferred here.
+
+Tests required before activation:
+- host actual-source ownership tests and Rust compile-fail examples for mutable
+  access after transfer, lease-return while view borrowed, and legacy pooled reap;
+- distinguishable A/B payloads, retained A while B progresses, stale/double/out-of-
+  order returns and pool incarnation reuse, returned-error retention;
+- abandoned future/client with outstanding requests and leases; exact eventual
+  refund, full CQ/empty pool, bounded failed-return retirement list;
+- native wrappers in explicitly qualified image without default activation,
+  followed by full source-matched CPU/SMP/sanitizer and AS4 clipboard/SAK arc.
+Do not count native kernel fixtures as these safe-client ownership tests.

@@ -1,0 +1,6 @@
+{
+  "owner": "astra",
+  "installed": false,
+  "state": "source-inspection-only",
+  "next": "Implement approved owned C/Rust clients after the remaining native hostile schedules; inspect implementation-notes.txt. No client runtime or ownership test pass claimed."
+}

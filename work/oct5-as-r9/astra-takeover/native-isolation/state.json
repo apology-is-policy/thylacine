@@ -1,6 +1,7 @@
 {
   "owner": "astra",
-  "installed": false,
-  "state": "prepared-unverified",
-  "next": "After native-stage-close verified/checkpoint, review/apply isolation.patch;1861 tests; controlled independent byte stream, not real media application."
+  "installed": true,
+  "state": "verified-five-row-smoke",
+  "next": "Checkpoint then apply reviewed native-midwrite patch; remaining AS3/owned clients,AS4/MM0-MM4.",
+  "run": "work/oct5-as-r9/astra-takeover/native-isolation/smoke-20261010T031341Z"
 }

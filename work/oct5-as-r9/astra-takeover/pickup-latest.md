@@ -231,3 +231,43 @@ while a second scope stalls, then cancels only the latter and continues original
 WRITE/provided/MORE/EOF/CLUNK with torn peer retained. Controlled native isolation
 is not real media throughput. Owned clients, other AS3 integration,AS4/MM0-MM4
 remain. No Main/private activation or128MiB protection removal.
+
+
+## Newest native scope-isolation verification in flight
+
+Close-boundary evidence checkpoint5734fe538 complete. Reviewed
+native-isolation/isolation.patch is APPLIED. Original scope READ progresses with
+second scope stalled at VERSION; cancel/reap latter then original WRITE,
+provided/MORE/EOF/CLUNK continues while torn peer retained. Normal/bulk, actual
+worker and byte-checked deterministic peer; not real media throughput.1861tests.
+Read native-isolation-flight.json, preserve frozen source/HEAD and running jobs.
+After rc0 run its verify-smoke.py before tracked changes, then checkpoint.
+Remaining AS3/owned clients,AS4/MM0-MM4; no Main/private activation/128MiB change.
+
+Isolation run031230Z failed before boot: fixture initializer emitted unavailable memset. Source/log/manifest preserved; ISOLATION-FIXTURE-R1 corrected with explicit byte-zero loop. New native-isolation flight is authoritative; do not treat build failure as runtime coverage.
+
+
+### Astra same-worker scope isolation verified, October 10
+
+One scope completes byte-checked READ while a second stalls at an observed
+VERSION request. Canceling/reaping only the second preserves the first READY
+transport and its WRITE/provided READ/MORE/EOF/CLUNK progress while the torn peer
+remains held. Both classes pass on the same actual worker/ring. CQ4 uses existing
+geometry for two CONNECT owners plus IO; full-CQ checks fill its actual capacity.
+
+First run031230Z failed at link before any VM: a large fixture initializer emitted
+unavailable memset (ISOLATION-FIXTURE-R1). Failed source/manifest/build log retained;
+explicit existing byte-zero pattern fixes fixture only. Corrected run
+native-isolation/smoke-20261010T031341Z passed five rows1861/1861,D7overlap/20cycles,
+default1/4/8+UBSan4/8. Source5734fe538+difff3da283cc8;10rawlogs/41sources/sixinputs
+per row/cloned kernels reverified before docs changed. Clean61dde37 and Astra10
+hashes preserved;minimum9079MiB. Single-agent review, controlled native byte stream,
+not real media throughput, whole userspace exec/exit or full50boot qualification.
+
+Next reviewed UNINSTALLED native-midwrite/midwrite.patch injects c2s pressure
+leaving5bytes, observes actual TWRITE prefix, then aborts without draining peer.
+Private progress uses partial srvconn_io_nonblock, not legacy atomic frame send.
+This is explicit transport pressure injection, not a valid peer transcript.
+Owned C/Rust implementation source inspection is in owned-clients/; no safe-client
+implementation/tests claimed. Remaining AS3/clients,AS4/MM0-MM4; no activation,
+Main landing or128MiB protection removal.

@@ -13,3 +13,7 @@ Outer creation/observation refs cover lifetimes; errors use established whole-cl
 join before unmapping payload and dropping both peers. Final outer image baseline
 assertion covers new fixture. No direct engine visits, production changes,
 real media performance or whole AS3 qualification claimed. Activation remains gated.
+
+First build failed at link due to implicit memset from the large peer initializer. Replaced with existing explicit byte-zero loop; raw source/logs retained under031230Z. No runtime pass implied.
+
+Corrected native isolation verified in031341Z: five rows1861,D7/20cycles;raw/source/artifact/protected hashes match,min9079MiB. Original byte stream survives other-scope cancellation with torn peer held.
