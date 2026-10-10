@@ -45,6 +45,7 @@ impl<B:RingBackend> FixedDriver<B>{
   if delivery.abandoned{c.book.take_terminal(delivery.cookie).expect("fixed terminal");}
   Ok(())
  }
+ pub(crate) fn close(&mut self){self.core.borrow_mut().fail();}
  pub(crate) fn begin_retire(&mut self){self.core.borrow_mut().retire();}
  /// No completion drain or allocation here; bounded preallocated owner scans.
  /// Once true, all fixed views/requests are gone and whole-owner local access

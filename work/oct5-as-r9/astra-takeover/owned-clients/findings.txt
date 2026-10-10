@@ -14,3 +14,5 @@ SQ-REUSE-R1: kernel publishes freed SQ slot before copying. Patch and successful
 FIXED-OWNERSHIP: shared-core C/Rust fixed reservations host-verified; active abandonment retains range until terminal/retirement, pool overlap excluded, no view during I/O. Conservative one fixed reservation per registered buffer; future/native integration pending. SQ reuse remains parked.
 
 TYPED-REVIEW-R1 resolved: driver drop returns Closing to unfinished typed handles; ownership remains retained. Both languages regression-tested in083803Z/083816Z.
+
+RETIREMENT-HARNESS-R1: initial Rust clean profiles passed; premature-admission mutant reaches forbidden factory and panics with unreachable-code diagnostic, not assertion. Raw failed run retained; correct expected diagnostic before rerun.

@@ -1,0 +1,45 @@
+Astra single-agent self-review: bounded library retirement owner, October10.
+Not an independent audit. Both implementations uninstalled; backend retirement,
+CQ producer and pin guarantees remain simulated/trusted native obligations.
+
+Executor allocates 1..64 cells once, a conservative local library configuration,
+not a new kernel quota. Admission finds capacity before invoking the driver
+factory; C also allocates its client handle before the factory. Root/client
+references retain one cell per admitted driver. Dropping a client marks that
+same cell retiring and starts owner retirement; no new list node/allocation.
+Busy records remain charged. A round visits min(budget,capacity) cells once each
+with rotating cursor, so a stalled first cell cannot starve later records.
+Underlying per-driver progress retains its existing64fixed/64pool scan bounds.
+Reclamation requires client drop and driver-confirmed retirement after all live
+fixed handles/results end. Attached clients cannot be reclaimed, including when
+backend already reports retired. This avoids stale slot handles on reuse.
+
+Rust unique mutable executor prevents simultaneous admission; factory runs outside
+state RefCell borrow, while extant clients can only affect their occupied cells.
+C requires single creator and no callback reentry. Factory failure leaves cell
+free; factory itself owns partial-resource cleanup. C defensively drops nonnull
+failure output and rejects success-with-null. No caller borrows raw driver from
+managed clients, so replacing/extracting the driver cannot bypass the cell.
+No Clone/Send Rust API. C consumed pointers must not be reused.
+
+Executor destruction closes descriptors once and forbids new client operations.
+It does not pretend asynchronous retirement completed: independent kernel pins
+and existing owned storage handles still retain actual lifetimes and charges.
+Existing READ result remains valid. Client drop after root destruction releases
+its bookkeeping; live request/result owner still survives. This is a bounded
+retirement scheduler, NOT a complete event-loop/Future executor: caller must drive
+later rounds on local events; registration/wakeup/deadline integration is pending.
+No native SQ publication or parked-patch integration was attempted.
+
+Eight scenarios/language: pre-factory admission; abandoned retention and slot
+reuse; live pending requests and held READ results prevent refund; rotating bounded
+progress; attached-client retention; root close with surviving payload; failed
+factory (and C allocation failure); allocation-free drop/progress. Rust084435Z
+opt0/2,2compile-fail contracts+control,6mutants;9hashes/21commands. C084418Z
+LLVM22ASan+UBSan/NDEBUG,6mutants;15hashes/27commands. Raw source/diff/logs verified
+before docs, including exact semantic mutant assertions. RETIREMENT-HARNESS-R1:
+initial084249Z clean/compile controls pass; premature-admission mutant fails by
+reaching unreachable factory, but diagnostic matcher expected assertion. Retained
+failed run, corrected expected diagnostic, complete retry passed. No initial
+full-suite pass. Protected10/cleanexternal61dde37 and parked kernel base verified.
+AS3 native integration/gates, AS4 and MM0-MM4 remain; all activation guards stay.

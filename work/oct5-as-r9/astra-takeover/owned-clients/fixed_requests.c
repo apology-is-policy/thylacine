@@ -60,6 +60,7 @@ void t_fixed_request_drop(struct t_fixed_request *r){
  /* Fixed drop dispatches the single scope abort; book abandonment does not. */
  t_ring_fixed_drop(r->fixed);free(r);unref(d);
 }
+void t_fixed_close(struct t_fixed_driver *d){assert(d->alive);fail(d);}
 void t_fixed_begin_retire(struct t_fixed_driver *d){assert(d->alive);retire(d);}
 int t_fixed_progress(struct t_fixed_driver *d){assert(d->alive);if(t_ring_progress(d->owner)){t_request_clear_retired(d->book);return 1;}return 0;}
 size_t t_fixed_occupied(const struct t_fixed_driver *d){assert(d->alive);return t_request_occupied(d->book);}

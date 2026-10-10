@@ -1,0 +1,12 @@
+diff --git a/work/oct5-as-r9/astra-takeover/owned-clients/fixed_requests.rs b/work/oct5-as-r9/astra-takeover/owned-clients/fixed_requests.rs
+index 59decf58a..81d3f55f5 100644
+--- a/work/oct5-as-r9/astra-takeover/owned-clients/fixed_requests.rs
++++ b/work/oct5-as-r9/astra-takeover/owned-clients/fixed_requests.rs
+@@ -45,6 +45,7 @@ impl<B:RingBackend> FixedDriver<B>{
+   if delivery.abandoned{c.book.take_terminal(delivery.cookie).expect("fixed terminal");}
+   Ok(())
+  }
++ pub(crate) fn close(&mut self){self.core.borrow_mut().fail();}
+  pub(crate) fn begin_retire(&mut self){self.core.borrow_mut().retire();}
+  /// No completion drain or allocation here; bounded preallocated owner scans.
+  /// Once true, all fixed views/requests are gone and whole-owner local access

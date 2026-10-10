@@ -24,6 +24,7 @@ int64_t t_fixed_read_bytes(const struct t_fixed_read_result *,const unsigned cha
 /* End all result view uses before drop; never reuse a consumed handle. */
 void t_fixed_read_drop(struct t_fixed_read_result *);
 void t_fixed_request_drop(struct t_fixed_request *);
+void t_fixed_close(struct t_fixed_driver *);
 void t_fixed_begin_retire(struct t_fixed_driver *);
 int t_fixed_progress(struct t_fixed_driver *);
 size_t t_fixed_occupied(const struct t_fixed_driver *);

@@ -36459,3 +36459,25 @@ or native SQ integration. Continue bounded executor retirement/futures independe
 SQ correction remains parked/unapplied. Heartbeat resumed ACTIVE under operator's
 latest autonomous-continuation instruction. AS3/AS4/MM0-MM4 remain incomplete;
 no Main, private activation or128MiB protection change.
+
+
+### Astra bounded library retirement owners, October 10
+
+Uninstalled C/Rust executors reserve a bounded retirement cell before the driver
+factory runs. Dropping a managed client transfers it to its existing cell without
+allocation; confirmed local retirement and ended storage users are required before
+reuse. A rotating progress round visits at most min(budget,capacity) cells, keeping
+busy entries charged while allowing later ones to finish. Root shutdown closes
+descriptors once, rejects new operations and preserves existing payload backing.
+The1..64cell bound is conservative library configuration, not a new kernel quota.
+
+Eight scenarios/language pass: Rust084435Z opt0/2,2compile-fail+control,6mutants;
+C084418Z LLVM22ASan+UBSan/NDEBUG,6mutants. Nine/fifteen source hashes and21/27raw
+command records reverified. Initial084249Z Rust clean profiles passed; final
+mutant failed correctly with unreachable-factory panic, but diagnostic expected
+assertion. RETIREMENT-HARNESS-R1 evidence retained, expected diagnostic corrected,
+complete retry passes. Single-agent retirement-self-review.txt records ownership,
+allocation, shutdown and fair bounded progression. Protected10/cleanexternal61dde37
+and parked kernel base unchanged. Event-loop wakeups/typed Future integration and
+native backend remain pending; this is not a full async executor/AS3 pass. SQ stays
+parked/unapplied. Heartbeat ACTIVE; AS4/MM0-MM4 and all activation guards remain.
