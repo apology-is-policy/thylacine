@@ -1,0 +1,14 @@
+  [ubsan-smp4] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/ubsan-smp4-20261010T014116Z
+  [ubsan-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [ubsan-smp4 1/10] PASS (47s)
+  [ubsan-smp4 2/10] PASS (49s)
+  [ubsan-smp4 3/10] PASS (49s)
+  [ubsan-smp4 4/10] PASS (47s)
+  [ubsan-smp4 5/10] PASS (47s)
+  [ubsan-smp4 6/10] PASS (47s)
+  [ubsan-smp4 7/10] PASS (47s)
+  [ubsan-smp4 8/10] PASS (49s)
+  [ubsan-smp4 9/10] PASS (48s)
+  [ubsan-smp4 10/10] PASS (49s)
+== ubsan-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp4: exposure 479s total, ~47s mean/boot; per-boot: 47 49 49 47 47 47 47 49 48 49 ==

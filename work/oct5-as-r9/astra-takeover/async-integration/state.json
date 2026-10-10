@@ -1,7 +1,7 @@
 {
   "owner": "astra",
   "installed": true,
-  "state": "native-qualified-coherent-async-integration",
+  "state": "installed-async-pinned-matrix-qualified",
   "source_base": "fff2c57b2eeb5a7576b7e47ec1c57bc1996d2b49",
   "native_run": "work/oct5-as-r9/astra-takeover/async-integration/native-20261010T010700Z",
   "native_tests": 1855,
@@ -10,7 +10,11 @@
   "minimum_free_mib": 8617,
   "review": "single-agent self-review; not independent",
   "limits": "Native immutable frontend CONNECT normal/bulk, malformed refusal, CQ acknowledgement and existing storage/engine/close gates. General WALK/LOPEN/READ/WRITE/provided/MORE native traffic and full Mac qualification still owed; host qualification remains bounded.",
-  "next": "Run pinned-matrix.py on clean committed source; it rebuilds default/UBSan kernels, uses exact native-qualified images, actual five derived matrix rows and full raw verifier. This is matrix-stage qualification, not a successful whole-image rebake. Then native general operations/provided,MORE,AS3/4,MM0-MM4.",
+  "next": "Native general WALK/LOPEN/READ/WRITE/CLUNK and provided/MORE qualification, then AS3/4 and MM0-MM4. Preserve completed matrix; no duplicate gate or historical installer.",
   "full_gate_attempt": "work/oct5-as-r9/current-gate-20261010T011053Z",
-  "full_gate_result": "Stopped143 by disk guard at8247MiB, no matrix boots; exact native image set restored."
+  "full_gate_result": "Stopped143 by disk guard at8247MiB, no matrix boots; exact native image set restored.",
+  "matrix_run": "work/oct5-as-r9/pinned-matrix-20261010T011750Z",
+  "matrix_source": "98dd4b6183c002fa2ead543b6fb350da604cdec0",
+  "matrix_boots": 50,
+  "matrix_minimum_free_mib": 8510
 }

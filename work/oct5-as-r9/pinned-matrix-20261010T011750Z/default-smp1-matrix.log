@@ -1,0 +1,14 @@
+  [default-smp1] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/default-smp1-20261010T011800Z
+  [default-smp1] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [default-smp1 1/10] PASS (45s)
+  [default-smp1 2/10] PASS (44s)
+  [default-smp1 3/10] PASS (44s)
+  [default-smp1 4/10] PASS (44s)
+  [default-smp1 5/10] PASS (44s)
+  [default-smp1 6/10] PASS (44s)
+  [default-smp1 7/10] PASS (43s)
+  [default-smp1 8/10] PASS (44s)
+  [default-smp1 9/10] PASS (44s)
+  [default-smp1 10/10] PASS (44s)
+== default-smp1: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp1: exposure 440s total, ~44s mean/boot; per-boot: 45 44 44 44 44 44 43 44 44 44 ==

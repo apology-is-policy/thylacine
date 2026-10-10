@@ -1,0 +1,204 @@
+{
+  "owner": "astra",
+  "observed_utc": "2026-10-10T01:42:46.586168+00:00",
+  "flight": {
+    "owner": "astra",
+    "source": "98dd4b6183c002fa2ead543b6fb350da604cdec0",
+    "pid": 72618,
+    "state": "running",
+    "run": "work/oct5-as-r9/pinned-matrix-20261010T011750Z",
+    "floor_mib": 8192,
+    "expected_tests": 1855,
+    "launched_utc": "2026-10-10T01:17:50.193022+00:00",
+    "next": "Keep tracked source frozen; inspect progress/result and raw evidence. This is the five-row matrix stage with rebuilt default/UBSan kernels and pinned native-qualified images, not a successful whole-image ci-smp-gate rebuild. After verification checkpoint, add native general operation/provided exercises then AS3/4 and MM0-MM4.",
+    "phase": "ubsan-smp4",
+    "minimum_free_mib": 8576,
+    "current_free_mib": 8595,
+    "completed_rows": 3,
+    "child_pid": 24301
+  },
+  "verified_default_boots": [
+    {
+      "label": "default-smp1",
+      "boot": 1,
+      "serial_sha256": "16f6fc0205ad0c7ea79d1a6ec5fd2f49ea140399ea1ac31a8f8294a952716008",
+      "harness_sha256": "27f044762e812c3910e634e0f0064b75dfff35ffaef6fcc4ad00d188bdb80c8f"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 2,
+      "serial_sha256": "6df653c097ff1afcdc00a81a3aea5ec5337fa257038d8b1813a44161a7b7405e",
+      "harness_sha256": "fa29988ae82d25ccb4f8d5d84ea79e06ab93ca7e565138c527b7c5fd1ff0b148"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 3,
+      "serial_sha256": "a7be6ccdf1af84ce3260c527d61750e0ec75852da83b07a5219185c493e5f6ec",
+      "harness_sha256": "0b425cde9ea8f52b4050306e15a75f3893fba85e95a84bf2d28209da25291b44"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 4,
+      "serial_sha256": "39f4cd04fb7126b336d9f03e7b67be1df53a811adf6abec8269a3d181abaeaeb",
+      "harness_sha256": "28cc364c9a01fc65064015b19cd75dca091236a7c4bc50ea045356cc24c5d91d"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 5,
+      "serial_sha256": "bbb3f10e78d02f88f32173b5ff32b52b1b16efb618897d4e3b66e32b9aa2b8b8",
+      "harness_sha256": "d393acc6044937c753cd2b7e4dcf17ff75f2566b48e1e2a664e49bf9175f9a08"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 6,
+      "serial_sha256": "ffe88146d0e5588f9b2b725946ea63311c27f82301fae71fff6753117911a411",
+      "harness_sha256": "e2fd97d18f2409e18882b99b9e33ccca1420cc6d6da02ab02ef0a73cb96051eb"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 7,
+      "serial_sha256": "050d233fbf820a07d6a5d87bbe3502011ae568addc1e02d72cc493c18c5c726e",
+      "harness_sha256": "bcff71b892940703c42ccc317a2cedf04a055ac5b44c611e24a419b3f9c1fc07"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 8,
+      "serial_sha256": "213278c4fe033c6ca6cc112689af0344448820a44727760a45d78bb3d28ba548",
+      "harness_sha256": "faf8220ca92e42b3c83e2e3da6d914e4b74c019a5f00d0677d910bbe87087811"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 9,
+      "serial_sha256": "da5af0efafe81185655e831038f3cb62ae7222a234c4f4b79c8d09e889b6e864",
+      "harness_sha256": "e52bfb055eff9208b1bd6ae5695a04e0115fbcf3c9c61ba14734d6b2c92c4f1a"
+    },
+    {
+      "label": "default-smp1",
+      "boot": 10,
+      "serial_sha256": "09339f93f3065f509ff0f43c0feb6fb133c2ac58cc184e67be6a7e80cfc008d9",
+      "harness_sha256": "21d9ebfa8b93f226c764d8a2327534727c0970a6a359da0ee8996934cf984d09"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 1,
+      "serial_sha256": "0d2143c708b27e09eb23da317adf153d3e8df14b32e506bf0c88cd6cedf3ad6f",
+      "harness_sha256": "ffb4aa47e4e2fa3e20b0a1af2a17f91a71a060952aa2e2ada44ee6103ea2f2e1"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 2,
+      "serial_sha256": "dfdb46fb189fed2d8990b0cbc27d5935a92077eec67a667b1ba4b8c9b1db22e1",
+      "harness_sha256": "fb16ecc12f10138422505ab41007a2b8581e6f4ece2d6a452e18a509c92e9056"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 3,
+      "serial_sha256": "29ecac5885fa41a19de239c27d9ddaa377051ad2776a3e4c0df2ddaf8ad9e035",
+      "harness_sha256": "46630b7e7af97e3d509fc9f9346fcbf36671f8702498520a3a1cb1f396010de4"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 4,
+      "serial_sha256": "2d1f718596eefdb6d2743d59be4d9e0efecf41b8315aeea4d057f71b0c7b0c79",
+      "harness_sha256": "5cc30507b59805f70b6fe1a51406343245bfd56f1663267ef6acfa90945ffd69"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 5,
+      "serial_sha256": "b6b85b3606f0115aa6033b696086b03144c1abfe7f4a2806d717c78d8805cf16",
+      "harness_sha256": "17ef5685b835add72d99dfde2eebff51f5c7ce21c1d17cb42787b88f2795e31b"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 6,
+      "serial_sha256": "d9a3455156fe30e674ec40375e81f02780f3ff78da2d707492c27f88cc978d4c",
+      "harness_sha256": "b768c755e2d735e6195342b0ef232f70d92b2d650be205817bfb17327ae9891c"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 7,
+      "serial_sha256": "cbb7538b573835b27b680d512655cb263173f71da55dbe1e06a74f4fb217c334",
+      "harness_sha256": "78ac2ee34c9cb52e092a815434204a4e49fa0d525a797545d914d57df561cfc3"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 8,
+      "serial_sha256": "8f5cd4ae46609d32c406afff9b3cbe89717e8381f35521270ff8d0da367720a7",
+      "harness_sha256": "fcc3555f7d610d52a7dcc7304385f58498e5d2935f60aede3061b3e2f250efeb"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 9,
+      "serial_sha256": "065e94aab7625561217570c6f7f310440dfbcf111a04a14e87c717b4f5c6ee48",
+      "harness_sha256": "a62ff4634444ceaa2db9a819dbc2abb77f24b04787dcff15f06387332ea585f7"
+    },
+    {
+      "label": "default-smp4",
+      "boot": 10,
+      "serial_sha256": "c27ea41a6a7d2449538d74c46ef6320d924fc4577cd36443ac21420a67257adf",
+      "harness_sha256": "e308469a4f0ed108e1b3749f1dac1c71aae8baee4c545add32ce203dbad2d434"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 1,
+      "serial_sha256": "c817b289fcf99af85b258a9c76411e6120bcabfbf82eec9ae40f43ef0a2a4164",
+      "harness_sha256": "0deb81c0166c8fa96d10929c72cd4a99e6810f38f1ac2aa8b7589277e6f25259"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 2,
+      "serial_sha256": "a27a5508c9f1878f746b2d0dd4dc55570b5dbadf33a87b3e3e75392a47e80287",
+      "harness_sha256": "8c010e3a237731c6db7d13108222512bd286a8605dfd40b09fe5836c3ba9afef"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 3,
+      "serial_sha256": "a3dceb8373602fe0efb77b5fb01c626d4d2c78892bbd539af615a9dbc8f30588",
+      "harness_sha256": "99ceeb58543447b01b6605cce623c5f5ec3178f6914d54af4311fd095ba5762e"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 4,
+      "serial_sha256": "b1d5ace4880718e1cea931e66de642ad4e05b686e2bfdc2912b12597662ce42d",
+      "harness_sha256": "c787aa9873e7ce7d8376c7f5e3eba50d2c0d66c52630e115174fbfedeaaa8626"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 5,
+      "serial_sha256": "080c057400cef21dea6162edb283fce13ac433621cbe64f49a57255b638bb0fa",
+      "harness_sha256": "8b0cc81fd35c9b776e662e28446804c37b8dc989e9322ead3fe5d7495e86205f"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 6,
+      "serial_sha256": "00d827a1039882ee8867f770b60ac1b09345053a2ed2cebb5179528af297f8a2",
+      "harness_sha256": "ae6889adac39818e4ecb85ae7c82414cd97ecaab02009d439bff59e9fc8d7ae7"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 7,
+      "serial_sha256": "1ce2dcc9ce024a896136f9377a216e25fed9716d18c25e6d19266d8fc39a454c",
+      "harness_sha256": "e296766e444f472620edab33bfca0250adefa27c17a02c01f5b7d7dae4dc4da7"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 8,
+      "serial_sha256": "6cd0d42a4edabe9ec87d144cc7aca7ac20be2356b3236c18d378921cc8913f64",
+      "harness_sha256": "aa0fef01d5f3746dab51c9f4457cb17c43a1113eee9657d438bf9b54a9dda1f6"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 9,
+      "serial_sha256": "72e614fc40dbe41c5f433eb9ed06a921dcb51801239e2c5a2fb551dfcc3d5799",
+      "harness_sha256": "2dcfebcb5d10089e3c12d26f3605b605fd710086d6f1ae3510b80f71ab9c2597"
+    },
+    {
+      "label": "default-smp8",
+      "boot": 10,
+      "serial_sha256": "bc82e6feeb4c0df4013ddae654bdfc0e19b49addc87f5e0aba14412d37079d6b",
+      "harness_sha256": "653993d88a50f6e03aa8fb544a1a303f6cd17791191ed1a7eca151ffcc739f89"
+    }
+  ],
+  "eight_inputs_unchanged": true,
+  "limit": "30 default boots checked. UBSan still running; full verifier required."
+}

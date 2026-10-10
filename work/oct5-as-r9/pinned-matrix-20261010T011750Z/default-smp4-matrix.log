@@ -1,0 +1,14 @@
+  [default-smp4] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/default-smp4-20261010T012521Z
+  [default-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [default-smp4 1/10] PASS (47s)
+  [default-smp4 2/10] PASS (47s)
+  [default-smp4 3/10] PASS (47s)
+  [default-smp4 4/10] PASS (46s)
+  [default-smp4 5/10] PASS (47s)
+  [default-smp4 6/10] PASS (48s)
+  [default-smp4 7/10] PASS (47s)
+  [default-smp4 8/10] PASS (45s)
+  [default-smp4 9/10] PASS (48s)
+  [default-smp4 10/10] PASS (47s)
+== default-smp4: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp4: exposure 469s total, ~46s mean/boot; per-boot: 47 47 47 46 47 48 47 45 48 47 ==

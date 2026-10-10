@@ -1,0 +1,14 @@
+  [ubsan-smp8] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/ubsan-smp8-20261010T014918Z
+  [ubsan-smp8] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [ubsan-smp8 1/10] PASS (50s)
+  [ubsan-smp8 2/10] PASS (50s)
+  [ubsan-smp8 3/10] PASS (50s)
+  [ubsan-smp8 4/10] PASS (49s)
+  [ubsan-smp8 5/10] PASS (50s)
+  [ubsan-smp8 6/10] PASS (50s)
+  [ubsan-smp8 7/10] PASS (52s)
+  [ubsan-smp8 8/10] PASS (49s)
+  [ubsan-smp8 9/10] PASS (50s)
+  [ubsan-smp8 10/10] PASS (50s)
+== ubsan-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== ubsan-smp8: exposure 500s total, ~50s mean/boot; per-boot: 50 50 50 49 50 50 52 49 50 50 ==

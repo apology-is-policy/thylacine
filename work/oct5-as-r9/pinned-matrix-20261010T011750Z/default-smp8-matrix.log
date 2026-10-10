@@ -1,0 +1,14 @@
+  [default-smp8] archived 20 prior per-boot log(s) -> build/multiboot-logs/archive/default-smp8-20261010T013311Z
+  [default-smp8] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [default-smp8 1/10] PASS (49s)
+  [default-smp8 2/10] PASS (48s)
+  [default-smp8 3/10] PASS (50s)
+  [default-smp8 4/10] PASS (47s)
+  [default-smp8 5/10] PASS (48s)
+  [default-smp8 6/10] PASS (48s)
+  [default-smp8 7/10] PASS (48s)
+  [default-smp8 8/10] PASS (48s)
+  [default-smp8 9/10] PASS (48s)
+  [default-smp8 10/10] PASS (49s)
+== default-smp8: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) ==
+== default-smp8: exposure 483s total, ~48s mean/boot; per-boot: 49 48 50 47 48 48 48 48 48 49 ==

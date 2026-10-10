@@ -1,0 +1,46 @@
+{
+  "owner": "astra",
+  "source": "98dd4b6183c002fa2ead543b6fb350da604cdec0",
+  "clean_boots": 50,
+  "expected_tests": 1855,
+  "rows": [
+    [
+      "default-smp1",
+      "1",
+      "-",
+      "300"
+    ],
+    [
+      "default-smp4",
+      "4",
+      "-",
+      "300"
+    ],
+    [
+      "default-smp8",
+      "8",
+      "-",
+      "300"
+    ],
+    [
+      "ubsan-smp4",
+      "4",
+      "undefined",
+      "420"
+    ],
+    [
+      "ubsan-smp8",
+      "8",
+      "undefined",
+      "420"
+    ]
+  ],
+  "minimum_free_mib": 8510,
+  "limits": [
+    "Matrix stage with rebuilt default/UBSan kernels and pinned native-qualified image inputs; not a completed ci-smp-gate whole-image rebake.",
+    "Mac HVF only, no Pi/A72/KVM qualification.",
+    "Internal CONNECT frontend and existing storage/close probes; native general operations/provided/MORE qualification still owed.",
+    "Private public ENTER stays gated, no Main/clipboard activation or128MiB removal.",
+    "Single-agent self-review, not independent audit."
+  ]
+}

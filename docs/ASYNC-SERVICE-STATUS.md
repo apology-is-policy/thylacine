@@ -3110,3 +3110,21 @@ astra-takeover/async-integration-matrix-flight.json when present; do not duplica
 its work or modify tracked files while active. Prior native/host evidence remains
 bounded; native general operations/provided traffic,AS3/4 and MM0-MM4 follow.
 No Main/private async/clipboard activation or128MiB removal; single-agent review.
+
+
+### Astra installed async matrix verified, October10 02:02 UTC
+
+The five-row pinned-image Mac matrix passed50/50 at exact clean source
+98dd4b6183c002fa2ead543b6fb350da604cdec0: default SMP1/4/8 and UBSan SMP4/8,
+ten boots each. Raw verification rechecked100serial/harness logs,1855/1855
+tests per boot,20private ownership/frontend probes,D7overlap and20login cycles,
+eight captured/current artifact hashes,clean61dde37 and Astra's10preserved files.
+Minimum free space8510MiB stayed above8192floor. Run: work/oct5-as-r9/
+pinned-matrix-20261010T011750Z. Runner exited0 and released Mac.
+
+This is kernel matrix qualification with pinned native-qualified image inputs;
+it does not convert the earlier stopped whole-image rebake into a pass.
+Single-agent self-review of source freeze, input copies and verifier assertions
+found no new discrepancy. Native general WALK/LOPEN/READ/WRITE/CLUNK and provided/
+MORE traffic remain next, then AS3/4 and MM0-MM4. No Main/private async/clipboard
+activation or128MiB protection removal. Historical installers must not be rerun.
