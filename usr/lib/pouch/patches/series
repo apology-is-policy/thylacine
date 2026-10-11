@@ -172,3 +172,5 @@
 # 0051 (B-3a): fsync/fdatasync on SYS_FSYNC; readv/writev/preadv/pwritev as one
 # gathered transfer; a socket answers lseek/pread/pwrite ESPIPE and fstat S_IFSOCK.
 0051-pouch-fd-sync-vectored.patch
+# 0052 (codex/astra 0049): Preserve child action history and parent temporary-fd provenance.
+0052-pouch-spawn-action-sources.patch

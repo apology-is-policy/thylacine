@@ -1,0 +1,76 @@
+Pouch: preserve ordered spawn file-action source provenance.
+
+Reject sources closed by an earlier child action. Parent-side temporary
+opens cannot establish original-parent sources, including aliases later
+closed or overwritten. No kernel ABI, new fd probes or inheritance expansion.
+
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -54,6 +54,49 @@
+ 	return 1;
+ }
+ 
++/* next points toward older actions. The nearest earlier assignment, not
++ * the original parent, decides whether a child descriptor is still open. */
++static struct fdop *pspawn_prior_action(struct fdop *op, int fd)
++{
++	for (op = op->next; op; op = op->next) {
++		if (op->fd == fd && (op->cmd == FDOP_CLOSE ||
++		    op->cmd == FDOP_OPEN || op->cmd == FDOP_DUP2)) return op;
++	}
++	return 0;
++}
++
++/* Check closes before opening any parent-side temporaries. A later OPEN or
++ * DUP2 may reestablish a closed slot; that does not revive an earlier use.
++ * No fd-existence probes: dup-based probes confuse resource exhaustion and
++ * narrower rights with absence. The kernel still validates final sources.
++ * As before, callers must serialize parent fd close/reuse and action edits. */
++static int pspawn_validate_sources(const posix_spawn_file_actions_t *fa)
++{
++	if (!fa) return 0;
++	for (struct fdop *op = fa->__actions; op; op = op->next) {
++		if (op->cmd != FDOP_DUP2) continue;
++		if (op->srcfd < 0) return EBADF;
++		struct fdop *prior = pspawn_prior_action(op, op->srcfd);
++		if (prior && prior->cmd == FDOP_CLOSE) return EBADF;
++	}
++	return 0;
++}
++
++/* A parent-side open must never supply an ORIGINAL-parent source mentioned
++ * anywhere in the actions, even through an alias later closed/overwritten.
++ * The newly allocated fd proves that original slot was absent. A source
++ * established by a prior child OPEN/DUP2 instead belongs to the child model
++ * and may legitimately refer to one of our temporaries. No extra handles,
++ * allocations or shared state; at most the existing 64 opens scan the list. */
++static int pspawn_uses_parent_source(const posix_spawn_file_actions_t *fa, int fd)
++{
++	for (struct fdop *op = fa->__actions; op; op = op->next) {
++		if (op->cmd == FDOP_DUP2 && op->srcfd == fd &&
++		    !pspawn_prior_action(op, fd)) return 1;
++	}
++	return 0;
++}
++
+ int posix_spawn(pid_t *restrict res, const char *restrict path,
+ 	const posix_spawn_file_actions_t *fa,
+ 	const posix_spawnattr_t *restrict attr,
+@@ -65,6 +108,9 @@
+ 	if (!path || !path[0]) return EINVAL;
+ 	size_t name_len = strlen(path);
+ 	if (name_len > POUCH_SPAWN_NAME_MAX) return ENAMETOOLONG;
++
++	int source_ec = pspawn_validate_sources(fa);
++	if (source_ec) return source_ec;
+ 
+ 	/* --- child fd model: slot i -> the parent fd that backs it, or -1.
+ 	 * Seed 0/1/2 = inherit the parent's standard streams THAT EXIST (POSIX: an
+@@ -115,6 +161,7 @@
+ 				int pf = open(op->path, op->oflag, op->mode);
+ 				if (pf < 0) { ec = errno; goto done; }
+ 				opened[nopened++] = pf;
++				if (pspawn_uses_parent_source(fa, pf)) { ec = EBADF; goto done; }
+ 				child_fd[dst] = pf;
+ 				break;
+ 			}

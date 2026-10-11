@@ -5,6 +5,7 @@ parent: moc-pouch-seam
 title: "Process lifecycle — posix_spawn, wait, pipe, the environ populate, the terminators"
 code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
+  - usr/lib/pouch/patches/0052-pouch-spawn-action-sources.patch
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
   - usr/lib/pouch/patches/0025-pouch-env.patch
@@ -17,7 +18,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-15
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -109,6 +110,22 @@ answer `ENOSYS` rather than silently spawning in the wrong directory.
 Slots 0/1/2 are seeded by PROBING the parent's std fds (a lowest-free dup
 with each right, then close) — a parent lacking stderr must not list a
 non-existent fd and fail the whole spawn.
+
+**Action history and temporary descriptor provenance (0052).** A source
+closed by an earlier child action cannot fall back to the parent's live fd.
+The nearest earlier CLOSE/OPEN/DUP2 decides whether that source was removed
+or reestablished. This check runs before opening parent-side temporaries.
+Each newly opened fd is then checked against every original-parent source
+mentioned in the action list, including aliases later closed or overwritten.
+A collision proves that original source was absent: reject EBADF after
+registering the temporary for cleanup. An explicitly child-created source
+continues to resolve through the existing model. No additional R/W existence
+probes or shared state are introduced; concurrent parent fd close/reuse stays
+outside the existing supported envelope. The final kernel list still validates
+original sources, with its existing errno collapse; a discarded invalid
+original source without a temporary collision remains a tracked gap.
+See `docs/POUCH-SPAWN-ACTION-REVIEW.md` for self-review and bounded host evidence.
+This patch has not yet been rebuilt into the shared sysroot or guest-tested.
 
 **Contiguity is a hard requirement, not a nicety.** The kernel installs
 the list at consecutive lowest-free slots, so a HOLE (`{0,2}`) cannot be
