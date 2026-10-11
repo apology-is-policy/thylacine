@@ -8,6 +8,7 @@ code:
   - usr/lib/pouch/patches/0052-pouch-spawn-action-sources.patch
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
+  - usr/pouch-hello/pouch-hello-spawn-actions.c
   - usr/lib/pouch/patches/0025-pouch-env.patch
   - usr/lib/pouch/patches/0011-pouch-abort.patch
   - usr/lib/pouch/patches/0012-pouch-mallocng-crash.patch
@@ -124,8 +125,14 @@ probes or shared state are introduced; concurrent parent fd close/reuse stays
 outside the existing supported envelope. The final kernel list still validates
 original sources, with its existing errno collapse; a discarded invalid
 original source without a temporary collision remains a tracked gap.
-See `docs/POUCH-SPAWN-ACTION-REVIEW.md` for self-review and bounded host evidence.
-This patch has not yet been rebuilt into the shared sysroot or guest-tested.
+See `docs/POUCH-SPAWN-ACTION-REVIEW.md` for single-agent self-review, host
+baseline/mutant evidence and the native14-case ordinary-user witness. The
+full official sysroot rebuild includes static/shared libc; runtime7's static
+probe verifies child bytes/wait/errors and exits0 with clean harness shutdown.
+The witness measures an identical O_CREAT open to locate its temporary slot:
+the parent-directory handle means /dev/null predicts a different slot. The
+initial wrong-slot run is preserved as a failed fixture, not a code regression.
+Existing Ninja and dynamic-loader behavior are not requalified by this probe.
 
 **Contiguity is a hard requirement, not a nicety.** The kernel installs
 the list at consecutive lowest-free slots, so a HOLE (`{0,2}`) cannot be

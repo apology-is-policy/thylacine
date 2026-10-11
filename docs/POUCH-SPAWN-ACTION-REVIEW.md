@@ -83,8 +83,50 @@ now obtains the installed SDK through xcrun. These setup failures are recorded,
 not test passes.
 
 Evidence: `work/oct11-native-tools/spawn-order/`, including final inputs,
-compiler commands, raw logs, baseline and mutant outputs. The shared sysroot
-and existing Ninja executable have not been rebuilt with this patch. No guest
-qualification, native Ninja self-build or production bake is claimed. Disk
-headroom is approximately8.3GiB; a broader build/VM run needs additional
-reserve above the mandatory8GiB floor.
+compiler commands, raw logs, baseline and mutant outputs.
+
+The official full `tools/build.sh sysroot` rebuild now includes all49 patches
+in both libc.a and libc.so. Its actual spawn implementation matches the final
+host-test implementation after the harness-only include substitution. Earlier
+sysroot and Pouch program artifacts were preserved as APFS clones before the
+build (which replaces both build directories); the existing Ninja executable
+remains linked to its earlier libc.
+
+`usr/pouch-hello/pouch-hello-spawn-actions.c` is an explicit native witness,
+not a production boot probe. Build it with the rebuilt target sysroot:
+
+```sh
+tools/pouch-clang -O2 -Wall -Wextra -static \
+  usr/pouch-hello/pouch-hello-spawn-actions.c -o /path/to/spawn-probe
+```
+
+Expose that binary read-only through Haul, then run its absolute guest path
+from a writable ordinary-user directory as uid1000. It creates/removes
+`spawn-target`; use an otherwise empty directory. The runtime7 fixture passes
+all14 cases: ordered closes, reopen/reestablishment, chained sources,
+three temporary-collision shapes, high parent sources and open failure.
+Successful cases verify child uid, exact redirected bytes and wait status;
+errors preserve the output pid. The lowest-free-slot check is bounded evidence
+against low-slot leaks, not a complete handle-table leak census. Host mocks
+separately check all temporary cleanup. Final probe, shell and sync exit0;
+raw result assertions pass and the whole harness exits0 after QMP quit/serial
+EOF. Host servers are reaped and the temporary host token removed.
+
+The first native witness (runtime6) failed three cases because it predicted
+an O_CREAT result from a /dev/null open. Pouch holds a parent-directory handle
+during O_CREAT: the measured returned file slot is4, while /dev/null gets3.
+That first run therefore missed the intended collision; the discarded-source
+case instead exposed the already recorded NT2d limitation. Preserve its raw
+failure, original source and disposition. The corrected witness measures and
+closes an identical path/flags open before constructing actions; production
+code was unchanged between runtime6 and runtime7. This is single-agent
+self-review, not an independent audit.
+
+Runtime7 retains the prior kernel and source-matched Stratum7dd103d daemon;
+its source/binary/libc/initrd/image receipts and logs live under
+`work/oct11-native-tools/`. The probe links static libc; rebuilding libc.so is
+not a dynamic-loader qualification. No native Ninja self-build or production
+bake is claimed. Fifteen obsolete October1 scratch disks were reclaimed with
+SHA256 receipts, preserving their source/initrds/raw logs and baseline images.
+Free space rose8.36 to11.32GiB before the fresh guest runs; the8448MiB runner
+floor stayed in force.
