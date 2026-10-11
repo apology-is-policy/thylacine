@@ -3948,3 +3948,19 @@ pub unsafe fn t_handle_flags_get(fd: i64) -> i64 {
          options(nostack));
     x0
 }
+pub const T_SYS_HANDLE_FLAGS_SET: u64 = 130;
+pub const T_SYS_HANDLE_DUP_TO: u64 = 131;
+/// Set caller-local descriptor flags. Returns raw native negative errno.
+pub unsafe fn t_handle_flags_set(fd: i64, flags: u64) -> i64 {
+    let mut x0 = fd as u64;
+    asm!("svc #0", inout("x0") x0, in("x1") flags,
+         in("x8") T_SYS_HANDLE_FLAGS_SET, options(nostack));
+    x0 as i64
+}
+/// Atomically replace a distinct caller-local target; preserve source rights.
+pub unsafe fn t_handle_dup_to(source: i64, target: i64, flags: u64) -> i64 {
+    let mut x0 = source as u64;
+    asm!("svc #0", inout("x0") x0, in("x1") target as u64, in("x2") flags,
+         in("x8") T_SYS_HANDLE_DUP_TO, options(nostack));
+    x0 as i64
+}

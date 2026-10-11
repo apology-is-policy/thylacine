@@ -2461,4 +2461,23 @@ static inline long t_handle_flags_get(long fd) {
     return x0;
 }
 
+// Caller-local descriptor operations; raw native errno results.
+#define T_SYS_HANDLE_FLAGS_SET 130
+#define T_SYS_HANDLE_DUP_TO 131
+static inline long t_handle_flags_set(long fd, unsigned long flags) {
+    register long x0 __asm__("x0") = fd;
+    register unsigned long x1 __asm__("x1") = flags;
+    register long x8 __asm__("x8") = T_SYS_HANDLE_FLAGS_SET;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
+    return x0;
+}
+static inline long t_handle_dup_to(long source, long target, unsigned long flags) {
+    register long x0 __asm__("x0") = source;
+    register long x1 __asm__("x1") = target;
+    register unsigned long x2 __asm__("x2") = flags;
+    register long x8 __asm__("x8") = T_SYS_HANDLE_DUP_TO;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
 #endif // THYLA_SYSCALL_H

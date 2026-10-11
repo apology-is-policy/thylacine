@@ -8195,6 +8195,27 @@ static s64 sys_handle_flags_get_handler(u64 hraw) {
     return on ? (s64)SYS_HANDLE_CLOSE_ON_EXEC : 0;
 }
 
+// The descriptor flag and target replacement share existing table ownership.
+// Range checks precede narrowing; a failed mutation never re-queries a slot.
+static s64 sys_handle_flags_set_handler(u64 hraw, u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    if (flags & ~(u64)SYS_HANDLE_CLOSE_ON_EXEC) return -(s64)T_E_INVAL;
+    if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    return handle_set_cloexec(t->proc, (hidx_t)hraw, flags != 0) < 0
+        ? -(s64)T_E_BADF : 0;
+}
+
+static s64 sys_handle_dup_to_handler(u64 old, u64 target, u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    if (flags & ~(u64)SYS_HANDLE_CLOSE_ON_EXEC) return -(s64)T_E_INVAL;
+    if (old >= (u64)PROC_HANDLE_MAX || target >= (u64)PROC_HANDLE_MAX)
+        return -(s64)T_E_BADF;
+    if (old == target) return -(s64)T_E_INVAL;
+    return handle_dup_to_checked(t->proc, (hidx_t)old, (hidx_t)target, flags != 0);
+}
+
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -15846,6 +15867,14 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
 
     case SYS_HANDLE_FLAGS_GET:
         ctx->regs[0] = (u64)sys_handle_flags_get_handler(ctx->regs[0]);
+        return;
+
+    case SYS_HANDLE_FLAGS_SET:
+        ctx->regs[0] = (u64)sys_handle_flags_set_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_HANDLE_DUP_TO:
+        ctx->regs[0] = (u64)sys_handle_dup_to_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
         return;
 
     case SYS_DUP:

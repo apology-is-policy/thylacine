@@ -715,12 +715,20 @@ void test_handles_dup_to(void) {
                 "an out-of-range target refuses");
     TEST_ASSERT(handle_dup_to(p, 45, 44, false) < 0, "an EMPTY source refuses");
 
+    // Native checked errors are decided by the operation, not a racy re-query.
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, src, src, false), -22, "same slot EINVAL");
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, 45, 44, false), -9, "absent source EBADF");
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, -1, 44, false), -9, "negative EBADF");
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, src, PROC_HANDLE_MAX, false), -9, "bounds EBADF");
+
     // (6) THE ALIAS GATE, the same predicate handle_dup and the fork copy use:
     // a KOBJ_SRV connection Spoor is pinned to its Proc, so a second handle
     // naming it is refused here exactly as it is there. A target left untouched
     // by the refusal is part of the contract.
     hidx_t srv = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, NULL);
     TEST_ASSERT(srv >= 0, "srv alloc failed");
+    TEST_EXPECT_EQ(handle_dup_to_checked(p, srv, 40, true), -13, "forbidden alias EACCES");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 40), 0, "failed alias preserves occupied target flag");
     TEST_ASSERT(handle_dup_to(p, srv, 44, false) < 0,
                 "a non-aliasable source refuses (NoSrvDup)");
     TEST_ASSERT(handle_get(p, 44, &got) != 0,

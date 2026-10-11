@@ -1,7 +1,7 @@
 ---
 id: seam-pouch-dup2-target
 type: seam
-title: "`dup2`/`dup3` onto a chosen target fd has no kernel primitive"
+title: "Pouch target duplication qualification and remaining socket scope"
 status: open
 surface: [sub-pouch-process]
 opened-by: chg-2026-07-23-cl1b-process
@@ -11,24 +11,15 @@ updated: 2026-10-15
 ---
 ## Owed
 
-`handle_dup` allocates the lowest free slot — that is `dup()`. There is
-no dup-onto-a-chosen-fd, which is what `dup2` is DEFINED by. The
-toolchain never needs it (posix_spawn resolves its file_actions
-statically into the positional spawn fd list, and popen/system route
-through that resolver), so the call fails loud with `ENOSYS`.
-
-Left non-functional: `freopen(filename, …)` (reopen a stream onto a
-fixed fd), `login_tty`, `daemon`, `wordexp`.
+Native target duplication is implemented through approved native 131 (codex/astra 130) and Pouch 0055;
+bounded host/kernel/guest qualification passed. Tagged socket duplication is still explicitly
+unsupported. Public descriptor flags are implemented, but raw internal fcntl
+users remain gaps; do not call full freopen/login_tty/daemon/wordexp qualified
+because one primitive now exists.
 
 ## The lift
 
-A kernel dup-onto-target primitive — a new syscall, hence an ABI
-addition to escalate when a real workload needs one. Native internal
-`handle_dup_to` now exists for Vivarium, but has no native syscall exposure;
-lowest-free `SYS_DUP` cannot implement atomic replacement.
-
-Patch0054 closes only the self-alias gap: `old == new` now checks native129
-metadata or the Pouch socket slot under its owner lookup. The earlier
-implementation returned success without validating nonnegative descriptors.
-Self-dup preserves flags and performs no close/reopen. Distinct-target support
-remains open; this note does not claim it was delivered.
+`handle_dup_to_checked` exposes the existing atomic replacement core through
+native 131 (HANDLE_DUP_TO; codex/astra 130), with flags from the caller and unchanged alias/rights rules. Self-dup
+remains the separately validated 0054 behavior. See
+`docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md` and its source-matched evidence.

@@ -19,6 +19,20 @@ design:
 created: 2026-08-03
 updated: 2026-10-14
 ---
+## Native descriptor mutation ABI (October 11; main B-3b)
+
+Approved HANDLE_FLAGS_SET (native 130 on main; Astra's 129) takes fd/flags and
+returns 0; HANDLE_DUP_TO (native 131; Astra's 130) takes source/target/flags and
+returns target. Only close-on-exec bit0 is accepted. Current process, flags,
+full-width bounds and distinct targets are validated before the locked
+operation. Invalid slots give EBADF, invalid flags/self-target EINVAL,
+forbidden source aliases EACCES. EPERM is excluded. C and Rust mirrors carry
+the register-only contract; there is no user-memory record or new authority.
+Linux 130/131 are tkill/tgkill, Vivarium TIER2 rows consumed before native
+dispatch; the native ceiling is 131. Design:
+docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md; qualification is recorded
+separately in NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md.
+
 ## Native handle metadata query (October 11; main B-3b)
 
 Operator-approved `SYS_HANDLE_FLAGS_GET` takes a full-width handle index in

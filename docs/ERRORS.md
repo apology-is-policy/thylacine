@@ -542,3 +542,12 @@ ENOSYS for this query alone (the defined query failures exclude EPERM).
 An explicit -ENOSYS also stops spawn before child publication. This does not alter the
 existing translation of legacy -1 results. Linux kill at number 129
 is answered by the Vivarium's kill translation rather than entering this handler.
+
+### Native descriptor mutation (130/131)
+
+HANDLE_FLAGS_SET(fd,flags) returns0; HANDLE_DUP_TO(source,target,flags) returns
+the target. Both accept only close-on-exec bit0. In order: missing Proc/thread
+EINVAL, unknown flag bits EINVAL, full-width index bounds EBADF, same-index dup
+EINVAL, locked non-live source EBADF; prohibited duplication aliases EACCES.
+No EPERM is returned. Failures do not mutate slots or flags. Pouch alone maps
+legacy unknown-call raw-1 to ENOSYS at these boundaries; native wrappers stay raw.

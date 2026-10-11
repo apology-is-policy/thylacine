@@ -30,11 +30,11 @@ checks = {
     'usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch': [
         r'\+#define __NR_thyla_handle_flags_get 129\b',
         r'\+#define SYS_thyla_handle_flags_get 129\b'],
-    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+129\b'],
+    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+131\b'],
     'kernel/vivarium.c': [
         r'VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET',
         r'\{ VIV_LINUX_KILL,\s+VIV_TIER2 \}',
-        r'VIV_LINUX_TKILL > VIV_NATIVE_CEILING'],
+        r'VIV_LINUX_SIGALTSTACK > VIV_NATIVE_CEILING'],
 }
 for name, patterns in checks.items():
     source = (r / name).read_text()

@@ -2503,6 +2503,12 @@ enum {
     // for a non-live/out-of-range slot, -EINVAL without a current Proc.
     // This is an instantaneous query, not a pin against concurrent close/reuse.
     SYS_HANDLE_FLAGS_GET = 129, // arg: fd (x0); no user-memory pointer
+    // Caller-local metadata / exact-target replacement. Flags are 0 or bit0.
+    // Validate Proc, flags, full-width bounds, then (DUP_TO) distinct indices;
+    // locked validity/alias checks follow. Errors: EINVAL, EBADF, and DUP_TO
+    // EACCES for forbidden alias kinds. No EPERM; no cross-Proc authority.
+    SYS_HANDLE_FLAGS_SET = 130, // x0 fd, x1 flags -> 0
+    SYS_HANDLE_DUP_TO = 131,    // x0 source, x1 target, x2 flags -> target
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes

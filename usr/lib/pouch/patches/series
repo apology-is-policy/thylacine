@@ -178,3 +178,5 @@
 0053-pouch-spawn-source-query.patch
 # 0054 (codex/astra 0051): validate self-dup with the native query or the Pouch socket-slot owner.
 0054-pouch-dup2-self-query.patch
+# 0055 (codex/astra 0052): native descriptor flag setter and atomic target replacement (130/131).
+0055-pouch-descriptor-operations.patch

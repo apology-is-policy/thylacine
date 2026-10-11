@@ -24,11 +24,22 @@ if a.mutant:
     }[a.mutant]
     assert s.count(old) == 1
     s = s.replace(old, new)
-for header in ('"syscall.h"', '"_pouch_process.h"', '"_pouch_socket.h"'):
+for header in ('"syscall.h"', '"_pouch_process.h"', '"_pouch_socket.h"', '"_pouch_descriptor.h"'):
     s = s.replace('#include '+header, '/* supplied by host boundary harness */')
 a.output.mkdir(parents=True, exist_ok=False)
 (a.output/'dup2-under-test.c').write_text(s)
+common = a.musl/'src/internal/_pouch_descriptor.h'
+if common.exists():
+    body=common.read_text()
+    for h in ('syscall.h','_pouch_socket.h'):
+        body=body.replace('#include "'+h+'"','/* host boundary */')
+    (a.output/'descriptor-under-test.h').write_text(body)
+else:
+    (a.output/'descriptor-under-test.h').write_text('/* older source has no common helper */\n')
+
 inputs = [source, r/'tools/host-tests/pouch-dup2-self.c', Path(__file__)]
+if common.exists():
+    inputs.append(common)
 (a.output/'inputs.json').write_text(json.dumps({str(x):hashlib.sha256(x.read_bytes()).hexdigest() for x in inputs},indent=2)+'\n')
 sdk = ['-isysroot', subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system() == 'Darwin' else []
 for opt in ('0','2'):

@@ -115,6 +115,18 @@ void test_vivarium_t1_renumbers(void) {
 // future change promotes one to a table row, this test fails and forces the
 // promotion to be deliberate rather than incidental.
 void test_vivarium_rejects_are_deliberate(void) {
+    // Linux 129-131 share numbers with the native descriptor calls. A TIER2
+    // verdict is consumed by viv_linux_dispatch before the native switch;
+    // TRANSLATED is the one verdict that would hand the frame to a handle op.
+    u64 mutation_args[VIV_NARGS] = {1, 1, 1, 0, 0, 0};
+    struct viv_call mutation_out = {0};
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_KILL, mutation_args, &mutation_out),
+                   (int)VIV_TIER2, "Linux kill is the kill shell, never HANDLE_FLAGS_GET");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TKILL, mutation_args, &mutation_out),
+                   (int)VIV_TIER2, "Linux tkill is the kill shell, never HANDLE_FLAGS_SET");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TGKILL, mutation_args, &mutation_out),
+                   (int)VIV_TIER2, "Linux tgkill is the kill shell, never HANDLE_DUP_TO");
+
     u64 args[VIV_NARGS];
     struct viv_call out;
     viv_fill_args(args);

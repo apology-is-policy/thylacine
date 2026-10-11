@@ -21,6 +21,7 @@ static int deny_probe, query_error;
 #ifndef QUERY_MODE
 #define QUERY_MODE 1
 #endif
+static int descriptor_flags[256], want_count=3;
 static int handles[256], spawned[16], nspawned, calls, opens, fails;
 static int alloc_handle(int object) {
     for (int i = 0; i < 256; ++i) if (!handles[i]) {
@@ -46,7 +47,7 @@ static long __attribute__((unused)) mock_syscall2(long number, long fd, long rig
 static long mock_syscall1(long number, long arg) {
     if (number == SYS_thyla_handle_flags_get) {
         if (query_error) return -query_error;
-        return arg < 0 || arg >= 256 || !handles[arg] ? -EBADF : 0;
+        return arg < 0 || arg >= 256 || !handles[arg] ? -EBADF : descriptor_flags[arg];
     }
     if (number == SYS_thyla_close) return mock_close((int)arg);
     assert(number == SYS_thyla_spawn_full_argv);
@@ -82,19 +83,21 @@ static void add(int cmd, int dst, int src) {
 static void reset(void) {
     while (head) { struct fdop *next = head->next; free(head); head = next; }
     memset(handles, 0, sizeof handles);
+    memset(descriptor_flags, 0, sizeof descriptor_flags); want_count=3;
     memset(spawned, 0, sizeof spawned);
     for (int i = 0; i < 3; ++i) handles[i] = 100 + i;
     handles[8] = 108; handles[100] = 200;
     calls = opens = nspawned = 0; deny_probe = -1; query_error = 0;
 }
 static void check(const char *name, int want, int stdout_object, int want_opens) {
-    int before[256]; memcpy(before, handles, sizeof before);
+    int before[256], before_flags[256]; memcpy(before, handles, sizeof before);
+    memcpy(before_flags,descriptor_flags,sizeof before_flags);
     posix_spawn_file_actions_t fa = { .__actions = head };
     pid_t pid = -123;
     char *argv[] = { "child", NULL };
     int r = pouch_spawn_under_test(&pid, "/child", &fa, NULL, argv, NULL);
-    int ok = r == want && opens == want_opens && !memcmp(before, handles, sizeof before);
-    if (!want) ok &= calls == 1 && pid == 42 && nspawned == 3 && spawned[1] == stdout_object;
+    int ok = r == want && opens == want_opens && !memcmp(before, handles, sizeof before) && !memcmp(before_flags,descriptor_flags,sizeof before_flags);
+    if (!want) ok &= calls == 1 && pid == 42 && nspawned == want_count && spawned[1] == stdout_object;
     else ok &= calls == (want == ENOENT ? 1 : 0) && pid == -123;
     printf("%s %s: result=%d spawn=%d opens=%d stdout=%d\n", ok ? "PASS" : "FAIL", name, r, calls, opens, spawned[1]);
     fails += !ok;
@@ -157,5 +160,19 @@ int main(void) {
     check("legacy-query-unavailable-fails-before-spawn", ENOSYS, 0, 0);
     reset(); query_error = 1;
     check("legacy-query-unavailable-standard-streams", ENOSYS, 0, 0);
+    reset(); descriptor_flags[2]=1; want_count=2;
+    check("flagged-trailing-stream-excluded",0,101,0);
+    reset(); descriptor_flags[1]=1;
+    check("flagged-interior-stream-refused",EINVAL,0,0);
+    reset(); descriptor_flags[1]=1; add(FDOP_DUP2,1,1);
+    check("spawn-self-action-clears-child-flag",0,101,0);
+    reset(); descriptor_flags[1]=1; add(FDOP_DUP2,1,8);
+    check("spawn-distinct-action-clears-child-flag",0,108,0);
+    reset(); descriptor_flags[1]=1; add(FDOP_OPEN,1,0);
+    check("spawn-open-clears-child-flag",0,900,1);
+    reset(); descriptor_flags[2]=1; add(FDOP_DUP2,1,2); want_count=2;
+    check("flagged-source-available-before-final-close",0,102,0);
+    reset(); add(FDOP_OPEN,1,0); add(FDOP_OPEN,2,0); head->oflag=O_CLOEXEC;
+    check("unsupported-open-flags-before-temporaries",ENOSYS,0,0);
     reset(); printf("failures=%d\n", fails); return !!fails;
 }

@@ -10,7 +10,8 @@
 > mode, nonblock and append (vote 7). The text below keeps the numbering
 > and the collision analysis this design was written against on codex/astra.
 
-Status: APPROVED by the operator, October 11, 2026; implementation pending.
+Status: APPROVED by the operator, October 11, 2026; implementation and bounded
+qualification complete. See NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md.
 Source reviewed at 2e2ba81b9. This is a single-agent design review, not an
 independent audit. The approval reserves native129/130 as specified below.
 

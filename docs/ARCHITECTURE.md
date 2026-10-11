@@ -3057,6 +3057,14 @@ Per §18:
 
 The `burrow_*` rows above are the **Tier 2** memory surface (§6.5): a Burrow held as a first-class `KObj_Burrow` handle, for *shared*, *named*, or *transferable* memory — distinct from the handle-free Tier 1 `burrow_attach` / `burrow_detach` (§11.2). Tier 2 is design intent; it lands when a native workload needs shared memory, not at v1.0.
 
+Native 130/131 (FLAGS_SET, DUP_TO; Astra's 129/130) additionally expose caller-local flag replacement and atomic
+exact-target duplication. They reuse existing table locks, alias policy and
+object reference ordering; no process-transfer or ambient authority is added.
+See NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md for the approved register/error
+contract; on main the Linux 129-131 collisions are the kill family's Vivarium
+TIER2 rows, consumed before native dispatch. Qualification is tracked
+in NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md, not inferred from the getter's tests.
+
 The operator-approved native handle query is implemented separately from the
 rights-query design row. Its C/Rust mirrors and Vivarium 129 collision contract
 are documented in `vault/system/kernel/entry/sub-kernel-syscall-abi.md` and

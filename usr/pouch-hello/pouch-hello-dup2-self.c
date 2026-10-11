@@ -48,8 +48,8 @@ int main(int argc, char **argv) {
     check(live == 1024 && full_result == fd, "full-table-self-dup");
     check(close_errors == 0 && t_close(narrow) == 0, "full-table-cleanup");
     errno = 0;
-    check(dup2(fd, fd+1) == -1 && errno == ENOSYS &&
-          t_handle_flags_get(fd) == flags, "distinct-target-remains-unsupported");
+    check(dup2(fd, fd+1) == fd+1 && t_handle_flags_get(fd+1) == 0 &&
+          close(fd+1) == 0 && t_handle_flags_get(fd) == flags, "distinct-target-native");
     check(close(fd) == 0, "close-native");
     errno = 0;
     check(dup2(fd, fd) == -1 && errno == EBADF, "closed-native");

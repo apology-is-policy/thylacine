@@ -5,6 +5,7 @@
 #include <unistd.h>
 #define POUCH_SOCK_TAG 0x40000000
 #define SYS_thyla_handle_flags_get 129
+#define SYS_thyla_handle_dup_to 131
 static long reply;
 static int queries, resolves, failures;
 struct pouch_sock_slot { int in_use; };
@@ -18,6 +19,10 @@ static __attribute__((unused)) long __syscall1(long number, long fd) {
     ++queries;
     return reply;
 }
+static __attribute__((unused)) long __syscall3(long number, long old, long target, long flags) {
+    assert(number==SYS_thyla_handle_dup_to && old==8 && target==9 && flags==0); ++queries; return reply;
+}
+#include "descriptor-under-test.h"
 #define dup2 tested_dup2
 #include "dup2-under-test.c"
 #undef dup2
@@ -43,7 +48,7 @@ int main(void) {
     slot.in_use = 0;
     check("closed-socket", POUCH_SOCK_TAG, POUCH_SOCK_TAG, 0, -1, EBADF, 0, 1);
     check("malformed-socket-tag", INT_MAX, INT_MAX, 0, -1, EBADF, 0, 1);
-    check("distinct-still-unsupported", 8, 9, 0, -1, ENOSYS, 0, 0);
+    check("distinct-native-target", 8, 9, 9, 9, EDOM, 1, 0);
     printf("tests=12 failures=%d\n", failures);
     return !!failures;
 }

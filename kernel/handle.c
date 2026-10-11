@@ -41,6 +41,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/loom.h>
@@ -831,27 +832,27 @@ hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) 
 // is not close-then-dup; the body is handle_dup_common's capture-and-acquire
 // followed by handle_replace's install-then-release-outside-the-lock, with the
 // install going to a caller-named slot that may be free.
-hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
+int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     struct HandleTable *t = proc_handles_or_extinct(p);
-    if (old < 0   || old   >= PROC_HANDLE_MAX) return -1;
-    if (new_h < 0 || new_h >= PROC_HANDLE_MAX) return -1;
+    if (old < 0   || old   >= PROC_HANDLE_MAX) return -T_E_BADF;
+    if (new_h < 0 || new_h >= PROC_HANDLE_MAX) return -T_E_BADF;
     // Defence in depth: the caller returns EINVAL for this. Serving it here
     // would be nearly harmless (acquire, capture the same slot, install the
     // same values, release -- net zero) EXCEPT that it would set cloexec on a
     // descriptor POSIX says dup2 returns untouched. Refusing is one line.
-    if (old == new_h) return -1;
+    if (old == new_h) return -T_E_INVAL;
 
     spin_lock(&t->lock);
     struct Handle *src = &t->slots[old];
     if (src->magic != HANDLE_MAGIC) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_BADF;
     }
     // The SAME predicate handle_dup and the fork copy use -- all three create a
     // second handle naming one object, so all three must answer identically.
     if (!handle_slot_may_alias(src)) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     enum kobj_kind kind   = src->kind;
@@ -892,6 +893,12 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     // the same reason.
     if (had) handle_release_obj(old_kind, old_obj);
     return new_h;
+}
+
+// Preserve the historical flat-error contract for existing Vivarium callers.
+hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
+    int ret = handle_dup_to_checked(p, old, new_h, cloexec);
+    return ret < 0 ? -1 : (hidx_t)ret;
 }
 
 int handle_set_cloexec(struct Proc *p, hidx_t h, bool on) {

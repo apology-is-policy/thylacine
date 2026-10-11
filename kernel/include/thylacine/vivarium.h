@@ -570,7 +570,13 @@ enum {
 // Linux Proc's kill never reaches the query; kill's argument is now
 // per-number (vivarium.c). The lowest signal-family number still argued by
 // the ceiling is tkill (130).
-#define VIV_NATIVE_CEILING 129
+//
+// B-3b appends SYS_HANDLE_FLAGS_SET at 130 and SYS_HANDLE_DUP_TO at 131
+// (Astra's 129 and 130). Linux 130 and 131 are tkill and tgkill, VIV_TIER2
+// rows consumed before the native switch exactly as kill's is, so each now
+// has a per-number argument (vivarium.c). The lowest row still argued by the
+// ceiling is sigaltstack (132), a VIV_ENOSYS row.
+#define VIV_NATIVE_CEILING 131
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

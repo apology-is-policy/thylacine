@@ -12,16 +12,19 @@ design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
 updated: 2026-10-15
 ---
-## Native ceiling 129 (B-3b)
+## Native ceiling 131 (B-3b)
 
-Native HANDLE_FLAGS_GET (129; Astra's 128 on codex/astra) overlaps Linux kill.
-Kill's row is VIV_TIER2 (`vivarium_kill_decide` + `viv_kill`), and
-`viv_linux_dispatch` returns before the native switch for every row that is
-not TRANSLATED, so a Linux kill never reads a handle's flags. The kill
-family's above-ceiling assertion is replaced by an explicit number-collision
-pin; tkill (130) carries the ceiling argument. Restart_syscall (128) keeps its
-ENOSYS row against `SYS_ICACHE_SYNC_SPACE`. See [[sub-kernel-syscall-abi]] and
-`docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`.
+Astra's native descriptor calls land on main as HANDLE_FLAGS_GET (129),
+HANDLE_FLAGS_SET (130) and HANDLE_DUP_TO (131) -- her 128-130 on
+codex/astra, moved because main's 128 is `SYS_ICACHE_SYNC_SPACE`. They overlap
+Linux kill, tkill and tgkill. Those rows are VIV_TIER2 (`vivarium_kill_decide`
++ `viv_kill`), and `viv_linux_dispatch` returns before the native switch for
+every row that is not TRANSLATED, so a Linux kill-family call never reaches a
+handle operation. The family's above-ceiling assertion is replaced by three
+number-collision pins, test_vivarium checks the three TIER2 verdicts, and
+sigaltstack (132, VIV_ENOSYS) now carries the ceiling argument.
+Restart_syscall (128) keeps its ENOSYS row against `SYS_ICACHE_SYNC_SPACE`.
+See [[sub-kernel-syscall-abi]] and `docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md`.
 
 ## Purpose
 

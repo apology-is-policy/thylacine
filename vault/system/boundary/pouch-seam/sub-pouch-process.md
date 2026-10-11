@@ -8,6 +8,8 @@ code:
   - usr/lib/pouch/patches/0052-pouch-spawn-action-sources.patch
   - usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch
   - usr/lib/pouch/patches/0054-pouch-dup2-self-query.patch
+  - usr/lib/pouch/patches/0055-pouch-descriptor-operations.patch
+  - usr/pouch-hello/pouch-hello-descriptor-ops.c
   - usr/pouch-hello/pouch-hello-dup2-self.c
   - usr/pouch-hello/pouch-hello-handle-query.c
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
@@ -25,6 +27,16 @@ design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
 updated: 2026-10-15
 ---
+## Descriptor operations checkpoint (October 11; main B-3b)
+
+Patch0055 (codex/astra 0052) consumes approved native 130/131 for public F_SETFD
+and exact-target dup2/dup3; F_GETFD uses 129. Self-dup preserves flags. Live tagged sockets remain
+explicit ENOSYS for unsupported flag/target operations; invalid tags are EBADF.
+The current spawn interpreter tracks child flags and applies final exclusion
+after actions; self-DUP2 actions clear the child flag. OPEN with O_CLOEXEC is
+rejected before temporaries; sparse lists still fail. Raw internal SYS_fcntl
+callers and general inheritance remain gaps. See `docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md` for actual-source tests, audit reasoning and source-matched qualification limits.
+
 ## Identity — the calls that could not report failure (A-6)
 
 A program's own identity belongs here with the rest of what it knows about

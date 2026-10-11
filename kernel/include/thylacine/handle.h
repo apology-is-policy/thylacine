@@ -461,6 +461,9 @@ hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
 // caught it, and a primitive that cannot corrupt beats one that happens not
 // to), an empty `old`, or a source the alias gate rejects.
 hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
+// Same atomic operation with checked errno results. Source/alias failures
+// are decided under the table lock, never re-queried after failure.
+int handle_dup_to_checked(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 
 // #151: read / write a slot's close-on-exec flag. Returns 0 or 1 (get) and 0
 // (set) on success; -1 if h is out of range or names a free slot.

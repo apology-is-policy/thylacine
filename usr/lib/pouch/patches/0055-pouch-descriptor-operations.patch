@@ -1,0 +1,241 @@
+Pouch descriptor flags and atomic target duplication over approved native 130/131
+(codex/astra 129/130).
+
+--- /dev/null
++++ b/src/internal/_pouch_descriptor.h
+@@ -0,0 +1,22 @@
++/* Native descriptor operations only. Tagged sockets have another owner. */
++#ifndef _POUCH_DESCRIPTOR_H
++#define _POUCH_DESCRIPTOR_H
++#include <errno.h>
++#include "syscall.h"
++#include "_pouch_socket.h"
++
++static inline int pouch_descriptor_check(int fd)
++{
++    if (fd < 0) return EBADF;
++    if (fd & POUCH_SOCK_TAG)
++        return pouch_sock_resolve(fd) ? ENOSYS : EBADF;
++    return 0;
++}
++
++/* These metadata/dup contracts exclude EPERM, so legacy unknown-call -1
++ * can be translated here without changing unrelated native error handling. */
++static inline long pouch_descriptor_result(long result)
++{
++    return result == -1 ? -ENOSYS : result;
++}
++#endif
+--- a/src/fcntl/fcntl.c
++++ b/src/fcntl/fcntl.c
+@@ -1,48 +1,28 @@
+-#define _GNU_SOURCE
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <errno.h>
+-#include "syscall.h"
++#include "_pouch_descriptor.h"
+ 
+ int fcntl(int fd, int cmd, ...)
+ {
+-	unsigned long arg;
+-	va_list ap;
+-	va_start(ap, cmd);
+-	arg = va_arg(ap, unsigned long);
+-	va_end(ap);
+-	if (cmd == F_SETFL) arg |= O_LARGEFILE;
+-	if (cmd == F_SETLKW) return syscall_cp(SYS_fcntl, fd, cmd, (void *)arg);
+-	if (cmd == F_GETOWN) {
+-		struct f_owner_ex ex;
+-		int ret = __syscall(SYS_fcntl, fd, F_GETOWN_EX, &ex);
+-		if (ret == -EINVAL) return __syscall(SYS_fcntl, fd, cmd, (void *)arg);
+-		if (ret) return __syscall_ret(ret);
+-		return ex.type == F_OWNER_PGRP ? -ex.pid : ex.pid;
+-	}
+-	if (cmd == F_DUPFD_CLOEXEC) {
+-		int ret = __syscall(SYS_fcntl, fd, F_DUPFD_CLOEXEC, arg);
+-		if (ret != -EINVAL) {
+-			if (ret >= 0)
+-				__syscall(SYS_fcntl, ret, F_SETFD, FD_CLOEXEC);
+-			return __syscall_ret(ret);
+-		}
+-		ret = __syscall(SYS_fcntl, fd, F_DUPFD_CLOEXEC, 0);
+-		if (ret != -EINVAL) {
+-			if (ret >= 0) __syscall(SYS_close, ret);
+-			return __syscall_ret(-EINVAL);
+-		}
+-		ret = __syscall(SYS_fcntl, fd, F_DUPFD, arg);
+-		if (ret >= 0) __syscall(SYS_fcntl, ret, F_SETFD, FD_CLOEXEC);
+-		return __syscall_ret(ret);
+-	}
+-	switch (cmd) {
+-	case F_SETLK:
+-	case F_GETLK:
+-	case F_GETOWN_EX:
+-	case F_SETOWN_EX:
+-		return syscall(SYS_fcntl, fd, cmd, (void *)arg);
+-	default:
+-		return syscall(SYS_fcntl, fd, cmd, arg);
+-	}
++    if (cmd != F_GETFD && cmd != F_SETFD) {
++        errno = ENOSYS;
++        return -1;
++    }
++    int flags = 0;
++    if (cmd == F_SETFD) {
++        va_list ap;
++        va_start(ap, cmd);
++        flags = va_arg(ap, int);
++        va_end(ap);
++        if (flags & ~FD_CLOEXEC) { errno = EINVAL; return -1; }
++    }
++    int ec = pouch_descriptor_check(fd);
++    if (ec) { errno = ec; return -1; }
++    long ret = cmd == F_GETFD
++        ? __syscall1(SYS_thyla_handle_flags_get, fd)
++        : __syscall2(SYS_thyla_handle_flags_set, fd, flags ? 1 : 0);
++    ret = pouch_descriptor_result(ret);
++    if (ret < 0) { errno = (int)-ret; return -1; }
++    return cmd == F_GETFD ? ((ret & 1) ? FD_CLOEXEC : 0) : 0;
+ }
+--- a/src/unistd/dup2.c
++++ b/src/unistd/dup2.c
+@@ -1,7 +1,7 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include "syscall.h"
+-#include "_pouch_socket.h"
++#include "_pouch_descriptor.h"
+ 
+ /* A self-dup validates the descriptor without changing flags or acquiring
+  * another reference. Native slots and Pouch socket slots have separate owners. */
+@@ -22,7 +22,10 @@
+ 		}
+ 		return new;
+ 	}
+-	/* Lowest-free duplication cannot atomically replace a chosen target. */
+-	errno = ENOSYS;
+-	return -1;
++	int ec = pouch_descriptor_check(old);
++	if (!ec) ec = pouch_descriptor_check(new);
++	if (ec) { errno = ec; return -1; }
++	long ret = pouch_descriptor_result(__syscall3(SYS_thyla_handle_dup_to, old, new, 0));
++	if (ret < 0) { errno = (int)-ret; return -1; }
++	return (int)ret;
+ }
+--- a/src/unistd/dup3.c
++++ b/src/unistd/dup3.c
+@@ -1,21 +1,19 @@
+ #define _GNU_SOURCE
+ #include <unistd.h>
++#include <fcntl.h>
+ #include <errno.h>
+-#include "syscall.h"
+-#include "_pouch_process.h"
++#include "_pouch_descriptor.h"
+ 
+-/* pouch: dup3. Same onto-target ENOSYS seam as dup2 (no kernel
+- * dup-onto-target primitive; the spawn fd_list is resolved statically). The
+- * runtime onto-target callers left non-functional are the same as dup2's
+- * (freopen(filename,...)/login_tty/daemon/wordexp -- freopen reaches __dup3
+- * directly); each fails loud. O_CLOEXEC is a no-op on Thylacine (a child
+- * inherits only explicitly-listed fds). POSIX: dup3 with old==new is EINVAL. */
+ int __dup3(int old, int new, int flags)
+ {
+-	(void)flags;
+-	if (old == new) { errno = EINVAL; return -1; }
+-	errno = ENOSYS;
+-	return -1;
++    if (old == new || (flags & ~O_CLOEXEC)) { errno = EINVAL; return -1; }
++    int ec = pouch_descriptor_check(old);
++    if (!ec) ec = pouch_descriptor_check(new);
++    if (ec) { errno = ec; return -1; }
++    long ret = pouch_descriptor_result(__syscall3(SYS_thyla_handle_dup_to,
++                                                old, new, flags ? 1 : 0));
++    if (ret < 0) { errno = (int)-ret; return -1; }
++    return (int)ret;
+ }
+ 
+ weak_alias(__dup3, dup3);
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -1,13 +1,9 @@
+ /* pouch boundary-line: posix_spawn over SYS_SPAWN_FULL_ARGV (Clade CL-1b).
+  *
+- * Thylacine has no fork/execve -- a Proc cannot clone-and-replace its image;
+- * SYS_SPAWN_FULL_ARGV is the atomic spawn primitive. So the upstream
+- * posix_spawn (clone(CLONE_VM|CLONE_VFORK) into a child that runs the
+- * file_actions then execve's) cannot apply here. Instead the file_actions are
+- * resolved STATICALLY -- interpreted against a model of the child's fd table
+- * -- into the positional fd_list the kernel installs (fd_list[i] -> child fd
+- * i, contiguous, lowest-free). The dominant toolchain pattern (open/dup2 a
+- * redirect onto fd 0/1/2, close a temp) resolves to {0,1,2}.
++ * Native RFORK105 and EXECVE104 exist, but Pouch's public fork/exec adapters
++ * do not implement those contracts. This bounded interpreter resolves file
++ * actions in the parent into an explicit contiguous list, not a general
++ * inherited descriptor table. Its close-on-exec model is child-local.
+  *
+  * envp is inherited via the kernel /env clone (env_clone_into), NOT the passed
+  * envp -- the SYS_SPAWN_FULL_ARGV _pad_envp slot reserves the per-child
+@@ -71,6 +67,8 @@
+ {
+ 	if (!fa) return 0;
+ 	for (struct fdop *op = fa->__actions; op; op = op->next) {
++		/* Reject unsupported open flags before any parent-side temporary. */
++		if (op->cmd == FDOP_OPEN && (op->oflag & O_CLOEXEC)) return ENOSYS;
+ 		if (op->cmd != FDOP_DUP2) continue;
+ 		if (op->srcfd < 0) return EBADF;
+ 		struct fdop *prior = pspawn_prior_action(op, op->srcfd);
+@@ -117,10 +115,11 @@
+ 	 * slot metadata without allocating or requesting additional rights.
+ 	 * Missing streams stay absent; other query errors fail closed. */
+ 	int child_fd[PSPAWN_MAXSLOT];
++	unsigned char child_cloexec[PSPAWN_MAXSLOT] = {0};
+ 	for (int i = 0; i < PSPAWN_MAXSLOT; i++) child_fd[i] = -1;
+ 	for (int i = 0; i < 3; i++) {
+ 		long flags = pspawn_handle_flags(i);
+-		if (flags >= 0) child_fd[i] = i;
++		if (flags >= 0) { child_fd[i] = i; child_cloexec[i] = (flags & 1) != 0; }
+ 		else if (flags != -EBADF) return (int)-flags;
+ 	}
+ 
+@@ -148,6 +147,8 @@
+ 				             && child_fd[src] >= 0) ? child_fd[src] : src;
+ 				if (srcpf < 0) { ec = EBADF; goto done; }
+ 				child_fd[dst] = srcpf;
++				/* Spawn DUP2 clears the target flag even for a self-action. */
++				child_cloexec[dst] = 0;
+ 				break;
+ 			}
+ 			case FDOP_OPEN: {
+@@ -161,6 +162,7 @@
+ 				opened[nopened++] = pf;
+ 				if (pspawn_uses_parent_source(fa, pf)) { ec = EBADF; goto done; }
+ 				child_fd[dst] = pf;
++				child_cloexec[dst] = 0;
+ 				break;
+ 			}
+ 			case FDOP_CHDIR:
+@@ -174,6 +176,11 @@
+ 			}
+ 		}
+ 	}
++
++	/* Apply final descriptor flags after actions, without mutating the parent.
++	 * Removing a flagged interior slot may create a hole: refuse, never compact. */
++	for (int i = 0; i < PSPAWN_MAXSLOT; i++)
++		if (child_cloexec[i]) child_fd[i] = -1;
+ 
+ 	/* --- validate contiguity + build the positional fd_list. The kernel
+ 	 * installs fd_list[i] at the lowest free slot = child fd i, so the child
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -473,3 +473,8 @@
+ 
+ #define __NR_thyla_handle_flags_get 129
+ #define SYS_thyla_handle_flags_get 129
++
++#define __NR_thyla_handle_flags_set 130
++#define SYS_thyla_handle_flags_set 130
++#define __NR_thyla_handle_dup_to 131
++#define SYS_thyla_handle_dup_to 131

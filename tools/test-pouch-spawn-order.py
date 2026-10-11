@@ -15,7 +15,7 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('musl', type=Path)
 p.add_argument('output', type=Path)
 p.add_argument('--cc', default=os.environ.get('CC') or shutil.which('/opt/homebrew/opt/llvm/bin/clang') or 'clang')
-p.add_argument('--mutant', choices=['close', 'query', 'legacy'])
+p.add_argument('--mutant', choices=['close', 'query', 'legacy', 'flags', 'self-flags', 'open-flags'])
 a = p.parse_args()
 r = Path(__file__).resolve().parent.parent
 sdk_flags = []
@@ -26,11 +26,14 @@ source = a.musl / 'src/process/posix_spawn.c'
 text = source.read_text()
 if a.mutant:
     old, new = {
+        'flags': ('if (child_cloexec[i])', 'if (0 && child_cloexec[i])'),
+        'self-flags': ('child_cloexec[dst] = 0;', 'child_cloexec[dst] = child_cloexec[dst];'),
+        'open-flags': ('if (op->cmd == FDOP_OPEN && (op->oflag & O_CLOEXEC))', 'if (0 && op->cmd == FDOP_OPEN && (op->oflag & O_CLOEXEC))'),
         'close': ('if (prior && prior->cmd == FDOP_CLOSE)', 'if (0 && prior && prior->cmd == FDOP_CLOSE)'),
         'query': ('if (!prior) {', 'if (0 && !prior) {'),
         'legacy': ('return flags == -1 ? -ENOSYS : flags;', 'return flags;'),
     }[a.mutant]
-    assert text.count(old) == 1
+    assert text.count(old) >= 1
     text = text.replace(old, new)
 # Use host standard C headers; replace only target ABI declarations and syscall
 # shim. The function body is byte-for-byte the series-produced implementation.

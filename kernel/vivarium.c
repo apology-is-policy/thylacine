@@ -43,12 +43,12 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is tkill (130);
+// rather than by a per-number one. The lowest such number is sigaltstack (132);
 // execve (221) is the newest. If the ceiling ever rises past one of these, the
 // build stops and the reader is forced back to the argument instead of
 // inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_TKILL > VIV_NATIVE_CEILING,
-               "the signal family's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_SIGALTSTACK > VIV_NATIVE_CEILING,
+               "sigaltstack's collision argument is the ceiling one");
 // Linux restart_syscall (128) collides with SYS_ICACHE_SYNC_SPACE (B-2e2). The
 // row is VIV_ENOSYS (below) and viv_linux_dispatch consumes every phenotyped
 // number that is not TRANSLATED before the native switch, so a Linux Proc
@@ -58,13 +58,20 @@ _Static_assert(VIV_LINUX_TKILL > VIV_NATIVE_CEILING,
 // per-number argument names the row.
 _Static_assert(VIV_LINUX_RESTART_SYSCALL == SYS_ICACHE_SYNC_SPACE,
                "revisit restart_syscall / ICACHE_SYNC_SPACE collision on renumber");
-// Linux kill (129) collides with SYS_HANDLE_FLAGS_GET (B-3b). Its row is
-// VIV_TIER2 (vivarium_kill_decide + viv_kill), and viv_linux_dispatch
-// returns before the native switch for every row that is not TRANSLATED,
-// so a Linux Proc's kill is answered by the kill shell and never reads a
-// handle's flags. A change of kill's row to TRANSLATED must re-argue this.
+// Linux kill (129), tkill (130) and tgkill (131) collide with
+// SYS_HANDLE_FLAGS_GET, SYS_HANDLE_FLAGS_SET and SYS_HANDLE_DUP_TO (B-3b).
+// Their rows are VIV_TIER2 (vivarium_kill_decide + viv_kill), and
+// viv_linux_dispatch returns before the native switch for every row that is
+// not TRANSLATED, so a Linux Proc's kill family is answered by the kill
+// shell and never reaches a handle operation -- test_vivarium pins the
+// verdicts. A change of any of the three rows to TRANSLATED must re-argue
+// this.
 _Static_assert(VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET,
                "revisit kill / HANDLE_FLAGS_GET collision on renumber");
+_Static_assert(VIV_LINUX_TKILL == SYS_HANDLE_FLAGS_SET,
+               "revisit tkill / HANDLE_FLAGS_SET collision on renumber");
+_Static_assert(VIV_LINUX_TGKILL == SYS_HANDLE_DUP_TO,
+               "revisit tgkill / HANDLE_DUP_TO collision on renumber");
 _Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
                "the socket family's collision argument is the ceiling one");
 _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,

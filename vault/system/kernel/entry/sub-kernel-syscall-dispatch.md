@@ -17,6 +17,15 @@ design:
 created: 2026-08-03
 updated: 2026-10-14
 ---
+## Native descriptor mutations (October 11; main B-3b)
+
+Native 130/131 validate full-width arguments before invoking existing locked
+handle operations. No user pointers, allocation or cross-process target.
+Checked duplication errors are produced within the replacement lock, not by
+querying a source again after failure. Linux tkill/tgkill (130/131) are
+Vivarium TIER2 rows, consumed before these handlers. See [[sub-kernel-handle]]
+and [[sub-kernel-syscall-abi]].
+
 ## Handle metadata query (October 11; main B-3b)
 
 Native 129 range-checks the full u64 argument before narrowing, then invokes
@@ -30,7 +39,7 @@ protect against concurrent close/reuse. See [[sub-kernel-syscall-abi]].
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is 123. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 131. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before

@@ -13,8 +13,19 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-15
 ---
+## Native descriptor mutation (October11)
+
+`handle_dup_to_checked` returns EBADF/EINVAL/EACCES while preserving the old
+helper's one-lock acquire/install/unlock/release order. `handle_dup_to` retains
+its flat-error wrapper for existing callers. Source rights and alias predicate
+are unchanged; prohibited aliases leave occupied targets and flags intact.
+Native 130 (HANDLE_FLAGS_SET; codex/astra 129) uses the existing locked
+live-slot flag setter; 131 (HANDLE_DUP_TO; codex/astra 130) uses the checked
+replacement core. Both are caller-local. See `docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md`
+for concurrency/refcount witnesses and qualification limits.
+
 ## Purpose
 
 Every kernel object a Proc can name — a Burrow, a Spoor, an MMIO window, a
