@@ -529,3 +529,16 @@ CAP_POST_SERVICE is bit 13 and follows elevation-only grant/redeem rules.
 The existing `/srv` WALK_CREATE failure convention remains -1, including
 missing post authority, occupied/protected names and exhausted admission quota.
 Shell `mount`/`unmount` translate these failures to status 1 plus `$errstr`.
+
+## Native handle metadata query (operator-approved, October 11)
+
+`SYS_HANDLE_FLAGS_GET` (129) returns a nonnegative flag word, currently 0 or
+bit0 CLOSE_ON_EXEC. It returns `-T_E_BADF` for a full-width out-of-range index
+or absent slot, and `-T_E_INVAL` for a missing internal current thread/process.
+No allocation or I/O is attempted. Native callers receive the raw negative
+errno. Pouch spawn returns the positive errno to its caller. Historical native
+kernels return legacy -1 for an unknown call; Pouch maps that one result to
+ENOSYS for this query alone (the defined query failures exclude EPERM).
+An explicit -ENOSYS also stops spawn before child publication. This does not alter the
+existing translation of legacy -1 results. Linux kill at number 129
+is answered by the Vivarium's kill translation rather than entering this handler.

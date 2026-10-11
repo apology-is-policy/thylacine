@@ -8183,6 +8183,18 @@ static s64 sys_torpor_wake_handler(u64 addr_va, u64 count_raw) {
     return sys_torpor_wake_for_proc(t->proc, addr_va, (u32)count_raw);
 }
 
+// Read only slot metadata under the existing handle-table lock. No object
+// reference, capability, or rights are acquired; allocation pressure cannot
+// turn a live descriptor into an invalid one. Range-check before narrowing.
+static s64 sys_handle_flags_get_handler(u64 hraw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    int on = handle_get_cloexec(t->proc, (hidx_t)hraw);
+    if (on < 0) return -(s64)T_E_BADF;
+    return on ? (s64)SYS_HANDLE_CLOSE_ON_EXEC : 0;
+}
+
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -15830,6 +15842,10 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
 
     case SYS_CLOSE:
         ctx->regs[0] = (u64)sys_close_handler(ctx->regs[0]);
+        return;
+
+    case SYS_HANDLE_FLAGS_GET:
+        ctx->regs[0] = (u64)sys_handle_flags_get_handler(ctx->regs[0]);
         return;
 
     case SYS_DUP:

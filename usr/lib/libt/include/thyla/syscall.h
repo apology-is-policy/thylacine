@@ -2450,4 +2450,15 @@ static inline long t_pivot_root(long new_root_fd) {
     return x0;
 }
 
+// Instantaneous metadata query on the caller's own handle; no rights probe.
+#define T_SYS_HANDLE_FLAGS_GET 129
+#define T_HANDLE_CLOSE_ON_EXEC 1u
+__attribute__((always_inline))
+static inline long t_handle_flags_get(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_HANDLE_FLAGS_GET;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
 #endif // THYLA_SYSCALL_H

@@ -3044,6 +3044,7 @@ Per §18:
 | Syscall | Description |
 |---|---|
 | `handle_close(h)` | Release a handle |
+| `handle_flags_get(h)` | Native syscall 129: read live-slot close-on-image-replacement metadata (bit0), without allocation, object borrow or I/O rights. Full-width invalid/absent index gives EBADF; missing internal process/thread gives EINVAL. An instant observation, not a lifetime pin. |
 | `handle_rights(h)` | Query rights on a handle |
 | `handle_reduce(h, rights)` | Return new handle with reduced rights |
 | `mmap_handle(h, addr, len, prot)` | Map a BURROW or MMIO handle |
@@ -3055,6 +3056,13 @@ Per §18:
 | `burrow_write(h, buf, off, len)` | Write to BURROW without mapping |
 
 The `burrow_*` rows above are the **Tier 2** memory surface (§6.5): a Burrow held as a first-class `KObj_Burrow` handle, for *shared*, *named*, or *transferable* memory — distinct from the handle-free Tier 1 `burrow_attach` / `burrow_detach` (§11.2). Tier 2 is design intent; it lands when a native workload needs shared memory, not at v1.0.
+
+The operator-approved native handle query is implemented separately from the
+rights-query design row. Its C/Rust mirrors and Vivarium 129 collision contract
+are documented in `vault/system/kernel/entry/sub-kernel-syscall-abi.md` and
+`docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`. Pouch uses it for spawn source validation;
+it does not add a setter or alter descriptor inheritance. Linux kill (129)
+stays a Vivarium translation consumed before native dispatch. Kernel and consuming libc must be packaged together.
 
 ### 11.4 POSIX compat surface
 

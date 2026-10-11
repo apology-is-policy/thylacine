@@ -3938,3 +3938,13 @@ macro_rules! eprintln {
         $crate::eprint!("{}\n", core::format_args!($($arg)*));
     }};
 }
+
+/// Native descriptor metadata, not a lifetime pin. Returns -EBADF if absent.
+pub const T_SYS_HANDLE_FLAGS_GET: u64 = 129;
+pub const T_HANDLE_CLOSE_ON_EXEC: u64 = 1;
+pub unsafe fn t_handle_flags_get(fd: i64) -> i64 {
+    let mut x0 = fd;
+    asm!("svc #0", inout("x0") x0, in("x8") T_SYS_HANDLE_FLAGS_GET,
+         options(nostack));
+    x0
+}

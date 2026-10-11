@@ -130,3 +130,25 @@ bake is claimed. Fifteen obsolete October1 scratch disks were reclaimed with
 SHA256 receipts, preserving their source/initrds/raw logs and baseline images.
 Free space rose8.36 to11.32GiB before the fresh guest runs; the8448MiB runner
 floor stayed in force.
+
+
+## Native metadata query follow-up (October 11)
+
+The approved native128 interface and Pouch0050 close NT2d: all original DUP2
+sources are validated before temporary opens even when later actions discard
+or overwrite their aliases. Standard streams use nonallocating metadata queries
+instead of R/W duplicates. The query does not pin descriptors against concurrent
+parent mutation; callers still serialize it. Historical unknown-call raw-1 is
+translated to ENOSYS for this query only, before child publication.
+
+Final25-case actual-source host tests pass at O0/O2 with ASan+UBSan; close/query/
+legacy mutants fail4/7/2 assertions. The final rebuilt50-patch libc passes all16
+native spawn cases as uid1000 in runtime15, alongside full-table metadata and
+actual Linux128 refusal checks. Runtime16 verifies old-kernel refusal. The new
+kernel passes50 source-matched default/SMP/UBSan boots,1830/1830 tests per boot.
+The matrix uses a historical userspace fixture and committed test registry;
+protected pending edits are excluded and preserved. Complete receipts and
+failure dispositions are in NATIVE-HANDLE-QUERY-PROPOSAL and
+work/oct11-native-tools/handle-query/. This is single-agent self-review. General
+inheritance, flags setters, attributes, signal waits and process-group delivery
+remain open; this checkpoint does not qualify Ninja or a production bake.

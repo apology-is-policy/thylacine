@@ -10,8 +10,19 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-14
+updated: 2026-10-15
 ---
+## Native ceiling 129 (B-3b)
+
+Native HANDLE_FLAGS_GET (129; Astra's 128 on codex/astra) overlaps Linux kill.
+Kill's row is VIV_TIER2 (`vivarium_kill_decide` + `viv_kill`), and
+`viv_linux_dispatch` returns before the native switch for every row that is
+not TRANSLATED, so a Linux kill never reads a handle's flags. The kill
+family's above-ceiling assertion is replaced by an explicit number-collision
+pin; tkill (130) carries the ceiling argument. Restart_syscall (128) keeps its
+ENOSYS row against `SYS_ICACHE_SYNC_SPACE`. See [[sub-kernel-syscall-abi]] and
+`docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`.
+
 ## Purpose
 
 A Linux binary issues Linux syscall numbers. This layer decides, for each
@@ -698,7 +709,7 @@ reddens L23l.
 
 ## Native ceiling 126 (2026-09-24, B-1d)
 
-`VIV_NATIVE_CEILING` is 126 (`SYS_BURROW_MAP_FILE`), again moved by the
+At that checkpoint `VIV_NATIVE_CEILING` became 126 (`SYS_BURROW_MAP_FILE`), again moved by the
 sentinel rather than by hand. No vivarium row lies at 126 or 127, and the
 lowest row the ceiling argues for is `restart_syscall` (128), so the move voids
 no row's argument. The phenotype's file-backed `mmap` rows and the new native

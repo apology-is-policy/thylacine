@@ -15,7 +15,7 @@ p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('musl', type=Path)
 p.add_argument('output', type=Path)
 p.add_argument('--cc', default=os.environ.get('CC') or shutil.which('/opt/homebrew/opt/llvm/bin/clang') or 'clang')
-p.add_argument('--mutant', choices=['close', 'temporary'])
+p.add_argument('--mutant', choices=['close', 'query', 'legacy'])
 a = p.parse_args()
 r = Path(__file__).resolve().parent.parent
 sdk_flags = []
@@ -27,7 +27,8 @@ text = source.read_text()
 if a.mutant:
     old, new = {
         'close': ('if (prior && prior->cmd == FDOP_CLOSE)', 'if (0 && prior && prior->cmd == FDOP_CLOSE)'),
-        'temporary': ('if (pspawn_uses_parent_source(fa, pf))', 'if (0 && pspawn_uses_parent_source(fa, pf))'),
+        'query': ('if (!prior) {', 'if (0 && !prior) {'),
+        'legacy': ('return flags == -1 ? -ENOSYS : flags;', 'return flags;'),
     }[a.mutant]
     assert text.count(old) == 1
     text = text.replace(old, new)

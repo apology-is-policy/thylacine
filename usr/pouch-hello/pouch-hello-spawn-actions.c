@@ -110,6 +110,11 @@ int main(int argc, char **argv) {
     run("high-dup-then-close", &fa, 0);
     while (count) require(close(held[--count]) == 0, "high parent cleanup");
 
+    INIT(); DUP(100,8); CLOSE(8);
+    run("discarded-invalid-source-no-open", &fa, EBADF);
+    INIT(); DUP(100,8); DUP(1,8); CLOSE(8);
+    run("overwritten-invalid-source-no-open", &fa, EBADF);
+
     INIT(); action(posix_spawn_file_actions_addopen(&fa,1,"/no-such-spawn-parent/file",O_WRONLY,0)); DUP(1,2);
     run("open-failure", &fa, ENOENT);
     require(unlink("spawn-target") == 0, "target cleanup");

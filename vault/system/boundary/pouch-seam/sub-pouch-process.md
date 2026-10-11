@@ -6,6 +6,8 @@ title: "Process lifecycle — posix_spawn, wait, pipe, the environ populate, the
 code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
   - usr/lib/pouch/patches/0052-pouch-spawn-action-sources.patch
+  - usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch
+  - usr/pouch-hello/pouch-hello-handle-query.c
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
   - usr/pouch-hello/pouch-hello-spawn-actions.c
@@ -273,6 +275,26 @@ arithmetic slip there removes content while reporting success.
 internal-allocator remapping in `fdop.h` is undone and the plain
 allocators are used. The `opened[]` array is bounded independently of the
 slot count, because many opens can target the same bounded slot.
+
+## Native source validation (October 11)
+
+Patch0050 queries each original-parent DUP2 source before temporary opens,
+including sources whose child aliases are later closed or overwritten. Earlier
+child assignments still use the ordered child model. Standard streams are
+seeded with the same nonallocating, rights-independent native128 query: EBADF
+means absent; other errors stop spawn. A full parent table no longer makes a
+live stream appear absent. Historical kernels return raw -1 for an unknown native call; this query alone
+normalizes that value to ENOSYS and the new libc fails closed before publishing
+a child. Explicit -ENOSYS is also passed through. Kernel and libc must therefore ship together.
+Close-history and temporary-origin guards remain. Parent close/reuse and action
+edits must still be serialized by the caller; this query does not pin a handle.
+
+The maintained real-source host suite now has25 cases and close/query/legacy-error mutants;
+the native spawn witness has16 cases. The dedicated metadata witness covers
+narrowed aliases, rights-independent access and saturated tables, with a
+separate old-kernel mode. Qualification is recorded in
+`docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`. General inheritance, F_GETFD/F_SETFD,
+spawn attributes and signal policy remain separate unfinished contracts.
 
 ## Invariants enforced
 

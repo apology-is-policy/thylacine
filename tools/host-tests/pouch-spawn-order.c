@@ -16,7 +16,11 @@ typedef struct { void *__actions; } posix_spawn_file_actions_t;
 #define hidden
 #include "_pouch_process.h"
 
-static int deny_probe;
+static int deny_probe, query_error;
+#define SYS_thyla_handle_flags_get 129
+#ifndef QUERY_MODE
+#define QUERY_MODE 1
+#endif
 static int handles[256], spawned[16], nspawned, calls, opens, fails;
 static int alloc_handle(int object) {
     for (int i = 0; i < 256; ++i) if (!handles[i]) {
@@ -33,13 +37,17 @@ static int mock_open(const char *path, int flags, ...) {
     if (!strcmp(path, "fail")) { errno = EACCES; return -1; }
     return alloc_handle(900);
 }
-static long mock_syscall2(long number, long fd, long rights) {
+static long __attribute__((unused)) mock_syscall2(long number, long fd, long rights) {
     assert(number == SYS_thyla_dup);
     assert(rights == POUCH_RIGHT_READ || rights == POUCH_RIGHT_WRITE);
     if (fd < 0 || fd >= 256 || !handles[fd] || fd == deny_probe) return -1;
     return alloc_handle(handles[fd]);
 }
 static long mock_syscall1(long number, long arg) {
+    if (number == SYS_thyla_handle_flags_get) {
+        if (query_error) return -query_error;
+        return arg < 0 || arg >= 256 || !handles[arg] ? -EBADF : 0;
+    }
     if (number == SYS_thyla_close) return mock_close((int)arg);
     assert(number == SYS_thyla_spawn_full_argv);
     struct pouch_spawn_args *sa = (void *)(uintptr_t)arg;
@@ -77,7 +85,7 @@ static void reset(void) {
     memset(spawned, 0, sizeof spawned);
     for (int i = 0; i < 3; ++i) handles[i] = 100 + i;
     handles[8] = 108; handles[100] = 200;
-    calls = opens = nspawned = 0; deny_probe = -1;
+    calls = opens = nspawned = 0; deny_probe = -1; query_error = 0;
 }
 static void check(const char *name, int want, int stdout_object, int want_opens) {
     int before[256]; memcpy(before, handles, sizeof before);
@@ -99,11 +107,11 @@ int main(void) {
     reset(); add(FDOP_CLOSE, 1, 0); add(FDOP_DUP2, 1, 1);
     check("closed-self-dup", EBADF, 0, 0);
     reset(); add(FDOP_OPEN, 1, 0); add(FDOP_DUP2, 2, 3);
-    check("temporary-does-not-create-child-source", EBADF, 0, 1);
+    check("temporary-does-not-create-child-source", EBADF, 0, QUERY_MODE ? 0 : 1);
     reset(); handles[2] = 0; add(FDOP_OPEN, 1, 0); add(FDOP_DUP2, 2, 2);
-    check("temporary-does-not-resurrect-missing-stderr", EBADF, 0, 1);
+    check("temporary-does-not-resurrect-missing-stderr", EBADF, 0, QUERY_MODE ? 0 : 1);
     reset(); add(FDOP_DUP2, 1, 99);
-    check("missing-original-source", ENOENT, 0, 0);
+    check("missing-original-source", QUERY_MODE ? EBADF : ENOENT, 0, 0);
     reset(); add(FDOP_DUP2, 1, -1);
     check("negative-source", EBADF, 0, 0);
     reset(); add(FDOP_DUP2, 1, 8); add(FDOP_CLOSE, 8, 0);
@@ -127,14 +135,27 @@ int main(void) {
     check("open-failure-no-spawn", EACCES, 0, 1);
     reset(); add(FDOP_DUP2, 4, 3); add(FDOP_OPEN, 1, 0);
     add(FDOP_DUP2, 2, 4); add(FDOP_CLOSE, 4, 0);
-    check("temporary-cannot-capture-earlier-alias", EBADF, 0, 1);
+    check("temporary-cannot-capture-earlier-alias", EBADF, 0, QUERY_MODE ? 0 : 1);
     reset(); add(FDOP_DUP2, 4, 3); add(FDOP_CLOSE, 4, 0);
     add(FDOP_OPEN, 1, 0);
-    check("temporary-cannot-capture-discarded-alias", EBADF, 0, 1);
+    check("temporary-cannot-capture-discarded-alias", EBADF, 0, QUERY_MODE ? 0 : 1);
     reset(); add(FDOP_OPEN, 3, 0); add(FDOP_DUP2, 1, 3); add(FDOP_CLOSE, 3, 0);
     check("child-open-may-establish-same-number", 0, 900, 1);
     reset(); deny_probe = 8; add(FDOP_DUP2, 1, 8);
     check("original-source-not-reprobed", 0, 108, 0);
     reset(); check("standard-streams", 0, 101, 0);
+    reset(); add(FDOP_DUP2, 4, 99); add(FDOP_CLOSE, 4, 0);
+    check("discarded-invalid-source-no-open", EBADF, 0, 0);
+    reset(); add(FDOP_DUP2, 4, 99); add(FDOP_DUP2, 4, 8); add(FDOP_CLOSE, 4, 0);
+    check("overwritten-invalid-source-no-open", EBADF, 0, 0);
+    reset(); for (int i=3;i<256;i++) handles[i]=100+i;
+    add(FDOP_DUP2, 1, 8);
+    check("full-parent-table-needs-no-probes", 0, 108, 0);
+    reset(); query_error = ENOSYS; add(FDOP_DUP2, 1, 8);
+    check("query-unavailable-fails-before-spawn", ENOSYS, 0, 0);
+    reset(); query_error = 1; add(FDOP_DUP2, 1, 8);
+    check("legacy-query-unavailable-fails-before-spawn", ENOSYS, 0, 0);
+    reset(); query_error = 1;
+    check("legacy-query-unavailable-standard-streams", ENOSYS, 0, 0);
     reset(); printf("failures=%d\n", fails); return !!fails;
 }

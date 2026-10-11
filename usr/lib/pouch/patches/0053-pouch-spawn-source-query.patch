@@ -1,0 +1,99 @@
+Subject: Pouch: native metadata query for original spawn sources
+
+Requires SYS_HANDLE_FLAGS_GET (129; codex/astra 128); fail closed on older kernels.
+Legacy unknown-syscall -1 is translated to ENOSYS for this query alone.
+No allocating READ/WRITE probes; retain ordered child actions and guards.
+
+--- a/src/process/posix_spawn.c
++++ b/src/process/posix_spawn.c
+@@ -41,19 +41,6 @@
+  * as raw parent fds (never rewritten by a file_action, which target < this). */
+ #define PSPAWN_MAXSLOT 64
+ 
+-/* Probe whether std fd `fd` currently exists in the parent. A std fd is a
+- * byte-I/O Spoor with READ and/or WRITE; there is no rights-independent
+- * existence check, so try a lowest-free dup with each right, then close the
+- * probe. Returns 1 if `fd` is a live handle, 0 otherwise. */
+-static int pspawn_fd_exists(int fd)
+-{
+-	long t = __syscall2(SYS_thyla_dup, fd, POUCH_RIGHT_WRITE);
+-	if (t < 0) t = __syscall2(SYS_thyla_dup, fd, POUCH_RIGHT_READ);
+-	if (t < 0) return 0;
+-	__syscall1(SYS_thyla_close, t);
+-	return 1;
+-}
+-
+ /* next points toward older actions. The nearest earlier assignment, not
+  * the original parent, decides whether a child descriptor is still open. */
+ static struct fdop *pspawn_prior_action(struct fdop *op, int fd)
+@@ -65,10 +52,20 @@
+ 	return 0;
+ }
+ 
++/* Old native kernels return legacy -1 for an unknown syscall. This query's
++ * defined failures are EBADF/EINVAL, never EPERM (-1), so translate that one
++ * legacy value to ENOSYS here without changing other syscall error handling. */
++static long pspawn_handle_flags(int fd)
++{
++	long flags = __syscall1(SYS_thyla_handle_flags_get, fd);
++	return flags == -1 ? -ENOSYS : flags;
++}
++
+ /* Check closes before opening any parent-side temporaries. A later OPEN or
+  * DUP2 may reestablish a closed slot; that does not revive an earlier use.
+- * No fd-existence probes: dup-based probes confuse resource exhaustion and
+- * narrower rights with absence. The kernel still validates final sources.
++ * Query original-parent slots before any temporary opens, including sources
++ * later discarded. Metadata inspection does not allocate or require I/O rights.
++ * A failed query (including ENOSYS on an older kernel) stops the spawn.
+  * As before, callers must serialize parent fd close/reuse and action edits. */
+ static int pspawn_validate_sources(const posix_spawn_file_actions_t *fa)
+ {
+@@ -78,6 +75,10 @@
+ 		if (op->srcfd < 0) return EBADF;
+ 		struct fdop *prior = pspawn_prior_action(op, op->srcfd);
+ 		if (prior && prior->cmd == FDOP_CLOSE) return EBADF;
++		if (!prior) {
++			long flags = pspawn_handle_flags(op->srcfd);
++			if (flags < 0) return (int)-flags;
++		}
+ 	}
+ 	return 0;
+ }
+@@ -112,19 +113,16 @@
+ 	int source_ec = pspawn_validate_sources(fa);
+ 	if (source_ec) return source_ec;
+ 
+-	/* --- child fd model: slot i -> the parent fd that backs it, or -1.
+-	 * Seed 0/1/2 = inherit the parent's standard streams THAT EXIST (POSIX: an
+-	 * fd with no file_action is inherited). Thylacine does NOT auto-inherit
+-	 * higher fds -- a well-behaved posix_spawn caller CLOEXECs its internal
+-	 * fds and explicitly dup2's the ones the child needs -- so seeding only
+-	 * {0,1,2} matches that (higher fds are never inherited, as CLOEXEC would
+-	 * do on Linux). Probing existence keeps a parent that lacks a std stream
+-	 * (e.g. no stderr) from listing a non-existent fd that would fail the
+-	 * spawn. --- */
++	/* Only standard streams seed the existing explicit child model. Query
++	 * slot metadata without allocating or requesting additional rights.
++	 * Missing streams stay absent; other query errors fail closed. */
+ 	int child_fd[PSPAWN_MAXSLOT];
+ 	for (int i = 0; i < PSPAWN_MAXSLOT; i++) child_fd[i] = -1;
+-	for (int i = 0; i < 3; i++)
+-		if (pspawn_fd_exists(i)) child_fd[i] = i;
++	for (int i = 0; i < 3; i++) {
++		long flags = pspawn_handle_flags(i);
++		if (flags >= 0) child_fd[i] = i;
++		else if (flags != -EBADF) return (int)-flags;
++	}
+ 
+ 	int opened[PSPAWN_MAXSLOT];   /* parent fds WE opened (close after spawn) */
+ 	int nopened = 0;
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -470,3 +470,6 @@
+ #define __NR_tty_acquire 95
+ #define __NR_tty_set_fg 96
+ #define __NR_tty_get_fg 97
++
++#define __NR_thyla_handle_flags_get 129
++#define SYS_thyla_handle_flags_get 129

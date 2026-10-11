@@ -19,6 +19,21 @@ design:
 created: 2026-08-03
 updated: 2026-10-14
 ---
+## Native handle metadata query (October 11; main B-3b)
+
+Operator-approved `SYS_HANDLE_FLAGS_GET` takes a full-width handle index in
+x0 and returns 0 or `SYS_HANDLE_CLOSE_ON_EXEC = 1`, or negative errno. Astra
+designed it as 128 on codex/astra; main numbers it 129 (main's 128 is
+`SYS_ICACHE_SYNC_SPACE`). Out-of-range and absent slots return EBADF; a
+missing current process/thread returns EINVAL. It reads the existing flag
+under the handle-table lock without allocating, acquiring an object reference,
+or requiring I/O rights. The result is an instant observation, not a pin
+against close/reuse. Native C/Rust wrappers mirror number and flag;
+`tools/test-native-handle-query.py` checks the mirrors and the actual handler.
+Linux 129 is kill, answered by the Vivarium's kill translation (a TIER2 row,
+consumed before native dispatch). See `docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`
+for approval and qualification.
+
 ## Purpose
 
 The contract half of the userspace boundary. [[sub-kernel-exception]] defines
@@ -26,8 +41,9 @@ The contract half of the userspace boundary. [[sub-kernel-exception]] defines
 the register convention, the argument records copied across, and the bounds
 every one of them is checked against.
 
-It is three files saying the same thing in three languages, and nothing in the
-build checks that they agree.
+C/kernel, C/libt and Rust mirror this contract. A focused check
+(`tools/test-native-handle-query.py`) covers the native handle-query
+constants; this is not a claim that every mirror has an automated check.
 
 ## Contract
 

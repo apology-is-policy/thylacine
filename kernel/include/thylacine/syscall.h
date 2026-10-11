@@ -2497,6 +2497,13 @@ enum {
     //   Errors: -EINVAL only for a caller with no address space (never EL0).
     SYS_ICACHE_SYNC_SPACE = 128,
 
+    // Read metadata from the caller's own handle slot without allocating,
+    // borrowing the object, or requiring READ/WRITE rights. Returns the native
+    // close-on-image-replacement bit (0 or SYS_HANDLE_CLOSE_ON_EXEC), -EBADF
+    // for a non-live/out-of-range slot, -EINVAL without a current Proc.
+    // This is an instantaneous query, not a pin against concurrent close/reuse.
+    SYS_HANDLE_FLAGS_GET = 129, // arg: fd (x0); no user-memory pointer
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2512,6 +2519,9 @@ enum {
     SYS__NATIVE_TOP,
 };
 
+
+#define SYS_HANDLE_CLOSE_ON_EXEC 1u
+_Static_assert(SYS_HANDLE_CLOSE_ON_EXEC == 1u, "handle flag ABI");
 
 // SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
 // T_CONSOLE_EPISODE_* and docs/ERRORS.md.

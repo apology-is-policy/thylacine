@@ -17,6 +17,16 @@ design:
 created: 2026-08-03
 updated: 2026-10-14
 ---
+## Handle metadata query (October 11; main B-3b)
+
+Native 129 range-checks the full u64 argument before narrowing, then invokes
+`handle_get_cloexec` for the current process. The existing table lock covers
+live-slot validation and flag read. No user-memory access, object operation,
+allocation or rights/capability acquisition occurs. EBADF describes an invalid
+slot; EINVAL describes a missing current thread/process. Linux kill (129) is a
+Vivarium TIER2 row, consumed before native dispatch. The metadata does not
+protect against concurrent close/reuse. See [[sub-kernel-syscall-abi]].
+
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;

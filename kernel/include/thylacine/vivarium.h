@@ -563,8 +563,14 @@ enum {
 // is now per-number (vivarium.c): its row is VIV_ENOSYS, consumed before the
 // native switch, so a Linux Proc's 128 never reaches the sync, and a native
 // program mis-declared as Linux loses the sync, which confers nothing anyway.
-// The lowest signal-family number still argued by the ceiling is kill (129).
-#define VIV_NATIVE_CEILING 128
+//
+// B-3b appends SYS_HANDLE_FLAGS_GET at 129 (Astra's handle query, her 128 on
+// codex/astra). Linux 129 is kill, a VIV_TIER2 row, and viv_linux_dispatch
+// consumes every row that is not TRANSLATED before the native switch, so a
+// Linux Proc's kill never reaches the query; kill's argument is now
+// per-number (vivarium.c). The lowest signal-family number still argued by
+// the ceiling is tkill (130).
+#define VIV_NATIVE_CEILING 129
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

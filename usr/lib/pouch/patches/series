@@ -174,3 +174,5 @@
 0051-pouch-fd-sync-vectored.patch
 # 0052 (codex/astra 0049): Preserve child action history and parent temporary-fd provenance.
 0052-pouch-spawn-action-sources.patch
+# 0053 (codex/astra 0050): Requires native129 (HANDLE_FLAGS_GET); rights-independent, nonallocating source queries.
+0053-pouch-spawn-source-query.patch
