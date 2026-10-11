@@ -7,6 +7,8 @@ code:
   - usr/lib/pouch/patches/0026-pouch-process.patch
   - usr/lib/pouch/patches/0052-pouch-spawn-action-sources.patch
   - usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch
+  - usr/lib/pouch/patches/0054-pouch-dup2-self-query.patch
+  - usr/pouch-hello/pouch-hello-dup2-self.c
   - usr/pouch-hello/pouch-hello-handle-query.c
   - usr/lib/pouch/patches/0043-pouch-identity-calls.patch
   - usr/pouch-hello/pouch-hello-identity.c
@@ -162,9 +164,15 @@ construction — correct only because it names a real number.
 **`dup2` onto a target has no primitive and no consumer.** `handle_dup`
 allocates the lowest free slot — that is `dup()`, not `dup2()`. The
 toolchain never needs it (posix_spawn resolves statically), so
-onto-target fails LOUD with `ENOSYS`; `old == new` returns `new`
-best-effort, since there is no rights-independent fd-existence probe (a
-0-rights dup is rejected, and the source's own rights are unknown).
+onto-target still fails with `ENOSYS`. Patch0054 validates `old == new`
+using native129 for a kernel descriptor or the existing locked Pouch socket
+resolver for a tagged socket, including fresh sockets without kernel handles.
+Absent slots return EBADF; historical native unknown-call -1 maps to ENOSYS.
+Self-dup allocates nothing, acquires no object reference and preserves flags.
+It observes validity at one instant; it does not pin concurrent close/reuse.
+The12-case actual-source host suite and native uid1000 probes cover both
+owners, table exhaustion and old-kernel refusal. See
+`docs/POUCH-DUP2-SELF-REVIEW.md` for exact evidence and limits.
 
 **`abort()` dies of `snare:abort`; mallocng's `assert` calls it.** musl's
 `abort()` and mallocng's internal `assert` both ended in `a_crash()` — a
