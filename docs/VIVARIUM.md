@@ -2608,7 +2608,10 @@ sig (omitted under `SA_NODEFER`, which is therefore honoured for the mask), and
 `rt_sigreturn` restores the pre-handler mask from the kernel-side save — so a
 handler's own `rt_sigprocmask` does not outlive it, and an `execve`/`fork()`
 from inside a handler passes on what Linux passes on. The guard above is what
-still differs, and it only defers.
+still differs, and it only defers — except at a fault: an instruction in a
+handler that faults while a SIG_DFL terminating signal is pending ends the
+process there with that signal (ARCH §7.6.4), which is what Linux's send-time
+group exit for a fatal default signal would already have done.
 
 ---
 

@@ -906,6 +906,8 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 
 **Async-safety**: delivery happens only at the EL0-return tail, after `regs[0]` is written and before `eret`. At that point the kernel holds no locks (a syscall acquires-then-releases all locks within its body; an IRQ-return is similar). Handlers therefore can never observe a partial-kernel state. The lock discipline in steps 1-5 above ensures the queue-mutation is atomic w.r.t. concurrent fd-reads from another Thread.
 
+**One default action is taken at a fault instead of the tail.** A user fault left unresolved while a terminate latch is pending (§8.8.2; the latch's own wake abandoned the page-in) reaches the EL0 fault arm as `FAULT_USER_DYING`, and the arm calls `notes_fault_dying_latch`: under the queue lock it `exits()` with the note the tail would pick, or clears the latches no queued note still backs and returns. The tail defers notes while a handler runs and while `SP_EL0` is unusable, so waiting for it re-executed the faulting instruction into the same fault forever. No handler runs at the fault, so the async-safety argument above is untouched; ending a thread inside a handler on a pending SIG_DFL fatal note is Linux's behaviour too, since `complete_signal` makes such a signal a group exit at send time. A group death is not acted on here: the arm returns and the tail's die-check acts.
+
 **Multi-thread Procs (post sub-chunk 9a)**: notes are Proc-directed. The EL0-return-tail check fires on each Thread's return; first-eligible Thread wins the delivery (its mask is the gate). If every Thread has the note masked, it stays queued; delivery happens when any Thread clears its mask (the `SYS_NOTE_MASK` syscall re-pumps before returning).
 
 **`kill` is non-catchable**: bypasses mask, handler, and fd-read. Posting `kill` to a Proc terminates it immediately at the next return-to-EL0 (mirrors SIGKILL).
@@ -1425,7 +1427,8 @@ the focused adversarial round + the LS-CI `ls-5` scenario ride LS-5-audit,
 task #963). As-built per `docs/LIFE-SUPPORT.md` LS-5: the P3-terminate wake
 predicate is the `PROC_FLAG_INTR_TERMINATE_PENDING` latch (proc.h), read
 lock-free by `thread_die_pending` (notes.c) at every §8.8.1 sleep site; the
-EL0-return tail remains the truth. Builds directly on §8.8.1.
+EL0-return tail remains the truth, except at an unresolved EL0 fault, where the
+fault arm acts on the latch (§7.6.4). Builds directly on §8.8.1.
 
 `interrupt` (the cooked-Ctrl-C note) is, at v1.0, half-wired: the kernel posts it
 but (a) to a NULL `g_console_owner` during a login session [dropped], (b) an

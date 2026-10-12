@@ -3049,15 +3049,39 @@ static void fdl_live_entry(void *arg) {
     exits_code(7, "returned");
 }
 
+static bool fdl_str_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+// The status alone cannot tell the note's death from a snare:* one (both reap
+// 1), so the message is read from the ZOMBIE, which the reap frees. NULL when
+// the child is not a ZOMBIE inside the budget.
+static const char *fdl_zombie_msg(int pid) {
+    struct Proc *c = proc_find_by_pid(pid);
+    if (!c) return NULL;
+    u64 deadline = timer_now_ns() + 2000000000ull;
+    for (;;) {
+        irq_state_t s = proc_table_lock_acquire();
+        const char *m = (c->state == PROC_STATE_ZOMBIE) ? c->exit_msg : NULL;
+        proc_table_lock_release(s);
+        if (m || timer_now_ns() >= deadline) return m;
+        sched();
+    }
+}
+
 void test_notes_fault_dying_latch_live_note_exits(void) {
     g_fdl_pending = -1;
     int pid = rfork(RFPROC, fdl_live_entry, NULL);
+    const char *msg = pid > 0 ? fdl_zombie_msg(pid) : NULL;
     int st = -1;
     int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
     TEST_ASSERT(pid > 0, "rfork");
     TEST_EXPECT_EQ(got, pid, "reaped the child");
     TEST_EXPECT_EQ(g_fdl_pending, 1, "the interrupt armed a latch the child would die of");
     TEST_EXPECT_EQ(st, 1, "the child died of the note (1), not by returning (7)");
+    TEST_ASSERT(msg != NULL && fdl_str_eq(msg, NOTE_NAME_INTERRUPT),
+                "the child's exit message is the note's name, not a snare:*");
 }
 
 // The stale half: a latch whose class has no default-terminating note queued
