@@ -1176,10 +1176,11 @@ struct sq_refill_obs {
     u64 first_ud, refill_ud;
     s32 first_res;
 };
+// Atomic: while armed, the hook also runs from any other ring's SQPOLL drain.
 static struct Loom *sq_refill_target;
 static u32 sq_refill_visits;
 static void sq_refill_producer(struct Loom *l) {
-    if (l != sq_refill_target || sq_refill_visits++) return;
+    if (l != __atomic_load_n(&sq_refill_target, __ATOMIC_ACQUIRE) || sq_refill_visits++) return;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x222ULL);
     __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
@@ -1195,12 +1196,12 @@ static bool sq_refill_run(bool bad_index, struct sq_refill_obs *o) {
     if (bad_index) sqa[0] = 7;
     __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
 
-    sq_refill_target = l;
     sq_refill_visits = 0;
+    __atomic_store_n(&sq_refill_target, l, __ATOMIC_RELEASE);
     loom_sq_release_hook_for_test(sq_refill_producer);
     o->n1 = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
     loom_sq_release_hook_for_test(NULL);
-    sq_refill_target = NULL;
+    __atomic_store_n(&sq_refill_target, NULL, __ATOMIC_RELEASE);
     o->visits    = sq_refill_visits;
     o->dropped   = h->dropped;
     o->tail1     = l->cq_tail;
