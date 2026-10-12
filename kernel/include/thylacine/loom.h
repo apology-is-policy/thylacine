@@ -655,6 +655,8 @@ void loom_handle_closed(struct Loom *l);
 // Call only AFTER ending the physical borrow; internal close puts are quiet.
 void loom_private_close_changed(struct Loom *l);
 #ifdef KERNEL_TESTS
+// Runs under l->lock right after sq_head is published; shared ring memory only.
+void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
 // Deterministic unlocked owner-boundary interleavings, test builds only.
 void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32));
 void loom_private_close_boundary_for_test(struct Loom *, u32);

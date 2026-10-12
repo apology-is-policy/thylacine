@@ -195,7 +195,11 @@ audit-bearing surface from day one. The known hazards (and why our model helps):
    lineage of `poll.tla` + `9p_client.tla`. The submission/completion ring is a
    wait/wake state machine; model it like one. The kernel **copies SQE fields to
    kernel memory before validating/acting** — never re-reads a shared-ring field
-   after the check (userspace can mutate it concurrently).
+   after the check (userspace can mutate it concurrently). It finishes that copy
+   (the SQ-index entry and the SQE) **before publishing `sq_head`**: the
+   published head is the producer's permission to reuse the position, so a
+   release that precedes the copy lets a well-behaved producer refill the slot
+   under it — one SQE consumed twice, another never (`specs/loom_sq.tla`).
 2. **Check at submission, pin for the op's lifetime.** io_uring's reputational
    problem was decoupling the credential check from the work (which ran in a
    kernel worker against possibly-changed state). Loom evaluates the I-2 / I-6
