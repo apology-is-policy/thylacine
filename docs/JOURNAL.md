@@ -1,6 +1,104 @@
 # The autonomous-run journal
 
 
+## October 12: NA-3 -- Astra's Rust client cores, installed as the crate loom-client (Corona)
+
+Astra's eleven Rust owned-client cores were written and host-tested
+uninstalled, next to their C twins, which NA-2b installed into libt. NA-3
+installs the Rust side and closes two items NA-2 deferred: NA-2a F5's Rust half
+(the ring records in a module the ABI checker can compile) and NA-2b F6 (the C
+local codes that collided with each other and with errnos). Scripture
+a8ea95306, WIP 194c06947 (written while main held the mac), first build and
+evidence 511f6ef11, audit close a6c56c0bc.
+
+**Where the cores live was decided by what can be tested.** libthyla-rs cannot
+be built for the host: its `_start` is ELF assembly, and `tools/test-rust.sh`
+lists it NO-HOST. Modules inside it would have had tests that run nowhere, the
+class the 9e837771 fix exists for. So the cores became their own crate, as
+`thyla-heap` did, and libthyla-rs depends on it and re-exports `service_abi`.
+The Rust twins keep the heap: the caller-storage vote of 10-12 was about
+freestanding C, and libthyla-rs has `ThylaAlloc`.
+
+**The install is derived, not ported.** `work/oct12-na3/na3_install.py` makes
+every installed file rustfmt(listed edits(original)), and `--check` proves the
+tree still equals that. A code edit may only swap or extend one path token. The
+first version allowed any substring replacement, and a sabotage showed it could
+drop an assertion while the union check still passed, because the check applied
+the same edit to the original. Astra's test files are cumulative copies (650
+test definitions, 137 distinct): `test_task_loop.rs` becomes `tests/ring.rs`
+whole, and four other files contribute only the line ranges it lacks.
+
+**The first build.** It ran under the lease at 19:48Z.
+- Before building, Astra's own build logs showed one warning the runner would
+  fail on: an unreachable `async{}` after a factory's deliberate panic. The
+  derivation gained one more edit form, an allow on one named test, from a
+  one-lint list.
+- 81 errors, one cause. `#![no_std]` also strips the std prelude from the test
+  build, so `Vec`, `Box` and `thread_local!` vanished, and the
+  `LATE_ALLOCS`/`HOOK` fixtures followed (they are `thread_local!`). The crate
+  is now `#![cfg_attr(not(test), no_std)]`, as cornucopia and corvus-crypto
+  are; the guest build is what proves no_std.
+- Then 137 passed with three warnings, all dead code, and they were the
+  finding of the build. Astra's test files began `#![allow(dead_code)]`; at
+  the root of a standalone test binary that covers the whole crate, cores
+  included. In the crate it covers one test module. So the test build reported
+  three adapter-facing paths no test reached: `ReadFuture::request_cancel`,
+  `WakeReason::Event`, `Delivery::kind`. NA-3 added three tests for them
+  (tests/ring/seams.rs, tests/request_book/seams.rs), and
+  `work/oct12-na3/seam-sabotage.py` broke each path in turn: only its new test
+  failed, 139 others passed, so nothing had covered them.
+
+**Evidence.** The first full run of the Rust mutant driver was RED: 100 of 110,
+55 of 59. Every miss was the classifier's. This rustc prints `thread 'x'
+(30846027) panicked`, and my regex had no room for the id, so every expected
+text read empty. A test outside the named set panicked during unwinding and
+aborted the whole binary; Astra's binaries held only her own file's tests, so
+hers never saw that. Her owned-mapping cases put `let(b,p,_q)=fixture(4,8);let
+mut m=...` before the body, and my extractor kept only the body. Two of her
+diagnostics are message text, not codes. The verdict now comes from a serial
+`--exact` run of the named set alone, and a no-op mutant must come out SURVIVED
+through the same path, which is the control the driver lacked: it had never
+shown it could say SURVIVED. The evidence run (mutants-20261012T200803Z): 110
+of 110 rejected, 3 of them by a named test aborting the binary with her text;
+59 of 59 cases; the C code-block and ABI sabotages refused. The NA-2b C driver
+on the renumbered codes: 87 of 87.
+
+**Audit.** Fable 5.1 reviewed Opus 5.5 (start == end), read-only: 0 P0,
+0 P1, 2 P2, 6 P3, not dirty.
+- F1 (P2) is the one I most needed someone else for. Moving `service_abi.rs`
+  broke `tools/test-loom-rust-ownership.py`, the only witness that raw
+  registration is `unsafe` and that range borrows cannot alias or dangle. It
+  copied the old path. Nothing noticed, because nothing ran it: no Makefile or
+  gate target had invoked it since c78142bd8. It now builds the real
+  loom-client crate and links it, and `make test-loom-client` runs it.
+- F2 (P2): two binding citations still named the old path. The coverage view I
+  re-rendered in 511f6ef11 reported it (24 unresolved became 25), and I
+  committed the view without reading its diff.
+- F5 (P3) was my own S2, found independently: the future driver answered a
+  full registration table with `Busy`, the pattern the envelope edit had just
+  removed. Now `Full`, through the derivation, with a seam test.
+- F3, F4, F6, F7 fixed (the -1000 code family bounded both ways; an edition
+  claim that named no construct, reworded to what is true; five sentences; doc
+  edits held to one line). F8 closed without change: the compile-fail judge
+  matches the code at the probe's own lines, which is stricter than Astra's,
+  and the reviewer read all 44 messages.
+
+**The re-runs.** The fixes were written as WIP ce328ab79 while main held the
+mac, so none of them was believed until it ran. Under the lease (22:10Z) the
+ownership witness was the first thing checked: it gave its four PASS lines, and
+each failing case failed with exactly its own rustc code and no other error, so
+it fails for the reason it claims, not on an unresolved import. The four seam
+sabotages each turned only their own test red. The Rust mutant driver rejected
+110 of 110 and all 59 cases, refused the seven C block and six checker
+sabotages, and still said SURVIVED for its no-op control; the NA-2b C driver
+rejected 87 of 87. The guest build compiled loom-client no_std with the same
+warning set as 511f6ef11.
+
+**Decisions.** No new operator vote. The three of 10-12 hold (qualification
+lever, ENTER never sleeps, C caller storage); the crate placement and the
+disjoint C code blocks follow precedent and are recorded in scripture
+a8ea95306.
+
 ## October 12: NA-2b -- Astra's C client cores, installed into libt without a heap (Corona)
 
 Astra's seven C owned-client cores (lease ledger, paired CQ reader, owned
