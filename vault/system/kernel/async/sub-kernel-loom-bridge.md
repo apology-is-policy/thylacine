@@ -139,6 +139,8 @@ usercopy. `usr/loom-bridge-probe` is a native C program over libt's
 `thyla/loom.h` ([[sub-kernel-syscall-abi]]), shipped in every ramfs. The test
 `loom.bridge_probe` spawns it and holds it to the verdict the kernel's own
 lever implies: exit 70 without the lever, 71 with it, anything else a failure.
+It may skip only a kernel booted without userspace: when the ramfs carries
+`bin/joey` but not the probe, the ramfs is stale and the test fails.
 The probe infers its mode from its first private setup. Because the expected
 code comes from the kernel's build and not from the probe, a kernel that routes
 when it should refuse fails the test, and so does the reverse.
@@ -154,22 +156,36 @@ What it checks, by image:
   an ordinary ring gets the same fd and address as before the refusals.
 - **Qualification.** It checks:
   - the setup refusals;
-  - the geometry and header words the kernel wrote, against the mirror;
-  - two copyout faults (a read-only params page, and params running into one).
-    Each must leave partial bytes, which shows the ring existed, and the next
-    setup must get the same fd and address.
-  - each register record's copyin fault, which burns no incarnation, against
-    its result-copyout fault, which burns exactly one;
+  - the geometry the kernel wrote, against the mirror. Every setup runs over
+    params pre-filled with 0xA5, so a zero read back (the reserved words) is the
+    kernel's. `flags` is the probe's own IN word, so its check pins the grant.
+    A fresh ring's header words are zeroed memory; `hdr.flags` and `overflow`
+    never become non-zero here, so their offsets rest on the static asserts and
+    `tools/check-loom-service-abi.py`.
+  - two copyout faults. Read-only params fault at byte 0 and leave nothing.
+    Params running into a read-only page leave bytes 0..15, whose `sq_entries`
+    and `cq_entries` show the ring existed. After both, the next setup must get
+    the same fd and address.
+  - a SLOT record's copyin fault, which burns no incarnation, against its
+    result-copyout fault, which burns exactly one. The copyin is one loop shared
+    by every op. Result-copyout faults are also driven for QUERY, POOL and POOL
+    QUERY; TARGET's needs a registry and is faulted in-kernel;
   - the argument refusals (nargs, null, kernel address, closed fd, a pipe, an
     unknown version, op 10);
   - QUERY, REAP and ABORT, a TARGET with an absent registry fd, and the pool
     round trip;
-  - ENTER's refusals and two rejected SQEs. Their CQEs carry distinct errnos,
-    which shows which mirrored field the kernel decoded. They are reaped after
-    poll(2) reports POLLIN, and poll must report nothing once they are reaped.
+  - ENTER's refusals and three rejected SQEs. An unknown opcode completes
+    -EOPNOTSUPP and a NOP without an incarnation -EINVAL, which pins the
+    incarnation word. A CLUNK with an offset completes -EINVAL from the CLUNK
+    arm alone, which pins the opcode byte: an opcode read as zero would answer
+    -EOPNOTSUPP. The CQEs are reaped after poll(2) reports POLLIN, and poll must
+    report nothing once they are reaped.
 
-The test then waits for exactly the four private rings the probe made to
-retire.
+The test counts the private rings created and retired across the probe's run
+(`loom_private_created` beside `loom_private_retired`). It waits until every
+ring created has retired, then requires exactly four created in the
+qualification image and none in the default one. A count that only waited for
+the retired total to reach four would pass a fifth ring that retired late.
 
 ## Data structures
 

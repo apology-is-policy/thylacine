@@ -883,10 +883,14 @@ return contracts:
 - On the private route, it answers fd or -errno.
 - A params block the kernel cannot read answers -1 before any route is chosen.
 
-libt's `syscall.h` gains stubs for burrow ATTACH 37 and DETACH 38 (vaddr or 0,
-or -1) and RESERVE 124 and PROTECT 125 (vaddr or 0, or -errno). It also gains
+libt's `syscall.h` gains stubs for burrow ATTACH 37, DETACH 38, RESERVE 124 and
+PROTECT 125. ATTACH answers a vaddr, -1 (a bad length, no free gap, a failed map)
+or -ENOMEM (the page cap or the pool); DETACH answers 0 or -errno; RESERVE answers
+a vaddr or -errno; PROTECT answers 0 or -errno. It also gains
 the prot bits that mirror `BURROW_PROT_*`. Before this, native C reached none of
 them. These declarations route nothing and enable nothing: the private routes
 stay behind the kernel's qualification lever ([[sub-kernel-loom-bridge]]).
 `loom-bridge-probe` is the first consumer, and the only check on these mirrors
-against the kernel's own writes.
+against the kernel's own writes. `thyla/loom.h` also mirrors the full opcode list
+(NOP 0 .. STATFS 18), which `tools/check-loom-service-abi.py` compares with the
+kernel's.

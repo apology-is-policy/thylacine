@@ -4029,3 +4029,18 @@ the reserve, protect, attach and detach stubs. The C owned-client cores are
 not installed here: they allocate, and native C has no heap. How they get their
 storage is the open design question for NA-2b. The Rust twins (NA-3) have
 `ThylaAlloc`.
+
+Audit round 1 (Fable 5.1 reviewing Opus 5.5): 0 P0, 0 P1, 1 P2, 6 P3, plus one
+P3 found by the implementer's own review. The round is not dirty. The close:
+- F1 (P2): the test now fails, instead of skipping, on a ramfs that carries init
+  but not the probe.
+- F3: the count compares private rings created with those retired, so a late
+  fifth ring fails it.
+- F4: params are pre-filled with 0xA5, and a CLUNK SQE pins the opcode byte.
+- F5: `tools/check-loom-service-abi.py` asserts the kernel's and native C's ring
+  records against one table. The Rust half moves to NA-3.
+- F2, F6, F7: the burrow stub contracts, the runner's hygiene, and the dossier
+  wording.
+- S1: the coverage claim in ASYNC-SERVICE-ABI.md is narrowed, and the POOL QUERY
+  copyout fault is added.
+The guest legs (`work/oct12-na2a/na2a-run.sh`) run on the close commit.

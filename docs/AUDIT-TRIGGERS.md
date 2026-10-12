@@ -292,4 +292,6 @@ The independent review is the NA-1 audit round (Fable reviewing Opus). An EL0 pr
 - each probe check against the kernel path it claims to reach. Name the check whose truth a broken kernel would leave unchanged, such as a check satisfied by a fresh ring's zeroed memory.
 - the fault-page construction: can any setup or register call meant to fault find a mapping where its fault was expected?
 - the mirror: every C offset against the kernel struct, and every return contract written in `thyla/loom.h` against the handler;
-- the retirement count: can the probe's rings retire uncounted, or an unrelated ring be counted?
+- the retirement count: can the probe's rings retire uncounted, or an unrelated ring be counted? The test compares `loom_private_created` with `loom_private_retired` (kernel/loom.c); a ring created but never passed through `loom_private_destroy` would hang the wait, and a counter bumped on a path that can still fail would count a ring that never existed.
+- the skip: the test may skip only when the ramfs also lacks `bin/joey`. Can a stale ramfs still reach the skip?
+- `tools/check-loom-service-abi.py`'s ring table: every field and constant is listed once and asserted against both C headers. Does each assert fail on a sabotage the header's own asserts miss (`work/oct12-na2a/abi-witness.sh`)?

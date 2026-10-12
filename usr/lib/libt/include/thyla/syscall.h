@@ -2519,9 +2519,11 @@ static inline long t_srv_registry_new(long source, const struct t_srv_route *rou
     return x0;
 }
 
-// Anonymous memory in the burrow window. ATTACH (eager RW) and DETACH answer
-// vaddr or 0 / -1; RESERVE (lazy, minted at prot) and PROTECT answer vaddr or
-// 0 / -errno. Prot bits mirror the kernel's BURROW_PROT_*; X is never a target.
+// Anonymous memory in the burrow window. ATTACH (eager RW) answers vaddr, -1 (a
+// bad length, no free gap, a failed map) or -ENOMEM (the page cap, the pool);
+// DETACH answers 0 or -errno; RESERVE (lazy, minted at prot) answers vaddr or
+// -errno; PROTECT answers 0 or -errno.
+// Prot bits mirror the kernel's BURROW_PROT_*; X is never a target.
 #define T_SYS_BURROW_ATTACH  37
 #define T_SYS_BURROW_DETACH  38
 #define T_SYS_BURROW_RESERVE 124

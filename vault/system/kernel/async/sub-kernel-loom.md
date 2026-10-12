@@ -3586,5 +3586,13 @@ reading this path. Both were live on main a7353c36f, and both are fixed in
 **NA-2a (October 12).** `loom.bridge_probe` drives the same routes from EL0
 through `/bin/loom-bridge-probe`. The status it requires comes from the
 kernel's own lever: 70 for the default image, 71 for the qualification image.
-In the qualification image it also requires exactly the probe's four private
-rings to retire. The detail is in [[sub-kernel-loom-bridge]], "The EL0 probe".
+It counts the private rings created (`loom_private_created`, added for it,
+bumped once a private ring is fully built) and retired across the probe's run.
+It requires every created ring to retire, and exactly four created in the
+qualification image, none in the default one. Every counted ring reaches
+`loom_private_destroy`, because a private ring's last `loom_unref` always queues
+it to the retirer, so created minus retired is the number still alive. The
+detail is in [[sub-kernel-loom-bridge]], "The EL0 probe".
+`tools/check-loom-service-abi.py` also gained a ring table: the five ring records
+and the ring constants, asserted against this header and libt's `thyla/loom.h`
+([[abi-loom-ring]]).

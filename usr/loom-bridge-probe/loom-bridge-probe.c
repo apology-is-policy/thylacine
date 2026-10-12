@@ -123,6 +123,8 @@ static void fault_pages(void) {
     p1_writable(0);
 }
 
+// Callers pre-fill params with 0xA5: the kernel reads only flags, so every other
+// byte read back as zero was written by the kernel.
 static long setup_at(void *params, uint32_t flags, unsigned long entries) {
     put32(params, 0, flags);
     return t_loom_setup(entries, params);
@@ -142,8 +144,12 @@ static int regions_disjoint(const struct t_loom_params *q, int receipts) {
     return 1;
 }
 
-// Every geometry field and header word is the kernel's own write, so the
-// mirror's offsets are checked against it, not against a constant.
+// Every geometry field is the kernel's own write over the 0xA5 fill, so the
+// mirror's offsets are checked against it, not against a constant. flags is the
+// probe's own IN word, so its check pins the grant, not the copyout. A fresh
+// ring's header is zeroed memory: its zero words (hdr.flags and overflow above
+// all, which no step here makes non-zero) rest on the static asserts and
+// tools/check-loom-service-abi.py.
 static volatile struct t_loom_ring_hdr *check_ring(const struct t_loom_params *q,
                                                    uint32_t flags, uint32_t entries) {
     int receipts = (flags & B) != 0;
@@ -205,7 +211,7 @@ static int run_default(long fd0, uint64_t va0) {
         CHECK(t_loom_register(999, op, g_rec, 1) == -E_OPNOTSUPP,
               "the default image refuses a private register op before any lookup", op);
 
-    fill(&g_params, 0, sizeof(g_params));
+    fill(&g_params, 0xA5, sizeof(g_params));
     long fd = setup_at(&g_params, 0, 2);
     CHECK(fd == fd0 && g_params.ring_va == va0,
           "the refusals left no handle and no mapping", fd);
@@ -270,11 +276,33 @@ static void qual_enter_and_cq(long fd, volatile struct t_loom_ring_hdr *h,
     rc = t_poll(&pfd, 1, 0);
     CHECK(rc == 0, "a reaped CQ no longer polls ready", rc);
 
-    sq[0] = 7;
+    // 0xEE's -EOPNOTSUPP would also come from an opcode read as zero; a CLUNK
+    // with an offset is refused by the CLUNK arm alone.
+    fill(sqes, 0, sizeof(struct t_loom_sqe));
+    s[0].opcode = T_LOOM_OP_CLUNK;
+    s[0].offset = 1;
+    s[0]._resv1[1] = 1;
+    s[0].user_data = 0x30EF;
+    sq[0] = 0;
+    fill(receipts + 2 * sizeof(struct t_loom_service_buffer_receipt), 0xFF,
+         sizeof(struct t_loom_service_buffer_receipt));
     __atomic_store_n(&h->sq_tail, 3, __ATOMIC_RELEASE);
     rc = t_loom_enter(fd, 1, 0, T_LOOM_ENTER_NONBLOCK);
-    CHECK(rc == 1 && h->dropped == 1 && h->sq_head == 3, "an out-of-range index is dropped", rc);
-    CHECK(__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) == 2, "a dropped SQE posts nothing", 0);
+    CHECK(rc == 1 && h->sq_head == 3, "ENTER consumes the CLUNK", rc);
+    tail = __atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE);
+    CHECK(tail == 3, "the CLUNK posts one CQE", tail);
+    CHECK(c[2].user_data == 0x30EF && c[2].result == -E_INVAL && !c[2].flags,
+          "a CLUNK with an offset completes -EINVAL: the opcode byte was read", c[2].result);
+    for (size_t b = 0; b < sizeof(struct t_loom_service_buffer_receipt); b++)
+        CHECK(!receipts[2 * sizeof(struct t_loom_service_buffer_receipt) + b],
+              "the CLUNK's post clears its receipt", b);
+    __atomic_store_n(&h->cq_head, tail, __ATOMIC_RELEASE);
+
+    sq[1] = 7;
+    __atomic_store_n(&h->sq_tail, 4, __ATOMIC_RELEASE);
+    rc = t_loom_enter(fd, 1, 0, T_LOOM_ENTER_NONBLOCK);
+    CHECK(rc == 1 && h->dropped == 1 && h->sq_head == 4, "an out-of-range index is dropped", rc);
+    CHECK(__atomic_load_n(&h->cq_tail, __ATOMIC_ACQUIRE) == 3, "a dropped SQE posts nothing", 0);
 }
 
 static uint64_t reserve_scope(long fd, uint32_t *slot) {
@@ -394,6 +422,12 @@ static void qual_pool(long fd, long buf) {
     rc = t_loom_register(fd, T_LOOM_REGISTER_QUERY_SERVICE_POOL, g_rec, 1);
     CHECK(rc == 0 && get32(g_rec, 24) == 1 && get32(g_rec, 28) == 1,
           "POOL QUERY: one member, available", rc);
+    p1_writable(1);
+    record(g_p1 + 2560, sizeof(struct t_loom_service_pool_snapshot));
+    ref_into(g_p1 + 2560, 8, slot, incarnation);
+    p1_writable(0);
+    rc = t_loom_register(fd, T_LOOM_REGISTER_QUERY_SERVICE_POOL, g_p1 + 2560, 1);
+    CHECK(rc == -E_FAULT, "a read-only POOL QUERY record faults on its copyout", rc);
     record(g_rec, sizeof(struct t_loom_service_buffer_return));
     ref_into(g_rec, 8, slot, incarnation);
     put64(g_rec, 32, 1);
@@ -412,7 +446,7 @@ static int run_qual(long fd, long fd0, uint64_t va0, long buf) {
     copy_params(&first, &g_params);
     check_ring(&first, P | B, 2);
 
-    fill(&g_params, 0, sizeof(g_params));
+    fill(&g_params, 0xA5, sizeof(g_params));
     CHECK(setup_at(&g_params, B, 2) == -E_INVAL, "SERVICE_BUFFERS alone refused", 0);
     CHECK(setup_at(&g_params, P | T_LOOM_SETUP_SQPOLL, 2) == -E_INVAL, "SQPOLL refused", 0);
     CHECK(setup_at(&g_params, P | 0x100u, 2) == -E_INVAL, "an unknown setup bit refused", 0);
@@ -431,12 +465,12 @@ static int run_qual(long fd, long fd0, uint64_t va0, long buf) {
     long rc = t_loom_setup(2, (struct t_loom_params *)(void *)g_p1);
     CHECK(rc == -E_FAULT, "read-only params: the copyout faults", rc);
     uint8_t *split = g_p1 - 16;
-    fill(split, 0, 16);
+    fill(split, 0xA5, 16);
     rc = setup_at(split, P | B, 2);
     CHECK(rc == -E_FAULT, "params running into a read-only page: the copyout faults", rc);
     CHECK(get32(split, 0) == (P | B) && get32(split, 4) == 2 && get32(split, 8) == 4,
           "the fault came mid-copyout, after the ring existed", get32(split, 4));
-    fill(&g_params, 0, sizeof(g_params));
+    fill(&g_params, 0xA5, sizeof(g_params));
     fd = setup_at(&g_params, P | B, 2);
     CHECK(fd == fd0 && g_params.ring_va == va0,
           "both rollbacks closed the handle and unmapped the ring", fd);
@@ -456,7 +490,7 @@ int main(void) {
     CHECK(buf > 0, "a buffer page", buf);
 
     // The lowest fd and gap, taken by an ordinary ring and given back.
-    fill(&g_params, 0, sizeof(g_params));
+    fill(&g_params, 0xA5, sizeof(g_params));
     long fd0 = setup_at(&g_params, 0, 2);
     CHECK(fd0 >= 0, "an ordinary ring", fd0);
     static struct t_loom_params ordinary;
@@ -465,7 +499,7 @@ int main(void) {
     uint64_t va0 = ordinary.ring_va;
     close_ring(fd0, &ordinary);
 
-    fill(&g_params, 0, sizeof(g_params));
+    fill(&g_params, 0xA5, sizeof(g_params));
     long fd = setup_at(&g_params, P | B, 2);
     if (fd == -E_OPNOTSUPP) return run_default(fd0, va0);
     CHECK(fd >= 0, "a private ring in the qualification image", fd);

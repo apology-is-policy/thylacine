@@ -679,6 +679,7 @@ bool loom_is_private(const struct Loom *l);
 void loom_retire_init(void);
 void loom_retirer_main(void);
 u64 loom_private_retired(void);
+u64 loom_private_created(void);
 
 
 // Refcount. loom_unref's last drop clunks every registered Spoor and

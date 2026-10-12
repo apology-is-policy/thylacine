@@ -186,6 +186,8 @@ and the suite's own tally cannot tell you. The skip exists for a fresh checkout
 without userspace; a gate image always carries the probe set. A gate that cares
 therefore asserts ZERO `[skip]` lines against a baseline that had none -- a
 property of the IMAGE, which must be stated as such. Tracked as an open defect.
+`loom.bridge_probe` is the first test to fail instead: it skips only when the
+ramfs lacks `bin/joey` as well. The same key would close the trap for the rest.
 
 **This dossier covers the harness, not the tests.** `test.c` and `test.h` are
 the harness. The individual test files are a separate and much larger surface --
@@ -1270,8 +1272,10 @@ implies: 70 without it, 71 with it ([[sub-kernel-loom-bridge]]). So the same
 registration passes on both images for different reasons, and a PASS line alone
 does not say which kernel booted.
 
-Like every probe-spawning test, it SKIPs (and so PASSes) when its binary is
-absent from the ramfs. The guest runner closes that gap. It requires:
-- the probe's own verdict line, and the status line
-  `loom-bridge-probe status=N expected=N`, each exactly once;
+Unlike the other probe-spawning tests, it fails rather than skips when its
+binary is absent from a ramfs that carries `bin/joey`. Only a kernel booted
+without userspace may skip it. The guest runner also requires:
+- the probe's own verdict line, the status line
+  `loom-bridge-probe status=N expected=N`, and the ring line
+  `loom-bridge-probe rings made=N retired=N expected=N`, each exactly once;
 - that the baked binary matches the built one.

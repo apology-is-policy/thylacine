@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Compile the three actual AS-0 ABI mirrors and compare independent byte vectors.
+"""Compile the three actual AS-0 ABI mirrors and compare independent byte vectors;
+then assert the kernel and native C ring records against one layout table.
 
 Blind to syscall decoding, permission checks, runtime cancellation and races.
 Run under the repository's host-resource lease. Temporary binaries are removed.
@@ -40,6 +41,56 @@ def expected():
     return [struct.pack('<' + 'I' * len(CONSTANTS), *(v for _, v in CONSTANTS)),
             ref, target, reserve, control, snapshot, member, pool, receipt,
             returned, pool_snapshot]
+
+# The ring records and constants beside the three Loom syscalls, written here from
+# the ABI rather than parsed from either header. Every field is listed, so a field
+# the two headers order, size or add differently cannot pass both.
+RING_CONSTANTS = ([('MAX_ENTRIES', 4096), ('SETUP_SQPOLL', 1), ('SETUP_CQSIZE', 2),
+                   ('ENTER_GETEVENTS', 1), ('ENTER_NONBLOCK', 2), ('REGISTER_HANDLES', 0),
+                   ('REGISTER_BUFFERS', 1), ('RING_SQ_NEED_WAKEUP', 1), ('SQE_LINK', 1),
+                   ('SQE_DRAIN', 2), ('SQE_CQE_SKIP', 4), ('SQE_MULTISHOT', 8), ('CQE_MORE', 1)]
+                  + [('OP_' + n, i) for i, n in enumerate(
+                      'NOP WALK LOPEN LCREATE READ WRITE GETATTR SETATTR READDIR FSYNC CLUNK '
+                      'RENAMEAT UNLINKAT MKDIR SYMLINK LINK MKNOD READLINK STATFS'.split())])
+RING_RECORDS = [  # (struct, size, [(field, bytes, alignment)])
+    ('loom_params', 88, [('flags', 4, 4), ('sq_entries', 4, 4), ('cq_entries', 4, 4),
+                         ('ring_size', 4, 4), ('ring_va', 8, 8), ('hdr_off', 4, 4),
+                         ('sq_array_off', 4, 4), ('sqe_off', 4, 4), ('cqe_off', 4, 4),
+                         ('sq_array_size', 4, 4), ('sqe_size', 4, 4), ('cqe_size', 4, 4),
+                         ('_resv0', 4, 4), ('_resv1', 32, 8)]),
+    ('loom_sqe', 64, [('opcode', 1, 1), ('flags', 1, 1), ('_resv0', 2, 2), ('handle_idx', 4, 4),
+                      ('offset', 8, 8), ('len', 4, 4), ('buf_idx_or_off', 4, 4),
+                      ('user_data', 8, 8), ('_resv1', 32, 8)]),
+    ('loom_cqe', 16, [('user_data', 8, 8), ('result', 4, 4), ('flags', 4, 4)]),
+    ('loom_ring_hdr', 64, [('sq_head', 4, 4), ('sq_tail', 4, 4), ('sq_mask', 4, 4),
+                           ('sq_entries', 4, 4), ('cq_head', 4, 4), ('cq_tail', 4, 4),
+                           ('cq_mask', 4, 4), ('cq_entries', 4, 4), ('flags', 4, 4),
+                           ('dropped', 4, 4), ('overflow', 4, 4), ('_pad', 20, 4)]),
+    ('loom_buf_reg', 16, [('va', 8, 8), ('len', 8, 8)]),
+]
+
+def ring_layout(fields):
+    off, align, out = 0, 1, []
+    for name, size, a in fields:
+        if off % a: raise AssertionError(f'layout table leaves a gap before {name}')
+        out.append((name, off, size)); off += size; align = max(align, a)
+    if off % align: raise AssertionError('layout table leaves tail padding')
+    return out, off
+
+def ring_source(kernel):
+    prefix, macro = ('', 'LOOM_') if kernel else ('t_', 'T_LOOM_')
+    lines = ['#include <' + ('thylacine/loom.h' if kernel else 'thyla/loom.h') + '>']
+    for name, value in RING_CONSTANTS:
+        lines.append(f'_Static_assert({macro}{name} == {value}, "{macro}{name}");')
+    for name, size, fields in RING_RECORDS:
+        layout, total = ring_layout(fields)
+        if total != size: raise AssertionError(f'layout table for {name} sums to {total}')
+        s = f'struct {prefix}{name}'
+        lines.append(f'_Static_assert(sizeof({s}) == {size}, "{s} size");')
+        for field, off, n in layout:
+            lines.append(f'_Static_assert(__builtin_offsetof({s}, {field}) == {off} && '
+                         f'sizeof((({s} *)0)->{field}) == {n}, "{s}.{field}");')
+    return '\n'.join(lines) + '\n'
 
 def c_source(kernel):
     prefix = '' if kernel else 't_'
@@ -130,7 +181,15 @@ _Static_assert(LOOM_OP_COUNT==20, "private opcode remains reserved");
                         '-ffreestanding','-std=c11','-fsyntax-only',
                         '-I',str(root/'kernel/include'),'-I',str(root/'arch/arm64'),
                         str(full)],check=True)
+        for kernel, label, incs in [(True, 'kernel-ring', ['kernel/include', 'arch/arm64']),
+                                    (False, 'native-c-ring', ['usr/lib/libt/include'])]:
+            source = tmp/(label+'.c'); source.write_text(ring_source(kernel))
+            subprocess.run([clang,'--target=aarch64-none-elf','-march=armv8-a',
+                            '-ffreestanding','-std=c11','-fsyntax-only',
+                            *[a for i in incs for a in ('-I', str(root/i))], str(source)],check=True)
     print(f'PASS: 3 actual mirrors; {len(CONSTANTS)} constants, 10 records and every declared size/offset; ARM64 C layouts.')
+    print(f'PASS: kernel and native C ring mirrors; {len(RING_CONSTANTS)} constants, '
+          f'{len(RING_RECORDS)} records, {sum(len(f) for _, _, f in RING_RECORDS)} fields against one layout table.')
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--root',type=Path,default=ROOT)

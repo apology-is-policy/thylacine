@@ -10,7 +10,7 @@ pinned-by:
 mirrors:
   - "usr/lib/libthyla-rs/src/loom.rs: Sqe / Cqe / BufReg / Params (size + full offset_of! sets)"
   - "usr/lib/libthyla-rs/src/loom.rs: the ring header as five bare offset constants (HDR_SQ_HEAD=0 .. HDR_FLAGS=32), no struct, no assert"
-  - "usr/lib/libt/include/thyla/loom.h: t_loom_params / t_loom_sqe / t_loom_cqe / t_loom_ring_hdr / t_loom_buf_reg (size + every field offset); loom-bridge-probe checks them against the kernel's own writes"
+  - "usr/lib/libt/include/thyla/loom.h: t_loom_params / t_loom_sqe / t_loom_cqe / t_loom_ring_hdr / t_loom_buf_reg (size + every field offset) and the opcode/flag constants; tools/check-loom-service-abi.py asserts them and the kernel's against one layout table; loom-bridge-probe checks the fields the kernel writes"
 created: 2026-08-02
 updated: 2026-10-12
 ---
@@ -34,6 +34,16 @@ These five ring structures have two mirrors. `libthyla-rs` has had one since
 Loom-2. Native C gained the second on 2026-10-12 (`thyla/loom.h`, NA-2a). It has
 a static assert on every field offset, and `loom-bridge-probe` checks it against
 a live ring's params, header words and CQEs.
+
+`tools/check-loom-service-abi.py` holds one layout table for the five records:
+every field with its size, plus the setup, enter, register, SQE, CQE and opcode
+constants. It asserts that table against the kernel's header and the native C
+mirror, both compiled for AArch64, so the two cannot disagree on a field's order,
+size or presence. Before it, the kernel pinned only some offsets (the ring
+header: its size and `sq_head`), and swapping two of its header words would have
+passed every assert. The Rust mirror is not yet in that table: its records live
+inside `loom.rs` beside code that needs the rest of the crate. NA-3, the Rust
+adapter, moves them into a module the checker can compile.
 Neither pouch nor the Go fork speaks Loom; the ring is native-only.
 
 | struct | size | role | writer |

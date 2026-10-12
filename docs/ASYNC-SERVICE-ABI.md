@@ -200,12 +200,23 @@ image's ramfs and reaches these syscalls from EL0 through the real argument and
 copy paths. The kernel test `loom.bridge_probe` spawns it and requires the exit
 status that its own build implies: one value for a kernel with the lever, another
 for a kernel without it. A probe that infers its mode from what it sees cannot
-pass the wrong image. In the default image it checks every private route's
--EOPNOTSUPP, and that a refusal leaves no handle, no mapping and no partial
-params write. In the qualification image it checks:
+pass the wrong image. The test may skip only a kernel booted without userspace;
+a ramfs that carries init but not the probe fails it. In the default image the
+probe checks every private route's -EOPNOTSUPP, and that a refusal leaves no
+handle, no mapping and no partial params write. In the qualification image it
+checks:
 - each refusal above;
-- the params copyout against read-only and part-read-only pages;
-- each record's copyin and result copyout against those pages;
+- the params copyout against a read-only page and against params that run into one;
+- the record copyin (one loop serves every op) against a record that runs into an
+  unreadable page;
+- the result copyout of SLOT, QUERY, POOL and POOL QUERY against a read-only
+  record (TARGET shares SLOT's and POOL's publish path and is faulted in-kernel,
+  since it needs a service registry);
 - the rollback, by the identity of the next fd and ring address;
-- a rejected SQE's CQE, reaped through poll(2);
-- the exact count of private rings that retire after the probe exits.
+- rejected SQEs' CQEs, reaped through poll(2), with one SQE that only a correctly
+  read opcode byte can reject as it is.
+
+Every successful setup runs over params pre-filled with a non-zero pattern, so a
+zero read back was written by the kernel. The test then requires that the probe
+created exactly the expected number of private rings, none in the default image
+and four in the qualification image, and that every one of them retired.

@@ -4,17 +4,25 @@
 #              PASSes, and the probe itself printed its default verdict (70) -- a
 #              SKIP for a missing binary would also PASS, so the line is required.
 #   CONTROL-Q  PRIVATE_ASYNC_QUAL=y in its own kernel dir: the same, with the
-#              qualification verdict (71) and four private rings retired.
-#   M10        default-image mutant: a private request reaches an ordinary ring.
-#   M8 M9 M11  qualification-image mutants: the params-copyout rollback skipped;
-#              the record copyout blind to faults; the test's lever pin inverted.
-#              Each is predicted to FAIL exactly loom.bridge_probe, and the
-#              probe's own line names which check caught it (M11: none -- the
-#              probe passes honestly and the pin alone fails it).
+#              qualification verdict (71) and four private rings made and retired.
+#   ABI        tools/check-loom-service-abi.py passes on the tree, and fails on
+#              each of three sabotaged copies (work/oct12-na2a/abi-witness.sh).
+#   M10 M14 M12  default-image mutants: a private request reaches an ordinary
+#              ring; the params copyout skips _resv0; the probe looked up under a
+#              name the ramfs lacks.
+#   M8 M9 M15 M13 M11  qualification-image mutants: the params-copyout rollback
+#              skipped; the record copyout blind to faults; POOL QUERY blind to a
+#              faulted copyout; a fifth private ring; the test's lever pin inverted.
+#              Each is predicted to FAIL exactly loom.bridge_probe, at a named
+#              message, and the probe's own line names which check caught it
+#              (M12: the probe never runs; M13 and M11: the probe passes honestly
+#              and the test's count or pin alone fails it).
 #   REBUILD    both kernels from the committed tree, compared with the controls.
 # Not proven here: SMP, sanitizers (the Mac-axis residual, 2026-10-07 vote).
 # Derived from work/oct12-na1/na1-run.sh.
 set -e
+# The boot must read the ramfs and kernel dirs this script hashes.
+unset THYLACINE_RAMFS_CPIO THYLACINE_BUILD_DIR
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
@@ -38,6 +46,10 @@ LINE_Q='loom-bridge-probe: qualification image routes every private syscall from
 P8='both rollbacks closed the handle and unmapped the ring'
 P9="a read-only record's result copyout faults"
 P10='params echo the granted flags'
+P14='reserved params are zero'
+P15='a read-only POOL QUERY record faults on its copyout'
+ABSENT='an image that carries userspace carries /bin/loom-bridge-probe'
+MADE='the probe made exactly its private rings'
 MUTATED=0
 
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
@@ -87,6 +99,7 @@ tally() { /usr/bin/grep -E '  tests: [0-9]+/[0-9]+' "$1" | tail -1 | sed -E 's/.
 lines() { tr -d '\r' < "$1" | /usr/bin/grep -cF -- "$2" || true; }
 run_suite() { # run_suite <label> [test.sh args]
   _l=$1; shift
+  rm -f build/test-boot.log
   ( set +e; tools/test.sh "$@" > "$OUT/$_l-test.log" 2>&1; echo $? > "$OUT/$_l.rc" )
   suite_rc=$(cat "$OUT/$_l.rc")
   [ -f build/test-boot.log ] || { echo "!! no build/test-boot.log after $_l"; exit 1; }
@@ -113,7 +126,14 @@ status_line() { # status_line <boot log> <status> <expected>
   _s="loom-bridge-probe status=$2 expected=$3"
   [ "$(lines "$1" "$_s")" = 1 ] || { echo "no single '$_s' in $1"; /usr/bin/grep -F 'loom-bridge-probe' "$1" | head; exit 2; }
 }
-green() { # green <label> <boot log> <probe line> <status>
+rings_line() { # rings_line <boot log> <made> <retired> <expected>
+  _s="loom-bridge-probe rings made=$2 retired=$3 expected=$4"
+  [ "$(lines "$1" "$_s")" = 1 ] || { echo "no single '$_s' in $1"; /usr/bin/grep -F 'loom-bridge-probe' "$1" | head; exit 2; }
+}
+same_probe() { # same_probe <label>: the baked probe is the controls' one
+  cmp -s "$OUT/$1-probe" "$OUT/control-d-probe" || { echo "$1: the baked probe differs from the controls'"; exit 1; }
+}
+green() { # green <label> <boot log> <probe line> <status> <rings>
   _l=$1; _b=$2
   /usr/bin/grep -q '^EXTINCTION:' "$_b" && { echo "$_l EXTINCTED"; /usr/bin/grep '^EXTINCTION:' "$_b"; exit 1; } || true
   _t=$(tally "$_b")
@@ -125,6 +145,7 @@ green() { # green <label> <boot log> <probe line> <status>
   [ "$(lines "$_b" "$3")" = 1 ] || { echo "$_l: the probe did not print '$3' once"; exit 1; }
   [ "$(lines "$_b" 'loom-bridge-probe: FAIL')" = 0 ] || { echo "$_l: a probe FAIL line"; exit 1; }
   status_line "$_b" "$4" "$4"
+  rings_line "$_b" "$5" "$5" "$5"
 }
 
 echo "=== preconditions ==="
@@ -134,11 +155,13 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 record "HEAD $(git rev-parse HEAD)"
 python3 "$MUT" --check > "$OUT/anchors.txt" || { cat "$OUT/anchors.txt"; echo "REFUSING: mutant anchors"; exit 3; }
-for w in "$P8" "$P9" "$P10"; do
+for w in "$P8" "$P9" "$P10" "$P14" "$P15"; do
   c=$(/usr/bin/grep -cF "\"$w\"" "$PROBE" || true)
   [ "$c" = 1 ] || { echo "REFUSING: probe check '$w' occurs $c times"; exit 3; }
 done
-[ "$(/usr/bin/grep -cF "\"$VERDICT\"" "$KTEST")" = 1 ] || { echo "REFUSING: the verdict message"; exit 3; }
+for w in "$VERDICT" "$ABSENT" "$MADE"; do
+  [ "$(/usr/bin/grep -cF "\"$w\"" "$KTEST")" = 1 ] || { echo "REFUSING: the test message '$w'"; exit 3; }
+done
 for t in $TESTS; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
@@ -150,6 +173,12 @@ record "expected tests (derived from test.c): $EXPECT"
 for f in $FILES; do cp "$f" "$OUT/pristine/$(basename "$f")"; done
 floor pre
 
+echo "=== ABI ==="
+python3 tools/check-loom-service-abi.py > "$OUT/abi-check.txt" 2>&1 || { cat "$OUT/abi-check.txt"; echo "ABI: the checker fails on the tree"; exit 1; }
+[ "$(/usr/bin/grep -c '^PASS:' "$OUT/abi-check.txt")" = 2 ] || { cat "$OUT/abi-check.txt"; echo "ABI: not both PASS lines"; exit 1; }
+sh work/oct12-na2a/abi-witness.sh "$OUT/abi-witness" > "$OUT/abi-witness.txt" 2>&1 || { cat "$OUT/abi-witness.txt"; echo "ABI: a sabotage passed the checker"; exit 1; }
+record "ABI: the checker passes on the tree and fails on each sabotaged copy"
+
 echo "=== CONTROL-D ==="
 lease control-d
 build control-d default
@@ -159,8 +188,8 @@ baked control-d
 inputs control-d build/kernel
 D_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
 run_suite control-d
-green CONTROL-D "$OUT/control-d-boot.log" "$LINE_D" 70
-record "CONTROL-D GREEN: $EXPECT/$EXPECT; the probe ran from the ramfs and printed its default verdict"
+green CONTROL-D "$OUT/control-d-boot.log" "$LINE_D" 70 0
+record "CONTROL-D GREEN: $EXPECT/$EXPECT; the probe ran from the ramfs and printed its default verdict; no private ring made"
 
 echo "=== CONTROL-Q ==="
 lease control-q
@@ -168,13 +197,14 @@ build control-q qual
 /usr/bin/grep -qF "$QUAL_LINE" "$OUT/control-q-build.log" || { echo "CONTROL-Q: cmake never saw the lever"; exit 1; }
 floor post-control-q-build
 baked control-q
+same_probe control-q
 inputs control-q "$QDIR"
 Q_BIN=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
 [ "$Q_BIN" != "$D_BIN" ] || { echo "CONTROL-Q: the qualification kernel equals the default one"; exit 1; }
 [ "$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)" = "$D_BIN" ] || { echo "CONTROL-Q: the qual build replaced the default kernel"; exit 1; }
 run_suite control-q --private-async-qual
-green CONTROL-Q "$OUT/control-q-boot.log" "$LINE_Q" 71
-record "CONTROL-Q GREEN: $EXPECT/$EXPECT; the probe drove every private route from EL0 and its four rings retired"
+green CONTROL-Q "$OUT/control-q-boot.log" "$LINE_Q" 71 4
+record "CONTROL-Q GREEN: $EXPECT/$EXPECT; the probe drove every private route from EL0; four rings made, four retired"
 SEEN_BINS="$D_BIN $Q_BIN"
 
 mutant() { # mutant <label> default|qual: patch, build, boot; sets B
@@ -186,6 +216,12 @@ mutant() { # mutant <label> default|qual: patch, build, boot; sets B
   git diff -- $FILES > "$OUT/$1.diff"
   build "$1" "$2"
   floor "post-$1-build"
+  baked "$1"
+  case " $(cat "$OUT/$1.files") " in
+    *" usr/loom-bridge-probe/loom-bridge-probe.c "*)
+      cmp -s "$OUT/$1-probe" "$OUT/control-d-probe" && { echo "REFUSING: the $1 probe was not rebuilt"; exit 5; } || true ;;
+    *) same_probe "$1" ;;
+  esac
   if [ "$2" = qual ]; then _k=$QDIR; _a=--private-async-qual; else _k=build/kernel; _a=; fi
   inputs "$1" "$_k"
   _bin=$(shasum -a 256 "$_k/thylacine.bin" | cut -d' ' -f1)
@@ -197,13 +233,14 @@ mutant() { # mutant <label> default|qual: patch, build, boot; sets B
   restore || exit 9
   MUTATED=0
 }
-only_probe_fails() { # only_probe_fails <label>: exactly loom.bridge_probe, at its verdict
+only_probe_fails() { # only_probe_fails <label> [message]: exactly loom.bridge_probe, at that message
+  _msg=${2:-$VERDICT}
   _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
   [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
   _t=$(tally "$B")
   [ "$_t" = "$((EXPECT - 1)) $EXPECT" ] || { echo "$1 tally '$_t', predicted $((EXPECT - 1)) $EXPECT"; fails "$B"; exit 2; }
   _v=$(verdict "$B" loom.bridge_probe)
-  [ "$_v" = "FAIL: $VERDICT" ] || { echo "$1: loom.bridge_probe verdict '$_v'"; exit 2; }
+  [ "$_v" = "FAIL: $_msg" ] || { echo "$1: loom.bridge_probe verdict '$_v', predicted 'FAIL: $_msg'"; exit 2; }
   _nf=$(fails "$B" | wc -l | tr -d ' ')
   [ "$_nf" = 1 ] || { echo "$1: $_nf FAIL lines, predicted 1"; fails "$B"; exit 2; }
 }
@@ -220,6 +257,22 @@ caught_by M10 "$P10"
 status_line "$B" 1 70
 record "M10 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught '$P10'"
 
+echo "=== M14: the params copyout skips _resv0 ==="
+mutant m14 default
+only_probe_fails M14
+caught_by M14 "$P14"
+status_line "$B" 1 70
+record "M14 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught '$P14'"
+
+echo "=== M12: the probe looked up under a name the ramfs lacks ==="
+mutant m12 default
+only_probe_fails M12 "$ABSENT"
+# The FAIL message itself names the probe, so look for the probe's own prefix
+# and the test's status line instead.
+[ "$(lines "$B" 'loom-bridge-probe:')" = 0 ] && [ "$(lines "$B" 'loom-bridge-probe status=')" = 0 ] && [ "$(lines "$B" '[skip] /bin/loom-bridge-probe')" = 0 ] || {
+  echo "M12: the probe ran or the test skipped"; /usr/bin/grep -F 'loom-bridge-probe' "$B" | head; exit 2; }
+record "M12 DISCRIMINATED: exactly loom.bridge_probe FAILs at '$ABSENT'; no skip"
+
 echo "=== M8: the params-copyout fault skips its rollback ==="
 mutant m8 qual
 only_probe_fails M8
@@ -234,6 +287,22 @@ caught_by M9 "$P9"
 status_line "$B" 1 71
 record "M9 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught '$P9'"
 
+echo "=== M15: POOL QUERY ignores a faulted copyout ==="
+mutant m15 qual
+only_probe_fails M15
+caught_by M15 "$P15"
+status_line "$B" 1 71
+record "M15 DISCRIMINATED: exactly loom.bridge_probe FAILs; the probe caught '$P15'"
+
+echo "=== M13: the probe makes a fifth private ring ==="
+mutant m13 qual
+only_probe_fails M13 "$MADE"
+[ "$(lines "$B" "$LINE_Q")" = 1 ] && [ "$(lines "$B" 'loom-bridge-probe: FAIL')" = 0 ] || {
+  echo "M13: the probe itself did not pass honestly"; /usr/bin/grep -F 'loom-bridge-probe' "$B" | head; exit 2; }
+status_line "$B" 71 71
+rings_line "$B" 5 5 4
+record "M13 DISCRIMINATED: the probe passed honestly (71); five rings made and retired; the count alone failed it"
+
 echo "=== M11: the test's lever pin inverted ==="
 mutant m11 qual
 only_probe_fails M11
@@ -246,6 +315,8 @@ echo "=== REBUILD both kernels from the committed tree ==="
 lease rebuild
 build rebuild-d default
 build rebuild-q qual
+baked rebuild
+same_probe rebuild
 RD=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
 RQ=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
 [ "$RD" = "$D_BIN" ] && record "rebuild-d byte-identical to CONTROL-D" || record "rebuild-d differs from CONTROL-D (recorded, not claimed identical)"

@@ -1,6 +1,7 @@
 // Native C mirror of the Loom ring ABI (kernel/include/thylacine/loom.h) and its
-// three syscalls. Every offset is pinned below; loom-bridge-probe checks the
-// mirror against what the kernel actually writes into a ring.
+// three syscalls. Every offset is pinned below; tools/check-loom-service-abi.py
+// compares the layouts with the kernel's, and loom-bridge-probe checks the fields
+// the kernel writes into a ring.
 #ifndef THYLA_LOOM_H
 #define THYLA_LOOM_H
 #include <stdint.h>
@@ -20,6 +21,24 @@
 #define T_LOOM_REGISTER_BUFFERS    1u
 #define T_LOOM_RING_SQ_NEED_WAKEUP 1u
 #define T_LOOM_OP_NOP              0u
+#define T_LOOM_OP_WALK             1u
+#define T_LOOM_OP_LOPEN            2u
+#define T_LOOM_OP_LCREATE          3u
+#define T_LOOM_OP_READ             4u
+#define T_LOOM_OP_WRITE            5u
+#define T_LOOM_OP_GETATTR          6u
+#define T_LOOM_OP_SETATTR          7u
+#define T_LOOM_OP_READDIR          8u
+#define T_LOOM_OP_FSYNC            9u
+#define T_LOOM_OP_CLUNK            10u
+#define T_LOOM_OP_RENAMEAT         11u
+#define T_LOOM_OP_UNLINKAT         12u
+#define T_LOOM_OP_MKDIR            13u
+#define T_LOOM_OP_SYMLINK          14u
+#define T_LOOM_OP_LINK             15u
+#define T_LOOM_OP_MKNOD            16u
+#define T_LOOM_OP_READLINK         17u
+#define T_LOOM_OP_STATFS           18u
 #define T_LOOM_SQE_LINK            1u
 #define T_LOOM_SQE_DRAIN           2u
 #define T_LOOM_SQE_CQE_SKIP        4u

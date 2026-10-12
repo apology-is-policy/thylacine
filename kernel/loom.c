@@ -355,6 +355,7 @@ static struct Loom **service_retire_tail;
 static bool service_retire_ready;
 static struct loom_close_queue service_close_queue;
 static u64 service_retired_count;
+static u64 service_created_count;
 
 void loom_retire_init(void) {
     spin_lock_init(&service_retire_lock);
@@ -368,6 +369,12 @@ bool loom_is_private(const struct Loom *l) { return l && l->service_as != NULL; 
 
 u64 loom_private_retired(void) {
     return __atomic_load_n(&service_retired_count, __ATOMIC_ACQUIRE);
+}
+
+// Every ring counted here reaches loom_private_destroy, so created minus retired
+// is the number of private rings still alive.
+u64 loom_private_created(void) {
+    return __atomic_load_n(&service_created_count, __ATOMIC_ACQUIRE);
 }
 
 #ifdef KERNEL_TESTS
@@ -576,6 +583,7 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     // The charge follows the ring Burrow, including when a mapping survives fd
     // retirement. No raw Proc pointer is consulted by the eventual refund.
     burrow_charge_record(l->ring, p, backing);
+    __atomic_fetch_add(&service_created_count, 1, __ATOMIC_RELEASE);
     *why = 0;
     return l;
 }
