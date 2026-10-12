@@ -1,6 +1,60 @@
 # The autonomous-run journal
 
 
+## October 12: NA-1 -- the private Loom syscall bridge (Corona)
+
+Step 1 of the transferred sequence is that userspace must reach the private
+async ABI. The operator voted twice (AskUserQuestion, 2026-10-12):
+- a compile lever, off by default, rather than a KERNEL_TESTS gate, because the
+  dev image runs the tests and would have turned the feature on in practice;
+- an ENTER that never sleeps, so clients park in poll(2).
+
+The scripture came first (c8d9127f5). The code (6a5039788) routes SETUP, REGISTER
+2..9, BUFFERS and ENTER into the existing internal stack. Every default image
+refuses each private route with -EOPNOTSUPP.
+
+**Two live defects on main surfaced in code I was reading, not writing.** The
+legacy `sys_loom_setup_for_proc` stored into the Loom after `handle_alloc` had
+adopted its only reference. A sibling's close frees it synchronously, which makes
+an EL0-reachable UAF write (P1, latent). Its params-copyout rollback used the
+unsettled `burrow_unmap` as the final drop and lost the ring's charge (P3). I
+enqueued both in OPEN-BUGS before fixing them. Each witness was a test hook at the
+race window plus a monotonic counter (`loom_total_destroyed` sampled at the close),
+not a gauge read afterwards. Both were ported to main as 3f4896413
+(`corona/loom-setup-main`), offered on yip 0212.
+
+**The reviewer missed what I found, and why.** Round 1 (Fable 5.1 on Opus 5.5)
+returned 0/0/0/5. While it ran I asked what else could carry a private ring's
+pages to another Proc, and found `SYS_WEFT_SHARE`. Its type gate sees plain ANON
+and admits the ring (S1, P2). My prompt had named "I-5 fork/exec", and the
+prosecutor checked exactly those paths. The AUDIT-TRIGGERS row now names the
+class: every path by which pages leave the image. Mutant M7 proves the refusal is
+the gate that fires. A positive control (an ordinary page of the same caller still
+shares) rules out an earlier gate refusing first.
+
+**Wrong turns.**
+- Disk fell under the 8 GiB floor (5.6 GiB, with swap on the same container)
+  just as the mac lease arrived. I released the lease after 14 s rather than sit
+  on it, and a background `df` watcher re-woke me at 12.3 GiB.
+- I deliberately kept the mutant legs off the mac while the reviewer read the
+  tree, because they patch sources in place. I ran only builds and control boots
+  in that window.
+- No boot log says which kernel booted. The M6 extinction is the proof that
+  `--private-async-qual` ran the qualification kernel; the controls' PASS is not.
+
+**Evidence.** run-20261012T094440Z on 3f816c8a4, exit 0:
+- both controls 1869/1869;
+- M3-M7 each discriminated by name;
+- both kernels rebuilt byte-identical;
+- the guard and shape legs green.
+
+The branch is at 17997a2c6 on both mirrors. Not proven: EL0 usercopy (owed to
+NA-2's probe), SMP and sanitizers (the Mac-axis residual, per the 10-07 vote).
+Main landed SQ-1 as cc422b913 during the run. I declined its rebase request,
+because rebasing a published branch would need a force-push, and the standing
+instruction is not to merge main.
+
+
 ## October 12: SQ-1 -- the SQ head published before its copy (Corona)
 
 The operator returned the clipboard arc to Corona, with the parked SQ
