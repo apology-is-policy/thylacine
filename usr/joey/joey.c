@@ -11789,7 +11789,9 @@ int main(void) {
         // Stopped is the resume proof AND the task-#19 regression); `bg`
         // resumes it backgrounded; `fg` + ^C -> interrupt terminates it
         // (post-resume signal delivery, the F4 leg); the shell reclaims the
-        // terminal + still runs pipelines; then the `maskstop` rung, which is
+        // terminal + still runs pipelines; a job spinning with no syscall
+        // takes ^C, by default and by a handler (spinint/spinnote: only an
+        // IRQ return reaches it, ARCH 8.8.3 #964); then the `maskstop` rung, which is
         // the ONLY leg that reaches the EL0-return tail's NOTE_DFL_STOP arm --
         // /susp-mask-child masks NOTE_BIT_TTY so the ^Z fan POSTS instead of
         // stopping, keeps running through the ^Z, and takes the deferred stop
@@ -11816,7 +11818,8 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
-                     "jobs/fg-restop/bg/fg-int/maskstop/exit over a live "
+                     "jobs/fg-restop/bg/fg-int/spinint/spinnote/maskstop/"
+                     "exit over a live "
                      "pts; killst)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
