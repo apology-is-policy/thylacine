@@ -4163,3 +4163,38 @@ Re-run under the lease (18:59-19:02 UTC): the first attempt failed on the
 uninitialized ledger above; then the runner passed
 (`run-20261012T190029Z`) and the mutant driver rejected 87 of 87, refused all
 three header sabotages and the ABI sabotage (`mutants-20261012T190121Z`).
+
+## NA-3: the Rust client cores, host-tested (Corona, October 12 -- in progress)
+
+Scripture a8ea95306 ("Native Rust client cores" in ASYNC-SERVICE-ABI.md). NA-3
+installs Astra's Rust twins as the crate `usr/lib/loom-client` (no_std + alloc,
+edition 2024), because libthyla-rs cannot be built for the host and a test
+inside it would run nowhere. The twins keep the heap.
+
+**Written, October 12, 19:10-19:40 UTC (not yet built; the lease is main's).**
+- **The install is derived, not hand-ported.** `work/oct12-na3/na3_install.py`
+  produces every core and test as rustfmt of Astra's original plus a listed
+  edit set, and `--check` proves the tree equals it. A code edit may only swap
+  or extend one path token, so none can delete a statement. A sabotage showed
+  that the first form of the check let an edit drop an assertion; the token rule
+  closed that.
+- **The tests are a union.** Astra's Rust test files are cumulative copies:
+  650 test definitions, 137 distinct. `test_task_loop.rs` becomes `tests/ring.rs`,
+  and the deadlines, local-progress, executor and composed files contribute only
+  their missing lines, as child modules. The check proves every original test's
+  lines are present in its installed namesake.
+- **Error alignment.** The 64-member envelope answers a new `Error::Full`
+  (it answered `Busy`). The C cores' local codes move out of the errno range,
+  one block per family (NA-2b F6): lease -1101.., request book -1201.. (FULL
+  stays -ENOSPC), mapping -1301.., and the paired reader's bare -1/-2 become
+  `T_CQ_GEOMETRY`/`T_CQ_CORRUPT` (-1401/-1402).
+- **Ring records (NA-2a F5, Rust half).** `Params`, `Sqe`, `Cqe`, `BufReg` and a
+  new `RingHdr` move into libthyla-rs `loom/ring_abi.rs`; `loom.rs` derives its
+  header offsets from `RingHdr`. The ABI checker gains a Rust ring leg and checks
+  the cores' own setup and CQE copies (C and Rust) field by field.
+- **Evidence still owed (under the lease):** `make test-loom-client` (now with a
+  Rust stage that requires all 137 declared tests in the dev and release
+  profiles), the ABI checker, a guest build of the Loom consumers, the NA-3
+  mutant driver (`work/oct12-na3/na3-mutants.py`: Astra's 110 Rust mutants, 59
+  compile-fail cases, 4 C code-block sabotages, 6 checker sabotages) and a re-run
+  of the NA-2b C mutants on the renumbered codes.

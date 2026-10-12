@@ -3603,3 +3603,11 @@ answers -ENOSPC, the same errno this kernel's slot table, pool bank and request
 table answer. The checker's ring legs pin both sides to 28: `T_E_NOSPC` here and
 `T_LOOM_CLIENT_ENOSPC` in libt. The native C leg also parses every
 `thyla/loom_client` header for AArch64.
+
+**NA-3 (Corona, 2026-10-12).** The checker gained a Rust ring leg: libthyla-rs's
+ring records moved into `loom/ring_abi.rs`, and a compiled program checks every
+ring constant and every field of the five records against the layout table. The
+client cores' own copies of the setup record and the CQE (`t_owned_setup` and
+`t_owned_cqe` in C, `Setup` and `Completion` in [[sub-loom-client]]) are checked
+field by field too. The service mirror's Rust leg now compiles
+`usr/lib/loom-client/src/service_abi.rs`.

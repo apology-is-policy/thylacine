@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# tools/test-loom-client.sh -- the native C Loom client cores (libt's
-# thyla/loom_client/): their HOST tests, and the proof that they build and link
-# freestanding the way libt builds them (docs/ASYNC-SERVICE-ABI.md, "Native C
-# client storage").
+# tools/test-loom-client.sh -- the native Loom client cores: the C cores in
+# libt's thyla/loom_client/ and their Rust twins in usr/lib/loom-client. Their
+# HOST tests, and the proof that the C cores build and link freestanding the way
+# libt builds them (docs/ASYNC-SERVICE-ABI.md, "Native C client storage" and
+# "Native Rust client cores").
 #
-# Three stages; any failure fails the script.
+# Four stages; any failure fails the script.
 #   sanitized     every test, cores and test at -O0 under ASan + UBSan, with
 #                 no recovery: any report fails the test. A control proves a
 #                 signed overflow fails this build.
@@ -18,6 +19,10 @@
 #                 mem* routine: libt has none, and -O2 inlines every aggregate
 #                 copy. The control builds the same objects at -O0, where clang
 #                 calls memcpy, and requires that link to fail on it.
+#   rust          the Rust twins' tests with cargo, in the dev profile and in
+#                 the release profile the guest builds (opt-level "z", overflow
+#                 checks on). A run passes only when every #[test] the crate
+#                 declares ran and passed, and the build printed no warning.
 #
 # A test passes only by exiting 0 AND printing its own PASS line, so a test that
 # returns early, or is never built, cannot read as green.
@@ -170,4 +175,27 @@ fi
 /usr/bin/grep -q 'undefined symbol: memcpy' "$O0/link.log" || {
     cat "$O0/link.log"; echo "test-loom-client: control: the -O0 link failed, but not on memcpy"; exit 1; }
 echo "  freestanding: control -- at -O0 the same link fails on memcpy"
+
+# Rust. The declared count comes from the crate, so a test compiled out or
+# filtered away cannot leave a green summary.
+HOST_TRIPLE=$(rustc -vV | awk '/^host:/ {print $2}')
+RUST_SRC="$ROOT/usr/lib/loom-client/src"
+declared=$(/usr/bin/grep -rhcE '^[[:space:]]*#\[test\]' "$RUST_SRC" | awk '{s+=$1} END {print s+0}')
+[ "$declared" -gt 0 ] || { echo "test-loom-client: rust: $RUST_SRC declares no #[test]"; exit 1; }
+for profile in dev release; do
+    log="$OUT/rust-$profile.log"
+    case $profile in release) release=--release ;; *) release= ;; esac
+    if ! (cd "$ROOT/usr" && cargo test -p loom-client --lib $release --target "$HOST_TRIPLE") > "$log" 2>&1; then
+        tail -60 "$log"; echo "test-loom-client: rust $profile FAILED"; exit 1
+    fi
+    if /usr/bin/grep -qE '^warning' "$log"; then
+        /usr/bin/grep -E -A6 '^warning' "$log" | head -60; echo "test-loom-client: rust $profile built with warnings"; exit 1
+    fi
+    results=$(/usr/bin/grep -E '^test result: ' "$log" || true)
+    [ "$(printf '%s\n' "$results" | /usr/bin/grep -c .)" -eq 1 ] || {
+        tail -20 "$log"; echo "test-loom-client: rust $profile: expected one test harness summary"; exit 1; }
+    printf '%s\n' "$results" | /usr/bin/grep -qE "^test result: ok\. $declared passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" || {
+        echo "$results"; echo "test-loom-client: rust $profile did not pass all $declared declared tests"; exit 1; }
+    echo "  rust: $profile -- $declared of $declared declared tests passed"
+done
 echo "test-loom-client: PASS"

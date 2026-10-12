@@ -22,7 +22,7 @@ code:
   - usr/lib/libthyla-rs/src/io.rs
   - usr/lib/libthyla-rs/src/jit.rs
   - usr/lib/libthyla-rs/src/loom.rs
-  - usr/lib/libthyla-rs/src/loom/service_abi.rs
+  - usr/lib/libthyla-rs/src/loom/ring_abi.rs
   - usr/lib/libthyla-rs/src/net.rs
   - usr/lib/libthyla-rs/src/notes.rs
   - usr/lib/libthyla-rs/src/poll.rs
@@ -49,7 +49,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-04
+updated: 2026-10-12
 ---
 ## Dedicated service owner (October 2)
 
@@ -794,10 +794,15 @@ qualification. No production ABI or externally writable fault control exists.
 
 ## Private Loom ABI module and open ownership work
 
-loom/service_abi.rs is now owned here as a runtime declaration mirror rather
-than only an ABI registry pin. Its30 constants and10 repr(C) records match
-kernel/native C under the independent byte gate; new pool records pin alignment
-as well as size/offset. It exposes no working private client yet.
+The private-service mirror `service_abi` moved into the loom-client crate in
+NA-3 ([[sub-loom-client]]), beside the Rust client cores that use it, and is
+re-exported here as `loom::service_abi`. Its 30 constants and 10 repr(C) records
+still match kernel and native C under the independent byte gate. The ring
+records (`Params`, `Sqe`, `Cqe`, `BufReg` and a `RingHdr` struct) moved into
+`loom/ring_abi.rs`, a file with no crate dependency that
+tools/check-loom-service-abi.py compiles against the ring layout table; `loom.rs`
+re-exports the public names and derives its header offsets from `RingHdr`.
+No working private client is exposed yet.
 
 AS-R8 raw registration is now explicitly unsafe: integer VAs carry the full
 asynchronous lifetime and alias-exclusion obligation through terminal completion

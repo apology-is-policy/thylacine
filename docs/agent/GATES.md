@@ -142,14 +142,17 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 tools/check-prot-mirror.py                       # 0 agree / 1 drift / 2 cannot measure
 tools/check-prot-mirror.py --expect-unmirrored 5 # today's absence count
 
-# The native C Loom client cores in libt (thyla/loom_client/, NA-2b). Host only,
-# no boot, about a minute. Every host test under ASan + UBSan with no recovery
+# The native Loom client cores: C in libt (thyla/loom_client/, NA-2b) and the
+# Rust twins in usr/lib/loom-client (NA-3). Host only, no boot, a few minutes. Every host test under ASan + UBSan with no recovery
 # (a control proves a signed overflow fails that build), then at -O2 with
 # NDEBUG cores; a test passes only by exiting 0 AND printing its own PASS line.
 # Then the cores built with libt's exact flags for aarch64-none-elf: no mem*
 # import, and every public function linked under --no-undefined; an -O0
-# control must fail that link on memcpy. The mutant driver
-# work/oct12-na2b/na2b-mutants.py is the discrimination evidence behind it.
+# control must fail that link on memcpy. Then the Rust twins' tests with cargo,
+# in the dev profile and in the guest's release profile; each run must pass every
+# #[test] the crate declares, with no build warning. The mutant drivers
+# work/oct12-na2b/na2b-mutants.py (C) and work/oct12-na3/na3-mutants.py (Rust)
+# are the discrimination evidence behind it.
 make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --

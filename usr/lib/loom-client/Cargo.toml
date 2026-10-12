@@ -1,0 +1,15 @@
+[package]
+name = "loom-client"
+version = "0.1.0"
+# The cores were written and tested as 2024, whose temporary-drop rules decide
+# when a RefCell borrow ends (docs/ASYNC-SERVICE-ABI.md, "Native Rust client cores").
+edition = "2024"
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "loom_client"
+path = "src/lib.rs"
+
+# The native Loom client cores. They make no syscall, so the host tests them
+# (make test-rust) and libthyla-rs supplies the kernel calls, as with thyla-heap.

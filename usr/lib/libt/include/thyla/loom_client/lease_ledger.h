@@ -2,8 +2,11 @@
 #ifndef THYLA_LOOM_CLIENT_LEASE_LEDGER_H
 #define THYLA_LOOM_CLIENT_LEASE_LEDGER_H
 #include <thyla/loom_client/base.h>
-enum t_lease_error { T_LEASE_GEOMETRY=-1,T_LEASE_RECEIPT=-2,T_LEASE_BUSY=-3,
-    T_LEASE_STALE=-4,T_LEASE_STATE=-5,T_LEASE_EXHAUSTED=-6 };
+enum t_lease_error { T_LEASE_GEOMETRY=-1101,T_LEASE_RECEIPT=-1102,T_LEASE_BUSY=-1103,
+    T_LEASE_STALE=-1104,T_LEASE_STATE=-1105,T_LEASE_EXHAUSTED=-1106 };
+_Static_assert(T_LOOM_CLIENT_LOCAL(T_LEASE_GEOMETRY,1100)&&T_LOOM_CLIENT_LOCAL(T_LEASE_RECEIPT,1100)&&
+    T_LOOM_CLIENT_LOCAL(T_LEASE_BUSY,1100)&&T_LOOM_CLIENT_LOCAL(T_LEASE_STALE,1100)&&
+    T_LOOM_CLIENT_LOCAL(T_LEASE_STATE,1100)&&T_LOOM_CLIENT_LOCAL(T_LEASE_EXHAUSTED,1100),"lease codes lie in their block");
 struct t_lease_token { uint64_t owner;struct t_loom_service_buffer_receipt receipt;size_t length; };
 /* One cell per pool member, shared by every pool of a ring as the kernel's pool
  * bank is (at most 64 members across all pools). Owner zero marks a free cell;

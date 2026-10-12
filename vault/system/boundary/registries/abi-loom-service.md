@@ -9,7 +9,7 @@ pinned-by:
   - "tools/check-loom-service-abi.py: actual C/Rust bytes against independent vectors"
 mirrors:
   - "usr/lib/libt/include/thyla/loom_service.h: ten records and constants"
-  - "usr/lib/libthyla-rs/src/loom/service_abi.rs: ten repr(C) records and constants"
+  - "usr/lib/loom-client/src/service_abi.rs: ten repr(C) records and constants (re-exported as libthyla_rs::loom::service_abi)"
 created: 2026-10-04
 updated: 2026-10-12
 ---
@@ -35,3 +35,8 @@ October 12: register ops 2..9 now route through [[sub-kernel-loom-bridge]], in
 qualification kernels only. Each record is copied once, at the size it pins
 here. The default image refuses all eight with -EOPNOTSUPP. The encodings are
 unchanged.
+
+October 12 (NA-3): the Rust mirror moved from libthyla-rs into the loom-client
+crate ([[sub-loom-client]]), whose cores use its records and which the host can
+test. libthyla-rs re-exports it at the old path. The checker compiles it from
+its new place; the encodings are unchanged.

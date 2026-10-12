@@ -13,7 +13,9 @@ struct t_mapping_backend{void *context;void *(*base)(void *);size_t(*length)(voi
 /* The caller's storage: zero it before its first use (static storage is), and
  * reuse it only after t_mapping_destroy. Its fields are the core's own. */
 struct t_owned_mapping{struct t_paired_cq reader;struct t_mapping_backend backend;unsigned live,closed;};
-enum{T_MAP_GEOMETRY=-1,T_MAP_HEADER=-2,T_MAP_CLOSED=-3,T_MAP_CORRUPT=-4};
+enum{T_MAP_GEOMETRY=-1301,T_MAP_HEADER=-1302,T_MAP_CLOSED=-1303,T_MAP_CORRUPT=-1304};
+_Static_assert(T_LOOM_CLIENT_LOCAL(T_MAP_GEOMETRY,1300)&&T_LOOM_CLIENT_LOCAL(T_MAP_HEADER,1300)&&
+    T_LOOM_CLIENT_LOCAL(T_MAP_CLOSED,1300)&&T_LOOM_CLIENT_LOCAL(T_MAP_CORRUPT,1300),"mapping codes lie in their block");
 /* Consumes backend on all paths and is live only on zero; the storage cannot
  * alias backend or mapped storage. */
 int t_mapping_create(struct t_mapping_backend,struct t_owned_setup,struct t_owned_mapping *);

@@ -123,9 +123,10 @@ test-fault:
 test-rust:
 	@tools/test-rust.sh
 
-# The native C Loom client cores in libt (thyla/loom_client/): their host tests
-# under ASan+UBSan and at -O2, then a freestanding aarch64 build and a link of
-# every public function under libt's own flags. No boot; seconds.
+# The native Loom client cores: the C cores in libt (thyla/loom_client/) under
+# ASan+UBSan and at -O2, a freestanding aarch64 build and a link of every public
+# function under libt's own flags, then the Rust twins (usr/lib/loom-client) with
+# cargo in the dev and release profiles. No boot; a few minutes.
 test-loom-client:
 	@tools/test-loom-client.sh
 
@@ -268,8 +269,9 @@ help:
 	@echo "               which NOTHING in the tree ran before 2026-09-22. Also names"
 	@echo "               the crates that cannot host-test at all (unconditional"
 	@echo "               libthyla-rs), whose cfg(test) tests run nowhere. No boot."
-	@echo "  test-loom-client — the native C Loom client cores' HOST tests (ASan+UBSan,"
-	@echo "               -O2) and their freestanding link under libt's flags. No boot."
+	@echo "  test-loom-client — the native Loom client cores' HOST tests: C (ASan+UBSan,"
+	@echo "               -O2, freestanding link under libt's flags) and the Rust twins"
+	@echo "               (cargo, dev and release profiles). No boot."
 	@echo "  verify-kaslr — #245: I-16's only runtime witness -- the slide must vary"
 	@echo "               across N=10 boots; a single boot cannot see a fixed slide."
 	@echo "  test-venus-verdict — Warp-6 V-0: the venus gate discriminates (no boot)."

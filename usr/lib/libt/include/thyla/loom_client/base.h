@@ -11,6 +11,9 @@
 
 // -ENOSPC, the errno the kernel's pool bank and request table answer when full.
 #define T_LOOM_CLIENT_ENOSPC (-28)
+/* A core's return channel can also carry a kernel errno or another family's
+ * code, so each family's local codes lie in a block of 100 below -1000. */
+#define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
 
 // libt's definition writes the site to fd 2 and ends every thread of the
 // process; a host test links its own.

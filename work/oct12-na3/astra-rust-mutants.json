@@ -1,0 +1,1709 @@
+{
+ "variants": [
+  {
+   "driver": "run-composed-ring.py",
+   "name": "wrong-receipt",
+   "file": "paired_cq.rs",
+   "a": "ptr::read(self.receipts.add(slot))",
+   "b": "ptr::read(self.receipts.add((slot+1)&(self.entries as usize-1)))",
+   "test": "test_composed_ring.rs",
+   "filter": "composed_",
+   "expect": "'attempt to subtract with overflow' if name=='untracked-lease' else 'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-composed-ring.py",
+   "name": "wrong-pool",
+   "file": "request_book.rs",
+   "a": "record.receipt.pool != pool",
+   "b": "false && record.receipt.pool != pool",
+   "test": "test_composed_ring.rs",
+   "filter": "composed_",
+   "expect": "'attempt to subtract with overflow' if name=='untracked-lease' else 'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-composed-ring.py",
+   "name": "untracked-lease",
+   "file": "ring_payload.rs",
+   "a": "p.live+=1;s.live+=1;",
+   "b": "p.live+=1;",
+   "test": "test_composed_ring.rs",
+   "filter": "composed_",
+   "expect": "'attempt to subtract with overflow' if name=='untracked-lease' else 'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "ignore-deadline",
+   "file": "ring_payload.rs",
+   "a": "f.deadline.is_some_and(|d|now>=d)",
+   "b": "f.deadline.is_some()",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "late-deadline",
+   "file": "ring_payload.rs",
+   "a": "now>=d",
+   "b": "now>d",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "repeat-cancel",
+   "file": "ring_payload.rs",
+   "a": "f.abort_requested=true;f.scope",
+   "b": "f.scope",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "drop-double-abort",
+   "file": "ring_payload.rs",
+   "a": "if f.abort_requested{f.abandoned=true;None}",
+   "b": "if false{f.abandoned=true;None}",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "unbounded-scan",
+   "file": "ring_payload.rs",
+   "a": "0..budget.min(64)",
+   "b": "0..64",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "mutable-active-deadline",
+   "file": "ring_payload.rs",
+   "a": "if f.phase!=FixedPhase::Prepared{return Err(Error::Busy);}f.deadline",
+   "b": "if false{return Err(Error::Busy);}f.deadline",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "missing-wakeup",
+   "file": "fixed_futures.rs",
+   "a": "w.wake();",
+   "b": "drop(w);",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "missing-unregister",
+   "file": "fixed_futures.rs",
+   "a": "hub.borrow_mut().slots[i].take()",
+   "b": "{let _=i;None::<Registration>}",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "stale-waker",
+   "file": "fixed_futures.rs",
+   "a": "h.slots[slot.expect(\"pending future owns registration\")].as_mut().unwrap().waker.replace(waker)",
+   "b": "{let r=h.slots[slot.unwrap()].as_mut().unwrap();if r.waker.is_none(){r.waker=Some(waker);}None::<Waker>}",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "callback-under-borrow",
+   "file": "fixed_futures.rs",
+   "a": "let(result,batch)=unsafe{self.receive_deferred(record)};batch.dispatch();result",
+   "b": "let(result,batch)=unsafe{self.receive_deferred(record)};let _borrow=self.hub.borrow_mut();batch.dispatch();result",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "clone-after-check",
+   "file": "fixed_futures.rs",
+   "a": "let waker=cx.waker().clone();let status=me.request.try_complete();",
+   "b": "let status=me.request.try_complete();let waker=cx.waker().clone();",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "preparation-slot-leak",
+   "file": "fixed_futures.rs",
+   "a": "Err(e)=>{release(&self.hub,&mut slot);Err(e)}",
+   "b": "Err(e)=>{Err(e)}",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "early-fixed-view",
+   "file": "ring_payload.rs",
+   "a": "let FixedPhase::Terminal(n)=f.phase else{return Err(Error::Busy)};",
+   "b": "let n=match f.phase{FixedPhase::Terminal(n)=>n,_=>f.range.length as i32};",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "abandon-refund",
+   "file": "ring_payload.rs",
+   "a": "f.abandoned=true;Some(f.scope)",
+   "b": "let scope=f.scope;s.fixed[self.index]=None;Some(scope)",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "missing-abort",
+   "file": "ring_payload.rs",
+   "a": "self.core.backend.abort_scope(scope);",
+   "b": "let _=scope;",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "fixed-pool-overlap",
+   "file": "ring_payload.rs",
+   "a": "if overlap(f.range,*r)",
+   "b": "if false && overlap(f.range,*r)",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "pool-fixed-overlap",
+   "file": "ring_payload.rs",
+   "a": "p.ranges.iter().any(|r|overlap(*r,range))",
+   "b": "p.ranges.iter().any(|r|false && overlap(*r,range))",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "early-retired-refund",
+   "file": "ring_payload.rs",
+   "a": "if retired{for slot",
+   "b": "if true{for slot",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "oversized-fixed-result",
+   "file": "ring_payload.rs",
+   "a": "if result>0&&result as u64>f.range.length",
+   "b": "if false&&result>0&&result as u64>f.range.length",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "late-write",
+   "file": "ring_payload.rs",
+   "a": "!f.write||f.phase!=FixedPhase::Prepared",
+   "b": "!f.write",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "unpublished-leak",
+   "file": "fixed_requests.rs",
+   "a": "core.book.cancel_unpublished(cookie).expect(\"fresh request\");",
+   "b": "let _=cookie;",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "lost-abandoned-terminal",
+   "file": "fixed_requests.rs",
+   "a": "if delivery.abandoned{",
+   "b": "if false && delivery.abandoned{",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "retirement-without-proof",
+   "file": "fixed_requests.rs",
+   "a": "if c.owner.progress(){",
+   "b": "if true{",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "retired-metadata-leak",
+   "file": "fixed_requests.rs",
+   "a": "unsafe{c.book.clear_retired();}",
+   "b": "",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "missing-storage-terminal",
+   "file": "fixed_requests.rs",
+   "a": "c.owner.finish_fixed(delivery.cookie,delivery.record.cqe.result)",
+   "b": "{let _=delivery.cookie;Ok::<(),StorageError>(())}",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "corrupt-keeps-open",
+   "file": "fixed_requests.rs",
+   "a": "self.owner.close();",
+   "b": "",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "wake-under-receive-borrow",
+   "file": "retirement_executor.rs",
+   "a": "batch.dispatch();result.map_err(Error::Driver)",
+   "b": "let _borrow=self.state.borrow_mut();batch.dispatch();result.map_err(Error::Driver)",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "expect": "'RefCell already' if name.startswith('wake-under-') else 'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "wake-under-drop-borrow",
+   "file": "retirement_executor.rs",
+   "a": "batch.dispatch(); // Existing cell",
+   "b": "let _borrow=self.state.borrow_mut();batch.dispatch(); // Existing cell",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "expect": "'RefCell already' if name.startswith('wake-under-') else 'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "wake-under-shutdown-borrow",
+   "file": "retirement_executor.rs",
+   "a": "batch.dispatch(); // Allows task",
+   "b": "let _borrow=self.state.borrow_mut();batch.dispatch(); // Allows task",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "expect": "'RefCell already' if name.startswith('wake-under-') else 'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "skip-retire-notification",
+   "file": "retirement_executor.rs",
+   "a": "batch.dispatch(); // Existing cell",
+   "b": "drop(batch); // Existing cell",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "expect": "'RefCell already' if name.startswith('wake-under-') else 'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "early-reclaim",
+   "file": "retirement_executor.rs",
+   "a": "e.retiring&&e.driver.progress()",
+   "b": "e.retiring",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "expect": "'RefCell already' if name.startswith('wake-under-') else 'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "close-instead-of-retire",
+   "file": "retirement_executor.rs",
+   "a": "let batch=e.driver.retire();",
+   "b": "let batch=e.driver.close();",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "expect": "'RefCell already' if name.startswith('wake-under-') else 'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-ledger.py",
+   "name": "owner",
+   "file": "lease_ledger.rs",
+   "a": "token.owner != self.owner || ",
+   "b": "",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-ledger.py",
+   "name": "stale",
+   "file": "lease_ledger.rs",
+   "a": "if receipt.lease <= member.last { return Err(LeaseError::Stale); }",
+   "b": "",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-ledger.py",
+   "name": "failed-return",
+   "file": "lease_ledger.rs",
+   "a": "if syscall_result == 0 {",
+   "b": "if syscall_result <= 0 {",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-ledger.py",
+   "name": "busy",
+   "file": "lease_ledger.rs",
+   "a": "if member.state != State::Available { return Err(LeaseError::Busy); }",
+   "b": "",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-ledger.py",
+   "name": "final-release",
+   "file": "lease_ledger.rs",
+   "a": "return Ok(None);",
+   "b": "self.outstanding = 0; return Ok(None);",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-ledger.py",
+   "name": "overlap",
+   "file": "lease_ledger.rs",
+   "a": "if prior.buffer_index == range.buffer_index &&",
+   "b": "if false && prior.buffer_index == range.buffer_index &&",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "lost-owner-signal",
+   "file": "ring_payload.rs",
+   "a": " fn notify(&self){if let Some(s)=self.signal.borrow().as_ref(){s.notify();}}",
+   "b": " fn notify(&self){}",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "missing-cq-signal",
+   "file": "ring_payload.rs",
+   "a": "drop(s);self.core.notify();Ok(())",
+   "b": "drop(s);Ok(())",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "zero-budget-loses-event",
+   "file": "retirement_executor.rs",
+   "a": "if budget==0{return",
+   "b": "if budget==0{self.state.borrow().signal.take();return",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "lost-partial-sweep",
+   "file": "retirement_executor.rs",
+   "a": "s.scan_left-=n;",
+   "b": "s.scan_left=0;",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "busy-self-reschedule",
+   "file": "retirement_executor.rs",
+   "a": "self.progress(visits)",
+   "b": "{self.notify_progress();self.progress(visits)}",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "missing-admission-signal",
+   "file": "retirement_executor.rs",
+   "a": "s.slots[slot]=Some(Entry{driver,retiring:false});s.signal.notify();",
+   "b": "s.slots[slot]=Some(Entry{driver,retiring:false});",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "lost-self-wake",
+   "file": "local_tasks.rs",
+   "a": "self.slots[i]=Some(entry);",
+   "b": "entry.ready.ready.store(false,Ordering::Release);self.slots[i]=Some(entry);",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "poll-quiet-tasks",
+   "file": "local_tasks.rs",
+   "a": "e.ready.ready.swap(false,Ordering::AcqRel)",
+   "b": "{e.ready.ready.store(false,Ordering::Release);true}",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "ignore-budget",
+   "file": "local_tasks.rs",
+   "a": "budget.min(self.slots.len())",
+   "b": "self.slots.len()",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "stale-cancel",
+   "file": "local_tasks.rs",
+   "a": "e.id==task.id",
+   "b": "true",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "drop-pending-task",
+   "file": "local_tasks.rs",
+   "a": "self.slots[i]=Some(entry);",
+   "b": "drop(entry);",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "lost-wake",
+   "file": "local_tasks.rs",
+   "a": "self.ready.store(true,Ordering::Release);",
+   "b": "self.ready.store(false,Ordering::Release);",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "skip-local-recheck",
+   "file": "local_wait.rs",
+   "a": "else if queue.needs_progress()||runnable(){Outcome::Retry}",
+   "b": "else if false{Outcome::Retry}",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "skip-native-recheck",
+   "file": "local_wait.rs",
+   "a": "else if ready{",
+   "b": "else if false{",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "skip-deadline-recheck",
+   "file": "local_wait.rs",
+   "a": "let elapsed=expired(armed.source.now(),deadline);",
+   "b": "let elapsed=false;",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "reset-absolute-deadline",
+   "file": "local_wait.rs",
+   "a": "armed.source.wait(armed.ticket,deadline)",
+   "b": "armed.source.wait(armed.ticket,deadline.map(|d|d+1))",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "skip-disarm",
+   "file": "local_wait.rs",
+   "a": "self.source.disarm(self.ticket);",
+   "b": "",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "lost-wake-progress",
+   "file": "local_wait.rs",
+   "a": "queue.notify_progress();Outcome::Woke(reason)",
+   "b": "Outcome::Woke(reason)",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "sq-overlap",
+   "file": "owned_mapping.rs",
+   "a": "for j in 0..i{",
+   "b": "for j in 0..0{",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "receipt-stride",
+   "file": "owned_mapping.rs",
+   "a": "p.receipt[2]!=32",
+   "b": "false && p.receipt[2]!=32",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "failed-close",
+   "file": "owned_mapping.rs",
+   "a": "mapping.close();Err(e)",
+   "b": "Err(e)",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "after-close",
+   "file": "owned_mapping.rs",
+   "a": "if self.closed{return Err(Error::Closed);}",
+   "b": "if false && self.closed{return Err(Error::Closed);}",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "fresh-header",
+   "file": "owned_mapping.rs",
+   "a": "word(0)!=0",
+   "b": "false && word(0)!=0",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-paired.py",
+   "name": "receipt-index",
+   "file": "paired_cq.rs",
+   "a": "self.receipts.add(slot)",
+   "b": "self.receipts.add(slot ^ 1)",
+   "test": "test_paired_cq.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-paired.py",
+   "name": "double-ack",
+   "file": "paired_cq.rs",
+   "a": "self.next.wrapping_add(1)",
+   "b": "self.next.wrapping_add(2)",
+   "test": "test_paired_cq.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-paired.py",
+   "name": "overlap",
+   "file": "paired_cq.rs",
+   "a": "if start < prior+bytes",
+   "b": "if false && start < prior+bytes",
+   "test": "test_paired_cq.rs",
+   "filter": null,
+   "expect": null,
+   "replace_all": false
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "live-retire",
+   "file": "payload_owner.rs",
+   "a": " && self.core.state.borrow().live==0",
+   "b": "",
+   "test": "test_payload_owner.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "lost-return",
+   "file": "payload_owner.rs",
+   "a": "s.pending[index]=Some(token);",
+   "b": "drop(token);",
+   "test": "test_payload_owner.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "wrong-range",
+   "file": "payload_owner.rs",
+   "a": "self.core.ranges[token.receipt().member as usize]",
+   "b": "self.core.ranges[0]",
+   "test": "test_payload_owner.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "failed-success",
+   "file": "payload_owner.rs",
+   "a": "if rc==0{Ok(())}",
+   "b": "if rc<=0{Ok(())}",
+   "test": "test_payload_owner.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "live-retire",
+   "file": "ring_payload.rs",
+   "a": "&&self.core.state.borrow().live==0",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "pool-closes-ring",
+   "file": "ring_payload.rs",
+   "a": "self.core.backend.retire_pool(self.identity);",
+   "b": "self.core.retire();",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "global-cap",
+   "file": "ring_payload.rs",
+   "a": "if ranges.len()>64-s.members{return Err(Error::Busy);}",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "cross-pool-overlap",
+   "file": "ring_payload.rs",
+   "a": "if a.buffer_index==b.buffer_index",
+   "b": "if false && a.buffer_index==b.buffer_index",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "failed-destroy",
+   "file": "ring_payload.rs",
+   "a": "if self.core.backend.destroy_pool(identity)==0",
+   "b": "if self.core.backend.destroy_pool(identity)<=0",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "stale-pool",
+   "file": "ring_payload.rs",
+   "a": "if identity.incarnation<=s.last[slot]{return Err(Error::Stale);}",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "missing-precharge",
+   "file": "ring_payload.rs",
+   "a": "s.members+=p.ranges.len();",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "uncertain-no-close",
+   "file": "ring_payload.rs",
+   "a": "drop(s);self.core.close();return Err(Error::Uncertain(rc));",
+   "b": "drop(s);return Err(Error::Uncertain(rc));",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "rollback-no-refund",
+   "file": "ring_payload.rs",
+   "a": "s.members-=p.ranges.len();return Err(Error::Backend(rc));",
+   "b": "return Err(Error::Backend(rc));",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "accept-nonzero-output",
+   "file": "ring_payload.rs",
+   "a": "rc<0&&identity==(SlotRef{slot:0,reserved:0,incarnation:0})",
+   "b": "rc<0",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "reused-cookie",
+   "file": "request_book.rs",
+   "a": "let id = cookie(&NEXT_COOKIE)?;",
+   "b": "let _ = cookie(&NEXT_COOKIE)?; let id = 1;",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "expect": "'FAILED' if lang=='rust' else 'Assertion failed'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "more-final",
+   "file": "request_book.rs",
+   "a": "let terminal = flags & 1 == 0;",
+   "b": "let terminal = true;",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "expect": "'FAILED' if lang=='rust' else 'Assertion failed'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "duplicate-terminal",
+   "file": "request_book.rs",
+   "a": "e.phase = Phase::Terminal; e.terminal",
+   "b": "e.phase = Phase::Active; e.terminal",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "expect": "'FAILED' if lang=='rust' else 'Assertion failed'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "wrong-pool",
+   "file": "request_book.rs",
+   "a": "record.receipt.pool != pool",
+   "b": "false && record.receipt.pool != pool",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "expect": "'FAILED' if lang=='rust' else 'Assertion failed'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "oversized-fixed",
+   "file": "request_book.rs",
+   "a": "(result > 0 && result as u32 > limit)",
+   "b": "false",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "expect": "'FAILED' if lang=='rust' else 'Assertion failed'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "repeated-abort",
+   "file": "request_book.rs",
+   "a": "!e.abandoned && e.phase == Phase::Active",
+   "b": "e.phase == Phase::Active",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "expect": "'FAILED' if lang=='rust' else 'Assertion failed'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "early-reclaim",
+   "file": "retirement_executor.rs",
+   "a": "e.retiring&&e.driver.progress()",
+   "b": "e.retiring",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "expect": "'unreachable code' if name=='premature-admission' else 'assertion'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "missing-retire",
+   "file": "retirement_executor.rs",
+   "a": "let batch=e.driver.retire();",
+   "b": "let batch=WakeBatch::empty();",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "expect": "'unreachable code' if name=='premature-admission' else 'assertion'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "frozen-cursor",
+   "file": "retirement_executor.rs",
+   "a": "s.cursor=(i+1)%s.slots.len();",
+   "b": "s.cursor=i;",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "expect": "'unreachable code' if name=='premature-admission' else 'assertion'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "excess-budget",
+   "file": "retirement_executor.rs",
+   "a": "budget.min(s.slots.len())",
+   "b": "budget.min(s.slots.len())+1",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "expect": "'unreachable code' if name=='premature-admission' else 'assertion'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "no-shutdown-close",
+   "file": "retirement_executor.rs",
+   "a": "e.driver.close()",
+   "b": "e.driver.retire()",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "expect": "'unreachable code' if name=='premature-admission' else 'assertion'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "premature-admission",
+   "file": "retirement_executor.rs",
+   "a": ".position(Option::is_none).ok_or(Error::Full)?",
+   "b": ".position(Option::is_none).unwrap_or(0)",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "expect": "'unreachable code' if name=='premature-admission' else 'assertion'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "live-retire",
+   "file": "ring_payload.rs",
+   "a": "&&self.core.state.borrow().live==0",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "pool-closes-ring",
+   "file": "ring_payload.rs",
+   "a": "self.core.backend.retire_pool(self.identity);",
+   "b": "self.core.retire();",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "global-cap",
+   "file": "ring_payload.rs",
+   "a": "if ranges.len()>64-s.members{return Err(Error::Busy);}",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "cross-pool-overlap",
+   "file": "ring_payload.rs",
+   "a": "if a.buffer_index==b.buffer_index",
+   "b": "if false && a.buffer_index==b.buffer_index",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "failed-destroy",
+   "file": "ring_payload.rs",
+   "a": "if self.core.backend.destroy_pool(identity)==0",
+   "b": "if self.core.backend.destroy_pool(identity)<=0",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "stale-pool",
+   "file": "ring_payload.rs",
+   "a": "if identity.incarnation<=s.last[slot]{return Err(Error::Stale);}",
+   "b": "",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "expect": "'FAILED'",
+   "replace_all": false
+  },
+  {
+   "driver": "run-shutdown-audit.py",
+   "name": "lost-shutdown-wakeup",
+   "file": "fixed_futures.rs",
+   "a": "self.driver.as_mut().unwrap().close();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch(h.batch())",
+   "b": "self.driver.as_mut().unwrap().close();let mut h=self.hub.borrow_mut();h.closed=true;WakeBatch::empty()",
+   "test": "test_task_loop.rs",
+   "filter": "shutdown_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-shutdown-audit.py",
+   "name": "missing-close",
+   "file": "retirement_executor.rs",
+   "a": "Some(e)=>e.driver.close()",
+   "b": "Some(_)=>WakeBatch::empty()",
+   "test": "test_task_loop.rs",
+   "filter": "shutdown_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-shutdown-audit.py",
+   "name": "early-reclaim",
+   "file": "retirement_executor.rs",
+   "a": "e.retiring&&e.driver.progress()",
+   "b": "e.retiring",
+   "test": "test_task_loop.rs",
+   "filter": "shutdown_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "skip-initial-runnable",
+   "file": "local_wait.rs",
+   "a": "if queue.needs_progress()||runnable(){return",
+   "b": "if queue.needs_progress(){return",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "skip-final-runnable",
+   "file": "local_wait.rs",
+   "a": "else if queue.needs_progress()||runnable(){",
+   "b": "else if queue.needs_progress(){",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "skip-task-dispatch",
+   "file": "task_loop.rs",
+   "a": "tasks.dispatch(b.tasks)",
+   "b": "tasks.dispatch(0)",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "ignore-task-budget",
+   "file": "task_loop.rs",
+   "a": "tasks.dispatch(b.tasks)",
+   "b": "tasks.dispatch(64)",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "poll-after-outer-expiry",
+   "file": "task_loop.rs",
+   "a": "if outer_deadline.is_some_and(|d|source.now()>=d)",
+   "b": "if false",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "ready-starves-timers",
+   "file": "local_wait.rs",
+   "a": "let cancellation_requests=queue.expire(now,ring_budget,fixed_budget);",
+   "b": "let cancellation_requests=0;",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "skip-expiry",
+   "file": "local_wait.rs",
+   "a": "let cancellation_requests=queue.expire(now,ring_budget,fixed_budget);",
+   "b": "let cancellation_requests=0;",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "ignore-request-deadline",
+   "file": "local_wait.rs",
+   "a": "earliest(outer_deadline,queue.next_deadline())",
+   "b": "outer_deadline",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "ignore-outer-deadline",
+   "file": "local_wait.rs",
+   "a": "earliest(outer_deadline,queue.next_deadline())",
+   "b": "queue.next_deadline()",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "due-is-outer-timeout",
+   "file": "local_wait.rs",
+   "a": "step.outcome=Outcome::Retry;",
+   "b": "step.outcome=Outcome::Deadline;",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "unbounded-ring-scan",
+   "file": "retirement_executor.rs",
+   "a": "0..ring_budget.min(capacity)",
+   "b": "0..capacity",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "skip-retiring-timers",
+   "file": "retirement_executor.rs",
+   "a": "requested+=e.driver.expire(now,fixed_budget);",
+   "b": "if !e.retiring{requested+=e.driver.expire(now,fixed_budget);}",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "expect": "'FAILED'",
+   "replace_all": true
+  }
+ ],
+ "cases": [
+  {
+   "driver": "run-deadlines.py",
+   "name": "no-clone-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
+   "diag": "E0599",
+   "test": "test_deadlines.rs"
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "no-send-executor",
+   "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
+   "diag": "E0277",
+   "test": "test_deadlines.rs"
+  },
+  {
+   "driver": "run-deadlines.py",
+   "name": "valid-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
+   "diag": null,
+   "test": "test_deadlines.rs"
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "no-clone-future",
+   "body": "let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();let _=f.clone();",
+   "diag": "E0599",
+   "test": "test_fixed_futures.rs"
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "no-send-future",
+   "body": "fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);",
+   "diag": "E0277",
+   "test": "test_fixed_futures.rs"
+  },
+  {
+   "driver": "run-fixed-futures.py",
+   "name": "valid-future",
+   "body": "let(_,mut d)=future_driver();let mut f=d.read(id(0,1),range(0)).unwrap();let c=unsafe{f.publish().unwrap()};unsafe{d.receive(typed_record(c,1,0)).unwrap();}let(_,w)=counter();assert!(matches!(poll(&mut f,&w),Poll::Ready(Ok(r))if r.result()==1));",
+   "diag": null,
+   "test": "test_fixed_futures.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "fixed-borrow",
+   "body": "let (_p,mut r,c)=fixture();let mut f=c.reserve_fixed(901,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(901,8).unwrap();}let v=f.bytes().unwrap();drop(f);println!(\"{:?}\",v);",
+   "diag": "E0505",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "fixed-mutable-view",
+   "body": "let (_p,mut r,c)=fixture();let mut f=c.reserve_fixed(901,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(901,8).unwrap();}f.bytes().unwrap()[0]=3;",
+   "diag": "E0594",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "return-borrow",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
+   "diag": "E0505",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "mutate-view",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;",
+   "diag": "E0594",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "moved-storage",
+   "body": "let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();",
+   "diag": "E0382",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "legacy-reap",
+   "body": "let (_p,_root,c)=fixture();let _=c.reap();",
+   "diag": "E0599",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-io.py",
+   "name": "valid-return",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);assert_eq!(a.bytes(),&[0;8]);assert!(a.try_return().is_ok());",
+   "diag": null,
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "no-active-view",
+   "body": "let (_p,d)=typed_driver(1);let r=d.read(id(0,1),range(0)).unwrap();let _=r.bytes();",
+   "diag": "E0599",
+   "test": "test_fixed_requests.rs"
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "no-clone",
+   "body": "let (_p,d)=typed_driver(1);let r=d.read(id(0,1),range(0)).unwrap();let _=r.clone();",
+   "diag": "E0599",
+   "test": "test_fixed_requests.rs"
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "result-borrow",
+   "body": "let (_p,mut d)=typed_driver(1);let mut r=d.read(id(0,1),range(0)).unwrap();let cookie=unsafe{r.publish().unwrap()};unsafe{d.receive(typed_record(cookie,3,0)).unwrap();}let done=r.try_complete().unwrap().unwrap();let v=done.bytes().unwrap();drop(done);println!(\"{:?}\",v);",
+   "diag": "E0505",
+   "test": "test_fixed_requests.rs"
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "no-mutable-result",
+   "body": "let (_p,mut d)=typed_driver(1);let mut r=d.read(id(0,1),range(0)).unwrap();let cookie=unsafe{r.publish().unwrap()};unsafe{d.receive(typed_record(cookie,3,0)).unwrap();}let done=r.try_complete().unwrap().unwrap();done.bytes().unwrap()[0]=7;",
+   "diag": "E0594",
+   "test": "test_fixed_requests.rs"
+  },
+  {
+   "driver": "run-fixed-requests.py",
+   "name": "valid-result",
+   "body": "let (_p,mut d)=typed_driver(1);let mut r=d.read(id(0,1),range(0)).unwrap();let cookie=unsafe{r.publish().unwrap()};unsafe{d.receive(typed_record(cookie,3,0)).unwrap();}let done=r.try_complete().unwrap().unwrap();assert_eq!(done.bytes().unwrap(),&[0;3]);",
+   "diag": null,
+   "test": "test_fixed_requests.rs"
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "no-clone-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
+   "diag": "E0599",
+   "test": "test_future_retirement.rs"
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "no-send-executor",
+   "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
+   "diag": "E0277",
+   "test": "test_future_retirement.rs"
+  },
+  {
+   "driver": "run-future-retirement.py",
+   "name": "valid-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
+   "diag": null,
+   "test": "test_future_retirement.rs"
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "no-clone-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
+   "diag": "E0599",
+   "test": "test_local_progress.rs"
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "no-send-executor",
+   "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
+   "diag": "E0277",
+   "test": "test_local_progress.rs"
+  },
+  {
+   "driver": "run-local-progress.py",
+   "name": "valid-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
+   "diag": null,
+   "test": "test_local_progress.rs"
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "no-clone-tasks",
+   "body": "let t=Tasks::new(1).unwrap();let _=t.clone();",
+   "diag": "E0599",
+   "test": "test_local_tasks.rs"
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "no-send-tasks",
+   "body": "fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());",
+   "diag": "E0277",
+   "test": "test_local_tasks.rs"
+  },
+  {
+   "driver": "run-local-tasks.py",
+   "name": "valid-task",
+   "body": "let mut t=Tasks::new(1).unwrap();t.spawn(||async{}).unwrap();assert_eq!(t.dispatch(1).completed,1);",
+   "diag": null,
+   "test": "test_local_tasks.rs"
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "no-clone-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
+   "diag": "E0599",
+   "test": "test_local_wait.rs"
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "no-send-executor",
+   "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
+   "diag": "E0277",
+   "test": "test_local_wait.rs"
+  },
+  {
+   "driver": "run-local-wait.py",
+   "name": "valid-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
+   "diag": null,
+   "test": "test_local_wait.rs"
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "moved-backend",
+   "body": "let _n=b.len();",
+   "diag": "E0382",
+   "test": "test_owned_mapping.rs"
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "clone-owner",
+   "body": "let _copy=m.clone();",
+   "diag": "no method named",
+   "test": "test_owned_mapping.rs"
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "raw-mapping",
+   "body": "let _raw=m.mapping.base();",
+   "diag": "private",
+   "test": "test_owned_mapping.rs"
+  },
+  {
+   "driver": "run-owned-mapping.py",
+   "name": "owned-control",
+   "body": "m.close();",
+   "diag": null,
+   "test": "test_owned_mapping.rs"
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "return-borrow",
+   "body": "let (_p,_root,pool)=fixture();let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
+   "diag": "E0505",
+   "test": "test_payload_owner.rs"
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "mutate-view",
+   "body": "let (_p,_root,pool)=fixture();let a=accept(&pool,0);a.bytes()[0]=0;",
+   "diag": "E0594",
+   "test": "test_payload_owner.rs"
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "moved-storage",
+   "body": "let p=Rc::new(Probe::default());let b=Backing::new(p);let _=RetirementOwner::new(b,poolref(),&ranges());let _pointer=b.bytes.get();",
+   "diag": "E0382",
+   "test": "test_payload_owner.rs"
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "legacy-reap",
+   "body": "let (_p,_root,pool)=fixture();let _=pool.reap();",
+   "diag": "E0599",
+   "test": "test_payload_owner.rs"
+  },
+  {
+   "driver": "run-payload.py",
+   "name": "valid-return",
+   "body": "let (_p,_root,pool)=fixture();let a=accept(&pool,0);assert_eq!(a.bytes(),b\"AAAAAAAA\");assert!(a.try_return().is_ok());",
+   "diag": null,
+   "test": "test_payload_owner.rs"
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "return-borrow",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
+   "diag": "E0505",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "mutate-view",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;",
+   "diag": "E0594",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "moved-storage",
+   "body": "let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();",
+   "diag": "E0382",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "legacy-reap",
+   "body": "let (_p,_root,c)=fixture();let _=c.reap();",
+   "diag": "E0599",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-registration.py",
+   "name": "valid-return",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);assert_eq!(a.bytes(),&[0;8]);assert!(a.try_return().is_ok());",
+   "diag": null,
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "clone",
+   "body": "let b=RequestBook::new(2).unwrap();let _=b.clone();",
+   "diag": "E0599",
+   "test": "test_request_book.rs"
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "send",
+   "body": "let b=RequestBook::new(2).unwrap();std::thread::spawn(move||drop(b));",
+   "diag": "E0277",
+   "test": "test_request_book.rs"
+  },
+  {
+   "driver": "run-request-book.py",
+   "name": "valid",
+   "body": "let mut b=RequestBook::new(2).unwrap();let a=b.reserve(id(1,1),Kind::Control).unwrap();b.cancel_unpublished(a).unwrap();",
+   "diag": null,
+   "test": "test_request_book.rs"
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "no-clone-client",
+   "body": "let mut e=RetirementExecutor::new(1).unwrap();let(_,c)=managed(&mut e);let _=c.clone();",
+   "diag": "E0599",
+   "test": "test_retirement_executor.rs"
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "no-send-executor",
+   "body": "fn send<T:Send>(_:T){} let e=RetirementExecutor::<Backing>::new(1).unwrap();send(e);",
+   "diag": "E0277",
+   "test": "test_retirement_executor.rs"
+  },
+  {
+   "driver": "run-retirement-executor.py",
+   "name": "valid-client",
+   "body": "let mut e=RetirementExecutor::new(1).unwrap();let(p,c)=managed(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
+   "diag": null,
+   "test": "test_retirement_executor.rs"
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "return-borrow",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
+   "diag": "E0505",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "mutate-view",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;",
+   "diag": "E0594",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "moved-storage",
+   "body": "let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();",
+   "diag": "E0382",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "legacy-reap",
+   "body": "let (_p,_root,c)=fixture();let _=c.reap();",
+   "diag": "E0599",
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-ring-payload.py",
+   "name": "valid-return",
+   "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);assert_eq!(a.bytes(),&[0;8]);assert!(a.try_return().is_ok());",
+   "diag": null,
+   "test": "test_ring_payload.rs"
+  },
+  {
+   "driver": "run-shutdown-audit.py",
+   "name": "no-clone-tasks",
+   "body": "let t=Tasks::new(1).unwrap();let _=t.clone();",
+   "diag": "E0599",
+   "test": "test_task_loop.rs"
+  },
+  {
+   "driver": "run-shutdown-audit.py",
+   "name": "no-send-tasks",
+   "body": "fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());",
+   "diag": "E0277",
+   "test": "test_task_loop.rs"
+  },
+  {
+   "driver": "run-shutdown-audit.py",
+   "name": "valid-task",
+   "body": "let mut t=Tasks::new(1).unwrap();t.spawn(||async{}).unwrap();assert_eq!(t.dispatch(1).completed,1);",
+   "diag": null,
+   "test": "test_task_loop.rs"
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "no-clone-tasks",
+   "body": "let t=Tasks::new(1).unwrap();let _=t.clone();",
+   "diag": "E0599",
+   "test": "test_task_loop.rs"
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "no-send-tasks",
+   "body": "fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());",
+   "diag": "E0277",
+   "test": "test_task_loop.rs"
+  },
+  {
+   "driver": "run-task-loop.py",
+   "name": "valid-task",
+   "body": "let mut t=Tasks::new(1).unwrap();t.spawn(||async{}).unwrap();assert_eq!(t.dispatch(1).completed,1);",
+   "diag": null,
+   "test": "test_task_loop.rs"
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "no-clone-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
+   "diag": "E0599",
+   "test": "test_timer_wait.rs"
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "no-send-executor",
+   "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
+   "diag": "E0277",
+   "test": "test_timer_wait.rs"
+  },
+  {
+   "driver": "run-timer-wait.py",
+   "name": "valid-client",
+   "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
+   "diag": null,
+   "test": "test_timer_wait.rs"
+  }
+ ],
+ "skipped": []
+}

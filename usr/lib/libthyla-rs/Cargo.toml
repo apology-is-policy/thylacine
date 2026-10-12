@@ -20,6 +20,8 @@ poll-worker-test = []
 thyla-heap = { path = "../thyla-heap" }
 # The 9P codec, re-exported as `ninep`.
 ninep = { path = "../ninep" }
+# The native Loom client cores; `loom::service_abi` is re-exported from it.
+loom-client = { path = "../loom-client" }
 
 # Thylacine userspace runtime — Rust side.
 #

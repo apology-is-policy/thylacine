@@ -83,6 +83,17 @@ to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
   factory's own errors, and a factory over the kernel can answer -ENOSPC. Only
   `T_RETIREMENT_FULL` says that the factory never ran, so the caller still owns
   the backend the factory would have consumed.
+- **No local code lies in the errno range** (NA-3), except `T_REQ_FULL`,
+  which is -ENOSPC on purpose. A return channel can also carry a kernel errno or
+  another family's code, so each family has its own block of 100 at or below
+  -1000: -1000 to -1003 for `T_FIXED_CLOSING`, the executor and
+  `T_RING_UNCERTAIN`; `T_LEASE_*` -1101 to -1106; `T_REQ_*` -1201 to -1206;
+  `T_MAP_*` -1301 to -1304; the paired reader's `T_CQ_GEOMETRY` and
+  `T_CQ_CORRUPT` -1401 and -1402 (bare -1 and -2 before). Before NA-3,
+  `t_fixed_read` and `t_fixed_write` returned -3 both for `T_REQ_EXHAUSTED`
+  (permanent) and `T_LEASE_BUSY` (transient), and `t_ring_fixed_bytes` returned
+  `T_LEASE_BUSY` (-3) beside a remote -ESRCH. `T_LOOM_CLIENT_LOCAL` static
+  assertions keep each code in its block.
 - **Broken invariants are fatal.** Every check that was assert or abort is now
   `T_LOOM_CHECK`, which calls `t_loom_client_fatal(func, line)`. libt's
   definition writes `loom-client: broken invariant in <func>:<line>` to fd 2 and
@@ -215,16 +226,8 @@ Create zeroes the whole object.
 
 - **The native adapter** (backend callbacks over SYS_LOOM_*) is not written.
   Until it is, `t_ring_backend` and `t_mapping_backend` are only test fixtures.
-- **The Rust twins** (NA-3) keep the old local codes (`T_REQ_FULL` = -2,
-  `T_LEASE_BUSY` for the envelope), so C and Rust differ until NA-3 aligns
-  them.
-- **Two inherited code collisions, owed to NA-3's alignment.** `t_fixed_read`
-  and `t_fixed_write` return -3 both for `T_REQ_EXHAUSTED` (permanent: the
-  cookie counter is spent) and for `T_LEASE_BUSY` (transient), which a caller
-  must handle differently; EXHAUSTED needs 2^64 reservations. And
-  `t_ring_fixed_bytes` returns `T_LEASE_BUSY` (-3) beside a remote errno (ESRCH
-  is 3); through `t_fixed_read_bytes` BUSY is unreachable, so only a raw ring
-  user meets it.
+- **The Rust twins** are [[sub-loom-client]]. Their errors are typed; the
+  full-table outcomes match this side's (NA-3).
 
 ## Caveats
 

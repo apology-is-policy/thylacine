@@ -8,8 +8,8 @@ pinned-by:
   - "kernel/include/thylacine/loom.h: _Static_assert on all five sizes; offsets on sqe(2) cqe(2) hdr(1) params(1) buf_reg(1)"
   - "kernel/loom.c: _Static_assert on p9_attr / p9_setattr / p9_statfs sizes + 12 offsets"
 mirrors:
-  - "usr/lib/libthyla-rs/src/loom.rs: Sqe / Cqe / BufReg / Params (size + full offset_of! sets)"
-  - "usr/lib/libthyla-rs/src/loom.rs: the ring header as five bare offset constants (HDR_SQ_HEAD=0 .. HDR_FLAGS=32), no struct, no assert"
+  - "usr/lib/libthyla-rs/src/loom/ring_abi.rs: Sqe / Cqe / BufReg / Params / RingHdr and the ring constants; tools/check-loom-service-abi.py asserts every field against the layout table (NA-3); loom.rs derives its header offsets from RingHdr"
+  - "the client cores' own copies, checked field by field against the same table: t_owned_setup / t_owned_cqe (libt thyla/loom_client) and Setup / Completion (usr/lib/loom-client)"
   - "usr/lib/libt/include/thyla/loom.h: t_loom_params / t_loom_sqe / t_loom_cqe / t_loom_ring_hdr / t_loom_buf_reg (size + every field offset) and the opcode/flag constants; tools/check-loom-service-abi.py asserts them and the kernel's against one layout table; loom-bridge-probe checks the fields the kernel writes"
 created: 2026-08-02
 updated: 2026-10-12
@@ -41,9 +41,11 @@ constants. It asserts that table against the kernel's header and the native C
 mirror, both compiled for AArch64, so the two cannot disagree on a field's order,
 size or presence. Before it, the kernel pinned only some offsets (the ring
 header: its size and `sq_head`), and swapping two of its header words would have
-passed every assert. The Rust mirror is not yet in that table: its records live
-inside `loom.rs` beside code that needs the rest of the crate. NA-3, the Rust
-adapter, moves them into a module the checker can compile.
+passed every assert. Since NA-3 the Rust mirror is in that table too: its records
+moved out of `loom.rs` into `loom/ring_abi.rs`, which depends on no crate, and the
+ring header became a `RingHdr` struct whose offsets `loom.rs` derives. The client
+cores' own copies of the setup record and the CQE, in C and Rust, are checked
+field by field against the same table.
 Since NA-2b the same table also pins the errno a full table answers (28): the
 kernel's `T_E_NOSPC` and the native C client cores' `T_LOOM_CLIENT_ENOSPC`
 ([[sub-libt-loom-client]]).
@@ -107,6 +109,12 @@ on the kernel's. `Cqe` has three and two. `Params` has four and one.
 `BufReg` has two and one. The header, which both sides write concurrently,
 has one and zero. The pinning tracks *how easy the struct was to assert*, not
 *how much a mistake would cost*. Tracked as task #44.
+
+**Closed by NA-2a and NA-3 (October 12).** The checker's layout table now names
+all twelve header fields, and it asserts them against the kernel's header, libt's
+`t_loom_ring_hdr` and, since NA-3, a Rust `RingHdr` struct in `loom/ring_abi.rs`.
+`loom.rs` derives the five offsets it reads from that struct with `offset_of!`,
+so they cannot drift from what the checker measured.
 
 Those Rust `offset_of!` sets exist because a Loom-6d audit found them
 missing and asked for them. The finding's reasoning was general — a

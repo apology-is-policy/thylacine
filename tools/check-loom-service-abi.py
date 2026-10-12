@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile the three actual AS-0 ABI mirrors and compare independent byte vectors;
-then assert the kernel and native C ring records against one layout table.
+then assert the kernel, native C and Rust ring records, and the client cores' own
+copies of the setup record and the CQE, against one layout table.
 
 Blind to syscall decoding, permission checks, runtime cancellation and races.
 Run under the repository's host-resource lease. Temporary binaries are removed.
@@ -72,6 +73,19 @@ RING_RECORDS = [  # (struct, size, [(field, bytes, alignment)])
     ('loom_buf_reg', 16, [('va', 8, 8), ('len', 8, 8)]),
 ]
 
+# The client cores keep their own copies of two ring records (the setup record they
+# validate and the CQE they read), checked field by field under their own names.
+# (C struct, Rust path in loom-client, table record, {table field: twin field})
+TWINS = [('t_owned_setup', 'owned_mapping::Setup', 'loom_params', {'_resv0': 'reserved', '_resv1': 'receipt'}),
+         ('t_owned_cqe', 'paired_cq::Completion', 'loom_cqe', {})]
+RUST_RECORDS = {'loom_params': 'Params', 'loom_sqe': 'Sqe', 'loom_cqe': 'Cqe',
+                'loom_ring_hdr': 'RingHdr', 'loom_buf_reg': 'BufReg'}
+
+def rust_constant(name):
+    for prefix, module in (('SQE_', 'sqe_flag::'), ('OP_', 'op::')):
+        if name.startswith(prefix): return 'abi::' + module + name[len(prefix):]
+    return 'abi::' + name
+
 def ring_layout(fields):
     off, align, out = 0, 1, []
     for name, size, a in fields:
@@ -90,6 +104,15 @@ def ring_source(kernel):
         lines += ['#include <thyla/loom_client/owned_mapping.h>',
                   '#include <thyla/loom_client/retirement_executor.h>',
                   f'_Static_assert(T_LOOM_CLIENT_ENOSPC == -{ENOSPC}, "T_LOOM_CLIENT_ENOSPC");']
+        records = dict((n, f) for n, _, f in RING_RECORDS)
+        sizes = dict((n, z) for n, z, _ in RING_RECORDS)
+        for twin, _, record, rename in TWINS:
+            layout, _ = ring_layout(records[record])
+            lines.append(f'_Static_assert(sizeof(struct {twin}) == {sizes[record]}, "{twin} size");')
+            for field, off, n in layout:
+                f = rename.get(field, field)
+                lines.append(f'_Static_assert(__builtin_offsetof(struct {twin}, {f}) == {off} && '
+                             f'sizeof(((struct {twin} *)0)->{f}) == {n}, "{twin}.{f}");')
     for name, value in RING_CONSTANTS:
         lines.append(f'_Static_assert({macro}{name} == {value}, "{macro}{name}");')
     for name, size, fields in RING_RECORDS:
@@ -101,6 +124,31 @@ def ring_source(kernel):
             lines.append(f'_Static_assert(__builtin_offsetof({s}, {field}) == {off} && '
                          f'sizeof((({s} *)0)->{field}) == {n}, "{s}.{field}");')
     return '\n'.join(lines) + '\n'
+
+def rust_ring_source(root):
+    """The Rust ring mirror and the Rust cores' twins, against the same table."""
+    abi = root / 'usr/lib/libthyla-rs/src/loom/ring_abi.rs'
+    client = root / 'usr/lib/loom-client/src'
+    out = ['#![allow(dead_code)]', f'#[path="{abi}"] mod abi;']
+    out += [f'#[path="{client / m}.rs"] mod {m};' for m in ('service_abi', 'paired_cq', 'owned_mapping')]
+    out += ['fn field<T, F>(_: fn(&T) -> &F) -> usize { core::mem::size_of::<F>() }',
+            'fn check(what: &str, got: usize, want: usize) { assert_eq!(got, want, "{what}"); println!("{what} {got}"); }',
+            'fn main() {']
+    for name, value in RING_CONSTANTS:
+        out.append(f' check("{name}", {rust_constant(name)} as usize, {value});')
+    records = dict((n, (z, f)) for n, z, f in RING_RECORDS)
+    checks = [(f'abi::{RUST_RECORDS[n]}', n, {}) for n, _, _ in RING_RECORDS]
+    checks += [(path, record, rename) for _, path, record, rename in TWINS]
+    for path, record, rename in checks:
+        size, fields = records[record]
+        layout, _ = ring_layout(fields)
+        out.append(f' check("{path} size", core::mem::size_of::<{path}>(), {size});')
+        for field, off, n in layout:
+            f = rename.get(field, field)
+            out.append(f' check("{path}.{f}", core::mem::offset_of!({path}, {f}), {off});')
+            out.append(f' check("{path}.{f} size", field(|s: &{path}| &s.{f}), {n});')
+    out.append('}')
+    return '\n'.join(out) + '\n', len(checks), sum(line.startswith(' check(') for line in out)
 
 def c_source(kernel):
     prefix = '' if kernel else 't_'
@@ -170,7 +218,7 @@ def run(root):
             # Freestanding target compilation validates ARM64 layout as well.
             probe=tmp/(label+'-target.c'); probe.write_text('#include <'+('thylacine/loom_service_abi.h' if kernel else 'thyla/loom_service.h')+'>\n')
             subprocess.run([clang,'--target=aarch64-none-elf','-ffreestanding','-std=c11','-fsyntax-only','-I',str(inc),str(probe)],check=True)
-        source=tmp/'mirror.rs'; source.write_text(rust_source(root/'usr/lib/libthyla-rs/src/loom/service_abi.rs'))
+        source=tmp/'mirror.rs'; source.write_text(rust_source(root/'usr/lib/loom-client/src/service_abi.rs'))
         exe=tmp/'rust'; subprocess.run([rustc,'--edition=2021','-Dwarnings',str(source),'-o',str(exe)],check=True)
         got=subprocess.check_output([str(exe)],text=True).splitlines()
         assert got==want,'ABI vector mismatch: Rust'
@@ -197,10 +245,19 @@ _Static_assert(LOOM_OP_COUNT==20, "private opcode remains reserved");
             subprocess.run([clang,'--target=aarch64-none-elf','-march=armv8-a',
                             '-ffreestanding','-std=c11','-fsyntax-only',
                             *[a for i in incs for a in ('-I', str(root/i))], str(source)],check=True)
+        # Edition 2024 for the cores' twins, as their crate builds them; the ring
+        # mirror is edition-neutral. The binary prints every check it made.
+        source, rust_records, rust_checks = rust_ring_source(root)
+        (tmp/'rust-ring.rs').write_text(source)
+        subprocess.run([rustc,'--edition=2024','-Dwarnings',str(tmp/'rust-ring.rs'),'-o',str(tmp/'rust-ring')],check=True)
+        got=subprocess.check_output([str(tmp/'rust-ring')],text=True).splitlines()
+        assert len(got)==rust_checks, f'Rust ring leg printed {len(got)} checks, expected {rust_checks}'
     print(f'PASS: 3 actual mirrors; {len(CONSTANTS)} constants, 10 records and every declared size/offset; ARM64 C layouts.')
     print(f'PASS: kernel and native C ring mirrors; {len(RING_CONSTANTS)} constants, '
           f'{len(RING_RECORDS)} records, {sum(len(f) for _, _, f in RING_RECORDS)} fields against one layout table; '
           f'the full-table errno ({ENOSPC}) of the kernel and the native C client cores.')
+    print(f'PASS: Rust ring mirror (ring_abi.rs) and the cores\' twins ({", ".join(t for t, *_ in TWINS)} in C; '
+          f'{", ".join(p for _, p, *_ in TWINS)} in Rust): {rust_records} Rust records, {len(got)} checks.')
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--root',type=Path,default=ROOT)

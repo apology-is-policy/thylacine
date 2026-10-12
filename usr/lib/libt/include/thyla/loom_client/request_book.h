@@ -6,7 +6,11 @@
 enum t_request_kind { T_REQ_CONTROL, T_REQ_FIXED_READ, T_REQ_FIXED_WRITE, T_REQ_POOLED_READ };
 struct t_request_spec { enum t_request_kind kind;uint32_t limit,multi;struct t_loom_service_ref pool; };
 struct t_request_delivery { uint64_t cookie;struct t_loom_service_ref scope;struct t_request_spec spec;unsigned terminal,abandoned;struct t_paired_record record; };
-enum t_request_error { T_REQ_GEOMETRY=-1,T_REQ_FULL=T_LOOM_CLIENT_ENOSPC,T_REQ_EXHAUSTED=-3,T_REQ_STALE=-4,T_REQ_STATE=-5,T_REQ_RECORD=-6 };
+/* T_REQ_FULL is -ENOSPC on purpose: the kernel's own request table answers it too. */
+enum t_request_error { T_REQ_GEOMETRY=-1201,T_REQ_FULL=T_LOOM_CLIENT_ENOSPC,T_REQ_EXHAUSTED=-1203,T_REQ_STALE=-1204,T_REQ_STATE=-1205,T_REQ_RECORD=-1206 };
+_Static_assert(T_LOOM_CLIENT_LOCAL(T_REQ_GEOMETRY,1200)&&T_LOOM_CLIENT_LOCAL(T_REQ_EXHAUSTED,1200)&&
+    T_LOOM_CLIENT_LOCAL(T_REQ_STALE,1200)&&T_LOOM_CLIENT_LOCAL(T_REQ_STATE,1200)&&
+    T_LOOM_CLIENT_LOCAL(T_REQ_RECORD,1200),"request book codes lie in their block");
 /* One entry per CQ slot, in the caller's array; its fields are the book's own. */
 struct t_request_entry { uint64_t cookie;struct t_loom_service_ref scope;struct t_request_spec spec;unsigned phase,abandoned;struct t_owned_cqe terminal; };
 struct t_request_book { size_t count;struct t_request_entry *entries; };

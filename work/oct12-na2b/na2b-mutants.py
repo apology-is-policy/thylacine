@@ -224,8 +224,10 @@ def abi_sabotage(out):
         for rel in ('arch/arm64', 'kernel/include', 'usr/lib/libt/include'):
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(['cp', '-cR', str(R / rel), str(root / rel)], check=True)
-        rs = root / 'usr/lib/libthyla-rs/src/loom'; rs.mkdir(parents=True)
-        shutil.copy2(R / 'usr/lib/libthyla-rs/src/loom/service_abi.rs', rs / 'service_abi.rs')
+        # NA-3 moved service_abi.rs into loom-client and gave the checker a Rust ring leg.
+        for rel in ('usr/lib/libthyla-rs/src/loom/ring_abi.rs', 'usr/lib/loom-client/src'):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(['cp', '-cR', str(R / rel), str(root / rel)], check=True)
         if sabotage:
             base = root / 'usr/lib/libt/include/thyla/loom_client/base.h'
             s = base.read_text(); a = '#define T_LOOM_CLIENT_ENOSPC (-28)'

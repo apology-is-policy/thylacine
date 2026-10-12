@@ -13,7 +13,7 @@ int main(void){struct memory m;struct t_paired_cq q;struct t_paired_record r,kep
  for(uint32_t i=0;i<4;++i){publish(&m,UINT32_MAX-1+i,i);assert(t_paired_reap(&q,&kept[i])==1);}
  publish(&m,2,99);for(unsigned i=0;i<4;++i){assert(kept[i].cqe.user_data==i);assert(kept[i].receipt.lease==i+1);assert(kept[i].receipt.pool.incarnation==i+91);}
  assert(atomic_load(&m.header[4])==2);assert(t_paired_reap(&q,&r)==1&&r.cqe.user_data==99);
- init(&m,0);assert(!t_paired_init(&q,&m,sizeof(m),0,64,128,4));atomic_store(&m.header[5],5);assert(t_paired_reap(&q,&r)==-2&&atomic_load(&m.header[4])==0);atomic_store(&m.header[5],1);atomic_store(&m.header[4],1);assert(t_paired_reap(&q,&r)==-2);
+ init(&m,0);assert(!t_paired_init(&q,&m,sizeof(m),0,64,128,4));atomic_store(&m.header[5],5);assert(t_paired_reap(&q,&r)==T_CQ_CORRUPT&&atomic_load(&m.header[4])==0);atomic_store(&m.header[5],1);atomic_store(&m.header[4],1);assert(t_paired_reap(&q,&r)==T_CQ_CORRUPT);
  size_t cases[][5]={{256,0,64,128,0},{256,0,64,128,3},{256,0,64,128,16384},{255,0,64,128,4},{256,0,60,128,4},{256,0,64,64,4},{256,0,64,0,4},{256,SIZE_MAX-7,64,128,4},{SIZE_MAX,0,64,128,4}};
- for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);++i)assert(t_paired_init(&q,&m,cases[i][0],cases[i][1],cases[i][2],cases[i][3],(uint32_t)cases[i][4])==-1);
+ for(unsigned i=0;i<sizeof(cases)/sizeof(cases[0]);++i)assert(t_paired_init(&q,&m,cases[i][0],cases[i][1],cases[i][2],cases[i][3],(uint32_t)cases[i][4])==T_CQ_GEOMETRY);
  init(&m,UINT32_MAX-50);assert(!t_paired_init(&q,&m,sizeof(m),0,64,128,4));pthread_t p;assert(!pthread_create(&p,NULL,producer,&m));for(uint64_t n=0;n<100000;++n){int rc;while((rc=t_paired_reap(&q,&r))==0)sched_yield();assert(rc==1);assert(r.cqe.user_data==n&&r.cqe.result==(int32_t)(n%4096)&&r.cqe.flags==4);assert(r.receipt.lease==n+1&&r.receipt.pool.incarnation==n+91);}assert(!pthread_join(p,NULL));assert(!t_paired_reap(&q,&r));puts("C paired CQ geometry/wrap/concurrent100000 PASS");return 0;}
