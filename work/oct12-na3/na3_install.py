@@ -51,6 +51,10 @@ RING_CHILDREN = {  # child module -> (source, first line, last line), 1-based in
     'executor': ('test_retirement_executor.rs', 158, 188),
 }
 STANDALONE = ['lease_ledger', 'owned_mapping', 'paired_cq', 'request_book']
+# NA-3's own tests, for adapter-facing paths no original test reaches (the
+# crate-root allow(dead_code) of the original test binaries hid them). Each is a
+# child of the module whose fixtures it uses; its file is written by hand, not derived.
+OWN_CHILDREN = {'ring': ['seams'], 'request_book': ['seams']}
 TEST_EDITS = {
     'ring': [
         ('assert_eq!(r.members(),64);assert!(matches!(unsafe{c.attach_pool(id(2,1),&[range(512)])},Err(Error::Busy)));',
@@ -58,6 +62,14 @@ TEST_EDITS = {
         ('let a=register(&c,&ranges).unwrap();assert!(matches!(register(&c,&[range(512)]),Err(Error::Busy)));',
          'Error::Busy', 'Error::Full', 'envelope answer'),
     ],
+}
+# (test, lint, reason): an allow attribute on one test, from this list of lints only,
+# for a construct the test needs; the runner fails on any warning, so it cannot be
+# allowed wider than the test.
+ALLOWABLE = {'unreachable_code'}
+TEST_ALLOWS = {
+    'ring': [('task_capacity_precedes_factory_and_ids_are_owner_specific', 'unreachable_code',
+              'a factory that must never run panics before the future its type needs')],
 }
 
 
@@ -74,6 +86,15 @@ def edit(text, edits, where):
                                                  and (len(parts) == 1 or old in parts)):
             raise SystemExit(f'{where}: a code edit must swap or extend one path token: {old!r} -> {new!r}')
         text = text.replace(anchor, anchor.replace(old, new))
+    return text
+
+
+def allow(text, allows, where):
+    for test, lint, _ in allows:
+        head = f'#[test]fn {test}('
+        if lint not in ALLOWABLE or text.count(head) != 1 or f'\n{head}' not in text:
+            raise SystemExit(f'{where}: cannot allow {lint} on {test}')
+        text = text.replace(f'\n{head}', f'\n#[allow({lint})]\n{head}')
     return text
 
 
@@ -116,14 +137,15 @@ def carry(name, s):
 def test_sources():
     out = {}
     ring = (ORIG / 'test_task_loop.rs').read_text()
-    ring = module_lines(edit(ring, TEST_EDITS['ring'], 'ring'))
-    out['tests/ring.rs'] = ring + '\n' + ''.join(f'mod {c};\n' for c in RING_CHILDREN)
+    ring = module_lines(allow(edit(ring, TEST_EDITS['ring'], 'ring'), TEST_ALLOWS['ring'], 'ring'))
+    out['tests/ring.rs'] = ring + '\n' + ''.join(f'mod {c};\n' for c in [*RING_CHILDREN, *OWN_CHILDREN['ring']])
     for child, (src, a, b) in RING_CHILDREN.items():
         lines = (ORIG / src).read_text().splitlines()[a - 1:b]
         body = module_lines('\n'.join(lines))
         out[f'tests/ring/{child}.rs'] = 'use super::*;\n' + body
     for name in STANDALONE:
-        out[f'tests/{name}.rs'] = module_lines((ORIG / f'test_{name}.rs').read_text())
+        text = module_lines((ORIG / f'test_{name}.rs').read_text())
+        out[f'tests/{name}.rs'] = text + ''.join(f'\nmod {c};\n' for c in OWN_CHILDREN.get(name, []))
     return out
 
 

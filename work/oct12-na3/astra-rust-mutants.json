@@ -1259,6 +1259,7 @@
   {
    "driver": "run-deadlines.py",
    "name": "no-clone-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
    "diag": "E0599",
    "test": "test_deadlines.rs"
@@ -1266,6 +1267,7 @@
   {
    "driver": "run-deadlines.py",
    "name": "no-send-executor",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
    "diag": "E0277",
    "test": "test_deadlines.rs"
@@ -1273,6 +1275,7 @@
   {
    "driver": "run-deadlines.py",
    "name": "valid-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
    "diag": null,
    "test": "test_deadlines.rs"
@@ -1280,6 +1283,7 @@
   {
    "driver": "run-fixed-futures.py",
    "name": "no-clone-future",
+   "pre": "",
    "body": "let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();let _=f.clone();",
    "diag": "E0599",
    "test": "test_fixed_futures.rs"
@@ -1287,6 +1291,7 @@
   {
    "driver": "run-fixed-futures.py",
    "name": "no-send-future",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let(_,d)=future_driver();let f=d.read(id(0,1),range(0)).unwrap();send(f);",
    "diag": "E0277",
    "test": "test_fixed_futures.rs"
@@ -1294,6 +1299,7 @@
   {
    "driver": "run-fixed-futures.py",
    "name": "valid-future",
+   "pre": "",
    "body": "let(_,mut d)=future_driver();let mut f=d.read(id(0,1),range(0)).unwrap();let c=unsafe{f.publish().unwrap()};unsafe{d.receive(typed_record(c,1,0)).unwrap();}let(_,w)=counter();assert!(matches!(poll(&mut f,&w),Poll::Ready(Ok(r))if r.result()==1));",
    "diag": null,
    "test": "test_fixed_futures.rs"
@@ -1301,6 +1307,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "fixed-borrow",
+   "pre": "",
    "body": "let (_p,mut r,c)=fixture();let mut f=c.reserve_fixed(901,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(901,8).unwrap();}let v=f.bytes().unwrap();drop(f);println!(\"{:?}\",v);",
    "diag": "E0505",
    "test": "test_ring_payload.rs"
@@ -1308,6 +1315,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "fixed-mutable-view",
+   "pre": "",
    "body": "let (_p,mut r,c)=fixture();let mut f=c.reserve_fixed(901,id(0,1),range(0),false).unwrap();unsafe{f.publish().unwrap();r.finish_fixed(901,8).unwrap();}f.bytes().unwrap()[0]=3;",
    "diag": "E0594",
    "test": "test_ring_payload.rs"
@@ -1315,6 +1323,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "return-borrow",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
    "diag": "E0505",
    "test": "test_ring_payload.rs"
@@ -1322,6 +1331,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "mutate-view",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;",
    "diag": "E0594",
    "test": "test_ring_payload.rs"
@@ -1329,6 +1339,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "moved-storage",
+   "pre": "",
    "body": "let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();",
    "diag": "E0382",
    "test": "test_ring_payload.rs"
@@ -1336,6 +1347,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "legacy-reap",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let _=c.reap();",
    "diag": "E0599",
    "test": "test_ring_payload.rs"
@@ -1343,6 +1355,7 @@
   {
    "driver": "run-fixed-io.py",
    "name": "valid-return",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);assert_eq!(a.bytes(),&[0;8]);assert!(a.try_return().is_ok());",
    "diag": null,
    "test": "test_ring_payload.rs"
@@ -1350,6 +1363,7 @@
   {
    "driver": "run-fixed-requests.py",
    "name": "no-active-view",
+   "pre": "",
    "body": "let (_p,d)=typed_driver(1);let r=d.read(id(0,1),range(0)).unwrap();let _=r.bytes();",
    "diag": "E0599",
    "test": "test_fixed_requests.rs"
@@ -1357,6 +1371,7 @@
   {
    "driver": "run-fixed-requests.py",
    "name": "no-clone",
+   "pre": "",
    "body": "let (_p,d)=typed_driver(1);let r=d.read(id(0,1),range(0)).unwrap();let _=r.clone();",
    "diag": "E0599",
    "test": "test_fixed_requests.rs"
@@ -1364,6 +1379,7 @@
   {
    "driver": "run-fixed-requests.py",
    "name": "result-borrow",
+   "pre": "",
    "body": "let (_p,mut d)=typed_driver(1);let mut r=d.read(id(0,1),range(0)).unwrap();let cookie=unsafe{r.publish().unwrap()};unsafe{d.receive(typed_record(cookie,3,0)).unwrap();}let done=r.try_complete().unwrap().unwrap();let v=done.bytes().unwrap();drop(done);println!(\"{:?}\",v);",
    "diag": "E0505",
    "test": "test_fixed_requests.rs"
@@ -1371,6 +1387,7 @@
   {
    "driver": "run-fixed-requests.py",
    "name": "no-mutable-result",
+   "pre": "",
    "body": "let (_p,mut d)=typed_driver(1);let mut r=d.read(id(0,1),range(0)).unwrap();let cookie=unsafe{r.publish().unwrap()};unsafe{d.receive(typed_record(cookie,3,0)).unwrap();}let done=r.try_complete().unwrap().unwrap();done.bytes().unwrap()[0]=7;",
    "diag": "E0594",
    "test": "test_fixed_requests.rs"
@@ -1378,6 +1395,7 @@
   {
    "driver": "run-fixed-requests.py",
    "name": "valid-result",
+   "pre": "",
    "body": "let (_p,mut d)=typed_driver(1);let mut r=d.read(id(0,1),range(0)).unwrap();let cookie=unsafe{r.publish().unwrap()};unsafe{d.receive(typed_record(cookie,3,0)).unwrap();}let done=r.try_complete().unwrap().unwrap();assert_eq!(done.bytes().unwrap(),&[0;3]);",
    "diag": null,
    "test": "test_fixed_requests.rs"
@@ -1385,6 +1403,7 @@
   {
    "driver": "run-future-retirement.py",
    "name": "no-clone-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
    "diag": "E0599",
    "test": "test_future_retirement.rs"
@@ -1392,6 +1411,7 @@
   {
    "driver": "run-future-retirement.py",
    "name": "no-send-executor",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
    "diag": "E0277",
    "test": "test_future_retirement.rs"
@@ -1399,6 +1419,7 @@
   {
    "driver": "run-future-retirement.py",
    "name": "valid-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
    "diag": null,
    "test": "test_future_retirement.rs"
@@ -1406,6 +1427,7 @@
   {
    "driver": "run-local-progress.py",
    "name": "no-clone-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
    "diag": "E0599",
    "test": "test_local_progress.rs"
@@ -1413,6 +1435,7 @@
   {
    "driver": "run-local-progress.py",
    "name": "no-send-executor",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
    "diag": "E0277",
    "test": "test_local_progress.rs"
@@ -1420,6 +1443,7 @@
   {
    "driver": "run-local-progress.py",
    "name": "valid-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
    "diag": null,
    "test": "test_local_progress.rs"
@@ -1427,6 +1451,7 @@
   {
    "driver": "run-local-tasks.py",
    "name": "no-clone-tasks",
+   "pre": "",
    "body": "let t=Tasks::new(1).unwrap();let _=t.clone();",
    "diag": "E0599",
    "test": "test_local_tasks.rs"
@@ -1434,6 +1459,7 @@
   {
    "driver": "run-local-tasks.py",
    "name": "no-send-tasks",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());",
    "diag": "E0277",
    "test": "test_local_tasks.rs"
@@ -1441,6 +1467,7 @@
   {
    "driver": "run-local-tasks.py",
    "name": "valid-task",
+   "pre": "",
    "body": "let mut t=Tasks::new(1).unwrap();t.spawn(||async{}).unwrap();assert_eq!(t.dispatch(1).completed,1);",
    "diag": null,
    "test": "test_local_tasks.rs"
@@ -1448,6 +1475,7 @@
   {
    "driver": "run-local-wait.py",
    "name": "no-clone-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
    "diag": "E0599",
    "test": "test_local_wait.rs"
@@ -1455,6 +1483,7 @@
   {
    "driver": "run-local-wait.py",
    "name": "no-send-executor",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
    "diag": "E0277",
    "test": "test_local_wait.rs"
@@ -1462,6 +1491,7 @@
   {
    "driver": "run-local-wait.py",
    "name": "valid-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
    "diag": null,
    "test": "test_local_wait.rs"
@@ -1469,6 +1499,7 @@
   {
    "driver": "run-owned-mapping.py",
    "name": "moved-backend",
+   "pre": "let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();",
    "body": "let _n=b.len();",
    "diag": "E0382",
    "test": "test_owned_mapping.rs"
@@ -1476,6 +1507,7 @@
   {
    "driver": "run-owned-mapping.py",
    "name": "clone-owner",
+   "pre": "let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();",
    "body": "let _copy=m.clone();",
    "diag": "no method named",
    "test": "test_owned_mapping.rs"
@@ -1483,6 +1515,7 @@
   {
    "driver": "run-owned-mapping.py",
    "name": "raw-mapping",
+   "pre": "let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();",
    "body": "let _raw=m.mapping.base();",
    "diag": "private",
    "test": "test_owned_mapping.rs"
@@ -1490,6 +1523,7 @@
   {
    "driver": "run-owned-mapping.py",
    "name": "owned-control",
+   "pre": "let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();",
    "body": "m.close();",
    "diag": null,
    "test": "test_owned_mapping.rs"
@@ -1497,6 +1531,7 @@
   {
    "driver": "run-payload.py",
    "name": "return-borrow",
+   "pre": "",
    "body": "let (_p,_root,pool)=fixture();let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
    "diag": "E0505",
    "test": "test_payload_owner.rs"
@@ -1504,6 +1539,7 @@
   {
    "driver": "run-payload.py",
    "name": "mutate-view",
+   "pre": "",
    "body": "let (_p,_root,pool)=fixture();let a=accept(&pool,0);a.bytes()[0]=0;",
    "diag": "E0594",
    "test": "test_payload_owner.rs"
@@ -1511,6 +1547,7 @@
   {
    "driver": "run-payload.py",
    "name": "moved-storage",
+   "pre": "",
    "body": "let p=Rc::new(Probe::default());let b=Backing::new(p);let _=RetirementOwner::new(b,poolref(),&ranges());let _pointer=b.bytes.get();",
    "diag": "E0382",
    "test": "test_payload_owner.rs"
@@ -1518,6 +1555,7 @@
   {
    "driver": "run-payload.py",
    "name": "legacy-reap",
+   "pre": "",
    "body": "let (_p,_root,pool)=fixture();let _=pool.reap();",
    "diag": "E0599",
    "test": "test_payload_owner.rs"
@@ -1525,6 +1563,7 @@
   {
    "driver": "run-payload.py",
    "name": "valid-return",
+   "pre": "",
    "body": "let (_p,_root,pool)=fixture();let a=accept(&pool,0);assert_eq!(a.bytes(),b\"AAAAAAAA\");assert!(a.try_return().is_ok());",
    "diag": null,
    "test": "test_payload_owner.rs"
@@ -1532,6 +1571,7 @@
   {
    "driver": "run-registration.py",
    "name": "return-borrow",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
    "diag": "E0505",
    "test": "test_ring_payload.rs"
@@ -1539,6 +1579,7 @@
   {
    "driver": "run-registration.py",
    "name": "mutate-view",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;",
    "diag": "E0594",
    "test": "test_ring_payload.rs"
@@ -1546,6 +1587,7 @@
   {
    "driver": "run-registration.py",
    "name": "moved-storage",
+   "pre": "",
    "body": "let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();",
    "diag": "E0382",
    "test": "test_ring_payload.rs"
@@ -1553,6 +1595,7 @@
   {
    "driver": "run-registration.py",
    "name": "legacy-reap",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let _=c.reap();",
    "diag": "E0599",
    "test": "test_ring_payload.rs"
@@ -1560,6 +1603,7 @@
   {
    "driver": "run-registration.py",
    "name": "valid-return",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);assert_eq!(a.bytes(),&[0;8]);assert!(a.try_return().is_ok());",
    "diag": null,
    "test": "test_ring_payload.rs"
@@ -1567,6 +1611,7 @@
   {
    "driver": "run-request-book.py",
    "name": "clone",
+   "pre": "",
    "body": "let b=RequestBook::new(2).unwrap();let _=b.clone();",
    "diag": "E0599",
    "test": "test_request_book.rs"
@@ -1574,6 +1619,7 @@
   {
    "driver": "run-request-book.py",
    "name": "send",
+   "pre": "",
    "body": "let b=RequestBook::new(2).unwrap();std::thread::spawn(move||drop(b));",
    "diag": "E0277",
    "test": "test_request_book.rs"
@@ -1581,6 +1627,7 @@
   {
    "driver": "run-request-book.py",
    "name": "valid",
+   "pre": "",
    "body": "let mut b=RequestBook::new(2).unwrap();let a=b.reserve(id(1,1),Kind::Control).unwrap();b.cancel_unpublished(a).unwrap();",
    "diag": null,
    "test": "test_request_book.rs"
@@ -1588,6 +1635,7 @@
   {
    "driver": "run-retirement-executor.py",
    "name": "no-clone-client",
+   "pre": "",
    "body": "let mut e=RetirementExecutor::new(1).unwrap();let(_,c)=managed(&mut e);let _=c.clone();",
    "diag": "E0599",
    "test": "test_retirement_executor.rs"
@@ -1595,6 +1643,7 @@
   {
    "driver": "run-retirement-executor.py",
    "name": "no-send-executor",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let e=RetirementExecutor::<Backing>::new(1).unwrap();send(e);",
    "diag": "E0277",
    "test": "test_retirement_executor.rs"
@@ -1602,6 +1651,7 @@
   {
    "driver": "run-retirement-executor.py",
    "name": "valid-client",
+   "pre": "",
    "body": "let mut e=RetirementExecutor::new(1).unwrap();let(p,c)=managed(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
    "diag": null,
    "test": "test_retirement_executor.rs"
@@ -1609,6 +1659,7 @@
   {
    "driver": "run-ring-payload.py",
    "name": "return-borrow",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!(\"{:?}\",view);",
    "diag": "E0505",
    "test": "test_ring_payload.rs"
@@ -1616,6 +1667,7 @@
   {
    "driver": "run-ring-payload.py",
    "name": "mutate-view",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);a.bytes()[0]=0;",
    "diag": "E0594",
    "test": "test_ring_payload.rs"
@@ -1623,6 +1675,7 @@
   {
    "driver": "run-ring-payload.py",
    "name": "moved-storage",
+   "pre": "",
    "body": "let p=Probe::new();let b=Backing::new(p);let _=RingOwner::new(b);let _pointer=b.bytes.get();",
    "diag": "E0382",
    "test": "test_ring_payload.rs"
@@ -1630,6 +1683,7 @@
   {
    "driver": "run-ring-payload.py",
    "name": "legacy-reap",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let _=c.reap();",
    "diag": "E0599",
    "test": "test_ring_payload.rs"
@@ -1637,6 +1691,7 @@
   {
    "driver": "run-ring-payload.py",
    "name": "valid-return",
+   "pre": "",
    "body": "let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);assert_eq!(a.bytes(),&[0;8]);assert!(a.try_return().is_ok());",
    "diag": null,
    "test": "test_ring_payload.rs"
@@ -1644,6 +1699,7 @@
   {
    "driver": "run-shutdown-audit.py",
    "name": "no-clone-tasks",
+   "pre": "",
    "body": "let t=Tasks::new(1).unwrap();let _=t.clone();",
    "diag": "E0599",
    "test": "test_task_loop.rs"
@@ -1651,6 +1707,7 @@
   {
    "driver": "run-shutdown-audit.py",
    "name": "no-send-tasks",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());",
    "diag": "E0277",
    "test": "test_task_loop.rs"
@@ -1658,6 +1715,7 @@
   {
    "driver": "run-shutdown-audit.py",
    "name": "valid-task",
+   "pre": "",
    "body": "let mut t=Tasks::new(1).unwrap();t.spawn(||async{}).unwrap();assert_eq!(t.dispatch(1).completed,1);",
    "diag": null,
    "test": "test_task_loop.rs"
@@ -1665,6 +1723,7 @@
   {
    "driver": "run-task-loop.py",
    "name": "no-clone-tasks",
+   "pre": "",
    "body": "let t=Tasks::new(1).unwrap();let _=t.clone();",
    "diag": "E0599",
    "test": "test_task_loop.rs"
@@ -1672,6 +1731,7 @@
   {
    "driver": "run-task-loop.py",
    "name": "no-send-tasks",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} send(Tasks::new(1).unwrap());",
    "diag": "E0277",
    "test": "test_task_loop.rs"
@@ -1679,6 +1739,7 @@
   {
    "driver": "run-task-loop.py",
    "name": "valid-task",
+   "pre": "",
    "body": "let mut t=Tasks::new(1).unwrap();t.spawn(||async{}).unwrap();assert_eq!(t.dispatch(1).completed,1);",
    "diag": null,
    "test": "test_task_loop.rs"
@@ -1686,6 +1747,7 @@
   {
    "driver": "run-timer-wait.py",
    "name": "no-clone-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(_,c)=future_client(&mut e);let _=c.clone();",
    "diag": "E0599",
    "test": "test_timer_wait.rs"
@@ -1693,6 +1755,7 @@
   {
    "driver": "run-timer-wait.py",
    "name": "no-send-executor",
+   "pre": "",
    "body": "fn send<T:Send>(_:T){} let e=FutureExecutor::<Backing>::new(1).unwrap();send(e);",
    "diag": "E0277",
    "test": "test_timer_wait.rs"
@@ -1700,6 +1763,7 @@
   {
    "driver": "run-timer-wait.py",
    "name": "valid-client",
+   "pre": "",
    "body": "let mut e=FutureExecutor::new(1).unwrap();let(p,c)=future_client(&mut e);drop(c);p.retired.set(true);assert_eq!(e.progress(1).reclaimed,1);",
    "diag": null,
    "test": "test_timer_wait.rs"

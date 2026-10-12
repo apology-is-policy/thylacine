@@ -1,0 +1,28 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-dk9hrjn8/native-c-ring.c:11:16: error: static assertion failed due to requirement '__builtin_offsetof(struct t_owned_setup, hdr_off) == 24': t_owned_setup.hdr_off
+   11 | _Static_assert(__builtin_offsetof(struct t_owned_setup, hdr_off) == 24 && sizeof(((struct t_owned_setup *)0)->hdr_off) == 4, "t_owned_setup.hdr_off");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-dk9hrjn8/native-c-ring.c:11:66: note: expression evaluates to '28 == 24'
+   11 | _Static_assert(__builtin_offsetof(struct t_owned_setup, hdr_off) == 24 && sizeof(((struct t_owned_setup *)0)->hdr_off) == 4, "t_owned_setup.hdr_off");
+      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-dk9hrjn8/native-c-ring.c:12:16: error: static assertion failed due to requirement '__builtin_offsetof(struct t_owned_setup, sq_array_off) == 28': t_owned_setup.sq_array_off
+   12 | _Static_assert(__builtin_offsetof(struct t_owned_setup, sq_array_off) == 28 && sizeof(((struct t_owned_setup *)0)->sq_array_off) == 4, "t_owned_setup.sq_array_off");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-dk9hrjn8/native-c-ring.c:12:71: note: expression evaluates to '24 == 28'
+   12 | _Static_assert(__builtin_offsetof(struct t_owned_setup, sq_array_off) == 28 && sizeof(((struct t_owned_setup *)0)->sq_array_off) == 4, "t_owned_setup.sq_array_off");
+      |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+2 errors generated.
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 264, in <module>
+    run(parser.parse_args().root.resolve())
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 245, in run
+    subprocess.run([clang,'--target=aarch64-none-elf','-march=armv8-a',
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    '-ffreestanding','-std=c11','-fsyntax-only',
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    *[a for i in incs for a in ('-I', str(root/i))], str(source)],check=True)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['clang', '--target=aarch64-none-elf', '-march=armv8-a', '-ffreestanding', '-std=c11', '-fsyntax-only', '-I', '/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/abi-c-setup-twin/usr/lib/libt/include', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-dk9hrjn8/native-c-ring.c']' returned non-zero exit status 1.

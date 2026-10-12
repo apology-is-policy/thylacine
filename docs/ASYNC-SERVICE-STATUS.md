@@ -4164,7 +4164,7 @@ uninitialized ledger above; then the runner passed
 (`run-20261012T190029Z`) and the mutant driver rejected 87 of 87, refused all
 three header sabotages and the ABI sabotage (`mutants-20261012T190121Z`).
 
-## NA-3: the Rust client cores, host-tested (Corona, October 12 -- in progress)
+## NA-3: the Rust client cores, host-tested (Corona, October 12 -- built; audit next)
 
 Scripture a8ea95306 ("Native Rust client cores" in ASYNC-SERVICE-ABI.md). NA-3
 installs Astra's Rust twins as the crate `usr/lib/loom-client` (no_std + alloc,
@@ -4192,9 +4192,32 @@ inside it would run nowhere. The twins keep the heap.
   new `RingHdr` move into libthyla-rs `loom/ring_abi.rs`; `loom.rs` derives its
   header offsets from `RingHdr`. The ABI checker gains a Rust ring leg and checks
   the cores' own setup and CQE copies (C and Rust) field by field.
-- **Evidence still owed (under the lease):** `make test-loom-client` (now with a
-  Rust stage that requires all 137 declared tests in the dev and release
-  profiles), the ABI checker, a guest build of the Loom consumers, the NA-3
-  mutant driver (`work/oct12-na3/na3-mutants.py`: Astra's 110 Rust mutants, 59
-  compile-fail cases, 4 C code-block sabotages, 6 checker sabotages) and a re-run
-  of the NA-2b C mutants on the renumbered codes.
+
+**Built, October 12, 19:47-20:13 UTC (mac lease held; evidence in `work/oct12-na3/`).**
+- **First build RED, one cause.** `#![no_std]` also removes the std prelude
+  from the test build, so `Vec`, `Box` and `thread_local!` were missing (81
+  errors). The crate is now `#![cfg_attr(not(test), no_std)]`, as cornucopia and
+  corvus-crypto are. The guest build is what compiles the cores no_std.
+- **Self-found: three paths no test reached.** Astra's test files began
+  `#![allow(dead_code)]`, which at the root of a standalone test binary covers
+  the cores too. In the crate it covers one test module, so the test build
+  reported `ReadFuture::request_cancel`, `WakeReason::Event` and `Delivery::kind`
+  as dead. NA-3's own tests (`tests/ring/seams.rs`, `tests/request_book/seams.rs`)
+  cover them; `work/oct12-na3/seam-sabotage.py` breaks each path and only its new
+  test fails (139 others pass). One more derivation form allows
+  `unreachable_code` on the one original test that needs it.
+- **Green.** `make test-loom-client` PASS, with Rust dev and release at 140 of 140
+  declared tests and no warning (run-20261012T195631Z). The ABI checker gives 3
+  PASS lines (153 Rust checks). The guest release build of libthyla-rs and the
+  six Loom consumers adds no warning of NA-3's. `tools/test-rust.sh` lists
+  loom-client PASS, 140.
+- **Mutants.** The first full run (mutants-20261012T195818Z) was RED from the
+  driver's classifier alone. This rustc prints a thread id in its panic line, so
+  every expected text read empty. A test outside the named set aborted the
+  binary by panicking during unwinding. One driver's case prelude was dropped,
+  and two diagnostics were message text, not codes. Fixed: the verdict comes
+  from a serial run of the named set alone, and a no-op mutant must come out
+  SURVIVED. Evidence run mutants-20261012T200803Z: 110 of 110 rejected (3 by a
+  named test aborting the binary), 59 of 59 cases as required, 4 C code blocks
+  and 6 checker sabotages refused. The NA-2b C driver on the renumbered codes:
+  87 of 87 rejected (c-mutants-20261012T201157Z).

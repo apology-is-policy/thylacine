@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 264, in <module>
+    run(parser.parse_args().root.resolve())
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 224, in run
+    assert got==want,'ABI vector mismatch: Rust'
+           ^^^^^^^^^
+AssertionError: ABI vector mismatch: Rust

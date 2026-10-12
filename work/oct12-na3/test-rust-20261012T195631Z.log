@@ -1,0 +1,8 @@
+==> test-rust: aarch64-apple-darwin, 2 crate(s)
+
+================ test-rust summary ================
+  PASS      loom-client              140 test(s)
+  NO-HOST   libthyla-rs              cannot host-test (declares no tests; nothing stranded)
+===================================================
+test-rust: 1 crate(s) passing, 140 test(s); 0 bin-only; 0 with no tests; 1 un-host-testable; 0 FAILING
+test-rust: every #[test] the sources declare compiled into a pass -- nothing is stranded.

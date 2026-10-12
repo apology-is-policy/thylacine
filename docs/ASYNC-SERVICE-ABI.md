@@ -315,6 +315,9 @@ only their tests use them.
   That edition's rules for when a temporary is dropped decide when a `RefCell`
   borrow ends, so the same code built as 2021 could hold a borrow longer and
   panic.
+- Under `cargo test` the crate is std, as the twins' own test binaries were, so
+  the tests keep `Vec`, `Box` and `thread_local!` as written. Every other build,
+  the guest's included, is `no_std`.
 - `make test-rust` runs the tests with `cargo test`. `make test-loom-client`
   runs them again in the release profile, which is the one the guest builds
   (opt-level "z", overflow checks on).

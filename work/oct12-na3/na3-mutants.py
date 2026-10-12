@@ -12,7 +12,11 @@ would neutralize is reported, not counted.
 A mutant is rejected only when the crate still BUILDS and a test from the set
 Astra's driver named (her test file's tests, under her filter) FAILS, with her
 expected panic text where she gave one. A build failure, a timeout, or a failure
-only outside the named set does not count.
+only outside the named set does not count. The verdict comes from a second run
+of the named set alone, serially, as her binaries held only her own file's
+tests: in the whole suite a test outside the set that panics during unwinding
+aborts the binary before the named tests report. A named test that aborts the
+binary is recorded as such, and counts only with her text in its panic.
 
 Each compile-fail case is appended as a test to the module that holds its
 fixtures; it must fail with its rustc error code at the appended lines, and only
@@ -133,14 +137,36 @@ def cargo(crate, out_log, *args, timeout=600):
     return sh(['cargo', 'test', '--lib', *args], out_log, cwd=crate, timeout=timeout, env=env)
 
 
+PANIC = re.compile(r"^thread '([^']+)'(?: \(\d+\))? panicked at ([^\n]+):\n([^\n]*)", re.M)
+
+
+def panics(text):
+    """Test leaf name -> every panic its thread printed, as 'site: message'."""
+    out = {}
+    for m in PANIC.finditer(text):
+        out.setdefault(m.group(1).split('::')[-1], []).append(f'{m.group(2)}: {m.group(3)}')
+    return out
+
+
 def failures(log):
-    """Failing test leaf names, and each one's panic site and message."""
+    """Failing test leaf names, and each one's panics."""
     text = Path(log).read_text(errors='replace')
     failed = re.findall(r'^test (\S+) \.\.\. FAILED$', text, re.M)
-    panics = {}
-    for m in re.finditer(r"thread '([^']+)' panicked at ([^\n]+):\n([^\n]*)", text):
-        panics.setdefault(m.group(1).split('::')[-1], f'{m.group(2)}: {m.group(3)}')
-    return {f.split('::')[-1]: panics.get(f.split('::')[-1], '') for f in failed}, text
+    p = panics(text)
+    return {f.split('::')[-1]: p.get(f.split('::')[-1], []) for f in failed}, text
+
+
+def test_paths(src):
+    """Test leaf name -> its full path in the crate, for an --exact run."""
+    out = {}
+    for f in sorted((src / 'tests').rglob('*.rs')):
+        rel = f.relative_to(src).with_suffix('')
+        mod = '::'.join(p for p in rel.parts if p != 'mod')
+        for name in re.findall(r'^\s*#\[test\]\s*\n(?:\s*#\[[^\n]*\]\s*\n)*\s*fn (\w+)', f.read_text(), re.M):
+            if name in out:
+                sys.exit(f'na3-mutants: test {name} is defined twice')
+            out[name] = f'{mod}::{name}'
+    return out
 
 
 def summary(text):
@@ -149,13 +175,64 @@ def summary(text):
 
 
 def errors(text, host, first_probe_line):
-    """rustc errors as (code, file, line); and whether each lies in the probe."""
+    """rustc errors as (code, file, line, message); and those that lie in the probe."""
     out = []
-    for m in re.finditer(r'^error(?:\[(E\d+)\])?: [^\n]*\n\s*--> ([^:\n]+):(\d+):\d+', text, re.M):
-        out.append((m.group(1), m.group(2), int(m.group(3))))
+    for m in re.finditer(r'^error(?:\[(E\d+)\])?: ([^\n]*)\n\s*--> ([^:\n]+):(\d+):\d+', text, re.M):
+        out.append((m.group(1), m.group(3), int(m.group(4)), m.group(2)))
     inside = [e for e in out if e[1].endswith(host) and e[2] >= first_probe_line]
     return out, inside
 
+
+def shows(diag, e):
+    """Her runner's diag is an error code or a fragment of the message."""
+    return e[0] == diag if re.fullmatch(r'E\d+', diag) else diag in e[3]
+
+
+def judge(crate, out, paths, v, key, text, pristine, rec):
+    """Build and run one mutant (text = the whole mutated core); record and return its verdict."""
+    core = crate / 'src' / v['file']
+    core.write_text(text)
+    stem = 'mutant-' + re.sub(r'[^a-z0-9.-]+', '_', key)
+    log, nlog = out / (stem + '.log'), out / (stem + '.named.log')
+    named = named_set(v)
+    if not named <= paths.keys():
+        sys.exit(f'na3-mutants: {key}: named tests not installed: {sorted(named - paths.keys())[:5]}')
+    rc = cargo(crate, log, timeout=300)  # the whole suite, for the record
+    fails, body = failures(log)
+    nrc = 'not run'
+    if rc != 'timeout' and 'error: could not compile' not in body:
+        nrc = cargo(crate, nlog, '--', '--exact', '--test-threads=1', *sorted(paths[n] for n in named),
+                    timeout=300)
+    core.write_text(pristine[v['file']])
+    want = expect_text(v)
+    rec.update(rc=rc, failing=sorted(fails), expect=want, named_rc=nrc)
+    if rc == 'timeout' or nrc == 'timeout':
+        verdict = 'timeout'
+    elif nrc == 'not run':
+        verdict = 'did not build' if 'error: could not compile' in body else 'no test binary'
+    else:
+        hit, ntext = failures(nlog)
+        s = summary(ntext)
+        aborted = s is None
+        if aborted:  # serial, named tests only: every panic is a named test's
+            hit = {n: p for n, p in panics(ntext).items() if n in named}
+        rec.update(named_failing=sorted(hit), aborted=aborted, named_summary=s)
+        if want is None:
+            shown = [m for ms in hit.values() for m in ms] or [f'{n} FAILED' for n in hit]
+        else:
+            shown = [m for ms in hit.values() for m in ms if want in m]
+        if nrc == 0 or not hit:
+            outside = fails or summary(body) is None
+            verdict = 'killed only outside the named set' if outside else 'SURVIVED'
+        elif not aborted and s[1] + s[2] != len(named):
+            verdict = f'named run counted {s[1] + s[2]} of {len(named)} tests'
+        elif not shown:
+            verdict = f'no named failure shows {want!r}'
+        else:
+            verdict = 'rejected'
+            rec['shown'] = shown[0]
+    rec['verdict'] = verdict
+    return verdict
 
 def c_blocks(out):
     sdk = subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip()
@@ -219,10 +296,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', type=Path)
     ap.add_argument('--dry', action='store_true')
+    ap.add_argument('--only', help='comma-separated mutant/case keys, for iterating on the driver; not evidence')
     args = ap.parse_args()
     if args.dry:
         sys.exit(dry())
-    out = args.out
+    out = args.out.resolve()  # cargo runs inside the scratch crate: a relative target dir would land there
     out.mkdir(parents=True)
     res = subprocess.check_output([os.path.expanduser('~/.local/bin/yip'), 'resources'], text=True)
     if not re.search(r'^mac +HELD by (you|corona)\b', res, re.M):
@@ -231,6 +309,12 @@ def main():
     if st.f_bavail * st.f_frsize < 8 * 1024 ** 3:
         sys.exit('na3-mutants: below the 8 GiB disk floor')
     data, variants, cases = load()
+    if args.only:
+        keep = set(args.only.split(','))
+        variants = [v for v in variants if f"{v['driver'][4:-3]}:{v['name']}" in keep]
+        cases = [c for c in cases if f"case:{c['driver'][4:-3]}:{c['name']}" in keep]
+        if len(variants) + len(cases) != len(keep):
+            sys.exit(f'na3-mutants: --only matched {len(variants) + len(cases)} of {len(keep)} keys')
     pristine = inst.derive()
     for rel, text in pristine.items():
         if (CRATE / 'src' / rel).read_text() != text:
@@ -246,6 +330,17 @@ def main():
     if rc != 0 or s != ('ok', declared, 0):
         sys.exit(f'na3-mutants: control: rc={rc}, summary {s}, declared {declared}')
     print(f'control: {declared} of {declared} declared tests pass', flush=True)
+    paths = test_paths(crate / 'src')
+    if len(paths) != declared:
+        sys.exit(f'na3-mutants: {len(paths)} test paths found, {declared} declared')
+    # Negative control: a mutant that changes nothing must come out SURVIVED through the
+    # same verdict path, or the driver cannot tell a survivor from a kill.
+    v0 = (variants or load()[1])[0]
+    noop = pristine[v0['file']] + '// na3-mutants negative control: no behaviour change\n'
+    ctl = dict(name='control:no-op', file=v0['file'])
+    if judge(crate, out, paths, v0, 'control:no-op', noop, pristine, ctl) != 'SURVIVED':
+        sys.exit(f"na3-mutants: negative control: a no-op mutant came out {ctl['verdict']!r}")
+    print(f"control: a no-op mutant of {v0['file']} survives {len(named_set(v0))} named tests", flush=True)
 
     for v in variants:
         key = f"{v['driver'][4:-3]}:{v['name']}"
@@ -254,32 +349,12 @@ def main():
         text, err = mutant_source(v, pristine)
         if err:
             failed.append(f'{key}: {err}'); rec['verdict'] = err; continue
-        core = crate / 'src' / v['file']
-        core.write_text(text)
-        log = out / ('mutant-' + re.sub(r'[^a-z0-9.-]+', '_', key) + '.log')
-        rc = cargo(crate, log, timeout=300)
-        core.write_text(pristine[v['file']])
-        fails, body = failures(log)
-        hit = {n: p for n, p in fails.items() if n in named_set(v)}
-        want = expect_text(v)
-        rec.update(rc=rc, failing=sorted(fails), named_failing=sorted(hit), expect=want)
-        if rc == 'timeout':
-            verdict = 'timeout'
-        elif summary(body) is None:
-            verdict = 'did not build' if 'error: could not compile' in body else 'no test summary'
-        elif rc == 0 or not fails:
-            verdict = 'SURVIVED'
-        elif not hit:
-            verdict = 'killed only outside the named set'
-        elif want and not any(want in p for p in hit.values()):
-            verdict = f'no named failure shows {want!r}'
-        else:
-            verdict = 'rejected'
-            rec['shown'] = next((p for p in hit.values() if want and want in p), next(iter(hit.values())))
-        rec['verdict'] = verdict
+        verdict = judge(crate, out, paths, v, key, text, pristine, rec)
         if verdict != 'rejected':
             failed.append(f'{key}: {verdict}')
-        print(f"{key:52} {verdict:9} {len(fails):3} failing, {len(hit)} named  {rec.get('shown', '')[:80]}", flush=True)
+        flag = ' (aborted)' if rec.get('aborted') else ''
+        print(f"{key:52} {verdict}{flag}  {len(rec.get('failing', []))} failing, {len(rec.get('named_failing', []))} named  "
+              f"{rec.get('shown', '')[:80]}", flush=True)
 
     for c in cases:
         key = f"case:{c['driver'][4:-3]}:{c['name']}"
@@ -289,14 +364,14 @@ def main():
         f = crate / 'src' / host
         orig = f.read_text()
         first = orig.count('\n') + 2
-        f.write_text(orig + '\n#[test]\nfn na3_probe() {\n' + c['body'] + '\n}\n')
+        f.write_text(orig + '\n#[test]\nfn na3_probe() {\n' + c['pre'] + c['body'] + '\n}\n')
         log = out / ('case-' + re.sub(r'[^a-z0-9.-]+', '_', key) + '.log')
         rc = cargo(crate, log, 'na3_probe', timeout=300)
         f.write_text(orig)
         text = log.read_text(errors='replace')
         errs, inside = errors(text, host, first)
         if c['diag']:
-            ok = rc != 0 and errs and len(inside) == len(errs) and any(e[0] == c['diag'] for e in inside)
+            ok = rc != 0 and errs and len(inside) == len(errs) and any(shows(c['diag'], e) for e in inside)
             verdict = 'refused' if ok else f'rc={rc}, errors {errs[:3]}'
         else:
             s = summary(text)
@@ -312,14 +387,17 @@ def main():
         failed.append(err)
     shutil.rmtree(out / 'target', ignore_errors=True)
     rejected = sum(r.get('verdict') == 'rejected' for r in records)
+    aborted = sum(r.get('verdict') == 'rejected' and r.get('aborted', False) for r in records)
     refused = sum(r.get('verdict') in ('refused', 'compiles and passes') for r in records)
-    result = dict(owner='corona', state='failed' if failed else 'passed', declared_tests=declared,
-                  mutants=len(variants), rejected=rejected, cases=len(cases), cases_ok=refused,
+    result = dict(owner='corona', state='failed' if failed else 'passed', only=args.only, declared_tests=declared,
+                  mutants=len(variants), rejected=rejected, rejected_by_abort=aborted, cases=len(cases),
+                  cases_ok=refused,
                   superseded=[f"{v['driver']}:{v['name']}" for v in data['variants'] if v['driver'] in SUPERSEDED],
                   c_code_blocks=len(C_BLOCKS), abi_sabotages=len(ABI), versions=versions,
                   failures=failed, records=records)
     (out / 'result.json').write_text(json.dumps(result, indent=1) + '\n')
-    print(f'{rejected}/{len(variants)} mutants rejected; {refused}/{len(cases)} cases as required; '
+    print(f'{rejected}/{len(variants)} mutants rejected ({aborted} by a named test aborting the binary); '
+          f'{refused}/{len(cases)} cases as required; '
           f'{len(C_BLOCKS)} C code blocks and {len(ABI)} ABI sabotages refused' if not failed else
           'FAILED:\n  ' + '\n  '.join(failed))
     sys.exit(1 if failed else 0)

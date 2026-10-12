@@ -1,0 +1,1 @@
+Assertion failed: (!t_request_accept(book,&r,&d)), function reap, file test_composed_ring.c, line 13.

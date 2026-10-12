@@ -1,11 +1,10 @@
 //! The native Loom client cores: payload leases, the paired CQ reader, request
 //! correlation, fixed I/O and its futures, retirement, and the creator-thread loop.
-#![no_std]
+// The tests run with std, as the cores' original test binaries did; every other
+// build, the guest's included, compiles them no_std.
+#![cfg_attr(not(test), no_std)]
 // Until the native adapter composes the cores, their only caller is the tests.
 #![cfg_attr(not(test), allow(dead_code))]
-
-#[cfg(test)]
-extern crate std;
 
 pub mod service_abi;
 

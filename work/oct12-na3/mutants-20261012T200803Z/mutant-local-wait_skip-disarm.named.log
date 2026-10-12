@@ -1,0 +1,75 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::wait_absolute_deadline_before_and_after_arm ... FAILED
+test tests::ring::wait_bounded_turn_has_no_internal_allocation ... FAILED
+test tests::ring::wait_failures_cleanup_without_retry_loop ... FAILED
+test tests::ring::wait_local_release_during_arm_prevents_sleep ... FAILED
+test tests::ring::wait_native_ready_and_intervening_event_are_not_lost ... FAILED
+test tests::ring::wait_ready_callback_release_is_checked_last ... FAILED
+test tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress ... FAILED
+test tests::ring::wait_timeout_is_not_terminal_storage_proof ... ok
+test tests::ring::wait_zero_and_partial_quantum_do_not_sleep ... ok
+
+failures:
+
+---- tests::ring::wait_absolute_deadline_before_and_after_arm stdout ----
+
+thread 'tests::ring::wait_absolute_deadline_before_and_after_arm' (30942070) panicked at src/tests/ring.rs:1758:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::wait_bounded_turn_has_no_internal_allocation stdout ----
+
+thread 'tests::ring::wait_bounded_turn_has_no_internal_allocation' (30942071) panicked at src/tests/ring.rs:1860:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::wait_failures_cleanup_without_retry_loop stdout ----
+
+thread 'tests::ring::wait_failures_cleanup_without_retry_loop' (30942072) panicked at src/tests/ring.rs:1825:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::wait_local_release_during_arm_prevents_sleep stdout ----
+
+thread 'tests::ring::wait_local_release_during_arm_prevents_sleep' (30942073) panicked at src/tests/ring.rs:1703:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::wait_native_ready_and_intervening_event_are_not_lost stdout ----
+
+thread 'tests::ring::wait_native_ready_and_intervening_event_are_not_lost' (30942074) panicked at src/tests/ring.rs:1641:9:
+assertion failed: !self.armed
+
+---- tests::ring::wait_ready_callback_release_is_checked_last stdout ----
+
+thread 'tests::ring::wait_ready_callback_release_is_checked_last' (30942075) panicked at src/tests/ring.rs:1720:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress stdout ----
+
+thread 'tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress' (30942076) panicked at src/tests/ring.rs:1800:9:
+assertion failed: !w.armed
+
+
+failures:
+    tests::ring::wait_absolute_deadline_before_and_after_arm
+    tests::ring::wait_bounded_turn_has_no_internal_allocation
+    tests::ring::wait_failures_cleanup_without_retry_loop
+    tests::ring::wait_local_release_during_arm_prevents_sleep
+    tests::ring::wait_native_ready_and_intervening_event_are_not_lost
+    tests::ring::wait_ready_callback_release_is_checked_last
+    tests::ring::wait_spurious_wakes_keep_original_deadline_and_schedule_progress
+
+test result: FAILED. 2 passed; 7 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

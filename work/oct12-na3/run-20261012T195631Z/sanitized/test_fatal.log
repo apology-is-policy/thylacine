@@ -1,0 +1,8 @@
+loom-client fatal: t_ring_create:13
+loom-client fatal: t_fixed_create:11
+loom-client fatal: t_mapping_create:18
+loom-client fatal: t_retirement_create:4
+loom-client fatal: t_lease_init:26
+loom-client fatal: t_ring_owner_drop:66
+loom-client fatal: t_fixed_request_drop:60
+C seven fatal invariant scenarios PASS

@@ -28,6 +28,8 @@ code:
   - usr/lib/loom-client/src/tests/owned_mapping.rs
   - usr/lib/loom-client/src/tests/paired_cq.rs
   - usr/lib/loom-client/src/tests/request_book.rs
+  - usr/lib/loom-client/src/tests/ring/seams.rs
+  - usr/lib/loom-client/src/tests/request_book/seams.rs
 audit: hard
 guarded-by: [inv-i29]
 validated-by: [prose]
@@ -45,7 +47,8 @@ The Rust twins of the native Loom client cores: the bookkeeping that keeps a
 program's view of its requests, buffers and payload leases consistent with what
 the kernel has accepted. Astra wrote and host-tested them uninstalled
 (`work/oct5-as-r9/astra-takeover/owned-clients`). NA-3 installs them as the
-crate `loom-client`, `no_std` with `alloc`. Unlike the C twins
+crate `loom-client`, `no_std` with `alloc`; its test build is std, as the
+original test binaries were. Unlike the C twins
 ([[sub-libt-loom-client]]) they keep the heap: libthyla-rs has `ThylaAlloc`, and
 the caller-storage vote of 2026-10-12 concerned freestanding C.
 
@@ -144,17 +147,32 @@ Lookups scan at most 64 cells. A pool costs a few small allocations at
   every installed core and test equal to rustfmt applied to Astra's original
   plus a listed edit set. A code edit may only swap or extend one path token, so
   no edit can delete a statement. The edits: "uninstalled" leaves six doc lines;
-  `Error::Full` is added and the envelope answers it, and two ring tests expect it.
+  `Error::Full` is added and the envelope answers it, and two ring tests expect it;
+  one test allows `unreachable_code`, for a factory that must panic before it
+  builds the future its type needs.
 - **No test lost a line.** Astra's test files are cumulative copies (650 test
   definitions, 137 distinct). The install keeps `test_task_loop.rs` whole as
   `tests/ring.rs` and adds only the other files' missing lines as child modules;
   `--check` proves that every original test's lines are present in its
   installed namesake.
+- **Three paths no original test reached.** Each original test binary had
+  `#![allow(dead_code)]` at its crate root, which hid that no test called
+  `ReadFuture::request_cancel`, built `WakeReason::Event` or read
+  `Delivery::kind`. In the crate that allowance covers only its own module, so
+  the test build reported all three. NA-3's own tests in `tests/ring/seams.rs`
+  and `tests/request_book/seams.rs` cover them (140 tests in all), and
+  `work/oct12-na3/seam-sabotage.py` breaks each path in turn: only its new test
+  fails.
 - **Mutants.** `work/oct12-na3/na3-mutants.py` carries all 110 of Astra's Rust
   mutants through the same derivation and counts one only when a test from the
   set her driver named fails, with her expected panic text where she gave one.
-  Her 59 compile-fail cases run as probes inside the module that holds their
-  fixtures and must fail with their rustc code at the probe's own lines.
+  The verdict comes from a run of that set alone, serially, as her binaries
+  held only her own file's tests: in the whole suite, a test outside the set
+  that panics during unwinding aborts the binary first. A no-op mutant must
+  come out SURVIVED through the same path. Her 59 compile-fail cases run as
+  probes inside the module that holds their fixtures, after the prelude her
+  runner put before them, and must fail with her rustc code or message at the
+  probe's own lines.
 - **The ABI twins.** `tools/check-loom-service-abi.py` checks `owned_mapping::Setup`
   and `paired_cq::Completion` field by field against the ring layout table.
 

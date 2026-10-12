@@ -1,0 +1,1 @@
+Assertion failed: (t_paired_init(&q,&m,cases[i][0],cases[i][1],cases[i][2],cases[i][3],(uint32_t)cases[i][4])==T_CQ_GEOMETRY), function main, file test_paired_cq.c, line 18.

@@ -1,0 +1,61 @@
+warning: unnecessary `unsafe` block
+   --> src/fixed_requests.rs:151:25
+    |
+151 |         if let Err(e) = unsafe {
+    |                         ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 10 tests
+test tests::ring::typed_abandon_retains_obligation_until_terminal ... FAILED
+test tests::ring::typed_corruption_closes_without_refunding_active_storage ... ok
+test tests::ring::typed_driver_drop_reports_closing_to_pending_handle ... ok
+test tests::ring::typed_drop_terminal_does_not_abort_or_leak ... FAILED
+test tests::ring::typed_foreign_cookie_fails_only_its_driver ... ok
+test tests::ring::typed_prepare_rolls_back_both_tables ... ok
+test tests::ring::typed_read_owns_until_consumed_view_ends ... FAILED
+test tests::ring::typed_retire_prepared_prevents_publication ... ok
+test tests::ring::typed_retirement_without_cq_keeps_metadata_until_proof ... ok
+test tests::ring::typed_write_and_read_errors_are_preserved ... FAILED
+
+failures:
+
+---- tests::ring::typed_abandon_retains_obligation_until_terminal stdout ----
+
+thread 'tests::ring::typed_abandon_retains_obligation_until_terminal' (30932185) panicked at src/tests/ring.rs:748:40:
+called `Result::unwrap()` on an `Err` value: Storage(Busy)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::typed_drop_terminal_does_not_abort_or_leak stdout ----
+
+thread 'tests::ring::typed_drop_terminal_does_not_abort_or_leak' (30932188) panicked at src/tests/ring.rs:847:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- tests::ring::typed_read_owns_until_consumed_view_ends stdout ----
+
+thread 'tests::ring::typed_read_owns_until_consumed_view_ends' (30932191) panicked at src/tests/ring.rs:721:29:
+called `Result::unwrap()` on an `Err` value: Busy
+
+---- tests::ring::typed_write_and_read_errors_are_preserved stdout ----
+
+thread 'tests::ring::typed_write_and_read_errors_are_preserved' (30932194) panicked at src/tests/ring.rs:812:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    tests::ring::typed_abandon_retains_obligation_until_terminal
+    tests::ring::typed_drop_terminal_does_not_abort_or_leak
+    tests::ring::typed_read_owns_until_consumed_view_ends
+    tests::ring::typed_write_and_read_errors_are_preserved
+
+test result: FAILED. 6 passed; 4 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

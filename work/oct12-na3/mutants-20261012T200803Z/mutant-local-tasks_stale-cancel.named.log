@@ -1,0 +1,55 @@
+warning: unused variable: `e`
+   --> src/local_tasks.rs:103:40
+    |
+103 |         if !slot.as_ref().is_some_and(|e| true) {
+    |                                        ^ help: if this is intentional, prefix it with an underscore: `_e`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `id` is never read
+  --> src/local_tasks.rs:44:5
+   |
+43 | struct Entry {
+   |        ----- field in this struct
+44 |     id: u64,
+   |     ^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 2 warnings (run `cargo fix --lib -p loom-client --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 10 tests
+test tests::ring::task_capacity_precedes_factory_and_ids_are_owner_specific ... FAILED
+test tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot ... FAILED
+test tests::ring::task_completion_and_root_drop_release_owned_futures ... ok
+test tests::ring::task_dispatch_and_wake_have_no_internal_allocation ... ok
+test tests::ring::task_fixed_completion_wakes_and_result_stays_owned ... ok
+test tests::ring::task_fixed_future_cancel_retains_storage_until_terminal ... ok
+test tests::ring::task_pending_stays_quiet_until_woken ... ok
+test tests::ring::task_self_wake_survives_poll_and_is_bounded ... ok
+test tests::ring::task_unwind_detaches_owner_and_keeps_other_tasks ... ok
+test tests::ring::task_zero_budget_and_many_wakes_coalesce ... ok
+
+failures:
+
+---- tests::ring::task_capacity_precedes_factory_and_ids_are_owner_specific stdout ----
+
+thread 'tests::ring::task_capacity_precedes_factory_and_ids_are_owner_specific' (30939773) panicked at src/tests/ring.rs:2143:5:
+assertion failed: !a.cancel(bid)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot stdout ----
+
+thread 'tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot' (30939774) panicked at src/tests/ring.rs:2198:9:
+assertion failed: !t.cancel(old)
+
+
+failures:
+    tests::ring::task_capacity_precedes_factory_and_ids_are_owner_specific
+    tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 130 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

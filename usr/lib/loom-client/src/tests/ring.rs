@@ -2124,6 +2124,7 @@ fn task_probe(
         waker,
     )
 }
+#[allow(unreachable_code)]
 #[test]
 fn task_capacity_precedes_factory_and_ids_are_owner_specific() {
     assert!(Tasks::new(0).is_err());
@@ -2655,3 +2656,4 @@ mod composed;
 mod deadlines;
 mod executor;
 mod local_progress;
+mod seams;

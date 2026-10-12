@@ -206,3 +206,5 @@ fn geometry_maximum_capacity_and_cookie_exhaustion() {
     assert_eq!(b.occupied(), 0);
     request_book::exhausted_cookie_test();
 }
+
+mod seams;

@@ -1,0 +1,14 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/crate)
+error[E0599]: no method named `reap` found for struct `ring_payload::RingClient<B>` in the current scope
+    --> src/tests/ring.rs:2663:36
+     |
+2663 | let (_p,_root,c)=fixture();let _=c.reap();
+     |                                    ^^^^ method not found in `ring_payload::RingClient<ring::Backing>`
+     |
+    ::: src/ring_payload.rs:191:1
+     |
+ 191 | pub(crate) struct RingClient<B: RingBackend> {
+     | -------------------------------------------- method `reap` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

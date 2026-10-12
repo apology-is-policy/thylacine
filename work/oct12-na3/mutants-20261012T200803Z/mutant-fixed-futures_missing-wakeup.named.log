@@ -1,0 +1,88 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 12 tests
+test tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference ... FAILED
+test tests::ring::future_clone_callback_completion_is_not_lost ... ok
+test tests::ring::future_completion_before_first_poll ... ok
+test tests::ring::future_driver_close_and_drop_wake_unfinished ... FAILED
+test tests::ring::future_drop_unregisters_but_keeps_active_storage ... ok
+test tests::ring::future_failed_prepare_and_write_result ... FAILED
+test tests::ring::future_malformed_record_wakes_then_fails_closed ... FAILED
+test tests::ring::future_read_wakes_and_retains_result ... FAILED
+test tests::ring::future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test tests::ring::future_replaced_waker_drop_can_deliver_completion ... FAILED
+test tests::ring::future_replaces_waker_without_notifying_old_task ... FAILED
+test tests::ring::future_wake_callback_polls_outside_hub_borrow ... FAILED
+
+failures:
+
+---- tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference stdout ----
+
+thread 'tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference' (30925559) panicked at src/tests/ring.rs:1255:5:
+assertion `left == right` failed
+  left: 0
+ right: 64
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::future_driver_close_and_drop_wake_unfinished stdout ----
+
+thread 'tests::ring::future_driver_close_and_drop_wake_unfinished' (30925562) panicked at src/tests/ring.rs:1028:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::future_failed_prepare_and_write_result stdout ----
+
+thread 'tests::ring::future_failed_prepare_and_write_result' (30925564) panicked at src/tests/ring.rs:1066:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::future_malformed_record_wakes_then_fails_closed stdout ----
+
+thread 'tests::ring::future_malformed_record_wakes_then_fails_closed' (30925565) panicked at src/tests/ring.rs:1046:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::future_read_wakes_and_retains_result stdout ----
+
+thread 'tests::ring::future_read_wakes_and_retains_result' (30925566) panicked at src/tests/ring.rs:950:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::future_replaced_waker_drop_can_deliver_completion stdout ----
+
+thread 'tests::ring::future_replaced_waker_drop_can_deliver_completion' (30925568) panicked at src/tests/ring.rs:1144:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::future_replaces_waker_without_notifying_old_task stdout ----
+
+thread 'tests::ring::future_replaces_waker_without_notifying_old_task' (30925569) panicked at src/tests/ring.rs:993:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::future_wake_callback_polls_outside_hub_borrow stdout ----
+
+thread 'tests::ring::future_wake_callback_polls_outside_hub_borrow' (30925570) panicked at src/tests/ring.rs:1163:5:
+assertion failed: observed.get()
+
+
+failures:
+    tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference
+    tests::ring::future_driver_close_and_drop_wake_unfinished
+    tests::ring::future_failed_prepare_and_write_result
+    tests::ring::future_malformed_record_wakes_then_fails_closed
+    tests::ring::future_read_wakes_and_retains_result
+    tests::ring::future_replaced_waker_drop_can_deliver_completion
+    tests::ring::future_replaces_waker_without_notifying_old_task
+    tests::ring::future_wake_callback_polls_outside_hub_borrow
+
+test result: FAILED. 4 passed; 8 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

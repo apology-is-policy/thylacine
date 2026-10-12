@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 4 tests
+test tests::paired_cq::concurrent_pair_publication_and_reuse ... ok
+test tests::paired_cq::copies_receipt_before_slot_reuse_and_wrap ... ok
+test tests::paired_cq::geometry_refuses_overlap_alignment_and_overflow ... FAILED
+test tests::paired_cq::refuses_corrupt_distance_or_second_head_writer ... ok
+
+failures:
+
+---- tests::paired_cq::geometry_refuses_overlap_alignment_and_overflow stdout ----
+
+thread 'tests::paired_cq::geometry_refuses_overlap_alignment_and_overflow' (30945028) panicked at src/tests/paired_cq.rs:123:9:
+assertion failed: matches!(unsafe { PairedCq::new(m.base(), len, h, c, r, n) },
+    Err(CqError::Geometry))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::paired_cq::geometry_refuses_overlap_alignment_and_overflow
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,2 @@
+work/oct12-na3/run-20261012T195631Z/sanitized/ubsan_control.c:3:77: runtime error: signed integer overflow: 2147483647 + 1 cannot be represented in type 'int'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior work/oct12-na3/run-20261012T195631Z/sanitized/ubsan_control.c:3:77 

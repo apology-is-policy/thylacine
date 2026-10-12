@@ -978,6 +978,7 @@ dependencies = [
 name = "libthyla-rs"
 version = "0.1.0"
 dependencies = [
+ "loom-client",
  "ninep",
  "thyla-heap",
 ]
@@ -1033,6 +1034,10 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
 ]
+
+[[package]]
+name = "loom-client"
+version = "0.1.0"
 
 [[package]]
 name = "loom-smoke"

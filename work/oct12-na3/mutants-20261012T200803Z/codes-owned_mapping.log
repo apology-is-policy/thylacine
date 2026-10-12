@@ -1,0 +1,14 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/codes.c:3:
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/codes-owned_mapping/thyla/loom_client/owned_mapping.h:18:5: error: static assertion failed due to requirement '(T_MAP_CLOSED) <= -(1300)': mapping codes lie in their block
+   18 |     T_LOOM_CLIENT_LOCAL(T_MAP_CLOSED,1300)&&T_LOOM_CLIENT_LOCAL(T_MAP_CORRUPT,1300),"mapping codes lie in their block");
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/codes-owned_mapping/thyla/loom_client/base.h:16:42: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                          ^~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/codes-owned_mapping/thyla/loom_client/owned_mapping.h:18:5: note: expression evaluates to '-3 <= -1300'
+   18 |     T_LOOM_CLIENT_LOCAL(T_MAP_CLOSED,1300)&&T_LOOM_CLIENT_LOCAL(T_MAP_CORRUPT,1300),"mapping codes lie in their block");
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T200803Z/codes-owned_mapping/thyla/loom_client/base.h:16:48: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                          ~~~~~~^~~~~~~~~~
+1 error generated.

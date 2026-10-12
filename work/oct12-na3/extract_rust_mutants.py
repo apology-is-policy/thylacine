@@ -5,7 +5,8 @@ Reads work/oct5-as-r9/astra-takeover/owned-clients/run-*.py as Python syntax
 trees (never executes them) and writes astra-rust-mutants.json beside this file:
   variants: driver, name, file (the core .rs), a, b, test file, filter, expect,
             replace_all (her runner replaced every match rather than requiring one)
-  cases:    driver, name, body, diag (an rustc error code, or null = must compile)
+  cases:    driver, name, pre, body, diag (an rustc error code, or null = must compile);
+            pre is what her runner's `fn main(){` puts before the body
 The `expect` of a mutant run is the runner's own source text for it, kept for review.
 """
 import ast, json, re, sys
@@ -18,6 +19,26 @@ out = dict(variants=[], cases=[], skipped=[])
 
 def lit(node):
     return ast.literal_eval(node)
+
+
+def terms(n):
+    """The operands of a chain of string `+`, left to right."""
+    if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Add):
+        return terms(n.left) + terms(n.right)
+    return [n]
+
+
+def wrappers(tree):
+    """(pre, post) around `body` in every `...'fn main(){' + body + '}...'` the runner builds."""
+    found = set()
+    for n in ast.walk(tree):
+        ops = terms(n)
+        for i, o in enumerate(ops):
+            if (isinstance(o, ast.Name) and o.id == 'body' and 0 < i < len(ops) - 1
+                    and isinstance(ops[i - 1], ast.Constant) and 'fn main(){' in str(ops[i - 1].value)
+                    and isinstance(ops[i + 1], ast.Constant)):
+                found.add((ops[i - 1].value.split('fn main(){', 1)[1], ops[i + 1].value))
+    return found
 
 
 for drv in sorted(D.glob('run-*.py')):
@@ -81,8 +102,13 @@ for drv in sorted(D.glob('run-*.py')):
         if isinstance(n, ast.For) and isinstance(n.iter, ast.List) and isinstance(n.target, ast.Tuple) \
                 and [getattr(e, 'id', None) for e in n.target.elts] == ['name', 'body', 'diag']:
             cases += [tuple(lit(e)) for e in n.iter.elts]
+    if cases:
+        w = wrappers(tree)
+        if len(w) != 1 or not next(iter(w))[1].startswith('}'):
+            sys.exit(f'{drv.name}: expected one fn main wrapper around body, found {sorted(w)}')
+        pre = next(iter(w))[0]
     for name, body, diag in cases:
-        out['cases'].append(dict(driver=drv.name, name=name, body=body, diag=diag, test=test_file))
+        out['cases'].append(dict(driver=drv.name, name=name, pre=pre, body=body, diag=diag, test=test_file))
 
 (HERE / 'astra-rust-mutants.json').write_text(json.dumps(out, indent=1) + '\n')
 by = {}

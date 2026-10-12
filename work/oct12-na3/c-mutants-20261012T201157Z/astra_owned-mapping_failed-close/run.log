@@ -1,0 +1,1 @@
+Assertion failed: (b->p->closed==1), function destroy, file test_owned_mapping.c, line 9.
