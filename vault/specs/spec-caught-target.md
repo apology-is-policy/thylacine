@@ -6,7 +6,7 @@ models: [sub-kernel-notes, sub-kernel-rendez, sub-kernel-exception]
 pins: [inv-i19, inv-i9]
 cfgs:
   - "caught_target.cfg -- clean, 2 threads, 2 posts, 2 waits a call: TypeOK + OneClaimant + NoStrand (613245 distinct, -workers 1 -lncheck final)"
-  - "caught_target_3t.cfg -- clean, 3 threads: the same (not in the gate; its result is recorded in specs/SPEC-TO-CODE.md)"
+  - "caught_target_3t.cfg -- 3 threads, the same properties; not in the gate and not finished: stopped at the disk floor after 12789190 distinct states (4 workers), the invariants holding throughout and NoStrand not judged (specs/SPEC-TO-CODE.md)"
   - "caught_target_buggy_double_designate.cfg -- the walk designates without checking the family is still open: OneClaimant (371)"
   - "caught_target_buggy_no_handoff.cfg -- a designee keeps the family into a wait that holds: NoStrand (611617)"
   - "caught_target_buggy_unlocked_designate.cfg -- the designation is made without the re-check under the pick's wait_lock: NoStrand (632863)"

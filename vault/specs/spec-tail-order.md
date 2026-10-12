@@ -5,16 +5,17 @@ title: "tail_order.tla"
 models: [sub-kernel-exception, sub-kernel-notes, sub-kernel-birth-hold]
 pins: [inv-i39, inv-i19]
 cfgs:
-  - "tail_order.cfg -- clean: TypeOK + MeetsQueue + NoEretUnderOwnStop + TailEnds (23146 distinct with -workers 1, DEPTH 3)"
-  - "tail_order_birth.cfg -- clean, the birth tail: the same (45272)"
-  - "tail_order_buggy_notes_first.cfg -- the notes leg before the stop leg, the order before the vote: MeetsQueue (3146)"
+  - "tail_order.cfg -- clean, the EL0-return tail entered by a syscall or an IRQ: TypeOK + MeetsQueue + NoEretUnderOwnStop + TailEnds + RunMeets (46292 distinct with -workers 1, DEPTH 3)"
+  - "tail_order_birth.cfg -- clean, the birth tail: the same (68418)"
+  - "tail_order_buggy_notes_first.cfg -- the notes leg before the stop leg, the order before the vote: MeetsQueue (5622)"
   - "tail_order_buggy_birth_notes_first.cfg -- the same on the birth tail: MeetsQueue (3390)"
-  - "tail_order_buggy_no_repass.cfg -- the stop arm reports no stop, so nothing parks the thread: NoEretUnderOwnStop (649)"
-  - "tail_order_buggy_budget_first.cfg -- the budget break before the re-pass's die-check and stop leg: NoEretUnderOwnStop (4368)"
-  - "tail_order_buggy_no_budget.cfg -- neither the passes nor the discards count: TailEnds, the invariants hold (9022)"
-gate: "any change to the tails' leg order (.Lel0_sync_return, userland_enter_held), to notes_deliver_at_el0_return's loop, to what notes_deliver_tail returns or spends, or to NOTE_QUEUE_DEPTH as the tail's budget; specs/check-tail-order.sh"
+  - "tail_order_buggy_no_repass.cfg -- the stop arm reports no stop, so nothing parks the thread: NoEretUnderOwnStop (870)"
+  - "tail_order_buggy_budget_first.cfg -- the budget break before the re-pass's die-check and stop leg: NoEretUnderOwnStop (8167)"
+  - "tail_order_buggy_no_budget.cfg -- neither the passes nor the discards count: TailEnds, the invariants hold (18044)"
+  - "tail_order_buggy_irq_no_notes.cfg -- the IRQ tail ends at the stop leg, as it did before #964: RunMeets (26886)"
+gate: "any change to the tails' leg order (.Lel0_return and either vector slot that enters it, userland_enter_held), to notes_deliver_at_el0_return's loop, to what notes_deliver_tail returns or spends, or to NOTE_QUEUE_DEPTH as the tail's budget; specs/check-tail-order.sh"
 created: 2026-10-06
-updated: 2026-10-06
+updated: 2026-10-12
 ---
 ## Abstraction
 
@@ -40,6 +41,14 @@ The queue holds four kinds of note, by what the leg does with each: `plain`
 is discarded and the leg loops, `caught` builds a handler frame and ends the
 leg, `term` ends the thread, and `susp` applies a stop and asks for a re-pass.
 
+Since 2026-10-12 (#964) the IRQ-from-EL0 vector branches into the same tail
+the synchronous vector takes, so a thread that computes at EL0 and never
+enters the kernel on its own still meets its queue: `Enter` is the synchronous
+entry, which a compute loop never makes, and `IrqEnter` is the tick's, which
+comes however the thread runs (weak fairness on the thread's steps). Both run
+the same legs. Which thread of a Proc takes a caught note is
+[[spec-caught-target]]'s.
+
 ## What it checks
 
 | Property | Obligation |
@@ -47,6 +56,7 @@ leg, `term` ends the thread, and `susp` applies a stop and asks for a re-pass.
 | `MeetsQueue` | a thread reaches the `eret` only with its queue empty, a handler frame built, or the budget spent: a note posted while the thread is stopped is met as the stop ends, not at some later checkpoint |
 | `NoEretUnderOwnStop` | a thread never reaches the `eret` while a stop it applied itself is still in force |
 | `TailEnds` | every tail leaves its legs, into EL0, a park or death; a flooded queue cannot hold the masked tail |
+| `RunMeets` | a thread at EL0 with a note queued reaches the notes leg, a park or death, even one that never makes a syscall: the IRQ tail meets the queue |
 
 `TailEnds` holds under weak fairness of the thread's own steps, so the
 environment cannot starve it by never letting it move.
@@ -68,6 +78,11 @@ read rather than counted.
 - **no budget** never counts a discard or a pass. Every invariant holds, and
   the liveness property fails on a lasso: posts keep pace with the discards,
   and the thread never leaves its notes leg.
+- **IRQ no notes** is the IRQ tail before #964: the die-check and the stop
+  leg, then the `eret`. `RunMeets` fails on a lasso in which the thread runs
+  at EL0 with a note queued and only ever takes the tick, which never reaches
+  the notes leg. (`MeetsQueue` would also fire; the cfg checks the liveness
+  form, which is the defect a spinner showed.)
 
 The first notes-first trace was not that defect. It posted the note while the
 thread was in its final stop leg, after the notes leg had run -- the masked
@@ -80,7 +95,8 @@ fails for a reason other than its own is a configuration that proves nothing.
 
 | Action | Site |
 |---|---|
-| `Enter` / `DieCheck` / `StopLeg` / `Park` | `arch/arm64/vectors.S` `.Lel0_sync_return`: `el0_return_die_check`, `el0_return_stop_check`, then `notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, then the notes leg |
+| `Enter` / `IrqEnter` | `arch/arm64/vectors.S`: the synchronous and the IRQ-from-EL0 vector slots, each branching into `.Lel0_return` |
+| `DieCheck` / `StopLeg` / `Park` | `.Lel0_return`: `el0_return_die_check`, `el0_return_stop_check`, then `notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, then the notes leg |
 | `NotesLeg` | `kernel/notes.c::notes_deliver_tail`: the discard loop, a frame build, a terminating default, and the stop arm (`notes_stop_dequeue_locked` -> `proc_job_stop_self`, which returns true, as the orphan rule's discard does) |
 | `Repass` / `Proceed` | `notes_deliver_at_el0_return`'s loop: the die-check, the stop check, then `++passes` against `NOTE_QUEUE_DEPTH` |
 | `Spend` | the one counter `notes_deliver_tail` and the loop share |
@@ -89,7 +105,6 @@ fails for a reason other than its own is a configuration that proves nothing.
 ## Deliberately beneath the model
 
 - the park itself, which is [[spec-debug-stop]]'s;
-- the IRQ tail, which delivers no notes ([[seam-el0-irq-tail-no-notes]]);
 - a note posted in the masked window after the leg's last decision, as above;
 - notes left for a self-managing Proc's fd reader;
 - registers. That each pass re-reads the handler, the stack pointer and the
@@ -105,6 +120,9 @@ meets a note posted during a stop on the very resume, and its `caught-step`
 leg's step reports at the handler's first instruction. Sabotages one variable
 from the code turned each red: the old order (`resume`), a stop arm returning
 false (the kernel test), and a frame build that keeps `SPSR.SS`
-(`caught-step`). `specs/check-tail-order.sh` runs all seven configurations and
-fails unless the clean ones reach their pinned counts and each buggy one
-violates its named property.
+(`caught-step`). The IRQ tail's notes leg is held by viv-pheno-probe L332 (a
+main spinning with no syscall takes a child's `SIGCHLD`) and jc-probe's spinint
+and spinnote rungs (a native spinner ended by `^C` after it settles); reverting
+the vector's branch turns each red. `specs/check-tail-order.sh` runs all eight
+configurations and fails unless the clean ones reach their pinned counts and
+each buggy one violates its named property.

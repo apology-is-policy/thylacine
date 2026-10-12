@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 84
+## Open seams: 83
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -64,7 +64,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
-- [[seam-el0-irq-tail-no-notes]] (sub-kernel-exception)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
@@ -130,9 +129,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-12 [[chg-2026-10-12-group-status-first-claim]] — A dying group keeps its status; a page-in its death abandoned is that death
 - 2026-10-12 [[chg-2026-10-12-loom-setup-ref-and-settle]] — Loom setup holds its own reference across the install; the rollback settles
 - 2026-10-12 [[chg-2026-10-12-loom-sq-release-after-copy]] — The SQ head is published only after the copy (SQ-1)
+- 2026-10-12 [[chg-2026-10-12-note-target]] — Every EL0 return delivers notes, and a caught note goes to a thread that can take it soon
 - 2026-10-08 [[chg-2026-10-08-exec-device-reset]] — Exec resets the image's devices; the last reference resets what is mapped
 - 2026-10-08 [[chg-2026-10-08-image-holder-record-land]] — capmark's land: the holder record's verification, which its change note left as an unfilled marker
 - 2026-10-08 [[chg-2026-10-08-image-holder-record]] — An address space records every holder that has left it, and the I-39 image join weighs the record; the code-alias count retires
 - 2026-10-08 [[chg-2026-10-08-vma-linkage-guard]] — A VMA its address space's list does not hold is never removed, and the weft reaper unmaps only the space it locked
-- 2026-10-08 [[chg-2026-10-08-weft-reap-test-mark]] — The live weft reaper never sweeps a test's binding
 <!-- generated:end -->

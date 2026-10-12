@@ -22,6 +22,118 @@ needed the operator.
 
 
 ---
+## 2026-10-12 (main, Opus 5.5, effort max) -- every EL0 return delivers notes, and a caught note goes to a thread that can take it soon (#964 + L285) (landed)
+
+**What the run is for.** Two defects in caught-note delivery came out of the
+groupstatus chunk, and the operator voted to fix them together before B-2c
+resumes ("#964 next, with the vote", 2026-10-12). #964 (OPEN-BUGS 07:34Z): the
+IRQ-from-EL0 vector returned through the die-check and the stop leg but no
+notes leg, so a thread that computes at EL0 without a syscall never met its
+note queue; Ctrl-C did not end a native spinner, and a phenotype spinner's
+handler never ran (the old seam-el0-irq-tail-no-notes, open since 2026-08-02).
+L285 (OPEN-BUGS 06:01Z/07:24Z): ARCH 8.8.3 let "one caught note unwind one
+sleeper, whichever claims first", so a child's SIGCHLD returned a worker's
+`ppoll` -EINTR while main ran. The operator chose "Prefer running/main",
+native and phenotype alike, and "Model it": a TLA+ model before the code,
+re-enabling spec-first for this surface.
+
+**The design** (ARCH 7.6.4 and the 8.8.3 amendment, dec-2026-10-12-note-target).
+The 0x480 slot branches into the synchronous slot's tail, renamed
+`.Lel0_return`, so every EL0 return runs the notes leg; the handler frame saves
+the whole interrupted context, and SS and BTYPE are cleared on entry. A posted
+caught note designates one thread: the poster, then main, then any thread not
+blocked, then main blocked in a wait that unwinds, then any such sleeper. The
+designation is made under the pick's `wait_lock`, where each wait publishes
+whether it unwinds or holds (`Thread.caught_wait`); a designee entering a wait
+that cannot unwind for the family hands the designation on, as does an exiting
+thread; a running designee is kicked so its IRQ tail delivers. A native Proc's
+waits never unwind, so its walk only kicks.
+
+**The model changed under the code, three times.** caught_target.tla was clean
+at 140075 states with 7 buggy cfgs before any code existed. Writing the walk
+showed three things it had wrong. The mask and the handler flag are the
+thread's own and written without a lock, so the walk's re-check reads them
+exactly only for a blocked thread (`Fresh`); a designee picked on a stale value
+must give the designation up at its next wait that cannot unwind for it
+(`uentry`, a new buggy cfg `BUGGY_STALE_KEEPS`). And a release's walk must skip
+the releasing thread (`wskip`, `wcur`): a tail can end short of the family's
+note (a frame that would not build, the pass budget spent), and the thread
+whose tail just passed the note by is the one it should not wait on. Clean 613245 distinct, 8 buggy cfgs each violating
+its named property, traces read. A 3-thread run started on the old model was
+killed. Re-run on the final model it did not finish: my first launch stopped in
+2 seconds on "Deadlock reached" because my runner left out the `-deadlock`
+flag that `check-caught-target.sh` passes (all threads exited is a legitimate
+end); relaunched with the script's flags, it reached 12,789,190 distinct states
+(depth 22, 3.4M queued) in 10 minutes on 4 workers and was stopped at the
+host's 8 GiB disk floor. `TypeOK` and `OneClaimant` held over every state
+reached; `NoStrand`, judged only at the end, was not judged. The 2-thread
+clean cfg remains the model's liveness evidence. Fresh runs at land:
+check-caught-target.sh and check-tail-order.sh both ALL AS CLAIMED; three of
+tail_order's buggy counts moved with the IRQ entry (notes-first 3146 -> 5622,
+no-repass 649 -> 870, budget-first 4368 -> 8167).
+
+**Two red builds, neither the kernel's.** s1 did not compile: a test called
+`notes_release_claims_for_test` without a prototype. s2 failed
+`rendez.caught_note_holder_rewake` at "main unwound for the first note". The
+fixture was wrong, not the walk: the idle peer spins in `sched()` between
+steps, which is exactly "awake", so the walk rightly designated the peer. The
+peer now parks in a wait that holds first, and the test asserts it stayed
+there undesignated. s3: suite 1983/1983, viv-pheno-probe L331-L333 and
+jc-probe's spinint/spinnote rungs green.
+
+**Audit r1 (Fable 5.1, start == end): 0 P0 / 0 P1 / 0 P2 / 6 P3, clean.**
+F1: jc-probe's Ctrl-C rungs could pass on the old kernel, because the ^C could
+meet the spinner at the sync tail of its own `SPINNING` write; both rungs now
+settle before the ^C. F2: a comment cited Linux's `setup_return` for clearing
+BTYPE, but Linux sets BTYPE_C; the comment is fixed and the policy (require a
+landing pad at handler entry) is an operator vote enqueued with the SCTLR
+BT0/BT1 item (OPEN-BUGS 12:06Z). F3: `caught_pick`'s comment claimed Linux
+makes the same choice; Linux's `complete_signal` prefers main whenever main
+can take the signal, waking it from an interruptible sleep even while a worker
+runs. Ours prefers a running thread; the comment and the vivarium dossier say
+so. F4: SPEC-TO-CODE named the wrong test file. F5: the holder re-wake did not
+kick a running holder; it does now (no witness: kicks are gated off in kernel
+tests, and the tick bounds a missed one). F6: four untested arms; the tsleep
+hand-off and the bounded re-pick with its wake-every-sleeper fallback got
+tests in this chunk (801d37a4a: a third hand-off leg, and
+`rendez.caught_note_repick_fallback` with a KERNEL_TESTS hook that forces
+stale picks; the control forces one fewer); the stop-park outer restore and
+the exec clear are enqueued (OPEN-BUGS 12:06Z). s4: suite 1984/1984.
+
+**What each test proved, both ways, and the one that proved nothing.** Fifteen
+mutants, one build and boot each (scratchpad nt_reds.sh, on 801d37a4a), each a
+one-variable change from the code. Dropping the hand-off call failed
+`_handoff`'s first leg; skipping it in `tsleep` alone failed only the new
+timed leg; dropping the exit drop failed `_exit_drop`; disabling the holder
+re-wake failed `_holder_rewake`; letting the release's walk re-pick the
+releaser failed `_release_wakes_peer` and `_prefers_awake`'s control; removing the poster preference failed `_poster_first`; swapping
+awake and unwinding failed the three tests that designate an awake main
+(`_prefers_awake`, `_handoff`, `_exit_drop`); removing the main preference
+failed four (`_one_unwind`, `_release_wakes_peer`, `_poster_first`, and
+`_repick_fallback`'s control); dropping the wake-all fallback
+failed `_repick_fallback` at "exactly one unwound". Reverting the 0x480
+branch failed viv-pheno-probe L332 (`spin=0`: the handler waited out the
+3 s spin), then, with that leg silenced, jc-probe's spinint and spinnote by
+watchdog. Replacing the pick with a wake-all (the pre-vote behaviour) failed
+L332 with `on_main=0 intrs=1`, the L285 shape itself. One mutant passed:
+removing the native walk's kick-only arm left the suite at 1984/1984.
+`_native_kicks_only` posted only while both native threads were blocked, and
+a native Proc's waits always hold, so no thread was ever a candidate and the
+arm was never reached. The test gained a second shape, main awake with the
+peer asleep, each shape against a Linux-Proc control (e61975590); the
+mutant then failed it at "native, main awake: the walk kicked main and
+designated no one" (1983/1984), and the clean suite stayed 1984/1984.
+
+**Gates.** On e61975590: test-fault 8/8; ci-smp-gate N=10 50/50 (default
+smp1/4/8, UBSan smp4/8; 0 corruption); check-production --all PASS
+(KERNEL_TESTS off, where the forced-stale hook compiles out: the lean image
+builds, boots and logs in).
+
+**Still open.** The handler BTYPE policy and SCTLR BT0/BT1 (operator vote);
+the stop-park restore and exec-clear coverage (OPEN-BUGS 12:06Z). The model
+does not see the preference order or the kick; the kernel tests pin the
+order, and the tick is the fairness the model assumes.
+
 ## 2026-10-12 (main, Opus 5.5, effort max) -- Loom setup holds its own reference across the install; the rollback settles (Corona's fix, main's gate) (landed)
 
 **What this is.** Two defects in the ordinary `SYS_LOOM_SETUP` path, live on

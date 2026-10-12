@@ -2603,7 +2603,7 @@ tick while a peer that could unwind slept on.
 | cfg | knob | checks | outcome | distinct (`-workers 1 -lncheck final`) |
 |---|---|---|---|---|
 | `caught_target.cfg` | none; 2 threads, 2 posts, 2 waits a call | `TypeOK` + `OneClaimant` + `NoStrand` | clean | 613245 |
-| `caught_target_3t.cfg` | none; 3 threads | the same | clean (not in the gate: its liveness pass is long) | RESULT_3T |
+| `caught_target_3t.cfg` | none; 3 threads | the same | not finished (not in the gate): stopped at the host's 8 GiB disk floor on 2026-10-12 after 10 minutes on 4 workers, at depth 22 with 3397015 states queued; `TypeOK` and `OneClaimant` held over every state reached; `NoStrand`, judged only at the end under `-lncheck final`, was not judged | 12789190 reached (`-workers 4`) |
 | `caught_target_buggy_double_designate.cfg` | `BUGGY_DOUBLE_DESIGNATE` | the invariants | violation (`OneClaimant`) | 371 |
 | `caught_target_buggy_no_handoff.cfg` | `BUGGY_NO_HANDOFF` | the invariants + `NoStrand` | violation (`NoStrand`) | 611617 |
 | `caught_target_buggy_unlocked_designate.cfg` | `BUGGY_UNLOCKED_DESIGNATE` | the same | violation (`NoStrand`) | 632863 |
