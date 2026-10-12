@@ -20,7 +20,9 @@ set -uo pipefail
 # build/clade) resolve under -- so tools/test-forage.sh can isolate probes +
 # downloads to a temp dir. Its default is the real repo. MANIFEST is likewise
 # overridable (a fixture manifest).
-REPO_ROOT="${FORAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# Made absolute either way: the patch paths built from it are handed to `git -C`,
+# which resolves a relative path against the checkout, not here.
+REPO_ROOT="$(cd "${FORAGE_ROOT:-$(dirname "$0")/..}" && pwd)" || exit 1
 MANIFEST="${MANIFEST:-$REPO_ROOT/tools/build-manifest.toml}"
 DRY="${FORAGE_DRY:-0}"
 
@@ -104,6 +106,8 @@ series_tree() {
     GIT_INDEX_FILE="$idx/index" git -C "$path" read-tree "$pin" 2>/dev/null || rc=1
     for pp; do
         (( rc == 0 )) || break
+        [[ "$pp" == /* ]] || pp="$PWD/$pp"
+        [[ -r "$pp" ]] || { echo "forage: patch $pp is not readable" >&2; rc=1; break; }
         GIT_INDEX_FILE="$idx/index" git -C "$path" apply --cached "$pp" 2>/dev/null || rc=1
     done
     if (( rc == 0 )); then
@@ -166,6 +170,23 @@ do_clone_sparse() {
     local k applied=-1 head_tree tree
     for pp in "$patches"/*.patch; do
         [[ -e "$pp" ]] && series+=("$pp")
+    done
+    # Every path the series touches must lie in the cone. The prefix check below
+    # would pass a patch outside it (its scratch index holds the whole tree), and
+    # `git am` would then fail on a skip-worktree path naming neither the patch's
+    # path nor the cone.
+    local f c inside
+    for pp in "${series[@]}"; do
+        while read -r f; do
+            inside=0
+            for c in $sparse; do
+                if [[ "$f" == "$c" || "$f" == "$c"/* ]]; then inside=1; break; fi
+            done
+            if (( ! inside )); then
+                echo "forage: $sec: $(basename "$pp") touches $f, outside the sparse cone ($sparse) -- widen the manifest's cone" >&2
+                return 1
+            fi
+        done < <(awk '/^diff --git /{ sub(/^a\//, "", $3); sub(/^b\//, "", $4); print $3; print $4 }' "$pp" | sort -u)
     done
     head_tree="$(git -C "$path" rev-parse 'HEAD^{tree}')"
     for (( k = ${#series[@]}; k >= 0; k-- )); do

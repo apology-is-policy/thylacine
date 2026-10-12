@@ -6748,19 +6748,25 @@ build_icu() {
 # The tree the pin plus the patch series builds, applied IN ORDER in a scratch
 # index: the series is stacked, so a later patch may edit lines an earlier one
 # added, and no patch can be asked about alone. Prints the tree id, or the first
-# patch that does not apply; returns nonzero on failure.
+# patch that does not apply with git's reason; returns nonzero on failure. A
+# relative patch path is made absolute: `git -C` would resolve it in the checkout.
 webkit_series_tree() {
-    local wk="$1" pin="$2" pp tree rc=0; shift 2
+    local wk="$1" pin="$2" pp tree err rc=0; shift 2
     local idx; idx="$(mktemp -d "${TMPDIR:-/tmp}/webkit-series.XXXXXX")" || return 1
     GIT_INDEX_FILE="$idx/index" git -C "$wk" read-tree "$pin" 2>/dev/null \
         || { echo "the pin $pin is not readable"; rm -rf "$idx"; return 1; }
     for pp; do
-        GIT_INDEX_FILE="$idx/index" git -C "$wk" apply --cached "$pp" 2>/dev/null \
-            || { echo "patch $(basename "$pp") does not apply on the pin plus the patches before it"; rc=1; break; }
+        [[ "$pp" == /* ]] || pp="$PWD/$pp"
+        [[ -r "$pp" ]] || { echo "patch $pp is not readable"; rc=1; break; }
+        err="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" apply --cached "$pp" 2>&1 >/dev/null)" \
+            || { echo "patch $(basename "$pp") does not apply on the pin plus the patches before it: ${err%%$'\n'*}"; rc=1; break; }
     done
     if (( rc == 0 )); then
-        tree="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" write-tree)" || rc=1
-        echo "$tree"
+        if tree="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" write-tree 2>&1)"; then
+            echo "$tree"
+        else
+            echo "the series index could not be written: ${tree%%$'\n'*}"; rc=1
+        fi
     fi
     rm -rf "$idx"
     return $rc

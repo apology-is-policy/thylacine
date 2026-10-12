@@ -1,8 +1,8 @@
-From 435ef4e5bade9da134f0ac7131c37b37e857c8fa Mon Sep 17 00:00:00 2001
+From 566b6e936abddffcff1ad2187ae4454ca970de96 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <noreply@example.invalid>
 Date: Mon, 12 Oct 2026 19:45:00 +0200
 Subject: [PATCH] thylacine: gcpark the conservative scan reads parked stack
- images, never suspends (WIP, local only)
+ images, never suspends
 
 OS(THYLACINE): Thread::suspend is unavailable (Pouch has no per-thread
 signal), and the collector's conservative scan suspended every thread in the
@@ -14,25 +14,29 @@ A thread now parks when it releases heap access: Heap::releaseAccess (and
 releaseAccessSlow, just before the clearing CAS) copies its callee-saves and
 its stack from the release point to the origin into a per-heap, per-thread
 image in MachineThreads; acquiring access, or entering the JSLock on access it
-did not acquire, unparks it. The scan reads the images of every group thread
+did not acquire, unparks it. A thread that entered the JSLock on access another
+thread holds parks when it leaves the JSLock (JSLock::willReleaseLock), since it
+releases no access of its own: WebCore's model keeps one thread on access for
+the VM's lifetime, and a second thread entering that VM would otherwise be
+unparked at the next scan. The scan reads the images of every group thread
 but the current and conducting ones and never suspends; a group thread that is
 not parked is fatal, with a message. The image is a copy, not a recorded
 range: the frames below the releasing caller are reused once the release
 returns, and they may hold the only copy of a caller's callee-save. It is
 complete because a thread without heap access cannot obtain a cell it did not
-hold at the release. Records are written only by their own thread while it
-holds access and read only while no thread but the conductor can hold it
-(gatherStackRoots asserts the world is stopped); the thread group's lock
-guards them as well.
+hold at the release, and one that leaves the JSLock touches no cell until it
+takes the JSLock again. Records are written only by their own thread, as it
+leaves the heap or re-enters it, and read only with the world stopped
+(gatherStackRoots asserts it); the thread group's lock guards them as well.
 ---
  Source/JavaScriptCore/heap/Heap.cpp           | 23 ++++++
  Source/JavaScriptCore/heap/Heap.h             |  7 ++
  Source/JavaScriptCore/heap/HeapInlines.h      |  6 +-
- .../heap/MachineStackMarker.cpp               | 79 +++++++++++++++++++
+ .../heap/MachineStackMarker.cpp               | 80 +++++++++++++++++++
  .../JavaScriptCore/heap/MachineStackMarker.h  | 25 ++++++
- Source/JavaScriptCore/runtime/JSLock.cpp      |  8 +-
- Source/WTF/wtf/posix/ThreadingPOSIX.cpp       |  4 +-
- 7 files changed, 148 insertions(+), 4 deletions(-)
+ Source/JavaScriptCore/runtime/JSLock.cpp      | 16 +++-
+ Source/WTF/wtf/posix/ThreadingPOSIX.cpp       |  7 +-
+ 7 files changed, 159 insertions(+), 5 deletions(-)
 
 diff --git a/Source/JavaScriptCore/heap/Heap.cpp b/Source/JavaScriptCore/heap/Heap.cpp
 index 67e317d5bb..490eaf090c 100644
@@ -133,7 +137,7 @@ index 5333d28aa3..1bad65d789 100644
  }
  
 diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.cpp b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
-index 9c95d17c77..21c0409f23 100644
+index 9c95d17c77..f8656aabb9 100644
 --- a/Source/JavaScriptCore/heap/MachineStackMarker.cpp
 +++ b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
 @@ -25,6 +25,7 @@
@@ -160,7 +164,7 @@ index 9c95d17c77..21c0409f23 100644
  
  SUPPRESS_ASAN
  static void NODELETE copyMemory(void* dst, const void* src, size_t size)
-@@ -107,6 +110,76 @@ static void NODELETE copyMemory(void* dst, const void* src, size_t size)
+@@ -107,6 +110,77 @@ static void NODELETE copyMemory(void* dst, const void* src, size_t size)
      
  
  
@@ -183,8 +187,9 @@ index 9c95d17c77..21c0409f23 100644
 +}
 +
 +// The image is what suspending the thread at this point would have read: its callee-saves
-+// and its stack from here to the origin. Until it reacquires heap access the thread cannot
-+// obtain a cell it does not hold now, so the image covers every cell its frames will use,
++// and its stack from here to the origin. Until it next enters the heap (reacquires access,
++// or takes the JSLock on access another thread holds) the thread cannot obtain a cell it
++// does not hold now, so the image covers every cell its frames will use,
 +// however the compiler moves values between registers and slots meanwhile. It is a copy,
 +// not a recorded range, because the frames below the caller are reused once this returns.
 +NEVER_INLINE void MachineThreads::parkCurrentThread()
@@ -237,7 +242,7 @@ index 9c95d17c77..21c0409f23 100644
  // This function must not call malloc(), free(), or any other function that might
  // acquire a lock. Since 'thread' is suspended, trying to acquire a lock
  // will deadlock if 'thread' holds that lock.
-@@ -209,12 +282,17 @@ static void growBuffer(size_t size, void** buffer, size_t* capacity)
+@@ -209,12 +283,17 @@ static void growBuffer(size_t size, void** buffer, size_t* capacity)
      *capacity = WTF::roundUpToMultipleOf(WTF::pageSize(), size * 2);
      *buffer = fastMalloc(*capacity);
  }
@@ -255,7 +260,7 @@ index 9c95d17c77..21c0409f23 100644
      size_t size;
      size_t capacity = 0;
      void* buffer = nullptr;
-@@ -227,6 +305,7 @@ void MachineThreads::gatherConservativeRoots(ConservativeRoots& conservativeRoot
+@@ -227,6 +306,7 @@ void MachineThreads::gatherConservativeRoots(ConservativeRoots& conservativeRoot
  
      conservativeRoots.add(buffer, static_cast<char*>(buffer) + size, jitStubRoutines, codeBlocks);
      fastFree(buffer);
@@ -264,7 +269,7 @@ index 9c95d17c77..21c0409f23 100644
  
  NEVER_INLINE int callWithCurrentThreadState(const ScopedLambda<void(CurrentThreadState&)>& lambda)
 diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.h b/Source/JavaScriptCore/heap/MachineStackMarker.h
-index 16d683d645..0a0f3e6b60 100644
+index 16d683d645..1d60536cd9 100644
 --- a/Source/JavaScriptCore/heap/MachineStackMarker.h
 +++ b/Source/JavaScriptCore/heap/MachineStackMarker.h
 @@ -24,8 +24,10 @@
@@ -303,8 +308,8 @@ index 16d683d645..0a0f3e6b60 100644
 +    ParkedThread& ensureParkedThread(const AbstractLocker&, Thread&);
 +    void gatherFromParkedThreads(const AbstractLocker&, ConservativeRoots&, JITStubRoutineSet&, CodeBlockSet&, Thread&);
 +
-+    // Guarded by the thread group's lock. Written only by the thread it describes, while
-+    // that thread holds heap access; read by the scan, while no other thread holds it.
++    // Guarded by the thread group's lock. Written only by the thread it describes, as it
++    // leaves the heap or re-enters it; read by the scan, with the world stopped.
 +    Vector<ParkedThread> m_parkedThreads;
 +#else
      void tryCopyOtherThreadStack(const ThreadSuspendLocker&, Thread&, void*, size_t capacity, size_t*);
@@ -314,7 +319,7 @@ index 16d683d645..0a0f3e6b60 100644
      Ref<ThreadGroup> m_threadGroup;
  };
 diff --git a/Source/JavaScriptCore/runtime/JSLock.cpp b/Source/JavaScriptCore/runtime/JSLock.cpp
-index 0fa9323dc1..efa7a6fc22 100644
+index 0fa9323dc1..29b5080d58 100644
 --- a/Source/JavaScriptCore/runtime/JSLock.cpp
 +++ b/Source/JavaScriptCore/runtime/JSLock.cpp
 @@ -128,9 +128,13 @@ void JSLock::didAcquireLock()
@@ -333,18 +338,36 @@ index 0fa9323dc1..efa7a6fc22 100644
          m_vm->heap.acquireAccess();
          m_shouldReleaseHeapAccess = true;
      }
+@@ -322,6 +326,14 @@ void JSLock::willReleaseLock()
+ 
+             if (m_shouldReleaseHeapAccess)
+                 protectedVM->heap.releaseAccess();
++#if OS(THYLACINE)
++            else {
++                // Another thread holds heap access and runs the scans. This thread stops
++                // using the heap here, so it publishes the image a scan reads in place of
++                // suspending it, as releaseAccess() does for a thread that acquired access.
++                protectedVM->heap.machineThreads().parkCurrentThread();
++            }
++#endif
+         }
+     }
+ 
 diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
-index e9f6b33897..5512e3766d 100644
+index e9f6b33897..4301f3dda2 100644
 --- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
 +++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
-@@ -195,7 +195,9 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+@@ -194,8 +194,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
  #if OS(THYLACINE)
      // Pouch delivers no per-thread asynchronous signal, so there is no handler to install
-     // and Thread::suspend() is unavailable. JavaScriptCore's users of it are switched off
+-    // and Thread::suspend() is unavailable. JavaScriptCore's users of it are switched off
 -    // in Options (polling VM traps; no sampling profiler; no Wasm fault handler).
-+    // in Options (polling VM traps; no sampling profiler; no Wasm fault handler), and the
-+    // collector's conservative scan reads the stack image a thread parks when it releases
-+    // heap access (MachineThreads::parkCurrentThread) instead of suspending it.
++    // and Thread::suspend() is unavailable. JavaScriptCore's other users of it are off:
++    // Options forces polling VM traps, and the sampling profiler and the Wasm fault handler
++    // need HAVE(MACHINE_CONTEXT), which OS(THYLACINE) does not define. The collector's
++    // conservative scan reads the stack image a thread parks when it leaves the heap
++    // (MachineThreads::parkCurrentThread) instead of suspending it.
      return;
  #endif
  

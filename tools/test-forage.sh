@@ -197,6 +197,9 @@ PINSHA="$($G -C "$UP" rev-parse HEAD)"
 $G clone -q "$UP" "$TMP/mk" && echo two > "$TMP/mk/keep/a.txt" && sed -i.bak 's/^m2$/M2/' "$TMP/mk/keep/m.txt" && rm -f "$TMP/mk/keep/m.txt.bak"
 $G -C "$TMP/mk" commit -qam port && $G -C "$TMP/mk" format-patch -q -1 -o "$SER/p"
 echo two-b > "$TMP/mk/keep/a.txt" && $G -C "$TMP/mk" commit -qam stack && $G -C "$TMP/mk" format-patch -q -2 -o "$SER/s"
+# series/o: one patch that edits a file OUTSIDE the cone (skip/)
+mkdir -p "$SER/o" && $G clone -q "$UP" "$TMP/mko" && echo y > "$TMP/mko/skip/b.txt"
+$G -C "$TMP/mko" commit -qam outside && $G -C "$TMP/mko" format-patch -q -1 -o "$SER/o"
 sparse_fix() {   # COMMIT [PATH] -> a manifest with one clone-sparse section
     cat > "$TMP/sparse.toml" <<EOF2
 [meta]
@@ -274,6 +277,22 @@ if [[ $rc -eq 0 ]]; then ok "C7 second gather of a stacked series exits zero"; e
 assert_grep "$out" "0002-stack.patch: already applied" "C7 the stacked patch reads as applied"
 if [[ "$(git -C "$TMP/cs" rev-parse HEAD 2>/dev/null)" == "$h6" ]]; then ok "C7 HEAD unchanged"; else bad "C7 HEAD moved"; fi
 
+# C10: a RELATIVE FORAGE_ROOT still finds the series applied (the patch paths
+# built from it go to `git -C`, which resolves a relative one in the checkout:
+# every prefix failed and a correct checkout was called drifted)
+out="$(cd "$(dirname "$TMP")" && FORAGE_ROOT="$(basename "$TMP")" MANIFEST="$TMP/sparse.toml" "$FORAGE" source.thing 2>&1)"; rc=$?
+if [[ $rc -eq 0 ]]; then ok "C10 relative FORAGE_ROOT exits zero"; else bad "C10 relative FORAGE_ROOT: rc=$rc $out"; fi
+assert_grep "$out" "0002-stack.patch: already applied" "C10 relative FORAGE_ROOT reads the series as applied"
+
+# C11: a patch that touches a path outside the sparse cone is refused by name,
+# before any patch is applied (the series check's scratch index holds the whole
+# tree, so it would have passed it, and `git am` failed on the skip-worktree path)
+sparse_fix "$PINSHA" "$TMP/co11" series/o
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "C11 a patch outside the cone exits nonzero"; else bad "C11 a patch outside the cone was accepted"; fi
+assert_grep "$out" "touches skip/b.txt, outside the sparse cone" "C11 names the path and the cone"
+if [[ "$(git -C "$TMP/co11" rev-parse HEAD 2>/dev/null)" == "$PINSHA" ]]; then ok "C11 nothing applied"; else bad "C11 the checkout moved"; fi
+
 # C8: a checkout at the pin plus a PREFIX of the series gets only the rest
 sparse_fix "$PINSHA" "$TMP/cp" series/p
 runs source.thing > /dev/null 2>&1
@@ -318,6 +337,18 @@ printf 'From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] bad\n\n---\n--- a/keep
 out="$(chk)"; rc=$?
 if [[ $rc -ne 0 ]]; then ok "D4 a patch that does not apply is refused"; else bad "D4 unappliable patch accepted"; fi
 assert_grep "$out" "0003-bad.patch does not apply" "D4 names the patch"
+assert_grep "$out" "0003-bad.patch does not apply on the pin plus the patches before it: .+" "D4 keeps git's reason"
+
+# D6: a patch that cannot be opened is named as such, not "does not apply"
+out="$(webkit_series_tree "$TMP/dco" "$PINSHA" "$TMP/port/patches/no-such.patch" 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "D6 a missing patch is refused"; else bad "D6 a missing patch was accepted"; fi
+assert_grep "$out" "no-such.patch is not readable" "D6 names the unreadable patch"
+
+# D7: RELATIVE patch paths build the same tree as absolute ones (git -C resolves
+# a relative path in the checkout, where the patch is not)
+want="$(git -C "$TMP/dco" rev-parse 'HEAD^{tree}')"
+out="$(cd "$SER/s" && webkit_series_tree "$TMP/dco" "$PINSHA" 0001-*.patch 0002-*.patch 2>&1)"; rc=$?
+if [[ $rc -eq 0 && "$out" == "$want" ]]; then ok "D7 relative patch paths build HEAD's tree"; else bad "D7 relative paths: rc=$rc $out (want $want)"; fi
 
 # D5: the same extra hunk over the ONE-patch series, which a per-patch check could
 # ask about (D3's series is stacked, so a per-patch check refuses it for that).
