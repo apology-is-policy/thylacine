@@ -57,7 +57,8 @@ that are not obvious.
   `rendez.caught_note_release_wakes_peer` (the release's walk skips main and
   reaches the peer), which run the real tail; and the pick's own witnesses,
   `rendez.caught_note_prefers_awake`, `_poster_first`, `_handoff`,
-  `_exit_drop`, `_holder_rewake`, `_native_kicks_only` and `_repick_fallback`.
+  `_exit_drop`, `_holder_rewake`, `_native_kicks_only` (both threads asleep,
+  and main awake, each against a Linux-Proc control) and `_repick_fallback`.
 - Both sleep cores publish the wait's kind (`Thread.caught_wait`: unwinds or
   holds) under the thread's `wait_lock` first (`sleep_caught_wait_enter`) and
   restore the outer kind on every exit, because a stop park nests a wait in a

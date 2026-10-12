@@ -733,7 +733,9 @@ peer is not woken; released, the note reaches the peer), `_poster_first`,
 `_handoff` (a wait that holds, an unwinding wait with the family masked, and a
 `tsleep` that holds handing off to a `tsleep_noteintr` that unwinds),
 `_exit_drop` (through the real `thread_exit_self`), `_holder_rewake`,
-`_native_kicks_only` (with a Linux-Proc control one variable away), and
+`_native_kicks_only` (both threads asleep, and main awake: the native walk
+kicks main and designates no one; each shape has a Linux-Proc control one
+variable away), and
 `_repick_fallback` (`CAUGHT_REPICKS` stale picks, forced through
 `caught_force_stale_for_test`, reach the fallback that wakes every unwinding
 sleeper: exactly one unwinds and the other re-parks; one stale pick fewer

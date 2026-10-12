@@ -2306,35 +2306,52 @@ void test_rendez_caught_note_holder_rewake(void) {
 
 // rendez.caught_note_native_kicks_only -- a native Proc's waits never unwind for
 // a caught note (item 11c), so its walk designates no one and wakes no one; it
-// only kicks a thread that is not blocked. Both threads asleep, one in a wait
-// that would unwind in a Linux Proc: the post leaves both asleep. The control is
-// the same shape in a Linux Proc, one variable away: there the sleeper is woken.
-static void nt_native_leg(bool linux_pheno, bool *ok, bool *woke, bool *any_target,
-                          bool *down) {
+// only kicks a thread that is not blocked. Two shapes, each with a Linux-Proc
+// control one variable away. Both threads asleep, one in a wait that would
+// unwind in a Linux Proc: the native post leaves both asleep, and the Linux
+// one wakes and designates the sleeper. Main awake and the peer asleep: the
+// native walk picks main and only kicks it, and the Linux one designates it.
+// A designation reads as the target or, once its thread has unwound, the claim.
+struct nt_native {
+    bool ok, down;
+    bool peer_woke;
+    u8   held[2];    // designation or claim, per thread
+};
+
+static void nt_native_leg(bool linux_pheno, bool main_awake, struct nt_native *o) {
     struct Thread *t[2];
     bool made = nt_setup(linux_pheno, t);
-    bool m0   = made && nt_run(t[0], 0, NT_HWAIT, true);
+    bool m0   = made && (main_awake || nt_run(t[0], 0, NT_HWAIT, true));
     bool p1   = m0 && nt_run(t[1], 1, NT_UWAIT, true);
     bool post = p1 && test_caught_post(g_nt_proc);
-    *woke       = post && t[1]->state != THREAD_SLEEPING;
-    *any_target = made && ((nt_target(t[0]) | nt_target(t[1])) != 0);
-    *ok   = made && m0 && p1 && post;
-    *down = nt_teardown(t);
+    o->peer_woke = post && t[1]->state != THREAD_SLEEPING;
+    for (u32 i = 0; i < 2u; i++)
+        o->held[i] = made ? (u8)((nt_target(t[i]) | nt_claim(t[i])) & NT_FAM) : 0;
+    o->ok   = made && m0 && p1 && post;
+    o->down = nt_teardown(t);
 }
 
 void test_rendez_caught_note_native_kicks_only(void);
 void test_rendez_caught_note_native_kicks_only(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
-    bool ok, woke, tgt, down, cok, cwoke, ctgt, cdown;
-    nt_native_leg(false, &ok, &woke, &tgt, &down);
-    nt_native_leg(true, &cok, &cwoke, &ctgt, &cdown);
+    struct nt_native nat, lin, nat_awake, lin_awake;
+    nt_native_leg(false, false, &nat);
+    nt_native_leg(true,  false, &lin);
+    nt_native_leg(false, true,  &nat_awake);
+    nt_native_leg(true,  true,  &lin_awake);
 
-    TEST_ASSERT(ok && cok, "both legs: two threads asleep, the note posted");
-    TEST_ASSERT(down && cdown, "every thread was reclaimed");
-    TEST_ASSERT(!woke, "native: the post woke no sleeper");
-    TEST_ASSERT(!tgt, "native: the walk designated no one");
-    TEST_ASSERT(cwoke && ctgt,
+    TEST_ASSERT(nat.ok && lin.ok && nat_awake.ok && lin_awake.ok, "every leg posted the note");
+    TEST_ASSERT(nat.down && lin.down && nat_awake.down && lin_awake.down,
+                "every thread was reclaimed");
+    TEST_ASSERT(!nat.peer_woke, "native, both asleep: the post woke no sleeper");
+    TEST_ASSERT(!nat.held[0] && !nat.held[1], "native, both asleep: the walk designated no one");
+    TEST_ASSERT(lin.peer_woke && lin.held[1],
                 "control: in a Linux Proc the same post designates and wakes the sleeper");
+    TEST_ASSERT(!nat_awake.peer_woke, "native, main awake: the post woke no sleeper");
+    TEST_ASSERT(!nat_awake.held[0] && !nat_awake.held[1],
+                "native, main awake: the walk kicked main and designated no one");
+    TEST_ASSERT(lin_awake.held[0] && !lin_awake.peer_woke,
+                "control: in a Linux Proc the same post designates main, awake");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
