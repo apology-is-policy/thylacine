@@ -1625,41 +1625,42 @@ static void wpf_code_thunk(void *arg) {
 // The packed word tells an exit from a death by note; the raw word keeps the
 // status 1 every native caller has always read. Each packed flag yields it.
 // Every child is reaped before the first assert, which returns.
-struct wps_case { void (*thunk)(void *); int flags; int pid; int got; };
+static const struct { void (*thunk)(void *); int flags; } g_wps_cases[] = {
+    { wpf_abort_thunk,     WAIT_PACKED    },
+    { wpf_abort_thunk,     0              },
+    { wpf_interrupt_thunk, WAIT_UNTRACED  },
+    { wpf_killed_thunk,    WAIT_CONTINUED },
+    { wpf_failer_thunk,    WAIT_PACKED    },
+    { wpf_code_thunk,      WAIT_PACKED    },
+};
+#define WPS_N ((int)(sizeof g_wps_cases / sizeof g_wps_cases[0]))
 
 void test_proc_wait_packed_signalled(void) {
-    struct wps_case c[] = {
-        { wpf_abort_thunk,     WAIT_PACKED,    0, -42 },
-        { wpf_abort_thunk,     0,              0, -42 },
-        { wpf_interrupt_thunk, WAIT_UNTRACED,  0, -42 },
-        { wpf_killed_thunk,    WAIT_CONTINUED, 0, -42 },
-        { wpf_failer_thunk,    WAIT_PACKED,    0, -42 },
-        { wpf_code_thunk,      WAIT_PACKED,    0, -42 },
-    };
-    int n = (int)(sizeof c / sizeof c[0]);
+    int got[WPS_N];
     int reaped = 0;
-    for (int i = 0; i < n; i++) {
-        c[i].pid = rfork(RFPROC, c[i].thunk, NULL);
-        if (c[i].pid > 0 && wait_pid_for(c[i].pid, c[i].flags, &c[i].got) == c[i].pid)
+    for (int i = 0; i < WPS_N; i++) {
+        got[i] = -42;
+        int pid = rfork(RFPROC, g_wps_cases[i].thunk, NULL);
+        if (pid > 0 && wait_pid_for(pid, g_wps_cases[i].flags, &got[i]) == pid)
             reaped++;
     }
-    TEST_EXPECT_EQ(reaped, n, "every child forked and was reaped by its own pid");
+    TEST_EXPECT_EQ(reaped, WPS_N, "every child forked and was reaped by its own pid");
 
-    TEST_EXPECT_EQ(c[0].got, WAIT_STATUS_SIGNALED(NOTE_SIG_ABRT),
+    TEST_EXPECT_EQ(got[0], WAIT_STATUS_SIGNALED(NOTE_SIG_ABRT),
         "WAIT_PACKED: snare:abort reads signalled SIGABRT (6)");
-    TEST_ASSERT(WAIT_IF_SIGNALED(c[0].got) && WAIT_TERMSIG(c[0].got) == 6 &&
-                !WAIT_IF_EXITED(c[0].got) && !WAIT_IF_STOPPED(c[0].got) &&
-                !WAIT_IF_CONTINUED(c[0].got), "signalled decodes as signalled only");
-    TEST_EXPECT_EQ(c[1].got, 1, "a raw wait reads a death by note as 1");
-    TEST_EXPECT_EQ(c[2].got, WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
+    TEST_ASSERT(WAIT_IF_SIGNALED(got[0]) && WAIT_TERMSIG(got[0]) == 6 &&
+                !WAIT_IF_EXITED(got[0]) && !WAIT_IF_STOPPED(got[0]) &&
+                !WAIT_IF_CONTINUED(got[0]), "signalled decodes as signalled only");
+    TEST_EXPECT_EQ(got[1], 1, "a raw wait reads a death by note as 1");
+    TEST_EXPECT_EQ(got[2], WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
         "WAIT_UNTRACED packs too: an uncaught interrupt reads SIGINT (2)");
-    TEST_EXPECT_EQ(c[3].got, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
+    TEST_EXPECT_EQ(got[3], WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
         "WAIT_CONTINUED packs too: a kill reads SIGKILL (9)");
     // One variable away: an exit with the same raw status packs as an exit.
-    TEST_EXPECT_EQ(c[4].got, WAIT_STATUS_EXITED(1), "an exit(1) packs as exited (0x100)");
-    TEST_ASSERT(WAIT_IF_EXITED(c[4].got) && !WAIT_IF_SIGNALED(c[4].got),
+    TEST_EXPECT_EQ(got[4], WAIT_STATUS_EXITED(1), "an exit(1) packs as exited (0x100)");
+    TEST_ASSERT(WAIT_IF_EXITED(got[4]) && !WAIT_IF_SIGNALED(got[4]),
         "exited decodes as exited only");
-    TEST_EXPECT_EQ(c[5].got, WAIT_STATUS_EXITED(42), "exits_code(42) packs its byte (0x2a00)");
+    TEST_EXPECT_EQ(got[5], WAIT_STATUS_EXITED(42), "exits_code(42) packs its byte (0x2a00)");
 }
 
 // A child that claims its own group's termination twice: the first claim's
