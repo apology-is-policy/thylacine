@@ -1,6 +1,51 @@
 # The autonomous-run journal
 
 
+## October 12: SQ-1 -- the SQ head published before its copy (Corona)
+
+The operator returned the clipboard arc to Corona, with the parked SQ
+dependency first (yip 0206). Astra's session had parked a proposed correction
+after a security-classifier block with no visible reason. I read it as a
+technical proposal and re-derived it in my checkout. No restriction appeared.
+
+The defect was real and also live on main a7353c36f. `loom_drain_sq` published
+`sq_head` before reading the index and copying the SQE. The one producer in the
+tree (`Ring::try_submit`) refills a position as soon as it sees the head move.
+`loom.tla` could not see this: it copies atomically and never reuses a slot. So
+the spec came first, as `specs/loom_sq.tla`. Its counterexample for the old
+order is six states long. An out-of-range entry's position is refilled under
+the stale claim and consumed as valid. That is the same shape as one of the
+two runtime tests.
+
+Wrong turns, each caught before evidence was claimed:
+- A failed commit hook left the PREVIOUS commit's text in COMMIT_EDITMSG, and
+  `commit -F COMMIT_EDITMSG` reused it. The commit was unpushed, so I amended its
+  message.
+- I kept an old comment's clause about "an ENTER racing the SQPOLL kthread"
+  through my rewrite. The Fable audit showed that interleaving cannot happen:
+  ENTER never drains an SQPOLL ring.
+- My runner's mutant leg refused on any extinction. A failed suite always
+  extincts, so the leg could never have passed (audit F1, P2). The older runner
+  I derived it from had handled this; the derivation dropped it.
+- The test hook's placement was itself a guard pinned to a name. The runner
+  now derives a single-writer count from the tree. I proved it red on the
+  pre-fix tree before trusting it.
+
+Evidence:
+- TLC: 14/14 as predicted (`work/oct12-sq1/tlc-20261012T072500Z`).
+- Guest (`run-20261012T072527Z`): control 1864/1864. M1 fails exactly the three
+  SQ-1 tests; M2 fails exactly the chain test.
+
+The SHAPE leg then found an unrelated real break: the KERNEL_TESTS-off kernel
+did not compile on this branch (a missing stub from 45d26893b). No gate image
+builds that shape. It is enqueued and fixed, and `tools/check-production.sh
+--all` was re-run.
+
+"Fixed" covers: this branch's SQ consumers, Mac default, one boot per row. It
+does not cover SMP or sanitizer rows, main (port branch `corona/sq1-main`
+awaits main's gate), or real userspace concurrent scheduling. The producer
+here is a deterministic hook.
+
 ## October 10: private operation storage and callback capture prerequisites
 
 The request ledger now separates its terminal obligation from physical RPC

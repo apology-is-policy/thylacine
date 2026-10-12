@@ -479,6 +479,7 @@ static inline bool loom_private_slots_fault_take(void) { return false; }
 static inline bool loom_private_pools_fault_take(void) { return false; }
 static inline bool loom_private_targets_fault_take(void) { return false; }
 static inline bool loom_private_nodes_fault_take(void) { return false; }
+static inline bool loom_private_requests_fault_take(void) { return false; }
 #endif
 
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {

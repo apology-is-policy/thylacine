@@ -1,0 +1,9 @@
+mac   HELD by you for 3m, 1.9h left
+        why: corona: SQ-1 loom_drain_sq copy-before-release -- TLC loom_sq + kernel build + guest control and M1 mutant (work/oct12-sq1/sq1-run.sh)
+        phase: corona: SQ-1 TLC done (14/14 as predicted); sq1-run.sh running: control build+boot, M1, M2, rebuild, guard, shape
+        runner: North-Kill-PD.local pid 91355 alive (start Mon Oct 12 09:25:27 2026)
+        runner: North-Kill-PD.local pid 91358 alive (start Mon Oct 12 09:25:27 2026)
+        pids: [91355 91358] (their registered work -- not a kill list)
+        queue 1: main (31s waiting)
+pi    FREE
+disk: 9.9 GiB available at /Users/northkillpd/projects/thylacine-corona

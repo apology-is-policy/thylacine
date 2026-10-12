@@ -1,0 +1,18 @@
+2026-10-12T07:25:27Z  HEAD 46f07edc263a0f93fa9f572889b0862a7c017d98
+2026-10-12T07:25:28Z  expected tests (derived from test.c): 1864
+2026-10-12T07:25:28Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-12T07:25:28Z  disk pre: 10574 MiB free (floor 8192)
+2026-10-12T07:26:27Z  disk post-control-build: 10261 MiB free (floor 8192)
+2026-10-12T07:27:18Z  control: test.sh exit 0
+2026-10-12T07:27:18Z  CONTROL GREEN: 1864/1864, the three SQ-1 tests PASS, bin 5f5df4e56972c2aa
+2026-10-12T07:27:18Z  disk pre-m1: 10092 MiB free (floor 8192)
+2026-10-12T07:28:06Z  disk post-m1-build: 10290 MiB free (floor 8192)
+2026-10-12T07:28:19Z  m1: test.sh exit 1
+2026-10-12T07:28:19Z  M1 DISCRIMINATED: 1861/1864, exactly loom.sq_release_after_copy, loom.sq_release_after_index and loom.sq_release_after_copy_chain FAIL at their named assertions; extinction set = the suite's own
+2026-10-12T07:28:19Z  disk pre-m2: 10062 MiB free (floor 8192)
+2026-10-12T07:29:06Z  disk post-m2-build: 10061 MiB free (floor 8192)
+2026-10-12T07:29:19Z  m2: test.sh exit 1
+2026-10-12T07:29:19Z  M2 DISCRIMINATED: 1863/1864, exactly loom.sq_release_after_copy_chain FAILs at its named assertion; extinction set = the suite's own
+2026-10-12T07:30:06Z  rebuild byte-identical to the control kernel
+2026-10-12T07:30:07Z  GUARD: 241 production sources; the 2 sq_head writes (advance + publish) are both inside loom_sq_release (loom.c:3355-3362)
+2026-10-12T07:30:07Z  exit 7

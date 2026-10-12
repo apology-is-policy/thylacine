@@ -1,0 +1,11 @@
+--- work/oct12-sq1/run-20261012T072527Z/loom.c.pristine	2026-10-12 09:25:28
++++ kernel/loom.c	2026-10-12 09:28:19
+@@ -3461,7 +3461,7 @@
+                 submitted++;
+                 continue;
+             }
+-            ce->sqe   = ksqe;
++            ce->sqe   = sqes[sqe_idx];                     // MUTANT M2: re-read after release
+             ce->link  = (ksqe.flags & LOOM_SQE_LINK)  != 0;
+             ce->drain = (ksqe.flags & LOOM_SQE_DRAIN) != 0;
+             ce->state = LOOM_CHAIN_HELD;

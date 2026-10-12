@@ -1,0 +1,12 @@
+
+build/kernel/kernel/CMakeFiles/thylacine.elf.dir/loom.c.obj:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+0000000000003c44 <loom_sq_release>:
+    3c44: d503245f     	bti	c
+    3c48: b9410c08     	ldr	w8, [x0, #0x10c]
+    3c4c: 11000508     	add	w8, w8, #0x1
+    3c50: b9010c08     	str	w8, [x0, #0x10c]
+    3c54: 889ffc28     	stlr	w8, [x1]
+    3c58: d65f03c0     	ret

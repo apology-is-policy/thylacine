@@ -3891,3 +3891,62 @@ dependency changes; do not rerun unchanged suites or invent mechanisms to stay b
 CompleteAS3,AS4,MM0-MM4 remain incomplete; heartbeat ACTIVE. Protected10, clean
 external61dde37 and parked patch/restored kernel preserved. Single-agent self-review,
 no independent audit, Main landing, private activation or128MiB protection change.
+
+
+## SQ-1: sq_head is published only after the SQ copy (Corona, October 12)
+
+Ownership of the clipboard arc and this parked dependency returned to Corona
+(operator, yip 0206). The parked correction was reviewed on its merits and
+re-derived in Corona's checkout; no restriction appeared in this session.
+
+**Defect (live P1, also on main a7353c36f).** `loom_drain_sq` advanced and
+published `sq_head` before it read the SQ-index entry and copied the SQE. The
+published head is the producer's permission to reuse the position, and
+`l->lock` excludes other kernel consumers, never the producer. A refill landing
+in that window (SQPOLL, or a sibling thread producing while another enters)
+was consumed in the old position's place and again at its own; the original
+was never consumed (I-29). An out-of-range original index could be "repaired"
+the same way. I-30 held.
+
+**Fix.** `loom_sq_release` advances and release-stores the head and is the only
+writer of either copy; `loom_drain_sq` calls it after the index read and the
+copy or drop, and `loom_private_submit` (already correctly ordered) now
+publishes through it. The dropped count is an atomic increment.
+
+**Spec first.** `specs/loom_sq.tla` (vault `spec-loom-sq`): clean 188 states,
+liveness 188, `BUGGY_RELEASE_BEFORE_COPY` and `BUGGY_UNLOCKED_CLAIM` violate
+`FifoFidelity`, the unlocked claim also violates `ClaimExclusive`; `loom.tla`
+re-run unchanged (2429, 1457, all seven buggy cfgs violate).
+Run `work/oct12-sq1/tlc-20261012T072500Z`.
+
+**Guest (Mac default, one boot per row; no SMP or sanitizer claim).** Run
+`work/oct12-sq1/run-20261012T072527Z` on 46f07edc2, Stratum stratum-astra/v2
+7dd103d: CONTROL 1864/1864 with `loom.sq_release_after_copy`, `_after_index`
+and `_after_copy_chain` PASS; M1 (the main ordering) 1861/1864, exactly those
+three FAIL at their named assertions; M2 (chain path re-reads the refilled
+slot) 1863/1864, exactly `_after_copy_chain` FAILs; each mutant's extinction
+set is exactly the suite's own; rebuild byte-identical to the control; the
+derived single-writer guard (241 production sources, both `sq_head` writes
+inside `loom_sq_release`; red on 188b862e2). The SHAPE leg then refused: the
+KERNEL_TESTS-off compile of `kernel/loom.c` FAILED -- see the next paragraph.
+
+**Found on the way: the production shape did not build on this branch.**
+`loom_private_requests_fault_take` (45d26893b) had no KERNEL_TESTS-off stub, so
+`tools/check-production.sh --all` would fail; no gate image builds that shape.
+Stub added; `tools/check-production.sh --all` then PASSED (lean kernel,
+userspace, ramfs and pool built; the lean image booted and both dev accounts
+authenticated; `work/oct12-sq1/check-production-20261012T073104Z.log`). Its
+KERNEL_TESTS-off `loom.c` object stands in for the refused SHAPE leg: no hook
+symbol, and in the inlined drain every shared-SQ load (index `ldar`, the four
+SQE `ldp`s, or the dropped `ldxr/stlxr`) precedes the `stlr` of the published
+head (`run-20261012T072527Z/shape/production-shape-note.txt`). The CI image
+rebuilt afterwards is byte-identical to the control kernel (5f5df4e56972c2aa),
+so the stub does not change the tested binary.
+
+**Audit.** holotype-reviewer r1, Fable 5.1 reviewing Opus 5.5: 0 P0 / 0 P1 /
+1 P2 / 4 P3, all fixed in 46f07edc2 (runner extinction set, single writer,
+chain witness and M2, spec registry and a live ClaimExclusive, atomic dropped).
+
+**Main.** `corona/sq1-main` (22c343232) is the port onto a7353c36f, built
+without hooks or a build here; main builds, gates, renders the vault view and
+lands it.
