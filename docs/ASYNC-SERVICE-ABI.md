@@ -220,3 +220,37 @@ Every successful setup runs over params pre-filled with a non-zero pattern, so a
 zero read back was written by the kernel. The test then requires that the probe
 created exactly the expected number of private rings, none in the default image
 and four in the qualification image, and that every one of them retired.
+
+## Native C client storage (October 12)
+
+Operator vote, 2026-10-12 (NA-2b): the native C owned-client cores take
+caller-provided storage. Native C links libt, which is freestanding: there is no
+heap, no memcpy and no assert. The cores therefore never allocate. A caller hands
+each ring client one storage object, sized at compile time by the ring's entries
+(at most LOOM_MAX_ENTRIES) and by the ABI's own limits: 64 descriptor slots and
+64 pool members. The object exists before the client makes its first kernel
+registration. So a local allocation can never fail after the kernel has reserved
+something, and the obligation to pre-reserve local metadata holds by
+construction rather than by discipline.
+
+- A request that finds its fixed table full is refused with -ENOSPC before the
+  kernel is touched. The kernel's slot table answers the same errno when it is
+  full.
+- The cores copy with libt byte helpers, not memcpy or memset.
+- A broken internal invariant ends the process through a fatal exit, not
+  assert or abort. It is never ignored.
+- The ring mapping stays the kernel's, mapped by setup. The storage object holds
+  only the client's own bookkeeping.
+
+Rejected:
+- A libt heap. This is Plan 9's answer, where libc mallocs over the data
+  segment. Here it would add a new audit-bearing allocator to a library that
+  today serves only probes and fixtures. It would also have to sit on the eager
+  SYS_BURROW_ATTACH, because RESERVE charges at first touch.
+- Rust-only clients. This would amend AS-3's "C/Rust clients".
+- The C cores on Pouch. Pouch has no Loom mirror, and no ported program is
+  planned to use private async.
+
+Prior art: liburing's no-libc build, where the caller owns struct io_uring;
+seL4 and Genode, which pass allocators explicitly; and Fuchsia's
+caller-allocated FIDL.

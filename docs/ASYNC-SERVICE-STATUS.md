@@ -4058,3 +4058,13 @@ The first run (`run-20261012T142914Z`) refused M13 at that guard: a probe-only
 mutant leaves the kernel byte-identical to its control by construction.
 Not proven here: SMP and the sanitizers (the Mac-gate residual, operator vote
 2026-10-07).
+
+## NA-2b: the native C owned-client cores over caller-provided storage (Corona, October 12 -- in progress)
+
+The operator voted on 2026-10-12 for caller-provided storage, the recommended
+option of four. The decision is recorded in ASYNC-SERVICE-ABI.md, "Native C
+client storage". The C cores in `work/oct5-as-r9/astra-takeover/owned-clients`
+call calloc, free, assert, abort and memcpy, so they cannot be installed into
+libt as they are. NA-2b restructures their storage into fixed tables inside one
+caller-owned object, re-runs their host tests, and installs them beside
+`thyla/loom.h`. The Rust twins (NA-3) keep ThylaAlloc.
