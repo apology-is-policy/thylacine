@@ -9,7 +9,7 @@ guarded-by: [inv-i9, inv-i8]
 validated-by: [spec-scheduler, spec-tsleep, spec-death-wake, gate-smp]
 locks: [lock-wait, lock-timerwait, lock-rendez]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -38,10 +38,12 @@ that are not obvious.
   a Linux phenotype and -- tested LAST -- `thread_caught_note_claim` claims the
   note's family, which it does
   only for a thread whose call is on signal(7)'s list (`note_interruptible`)
-  and only once per note: the peers the same wake reached find the family
-  claimed and re-park ([[sub-kernel-notes]]). The claim is the claimant's until
-  its EL0-return tail, which releases it and, if the note is still queued there,
-  wakes the parked peers again. Every kernel wait a call on signal(7)'s list
+  and only once per note: a peer finds the family claimed and stays parked
+  ([[sub-kernel-notes]]). In a Linux-phenotype Proc the posting walk usually
+  designates the thread that takes the note, and only the designee or the
+  claimant may unwind for the family. The claim is the claimant's until its
+  EL0-return tail, which releases it and, if the note is still queued there,
+  walks again for another thread. Every kernel wait a call on signal(7)'s list
   can reach opts in since [[chg-2026-10-05-signal7-list]]: the two 9P waits,
   a pipe's read and write, the console's read and write waits, poll's park
   and its timeout-only sleep, `wait_pid_for` and the futex wait (ARCH 8.8.3
@@ -49,10 +51,20 @@ that are not obvious.
   lasts until its tail, so a second wait in the same call would unwind at
   once. Witnesses:
   `rendez.caught_note_one_unwind` -- two sleepers of one Linux Proc, one caught
-  `child_exit`: exactly one unwinds and the other re-reads its cond and re-parks,
-  and a caught note of another family then unwinds the re-parked one;
+  note: the walk wakes main alone, and a caught note of another family, posted
+  once main has gone, unwinds the peer;
   `rendez.caught_note_tail_discards_and_releases` and
-  `rendez.caught_note_release_wakes_peer`, which run the real tail.
+  `rendez.caught_note_release_wakes_peer` (the release's walk skips main and
+  reaches the peer), which run the real tail; and the pick's own witnesses,
+  `rendez.caught_note_prefers_awake`, `_poster_first`, `_handoff`,
+  `_exit_drop`, `_holder_rewake` and `_native_kicks_only`.
+- Both sleep cores publish the wait's kind (`Thread.caught_wait`: unwinds or
+  holds) under the thread's `wait_lock` first (`sleep_caught_wait_enter`) and
+  restore the outer kind on every exit, because a stop park nests a wait in a
+  wait. A designation the wait cannot honour is handed off before the thread
+  blocks (`notes_handoff_target`, with the `wait_lock` dropped), so no thread
+  holds a note it cannot take; the walk designates under that same lock (ARCH
+  8.8.3, [[spec-caught-target]]).
 - `tsleep(r, cond, arg, deadline_ns)` adds a deadline on the
   `timer_now_ns` timebase. Returns `TSLEEP_AWOKEN` / `TSLEEP_TIMEDOUT` /
   `TSLEEP_INTR`. **`cond` has precedence**: a wait satisfied exactly as

@@ -148,9 +148,9 @@ exit and a kill alike:
 - capturing status/msg, flipping to ZOMBIE;
 - the parent's side, `proc_exit_notify_parent_locked`, all **under the
   lock**: wake the parent's `child_waiters`, post the synthetic `child_exit`
-  note, and run the caught-note wake (`proc_caught_note_wake`) so a parent
-  that catches `child_exit` -- a SIGCHLD handler, a notes fd -- and is already
-  asleep in an interruptible wait takes it now ([[sub-kernel-notes]]). There is
+  note, and run the caught-note walk (`proc_caught_note_wake`), which picks
+  the parent's thread that takes it -- a running one first, so a polling peer
+  is not interrupted -- and wakes or kicks it ([[sub-kernel-notes]]). There is
   no terminate wake: `child_exit` defaults to ignore and never arms that latch.
 
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
@@ -548,7 +548,13 @@ What a change **must** re-establish:
   caught-note claim sub-field of `proc_flags` (2026-09-30), and a claim is taken
   only by a thread of this process for its own wait, so with exec alone the clear
   is a guard, not a repair -- posters from other processes set caught bits, never
-  claims ([[sub-kernel-notes]]).
+  claims ([[sub-kernel-notes]]). Since 2026-10-12 a posting walk can also take a
+  claim on a thread's behalf (a designation), so exec clears the claim, the
+  designation and the sub-field under the thread's `wait_lock`, where a walk
+  designates: one made after the clear carries its claim bit too. A thread that
+  exits drops its claim and its designation at the `THREAD_EXITING` commit
+  (`notes_exit_drop_locked`, under the process-table lock), and the walk runs
+  again if a family's note is still queued.
 
 ## Provenance
 

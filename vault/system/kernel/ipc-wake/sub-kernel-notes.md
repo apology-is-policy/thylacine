@@ -223,39 +223,42 @@ liveness bug when the thing being exempted is a latch.*
 ### A caught note interrupts a blocked peer's wait (item 11)
 
 A note with a live handler must run at the return tail — but a peer thread
-blocked in a syscall reaches no return tail until something wakes it. So a caught
-note ARMS a per-Proc mask (`notes_arm_caught_note_locked`, the caught-note
-sub-field of `proc_flags`) and wakes every blocked peer outside a stop park
-(`proc_caught_note_wake`, under the process-table lock; a stopped thread waits
-for the stop to clear). `notes_post` cannot run that wake itself -- the
-thread walk needs the process-table lock, which it does not take -- so it is the
-POSTER's, and every poster that holds the lock runs it: the interrupt and tty
+blocked in a syscall reaches no return tail until something wakes it, and a
+thread spinning at EL0 reaches one only at an interrupt. So a caught note ARMS a
+per-Proc mask (`notes_arm_caught_note_locked`, the caught-note sub-field of
+`proc_flags`), and the posting walk (`proc_caught_note_wake`, under the
+process-table lock) chooses the thread that takes it and wakes or kicks that
+thread (next section); a stopped thread waits for the stop to clear.
+`notes_post` cannot run that walk itself -- it needs the process-table lock,
+which `notes_post` does not take -- so it is the POSTER's, and every poster that
+holds the lock runs it: the interrupt and tty
 fans beside the terminate wake, and the posts with no terminate twin -- a
 child's exit (`proc_exit_notify_parent_locked`), a caught `tty:susp`, `tty:cont`
 (the continue fan, and the orphan rule after both of its posts). Two posts run
 outside the lock: a Proc noting itself takes the lock for its wakes after the
 post, and `pipe` needs none -- it posts to the writer's own Proc from inside
 the write, which delivers at that thread's return tail, as Linux sends SIGPIPE
-to the writing thread alone. The wake reaches every blocked peer outside a stop
-park, but one caught note unwinds ONE of them (`thread_caught_note_claim`, the
-sleep arms' last test):
-the unwinding sleeper claims the note's family in a claim sub-field of
-`proc_flags` by a CAS that re-validates the caught bit and records the family as
-its own (`Thread.note_claim`), and its peers find the family claimed and re-park
--- as Linux interrupts one thread for a process-directed signal. The claim is the
-claimant's, and it ends at the claimant's EL0-return tail whatever that tail
-delivered: `notes_deliver_at_el0_return` runs the delivery body
-(`notes_deliver_tail`), once more after each stop it applied (below), and then
-`notes_release_claims`, which ANDs the thread's
-bits out and, if the family is still caught -- the tail ended short of the note
--- runs `proc_caught_note_wake` under the process-table lock so a parked peer
-re-reads its condition and unwinds for it. A thread's own claim stays open to
-it, so a wait that claimed and then completed anyway cannot make the call's next
-wait refuse the note only it may unwind for. The drain of a family's last queued
-note clears the caught bit alone; exec clears the claim sub-field as a guard
-(exec runs alone, so nothing should hold one). A claimant that dies before its
-tail leaves its claim set, and harmlessly: the tail's die-check kills a thread
-only in a group termination, after which no thread of the Proc waits again.
+to the writing thread alone. One caught note unwinds at most ONE sleeper. An unwinding sleeper claims the
+note's family in a claim sub-field of `proc_flags` (`thread_caught_note_claim`,
+the sleep arms' last test) by a CAS that re-validates the caught bit, and
+records the family as its own (`Thread.note_claim`); its peers find the family
+claimed and stay parked. In a Linux-phenotype Proc the walk usually takes that
+claim on its pick's behalf (a designation, `Thread.note_target`), and the
+designee's wait turns it into its own claim with no CAS. A claim or a
+designation ends at its thread's EL0-return tail whatever that tail delivered:
+`notes_deliver_at_el0_return` runs the delivery body (`notes_deliver_tail`),
+once more after each stop it applied (below), and then `notes_release_claims`,
+which clears the thread's claim and designation, ANDs their bits out of the
+Proc's claim sub-field and, if a family is still caught -- the tail ended short
+of its note -- walks again, skipping this thread, whose tail has just passed the
+note by. A thread's own claim stays open to it, so a wait that claimed and then
+completed anyway cannot make the call's next wait refuse the note only it may
+unwind for. The drain of a family's last queued note clears the caught bit
+alone. Exec clears the claim sub-field, the claim and the designation under the
+thread's `wait_lock` (exec runs alone, but a walk can have designated it). A
+thread that exits gives up both at its `THREAD_EXITING` commit, under the
+process-table lock (`notes_exit_drop_locked`), and walks again if a family's
+note is still queued.
 Each woken thread re-checks a lock-free predicate,
 `thread_caught_note_deliverable`: a caught note is deliverable to *this* thread
 iff it is armed AND unmasked by the thread's own `note_mask` AND in the supported
@@ -335,6 +338,65 @@ one, and the retried wait unwinds again), `rendez.caught_note_release_wakes_peer
 (the tail held until the peer has re-parked, so only the release's wake can
 unwind it), and `notes.caught_note_claim_once`.
 
+### Which thread takes a caught note, and every EL0 return delivers it (2026-10-12)
+
+Two defects shared one design ([[dec-2026-10-12-note-target]], ARCH 8.8.3). The
+IRQ-from-EL0 tail had no notes leg (#964, [[seam-el0-irq-tail-no-notes]]), so a
+thread that never entered the kernel never took a note: Ctrl-C did not end
+`while(1);`, and a caught handler never ran. And the walk woke every blocked
+thread, so a child's `SIGCHLD` returned `EINTR` from a worker's `ppoll` while
+main was running (L285).
+
+**Every EL0 return delivers.** The 0x480 vector branches into `.Lel0_return`,
+the tail the synchronous vector takes ([[sub-kernel-exception]]), so the notes
+leg runs on an IRQ return too, at any EL0 instruction; the whole-context save
+already covered that. Delivery clears `SPSR.BTYPE` in the handler's context,
+after the save and in both arms: an IRQ can arrive between an indirect branch
+and its target, and the handler is not that target. The restore puts the saved
+value back.
+
+**The pick.** For each caught family queued and held by nobody,
+`proc_caught_note_walk` picks one candidate: not exiting, the family unmasked,
+no handler running, and not in a wait that holds. It prefers the posting
+thread, then main (the oldest live thread: `p->threads` is head-inserted, so
+the last one not exiting), any thread not blocked, main blocked in an unwinding
+wait, and any thread blocked in one. In a Linux-phenotype Proc it designates the
+pick under the pick's `wait_lock`: it re-checks the pick there, CASes the
+family's claim bit while the family is still caught and unclaimed, sets
+`note_target`, and wakes the pick if it is in an unwinding wait or kicks it
+(`sched_kick_thread`: `IPI_RESCHED` to the CPU it runs on) if not. A pick that
+went stale is picked again up to `CAUGHT_REPICKS` (4) times, after which the walk
+wakes every unwinding sleeper and lets one claim. A native Proc's walk only
+kicks, since no native wait unwinds for a caught note. The pick decides who is
+interrupted or kicked, not who may deliver: any thread's tail still delivers a
+queued note whose family it has unmasked.
+
+**The wait kind and the hand-off.** `sleep_common` and `tsleep_common` publish
+the wait's kind (`Thread.caught_wait`: none, unwinds, holds) under the thread's
+`wait_lock` before anything else (`sleep_caught_wait_enter`), and restore the
+outer kind on the way out, since a stop park nests a wait inside a wait.
+`thread_caught_wait_kind` answers "unwinds" exactly when every gate of
+`thread_caught_note_unwinds` that cannot change during the wait passes. A
+designation the wait cannot honour -- every family when it holds, a masked one
+when it unwinds -- is handed off before the thread blocks
+(`notes_handoff_target`): the wait lock is dropped, the families leave the
+thread and the Proc's claim sub-field, and the walk runs again. The walk
+designates under the same lock the kind is published under, so no thread is
+designated into a wait that will not unwind.
+
+**Re-wake.** Every walk first wakes a holder of a caught, held family that is
+blocked in an unwinding wait: a claim can outlive its note when another
+thread's tail delivered it, and the family's next note must still unwind it.
+
+**Stale reads.** The mask and the handler flag are the thread's own and written
+without a lock, so the walk reads them exactly only for a blocked thread. An
+awake thread designated on a stale value gives the designation up at its tail
+or its next wait.
+
+Modelled in `specs/caught_target.tla` ([[spec-caught-target]]): `OneClaimant`,
+and `NoStrand` (a caught note stays queued forever only if no thread stays able
+to take it), with a buggy cfg per defect. The witnesses are under Tests.
+
 ### A fault under a terminate latch is the latch's death, at the fault
 
 A user fault left unresolved while a terminate latch is pending reaches the
@@ -359,8 +421,9 @@ thread stays armed, because a peer may still die of it. Witnesses:
 An uncaught note whose default is terminate (an `interrupt` nothing catches,
 `tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch, and its post
 wakes every blocked thread of the Proc outside a stop park
-(`proc_interrupt_terminate_wake`). An
-ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
+(`proc_interrupt_terminate_wake`), and kicks every thread of the Proc running on
+another CPU, so a thread spinning at EL0 takes an IRQ into its tail, whose notes
+leg meets the latch (#964). An ordinary sleep then returns `SLEEP_INTR` and the thread dies of the note at
 its return tail: `thread_die_pending` reports the latch in any family the
 thread has not masked, as well as group death. Five waits read
 `thread_group_death_pending` instead, `thread_die_pending`'s group-death leg
@@ -512,9 +575,13 @@ depends on a property (no writable file-backed mapping) that
 [[sub-kernel-fault]] records as a v1.x seam. See Caveats.
 
 The caught-note claim takes no lock: a CAS on `proc_flags` takes it, an atomic
-AND releases it, and only the release's wake -- run from the EL0-return tail,
+AND releases it, and only the release's walk -- run from the EL0-return tail,
 which holds nothing, and only while the family is still caught -- takes the
-process-table lock.
+process-table lock. A designation is made under the designee's `wait_lock`,
+inside the walk's process-table lock, so the order is process-table lock ->
+`wait_lock` -> `r->lock`. The sleep side's hand-off drops its `wait_lock` before
+it takes the process-table lock, and the exit drop runs under the process-table
+lock with no `wait_lock` held.
 
 ## Invariants enforced
 
@@ -559,7 +626,8 @@ in both the name table and [[abi-note-names]].
 
 ## Seams
 
-- No model. The two-consumers-of-one-queue shape usually earns one.
+- The two-consumers-of-one-queue shape has no model. The claim and the
+  designation do (`caught_target.tla`).
 - Per-kind masking within the `tty:` and `snare:` families is one bit each today.
 - `snare:*` is defined, prefix-gated, and **not deliverable**: fault termination
   calls the exit path directly rather than posting. The names, the mask bit and
@@ -657,6 +725,20 @@ post, or rode the note out. Fourteen witnesses use it
 `cons.caught_note_*`); six carry a native control one variable away, and
 opening the phenotype gate turns exactly those six red. `viv-pheno-probe` legs L311-L318 drive each listed call
 from a real Linux binary and require `EINTR` with the handler run.
+
+The pick and the hand-off have their own witnesses in `test_rendez.c`, driven
+on two kernel threads of one Proc by a step interpreter (`nt_*`):
+`rendez.caught_note_prefers_awake` (main, awake, is designated and the sleeping
+peer is not woken; released, the note reaches the peer), `_poster_first`,
+`_handoff` (a wait that holds, and an unwinding wait with the family masked),
+`_exit_drop` (through the real `thread_exit_self`), `_holder_rewake`, and
+`_native_kicks_only` (with a Linux-Proc control one variable away).
+`_one_unwind` and `_release_wakes_peer` were rewritten for the pick. The
+fixture's `test_caught_run` now wakes a waiter that holds itself, since the walk
+no longer wakes a wait that cannot unwind. On the device: viv-pheno-probe
+L331-L333 (a spinning main takes a child's `SIGCHLD` while a polling peer is
+left alone) and jc-probe's spinint and spinnote rungs (a native spinner ended by
+`^C`, and one whose handler runs).
 
 ## Referenced by
 

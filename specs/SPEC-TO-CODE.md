@@ -2646,10 +2646,12 @@ note's handler is one bit (`inh`) that `rt_sigreturn` clears; discarded and
 uncaught notes (the terminate latch's wake is `death_wake.tla`'s and §8.8.2's);
 the preference order; the kick (the tick is the fairness that matters, a kick
 only makes it prompt); a call enters at most `MAX_WAITS` waits. The kernel
-tests in `test_notes.c` (the pick, the designee conversion, the hand-off, the
-exit drop, the holder re-wake) and the viv-pheno-probe and note-probe legs (a
-spinner killed by Ctrl-C, a spinner's handler, a running main taking `SIGCHLD`
-with the poller undisturbed) hold the code to it.
+tests in `test_rendez.c` (`rendez.caught_note_prefers_awake`, `_poster_first`,
+`_handoff`, `_exit_drop`, `_holder_rewake`, `_native_kicks_only`, and the
+rewritten `_one_unwind` and `_release_wakes_peer`), viv-pheno-probe L331-L333
+(a running main takes `SIGCHLD` with a polling peer undisturbed) and jc-probe's
+spinint and spinnote rungs (a native spinner ended by Ctrl-C, and one whose
+handler runs) hold the code to it.
 
 Pre-commit gate: `specs/check-caught-target.sh` (the clean cfg at its pinned
 count, the 8 buggy cfgs violating their named properties), on any change to

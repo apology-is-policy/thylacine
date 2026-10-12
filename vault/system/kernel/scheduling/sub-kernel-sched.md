@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -45,6 +45,13 @@ machinery around it.
   expiry, requests preemption.
 - `preempt_check_irq()` — called from the IRQ-return and syscall-return
   tails. Consumes a pending request and calls `sched()`.
+- `sched_kick_thread(t)` — if `t` runs on another CPU, send that CPU
+  `IPI_RESCHED`, so a thread at EL0 takes an IRQ into its return tail now
+  (Linux's `kick_process`; the caught-note walk and the interrupt-terminate
+  wake use it, [[sub-kernel-notes]]). The reads of `on_cpu` and `last_cpu`
+  are unlocked: a stale one costs a spurious IPI or a missed one, and a busy
+  CPU is never tickless, so the tick bounds a missed one. Gated with the
+  placement notify: never self, and off in the in-kernel tests.
 - **A plain spinlock may never be held across `sched()`.** This is
   checked, not documented: `sched()` extincts on `prev->preempt_count != 0`
   and names the outermost acquire site.

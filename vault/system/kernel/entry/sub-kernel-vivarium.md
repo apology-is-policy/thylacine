@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-07
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -835,6 +835,16 @@ failed about half its boots. Pre-existing and owned: an EINTR'd 9P op still
 discards a late original reply, where flush(5) says it must be honoured -- a
 fix for the 9P client's abandon path
 ([[dec-2026-09-29-caught-signal-slow-calls]]).
+
+Since 2026-10-12 a process-directed caught signal goes to one thread, as
+Linux's `complete_signal` chooses: the posting thread, then main, then any
+running thread, and only then a sleeper in an interruptible wait, main first
+([[dec-2026-10-12-note-target]], [[sub-kernel-notes]]). Before, the walk woke
+every sleeper and the first to claim unwound, so a child's `SIGCHLD` ended a
+worker's `ppoll` with `EINTR` while main was running (L285). viv-pheno-probe
+L331-L333 pin it: main spins with no syscall while a peer polls, and the
+handler must run on main, at an IRQ return, with the poll undisturbed. L285's
+retry stays, since POSIX lets any thread take the signal.
 
 The socket calls keep Linux's shape at the boundary: a signal interrupts the
 call's wait and nothing else. `accept`'s wait is netd's held `listen` open. Once
