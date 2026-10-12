@@ -3950,3 +3950,19 @@ chain witness and M2, spec registry and a live ClaimExclusive, atomic dropped).
 **Main.** `corona/sq1-main` (22c343232) is the port onto a7353c36f, built
 without hooks or a build here; main builds, gates, renders the vault view and
 lands it.
+
+## NA-1: the private syscall bridge (Corona, October 12 -- IN FLIGHT, unbuilt)
+
+Step 1 of the transferred sequence needs userspace to reach the private ABI.
+The operator ratified two choices (ASYNC-SERVICE-ABI.md, Qualification bridge):
+a compile lever off by default, and an ENTER that never sleeps (clients park in
+poll). Scripture c8d9127f5; code 6a5039788, compiled with -fsyntax-only in all
+four shapes only. The guest legs are scripted in work/oct12-na1/na1-run.sh:
+both images' controls and four mutants with named predictions. Owed after them:
+the audit round, the dossier pass, and NA-2's EL0 leg.
+
+Two legacy defects surfaced while reading the setup it extends. Both are live on
+main, enqueued in OPEN-BUGS and fixed here: a setup that touched the Loom after
+`handle_alloc` adopted its only reference (a racing close frees it), and a
+copyout-fault rollback whose unsettled unmap lost the ring's charge. Their main
+port follows the guest run. Nothing is activated; the lever is in no preset.
