@@ -836,10 +836,13 @@ discards a late original reply, where flush(5) says it must be honoured -- a
 fix for the 9P client's abandon path
 ([[dec-2026-09-29-caught-signal-slow-calls]]).
 
-Since 2026-10-12 a process-directed caught signal goes to one thread, as
-Linux's `complete_signal` chooses: the posting thread, then main, then any
-running thread, and only then a sleeper in an interruptible wait, main first
-([[dec-2026-10-12-note-target]], [[sub-kernel-notes]]). Before, the walk woke
+Since 2026-10-12 a process-directed caught signal goes to one thread: the
+posting thread, then main, then any running thread, and only then a sleeper in
+an interruptible wait, main first ([[dec-2026-10-12-note-target]],
+[[sub-kernel-notes]]). Linux also picks one thread, but its `complete_signal`
+takes the target (main, for `kill`) whenever it can take the signal, so a
+sleeping main is woken even while a worker runs; here a running thread is
+preferred. Before, the walk woke
 every sleeper and the first to claim unwound, so a child's `SIGCHLD` ended a
 worker's `ppoll` with `EINTR` while main was running (L285). viv-pheno-probe
 L331-L333 pin it: main spins with no syscall while a peer polls, and the

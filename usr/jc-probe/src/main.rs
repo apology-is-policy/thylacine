@@ -636,9 +636,10 @@ fn run() -> i64 {
 
     // (h2) A foreground job that never enters the kernel takes `^C`. Only an
     //      IRQ return can deliver the interrupt to it (ARCH 8.8.3, #964), and
-    //      the kick sends its CPU one at once. SPINNING is written before the
-    //      loop, so a `^C` sent after it cannot be met at a syscall's return.
-    //      The prompt is non-vacuous for the reason given at (g).
+    //      the kick sends its CPU one at once. SPINNING reaches us from inside
+    //      the child's write, before that call's own return tail, so a `^C`
+    //      sent at once could still be met there; the settle puts the child in
+    //      its loop first. The prompt is non-vacuous for the reason given at (g).
     leg("spinint");
     let m = d.mark();
     if !d.send(b"debug-child spin-tty\r", "spinint-spawn")
@@ -646,13 +647,14 @@ fn run() -> i64 {
     {
         return 14;
     }
+    settle();
     let spin_mark = d.mark();
     if !d.send(&[0x03], "spinint") || !d.read_until(spin_mark, PROMPT, 1, "spinint-prompt") {
         return 14;
     }
 
     // (h3) The same with a handler: it runs inside the spin, ends the loop,
-    //      and the child writes HANDLED and exits 0.
+    //      and the child writes HANDLED and exits 0. The same settle.
     leg("spinnote");
     let m = d.mark();
     if !d.send(b"debug-child spin-note\r", "spinnote-spawn")
@@ -660,6 +662,7 @@ fn run() -> i64 {
     {
         return 15;
     }
+    settle();
     let note_mark = d.mark();
     if !d.send(&[0x03], "spinnote")
         || !d.read_until(note_mark, b"HANDLED", 1, "spinnote-handled")

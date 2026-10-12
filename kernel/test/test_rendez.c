@@ -2093,6 +2093,8 @@ static bool nt_teardown(struct Thread *t[2]) {
     return true;
 }
 
+void notes_release_claims_for_test(struct Thread *t);
+
 // rendez.caught_note_prefers_awake -- the walk prefers a thread that is not
 // blocked: main, awake, is designated and the peer asleep in an unwinding wait
 // is not woken (the L285 shape). Main then enters an unwinding wait and unwinds
@@ -2234,9 +2236,11 @@ void test_rendez_caught_note_exit_drop(void) {
 
 // rendez.caught_note_holder_rewake -- a claim can outlive its note, when another
 // thread's tail delivers it, and its holder must still take the family's next
-// note. Main unwinds for one interrupt; the note is then taken off the queue as
-// a peer's tail would take it; main blocks again in an unwinding wait, holding
-// the claim with nothing queued. A second interrupt finds the family claimed,
+// note. The peer sits in a wait that holds, so main is the one thread that can
+// take a note (an awake peer would be picked first). Main unwinds for one
+// interrupt; the note is then taken off the queue as a peer's tail would take
+// it; main blocks again in an unwinding wait, holding the claim with nothing
+// queued. A second interrupt finds the family claimed,
 // so no thread is picked: only the walk's re-wake of the holder ends main's
 // wait (caught_target.tla BUGGY_NO_REKICK).
 void test_rendez_caught_note_holder_rewake(void);
@@ -2244,7 +2248,8 @@ void test_rendez_caught_note_holder_rewake(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
     struct Thread *t[2];
     bool made   = nt_setup(true, t);
-    bool m1     = made && nt_run(t[0], 0, NT_UWAIT, true);
+    bool held   = made && nt_run(t[1], 1, NT_HWAIT, true);
+    bool m1     = held && nt_run(t[0], 0, NT_UWAIT, true);
     bool post1  = m1 && test_caught_post(g_nt_proc);
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
     while (post1 && !nt_done(0) && timer_now_ns() < dl) sched();
@@ -2264,9 +2269,12 @@ void test_rendez_caught_note_holder_rewake(void) {
     while (post2 && !nt_done(0) && timer_now_ns() < dl) sched();
     bool back2  = post2 && nt_done(0);
     int  rc2    = g_nt[0].rc;
+    bool peer_held = held && nt_blocked(t[1], 1) && !(nt_target(t[1]) & NT_FAM);
     bool down   = nt_teardown(t);
 
-    TEST_ASSERT(made && m1 && post1, "main asleep, the first note posted");
+    TEST_ASSERT(made && held && m1 && post1,
+                "the peer in a wait that holds, main asleep, the first note posted");
+    TEST_ASSERT(peer_held, "the peer rode both notes out, never designated");
     TEST_ASSERT(down, "both threads returned and were reclaimed");
     TEST_EXPECT_EQ(rc1, SLEEP_NOTEINTR, "main unwound for the first note");
     TEST_ASSERT(taken && still, "the note was taken elsewhere; main still holds the claim");

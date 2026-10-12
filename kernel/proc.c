@@ -3322,8 +3322,10 @@ static bool caught_waits(const struct Thread *x, u8 kind) {
 // thread -- p->threads is head-inserted, so the last one not exiting), any
 // thread not blocked, main blocked in an unwinding wait, then any thread
 // blocked in one. A thread not blocked reaches an EL0-return tail soon (an EL0
-// spinner by the kick), so a sleeper is interrupted only when none can. Linux's
-// complete_signal makes the same choice.
+// spinner by the kick), so a sleeper is interrupted only when none can. This
+// is the operator's order, not Linux's: complete_signal takes the target
+// (main, for kill) whenever it can take the signal, waking it from an
+// interruptible sleep even while a worker runs.
 static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster,
                                   struct Thread *skip) {
     struct Thread *main_t = NULL;
@@ -3419,16 +3421,14 @@ void proc_caught_note_walk(struct Proc *p, struct Thread *skip) {
     // A claim or a designation can outlive the note it was taken for, when
     // another thread's tail delivered it, and its holder must still take the
     // family's next note. Wake a holder blocked in an unwinding wait to re-read
-    // (BUGGY_NO_REKICK).
+    // (BUGGY_NO_REKICK), and kick one that is running, as a designation is.
     if (pheno && (caught & held)) {
         for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
             irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
             u32 h = (u32)(__atomic_load_n(&x->note_claim, __ATOMIC_RELAXED) |
                           __atomic_load_n(&x->note_target, __ATOMIC_RELAXED));
-            struct Rendez *r = x->rendez_blocked_on;
-            if ((h & caught & held) && caught_waits(x, CAUGHT_WAIT_UNWINDS) &&
-                r && r != &x->debug_rendez)
-                wakeup(r);
+            if ((h & caught & held) && !caught_waits(x, CAUGHT_WAIT_HOLDS))
+                caught_rouse_locked(x);
             spin_unlock_irqrestore(&x->wait_lock, ws);
         }
     }

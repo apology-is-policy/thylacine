@@ -1690,9 +1690,11 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     ctx->sp       = sigframe;
     ctx->elr      = act->handler;
     // BTYPE: the tail may have stopped EL0 between an indirect branch and its
-    // target, and the handler is not that target (Linux's setup_return). The
-    // save above keeps it for the restore. Otherwise the handler runs with the
-    // PSTATE EL0 had, as the Plan 9 note path leaves it.
+    // target, and the handler is not that target. The save above keeps it for
+    // the restore. The handler is entered with BTYPE 0, as at every syscall
+    // return, so it needs no landing pad; Linux's setup_return sets BTYPE_C
+    // instead, which would make one mandatory on a guarded page. Otherwise the
+    // handler runs with the PSTATE EL0 had, as the Plan 9 note path leaves it.
     ctx->spsr    &= ~SPSR_EL1_BTYPE;
 }
 
