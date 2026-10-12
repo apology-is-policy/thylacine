@@ -128,11 +128,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-12 [[chg-2026-10-12-group-status-first-claim]] — A dying group keeps its status; a page-in its death abandoned is that death
+- 2026-10-12 [[chg-2026-10-12-loom-setup-ref-and-settle]] — Loom setup holds its own reference across the install; the rollback settles
 - 2026-10-12 [[chg-2026-10-12-loom-sq-release-after-copy]] — The SQ head is published only after the copy (SQ-1)
 - 2026-10-08 [[chg-2026-10-08-exec-device-reset]] — Exec resets the image's devices; the last reference resets what is mapped
 - 2026-10-08 [[chg-2026-10-08-image-holder-record-land]] — capmark's land: the holder record's verification, which its change note left as an unfilled marker
 - 2026-10-08 [[chg-2026-10-08-image-holder-record]] — An address space records every holder that has left it, and the I-39 image join weighs the record; the code-alias count retires
 - 2026-10-08 [[chg-2026-10-08-vma-linkage-guard]] — A VMA its address space's list does not hold is never removed, and the weft reaper unmaps only the space it locked
 - 2026-10-08 [[chg-2026-10-08-weft-reap-test-mark]] — The live weft reaper never sweeps a test's binding
-- 2026-10-07 [[chg-2026-10-06-seam90-close]] — A blocking 9P reader unwinds at any byte for a death, a stop or a caught note; the client keeps the partial frame
 <!-- generated:end -->

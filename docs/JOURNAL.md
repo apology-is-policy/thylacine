@@ -22,6 +22,53 @@ needed the operator.
 
 
 ---
+## 2026-10-12 (main, Opus 5.5, effort max) -- Loom setup holds its own reference across the install; the rollback settles (Corona's fix, main's gate) (landed)
+
+**What this is.** Two defects in the ordinary `SYS_LOOM_SETUP` path, live on
+main cc422b913. Corona found them while reading that path for the private
+bridge (NA-1), enqueued them (OPEN-BUGS 2026-10-12 08:46Z and 08:43Z), fixed
+and audited them on corona/async-memory (6a5039788, guest-verified 3f816c8a4),
+and built the port: 3f4896413, one commit whose parent is main cc422b913 (yip
+0212). Main built it, gated it and landed it as a fast-forward; no
+cherry-pick was needed.
+
+**The defects.** (1) P1, latent, EL0-reachable kernel UAF write.
+`sys_loom_setup_for_proc` wrote the owner fields, the ring's charge record and
+every out field through `l` after `handle_alloc` had adopted the Loom's only
+reference. A sibling thread that closed the new fd in that window (a
+lowest-free-slot guess is enough) freed the Loom under those stores. Setup now
+takes its own reference before the install and drops it as its last act, after
+which it does not touch `l`. (2) P3, I-32, self-only. The params-copyout-fault
+rollback ran `handle_close` and then `burrow_unmap`. After the close the unmap
+is the ring's final drop, and `burrow_unmap` has no payer, so the charge record
+died unrefunded: a caller passing a read-only params page leaked the ring's
+pages from its own budget on every attempt. `sys_loom_setup_rollback` closes
+and then detaches through the settling path; whichever drop ends the ring
+claims the record.
+
+**Evidence on main's tree.** Port 3f4896413 on main cc422b913: suite 1977/1977
+(main's 1975 plus loom.setup_close_race and loom.setup_rollback_settles).
+Corona's mutants, re-taken in main's tree by name (na1-mutants.py): M4 (no own
+reference) fails exactly loom.setup_close_race, at "the Loom outlives a close
+that lands at install"; M5 (burrow_unmap in the rollback) fails exactly
+loom.setup_rollback_settles, at "the rollback settles the ring's charge
+exactly" (1976/1977 each), as Corona predicted. test-fault 8/8; ci-smp-gate
+N=10 50/50 (default smp1/4/8, ubsan smp4/8, 0 corruption); check-production
+--all PASS (the KERNEL_TESTS=OFF shape, where the new test hook compiles out,
+builds and boots).
+
+**One thing taken on trust, and why that is safe.** Corona's mutant script
+(`na1-mutants.py`) lives only in their checkout; it edits by an anchor that
+must occur exactly once and refuses otherwise, so a leg that applied is the
+named mutant. Corona warned that M4 can pass by chance if the freed page is
+reallocated inside the window (their audit F3) and asked for a second run if it
+ever did. It failed on the first run, so none was taken.
+
+**Open.** Corona's audit F2 [P3], the rollback's fd number and VA reusable by a
+sibling thread, was closed with a reason: a self-race inside one Proc, in which
+every ledger still settles exactly once.
+
+---
 ## 2026-10-12 (main, Opus 5.5, effort max) -- SQ-1 lands on main: the SQ head is published only after the copy (Corona's fix, main's gate) (landed)
 
 **What this is.** Corona found, specified, fixed and audited SQ-1 on
