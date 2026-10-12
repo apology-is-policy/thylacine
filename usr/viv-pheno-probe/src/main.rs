@@ -935,6 +935,7 @@ const NP5_UNSET: u64 = 0xDEAD;
 static NP5_ENTER_NS: AtomicU64 = AtomicU64::new(0);
 static NP5_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 static NP5_SIGS: AtomicU64 = AtomicU64::new(0);
+static NP5_INTRS: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn np5_poller_main(_arg: u64) -> ! {
     #[repr(C)]
@@ -944,7 +945,7 @@ extern "C" fn np5_poller_main(_arg: u64) -> ! {
         revents: i16,
     }
     let mut pfd = [Pfd { fd: NP5_POLL_FD.load(Ordering::SeqCst) as i32, events: 0x001, revents: 0 }];
-    let ts_5s: [i64; 2] = [5, 0];
+    const WAIT_NS: u64 = 5_000_000_000;
     NP5_ENTERED.store(1, Ordering::SeqCst);
     unsafe {
         let _ = svc3(NR_FUTEX, core::ptr::addr_of!(NP5_ENTERED) as u64,
@@ -952,7 +953,29 @@ extern "C" fn np5_poller_main(_arg: u64) -> ! {
         let s0 = sig_fired();
         let t0 = mono_ns();
         NP5_ENTER_NS.store(t0, Ordering::SeqCst);
-        let r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_5s.as_ptr() as u64, 0, 8, 0);
+        // A caught note ends the wait early (ARCH 8.8.3), and a child's SIGCHLD
+        // may unwind THIS thread rather than the main one: a process-directed
+        // signal goes to any thread that does not block it. ppoll is never
+        // restarted, so the wait is re-issued with the time left, as every other
+        // wait here does; only -EINTR is retried, so a lost wake still times out.
+        let mut r;
+        let mut intrs = 0u64;
+        loop {
+            let spent = mono_ns().wrapping_sub(t0);
+            if spent >= WAIT_NS {
+                r = 0;
+                break;
+            }
+            let left = WAIT_NS - spent;
+            let ts: [i64; 2] = [(left / 1_000_000_000) as i64, (left % 1_000_000_000) as i64];
+            r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0, 8, 0);
+            if r == -4 && intrs < 64 {
+                intrs += 1;
+                continue;
+            }
+            break;
+        }
+        NP5_INTRS.store(intrs, Ordering::SeqCst);
         NP5_WAIT_NS.store(mono_ns().wrapping_sub(t0), Ordering::SeqCst);
         NP5_SIGS.store(sig_fired().wrapping_sub(s0), Ordering::SeqCst);
         NP5_REVENTS.store(pfd[0].revents as u16 as u32, Ordering::SeqCst);
@@ -3283,6 +3306,8 @@ unsafe fn run_linux() -> ! {
         k = put_dec(&mut mk, k, NP5_SIGS.load(Ordering::SeqCst) as i64);
         k = put_bytes(&mut mk, k, b" signo=");
         k = put_dec(&mut mk, k, sig_signo() as i64);
+        k = put_bytes(&mut mk, k, b" intrs=");
+        k = put_dec(&mut mk, k, NP5_INTRS.load(Ordering::SeqCst) as i64);
         k = put_bytes(&mut mk, k, b"\n");
         leg!(rep, false, &mk[..k]);
     }
