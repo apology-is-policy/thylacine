@@ -68,8 +68,26 @@ static const char *loom_bridge_fixture_run(void) {
 
 #else
 
+#include <thylacine/caps.h>
+#include <thylacine/weft.h>
+
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+extern s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
+
+// Weft-share [va, va+len) with CAP_HW_CREATE lent for the call, then consume
+// any share it registered so nothing outlives the probe. The share's id, or -1.
+static s64 bridge_weft_share(struct Proc *p, u64 va, u64 len) {
+    u64 caps = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&p->caps, caps | CAP_HW_CREATE, __ATOMIC_RELEASE);
+    s64 id = sys_weft_share_for_proc(p, va, len);
+    __atomic_store_n(&p->caps, caps, __ATOMIC_RELEASE);
+    if (id > 0) {
+        struct Burrow *v = weft_share_claim((u64)id);
+        if (v) burrow_unref(v);
+    }
+    return id;
+}
 
 static struct loom_service_ref bridge_ref_at(u32 offset) {
     struct loom_service_ref r;
@@ -150,6 +168,15 @@ static const char *loom_bridge_fixture_run(void) {
     spin_unlock(&p->as->lock);
     BQ(tagged, "the ring mapping is tagged private, so fork omits it");
 
+    // Nor can it reach another Proc through a weft share, while the same caller
+    // still shares an ordinary region of its own.
+    s64 plain_va = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    s64 plain_share = plain_va > 0 ? bridge_weft_share(p, (u64)plain_va, PAGE_SIZE) : -1;
+    if (plain_va > 0) (void)sys_burrow_detach_for_proc(p, (u64)plain_va, PAGE_SIZE);
+    s64 ring_share = bridge_weft_share(p, out.ring_va, out.ring_size);
+    BQ(plain_share > 0, "an ordinary region of the same caller weft-shares");
+    BQ(ring_share == -1, "a private ring cannot be weft-shared");
+
     // ENTER never sleeps, and belongs to the creator image.
     BQ(loom_private_enter(l, p, 0, 1, 0) == -T_E_INVAL, "ENTER with min_complete refused");
     BQ(loom_private_enter(l, p, 0, 0, LOOM_ENTER_GETEVENTS) == -T_E_INVAL,
@@ -158,6 +185,23 @@ static const char *loom_bridge_fixture_run(void) {
     BQ(loom_private_enter(l, q, 0, 0, 0) == -T_E_ACCES, "another image cannot ENTER");
     BQ(sys_loom_register_for_proc(p, fd, LOOM_REGISTER_HANDLES, NULL, 0) == -T_E_OPNOTSUPP,
        "HANDLES on a private ring refused");
+
+    // An ordinary ring in the same image stays out of the private inners.
+    struct loom_params kp;
+    hidx_t lfd = -1;
+    int legacy = sys_loom_setup_for_proc(p, 2, 0, &kp, &lfd);
+    int legacy_enter = 0, legacy_reg = 0;
+    struct Handle lh;
+    if (!legacy && handle_get(p, lfd, &lh) == 0) {
+        bridge_header(sizeof(struct loom_service_reserve));
+        legacy_enter = loom_private_enter((struct Loom *)lh.obj, p, 0, 0, 0);
+        legacy_reg = bridge_reg((struct Loom *)lh.obj, p, LOOM_REGISTER_SERVICE_SLOT, NULL);
+        handle_put(&lh);
+    }
+    if (!legacy) sys_loom_setup_rollback(p, lfd, kp.ring_va, kp.ring_size);
+    BQ(legacy == 0, "an ordinary ring beside the private one");
+    BQ(legacy_enter == -T_E_INVAL, "private ENTER refuses an ordinary ring");
+    BQ(legacy_reg == -T_E_OPNOTSUPP, "a private register op refuses an ordinary ring");
 
     // SLOT: published only once the caller holds its result; a fault burns it.
     u32 slots0 = bridge_live_slots(l);

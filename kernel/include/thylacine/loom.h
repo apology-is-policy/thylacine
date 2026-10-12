@@ -841,13 +841,14 @@ void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_si
 
 // Testable register inner. Resolves the `n` fds in `fds[]` (each must be a
 // KOBJ_SPOOR handle in p) into the ring at `loom_fd`'s registered-handle table.
-// Returns 0 / -1.
+// Returns 0 / -1, or -EOPNOTSUPP on a private ring (it names targets instead).
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n);
 
 // Loom-6: testable register inner for LOOM_REGISTER_BUFFERS. Resolves the `n`
 // VA ranges in `bufs[]` (each within one anon RW VMA of `p`) into `loom_fd`'s
-// registered-buffer table via loom_register_buffers. Returns 0 / -1.
+// registered-buffer table via loom_register_buffers. Returns 0 / -1; a private
+// ring routes to its private registration and returns that call's errno.
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n);
 

@@ -27,8 +27,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --private-async-qual)
-            # The kernel tools/build.sh builds with PRIVATE_ASYNC_QUAL=y, in its
-            # own dir (docs/ASYNC-SERVICE-ABI.md, Qualification bridge).
+            # The kernel `tools/build.sh kernel --config <preset> --set
+            # PRIVATE_ASYNC_QUAL=y` builds, in its own dir (docs/ASYNC-SERVICE-ABI.md,
+            # Qualification bridge); the preset is what puts the suite in it.
             private_async_qual=1
             shift
             ;;
@@ -163,7 +164,9 @@ if [[ ! -f "$KERNEL_ELF" ]]; then
     if [[ "$private_async_qual" == 1 ]]; then
         # A fallback build here would make the DEFAULT shape and boot nothing.
         echo "==> FAIL: no qualification kernel at $KERNEL_ELF." >&2
-        echo "    Build it: tools/build.sh kernel --set PRIVATE_ASYNC_QUAL=y" >&2
+        # Name a preset: a bare --set selects none, and TESTS then defaults to n,
+        # so the suite this flag exists to run would not be in the kernel.
+        echo "    Build it: tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y" >&2
         exit 1
     fi
     echo "==> Kernel ELF missing; building..."

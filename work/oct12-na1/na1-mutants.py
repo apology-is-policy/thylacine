@@ -10,6 +10,8 @@ M5  the setup rollback unmaps with the unsettled burrow_unmap (the pre-fix
     leak). Default image.
 M6  a private register reservation is published before its result copyout, so
     a faulted copyout must roll back a LIVE slot. Qualification image.
+M7  SYS_WEFT_SHARE admits a private ring's mapping (the type gate alone sees
+    plain ANON). Qualification image.
 """
 import sys
 
@@ -44,6 +46,12 @@ MUTANTS = {
             "    int rc = copyout(ctx, at, &ref, sizeof(ref)) ? -T_E_FAULT : publish(l, ref);\n",
             "    int rc = publish(l, ref);   // MUTANT M6: published before the result copyout\n"
             "    if (!rc && copyout(ctx, at, &ref, sizeof(ref))) rc = -T_E_FAULT;\n")],
+    "m7": [("kernel/syscall.c",
+            "    if (vma->flags & VMA_FLAG_PRIVATE_RING) {\n"
+            "        spin_unlock(&p->as->lock);\n"
+            "        return -1;\n"
+            "    }\n",
+            "    // MUTANT M7: a private ring passes to the type gate\n")],
 }
 FILES = sorted({f for pairs in MUTANTS.values() for f, _, _ in pairs})
 

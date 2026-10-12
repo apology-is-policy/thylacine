@@ -3951,7 +3951,7 @@ chain witness and M2, spec registry and a live ClaimExclusive, atomic dropped).
 without hooks or a build here; main builds, gates, renders the vault view and
 lands it.
 
-## NA-1: the private syscall bridge (Corona, October 12 -- IN FLIGHT, unbuilt)
+## NA-1: the private syscall bridge (Corona, October 12 -- audit closed, mutant run pending)
 
 Step 1 of the transferred sequence needs userspace to reach the private ABI.
 The operator ratified two choices (ASYNC-SERVICE-ABI.md, Qualification bridge):
@@ -3966,3 +3966,23 @@ main, enqueued in OPEN-BUGS and fixed here: a setup that touched the Loom after
 `handle_alloc` adopted its only reference (a racing close frees it), and a
 copyout-fault rollback whose unsettled unmap lost the ring's charge. Their main
 port follows the guest run. Nothing is activated; the lever is in no preset.
+
+**Progress, October 12, 09:33-10:2x UTC.**
+- **Built.** Both kernels built from 6308d5b2b with no new warnings. One boot of
+  each passed 1869/1869, with no extinction and every new test PASS
+  (work/oct12-na1/prebuild-20261012T093313Z).
+- **Dossier pass.** The new dossier is sub-kernel-loom-bridge, plus six
+  co-updates and the AUDIT-TRIGGERS row (6308d5b2b).
+- **Audit round 1.** Fable 5.1 reviewed Opus 5.5's work and found 0 P0, 0 P1,
+  0 P2 and 5 P3, plus one P2 I found myself:
+  - **S1 (P2).** SYS_WEFT_SHARE admitted a private ring's plain-ANON mapping, so
+    a CAP_HW_CREATE holder could hand its ring to another Proc. It now refuses
+    the VMA tag. Witness: the qualification body; mutant M7.
+  - **F1, F4, F5 are fixed:** the build hint, the stale contracts, and coverage
+    of ordinary rings.
+  - **F3** is noted in the M4 leg.
+  - **F2** is closed with a reason: a self-race inside one Proc in which every
+    ledger still settles exactly once.
+
+The full mutant run (M3-M7) validates the close commit. The push and the main
+port of the two legacy fixes follow it.

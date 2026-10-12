@@ -7491,6 +7491,13 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
         spin_unlock(&p->as->lock);
         return -1;
     }
+    // A private Loom ring's pages submit operations as its creator, so no other
+    // Proc may ever map them -- the reason fork omits them, too. Its Burrow is
+    // plain ANON, so the type gate below would admit it.
+    if (vma->flags & VMA_FLAG_PRIVATE_RING) {
+        spin_unlock(&p->as->lock);
+        return -1;
+    }
     struct Burrow *v = vma->burrow;
     // Admission (G-2 + Warp-2): ANON (a netd flow ring), or a KERNEL-MINTED
     // share-admissible DMA subtype -- the device-passive weave (tapestryd's

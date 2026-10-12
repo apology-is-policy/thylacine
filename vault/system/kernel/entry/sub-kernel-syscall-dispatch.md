@@ -1368,7 +1368,9 @@ copies the op's fixed-size record once into kmalloc'd memory, and results return
 through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
 BUFFERS and ENTER branch on `loom_is_private`. A params copyout fault on either
 ring kind calls `sys_loom_setup_rollback`. Without the qualification lever,
-every private arm is -EOPNOTSUPP. Mechanism and fixes: [[sub-kernel-loom-bridge]].
+every private arm is -EOPNOTSUPP. `sys_weft_share_for_proc` refuses a
+private-ring VMA, so no other Proc can map one ([[sub-kernel-weft]]). Mechanism
+and fixes: [[sub-kernel-loom-bridge]].
 
 ## Terminal interaction suboperations
 

@@ -283,5 +283,6 @@ work; the record does not assert a new independent adversarial audit.
 - each register record copied once, at its op's fixed size; TARGET/SLOT/POOL publish only after the result copyout, and a faulted copyout rolls back the call's own unpublished reservation;
 - ENTER never sleeps, copies before it releases sq_head, and refuses outside the creator image;
 - the rollback's fd and ring VA against sibling-thread reuse.
+- every path by which a mapping's pages can reach ANOTHER Proc (fork, rfork, `SYS_WEFT_SHARE`, any future export) refuses a `VMA_FLAG_PRIVATE_RING` VMA. Round 1's own prosecutor checked the paths it was named and missed weft share (S1, closed with mutant M7).
 
 The independent review is the NA-1 audit round (Fable reviewing Opus). An EL0 probe of the handlers' usercopy is owed to NA-2.

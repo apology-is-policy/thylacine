@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -78,6 +78,15 @@ unshareable. There is no flag a caller can set to admit one. Sharing a region th
 device *interprets* is therefore impossible by construction, which is the point:
 the discriminant is minted at allocation by the kernel (a subtype bit, or the
 burrow type) and is create-immutable.
+
+**One ANON mapping is refused by its VMA, not its type: a private Loom ring
+(October 12).** A private ring's Burrow is plain ANON, so the type gate admits it.
+Its pages submit operations as the ring's creator, and no other Proc may ever map
+them; fork omits them for the same reason. `sys_weft_share_for_proc` therefore
+refuses any VMA tagged `VMA_FLAG_PRIVATE_RING` before the type gate. The register
+side is the only way in, because the claim side sees only registered Burrows. The
+regression is the weft-share assertion in `loom.private_bridge` (qualification
+image), with mutant M7 ([[sub-kernel-loom-bridge]]).
 
 **The hostmem kind must be widened in lockstep at BOTH reading sites, and once it
 was not.** Admission is read twice — `weft_claimed_kind` (the claim-time

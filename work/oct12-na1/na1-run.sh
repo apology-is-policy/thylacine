@@ -11,7 +11,12 @@
 #              only extinction is the suite's own.
 #   M6         qualification-image mutant: predicted to EXTINCT with the bridge's
 #              own invariant ("private register lost its reservation rollback")
-#              while loom.private_bridge is the running test.
+#              while loom.private_bridge is the running test. It is also the
+#              proof that --private-async-qual booted the qualification kernel:
+#              no log line says which kernel ran, and a default boot cannot
+#              reach this extinction.
+#   M7         qualification-image mutant: SYS_WEFT_SHARE admits the private
+#              ring, so loom.private_bridge FAILs at its weft-share assertion.
 #   REBUILD    both kernels from the committed tree, compared with the controls.
 #   GUARD      the derived sq_head single-writer guard (SQ-1), re-taken.
 #   SHAPE      KERNEL_TESTS-off compiles of the touched files; no setup hook
@@ -42,6 +47,7 @@ W4='the Loom outlives a close that lands at install'
 W5A="the rollback settles the ring's charge exactly"
 W5B="the ordinary ring's rollback settles its charge exactly"
 W6='private register lost its reservation rollback'
+W7='a private ring cannot be weft-shared'
 MUTATED=0
 
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
@@ -124,7 +130,7 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 record "HEAD $(git rev-parse HEAD)"
 python3 "$MUT" --check > "$OUT/anchors.txt" || { cat "$OUT/anchors.txt"; echo "REFUSING: mutant anchors"; exit 3; }
-for w in "$W3A" "$W3B" "$W4" "$W5A" "$W5B" "$W6"; do
+for w in "$W3A" "$W3B" "$W4" "$W5A" "$W5B" "$W6" "$W7"; do
   c=$(cat kernel/test/*.c kernel/test/*.h kernel/*.c | /usr/bin/grep -cF "\"$w\"" || true)
   [ "$c" = 1 ] || { echo "REFUSING: '$w' occurs $c times"; exit 3; }
 done
@@ -207,6 +213,10 @@ expect_fails M3 2 "loom.private_sq_release_after_copy|$W3A" "loom.private_sq_rel
 record "M3 DISCRIMINATED: exactly the two frontend witnesses FAIL at their named assertions"
 
 echo "=== M4: the legacy setup holds no reference across handle_alloc ==="
+# The freed Loom's page is untouched (the buddy keeps its lists in struct page and
+# never poisons), so setup's post-install stores land harmlessly -- unless another
+# CPU allocates that page inside the window. Then the leg can exit 2 with garbage
+# instead: re-run it once before treating that as a kernel finding.
 mutant m4 default
 expect_fails M4 1 "loom.setup_close_race|$W4"
 record "M4 DISCRIMINATED: exactly loom.setup_close_race FAILs at its named assertion"
@@ -223,6 +233,11 @@ _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
 _last=$(/usr/bin/grep -oE '\[test\] [^ ]+ \.\.\.' "$B" | tail -1)
 [ "$_last" = "[test] loom.private_bridge ..." ] || { echo "M6: the running test was '$_last'"; exit 2; }
 record "M6 DISCRIMINATED: the qual boot extincts with exactly '$W6' inside loom.private_bridge"
+
+echo "=== M7: weft share admits a private ring ==="
+mutant m7 qual
+expect_fails M7 1 "loom.private_bridge|$W7"
+record "M7 DISCRIMINATED: exactly loom.private_bridge FAILs at its weft-share assertion"
 
 echo "=== REBUILD both kernels from the committed tree ==="
 lease rebuild

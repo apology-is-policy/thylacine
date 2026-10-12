@@ -151,6 +151,8 @@ POOL create, is 1568 bytes), not stack-allocated.
   copyout fault. `loom.setup_rollback_settles` and both bridge bodies assert
   the exact page count after rollback.
 - **I-5.** The private-ring VMA tag is set under the same lock hold as the map.
+  The tag is what keeps the ring in its creator's image: fork omits it, and
+  `SYS_WEFT_SHARE` refuses it (audit close S1).
 - **I-29 / I-30.** ENTER copies before release, through the single sq_head writer.
 
 ## Error paths
@@ -193,9 +195,26 @@ Each is predicted red by name in `na1-run.sh`.
 
 ## Caveats
 
-- Status on 2026-10-12: committed (6a5039788) and checked with
-  `-fsyntax-only` only. The guest run (`work/oct12-na1/na1-run.sh`) and the audit
-  round are pending. This dossier is updated when they land.
+- **Audit round 1 (2026-10-12).** Fable 5.1 reviewed Opus 5.5's work and found
+  0 P0, 0 P1, 0 P2 and 5 P3; I found one P2 myself.
+  - **S1 (P2).** `SYS_WEFT_SHARE` admitted a private ring's ANON mapping, so a
+    CAP_HW_CREATE holder could export its ring. Fixed by refusing the VMA tag.
+    Witness: the qualification body; mutant M7.
+  - **F1.** test.sh's hint built a kernel without the suite. Fixed: the hint now
+    names `--config ci`.
+  - **F2 (closed, not fixed).** The rollback closes by fd number and detaches by
+    VA, and a sibling thread can reuse either before it runs. That harms only
+    the Proc racing its own syscall, every ledger still settles once, and the
+    fix would be an identity-checked close.
+  - **F3.** M4 is nondeterministic if the freed page is reallocated in the
+    window. Noted in its leg.
+  - **F4.** Stale "0 / -1" contracts in loom.h. Fixed.
+  - **F5.** The qualification body now drives an ordinary ring into both private
+    inners.
+- **Before the close:** both kernels built from 6308d5b2b and each passed one
+  boot at 1869/1869 (`work/oct12-na1/prebuild-20261012T093313Z`). Nothing in a
+  boot log shows which kernel ran. M6's extinction is the proof that the
+  qualification kernel booted. The full mutant run follows the close commit.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
