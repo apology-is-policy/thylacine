@@ -30,7 +30,7 @@ impl Hub {
             .slots
             .iter()
             .position(Option::is_none)
-            .ok_or(Error::Storage(super::ring_payload::Error::Busy))?;
+            .ok_or(Error::Storage(super::ring_payload::Error::Full))?;
         self.slots[i] = Some(Registration { waker: None });
         Ok(i)
     }

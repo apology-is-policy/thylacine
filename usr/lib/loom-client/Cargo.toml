@@ -1,8 +1,8 @@
 [package]
 name = "loom-client"
 version = "0.1.0"
-# The cores were written and tested as 2024, whose temporary-drop rules decide
-# when a RefCell borrow ends (docs/ASYNC-SERVICE-ABI.md, "Native Rust client cores").
+# The cores were written and tested as 2024; keeping it installs exactly what
+# was tested (docs/ASYNC-SERVICE-ABI.md, "Native Rust client cores").
 edition = "2024"
 publish.workspace = true
 license.workspace = true

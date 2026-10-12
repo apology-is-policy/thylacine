@@ -36,6 +36,8 @@ CORE_EDITS = {
          'envelope answer, C -ENOSPC'),
     ],
     'request_book': [('//! Uninstalled request/CQ correlation', 'Uninstalled request', 'Request', 'installed')],
+    'fixed_futures': [('.ok_or(Error::Storage(super::ring_payload::Error::Busy))?;', 'super::ring_payload::Error::Busy',
+                       'super::ring_payload::Error::Full', 'a full registration table answers Full, as the envelope does')],
     'fixed_requests': [('//! Typed fixed request ownership, uninstalled.', ', uninstalled.', '.', 'installed')],
     'local_tasks': [('//! Uninstalled bounded creator-thread', 'Uninstalled bounded', 'Bounded', 'installed')],
     'local_wait': [('//! Uninstalled creator-thread wait', 'Uninstalled creator', 'Creator', 'installed')],
@@ -82,8 +84,12 @@ def edit(text, edits, where):
         # replaces it or keeps it beside an added element, so no edit can drop code.
         tok = r'[A-Za-z_][A-Za-z0-9_:]*'
         parts = new.split(',')
-        if not anchor.startswith('//!') and not (re.fullmatch(tok, old) and all(re.fullmatch(tok, t) for t in parts)
-                                                 and (len(parts) == 1 or old in parts)):
+        if anchor.startswith('//!'):
+            # A doc edit stays one doc line: it cannot add a line, so it cannot add code.
+            if '\n' in anchor or '\n' in new or not anchor.replace(old, new).startswith('//!'):
+                raise SystemExit(f'{where}: a doc edit must stay one //! line: {new!r}')
+        elif not (re.fullmatch(tok, old) and all(re.fullmatch(tok, t) for t in parts)
+                  and (len(parts) == 1 or old in parts)):
             raise SystemExit(f'{where}: a code edit must swap or extend one path token: {old!r} -> {new!r}')
         text = text.replace(anchor, anchor.replace(old, new))
     return text

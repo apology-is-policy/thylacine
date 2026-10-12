@@ -47,10 +47,12 @@ fn main() {
 def main():
  p=argparse.ArgumentParser();p.add_argument('--logs',type=Path,required=True);a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
  with tempfile.TemporaryDirectory(prefix='loom-rust-ownership-') as tmp:
-  t=Path(tmp);shutil.copyfile(ROOT/'usr/lib/libthyla-rs/src/loom.rs',t/'loom.rs');(t/'loom').mkdir();shutil.copyfile(ROOT/'usr/lib/libthyla-rs/src/loom/service_abi.rs',t/'loom/service_abi.rs')
+  t=Path(tmp);shutil.copyfile(ROOT/'usr/lib/libthyla-rs/src/loom.rs',t/'loom.rs');(t/'loom').mkdir();shutil.copyfile(ROOT/'usr/lib/libthyla-rs/src/loom/ring_abi.rs',t/'loom/ring_abi.rs')
+  # loom.rs re-exports service_abi from the loom-client crate, so the real crate is built and linked.
+  lib=t/'libloom_client.rlib';r=subprocess.run(['rustc','--edition=2024','--crate-type=rlib','--crate-name','loom_client',str(ROOT/'usr/lib/loom-client/src/lib.rs'),'-o',str(lib)],capture_output=True,text=True,timeout=120);(a.logs/'loom-client.log').write_text(r.stdout+r.stderr);assert r.returncode==0,r.stderr
   for name,(body,want) in {'clean':(CLEAN,None),**CASES}.items():
    src=t/(name+'.rs');src.write_text(STUBS+body);exe=t/name
-   r=subprocess.run(['rustc','--edition=2021','--crate-name','ownership',str(src),'-o',str(exe)],capture_output=True,text=True,timeout=60);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
+   r=subprocess.run(['rustc','--edition=2021','--crate-name','ownership','--extern',f'loom_client={lib}',str(src),'-o',str(exe)],capture_output=True,text=True,timeout=60);(a.logs/(name+'.log')).write_text(r.stdout+r.stderr)
    if want:assert r.returncode!=0 and f'error[{want}]' in r.stderr,(name,r.stderr)
    else:
     assert r.returncode==0,r.stderr

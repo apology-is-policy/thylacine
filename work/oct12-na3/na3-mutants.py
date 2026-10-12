@@ -57,6 +57,13 @@ C_BLOCKS = [
     ('request_book.h', 'T_REQ_EXHAUSTED=-1203', 'T_REQ_EXHAUSTED=-3', 'request book codes lie in their block'),
     ('owned_mapping.h', 'T_MAP_CLOSED=-1303', 'T_MAP_CLOSED=-3', 'mapping codes lie in their block'),
     ('paired_cq.h', 'T_CQ_CORRUPT=-1402', 'T_CQ_CORRUPT=-2', 'CQ codes lie in their block'),
+    # The -1000 family below every errno but inside another family's block.
+    ('ring_payload.h', '#define T_RING_UNCERTAIN (-1003)', '#define T_RING_UNCERTAIN (-1103)',
+     'T_RING_UNCERTAIN lies in the -1000 block'),
+    ('fixed_requests.h', '#define T_FIXED_CLOSING (-1000)', '#define T_FIXED_CLOSING (-1100)',
+     'T_FIXED_CLOSING lies in the -1000 block'),
+    ('retirement_executor.h', '#define T_RETIREMENT_CAPACITY (-1002)', '#define T_RETIREMENT_CAPACITY (-1202)',
+     'executor codes lie in the -1000 block'),
 ]
 # label, file (relative to the cloned root), anchor, sabotage, text the checker's log must hold
 ABI = [

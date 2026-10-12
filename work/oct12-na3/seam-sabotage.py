@@ -10,6 +10,8 @@ SAB = [  # file, anchor (unique), replacement, the test that must fail
  ('local_wait.rs', 'Outcome::Woke(reason)', 'Outcome::Woke(if reason == WakeReason::Event { WakeReason::Spurious } else { reason })',
   'wait_event_wake_is_reported_and_releases_the_subscription'),
  ('request_book.rs', '            kind: e.kind,\n', '            kind: Kind::Control,\n', 'delivery_reports_its_own_reserved_kind'),
+ ('fixed_futures.rs', 'ok_or(Error::Storage(super::ring_payload::Error::Full))',
+  'ok_or(Error::Storage(super::ring_payload::Error::Busy))', 'future_full_registration_table_answers_full'),
 ]
 bad = 0
 for f, a, b, test in SAB:

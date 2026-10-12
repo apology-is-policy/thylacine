@@ -110,7 +110,7 @@ existing MORE and exactly one final completion. No new private CQE flag is neede
 
 Kernel: kernel/include/thylacine/loom_service_abi.h, included by loom.h.
 Native C: usr/lib/libt/include/thyla/loom_service.h.
-Rust: usr/lib/libthyla-rs/src/loom/service_abi.rs, exported by loom.rs.
+Rust: usr/lib/loom-client/src/service_abi.rs, re-exported by libthyla-rs as loom::service_abi.
 The ring records these records travel with (params, SQE, CQE, ring header) are
 mirrored for native C in usr/lib/libt/include/thyla/loom.h, beside the three
 Loom syscall stubs. Each field offset is pinned there, and the EL0 probe checks
@@ -311,16 +311,17 @@ only their tests use them.
 - `service_abi` moves into the crate, because the cores use its records and a
   host-tested crate cannot depend on libthyla-rs. libthyla-rs re-exports it as
   `loom::service_abi`.
-- The crate is edition 2024, the edition the twins were written and tested in.
-  That edition's rules for when a temporary is dropped decide when a `RefCell`
-  borrow ends, so the same code built as 2021 could hold a borrow longer and
-  panic.
+- The crate is edition 2024, the edition the twins were written and tested in,
+  so the install builds exactly what was tested. The NA-3 audit enumerated every
+  `RefCell` borrow in the cores and found none whose end differs under 2021: the
+  pin keeps the derivation exact, and no borrow depends on it.
 - Under `cargo test` the crate is std, as the twins' own test binaries were, so
   the tests keep `Vec`, `Box` and `thread_local!` as written. Every other build,
   the guest's included, is `no_std`.
 - `make test-rust` runs the tests with `cargo test`. `make test-loom-client`
   runs them again in the release profile, which is the one the guest builds
-  (opt-level "z", overflow checks on).
+  (opt-level "z", overflow checks on). A test build still unwinds on a panic
+  where the guest aborts.
 - The tests count allocations. A pool's state is allocated before the kernel
   admits it, so the count runs from the moment the backend's `register_pool`
   returns until the client's does, and any allocation there fails the test.
@@ -333,7 +334,9 @@ full-table outcomes match C:
   with -ENOSPC. The uninstalled twin answered `Busy`, which also means that a
   fixed range or a pool slot is in use;
 - the executor's full table stays `Error::Full`, apart from a factory's error,
-  as C keeps -1001 apart from -ENOSPC.
+  as C keeps -1001 apart from -ENOSPC;
+- a future driver's 64-registration table, which has no C twin, answers
+  `Storage(Full)`. The uninstalled twin answered `Busy` there too.
 
 When the native adapter maps one of these to an errno, `Full` becomes ENOSPC.
 

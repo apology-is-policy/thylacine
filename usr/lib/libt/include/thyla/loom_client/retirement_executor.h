@@ -15,6 +15,7 @@ struct t_retirement_progress{size_t visited,reclaimed,occupied;};
 #define T_RETIREMENT_FULL (-1001)
 #define T_RETIREMENT_CAPACITY (-1002)
 _Static_assert(T_RETIREMENT_FULL<=-1000&&T_RETIREMENT_CAPACITY<=-1000,"executor codes must lie below every errno");
+_Static_assert(T_LOOM_CLIENT_LOCAL(T_RETIREMENT_FULL,1000)&&T_LOOM_CLIENT_LOCAL(T_RETIREMENT_CAPACITY,1000),"executor codes lie in the -1000 block");
 /* Factory must produce exactly one owned driver on zero, NULL on failure; the
  * driver's storage is the factory's. Capacity and the client cell are secured
  * before the factory runs. */

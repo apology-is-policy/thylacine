@@ -198,4 +198,13 @@ for profile in dev release; do
         echo "$results"; echo "test-loom-client: rust $profile did not pass all $declared declared tests"; exit 1; }
     echo "  rust: $profile -- $declared of $declared declared tests passed"
 done
+
+# The Rust ring's own ownership witnesses: raw registration is unsafe, and a
+# range borrow can neither alias a mutable one nor outlive its buffer.
+if ! python3 "$ROOT/tools/test-loom-rust-ownership.py" --logs "$OUT/ownership" > "$OUT/ownership.log" 2>&1; then
+    cat "$OUT/ownership.log"; echo "test-loom-client: ownership FAILED"; exit 1
+fi
+[ "$(/usr/bin/grep -c '^PASS ' "$OUT/ownership.log")" -eq 4 ] || {
+    cat "$OUT/ownership.log"; echo "test-loom-client: ownership: expected 4 PASS lines"; exit 1; }
+echo "  ownership: raw registration is unsafe; range borrows cannot alias or dangle"
 echo "test-loom-client: PASS"

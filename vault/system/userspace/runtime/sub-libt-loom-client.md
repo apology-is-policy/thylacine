@@ -93,7 +93,8 @@ to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
   `t_fixed_read` and `t_fixed_write` returned -3 both for `T_REQ_EXHAUSTED`
   (permanent) and `T_LEASE_BUSY` (transient), and `t_ring_fixed_bytes` returned
   `T_LEASE_BUSY` (-3) beside a remote -ESRCH. `T_LOOM_CLIENT_LOCAL` static
-  assertions keep each code in its block.
+  assertions keep each code in its block, the -1000 family's included (NA-3
+  audit F3: it had only an upper bound).
 - **Broken invariants are fatal.** Every check that was assert or abort is now
   `T_LOOM_CHECK`, which calls `t_loom_client_fatal(func, line)`. libt's
   definition writes `loom-client: broken invariant in <func>:<line>` to fd 2 and

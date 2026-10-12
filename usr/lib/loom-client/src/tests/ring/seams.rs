@@ -31,3 +31,31 @@ fn wait_event_wake_is_reported_and_releases_the_subscription() {
     assert_eq!((w.waits, w.sleeps, w.disarms), (1, 1, 1));
     assert!(e.needs_progress());
 }
+
+#[test]
+fn future_full_registration_table_answers_full() {
+    let p = Probe::new();
+    let b = ManyBacking {
+        buffers: std::array::from_fn(|_| Box::new(UnsafeCell::new([0; 8]))),
+        p: p.clone(),
+    };
+    let d = FutureDriver::new(fixed_requests::FixedDriver::new(b, 128).unwrap());
+    let futures: Vec<_> = (0..64)
+        .map(|i| {
+            let r = PoolMember {
+                buffer_index: i,
+                ..range(0)
+            };
+            d.write(id(0, 1), r, &[3; 8]).unwrap()
+        })
+        .collect();
+    assert_eq!(d.registrations(), 64);
+    // Every buffer is in use as well; the table answers first, and it is full.
+    assert!(matches!(
+        d.write(id(0, 1), range(0), &[3; 8]),
+        Err(fixed_requests::Error::Storage(ring_payload::Error::Full))
+    ));
+    drop(futures);
+    assert_eq!(d.registrations(), 0);
+    assert!(d.write(id(0, 1), range(0), &[3; 8]).is_ok());
+}

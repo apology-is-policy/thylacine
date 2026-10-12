@@ -152,7 +152,9 @@ tools/check-prot-mirror.py --expect-unmirrored 5 # today's absence count
 # in the dev profile and in the guest's release profile; each run must pass every
 # #[test] the crate declares, with no build warning. The mutant drivers
 # work/oct12-na2b/na2b-mutants.py (C) and work/oct12-na3/na3-mutants.py (Rust)
-# are the discrimination evidence behind it.
+# are the discrimination evidence behind it. Last, the Rust ring's ownership
+# witnesses (tools/test-loom-rust-ownership.py): raw registration must be unsafe,
+# and a range borrow can neither alias a mutable one nor outlive its buffer.
 make test-loom-client               # or: tools/test-loom-client.sh [--out DIR]
 
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --

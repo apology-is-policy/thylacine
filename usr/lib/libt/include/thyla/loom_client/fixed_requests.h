@@ -21,6 +21,7 @@ struct t_fixed_storage{struct t_fixed_driver driver;struct t_ring_core ring;stru
 #define T_FIXED_CLOSING (-1000)
 /* Admit returns it beside a factory's errno, so it lies below every errno. */
 _Static_assert(T_FIXED_CLOSING<=-1000,"T_FIXED_CLOSING must lie below every errno");
+_Static_assert(T_LOOM_CLIENT_LOCAL(T_FIXED_CLOSING,1000),"T_FIXED_CLOSING lies in the -1000 block");
 /* Consumes backend on every path; the storage must be idle. */
 int t_fixed_create(struct t_ring_backend,struct t_fixed_storage *,struct t_request_entry *,size_t,struct t_fixed_driver **);
 /* 1 once the driver, every request and read result, and the ring have ended. */

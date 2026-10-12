@@ -71,13 +71,16 @@ tests use them; `lib.rs` allows dead code outside test builds for that reason.
   collisions cannot arise. The full-table outcomes match C: the request book's
   `Error::Full` is C's `T_REQ_FULL` (-ENOSPC); the 64-member envelope answers
   `ring_payload::Error::Full` (C: -ENOSPC); the executor's `Error::Full` stays
-  apart from a factory's error (C: -1001). The adapter maps `Full` to ENOSPC.
+  apart from a factory's error (C: -1001); a future driver's full registration
+  table answers `Storage(Full)`. The adapter maps `Full` to ENOSPC.
 - **Allocation precedes admission.** `RingClient::register_pool` boxes the
   pool's whole state (`prepare`) before the backend's `register_pool`, and binds
   it afterwards without allocating. Allocation failure follows Rust's global
   policy (abort); nothing here recovers from it.
-- **One creator thread.** The cores hold `Rc` and `RefCell` and are neither
-  `Send` nor `Sync`. The only thread-safe piece is a task's waker flag
+- **One creator thread.** The cores that own state hold `Rc` and `RefCell`,
+  so they are neither `Send` nor `Sync`. Plain value types (`LeaseLedger`,
+  `Completion`, `Record`, `Delivery`, `Setup`) are both; a ledger changes only
+  through `&mut`. The only piece shared across threads is a task's waker flag
   (`local_tasks`).
 
 ## Mechanism
@@ -138,7 +141,8 @@ dispatcher swaps it with acquire-release before it polls.
 
 ## Performance
 
-Lookups scan at most 64 cells. A pool costs a few small allocations at
+Lookups scan at most 64 cells, except the request book's, which scan its
+entries: one per CQ slot, at most 8192. A pool costs a few small allocations at
 `prepare`; nothing on the completion path allocates.
 
 ## Prosecution
@@ -146,8 +150,10 @@ Lookups scan at most 64 cells. A pool costs a few small allocations at
 - **The install is mechanical.** `work/oct12-na3/na3_install.py --check` proved
   every installed core and test equal to rustfmt applied to Astra's original
   plus a listed edit set. A code edit may only swap or extend one path token, so
-  no edit can delete a statement. The edits: "uninstalled" leaves six doc lines;
-  `Error::Full` is added and the envelope answers it, and two ring tests expect it;
+  no edit can delete a statement, and a doc edit must stay one `//!` line. The
+  edits: "uninstalled" leaves seven doc lines; `Error::Full` is added and the
+  envelope and the future driver's registration table answer it, and two ring
+  tests expect it;
   one test allows `unreachable_code`, for a factory that must panic before it
   builds the future its type needs.
 - **No test lost a line.** Astra's test files are cumulative copies (650 test
@@ -160,7 +166,8 @@ Lookups scan at most 64 cells. A pool costs a few small allocations at
   `ReadFuture::request_cancel`, built `WakeReason::Event` or read
   `Delivery::kind`. In the crate that allowance covers only its own module, so
   the test build reported all three. NA-3's own tests in `tests/ring/seams.rs`
-  and `tests/request_book/seams.rs` cover them (140 tests in all), and
+  and `tests/request_book/seams.rs` cover them, with a fourth for the
+  registration table's `Full` (141 tests in all), and
   `work/oct12-na3/seam-sabotage.py` breaks each path in turn: only its new test
   fails.
 - **Mutants.** `work/oct12-na3/na3-mutants.py` carries all 110 of Astra's Rust
@@ -169,10 +176,10 @@ Lookups scan at most 64 cells. A pool costs a few small allocations at
   The verdict comes from a run of that set alone, serially, as her binaries
   held only her own file's tests: in the whole suite, a test outside the set
   that panics during unwinding aborts the binary first. A no-op mutant must
-  come out SURVIVED through the same path. Her 59 compile-fail cases run as
-  probes inside the module that holds their fixtures, after the prelude her
-  runner put before them, and must fail with her rustc code or message at the
-  probe's own lines.
+  come out SURVIVED through the same path. Her 59 cases run as probes inside
+  the module that holds their fixtures, after the prelude her runner put before
+  them: 44 must fail with her rustc code or message at the probe's own lines,
+  and 15 positive controls must compile and pass.
 - **The ABI twins.** `tools/check-loom-service-abi.py` checks `owned_mapping::Setup`
   and `paired_cq::Completion` field by field against the ring layout table.
 
