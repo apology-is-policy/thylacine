@@ -3951,7 +3951,7 @@ chain witness and M2, spec registry and a live ClaimExclusive, atomic dropped).
 without hooks or a build here; main builds, gates, renders the vault view and
 lands it.
 
-## NA-1: the private syscall bridge (Corona, October 12 -- audit closed, mutant run pending)
+## NA-1: the private syscall bridge (Corona, October 12 -- audit closed, guest legs green)
 
 Step 1 of the transferred sequence needs userspace to reach the private ABI.
 The operator ratified two choices (ASYNC-SERVICE-ABI.md, Qualification bridge):
@@ -3986,3 +3986,29 @@ port follows the guest run. Nothing is activated; the lever is in no preset.
 
 The full mutant run (M3-M7) validates the close commit. The push and the main
 port of the two legacy fixes follow it.
+
+**Guest legs, 09:44-09:58 UTC, on the close commit 3f816c8a4**
+(work/oct12-na1/run-20261012T094440Z, exit 0, Mac axis, one boot per leg):
+- **Controls.** CONTROL-D and CONTROL-Q each passed 1869/1869 with every new
+  test PASS. The qualification kernel differs from the default one, and the
+  default kernel was left untouched.
+- **Mutants.** Each one discriminated by name:
+  - M3 (frontend releases before the copy): exactly the two frontend witnesses
+    FAIL.
+  - M4 (no own reference): exactly setup_close_race FAILs.
+  - M5 (unsettled unmap): exactly the two rollback witnesses FAIL.
+  - M6 (publish before copyout): the qualification boot extincts with "private
+    register lost its reservation rollback" inside loom.private_bridge. That
+    extinction is also the proof that --private-async-qual booted the
+    qualification kernel.
+  - M7 (weft share admits the ring): exactly loom.private_bridge FAILs at its
+    weft-share assertion.
+- **Rebuild.** Both kernels rebuilt byte-identical.
+- **Guard.** Both sq_head writes are in loom_sq_release, across 243 production
+  sources.
+- **Shape.** Four files built in two shapes (default and lever) with
+  KERNEL_TESTS off; no test hook symbol survives.
+
+Not proven here: EL0 reaching the handlers' usercopy (NA-2's probe), SMP, and
+sanitizers. The Mac-axis residual is recorded per the operator vote of
+2026-10-07.

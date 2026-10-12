@@ -1,0 +1,7 @@
+mac   HELD by you for 7m, 1.9h left
+        why: corona: NA-1 full guest run (work/oct12-na1/na1-run.sh @3f816c8a4): 2 controls + 5 mutants (M3-M5 default, M6-M7 qual), each a --config ci kernel build + one boot, then rebuild both + host checks. Mutant legs MAY extinct by design. Release at the end.
+        phase: corona: na1-run.sh @3f816c8a4 -- controls, M3-M7 mutant builds+boots, rebuild; output work/oct12-na1/run-20261012T094440Z
+        runner: North-Kill-PD.local pid 38156 alive (start Mon Oct 12 11:44:40 2026)
+        pids: [38156] (their registered work -- not a kill list)
+pi    FREE
+disk: 11.7 GiB available at /Users/northkillpd/projects/thylacine-corona

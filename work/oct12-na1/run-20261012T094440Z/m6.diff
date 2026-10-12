@@ -1,0 +1,14 @@
+diff --git a/kernel/loom_service_syscall.c b/kernel/loom_service_syscall.c
+index e8bb7a6d2..7fbc01392 100644
+--- a/kernel/loom_service_syscall.c
++++ b/kernel/loom_service_syscall.c
+@@ -150,7 +150,8 @@ static int finish_reservation(struct Loom *l, struct loom_service_ref ref, u32 a
+                               loom_record_copyout_fn copyout, void *ctx,
+                               int (*publish)(struct Loom *, struct loom_service_ref),
+                               int (*rollback)(struct Loom *, struct loom_service_ref)) {
+-    int rc = copyout(ctx, at, &ref, sizeof(ref)) ? -T_E_FAULT : publish(l, ref);
++    int rc = publish(l, ref);   // MUTANT M6: published before the result copyout
++    if (!rc && copyout(ctx, at, &ref, sizeof(ref))) rc = -T_E_FAULT;
+     if (rc && rollback(l, ref)) extinction("private register lost its reservation rollback");
+     return rc;
+ }

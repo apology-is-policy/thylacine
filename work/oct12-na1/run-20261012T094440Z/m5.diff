@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index f1bc5161f..72e3ff0b3 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -7938,7 +7938,9 @@ void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_si
+     (void)handle_close(p, fd);
+     // Not burrow_unmap: that drops the mapping with no payer, so when it is the
+     // final drop the ring's charge record dies unrefunded.
+-    (void)sys_burrow_detach_for_proc(p, ring_va, ring_size);
++    spin_lock(&p->as->lock);   // MUTANT M5: the unsettled unmap
++    (void)burrow_unmap(p, ring_va, (size_t)ring_size);
++    spin_unlock(&p->as->lock);
+ }
+ 
+ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {

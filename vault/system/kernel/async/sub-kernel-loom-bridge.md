@@ -214,7 +214,16 @@ Each is predicted red by name in `na1-run.sh`.
 - **Before the close:** both kernels built from 6308d5b2b and each passed one
   boot at 1869/1869 (`work/oct12-na1/prebuild-20261012T093313Z`). Nothing in a
   boot log shows which kernel ran. M6's extinction is the proof that the
-  qualification kernel booted. The full mutant run follows the close commit.
+  qualification kernel booted.
+- **Guest legs on the close commit 3f816c8a4 are green**
+  (work/oct12-na1/run-20261012T094440Z):
+  - both controls passed 1869/1869;
+  - mutants M3 through M7 each discriminated by name, and M6's extinction proves
+    which kernel booted;
+  - both kernels rebuilt byte-identical;
+  - the sq_head guard and the production shape both hold.
+- **Still unproven:** EL0 usercopy (NA-2), SMP and sanitizers. The Mac-axis
+  residual is recorded per the 2026-10-07 vote.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
