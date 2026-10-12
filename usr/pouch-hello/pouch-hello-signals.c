@@ -20,6 +20,13 @@
 //                                         without invoking the user handler;
 //                                         the flag must NOT change.
 //   sigaction(SIGUSR1, ...)            -> EINVAL (unsupported v1.0 signum).
+//   deaths (gcpark-b)                  -> the binary re-spawns itself to die
+//                                         by abort(), a failed assert(), a
+//                                         plain `brk #1` and a NULL store; each
+//                                         waitpid must read WIFSIGNALED with
+//                                         SIGABRT, SIGABRT, SIGTRAP, SIGSEGV --
+//                                         never WIFEXITED (docs/ERRORS.md
+//                                         "The wait status").
 //
 // Output (joey relays via the pipe-to-UART):
 //   pouch-hello-signals: install handler
@@ -30,17 +37,70 @@
 //   pouch-hello-signals: raise SIGINT (ignored)
 //   pouch-hello-signals: count unchanged (count=2)
 //   pouch-hello-signals: unsupported sigaction returns EINVAL
-//   pouch-hello-signals: exit 0
+//   pouch-hello-signals: death abort reads WIFSIGNALED SIGABRT  (x4 legs)
+//   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
 // "exit 0" or non-zero exit status.
 
+#undef NDEBUG
+#include "pouch-census.h"
+#include <assert.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+static const char SELF[] = "/bin/pouch-hello-signals";
+
+// CHILD: die one way. Returns only if the death did not happen.
+static int die(const char *how) {
+    if (!strcmp(how, "abort"))  abort();
+    if (!strcmp(how, "assert")) { volatile int zero = 0; assert(zero); }
+    if (!strcmp(how, "brk"))    __asm__ __volatile__("brk #1" ::: "memory");
+    if (!strcmp(how, "segv"))   { volatile int *bad = (volatile int *)0; *bad = 1; }
+    return 0;
+}
+
+// Each death must reach the parent as the signal the kernel recorded for it.
+// Before gcpark-b every one read WIFEXITED: abort() as 127, the faults as 1.
+static int test_deaths(void) {
+    static const struct { const char *how; int sig; const char *name; } legs[] = {
+        { "abort",  SIGABRT, "SIGABRT" },
+        { "assert", SIGABRT, "SIGABRT" },
+        { "brk",    SIGTRAP, "SIGTRAP" },
+        { "segv",   SIGSEGV, "SIGSEGV" },
+    };
+    for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
+        char *cargv[] = { (char *)SELF, (char *)"die", (char *)legs[i].how, NULL };
+        pid_t pid;
+        int st = 0;
+        if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+            printf("pouch-hello-signals: death %s: respawn failed errno=%d\n",
+                   legs[i].how, errno);
+            return -1;
+        }
+        if (waitpid(pid, &st, 0) != pid) {
+            printf("pouch-hello-signals: death %s: waitpid failed errno=%d\n",
+                   legs[i].how, errno);
+            return -1;
+        }
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != legs[i].sig) {
+            printf("pouch-hello-signals: death %s: status %#x (want WIFSIGNALED %s)\n",
+                   legs[i].how, (unsigned)st, legs[i].name);
+            return -1;
+        }
+        printf("pouch-hello-signals: death %s reads WIFSIGNALED %s\n",
+               legs[i].how, legs[i].name);
+    }
+    return 0;
+}
 
 static volatile sig_atomic_t g_handler_count = 0;
 static volatile int g_handler_sig = -1;
@@ -81,7 +141,9 @@ static void on_sigint(int sig) {
 static unsigned char g_fp_sent[512] __attribute__((aligned(16)));
 static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[1], "die")) return die(argv[2]);
+
     printf("pouch-hello-signals: install handler\n");
     fflush(stdout);
 
@@ -252,7 +314,12 @@ int main(void) {
     printf("pouch-hello-signals: unsupported sigaction returns EINVAL\n");
     fflush(stdout);
 
-    printf("pouch-hello-signals: exit 0\n");
+    if (test_deaths() != 0) {
+        fflush(stdout);
+        return 10;
+    }
+
+    printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);
     return 0;
 }

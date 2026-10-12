@@ -1300,12 +1300,18 @@ static inline long t_spawn(const char *name, size_t name_len) {
 #define WAIT_UNTRACED  2
 #define WAIT_CONTINUED 4
 
-// The packed status encoding (only under WAIT_UNTRACED/WAIT_CONTINUED;
-// the Linux wait(2) layout).
+// The packed status encoding with no stop or continue reports: a child that
+// died of a note reads as signalled (docs/ERRORS.md "The wait status").
+#define WAIT_PACKED    8
+
+// The packed status encoding (only under WAIT_UNTRACED/WAIT_CONTINUED/
+// WAIT_PACKED; the Linux wait(2) layout; no core-dump bit).
 #define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
 #define WAIT_STATUS_CONTINUED     0xffff
 #define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
 #define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_SIGNALED(st)      (((st) & 0x7f) != 0 && ((st) & 0x7f) != 0x7f)
+#define WAIT_TERMSIG(st)          ((st) & 0x7f)
 #define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
 #define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
 

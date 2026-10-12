@@ -161,13 +161,16 @@ on device bringing up JavaScriptCore), NOT yet on main -- both bite `std`:**
 Spare threads get musl's 128 KiB default stack; Rust sets its 2 MiB spawn stack
 explicitly, so `std` is fine -- but a crate relying on the default is tight.
 
-**Bring-up debugging (steal from main):** on pouch `abort()` is a SILENT
-`_Exit(127)` -- indistinguishable from `ut`'s "command not found", and `ut`
-does not clear `$errstr` on success. A `panic = "abort"` binary dying silently
-looks identical. Main's fix, worth reusing for `std` bring-up: a ~12-line
-`abort()` override that prints return addresses through `_Unwind_Backtrace`
-(libunwind is in the sysroot), linked ahead of `libc.a` -- turns each silent
-127 into a one-boot diagnosis.
+**Bring-up debugging (steal from main):** on pouch `abort()` is one `brk` the
+kernel ends as `snare:abort` (gcpark-b, 2026-10-12; docs/ERRORS.md). The
+console prints `user fault: pid=N reason="snare:abort" ... pc=... lr=...`, and
+the parent reads a SIGABRT death (`$status` 134 in a job-controlled `ut`; a
+plain wait reads 1). A `panic = "abort"` binary dies the same way. The lr names
+one frame, abort()'s caller. (Until gcpark-b abort() was a silent `_Exit(127)`,
+indistinguishable from `ut`'s "command not found".) For a deeper trace main's
+fix is still worth reusing: a ~12-line `abort()` override that prints return
+addresses through `_Unwind_Backtrace` (libunwind is in the sysroot), linked
+ahead of `libc.a`.
 
 ---
 
@@ -377,7 +380,7 @@ holds the LLVM fork) if the Mac's headroom or contention bites.
   under ENOSYS (section 4 residual), the exact per-arm field specifics, and
   `panic = "unwind"` on device (fall back to `abort` only if the unwind wiring
   stalls, the HelenOS precedent -- with the `abort`-backtrace shim from section 4
-  so a silent 127 is diagnosable). Exit: `std` compiles for
+  so an abort is diagnosable past its one-frame lr). Exit: `std` compiles for
   `aarch64-unknown-thylacine`.
 - **R-1** -- the milestone hello on the device (threads/file/TCP/HashMap/unwind).
 - **R-2** -- the crate tail (libc first, then mio/socket2/getrandom/ring/...).

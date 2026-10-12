@@ -2476,7 +2476,7 @@ build_sysroot() {
     # POUCH_MALLOCNG_DIAG=1 in the env opts into the 0013-pouch-mallocng-
     # diag.patch's gated diagnostic: a sc/idx/maplen/stride/p+-8 dump
     # fires from enframe BEFORE the mallocng assertion that would
-    # otherwise _Exit(127) silently. Off by default (zero perf cost).
+    # otherwise abort() with no message. Off by default (zero perf cost).
     local musl_cflags=""
     if [[ "${POUCH_MALLOCNG_DIAG:-0}" == "1" ]]; then
         musl_cflags="-DPOUCH_MALLOCNG_DIAG"

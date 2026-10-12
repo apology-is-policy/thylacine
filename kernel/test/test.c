@@ -459,6 +459,9 @@ void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void);
 void test_proc_wait_pid_for_pgrp_selectors(void);
 void test_proc_wait_pid_for_report_not_reap(void);
 void test_proc_wait_pid_syscall_untraced_flag(void);
+void test_proc_wait_packed_signalled(void);        // gcpark-b
+void test_proc_group_claim_decides_signal(void);    // gcpark-b
+void test_proc_wait_pid_syscall_packed_flag(void);  // gcpark-b
 void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
@@ -885,6 +888,8 @@ void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
 void test_proc_exits_in_dying_group_keeps_group_status(void);
 void test_proc_fault_in_dying_group_keeps_group_status(void);
+void test_proc_fault_in_dying_group_reaps_exited_packed(void);   // gcpark-b
+void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -2504,6 +2509,11 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_report_not_reap, false, NULL },
     { "proc.wait_pid_syscall_untraced_flag",
                                        test_proc_wait_pid_syscall_untraced_flag, false, NULL },
+    { "proc.wait_packed_signalled",    test_proc_wait_packed_signalled,    false, NULL },
+    { "proc.group_claim_decides_signal",
+                                       test_proc_group_claim_decides_signal, false, NULL },
+    { "proc.wait_pid_syscall_packed_flag",
+                                       test_proc_wait_pid_syscall_packed_flag, false, NULL },
     { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
     { "proc.job_stop_park_report_cont_live",
                                        test_proc_job_stop_park_report_cont_live, false, NULL },
@@ -3114,6 +3124,8 @@ struct test_case g_tests[] = {
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
     { "proc.exits_in_dying_group_keeps_group_status", test_proc_exits_in_dying_group_keeps_group_status, false, NULL },
     { "proc.fault_in_dying_group_keeps_group_status", test_proc_fault_in_dying_group_keeps_group_status, false, NULL },
+    { "proc.fault_in_dying_group_reaps_exited_packed", test_proc_fault_in_dying_group_reaps_exited_packed, false, NULL },
+    { "proc.note_death_with_live_peer_reaps_signalled", test_proc_note_death_with_live_peer_reaps_signalled, false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },

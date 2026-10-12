@@ -149,8 +149,8 @@ use libthyla_rs::process::{pipe, Stdio};
 use libthyla_rs::notes::{send, Note, NoteClass, NoteTarget};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::{
-    t_putstr, t_setpgid, t_tty_cont, t_tty_set_fg, t_wait_exitstatus, t_wait_if_stopped,
-    t_wait_pid_for, T_WAIT_UNTRACED, T_WAIT_WNOHANG,
+    t_putstr, t_setpgid, t_tty_cont, t_tty_set_fg, t_wait_if_stopped, t_wait_pid_for,
+    T_WAIT_UNTRACED, T_WAIT_WNOHANG,
 };
 
 use super::builtin;
@@ -159,6 +159,7 @@ use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
 use super::expr::{eval_expr, eval_pattern};
 use super::glob;
+use super::jobs::status_of_packed;
 use super::pathname;
 use super::value::Value;
 
@@ -2654,7 +2655,8 @@ enum FgOutcome {
 
 /// Block until every pid in the job's process group exits, or a member
 /// job-stops. The wait is by-GROUP (`want_pid = -pgid`, `WAIT_UNTRACED` --
-/// the packed-status encoding), so a stop anywhere in the job surfaces as a
+/// the packed-status encoding, so a member that died of a note reads 128 plus
+/// its signal), so a stop anywhere in the job surfaces as a
 /// report without reaping (1e report-is-not-reap). A group wait that stops
 /// matching (a member whose `setpgid` raced its exit stayed in the shell's
 /// group) falls back to a blocking by-pid sweep of the stragglers, which is
@@ -2675,7 +2677,7 @@ fn wait_fg_job_jc(pids: &[i32], job_pgid: u64) -> FgOutcome {
             }
             if let Some(i) = pids.iter().position(|&p| p == rc as i32) {
                 if !finished[i] {
-                    statuses[i] = t_wait_exitstatus(st);
+                    statuses[i] = status_of_packed(st);
                     finished[i] = true;
                     remaining -= 1;
                 }
@@ -2698,7 +2700,7 @@ fn wait_fg_job_jc(pids: &[i32], job_pgid: u64) -> FgOutcome {
                     return FgOutcome::Stopped { statuses, finished };
                 }
                 // Reaped (unpack) or vanished (0, matching the reap loops).
-                statuses[i] = if rc2 > 0 { t_wait_exitstatus(st2) } else { 0 };
+                statuses[i] = if rc2 > 0 { status_of_packed(st2) } else { 0 };
                 finished[i] = true;
                 remaining -= 1;
             }

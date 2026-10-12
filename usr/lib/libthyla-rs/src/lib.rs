@@ -3373,10 +3373,15 @@ pub const T_WAIT_WNOHANG: i32 = 1;
 /// < -1 = any child in group `-want_pid`.
 pub const T_WAIT_UNTRACED: i32 = 2;
 pub const T_WAIT_CONTINUED: i32 = 4;
+/// The packed encoding with no stop or continue reports: a child that died of
+/// a note reads as signalled (docs/ERRORS.md "The wait status").
+pub const T_WAIT_PACKED: i32 = 8;
 pub const T_WAIT_STATUS_STOPPED: i32 = 0x7f | (20 << 8);
 pub const T_WAIT_STATUS_CONTINUED: i32 = 0xffff;
 #[inline(always)] pub fn t_wait_if_exited(st: i32) -> bool { (st & 0x7f) == 0 }
 #[inline(always)] pub fn t_wait_exitstatus(st: i32) -> i32 { (st >> 8) & 0xff }
+#[inline(always)] pub fn t_wait_if_signaled(st: i32) -> bool { (st & 0x7f) != 0 && (st & 0x7f) != 0x7f }
+#[inline(always)] pub fn t_wait_termsig(st: i32) -> i32 { st & 0x7f }
 #[inline(always)] pub fn t_wait_if_stopped(st: i32) -> bool { (st & 0xff) == 0x7f }
 #[inline(always)] pub fn t_wait_if_continued(st: i32) -> bool { st == 0xffff }
 

@@ -252,15 +252,15 @@ flag set + value verified); exits 0.
 + *   - sigpending / sigtimedwait / sigqueue / sigsuspend return ENOSYS.
 + *   - SIGRT* (real-time signals) and per-signal-info (siginfo_t) not
 + *     supported. sigqueue() returns ENOSYS.
-+ *   - SIGABRT not in the v1.0 supported set (sigaction(SIGABRT) returns
-+ *     EINVAL). musl's abort.c reaches a_crash() (a deliberate NULL deref)
-+ *     BEFORE its _Exit(127) tail; at v1.0 the kernel's FAULT_UNHANDLED_USER
-+ *     policy extincts on EL0 faults, so abort() manifests as kernel
-+ *     extinction rather than clean process termination. PRE-EXISTING
-+ *     limitation (not introduced by sub-chunk 13b — pre-13b pouch had the
-+ *     same a_crash() path). v1.x extensions: (1) override pouch's abort.c
-+ *     to _Exit(127) directly, bypassing a_crash; (2) deliver SIGSEGV-shaped
-+ *     note instead of extincting on EL0 fault. See R1-F4 closed disposition
++ *   - SIGABRT not in the supported set (sigaction(SIGABRT) returns
++ *     EINVAL). abort() does not raise it: 0011-pouch-abort.patch makes
++ *     abort() one `brk #0xab06`, which the kernel ends as the fault note
++ *     snare:abort, and a waiting parent reads WIFSIGNALED with WTERMSIG ==
++ *     SIGABRT (docs/ERRORS.md). An EL0 fault ends only its own Proc (the
++ *     snare:* family), and the kernel records each fault's signal --
++ *     SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE, SIGABRT -- for the wait.
++ *     Handlers for those signals do not run (ERRORS.md: deferred to v1.x).
++ *     See R1-F4 closed disposition
 + *     + docs/reference/83-pouch-signals.md "Known caveats / footguns".
 + */
 +
@@ -867,14 +867,14 @@ flag set + value verified); exits 0.
 -	}
 -	return r;
 +	/* musl preserves a SIGABRT abort-lock interlock here on Linux.
-+	 * Thylacine v1.0 does not include SIGABRT in the supported set
-+	 * (sigaction(SIGABRT) returns EINVAL above); the abort-lock interlock
-+	 * is dead code at v1.0. musl's abort.c reaches a_crash() (NULL deref)
-+	 * BEFORE its _Exit(127) tail; at v1.0 the kernel's FAULT_UNHANDLED_USER
-+	 * policy extincts on EL0 faults, so abort() manifests as kernel
-+	 * extinction. PRE-EXISTING limitation (not introduced by sub-chunk 13b).
-+	 * v1.x extensions: override abort.c to _Exit directly, or deliver
-+	 * SIGSEGV-shaped note. See R1-F4 closed disposition + reference doc. */
++	 * Thylacine does not include SIGABRT in the supported set
++	 * (sigaction(SIGABRT) returns EINVAL above), and Pouch's abort()
++	 * (0011-pouch-abort.patch) neither raises SIGABRT nor takes
++	 * __abort_lock: it is one brk the kernel ends as snare:abort. The
++	 * interlock has nothing to guard, so it is not carried. A waiting
++	 * parent reads the abort as WIFSIGNALED with WTERMSIG == SIGABRT.
++	 * See R1-F4 closed disposition + docs/reference/
++	 * 83-pouch-signals.md. */
 +	return __libc_sigaction(sig, sa, old);
  }
  

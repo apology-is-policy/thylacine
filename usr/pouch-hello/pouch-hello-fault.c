@@ -4,9 +4,9 @@
 // Deliberately NULL-derefs to trigger an EL0 unhandled fault. The kernel
 // MUST NOT extinct -- it must route the fault through
 // arch_fault_handle's FAULT_UNHANDLED_USER branch + proc_fault_terminate
-// (kernel/proc.c) to exits(NOTE_NAME_SNARE_SEGV). Parent joey's
-// t_wait_pid then observes exit_status = 1 (v1.0 collapse; v1.x richer
-// exit_status distinguishes fault-terminated from clean-non-zero).
+// (kernel/proc.c), which ends the Proc as snare:segv. Parent joey's raw
+// t_wait_pid then reads 1; a packed wait reads WIFSIGNALED SIGSEGV
+// (docs/ERRORS.md "The wait status"; pouch-hello-signals pins it).
 //
 // Pre-#3a (commit 26e3156 and earlier): the same NULL deref would
 // produce "EXTINCTION: EL0 fault: no VMA covers vaddr / permission

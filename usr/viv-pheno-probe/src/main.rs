@@ -4773,10 +4773,13 @@ unsafe fn run_linux() -> ! {
     // makes the write and faults) and while the user SP is unusable (L330), so
     // the kernel must end the thread at the fault itself: returning from it
     // re-executes the faulting load into the same fault forever. Each case runs
-    // in a forked subject the parent reaps within ~4 s. The failure marker says
-    // "hung" for a subject still alive there (it is left spinning: the
-    // phenotype has no kill, and the failed leg ends the boot's gate anyway),
-    // "lived" for one that came back from the fault, "nofork" for a failed fork.
+    // in a forked subject the parent reaps within ~4 s, and the subject must
+    // die of the note: wait4 reads WIFSIGNALED SIGPIPE (the kernel records the
+    // death's signal, docs/ERRORS.md), where a death by the fault itself would
+    // read SIGSEGV. The failure marker says "hung" for a subject still alive
+    // there (it is left spinning: the phenotype has no kill, and the failed leg
+    // ends the boot's gate anyway), "lived" for one that came back from the
+    // fault, "wrongdeath" for any other status, "nofork" for a failed fork.
     unsafe fn reap_within(kid: i64) -> Option<i32> {
         let nap: [i64; 2] = [0, 50_000_000];
         for _ in 0..80 {
@@ -4821,8 +4824,9 @@ unsafe fn run_linux() -> ! {
             b"nofork"
         } else {
             match reap_within(kid) {
-                Some(ws) if (ws & 0x7f) == 0 && ((ws >> 8) & 0xff) != 0 => b"",
-                Some(_) => b"lived",
+                Some(ws) if (ws & 0x7f) == SIGPIPE as i32 => b"",
+                Some(ws) if ws == 0 => b"lived",
+                Some(_) => b"wrongdeath",
                 None => b"hung",
             }
         };

@@ -420,14 +420,25 @@ static void dgs_main_entry(void *arg) {
     thread_exit_self();
 }
 
-static int dgs_run(bool fault) {
+static void dgs_note_worker_entry(void *arg) {
+    (void)arg;
+    while (g_dgs_main->state != THREAD_EXITING)
+        sched();
+    exits("ok");
+}
+
+static int dgs_run_entry(void (*entry)(void *), bool fault, int flags) {
     g_dgs_main  = NULL;
     g_dgs_fault = fault;
-    int child_pid = rfork(RFPROC, dgs_main_entry, NULL);
+    int child_pid = rfork(RFPROC, entry, NULL);
     if (child_pid <= 0) return -2;
     int status = -1;
-    int reaped = wait_pid(&status);
+    int reaped = wait_pid_for(child_pid, flags, &status);
     return reaped == child_pid ? status : -3;
+}
+
+static int dgs_run(bool fault) {
+    return dgs_run_entry(dgs_main_entry, fault, 0);
 }
 
 void test_proc_exits_in_dying_group_keeps_group_status(void) {
@@ -442,4 +453,35 @@ void test_proc_fault_in_dying_group_keeps_group_status(void) {
     TEST_EXPECT_NE(status, 1, "the late fault's snare:bus status (1) replaced the group's");
     TEST_EXPECT_EQ(status, 7,
         "a fault in a dying group reaps with the group's status, not snare:bus");
+}
+
+// gcpark-b: the claim decides the signal too. The packed word of the same run
+// must read EXITED(7) (0x700); SIGNALED(SIGBUS) would read 7, the raw value
+// the test above accepts, so only the packed wait can tell.
+void test_proc_fault_in_dying_group_reaps_exited_packed(void) {
+    int status = dgs_run_entry(dgs_main_entry, true, WAIT_PACKED);
+    TEST_EXPECT_NE(status, WAIT_STATUS_SIGNALED(NOTE_SIG_BUS),
+        "the late fault's SIGBUS replaced the group's exit");
+    TEST_EXPECT_EQ(status, WAIT_STATUS_EXITED(7),
+        "a fault in a dying group reaps packed as the group's exit (0x700)");
+}
+
+// Main dies of a fault while a worker still runs: the death claims the group
+// with its signal, and the worker's later exits("ok") leaves as a peer does.
+static void dgs_note_main_entry(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    g_dgs_main = current_thread();
+    struct Thread *w = thread_create_with_arg(p, dgs_note_worker_entry, NULL);
+    if (!w) extinction("dgs_note_main_entry: thread_create_with_arg failed");
+    ready(w);
+    exits_note(NOTE_NAME_SNARE_SEGV);
+}
+
+void test_proc_note_death_with_live_peer_reaps_signalled(void) {
+    int packed = dgs_run_entry(dgs_note_main_entry, false, WAIT_PACKED);
+    int raw    = dgs_run_entry(dgs_note_main_entry, false, 0);
+    TEST_EXPECT_EQ(packed, WAIT_STATUS_SIGNALED(NOTE_SIG_SEGV),
+        "a fault with a live peer reaps packed as SIGSEGV, not the peer's exit");
+    TEST_EXPECT_EQ(raw, 1, "the same death reads 1 raw");
 }
