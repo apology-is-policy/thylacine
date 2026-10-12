@@ -1928,11 +1928,14 @@ void test_rendez_caught_note_release_wakes_peer(void) {
 // with no wait published, as a thread computing at EL0 is between ticks.
 // ---------------------------------------------------------------------------
 #define NT_FAM (1u << NOTE_BIT_INTERRUPT)
+#define NT_TWAIT_NS (10ull * 1000ull * 1000ull * 1000ull)  // far past any leg
 
 enum nt_step {
     NT_UWAIT = 1,   // block in a wait a caught note unwinds (a listed call)
     NT_HWAIT,       // block in a wait that rides a caught note out
     NT_MUWAIT,      // mask the family, then block in a wait that would unwind
+    NT_THWAIT,      // block in a timed wait (tsleep) that rides a caught note out
+    NT_TUWAIT,      // block in a timed wait (tsleep_noteintr) a caught note unwinds
     NT_POST,        // post a caught interrupt to our own Proc: we are the poster
     NT_EXIT,        // thread_exit_self
     NT_PARK,        // park terminally (the test reclaims us)
@@ -1980,6 +1983,14 @@ static void nt_loop(u32 i) {
             break;
         case NT_HWAIT:
             n->rc = sleep(&n->rendez, nt_cond, n);
+            break;
+        case NT_TUWAIT:
+            t->note_interruptible = true;
+            n->rc = tsleep_noteintr(&n->rendez, nt_cond, n, timer_now_ns() + NT_TWAIT_NS);
+            t->note_interruptible = false;
+            break;
+        case NT_THWAIT:
+            n->rc = tsleep(&n->rendez, nt_cond, n, timer_now_ns() + NT_TWAIT_NS);
             break;
         case NT_POST:
             (void)test_caught_post(g_nt_proc);
@@ -2166,22 +2177,23 @@ void test_rendez_caught_note_poster_first(void) {
 
 // rendez.caught_note_handoff -- a designation ends when its thread enters a
 // wait that cannot unwind for the family: one that holds, or one that would
-// unwind but the family is masked. Main, awake, is designated; it then blocks
-// in such a wait, and the hand-off designates the peer asleep in an unwinding
-// wait, which unwinds. Main's own wait is untouched. The control is
-// caught_note_prefers_awake: main entering an unmasked unwinding wait takes the
-// note itself and the peer sleeps on.
-static void nt_handoff_leg(u32 main_step, bool *ok, bool *main_tgt, bool *peer_unwound,
-                           bool *main_held, bool *main_dropped, bool *down) {
+// unwind but the family is masked, through sleep or tsleep alike. Main, awake,
+// is designated; it then blocks in such a wait, and the hand-off designates the
+// peer asleep in an unwinding wait, which unwinds. Main's own wait is
+// untouched. The control is caught_note_prefers_awake: main entering an
+// unmasked unwinding wait takes the note itself and the peer sleeps on.
+static void nt_handoff_leg(u32 main_step, u32 peer_step, int peer_rc, bool *ok,
+                           bool *main_tgt, bool *peer_unwound, bool *main_held,
+                           bool *main_dropped, bool *down) {
     struct Thread *t[2];
     bool made  = nt_setup(true, t);
-    bool pp    = made && nt_run(t[1], 1, NT_UWAIT, true);
+    bool pp    = made && nt_run(t[1], 1, peer_step, true);
     bool post  = pp && test_caught_post(g_nt_proc);
     *main_tgt  = made && (nt_target(t[0]) & NT_FAM);
     bool mb    = post && nt_run(t[0], 0, main_step, true);
     u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
     while (mb && !nt_done(1) && timer_now_ns() < dl) sched();
-    *peer_unwound = mb && nt_done(1) && g_nt[1].rc == SLEEP_NOTEINTR &&
+    *peer_unwound = mb && nt_done(1) && g_nt[1].rc == peer_rc &&
                     (nt_claim(t[1]) & NT_FAM);
     *main_held    = mb && nt_blocked(t[0], 0);
     *main_dropped = made && !(nt_target(t[0]) & NT_FAM);
@@ -2192,16 +2204,24 @@ static void nt_handoff_leg(u32 main_step, bool *ok, bool *main_tgt, bool *peer_u
 void test_rendez_caught_note_handoff(void);
 void test_rendez_caught_note_handoff(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
-    bool ok[2], tgt[2], unw[2], held[2], drop[2], down[2];
-    nt_handoff_leg(NT_HWAIT,  &ok[0], &tgt[0], &unw[0], &held[0], &drop[0], &down[0]);
-    nt_handoff_leg(NT_MUWAIT, &ok[1], &tgt[1], &unw[1], &held[1], &drop[1], &down[1]);
+    static const char *const why[3] = {
+        "main blocked in a wait that holds: the peer was designated and unwound",
+        "main masked the family and blocked: the peer was designated and unwound",
+        "main blocked in a timed wait that holds: the peer, in a timed wait that "
+        "unwinds, was designated and unwound",
+    };
+    bool ok[3], tgt[3], unw[3], held[3], drop[3], down[3];
+    nt_handoff_leg(NT_HWAIT,  NT_UWAIT,  SLEEP_NOTEINTR,
+                   &ok[0], &tgt[0], &unw[0], &held[0], &drop[0], &down[0]);
+    nt_handoff_leg(NT_MUWAIT, NT_UWAIT,  SLEEP_NOTEINTR,
+                   &ok[1], &tgt[1], &unw[1], &held[1], &drop[1], &down[1]);
+    nt_handoff_leg(NT_THWAIT, NT_TUWAIT, TSLEEP_NOTEINTR,
+                   &ok[2], &tgt[2], &unw[2], &held[2], &drop[2], &down[2]);
 
-    for (u32 i = 0; i < 2u; i++) {
+    for (u32 i = 0; i < 3u; i++) {
         TEST_ASSERT(ok[i] && down[i], "the leg ran and every thread was reclaimed");
         TEST_ASSERT(tgt[i], "main, awake, was designated");
-        TEST_ASSERT(unw[i], i == 0
-            ? "main blocked in a wait that holds: the peer was designated and unwound"
-            : "main masked the family and blocked: the peer was designated and unwound");
+        TEST_ASSERT(unw[i], why[i]);
         TEST_ASSERT(held[i], "main stayed in its wait");
         TEST_ASSERT(drop[i], "main gave its designation up");
     }
@@ -2315,6 +2335,89 @@ void test_rendez_caught_note_native_kicks_only(void) {
     TEST_ASSERT(!tgt, "native: the walk designated no one");
     TEST_ASSERT(cwoke && ctgt,
                 "control: in a Linux Proc the same post designates and wakes the sleeper");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_repick_fallback -- a pick that goes stale (its thread
+// entered a wait that holds, or a handler, between the pick and the re-check
+// under its wait_lock) is picked again, and after CAUGHT_REPICKS stale picks the
+// walk wakes every thread blocked in an unwinding wait: they race for the
+// claim, one unwinds, and the other re-reads its cond and sleeps on. Both
+// threads sleep in unwinding waits; the stale picks are forced. The control,
+// one variable away, forces one stale pick fewer: the last re-pick designates
+// main, which unwinds alone while the peer sleeps on.
+u32 caught_force_stale_for_test(struct Proc *p, u32 n);
+u32 caught_repicks_for_test(void);
+
+struct nt_repick {
+    bool ok, down;
+    u32  left;          // forced stale picks the walk did not consume
+    u32  unwound;       // threads whose wait returned SLEEP_NOTEINTR
+    bool claimed;       // ...and the one that did holds the family's claim
+    bool main_unwound;
+    bool other_reread;  // the thread still waiting re-read its cond, then slept
+    bool other_still;   // ...or slept on and never re-read it
+    u8   targets;       // designations left on either thread
+};
+
+static void nt_repick_leg(u32 stale, struct nt_repick *o) {
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool pp   = made && nt_run(t[1], 1, NT_UWAIT, true);
+    bool mp   = pp && nt_run(t[0], 0, NT_UWAIT, true);
+    u32  ev[2] = { g_nt[0].evals, g_nt[1].evals };
+    if (mp) (void)caught_force_stale_for_test(g_nt_proc, stale);
+    bool post = mp && test_caught_post(g_nt_proc);
+    // A thread the walk woke is off THREAD_SLEEPING until it re-reads its cond.
+    bool slept[2] = { post && t[0]->state == THREAD_SLEEPING,
+                      post && t[1]->state == THREAD_SLEEPING };
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (post && timer_now_ns() < dl) {
+        if (nt_done(0) && nt_done(1)) break;
+        if (nt_done(0) && nt_blocked(t[1], 1)) break;
+        if (nt_done(1) && nt_blocked(t[0], 0)) break;
+        sched();
+    }
+    o->left = caught_force_stale_for_test(NULL, 0);
+    o->unwound = 0; o->claimed = false; o->main_unwound = false;
+    o->other_reread = false; o->other_still = false; o->targets = 0;
+    if (post) {
+        for (u32 i = 0; i < 2u; i++) {
+            if (!nt_done(i) || g_nt[i].rc != SLEEP_NOTEINTR) continue;
+            o->unwound++;
+            if (nt_claim(t[i]) & NT_FAM) o->claimed = true;
+        }
+        o->main_unwound = nt_done(0) && g_nt[0].rc == SLEEP_NOTEINTR;
+        u32 w = nt_done(0) ? 1u : 0u;
+        bool waits = nt_blocked(t[w], w);
+        o->other_reread = waits && g_nt[w].evals > ev[w];
+        o->other_still  = waits && slept[w] && g_nt[w].evals == ev[w];
+        o->targets = (u8)((nt_target(t[0]) | nt_target(t[1])) & NT_FAM);
+    }
+    o->ok   = made && pp && mp && post;
+    o->down = nt_teardown(t);
+}
+
+void test_rendez_caught_note_repick_fallback(void);
+void test_rendez_caught_note_repick_fallback(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    const u32 n = caught_repicks_for_test();
+    struct nt_repick fb, ctl;
+    nt_repick_leg(n, &fb);
+    nt_repick_leg(n - 1u, &ctl);
+
+    TEST_ASSERT(fb.ok && fb.down && ctl.ok && ctl.down,
+                "both legs ran and every thread was reclaimed");
+    TEST_EXPECT_EQ(fb.left, 0u, "the walk went through every forced stale pick");
+    TEST_EXPECT_EQ(fb.unwound, 1u, "the fallback woke both sleepers and exactly one unwound");
+    TEST_ASSERT(fb.claimed, "...holding the family's claim");
+    TEST_ASSERT(fb.other_reread, "the other re-read its cond and sleeps on");
+    TEST_EXPECT_EQ(fb.targets, 0u, "the fallback designated no one");
+    TEST_EXPECT_EQ(ctl.left, 0u, "control: the walk went through every forced stale pick");
+    TEST_ASSERT(ctl.main_unwound && ctl.unwound == 1u,
+                "control: the last re-pick designated main, which unwound alone");
+    TEST_ASSERT(ctl.claimed, "control: ...holding the family's claim");
+    TEST_ASSERT(ctl.other_still, "control: the peer slept on and never re-read its cond");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 

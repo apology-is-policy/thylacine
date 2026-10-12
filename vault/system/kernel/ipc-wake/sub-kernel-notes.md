@@ -730,9 +730,14 @@ The pick and the hand-off have their own witnesses in `test_rendez.c`, driven
 on two kernel threads of one Proc by a step interpreter (`nt_*`):
 `rendez.caught_note_prefers_awake` (main, awake, is designated and the sleeping
 peer is not woken; released, the note reaches the peer), `_poster_first`,
-`_handoff` (a wait that holds, and an unwinding wait with the family masked),
-`_exit_drop` (through the real `thread_exit_self`), `_holder_rewake`, and
-`_native_kicks_only` (with a Linux-Proc control one variable away).
+`_handoff` (a wait that holds, an unwinding wait with the family masked, and a
+`tsleep` that holds handing off to a `tsleep_noteintr` that unwinds),
+`_exit_drop` (through the real `thread_exit_self`), `_holder_rewake`,
+`_native_kicks_only` (with a Linux-Proc control one variable away), and
+`_repick_fallback` (`CAUGHT_REPICKS` stale picks, forced through
+`caught_force_stale_for_test`, reach the fallback that wakes every unwinding
+sleeper: exactly one unwinds and the other re-parks; one stale pick fewer
+designates main alone).
 `_one_unwind` and `_release_wakes_peer` were rewritten for the pick. The
 fixture's `test_caught_run` now wakes a waiter that holds itself, since the walk
 no longer wakes a wait that cannot unwind. On the device: viv-pheno-probe

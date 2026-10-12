@@ -67,8 +67,10 @@ and `kernel/notes.c::notes_handoff_target`; `Resume` is
 ## Holding the code to it
 
 Kernel tests in `test_rendez.c`: `rendez.caught_note_prefers_awake`,
-`_poster_first`, `_handoff`, `_exit_drop`, `_holder_rewake`,
-`_native_kicks_only`, `_one_unwind`, `_release_wakes_peer`. On the device:
+`_poster_first`, `_handoff` (through sleep and tsleep), `_exit_drop`,
+`_holder_rewake`, `_native_kicks_only`, `_repick_fallback` (forced stale picks
+reach the wake-every-unwinder fallback, and one unwinds), `_one_unwind`,
+`_release_wakes_peer`. On the device:
 viv-pheno-probe L331-L333 (a spinning main takes a child's `SIGCHLD` while a
 polling peer is left alone) and jc-probe's spinint and spinnote rungs (a native
 spinner ended by `^C`, and one whose handler runs). The pre-commit gate is

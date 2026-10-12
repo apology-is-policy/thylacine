@@ -2647,7 +2647,10 @@ uncaught notes (the terminate latch's wake is `death_wake.tla`'s and §8.8.2's);
 the preference order; the kick (the tick is the fairness that matters, a kick
 only makes it prompt); a call enters at most `MAX_WAITS` waits. The kernel
 tests in `test_rendez.c` (`rendez.caught_note_prefers_awake`, `_poster_first`,
-`_handoff`, `_exit_drop`, `_holder_rewake`, `_native_kicks_only`, and the
+`_handoff` (sleep and tsleep), `_exit_drop`, `_holder_rewake`,
+`_native_kicks_only`, `_repick_fallback` (the model's `Walk2` re-picks
+without bound; the code stops at `CAUGHT_REPICKS` and wakes every unwinding
+sleeper instead, which this test holds with forced stale picks), and the
 rewritten `_one_unwind` and `_release_wakes_peer`), viv-pheno-probe L331-L333
 (a running main takes `SIGCHLD` with a polling peer undisturbed) and jc-probe's
 spinint and spinnote rungs (a native spinner ended by Ctrl-C, and one whose

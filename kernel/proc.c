@@ -3358,6 +3358,33 @@ static void caught_rouse_locked(struct Thread *x) {
 
 enum { CAUGHT_DESIGNATED, CAUGHT_SETTLED, CAUGHT_STALE };
 
+// Picks a family may go through before the walk falls back to waking every
+// unwinding sleeper. A pick goes stale only when its thread entered a wait
+// that holds, or a handler, between the pick and the re-check.
+#define CAUGHT_REPICKS 4u
+
+#ifdef KERNEL_TESTS
+// The *_for_test convention: the next `n` designations in `p` go stale, as when
+// each pick enters a wait that holds between the pick and the re-check. Returns
+// what the last count left unconsumed; (NULL, 0) resets.
+static struct Proc *g_caught_stale_proc;
+static u32          g_caught_stale_left;
+u32 caught_force_stale_for_test(struct Proc *p, u32 n);
+u32 caught_force_stale_for_test(struct Proc *p, u32 n) {
+    __atomic_store_n(&g_caught_stale_proc, p, __ATOMIC_RELEASE);
+    return __atomic_exchange_n(&g_caught_stale_left, n, __ATOMIC_ACQ_REL);
+}
+u32 caught_repicks_for_test(void);
+u32 caught_repicks_for_test(void) { return CAUGHT_REPICKS; }
+static bool caught_forced_stale(const struct Proc *p) {
+    if (__atomic_load_n(&g_caught_stale_proc, __ATOMIC_ACQUIRE) != p) return false;
+    u32 left = __atomic_load_n(&g_caught_stale_left, __ATOMIC_ACQUIRE);
+    while (left && !__atomic_compare_exchange_n(&g_caught_stale_left, &left, left - 1u, false,
+                                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
+    return left != 0;
+}
+#endif
+
 // Designate `x` for `fam` under its wait_lock. The re-check there is what keeps
 // a thread entering a wait that holds from being designated into it (its kind
 // is published under the same lock; BUGGY_UNLOCKED_DESIGNATE). The claim needs
@@ -3366,6 +3393,9 @@ enum { CAUGHT_DESIGNATED, CAUGHT_SETTLED, CAUGHT_STALE };
 // does not. SETTLED: the family closed or drained meanwhile; STALE: `x` stopped
 // being a candidate, so pick again.
 static int caught_designate(struct Proc *p, struct Thread *x, u32 fam) {
+#ifdef KERNEL_TESTS
+    if (caught_forced_stale(p)) return CAUGHT_STALE;
+#endif
     int rc = CAUGHT_STALE;
     irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
     if (caught_candidate(x, fam)) {
@@ -3399,11 +3429,6 @@ static void caught_wake_unwinders(struct Proc *p, u32 fam) {
         spin_unlock_irqrestore(&x->wait_lock, ws);
     }
 }
-
-// Picks a family may go through before the walk falls back to waking every
-// unwinding sleeper. A pick goes stale only when its thread entered a wait
-// that holds, or a handler, between the pick and the re-check.
-#define CAUGHT_REPICKS 4u
 
 void proc_caught_note_walk(struct Proc *p, struct Thread *skip) {
     if (!p || p->magic != PROC_MAGIC) return;

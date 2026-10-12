@@ -369,6 +369,7 @@ void test_rendez_caught_note_handoff(void);
 void test_rendez_caught_note_exit_drop(void);
 void test_rendez_caught_note_holder_rewake(void);
 void test_rendez_caught_note_native_kicks_only(void);
+void test_rendez_caught_note_repick_fallback(void);
 void test_rendez_caught_note_ends_wait4(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
@@ -2408,6 +2409,7 @@ struct test_case g_tests[] = {
     { "rendez.caught_note_exit_drop", test_rendez_caught_note_exit_drop, false, NULL },
     { "rendez.caught_note_holder_rewake", test_rendez_caught_note_holder_rewake, false, NULL },
     { "rendez.caught_note_native_kicks_only", test_rendez_caught_note_native_kicks_only, false, NULL },
+    { "rendez.caught_note_repick_fallback", test_rendez_caught_note_repick_fallback, false, NULL },
     { "rendez.caught_note_ends_wait4",         test_rendez_caught_note_ends_wait4,         false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
