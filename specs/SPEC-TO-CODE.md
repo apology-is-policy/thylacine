@@ -2532,36 +2532,130 @@ called).
 
 | cfg | knob(s) | checks | outcome | distinct (`-workers 1`) |
 |---|---|---|---|---|
-| `tail_order.cfg` | none; DEPTH 3 | `TypeOK` + `MeetsQueue` + `NoEretUnderOwnStop` + `TailEnds` | clean | 23146 |
-| `tail_order_birth.cfg` | `BIRTH` | the same | clean | 45272 |
-| `tail_order_buggy_notes_first.cfg` | `BUGGY_NOTES_FIRST` | the invariants | violation (`MeetsQueue`) | 3146 |
+| `tail_order.cfg` | none; DEPTH 3 | `TypeOK` + `MeetsQueue` + `NoEretUnderOwnStop` + `TailEnds` + `RunMeets` | clean | 46292 |
+| `tail_order_birth.cfg` | `BIRTH` | the same | clean | 68418 |
+| `tail_order_buggy_notes_first.cfg` | `BUGGY_NOTES_FIRST` | the invariants | violation (`MeetsQueue`) | 5622 |
 | `tail_order_buggy_birth_notes_first.cfg` | `BUGGY_NOTES_FIRST` + `BIRTH` | the invariants | violation (`MeetsQueue`, on the birth tail) | 3390 |
-| `tail_order_buggy_no_repass.cfg` | `BUGGY_NO_REPASS` | the invariants | violation (`NoEretUnderOwnStop`) | 649 |
-| `tail_order_buggy_budget_first.cfg` | `BUGGY_BUDGET_FIRST` | the invariants | violation (`NoEretUnderOwnStop`) | 4368 |
-| `tail_order_buggy_no_budget.cfg` | `BUGGY_NO_BUDGET` | the invariants + `TailEnds` | violation (`TailEnds`; the invariants hold) | 9022 |
+| `tail_order_buggy_no_repass.cfg` | `BUGGY_NO_REPASS` | the invariants | violation (`NoEretUnderOwnStop`) | 870 |
+| `tail_order_buggy_budget_first.cfg` | `BUGGY_BUDGET_FIRST` | the invariants | violation (`NoEretUnderOwnStop`) | 8167 |
+| `tail_order_buggy_no_budget.cfg` | `BUGGY_NO_BUDGET` | the invariants + `TailEnds` | violation (`TailEnds`; the invariants hold) | 18044 |
+| `tail_order_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | `TypeOK` + `RunMeets` | violation (`RunMeets`; `MeetsQueue` fires first when it is on) | 26886 |
+
+The counts are `-workers 1 -lncheck final` (`specs/check-tail-order.sh`). They
+rose on 2026-10-12, when the model gained the IRQ entry (`IrqEnter`, the `irq`
+variable); the verdicts did not change.
 
 | Spec action | Code site (as-built) | Invariant pinned |
 |---|---|---|
-| `Enter` / `DieCheck` / `StopLeg` / `Park` (the first two legs; the park as one step) | `arch/arm64/vectors.S` `.Lel0_sync_return`: `bl el0_return_die_check`, `bl el0_return_stop_check`, `bl notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, `notes_deliver_at_el0_return` | `MeetsQueue`: the stop leg runs before the notes leg, so a note posted during a stop is met as the stop ends. `BUGGY_NOTES_FIRST` = the order before the vote (the S1 sabotage's shape). |
+| `Enter` / `IrqEnter` / `DieCheck` / `StopLeg` / `Park` (the first two legs; the park as one step) | `arch/arm64/vectors.S` `.Lel0_return`, which the `0x400` sync slot and, since #964, the `0x480` IRQ slot both branch to: `bl el0_return_die_check`, `bl el0_return_stop_check`, `bl notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, `notes_deliver_at_el0_return` | `MeetsQueue`: the stop leg runs before the notes leg, so a note posted during a stop is met as the stop ends. `BUGGY_NOTES_FIRST` = the order before the vote (the S1 sabotage's shape). |
 | `NotesLeg` (`"plain"` / `"caught"` / `"term"` / `"susp"`) | `kernel/notes.c::notes_deliver_tail`: the discard loop (`if (++*passes < NOTE_QUEUE_DEPTH) goto again; return false;`), a frame build (returns false), a terminating default (`exits`), the stop arm (`notes_stop_dequeue_locked` -> `proc_job_stop_self`, returns true, as does the orphan rule's discard) | -- |
 | `Repass` + `Proceed` at `leg = "repass"` (the die-check, the stop leg, then `++passes`) | `kernel/notes.c::notes_deliver_at_el0_return`: `while (notes_deliver_tail(ctx, &passes)) { el0_return_die_check(); el0_return_stop_check(ctx); if (++passes >= NOTE_QUEUE_DEPTH) break; }` | `NoEretUnderOwnStop`. `BUGGY_NO_REPASS` = the stop arm returns false (the S3 sabotage's shape); `BUGGY_BUDGET_FIRST` = the budget break before the die-check and the stop leg. |
 | `Spend` (one budget for the passes and the discards) | `notes_deliver_tail`'s `*passes` and the loop's `++passes` | `TailEnds`: a flood cannot hold the masked tail. `BUGGY_NO_BUDGET` = neither counts. |
 | `Post` / `DebugStop` / `DebugResume` / `JobStop` / `JobCont` / `Kill` / `Release` | `notes_post`; `proc_debug_stop_deliver` / `proc_debug_resume`; the job stop and continue (`proc_job_stop_self`, `proc_job_cont_proc`); `proc_group_terminate`; `proc_birth_hold_release_locked` | -- |
 
+`RunMeets` (2026-10-12, #964) is the IRQ tail's: a Thread at EL0 with a note
+queued reaches the notes leg though it never enters the kernel itself, because
+the tick (`IrqEnter`, weakly fair with the Thread's other steps) takes it into
+the same tail. `BUGGY_IRQ_NO_NOTES` is the IRQ tail as it was, ending at the
+stop leg (`seam-el0-irq-tail-no-notes`, closed).
+
 Abstracted, said so the green reads no larger: the park (`debug_stop.tla`'s);
-the IRQ tail, which delivers no notes; a note posted in the masked window
-between the notes leg's last decision and the eret, which waits for the next
-checkpoint (`seam-el0-irq-tail-no-notes`); notes left for a self-managing Proc's
+which thread of a Proc takes a caught note (`caught_target.tla`'s); a note
+posted in the masked window between the notes leg's last decision and the eret,
+which waits for the next checkpoint (a tick away at most, now that the IRQ tail
+meets the queue); notes left for a self-managing Proc's
 fd reader; and registers (that each pass re-reads the handler, `sp` and the
 sigtab is the kernel tests' and round 1's W3). The kernel test
 `rendez.tail_parks_for_the_stop_it_applies` and debug-probe's resume,
 death-step and caught-step legs hold the code to the model.
 
 Pre-commit gate: `specs/check-tail-order.sh` (the 2 clean cfgs at their pinned
-counts, the 5 buggy cfgs violating their named properties), on any change to
-the tails' leg order (`.Lel0_sync_return`, `userland_enter_held`), to
+counts, the 6 buggy cfgs violating their named properties), on any change to
+the tails' leg order (`.Lel0_return`, either vector slot that enters it,
+`userland_enter_held`), to
 `notes_deliver_at_el0_return`'s loop, to what `notes_deliver_tail` returns or
 spends, or to `NOTE_QUEUE_DEPTH` as the tail's budget.
+
+## caught_target.tla — which thread takes a caught note (operator votes 2026-10-12, "Prefer running/main" and "Model it"; ARCH 8.8.3; spec-first re-enabled, model-first)
+
+The posting walk picks one thread to take a process-directed caught note and,
+in a Linux-phenotype Proc, takes the family's claim on its behalf (a
+designation); only the holder may unwind for a claimed family. The model
+checks that this never lets two threads hold a family and never strands a note
+while a thread could take it: the designation is handed off when its thread
+enters a wait that will not unwind for a caught note, released at its tail,
+dropped at its exit, and every walk re-wakes a holder blocked in an unwinding
+wait. The walk may pick ANY candidate in the model, so the preference order is
+the tests' to pin, not this model's.
+
+Revised while the code was written (same day, before any of it was built). The
+walk's re-check reads a thread's mask and handler flag without the lock their
+owner writes them under, so for a thread that is not blocked it can read a
+stale value and designate a thread that has just masked the family or entered
+a handler. The model now lets `Walk2` do that (`Fresh`), and such a designee
+gives the designation up at its tail or hands it off as it enters a wait that
+cannot unwind for it, masked or in a handler (`uentry`, knob
+`BUGGY_STALE_KEEPS`). A walk owed by a release now skips the releasing thread,
+whose tail has just passed the note by (`wskip`, `wcur`); without the skip a
+thread whose frame cannot be built would take its own designation back at every
+tick while a peer that could unwind slept on.
+
+| cfg | knob | checks | outcome | distinct (`-workers 1 -lncheck final`) |
+|---|---|---|---|---|
+| `caught_target.cfg` | none; 2 threads, 2 posts, 2 waits a call | `TypeOK` + `OneClaimant` + `NoStrand` | clean | 613245 |
+| `caught_target_3t.cfg` | none; 3 threads | the same | clean (not in the gate: its liveness pass is long) | RESULT_3T |
+| `caught_target_buggy_double_designate.cfg` | `BUGGY_DOUBLE_DESIGNATE` | the invariants | violation (`OneClaimant`) | 371 |
+| `caught_target_buggy_no_handoff.cfg` | `BUGGY_NO_HANDOFF` | the invariants + `NoStrand` | violation (`NoStrand`) | 611617 |
+| `caught_target_buggy_unlocked_designate.cfg` | `BUGGY_UNLOCKED_DESIGNATE` | the same | violation (`NoStrand`) | 632863 |
+| `caught_target_buggy_no_rekick.cfg` | `BUGGY_NO_REKICK` | the same | violation (`NoStrand`) | 613245 |
+| `caught_target_buggy_exit_keeps.cfg` | `BUGGY_EXIT_KEEPS` | the same | violation (`NoStrand`) | 639673 |
+| `caught_target_buggy_release_no_wake.cfg` | `BUGGY_RELEASE_NO_WAKE` | the same | violation (`NoStrand`) | 165597 |
+| `caught_target_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | the same | violation (`NoStrand`) | 613245 |
+| `caught_target_buggy_stale_keeps.cfg` | `BUGGY_STALE_KEEPS` | the same | violation (`NoStrand`) | 616829 |
+
+Each counterexample was read for its mechanism, not only its verdict: the
+designee blocks in a hold wait holding the family while a peer sleeps in an
+unwinding wait (`NO_HANDOFF`); the walk's pick masks the family and blocks in
+an unwinding wait between the pick and the designation, and is designated
+inside it (`UNLOCKED_DESIGNATE`); a claimant whose note a peer's
+tail delivered carries on into an unwinding wait, a second note posts, and no
+walk wakes it (`NO_REKICK`); a sleeper claims and unwinds while the walk
+designates another thread (`DOUBLE_DESIGNATE`); the designee exits
+(`EXIT_KEEPS`); the designee delivers one of two notes, masks the family, and
+its release wakes no one (`RELEASE_NO_WAKE`); the designee spins at EL0 and its
+IRQ tail has no notes leg (`IRQ_NO_NOTES`); the walk picks a thread on its way
+to its tail, the thread delivers the other note and enters its handler, the
+designation lands after its release, and the thread carries it into an
+unwinding wait while a peer sleeps in one (`STALE_KEEPS`). The 2-thread counts
+were re-pinned after the revision above (from 140075 clean).
+
+| Spec action | Code site (as-built) | Property pinned |
+|---|---|---|
+| `Post` | `notes_post` arming the caught bit, then the poster's `proc_caught_note_wake` under `g_proc_table_lock` (every caught-note poster; a release and an exit run it too) | -- |
+| `Walk1` (re-wake every holder in an unwinding wait; pick a candidate, never `wskip`) | `kernel/proc.c::proc_caught_note_walk` (`proc_caught_note_wake` is the walk with no skip): the holder pass under each thread's `wait_lock` (`note_claim` / `note_target` holding a queued, claimed family, `caught_wait == CAUGHT_WAIT_UNWINDS` -> `wakeup`), then `caught_pick`, which reads `caught_candidate` (not `THREAD_EXITING`, the family unmasked, no handler, `caught_wait != CAUGHT_WAIT_HOLDS`) without the lock | `NoStrand` (`NO_REKICK` drops the holder pass) |
+| `Walk2` (re-check, designate) | `caught_designate`: the pick's `wait_lock` taken, `caught_candidate` again (`Fresh`: the wait's kind and the exit read exactly there, the mask and the handler flag exactly only for a blocked thread), then the CAS of the family's claim bit (caught set, claim clear) and `note_target`; a stale pick is re-picked with the same skip, and after `CAUGHT_REPICKS` the walk wakes every unwinding sleeper (`caught_wake_unwinders`) | `OneClaimant` (`DOUBLE_DESIGNATE` drops the open check); `NoStrand` (`UNLOCKED_DESIGNATE` drops the re-check) |
+| `EnterUWait` / `EnterHWait` / `Handoff` | `kernel/sched.c::sleep_caught_wait_enter`, called by `sleep_common` / `tsleep_common` under `wait_lock` on entry: `caught_wait` published (`thread_caught_wait_kind`; a thread in a handler waits as `HOLDS`), the outer kind restored on every exit (the stop park nests a wait in a wait); a designation the wait cannot honour, every family for a hold wait and a masked one for an unwinding wait (`uentry`), dropped by `notes_handoff_target`, which walks if the note is queued, before the thread blocks | `NoStrand` (`NO_HANDOFF`; `STALE_KEEPS` keeps the `uentry` designation) |
+| `Resume` (the unwind test) | the register-then-observe and post-`sched()` arms: `thread_caught_note_unwinds` -> `thread_caught_note_claim`, where a designee's `note_target` becomes its `note_claim` | `OneClaimant` |
+| `Unwound` / `FlushDone` / `ContWait` | the 9P client's caught-note unwind: `Tflush`, then the flush wait, killable only (ARCH 8.8.3 *A 9P wait honours flush(5)*); the claim kept to the tail | -- (the flush's end is a fairness assumption) |
+| `Irq` | `arch/arm64/vectors.S` `0x480` -> `.Lel0_return` (#964) | `NoStrand` (`IRQ_NO_NOTES`) |
+| `Deliver` / `Release` | `kernel/notes.c::notes_deliver_at_el0_return`: the delivery loop, then `notes_release_claims` (the claim and the designation; a walk skipping the releaser while the note is queued) | `NoStrand` (`RELEASE_NO_WAKE`) |
+| `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `g_proc_table_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
+
+Abstracted, said so the green reads no larger: one note family; a delivered
+note's handler is one bit (`inh`) that `rt_sigreturn` clears; discarded and
+uncaught notes (the terminate latch's wake is `death_wake.tla`'s and §8.8.2's);
+the preference order; the kick (the tick is the fairness that matters, a kick
+only makes it prompt); a call enters at most `MAX_WAITS` waits. The kernel
+tests in `test_notes.c` (the pick, the designee conversion, the hand-off, the
+exit drop, the holder re-wake) and the viv-pheno-probe and note-probe legs (a
+spinner killed by Ctrl-C, a spinner's handler, a running main taking `SIGCHLD`
+with the poller undisturbed) hold the code to it.
+
+Pre-commit gate: `specs/check-caught-target.sh` (the clean cfg at its pinned
+count, the 8 buggy cfgs violating their named properties), on any change to
+`proc_caught_note_walk`, `thread_caught_note_claim`, `notes_release_claims`,
+`sleep_caught_wait_enter`, `notes_handoff_target`, `notes_exit_drop_locked`,
+or where a claim or a designation is set or cleared.
 
 ## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
 
@@ -3239,6 +3333,8 @@ pty_stop, reader_frame, ...) are recorded per-row in
 | `OneScopePerProc` / `ScopeTraitsSetOnce` / `MembersNeverRoot` / `PropagatingIsScopeWide` | `devcap.further_redeem_keeps_scope` (tag + traits kept) + `devcap.imperium_nest_refused` + the rfork inherit (`caps.rfork_inherits_legate_scope`: the ROOT flag never inherits) |
 
 **RE-ENABLED for the page-accounting conservation law (B-1a', 2026-09-23; ARCH 6.5 "Capacity, and the I-32 default").** The ninth instance, and the first applied to an ACCOUNTING law rather than a state machine. The B-1a holotype audit's F5 (an orphan-slot over-charge after a D-3b window inside a touched lazy mapping) and the pre-B-1a piece-detach bug it echoed were one defect twice: a path that unmaps a slot without first releasing it, in a system whose free (`burrow_free_internal`) is Proc-agnostic and so can never refund. The second occurrence is the trigger. `specs/capacity.tla` states the law -- `ChargeConserved` (page_count == the resident count) and `NoOrphan` (a resident slot is always mapped) -- with the range detach and the MAP_FIXED replace as actions, one buggy cfg per historical shape, and B-1a''s `vma_detach_range_in` / `vma_replace_range_in` were written to it (the release BEFORE the geometry change; replace = detach + insert). The map, the gate (`specs/check-capacity.sh`) and what the model does not cover are in the `capacity.tla` section above.
+
+**RE-ENABLED for the caught-note target (user-directed, 2026-10-12; ARCH 8.8.3, I-9 / I-19).** The tenth instance. The operator voted that a process-directed caught note goes to a running thread, then main, and that a sleeper is woken only when none can take it; the walk therefore designates one thread, and that designation must be handed back when its thread blocks in a wait that will not unwind, exits, or reaches its tail. That hand-off is a no-lost-wake protocol among five parties (the poster, the designee, its peers, the tail, the exit), and the item-11 claim race it replaces was found by an audit, not a test; the operator chose "Model it". `specs/caught_target.tla` was written before the code, with one buggy cfg per defect the design must not have. The map, the gate (`specs/check-caught-target.sh`) and what the model does not cover are in the `caught_target.tla` section above.
 
 ---
 

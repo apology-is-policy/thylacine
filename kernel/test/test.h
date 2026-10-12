@@ -153,7 +153,9 @@ void test_dying_reap(struct test_dying *d);
 //
 // A Linux Proc catches the interrupt with a handler. The native control is
 // self-managing, so the same post arms the same caught latch and only the
-// phenotype differs. Use a fresh Proc per leg: a claim lasts until the call's
+// phenotype differs. The post's walk wakes a wait that unwinds; a wait that
+// holds (every native wait) it never wakes, so test_caught_run wakes that one
+// itself after the post, and `rode_out` still shows it re-read the note. Use a fresh Proc per leg: a claim lasts until the call's
 // EL0 tail, which a kernel thread never reaches. Bodies in kernel/test/test.c.
 struct test_caught_leg {
     bool parked;     // the call blocked (with pre_post: with the note pending)

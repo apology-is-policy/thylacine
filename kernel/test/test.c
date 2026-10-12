@@ -209,6 +209,21 @@ static bool test_caught_settle(struct Thread *t, u64 seen) {
     return false;
 }
 
+// Wake a thread blocked in a wait that holds through a caught note. The posting
+// walk never wakes one (ARCH 8.8.3: it picks a thread that can take the note,
+// and a native walk only kicks), so this stands in for the wake anything else
+// might bring -- data, a timer, a spurious wake -- and the leg still shows the
+// wait re-reading the pending note and riding it out. A wait that unwinds is
+// left to the walk: waking it here would hide a walk that failed to.
+static void test_caught_wake_holder(struct Thread *t) {
+    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
+    struct Rendez *r = t->rendez_blocked_on;
+    if (r && r != &t->debug_rendez &&
+        __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
+        wakeup(r);
+    spin_unlock_irqrestore(&t->wait_lock, ws);
+}
+
 struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
                                        bool (*prep)(void *arg),
                                        void (*release)(void *arg), void *arg,
@@ -231,6 +246,7 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
         if (leg.prepped) {
             u64 seen     = __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED);
             leg.posted   = test_caught_post(p);
+            test_caught_wake_holder(t);
             leg.rode_out = test_caught_settle(t, seen);
         }
     }
@@ -347,6 +363,12 @@ void test_rendez_caught_note_one_unwind(void);
 void test_rendez_caught_note_tail_discards_and_releases(void);
 void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_caught_note_release_wakes_peer(void);
+void test_rendez_caught_note_prefers_awake(void);
+void test_rendez_caught_note_poster_first(void);
+void test_rendez_caught_note_handoff(void);
+void test_rendez_caught_note_exit_drop(void);
+void test_rendez_caught_note_holder_rewake(void);
+void test_rendez_caught_note_native_kicks_only(void);
 void test_rendez_caught_note_ends_wait4(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
@@ -2380,6 +2402,12 @@ struct test_case g_tests[] = {
     { "rendez.caught_note_tail_discards_and_releases", test_rendez_caught_note_tail_discards_and_releases, false, NULL },
     { "rendez.tail_parks_for_the_stop_it_applies", test_rendez_tail_parks_for_the_stop_it_applies, false, NULL },
     { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
+    { "rendez.caught_note_prefers_awake", test_rendez_caught_note_prefers_awake, false, NULL },
+    { "rendez.caught_note_poster_first", test_rendez_caught_note_poster_first, false, NULL },
+    { "rendez.caught_note_handoff", test_rendez_caught_note_handoff, false, NULL },
+    { "rendez.caught_note_exit_drop", test_rendez_caught_note_exit_drop, false, NULL },
+    { "rendez.caught_note_holder_rewake", test_rendez_caught_note_holder_rewake, false, NULL },
+    { "rendez.caught_note_native_kicks_only", test_rendez_caught_note_native_kicks_only, false, NULL },
     { "rendez.caught_note_ends_wait4",         test_rendez_caught_note_ends_wait4,         false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,

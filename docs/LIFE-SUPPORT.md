@@ -385,9 +385,13 @@ idle-cancel moves wholly to LS-8; LS-5 delivers the foreground-command interrupt
   internally latch-gated, caller holds g_proc_table_lock) is the #811 death
   walk verbatim minus `torpor_wake_all_for_proc` (torpor waiters are
   reachable via `rendez_blocked_on`; tsleep's widened check closes the
-  register-after-walk race) and minus `smp_resched_others` (the IRQ-from-EL0
-  tail evaluates only group_exit_msg, so the IPI buys nothing — the
-  never-syscalling-spinner gap is tracked, #964); wired at all four
+  register-after-walk race), with the broadcast `smp_resched_others` replaced by
+  a kick of each of the Proc's threads running on another CPU (`IPI_RESCHED` to
+  its CPU, Linux's `kick_process`): since #964 (2026-10-12) the IRQ-from-EL0
+  tail runs the notes leg, so a spinner meets the latch at once, or at its next
+  tick if a kick is missed. Until then that tail evaluated only
+  `group_exit_msg`, the IPI bought nothing, and a never-syscalling spinner
+  ignored Ctrl-C; wired at all four
   interrupt-post sites (console post, SAK, `postnote_walk_cb`, the
   SYS_POSTNOTE self-post, which now takes the table lock for the walk). The
   EL0-return tail stays the TRUTH (the LS-5b predicate re-runs against the

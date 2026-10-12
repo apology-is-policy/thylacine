@@ -774,6 +774,16 @@ static void sched_notify_cpu(unsigned target) {
     (void)gic_send_ipi(target, IPI_RESCHED);
 }
 
+// ARCH 8.8.3 (#964): make `t`, if it runs on another CPU, take an IRQ now, so
+// its EL0-return tail meets a note posted for it -- Linux's kick_process. The
+// reads are unlocked: a stale on_cpu or last_cpu costs a spurious IPI or a
+// missed one, and the tick bounds a missed one, since a busy CPU is never
+// tickless. Gated with sched_notify_cpu.
+void sched_kick_thread(struct Thread *t) {
+    if (!t || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) return;
+    sched_notify_cpu(__atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED));
+}
+
 // Wake-preemption policy (RW-11 SA-1b -- the 6 ms slice cliff). PURE so a unit
 // test drives it against synthetic bands (the "verification boundary", like
 // sched_place_by_capacity). Lower band number = higher priority (sched.h).
@@ -1871,6 +1881,26 @@ static bool sleep_death_pending(struct Thread *t, enum sleep_unwind unwind) {
                                         : thread_die_pending(t);
 }
 
+// ARCH 8.8.3: publish the kind of wait `t` is entering, under its wait_lock
+// (held on entry, held on return), where the posting walk re-checks a pick
+// before designating it. A designation this wait cannot honour -- every family
+// when the wait holds, a masked one when it unwinds -- is handed off before the
+// thread blocks (specs/caught_target.tla Handoff), so a thread is never left
+// holding a note it cannot take. Returns the kind to restore on the way out: a
+// stop park nests a wait inside a wait.
+static u8 sleep_caught_wait_enter(struct Thread *t, bool caught_ok, irq_state_t *s) {
+    u8 outer = t->caught_wait;
+    u8 kind  = thread_caught_wait_kind(t, caught_ok);
+    __atomic_store_n(&t->caught_wait, kind, __ATOMIC_RELAXED);
+    u8 keep  = kind == CAUGHT_WAIT_UNWINDS ? (u8)~t->note_mask : 0u;
+    if (__atomic_load_n(&t->note_target, __ATOMIC_RELAXED) & (u8)~keep) {
+        spin_unlock_irqrestore(&t->wait_lock, *s);
+        notes_handoff_target(t, keep);
+        *s = spin_lock_irqsave(&t->wait_lock);
+    }
+    return outer;
+}
+
 // item 11 (ARCH §8.8.3): the shared core of sleep(), sleep_noteintr() and
 // sleep_death_only(). SLEEP_UNWIND_NOTE enables the caught-note unwind
 // (SLEEP_NOTEINTR): a deliverable caught note interrupts the wait ALONGSIDE the
@@ -1900,6 +1930,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // is serialized against this Thread's register-then-observe of
     // group_exit_msg (the I-9 death-wake close).
     irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    u8 outer_wait = sleep_caught_wait_enter(t, caught_ok, &s);
     spin_lock(&r->lock);
 
     int rc = SLEEP_OK;
@@ -2073,6 +2104,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     }
 
     spin_unlock(&r->lock);
+    __atomic_store_n(&t->caught_wait, outer_wait, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return rc;
 }
@@ -2137,6 +2169,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // before g_timerwait/r->lock so the cascade's per-peer wait_lock walk is
     // serialized against this Thread's register-then-observe.
     irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    u8 outer_wait = sleep_caught_wait_enter(t, caught_ok, &s);
     spin_lock(&g_timerwait.lock);
     spin_lock(&r->lock);
 
@@ -2276,6 +2309,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
     spin_unlock(&r->lock);
     spin_unlock(&g_timerwait.lock);
+    __atomic_store_n(&t->caught_wait, outer_wait, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return ret;
 }
@@ -2707,7 +2741,7 @@ void preempt_check_irq(void) {
     // does and for the same reason: the flag may be the #866-F1 cross-CPU
     // placement kick, set exactly once. The deferred switch is taken at the
     // EL0-return tail, where syscall_dispatch has already cleared the marker
-    // -- so THIS call site gates while the .Lel0_sync_return one does not,
+    // -- so THIS call site gates while the .Lel0_return one does not,
     // from one flag and no extra state.
     //
     // A kernel THREAD is not gated here: it carries no marker, stays

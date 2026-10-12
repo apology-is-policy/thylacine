@@ -15461,7 +15461,7 @@ static void syscall_dispatch_body(struct exception_context *ctx);
 //          other than the boundary the design names.
 //
 // The deferred reschedule is not denied, only POSTPONED: with the marker
-// cleared, .Lel0_sync_return's preempt_check_irq takes it
+// cleared, .Lel0_return's preempt_check_irq takes it
 // (specs/syscall_irqs_buggy_marker_never_cleared.cfg is this clear removed,
 // and it violates TailTookItsPreempt).
 //

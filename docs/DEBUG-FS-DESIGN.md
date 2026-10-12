@@ -714,8 +714,9 @@ arrives during the stop is taken the moment the stop clears; §5g):
 tail: preempt_check_irq -> el0_return_die_check -> STOP-CHECK -> [notes] -> eret
 ```
 
-The bracketed leg is the synchronous tail's alone: the `0x480` IRQ tail delivers
-no notes (`seam-el0-irq-tail-no-notes`). Plan 9 orders the checkpoint the same
+Both vectors run every leg: since #964 (2026-10-12) the `0x480` IRQ tail
+branches into the synchronous one (`.Lel0_return`), so it delivers notes too
+(`seam-el0-irq-tail-no-notes`, closed). Plan 9 orders the checkpoint the same
 way (`notify` runs `procctl` before it looks at a note), and so does Linux, whose
 ptrace signal-delivery-stop comes before the handler frame. Until 2026-10-05 the
 notes leg ran first, so a note could end a thread with a stop pending, and a note
@@ -744,8 +745,8 @@ it.
 
 **The mask guard follows the order.** KERNEL_EXIT erets under an inherited mask
 (#713, ARCH §8.12), so the last C call of each tail asserts that interrupts are
-masked: the stop check on the IRQ tail, and the notes leg on the synchronous tail
-and on the birth tail of a held spawn (§5f). The birth tail runs the same order,
+masked: the notes leg, on the EL0-return tail both vectors take and on the birth
+tail of a held spawn (§5f). Until #964 the IRQ tail ended at the stop check. The birth tail runs the same order,
 with its birth park in the stop leg's place.
 
 On observing a pending stop, the thread transitions to `THREAD_SLEEPING` under
@@ -2110,8 +2111,9 @@ in a family the thread has not masked, as a reason to unwind
 
 - **The tail's stop park** left the park on the latch, so that the thread could
   eret and take the note at its next checkpoint. Only the synchronous and birth
-  tails deliver notes (`seam-el0-irq-tail-no-notes`), and a compute-bound thread
-  re-enters only through the IRQ tail, whose stop check sent it into the park and
+  tails delivered notes then (`seam-el0-irq-tail-no-notes`, closed by #964 on
+  2026-10-12), and a compute-bound thread
+  re-entered only through the IRQ tail, whose stop check sent it into the park and
   straight back out. So a debug- or job-stopped thread that was sent an interrupt
   ran at EL0 with its stop still set. It never settled (§5e), so a debugger could
   neither read nor write it.
@@ -2155,10 +2157,10 @@ disposition does not change. Only group death ends a stopped thread: `kill`,
 the synchronous tail and the birth tail run their stop check before their note
 delivery (§4.2), so the park returns straight into the delivery, where an
 uncaught interrupt terminates the thread. Plan 9 handles the note right after the
-stop in the same way, because `notify` runs `procctl` first. A thread parked by
-the IRQ tail, which delivers no notes, takes the note at its next synchronous
-entry; the running compute-bound thread takes it once
-`seam-el0-irq-tail-no-notes` is closed. (Until 2026-10-05 the notes leg ran
+stop in the same way, because `notify` runs `procctl` first. Since #964
+(2026-10-12) the IRQ tail runs the same legs, so a thread it parked takes the
+note there too, and a running compute-bound thread takes it at its next tick or
+kick. (Until 2026-10-05 the notes leg ran
 first, and a note that arrived during a stop waited for the next synchronous
 entry; OPEN-BUGS 2026-09-30, closed by the operator's choice of stop-first.)
 

@@ -4439,7 +4439,7 @@ void test_cons_caught_note_ends_read(void) {
     TEST_ASSERT(!slot_held, "the interrupted read released the reader slot");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
         "control: the native reader waited, the note posted, the read returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native reader and it slept again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native reader slept again");
     TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native read ends on the fed byte");
 }
 

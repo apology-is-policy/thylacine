@@ -185,6 +185,12 @@ void sched_idle_park(bool tickless);
 // an idle peer, closing R5-H F78 in the production path.
 void sched_set_notify_enabled(bool enabled);
 
+// ARCH 8.8.3 (#964): IPI_RESCHED to the CPU `t` runs on, if that is another
+// CPU, so a thread at EL0 enters its EL0-return tail and meets a note posted
+// for it (Linux's kick_process). Unlocked reads; the tick bounds a miss. Gated
+// by the notify toggle above, so the in-kernel tests send nothing.
+void sched_kick_thread(struct Thread *t);
+
 // Yield the CPU.
 //
 // Picks the highest-priority runnable thread across bands; within a

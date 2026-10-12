@@ -10,9 +10,10 @@
 # is the one specs/SPEC-TO-CODE.md records.
 #
 # What this script CANNOT see, said so the green reads no larger: the model
-# abstracts the park to one step (debug_stop.tla checks the park itself) and
-# leaves out the IRQ tail; the kernel test rendez.tail_parks_for_the_stop_it_applies
-# and debug-probe's resume, death-step and caught-step legs hold the code to it.
+# abstracts the park to one step (debug_stop.tla checks the park itself), and
+# which thread of a Proc takes a caught note is caught_target.tla's; the kernel
+# test rendez.tail_parks_for_the_stop_it_applies and debug-probe's resume,
+# death-step and caught-step legs hold the code to it.
 set -u
 cd "$(dirname "$0")"
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
@@ -22,8 +23,8 @@ trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
 # clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="tail_order:23146
-tail_order_birth:45272"
+CLEAN="tail_order:46292
+tail_order_birth:68418"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="tail_order_buggy_notes_first:MeetsQueue
@@ -33,7 +34,8 @@ tail_order_buggy_budget_first:NoEretUnderOwnStop"
 
 # temporal: cfg, the property that must be the one reported, expected distinct
 # states ("-" = do not pin)
-TEMPORAL="tail_order_buggy_no_budget:TailEnds:9022"
+TEMPORAL="tail_order_buggy_no_budget:TailEnds:18044
+tail_order_buggy_irq_no_notes:RunMeets:26886"
 
 # Every temporal run is `-lncheck final`: liveness is judged once the whole
 # space is explored. Without it TLC checks liveness at TIME-triggered points

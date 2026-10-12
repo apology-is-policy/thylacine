@@ -1011,7 +1011,7 @@ void test_proc_group_terminate_smoke(void) {
     // MASKED, because that is the state the function's real callers provide.
     // el0_return_die_check runs on the approach to KERNEL_EXIT, which installs
     // ELR/SPSR and erets under an INHERITED mask (#713); every real call site
-    // -- .Lel0_sync_return, the 0x480 IRQ tail, both trampolines -- arrives
+    // -- .Lel0_return (both lower-EL vectors), both trampolines -- arrives
     // masked. This test drives it from the boot kthread, which runs UNMASKED,
     // so without this the call happens in a state no shipping path produces.
     //

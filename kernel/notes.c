@@ -1401,13 +1401,23 @@ bool thread_caught_note_claim(struct Thread *t) {
         // and then completed anyway leaves the claim until the call's tail, and
         // the call's next wait must not refuse the note only it may unwind for.
         if (deliv & t->note_claim) return true;
+        // A designation becomes the claim when its thread unwinds for it: the
+        // posting walk set the claim bit on this thread's behalf, so no CAS is
+        // owed. The claim is recorded before the designation goes, so the
+        // family's bit always has a holder (the walk's re-wake looks for one).
+        u8 tgt = (u8)(__atomic_load_n(&t->note_target, __ATOMIC_ACQUIRE) & deliv);
+        if (tgt) {
+            __atomic_store_n(&t->note_claim, (u8)(t->note_claim | tgt), __ATOMIC_RELAXED);
+            __atomic_and_fetch(&t->note_target, (u8)~tgt, __ATOMIC_RELEASE);
+            return true;
+        }
         u32 open    = deliv & ~claimed;
         if (open == 0) return false;   // every family deliverable here is taken
         u32 fam = open & (~open + 1u); // the lowest: any one family unwinds us
         if (__atomic_compare_exchange_n(&p->proc_flags, &flags,
                                         flags | (fam << PROC_CAUGHT_CLAIM_SHIFT),
                                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            t->note_claim |= (u8)fam;
+            __atomic_store_n(&t->note_claim, (u8)(t->note_claim | fam), __ATOMIC_RELAXED);
             return true;
         }
         // `flags` now holds the fresh word: a post, a drain or a peer's claim.
@@ -1465,6 +1475,65 @@ bool proc_caught_note_eintr_ready(struct Proc *p) {
 
 bool thread_caught_note_unwinds(struct Thread *t) {
     return t && proc_caught_note_eintr_ready(t->proc) && thread_caught_note_claim(t);
+}
+
+// ARCH 8.8.3: the kind of wait `t` is entering. UNWINDS exactly when every
+// gate of thread_caught_note_unwinds that cannot change during the wait passes:
+// the caller opted in (caught_ok), the call is on signal(7)'s list, the Proc is
+// EINTR-ready, and no handler, exit close or kthread join holds the thread.
+// What is left is per family -- the mask, the queued note, the claim -- and the
+// walk re-checks the mask itself.
+u8 thread_caught_wait_kind(const struct Thread *t, bool caught_ok) {
+    if (!caught_ok || !t->note_interruptible || t->in_handler ||
+        t->exit_close_active || t->kthread_join_active)
+        return CAUGHT_WAIT_HOLDS;
+    struct Proc *p = t->proc;
+    if (!p || p == kproc() || !proc_caught_note_eintr_ready(p))
+        return CAUGHT_WAIT_HOLDS;
+    return CAUGHT_WAIT_UNWINDS;
+}
+
+// Give up the families in `mine`, already cleared from `t`'s claim and
+// designation, and walk the Proc again if a note of one is still queued. The
+// walk skips `skip`. Called with no lock held.
+static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip) {
+    struct Proc *p   = t->proc;
+    u32          was = __atomic_fetch_and(&p->proc_flags,
+                                          ~(mine << PROC_CAUGHT_CLAIM_SHIFT),
+                                          __ATOMIC_ACQ_REL);
+    u32 caught = (was & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    if ((caught & mine) == 0) return;
+    irq_state_t s = proc_table_lock_acquire();
+    proc_caught_note_walk(p, skip);
+    proc_table_lock_release(s);
+}
+
+// ARCH 8.8.3: the hand-off. sleep_common and tsleep_common call this after they
+// have published the wait's kind under t->wait_lock and dropped it, when `t`
+// holds a designation the wait cannot honour: every family when the wait
+// holds, a masked one when it unwinds. The walk re-checks a pick under that
+// lock, so it cannot designate `t` again for one of these families until the
+// wait ends; a family whose note is still queued goes to another thread now.
+void notes_handoff_target(struct Thread *t, u8 keep) {
+    u8 drop = (u8)(__atomic_fetch_and(&t->note_target, keep, __ATOMIC_ACQ_REL) & (u8)~keep);
+    if (drop == 0 || !t->proc) return;
+    notes_drop_families(t, drop, NULL);
+}
+
+// ARCH 8.8.3: an exiting thread gives up its claim and its designation at the
+// THREAD_EXITING commit. The caller holds g_proc_table_lock, which every walk
+// holds, so no walk can designate `t` after this: the walk refuses an EXITING
+// thread.
+void notes_exit_drop_locked(struct Thread *t) {
+    struct Proc *p = t->proc;
+    if (!p || p == kproc()) return;
+    u32 mine = t->note_claim | __atomic_exchange_n(&t->note_target, 0, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&t->note_claim, 0, __ATOMIC_RELAXED);
+    if (mine == 0) return;
+    u32 was = __atomic_fetch_and(&p->proc_flags, ~(mine << PROC_CAUGHT_CLAIM_SHIFT),
+                                 __ATOMIC_ACQ_REL);
+    u32 caught = (was & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    if (caught & mine) proc_caught_note_walk(p, NULL);
 }
 
 // VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
@@ -1620,8 +1689,11 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     ctx->regs[30] = act->restorer;   // vivarium_sigaction_decide required it
     ctx->sp       = sigframe;
     ctx->elr      = act->handler;
-    // spsr unchanged but for SS: the handler runs at EL0 with the PSTATE the
-    // syscall entered with, exactly as the Plan 9 note path leaves it.
+    // BTYPE: the tail may have stopped EL0 between an indirect branch and its
+    // target, and the handler is not that target (Linux's setup_return). The
+    // save above keeps it for the restore. Otherwise the handler runs with the
+    // PSTATE EL0 had, as the Plan 9 note path leaves it.
+    ctx->spsr    &= ~SPSR_EL1_BTYPE;
 }
 
 static bool notes_deliver_tail(struct exception_context *ctx, u32 *passes) {
@@ -1980,33 +2052,28 @@ again:
     ctx->regs[1] = (u64)popped.arg;
     ctx->sp      = new_sp;     // sp_el0 saved back to exception frame's sp
     ctx->elr     = handler_va;
-    // spsr unchanged but for SS -- the handler runs at EL0 with the same
-    // PSTATE the syscall entered with.
+    // BTYPE, as in notes_deliver_linux_locked; otherwise the handler runs with
+    // the PSTATE EL0 had.
+    ctx->spsr   &= ~SPSR_EL1_BTYPE;
     return false;                   // the handler runs next; the tail ends, as the Linux arm's does
 }
 
-// ARCH 8.8.3: an unwind claim (thread_caught_note_claim) lasts until the
-// claimant's EL0-return tail, whatever the tail delivered. The tail runs at most
-// one handler and can end short of the claimed note -- at a frame that would not
-// build, or with its pass budget spent -- so the claim cannot wait for that note
-// to drain: the
-// claimant may block again before it does, and every peer's wait refuses a
-// claimed family. Released, the family is open to this thread's next wait and
-// to a peer's; if its note is still queued, the peers' waits re-read their
-// conditions, so one of them can unwind for it now.
+// ARCH 8.8.3: an unwind claim (thread_caught_note_claim) and a designation (the
+// posting walk's note_target) last until the thread's EL0-return tail, whatever
+// the tail delivered. The tail runs at most one handler and can end short of the
+// family's note -- at a frame that would not build, or with its pass budget
+// spent -- so the claim cannot wait for that note to drain: the thread may block
+// again before it does, and every peer's wait refuses a claimed family.
+// Released, the family is open again; if its note is still queued, the walk
+// picks a thread for it, and not this one, whose tail has just passed it by.
+// Every IRQ return from EL0 reaches here, so the common case reads two bytes.
 static void notes_release_claims(struct Thread *t) {
-    u32 mine = t->note_claim;
+    if (t->note_claim == 0 && __atomic_load_n(&t->note_target, __ATOMIC_RELAXED) == 0)
+        return;
+    u32 mine = t->note_claim | __atomic_exchange_n(&t->note_target, 0, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&t->note_claim, 0, __ATOMIC_RELAXED);
     if (mine == 0) return;
-    t->note_claim = 0;
-    struct Proc *p   = t->proc;
-    u32          was = __atomic_fetch_and(&p->proc_flags,
-                                          ~(mine << PROC_CAUGHT_CLAIM_SHIFT),
-                                          __ATOMIC_ACQ_REL);
-    u32 caught = (was & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
-    if ((caught & mine) == 0) return;
-    irq_state_t s = proc_table_lock_acquire();
-    proc_caught_note_wake(p);
-    proc_table_lock_release(s);
+    notes_drop_families(t, mine, t);
 }
 
 // The last leg of the synchronous and birth tails (DEBUG-FS-DESIGN 4.2). A stop

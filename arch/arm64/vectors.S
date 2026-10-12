@@ -243,8 +243,9 @@ _exception_vectors:
     //
     // IRQ (0x480) reuses exception_irq_curr_el — same GIC ack→dispatch→
     // EOI flow regardless of EL source. KERNEL_ENTRY captures SP_EL0
-    // (the user's stack at fault) for the saved context. preempt_check_irq
-    // observes the slice/need_resched and may context-switch.
+    // (the user's stack at fault) for the saved context. Both slots then take
+    // the one EL0-return tail, .Lel0_return (#964: an IRQ return delivers
+    // notes, so a thread that never traps still takes them).
     //
     // FIQ + SError still extinct (no FIQ source online; SError indicates
     // hardware-level corruption that v1.0 can't recover from cleanly).
@@ -253,17 +254,13 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_lower_el
-    b       .Lel0_sync_return            /* #107: clean-frame preempt + die-check + notes, then ERET */
+    b       .Lel0_return                 /* #107: clean-frame preempt + die-check + stop + notes, then ERET */
 
     .org _exception_vectors + 0x480      /* IRQ from EL0 */
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_irq_curr_el
-    bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
-    bl      el0_return_die_check         /* I-24: self-exit if Proc group-terminating (noreturn if so) */
-    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */
-    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER the die-check -- death wins) */
-    b       .Lexception_return
+    b       .Lel0_return                 /* #964: the same tail, notes leg included */
 
     .org _exception_vectors + 0x500
     VEC_UNEXPECTED 10
@@ -314,14 +311,18 @@ _exception_vectors:
 .section ".text", "ax"
 
 // ---------------------------------------------------------------------------
-// .Lel0_sync_return — #107: EL0 sync-exception return tail. The 0x400 slot
-// branches here AFTER exception_sync_lower_el returns and its HX-1 halls frame
-// is closed (the wrapper ran halls_leave_frame), so this is a CLEAN saved frame
-// with no live C handler on the stack — structurally identical to the 0x480 IRQ
-// slot. It is reached ONLY from the recoverable EL0-sync returns (SVC-return,
-// FAULT_HANDLED); the terminating fault paths are noreturn and never arrive.
+// .Lel0_return — the EL0-return tail of both lower-EL slots. The 0x400 slot
+// (#107) branches here AFTER exception_sync_lower_el returns and its HX-1 halls
+// frame is closed (the wrapper ran halls_leave_frame); the 0x480 slot (#964)
+// after exception_irq_curr_el has acked, dispatched and EOIed with IRQs masked
+// and closed its frame. Either way this is a CLEAN saved frame with no live C
+// handler on the stack and no kernel lock held, which is what the notes leg
+// requires (ARCH 7.6.4). The sync slot arrives ONLY from the recoverable
+// returns (SVC-return, FAULT_HANDLED); the terminating fault paths are noreturn
+// and never arrive. Until #964 the IRQ slot ran the first three legs and
+// skipped the notes leg, so a thread that never trapped never took a note.
 //
-// Ordering mirrors 0x480 (preempt BEFORE die-check):
+// Ordering (preempt BEFORE die-check):
 //   1. preempt_check_irq — the syscall/fault-return wake-preempt (RW-11 SA-1b,
 //      the #60 latency win). A sched() inside it saves THIS trampoline's frame,
 //      so a thread preempted + stolen here resumes at a clean frame (never
@@ -335,9 +336,10 @@ _exception_vectors:
 //      note latched during the stop is taken as it clears; DEBUG-FS-DESIGN 4.2).
 //   4. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery,
 //      the last C call (it asserts the #713 mask); sp still points at the
-//      KERNEL_ENTRY trapframe here.
+//      KERNEL_ENTRY trapframe here. On an IRQ return it can stop EL0 at any
+//      instruction, which the whole-context save already covers (7.6.4).
 // ---------------------------------------------------------------------------
-.Lel0_sync_return:
+.Lel0_return:
     bl      preempt_check_irq
     bl      el0_return_die_check
     mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */

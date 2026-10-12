@@ -1840,7 +1840,7 @@ void test_poll_caught_note_ends_park(void) {
     TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not the fd the release readied");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
         "control: the native poller parked, the note posted, the poll returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native poller and it parked again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native poller parked again");
     TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native poll ends on the readied fd");
 }
 
@@ -1971,7 +1971,7 @@ void test_poll_caught_note_ends_pause(void) {
     TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not the timeout's 0");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
         "control: the native sleeper parked, the note posted, the sleep returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native sleeper and it slept again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native sleeper slept again");
     TEST_EXPECT_EQ(ctl.rc, 0L, "control: the native sleep ends on its timeout");
     TEST_ASSERT(zero.posted && zero.on_post && zero.joined, "zero timeout: returned at once");
     TEST_EXPECT_EQ(zero.rc, -(long)T_E_INTR,

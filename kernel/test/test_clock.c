@@ -272,7 +272,7 @@ void test_clock_nanosleep_caught_note(void) {
                 "and is the request less at most the time the leg took");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
                 "control: the native sleeper parked, the note posted, the sleep returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native sleeper and it slept again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native sleeper slept again");
     TEST_EXPECT_EQ(ctl.rc, 0L, "control: the native sleep ends on its deadline");
     TEST_ASSERT(ctl_ns >= CNS_CTL, "control: and not before it");
     TEST_ASSERT(early.posted && early.on_post && early.joined,

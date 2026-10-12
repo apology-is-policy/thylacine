@@ -889,26 +889,26 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 3. If found: copy to a `struct note_record`; remove from the queue; release lock; copy out to user buffer (uaccess with fault fixup).
 4. If empty (or all masked): release lock; `tsleep` on `notes.waiters` (with optional non-blocking via `O_NONBLOCK` on the fd — deferred to v1.x; v1.0 always blocks).
 
-**Async-handler path** (at EL0-return tail in `arch/arm64/exception.c::exception_sync_lower_el`):
+**Async-handler path** (the notes leg of every EL0-return tail: `.Lel0_return` in `arch/arm64/vectors.S`, which the synchronous vector (a syscall, a fault) and, since #964 (2026-10-12), the IRQ-from-EL0 vector (a tick, a kick) both take, and a held child's birth tail):
 1. Acquire `notes.lock`. If `t->in_handler` is true, release and continue (no nested delivery).
 2. Walk the queue; pick the first non-masked note. If none, release and continue.
 3. Pop the note. If `name == "kill"`: release lock; call `exits("killed")` (non-catchable; bypasses handler regardless of registration).
 4. If `p->handler_va == 0`: this note has no handler; release lock; apply the uncaught default. NOT `exits(name)` for every note (that text predates LS-5 and #15): the tail terminates only for a note whose `dfl` is TERMINATE **and** which carries a terminate latch (`interrupt`, `tty:quit`, `tty:hup` — `notes_name_terminate_latch`); every other note is left QUEUED for the fd-read path. An uncaught `tty:susp` never reaches here at all — it is stopped at POST time by `job_stop_cb` and never queued. See the I-19 row in §28 for the partial-unification boundary.
-5. Otherwise: cache `t->note_saved_pc = ctx->elr; t->note_saved_sp = ctx->sp_el0; t->in_handler = true;` — release lock.
-6. Push a `struct ureg` + the note name onto the user stack (sp aligned to 16; sp -= sizeof(ureg) + NOTE_NAME_MAX, with red-zone allowance).
-7. Mutate the exception context: `elr = handler_va; regs[0] = ureg_va; regs[1] = note_name_va; sp_el0 = adjusted_sp`.
+5. Otherwise: pop the note and push its name below the interrupted `sp` (`NOTE_NAME_MAX` bytes, 16-aligned; AArch64 has no red zone); release the lock. A push that faults re-queues the note at the head.
+6. Save the WHOLE interrupted context in the Thread, never in user memory: x0-x30, `sp`, `elr` and `spsr` from the trapframe, and the FP/SIMD half (V0-V31, FPSR, FPCR) from the live registers, which the kernel never touches. Set `t->in_handler`. (The Linux phenotype builds its `rt_sigframe` here instead, from the same save; VIVARIUM §6.22.)
+7. Rewrite the exception context: `elr = handler_va; regs[0] = note_name_va; regs[1] = arg; sp = note_name_va`. Clear `SPSR.SS` (DEBUG-FS-DESIGN §5.5) and `SPSR.BTYPE` (an IRQ can arrive between an indirect branch and its target, and the handler is not that target); the rest of PSTATE is the thread's own.
 8. `eret` normally; the handler runs in the same Thread's user context.
 
 **`SYS_NOTED(arg)`**:
-- arg == 0 (NCONT): validate `t->in_handler == true`; restore `ctx->elr` and `ctx->sp_el0` from the user-stack `ureg` (via uaccess) — the cached `note_saved_pc/sp` provide cross-checks against tampering; clear `in_handler`; eret to the restored user state.
+- arg == 0 (NCONT): validate `t->in_handler == true`; restore the whole saved context from the Thread (`notes_noted_restore`: every GPR, `sp`, `elr`, `spsr`, and the FP/SIMD half), never from user memory, so no user-written word reaches `pstate` or `pc`; clear `in_handler`; eret to the restored user state. (This text said `elr` and `sp` were restored from a user-stack `ureg`; the save has been whole since task #96.)
 - arg == 1 (NDFLT): take the note's default action, which since #15 is PER-NOTE (`notes_default_action` reads the `dfl` column of `g_known_notes`): TERMINATE → `exits(name)`, noreturn (`interrupt`/`kill`/`pipe`/`tty:quit`/`tty:hup`); STOP → restore the pre-handler context as NCONT does, then arm the job stop, and the EL0-return tail parks the thread (`tty:susp`; discarded with a 0 return if EITHER premise fails at apply time: the caller's pgrp is orphaned, OR the stop is STALE — #240's `Proc.susp_stop_armed`, set on the susp's post and cleared by any intervening cont, since #15's decide-at-POST / apply-at-NDFLT split leaves a full EL0 handler execution in which a cont can overtake the susp); IGNORE → restore and return, identical to NCONT (`child_exit`/`tty:winch`/`tty:cont`). Only the TERMINATE arm never returns.
 - Anything else → `-EINVAL`.
 
-**Async-safety**: delivery happens only at the EL0-return tail, after `regs[0]` is written and before `eret`. At that point the kernel holds no locks (a syscall acquires-then-releases all locks within its body; an IRQ-return is similar). Handlers therefore can never observe a partial-kernel state. The lock discipline in steps 1-5 above ensures the queue-mutation is atomic w.r.t. concurrent fd-reads from another Thread.
+**Async-safety**: delivery happens only at an EL0-return tail, before `eret`. A syscall, a fault and an interrupt from EL0 all reach it with no kernel lock held on that CPU (a syscall acquires and releases its locks within its body; an interrupt from EL0 interrupted no kernel code). Handlers therefore can never observe a partial-kernel state. Since #964 the tail also runs on an IRQ return, so a note can stop EL0 at any instruction, not only at a syscall boundary: that is why step 6 saves the whole register file and FP state, and why nothing on the path reads a syscall result. The lock discipline in steps 1-5 above ensures the queue-mutation is atomic w.r.t. concurrent fd-reads from another Thread.
 
 **One default action is taken at a fault instead of the tail.** A user fault left unresolved while a terminate latch is pending (§8.8.2; the latch's own wake abandoned the page-in) reaches the EL0 fault arm as `FAULT_USER_DYING`, and the arm calls `notes_fault_dying_latch`: under the queue lock it `exits()` with the note the tail would pick, or clears the latches no queued note still backs and returns. The tail defers notes while a handler runs and while `SP_EL0` is unusable, so waiting for it re-executed the faulting instruction into the same fault forever. No handler runs at the fault, so the async-safety argument above is untouched; ending a thread inside a handler on a pending SIG_DFL fatal note is Linux's behaviour too, since `complete_signal` makes such a signal a group exit at send time. A group death is not acted on here: the arm returns and the tail's die-check acts.
 
-**Multi-thread Procs (post sub-chunk 9a)**: notes are Proc-directed. The EL0-return-tail check fires on each Thread's return; first-eligible Thread wins the delivery (its mask is the gate). If every Thread has the note masked, it stays queued; delivery happens when any Thread clears its mask (the `SYS_NOTE_MASK` syscall re-pumps before returning).
+**Multi-thread Procs (post sub-chunk 9a)**: notes are Proc-directed. The EL0-return-tail check fires on each Thread's return; first-eligible Thread wins the delivery (its mask is the gate). The posting walk decides which Thread should take a caught note soon, kicking it by IPI or interrupting its wait (§8.8.3 *Which thread takes a caught note*); that decides who is disturbed, not who may deliver. If every Thread has the note masked, it stays queued; delivery happens when any Thread clears its mask (the `SYS_NOTE_MASK` syscall re-pumps before returning).
 
 **`kill` is non-catchable**: bypasses mask, handler, and fd-read. Posting `kill` to a Proc terminates it immediately at the next return-to-EL0 (mirrors SIGKILL).
 
@@ -1483,7 +1483,8 @@ opening the notes fd, while its child uses the parent's stack or is still
 loading. The latch stays armed and the note queued. A thread parked at the
 synchronous tail or the birth tail takes it at that same tail as the stop clears,
 because both tails stop before they deliver notes (operator-voted 2026-10-05;
-DEBUG-FS-DESIGN §4.2). A thread in a nested park, in the IRQ tail's park or in a
+DEBUG-FS-DESIGN §4.2), and since #964 (2026-10-12) so does a thread parked at
+the IRQ tail, which runs the same legs. A thread in a nested park or in a
 suspend takes it at its next note checkpoint once the stop clears or the suspend
 returns. The latch's
 wake walk, the caught note's and a second stop's pass a thread in a stop park
@@ -1565,9 +1566,11 @@ wait **without** terminating the Thread, so it is serviced promptly at the tail.
   note, under the #90 guard `thread_reader_blocks_death`.)
 - **`proc_caught_note_wake(p)`** (proc.c, parallel to
   `proc_interrupt_terminate_wake`): run on every commit of a deliverable caught
-  note, it walks `p->threads` and `wakeup()`s each
-  blocked peer under its `wait_lock`, so an **already-sleeping** thread observes
-  the predicate on resume. (A not-yet-sleeping thread is covered without the
+  note, it walks `p->threads` and picks the one thread that takes the note,
+  waking it under its `wait_lock` if it is blocked (*Which thread takes a caught
+  note*, below; until 2026-10-12 it woke every blocked peer and the first to
+  claim unwound), so an **already-sleeping** designee observes the predicate on
+  resume. (A not-yet-sleeping thread is covered without the
   wake — its register-then-observe reads the predicate.) `notes_post`'s existing
   `poll_waiter_list_wake` already covers a peer blocked in `poll` on its *own*
   notes fd; the new wake covers a peer blocked in an *unrelated* wait — `read`,
@@ -1579,11 +1582,12 @@ wait **without** terminating the Thread, so it is serviced promptly at the tail.
   takes the lock for its wakes after the post. The `pipe` note needs no wake:
   it goes to the writer's own Proc from inside the write and delivers at that
   thread's return tail, as Linux sends SIGPIPE to the writing thread alone.
-  The wake reaches every blocked peer, but **one caught note unwinds one
-  sleeper**, as Linux interrupts one thread for a process-directed signal: the
-  sleeper that unwinds claims the note's family (a claim sub-field of
-  `proc_flags`, taken by a CAS that re-validates the caught bit), and its peers
-  find the family claimed and re-park. The claim is the claimant's, and it ends
+  **One caught note unwinds at most one sleeper**, as Linux interrupts at most
+  one thread for a process-directed signal: a family's claim (a sub-field of
+  `proc_flags`, taken by a CAS that re-validates the caught bit) is held by one
+  thread at a time -- the walk's designee, on whose behalf the walk took it, or a
+  sleeper that found the family open and took it itself -- and a peer finds the
+  family claimed and re-parks. The claim is the holder's, and it ends
   at the claimant's EL0-return tail, whatever the tail delivered: that tail runs
   at most one handler and can end short of the claimed note (a frame that will
   not build, a pass budget spent), so a claim that waited for its note to drain
@@ -1591,7 +1595,7 @@ wait **without** terminating the Thread, so it is serviced promptly at the tail.
   for, since the stop comes before the notes leg (DEBUG-FS-DESIGN §4.2). Nothing
   needs it there: a stop holds every thread of the Proc, and the caught note's
   wake passes a stopped thread by. Released with its note still queued, the family is
-  open again and the Proc's sleepers are woken to claim it. The tail itself
+  open again and the walk runs again to pick a taker. The tail itself
   loops past notes it discards, as Linux's `get_signal` loops past ignored
   signals, so a caught note queued behind an ignored one is delivered on the
   same return.
@@ -1735,6 +1739,77 @@ Two alternatives were rejected:
 
 No new invariant. This narrows I-19's caught-note disposition and leaves the
 I-9 wake intact: a waiter that is refused the unwind re-sleeps.
+
+**Which thread takes a caught note, and every EL0 return delivers it
+(amendment, operator votes 2026-10-12, `dec-2026-10-12-note-target`).** Two
+defects shared one design. The IRQ-from-EL0 tail had no notes leg (#964,
+`seam-el0-irq-tail-no-notes`), so a thread that never entered the kernel never
+took a note: Ctrl-C did not end a `while(1);`, and a caught handler did not run.
+And the walk above woke every blocked thread, so a child's `SIGCHLD` returned
+`EINTR` from a worker's `ppoll` while main was running (L285). Plan 9 notifies
+at every trap return, interrupts included (9front `trap.c`). Linux meets
+signals on every return to user mode, and its `complete_signal` prefers the
+thread a signal was sent to (main, for `kill`) when that thread can take it,
+waking it if it sleeps interruptibly and kicking it by IPI if it runs.
+FreeBSD's `sigtd` prefers the current thread, then the first that does not
+block the signal.
+- **Every EL0 return delivers notes.** The IRQ-from-EL0 vector branches into
+  the tail the synchronous vector takes (`.Lel0_return`): the preempt check,
+  the die-check, the stop leg and the notes leg, under one budget. The IRQ
+  handler acks, dispatches and EOIs with IRQs masked and closes its halls frame,
+  so the leg runs in the state the sync tail gives it: no kernel lock held, the
+  #713 mask. The save and restore were already whole (§7.6.4), and nothing on
+  the path reads a syscall result (there is no kernel restart, *Disposition*
+  above). The handler's context clears `SPSR.BTYPE` as well as `SPSR.SS`.
+- **The kick.** A post that picks a thread running on another CPU sends that
+  CPU `IPI_RESCHED`, as Linux's `kick_process` does, so a spinner enters the
+  IRQ tail at once. The interrupt-terminate wake (§8.8.2) kicks the Proc's
+  running threads the same way. If a kick is missed, the tick bounds the wait,
+  because a busy CPU is never tickless.
+- **The pick.** For each caught family with a note queued and no holder, the
+  walk picks one candidate. A candidate is not exiting, has the family
+  unmasked, is not in a handler, and is not in a wait that will not unwind for
+  a caught note. The walk prefers, in order: the posting thread, main (the
+  oldest live thread), any other thread that is not blocked, main blocked in
+  an unwinding wait, and any thread blocked in one. A thread that is not
+  blocked reaches a tail soon, so a sleeper is woken only when none can. In a
+  Linux-phenotype Proc the walk takes the family's claim on the pick's behalf
+  (recorded in its `note_target`) and wakes it if it is blocked; then only the
+  holder may unwind for the family. In a native Proc the walk only kicks,
+  since no native wait unwinds for a caught note (item 11c). Any thread's tail
+  still delivers a queued note whose family it has unmasked. The pick decides
+  who is interrupted or kicked, not who may deliver.
+- **The hand-off.** A designation ends in three places. It ends at its
+  thread's EL0-return tail, as a claim does. It ends when the thread enters a
+  wait that cannot unwind for the family, before the thread blocks: a wait
+  that will not unwind for a caught note (a thread in a handler waits so), or
+  one that would but the thread has masked the family. And it ends at the
+  thread's exit, at the `THREAD_EXITING` commit under `g_proc_table_lock`.
+  Each end with the note still queued runs the walk again, and a walk run by
+  a release does not pick the releasing thread, whose tail has just passed the
+  note by. The wait's kind is published under the thread's `wait_lock`, where
+  the walk re-checks its pick before designating it, so no thread is
+  designated into a wait that will not unwind. The mask and the handler flag
+  are the thread's own and are written without that lock, so the re-check
+  reads them exactly only while the thread is blocked; a thread designated on
+  a stale value gives it up at its tail or at its next wait. Every walk also wakes a holder blocked in an
+  unwinding wait. A claim or a designation can outlive its note, when another
+  thread's tail delivered it, and a later note of the family must still unwind
+  that holder. A sleeper that unwound keeps its claim through the 9P flush wait
+  (above); only a designation is handed off. Linux leaves a signal with a
+  target in an uninterruptible sleep. Here a thread that can unwind takes it
+  instead.
+
+The hand-off is modelled (operator, 2026-10-12, "Model it"; spec-first
+re-enabled for this surface). `specs/caught_target.tla` checks `OneClaimant`,
+and `NoStrand`: a note stays queued forever only if no thread stays able to
+take it. It has a buggy cfg for each of eight defects: no hand-off at a hold
+wait; a designation without the re-check; no re-wake of a stale holder; a
+second designation; an exit that keeps its designation; a release that owes no
+walk; an IRQ tail with no notes leg; and a designation kept into a wait that
+cannot unwind for it. `specs/tail_order.tla` gains the IRQ
+entry and `RunMeets`. No new section 28 invariant: this is I-19's delivery and
+I-9's wake on one more path.
 
 ### 8.9 Open design questions
 

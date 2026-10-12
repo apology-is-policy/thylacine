@@ -443,16 +443,17 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // via proc_fault_terminate (snare:align / snare:bti / snare:brk
 // respectively).
 // P6-pouch-signals-impl (sub-chunk 13a): the EL0-return-tail note-delivery hook
-// (defined in kernel/notes.c). As of #107 it is invoked from the vector tails
-// (vectors.S .Lel0_sync_return for sync-from-EL0, 0x480 for IRQ-from-EL0), not
-// from the C handlers here; the decl is retained for documentation.
+// (defined in kernel/notes.c). As of #107 it is invoked from the vector tail
+// (vectors.S .Lel0_return, which sync-from-EL0 and, since #964, IRQ-from-EL0
+// both take), not from the C handlers here; the decl is retained for
+// documentation.
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
 // EL0-return-tail die-check (defined in kernel/proc.c). If the calling
 // Thread's Proc is group-terminating, the Thread self-exits here (noreturn);
 // otherwise returns. As of #107 invoked from the vector tails (vectors.S
-// .Lel0_sync_return + 0x480), AFTER preempt_check_irq -- so a group-terminate
+// .Lel0_return), AFTER preempt_check_irq -- so a group-terminate
 // landing during the preempt is caught before any EL0 instruction runs.
 void el0_return_die_check(void);
 
@@ -493,7 +494,7 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // #107: the EL0-return tail -- preempt_check_irq ->
             // el0_return_die_check (I-24) -> el0_return_stop_check ->
             // notes_deliver_at_el0_return (DEBUG-FS-DESIGN 4.2) -- now
-            // runs at the VECTOR level (vectors.S .Lel0_sync_return), AFTER this
+            // runs at the VECTOR level (vectors.S .Lel0_return), AFTER this
             // handler returns and its halls frame is closed. That clean-frame
             // preempt mirrors the 0x480 IRQ slot and avoids the mid-handler steal
             // hazard (#104). The fault was resolved; ERET (via KERNEL_EXIT)
@@ -566,7 +567,7 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // vectors.S ERETs to EL0 with the result in x0.
         syscall_dispatch(ctx);
         // EL0-return tail runs at the VECTOR level now (vectors.S
-        // .Lel0_sync_return), AFTER this handler returns + its halls frame is
+        // .Lel0_return), AFTER this handler returns + its halls frame is
         // closed: (1) preempt_check_irq -- the #107 syscall-return preempt, the
         // RW-11 SA-1b wake-preemption consumer, re-added at a CLEAN saved frame
         // mirroring the 0x480 IRQ slot (the #104 deadlock was a per-CPU `cs`

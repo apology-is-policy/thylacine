@@ -3255,12 +3255,14 @@ bool proc_caught_note_pending(const struct Proc *p) {
 // Deliberate deltas from the death template (see the proc.h contract):
 // no torpor_wake_all_for_proc (torpor waiters are reachable through
 // rendez_blocked_on, and tsleep's widened register-then-observe closes the
-// register-after-walk race) and no smp_resched_others (the IRQ-from-EL0 tail
-// evaluates only group_exit_msg -- an IPI cannot accelerate a RUNNING
-// thread's interrupt-death; task #964 tracks the never-syscalling gap). The
-// no-IPI shape also lets the in-kernel unit test drive this REAL waker under
-// the deterministic single-CPU harness (the death test must hand-roll the
-// cascade to avoid waking idle secondaries).
+// register-after-walk race) and a kick of each thread running elsewhere in
+// place of smp_resched_others. Since #964 the IRQ-from-EL0 tail carries the
+// notes leg, so IPI_RESCHED makes a thread spinning at EL0 take the interrupt
+// at once rather than at its next tick; only the CPUs running a thread of `p`
+// are kicked. sched_kick_thread is gated off in the in-kernel tests, so the
+// unit test still drives this REAL waker under the deterministic single-CPU
+// harness (the death test must hand-roll the cascade to avoid waking idle
+// secondaries).
 //
 // A thread parked on its own debug_rendez is skipped. Both sleeps there (the
 // stop parks) are death-only (DEBUG-FS-DESIGN 5g), so the wake could only be
@@ -3278,31 +3280,174 @@ void proc_interrupt_terminate_wake(struct Proc *p) {
         struct Rendez *r = peer->rendez_blocked_on;
         if (r && r != &peer->debug_rendez) wakeup(r);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
+        sched_kick_thread(peer);
     }
 }
 
-// item 11 (ARCH 8.8.3): the CAUGHT-note twin of proc_interrupt_terminate_wake.
-// IDENTICAL body + lock contract (CALLER HOLDS g_proc_table_lock; see the
-// proc.h contract + the death-template rationale above), gated on the
-// caught-note sub-field instead of the terminate latch. A blocked peer it wakes
-// unwinds SLEEP_NOTEINTR (not SLEEP_INTR), returns -T_E_INTR, and delivers its
-// queued caught note at the EL0-return tail WITHOUT dying. Interrupt-posting
-// sites call this right after proc_interrupt_terminate_wake: for a given post
-// exactly one of the two latches is armed (uncaught -> terminate; caught -> this
-// sub-field -- the arms are mutually exclusive by notes_post's arm-refusal), so
-// the other wake is a no-op via its gate. A thread in a stop park is skipped for
-// the reason given above: the park is death-only, and a caught note waits for
-// the stop to clear.
+// item 11 (ARCH 8.8.3): the CAUGHT-note twin of proc_interrupt_terminate_wake,
+// on the same lock contract (CALLER HOLDS g_proc_table_lock; see the proc.h
+// contract), gated on the caught-note sub-field instead of the terminate latch.
+// Interrupt-posting sites call it right after proc_interrupt_terminate_wake: for
+// a given post exactly one of the two latches is armed (uncaught -> terminate;
+// caught -> this sub-field; notes_post's arm-refusal keeps them exclusive), so
+// the other is a no-op. Until 2026-10-12 it woke every blocked thread and the
+// first to claim the family unwound, so a child's SIGCHLD returned EINTR from a
+// worker's ppoll while main ran (L285). It now chooses one thread
+// (dec-2026-10-12-note-target).
 void proc_caught_note_wake(struct Proc *p) {
+    proc_caught_note_walk(p, NULL);
+}
+
+// ARCH 8.8.3, "Which thread takes a caught note" (operator votes 2026-10-12;
+// specs/caught_target.tla). A candidate for family `fam` is not exiting (read
+// under g_proc_table_lock, which every walk holds), has the family unmasked,
+// runs no handler, and is not in a wait that holds. The mask and the handler
+// flag are the thread's own, written without a lock, so they read exactly only
+// while it is blocked (it wrote them before it published its wait under
+// wait_lock); an awake thread designated on a stale value gives the
+// designation up at its tail or at its next wait (caught_target.tla Fresh,
+// BUGGY_STALE_KEEPS).
+static bool caught_candidate(const struct Thread *x, u32 fam) {
+    if (x->state == THREAD_EXITING) return false;
+    if (__atomic_load_n(&x->note_mask, __ATOMIC_RELAXED) & fam) return false;
+    if (__atomic_load_n(&x->in_handler, __ATOMIC_RELAXED)) return false;
+    return __atomic_load_n(&x->caught_wait, __ATOMIC_RELAXED) != CAUGHT_WAIT_HOLDS;
+}
+
+static bool caught_waits(const struct Thread *x, u8 kind) {
+    return __atomic_load_n(&x->caught_wait, __ATOMIC_RELAXED) == kind;
+}
+
+// The preference among candidates: the posting thread, main (the oldest live
+// thread -- p->threads is head-inserted, so the last one not exiting), any
+// thread not blocked, main blocked in an unwinding wait, then any thread
+// blocked in one. A thread not blocked reaches an EL0-return tail soon (an EL0
+// spinner by the kick), so a sleeper is interrupted only when none can. Linux's
+// complete_signal makes the same choice.
+static struct Thread *caught_pick(struct Proc *p, u32 fam, struct Thread *poster,
+                                  struct Thread *skip) {
+    struct Thread *main_t = NULL;
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->state != THREAD_EXITING) main_t = x;
+    if (main_t == skip) main_t = NULL;
+    if (poster && poster != skip && caught_candidate(poster, fam)) return poster;
+    static const u8 order[2] = { CAUGHT_WAIT_NONE, CAUGHT_WAIT_UNWINDS };
+    for (u32 i = 0; i < 2u; i++) {
+        if (main_t && caught_candidate(main_t, fam) && caught_waits(main_t, order[i]))
+            return main_t;
+        for (struct Thread *x = p->threads; x; x = x->next_in_proc)
+            if (x != skip && caught_candidate(x, fam) && caught_waits(x, order[i]))
+                return x;
+    }
+    return NULL;
+}
+
+// Make a designee take its note: wake it if it is blocked in an unwinding wait,
+// else kick it, so a thread running at EL0 takes an IRQ into its tail. Caller
+// holds x->wait_lock.
+static void caught_rouse_locked(struct Thread *x) {
+    if (caught_waits(x, CAUGHT_WAIT_UNWINDS)) {
+        struct Rendez *r = x->rendez_blocked_on;
+        if (r && r != &x->debug_rendez) wakeup(r);
+        return;
+    }
+    sched_kick_thread(x);
+}
+
+enum { CAUGHT_DESIGNATED, CAUGHT_SETTLED, CAUGHT_STALE };
+
+// Designate `x` for `fam` under its wait_lock. The re-check there is what keeps
+// a thread entering a wait that holds from being designated into it (its kind
+// is published under the same lock; BUGGY_UNLOCKED_DESIGNATE). The claim needs
+// the family still open and its note still queued (BUGGY_DOUBLE_DESIGNATE), and
+// goes in before note_target, so a thread never holds a designation the Proc
+// does not. SETTLED: the family closed or drained meanwhile; STALE: `x` stopped
+// being a candidate, so pick again.
+static int caught_designate(struct Proc *p, struct Thread *x, u32 fam) {
+    int rc = CAUGHT_STALE;
+    irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+    if (caught_candidate(x, fam)) {
+        rc = CAUGHT_SETTLED;
+        u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+        while ((flags & (fam << PROC_CAUGHT_NOTE_SHIFT)) &&
+               !(flags & (fam << PROC_CAUGHT_CLAIM_SHIFT))) {
+            if (__atomic_compare_exchange_n(&p->proc_flags, &flags,
+                                            flags | (fam << PROC_CAUGHT_CLAIM_SHIFT),
+                                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                __atomic_or_fetch(&x->note_target, (u8)fam, __ATOMIC_RELEASE);
+                caught_rouse_locked(x);
+                rc = CAUGHT_DESIGNATED;
+                break;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&x->wait_lock, ws);
+    return rc;
+}
+
+// Wake every thread blocked in an unwinding wait with `fam` unmasked: they race
+// for the claim, and one unwinds. The fallback when the picks keep going stale.
+static void caught_wake_unwinders(struct Proc *p, u32 fam) {
+    for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+        struct Rendez *r = x->rendez_blocked_on;
+        if (caught_candidate(x, fam) && caught_waits(x, CAUGHT_WAIT_UNWINDS) &&
+            r && r != &x->debug_rendez)
+            wakeup(r);
+        spin_unlock_irqrestore(&x->wait_lock, ws);
+    }
+}
+
+// Picks a family may go through before the walk falls back to waking every
+// unwinding sleeper. A pick goes stale only when its thread entered a wait
+// that holds, or a handler, between the pick and the re-check.
+#define CAUGHT_REPICKS 4u
+
+void proc_caught_note_walk(struct Proc *p, struct Thread *skip) {
     if (!p || p->magic != PROC_MAGIC) return;
     if (p == g_kproc) return;            // belt: the arm never latches kproc
     if (p->state != PROC_STATE_ALIVE) return;
     if (!proc_caught_note_pending(p)) return;
-    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
-        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
-        struct Rendez *r = peer->rendez_blocked_on;
-        if (r && r != &peer->debug_rendez) wakeup(r);
-        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    const bool     pheno  = proc_caught_note_eintr_ready(p);
+    struct Thread *self   = current_thread();
+    struct Thread *poster = (self && self->proc == p) ? self : NULL;
+
+    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    u32 caught = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    u32 held   = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+
+    // A claim or a designation can outlive the note it was taken for, when
+    // another thread's tail delivered it, and its holder must still take the
+    // family's next note. Wake a holder blocked in an unwinding wait to re-read
+    // (BUGGY_NO_REKICK).
+    if (pheno && (caught & held)) {
+        for (struct Thread *x = p->threads; x; x = x->next_in_proc) {
+            irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
+            u32 h = (u32)(__atomic_load_n(&x->note_claim, __ATOMIC_RELAXED) |
+                          __atomic_load_n(&x->note_target, __ATOMIC_RELAXED));
+            struct Rendez *r = x->rendez_blocked_on;
+            if ((h & caught & held) && caught_waits(x, CAUGHT_WAIT_UNWINDS) &&
+                r && r != &x->debug_rendez)
+                wakeup(r);
+            spin_unlock_irqrestore(&x->wait_lock, ws);
+        }
+    }
+
+    // Every family queued and held by nobody gets one thread. A native Proc's
+    // waits never unwind for a caught note (item 11c), so its walk only kicks.
+    // No pick means no thread can take the note soon; any thread's tail still
+    // delivers it.
+    u32 open = caught & ~held & NOTE_MASK_SUPPORTED;
+    while (open) {
+        u32 fam = open & (~open + 1u);
+        open &= ~fam;
+        for (u32 tries = 1; ; tries++) {
+            struct Thread *x = caught_pick(p, fam, poster, skip);
+            if (!x) break;
+            if (!pheno) { sched_kick_thread(x); break; }
+            if (caught_designate(p, x, fam) != CAUGHT_STALE) break;
+            if (tries >= CAUGHT_REPICKS) { caught_wake_unwinders(p, fam); break; }
+        }
     }
 }
 
@@ -4411,6 +4556,9 @@ void thread_exit_self(void) {
     }
 
     t->state = THREAD_EXITING;
+    // ARCH 8.8.3: a designation ends at the exit commit; a family whose note is
+    // still queued goes to another thread (caught_target.tla BUGGY_EXIT_KEEPS).
+    notes_exit_drop_locked(t);
 
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
@@ -4642,8 +4790,14 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // execve is not a call a note interrupts. A claim left by a path that broke
     // that argument would have no owner in the new image and would refuse its
     // family's unwind in every wait, so the sub-field is cleared regardless.
+    // A designation may be held (the walk can pick a thread in any call), and
+    // the walk sets one under this thread's wait_lock, so both are cleared
+    // under it: a designation made after the clear has its claim bit too.
+    irq_state_t ws = spin_lock_irqsave(&self->wait_lock);
     __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
-    self->note_claim = 0;
+    __atomic_store_n(&self->note_claim, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&self->note_target, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&self->wait_lock, ws);
 
     // A frozen console read's unwind mark (cons.c) belongs to a read of the
     // outgoing image; carried across, it would make the new image's first
@@ -4949,14 +5103,14 @@ void proc_group_kill(struct Proc *p) {
 
 void el0_return_die_check(void) {
     // NO interrupt-state assert here, and the absence is deliberate: this
-    // function HAS NO UNIFORM interrupt-state contract. Three of its callers
-    // arrive masked (.Lel0_sync_return, the 0x480 IRQ tail,
+    // function HAS NO UNIFORM interrupt-state contract. Some callers arrive
+    // masked (.Lel0_return, which both lower-EL vectors take, and
     // thread_fork_trampoline), but userland_enter calls it UNMASKED ON
     // PURPOSE -- userland.S puts it before the `msr daifset, #0xf` precisely
     // so a die-path exit never enters that window (#713-safe by placement).
     // The property belongs to the PATH, not to this function; it is asserted
-    // in el0_return_stop_check, whose only two callers are the tails that
-    // reach KERNEL_EXIT under an INHERITED mask.
+    // in el0_return_stop_check, which only .Lel0_return's legs call, on the way
+    // to KERNEL_EXIT under an INHERITED mask.
     struct Thread *t = current_thread();
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;
@@ -5125,9 +5279,9 @@ static void el0_stop_park(struct exception_context *ctx, struct Thread *t,
 void el0_return_stop_check(struct exception_context *ctx) {
     // ARCH 8.12. THE #713 GUARD. KERNEL_EXIT installs ELR/SPSR and erets under
     // an INHERITED mask, so every leg of an EL0-return tail runs masked and each
-    // tail's LAST C call asserts it (DEBUG-FS-DESIGN 4.2): this check on the
-    // 0x480 IRQ tail; on .Lel0_sync_return the notes leg follows it and asserts
-    // again, and calls it once more to park for a stop that leg applied. That is
+    // tail's LAST C call asserts it (DEBUG-FS-DESIGN 4.2): this check, then the
+    // notes leg after it on .Lel0_return, which asserts again and calls this
+    // once more to park for a stop that leg applied. That is
     // the one surviving #713-class window
     // that does not mask locally; #713 was the year-long AEGIS corruption,
     // 3-13% of boots, never at -smp 1.

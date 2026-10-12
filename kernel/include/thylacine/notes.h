@@ -631,14 +631,26 @@ bool thread_death_reaches(struct Thread *t);
 bool thread_caught_note_deliverable(struct Thread *t);
 
 // ARCH 8.8.3: the sleep sites' unwind decision. True iff a family deliverable to
-// `t` is claimed by `t` already, or is not yet claimed AND `t` claims it (a CAS
+// `t` is claimed by `t` already, or designated to it by the posting walk (the
+// designation becomes the claim), or is not yet claimed AND `t` claims it (a CAS
 // on proc_flags' claim sub-field that also re-validates the caught bit, recorded
 // in t->note_claim), so one caught note unwinds ONE interruptible sleeper -- as
 // Linux interrupts one thread for a process-directed signal -- and every other
 // sleeper re-parks. The claim holds until `t`'s next EL0-return tail, which
-// releases it and wakes the Proc's sleepers if its note is still queued. The
-// sleep sites evaluate it LAST, only when every other unwind gate has passed.
+// releases it and walks the Proc again if its note is still queued. The sleep
+// sites evaluate it LAST, only when every other unwind gate has passed.
 bool thread_caught_note_claim(struct Thread *t);
+
+// ARCH 8.8.3 (dec-2026-10-12-note-target): the posting walk's designation.
+// thread_caught_wait_kind is the enum caught_wait of the wait `t` is entering
+// (sleep_common/tsleep_common publish it under t->wait_lock). notes_handoff_
+// target ends the designations that wait cannot honour, keeping only `keep`,
+// and walks again for a family still queued; no lock held. notes_exit_drop_
+// locked ends `t`'s claim and designation at its THREAD_EXITING commit, under
+// g_proc_table_lock.
+u8   thread_caught_wait_kind(const struct Thread *t, bool caught_ok);
+void notes_handoff_target(struct Thread *t, u8 keep);
+void notes_exit_drop_locked(struct Thread *t);
 
 // bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
 // its frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn,

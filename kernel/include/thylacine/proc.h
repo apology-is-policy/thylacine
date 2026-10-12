@@ -2789,11 +2789,11 @@ void proc_interrupt_terminate_wake(struct Proc *p);
 // (thread_caught_note_deliverable at every sleep site) sees a published latch.
 bool proc_caught_note_pending(const struct Proc *p);
 
-// proc_caught_note_wake — wake every Thread of `p` blocked in a rendez sleep so
-// it unwinds (SLEEP_NOTEINTR) toward its EL0-return tail, where the queued
-// caught note is delivered WITHOUT terminating the Thread. The non-death twin
-// of proc_interrupt_terminate_wake: identical body + lock contract (CALLER MUST
-// HOLD g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
+// proc_caught_note_wake — choose which Thread of `p` takes a queued caught note
+// and make it take it soon: proc_caught_note_walk(p, NULL), with the current
+// thread as the poster when it is one of p's. The non-death twin of
+// proc_interrupt_terminate_wake, on its lock contract (CALLER MUST HOLD
+// g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
 // internally gated on proc_caught_note_pending so a caller invokes it
 // unconditionally after posting. EVERY site that posts a catchable note to a
 // Proc under g_proc_table_lock calls it (ARCH 8.8.3: the wake runs on every
@@ -2807,6 +2807,17 @@ bool proc_caught_note_pending(const struct Proc *p);
 // inside the write, which delivers at that thread's EL0-return tail, as Linux
 // sends SIGPIPE to the writing thread alone.
 void proc_caught_note_wake(struct Proc *p);
+
+// proc_caught_note_walk — ARCH 8.8.3 "Which thread takes a caught note". For
+// each caught family with a note queued: wake a holder (a claim or a
+// designation) blocked in an unwinding wait, and if no thread holds the family,
+// pick one, never `skip`: the posting thread, main, any thread not blocked,
+// main blocked in an unwinding wait, any thread blocked in one. A
+// Linux-phenotype walk designates the pick (claims the family on its behalf,
+// re-checked under its wait_lock) and wakes it if it is blocked; a native walk
+// only kicks it. A pick running on another CPU is kicked (sched_kick_thread).
+// CALLER MUST HOLD g_proc_table_lock. specs/caught_target.tla.
+void proc_caught_note_walk(struct Proc *p, struct Thread *skip);
 
 // The parent's side of p's exit: wake the parent's wait_pid sleepers, post it
 // child_exit, and wake a parent blocked in a caught-note-interruptible wait
