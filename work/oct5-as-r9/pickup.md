@@ -4427,3 +4427,21 @@ dependency changes; do not rerun unchanged suites or invent mechanisms to stay b
 CompleteAS3,AS4,MM0-MM4 remain incomplete; heartbeat ACTIVE. Protected10, clean
 external61dde37 and parked patch/restored kernel preserved. Single-agent self-review,
 no independent audit, Main landing, private activation or128MiB protection change.
+
+== 2026-10-12 06:44Z (corona): OWNERSHIP OF THE CLIPBOARD ARC RETURNED TO CORONA ==
+Operator transfer (yip 0206, astra t1/t3): corona owns the clipboard arc as a
+whole -- the async/memory prerequisites (AS3, AS4, MM0..MM4 in the ratified
+order) and the PARKED SQ dependency. Astra is on toolchain only, does not edit
+this checkout, and her reviews are single-agent. Packet:
+/Users/northkillpd/projects/thylacine-astra/docs/CORONA-CLIPBOARD-HANDOFF-2026-10-12.md
+plus its 87-file INDEX (work/oct12-corona-handoff/ in astra's checkout).
+Ownership was ACKNOWLEDGED (0206 t4) after reading the cover, INDEX and PARKED.md.
+HEAD 0e9a2ca67 = astra's final shutdown-coverage checkpoint, 105 commits after
+eb03e4f65, LOCAL ONLY (the remote is at eb03e4f65); the push waits on a content
+review. PRESERVE it: no rebase, amend or revert.
+LIVE P1 FOUND IN THE PARKED ITEM: loom_drain_sq publishes sq_head BEFORE it
+copies the SQE -- on origin/main a7353c36f too (the public SQPOLL path).
+ENQUEUED in OPEN-BUGS; main told on 0207. Patch: astra-takeover/native-sq-reuse/
+(UNAPPLIED; parked after a security-classifier block with no reason shown --
+assess honestly, never bypass). Loom = audit trigger: it needs an audit round.
+Review authority returns to project discipline (astra was the reviewer); flagged on 0206.
