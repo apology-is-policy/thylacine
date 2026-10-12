@@ -1,0 +1,2 @@
+Assertion failed: (!*rc&&claimed(core)==before), function register_checked, file test_ring_payload.c, line 32.
+C seven fixed ownership scenarios PASS

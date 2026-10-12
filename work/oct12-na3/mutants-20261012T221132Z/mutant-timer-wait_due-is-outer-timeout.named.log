@@ -1,0 +1,47 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::timer_due_after_arm_retries_then_cancels ... FAILED
+test tests::ring::timer_future_cancel_waits_for_actual_terminal ... ok
+test tests::ring::timer_outer_deadline_keeps_separate_policy ... ok
+test tests::ring::timer_polling_driver_uses_same_queue_and_no_allocation ... ok
+test tests::ring::timer_publication_during_arm_prevents_stale_sleep ... ok
+test tests::ring::timer_queue_minimum_and_independent_fair_cursor ... FAILED
+test tests::ring::timer_retiring_driver_still_owns_deadline ... ok
+test tests::ring::timer_wait_uses_earliest_and_expiry_preserves_storage ... ok
+test tests::ring::timer_zero_expiry_budgets_preserve_due_work ... FAILED
+
+failures:
+
+---- tests::ring::timer_due_after_arm_retries_then_cancels stdout ----
+
+thread 'tests::ring::timer_due_after_arm_retries_then_cancels' (31866086) panicked at src/tests/ring.rs:1974:5:
+assertion `left == right` failed
+  left: Deadline
+ right: Retry
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::timer_queue_minimum_and_independent_fair_cursor stdout ----
+
+thread 'tests::ring::timer_queue_minimum_and_independent_fair_cursor' (31866091) panicked at src/tests/ring.rs:1932:13:
+assertion `left == right` failed
+  left: Deadline
+ right: Retry
+
+---- tests::ring::timer_zero_expiry_budgets_preserve_due_work stdout ----
+
+thread 'tests::ring::timer_zero_expiry_budgets_preserve_due_work' (31866094) panicked at src/tests/ring.rs:1953:9:
+assertion `left == right` failed
+  left: Deadline
+ right: Retry
+
+
+failures:
+    tests::ring::timer_due_after_arm_retries_then_cancels
+    tests::ring::timer_queue_minimum_and_independent_fair_cursor
+    tests::ring::timer_zero_expiry_budgets_preserve_due_work
+
+test result: FAILED. 6 passed; 3 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

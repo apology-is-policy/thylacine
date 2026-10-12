@@ -1,0 +1,71 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 9 tests
+test tests::ring::loop_cancellation_does_not_reclaim_before_retirement ... ok
+test tests::ring::loop_expired_outer_deadline_does_not_poll_tasks ... ok
+test tests::ring::loop_fixed_cq_completion_and_last_result_retirement ... FAILED
+test tests::ring::loop_quiet_step_has_no_internal_allocation ... FAILED
+test tests::ring::loop_self_wake_prevents_wait_without_starving_expiry ... FAILED
+test tests::ring::loop_wake_during_arm_is_seen_before_wait ... FAILED
+test tests::ring::loop_wake_during_final_clock_sample_is_seen ... ok
+test tests::ring::loop_wake_during_readiness_is_seen_before_wait ... FAILED
+test tests::ring::loop_zero_and_partial_task_budget_preserve_readiness ... FAILED
+
+failures:
+
+---- tests::ring::loop_fixed_cq_completion_and_last_result_retirement stdout ----
+
+thread 'tests::ring::loop_fixed_cq_completion_and_last_result_retirement' (31863781) panicked at src/tests/ring.rs:2487:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::loop_quiet_step_has_no_internal_allocation stdout ----
+
+thread 'tests::ring::loop_quiet_step_has_no_internal_allocation' (31863782) panicked at src/tests/ring.rs:2574:5:
+assertion `left == right` failed
+  left: Retry
+ right: Woke(Spurious)
+
+---- tests::ring::loop_self_wake_prevents_wait_without_starving_expiry stdout ----
+
+thread 'tests::ring::loop_self_wake_prevents_wait_without_starving_expiry' (31863783) panicked at src/tests/ring.rs:2333:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::loop_wake_during_arm_is_seen_before_wait stdout ----
+
+thread 'tests::ring::loop_wake_during_arm_is_seen_before_wait' (31863784) panicked at src/tests/ring.rs:2353:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::loop_wake_during_readiness_is_seen_before_wait stdout ----
+
+thread 'tests::ring::loop_wake_during_readiness_is_seen_before_wait' (31863786) panicked at src/tests/ring.rs:2380:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::loop_zero_and_partial_task_budget_preserve_readiness stdout ----
+
+thread 'tests::ring::loop_zero_and_partial_task_budget_preserve_readiness' (31863787) panicked at src/tests/ring.rs:2450:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    tests::ring::loop_fixed_cq_completion_and_last_result_retirement
+    tests::ring::loop_quiet_step_has_no_internal_allocation
+    tests::ring::loop_self_wake_prevents_wait_without_starving_expiry
+    tests::ring::loop_wake_during_arm_is_seen_before_wait
+    tests::ring::loop_wake_during_readiness_is_seen_before_wait
+    tests::ring::loop_zero_and_partial_task_budget_preserve_readiness
+
+test result: FAILED. 3 passed; 6 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

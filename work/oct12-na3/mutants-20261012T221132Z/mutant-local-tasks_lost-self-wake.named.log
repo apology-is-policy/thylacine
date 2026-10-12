@@ -1,0 +1,30 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 10 tests
+test tests::ring::task_capacity_precedes_factory_and_ids_are_owner_specific ... ok
+test tests::ring::task_completed_and_cancelled_wakers_cannot_wake_reused_slot ... ok
+test tests::ring::task_completion_and_root_drop_release_owned_futures ... ok
+test tests::ring::task_dispatch_and_wake_have_no_internal_allocation ... ok
+test tests::ring::task_fixed_completion_wakes_and_result_stays_owned ... ok
+test tests::ring::task_fixed_future_cancel_retains_storage_until_terminal ... ok
+test tests::ring::task_pending_stays_quiet_until_woken ... ok
+test tests::ring::task_self_wake_survives_poll_and_is_bounded ... FAILED
+test tests::ring::task_unwind_detaches_owner_and_keeps_other_tasks ... ok
+test tests::ring::task_zero_budget_and_many_wakes_coalesce ... ok
+
+failures:
+
+---- tests::ring::task_self_wake_survives_poll_and_is_bounded stdout ----
+
+thread 'tests::ring::task_self_wake_survives_poll_and_is_bounded' (31843209) panicked at src/tests/ring.rs:2173:5:
+assertion failed: t.ready()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::task_self_wake_survives_poll_and_is_bounded
+
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

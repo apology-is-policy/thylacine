@@ -1,0 +1,15 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/retirement_executor.c:1:
+In file included from work/oct12-na3/c-mutants-20261012T221512Z/hdr-fixed_requests/include/thyla/loom_client/retirement_executor.h:3:
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-fixed_requests/include/thyla/loom_client/fixed_requests.h:23:16: error: static assertion failed due to requirement '(-100) <= -1000': T_FIXED_CLOSING must lie below every errno
+   23 | _Static_assert(T_FIXED_CLOSING<=-1000,"T_FIXED_CLOSING must lie below every errno");
+      |                ^~~~~~~~~~~~~~~~~~~~~~
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-fixed_requests/include/thyla/loom_client/fixed_requests.h:21:25: note: expanded from macro 'T_FIXED_CLOSING'
+   21 | #define T_FIXED_CLOSING (-100)
+      |                         ^
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-fixed_requests/include/thyla/loom_client/fixed_requests.h:24:16: error: static assertion failed due to requirement '((-100)) <= -(1000)': T_FIXED_CLOSING lies in the -1000 block
+   24 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_FIXED_CLOSING,1000),"T_FIXED_CLOSING lies in the -1000 block");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-fixed_requests/include/thyla/loom_client/base.h:16:42: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                          ^~~~~~~~~~~~~~~~
+2 errors generated.

@@ -1,0 +1,26 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 6 tests
+test tests::ring::composed_client_drop_wake_can_access_peer_and_retire_both ... FAILED
+test tests::ring::composed_drop_progress_no_internal_allocation ... ok
+test tests::ring::composed_payload_result_blocks_cell_until_last_view_ends ... ok
+test tests::ring::composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict ... ok
+test tests::ring::composed_receive_wake_can_drop_another_client_and_poll ... ok
+test tests::ring::composed_terminal_survives_client_retire_before_poll ... ok
+
+failures:
+
+---- tests::ring::composed_client_drop_wake_can_access_peer_and_retire_both stdout ----
+
+thread 'tests::ring::composed_client_drop_wake_can_access_peer_and_retire_both' (31837417) panicked at src/tests/ring.rs:1340:5:
+assertion failed: flag.get()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::ring::composed_client_drop_wake_can_access_peer_and_retire_both
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 135 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

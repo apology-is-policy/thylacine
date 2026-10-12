@@ -1,0 +1,14 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes.c:6:
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-fixed_requests/thyla/loom_client/fixed_requests.h:24:16: error: static assertion failed due to requirement '((-1100)) > -(1000) - 100': T_FIXED_CLOSING lies in the -1000 block
+   24 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_FIXED_CLOSING,1000),"T_FIXED_CLOSING lies in the -1000 block");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-fixed_requests/thyla/loom_client/base.h:16:60: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                                            ^~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-fixed_requests/thyla/loom_client/fixed_requests.h:24:16: note: expression evaluates to '-1100 > -1100'
+   24 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_FIXED_CLOSING,1000),"T_FIXED_CLOSING lies in the -1000 block");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-fixed_requests/thyla/loom_client/base.h:16:66: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                                            ~~~~~~^~~~~~~~~~~~~
+1 error generated.

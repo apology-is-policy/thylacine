@@ -1,0 +1,61 @@
+warning: variable does not need to be mutable
+   --> src/fixed_futures.rs:124:13
+    |
+124 |         let mut slot = Some(self.hub.borrow_mut().reserve()?);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/fixed_futures.rs:140:13
+    |
+140 |         let mut slot = Some(self.hub.borrow_mut().reserve()?);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: `loom-client` (lib test) generated 2 warnings (run `cargo fix --lib -p loom-client --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 12 tests
+test tests::ring::future_all64_cells_wake_and_reuse_without_old_handle_interference ... ok
+test tests::ring::future_clone_callback_completion_is_not_lost ... ok
+test tests::ring::future_completion_before_first_poll ... ok
+test tests::ring::future_driver_close_and_drop_wake_unfinished ... ok
+test tests::ring::future_drop_unregisters_but_keeps_active_storage ... FAILED
+test tests::ring::future_failed_prepare_and_write_result ... FAILED
+test tests::ring::future_malformed_record_wakes_then_fails_closed ... ok
+test tests::ring::future_read_wakes_and_retains_result ... ok
+test tests::ring::future_ready_path_has_no_internal_allocation_with_arc_waker ... ok
+test tests::ring::future_replaced_waker_drop_can_deliver_completion ... ok
+test tests::ring::future_replaces_waker_without_notifying_old_task ... ok
+test tests::ring::future_wake_callback_polls_outside_hub_borrow ... ok
+
+failures:
+
+---- tests::ring::future_drop_unregisters_but_keeps_active_storage stdout ----
+
+thread 'tests::ring::future_drop_unregisters_but_keeps_active_storage' (31829775) panicked at src/tests/ring.rs:1013:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::future_failed_prepare_and_write_result stdout ----
+
+thread 'tests::ring::future_failed_prepare_and_write_result' (31829776) panicked at src/tests/ring.rs:1058:5:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+
+failures:
+    tests::ring::future_drop_unregisters_but_keeps_active_storage
+    tests::ring::future_failed_prepare_and_write_result
+
+test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 129 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

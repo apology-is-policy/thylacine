@@ -1,0 +1,54 @@
+warning: variable does not need to be mutable
+   --> src/owned_mapping.rs:113:23
+    |
+113 |     pub(crate) fn new(mut mapping: M, p: Setup) -> Result<Self, Error> {
+    |                       ----^^^^^^^
+    |                       |
+    |                       help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning (run `cargo fix --lib -p loom-client --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 5 tests
+test tests::owned_mapping::every_region_pair_rejects_overlap ... FAILED
+test tests::owned_mapping::fresh_header_checks_and_wakeup ... FAILED
+test tests::owned_mapping::malformed_geometry_cleanup ... FAILED
+test tests::owned_mapping::min_max_copy_and_cleanup ... ok
+test tests::owned_mapping::post_setup_corruption_is_detected ... ok
+
+failures:
+
+---- tests::owned_mapping::every_region_pair_rejects_overlap stdout ----
+
+thread 'tests::owned_mapping::every_region_pair_rejects_overlap' (31848869) panicked at src/tests/owned_mapping.rs:35:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::owned_mapping::fresh_header_checks_and_wakeup stdout ----
+
+thread 'tests::owned_mapping::fresh_header_checks_and_wakeup' (31848870) panicked at src/tests/owned_mapping.rs:35:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::owned_mapping::malformed_geometry_cleanup stdout ----
+
+thread 'tests::owned_mapping::malformed_geometry_cleanup' (31848871) panicked at src/tests/owned_mapping.rs:35:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    tests::owned_mapping::every_region_pair_rejects_overlap
+    tests::owned_mapping::fresh_header_checks_and_wakeup
+    tests::owned_mapping::malformed_geometry_cleanup
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

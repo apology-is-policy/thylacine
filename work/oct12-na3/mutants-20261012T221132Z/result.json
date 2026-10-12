@@ -1,0 +1,3893 @@
+{
+ "owner": "corona",
+ "state": "passed",
+ "only": null,
+ "declared_tests": 141,
+ "mutants": 110,
+ "rejected": 110,
+ "rejected_by_abort": 3,
+ "cases": 59,
+ "cases_ok": 59,
+ "superseded": [
+  "run-payload.py:live-retire",
+  "run-payload.py:lost-return",
+  "run-payload.py:wrong-range",
+  "run-payload.py:failed-success"
+ ],
+ "c_code_blocks": 7,
+ "abi_sabotages": 6,
+ "versions": {
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+  "rustfmt": "rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)"
+ },
+ "failures": [],
+ "records": [
+  {
+   "name": "composed-ring:wrong-receipt",
+   "file": "paired_cq.rs",
+   "test": "test_composed_ring.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "concurrent_pair_publication_and_reuse",
+    "copies_receipt_before_slot_reuse_and_wrap",
+    "min_max_copy_and_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    0,
+    2
+   ],
+   "shown": "src/tests/ring/composed.rs:137:68: called `Result::unwrap()` on an `Err` value: Record",
+   "verdict": "rejected"
+  },
+  {
+   "name": "composed-ring:wrong-pool",
+   "file": "request_book.rs",
+   "test": "test_composed_ring.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "malformed_receipts_flags_and_lengths_leave_active"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    1
+   ],
+   "shown": "src/tests/ring/composed.rs:170:5: assertion failed: book.accept(bad).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "composed-ring:untracked-lease",
+   "file": "ring_payload.rs",
+   "test": "test_composed_ring.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [],
+   "expect": "attempt to subtract with overflow",
+   "named_rc": 101,
+   "named_failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes"
+   ],
+   "aborted": true,
+   "named_summary": null,
+   "shown": "src/ring_payload.rs:167:9: attempt to subtract with overflow",
+   "verdict": "rejected"
+  },
+  {
+   "name": "deadlines:ignore-deadline",
+   "file": "ring_payload.rs",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "rc": 101,
+   "failing": [
+    "deadline_expiry_requests_once_without_refund",
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_outer_deadline_keeps_separate_policy",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "deadline_expiry_requests_once_without_refund"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    9,
+    1
+   ],
+   "shown": "src/tests/ring/deadlines.rs:21:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "deadlines:late-deadline",
+   "file": "ring_payload.rs",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "rc": 101,
+   "failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_expiry_has_no_internal_allocation",
+    "deadline_expiry_requests_once_without_refund",
+    "deadline_publication_notifies_local_progress",
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_polling_driver_uses_same_queue_and_no_allocation",
+    "timer_retiring_driver_still_owns_deadline",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_expiry_has_no_internal_allocation",
+    "deadline_expiry_requests_once_without_refund",
+    "deadline_publication_notifies_local_progress"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    4
+   ],
+   "shown": "src/tests/ring/deadlines.rs:132:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "deadlines:repeat-cancel",
+   "file": "ring_payload.rs",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "rc": 101,
+   "failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_cancel_does_not_overwrite_later_success",
+    "deadline_expiry_requests_once_without_refund",
+    "timer_future_cancel_waits_for_actual_terminal",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_read_future_cancel_waits_for_actual_terminal",
+    "timer_retiring_driver_still_owns_deadline",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_cancel_does_not_overwrite_later_success",
+    "deadline_expiry_requests_once_without_refund"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    3
+   ],
+   "shown": "src/tests/ring/deadlines.rs:135:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "deadlines:drop-double-abort",
+   "file": "ring_payload.rs",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "rc": 101,
+   "failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_expiry_requests_once_without_refund",
+    "timer_retiring_driver_still_owns_deadline"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_expiry_requests_once_without_refund"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring/deadlines.rs:139:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "deadlines:unbounded-scan",
+   "file": "ring_payload.rs",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "rc": 101,
+   "failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "deadline_all64_cells_expire_in_bounded_rotating_visits"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    9,
+    1
+   ],
+   "shown": "src/tests/ring/deadlines.rs:130:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "deadlines:mutable-active-deadline",
+   "file": "ring_payload.rs",
+   "test": "test_deadlines.rs",
+   "filter": "deadline_",
+   "rc": 101,
+   "failing": [
+    "deadline_active_deadline_cannot_be_extended"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "deadline_active_deadline_cannot_be_extended"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    9,
+    1
+   ],
+   "shown": "src/tests/ring/deadlines.rs:79:5: assertion failed: r.set_deadline(Some(90)).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-futures:missing-wakeup",
+   "file": "fixed_futures.rs",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict",
+    "composed_receive_wake_can_drop_another_client_and_poll",
+    "composed_terminal_survives_client_retire_before_poll",
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_driver_close_and_drop_wake_unfinished",
+    "future_failed_prepare_and_write_result",
+    "future_malformed_record_wakes_then_fails_closed",
+    "future_read_wakes_and_retains_result",
+    "future_replaced_waker_drop_can_deliver_completion",
+    "future_replaces_waker_without_notifying_old_task",
+    "future_wake_callback_polls_outside_hub_borrow",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read",
+    "task_fixed_completion_wakes_and_result_stays_owned"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_driver_close_and_drop_wake_unfinished",
+    "future_failed_prepare_and_write_result",
+    "future_malformed_record_wakes_then_fails_closed",
+    "future_read_wakes_and_retains_result",
+    "future_replaced_waker_drop_can_deliver_completion",
+    "future_replaces_waker_without_notifying_old_task",
+    "future_wake_callback_polls_outside_hub_borrow"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    8
+   ],
+   "shown": "src/tests/ring.rs:1255:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-futures:missing-unregister",
+   "file": "fixed_futures.rs",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "rc": 101,
+   "failing": [
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_clone_callback_completion_is_not_lost",
+    "future_completion_before_first_poll",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "future_failed_prepare_and_write_result",
+    "future_full_registration_table_answers_full",
+    "future_malformed_record_wakes_then_fails_closed",
+    "future_read_wakes_and_retains_result",
+    "future_wake_callback_polls_outside_hub_borrow"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_clone_callback_completion_is_not_lost",
+    "future_completion_before_first_poll",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "future_failed_prepare_and_write_result",
+    "future_malformed_record_wakes_then_fails_closed",
+    "future_read_wakes_and_retains_result",
+    "future_wake_callback_polls_outside_hub_borrow"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    8
+   ],
+   "shown": "src/tests/ring.rs:1259:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-futures:stale-waker",
+   "file": "fixed_futures.rs",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "rc": 101,
+   "failing": [
+    "future_replaced_waker_drop_can_deliver_completion",
+    "future_replaces_waker_without_notifying_old_task"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "future_replaced_waker_drop_can_deliver_completion",
+    "future_replaces_waker_without_notifying_old_task"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    10,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1144:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-futures:callback-under-borrow",
+   "file": "fixed_futures.rs",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "rc": 101,
+   "failing": [
+    "future_wake_callback_polls_outside_hub_borrow"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "future_wake_callback_polls_outside_hub_borrow"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    11,
+    1
+   ],
+   "shown": "src/fixed_futures.rs:45:25: RefCell already borrowed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-futures:clone-after-check",
+   "file": "fixed_futures.rs",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "rc": 101,
+   "failing": [
+    "future_clone_callback_completion_is_not_lost"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "future_clone_callback_completion_is_not_lost"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    11,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1124:5: assertion failed: matches!(poll(&mut f,&w),Poll::Ready(Ok(r))if r.result()==2)",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-futures:preparation-slot-leak",
+   "file": "fixed_futures.rs",
+   "test": "test_fixed_futures.rs",
+   "filter": "future_",
+   "rc": 101,
+   "failing": [
+    "future_drop_unregisters_but_keeps_active_storage",
+    "future_failed_prepare_and_write_result"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "future_drop_unregisters_but_keeps_active_storage",
+    "future_failed_prepare_and_write_result"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    10,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1013:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:early-fixed-view",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_read_owns_range_through_terminal_and_view"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_read_owns_range_through_terminal_and_view"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:529:5: assertion failed: f.bytes().is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:abandon-refund",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_abandon_is_scope_cancel_not_refund",
+    "fixed_retirement_reclaims_abandoned_only_after_proof",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "typed_abandon_retains_obligation_until_terminal"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_abandon_is_scope_cancel_not_refund",
+    "fixed_retirement_reclaims_abandoned_only_after_proof"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:560:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:missing-abort",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "deadline_reused_cell_does_not_inherit_old_timer",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "fixed_abandon_is_scope_cancel_not_refund",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "shutdown_task_owner_drop_keeps_retirement_charge_until_proof",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "typed_abandon_retains_obligation_until_terminal"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_abandon_is_scope_cancel_not_refund"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:558:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:fixed-pool-overlap",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:580:5: assertion failed: unsafe { c.attach_pool(id(2, 1), &[range(0)]) }.is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:pool-fixed-overlap",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:578:5: assertion failed: c.reserve_fixed(301, id(0, 1), range(8), false).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:early-retired-refund",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_abandon_is_scope_cancel_not_refund",
+    "fixed_retirement_reclaims_abandoned_only_after_proof"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_abandon_is_scope_cancel_not_refund",
+    "fixed_retirement_reclaims_abandoned_only_after_proof"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:562:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:oversized-fixed-result",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_read_owns_range_through_terminal_and_view"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_read_owns_range_through_terminal_and_view"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:535:5: assertion failed: unsafe { r.finish_fixed(101, 9) }.is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-io:late-write",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_write_freezes_after_publish_and_error_preserves_owner"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_write_freezes_after_publish_and_error_preserves_owner"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:597:5: assertion failed: f.write_from(&[4; 8]).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-requests:unpublished-leak",
+   "file": "fixed_requests.rs",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "rc": 101,
+   "failing": [
+    "deadline_expiry_requests_once_without_refund",
+    "future_failed_prepare_and_write_result",
+    "typed_prepare_rolls_back_both_tables",
+    "typed_read_owns_until_consumed_view_ends"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "typed_prepare_rolls_back_both_tables",
+    "typed_read_owns_until_consumed_view_ends"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:757:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-requests:lost-abandoned-terminal",
+   "file": "fixed_requests.rs",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "rc": 101,
+   "failing": [
+    "deadline_expiry_requests_once_without_refund",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "typed_abandon_retains_obligation_until_terminal"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "typed_abandon_retains_obligation_until_terminal"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    9,
+    1
+   ],
+   "shown": "src/tests/ring.rs:747:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-requests:retirement-without-proof",
+   "file": "fixed_requests.rs",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "executor_capacity_precedes_factory_and_survives_abandon",
+    "executor_drop_and_progress_do_not_allocate",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "shutdown_task_owner_drop_keeps_retirement_charge_until_proof",
+    "timer_retiring_driver_still_owns_deadline",
+    "typed_corruption_closes_without_refunding_active_storage",
+    "typed_retirement_without_cq_keeps_metadata_until_proof",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_ready_callback_release_is_checked_last",
+    "wait_timeout_is_not_terminal_storage_proof",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "typed_corruption_closes_without_refunding_active_storage",
+    "typed_retirement_without_cq_keeps_metadata_until_proof"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:776:5: assertion failed: !d.progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-requests:retired-metadata-leak",
+   "file": "fixed_requests.rs",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "rc": 101,
+   "failing": [
+    "typed_corruption_closes_without_refunding_active_storage",
+    "typed_retirement_without_cq_keeps_metadata_until_proof"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "typed_corruption_closes_without_refunding_active_storage",
+    "typed_retirement_without_cq_keeps_metadata_until_proof"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:779:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-requests:missing-storage-terminal",
+   "file": "fixed_requests.rs",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "rc": 101,
+   "failing": [
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "composed_receive_wake_can_drop_another_client_and_poll",
+    "deadline_expiry_requests_once_without_refund",
+    "deadline_reused_cell_does_not_inherit_old_timer",
+    "deadline_terminal_before_expiry_wins",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_shutdown_closes_once_keeps_live_read_storage",
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_completion_before_first_poll",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "future_read_wakes_and_retains_result",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read",
+    "task_fixed_completion_wakes_and_result_stays_owned",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "typed_abandon_retains_obligation_until_terminal",
+    "typed_drop_terminal_does_not_abort_or_leak",
+    "typed_read_owns_until_consumed_view_ends",
+    "typed_write_and_read_errors_are_preserved"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "typed_abandon_retains_obligation_until_terminal",
+    "typed_drop_terminal_does_not_abort_or_leak",
+    "typed_read_owns_until_consumed_view_ends",
+    "typed_write_and_read_errors_are_preserved"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    4
+   ],
+   "shown": "src/tests/ring.rs:748:40: called `Result::unwrap()` on an `Err` value: Storage(Busy)",
+   "verdict": "rejected"
+  },
+  {
+   "name": "fixed-requests:corrupt-keeps-open",
+   "file": "fixed_requests.rs",
+   "test": "test_fixed_requests.rs",
+   "filter": "typed_",
+   "rc": 101,
+   "failing": [
+    "composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict",
+    "deadline_closed_driver_does_not_issue_more_aborts",
+    "executor_shutdown_closes_once_keeps_live_read_storage",
+    "future_driver_close_and_drop_wake_unfinished",
+    "future_malformed_record_wakes_then_fails_closed",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read",
+    "typed_corruption_closes_without_refunding_active_storage",
+    "typed_foreign_cookie_fails_only_its_driver"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "typed_corruption_closes_without_refunding_active_storage",
+    "typed_foreign_cookie_fails_only_its_driver"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:772:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "future-retirement:wake-under-receive-borrow",
+   "file": "retirement_executor.rs",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [
+    "composed_receive_wake_can_drop_another_client_and_poll"
+   ],
+   "expect": "RefCell already",
+   "named_rc": 101,
+   "named_failing": [
+    "composed_receive_wake_can_drop_another_client_and_poll"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    1
+   ],
+   "shown": "src/retirement_executor.rs:348:36: RefCell already borrowed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "future-retirement:wake-under-drop-borrow",
+   "file": "retirement_executor.rs",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [],
+   "expect": "RefCell already",
+   "named_rc": 101,
+   "named_failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both"
+   ],
+   "aborted": true,
+   "named_summary": null,
+   "shown": "src/retirement_executor.rs:303:28: RefCell already mutably borrowed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "future-retirement:wake-under-shutdown-borrow",
+   "file": "retirement_executor.rs",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [],
+   "expect": "RefCell already",
+   "named_rc": 101,
+   "named_failing": [
+    "composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict"
+   ],
+   "aborted": true,
+   "named_summary": null,
+   "shown": "src/retirement_executor.rs:304:28: RefCell already mutably borrowed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "future-retirement:skip-retire-notification",
+   "file": "retirement_executor.rs",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1340:5: assertion failed: flag.get()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "future-retirement:early-reclaim",
+   "file": "retirement_executor.rs",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "executor_capacity_precedes_factory_and_survives_abandon",
+    "executor_drop_and_progress_do_not_allocate",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "shutdown_task_owner_drop_keeps_retirement_charge_until_proof",
+    "timer_retiring_driver_still_owns_deadline",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_timeout_is_not_terminal_storage_proof",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_payload_result_blocks_cell_until_last_view_ends"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1342:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "future-retirement:close-instead-of-retire",
+   "file": "retirement_executor.rs",
+   "test": "test_future_retirement.rs",
+   "filter": "composed_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_terminal_survives_client_retire_before_poll",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "timer_retiring_driver_still_owns_deadline"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_terminal_survives_client_retire_before_poll"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1341:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ledger:owner",
+   "file": "lease_ledger.rs",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "owner_namespace_prevents_cross_ring_token_return"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "owner_namespace_prevents_cross_ring_token_return"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    1
+   ],
+   "shown": "src/tests/lease_ledger.rs:107:5: assertion failed: matches!(b.begin_return(&token), Err(LeaseError::Stale))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ledger:stale",
+   "file": "lease_ledger.rs",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "bounded_members_and_lease_wrap",
+    "stale_and_failed_returns_cannot_recycle"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "bounded_members_and_lease_wrap",
+    "stale_and_failed_returns_cannot_recycle"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    2
+   ],
+   "shown": "src/tests/lease_ledger.rs:179:5: assertion failed: matches!(b.accept_read(1, 4, receipt(0, 1)), Err(LeaseError::Stale))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ledger:failed-return",
+   "file": "lease_ledger.rs",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "final_and_explicit_return_errors_preserve_full_ring_ownership",
+    "pending_returns_are_global_bounded_and_block_pool_reclaim",
+    "stale_and_failed_returns_cannot_recycle"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "stale_and_failed_returns_cannot_recycle"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    1
+   ],
+   "shown": "src/tests/lease_ledger.rs:81:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ledger:busy",
+   "file": "lease_ledger.rs",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "final_and_out_of_order_return_preserve_earlier_payload",
+    "stale_and_failed_returns_cannot_recycle"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "final_and_out_of_order_return_preserve_earlier_payload",
+    "stale_and_failed_returns_cannot_recycle"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    2
+   ],
+   "shown": "src/tests/lease_ledger.rs:66:5: assertion failed: matches!(b.accept_read(1, 4, receipt(0, 12)), Err(LeaseError::Busy))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ledger:final-release",
+   "file": "lease_ledger.rs",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "final_and_explicit_return_errors_preserve_full_ring_ownership",
+    "final_and_out_of_order_return_preserve_earlier_payload"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "final_and_out_of_order_return_preserve_earlier_payload"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    1
+   ],
+   "shown": "src/tests/lease_ledger.rs:62:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ledger:overlap",
+   "file": "lease_ledger.rs",
+   "test": "test_lease_ledger.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "geometry_is_checked_before_any_receipt"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "geometry_is_checked_before_any_receipt"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    1
+   ],
+   "shown": "src/tests/lease_ledger.rs:140:5: assertion failed: LeaseLedger::new(pool(), &r, &[8]).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-progress:lost-owner-signal",
+   "file": "ring_payload.rs",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "rc": 101,
+   "failing": [
+    "deadline_publication_notifies_local_progress",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_pool_and_payload_release_share_noncallback_signal",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_ready_callback_release_is_checked_last"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_pool_and_payload_release_share_noncallback_signal",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "local_terminal_cq_signals_even_without_registered_waker"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    5
+   ],
+   "shown": "src/tests/ring.rs:1488:5: assertion failed: e.needs_progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-progress:missing-cq-signal",
+   "file": "ring_payload.rs",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "rc": 101,
+   "failing": [
+    "deadline_publication_notifies_local_progress",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "timer_publication_during_arm_prevents_stale_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "local_terminal_cq_signals_even_without_registered_waker"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1547:5: assertion failed: e.needs_progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-progress:zero-budget-loses-event",
+   "file": "retirement_executor.rs",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "rc": 101,
+   "failing": [
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1526:5: assertion failed: e.needs_progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-progress:lost-partial-sweep",
+   "file": "retirement_executor.rs",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "rc": 101,
+   "failing": [
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1532:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-progress:busy-self-reschedule",
+   "file": "retirement_executor.rs",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "rc": 101,
+   "failing": [
+    "local_admission_signals_before_request_publication",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep",
+    "loop_quiet_step_has_no_internal_allocation",
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "loop_zero_and_partial_task_budget_preserve_readiness",
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_outer_deadline_keeps_separate_policy",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "wait_absolute_deadline_before_and_after_arm",
+    "wait_bounded_turn_has_no_internal_allocation",
+    "wait_event_wake_is_reported_and_releases_the_subscription",
+    "wait_failures_cleanup_without_retry_loop",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_native_ready_and_intervening_event_are_not_lost",
+    "wait_ready_callback_release_is_checked_last",
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress",
+    "wait_timeout_is_not_terminal_storage_proof",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "local_admission_signals_before_request_publication",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    7
+   ],
+   "shown": "src/tests/ring.rs:1486:5: assertion failed: !e.needs_progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-progress:missing-admission-signal",
+   "file": "retirement_executor.rs",
+   "test": "test_local_progress.rs",
+   "filter": "local_",
+   "rc": 101,
+   "failing": [
+    "local_admission_signals_before_request_publication"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "local_admission_signals_before_request_publication"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring/local_progress.rs:7:5: assertion failed: e.needs_progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-tasks:lost-self-wake",
+   "file": "local_tasks.rs",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "rc": 101,
+   "failing": [
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "task_self_wake_survives_poll_and_is_bounded"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "task_self_wake_survives_poll_and_is_bounded"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    9,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2173:5: assertion failed: t.ready()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-tasks:poll-quiet-tasks",
+   "file": "local_tasks.rs",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "rc": 101,
+   "failing": [
+    "task_completed_and_cancelled_wakers_cannot_wake_reused_slot",
+    "task_pending_stays_quiet_until_woken"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "task_completed_and_cancelled_wakers_cannot_wake_reused_slot",
+    "task_pending_stays_quiet_until_woken"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:2199:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-tasks:ignore-budget",
+   "file": "local_tasks.rs",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "rc": 101,
+   "failing": [
+    "loop_zero_and_partial_task_budget_preserve_readiness",
+    "task_self_wake_survives_poll_and_is_bounded",
+    "task_zero_budget_and_many_wakes_coalesce"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "task_self_wake_survives_poll_and_is_bounded",
+    "task_zero_budget_and_many_wakes_coalesce"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:2174:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-tasks:stale-cancel",
+   "file": "local_tasks.rs",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "rc": 101,
+   "failing": [
+    "task_capacity_precedes_factory_and_ids_are_owner_specific",
+    "task_completed_and_cancelled_wakers_cannot_wake_reused_slot"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "task_capacity_precedes_factory_and_ids_are_owner_specific",
+    "task_completed_and_cancelled_wakers_cannot_wake_reused_slot"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    2
+   ],
+   "shown": "src/tests/ring.rs:2143:5: assertion failed: !a.cancel(bid)",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-tasks:drop-pending-task",
+   "file": "local_tasks.rs",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "rc": 101,
+   "failing": [
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_final_clock_sample_is_seen",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read",
+    "task_completed_and_cancelled_wakers_cannot_wake_reused_slot",
+    "task_completion_and_root_drop_release_owned_futures",
+    "task_fixed_completion_wakes_and_result_stays_owned",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "task_pending_stays_quiet_until_woken",
+    "task_self_wake_survives_poll_and_is_bounded",
+    "task_zero_budget_and_many_wakes_coalesce"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "task_completed_and_cancelled_wakers_cannot_wake_reused_slot",
+    "task_completion_and_root_drop_release_owned_futures",
+    "task_fixed_completion_wakes_and_result_stays_owned",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "task_pending_stays_quiet_until_woken",
+    "task_self_wake_survives_poll_and_is_bounded",
+    "task_zero_budget_and_many_wakes_coalesce"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    7
+   ],
+   "shown": "src/tests/ring.rs:2188:13: assertion failed: t.cancel(old)",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-tasks:lost-wake",
+   "file": "local_tasks.rs",
+   "test": "test_local_tasks.rs",
+   "filter": "task_",
+   "rc": 101,
+   "failing": [
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_final_clock_sample_is_seen",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read",
+    "task_fixed_completion_wakes_and_result_stays_owned",
+    "task_pending_stays_quiet_until_woken",
+    "task_self_wake_survives_poll_and_is_bounded",
+    "task_zero_budget_and_many_wakes_coalesce"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "task_fixed_completion_wakes_and_result_stays_owned",
+    "task_pending_stays_quiet_until_woken",
+    "task_self_wake_survives_poll_and_is_bounded",
+    "task_zero_budget_and_many_wakes_coalesce"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    4
+   ],
+   "shown": "src/tests/ring.rs:2300:5: assertion failed: t.ready()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-wait:skip-local-recheck",
+   "file": "local_wait.rs",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "rc": 101,
+   "failing": [
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_final_clock_sample_is_seen",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_ready_callback_release_is_checked_last"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_ready_callback_release_is_checked_last"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1701:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-wait:skip-native-recheck",
+   "file": "local_wait.rs",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "rc": 101,
+   "failing": [
+    "wait_native_ready_and_intervening_event_are_not_lost"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "wait_native_ready_and_intervening_event_are_not_lost"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1727:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-wait:skip-deadline-recheck",
+   "file": "local_wait.rs",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "rc": 101,
+   "failing": [
+    "loop_wake_during_final_clock_sample_is_seen",
+    "timer_due_after_arm_retries_then_cancels",
+    "wait_absolute_deadline_before_and_after_arm"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "wait_absolute_deadline_before_and_after_arm"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1753:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-wait:reset-absolute-deadline",
+   "file": "local_wait.rs",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "rc": 101,
+   "failing": [
+    "timer_outer_deadline_keeps_separate_policy",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:1798:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-wait:skip-disarm",
+   "file": "local_wait.rs",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "rc": 101,
+   "failing": [
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "loop_quiet_step_has_no_internal_allocation",
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "wait_absolute_deadline_before_and_after_arm",
+    "wait_bounded_turn_has_no_internal_allocation",
+    "wait_event_wake_is_reported_and_releases_the_subscription",
+    "wait_failures_cleanup_without_retry_loop",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_native_ready_and_intervening_event_are_not_lost",
+    "wait_ready_callback_release_is_checked_last",
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "wait_absolute_deadline_before_and_after_arm",
+    "wait_bounded_turn_has_no_internal_allocation",
+    "wait_failures_cleanup_without_retry_loop",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_native_ready_and_intervening_event_are_not_lost",
+    "wait_ready_callback_release_is_checked_last",
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    2,
+    7
+   ],
+   "shown": "src/tests/ring.rs:1758:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "local-wait:lost-wake-progress",
+   "file": "local_wait.rs",
+   "test": "test_local_wait.rs",
+   "filter": "wait_",
+   "rc": 101,
+   "failing": [
+    "wait_event_wake_is_reported_and_releases_the_subscription",
+    "wait_native_ready_and_intervening_event_are_not_lost",
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "wait_native_ready_and_intervening_event_are_not_lost",
+    "wait_spurious_wakes_keep_original_deadline_and_schedule_progress"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1741:5: assertion failed: e.needs_progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "owned-mapping:sq-overlap",
+   "file": "owned_mapping.rs",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "every_region_pair_rejects_overlap",
+    "malformed_geometry_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "every_region_pair_rejects_overlap",
+    "malformed_geometry_cleanup"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    2
+   ],
+   "shown": "src/tests/owned_mapping.rs:188:13: assertion failed: matches!(OwnedMapping::new(b, p), Err(Error::Geometry))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "owned-mapping:receipt-stride",
+   "file": "owned_mapping.rs",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "malformed_geometry_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "malformed_geometry_cleanup"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    1
+   ],
+   "shown": "src/tests/owned_mapping.rs:161:9: case 3",
+   "verdict": "rejected"
+  },
+  {
+   "name": "owned-mapping:failed-close",
+   "file": "owned_mapping.rs",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "every_region_pair_rejects_overlap",
+    "fresh_header_checks_and_wakeup",
+    "malformed_geometry_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "every_region_pair_rejects_overlap",
+    "fresh_header_checks_and_wakeup",
+    "malformed_geometry_cleanup"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    2,
+    3
+   ],
+   "shown": "src/tests/owned_mapping.rs:35:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "owned-mapping:after-close",
+   "file": "owned_mapping.rs",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "min_max_copy_and_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "min_max_copy_and_cleanup"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    1
+   ],
+   "shown": "src/tests/owned_mapping.rs:123:9: assertion failed: matches!(m.reap(), Err(Error::Closed))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "owned-mapping:fresh-header",
+   "file": "owned_mapping.rs",
+   "test": "test_owned_mapping.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fresh_header_checks_and_wakeup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fresh_header_checks_and_wakeup"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    1
+   ],
+   "shown": "src/tests/owned_mapping.rs:201:9: header 0",
+   "verdict": "rejected"
+  },
+  {
+   "name": "paired:receipt-index",
+   "file": "paired_cq.rs",
+   "test": "test_paired_cq.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "concurrent_pair_publication_and_reuse",
+    "copies_receipt_before_slot_reuse_and_wrap",
+    "min_max_copy_and_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "concurrent_pair_publication_and_reuse",
+    "copies_receipt_before_slot_reuse_and_wrap"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    2,
+    2
+   ],
+   "shown": "src/tests/paired_cq.rs:153:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "paired:double-ack",
+   "file": "paired_cq.rs",
+   "test": "test_paired_cq.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "concurrent_pair_publication_and_reuse",
+    "copies_receipt_before_slot_reuse_and_wrap",
+    "min_max_copy_and_cleanup"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "concurrent_pair_publication_and_reuse",
+    "copies_receipt_before_slot_reuse_and_wrap"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    2,
+    2
+   ],
+   "shown": "src/tests/paired_cq.rs:150:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "paired:overlap",
+   "file": "paired_cq.rs",
+   "test": "test_paired_cq.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "geometry_refuses_overlap_alignment_and_overflow"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "geometry_refuses_overlap_alignment_and_overflow"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    1
+   ],
+   "shown": "src/tests/paired_cq.rs:123:9: assertion failed: matches!(unsafe { PairedCq::new(m.base(), len, h, c, r, n) },",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:live-retire",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "client_and_controller_close_preserve_all_live_payloads",
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "client_and_controller_close_preserve_all_live_payloads",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:289:5: assertion failed: !r.progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:pool-closes-ring",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions",
+    "last_generation_cannot_wrap_or_reuse",
+    "local_pool_and_payload_release_share_noncallback_signal",
+    "one_pool_drop_preserves_other_pool_and_ring",
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions",
+    "last_generation_cannot_wrap_or_reuse",
+    "one_pool_drop_preserves_other_pool_and_ring",
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    14,
+    6
+   ],
+   "shown": "src/tests/ring.rs:147:61: called `Result::unwrap()` on an `Err` value: Closing",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:global-cap",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "overlap_and_global64_members_are_rejected",
+    "registration_preflight_global_capacity_avoids_native_admission"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "overlap_and_global64_members_are_rejected",
+    "registration_preflight_global_capacity_avoids_native_admission"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:197:5: assertion failed: matches!(unsafe { c.attach_pool(id(2, 1), &[range(512)]) }, Err(Error::Full))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:cross-pool-overlap",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "registration_rejects_before_syscall_and_refunds_definite_error"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "registration_rejects_before_syscall_and_refunds_definite_error"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    17,
+    3
+   ],
+   "shown": "src/tests/ring.rs:191:5: assertion failed: matches!(unsafe { c.attach_pool(id(1, 1), &[range(0)]) },",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:failed-destroy",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "pool_destroy_error_retains_exclusion_and_incarnation"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "pool_destroy_error_retains_exclusion_and_incarnation"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:218:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:stale-pool",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "last_generation_cannot_wrap_or_reuse",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "last_generation_cannot_wrap_or_reuse",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    17,
+    3
+   ],
+   "shown": "src/tests/ring.rs:308:5: assertion failed: matches!(unsafe { c.attach_pool(id(63, 1), &[range(0)]) }, Err(Error::Stale))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:missing-precharge",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "registration_preflight_global_capacity_avoids_native_admission",
+    "registration_rejects_before_syscall_and_refunds_definite_error",
+    "registration_success_binds_actual_identity_without_late_allocation",
+    "stale_native_registration_keeps_precharged_reservation_until_close",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "registration_preflight_global_capacity_avoids_native_admission",
+    "registration_rejects_before_syscall_and_refunds_definite_error",
+    "registration_success_binds_actual_identity_without_late_allocation",
+    "stale_native_registration_keeps_precharged_reservation_until_close",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    15,
+    5
+   ],
+   "shown": "src/tests/ring.rs:440:5: assertion failed: matches!(register(&c, &[range(512)]), Err(Error::Full))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:uncertain-no-close",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "stale_native_registration_keeps_precharged_reservation_until_close",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "stale_native_registration_keeps_precharged_reservation_until_close",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:501:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:rollback-no-refund",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "registration_rejects_before_syscall_and_refunds_definite_error"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "registration_rejects_before_syscall_and_refunds_definite_error"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:422:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "registration:accept-nonzero-output",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:470:9: assertion failed: matches!(register(&c,&[range(8)]),Err(Error::Uncertain(x))if x==rc)",
+   "verdict": "rejected"
+  },
+  {
+   "name": "request-book:reused-cookie",
+   "file": "request_book.rs",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once",
+    "bounded_prepublication_and_terminal_retention",
+    "deadline_all64_cells_expire_in_bounded_rotating_visits",
+    "deadline_expiry_requests_once_without_refund",
+    "delivery_reports_its_own_reserved_kind",
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_full_registration_table_answers_full",
+    "ring_local_identity_cannot_alias_other_book_cookie",
+    "typed_foreign_cookie_fails_only_its_driver"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once",
+    "bounded_prepublication_and_terminal_retention",
+    "ring_local_identity_cannot_alias_other_book_cookie"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    3
+   ],
+   "shown": "src/tests/request_book.rs:129:24: called `Result::unwrap()` on an `Err` value: State",
+   "verdict": "rejected"
+  },
+  {
+   "name": "request-book:more-final",
+   "file": "request_book.rs",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once",
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "multishot_more_and_final_keep_payload_separate"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once",
+    "multishot_more_and_final_keep_payload_separate"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    2
+   ],
+   "shown": "src/tests/request_book.rs:134:5: assertion failed: d.abandoned && !d.terminal",
+   "verdict": "rejected"
+  },
+  {
+   "name": "request-book:duplicate-terminal",
+   "file": "request_book.rs",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once",
+    "bounded_prepublication_and_terminal_retention",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "composed_receive_wake_can_drop_another_client_and_poll",
+    "composed_terminal_survives_client_retire_before_poll",
+    "deadline_cancel_does_not_overwrite_later_success",
+    "deadline_expiry_requests_once_without_refund",
+    "deadline_reused_cell_does_not_inherit_old_timer",
+    "deadline_terminal_before_expiry_wins",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_shutdown_closes_once_keeps_live_read_storage",
+    "fixed_and_control_refuse_payload_more_and_oversize",
+    "future_all64_cells_wake_and_reuse_without_old_handle_interference",
+    "future_clone_callback_completion_is_not_lost",
+    "future_completion_before_first_poll",
+    "future_drop_unregisters_but_keeps_active_storage",
+    "future_failed_prepare_and_write_result",
+    "future_read_wakes_and_retains_result",
+    "future_ready_path_has_no_internal_allocation_with_arc_waker",
+    "future_replaced_waker_drop_can_deliver_completion",
+    "future_replaces_waker_without_notifying_old_task",
+    "future_wake_callback_polls_outside_hub_borrow",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "malformed_receipts_flags_and_lengths_leave_active",
+    "multishot_more_and_final_keep_payload_separate",
+    "ring_local_identity_cannot_alias_other_book_cookie",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read",
+    "task_fixed_completion_wakes_and_result_stays_owned",
+    "task_fixed_future_cancel_retains_storage_until_terminal",
+    "timer_future_cancel_waits_for_actual_terminal",
+    "timer_read_future_cancel_waits_for_actual_terminal",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "typed_abandon_retains_obligation_until_terminal",
+    "typed_drop_terminal_does_not_abort_or_leak",
+    "typed_foreign_cookie_fails_only_its_driver",
+    "typed_read_owns_until_consumed_view_ends",
+    "typed_write_and_read_errors_are_preserved"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once",
+    "bounded_prepublication_and_terminal_retention",
+    "fixed_and_control_refuse_payload_more_and_oversize",
+    "malformed_receipts_flags_and_lengths_leave_active",
+    "multishot_more_and_final_keep_payload_separate",
+    "ring_local_identity_cannot_alias_other_book_cookie"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    6
+   ],
+   "shown": "src/tests/request_book.rs:140:35: called `Result::unwrap()` on an `Err` value: State",
+   "verdict": "rejected"
+  },
+  {
+   "name": "request-book:wrong-pool",
+   "file": "request_book.rs",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "malformed_receipts_flags_and_lengths_leave_active"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "malformed_receipts_flags_and_lengths_leave_active"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    1
+   ],
+   "shown": "src/tests/request_book.rs:117:9: assertion failed: b.accept(r).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "request-book:oversized-fixed",
+   "file": "request_book.rs",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "bounded_prepublication_and_terminal_retention",
+    "fixed_and_control_refuse_payload_more_and_oversize"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "bounded_prepublication_and_terminal_retention",
+    "fixed_and_control_refuse_payload_more_and_oversize"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    5,
+    2
+   ],
+   "shown": "src/tests/request_book.rs:68:5: assertion failed: b.accept(rec(c, 9, 0)).is_err()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "request-book:repeated-abort",
+   "file": "request_book.rs",
+   "test": "test_request_book.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "abandoned_future_retains_until_terminal_and_scope_abort_once"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    1
+   ],
+   "shown": "src/tests/request_book.rs:131:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "retirement-executor:early-reclaim",
+   "file": "retirement_executor.rs",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "executor_capacity_precedes_factory_and_survives_abandon",
+    "executor_drop_and_progress_do_not_allocate",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "shutdown_task_owner_drop_keeps_retirement_charge_until_proof",
+    "timer_retiring_driver_still_owns_deadline",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_timeout_is_not_terminal_storage_proof",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": "assertion",
+   "named_rc": 101,
+   "named_failing": [
+    "executor_capacity_precedes_factory_and_survives_abandon",
+    "executor_drop_and_progress_do_not_allocate",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    5
+   ],
+   "shown": "src/tests/ring/executor.rs:36:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "retirement-executor:missing-retire",
+   "file": "retirement_executor.rs",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "rc": 101,
+   "failing": [
+    "composed_drop_progress_no_internal_allocation",
+    "composed_payload_result_blocks_cell_until_last_view_ends"
+   ],
+   "expect": "assertion",
+   "named_rc": 101,
+   "named_failing": [
+    "executor_capacity_precedes_factory_and_survives_abandon",
+    "executor_drop_and_progress_do_not_allocate",
+    "executor_failed_factory_does_not_leak_cell",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "executor_never_reclaims_attached_client",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    7
+   ],
+   "shown": "src/tests/ring/executor.rs:34:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "retirement-executor:frozen-cursor",
+   "file": "retirement_executor.rs",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_receive_wake_can_drop_another_client_and_poll",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells",
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep"
+   ],
+   "expect": "assertion",
+   "named_rc": 101,
+   "named_failing": [
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring/executor.rs:102:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "retirement-executor:excess-budget",
+   "file": "retirement_executor.rs",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "rc": 101,
+   "failing": [
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells",
+    "local_admission_signals_before_request_publication",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_terminal_cq_signals_even_without_registered_waker",
+    "local_zero_partial_budget_and_coalesced_events_preserve_sweep",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": "assertion",
+   "named_rc": 101,
+   "named_failing": [
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring/executor.rs:100:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "retirement-executor:no-shutdown-close",
+   "file": "retirement_executor.rs",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "rc": 101,
+   "failing": [
+    "composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict",
+    "executor_shutdown_closes_once_keeps_live_read_storage",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read"
+   ],
+   "expect": "assertion",
+   "named_rc": 101,
+   "named_failing": [
+    "executor_shutdown_closes_once_keeps_live_read_storage"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring/executor.rs:135:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "retirement-executor:premature-admission",
+   "file": "retirement_executor.rs",
+   "test": "test_retirement_executor.rs",
+   "filter": "executor_",
+   "rc": 101,
+   "failing": [
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "executor_capacity_precedes_factory_and_survives_abandon"
+   ],
+   "expect": "unreachable code",
+   "named_rc": 101,
+   "named_failing": [
+    "executor_capacity_precedes_factory_and_survives_abandon"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    1
+   ],
+   "shown": "src/tests/ring/executor.rs:28:13: internal error: entered unreachable code",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ring-payload:live-retire",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "client_and_controller_close_preserve_all_live_payloads",
+    "composed_abandoned_stream_and_corrupt_record_retain_owned_bytes",
+    "composed_paired_delivery_keeps_a_across_b_final_and_teardown",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "client_and_controller_close_preserve_all_live_payloads",
+    "uncertain_registration_closes_and_quarantines_with_live_payload"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:289:5: assertion failed: !r.progress()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ring-payload:pool-closes-ring",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions",
+    "last_generation_cannot_wrap_or_reuse",
+    "local_pool_and_payload_release_share_noncallback_signal",
+    "one_pool_drop_preserves_other_pool_and_ring",
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "fixed_and_provided_exclude_overlaps_both_directions",
+    "last_generation_cannot_wrap_or_reuse",
+    "one_pool_drop_preserves_other_pool_and_ring",
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    14,
+    6
+   ],
+   "shown": "src/tests/ring.rs:147:61: called `Result::unwrap()` on an `Err` value: Closing",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ring-payload:global-cap",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "overlap_and_global64_members_are_rejected",
+    "registration_preflight_global_capacity_avoids_native_admission"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "overlap_and_global64_members_are_rejected",
+    "registration_preflight_global_capacity_avoids_native_admission"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    18,
+    2
+   ],
+   "shown": "src/tests/ring.rs:197:5: assertion failed: matches!(unsafe { c.attach_pool(id(2, 1), &[range(512)]) }, Err(Error::Full))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ring-payload:cross-pool-overlap",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "registration_rejects_before_syscall_and_refunds_definite_error"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "overlap_and_global64_members_are_rejected",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "registration_rejects_before_syscall_and_refunds_definite_error"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    17,
+    3
+   ],
+   "shown": "src/tests/ring.rs:191:5: assertion failed: matches!(unsafe { c.attach_pool(id(1, 1), &[range(0)]) },",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ring-payload:failed-destroy",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "pool_destroy_error_retains_exclusion_and_incarnation"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "pool_destroy_error_retains_exclusion_and_incarnation"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    19,
+    1
+   ],
+   "shown": "src/tests/ring.rs:218:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "ring-payload:stale-pool",
+   "file": "ring_payload.rs",
+   "test": "test_ring_payload.rs",
+   "filter": null,
+   "rc": 101,
+   "failing": [
+    "last_generation_cannot_wrap_or_reuse",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "last_generation_cannot_wrap_or_reuse",
+    "pool_destroy_error_retains_exclusion_and_incarnation",
+    "stale_native_registration_keeps_precharged_reservation_until_close"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    17,
+    3
+   ],
+   "shown": "src/tests/ring.rs:308:5: assertion failed: matches!(unsafe { c.attach_pool(id(63, 1), &[range(0)]) }, Err(Error::Stale))",
+   "verdict": "rejected"
+  },
+  {
+   "name": "shutdown-audit:lost-shutdown-wakeup",
+   "file": "fixed_futures.rs",
+   "test": "test_task_loop.rs",
+   "filter": "shutdown_",
+   "rc": 101,
+   "failing": [
+    "composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict",
+    "future_driver_close_and_drop_wake_unfinished",
+    "future_malformed_record_wakes_then_fails_closed",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2636:5: assertion failed: tasks.ready()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "shutdown-audit:missing-close",
+   "file": "retirement_executor.rs",
+   "test": "test_task_loop.rs",
+   "filter": "shutdown_",
+   "rc": 101,
+   "failing": [
+    "composed_queue_shutdown_wake_can_drop_peer_without_borrow_conflict",
+    "executor_shutdown_closes_once_keeps_live_read_storage",
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "shutdown_retirement_root_wakes_task_and_preserves_held_read"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2636:5: assertion failed: tasks.ready()",
+   "verdict": "rejected"
+  },
+  {
+   "name": "shutdown-audit:early-reclaim",
+   "file": "retirement_executor.rs",
+   "test": "test_task_loop.rs",
+   "filter": "shutdown_",
+   "rc": 101,
+   "failing": [
+    "composed_client_drop_wake_can_access_peer_and_retire_both",
+    "composed_payload_result_blocks_cell_until_last_view_ends",
+    "executor_capacity_precedes_factory_and_survives_abandon",
+    "executor_drop_and_progress_do_not_allocate",
+    "executor_held_terminal_result_blocks_reuse_and_preserves_bytes",
+    "executor_live_request_blocks_reuse_despite_retirement_proof",
+    "executor_rotation_is_bounded_and_does_not_starve_later_cells",
+    "local_last_future_drop_schedules_after_closing_poll",
+    "local_native_retirement_requires_explicit_event_not_busy_spin",
+    "local_pulse_drop_and_bounded_progress_do_not_allocate",
+    "local_result_drop_schedules_retirement_without_new_cq",
+    "loop_cancellation_does_not_reclaim_before_retirement",
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "shutdown_task_owner_drop_keeps_retirement_charge_until_proof",
+    "timer_retiring_driver_still_owns_deadline",
+    "wait_local_release_during_arm_prevents_sleep",
+    "wait_timeout_is_not_terminal_storage_proof",
+    "wait_zero_and_partial_quantum_do_not_sleep"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "shutdown_task_owner_drop_keeps_retirement_charge_until_proof"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    1,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2597:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "task-loop:skip-initial-runnable",
+   "file": "local_wait.rs",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "rc": 101,
+   "failing": [
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "loop_zero_and_partial_task_budget_preserve_readiness"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "loop_zero_and_partial_task_budget_preserve_readiness"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    2
+   ],
+   "shown": "src/tests/ring.rs:2336:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "task-loop:skip-final-runnable",
+   "file": "local_wait.rs",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "rc": 101,
+   "failing": [
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_final_clock_sample_is_seen",
+    "loop_wake_during_readiness_is_seen_before_wait"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_final_clock_sample_is_seen",
+    "loop_wake_during_readiness_is_seen_before_wait"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    3
+   ],
+   "shown": "src/tests/ring.rs:2351:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "task-loop:skip-task-dispatch",
+   "file": "task_loop.rs",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "rc": 101,
+   "failing": [
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "loop_quiet_step_has_no_internal_allocation",
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "loop_zero_and_partial_task_budget_preserve_readiness"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "loop_fixed_cq_completion_and_last_result_retirement",
+    "loop_quiet_step_has_no_internal_allocation",
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "loop_wake_during_arm_is_seen_before_wait",
+    "loop_wake_during_readiness_is_seen_before_wait",
+    "loop_zero_and_partial_task_budget_preserve_readiness"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    6
+   ],
+   "shown": "src/tests/ring.rs:2487:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "task-loop:ignore-task-budget",
+   "file": "task_loop.rs",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "rc": 101,
+   "failing": [
+    "loop_zero_and_partial_task_budget_preserve_readiness"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "loop_zero_and_partial_task_budget_preserve_readiness"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2440:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "task-loop:poll-after-outer-expiry",
+   "file": "task_loop.rs",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "rc": 101,
+   "failing": [
+    "loop_expired_outer_deadline_does_not_poll_tasks"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "loop_expired_outer_deadline_does_not_poll_tasks"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2466:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "task-loop:ready-starves-timers",
+   "file": "local_wait.rs",
+   "test": "test_task_loop.rs",
+   "filter": "loop_",
+   "rc": 101,
+   "failing": [
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_polling_driver_uses_same_queue_and_no_allocation",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_retiring_driver_still_owns_deadline",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "loop_self_wake_prevents_wait_without_starving_expiry"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2334:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "timer-wait:skip-expiry",
+   "file": "local_wait.rs",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "rc": 101,
+   "failing": [
+    "loop_self_wake_prevents_wait_without_starving_expiry",
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_polling_driver_uses_same_queue_and_no_allocation",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_retiring_driver_still_owns_deadline",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_polling_driver_uses_same_queue_and_no_allocation",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_retiring_driver_still_owns_deadline",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    3,
+    6
+   ],
+   "shown": "src/tests/ring.rs:1978:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "timer-wait:ignore-request-deadline",
+   "file": "local_wait.rs",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "rc": 101,
+   "failing": [
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_publication_during_arm_prevents_stale_sleep",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    4,
+    5
+   ],
+   "shown": "src/tests/ring.rs:1974:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "timer-wait:ignore-outer-deadline",
+   "file": "local_wait.rs",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "rc": 101,
+   "failing": [
+    "timer_outer_deadline_keeps_separate_policy",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "timer_outer_deadline_keeps_separate_policy",
+    "timer_wait_uses_earliest_and_expiry_preserves_storage"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1995:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "timer-wait:due-is-outer-timeout",
+   "file": "local_wait.rs",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "rc": 101,
+   "failing": [
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "timer_due_after_arm_retries_then_cancels",
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    6,
+    3
+   ],
+   "shown": "src/tests/ring.rs:1974:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "timer-wait:unbounded-ring-scan",
+   "file": "retirement_executor.rs",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "rc": 101,
+   "failing": [
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "timer_queue_minimum_and_independent_fair_cursor",
+    "timer_zero_expiry_budgets_preserve_due_work"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    7,
+    2
+   ],
+   "shown": "src/tests/ring.rs:1929:9: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "timer-wait:skip-retiring-timers",
+   "file": "retirement_executor.rs",
+   "test": "test_timer_wait.rs",
+   "filter": "timer_",
+   "rc": 101,
+   "failing": [
+    "timer_retiring_driver_still_owns_deadline"
+   ],
+   "expect": null,
+   "named_rc": 101,
+   "named_failing": [
+    "timer_retiring_driver_still_owns_deadline"
+   ],
+   "aborted": false,
+   "named_summary": [
+    "FAILED",
+    8,
+    1
+   ],
+   "shown": "src/tests/ring.rs:2015:5: assertion `left == right` failed",
+   "verdict": "rejected"
+  },
+  {
+   "name": "case:deadlines:no-clone-client",
+   "test": "test_deadlines.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring/deadlines.rs",
+     193,
+     "no method named `clone` found for struct `Managed<D>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:deadlines:no-send-executor",
+   "test": "test_deadlines.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring/deadlines.rs",
+     193,
+     "`std::rc::Rc<RefCell<retirement_executor::State<fixed_futures::FutureDriver<ring::Backing>>>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:deadlines:valid-client",
+   "test": "test_deadlines.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:fixed-futures:no-clone-future",
+   "test": "test_fixed_futures.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `ReadFuture<B>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-futures:no-send-future",
+   "test": "test_fixed_futures.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<RefCell<Hub>>` cannot be sent between threads safely"
+    ],
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<RefCell<fixed_requests::Core<ring::Backing>>>` cannot be sent between threads safely"
+    ],
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<ring_payload::Core<ring::Backing>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-futures:valid-future",
+   "test": "test_fixed_futures.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:fixed-io:fixed-borrow",
+   "test": "test_ring_payload.rs",
+   "diag": "E0505",
+   "rc": 101,
+   "errors": [
+    [
+     "E0505",
+     "src/tests/ring.rs",
+     2663,
+     "cannot move out of `f` because it is borrowed"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-io:fixed-mutable-view",
+   "test": "test_ring_payload.rs",
+   "diag": "E0594",
+   "rc": 101,
+   "errors": [
+    [
+     "E0594",
+     "src/tests/ring.rs",
+     2663,
+     "cannot assign to data in a `&` reference"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-io:return-borrow",
+   "test": "test_ring_payload.rs",
+   "diag": "E0505",
+   "rc": 101,
+   "errors": [
+    [
+     "E0505",
+     "src/tests/ring.rs",
+     2663,
+     "cannot move out of `a` because it is borrowed"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-io:mutate-view",
+   "test": "test_ring_payload.rs",
+   "diag": "E0594",
+   "rc": 101,
+   "errors": [
+    [
+     "E0594",
+     "src/tests/ring.rs",
+     2663,
+     "cannot assign to data in a `&` reference"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-io:moved-storage",
+   "test": "test_ring_payload.rs",
+   "diag": "E0382",
+   "rc": 101,
+   "errors": [
+    [
+     "E0382",
+     "src/tests/ring.rs",
+     2663,
+     "borrow of moved value: `b`"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-io:legacy-reap",
+   "test": "test_ring_payload.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `reap` found for struct `ring_payload::RingClient<B>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-io:valid-return",
+   "test": "test_ring_payload.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:fixed-requests:no-active-view",
+   "test": "test_fixed_requests.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `bytes` found for struct `ReadRequest<B>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-requests:no-clone",
+   "test": "test_fixed_requests.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `ReadRequest<B>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-requests:result-borrow",
+   "test": "test_fixed_requests.rs",
+   "diag": "E0505",
+   "rc": 101,
+   "errors": [
+    [
+     "E0505",
+     "src/tests/ring.rs",
+     2663,
+     "cannot move out of `done` because it is borrowed"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-requests:no-mutable-result",
+   "test": "test_fixed_requests.rs",
+   "diag": "E0594",
+   "rc": 101,
+   "errors": [
+    [
+     "E0594",
+     "src/tests/ring.rs",
+     2663,
+     "cannot assign to data in a `&` reference"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:fixed-requests:valid-result",
+   "test": "test_fixed_requests.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:future-retirement:no-clone-client",
+   "test": "test_future_retirement.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `Managed<D>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:future-retirement:no-send-executor",
+   "test": "test_future_retirement.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<RefCell<retirement_executor::State<fixed_futures::FutureDriver<ring::Backing>>>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:future-retirement:valid-client",
+   "test": "test_future_retirement.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:local-progress:no-clone-client",
+   "test": "test_local_progress.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring/local_progress.rs",
+     16,
+     "no method named `clone` found for struct `Managed<D>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:local-progress:no-send-executor",
+   "test": "test_local_progress.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring/local_progress.rs",
+     16,
+     "`std::rc::Rc<RefCell<retirement_executor::State<fixed_futures::FutureDriver<ring::Backing>>>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:local-progress:valid-client",
+   "test": "test_local_progress.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:local-tasks:no-clone-tasks",
+   "test": "test_local_tasks.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `Tasks` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:local-tasks:no-send-tasks",
+   "test": "test_local_tasks.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<()>` cannot be sent between threads safely"
+    ],
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`(dyn Future<Output = ()> + 'static)` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:local-tasks:valid-task",
+   "test": "test_local_tasks.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:local-wait:no-clone-client",
+   "test": "test_local_wait.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `Managed<D>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:local-wait:no-send-executor",
+   "test": "test_local_wait.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<RefCell<retirement_executor::State<fixed_futures::FutureDriver<ring::Backing>>>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:local-wait:valid-client",
+   "test": "test_local_wait.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:owned-mapping:moved-backend",
+   "test": "test_owned_mapping.rs",
+   "diag": "E0382",
+   "rc": 101,
+   "errors": [
+    [
+     "E0382",
+     "src/tests/owned_mapping.rs",
+     225,
+     "borrow of moved value: `b`"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:owned-mapping:clone-owner",
+   "test": "test_owned_mapping.rs",
+   "diag": "no method named",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/owned_mapping.rs",
+     225,
+     "no method named `clone` found for struct `owned_mapping::OwnedMapping<M>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:owned-mapping:raw-mapping",
+   "test": "test_owned_mapping.rs",
+   "diag": "private",
+   "rc": 101,
+   "errors": [
+    [
+     "E0616",
+     "src/tests/owned_mapping.rs",
+     225,
+     "field `mapping` of struct `owned_mapping::OwnedMapping` is private"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:owned-mapping:owned-control",
+   "test": "test_owned_mapping.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:registration:return-borrow",
+   "test": "test_ring_payload.rs",
+   "diag": "E0505",
+   "rc": 101,
+   "errors": [
+    [
+     "E0505",
+     "src/tests/ring.rs",
+     2663,
+     "cannot move out of `a` because it is borrowed"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:registration:mutate-view",
+   "test": "test_ring_payload.rs",
+   "diag": "E0594",
+   "rc": 101,
+   "errors": [
+    [
+     "E0594",
+     "src/tests/ring.rs",
+     2663,
+     "cannot assign to data in a `&` reference"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:registration:moved-storage",
+   "test": "test_ring_payload.rs",
+   "diag": "E0382",
+   "rc": 101,
+   "errors": [
+    [
+     "E0382",
+     "src/tests/ring.rs",
+     2663,
+     "borrow of moved value: `b`"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:registration:legacy-reap",
+   "test": "test_ring_payload.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `reap` found for struct `ring_payload::RingClient<B>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:registration:valid-return",
+   "test": "test_ring_payload.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:request-book:clone",
+   "test": "test_request_book.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/request_book.rs",
+     214,
+     "no method named `clone` found for struct `request_book::RequestBook` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:request-book:send",
+   "test": "test_request_book.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/request_book.rs",
+     214,
+     "`std::rc::Rc<()>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:request-book:valid",
+   "test": "test_request_book.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:retirement-executor:no-clone-client",
+   "test": "test_retirement_executor.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring/executor.rs",
+     176,
+     "no method named `clone` found for struct `Managed<D>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:retirement-executor:no-send-executor",
+   "test": "test_retirement_executor.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring/executor.rs",
+     176,
+     "`std::rc::Rc<RefCell<retirement_executor::State<FixedDriver<ring::Backing>>>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:retirement-executor:valid-client",
+   "test": "test_retirement_executor.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:ring-payload:return-borrow",
+   "test": "test_ring_payload.rs",
+   "diag": "E0505",
+   "rc": 101,
+   "errors": [
+    [
+     "E0505",
+     "src/tests/ring.rs",
+     2663,
+     "cannot move out of `a` because it is borrowed"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:ring-payload:mutate-view",
+   "test": "test_ring_payload.rs",
+   "diag": "E0594",
+   "rc": 101,
+   "errors": [
+    [
+     "E0594",
+     "src/tests/ring.rs",
+     2663,
+     "cannot assign to data in a `&` reference"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:ring-payload:moved-storage",
+   "test": "test_ring_payload.rs",
+   "diag": "E0382",
+   "rc": 101,
+   "errors": [
+    [
+     "E0382",
+     "src/tests/ring.rs",
+     2663,
+     "borrow of moved value: `b`"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:ring-payload:legacy-reap",
+   "test": "test_ring_payload.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `reap` found for struct `ring_payload::RingClient<B>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:ring-payload:valid-return",
+   "test": "test_ring_payload.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:shutdown-audit:no-clone-tasks",
+   "test": "test_task_loop.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `Tasks` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:shutdown-audit:no-send-tasks",
+   "test": "test_task_loop.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<()>` cannot be sent between threads safely"
+    ],
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`(dyn Future<Output = ()> + 'static)` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:shutdown-audit:valid-task",
+   "test": "test_task_loop.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:task-loop:no-clone-tasks",
+   "test": "test_task_loop.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `Tasks` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:task-loop:no-send-tasks",
+   "test": "test_task_loop.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<()>` cannot be sent between threads safely"
+    ],
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`(dyn Future<Output = ()> + 'static)` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:task-loop:valid-task",
+   "test": "test_task_loop.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  },
+  {
+   "name": "case:timer-wait:no-clone-client",
+   "test": "test_timer_wait.rs",
+   "diag": "E0599",
+   "rc": 101,
+   "errors": [
+    [
+     "E0599",
+     "src/tests/ring.rs",
+     2663,
+     "no method named `clone` found for struct `Managed<D>` in the current scope"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:timer-wait:no-send-executor",
+   "test": "test_timer_wait.rs",
+   "diag": "E0277",
+   "rc": 101,
+   "errors": [
+    [
+     "E0277",
+     "src/tests/ring.rs",
+     2663,
+     "`std::rc::Rc<RefCell<retirement_executor::State<fixed_futures::FutureDriver<ring::Backing>>>>` cannot be sent between threads safely"
+    ]
+   ],
+   "verdict": "refused"
+  },
+  {
+   "name": "case:timer-wait:valid-client",
+   "test": "test_timer_wait.rs",
+   "diag": null,
+   "rc": 0,
+   "errors": [],
+   "verdict": "compiles and passes"
+  }
+ ]
+}

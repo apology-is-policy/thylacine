@@ -1,0 +1,85 @@
+warning: method `retire_pool` is never used
+  --> src/ring_payload.rs:34:8
+   |
+24 | pub(crate) unsafe trait RingBackend {
+   |                         ----------- method in this trait
+...
+34 |     fn retire_pool(&self, pool: SlotRef);
+   |        ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `loom-client` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 20 tests
+test tests::ring::client_and_controller_close_preserve_all_live_payloads ... ok
+test tests::ring::final_and_explicit_return_errors_preserve_full_ring_ownership ... ok
+test tests::ring::fixed_abandon_is_scope_cancel_not_refund ... ok
+test tests::ring::fixed_and_provided_exclude_overlaps_both_directions ... FAILED
+test tests::ring::fixed_bad_geometry_and_precise_error ... ok
+test tests::ring::fixed_read_owns_range_through_terminal_and_view ... ok
+test tests::ring::fixed_retirement_reclaims_abandoned_only_after_proof ... ok
+test tests::ring::fixed_unpublished_and_closed_drop_do_not_abort ... ok
+test tests::ring::fixed_write_freezes_after_publish_and_error_preserves_owner ... ok
+test tests::ring::last_generation_cannot_wrap_or_reuse ... FAILED
+test tests::ring::ledger_cannot_accept_unbound_or_rebind_after_return ... ok
+test tests::ring::one_pool_drop_preserves_other_pool_and_ring ... FAILED
+test tests::ring::overlap_and_global64_members_are_rejected ... FAILED
+test tests::ring::pending_returns_are_global_bounded_and_block_pool_reclaim ... ok
+test tests::ring::pool_destroy_error_retains_exclusion_and_incarnation ... FAILED
+test tests::ring::registration_preflight_global_capacity_avoids_native_admission ... ok
+test tests::ring::registration_rejects_before_syscall_and_refunds_definite_error ... ok
+test tests::ring::registration_success_binds_actual_identity_without_late_allocation ... ok
+test tests::ring::stale_native_registration_keeps_precharged_reservation_until_close ... FAILED
+test tests::ring::uncertain_registration_closes_and_quarantines_with_live_payload ... ok
+
+failures:
+
+---- tests::ring::fixed_and_provided_exclude_overlaps_both_directions stdout ----
+
+thread 'tests::ring::fixed_and_provided_exclude_overlaps_both_directions' (31859902) panicked at src/tests/ring.rs:147:61:
+called `Result::unwrap()` on an `Err` value: Closing
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::last_generation_cannot_wrap_or_reuse stdout ----
+
+thread 'tests::ring::last_generation_cannot_wrap_or_reuse' (31859908) panicked at src/tests/ring.rs:308:5:
+assertion failed: matches!(unsafe { c.attach_pool(id(63, 1), &[range(0)]) }, Err(Error::Stale))
+
+---- tests::ring::one_pool_drop_preserves_other_pool_and_ring stdout ----
+
+thread 'tests::ring::one_pool_drop_preserves_other_pool_and_ring' (31859910) panicked at src/tests/ring.rs:164:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- tests::ring::overlap_and_global64_members_are_rejected stdout ----
+
+thread 'tests::ring::overlap_and_global64_members_are_rejected' (31859911) panicked at src/tests/ring.rs:147:61:
+called `Result::unwrap()` on an `Err` value: Closing
+
+---- tests::ring::pool_destroy_error_retains_exclusion_and_incarnation stdout ----
+
+thread 'tests::ring::pool_destroy_error_retains_exclusion_and_incarnation' (31859913) panicked at src/tests/ring.rs:219:5:
+assertion failed: matches!(unsafe { c.attach_pool(id(4, 1), &[range(0)]) },
+    Err(Error::Geometry))
+
+---- tests::ring::stale_native_registration_keeps_precharged_reservation_until_close stdout ----
+
+thread 'tests::ring::stale_native_registration_keeps_precharged_reservation_until_close' (31859917) panicked at src/tests/ring.rs:495:5:
+assertion failed: matches!(register(&c, &[range(8)]), Err(Error::Uncertain(0)))
+
+
+failures:
+    tests::ring::fixed_and_provided_exclude_overlaps_both_directions
+    tests::ring::last_generation_cannot_wrap_or_reuse
+    tests::ring::one_pool_drop_preserves_other_pool_and_ring
+    tests::ring::overlap_and_global64_members_are_rejected
+    tests::ring::pool_destroy_error_retains_exclusion_and_incarnation
+    tests::ring::stale_native_registration_keeps_precharged_reservation_until_close
+
+test result: FAILED. 14 passed; 6 failed; 0 ignored; 0 measured; 121 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

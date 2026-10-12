@@ -1,0 +1,1 @@
+Assertion failed: (p.closes==1&&t_managed_read(c,id(0,1),range(0),&r)==T_FIXED_CLOSING&&!r), function main, file test_retirement_executor.c, line 15.

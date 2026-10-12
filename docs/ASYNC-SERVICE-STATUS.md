@@ -4164,7 +4164,7 @@ uninitialized ledger above; then the runner passed
 (`run-20261012T190029Z`) and the mutant driver rejected 87 of 87, refused all
 three header sabotages and the ABI sabotage (`mutants-20261012T190121Z`).
 
-## NA-3: the Rust client cores, host-tested (Corona, October 12 -- built; audit next)
+## NA-3: the Rust client cores, host-tested (Corona, October 12 -- audit closed)
 
 Scripture a8ea95306 ("Native Rust client cores" in ASYNC-SERVICE-ABI.md). NA-3
 installs Astra's Rust twins as the crate `usr/lib/loom-client` (no_std + alloc,
@@ -4221,3 +4221,41 @@ inside it would run nowhere. The twins keep the heap.
   named test aborting the binary), 59 of 59 cases as required, 4 C code blocks
   and 6 checker sabotages refused. The NA-2b C driver on the renumbered codes:
   87 of 87 rejected (c-mutants-20261012T201157Z).
+
+**Audit, October 12, 20:20-20:47 UTC.** Fable 5.1 reviewed Opus 5.5 (start ==
+end), read-only: 0 P0, 0 P1, 2 P2, 6 P3, not dirty. Fixes in WIP ce328ab79.
+- **F1 (P2): a witness nothing ran.** Moving `service_abi.rs` broke
+  `tools/test-loom-rust-ownership.py`, the only witness that raw registration is
+  `unsafe` and that a range borrow can neither alias a mutable one nor outlive
+  its buffer (row 263). It copied the old path. No make target had run it since
+  c78142bd8, so nothing noticed. It now builds the real loom-client rlib and
+  links it, and `make test-loom-client` runs it and requires its four PASS lines.
+- **F2 (P2): stale citations.** ASYNC-SERVICE-ABI.md "Mirrors and validation"
+  and AUDIT-TRIGGERS row 259 still named the old path. The coverage view
+  re-rendered in 511f6ef11 had reported it (24 unresolved citations became 25);
+  it is 24 again.
+- **F5 (P3), also self-found:** a future driver's full registration table
+  answered `Storage(Busy)`. It answers `Storage(Full)`, through the derivation,
+  and a fourth seam test covers it (141 tests).
+- **F3, F4, F6, F7 (P3) fixed:** the -1000 code family is bounded on both
+  sides, with three more block sabotages; the edition claim now says what is
+  true; five sentences corrected; a doc edit must stay one `//!` line. **F8
+  (P3)** closed without change: the compile-fail judge matches the rustc code at
+  the probe's own lines, which is stricter than the original drivers.
+
+**Verified under the lease, October 12, 22:10-22:16 UTC** (evidence in
+`work/oct12-na3/`).
+- `make test-loom-client` PASS (run-20261012T221032Z): Rust dev and release at
+  141 of 141 declared tests with no warning, and the ownership witness's four
+  PASS lines, each failing case on exactly its own rustc code.
+- The ABI checker gives 3 PASS lines (abi-20261012T221115Z).
+- Mutants (mutants-20261012T221132Z): 110 of 110 rejected, 59 of 59 cases as
+  required, 7 C code blocks and 6 checker sabotages refused, and the no-op
+  control SURVIVED.
+- Seam sabotage (seam-sabotage-20261012T221117Z): each of the four paths turns
+  only its own test red.
+- The NA-2b C driver (c-mutants-20261012T221512Z): 87 of 87 rejected.
+- The guest release build (guest-build-20261012T221249Z) compiles loom-client
+  no_std with the same warning set as 511f6ef11.
+
+Next: NA-4, the native adapter.

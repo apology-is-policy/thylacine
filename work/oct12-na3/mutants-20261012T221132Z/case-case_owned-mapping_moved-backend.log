@@ -1,0 +1,47 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+warning: variable does not need to be mutable
+   --> src/tests/owned_mapping.rs:225:30
+    |
+225 | let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _n=b.len();
+    |                              ----^
+    |                              |
+    |                              help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: borrow of moved value: `b`
+   --> src/tests/owned_mapping.rs:225:75
+    |
+225 | let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _n=b.len();
+    |     -                                                -                    ^ value borrowed here after move
+    |     |                                                |
+    |     |                                                value moved here
+    |     move occurs because `b` has type `tests::owned_mapping::Backing`, which does not implement the `Copy` trait
+    |
+note: consider changing this parameter type in method `new` to borrow instead if owning the value isn't necessary
+   --> src/owned_mapping.rs:113:36
+    |
+113 |     pub(crate) fn new(mut mapping: M, p: Setup) -> Result<Self, Error> {
+    |                   ---              ^ this parameter takes ownership of the value
+    |                   |
+    |                   in this method
+note: if `tests::owned_mapping::Backing` implemented `Clone`, you could clone the value
+   --> src/tests/owned_mapping.rs:17:1
+    |
+ 17 | struct Backing {
+    | ^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+...
+225 | let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _n=b.len();
+    |                                                      - you could clone this value
+
+warning: unused variable: `m`
+   --> src/tests/owned_mapping.rs:225:30
+    |
+225 | let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _n=b.len();
+    |                              ^^^^^ help: if this is intentional, prefix it with an underscore: `_m`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `loom-client` (lib test) generated 2 warnings
+error: could not compile `loom-client` (lib test) due to 1 previous error; 2 warnings emitted

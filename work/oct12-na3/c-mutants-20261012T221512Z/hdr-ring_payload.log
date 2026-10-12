@@ -1,0 +1,16 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/retirement_executor.c:1:
+In file included from work/oct12-na3/c-mutants-20261012T221512Z/hdr-ring_payload/include/thyla/loom_client/retirement_executor.h:3:
+In file included from work/oct12-na3/c-mutants-20261012T221512Z/hdr-ring_payload/include/thyla/loom_client/fixed_requests.h:3:
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-ring_payload/include/thyla/loom_client/ring_payload.h:37:16: error: static assertion failed due to requirement '(-100) <= -1000': T_RING_UNCERTAIN must lie below every errno
+   37 | _Static_assert(T_RING_UNCERTAIN<=-1000,"T_RING_UNCERTAIN must lie below every errno");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-ring_payload/include/thyla/loom_client/ring_payload.h:36:26: note: expanded from macro 'T_RING_UNCERTAIN'
+   36 | #define T_RING_UNCERTAIN (-100)
+      |                          ^
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-ring_payload/include/thyla/loom_client/ring_payload.h:38:16: error: static assertion failed due to requirement '((-100)) <= -(1000)': T_RING_UNCERTAIN lies in the -1000 block
+   38 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_RING_UNCERTAIN,1000),"T_RING_UNCERTAIN lies in the -1000 block");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+work/oct12-na3/c-mutants-20261012T221512Z/hdr-ring_payload/include/thyla/loom_client/base.h:16:42: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                          ^~~~~~~~~~~~~~~~
+2 errors generated.

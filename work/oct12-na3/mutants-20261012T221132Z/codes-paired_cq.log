@@ -1,0 +1,15 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes.c:2:
+In file included from /Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-paired_cq/thyla/loom_client/request_book.h:3:
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-paired_cq/thyla/loom_client/paired_cq.h:11:57: error: static assertion failed due to requirement '(T_CQ_CORRUPT) <= -(1400)': CQ codes lie in their block
+   11 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_CQ_GEOMETRY,1400)&&T_LOOM_CLIENT_LOCAL(T_CQ_CORRUPT,1400),"CQ codes lie in their block");
+      |                                                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-paired_cq/thyla/loom_client/base.h:16:42: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                          ^~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-paired_cq/thyla/loom_client/paired_cq.h:11:57: note: expression evaluates to '-2 <= -1400'
+   11 | _Static_assert(T_LOOM_CLIENT_LOCAL(T_CQ_GEOMETRY,1400)&&T_LOOM_CLIENT_LOCAL(T_CQ_CORRUPT,1400),"CQ codes lie in their block");
+      |                                                         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/codes-paired_cq/thyla/loom_client/base.h:16:48: note: expanded from macro 'T_LOOM_CLIENT_LOCAL'
+   16 | #define T_LOOM_CLIENT_LOCAL(code,block) ((code)<=-(block)&&(code)>-(block)-100)
+      |                                          ~~~~~~^~~~~~~~~~
+1 error generated.

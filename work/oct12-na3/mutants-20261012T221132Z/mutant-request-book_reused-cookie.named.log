@@ -1,0 +1,43 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 7 tests
+test tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once ... FAILED
+test tests::request_book::bounded_prepublication_and_terminal_retention ... FAILED
+test tests::request_book::fixed_and_control_refuse_payload_more_and_oversize ... ok
+test tests::request_book::geometry_maximum_capacity_and_cookie_exhaustion ... ok
+test tests::request_book::malformed_receipts_flags_and_lengths_leave_active ... ok
+test tests::request_book::multishot_more_and_final_keep_payload_separate ... ok
+test tests::request_book::ring_local_identity_cannot_alias_other_book_cookie ... FAILED
+
+failures:
+
+---- tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once stdout ----
+
+thread 'tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once' (31854947) panicked at src/tests/request_book.rs:129:24:
+called `Result::unwrap()` on an `Err` value: State
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::request_book::bounded_prepublication_and_terminal_retention stdout ----
+
+thread 'tests::request_book::bounded_prepublication_and_terminal_retention' (31854948) panicked at src/tests/request_book.rs:62:5:
+assertion `left != right` failed
+  left: 1
+ right: 1
+
+---- tests::request_book::ring_local_identity_cannot_alias_other_book_cookie stdout ----
+
+thread 'tests::request_book::ring_local_identity_cannot_alias_other_book_cookie' (31854953) panicked at src/tests/request_book.rs:169:5:
+assertion `left != right` failed
+  left: 1
+ right: 1
+
+
+failures:
+    tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once
+    tests::request_book::bounded_prepublication_and_terminal_retention
+    tests::request_book::ring_local_identity_cannot_alias_other_book_cookie
+
+test result: FAILED. 4 passed; 3 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `--lib`

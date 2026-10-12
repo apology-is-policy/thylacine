@@ -1,0 +1,23 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+error[E0599]: no method named `clone` found for struct `owned_mapping::OwnedMapping<M>` in the current scope
+   --> src/tests/owned_mapping.rs:225:80
+    |
+225 | let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _copy=m.clone();
+    |                                                                                ^^^^^
+    |
+   ::: src/owned_mapping.rs:107:1
+    |
+107 | pub(crate) struct OwnedMapping<M: Mapping> {
+    | ------------------------------------------ method `clone` not found for this struct
+    |
+    = help: items from traits can only be used if the trait is implemented and in scope
+    = note: the following trait defines an item `clone`, perhaps you need to implement it:
+            candidate #1: `Clone`
+help: there is a method `close` with a similar name
+    |
+225 - let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _copy=m.clone();
+225 + let(b,p,_q)=fixture(4,8);let mut m=OwnedMapping::new(b,p).unwrap();let _copy=m.close();
+    |
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

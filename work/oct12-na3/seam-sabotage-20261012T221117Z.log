@@ -1,0 +1,4 @@
+RED  fixed_futures.rs: failing ['tests::ring::seams::timer_read_future_cancel_waits_for_actual_terminal'] | test result: FAILED. 140 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+RED  local_wait.rs: failing ['tests::ring::seams::wait_event_wake_is_reported_and_releases_the_subscription'] | test result: FAILED. 140 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+RED  request_book.rs: failing ['tests::request_book::seams::delivery_reports_its_own_reserved_kind'] | test result: FAILED. 140 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+RED  fixed_futures.rs: failing ['tests::ring::seams::future_full_registration_table_answers_full'] | test result: FAILED. 140 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s

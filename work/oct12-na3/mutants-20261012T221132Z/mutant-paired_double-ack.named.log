@@ -1,0 +1,32 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 4 tests
+test tests::paired_cq::concurrent_pair_publication_and_reuse ... FAILED
+test tests::paired_cq::copies_receipt_before_slot_reuse_and_wrap ... FAILED
+test tests::paired_cq::geometry_refuses_overlap_alignment_and_overflow ... ok
+test tests::paired_cq::refuses_corrupt_distance_or_second_head_writer ... ok
+
+failures:
+
+---- tests::paired_cq::concurrent_pair_publication_and_reuse stdout ----
+
+thread 'tests::paired_cq::concurrent_pair_publication_and_reuse' (31850408) panicked at src/tests/paired_cq.rs:150:9:
+assertion `left == right` failed
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::paired_cq::copies_receipt_before_slot_reuse_and_wrap stdout ----
+
+thread 'tests::paired_cq::copies_receipt_before_slot_reuse_and_wrap' (31850410) panicked at src/tests/paired_cq.rs:87:40:
+called `Option::unwrap()` on a `None` value
+
+
+failures:
+    tests::paired_cq::concurrent_pair_publication_and_reuse
+    tests::paired_cq::copies_receipt_before_slot_reuse_and_wrap
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

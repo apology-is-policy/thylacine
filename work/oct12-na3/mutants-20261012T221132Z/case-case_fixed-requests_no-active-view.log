@@ -1,0 +1,18 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+error[E0599]: no method named `bytes` found for struct `ReadRequest<B>` in the current scope
+    --> src/tests/ring.rs:2663:76
+     |
+2663 | let (_p,d)=typed_driver(1);let r=d.read(id(0,1),range(0)).unwrap();let _=r.bytes();
+     |                                                                            ^^^^^ method not found in `ReadRequest<ring::Backing>`
+     |
+    ::: src/fixed_requests.rs:44:1
+     |
+  44 | pub(crate) struct ReadRequest<B: RingBackend> {
+     | --------------------------------------------- method `bytes` not found for this struct
+     |
+     = help: items from traits can only be used if the trait is implemented and in scope
+     = note: the following trait defines an item `bytes`, perhaps you need to implement it:
+             candidate #1: `std::io::Read`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 5 tests
+test tests::owned_mapping::every_region_pair_rejects_overlap ... ok
+test tests::owned_mapping::fresh_header_checks_and_wakeup ... ok
+test tests::owned_mapping::malformed_geometry_cleanup ... ok
+test tests::owned_mapping::min_max_copy_and_cleanup ... FAILED
+test tests::owned_mapping::post_setup_corruption_is_detected ... ok
+
+failures:
+
+---- tests::owned_mapping::min_max_copy_and_cleanup stdout ----
+
+thread 'tests::owned_mapping::min_max_copy_and_cleanup' (31849211) panicked at src/tests/owned_mapping.rs:123:9:
+assertion failed: matches!(m.reap(), Err(Error::Closed))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::owned_mapping::min_max_copy_and_cleanup
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

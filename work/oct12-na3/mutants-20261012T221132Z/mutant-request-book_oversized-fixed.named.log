@@ -1,0 +1,46 @@
+warning: unused variable: `limit`
+   --> src/request_book.rs:178:29
+    |
+178 |             Kind::FixedRead(limit) | Kind::FixedWrite(limit) => {
+    |                             ^^^^^                     ^^^^^
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+help: if this is intentional, prefix it with an underscore
+    |
+178 |             Kind::FixedRead(_limit) | Kind::FixedWrite(_limit) => {
+    |                             +                          +
+
+warning: `loom-client` (lib test) generated 1 warning (run `cargo fix --lib -p loom-client --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 7 tests
+test tests::request_book::abandoned_future_retains_until_terminal_and_scope_abort_once ... ok
+test tests::request_book::bounded_prepublication_and_terminal_retention ... FAILED
+test tests::request_book::fixed_and_control_refuse_payload_more_and_oversize ... FAILED
+test tests::request_book::geometry_maximum_capacity_and_cookie_exhaustion ... ok
+test tests::request_book::malformed_receipts_flags_and_lengths_leave_active ... ok
+test tests::request_book::multishot_more_and_final_keep_payload_separate ... ok
+test tests::request_book::ring_local_identity_cannot_alias_other_book_cookie ... ok
+
+failures:
+
+---- tests::request_book::bounded_prepublication_and_terminal_retention stdout ----
+
+thread 'tests::request_book::bounded_prepublication_and_terminal_retention' (31856657) panicked at src/tests/request_book.rs:68:5:
+assertion failed: b.accept(rec(c, 9, 0)).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::request_book::fixed_and_control_refuse_payload_more_and_oversize stdout ----
+
+thread 'tests::request_book::fixed_and_control_refuse_payload_more_and_oversize' (31856658) panicked at src/tests/request_book.rs:155:9:
+assertion failed: b.accept(rec(a, 9, 0)).is_err()
+
+
+failures:
+    tests::request_book::bounded_prepublication_and_terminal_retention
+    tests::request_book::fixed_and_control_refuse_payload_more_and_oversize
+
+test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 134 filtered out; finished in 0.26s
+
+error: test failed, to rerun pass `--lib`

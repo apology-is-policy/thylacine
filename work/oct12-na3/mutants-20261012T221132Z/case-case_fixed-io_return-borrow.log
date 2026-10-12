@@ -1,0 +1,23 @@
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/crate)
+error[E0505]: cannot move out of `a` because it is borrowed
+    --> src/tests/ring.rs:2663:99
+     |
+2663 | ...(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!("{:?}",view);
+     |                 -                          -               ^ move out of `a` occurs here  ---- borrow later used here
+     |                 |                          |
+     |                 |                          borrow of `a` occurs here
+     |                 binding `a` declared here
+     |
+note: if `ring_payload::Payload<ring::Backing>` implemented `Clone`, you could clone the value
+    --> src/ring_payload.rs:204:1
+     |
+ 204 | pub(crate) struct Payload<B: RingBackend> {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+     |
+    ::: src/tests/ring.rs:2663:83
+     |
+2663 | let (_p,_root,c)=fixture();let pool=attach(&c,0,0);let a=accept(&pool,0);let view=a.bytes();let _=a.try_return();println!("{:?}",v...
+     |                                                                                   - you could clone this value
+
+For more information about this error, try `rustc --explain E0505`.
+error: could not compile `loom-client` (lib test) due to 1 previous error

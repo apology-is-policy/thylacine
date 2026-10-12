@@ -1,0 +1,1 @@
+Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:before)), function register_checked, file test_ring_payload.c, line 32.

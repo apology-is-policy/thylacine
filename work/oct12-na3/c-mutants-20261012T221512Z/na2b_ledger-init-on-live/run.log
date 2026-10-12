@@ -1,0 +1,6 @@
+loom-client fatal: t_ring_create:13
+loom-client fatal: t_fixed_create:11
+loom-client fatal: t_mapping_create:18
+loom-client fatal: t_retirement_create:4
+t_lease_init: no fatal there (status 0)
+Assertion failed: (0), function expect_fatal, file test_fatal.c, line 14.

@@ -1,0 +1,40 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+     Running unittests src/lib.rs (/Users/northkillpd/projects/thylacine-corona/work/oct12-na3/mutants-20261012T221132Z/target/debug/deps/loom_client-e6845828c4aaf972)
+
+running 10 tests
+test tests::ring::deadlines::deadline_active_deadline_cannot_be_extended ... ok
+test tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits ... FAILED
+test tests::ring::deadlines::deadline_cancel_does_not_overwrite_later_success ... ok
+test tests::ring::deadlines::deadline_closed_driver_does_not_issue_more_aborts ... ok
+test tests::ring::deadlines::deadline_expiry_has_no_internal_allocation ... ok
+test tests::ring::deadlines::deadline_expiry_requests_once_without_refund ... FAILED
+test tests::ring::deadlines::deadline_prepared_has_no_timer_or_scope_abort ... ok
+test tests::ring::deadlines::deadline_publication_notifies_local_progress ... ok
+test tests::ring::deadlines::deadline_reused_cell_does_not_inherit_old_timer ... ok
+test tests::ring::deadlines::deadline_terminal_before_expiry_wins ... ok
+
+failures:
+
+---- tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits stdout ----
+
+thread 'tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits' (31826557) panicked at src/tests/ring/deadlines.rs:139:5:
+assertion `left == right` failed
+  left: 128
+ right: 64
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::ring::deadlines::deadline_expiry_requests_once_without_refund stdout ----
+
+thread 'tests::ring::deadlines::deadline_expiry_requests_once_without_refund' (31826561) panicked at src/tests/ring/deadlines.rs:30:5:
+assertion `left == right` failed
+  left: 2
+ right: 1
+
+
+failures:
+    tests::ring::deadlines::deadline_all64_cells_expire_in_bounded_rotating_visits
+    tests::ring::deadlines::deadline_expiry_requests_once_without_refund
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

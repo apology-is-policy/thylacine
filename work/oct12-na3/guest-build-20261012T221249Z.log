@@ -1,0 +1,43 @@
+warning: unstable feature specified for `-Ctarget-feature`: `outline-atomics`
+  |
+  = note: this feature is not stably supported; its behavior can change in the future
+
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+warning: `thyla-heap` (lib) generated 1 warning
+warning: `ninep` (lib) generated 1 warning (1 duplicate)
+warning: `vt` (lib) generated 1 warning (1 duplicate)
+warning: constant `DAYLIGHT` is never used
+   --> lib/libhalcyon/src/theme.rs:404:18
+    |
+404 | pub(crate) const DAYLIGHT: Theme = DAYLIGHT_THEME;
+    |                  ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `libhalcyon` (lib) generated 2 warnings (1 duplicate)
+   Compiling libthyla-rs v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/libthyla-rs)
+warning: `loom-client` (lib) generated 1 warning (1 duplicate)
+warning: unnecessary `unsafe` block
+   --> lib/libthyla-rs/src/hardware.rs:453:22
+    |
+453 |         let handle = unsafe { Handle::from_raw(raw as i32, Rights::READ | Rights::WRITE | Rights::SIGNAL) };
+    |                      ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling tls v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/tls)
+   Compiling libtapestry v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/libtapestry)
+warning: `tls` (lib) generated 1 warning (1 duplicate)
+warning: `libtapestry` (lib) generated 1 warning (1 duplicate)
+warning: `libthyla-rs` (lib) generated 2 warnings (1 duplicate)
+   Compiling loom-smoke v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/loom-smoke)
+   Compiling symlink-probe v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/symlink-probe)
+   Compiling net-echo v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/net-echo)
+   Compiling loom-stress v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/loom-stress)
+   Compiling loom-bench v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/loom-bench)
+warning: `loom-bench` (bin "loom-bench") generated 1 warning (1 duplicate)
+warning: `loom-stress` (bin "loom-stress") generated 1 warning (1 duplicate)
+warning: `loom-smoke` (bin "loom-smoke") generated 1 warning (1 duplicate)
+warning: `symlink-probe` (bin "symlink-probe") generated 1 warning (1 duplicate)
+warning: `net-echo` (bin "net-echo") generated 1 warning (1 duplicate)
+    Finished `release` profile [optimized] target(s) in 6.31s
