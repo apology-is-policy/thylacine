@@ -3165,14 +3165,20 @@ void test_notes_death_signal_table(void) {
 
     // The phenotype translates signals to these notes through its own table; a
     // guest's waitpid must see the signal that table maps back from the note.
-    u32 compared = 0;
+    // Only the rows it names compare: its snare rows have no name, a snare never
+    // being posted, and their numbers are pinned by the VIV_SIG* _Static_assert
+    // in notes.c. The count is derived, so a row added either side is counted.
+    u32 compared = 0, terminating = 0;
     for (u32 v = 1; v < VIV_SIGNOTE_COUNT; v++) {
         const char *name = viv_signote_note_name((enum viv_signote)v);
+        if (!name) continue;
+        if (notes_default_action(name) == NOTE_DFL_TERMINATE) terminating++;
         int sig = notes_death_signal(name);
         if (sig == 0) continue;
         TEST_EXPECT_EQ((u64)sig, viv_signote_to_signal((enum viv_signote)v),
                        "a death reports the signal the phenotype maps its note from");
         compared++;
     }
-    TEST_ASSERT(compared >= 9, "the phenotype cross-check compared the terminating notes");
+    TEST_ASSERT(terminating > 0 && compared == terminating,
+                "the phenotype cross-check compared every terminating note it names");
 }

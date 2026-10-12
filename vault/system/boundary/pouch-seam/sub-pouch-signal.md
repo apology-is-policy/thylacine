@@ -11,7 +11,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -37,6 +37,18 @@ The supported set: `SIGINT`/`SIGTERM` → `"interrupt"` (shared),
 (non-catchable), plus the PTY-3 tty family — `SIGQUIT` → `"tty:quit"`,
 `SIGTSTP` → `"tty:susp"`, `SIGCONT` → `"tty:cont"`, `SIGWINCH` →
 `"tty:winch"`, `SIGHUP` → `"tty:hup"`.
+
+`SIGABRT` is outside the set: `sigaction(SIGABRT)` and `raise(SIGABRT)`
+answer `EINVAL`. `abort()` does not raise it — it executes the `brk` the
+kernel ends as `snare:abort` ([[sub-pouch-process]]). The reverse direction
+does carry signals since gcpark-b (2026-10-12): the kernel records the
+signal of every death by note, a fault (`snare:segv` → `SIGSEGV`, …,
+`snare:abort` → `SIGABRT`) or an uncaught terminating note (`interrupt` →
+`SIGINT`, `kill` → `SIGKILL`, `pipe` → `SIGPIPE`, `tty:quit`, `tty:hup`),
+and a parent's `waitpid` reads it as `WIFSIGNALED` / `WTERMSIG`
+(docs/ERRORS.md "The wait status"). No handler runs for a fault signal.
+The musl `__abort_lock` interlock in `sigaction` is not carried: Pouch's
+`abort()` never takes the lock, so it has nothing to guard.
 
 ## Mechanism
 
@@ -162,7 +174,11 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
 - **`83-pouch-signals.md` (absorbed) still listed "abort() extincts the
   kernel" as a live caveat, proposing as a "v1.x extension" the exact
   override that shipped** in 0011 — documented in a different reference
-  doc (`86-pouch-stratumd-boot.md`), so the two never met.
+  doc (`86-pouch-stratumd-boot.md`), so the two never met. That override
+  (`_Exit(127)`) was itself replaced at gcpark-b by the `snare:abort` death.
+- **`raise(SIGABRT)` answers `EINVAL` and the program runs on.** POSIX
+  expects it to end the process when no handler is installed. Tracked in
+  OPEN-BUGS (gcpark-b follow-up); `abort()` is unaffected.
 - SIGINT/SIGTERM aliasing; `sigset_t` round-trip is lossy (unsupported
   signums drop) and spuriously additive (reading back a mask containing
   SIGINT also reports SIGTERM).
@@ -181,4 +197,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
 
 [[chg-2026-05-24-p6-signals-b]] (0007 + the paired kernel `pid=0`
 self-post sentinel; [[adt-signals13b-r1]] DIRTY 2 P1 + 6 P2 →
-[[adt-signals13b-r2]] CLEAN) → [[chg-2026-07-18-pty3]] (the tty family).
+[[adt-signals13b-r2]] CLEAN) → [[chg-2026-07-18-pty3]] (the tty family) →
+gcpark-b (2026-10-12: the patch prose for `abort()` and the dropped
+`__abort_lock` interlock; deaths by note report their signal).

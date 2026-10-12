@@ -347,7 +347,8 @@ relative name opens the plugin, and after it `..` alone opens the new root),
 plugin and its constructor ran), `segments` (the four PT_LOADs R, R+X, RW, RW,
 a RELRO range and a bss tail, each reading and taking writes as its shape
 promises) and `relro` (a child writing the plugin's RELRO table dies of the
-fault; one writing its `.data` exits 0). The deny legs run before the parent's
+fault, which its parent's `waitpid` reads as `WIFSIGNALED` `SIGSEGV` since
+gcpark-b, 2026-10-12; one writing its `.data` exits 0). The deny legs run before the parent's
 own load, because musl caches a loaded library by its short name. Every child
 is the same binary through `posix_spawn`: a dynamic program spawning a
 dynamic program. It ships only with `libc.so`, and the image that ships it
