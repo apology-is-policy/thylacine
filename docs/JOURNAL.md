@@ -22,6 +22,91 @@ needed the operator.
 
 
 ---
+## 2026-10-12 (main, Opus 5.5, effort max) -- JavaScriptCore's collector scans without suspending a thread, and Pouch's abort() is a signalled death (gcpark) (landed)
+
+**What the run is for.** B-2c's research for B-2d found two defects that every
+WebContent process would hit. JavaScriptCore's conservative scan suspends
+threads, and Pouch has no per-thread signal, so jsc died with exit status 127
+at the first collection that stopped the world while its one JS thread had
+dropped heap access. And that 127 was silent because Pouch's `abort()` was
+`_Exit(127)`. The operator voted 2026-10-12: a cooperative scan with no kernel
+change, abort as a signalled death, B-2c landed first, both before B-2d
+(`dec-2026-10-12-jsc-cooperative-scan`). gcpark-a is the scan, gcpark-b the
+abort; they land together because both need the same full jsc rebuild.
+
+**gcpark-a, the shape.** Patch 0003: every release of heap access parks a copy
+of the thread's stack and callee-saved registers, every acquire unparks, and
+the scan reads the images instead of calling `Thread::suspend`. A copy and not
+a recorded stack pointer (Go's goroutine-in-syscall), because the frames below
+the release point may hold the only copy of a caller's callee-saved register.
+
+**gcpark-b, the shape.** Two more votes (18:02Z): `abort()` is one
+`brk #0xab06` that the kernel turns into a new fault note `snare:abort`
+(SIGABRT); and every death by a note records its signal, so a packed wait word
+reads `WIFSIGNALED` (`dec-2026-10-12-abort-signalled-death`). Raw native waits
+still read 1; ut's job-control `$status` is 128 + signal.
+
+**Wrong turns, and what caught them.**
+- The first green ls-jsc FAILED in its new held leg with `out=40-0`, a pass:
+  ut prints `JSCQ-ST- 0` and the status pattern did not allow the space
+  (7dd3da86b).
+- The REDs R0 (no patch) and R1 (images never marked parked) were predicted to
+  pass the held leg (a wait that holds heap access, so the mutator conducts and
+  no image is read). Both died there with no output. Three explanations were
+  refuted by reading, one of them on a wrong premise ("main never parks after
+  the script's print"). A diagnostic build (local fork branches, never
+  exported) recorded each park's return chain and, in the sabotaged variant,
+  printed the scanner and the target's last park at the FATAL: thread 3, the
+  collector, scanned main, whose last park was `JSLock::unlock` under
+  `~JSLockHolder` in `jscmain`. jsc drops and retakes its lock around the
+  script, and the continuous collector can scan there. So held is a weak leg,
+  not a control (R1: 1 run in 3); flash is the only leg that catches R2, a scan
+  that ignores the images (40-37). ls-jsc's header says this now (audit F5).
+- A zsh one-liner reported all 20 of the series' paths outside the sparse cone.
+  bash showed all 20 inside: the checker's word splitting, not forage.
+- gcpark-b's first link failed: a local struct-array initialised from a literal
+  emitted `memcpy`, which the kernel does not have (ff3bb9508).
+- The first suite run failed `notes.death_signal_table`: it asserted the
+  phenotype names at least 9 terminating notes, but `viv_signote_note_name`
+  names none of the snare faults, so 5 is right; the count is now derived.
+- The second failed `pouch-hello-dlopen`'s RELRO leg, which read a fault death
+  as "exit 1". The consumer census had searched for 127 only; a sweep of every
+  wait-status decoder (9 C files, 14 Rust, the Go port, ut, the phenotype
+  probe) found no other.
+- Two kernel REDs named the wrong first witness. K3 (`thread_exit_self`
+  passes no signal) failed `proc.group_claim_decides_signal` first, which also
+  reaps through `thread_exit_self`; K6 (the `brk` immediate never matches)
+  failed `pouch-hello-sockets`' fdset leg (status 0x5, SIGTRAP) before
+  `pouch-hello-signals` ran, because joey stops at its first failing smoke.
+  Each was rerun with the earlier witness out of the way (K3b, K6b) and went
+  red at its own. K8's verdict read "not at its witness" only because the
+  script's two-line window caught a runnable-dump line instead of the test
+  name; the boot log shows the FAIL inside the named test.
+- The land build relinked jsc in 10 minutes, not the 40-minute rebuild
+  expected: the WebKit objects were reused. Before trusting ls-jsc: the jsc
+  binary is newer than the rebuilt `libc.a`, and its `abort()` disassembles
+  to `brk #0xab06`.
+
+**Found on the way, owned.** `raise(SIGABRT)` in Pouch answers EINVAL and the
+program runs on (OPEN-BUGS, P3). During one Mac run free disk fell from 8.2 to
+2.4 GiB in about a minute and recovered after the watchdog killed the build;
+a retry with a 2 s sampler did not reproduce it (OPEN-BUGS, UNEXPLAINED). The
+green image never showed a JSLock-boundary scan in 17 held/flash runs while
+R1 hit one in 1 of 3 (OPEN-BUGS, P3; idle exercises the same park shape and
+checks its objects).
+
+**Audits.** gcpark-a Fable 5.1 r1 0/0/1/5: F1, a thread that entered the
+JSLock on access another thread held neither released nor parked at its unlock
+(fixed; no runtime witness, since jsc's main always takes access itself; owed
+when a WebCore-model consumer lands). gcpark-b Fable 5.1 r1 0/0/0/7, closed (F1 F2 F6 F7 fixed; F3 and F5 are operator vote items, F4 is queued with Pouch's `raise(SIGABRT)`)
+
+**Evidence.** Land gates on 0b4276ce0: On the tip 0b4276ce0: ls-jsc PASS on the CI image, all 25 legs (jsc relinked against the new Pouch, its `abort()` disassembles to `brk #0xab06`; SunSpider 1.0.2 111 ms with the JIT vs 363 ms denied, the int32 loop 450 vs 962 ms); pty-4 PASS (`$status` 130 after `fg` + Ctrl-C); suite 1991/1991 on the default image (deaths legs abort and assert -> SIGABRT, `brk #1` -> SIGTRAP, a NULL store -> SIGSEGV; three `snare:abort` console lines; the dlopen RELRO legs read SIGSEGV); test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption; check-production --all PASS (the lean image builds, boots, and both dev accounts log in). Kernel REDs K1-K10 each red at its witness (K3 and K6 first at an earlier witness, then at their own with it removed). gcpark-a: green x3, REDs R0/R1/R2 as above, the held leg explained by a diagnostic build.
+
+**Still open.** F7's other users (a sampling profiler, signal-based VM traps,
+Wasm's instruction-cache reset) need a kernel thread suspend, a separate
+question. Next: B-2d.
+
+---
 ## 2026-10-08..12 (main, Opus 5.5, effort max) -- JavaScriptCore's Baseline and regexp JITs run on one sealed code region (B-2c) (landed)
 
 **What the run is for.** B-2a and B-2b gave the kernel a code region that is a

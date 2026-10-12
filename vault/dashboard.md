@@ -126,12 +126,12 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-12 [[chg-2026-10-12-abort-signalled-death]] — Pouch's abort() ends in snare:abort, and a death by a note reaps as a signalled wait word
 - 2026-10-12 [[chg-2026-10-12-group-status-first-claim]] — A dying group keeps its status; a page-in its death abandoned is that death
 - 2026-10-12 [[chg-2026-10-12-jsc-baseline-jit]] — JavaScriptCore's Baseline and regexp JITs run on one code region, written only through a sealed thunk
+- 2026-10-12 [[chg-2026-10-12-jsc-cooperative-scan]] — JavaScriptCore's conservative scan reads the stack image a thread parks when it releases heap access; no thread is suspended
 - 2026-10-12 [[chg-2026-10-12-loom-setup-ref-and-settle]] — Loom setup holds its own reference across the install; the rollback settles
 - 2026-10-12 [[chg-2026-10-12-loom-sq-release-after-copy]] — The SQ head is published only after the copy (SQ-1)
 - 2026-10-12 [[chg-2026-10-12-note-target]] — Every EL0 return delivers notes, and a caught note goes to a thread that can take it soon
 - 2026-10-08 [[chg-2026-10-08-exec-device-reset]] — Exec resets the image's devices; the last reference resets what is mapped
-- 2026-10-08 [[chg-2026-10-08-image-holder-record-land]] — capmark's land: the holder record's verification, which its change note left as an unfilled marker
-- 2026-10-08 [[chg-2026-10-08-image-holder-record]] — An address space records every holder that has left it, and the I-39 image join weighs the record; the code-alias count retires
 <!-- generated:end -->
