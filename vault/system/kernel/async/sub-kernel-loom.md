@@ -81,7 +81,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-10
+updated: 2026-10-12
 ---
 
 ## Approved private service lifecycle
@@ -3559,3 +3559,26 @@ dependency changes; do not rerun unchanged suites or invent mechanisms to stay b
 CompleteAS3,AS4,MM0-MM4 remain incomplete; heartbeat ACTIVE. Protected10, clean
 external61dde37 and parked patch/restored kernel preserved. Single-agent self-review,
 no independent audit, Main landing, private activation or128MiB protection change.
+
+## The private syscall bridge (October 12, Corona)
+
+The syscalls now reach the private stack, but only in a kernel built with the
+qualification lever `PRIVATE_ASYNC_QUAL` (default off, in no preset). The
+mechanism is [[sub-kernel-loom-bridge]]. Every default image refuses each
+private route with -EOPNOTSUPP. That superseded the October 10 status above;
+the ownership transfer of 2026-10-12 retired the heartbeat and the parked-SQ
+wording. SQ-1 (copy before releasing sq_head) is closed on this branch, audit
+close 46f07edc2.
+
+Two defects in the legacy `sys_loom_setup_for_proc` / SETUP handler were found
+reading this path. Both were live on main a7353c36f, and both are fixed in
+6a5039788:
+- **A latent P1, EL0-reachable kernel UAF write.** The setup wrote `l->owner`,
+  `ring_pages`, the charge record and `*out` after `handle_alloc` had adopted the
+  only reference. The setup now holds `loom_ref` from before `handle_alloc` to
+  its end. Witness: `loom.setup_close_race`.
+- **A P3 I-32 leak, self-only.** The params-copyout rollback used `burrow_unmap`.
+  As the final drop, it lost the charge record. The fix is
+  `sys_loom_setup_rollback`: `handle_close` followed by a settling detach.
+  Witnesses: `loom.setup_rollback_settles`, and the default body of
+  `loom.private_bridge`.

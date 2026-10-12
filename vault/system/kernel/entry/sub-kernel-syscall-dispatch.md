@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-05
+updated: 2026-10-12
 ---
 ## Session registry factory
 
@@ -1358,6 +1358,17 @@ this file's comments. The holotype audit of this surface is owed.
 `loom_create` and binds ring identity before publication. Both independent
 contracts survive the Astra merge;1691/1691 kernel tests pass on the merged CI
 image. The new Aux test calls use the existing non-exempt false argument.
+
+## Loom private routing (NA-1, 2026-10-12)
+
+The SETUP handler sends PRIVATE_SERVICE or SERVICE_BUFFERS to
+`loom_private_setup_for_proc` and returns its negative errno. The legacy path
+still returns -1. REGISTER ops 2..9 go to `sys_loom_register_private`, which
+copies the op's fixed-size record once into kmalloc'd memory, and results return
+through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
+BUFFERS and ENTER branch on `loom_is_private`. A params copyout fault on either
+ring kind calls `sys_loom_setup_rollback`. Without the qualification lever,
+every private arm is -EOPNOTSUPP. Mechanism and fixes: [[sub-kernel-loom-bridge]].
 
 ## Terminal interaction suboperations
 

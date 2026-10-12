@@ -11,7 +11,7 @@ mirrors:
   - "usr/lib/libt/include/thyla/loom_service.h: ten records and constants"
   - "usr/lib/libthyla-rs/src/loom/service_abi.rs: ten repr(C) records and constants"
 created: 2026-10-04
-updated: 2026-10-04
+updated: 2026-10-12
 ---
 The approved encoding is docs/ASYNC-SERVICE-ABI.md and its provided-buffer
 companion docs/ASYNC-SERVICE-BUFFERS.md (operator-selected C, scripture30695b43e).
@@ -30,3 +30,8 @@ Reservations only: legacy valid masks and opcode count remain unchanged. No
 private runtime wrapper or decoder is claimed. [[spec-loom-service]] models
 scope lifecycle, not the new buffer leases; the pool model and actual-source
 ownership qualification remain owed by [[sub-kernel-loom]].
+
+October 12: register ops 2..9 now route through [[sub-kernel-loom-bridge]], in
+qualification kernels only. Each record is copied once, at the size it pins
+here. The default image refuses all eight with -EOPNOTSUPP. The encodings are
+unchanged.

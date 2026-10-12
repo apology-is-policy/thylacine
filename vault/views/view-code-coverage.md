@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**644 owned · 46 unowned · 690 files (93% owned) · ~12112 unswept lines.**
+**646 owned · 44 unowned · 690 files (93% owned) · ~11866 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **88 files, ~40267 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40267 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 11 | 17 | 2486 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 184 | 13 | 1652 |
+| kernel | 186 | 11 | 1406 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
@@ -140,7 +140,6 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40267 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| kernel/loom_service_syscall.c | 204 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
@@ -169,7 +168,6 @@ Excluded as harness and counted here rather than dropped: **88 files, ~40267 lin
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
-| kernel/include/thylacine/loom_service_syscall.h | 42 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | kernel/include/thylacine/types.h | 30 |

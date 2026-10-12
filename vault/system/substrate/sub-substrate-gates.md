@@ -18,7 +18,7 @@ locks: []
 abis: [abi-boot-banner]
 design: ["docs/TOOLING.md", "docs/PORTABILITY.md", "docs/DEBUGGING-PLAYBOOK.md"]
 created: 2026-08-01
-updated: 2026-10-08
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -33,6 +33,10 @@ them run on no machine at all.
 
 - `test.sh` → exit 0 iff the boot reached [[abi-boot-banner]] with no
   extinction, and every enforced post-boot gate passed.
+- `test.sh --private-async-qual` boots `build/kernel-private-async-qual`
+  instead of `build/kernel`. It refuses when that ELF is missing rather than
+  building it, so it never boots a stale default kernel under the
+  qualification name ([[sub-kernel-loom-bridge]]).
 - `smp-multiboot.sh <label> <cpus> <N> [sanitizer]` → exit 0 iff
   0 CORRUPTION, 0 EXTERNAL-KILL **and** 0 OTHER across N boots.
 - `ci-smp-gate.sh` → builds each kernel once, runs the matrix, aggregates.

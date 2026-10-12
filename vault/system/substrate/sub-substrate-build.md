@@ -26,7 +26,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-03
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -92,6 +92,14 @@ Rust build maps the enabled value to `halcyond/interaction-qualification` and
 logs it. This development option exposes the HIN1 adapter and expanded pool
 for HI1-R24 qualification. Normal builds keep media-only discovery. Tests pin
 the production/default refusal and explicit enabled export.
+
+The kernel-group `PRIVATE_ASYNC_QUAL` bool, default off and in no preset, sets
+the CMake option `THYLACINE_PRIVATE_ASYNC_QUALIFICATION`. CMake announces the build as not a
+release default, and `build.sh` builds that kernel into
+`build/kernel-private-async-qual`, so a qualification build never replaces
+`build/kernel`. It routes the reserved private Loom ABI
+([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
+the export.
 
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a

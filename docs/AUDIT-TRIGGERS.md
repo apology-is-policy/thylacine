@@ -272,3 +272,16 @@ work; the record does not assert a new independent adversarial audit.
 ### Private async operation integration (October10)
 
 `kernel/loom_service_{wire,program,rpc,admission,io,provided,retirement,ready,action,frontend}.c` and matching headers join the existing Loom/CONNECT/engine/control review surface. Prosecute immutable creator/SQE admission, one terminal owner, no remote-EAGAIN replay, FID/DAC commit, fixed/pool physical ownership, MORE-before-terminal, independent driver pins, bounded fair readiness, fresh deadlines, CQ/refusal reservation, RETURN and close after writer quiescence. Current installed review is Astra single-agent self-review under the operator override; native general-operation/provided traffic and full Mac gates remain required before activation.
+
+### Private Loom syscall bridge (October 12)
+
+`kernel/loom_service_syscall.{c,h}`, `kernel/test/loom_bridge_fixture.h`, and the routing in `kernel/syscall.c` (the SETUP handler's private branch, `sys_loom_setup_rollback`, `sys_loom_register_private` with `loom_record_copyout_user`, BUFFERS/HANDLES/ENTER on a private ring), `loom_create_private_why` in `kernel/loom.c`, and the lever in `kernel/CMakeLists.txt`, `tools/build-config.sh`, `tools/build.sh` and `tools/test.sh --private-async-qual`. Invariants: I-5, I-7, I-29, I-30, I-32. Prosecute:
+- the default image: every private route returns -EOPNOTSUPP, and a refused setup charges nothing; the lever is in no preset and never shares `build/kernel`;
+- nothing is touched after `handle_alloc` in either setup: the legacy setup holds its own `loom_ref` from before the install to its end (the P1 UAF fixed in 6a5039788);
+- exact-once settlement of the ring's charge on every unwind (create refusal, executor start, `handle_alloc`, params copyout fault); a rollback detaches through the settling path, never `burrow_unmap`;
+- the private-ring VMA tag set under the same `as->lock` hold as the map;
+- each register record copied once, at its op's fixed size; TARGET/SLOT/POOL publish only after the result copyout, and a faulted copyout rolls back the call's own unpublished reservation;
+- ENTER never sleeps, copies before it releases sq_head, and refuses outside the creator image;
+- the rollback's fd and ring VA against sibling-thread reuse.
+
+The independent review is the NA-1 audit round (Fable reviewing Opus). An EL0 probe of the handlers' usercopy is owed to NA-2.

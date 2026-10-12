@@ -11,7 +11,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/loom.rs: Sqe / Cqe / BufReg / Params (size + full offset_of! sets)"
   - "usr/lib/libthyla-rs/src/loom.rs: the ring header as five bare offset constants (HDR_SQ_HEAD=0 .. HDR_FLAGS=32), no struct, no assert"
 created: 2026-08-02
-updated: 2026-10-04
+updated: 2026-10-12
 ---
 ## Private service reservations (AS-0)
 
@@ -181,3 +181,12 @@ page-rounded layout675840bytes is verified natively and on host. Publication
 pairs CQE/receipt/lease before release-tail and clears receipts for ordinary
 CQEs. Public PRIVATE_SERVICE/SERVICE_BUFFERS setup remains rejected; output
 parameter wiring and owned client consumption remain activation obligations.
+
+## Qualification bridge (October 12)
+
+The default image still rejects PRIVATE_SERVICE/SERVICE_BUFFERS setup, now with
+-EOPNOTSUPP. Before the bridge it returned -1; no userspace caller depended on
+that value. Only a kernel built with `PRIVATE_ASYNC_QUAL` routes it
+([[sub-kernel-loom-bridge]]). With the lever, params echo the granted flags and
+carry the receipt geometry in `_resv1[0..2]`: offset, size, and the size of one
+receipt. No struct, flag, offset or syscall number changes.
