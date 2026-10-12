@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-08
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -181,6 +181,24 @@ while the numeric status lives in the separate `exit_status` field the parent's
 wait packs (`WAIT_STATUS_EXITED`, in [[sub-kernel-proc]]'s `wait_pid_for`). The
 two-field split is the point: the flag that says "die" and the byte that says
 "with what status" are no longer one datum.
+
+**A late `exits()` leaves as a peer (I-24).** The group's status is decided
+once, by the first claim. A thread that reaches `exits_code` after
+`group_exit_msg` is set -- an `exit_group` or kill it had not yet seen, or a
+fault it took while the group was dying -- finds the claim under
+`g_proc_table_lock` and leaves through `thread_exit_self`, as a peer does, so
+the last thread out reaps with the claimed `exit_status`. `exits_code`'s own
+last-thread path used to record its code and msg over the claim. B-2c's
+`ls-jsc` showed the trigger (a JIT thread's page-in abandoned by jsc's own clean
+exit reported `snare:bus`); when that thread is the last out, the group's
+status became its 1. The witnesses construct that order and reaped 1 instead
+of the claimed 7 before the fix. The check runs under the
+same hold as the `PROC_FLAG_EXIT_CLOSING` mark, so a kill lands either before it
+(the kill's claim wins, Linux's `do_group_exit` precedent) or after the mark
+(it forces the close, and the exit keeps its own status, Linux's `PF_EXITING`
+shape). Witnesses: `proc.exits_in_dying_group_keeps_group_status`,
+`proc.fault_in_dying_group_keeps_group_status`. The fault side, which stopped
+the false `snare:bus` itself, is [[sub-kernel-fault]]'s `FAULT_USER_DYING`.
 
 **The close-at-exit window** (#926, completed by #68). A Proc's fds must
 close when the *process* terminates, not when its parent later reaps it —
@@ -396,8 +414,8 @@ target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
 ## Invariants enforced
 
 - [[inv-i24]] — group termination is atomic (one CAS), exactly-once (the
-  last-out determination is unique under the lock), and no Thread runs at
-  EL0 after ZOMBIE.
+  last-out determination is unique under the lock, and a late `exits()` never
+  records its status over the claim), and no Thread runs at EL0 after ZOMBIE.
 - [[inv-i9]] — the death-wake generalization: no wake lost between a
   sleeper's cond-check and its sleep, for **every** rendez sleep. Extended
   by LS-5 to the terminate-disposition `interrupt` latch, which is read

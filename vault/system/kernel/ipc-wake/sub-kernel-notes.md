@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -334,6 +334,25 @@ the real tail: two ignored notes and a caught one, the tail loops to the caught
 one, and the retried wait unwinds again), `rendez.caught_note_release_wakes_peer`
 (the tail held until the peer has re-parked, so only the release's wake can
 unwind it), and `notes.caught_note_claim_once`.
+
+### A fault under a terminate latch is the latch's death, at the fault
+
+A user fault left unresolved while a terminate latch is pending reaches the
+EL0 fault arm as `FAULT_USER_DYING` ([[sub-kernel-fault]],
+[[sub-kernel-exception]]), and the arm does not wait for the return tail:
+`notes_fault_dying_latch` takes `q->lock` and `exits()` with the note
+`notes_terminate_note_name_locked` picks, the tail's own choice. The tail
+defers every note but `kill` while a handler runs and while `SP_EL0` is
+unusable, and the faulting instruction would otherwise re-execute into the
+same fault forever. Ending the thread inside a running handler matches Linux,
+whose `complete_signal` makes a fatal default signal a group exit at send time.
+When no queued note of an armed class would still default-terminate (a
+phenotype handler installed for it since the arm, which clears no latch), those
+latches are stale: cleared under the lock, and the arm returns so the
+instruction re-executes. A class whose note is live but masked by the faulting
+thread stays armed, because a peer may still die of it. Witnesses:
+`notes.fault_dying_latch_live_note_exits`,
+`notes.fault_dying_latch_clears_only_stale`, viv-pheno-probe L329/L330.
 
 ### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
 

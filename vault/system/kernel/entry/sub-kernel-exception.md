@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -316,6 +316,25 @@ own re-entrancy guard beneath this one, and the failure mode of a miss is a spin
 rather than corruption. **A guard with a known hole and an argued containment is
 worth more than one whose hole nobody has looked for** — and this one earned that
 posture by having its first premise disproved.
+
+### An EL0 abort's verdict
+
+An EL0 data or instruction abort goes to `arch_fault_handle`
+([[sub-kernel-fault]]), and the handler acts on the result. `FAULT_HANDLED`
+returns, and the vector tail (die-check, stop check, note delivery) runs before
+the faulting instruction re-executes. `FAULT_UNHANDLED_USER` and
+`FAULT_USER_BUS` end the Proc through `proc_fault_terminate` with `snare:segv`
+or `snare:bus`. `FAULT_USER_DYING` (the thread's death was pending when the
+fault went unresolved) splits on the death. A group death returns: the tail's
+`el0_return_die_check` acts on `group_exit_msg` unconditionally. A terminate
+latch is acted on at the fault, by `notes_fault_dying_latch`
+([[sub-kernel-notes]]), because the tail defers notes in two states -- while a
+handler runs (the N-3 guard) and while `SP_EL0` is unusable -- and returning
+there re-executed the faulting instruction into the same fault forever
+(groupstatus audit r1 F1; witnesses viv-pheno-probe L329/L330). In the EL1
+switch DYING is unreachable (only `userland_demand_page` produces it, for EL0
+faults) and extincts; a uaccess fixup treats it as a failed access, as it
+treats every non-HANDLED result.
 
 ### The hardware-debug exception classes
 
