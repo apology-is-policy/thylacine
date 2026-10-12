@@ -550,6 +550,59 @@ before any syscall, and the engine then runs its interpreter.
   Wasm instruction-cache reset and a sampling profiler. `Atomics.wait` is not a
   release in this WebKit (it blocks holding access), so it needs no image.
 
+*B-2d, 2026-10-13: the DFG on the same region.*
+
+- **The DFG rewrites code that runs.** Baseline is unlinked: its calls and
+  property accesses go through data, so a finished Baseline function is never
+  rewritten. The linked DFG rewrites its own instructions in place: a direct
+  call linked or unlinked (`CallLinkInfo`), a discarded function's
+  invalidation points replaced by jumps (`JumpReplacement::fire`), an OSR
+  exit's jump pointed at its lazily compiled ramp (`repatchJump`), a constant
+  patched into a finished function before it is installed (`LazyJSValue`), an
+  arithmetic IC's inline code (`JITMathIC`). Every rewrite still goes through
+  `performJITMemcpy` and the thunk, whose 4- and 8-byte copies are single
+  stores, and is followed by `cacheFlush`, the `svc` to `SYS_ICACHE_SYNC`.
+  Property ICs stay data ICs (only the FTL repatches them).
+- **Three kinds of thread patch, and only one of them runs the code.**
+  `SYS_ICACHE_SYNC` invalidates by broadcast, so the new bytes are fetchable
+  on every CPU, but its trailing ISB retires prefetched instructions only on
+  the CPU that called it; any other CPU must take a context-synchronization
+  event before it runs the code (the cross-CPU contract in
+  `kernel/include/thylacine/syscall.h`). The JS thread's own patches return
+  through `eret`, which is one. A compiler thread's code is installed by the
+  JS thread after `crossModifyingCodeFence`, upstream's rule. The collector
+  discards and unlinks code in its end phase with the world stopped, and
+  JavaScriptCore stops the world only when no thread holds heap access (a
+  thread that holds it is handed the collection and runs it on its own CPU).
+  So when the collector's thread does the patching, the JS thread is parked
+  off the heap; and a JS thread may take the JSLock after another thread
+  patched on another CPU. Upstream counts on a syscall happening before the
+  code runs again (`Heap.cpp`, `finalizeWasmCalleeCleanup`); on Thylacine
+  heap access is retaken by a compare-and-swap, with no syscall.
+- **Decided (research, not a vote): the JS thread executes an ISB where it
+  resumes.** `MachineThreads::unparkCurrentThread` runs
+  `WTF::crossModifyingCodeFence()`. gcpark made it the one point every resume
+  passes through: `acquireAccess`'s fast and slow paths, and a JSLock taken
+  while another thread holds heap access. This is HotSpot's
+  `cross_modify_fence`, which each thread runs as it leaves a safepoint. The
+  kernel alternative, a `SYS_ICACHE_SYNC` mode that interrupts the address
+  space's other running threads (Linux's `membarrier` SYNC_CORE), is left to
+  B-2e: Wasm's instruction-cache reset (`resetInstructionCacheOnAllThreads`)
+  signals every VM thread and needs a broadcast of that kind.
+- **No near branch may silently leave the pool.** With jump islands off, the
+  three encoders of a 26-bit branch (`linkJumpOrCall`, `replaceWithJump`,
+  `fillNearTailCall`) checked the range only in debug builds and masked the
+  offset in release; a target out of range now stops the process. The 64 MiB
+  pool's static assert proves every branch inside the pool in range; the check
+  catches a target outside it. A conditional branch is encoded directly only
+  when the link step has measured its target in range; otherwise it goes
+  through the 26-bit path.
+- **On at run time: Baseline, DFG and YARR; FTL, BBQ and OMG stay off
+  (B-2e).** The DFG polls for traps (`usePollingTraps` is forced on), and it
+  emits ARMv8.0 code only: Pouch compiles for `armv8-a`, so the CPU-feature
+  queries, which have no Thylacine arm, read their compile-time defaults (no
+  LSE atomics, no `FJCVTZS`, no FP16, no `FRINT`).
+
 The YARR regex JIT, the CSS selector JIT and the Wasm tiers share the one
 allocator. The kernel side changes too (B-2a/B-2b): the region is a
 reservation committed page by page, and the writer alias is hardened before
