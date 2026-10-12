@@ -22,6 +22,131 @@ needed the operator.
 
 
 ---
+## 2026-10-12 (main, Opus 5.5, effort max) -- SQ-1 lands on main: the SQ head is published only after the copy (Corona's fix, main's gate) (landed)
+
+**What this is.** Corona found, specified, fixed and audited SQ-1 on
+corona/async-memory: `loom_drain_sq` published `sq_head` before it read the
+index and copied the SQE, and `sq_head` is the producer's permission to reuse
+both. Under SQPOLL the kernel drains on another CPU while the producer runs, so
+a producer that refilled the position in that window had the kernel copy the
+newer SQE under the old submission: one op twice, one lost (I-29 at risk; I-30
+held, because the kernel validates its own copy). It was live on main
+a7353c36f (OPEN-BUGS 2026-10-12 06:42Z). Corona's own narrative, wrong turns
+included, is their journal entry on that branch (18ee6f055, "October 12:
+SQ-1"); this entry records what main did with the port.
+
+**The port and who owns what.** Corona built `corona/sq1-main` (22c343232,
+parent main a7353c36f) with `git commit-tree`, so no hook ran and nothing was
+built in that shape; main owned the build, the gates and the land (yip 0208).
+`loom_sq_release` (advance + release-store `sq_head`) is now the only writer of
+either head, called after the index read and the copy or drop; the dropped
+count is an atomic add. The spec is `specs/loom_sq.tla` (`loom.tla` copies
+atomically and cannot see the window).
+
+**Stacked, not gated twice.** groupstatus was at its last gates, and the two
+touch different files (a dry merge was clean), so SQ-1 was cherry-picked onto
+groupstatus's close (2c038fce1) and the stacked tip carried ONE full SMP
+matrix instead of two. The port had folded SQ-1 into sub-kernel-loom without
+bumping its `updated:` date, which left the dossier reading stale against the
+change it describes; 512383b31 bumps it and renders the spec-coverage view.
+
+**Evidence on main's tree.** Stacked tip 512383b31: suite 1975/1975 (main's 1972 plus the three SQ-1 tests). Corona's mutants, re-taken in main's tree: M1 (release before the copy, main's old order) fails exactly sq_release_after_copy, sq_release_after_index and sq_release_after_copy_chain at Corona's named assertions (1972/1975); M2 (the chain path re-reads the shared SQE) fails only the chain test (1974/1975). TLC: loom_sq clean 188 distinct, liveness 188, buggy_release_before_copy and buggy_unlocked_claim violate FifoFidelity, buggy_unlocked_claim_exclusive violates ClaimExclusive; loom.tla unchanged: clean 2429, liveness 1457, all 7 buggy cfgs violate their named invariants. One number differed from Corona's table: unlocked_claim stopped at 110 distinct states, not 104; at one worker it stops at 51. The count before a violation depends on the worker count; the verdict does not. ci-smp-gate N=10 50/50, test-fault 8/8, and the production shape (KERNEL_TESTS off, where the new test hook compiles out) builds and boots.
+
+**Open.** The deterministic test hook is the producer here; real concurrent
+userspace scheduling against a live SQPOLL ring is not exercised by any test.
+
+## 2026-10-12 (main, Opus 5.5, effort max) -- a dying group keeps its status; a page-in its death abandoned is that death (landed)
+
+**What the run is for.** B-2c's `ls-jsc` passed on b2c @c0bbcfbf0, but its
+console showed `9p: op abandoned (tag 0, death, flush sent)` and then
+`user fault: pid=5182 reason="snare:bus" addr=0x2d7c9a0 pc=0x2d7c9a0` right
+after jsc printed its result and exited (OPEN-BUGS 2026-10-08 17:15Z). pc ==
+addr is an instruction fetch in jsc's demand-paged text. B-2c paused behind it.
+The question that made it preemptive was not the stray line but whether that
+peer's `exits()` could change the group's exit status, turning a clean run
+into a failure.
+
+**It could, and two kernel tests made it fail on demand.** jsc's main thread
+claims the group's death (`group_exit_msg`); a peer faulting text has its 9P
+read abandoned by that death; `userland_demand_page` answers `FAULT_USER_BUS`
+(I-36 condition 6, the I/O-error answer); `proc_fault_terminate` prints the
+user-fault line and calls `exits("snare:bus")`; and `exits_code`'s last-thread
+path recorded `snare:bus`/1 over the claim. `thread_exit_self`'s last-out path
+already used the claim; `exits_code`'s did not. Witnesses
+`proc.exits_in_dying_group_keeps_group_status` and
+`proc.fault_in_dying_group_keeps_group_status` reaped 1 instead of 7 on the
+unfixed tree. b0bd631a0 fixes both halves: `exits_code` finds the claim under
+`g_proc_table_lock`, in the same hold as the `PROC_FLAG_EXIT_CLOSING` mark, and
+leaves through `thread_exit_self` (the first claim's status wins, Linux's
+`do_group_exit` precedent); and `userland_demand_page` answers the new
+`FAULT_USER_DYING` for an unresolved user fault while the thread's death is
+pending, which the EL0 arm turns into a return to the vector tail.
+
+**The gate turned red on something else, and I hunted it before going on.**
+ci-smp-gate's default-smp1 row failed 1 boot of 10 on b0bd631a0:
+`joey: V-1b linux-phenotype leg FAILED marker=L285`. L285 is NP-5's leg: a
+CLONE_THREAD peer blocked in `ppoll` on a listening socket must see POLLIN once
+main connects. My change touches exit-status selection, so it was the suspect
+until measured otherwise. 30 more boots on c855c2dd3 (which only makes the
+marker report the poller's result) passed, 1 failure in 40 overall. The marker
+could not tell me why, so I built the failure instead: a child that exits about
+100 ms into the window while main spins at EL0 without sleeping
+(scratchpad l285_exp.py). It failed on every boot with
+`L285 r=-4 ev=0 wait_ms=100 conn_ms=501 sigs=1 signo=17`, and identically on
+main's own kernel a7353c36f. The mechanism is ARCH 8.8.3's caught-note claim:
+"one caught note unwinds one sleeper", whichever claims first. The child's
+SIGCHLD found the poller as the only sleeper and returned it -EINTR. POSIX
+allows that; Linux's `complete_signal` and FreeBSD's `sigtd` would both give
+the signal to the running main thread and leave the poller alone. So the
+attribution is pre-existing, and the ownership is ours: the probe now re-issues
+an interrupted `ppoll` with the time left, as every other wait in the probe
+does (479d1218b), and the kernel half is a design fork put to the operator
+(OPEN-BUGS 2026-10-12 07:24Z).
+
+**Audit r1 (Fable 5.1): 0 P0 / 1 P1 / 0 P2 / 4 P3, and the P1 was mine to
+miss.** `FAULT_USER_DYING` caused by a terminate latch (interrupt, tty or pipe,
+not group death) relied on the EL0-return tail to act. The tail refuses while
+the thread is in a handler (N-3) and when `SP_EL0` is unusable, so the faulting
+instruction re-executed into the same fault forever; the old tree had at least
+terminated with `snare:*`. 59381c434 acts at the fault: `notes_fault_dying_latch`
+exits with the note the tail itself would pick, or clears latches no queued note
+still backs and returns. The probe has no `kill` (the phenotype serves none;
+nr 129 is unserved), so the witnesses L329/L330 raise the death with a write to
+a reader-less pipe under SIG_DFL SIGPIPE and then fault inside a SIGCHLD
+handler, the second with `SP_EL0 = 8`. P3-2 (a latch a peer revokes while the
+read unwinds leaves a false `snare:bus`) is fixed by sampling die-pending
+before and after the page-in, with its own witness (d82c0d14c).
+
+**What each test proved, both ways.** Removing the fault-arm call left L329
+and L330 "hung" (the livelock, on the real EL0 path). Breaking the helper
+failed the three new kernel tests (1969/1972); breaking only the stale-clear
+failed the stale test alone (1971/1972). Clean rebuilds followed each RED.
+
+**Audit r2 (Fable 5.1) on the fixes: 0 P0 / 0 P1 / 0 P2 / 3 P3, clean.** It
+re-derived the loop closure: an armed, live, unmasked latch is always found by
+the same scan the tail uses, so the arm either exits or leaves die-pending
+false. Its three P3s: scripture still said a default action is taken only at
+the tail (ARCH 7.6.4 and 8.8.2, VIVARIUM 6.22 now name the fault arm); the live
+kernel test asserted status 1, which a `snare:segv` death also reaps, so it now
+reads the child's exit message from its ZOMBIE (f4d6b1152); and my r1 closed
+list misdescribed L329. Its confidence notes named "#964, the
+never-syscalling gap, pre-existing and tracked". I checked the "tracked": the
+old task number survives only in closed lists and a LIFE-SUPPORT aside, with no
+live queue entry. The IRQ-from-EL0 tail (vectors.S:258-266) has no notes leg,
+so a `while(1);` program ignores Ctrl-C. Re-enqueued (OPEN-BUGS 2026-10-12
+07:34Z), sequenced after this land.
+
+**Land gates.** On the stacked tip 512383b31 (groupstatus + SQ-1): suite 1975/1975; test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8, no corruption); the production shape (KERNEL_TESTS off) builds, boots and logs in. groupstatus alone at f4d6b1152: suite 1972/1972. REDs: removing the fault-arm call -> L329/L330 "hung"; breaking the helper -> the three new kernel tests fail (1969/1972); breaking only the stale clear -> the stale test alone (1971/1972); exiting with snare:segv -> only the live test's message assertion (1971/1972). L285: the forced construction failed every boot before the probe fix (r=-4, identical on main a7353c36f) and passes 2/2 after it, with a leg proving the retry ran. death_wake.tla clean (1422 distinct, EventuallyReaps) and its buggy cfg violates NoLostDeathWake; the model covers the cascade and the reap, not which status the ZOMBIE records, which rests on the two kernel witnesses.
+
+**Open after this run.** The caught-note thread-selection vote (OPEN-BUGS
+2026-10-12 07:24Z). A phenotype `rt_sigaction` installing a handler for a class
+whose latch is already armed does not clear the latch on the sleep side
+(OPEN-BUGS 2026-10-12 06:43Z; the fault side is closed here). A program
+spinning at EL0 without syscalls ignores Ctrl-C (#964, OPEN-BUGS 2026-10-12
+07:34Z): the IRQ-from-EL0 tail has no notes leg; the note restore is already
+full-context, so the remaining question is what the delivery path assumes about
+a syscall boundary. B-2c resumes on b2c @63c2b4ad6.
+
 ## 2026-10-08 (main, Opus 5.5, effort max) -- exec resets the image's devices; the last reference resets what is mapped (landed)
 
 **What the run is for.** vmaguard's audit r2 left a lead (OPEN-BUGS 10-08 (a)):
