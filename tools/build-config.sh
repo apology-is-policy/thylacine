@@ -62,6 +62,9 @@ bc_def compile SANITIZE "choice:none,ubsan" none "sanitize:sanitize" \
 bc_def compile TICKLESS bool y "varinv:no_tickless" \
   "Tickless idle" \
   "NO_HZ_IDLE: an idle CPU sleeps without a periodic timer tick. Leave on. Off forces the old 1 kHz-always tick and is a diagnostic-only baseline."
+bc_def compile PRIVATE_ASYNC_QUAL bool n "var:private_async_qual" \
+  "Private async qualification kernel" \
+  "Routes the reserved private Loom service ABI (setup PRIVATE_SERVICE, register ops 2..9, ENTER, poll) to the kernel's private stack so its native clients can be qualified (docs/ASYNC-SERVICE-ABI.md, Qualification bridge). NOT a release default and in no preset: off, every private route returns EOPNOTSUPP. Builds into its own kernel dir so it never replaces the image it is not."
 
 # bake-content ----------------------------------------------------------------
 bc_def bake CHUNK_GOROOT bool y "env:THYLACINE_BAKE_GOROOT" \

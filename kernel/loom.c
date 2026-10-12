@@ -483,6 +483,13 @@ static inline bool loom_private_requests_fault_take(void) { return false; }
 #endif
 
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) {
+    return loom_create_private_why(p, sq, cq, receipts, NULL);
+}
+
+struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receipts,
+                                     int *why) {
+    int ignored;
+    if (!why) why = &ignored;
     // Taken before any refusal, so a shot armed for this call cannot outlive it.
     bool layout_fault = loom_private_layout_fault_take();
     bool slots_fault = loom_private_slots_fault_take();
@@ -492,10 +499,17 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     bool requests_fault = loom_private_requests_fault_take();
     bool engine_fault = loom_private_engine_fault_take();
     struct loom_layout g;
-    if (!service_retire_ready || !p || p->magic != PROC_MAGIC || !p->as ||
-        !loom_measure(sq, cq, receipts, &g)) return NULL;
+    *why = -T_E_AGAIN;
+    if (!service_retire_ready) return NULL;
+    *why = -T_E_INVAL;
+    if (!p || p->magic != PROC_MAGIC || !p->as || !loom_measure(sq, cq, receipts, &g))
+        return NULL;
     struct AddrSpace *as = p->as;
+    // Refused while another Proc shares this address space (or the guard count
+    // would wrap): a sibling could write SQEs no syscall check can attribute.
+    *why = -T_E_BUSY;
     if (!addrspace_private_begin(as)) return NULL;
+    *why = -T_E_NOMEM;
     // Loom uses the buddy path of kmalloc; a conservative whole page also
     // attributes its ring's slab descriptor for as long as ring mappings live.
     _Static_assert(sizeof(struct Loom) > 2048, "private Loom metadata uses buddy kmalloc");
@@ -562,6 +576,7 @@ struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts) 
     // The charge follows the ring Burrow, including when a mapping survives fd
     // retirement. No raw Proc pointer is consulted by the eventual refund.
     burrow_charge_record(l->ring, p, backing);
+    *why = 0;
     return l;
 }
 
@@ -3344,6 +3359,15 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
 static void (*loom_sq_release_hook)(struct Loom *);
 void loom_sq_release_hook_for_test(void (*hook)(struct Loom *)) {
     __atomic_store_n(&loom_sq_release_hook, hook, __ATOMIC_RELEASE);
+}
+static void (*loom_setup_installed_hook)(struct Proc *, hidx_t);
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t)) {
+    __atomic_store_n(&loom_setup_installed_hook, hook, __ATOMIC_RELEASE);
+}
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd) {
+    void (*hook)(struct Proc *, hidx_t) =
+        __atomic_load_n(&loom_setup_installed_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(p, fd);
 }
 #endif
 

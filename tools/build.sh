@@ -233,6 +233,11 @@ elif [[ -n "$sanitize_cmake" ]]; then
 elif [[ "$no_tickless" == "ON" ]]; then
     KERNEL_BUILD="$BUILD_DIR/kernel-no-tickless"
 fi
+# The private-async qualification kernel composes with the dirs above, and never
+# shares a CMake cache or an ELF with the image it is not (ASYNC-SERVICE-ABI.md).
+if [[ -z "$build_dir_override" && "${private_async_qual:-OFF}" == "ON" ]]; then
+    KERNEL_BUILD="${KERNEL_BUILD}-private-async-qual"
+fi
 
 # --- build ledger -------------------------------------------------------------
 # So a session reading the build output afterwards can see EXACTLY what was
@@ -326,6 +331,7 @@ build_kernel() {
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         -DKERNEL_TESTS="$kernel_tests" \
         -DTHYLACINE_NO_TICKLESS="$no_tickless" \
+        -DTHYLACINE_PRIVATE_ASYNC_QUALIFICATION="${private_async_qual:-OFF}" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;

@@ -81,6 +81,7 @@ set(KERNEL_SRCS
     loom_service_ready.c
     loom_service_action.c
     loom_service_frontend.c
+    loom_service_syscall.c
     loom_service_reply.c
     loom_service_decode.c
     loom_service_protocol.c
@@ -329,6 +330,15 @@ endif()
 if(THYLACINE_NO_TICKLESS)
     target_compile_definitions(thylacine.elf PRIVATE THYLACINE_NO_TICKLESS)
     message(STATUS "Kernel: TICKFUL-BASELINE build -- tickless idle DISABLED (THYLACINE_NO_TICKLESS=ON)")
+endif()
+
+# The private-async qualification lever (docs/ASYNC-SERVICE-ABI.md, Qualification
+# bridge; operator vote 2026-10-12): routes the reserved private Loom ABI to the
+# kernel's private stack so native clients can be qualified. Never a release
+# default; OFF, every private route returns EOPNOTSUPP.
+if(THYLACINE_PRIVATE_ASYNC_QUALIFICATION)
+    target_compile_definitions(thylacine.elf PRIVATE LOOM_PRIVATE_QUALIFICATION)
+    message(STATUS "Kernel: PRIVATE-ASYNC QUALIFICATION build -- private Loom syscalls ROUTED (not a release default)")
 endif()
 
 target_include_directories(thylacine.elf

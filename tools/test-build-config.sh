@@ -88,7 +88,7 @@ if bc_set_one BOGUS y 2>/dev/null; then bad "unknown symbol accepted"; else ok "
 
 echo "== T-export: symbols -> build.sh knobs (incl. TICKLESS inversion + DEV_ACCOUNTS) =="
 build_type=""; kernel_tests=""; boot_probes=""; hardening_full=""; kaslr=""
-sanitize="__unset__"; no_tickless=""; dev_accounts=""; extra_cmake_args=()
+sanitize="__unset__"; no_tickless=""; dev_accounts=""; private_async_qual=""; extra_cmake_args=()
 unset THYLACINE_BAKE_GOROOT THYLACINE_BAKE_CLADE THYLACINE_BAKE_DOSBOX THYLACINE_BAKE_DUKE3D THYLACINE_BAKE_TOMBRAIDER THYLACINE_DOSBOX_CPU_PRESET THYLACINE_BAKE_WEBKIT 2>/dev/null || true
 bc_reset; bc_apply_preset production; bc_resolve 2>/dev/null; bc_export
 eq "export THYLACINE_BAKE_WEBKIT (n -> 0)" "${THYLACINE_BAKE_WEBKIT:-}" "0"
@@ -100,6 +100,7 @@ eq "export kaslr"         "$kaslr"         "ON"
 eq "export sanitize (none->empty)" "$sanitize" ""
 eq "export no_tickless (TICKLESS=y -> OFF)" "$no_tickless" "OFF"
 eq "export dev_accounts (DEV_ACCOUNTS=y -> ON)" "$dev_accounts" "ON"
+eq "export private_async_qual (n by default -> OFF)" "$private_async_qual" "OFF"
 eq "export THYLACINE_BAKE_GOROOT" "${THYLACINE_BAKE_GOROOT:-}" "1"
 eq "export THYLACINE_BAKE_CLADE"  "${THYLACINE_BAKE_CLADE:-}"  "0"
 eq "export THYLACINE_BAKE_DOSBOX (y -> 1)" "${THYLACINE_BAKE_DOSBOX:-}" "1"
@@ -200,6 +201,17 @@ eq "default interaction qualification OFF" "$(bc_get HALCYON_INTERACTION_QUALIFI
 bc_set HALCYON_INTERACTION_QUALIFICATION=y; bc_export
 eq "explicit interaction qualification export" "${THYLACINE_INTERACTION_QUALIFICATION:-}" "1"
 unset THYLACINE_INTERACTION_QUALIFICATION
+
+# The private-async qualification kernel is in no preset: every one leaves it n,
+# and only an explicit set turns the kernel knob ON.
+for paq_preset in "$BC_DIR_CONFIGS"/*.config; do
+    paq_name="$(basename "$paq_preset" .config)"
+    bc_reset; bc_apply_preset "$paq_name"; bc_resolve 2>/dev/null
+    eq "preset $paq_name leaves private async qualification n" "$(bc_get PRIVATE_ASYNC_QUAL)" "n"
+done
+bc_reset; bc_apply_preset default; bc_set PRIVATE_ASYNC_QUAL=y; bc_resolve 2>/dev/null
+private_async_qual=""; bc_export
+eq "explicit private async qualification -> ON" "$private_async_qual" "ON"
 
 echo
 if [[ "$fail" == 0 ]]; then echo "ALL PASS"; exit 0; else echo "FAILURES"; exit 1; fi

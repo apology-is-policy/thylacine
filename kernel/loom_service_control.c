@@ -143,3 +143,20 @@ int loom_private_service_return(struct Loom *l,struct Proc *p,
     if(!rc)loom_private_close_changed(l);
     return rc;
 }
+int loom_private_service_pool_query(struct Loom *l,struct Proc *p,
+        const struct loom_service_pool_snapshot *in,struct loom_service_pool_snapshot *out) {
+    int rc=control_owner(l,p);if(rc)return rc;
+    if(!in || !out || in->size!=sizeof(*in) || in->version!=LOOM_SERVICE_ABI_VERSION ||
+       in->flags || in->pool.reserved || in->members || in->available || in->busy ||
+       in->pending || in->leased || in->streams || in->reserved[0] || in->reserved[1])
+        return -T_E_INVAL;
+    if(!l->receipt_size)return -T_E_OPNOTSUPP;
+    struct loom_service_pool_snapshot result;
+    spin_lock(&l->lock);
+    struct loom_service_slot *s=control_exact(l,in->pool);
+    if(!s || s->kind!=LOOM_SERVICE_POOL)rc=-T_E_NOENT;
+    else rc=loom_pool_snapshot(&l->service_pools->bank,&l->service_pools->pools[in->pool.slot],&result);
+    spin_unlock(&l->lock);
+    if(!rc)*out=result;
+    return rc;
+}

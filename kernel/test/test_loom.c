@@ -97,6 +97,18 @@ static void test_proc_drop(struct Proc *p) {
 // ---------------------------------------------------------------------------
 #include "loom_receipt_fixture.h"
 #include "loom_private_fixture.h"
+#include "loom_bridge_fixture.h"
+
+void test_loom_private_bridge(void);
+void test_loom_private_bridge(void) {
+    const char *error = loom_bridge_fixture_run();
+    TEST_ASSERT(!error, error);
+}
+void test_loom_setup_rollback_settles(void);
+void test_loom_setup_rollback_settles(void) {
+    const char *error = loom_setup_rollback_fixture_run();
+    TEST_ASSERT(!error, error);
+}
 #include "loom_slots_fixture.h"
 #include "loom_nodes_fixture.h"
 
@@ -939,6 +951,42 @@ void test_loom_register_replaces(void) {
 // ---------------------------------------------------------------------------
 #include "private_pool_fixture.h"
 
+// A sibling thread closes the new fd the instant setup installs it. That close
+// drops the handle's reference; setup must still hold its own, so the Loom
+// survives until setup's last touch, and setup's own drop then frees it.
+static bool setup_race_closed;
+static u64  setup_race_destroyed_at_close;
+static void setup_race_close(struct Proc *p, hidx_t fd) {
+    setup_race_closed = handle_close(p, fd) == 0;
+    setup_race_destroyed_at_close = loom_total_destroyed();
+}
+void test_loom_setup_close_race(void);
+void test_loom_setup_close_race(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    u32 base = p->as->page_count;
+    u64 before = loom_total_destroyed();
+    struct loom_params kp;
+    hidx_t fd = -1;
+    setup_race_closed = false;
+    setup_race_destroyed_at_close = 0;
+    loom_setup_installed_hook_for_test(setup_race_close);
+    int rc = sys_loom_setup_for_proc(p, 4, 0, &kp, &fd);
+    loom_setup_installed_hook_for_test(NULL);
+    u64 after = loom_total_destroyed();
+    // The ring mapping outlives the Loom; its detach is the final drop.
+    s64 detached = rc == 0 ? sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size) : -1;
+    u32 settled = p->as->page_count;
+    test_proc_drop(p);
+    TEST_EXPECT_EQ(rc, 0, "setup completes although its fd was closed at install");
+    TEST_ASSERT(setup_race_closed, "the racing close found the freshly installed fd");
+    TEST_EXPECT_EQ(setup_race_destroyed_at_close, before,
+                   "the Loom outlives a close that lands at install");
+    TEST_EXPECT_EQ(after, before + 1, "setup's own last drop frees the closed Loom");
+    TEST_EXPECT_EQ(detached, 0, "the orphaned ring mapping detaches");
+    TEST_EXPECT_EQ(settled, base, "the detach settles the ring charge exactly");
+}
+
 void test_loom_register_buffers(void) {
     const char *pool_error = private_pool_fixture_run();
     TEST_ASSERT(pool_error == NULL, pool_error);
@@ -1262,6 +1310,75 @@ void test_loom_sq_release_after_index(void) {
     TEST_EXPECT_EQ(o.tail2, 1u, "the refill posts exactly one CQE");
     TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
     TEST_EXPECT_EQ(o.head, 2u, "each position released exactly once");
+}
+
+// The same handoff through the private frontend (loom_private_submit). A NOP is
+// not a private opcode, so each consumed entry earns exactly one refusal CQE
+// carrying the user_data that was copied -- the copy is what the CQE reports.
+static bool sq_private_refill_run(bool bad_index, struct sq_refill_obs *o) {
+    struct Proc *p = test_proc_make();
+    if (!p) return false;
+    u64 goal = loom_private_retired();
+    struct Loom *l = loom_create_private(p, 1, 2, false);
+    if (!l) { test_proc_drop(p); return false; }
+    ++goal;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x111ULL);
+    if (bad_index) sqa[0] = 7;
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    sq_refill_visits = 0;
+    __atomic_store_n(&sq_refill_target, l, __ATOMIC_RELEASE);
+    loom_sq_release_hook_for_test(sq_refill_producer);
+    o->n1 = loom_private_submit(l, p, 1);
+    loom_sq_release_hook_for_test(NULL);
+    __atomic_store_n(&sq_refill_target, NULL, __ATOMIC_RELEASE);
+    o->visits    = sq_refill_visits;
+    o->dropped   = h->dropped;
+    o->tail1     = l->cq_tail;
+    o->first_ud  = cqes[0].user_data;
+    o->first_res = cqes[0].result;
+    o->n2        = loom_private_submit(l, p, 1);
+    o->tail2     = l->cq_tail;
+    o->refill_ud = cqes[bad_index ? 0 : 1].user_data;
+    o->head      = h->sq_head;
+    loom_unref(l);
+    bool retired = lp_wait(goal);
+    test_proc_drop(p);
+    return retired;
+}
+
+void test_loom_private_sq_release_after_copy(void);
+void test_loom_private_sq_release_after_copy(void) {
+    struct sq_refill_obs o;
+    TEST_ASSERT(sq_private_refill_run(false, &o), "private ring made and retired");
+    TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first private sq_head release");
+    TEST_EXPECT_EQ(o.n1, 1, "the private original SQE is consumed");
+    TEST_EXPECT_EQ(o.dropped, 0u, "nothing dropped");
+    TEST_EXPECT_EQ(o.tail1, 1u, "the private original earns one refusal CQE");
+    TEST_EXPECT_EQ(o.first_ud, (u64)0x111ULL,
+                   "the private original SQE was copied before its release");
+    TEST_EXPECT_EQ(o.first_res, -T_E_INVAL, "a NOP is refused on a private ring");
+    TEST_EXPECT_EQ(o.n2, 1, "the refill is consumed by the next submit");
+    TEST_EXPECT_EQ(o.tail2, 2u, "the refill earns exactly one refusal CQE");
+    TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
+    TEST_EXPECT_EQ(o.head, 2u, "each private position released exactly once");
+}
+
+void test_loom_private_sq_release_after_index(void);
+void test_loom_private_sq_release_after_index(void) {
+    struct sq_refill_obs o;
+    TEST_ASSERT(sq_private_refill_run(true, &o), "private ring made and retired");
+    TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first private sq_head release");
+    TEST_EXPECT_EQ(o.n1, 1, "the out-of-range private position is still claimed");
+    TEST_EXPECT_EQ(o.dropped, 1u, "the out-of-range private original index is counted dropped");
+    TEST_EXPECT_EQ(o.tail1, 0u, "a dropped private original earns no CQE, not the refill's");
+    TEST_EXPECT_EQ(o.n2, 1, "the refill is consumed by the next submit");
+    TEST_EXPECT_EQ(o.tail2, 1u, "the refill earns exactly one refusal CQE");
+    TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
+    TEST_EXPECT_EQ(o.head, 2u, "each private position released exactly once");
 }
 
 // The submit-time reject paths each post an error CQE (the SQE is still consumed

@@ -711,6 +711,11 @@ void test_loom_enter_nop(void);
 void test_loom_sq_release_after_copy(void);
 void test_loom_sq_release_after_index(void);
 void test_loom_sq_release_after_copy_chain(void);
+void test_loom_setup_close_race(void);
+void test_loom_private_sq_release_after_copy(void);
+void test_loom_private_sq_release_after_index(void);
+void test_loom_private_bridge(void);
+void test_loom_setup_rollback_settles(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
@@ -2813,6 +2818,11 @@ struct test_case g_tests[] = {
     { "loom.sq_release_after_copy",      test_loom_sq_release_after_copy,      false, NULL },
     { "loom.sq_release_after_index",     test_loom_sq_release_after_index,     false, NULL },
     { "loom.sq_release_after_copy_chain", test_loom_sq_release_after_copy_chain, false, NULL },
+    { "loom.setup_close_race",          test_loom_setup_close_race,           false, NULL },
+    { "loom.private_sq_release_after_copy",  test_loom_private_sq_release_after_copy,  false, NULL },
+    { "loom.private_sq_release_after_index", test_loom_private_sq_release_after_index, false, NULL },
+    { "loom.private_bridge",            test_loom_private_bridge,             false, NULL },
+    { "loom.setup_rollback_settles",    test_loom_setup_rollback_settles,     false, NULL },
     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },

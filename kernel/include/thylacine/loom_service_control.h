@@ -16,4 +16,7 @@ int loom_private_service_reap(struct Loom *, struct Proc *,
 // Caller retains Loom through unlocked wake; no pointer/Proc escapes this call.
 int loom_private_service_return(struct Loom *, struct Proc *,
     const struct loom_service_buffer_return *);
+// One consistent LIVE pool snapshot; output only on success. Never a scope.
+int loom_private_service_pool_query(struct Loom *, struct Proc *,
+    const struct loom_service_pool_snapshot *, struct loom_service_pool_snapshot *);
 #endif

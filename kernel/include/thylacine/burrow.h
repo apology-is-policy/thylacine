@@ -819,6 +819,10 @@ int burrow_protect_in(struct AddrSpace *as, bool exempt,
 // PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` (a
 // `p->vmas` mutator; same discipline as burrow_map).
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
+// SYS_BURROW_DETACH's inner (kernel/syscall.c): the CHARGE-SETTLING unmap of an
+// exact burrow-window range -- refunds the recorded payer iff this drop frees the
+// pages. burrow_unmap above settles nothing. 0, or -1 when nothing matched.
+s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 // burrow_unmap, additionally reporting whether removing this mapping was the
 // drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed

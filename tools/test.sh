@@ -18,11 +18,18 @@ BUILD_DIR="$REPO_ROOT/build"
 # P1-I: optional --sanitize=ubsan flag selects the alternate build dir
 # so the production build's CMake cache isn't clobbered.
 sanitize=""
+private_async_qual=0
 extra_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --sanitize=*)
             sanitize="${1#--sanitize=}"
+            shift
+            ;;
+        --private-async-qual)
+            # The kernel tools/build.sh builds with PRIVATE_ASYNC_QUAL=y, in its
+            # own dir (docs/ASYNC-SERVICE-ABI.md, Qualification bridge).
+            private_async_qual=1
             shift
             ;;
         *)
@@ -40,6 +47,10 @@ case "$sanitize" in
         exit 1
         ;;
 esac
+
+if [[ "$private_async_qual" == 1 ]]; then
+    KERNEL_BUILD="${KERNEL_BUILD}-private-async-qual"
+fi
 
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
@@ -149,6 +160,12 @@ mkdir -p "$BUILD_DIR"
 
 # Build first if the ELF is missing.
 if [[ ! -f "$KERNEL_ELF" ]]; then
+    if [[ "$private_async_qual" == 1 ]]; then
+        # A fallback build here would make the DEFAULT shape and boot nothing.
+        echo "==> FAIL: no qualification kernel at $KERNEL_ELF." >&2
+        echo "    Build it: tools/build.sh kernel --set PRIVATE_ASYNC_QUAL=y" >&2
+        exit 1
+    fi
     echo "==> Kernel ELF missing; building..."
     if [[ -n "$sanitize" ]]; then
         "$REPO_ROOT/tools/build.sh" kernel "--sanitize=$sanitize"

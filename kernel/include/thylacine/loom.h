@@ -616,6 +616,11 @@ struct Loom *loom_create_with_receipts(u32 sq_entries, u32 cq_entries, bool exem
 // Caller retains p and its image throughout construction. No scopes, registered
 // buffers or worker are admitted until their private engine is qualified.
 struct Loom *loom_create_private(struct Proc *p, u32 sq, u32 cq, bool receipts);
+// The same, reporting a refusal: -EINVAL (geometry/Proc), -EBUSY (address space
+// shared, or its private-ring guard count exhausted), -ENOMEM (budget or
+// allocation), -EAGAIN (the retirer is not up yet). *why is 0 on success.
+struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receipts,
+                                     int *why);
 #ifdef KERNEL_TESTS
 // One-shot test seam: the next loom_create_private treats its ring layout
 // allocation as failed. Sound only while the in-kernel fixture is that
@@ -660,6 +665,10 @@ void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h);
 #ifdef KERNEL_TESTS
 // Runs under l->lock right after sq_head is published; shared ring memory only.
 void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
+// Runs in a setup the moment its handle is installed: where a sibling thread's
+// close of the new fd can land.
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
 // Deterministic unlocked owner-boundary interleavings, test builds only.
 void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32));
 void loom_private_close_boundary_for_test(struct Loom *, u32);
@@ -825,6 +834,10 @@ int loom_private_start_executor(struct Loom *l);
 // kthread -- on any failure).
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd);
+// Undo a successful setup (legacy or private) whose params never reached the
+// caller: close the handle, then detach the ring through the charge-settling
+// path -- after the close that detach can be the ring's final drop.
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size);
 
 // Testable register inner. Resolves the `n` fds in `fds[]` (each must be a
 // KOBJ_SPOOR handle in p) into the ring at `loom_fd`'s registered-handle table.
