@@ -886,6 +886,12 @@ static NP5_ENTERED: AtomicU32 = AtomicU32::new(0);
 static NP5_RESULT: AtomicU64 = AtomicU64::new(0);
 static NP5_REVENTS: AtomicU32 = AtomicU32::new(0);
 const NP5_UNSET: u64 = 0xDEAD;
+// What L285's marker reports when the poll did not see the connection: when the
+// wait began, how long it lasted, and how many caught notes ran across it. A
+// lost wake, a timeout and an interrupted wait each read differently there.
+static NP5_ENTER_NS: AtomicU64 = AtomicU64::new(0);
+static NP5_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static NP5_SIGS: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn np5_poller_main(_arg: u64) -> ! {
     #[repr(C)]
@@ -900,7 +906,12 @@ extern "C" fn np5_poller_main(_arg: u64) -> ! {
     unsafe {
         let _ = svc3(NR_FUTEX, core::ptr::addr_of!(NP5_ENTERED) as u64,
                      FUTEX_WAKE | FUTEX_PRIVATE, 1);
+        let s0 = sig_fired();
+        let t0 = mono_ns();
+        NP5_ENTER_NS.store(t0, Ordering::SeqCst);
         let r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_5s.as_ptr() as u64, 0, 8, 0);
+        NP5_WAIT_NS.store(mono_ns().wrapping_sub(t0), Ordering::SeqCst);
+        NP5_SIGS.store(sig_fired().wrapping_sub(s0), Ordering::SeqCst);
         NP5_REVENTS.store(pfd[0].revents as u16 as u32, Ordering::SeqCst);
         NP5_RESULT.store(r as u64, Ordering::SeqCst);
         linux_thread_exit(0)
@@ -945,6 +956,45 @@ macro_rules! leg {
             linux_exit(1)
         }
     };
+}
+
+/// A monotonic reading in nanoseconds (0 if the clock is refused).
+unsafe fn mono_ns() -> u64 {
+    let mut ts: [i64; 2] = [0, 0];
+    let _ = svc3(NR_CLOCK_GETTIME, CLOCK_MONOTONIC, ts.as_mut_ptr() as u64, 0);
+    (ts[0] as u64).wrapping_mul(1_000_000_000).wrapping_add(ts[1] as u64)
+}
+
+/// Marker assembly without allocation (the linux path may not allocate):
+/// append `b` at `pos`, returning the new end.
+fn put_bytes(buf: &mut [u8], pos: usize, b: &[u8]) -> usize {
+    buf[pos..pos + b.len()].copy_from_slice(b);
+    pos + b.len()
+}
+
+/// Append `v` in decimal at `pos`, returning the new end.
+fn put_dec(buf: &mut [u8], mut pos: usize, v: i64) -> usize {
+    if v < 0 {
+        buf[pos] = b'-';
+        pos += 1;
+    }
+    let mut u = v.unsigned_abs();
+    let mut tmp = [0u8; 20];
+    let mut n = 0;
+    loop {
+        tmp[n] = b'0' + (u % 10) as u8;
+        n += 1;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        buf[pos] = tmp[n];
+        pos += 1;
+    }
+    pos
 }
 
 /// Pre-stamp a leg whose NEXT step can kill this process outright (a signal
@@ -3165,6 +3215,7 @@ unsafe fn run_linux() -> ! {
     let cli = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
     let dialed = cli >= 0
         && svc3(NR_CONNECT, cli as u64, lsn_sa.as_ptr() as u64, lsn_sa.len() as u64) == 0;
+    let conn_ns = mono_ns().wrapping_sub(NP5_ENTER_NS.load(Ordering::SeqCst));
     let joined = futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
         && CTID_WORD.load(Ordering::SeqCst) == 0;
 
@@ -3173,12 +3224,25 @@ unsafe fn run_linux() -> ! {
     leg!(rep, lowest_free, b"L283\n");
     leg!(rep, dialed && joined, b"L284\n");
     // The poll saw the connection: 1 ready, POLLIN.
-    leg!(
-        rep,
-        NP5_RESULT.load(Ordering::SeqCst) == 1
-            && NP5_REVENTS.load(Ordering::SeqCst) & (POLLIN as u16 as u32) != 0,
-        b"L285\n"
-    );
+    let np5_r = NP5_RESULT.load(Ordering::SeqCst) as i64;
+    let np5_ev = NP5_REVENTS.load(Ordering::SeqCst);
+    if !(np5_r == 1 && np5_ev & (POLLIN as u16 as u32) != 0) {
+        let mut mk = [0u8; 160];
+        let mut k = put_bytes(&mut mk, 0, b"L285 r=");
+        k = put_dec(&mut mk, k, np5_r);
+        k = put_bytes(&mut mk, k, b" ev=");
+        k = put_dec(&mut mk, k, np5_ev as i64);
+        k = put_bytes(&mut mk, k, b" wait_ms=");
+        k = put_dec(&mut mk, k, (NP5_WAIT_NS.load(Ordering::SeqCst) / 1_000_000) as i64);
+        k = put_bytes(&mut mk, k, b" conn_ms=");
+        k = put_dec(&mut mk, k, (conn_ns / 1_000_000) as i64);
+        k = put_bytes(&mut mk, k, b" sigs=");
+        k = put_dec(&mut mk, k, NP5_SIGS.load(Ordering::SeqCst) as i64);
+        k = put_bytes(&mut mk, k, b" signo=");
+        k = put_dec(&mut mk, k, sig_signo() as i64);
+        k = put_bytes(&mut mk, k, b"\n");
+        leg!(rep, false, &mk[..k]);
+    }
     if d >= 0 && d != lowest {
         svc3(NR_CLOSE, d as u64, 0, 0);
     }
