@@ -260,6 +260,11 @@ construction rather than by discipline.
   also returns the factory's own errors, and a factory over the kernel can
   answer -ENOSPC. Only FULL says the factory never ran, so the caller still owns
   what the factory would have consumed.
+- A pool registration's uncertain outcome is `T_RING_UNCERTAIN` (-1003), outside
+  the POSIX errno range. A definite rejection returns the kernel's errno, and
+  its native rc is that same errno. An uncertain code inside the range (the
+  uninstalled core's -100, which is ENETDOWN's value) could not be told apart
+  from a rejection with that errno, and the two need different cleanup.
 - The cores copy with libt's byte helpers (`thyla/bytes.h`), not memcpy or
   memset. The userspace toolchain builds them at -O2, where clang inlines every
   aggregate copy. At -O0 it would call memcpy for a struct passed by value. A

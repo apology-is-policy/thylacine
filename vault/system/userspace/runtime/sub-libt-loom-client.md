@@ -165,7 +165,9 @@ the toolchain does not use outline atomics.
 - A local refusal (geometry, ENOSPC, STATE) leaves the storage unchanged. This
   is asserted by claim counts and by `t_fixed_occupied` / `used_requests`.
 - A definite kernel refusal of a pool registration releases its header and
-  cells. An uncertain one quarantines them until the core's final release.
+  cells, and returns the kernel's errno. An uncertain one quarantines them until
+  the core's final release, and returns `T_RING_UNCERTAIN` (-1003), which lies
+  outside the errno range so that it cannot equal a rejection's errno.
 - A create that fails consumes the backend (Astra's contract). The storage stays
   idle.
 

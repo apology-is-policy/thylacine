@@ -30,8 +30,10 @@ int t_ring_idle(const struct t_ring_core *);
  * Exact negative errno is returned for definite rejection. Uncertain outcomes
  * return T_RING_UNCERTAIN, with native rc in *native_rc (also set on success).
  * *native_rc is zero when local preflight fails; no backend call occurred.
- * More than 64 members across the ring's pools is T_LOOM_CLIENT_ENOSPC. */
-#define T_RING_UNCERTAIN (-100)
+ * More than 64 members across the ring's pools is T_LOOM_CLIENT_ENOSPC.
+ * UNCERTAIN lies outside the POSIX errno range, which a definite rejection
+ * returns: -100 would be read as ENETDOWN. */
+#define T_RING_UNCERTAIN (-1003)
 int64_t t_ring_register_pool(struct t_ring_client *,const struct t_loom_service_pool_member *,size_t,struct t_ring_pool **,int64_t *native_rc);
 /* Native adapter must already own exact kernel pool and error cleanup. Serialized
  * provisional registration/preflight is still to be wired before public use. */

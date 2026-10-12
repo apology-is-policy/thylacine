@@ -29,7 +29,7 @@ static struct t_ring_payload *accept(struct t_ring_pool *p,unsigned slot){struct
 static void view(struct t_ring_payload *l,unsigned char byte){size_t n=0;const unsigned char *p=t_ring_bytes(l,&n);assert(n==8);for(size_t i=0;i<n;++i)assert(p[i]==byte);}
 static int64_t register_checked(struct t_ring_client *c,const struct t_loom_service_pool_member *m,size_t n,struct t_ring_pool **out,int64_t *rc){
  struct t_ring_core *core=c->core;size_t before=claimed(core);at_register=SIZE_MAX;int64_t result=t_ring_register_pool(c,m,n,out,rc);
- if(at_register==SIZE_MAX)assert(!*rc&&claimed(core)==before);else assert(at_register==before+1+n&&claimed(core)<=at_register);return result;
+ if(at_register==SIZE_MAX)assert(!*rc&&claimed(core)==before);else assert(at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:before));return result;
 }
 static void registration_tests(void){
  struct probe p={.register_id={7,0,91}};struct t_ring_owner *r;struct t_ring_client *c;struct t_ring_pool *a,*b,*out;struct t_ring_payload *v;struct t_loom_service_pool_member m=range(8);int64_t rc;
