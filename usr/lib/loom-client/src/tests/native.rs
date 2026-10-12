@@ -1,7 +1,7 @@
 //! The native adapter against a simulated kernel (sim.rs).
 mod sim;
 use crate::native::{PoolMember, Ring, Shot};
-use sim::{ECANCELED, EINVAL, ENOENT, ETIMEDOUT, Sim, SimKernel};
+use sim::{ECANCELED, EINVAL, ENOENT, ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind};
 use std::future::Future;
 
 const MS: u64 = 1_000_000;
@@ -85,6 +85,28 @@ fn each_walk_name_is_read_inside_the_enter_that_consumes_it() {
     let scope = run(&r, target.connect(None).unwrap()).unwrap();
     let wa = scope.walk(b"a", None).unwrap();
     let wb = scope.walk(b"b", None).unwrap();
+    let a = run(&r, wa).unwrap();
+    let b = run(&r, wb).unwrap();
+    run(&r, a.open(0, None).unwrap()).unwrap();
+    run(&r, b.open(0, None).unwrap()).unwrap();
+    assert_eq!(run(&r, a.read(range(0, 0, 16), 0, None).unwrap()).unwrap().bytes(), b"first");
+    assert_eq!(run(&r, b.read(range(0, 0, 16), 0, None).unwrap()).unwrap().bytes(), b"second");
+}
+
+#[test]
+fn queued_walks_keep_their_own_name_cells() {
+    // Neither SQE is consumed until both are queued, so each name must still be
+    // in its own slot's cell when the kernel reads it.
+    let sim = Sim::new();
+    file(&sim, "a", b"first");
+    file(&sim, "b", b"second");
+    let r = ring(&sim, 4, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    sim.s().enter_limit = Some(0);
+    let wa = scope.walk(b"a", None).unwrap();
+    let wb = scope.walk(b"b", None).unwrap();
+    sim.s().enter_limit = None;
     let a = run(&r, wa).unwrap();
     let b = run(&r, wb).unwrap();
     run(&r, a.open(0, None).unwrap()).unwrap();
@@ -277,7 +299,7 @@ fn a_forged_completion_fails_the_ring() {
     sim.s().forge_next = Some(0xdead);
     let connect = target.connect(None).unwrap();
     assert_eq!(r.turn(None).err(), Some(-5));
-    assert_eq!(r.block_on(connect, None).err(), Some(-5));
+    assert_eq!(r.block_on(connect, None).and_then(|c| c.map(drop)).err(), Some(-5));
     assert_eq!(sim.s().closed_fds, vec![7], "a failed ring is closed");
 }
 
@@ -296,23 +318,57 @@ fn closing_with_leases_held_keeps_their_bytes_until_they_drop() {
     drop((stream, fid, scope, target, pool));
     drop(r);
     assert_eq!(sim.s().closed_fds, vec![7]);
+    // The buffer, the name arena and the ring mapping, all still attached.
+    assert_eq!(sim.regions(), 3);
     assert_eq!(p.bytes(), b"kept");
-    assert!(sim.regions() > 0);
     drop(p);
     assert_eq!(sim.regions(), 0);
 }
 
-#[test]
-fn a_kernel_side_close_cancels_everything() {
+/// A ring closed under the adapter cancels everything, and its descriptor is
+/// never closed again: another thread closed it, so the number may name
+/// another file. `latch` is a close that races the adapter's call.
+fn closed_under(latch: bool, in_flight: bool) -> Vec<i32> {
     let sim = Sim::new();
     let r = ring(&sim, 8, &[4096]);
     let target = r.target(5, b"clip").unwrap();
     let scope = run(&r, target.connect(None).unwrap()).unwrap();
     sim.s().hold = true;
-    let walk = scope.walk(b"", None).unwrap();
-    sim.close_under();
-    assert_eq!(r.block_on(walk, None).err(), Some(ECANCELED as i32));
+    let walk = in_flight.then(|| scope.walk(b"", None).unwrap());
+    if latch { sim.latch_under() } else { sim.close_under() }
+    match walk {
+        // Its cancellation is routed, and the ENTER after it learns of the close.
+        Some(walk) => {
+            let out = r.block_on(walk, None).and_then(|w| w.map(drop));
+            assert_eq!(out.err(), Some(ECANCELED as i32));
+        }
+        // Nothing to route: the wait learns of it.
+        None => assert_eq!(r.turn(None).err(), Some(ECANCELED as i32)),
+    }
     assert_eq!(scope.walk(b"", None).err(), Some(ECANCELED as i32));
+    drop((scope, target, r));
+    let closed = sim.s().closed_fds.clone();
+    closed
+}
+
+#[test]
+fn an_enter_that_finds_the_descriptor_closed_forgets_it() {
+    assert_eq!(closed_under(false, true), vec![7], "only the other thread's close");
+}
+
+#[test]
+fn an_enter_that_races_the_close_forgets_the_descriptor() {
+    assert_eq!(closed_under(true, true), Vec::<i32>::new());
+}
+
+#[test]
+fn a_poll_that_finds_the_descriptor_closed_forgets_it() {
+    assert_eq!(closed_under(false, false), vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_hangup_while_polling_forgets_the_descriptor() {
+    assert_eq!(closed_under(true, false), Vec::<i32>::new());
 }
 
 #[test]
@@ -330,6 +386,8 @@ fn retire_waits_until_the_kernel_retires_every_scope() {
     }
     assert!(r.retired());
     assert_eq!(sim.s().aborts.len(), 1);
+    let kernel_retired = sim.s().slots.iter().flatten().any(|s| s.kind == SlotKind::Scope && s.state == RETIRED);
+    assert!(kernel_retired, "retired() answered only after the kernel retired the scope");
     drop(scope);
 }
 

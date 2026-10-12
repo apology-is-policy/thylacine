@@ -57,6 +57,13 @@ enabled by it.
   SQ are -ENOSPC; a closed ring is -ECANCELED; a failed ring (a corrupt or stale
   CQE) is -EIO. A changed `dropped` count panics: the adapter never writes an
   out-of-range index, so it is a broken invariant.
+- **A ring closed under the adapter is forgotten, never closed again.** ENTER
+  answering -EBADF or -ECANCELED, or poll answering POLLHUP or POLLNVAL, means
+  another thread closed the ring's only descriptor: a private ring is never
+  duplicated (handle.c, `handle_dup`) or inherited across fork
+  (`handle_slot_may_alias`), and exec latches it only past the point of no
+  return (proc.c, `proc_exec_replace`). The number may already name another
+  file, so the adapter drops it unclosed and the ring answers -ECANCELED.
 
 ## Mechanism
 
@@ -75,7 +82,8 @@ enabled by it.
   the ENTER that consumes the slot, and only the creator thread enters.
 - **Waiting.** `RingWait` is the cores' `WaitSource`: arm samples `cq_tail`,
   ready is a non-empty CQ, wait is poll(2) with the time left rounded up to a
-  millisecond. POLLHUP closes the ring; POLLERR and POLLNVAL fail the wait.
+  millisecond. POLLHUP and POLLNVAL forget the descriptor and close the ring;
+  POLLERR fails the wait with -EBADF.
 - **Deadlines** go in each SQE; the kernel enforces them and aborts the scope.
 - **Slots.** `Shared` tracks every target, scope and fid the adapter minted:
   Live, Clunk (a dropped fid, clunked when the SQ has room), Clunking, Reap
@@ -94,8 +102,10 @@ each, and a background-CLUNK table of 64.
 
 ## Concurrency
 
-Creator thread only (`Rc`, `RefCell`). No borrow is held across a waker's
-`wake` or a payload's drop. The kernel's poll registers its waiter before it
+Creator thread only (`Rc`, `RefCell`). No other thread may close the ring's
+descriptor; if one does, the adapter forgets the number rather than close a
+file it may now name. No borrow is held across a waker's `wake` or a payload's
+drop. The kernel's poll registers its waiter before it
 samples the CQ, which gives the wait its atomic compare.
 
 ## Invariants enforced
@@ -121,7 +131,11 @@ completion path allocates.
 
 - **The simulated kernel** (`tests/native/sim.rs`) ports the private SQE shape
   check and models ENTER, poll, REGISTER and close as the kernel's frontend,
-  decode and loom.c define them; each test names the behaviour it pins.
+  decode and loom.c define them; each test names the behaviour it pins. It
+  panics on a second close of a descriptor.
+- **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
+  targeted adapter edit (25 cases), and each red was read for the intended
+  assertion.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,
   against the ring layout table.
@@ -137,6 +151,14 @@ completion path allocates.
 1. No guest program uses the adapter yet; only the host runs it (NA-4d).
 2. Retirement and REAP are not poll events. A caller waiting for `retired()`
    turns with a deadline.
+3. **The kernel cannot yet reap a walked fid while the ring lives.** REAP of a
+   clunked fid answers -ENOENT and frees nothing, a fid of an aborted scope has
+   no retire path before ring destruction, and each fid pins its scope
+   (loom_service_control.c, `loom_private_service_reap`; loom_service_fids.c,
+   `loom_fid_reap`). So a scope that walked, and its fids, hold their slots
+   until the ring closes, and the simulated kernel's REAP is more permissive
+   than the real one. Owned in OPEN-BUGS (2026-10-12 23:16Z); the ABI fix is
+   an operator vote.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

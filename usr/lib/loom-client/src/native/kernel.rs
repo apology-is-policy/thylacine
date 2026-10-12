@@ -158,6 +158,13 @@ impl<K: Kernel> Shared<K> {
             self.kernel.close(fd);
         }
     }
+    /// The ring was closed under the adapter. Its descriptor is the only one
+    /// (a private ring is never duplicated or inherited, and exec latches it
+    /// only past the point of no return), so another thread closed it and the
+    /// number may already name another file: it is dropped, never closed.
+    pub(crate) fn forget_fd(&self) {
+        self.fd.set(-1);
+    }
     /// One versioned record; after close the ring is gone and nothing is sent.
     pub(crate) fn register<T>(&self, op: u32, record: &mut T) -> i64 {
         let fd = self.fd.get();

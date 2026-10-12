@@ -25,6 +25,11 @@ unsafe fn t_burrow_detach(p:u64,n:u64)->i64 { std::alloc::dealloc(p as *mut u8,s
 unsafe fn t_loom_setup(_:u64,_:u64)->i64 {-1}
 unsafe fn t_loom_register(_:u64,_:u64,_:u64,_:u64)->i64 {0}
 unsafe fn t_loom_enter(_:u64,_:u64,_:u64,_:u64)->i64 {0}
+const T_POLLIN:i16=0x001; const T_POLLERR:i16=0x008; const T_POLLHUP:i16=0x010; const T_POLLNVAL:i16=0x020;
+#[repr(C)] struct TPollFd { fd:i32, events:i16, revents:i16 }
+unsafe fn t_poll(_:*mut TPollFd,_:usize,_:i32)->i64 {0}
+unsafe fn t_close(_:i64)->i64 {0}
+mod time { pub fn monotonic_ns()->u64 {0} }
 mod loom;
 '''
 CASES={

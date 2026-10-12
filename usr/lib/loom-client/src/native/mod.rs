@@ -31,7 +31,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     task::{Context, Poll, Waker},
 };
-use kernel::{Backend, ECANCELED, EINTR, EINVAL, EIO, ENOSPC, ETIMEDOUT, Map, PAGE, Shared};
+use kernel::{Backend, EBADF, ECANCELED, EINTR, EINVAL, EIO, ENOSPC, ETIMEDOUT, Map, PAGE, Shared};
 
 /// A negative errno.
 pub type Result<T> = core::result::Result<T, i32>;
@@ -382,12 +382,13 @@ impl<K: Kernel> WaitSource for RingWait<'_, K> {
             return Ok(WakeReason::Deadline);
         }
         let events = rc as i16;
-        if events & (POLLERR | POLLNVAL) != 0 {
-            return Err(-kernel::EBADF);
+        if events & (POLLHUP | POLLNVAL) != 0 {
+            // The ring was closed under us; nothing more will arrive.
+            self.inner.lost();
+            return Ok(WakeReason::Event);
         }
-        if events & POLLHUP != 0 {
-            // The kernel is closing the ring under us; nothing more will arrive.
-            self.inner.close();
+        if events & POLLERR != 0 {
+            return Err(-EBADF);
         }
         Ok(WakeReason::Event)
     }
@@ -467,9 +468,8 @@ impl<K: Kernel> Inner<K> {
         if self.sq.dropped_changed() {
             panic!("loom-client: the kernel dropped an SQE the adapter wrote in range");
         }
-        if rc == -(ECANCELED as i64) {
-            // Something closed the ring under us (exec, or a peer thread).
-            self.close();
+        if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+            self.lost();
         }
     }
     fn wait(&self, deadline: Option<u64>) -> Result<()> {
@@ -647,7 +647,7 @@ impl<K: Kernel> Inner<K> {
                 self.shared.set_state(e.r, kernel::SlotState::Reap);
                 continue;
             }
-            if !self.sq.space() {
+            if !self.sq.space() || self.check().is_err() {
                 return;
             }
             let request = self
@@ -656,10 +656,9 @@ impl<K: Kernel> Inner<K> {
                 .request(e.scope, crate::request_book::Kind::Control);
             let Ok(mut request) = request else { return };
             let sqe = handles::clunk_sqe(e.r);
-            if self
-                .submit(sqe, &[], || unsafe { request.publish() })
-                .is_ok()
-            {
+            let submitted = self.submit(sqe, &[], || unsafe { request.publish() });
+            // A ring that closed inside the submit already shut every CLUNK down.
+            if submitted.is_ok() && self.check().is_ok() {
                 self.shared.set_state(e.r, kernel::SlotState::Clunking);
                 self.clunks.borrow_mut()[i] = Some(request);
             }
@@ -693,6 +692,11 @@ impl<K: Kernel> Inner<K> {
     fn fail(&self) {
         self.state.set(State::Failed);
         self.shutdown();
+    }
+    /// The kernel closed the ring under the adapter: forget its descriptor.
+    fn lost(&self) {
+        self.shared.forget_fd();
+        self.close();
     }
     fn close(&self) {
         if matches!(self.state.get(), State::Open | State::Retiring) {

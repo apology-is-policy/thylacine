@@ -4272,15 +4272,30 @@ REAPed once their streams end. The Rust adapter (NA-4b) comes before the C one
 (NA-4c). NA-4d adds the EL0 fixture server and the qualification probe, because
 no EL0 program can reach a private CONNECT today.
 
-### NA-4b: the Rust adapter (WIP, unverified)
+### NA-4b: the Rust adapter (host-verified; blocked on a kernel REAP vote)
 
-Written while main held the mac; nothing has compiled or run yet. The adapter is
-`loom_client::native` (`Kernel`, `Ring`, the handles and futures) with
-`ThylaKernel` in libthyla-rs, 20 host tests against a simulated kernel
+The adapter is `loom_client::native` (`Kernel`, `Ring`, the handles and futures)
+with `ThylaKernel` in libthyla-rs, 24 host tests against a simulated kernel
 (`tests/native.rs`, `tests/native/sim.rs`), the fixed driver made the ring's one
 request driver (`route`, `BookRequest`, `Kind::Slot`), the adapter's ring twins
 in the ABI checker, the trigger row "Native Loom adapter (October 12)", and the
-dossier `sub-loom-native-adapter`. Owed before the close: the first build and
-test run under the lease, a sabotage of each new witness, the checker run and a
-twin sabotage, the guest build, quaestor lint, the self-audit, and the
-cross-family audit round.
+dossier `sub-loom-native-adapter`.
+
+The first build under the lease (October 12, 23:07Z onwards) compiled without
+errors. Two tests read an operation's error from the wrong layer of `block_on`'s
+result, and the ownership harness lacked doubles for the new libthyla-rs calls;
+both are fixed. A self-found P1 is fixed: the adapter closed a ring descriptor
+that another thread had already closed, and that number may name another file.
+It now forgets the descriptor, and four tests pin the four ways it learns of
+the close. `tools/test-loom-client.sh` passes (165 of 165 Rust tests in both
+profiles). Each new test was turned red by a targeted sabotage
+(`work/oct13-na4b/sabotage.py`, 25 cases), and the checker rejects a swapped
+`Submission` field and a changed `CQE_MORE`. The guest build's warning set
+equals NA-3's.
+
+Blocked: the kernel cannot reap a walked fid while its ring lives (OPEN-BUGS,
+2026-10-12 23:16Z), so a scope that walked, and its fids, hold their slots until
+the ring closes. The simulated kernel's REAP is more permissive than the real
+one, and the test `a_dropped_fid_is_clunked_then_reaped` passes only against
+it. The fix changes what REAP accepts, an ABI change put to the operator. Owed
+after it: the self-audit and the cross-family audit round.

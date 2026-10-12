@@ -5,7 +5,7 @@
 //! reports POLLIN for a non-empty CQ and POLLHUP while closing. The service is
 //! a strict 9P server with a flat file tree, answering on the next poll.
 use crate::native::{Kernel, POLLHUP, POLLIN, POLLNVAL, Setup};
-use crate::ring_records::{BufferRange, OP_CLUNK, OP_LOPEN, OP_READ, OP_WALK, OP_WRITE, SQE_MULTISHOT, Submission};
+use crate::ring_records::{BufferRange, CQE_MORE, OP_CLUNK, OP_LOPEN, OP_READ, OP_WALK, OP_WRITE, SQE_MULTISHOT, Submission};
 use crate::service_abi::{
     BufferReceipt, BufferReturn, Control, CQE_SERVICE_BUFFER, OP_SERVICE_CONNECT, PoolCreate,
     PoolMember, Reservation, SQE_BUFFER_SELECT, SlotRef, Snapshot, Target,
@@ -163,15 +163,21 @@ impl Sim {
     pub fn pending_ops(&self) -> usize {
         self.0.borrow().ops.len()
     }
-    /// Close the ring from the kernel's side, as exec does.
+    /// Another thread closes the ring's descriptor: the number is gone, so
+    /// ENTER answers -EBADF and poll POLLNVAL.
     pub fn close_under(&self) {
         let mut s = self.0.borrow_mut();
+        let fd = s.ring().fd;
+        s.closed_fds.push(fd);
         s.ring.as_mut().unwrap().closing = true;
         s.abort_all();
     }
-    /// The server answers whatever is pending, as poll would.
-    pub fn serve(&self) {
-        self.0.borrow_mut().step();
+    /// The ring latches closing while the descriptor still resolves: a close
+    /// racing ENTER (-ECANCELED) or poll (POLLHUP).
+    pub fn latch_under(&self) {
+        let mut s = self.0.borrow_mut();
+        s.ring.as_mut().unwrap().closing = true;
+        s.abort_all();
     }
     pub fn hdr_word(&self, i: usize) -> u32 {
         let s = self.0.borrow();
@@ -453,7 +459,7 @@ impl State {
                         reserved: 0,
                         lease,
                     };
-                    let more = if multi { 1 } else { 0 };
+                    let more = if multi { CQE_MORE } else { 0 };
                     self.post(op.user_data, shot.len() as i32, CQE_SERVICE_BUFFER | more, receipt);
                     if !multi {
                         return None;
@@ -875,7 +881,8 @@ unsafe impl Kernel for SimKernel {
     }
     fn close(&self, fd: i32) -> i64 {
         let mut s = self.0.s();
-        if s.closed_fds.contains(&fd) || s.ring.as_ref().is_none_or(|r| r.fd != fd) {
+        assert!(!s.closed_fds.contains(&fd), "a second close of fd {fd}, which may name another file now");
+        if s.ring.as_ref().is_none_or(|r| r.fd != fd) {
             return EBADF;
         }
         s.closed_fds.push(fd);

@@ -437,7 +437,12 @@ absolute deadline. The kernel registers the waiter before it samples the CQ, and
 that is what discharges the trait's obligation to compare the armed state
 atomically with parking. poll's timeout is in milliseconds, so the adapter
 rounds the remaining time up: it never wakes before a deadline, and it expires
-the deadline on the recheck. POLLHUP means the ring is closing. A pool RETURN, a
+the deadline on the recheck. POLLHUP means the ring is closing. A private ring
+has exactly one descriptor: it is never duplicated or inherited across fork, and
+exec latches it only past the point of no return. So a ring that closes under the
+adapter had that descriptor closed by another thread, whether poll reports it
+(POLLHUP or POLLNVAL) or ENTER does (-ECANCELED or -EBADF). The number may already
+name another file, so the adapter forgets it without closing it. A pool RETURN, a
 REAP and a scope's retirement are synchronous REGISTER results, not poll events.
 The loop turn rechecks them as local progress. ENTER never sleeps, by the
 October 12 vote.
