@@ -3596,3 +3596,10 @@ detail is in [[sub-kernel-loom-bridge]], "The EL0 probe".
 `tools/check-loom-service-abi.py` also gained a ring table: the five ring records
 and the ring constants, asserted against this header and libt's `thyla/loom.h`
 ([[abi-loom-ring]]).
+
+**NA-2b (Corona, 2026-10-12).** The native C client cores were installed into
+libt over caller-provided storage ([[sub-libt-loom-client]]). A full client table
+answers -ENOSPC, the same errno this kernel's slot table, pool bank and request
+table answer. The checker's ring legs pin both sides to 28: `T_E_NOSPC` here and
+`T_LOOM_CLIENT_ENOSPC` in libt. The native C leg also parses every
+`thyla/loom_client` header for AArch64.

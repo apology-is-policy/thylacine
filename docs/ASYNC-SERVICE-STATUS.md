@@ -4068,3 +4068,29 @@ call calloc, free, assert, abort and memcpy, so they cannot be installed into
 libt as they are. NA-2b restructures their storage into fixed tables inside one
 caller-owned object, re-runs their host tests, and installs them beside
 `thyla/loom.h`. The Rust twins (NA-3) keep ThylaAlloc.
+
+**Progress, October 12, 15:05-15:45 UTC (WIP commit; nothing compiled or run
+under the lease yet).** The cores are installed as `usr/lib/libt/{include/thyla,src}/loom_client/`.
+- **Storage.** The pool members now share one 64-cell bank, the kernel's own
+  pool-bank shape, instead of 64 members inline in every pool. That cuts a
+  ring's storage from about 530 KB at the bound to about 30 KB.
+- **Errno and fatal.** A full table in front of the kernel answers -ENOSPC.
+  Every assert and abort is now `T_LOOM_CHECK`, which calls
+  `t_loom_client_fatal`.
+- **Executor, a correction found by self-audit.** The executor keeps
+  `T_RETIREMENT_FULL` at -1001. Admit also returns the factory's errors, so
+  -ENOSPC there would hide whether the factory ran.
+- **Tests.** Astra's ten C tests are ported to the storage API:
+  - allocation-failure injection became table-full and claim-before-register
+    checks;
+  - a new death test proves that each storage-reuse guard fires at its own site;
+  - every test ends by asserting its storage idle.
+- **Runner.** `make test-loom-client` (`tools/test-loom-client.sh`) runs the
+  tests under ASan and UBSan and at -O2. It then links every public function
+  freestanding under libt's flags, and its -O0 control must fail that link on
+  memcpy.
+- **ABI checker.** `tools/check-loom-service-abi.py` pins the full-table errno
+  on both sides to 28.
+
+Next: run the runner under the mac lease, fix, run the mutants, then the Fable
+audit.

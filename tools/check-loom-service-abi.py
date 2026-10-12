@@ -52,6 +52,9 @@ RING_CONSTANTS = ([('MAX_ENTRIES', 4096), ('SETUP_SQPOLL', 1), ('SETUP_CQSIZE', 
                   + [('OP_' + n, i) for i, n in enumerate(
                       'NOP WALK LOPEN LCREATE READ WRITE GETATTR SETATTR READDIR FSYNC CLUNK '
                       'RENAMEAT UNLINKAT MKDIR SYMLINK LINK MKNOD READLINK STATFS'.split())])
+# The errno both sides answer for a full table: the kernel's slot table, pool
+# bank and request table, and the native C client cores (T_LOOM_CLIENT_ENOSPC).
+ENOSPC = 28
 RING_RECORDS = [  # (struct, size, [(field, bytes, alignment)])
     ('loom_params', 88, [('flags', 4, 4), ('sq_entries', 4, 4), ('cq_entries', 4, 4),
                          ('ring_size', 4, 4), ('ring_va', 8, 8), ('hdr_off', 4, 4),
@@ -80,6 +83,13 @@ def ring_layout(fields):
 def ring_source(kernel):
     prefix, macro = ('', 'LOOM_') if kernel else ('t_', 'T_LOOM_')
     lines = ['#include <' + ('thylacine/loom.h' if kernel else 'thyla/loom.h') + '>']
+    if kernel:
+        lines += ['#include <thylacine/errno.h>',
+                  f'_Static_assert(T_E_NOSPC == {ENOSPC}, "T_E_NOSPC");']
+    else:
+        lines += ['#include <thyla/loom_client/owned_mapping.h>',
+                  '#include <thyla/loom_client/retirement_executor.h>',
+                  f'_Static_assert(T_LOOM_CLIENT_ENOSPC == -{ENOSPC}, "T_LOOM_CLIENT_ENOSPC");']
     for name, value in RING_CONSTANTS:
         lines.append(f'_Static_assert({macro}{name} == {value}, "{macro}{name}");')
     for name, size, fields in RING_RECORDS:
@@ -189,7 +199,8 @@ _Static_assert(LOOM_OP_COUNT==20, "private opcode remains reserved");
                             *[a for i in incs for a in ('-I', str(root/i))], str(source)],check=True)
     print(f'PASS: 3 actual mirrors; {len(CONSTANTS)} constants, 10 records and every declared size/offset; ARM64 C layouts.')
     print(f'PASS: kernel and native C ring mirrors; {len(RING_CONSTANTS)} constants, '
-          f'{len(RING_RECORDS)} records, {sum(len(f) for _, _, f in RING_RECORDS)} fields against one layout table.')
+          f'{len(RING_RECORDS)} records, {sum(len(f) for _, _, f in RING_RECORDS)} fields against one layout table; '
+          f'the full-table errno ({ENOSPC}) of the kernel and the native C client cores.')
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--root',type=Path,default=ROOT)

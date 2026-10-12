@@ -44,6 +44,9 @@ header: its size and `sq_head`), and swapping two of its header words would have
 passed every assert. The Rust mirror is not yet in that table: its records live
 inside `loom.rs` beside code that needs the rest of the crate. NA-3, the Rust
 adapter, moves them into a module the checker can compile.
+Since NA-2b the same table also pins the errno a full table answers (28): the
+kernel's `T_E_NOSPC` and the native C client cores' `T_LOOM_CLIENT_ENOSPC`
+([[sub-libt-loom-client]]).
 Neither pouch nor the Go fork speaks Loom; the ring is native-only.
 
 | struct | size | role | writer |

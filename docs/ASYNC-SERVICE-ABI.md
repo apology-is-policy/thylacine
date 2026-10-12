@@ -225,22 +225,54 @@ and four in the qualification image, and that every one of them retired.
 
 Operator vote, 2026-10-12 (NA-2b): the native C owned-client cores take
 caller-provided storage. Native C links libt, which is freestanding: there is no
-heap, no memcpy and no assert. The cores therefore never allocate. A caller hands
-each ring client one storage object, sized at compile time by the ring's entries
-(at most LOOM_MAX_ENTRIES) and by the ABI's own limits: 64 descriptor slots and
-64 pool members. The object exists before the client makes its first kernel
-registration. So a local allocation can never fail after the kernel has reserved
+heap, no memcpy and no assert. The cores therefore never allocate. They are
+installed in libt as `thyla/loom_client/` (headers) and `src/loom_client/`.
+
+A ring client's storage is one object, `T_FIXED_STORAGE(entries)`, sized at
+compile time. `entries` is the ring's CQ size: a power of two of at most 8192
+(twice LOOM_MAX_ENTRIES), one request-book entry per CQ slot. Every other table
+in it is sized by the ABI's own limits:
+- one fixed cell and one request cell per registered buffer, 64 of each;
+- 64 pool-member cells shared by every pool of the ring, as the kernel's own
+  pool bank is shared, and so at most 64 pool headers;
+- the 64-slot descriptor table that names the ring's pools.
+
+The owned mapping (the paired CQ reader over the kernel's ring) and the
+retirement executor take caller storage of their own, until a native adapter
+composes them with the client. Storage is zero before its first use (static
+storage already is). It is reused only once it is idle (`t_ring_idle`,
+`t_fixed_storage_idle`, a destroyed mapping, an executor with no references).
+Reusing live storage is a broken invariant.
+
+A pool's header and member cells are claimed before the client registers the
+pool with the kernel. Once the 64-member envelope admits the pool, the claim
+cannot fail. So a local claim never fails after the kernel has reserved
 something, and the obligation to pre-reserve local metadata holds by
 construction rather than by discipline.
 
-- A request that finds its fixed table full is refused with -ENOSPC before the
-  kernel is touched. The kernel's slot table answers the same errno when it is
-  full.
-- The cores copy with libt byte helpers, not memcpy or memset.
-- A broken internal invariant ends the process through a fatal exit, not
-  assert or abort. It is never ignored.
+- A full table in front of the kernel refuses before the kernel is touched,
+  with -ENOSPC (`T_LOOM_CLIENT_ENOSPC`). This covers the request book
+  (`T_REQ_FULL`) and the 64-member envelope. The kernel's slot table, pool bank
+  and request table answer the same errno when they are full.
+  `tools/check-loom-service-abi.py` pins both sides to 28. A pool registration
+  tells the two apart by its native rc, which is zero when the refusal is local.
+- The retirement executor's full table keeps `T_RETIREMENT_FULL` (-1001). Admit
+  also returns the factory's own errors, and a factory over the kernel can
+  answer -ENOSPC. Only FULL says the factory never ran, so the caller still owns
+  what the factory would have consumed.
+- The cores copy with libt's byte helpers (`thyla/bytes.h`), not memcpy or
+  memset. The userspace toolchain builds them at -O2, where clang inlines every
+  aggregate copy. At -O0 it would call memcpy for a struct passed by value. A
+  native link runs with --no-undefined, so it refuses that call rather than
+  carrying it.
+- A broken internal invariant ends the process through `t_loom_client_fatal`,
+  not assert or abort. libt's definition writes the site to fd 2 and then calls
+  `t_exit_group`. It is never ignored.
 - The ring mapping stays the kernel's, mapped by setup. The storage object holds
   only the client's own bookkeeping.
+- `make test-loom-client` (`tools/test-loom-client.sh`) runs the cores' host
+  tests under ASan and UBSan and at -O2. It also builds the cores for aarch64
+  with libt's flags and links every public function under --no-undefined.
 
 Rejected:
 - A libt heap. This is Plan 9's answer, where libc mallocs over the data
