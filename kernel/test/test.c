@@ -1045,6 +1045,7 @@ void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_debug_release_cancels_step(void);
+void test_devproc_zombie_status_signal(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_kernel_writer_bracket(void);              // #152
@@ -3280,6 +3281,7 @@ struct test_case g_tests[] = {
     { "devproc.debug_kstack_settled",          test_devproc_debug_kstack_settled,          false, NULL },
     { "devproc.debug_step_cancel_on_stop",     test_devproc_debug_step_cancel_on_stop,     false, NULL },
     { "devproc.debug_release_cancels_step",    test_devproc_debug_release_cancels_step,    false, NULL },
+    { "devproc.zombie_status_signal",          test_devproc_zombie_status_signal,          false, NULL },
     { "hwdebug.dfr0_enumerate",                test_hwdebug_dfr0_enumerate,                false, NULL },
     { "hwdebug.arm_disarm_roundtrip",          test_hwdebug_arm_disarm_roundtrip,          false, NULL },
     { "hwdebug.bp_table",                      test_hwdebug_bp_table,                      false, NULL },

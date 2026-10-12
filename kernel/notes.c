@@ -416,6 +416,17 @@ u32 notes_name_terminate_latch_for_test(const char *name) {
     return notes_name_terminate_latch(name);
 }
 
+// The note-table test walks both tables through these, so a row added to either
+// is checked without anyone extending a list. NULL past the last row.
+const char *notes_known_name_for_test(u32 i);
+const char *notes_known_name_for_test(u32 i) {
+    return i < NOTE_NUM_KNOWN ? g_known_notes[i].name : NULL;
+}
+const char *notes_snare_death_name_for_test(u32 i);
+const char *notes_snare_death_name_for_test(u32 i) {
+    return i < NOTE_NUM_SNARE_DEATHS ? g_snare_deaths[i].name : NULL;
+}
+
 // V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
 // below answers that for a native Proc, and answers it WRONG for a phenotyped
 // one: a Linux guest never calls SYS_NOTIFY -- its handler lives in the per-Proc
@@ -1942,11 +1953,11 @@ again:
         // phenotype wait4 reports it WIFSIGNALED, as Linux does. The lock is
         // dropped first; the note stays in the about-to-be-freed queue.
         if (viv_signote_default_is_terminate(sn)) {
-            // sn decoded from a canonical literal, so the lookup cannot miss;
-            // the "unknown" arm is the F10 convention, not a reachable case.
+            // sn decoded from a canonical literal, so the lookup cannot miss; a
+            // miss (NULL) records no signal, and exits_note stops the kernel.
             const char *tname = notes_canonical_name_ptr(candidate.name);
             spin_unlock(&q->lock);
-            exits_note(tname ? tname : "unknown");
+            exits_note(tname);
             // unreachable
         }
         // Otherwise SIG_DFL with a default that STOPS (tty:susp). Fall through
@@ -2215,10 +2226,10 @@ int notes_noted_default(struct exception_context *ctx, struct Thread *t) {
     // that reads after thread_free + before proc_free).
     const char *msg = notes_canonical_name_ptr(t->note_handling_name);
     if (!msg) {
-        // Should be unreachable — note_handling_name was captured from
-        // notes_peek_locked's output, which only returns supported-set
-        // entries. Defense-in-depth.
-        msg = "noted";
+        // Unreachable: note_handling_name was captured from notes_peek_locked's
+        // output, which only returns table rows. A corrupted buffer must not
+        // choose a disposition, or reap a death that records no signal.
+        extinction("notes_noted_default: the handled note is not a table row");
     }
 
     // Read the disposition off the CANONICAL name, not the Thread buffer: both

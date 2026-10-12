@@ -617,6 +617,16 @@ included. Both are telemetry; no policy reads them
 manual has no `/proc/<pid>/status` section, and the prowl telemetry
 sub-chunk that adds one folds `tables:`, `file:` and `/ctl/memory` in.
 
+## `status` shows a zombie's death signal (2026-10-12; gcpark-b audit F6)
+
+A zombie's block is `exit:` (the exit status) and, when it died of a note, a
+`signal:` line with `Proc.term_sig`, the signal its parent's packed wait word
+reports. The exit status alone reads 1 for both a death and an `exit(1)`.
+Read under `g_proc_table_lock`, as `exit:` is; `term_sig` is written before
+the ZOMBIE transition under the same lock ([[sub-kernel-death]]). Witness:
+`devproc.zombie_status_signal` (a `snare:abort` zombie shows `signal:  6`; an
+`exit(1)` zombie, one variable away, shows none).
+
 ## Data structures
 
 The Dev owns none. Every piece of state it manipulates lives on `struct Proc`

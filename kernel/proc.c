@@ -4305,7 +4305,11 @@ void exits_signalled(int sig, const char *msg) {
 }
 
 void exits_note(const char *name) {
-    exits_signalled(notes_death_signal(name), name);
+    // Every caller passes a table row. A name that records no signal would reap
+    // as an exit 1 and hide the death, so it is a kernel bug, not a status.
+    int sig = notes_death_signal(name);
+    if (sig == 0) extinction("exits_note: a death by a note that records no signal");
+    exits_signalled(sig, name);
 }
 
 // The body every exit and every death by note shares: `code` and `sig` are the

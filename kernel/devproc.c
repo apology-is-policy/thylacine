@@ -326,6 +326,13 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
         n = fmt_str(buf, cap, off, "exit:    ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, p->exit_status); if (!n && p->exit_status != 0) return 0; off += n;
         n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+        // A death by note: the signal the packed wait word reports. The exit
+        // status alone (1) does not tell it from an exit(1).
+        if (p->term_sig != 0) {
+            n = fmt_str(buf, cap, off, "signal:  ");  if (!n) return 0; off += n;
+            n = fmt_sdec(buf, cap, off, p->term_sig); if (!n) return 0; off += n;
+            n = fmt_str(buf, cap, off, "\n");         if (!n) return 0; off += n;
+        }
     }
     return off;
 }

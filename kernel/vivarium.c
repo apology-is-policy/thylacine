@@ -1746,7 +1746,9 @@ enum viv_signote viv_signal_note(u64 signum) {
     //              so nothing could post it.
     //   SIGUSR1/2 — no general-purpose note; a note has a fixed 16-byte name
     //              from a closed set, so there is nothing to carry them.
-    //   SIGABRT  — reachable only via raise() == tkill(self), which terminates.
+    //   SIGABRT  — reachable only via raise() == tkill(self). tkill has no row,
+    //              so a guest's abort() falls through to a_crash()'s NULL store
+    //              and dies of snare:segv, which its parent reads as SIGSEGV.
     //   SIGSTOP  — uncatchable by POSIX and rejected by the sigaction domain.
     //   32..64   — the realtime range, which requires queued siginfo (Tier 2).
     default: return VIV_SIGNOTE_NONE;

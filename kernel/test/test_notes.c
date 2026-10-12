@@ -46,6 +46,8 @@
 // "Test support" blocks in kernel/notes.c and kernel/proc.c -- deliberately
 // absent from the headers, so every consumer extern-declares them).
 extern u32  notes_name_terminate_latch_for_test(const char *name);
+extern const char *notes_known_name_for_test(u32 i);
+extern const char *notes_snare_death_name_for_test(u32 i);
 extern int  notes_noted_default(struct exception_context *ctx, struct Thread *t);
 extern int  notes_noted_restore(struct exception_context *ctx, struct Thread *t);
 extern void proc_test_link(struct Proc *p);
@@ -3151,17 +3153,17 @@ void test_notes_death_signal_table(void) {
     TEST_EXPECT_EQ(notes_death_signal("snare:"),             0, "the bare prefix is not a note");
     TEST_EXPECT_EQ(notes_death_signal(NULL),                 0, "NULL -> 0");
 
-    // A known note kills iff it records a signal.
-    static const char *const known[] = {
-        NOTE_NAME_INTERRUPT, NOTE_NAME_KILL, NOTE_NAME_PIPE, NOTE_NAME_CHILD_EXIT,
-        NOTE_NAME_TTY_WINCH, NOTE_NAME_TTY_SUSP, NOTE_NAME_TTY_CONT,
-        NOTE_NAME_TTY_QUIT, NOTE_NAME_TTY_HUP, NOTE_NAME_SAK,
-    };
-    for (u32 i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
-        bool kills = notes_default_action(known[i]) == NOTE_DFL_TERMINATE;
-        TEST_ASSERT(kills == (notes_death_signal(known[i]) != 0),
+    // Every row of both tables, walked from the tables themselves: a known note
+    // kills iff it records a signal, and every snare death records one.
+    u32 known = 0, snares = 0;
+    for (const char *name; (name = notes_known_name_for_test(known)) != NULL; known++) {
+        bool kills = notes_default_action(name) == NOTE_DFL_TERMINATE;
+        TEST_ASSERT(kills == (notes_death_signal(name) != 0),
                     "a known note records a death signal exactly when it terminates");
     }
+    for (const char *name; (name = notes_snare_death_name_for_test(snares)) != NULL; snares++)
+        TEST_ASSERT(notes_death_signal(name) != 0, "every snare death records a signal");
+    TEST_ASSERT(known > 0 && snares > 0, "both tables were walked");
 
     // The phenotype translates signals to these notes through its own table; a
     // guest's waitpid must see the signal that table maps back from the note.

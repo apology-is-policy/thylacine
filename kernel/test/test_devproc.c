@@ -31,6 +31,7 @@
 #include <thylacine/errno.h>
 #include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
 #include <thylacine/page.h>
+#include <thylacine/notes.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>       // prowl-1/3a: sched() + sched_cpu_idle_ns
@@ -4551,4 +4552,49 @@ void test_proc_debug_taint_crosses_fork(void) {
     TEST_ASSERT((clean_child & PROC_FLAG_DEBUG_TAINTED) == 0,
                 "control: a clean parent's child is born clean");
     TEST_ASSERT(restored, "the fixture was restored -- kproc is untainted again");
+}
+
+// =============================================================================
+// gcpark-b: a zombie's status shows the signal it died of
+// =============================================================================
+
+static void zsig_abort_thunk(void *arg) { (void)arg; exits_note(NOTE_NAME_SNARE_ABORT); }
+static void zsig_exit_thunk(void *arg)  { (void)arg; exits_code(1, "one"); }
+
+// The status text once the Proc is a zombie (only a zombie has an "exit:"
+// line); 0 if it did not become one within the budget.
+static long zsig_zombie_status(int pid, char *buf, long cap) {
+    for (int tries = 0; tries < 2000; tries++) {
+        struct Spoor *f = open_pidfile_for(pid, "status", 0);
+        if (!f) return 0;
+        long got = devproc.read(f, buf, cap - 1, 0);
+        spoor_clunk(f);
+        if (got > 0) {
+            buf[got] = '\0';
+            if (index_of(buf, (size_t)got, "exit:") >= 0) return got;
+        }
+        sched();
+    }
+    return 0;
+}
+
+// One variable away: both children reap with status 1; only the death by note
+// has a signal, and only it shows a signal line.
+void test_devproc_zombie_status_signal(void) {
+    static char a[512], e[512];
+    int pa = rfork(RFPROC, zsig_abort_thunk, NULL);
+    int pe = rfork(RFPROC, zsig_exit_thunk, NULL);
+    long la = pa > 0 ? zsig_zombie_status(pa, a, (long)sizeof a) : 0;
+    long le = pe > 0 ? zsig_zombie_status(pe, e, (long)sizeof e) : 0;
+    int sa = -1, se = -1;
+    int ra = pa > 0 ? wait_pid_for(pa, 0, &sa) : -1;
+    int re = pe > 0 ? wait_pid_for(pe, 0, &se) : -1;
+    TEST_ASSERT(ra == pa && re == pe, "both children forked and were reaped");
+    TEST_ASSERT(sa == 1 && se == 1, "both reap raw as status 1");
+    TEST_ASSERT(la > 0 && le > 0, "both children were read as zombies");
+    TEST_ASSERT(index_of(a, (size_t)la, "exit:    1\nsignal:  6\n") >= 0,
+                "a death by snare:abort shows signal 6 after its exit status");
+    TEST_ASSERT(index_of(e, (size_t)le, "exit:    1\n") >= 0 &&
+                index_of(e, (size_t)le, "signal:") < 0,
+                "an exit(1) shows no signal line");
 }

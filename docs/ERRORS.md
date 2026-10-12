@@ -257,7 +257,10 @@ reports. Pouch's `waitpid` and the phenotype `wait4` always pass it, so a Pouch
 or Linux parent sees `WIFSIGNALED` and `WTERMSIG` for a child that died of a
 note. ut's job-control wait passes `WAIT_UNTRACED` and so gets the packed word
 too: it sets `$status` to the code for an exit and to 128 plus the signal for a
-death by note, 130 for an interrupted job and 137 for a killed one.
+death by note, 130 for an interrupted job and 137 for a killed one. ut's other
+waits are raw: a command substitution, and a script or `ut -c` without job
+control, read a death by note as `$status` 1 (whether every ut wait should pack
+is an operator vote item, OPEN-BUGS 2026-10-12).
 
 ## Extinction messages
 
@@ -300,6 +303,13 @@ could not tell apart from a program that chose to exit 127.
 
 **`waitpid` (patch 0026).** `__pouch_wait` always passes `WAIT_PACKED` and
 forwards the word unchanged (§"The wait status").
+
+**Two deaths that read back as another signal.** Pouch sends `SIGTERM` as the
+`interrupt` note, which `SIGINT` shares, so a child killed with
+`kill(pid, SIGTERM)` reads `WTERMSIG == SIGINT`. A Linux-phenotype guest's own
+`abort()` reads `SIGSEGV`: the phenotype has no `tkill` row, so musl's
+`raise(SIGABRT)` returns and `abort()` ends in `a_crash()`'s NULL store, a
+`snare:segv` death. Both are tracked in OPEN-BUGS (2026-10-12).
 
 **Rollout policy** (the retrospective sweep — *user-decided 2026-06-24,
 the "errno-rollout arc"*).

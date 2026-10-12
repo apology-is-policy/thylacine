@@ -445,6 +445,10 @@ Every death site names its note: the fault latch above, the uncaught default
 terminate (`notes_noted_default`), the viv terminate arm and the tail's uncaught
 terminate call `exits_note(name)`, which records `notes_death_signal(name)` with
 exit status 1; the `kill` arm calls `exits_signalled(NOTE_SIG_KILL, "killed")`.
+`exits_note` stops the kernel on a name that records no signal: every caller
+passes a table row, and such a death would reap as an exit 1 and hide itself.
+The viv arm's `"unknown"` and the uncaught-default arm's `"noted"` fallbacks
+are gone with it (gcpark-b audit F1).
 A raw wait still reads 1, so every native caller that predates the signal is
 unchanged; only a caller that asks for the packed word sees the signal.
 
@@ -454,8 +458,11 @@ unchanged; only a caller that asks for the packed word sees the signal.
 `NOTE_NAME_SNARE_ABORT` instead of `snare:brk`. The immediate is ABI, as the
 name is; `notes.h` lists the immediates it avoids (0x1 clang's trap, 0x3e8
 gcc's, 0xf000 debuggers, 0x5500-0x55ff UBSan, 0xc471 WTF/JSC). Witness:
-`notes.death_signal_table` (every row, the non-notes, "a known note kills iff
-it records a signal", and a cross-check against the vivarium's numbers).
+`notes.death_signal_table` (every name, the non-notes, both tables walked
+row by row through `notes_known_name_for_test` and
+`notes_snare_death_name_for_test` -- a known note kills iff it records a
+signal, a snare death always records one -- and a cross-check against the
+vivarium's numbers).
 
 ### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
 
@@ -665,8 +672,9 @@ pointer validation stays *first*; that the two 32-byte structs keep the assert
 tying them to **each other**, not only to 32; that any new note name lands
 in both the name table and [[abi-note-names]]; and that a terminating name
 carries a death signal and a non-terminating one carries none
-(`notes.death_signal_table` enumerates the rule, so a new row fails it rather
-than defaulting to 0).
+(`notes.death_signal_table` walks both tables, so a new row is checked without
+anyone extending a list, and `exits_note` stops the kernel on a death that
+records no signal).
 
 ## Seams
 

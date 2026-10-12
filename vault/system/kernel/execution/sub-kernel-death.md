@@ -35,7 +35,7 @@ consequence of getting it wrong is a hang rather than a crash.
 |---|---|---|
 | `exits(msg)` | the Proc's own thread | terminate the *program*; with live peers, routes through the group cascade then self-exits |
 | `thread_exit_self()` | any thread | terminate *this Thread*; the last live one out zombies the Proc |
-| `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b) |
+| `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b); `exits_note` on a name with no signal is an extinction |
 | `proc_group_terminate(p, sig, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait; `sig` is the death signal the claim records (0 for an exit) |
 | `el0_return_die_check()` | at every return-to-EL0 | if flagged, `thread_exit_self()` (noreturn) |
 | `proc_fault_terminate(name, addr)` | EL0 unhandled fault | diagnose + `exits_note(snare:*)`; noreturn |
@@ -520,6 +520,17 @@ What a change **must** re-establish:
 
 ## Caveats
 
+- **A kill during the final close: the two last-out paths disagree.**
+  `exits_term` checks the claim once, before it drops the lock for the
+  handle close and the territory release, and then records its own
+  `(code, sig)`; `thread_exit_self`'s last-out (a Proc whose last thread
+  leaves by `SYS_THREAD_EXIT`) reads the claim after that window. So a
+  `proc_group_kill` landing in the window (which forces the close, ARCH 7.9.1
+  part B) reaps as `SIGKILL` on the second path and as the program's own exit
+  on the first. Each path keeps message, code and signal from one claim; only
+  the rule between them differs. Linux lets an exit in progress ignore the
+  signal. Which rule both follow is an operator vote item (OPEN-BUGS
+  2026-10-12; gcpark-b audit F5, pre-existing for message and code).
 - **The multi-thread `exits()` gate is gone.** `exits()` with live peers is
   no longer an extinction — since #811 it routes through the same cascade as
   `exit_group` and then self-exits. The absorbed reference doc still said

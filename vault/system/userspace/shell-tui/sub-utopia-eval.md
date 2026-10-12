@@ -231,8 +231,10 @@ an exit, **128 + the signal** for a death by note or fault (gcpark-b,
 that called `abort()` 134. The kernel had no signalled shape before gcpark-b,
 and this path read every death as exit 1; with the shape in the word, the old
 decode would have read a death as `$status` 0, which is why the decoder and
-the kernel change landed together. The console path's plain waits stay raw:
-a death there still sets `$status` 1. `status_of_packed_reads_exits_and_deaths`
+the kernel change landed together. Every other wait stays raw -- the console
+path, command substitution, and a script or `ut -c` without job control -- so
+a death there still sets `$status` 1 (one convention per shell is an operator
+vote item, OPEN-BUGS 2026-10-12; gcpark-b audit F3). `status_of_packed_reads_exits_and_deaths`
 is the host test; `pty-4.exp` requires 130 after `fg` + Ctrl-C.
 
 The pts slave is not directly pollable — `dev9p.poll` reports it always-ready —

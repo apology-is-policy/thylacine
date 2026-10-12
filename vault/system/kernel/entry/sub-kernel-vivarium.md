@@ -551,6 +551,13 @@ its reasoning fails a test rather than passing quietly.
 
 ## Caveats
 
+- **A guest's own `abort()` reads `SIGSEGV` to its parent.** `kill`, `tkill`
+  and `tgkill` have no rows, so musl's `raise(SIGABRT)` returns, `abort()`
+  falls through to `a_crash()`'s NULL store, and the guest dies of
+  `snare:segv`. Since gcpark-b `wait4` passes `WAIT_PACKED`, so the parent
+  sees `WIFSIGNALED` with `SIGSEGV` (before it, exit 1). A `tkill(self,
+  SIGABRT)` row ending in `snare:abort` would report `SIGABRT`; tracked with
+  Pouch's `raise(SIGABRT)` in OPEN-BUGS (2026-10-12; gcpark-b audit F4).
 - **The header's opening block describes a system that no longer exists,
   and it is the first thing a reader of this surface sees.** Its "WHAT IS
   DELIBERATELY ABSENT" paragraph states that nothing here is wired into

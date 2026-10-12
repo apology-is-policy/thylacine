@@ -66,9 +66,10 @@ cat /proc/<pid>/status
 It reports `name`, `pid`, `state`, `threads`, `cpu_ns`, `ppid`, the owning
 `principal` and `gid`, then the memory lines: `pages` (the charge), `tables`,
 `file`, `children`, `peak` and `budget`. A zombie reports its final figures and
-an `exit` line with its exit status. Every process's status file is readable by
-everyone, but `cpu_ns` reads `-` to anyone other than the process's owner and
-the holders of `CAP_HOSTOWNER`.
+an `exit` line with its exit status, and a process that died of a fault or a
+note adds a `signal` line with the number of the signal it died of. Every
+process's status file is readable by everyone, but `cpu_ns` reads `-` to anyone
+other than the process's owner and the holders of `CAP_HOSTOWNER`.
 
 ### Read the pool
 

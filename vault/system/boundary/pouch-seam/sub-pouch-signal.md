@@ -181,7 +181,9 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   OPEN-BUGS (gcpark-b follow-up); `abort()` is unaffected.
 - SIGINT/SIGTERM aliasing; `sigset_t` round-trip is lossy (unsupported
   signums drop) and spuriously additive (reading back a mask containing
-  SIGINT also reports SIGTERM).
+  SIGINT also reports SIGTERM). The aliasing reaches the wait word too: a
+  child killed with `kill(pid, SIGTERM)` dies of `interrupt`, so its parent
+  reads `WTERMSIG == SIGINT` (since gcpark-b; OPEN-BUGS 2026-10-12).
 - No mask inheritance across `pthread_create` (the child starts at 0).
 - `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
   defers them, and a later real handler sees them retroactively.
