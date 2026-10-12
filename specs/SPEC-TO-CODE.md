@@ -1348,6 +1348,14 @@ changes the consume ORDER, which `loom.tla` abstracts): clean 2429, liveness
 | `loom_sq_buggy_unlocked_claim.cfg` | `BUGGY_UNLOCKED_CLAIM` | `FifoFidelity` | violation | 104 |
 | `loom_sq_buggy_unlocked_claim_exclusive.cfg` | `BUGGY_UNLOCKED_CLAIM` | `ClaimExclusive` | violation | 11 |
 
+A violating run stops at the first counterexample it finds. How many distinct
+states it has explored by then depends on how many TLC workers raced to it, but
+the verdict does not. Main's re-run of `loom_sq_buggy_unlocked_claim.cfg` in its
+own tree (2026-10-12, landing cc422b913) stopped at 110 states with 4 workers
+and 51 with 1, against 104 here. Read the Distinct column on a violation row as
+"this run", not as a value to reproduce. Clean rows explore the whole space and
+do not vary.
+
 | Spec action | Source location | Notes |
 |---|---|---|
 | `Produce` | `usr/lib/libthyla-rs/src/loom.rs::Ring::try_submit` | acquire `sq_head`, refuse when `tail - head >= entries`, write the SQE and its 1:1 index, release `sq_tail`. The only SQ producer in the tree. |
