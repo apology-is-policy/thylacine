@@ -96,11 +96,10 @@ fn yield_now() {
     }
 }
 
-// Spin mode (DEBUG-FS-DESIGN 5g). Parked at an IRQ tail -- the one with no notes
-// leg -- a thread that left its park for a latched interrupt would be back in
-// this loop with its stop still set, so the counter is the witness: stopped, it
-// must not move. The yield after the loop is the syscall at whose tail a note
-// still pending is met.
+// Spin mode (DEBUG-FS-DESIGN 5g). Parked at an IRQ tail, a thread that left its
+// park for a latched interrupt would run on with its stop still set, so the
+// counter is the witness: stopped, it must not move. A note still pending when
+// the loop ends is met at the yield's tail.
 fn spin(ptr: *mut u64) -> ! {
     unsafe {
         core::arch::asm!(

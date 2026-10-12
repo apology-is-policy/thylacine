@@ -535,11 +535,11 @@ fn reap_dead(pid: i32, alive: &'static str, clean: &'static str) -> Result<(), &
 }
 
 // The stay-stopped leg (DEBUG-FS-DESIGN 5g): stop a child in a loop with no
-// syscall -- so the stop parks it at an IRQ tail, the tail with no notes leg --
-// then post it an interrupt. The park must hold through it: a park that left
-// for the interrupt would eret the thread straight back into the loop with its
-// stop still set, and its counter would move. Started, the child leaves the
-// loop for a syscall and dies of the note at that syscall's tail.
+// syscall -- so the stop parks it at an IRQ tail -- then post it an interrupt.
+// The park must hold through it: a park that left for the interrupt would run
+// the thread on with its stop still set, so its counter would move or the
+// stopped-only reads would stop answering. Started, the child dies of the note
+// in the tail it parked in, whose notes leg follows the stop leg (#964).
 fn stopped_intr(child: &Child) -> Result<(), &'static str> {
     let pid = child.pid();
     let mut ctl = OpenOptions::new()
@@ -734,12 +734,12 @@ fn step_meets_death(child: &Child) -> Result<(), &'static str> {
 // report at the handler with x23 unchanged (the note came before the stepped
 // instruction) and the handler not yet run.
 //
-// The loop makes no syscall, so the stop that finds it parks in the IRQ tail,
-// which delivers no notes (DEBUG-FS-DESIGN 5g; seam-el0-irq-tail-no-notes). A
-// step from there runs its instruction before the note. So the leg always steps
-// once before it seeks the top: every step parks the child in the synchronous
-// tail, whose resume meets the note. A child that stopped at the top already
-// would otherwise take no step, and about half the children do.
+// The loop makes no syscall, so the stop that finds it parks in an IRQ tail.
+// The leg steps once before it seeks the top, so the step it measures starts
+// from the synchronous tail a step parks in, whose resume meets the note. (Until
+// #964 the IRQ tail had no notes leg, and a step from it ran its instruction
+// before the note.) A child that stopped at the top already would otherwise
+// take no step, and about half the children do.
 fn step_meets_handler(child: &Child) -> Result<(), &'static str> {
     let pid = child.pid();
     let mut s = stop_in_loop(pid, in_caught_loop)?;
