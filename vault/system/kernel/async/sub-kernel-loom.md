@@ -94,6 +94,20 @@ examined. Everything downstream — the opcode switch, the bounds checks, the
 builders that encode the wire message later — reads the copy. Nothing re-reads
 the shared slot after the checks, which is what makes the checks mean anything.
 
+The copy also comes before the *release*. Publishing the submission head hands
+the position back: a well-behaved producer acquire-loads the head and refills
+that position's indirection slot and, under its one-to-one convention, the entry
+it names. So the consumer reads the indirection slot and copies the entry, and
+only then advances and publishes the head (`loom_sq_release`, which every drain
+iteration calls after its copy or its drop). The ring lock does not cover this:
+it excludes other kernel consumers, never the producer. Until October 12 the
+drain released first, and a refill landing in that window had the kernel
+consume the new entry in the old position's place and again in its own, and
+never consume the old one — a lost and a doubled submission, reachable under
+SQPOLL or a sibling-thread producer (`specs/loom_sq.tla`,
+`BUGGY_RELEASE_BEFORE_COPY`). `loom_sq_release` is the only writer
+of the published head.
+
 Operations whose encoding needs more fields than the resolved state carries keep
 the whole copied entry alongside the in-flight operation, so a builder running
 minutes later still decodes from the snapshot.

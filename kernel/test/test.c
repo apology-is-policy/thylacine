@@ -835,6 +835,9 @@ void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
 void test_loom_enter_nop(void);
+void test_loom_sq_release_after_copy(void);
+void test_loom_sq_release_after_index(void);
+void test_loom_sq_release_after_copy_chain(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
@@ -3050,6 +3053,9 @@ struct test_case g_tests[] = {
     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
     { "loom.enter_nop",                  test_loom_enter_nop,                  false, NULL },
+    { "loom.sq_release_after_copy",      test_loom_sq_release_after_copy,      false, NULL },
+    { "loom.sq_release_after_index",     test_loom_sq_release_after_index,     false, NULL },
+    { "loom.sq_release_after_copy_chain", test_loom_sq_release_after_copy_chain, false, NULL },
     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },

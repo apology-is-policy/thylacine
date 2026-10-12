@@ -2350,6 +2350,28 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     for (u32 i = 0; i < LOOM_FANIN_MAX; i++) fs.ent[i].hook.pw.magic = 0;
 }
 
+#ifdef KERNEL_TESTS
+static void (*loom_sq_release_hook)(struct Loom *);
+void loom_sq_release_hook_for_test(void (*hook)(struct Loom *)) {
+    __atomic_store_n(&loom_sq_release_hook, hook, __ATOMIC_RELEASE);
+}
+#endif
+
+// Advance and publish sq_head past one consumed position. The published head is
+// the producer's permission to refill that position's SQ-index entry and, under
+// the 1:1 convention Ring::try_submit follows, its SQE: so the caller must have
+// read the index and copied the SQE first. Caller holds l->lock. The only writer
+// of the published head; the test hook runs HERE, at the permission itself, so
+// it moves with any reordering.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h) {
+    l->sq_head++;
+    __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);
+#ifdef KERNEL_TESTS
+    void (*hook)(struct Loom *) = __atomic_load_n(&loom_sq_release_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(l);
+#endif
+}
+
 // Consume up to `budget` SQEs from the SQ index ring in SQ-index order, copying
 // each to kernel memory (ring TOCTOU) and either dispatching it (fast path,
 // loom_submit_one) or enqueueing it HELD in the LINK/DRAIN chain (Loom-5b).
@@ -2361,12 +2383,14 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
 // ring slot it points at is user-written, so it is range-checked before it
 // indexes the SQE array (the SA-1 discipline on the SQ side).
 //
-// F1: each per-slot claim (the sq_head read + advance + the SQE read+copy) runs
-// under l->lock so two concurrent consumers on the same ring (two ENTERs of a
-// multi-thread Proc, or an ENTER racing the SQPOLL kthread) never read the same
-// sq_head -> never double-dispatch a slot or lose an sq_head update; each
-// iteration atomically claims exactly one slot. loom_submit_one / the chain
-// enqueue run OUTSIDE the lock (a separate, non-nested acquisition).
+// F1: each per-slot claim (the sq_head read, the SQE read+copy, then the advance)
+// runs under l->lock so two concurrent consumers on the same ring (two ENTERs of a
+// multi-thread Proc; an SQPOLL ring is drained by its kthread alone) never read
+// the same sq_head -> never double-dispatch a slot or lose an sq_head update; each
+// iteration atomically claims exactly one slot. The lock excludes other kernel
+// consumers only, never the producer: see loom_sq_release (specs/loom_sq.tla).
+// loom_submit_one / the chain enqueue run OUTSIDE the lock (a separate,
+// non-nested acquisition).
 //
 // Loom-5b chain routing: an SQE is ORDERING-RELEVANT -- it goes HELD in l->chain
 // rather than dispatching immediately -- iff it sets LINK/DRAIN, OR the chain is
@@ -2421,12 +2445,11 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
             break;
         }
         u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
-        l->sq_head++;
-        __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);   // publish (user-readable mirror)
         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
         have = (sqe_idx < l->sq_entries);
         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
-        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+        else __atomic_fetch_add(&h->dropped, 1u, __ATOMIC_RELEASE);
+        loom_sq_release(l, h);                              // only after the copy
         // Route under the SAME lock so the chain-non-empty test is consistent with
         // the snapshot we just took (the chain only grows during this call).
         to_chain = have && ((ksqe.flags & (LOOM_SQE_LINK | LOOM_SQE_DRAIN)) != 0 ||

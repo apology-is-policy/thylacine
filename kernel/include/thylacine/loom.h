@@ -706,6 +706,13 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
 // (NULL/corrupt l, invalid flags). The caller (SYS_LOOM_ENTER handler) holds a
 // loom ref across this call, so loom_free cannot run concurrently.
 int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags);
+// Publish sq_head past one consumed position, after its index and SQE are copied.
+// Caller holds l->lock.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h);
+#ifdef KERNEL_TESTS
+// Runs under l->lock right after sq_head is published; shared ring memory only.
+void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
+#endif
 
 // Testable enter inner. Resolves `loom_fd` -> KObj_Loom in `p` (holding a loom
 // ref for the call), runs loom_enter, and returns its result. -1 on a bad fd /

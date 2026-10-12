@@ -1332,6 +1332,35 @@ gate; the formal focused audit lands at Loom-6c over the whole 6a+6b surface.
 
 ---
 
+## loom_sq.tla — SQ-1 (the SQ slot handoff; spec-first, 2026-10-12)
+
+Status: **TLC-green** (run on corona/async-memory 46f07edc2, `work/oct12-sq1/tlc-20261012T072500Z` there; the spec files are identical here).
+A focused module: `loom.tla` gives every op its own slot and copies atomically at
+`Consume`, so it cannot reach a position handed back to the producer and refilled
+between the head publication and the copy. That window was live in
+`loom_drain_sq` through main a7353c36f (published `sq_head`, THEN read the index
+and copied the SQE). The model: one well-behaved producer gated on the published
+head, two kernel consumers under `l->lock`, the head's private and published
+copies as one variable (the code advances both under the lock). Vault note:
+`spec-loom-sq`. The `loom.tla` set was re-run unchanged in the same run (SQ-1
+changes the consume ORDER, which `loom.tla` abstracts): clean 2429, liveness
+1457, all 7 buggy cfgs still violate their targets.
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `loom_sq.cfg` | all FALSE | `Invariants` (TypeOK, FifoFidelity, HeadNeverPassesTail, ClaimExclusive) | clean | 188 |
+| `loom_sq_liveness.cfg` | Live, all FALSE | `AllConsumed` | clean | 188 |
+| `loom_sq_buggy_release_before_copy.cfg` | `BUGGY_RELEASE_BEFORE_COPY` | `FifoFidelity` | violation (6 states: an out-of-range entry's position refilled under the stale claim) | 53 |
+| `loom_sq_buggy_unlocked_claim.cfg` | `BUGGY_UNLOCKED_CLAIM` | `FifoFidelity` | violation | 104 |
+| `loom_sq_buggy_unlocked_claim_exclusive.cfg` | `BUGGY_UNLOCKED_CLAIM` | `ClaimExclusive` | violation | 11 |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Produce` | `usr/lib/libthyla-rs/src/loom.rs::Ring::try_submit` | acquire `sq_head`, refuse when `tail - head >= entries`, write the SQE and its 1:1 index, release `sq_tail`. The only SQ producer in the tree. |
+| `Claim` | `kernel/loom.c::loom_drain_sq` under `l->lock` | CORRECT: read the index and copy the SQE (or count it dropped) while still holding the head. |
+| `Finish` | `kernel/loom.c::loom_sq_release` | advance the private head and release-store the published mirror, still under `l->lock`; the ONLY writer of either (the runner's derived guard checks it). Its KERNEL_TESTS hook is the runtime `Produce` at the permission itself: `loom.sq_release_after_copy` / `_after_index` / `_after_copy_chain`. |
+| `Terminated` | -- | stutter so TLC's deadlock check stays on everywhere else. |
+
 ## loom_multishot.tla — Loom-5 (the multishot op lifecycle; spec-first)
 
 Status: **TLC-green; the Loom-5 SPEC is landed, the Loom-5 IMPL is pending
