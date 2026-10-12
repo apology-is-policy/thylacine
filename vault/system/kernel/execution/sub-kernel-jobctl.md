@@ -228,7 +228,9 @@ candidate; death is not a hot path and the fan is the rare case.
 
 The per-member order is hangup, then the terminate wake, then continue, then
 the caught-note wake, then the job resume: POSIX's order for a newly orphaned
-stopped group (SIGHUP, then SIGCONT). The hangup arms the terminate latch, and
+stopped group (SIGHUP, then SIGCONT). A member that dies of the hangup records
+`SIGHUP` for its parent's packed wait (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
+The hangup arms the terminate latch, and
 the wake unwinds the member's blocked threads to die at their tails. The
 caught-note wake comes after **both** posts because a member may ignore the
 hangup and still catch the continue; a wake between them would find nothing

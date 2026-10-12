@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -882,3 +882,17 @@ Existing numbers whose answers changed, no number or record moved:
   `Error::from_syscall_return` instead of answering `InvalidArgument` for
   every failure. Mirrors: `thyla_jit.h`, `libthyla_rs` (`T_SYS_JIT_CREATE_SEALED`,
   `t_jit_create_sealed`, `jit::SealedRegion`).
+
+## gcpark-b: `WAIT_PACKED` and the signalled wait word (2026-10-12)
+
+`SYS_WAIT_PID` (22) takes a new flag bit, `WAIT_PACKED` (8): return the Linux
+`wait(2)` word for an exit or a death, and report no stop or continue. The
+word itself gained the signalled shape, `signal & 0x7f`, which the kernel now
+records for every death by note (docs/ERRORS.md "The wait status";
+[[sub-kernel-proc]], [[sub-kernel-death]]). Additive, not an ABI break: a
+caller that passes no packing flag still reads the raw status, where a death
+reads 1, and the kernel refuses an unknown bit with -1, so a new caller on an
+old kernel fails loud instead of reading a raw word as packed. Mirrors: libt
+`<thyla/syscall.h>` (`WAIT_PACKED`, `WAIT_IF_SIGNALED`, `WAIT_TERMSIG`),
+`libthyla_rs` (`T_WAIT_PACKED`, `t_wait_if_signaled`, `t_wait_termsig`), and
+Pouch's `POUCH_WAIT_PACKED` in 0026 ([[sub-pouch-process]]).

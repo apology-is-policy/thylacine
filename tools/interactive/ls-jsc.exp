@@ -41,11 +41,25 @@
 #           thread parked instead of suspending it (Thylacine cannot; before
 #           gcpark, jsc died silently, exit 127). 40 rounds each hold an object
 #           only in a JS frame across the wait, then allocate, then check it; the
-#           leg asserts 0 lost AND exit status 0. gc-held waits holding access
-#           (the control: same workload, no release); gc-flash releases it
-#           (flashHeapAccess) under --collectContinuously, gc-flash-dft under the
-#           default collector; gc-idle drops the JSLock and idles in the run loop
-#           until a setTimeout fires, the shape a page process has between events.
+#           leg asserts 0 lost AND exit status 0. What each leg discriminates was
+#           measured on 2026-10-12 against three REDs: R0 (no park at all), R1 (a
+#           park that never marks the thread parked) and R2 (a scan that ignores
+#           the parked images).
+#           - gc-flash releases access each round (flashHeapAccess) under
+#             --collectContinuously. R0 and R1 die. It is the only leg that
+#             catches R2: it lost 3 of 40 objects.
+#           - gc-flash-dft is the same under the default collector. R0 and R1
+#             die; R2 passes.
+#           - gc-idle drops the JSLock and idles in the run loop until a
+#             setTimeout fires, the shape a page process has between events. R0
+#             and R1 die; R2 passes.
+#           - gc-held sleeps holding access, but it is NOT a release-free
+#             control. jsc itself drops the JSLock between its own lock scopes,
+#             before the script (VM setup) and after it (teardown), and the
+#             continuous collector can scan the parked thread there. R0 and R1
+#             died of that (an R1 diag build caught the scan, the target's last
+#             park in jscmain's ~JSLockHolder), but only when the collector ran
+#             inside such a window: one R1 run in three. A weak leg.
 #           Atomics.wait is not a release here: it blocks holding access.
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case

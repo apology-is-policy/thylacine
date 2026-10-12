@@ -26,7 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-09-25
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -223,6 +223,17 @@ restores the terminal and the prompt line discipline on **every** outcome
 including a stop. No note forwarding happens on this path. Every job-control arm
 is inert while `job_control` is `None`, so the console path is unchanged by the
 existence of the other one.
+
+The stop-aware wait returns the kernel's packed `wait(2)` word, and
+`jobs::status_of_packed` turns a reaped one into `$status`: the exit code for
+an exit, **128 + the signal** for a death by note or fault (gcpark-b,
+2026-10-12) — the bash convention, so a job ended by Ctrl-C reads 130 and one
+that called `abort()` 134. The kernel had no signalled shape before gcpark-b,
+and this path read every death as exit 1; with the shape in the word, the old
+decode would have read a death as `$status` 0, which is why the decoder and
+the kernel change landed together. The console path's plain waits stay raw:
+a death there still sets `$status` 1. `status_of_packed_reads_exits_and_deaths`
+is the host test; `pty-4.exp` requires 130 after `fg` + Ctrl-C.
 
 The pts slave is not directly pollable — `dev9p.poll` reports it always-ready —
 so for fd-0 input readiness the shell polls a side fd, `/dev/pts/<n>ready`
@@ -613,3 +624,6 @@ one.
 
 [[chg-2026-09-06-utopia-eval-shell-arc-notes]] folds the `&&`/`||` eval half,
 the six-entry `$path`, `cd --`, and the settled notes-mask changes.
+
+gcpark-b (2026-10-12) adds `jobs::status_of_packed`: a job-control death sets
+`$status` to 128 + the signal.

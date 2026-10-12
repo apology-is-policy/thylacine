@@ -1557,6 +1557,22 @@ Nothing was reaped, so nothing is written to `wstatus`; the handler runs at the
 call's tail. The native `SYS_WAIT` handler and the kernel's own reaper in
 `joey.c` never see -2: neither runs with `note_interruptible` set.
 
+## `SYS_WAIT_PID` admits `WAIT_PACKED`; `viv_wait4` always asks for it (2026-10-12)
+
+`sys_wait_pid_handler` rejects any flag bit outside `WAIT_WNOHANG |
+WAIT_UNTRACED | WAIT_CONTINUED | WAIT_PACKED` (-1), so a caller learns that a
+flag is unknown instead of getting a word it did not ask for. gcpark-b added
+`WAIT_PACKED` (8): the Linux `wait(2)` word for an exit or a death, with no stop
+or continue report and neither latch consumed ([[sub-kernel-proc]]). Pouch's
+`waitpid` passes it on every call. `viv_wait4` passes it too, and stores the
+word the kernel returns unchanged. It used to pack the word itself when no
+PTY-1e flag was asked for, deciding before the call because a raw status and a
+packed stop can be the same number; that repack could only ever say "exited",
+so a guest whose child died of `pipe` read exit 1. Now the kernel records the
+death's signal and the guest reads `WIFSIGNALED` `SIGPIPE`, as on Linux
+(viv-pheno-probe L329/L330 require it). Native callers that pass no packing
+flag still get the raw status, where every death by note reads 1.
+
 ## The sleep rows' shells (2026-10-05, VIVARIUM 6.29)
 
 `viv_nanosleep(req, rem)` and `viv_clock_nanosleep(clk, flags, req, rem)` are

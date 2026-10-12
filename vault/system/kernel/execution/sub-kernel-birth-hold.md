@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/DEBUG-FS-DESIGN.md section 5f", "docs/DELVE-PORT-DESIGN.md section 8c-4"]
 created: 2026-09-29
-updated: 2026-10-06
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -226,7 +226,8 @@ round 1, F8. A sleep that reads group death alone cannot confuse the two.)
 `proc_become_zombie_locked` calls `proc_birth_hold_orphan_rule_locked` before
 it reparents the dying Proc's children, beside the PTY orphan rule. Every
 ALIVE child whose hold is still set is `proc_group_terminate`d with the
-message "launcher exited". That is safe under the table lock (the
+message "launcher exited" and the signal `SIGKILL` (gcpark-b, 2026-10-12), so
+a packed wait reads the child killed. That is safe under the table lock (the
 `devproc_kill_walk_cb` idiom) and idempotent over a child already dying. The
 trigger is the hold alone, not the attachment: a debugger that attached but
 did not stop has not taken the hold over, so that child dies with its spawner

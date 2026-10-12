@@ -241,7 +241,10 @@ That is what makes the scope guarantee tractable: **I-25's privilege
 property rests on the root alone.** A member never holds the elevated caps,
 so a straggler the teardown sweep misses is an unelevated Proc with a stale
 tag — untidy, not a violation. The teardown walk is a tidiness sweep; the
-root dies on its own exit or self-terminates at `valid_until`.
+root dies on its own exit or self-terminates at `valid_until`. A member the
+sweep terminates dies as if killed: `proc_group_terminate(m, NOTE_SIG_KILL,
+"legate scope ended")` records `SIGKILL`, so a waiting parent's packed word
+reads `WIFSIGNALED` `SIGKILL` (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
 
 **The arm-6 session hangup is this teardown's structural sibling, and is *not* a
 cap.** `proc_session_hangup_if_leader` ([[sub-kernel-death]]) rides the same

@@ -63,7 +63,11 @@ POUCH_CENSUS_MEM)` after the malloc smoke (twelve legs of the exact memory
 seam, the mallocng witness among them -- [[sub-pouch-mem]]), and
 `pouch_smoke_one_expect_fault("pouch-hello-guard", POUCH_CENSUS_GUARD)` after
 the fault smoke (a worker's write into its own guard dies of `snare:segv`);
-`/pouch-hello-threads`'s census grew by three legs. Both rungs are boot-fatal like every other. The marker goes out on fd 1
+`/pouch-hello-threads`'s census grew by three legs. gcpark-b (2026-10-12)
+matches `/pouch-hello-signals` on `POUCH_CENSUS_SIGNALS` too: its `deaths` leg
+(abort, assert, `brk #1` and a NULL store, each read back as the signal it
+died of) is what tells the new binary from an old one that also exits 0.
+Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
 

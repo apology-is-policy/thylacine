@@ -253,13 +253,20 @@ when the scan runs is fatal (`FATAL: the conservative scan found thread N
 running without a published stack image`), never skipped: skipping it would
 lose its roots silently.
 
-A WebKit `CRASH()`/`RELEASE_ASSERT` is `abort()`, which on Pouch is a
-SILENT `_Exit(127)` — the same number `ut` reports for "command not found",
-and `ut` does not clear `$errstr` after a success, so a stale "spawn
-failed" can sit next to it. B-0 lost an hour to exactly that pairing. The
-diagnostic that ended it is twelve lines: an `abort()` override linked
-ahead of `libc.a` that prints return addresses via `_Unwind_Backtrace`,
-symbolized with `llvm-nm -n --demangle` (return address − 4).
+A WebKit `CRASH()`/`RELEASE_ASSERT` is `abort()`. Since gcpark-b (2026-10-12)
+a Pouch `abort()` dies of `snare:abort` ([[sub-pouch-process]]): the console
+prints `user fault: pid=… reason="snare:abort" … pc=… lr=…`, so a crash
+names its program counter without any diagnostic build, and a parent's
+`waitpid` reads `WIFSIGNALED` `SIGABRT` (`ut` sets `$status` 134 under job
+control and 1 on a plain wait). Before that it was a SILENT `_Exit(127)` —
+the same number `ut` reports for "command not found", and `ut` does not
+clear `$errstr` after a success, so a stale "spawn failed" could sit next to
+it. B-0 lost an hour to exactly that pairing, and gcpark's first stop-the-world
+death read the same way. The diagnostic that ended B-0's is twelve lines: an
+`abort()` override linked ahead of `libc.a` that prints return addresses via
+`_Unwind_Backtrace`, symbolized with `llvm-nm -n --demangle` (return
+address − 4); the user-fault line's `pc` and `lr` now give the first two
+frames for free.
 
 ## Performance
 

@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-08
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -345,7 +345,9 @@ NoStrand-resuming a launched child would orphan it to init to run forever — th
 debugger-launched-orphan leak. The #811 death cascade wakes the debug-parked
 threads by their **rendez blocked-on, not `debug_stop_req`**, so each hits the
 EL0-return die-check (death wins over the stop) and terminates; the last out
-ZOMBIEs and init reaps. The mark dies with the slot, and the release also
+ZOMBIEs and init reaps. The death records `SIGKILL` (`proc_group_terminate(p,
+NOTE_SIG_KILL, "debugger exited")`, gcpark-b 2026-10-12), so a waiter's packed
+word reads it as killed, as `PTRACE_O_EXITKILL` would. The mark dies with the slot, and the release also
 `hwdebug_*_clear_all`s the target's breakpoints and watchpoints — an orphaned
 target left armed would re-trap forever.
 
@@ -832,7 +834,7 @@ performance backlog.
 ## The ctl `kill` forces a final close already under way (2026-10-07)
 
 The `kill` verb terminates through `proc_group_kill` instead of
-`proc_group_terminate(target, "killed")`. The termination is the same; the
+`proc_group_terminate(target, NOTE_SIG_KILL, "killed")`. The termination is the same; the
 difference is a target already terminating: there the kill sets
 `PROC_FLAG_EXIT_CLOSE_FORCED` before its death wake, so a final close waiting
 on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
