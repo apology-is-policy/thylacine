@@ -85,7 +85,7 @@ int loom_private_submit(struct Loom *l,struct Proc *p,u32 budget) {
             for(u32 b=0;b<sizeof(copy);++b)to[b]=from[b];
             e->submitting=true; // reserves the precharged rejection record
         } else __atomic_fetch_add(&h->dropped,1,__ATOMIC_RELEASE);
-        ++l->sq_head;__atomic_store_n(&h->sq_head,l->sq_head,__ATOMIC_RELEASE);
+        loom_sq_release(l,h);
         spin_unlock(&l->lock);++consumed;
         if(!valid)continue;
         int rc=frontend_dispatch(l,p,&copy);

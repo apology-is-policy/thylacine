@@ -1,12 +1,18 @@
 #!/bin/sh
 # SQ-1 guest legs, in one lease window:
-#   CONTROL  the committed tree: loom.sq_release_after_copy and
-#            loom.sq_release_after_index PASS, the whole suite passes.
+#   CONTROL  the committed tree: loom.sq_release_after_copy, _after_index and
+#            _after_copy_chain PASS, the whole suite passes.
 #   M1       loom_sq_release moved back above the SQ-index read -- the ordering
-#            loom_drain_sq shipped through a7353c36f. Predicted: exactly those two
-#            tests FAIL, each at its own named assertion, and nothing else.
+#            loom_drain_sq shipped through a7353c36f. Predicted: exactly those
+#            three tests FAIL, each at its own named assertion, and nothing else.
+#   M2       the chain path re-reads the refilled SQE slot instead of keeping the
+#            copy. Predicted: ONLY _after_copy_chain FAILs, at its own assertion.
+#   GUARD    the published sq_head has exactly one writer (loom_sq_release), so
+#            the hook inside it cannot be left behind by a reordered store.
 #   SHAPE    kernel/loom.c compiled with KERNEL_TESTS off: no hook symbol, and
-#            the production loom_drain_sq disassembly retained for the record.
+#            the production disassembly retained for the record.
+# A failed suite always ends in "EXTINCTION: kernel test suite failed"
+# (kernel/main.c): a mutant run must show exactly that extinction and no other.
 # Not proven here: real userspace scheduling (the producer is a deterministic
 # hook at the release), SMP, sanitizers. Mac axis, one boot per run.
 # Derived from work/oct5-as-r9/inner-leg-run.sh (lease, floor, pristine restore,
@@ -21,8 +27,11 @@ YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
 FLOOR_MB=${FLOOR_MB:-8192}
 T_COPY=loom.sq_release_after_copy
 T_INDEX=loom.sq_release_after_index
+T_CHAIN=loom.sq_release_after_copy_chain
 WANT_COPY='the original SQE was copied before its release'
 WANT_INDEX='an out-of-range original index is not consumed as the refill'
+WANT_CHAIN='the chain-routed original SQE was copied before its release'
+SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
 MUTATED=0
@@ -97,13 +106,14 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 HEAD_SHA=$(git rev-parse HEAD)
 record "HEAD $HEAD_SHA"
-for w in "$WANT_COPY" "$WANT_INDEX"; do
+for w in "$WANT_COPY" "$WANT_INDEX" "$WANT_CHAIN"; do
   [ -n "$w" ] || { echo "REFUSING: empty prediction"; exit 3; }
   c=$(/usr/bin/grep -cF "\"$w\"" kernel/test/test_loom.c || true)
   [ "$c" = 1 ] || { echo "REFUSING: '$w' occurs $c times in test_loom.c"; exit 3; }
 done
-[ "$WANT_COPY" != "$WANT_INDEX" ] || { echo "REFUSING: identical predictions"; exit 3; }
-for t in "$T_COPY" "$T_INDEX"; do
+[ "$WANT_COPY" != "$WANT_INDEX" ] && [ "$WANT_COPY" != "$WANT_CHAIN" ] && [ "$WANT_INDEX" != "$WANT_CHAIN" ] || {
+  echo "REFUSING: two predictions are identical"; exit 3; }
+for t in "$T_COPY" "$T_INDEX" "$T_CHAIN"; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
 EXPECT=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c)
@@ -128,61 +138,89 @@ B=$OUT/control-boot.log
 set -- $(tally "$B")
 [ "${2:-}" = "$EXPECT" ] && [ "${1:-}" = "$EXPECT" ] || { echo "control tally '$*' != $EXPECT/$EXPECT"; fails "$B" | head; exit 1; }
 [ "$suite_rc" = 0 ] || { echo "control test.sh exit $suite_rc"; exit 1; }
-for t in "$T_COPY" "$T_INDEX"; do
+for t in "$T_COPY" "$T_INDEX" "$T_CHAIN"; do
   v=$(verdict "$B" "$t")
   [ "$v" = PASS ] || { echo "control: $t verdict '$v'"; exit 1; }
 done
-record "CONTROL GREEN: $EXPECT/$EXPECT, both SQ-1 tests PASS, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
+record "CONTROL GREEN: $EXPECT/$EXPECT, the three SQ-1 tests PASS, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
+SEEN_BINS=$CONTROL_BIN
 
-echo "=== M1: release before the index read ==="
-lease m1
-floor pre-m1
-MUTATED=1
-python3 - <<'PY' || exit 5
+# mutant <label> <python old> <python new> -- applied to PRISTINE kernel/loom.c,
+# built, booted; sets B to its boot log. The caller checks the prediction.
+mutant() {
+  lease "$1"; floor "pre-$1"
+  restore || exit 9
+  MUTATED=1
+  OLD=$2 NEW=$3 LAB=$1 python3 - <<'PY' || exit 5
+import os
 p = 'kernel/loom.c'
 s = open(p).read()
-old = """        u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
+old, new, lab = os.environ['OLD'], os.environ['NEW'], os.environ['LAB']
+n = s.count(old)
+if n != 1:
+    raise SystemExit("REFUSING: %s anchor occurs %d times" % (lab, n))
+open(p, 'w').write(s.replace(old, new, 1))
+PY
+  [ "$(/usr/bin/grep -c 'MUTANT' kernel/loom.c)" = 1 ] || { echo "REFUSING: not exactly one MUTANT site"; exit 5; }
+  diff -u "$PRISTINE" kernel/loom.c > "$OUT/$1.diff" || true
+  tools/build.sh kernel --config ci > "$OUT/$1-build.log" 2>&1 || { echo "$1 build failed"; exit 5; }
+  floor "post-$1-build"
+  inputs "$1"
+  _bin=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
+  case " $SEEN_BINS " in *" $_bin "*) echo "REFUSING: the $1 kernel equals an earlier kernel of this run"; exit 5;; esac
+  SEEN_BINS="$SEEN_BINS $_bin"
+  mkdir -p "$OUT/$1-artifacts-DO-NOT-BOOT"
+  cp build/kernel/thylacine.bin "$OUT/$1-artifacts-DO-NOT-BOOT/"
+  echo "MUTANT $1 kernel. Never boot or promote." > "$OUT/$1-artifacts-DO-NOT-BOOT/WARNING.txt"
+  run_suite "$1"
+  B=$OUT/$1-boot.log
+  _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
+  [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
+  [ "$suite_rc" != 0 ] || { echo "HARNESS: test.sh exit 0 under $1"; exit 2; }
+  restore || exit 9
+  MUTATED=0
+}
+expect_fails() { # expect_fails <label> <count> then "<test>|<message>" pairs
+  _lab=$1; _n=$2; shift 2
+  set -- "$@"
+  _t=$(tally "$B")
+  [ "$_t" = "$((EXPECT - _n)) $EXPECT" ] || { echo "$_lab tally '$_t', predicted $((EXPECT - _n)) $EXPECT"; fails "$B"; exit 2; }
+  for _p in "$@"; do
+    _tn=${_p%%|*}; _m=${_p#*|}
+    _v=$(verdict "$B" "$_tn")
+    [ "$_v" = "FAIL: $_m" ] || { echo "$_lab: $_tn verdict '$_v', predicted 'FAIL: $_m'"; exit 2; }
+  done
+  _nf=$(fails "$B" | wc -l | tr -d ' ')
+  [ "$_nf" = "$_n" ] || { echo "$_lab: $_nf FAIL lines, predicted $_n"; fails "$B"; exit 2; }
+}
+
+echo "=== M1: release before the index read ==="
+mutant m1 \
+'        u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
         have = (sqe_idx < l->sq_entries);
         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
-        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+        else __atomic_fetch_add(&h->dropped, 1u, __ATOMIC_RELEASE);
         loom_sq_release(l, h);                              // only after the copy
-"""
-new = """        u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
+' \
+'        u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
         loom_sq_release(l, h);                              // MUTANT M1: release before the copy
         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
         have = (sqe_idx < l->sq_entries);
         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
-        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
-"""
-n = s.count(old)
-if n != 1:
-    raise SystemExit("REFUSING: M1 anchor occurs %d times" % n)
-open(p, 'w').write(s.replace(old, new, 1))
-PY
-[ "$(/usr/bin/grep -c 'MUTANT' kernel/loom.c)" = 1 ] || { echo "REFUSING: not exactly one MUTANT site"; exit 5; }
-diff -u "$PRISTINE" kernel/loom.c > "$OUT/m1.diff" || true
-tools/build.sh kernel --config ci > "$OUT/m1-build.log" 2>&1 || { echo "m1 build failed"; exit 5; }
-floor post-m1-build
-inputs m1
-M1_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
-[ "$M1_BIN" != "$CONTROL_BIN" ] || { echo "REFUSING: M1 kernel identical to control"; exit 5; }
-mkdir -p "$OUT/m1-artifacts-DO-NOT-BOOT"
-cp build/kernel/thylacine.bin "$OUT/m1-artifacts-DO-NOT-BOOT/"
-echo "MUTANT M1 kernel. Never boot or promote." > "$OUT/m1-artifacts-DO-NOT-BOOT/WARNING.txt"
-run_suite m1
-B=$OUT/m1-boot.log
-/usr/bin/grep -q '^EXTINCTION:' "$B" && { echo "M1 EXTINCTED: not the prediction"; exit 2; } || true
-[ "$suite_rc" != 0 ] || { echo "HARNESS: test.sh exit 0 under M1"; exit 2; }
-set -- $(tally "$B")
-[ "${2:-}" = "$EXPECT" ] && [ "${1:-}" = "$((EXPECT - 2))" ] || { echo "M1 tally '$*', predicted $((EXPECT - 2))/$EXPECT"; fails "$B"; exit 2; }
-v=$(verdict "$B" "$T_COPY");  [ "$v" = "FAIL: $WANT_COPY" ]  || { echo "M1: $T_COPY verdict '$v'"; exit 2; }
-v=$(verdict "$B" "$T_INDEX"); [ "$v" = "FAIL: $WANT_INDEX" ] || { echo "M1: $T_INDEX verdict '$v'"; exit 2; }
-nf=$(fails "$B" | wc -l | tr -d ' ')
-[ "$nf" = 2 ] || { echo "M1: $nf FAIL lines, predicted 2"; fails "$B"; exit 2; }
-restore || exit 9
-MUTATED=0
-record "M1 DISCRIMINATED: $((EXPECT - 2))/$EXPECT, exactly $T_COPY and $T_INDEX FAIL at their named assertions"
+        else __atomic_fetch_add(&h->dropped, 1u, __ATOMIC_RELEASE);
+'
+expect_fails M1 3 "$T_COPY|$WANT_COPY" "$T_INDEX|$WANT_INDEX" "$T_CHAIN|$WANT_CHAIN"
+record "M1 DISCRIMINATED: $((EXPECT - 3))/$EXPECT, exactly $T_COPY, $T_INDEX and $T_CHAIN FAIL at their named assertions; extinction set = the suite's own"
+
+echo "=== M2: the chain path re-reads the shared SQE ==="
+mutant m2 \
+'            ce->sqe   = ksqe;
+' \
+'            ce->sqe   = sqes[sqe_idx];                     // MUTANT M2: re-read after release
+'
+expect_fails M2 1 "$T_CHAIN|$WANT_CHAIN"
+record "M2 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_CHAIN FAILs at its named assertion; extinction set = the suite's own"
 
 echo "=== rebuild the committed tree, then SHAPE ==="
 lease rebuild
@@ -190,6 +228,20 @@ tools/build.sh kernel --config ci > "$OUT/rebuild.log" 2>&1 || { echo "rebuild f
 REB_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
 [ "$REB_BIN" = "$CONTROL_BIN" ] && record "rebuild byte-identical to the control kernel" \
   || record "rebuild differs from the control kernel (recorded, not claimed identical)"
+# THE SINGLE-WRITER GUARD, derived from the tree rather than pinned to a name:
+# every production store to a published or private sq_head must sit inside
+# loom_sq_release, or a reordered store could leave the hook behind.
+PROD=$(find kernel mm arch -name '*.[ch]' -not -path 'kernel/test/*' | sort)
+NPROD=$(echo "$PROD" | wc -l | tr -d ' ')
+[ "$NPROD" -ge 100 ] || { echo "REFUSING: only $NPROD production sources found"; exit 7; }
+echo "$PROD" | xargs /usr/bin/grep -nE '__atomic_(store|exchange|compare_exchange|fetch_[a-z]+|[a-z]+_fetch)(_n)?\(&[^,]*sq_head|sq_head *(\+\+|\+=|-=|=[^=])|(\+\+|--) *[A-Za-z_>.-]*sq_head' > "$OUT/sq_head-writers.txt" || true
+FN0=$(/usr/bin/grep -n '^void loom_sq_release(' kernel/loom.c | cut -d: -f1)
+FN1=$(awk -v a="$FN0" 'NR > a && /^}/ {print NR; exit}' kernel/loom.c)
+[ -n "$FN0" ] && [ -n "$FN1" ] || { echo "REFUSING: loom_sq_release not found"; exit 7; }
+NW=$(wc -l < "$OUT/sq_head-writers.txt" | tr -d ' ')
+OUTSIDE=$(awk -F: -v a="$FN0" -v b="$FN1" '!($1 == "kernel/loom.c" && $2 > a && $2 < b)' "$OUT/sq_head-writers.txt")
+[ "$NW" = 2 ] && [ -z "$OUTSIDE" ] || { echo "GUARD: sq_head writers outside loom_sq_release (or not exactly 2):"; cat "$OUT/sq_head-writers.txt"; exit 7; }
+record "GUARD: $NPROD production sources; the 2 sq_head writes (advance + publish) are both inside loom_sq_release (loom.c:$FN0-$FN1)"
 SH=$OUT/shape; mkdir -p "$SH"
 CCX=$(sed -n 's/^set(CMAKE_C_COMPILER "\(.*\)")$/\1/p' build/kernel/CMakeFiles/*/CMakeCCompiler.cmake | head -1)
 TOOLS=$(dirname "$CCX")

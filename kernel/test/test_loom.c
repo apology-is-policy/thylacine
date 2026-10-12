@@ -51,6 +51,7 @@ void test_loom_dup_rejected(void);
 void test_loom_enter_nop(void);
 void test_loom_sq_release_after_copy(void);
 void test_loom_sq_release_after_index(void);
+void test_loom_sq_release_after_copy_chain(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
@@ -1186,13 +1187,13 @@ static void sq_refill_producer(struct Loom *l) {
     __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
 }
 // Observes everything and drops the Loom before the caller asserts anything.
-static bool sq_refill_run(bool bad_index, struct sq_refill_obs *o) {
+static bool sq_refill_run(bool bad_index, u8 flags, struct sq_refill_obs *o) {
     struct Loom *l = loom_create(1, 2, false);
     if (!l) return false;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
     u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
-    loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x111ULL);
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, flags, 0, 0, 0x111ULL);
     if (bad_index) sqa[0] = 7;
     __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
 
@@ -1218,7 +1219,7 @@ static bool sq_refill_run(bool bad_index, struct sq_refill_obs *o) {
 // A valid original completes with its own cookie, then the refill with its own.
 void test_loom_sq_release_after_copy(void) {
     struct sq_refill_obs o;
-    TEST_ASSERT(sq_refill_run(false, &o), "loom_create(1,2)");
+    TEST_ASSERT(sq_refill_run(false, 0, &o), "loom_create(1,2)");
     TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first sq_head release");
     TEST_EXPECT_EQ(o.n1, 1, "the original SQE is consumed");
     TEST_EXPECT_EQ(o.dropped, 0u, "nothing dropped");
@@ -1231,11 +1232,28 @@ void test_loom_sq_release_after_copy(void) {
     TEST_EXPECT_EQ(o.head, 2u, "each position released exactly once");
 }
 
+// The same with a DRAIN original, so it is routed through the LINK/DRAIN chain:
+// the held entry must carry the copy, not a later read of the refilled slot.
+void test_loom_sq_release_after_copy_chain(void) {
+    struct sq_refill_obs o;
+    TEST_ASSERT(sq_refill_run(false, LOOM_SQE_DRAIN, &o), "loom_create(1,2)");
+    TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first sq_head release");
+    TEST_EXPECT_EQ(o.n1, 1, "the chain-routed original SQE is consumed");
+    TEST_EXPECT_EQ(o.dropped, 0u, "nothing dropped");
+    TEST_EXPECT_EQ(o.tail1, 1u, "the chain-routed original posts one CQE");
+    TEST_EXPECT_EQ(o.first_ud, (u64)0x111ULL, "the chain-routed original SQE was copied before its release");
+    TEST_EXPECT_EQ(o.first_res, 0, "the chain-routed original NOP result");
+    TEST_EXPECT_EQ(o.n2, 1, "the refill is consumed by the next enter");
+    TEST_EXPECT_EQ(o.tail2, 2u, "the refill posts exactly one CQE");
+    TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
+    TEST_EXPECT_EQ(o.head, 2u, "each position released exactly once");
+}
+
 // An out-of-range original index stays dropped: the refill's valid index, written
 // after the release, must not be read in its place.
 void test_loom_sq_release_after_index(void) {
     struct sq_refill_obs o;
-    TEST_ASSERT(sq_refill_run(true, &o), "loom_create(1,2)");
+    TEST_ASSERT(sq_refill_run(true, 0, &o), "loom_create(1,2)");
     TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first sq_head release");
     TEST_EXPECT_EQ(o.n1, 0, "an out-of-range original index is not consumed as the refill");
     TEST_EXPECT_EQ(o.dropped, 1u, "the out-of-range original index is counted dropped");

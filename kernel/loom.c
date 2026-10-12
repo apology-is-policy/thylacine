@@ -3349,9 +3349,10 @@ void loom_sq_release_hook_for_test(void (*hook)(struct Loom *)) {
 // Advance and publish sq_head past one consumed position. The published head is
 // the producer's permission to refill that position's SQ-index entry and, under
 // the 1:1 convention Ring::try_submit follows, its SQE: so the caller must have
-// read the index and copied the SQE first. Caller holds l->lock. The test hook
-// runs HERE, at the permission itself, so it moves with any reordering.
-static void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h) {
+// read the index and copied the SQE first. Caller holds l->lock. The only writer
+// of the published head; the test hook runs HERE, at the permission itself, so
+// it moves with any reordering.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h) {
     l->sq_head++;
     __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);
 #ifdef KERNEL_TESTS
@@ -3373,8 +3374,8 @@ static void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h) {
 //
 // F1: each per-slot claim (the sq_head read, the SQE read+copy, then the advance)
 // runs under l->lock so two concurrent consumers on the same ring (two ENTERs of a
-// multi-thread Proc, or an ENTER racing the SQPOLL kthread) never read the same
-// sq_head -> never double-dispatch a slot or lose an sq_head update; each
+// multi-thread Proc; an SQPOLL ring is drained by its kthread alone) never read
+// the same sq_head -> never double-dispatch a slot or lose an sq_head update; each
 // iteration atomically claims exactly one slot. The lock excludes other kernel
 // consumers only, never the producer: see loom_sq_release (specs/loom_sq.tla).
 // loom_submit_one / the chain enqueue run OUTSIDE the lock (a separate,
@@ -3436,7 +3437,7 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
         have = (sqe_idx < l->sq_entries);
         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
-        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+        else __atomic_fetch_add(&h->dropped, 1u, __ATOMIC_RELEASE);
         loom_sq_release(l, h);                              // only after the copy
         // Route under the SAME lock so the chain-non-empty test is consistent with
         // the snapshot we just took (the chain only grows during this call).

@@ -654,6 +654,9 @@ void loom_handle_closed(struct Loom *l);
 // External close prerequisite changed; caller retains l, no outer locks.
 // Call only AFTER ending the physical borrow; internal close puts are quiet.
 void loom_private_close_changed(struct Loom *l);
+// Publish sq_head past one consumed position, after its index and SQE are copied.
+// Caller holds l->lock.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h);
 #ifdef KERNEL_TESTS
 // Runs under l->lock right after sq_head is published; shared ring memory only.
 void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));

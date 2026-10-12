@@ -192,7 +192,8 @@ consume the new entry in the old position's place and again in its own, and
 never consume the old one — a lost and a doubled submission, reachable under
 SQPOLL or a sibling-thread producer (`specs/loom_sq.tla`,
 `BUGGY_RELEASE_BEFORE_COPY`). The private frontend's consumer
-(`loom_private_submit`) already copied before releasing.
+(`loom_private_submit`) already copied before releasing; it now publishes through
+the same `loom_sq_release`, which is the only writer of the published head.
 
 Operations whose encoding needs more fields than the resolved state carries keep
 the whole copied entry alongside the in-flight operation, so a builder running
