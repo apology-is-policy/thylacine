@@ -1,0 +1,13 @@
+NA-2a pre-audit boots of the tree committed as the NA-2a code commit (parent 61bb40d1b); mac lease (corona, from 11:52Z).
+build logs last written (UTC): default 2026-10-12T11:54:04Z, qual 2026-10-12T11:57:14Z; boot logs: default 2026-10-12T11:58:13Z, qual 2026-10-12T11:59:06Z
+boot-d:  tests: 1870/1870 PASS
+    [test] loom.bridge_probe ... loom-bridge-probe: default image refuses every private route
+    loom-bridge-probe status=70 expected=70
+boot-q:  tests: 1870/1870 PASS
+    [test] loom.bridge_probe ... loom-bridge-probe: qualification image routes every private syscall from EL0
+    loom-bridge-probe status=71 expected=71
+probe: 76656 bytes, undefined symbols 0, mem* symbols 0, baked once in build/ramfs.cpio
+e59420be602cebcbe89615c80e670255a613e2bf8f95551838760c4b177f52aa  build/kernel/thylacine.bin
+4ee7ea51b1ddd4fee202a702c3b9917d12eddd5719409d4c04abdbb11e61a975  build/kernel-private-async-qual/thylacine.bin
+64466cefb17862f208562e979885b5526136ad9790107a4a21c19e1db413a139  build/ramfs.cpio
+11c6fee680f1bf26ff97c6b2b9135de888b7b56544bc085a68e4a7dcca20c9fd  build/usr/loom-bridge-probe/loom-bridge-probe

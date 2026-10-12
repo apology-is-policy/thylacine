@@ -7,6 +7,7 @@ code:
   - kernel/loom_service_syscall.c
   - kernel/include/thylacine/loom_service_syscall.h
   - kernel/test/loom_bridge_fixture.h
+  - kernel/test/test_loom_bridge_probe.c
 audit: hard
 guarded-by: [inv-i5, inv-i7, inv-i29, inv-i30, inv-i32]
 validated-by: [spec-loom-sq]
@@ -130,6 +131,46 @@ syscall-side record copy and copyout live in `sys_loom_register_private` and
 `loom_record_copyout_user` (kernel/syscall.c). This file takes kernel copies and
 a caller-supplied copyout, so fixtures drive it with a faulting copyout.
 
+### The EL0 probe (NA-2a)
+
+The fixtures call the inners directly, with a kernel-side copyout. Only a real
+syscall from EL0 reaches the handlers' argument decoding and their byte-wise
+usercopy. `usr/loom-bridge-probe` is a native C program over libt's
+`thyla/loom.h` ([[sub-kernel-syscall-abi]]), shipped in every ramfs. The test
+`loom.bridge_probe` spawns it and holds it to the verdict the kernel's own
+lever implies: exit 70 without the lever, 71 with it, anything else a failure.
+The probe infers its mode from its first private setup. Because the expected
+code comes from the kernel's build and not from the probe, a kernel that routes
+when it should refuse fails the test, and so does the reverse.
+
+Its fault pages are one `SYS_BURROW_RESERVE` cut by `SYS_BURROW_PROTECT` into
+RW, R and none, never unmapped. The setup that is meant to fault creates and
+maps a ring first. If the fault page were a hole, that ring could land in it
+and the copyout would succeed.
+
+What it checks, by image:
+- **Default.** Each private setup returns -EOPNOTSUPP without writing past
+  `flags`, and register ops 2..9 are refused before any fd lookup. Afterwards
+  an ordinary ring gets the same fd and address as before the refusals.
+- **Qualification.** It checks:
+  - the setup refusals;
+  - the geometry and header words the kernel wrote, against the mirror;
+  - two copyout faults (a read-only params page, and params running into one).
+    Each must leave partial bytes, which shows the ring existed, and the next
+    setup must get the same fd and address.
+  - each register record's copyin fault, which burns no incarnation, against
+    its result-copyout fault, which burns exactly one;
+  - the argument refusals (nargs, null, kernel address, closed fd, a pipe, an
+    unknown version, op 10);
+  - QUERY, REAP and ABORT, a TARGET with an absent registry fd, and the pool
+    round trip;
+  - ENTER's refusals and two rejected SQEs. Their CQEs carry distinct errnos,
+    which shows which mirrored field the kernel decoded. They are reaped after
+    poll(2) reports POLLIN, and poll must report nothing once they are reaped.
+
+The test then waits for exactly the four private rings the probe made to
+retire.
+
 ## Data structures
 
 None of its own. The record buffer is kmalloc'd per call (the largest record,
@@ -185,9 +226,9 @@ Each is predicted red by name in `na1-run.sh`.
 
 ## Seams
 
-- **NA-2.** The C adapter in libt over these syscalls, and an EL0 probe in a
-  separately baked qualification image. The handlers' usercopy can only be
-  exercised from EL0.
+- **NA-2.** NA-2a (the EL0 probe and libt's ring mirror and stubs) is above.
+  NA-2b installs the owned-client C cores over those stubs. They allocate and
+  native C has no heap, so how they get storage is an open design question.
 - **NA-3.** The Rust adapter.
 - **NA-4.** poll wake/park and creator/control wiring.
 - Activation of the whole arc is a separate gate. This lever is a

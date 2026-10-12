@@ -2519,4 +2519,53 @@ static inline long t_srv_registry_new(long source, const struct t_srv_route *rou
     return x0;
 }
 
+// Anonymous memory in the burrow window. ATTACH (eager RW) and DETACH answer
+// vaddr or 0 / -1; RESERVE (lazy, minted at prot) and PROTECT answer vaddr or
+// 0 / -errno. Prot bits mirror the kernel's BURROW_PROT_*; X is never a target.
+#define T_SYS_BURROW_ATTACH  37
+#define T_SYS_BURROW_DETACH  38
+#define T_SYS_BURROW_RESERVE 124
+#define T_SYS_BURROW_PROTECT 125
+#define T_BURROW_PROT_NONE   0u
+#define T_BURROW_PROT_READ   1u
+#define T_BURROW_PROT_WRITE  2u
+#define T_BURROW_PROTECT_SEAL 1u
+
+static inline long t_burrow_attach(unsigned long length) {
+    register long x0 __asm__("x0") = (long)length;
+    register long x8 __asm__("x8") = T_SYS_BURROW_ATTACH;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+static inline long t_burrow_detach(unsigned long va, unsigned long length) {
+    register long x0 __asm__("x0") = (long)va;
+    register long x1 __asm__("x1") = (long)length;
+    register long x8 __asm__("x8") = T_SYS_BURROW_DETACH;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+static inline long t_burrow_reserve(unsigned long length, unsigned long prot,
+                                    unsigned long align_log2) {
+    register long x0 __asm__("x0") = (long)length;
+    register long x1 __asm__("x1") = (long)prot;
+    register long x2 __asm__("x2") = (long)align_log2;
+    register long x8 __asm__("x8") = T_SYS_BURROW_RESERVE;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+static inline long t_burrow_protect(unsigned long va, unsigned long length,
+                                    unsigned long prot, unsigned long flags) {
+    register long x0 __asm__("x0") = (long)va;
+    register long x1 __asm__("x1") = (long)length;
+    register long x2 __asm__("x2") = (long)prot;
+    register long x3 __asm__("x3") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_BURROW_PROTECT;
+    __asm__ volatile ("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+                      : "memory", "cc");
+    return x0;
+}
+
 #endif // THYLA_SYSCALL_H

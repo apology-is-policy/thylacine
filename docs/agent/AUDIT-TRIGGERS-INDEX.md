@@ -246,4 +246,4 @@
 - **AS-2h paired payload receipts** -- `kernel/loom.c`, `loom.h`, shared native/host receipt fixture; bounded optional layout and CQ/receipt/lease publication.
 
 - **Private async operation integration (October10)** -- `kernel/loom_service_{wire,program,rpc,admission,io,provided,retirement,ready,action,frontend}.c` and matching headers; immutable admission, payload/terminal lifetime and READY/close fairness.
-- **Private Loom syscall bridge (October 12)** -- `kernel/loom_service_syscall.{c,h}`, `loom_bridge_fixture.h`, the Loom routing in `kernel/syscall.c` and the `PRIVATE_ASYNC_QUAL` lever; default-image refusal, post-install lifetime, exact-once charge settlement, publish-after-copyout.
+- **Private Loom syscall bridge (October 12)** -- `kernel/loom_service_syscall.{c,h}`, `loom_bridge_fixture.h`, the Loom routing in `kernel/syscall.c` and the `PRIVATE_ASYNC_QUAL` lever; default-image refusal, post-install lifetime, exact-once charge settlement, publish-after-copyout. NA-2a: `usr/loom-bridge-probe`, `test_loom_bridge_probe.c`, libt `thyla/loom.h` + burrow stubs (the lever-pinned EL0 probe).

@@ -10,6 +10,7 @@ pinned-by:
 mirrors:
   - "usr/lib/libthyla-rs/src/loom.rs: Sqe / Cqe / BufReg / Params (size + full offset_of! sets)"
   - "usr/lib/libthyla-rs/src/loom.rs: the ring header as five bare offset constants (HDR_SQ_HEAD=0 .. HDR_FLAGS=32), no struct, no assert"
+  - "usr/lib/libt/include/thyla/loom.h: t_loom_params / t_loom_sqe / t_loom_cqe / t_loom_ring_hdr / t_loom_buf_reg (size + every field offset); loom-bridge-probe checks them against the kernel's own writes"
 created: 2026-08-02
 updated: 2026-10-12
 ---
@@ -29,8 +30,10 @@ drives them, and R-messages return as completion entries. The whole
 transport is **five structures on a page both sides write**, so the layout is
 not a convenience — it is the protocol.
 
-Unlike [[abi-t-stat]], these five legacy ring structures have exactly **one**
-mirror, `libthyla-rs`.
+These five ring structures have two mirrors. `libthyla-rs` has had one since
+Loom-2. Native C gained the second on 2026-10-12 (`thyla/loom.h`, NA-2a). It has
+a static assert on every field offset, and `loom-bridge-probe` checks it against
+a live ring's params, header words and CQEs.
 Neither pouch nor the Go fork speaks Loom; the ring is native-only.
 
 | struct | size | role | writer |

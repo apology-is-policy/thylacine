@@ -9,6 +9,7 @@ code:
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libt/include/thyla/poll.h
   - usr/lib/libt/include/thyla/loom_service.h
+  - usr/lib/libt/include/thyla/loom.h
   - usr/lib/libt/src/start.S
   - usr/lib/libthyla-rs/src/lib.rs
   - usr/lib/libthyla-rs/src/pty_interaction.rs
@@ -20,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-04
+updated: 2026-10-12
 ---
 ## Session registry factory ABI
 
@@ -870,3 +871,22 @@ provided-buffer create/receipt/return/query layouts. Every field offset and size
 is asserted; new pool records also assert eight-byte alignment. No wrappers or
 syscall numbers are added, and no private mode is enabled. See [[abi-loom-service]]
 and [[sub-kernel-loom]]; tools/check-loom-service-abi.py checks independent bytes.
+
+## Native C Loom ring stubs and burrow stubs (NA-2a, 2026-10-12)
+
+`thyla/loom.h` adds the native C mirror of the ring records in
+[[abi-loom-ring]] (params 88, SQE 64, CQE 16, header 64, buffer registration
+16). It asserts every field offset, not just the two the kernel pins. It also
+adds the three Loom stubs, SETUP 66, REGISTER 67 and ENTER 68, with their
+return contracts:
+- On the legacy route, setup answers fd or -1.
+- On the private route, it answers fd or -errno.
+- A params block the kernel cannot read answers -1 before any route is chosen.
+
+libt's `syscall.h` gains stubs for burrow ATTACH 37 and DETACH 38 (vaddr or 0,
+or -1) and RESERVE 124 and PROTECT 125 (vaddr or 0, or -errno). It also gains
+the prot bits that mirror `BURROW_PROT_*`. Before this, native C reached none of
+them. These declarations route nothing and enable nothing: the private routes
+stay behind the kernel's qualification lever ([[sub-kernel-loom-bridge]]).
+`loom-bridge-probe` is the first consumer, and the only check on these mirrors
+against the kernel's own writes.

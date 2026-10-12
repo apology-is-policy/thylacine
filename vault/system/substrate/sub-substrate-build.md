@@ -101,6 +101,11 @@ release default, and `build.sh` builds that kernel into
 ([[sub-kernel-loom-bridge]]). `test-build-config.sh` pins both the refusal and
 the export.
 
+The lever selects a kernel, never a ramfs. `build/ramfs.cpio` is shared by every
+kernel dir, so its contents cannot differ by image. The bridge's EL0 probe,
+`loom-bridge-probe`, therefore sits in the curated `usr_bins` list of every
+image. The kernel test holds it to the verdict its own lever implies.
+
 An input the manifest does not declare is invisible twice over: `forage.sh
 status` cannot report it missing, and whatever it feeds degrades without a
 word. The static Linux git (`/viv/bin`, and the git-probe / git-net /

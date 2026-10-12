@@ -3582,3 +3582,9 @@ reading this path. Both were live on main a7353c36f, and both are fixed in
   `sys_loom_setup_rollback`: `handle_close` followed by a settling detach.
   Witnesses: `loom.setup_rollback_settles`, and the default body of
   `loom.private_bridge`.
+
+**NA-2a (October 12).** `loom.bridge_probe` drives the same routes from EL0
+through `/bin/loom-bridge-probe`. The status it requires comes from the
+kernel's own lever: 70 for the default image, 71 for the qualification image.
+In the qualification image it also requires exactly the probe's four private
+rings to retire. The detail is in [[sub-kernel-loom-bridge]], "The EL0 probe".

@@ -286,3 +286,10 @@ work; the record does not assert a new independent adversarial audit.
 - every path by which a mapping's pages can reach ANOTHER Proc (fork, rfork, `SYS_WEFT_SHARE`, any future export) refuses a `VMA_FLAG_PRIVATE_RING` VMA. Round 1's own prosecutor checked the paths it was named and missed weft share (S1, closed with mutant M7).
 
 The independent review is the NA-1 audit round (Fable reviewing Opus). An EL0 probe of the handlers' usercopy is owed to NA-2.
+
+**NA-2a addendum (EL0 probe).** It adds `usr/loom-bridge-probe/loom-bridge-probe.c`, `kernel/test/test_loom_bridge_probe.c`, libt's `thyla/loom.h` (the native C ring mirror and the three Loom stubs) and libt's burrow stubs (37, 38, 124, 125). Prosecute:
+- the verdict pin: the expected exit status comes from the kernel's compile-time lever, never from the probe. Can any state the probe observes make a wrong image pass?
+- each probe check against the kernel path it claims to reach. Name the check whose truth a broken kernel would leave unchanged, such as a check satisfied by a fresh ring's zeroed memory.
+- the fault-page construction: can any setup or register call meant to fault find a mapping where its fault was expected?
+- the mirror: every C offset against the kernel struct, and every return contract written in `thyla/loom.h` against the handler;
+- the retirement count: can the probe's rings retire uncounted, or an unrelated ring be counted?

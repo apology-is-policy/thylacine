@@ -9,7 +9,7 @@ code:
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
-updated: 2026-10-10
+updated: 2026-10-12
 ---
 
 ## Purpose
@@ -1257,3 +1257,21 @@ dependency changes; do not rerun unchanged suites or invent mechanisms to stay b
 CompleteAS3,AS4,MM0-MM4 remain incomplete; heartbeat ACTIVE. Protected10, clean
 external61dde37 and parked patch/restored kernel preserved. Single-agent self-review,
 no independent audit, Main landing, private activation or128MiB protection change.
+
+### Corona, October 12: SQ-1, NA-1 and the first lever-pinned EL0 probe
+
+Counted from test.c's table rows (one row per registered test, the same derived
+count the guest runners require). SQ-1 and NA-1 brought the suite to 1869
+registrations, and NA-2a makes it 1870.
+
+The new test is `loom.bridge_probe`. It spawns `/bin/loom-bridge-probe` from the
+ramfs and requires the exit status that the kernel's own qualification lever
+implies: 70 without it, 71 with it ([[sub-kernel-loom-bridge]]). So the same
+registration passes on both images for different reasons, and a PASS line alone
+does not say which kernel booted.
+
+Like every probe-spawning test, it SKIPs (and so PASSes) when its binary is
+absent from the ramfs. The guest runner closes that gap. It requires:
+- the probe's own verdict line, and the status line
+  `loom-bridge-probe status=N expected=N`, each exactly once;
+- that the baked binary matches the built one.
