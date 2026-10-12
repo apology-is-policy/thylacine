@@ -1,0 +1,4 @@
+7fe63e6d923e6eef7a7dd5ab597100342174bf3951df4218ac44638355699ff5  build/kernel/thylacine.bin
+e51abeeeee6eb22494615a29113c588aabef7d4f81cfd446dd2d404904564e93  build/kernel/thylacine.elf
+4b344a67050967a6a82a7f4a22eaf572600ee757e72d8b6cb864c0623ceabbd6  build/ramfs.cpio
+08d8c861a8fc808026a465ff32b70b16ad2a48aee476e0235cc569c57c3ebd97  build/disk.img

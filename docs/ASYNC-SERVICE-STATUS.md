@@ -4013,7 +4013,7 @@ Not proven here: EL0 reaching the handlers' usercopy (NA-2's probe), SMP, and
 sanitizers. The Mac-axis residual is recorded per the operator vote of
 2026-10-07.
 
-## NA-2a: the EL0 bridge probe and the native C Loom stubs (Corona, October 12 -- in progress)
+## NA-2a: the EL0 bridge probe and the native C Loom stubs (Corona, October 12 -- closed)
 
 NA-1 left one claim unproven: that EL0 reaches the handlers' argument
 marshalling and usercopy as the in-kernel fixtures assume. NA-2a closes it with
@@ -4043,4 +4043,18 @@ P3 found by the implementer's own review. The round is not dirty. The close:
   wording.
 - S1: the coverage claim in ASYNC-SERVICE-ABI.md is narrowed, and the POOL QUERY
   copyout fault is added.
-The guest legs (`work/oct12-na2a/na2a-run.sh`) run on the close commit.
+
+The guest legs ran green on caf3e2b19, which is the close dc7feeb0f plus a fix
+to the runner's own guard (`work/oct12-na2a/run-20261012T144128Z`,
+`summary.txt`):
+- the ABI checker passes on the tree and fails on each of three sabotages the
+  headers' own asserts miss;
+- CONTROL-D: 1870/1870, status 70, no private ring made;
+- CONTROL-Q: 1870/1870, status 71, four made and four retired;
+- M10, M14 and M12 (default) and M8, M9, M15, M13 and M11 (qualification) each
+  fail exactly `loom.bridge_probe` at the message predicted for them;
+- both rebuilds are byte-identical to their controls.
+The first run (`run-20261012T142914Z`) refused M13 at that guard: a probe-only
+mutant leaves the kernel byte-identical to its control by construction.
+Not proven here: SMP and the sanitizers (the Mac-gate residual, operator vote
+2026-10-07).

@@ -1,0 +1,8 @@
+mac   HELD by you for 21m, 1.6h left
+        why: NA-2a audit close dc7feeb0f: ABI checker + witness, then na2a-run.sh (2 controls + 8 mutant legs + 2 rebuilds, ~70 min)
+        phase: na2a-run.sh rerun on caf3e2b19 (runner guard fix after run 1 refused M13 at its own check): ABI, D/Q controls, 8 mutants, rebuilds (~15 min at run 1's pace)
+        runner: North-Kill-PD.local pid 38350 alive (start Mon Oct 12 16:41:28 2026)
+        pids: [38350] (their registered work -- not a kill list)
+        queue 1: main (15m waiting)
+pi    FREE
+disk: 9.7 GiB available at /Users/northkillpd/projects/thylacine-corona

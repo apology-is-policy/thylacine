@@ -1,6 +1,80 @@
 # The autonomous-run journal
 
 
+## October 12: NA-2a -- the private bridge reached from EL0 (Corona)
+
+NA-1 proved the private routes only through in-kernel fixtures, which call the
+inners with a kernel-side copyout. Nothing had crossed the real argument decoding
+or the byte-wise usercopy. NA-2a adds a native C probe, `loom-bridge-probe`, and
+the libt surface it needs: `thyla/loom.h` (the ring mirror and the three Loom
+stubs) and four burrow stubs. Scripture 61bb40d1b, code 943595911, audit close
+dc7feeb0f, runner fix caf3e2b19.
+
+**Three facts shaped it, each found by reading rather than assuming.**
+- `build/ramfs.cpio` is shared by every kernel build dir, so the probe cannot be
+  baked into the qualification image alone. It ships everywhere, and the kernel
+  test pins the verdict by its own `#ifdef`: exit 70 without the lever, 71 with
+  it. A probe that infers its mode wrongly fails, whichever way it errs.
+- libt's `_start` calls `main()` with no argv, so the verdict travels as an
+  exit code.
+- The fault pages are one RESERVE cut by PROTECT into RW, R and none, never a
+  hole. A one-page ring created by the very setup meant to fault would land in
+  a hole, and the copyout would succeed.
+
+**The NA-2b fork came out of the same survey.** libt is freestanding (no malloc,
+no memcpy), and the C owned-client cores call calloc, free, assert, abort and
+memcpy. They cannot be installed as they are. That question is the operator's.
+
+**What the round caught (Fable 5.1 on Opus 5.5: 0/0/1/6), and what I caught.**
+- F1 (P2): the test SKIPped, and so passed, with the probe absent. A stale
+  ramfs would have passed the suite with no EL0 witness at all. The same trap
+  sits in 17 other probe tests (OPEN-BUGS, owned, now carrying this key as the
+  pattern). This test is keyed on `bin/joey`: a ramfs with init but no probe
+  fails (M12).
+- F3: "retired reached 4" was sampled once, so a fifth ring retiring late would
+  pass. The kernel now also counts created rings (`loom_private_created`). The
+  test waits for every created ring to retire and requires 4 (or 0). M13 makes
+  a fifth ring: the probe passes honestly and the count alone fails it.
+- F4: the reserved params words were checked over my own zero fill. That is the
+  hollow-check class I had caught once already in this chunk (the receipts) and
+  then missed for params. Every setup now runs over 0xA5 (M14).
+- F5: no derived check compared the ring mirrors. The checker's new table showed
+  that the kernel pins only the ring header's size and `sq_head`: swapping two
+  header words passed every assert in the tree (sabotage C). The Rust half moves
+  to NA-3.
+- S1 (mine, while it ran): the scripture paragraph I wrote claimed "each
+  record's copyin and result copyout". The probe covered one copyin and three of
+  the five copyouts. The reviewer read the paragraph but did not test the claim
+  against the code. The closed list now carries "check every sentence of the
+  scripture against what the code covers" for the next prompt. The POOL QUERY
+  copyout no fixture faulted is added (M15).
+
+**Wrong turns.**
+- The first run (`run-20261012T142914Z`) refused M13 at its own guard: "the m13
+  kernel equals an earlier kernel of this run". The guard was written for kernel
+  mutants, and a probe-only mutant leaves the kernel byte-identical by
+  construction. caf3e2b19 makes a probe mutant prove itself by its probe (it
+  must differ) and its kernel (it must equal its control).
+- The ramfs hash differed in all 13 legs of both runs. Before calling that
+  harmless I traced it: each bake mints a fresh libsodium pool key into
+  `bin/system.key`, and mkcpio zeroes the mtimes. The probe is proven per leg by
+  extraction, not by the archive hash.
+
+**Evidence** (`work/oct12-na2a/run-20261012T144128Z/summary.txt`, copied from
+the gitignored boot logs):
+- ABI stage: the checker passes on the tree, and sabotages A, B and C each fail
+  at the checker's own assert.
+- CONTROL-D 1870/1870, `status=70 expected=70`, `rings made=0 retired=0`.
+- CONTROL-Q 1870/1870, `status=71 expected=71`, `rings made=4 retired=4`.
+- M10 and M14 fail at probe lines 156 and 165, M8 at 476, M9 at 345 and M15 at
+  430. M12, M13 and M11 fail at the test's own messages. Every leg's extinction
+  set is exactly the suite's own.
+- Both rebuilds are byte-identical to their controls. Not covered: SMP and the
+  sanitizers (the Mac-gate residual, operator vote 2026-10-07).
+
+**Decisions the operator made:** none new. The two votes of 2026-10-12 (a
+compile lever; an ENTER that never sleeps) govern NA-2a.
+
 ## October 12: NA-1 -- the private Loom syscall bridge (Corona)
 
 Step 1 of the transferred sequence is that userspace must reach the private

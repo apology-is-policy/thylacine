@@ -1,0 +1,2 @@
+PASS: 3 actual mirrors; 30 constants, 10 records and every declared size/offset; ARM64 C layouts.
+PASS: kernel and native C ring mirrors; 32 constants, 5 records, 40 fields against one layout table.

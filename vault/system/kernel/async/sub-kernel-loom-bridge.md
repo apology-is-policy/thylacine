@@ -252,7 +252,16 @@ Each is predicted red by name in `na1-run.sh`.
 
 ## Caveats
 
-- **Audit round 1 (2026-10-12).** Fable 5.1 reviewed Opus 5.5's work and found
+- **NA-2a audit and guest run (2026-10-12).** Round 1 (Fable 5.1 on Opus 5.5)
+  returned 0 P0, 0 P1, 1 P2 and 6 P3, plus one self-found P3; all are closed in
+  dc7feeb0f except the Rust half of F5, which moves to NA-3. The legs ran green
+  on caf3e2b19 (`work/oct12-na2a/run-20261012T144128Z/summary.txt`): both
+  controls 1870/1870, and eight mutants, each failing exactly `loom.bridge_probe`
+  at its own message. SMP and the sanitizers are not covered (the Mac-gate
+  residual). The ramfs hash differs per bake because each bake mints a new pool
+  key into `bin/system.key`; the runner proves the probe by extracting it.
+
+- **NA-1 audit round 1 (2026-10-12).** Fable 5.1 reviewed Opus 5.5's work and found
   0 P0, 0 P1, 0 P2 and 5 P3; I found one P2 myself.
   - **S1 (P2).** `SYS_WEFT_SHARE` admitted a private ring's ANON mapping, so a
     CAP_HW_CREATE holder could export its ring. Fixed by refusing the VMA tag.

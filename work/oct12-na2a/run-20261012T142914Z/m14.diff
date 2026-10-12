@@ -1,0 +1,12 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index f1bc5161f..43ef8952d 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -7969,6 +7969,7 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
+     // so a faulting caller never leaks a ring -- or its charge -- it cannot see.
+     const u8 *src = (const u8 *)&kp;
+     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
++        if (i >= 52 && i < 56) continue; // MUTANT M14
+         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
+             sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
+             return private_ring ? -T_E_FAULT : -1;

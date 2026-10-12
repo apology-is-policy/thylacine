@@ -1,0 +1,13 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index f1bc5161f..fe89e36bf 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -7970,7 +7970,7 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
+     const u8 *src = (const u8 *)&kp;
+     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
+         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
+-            sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
++            if (!private_ring) sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size); // MUTANT M8
+             return private_ring ? -T_E_FAULT : -1;
+         }
+     }

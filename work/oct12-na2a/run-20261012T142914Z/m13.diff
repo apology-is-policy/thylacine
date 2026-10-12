@@ -1,0 +1,12 @@
+diff --git a/usr/loom-bridge-probe/loom-bridge-probe.c b/usr/loom-bridge-probe/loom-bridge-probe.c
+index 5d36c75a1..9dfd12e3b 100644
+--- a/usr/loom-bridge-probe/loom-bridge-probe.c
++++ b/usr/loom-bridge-probe/loom-bridge-probe.c
+@@ -479,6 +479,7 @@ static int run_qual(long fd, long fd0, uint64_t va0, long buf) {
+     qual_enter_and_cq(fd, h, &g_params);
+     qual_register(fd);
+     qual_pool(fd, buf);
++    { static struct t_loom_params extra; if (setup_at(&extra, P | B, 2) < 0) t_exits(3); } // MUTANT M13
+     close_ring(fd, &g_params);
+     t_putstr("loom-bridge-probe: qualification image routes every private syscall from EL0\n");
+     return PASS_QUAL;
