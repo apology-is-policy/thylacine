@@ -6,12 +6,13 @@
 # FIXTURE manifest, and every gather runs under FORAGE_DRY=1 (touch nothing) or
 # resolves to an instruction. ~1 s.
 #
-# FORAGE is overridable so each control can be PROVEN by pointing it at a
-# sabotaged copy (the fail-without-fix check).
+# FORAGE and BUILDSH are overridable so each control can be PROVEN by pointing it
+# at a sabotaged copy (the fail-without-fix check).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FORAGE="${FORAGE:-$REPO_ROOT/tools/forage.sh}"
+BUILDSH="${BUILDSH:-$REPO_ROOT/tools/build.sh}"
 REAL_MANIFEST="$REPO_ROOT/tools/build-manifest.toml"
 
 pass=0; fail=0
@@ -183,14 +184,19 @@ if [[ -f "$TMP/cache/alpine.tar.gz" ]]; then bad "B10 dry-run created a file"; e
 
 # --- C. clone-sparse: a pinned UPSTREAM + an in-repo patch series --------------
 # A local upstream stands in for the network: two dirs (one inside the cone, one
-# outside), a tag, and a one-patch series made with format-patch.
+# outside), a tag, and a one-patch series made with format-patch (series/p). A
+# second, STACKED series (series/s) adds a patch that edits the line the first one
+# wrote, as WebKit's does (0003 corrects a comment 0001 added).
 UP="$TMP/upstream"; SER="$TMP/series"; G="git -c user.name=t -c user.email=t@t -c init.defaultBranch=main"
-mkdir -p "$UP/keep" "$UP/skip" "$SER/p"
+mkdir -p "$UP/keep" "$UP/skip" "$UP/Source/JavaScriptCore" "$SER/p" "$SER/s"
 $G -C "$UP" init -q && echo one > "$UP/keep/a.txt" && echo x > "$UP/skip/b.txt"
+for i in $(seq 1 20); do echo "m$i"; done > "$UP/keep/m.txt"
+echo "project(JavaScriptCore)" > "$UP/Source/JavaScriptCore/CMakeLists.txt"
 $G -C "$UP" add -A && $G -C "$UP" commit -qm base && $G -C "$UP" tag v1
 PINSHA="$($G -C "$UP" rev-parse HEAD)"
-$G clone -q "$UP" "$TMP/mk" && echo two > "$TMP/mk/keep/a.txt"
+$G clone -q "$UP" "$TMP/mk" && echo two > "$TMP/mk/keep/a.txt" && sed -i.bak 's/^m2$/M2/' "$TMP/mk/keep/m.txt" && rm -f "$TMP/mk/keep/m.txt.bak"
 $G -C "$TMP/mk" commit -qam port && $G -C "$TMP/mk" format-patch -q -1 -o "$SER/p"
+echo two-b > "$TMP/mk/keep/a.txt" && $G -C "$TMP/mk" commit -qam stack && $G -C "$TMP/mk" format-patch -q -2 -o "$SER/s"
 sparse_fix() {   # COMMIT [PATH] -> a manifest with one clone-sparse section
     cat > "$TMP/sparse.toml" <<EOF2
 [meta]
@@ -204,7 +210,7 @@ tag = "v1"
 commit = "$1"
 branch = "port"
 sparse = "keep"
-patches = "series/p"
+patches = "${3:-series/p}"
 feeds = "thing feed"
 forageable = "clone-sparse"
 EOF2
@@ -255,6 +261,72 @@ assert_grep "$out" "source.thing: .*full is not a sparse checkout" "C5 names the
 if [[ "$(git -C "$TMP/full" rev-parse HEAD)" == "$h5" && -e "$TMP/full/skip/b.txt" \
       && "$(git -C "$TMP/full" config --bool core.sparseCheckout)" != true ]]; then
     ok "C5 full checkout left as it was"; else bad "C5 forage modified a full checkout"; fi
+
+# C6/C7: a STACKED series gathers, and a second gather finds both patches applied
+# (asked one patch at a time, 0001 no longer reverse-applies and the checkout
+# would be called drifted).
+sparse_fix "$PINSHA" "$TMP/cs" series/s
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -eq 0 && "$(cat "$TMP/cs/keep/a.txt" 2>/dev/null)" == "two-b" ]]; then ok "C6 stacked series applied in order"; else bad "C6 stacked series: rc=$rc $out"; fi
+h6="$(git -C "$TMP/cs" rev-parse HEAD 2>/dev/null)"
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -eq 0 ]]; then ok "C7 second gather of a stacked series exits zero"; else bad "C7 stacked series called drifted: $out"; fi
+assert_grep "$out" "0002-stack.patch: already applied" "C7 the stacked patch reads as applied"
+if [[ "$(git -C "$TMP/cs" rev-parse HEAD 2>/dev/null)" == "$h6" ]]; then ok "C7 HEAD unchanged"; else bad "C7 HEAD moved"; fi
+
+# C8: a checkout at the pin plus a PREFIX of the series gets only the rest
+sparse_fix "$PINSHA" "$TMP/cp" series/p
+runs source.thing > /dev/null 2>&1
+sparse_fix "$PINSHA" "$TMP/cp" series/s
+out="$(runs source.thing 2>&1)"; rc=$?
+assert_grep "$out" "0001-port.patch: already applied" "C8 the applied prefix is recognised"
+assert_grep "$out" "0002-stack.patch: applied" "C8 the rest of the series is applied"
+if [[ $rc -eq 0 && "$(cat "$TMP/cp/keep/a.txt" 2>/dev/null)" == "two-b" ]]; then ok "C8 checkout reaches the whole series"; else bad "C8 rc=$rc"; fi
+
+# C9: an extra hunk in a file the series NAMES is drift, not "already applied"
+# (each patch still reverse-applies, so a per-patch check accepted it)
+sparse_fix "$PINSHA" "$TMP/cx" series/p
+runs source.thing > /dev/null 2>&1
+sed -i.bak 's/^m20$/m20-extra/' "$TMP/cx/keep/m.txt" && rm -f "$TMP/cx/keep/m.txt.bak"
+$G -C "$TMP/cx" commit -qam extra
+h9="$(git -C "$TMP/cx" rev-parse HEAD)"
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "C9 extra hunk in a named file exits nonzero"; else bad "C9 extra hunk accepted as applied"; fi
+assert_grep "$out" "drifted" "C9 extra hunk is named drift"
+if [[ "$(git -C "$TMP/cx" rev-parse HEAD)" == "$h9" ]]; then ok "C9 checkout left intact"; else bad "C9 forage moved the checkout"; fi
+
+# --- D. build.sh's own check of the WebKit checkout ---------------------------
+# webkit_series_tree + webkit_checkout_ok, lifted from build.sh, against a full
+# clone at the pin plus the stacked series: HEAD's tree must be EXACTLY the pin
+# plus the series in order.
+eval "$(sed -n '/^webkit_series_tree() {/,/^}/p;/^webkit_checkout_ok() {/,/^}/p' "$BUILDSH")"
+mkdir -p "$TMP/port/patches" && cp "$SER/s/"*.patch "$TMP/port/patches/"
+$G clone -q "$UP" "$TMP/dco" && $G -C "$TMP/dco" checkout -q -b port "$PINSHA" && $G -C "$TMP/dco" am -q "$TMP/port/patches/"*.patch
+chk() { WEBKIT_PIN="$PINSHA" webkit_checkout_ok "$TMP/dco" "$TMP/port" 2>&1; }
+out="$(chk)"; rc=$?
+if [[ $rc -eq 0 ]]; then ok "D1 pin + stacked series accepted"; else bad "D1 refused: $out"; fi
+sed -i.bak 's/^m20$/m20-extra/' "$TMP/dco/keep/m.txt" && rm -f "$TMP/dco/keep/m.txt.bak"
+out="$(chk)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "D2 uncommitted change refused"; else bad "D2 uncommitted change accepted"; fi
+assert_grep "$out" "uncommitted" "D2 names the uncommitted change"
+$G -C "$TMP/dco" commit -qam extra
+out="$(chk)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "D3 extra hunk in a named file refused"; else bad "D3 extra hunk in a named file accepted"; fi
+assert_grep "$out" "not the pin plus the patch series" "D3 names the mismatch"
+$G -C "$TMP/dco" reset -q --hard HEAD~1
+printf 'From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] bad\n\n---\n--- a/keep/a.txt\n+++ b/keep/a.txt\n@@ -1 +1 @@\n-nothing-like-this\n+x\n' > "$TMP/port/patches/0003-bad.patch"
+out="$(chk)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "D4 a patch that does not apply is refused"; else bad "D4 unappliable patch accepted"; fi
+assert_grep "$out" "0003-bad.patch does not apply" "D4 names the patch"
+
+# D5: the same extra hunk over the ONE-patch series, which a per-patch check could
+# ask about (D3's series is stacked, so a per-patch check refuses it for that).
+mkdir -p "$TMP/port1/patches" && cp "$SER/p/"*.patch "$TMP/port1/patches/"
+$G clone -q "$UP" "$TMP/dco1" && $G -C "$TMP/dco1" checkout -q -b port "$PINSHA" && $G -C "$TMP/dco1" am -q "$TMP/port1/patches/"*.patch
+sed -i.bak 's/^m20$/m20-extra/' "$TMP/dco1/keep/m.txt" && rm -f "$TMP/dco1/keep/m.txt.bak" && $G -C "$TMP/dco1" commit -qam extra
+out="$(WEBKIT_PIN="$PINSHA" webkit_checkout_ok "$TMP/dco1" "$TMP/port1" 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "D5 extra hunk over a one-patch series refused"; else bad "D5 extra hunk over a one-patch series accepted"; fi
+assert_grep "$out" "not the pin plus the patch series" "D5 names the mismatch"
 
 echo "== $pass passed, $fail failed =="
 [[ "$fail" -eq 0 ]]

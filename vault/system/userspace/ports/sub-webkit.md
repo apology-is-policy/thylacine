@@ -1,12 +1,13 @@
 ---
 id: sub-webkit
 type: sub
-title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline and regexp JITs on one sealed code region, and what the engine asked the platform for"
+title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline and regexp JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
 parent: moc-userspace
 code:
   - usr/ports/webkit/README.md
   - usr/ports/webkit/patches/0001-thylacine-jsconly-b0.patch
   - usr/ports/webkit/patches/0002-thylacine-jsc-jit-b2c.patch
+  - usr/ports/webkit/patches/0003-thylacine-jsc-gc-park.patch
   - cmake/Toolchain-aarch64-pouch-cxx.cmake
   - cmake/Platform/Thylacine.cmake
   - usr/ports/webkit/sunspider-run.js
@@ -67,8 +68,9 @@ series; `tools/forage.sh webkit` gathers the source and the ICU tarball, and
   runs its interpreters. Any refusal does the same; only EACCES is quiet.
 - `USE_SYSTEM_MALLOC=ON`: bmalloc/libpas is out, mallocng is in. Gigacage
   is therefore off.
-- One JavaScript thread. `Thread::suspend` is fatal on Thylacine rather
-  than silently wrong (see Mechanism).
+- `Thread::suspend` is fatal on Thylacine rather than silently wrong, and
+  since gcpark no collector path reaches it: the conservative scan reads the
+  stack image a thread parks when it releases heap access (see Mechanism).
 
 ## Mechanism
 
@@ -174,6 +176,32 @@ echoes what is typed, and an expect the echo can satisfy proves nothing.
 
 None of its own.
 
+**The collector's scan (gcpark, patch 0003, `dec-2026-10-12-jsc-cooperative-scan`).**
+JavaScriptCore's conservative scan suspended every thread in the heap's group
+but the scanning one, and when a stop-the-world found the mutator without heap
+access the collector thread conducted and suspended it -- fatal here (found
+2026-10-12; jsc exited 127 at the first collection that stopped the world while
+its one JS thread waited or idled with the JSLock dropped). On `OS(THYLACINE)`
+a thread now *parks* whenever it releases heap access: `Heap::releaseAccess`
+(before its fast CAS) and `releaseAccessSlow` (again before its clearing CAS,
+because finalizers may have run in between) call
+`MachineThreads::parkCurrentThread`, which captures the callee-saved registers
+(`DECLARE_AND_COMPUTE_CURRENT_THREAD_STATE`, the same capture the scanning
+thread uses on itself) and COPIES the stack from that point to the thread's
+origin into a per-heap, per-thread image. Acquiring access unparks
+(`acquireAccess`, both arms), and so does entering the JSLock on access some
+other thread holds (`JSLock::didAcquireLock`), so an image is never older than
+the thread's last use of the heap. `gatherFromParkedThreads` replaces the
+suspend loop: every group thread other than the scanning and conducting ones
+must be parked, its image goes to `ConservativeRoots`, and a thread that is not
+is fatal with a `FATAL: the conservative scan found thread N ...` line. Records
+of threads that left the group are pruned at each scan.
+The image is a copy, not a recorded stack pointer as Go keeps for a goroutine
+in a syscall: the frames between the releasing caller and the park point may
+hold the only copy of a caller's callee-saved register, and they are reused as
+soon as the release returns. It is complete because a thread without heap
+access cannot obtain a cell it did not hold at the release.
+
 ## Concurrency
 
 Baseline plans compile on `JITWorklist` threads: the worker's publish (svc
@@ -182,12 +210,20 @@ Baseline plans compile on `JITWorklist` threads: the worker's publish (svc
 cross-PE contract of `SYS_ICACHE_SYNC` for Baseline. Wasm thunks generated on
 one agent thread and entered from another are B-2e's question.
 
-One JS thread at B-0. JSC's GC and compiler threads exist as pthreads; the
-collector's stop-the-world uses `Thread::suspend`, which is made fatal
-here, and no B-0 workload reached it. That is a statement about the
-workloads run, not a proof about the collector: a multi-threaded JS
-workload (Workers, shared-memory Wasm) is expected to hit it, and F7 is the
-design item that answers it.
+JSC's GC and compiler threads exist as pthreads. B-0 recorded that the
+collector's stop-the-world uses `Thread::suspend` "and no B-0 workload reached
+it"; one JS thread was enough, and gcpark replaced the suspend with the parked
+images. A record is written only by its own thread while that thread holds
+heap access, and read only by the scan, which runs with the world stopped
+(`Heap::gatherStackRoots` release-asserts it): no thread but the conductor can
+hold access then, and a released thread cannot reacquire it until the world
+resumes (`acquireAccessSlow` parks on `stoppedBit`). The thread group's lock
+guards the records as well; records are per heap, so a thread using two VMs
+cannot race one VM's scan with its record for the other. `Atomics.wait` blocks
+holding access in this WebKit, so it is not a release and needs no image. The
+remaining `Thread::suspend` users (a sampling profiler, signal-based VM traps,
+Wasm's instruction-cache reset) stay off; a kernel thread suspend for them is a
+separate question.
 
 ## Invariants enforced
 
@@ -198,6 +234,10 @@ design item that answers it.
   empty and nothing is generated.
 - The thunk's bounds: no write through it lands outside the region
   (witnessed by `thunk-oob`).
+- Root completeness without suspension: every cell a thread will use after it
+  reacquires heap access is in the image it parked (witnessed by `ls-jsc`'s
+  gc legs: an object held only in a JS frame across a released wait survives
+  40 rounds of collection, and jsc exits 0).
 
 ## Error paths
 
@@ -207,6 +247,11 @@ false, and JSC runs the LLInt and IPInt; EACCES is the deny path and prints
 nothing, any other errno is logged. A write outside the pool executes the
 thunk's `brk` and the Proc dies of `snare:brk`; a failed publish is a
 `RELEASE_ASSERT`.
+
+A thread in the heap's group that is neither scanning, conducting nor parked
+when the scan runs is fatal (`FATAL: the conservative scan found thread N
+running without a published stack image`), never skipped: skipping it would
+lose its roots silently.
 
 A WebKit `CRASH()`/`RELEASE_ASSERT` is `abort()`, which on Pouch is a
 SILENT `_Exit(127)` — the same number `ut` reports for "command not found",
@@ -227,14 +272,18 @@ the 2e7-iteration int32 loop takes 442 ms against 931 ms.
 
 - The three tolerances are probe posture. None may survive into a shipped
   browser: each either leaks VA (F3), never returns memory (F4), or removes
-  a safety net (F5 guard pages, F7 suspend).
+  a safety net (F5 guard pages; F7's suspend is answered for the collector
+  by gcpark and stays fatal for every other user).
 - The pin is a tag AND a hash; a codified build must check the hash.
 - The JIT landed (B-2c): `cacheFlush` is live, this dossier is `audit: hard`,
   and the surface has its own row in `docs/AUDIT-TRIGGERS.md`. Prosecute: the
   thunk's bounds and encodings (the header is the one source; JSC and the
   probe both build from it), every pool write funnelling through the thunk,
   every write followed by a publish, the tier gate surviving every flag, and
-  the deny path.
+  the deny path. gcpark (patch 0003) has its own row: prosecute that every
+  release of heap access parks and every acquire unparks, that the image is a
+  copy covering the callee-saves and the stack to its origin, the exclusion
+  that keeps records stable, and that no `Thread::suspend` caller is reachable.
 - Writer-address residue beyond the scrubbed struct and array (compiler
   temporaries, the kernel's out-struct copy) and a `CAP_JIT` that is never
   dropped are recorded (Fable r1 F4); the answer is a kernel-emitted thunk

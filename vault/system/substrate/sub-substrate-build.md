@@ -333,19 +333,30 @@ chunk, each on purpose.
 is kind `clone-sparse`: nothing of ours is hosted, so it is not a `fork.`.
 `forage.sh` makes a partial (`blob:none`) sparse clone at a TAG, refuses unless
 that tag resolves to the manifest's commit, creates a local branch, and `git am`s
-`usr/ports/webkit/patches/*`. It is idempotent (a patch that reverse-applies is
-reported as already applied) and it never resets: a checkout where a patch
-neither applies nor reverse-applies is reported as drifted and left alone,
-because it may hold work. An existing sparse checkout is only widened (`add`, so a
+`usr/ports/webkit/patches/*`. The series is stacked -- a later patch may edit
+lines an earlier one added (0003 corrects a comment 0001 wrote) -- so no patch is
+asked about alone: `series_tree` builds the pin plus the first k patches in a
+scratch index, and the longest k whose tree is HEAD's is what is applied; the rest
+are `am`'d. It is idempotent (the whole series' tree reports every patch as
+already applied) and it never resets: a checkout that is the pin plus no prefix of
+the series -- including one that carries an extra hunk in a file a patch names --
+is reported as drifted and left alone, because it may hold work. An existing sparse checkout is only widened (`add`, so a
 cone somebody added by hand stays); a full checkout at the path is reported and
-left alone, never converted. `test-forage.sh` C1-C5 drive all five outcomes
-against a local upstream with no network.
+left alone, never converted. `test-forage.sh` C1-C9 drive the outcomes against a
+local upstream with no network: C6-C8 a stacked series (fresh, idempotent, from a
+prefix), C9 an extra hunk in a named file; against the per-patch forage that
+preceded gcpark, C7 and C9 fail.
 
 *The build re-checks the checkout from its own side.* `webkit_checkout_ok`
-requires the pin to be an ancestor of HEAD, a clean tree, every series patch to
-reverse-apply, AND the files that differ from the pin to be exactly the files the
-series names -- the last because a reverse-apply check alone passes on a tree that
-carries the patches plus local edits elsewhere. So `WEBKIT_PIN` / `ICU_SHA256` in
+requires the pin to be an ancestor of HEAD, a clean tree, and HEAD's tree to be
+EXACTLY the tree `webkit_series_tree` builds from the pin plus the series in
+order (about 0.6 s on the WebKit tree; no network, the blob-less clone holds every
+tree and the patched files' blobs). Until gcpark (2026-10-12) it asked each patch
+to reverse-apply and the changed files to be the series' files, which passed a
+commit adding an extra hunk to a file a patch names (measured on the B-2c tip:
+one line in `ExecutableAllocator.cpp` passed) and could not express a stacked
+series. `test-forage.sh` D1-D5 lift the two functions from `build.sh` and drive
+them; D5 is the extra hunk over a one-patch series, which the old check accepted. So `WEBKIT_PIN` / `ICU_SHA256` in
 `build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
 fails when they drift (sabotaged: one hex digit -> FAIL).
 

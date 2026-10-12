@@ -144,7 +144,7 @@ lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
 
 # gcpark. Each leg prints its marker upper-cased by the script itself and then its
 # exit status through tr, so the echo of the typed line (lower case) satisfies
-# neither. A lost object, a nonzero status, the scan's FATAL line or a user fault
+# neither. ut joins `-st-` and `$status` with a space ("JSCQ-ST- 0"). A lost object, a nonzero status, the scan's FATAL line or a user fault
 # fails the leg.
 set gcround {function churn(){var k=[]; for(var i=0;i<1e5;i++)k.push({x:i,y:[i]}); return k.length} function round(r){var a={v:r*7+1,s:[r,r+1]}; @W; churn(); return a.v===r*7+1&&a.s[1]===r+1?0:1} var lost=0,r=0; for(;r<40;r++)lost+=round(r); print(("@T-"+r+"-"+lost).toUpperCase())}
 set gcidle {var keep=[]; for(var i=0;i<3e5;i++)keep.push({x:i,y:[i]}); setTimeout(function(){var s=0; for(var i=0;i<keep.length;i+=1000)s+=keep[i].y[0]; print(("@T-"+keep.length+"-"+s).toUpperCase())}, 500)}
@@ -156,7 +156,7 @@ proc gcpark_leg {what tag opts js want} {
     set out ""
     expect {
         -re "$T-(\[0-9\]+-\[0-9\]+)\[\r\n\]" { set out $expect_out(1,string); exp_continue }
-        -re "$T-ST-(\[0-9\]+)\[\r\n\]" { set st $expect_out(1,string) }
+        -re "$T-ST- ?(\[0-9\]+)\[\r\n\]" { set st $expect_out(1,string) }
         -re {FATAL: [^\r\n]*|user fault: pid=[0-9]+ reason="snare:[a-z]+"} { lc_fail "gc-park($what): \[$expect_out(0,string)\]" }
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during gc-park($what)" }
         timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-park($what): out=$out" }

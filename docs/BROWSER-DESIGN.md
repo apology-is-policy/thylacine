@@ -510,6 +510,46 @@ before any syscall, and the engine then runs its interpreter.
   thread, which B-0 made fatal. Harmless until BBQ/OMG run (B-2e), which must
   replace the walk.
 
+*Corrected 2026-10-12, after a crash on the device:*
+
+- **The collector suspends threads too, and the thread it suspends is the
+  mutator.** The conservative scan (`MachineThreads::tryCopyOtherThreadStacks`)
+  suspends every thread in the heap's group except the one scanning, to read its
+  registers and stack. When a stop-the-world phase finds the mutator *without*
+  heap access -- the JSLock dropped between scripts or events, or a host call
+  that releases access while it waits -- `Heap::stopTheMutator` stops the world
+  at once and the collector thread conducts, so the one JS thread is suspended,
+  and B-0 made that fatal: jsc died with exit 127 and no message (the second
+  defect, Pouch's `abort()`, is gcpark-b). B-0's list of suspend users had
+  omitted this one, and the F7 note that suspension "costs nothing with one JS
+  thread" was wrong.
+- **Decided 2026-10-12 (operator vote, `dec-2026-10-12-jsc-cooperative-scan`):
+  a cooperative scan, no kernel change.** A thread *parks* each time it releases
+  heap access: it copies its callee-saved registers and its stack, from the
+  release point to the stack's origin, into an image the heap keeps for that
+  thread. The scan reads the images and never suspends; a thread in the group
+  that is neither scanning, conducting nor parked is fatal. Acquiring access
+  unparks. This is how Go treats a goroutine in a syscall and HotSpot a thread
+  in native code, with one difference forced by C++: those runtimes record only
+  a stack pointer, because their compiled code keeps no live reference in a
+  callee-saved register across the transition. JavaScriptCore's C++ frames do,
+  and the frames between the caller and the release point -- where such a
+  register may have been spilled -- are reused as soon as the release returns,
+  so the image is a copy, not a recorded range.
+- **Why the image is enough.** A thread without heap access cannot obtain a
+  cell it did not hold at the release (allocation and heap reads need access),
+  so the cells its frames will use after it reacquires are a subset of the
+  image, however the compiler moves values between registers and slots in the
+  meantime. Images are written only by their own thread while it holds access,
+  and read only when no thread but the conductor can hold it; the scan asserts
+  that the world is stopped. The cost is one copy of the live stack per
+  release, which at a JSLock drop is the shallow stack of an event loop.
+- **What stays open.** A kernel thread suspend (Fuchsia's `zx_task_suspend` +
+  `zx_thread_read_state`, Mach's `thread_suspend` + `thread_get_state`) remains
+  a separate question for the users that cannot be made cooperative: B-2e's
+  Wasm instruction-cache reset and a sampling profiler. `Atomics.wait` is not a
+  release in this WebKit (it blocks holding access), so it needs no image.
+
 The YARR regex JIT, the CSS selector JIT and the Wasm tiers share the one
 allocator. The kernel side changes too (B-2a/B-2b): the region is a
 reservation committed page by page, and the writer alias is hardened before
