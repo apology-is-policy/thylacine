@@ -22,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -336,8 +336,10 @@ that tag resolves to the manifest's commit, creates a local branch, and `git am`
 `usr/ports/webkit/patches/*`. It is idempotent (a patch that reverse-applies is
 reported as already applied) and it never resets: a checkout where a patch
 neither applies nor reverse-applies is reported as drifted and left alone,
-because it may hold work. `test-forage.sh` C1-C4 drive all four outcomes against
-a local upstream with no network.
+because it may hold work. An existing sparse checkout is only widened (`add`, so a
+cone somebody added by hand stays); a full checkout at the path is reported and
+left alone, never converted. `test-forage.sh` C1-C5 drive all five outcomes
+against a local upstream with no network.
 
 *The build re-checks the checkout from its own side.* `webkit_checkout_ok`
 requires the pin to be an ancestor of HEAD, a clean tree, every series patch to

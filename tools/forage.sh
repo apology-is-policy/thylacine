@@ -120,9 +120,15 @@ do_clone_sparse() {
         # shellcheck disable=SC2086  # the cone list is space-separated on purpose
         git -C "$path" sparse-checkout set $sparse || return 1
     else
-        # An existing checkout is only widened, so a cone the manifest grew reaches
-        # it and a directory somebody added by hand stays (`set` would drop it).
-        # It moves no commit.
+        # An existing sparse checkout is only widened, so a cone the manifest grew
+        # reaches it and a directory somebody added by hand stays (`set` would drop
+        # it). It moves no commit. A full checkout is not ours to convert: git's
+        # `add` refuses it with a message that names neither the section nor the
+        # path, so it is reported here instead.
+        if [[ "$(git -C "$path" config --bool core.sparseCheckout 2>/dev/null)" != true ]]; then
+            echo "forage: $sec: $path is not a sparse checkout -- not widened; inspect it" >&2
+            return 1
+        fi
         # shellcheck disable=SC2086
         git -C "$path" sparse-checkout add $sparse || return 1
     fi

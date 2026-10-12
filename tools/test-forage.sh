@@ -191,13 +191,13 @@ $G -C "$UP" add -A && $G -C "$UP" commit -qm base && $G -C "$UP" tag v1
 PINSHA="$($G -C "$UP" rev-parse HEAD)"
 $G clone -q "$UP" "$TMP/mk" && echo two > "$TMP/mk/keep/a.txt"
 $G -C "$TMP/mk" commit -qam port && $G -C "$TMP/mk" format-patch -q -1 -o "$SER/p"
-sparse_fix() {   # COMMIT -> a manifest with one clone-sparse section
+sparse_fix() {   # COMMIT [PATH] -> a manifest with one clone-sparse section
     cat > "$TMP/sparse.toml" <<EOF2
 [meta]
 schema = "1"
 
 [source.thing]
-path = "$TMP/co"
+path = "${2:-$TMP/co}"
 probe = "keep/a.txt"
 repo = "file://$UP"
 tag = "v1"
@@ -242,6 +242,19 @@ if [[ $rc -ne 0 ]]; then ok "C4 drift exits nonzero"; else bad "C4 drift was acc
 assert_grep "$out" "drifted" "C4 drift is named"
 if [[ "$(git -C "$TMP/co" rev-parse HEAD)" == "$h2" && "$(cat "$TMP/co/keep/a.txt")" == "three" ]]; then
     ok "C4 drifted work left intact"; else bad "C4 forage modified a drifted checkout"; fi
+
+# C5: a FULL checkout at the path is reported, never converted or widened (git's
+# own refusal names neither the section nor the path). C3 is its control: the
+# same gather on a sparse checkout passes through the widen.
+$G clone -q "$UP" "$TMP/full"
+h5="$(git -C "$TMP/full" rev-parse HEAD)"
+sparse_fix "$PINSHA" "$TMP/full"
+out="$(runs source.thing 2>&1)"; rc=$?
+if [[ $rc -ne 0 ]]; then ok "C5 full checkout exits nonzero"; else bad "C5 full checkout was accepted"; fi
+assert_grep "$out" "source.thing: .*full is not a sparse checkout" "C5 names the section and the path"
+if [[ "$(git -C "$TMP/full" rev-parse HEAD)" == "$h5" && -e "$TMP/full/skip/b.txt" \
+      && "$(git -C "$TMP/full" config --bool core.sparseCheckout)" != true ]]; then
+    ok "C5 full checkout left as it was"; else bad "C5 forage modified a full checkout"; fi
 
 echo "== $pass passed, $fail failed =="
 [[ "$fail" -eq 0 ]]
