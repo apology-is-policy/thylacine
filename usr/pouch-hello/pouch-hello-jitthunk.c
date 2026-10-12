@@ -9,11 +9,12 @@
 //              7 bytes at offset 1 (an unaligned word, then a byte tail), 4 bytes
 //              at the end, and 0 bytes at offset == size (no trap, no write);
 //   out of     `pouch-hello-jitthunk <case>` (case 0..3) makes ONE call the bounds
-//   bounds     must refuse, after announcing it, and exits 42 only if the thunk
-//              returned. One invocation per case: a Proc with a live JIT region
-//              cannot fork (clone_one_vma refuses CODE). The kernel names the death
-//              on the console: `reason="snare:brk"` is the thunk's trap; `snare:segv`
-//              would mean the store ran outside the region (the gate fails on it).
+//   bounds     must refuse, after announcing it with this Proc's pid, and exits 42
+//              only if the thunk returned. One invocation per case: a Proc with a
+//              live JIT region cannot fork (clone_one_vma refuses CODE). The kernel
+//              names the death on the console, `user fault: pid=<pid>
+//              reason="snare:brk"` for the thunk's trap; `snare:segv` would mean the
+//              store ran outside the region (the gate fails on it).
 // With no argument the last line is "jitthunk: in bounds done", or a FAIL line.
 
 #define THYLA_CAPJIT_SELF_ONLY
@@ -80,7 +81,7 @@ int main(int argc, char **argv)
         int c = argv[1][0] - '0';
         if (argv[1][1] != '\0' || c < 0 || c > 3)
             return fail("case must be 0..3");
-        printf("jitthunk: out of bounds %s calling\n", oob[c].what);
+        printf("jitthunk: out of bounds %s calling, pid %d\n", oob[c].what, (int)getpid());
         g_write(oob[c].off, junk, oob[c].n);
         printf("jitthunk: FAIL out of bounds %s returned\n", oob[c].what);
         return 42;

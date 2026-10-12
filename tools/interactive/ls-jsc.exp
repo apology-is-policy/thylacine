@@ -34,8 +34,8 @@
 #   thunk / thunk-oob  pouch-hello-jitthunk runs JSC's write-thunk encoding
 #           (usr/lib/thylajit/thyla_jit_thunk.h) against the kernel: edge writes
 #           read back through the exec alias, and each out-of-bounds write dies of
-#           the thunk's brk (JSC itself never writes out of range, so only a probe
-#           reaches the bounds check)
+#           the thunk's brk, matched to the probe's own pid (JSC itself never
+#           writes out of range, so only a probe reaches the bounds check)
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -119,46 +119,52 @@ lc_expect $nojit "denied, the pattern goes to the YARR interpreter"
 lc_expect "JSCL-1000" "the interpreted pattern matches the same"
 lc_pass "ls-jsc(rx-deny): Can't JIT, JSCL-1000"
 
-set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
-lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
-    "JSCO-0-0-0-0-1-1"
-lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
-
+# The behaviour first, then the option values: a DFG turned on fails dfg here
+# whatever the values say, and tiers then pins FTL, BBQ and OMG too.
 set dfg {function f(){return $vm.baselineJITTrue()}; function g(){return $vm.dfgTrue()}; var b=false, d=false; for(var i=0;i<1e7&&!(b&&d);i++){if(!b)b=f(); if(!d)d=g()} print("@T-"+b+"-"+d)}
 lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jscp} $dfg]' | tr a-z A-Z" \
     "JSCP-TRUE-FALSE" {JSCP-(FALSE-|TRUE-TRUE)}
 lc_pass "ls-jsc(dfg): a hot function runs Baseline code, never DFG code"
 
+set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
+lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
+    "JSCO-0-0-0-0-1-1"
+lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
+
 # The write thunk's bounds are what keep it from being a write-anywhere gadget.
 # Each out-of-bounds call is its own process: a Proc holding a live JIT region
-# cannot fork. The kernel names the death on the console; snare:segv would mean
-# the store ran outside the region. One leftmost regex alternation, so a fault
-# line that lands before the probe's own line is never skipped.
+# cannot fork. The probe names its pid and the kernel names the death,
+# `user fault: pid=N reason="..."`; snare:segv would mean the store ran outside
+# the region. One leftmost regex alternation, with fault lines kept by pid, so the
+# two lines may arrive in either order and another process's fault is never
+# taken for the probe's. The pid is matched up to its line end: a pattern that
+# can stop inside a number matches a partly received one.
 lc_run_expect_hardfail_re "pouch-hello-jitthunk" "jitthunk: in bounds done" {jitthunk: FAIL[^\r\n]*|reason="snare:[a-z]+"}
 lc_pass "ls-jsc(thunk): edge writes read back through the exec alias"
 foreach {c what} {0 1@end 1 5@end-4 2 8@-8 3 size+1@0} {
     lc_send "pouch-hello-jitthunk $c"
     set timeout $::lc_cmd_timeout
-    set called 0
-    set reason ""
+    set pid ""
+    array unset died
     expect {
-        -re {jitthunk: out of bounds [^ \r\n]+ calling|jitthunk: FAIL[^\r\n]*|reason="snare:[a-z]+"} {
+        -re {jitthunk: out of bounds [^ \r\n]+ calling, pid [0-9]+[\r\n]|jitthunk: FAIL[^\r\n]*|user fault: pid=[0-9]+ reason="snare:[a-z]+"} {
             set m $expect_out(0,string)
-            if {[string match {reason=*} $m]} {
-                set reason [string range $m 8 end-1]
-            } elseif {$m eq "jitthunk: out of bounds $what calling"} {
-                set called 1
+            if {[regexp {^jitthunk: out of bounds ([^ ]+) calling, pid ([0-9]+)} $m -> w p]} {
+                if {$w ne $what} { lc_fail "thunk-oob($what): the probe announced $w" }
+                set pid $p
+            } elseif {[regexp {^user fault: pid=([0-9]+) reason="(snare:[a-z]+)"} $m -> fp fr]} {
+                set died($fp) $fr
             } else {
-                lc_fail "thunk-oob($what): \[$m\]"
+                lc_fail "thunk-oob($what): \[[string trim $m]\]"
             }
-            if {!$called || $reason eq ""} exp_continue
+            if {$pid eq "" || ![info exists died($pid)]} exp_continue
         }
         -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during thunk-oob($what)" }
-        timeout { lc_fail "timeout (${::lc_cmd_timeout}s) in thunk-oob($what): called=$called reason=$reason" }
+        timeout { lc_fail "timeout (${::lc_cmd_timeout}s) in thunk-oob($what): pid=$pid deaths=[array get died]" }
         eof     { lc_fail "unexpected EOF during thunk-oob($what)" }
     }
-    if {$reason ne "snare:brk"} {
-        lc_fail "thunk-oob($what): died of $reason, not the thunk's snare:brk"
+    if {$died($pid) ne "snare:brk"} {
+        lc_fail "thunk-oob($what): pid $pid died of $died($pid), not the thunk's snare:brk"
     }
     lc_pass "ls-jsc(thunk-oob): $what died of snare:brk"
 }
