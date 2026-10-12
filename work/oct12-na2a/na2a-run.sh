@@ -225,8 +225,15 @@ mutant() { # mutant <label> default|qual: patch, build, boot; sets B
   if [ "$2" = qual ]; then _k=$QDIR; _a=--private-async-qual; else _k=build/kernel; _a=; fi
   inputs "$1" "$_k"
   _bin=$(shasum -a 256 "$_k/thylacine.bin" | cut -d' ' -f1)
-  case " $SEEN_BINS " in *" $_bin "*) echo "REFUSING: the $1 kernel equals an earlier kernel of this run"; exit 5;; esac
-  SEEN_BINS="$SEEN_BINS $_bin"
+  case " $(cat "$OUT/$1.files") " in
+    *" usr/loom-bridge-probe/loom-bridge-probe.c "*)
+      # A probe mutant changes the baked probe (checked above), never the kernel.
+      if [ "$2" = qual ]; then _c=$Q_BIN; else _c=$D_BIN; fi
+      [ "$_bin" = "$_c" ] || { echo "REFUSING: the $1 kernel differs from its control"; exit 5; } ;;
+    *)
+      case " $SEEN_BINS " in *" $_bin "*) echo "REFUSING: the $1 kernel equals an earlier kernel of this run"; exit 5;; esac
+      SEEN_BINS="$SEEN_BINS $_bin" ;;
+  esac
   run_suite "$1" $_a
   B=$OUT/$1-boot.log
   [ "$suite_rc" != 0 ] || { echo "HARNESS: test.sh exit 0 under $1"; exit 2; }
