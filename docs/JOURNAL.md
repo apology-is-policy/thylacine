@@ -22,6 +22,86 @@ needed the operator.
 
 
 ---
+## 2026-10-12..13 (main, Opus 5.5, effort max) -- JavaScriptCore's DFG runs on the sealed code region (B-2d) (in progress)
+
+**What the run is for.** B-2c opened Baseline and the regexp JIT; B-2d opens
+the DFG, the optimizing tier, on the same region. The new thing the DFG brings
+is that it rewrites instructions that run, and some of the rewrites happen on a
+thread that is not the one that runs them next.
+
+**The design question, settled by reading rather than a vote.** The kernel's
+`SYS_ICACHE_SYNC` contract (syscall.h) says a CPU other than the caller must
+take a context-synchronization event before it runs patched code. Who patches:
+the JS thread (its own `svc` returns through `eret`), compiler threads (the JS
+thread installs their code after `crossModifyingCodeFence`, upstream's rule),
+and the collector, which discards and unlinks code in its end phase. Reading
+`Heap::stopTheMutator` (Heap.cpp ~2003): the world stops "instantly" only when
+the mutator has released heap access; a mutator that holds access is handed the
+collection and runs it itself. So a collector-thread patch always lands while
+the JS thread is parked, and gcpark had already routed every resume through
+`MachineThreads::unparkCurrentThread`. One ISB there covers it, plus a JSLock
+handed to a thread on another CPU. HotSpot's `cross_modify_fence` at safepoint
+exit is the same idea. The kernel broadcast alternative (Linux `membarrier`
+SYNC_CORE) is left to B-2e, where Wasm's `resetInstructionCacheOnAllThreads`
+needs one. Scripture 1685982a2.
+
+**What else the patch carries.** The DFG gate lifted (FTL/BBQ/OMG still off);
+`RELEASE_ASSERT` on the three 26-bit branch encoders with jump islands off
+(release builds masked an out-of-range offset into a branch to the wrong
+place). Read and found already right: `LazyJSValue`'s 3-4 instruction patch
+runs as a main-thread finalization task before install (no tearing exposure);
+the JIT's CPU-feature queries read compile-time defaults from `armv8-a`, so no
+LSE, `FJCVTZS`, FP16 or `FRINT` (the v8.0 floor holds).
+
+**The fence has no run-time witness, so the build asks the binary.**
+`build_jsc` disassembles `MachineThreads::unparkCurrentThread` and refuses a
+jsc without an `isb` (a denominator of eight instructions first). Run on the
+B-2c jsc it refused at the isb test; green passed; the R-fence sabotage build
+was refused.
+
+**Wrong turns, and what caught them.**
+- A collector-discard witness took ten host experiments on the macOS jsc.
+  Hot functions are never discarded under `--forceCodeBlockToJettisonDueToOldAge`
+  (their DFG code's references stay live); my "fresh structure per round"
+  constructs never died; a probe call on a wrong-shaped object exits before a
+  `$vm.dfgTrue()` branch and so always read Baseline (a broken probe, caught by
+  a no-collection control that also read "discarded"). JSC's own log
+  (`--dumpDFGDisassembly`, "Jettisoning ... due to JettisonDueToOldAge") showed
+  what IS discarded: old DFG code of rarely called functions. The leg counts
+  those lines; host 7-41 vs 0 over five runs each, device 18 vs 0.
+- My first gc-jettison expect block listed the discard pattern before the
+  marker: expect tries patterns in list order, so a discard logged during
+  teardown would have swallowed the marker. Rewritten as one alternation before
+  any run.
+- The watch RED (jump replacement disabled) was predicted to read `undefined`.
+  It read a Symbol (the stale loop's speculation read garbage) and the print
+  threw; the leg failed by timeout because its fail pattern named only
+  `undefined`. Red at its witness, for a reason the prediction did not name.
+
+**Fable r1 (5.1 at start and end): 0 P0, 1 P1, 1 P2, 2 P3, clean.** F1 was
+mine to catch and I did not: the gc-jettison leg counted "due to
+JettisonDueToOldAge" lines, and `ScriptExecutableInlines.h:40-46` gives an
+unmarked DFG block `JettisonDueToWeakReference` every time, so every line it
+counted was an LLInt or Baseline block -- the leg passed with the DFG off.
+My control varied the force flag, not the DFG: the "a control must prove
+discrimination, not detection" lesson, again. Rebuilt around a weak reference
+that dies (a fresh closure folded into fresh DFG code as a constant callee,
+the closure dropped, the function kept; `$vm.codeBlockFor` reads the tier
+without calling): host 10-13 of 20 discarded against 0 with the closures kept,
+and no round reaches DFG with the DFG off. F2: scripture said a finished
+Baseline function is never rewritten; Baseline's arithmetic ICs do. F3: the
+osr leg did not wait for the worker's compile. F4: a misread upstream comment.
+
+**Device evidence (HVF, b2c worktree at 211104306).** ls-jsc 34/34 three times
+(78-80 s each). SunSpider 1.0.2: 68 ms all JITs, 105 ms DFG off, 346 ms denied
+(B-2c's Baseline: 111 ms); int32 loop 193 / 433 / 917 ms. REDs: R-fence build
+refused, R-dfg red at dfg (`JSCP-TRUE-FALSE`), R-watch red at watch.
+
+**Also fixed on the way.** `check-doc-tables.sh` found two older ARCHITECTURE.md
+table defects (a severed spec-table row; an I-39 row split by a pipe inside a
+code span), fixed in 05c9393a0.
+
+---
 ## 2026-10-12 (main, Opus 5.5, effort max) -- JavaScriptCore's collector scans without suspending a thread, and Pouch's abort() is a signalled death (gcpark) (landed)
 
 **What the run is for.** B-2c's research for B-2d found two defects that every

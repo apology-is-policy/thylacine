@@ -35,28 +35,43 @@
 #           asked for by flag; --useDollarVM=true in the same line reads on, so the
 #           flags were parsed (jscOptions() reports a bool as the number 0 or 1)
 #   osr     a DFG function speculating int32 is handed a double and a string: two
-#           OSR exits, each ramp compiled on first use and its jump patched in
-#           place, and both answers right. numberOfDFGCompiles reads 1000000
-#           whenever the DFG is off, so the leg asks for at least 1 and below that
+#           OSR exits through the one ramp compiled on the first (its jump patched
+#           in place), and both answers right. The leg calls on until the DFG
+#           compile has landed (numberOfDFGCompiles counts only installed code,
+#           and the compile runs on a worker thread); numberOfDFGCompiles reads
+#           1000000 whenever the DFG is off, so the leg asks for at least 1 and
+#           below that
 #   watch   a loop running DFG code that reads an array hole (the prototype chain
 #           speculated empty) calls out to code that puts an indexed getter on
 #           Array.prototype: the watchpoint discards the loop's code, the jump
 #           patched over its invalidation point sends it back to Baseline, and the
 #           hole reads the getter's 42. The call passes $vm.dfgTrue(), so the leg
 #           also proves the loop WAS DFG code when the watchpoint fired. A broken
-#           discard reads undefined.
-#   gc-jettison / gc-jettison-ctl   the collector discards DFG code: twenty rounds
-#           each make a function DFG code, then park in flashHeapAccess under the
-#           continuous collector; with --forceCodeBlockToJettisonDueToOldAge every
-#           unmarked DFG block counts as old, and JSC's own log
-#           (--dumpDFGDisassembly) names each discard "due to
-#           JettisonDueToOldAge", a reason only the collector's end phase gives.
-#           The leg counts those lines (at least 1) and checks every call's result;
-#           its twin without the force flag must count 0 (this script on the
-#           macOS jsc, 2026-10-13: 7-41 vs 0 over five runs each, 0.2-0.6 MB of
-#           log per run; the device's jsc is a different build). Which thread conducted each end
-#           phase is not observable; the collector conducts whenever it stops
-#           the world with jsc parked, which flashHeapAccess arranges.
+#           discard keeps running the stale loop: with the jump replacement
+#           sabotaged (2026-10-12) it read a Symbol out of the hole and the print
+#           threw, so the leg fails on any value but 42 and on an exception.
+#   gc-jettison / gc-jettison-ctl   the collector discards DFG code, and patches
+#           it doing so. Twenty rounds each make a fresh function DFG code that
+#           calls a fresh closure; the DFG folds the closure in as a constant, a
+#           WEAK reference of the DFG block. The closure is dropped, the function
+#           kept, and jsc parks in flashHeapAccess under the continuous collector:
+#           a DFG block whose weak reference died is unmarked, and the collector's
+#           end phase discards it (JettisonDueToWeakReference), firing its
+#           invalidation points and unlinking its callers -- code patched by the
+#           thread that conducts. $vm.codeBlockFor reads the function's tier
+#           without calling it, so a DFG block gone back to Baseline with no call
+#           in between was discarded by a collection. The leg needs every round to
+#           reach DFG code first (with the DFG off none does: red), every call
+#           right, and at least one discard; its twin keeps each closure alive
+#           and must see none. Measured on the macOS jsc, this script: 10-13 of 20
+#           discarded vs 0 kept-alive, three runs each; with no collector window
+#           0-1; with the DFG off 20 of 20 never reach DFG code; JSC's own log
+#           names such a discard "DFGFunctionCall ... due to WeakReference".
+#           Which thread conducted each end phase is not observable; the
+#           collector conducts whenever it stops the world with jsc parked,
+#           which flashHeapAccess arranges. (Round 1's version counted "due to
+#           JettisonDueToOldAge" log lines, a reason JSC gives only an LLInt or
+#           Baseline block: it passed with the DFG off. Fable r1 F1.)
 #   thunk / thunk-oob  pouch-hello-jitthunk runs JSC's write-thunk encoding
 #           (usr/lib/thylajit/thyla_jit_thunk.h) against the kernel: edge writes
 #           read back through the exec alias, and each out-of-bounds write dies of
@@ -190,36 +205,31 @@ lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --
     "JSCO-1-0-0-0-1-1"
 lc_pass "ls-jsc(tiers): Baseline and DFG on, FTL/BBQ/OMG off; the flags were parsed"
 
-set osr {function h(x){return x+1} var s=0; for(var i=0;i<1e5;i++)s=h(i); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}
+set osr {function h(x){return x+1} var s=0, i=0; for(;i<1e5||(i<1e7&&numberOfDFGCompiles(h)<1);i++)s=h(i); s=h(99999); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}
 lc_run_expect_hardfail "/webkit/jsc -e '[string map {@T jscx} $osr]' | tr a-z A-Z" "JSCX-OK-C" "JSCX-BAD"
 lc_pass "ls-jsc(osr): two OSR exits out of DFG code, both answers right"
 
 set watch {var armed=0, dd=false; function arm(i,d){if(i===9e4&&!armed){armed=1; dd=d; Object.defineProperty(Array.prototype,1,{get:function(){return 6*7}})}} noInline(arm); function run(a){var x; for(var i=0;i<1e5;i++){arm(i,$vm.dfgTrue()); x=a[1]} return x} var r=run([1,,3]); print("@T-"+armed+"-"+dd+"-"+r)}
 lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jscy} $watch]' | tr a-z A-Z" \
-    "JSCY-1-TRUE-42" {JSCY-(0|1-FALSE|1-TRUE-UNDEFINED)}
+    "JSCY-1-TRUE-42" {JSCY-(0|1-FALSE|1-TRUE-([^4]|4[^2]|42[^\r\n]))|EXCEPTION: [^\r\n]*}
 lc_pass "ls-jsc(watch): a watchpoint discards running DFG code; the hole reads 42"
 
 # Each leg prints its marker upper-cased by the script itself, then its exit status
-# through tr, so the echo of the typed line satisfies neither; the discard lines are
-# counted from jsc's own log until the status arrives.
-set gcjet {function mk(r){var a=[]; for(var i=0;i<64;i++){var o={p:i}; o["q"+r]=1; a.push(o)} return a} function drive(k,a){var bad=0; for(var i=0;i<6e4;i++){if(k(a[i&63])!==(i&63))bad++} return bad} var ks=[], bad=0, r=0; for(;r<20;r++){var k=new Function("o","return o.p /*"+r+"*/"); noInline(k); ks.push(k); var objs=mk(r); bad+=drive(k,objs); objs=null; for(var w=0;w<4;w++)flashHeapAccess(20)} print(("@T-"+r+"-"+bad).toUpperCase())}
-proc gcjet_leg {what tag opts js wantn} {
-    global lc_cmd_timeout timeout
+# through tr, so the echo of the typed line satisfies neither. @K keeps each round's
+# closure alive (the twin).
+set gcjet {function tier(f){var s=String($vm.codeBlockFor(f)); return s.indexOf("DFG")>=0?2:s.indexOf("Baseline")>=0?1:0} var ks=[], keep=[], gone=0, kept=0, cold=0, bad=0, r=0; for(;r<20;r++){var h={g:(function(q){return function(x){return x+q}})(r)}; var c=new Function("h","x","return h.g(x) /*"+r+"*/"); ks.push(c); for(var i=0;i<4e4&&!(i>=2e4&&tier(c)==2);i++){if(c(h,i)!==i+r)bad++} if(tier(c)!=2){cold++;continue} if(@K)keep.push(h.g); h.g=null; h=null; for(var w=0;w<4;w++)flashHeapAccess(20); if(tier(c)==2)kept++; else gone++} print(("@T-"+r+"-"+gone+"-"+kept+"-"+cold+"-"+bad).toUpperCase())}
+proc gcjet_leg {what tag keep} {
+    global lc_cmd_timeout timeout gcjet
     set T [string toupper $tag]
-    lc_send "/webkit/jsc --useDollarVM=true --collectContinuously=true --dumpDFGDisassembly=true $opts -e '[string map [list @T $tag] $js]'; echo $tag-st-\$status | tr a-z A-Z"
+    lc_send "/webkit/jsc --useDollarVM=true --collectContinuously=true -e '[string map [list @T $tag @K $keep] $gcjet]'; echo $tag-st-\$status | tr a-z A-Z"
     set timeout $lc_cmd_timeout
     set out ""
-    set n 0
-    # One alternation, so the leftmost line in the stream is taken first: a discard
-    # logged after the marker (the VM's teardown) cannot swallow it.
+    # One alternation, so the leftmost line in the stream is taken first.
     expect {
-        -re "Jettisoning \[^\r\n\]* due to JettisonDueToOldAge|$T-\[0-9\]+-\[0-9\]+\[\r\n\]|$T-ST- ?\[0-9\]+\[\r\n\]|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXTINCTION:" {
+        -re "$T-\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+\[\r\n\]|$T-ST- ?\[0-9\]+\[\r\n\]|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXCEPTION: \[^\r\n\]*|EXTINCTION:" {
             set m $expect_out(0,string)
-            if {[string match "Jettisoning *" $m]} {
-                incr n
-                exp_continue
-            } elseif {[regexp "^$T-ST- ?(\[0-9\]+)" $m -> st]} {
-            } elseif {[regexp "^$T-(\[0-9\]+-\[0-9\]+)" $m -> out]} {
+            if {[regexp "^$T-ST- ?(\[0-9\]+)" $m -> st]} {
+            } elseif {[regexp "^$T-(\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+)" $m -> out]} {
                 exp_continue
             } elseif {$m eq "EXTINCTION:"} {
                 lc_extinction_fail "kernel extinction during gc-jettison($what)"
@@ -227,16 +237,21 @@ proc gcjet_leg {what tag opts js wantn} {
                 lc_fail "gc-jettison($what): \[[string trim $m]\]"
             }
         }
-        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-jettison($what): out=$out discards=$n" }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-jettison($what): out=$out" }
         eof     { lc_fail "unexpected EOF during gc-jettison($what)" }
     }
-    if {$out ne "20-0" || $st ne "0" || ($wantn eq "some" && $n < 1) || ($wantn eq "none" && $n != 0)} {
-        lc_fail "gc-jettison($what): printed \[$out\] (want 20-0), exit status $st (want 0), $n collector discards (want $wantn)"
+    if {![regexp {^([0-9]+)-([0-9]+)-([0-9]+)-([0-9]+)-([0-9]+)$} $out -> r gone kept cold bad]} {
+        lc_fail "gc-jettison($what): no marker (exit status $st)"
     }
-    lc_pass "ls-jsc(gc-jettison$what): $T-20-0, exit 0, $n collector discards of DFG code"
+    set ok [expr {$r == 20 && $cold == 0 && $bad == 0 && $st eq "0"}]
+    if {$keep eq "false"} { set ok [expr {$ok && $gone >= 1}] } else { set ok [expr {$ok && $gone == 0 && $kept == 20}] }
+    if {!$ok} {
+        lc_fail "gc-jettison($what): rounds $r, discarded $gone, kept $kept, never DFG $cold, wrong $bad, exit status $st"
+    }
+    lc_pass "ls-jsc(gc-jettison$what): $T-$out (rounds-discarded-kept-never DFG-wrong), exit 0"
 }
-gcjet_leg ""     jscz "--forceCodeBlockToJettisonDueToOldAge=true" $gcjet some
-gcjet_leg "-ctl" jsda ""                                           $gcjet none
+gcjet_leg ""     jscz false
+gcjet_leg "-ctl" jsda true
 
 # gcpark. Each leg prints its marker upper-cased by the script itself and then its
 # exit status through tr, so the echo of the typed line (lower case) satisfies

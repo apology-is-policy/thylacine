@@ -1,13 +1,14 @@
 ---
 id: sub-webkit
 type: sub
-title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline and regexp JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
+title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline, DFG and regexp JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
 parent: moc-userspace
 code:
   - usr/ports/webkit/README.md
   - usr/ports/webkit/patches/0001-thylacine-jsconly-b0.patch
   - usr/ports/webkit/patches/0002-thylacine-jsc-jit-b2c.patch
   - usr/ports/webkit/patches/0003-thylacine-jsc-gc-park.patch
+  - usr/ports/webkit/patches/0004-thylacine-jsc-dfg-b2d.patch
   - cmake/Toolchain-aarch64-pouch-cxx.cmake
   - cmake/Platform/Thylacine.cmake
   - usr/ports/webkit/sunspider-run.js
@@ -22,7 +23,7 @@ hazards: []
 abis: []
 design: [docs/BROWSER-DESIGN.md]
 created: 2026-09-21
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -34,9 +35,9 @@ with every JIT tier off to measure what a real engine asks of the platform
 before any kernel work was designed — the findings list in
 `docs/browser-status.md` is its product as much as the binary is. Since B-2c
 the Baseline JIT and the regexp (YARR) JIT run, on one `SYS_JIT_CREATE` code
-region whose writer is reachable only through a sealed write thunk; every
-other tier is built and held off at run time until its own chunk opens it
-([[dec-2026-10-08-jsc-tiers-run-time]]).
+region whose writer is reachable only through a sealed write thunk, and since
+B-2d the DFG; FTL and Wasm's BBQ and OMG are built and held off at run time
+until their own chunk opens them ([[dec-2026-10-08-jsc-tiers-run-time]]).
 
 The source is NOT vendored. WebKit is about 13 GB; it lives in a sparse,
 partial clone beside the other forks (`~/projects/webkit-thylacine`, branch
@@ -52,11 +53,16 @@ series; `tools/forage.sh webkit` gathers the source and the ICU tarball, and
   segment both writable and executable ([[inv-i12]]: the image never is; JIT
   code exists only in the code region below).
 - Tiers: the offlineasm LLInt (`ENABLE_C_LOOP=OFF`) and IPInt for
-  WebAssembly always; the Baseline JIT and the YARR JIT when the process
-  holds `CAP_JIT`. DFG, FTL and Wasm's BBQ and OMG are compiled in (upstream
-  no longer builds JIT-on with them off on ARM64) and forced off in
+  WebAssembly always; the Baseline JIT, the DFG and the YARR JIT when the
+  process holds `CAP_JIT`. FTL and Wasm's BBQ and OMG are compiled in
+  (upstream no longer builds JIT-on with them off on ARM64) and forced off in
   `Options::notifyOptionsChanged` under `OS(THYLACINE)`, after which the
   options are frozen: no flag can turn them on.
+- A thread that resumes running the VM's code executes an ISB first
+  (`MachineThreads::unparkCurrentThread`), so code another CPU patched -- the
+  collector with the world stopped, a previous JSLock holder -- is never run
+  from stale prefetch; the build refuses a `jsc` whose
+  `unparkCurrentThread` holds no `isb`.
 - The JIT pool is one 64 MiB code region: its exec alias (RX) is the
   reservation, the writer alias's address lives only as immediates inside an
   execute-only thunk sealed by `SYS_JIT_CREATE_SEALED`, and every write into
@@ -133,6 +139,41 @@ otherwise calls `thyla_acquire_cap_jit` (SELF form only:
 `THYLA_CAPJIT_SELF_ONLY` compiles the bearer form out). `Options.cpp` holds
 the run-time tier gate.
 
+**The DFG (B-2d, patch 0004, three files).** `Options.cpp` lets the DFG run.
+Baseline is unlinked (its calls and property accesses go through data); the
+linked DFG rewrites instructions that run: a direct call linked or unlinked
+(`CallLinkInfo`, `DirectCallLinkInfo`), a discarded function's invalidation
+points replaced by jumps (`JumpReplacement::fire`), an OSR exit's jump pointed
+at its lazily compiled ramp (`repatchJump`), an arithmetic IC's inline code
+(`JITMathIC`), and, before the function is installed, a constant
+(`LazyJSValue::emit`'s main-thread finalization task). Each goes through
+`performJITMemcpy` and the thunk and is followed by `cacheFlush`. Baseline's
+arithmetic ICs (`JITMathIC::generateOutOfLine`) rewrite a finished Baseline
+function too, once each, on the JS thread. Three kinds
+of thread write code: the JS thread (its `svc` returns through `eret`, which
+synchronizes its own CPU), a `JITWorklist` thread (the JS thread installs its
+code after `crossModifyingCodeFence`), and the collector, which discards and
+unlinks code in its end phase with the world stopped -- and JavaScriptCore
+stops the world only when no thread holds heap access (an access holder is
+handed the collection and runs it on its own CPU). `SYS_ICACHE_SYNC`'s ISB
+synchronizes only the CPU that called it, and heap access is retaken by a
+compare-and-swap with no syscall, so `MachineThreads::unparkCurrentThread`
+runs `WTF::crossModifyingCodeFence()` first: gcpark made it the one point every
+resume passes through (both `acquireAccess` arms, and a JSLock entered on
+access another thread holds), and it also covers a JSLock handed to a thread
+on another CPU after its previous holder patched. HotSpot's
+`cross_modify_fence` at safepoint exit is the precedent. `build_jsc`
+disassembles the symbol-bearing `jsc` and refuses the build when that function
+holds no `isb` (after checking it disassembled at least eight instructions),
+because no run can show the fence missing. With jump islands off,
+`ARM64Assembler.h`'s three 26-bit branch encoders (`linkJumpOrCall`,
+`replaceWithJump`, `fillNearTailCall`) checked the range only in debug builds
+and masked the offset in release; they `RELEASE_ASSERT` it now. The pool's
+`static_assert` puts every branch inside the pool in range; the check catches
+a target outside it. The DFG emits ARMv8.0 code only: Pouch compiles for
+`armv8-a`, and `collectCPUFeatures` has no Thylacine arm, so LSE atomics,
+`FJCVTZS`, FP16 and `FRINT` read their compile-time default, off.
+
 **The write thunk** is 33 hand-encoded A64 words from
 `usr/lib/thylajit/thyla_jit_thunk.h`, never assembled at run time, so no
 LinkBuffer ever holds a readable copy of the writer address. `write(offset,
@@ -161,16 +202,45 @@ that never started prints): `jit`/`jit-deny` (`$vm.baselineJITTrue()` in a
 hot function), `rx`/`rx-deny` (a pattern through the YARR JIT; denied, JSC
 says "Can't JIT"), `loop`/`loop-deny` (the same int32 sum both ways),
 `sunspider`/`sunspider-deny` (SunSpider 1.0.2, three runs; 23 of its 26
-tests check their own result), `tiers` (every tier asked for by flag, only
-Baseline on), `dfg` (a hot function reaches Baseline code and never DFG code;
-with the DFG on, `$vm.dfgTrue()` turns true within ~4e4 calls on a host
-`jsc`), and `thunk`/`thunk-oob` (the probe above; each out-of-bounds call must
+tests check their own result), `tiers` (every tier asked for by flag; Baseline
+and DFG on), and `thunk`/`thunk-oob` (the probe above; each out-of-bounds call must
 die of `snare:brk`, read from the kernel's `user fault:` console line, and
 `snare:segv` would mean the store ran outside the region). Every marker is printed in lower case by the
 guest and asserted in UPPER case through `tr`, and no expected string occurs
 in the typed line (inputs are spelled `6*7`, `4e5`, `64<<20`): the terminal
 echoes what is typed, and an expect the echo can satisfy proves nothing.
 `$errstr` is never consulted; `ut` does not clear it after a success.
+
+B-2d adds the DFG legs, each with a twin one flag away. `dfg`: a hot
+function reaches DFG code (`$vm.dfgTrue()` folds to true only there);
+`dfg-off` (`--useDFGJIT=false`) stops at Baseline, `dfg-deny` reaches
+neither, `dfg-sync` (`--useConcurrentJIT=false`) compiles on the JS thread
+and gets there too. `osr`: a DFG function speculating int32 gets a double
+and a string -- two OSR exits through the one ramp compiled on the first,
+its jump patched -- and both answers are right (the leg calls on until the
+worker's compile has landed); `numberOfDFGCompiles` reads 1000000
+whenever the DFG is off, so the leg asks for at least 1 and fewer than that.
+`watch`: a DFG loop reading an array hole calls out to code that puts an
+indexed getter on `Array.prototype`; the watchpoint discards the running
+loop's code, the patched invalidation point sends it to Baseline, and the hole
+reads 42 (a broken discard reads `undefined`); the call passes
+`$vm.dfgTrue()`, so the leg also shows the loop was DFG code when the
+watchpoint fired. `gc-jettison`/`gc-jettison-ctl`: twenty rounds each make
+a fresh function DFG code that calls a fresh closure, which the DFG folds in
+as a constant -- a weak reference of the DFG block. The closure is dropped
+(the function kept) and jsc parks in `flashHeapAccess` under the continuous
+collector; a DFG block whose weak reference died is unmarked, and the
+collector's end phase discards it (`JettisonDueToWeakReference`), firing its
+invalidation points and unlinking its callers. `$vm.codeBlockFor` reads the
+function's tier without calling it, so DFG gone back to Baseline with no call
+in between is a collector discard. The leg needs every round to reach DFG
+code, every call right and at least one discard; its twin keeps each closure
+alive and must see none (on the macOS `jsc`: 10-13 of 20 against 0; with the
+DFG off no round reaches DFG code). The first version counted "due to
+JettisonDueToOldAge" log lines, which JSC gives only an LLInt or Baseline
+block: it passed with the DFG off (Fable r1 F1). Which thread conducted each end phase is not
+observable. `loop-baseline` and `sunspider-baseline` record the DFG-off times
+beside the all-on ones.
 
 ## Data structures
 
@@ -207,8 +277,16 @@ access cannot obtain a cell it did not hold at the release.
 Baseline plans compile on `JITWorklist` threads: the worker's publish (svc
 103: `IC IVAU` broadcast + `DSB ISH`) and the main thread's
 `crossModifyingCodeFence` (`isb`) before `installCode` discharge the
-cross-PE contract of `SYS_ICACHE_SYNC` for Baseline. Wasm thunks generated on
-one agent thread and entered from another are B-2e's question.
+cross-PE contract of `SYS_ICACHE_SYNC` for Baseline. The DFG adds two
+writers that are not the thread that runs the code next: the collector, which
+patches with the world stopped while the JS thread is parked, and a JSLock's
+previous holder on another CPU. Both are covered by the ISB in
+`MachineThreads::unparkCurrentThread`, which every resume passes (see
+Mechanism). Wasm thunks generated on one agent thread and entered from
+another, and Wasm's `resetInstructionCacheOnAllThreads` (a signal to every VM
+thread), are B-2e's question, and with it whether `SYS_ICACHE_SYNC` gains a
+mode that synchronizes the address space's other running threads (Linux's
+`membarrier` SYNC_CORE).
 
 JSC's GC and compiler threads exist as pthreads. B-0 recorded that the
 collector's stop-the-world uses `Thread::suspend` "and no B-0 workload reached
@@ -230,8 +308,11 @@ separate question.
 - **[[inv-i12]]** (W^X, and I-42: JIT is a capability). No page of the pool
   is ever writable and executable through one alias; the writer alias is
   named only by the sealed, execute-only thunk; every write is followed by
-  the fail-loud `SYS_ICACHE_SYNC` publish; without `CAP_JIT` the pool is
-  empty and nothing is generated.
+  the fail-loud `SYS_ICACHE_SYNC` publish, and the thread that next runs
+  patched code synchronizes its own CPU first (the `eret` after its own
+  publish, `crossModifyingCodeFence` before installing a compiler thread's
+  code, the ISB in `unparkCurrentThread` after any other CPU's); without
+  `CAP_JIT` the pool is empty and nothing is generated.
 - The thunk's bounds: no write through it lands outside the region
   (witnessed by `thunk-oob`).
 - Root completeness without suspension: every cell a thread will use after it
@@ -273,7 +354,9 @@ frames for free.
 `fib(30)` = 832040 in 71–72 ms on the LLInt (HVF, M2). With the Baseline
 JIT (B-2c, HVF, one run of `ls-jsc` on 2026-10-12): SunSpider 1.0.2 totals
 112 ms with the JIT and 352 ms denied (each test the mean of three runs);
-the 2e7-iteration int32 loop takes 442 ms against 931 ms.
+the 2e7-iteration int32 loop takes 442 ms against 931 ms. With the DFG (B-2d,
+HVF, `ls-jsc` on 2026-10-13, one run): SunSpider 68 ms with every JIT on, 105
+ms with the DFG off, 346 ms denied; the loop 193 / 433 / 917 ms.
 
 ## Prosecution
 
@@ -287,7 +370,11 @@ the 2e7-iteration int32 loop takes 442 ms against 931 ms.
   thunk's bounds and encodings (the header is the one source; JSC and the
   probe both build from it), every pool write funnelling through the thunk,
   every write followed by a publish, the tier gate surviving every flag, and
-  the deny path. gcpark (patch 0003) has its own row: prosecute that every
+  the deny path. B-2d (patch 0004) has its own row: enumerate every thread
+  that writes code and show the thread that next runs it synchronizes its CPU
+  first; no multi-instruction rewrite of a range some thread is executing;
+  the 26-bit release checks; the tier gate with the DFG on. gcpark (patch
+  0003) has its own row: prosecute that every
   release of heap access parks and every acquire unparks, that the image is a
   copy covering the callee-saves and the stack to its origin, the exclusion
   that keeps records stable, and that no `Thread::suspend` caller is reachable.

@@ -553,8 +553,9 @@ before any syscall, and the engine then runs its interpreter.
 *B-2d, 2026-10-13: the DFG on the same region.*
 
 - **The DFG rewrites code that runs.** Baseline is unlinked: its calls and
-  property accesses go through data, so a finished Baseline function is never
-  rewritten. The linked DFG rewrites its own instructions in place: a direct
+  property accesses go through data, and only its arithmetic ICs (`JITMathIC`,
+  for add, sub, mul and negate) rewrite a finished function, once each, on the
+  JS thread. The linked DFG rewrites its own instructions in place: a direct
   call linked or unlinked (`CallLinkInfo`), a discarded function's
   invalidation points replaced by jumps (`JumpReplacement::fire`), an OSR
   exit's jump pointed at its lazily compiled ramp (`repatchJump`), a constant
@@ -576,9 +577,13 @@ before any syscall, and the engine then runs its interpreter.
   thread that holds it is handed the collection and runs it on its own CPU).
   So when the collector's thread does the patching, the JS thread is parked
   off the heap; and a JS thread may take the JSLock after another thread
-  patched on another CPU. Upstream counts on a syscall happening before the
-  code runs again (`Heap.cpp`, `finalizeWasmCalleeCleanup`); on Thylacine
-  heap access is retaken by a compare-and-swap, with no syscall.
+  patched on another CPU. Nothing on JavaScriptCore's resume path
+  synchronizes the resuming CPU, and on Thylacine heap access is retaken by a
+  compare-and-swap with no syscall, so no trap is guaranteed in between.
+  *(Corrected at the B-2d audit, Fable r1 F2 and F4: an earlier draft said a
+  finished Baseline function is never rewritten, and cited an upstream comment
+  about the conducting thread's own core as upstream's rule for the JS
+  thread.)*
 - **Decided (research, not a vote): the JS thread executes an ISB where it
   resumes.** `MachineThreads::unparkCurrentThread` runs
   `WTF::crossModifyingCodeFence()`. gcpark made it the one point every resume
