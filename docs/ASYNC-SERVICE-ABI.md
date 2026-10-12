@@ -111,6 +111,10 @@ existing MORE and exactly one final completion. No new private CQE flag is neede
 Kernel: kernel/include/thylacine/loom_service_abi.h, included by loom.h.
 Native C: usr/lib/libt/include/thyla/loom_service.h.
 Rust: usr/lib/libthyla-rs/src/loom/service_abi.rs, exported by loom.rs.
+The ring records these records travel with (params, SQE, CQE, ring header) are
+mirrored for native C in usr/lib/libt/include/thyla/loom.h, beside the three
+Loom syscall stubs. Each field offset is pinned there, and the EL0 probe checks
+the mirror against what the kernel actually writes.
 Pouch/Go currently have no Loom mirror; adding one later requires extending
 abi-loom-service's mirror set. They must not be invented as existing consumers.
 
@@ -188,3 +192,20 @@ With the lever, the syscalls route to the existing internal private stack:
   absolute deadline.
 
 -EFAULT and the other codes are existing registry values; no errno is added.
+The flags that choose the route live inside params, so a params block the kernel
+cannot validate or read returns the legacy -1 before any route is chosen.
+
+**The EL0 probe (NA-2).** `loom-bridge-probe`, a native C program, ships in every
+image's ramfs and reaches these syscalls from EL0 through the real argument and
+copy paths. The kernel test `loom.bridge_probe` spawns it and requires the exit
+status that its own build implies: one value for a kernel with the lever, another
+for a kernel without it. A probe that infers its mode from what it sees cannot
+pass the wrong image. In the default image it checks every private route's
+-EOPNOTSUPP, and that a refusal leaves no handle, no mapping and no partial
+params write. In the qualification image it checks:
+- each refusal above;
+- the params copyout against read-only and part-read-only pages;
+- each record's copyin and result copyout against those pages;
+- the rollback, by the identity of the next fd and ring address;
+- a rejected SQE's CQE, reaped through poll(2);
+- the exact count of private rings that retire after the probe exits.

@@ -4012,3 +4012,20 @@ port of the two legacy fixes follow it.
 Not proven here: EL0 reaching the handlers' usercopy (NA-2's probe), SMP, and
 sanitizers. The Mac-axis residual is recorded per the operator vote of
 2026-10-07.
+
+## NA-2a: the EL0 bridge probe and the native C Loom stubs (Corona, October 12 -- in progress)
+
+NA-1 left one claim unproven: that EL0 reaches the handlers' argument
+marshalling and usercopy as the in-kernel fixtures assume. NA-2a closes it with
+a native C probe, `usr/loom-bridge-probe`, which ships in every image. The kernel
+test `loom.bridge_probe` spawns it and requires the exit status its compile-time
+lever implies: 70 without the lever, 71 with it. A probe that infers its mode
+cannot pass the wrong image. Its fault pages come from one SYS_BURROW_RESERVE,
+cut by SYS_BURROW_PROTECT into RW, R and none. They are never unmapped, so no
+hole is left for a ring to land in.
+
+libt gains the ring ABI mirror and the three Loom stubs (`thyla/loom.h`), plus
+the reserve, protect, attach and detach stubs. The C owned-client cores are
+not installed here: they allocate, and native C has no heap. How they get their
+storage is the open design question for NA-2b. The Rust twins (NA-3) have
+`ThylaAlloc`.
