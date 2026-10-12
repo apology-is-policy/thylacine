@@ -343,6 +343,17 @@ switch DYING is unreachable (only `userland_demand_page` produces it, for EL0
 faults) and extincts; a uaccess fixup treats it as a failed access, as it
 treats every non-HANDLED result.
 
+### An EL0 `brk` names its immediate (gcpark-b, 2026-10-12)
+
+`EC_BRK` from EL0 ends the Proc through `proc_fault_terminate`. The ISS low 16
+bits are the `brk` immediate: `SNARE_ABORT_BRK_IMM` (`0xab06`, notes.h) is
+Pouch's `abort()` (patch 0011) and ends as `snare:abort` (SIGABRT to a packed
+wait); every other immediate -- a compiler's `__builtin_trap`, WTFCrash's
+`0xc471`, a debugger's -- stays `snare:brk` (SIGTRAP). The immediate is ABI with
+the note name ([[abi-note-names]]); operator vote "snare:abort". Witness:
+pouch-hello-signals' deaths legs (abort and a failed assert read SIGABRT,
+`brk #1` reads SIGTRAP).
+
 ### The hardware-debug exception classes
 
 Three exception classes arrive from EL0 only because the kernel armed something:

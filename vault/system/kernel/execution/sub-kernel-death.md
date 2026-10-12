@@ -35,9 +35,10 @@ consequence of getting it wrong is a hang rather than a crash.
 |---|---|---|
 | `exits(msg)` | the Proc's own thread | terminate the *program*; with live peers, routes through the group cascade then self-exits |
 | `thread_exit_self()` | any thread | terminate *this Thread*; the last live one out zombies the Proc |
-| `proc_group_terminate(p, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait |
+| `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b) |
+| `proc_group_terminate(p, sig, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait; `sig` is the death signal the claim records (0 for an exit) |
 | `el0_return_die_check()` | at every return-to-EL0 | if flagged, `thread_exit_self()` (noreturn) |
-| `proc_fault_terminate(name, addr)` | EL0 unhandled fault | diagnose + `exits(snare:*)`; noreturn |
+| `proc_fault_terminate(name, addr)` | EL0 unhandled fault | diagnose + `exits_note(snare:*)`; noreturn |
 
 `proc_group_terminate`'s lock precondition is not stylistic: the cascade
 walks `p->threads`, and that list is mutated only under the table lock, so a
@@ -181,6 +182,28 @@ while the numeric status lives in the separate `exit_status` field the parent's
 wait packs (`WAIT_STATUS_EXITED`, in [[sub-kernel-proc]]'s `wait_pid_for`). The
 two-field split is the point: the flag that says "die" and the byte that says
 "with what status" are no longer one datum.
+
+**A death by note records its signal (gcpark-b, 2026-10-12).** Operator votes
+"snare:abort" and "every note death records a signal" (docs/ERRORS.md is the
+binding table). `exits_code`, `exits_signalled` and `exits_note` share one body,
+`exits_term(code, sig, msg)`: an exit passes sig 0, a death by note passes
+status 1 and the note's signal (`notes_death_signal`, in [[sub-kernel-notes]]).
+The signal rides every path the status rides: the single-thread zombie
+(`proc_become_zombie_locked(p, status, sig, msg)` sets `Proc.term_sig`), the
+live-peer cascade (`group_terminate(p, code, sig, msg, kill)`), and the claim:
+`group_term_sig` is written in the same set-once CAS-winner branch as
+`group_exit_code`, and `thread_exit_self` hands both to the chokepoint. So the
+first claim decides the signal as it decides the status -- an `exit_group(7)`
+that a kill then finds reaps as an exit of 7, a kill first reaps SIGKILL, and a
+fault taken in an already-dying group keeps the group's claim (its SIGBUS would
+otherwise read as 7, the same raw value as the exit). The callers name their
+signals: `proc_group_kill` SIGKILL, `proc_group_terminate_code` 0, a legate
+scope's end SIGKILL, a session leader's death SIGHUP to its session, a held
+child's dead launcher SIGKILL, a debugger's EXITKILL SIGKILL. The wait reads
+the field only when the caller asked for the packed word ([[sub-kernel-proc]]).
+Witnesses: `proc.wait_packed_signalled`, `proc.group_claim_decides_signal`,
+`proc.fault_in_dying_group_reaps_exited_packed`,
+`proc.note_death_with_live_peer_reaps_signalled`.
 
 **A late `exits()` leaves as a peer (I-24).** The group's status is decided
 once, by the first claim. A thread that reaches `exits_code` after
@@ -385,7 +408,10 @@ every die-check. Since #91 the numeric status is a **separate** field,
 `Proc.exit_status` (int): the real exit byte, stored verbatim, no longer the
 `"ok"`→0/else→1 collapse derived from the msg. `group_exit_msg` decides *whether*
 the Proc dies and carries the msg; `exit_status` decides *what status* the
-parent's wait reads.
+parent's wait reads. `Proc.term_sig` (u8, gcpark-b) is the death signal beside
+it, 0 for an exit; `group_term_sig` is its set-once claim twin beside
+`group_exit_code`. Both took the old `_reserved0` slot, so `struct Proc` keeps
+its size.
 
 `Proc.debug_stop_req` / `job_stop_req` — the two stop owners, deliberately
 in the same cache line so the tail's fast path reads both in two ACQUIRE

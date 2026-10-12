@@ -56,9 +56,13 @@ does**:
 |---|---|---|
 | `interrupt` | anyone | terminate (unless the Proc reads its own notes) |
 | `kill` | anyone | terminate, **uncatchable** |
-| `pipe`, `child_exit` | kernel | nothing — queue for the fd reader |
+| `pipe` | kernel | terminate (SIGPIPE's default; a reader-less write posts it) |
+| `child_exit` | kernel | nothing — queue for the fd reader |
 | `tty:*` | **kernel only**, catchable | quit/hup terminate; susp stops; winch/cont informational |
 | `snare:*` | **kernel only** | terminate — and not deliverable at all today |
+
+Each terminating death records its POSIX signal for a packed wait (below,
+"Every death by note records its signal").
 
 The two prefix gates are not decoration. `notes_post` rejects any userspace post
 of a `tty:`- or `snare:`-prefixed name, and for `tty:` **that gate is the only
@@ -402,8 +406,10 @@ to take it), with a buggy cfg per defect. The witnesses are under Tests.
 A user fault left unresolved while a terminate latch is pending reaches the
 EL0 fault arm as `FAULT_USER_DYING` ([[sub-kernel-fault]],
 [[sub-kernel-exception]]), and the arm does not wait for the return tail:
-`notes_fault_dying_latch` takes `q->lock` and `exits()` with the note
-`notes_terminate_note_name_locked` picks, the tail's own choice. The tail
+`notes_fault_dying_latch` takes `q->lock` and ends the Proc with
+`exits_note()` of the note `notes_terminate_note_name_locked` picks, the tail's
+own choice -- so the death records that note's signal (SIGPIPE for a `pipe`),
+not the fault's. The tail
 defers every note but `kill` while a handler runs and while `SP_EL0` is
 unusable, and the faulting instruction would otherwise re-execute into the
 same fault forever. Ending the thread inside a running handler matches Linux,
@@ -414,7 +420,42 @@ latches are stale: cleared under the lock, and the arm returns so the
 instruction re-executes. A class whose note is live but masked by the faulting
 thread stays armed, because a peer may still die of it. Witnesses:
 `notes.fault_dying_latch_live_note_exits`,
-`notes.fault_dying_latch_clears_only_stale`, viv-pheno-probe L329/L330.
+`notes.fault_dying_latch_clears_only_stale`, viv-pheno-probe L329/L330 (which
+since gcpark-b require wait4 to read WIFSIGNALED SIGPIPE: a death by the fault
+itself would read SIGSEGV).
+
+### Every death by note records its signal (gcpark-b, 2026-10-12)
+
+Operator votes "every note death records a signal" and "snare:abort"
+(docs/ERRORS.md "Exit-status semantics" and "The wait status" are the binding
+text). A Proc that does not end by its own exit ends because of a note, and the
+kernel now records which, as a POSIX signal number beside the exit status
+(`Proc.term_sig`, set at the ZOMBIE chokepoint -- [[sub-kernel-death]]). The
+table is here: `g_known_notes` gained a `death_sig` column, nonzero exactly on
+the `NOTE_DEFAULT_TERMINATE` rows (`interrupt` 2, `kill` 9, `pipe` 13,
+`tty:quit` 3, `tty:hup` 1), and `g_snare_deaths` maps the fault family
+(`snare:segv` 11, `snare:bus` and `snare:align` 7, `snare:ill` and `snare:bti`
+4, `snare:brk` 5, `snare:fpe` 8, `snare:abort` 6). `notes_death_signal(name)`
+reads both and answers 0 for a name that cannot kill. The numbers are Linux's
+aarch64 ones, pinned to the vivarium's `VIV_SIG*` by `_Static_assert`, because
+the packed wait word they land in is the Linux layout and both boundary-lines
+pass it through unchanged.
+
+Every death site names its note: the fault latch above, the uncaught default
+terminate (`notes_noted_default`), the viv terminate arm and the tail's uncaught
+terminate call `exits_note(name)`, which records `notes_death_signal(name)` with
+exit status 1; the `kill` arm calls `exits_signalled(NOTE_SIG_KILL, "killed")`.
+A raw wait still reads 1, so every native caller that predates the signal is
+unchanged; only a caller that asks for the packed word sees the signal.
+
+`snare:abort` is the one new name. Pouch's `abort()` is a single
+`brk #SNARE_ABORT_BRK_IMM` (`0xab06`), and the EL0 brk arm
+([[sub-kernel-exception]]) recognises the immediate and terminates with
+`NOTE_NAME_SNARE_ABORT` instead of `snare:brk`. The immediate is ABI, as the
+name is; `notes.h` lists the immediates it avoids (0x1 clang's trap, 0x3e8
+gcc's, 0xf000 debuggers, 0x5500-0x55ff UBSan, 0xc471 WTF/JSC). Witness:
+`notes.death_signal_table` (every row, the non-notes, "a known note kills iff
+it records a signal", and a cross-check against the vivarium's numbers).
 
 ### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
 
@@ -621,8 +662,11 @@ failure path inside it re-enqueues; that kill keeps its two asymmetries (scanned
 before the mask, skipped by the fd path); that the `tty:` prefix gate survives —
 it is one string comparison holding an [[inv-i39]] boundary; that the stack
 pointer validation stays *first*; that the two 32-byte structs keep the assert
-tying them to **each other**, not only to 32; and that any new note name lands
-in both the name table and [[abi-note-names]].
+tying them to **each other**, not only to 32; that any new note name lands
+in both the name table and [[abi-note-names]]; and that a terminating name
+carries a death signal and a non-terminating one carries none
+(`notes.death_signal_table` enumerates the rule, so a new row fails it rather
+than defaulting to 0).
 
 ## Seams
 
@@ -630,7 +674,9 @@ in both the name table and [[abi-note-names]].
   designation do (`caught_target.tla`).
 - Per-kind masking within the `tty:` and `snare:` families is one bit each today.
 - `snare:*` is defined, prefix-gated, and **not deliverable**: fault termination
-  calls the exit path directly rather than posting. The names, the mask bit and
+  calls the exit path directly rather than posting (since gcpark-b,
+  `exits_note()`, which records the fault's signal for a packed wait). No
+  handler runs for a fault or for `abort()` (ERRORS.md: DEFERRED v1.x). The names, the mask bit and
   the gate are all in place for a substrate that does not consume them yet.
 
 ## Caveats
@@ -691,6 +737,8 @@ Designed at the fd-first scripture commit and built as the signals sub-chunk;
 hardened across four numbered audit rounds whose findings are still visible at
 the lines they fixed. LS-5 added the uncaught-`interrupt` default terminate;
 PTY-1b added the `tty:` family and its gate; hardening #3a added `snare:*`.
+gcpark-b (2026-10-12) added `snare:abort` and the death-signal column, and
+moved every death site onto `exits_note` / `exits_signalled`.
 
 [[chg-2026-09-06-notes-caught-wait-mechanisms]] adds the three signal-delivery
 mechanisms that landed after the 2026-08-16 update: the caught-note interruptible
