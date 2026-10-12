@@ -22,6 +22,129 @@ needed the operator.
 
 
 ---
+## 2026-10-08..12 (main, Opus 5.5, effort max) -- JavaScriptCore's Baseline and regexp JITs run on one sealed code region (B-2c) (landed)
+
+**What the run is for.** B-2a and B-2b gave the kernel a code region that is a
+reservation and a write thunk that is born sealed (`dec-2026-10-07-jit-sealed-thunk`).
+B-2c puts JavaScriptCore on it: the Baseline JIT and the YARR regexp JIT, the
+first tiers of the operator's 2026-09-28 order (Baseline + YARR, then DFG, then
+FTL/BBQ/OMG).
+
+**The shape.** Patch 0002 (five files) selects JSC's separated-WX heap for
+`OS(THYLACINE)`, with no jump islands and a 64 MiB pool, so one near branch
+reaches the whole pool. The pool is the exec alias of one `SYS_JIT_CREATE`
+region, adopted through a new `PageReservation::adoptExecutable`; commit and
+decommit are no-ops there because the region is demand-zero (B-2a). The writer
+address lives only as immediates in a 33-word hand-encoded thunk sealed by
+`SYS_JIT_CREATE_SEALED`, and the `thyla_jit_region` that returned it is
+scrubbed with volatile stores. `jsc` takes `CAP_JIT` by the SELF form before
+`JSC::initialize`.
+
+**Wrong turns, and what caught them.**
+- The deny probe was first an environment variable. `ut` passes no envp to its
+  children, so it could never have been set from the shell; it became a jsc
+  flag, `--thylacine-no-cap-jit`, stripped from argv before JSC parses it
+  (fork `dbdab51d01`).
+- The first build, JIT on with DFG and FTL off, failed in seven objects:
+  upstream no longer builds that configuration on ARM64 (B3 exists only with
+  FTL, `PlatformEnable.h:839`; the Wasm code assumes JIT implies B3; a DFG
+  inline-cache variant is visited without the DFG). That is a design question,
+  so it went to the operator: **voted 16:25Z, "gate tiers at run time"**
+  (`dec-2026-10-08-jsc-tiers-run-time`). Every tier is built, as on RISC-V 64,
+  and `Options::notifyOptionsChanged` forces DFG, FTL, BBQ and OMG off under
+  `OS(THYLACINE)`, after which the options are frozen.
+- The `tiers` leg first expected `TRUE`/`FALSE`. A run of the host `jsc`
+  showed `jscOptions()` reports a bool as the number 0 or 1, and the leg was
+  fixed before it ever ran in the guest.
+- The thunk witness was first one process forking a child per out-of-bounds
+  case. A Proc holding a live code region cannot fork (`clone_one_vma` refuses
+  CODE, B-2a F3), so each case became its own invocation.
+
+**Audit round 1** (Fable 5.1, start == end) closed clean, 0/0/0/7. Fixed: F1
+the SunSpider legs on a pool without the payload (now refused before boot), F2
+"each test checks its own result" (23 of 26 do), F6 the tier leg pinned option
+values, not behaviour (a `dfg` leg now shows a hot function reaching Baseline
+code and never DFG code; on the host `jsc`, with the DFG on, `$vm.dfgTrue()`
+turned true after 1599, 8290 and 38696 iterations, and with `--useDFGJIT=false`
+it stayed false through 1e7), F7 forage's `sparse-checkout set` dropped a
+hand-added directory (now `add`; a throwaway-repo control shows `add` keeps it
+and `set` drops it). Recorded and owned (OPEN-BUGS 2026-10-08 16:41Z): F3 the
+content process must run without `/proc`, F4 writer-address residue and a
+never-dropped `CAP_JIT` (a kernel-emitted thunk after B-2e), F5 the Wasm
+cross-PE publish at B-2e.
+
+**Self-found during round 1 (SF-1): the thunk's bounds had no witness.** The
+bounds are what keep the thunk from being a write-anywhere gadget, and JSC
+never writes out of range, so `ls-jsc` could not reach them. The emitter moved
+to `usr/lib/thylajit/thyla_jit_thunk.h` (word-identical to the round-1-verified
+C++ emitter across 25 writer/size pairs), and both JSC and a new probe,
+`pouch-hello-jitthunk`, build from it. The probe writes at the region's edges
+(each store path, and a zero-length write at the end), reads every byte back
+through the exec alias, and makes four out-of-bounds calls, each of which must
+die of `snare:brk`.
+
+**Numbers** (HVF, one `ls-jsc` run of the all-tiers build `107154215`, PASS in
+59 s): SunSpider 1.0.2 totals 121 ms with the JIT and 365 ms denied; the
+2e7-iteration int32 loop takes 467 ms against 959 ms.
+
+**Audit round 2** (Fable 5.1, start == end, on the r1 fixes + SF-1) closed clean,
+0/0/0/4. R2-F1: the thunk header and the probe join sub-webkit's code list (in
+the land commit). R2-F2: `tools/forage.sh` on an existing FULL checkout died on
+git's opaque "no sparse-checkout to add to"; it now checks `core.sparseCheckout`
+first and names the path (`test-forage.sh` C5, red with the guard removed). R2-F3:
+closed with reason (0783535a9's message). R2-F4: a stray `snare:brk` from another
+process could satisfy a thunk-oob leg; deaths are now kept per pid and the leg
+requires the probe's own printed pid to die of `snare:brk`.
+
+**Paused four days.** The first all-tiers `ls-jsc` (10-08) also printed a false
+`user fault: snare:bus` after jsc's clean exit. That was a kernel defect, not
+B-2c's: a dying group's page-in looked like a fault. It preempted the chunk
+(groupstatus), and three more side quests followed (SQ-1, Loom setup,
+notetarget). B-2c was rebased onto main 97ea7437f on 10-12. It touches no kernel
+file, so the rebase was clean; the views re-rendered with no diff.
+
+**What each test proved, both ways** (rebased tip 5597a17b0, one build and one
+`ls-jsc` each, 15:09Z-15:32Z; predictions written before the runs). The thunk's
+first bounds check replaced by a nop: `thunk-oob(8@-8)` died of `snare:segv`
+(the first two cases still died of `snare:brk`, caught by check 2). The second
+check replaced: `thunk-oob(1@end)` died of `snare:segv`. The fork's run-time gate
+without the DFG line: `dfg` printed `JSCP-TRUE-TRUE`. With only the DFG line kept:
+`dfg` passed and `tiers` printed `JSCO-0-1-1-1-1-1`. `CAP_JIT` taken despite
+`--thylacine-no-cap-jit`: `jit-deny` saw "CAP_JIT acquired". `CAP_JIT` taken after
+`JSC::initialize`: `jit` printed `JSCG-FALSE`, the pool having been created and
+refused before the clearance existed. The fork sabotages were discarded detached
+commits, exported as a plain diff in place of 0002; the restored tree rebuilt green
+twice (15:34Z, 15:55Z).
+
+**A crash B-0 shipped, found while researching B-2d.** A read-only agent reading
+the fork for the DFG's platform needs found `MachineThreads::tryCopyOtherThreadStacks`
+calling `Thread::suspend`, which B-0 made a `RELEASE_ASSERT` on Thylacine (no
+per-thread signals). I re-read the path: `Heap::stopTheMutator` hands the conn to
+a mutator that HOLDS heap access, which then scans its own stack, but stops the
+world "instantly" when the mutator has RELEASED access, and the collector's
+conservative scan then suspends every other thread in the group, the mutator
+included. B-0's comment listed the suspend users it had switched off and missed
+this one. On the device, 40 rounds of allocation with a 25 ms wait: with the heap
+held, jsc completed (2/2); with it released (`flashHeapAccess(25)`), jsc exited 127
+with no output (2/2). My first control busy-waited instead of sleeping, so it differed
+in two variables; the second experiment paired `sleepSeconds(0.025)` against
+`flashHeapAccess(25)` and put a diagnostic write before `thread->suspend()`: it
+printed only in the two released legs, each followed by exit 127. The silence was a
+second defect. Pouch's `abort()` is `_Exit(127)`, a P6 workaround from when a user
+fault took the kernel down, and WTF's release `CRASH()` is `std::abort()`, so every
+failed `RELEASE_ASSERT` in jsc is a silent 127. **Operator votes 2026-10-12:** fix the
+scan cooperatively, with no kernel change (a thread that releases the heap publishes
+its registers and stack position, and the scan reads those instead of suspending it);
+make `abort()` a signalled death the kernel reports; land B-2c first, then the fix,
+before B-2d. Both are in OPEN-BUGS; the fix is the next chunk.
+
+**Land.** Gates on the rebased tip, the primary tree detached at 5597a17b0 (default image): suite 1984/1984 on the default image; test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, ubsan smp4/8), 0 corruption; check-production --all PASS (the lean image builds, boots, and both dev accounts log in). The Operator's Manual has no browser or `jsc` chapter yet (exit criterion 5), so no text changes.
+
+**Still open.** The cooperative GC scan and the `abort()` change (voted, next); the three carried
+obligations (OPEN-BUGS 2026-10-08 16:41Z: the content process without `/proc`, the kernel-emitted thunk
+and `CAP_JIT` drop, the Wasm cross-PE publish); B-2d research is in hand (the DFG patches code in place,
+including from the collector thread, where nothing context-synchronizes the mutator's PE).
+
 ## 2026-10-12 (main, Opus 5.5, effort max) -- every EL0 return delivers notes, and a caught note goes to a thread that can take it soon (#964 + L285) (landed)
 
 **What the run is for.** Two defects in caught-note delivery came out of the
