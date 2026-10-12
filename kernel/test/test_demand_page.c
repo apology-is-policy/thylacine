@@ -46,6 +46,7 @@
 
 #include <thylacine/dev.h>           // REVENANT R-2: struct Dev for the stub backing Dev
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>          // groupstatus r1 P3-2: a latch revoked mid-read
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>         // REVENANT R-2: spoor_alloc for the FILE Burrow's backing Chan
@@ -503,6 +504,11 @@ extern s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length
 static bool g_rev_record_intr = false;
 static int  g_rev_saw_intr    = -1;
 
+// groupstatus r1 P3-2: a peer registering a note handler while the page-in's
+// read runs, which clears the Proc's terminate latches. Set to the Proc; the
+// stub registers on it once.
+static struct Proc *g_rev_revoke_proc = NULL;
+
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
@@ -518,6 +524,10 @@ static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
         (void)sys_burrow_protect_for_proc(g_rev_protect_proc, g_rev_protect_va,
                                           PAGE_SIZE, g_rev_protect_prot, 0);
         g_rev_protect_proc = NULL;       // protect ONCE
+    }
+    if (g_rev_revoke_proc) {
+        notes_set_handler(g_rev_revoke_proc, 0x1000u);
+        g_rev_revoke_proc = NULL;        // register ONCE
     }
     if (g_rev_read_fail) return -1;
     long m = n;
@@ -1040,6 +1050,53 @@ void test_demand_page_file_read_error_dying_is_death(void) {
         "a failed page-in with the thread's death pending is answered by the death");
     TEST_EXPECT_EQ(g_rev_read_calls, 2, "both faults attempted the read");
     TEST_EXPECT_EQ(status, 5, "the child reaped with its group's claimed status");
+}
+
+// Pending is sampled before the page-in as well as after. A terminate latch
+// that a peer revokes while the read runs (a handler registered, interposed in
+// the stub read) leaves only the first sample true; the failed read is still
+// answered FAULT_USER_DYING -- the EL0 arm then finds the latch stale and
+// re-executes -- never FAULT_USER_BUS, a false snare:bus for a read the latch
+// abandoned.
+static volatile int g_revoke_r;
+static volatile int g_revoke_armed;
+static volatile int g_revoke_after;
+
+static void revoked_latch_page_in_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    struct Burrow *v = s ? burrow_create_file(s, 0, ONE_PAGE) : NULL;
+    if (v && burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RX) == 0) {
+        (void)notes_post(p, "interrupt", 0u, NULL, true);
+        g_revoke_armed = thread_die_pending(t) ? 1 : 0;
+        g_rev_revoke_proc = p;
+        struct fault_info fi;
+        make_fi(&fi, USER_VA, /*is_write=*/false, /*is_instr=*/true);
+        g_revoke_r = (int)userland_demand_page(p, &fi);
+        g_revoke_after = thread_die_pending(t) ? 1 : 0;
+    }
+    if (v) burrow_unref(v);
+    thread_exit_self();
+}
+
+void test_demand_page_file_read_revoked_latch_is_dying(void) {
+    g_rev_read_fail  = true;
+    g_rev_read_calls = 0;
+    g_revoke_r = g_revoke_armed = g_revoke_after = -1;
+    int pid = rfork(RFPROC, revoked_latch_page_in_entry, NULL);
+    int status = -1;
+    int reaped = pid > 0 ? wait_pid_for(pid, 0, &status) : -1;
+    g_rev_read_fail   = false;   // reset for other tests (before any assert returns)
+    g_rev_revoke_proc = NULL;
+    TEST_ASSERT(pid > 0, "rfork");
+    TEST_EXPECT_EQ(reaped, pid, "reaped the child");
+    TEST_EXPECT_EQ(g_revoke_armed, 1, "the interrupt armed a latch before the page-in");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the page-in attempted the read");
+    TEST_EXPECT_EQ(g_revoke_after, 0, "the handler registered during the read revoked it");
+    TEST_EXPECT_EQ(g_revoke_r, (int)FAULT_USER_DYING,
+        "a failed read under a latch revoked mid-read is not a snare:bus");
 }
 
 // REVENANT read-ahead (#343): a FILE fault fills a CLUSTER of pages from ONE

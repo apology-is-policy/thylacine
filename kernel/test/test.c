@@ -624,6 +624,7 @@ void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_read_error_dying_is_death(void);
+void test_demand_page_file_read_revoked_latch_is_dying(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
 void test_demand_page_file_cluster_short_read(void);
@@ -2753,6 +2754,8 @@ struct test_case g_tests[] = {
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_read_error_dying_is_death",
                                        test_demand_page_file_read_error_dying_is_death, false, NULL },
+    { "demand_page.file_read_revoked_latch_is_dying",
+                                       test_demand_page_file_read_revoked_latch_is_dying, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
     { "demand_page.file_short_read_fills_page",
                                        test_demand_page_file_short_read_fills_page, false, NULL },
