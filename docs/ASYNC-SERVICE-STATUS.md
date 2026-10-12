@@ -4259,3 +4259,15 @@ end), read-only: 0 P0, 0 P1, 2 P2, 6 P3, not dirty. Fixes in WIP ce328ab79.
   no_std with the same warning set as 511f6ef11.
 
 Next: NA-4, the native adapter.
+
+## NA-4: the native adapter (Corona, October 12 -- scripture)
+
+Scripture: "Native adapter (October 12)" in ASYNC-SERVICE-ABI.md (NA-4a). The
+adapter composes the owned-client cores over the private ring from EL0, in the
+qualification image only. It has one request book per ring and one dispatcher
+that routes each CQE by its entry's kind. It is the SQ's only producer and ends
+every submission with ENTER. It waits in poll(2), and cancels only by
+ABORT_SCOPE, which is scope-wide and explicit. Pools are retired locally and
+REAPed once their streams end. The Rust adapter (NA-4b) comes before the C one
+(NA-4c). NA-4d adds the EL0 fixture server and the qualification probe, because
+no EL0 program can reach a private CONNECT today.

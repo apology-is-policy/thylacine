@@ -370,3 +370,101 @@ table the kernel and libt headers already answer to. The ring's header offsets
 in `loom.rs` are derived from `RingHdr`. The checker also checks the cores' own
 copies of the setup record and the CQE, field by field: `t_owned_setup` and
 `t_owned_cqe` in C, `Setup` and `Completion` in Rust.
+
+## Native adapter (October 12)
+
+NA-4 composes the owned-client cores into a client that drives a private ring
+from EL0. It runs only in the qualification image, because outside it setup
+returns -EOPNOTSUPP; it activates nothing. The cores make no syscall and never
+write an SQE. Their `RingBackend`, `Mapping` and `WaitSource` contracts name
+what an integrator owes, and this section says how the adapter pays it.
+
+**Where it lives.** The Rust adapter is a module of `loom-client`, written over
+a public trait of raw kernel calls (setup, register, enter, poll, close, detach,
+the monotonic clock). libthyla-rs implements that trait over its stubs and
+re-exports the adapter. This is `thyla-heap`'s shape: libthyla-rs implements its
+`Backend`. So the adapter's logic runs under `cargo test` against a simulated
+kernel, and the cores stay crate-private. The C adapter is
+`thyla/loom_client/adapter.h` and `src/loom_client/adapter.c` in libt, over a
+table of the same calls that libt fills with its `svc` stubs and the host tests
+fill with a simulation. Following the October 12 vote, its storage is one
+caller-provided object that holds the mapping, the client storage and the
+executor. The Rust adapter comes first, because the clipboard client that AS-4
+adopts is Rust.
+
+**One book per ring.** Every request takes its cookie from one request book of
+`cq_entries` entries (NA-2b F3): control operations (CONNECT, WALK, LOPEN,
+CLUNK), fixed reads and writes, and pooled reads. One dispatcher reads each CQE
+and its receipt through the paired reader and routes it by the book entry's
+kind:
+- a control completion goes to the operation's waiter;
+- a fixed completion goes to the fixed owner, which ends that buffer's use;
+- a pooled completion goes to its pool, which yields an owned payload lease.
+The fixed driver takes the ring's book instead of owning one. That edits
+Astra's cores, so it ends NA-3's derived equivalence, as NA-3's dossier says
+the first edit will.
+
+**Submission.** The adapter is the SQ's only producer. It writes the SQE, with
+`user_data` set to the book's cookie, and the SQ index. It publishes the book
+entry, and only then release-stores `sq_tail`. Nothing fallible follows that
+store. The private executor never drains the SQ, so every submission ends with
+ENTER(NONBLOCK, `min_complete` 0). ENTER may consume fewer SQEs than are
+queued: when the CQ is full, when a rejection is pending, or while another ENTER
+is submitting. A ring that starts closing mid-call returns the count consumed so
+far, or -ECANCELED if it is zero. The adapter submits the rest on a later turn
+and never discards one. It never writes an out-of-range index, so
+a change in the header's `dropped` count is a broken invariant, and it ends the
+process through the client's fatal path.
+
+**Waiting.** The `WaitSource` is poll(2) on the ring fd. `arm` samples
+`cq_tail`, and `wait` polls for POLLIN with a timeout taken from the nearest
+absolute deadline. The kernel registers the waiter before it samples the CQ, and
+that is what discharges the trait's obligation to compare the armed state
+atomically with parking. poll's timeout is in milliseconds, so the adapter
+rounds the remaining time up: it never wakes before a deadline, and it expires
+the deadline on the recheck. POLLHUP means the ring is closing. A pool RETURN, a
+REAP and a scope's retirement are synchronous REGISTER results, not poll events.
+The loop turn rechecks them as local progress. ENTER never sleeps, by the
+October 12 vote.
+
+**Scopes and cancellation.** The adapter creates scopes. It reserves the slot
+(REGISTER SLOT, kind SCOPE), submits CONNECT with an absolute deadline, and
+hands out a scope only after CONNECT's completion. FID slots for WALK work the
+same way. Cancellation is ABORT_SCOPE, the only cancel the kernel has: it ends
+the whole connection, siblings included. Every cancelling API says so, and the
+application uses separate scopes for independent work (ASYNC-SERVICE-LIFECYCLE
+section 7). Dropping a scope aborts it, and REAPs it once it reports RETIRED.
+
+**Pools and streams.** A pooled read is a typed stream handle that holds its
+pool. Dropping the handle aborts its scope, as dropping a fixed request does.
+A pool is retired locally: no new read may name it. The kernel has no pool
+retire, and REAP refuses a pool while any stream, busy, pending or leased
+member remains. So each progress turn retries REAP until it succeeds. The
+backend's whole-ring calls map as follows:
+- `begin_retire` closes local admission and aborts every scope the adapter owns;
+- `retired` holds once each of those scopes reports RETIRED and no fixed or
+  pool reference remains;
+- `close` closes the ring fd. It detaches the mapping only after retirement,
+  because closing does not unmap and the paired reader reads that mapping until
+  the end. Exec closes the ring, and fork omits its mapping (NA-1).
+
+**Errors.** The client's `Full` becomes -ENOSPC. Kernel errnos pass through
+unchanged. The adapter adds no errno.
+
+**Sub-chunks.**
+- NA-4a: this section.
+- NA-4b: the Rust adapter and libthyla-rs's implementation of the call trait,
+  tested on the host against a simulated kernel.
+- NA-4c: the C adapter, tested the same way.
+- NA-4d: the guest qualification. No EL0 program can reach a private CONNECT
+  today, because the kernel's tests serve from kernel threads on registries
+  they create themselves. NA-4d adds an EL0 fixture, a strict 9P server posted
+  in a registry the probe can name, and a qualification-image probe. The probe
+  drives both adapters through: connect, walk, open, fixed reads and writes, a
+  multishot pooled stream with out-of-order returns, a deadline that aborts its
+  scope, cancellation by drop, a full CQ, and closing the whole ring with leases
+  still held. A kernel test pins the probe's exit status by image, as
+  `loom.bridge_probe` does.
+
+Each sub-chunk is audit-bearing, and NA-4b adds the trigger row for the
+adapter.
