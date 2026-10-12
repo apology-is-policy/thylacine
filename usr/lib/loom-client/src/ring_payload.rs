@@ -378,6 +378,13 @@ impl<B: RingBackend> RingOwner<B> {
         }
         requested
     }
+    /// Scope-wide abort for a request the ring's driver abandoned; never after close.
+    pub(crate) fn abort_scope(&self, scope: SlotRef) {
+        if !self.core.closed.get() {
+            self.core.backend.abort_scope(scope);
+            self.core.notify();
+        }
+    }
     pub(crate) fn fixed_count(&self) -> usize {
         self.core.state.borrow().fixed.iter().flatten().count()
     }
@@ -606,6 +613,9 @@ impl<B: RingBackend> Drop for RingClient<B> {
     }
 }
 impl<B: RingBackend> Pool<B> {
+    pub(crate) fn identity(&self) -> SlotRef {
+        self.identity
+    }
     /// # Safety
     /// Record must be the authenticated paired CQ result of a READ for this pool.
     pub(crate) unsafe fn accept(

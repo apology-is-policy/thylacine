@@ -29,6 +29,8 @@ fn zero(r: BufferReceipt) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Control,
+    /// CONNECT and WALK succeed with their reserved destination slot.
+    Slot(u32),
     FixedRead(u32),
     FixedWrite(u32),
     PooledRead {
@@ -97,6 +99,11 @@ impl RequestBook {
         }
         if let Kind::PooledRead { pool, limit, .. } = kind {
             if !valid(pool) || limit == 0 {
+                return Err(Error::Geometry);
+            }
+        }
+        if let Kind::Slot(slot) = kind {
+            if slot >= 64 {
                 return Err(Error::Geometry);
             }
         }
@@ -172,6 +179,11 @@ impl RequestBook {
             }
             Kind::Control => {
                 if flags != 0 || result > 0 || !zero(record.receipt) {
+                    return Err(Error::Record);
+                }
+            }
+            Kind::Slot(slot) => {
+                if flags != 0 || (result >= 0 && result as u32 != slot) || !zero(record.receipt) {
                     return Err(Error::Record);
                 }
             }

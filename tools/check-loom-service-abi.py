@@ -74,10 +74,20 @@ RING_RECORDS = [  # (struct, size, [(field, bytes, alignment)])
 ]
 
 # The client cores keep their own copies of two ring records (the setup record they
-# validate and the CQE they read), checked field by field under their own names.
-# (C struct, Rust path in loom-client, table record, {table field: twin field})
+# validate and the CQE they read), and the native adapter copies of the three it
+# writes or reads by offset (Rust only: libt's adapter uses libt's own records).
+# Each is checked field by field under its own names.
+# (C struct or None, Rust path in loom-client, table record, {table field: twin field})
 TWINS = [('t_owned_setup', 'owned_mapping::Setup', 'loom_params', {'_resv0': 'reserved', '_resv1': 'receipt'}),
-         ('t_owned_cqe', 'paired_cq::Completion', 'loom_cqe', {})]
+         ('t_owned_cqe', 'paired_cq::Completion', 'loom_cqe', {}),
+         (None, 'ring_records::Submission', 'loom_sqe', {'_resv0': 'reserved', '_resv1': 'args'}),
+         (None, 'ring_records::Header', 'loom_ring_hdr', {'_pad': 'pad'}),
+         (None, 'ring_records::BufferRange', 'loom_buf_reg', {})]
+# The adapter's copies of ring constants, against the same table; the buffer-table
+# bound is pinned here and in the kernel's ring leg.
+ADAPTER_CONSTANTS = ['OP_WALK', 'OP_LOPEN', 'OP_READ', 'OP_WRITE', 'OP_CLUNK', 'SQE_MULTISHOT',
+                     'CQE_MORE', 'ENTER_NONBLOCK', 'REGISTER_BUFFERS']
+MAX_REG_BUFFERS = 64
 RUST_RECORDS = {'loom_params': 'Params', 'loom_sqe': 'Sqe', 'loom_cqe': 'Cqe',
                 'loom_ring_hdr': 'RingHdr', 'loom_buf_reg': 'BufReg'}
 
@@ -99,7 +109,8 @@ def ring_source(kernel):
     lines = ['#include <' + ('thylacine/loom.h' if kernel else 'thyla/loom.h') + '>']
     if kernel:
         lines += ['#include <thylacine/errno.h>',
-                  f'_Static_assert(T_E_NOSPC == {ENOSPC}, "T_E_NOSPC");']
+                  f'_Static_assert(T_E_NOSPC == {ENOSPC}, "T_E_NOSPC");',
+                  f'_Static_assert(LOOM_MAX_REG_BUFFERS == {MAX_REG_BUFFERS}, "LOOM_MAX_REG_BUFFERS");']
     else:
         lines += ['#include <thyla/loom_client/owned_mapping.h>',
                   '#include <thyla/loom_client/retirement_executor.h>',
@@ -107,6 +118,7 @@ def ring_source(kernel):
         records = dict((n, f) for n, _, f in RING_RECORDS)
         sizes = dict((n, z) for n, z, _ in RING_RECORDS)
         for twin, _, record, rename in TWINS:
+            if twin is None: continue
             layout, _ = ring_layout(records[record])
             lines.append(f'_Static_assert(sizeof(struct {twin}) == {sizes[record]}, "{twin} size");')
             for field, off, n in layout:
@@ -130,12 +142,17 @@ def rust_ring_source(root):
     abi = root / 'usr/lib/libthyla-rs/src/loom/ring_abi.rs'
     client = root / 'usr/lib/loom-client/src'
     out = ['#![allow(dead_code)]', f'#[path="{abi}"] mod abi;']
-    out += [f'#[path="{client / m}.rs"] mod {m};' for m in ('service_abi', 'paired_cq', 'owned_mapping')]
+    out += [f'#[path="{client / m}.rs"] mod {m};' for m in ('service_abi', 'paired_cq', 'owned_mapping', 'ring_records')]
     out += ['fn field<T, F>(_: fn(&T) -> &F) -> usize { core::mem::size_of::<F>() }',
             'fn check(what: &str, got: usize, want: usize) { assert_eq!(got, want, "{what}"); println!("{what} {got}"); }',
             'fn main() {']
     for name, value in RING_CONSTANTS:
         out.append(f' check("{name}", {rust_constant(name)} as usize, {value});')
+    table = dict(RING_CONSTANTS)
+    for name in ADAPTER_CONSTANTS:
+        out.append(f' check("ring_records::{name}", ring_records::{name} as usize, {table[name]});')
+    for path in ('ring_records::MAX_REG_BUFFERS', 'abi::MAX_REG_BUFFERS'):
+        out.append(f' check("{path}", {path} as usize, {MAX_REG_BUFFERS});')
     records = dict((n, (z, f)) for n, z, f in RING_RECORDS)
     checks = [(f'abi::{RUST_RECORDS[n]}', n, {}) for n, _, _ in RING_RECORDS]
     checks += [(path, record, rename) for _, path, record, rename in TWINS]
@@ -256,7 +273,7 @@ _Static_assert(LOOM_OP_COUNT==20, "private opcode remains reserved");
     print(f'PASS: kernel and native C ring mirrors; {len(RING_CONSTANTS)} constants, '
           f'{len(RING_RECORDS)} records, {sum(len(f) for _, _, f in RING_RECORDS)} fields against one layout table; '
           f'the full-table errno ({ENOSPC}) of the kernel and the native C client cores.')
-    print(f'PASS: Rust ring mirror (ring_abi.rs) and the cores\' twins ({", ".join(t for t, *_ in TWINS)} in C; '
+    print(f'PASS: Rust ring mirror (ring_abi.rs) and the cores\' twins ({", ".join(t for t, *_ in TWINS if t)} in C; '
           f'{", ".join(p for _, p, *_ in TWINS)} in Rust): {rust_records} Rust records, {len(got)} checks.')
 
 if __name__=='__main__':

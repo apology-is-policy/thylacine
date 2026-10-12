@@ -802,7 +802,12 @@ records (`Params`, `Sqe`, `Cqe`, `BufReg` and a `RingHdr` struct) moved into
 `loom/ring_abi.rs`, a file with no crate dependency that
 tools/check-loom-service-abi.py compiles against the ring layout table; `loom.rs`
 re-exports the public names and derives its header offsets from `RingHdr`.
-No working private client is exposed yet.
+NA-4b adds the private client: `loom::native` re-exports the adapter
+([[sub-loom-native-adapter]]), and `ThylaKernel` implements its `Kernel` trait,
+one system call per method (SYS_LOOM_SETUP/REGISTER/ENTER, poll on one
+descriptor, close, SYS_BURROW_ATTACH/DETACH, the monotonic clock), with the poll
+bits asserted equal to `T_POLL*` at compile time. `ServiceRing` names the ring;
+its setup succeeds only in the qualification image.
 
 AS-R8 raw registration is now explicitly unsafe: integer VAs carry the full
 asynchronous lifetime and alias-exclusion obligation through terminal completion

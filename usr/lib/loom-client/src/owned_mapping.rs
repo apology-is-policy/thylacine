@@ -4,9 +4,10 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicU32, Ordering},
 };
+/// SYS_LOOM_SETUP's 88-byte parameter record; `receipt` is the kernel's `_resv1`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Setup {
+pub struct Setup {
     pub flags: u32,
     pub sq_entries: u32,
     pub cq_entries: u32,

@@ -54,15 +54,19 @@ the caller-storage vote of 2026-10-12 concerned freestanding C.
 
 They are a crate of their own, not modules of libthyla-rs, because libthyla-rs
 cannot be built for the host (its `_start` is ELF assembly) and a test inside it
-would run nowhere. None of the cores makes a syscall. As with `thyla-heap`, the
-kernel calls arrive through traits the native adapter (NA-4) will implement in
-libthyla-rs terms. Until it exists the cores are crate-private and only their
-tests use them; `lib.rs` allows dead code outside test builds for that reason.
+would run nowhere. None of the cores makes a syscall. The native adapter
+([[sub-loom-native-adapter]]) composes them over a public `Kernel` trait that
+libthyla-rs implements, as with `thyla-heap`. The cores stay crate-private. The
+adapter does not compose the futures over fixed I/O, the retirement executor or
+the task loop; only their tests use them, so `lib.rs` still allows dead code
+outside test builds.
 
 ## Contract
 
-- **The public surface is `service_abi`.** It moved here from libthyla-rs, which
-  re-exports it as `loom::service_abi`. Everything else is `pub(crate)`.
+- **The public surface is `service_abi` and the adapter, `native`.** The mirror
+  moved here from libthyla-rs, which re-exports both as `loom::service_abi` and
+  `loom::native`. `owned_mapping::Setup` is public because `Kernel::setup` takes
+  it; every core is `pub(crate)`.
 - **The adapter's seams are three traits.** `RingBackend` (ring_payload) and
   `Mapping` (owned_mapping) are `unsafe trait`s whose `# Safety` sections are the
   adapter's obligations; `WaitSource` (local_wait) is the event source a turn
@@ -97,9 +101,15 @@ tests use them; `lib.rs` allows dead code outside test builds for that reason.
   the member count; the envelope refuses a pool that would pass 64 members. An
   uncertain registration quarantines the pool and closes the owner.
 - **request_book** -- cookie correlation of CQEs to requests, cookies from a
-  process-wide counter.
+  process-wide counter. `Kind::Slot` (NA-4b) is CONNECT's and WALK's: their
+  success result is the reserved destination slot, which the book requires
+  exactly; `Kind::Control` keeps accepting no positive result.
 - **fixed_requests**, **fixed_futures** -- typed fixed I/O over a `RingClient`
-  and a `RequestBook`, and `Future`s over it.
+  and a `RequestBook`, and `Future`s over it. Since NA-4b the fixed driver is the
+  ring's one request driver: `request` reserves control, slot and pooled entries
+  (`BookRequest`, whose drop cancels or abandons and requests the scope abort),
+  `register_pool` reaches the client, and `route` dispatches each accepted CQE by
+  kind. `receive` is `route` for callers that hold only fixed requests.
 - **retirement_executor** -- a bounded queue (at most 64) of drivers awaiting
   retirement; admission checks capacity before it calls the factory.
 - **local_tasks**, **local_wait**, **task_loop** -- at most 64 cooperative
@@ -185,18 +195,22 @@ entries: one per CQ slot, at most 8192. A pool costs a few small allocations at
 
 ## Seams
 
-- **The native adapter (NA-4)** implements `RingBackend`, `Mapping` and
-  `WaitSource` over SYS_LOOM_*. It sets the book's `entries` to the ring's
-  `cq_entries`, maps `Full` to ENOSPC, and parks in poll(2): a private ENTER
-  never sleeps (operator vote 2026-10-12). The dead-code allowance in `lib.rs`
-  goes when the adapter uses the cores.
+- **The native adapter** ([[sub-loom-native-adapter]]) implements `RingBackend`,
+  `Mapping` and `WaitSource` over its `Kernel` trait. It sets the book's
+  `entries` to the ring's `cq_entries`, maps `Full` to ENOSPC, and parks in
+  poll(2): a private ENTER never sleeps (operator vote 2026-10-12). It uses
+  `RingOwner::abort_scope` for an abandoned control or pooled request and
+  `Pool::identity` for a stream's SQE.
 
 ## Caveats
 
 1. The cores are compiled into every guest that links libthyla-rs, but no guest
    program calls them yet. Only the host runs them.
-2. The equivalence with Astra's originals is NA-3's evidence, not a standing
-   gate: the first later edit to a core ends it, deliberately.
+2. The equivalence with Astra's originals was NA-3's evidence, not a standing
+   gate. NA-4b's edits (`Kind::Slot`, the request driver's `route` and
+   `BookRequest`, `RingOwner::abort_scope`, `Pool::identity`, the public `Setup`)
+   end it, deliberately: `na3_install.py --check` and `na3-mutants.py` are NA-3's
+   historical evidence and no longer apply to the tree.
 3. `cargo test` runs the tests on parallel threads, which share the three
    process-wide counters. No test depends on a specific id.
 

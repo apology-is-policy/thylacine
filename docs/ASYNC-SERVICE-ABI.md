@@ -400,9 +400,13 @@ kind:
 - a control completion goes to the operation's waiter;
 - a fixed completion goes to the fixed owner, which ends that buffer's use;
 - a pooled completion goes to its pool, which yields an owned payload lease.
-The fixed driver takes the ring's book instead of owning one. That edits
-Astra's cores, so it ends NA-3's derived equivalence, as NA-3's dossier says
-the first edit will.
+The fixed driver becomes the ring's request driver: its book is the ring's one
+book, and control, slot and pooled requests are reserved through it beside the
+fixed ones. CONNECT and WALK succeed with their reserved destination slot
+(loom_service_connect.c, loom_service_admission.c), so the book accepts exactly
+that value for them and nothing positive for LOPEN or CLUNK. That edits Astra's
+cores, so it ends NA-3's derived equivalence, as NA-3's dossier says the first
+edit will.
 
 **Submission.** The adapter is the SQ's only producer. It writes the SQE, with
 `user_data` set to the book's cookie, and the SQ index. It publishes the book
@@ -415,6 +419,17 @@ far, or -ECANCELED if it is zero. The adapter submits the rest on a later turn
 and never discards one. It never writes an out-of-range index, so
 a change in the header's `dropped` count is a broken invariant, and it ends the
 process through the client's fatal path.
+
+**WALK names.** A WALK's component travels in a registered buffer. The adapter
+registers one more buffer after the caller's, a name arena of one 256-byte cell
+per SQ slot, and a WALK uses the cell of the slot its SQE takes. The kernel
+releases `sq_head` before it copies the name, but it copies it inside the ENTER
+that consumed the slot (loom_service_frontend.c, loom_service_io.c), and only the
+creator thread enters. So a cell is free again before its slot is.
+
+**Deadlines.** Each operation's absolute deadline travels in its SQE, where the
+kernel enforces it, and a timeout aborts the whole scope. The adapter keeps no
+timer of its own; a wait's timeout is the caller's deadline.
 
 **Waiting.** The `WaitSource` is poll(2) on the ring fd. `arm` samples
 `cq_tail`, and `wait` polls for POLLIN with a timeout taken from the nearest
@@ -433,7 +448,13 @@ hands out a scope only after CONNECT's completion. FID slots for WALK work the
 same way. Cancellation is ABORT_SCOPE, the only cancel the kernel has: it ends
 the whole connection, siblings included. Every cancelling API says so, and the
 application uses separate scopes for independent work (ASYNC-SERVICE-LIFECYCLE
-section 7). Dropping a scope aborts it, and REAPs it once it reports RETIRED.
+section 7). A scope lives while its handle, a fid of it or an operation on it
+does; when the last goes, the adapter aborts it and REAPs it once it reports
+RETIRED. Dropping a fid clunks it in the background, when the SQ has room, and
+REAPs it after the CLUNK's completion; a fid of an aborted scope is only reaped.
+REAP is retried on every turn, and once more before a reservation answers
+-ENOSPC. Retirement and REAP are not poll events, so a turn that waits for them
+needs a deadline.
 
 **Pools and streams.** A pooled read is a typed stream handle that holds its
 pool. Dropping the handle aborts its scope, as dropping a fixed request does.
@@ -444,12 +465,16 @@ backend's whole-ring calls map as follows:
 - `begin_retire` closes local admission and aborts every scope the adapter owns;
 - `retired` holds once each of those scopes reports RETIRED and no fixed or
   pool reference remains;
-- `close` closes the ring fd. It detaches the mapping only after retirement,
-  because closing does not unmap and the paired reader reads that mapping until
-  the end. Exec closes the ring, and fork omits its mapping (NA-1).
+- `close` closes the ring fd. The mapping and the buffers are detached when
+  their last owner is gone, after the paired reader and every payload lease,
+  because closing does not unmap and those read them until the end. A mapping
+  whose setup geometry fails validation is never detached. Exec closes the ring,
+  and fork omits its mapping (NA-1).
 
-**Errors.** The client's `Full` becomes -ENOSPC. Kernel errnos pass through
-unchanged. The adapter adds no errno.
+**Errors.** The client's `Full` and a full SQ become -ENOSPC. Kernel errnos pass
+through unchanged. A closed ring answers -ECANCELED, the kernel's own code for
+it. A corrupt or stale CQE fails the ring, which closes it, and every operation
+then answers -EIO. The adapter adds no errno.
 
 **Sub-chunks.**
 - NA-4a: this section.

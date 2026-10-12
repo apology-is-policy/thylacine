@@ -13,7 +13,7 @@
 //! corrupt its own ring view, never the kernel's (the kernel copies every SQE to
 //! private memory and keeps `sq_head` / `cq_tail` kernel-private).
 
-pub use loom_client::service_abi;
+pub use loom_client::{native, service_abi};
 
 mod ring_abi;
 
@@ -523,3 +523,53 @@ impl Drop for Ring {
         }
     }
 }
+
+/// The system calls behind a private service ring. The ring, its scopes and its
+/// futures are [`native`]'s, where the host tests them against a simulated
+/// kernel; this is the only part that enters the kernel.
+pub struct ThylaKernel;
+
+const _: () = assert!(native::POLLIN == crate::T_POLLIN);
+const _: () = assert!(native::POLLERR == crate::T_POLLERR);
+const _: () = assert!(native::POLLHUP == crate::T_POLLHUP);
+const _: () = assert!(native::POLLNVAL == crate::T_POLLNVAL);
+
+// SAFETY: each method is one system call, its arguments and result unchanged.
+// SYS_BURROW_ATTACH maps eager, physically contiguous, zeroed RW memory, the kind
+// Loom registration resolves (RegisteredBuffer above).
+unsafe impl native::Kernel for ThylaKernel {
+    fn setup(&self, entries: u32, params: &mut native::Setup) -> i64 {
+        unsafe { t_loom_setup(entries as u64, params as *mut native::Setup as u64) }
+    }
+    unsafe fn register(&self, fd: i32, op: u32, arg: *mut u8, nargs: u32) -> i64 {
+        unsafe { t_loom_register(fd as u64, op as u64, arg as u64, nargs as u64) }
+    }
+    fn enter(&self, fd: i32, to_submit: u32, min_complete: u32, flags: u32) -> i64 {
+        unsafe { t_loom_enter(fd as u64, to_submit as u64, min_complete as u64, flags as u64) }
+    }
+    fn poll(&self, fd: i32, events: i16, timeout_ms: i32) -> i64 {
+        let mut p = crate::TPollFd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let rc = unsafe { crate::t_poll(&mut p, 1, timeout_ms) };
+        if rc <= 0 { rc } else { p.revents as i64 }
+    }
+    fn close(&self, fd: i32) -> i64 {
+        unsafe { crate::t_close(fd as i64) }
+    }
+    fn attach(&self, len: usize) -> i64 {
+        unsafe { t_burrow_attach(len as u64) }
+    }
+    fn detach(&self, va: usize, len: usize) -> i64 {
+        unsafe { t_burrow_detach(va as u64, len as u64) }
+    }
+    fn now(&self) -> u64 {
+        crate::time::monotonic_ns()
+    }
+}
+
+/// A private service ring on this kernel. Setup succeeds only in an image built
+/// with the private-async qualification lever; otherwise it is -EOPNOTSUPP.
+pub type ServiceRing = native::Ring<ThylaKernel>;

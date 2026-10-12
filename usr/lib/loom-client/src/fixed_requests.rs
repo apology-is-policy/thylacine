@@ -1,9 +1,10 @@
-//! Typed fixed request ownership. No SQ publishing or Future wakeup.
+//! The ring's request driver: one book for fixed, control and pooled requests.
+//! No SQ publishing or Future wakeup.
 extern crate alloc;
 use super::{
     paired_cq::{Completion, Record},
-    request_book::{Error as BookError, Kind, RequestBook},
-    ring_payload::{Error as StorageError, FixedIo, RingBackend, RingClient, RingOwner},
+    request_book::{Delivery, Error as BookError, Kind, RequestBook},
+    ring_payload::{Error as StorageError, FixedIo, Pool, RingBackend, RingClient, RingOwner},
     service_abi::{PoolMember, SlotRef},
 };
 use alloc::rc::Rc;
@@ -50,6 +51,21 @@ pub(crate) struct WriteRequest<B: RingBackend> {
 pub(crate) struct ReadCompletion<B: RingBackend> {
     fixed: FixedIo<B>,
     completion: Completion,
+}
+/// A control, slot or pooled request: book metadata only, no fixed buffer.
+pub(crate) struct BookRequest<B: RingBackend> {
+    core: Rc<RefCell<Core<B>>>,
+    cookie: u64,
+    published: bool,
+    taken: bool,
+}
+/// What an accepted completion was. Fixed and control terminals stay in the book
+/// for their owners; a pooled shot goes to the pool its request names.
+#[derive(Debug)]
+pub(crate) enum Routed {
+    Fixed(u64),
+    Control(u64),
+    Pooled(Delivery),
 }
 impl<B: RingBackend> FixedDriver<B> {
     pub(crate) fn new(backend: B, cq_capacity: usize) -> Result<Self, Error> {
@@ -133,10 +149,42 @@ impl<B: RingBackend> FixedDriver<B> {
             inner: self.prepare(scope, range, Some(bytes))?,
         })
     }
+    /// Control, slot and pooled kinds only; fixed requests own a buffer and use
+    /// read or write.
+    pub(crate) fn request(&self, scope: SlotRef, kind: Kind) -> Result<BookRequest<B>, Error> {
+        let mut core = self.core.borrow_mut();
+        if core.failed || core.client.is_none() {
+            return Err(Error::Closing);
+        }
+        if matches!(kind, Kind::FixedRead(_) | Kind::FixedWrite(_)) {
+            return Err(Error::Book(BookError::Geometry));
+        }
+        let cookie = core.book.reserve(scope, kind).map_err(Error::Book)?;
+        Ok(BookRequest {
+            core: self.core.clone(),
+            cookie,
+            published: false,
+            taken: false,
+        })
+    }
+    pub(crate) fn register_pool(&self, ranges: &[PoolMember]) -> Result<Pool<B>, Error> {
+        let core = self.core.borrow();
+        if core.failed {
+            return Err(Error::Closing);
+        }
+        let client = core.client.as_ref().ok_or(Error::Closing)?;
+        client.register_pool(ranges).map_err(Error::Storage)
+    }
     /// # Safety
     /// Paired completion from this driver's exclusive native mapping, after local
     /// fixed-buffer access has ended. It is never synthesized from ENTER/ABORT rc.
     pub(crate) unsafe fn receive(&mut self, record: Record) -> Result<(), Error> {
+        unsafe { self.route(record) }.map(|_| ())
+    }
+    /// # Safety
+    /// As receive. A pooled delivery's receipt is not yet owned by anyone: the
+    /// caller hands it to the pool's accept before any other ring work.
+    pub(crate) unsafe fn route(&mut self, record: Record) -> Result<Routed, Error> {
         let mut c = self.core.borrow_mut();
         if c.failed {
             return Err(Error::Closing);
@@ -148,19 +196,31 @@ impl<B: RingBackend> FixedDriver<B> {
                 return Err(Error::Book(e));
             }
         };
-        if let Err(e) = unsafe {
-            c.owner
-                .finish_fixed(delivery.cookie, delivery.record.cqe.result)
-        } {
-            c.fail();
-            return Err(Error::Storage(e));
+        let cookie = delivery.cookie;
+        match delivery.kind {
+            Kind::FixedRead(_) | Kind::FixedWrite(_) => {
+                if let Err(e) = unsafe { c.owner.finish_fixed(cookie, delivery.record.cqe.result) } {
+                    c.fail();
+                    return Err(Error::Storage(e));
+                }
+                if delivery.abandoned {
+                    c.book.take_terminal(cookie).expect("fixed terminal");
+                }
+                Ok(Routed::Fixed(cookie))
+            }
+            Kind::Control | Kind::Slot(_) => {
+                if delivery.abandoned {
+                    c.book.take_terminal(cookie).expect("control terminal");
+                }
+                Ok(Routed::Control(cookie))
+            }
+            Kind::PooledRead { .. } => {
+                if delivery.terminal && delivery.abandoned {
+                    c.book.take_terminal(cookie).expect("pooled terminal");
+                }
+                Ok(Routed::Pooled(delivery))
+            }
         }
-        if delivery.abandoned {
-            c.book
-                .take_terminal(delivery.cookie)
-                .expect("fixed terminal");
-        }
-        Ok(())
     }
     /// Scheduling/cancellation bookkeeping only; no synthetic completion or refund.
     pub(crate) fn next_deadline(&self) -> Option<u64> {
@@ -334,6 +394,80 @@ impl<B: RingBackend> WriteRequest<B> {
     }
     pub(crate) fn try_complete(&mut self) -> Result<Option<Completion>, Error> {
         Ok(self.inner.take()?.map(|(completion, _fixed)| completion))
+    }
+}
+impl<B: RingBackend> BookRequest<B> {
+    pub(crate) fn cookie(&self) -> u64 {
+        self.cookie
+    }
+    /// # Safety
+    /// As a fixed request's publish: the SQE carries this cookie, and the SQ tail
+    /// is released next with no fallible work between.
+    pub(crate) unsafe fn publish(&mut self) -> Result<u64, Error> {
+        let mut c = self.core.borrow_mut();
+        if c.failed || c.client.is_none() {
+            return Err(Error::Closing);
+        }
+        if self.published || self.taken {
+            return Err(Error::Book(BookError::State));
+        }
+        c.book.publish(self.cookie).expect("owned prepared request");
+        self.published = true;
+        Ok(self.cookie)
+    }
+    pub(crate) fn take(&mut self) -> Result<Option<Completion>, Error> {
+        if self.taken {
+            return Err(Error::Consumed);
+        }
+        let mut c = self.core.borrow_mut();
+        if c.failed {
+            return Err(Error::Closing);
+        }
+        if !self.published {
+            return if c.client.is_none() {
+                Err(Error::Closing)
+            } else {
+                Ok(None)
+            };
+        }
+        match c.book.take_terminal(self.cookie) {
+            Ok(completion) => {
+                self.taken = true;
+                Ok(Some(completion))
+            }
+            Err(BookError::State) => {
+                if c.client.is_none() {
+                    Err(Error::Closing)
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => Err(Error::Book(e)),
+        }
+    }
+}
+impl<B: RingBackend> Drop for BookRequest<B> {
+    fn drop(&mut self) {
+        if self.taken {
+            return;
+        }
+        let mut c = self.core.borrow_mut();
+        if !self.published {
+            c.book
+                .cancel_unpublished(self.cookie)
+                .expect("unpublished owner");
+            return;
+        }
+        match c.book.take_terminal(self.cookie) {
+            Ok(_) => {}
+            Err(BookError::State) => {
+                // Only the first abandonment of a live request asks for the abort.
+                if let Some(scope) = c.book.abandon(self.cookie).expect("active owner") {
+                    c.owner.abort_scope(scope);
+                }
+            }
+            Err(_) => c.fail(),
+        }
     }
 }
 impl<B: RingBackend> ReadCompletion<B> {

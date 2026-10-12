@@ -4271,3 +4271,16 @@ ABORT_SCOPE, which is scope-wide and explicit. Pools are retired locally and
 REAPed once their streams end. The Rust adapter (NA-4b) comes before the C one
 (NA-4c). NA-4d adds the EL0 fixture server and the qualification probe, because
 no EL0 program can reach a private CONNECT today.
+
+### NA-4b: the Rust adapter (WIP, unverified)
+
+Written while main held the mac; nothing has compiled or run yet. The adapter is
+`loom_client::native` (`Kernel`, `Ring`, the handles and futures) with
+`ThylaKernel` in libthyla-rs, 20 host tests against a simulated kernel
+(`tests/native.rs`, `tests/native/sim.rs`), the fixed driver made the ring's one
+request driver (`route`, `BookRequest`, `Kind::Slot`), the adapter's ring twins
+in the ABI checker, the trigger row "Native Loom adapter (October 12)", and the
+dossier `sub-loom-native-adapter`. Owed before the close: the first build and
+test run under the lease, a sabotage of each new witness, the checker run and a
+twin sabotage, the guest build, quaestor lint, the self-audit, and the
+cross-family audit round.
