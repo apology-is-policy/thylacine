@@ -2040,11 +2040,13 @@ enum {
     //   through the kernel is already covered -- the exposed case is a peer
     //   spin-waiting on a flag in userspace with no intervening trap.
     //
-    //   Nothing at v1.0 drives this (the JIT surface has no threaded consumer
-    //   yet), but the named first consumer -- LLVM ORC's DualMapMemoryMapper --
-    //   has exactly the emit-on-one-thread / execute-on-a-worker shape, so
-    //   CL-7 must either honor this contract or make this syscall broadcast an
-    //   ISB to the Proc's other running threads.
+    //   Consumers honor it in userspace. JavaScriptCore installs a compiler
+    //   thread's code after an ISB on the JS thread, and the JS thread runs one
+    //   wherever it resumes the VM's code (MachineThreads::unparkCurrentThread),
+    //   which covers code the collector patched with the world stopped and a
+    //   JSLock handed across CPUs. No mode of this syscall
+    //   broadcasts an ISB to the Proc's other running threads (Linux's
+    //   membarrier SYNC_CORE); B-2e decides one for Wasm's cache reset.
     //
     //   Errors: -EINVAL (range empty, wraps, or is not contained in a single
     //   live code-region alias of this Proc).

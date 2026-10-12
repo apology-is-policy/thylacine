@@ -1,0 +1,99 @@
+From 608a6c6969e843b65c724e8a1c0fdb772e602284 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <noreply@example.invalid>
+Date: Tue, 13 Oct 2026 00:39:57 +0200
+Subject: [PATCH] thylacine: B-2d the DFG on at run time, an ISB where a thread
+ resumes the VM's code
+
+OS(THYLACINE): the DFG joins Baseline and the RegExp JIT at run time; FTL
+and Wasm's BBQ and OMG stay off until their own step.
+
+The linked DFG rewrites instructions that run (direct-call link and unlink,
+JumpReplacement on a discard, OSR exit jumps, JITMathIC inline code). The
+collector discards and unlinks code with the world stopped, which
+JavaScriptCore does only when no thread holds heap access, and a JSLock can
+pass to a thread on another CPU after its previous holder patched. Thylacine's
+SYS_ICACHE_SYNC invalidates by broadcast but synchronizes only the calling
+CPU, and heap access is retaken by a compare-and-swap with no syscall, so
+MachineThreads::unparkCurrentThread -- the one point every resume passes
+through since gcpark -- now runs WTF::crossModifyingCodeFence() (an ISB), as
+HotSpot runs cross_modify_fence leaving a safepoint.
+
+With jump islands off, linkJumpOrCall, replaceWithJump and fillNearTailCall
+checked the 26-bit branch range only in debug builds and masked the offset in
+release; a target out of range is now a RELEASE_ASSERT.
+---
+ Source/JavaScriptCore/assembler/ARM64Assembler.h  | 8 ++++++++
+ Source/JavaScriptCore/heap/MachineStackMarker.cpp | 5 +++++
+ Source/JavaScriptCore/runtime/Options.cpp         | 5 ++---
+ 3 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/Source/JavaScriptCore/assembler/ARM64Assembler.h b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+index e8ba1ef823..add044a47a 100644
+--- a/Source/JavaScriptCore/assembler/ARM64Assembler.h
++++ b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+@@ -2625,7 +2625,11 @@ public:
+         RELEASE_ASSERT(roundUpToMultipleOf<instructionSize>(from) == from);
+         intptr_t offset = (std::bit_cast<intptr_t>(to) - std::bit_cast<intptr_t>(from)) >> 2;
+         ASSERT(static_cast<int>(offset) == offset);
++#if ENABLE(JUMP_ISLANDS)
+         ASSERT(isInt<26>(offset));
++#else
++        RELEASE_ASSERT(isInt<26>(offset));
++#endif
+         constexpr bool isCall = false;
+         int insn = unconditionalBranchImmediate(isCall, static_cast<int>(offset));
+         machineCodeCopy<noFlush(repatch)>(from, &insn, sizeof(int));
+@@ -3882,6 +3886,8 @@ public:
+             offset = (std::bit_cast<intptr_t>(to) - std::bit_cast<intptr_t>(where)) >> 2;
+             RELEASE_ASSERT(isInt<26>(offset));
+         }
++#else
++        RELEASE_ASSERT(isInt<26>(offset));
+ #endif
+ 
+         int insn = unconditionalBranchImmediate(false, static_cast<int>(offset));
+@@ -4258,6 +4264,8 @@ protected:
+             offset = (std::bit_cast<intptr_t>(to) - std::bit_cast<intptr_t>(fromInstruction)) >> 2;
+             RELEASE_ASSERT(isInt<26>(offset));
+         }
++#else
++        RELEASE_ASSERT(isInt<26>(offset));
+ #endif
+ 
+         int insn = unconditionalBranchImmediate(isCall, static_cast<int>(offset));
+diff --git a/Source/JavaScriptCore/heap/MachineStackMarker.cpp b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+index f8656aabb9..852d88c4f3 100644
+--- a/Source/JavaScriptCore/heap/MachineStackMarker.cpp
++++ b/Source/JavaScriptCore/heap/MachineStackMarker.cpp
+@@ -155,6 +155,11 @@ NEVER_INLINE void MachineThreads::parkCurrentThread()
+ 
+ void MachineThreads::unparkCurrentThread()
+ {
++    // Every resume of the VM's code passes through here, and that code may have been
++    // patched on another CPU since this one last synchronized: by the collector while
++    // the world was stopped, or by the JSLock's previous holder. SYS_ICACHE_SYNC
++    // synchronizes only the CPU that calls it.
++    WTF::crossModifyingCodeFence();
+     Locker locker { m_threadGroup->getLock() };
+     if (auto* parked = findParkedThread(locker, Thread::currentSingleton()))
+         parked->parked = false;
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 35cf88457b..2bcf75b6a1 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -838,10 +838,9 @@ void Options::notifyOptionsChanged()
+ 
+ #if OS(THYLACINE)
+     // As on RISCV64, every JIT tier is built (the configuration upstream builds) and
+-    // the tiers not yet opened on Thylacine are off at run time: Baseline and the
+-    // RegExp JIT run; DFG, FTL and Wasm's BBQ and OMG stay off whatever a flag or the
++    // the tiers not yet opened on Thylacine are off at run time: Baseline, the DFG and
++    // the RegExp JIT run; FTL and Wasm's BBQ and OMG stay off whatever a flag or the
+     // environment asked, until each is opened in its own audited step.
+-    Options::useDFGJIT() = false;
+     Options::useFTLJIT() = false;
+     Options::useBBQJIT() = false;
+     Options::useOMGJIT() = false;
+-- 
+2.43.0
+

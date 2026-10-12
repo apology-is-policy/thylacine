@@ -6850,12 +6850,12 @@ build_jsc() {
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
             stage_jsc_bench "$wk" "$stage" "$port_dir"
-            ledger "jsc (JavaScriptCore, every tier built, Baseline + YARR on): REUSED (cached + up-to-date)"
+            ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + YARR on): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built, Baseline + YARR on, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built, Baseline + DFG + YARR on, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6889,11 +6889,21 @@ build_jsc() {
     fi
     [[ "$(grep -cE '^[[:space:]]*LOAD[[:space:]]' <<< "$ph")" -ge 2 ]] \
         || { echo "==> jsc: readelf printed no LOAD segments -- the W+X check saw nothing" >&2; exit 1; }
+    # The ISB a thread runs where it resumes the VM's code (patch 0004) is what lets it
+    # run code the collector or another CPU patched (BROWSER-DESIGN 7, B-2d), and no run
+    # can show it missing: so the built binary is asked for it.
+    local unpark
+    unpark="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+        --disassemble-symbols=_ZN3JSC14MachineThreads19unparkCurrentThreadEv "$out")"
+    [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$unpark")" -ge 8 ]] \
+        || { echo "==> jsc: no MachineThreads::unparkCurrentThread to disassemble -- the ISB check saw nothing" >&2; exit 1; }
+    grep -qE '^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)' <<< "$unpark" \
+        || { echo "==> jsc: MachineThreads::unparkCurrentThread has no isb (patch 0004)" >&2; exit 1; }
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
     stage_jsc_bench "$wk" "$stage" "$port_dir"
-    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
-    ledger "jsc (JavaScriptCore, every tier built, Baseline + YARR on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, the resume ISB present)"
+    ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + YARR on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {

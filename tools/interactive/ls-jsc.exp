@@ -1,7 +1,8 @@
 #!/usr/bin/expect -f
 # tools/interactive/ls-jsc.exp -- Boosty over a real PTY: JavaScriptCore (WebKit's
-# JSCOnly port, static; B-2c: the Baseline and regexp JITs on one SYS_JIT_CREATE
-# code region; every other tier is built and held off at run time) runs as the
+# JSCOnly port, static; the Baseline, DFG (B-2d) and regexp JITs on one
+# SYS_JIT_CREATE code region; FTL, BBQ and OMG are built and held off at run time)
+# runs as the
 # logged-in user from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md;
 # docs/browser-status.md.
 #
@@ -21,16 +22,41 @@
 #           goes to the YARR interpreter (JSC says "Can't JIT" for it)
 #   loop / loop-deny   a 2e7-iteration int32 loop computes the same value both ways;
 #           each prints its time for the record (asserted: the value, never a time)
-#   sunspider / sunspider-deny   SunSpider 1.0.2, three runs each, JIT on and
-#           denied; 23 of its 26 tests check their own result (date-format-tofte,
+#   sunspider / sunspider-baseline / sunspider-deny   SunSpider 1.0.2, three runs
+#           each: every JIT on, the DFG off (--useDFGJIT=false), and denied; 23 of
+#           its 26 tests check their own result (date-format-tofte,
 #           date-format-xparb and string-validate-input check nothing); the totals
-#           are the record
-#   tiers   DFG, FTL, BBQ and OMG stay off although every one is asked for by flag;
-#           --useDollarVM=true in the same line reads on, so the flags were parsed
-#           (jscOptions() reports a bool as the number 0 or 1)
-#   dfg     the same flags, and a hot function reaches Baseline code but never DFG
-#           code: $vm.dfgTrue() stays false through 1e7 calls (with the DFG on it
-#           turns true within ~4e4 -- measured on a host jsc, one flag away)
+#           are the record (loop-baseline is the same split for the loop)
+#   dfg / dfg-off / dfg-deny / dfg-sync   a hot function reaches DFG code
+#           ($vm.dfgTrue() folds to true only there); --useDFGJIT=false, one flag
+#           away, stops at Baseline; --thylacine-no-cap-jit reaches neither;
+#           --useConcurrentJIT=false compiles on the JS thread and gets there too
+#   tiers   Baseline and DFG on; FTL, BBQ and OMG stay off although every one is
+#           asked for by flag; --useDollarVM=true in the same line reads on, so the
+#           flags were parsed (jscOptions() reports a bool as the number 0 or 1)
+#   osr     a DFG function speculating int32 is handed a double and a string: two
+#           OSR exits, each ramp compiled on first use and its jump patched in
+#           place, and both answers right. numberOfDFGCompiles reads 1000000
+#           whenever the DFG is off, so the leg asks for at least 1 and below that
+#   watch   a loop running DFG code that reads an array hole (the prototype chain
+#           speculated empty) calls out to code that puts an indexed getter on
+#           Array.prototype: the watchpoint discards the loop's code, the jump
+#           patched over its invalidation point sends it back to Baseline, and the
+#           hole reads the getter's 42. The call passes $vm.dfgTrue(), so the leg
+#           also proves the loop WAS DFG code when the watchpoint fired. A broken
+#           discard reads undefined.
+#   gc-jettison / gc-jettison-ctl   the collector discards DFG code: twenty rounds
+#           each make a function DFG code, then park in flashHeapAccess under the
+#           continuous collector; with --forceCodeBlockToJettisonDueToOldAge every
+#           unmarked DFG block counts as old, and JSC's own log
+#           (--dumpDFGDisassembly) names each discard "due to
+#           JettisonDueToOldAge", a reason only the collector's end phase gives.
+#           The leg counts those lines (at least 1) and checks every call's result;
+#           its twin without the force flag must count 0 (this script on the
+#           macOS jsc, 2026-10-13: 7-41 vs 0 over five runs each, 0.2-0.6 MB of
+#           log per run; the device's jsc is a different build). Which thread conducted each end
+#           phase is not observable; the collector conducts whenever it stops
+#           the world with jsc parked, which flashHeapAccess arranges.
 #   thunk / thunk-oob  pouch-hello-jitthunk runs JSC's write-thunk encoding
 #           (usr/lib/thylajit/thyla_jit_thunk.h) against the kernel: edge writes
 #           read back through the exec alias, and each out-of-bounds write dies of
@@ -144,17 +170,73 @@ lc_expect $nojit "denied, the pattern goes to the YARR interpreter"
 lc_expect "JSCL-1000" "the interpreted pattern matches the same"
 lc_pass "ls-jsc(rx-deny): Can't JIT, JSCL-1000"
 
-# The behaviour first, then the option values: a DFG turned on fails dfg here
-# whatever the values say, and tiers then pins FTL, BBQ and OMG too.
+# B-2d. The behaviour first, then the option values.
 set dfg {function f(){return $vm.baselineJITTrue()}; function g(){return $vm.dfgTrue()}; var b=false, d=false; for(var i=0;i<1e7&&!(b&&d);i++){if(!b)b=f(); if(!d)d=g()} print("@T-"+b+"-"+d)}
-lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jscp} $dfg]' | tr a-z A-Z" \
-    "JSCP-TRUE-FALSE" {JSCP-(FALSE-|TRUE-TRUE)}
-lc_pass "ls-jsc(dfg): a hot function runs Baseline code, never DFG code"
+lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jscp} $dfg]' | tr a-z A-Z" \
+    "JSCP-TRUE-TRUE" {JSCP-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(dfg): a hot function runs DFG code"
+lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=false --useDollarVM=true -e '[string map {@T jscu} $dfg]' | tr a-z A-Z" \
+    "JSCU-TRUE-FALSE" {JSCU-(FALSE|TRUE-TRUE)}
+lc_pass "ls-jsc(dfg-off): with --useDFGJIT=false it stops at Baseline"
+lc_run_expect_hardfail_re "/webkit/jsc --thylacine-no-cap-jit --useDollarVM=true -e '[string map {@T jscv} $dfg]' | tr a-z A-Z" \
+    "JSCV-FALSE-FALSE" {JSCV-TRUE|CAP_JIT acquired}
+lc_pass "ls-jsc(dfg-deny): without CAP_JIT, neither tier"
+lc_run_expect_hardfail_re "/webkit/jsc --useConcurrentJIT=false --useDollarVM=true -e '[string map {@T jscw} $dfg]' | tr a-z A-Z" \
+    "JSCW-TRUE-TRUE" {JSCW-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(dfg-sync): compiled on the JS thread, the same"
 
 set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
 lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
-    "JSCO-0-0-0-0-1-1"
-lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
+    "JSCO-1-0-0-0-1-1"
+lc_pass "ls-jsc(tiers): Baseline and DFG on, FTL/BBQ/OMG off; the flags were parsed"
+
+set osr {function h(x){return x+1} var s=0; for(var i=0;i<1e5;i++)s=h(i); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}
+lc_run_expect_hardfail "/webkit/jsc -e '[string map {@T jscx} $osr]' | tr a-z A-Z" "JSCX-OK-C" "JSCX-BAD"
+lc_pass "ls-jsc(osr): two OSR exits out of DFG code, both answers right"
+
+set watch {var armed=0, dd=false; function arm(i,d){if(i===9e4&&!armed){armed=1; dd=d; Object.defineProperty(Array.prototype,1,{get:function(){return 6*7}})}} noInline(arm); function run(a){var x; for(var i=0;i<1e5;i++){arm(i,$vm.dfgTrue()); x=a[1]} return x} var r=run([1,,3]); print("@T-"+armed+"-"+dd+"-"+r)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jscy} $watch]' | tr a-z A-Z" \
+    "JSCY-1-TRUE-42" {JSCY-(0|1-FALSE|1-TRUE-UNDEFINED)}
+lc_pass "ls-jsc(watch): a watchpoint discards running DFG code; the hole reads 42"
+
+# Each leg prints its marker upper-cased by the script itself, then its exit status
+# through tr, so the echo of the typed line satisfies neither; the discard lines are
+# counted from jsc's own log until the status arrives.
+set gcjet {function mk(r){var a=[]; for(var i=0;i<64;i++){var o={p:i}; o["q"+r]=1; a.push(o)} return a} function drive(k,a){var bad=0; for(var i=0;i<6e4;i++){if(k(a[i&63])!==(i&63))bad++} return bad} var ks=[], bad=0, r=0; for(;r<20;r++){var k=new Function("o","return o.p /*"+r+"*/"); noInline(k); ks.push(k); var objs=mk(r); bad+=drive(k,objs); objs=null; for(var w=0;w<4;w++)flashHeapAccess(20)} print(("@T-"+r+"-"+bad).toUpperCase())}
+proc gcjet_leg {what tag opts js wantn} {
+    global lc_cmd_timeout timeout
+    set T [string toupper $tag]
+    lc_send "/webkit/jsc --useDollarVM=true --collectContinuously=true --dumpDFGDisassembly=true $opts -e '[string map [list @T $tag] $js]'; echo $tag-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set out ""
+    set n 0
+    # One alternation, so the leftmost line in the stream is taken first: a discard
+    # logged after the marker (the VM's teardown) cannot swallow it.
+    expect {
+        -re "Jettisoning \[^\r\n\]* due to JettisonDueToOldAge|$T-\[0-9\]+-\[0-9\]+\[\r\n\]|$T-ST- ?\[0-9\]+\[\r\n\]|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXTINCTION:" {
+            set m $expect_out(0,string)
+            if {[string match "Jettisoning *" $m]} {
+                incr n
+                exp_continue
+            } elseif {[regexp "^$T-ST- ?(\[0-9\]+)" $m -> st]} {
+            } elseif {[regexp "^$T-(\[0-9\]+-\[0-9\]+)" $m -> out]} {
+                exp_continue
+            } elseif {$m eq "EXTINCTION:"} {
+                lc_extinction_fail "kernel extinction during gc-jettison($what)"
+            } else {
+                lc_fail "gc-jettison($what): \[[string trim $m]\]"
+            }
+        }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-jettison($what): out=$out discards=$n" }
+        eof     { lc_fail "unexpected EOF during gc-jettison($what)" }
+    }
+    if {$out ne "20-0" || $st ne "0" || ($wantn eq "some" && $n < 1) || ($wantn eq "none" && $n != 0)} {
+        lc_fail "gc-jettison($what): printed \[$out\] (want 20-0), exit status $st (want 0), $n collector discards (want $wantn)"
+    }
+    lc_pass "ls-jsc(gc-jettison$what): $T-20-0, exit 0, $n collector discards of DFG code"
+}
+gcjet_leg ""     jscz "--forceCodeBlockToJettisonDueToOldAge=true" $gcjet some
+gcjet_leg "-ctl" jsda ""                                           $gcjet none
 
 # gcpark. Each leg prints its marker upper-cased by the script itself and then its
 # exit status through tr, so the echo of the typed line (lower case) satisfies
@@ -225,12 +307,16 @@ foreach {c what} {0 1@end 1 5@end-4 2 8@-8 3 size+1@0} {
 }
 
 lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI-820578176-"
-lc_pass "ls-jsc(loop): JSCI-820578176 (Baseline JIT)"
+lc_pass "ls-jsc(loop): JSCI-820578176 (every JIT on)"
+lc_run_expect "/webkit/jsc --useDFGJIT=false -e '[string map {@T jsdc} $loop]' | tr a-z A-Z" "JSDC-820578176-"
+lc_pass "ls-jsc(loop-baseline): JSDC-820578176 (the DFG off)"
 lc_run_expect "/webkit/jsc --thylacine-no-cap-jit -e '[string map {@T jscj} $loop]' | tr a-z A-Z" "JSCJ-820578176-"
 lc_pass "ls-jsc(loop-deny): JSCJ-820578176 (interpreted)"
 
 lc_run_expect_hardfail "/webkit/jsc /webkit/sunspider/run.js -- jscm | tr a-z A-Z" "JSCM-OK-26-" "JSCM-FAIL"
-lc_pass "ls-jsc(sunspider): all 26 ran (23 self-checking) with the JIT on"
+lc_pass "ls-jsc(sunspider): all 26 ran (23 self-checking) with every JIT on"
+lc_run_expect_hardfail "/webkit/jsc --useDFGJIT=false /webkit/sunspider/run.js -- jsdb | tr a-z A-Z" "JSDB-OK-26-" "JSDB-FAIL"
+lc_pass "ls-jsc(sunspider-baseline): all 26 ran (23 self-checking) with the DFG off"
 lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit /webkit/sunspider/run.js -- jscn | tr a-z A-Z" "JSCN-OK-26-" "JSCN-FAIL"
 lc_pass "ls-jsc(sunspider-deny): all 26 ran (23 self-checking) interpreted"
 
