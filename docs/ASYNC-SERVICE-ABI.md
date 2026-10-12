@@ -295,3 +295,72 @@ Rejected:
 Prior art: liburing's no-libc build, where the caller owns struct io_uring;
 seL4 and Genode, which pass allocators explicitly; and Fuchsia's
 caller-allocated FIDL.
+
+## Native Rust client cores (October 12)
+
+The Rust twins of the owned-client cores (NA-3) keep the heap. libthyla-rs has
+`ThylaAlloc`, and the caller-storage vote concerned freestanding C only.
+
+They are installed as the crate `loom-client` (`usr/lib/loom-client`),
+`no_std` with `alloc`, not as modules of libthyla-rs. libthyla-rs cannot be
+built for the host, because its `_start` is ELF assembly, so a test inside it
+would run nowhere. The cores make no syscall. Like `thyla-heap`, they live in a
+crate the host can test, and libthyla-rs supplies the kernel calls through the
+native adapter (NA-4). Until the adapter exists the cores are crate-private, and
+only their tests use them.
+- `service_abi` moves into the crate, because the cores use its records and a
+  host-tested crate cannot depend on libthyla-rs. libthyla-rs re-exports it as
+  `loom::service_abi`.
+- The crate is edition 2024, the edition the twins were written and tested in.
+  That edition's rules for when a temporary is dropped decide when a `RefCell`
+  borrow ends, so the same code built as 2021 could hold a borrow longer and
+  panic.
+- `make test-rust` runs the tests with `cargo test`. `make test-loom-client`
+  runs them again in the release profile, which is the one the guest builds
+  (opt-level "z", overflow checks on).
+- The tests count allocations. A pool's state is allocated before the kernel
+  admits it, so the count runs from the moment the backend's `register_pool`
+  returns until the client's does, and any allocation there fails the test.
+  Bounded progress, a ready future and a wait turn are counted the same way.
+
+The Rust cores return typed errors, so no two outcomes share a value. The
+full-table outcomes match C:
+- the request book's `Error::Full` is C's `T_REQ_FULL`, which is -ENOSPC;
+- the 64-member envelope answers `ring_payload::Error::Full`, which C answers
+  with -ENOSPC. The uninstalled twin answered `Busy`, which also means that a
+  fixed range or a pool slot is in use;
+- the executor's full table stays `Error::Full`, apart from a factory's error,
+  as C keeps -1001 apart from -ENOSPC.
+
+When the native adapter maps one of these to an errno, `Full` becomes ENOSPC.
+
+### C local codes
+
+A C core's return channel can also carry a kernel errno or another family's
+code. So no local code lies in the errno range, except `T_REQ_FULL`, which is
+-ENOSPC on purpose. Each family has its own block at or below -1000. The
+hundreds digit names the family, and the last digit keeps the old value:
+- `T_FIXED_CLOSING`, `T_RETIREMENT_FULL`, `T_RETIREMENT_CAPACITY` and
+  `T_RING_UNCERTAIN`: -1000 to -1003, unchanged;
+- the lease ledger's `T_LEASE_*`: -1101 to -1106;
+- the request book's `T_REQ_*`: -1201 to -1206;
+- the owned mapping's `T_MAP_*`: -1301 to -1304;
+- the paired CQ reader's `T_CQ_GEOMETRY` and `T_CQ_CORRUPT`: -1401 and -1402.
+  It returned bare -1 and -2 before.
+
+Two collisions forced this. `t_fixed_read` and `t_fixed_write` returned -3
+both for `T_REQ_EXHAUSTED` and for `T_LEASE_BUSY`. The first is permanent (the
+cookie counter is spent) and the second is transient. `t_ring_fixed_bytes`
+returned `T_LEASE_BUSY` (-3) in the channel that carries a remote -ESRCH.
+Static assertions keep every code inside its block.
+
+### Ring records
+
+The Rust ring records (`Params`, `Sqe`, `Cqe`, `BufReg`, and a `RingHdr` that
+`loom.rs` used to read only by byte offset) move into libthyla-rs's
+`loom/ring_abi.rs`. That file depends on no crate, so
+`tools/check-loom-service-abi.py` compiles it and checks it against the layout
+table the kernel and libt headers already answer to. The ring's header offsets
+in `loom.rs` are derived from `RingHdr`. The checker also checks the cores' own
+copies of the setup record and the CQE, field by field: `t_owned_setup` and
+`t_owned_cqe` in C, `Setup` and `Completion` in Rust.
