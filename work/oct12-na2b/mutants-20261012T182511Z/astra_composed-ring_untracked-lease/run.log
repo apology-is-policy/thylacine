@@ -1,0 +1,1 @@
+Assertion failed: (!t_ring_return(b)&&t_ring_live(root)==1), function main, file test_composed_ring.c, line 19.

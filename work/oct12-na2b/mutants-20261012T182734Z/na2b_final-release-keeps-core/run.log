@@ -1,0 +1,3 @@
+Assertion failed: (t_ring_idle(cores[i])), function cores_idle, file test_ring_payload.c, line 19.
+C seven fixed ownership scenarios PASS
+C seven registration transaction scenarios PASS

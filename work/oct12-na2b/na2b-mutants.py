@@ -91,7 +91,7 @@ NA2B = {
     'pool-overlap-keeps-claims': ('ring_payload', [('{release_pool(p);return T_LEASE_GEOMETRY;}}}}\n', '{return T_LEASE_GEOMETRY;}}}}\n', 1)],
         'test_ring_payload', r'claimed\(core\)==before'),
     'fixed-overlap-keeps-claims': ('ring_payload', [('{release_pool(p);return T_LEASE_GEOMETRY;}}}\n', '{return T_LEASE_GEOMETRY;}}}\n', 1)],
-        'test_ring_payload', r'claimed\(core\)==before'),
+        'test_ring_payload', r'claimed\(r->core\)==held'),
     'bank-cells-leak': ('ring_payload', [('t_lease_release(&p->ledger);t_bytes_zero(p,sizeof(*p));', 't_bytes_zero(p,sizeof(*p));', 1)],
         'test_ring_payload', r'.'),
     'final-release-keeps-core': ('ring_payload', [('c->b.destroy(c->b.context);t_bytes_zero(c,sizeof(*c));', 'c->b.destroy(c->b.context);', 1)],
@@ -175,6 +175,16 @@ def build(dirpath, core_dir, tests, sdk_path):
     return bins, None
 
 
+def prune(d):
+    """Keep the logs; build products are the disk the 8 GiB floor protects."""
+    for f in sorted(Path(d).rglob('*'), reverse=True):
+        if f.is_dir():
+            if not any(f.iterdir()):
+                f.rmdir()
+        elif not f.name.endswith('.log'):
+            f.unlink()
+
+
 def killed(log):
     text = Path(log).read_text(errors='replace')
     return [l for l in text.splitlines() if 'Assertion failed' in l or 'loom-client fatal:' in l
@@ -203,6 +213,7 @@ def abi_sabotage(out):
         if sabotage and (rc == 0 or '"T_LOOM_CLIENT_ENOSPC"' not in text):
             return f'{label}: rc={rc} without the T_LOOM_CLIENT_ENOSPC static assert'
         print(f'{label}: rc={rc}', flush=True)
+        shutil.rmtree(root)
     return None
 
 
@@ -250,6 +261,7 @@ def main():
         if rc != 0 or PASS[t] not in lines:
             sys.exit(f'na2b-mutants: control: {t} rc={rc} without its PASS line')
     print(f'control: {len(bins)} tests PASS', flush=True)
+    prune(ctl)
 
     plan = make_plan(records)
     bad = anchors(plan)
@@ -282,7 +294,10 @@ def main():
                 failures.append(f"{p['name']}: survived or unnamed (rc={rc})")
             elif p['expect'] and not any(re.search(p['expect'], l) for l in lines):
                 failures.append(f"{p['name']}: killed elsewhere: {lines[0]}")
-            print(f"{p['name']:58} rc={rc} {lines[0][:110] if lines else ''}", flush=True)
+            shown = next((l for l in lines if p['expect'] and re.search(p['expect'], l)), lines[0] if lines else '')
+            rec['shown'] = shown
+            print(f"{p['name']:58} rc={rc} {shown[:110]}", flush=True)
+        prune(d)
     for name, why in EQUIVALENT.items():
         records.append(dict(name='na2b:' + name, verdict='equivalent', why=why))
     (out / 'result.json').write_text(json.dumps(dict(mutants=len(plan), failures=failures, records=records), indent=1) + '\n')

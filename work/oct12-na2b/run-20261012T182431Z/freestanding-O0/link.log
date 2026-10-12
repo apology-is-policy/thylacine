@@ -1,0 +1,15 @@
+ld.lld: error: undefined symbol: memcpy
+>>> referenced by lease_ledger.c:71 (usr/lib/libt/src/loom_client/lease_ledger.c:71)
+>>>               work/oct12-na2b/run-20261012T182431Z/freestanding-O0/lease_ledger.o:(t_lease_accept_read)
+>>> referenced by ring_payload.c:13 (usr/lib/libt/src/loom_client/ring_payload.c:13)
+>>>               work/oct12-na2b/run-20261012T182431Z/freestanding-O0/ring_payload.o:(t_ring_create)
+>>> referenced by ring_payload.c:13 (usr/lib/libt/src/loom_client/ring_payload.c:13)
+>>>               work/oct12-na2b/run-20261012T182431Z/freestanding-O0/ring_payload.o:(t_ring_create)
+>>> referenced 17 more times
+
+ld.lld: error: undefined symbol: memset
+>>> referenced by lease_ledger.c:95 (usr/lib/libt/src/loom_client/lease_ledger.c:95)
+>>>               work/oct12-na2b/run-20261012T182431Z/freestanding-O0/lease_ledger.o:(t_lease_release)
+>>> referenced by ring_payload.c:10 (usr/lib/libt/src/loom_client/ring_payload.c:10)
+>>>               work/oct12-na2b/run-20261012T182431Z/freestanding-O0/ring_payload.o:(release_pool)
+clang: error: linker command failed with exit code 1 (use -v to see invocation)

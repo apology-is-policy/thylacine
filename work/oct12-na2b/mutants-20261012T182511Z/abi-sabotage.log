@@ -1,0 +1,22 @@
+/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-ztodyhzl/native-c-ring.c:4:16: error: static assertion failed due to requirement '(-2) == -28': T_LOOM_CLIENT_ENOSPC
+    4 | _Static_assert(T_LOOM_CLIENT_ENOSPC == -28, "T_LOOM_CLIENT_ENOSPC");
+      |                ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/northkillpd/projects/thylacine-corona/work/oct12-na2b/mutants-20261012T182511Z/abi-sabotage/usr/lib/libt/include/thyla/loom_client/base.h:13:30: note: expanded from macro 'T_LOOM_CLIENT_ENOSPC'
+   13 | #define T_LOOM_CLIENT_ENOSPC (-2)
+      |                              ^
+1 error generated.
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 207, in <module>
+    run(parser.parse_args().root.resolve())
+    ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/northkillpd/projects/thylacine-corona/tools/check-loom-service-abi.py", line 197, in run
+    subprocess.run([clang,'--target=aarch64-none-elf','-march=armv8-a',
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    '-ffreestanding','-std=c11','-fsyntax-only',
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                    *[a for i in incs for a in ('-I', str(root/i))], str(source)],check=True)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['clang', '--target=aarch64-none-elf', '-march=armv8-a', '-ffreestanding', '-std=c11', '-fsyntax-only', '-I', '/Users/northkillpd/projects/thylacine-corona/work/oct12-na2b/mutants-20261012T182511Z/abi-sabotage/usr/lib/libt/include', '/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/loom-service-abi-ztodyhzl/native-c-ring.c']' returned non-zero exit status 1.

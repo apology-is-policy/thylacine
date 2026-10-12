@@ -4092,5 +4092,36 @@ under the lease yet).** The cores are installed as `usr/lib/libt/{include/thyla,
 - **ABI checker.** `tools/check-loom-service-abi.py` pins the full-table errno
   on both sides to 28.
 
-Next: run the runner under the mac lease, fix, run the mutants, then the Fable
-audit.
+**Self-found before the first build (15:45-16:10 UTC).**
+- `T_RING_UNCERTAIN` was -100, ENETDOWN's POSIX value. A definite rejection
+  returns the kernel's errno with `*native_rc` equal to it, so the two outcomes
+  could not be told apart. It is now -1003.
+- The ring test's `register_checked` accepted `claimed(core)<=at_register` once
+  the backend had run, so a refusal that kept its claims passed. It now
+  requires the exact count for each outcome.
+
+**First build and run under the mac lease, 18:23-18:31 UTC.** The disk was
+below the 8 GiB floor at 17:17 UTC, so the lease went back unused. At 18:23
+corona deleted its own rebuildable `build/fixtures` pool images and
+`build/ramfs.cpio` (7.67 -> 8.03 GiB) and pruned build products as the runs
+went.
+- `tools/test-loom-client.sh` passed on the first compile: all 11 tests under
+  ASan+UBSan and at -O2, then 83 public functions linked freestanding under
+  `--no-undefined` with 47 imports and no mem* routine, and the -O0 control
+  failed that link on memcpy (`work/oct12-na2b/run-20261012T182734Z`).
+- `work/oct12-na2b/na2b-mutants.py`: the first run left one of 85 mutants
+  alive. Skipping `release_pool` when a new pool overlaps a reserved fixed
+  buffer was invisible, because that refusal was tested only through
+  `t_ring_attach`, which never counted claims. Both register paths now check
+  the claim count across that refusal. The final run
+  (`mutants-20261012T182934Z`) rejected all 85, each at a named check: Astra's
+  71 C mutants (6 re-anchored, payload_owner's 4 superseded) and 14 storage
+  mutants. The ABI checker on a cloned root passed pristine and failed on
+  `T_LOOM_CLIENT_ENOSPC` at -2. The script argues three further storage
+  mutants equivalent.
+- libt's own CMake build (Debug, the userspace toolchain's `-O2`) built
+  `libt.a` with 9 members whose undefined symbols are cross-core `t_*`,
+  `__stack_chk_*` and `main` only, and `loom-bridge-probe` linked against it
+  (`cmake-libt-20261012T183129Z.log`).
+
+Next: the Fable audit.

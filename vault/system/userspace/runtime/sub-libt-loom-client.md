@@ -190,6 +190,12 @@ Create zeroes about 30 KB of core plus the book entries.
   incarnation 2).
 - **Idle accounting.** Every host test ends by asserting that each storage
   object it created is idle.
+- **Mutants.** `work/oct12-na2b/na2b-mutants.py` applies every C mutant from
+  Astra's drivers to the installed cores, plus 14 storage mutants. A mutant
+  counts only when its named test fails at a named check. All 85 are rejected
+  (October 12). It also runs the ABI checker on a cloned root with
+  `T_LOOM_CLIENT_ENOSPC` sabotaged. Three storage mutants are argued
+  equivalent in the script.
 
 ## Seams
 

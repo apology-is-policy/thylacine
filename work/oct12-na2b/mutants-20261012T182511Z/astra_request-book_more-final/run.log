@@ -1,0 +1,1 @@
+Assertion failed: (!accept(b,payload(a,5),&first)&&!first.terminal&&!first.abandoned&&first.record.receipt.lease==7), function main, file test_request_book.c, line 12.

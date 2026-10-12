@@ -1,0 +1,1 @@
+Assertion failed: (t_mapping_reap(m,&r)==T_MAP_CLOSED&&q.closed==1&&!q.freed), function main, file test_owned_mapping.c, line 22.

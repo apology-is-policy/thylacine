@@ -1,0 +1,1 @@
+Assertion failed: (p[i]==byte), function view, file test_ring_payload.c, line 29.
