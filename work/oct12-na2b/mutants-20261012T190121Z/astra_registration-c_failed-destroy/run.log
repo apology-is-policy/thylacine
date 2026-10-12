@@ -1,0 +1,3 @@
+Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55.
+C seven fixed ownership scenarios PASS
+C seven registration transaction scenarios PASS

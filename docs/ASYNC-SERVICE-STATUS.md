@@ -4059,7 +4059,7 @@ mutant leaves the kernel byte-identical to its control by construction.
 Not proven here: SMP and the sanitizers (the Mac-gate residual, operator vote
 2026-10-07).
 
-## NA-2b: the native C owned-client cores over caller-provided storage (Corona, October 12 -- in progress)
+## NA-2b: the native C owned-client cores over caller-provided storage (Corona, October 12 -- audit closed)
 
 The operator voted on 2026-10-12 for caller-provided storage, the recommended
 option of four. The decision is recorded in ASYNC-SERVICE-ABI.md, "Native C
@@ -4072,8 +4072,9 @@ caller-owned object, re-runs their host tests, and installs them beside
 **Progress, October 12, 15:05-15:45 UTC (WIP commit; nothing compiled or run
 under the lease yet).** The cores are installed as `usr/lib/libt/{include/thyla,src}/loom_client/`.
 - **Storage.** The pool members now share one 64-cell bank, the kernel's own
-  pool-bank shape, instead of 64 members inline in every pool. That cuts a
-  ring's storage from about 530 KB at the bound to about 30 KB.
+  pool-bank shape, instead of 64 members inline in every pool. A ring core is
+  22,208 bytes on arm64 and one client's whole storage 26,880 plus 80 bytes per
+  book entry (measured in the audit).
 - **Errno and fatal.** A full table in front of the kernel answers -ENOSPC.
   Every assert and abort is now `T_LOOM_CHECK`, which calls
   `t_loom_client_fatal`.
@@ -4124,4 +4125,41 @@ went.
   `__stack_chk_*` and `main` only, and `loom-bridge-probe` linked against it
   (`cmake-libt-20261012T183129Z.log`).
 
-Next: the Fable audit.
+**Audit round 1, Fable 5.1 reviewing Opus 5.5 (18:37-19:00 UTC): 0 P0, 0 P1,
+1 P2, 5 P3. Not dirty.**
+- F1 (P2): the sanitized stage could not fail on a UBSan report, which recovers
+  by default and lets the test print its PASS line. Now
+  `-fno-sanitize-recover=all`, a test whose log holds a sanitizer report fails,
+  and a control requires a signed overflow to fail the same build.
+- F2: a well-formed `t_lease_init` over a live ledger stranded its cells under
+  the old owner id. It now ends the process before claiming (a seventh death
+  test, mutant `ledger-init-on-live`). The check exposed an uninitialized
+  stack ledger in `test_ring_payload.c`: zero at -O0, garbage at -O2, and
+  invisible to ASan, which does not see uninitialized reads. It is
+  zero-initialized, and the header now says to zero a ledger before first use.
+- F3: the I-29 client-side sentence claimed the book bounds completions. It
+  bounds requests: a multishot read yields many CQEs for one entry, and nothing
+  ties `entries` to `cq_entries` until the native adapter does (owed to NA-4).
+  Scripture, trigger row and dossier reworded.
+- F4: `executor-release-without-zero` was argued equivalent, but a white-box
+  assertion kills it. The assertion is added and the mutant counted.
+- F5: static asserts keep `T_FIXED_CLOSING`, `T_RETIREMENT_FULL`,
+  `T_RETIREMENT_CAPACITY` and `T_RING_UNCERTAIN` at or below -1000, and three
+  header sabotages prove them; the optimized stage builds the cores with
+  `-DNDEBUG`; the idle sentence is narrowed; sizes are measured (core 22,208
+  bytes, client storage 26,880 plus 80 per book entry); `make
+  test-loom-client` is in GATES.md; caveat 3 names cell reuse inside a live
+  core.
+- F6, deferred to NA-3's code alignment: two inherited -3 collisions
+  (`T_REQ_EXHAUSTED` vs `T_LEASE_BUSY` from `t_fixed_read`/`write`;
+  `T_LEASE_BUSY` vs a remote ESRCH from `t_ring_fixed_bytes`), recorded in the
+  dossier's Seams.
+- Self-found S3 closed as documented: the reviewer traced every path on idle
+  storage, and none is worse than a NULL dereference. S5 closed without
+  change: no allocator exists, and `register_checked` is stronger than the
+  dropped `late_allocs` watches.
+
+Re-run under the lease (18:59-19:02 UTC): the first attempt failed on the
+uninitialized ledger above; then the runner passed
+(`run-20261012T190029Z`) and the mutant driver rejected 87 of 87, refused all
+three header sabotages and the ABI sabotage (`mutants-20261012T190121Z`).

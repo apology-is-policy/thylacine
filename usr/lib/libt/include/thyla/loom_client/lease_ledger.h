@@ -12,7 +12,9 @@ struct t_lease_member { uint64_t owner;uint32_t ordinal;unsigned state;struct t_
 struct t_lease_bank { struct t_lease_member cells[64]; };
 struct t_lease_ledger { uint64_t owner;struct t_loom_service_ref pool;struct t_lease_bank *bank;size_t count,outstanding;unsigned bound; };
 /* Claims one bank cell per range, or answers T_LOOM_CLIENT_ENOSPC with the bank
- * and ledger unchanged. A live ledger is released before it is initialized again. */
+ * and ledger unchanged. Zero the ledger before its first use. A live ledger is
+ * released before it is initialized again: a well-formed init over one ends the
+ * process, and a malformed one is refused with the ledger unchanged. */
 int t_lease_init(struct t_lease_ledger *,struct t_lease_bank *,struct t_loom_service_ref,
     const struct t_loom_service_pool_member *,size_t,const uint64_t *,size_t);
 int t_lease_prepare(struct t_lease_ledger *,struct t_lease_bank *,const struct t_loom_service_pool_member *,size_t,const uint64_t *,size_t);

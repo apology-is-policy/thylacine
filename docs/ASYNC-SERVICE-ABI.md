@@ -230,7 +230,11 @@ installed in libt as `thyla/loom_client/` (headers) and `src/loom_client/`.
 
 A ring client's storage is one object, `T_FIXED_STORAGE(entries)`, sized at
 compile time. `entries` is the ring's CQ size: a power of two of at most 8192
-(twice LOOM_MAX_ENTRIES), one request-book entry per CQ slot. Every other table
+(twice LOOM_MAX_ENTRIES), one request-book entry per CQ slot. The cores do not
+check it against the mapping's `cq_entries`; the native adapter that composes
+the mapping and the client sets it. It bounds outstanding requests, not
+completions: a multishot pooled read yields many CQEs for one entry, so never
+overfilling the CQ stays the kernel's half of I-29. Every other table
 in it is sized by the ABI's own limits:
 - one fixed cell and one request cell per registered buffer, 64 of each;
 - 64 pool-member cells shared by every pool of the ring, as the kernel's own

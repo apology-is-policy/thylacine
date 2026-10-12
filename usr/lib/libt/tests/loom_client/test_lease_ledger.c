@@ -5,7 +5,7 @@ static struct t_loom_service_ref pool(void){return (struct t_loom_service_ref){.
 static struct t_loom_service_buffer_receipt receipt(unsigned member,uint64_t lease){return (struct t_loom_service_buffer_receipt){.pool=pool(),.member=member,.lease=lease};}
 static struct t_lease_bank bank;
 static size_t free_cells(void){size_t n=0;for(unsigned i=0;i<64;++i)n+=!bank.cells[i].owner;return n;}
-static struct t_lease_ledger book(void){struct t_lease_ledger b;struct t_loom_service_pool_member r[2]={{.length=4},{.offset=4,.length=4}};uint64_t sizes[]={8};assert(!t_lease_init(&b,&bank,pool(),r,2,sizes,1));return b;}
+static struct t_lease_ledger book(void){struct t_lease_ledger b={0};struct t_loom_service_pool_member r[2]={{.length=4},{.offset=4,.length=4}};uint64_t sizes[]={8};assert(!t_lease_init(&b,&bank,pool(),r,2,sizes,1));return b;}
 int main(void){
  struct t_lease_ledger b=book();struct t_lease_token a,c,next,ignored;
  assert(t_lease_accept_read(&b,4,5,receipt(0,11),&a)==1);
@@ -54,7 +54,7 @@ int main(void){
  assert(!b.outstanding);assert(t_lease_accept_read(&b,1,4,receipt(0,1),&ignored)==T_LEASE_STALE);
  assert(t_lease_init(&b,&bank,pool(),all,65,total,1)==T_LEASE_GEOMETRY);
  /* A ledger reuses freed cells wherever they lie; each ordinal finds its own. */
- t_lease_release(&b);struct t_lease_ledger p,q,s;struct t_loom_service_pool_member two[2]={{.length=4},{.offset=4,.length=4}},three[3]={{.length=1},{.offset=1,.length=2},{.offset=3,.length=3}};uint64_t eight[]={8};
+ t_lease_release(&b);struct t_lease_ledger p={0},q={0},s={0};struct t_loom_service_pool_member two[2]={{.length=4},{.offset=4,.length=4}},three[3]={{.length=1},{.offset=1,.length=2},{.offset=3,.length=3}};uint64_t eight[]={8};
  assert(!t_lease_init(&p,&bank,pool(),two,2,eight,1)&&!t_lease_init(&q,&bank,pool(),two,2,eight,1));t_lease_release(&p);
  assert(!t_lease_init(&s,&bank,pool(),three,3,eight,1)&&free_cells()==59&&t_lease_cell(&s,0)==0&&t_lease_cell(&s,1)==1&&t_lease_cell(&s,2)==4);
  for(unsigned k=0;k<3;++k){assert(t_lease_accept_read(&s,(int32_t)k+2,4,receipt(k,1),&ignored)<0);assert(t_lease_accept_read(&s,(int32_t)k+1,4,receipt(k,1),&tokens[k])==1&&tokens[k].length==k+1);}

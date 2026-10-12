@@ -1,0 +1,9 @@
+In file included from /Users/northkillpd/projects/thylacine-corona/usr/lib/libt/src/loom_client/retirement_executor.c:1:
+In file included from work/oct12-na2b/mutants-20261012T190121Z/hdr-fixed_requests/include/thyla/loom_client/retirement_executor.h:3:
+work/oct12-na2b/mutants-20261012T190121Z/hdr-fixed_requests/include/thyla/loom_client/fixed_requests.h:23:16: error: static assertion failed due to requirement '(-100) <= -1000': T_FIXED_CLOSING must lie below every errno
+   23 | _Static_assert(T_FIXED_CLOSING<=-1000,"T_FIXED_CLOSING must lie below every errno");
+      |                ^~~~~~~~~~~~~~~~~~~~~~
+work/oct12-na2b/mutants-20261012T190121Z/hdr-fixed_requests/include/thyla/loom_client/fixed_requests.h:21:25: note: expanded from macro 'T_FIXED_CLOSING'
+   21 | #define T_FIXED_CLOSING (-100)
+      |                         ^
+1 error generated.

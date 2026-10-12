@@ -1,0 +1,18 @@
+control: 11 tests PASS
+abi-pristine: rc=0
+abi-sabotage: rc=1
+cp: work/oct12-na2b/mutants-20261012T185928Z/hdr-ring_payload/include: No such file or directory
+Traceback (most recent call last):
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct12-na2b/na2b-mutants.py", line 340, in <module>
+    main()
+    ~~~~^^
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct12-na2b/na2b-mutants.py", line 299, in main
+    err = header_sabotage(out, sdk_path)
+  File "/Users/northkillpd/projects/thylacine-corona/work/oct12-na2b/na2b-mutants.py", line 140, in header_sabotage
+    subprocess.run(['cp', '-cR', str(INC), str(inc)], check=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.14/3.14.4_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/subprocess.py", line 578, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['cp', '-cR', '/Users/northkillpd/projects/thylacine-corona/usr/lib/libt/include', 'work/oct12-na2b/mutants-20261012T185928Z/hdr-ring_payload/include']' returned non-zero exit status 1.
+exit=1

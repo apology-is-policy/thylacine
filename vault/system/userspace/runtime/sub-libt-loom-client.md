@@ -64,8 +64,9 @@ to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
 
 - **Storage is the caller's.** `T_FIXED_STORAGE(entries)` declares one ring
   client's storage: the fixed driver, its ring core (`struct t_ring_core`), the
-  request book, 64 request cells, and `entries` book entries. `entries` is the
-  CQ size, a power of two of at most 8192. `T_FIXED_CREATE(backend, &s, &d)`
+  request book, 64 request cells, and `entries` book entries. `entries` is
+  meant to be the ring's CQ size, a power of two of at most 8192. The cores do
+  not tie it to the mapping's `cq_entries`: the native adapter must. `T_FIXED_CREATE(backend, &s, &d)`
   creates a driver over it. `struct t_owned_mapping` and
   `struct t_retirement_executor` are caller storage of their own.
 - **Lifetime.** Storage is zero before its first use (static storage already
@@ -86,7 +87,8 @@ to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
   `T_LOOM_CHECK`, which calls `t_loom_client_fatal(func, line)`. libt's
   definition writes `loom-client: broken invariant in <func>:<line>` to fd 2 and
   then calls `t_exit_group(134)`. The checks are always compiled in: NDEBUG does
-  not remove them.
+  not remove them, and the runner's optimized stage builds the cores with
+  `-DNDEBUG` so that `test_fatal` shows it.
 - The other per-function contracts are Astra's, unchanged. They are written at
   each declaration in the headers.
 
@@ -136,7 +138,7 @@ to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
 | `struct t_ring_core` | fixed (64-entry tables) | one per ring; zeroed at create and at final release |
 | `struct t_lease_bank` | 64 cells | owner 0 = free; shared by every pool of the ring |
 | `struct t_fixed_storage` | fixed + 64 request cells | plus `entries` book entries from `T_FIXED_STORAGE` |
-| `struct t_request_entry[entries]` | CQ size, at most 8192 | zeroed by `t_request_create` |
+| `struct t_request_entry[entries]` | the caller's `entries`, at most 8192 | 80 bytes each; zeroed by `t_request_create` |
 | `struct t_owned_mapping` | fixed | `live` from create to destroy |
 | `struct t_retirement_executor` | 64 cells | live while `refs` is nonzero |
 
@@ -149,10 +151,13 @@ the toolchain does not use outline atomics.
 
 ## Invariants enforced
 
-- **I-29 (client side).** The request book holds at most the CQ size in
-  outstanding requests, so a client cannot submit more completions than its CQ
-  can hold. Exactly one terminal per request: `take_terminal` frees the entry,
-  and a second take is STALE.
+- **I-29 (client side).** The request book admits at most `entries`
+  outstanding requests, and each request's terminal is taken exactly once:
+  `take_terminal` frees the entry, and a second take is STALE. This bounds
+  requests, not completions. `entries` equals the CQ size only once the native
+  adapter sets it to the ring's `cq_entries`, and a multishot pooled read
+  yields many CQEs for one entry. Never overfilling the CQ stays the kernel's
+  half of I-29.
 - **Pre-reserved local metadata.** No local claim follows a kernel registration.
   The ring test asserts this: at the moment the registration callback runs, the
   claims already equal `before + 1 + n`.
@@ -174,13 +179,17 @@ the toolchain does not use outline atomics.
 ## Performance
 
 Lookups are 64-cell scans (members, request cells, headers), bounded by the ABI.
-Create zeroes about 30 KB of core plus the book entries.
+On arm64, `struct t_ring_core` is 22,208 bytes and `struct t_fixed_storage`
+26,880, plus 80 bytes per book entry (682,240 for `T_FIXED_STORAGE(8192)`).
+The executor is 2,088 bytes and a mapping 88 (measured in the NA-2b audit).
+Create zeroes the whole object.
 
 ## Prosecution
 
 - **Storage reuse.** A create on live storage ends the process. `test_fatal.c`
-  witnesses this for each of the four storage types, and witnesses a double
-  owner drop and a drop of a consumed request. A child passes only by exiting 77
+  witnesses this for each of the four storage types and for a well-formed
+  ledger init over a live ledger, and witnesses a double owner drop and a drop
+  of a consumed request. A child passes only by exiting 77
   from `t_loom_client_fatal` in the named function, so a test assert (SIGABRT)
   cannot pass it.
 - **Bank aliasing.** A ledger freed and reclaimed in the middle of the bank
@@ -188,8 +197,13 @@ Create zeroes about 30 KB of core plus the book entries.
   `t_lease_cell == 0, 1, 4` case). A pool re-registered into a destroyed pool's
   header and cell reads its own bytes (`test_ring_payload.c`, slot 5
   incarnation 2).
-- **Idle accounting.** Every host test ends by asserting that each storage
-  object it created is idle.
+- **Idle accounting.** Every test that creates ring, fixed or executor storage
+  ends by asserting it idle (`cores_idle`, `fixeds_idle`, `!es.refs`; the
+  executor test also checks the final zero). The request-book test checks an
+  empty book after a recycled create; the paired-CQ test owns no storage.
+- **Sanitizers.** The sanitized stage builds with `-fno-sanitize-recover=all`
+  and fails a test whose log holds a sanitizer report. Its control requires a
+  signed overflow to fail the same build.
 - **Mutants.** `work/oct12-na2b/na2b-mutants.py` applies every C mutant from
   Astra's drivers to the installed cores, plus 14 storage mutants. A mutant
   counts only when its named test fails at a named check. All 85 are rejected
@@ -204,6 +218,13 @@ Create zeroes about 30 KB of core plus the book entries.
 - **The Rust twins** (NA-3) keep the old local codes (`T_REQ_FULL` = -2,
   `T_LEASE_BUSY` for the envelope), so C and Rust differ until NA-3 aligns
   them.
+- **Two inherited code collisions, owed to NA-3's alignment.** `t_fixed_read`
+  and `t_fixed_write` return -3 both for `T_REQ_EXHAUSTED` (permanent: the
+  cookie counter is spent) and for `T_LEASE_BUSY` (transient), which a caller
+  must handle differently; EXHAUSTED needs 2^64 reservations. And
+  `t_ring_fixed_bytes` returns `T_LEASE_BUSY` (-3) beside a remote errno (ESRCH
+  is 3); through `t_fixed_read_bytes` BUSY is unreachable, so only a raw ring
+  user meets it.
 
 ## Caveats
 
@@ -213,9 +234,22 @@ Create zeroes about 30 KB of core plus the book entries.
 2. At -O0, clang lowers by-value struct copies (the backend, the setup record,
    receipts) to memcpy. The toolchain builds -O2, and `--no-undefined` refuses
    such a link. The runner's control proves that refusal.
-3. A stale handle used after its storage is re-created aliases the new object.
-   The `alive`, `live` and `client_alive` checks catch a stale use only until
-   the storage is reused.
+3. A stale handle (one used after the call that consumed it) is excluded by
+   the contract, and its effect depends on what happened to its cell since:
+   - after the whole storage was zeroed and not re-created, the handle's core
+     or executor pointer is NULL, and the use dereferences it before any
+     check. On Thylacine that raises a snare fault note, whose default action
+     ends the process as the fatal check would;
+   - after its cell was reused inside a live core, it aliases the new
+     occupant. `claim_pool` reuses a released header, and so its
+     `&p->handle`; `t_retirement_admit` reuses a reclaimed cell, and so its
+     `&cell->client`. A stale `t_ring_pool_drop` then passes `handle_alive` and
+     drops the new pool. With the uninstalled cores' calloc this was a
+     use-after-free;
+   - after the storage was re-created, it aliases the new object.
+
+   The `alive`, `live`, `used` and `client_alive` checks catch a stale use only
+   while its cell is still free.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

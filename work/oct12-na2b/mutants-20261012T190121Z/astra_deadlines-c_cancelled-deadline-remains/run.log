@@ -1,0 +1,1 @@
+Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_deadlines.c, line 17.

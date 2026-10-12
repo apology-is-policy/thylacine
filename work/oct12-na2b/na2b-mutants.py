@@ -44,7 +44,7 @@ PASS = {
     'test_deadlines': 'C eight deadline cancellation scenarios PASS',
     'test_retirement_executor': 'C eight retirement owner scenarios PASS',
     'test_retirement_timers': 'C six retirement timer scenarios PASS',
-    'test_fatal': 'C six fatal invariant scenarios PASS',
+    'test_fatal': 'C seven fatal invariant scenarios PASS',
 }
 # Astra's driver -> the test it ran (the named test).
 DRIVER_TEST = {
@@ -110,6 +110,10 @@ NA2B = {
         'test_fixed_requests', r'.'),
     'read-drop-keeps-cell': ('fixed_requests', [('t_ring_fixed_drop(r->fixed);release_request(cell);}', 't_ring_fixed_drop(r->fixed);}', 1)],
         'test_fixed_requests', r't_fixed_storage_idle'),
+    'ledger-init-on-live': ('lease_ledger', [('    T_LOOM_CHECK(!out->count);\n', '', 1)],
+        'test_fatal', r't_lease_init: no fatal there'),
+    'executor-release-without-zero': ('retirement_executor', [('t_fixed_driver_drop(e->cells[i].driver);t_bytes_zero(e,sizeof(*e));}}', 't_fixed_driver_drop(e->cells[i].driver);}}', 1)],
+        'test_retirement_executor', r'!es\.capacity'),
     'ledger-release-keeps-count': ('lease_ledger', [('b->count=0;b->outstanding=0;b->bound=1;', 'b->outstanding=0;b->bound=1;', 1)],
         'test_lease_ledger', r'.'),
 }
@@ -120,9 +124,31 @@ EQUIVALENT = {
         'and prepare rewrites .pool while accept rewrites the token, so the clear is hygiene only.',
     'idle-ignores-request-cells': 'every used request cell holds a fixed handle (read-drop-keeps-cell '
         'is the mutant that separates them), so the ring is not idle while a cell is used.',
-    'executor-release-without-zero': 'create zeroes the storage, and a stale managed drop after release '
-        'already fails cell->driver&&!cell->retiring, since the first drop set retiring.',
 }
+# Local codes returned beside an errno: each header's static assert must stop a
+# value moved back into the errno range. (header, anchor, sabotage, message)
+HEADER_SABOTAGE = [
+    ('ring_payload.h', '#define T_RING_UNCERTAIN (-1003)', '#define T_RING_UNCERTAIN (-100)', 'T_RING_UNCERTAIN must lie below every errno'),
+    ('fixed_requests.h', '#define T_FIXED_CLOSING (-1000)', '#define T_FIXED_CLOSING (-100)', 'T_FIXED_CLOSING must lie below every errno'),
+    ('retirement_executor.h', '#define T_RETIREMENT_FULL (-1001)', '#define T_RETIREMENT_FULL (-101)', 'executor codes must lie below every errno'),
+]
+
+
+def header_sabotage(out, sdk_path):
+    for header, a, b, msg in HEADER_SABOTAGE:
+        root = out / ('hdr-' + header[:-2]); inc = root / 'include'; root.mkdir()
+        subprocess.run(['cp', '-cR', str(INC), str(inc)], check=True)
+        h = inc / 'thyla/loom_client' / header; s = h.read_text()
+        if s.count(a) != 1:
+            return f'{header}: anchor count {s.count(a)}'
+        h.write_text(s.replace(a, b))
+        log = out / ('hdr-' + header[:-2] + '.log')
+        rc = sh([CC, '-isysroot', sdk_path, '-std=c99', '-Werror', '-I', inc, '-c', SRC / 'retirement_executor.c', '-o', root / 'x.o'], log)
+        shutil.rmtree(root)
+        if rc == 0 or msg not in log.read_text(errors='replace'):
+            return f'{header}: the sabotaged code compiled or failed for another reason (rc={rc})'
+        print(f'header {header}: sabotage refused by its static assert', flush=True)
+    return None
 
 
 def make_plan(records):
@@ -268,6 +294,9 @@ def main():
     if bad:
         sys.exit('na2b-mutants: ' + '; '.join(bad))
     err = abi_sabotage(out)
+    if err:
+        sys.exit('na2b-mutants: ' + err)
+    err = header_sabotage(out, sdk_path)
     if err:
         sys.exit('na2b-mutants: ' + err)
 

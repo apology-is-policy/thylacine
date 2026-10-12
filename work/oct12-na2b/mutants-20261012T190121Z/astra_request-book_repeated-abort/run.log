@@ -1,0 +1,1 @@
+Assertion failed: (!t_request_abandon(b,a,&scope)&&t_request_occupied(b)==2), function main, file test_request_book.c, line 14.

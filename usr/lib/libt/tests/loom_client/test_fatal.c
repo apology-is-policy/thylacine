@@ -19,6 +19,7 @@ static void fixed_storage_reused(void){struct probe p={0};struct t_fixed_driver 
 static void *map_base(void *v){return v;}static size_t map_length(void *v){(void)v;return 4096;}static void map_close(void *v){(void)v;}static void map_destroy(void *v){(void)v;}
 static void mapping_storage_reused(void){static _Alignas(4096) unsigned char ring[4096];static struct t_owned_mapping m;m.live=1;struct t_owned_setup p={0};(void)t_mapping_create((struct t_mapping_backend){ring,map_base,map_length,map_close,map_destroy},p,&m);}
 static void executor_storage_reused(void){static struct t_retirement_executor e;struct t_retirement_executor *h;assert(!t_retirement_create(&e,1,&h));(void)t_retirement_create(&e,1,&h);}
+static void ledger_initialized_live(void){static struct t_lease_bank bank;struct t_lease_ledger l={0};struct t_loom_service_pool_member m={.length=4};uint64_t size=8;struct t_loom_service_ref pool={1,0,1};assert(!t_lease_init(&l,&bank,pool,&m,1,&size,1));(void)t_lease_init(&l,&bank,pool,&m,1,&size,1);}
 static void owner_dropped_twice(void){struct probe p={0};struct t_ring_owner *r;struct t_ring_client *c;fixture(&p,&r,&c);t_ring_owner_drop(r);t_ring_owner_drop(r);}
 static void consumed_request_dropped(void){struct probe p={0};struct t_fixed_driver *d=driver(&p,1);struct t_fixed_request *r;assert(!t_fixed_read(d,id(0,1),range(0),&r));uint64_t cookie;assert(!t_fixed_publish(r,&cookie));struct t_paired_record cq=record(cookie,3,0);assert(!t_fixed_receive(d,&cq));struct t_fixed_read_result *done;assert(t_fixed_read_complete(r,&done)==1);t_fixed_request_drop(r);}
 int main(void){
@@ -26,7 +27,8 @@ int main(void){
  expect_fatal("t_fixed_create",fixed_storage_reused);
  expect_fatal("t_mapping_create",mapping_storage_reused);
  expect_fatal("t_retirement_create",executor_storage_reused);
+ expect_fatal("t_lease_init",ledger_initialized_live);
  expect_fatal("t_ring_owner_drop",owner_dropped_twice);
  expect_fatal("t_fixed_request_drop",consumed_request_dropped);
- puts("C six fatal invariant scenarios PASS");return 0;
+ puts("C seven fatal invariant scenarios PASS");return 0;
 }

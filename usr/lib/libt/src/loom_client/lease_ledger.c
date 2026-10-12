@@ -22,6 +22,8 @@ int t_lease_init(struct t_lease_ledger *out,struct t_lease_bank *bank,struct t_l
                 return T_LEASE_GEOMETRY;
         }
     }
+    /* Claiming over a live ledger would strand its cells under the old owner. */
+    T_LOOM_CHECK(!out->count);
     if(free_cells(bank)<count)return T_LOOM_CLIENT_ENOSPC;
     uint64_t owner=atomic_load_explicit(&next_owner,memory_order_relaxed);
     do { if(owner==UINT64_MAX)return T_LEASE_EXHAUSTED; }

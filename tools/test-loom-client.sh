@@ -5,9 +5,12 @@
 # client storage").
 #
 # Three stages; any failure fails the script.
-#   sanitized     every test, cores and test at -O0 under ASan + UBSan.
+#   sanitized     every test, cores and test at -O0 under ASan + UBSan, with
+#                 no recovery: any report fails the test. A control proves a
+#                 signed overflow fails this build.
 #   optimized     the cores at -O2 with libt's codegen flags (-ffreestanding
-#                 -fno-builtin -std=c99), the tests hosted at -O2.
+#                 -fno-builtin -std=c99) and -DNDEBUG, the tests hosted at -O2
+#                 with their asserts on.
 #   freestanding  the cores and libt's fatal.c compiled for aarch64-none-elf with
 #                 libt's flags, then linked with start.S under libt's linker
 #                 script and --no-undefined into a program that takes the
@@ -56,7 +59,7 @@ PASS_LINES=(
     "test_deadlines:C eight deadline cancellation scenarios PASS"
     "test_retirement_executor:C eight retirement owner scenarios PASS"
     "test_retirement_timers:C six retirement timer scenarios PASS"
-    "test_fatal:C six fatal invariant scenarios PASS"
+    "test_fatal:C seven fatal invariant scenarios PASS"
 )
 SDK=()
 if command -v xcrun >/dev/null 2>&1; then SDK=(-isysroot "$(xcrun --show-sdk-path)"); fi
@@ -86,14 +89,32 @@ run_profile() { # run_profile <name> <core flags...> -- <test flags...>
         fi
         /usr/bin/grep -qxF "$want" "$dir/$t.log" || {
             cat "$dir/$t.log"; echo "test-loom-client: $name $t exited 0 without its PASS line"; exit 1; }
+        if /usr/bin/grep -qE 'runtime error:|ERROR: AddressSanitizer' "$dir/$t.log"; then
+            cat "$dir/$t.log"; echo "test-loom-client: $name $t logged a sanitizer report"; exit 1
+        fi
         echo "  $name: $t PASS"
     done
 }
 
 echo "test-loom-client: $OUT"
-run_profile sanitized -std=c99 -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
-    -- -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer
-run_profile optimized -std=c99 -O2 -ffreestanding -fno-builtin -- -O2
+# UBSan recovers by default, so a core with undefined behaviour would still print
+# its PASS line; -fno-sanitize-recover makes the first report fatal.
+SAN=(-O0 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+run_profile sanitized -std=c99 "${SAN[@]}" -- "${SAN[@]}"
+# Control: the same flags must turn a signed overflow into a failing exit.
+printf '%s\n' '#include <limits.h>' '#include <stdio.h>' \
+    'int main(int argc, char **argv) { int x = INT_MAX - 1 + argc; (void)argv; x += 1; printf("%d\n", x); return 0; }' \
+    > "$OUT/sanitized/ubsan_control.c"
+"$CC" "${SDK[@]}" "${SAN[@]}" "$OUT/sanitized/ubsan_control.c" -o "$OUT/sanitized/ubsan_control"
+if "$OUT/sanitized/ubsan_control" > "$OUT/sanitized/ubsan_control.log" 2>&1; then
+    echo "test-loom-client: control: a signed overflow exited 0 under the sanitized flags"; exit 1
+fi
+/usr/bin/grep -q 'runtime error: signed integer overflow' "$OUT/sanitized/ubsan_control.log" || {
+    cat "$OUT/sanitized/ubsan_control.log"; echo "test-loom-client: control: no UBSan report"; exit 1; }
+echo "  sanitized: control -- a signed overflow fails the run"
+# The cores' checks are T_LOOM_CHECK, not assert: NDEBUG must not remove them,
+# which test_fatal shows here against NDEBUG-built cores.
+run_profile optimized -std=c99 -O2 -ffreestanding -fno-builtin -DNDEBUG -- -O2
 
 # Freestanding: libt's own flags (cmake/Toolchain-aarch64-userspace.cmake),
 # plus -Werror.

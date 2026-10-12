@@ -1,0 +1,1 @@
+Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66.

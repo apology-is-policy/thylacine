@@ -1,0 +1,911 @@
+{
+ "mutants": 87,
+ "failures": [],
+ "records": [
+  {
+   "name": "run-payload-c.py:live-retire",
+   "verdict": "superseded (payload_owner not installed)"
+  },
+  {
+   "name": "run-payload-c.py:lost-return",
+   "verdict": "superseded (payload_owner not installed)"
+  },
+  {
+   "name": "run-payload-c.py:wrong-range",
+   "verdict": "superseded (payload_owner not installed)"
+  },
+  {
+   "name": "run-payload-c.py:failed-success",
+   "verdict": "superseded (payload_owner not installed)"
+  },
+  {
+   "name": "astra:composed-ring:wrong-receipt",
+   "test": "test_composed_ring",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_request_accept(book,&r,&d)), function reap, file test_composed_ring.c, line 13."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_request_accept(book,&r,&d)), function reap, file test_composed_ring.c, line 13."
+  },
+  {
+   "name": "astra:composed-ring:wrong-pool",
+   "test": "test_composed_ring",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_request_accept(book,&bad,&d)<0&&t_request_occupied(book)==1), function main, file test_composed_ring.c, line 25."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_request_accept(book,&bad,&d)<0&&t_request_occupied(book)==1), function main, file test_composed_ring.c, line 25."
+  },
+  {
+   "name": "astra:composed-ring:untracked-lease",
+   "test": "test_composed_ring",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_ring_return(b)&&t_ring_live(root)==1), function main, file test_composed_ring.c, line 19."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_ring_return(b)&&t_ring_live(root)==1), function main, file test_composed_ring.c, line 19."
+  },
+  {
+   "name": "astra:deadlines-c:repeat-abort",
+   "test": "test_deadlines",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_deadlines.c, line 17."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_deadlines.c, line 17."
+  },
+  {
+   "name": "astra:deadlines-c:early-expiry",
+   "test": "test_deadlines",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_expire(d,99,64)), function deadline_cases, file test_deadlines.c, line 32."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_expire(d,99,64)), function deadline_cases, file test_deadlines.c, line 32."
+  },
+  {
+   "name": "astra:deadlines-c:no-cursor",
+   "test": "test_deadlines",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, file test_deadlines.c, line 33."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, file test_deadlines.c, line 33."
+  },
+  {
+   "name": "astra:deadlines-c:ignore-budget",
+   "test": "test_deadlines",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, file test_deadlines.c, line 33."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_fixed_expire(d,100,1)==1&&p.aborts==i+1&&p.last_abort.slot==i), function deadline_cases, file test_deadlines.c, line 33."
+  },
+  {
+   "name": "astra:deadlines-c:cancel-releases-storage",
+   "test": "test_deadlines",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_receive(d,&cq)), function deadline_cases, file test_deadlines.c, line 19."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_receive(d,&cq)), function deadline_cases, file test_deadlines.c, line 19."
+  },
+  {
+   "name": "astra:deadlines-c:cancelled-deadline-remains",
+   "test": "test_deadlines",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_deadlines.c, line 17."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_next_deadline(d,&when)&&!t_fixed_cancel(r)), function deadline_cases, file test_deadlines.c, line 17."
+  },
+  {
+   "name": "astra:fixed-io-c:early-fixed-view",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_fixed_bytes(f,&bytes,&n)<0&&!bytes&&!n), function fixed_tests, file test_ring_payload.c, line 64."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_fixed_bytes(f,&bytes,&n)<0&&!bytes&&!n), function fixed_tests, file test_ring_payload.c, line 64."
+  },
+  {
+   "name": "astra:fixed-io-c:abandon-refund",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payload.c, line 65."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payload.c, line 65."
+  },
+  {
+   "name": "astra:fixed-io-c:missing-abort",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payload.c, line 65."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.aborts==1&&p.last_abort.slot==3&&p.last_abort.incarnation==7&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payload.c, line 65."
+  },
+  {
+   "name": "astra:fixed-io-c:fixed-pool-overlap",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66."
+  },
+  {
+   "name": "astra:fixed-io-c:pool-fixed-overlap",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_fixed_reserve(c,301,id(0,1),range(8),0,&f)<0), function fixed_tests, file test_ring_payload.c, line 66."
+   ],
+   "ported": true,
+   "shown": "Assertion failed: (t_ring_fixed_reserve(c,301,id(0,1),range(8),0,&f)<0), function fixed_tests, file test_ring_payload.c, line 66."
+  },
+  {
+   "name": "astra:fixed-io-c:early-retired-refund",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_ring_progress(r)&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payload.c, line 65."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_ring_progress(r)&&t_ring_fixed_count(r)==1), function fixed_tests, file test_ring_payload.c, line 65."
+  },
+  {
+   "name": "astra:fixed-io-c:oversized-fixed-result",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_fixed_finish(r,101,9)<0), function fixed_tests, file test_ring_payload.c, line 64."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_fixed_finish(r,101,9)<0), function fixed_tests, file test_ring_payload.c, line 64."
+  },
+  {
+   "name": "astra:fixed-io-c:late-write",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_fixed_write(f,input,8)<0), function fixed_tests, file test_ring_payload.c, line 67."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_fixed_write(f,input,8)<0), function fixed_tests, file test_ring_payload.c, line 67."
+  },
+  {
+   "name": "astra:fixed-requests-c:unpublished-leak",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_occupied(d)), function main, file test_fixed_requests.c, line 4."
+   ],
+   "ported": true,
+   "shown": "Assertion failed: (!t_fixed_occupied(d)), function main, file test_fixed_requests.c, line 4."
+  },
+  {
+   "name": "astra:fixed-requests-c:lost-abandoned-terminal",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_receive(d,&cq)&&!t_fixed_occupied(d)), function main, file test_fixed_requests.c, line 5."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_receive(d,&cq)&&!t_fixed_occupied(d)), function main, file test_fixed_requests.c, line 5."
+  },
+  {
+   "name": "astra:fixed-requests-c:retirement-without-proof",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_progress(d)), function main, file test_fixed_requests.c, line 7."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_progress(d)), function main, file test_fixed_requests.c, line 7."
+  },
+  {
+   "name": "astra:fixed-requests-c:retired-metadata-leak",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_fixed_progress(d)&&!t_fixed_occupied(d)&&!p.aborts), function main, file test_fixed_requests.c, line 7."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_fixed_progress(d)&&!t_fixed_occupied(d)&&!p.aborts), function main, file test_fixed_requests.c, line 7."
+  },
+  {
+   "name": "astra:fixed-requests-c:missing-storage-terminal",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_fixed_read_bytes(done,&bytes,&n)&&n==3&&bytes[0]==1), function main, file test_fixed_requests.c, line 4."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_fixed_read_bytes(done,&bytes,&n)&&n==3&&bytes[0]==1), function main, file test_fixed_requests.c, line 4."
+  },
+  {
+   "name": "astra:fixed-requests-c:corrupt-keeps-open",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_fixed_receive(d,&cq)<0&&p.closes==1&&t_fixed_occupied(d)==1), function main, file test_fixed_requests.c, line 7."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_fixed_receive(d,&cq)<0&&p.closes==1&&t_fixed_occupied(d)==1), function main, file test_fixed_requests.c, line 7."
+  },
+  {
+   "name": "astra:ledger:owner",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_lease_begin_return(&y,&xt)==T_LEASE_STALE), function main, file test_lease_ledger.c, line 28."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_lease_begin_return(&y,&xt)==T_LEASE_STALE), function main, file test_lease_ledger.c, line 28."
+  },
+  {
+   "name": "astra:ledger:stale",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_lease_accept_read(&b,4,4,receipt(0,11),&ignored)==T_LEASE_STALE), function main, file test_lease_ledger.c, line 21."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_lease_accept_read(&b,4,4,receipt(0,11),&ignored)==T_LEASE_STALE), function main, file test_lease_ledger.c, line 21."
+  },
+  {
+   "name": "astra:ledger:failed-return",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (b.outstanding==1), function main, file test_lease_ledger.c, line 17."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (b.outstanding==1), function main, file test_lease_ledger.c, line 17."
+  },
+  {
+   "name": "astra:ledger:busy",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_lease_accept_read(&b,1,4,receipt(0,12),&ignored)==T_LEASE_BUSY), function main, file test_lease_ledger.c, line 15."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_lease_accept_read(&b,1,4,receipt(0,12),&ignored)==T_LEASE_BUSY), function main, file test_lease_ledger.c, line 15."
+  },
+  {
+   "name": "astra:ledger:final-release",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (b.outstanding==2), function main, file test_lease_ledger.c, line 13."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (b.outstanding==2), function main, file test_lease_ledger.c, line 13."
+  },
+  {
+   "name": "astra:ledger:overlap",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: t_lease_init:26"
+   ],
+   "ported": false,
+   "shown": "loom-client fatal: t_lease_init:26"
+  },
+  {
+   "name": "astra:owned-mapping:sq-overlap",
+   "test": "test_owned_mapping",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_mapping_create(b,p,m)==T_MAP_GEOMETRY&&!m->live&&q.closed==1&&q.freed==1), function main, file test_owned_mapping.c, line 25."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_mapping_create(b,p,m)==T_MAP_GEOMETRY&&!m->live&&q.closed==1&&q.freed==1), function main, file test_owned_mapping.c, line 25."
+  },
+  {
+   "name": "astra:owned-mapping:receipt-stride",
+   "test": "test_owned_mapping",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_mapping_create(b,p,m)==T_MAP_GEOMETRY&&!m->live&&q.closed==1&&q.freed==1), function main, file test_owned_mapping.c, line 25."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_mapping_create(b,p,m)==T_MAP_GEOMETRY&&!m->live&&q.closed==1&&q.freed==1), function main, file test_owned_mapping.c, line 25."
+  },
+  {
+   "name": "astra:owned-mapping:failed-close",
+   "test": "test_owned_mapping",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (b->p->closed==1), function destroy, file test_owned_mapping.c, line 9."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (b->p->closed==1), function destroy, file test_owned_mapping.c, line 9."
+  },
+  {
+   "name": "astra:owned-mapping:after-close",
+   "test": "test_owned_mapping",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_mapping_reap(m,&r)==T_MAP_CLOSED&&q.closed==1&&!q.freed), function main, file test_owned_mapping.c, line 22."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_mapping_reap(m,&r)==T_MAP_CLOSED&&q.closed==1&&!q.freed), function main, file test_owned_mapping.c, line 22."
+  },
+  {
+   "name": "astra:owned-mapping:fresh-header",
+   "test": "test_owned_mapping",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_mapping_create(b,p,m)==T_MAP_HEADER&&!m->live&&q.freed==1), function main, file test_owned_mapping.c, line 28."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_mapping_create(b,p,m)==T_MAP_HEADER&&!m->live&&q.freed==1), function main, file test_owned_mapping.c, line 28."
+  },
+  {
+   "name": "astra:paired:receipt-index",
+   "test": "test_paired_cq",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (kept[i].receipt.lease==i+1), function main, file test_paired_cq.c, line 14."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (kept[i].receipt.lease==i+1), function main, file test_paired_cq.c, line 14."
+  },
+  {
+   "name": "astra:paired:double-ack",
+   "test": "test_paired_cq",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_paired_reap(&q,&kept[i])==1), function main, file test_paired_cq.c, line 13."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_paired_reap(&q,&kept[i])==1), function main, file test_paired_cq.c, line 13."
+  },
+  {
+   "name": "astra:paired:overlap",
+   "test": "test_paired_cq",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_paired_init(&q,&m,cases[i][0],cases[i][1],cases[i][2],cases[i][3],(uint32_t)cases[i][4])==-1), function main, file test_paired_cq.c, line 18."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_paired_init(&q,&m,cases[i][0],cases[i][1],cases[i][2],cases[i][3],(uint32_t)cases[i][4])==-1), function main, file test_paired_cq.c, line 18."
+  },
+  {
+   "name": "astra:registration-c:live-retire",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_ring_progress(r)), function registration_tests, file test_ring_payload.c, line 40."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_ring_progress(r)), function registration_tests, file test_ring_payload.c, line 40."
+  },
+  {
+   "name": "astra:registration-c:pool-closes-ring",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_ring_attach(c,id(slot,1),&m,1,&p)), function attach, file test_ring_payload.c, line 27."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_ring_attach(c,id(slot,1),&m,1,&p)), function attach, file test_ring_payload.c, line 27."
+  },
+  {
+   "name": "astra:registration-c:global-cap",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: prepare:28"
+   ],
+   "ported": true,
+   "shown": "loom-client fatal: prepare:28"
+  },
+  {
+   "name": "astra:registration-c:cross-pool-overlap",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.registrations==1), function registration_tests, file test_ring_payload.c, line 37."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.registrations==1), function registration_tests, file test_ring_payload.c, line 37."
+  },
+  {
+   "name": "astra:registration-c:failed-destroy",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55."
+  },
+  {
+   "name": "astra:registration-c:stale-pool",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, file test_ring_payload.c, line 41."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, file test_ring_payload.c, line 41."
+  },
+  {
+   "name": "astra:registration-c:missing-precharge",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!register_checked(c,&m,1,&a,&rc)&&!rc&&p.registrations==1&&t_ring_members(r)==1), function registration_tests, file test_ring_payload.c, line 36."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!register_checked(c,&m,1,&a,&rc)&&!rc&&p.registrations==1&&t_ring_members(r)==1), function registration_tests, file test_ring_payload.c, line 36."
+  },
+  {
+   "name": "astra:registration-c:uncertain-no-close",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.closes==1&&t_ring_members(r)==2), function registration_tests, file test_ring_payload.c, line 40."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.closes==1&&t_ring_members(r)==2), function registration_tests, file test_ring_payload.c, line 40."
+  },
+  {
+   "name": "astra:registration-c:rollback-no-refund",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_members(r)==1&&!p.closes), function registration_tests, file test_ring_payload.c, line 37."
+   ],
+   "ported": true,
+   "shown": "Assertion failed: (t_ring_members(r)==1&&!p.closes), function registration_tests, file test_ring_payload.c, line 37."
+  },
+  {
+   "name": "astra:registration-c:accept-nonzero-output",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&rc==results[i]&&!out), function registration_tests, file test_ring_payload.c, line 40."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&rc==results[i]&&!out), function registration_tests, file test_ring_payload.c, line 40."
+  },
+  {
+   "name": "astra:request-book:reused-cookie",
+   "test": "test_request_book",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_request_reserve(b,id(1,1),spec(T_REQ_FIXED_WRITE,0),&c)&&a!=c), function main, file test_request_book.c, line 11."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_request_reserve(b,id(1,1),spec(T_REQ_FIXED_WRITE,0),&c)&&a!=c), function main, file test_request_book.c, line 11."
+  },
+  {
+   "name": "astra:request-book:more-final",
+   "test": "test_request_book",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!accept(b,payload(a,5),&first)&&!first.terminal&&!first.abandoned&&first.record.receipt.lease==7), function main, file test_request_book.c, line 12."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!accept(b,payload(a,5),&first)&&!first.terminal&&!first.abandoned&&first.record.receipt.lease==7), function main, file test_request_book.c, line 12."
+  },
+  {
+   "name": "astra:request-book:duplicate-terminal",
+   "test": "test_request_book",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (accept(b,rec(c,8,0),&d)<0), function main, file test_request_book.c, line 11."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (accept(b,rec(c,8,0),&d)<0), function main, file test_request_book.c, line 11."
+  },
+  {
+   "name": "astra:request-book:wrong-pool",
+   "test": "test_request_book",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (accept(b,r,&d)<0&&t_request_occupied(b)==1), function main, file test_request_book.c, line 13."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (accept(b,r,&d)<0&&t_request_occupied(b)==1), function main, file test_request_book.c, line 13."
+  },
+  {
+   "name": "astra:request-book:oversized-fixed",
+   "test": "test_request_book",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (accept(b,rec(c,9,0),&d)<0), function main, file test_request_book.c, line 11."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (accept(b,rec(c,9,0),&d)<0), function main, file test_request_book.c, line 11."
+  },
+  {
+   "name": "astra:request-book:repeated-abort",
+   "test": "test_request_book",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_request_abandon(b,a,&scope)&&t_request_occupied(b)==2), function main, file test_request_book.c, line 14."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_request_abandon(b,a,&scope)&&t_request_occupied(b)==2), function main, file test_request_book.c, line 14."
+  },
+  {
+   "name": "astra:retirement-executor-c:early-reclaim",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_retirement_progress(e,64).reclaimed), function main, file test_retirement_executor.c, line 10."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_retirement_progress(e,64).reclaimed), function main, file test_retirement_executor.c, line 10."
+  },
+  {
+   "name": "astra:retirement-executor-c:missing-retire",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.retires==1), function main, file test_retirement_executor.c, line 10."
+   ],
+   "ported": true,
+   "shown": "Assertion failed: (p.retires==1), function main, file test_retirement_executor.c, line 10."
+  },
+  {
+   "name": "astra:retirement-executor-c:frozen-cursor",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_retirement_progress(e,1).reclaimed==1&&q.freed==1), function main, file test_retirement_executor.c, line 13."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_retirement_progress(e,1).reclaimed==1&&q.freed==1), function main, file test_retirement_executor.c, line 13."
+  },
+  {
+   "name": "astra:retirement-executor-c:excess-budget",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_retirement_progress(e,0).visited), function main, file test_retirement_executor.c, line 13."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_retirement_progress(e,0).visited), function main, file test_retirement_executor.c, line 13."
+  },
+  {
+   "name": "astra:retirement-executor-c:no-shutdown-close",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.closes==1&&t_managed_read(c,id(0,1),range(0),&r)==T_FIXED_CLOSING&&!r), function main, file test_retirement_executor.c, line 15."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.closes==1&&t_managed_read(c,id(0,1),range(0),&r)==T_FIXED_CLOSING&&!r), function main, file test_retirement_executor.c, line 15."
+  },
+  {
+   "name": "astra:retirement-executor-c:premature-admission",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_retirement_admit(e,make_driver,&f,&extra)==T_RETIREMENT_FULL&&!extra&&f.calls==1), function main, file test_retirement_executor.c, line 10."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_retirement_admit(e,make_driver,&f,&extra)==T_RETIREMENT_FULL&&!extra&&f.calls==1), function main, file test_retirement_executor.c, line 10."
+  },
+  {
+   "name": "astra:retirement-timers-c:skip-retiring",
+   "test": "test_retirement_timers",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_retirement_expire(e,5,1,1)==1&&q.aborts==1), function main, file test_retirement_timers.c, line 21."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_retirement_expire(e,5,1,1)==1&&q.aborts==1), function main, file test_retirement_timers.c, line 21."
+  },
+  {
+   "name": "astra:retirement-timers-c:skip-attached",
+   "test": "test_retirement_timers",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retirement_timers.c, line 20."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retirement_timers.c, line 20."
+  },
+  {
+   "name": "astra:retirement-timers-c:ignore-inner-budget",
+   "test": "test_retirement_timers",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_retirement_expire(e,5,3,0)&&!p.aborts&&!q.aborts), function main, file test_retirement_timers.c, line 17."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_retirement_expire(e,5,3,0)&&!p.aborts&&!q.aborts), function main, file test_retirement_timers.c, line 17."
+  },
+  {
+   "name": "astra:retirement-timers-c:ignore-outer-budget",
+   "test": "test_retirement_timers",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_retirement_expire(e,5,0,64)&&!p.aborts&&!q.aborts), function main, file test_retirement_timers.c, line 16."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_retirement_expire(e,5,0,64)&&!p.aborts&&!q.aborts), function main, file test_retirement_timers.c, line 16."
+  },
+  {
+   "name": "astra:retirement-timers-c:shared-cursor",
+   "test": "test_retirement_timers",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retirement_timers.c, line 20."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_retirement_expire(e,0,1,1)==1&&p.aborts==1&&!q.aborts), function main, file test_retirement_timers.c, line 20."
+  },
+  {
+   "name": "astra:retirement-timers-c:wrong-earliest",
+   "test": "test_retirement_timers",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_retirement_next_deadline(e,&when)&&when==0), function main, file test_retirement_timers.c, line 16."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_retirement_next_deadline(e,&when)&&when==0), function main, file test_retirement_timers.c, line 16."
+  },
+  {
+   "name": "astra:ring-payload-c:live-retire",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_ring_progress(r)), function registration_tests, file test_ring_payload.c, line 40."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_ring_progress(r)), function registration_tests, file test_ring_payload.c, line 40."
+  },
+  {
+   "name": "astra:ring-payload-c:pool-closes-ring",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!t_ring_attach(c,id(slot,1),&m,1,&p)), function attach, file test_ring_payload.c, line 27."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!t_ring_attach(c,id(slot,1),&m,1,&p)), function attach, file test_ring_payload.c, line 27."
+  },
+  {
+   "name": "astra:ring-payload-c:global-cap",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: prepare:28"
+   ],
+   "ported": true,
+   "shown": "loom-client fatal: prepare:28"
+  },
+  {
+   "name": "astra:ring-payload-c:cross-pool-overlap",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.registrations==1), function registration_tests, file test_ring_payload.c, line 37."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.registrations==1), function registration_tests, file test_ring_payload.c, line 37."
+  },
+  {
+   "name": "astra:ring-payload-c:failed-destroy",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_members(r)==1), function main, file test_ring_payload.c, line 55."
+  },
+  {
+   "name": "astra:ring-payload-c:stale-pool",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, file test_ring_payload.c, line 41."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (register_checked(c,&m,1,&out,&rc)==T_RING_UNCERTAIN&&!rc), function registration_tests, file test_ring_payload.c, line 41."
+  },
+  {
+   "name": "na2b:claim-after-register",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:before)), function register_checked, file test_ring_payload.c, line 32."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:before)), function register_checked, file test_ring_payload.c, line 32."
+  },
+  {
+   "name": "na2b:refusal-keeps-claims",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:before)), function register_checked, file test_ring_payload.c, line 32."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (at_register==before+1+n&&claimed(core)==(result==0||result==T_RING_UNCERTAIN?at_register:before)), function register_checked, file test_ring_payload.c, line 32."
+  },
+  {
+   "name": "na2b:pool-overlap-keeps-claims",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!*rc&&claimed(core)==before), function register_checked, file test_ring_payload.c, line 32."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!*rc&&claimed(core)==before), function register_checked, file test_ring_payload.c, line 32."
+  },
+  {
+   "name": "na2b:fixed-overlap-keeps-claims",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66."
+  },
+  {
+   "name": "na2b:bank-cells-leak",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_attach(c,id(2,1),&rr,1,&bad)==T_LEASE_GEOMETRY&&!bad&&claimed(r->core)==held), function fixed_tests, file test_ring_payload.c, line 66."
+  },
+  {
+   "name": "na2b:final-release-keeps-core",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (t_ring_idle(cores[i])), function cores_idle, file test_ring_payload.c, line 19."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (t_ring_idle(cores[i])), function cores_idle, file test_ring_payload.c, line 19."
+  },
+  {
+   "name": "na2b:ring-create-on-live",
+   "test": "test_fatal",
+   "rc": -6,
+   "kill": [
+    "t_ring_create: no fatal there (status 0)",
+    "Assertion failed: (0), function expect_fatal, file test_fatal.c, line 14."
+   ],
+   "ported": false,
+   "shown": "t_ring_create: no fatal there (status 0)"
+  },
+  {
+   "name": "na2b:fixed-create-on-live",
+   "test": "test_fatal",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: t_ring_create:13",
+    "loom-client fatal: t_ring_create:13",
+    "t_fixed_create: no fatal there (status 25344)"
+   ],
+   "ported": false,
+   "shown": "t_fixed_create: no fatal there (status 25344)"
+  },
+  {
+   "name": "na2b:mapping-create-on-live",
+   "test": "test_fatal",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: t_ring_create:13",
+    "loom-client fatal: t_fixed_create:11",
+    "t_mapping_create: no fatal there (status 0)"
+   ],
+   "ported": false,
+   "shown": "t_mapping_create: no fatal there (status 0)"
+  },
+  {
+   "name": "na2b:executor-create-on-live",
+   "test": "test_fatal",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: t_ring_create:13",
+    "loom-client fatal: t_fixed_create:11",
+    "loom-client fatal: t_mapping_create:18"
+   ],
+   "ported": false,
+   "shown": "t_retirement_create: no fatal there (status 0)"
+  },
+  {
+   "name": "na2b:fixed-write-drops-bytes",
+   "test": "test_ring_payload",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p[i]==byte), function view, file test_ring_payload.c, line 29."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p[i]==byte), function view, file test_ring_payload.c, line 29."
+  },
+  {
+   "name": "na2b:request-claimed-before-book",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.freed==1&&t_fixed_storage_idle(storage)), function main, file test_fixed_requests.c, line 4."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.freed==1&&t_fixed_storage_idle(storage)), function main, file test_fixed_requests.c, line 4."
+  },
+  {
+   "name": "na2b:read-drop-keeps-cell",
+   "test": "test_fixed_requests",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (p.freed==1&&t_fixed_storage_idle(storage)), function main, file test_fixed_requests.c, line 4."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (p.freed==1&&t_fixed_storage_idle(storage)), function main, file test_fixed_requests.c, line 4."
+  },
+  {
+   "name": "na2b:ledger-init-on-live",
+   "test": "test_fatal",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: t_ring_create:13",
+    "loom-client fatal: t_fixed_create:11",
+    "loom-client fatal: t_mapping_create:18"
+   ],
+   "ported": false,
+   "shown": "t_lease_init: no fatal there (status 0)"
+  },
+  {
+   "name": "na2b:executor-release-without-zero",
+   "test": "test_retirement_executor",
+   "rc": -6,
+   "kill": [
+    "Assertion failed: (!es.refs&&!es.capacity&&!es.cells[0].driver), function main, file test_retirement_executor.c, line 15."
+   ],
+   "ported": false,
+   "shown": "Assertion failed: (!es.refs&&!es.capacity&&!es.cells[0].driver), function main, file test_retirement_executor.c, line 15."
+  },
+  {
+   "name": "na2b:ledger-release-keeps-count",
+   "test": "test_lease_ledger",
+   "rc": -6,
+   "kill": [
+    "loom-client fatal: t_lease_init:26"
+   ],
+   "ported": false,
+   "shown": "loom-client fatal: t_lease_init:26"
+  },
+  {
+   "name": "na2b:leases-not-cleared",
+   "verdict": "equivalent",
+   "why": "release_pool runs only once every lease of the pool is inactive and not pending (destroy needs !live && !outstanding; a definite or local refusal precedes any accept), and prepare rewrites .pool while accept rewrites the token, so the clear is hygiene only."
+  },
+  {
+   "name": "na2b:idle-ignores-request-cells",
+   "verdict": "equivalent",
+   "why": "every used request cell holds a fixed handle (read-drop-keeps-cell is the mutant that separates them), so the ring is not idle while a cell is used."
+  }
+ ]
+}

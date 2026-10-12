@@ -34,6 +34,7 @@ int t_ring_idle(const struct t_ring_core *);
  * UNCERTAIN lies outside the POSIX errno range, which a definite rejection
  * returns: -100 would be read as ENETDOWN. */
 #define T_RING_UNCERTAIN (-1003)
+_Static_assert(T_RING_UNCERTAIN<=-1000,"T_RING_UNCERTAIN must lie below every errno");
 int64_t t_ring_register_pool(struct t_ring_client *,const struct t_loom_service_pool_member *,size_t,struct t_ring_pool **,int64_t *native_rc);
 /* Native adapter must already own exact kernel pool and error cleanup. Serialized
  * provisional registration/preflight is still to be wired before public use. */
