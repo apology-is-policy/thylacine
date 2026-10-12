@@ -137,3 +137,54 @@ Five new layouts (member24, create1568, receipt32, return40, snapshot64) and the
 exact offsets/zero rules are in the companion. The three compiled mirrors now pin all30 constants/10 records against
 independent byte vectors and full ARM64 envelope guards. Runtime qualification
 and pool ownership model/consumers follow; valid masks remain off.
+
+## Qualification bridge (October 12)
+
+Two operator votes of October 12, 2026 (Corona) settle how userspace reaches the
+reserved ABI before activation. Neither changes an encoding above.
+
+**A compile lever, off by default.** The build-config symbol
+`PRIVATE_ASYNC_QUAL` (default n, in no preset) sets the kernel CMake option
+`THYLACINE_PRIVATE_ASYNC_QUALIFICATION`, which defines
+`LOOM_PRIVATE_QUALIFICATION`. The precedent is the Halcyon
+interaction-qualification feature and the `KERNEL_TESTS` and tickful levers. The
+`KERNEL_TESTS` gate was rejected: the everyday dev image runs the in-kernel
+tests, so it would turn the feature on in practice. Without the lever, setup
+with PRIVATE_SERVICE or SERVICE_BUFFERS and register ops 2..9 return
+-EOPNOTSUPP. No private ring can then exist, so ENTER and poll never see one. A
+test in the default image pins this. The lever is a qualification vehicle, not
+activation; whole-arc activation remains a separate gate.
+
+With the lever, the syscalls route to the existing internal private stack:
+
+- **SETUP.** flags must be PRIVATE_SERVICE, alone or with SERVICE_BUFFERS.
+  SERVICE_BUFFERS alone, SQPOLL, CQSIZE or any unknown bit returns -EINVAL. The
+  private executor is implicit. entries is a power of two in 1..4096, and
+  cq_entries is twice entries. Setup creates the ring and maps it with the
+  private-ring VMA tag, so fork omits it and exec closes it. It then starts the
+  executor (-EAGAIN on the thread budget) and installs the handle. params echoes
+  the granted flags; with SERVICE_BUFFERS it also carries the receipt geometry
+  described in ASYNC-SERVICE-BUFFERS.md. Every failure unwinds completely. A
+  fault while copying params out closes the handle and unmaps the ring.
+- **REGISTER.** BUFFERS on a private ring is private registration. HANDLES
+  returns -EOPNOTSUPP, because targets replace it. Ops 2..9 take nargs 1 and the
+  record's address. The kernel copies the record exactly once, at the size its
+  operation fixes; a short size or a header mismatch returns -EINVAL. TARGET,
+  SLOT and POOL publish only after the result has been copied back. A fault
+  rolls the reservation back, burns its incarnation and returns -EFAULT. QUERY
+  and POOL QUERY write output only on success. ABORT returns 0 or 1; RETURN
+  returns 0.
+- **ENTER never sleeps.** to_submit is capped at sq_entries. min_complete must be
+  0, and flags may hold only NONBLOCK; GETEVENTS returns -EINVAL. ENTER copies
+  each SQE before it publishes sq_head (SQ-1), kicks queued CQ work, and returns
+  the count consumed, or -ECANCELED once the ring is closing. A caller outside
+  the creator image gets -EACCES.
+- **poll parks.** POLLIN means a CQE is ready; POLLHUP means the ring is closing.
+  A client parks in poll(2) with its nearest absolute deadline as the timeout and
+  rechecks its work predicate after every wake. That poll registers before it
+  rechecks, so a CQE posted between the client's check and its sleep is not
+  lost. There is no second park path to qualify. The legacy GETEVENTS wait was
+  rejected because ENTER has no timeout argument and so cannot honour an
+  absolute deadline.
+
+-EFAULT and the other codes are existing registry values; no errno is added.
