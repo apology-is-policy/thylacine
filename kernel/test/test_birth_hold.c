@@ -608,7 +608,7 @@ static int bh_reap_or_kill(int pid, struct Proc *c, int *st, bool *killed) {
     *killed = true;
     irq_state_t s = proc_table_lock_acquire();
     if (c->state == PROC_STATE_ALIVE)
-        proc_group_terminate(c, "killed");
+        proc_group_terminate(c, NOTE_SIG_KILL, "killed");
     proc_table_lock_release(s);
     return bh_reap_bounded(pid, st);
 }
@@ -776,7 +776,7 @@ void test_birth_hold_held_spawn_death_wins(void) {
         // /hello to its exit, and the kill has nothing to act on.
         irq_state_t s = proc_table_lock_acquire();
         if (c->state == PROC_STATE_ALIVE)
-            proc_group_terminate(c, "killed");
+            proc_group_terminate(c, NOTE_SIG_KILL, "killed");
         proc_table_lock_release(s);
         reaped = bh_reap_or_kill(pid, c, &st, &killed);
     }
@@ -823,7 +823,7 @@ void test_birth_hold_held_spawn_death_wins(void) {
         } else {
             irq_state_t s = proc_table_lock_acquire();
             if (c->state == PROC_STATE_ALIVE)
-                proc_group_terminate(c, "killed");   // never strand the child
+                proc_group_terminate(c, NOTE_SIG_KILL, "killed");   // never strand the child
             proc_table_lock_release(s);
         }
         reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
@@ -902,7 +902,7 @@ void test_birth_hold_held_spawn_death_wins(void) {
         }
         s = proc_table_lock_acquire();
         if (c->state == PROC_STATE_ALIVE)
-            proc_group_terminate(c, "killed");
+            proc_group_terminate(c, NOTE_SIG_KILL, "killed");
         proc_table_lock_release(s);
         reaped = bh_reap_with_msg(pid, c, &st, &killed, msg, sizeof(msg));
     }

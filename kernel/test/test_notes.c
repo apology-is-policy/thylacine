@@ -87,6 +87,7 @@ void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
 void test_notes_linux_sigign_discard(void);
 void test_notes_default_action_table(void);
+void test_notes_death_signal_table(void);
 void test_notes_ndflt_dispatch(void);
 void test_notes_kill_terminates_single_thread(void);
 void test_notes_ndflt_stop_discarded_after_cont(void);
@@ -3117,4 +3118,61 @@ void test_notes_fault_dying_latch_clears_only_stale(void) {
                 "the stale pipe latch (no pipe note queued) was cleared");
     TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
                 "the live interrupt latch this thread masks was kept");
+}
+
+// gcpark-b: the signal each death by note records, row by row (the same reason
+// the default-action test names every row: a lookup that returned one signal for
+// everything would pass a spot-check). Then the two pins: a known note kills iff
+// it has a signal, and the phenotype's own map agrees on every note it carries.
+void test_notes_death_signal_table(void) {
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_INTERRUPT), NOTE_SIG_INT,  "interrupt -> SIGINT");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_KILL),      NOTE_SIG_KILL, "kill -> SIGKILL");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_PIPE),      NOTE_SIG_PIPE, "pipe -> SIGPIPE");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_QUIT),  NOTE_SIG_QUIT, "tty:quit -> SIGQUIT");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_HUP),   NOTE_SIG_HUP,  "tty:hup -> SIGHUP");
+
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_SEGV),  NOTE_SIG_SEGV, "snare:segv -> SIGSEGV");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_BUS),   NOTE_SIG_BUS,  "snare:bus -> SIGBUS");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_ALIGN), NOTE_SIG_BUS,  "snare:align -> SIGBUS");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_BTI),   NOTE_SIG_ILL,  "snare:bti -> SIGILL");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_BRK),   NOTE_SIG_TRAP, "snare:brk -> SIGTRAP");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_ILL),   NOTE_SIG_ILL,  "snare:ill -> SIGILL");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_FPE),   NOTE_SIG_FPE,  "snare:fpe -> SIGFPE");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_ABORT), NOTE_SIG_ABRT, "snare:abort -> SIGABRT");
+
+    // Notes that cannot kill, and strings that are no note: no signal.
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_CHILD_EXIT), 0, "child_exit has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_WINCH),  0, "tty:winch has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_SUSP),   0, "tty:susp stops; no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_CONT),   0, "tty:cont has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SAK),        0, "sak has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal("killed"),             0, "\"killed\" is a message, not a note");
+    TEST_EXPECT_EQ(notes_death_signal("unknown"),            0, "\"unknown\" is not a note");
+    TEST_EXPECT_EQ(notes_death_signal("snare:"),             0, "the bare prefix is not a note");
+    TEST_EXPECT_EQ(notes_death_signal(NULL),                 0, "NULL -> 0");
+
+    // A known note kills iff it records a signal.
+    static const char *const known[] = {
+        NOTE_NAME_INTERRUPT, NOTE_NAME_KILL, NOTE_NAME_PIPE, NOTE_NAME_CHILD_EXIT,
+        NOTE_NAME_TTY_WINCH, NOTE_NAME_TTY_SUSP, NOTE_NAME_TTY_CONT,
+        NOTE_NAME_TTY_QUIT, NOTE_NAME_TTY_HUP, NOTE_NAME_SAK,
+    };
+    for (u32 i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
+        bool kills = notes_default_action(known[i]) == NOTE_DFL_TERMINATE;
+        TEST_ASSERT(kills == (notes_death_signal(known[i]) != 0),
+                    "a known note records a death signal exactly when it terminates");
+    }
+
+    // The phenotype translates signals to these notes through its own table; a
+    // guest's waitpid must see the signal that table maps back from the note.
+    u32 compared = 0;
+    for (u32 v = 1; v < VIV_SIGNOTE_COUNT; v++) {
+        const char *name = viv_signote_note_name((enum viv_signote)v);
+        int sig = notes_death_signal(name);
+        if (sig == 0) continue;
+        TEST_EXPECT_EQ((u64)sig, viv_signote_to_signal((enum viv_signote)v),
+                       "a death reports the signal the phenotype maps its note from");
+        compared++;
+    }
+    TEST_ASSERT(compared >= 9, "the phenotype cross-check compared the terminating notes");
 }

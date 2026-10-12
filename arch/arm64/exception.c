@@ -433,8 +433,8 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // terminates the faulting Proc via proc_fault_terminate(NOTE_NAME_SNARE_*,
 // addr) -- the kernel does NOT extinct. Per docs/ERRORS.md (scripture
 // e45a571) the snare:* note name family signals the fault kind to the
-// parent's wait_pid + uart log; v1.x adds POSIX signal mapping +
-// structured 64-bit exit_status.
+// uart log, and since gcpark-b to the parent's packed wait as the note's
+// POSIX signal (docs/ERRORS.md "Exit-status semantics").
 //
 // SVC (EC 0x15) routes through syscall_dispatch at v1.0 -- userspace
 // syscalls land at P3-Ec; does NOT extinct.
@@ -505,8 +505,8 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // P6 hardening #3a (scripture e45a571): terminate the
             // faulting Proc with the snare:segv tag; the kernel does
             // NOT extinct. proc_fault_terminate emits a uart
-            // diagnostic + calls exits(NOTE_NAME_SNARE_SEGV). Parent
-            // reaps via wait_pid; exit_status = 1 at v1.0.
+            // diagnostic + calls exits_note(NOTE_NAME_SNARE_SEGV). Parent
+            // reaps via wait_pid: raw status 1, packed SIGSEGV.
             // Diagnostic preserves the visibility the prior
             // extinction_with_addr line provided.
             proc_fault_terminate(NOTE_NAME_SNARE_SEGV, (uintptr_t)fi.vaddr);
@@ -599,9 +599,12 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         proc_fault_terminate(NOTE_NAME_SNARE_BTI, (uintptr_t)ctx->elr);
 
     case EC_BRK:
-        // EL0 brk #imm -- userspace assertion or debug trap.
-        // Terminate with snare:brk. Debuggers attaching at EL0 are a
-        // Phase 5+ concern; v1.0 treats all EL0 brk as fatal-to-Proc.
+        // EL0 brk #imm -- userspace assertion or debug trap, fatal to the
+        // Proc. ISS[15:0] is the instruction's immediate: Pouch's abort()
+        // executes SNARE_ABORT_BRK_IMM and dies of snare:abort (SIGABRT);
+        // every other immediate is snare:brk (SIGTRAP).
+        if ((u32)(esr & 0xffffu) == SNARE_ABORT_BRK_IMM)
+            proc_fault_terminate(NOTE_NAME_SNARE_ABORT, (uintptr_t)ctx->elr);
         proc_fault_terminate(NOTE_NAME_SNARE_BRK, (uintptr_t)ctx->elr);
 
     case EC_BREAKPOINT_LOWER:

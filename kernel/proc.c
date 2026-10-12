@@ -3738,7 +3738,7 @@ static int legate_teardown_cb(struct Proc *m, void *arg) {
     if (m == ctx->except)     return 0;
     if (m == g_kproc)         return 0;
     if (m->legate_scope_id != 0u && m->legate_scope_id == ctx->scope_id)
-        proc_group_terminate(m, "legate scope ended");
+        proc_group_terminate(m, NOTE_SIG_KILL, "legate scope ended");
     return 0;   // visit every Proc
 }
 
@@ -3801,7 +3801,7 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     // Unlike the legate teardown this mirrors (which keys on a dedicated
     // non-reusable legate_scope_id), this path leans on the pid property.
     if (m->state == PROC_STATE_ALIVE && (u32)m->sid == ctx->sid)
-        proc_group_terminate(m, "session leader exit");
+        proc_group_terminate(m, NOTE_SIG_HUP, "session leader exit");
     return 0;   // visit every Proc
 }
 
@@ -3896,9 +3896,12 @@ void proc_exit_notify_parent_locked(struct Proc *p) {
 // (proc_exit_notify_parent_locked).
 //
 // status: 0 = clean exit ("ok"); non-zero = error.
+// sig:    the POSIX signal a death by note records (0 for an exit); see
+//         Proc.term_sig.
 // msg:    captured by reference; caller-owned (typically a string
 //         literal). NULL becomes "ok".
-static void proc_become_zombie_locked(struct Proc *p, int status, const char *msg) {
+static void proc_become_zombie_locked(struct Proc *p, int status, int sig,
+                                      const char *msg) {
     // The departure record, under the lock every image join reads it under, and
     // before any reap can unlink p out of the joins' traversal.
     addrspace_record_holder(p->as, p);
@@ -3995,6 +3998,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     }
     p->exit_msg    = msg ? msg : "ok";
     p->exit_status = status;
+    p->term_sig    = (u8)sig;
     p->state       = PROC_STATE_ZOMBIE;
     proc_exit_notify_parent_locked(p);
 }
@@ -4172,8 +4176,8 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
 // CONTRACT:
 //   - `name` MUST be one of the snare:* string-literal constants from
 //     <thylacine/notes.h> (NOTE_NAME_SNARE_SEGV, etc.). The kernel
-//     forwards it verbatim to exits() so wait_pid + the parent's
-//     uart log see a recognizable tag.
+//     forwards it verbatim to exits_note(), so the uart log names the
+//     fault and the parent's packed wait reports its signal.
 //   - `faulting_addr` is the FAR_EL1 (data abort) or ELR_EL1 (PC
 //     alignment / BTI / BRK / unknown EC) value at the fault; printed
 //     in the diagnostic for forensics.
@@ -4238,9 +4242,9 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // on (cross-thread shootdown) has landed; the branch is now retired.
     //
     // The uart line preserves pre-#3a visibility: a faulting binary
-    // announces pid + reason + addr on the boot log. Parent wait_pid
-    // observes exit_status = 1 at v1.0 (sys_exits_handler collapses non-"ok"
-    // to 1); the structured 64-bit status is a v1.x lift per docs/ERRORS.md.
+    // announces pid + reason + addr on the boot log. The death records the
+    // snare's signal (gcpark-b): a raw wait reads exit_status 1, a packed one
+    // reads the signalled word (docs/ERRORS.md "Exit-status semantics").
     //
     // #126 (the sibling of the orphan-diagnostic fix, NOT the same defect):
     // this site is NOT under g_proc_table_lock -- it runs before exits() takes
@@ -4273,9 +4277,9 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     cons_diag_line_puts(&dl, " -- terminating Proc\n");
     cons_diag_line_emit(&dl);
 
-    exits(name);
-    /* UNREACHABLE -- exits is noreturn (single-thread: sched; multi-thread:
-       thread_exit_self after the group cascade) */
+    exits_note(name);
+    /* UNREACHABLE -- exits_note is noreturn (single-thread: sched; multi-
+       thread: thread_exit_self after the group cascade) */
 }
 
 // #91: the string-only wrapper preserving the native Plan 9 exits(string)
@@ -4287,7 +4291,26 @@ void exits(const char *msg) {
     extinction("exits: exits_code returned (impossible)");
 }
 
+static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
+                            bool kill);
+__attribute__((noreturn))
+static void exits_term(int code, int sig, const char *msg);
+
 void exits_code(int code, const char *msg) {
+    exits_term(code, 0, msg);
+}
+
+void exits_signalled(int sig, const char *msg) {
+    exits_term(1, sig, msg);
+}
+
+void exits_note(const char *name) {
+    exits_signalled(notes_death_signal(name), name);
+}
+
+// The body every exit and every death by note shares: `code` and `sig` are the
+// status the ZOMBIE records (Proc.exit_status / term_sig).
+static void exits_term(int code, int sig, const char *msg) {
     struct Thread *t = current_thread();
     if (!t)                  extinction("exits with no current thread");
     if (t->magic != THREAD_MAGIC)
@@ -4387,7 +4410,7 @@ void exits_code(int code, const char *msg) {
         // die-check; the last Thread out reaps the Proc with this msg's status
         // (thread_exit_self reads the recorded group_exit_msg). A well-formed
         // multi-thread program joins its peers first and never reaches here.
-        proc_group_terminate_code(p, code, msg);
+        group_terminate(p, code, sig, msg, false);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         thread_exit_self();
         extinction("exits: thread_exit_self returned after group terminate");
@@ -4433,7 +4456,7 @@ void exits_code(int code, const char *msg) {
     if (proc_count_live_peers_locked(p, t) != 0)
         extinction("exits: peer appeared during territory release");
 
-    proc_become_zombie_locked(p, code, msg);
+    proc_become_zombie_locked(p, code, sig, msg);
 
     // Mark the executing thread EXITING so sched() leaves it out of the
     // run tree (it will be reaped by the parent's wait_pid).
@@ -4572,11 +4595,13 @@ void thread_exit_self(void) {
         // proc_group_terminate_code -- a coherent snapshot; group_exit_code is
         // written in the SAME set-once CAS-winner branch and read plainly under
         // this lock (the write side holds it too), so it matches the winning msg.
+        // gcpark-b: group_term_sig rides the same claim as group_exit_code.
         const char *gmsg = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE);
         if (gmsg) {
-            proc_become_zombie_locked(p, p->group_exit_code, gmsg);
+            proc_become_zombie_locked(p, p->group_exit_code, p->group_term_sig,
+                                      gmsg);
         } else {
-            proc_become_zombie_locked(p, 0, "ok");
+            proc_become_zombie_locked(p, 0, 0, "ok");
         }
     }
 
@@ -5025,12 +5050,13 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
 // "killed" inside the core -> 1, correct for a kill). The two real-code callers
 // (SYS_EXIT_GROUP and exits_code's live-peers cascade) call the _code core
 // directly with the true exit byte.
-void proc_group_terminate(struct Proc *p, const char *msg) {
+void proc_group_terminate(struct Proc *p, int sig, const char *msg) {
     int code = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
-    proc_group_terminate_code(p, code, msg);
+    group_terminate(p, code, sig, msg, false);
 }
 
-static void group_terminate(struct Proc *p, int code, const char *msg, bool kill) {
+static void group_terminate(struct Proc *p, int code, int sig, const char *msg,
+                            bool kill) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
     if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
     if (!msg) msg = "killed";
@@ -5063,7 +5089,9 @@ static void group_terminate(struct Proc *p, int code, const char *msg, bool kill
         // sole ordering vs thread_exit_self's read, which holds the same lock. A
         // racing loser (a second exit_group, or a kill racing the exit) writes
         // NEITHER field, so no torn (msg, code) pair can be observed.
+        // gcpark-b: the signal is the same claim's third field.
         p->group_exit_code = code;
+        p->group_term_sig  = (u8)sig;
         first = true;
     }
     // A kill that finds the Proc already terminating -- its group exiting, or
@@ -5119,11 +5147,11 @@ static void group_terminate(struct Proc *p, int code, const char *msg, bool kill
 }
 
 void proc_group_terminate_code(struct Proc *p, int code, const char *msg) {
-    group_terminate(p, code, msg, false);
+    group_terminate(p, code, 0, msg, false);
 }
 
 void proc_group_kill(struct Proc *p) {
-    group_terminate(p, 1, "killed", true);
+    group_terminate(p, 1, NOTE_SIG_KILL, "killed", true);
 }
 
 void el0_return_die_check(void) {
@@ -5667,7 +5695,7 @@ void proc_birth_hold_orphan_rule_locked(struct Proc *p) {
         // cascade wakes the parked thread to die at the birth park's death
         // check; a child still in exec_setup dies at its next sleep or at the
         // birth tail's die-check.
-        proc_group_terminate(c, "launcher exited");
+        proc_group_terminate(c, NOTE_SIG_KILL, "launcher exited");
     }
 }
 
@@ -6239,10 +6267,11 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
     const bool nohang = (flags & WAIT_WNOHANG) != 0;
     // PTY-1e: either job-control flag opts the caller into the packed
     // status encoding (a plain wait keeps the raw exit status -- full
-    // compatibility for every pre-PTY caller).
+    // compatibility for every pre-PTY caller); gcpark-b's WAIT_PACKED opts in
+    // without asking for stop or continue reports.
     const bool want_stops = (flags & WAIT_UNTRACED)  != 0;
     const bool want_conts = (flags & WAIT_CONTINUED) != 0;
-    const bool packed     = want_stops || want_conts;
+    const bool packed     = want_stops || want_conts || (flags & WAIT_PACKED) != 0;
     // The pgrp selector's group, computed in s64 so want_pid == INT_MIN
     // cannot overflow the negation.
     const u32 want_pgid_sel = (want_pid < -1) ? (u32)(-(s64)want_pid) : 0u;
@@ -6323,8 +6352,9 @@ int wait_pid_for(int want_pid, int flags, int *status_out) {
 
         if (zombie) {
             int pid    = zombie->pid;
-            int status = packed ? WAIT_STATUS_EXITED(zombie->exit_status)
-                                : zombie->exit_status;
+            int status = !packed          ? zombie->exit_status
+                       : zombie->term_sig ? WAIT_STATUS_SIGNALED(zombie->term_sig)
+                       :                    WAIT_STATUS_EXITED(zombie->exit_status);
 
             // P6-pouch-threads (sub-chunk 9): multi-thread Procs are
             // allowed. Every Thread in zombie->threads must be EXITING

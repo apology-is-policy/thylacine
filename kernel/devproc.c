@@ -44,6 +44,7 @@
 #include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
+#include <thylacine/notes.h>  // gcpark-b: NOTE_SIG_KILL -- EXITKILL records a kill
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/path.h>     // V-4a-0: Proc.exe_path rendering
@@ -1089,7 +1090,7 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
         // clears the mark first (devproc_debug_walk_cb), so a launched target survives
         // ONLY via detach. debug_stop.tla models the death case (~dbg_live); the
         // live-bare-close is the same-outcome, unexercised edge (see the spec note).
-        proc_group_terminate(p, "debugger exited");
+        proc_group_terminate(p, NOTE_SIG_KILL, "debugger exited");
         // StopImpliesOwned (debug_stop.tla; self-audit SA-1): clear the stop flag +
         // focus so they do not outlive the now-NULL owner (the spec's exitkill
         // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate, which is what

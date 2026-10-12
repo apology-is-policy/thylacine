@@ -342,10 +342,20 @@ struct Proc {
     // `child_waiters` + the g_proc_table_lock-protected re-scan (replacing the
     // single-waiter `child_done` Rendez + the lockless `wait_pid_cond` walk
     // that the guard existed to protect) -- RETIRES the guard: all may wait.
-    // The field is kept (now reserved) so every following field holds its
-    // pinned offset; the size + offset _Static_asserts below depend on it.
-    // KP_ZERO inits it to 0; nothing reads or writes it.
-    u32                _reserved0;
+    // The field's four bytes stay so every following field holds its pinned
+    // offset; gcpark-b took two of them for the death signal below, and the
+    // other two stay reserved (KP_ZERO; nothing reads or writes them).
+    //
+    // gcpark-b: the POSIX signal the Proc died of (notes.h NOTE_SIG_*), 0 for a
+    // Proc that exited. term_sig is the ZOMBIE record, written beside
+    // exit_status by proc_become_zombie_locked and read by wait_pid_for, both
+    // under g_proc_table_lock. group_term_sig is the group-termination stash,
+    // group_exit_code's companion: written once, in the set-once claim that
+    // publishes group_exit_msg, and read by the last Thread out, again under
+    // g_proc_table_lock (I-24). Bytes, not ints: a signal is 1..127.
+    u8                 term_sig;
+    u8                 group_term_sig;
+    u16                _reserved0;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from
@@ -1737,6 +1747,20 @@ void exits(const char *msg);
 // SYS_EXITS entry point calls this directly with the real byte.
 void exits_code(int code, const char *msg);
 
+// gcpark-b: a death by a note -- a fault, an uncaught terminating note, a kill.
+// exit_status 1 as exits(msg) records it, plus the POSIX signal `sig` (notes.h
+// NOTE_SIG_*) the packed wait word reports (docs/ERRORS.md "Exit-status
+// semantics"). In a multi-thread Proc the signal rides the same set-once group
+// claim as the status (I-24). `msg` has exits()'s lifetime rule.
+__attribute__((noreturn))
+void exits_signalled(int sig, const char *msg);
+
+// exits_signalled(notes_death_signal(name), name): the death by the note
+// `name`, a canonical .rodata name (a NOTE_NAME_* literal or a g_known_notes
+// row pointer).
+__attribute__((noreturn))
+void exits_note(const char *name);
+
 // P6 hardening #3a (scripture e45a571): terminate the calling Thread's
 // Proc on EL0 unhandled fault. Called from
 // arch/arm64/exception.c::exception_sync_lower_el for every EL0 sync
@@ -1801,14 +1825,20 @@ void thread_exit_self(void);
 // p->threads walk races a concurrent thread_free into a UAF otherwise. It
 // additionally takes torpor_lock + per-peer wait_lock + (via wakeup)
 // rendez/timerwait locks, all strictly BELOW g_proc_table_lock in the order.
-void proc_group_terminate(struct Proc *p, const char *msg);
+//
+// gcpark-b: `sig` is the POSIX signal the termination records (notes.h
+// NOTE_SIG_*; 0 = none): every production caller is a kill-class termination
+// -- a legate scope's end and an orphaned birth hold and EXITKILL are
+// NOTE_SIG_KILL, a session hangup is NOTE_SIG_HUP. Set-once with the msg.
+void proc_group_terminate(struct Proc *p, int sig, const char *msg);
 
 // #91: the code-carrying core of proc_group_terminate(). Stashes `code` (low
 // byte, 0..255) into p->group_exit_code in the SAME set-once CAS-winner branch
 // that publishes group_exit_msg, so the last Thread out (thread_exit_self)
 // seeds the ZOMBIE exit_status with the real code instead of msg-derived 0/1.
-// proc_group_terminate(p, msg) is the string-only wrapper (kept for the kill /
-// legate / debugger callers): code = 0 iff msg=="ok", else 1.
+// proc_group_terminate(p, sig, msg) is the string-only wrapper (kept for the
+// kill / legate / debugger callers): code = 0 iff msg=="ok", else 1. This one
+// records no signal: its callers (SYS_EXIT_GROUP) are exits.
 void proc_group_terminate_code(struct Proc *p, int code, const char *msg);
 
 // A kill (SYS_POSTNOTE "kill", the /proc/<pid>/ctl kill verb):
@@ -2178,23 +2208,36 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 #define WAIT_UNTRACED  2
 #define WAIT_CONTINUED 4
 
+// gcpark-b: asks for the packed status encoding below with no stop or continue
+// reports -- what Pouch's waitpid and the phenotype wait4 pass, so a child that
+// died of a note reads as signalled. The libt / libthyla-rs mirrors (WAIT_PACKED
+// / T_WAIT_PACKED) MUST hold the same value.
+#define WAIT_PACKED    8
+
 // wait_pid_for's caught-note result (ARCH 8.8.3), distinct from -1 so wait4
 // can answer EINTR rather than ECHILD.
 #define WAIT_PID_NOTEINTR (-2)
 
 // The packed wait-status encoding (ABI; the Linux wait(2) layout so the
 // Pouch boundary-line maps 1:1). In effect ONLY when the caller passed
-// WAIT_UNTRACED and/or WAIT_CONTINUED:
+// WAIT_UNTRACED, WAIT_CONTINUED and/or WAIT_PACKED:
 //   exited:    (code & 0xff) << 8         (WAIT_IF_EXITED; WAIT_EXITSTATUS)
+//   signalled: sig & 0x7f                 (WAIT_IF_SIGNALED; WAIT_TERMSIG --
+//                                          gcpark-b: a death by note, the
+//                                          signal Proc.term_sig recorded; no
+//                                          core-dump bit, there are no cores)
 //   stopped:   0x7f | (20 << 8)           (20 = the SIGTSTP-shaped job-stop
 //                                          cause, the Linux value, so the
 //                                          boundary-line is the identity)
 //   continued: 0xffff
 #define WAIT_STATUS_EXITED(code)  ((((code) & 0xff)) << 8)
+#define WAIT_STATUS_SIGNALED(sig) ((sig) & 0x7f)
 #define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
 #define WAIT_STATUS_CONTINUED     0xffff
 #define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
 #define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_SIGNALED(st)      (((st) & 0x7f) != 0 && ((st) & 0x7f) != 0x7f)
+#define WAIT_TERMSIG(st)          ((st) & 0x7f)
 #define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
 #define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
 

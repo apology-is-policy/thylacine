@@ -930,7 +930,9 @@ Two userspace pieces, ZERO expected kernel bytes:
    note-forwarding in `wait_pids_interruptible` is not consulted on a pts.
 4. **The stop-aware fg wait + `fg`/`bg` resume.** The fg wait passes
    `WAIT_UNTRACED`: an exit reaps (status unpacked via `WAIT_EXITSTATUS` —
-   the flag opts into the packed encoding); a STOP-report (report-is-not-reap,
+   the flag opts into the packed encoding; *since gcpark-b, 2026-10-12, a job
+   that dies of a note reaps with the signalled word instead, and ut sets
+   `$status` to 128 plus `WAIT_TERMSIG` — ERRORS.md §"The wait status"*); a STOP-report (report-is-not-reap,
    1e) ends the fg wait — ut takes the terminal back (`t_tty_set_fg(0,
    own_pgid)`), records the job STOPPED in the U-7a table, and prints the
    `[N]+ Stopped` line. `fg %N` = terminal to the job + `t_tty_cont(0,

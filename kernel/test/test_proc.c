@@ -966,7 +966,7 @@ void test_proc_console_attached_smoke(void) {
 void test_proc_group_terminate_smoke(void) {
     // Fail-safe: a NULL Proc is a quiet no-op -- it returns at the magic check
     // BEFORE the p->threads walk, so it needs no g_proc_table_lock.
-    proc_group_terminate(NULL, "fail");
+    proc_group_terminate(NULL, NOTE_SIG_KILL, "fail");
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -981,7 +981,7 @@ void test_proc_group_terminate_smoke(void) {
     // so the walk is empty, but hold the lock so the test models the contract.
     {
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(p, "fail");
+        proc_group_terminate(p, NOTE_SIG_KILL, "fail");
         proc_table_lock_release(s);
     }
     TEST_ASSERT(p->group_exit_msg != NULL,
@@ -994,7 +994,7 @@ void test_proc_group_terminate_smoke(void) {
     const char *first = p->group_exit_msg;
     {
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(p, "ok");
+        proc_group_terminate(p, 0, "ok");
         proc_table_lock_release(s);
     }
     TEST_ASSERT(p->group_exit_msg == first,
@@ -2418,7 +2418,7 @@ static void strag_run(int role) {
         struct Proc *cp = __atomic_load_n(&g_strag_child_proc, __ATOMIC_ACQUIRE);
         TEST_ASSERT(cp != NULL, "child published its Proc");
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(cp, "im2 straggler test");   // what the sweep does
+        proc_group_terminate(cp, NOTE_SIG_KILL, "im2 straggler test");   // what the sweep does
         proc_table_lock_release(s);
     }
     __atomic_store_n(&g_strag_phase, 2, __ATOMIC_RELEASE);
@@ -2588,7 +2588,7 @@ void test_proc_kill_forces_final_close(void) {
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 
     proc_group_terminate_code(b, 0, "ok");           // an exit_group(0)
-    proc_group_terminate(b, "hangup");
+    proc_group_terminate(b, NOTE_SIG_HUP, "hangup");
     bool b_other  = (__atomic_load_n(&b->proc_flags, __ATOMIC_ACQUIRE) &
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
     proc_group_kill(b);
@@ -2596,8 +2596,8 @@ void test_proc_kill_forces_final_close(void) {
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
     int  b_code   = b->group_exit_code;
 
-    proc_group_terminate(c, "killed");
-    proc_group_terminate(c, "killed");
+    proc_group_terminate(c, NOTE_SIG_KILL, "killed");
+    proc_group_terminate(c, NOTE_SIG_KILL, "killed");
     bool c_wrap   = (__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 
@@ -2611,7 +2611,7 @@ void test_proc_kill_forces_final_close(void) {
     proc_group_kill(d);
     bool d_closing = (__atomic_load_n(&d->proc_flags, __ATOMIC_ACQUIRE) &
                       PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
-    proc_group_terminate(e, "hangup");
+    proc_group_terminate(e, NOTE_SIG_HUP, "hangup");
     bool e_hangup  = (__atomic_load_n(&e->proc_flags, __ATOMIC_ACQUIRE) &
                       PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 

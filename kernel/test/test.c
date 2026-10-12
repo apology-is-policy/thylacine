@@ -906,6 +906,7 @@ void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
 void test_notes_interrupt_terminate_gate(void);
 void test_notes_default_action_table(void);      // #15 / #236
+void test_notes_death_signal_table(void);        // gcpark-b
 void test_notes_ndflt_dispatch(void);            // #15 / #236
 void test_notes_kill_terminates_single_thread(void);   // #241
 void test_notes_self_kill_through_full_ring(void);     // aux#253
@@ -3134,6 +3135,7 @@ struct test_case g_tests[] = {
     { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
     { "notes.interrupt_terminate_gate",        test_notes_interrupt_terminate_gate,        false, NULL },
     { "notes.default_action_table",            test_notes_default_action_table,            false, NULL },
+    { "notes.death_signal_table",              test_notes_death_signal_table,              false, NULL },
     { "notes.ndflt_dispatch",                  test_notes_ndflt_dispatch,                  false, NULL },
     { "notes.kill_terminates_single_thread",   test_notes_kill_terminates_single_thread,   false, NULL },
     { "notes.self_kill_through_full_ring",     test_notes_self_kill_through_full_ring,     false, NULL },

@@ -69,21 +69,25 @@
 //     fd-read path, which is retention, not the ignore this column names.
 // Folding job_stop_cb onto the column is owed; until then, changing a `dfl`
 // value obliges you to check both sites by hand.
+// `death_sig` is the POSIX signal a death by the note records (notes.h
+// notes_death_signal): non-zero exactly on the TERMINATE rows, which the
+// note-table unit test pins, so a row cannot kill without a signal to report.
 struct note_name_entry {
     const char       *name;
     u32               bit;
     enum note_default dfl;
+    int               death_sig;
 };
 
 static const struct note_name_entry g_known_notes[] = {
-    { "interrupt",  NOTE_BIT_INTERRUPT,  NOTE_DFL_TERMINATE },
-    { "kill",       NOTE_BIT_KILL,       NOTE_DFL_TERMINATE },
-    { "pipe",       NOTE_BIT_PIPE,       NOTE_DFL_TERMINATE },
+    { "interrupt",  NOTE_BIT_INTERRUPT,  NOTE_DFL_TERMINATE, NOTE_SIG_INT  },
+    { "kill",       NOTE_BIT_KILL,       NOTE_DFL_TERMINATE, NOTE_SIG_KILL },
+    { "pipe",       NOTE_BIT_PIPE,       NOTE_DFL_TERMINATE, NOTE_SIG_PIPE },
     // SIGCHLD's POSIX default is ignore. Before #15 an NDFLT from a
     // child_exit handler killed the Proc; pouch worked around the kernel by
     // spelling this default NCONT instead (patches 0007/0021), which is why
     // no shipping program ever hit it.
-    { "child_exit", NOTE_BIT_CHILD_EXIT, NOTE_DFL_IGNORE    },
+    { "child_exit", NOTE_BIT_CHILD_EXIT, NOTE_DFL_IGNORE,    0             },
     // PTY-1b: the tty:* family (kernel-synthetic-POST + catchable; ONE
     // family mask bit, the SNARE per-kind-masking-is-v1.x precedent).
     // notes_post's tty-prefix gate is the ONLY thing keeping userspace
@@ -95,19 +99,48 @@ static const struct note_name_entry g_known_notes[] = {
     // terminate. tty:cont is IGNORE because the resume is the KERNEL's side
     // effect (proc_job_resume_one_locked, already done by the time anyone
     // sees the note) -- there is nothing left for the default to do.
-    { NOTE_NAME_TTY_WINCH, NOTE_BIT_TTY, NOTE_DFL_IGNORE    },
-    { NOTE_NAME_TTY_SUSP,  NOTE_BIT_TTY, NOTE_DFL_STOP      },
-    { NOTE_NAME_TTY_CONT,  NOTE_BIT_TTY, NOTE_DFL_IGNORE    },
-    { NOTE_NAME_TTY_QUIT,  NOTE_BIT_TTY, NOTE_DFL_TERMINATE },
-    { NOTE_NAME_TTY_HUP,   NOTE_BIT_TTY, NOTE_DFL_TERMINATE },
+    { NOTE_NAME_TTY_WINCH, NOTE_BIT_TTY, NOTE_DFL_IGNORE,    0             },
+    { NOTE_NAME_TTY_SUSP,  NOTE_BIT_TTY, NOTE_DFL_STOP,      0             },
+    { NOTE_NAME_TTY_CONT,  NOTE_BIT_TTY, NOTE_DFL_IGNORE,    0             },
+    { NOTE_NAME_TTY_QUIT,  NOTE_BIT_TTY, NOTE_DFL_TERMINATE, NOTE_SIG_QUIT },
+    { NOTE_NAME_TTY_HUP,   NOTE_BIT_TTY, NOTE_DFL_TERMINATE, NOTE_SIG_HUP  },
     // IM-1: the trusted-path note. Kernel-synthetic-POST (notes_post's
     // exact-name gate is the ONLY thing keeping userspace posters out of
     // this row -- load-bearing, like the tty prefix gate), catchable,
     // IGNORE by default: it is delivered to the TCB (corvus), and a note
     // the TCB does not happen to be reading must never terminate it.
-    { NOTE_NAME_SAK,       NOTE_BIT_SAK, NOTE_DFL_IGNORE    },
+    { NOTE_NAME_SAK,       NOTE_BIT_SAK, NOTE_DFL_IGNORE,    0             },
 };
 #define NOTE_NUM_KNOWN  (sizeof(g_known_notes) / sizeof(g_known_notes[0]))
+
+// The snare:* family is not in g_known_notes -- no snare note is ever queued;
+// proc_fault_terminate kills at the fault -- so the signals its deaths record
+// sit in their own rows.
+struct note_death_entry {
+    const char *name;
+    int         death_sig;
+};
+
+static const struct note_death_entry g_snare_deaths[] = {
+    { NOTE_NAME_SNARE_SEGV,  NOTE_SIG_SEGV },
+    { NOTE_NAME_SNARE_BUS,   NOTE_SIG_BUS  },
+    { NOTE_NAME_SNARE_ALIGN, NOTE_SIG_BUS  },
+    { NOTE_NAME_SNARE_BTI,   NOTE_SIG_ILL  },
+    { NOTE_NAME_SNARE_BRK,   NOTE_SIG_TRAP },
+    { NOTE_NAME_SNARE_ILL,   NOTE_SIG_ILL  },
+    { NOTE_NAME_SNARE_FPE,   NOTE_SIG_FPE  },
+    { NOTE_NAME_SNARE_ABORT, NOTE_SIG_ABRT },
+};
+#define NOTE_NUM_SNARE_DEATHS  (sizeof(g_snare_deaths) / sizeof(g_snare_deaths[0]))
+
+// The phenotype translates Linux signals to these notes and back through its own
+// table (vivarium.h); the numbers it uses must be the ones a death reports.
+_Static_assert(NOTE_SIG_HUP  == VIV_SIGHUP  && NOTE_SIG_INT  == VIV_SIGINT  &&
+               NOTE_SIG_QUIT == VIV_SIGQUIT && NOTE_SIG_ILL  == VIV_SIGILL  &&
+               NOTE_SIG_ABRT == VIV_SIGABRT && NOTE_SIG_BUS  == VIV_SIGBUS  &&
+               NOTE_SIG_FPE  == VIV_SIGFPE  && NOTE_SIG_KILL == VIV_SIGKILL &&
+               NOTE_SIG_SEGV == VIV_SIGSEGV && NOTE_SIG_PIPE == VIV_SIGPIPE,
+               "NOTE_SIG_* must be the Linux aarch64 numbers vivarium.h names");
 
 // strncmp-style name compare bounded by NOTE_NAME_MAX (so we don't read
 // past the in-kernel buffer if the input lacks the NUL).
@@ -139,6 +172,22 @@ enum note_default notes_default_action(const char *name) {
         }
     }
     return NOTE_DFL_TERMINATE;
+}
+
+// The signal a death by `name` records. Contract in <thylacine/notes.h>.
+int notes_death_signal(const char *name) {
+    if (!name) return 0;
+    for (u32 i = 0; i < NOTE_NUM_KNOWN; i++) {
+        if (notes_name_eq(name, g_known_notes[i].name)) {
+            return g_known_notes[i].death_sig;
+        }
+    }
+    for (u32 i = 0; i < NOTE_NUM_SNARE_DEATHS; i++) {
+        if (notes_name_eq(name, g_snare_deaths[i].name)) {
+            return g_snare_deaths[i].death_sig;
+        }
+    }
+    return 0;
 }
 
 // P6 hardening #3a (scripture e45a571 -- docs/ERRORS.md): the `snare:`
@@ -986,9 +1035,6 @@ int notes_name_is_kill(const char *name) {
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/uaccess.h"
 
-// Forward-declare exits() — defined in kernel/proc.c.
-__attribute__((noreturn)) extern void exits(const char *msg);
-
 // LS-5 (P2 default disposition): is there an `interrupt` note in `q`
 // deliverable to `t` -- present in the ring AND not masked for `t`? Caller
 // MUST hold q->lock. A masked interrupt is NOT deliverable (the program chose
@@ -1317,7 +1363,7 @@ void notes_fault_dying_latch(struct Thread *t) {
     const char *tname = notes_terminate_note_name_locked(p, t);
     if (tname) {
         spin_unlock(&q->lock);
-        exits(tname);
+        exits_note(tname);
         // unreachable
     }
     // A latch whose class has a default-terminating note queued stays armed
@@ -1789,7 +1835,7 @@ again:
             }
             return false;
         }
-        exits("killed");
+        exits_signalled(NOTE_SIG_KILL, "killed");
         // unreachable
     }
 
@@ -1890,17 +1936,17 @@ again:
         // it, the stop consumer skipped it, and "leave it queued for the fd
         // reader" stranded it at the head of a queue no fd will ever read --
         // every later caught signal blocked behind it for the life of the
-        // guest. Linux terminates; so does this. exits() with the canonical
-        // .rodata name, the same way the native arm reports interrupt/hup/quit
-        // (the phenotype wait4 folds a note-death into an EXITED status, so
-        // "pipe" reads exactly as "interrupt" already does). The lock is
+        // guest. Linux terminates; so does this. exits_note() with the
+        // canonical .rodata name, the same way the native arm reports
+        // interrupt/hup/quit, so the death records the note's signal and the
+        // phenotype wait4 reports it WIFSIGNALED, as Linux does. The lock is
         // dropped first; the note stays in the about-to-be-freed queue.
         if (viv_signote_default_is_terminate(sn)) {
             // sn decoded from a canonical literal, so the lookup cannot miss;
             // the "unknown" arm is the F10 convention, not a reachable case.
             const char *tname = notes_canonical_name_ptr(candidate.name);
             spin_unlock(&q->lock);
-            exits(tname ? tname : "unknown");
+            exits_note(tname ? tname : "unknown");
             // unreachable
         }
         // Otherwise SIG_DFL with a default that STOPS (tty:susp). Fall through
@@ -1924,14 +1970,14 @@ again:
         const char *tname = notes_terminate_note_name_locked(p, t);
         if (tname) {
             spin_unlock(&q->lock);
-            // exits() handles single-thread (-> ZOMBIE, status 1) AND multi-
-            // thread (-> the #811 proc_group_terminate cascade); it is
-            // noreturn. The terminating note is left in the about-to-be-
+            // exits_note() handles single-thread (-> ZOMBIE, status 1, the
+            // note's signal) AND multi-thread (-> the #811 group cascade); it
+            // is noreturn. The terminating note is left in the about-to-be-
             // freed queue -- no consume needed; the Proc is dying. Same
-            // terminate primitive the `kill` branch uses (exits("killed")).
-            // PTY-1b: tname is the canonical .rodata name (interrupt /
-            // tty:quit / tty:hup) -- program-lifetime storage, exits-safe.
-            exits(tname);
+            // terminate primitive the `kill` branch uses. PTY-1b: tname is
+            // the canonical .rodata name (interrupt / tty:quit / tty:hup) --
+            // program-lifetime storage, exits-safe.
+            exits_note(tname);
             // unreachable
         }
         // The STOP class (tty:susp), uncaught and with no fd reader: round-2
@@ -2203,7 +2249,7 @@ int notes_noted_default(struct exception_context *ctx, struct Thread *t) {
         break;
     }
 
-    exits(msg);
+    exits_note(msg);
     // unreachable
-    extinction("notes_noted_default: exits returned");
+    extinction("notes_noted_default: exits_note returned");
 }

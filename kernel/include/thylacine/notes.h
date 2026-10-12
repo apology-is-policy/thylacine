@@ -278,6 +278,16 @@ struct NoteQueue {
 #define NOTE_NAME_SNARE_BRK    "snare:brk"    // EL0 brk #imm (assertion/debug)
 #define NOTE_NAME_SNARE_ILL    "snare:ill"    // EL0 unknown sync EC
 #define NOTE_NAME_SNARE_FPE    "snare:fpe"    // EL0 floating-point trap (reserved; no v1.0 path emits this)
+#define NOTE_NAME_SNARE_ABORT  "snare:abort"  // EL0 brk #SNARE_ABORT_BRK_IMM -- Pouch's abort()
+
+// The `brk` immediate Pouch's abort() executes (patch 0011), read back from
+// ESR's ISS by the EL0 brk handler, which reports snare:abort for it and
+// snare:brk for every other immediate. Clear of every immediate a toolchain or
+// runtime in the tree emits: 0x1 (clang __builtin_trap), 0x3e8 (gcc
+// __builtin_trap), 0xf000 (debugger breakpoints), 0x5500-0x55ff (UBSan's trap
+// mode), 0xc471 (WebKit's WTFCrash and the JSC JIT's breakpoint). Pouch's copy
+// is checked by the boot probe, which sees SIGABRT only if the two agree.
+#define SNARE_ABORT_BRK_IMM    0xab06u
 
 // Length sanity -- the longest name + NUL must fit NOTE_NAME_MAX. The
 // constants above are #define'd as string literals; sizeof on the
@@ -350,6 +360,24 @@ _Static_assert(sizeof(NOTE_NAME_SNARE_ILL)   <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_ILL does not fit NOTE_NAME_MAX");
 _Static_assert(sizeof(NOTE_NAME_SNARE_FPE)   <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_FPE does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_ABORT) <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_ABORT does not fit NOTE_NAME_MAX");
+
+// The POSIX signal a Proc's death by a note records (Proc.term_sig), which the
+// packed wait word reports (proc.h WAIT_STATUS_SIGNALED). Linux aarch64
+// numbering, the wait word's own, so the Pouch and phenotype boundary-lines pass
+// it through unchanged; vivarium.c pins each against its VIV_SIG* twin.
+// docs/ERRORS.md "Exit-status semantics" is the table in prose.
+enum note_death_sig {
+    NOTE_SIG_HUP  = 1,  NOTE_SIG_INT  = 2,  NOTE_SIG_QUIT = 3,  NOTE_SIG_ILL  = 4,
+    NOTE_SIG_TRAP = 5,  NOTE_SIG_ABRT = 6,  NOTE_SIG_BUS  = 7,  NOTE_SIG_FPE  = 8,
+    NOTE_SIG_KILL = 9,  NOTE_SIG_SEGV = 11, NOTE_SIG_PIPE = 13,
+};
+
+// The signal a death by the note `name` records: a snare:* name, or a
+// terminate-default row of g_known_notes. 0 for a note that cannot kill (an
+// IGNORE or STOP row) and for a name that is no note at all. PURE.
+int notes_death_signal(const char *name);
 
 // ============================================================================
 // Public API

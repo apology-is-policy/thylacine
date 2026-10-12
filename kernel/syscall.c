@@ -10702,8 +10702,10 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
     // pgrp selectors on want_pid; the accepted-flag mask MUST admit them or the
     // job-control stop/continue reports are unreachable from EL0 (PTY-4: the
     // shell's WAIT_UNTRACED fg wait returned a spurious -1 -- the whole
-    // ^Z-detects-a-stop path was closed at this gate).
-    if (flags_u & ~(u64)(WAIT_WNOHANG | WAIT_UNTRACED | WAIT_CONTINUED))
+    // ^Z-detects-a-stop path was closed at this gate). gcpark-b's WAIT_PACKED
+    // is admitted the same way.
+    if (flags_u & ~(u64)(WAIT_WNOHANG | WAIT_UNTRACED | WAIT_CONTINUED |
+                         WAIT_PACKED))
                                                        return -1;
     int flags    = (int)flags_u;
 
@@ -12975,21 +12977,15 @@ static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
     // asked in Linux's terms; the translation to Thylacine's happens here, and
     // the third line is the one that matters -- Linux's WCONTINUED is bit 8 and
     // Thylacine's WAIT_CONTINUED is bit 4.
-    int flags = 0;
+    //
+    // Linux always wants the packed word, so WAIT_PACKED is always asked for
+    // (gcpark-b). Before it existed this row repacked a raw status itself when
+    // no PTY-1e flag was passed, which could only ever say "exited": a child
+    // that died of a note has raw status 1, and its signal is not in that word.
+    int flags = WAIT_PACKED;
     if (o.nohang)    flags |= WAIT_WNOHANG;
     if (o.untraced)  flags |= WAIT_UNTRACED;
     if (o.continued) flags |= WAIT_CONTINUED;
-
-    // wait_pid_for applies the packed encoding IFF a PTY-1e flag was passed
-    // (proc.h) -- a plain wait keeps the RAW exit status for pre-PTY callers.
-    // Linux always wants packed, so we pack exactly when the kernel will not.
-    //
-    // THIS MUST BE DECIDED BEFORE THE CALL, and derived from the word one line
-    // above rather than from `options`: the returned value cannot be classified
-    // after the fact, because a raw exit status of 5247 and a packed
-    // WAIT_STATUS_STOPPED are both 0x147f. Only what we ASKED for tells them
-    // apart.
-    const bool kernel_packs = (flags & (WAIT_UNTRACED | WAIT_CONTINUED)) != 0;
 
     // Validate up-front, as the native handler does: a wait that reaps and THEN
     // faults on the status write has destroyed the child's exit code with
@@ -13018,11 +13014,8 @@ static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
     if (reaped < 0)  return -(s64)T_E_CHILD;
     if (reaped == 0) return 0;                  // WNOHANG, nothing ready
 
-    if (wstatus_va != 0) {
-        if (!kernel_packs) status = WAIT_STATUS_EXITED(status);
-        if (sys_store_user_int(wstatus_va, status) != 0)
-            return -(s64)T_E_FAULT;
-    }
+    if (wstatus_va != 0 && sys_store_user_int(wstatus_va, status) != 0)
+        return -(s64)T_E_FAULT;
     return (s64)reaped;
 }
 
