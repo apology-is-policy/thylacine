@@ -2355,6 +2355,15 @@ static void (*loom_sq_release_hook)(struct Loom *);
 void loom_sq_release_hook_for_test(void (*hook)(struct Loom *)) {
     __atomic_store_n(&loom_sq_release_hook, hook, __ATOMIC_RELEASE);
 }
+static void (*loom_setup_installed_hook)(struct Proc *, hidx_t);
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t)) {
+    __atomic_store_n(&loom_setup_installed_hook, hook, __ATOMIC_RELEASE);
+}
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd) {
+    void (*hook)(struct Proc *, hidx_t) =
+        __atomic_load_n(&loom_setup_installed_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(p, fd);
+}
 #endif
 
 // Advance and publish sq_head past one consumed position. The published head is

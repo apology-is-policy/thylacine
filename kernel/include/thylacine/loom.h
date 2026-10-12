@@ -674,6 +674,10 @@ extern volatile u32 g_loom_fanin_test_stalled;
 // kthread -- on any failure).
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd);
+// Undo a successful setup whose params never reached the caller: close the
+// handle, then detach the ring through the charge-settling path -- after the
+// close that detach can be the ring's final drop.
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size);
 
 // Testable register inner. Resolves the `n` fds in `fds[]` (each must be a
 // KOBJ_SPOOR handle in p) into the ring at `loom_fd`'s registered-handle table.
@@ -712,6 +716,10 @@ void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h);
 #ifdef KERNEL_TESTS
 // Runs under l->lock right after sq_head is published; shared ring memory only.
 void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
+// Runs in a setup the moment its handle is installed: where a sibling thread's
+// close of the new fd can land.
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
 #endif
 
 // Testable enter inner. Resolves `loom_fd` -> KObj_Loom in `p` (holding a loom

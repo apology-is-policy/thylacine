@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-12
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1592,3 +1592,11 @@ write-behind flush's own, passed through from `dev9p_loom_register`
 ([[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]]) -- and `-EINVAL` for the
 rest (not a Loom, an unknown op, `nargs` over the table). `nargs` is a u32 by
 the ABI, so its upper bits are ignored as before.
+
+## Loom setup rollback (2026-10-12)
+
+A params-copyout fault in the SYS_LOOM_SETUP handler calls
+`sys_loom_setup_rollback`: `handle_close` followed by the charge-settling
+`sys_burrow_detach_for_proc`. It no longer uses the unsettled `burrow_unmap`, so a
+faulting caller never leaks the ring's charge. Mechanism and the setup's own
+reference: [[sub-kernel-loom]].

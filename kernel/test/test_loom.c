@@ -1562,3 +1562,62 @@ void test_loom_wait_counts_admitting(void) {
     TEST_EXPECT_EQ((u64)(h->cq_tail - h->cq_head), (u64)1, "the phantom's CQE ended the wait");
     loom_unref(l);
 }
+
+// A sibling thread closes the new fd the instant setup installs it. That close
+// drops the handle's reference; setup must still hold its own, so the Loom
+// survives until setup's last touch, and setup's own drop then frees it.
+static bool setup_race_closed;
+static u64  setup_race_destroyed_at_close;
+static void setup_race_close(struct Proc *p, hidx_t fd) {
+    setup_race_closed = handle_close(p, fd) == 0;
+    setup_race_destroyed_at_close = loom_total_destroyed();
+}
+void test_loom_setup_close_race(void);
+void test_loom_setup_close_race(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    u32 base = p->as->page_count;
+    u64 before = loom_total_destroyed();
+    struct loom_params kp;
+    hidx_t fd = -1;
+    setup_race_closed = false;
+    setup_race_destroyed_at_close = 0;
+    loom_setup_installed_hook_for_test(setup_race_close);
+    int rc = sys_loom_setup_for_proc(p, 4, 0, &kp, &fd);
+    loom_setup_installed_hook_for_test(NULL);
+    u64 after = loom_total_destroyed();
+    // The ring mapping outlives the Loom; its detach is the final drop.
+    s64 detached = rc == 0 ? sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size) : -1;
+    u32 settled = p->as->page_count;
+    test_proc_drop(p);
+    TEST_EXPECT_EQ(rc, 0, "setup completes although its fd was closed at install");
+    TEST_ASSERT(setup_race_closed, "the racing close found the freshly installed fd");
+    TEST_EXPECT_EQ(setup_race_destroyed_at_close, before,
+                   "the Loom outlives a close that lands at install");
+    TEST_EXPECT_EQ(after, before + 1, "setup's own last drop frees the closed Loom");
+    TEST_EXPECT_EQ(detached, 0, "the orphaned ring mapping detaches");
+    TEST_EXPECT_EQ(settled, base, "the detach settles the ring charge exactly");
+}
+
+// The setup rollback that runs when params cannot be copied out. It must settle
+// the ring's charge however its close and its detach interleave.
+void test_loom_setup_rollback_settles(void);
+void test_loom_setup_rollback_settles(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "rollback proc");
+    u32 base = p->as->page_count;
+    struct loom_params kp;
+    hidx_t fd = -1;
+    int rc = sys_loom_setup_for_proc(p, 4, 0, &kp, &fd);
+    u32 charged = p->as->page_count;
+    if (!rc) sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
+    struct Handle h;
+    bool closed = !rc && handle_get(p, fd, &h) != 0;
+    if (!closed && !rc) handle_put(&h);
+    u32 settled = p->as->page_count;
+    test_proc_drop(p);
+    TEST_EXPECT_EQ(rc, 0, "an ordinary ring to roll back");
+    TEST_ASSERT(charged != base, "the ordinary ring charged its pages");
+    TEST_ASSERT(closed, "the rollback closes the handle");
+    TEST_EXPECT_EQ(settled, base, "the rollback settles the ring's charge exactly");
+}

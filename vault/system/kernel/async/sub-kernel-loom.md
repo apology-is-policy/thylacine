@@ -764,3 +764,23 @@ an exec never refunds against the successor's space (the audit's F4;
 [[chg-2026-08-16-loom-backstop-closed]] (the thread-ledger backstop, and the
 one-line fix that would have leaked). 2026-09-23 (L): the identity cape's two
 Loom rules (the caped `GETATTR` copy; the caped create gid).
+
+## Setup holds its own reference across the install (2026-10-12)
+
+`sys_loom_setup_for_proc` used to write `l->owner`, `ring_pages`, the charge record
+and `*out` after `handle_alloc` had adopted the Loom's only reference. A sibling
+thread's close of the new fd in that window freed the Loom synchronously, so those
+writes landed in freed memory: a latent, EL0-reachable kernel UAF write (P1). Setup
+now takes `loom_ref` before `handle_alloc` and drops it as its last act, after
+which `l` is not touched. The `KERNEL_TESTS` hook `loom_setup_installed_for_test`
+sits at the window, and `loom.setup_close_race` closes the fd there.
+
+The SETUP handler's params-copyout-fault rollback used `burrow_unmap`. After
+`handle_close`, that unmap is the ring's final drop and carries no payer, so the
+charge record died unrefunded (P3, I-32, self-only).
+`sys_loom_setup_rollback` (`handle_close` followed by the settling
+`sys_burrow_detach_for_proc`) replaces it. Witness: `loom.setup_rollback_settles`.
+
+Both were found and fixed on corona/async-memory (6a5039788) while reading the
+private bridge's setup path. The regression mutants are M4 (no own reference) and
+M5 (the unsettled unmap), in work/oct12-na1/na1-mutants.py.
