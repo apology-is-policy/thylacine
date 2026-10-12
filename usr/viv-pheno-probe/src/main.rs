@@ -467,6 +467,49 @@ fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
 fn esc_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_FIRED) } }
 fn esc_phase() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_PHASE) } }
 
+// L329-L330: a fault taken while a terminate-default note is pending. A write
+// to a pipe nobody reads, with SIGPIPE at SIG_DFL, posts `pipe` to this process
+// and arms the kernel's terminate latch; the handler below then faults on a
+// NULL load -- inside a running handler, where the EL0-return tail defers every
+// note but kill. The fd is the reader-less write end the subject made.
+static LATCH_PIPE_FD: AtomicU64 = AtomicU64::new(0);
+static LATCH_BYTE: u8 = b'x';
+extern "C" fn viv_latch_fault_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        let fd = LATCH_PIPE_FD.load(Ordering::SeqCst);
+        let _ = svc3(NR_WRITE, fd, &LATCH_BYTE as *const u8 as u64, 1);
+        asm!("mov {t}, #0", "ldr {t}, [{t}]", t = out(reg) _, options(nostack));
+    }
+}
+fn latch_fault_handler_addr() -> u64 { viv_latch_fault_handler as usize as u64 }
+
+// L330's half: the same write and fault with SP_EL0 = 8, below what the tail
+// needs for a note frame, so it defers every note but kill there too.
+// x0 = the reader-less fd, x1 = a byte to write. The exit_group(0) runs only
+// if the fault came back.
+core::arch::global_asm!(
+    ".globl viv_latch_fault_bad_sp",
+    ".type viv_latch_fault_bad_sp, @function",
+    "viv_latch_fault_bad_sp:",
+    "    bti     c",
+    "    mov     x9, #8",
+    "    mov     sp, x9",
+    "    mov     x2, #1",
+    "    mov     x8, #64",              // write(fd, buf, 1): EPIPE + the pipe note
+    "    svc     #0",
+    "    mov     x9, #0",
+    "    ldr     x9, [x9]",
+    "    mov     x0, #0",
+    "    mov     x8, #94",              // exit_group(0)
+    "    svc     #0",
+    "1:  b       1b",
+    ".size viv_latch_fault_bad_sp, .-viv_latch_fault_bad_sp",
+);
+
+extern "C" {
+    fn viv_latch_fault_bad_sp(fd: u64, buf: u64) -> !;
+}
+
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
@@ -4615,6 +4658,79 @@ unsafe fn run_linux() -> ! {
     leg!(rep, nsb == 0, &sbad[..nsb]); // L328: every sleep leg above, by name
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+
+    // --- L329-L330: a fault taken while a terminate-default note is pending --
+    //
+    // A write to a pipe nobody reads, with SIGPIPE at SIG_DFL, arms the kernel's
+    // terminate latch; a fault taken then is the note's death. The EL0-return
+    // tail defers that note while a handler runs (L329: a SIGCHLD handler that
+    // makes the write and faults) and while the user SP is unusable (L330), so
+    // the kernel must end the thread at the fault itself: returning from it
+    // re-executes the faulting load into the same fault forever. Each case runs
+    // in a forked subject the parent reaps within ~4 s. The failure marker says
+    // "hung" for a subject still alive there (it is left spinning: the
+    // phenotype has no kill, and the failed leg ends the boot's gate anyway),
+    // "lived" for one that came back from the fault, "nofork" for a failed fork.
+    unsafe fn reap_within(kid: i64) -> Option<i32> {
+        let nap: [i64; 2] = [0, 50_000_000];
+        for _ in 0..80 {
+            let mut ws: i32 = -1;
+            if wait4_r(kid as u64, &mut ws as *mut i32 as u64, WNOHANG) == kid {
+                return Some(ws);
+            }
+            let _ = svc4(NR_PPOLL, 0, 0, nap.as_ptr() as u64, 0);
+        }
+        None
+    }
+    let mut lbad = [0u8; 40];
+    let mut nlb = 0usize;
+    for (mark, in_handler) in [(b"L329", true), (b"L330", false)] {
+        let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if kid == 0 {
+            ksa = [SIG_DFL, 0, 0, 0];
+            let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+            let mut pp: [i32; 2] = [-1, -1];
+            if svc3(NR_PIPE2, pp.as_mut_ptr() as u64, 0, 0) != 0
+                || svc3(NR_CLOSE, pp[0] as u64, 0, 0) != 0
+            {
+                linux_exit(0)
+            }
+            LATCH_PIPE_FD.store(pp[1] as u64, Ordering::SeqCst);
+            let un = (1u64 << (SIGCHLD - 1)) | (1u64 << (SIGPIPE - 1));
+            let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &un as *const u64 as u64, 0, 8);
+            if in_handler {
+                ksa = [latch_fault_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+                let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+                if svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0) == 0 {
+                    linux_exit(0)               // its exit is the SIGCHLD
+                }
+                let ts: [i64; 2] = [5, 0];
+                let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+            } else {
+                viv_latch_fault_bad_sp(pp[1] as u64, &LATCH_BYTE as *const u8 as u64);
+            }
+            linux_exit(0)
+        }
+        let why: &[u8] = if kid < 0 {
+            b"nofork"
+        } else {
+            match reap_within(kid) {
+                Some(ws) if (ws & 0x7f) == 0 && ((ws >> 8) & 0xff) != 0 => b"",
+                Some(_) => b"lived",
+                None => b"hung",
+            }
+        };
+        if !why.is_empty() {
+            for &c in mark.iter().chain(b" ".iter()).chain(why.iter()).chain(b" ".iter()) {
+                lbad[nlb] = c;
+                nlb += 1;
+            }
+        }
+    }
+    if nlb > 0 {
+        lbad[nlb - 1] = b'\n';
+    }
+    leg!(rep, nlb == 0, &lbad[..nlb]);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

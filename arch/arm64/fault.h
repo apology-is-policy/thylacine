@@ -90,10 +90,12 @@ enum fault_result {
     // A user fault the pager did not resolve while the faulting thread's death
     // was pending (thread_die_pending): the death is its disposition, not a
     // snare:* of its own. The common case is a file page-in whose 9P read the
-    // group's own death abandoned. At EL0 the handler returns and the vector
-    // tail's die-check (or the terminate note's delivery) ends the thread
-    // before any EL0 instruction runs; a uaccess treats it as a failed access,
-    // like every other non-HANDLED result, so it never re-executes into a loop.
+    // group's own death abandoned. At EL0 a group death is ended by the vector
+    // tail's die-check before any EL0 instruction runs; a terminate latch is
+    // ended at the fault itself (notes_fault_dying_latch), because the tail
+    // defers notes it cannot deliver, or cleared there when stale. A uaccess
+    // treats it as a failed access, like every other non-HANDLED result, so it
+    // never re-executes into a loop.
     FAULT_USER_DYING      = 4,
 };
 

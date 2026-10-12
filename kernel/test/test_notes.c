@@ -3031,3 +3031,66 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     TEST_EXPECT_EQ(c_rc, -1, "C: not in a handler -> refused");
     TEST_ASSERT(c_mask == HAND, "C: a refused restore touches nothing");
 }
+
+// The EL0 fault arm's latch act: a fault taken while a terminate latch is
+// pending ends the thread with that note at the fault, because the tail it
+// would otherwise wait for defers notes inside a handler or on a bad SP, and
+// the faulting instruction would re-execute forever. Driven from an rfork'd
+// child, since the helper acts on the calling thread. Returning is the defect
+// in the live case: the child then leaves with 7, not the note's 1.
+static volatile int g_fdl_pending;
+
+static void fdl_live_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    (void)notes_post(t->proc, "interrupt", 0u, NULL, true);
+    g_fdl_pending = thread_die_pending(t) ? 1 : 0;
+    notes_fault_dying_latch(t);
+    exits_code(7, "returned");
+}
+
+void test_notes_fault_dying_latch_live_note_exits(void) {
+    g_fdl_pending = -1;
+    int pid = rfork(RFPROC, fdl_live_entry, NULL);
+    int st = -1;
+    int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    TEST_ASSERT(pid > 0, "rfork");
+    TEST_EXPECT_EQ(got, pid, "reaped the child");
+    TEST_EXPECT_EQ(g_fdl_pending, 1, "the interrupt armed a latch the child would die of");
+    TEST_EXPECT_EQ(st, 1, "the child died of the note (1), not by returning (7)");
+}
+
+// The stale half: a latch whose class has no default-terminating note queued
+// is cleared; one whose note is live but masked by THIS thread is kept, since a
+// peer may still die of it -- and the call returns.
+static volatile int g_fdl_returned;
+static volatile u32 g_fdl_flags_after;
+
+static void fdl_stale_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    t->note_mask |= (1u << NOTE_BIT_INTERRUPT);
+    (void)notes_post(p, "interrupt", 0u, NULL, true);
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_PIPE_TERMINATE_PENDING, __ATOMIC_RELEASE);
+    notes_fault_dying_latch(t);
+    g_fdl_returned = 1;
+    g_fdl_flags_after = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    exits_code(0, "ok");
+}
+
+void test_notes_fault_dying_latch_clears_only_stale(void) {
+    g_fdl_returned = 0;
+    g_fdl_flags_after = 0;
+    int pid = rfork(RFPROC, fdl_stale_entry, NULL);
+    int st = -1;
+    int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    TEST_ASSERT(pid > 0, "rfork");
+    TEST_EXPECT_EQ(got, pid, "reaped the child");
+    TEST_EXPECT_EQ(g_fdl_returned, 1, "no unmasked live note: the call returned");
+    TEST_EXPECT_EQ(st, 0, "the child left by its own exit");
+    TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_PIPE_TERMINATE_PENDING) == 0,
+                "the stale pipe latch (no pipe note queued) was cleared");
+    TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
+                "the live interrupt latch this thread masks was kept");
+}

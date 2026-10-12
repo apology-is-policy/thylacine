@@ -889,6 +889,8 @@ void test_notes_discard_name_purges_pending(void);      // the install-time SIG_
 void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
+void test_notes_fault_dying_latch_live_note_exits(void);
+void test_notes_fault_dying_latch_clears_only_stale(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_death_reaches_predicate(void);
 void test_notes_forced_close_lifts_the_hold(void);
@@ -3101,6 +3103,8 @@ struct test_case g_tests[] = {
     { "notes.phenotype_sigreturn_restores_mask", test_notes_phenotype_sigreturn_restores_mask, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
+    { "notes.fault_dying_latch_live_note_exits", test_notes_fault_dying_latch_live_note_exits, false, NULL },
+    { "notes.fault_dying_latch_clears_only_stale", test_notes_fault_dying_latch_clears_only_stale, false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
     { "notes.death_reaches_predicate",         test_notes_death_reaches_predicate,         false, NULL },
     { "notes.forced_close_lifts_the_hold",     test_notes_forced_close_lifts_the_hold,     false, NULL },

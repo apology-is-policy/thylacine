@@ -564,11 +564,12 @@ int notes_post_pid(int pid, const char *name, u32 arg);
 // opening the notes fd (self-managing) AFTER an interrupt armed the latch
 // but BEFORE a latch-woken thread A reaches its EL0-return tail clears the
 // latch — but A has already unwound its blocked syscall *_INTR (e.g. a 9P
-// RPC surfaces -P9_E_IO). No wrong termination (the tail re-validates);
-// the cost is one EINTR-class return on A, the POSIX EINTR-with-handler
-// shape. Unreachable at v1.0: multi-thread Procs are stratumd-class and
-// never console-owner/foreground, and the single-thread variant requires
-// the Proc to change its own disposition concurrently with a Ctrl-C.
+// RPC surfaces -P9_E_IO). No wrong termination (the tail re-validates, and a
+// fault re-validates at the fault: notes_fault_dying_latch); the cost is one
+// EINTR-class return on A, the POSIX EINTR-with-handler shape. Reachable: a
+// phenotype guest that clones threads is multi-thread, and a phenotype
+// handler install is not one of the clearing choke points, so its latch stays
+// armed until the note is delivered or drained.
 
 // Register/clear the async note handler (the SYS_NOTIFY body). Stores
 // handler_va with RELEASE (pairs with the dispatcher's acquire, F9) and, when
@@ -599,6 +600,17 @@ bool thread_die_pending(struct Thread *t);
 // close until forced, the kthread join): never a terminate latch. The
 // predicate of sleep_death_only (DEBUG-FS-DESIGN §5g).
 bool thread_group_death_pending(struct Thread *t);
+
+// The EL0 fault arm's act on a terminate latch: a fault left unresolved while
+// thread_die_pending read true for a latch, not a group death. exits() with the
+// first queued terminate note `t` would die of -- the tail's own pick, made
+// here because the tail defers a note while a handler runs or the user SP is
+// unusable, and the faulting instruction would re-execute into the same fault
+// forever. When no queued note of an armed class would still default-terminate
+// (a phenotype handler installed for it since the arm, which clears no latch),
+// those latches are stale: cleared under q->lock, and the call returns. Owner
+// thread only.
+void notes_fault_dying_latch(struct Thread *t);
 
 // Can a death end this thread's sleeps? Not a kernel thread's (no death
 // reaches kproc), not one inside an exit close until a kill forces it, and not

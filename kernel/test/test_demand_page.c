@@ -1029,10 +1029,10 @@ void test_demand_page_file_read_error_dying_is_death(void) {
     g_rev_read_fail  = true;
     g_rev_read_calls = 0;
     int pid = rfork(RFPROC, dying_page_in_entry, NULL);
-    TEST_ASSERT(pid > 0, "rfork");
     int status = -1;
-    int reaped = wait_pid(&status);
+    int reaped = pid > 0 ? wait_pid(&status) : -1;
     g_rev_read_fail = false;     // reset for other tests (before any assert returns)
+    TEST_ASSERT(pid > 0, "rfork");
     TEST_EXPECT_EQ(reaped, pid, "wait_pid reaped the child");
     TEST_EXPECT_EQ(g_dying_ctl_r, (int)FAULT_USER_BUS,
         "control: a failed page-in with no death pending is snare:bus");

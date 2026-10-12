@@ -1308,6 +1308,40 @@ bool thread_group_death_pending(struct Thread *t) {
     return p && __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL;
 }
 
+void notes_fault_dying_latch(struct Thread *t) {
+    if (!t) return;
+    struct Proc *p = t->proc;
+    if (!p || p == kproc() || !p->notes) return;
+    struct NoteQueue *q = p->notes;
+    spin_lock(&q->lock);
+    const char *tname = notes_terminate_note_name_locked(p, t);
+    if (tname) {
+        spin_unlock(&q->lock);
+        exits(tname);
+        // unreachable
+    }
+    // A latch whose class has a default-terminating note queued stays armed
+    // even when this thread masks it: a peer may still die of it. The gates are
+    // notes_terminate_note_name_locked's, so a class kept here is one that
+    // lookup would have found for an unmasked thread.
+    u32 live = 0;
+    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) == 0 &&
+        !proc_is_self_managing_notes(p)) {
+        u32 idx = q->head;
+        for (u32 n = 0; n < q->count; n++) {
+            const char *name = q->ring[idx].name;
+            if (notes_proc_default_applies(p, name))
+                live |= notes_name_terminate_latch(name);
+            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        }
+    }
+    u32 armed = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
+                PROC_FLAG_TERMINATE_PENDING_MASK;
+    if (armed & ~live)
+        __atomic_and_fetch(&p->proc_flags, ~(armed & ~live), __ATOMIC_RELEASE);
+    spin_unlock(&q->lock);
+}
+
 // item 11 (ARCH 8.8.3): the NON-death sibling of thread_die_pending. True iff a
 // CAUGHT, deliverable note of a family UNMASKED for THIS thread is queued -- so
 // a caught-note-interruptible sleep should unwind SLEEP_NOTEINTR, return
