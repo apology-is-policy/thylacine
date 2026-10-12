@@ -6745,32 +6745,46 @@ build_icu() {
     ledger "icu $ICU_VER: BUILT (static, data packaged in libicudata.a)"
 }
 
+# The tree the pin plus the patch series builds, applied IN ORDER in a scratch
+# index: the series is stacked, so a later patch may edit lines an earlier one
+# added, and no patch can be asked about alone. Prints the tree id, or the first
+# patch that does not apply; returns nonzero on failure.
+webkit_series_tree() {
+    local wk="$1" pin="$2" pp tree rc=0; shift 2
+    local idx; idx="$(mktemp -d "${TMPDIR:-/tmp}/webkit-series.XXXXXX")" || return 1
+    GIT_INDEX_FILE="$idx/index" git -C "$wk" read-tree "$pin" 2>/dev/null \
+        || { echo "the pin $pin is not readable"; rm -rf "$idx"; return 1; }
+    for pp; do
+        GIT_INDEX_FILE="$idx/index" git -C "$wk" apply --cached "$pp" 2>/dev/null \
+            || { echo "patch $(basename "$pp") does not apply on the pin plus the patches before it"; rc=1; break; }
+    done
+    if (( rc == 0 )); then
+        tree="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" write-tree)" || rc=1
+        echo "$tree"
+    fi
+    rm -rf "$idx"
+    return $rc
+}
+
 webkit_checkout_ok() {
-    # The checkout must be the PINNED tree with EVERY port patch applied and
-    # nothing else: pin is an ancestor, each patch reverse-applies cleanly, and
-    # the tree is clean. Prints the first failing reason; returns nonzero.
-    local wk="$1" port_dir="$2" pp
+    # The checkout must be the PINNED tree with the port's patch series applied
+    # and nothing else: HEAD's tree is exactly the tree the series builds on the
+    # pin, and the working tree is clean. Prints the first failing reason;
+    # returns nonzero.
+    local wk="$1" port_dir="$2" pp want
+    local -a series=()
     [[ -d "$wk/.git" && -f "$wk/Source/JavaScriptCore/CMakeLists.txt" ]] \
         || { echo "no checkout at $wk"; return 1; }
     git -C "$wk" merge-base --is-ancestor "$WEBKIT_PIN" HEAD 2>/dev/null \
         || { echo "HEAD does not descend from the pin $WEBKIT_PIN"; return 1; }
     [[ -z "$(git -C "$wk" status --porcelain --untracked-files=no)" ]] \
         || { echo "the checkout has uncommitted changes"; return 1; }
-    local want=""
     for pp in "$port_dir"/patches/*.patch; do
-        [[ -e "$pp" ]] || continue
-        git -C "$wk" apply --check --reverse "$pp" 2>/dev/null \
-            || { echo "patch $(basename "$pp") is not applied"; return 1; }
-        want+="$(git -C "$wk" apply --numstat "$pp" 2>/dev/null | awk '{print $3}')"$'\n'
+        [[ -e "$pp" ]] && series+=("$pp")
     done
-    # "...and nothing else": the files that differ from the pin are exactly the
-    # files the series names. A reverse-apply check alone passes on a tree that
-    # carries the patches PLUS local edits to other files.
-    local got
-    got="$(git -C "$wk" diff --name-only "$WEBKIT_PIN" HEAD | sort -u)"
-    want="$(printf '%s' "$want" | sed '/^$/d' | sort -u)"
-    [[ "$got" == "$want" ]] \
-        || { echo "the checkout differs from the pin in files the patch series does not name"; return 1; }
+    want="$(webkit_series_tree "$wk" "$WEBKIT_PIN" "${series[@]}")" || { echo "$want"; return 1; }
+    [[ "$want" == "$(git -C "$wk" rev-parse 'HEAD^{tree}')" ]] \
+        || { echo "HEAD's tree is not the pin plus the patch series (a commit the series does not carry)"; return 1; }
     return 0
 }
 

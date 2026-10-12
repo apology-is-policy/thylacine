@@ -96,6 +96,23 @@ do_clone() {
     echo "    $sec now at $(git -C "$dest" rev-parse --short HEAD 2>/dev/null || echo '?')"
 }
 
+# The tree the pin plus the given patches builds, applied in order in a scratch
+# index (no checkout touched). Prints the tree id; nonzero if a patch does not apply.
+series_tree() {
+    local path="$1" pin="$2" pp tree rc=0; shift 2
+    local idx; idx="$(mktemp -d "${TMPDIR:-/tmp}/forage-series.XXXXXX")" || return 1
+    GIT_INDEX_FILE="$idx/index" git -C "$path" read-tree "$pin" 2>/dev/null || rc=1
+    for pp; do
+        (( rc == 0 )) || break
+        GIT_INDEX_FILE="$idx/index" git -C "$path" apply --cached "$pp" 2>/dev/null || rc=1
+    done
+    if (( rc == 0 )); then
+        tree="$(GIT_INDEX_FILE="$idx/index" git -C "$path" write-tree)" && echo "$tree" || rc=1
+    fi
+    rm -rf "$idx"
+    return $rc
+}
+
 do_clone_sparse() {
     # A partial sparse clone of a huge upstream, at an exact commit, plus our
     # in-repo patch series. Idempotent: a checkout already at pin + series is
@@ -142,15 +159,32 @@ do_clone_sparse() {
     else
         git -C "$path" checkout -q -b "$branch" "$commit" || return 1
     fi
+    # The series is stacked (a later patch may edit lines an earlier one added), so
+    # what is applied is asked of a PREFIX: the longest k for which the pin plus the
+    # first k patches, built in a scratch index, is HEAD's tree. The rest are am'd.
+    local -a series=()
+    local k applied=-1 head_tree tree
     for pp in "$patches"/*.patch; do
-        [[ -e "$pp" ]] || continue
-        if git -C "$path" apply --check --reverse "$pp" 2>/dev/null; then
+        [[ -e "$pp" ]] && series+=("$pp")
+    done
+    head_tree="$(git -C "$path" rev-parse 'HEAD^{tree}')"
+    for (( k = ${#series[@]}; k >= 0; k-- )); do
+        tree="$(series_tree "$path" "$commit" "${series[@]:0:k}")" || continue
+        if [[ "$tree" == "$head_tree" ]]; then applied=$k; break; fi
+    done
+    if (( applied < 0 )); then
+        echo "forage: $sec: HEAD is not the pin plus any prefix of the series -- the checkout has drifted; inspect $path" >&2
+        return 1
+    fi
+    for (( k = 0; k < ${#series[@]}; k++ )); do
+        pp="${series[k]}"
+        if (( k < applied )); then
             echo "    $(basename "$pp"): already applied"
         elif git -C "$path" -c user.name=forage -c user.email=forage@localhost am -q "$pp"; then
             echo "    $(basename "$pp"): applied"
         else
             git -C "$path" am --abort 2>/dev/null || true
-            echo "forage: $sec: $(basename "$pp") neither applies nor is applied -- the checkout has drifted; inspect $path" >&2
+            echo "forage: $sec: $(basename "$pp") does not apply on the patches before it -- inspect $path" >&2
             return 1
         fi
     done

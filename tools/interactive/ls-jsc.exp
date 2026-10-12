@@ -36,6 +36,17 @@
 #           read back through the exec alias, and each out-of-bounds write dies of
 #           the thunk's brk, matched to the probe's own pid (JSC itself never
 #           writes out of range, so only a probe reaches the bounds check)
+#   gc-held / gc-flash / gc-flash-dft / gc-idle   the collector stops the world
+#           while jsc has RELEASED heap access, and must scan the stack image the
+#           thread parked instead of suspending it (Thylacine cannot; before
+#           gcpark, jsc died silently, exit 127). 40 rounds each hold an object
+#           only in a JS frame across the wait, then allocate, then check it; the
+#           leg asserts 0 lost AND exit status 0. gc-held waits holding access
+#           (the control: same workload, no release); gc-flash releases it
+#           (flashHeapAccess) under --collectContinuously, gc-flash-dft under the
+#           default collector; gc-idle drops the JSLock and idles in the run loop
+#           until a setTimeout fires, the shape a page process has between events.
+#           Atomics.wait is not a release here: it blocks holding access.
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -130,6 +141,36 @@ set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.use
 lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
     "JSCO-0-0-0-0-1-1"
 lc_pass "ls-jsc(tiers): only Baseline is on; the flags were parsed"
+
+# gcpark. Each leg prints its marker upper-cased by the script itself and then its
+# exit status through tr, so the echo of the typed line (lower case) satisfies
+# neither. A lost object, a nonzero status, the scan's FATAL line or a user fault
+# fails the leg.
+set gcround {function churn(){var k=[]; for(var i=0;i<1e5;i++)k.push({x:i,y:[i]}); return k.length} function round(r){var a={v:r*7+1,s:[r,r+1]}; @W; churn(); return a.v===r*7+1&&a.s[1]===r+1?0:1} var lost=0,r=0; for(;r<40;r++)lost+=round(r); print(("@T-"+r+"-"+lost).toUpperCase())}
+set gcidle {var keep=[]; for(var i=0;i<3e5;i++)keep.push({x:i,y:[i]}); setTimeout(function(){var s=0; for(var i=0;i<keep.length;i+=1000)s+=keep[i].y[0]; print(("@T-"+keep.length+"-"+s).toUpperCase())}, 500)}
+proc gcpark_leg {what tag opts js want} {
+    global lc_cmd_timeout timeout
+    set T [string toupper $tag]
+    lc_send "/webkit/jsc $opts -e '[string map [list @T $tag] $js]'; echo $tag-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set out ""
+    expect {
+        -re "$T-(\[0-9\]+-\[0-9\]+)\[\r\n\]" { set out $expect_out(1,string); exp_continue }
+        -re "$T-ST-(\[0-9\]+)\[\r\n\]" { set st $expect_out(1,string) }
+        -re {FATAL: [^\r\n]*|user fault: pid=[0-9]+ reason="snare:[a-z]+"} { lc_fail "gc-park($what): \[$expect_out(0,string)\]" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during gc-park($what)" }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-park($what): out=$out" }
+        eof     { lc_fail "unexpected EOF during gc-park($what)" }
+    }
+    if {$out ne $want || $st ne "0"} {
+        lc_fail "gc-park($what): printed \[$out\] (want $want), exit status $st (want 0)"
+    }
+    lc_pass "ls-jsc(gc-$what): $T-$want, exit 0"
+}
+gcpark_leg held      jscq "--collectContinuously=true" [string map {@W sleepSeconds(0.025)} $gcround] 40-0
+gcpark_leg flash     jscr "--collectContinuously=true" [string map {@W flashHeapAccess(25)} $gcround] 40-0
+gcpark_leg flash-dft jscs ""                           [string map {@W flashHeapAccess(25)} $gcround] 40-0
+gcpark_leg idle      jsct "--collectContinuously=true" $gcidle 300000-44850000
 
 # The write thunk's bounds are what keep it from being a write-anywhere gadget.
 # Each out-of-bounds call is its own process: a Proc holding a live JIT region
