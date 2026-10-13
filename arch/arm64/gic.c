@@ -231,6 +231,11 @@ static void irq_barrier_handler(u32 intid, void *arg) {
         // so it sees every ticket taken before the SGI this interrupt serves.
         u64 req = __atomic_load_n(&g_barrier_req[cpu], __ATOMIC_ACQUIRE);
         __atomic_store_n(&g_barrier_done[cpu], req, __ATOMIC_RELEASE);
+        // The exception return that follows is the context-synchronization
+        // event a ticket promises, and a CSE does not wait for an earlier load:
+        // the DSB makes it follow the read of the ticket (observe the flag,
+        // then the CSE). On GICv2 the EOI's drained write would order it too.
+        __asm__ __volatile__("dsb sy" ::: "memory");
     }
 }
 static void irq_barrier_cpu_init(void) {

@@ -275,7 +275,8 @@ the shape on 2026-09-28; three things change, and Wasm brought a fourth
    waits until done reaches its ticket. The handler's read comes after the
    send that its ticket was taken before, so the interrupt that served it was
    acknowledged after the call began, and the handler's `eret` is a CSE that
-   follows its read. This is the ARM ARM's idiom for code modified while
+   follows its read: a `DSB` sits between them, because a CSE does not by
+   itself wait for an earlier load to complete. This is the ARM ARM's idiom for code modified while
    another PE may run it: invalidate, `DSB`, publish a flag; observe the
    flag, then a CSE. The GICv3 acknowledge executes `DSB SY` after reading
    `ICC_IAR1_EL1`, as Linux's `gic_read_iar_common` does, so the handler's

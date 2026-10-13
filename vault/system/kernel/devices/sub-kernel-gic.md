@@ -367,8 +367,9 @@ never authorizes reuse.
 The barrier is acknowledged by **ticket** (B-2e2, 2026-10-13). A sender adds
 one to the target's request count (`gic_barrier_send`; the new value is its
 ticket), executes `DSB SY` and sends SGI 15; the target's handler reads its
-request count and stores that value as done; `gic_barrier_reached` is true once
-done has reached the ticket. Done has one writer, the target's own handler. A
+request count and stores that value as done, then executes `DSB SY` so the
+exception return (the CSE the ticket promises) follows that read;
+`gic_barrier_reached` is true once done has reached the ticket. Done has one writer, the target's own handler. A
 ticket is served only by a handler that read it, so by an interrupt the target
 acknowledged after the send; a ticket whose send fails stays outstanding and
 the next barrier to that CPU serves it. The previous witness compared a count
