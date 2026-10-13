@@ -3172,6 +3172,59 @@ void test_9p_client_loom_dirmut_sqpoll(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
+// An SQPOLL ring refuses to register a 9P handle whose recv cannot time out: its
+// kthread would block in that recv and teardown's join would hang. The refusal
+// is -EOPNOTSUPP and installs nothing.
+void test_9p_client_loom_sqpoll_refuses_undeadlined(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    TEST_ASSERT(p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                                 loom_mut_capture_responder, NULL) == 0, "loopback");
+    struct p9_transport_ops ops = p9_loopback_ops_for(&g_loopback);
+    ops.set_recv_deadline = NULL;   // the shape of a pipe-pair transport
+    TEST_ASSERT(p9_client_init(&g_client, 0, 8192, ops, g_recv_buf, sizeof(g_recv_buf)) == 0,
+                "client");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_ASSERT(p9_client_handshake(&g_client, uname, sizeof(uname), aname,
+                                    sizeof(aname), 0) == 0, "handshake");
+    struct Spoor *root = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(root != NULL, "attach");
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->principal_id = 0x1234u; p->primary_gid = 0x5678u; p->caps = 0;
+
+    bool capable = p9_client_recv_is_deadline_capable(&g_client);
+    struct loom_params kp;
+    hidx_t fd = -1;
+    int setup_rc = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd);
+    spoor_ref(root);                                 // the handle adopts this one
+    hidx_t sfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, root);
+    if (sfd < 0) spoor_clunk(root);
+    hidx_t one[1] = { sfd };
+    int rc = setup_rc == 0 && sfd >= 0
+        ? sys_loom_register_for_proc(p, fd, LOOM_REGISTER_HANDLES, one, 1) : 1;
+    bool installed = true;
+    struct Handle hh;
+    if (setup_rc == 0 && handle_get(p, fd, &hh) == 0) {
+        installed = ((struct Loom *)hh.obj)->reg[0].spoor != NULL;
+        handle_put(&hh);
+    }
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);                                    // last handle -> loom_free joins
+    spoor_clunk(root);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+
+    TEST_ASSERT(!capable, "a transport without set_recv_deadline is not deadline-capable");
+    TEST_EXPECT_EQ(setup_rc, 0, "SQPOLL setup");
+    TEST_ASSERT(sfd >= 0, "the 9P Spoor takes a descriptor");
+    TEST_EXPECT_EQ(rc, -T_E_OPNOTSUPP,
+                   "an SQPOLL ring refuses a 9P handle without a recv deadline: -EOPNOTSUPP");
+    TEST_ASSERT(!installed, "and installs nothing");
+}
+
 // The create ops' SQE gid: 0 is the creator's primary group; any other value must
 // be a group the creator is in unless it holds chown-any authority (CAP_HOSTOWNER
 // or CAP_CHOWN) -- perm_wstat_check's chgrp rule applied at birth. The wire gid is

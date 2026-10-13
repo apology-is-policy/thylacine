@@ -622,6 +622,8 @@ its completion. The kernel tests `loom.register_rejects` and
 and a pipe, and each argument refusal's errno; `loom.setup_rejects`,
 `loom.setup_resource_refusals` (-ENOMEM at the page cap, -EMFILE for a full
 handle table) and `loom.sqpoll_charges_thread_budget` (-EAGAIN) pin SETUP's;
+`9p_client.loom_sqpoll_refuses_undeadlined` pins REGISTER's -EOPNOTSUPP for a
+9P handle whose transport cannot time out a receive on an SQPOLL ring;
 `loom-bridge-probe` pins ENTER and REGISTER on a closed ring's number, the
 unknown op, every ordinary-route refusal and every too-wide argument, from EL0
 in both images. The native operations test holds the peer at TCLUNK and pins

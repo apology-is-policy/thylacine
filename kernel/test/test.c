@@ -1599,6 +1599,7 @@ void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
 void test_9p_client_loom_dirmut_dac(void);
 void test_9p_client_loom_dirmut_sqpoll(void);
+void test_9p_client_loom_sqpoll_refuses_undeadlined(void);
 void test_9p_client_loom_create_gid(void);
 void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
@@ -3849,6 +3850,7 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_mutation_rejects, false, NULL },
     { "9p_client.loom_dirmut_dac",       test_9p_client_loom_dirmut_dac,       false, NULL },
     { "9p_client.loom_dirmut_sqpoll",    test_9p_client_loom_dirmut_sqpoll,    false, NULL },
+    { "9p_client.loom_sqpoll_refuses_undeadlined", test_9p_client_loom_sqpoll_refuses_undeadlined, false, NULL },
     { "9p_client.loom_create_gid",       test_9p_client_loom_create_gid,       false, NULL },
     { "9p_client.loom_cape",             test_9p_client_loom_cape,             false, NULL },
     { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
