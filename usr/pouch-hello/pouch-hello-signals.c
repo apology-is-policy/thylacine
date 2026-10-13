@@ -141,6 +141,41 @@ static int test_term_death(void) {
     return 0;
 }
 
+static volatile sig_atomic_t g_handler_count = 0;
+static volatile int g_handler_sig = -1;
+
+static void on_sigint(int sig) {
+    g_handler_count++;
+    g_handler_sig = sig;
+    // Task #96: be a handler that touches FP/SIMD -- the realistic case, since
+    // any float arithmetic or autovectorised memcpy does. Written as explicit
+    // asm so the clobber is guaranteed rather than left to the compiler's
+    // discretion; a handler that happened NOT to touch V regs would make the
+    // preservation check below pass vacuously.
+    __asm__ __volatile__(
+        "movi v0.16b,  #0x11\n"  "movi v1.16b,  #0x11\n"
+        "movi v2.16b,  #0x11\n"  "movi v3.16b,  #0x11\n"
+        "movi v4.16b,  #0x11\n"  "movi v5.16b,  #0x11\n"
+        "movi v6.16b,  #0x11\n"  "movi v7.16b,  #0x11\n"
+        "movi v8.16b,  #0x11\n"  "movi v9.16b,  #0x11\n"
+        "movi v10.16b, #0x11\n"  "movi v11.16b, #0x11\n"
+        "movi v12.16b, #0x11\n"  "movi v13.16b, #0x11\n"
+        "movi v14.16b, #0x11\n"  "movi v15.16b, #0x11\n"
+        "movi v16.16b, #0x11\n"  "movi v17.16b, #0x11\n"
+        "movi v18.16b, #0x11\n"  "movi v19.16b, #0x11\n"
+        "movi v20.16b, #0x11\n"  "movi v21.16b, #0x11\n"
+        "movi v22.16b, #0x11\n"  "movi v23.16b, #0x11\n"
+        "movi v24.16b, #0x11\n"  "movi v25.16b, #0x11\n"
+        "movi v26.16b, #0x11\n"  "movi v27.16b, #0x11\n"
+        "movi v28.16b, #0x11\n"  "movi v29.16b, #0x11\n"
+        "movi v30.16b, #0x11\n"  "movi v31.16b, #0x11\n"
+        : :
+        : "v0","v1","v2","v3","v4","v5","v6","v7",
+          "v8","v9","v10","v11","v12","v13","v14","v15",
+          "v16","v17","v18","v19","v20","v21","v22","v23",
+          "v24","v25","v26","v27","v28","v29","v30","v31");
+}
+
 // SIGINT is SIG_IGN when this runs. Until 0049 a delivered `interrupt` ran
 // SIGTERM's handler whenever SIGINT had none, and blocking SIGINT blocked the
 // note SIGTERM rode, so each of the two checks below failed.
@@ -181,41 +216,6 @@ static int test_term_apart(void) {
     }
     printf("pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT\n");
     return 0;
-}
-
-static volatile sig_atomic_t g_handler_count = 0;
-static volatile int g_handler_sig = -1;
-
-static void on_sigint(int sig) {
-    g_handler_count++;
-    g_handler_sig = sig;
-    // Task #96: be a handler that touches FP/SIMD -- the realistic case, since
-    // any float arithmetic or autovectorised memcpy does. Written as explicit
-    // asm so the clobber is guaranteed rather than left to the compiler's
-    // discretion; a handler that happened NOT to touch V regs would make the
-    // preservation check below pass vacuously.
-    __asm__ __volatile__(
-        "movi v0.16b,  #0x11\n"  "movi v1.16b,  #0x11\n"
-        "movi v2.16b,  #0x11\n"  "movi v3.16b,  #0x11\n"
-        "movi v4.16b,  #0x11\n"  "movi v5.16b,  #0x11\n"
-        "movi v6.16b,  #0x11\n"  "movi v7.16b,  #0x11\n"
-        "movi v8.16b,  #0x11\n"  "movi v9.16b,  #0x11\n"
-        "movi v10.16b, #0x11\n"  "movi v11.16b, #0x11\n"
-        "movi v12.16b, #0x11\n"  "movi v13.16b, #0x11\n"
-        "movi v14.16b, #0x11\n"  "movi v15.16b, #0x11\n"
-        "movi v16.16b, #0x11\n"  "movi v17.16b, #0x11\n"
-        "movi v18.16b, #0x11\n"  "movi v19.16b, #0x11\n"
-        "movi v20.16b, #0x11\n"  "movi v21.16b, #0x11\n"
-        "movi v22.16b, #0x11\n"  "movi v23.16b, #0x11\n"
-        "movi v24.16b, #0x11\n"  "movi v25.16b, #0x11\n"
-        "movi v26.16b, #0x11\n"  "movi v27.16b, #0x11\n"
-        "movi v28.16b, #0x11\n"  "movi v29.16b, #0x11\n"
-        "movi v30.16b, #0x11\n"  "movi v31.16b, #0x11\n"
-        : :
-        : "v0","v1","v2","v3","v4","v5","v6","v7",
-          "v8","v9","v10","v11","v12","v13","v14","v15",
-          "v16","v17","v18","v19","v20","v21","v22","v23",
-          "v24","v25","v26","v27","v28","v29","v30","v31");
 }
 
 // Task #96 sentinel buffers. 16-byte aligned for STP/LDP-Q.
@@ -397,17 +397,17 @@ int main(int argc, char **argv) {
 
     if (test_term_apart() != 0) {
         fflush(stdout);
-        return 11;
+        return 13;
     }
     fflush(stdout);
 
     if (test_deaths() != 0) {
         fflush(stdout);
-        return 10;
+        return 15;
     }
     if (test_term_death() != 0) {
         fflush(stdout);
-        return 12;
+        return 14;
     }
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);

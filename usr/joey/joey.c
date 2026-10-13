@@ -1085,6 +1085,8 @@ static int do_pouch_hello_smoke(void) {
     //   - sigaction(SIGUSR1, ...)     -> EINVAL (unsupported signum)
     //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
     //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b)
+    //   - SIGTERM rides `term`: its handler runs apart from SIGINT's ignore
+    //     and mask, and a child killed by it reads WIFSIGNALED SIGTERM
     // Closes POUCH-DESIGN.md §6.4 / §14 sub-chunk 13b's exit criterion.
     static const char psig_name[]   = "pouch-hello-signals";
     static const char psig_expect[] = POUCH_CENSUS_SIGNALS;
