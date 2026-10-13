@@ -4777,9 +4777,9 @@ unsafe fn run_linux() -> ! {
     // die of the note: wait4 reads WIFSIGNALED SIGPIPE (the kernel records the
     // death's signal, docs/ERRORS.md), where a death by the fault itself would
     // read SIGSEGV. The failure marker says "hung" for a subject still alive
-    // there (it is left spinning: the phenotype has no kill, and the failed leg
-    // ends the boot's gate anyway), "lived" for one that came back from the
-    // fault, "wrongdeath" for any other status, "nofork" for a failed fork.
+    // there (it is then killed, so it does not spin past the leg), "lived" for
+    // one that came back from the fault, "wrongdeath" for any other status,
+    // "nofork" for a failed fork.
     unsafe fn reap_within(kid: i64) -> Option<i32> {
         let nap: [i64; 2] = [0, 50_000_000];
         for _ in 0..80 {
@@ -4790,6 +4790,16 @@ unsafe fn run_linux() -> ! {
             let _ = svc4(NR_PPOLL, 0, 0, nap.as_ptr() as u64, 0);
         }
         None
+    }
+    // The status within ~4 s, or None for a child still alive then, which is
+    // killed and given another ~4 s to be reaped.
+    unsafe fn reap_or_kill(kid: i64) -> Option<i32> {
+        let ws = reap_within(kid);
+        if ws.is_none() {
+            let _ = svc3(NR_KILL, kid as u64, SIGKILL, 0);
+            let _ = reap_within(kid);
+        }
+        ws
     }
     let mut lbad = [0u8; 40];
     let mut nlb = 0usize;
@@ -4823,7 +4833,7 @@ unsafe fn run_linux() -> ! {
         let why: &[u8] = if kid < 0 {
             b"nofork"
         } else {
-            match reap_within(kid) {
+            match reap_or_kill(kid) {
                 Some(ws) if (ws & 0x7f) == SIGPIPE as i32 => b"",
                 Some(ws) if ws == 0 => b"lived",
                 Some(_) => b"wrongdeath",
@@ -4968,6 +4978,180 @@ unsafe fn run_linux() -> ! {
         nk = put_bytes(&mut nt_mk, nk, b"\n");
     }
     leg!(rep, nk == 0, &nt_mk[..nk]);
+
+    // --- L334-L338: the kill family -----------------------------------------
+    //
+    // VIVARIUM 6.22 (operator vote 2026-10-13): kill, tkill and tgkill post a
+    // signal's note through SYS_POSTNOTE's own gate -- the caller itself, or a
+    // live child -- and a self-directed signal a snare:* death carries ends the
+    // caller with that death. L334: a child's tkill(gettid(), SIGABRT) kills it
+    // with SIGABRT; a kernel that queued a note instead, or refused, lets the
+    // child exit with the call's answer. L335: a sleeping child is admitted by a
+    // signal-0 probe (the positive control for L336), refused a SIGSEGV (a
+    // snare:* death is never another Proc's to cause), and dies of SIGTERM.
+    // L336: the probe's parent is not its child, so a probe of it is EPERM --
+    // a shell that skipped the gate answers 0. L337: the refusals by shape, and
+    // the self probes they stand beside. L338: SIGTERM at a handler, through
+    // each of the three calls, runs it exactly once with signo SIGTERM while
+    // SIGINT is ignored: `term` is a note of its own, not `interrupt`'s.
+    const NR_KILL: u64 = 129;
+    const NR_TKILL: u64 = 130;
+    const NR_TGKILL: u64 = 131;
+    const NR_GETPID: u64 = 172;
+    const NR_GETPPID: u64 = 173;
+    const NEG_ESRCH: i64 = -3;
+    const SIGABRT: u64 = 6;
+    const SIGALRM: u64 = 14;
+    const SIGTERM: u64 = 15;
+    // A boot hands out pids and tids from 1 upward and never gets near this.
+    const KF_NO_ID: u64 = 0x3fff_fff0;
+    let kf_pid = svc3(NR_GETPID, 0, 0, 0);
+    let kf_tid = svc3(NR_GETTID, 0, 0, 0);
+    let kf_ppid = svc3(NR_GETPPID, 0, 0, 0);
+
+    let ab = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if ab == 0 {
+        let rc = svc3(NR_TKILL, svc3(NR_GETTID, 0, 0, 0) as u64, SIGABRT, 0);
+        linux_exit(if rc < 0 { -rc } else { 100 })
+    }
+    let ab_ws = if ab > 0 { reap_or_kill(ab) } else { None };
+    let mut kf_mk = [0u8; 96];
+    let mut kn = 0usize;
+    if !matches!(ab_ws, Some(ws) if (ws & 0x7f) == SIGABRT as i32) {
+        kn = put_bytes(&mut kf_mk, 0, b"L334 fork=");
+        kn = put_dec(&mut kf_mk, kn, ab);
+        kn = put_bytes(&mut kf_mk, kn, b" ws=");
+        kn = put_dec(&mut kf_mk, kn, ab_ws.map_or(-1, |w| w as i64));
+        kn = put_bytes(&mut kf_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kf_mk[..kn]);
+
+    let tm = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if tm == 0 {
+        ksa = [SIG_DFL, 0, 0, 0];
+        let _ = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8);
+        let un = 1u64 << (SIGTERM - 1);
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &un as *const u64 as u64, 0, 8);
+        let ts: [i64; 2] = [10, 0];
+        let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+        linux_exit(0)
+    }
+    let tm_probe = if tm > 0 { svc3(NR_KILL, tm as u64, 0, 0) } else { 1 };
+    let tm_segv = if tm > 0 { svc3(NR_KILL, tm as u64, SIGSEGV, 0) } else { 1 };
+    let tm_term = if tm > 0 { svc3(NR_KILL, tm as u64, SIGTERM, 0) } else { 1 };
+    let tm_ws = if tm > 0 { reap_or_kill(tm) } else { None };
+    kn = 0;
+    if !(tm_probe == 0 && tm_segv == NEG_EINVAL && tm_term == 0
+         && matches!(tm_ws, Some(ws) if (ws & 0x7f) == SIGTERM as i32))
+    {
+        kn = put_bytes(&mut kf_mk, 0, b"L335 fork=");
+        kn = put_dec(&mut kf_mk, kn, tm);
+        kn = put_bytes(&mut kf_mk, kn, b" probe=");
+        kn = put_dec(&mut kf_mk, kn, tm_probe);
+        kn = put_bytes(&mut kf_mk, kn, b" segv=");
+        kn = put_dec(&mut kf_mk, kn, tm_segv);
+        kn = put_bytes(&mut kf_mk, kn, b" term=");
+        kn = put_dec(&mut kf_mk, kn, tm_term);
+        kn = put_bytes(&mut kf_mk, kn, b" ws=");
+        kn = put_dec(&mut kf_mk, kn, tm_ws.map_or(-1, |w| w as i64));
+        kn = put_bytes(&mut kf_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kf_mk[..kn]);
+
+    let pp = svc3(NR_KILL, kf_ppid as u64, 0, 0);
+    kn = 0;
+    if !(kf_ppid > 0 && kf_ppid != kf_pid && pp == NEG_EPERM) {
+        kn = put_bytes(&mut kf_mk, 0, b"L336 ppid=");
+        kn = put_dec(&mut kf_mk, kn, kf_ppid);
+        kn = put_bytes(&mut kf_mk, kn, b" rc=");
+        kn = put_dec(&mut kf_mk, kn, pp);
+        kn = put_bytes(&mut kf_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kf_mk[..kn]);
+
+    // A refusal that posted instead could end the probe (SIGHUP's tty:hup
+    // terminates by default), so the leg is stamped across the calls.
+    stamp_armed(rep, b"L337\n");
+    let kf_cases: [(u8, i64, i64); 14] = [
+        (b'a', svc3(NR_KILL, KF_NO_ID, 0, 0), NEG_ESRCH),
+        (b'b', svc3(NR_KILL, (-1i64) as u64, 0, 0), NEG_EPERM),   // a group
+        (b'c', svc3(NR_KILL, 0, 65, 0), NEG_EINVAL),              // past _NSIG
+        (b'd', svc3(NR_KILL, 0, SIGALRM, 0), NEG_EINVAL),         // no note
+        (b'e', svc3(NR_KILL, 0, SIGHUP, 0), NEG_EINVAL),          // tty:* only
+        (b'f', svc3(NR_TKILL, 0, 0, 0), NEG_EINVAL),
+        (b'g', svc3(NR_TKILL, KF_NO_ID, 0, 0), NEG_ESRCH),
+        (b'h', svc3(NR_TGKILL, kf_pid as u64, 0, 0), NEG_EINVAL),
+        (b'i', svc3(NR_TGKILL, kf_pid as u64, KF_NO_ID, 0), NEG_ESRCH),
+        (b'j', svc3(NR_TGKILL, kf_ppid as u64, kf_tid as u64, 0), NEG_ESRCH),
+        (b'k', svc3(NR_KILL, 0, 0, 0), 0),
+        (b'l', svc3(NR_KILL, kf_pid as u64, 0, 0), 0),
+        (b'm', svc3(NR_TKILL, kf_tid as u64, 0, 0), 0),
+        (b'n', svc3(NR_TGKILL, kf_pid as u64, kf_tid as u64, 0), 0),
+    ];
+    stamp_disarm(rep);
+    let mut kc_mk = [0u8; 200];
+    kn = 0;
+    for (c, got, want) in kf_cases {
+        if got != want {
+            if kn == 0 {
+                kn = put_bytes(&mut kc_mk, 0, b"L337");
+            }
+            kn = put_bytes(&mut kc_mk, kn, &[b' ', c, b'=']);
+            kn = put_dec(&mut kc_mk, kn, got);
+        }
+    }
+    if kn > 0 {
+        kn = put_bytes(&mut kc_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kc_mk[..kn]);
+
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let h_term = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8) == 0;
+    ksa = [SIG_IGN, 0, 0, 0];
+    let h_int = svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8) == 0;
+    let kf_un = 1u64 << (SIGTERM - 1);
+    let mut kf_oldmask = 0u64;
+    let h_mask = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &kf_un as *const u64 as u64,
+                      &mut kf_oldmask as *mut u64 as u64, 8) == 0;
+    kn = 0;
+    if !(h_term && h_int && h_mask) {
+        kn = put_bytes(&mut kc_mk, 0, b"L338 setup\n");
+    } else {
+        // A handler that never took would leave SIGTERM's default to end us.
+        stamp_armed(rep, b"L338\n");
+        for (c, nr, a0, a1, a2) in [
+            (b'k', NR_KILL, 0, SIGTERM, 0),
+            (b'g', NR_TGKILL, kf_pid as u64, kf_tid as u64, SIGTERM),
+            (b't', NR_TKILL, kf_tid as u64, SIGTERM, 0),
+        ] {
+            let f0 = sig_fired();
+            let r = svc3(nr, a0, a1, a2);
+            let fired = sig_fired() - f0;
+            let signo = sig_signo();
+            if !(r == 0 && fired == 1 && signo == SIGTERM) {
+                if kn == 0 {
+                    kn = put_bytes(&mut kc_mk, 0, b"L338");
+                }
+                kn = put_bytes(&mut kc_mk, kn, &[b' ', c, b'=']);
+                kn = put_dec(&mut kc_mk, kn, r);
+                kn = put_bytes(&mut kc_mk, kn, b"/");
+                kn = put_dec(&mut kc_mk, kn, fired as i64);
+                kn = put_bytes(&mut kc_mk, kn, b"/");
+                kn = put_dec(&mut kc_mk, kn, signo as i64);
+            }
+        }
+        stamp_disarm(rep);
+        if kn > 0 {
+            kn = put_bytes(&mut kc_mk, kn, b"\n");
+        }
+    }
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8);
+    if h_mask {
+        let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &kf_oldmask as *const u64 as u64, 0, 8);
+    }
+    leg!(rep, kn == 0, &kc_mk[..kn]);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
