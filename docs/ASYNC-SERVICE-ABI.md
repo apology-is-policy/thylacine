@@ -34,6 +34,10 @@ source and destination incarnation on the copied SQE, then hold their pinned
 records until completion. REAP refuses live/busy slots. A terminal scope is
 reapable only once local retirement and terminal-completion publication finish.
 An unused reservation and a target with no local operation borrow can be reaped.
+A walked FID is reapable once it is retired: after its CLUNK completes, or once
+its scope has locally retired (RETIRED, the engine's proof of abort quiescence)
+and no operation claims or borrows it. Each FID pins its scope, so a scope is
+reapable only after its FIDs (operator vote, October 13).
 CQs may still contain an old terminal result, but it refers to the old request;
 incarnations never repeat and the library never reuses a live correlation ID.
 
@@ -98,7 +102,7 @@ components sequentially without a new path decoder. LOPEN rejects create/truncat
 and every unallocated mode flag; apply the ordinary9P DAC/stat checks before
 publishing access. A scope root cannot be CLUNKed to circumvent full scope
 retirement: use ABORT then REAP; derived FID CLUNK retires that fid after pending
-operation borrows end. Any operation timeout terminally aborts its whole scope.
+operation borrows end, and REAP then frees its slot. Any operation timeout terminally aborts its whole scope.
 
 CONNECT success result is its already-reserved destination index; WALK success
 likewise. LOPEN/CLUNK return0, reads/writes byte count, failures negative errno.
@@ -456,7 +460,9 @@ application uses separate scopes for independent work (ASYNC-SERVICE-LIFECYCLE
 section 7). A scope lives while its handle, a fid of it or an operation on it
 does; when the last goes, the adapter aborts it and REAPs it once it reports
 RETIRED. Dropping a fid clunks it in the background, when the SQ has room, and
-REAPs it after the CLUNK's completion; a fid of an aborted scope is only reaped.
+REAPs it after the CLUNK's completion. A fid of an aborted scope is not clunked:
+the abort ends its session, and the fid is reaped once the scope reports RETIRED.
+The scope is reaped after its fids.
 REAP is retried on every turn, and once more before a reservation answers
 -ENOSPC. Retirement and REAP are not poll events, so a turn that waits for them
 needs a deadline.
