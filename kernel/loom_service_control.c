@@ -26,6 +26,14 @@ static struct loom_service_slot *control_exact(struct Loom *l,struct loom_servic
     struct loom_service_slot *s=&l->service_slots->slots[ref.slot];
     return s->phase==LSLOT_LIVE && s->incarnation==ref.incarnation ? s : NULL;
 }
+// A FID's slot stays RETIRING from its CLUNK until REAP frees it; no other
+// kind is left RETIRING outside one Ll hold.
+static struct loom_service_slot *control_retiring_fid(struct Loom *l,struct loom_service_ref ref) {
+    if(ref.reserved || !ref.incarnation || ref.slot>=LOOM_SERVICE_SLOT_COUNT)return NULL;
+    struct loom_service_slot *s=&l->service_slots->slots[ref.slot];
+    return s->phase==LSLOT_RETIRING && s->kind==LOOM_SERVICE_FID &&
+           s->incarnation==ref.incarnation ? s : NULL;
+}
 static int control_input(struct Loom *l,struct Proc *p,const struct loom_service_control *in) {
     int rc=control_owner(l,p);if(rc)return rc;
     if(!in || in->size!=sizeof(*in) || in->version!=LOOM_SERVICE_ABI_VERSION ||
@@ -107,6 +115,7 @@ int loom_private_service_reap(struct Loom *l,struct Proc *p,const struct loom_se
     u32 kind=0,state=0;
     spin_lock(&l->lock);
     struct loom_service_slot *s=control_exact(l,in->object);
+    if(!s)s=control_retiring_fid(l,in->object);
     if(!s)rc=-T_E_NOENT;
     else {kind=s->kind;if(kind==LOOM_SERVICE_SCOPE || kind==LOOM_SERVICE_FID)state=l->service_nodes->nodes[in->object.slot].state;}
     spin_unlock(&l->lock);

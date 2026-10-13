@@ -3613,13 +3613,17 @@ field by field too. The service mirror's Rust leg now compiles
 `usr/lib/loom-client/src/service_abi.rs`.
 
 **A walked FID is reapable (Corona, 2026-10-13; operator vote: explicit REAP).**
-Until this change no REGISTER freed a FID that was ever walked. REAP of a FID
-reached only `loom_private_node_reap_unused`, which needs a LIVE, RESERVED node,
-so a clunked FID (slot RETIRING) answered -ENOENT and kept its slot.
-`loom_fid_reap` and `loom_fid_retire_aborted` ran only at ring destruction. Each
-FID pins its scope, so the scope stayed too. Now `loom_private_service_reap`
-sends a FID that is not RESERVED to `loom_private_fid_reap`, which runs
-`loom_fid_reap_retired` under the ring lock:
+Until this change no REGISTER freed a FID that was ever walked. A walked FID
+that was not clunked reached only `loom_private_node_reap_unused`, which needs a
+RESERVED node, and a clunked FID never reached the dispatch at all: CLUNK leaves
+its slot RETIRING, and the REAP lookup `control_exact` accepts only a LIVE
+slot, so REAP answered -ENOENT and the slot stayed. `loom_fid_reap` and
+`loom_fid_retire_aborted` ran only at ring destruction. Each FID pins its scope,
+so the scope stayed too. Now the REAP lookup also accepts a RETIRING FID
+(`control_retiring_fid`; no other kind stays RETIRING outside one lock hold:
+pools and targets retire and reap in the same hold), and
+`loom_private_service_reap` sends a FID that is not RESERVED to
+`loom_private_fid_reap`, which runs `loom_fid_reap_retired` under the ring lock:
 - a RETIRED FID (its CLUNK finished) is reaped;
 - any other FID needs a RETIRED scope, no slot pin, and no claim or borrow.
   RETIRED, because `loom_fid_retire_aborted` requires the engine's proof of
@@ -3631,3 +3635,6 @@ over the real slot, node and FID modules (also on the host,
 `tools/test-loom-service-fids.py`, with four named mutants). The success path
 of `loom.private_native_operations` and `_isolation` now REAPs a clunked FID,
 then walks a second FID, aborts the scope, and REAPs the FID and then the scope.
+The host fixture calls the FID primitive directly, so only the native test
+reaches the lookup: its first guest boot, without `control_retiring_fid`, failed
+at "native clunked FID reaps once while its ring lives".
