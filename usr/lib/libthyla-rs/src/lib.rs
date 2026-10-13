@@ -2559,7 +2559,8 @@ pub unsafe fn t_loom_setup(entries: u64, params_va: u64) -> i64 {
 
 // t_loom_register — install fixed handles (op = 0) or pin buffers (op = 1) for a
 // ring. `arg_va` points at `nargs` elements (u32 fd indices, or struct
-// loom_buf_reg). Returns 0 / -1. Backs t::loom::Ring::register_*.
+// loom_buf_reg). Returns 0 / -1, or -EBADF when `fd` names no ring. Backs
+// t::loom::Ring::register_*.
 #[inline(always)]
 pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) -> i64 {
     let mut x0: i64 = loom_fd as i64;
@@ -2577,7 +2578,8 @@ pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) ->
 
 // t_loom_enter — consume up to `to_submit` queued SQEs, then block until at least
 // `min_complete` CQEs are available (unless LOOM_ENTER_NONBLOCK in `flags`).
-// Returns the SQEs consumed (>= 0) or -1. Backs t::loom::Ring::enter.
+// Returns the SQEs consumed (>= 0), -EBADF when `fd` names no ring, or -1.
+// Backs t::loom::Ring::enter.
 #[inline(always)]
 pub unsafe fn t_loom_enter(loom_fd: u64, to_submit: u64, min_complete: u64, flags: u64) -> i64 {
     let mut x0: i64 = loom_fd as i64;
