@@ -4,7 +4,7 @@ type: chg
 title: "B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued"
 date: 2026-10-13
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["a59710f64"]
 touched:
   - sub-webkit
   - sub-substrate-build
