@@ -3224,12 +3224,13 @@ struct loom_native_peer {
     u8 request[512];
     u32 used, seen, stop; // optional one-based request at which peer sleeps
     u32 owners; // expected CONNECT request owners (zero means one)
+    u32 root; // wire fid TATTACH bound; only it is a directory
     struct Proc *creator;
 };
 static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *peer) {
     static const u8 sequence[]={P9_TVERSION,P9_TATTACH,P9_TGETATTR,P9_TWALK,
         P9_TGETATTR,P9_TLOPEN,P9_TREAD,P9_TWRITE,
-        P9_TREAD,P9_TREAD,P9_TREAD,P9_TREAD,P9_TCLUNK,P9_TWALK,P9_TGETATTR};
+        P9_TREAD,P9_TREAD,P9_TREAD,P9_TREAD,P9_TCLUNK,P9_TGETATTR,P9_TWALK};
     long n=srvconn_server_recv(cn,peer->request+peer->used,sizeof(peer->request)-peer->used);
     if(n<0)return -1;
     peer->used+=(u32)n;
@@ -3244,11 +3245,15 @@ static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *pee
        peer->request[23]!='h' || peer->request[24]!='e' || peer->request[25]!='l' ||
        peer->request[26]!='l' || peer->request[27]!='o'))return -1;
     if(peer->stop==peer->seen+1u)return 2; // complete request observed, no reply
+    u32 fid=0;
+    if((type==P9_TATTACH || type==P9_TGETATTR) && p9_unpack_u32(peer->request+P9_HDR_LEN,size-P9_HDR_LEN,&fid)<0)
+        return -1;
+    if(type==P9_TATTACH)peer->root=fid;
     u8 reply[256];
     int count=canonical_responder(NULL,peer->request,size,reply,sizeof(reply));
     if(count<=0)return -1;
     if(type==P9_TGETATTR) {
-        reply[15]=peer->seen==2?P9_QTDIR:P9_QTFILE;
+        reply[15]=fid==peer->root?P9_QTDIR:P9_QTFILE; // a WALK's stat names its source
         (void)p9_pack_u32(reply+28,sizeof(reply)-28,0777);
         (void)p9_pack_u32(reply+32,sizeof(reply)-32,42);
     }
