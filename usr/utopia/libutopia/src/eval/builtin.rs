@@ -55,13 +55,11 @@
 //   bg [%N]     resume a STOPPED job in the background (SYS_TTY_CONT,
 //               no terminal handoff) under job control; else report the
 //               job already running (bash-faithful).
-//   kill {%N|pid} [interrupt|kill]
-//               post a note to a job's pids / a pid. Default `interrupt`
-//               (the catchable Ctrl-C analogue); `kill` is the non-
-//               catchable force. The kernel's userspace-postable set is
-//               {interrupt, kill} -- `snare:*` is kernel-synthetic-only,
-//               so scripture's `snare:term` default is unsendable from
-//               userspace and `interrupt` is the graceful default.
+//   kill {%N|pid} [note]
+//               post a note to a job's pids / a pid. Default `term` (the
+//               catchable terminate request, POSIX kill's SIGTERM);
+//               `interrupt` is Ctrl-C's note, `kill` the non-catchable
+//               force. `snare:*` is kernel-synthetic-only.
 //
 // === Deferred (need substrate absent at v1.0) ===
 //
@@ -1004,22 +1002,20 @@ fn bi_wait(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     Ok(StatementFlow::Normal)
 }
 
-/// `kill {%N | pid} [interrupt | kill]` -- post a note to a job's element pids
-/// or to a single pid. Default note `interrupt` (the catchable Ctrl-C
-/// analogue); `kill` is the non-catchable force. The kernel's userspace-
-/// postable set is {interrupt, kill}; `snare:*` is kernel-synthetic-only, so
-/// scripture's `snare:term` default is unsendable from userspace -- `interrupt`
-/// is the graceful default.
+/// `kill {%N | pid} [note]` -- post a note to a job's element pids or to a
+/// single pid. The default note is `term`, the catchable terminate request
+/// (POSIX `kill`'s SIGTERM); `interrupt` is Ctrl-C's note and `kill` the
+/// non-catchable force. `snare:*` is kernel-synthetic-only.
 fn bi_kill(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if args.is_empty() || args.len() > 2 {
         return fail(
             env,
-            "kill: usage: kill {%job | pid} [interrupt | kill]".to_string(),
+            "kill: usage: kill {%job | pid} [term | interrupt | kill]".to_string(),
             1,
         );
     }
     let target = &args[0];
-    let name = if args.len() == 2 { args[1].as_str() } else { "interrupt" };
+    let name = if args.len() == 2 { args[1].as_str() } else { "term" };
     if name.starts_with("snare:") {
         return fail(env, "kill: snare:* notes are kernel-reserved".to_string(), 1);
     }

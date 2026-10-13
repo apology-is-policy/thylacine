@@ -26,7 +26,8 @@
 //   9. `fg %N` blocks to completion + removes the job silently (no Done line).
 //   10. `bg %N` reports the already-running job (status 0), no removal.
 //   11. `kill` error paths (usage / no-such-job / snare:* reserved).
-//   12. `kill %N` posts a note to a LIVE child's pid (the %N -> pid mapping).
+//   12. `kill %N` posts `term` to a LIVE child's pid (the %N -> pid mapping),
+//       and `wait %1` reads the death as $status 143.
 //
 //   U-7c-a (note runtime delivery):
 //   13. `on note 'interrupt' { ... }` registers a handler that fires when the
@@ -353,9 +354,12 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 12. `kill %N` SUCCESS to a LIVE child. Spawn `tr` with a piped stdin we
     //     hold open -> it blocks reading (cannot exit) -> register it as job
-    //     [1] -> `kill %1` posts `interrupt` to its pid (send must succeed) ->
-    //     EOF its stdin so it exits regardless of the note -> reap by-pid
-    //     (bounded; never hangs). Proves the %N -> live-pid mapping + send.
+    //     [1] -> `kill %1` posts the default `term` to its pid (send must
+    //     succeed) -> EOF its stdin so a child the note did not end exits
+    //     anyway (the wait never hangs) -> `wait %1` reaps it. The note was
+    //     posted before the EOF, so its default terminate decides the death:
+    //     $status 143, where `interrupt` (the default before S-2) reads 130
+    //     and an exit by the EOF reads 0.
     // All three slots are Piped (the shell's v1.0 no-terminal convention --
     // Stdio::Inherit cannot resolve without a terminal-backed fd 0/1/2). We
     // HOLD stdin's write end so `tr` blocks reading (stays alive) and drop the
@@ -381,10 +385,13 @@ pub extern "C" fn rs_main() -> i64 {
             if env_k.status() != 0 {
                 return fail("kill %1 to a live child should report success");
             }
-            // EOF the child's stdin so it exits even if it ignored the note,
-            // then reap by-pid (bounded -- never hangs).
             drop(child.stdin.take());
-            let _ = child.wait();
+            if eval_source(&mut env_k, "wait %1").is_err() {
+                return fail("kill: `wait %1` errored");
+            }
+            if env_k.status() != 143 {
+                return fail("kill %1 should end the child by `term`: $status 128+15");
+            }
         }
         Err(_) => return fail("kill: could not spawn the `tr` blocker"),
     }
