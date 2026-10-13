@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**188 declared surfaces · 184 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 25 cited path(s) that do not resolve.**
+**188 declared surfaces · 184 covered by a hard-audit dossier · 4 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -54,7 +54,6 @@ changed on main? — is the next increment, tracked as task #169.
 | A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
 | Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |
 | Initial bringup | `init/init.c` | no such file in the tree |
-| JavaScriptCore's Wasm BBQ and OMG on the code region, synchronized thr… | `usr/ports/webkit/patches/0006-thylacine-jsc-wasm-b2e3.patch` | no such file in the tree |
 | Monotonic-clock vDSO page (#343) | `kernel/user` | **possibly a documented NEGATIVE — read the claim** |
 | Notes / signals | `specs/notes.tla` | **possibly a documented NEGATIVE — read the claim** |
 | Page fault + COW + W^X | `mm/vm.c` | **possibly a documented NEGATIVE — read the claim** |

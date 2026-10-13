@@ -1,9 +1,7 @@
 #!/usr/bin/expect -f
 # tools/interactive/ls-jsc.exp -- Boosty over a real PTY: JavaScriptCore (WebKit's
-# JSCOnly port, static; the Baseline, DFG (B-2d), FTL (B-2e1) and regexp JITs on one
-# SYS_JIT_CREATE code region; Wasm's BBQ and OMG are built and held off at run time)
-# runs as the
-# logged-in user from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md;
+# JSCOnly port, static; the Baseline, DFG (B-2d), FTL (B-2e1), regexp and Wasm BBQ and
+# OMG (B-2e3) JITs on one SYS_JIT_CREATE code region) runs as the logged-in user from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md;
 # docs/browser-status.md.
 #
 # What each leg pins, and the libc defect it would have caught (all three were
@@ -64,11 +62,41 @@
 #           1 MiB): an LLInt frame is at least 48 bytes, so a stack of 128 KiB
 #           holds at most 131072/48 calls. --useJIT=false keeps one call per frame
 #           (an inlined call would share its caller's)
-#   tiers   Baseline, DFG and FTL on; BBQ and OMG stay off although each is
-#           asked for by flag; --useDollarVM=true in the same line reads on, so the
-#           flags were parsed (jscOptions() reports a bool as the number 0 or 1).
-#           Any other complete reading fails at once (the FTL forced off read
-#           JSCO-1-0-0-0-1-1 and, before the fail arm, waited out the timeout)
+#   tiers   every tier on, each asked for by flag; --useDollarVM=true in the same
+#           line reads on, so the flags were parsed (jscOptions() reports a bool as
+#           the number 0 or 1). Any other complete reading fails at once (the FTL
+#           forced off read JSCO-1-0-0-0-1-1 and, before the fail arm, waited out
+#           the timeout)
+#   wasm-tier / -bbq / -ipint / -deny   a Wasm function reads its own tier as
+#           10*callerIsBBQOrOMGCompiled() + $vm.omgTrue() (both imports see the
+#           calling Wasm frame): 0 interpreted (IPInt), 10 BBQ, 11 OMG. Called
+#           until it reads 11: every tier on reaches 11, --useOMGJIT=false stops at
+#           10, --useBBQJIT=false and the denied jsc stay at 0 (OMG is entered only
+#           from BBQ). Every BBQ and OMG install runs resetInstructionCacheOnAllThreads,
+#           SYS_ICACHE_SYNC_SPACE here (patch 0006; build_jsc asks the binary for
+#           it): upstream's thread walk would die at the first install
+#   wasm-patch   a() calls c() through a near call BBQ links at a's install; once a
+#           runs BBQ code, c alone is called until it runs OMG code, and a then
+#           reads 100*omgTrue + 10*bbqOrOmg for itself + c's omgTrue: 11 only if
+#           c's OMG install retargeted a's call (an unpatched call lands in c's
+#           BBQ code, 10)
+#   wasm-osr / -osr-bbq / -osr-ipint   ONE call of a 1e8-iteration loop that
+#           then reads its own tier: a call that starts interpreted and ends in OMG
+#           (or BBQ) code entered it by loop OSR. Each prints its time for the
+#           record (the benchmark: the same loop on each tier; asserted: the tier)
+#   refcast-bbq / -omg / -ipint   ref.cast of a null (ref null S) to (ref T),
+#           a struct type, after the function reached BBQ (OMG off), OMG, or stayed
+#           interpreted (BBQ off): a RuntimeError each time. BBQ and B3 dropped
+#           that null check where the field read sits at offset 0, trusting a
+#           fault handler Thylacine does not run; the macOS jsc with
+#           --useWasmFaultSignalHandler=false dies of SIGSEGV there under BBQ and
+#           under OMG (patch 0006: no offset is safe without a handler)
+#   wasm-canfail / -canfail-ctl   with every CanFail executable allocation made
+#           to fail (useExecutableAllocationFuzz), a module with imports must be a
+#           CompileError naming the stubs, compiled synchronously and by
+#           WebAssembly.compile, and jsc exits through the prompt; the twin, the
+#           fuzzer off, compiles both ways. The exit stubs asked MustSucceed, which
+#           the fuzzer cannot fail (and a full pool crashed on)
 #   osr     a DFG function speculating int32 is handed a double and a string: two
 #           OSR exits through the one ramp compiled on the first (its jump patched
 #           in place), and both answers right. The leg calls on until the DFG
@@ -239,8 +267,8 @@ lc_pass "ls-jsc(dfg-sync): compiled on the JS thread, the same"
 
 set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
 lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
-    "JSCO-1-1-0-0-1-1" {JSCO-[0-9](-[0-9]){5}[^-0-9]}
-lc_pass "ls-jsc(tiers): Baseline, DFG and FTL on, BBQ/OMG off; the flags were parsed"
+    "JSCO-1-1-1-1-1-1" {JSCO-[0-9](-[0-9]){5}[^-0-9]}
+lc_pass "ls-jsc(tiers): every tier on; the flags were parsed"
 
 set osr {function h(x){return x+1} var s=0, i=0; for(;i<1e5||(i<1e7&&numberOfDFGCompiles(h)<1);i++)s=h(i); s=h(99999); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}
 lc_run_expect_hardfail "/webkit/jsc -e '[string map {@T jscx} $osr]' | tr a-z A-Z" "JSCX-OK-C" "JSCX-BAD"
@@ -315,6 +343,41 @@ lc_run_expect_hardfail "/webkit/jsc -e '$wasmsync' | tr a-z A-Z" "JSDJ-85-100000
 lc_pass "ls-jsc(wasm-sync): a compiled module calls its JS import through JIT exit stubs, 1001 times"
 lc_run_expect_hardfail "/webkit/jsc -e '$wasmasync' | tr a-z A-Z" "JSDK-85-1000000-1001" "JSDK-ERR"
 lc_pass "ls-jsc(wasm-async): the same module through WebAssembly.instantiate"
+
+# B-2e3. Each leg prints "@T-<reading>." once (no "." inside a reading): the expected
+# reading is matched first, so any other complete one, an uncaught exception, a
+# FATAL line or a user fault fails at once. The imports read the calling Wasm
+# frame's tier; callerIsBBQOrOMGCompiled is jsc's, omgTrue needs $vm.
+proc wasm_leg {what tag opts js want {extrafail ""}} {
+    set T [string toupper $tag]
+    set fail "$T-\[^.\r\n\]*\\.|EXCEPTION: \[^\r\n\]*|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\""
+    if {$extrafail ne ""} { append fail "|$extrafail" }
+    lc_run_expect_hardfail_re "/webkit/jsc $opts -e '[string map [list @T $tag] $js]' | tr a-z A-Z" "$T-$want." $fail
+    lc_pass "ls-jsc($what): $T-$want"
+}
+set wimp {{m:{b:callerIsBBQOrOMGCompiled,o:$vm.omgTrue}}}
+set wtiers [string map [list WIMP $wimp] {var e=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,10,2,96,0,1,127,96,1,127,1,127,2,13,2,1,109,1,98,0,0,1,109,1,111,0,0,3,5,4,0,1,0,0,6,6,1,127,1,65,0,11,7,17,4,1,116,0,2,1,112,0,3,1,99,0,4,1,97,0,5,10,77,4,10,0,16,0,65,10,108,16,1,106,11,41,1,1,127,2,64,3,64,32,1,32,0,115,32,0,108,33,1,32,0,65,1,107,34,0,13,0,11,11,32,1,36,0,16,0,65,10,108,16,1,106,11,4,0,16,1,11,17,0,16,1,65,228,0,108,16,0,65,10,108,106,16,4,106,11])),WIMP).exports;}]
+set wtier "$wtiers var r=0, k=0; for(;k<1e6&&r!=11;k++)r=e.t(); print(\"@T-\"+r+\".\")"
+wasm_leg wasm-tier       jsdo "--useDollarVM=true"                       $wtier 11
+wasm_leg wasm-tier-bbq   jsdp "--useDollarVM=true --useOMGJIT=false"     $wtier 10
+wasm_leg wasm-tier-ipint jsdq "--useDollarVM=true --useBBQJIT=false"     $wtier 0
+wasm_leg wasm-tier-deny  jsdr "--thylacine-no-cap-jit --useDollarVM=true" $wtier 0 "CAP_JIT acquired"
+set wpatch "$wtiers var a1=0, c=0, k; for(k=0;k<1e5&&a1<10;k++)a1=e.a(); for(k=0;k<1e6&&c!=1;k++)c=e.c(); print(\"@T-\"+a1+\"-\"+c+\"-\"+e.a()+\".\")"
+wasm_leg wasm-patch      jsds "--useDollarVM=true"                       $wpatch 10-1-11
+set wosr "$wtiers var t=preciseTime(), v=e.p(1e8); print(\"@T-\"+v+\".\"+Math.round((preciseTime()-t)*1000)+\"ms\")"
+wasm_leg wasm-osr        jsdt "--useDollarVM=true"                       $wosr 11
+wasm_leg wasm-osr-bbq    jsdu "--useDollarVM=true --useOMGJIT=false"     $wosr 10
+wasm_leg wasm-osr-ipint  jsdv "--useDollarVM=true --useBBQJIT=false"     $wosr 0
+# new Uint8Array([0,97,115,109,1,0,0,0,1,31,5,80,0,95,1,127,0,80,1,0,95,2,127,0,127,0,96,0,1,127,96,0,1,99,1,96,1,99,0,1,127,2,13,2,1,109,1,98,0,2,1,109,1,111,0,2,3,3,2,3,4,7,13,2,2,109,107,0,2,4,99,97,115,116,0,3,10,36,2,9,0,65,7,65,9,251,0,1,11,24,0,16,0,65,228,0,108,16,1,65,10,108,106,32,0,251,22,1,251,2,1,0,106,11]): mk() -> a T (7, 9); cast(x: (ref null S)) = 100*b() + 10*o() + the
+# field read through ref.cast (ref T) x. @W is the reading that proves the tier.
+set wref {var e=new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([0,97,115,109,1,0,0,0,1,31,5,80,0,95,1,127,0,80,1,0,95,2,127,0,127,0,96,0,1,127,96,0,1,99,1,96,1,99,0,1,127,2,13,2,1,109,1,98,0,2,1,109,1,111,0,2,3,3,2,3,4,7,13,2,2,109,107,0,2,4,99,97,115,116,0,3,10,36,2,9,0,65,7,65,9,251,0,1,11,24,0,16,0,65,228,0,108,16,1,65,10,108,106,32,0,251,22,1,251,2,1,0,106,11])),WIMP).exports, s=e.mk(), r=0, k=0, x; for(;k<1e6&&r!=@W;k++)r=e.cast(s); try{x="returned"+e.cast(null)}catch(err){x=err instanceof WebAssembly.RuntimeError} print("@T-"+r+"-"+x+".")}
+set wref [string map [list WIMP $wimp] $wref]
+wasm_leg refcast-bbq     jsdw "--useDollarVM=true --useOMGJIT=false"     [string map {@W 107} $wref] 107-TRUE
+wasm_leg refcast-omg     jsdx "--useDollarVM=true"                       [string map {@W 117} $wref] 117-TRUE
+wasm_leg refcast-ipint   jsdy "--useDollarVM=true --useBBQJIT=false"     [string map {@W 7} $wref] 7-TRUE
+set wfail {var B=new Uint8Array([0,97,115,109,1,0,0,0,1,10,2,96,0,1,127,96,1,127,1,127,2,13,2,1,109,1,98,0,0,1,109,1,111,0,0,3,5,4,0,1,0,0,6,6,1,127,1,65,0,11,7,17,4,1,116,0,2,1,112,0,3,1,99,0,4,1,97,0,5,10,77,4,10,0,16,0,65,10,108,16,1,106,11,41,1,1,127,2,64,3,64,32,1,32,0,115,32,0,108,33,1,32,0,65,1,107,34,0,13,0,11,11,32,1,36,0,16,0,65,10,108,16,1,106,11,4,0,16,1,11,17,0,16,1,65,228,0,108,16,0,65,10,108,106,16,4,106,11]), x; function why(err){return (err instanceof WebAssembly.CompileError)+"-"+/out of executable memory at stub generation/i.test(err.message)} try{new WebAssembly.Module(B); x="compiled"}catch(err){x=why(err)} WebAssembly.compile(B).then(function(){print("@T-"+x+"-compiled.")}, function(err){print("@T-"+x+"-"+why(err)+".")})}
+wasm_leg wasm-canfail     jsdz "--useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAtOrAfter=1" $wfail TRUE-TRUE-TRUE-TRUE
+wasm_leg wasm-canfail-ctl jsea ""                                        $wfail COMPILED-COMPILED
 
 set stk {var n=0; function f(){n++;f()} try{f()}catch(e){} var m=n; $.agent.start("var n=0; function f(){n++;f()} try{f()}catch(e){} $.agent.report(String(n)); $.agent.leaving()"); var r=null; for(var i=0;i<5000&&r==null;i++){r=$.agent.getReport(); if(r==null)$.agent.sleep(1)} var a=r==null?-1:Number(r); print("@T-"+(a*48>131072?"ok":"bad")+"-main"+m+"-agent"+a)}
 lc_run_expect_hardfail "/webkit/jsc --useJIT=false -e '[string map {@T jsdn} $stk]' | tr a-z A-Z" "JSDN-OK-" "JSDN-BAD"

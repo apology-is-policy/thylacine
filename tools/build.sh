@@ -6648,7 +6648,8 @@ build_libcxx() {
 # B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: every JIT tier is
 # built (upstream no longer builds JIT without DFG/FTL on ARM64) and patch 0002 forced
 # DFG, FTL, BBQ and OMG off at run time, so the Baseline JIT and the YARR regexp JIT ran;
-# patch 0004 (B-2d) opened the DFG and patch 0005 (B-2e1) the FTL;
+# patch 0004 (B-2d) opened the DFG, patch 0005 (B-2e1) the FTL, and patch 0006 (B-2e3)
+# Wasm's BBQ and OMG, synchronized through SYS_ICACHE_SYNC_SPACE;
 # the pool is one SYS_JIT_CREATE region written through a sealed execute-only thunk
 # (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
 # Without CAP_JIT the pool is refused and JSC runs its LLInt + IPInt interpreters. DEFAULT-OFF (CHUNK_WEBKIT /
@@ -6851,12 +6852,12 @@ build_jsc() {
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
             stage_jsc_bench "$wk" "$stage" "$port_dir"
-            ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + FTL + YARR on): REUSED (cached + up-to-date)"
+            ledger "jsc (JavaScriptCore, every tier built and on): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built, Baseline + DFG + FTL + YARR on, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built and on, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6919,11 +6920,27 @@ _ZN3JSC4Wasm6Module11compileSyncERNS_2VMENS_10MemoryModeE Wasm::Module::compileS
 _ZN3JSC21JSWebAssemblyInstance16finalizeCreationERNS_2VMEPNS_14JSGlobalObjectEON3WTF3RefINS_4Wasm11CalleeGroupENS5_12RawPtrTraitsIS8_EENS5_21DefaultRefDerefTraitsIS8_EEEENS7_12CreationModeE JSWebAssemblyInstance::finalizeCreation(patch-0005) _ZN3JSC23WebAssemblyModuleRecord17initializeExports
 _ZN3JSC3FTL12JITFinalizer8finalizeEv FTL::JITFinalizer::finalize(upstream)
 ISBSYMS
+    # Wasm's BBQ and OMG publish code to threads that never stop, and patch 0006 makes
+    # Wasm::resetInstructionCacheOnAllThreads issue SYS_ICACHE_SYNC_SPACE in place of
+    # upstream's thread walk, whose suspension is fatal here. No run shows the walk's
+    # absence until a BBQ install, so the binary is asked: the last write to x8 before
+    # an svc #0 must put 128 there. A store or any other write to x8 fails closed.
+    local syncdis
+    syncdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+        --disassemble-symbols=_ZN3JSC4Wasm33resetInstructionCacheOnAllThreadsEv "$out")"
+    [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$syncdis")" -ge 3 ]] \
+        || { echo "==> jsc: no Wasm::resetInstructionCacheOnAllThreads to disassemble -- the sync check saw nothing" >&2; exit 1; }
+    [[ "$(awk '
+        /^[[:space:]]*[0-9a-f]+:[[:space:]]+[a-z][a-z0-9.]*[[:space:]]+[xw]8,/ {
+            w8 = ($0 ~ /[[:space:]]mov[[:space:]]+[xw]8, #(0x80|128)([[:space:]]|$)/) }
+        /^[[:space:]]*[0-9a-f]+:[[:space:]]+svc[[:space:]]+#0([[:space:]]|$)/ && w8 { ok = 1 }
+        END { print (ok ? "yes" : "no") }' <<< "$syncdis")" == yes ]] \
+        || { echo "==> jsc: Wasm::resetInstructionCacheOnAllThreads issues no SYS_ICACHE_SYNC_SPACE (x8 = 128, then svc #0)" >&2; exit 1; }
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
     stage_jsc_bench "$wk" "$stage" "$port_dir"
-    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, every cross-CPU ISB present)"
-    ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + FTL + YARR on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, every cross-CPU ISB present, the Wasm space sync)"
+    ledger "jsc (JavaScriptCore, every tier built and on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {
