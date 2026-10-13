@@ -22,6 +22,13 @@ needed the operator.
 
 
 ---
+## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig) (in progress)
+
+Four operator votes of 2026-10-13 05:00Z (3-6) decide it; no vote is owed. Started after B-2e3 landed (01330b422, committed 14:57Z).
+
+- *Scoping (read-only map, an Explore agent, then re-read where it mattered):* two facts shape the chunk. The exit-wins rule changes ONE path: `exits_term` (proc.c ~4397) already checks the claim under the hold that marks the close and records its own exit; only `thread_exit_self`'s last-out reads `group_exit_msg` after the close (~4603). And `proc_flags` (a u32) has no free bit, while a `term` family needs a mask bit in each of the two 7-bit caught sub-fields and its own terminate latch. Split: S-1 (exit wins + ut), S-2 (`term` + the kill family).
+- *Scripture (S-1 and the four decision notes):* ARCHITECTURE I-24 and 7.9.1 part B, ERRORS.md's claim rule, raw-keeper list and ut paragraph; `dec-2026-10-13-{ut-status-packed,exit-wins-final-close,term-note,phenotype-kill-family}`; the browser-status row.
+
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the FTL and Wasm's BBQ/OMG tiers on the sealed code region (B-2e) (landed)
 
 **Research (two read-only agents on fork 714fd13d6c, ~80 calls each; main re-read the marked items).**

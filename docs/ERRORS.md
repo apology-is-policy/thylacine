@@ -202,7 +202,12 @@ kernel records that note's POSIX signal beside the exit status
 (`Proc.term_sig`), and the exit status is 1. The signal is decided once for the
 whole Proc, in the same set-once claim that decides the group's status (I-24):
 a thread that faults while its group is already dying leaves with what the
-group already claimed.
+group already claimed. One exit stands against a later claim: once a Proc's
+last thread has marked its final close with no claim in place, its own exit is
+the status, and a kill arriving during the close only forces the close
+(ARCHITECTURE 7.9.1 part B). That is Linux's rule for an exiting task, and it
+holds whether the last thread left by `exits` or by `SYS_THREAD_EXIT`
+(operator vote 2026-10-13).
 
 | Death | Signal recorded |
 |---|---|
@@ -236,8 +241,7 @@ user fault: pid=42 reason="snare:segv" addr=0x000000000123abcd pc=0x... lr=0x...
 
 **The raw word**, when the caller passes no flag but `WAIT_WNOHANG`: the exit
 status alone, so a death by note reads 1. The native callers that predate the
-packed word keep it: joey, ut's plain waits, libthyla-rs's `Child::wait`, Go's
-`os/exec`.
+packed word keep it: joey, libthyla-rs's `Child::wait`, Go's `os/exec`.
 
 **The packed word**, when the caller passes `WAIT_UNTRACED`, `WAIT_CONTINUED`
 or `WAIT_PACKED`: the Linux `wait(2)` layout, so Pouch's `W*` macros decode it
@@ -255,12 +259,12 @@ The core-dump bit (0x80) is never set: Thylacine writes no core files.
 `WAIT_PACKED` (8) asks for the packed word without asking for stop or continue
 reports. Pouch's `waitpid` and the phenotype `wait4` always pass it, so a Pouch
 or Linux parent sees `WIFSIGNALED` and `WTERMSIG` for a child that died of a
-note. ut's job-control wait passes `WAIT_UNTRACED` and so gets the packed word
-too: it sets `$status` to the code for an exit and to 128 plus the signal for a
-death by note, 130 for an interrupted job and 137 for a killed one. ut's other
-waits are raw: a command substitution, and a script or `ut -c` without job
-control, read a death by note as `$status` 1 (whether every ut wait should pack
-is an operator vote item, OPEN-BUGS 2026-10-12).
+note. ut packs every wait: its job-control wait passes `WAIT_UNTRACED`, and
+every other wait (a command substitution, a pipeline's members, a script or
+`ut -c` without job control, `wait`, the background reaper) passes
+`WAIT_PACKED`. So `$status` is the code for an exit and 128 plus the signal for
+a death by note wherever ut sets it: 130 for an interrupted command, 137 for a
+killed one (operator vote 2026-10-13, `dec-2026-10-13-ut-status-packed`).
 
 ## Extinction messages
 
