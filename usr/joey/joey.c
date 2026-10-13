@@ -1084,7 +1084,8 @@ static int do_pouch_hello_smoke(void) {
     //                                  invoking the user handler
     //   - sigaction(SIGUSR1, ...)     -> EINVAL (unsupported signum)
     //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
-    //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b)
+    //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);
+    //     raise(SIGABRT) and kill(getpid(), SIGABRT) read SIGABRT (S-2)
     //   - SIGTERM rides `term`: its handler runs apart from SIGINT's ignore
     //     and mask, and a child killed by it reads WIFSIGNALED SIGTERM
     // Closes POUCH-DESIGN.md §6.4 / §14 sub-chunk 13b's exit criterion.

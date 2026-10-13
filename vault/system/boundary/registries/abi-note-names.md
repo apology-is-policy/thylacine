@@ -6,7 +6,7 @@ stability: append-only
 title: "The note-name registry — the deliverable set, the reserved prefixes, and struct note_record"
 pinned-by:
   - "_Static_assert sizeof(struct note_record) == 32 == sizeof(struct Note) (kernel/include/thylacine/notes.h)"
-  - "_Static_assert per name: sizeof(NAME) <= NOTE_NAME_MAX (14 asserts)"
+  - "_Static_assert per name: sizeof(NAME) <= NOTE_NAME_MAX (15 asserts; the four oldest open-class names have none)"
   - "g_known_notes[] (kernel/notes.c) — the authoritative deliverable set, with each name's death signal"
   - "g_snare_deaths[] (kernel/notes.c) — the snare family's death signals; NOTE_SIG_* == VIV_SIG* _Static_asserts"
   - "SNARE_ABORT_BRK_IMM 0xab06 (kernel/include/thylacine/notes.h) — the brk immediate that is snare:abort"
@@ -14,8 +14,10 @@ mirrors:
   - "usr/lib/pouch/patches/0007-pouch-signals.patch: __pouch_sig_to_note, the open class"
   - "usr/lib/pouch/patches/0021-pouch-pty.patch: __pouch_sig_to_note, the tty: class"
   - "usr/lib/pouch/patches/0011-pouch-abort.patch: abort() = brk #0xab06 (the SNARE_ABORT_BRK_IMM literal)"
+  - "usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch: SIGTERM -> term, POUCH_NOTE_BIT_TERM; raise/kill of self with SIGABRT -> abort()"
+  - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## The surface
 
@@ -35,6 +37,7 @@ below).
 | name | arg | default if uncaught |
 |---|---|---|
 | `interrupt` | 0 | **terminate** (LS-5) |
+| `term` | 0 | **terminate** (SIGTERM's; registered 2026-10-13, [[dec-2026-10-13-term-note]]) |
 | `kill` | 0 | terminate — **non-catchable**, bypasses mask and handler |
 | `pipe` | 0 | **terminate** (SIGPIPE's default; a write to a reader-less pipe posts it) |
 | `child_exit` | packed pid + status | none (informational) |
@@ -150,8 +153,9 @@ padding NUL coincides with the source NUL.
 per-Proc, so a multi-thread Proc can route different notes to different
 threads.
 
-`INTERRUPT` 0 · `KILL` 1 · `PIPE` 2 · `CHILD_EXIT` 3 · `SNARE` 4 · `TTY` 5,
-with `NOTE_MASK_SUPPORTED = 0x3f`.
+`INTERRUPT` 0 · `KILL` 1 · `PIPE` 2 · `CHILD_EXIT` 3 · `SNARE` 4 · `TTY` 5 ·
+`SAK` 6 · `TERM` 7, with `NOTE_MASK_SUPPORTED = 0xff` (0x3f until `sak`, 0x7f
+until `term`).
 
 Two bits cover **families**, one bit each: masking `NOTE_BIT_TTY` defers all
 five tty names, and `NOTE_BIT_SNARE` would defer all eight snare names.
@@ -173,6 +177,7 @@ are Linux's aarch64 ones so both boundary-lines pass them through:
 | death | signal |
 |---|---|
 | `interrupt` | SIGINT 2 |
+| `term` | SIGTERM 15 |
 | `kill` | SIGKILL 9 |
 | `pipe` | SIGPIPE 13 |
 | `tty:quit` | SIGQUIT 3 |
@@ -205,12 +210,12 @@ bits are tolerated rather than validated.
 
 ## Where the prose has drifted from the code
 
-`sys_postnote_handler` describes "the v1.0 supported set" as
-`"interrupt"/"kill"/"pipe"/"child_exit"` — four names, where the set is ten.
-The sentence is stale as written but harmless in consequence: those four
-*are* exactly the userspace-postable subset, since the other six are
-gated (the `tty:` prefix and `sak`'s exact name). A reader taking it as the registry would be wrong; a reader
-taking it as "what this path accepts" would be right.
+`sys_postnote_handler` described "the v1.0 supported set" as
+`"interrupt"/"kill"/"pipe"/"child_exit"` until 2026-10-13, when `term` made
+that list wrong as "what this path accepts" too; the comment now points at
+`g_known_notes` and names no set. The deliverable set is eleven names; the
+userspace-postable subset is the open class's five, since the other six are
+gated (the `tty:` prefix and `sak`'s exact name).
 
 ## The POSIX mapping, and what it loses
 
@@ -221,7 +226,7 @@ the open class in `0007-pouch-signals.patch`, the tty class in
 | signal | note | note |
 |---|---|---|
 | SIGINT | `interrupt` | catchable |
-| SIGTERM | `interrupt` | **shares the note with SIGINT** |
+| SIGTERM | `term` | catchable; its own note since 0049 (2026-10-13) |
 | SIGPIPE | `pipe` | pouch masks it at startup |
 | SIGCHLD | `child_exit` | default ignore |
 | SIGKILL | `kill` | non-catchable; `sigaction()` returns `EINVAL` |
@@ -232,15 +237,15 @@ the open class in `0007-pouch-signals.patch`, the tty class in
 | SIGHUP | `tty:hup` | |
 
 SIGABRT has no note. Pouch's `abort()` is the `snare:abort` trap (0011), which
-a parent reads as SIGABRT; a self-directed `raise(SIGABRT)` answers EINVAL
-today and the program runs on -- an owned gap (OPEN-BUGS 2026-10-12: route it
-through abort()'s trap).
+a parent reads as SIGABRT, and since 0049 `raise(SIGABRT)` and `kill` of the
+caller with it call `abort()`; a SIGABRT to another process answers EINVAL.
+The Linux phenotype's `kill`/`tkill`/`tgkill` end a self-directed SIGABRT the
+same way, kernel-side ([[sub-kernel-vivarium]]).
 
-The mapping is **many-to-one at SIGINT/SIGTERM**: both land on `interrupt`,
-so a handler cannot tell a Ctrl-C from a polite termination request, and
-installing different dispositions for the two is not expressible. That is a
-v1.0 boundary loss, not a registry property — the fix is a distinct note
-name, not a change here.
+Until 0049 the mapping was **many-to-one at SIGINT/SIGTERM**: both landed on
+`interrupt`, so a handler could not tell a Ctrl-C from a polite termination
+request, and different dispositions for the two were not expressible. The fix
+was the distinct note name this section asked for, `term`.
 
 The tty family is **receive-only** from pouch: nothing on that side may
 originate one, which is the userspace face of the `tty:` post gate above.

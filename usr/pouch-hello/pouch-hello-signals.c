@@ -22,9 +22,11 @@
 //   sigaction(SIGUSR1, ...)            -> EINVAL (unsupported v1.0 signum).
 //   deaths (gcpark-b)                  -> the binary re-spawns itself to die
 //                                         by abort(), a failed assert(), a
-//                                         plain `brk #1` and a NULL store; each
-//                                         waitpid must read WIFSIGNALED with
-//                                         SIGABRT, SIGABRT, SIGTRAP, SIGSEGV --
+//                                         plain `brk #1`, a NULL store,
+//                                         raise(SIGABRT) and kill(getpid(),
+//                                         SIGABRT); each waitpid must read
+//                                         WIFSIGNALED with SIGABRT, SIGABRT,
+//                                         SIGTRAP, SIGSEGV, SIGABRT, SIGABRT --
 //                                         never WIFEXITED (docs/ERRORS.md
 //                                         "The wait status").
 //   SIGTERM apart (signal chunk S-2)   -> with SIGINT ignored, raise(SIGINT)
@@ -74,18 +76,24 @@ static int die(const char *how) {
     if (!strcmp(how, "assert")) { volatile int zero = 0; assert(zero); }
     if (!strcmp(how, "brk"))    __asm__ __volatile__("brk #1" ::: "memory");
     if (!strcmp(how, "segv"))   { volatile int *bad = (volatile int *)0; *bad = 1; }
+    if (!strcmp(how, "raise"))  raise(SIGABRT);
+    if (!strcmp(how, "killself")) kill(getpid(), SIGABRT);
     if (!strcmp(how, "wait"))   for (;;) sleep(1);
     return 0;
 }
 
 // Each death must reach the parent as the signal the kernel recorded for it.
 // Before gcpark-b every one read WIFEXITED: abort() as 127, the faults as 1.
+// Before patch 0049 raise(SIGABRT) and kill(getpid(), SIGABRT) answered
+// EINVAL and the child ran on to exit 0.
 static int test_deaths(void) {
     static const struct { const char *how; int sig; const char *name; } legs[] = {
         { "abort",  SIGABRT, "SIGABRT" },
         { "assert", SIGABRT, "SIGABRT" },
         { "brk",    SIGTRAP, "SIGTRAP" },
         { "segv",   SIGSEGV, "SIGSEGV" },
+        { "raise",  SIGABRT, "SIGABRT" },
+        { "killself", SIGABRT, "SIGABRT" },
     };
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
         char *cargv[] = { (char *)SELF, (char *)"die", (char *)legs[i].how, NULL };

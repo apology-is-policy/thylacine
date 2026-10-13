@@ -5,13 +5,14 @@ parent: moc-pouch-seam
 title: "POSIX signals over kernel notes"
 code:
   - usr/lib/pouch/patches/0007-pouch-signals.patch
+  - usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch
 audit: hard
 guarded-by: [inv-i24]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -32,19 +33,23 @@ with the kernel; the kernel's job is delivery, pouch's is dispatch.
 - The bootstrap `__pouch_note_handler(name, arg)` never returns
   normally: it ends in `SYS_NOTED(NCONT)` or `SYS_NOTED(NDFLT)`.
 
-The supported set: `SIGINT`/`SIGTERM` → `"interrupt"` (shared),
+The supported set: `SIGINT` → `"interrupt"`, `SIGTERM` → `"term"` (its
+own note since 0049, 2026-10-13; before it SIGTERM shared `interrupt`),
 `SIGPIPE` → `"pipe"`, `SIGCHLD` → `"child_exit"`, `SIGKILL` → `"kill"`
 (non-catchable), plus the PTY-3 tty family — `SIGQUIT` → `"tty:quit"`,
 `SIGTSTP` → `"tty:susp"`, `SIGCONT` → `"tty:cont"`, `SIGWINCH` →
 `"tty:winch"`, `SIGHUP` → `"tty:hup"`.
 
-`SIGABRT` is outside the set: `sigaction(SIGABRT)` and `raise(SIGABRT)`
-answer `EINVAL`. `abort()` does not raise it — it executes the `brk` the
-kernel ends as `snare:abort` ([[sub-pouch-process]]). The reverse direction
+`SIGABRT` is outside the set: `sigaction(SIGABRT)` answers `EINVAL`, so its
+default is its only disposition. `abort()` does not raise it — it executes
+the `brk` the kernel ends as `snare:abort` ([[sub-pouch-process]]) — and since
+0049 `raise(SIGABRT)` and a `kill` of the caller with it call `abort()`; a
+`SIGABRT` to another process answers `EINVAL`, since no note carries it. The reverse direction
 does carry signals since gcpark-b (2026-10-12): the kernel records the
 signal of every death by note, a fault (`snare:segv` → `SIGSEGV`, …,
 `snare:abort` → `SIGABRT`) or an uncaught terminating note (`interrupt` →
-`SIGINT`, `kill` → `SIGKILL`, `pipe` → `SIGPIPE`, `tty:quit`, `tty:hup`),
+`SIGINT`, `term` → `SIGTERM`, `kill` → `SIGKILL`, `pipe` → `SIGPIPE`,
+`tty:quit`, `tty:hup`),
 and a parent's `waitpid` reads it as `WIFSIGNALED` / `WTERMSIG`
 (docs/ERRORS.md "The wait status"). No handler runs for a fault signal.
 The musl `__abort_lock` interlock in `sigaction` is not carried: Pouch's
@@ -62,10 +67,12 @@ compare, looks up the disposition, and ends with the right `SYS_NOTED`.
 The constructor's ORDER is itself the invariant: mask before notify, so
 no note can reach a registered handler over an unset sigtab.
 
-**SIGINT and SIGTERM share one note**, so the dispatcher arbitrates by
-handler-presence: prefer SIGINT's if installed, else SIGTERM's, else
-SIGINT. A program that installs both gets last-registered-wins semantics
-it did not ask for.
+**SIGINT and SIGTERM have a note each** since 0049: the dispatcher maps
+`interrupt` to SIGINT and `term` to SIGTERM, and each has its own mask bit
+(`POUCH_NOTE_BIT_TERM` is bit 7; the supported mask is 0xaf). Before it they
+shared `interrupt`: the dispatcher guessed by handler-presence (SIGINT's if
+installed, else SIGTERM's), blocking SIGINT blocked SIGTERM, and a child
+killed with SIGTERM read `WTERMSIG == SIGINT`.
 
 **The tty family is RECEIVE-ONLY.** The kernel's POST axis rejects any
 userspace `tty:*` post — the I-39 gate that makes a terminal event
@@ -176,14 +183,16 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   override that shipped** in 0011 — documented in a different reference
   doc (`86-pouch-stratumd-boot.md`), so the two never met. That override
   (`_Exit(127)`) was itself replaced at gcpark-b by the `snare:abort` death.
-- **`raise(SIGABRT)` answers `EINVAL` and the program runs on.** POSIX
-  expects it to end the process when no handler is installed. Tracked in
-  OPEN-BUGS (gcpark-b follow-up); `abort()` is unaffected.
-- SIGINT/SIGTERM aliasing; `sigset_t` round-trip is lossy (unsupported
-  signums drop) and spuriously additive (reading back a mask containing
-  SIGINT also reports SIGTERM). The aliasing reaches the wait word too: a
-  child killed with `kill(pid, SIGTERM)` dies of `interrupt`, so its parent
-  reads `WTERMSIG == SIGINT` (since gcpark-b; OPEN-BUGS 2026-10-12).
+- **A self-directed fault signal other than `SIGABRT` answers `EINVAL`.**
+  `raise(SIGSEGV)` (and `SIGBUS`, `SIGILL`, `SIGFPE`) runs on, where the
+  Linux phenotype ends the caller with the matching `snare:*` death
+  ([[sub-kernel-vivarium]]). Pouch has one trap the kernel names, abort's
+  `brk`; the others would need their own. `sigaction` refuses all five, so no
+  handler-then-reraise program reaches this.
+- `sigset_t` round-trip is lossy (unsupported signums drop) and spuriously
+  additive within the tty family, which shares one bit (reading back a mask
+  containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).
+  SIGINT and SIGTERM stopped aliasing at 0049.
 - No mask inheritance across `pthread_create` (the child starts at 0).
 - `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
   defers them, and a later real handler sees them retroactively.

@@ -319,9 +319,12 @@ errno number directly. No boundary-line patch change needed.
 **`abort()` (patch 0011).** Pouch's `abort()` executes `brk #0xab06`, and the
 Proc dies of `snare:abort`: the parent's `waitpid` sees `WIFSIGNALED` with
 `WTERMSIG == SIGABRT`, and the console names the cause. A `SIGABRT` handler
-does not run; Pouch has no `SIGABRT` disposition (`raise(SIGABRT)` answers
-`EINVAL`), so the trap is all of `abort()`. mallocng's internal assert (patch
-0012) calls `abort()`. Until gcpark-b both ended in `_Exit(127)`, which a parent
+does not run; Pouch has no `SIGABRT` disposition (`sigaction(SIGABRT)`
+answers `EINVAL`), so the trap is all of `abort()`. Since the signal chunk's
+S-2 (patch 0049) `raise(SIGABRT)` and a `kill` of the caller with `SIGABRT`
+call `abort()`; before, they answered `EINVAL` and the program ran on past its
+own abort. A `SIGABRT` to another process answers `EINVAL`: no note carries
+it. mallocng's internal assert (patch 0012) calls `abort()`. Until gcpark-b both ended in `_Exit(127)`, which a parent
 could not tell apart from a program that chose to exit 127.
 
 **`waitpid` (patch 0026).** `__pouch_wait` always passes `WAIT_PACKED` and

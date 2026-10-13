@@ -1,4 +1,4 @@
-pouch boundary-line patch 0049 - SIGTERM is the `term` note (signal chunk S-2).
+pouch boundary-line patch 0049 - SIGTERM is the `term` note; a self-directed SIGABRT is abort() (signal chunk S-2).
 
 0007 sent SIGTERM as `interrupt`, the note SIGINT owns, because the kernel
 had no other catchable terminating note. A child killed with
@@ -7,7 +7,7 @@ WTERMSIG == SIGINT, and the dispatcher had to guess which of the two
 handlers a delivered `interrupt` was for. The kernel now has `term`
 (NOTE_BIT_TERM = 7, default terminate, death recorded as SIGTERM;
 operator vote 2026-10-13, docs/ERRORS.md "The terminate-request note").
-Two files:
+Four files:
 
   src/internal/_pouch_signal.h  POUCH_NOTE_BIT_TERM (1u << 7), and the
       supported mask 0x2f -> 0xaf, so __block_all_sigs and
@@ -18,9 +18,17 @@ Two files:
       SIGTERM; the handler dispatches "interrupt" to SIGINT and "term" to
       SIGTERM, and the guess between them is gone. An uncaught "term"
       reaches SYS_NOTED(NDFLT), whose default for it is terminate.
+  src/signal/raise.c, src/signal/kill.c    a SIGABRT to the caller
+      itself is abort()'s death (snare:abort, read as WTERMSIG ==
+      SIGABRT): SIGABRT has no note and Pouch keeps no disposition for
+      it, so its default is the only one. Before this both answered
+      EINVAL and the program ran on past its own abort. A SIGABRT to
+      another process stays EINVAL.
 
 The witness is pouch-hello-signals: a child killed with SIGTERM reads
-WTERMSIG == SIGTERM, and a SIGTERM handler runs while SIGINT is ignored.
+WTERMSIG == SIGTERM, a SIGTERM handler runs while SIGINT is ignored, and
+children that raise(SIGABRT) or kill(getpid(), SIGABRT) read WTERMSIG ==
+SIGABRT.
 
 --- a/src/internal/_pouch_signal.h
 +++ b/src/internal/_pouch_signal.h
@@ -114,3 +122,53 @@ WTERMSIG == SIGTERM, and a SIGTERM handler runs while SIGINT is ignored.
      } else if (__pouch_note_name_eq(name, "pipe")) {
          sig = SIGPIPE;
      } else if (__pouch_note_name_eq(name, "child_exit")) {
+--- a/src/signal/kill.c
++++ b/src/signal/kill.c
+@@ -11,13 +11,22 @@
+ 
+ #include <signal.h>
+ #include <errno.h>
++#include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
+ 
+ #include "syscall.h"
+ #include "_pouch_signal.h"
+ 
+ int kill(pid_t pid, int sig)
+ {
++	/* A SIGABRT to the caller itself is raise(SIGABRT): abort()'s death.
++	 * To another process it stays EINVAL below: no note carries it, and a
++	 * snare:* death is never another process's to cause. pid 0 is the
++	 * kernel's self sentinel, as for every other signal here. */
++	if (sig == SIGABRT && (pid == 0 || pid == getpid()))
++		abort();
++
+ 	const char *name;
+ 	if (__pouch_sig_to_note(sig, &name) != 0) {
+ 		errno = EINVAL;
+--- a/src/signal/raise.c
++++ b/src/signal/raise.c
+@@ -12,6 +12,7 @@
+ 
+ #include <signal.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
+ 
+@@ -21,6 +22,14 @@
+ 
+ int raise(int sig)
+ {
++	/* SIGABRT has no note, and Pouch keeps no disposition for it
++	 * (sigaction refuses it), so raising it can only mean its default:
++	 * the process ends. abort()'s trap is that death -- the kernel ends
++	 * the Proc with snare:abort, which a parent reads as WTERMSIG ==
++	 * SIGABRT. */
++	if (sig == SIGABRT)
++		abort();
++
+ 	const char *name;
+ 	if (__pouch_sig_to_note(sig, &name) != 0) {
+ 		errno = EINVAL;
