@@ -5700,19 +5700,15 @@ static int probe100_errno(void) {
     long rc_whence    = t_lseek(fd, 0, 99);
     long rc_negoff    = t_lseek(fd, -1, T_SEEK_SET);
 
-    // #102 F6: whence is 32 bits wide, so junk in the HIGH half of x2 must not
-    // reject a valid seek. Linux's SYSCALL_DEFINE narrows `unsigned int whence`
-    // by construction and VIVARIUM's T1 table renumbers lseek onto this very
-    // handler with the argument words copied verbatim -- so before the fix a
-    // guest whose compiler left rubbish above bit 31 got EINVAL for a seek
-    // Linux performs. libt's t_lseek takes a long, which is what lets a NATIVE
-    // probe pose the question at all.
-    //
-    // The pair is the point. The first leg alone would pass under a handler
-    // that stopped range-checking whence entirely; the second says the low half
-    // is still being read, so together they pin narrowing rather than removal.
-    long rc_hiwhence  = t_lseek(fd, 0, (1L << 32) | T_SEEK_SET);   // valid -> 0
-    long rc_hibad     = t_lseek(fd, 0, (1L << 32) | 99);           // still -22
+    // ERRORS.md principle 6 (operator vote 8, 2026-10-13): a whence that does
+    // not fit 32 bits is refused, never narrowed. #102 F6 narrowed it here so a
+    // Linux guest's junk above bit 31 could not refuse a seek Linux performs;
+    // the vivarium's lseek row now narrows that word before this handler runs,
+    // so the guest keeps Linux's truncation and the native ABI refuses. libt's
+    // t_lseek takes a long, which is what lets a NATIVE probe pose the question.
+    // rc_rew below is the same seek with a clean word, one bit away.
+    long rc_hiwhence  = t_lseek(fd, 0, (1L << 32) | T_SEEK_SET);   // too wide -> -22
+    long rc_hibad     = t_lseek(fd, 0, (1L << 32) | 99);           // -22
 
     // Bad-buffer rejects on a GOOD fd -> EFAULT (-14). 0x7000_0000_0000 is
     // 112 TiB: below UACCESS_USER_VA_TOP (2^47 = 128 TiB) so it PASSES the
@@ -5756,8 +5752,8 @@ static int probe100_errno(void) {
     if (rc_seek_bad  != -9)  bad = 1;
     if (rc_whence    != -22) bad = 1;
     if (rc_negoff    != -22) bad = 1;
-    if (rc_hiwhence  != 0)   bad = 1;   // #102 F6: high half ignored
-    if (rc_hibad     != -22) bad = 1;   // ...but the low half still checked
+    if (rc_hiwhence  != -22) bad = 1;   // vote 8: refused, never narrowed
+    if (rc_hibad     != -22) bad = 1;
     if (rc_wfault    != -14) bad = 1;
     if (rc_rfault    != -14) bad = 1;
     // The read leg's PRECONDITIONS are asserted too: if either the seeding
@@ -5791,7 +5787,7 @@ static int probe100_errno(void) {
     t_putstr(itoa_dec(rc_seed, nb, sizeof(nb)));
     t_putstr(" rew=");
     t_putstr(itoa_dec(rc_rew, nb, sizeof(nb)));
-    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22 0 -22 -14 -14 16 0])\n" : ")\n");
+    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22 -22 -22 -14 -14 16 0])\n" : ")\n");
     return bad ? -1 : 0;
 }
 
