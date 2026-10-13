@@ -931,7 +931,7 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 | `sak` | 6 | kernel-synthetic (the secure attention key, IM-1) | yes | ignored |
 | `term` | 7 | `SYS_POSTNOTE` (`SIGTERM` from Pouch and the Linux phenotype) | yes | `exits("term")`, the death recorded as `SIGTERM` (operator vote 2026-10-13) |
 
-`alarm`, `hangup`, `usr1`, `usr2`, `stop`, `cont` — DEFERRED at v1.0; each needs an additional kernel hook (`SYS_ALARM`, cons close path, scheduler stop/cont). `sigaction` on a deferred signal returns `EINVAL`. The supported set can grow per chunk without ABI break.
+`alarm`, `usr1` and `usr2` have no note at v1.0: each needs its own kernel hook (`SYS_ALARM` for the first), and `sigaction` on `SIGALRM`, `SIGUSR1` or `SIGUSR2` returns `EINVAL`. Hangup, stop and continue arrived with the PTY-1 job-control arc as `tty:hup`, `tty:susp` and `tty:cont` (row 5 above). The supported set can grow per chunk without ABI break.
 
 ### 7.6.6 Synthetic posting hooks (v1.0)
 

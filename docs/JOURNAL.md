@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig) (in progress)
+## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 
 Four operator votes of 2026-10-13 05:00Z (3-6) decide it; no vote is owed. Started after B-2e3 landed (01330b422, committed 14:57Z).
 
@@ -54,6 +54,21 @@ Four operator votes of 2026-10-13 05:00Z (3-6) decide it; no vote is owed. Start
   - **F6** was withdrawn. A peer's tid is linked under the table lock before its creator learns it, so only a guessed tid can race the self check.
   Closed list: repo `memory/audit_sig2_closed_list.md`.
 - *First build of S-2 (Mac lease from 19:09Z):* it compiled with no errors, so the syntax-only checks had been enough. `specs/check-caught-target.sh`: ALL CFGS AS CLAIMED (clean 613245 states; 8 buggy cfgs on their named properties). After the audit fixes, suite 1998/1998 (1995 plus the three new kernel tests). Every pouch-hello-signals death reads its signal, including `raise` and `killself` as SIGABRT and `term` as SIGTERM; the census names the new legs; u-job-test and u-7-test reaped 0. The containered Linux probe passed: its `linux` mode writes `OK` only after L338.
+- *Device REDs on 66a8b175a (19:28-19:57Z, scratchpad `sig2_reds.sh` + `sig2_sab.py`).* A failing kernel test ends the boot before joey runs, and joey and the probe stop at their first failure, so the REDs took ten boots. Sabotages that probe Linux legs act only on real syscalls (`ctx != NULL`), so the kernel tests, which call the shell with a NULL ctx, stay green and joey reaches the probe. Before the run I made pouch-hello-signals run every death leg before its verdict (66a8b175a), so one boot could show three Pouch deaths red. Each RED failed at its own leg:
+  - **K1** (term arms interrupt's latch; the gate skipped for viv_kill; the phenotype terminate table without term; kill_decide posts SIGHUP): 1993/1998. It failed exactly at "term -> its own latch, never interrupt's", "the phenotype's terminate table is g_known_notes' dfl", "term arms its own latch", "kill(non-child) is EPERM: the parent gate" and "SIGHUP refused".
+  - **K2** (a dead child back to ESRCH): 1997/1998, at "a dead, unreaped child accepts it".
+  - **Probe:** each sabotage was red at its own leg with the kernel suite at 1998/1998.
+    - L334 (the self-death named snare:segv): ws=11.
+    - L335 (a cross SIGTERM posted as interrupt): term=0, ws=0. The child inherited SIGINT's ignore, slept, and exited 0.
+    - L336 (gate skipped on real syscalls): rc=0 for the parent.
+    - L337 (sig not narrowed): o=-22 and r=-22.
+    - L338 (a self SIGTERM posted as interrupt): `k=0/0/17` and the same for `g` and `t`, read as rc/fired/signo. Each call answered 0 and the SIGTERM handler fired 0 times; 17 is a stale SIGCHLD left by an earlier leg.
+  - **UP1** (0049's SIGTERM back to `interrupt`): "raise(SIGTERM) with SIGINT blocked: count 2 -> 2".
+  - **UP2** (the self-SIGABRT redirect gone; kill's cross SIGTERM sent as SIGINT): death raise status 0, death killself status 0, death term status 0x2.
+  - **UU** (ut's default back to `interrupt`, and joey continuing past u-job-test): "u-job-test: FAILED -- kill %1 should end the child by `term`: $status 128+15" and "u-7-test: FAILED -- flow 5: the sleeper's $status is not 128 plus its note's signal".
+  The green restore: 1998/1998, every Pouch, ut and probe line PASS, boot OK.
+- *A sweep for other SIGTERM mappings found the Go port's:* go-thylacine's `syscall.SIGTERM` was `Note("terminate")`, a name the kernel never had. It is renamed `term` (go-thylacine a6567ba, local; the operator pushes that fork). The same read showed Go can send no note but `kill`, because `(*Process).signal` writes the note name as a `/proc/<pid>/ctl` verb. That predates S-2; it is enqueued in OPEN-BUGS with the fix (post through SYS_POSTNOTE).
+- *Land gates on 66a8b175a (scratchpad `sig2_land_gates.sh`):* CI image (b2c, with the webkit fork at 7cf380d5ea): build, ls-jsc 59/59, pty-4 PASS (FG 130, CS 139, SX 139). Default image: build, suite PASS (1998/1998, boot OK), test-fault 8/8, ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption, check-production --all PASS. The CI image ran too because 0049 changes the mask musl blocks around every `pthread_create`, and JavaScriptCore runs on Pouch. In the same commit, ARCH 7.6.5's deferred list no longer names hangup, stop and continue, which PTY-1 delivered as `tty:*`. S-2 landed with this bullet's commit and was pushed to both mirrors.
 
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the FTL and Wasm's BBQ/OMG tiers on the sealed code region (B-2e) (landed)
 
