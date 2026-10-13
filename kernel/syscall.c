@@ -7716,12 +7716,12 @@ static s64 sys_weft_map_handler(u64 data_fd_raw, u64 hint_va) {
 
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd) {
-    if (!p || !out || !out_fd)                       return -1;
+    if (!p || !out || !out_fd)                       return -T_E_INVAL;
     // Loom-4c accepts LOOM_SETUP_SQPOLL; LOOM_SETUP_CQSIZE (caller-chosen cq)
     // is still reserved until its sub-chunk lands, so reject it + any unknown bit.
-    if (flags & ~LOOM_SETUP_SQPOLL)                  return -1;
-    if (entries == 0 || entries > LOOM_MAX_ENTRIES)  return -1;
-    if ((entries & (entries - 1u)) != 0)             return -1;  // power of two
+    if (flags & ~LOOM_SETUP_SQPOLL)                  return -T_E_INVAL;
+    if (entries == 0 || entries > LOOM_MAX_ENTRIES)  return -T_E_INVAL;
+    if ((entries & (entries - 1u)) != 0)             return -T_E_INVAL;  // power of two
 
     // io_uring default: CQ twice the SQ. `entries` is a power of two <=
     // LOOM_MAX_ENTRIES, so cq_entries is a power of two <= 2*LOOM_MAX_ENTRIES.
@@ -7764,18 +7764,18 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                      EXEC_USER_BURROW_TOP, &vaddr) != 0) {
         spin_unlock(&p->as->lock);
         loom_unref(l);
-        return -1;
+        return -T_E_NOMEM;
     }
     if (!proc_page_charge(p, ring_pages)) {
         spin_unlock(&p->as->lock);
         loom_unref(l);
-        return -1;                                   // over the per-Proc page cap
+        return -T_E_NOMEM;                           // over the per-Proc page cap
     }
     if (burrow_map(p, l->ring, vaddr, (size_t)l->ring_size, VMA_PROT_RW) != 0) {
         proc_page_uncharge(p, ring_pages);
         spin_unlock(&p->as->lock);
         loom_unref(l);
-        return -1;
+        return -T_E_NOMEM;
     }
     spin_unlock(&p->as->lock);
 
@@ -7796,17 +7796,18 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
             proc_page_uncharge(p, ring_pages);
             spin_unlock(&p->as->lock);
             loom_unref(l);
-            return -1;
+            return -T_E_AGAIN;                       // as a thread create over the cap
         }
         l->sqpoll_owner = p;
         l->sqpoll_charged = true;
-        if (loom_start_sqpoll(l) != 0) {
+        int src = loom_start_sqpoll(l);
+        if (src != 0) {
             spin_lock(&p->as->lock);
             (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
             proc_page_uncharge(p, ring_pages);       // #65: the ring VMA freed
             spin_unlock(&p->as->lock);
             loom_unref(l);
-            return -1;
+            return src;
         }
     }
 
@@ -7828,7 +7829,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         spin_unlock(&p->as->lock);
         loom_unref(l);
         loom_unref(l);
-        return -1;
+        return -T_E_MFILE;
     }
 #ifdef KERNEL_TESTS
     loom_setup_installed_for_test(p, fd);
@@ -7868,12 +7869,18 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     return 0;
 }
 
+// A descriptor argument wider than an index names nothing, so the lookup refuses
+// it after any check that precedes the lookup (ERRORS.md principle 6).
+static hidx_t sys_hidx_arg(u64 raw) {
+    return raw > 0x7fffffffull ? (hidx_t)-1 : (hidx_t)raw;
+}
+
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n) {
-    if (!p)                            return -1;
-    if (op != LOOM_REGISTER_HANDLES)   return -1;   // BUFFERS reserved (Loom-6)
-    if (n > LOOM_MAX_REG_HANDLES)      return -1;
-    if (n > 0 && !fds)                 return -1;
+    if (!p)                            return -T_E_INVAL;
+    if (op != LOOM_REGISTER_HANDLES)   return -T_E_INVAL;   // BUFFERS has its own entry
+    if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
+    if (n > 0 && !fds)                 return -T_E_INVAL;
 
     // A dead or foreign descriptor is -EBADF, as on the private route: a client
     // tells a ring closed under it from its own error by this answer.
@@ -7892,6 +7899,7 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     struct Spoor *spoors[LOOM_MAX_REG_HANDLES];
     rights_t      rights[LOOM_MAX_REG_HANDLES];
     u32 got = 0;
+    int rc = -T_E_BADF;   // a listed descriptor names nothing, or not a Spoor
     for (u32 i = 0; i < n; i++) {
         struct Handle sh;
         if (handle_get(p, fds[i], &sh) != 0)   goto rollback;
@@ -7903,23 +7911,24 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
         handle_put(&sh);
     }
 
-    // loom_register_handles ADOPTS the `got` refs on success (it cannot fail
-    // here: got <= n <= LOOM_MAX_REG_HANDLES).
-    if (loom_register_handles(l, spoors, rights, got) != 0) goto rollback;
+    // loom_register_handles ADOPTS the `got` refs on success. It refuses only a
+    // handle an SQPOLL ring cannot drive (got <= n <= LOOM_MAX_REG_HANDLES).
+    rc = loom_register_handles(l, spoors, rights, got);
+    if (rc != 0) goto rollback;
     handle_put(&lh);
     return 0;
 
 rollback:
     for (u32 i = 0; i < got; i++) spoor_clunk(spoors[i]);
     handle_put(&lh);
-    return -1;
+    return rc;
 }
 
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n) {
-    if (!p)                            return -1;
-    if (n > LOOM_MAX_REG_BUFFERS)      return -1;
-    if (n > 0 && !bufs)               return -1;
+    if (!p)                            return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_BUFFERS)      return -T_E_INVAL;
+    if (n > 0 && !bufs)               return -T_E_INVAL;
 
     struct Handle lh;
     if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
@@ -7945,14 +7954,15 @@ void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_si
 
 static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc)                              return -1;
+    if (!t || !t->proc)                              return -T_E_INVAL;
     struct Proc *p = t->proc;
-    if (!sys_validate_user_buf(params_va, sizeof(struct loom_params))) return -1;
+    if (entries_raw > 0xffffffffull)                 return -T_E_INVAL;
+    if (!sys_validate_user_buf(params_va, sizeof(struct loom_params))) return -T_E_FAULT;
 
     // Read the one IN field (params.flags, u32 at offset 0); the rest is OUT.
     u8 fb[4];
     for (int i = 0; i < 4; i++)
-        if (uaccess_load_u8(params_va + (u64)i, &fb[i]) != 0) return -1;
+        if (uaccess_load_u8(params_va + (u64)i, &fb[i]) != 0) return -T_E_FAULT;
     u32 flags = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
 
     struct loom_params kp;
@@ -7960,12 +7970,10 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     // The private service bits route to their own inner, which reports an errno
     // (-EOPNOTSUPP in every image built without the qualification lever).
     bool private_ring = (flags & (LOOM_SETUP_PRIVATE_SERVICE | LOOM_SETUP_SERVICE_BUFFERS)) != 0;
-    if (private_ring) {
-        int rc = loom_private_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd);
-        if (rc != 0) return rc;
-    } else if (sys_loom_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd) != 0) {
-        return -1;
-    }
+    int rc = private_ring
+        ? loom_private_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd)
+        : sys_loom_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd);
+    if (rc != 0) return rc;
 
     // Copy the geometry back. A fault mid-writeback fully rolls back the setup,
     // so a faulting caller never leaks a ring -- or its charge -- it cannot see.
@@ -7973,7 +7981,7 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
             sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
-            return private_ring ? -T_E_FAULT : -1;
+            return -T_E_FAULT;
         }
     }
     return (s64)fd;
@@ -8018,45 +8026,49 @@ static s64 sys_loom_register_private(struct Proc *p, hidx_t loom_fd, u32 op,
 static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                      u64 arg_va, u64 nargs_raw) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc)                              return -1;
+    if (!t || !t->proc)                              return -T_E_INVAL;
     struct Proc *p = t->proc;
+    if (op_raw > 0xffffffffull)                      return -T_E_INVAL;
     u32 op = (u32)op_raw;
-    u32 n  = (u32)nargs_raw;
+    hidx_t loom_fd = sys_hidx_arg(loom_fd_raw);
 
+    // nargs is checked at full width on both routes: != 1 here, against the cap
+    // below.
     if (loom_private_register_op(op))
-        return sys_loom_register_private(p, (hidx_t)loom_fd_raw, op, arg_va, nargs_raw);
+        return sys_loom_register_private(p, loom_fd, op, arg_va, nargs_raw);
 
     if (op == LOOM_REGISTER_HANDLES) {
-        if (n > LOOM_MAX_REG_HANDLES)                return -1;
+        if (nargs_raw > LOOM_MAX_REG_HANDLES)        return -T_E_INVAL;
+        u32 n = (u32)nargs_raw;
         hidx_t fds[LOOM_MAX_REG_HANDLES];
         if (n > 0) {
-            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -1;
+            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -T_E_FAULT;
             for (u32 i = 0; i < n; i++) {
                 u8 fb[4];
                 for (int b = 0; b < 4; b++)
                     if (uaccess_load_u8(arg_va + (u64)i * 4u + (u64)b, &fb[b]) != 0)
-                        return -1;
+                        return -T_E_FAULT;
                 u32 v = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
                 fds[i] = (hidx_t)v;
             }
         }
-        return (s64)sys_loom_register_for_proc(p, (hidx_t)loom_fd_raw, op,
-                                               n > 0 ? fds : NULL, n);
+        return (s64)sys_loom_register_for_proc(p, loom_fd, op, n > 0 ? fds : NULL, n);
     }
 
     if (op == LOOM_REGISTER_BUFFERS) {
-        if (n > LOOM_MAX_REG_BUFFERS)                return -1;
+        if (nargs_raw > LOOM_MAX_REG_BUFFERS)        return -T_E_INVAL;
+        u32 n = (u32)nargs_raw;
         struct loom_buf_reg bufs[LOOM_MAX_REG_BUFFERS];
         if (n > 0) {
             if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(struct loom_buf_reg)))
-                return -1;
+                return -T_E_FAULT;
             // Copy each {u64 va; u64 len} byte-by-byte (TOCTOU-safe; never re-read
             // after the kernel snapshot) and assemble little-endian.
             for (u32 i = 0; i < n; i++) {
                 u64 base = arg_va + (u64)i * (u64)sizeof(struct loom_buf_reg);
                 u8 raw[16];
                 for (int b = 0; b < 16; b++)
-                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -1;
+                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -T_E_FAULT;
                 u64 va = 0, len = 0;
                 for (int b = 0; b < 8; b++) {
                     va  |= (u64)raw[b]      << (8 * b);
@@ -8066,8 +8078,7 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                 bufs[i].len = len;
             }
         }
-        return (s64)sys_loom_register_buffers_for_proc(p, (hidx_t)loom_fd_raw,
-                                                       n > 0 ? bufs : NULL, n);
+        return (s64)sys_loom_register_buffers_for_proc(p, loom_fd, n > 0 ? bufs : NULL, n);
     }
 
     return -T_E_INVAL;   // unknown register op
@@ -8075,7 +8086,7 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
 
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
                             u32 min_complete, u32 flags) {
-    if (!p) return -1;
+    if (!p) return -T_E_INVAL;
     // handle_get holds a loom ref (loom_ref via handle_acquire_obj) for the whole
     // call, so loom_free cannot run concurrently with loom_enter -- the reap +
     // any submit run against a live ring; the abandon-before-free quiesce only
@@ -8093,8 +8104,10 @@ int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
 static s64 sys_loom_enter_handler(u64 loom_fd_raw, u64 to_submit_raw,
                                   u64 min_complete_raw, u64 flags_raw) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc)                              return -1;
-    return (s64)sys_loom_enter_for_proc(t->proc, (hidx_t)loom_fd_raw,
+    if (!t || !t->proc)                              return -T_E_INVAL;
+    if ((to_submit_raw | min_complete_raw | flags_raw) > 0xffffffffull)
+        return -T_E_INVAL;
+    return (s64)sys_loom_enter_for_proc(t->proc, sys_hidx_arg(loom_fd_raw),
                                         (u32)to_submit_raw, (u32)min_complete_raw,
                                         (u32)flags_raw);
 }

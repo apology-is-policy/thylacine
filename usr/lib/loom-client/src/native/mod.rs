@@ -400,8 +400,11 @@ impl<K: Kernel> WaitSource for RingWait<'_, K> {
             self.inner.lost();
             return Ok(WakeReason::Event);
         }
+        // The kernel answers POLLERR only for a Loom object it no longer
+        // recognises: nothing on this ring can be trusted.
         if events & POLLERR != 0 {
-            return Err(-EBADF);
+            self.inner.fail();
+            return Err(-EIO);
         }
         Ok(WakeReason::Event)
     }
@@ -488,9 +491,13 @@ impl<K: Kernel> Inner<K> {
         if self.sq.dropped_changed() {
             panic!("loom-client: the kernel dropped an SQE the adapter wrote in range");
         }
-        // A ring latched closing answers -ECANCELED, a dead number -EBADF.
+        // A ring latched closing answers -ECANCELED, a dead number -EBADF. Any
+        // other refusal (-EINVAL, -EACCES) repeats on every ENTER, so the queued
+        // SQEs could never run: the ring fails rather than hang its futures.
         if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
             self.lost();
+        } else if rc < 0 {
+            self.fail();
         }
     }
     fn wait(&self, deadline: Option<u64>) -> Result<()> {
@@ -590,9 +597,17 @@ impl<K: Kernel> Inner<K> {
                     // still arrive: one already in the CQ, or one the kernel held
                     // for CQ room and delivers before the abort's terminal.
                     // Unreturned, its member stays leased and REAP refuses the pool.
+                    // The ledger checks it first: a replayed record must never
+                    // RETURN a member a live payload still reads.
                     Err(StorageError::Closing) => {
-                        if cqe.result > 0 {
-                            let rc = self.shared.return_buffer(d.record.receipt);
+                        let refused =
+                            unsafe { pool.refuse(cqe.result, cqe.flags, d.record.receipt) };
+                        let Ok(refused) = refused else {
+                            self.fail();
+                            return Err(-EIO);
+                        };
+                        if let Some(receipt) = refused {
+                            let rc = self.shared.return_buffer(receipt);
                             // REGISTER found the descriptor gone and forgot it.
                             if rc == -(ECANCELED as i64) {
                                 self.lost();

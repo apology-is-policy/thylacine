@@ -696,6 +696,7 @@ void test_loom_create_rejects_bad_args(void);
 void test_loom_refcount_lifecycle(void);
 void test_loom_setup_via_proc(void);
 void test_loom_setup_rejects(void);
+void test_loom_setup_resource_refusals(void);
 void test_loom_register_handles(void);
 void test_loom_register_rejects(void);
 void test_loom_register_replaces(void);
@@ -2805,6 +2806,7 @@ struct test_case g_tests[] = {
     { "loom.refcount_lifecycle",         test_loom_refcount_lifecycle,         false, NULL },
     { "loom.setup_via_proc",             test_loom_setup_via_proc,             false, NULL },
     { "loom.setup_rejects",              test_loom_setup_rejects,              false, NULL },
+    { "loom.setup_resource_refusals",    test_loom_setup_resource_refusals,    false, NULL },
     { "loom.register_handles",           test_loom_register_handles,           false, NULL },
     { "loom.register_rejects",           test_loom_register_rejects,           false, NULL },
     { "loom.register_replaces",          test_loom_register_replaces,          false, NULL },

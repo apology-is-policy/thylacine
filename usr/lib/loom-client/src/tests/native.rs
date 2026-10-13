@@ -1,7 +1,10 @@
 //! The native adapter against a simulated kernel (sim.rs).
 mod sim;
-use crate::native::{PoolMember, Ring, Shot};
-use sim::{EBADF, ECANCELED, EINVAL, ENOENT, ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind};
+use crate::native::{POLLERR, PoolMember, Ring, Shot};
+use sim::{
+    ABORTING, EACCES, EBADF, ECANCELED, EINTR, EINVAL, ENOENT, ENOTDIR, ETIMEDOUT, RETIRED, Sim,
+    SimKernel, SlotKind,
+};
 use std::future::Future;
 
 const MS: u64 = 1_000_000;
@@ -1015,5 +1018,206 @@ fn a_payload_dropped_after_the_ring_closed_under_closes_the_ring() {
     drop(p);
     assert_eq!(r.turn(Some(r.now())).err(), Some(ECANCELED as i32));
     drop((stream, fid, scope, target, pool, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+/// A shot CQE replayed after retire() (an I-29 breach) names a member a live
+/// payload still reads: the ring fails, and the member is never RETURNed.
+#[test]
+fn a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return() {
+    let sim = Sim::new();
+    file(&sim, "burst", b"");
+    sim.s().shots.insert(
+        b"burst".to_vec(),
+        vec![b"kept".to_vec(), b"next".to_vec()].into(),
+    );
+    let r = ring(&sim, 8, &[4096]);
+    // One member: the second shot waits for it, so the stream stays routed.
+    let pool = r.pool(&[range(0, 0, 64)]).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"burst", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let mut stream = fid.stream(&pool, 0, 64, true, None).unwrap();
+    let Shot::Payload(p) = run(&r, stream.next()).unwrap() else {
+        panic!("a payload")
+    };
+    // Replayed before retire() aborts the scope, so it is routed ahead of the
+    // stream's cancel terminal, while the route still stands.
+    sim.replay_last_shot();
+    r.retire();
+    assert_eq!(r.turn(Some(r.now() + MS)).err(), Some(-5));
+    assert_eq!(sim.s().returns, 0, "the held member was not returned");
+    assert_eq!(p.bytes(), b"kept");
+    drop((p, stream, fid, scope, target, pool, r));
+}
+
+/// The kernel checks an operation's scope before its FID (loom_fid_borrow): a
+/// scope that is not READY answers -ECANCELED, then a FID that is not READY
+/// -ENOENT. The states are set in the simulated kernel directly: no adapter
+/// handle can reach a FID in that state.
+#[test]
+fn an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    let set = |kind: SlotKind, state: u32| {
+        let mut s = sim.s();
+        let slot = s
+            .slots
+            .iter_mut()
+            .flatten()
+            .find(|s| {
+                s.kind == kind && (kind != SlotKind::Fid || s.name.as_deref() == Some(&b"f"[..]))
+            })
+            .unwrap();
+        core::mem::replace(&mut slot.state, state)
+    };
+    let was = set(SlotKind::Fid, ABORTING);
+    assert_eq!(
+        run(&r, fid.open(0, None).unwrap()).err(),
+        Some(ENOENT as i32)
+    );
+    set(SlotKind::Fid, was);
+    let was = set(SlotKind::Scope, ABORTING);
+    assert_eq!(
+        run(&r, fid.open(0, None).unwrap()).err(),
+        Some(ECANCELED as i32)
+    );
+    set(SlotKind::Scope, was);
+}
+
+/// A WALK from a FID other than the root: an empty name clones that FID, and a
+/// name below a file answers -ENOTDIR.
+#[test]
+fn a_walk_from_a_file_fid_clones_it_or_answers_enotdir() {
+    let sim = Sim::new();
+    file(&sim, "f", b"bytes");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    let clone = run(&r, fid.walk(b"", None).unwrap()).unwrap();
+    run(&r, clone.open(0, None).unwrap()).unwrap();
+    let done = run(&r, clone.read(range(0, 0, 5), 0, None).unwrap()).unwrap();
+    assert_eq!(done.bytes(), b"bytes");
+    assert_eq!(
+        run(&r, fid.walk(b"g", None).unwrap()).err(),
+        Some(ENOTDIR as i32)
+    );
+}
+
+/// A RETURN the kernel refuses hands the payload back whole: its bytes stay
+/// readable, and a later return succeeds.
+#[test]
+fn a_refused_return_hands_the_payload_back() {
+    let sim = Sim::new();
+    file(&sim, "f", b"kept");
+    let r = ring(&sim, 8, &[4096]);
+    let pool = r.pool(&[range(0, 0, 64)]).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let mut stream = fid.stream(&pool, 0, 64, false, None).unwrap();
+    let Shot::Payload(p) = run(&r, stream.next()).unwrap() else {
+        panic!("a payload")
+    };
+    sim.s().refuse_return = Some(EINVAL);
+    let Err((rc, p)) = p.try_return() else {
+        panic!("the refusal")
+    };
+    assert_eq!(rc, EINVAL as i32);
+    assert_eq!(p.bytes(), b"kept");
+    assert_eq!(sim.s().returns, 0);
+    p.try_return().map_err(|(e, _)| e).unwrap();
+    assert_eq!(sim.s().returns, 1);
+}
+
+/// An ENTER refusal that is not a close (-EACCES: this image is not the
+/// ring's creator) would repeat on every turn, so the ring fails and closes
+/// its own descriptor.
+#[test]
+fn an_enter_refusal_that_is_not_a_close_fails_the_ring() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    sim.s().enter_errno = Some(EACCES);
+    let connect = target.connect(None).unwrap();
+    assert_eq!(r.turn(Some(r.now() + MS)).err(), Some(-5));
+    assert_eq!(
+        r.block_on(connect, None).and_then(|c| c.map(drop)).err(),
+        Some(-5)
+    );
+    assert_eq!(sim.s().closed_fds, vec![7], "a failed ring is closed");
+}
+
+/// poll's -EINTR is a spurious wake: the turn ends early, and the next one
+/// waits out its deadline.
+#[test]
+fn a_poll_interrupted_by_a_note_is_a_spurious_wake() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let deadline = r.now() + 3 * MS;
+    sim.s().poll_answer = Some(EINTR);
+    assert_eq!(r.turn(Some(deadline)).unwrap(), 0);
+    assert!(r.now() < deadline, "the interrupted wait returned at once");
+    assert_eq!(r.turn(Some(deadline)).unwrap(), 0);
+    assert!(r.now() >= deadline);
+    assert_eq!(sim.s().polls.len(), 2);
+}
+
+/// POLLERR names a Loom object the kernel no longer recognises: the ring fails.
+#[test]
+fn a_poll_error_fails_the_ring() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    sim.s().poll_answer = Some(POLLERR as i64);
+    assert_eq!(r.turn(Some(r.now() + MS)).err(), Some(-5));
+    assert_eq!(r.turn(None).err(), Some(-5), "and stays failed");
+    assert_eq!(sim.s().closed_fds, vec![7], "a failed ring is closed");
+}
+
+/// An explicit close with handles still alive: every later use answers a
+/// close, a held payload keeps its bytes, and the descriptor is closed once.
+#[test]
+fn an_explicit_close_with_live_handles_cancels_their_use() {
+    let sim = Sim::new();
+    file(&sim, "f", b"kept");
+    let r = ring(&sim, 8, &[4096]);
+    let pool = r.pool(&[range(0, 0, 64)]).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let mut stream = fid.stream(&pool, 0, 64, false, None).unwrap();
+    let Shot::Payload(p) = run(&r, stream.next()).unwrap() else {
+        panic!("a payload")
+    };
+    r.close();
+    assert_eq!(sim.s().closed_fds, vec![7]);
+    assert_eq!(fid.walk(b"", None).err(), Some(ECANCELED as i32));
+    assert_eq!(scope.walk(b"f", None).err(), Some(ECANCELED as i32));
+    assert_eq!(r.turn(None).err(), Some(ECANCELED as i32));
+    assert_eq!(p.bytes(), b"kept");
+    drop((p, stream, fid, scope, target, pool, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "closed once");
+    assert_eq!(sim.regions(), 0);
+}
+
+/// A pool's REAP that finds the descriptor gone: the adapter forgets the
+/// number and reports a close.
+#[test]
+fn a_pool_dropped_after_the_ring_closed_under_never_closes_the_number() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let pool = r.pool(&[range(0, 0, 64)]).unwrap();
+    drop(pool);
+    sim.close_under();
+    assert_eq!(r.turn(Some(r.now())).err(), Some(ECANCELED as i32));
+    drop(r);
     assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
 }

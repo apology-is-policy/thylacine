@@ -191,9 +191,69 @@ static void close_ring(long fd, const struct t_loom_params *q) {
 // Neither route is chosen before the flags are read, in either image.
 static void pre_route_refusals(void) {
     long rc = t_loom_setup(2, (struct t_loom_params *)KERNEL_VA);
-    CHECK(rc == -1, "params at a kernel address: the legacy -1", rc);
+    CHECK(rc == -E_FAULT, "params at a kernel address: -EFAULT", rc);
     rc = t_loom_setup(2, (struct t_loom_params *)(void *)g_p2);
-    CHECK(rc == -1, "unreadable params: the legacy -1", rc);
+    CHECK(rc == -E_FAULT, "unreadable params: -EFAULT", rc);
+}
+
+// The ordinary route, in both images: every refusal is an errno, and an argument
+// with bits above its declared width is refused. Each wide value is one that a
+// cast would turn into a request that succeeds.
+static void ordinary_refusals(void) {
+    fill(&g_params, 0xA5, sizeof(g_params));
+    CHECK(setup_at(&g_params, 0, 3) == -E_INVAL, "ordinary setup: entries 3", 0);
+    CHECK(setup_at(&g_params, 0x100u, 2) == -E_INVAL, "ordinary setup: an unknown flag", 0);
+    long rc = setup_at(&g_params, 0, (1ul << 32) | 2);
+    CHECK(rc == -E_INVAL, "setup entries above 32 bits: -EINVAL", rc);
+    p1_writable(1);
+    fill(g_p1, 0, sizeof(struct t_loom_params));
+    p1_writable(0);
+    rc = t_loom_setup(2, (struct t_loom_params *)(void *)g_p1);
+    CHECK(rc == -E_FAULT, "ordinary setup, read-only params: the copyout faults", rc);
+
+    fill(&g_params, 0xA5, sizeof(g_params));
+    long fd = setup_at(&g_params, 0, 2);
+    CHECK(fd >= 0, "an ordinary ring for the refusals", fd);
+    static uint32_t list[1];
+    list[0] = 999;
+    rc = t_loom_register(fd, T_LOOM_REGISTER_HANDLES, list, 1);
+    CHECK(rc == -E_BADF, "HANDLES: a listed fd naming nothing: -EBADF", rc);
+    list[0] = (uint32_t)fd;
+    rc = t_loom_register(fd, T_LOOM_REGISTER_HANDLES, list, 1);
+    CHECK(rc == -E_BADF, "HANDLES: a listed ring, not a Spoor: -EBADF", rc);
+    rc = t_loom_register(fd, T_LOOM_REGISTER_HANDLES, list, 1ul << 16);
+    CHECK(rc == -E_INVAL, "HANDLES: nargs over the cap: -EINVAL", rc);
+    rc = t_loom_register(fd, T_LOOM_REGISTER_HANDLES, (void *)KERNEL_VA, 1);
+    CHECK(rc == -E_FAULT, "HANDLES: the array at a kernel address: -EFAULT", rc);
+    static struct t_loom_buf_reg reg;
+    reg.va = (uint64_t)(uintptr_t)g_p0;
+    reg.len = 0;
+    rc = t_loom_register(fd, T_LOOM_REGISTER_BUFFERS, &reg, 1);
+    CHECK(rc == -E_INVAL, "BUFFERS: a zero-length buffer: -EINVAL", rc);
+    rc = t_loom_register(fd, T_LOOM_REGISTER_BUFFERS, &reg, 1ul << 16);
+    CHECK(rc == -E_INVAL, "BUFFERS: nargs over the cap: -EINVAL", rc);
+    rc = t_loom_register(fd, T_LOOM_REGISTER_BUFFERS, (void *)KERNEL_VA, 1);
+    CHECK(rc == -E_FAULT, "BUFFERS: the array at a kernel address: -EFAULT", rc);
+    rc = t_loom_enter(fd, 0, 0, 0x80);
+    CHECK(rc == -E_INVAL, "ordinary ENTER: an unknown flag: -EINVAL", rc);
+
+    rc = t_loom_register(fd | (1l << 32), T_LOOM_REGISTER_HANDLES, list, 0);
+    CHECK(rc == -E_BADF, "REGISTER fd above 32 bits: -EBADF", rc);
+    rc = t_loom_register(fd, (1ul << 32) | T_LOOM_REGISTER_HANDLES, list, 0);
+    CHECK(rc == -E_INVAL, "REGISTER op above 32 bits: -EINVAL", rc);
+    rc = t_loom_register(fd, T_LOOM_REGISTER_HANDLES, list, 1ul << 32);
+    CHECK(rc == -E_INVAL, "REGISTER nargs above 32 bits: -EINVAL", rc);
+    rc = t_loom_enter(fd | (1l << 32), 0, 0, 0);
+    CHECK(rc == -E_BADF, "ENTER fd above 32 bits: -EBADF", rc);
+    rc = t_loom_enter(fd, 1ul << 32, 0, 0);
+    CHECK(rc == -E_INVAL, "ENTER to_submit above 32 bits: -EINVAL", rc);
+    rc = t_loom_enter(fd, 0, 1ul << 32, 0);
+    CHECK(rc == -E_INVAL, "ENTER min_complete above 32 bits: -EINVAL", rc);
+    rc = t_loom_enter(fd, 0, 0, 1ul << 32);
+    CHECK(rc == -E_INVAL, "ENTER flags above 32 bits: -EINVAL", rc);
+    rc = t_loom_enter(fd, 0, 0, 0);
+    CHECK(rc == 0, "the ring still answers after the refusals", rc);
+    close_ring(fd, &g_params);
 }
 
 static int run_default(long fd0, uint64_t va0) {
@@ -206,6 +266,7 @@ static int run_default(long fd0, uint64_t va0) {
             CHECK(((uint8_t *)&g_params)[b] == 0xA5, "a refused setup writes no params", b);
     }
     pre_route_refusals();
+    ordinary_refusals();
     record(g_rec, sizeof(g_rec));
     for (unsigned long op = 2; op <= 9; op++)
         CHECK(t_loom_register(999, op, g_rec, 1) == -E_OPNOTSUPP,
@@ -462,6 +523,7 @@ static int run_qual(long fd, long fd0, uint64_t va0, long buf) {
           setup_at(&g_params, P, 2 * T_LOOM_MAX_ENTRIES) == -E_INVAL,
           "zero, non-power-of-two and oversized entries refused", 0);
     pre_route_refusals();
+    ordinary_refusals();
 
     // A params copyout that faults rolls the whole setup back: the next setup
     // gets the same fd and the same ring address.

@@ -97,7 +97,10 @@ enabled by it.
 - **Waiting.** `RingWait` is the cores' `WaitSource`: arm samples `cq_tail`,
   ready is a non-empty CQ, wait is poll(2) with the time left rounded up to a
   millisecond. POLLHUP and POLLNVAL forget the descriptor and close the ring;
-  POLLERR fails the wait with -EBADF.
+  POLLERR, which the kernel answers only for a Loom object it no longer
+  recognises, fails the ring (-EIO). poll's -EINTR is a spurious wake. An
+  ENTER refusal that is not a close (-EINVAL, -EACCES) would repeat on every
+  turn, so it fails the ring too.
 - **Deadlines** go in each SQE; the kernel enforces them and aborts the scope.
 - **Slots.** A scope's fids pin it, so `reap_pass` repeats while a pass frees
   a slot. `Shared` tracks every target, scope and fid the adapter minted:
@@ -115,8 +118,9 @@ enabled by it.
   `engine_ready_visit`), and ENTER can precharge a refusal against a full CQ
   (`loom_service_frontend.c`) that no request record counts. Retirement discards
   only abandoned book entries, so a future held across it keeps its terminal. A
-  shot routed once retirement has begun is refused by its pool and RETURNed at
-  once, so REAP can free the pool; a RETURN that finds the descriptor gone
+  shot routed once retirement has begun is refused by its pool, checked by the
+  ledger (`Pool::refuse`; a record naming a member a live payload still reads
+  fails the ring) and RETURNed at once, so REAP can free the pool; a RETURN that finds the descriptor gone
   forgets it as any REGISTER does, and the turn answers -ECANCELED.
 - **Teardown.** `close` (and dropping the `Ring`) aborts every scope and closes
   the descriptor. `Shared` detaches the mapping, then the buffers, when its last
@@ -199,12 +203,13 @@ completion path allocates.
    its ring lived, and the sim was more lenient than the kernel. The sim has no
    slot phase: the kernel's RETIRING FID is reachable by REAP only through
    `control_retiring_fid`, which only the guest test exercises.
-4. Paths no host test reaches yet: `Fid::walk` from a fid that is not the
-   root, a refused
-   `Payload::try_return`, POLLERR and -EINTR (the sim returns neither), an ENTER
-   error other than -ECANCELED and -EBADF, an explicit `Ring::close` with
-   handles alive, and a closing pool's REAP (`destroy_pool`) answered
-   -ECANCELED once the ring is lost.
+4. The six paths round 1 left untested have host tests since 2026-10-13,
+   each red under its own sabotage: `Fid::walk` from a file fid, a refused
+   `Payload::try_return`, poll's -EINTR and POLLERR (sim knobs), an ENTER
+   refusal that is not a close, an explicit `Ring::close` with handles alive,
+   and `destroy_pool` answered -EBADF once the ring is lost. The sim answers
+   -ENOENT for an operation on a FID that is not READY under a READY scope, as
+   `loom_fid_borrow` does, and -EISDIR for a byte READ of the root.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

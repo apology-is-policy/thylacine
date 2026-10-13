@@ -183,3 +183,36 @@ fn bounded_members_and_lease_wrap() {
     let too_many = [ranges[0]; 65];
     assert!(LeaseLedger::new(pool(), &too_many, &[64]).is_err());
 }
+#[test]
+fn a_refused_read_takes_no_lease_but_passes_every_check() {
+    let mut b = book();
+    let held = b.accept_read(4, 5, receipt(0, 11)).unwrap().unwrap();
+    // A replay of a member a payload holds, and a member past the pool.
+    assert!(matches!(
+        b.refuse_read(4, 5, receipt(0, 12)),
+        Err(LeaseError::Busy)
+    ));
+    assert!(matches!(
+        b.refuse_read(4, 5, receipt(2, 12)),
+        Err(LeaseError::Receipt)
+    ));
+    assert!(matches!(
+        b.refuse_read(5, 5, receipt(1, 12)),
+        Err(LeaseError::Receipt)
+    ));
+    // A fresh shot for a free member goes back as its receipt; no lease is taken
+    // and its lease order advances, so the same record replayed is stale.
+    assert_eq!(
+        b.refuse_read(4, 5, receipt(1, 12)).unwrap(),
+        Some(receipt(1, 12))
+    );
+    assert_eq!(b.outstanding(), 1);
+    assert!(matches!(
+        b.refuse_read(4, 5, receipt(1, 12)),
+        Err(LeaseError::Stale)
+    ));
+    // A non-payload record carries nothing to return.
+    assert_eq!(b.refuse_read(0, 0, zero()).unwrap(), None);
+    b.begin_return(&held).unwrap();
+    b.finish_return(&held, 0).unwrap();
+}

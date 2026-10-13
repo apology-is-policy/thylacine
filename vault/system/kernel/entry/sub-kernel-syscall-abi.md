@@ -497,9 +497,12 @@ be one 4 KiB staging buffer per round trip.
   ones use `-1`, and there is no migration underway. A caller handling both must
   know which is which per call. One exception, 2026-10-13 (operator vote 6):
   Loom's ENTER and REGISTER answer a descriptor that names no ring with
-  `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`; their other
-  legacy refusals keep `-1`.
-- **Loom reads its handle and op arguments as 32-bit values.** Its handlers
+  `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`. Since vote 7 the
+  same day every Loom refusal is an errno (LOOM.md 8.2a).
+- **A too-wide argument is refused, never truncated (operator vote 8,
+  2026-10-13; ERRORS.md principle 6).** Loom conforms (the next sentences
+  describe it before the vote). Handlers that still cast a high word away
+  are one tracked sweep. Before: its handlers
   cast `loom_fd` to `hidx_t` and `op`, `nargs` and ENTER's counts and flags to
   `u32`, so a high word is ignored: op `0x1_0000_0002` routes as op 2, and
   descriptor `0x1_0000_0005` names the caller's own descriptor 5. Handlers

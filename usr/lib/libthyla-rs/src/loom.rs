@@ -309,11 +309,9 @@ impl Ring {
             _resv1: [0; 4],
         };
         // SYS_LOOM_SETUP returns the loom_fd (>= 0) and fills `params` with the
-        // mapped ring geometry, or -1 (bad args / OOM / handle-table-full).
+        // mapped ring geometry, or -errno (docs/LOOM.md 8.2a).
         let rc = unsafe { t_loom_setup(entries as u64, &mut params as *mut Params as u64) };
-        if rc < 0 {
-            return Err(Error::InvalidArgument);
-        }
+        Error::from_syscall_return(rc)?;
         let handle = Handle::from_raw(rc as i32, Rights::READ | Rights::WRITE);
 
         let base = params.ring_va;
@@ -369,11 +367,7 @@ impl Ring {
                 fds.len() as u64,
             )
         };
-        if rc < 0 {
-            Err(Error::InvalidArgument)
-        } else {
-            Ok(())
-        }
+        Error::from_syscall_return(rc).map(|_| ())
     }
 
     /// Pin `bufs` (each a VA range within one anonymous RW VMA) for zero-copy
@@ -402,11 +396,7 @@ impl Ring {
                 bufs.len() as u64,
             )
         };
-        if rc < 0 {
-            Err(Error::InvalidArgument)
-        } else {
-            Ok(())
-        }
+        Error::from_syscall_return(rc).map(|_| ())
     }
 
     /// Place one SQE into the SQ. Returns [`Error::WouldBlock`] if the SQ is full
@@ -448,11 +438,7 @@ impl Ring {
                 flags as u64,
             )
         };
-        if rc < 0 {
-            Err(Error::InvalidArgument)
-        } else {
-            Ok(rc)
-        }
+        Error::from_syscall_return(rc)
     }
 
     /// Reap one completion, or `None` if the CQ is empty. Single-consumer: this

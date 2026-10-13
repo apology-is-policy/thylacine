@@ -809,6 +809,13 @@ descriptor, close, SYS_BURROW_ATTACH/DETACH, the monotonic clock), with the poll
 bits asserted equal to `T_POLL*` at compile time. `ServiceRing` names the ring;
 its setup succeeds only in the qualification image.
 
+The legacy `Ring` passes the kernel's errno through `Error::from_syscall_return`
+(2026-10-13; it reported every SETUP, REGISTER and ENTER refusal as
+`InvalidArgument`): a ring descriptor that names nothing reads as `BadHandle`,
+a page cap as `NoMemory`, and so on (LOOM.md 8.2a). No caller matched
+`InvalidArgument`; libtapestry maps every Ring error to its own `Loom` error
+or passes `as_errno()` into `Transport`.
+
 AS-R8 raw registration is now explicitly unsafe: integer VAs carry the full
 asynchronous lifetime and alias-exclusion obligation through terminal completion
 or local retirement, including wait errors and table replacement. The owned pool

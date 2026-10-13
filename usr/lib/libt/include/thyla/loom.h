@@ -146,9 +146,10 @@ struct t_loom_buf_reg {
 _Static_assert(sizeof(struct t_loom_buf_reg) == 16, "t_loom_buf_reg size");
 _Static_assert(__builtin_offsetof(struct t_loom_buf_reg, len) == 8, "t_loom_buf_reg.len");
 
-// The legacy route answers fd / -1; the private route (PRIVATE_SERVICE or
-// SERVICE_BUFFERS in params->flags) answers fd / -errno. A params block the
-// kernel cannot read answers -1 before either route is chosen.
+// Answers fd / -errno on both routes (the private route is PRIVATE_SERVICE or
+// SERVICE_BUFFERS in params->flags). A params block the kernel cannot read
+// answers -T_E_FAULT before either route is chosen. Every argument wider than
+// its declared type (entries: 32 bits) is refused, never truncated.
 static inline long t_loom_setup(unsigned long entries, struct t_loom_params *params) {
     register long x0 __asm__("x0") = (long)entries;
     register long x1 __asm__("x1") = (long)params;
@@ -157,9 +158,10 @@ static inline long t_loom_setup(unsigned long entries, struct t_loom_params *par
     return x0;
 }
 
-// Ops 0 and 1 answer 0 / -1 on an ordinary ring; ops 2..9 take one record
+// Ops 0 and 1 answer 0 / -errno on an ordinary ring; ops 2..9 take one record
 // (nargs 1) and answer 0 (ABORT: 0 or 1) / -errno. Arguments that pass on a
-// descriptor that names no ring answer -T_E_BADF; an unknown op -T_E_INVAL.
+// descriptor that names no ring answer -T_E_BADF; an unknown op -T_E_INVAL. A
+// descriptor above 31 bits answers -T_E_BADF, an op or nargs above 32 -T_E_INVAL.
 static inline long t_loom_register(long fd, unsigned long op, void *arg,
                                    unsigned long nargs) {
     register long x0 __asm__("x0") = fd;
@@ -174,7 +176,8 @@ static inline long t_loom_register(long fd, unsigned long op, void *arg,
 
 // On a private ring this never sleeps: min_complete must be 0 and flags may hold
 // only NONBLOCK. It answers the SQEs consumed or -errno; park in t_poll. A
-// descriptor that names no ring answers -T_E_BADF.
+// descriptor that names no ring, or is above 31 bits, answers -T_E_BADF; a
+// count or flags word above 32 bits -T_E_INVAL.
 static inline long t_loom_enter(long fd, unsigned long to_submit,
                                 unsigned long min_complete, unsigned long flags) {
     register long x0 __asm__("x0") = fd;

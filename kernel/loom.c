@@ -1234,10 +1234,10 @@ void loom_unref(struct Loom *l) {
 
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n) {
-    if (!l || l->magic != LOOM_MAGIC)  return -1;
+    if (!l || l->magic != LOOM_MAGIC)  return -T_E_INVAL;
     if (loom_is_private(l))            return -T_E_OPNOTSUPP;
-    if (n > LOOM_MAX_REG_HANDLES)      return -1;
-    if (n > 0 && (!spoors || !rights)) return -1;
+    if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
+    if (n > 0 && (!spoors || !rights)) return -T_E_INVAL;
 
     // Loom-4c SQPOLL deadline-capable gate. On an SQPOLL ring the poll-thread
     // block-recvs on the dev9p client of any in-flight async op, in process
@@ -1252,7 +1252,7 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
             struct p9_client *cl; u32 fid;
             if (dev9p_client_fid(spoors[i], &cl, &fid) == 0 &&
                 !p9_client_recv_is_deadline_capable(cl)) {
-                return -1;
+                return -T_E_OPNOTSUPP;
             }
         }
     }
@@ -1730,10 +1730,10 @@ int loom_private_target_put(struct Loom *l, struct loom_service_ref ref) {
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n) {
-    if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
+    if (!l || l->magic != LOOM_MAGIC || !p)  return -T_E_INVAL;
     if (loom_is_private(l))                  return -T_E_OPNOTSUPP;
-    if (n > LOOM_MAX_REG_BUFFERS)            return -1;
-    if (n > 0 && !bufs)                      return -1;
+    if (n > LOOM_MAX_REG_BUFFERS)            return -T_E_INVAL;
+    if (n > 0 && !bufs)                      return -T_E_INVAL;
 
     // Resolve + pin the WHOLE new set first (all-or-nothing, like
     // loom_register_handles): under p->vma_lock so vma_lookup is stable. On any
@@ -1746,12 +1746,12 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     u32 done = 0;
     int rc = 0;
     for (; done < n; done++) {
-        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -1; break; }
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -T_E_INVAL; break; }
     }
     spin_unlock(&p->as->lock);
     if (rc != 0) {
         for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
-        return -1;
+        return rc;
     }
 
     // Install: swap the table under l->lock, then unref the displaced pins OUTSIDE
@@ -3525,8 +3525,8 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
 }
 
 int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
-    if (!l || l->magic != LOOM_MAGIC) return -1;
-    if (flags & ~LOOM_ENTER_VALID)    return -1;
+    if (!l || l->magic != LOOM_MAGIC) return -T_E_INVAL;
+    if (flags & ~LOOM_ENTER_VALID)    return -T_E_INVAL;
 
     if (loom_is_private(l)) {
         spin_lock(&l->lock);
@@ -3803,14 +3803,14 @@ int loom_private_start_executor(struct Loom *l) {
 }
 
 int loom_start_sqpoll(struct Loom *l) {
-    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (!l || l->magic != LOOM_MAGIC) return -T_E_INVAL;
     if (loom_is_private(l))           return -T_E_OPNOTSUPP;
     // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
     // group-terminates and its only exit is the stop-flag terminal above). Set
     // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free
     // would observe it; ready() then makes it runnable.
     struct Thread *kt = thread_create_with_arg(kproc(), loom_sqpoll_main, l);
-    if (!kt) return -1;
+    if (!kt) return -T_E_NOMEM;
     l->sqpoll = kt;
     ready(kt);
     return 0;

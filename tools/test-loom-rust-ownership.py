@@ -12,6 +12,7 @@ mod err {
  #[derive(Debug)] pub enum Error { InvalidArgument, WouldBlock }
  pub type Result<T> = core::result::Result<T,Error>;
  impl From<i32> for Error { fn from(_:i32)->Self { Self::InvalidArgument } }
+ impl Error { pub fn from_syscall_return(rc:i64)->Result<i64> { if rc>=0 {Ok(rc)} else {Err(Self::InvalidArgument)} } }
 }
 mod handle {
  #[derive(Copy,Clone)] pub struct Rights;

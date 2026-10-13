@@ -159,6 +159,43 @@ impl LeaseLedger {
         flags: u32,
         receipt: BufferReceipt,
     ) -> Result<Option<LeaseToken>, LeaseError> {
+        let Some(i) = self.check_read(result, flags, receipt)? else {
+            return Ok(None);
+        };
+        let member = &mut self.members[i];
+        member.last = receipt.lease;
+        member.state = State::Leased;
+        self.outstanding += 1;
+        Ok(Some(LeaseToken {
+            owner: self.owner,
+            receipt,
+            length: result as usize,
+        }))
+    }
+
+    /// A payload no one will hold, because its ring or pool is closing: the
+    /// record passes the same checks and advances the member's lease order, and
+    /// its receipt is handed back for RETURN instead of becoming a token.
+    pub(crate) fn refuse_read(
+        &mut self,
+        result: i32,
+        flags: u32,
+        receipt: BufferReceipt,
+    ) -> Result<Option<BufferReceipt>, LeaseError> {
+        let Some(i) = self.check_read(result, flags, receipt)? else {
+            return Ok(None);
+        };
+        self.members[i].last = receipt.lease;
+        Ok(Some(receipt))
+    }
+
+    /// `Some(member)` for a payload record that may take its member's lease.
+    fn check_read(
+        &self,
+        result: i32,
+        flags: u32,
+        receipt: BufferReceipt,
+    ) -> Result<Option<usize>, LeaseError> {
         if !self.bound {
             return Err(LeaseError::State);
         }
@@ -185,7 +222,7 @@ impl LeaseLedger {
         {
             return Err(LeaseError::Receipt);
         }
-        let member = &mut self.members[receipt.member as usize];
+        let member = &self.members[receipt.member as usize];
         if result as u64 > member.range.length {
             return Err(LeaseError::Receipt);
         }
@@ -195,14 +232,7 @@ impl LeaseLedger {
         if receipt.lease <= member.last {
             return Err(LeaseError::Stale);
         }
-        member.last = receipt.lease;
-        member.state = State::Leased;
-        self.outstanding += 1;
-        Ok(Some(LeaseToken {
-            owner: self.owner,
-            receipt,
-            length: result as usize,
-        }))
+        Ok(Some(receipt.member as usize))
     }
 
     fn exact(&mut self, token: &LeaseToken) -> Result<&mut Member, LeaseError> {

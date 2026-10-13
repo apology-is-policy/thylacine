@@ -27,8 +27,11 @@ pub const EINVAL: i64 = -22;
 pub const ENOENT: i64 = -2;
 pub const ENOSPC: i64 = -28;
 pub const ENOTDIR: i64 = -20;
+pub const EISDIR: i64 = -21;
 pub const ETIMEDOUT: i64 = -110;
 pub const ECANCELED: i64 = -125;
+pub const EINTR: i64 = -4;
+pub const EACCES: i64 = -13;
 
 pub const RESERVED: u32 = 1;
 pub const READY: u32 = 5;
@@ -145,6 +148,14 @@ pub struct State {
     pub dropped: u32,
     /// Overwrite the next CQE's user_data, to forge a stale completion.
     pub forge_next: Option<u64>,
+    /// The last payload shot posted, for a test that replays it.
+    last_shot: Option<(Option<usize>, u64, i32, u32, BufferReceipt)>,
+    /// Every ENTER on a live ring answers this, as a non-creator image's does.
+    pub enter_errno: Option<i64>,
+    /// The next poll answers this instead of looking at the ring.
+    pub poll_answer: Option<i64>,
+    /// The next RETURN answers this instead of releasing its member.
+    pub refuse_return: Option<i64>,
 }
 #[derive(Clone)]
 pub struct Sim(pub Rc<RefCell<State>>);
@@ -185,6 +196,10 @@ impl Sim {
             next_lease: 1,
             dropped: 0,
             forge_next: None,
+            last_shot: None,
+            enter_errno: None,
+            poll_answer: None,
+            refuse_return: None,
         })))
     }
     pub fn kernel(&self) -> SimKernel {
@@ -222,6 +237,13 @@ impl Sim {
         for (scope, user_data, result) in std::mem::take(&mut s.held) {
             s.post(Some(scope), user_data, result, 0, zero());
         }
+    }
+    /// Post the last payload shot's CQE a second time, receipt and all: an I-29
+    /// breach the kernel never makes, for the adapter's defence in depth.
+    pub fn replay_last_shot(&self) {
+        let mut s = self.0.borrow_mut();
+        let (scope, user_data, result, flags, receipt) = s.last_shot.expect("a shot was posted");
+        s.post(scope, user_data, result, flags, receipt);
     }
     /// Another thread closes the ring's descriptor: the number is gone, so
     /// ENTER and REGISTER answer -EBADF and poll POLLNVAL.
@@ -336,6 +358,9 @@ impl State {
         flags: u32,
         receipt: BufferReceipt,
     ) {
+        if flags & CQE_SERVICE_BUFFER != 0 {
+            self.last_shot = Some((scope, user_data, result, flags, receipt));
+        }
         self.deferred
             .push_back((scope, user_data, result, flags, receipt));
         self.flush();
@@ -535,6 +560,8 @@ impl State {
                 self.slots[op.source].as_mut().unwrap().open = true;
                 0
             }
+            // The root is the service's only directory: a byte READ of it fails.
+            OpKind::Read { .. } if file.is_none() => EISDIR,
             OpKind::Read { buf, at, len } => {
                 let data = self
                     .files
@@ -675,8 +702,13 @@ impl State {
                     SlotKind::Fid => src.scope,
                     _ => return ENOENT,
                 };
-                if src.state != READY || self.slots[scope].as_ref().unwrap().state != READY {
+                // The kernel's order (loom_fid_borrow, loom_fid_begin_clunk): the
+                // scope first, then the FID itself.
+                if self.slots[scope].as_ref().unwrap().state != READY {
                     return ECANCELED;
+                }
+                if src.state != READY {
+                    return ENOENT;
                 }
                 let kind = if o == OP_WALK as u32 {
                     let Some(d) = self.live(dest) else {
@@ -1009,6 +1041,9 @@ unsafe impl Kernel for SimKernel {
                 if !header_ok(b.size, 40, b.version, b.flags) {
                     return EINVAL;
                 }
+                if let Some(rc) = s.refuse_return.take() {
+                    return rc;
+                }
                 let r = b.receipt;
                 if s.live(r.pool).is_none() {
                     return ENOENT;
@@ -1040,6 +1075,9 @@ unsafe impl Kernel for SimKernel {
         }
         if s.ring().closing {
             return ECANCELED;
+        }
+        if let Some(rc) = s.enter_errno {
+            return rc;
         }
         s.enters += 1;
         s.flush();
@@ -1101,6 +1139,9 @@ unsafe impl Kernel for SimKernel {
         }
         if s.ring().closing {
             return POLLHUP as i64;
+        }
+        if let Some(rc) = s.poll_answer.take() {
+            return rc;
         }
         let ready =
             |s: &State| s.word(5).load(Ordering::Acquire) != s.word(4).load(Ordering::Acquire);

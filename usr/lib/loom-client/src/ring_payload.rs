@@ -652,6 +652,27 @@ impl<B: RingBackend> Pool<B> {
             Ok(None)
         }
     }
+    /// For a record `accept` refused as closing: no payload is made, but the
+    /// record passes the ledger's checks before its receipt goes back to RETURN.
+    /// # Safety
+    /// Record must be the authenticated paired CQ result of a READ for this pool.
+    pub(crate) unsafe fn refuse(
+        &self,
+        result: i32,
+        flags: u32,
+        receipt: BufferReceipt,
+    ) -> Result<Option<BufferReceipt>, Error> {
+        let mut s = self.core.state.borrow_mut();
+        let p = s.pools[self.identity.slot as usize]
+            .as_mut()
+            .ok_or(Error::Stale)?;
+        if p.identity != self.identity {
+            return Err(Error::Stale);
+        }
+        p.ledger
+            .refuse_read(result, flags, receipt)
+            .map_err(Error::Ledger)
+    }
 }
 impl<B: RingBackend> Drop for Pool<B> {
     fn drop(&mut self) {

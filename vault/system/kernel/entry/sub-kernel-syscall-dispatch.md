@@ -1363,7 +1363,8 @@ image. The new Aux test calls use the existing non-exempt false argument.
 
 The SETUP handler sends PRIVATE_SERVICE or SERVICE_BUFFERS to
 `loom_private_setup_for_proc` and returns its negative errno. The legacy path
-still returns -1. REGISTER ops 2..9 go to `sys_loom_register_private`, which
+returns the errnos of LOOM.md 8.2a (operator vote 7, 2026-10-13; it answered -1
+before). REGISTER ops 2..9 go to `sys_loom_register_private`, which
 copies the op's fixed-size record once into kmalloc'd memory, and results return
 through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
 BUFFERS and ENTER branch on `loom_is_private`. A params copyout fault on either
@@ -1379,9 +1380,17 @@ the lever a private op answers -T_E_OPNOTSUPP before any lookup). An unknown
 REGISTER op answers -T_E_INVAL (operator vote 6, 2026-10-13; before it ENTER
 and the legacy REGISTER answered -1, which ERRORS.md forbids). A client tells
 a ring closed under it from its own error by this answer. The legacy
-REGISTER's argument refusals still answer -1, and they come first. The
-handlers read loom_fd and op as 32-bit values and ignore their high words
-([[sub-kernel-syscall-abi]] records which handlers refuse a high word instead).
+REGISTER's argument refusals come first: -T_E_INVAL for nargs over the cap,
+-T_E_FAULT for an array the kernel cannot read (vote 7). An argument wider than
+its declared type is refused, never truncated (vote 8, ERRORS.md principle 6):
+`sys_hidx_arg` turns a descriptor above 31 bits into an index that names
+nothing, so the lookup answers -T_E_BADF after the default image's private-op
+-T_E_OPNOTSUPP; an op, entries count, ENTER count or flags word above 32 bits
+answers -T_E_INVAL before any lookup, and nargs is checked at full width on
+both routes. Pins: `loom.setup_rejects`, `loom.setup_resource_refusals`,
+`loom.register_rejects`, `loom.register_buffers_rejects`,
+`loom.sqpoll_charges_thread_budget`, and `loom-bridge-probe`'s
+`ordinary_refusals`, run in both images.
 
 ## Terminal interaction suboperations
 

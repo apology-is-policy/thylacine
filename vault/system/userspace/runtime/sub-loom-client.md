@@ -91,6 +91,10 @@ outside test builds.
 
 - **lease_ledger** -- one ledger per pool: receipt validation, lease state per
   member, owner ids from a process-wide counter that is never reused.
+  `refuse_read` runs `accept_read`'s checks for a payload no one will hold
+  (its ring or pool is closing), advances the member's lease order and hands
+  the receipt back for RETURN; `Pool::refuse` wraps it, so a replayed record
+  can never RETURN a member a live payload still reads.
 - **paired_cq** -- the single CQ consumer: reads a CQE and its receipt after an
   acquire load of the tail, publishes the head with release.
 - **owned_mapping** -- validates the setup record's geometry (receipt region
