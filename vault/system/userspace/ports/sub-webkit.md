@@ -63,10 +63,12 @@ series; `tools/forage.sh webkit` gathers the source and the ICU tarball, and
 - A thread that resumes running the VM's code executes an ISB first
   (`MachineThreads::unparkCurrentThread`), so code another CPU patched -- the
   collector with the world stopped, a previous JSLock holder -- is never run
-  from stale prefetch. A thread that takes a finished Wasm plan executes one
-  too before it runs the plan's stubs (`Wasm::Module::compileSync`,
-  `JSWebAssemblyInstance::finalizeCreation`). The build refuses a `jsc` in
-  which any of the four functions that must hold an `isb` holds none.
+  from stale prefetch. Every Wasm instance executes one before it reads an
+  exit stub or runs its start function
+  (`JSWebAssemblyInstance::finalizeCreation`), and `Wasm::Module::compileSync`
+  before it returns a group. The build refuses a `jsc` in which any of the four
+  functions that must hold an `isb` holds none, or in which
+  `finalizeCreation`'s comes after its first call into the module record.
 - Every thread WTF creates (compilers, collector helpers, the Wasm worklist)
   gets a 1 MiB stack, not musl's 128 KiB default.
 - The JIT pool is one 64 MiB code region: its exec alias (RX) is the
@@ -196,19 +198,29 @@ compiler thread's code, as the DFG's does. The FTL polls for traps
 (`CheckTraps` lowers to a load and a lazy slow path), so a runaway FTL loop is
 interruptible like a DFG one.
 
-A Wasm module's wasm-to-wasm and wasm-to-JS exit stubs are JIT code written by
-whichever thread finishes its plan (`EntryPlan`), usually a Wasm worklist
-thread, and a synchronous compile's wait (`Plan::waitForCompletion`) returns
-without sleeping when the plan is already done: the JS thread could run stubs
-another CPU wrote with no context-synchronization event between. Upstream has
-the same gap. `Wasm::Module::compileSync`, after `waitUntilFinished`, and
-`JSWebAssemblyInstance::finalizeCreation`, where an asynchronous compile's
-result is taken, now run `WTF::crossModifyingCodeFence()` first
-([[dec-2026-10-13-wasm-plan-isb]]). `build_jsc`'s ISB check became a list of
-four functions: `unparkCurrentThread` (patch 0004), the two plan consumers
-(0005) and `FTL::JITFinalizer::finalize` (upstream's fence, asked for so that
-a merge cannot drop it). The B-2d `jsc` holds no `isb` in either plan
-consumer, so the check can fail.
+A Wasm module's exit stubs are JIT code written off the JS thread. Its
+wasm-to-JS stubs come from the *validation* plan: `Module::Module` takes them
+from the `IPIntPlan` of `Module::validateSync` or `validateAsync`, and the first
+worklist thread to claim them generates them in `EntryPlan::compileFunctions`.
+A CalleeGroup's wasm-to-wasm stubs are written by the thread that completes its
+plan; the IPInt group completes on the thread that creates it
+(`completeSyncIfPossible`), and another thread may take that group later. A
+wait that finds a plan done (`Plan::waitForCompletion`) returns without
+sleeping, so a JS thread could run stubs another CPU wrote with no
+context-synchronization event between. Upstream has the same gap.
+`JSWebAssemblyInstance::finalizeCreation`, which both instance-creation sites
+call before any stub is read or the start function runs, and
+`Wasm::Module::compileSync`, which returns a group, now run
+`WTF::crossModifyingCodeFence()` first ([[dec-2026-10-13-wasm-plan-isb-writers]]); the
+first is the one every consumer passes. `build_jsc`'s ISB check became a list
+of four functions: `unparkCurrentThread` (patch 0004), the two plan consumers
+(0005) and `FTL::JITFinalizer::finalize` (upstream's fence, asked for so that a
+merge cannot drop it), and for `finalizeCreation` the `isb` must also come
+before its first call into `WebAssemblyModuleRecord` (`initializeExports`, then
+`evaluate`, which runs the start function): a fence moved below that call would
+still be present. The B-2d `jsc` holds no `isb` in either plan consumer, so the
+check can fail; the position test refuses a marker call laid out before the
+`isb` and a call that is not there (run on the device `jsc`, 2026-10-13).
 
 `WTF::stackSize()` gives every thread WTF creates 1 MiB on a libc that is
 neither glibc nor bionic, because musl's default stack is 128 KiB; the arm
@@ -351,8 +363,8 @@ patches with the world stopped while the JS thread is parked, and a JSLock's
 previous holder on another CPU. Both are covered by the ISB in
 `MachineThreads::unparkCurrentThread`, which every resume passes (see
 Mechanism). The FTL's compiler threads are the DFG's rule again (the
-finalizer's fence). Wasm's exit stubs, written by a worklist thread, are fenced
-where a thread takes the finished plan (B-2e1). BBQ and OMG are the open part:
+finalizer's fence). Wasm's exit stubs, written off the JS thread, are fenced
+where an instance is created (B-2e1). BBQ and OMG are the open part:
 upstream publishes their code by suspending every VM thread
 (`resetInstructionCacheOnAllThreads`), fatal here; by operator vote
 ([[dec-2026-10-13-wasm-space-sync]]) `SYS_ICACHE_SYNC` gains a mode that

@@ -1,6 +1,6 @@
-From 5ee70fcee9913b38145a91f2adee029e3cb27dfe Mon Sep 17 00:00:00 2001
+From 5a2724d70f483b28276f93d6b56f40b1c35e7b44 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <noreply@example.invalid>
-Date: Tue, 13 Oct 2026 07:31:38 +0200
+Date: Tue, 13 Oct 2026 08:29:22 +0200
 Subject: [PATCH] thylacine: B-2e1 the FTL on at run time, an ISB where a
  thread takes a finished Wasm plan
 
@@ -12,14 +12,15 @@ the collector patches with the world stopped and a resuming thread runs an
 ISB), and its new kind, a property cache that rewrites code, rewrites more
 than one instruction only on the JS thread, outside the region it rewrites.
 
-A Wasm module's exit stubs are JIT-compiled by whichever thread finishes
-its plan, and a synchronous compile's wait returns without sleeping when
-the plan is already done, so the JS thread could run stubs written on
-another CPU with no context-synchronization event in between.
-Wasm::Module::compileSync and JSWebAssemblyInstance::finalizeCreation, the
-two points where a thread takes a finished plan (a synchronous wait, an
-asynchronous compile's ticket), now run WTF::crossModifyingCodeFence() (an
-ISB) first: the DFG finalizer's rule.
+A Wasm module's wasm-to-JS exit stubs are JIT-compiled by a worklist thread
+while it validates the module, and a CalleeGroup's wasm-to-wasm stubs by the
+thread that completes its plan; a wait that finds a plan done returns
+without sleeping, so a JS thread could run stubs written on another CPU
+with no context-synchronization event in between.
+JSWebAssemblyInstance::finalizeCreation, which every instance passes before
+it reads a stub or runs the start function, and Wasm::Module::compileSync,
+which returns a group another thread may have created, now run
+WTF::crossModifyingCodeFence() (an ISB) first: the DFG finalizer's rule.
 
 WTF gives every thread it creates 1 MiB of stack, as it does on musl Linux:
 musl's default is 128 KiB and jsc's PT_GNU_STACK is empty, so the compiler,
@@ -28,9 +29,9 @@ reserved zone.
 ---
  Source/JavaScriptCore/runtime/Options.cpp               | 7 +++----
  Source/JavaScriptCore/wasm/WasmModule.cpp               | 4 ++++
- Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp | 5 +++++
+ Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp | 6 ++++++
  Source/WTF/wtf/Threading.cpp                            | 2 +-
- 4 files changed, 13 insertions(+), 5 deletions(-)
+ 4 files changed, 14 insertions(+), 5 deletions(-)
 
 diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
 index 2bcf75b6a1..8bcc90b7b2 100644
@@ -51,31 +52,32 @@ index 2bcf75b6a1..8bcc90b7b2 100644
      Options::useOMGJIT() = false;
  #endif
 diff --git a/Source/JavaScriptCore/wasm/WasmModule.cpp b/Source/JavaScriptCore/wasm/WasmModule.cpp
-index 59984286fb..a40ff3b576 100644
+index 59984286fb..b9b09cb6f4 100644
 --- a/Source/JavaScriptCore/wasm/WasmModule.cpp
 +++ b/Source/JavaScriptCore/wasm/WasmModule.cpp
 @@ -119,6 +119,10 @@ Ref<CalleeGroup> Module::compileSync(VM& vm, MemoryMode mode)
  {
      Ref<CalleeGroup> calleeGroup = getOrCreateCalleeGroup(vm, mode);
      calleeGroup->waitUntilFinished();
-+    // The plan's exit stubs may have been written on another CPU, and the wait returns
-+    // without sleeping when the plan is already done, so this CPU may not have taken a
-+    // context-synchronization event since. The caller runs them next.
++    // The group's wasm-to-wasm exit stubs were written by the thread that completed its
++    // plan, which need not be this one, and the wait returns without sleeping when the plan
++    // is done. finalizeCreation fences every instance; this covers the group returned here.
 +    WTF::crossModifyingCodeFence();
      return calleeGroup;
  }
  
 diff --git a/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp b/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp
-index 807d8b5158..cd512c2463 100644
+index 807d8b5158..9d7f3b3632 100644
 --- a/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp
 +++ b/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp
-@@ -247,6 +247,11 @@ void JSWebAssemblyInstance::finalizeCreation(VM& vm, JSGlobalObject* globalObjec
+@@ -247,6 +247,12 @@ void JSWebAssemblyInstance::finalizeCreation(VM& vm, JSGlobalObject* globalObjec
          return;
      }
  
-+    // The CalleeGroup reaches this thread here, from a synchronous wait or an asynchronous
-+    // compile's ticket, after the plan's exit stubs were written on whichever CPU finished
-+    // it; synchronize this one before the instance runs them.
++    // The module's wasm-to-JS exit stubs were written by a worklist thread while it validated
++    // the module, and the group's wasm-to-wasm stubs by whichever thread completed its plan;
++    // a wait that found either done took no context synchronization on this CPU. Every
++    // instance passes here before it reads a stub or runs the start function below.
 +    WTF::crossModifyingCodeFence();
 +
      // When memory is imported, we will initialize all memory modes with the initial IPInt compilation

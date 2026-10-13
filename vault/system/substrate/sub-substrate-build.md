@@ -381,8 +381,13 @@ has no run-time witness, so the build asks the binary for each: since B-2d
 since B-2e1 the two places a thread takes a finished Wasm plan
 (`Wasm::Module::compileSync`, `JSWebAssemblyInstance::finalizeCreation`; the
 B-2d `jsc` holds no `isb` in either) and the FTL's `JITFinalizer::finalize`,
-whose fence is upstream's. The list is a quoted heredoc of mangled name and
-label; a refusal names the label and the patch that owes it. Then it strips
+whose fence is upstream's. The list is a quoted heredoc of mangled name,
+label and, optionally, the mangled prefix of a call the `isb` must precede:
+`finalizeCreation` runs the module's start function itself, so its fence must
+come before its first call into `WebAssemblyModuleRecord::initializeExports`.
+That test uses address order for program order and fails closed when the call
+is laid out first or absent (both controls refuse on the device `jsc`). A
+refusal names the label and the patch that owes it. Then it strips
 into `build/webkit/stage`.
 Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
 sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a

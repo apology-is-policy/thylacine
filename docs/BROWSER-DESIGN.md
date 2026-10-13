@@ -646,13 +646,17 @@ before any syscall, and the engine then runs its interpreter.
   upstream's walk runs as written.
 - **The same gap is open today for a module's stubs, and closes on the thread
   that consumes them** (`dec-2026-10-13-wasm-plan-isb`, by research). A
-  module's wasm-to-wasm and wasm-to-JS exit stubs are JIT-compiled by whichever
-  thread finishes the module's plan, usually a Wasm worklist thread, and a
-  synchronous compile's wait returns without sleeping when the plan is already
-  done. So the JS thread can run the stubs with no context-synchronization
-  event, with IPInt and the Baseline JIT on. The thread that takes a finished
-  plan runs `crossModifyingCodeFence` first, the DFG finalizer's rule.
-  Upstream has the same gap.
+  module's wasm-to-JS exit stubs are JIT-compiled by a Wasm worklist thread
+  while it validates the module, and a group's wasm-to-wasm stubs by the
+  thread that completes its plan; a wait that finds a plan done returns
+  without sleeping. So a JS thread can run stubs another CPU wrote with no
+  context-synchronization event, with IPInt and the Baseline JIT on. Every
+  instance passes `JSWebAssemblyInstance::finalizeCreation` before it reads a
+  stub or runs its start function, and runs `crossModifyingCodeFence` there
+  first, the DFG finalizer's rule; `Wasm::Module::compileSync` does too, for
+  a group another thread created. Upstream has the same gap. (Corrected after
+  B-2e1's Fable round, F1: this bullet first said both kinds were written by
+  the thread that finishes the module's plan.)
 - **Decided 2026-10-13 (operator vote, `dec-2026-10-13-jit-region-128`): the
   region is 128 MiB.** This is upstream's ARM64 size without jump islands; the
   kernel's `JIT_REGION_MAX` rises from 64 to 128 MiB. A region is a reservation
@@ -674,7 +678,9 @@ before any syscall, and the engine then runs its interpreter.
   FTL on. B-2e2, the kernel, audit-bearing: the address-space mode of
   `SYS_ICACHE_SYNC` (its mechanism designed in `JIT-ON-WX-DESIGN.md` first) and
   the 128 MiB region. B-2e3: BBQ and OMG on that mode, the pool at 128 MiB,
-  the `ref.cast` fix.
+  the `ref.cast` fix, and the Wasm exit stubs asked of the pool as compiles
+  that may fail (today they must succeed, so a full pool kills the process
+  where a `CompileError` was meant; B-2e1 Fable round, F3).
 
 The YARR regex JIT, the CSS selector JIT and the Wasm tiers share the one
 allocator. The kernel side changes too (B-2a/B-2b): the region is a

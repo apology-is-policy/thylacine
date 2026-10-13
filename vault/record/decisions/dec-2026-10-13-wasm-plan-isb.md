@@ -3,10 +3,11 @@ id: dec-2026-10-13-wasm-plan-isb
 type: dec
 title: "B-2e: a thread that takes a finished Wasm plan executes an ISB before running its stubs (the DFG finalizer's rule)"
 date: 2026-10-13
-status: standing
+status: superseded
 decided-by: research-collapsed
 affects: [sub-webkit]
 created: 2026-10-13
+superseded-by: dec-2026-10-13-wasm-plan-isb-writers
 ---
 ## Fork
 

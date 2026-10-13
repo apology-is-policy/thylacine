@@ -6894,19 +6894,29 @@ build_jsc() {
     # it resumes the VM's code (patch 0004), where it takes a finished Wasm plan's stubs
     # (patch 0005), and where the FTL installs a compiler thread's code (upstream's).
     # No run can show one missing (BROWSER-DESIGN 7, B-2d and B-2e), so the built binary
-    # is asked for each.
-    local isbsym isbname isbdis
-    while read -r isbsym isbname; do
+    # is asked for each. A third field names a call the isb must precede: finalizeCreation
+    # runs the module's start function itself, so a fence moved below that call would
+    # still be present and no longer cover it. Address order stands in for program order,
+    # and a layout that puts the call first fails closed.
+    local isbsym isbname isbafter isbdis isbpos
+    while read -r isbsym isbname isbafter; do
         isbdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
             --disassemble-symbols="$isbsym" "$out")"
         [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$isbdis")" -ge 8 ]] \
             || { echo "==> jsc: no $isbname to disassemble -- the ISB check saw nothing" >&2; exit 1; }
         grep -qE '^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)' <<< "$isbdis" \
             || { echo "==> jsc: $isbname has no isb" >&2; exit 1; }
+        [[ -z "$isbafter" ]] && continue
+        isbpos="$(awk -v c="<$isbafter" '
+            /^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)/ && !i { i = NR }
+            /^[[:space:]]*[0-9a-f]+:[[:space:]]+bl[[:space:]]/ && index($0, c) && !b { b = NR }
+            END { print (b == 0 ? "no such call" : (i < b ? "before" : "after it")) }' <<< "$isbdis")"
+        [[ "$isbpos" == before ]] \
+            || { echo "==> jsc: $isbname: its isb is not before its call to $isbafter ($isbpos)" >&2; exit 1; }
     done <<'ISBSYMS'
 _ZN3JSC14MachineThreads19unparkCurrentThreadEv MachineThreads::unparkCurrentThread(patch-0004)
 _ZN3JSC4Wasm6Module11compileSyncERNS_2VMENS_10MemoryModeE Wasm::Module::compileSync(patch-0005)
-_ZN3JSC21JSWebAssemblyInstance16finalizeCreationERNS_2VMEPNS_14JSGlobalObjectEON3WTF3RefINS_4Wasm11CalleeGroupENS5_12RawPtrTraitsIS8_EENS5_21DefaultRefDerefTraitsIS8_EEEENS7_12CreationModeE JSWebAssemblyInstance::finalizeCreation(patch-0005)
+_ZN3JSC21JSWebAssemblyInstance16finalizeCreationERNS_2VMEPNS_14JSGlobalObjectEON3WTF3RefINS_4Wasm11CalleeGroupENS5_12RawPtrTraitsIS8_EENS5_21DefaultRefDerefTraitsIS8_EEEENS7_12CreationModeE JSWebAssemblyInstance::finalizeCreation(patch-0005) _ZN3JSC23WebAssemblyModuleRecord17initializeExports
 _ZN3JSC3FTL12JITFinalizer8finalizeEv FTL::JITFinalizer::finalize(upstream)
 ISBSYMS
     "$strip" -o "$stage/jsc" "$out"
