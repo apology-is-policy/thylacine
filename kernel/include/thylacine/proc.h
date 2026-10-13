@@ -344,7 +344,7 @@ struct Proc {
     // that the guard existed to protect) -- RETIRES the guard: all may wait.
     // The field's four bytes stay so every following field holds its pinned
     // offset; gcpark-b took two of them for the death signal below, and the
-    // other two stay reserved (KP_ZERO; nothing reads or writes them).
+    // signal chunk's S-2 took the other two for note_caught.
     //
     // gcpark-b: the POSIX signal the Proc died of (notes.h NOTE_SIG_*), 0 for a
     // Proc that exited. term_sig is the ZOMBIE record, written beside
@@ -355,7 +355,13 @@ struct Proc {
     // g_proc_table_lock (I-24). Bytes, not ints: a signal is 1..127.
     u8                 term_sig;
     u8                 group_term_sig;
-    u16                _reserved0;
+
+    // ARCH 8.8.3: the caught-note latch (low byte) and its unwind claim (high
+    // byte), one bit per note family; CAUGHT_LATCH_MASK below has the
+    // discipline. A word of its own, not proc_flags bits: the claim's CAS needs
+    // both bytes in one word, and no reader needs either byte together with a
+    // proc_flags bit. NOT propagated by rfork; KP_ZERO at proc_alloc.
+    u16                note_caught;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from
@@ -1072,10 +1078,26 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // it), NOT propagated by rfork. See the SPAWN_PERM_* comment in syscall.h.
 #define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
 
+// The signal chunk's S-2: the TERM terminate-disposition latch -- the FOURTH
+// terminate family (interrupt, tty:quit/hup, pipe, term). Armed when
+// notes_post commits an unhandled + unmasked `term` note on a Proc that is not
+// self-managing; paired with NOTE_BIT_TERM in thread_die_pending exactly as the
+// other latches pair with theirs, so a thread that masked term never unwinds
+// for it and one that masked only interrupt still does (SIGINT ignored must not
+// silence SIGTERM). Same latch discipline: set/cleared ONLY under
+// p->notes->lock; NOT propagated by rfork; never armed on kproc. Bit 11 was the
+// first bit of the caught-note sub-field until that sub-field moved to
+// Proc.note_caught to make room for this family.
+#define PROC_FLAG_TERM_TERMINATE_PENDING (1u << 11)
+
 // item 11 (ARCH §8.8.3): the CAUGHT-note-deliverable latch -- the non-death
-// sibling of the two terminate latches above. A 7-bit sub-field at bits
-// 11..17 (6 bits, 11..16, until IM-1 added the `sak` family), one bit per note
-// family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6),
+// sibling of the terminate latches above. The LOW BYTE of Proc.note_caught, not
+// proc_flags: it was the sub-field at proc_flags bits 11..17 until the `term`
+// family needed an eighth bit and proc_flags had none left. Every reader and
+// writer touches only the two note_caught bytes (the claim's CAS needs both in
+// one word; nothing needs either beside a proc_flags bit), so the move kept
+// every atomicity the code relied on. One bit per note family ALIGNED TO
+// NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6, TERM=7),
 // so thread_caught_note_deliverable can gate it by the per-Thread note_mask
 // exactly as thread_die_pending gates the terminate latches. The per-family
 // pairing is REQUIRED for the same reason the PTY-1b comment above gives: a
@@ -1088,9 +1110,9 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // under p->notes->lock; NOT propagated by rfork; never armed on kproc (the arm
 // inherits notes_post's kproc guard). The mask is a literal here because proc.h
 // does not include notes.h; notes.c static_asserts it equals
-// NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT.
-#define PROC_CAUGHT_NOTE_SHIFT      11u
-#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x7fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..17
+// NOTE_MASK_SUPPORTED << CAUGHT_LATCH_SHIFT.
+#define CAUGHT_LATCH_SHIFT      0u
+#define CAUGHT_LATCH_MASK       (0xffu << CAUGHT_LATCH_SHIFT)  // note_caught bits 0..7
 
 // #237: the PIPE terminate-disposition latch -- the THIRD terminate family
 // (interrupt, tty:quit/hup, now pipe). Armed when notes_post commits an
@@ -1103,7 +1125,7 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // handler registration, the self-managing mark, or draining the last queued
 // pipe note); NOT propagated by rfork; never armed on kproc.
 //
-// BIT 18, not the next literal gap: bits 11..17 are the caught-note sub-field
+// BIT 18, not the next literal gap: bits 11..17 were the caught-note sub-field
 // (dense, one bit per NOTE_BIT_* family), and NOTE_MASK_SUPPORTED grows per
 // chunk, so that field grows UPWARD from bit 11. 18 is the first bit above it
 // today; the static_assert makes a future widening (an 8th note family) that
@@ -1113,12 +1135,10 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // assert below turned that into this relocation. (The design memo's "next
 // free bit = 11" missed the sub-field: bit 11 is the INTERRUPT family's
 // caught-note bit -- using it would have aliased two unrelated latches, a
-// collision no build would catch.)
+// collision no build would catch.) The sub-field has since left proc_flags for
+// Proc.note_caught; the latch stays at 18, and PROC_FLAGS_ALL's disjointness
+// assert below now guards every bit at once.
 #define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 18)
-_Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
-               "#237: the pipe terminate latch must not overlap the caught-note "
-               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
-               "relocate PROC_FLAG_PIPE_TERMINATE_PENDING above the field then");
 
 // PROC_FLAG_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1) -- kernel-stamped
 // from SPAWN_PERM_SESSION_HANGUP in the spawn thunk (paired with a proc_setsid
@@ -1128,13 +1148,13 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // session -- the legate-teardown pattern applied to the login session, so
 // logout reclaims the user's session (A-5 decision (3)). Set-once, never
 // cleared, NOT propagated by rfork (proc_flags is not copied), so only the
-// armed leader carries it. Bit 19: above the caught-note sub-field (11..17) and
-// the pipe latch (18); the static_assert makes a future field-widening a
-// compile-time relocation rather than a silent alias.
+// armed leader carries it. Bit 19: it was placed above the caught-note
+// sub-field (then 11..17) and the pipe latch (18); PROC_FLAGS_ALL's assert
+// below makes any alias a compile error.
 #define PROC_FLAG_SESSION_HANGUP    (1u << 19)
 // Boot-only graphical seat manager designation; not propagated through rfork.
 #define PROC_FLAG_SEAT_MANAGER       (1u << 20)
-_Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
+_Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,
     "seat manager flag must not overlap note, session or pipe flags");
 // This Proc's image has been under debug CONTROL, so it may never gain authority
@@ -1161,19 +1181,17 @@ _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
 // inherited at fork and stamped on every mapper); it is kept so the record is the
 // image's whole guard history.
 #define PROC_IMAGE_GUARDS (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_DEBUG_TAINTED)
-_Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_CAUGHT_NOTE_MASK |
+_Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING |
     PROC_FLAG_SEAT_MANAGER)) == 0,
-    "the debug taint must not overlap the caught-note field or the flags below it");
-_Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
-               "arm-6: the session-hangup flag must not overlap the caught-note "
-               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
-               "relocate PROC_FLAG_SESSION_HANGUP above the field then");
+    "the debug taint must not overlap the term latch or the flags below it");
 
-// ARCH 8.8.3: the CLAIM sub-field, one bit per note family aligned like the
-// caught sub-field above. One caught note unwinds ONE interruptible sleeper, as
-// Linux interrupts one thread for a process-directed signal: the sleeper that
-// unwinds sets its family's claim bit with a CAS on the whole word, so the claim
+// ARCH 8.8.3: the CLAIM, the HIGH BYTE of Proc.note_caught (proc_flags bits
+// 22..28 until S-2 moved it with the latch), one bit per note family aligned
+// like the caught byte above. One caught note unwinds ONE interruptible sleeper,
+// as Linux interrupts one thread for a process-directed signal: the sleeper
+// that unwinds sets its family's claim bit with a CAS on the whole note_caught
+// word, so the claim
 // is taken only while that family's caught bit is still set, and records it in
 // its own Thread (note_claim). Only that thread clears the bit, at its next
 // EL0-return tail, whatever the tail delivered -- the tail can end short of the
@@ -1181,25 +1199,24 @@ _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
 // claimant's unwind and refuse every wait in the Proc. Exec clears the field (a
 // Proc execs alone). NOT propagated by rfork; never set on kproc (the caught bit
 // never is).
-#define PROC_CAUGHT_CLAIM_SHIFT     22u
-#define PROC_FLAG_CAUGHT_CLAIM_MASK (0x7fu << PROC_CAUGHT_CLAIM_SHIFT)  // bits 22..28
-_Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
-    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
-    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED |
-    ((1u << 11) - 1u))) == 0,
-    "the caught-note claim sub-field must not overlap any other proc flag");
+#define CAUGHT_CLAIM_SHIFT     8u
+#define CAUGHT_CLAIM_MASK      (0xffu << CAUGHT_CLAIM_SHIFT)  // note_caught bits 8..15
+_Static_assert((CAUGHT_CLAIM_MASK & CAUGHT_LATCH_MASK) == 0 &&
+               ((CAUGHT_CLAIM_MASK | CAUGHT_LATCH_MASK) >>
+                (8u * sizeof(((struct Proc *)0)->note_caught))) == 0,
+    "the caught latch and its claim are disjoint and both fit Proc.note_caught");
 
 // A Proc the in-kernel test harness spliced into the table (proc_test_link /
 // proc_test_link_child, the test support in proc.c), read only by the test
 // runner's release of a fixture a failing test left linked. rfork links a real
 // child through proc_link_child directly, so no real Proc carries it.
-#define PROC_FLAG_TEST_FIXTURE       (1u << 29)   // above the claim sub-field
+#define PROC_FLAG_TEST_FIXTURE       (1u << 29)
 _Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
     PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
-    PROC_FLAG_CAUGHT_NOTE_MASK | PROC_FLAG_CAUGHT_CLAIM_MASK |
+    PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED)) == 0,
     "the test-fixture mark must not overlap another flag");
@@ -1217,7 +1234,7 @@ _Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTR
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
     PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
-    PROC_FLAG_CAUGHT_NOTE_MASK | PROC_FLAG_CAUGHT_CLAIM_MASK |
+    PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE)) == 0,
     "the forced-final-close mark must not overlap another flag");
@@ -1226,7 +1243,7 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
     PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
     PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
     PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
-    PROC_FLAG_CAUGHT_NOTE_MASK | PROC_FLAG_CAUGHT_CLAIM_MASK |
+    PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE |
     PROC_FLAG_EXIT_CLOSE_FORCED)) == 0,
@@ -1240,7 +1257,36 @@ _Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
 #define PROC_FLAG_TERMINATE_PENDING_MASK \
     (PROC_FLAG_INTR_TERMINATE_PENDING | \
      PROC_FLAG_TTY_TERMINATE_PENDING | \
-     PROC_FLAG_PIPE_TERMINATE_PENDING)
+     PROC_FLAG_PIPE_TERMINATE_PENDING | \
+     PROC_FLAG_TERM_TERMINATE_PENDING)
+
+// Every proc_flags bit, and a check DERIVED from the list rather than pinned to
+// pairs: the flags are disjoint iff the popcount of their union is the sum of
+// their popcounts. A new flag joins this list, and an alias anywhere fails here.
+#define PROC_FLAGS_ALL \
+    (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_MLOCKED | \
+     PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE | PROC_FLAG_LEGATE_ROOT | \
+     PROC_FLAG_SELF_MANAGING_NOTES | PROC_FLAG_INTR_TERMINATE_PENDING | \
+     PROC_FLAG_TTY_TERMINATE_PENDING | PROC_FLAG_CONSOLE_RENDERER | \
+     PROC_FLAG_MAY_RAISE_PAGE_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING | \
+     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
+     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
+     PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING)
+_Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
+    __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
+    __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
+    __builtin_popcount(PROC_FLAG_MAY_POST_SERVICE) + __builtin_popcount(PROC_FLAG_LEGATE_ROOT) +
+    __builtin_popcount(PROC_FLAG_SELF_MANAGING_NOTES) +
+    __builtin_popcount(PROC_FLAG_INTR_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_TTY_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_CONSOLE_RENDERER) +
+    __builtin_popcount(PROC_FLAG_MAY_RAISE_PAGE_BUDGET) +
+    __builtin_popcount(PROC_FLAG_TERM_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_PIPE_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_SESSION_HANGUP) + __builtin_popcount(PROC_FLAG_SEAT_MANAGER) +
+    __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +
+    __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING),
+    "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
 // seven fields from struct Proc and added one pointer, so the struct went
@@ -2826,7 +2872,7 @@ void proc_interrupt_terminate_wake(struct Proc *p);
 // item 11 (ARCH §8.8.3): the CAUGHT-note sibling of the two functions above.
 //
 // proc_caught_note_pending — true iff `p` carries any armed bit in the
-// PROC_FLAG_CAUGHT_NOTE_MASK sub-field (a caught, deliverable note of some
+// caught latch, CAUGHT_LATCH_MASK of note_caught (a caught, deliverable note of some
 // family is queued). Fail-closed on NULL/corrupt. Acquire load, pairing with
 // the release arm in notes_post so the lock-free reader
 // (thread_caught_note_deliverable at every sleep site) sees a published latch.

@@ -5679,13 +5679,27 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
 
 struct postnote_walk_ctx {
     int           target_pid;
+    int           target_tid;    // > 0: the target is the Proc holding this
+                                  // thread (the phenotype's tkill/tgkill), and a
+                                  // target_pid > 0 must then be that Proc's pid
     struct Proc  *caller;
-    const char   *name;
+    const char   *name;          // NULL: signal 0 -- the gate alone, no post
     int           result;        // 0 = not yet found (continue walk);
                                   // +1 = post succeeded (stop walk);
                                   // -1 = post failed / permission denied
                                   //      (stop walk).
+    s64           err;           // with result -1: why, as -T_E_* (ESRCH a dead
+                                  // or mismatched target, EPERM the gate, EAGAIN
+                                  // a full queue). SYS_POSTNOTE reports -1 alone.
 };
+
+// Does `p` hold the thread `tid`? Caller holds g_proc_table_lock, which every
+// thread-list walk holds (#811).
+static bool proc_holds_tid_locked(const struct Proc *p, int tid) {
+    for (const struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->tid == tid) return true;
+    return false;
+}
 
 // N-4 in ONE place: `kill` terminates its target, whatever the target's thread
 // count and whatever state its note ring is in. Returns true iff `name` was
@@ -5711,11 +5725,23 @@ static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) 
 
 static int postnote_walk_cb(struct Proc *target, void *arg) {
     struct postnote_walk_ctx *w = (struct postnote_walk_ctx *)arg;
-    if (target->pid != w->target_pid) return 0;     // keep walking
+    if (w->target_tid > 0) {
+        if (!proc_holds_tid_locked(target, w->target_tid)) return 0;
+        // A tid names one thread, so the Proc holding it is the only candidate:
+        // a tgkill whose tgid is some other Proc names no thread at all.
+        if (w->target_pid > 0 && target->pid != w->target_pid) {
+            w->result = -1;
+            w->err    = -(s64)T_E_SRCH;
+            return 1;
+        }
+    } else if (target->pid != w->target_pid) {
+        return 0;     // keep walking
+    }
 
     // Found the target. Permission gate: caller must be the parent.
     if (target->parent != w->caller) {
         w->result = -1;
+        w->err    = -(s64)T_E_PERM;
         return 1;     // stop walk (non-zero return)
     }
 
@@ -5725,6 +5751,13 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // misleadingly. wait_pid is the proper channel for ZOMBIE state.
     if (target->state != PROC_STATE_ALIVE) {
         w->result = -1;
+        w->err    = -(s64)T_E_SRCH;
+        return 1;
+    }
+
+    // Signal 0: the gate admitted the caller, and there is nothing to post.
+    if (!w->name) {
+        w->result = 1;
         return 1;
     }
 
@@ -5786,6 +5819,7 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         proc_caught_note_wake(target);   // item 11: caught-note twin
     }
     w->result = (rc == 0) ? 1 : -1;
+    if (rc != 0) w->err = -(s64)T_E_AGAIN;
     return 1;
 }
 
@@ -13680,9 +13714,86 @@ static s64 viv_getdents64_run(struct Proc *p, const u64 *args) {
     spoor_clunk(c);
     return (s64)emitted;
 }
+// The phenotype's kill family (VIVARIUM 6.22; operator vote 2026-10-13): one body
+// for kill(pid, sig), tkill(tid, sig) and tgkill(tgid, tid, sig), with `tid` 0
+// for kill. Every post goes through SYS_POSTNOTE's own arms -- postnote_self for
+// the caller, the parent-gated walk for anyone else -- so a guest reaches exactly
+// the Procs a Pouch program's kill reaches, and no third gate exists.
+static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int tid,
+                    u64 sig) {
+    const char        *name = NULL;
+    enum viv_kill_kind kind = vivarium_kill_decide(sig, &name);
+    if (kind == VIV_KILL_REFUSE) return -(s64)T_E_INVAL;
+
+    bool self;
+    if (tid > 0) {
+        // The caller's own thread list can change under it (a peer exits), so
+        // it is read under the lock every thread-list walk holds.
+        irq_state_t s = proc_table_lock_acquire();
+        self = proc_holds_tid_locked(p, tid);
+        proc_table_lock_release(s);
+        if (self && pid > 0 && pid != p->pid) return -(s64)T_E_SRCH;
+    } else {
+        // A negative pid is a process group, or every process: the gate admits
+        // one Proc at a time, so a group target is refused rather than widened.
+        if (pid < 0) return -(s64)T_E_PERM;
+        // pid 0 is the caller, as SYS_POSTNOTE's sentinel makes it for Pouch.
+        self = (pid == 0 || pid == p->pid);
+    }
+
+    if (self) {
+        if (kind == VIV_KILL_PROBE) return 0;
+        // Pouch's abort() ends in this same call: a snare:* death the kernel
+        // records as its signal, not a post anything could catch or mask. A
+        // NULL ctx is the test entry, whose current thread is the harness's: it
+        // learns the verdict (1, never a syscall's own answer) instead.
+        if (kind == VIV_KILL_SELF_DEATH) {
+            if (!ctx) return 1;
+            proc_fault_terminate(name, ctx->elr);
+        }
+        return postnote_self(p, name) == 0 ? 0 : -(s64)T_E_AGAIN;
+    }
+    // A snare:* death is the caller's own to choose, never another Proc's.
+    if (kind == VIV_KILL_SELF_DEATH) return -(s64)T_E_INVAL;
+
+    struct postnote_walk_ctx w = {
+        .target_pid = pid,
+        .target_tid = tid,
+        .caller     = p,
+        .name       = (kind == VIV_KILL_PROBE) ? NULL : name,
+        .result     = 0,
+        .err        = 0,
+    };
+    (void)proc_for_each(postnote_walk_cb, &w);
+    if (w.result == 1) return 0;
+    if (w.result == 0) return -(s64)T_E_SRCH;   // no Proc has that pid or tid
+    return w.err ? w.err : -(s64)T_E_PERM;
+}
+
+// Test support (the sys_postnote_*_for_test convention): drives the REAL shell
+// with an explicit caller. Deliberately absent from any header.
+s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
+    return viv_kill(NULL, caller, pid, tid, sig);
+}
+
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
+    case VIV_LINUX_KILL:
+        // kill(pid, sig): x0 pid, x1 sig. pid_t is an int.
+        return viv_kill(ctx, p, (int)(s32)args[0], 0, args[1]);
+
+    case VIV_LINUX_TKILL:
+        // tkill(tid, sig): Linux refuses a tid <= 0 with EINVAL.
+        if ((s32)args[0] <= 0) return -(s64)T_E_INVAL;
+        return viv_kill(ctx, p, 0, (int)(s32)args[0], args[1]);
+
+    case VIV_LINUX_TGKILL:
+        // tgkill(tgid, tid, sig): both ids must be positive (EINVAL).
+        if ((s32)args[0] <= 0 || (s32)args[1] <= 0) return -(s64)T_E_INVAL;
+        return viv_kill(ctx, p, (int)(s32)args[0], (int)(s32)args[1], args[2]);
+
     case VIV_LINUX_OPENAT: {
         // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags,
         // x3 mode (read only by the O_CREAT arm).

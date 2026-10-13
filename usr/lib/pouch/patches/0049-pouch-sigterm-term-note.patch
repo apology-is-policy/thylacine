@@ -1,0 +1,116 @@
+pouch boundary-line patch 0049 - SIGTERM is the `term` note (signal chunk S-2).
+
+0007 sent SIGTERM as `interrupt`, the note SIGINT owns, because the kernel
+had no other catchable terminating note. A child killed with
+kill(pid, SIGTERM) therefore died of `interrupt` and its parent read
+WTERMSIG == SIGINT, and the dispatcher had to guess which of the two
+handlers a delivered `interrupt` was for. The kernel now has `term`
+(NOTE_BIT_TERM = 7, default terminate, death recorded as SIGTERM;
+operator vote 2026-10-13, docs/ERRORS.md "The terminate-request note").
+Two files:
+
+  src/internal/_pouch_signal.h  POUCH_NOTE_BIT_TERM (1u << 7), and the
+      supported mask 0x2f -> 0xaf, so __block_all_sigs and
+      __block_app_sigs block it too.
+  src/signal/_pouch_signal.c    __pouch_sig_to_note maps SIGTERM to
+      "term" (kill() and raise() post it); the sigset translations give
+      SIGTERM its own bit both ways, so blocking SIGINT no longer blocks
+      SIGTERM; the handler dispatches "interrupt" to SIGINT and "term" to
+      SIGTERM, and the guess between them is gone. An uncaught "term"
+      reaches SYS_NOTED(NDFLT), whose default for it is terminate.
+
+The witness is pouch-hello-signals: a child killed with SIGTERM reads
+WTERMSIG == SIGTERM, and a SIGTERM handler runs while SIGINT is ignored.
+
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -100,7 +100,10 @@
+  * (documented coarseness; the kernel's terminate-class latch makes a
+  * masked tty:quit/tty:hup fire on unmask, the LS-5 latch model). */
+ #define POUCH_NOTE_BIT_TTY         (1u << 5)
+-#define POUCH_NOTE_MASK_SUPPORTED  0x2fu
++/* SIGTERM's own note, `term` (NOTE_BIT_TERM): masked and caught apart
++ * from SIGINT's `interrupt`. */
++#define POUCH_NOTE_BIT_TERM        (1u << 7)
++#define POUCH_NOTE_MASK_SUPPORTED  0xafu
+ 
+ /* SYS_NOTED arg semantics (matches kernel/include/thylacine/notes.h
+  * "SYS_NOTED arg semantics" docblock, R4-F6 audit close). */
+@@ -124,9 +127,9 @@ extern hidden struct sigaction __pouch_sigtab[_NSIG];
+ extern hidden __thread uint64_t __pouch_note_mask_shadow;
+ 
+ /* Translate POSIX signum -> note name string. Writes the static-storage
+- * canonical name to *out on success. Returns 0 on the v1.0 supported
+- * set (SIGINT/SIGTERM -> "interrupt"; SIGKILL -> "kill"; SIGPIPE ->
+- * "pipe"; SIGCHLD -> "child_exit"), -1 on unsupported. */
++ * canonical name to *out on success. Returns 0 on the supported set
++ * (SIGINT -> "interrupt"; SIGTERM -> "term"; SIGKILL -> "kill"; SIGPIPE ->
++ * "pipe"; SIGCHLD -> "child_exit"; the tty family), -1 on unsupported. */
+ hidden int __pouch_sig_to_note(int sig, const char **out);
+ 
+ /* The bootstrap async-handler. Registered with SYS_NOTIFY at startup;
+--- a/src/signal/_pouch_signal.c
++++ b/src/signal/_pouch_signal.c
+@@ -42,14 +42,16 @@ hidden int __pouch_note_name_eq(const char *name, const char *literal)
+ 
+ hidden int __pouch_sig_to_note(int sig, const char **out)
+ {
+-    /* v1.0 supported set per POUCH-DESIGN.md section 6.4. SIGINT and
+-     * SIGTERM share "interrupt" — a programs-side limitation documented
+-     * in docs/reference/83-pouch-signals.md. */
++    /* The supported set per POUCH-DESIGN.md section 6.4. SIGTERM has its
++     * own note, `term`, so a death by it reads back as SIGTERM and SIGINT
++     * can be ignored without ignoring it (0049). */
+     switch (sig) {
+     case SIGINT:
+-    case SIGTERM:
+         *out = "interrupt";
+         return 0;
++    case SIGTERM:
++        *out = "term";
++        return 0;
+     case SIGKILL:
+         *out = "kill";
+         return 0;
+@@ -85,8 +87,8 @@ hidden uint64_t __pouch_sigset_to_note(const sigset_t *s)
+ {
+     uint64_t m = 0;
+     /* sigismember returns 1/0/-1 (-1 on bad arg). Treat -1 as not-set. */
+-    if (sigismember(s, SIGINT) == 1 || sigismember(s, SIGTERM) == 1)
+-        m |= POUCH_NOTE_BIT_INTERRUPT;
++    if (sigismember(s, SIGINT) == 1) m |= POUCH_NOTE_BIT_INTERRUPT;
++    if (sigismember(s, SIGTERM) == 1) m |= POUCH_NOTE_BIT_TERM;
+     /* SIGKILL/SIGSTOP cannot be blocked; we silently drop them. */
+     if (sigismember(s, SIGPIPE) == 1) m |= POUCH_NOTE_BIT_PIPE;
+     if (sigismember(s, SIGCHLD) == 1) m |= POUCH_NOTE_BIT_CHILD_EXIT;
+@@ -102,10 +104,8 @@ hidden uint64_t __pouch_sigset_to_note(const sigset_t *s)
+ hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out)
+ {
+     sigemptyset(out);
+-    if (m & POUCH_NOTE_BIT_INTERRUPT) {
+-        sigaddset(out, SIGINT);
+-        sigaddset(out, SIGTERM);
+-    }
++    if (m & POUCH_NOTE_BIT_INTERRUPT)  sigaddset(out, SIGINT);
++    if (m & POUCH_NOTE_BIT_TERM)       sigaddset(out, SIGTERM);
+     if (m & POUCH_NOTE_BIT_PIPE)       sigaddset(out, SIGPIPE);
+     if (m & POUCH_NOTE_BIT_CHILD_EXIT) sigaddset(out, SIGCHLD);
+     if (m & POUCH_NOTE_BIT_TTY) {
+@@ -127,14 +127,9 @@ hidden void __pouch_note_handler(const char *name, unsigned int arg)
+ 
+     int sig = -1;
+     if (__pouch_note_name_eq(name, "interrupt")) {
+-        /* SIGINT and SIGTERM both map to "interrupt" at v1.0. Prefer
+-         * SIGINT's user handler if installed; fall back to SIGTERM.
+-         * (Documented limitation; v1.x extension: per-name notes.) */
+-        void (*hi)(int) = __pouch_sigtab[SIGINT].sa_handler;
+-        void (*ht)(int) = __pouch_sigtab[SIGTERM].sa_handler;
+-        if (hi && hi != SIG_DFL && hi != SIG_IGN)        sig = SIGINT;
+-        else if (ht && ht != SIG_DFL && ht != SIG_IGN)   sig = SIGTERM;
+-        else                                              sig = SIGINT;
++        sig = SIGINT;
++    } else if (__pouch_note_name_eq(name, "term")) {
++        sig = SIGTERM;
+     } else if (__pouch_note_name_eq(name, "pipe")) {
+         sig = SIGPIPE;
+     } else if (__pouch_note_name_eq(name, "child_exit")) {

@@ -3238,8 +3238,8 @@ bool proc_caught_note_pending(const struct Proc *p) {
     // so a spurious wake costs one predicate re-eval, never a wrong unwind --
     // exactly as the terminate-latch gate above.
     if (!p || p->magic != PROC_MAGIC) return false;
-    return (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE)
-            & PROC_FLAG_CAUGHT_NOTE_MASK) != 0;
+    return (__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE)
+            & CAUGHT_LATCH_MASK) != 0;
 }
 
 // LS-5c (P3-terminate, ARCH 8.8.2): wake every blocked Thread of `p` so it
@@ -3400,11 +3400,11 @@ static int caught_designate(struct Proc *p, struct Thread *x, u32 fam) {
     irq_state_t ws = spin_lock_irqsave(&x->wait_lock);
     if (caught_candidate(x, fam)) {
         rc = CAUGHT_SETTLED;
-        u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-        while ((flags & (fam << PROC_CAUGHT_NOTE_SHIFT)) &&
-               !(flags & (fam << PROC_CAUGHT_CLAIM_SHIFT))) {
-            if (__atomic_compare_exchange_n(&p->proc_flags, &flags,
-                                            flags | (fam << PROC_CAUGHT_CLAIM_SHIFT),
+        u16 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+        while ((flags & (fam << CAUGHT_LATCH_SHIFT)) &&
+               !(flags & (fam << CAUGHT_CLAIM_SHIFT))) {
+            if (__atomic_compare_exchange_n(&p->note_caught, &flags,
+                                            (u16)(flags | (fam << CAUGHT_CLAIM_SHIFT)),
                                             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
                 __atomic_or_fetch(&x->note_target, (u8)fam, __ATOMIC_RELEASE);
                 caught_rouse_locked(x);
@@ -3439,9 +3439,9 @@ void proc_caught_note_walk(struct Proc *p, struct Thread *skip) {
     struct Thread *self   = current_thread();
     struct Thread *poster = (self && self->proc == p) ? self : NULL;
 
-    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    u32 caught = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
-    u32 held   = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+    u32 flags  = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+    u32 caught = (flags & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+    u32 held   = (flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
 
     // A claim or a designation can outlive the note it was taken for, when
     // another thread's tail delivered it, and its holder must still take the
@@ -4883,7 +4883,7 @@ static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self,
     // the walk sets one under this thread's wait_lock, so both are cleared
     // under it: a designation made after the clear has its claim bit too.
     irq_state_t ws = spin_lock_irqsave(&self->wait_lock);
-    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&p->note_caught, (u16)~CAUGHT_CLAIM_MASK, __ATOMIC_RELEASE);
     __atomic_store_n(&self->note_claim, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&self->note_target, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&self->wait_lock, ws);

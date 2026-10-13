@@ -830,7 +830,11 @@ This is a deliberate inversion of priority versus Plan 9 (where `/proc/<pid>/not
 #define NOTE_BIT_KILL        1u
 #define NOTE_BIT_PIPE        2u
 #define NOTE_BIT_CHILD_EXIT  3u
-#define NOTE_MASK_SUPPORTED  0x0fu   /* grows as supported notes grow */
+#define NOTE_BIT_SNARE       4u      /* reserved: no snare:* note is ever queued */
+#define NOTE_BIT_TTY         5u      /* the whole tty:* family */
+#define NOTE_BIT_SAK         6u
+#define NOTE_BIT_TERM        7u
+#define NOTE_MASK_SUPPORTED  0xffu   /* grows as supported notes grow */
 
 struct Note {
     char name[NOTE_NAME_MAX];   /* NUL-terminated note name */
@@ -901,7 +905,7 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 
 **`SYS_NOTED(arg)`**:
 - arg == 0 (NCONT): validate `t->in_handler == true`; restore the whole saved context from the Thread (`notes_noted_restore`: every GPR, `sp`, `elr`, `spsr`, and the FP/SIMD half), never from user memory, so no user-written word reaches `pstate` or `pc`; clear `in_handler`; eret to the restored user state. (This text said `elr` and `sp` were restored from a user-stack `ureg`; the save has been whole since task #96.)
-- arg == 1 (NDFLT): take the note's default action, which since #15 is PER-NOTE (`notes_default_action` reads the `dfl` column of `g_known_notes`): TERMINATE → `exits(name)`, noreturn (`interrupt`/`kill`/`pipe`/`tty:quit`/`tty:hup`); STOP → restore the pre-handler context as NCONT does, then arm the job stop, and the EL0-return tail parks the thread (`tty:susp`; discarded with a 0 return if EITHER premise fails at apply time: the caller's pgrp is orphaned, OR the stop is STALE — #240's `Proc.susp_stop_armed`, set on the susp's post and cleared by any intervening cont, since #15's decide-at-POST / apply-at-NDFLT split leaves a full EL0 handler execution in which a cont can overtake the susp); IGNORE → restore and return, identical to NCONT (`child_exit`/`tty:winch`/`tty:cont`). Only the TERMINATE arm never returns.
+- arg == 1 (NDFLT): take the note's default action, which since #15 is PER-NOTE (`notes_default_action` reads the `dfl` column of `g_known_notes`): TERMINATE → `exits(name)`, noreturn (`interrupt`/`kill`/`pipe`/`term`/`tty:quit`/`tty:hup`); STOP → restore the pre-handler context as NCONT does, then arm the job stop, and the EL0-return tail parks the thread (`tty:susp`; discarded with a 0 return if EITHER premise fails at apply time: the caller's pgrp is orphaned, OR the stop is STALE — #240's `Proc.susp_stop_armed`, set on the susp's post and cleared by any intervening cont, since #15's decide-at-POST / apply-at-NDFLT split leaves a full EL0 handler execution in which a cont can overtake the susp); IGNORE → restore and return, identical to NCONT (`child_exit`/`tty:winch`/`tty:cont`). Only the TERMINATE arm never returns.
 - Anything else → `-EINVAL`.
 
 **Async-safety**: delivery happens only at an EL0-return tail, before `eret`. A syscall, a fault and an interrupt from EL0 all reach it with no kernel lock held on that CPU (a syscall acquires and releases its locks within its body; an interrupt from EL0 interrupted no kernel code). Handlers therefore can never observe a partial-kernel state. Since #964 the tail also runs on an IRQ return, so a note can stop EL0 at any instruction, not only at a syscall boundary: that is why step 6 saves the whole register file and FP state, and why nothing on the path reads a syscall result. The lock discipline in steps 1-5 above ensures the queue-mutation is atomic w.r.t. concurrent fd-reads from another Thread.
@@ -921,7 +925,11 @@ Two delivery paths consume the same queue; **every posted non-`kill` note is con
 | `interrupt` | 0 | `SYS_POSTNOTE`; future cons ^C | yes | `exits("interrupt")` |
 | `kill` | 1 | `SYS_POSTNOTE` | **no** | `exits("killed")` — handler/mask bypassed |
 | `pipe` | 2 | kernel-synthetic on write to closed pipe peer | yes | `exits("pipe")` if unmasked+unhandled (#237 as-built: `PROC_FLAG_PIPE_TERMINATE_PENDING`); the native runtimes (libthyla-rs / libt / Go rt0) **and** musl mask `NOTE_BIT_PIPE` at startup, so a program's observable default is EPIPE-not-death |
-| `child_exit` | 3 | kernel-synthetic on child `exits()` | yes | `exits("child_exit")` (most Procs handle it) |
+| `child_exit` | 3 | kernel-synthetic on child `exits()` | yes | ignored (#15, `NOTE_DFL_IGNORE`: `SIGCHLD`'s POSIX default) |
+| `snare:*` | 4 | kernel-synthetic at an EL0 fault | no: the fault ends the Proc; the bit is reserved (ERRORS.md) | `exits("snare:...")` at the fault |
+| `tty:*` | 5 | kernel-synthetic (the PTY line discipline and job control) | yes | per note: `tty:quit`/`tty:hup` terminate, `tty:susp` stops, `tty:winch`/`tty:cont` are ignored |
+| `sak` | 6 | kernel-synthetic (the secure attention key, IM-1) | yes | ignored |
+| `term` | 7 | `SYS_POSTNOTE` (`SIGTERM` from Pouch and the Linux phenotype) | yes | `exits("term")`, the death recorded as `SIGTERM` (operator vote 2026-10-13) |
 
 `alarm`, `hangup`, `usr1`, `usr2`, `stop`, `cont` — DEFERRED at v1.0; each needs an additional kernel hook (`SYS_ALARM`, cons close path, scheduler stop/cont). `sigaction` on a deferred signal returns `EINVAL`. The supported set can grow per chunk without ABI break.
 
@@ -3064,7 +3072,7 @@ The translation shim covers the top ~50 Linux ARM64 syscalls by frequency of use
 - Process/thread: `clone`, `execve`, `wait4`, `exit_group`, `getpid`, `gettid`, `set_tid_address`.
 - Memory: `mmap`, `munmap`, `brk`, `mprotect`.
 - Timing: `clock_gettime`, `clock_nanosleep`, `nanosleep`.
-- Signals: `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tgkill`.
+- Signals: `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tkill`, `tgkill`.
 - Threading: `futex`.
 - I/O multiplexing: `poll`, `pselect6`.
 - POSIX modern: `name_to_handle_at`, `open_by_handle_at`, `flock`, `fcntl` (`F_SETLK`, `F_GETLK`, `F_OFD_SETLK`).
@@ -3651,7 +3659,7 @@ POSIX signals map to Plan 9 notes:
 | POSIX | Plan 9 note | Notes |
 |---|---|---|
 | `SIGINT` | `interrupt` | Ctrl-C on cons → note |
-| `SIGTERM` | `kill` | `postnote(pid, "kill")` |
+| `SIGTERM` | `term` | Catchable; default terminate (operator vote 2026-10-13) |
 | `SIGKILL` | `kill` (non-catchable) | Kernel enforces non-catchable |
 | `SIGCHLD` | synthetic | Generated on child `exits()` |
 | `SIGHUP` | `hangup` | Terminal close |
@@ -3669,7 +3677,8 @@ POSIX signals map to Plan 9 notes:
 | POSIX | Plan 9 note | NOTE_BIT | Status at v1.0 |
 |---|---|---|---|
 | `SIGINT` | `interrupt` | 0 | supported (handler + fd-read paths) |
-| `SIGTERM` | `kill` | 1 | supported (non-catchable per §7.6.5) |
+| `SIGKILL` | `kill` | 1 | supported (non-catchable per §7.6.5) |
+| `SIGTERM` | `term` | 7 | supported (handler + fd-read paths; default terminate) |
 | `SIGPIPE` | `pipe` | 2 | supported; pouch default-masks per [RESOLVED 6.4] (write returns EPIPE) |
 | `SIGCHLD` | `child_exit` | 3 | supported (synthetic on child exits()) |
 | `SIGHUP`/`SIGALRM`/`SIGUSR1`/`SIGUSR2`/`SIGSTOP`/`SIGCONT` | (deferred) | n/a | `sigaction` returns EINVAL |
@@ -5244,7 +5253,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 | I-16 | KASLR randomizes kernel image base at boot | Boot init randomizes TTBR1 base (never-zero slide) | runtime + the `/ctl/kernel-base` leaf (devctl) |
 | I-17 | EEVDF latency bound: delay between runnable and running ≤ slice_size × N | DESIGN TARGET, not yet enforced as stated: the quantitative bound needs the full EEVDF deadline math, which is deferred (RW-2 2A-F6 → RW-13). As-built the eventual-progress form holds (ordered dispatch + timer preempt; `scheduler.tla` `LatencyBound` proves *eventually runs*, i.e. I-8's property, not the quantitative bound) | `scheduler.tla` (qualitative liveness only) |
 | I-18 | IPIs from CPU A to CPU B are processed in send order | GIC SGI ordering | `scheduler.tla` |
-| I-19 | Note delivery preserves causal order within a process; every posted non-`kill` note is consumed exactly once across the handler + fd-read paths; `kill` is non-catchable; an uncaught `interrupt` (no handler, not masked, on a non-self-managing Proc) default-terminates the Proc — the SIGINT-shaped per-note disposition (§8.8.2, LS-5). **A note's default action is a property of the note (#15)**: `notes_default_action` reads the `dfl` column of `g_known_notes` and answers TERMINATE (`interrupt`/`kill`/`pipe`/`tty:quit`/`tty:hup`), STOP (`tty:susp` — the I-20 job stop) or IGNORE (`child_exit`/`tty:winch`/`tty:cont`). **The unification is PARTIAL and the boundary is load-bearing**: the terminate-class *latch* (`notes_name_terminate_latch`, the EL0-tail uncaught arm) and `SYS_NOTED(NDFLT)` read that one column, so those two cannot drift. A THIRD decider does not: `tty:susp`'s *uncaught* stop is decided at POST time by `job_stop_cb` (`kernel/proc.c`, reached from `pts_tty_signal`'s `TTY_SIG_TSTP` arm) via hardcoded routing, and the IGNORE class has no uncaught reader at all — `notes_deliver_at_el0_return`'s handler-less branch simply leaves such a note QUEUED, which is retention, not ignore. So editing the column alone can still make a note mean one thing uncaught and another under NDFLT; unifying `job_stop_cb` onto the column is OWED (audit #15 F5) | Per-Proc `NoteQueue` under lock; EL0-return-tail dispatch; `devnotes` Dev; the self-managing gate = notes-fd-open; the `dfl` column + `notes_default_action` (`kernel/notes.c`) for the disposition, `proc_job_stop_self` for the STOP arm. Sub-invariants N-1..N-5 enumerated in §7.6.7 | (`notes.tla` planned then dropped per CLAUDE.md spec-to-code suspension; prose + audit + tests — `notes.default_action_table` pins every row, `notes.ndflt_dispatch` pins both directions) |
+| I-19 | Note delivery preserves causal order within a process; every posted non-`kill` note is consumed exactly once across the handler + fd-read paths; `kill` is non-catchable; an uncaught `interrupt` (no handler, not masked, on a non-self-managing Proc) default-terminates the Proc — the SIGINT-shaped per-note disposition (§8.8.2, LS-5). **A note's default action is a property of the note (#15)**: `notes_default_action` reads the `dfl` column of `g_known_notes` and answers TERMINATE (`interrupt`/`kill`/`pipe`/`term`/`tty:quit`/`tty:hup`), STOP (`tty:susp` — the I-20 job stop) or IGNORE (`child_exit`/`tty:winch`/`tty:cont`). **The unification is PARTIAL and the boundary is load-bearing**: the terminate-class *latch* (`notes_name_terminate_latch`, the EL0-tail uncaught arm) and `SYS_NOTED(NDFLT)` read that one column, so those two cannot drift. A THIRD decider does not: `tty:susp`'s *uncaught* stop is decided at POST time by `job_stop_cb` (`kernel/proc.c`, reached from `pts_tty_signal`'s `TTY_SIG_TSTP` arm) via hardcoded routing, and the IGNORE class has no uncaught reader at all — `notes_deliver_at_el0_return`'s handler-less branch simply leaves such a note QUEUED, which is retention, not ignore. So editing the column alone can still make a note mean one thing uncaught and another under NDFLT; unifying `job_stop_cb` onto the column is OWED (audit #15 F5) | Per-Proc `NoteQueue` under lock; EL0-return-tail dispatch; `devnotes` Dev; the self-managing gate = notes-fd-open; the `dfl` column + `notes_default_action` (`kernel/notes.c`) for the disposition, `proc_job_stop_self` for the STOP arm. Sub-invariants N-1..N-5 enumerated in §7.6.7 | (`notes.tla` planned then dropped per CLAUDE.md spec-to-code suspension; prose + audit + tests — `notes.default_action_table` pins every row, `notes.ndflt_dispatch` pins both directions) |
 | I-20 | PTY master ↔ slave atomicity | **ENFORCED (PTY-1 + PTY-2 as-built, 2026-07-18).** The statement (PTY-DESIGN §6): (a) every byte written to one end appears at the other's read exactly once, in order, transformed by the ldisc — none lost/torn/duped; (b) a cooked signal-class control char raises exactly one signal to exactly the controlling terminal's fg pgrp, exactly once, and (ISIG set) is NOT also a byte; (c) no wake lost between a write and a blocked peer read; (d) teardown delivers every in-flight byte, then EOF, strands no reader; master-close raises HUP exactly once. **Realization**: the *stop leg* + the signal routing are KERNEL (PTY-1: sessions/pgrps + the pts registry + `SYS_TTY_SIGNAL` → ct_sid → fg_pgid + the `job_stop_req` stop owner — `pty_stop.tla`); the *data path* is the USERSPACE `ptyfs` (PTY-2: the rings + the per-pts ldisc + the ctl + teardown — `pty.tla`'s actions map to `usr/ptyfs/src/server.rs` per SPEC-TO-CODE; HupAtMostOnce holds BY CONSTRUCTION — one master fd per pts can ever exist; the ptyfs single-threadedness carries (c) via `poll_reads`-before-park). The 2e `pty-probe` openpty E2E proves (b)+(d) live end-to-end: Ctrl-C → "interrupt" on a real controlling session's notes fd, winsize → `tty:winch`, master-close → `tty:hup`, plus the parked deferred master read. (LS-8a's pollable-cons deferred poll-wake stays under I-9: `cons_poll.tla`, not this row.) | `specs/pty.tla` (clean + liveness + the buggy cfgs `signal_also_byte` / `lost_teardown_byte` / `double_stop` / `signal_wrong_pgrp`) + `specs/pty_stop.tla` (clean + liveness + `double_stop` / `death_blocked`) + the §25.4 PTY-1 + ptyfs rows + `docs/reference/135-pty-kernel.md` + `136-ptyfs.md` + the PTY-1g + PTY-2e focused audits + the selftest/probe/E2E + the SMP gate |
 | I-21 | Kernel executes uniformly at EL1h (`SPSel=1`); `SP_EL0` is exclusively the userspace stack | Boot sets `SPSel=1` and never lowers it; per-thread kernel stack carries exception frames; `test_smp` asserts `SPSel==1` | `sched_ctxsw.tla` |
 | I-22 | No identity carries ambient super-authority: there is no superuser identity; `hostowner` is an authority *source* (the system key), not an identity; elevated power is acquired only via the legate (scoped, audited, ephemeral) | Syscall surface grants no authority by identity alone; capabilities are explicit (grant or legate activation) via the `cap` device + clearance-level policy | `IDENTITY-DESIGN.md §3.3/§8.2` (prose + audit + tests per the spec-to-code suspension) |

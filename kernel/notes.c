@@ -83,6 +83,10 @@ static const struct note_name_entry g_known_notes[] = {
     { "interrupt",  NOTE_BIT_INTERRUPT,  NOTE_DFL_TERMINATE, NOTE_SIG_INT  },
     { "kill",       NOTE_BIT_KILL,       NOTE_DFL_TERMINATE, NOTE_SIG_KILL },
     { "pipe",       NOTE_BIT_PIPE,       NOTE_DFL_TERMINATE, NOTE_SIG_PIPE },
+    // SIGTERM's own note (operator vote 2026-10-13): Pouch used to send SIGTERM
+    // as `interrupt`, so a death by it read back as SIGINT and a Proc could not
+    // ignore Ctrl-C without ignoring SIGTERM too. Userspace-postable.
+    { NOTE_NAME_TERM, NOTE_BIT_TERM,     NOTE_DFL_TERMINATE, NOTE_SIG_TERM },
     // SIGCHLD's POSIX default is ignore. Before #15 an NDFLT from a
     // child_exit handler killed the Proc; pouch worked around the kernel by
     // spelling this default NCONT instead (patches 0007/0021), which is why
@@ -139,7 +143,8 @@ _Static_assert(NOTE_SIG_HUP  == VIV_SIGHUP  && NOTE_SIG_INT  == VIV_SIGINT  &&
                NOTE_SIG_QUIT == VIV_SIGQUIT && NOTE_SIG_ILL  == VIV_SIGILL  &&
                NOTE_SIG_ABRT == VIV_SIGABRT && NOTE_SIG_BUS  == VIV_SIGBUS  &&
                NOTE_SIG_FPE  == VIV_SIGFPE  && NOTE_SIG_KILL == VIV_SIGKILL &&
-               NOTE_SIG_SEGV == VIV_SIGSEGV && NOTE_SIG_PIPE == VIV_SIGPIPE,
+               NOTE_SIG_SEGV == VIV_SIGSEGV && NOTE_SIG_PIPE == VIV_SIGPIPE &&
+               NOTE_SIG_TERM == VIV_SIGTERM,
                "NOTE_SIG_* must be the Linux aarch64 numbers vivarium.h names");
 
 // strncmp-style name compare bounded by NOTE_NAME_MAX (so we don't read
@@ -403,6 +408,8 @@ static u32 notes_name_terminate_latch(const char *name) {
         return PROC_FLAG_TTY_TERMINATE_PENDING;
     if (bit == (int)NOTE_BIT_PIPE)
         return PROC_FLAG_PIPE_TERMINATE_PENDING;
+    if (bit == (int)NOTE_BIT_TERM)
+        return PROC_FLAG_TERM_TERMINATE_PENDING;
     return 0;
 }
 
@@ -493,15 +500,16 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
     __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
 }
 
-// The caught-note sub-field (proc.h) carries a literal mask because proc.h does
-// not include notes.h; assert it equals NOTE_MASK_SUPPORTED shifted, so a new
-// NOTE_BIT_* family (widening NOTE_MASK_SUPPORTED) can never silently outgrow it.
-_Static_assert((NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT) == PROC_FLAG_CAUGHT_NOTE_MASK,
-               "item 11: PROC_FLAG_CAUGHT_NOTE_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
-_Static_assert((NOTE_MASK_SUPPORTED << PROC_CAUGHT_CLAIM_SHIFT) == PROC_FLAG_CAUGHT_CLAIM_MASK,
-               "ARCH 8.8.3: PROC_FLAG_CAUGHT_CLAIM_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
+// The caught latch and its claim (proc.h, Proc.note_caught) carry literal masks
+// because proc.h does not include notes.h; assert each equals NOTE_MASK_SUPPORTED
+// shifted, so a new NOTE_BIT_* family (widening NOTE_MASK_SUPPORTED) can never
+// silently outgrow them.
+_Static_assert((NOTE_MASK_SUPPORTED << CAUGHT_LATCH_SHIFT) == CAUGHT_LATCH_MASK,
+               "item 11: CAUGHT_LATCH_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
+_Static_assert((NOTE_MASK_SUPPORTED << CAUGHT_CLAIM_SHIFT) == CAUGHT_CLAIM_MASK,
+               "ARCH 8.8.3: CAUGHT_CLAIM_MASK must equal NOTE_MASK_SUPPORTED << SHIFT");
 // A claim is released only through the claimant's own record of it, so a family
-// that did not fit Thread.note_claim would be claimed in proc_flags forever.
+// that did not fit Thread.note_claim would be claimed in note_caught forever.
 _Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->note_claim))) == 0,
                "ARCH 8.8.3: Thread.note_claim must hold every supported note family");
 
@@ -509,7 +517,7 @@ _Static_assert(((u64)NOTE_MASK_SUPPORTED >> (8u * sizeof(((struct Thread *)0)->n
 // EXACT COMPLEMENT. The terminate arm REFUSES when a live handler exists OR the
 // Proc is self-managing; this one arms PRECISELY THEN. A committed note whose
 // family is caught (a handler will run it, or a self-managing notes fd will read
-// it) arms that family's bit in the PROC_FLAG_CAUGHT_NOTE_MASK sub-field, which
+// it) arms that family's bit in the caught latch (Proc.note_caught), which
 // the lock-free sleep predicate thread_caught_note_deliverable reads. Per-family
 // (bit == NOTE_BIT_*) so the sleeper's ~note_mask gate stays precise (the PTY-1b
 // reason). KILL is excluded: it is non-catchable and routes through
@@ -524,8 +532,8 @@ static void notes_arm_caught_note_locked(struct Proc *p, const char *name) {
     if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
     if (!notes_proc_has_live_handler(p, name) && !proc_is_self_managing_notes(p))
         return;
-    __atomic_or_fetch(&p->proc_flags,
-                      (1u << (PROC_CAUGHT_NOTE_SHIFT + (u32)bit)),
+    __atomic_or_fetch(&p->note_caught,
+                      (u16)(1u << (CAUGHT_LATCH_SHIFT + (u32)bit)),
                       __ATOMIC_RELEASE);
 }
 
@@ -581,7 +589,7 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
                                            const struct Note *popped) {
     int bit = notes_name_to_bit(popped->name);
     if (bit < 0 || bit == (int)NOTE_BIT_KILL) return;
-    u32 fambit = (1u << (PROC_CAUGHT_NOTE_SHIFT + (u32)bit));
+    u16 fambit = (u16)(1u << (CAUGHT_LATCH_SHIFT + (u32)bit));
     u32 idx = q->head;
     for (u32 n = 0; n < q->count; n++) {
         if (notes_name_to_bit(q->ring[idx].name) == bit)
@@ -592,7 +600,7 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
     // that took it and ends at that thread's EL0-return tail (notes_release_-
     // claims). A sleeper's claim CAS that raced this drain fails on the changed
     // word, so no claim is taken for a family with nothing queued.
-    __atomic_and_fetch(&p->proc_flags, ~fambit, __ATOMIC_RELEASE);
+    __atomic_and_fetch(&p->note_caught, (u16)~fambit, __ATOMIC_RELEASE);
 }
 
 int notes_post(struct Proc *p, const char *name, u32 arg,
@@ -1348,6 +1356,11 @@ bool thread_die_pending(struct Thread *t) {
         if ((flags & PROC_FLAG_PIPE_TERMINATE_PENDING) != 0 &&
             (t->note_mask & (1u << NOTE_BIT_PIPE)) == 0)
             return true;
+        // The term latch pairs with NOTE_BIT_TERM alone: a thread that masked
+        // only interrupt (SIGINT blocked) still unwinds for a pending term.
+        if ((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0 &&
+            (t->note_mask & (1u << NOTE_BIT_TERM)) == 0)
+            return true;
     }
     return false;
 }
@@ -1441,18 +1454,18 @@ bool thread_caught_note_deliverable(struct Thread *t) {
     if (t->in_handler) return false;
     struct Proc *p = t->proc;
     if (!p || p == kproc()) return false;
-    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    u32 caught = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    u32 caught = ((u32)__atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) &
+                  CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     return (caught & ~t->note_mask & NOTE_MASK_SUPPORTED) != 0;
 }
 
 bool thread_caught_note_claim(struct Thread *t) {
     if (!thread_caught_note_deliverable(t)) return false;
     struct Proc *p = t->proc;
-    u32 flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    u16 flags = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
     for (;;) {
-        u32 caught  = (flags & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
-        u32 claimed = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+        u32 caught  = ((u32)flags & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
+        u32 claimed = ((u32)flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
         u32 deliv   = caught & ~t->note_mask & NOTE_MASK_SUPPORTED;
         // A claim this thread holds is its own to unwind on. A wait that claimed
         // and then completed anyway leaves the claim until the call's tail, and
@@ -1471,8 +1484,8 @@ bool thread_caught_note_claim(struct Thread *t) {
         u32 open    = deliv & ~claimed;
         if (open == 0) return false;   // every family deliverable here is taken
         u32 fam = open & (~open + 1u); // the lowest: any one family unwinds us
-        if (__atomic_compare_exchange_n(&p->proc_flags, &flags,
-                                        flags | (fam << PROC_CAUGHT_CLAIM_SHIFT),
+        if (__atomic_compare_exchange_n(&p->note_caught, &flags,
+                                        (u16)(flags | (fam << CAUGHT_CLAIM_SHIFT)),
                                         false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             __atomic_store_n(&t->note_claim, (u8)(t->note_claim | fam), __ATOMIC_RELAXED);
             return true;
@@ -1555,10 +1568,10 @@ u8 thread_caught_wait_kind(const struct Thread *t, bool caught_ok) {
 // walk skips `skip`. Called with no lock held.
 static void notes_drop_families(struct Thread *t, u32 mine, struct Thread *skip) {
     struct Proc *p   = t->proc;
-    u32          was = __atomic_fetch_and(&p->proc_flags,
-                                          ~(mine << PROC_CAUGHT_CLAIM_SHIFT),
+    u16          was = __atomic_fetch_and(&p->note_caught,
+                                          (u16)~(mine << CAUGHT_CLAIM_SHIFT),
                                           __ATOMIC_ACQ_REL);
-    u32 caught = (was & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if ((caught & mine) == 0) return;
     irq_state_t s = proc_table_lock_acquire();
     proc_caught_note_walk(p, skip);
@@ -1587,9 +1600,9 @@ void notes_exit_drop_locked(struct Thread *t) {
     u32 mine = t->note_claim | __atomic_exchange_n(&t->note_target, 0, __ATOMIC_ACQ_REL);
     __atomic_store_n(&t->note_claim, 0, __ATOMIC_RELAXED);
     if (mine == 0) return;
-    u32 was = __atomic_fetch_and(&p->proc_flags, ~(mine << PROC_CAUGHT_CLAIM_SHIFT),
+    u16 was = __atomic_fetch_and(&p->note_caught, (u16)~(mine << CAUGHT_CLAIM_SHIFT),
                                  __ATOMIC_ACQ_REL);
-    u32 caught = (was & PROC_FLAG_CAUGHT_NOTE_MASK) >> PROC_CAUGHT_NOTE_SHIFT;
+    u32 caught = ((u32)was & CAUGHT_LATCH_MASK) >> CAUGHT_LATCH_SHIFT;
     if (caught & mine) proc_caught_note_walk(p, NULL);
 }
 

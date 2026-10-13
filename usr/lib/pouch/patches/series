@@ -162,3 +162,6 @@
 # parked at the sentinel, and the loader accepted its ENOSYS: RELRO was never
 # applied. SYS_BURROW_PROTECT's four words, a reduction; ENOSYS now fails.
 0048-pouch-ldso-relro.patch
+# 0049: the signal chunk's S-2 -- SIGTERM posts and receives its own note, `term`
+# (NOTE_BIT_TERM), instead of SIGINT's `interrupt`; a death by it reads SIGTERM.
+0049-pouch-sigterm-term-note.patch

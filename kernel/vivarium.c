@@ -368,17 +368,13 @@ static const struct viv_reject g_viv_rejects[] = {
     // The signal family (V-6, §6.22).
     { VIV_LINUX_RT_SIGACTION,   VIV_TIER2 },  // V-6b: vivarium_sigaction_decide
     { VIV_LINUX_RT_SIGPROCMASK, VIV_TIER2 },  // V-6b: vivarium_sigprocmask_decide
-    //
-    // STILL NOT LISTED, deliberately: kill (129), tkill (130), tgkill (131).
-    // Their shells do not exist, and a VIV_TIER2 row whose shell is missing
-    // would be a table that DECLARES a capability the code does not have --
-    // `viv_tier2`'s default arm calls exactly that a "table/shell disagreement"
-    // and fails closed. So a row lands WITH its shell, in the same commit, and
-    // until then the number FORWARDs like any unclassified call. (They are also
-    // the only signal rows that are an AUTHORITY question rather than a
-    // disposition one: they name another Proc, so they must reuse an existing
-    // cross-Proc gate verbatim -- SYS_POSTNOTE's parent-only check or I-26's
-    // two-axis one -- never invent a third.)
+    // The only signal rows that are an AUTHORITY question rather than a
+    // disposition one: they name another Proc, so they reuse SYS_POSTNOTE's own
+    // gate verbatim -- the caller, or a child it spawned; the gate Pouch's kill
+    // passes -- and never invent a third (operator vote 2026-10-13).
+    { VIV_LINUX_KILL,           VIV_TIER2 },  // vivarium_kill_decide + viv_kill
+    { VIV_LINUX_TKILL,          VIV_TIER2 },  // the same, a tid resolved to its Proc
+    { VIV_LINUX_TGKILL,         VIV_TIER2 },  // the same, the tid inside the tgid
     //
     // The ENOSYS rows below are NOT in that state -- they are live decisions,
     // correct today, and each has its own reason rather than a blanket
@@ -1728,12 +1724,12 @@ enum viv_signote viv_signal_note(u64 signum) {
     // mask conversion. A guest asking about SIGTERM got ENOSYS before this
     // change and gets ENOSYS after it.
     //
-    // THE SEAM: a real SIGTERM wants its own supported note name (`terminate`)
-    // and its own NOTE_BIT -- an addition to I-19's closed supported set, which
-    // is ABI-bearing and needs signoff (the tasks #15/#16 shape). It becomes
-    // load-bearing when `kill` lands, because THAT is what would first generate
-    // a SIGTERM.
+    // THE SEAM V-6b left -- SIGTERM wants its own supported note and its own
+    // NOTE_BIT, an addition to I-19's closed set -- closed with the operator's
+    // vote of 2026-10-13: the note is `term`, and the kill rows that first
+    // generate a SIGTERM landed with it.
     case VIV_SIGINT:                      return VIV_SIGNOTE_INTERRUPT;
+    case VIV_SIGTERM:                     return VIV_SIGNOTE_TERM;
     case VIV_SIGKILL:                     return VIV_SIGNOTE_KILL;
     case VIV_SIGPIPE:                     return VIV_SIGNOTE_PIPE;
     case VIV_SIGCHLD:                     return VIV_SIGNOTE_CHILD_EXIT;
@@ -1741,6 +1737,10 @@ enum viv_signote viv_signal_note(u64 signum) {
     case VIV_SIGBUS:                      return VIV_SIGNOTE_SNARE_BUS;
     case VIV_SIGILL:                      return VIV_SIGNOTE_SNARE_ILL;
     case VIV_SIGFPE:                      return VIV_SIGNOTE_SNARE_FPE;
+    // No note is ever queued for it: a self-directed one (musl's raise(), which
+    // is tkill to self) ends the caller as snare:abort, Pouch's abort() death,
+    // so SIG_DFL is the only disposition it can truthfully take.
+    case VIV_SIGABRT:                     return VIV_SIGNOTE_SNARE_ABORT;
     case VIV_SIGHUP:                      return VIV_SIGNOTE_TTY_HUP;
     case VIV_SIGQUIT:                     return VIV_SIGNOTE_TTY_QUIT;
     case VIV_SIGWINCH:                    return VIV_SIGNOTE_TTY_WINCH;
@@ -1749,15 +1749,10 @@ enum viv_signote viv_signal_note(u64 signum) {
 
     // NOT a gap, and worth naming so a future reader does not "fix" it by
     // inventing a delivery:
-    //   SIGTERM  — see above: it wants its own note, and inventing a shared one
-    //              is what V-6b just undid.
     //   SIGALRM  — no timer note exists; setitimer/alarm are themselves ENOSYS,
     //              so nothing could post it.
     //   SIGUSR1/2 — no general-purpose note; a note has a fixed 16-byte name
     //              from a closed set, so there is nothing to carry them.
-    //   SIGABRT  — reachable only via raise() == tkill(self). tkill has no row,
-    //              so a guest's abort() falls through to a_crash()'s NULL store
-    //              and dies of snare:segv, which its parent reads as SIGSEGV.
     //   SIGSTOP  — uncatchable by POSIX and rejected by the sigaction domain.
     //   32..64   — the realtime range, which requires queued siginfo (Tier 2).
     default: return VIV_SIGNOTE_NONE;
@@ -1783,6 +1778,7 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
     // In `g_known_notes` (notes.c), so `notes_post` accepts them and the
     // EL0-return-tail dispatcher can see them.
     case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TERM:
     case VIV_SIGNOTE_KILL:
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_CHILD_EXIT:
@@ -1800,9 +1796,62 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
     case VIV_SIGNOTE_SNARE_BUS:
     case VIV_SIGNOTE_SNARE_ILL:
     case VIV_SIGNOTE_SNARE_FPE:
+    case VIV_SIGNOTE_SNARE_ABORT:
     case VIV_SIGNOTE_NONE:
     default:
         return false;
+    }
+}
+
+// The snare:* death that carries an undeliverable signal, or NULL.
+static const char *viv_signote_snare_death(enum viv_signote note) {
+    switch (note) {
+    case VIV_SIGNOTE_SNARE_SEGV:  return NOTE_NAME_SNARE_SEGV;
+    case VIV_SIGNOTE_SNARE_BUS:   return NOTE_NAME_SNARE_BUS;
+    case VIV_SIGNOTE_SNARE_ILL:   return NOTE_NAME_SNARE_ILL;
+    case VIV_SIGNOTE_SNARE_FPE:   return NOTE_NAME_SNARE_FPE;
+    case VIV_SIGNOTE_SNARE_ABORT: return NOTE_NAME_SNARE_ABORT;
+    default:                      return NULL;
+    }
+}
+
+enum viv_kill_kind vivarium_kill_decide(u64 sig, const char **name_out) {
+    if (!name_out) return VIV_KILL_REFUSE;   // fail closed
+    *name_out = NULL;
+    // Linux's own check: 0 probes, 1.._NSIG are signals, anything else EINVAL.
+    if (sig == 0) return VIV_KILL_PROBE;
+    if (sig > VIV_NSIG) return VIV_KILL_REFUSE;
+    enum viv_signote note = viv_signal_note(sig);
+    switch (note) {
+    // Notes any program may post (notes_post refuses only the tty:* prefix and
+    // `sak` from a userspace poster), so SYS_POSTNOTE's gate is the whole
+    // authority question -- the one Pouch's kill already answers.
+    case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TERM:
+    case VIV_SIGNOTE_KILL:
+    case VIV_SIGNOTE_PIPE:
+    case VIV_SIGNOTE_CHILD_EXIT:
+        *name_out = viv_signote_note_name(note);
+        return *name_out ? VIV_KILL_POST : VIV_KILL_REFUSE;
+    // A snare:* death is the kernel's to cause; the one a program may choose is
+    // its own, which it could already reach by faulting.
+    case VIV_SIGNOTE_SNARE_SEGV:
+    case VIV_SIGNOTE_SNARE_BUS:
+    case VIV_SIGNOTE_SNARE_ILL:
+    case VIV_SIGNOTE_SNARE_FPE:
+    case VIV_SIGNOTE_SNARE_ABORT:
+        *name_out = viv_signote_snare_death(note);
+        return *name_out ? VIV_KILL_SELF_DEATH : VIV_KILL_REFUSE;
+    // tty:* is posted by the line discipline alone: a program that could post
+    // tty:susp could stop a job it does not control.
+    case VIV_SIGNOTE_TTY_HUP:
+    case VIV_SIGNOTE_TTY_QUIT:
+    case VIV_SIGNOTE_TTY_WINCH:
+    case VIV_SIGNOTE_TTY_SUSP:
+    case VIV_SIGNOTE_TTY_CONT:
+    case VIV_SIGNOTE_NONE:
+    default:
+        return VIV_KILL_REFUSE;
     }
 }
 
@@ -2887,6 +2936,7 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
     // posters. `kill` is present for completeness of the decode; nothing can put
     // it in a disposition table (vivarium_sigaction_decide refuses SIGKILL).
     if (viv_name_eq(name, NOTE_NAME_INTERRUPT))  return VIV_SIGNOTE_INTERRUPT;
+    if (viv_name_eq(name, NOTE_NAME_TERM))       return VIV_SIGNOTE_TERM;
     if (viv_name_eq(name, NOTE_NAME_KILL))       return VIV_SIGNOTE_KILL;
     if (viv_name_eq(name, NOTE_NAME_PIPE))       return VIV_SIGNOTE_PIPE;
     if (viv_name_eq(name, NOTE_NAME_CHILD_EXIT)) return VIV_SIGNOTE_CHILD_EXIT;
@@ -2904,6 +2954,7 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
 const char *viv_signote_note_name(enum viv_signote note) {
     switch (note) {
     case VIV_SIGNOTE_INTERRUPT:  return NOTE_NAME_INTERRUPT;
+    case VIV_SIGNOTE_TERM:       return NOTE_NAME_TERM;
     case VIV_SIGNOTE_KILL:       return NOTE_NAME_KILL;
     case VIV_SIGNOTE_PIPE:       return NOTE_NAME_PIPE;
     case VIV_SIGNOTE_CHILD_EXIT: return NOTE_NAME_CHILD_EXIT;
@@ -2926,6 +2977,7 @@ const struct viv_notebit_map g_viv_notebits = {
     .child_exit = NOTE_BIT_CHILD_EXIT,
     .snare      = NOTE_BIT_SNARE,
     .tty        = NOTE_BIT_TTY,
+    .term       = NOTE_BIT_TERM,
 };
 
 u64 viv_signote_to_signal(enum viv_signote note) {
@@ -3305,13 +3357,15 @@ u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m) {
 
         switch (viv_signal_note(sig)) {
         case VIV_SIGNOTE_INTERRUPT:  out |= 1ULL << m->interrupt;  break;
+        case VIV_SIGNOTE_TERM:       out |= 1ULL << m->term;       break;
         case VIV_SIGNOTE_PIPE:       out |= 1ULL << m->pipe;       break;
         case VIV_SIGNOTE_CHILD_EXIT: out |= 1ULL << m->child_exit; break;
 
         case VIV_SIGNOTE_SNARE_SEGV:
         case VIV_SIGNOTE_SNARE_BUS:
         case VIV_SIGNOTE_SNARE_ILL:
-        case VIV_SIGNOTE_SNARE_FPE:  out |= 1ULL << m->snare;      break;
+        case VIV_SIGNOTE_SNARE_FPE:
+        case VIV_SIGNOTE_SNARE_ABORT: out |= 1ULL << m->snare;     break;
 
         case VIV_SIGNOTE_TTY_HUP:
         case VIV_SIGNOTE_TTY_QUIT:
@@ -3346,13 +3400,15 @@ u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
         u64 bit;
         switch (viv_signal_note(sig)) {
         case VIV_SIGNOTE_INTERRUPT:  bit = 1ULL << m->interrupt;  break;
+        case VIV_SIGNOTE_TERM:       bit = 1ULL << m->term;       break;
         case VIV_SIGNOTE_PIPE:       bit = 1ULL << m->pipe;       break;
         case VIV_SIGNOTE_CHILD_EXIT: bit = 1ULL << m->child_exit; break;
 
         case VIV_SIGNOTE_SNARE_SEGV:
         case VIV_SIGNOTE_SNARE_BUS:
         case VIV_SIGNOTE_SNARE_ILL:
-        case VIV_SIGNOTE_SNARE_FPE:  bit = 1ULL << m->snare;      break;
+        case VIV_SIGNOTE_SNARE_FPE:
+        case VIV_SIGNOTE_SNARE_ABORT: bit = 1ULL << m->snare;     break;
 
         case VIV_SIGNOTE_TTY_HUP:
         case VIV_SIGNOTE_TTY_QUIT:

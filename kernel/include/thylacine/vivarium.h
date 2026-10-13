@@ -1234,6 +1234,7 @@ enum viv_signote {
     VIV_SIGNOTE_NONE = 0,
     VIV_SIGNOTE_INTERRUPT,       // SIGINT only -- see viv_signal_note for why
                                  // V-6b evicted SIGTERM from this row
+    VIV_SIGNOTE_TERM,            // SIGTERM          (its own note since S-2)
     VIV_SIGNOTE_KILL,            // SIGKILL          (non-catchable both sides)
     VIV_SIGNOTE_PIPE,            // SIGPIPE
     VIV_SIGNOTE_CHILD_EXIT,      // SIGCHLD
@@ -1241,6 +1242,7 @@ enum viv_signote {
     VIV_SIGNOTE_SNARE_BUS,       // SIGBUS
     VIV_SIGNOTE_SNARE_ILL,       // SIGILL
     VIV_SIGNOTE_SNARE_FPE,       // SIGFPE
+    VIV_SIGNOTE_SNARE_ABORT,     // SIGABRT          (a self-directed raise only)
     VIV_SIGNOTE_TTY_HUP,         // SIGHUP
     VIV_SIGNOTE_TTY_QUIT,        // SIGQUIT
     VIV_SIGNOTE_TTY_WINCH,       // SIGWINCH
@@ -1274,17 +1276,35 @@ bool viv_signal_owns_note_exclusively(u64 signum);
 // Can a note of this kind actually REACH a Proc's queue? PURE.
 //
 // MEASURED, not assumed: `g_known_notes` (notes.c) holds interrupt / kill /
-// pipe / child_exit / tty:{winch,susp,cont,quit,hup} -- and NOT the snare:*
+// pipe / term / child_exit / tty:{winch,susp,cont,quit,hup} -- and NOT the snare:*
 // family. `proc_fault_terminate` calls `exits(name)` DIRECTLY without going
 // through `notes_post`, so an EL0 fault terminates its Proc before any queue
 // or mask is consulted (notes.h says the same of NOTE_BIT_SNARE: "this bit has
 // no consumer today").
 //
 // The consequence for the phenotype is sharp and permanent-until-v1.x: SIGSEGV,
-// SIGBUS, SIGILL and SIGFPE can be given SIG_DFL (terminate -- which is what
-// already happens) but can NEVER be caught or ignored. A guest that installs a
+// SIGBUS, SIGILL, SIGFPE and SIGABRT can be given SIG_DFL (terminate -- which is
+// what already happens) but can NEVER be caught or ignored. A guest that installs a
 // SIGSEGV handler is told so, rather than discovering it at the first fault.
 bool viv_signote_is_deliverable(enum viv_signote note);
+
+// The kill family (kill 129, tkill 130, tgkill 131; VIVARIUM 6.22): what a
+// signal number asks of the shell. PURE.
+//   PROBE      -- signal 0: run the gate, post nothing.
+//   POST       -- `*name_out` is a note any program may post: through
+//                 SYS_POSTNOTE's own gate (the caller, or a child it spawned).
+//   SELF_DEATH -- `*name_out` is the snare:* death that carries the signal:
+//                 the caller dies of it when it signals ITSELF; a note only the
+//                 kernel posts cannot be sent to another Proc.
+//   REFUSE     -- no note carries the signal, or only the kernel posts its note
+//                 (tty:*), or it is out of range: EINVAL.
+enum viv_kill_kind {
+    VIV_KILL_REFUSE = 0,
+    VIV_KILL_PROBE,
+    VIV_KILL_POST,
+    VIV_KILL_SELF_DEATH,
+};
+enum viv_kill_kind vivarium_kill_decide(u64 sig, const char **name_out);
 
 // Which Linux signal owns this note -- the inverse of `viv_signal_note`. PURE.
 //
@@ -2149,7 +2169,7 @@ enum viv_verdict vivarium_sigprocmask_decide(u64 how, u64 sigsetsize);
 // numbering is notes.h's and is passed in by the caller so this file stays free
 // of kernel headers.
 struct viv_notebit_map {
-    u8 interrupt, kill, pipe, child_exit, snare, tty;
+    u8 interrupt, kill, pipe, child_exit, snare, tty, term;
 };
 u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m);
 

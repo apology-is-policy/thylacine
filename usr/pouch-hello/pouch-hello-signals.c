@@ -27,6 +27,13 @@
 //                                         SIGABRT, SIGABRT, SIGTRAP, SIGSEGV --
 //                                         never WIFEXITED (docs/ERRORS.md
 //                                         "The wait status").
+//   SIGTERM apart (signal chunk S-2)   -> with SIGINT ignored, raise(SIGINT)
+//                                         must not run the SIGTERM handler, and
+//                                         with SIGINT blocked raise(SIGTERM) must
+//                                         run it at once; a child killed with
+//                                         SIGTERM reads WIFSIGNALED SIGTERM.
+//                                         Before patch 0049 both rode
+//                                         `interrupt`, and all three failed.
 //
 // Output (joey relays via the pipe-to-UART):
 //   pouch-hello-signals: install handler
@@ -37,7 +44,9 @@
 //   pouch-hello-signals: raise SIGINT (ignored)
 //   pouch-hello-signals: count unchanged (count=2)
 //   pouch-hello-signals: unsupported sigaction returns EINVAL
+//   pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT
 //   pouch-hello-signals: death abort reads WIFSIGNALED SIGABRT  (x4 legs)
+//   pouch-hello-signals: death term reads WIFSIGNALED SIGTERM
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
@@ -65,6 +74,7 @@ static int die(const char *how) {
     if (!strcmp(how, "assert")) { volatile int zero = 0; assert(zero); }
     if (!strcmp(how, "brk"))    __asm__ __volatile__("brk #1" ::: "memory");
     if (!strcmp(how, "segv"))   { volatile int *bad = (volatile int *)0; *bad = 1; }
+    if (!strcmp(how, "wait"))   for (;;) sleep(1);
     return 0;
 }
 
@@ -99,6 +109,77 @@ static int test_deaths(void) {
         printf("pouch-hello-signals: death %s reads WIFSIGNALED %s\n",
                legs[i].how, legs[i].name);
     }
+    return 0;
+}
+
+// kill(pid, SIGTERM) posts `term`, and the child's death reads back as SIGTERM.
+// Before patch 0049 Pouch posted `interrupt` and this read SIGINT. The child
+// may not have reached main yet: a term it has no handler for ends it the same
+// way, by the kernel's default.
+static int test_term_death(void) {
+    char *cargv[] = { (char *)SELF, (char *)"die", (char *)"wait", NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("pouch-hello-signals: death term: respawn failed errno=%d\n", errno);
+        return -1;
+    }
+    if (kill(pid, SIGTERM) != 0) {
+        printf("pouch-hello-signals: death term: kill failed errno=%d\n", errno);
+        return -1;
+    }
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("pouch-hello-signals: death term: waitpid failed errno=%d\n", errno);
+        return -1;
+    }
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGTERM) {
+        printf("pouch-hello-signals: death term: status %#x (want WIFSIGNALED SIGTERM)\n",
+               (unsigned)st);
+        return -1;
+    }
+    printf("pouch-hello-signals: death term reads WIFSIGNALED SIGTERM\n");
+    return 0;
+}
+
+// SIGINT is SIG_IGN when this runs. Until 0049 a delivered `interrupt` ran
+// SIGTERM's handler whenever SIGINT had none, and blocking SIGINT blocked the
+// note SIGTERM rode, so each of the two checks below failed.
+static int test_term_apart(void) {
+    struct sigaction ta;
+    memset(&ta, 0, sizeof ta);
+    ta.sa_handler = on_sigint;
+    if (sigaction(SIGTERM, &ta, NULL) != 0) {
+        printf("pouch-hello-signals: sigaction(SIGTERM) failed: errno=%d\n", errno);
+        return -1;
+    }
+    int before = (int)g_handler_count;
+    raise(SIGINT);
+    int after_int = (int)g_handler_count;
+
+    sigset_t blk, old;
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGINT);
+    sigprocmask(SIG_BLOCK, &blk, &old);
+    g_handler_sig = -1;
+    raise(SIGTERM);
+    int after_term = (int)g_handler_count;
+    int term_sig   = g_handler_sig;
+    sigprocmask(SIG_SETMASK, &old, NULL);
+
+    ta.sa_handler = SIG_DFL;
+    sigaction(SIGTERM, &ta, NULL);
+
+    if (after_int != before) {
+        printf("pouch-hello-signals: raise(SIGINT) ran the SIGTERM handler (count %d -> %d)\n",
+               before, after_int);
+        return -1;
+    }
+    if (after_term != before + 1 || term_sig != SIGTERM) {
+        printf("pouch-hello-signals: raise(SIGTERM) with SIGINT blocked: count %d -> %d, sig %d\n",
+               before, after_term, term_sig);
+        return -1;
+    }
+    printf("pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT\n");
     return 0;
 }
 
@@ -314,9 +395,19 @@ int main(int argc, char **argv) {
     printf("pouch-hello-signals: unsupported sigaction returns EINVAL\n");
     fflush(stdout);
 
+    if (test_term_apart() != 0) {
+        fflush(stdout);
+        return 11;
+    }
+    fflush(stdout);
+
     if (test_deaths() != 0) {
         fflush(stdout);
         return 10;
+    }
+    if (test_term_death() != 0) {
+        fflush(stdout);
+        return 12;
     }
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);

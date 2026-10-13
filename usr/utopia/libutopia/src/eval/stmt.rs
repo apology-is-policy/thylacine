@@ -2454,6 +2454,7 @@ pub fn note_class_for_name(name: &str) -> Option<NoteClass> {
         "pipe" => Some(NoteClass::Pipe),
         "child_exit" => Some(NoteClass::ChildExit),
         "sak" => Some(NoteClass::Sak),
+        "term" => Some(NoteClass::Term),
         _ if name.starts_with("tty:") => Some(NoteClass::Tty),
         _ => None,
     }
@@ -2976,7 +2977,10 @@ fn dispatch_note(env: &mut Env, note: &Note) -> bool {
         // (the bash convention). Every other unhandled tty:* (susp at the
         // prompt, winch, cont) is discarded here by falling through: a shell
         // ignores its own SIGTSTP (the bash posture) and the v1.0 editor has
-        // no resize consumer. The fd-0 EOF path backstops the hup.
+        // no resize consumer. The fd-0 EOF path backstops the hup. An
+        // unhandled `term` falls through too: an interactive shell ignores
+        // SIGTERM (the bash posture); a script never opens its notes, so a term
+        // ends it by the kernel's default.
         if note.name == "tty:hup" {
             t_putstr("ut: hangup (tty:hup) -> exit 129\n");
             env.request_exit(129);

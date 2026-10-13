@@ -755,6 +755,10 @@ pub const T_NOTE_BIT_TTY:        u8 = 5;
 // of the name is refused), posted to the trusted login authority when a
 // serial BREAK opens a trusted episode. Default IGNORE. Its own bit.
 pub const T_NOTE_BIT_SAK:        u8 = 6;
+// `term` -- SIGTERM's note (the signal chunk's S-2): a request to end,
+// catchable, default terminate. Its own bit, so a program masks or catches it
+// apart from `interrupt`.
+pub const T_NOTE_BIT_TERM:       u8 = 7;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
@@ -767,7 +771,7 @@ pub const T_NOTE_BIT_SAK:        u8 = 6;
 // ties it to the NoteClass set at compile time, which catches a variant added
 // without the bit; it CANNOT catch the kernel growing a bit this file never
 // hears about, because both sides of that check live here.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x7f;
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0xff;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my

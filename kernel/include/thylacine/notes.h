@@ -158,11 +158,17 @@ struct Thread;
 // mask exactly it.
 #define NOTE_BIT_SAK         6u
 
+// The `term` note (SIGTERM; docs/ERRORS.md "The terminate-request note"): a
+// request to end, catchable, default terminate. Its own bit, apart from
+// INTERRUPT's, so a Proc that ignores Ctrl-C still dies of an unhandled term.
+#define NOTE_BIT_TERM        7u
+
 // F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
 // family even though no v1.0 consumer exists; reserves the bit
 // position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live. IM-1 adds
-// NOTE_BIT_SAK (bit 6), live.
-#define NOTE_MASK_SUPPORTED  0x7fu
+// NOTE_BIT_SAK (bit 6), live. The signal chunk adds NOTE_BIT_TERM (bit 7),
+// live -- the last family the per-Thread u8 claim and designation hold.
+#define NOTE_MASK_SUPPORTED  0xffu
 
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
@@ -260,6 +266,10 @@ struct NoteQueue {
 // requires program-lifetime storage; F10 audit close). Used by the EL0-
 // return-tail uncaught-interrupt default-terminate.
 #define NOTE_NAME_INTERRUPT "interrupt"
+
+// The request-to-end note, SIGTERM's (NOTE_BIT_TERM above). Userspace-
+// postable, like `interrupt`.
+#define NOTE_NAME_TERM "term"
 
 // `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
 // fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
@@ -371,7 +381,7 @@ _Static_assert(sizeof(NOTE_NAME_SNARE_ABORT) <= NOTE_NAME_MAX,
 enum note_death_sig {
     NOTE_SIG_HUP  = 1,  NOTE_SIG_INT  = 2,  NOTE_SIG_QUIT = 3,  NOTE_SIG_ILL  = 4,
     NOTE_SIG_TRAP = 5,  NOTE_SIG_ABRT = 6,  NOTE_SIG_BUS  = 7,  NOTE_SIG_FPE  = 8,
-    NOTE_SIG_KILL = 9,  NOTE_SIG_SEGV = 11, NOTE_SIG_PIPE = 13,
+    NOTE_SIG_KILL = 9,  NOTE_SIG_SEGV = 11, NOTE_SIG_PIPE = 13, NOTE_SIG_TERM = 15,
 };
 
 // The signal a death by the note `name` records: a snare:* name, or a

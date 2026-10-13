@@ -55,6 +55,7 @@ extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 extern int  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                         const char *name);   // #241
+extern s64  viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
 extern s64  sys_postnote_self_for_test(struct Proc *caller,
                                        const char *name);    // aux#253
 
@@ -1050,10 +1051,68 @@ void test_notes_pipe_die_pending(void) {
 }
 
 // ---------------------------------------------------------------------------
+// term_die_pending -- SIGTERM's own note (the signal chunk's S-2)
+// ---------------------------------------------------------------------------
+//
+// Pins the `term` row (default TERMINATE, death SIGTERM), its OWN latch, and the
+// per-family pairing the note exists for: a thread that masked interrupt (SIGINT
+// blocked) still unwinds for term, one that masked term does not, and term never
+// arms interrupt's latch. Red before S-2, where "term" was no note at all and the
+// post itself failed. Every reading is taken before the fixture is released, and
+// asserted after.
+void test_notes_term_die_pending(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    struct Thread fake_t;
+    fake_t.proc                = p;
+    fake_t.note_mask           = 0u;
+    fake_t.exit_close_active   = false;
+    fake_t.kthread_join_active = false;
+
+    bool fresh = thread_die_pending(&fake_t);
+    int  dfl   = (int)notes_default_action(NOTE_NAME_TERM);
+    int  sig   = notes_death_signal(NOTE_NAME_TERM);
+    int  post  = notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
+    u32  flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    bool gate  = proc_intr_terminate_pending(p);
+    bool open_ = thread_die_pending(&fake_t);
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    bool intr_masked = thread_die_pending(&fake_t);
+    fake_t.note_mask = (1u << NOTE_BIT_TERM);
+    bool term_masked = thread_die_pending(&fake_t);
+    fake_t.note_mask = 0u;
+    struct Note got;
+    got.name[0] = 0;
+    spin_lock(&p->notes->lock);
+    int deq = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    bool got_term = got.name[0] == 't' && got.name[1] == 'e' && got.name[2] == 'r' &&
+                    got.name[3] == 'm' && got.name[4] == 0;
+    bool drained  = thread_die_pending(&fake_t);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(!fresh, "fresh Proc -> false");
+    TEST_EXPECT_EQ(dfl, (int)NOTE_DFL_TERMINATE, "term's default action is TERMINATE");
+    TEST_EXPECT_EQ(sig, (int)NOTE_SIG_TERM, "a death by term records SIGTERM (15)");
+    TEST_EXPECT_EQ(post, 0, "a userspace post of term is accepted");
+    TEST_ASSERT((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0, "term arms its own latch");
+    TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0, "and not interrupt's");
+    TEST_ASSERT(gate, "the wake gate fires on term");
+    TEST_ASSERT(open_, "armed + unmasked -> true");
+    TEST_ASSERT(intr_masked, "interrupt masked, term unmasked -> true (per-family)");
+    TEST_ASSERT(!term_masked, "term masked -> false");
+    TEST_ASSERT(deq >= 0 && got_term, "the queued note is term");
+    TEST_ASSERT(!drained, "drained -> the latch clears -> false");
+}
+
+// ---------------------------------------------------------------------------
 // caught_note_latch_lifecycle (item 11, ARCH §8.8.3)
 // ---------------------------------------------------------------------------
 //
-// The PROC_FLAG_CAUGHT_NOTE_MASK sub-field: armed by notes_post's caught arm
+// The caught latch (Proc.note_caught, CAUGHT_LATCH_MASK): armed by notes_post's caught arm
 // (a live handler OR self-managing -- the EXACT COMPLEMENT of the terminate
 // arm), cleared by draining the last queued note of that family. The two
 // latches are DISJOINT -- a given note arms exactly one.
@@ -1210,11 +1269,11 @@ void test_notes_caught_note_deliverable_predicate(void) {
 
     // kproc guard: forced caught bits never make a kproc thread deliverable.
     fake_t.proc = kproc();
-    __atomic_or_fetch(&kproc()->proc_flags, PROC_FLAG_CAUGHT_NOTE_MASK,
+    __atomic_or_fetch(&kproc()->note_caught, (u16)CAUGHT_LATCH_MASK,
                       __ATOMIC_RELEASE);
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
                 "kproc guarded even when the caught sub-field is forced");
-    __atomic_and_fetch(&kproc()->proc_flags, ~PROC_FLAG_CAUGHT_NOTE_MASK,
+    __atomic_and_fetch(&kproc()->note_caught, (u16)~CAUGHT_LATCH_MASK,
                        __ATOMIC_RELEASE);
 
     p->state = PROC_STATE_ZOMBIE;
@@ -1280,13 +1339,13 @@ void test_notes_caught_note_claim_once(void) {
     int d2 = notes_dequeue_for_fd_locked(p, NULL, &got);
     int d3 = notes_dequeue_for_fd_locked(p, NULL, &got);
     spin_unlock(&p->notes->lock);
-    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    u32 caught = flags & PROC_FLAG_CAUGHT_NOTE_MASK;
-    u32 claims = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+    u32 flags  = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+    u32 caught = flags & CAUGHT_LATCH_MASK;
+    u32 claims = (flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
     notes_release_claims_for_test(&b);
     notes_release_claims_for_test(&c);
-    u32 claims_after = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
-                       PROC_FLAG_CAUGHT_CLAIM_MASK;
+    u32 claims_after = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) &
+                       CAUGHT_CLAIM_MASK;
     int  post4 = notes_post(p, "interrupt", 0u, NULL, true);
     b.note_mask = 1u << NOTE_BIT_INTERRUPT;                     // b defers it
     bool b5m   = thread_caught_note_claim(&b);
@@ -1409,8 +1468,8 @@ void test_notes_caught_note_stop_dequeue_drains(void) {
     // Simulate a caught tty:winch having armed the SHARED TTY family bit. (The
     // realistic arm needs a phenotype per-signal sigtab; forcing the bit tests
     // the FIX -- does the stop-dequeue drain it? -- with the same end state.)
-    __atomic_or_fetch(&p->proc_flags,
-                      (1u << (PROC_CAUGHT_NOTE_SHIFT + NOTE_BIT_TTY)),
+    __atomic_or_fetch(&p->note_caught,
+                      (u16)(1u << (CAUGHT_LATCH_SHIFT + NOTE_BIT_TTY)),
                       __ATOMIC_RELEASE);
     TEST_ASSERT(proc_caught_note_pending(p),
                 "caught-TTY bit armed (simulated caught tty:winch sibling)");
@@ -2033,6 +2092,99 @@ void test_notes_kill_terminates_single_thread(void) {
     proc_test_unlink(parent);
     parent->state = PROC_STATE_ZOMBIE;
     proc_free(parent);
+}
+
+// The signal chunk's S-2: the Linux phenotype's kill/tkill/tgkill (operator vote
+// 2026-10-13) reuse SYS_POSTNOTE's gate -- the caller, or a child it spawned --
+// and report its refusals as Linux errnos. Drives the REAL shell (viv_kill) over
+// linked fixtures; every reading is taken before the release and asserted after.
+// Red before S-2: the shell did not exist and the three numbers FORWARDed.
+static void kfg_thread(struct Thread *t, struct Proc *p, int tid) {
+    t->magic             = THREAD_MAGIC;
+    t->proc              = p;
+    t->tid               = tid;
+    t->note_mask         = 0;
+    t->next_in_proc      = NULL;
+    t->rendez_blocked_on = NULL;
+    p->threads           = t;
+}
+
+void test_notes_kill_family_gate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    struct Proc *other  = proc_alloc();
+    TEST_ASSERT(caller && child && other, "proc_alloc x3");
+    proc_test_link(caller);
+    proc_test_link_child(caller, child);
+    proc_test_link(other);                       // alive, not the caller's child
+
+    // tids far above the live counter, so no real thread can answer for them
+    static struct Thread cth, kth, oth;
+    kfg_thread(&cth, caller, 0x3f000001);
+    kfg_thread(&kth, child,  0x3f000002);
+    kfg_thread(&oth, other,  0x3f000003);
+    const int NO_PID = 0x3ffffff0, NO_TID = 0x3f0000ff;
+
+    s64 r_post   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGTERM);
+    u32 c_term1  = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_other  = viv_kill_for_test(caller, other->pid, 0, VIV_SIGTERM);
+    u32 o_term   = ndflt_note_count(other, NOTE_NAME_TERM);
+    s64 r_nopid  = viv_kill_for_test(caller, NO_PID, 0, VIV_SIGTERM);
+    s64 r_group  = viv_kill_for_test(caller, -child->pid, 0, VIV_SIGTERM);
+    s64 r_probe  = viv_kill_for_test(caller, child->pid, 0, 0);
+    u32 c_term2  = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_tty    = viv_kill_for_test(caller, child->pid, 0, VIV_SIGHUP);
+    s64 r_xabrt  = viv_kill_for_test(caller, child->pid, 0, VIV_SIGABRT);
+    s64 r_sabrt  = viv_kill_for_test(caller, caller->pid, 0, VIV_SIGABRT);
+    s64 r_range  = viv_kill_for_test(caller, child->pid, 0, 65);
+    s64 r_tkill  = viv_kill_for_test(caller, 0, kth.tid, VIV_SIGINT);
+    u32 c_intr   = ndflt_note_count(child, NOTE_NAME_INTERRUPT);
+    s64 r_tgbad  = viv_kill_for_test(caller, other->pid, kth.tid, VIV_SIGINT);
+    s64 r_tgok   = viv_kill_for_test(caller, child->pid, kth.tid, VIV_SIGINT);
+    u32 c_intr2  = ndflt_note_count(child, NOTE_NAME_INTERRUPT);
+    s64 r_toth   = viv_kill_for_test(caller, 0, oth.tid, VIV_SIGINT);
+    s64 r_notid  = viv_kill_for_test(caller, 0, NO_TID, VIV_SIGINT);
+    s64 r_tself  = viv_kill_for_test(caller, 0, cth.tid, VIV_SIGTERM);
+    u32 s_term   = ndflt_note_count(caller, NOTE_NAME_TERM);
+    s64 r_sprobe = viv_kill_for_test(caller, 0, 0, 0);
+    child->state = PROC_STATE_ZOMBIE;
+    s64 r_dead   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGTERM);
+
+    proc_test_unlink(other);
+    other->threads = NULL;
+    other->state   = PROC_STATE_ZOMBIE;
+    proc_free(other);
+    proc_test_unlink(child);
+    child->threads = NULL;
+    proc_free(child);
+    proc_test_unlink(caller);
+    caller->threads = NULL;
+    caller->state   = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+
+    TEST_EXPECT_EQ(r_post, (s64)0, "kill(child, SIGTERM) posts");
+    TEST_EXPECT_EQ(c_term1, 1u, "and the child holds one queued term");
+    TEST_EXPECT_EQ(r_other, -(s64)T_E_PERM, "kill(non-child) is EPERM: the parent gate");
+    TEST_EXPECT_EQ(o_term, 0u, "and nothing reached it");
+    TEST_EXPECT_EQ(r_nopid, -(s64)T_E_SRCH, "kill(no such pid) is ESRCH");
+    TEST_EXPECT_EQ(r_group, -(s64)T_E_PERM, "kill(-pgid) is refused: the gate admits no group");
+    TEST_EXPECT_EQ(r_probe, (s64)0, "kill(child, 0) passes the gate");
+    TEST_EXPECT_EQ(c_term2, 1u, "and signal 0 posts nothing");
+    TEST_EXPECT_EQ(r_tty, -(s64)T_E_INVAL, "SIGHUP: tty:* is the kernel's to post");
+    TEST_EXPECT_EQ(r_xabrt, -(s64)T_E_INVAL, "SIGABRT to another Proc: a snare death is its own");
+    TEST_EXPECT_EQ(r_sabrt, (s64)1, "SIGABRT to itself reaches the snare:abort death");
+    TEST_EXPECT_EQ(r_range, -(s64)T_E_INVAL, "signal 65 is out of range");
+    TEST_EXPECT_EQ(r_tkill, (s64)0, "tkill(child's tid) posts to the child");
+    TEST_EXPECT_EQ(c_intr, 1u, "the child holds the interrupt");
+    TEST_EXPECT_EQ(r_tgbad, -(s64)T_E_SRCH, "tgkill with a tgid that does not hold the tid");
+    TEST_EXPECT_EQ(r_tgok, (s64)0, "tgkill(child, child's tid) posts");
+    TEST_EXPECT_EQ(c_intr2, 2u, "a second interrupt queued");
+    TEST_EXPECT_EQ(r_toth, -(s64)T_E_PERM, "tkill(a non-child's tid) is EPERM");
+    TEST_EXPECT_EQ(r_notid, -(s64)T_E_SRCH, "tkill(no such tid) is ESRCH");
+    TEST_EXPECT_EQ(r_tself, (s64)0, "tkill(own tid) is self-directed");
+    TEST_EXPECT_EQ(s_term, 1u, "and the caller holds its own term");
+    TEST_EXPECT_EQ(r_sprobe, (s64)0, "kill(0, 0) probes the caller");
+    TEST_EXPECT_EQ(r_dead, -(s64)T_E_SRCH, "a dead child is ESRCH");
 }
 
 // aux#253: the SELF arm's twin of the above. Round-2 F4 -- a self `kill` used

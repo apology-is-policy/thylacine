@@ -183,6 +183,23 @@ terminates its target; corvus catches it. **Bit position**: `NOTE_BIT_SAK = 6`
 refuses the name from a non-kernel-synthetic caller (the `snare:*` rule applied
 to a reserved name), so no program can fake the start of an episode.
 
+## The terminate-request note — `term`
+
+**Registered 2026-10-13 (operator vote, `dec-2026-10-13-term-note`).** A note
+NAME is ABI, hence the entry.
+
+| Name | Length | POSIX-equiv signal | Cause |
+|---|---|---|---|
+| `term` | 4+1 | `SIGTERM` (15) | Posted by a program: Pouch's `kill(pid, SIGTERM)`, the Linux phenotype's `kill`/`tkill`/`tgkill` with `SIGTERM`, or a native `SYS_POSTNOTE` that names it. A request to end, which the target may catch and act on. Plan 9's APE gives `SIGTERM` the same name. |
+
+**Default action**: TERMINATE (`NOTE_DFL_TERMINATE`). An uncaught, unmasked
+`term` on a Proc that is not self-managing ends it, and the death records
+`SIGTERM`. **Bit position**: `NOTE_BIT_TERM = 7` (`NOTE_MASK_SUPPORTED` 0x7f ->
+0xff), so a program masks or catches it apart from `interrupt`, and a
+`SIGINT` set to `SIG_IGN` leaves `SIGTERM` at its own disposition. It is not
+reserved to the kernel: any poster that passes `SYS_POSTNOTE`'s gate may send
+it.
+
 ## Exit-status semantics
 
 *Rewritten 2026-10-12 (gcpark-b, operator votes "snare:abort" and "every note
@@ -219,6 +236,7 @@ holds whether the last thread left by `exits` or by `SYS_THREAD_EXIT`
 | `snare:fpe` | `SIGFPE` (8) |
 | `snare:abort` | `SIGABRT` (6) |
 | an uncaught `interrupt` | `SIGINT` (2) |
+| an uncaught `term` | `SIGTERM` (15) |
 | an uncaught `pipe` | `SIGPIPE` (13) |
 | an uncaught `tty:quit` | `SIGQUIT` (3) |
 | an uncaught `tty:hup`; the end of a session whose leader died | `SIGHUP` (1) |
@@ -309,12 +327,15 @@ could not tell apart from a program that chose to exit 127.
 **`waitpid` (patch 0026).** `__pouch_wait` always passes `WAIT_PACKED` and
 forwards the word unchanged (§"The wait status").
 
-**Two deaths that read back as another signal.** Pouch sends `SIGTERM` as the
-`interrupt` note, which `SIGINT` shares, so a child killed with
-`kill(pid, SIGTERM)` reads `WTERMSIG == SIGINT`. A Linux-phenotype guest's own
-`abort()` reads `SIGSEGV`: the phenotype has no `tkill` row, so musl's
-`raise(SIGABRT)` returns and `abort()` ends in `a_crash()`'s NULL store, a
-`snare:segv` death. Both are tracked in OPEN-BUGS (2026-10-12).
+**Two deaths that used to read back as another signal.** Until the signal
+chunk's S-2, Pouch sent `SIGTERM` as the `interrupt` note, which `SIGINT`
+shares, so a child killed with `kill(pid, SIGTERM)` read `WTERMSIG == SIGINT`.
+It now posts `term`, whose death records `SIGTERM`. And a Linux-phenotype
+guest's own `abort()` read `SIGSEGV`: the phenotype had no `tkill` row, so
+musl's `raise(SIGABRT)` returned and `abort()` ended in `a_crash()`'s NULL
+store, a `snare:segv` death. The `tkill` row now ends a self-directed `SIGABRT`
+as `snare:abort`, the death Pouch's `abort()` dies (operator votes
+2026-10-13).
 
 **Rollout policy** (the retrospective sweep — *user-decided 2026-06-24,
 the "errno-rollout arc"*).

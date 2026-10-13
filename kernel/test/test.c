@@ -932,6 +932,8 @@ void test_notes_die_pending_predicate(void);
 void test_notes_death_reaches_predicate(void);
 void test_notes_forced_close_lifts_the_hold(void);
 void test_notes_pipe_die_pending(void);
+void test_notes_term_die_pending(void);
+void test_notes_kill_family_gate(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_claim_once(void);
@@ -1181,6 +1183,7 @@ void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
 void test_vivarium_handler_mask(void);                    // the handler-time mask
 void test_vivarium_signal_exclusivity(void);             // VIVARIUM V-6b
 void test_vivarium_signote_deliverable(void);            // VIVARIUM V-6b
+void test_vivarium_kill_decide(void);
 void test_vivarium_sigtab(void);                         // VIVARIUM V-6b
 void test_vivarium_notemask_to_sigset(void);             // VIVARIUM V-6b
 void test_vivarium_signote_reverse(void);                 // VIVARIUM V-6c
@@ -3173,6 +3176,8 @@ struct test_case g_tests[] = {
     { "notes.death_reaches_predicate",         test_notes_death_reaches_predicate,         false, NULL },
     { "notes.forced_close_lifts_the_hold",     test_notes_forced_close_lifts_the_hold,     false, NULL },
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
+    { "notes.term_die_pending",                test_notes_term_die_pending,                false, NULL },
+    { "notes.kill_family_gate",                test_notes_kill_family_gate,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
     { "notes.caught_note_claim_once",            test_notes_caught_note_claim_once,            false, NULL },
@@ -3447,6 +3452,7 @@ struct test_case g_tests[] = {
     { "vivarium.handler_mask",           test_vivarium_handler_mask,           false, NULL },
     { "vivarium.signal_exclusivity",     test_vivarium_signal_exclusivity,     false, NULL },
     { "vivarium.signote_deliverable",    test_vivarium_signote_deliverable,    false, NULL },
+    { "vivarium.kill_decide",            test_vivarium_kill_decide,            false, NULL },
     { "vivarium.sigtab",                 test_vivarium_sigtab,                 false, NULL },
     { "vivarium.notemask_to_sigset",     test_vivarium_notemask_to_sigset,     false, NULL },
     { "vivarium.signote_reverse",       test_vivarium_signote_reverse,       false, NULL },
