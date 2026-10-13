@@ -54,6 +54,12 @@
 #           synchronously and by WebAssembly.instantiate: its exit stubs are
 #           JIT code a worklist thread may write, run by the JS thread, which
 #           takes an ISB first (patch 0005; build_jsc asks the binary for it)
+#   stack   a runaway recursion on a $.agent thread, a WTF thread as the compiler,
+#           collector and Wasm worklist threads are, must go deeper than any
+#           128 KiB stack holds (musl's default; patch 0005 gives every WTF thread
+#           1 MiB): an LLInt frame is at least 48 bytes, so a stack of 128 KiB
+#           holds at most 131072/48 calls. --useJIT=false keeps one call per frame
+#           (an inlined call would share its caller's)
 #   tiers   Baseline, DFG and FTL on; BBQ and OMG stay off although each is
 #           asked for by flag; --useDollarVM=true in the same line reads on, so the
 #           flags were parsed (jscOptions() reports a bool as the number 0 or 1)
@@ -303,6 +309,10 @@ lc_run_expect_hardfail "/webkit/jsc -e '$wasmsync' | tr a-z A-Z" "JSDJ-85-100000
 lc_pass "ls-jsc(wasm-sync): a compiled module calls its JS import through JIT exit stubs, 1001 times"
 lc_run_expect_hardfail "/webkit/jsc -e '$wasmasync' | tr a-z A-Z" "JSDK-85-1000000-1001" "JSDK-ERR"
 lc_pass "ls-jsc(wasm-async): the same module through WebAssembly.instantiate"
+
+set stk {var n=0; function f(){n++;f()} try{f()}catch(e){} var m=n; $.agent.start("var n=0; function f(){n++;f()} try{f()}catch(e){} $.agent.report(String(n)); $.agent.leaving()"); var r=null; for(var i=0;i<5000&&r==null;i++){r=$.agent.getReport(); if(r==null)$.agent.sleep(1)} var a=r==null?-1:Number(r); print("@T-"+(a*48>131072?"ok":"bad")+"-main"+m+"-agent"+a)}
+lc_run_expect_hardfail "/webkit/jsc --useJIT=false -e '[string map {@T jsdn} $stk]' | tr a-z A-Z" "JSDN-OK-" "JSDN-BAD"
+lc_pass "ls-jsc(stack): a WTF thread recursed deeper than a 128 KiB stack holds"
 
 # Each leg prints its marker upper-cased by the script itself, then its exit status
 # through tr, so the echo of the typed line satisfies neither. @K keeps each round's

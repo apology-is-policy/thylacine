@@ -1,6 +1,6 @@
-From e71d2d2a14738a347d096f42fab9465113c7c94c Mon Sep 17 00:00:00 2001
+From 5ee70fcee9913b38145a91f2adee029e3cb27dfe Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <noreply@example.invalid>
-Date: Tue, 13 Oct 2026 07:15:49 +0200
+Date: Tue, 13 Oct 2026 07:31:38 +0200
 Subject: [PATCH] thylacine: B-2e1 the FTL on at run time, an ISB where a
  thread takes a finished Wasm plan
 
@@ -20,11 +20,17 @@ Wasm::Module::compileSync and JSWebAssemblyInstance::finalizeCreation, the
 two points where a thread takes a finished plan (a synchronous wait, an
 asynchronous compile's ticket), now run WTF::crossModifyingCodeFence() (an
 ISB) first: the DFG finalizer's rule.
+
+WTF gives every thread it creates 1 MiB of stack, as it does on musl Linux:
+musl's default is 128 KiB and jsc's PT_GNU_STACK is empty, so the compiler,
+collector and Wasm worklist threads ran on 128 KiB, the size of JSC's own soft
+reserved zone.
 ---
  Source/JavaScriptCore/runtime/Options.cpp               | 7 +++----
  Source/JavaScriptCore/wasm/WasmModule.cpp               | 4 ++++
  Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp | 5 +++++
- 3 files changed, 12 insertions(+), 4 deletions(-)
+ Source/WTF/wtf/Threading.cpp                            | 2 +-
+ 4 files changed, 13 insertions(+), 5 deletions(-)
 
 diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
 index 2bcf75b6a1..8bcc90b7b2 100644
@@ -75,6 +81,19 @@ index 807d8b5158..cd512c2463 100644
      // When memory is imported, we will initialize all memory modes with the initial IPInt compilation
      // results, so that later when memory imports become available, the appropriate CalleeGroup can be used.
      // If IPInt is disabled, we instead defer compilation to module evaluation.
+diff --git a/Source/WTF/wtf/Threading.cpp b/Source/WTF/wtf/Threading.cpp
+index 7249ada7d7..2e65de9bbb 100644
+--- a/Source/WTF/wtf/Threading.cpp
++++ b/Source/WTF/wtf/Threading.cpp
+@@ -123,7 +123,7 @@ static std::optional<size_t> NODELETE stackSize(ThreadType threadType)
+ 
+ #if defined(DEFAULT_THREAD_STACK_SIZE_IN_KB) && DEFAULT_THREAD_STACK_SIZE_IN_KB > 0
+     return DEFAULT_THREAD_STACK_SIZE_IN_KB * 1024;
+-#elif OS(LINUX) && !defined(__BIONIC__) && !defined(__GLIBC__)
++#elif (OS(LINUX) && !defined(__BIONIC__) && !defined(__GLIBC__)) || OS(THYLACINE)
+     // on libcs other than glibc and bionic (e.g. musl) we are either unsure how big
+     // the default thread stack is, or we know it's too small - pick a robust default
+     return 1 * MB;
 -- 
 2.43.0
 
