@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Graphical seat incarnations
 
@@ -205,8 +205,9 @@ exit > continue > stop. Then:
   `term_sig`; docs/ERRORS.md "The wait status" is the binding table).
   `WAIT_PACKED` asks for that word and nothing else: it neither reports nor
   consumes a stop or continue latch. Pouch's waitpid and the phenotype wait4
-  always pass it; joey and ut's plain waits keep the raw word, where a death by
-  note reads 1;
+  always pass it, and so does every ut wait (2026-10-13,
+  [[dec-2026-10-13-ut-status-packed]]); joey, libthyla-rs's `Child::wait` and
+  Go's `os/exec` keep the raw word, where a death by note reads 1;
 - reportee → return the pid and packed status, consume the latch, and run
   **none** of the teardown (report-is-not-reap, PTY-1e R2-F6);
 - `WNOHANG` → `0`, an unambiguous sentinel because pid 0 is never a child;

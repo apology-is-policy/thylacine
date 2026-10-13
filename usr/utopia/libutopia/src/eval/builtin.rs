@@ -115,10 +115,11 @@ use core::fmt::Write as _;
 use libthyla_rs::fs::{self, Component, Path};
 use libthyla_rs::io::Read as _;
 use libthyla_rs::notes::{self, NoteTarget};
-use libthyla_rs::{t_wait_pid_for, T_WAIT_WNOHANG};
+use libthyla_rs::{t_wait_pid_for, T_WAIT_PACKED, T_WAIT_WNOHANG};
 
 use super::env::Env;
 use super::error::EvalResult;
+use super::jobs::status_of_packed;
 use super::stmt::{
     eval_source_as_command, poll_notes_once, run_foreground_jc, wait_pids_interruptible,
     StatementFlow,
@@ -666,9 +667,11 @@ pub fn reap_background(env: &mut Env) {
         let mut st: i32 = 0;
         // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st is a
         // valid writable i32. WNOHANG -> pid (reaped) / 0 (alive) / -1 (gone).
-        let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+        let rc = unsafe {
+            t_wait_pid_for(pid, T_WAIT_WNOHANG | T_WAIT_PACKED, &mut st as *mut i32)
+        };
         if rc > 0 {
-            env.jobs_mut().mark_reaped(pid, st);
+            env.jobs_mut().mark_reaped(pid, status_of_packed(st));
         } else if rc < 0 {
             // No longer our child (already gone). Treat as reaped so the job
             // can complete + be removed -- never left dangling.
@@ -698,8 +701,9 @@ fn wait_pids_reaping(env: &mut Env, pids: &[i32]) -> (i32, bool) {
         for &pid in pids {
             let mut st: i32 = 0;
             // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
-            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
             if rc > 0 {
+                let st = status_of_packed(st);
                 env.jobs_mut().mark_reaped(pid, st);
                 last = st;
             } else if rc < 0 {
@@ -717,11 +721,14 @@ fn wait_pids_reaping(env: &mut Env, pids: &[i32]) -> (i32, bool) {
             }
             let mut st: i32 = 0;
             // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
-            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+            let rc = unsafe {
+                t_wait_pid_for(pid, T_WAIT_WNOHANG | T_WAIT_PACKED, &mut st as *mut i32)
+            };
             if rc == 0 {
                 continue; // still alive (or stopped -- either way, not exited)
             }
             if rc > 0 {
+                let st = status_of_packed(st);
                 env.jobs_mut().mark_reaped(pid, st);
                 last = st;
             } else {

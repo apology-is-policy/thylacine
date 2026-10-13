@@ -150,7 +150,7 @@ use libthyla_rs::notes::{send, Note, NoteClass, NoteTarget};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::{
     t_putstr, t_setpgid, t_tty_cont, t_tty_set_fg, t_wait_if_stopped, t_wait_pid_for,
-    T_WAIT_UNTRACED, T_WAIT_WNOHANG,
+    T_WAIT_PACKED, T_WAIT_UNTRACED, T_WAIT_WNOHANG,
 };
 
 use super::builtin;
@@ -1572,7 +1572,7 @@ fn exec_external_raw(
             let mut st: i32 = 0;
             // SAFETY: SVC wrapper; &mut st is a valid writable i32. A vanished /
             // not-our-child pid yields rc < 0 -> status 0 (matches the reap loops).
-            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
             // 4. Restore on EVERY exit path (clean, error, OR death): re-emit the
             //    screen escapes (ALWAYS -- the crash backstop) and, when a consctl
             //    fd is held, ut's PROMPT mode. The child's own Drop emitted the same
@@ -1583,7 +1583,7 @@ fn exec_external_raw(
                 console::set_mode(fd, console::PROMPT_MODE);
             }
             console::restore_screen();
-            env.status_set(if rc < 0 { 0 } else { st });
+            env.status_set(if rc < 0 { 0 } else { status_of_packed(st) });
             Ok(StatementFlow::Normal)
         }
         Err(e) => {
@@ -1641,8 +1641,8 @@ fn exec_external_passthrough(env: &mut Env, argv: &[String]) -> EvalResult<State
             let mut st: i32 = 0;
             // SAFETY: SVC wrapper; &mut st is a valid writable i32. A vanished /
             // not-our-child pid yields rc < 0 -> status 0 (matches the reap loops).
-            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
-            env.status_set(if rc < 0 { 0 } else { st });
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
+            env.status_set(if rc < 0 { 0 } else { status_of_packed(st) });
             Ok(StatementFlow::Normal)
         }
         Err(e) => {
@@ -2157,11 +2157,11 @@ fn capture_external_pipeline(
         let mut st: i32 = 0;
         // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st is
         // a valid writable i32.
-        let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+        let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
         if rc < 0 {
             continue;
         }
-        statuses[i] = st;
+        statuses[i] = status_of_packed(st);
     }
 
     if spawn_failed {
@@ -2854,8 +2854,8 @@ pub fn wait_pids_interruptible(env: &mut Env, pids: &[i32]) -> Vec<i32> {
             let mut st: i32 = 0;
             // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st
             // is a valid writable i32.
-            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
-            statuses[i] = if rc < 0 { 0 } else { st };
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
+            statuses[i] = if rc < 0 { 0 } else { status_of_packed(st) };
         }
         return statuses;
     }
@@ -2870,12 +2870,14 @@ pub fn wait_pids_interruptible(env: &mut Env, pids: &[i32]) -> Vec<i32> {
             }
             let mut st: i32 = 0;
             // SAFETY: SVC wrapper; &mut st is a valid writable i32.
-            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+            let rc = unsafe {
+                t_wait_pid_for(pid, T_WAIT_WNOHANG | T_WAIT_PACKED, &mut st as *mut i32)
+            };
             if rc == 0 {
                 continue; // still alive
             }
             // rc > 0: reaped -> st. rc < 0: not our child (vanished) -> 0.
-            statuses[i] = if rc < 0 { 0 } else { st };
+            statuses[i] = if rc < 0 { 0 } else { status_of_packed(st) };
             reaped[i] = true;
             remaining -= 1;
         }

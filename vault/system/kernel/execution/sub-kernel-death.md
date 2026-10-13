@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -219,7 +219,23 @@ of the claimed 7 before the fix. The check runs under the
 same hold as the `PROC_FLAG_EXIT_CLOSING` mark, so a kill lands either before it
 (the kill's claim wins, Linux's `do_group_exit` precedent) or after the mark
 (it forces the close, and the exit keeps its own status, Linux's `PF_EXITING`
-shape). Witnesses: `proc.exits_in_dying_group_keeps_group_status`,
+shape). `thread_exit_self`'s last-out follows the same rule
+([[dec-2026-10-13-exit-wins-final-close]]): it reads the claim when it decides
+it is the last thread, under `g_proc_table_lock`, and publishes
+`PROC_FLAG_EXIT_CLOSING` in the same hold before it unlocks for the close; with
+no claim, the `SYS_THREAD_EXIT` convention (status 0, "ok") stands, and a later
+kill only forces the close. It used to read the claim after the close, so a kill
+there reaped as `SIGKILL`, and to mark the close only inside
+`proc_close_handles_at_exit`, outside the lock, so a kill between the unlock and
+that store took the first claim, found no mark and forced nothing: a wedged
+server then held the dying Proc until a second kill. Witnesses
+`p9_closer.kill_in_final_close_keeps_exit` (a real child holds a staged dev9p
+file whose flush meets a full ring; a kill while the close sleeps forces it, and
+the child reaps as its exit, 5 by `exits_code` or 0 by the last
+`SYS_THREAD_EXIT`) and `p9_closer.kill_at_final_close_start_forces_it` (the kill
+lands on the exiting thread between the commit's unlock and the close, through a
+`KERNEL_TESTS`-only window hook; the close must end before the server answers).
+Witnesses of the claim itself: `proc.exits_in_dying_group_keeps_group_status`,
 `proc.fault_in_dying_group_keeps_group_status`. The fault side, which stopped
 the false `snare:bus` itself, is [[sub-kernel-fault]]'s `FAULT_USER_DYING`.
 
@@ -520,17 +536,12 @@ What a change **must** re-establish:
 
 ## Caveats
 
-- **A kill during the final close: the two last-out paths disagree.**
-  `exits_term` checks the claim once, before it drops the lock for the
-  handle close and the territory release, and then records its own
-  `(code, sig)`; `thread_exit_self`'s last-out (a Proc whose last thread
-  leaves by `SYS_THREAD_EXIT`) reads the claim after that window. So a
-  `proc_group_kill` landing in the window (which forces the close, ARCH 7.9.1
-  part B) reaps as `SIGKILL` on the second path and as the program's own exit
-  on the first. Each path keeps message, code and signal from one claim; only
-  the rule between them differs. Linux lets an exit in progress ignore the
-  signal. Which rule both follow is an operator vote item (OPEN-BUGS
-  2026-10-12; gcpark-b audit F5, pre-existing for message and code).
+- **A kill during the final close** (resolved 2026-10-13, sig S-1): both
+  last-out paths read the claim once, under the hold that marks the close, and
+  a kill that lands after it forces the close and leaves the exit's status
+  (operator vote, [[dec-2026-10-13-exit-wins-final-close]]; gcpark-b audit F5).
+  The window between the commit and the close is a few instructions with no
+  sleep, so only the `KERNEL_TESTS` hook can put a kill there.
 - **The multi-thread `exits()` gate is gone.** `exits()` with live peers is
   no longer an extinction — since #811 it routes through the same cascade as
   `exit_group` and then self-exits. The absorbed reference doc still said

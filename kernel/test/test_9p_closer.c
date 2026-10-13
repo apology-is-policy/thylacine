@@ -38,8 +38,11 @@ void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
+void test_p9_closer_kill_in_final_close_keeps_exit(void);
+void test_p9_closer_kill_at_final_close_start_forces_it(void);
 void test_p9_closer_loom_register_flushes_staged_run(void);
 extern void proc_close_handles_at_exit_for_test(struct Proc *p);
+extern void proc_exit_close_test_set_window_hook(void (*fn)(void));
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
 void test_p9_closer_failed_spawn_retried_by_hand_off(void);
@@ -655,6 +658,135 @@ void test_p9_closer_first_kill_forces_exits_close(void) {
     TEST_EXPECT_EQ(st.job_errors, base.job_errors, "and it lost nothing");
     TEST_EXPECT_EQ(st.dropped, base.dropped, "no entry was dropped");
     TEST_EXPECT_EQ(budget, w.budget0, "the run's budget charge came back");
+}
+
+// The exit wins in the final close (I-24, ARCH 7.9.1 part B,
+// dec-2026-10-13-exit-wins-final-close): a kill that lands after a Proc's last
+// thread committed to exit forces its final close and leaves the exit's
+// status, whether the thread left by exits() or as the last SYS_THREAD_EXIT. A
+// real child holds the staged file in its handle table and every send meets a
+// full ring, so its close sleeps until a kill forces it. The kill lands while
+// the close sleeps, or at its start: on the exiting thread, between the
+// commit's unlock and the close, where only a mark published at the commit
+// lets a first kill find the close under way.
+static struct Proc   *volatile g_xw_proc;
+static struct Thread *volatile g_xw_thread;
+static volatile bool           g_xw_last_out;
+static volatile bool           g_xw_window;
+
+static void xw_window_kill(void) {
+    proc_exit_close_test_set_window_hook(NULL);
+    irq_state_t s = proc_table_lock_acquire();
+    proc_group_kill(current_thread()->proc);
+    proc_table_lock_release(s);
+}
+
+static void xw_child(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    g_xc_fd = handle_alloc(self, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, g_t1_spoor);
+    if (g_xc_fd < 0) { spoor_clunk(g_t1_spoor); exits_code(3, "no handle"); }
+    if (g_xw_window) proc_exit_close_test_set_window_hook(xw_window_kill);
+    __atomic_store_n(&g_xw_thread, current_thread(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xw_proc, self, __ATOMIC_RELEASE);
+    if (g_xw_last_out) thread_exit_self();
+    exits_code(5, "five");
+}
+
+static bool xw_zombie(void) {
+    struct Proc *p = __atomic_load_n(&g_xw_proc, __ATOMIC_ACQUIRE);
+    return p && __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) == PROC_STATE_ZOMBIE;
+}
+
+static bool xw_in_close(void) {
+    struct Proc   *p = __atomic_load_n(&g_xw_proc, __ATOMIC_ACQUIRE);
+    struct Thread *t = __atomic_load_n(&g_xw_thread, __ATOMIC_ACQUIRE);
+    return p && t &&
+           (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_EXIT_CLOSING) &&
+           __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+}
+
+struct xw_obs {
+    bool opened, started, installed, slept, forced, reaped;
+    int  status;
+    u32  nwrite, write_len, write_sum;
+};
+
+static void xw_run(bool last_out, bool window, struct xw_obs *o) {
+    struct wbc w = {0};
+    o->status = -1;
+    o->opened = wbc_open(&w);
+    if (o->opened) {
+        g_t1_spoor    = w.f;                     // the child's handle table adopts it
+        g_xc_fd       = -1;
+        g_xw_proc     = NULL;
+        g_xw_thread   = NULL;
+        g_xw_last_out = last_out;
+        g_xw_window   = window;
+        hold_reader(w.a->client, true);
+        g_mq_a.eagain_budget = 0xffffffffu;
+        int pid = rfork(RFPROC, xw_child, NULL);
+        o->started = pid > 0;
+        if (o->started) {
+            TEST_YIELD_UNTIL_SOFT(xw_zombie() || xw_in_close());
+            o->installed = g_xc_fd >= 0;
+            o->slept     = !xw_zombie() && xw_in_close();
+            if (!window && o->slept) {
+                // Only this test, the child's parent, reaps it, so the Proc
+                // outlives the call.
+                irq_state_t s = proc_table_lock_acquire();
+                proc_group_kill(g_xw_proc);
+                proc_table_lock_release(s);
+                TEST_YIELD_UNTIL_SOFT(xw_zombie());
+            }
+            o->forced = xw_zombie();             // before the server answered
+        }
+        wbc_unstall(&w);
+        if (o->started) {
+            int st = -1;
+            o->reaped = wait_pid_for(pid, WAIT_PACKED, &st) == pid;
+            o->status = st;
+        }
+        TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        TEST_YIELD_UNTIL_SOFT(closer_quiet());
+    }
+    o->nwrite    = g_rec_a.nwrite;
+    o->write_len = g_rec_a.write_len;
+    o->write_sum = g_rec_a.write_sum;
+    wbc_end(&w);
+}
+
+static void xw_expect(const struct xw_obs *o, int code) {
+    TEST_ASSERT(o->opened, "a staged file on a closer session");
+    TEST_ASSERT(o->started && o->installed, "a child holding it in its handle table");
+    TEST_ASSERT(o->reaped, "the child was reaped");
+    TEST_ASSERT(o->forced, "the kill forced the final close: it ended before the server answered");
+    TEST_EXPECT_NE(o->status, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
+        "the kill replaced the exit's status");
+    TEST_EXPECT_EQ(o->status, WAIT_STATUS_EXITED(code), "the exit's own status stands");
+    TEST_EXPECT_EQ((u64)o->nwrite, 1ull, "the closer wrote the run");
+    TEST_EXPECT_EQ((u64)o->write_len, (u64)WBC_LEN, "all of it");
+    TEST_EXPECT_EQ((u64)o->write_sum, (u64)wbc_sum(), "the bytes write() took");
+}
+
+void test_p9_closer_kill_in_final_close_keeps_exit(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct xw_obs ex = {0}, lo = {0};
+    xw_run(false, false, &ex);
+    xw_run(true,  false, &lo);
+    TEST_ASSERT(ex.slept && lo.slept,
+        "premise: each close waited for its server until the kill");
+    xw_expect(&ex, 5);                           // exits_code(5)
+    xw_expect(&lo, 0);                           // the SYS_THREAD_EXIT convention
+}
+
+void test_p9_closer_kill_at_final_close_start_forces_it(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct xw_obs ex = {0}, lo = {0};
+    xw_run(false, true, &ex);
+    xw_run(true,  true, &lo);
+    xw_expect(&ex, 5);
+    xw_expect(&lo, 0);
 }
 
 // A Loom op drives the fid straight to the wire, past every write-behind path,

@@ -336,10 +336,10 @@ impl JobTable {
     }
 }
 
-/// The `$status` a job-control wait word yields: the code for an exit, 128 plus
-/// the signal for a death by note (130 for an interrupted job, 137 for a killed
-/// one, as bash). The word is the kernel's packed layout (docs/ERRORS.md "The
-/// wait status"); the caller reads a stop report before it gets here.
+/// The `$status` a wait word yields: the code for an exit, 128 plus the signal
+/// for a death by note (130 for an interrupted job, 137 for a killed one, as
+/// bash). Every ut wait asks for the kernel's packed layout (docs/ERRORS.md "The
+/// wait status"); a job-control caller reads a stop report before it gets here.
 pub fn status_of_packed(st: i32) -> i32 {
     let sig = st & 0x7f;
     if sig != 0 && sig != 0x7f {

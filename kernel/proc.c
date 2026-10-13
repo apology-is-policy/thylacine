@@ -4102,6 +4102,29 @@ void proc_close_handles_at_exit_for_test(struct Proc *p) {
     proc_close_handles_at_exit(p);
 }
 
+// The window between a last thread's commit to exit and its final close: a
+// kill landing there must find the close marked (ARCH 7.9.1 part B). A test
+// runs a function there, on the exiting thread that set it (NULL clears it).
+// Compiled out of production.
+#ifdef KERNEL_TESTS
+static void (*g_exit_close_test_window)(void);
+static struct Thread *g_exit_close_test_owner;
+
+void proc_exit_close_test_set_window_hook(void (*fn)(void));
+void proc_exit_close_test_set_window_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_exit_close_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_exit_close_test_window, fn, __ATOMIC_RELEASE);
+}
+
+static inline void exit_close_test_window(void) {
+    void (*fn)(void) = __atomic_load_n(&g_exit_close_test_window, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_exit_close_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
+#else
+static inline void exit_close_test_window(void) {}
+#endif
+
 // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the Proc's Territory at EXIT,
 // not deferred to reap -- the direct analog of #68/#926 moving the handle-table
 // close to exit, so an exited/zombie Proc stops pinning its inherited 9P mount
@@ -4446,6 +4469,7 @@ static void exits_term(int code, int sig, const char *msg) {
         // way and forces it (ARCH 7.9.1 part B). Set inside the close too.
         __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
+        exit_close_test_window();
         proc_close_handles_at_exit(p);
         s = spin_lock_irqsave(&g_proc_table_lock);
         if (proc_count_live_peers_locked(p, t) != 0)
@@ -4526,6 +4550,31 @@ void thread_exit_self(void) {
     int live_peers = proc_count_live_peers_locked(p, t);
     bool become_zombie = (live_peers == 0);
 
+    // I-24 + ARCH 7.9.1 part B (dec-2026-10-13-exit-wins-final-close): the last
+    // thread out reads the group claim HERE, under the lock a kill decides
+    // under, and marks its final close in the same hold, as exits() does. A
+    // claim already made decides the status (an exit_group, a kill, a fault in
+    // the dying group); with none, the SYS_THREAD_EXIT convention, status 0 /
+    // "ok", stands, and a kill that lands later only forces the close. Read
+    // after the close, such a kill reaped as SIGKILL; marked only inside the
+    // close, a kill between this unlock and that store claimed first and forced
+    // nothing, so a wedged server held the dying Proc until a second kill.
+    // group_exit_code and group_term_sig are written by the claim's winner under
+    // this lock, so the three fields are one claim's.
+    const char *zmsg  = "ok";
+    int         zcode = 0;
+    int         zsig  = 0;
+    if (become_zombie) {
+        const char *gmsg = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE);
+        if (gmsg) {
+            zmsg  = gmsg;
+            zcode = p->group_exit_code;
+            zsig  = p->group_term_sig;
+        }
+        if (p->handles)
+            __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSING, __ATOMIC_RELEASE);
+    }
+
     // #68 (completes the #926 multi-thread seam): the LAST Thread out closes
     // the Proc's handles HERE, in a deliberately-opened RUNNING+ALIVE window
     // BEFORE the ZOMBIE transition -- so inherited pipe write ends deliver
@@ -4572,6 +4621,7 @@ void thread_exit_self(void) {
     // (idempotent: p->handles is NULLed by the close).
     if (become_zombie && p->handles) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
+        exit_close_test_window();
         proc_close_handles_at_exit(p);
         s = spin_lock_irqsave(&g_proc_table_lock);
         if (proc_count_live_peers_locked(p, t) != 0)
@@ -4587,26 +4637,11 @@ void thread_exit_self(void) {
         proc_release_territory_at_exit(p, &s);
         if (proc_count_live_peers_locked(p, t) != 0)
             extinction("thread_exit: peer appeared during territory release");
-        // This Thread is the last live one. Proc transitions to ZOMBIE.
-        // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
-        // termination is in progress, use the recorded group_exit_msg + its
-        // companion group_exit_code (#91: the REAL exit byte, no longer the
-        // "ok" -> 0 / else -> 1 collapse -- a phenotype exit_group(N) reaches
-        // the parent's wait as WEXITSTATUS == N); otherwise the SYS_THREAD_EXIT
-        // convention is status 0 / "ok" (no user-specified status; explicit-
-        // status program exit goes through exits_code). The group_exit_msg read
-        // is under g_proc_table_lock here + set via release CAS in
-        // proc_group_terminate_code -- a coherent snapshot; group_exit_code is
-        // written in the SAME set-once CAS-winner branch and read plainly under
-        // this lock (the write side holds it too), so it matches the winning msg.
-        // gcpark-b: group_term_sig rides the same claim as group_exit_code.
-        const char *gmsg = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE);
-        if (gmsg) {
-            proc_become_zombie_locked(p, p->group_exit_code, p->group_term_sig,
-                                      gmsg);
-        } else {
-            proc_become_zombie_locked(p, 0, 0, "ok");
-        }
+        // This Thread is the last live one. Proc transitions to ZOMBIE with the
+        // status read at the commit above (#91: a group claim carries the REAL
+        // exit byte, so a phenotype exit_group(N) reaches the parent's wait as
+        // WEXITSTATUS == N; gcpark-b: and the claim's signal).
+        proc_become_zombie_locked(p, zcode, zsig, zmsg);
     }
 
     t->state = THREAD_EXITING;

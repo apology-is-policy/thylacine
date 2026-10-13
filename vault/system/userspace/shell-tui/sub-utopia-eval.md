@@ -231,11 +231,19 @@ an exit, **128 + the signal** for a death by note or fault (gcpark-b,
 that called `abort()` 134. The kernel had no signalled shape before gcpark-b,
 and this path read every death as exit 1; with the shape in the word, the old
 decode would have read a death as `$status` 0, which is why the decoder and
-the kernel change landed together. Every other wait stays raw -- the console
-path, command substitution, and a script or `ut -c` without job control -- so
-a death there still sets `$status` 1 (one convention per shell is an operator
-vote item, OPEN-BUGS 2026-10-12; gcpark-b audit F3). `status_of_packed_reads_exits_and_deaths`
-is the host test; `pty-4.exp` requires 130 after `fg` + Ctrl-C.
+the kernel change landed together. Since 2026-10-13 every other wait packs too
+([[dec-2026-10-13-ut-status-packed]]; gcpark-b audit F3): the console and
+passthrough paths (`exec_external_raw`, `exec_external_passthrough`), command
+substitution, `wait_pids_interruptible` (its blocking degrade and its WNOHANG
+sweep), the background reaper and the `wait` builtin pass `T_WAIT_PACKED`
+(with `T_WAIT_WNOHANG` where they poll) and decode a reaped word once with
+`status_of_packed`, so a death by note sets `$status` to 128 plus the signal in
+a script and a substitution as at the prompt, and the job table holds decoded
+statuses on every path. A raw 1 read through the decoder would be SIGHUP (129)
+and a packed exit read raw would be N << 8, so the flag and the decode change
+together at each site. `status_of_packed_reads_exits_and_deaths` is the host
+test; `pty-4.exp` requires 130 after `fg` + Ctrl-C, and 139 for
+`pouch-hello-fault` in a `let x = $(...)` and in a script.
 
 The pts slave is not directly pollable — `dev9p.poll` reports it always-ready —
 so for fd-0 input readiness the shell polls a side fd, `/dev/pts/<n>ready`
@@ -628,4 +636,4 @@ one.
 the six-entry `$path`, `cd --`, and the settled notes-mask changes.
 
 gcpark-b (2026-10-12) adds `jobs::status_of_packed`: a job-control death sets
-`$status` to 128 + the signal.
+`$status` to 128 + the signal. sig S-1 (2026-10-13) makes every wait pack.

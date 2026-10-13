@@ -1993,6 +1993,8 @@ void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
+void test_p9_closer_kill_in_final_close_keeps_exit(void);
+void test_p9_closer_kill_at_final_close_start_forces_it(void);
 void test_p9_closer_loom_register_flushes_staged_run(void);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
@@ -4439,6 +4441,10 @@ struct test_case g_tests[] = {
                                        test_p9_closer_close_job_retries_a_refused_write, false, NULL },
     { "p9_closer.first_kill_forces_exits_close",
                                        test_p9_closer_first_kill_forces_exits_close, false, NULL },
+    { "p9_closer.kill_in_final_close_keeps_exit",
+                                       test_p9_closer_kill_in_final_close_keeps_exit, false, NULL },
+    { "p9_closer.kill_at_final_close_start_forces_it",
+                                       test_p9_closer_kill_at_final_close_start_forces_it, false, NULL },
     { "p9_closer.loom_register_flushes_staged_run",
                                        test_p9_closer_loom_register_flushes_staged_run, false, NULL },
     { "p9_closer.stalled_session_holds_one_closer",
