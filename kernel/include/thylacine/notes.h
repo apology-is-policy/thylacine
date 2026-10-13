@@ -271,6 +271,9 @@ struct NoteQueue {
 // postable, like `interrupt`.
 #define NOTE_NAME_TERM "term"
 
+_Static_assert(sizeof(NOTE_NAME_TERM) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TERM does not fit NOTE_NAME_MAX");
+
 // `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
 // fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
 // NOTE_NAME_MAX = 16 bytes including NUL. The `snare:` prefix is

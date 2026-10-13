@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -67,6 +67,13 @@ episode operations at 110, propagating grant at 111, and POST_SERVICE bit 13,
 while preserving DMA_SEGMENTS=112. The cap helper exposes the grant flag, and
 the notes vocabulary includes session hangup. Haul uses existing WALK_CREATE,
 SRV_ACCEPT and SRV_PEER wrappers; it grants itself no authority in userspace.
+
+**The `term` note (2026-10-13).** `T_NOTE_BIT_TERM` is 7 and
+`T_NOTE_MASK_SUPPORTED` 0xff, mirroring the kernel's `NOTE_BIT_TERM` and
+`NOTE_MASK_SUPPORTED` ([[sub-kernel-notes]]); `notes::NoteClass::Term` is the
+eighth class in `NoteClass::ALL`. The runtime does not mask it at startup (it
+masks only `pipe`), so a native program with no handler and no notes reader
+dies of a `term` by the kernel's default, as of an `interrupt`.
 
 
 A native binary does three things and gets a runtime:

@@ -427,7 +427,8 @@ the Proc dies and carries the msg; `exit_status` decides *what status* the
 parent's wait reads. `Proc.term_sig` (u8, gcpark-b) is the death signal beside
 it, 0 for an exit; `group_term_sig` is its set-once claim twin beside
 `group_exit_code`. Both took the old `_reserved0` slot, so `struct Proc` keeps
-its size.
+its size; S-2 gave the slot's remaining u16 to `note_caught`. A death by the
+`term` note (2026-10-13) records SIGTERM, 15.
 
 `Proc.debug_stop_req` / `job_stop_req` — the two stop owners, deliberately
 in the same cache line so the tail's fast path reads both in two ACQUIRE
@@ -596,12 +597,13 @@ What a change **must** re-establish:
   because a debugger can only have armed them while the target was fully stopped
   and this is the only live thread. Same gate, one valid use and one invalid one,
   forty lines apart. A third use is valid for the same reason: exec clears the
-  caught-note claim sub-field of `proc_flags` (2026-09-30), and a claim is taken
+  caught-note claim (2026-09-30; a sub-field of `proc_flags` until S-2 moved it
+  to the high byte of `Proc.note_caught`), and a claim is taken
   only by a thread of this process for its own wait, so with exec alone the clear
   is a guard, not a repair -- posters from other processes set caught bits, never
   claims ([[sub-kernel-notes]]). Since 2026-10-12 a posting walk can also take a
   claim on a thread's behalf (a designation), so exec clears the claim, the
-  designation and the sub-field under the thread's `wait_lock`, where a walk
+  designation and the claim byte under the thread's `wait_lock`, where a walk
   designates: one made after the clear carries its claim bit too. A thread that
   exits drops its claim and its designation at the `THREAD_EXITING` commit
   (`notes_exit_drop_locked`, under the process-table lock), and the walk runs

@@ -436,8 +436,11 @@ and extincts with a clear diagnostic rather than corrupting.
 
 Notable residents: `child_waiters` (a `poll_waiter_list` that is
 byte-identical in layout to the `Rendez` it replaced, which is why the #344
-swap kept every following offset stable); `_reserved0` (the retired
-`wait_active` guard, kept solely to hold the offsets); `page_peak` and
+swap kept every following offset stable); the slot the retired `wait_active`
+guard held, kept so the offsets stayed fixed, now `term_sig` and
+`group_term_sig` (gcpark-b) and the u16 `note_caught` (the caught-note latch
+and claim, moved out of `proc_flags` by the signal chunk's S-2,
+[[sub-kernel-notes]]); `page_peak` and
 `phenotype` and `shared_map_pages`, each of which fills an existing tail pad
 rather than growing the struct.
 
@@ -456,8 +459,17 @@ idempotent and nothing clears it), so a kill finds an
 the Proc terminating, which lifts the final close's hold on death. Neither is
 inherited or ever cleared: both mark a Proc that is going.
 
+Bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING` (2026-10-13), `term`'s terminate
+latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty and pipe
+latches. It became free when the caught-note latch and claim sub-fields (bits
+11..17 and 22..28) left for `Proc.note_caught`. `PROC_FLAGS_ALL` names every
+flag, and a `_Static_assert` that the popcount of their union equals the sum
+of their popcounts proves them disjoint -- derived, not pairwise, so an alias
+anywhere fails. Membership in the list is still by hand: a flag added to
+`proc.h` and not to the list escapes the check.
+
 `proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
-(bit 29, above the caught-note claim field), stamped by the test link helpers (`proc_test_link`,
+(bit 29), stamped by the test link helpers (`proc_test_link`,
 `proc_test_link_child`) on every Proc they splice into the table. rfork links
 a child through `proc_link_child` directly and copies only the debug taint
 from its parent, so the mark means exactly "a test linked this", and the test

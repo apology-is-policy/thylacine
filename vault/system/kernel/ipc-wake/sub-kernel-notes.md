@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -48,13 +48,14 @@ The third path is not a third *queue* — it is a second **frame shape** over th
 same one queue, and it sits *above* the native handler branch in the deliverer
 for a specific reason recorded below.
 
-**Five** families of note name (this note said four against a five-row table
-until 2026-08-16), distinguished by **who may post** and **what an uncaught one
-does**:
+**Seven** families of note name (this count has lagged its table twice -- four
+against five rows until 2026-08-16, five against six after `pipe` -- so count
+the rows), distinguished by **who may post** and **what an uncaught one does**:
 
 | family | postable by | uncaught default |
 |---|---|---|
 | `interrupt` | anyone | terminate (unless the Proc reads its own notes) |
+| `term` | anyone | terminate (unless the Proc reads its own notes); SIGTERM's note since 2026-10-13 |
 | `kill` | anyone | terminate, **uncatchable** |
 | `pipe` | kernel | terminate (SIGPIPE's default; a reader-less write posts it) |
 | `child_exit` | kernel | nothing — queue for the fd reader |
@@ -186,7 +187,12 @@ leaving SIGTERM at default has no correct answer — honour the ignore and
 SIGTERM goes silent too; refuse it and a Proc that asked to ignore Ctrl-C dies
 on Ctrl-C. Both directions wrong, and it is exactly the call a shell makes. So
 `interrupt` belongs to SIGINT alone (it *is* the Ctrl-C note) and SIGTERM
-declines until it has a name of its own.
+declined until it had a name of its own. It has one since 2026-10-13: `term`
+([[dec-2026-10-13-term-note]]; Plan 9 APE's sigtab spells SIGTERM the same
+way), catchable, terminating by default, with its own mask bit
+(`NOTE_BIT_TERM`, 7; `NOTE_MASK_SUPPORTED` is 0xff), its own caught bit and
+claim bit, and its own terminate latch -- so ignoring or masking Ctrl-C leaves
+SIGTERM's disposition alone, as POSIX keeps them.
 
 The lesson generalises past this pair: in a design where the name is the
 identity, **collapsing two identities onto one name is a decision that cannot
@@ -229,8 +235,8 @@ liveness bug when the thing being exempted is a latch.*
 A note with a live handler must run at the return tail — but a peer thread
 blocked in a syscall reaches no return tail until something wakes it, and a
 thread spinning at EL0 reaches one only at an interrupt. So a caught note ARMS a
-per-Proc mask (`notes_arm_caught_note_locked`, the caught-note sub-field of
-`proc_flags`), and the posting walk (`proc_caught_note_wake`, under the
+per-Proc mask (`notes_arm_caught_note_locked`, the caught latch: the low byte of
+`Proc.note_caught`), and the posting walk (`proc_caught_note_wake`, under the
 process-table lock) chooses the thread that takes it and wakes or kicks that
 thread (next section); a stopped thread waits for the stop to clear.
 `notes_post` cannot run that walk itself -- it needs the process-table lock,
@@ -243,7 +249,7 @@ outside the lock: a Proc noting itself takes the lock for its wakes after the
 post, and `pipe` needs none -- it posts to the writer's own Proc from inside
 the write, which delivers at that thread's return tail, as Linux sends SIGPIPE
 to the writing thread alone. One caught note unwinds at most ONE sleeper. An unwinding sleeper claims the
-note's family in a claim sub-field of `proc_flags` (`thread_caught_note_claim`,
+note's family in the claim byte, the high byte of `Proc.note_caught` (`thread_caught_note_claim`,
 the sleep arms' last test) by a CAS that re-validates the caught bit, and
 records the family as its own (`Thread.note_claim`); its peers find the family
 claimed and stay parked. In a Linux-phenotype Proc the walk usually takes that
@@ -253,12 +259,12 @@ designation ends at its thread's EL0-return tail whatever that tail delivered:
 `notes_deliver_at_el0_return` runs the delivery body (`notes_deliver_tail`),
 once more after each stop it applied (below), and then `notes_release_claims`,
 which clears the thread's claim and designation, ANDs their bits out of the
-Proc's claim sub-field and, if a family is still caught -- the tail ended short
+Proc's claim byte and, if a family is still caught -- the tail ended short
 of its note -- walks again, skipping this thread, whose tail has just passed the
 note by. A thread's own claim stays open to it, so a wait that claimed and then
 completed anyway cannot make the call's next wait refuse the note only it may
 unwind for. The drain of a family's last queued note clears the caught bit
-alone. Exec clears the claim sub-field, the claim and the designation under the
+alone. Exec clears the claim byte, the claim and the designation under the
 thread's `wait_lock` (exec runs alone, but a walk can have designated it). A
 thread that exits gives up both at its `THREAD_EXITING` commit, under the
 process-table lock (`notes_exit_drop_locked`), and walks again if a family's
@@ -341,6 +347,23 @@ the real tail: two ignored notes and a caught one, the tail loops to the caught
 one, and the retried wait unwinds again), `rendez.caught_note_release_wakes_peer`
 (the tail held until the peer has re-parked, so only the release's wake can
 unwind it), and `notes.caught_note_claim_once`.
+
+**Why the caught latch and the claim live in their own word.** Both were 7-bit
+sub-fields of `proc_flags` until `term` needed an eighth bit in each and
+`proc_flags` (a u32) had none free. They moved together into the u16
+`Proc.note_caught` (the u16 that sat reserved beside `term_sig`; the struct
+did not grow): the latch is the low byte (`CAUGHT_LATCH_SHIFT`/`_MASK`), the
+claim the high byte (`CAUGHT_CLAIM_SHIFT`/`_MASK`). One word, because the
+claim's CAS re-validates the caught bit. The move is sound because every
+reader and writer touches those two fields alone (the arm, the drain, the
+deliverable test, the claim CAS, the family drop, the exit drop, the
+designation CAS, the walk, the pending test, exec's clear): none needs one
+atomic snapshot of a sub-field together with another `proc_flags` bit.
+The macros were renamed rather than kept, so code that still applies them to
+`proc_flags` cannot compile: one test armed a tty caught bit through
+`proc_flags` with the old shift, which would have set `PROC_FLAG_LEGATE_ROOT`
+silently. `PROC_FLAGS_ALL` and a derived popcount `_Static_assert` now prove
+every `proc_flags` bit disjoint, so a new flag cannot land on an old one.
 
 ### Which thread takes a caught note, and every EL0 return delivers it (2026-10-12)
 
@@ -432,7 +455,7 @@ text). A Proc that does not end by its own exit ends because of a note, and the
 kernel now records which, as a POSIX signal number beside the exit status
 (`Proc.term_sig`, set at the ZOMBIE chokepoint -- [[sub-kernel-death]]). The
 table is here: `g_known_notes` gained a `death_sig` column, nonzero exactly on
-the `NOTE_DEFAULT_TERMINATE` rows (`interrupt` 2, `kill` 9, `pipe` 13,
+the `NOTE_DEFAULT_TERMINATE` rows (`interrupt` 2, `term` 15, `kill` 9, `pipe` 13,
 `tty:quit` 3, `tty:hup` 1), and `g_snare_deaths` maps the fault family
 (`snare:segv` 11, `snare:bus` and `snare:align` 7, `snare:ill` and `snare:bti`
 4, `snare:brk` 5, `snare:fpe` 8, `snare:abort` 6). `notes_death_signal(name)`
@@ -467,7 +490,9 @@ vivarium's numbers).
 ### A terminate latch wakes every sleep but a stop park's, and ends none of them (5g)
 
 An uncaught note whose default is terminate (an `interrupt` nothing catches,
-`tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch, and its post
+`term`, `tty:quit`, `tty:hup`, `pipe`) arms the LS-5c terminate latch -- one
+per family, so `term`'s (`PROC_FLAG_TERM_TERMINATE_PENDING`) is not held by a
+thread that masks only `interrupt` -- and its post
 wakes every blocked thread of the Proc outside a stop park
 (`proc_interrupt_terminate_wake`), and kicks every thread of the Proc running on
 another CPU, so a thread spinning at EL0 takes an IRQ into its tail, whose notes
@@ -622,7 +647,7 @@ sleeps. The stated justification and the real one differ, and the real one
 depends on a property (no writable file-backed mapping) that
 [[sub-kernel-fault]] records as a v1.x seam. See Caveats.
 
-The caught-note claim takes no lock: a CAS on `proc_flags` takes it, an atomic
+The caught-note claim takes no lock: a CAS on `Proc.note_caught` takes it, an atomic
 AND releases it, and only the release's walk -- run from the EL0-return tail,
 which holds nothing, and only while the family is still caught -- takes the
 process-table lock. A designation is made under the designee's `wait_lock`,

@@ -1597,6 +1597,31 @@ target through `proc_group_kill`. On a target already terminating that sets
 on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
 B, [[sub-kernel-death]]); a first kill terminates exactly as before.
 
+## SYS_POSTNOTE's walk serves the phenotype's kill family (2026-10-13, S-2)
+
+The Linux phenotype's `kill`, `tkill` and `tgkill` ([[sub-kernel-vivarium]],
+"The kill family") post through `SYS_POSTNOTE`'s own two arms rather than a
+gate of their own: `postnote_self` for the caller, and the parent-gated walk
+for anyone else. One shell, `viv_kill(ctx, p, pid, tid, sig)`, serves all
+three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
+`EINVAL` first, as Linux does). The walk's context gained two fields, and
+`SYS_POSTNOTE`'s own answers are unchanged:
+
+- `target_tid` (> 0): the target is the Proc holding that thread, found with
+  `proc_holds_tid_locked` under `g_proc_table_lock`, the lock every thread
+  list walk holds (#811); a `tgkill` whose tgid is a different Proc names no
+  thread (`ESRCH`).
+- `err`: with `result` -1, why -- `ESRCH` for a dead or mismatched target,
+  `EPERM` for the gate (the caller is not the target's parent), `EAGAIN` for a
+  full queue. `SYS_POSTNOTE` still reports -1 alone.
+
+A NULL `name` is signal 0: the gate runs, nothing is posted. The order inside
+the walk is the old one -- the gate, then ALIVE, then the post -- so a zombie
+that is not the caller's child reads `EPERM`, as it reads -1 to `SYS_POSTNOTE`.
+`viv_kill_for_test` drives the real shell with an explicit caller and a NULL
+`ctx`; a self-directed `snare:*` death answers 1 there instead of ending the
+harness (`notes.kill_family_gate`).
+
 ## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
 
 `sys_loom_register_handler` and its two `_for_proc` cores moved from the bare

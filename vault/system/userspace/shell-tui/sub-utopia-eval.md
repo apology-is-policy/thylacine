@@ -26,7 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -316,7 +316,23 @@ through `note_class_for_name`, where any `tty:`-prefixed name (`tty:susp`,
 `tty:winch`, …) resolves to the single `NoteClass::Tty` bit, so `mask note
 'tty:susp'` masks the whole tty family — matched by prefix rather than by
 enumerating the five, because before this arm existed that exact `mask note
-'tty:susp'` parsed, ran its body, and masked nothing.
+'tty:susp'` parsed, ran its body, and masked nothing. `term` maps to its own
+`NoteClass::Term` (2026-10-13).
+
+### `kill` sends `term` by default (2026-10-13)
+
+`kill {%N | pid} [note]` posts `term` when no note is named (operator vote of
+2026-10-13; UTOPIA-SHELL-DESIGN 9.1's terminate request, POSIX `kill`'s
+SIGTERM), so a job it ends reads `$status` 143. From U-7b until S-2 the default
+was `interrupt`: the `snare:term` the design named is kernel-synthetic and no
+userspace-postable terminate request existed. `interrupt` stays Ctrl-C's note
+and `kill` the non-catchable force; a `snare:` name is refused. A `term` the
+shell itself receives with no `on note 'term'` handler falls through
+`dispatch_note`: an interactive shell reads its own notes and ignores it, as
+bash ignores SIGTERM, while a script never opens its notes, so a `term` ends
+it by the kernel's default. `u-job-test` item 12 reads 143 for `kill %1`;
+`u-7-test` flow 5 ends a blocked sleeper once per latch (`kill <pid>
+interrupt` 130, the default 143).
 
 ### A backslash counts only where a word is a pattern
 

@@ -531,17 +531,11 @@ its reasoning fails a test rather than passing quietly.
 
 ## Seams
 
-- **`kill` / `tkill` / `tgkill`** are deliberately unlisted. They are the
-  only signal rows that are an *authority* question rather than a
-  disposition one — they name another Proc — so they must reuse an
-  existing cross-Proc gate verbatim (SYS_POSTNOTE's parent-only check, or
-  I-26's two-axis one), never invent a third.
-- **SIGTERM has no note.** `interrupt` belongs to SIGINT alone since V-6b,
-  because a shared note cannot carry two independent dispositions and
-  `sigaction(SIGINT, SIG_IGN)` with SIGTERM at SIG_DFL is *unrepresentable*
-  rather than merely approximate. A real SIGTERM wants its own supported
-  note name, which is an addition to I-19's closed set and needs signoff.
-  It becomes load-bearing the day `kill` lands.
+- **`tkill` and `tgkill` reach a Proc, not a thread.** Notes are per-Proc,
+  so a thread-directed signal goes to whichever thread of the named thread's
+  Proc takes the note (the caught-note walk's pick), not necessarily the
+  thread named -- a stated imprecision (VIVARIUM 6.22). A program that sends
+  one thread a signal to wake it alone gets a Proc-wide note.
 - **`dup3` on a socket declines** rather than half-serving. Reproducing
   Linux needs a *refcounted* socktab entry, a real change to a table V-5
   audited; the idiom turned away is the inetd shape.
@@ -551,13 +545,12 @@ its reasoning fails a test rather than passing quietly.
 
 ## Caveats
 
-- **A guest's own `abort()` reads `SIGSEGV` to its parent.** `kill`, `tkill`
-  and `tgkill` have no rows, so musl's `raise(SIGABRT)` returns, `abort()`
-  falls through to `a_crash()`'s NULL store, and the guest dies of
-  `snare:segv`. Since gcpark-b `wait4` passes `WAIT_PACKED`, so the parent
-  sees `WIFSIGNALED` with `SIGSEGV` (before it, exit 1). A `tkill(self,
-  SIGABRT)` row ending in `snare:abort` would report `SIGABRT`; tracked with
-  Pouch's `raise(SIGABRT)` in OPEN-BUGS (2026-10-12; gcpark-b audit F4).
+- **A guest's own `abort()` reads `SIGABRT` to its parent** (since S-2,
+  2026-10-13). musl's `raise(SIGABRT)` is `tkill(gettid(), SIGABRT)`, and a
+  self-directed SIGABRT ends the caller with `snare:abort`, as Pouch's
+  `abort()` does. Before S-2 the call had no row, `raise` returned, `abort()`
+  fell through to `a_crash()`'s NULL store, and the parent read `SIGSEGV`
+  (gcpark-b audit F4).
 - **The header's opening block describes a system that no longer exists,
   and it is the first thing a reader of this surface sees.** Its "WHAT IS
   DELIBERATELY ABSENT" paragraph states that nothing here is wired into
@@ -1017,3 +1010,45 @@ also answer `ENOSYS`, because the per-number argument names it. An unlanded
 peer branch numbers calls 127-131 and renumbers on its next merge (handoff 048;
 operator vote 6 makes Linux kill/tkill/tgkill Tier-2 rows later, so an assert
 pinning those rows' kind to ENOSYS would go stale).
+
+## SIGTERM and SIGABRT get notes; the kill family (2026-10-13, S-2)
+
+`SIGTERM` maps to `term` (`VIV_SIGNOTE_TERM`, bit 7 in the guest's sigset
+conversions) since the note exists ([[dec-2026-10-13-term-note]]); V-6b had
+evicted it from `interrupt` because one note cannot carry two dispositions,
+and with its own note `sigaction(SIGTERM, ...)` is translated like any other
+and `sigaction(SIGINT, SIG_IGN)` leaves it alone. `SIGABRT` maps to
+`snare:abort` (`VIV_SIGNOTE_SNARE_ABORT`), translated at `SIG_DFL` only: a
+`snare:*` death is never queued, so an ignore or a handler is forwarded and
+refused. Both enum values were inserted mid-list; `TTY_CONT` stays last, so
+the count assertions hold.
+
+`kill` (129), `tkill` (130) and `tgkill` (131) are Tier-2 rows with one shell,
+`viv_kill` ([[sub-kernel-syscall-dispatch]]), over a pure decision here:
+`vivarium_kill_decide(sig, &name)` answers PROBE (signal 0), POST (a signal
+whose note any program may post: `interrupt`, `term`, `kill`, `pipe`,
+`child_exit`), SELF_DEATH (a signal a `snare:*` death carries: SIGABRT,
+SIGSEGV, SIGBUS, SIGILL, SIGFPE, through `viv_signote_snare_death`) or REFUSE
+(past `_NSIG`, a signal no note carries, a `tty:*` signal, which the line
+discipline alone posts). The shell answers REFUSE with `EINVAL` before
+anything else, then resolves the target: pid 0 is the caller, as
+`SYS_POSTNOTE`'s sentinel makes it for Pouch; a negative pid is `EPERM`,
+because the gate admits one Proc at a time and a group target would widen it;
+a tid resolves to the Proc holding it. The caller's own Proc takes a post
+through `postnote_self`, a probe as 0, and a SELF_DEATH through
+`proc_fault_terminate` -- the death Pouch's `abort()` reaches by `brk`. Any
+other Proc goes through `SYS_POSTNOTE`'s parent-gated walk, and a SELF_DEATH
+aimed at it is `EINVAL`: a `snare:*` death is the kernel's to cause. So a
+guest reaches exactly the Procs a Pouch program's `kill` reaches -- itself and
+its own live children -- and no third gate exists ([[inv-i43]]: the phenotype
+confers shape, never authority; [[dec-2026-10-13-phenotype-kill-family]]).
+Generalizing the vote's SIGABRT to all five fault signals is this chunk's
+call, stated in VIVARIUM 6.22: each is a death the caller could already reach
+by faulting.
+
+Tests: `vivarium.kill_decide` (the table), `notes.kill_family_gate` (the real
+shell with an explicit caller: self, a child, a non-child, a missing pid, a
+group, a dead child, the tid forms, the refusals), and `viv-pheno-probe` L334-L338 on the device
+(a child's `tkill(gettid(), SIGABRT)` reads `SIGABRT`; a child killed with
+`SIGTERM` reads `SIGTERM`; the probe's parent is `EPERM`; the refusals by
+shape; a `SIGTERM` handler runs once per call while `SIGINT` is ignored).

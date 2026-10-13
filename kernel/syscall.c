@@ -5900,10 +5900,9 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     for (u32 i = 0; i < (u32)name_len_raw; i++) {
         u8 b;
         if (uaccess_load_u8(name_va + i, &b) != 0) return -1;
-        // Reject embedded NUL and non-printable bytes — the v1.0
-        // supported set is "interrupt"/"kill"/"pipe"/"child_exit", all
-        // [a-z_]; the validation in notes_post will catch unknown
-        // strings, but reject obvious garbage at the boundary.
+        // Reject embedded NUL and non-printable bytes. notes_post checks
+        // the name against g_known_notes and refuses the kernel-only
+        // ones; this only turns obvious garbage away at the boundary.
         if (b == 0) return -1;
         if (b < 0x20 || b > 0x7e) return -1;
         buf[i] = (char)b;
