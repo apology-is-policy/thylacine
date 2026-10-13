@@ -1372,6 +1372,13 @@ every private arm is -EOPNOTSUPP. `sys_weft_share_for_proc` refuses a
 private-ring VMA, so no other Proc can map one ([[sub-kernel-weft]]). Mechanism
 and fixes: [[sub-kernel-loom-bridge]].
 
+A descriptor that names no ring (a dead slot, or a handle of another kind)
+answers -T_E_BADF from ENTER and from every REGISTER op, legacy and private,
+and an unknown REGISTER op answers -T_E_INVAL (operator vote 6, 2026-10-13;
+before it ENTER and the legacy REGISTER answered -1, which ERRORS.md forbids).
+A client tells a ring closed under it from its own error by this answer. The
+legacy REGISTER's argument refusals still answer -1.
+
 ## Terminal interaction suboperations
 
 SYS_PTY_REGISTER subops 16..21 use [[abi-pty-interaction]]. BIND borrows two

@@ -488,9 +488,8 @@ impl<K: Kernel> Inner<K> {
         if self.sq.dropped_changed() {
             panic!("loom-client: the kernel dropped an SQE the adapter wrote in range");
         }
-        // A latched ring answers -ECANCELED; a dead number gets -1 from the
-        // kernel, which REGISTER's probe turns into a definite answer.
-        if rc == -(ECANCELED as i64) || (rc < 0 && self.shared.gone()) {
+        // A ring latched closing answers -ECANCELED, a dead number -EBADF.
+        if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
             self.lost();
         }
     }
@@ -735,16 +734,14 @@ impl<K: Kernel> Inner<K> {
         self.wake_all();
     }
     /// A REGISTER that found the descriptor gone forgot it; close the ring.
+    /// Callers hold no RefCell borrow: closing shuts the driver down.
     fn learn(&self) {
         if self.shared.is_lost() && matches!(self.state.get(), State::Open | State::Retiring) {
             self.lost();
         }
     }
     fn fail(&self) {
-        // A ring already closed stays closed: what fails after is its teardown.
-        if self.state.get() != State::Closed {
-            self.state.set(State::Failed);
-        }
+        self.state.set(State::Failed);
         self.shutdown();
     }
     /// The kernel closed the ring under the adapter: forget its descriptor.

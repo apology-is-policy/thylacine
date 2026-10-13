@@ -158,7 +158,8 @@ static inline long t_loom_setup(unsigned long entries, struct t_loom_params *par
 }
 
 // Ops 0 and 1 answer 0 / -1 on an ordinary ring; ops 2..9 take one record
-// (nargs 1) and answer 0 (ABORT: 0 or 1) / -errno.
+// (nargs 1) and answer 0 (ABORT: 0 or 1) / -errno. Arguments that pass on a
+// descriptor that names no ring answer -T_E_BADF; an unknown op -T_E_INVAL.
 static inline long t_loom_register(long fd, unsigned long op, void *arg,
                                    unsigned long nargs) {
     register long x0 __asm__("x0") = fd;
@@ -172,7 +173,8 @@ static inline long t_loom_register(long fd, unsigned long op, void *arg,
 }
 
 // On a private ring this never sleeps: min_complete must be 0 and flags may hold
-// only NONBLOCK. It answers the SQEs consumed or -errno; park in t_poll.
+// only NONBLOCK. It answers the SQEs consumed or -errno; park in t_poll. A
+// descriptor that names no ring answers -T_E_BADF.
 static inline long t_loom_enter(long fd, unsigned long to_submit,
                                 unsigned long min_complete, unsigned long flags) {
     register long x0 __asm__("x0") = fd;

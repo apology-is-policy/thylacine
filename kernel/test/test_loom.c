@@ -905,7 +905,15 @@ void test_loom_register_rejects(void) {
                    -1, "non-Spoor fd rejected");
     // A bogus loom_fd is rejected.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1),
-                   -1, "bad loom_fd rejected");
+                   -T_E_BADF, "bad loom_fd answers -EBADF");
+    // A descriptor naming no Loom answers -EBADF too, and so does ENTER: a
+    // client tells a ring closed under it from its own error by this answer.
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, rd, LOOM_REGISTER_HANDLES, one, 1),
+                   -T_E_BADF, "non-Loom loom_fd answers -EBADF");
+    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, (hidx_t)999, 0, 0, 0), -T_E_BADF,
+                   "ENTER on a bad descriptor answers -EBADF");
+    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, rd, 0, 0, 0), -T_E_BADF,
+                   "ENTER on a non-Loom descriptor answers -EBADF");
 
     test_proc_drop(p);
 }
@@ -1052,7 +1060,8 @@ void test_loom_register_buffers_rejects(void) {
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -1, "len 0 rejected");
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -1, "OOB len rejected");
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -1, "unmapped VA rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -1, "bad loom_fd rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -T_E_BADF,
+                   "BUFFERS on a bad loom_fd answers -EBADF");
 
     // Every reject is atomic: the table stays empty + no ref leaked.
     struct Handle h;

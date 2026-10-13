@@ -972,3 +972,48 @@ fn a_held_refusal_claims_no_further_sqe() {
     );
     drop((fid, scope));
 }
+
+#[test]
+fn a_connect_after_the_ring_closed_under_answers_a_close() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    sim.close_under();
+    // Its reservation is the first REGISTER to find the number dead.
+    assert_eq!(target.connect(None).err(), Some(ECANCELED as i32));
+    drop((target, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_pool_made_after_the_ring_closed_under_answers_a_close() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    sim.close_under();
+    assert_eq!(r.pool(&[range(0, 0, 64)]).err(), Some(ECANCELED as i32));
+    drop(r);
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_payload_dropped_after_the_ring_closed_under_closes_the_ring() {
+    let sim = Sim::new();
+    file(&sim, "f", b"kept");
+    let r = ring(&sim, 8, &[4096]);
+    let pool = r.pool(&[range(0, 0, 64)]).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let mut stream = fid.stream(&pool, 0, 64, false, None).unwrap();
+    let Shot::Payload(p) = run(&r, stream.next()).unwrap() else {
+        panic!("a payload")
+    };
+    sim.close_under();
+    // Its RETURN is the first REGISTER to find the number dead; a deadline
+    // already passed keeps the turn from polling.
+    drop(p);
+    assert_eq!(r.turn(Some(r.now())).err(), Some(ECANCELED as i32));
+    drop((stream, fid, scope, target, pool, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}

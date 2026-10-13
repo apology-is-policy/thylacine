@@ -89,16 +89,16 @@ CASES = [
                 self.kernel.detach(va, len);
             }
         }''')]),
- ('enter-probe-skipped', 'an_enter_that_finds_the_descriptor_closed_forgets_it',
-  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || (rc < 0 && self.shared.gone()) {
+ ('enter-ebadf-ignored', 'an_enter_that_finds_the_descriptor_closed_forgets_it',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
             self.lost();
-        }''', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+        }''', '''if rc == -(ECANCELED as i64) {
             self.lost();
         }''')]),
  ('enter-ecanceled-ignored', 'an_enter_that_races_the_close_forgets_the_descriptor',
-  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || (rc < 0 && self.shared.gone()) {
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
             self.lost();
-        }''', '''if rc < 0 && self.shared.gone() {
+        }''', '''if rc == -(EBADF as i64) {
             self.lost();
         }''')]),
  ('pollnval-ignored', 'a_poll_that_finds_the_descriptor_closed_forgets_it',
@@ -181,6 +181,15 @@ CASES = [
   [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
     'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
  ('register-ebadf-kept-retired', 'a_ring_whose_register_finds_it_closed_never_reports_retired',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-connect', 'a_connect_after_the_ring_closed_under_answers_a_close',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-pool', 'a_pool_made_after_the_ring_closed_under_answers_a_close',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-payload', 'a_payload_dropped_after_the_ring_closed_under_closes_the_ring',
   [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
     'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
  ('target-probe-skipped', 'a_target_refused_for_its_registry_keeps_the_ring',

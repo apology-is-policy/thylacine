@@ -7875,9 +7875,11 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     if (n > LOOM_MAX_REG_HANDLES)      return -1;
     if (n > 0 && !fds)                 return -1;
 
+    // A dead or foreign descriptor is -EBADF, as on the private route: a client
+    // tells a ring closed under it from its own error by this answer.
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
     struct Loom *l = (struct Loom *)lh.obj;
     // A private ring names its services through registered targets instead.
     if (loom_is_private(l))                { handle_put(&lh); return -T_E_OPNOTSUPP; }
@@ -7920,8 +7922,8 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
     if (n > 0 && !bufs)               return -1;
 
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
     struct Loom *l = (struct Loom *)lh.obj;
 
     // handle_get holds a ref on the Loom across the call (the #844 by-value
@@ -8068,7 +8070,7 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                                        n > 0 ? bufs : NULL, n);
     }
 
-    return -1;   // unknown register op
+    return -T_E_INVAL;   // unknown register op
 }
 
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
@@ -8079,8 +8081,8 @@ int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
     // any submit run against a live ring; the abandon-before-free quiesce only
     // happens once this ref (and the table's) drop. handle_put drops it after.
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
     struct Loom *l = (struct Loom *)lh.obj;
     int rc = loom_is_private(l) ? loom_private_enter(l, p, to_submit, min_complete, flags)
                                 : loom_enter(l, to_submit, min_complete, flags);

@@ -611,8 +611,11 @@ bad buffer index or out-of-bounds slice, a degenerate two-name split, a
 too-short input structure, a cross-session fid pair, a non-9P-backed handle,
 allocation failure. Cancellation for a chain successor whose predecessor failed.
 
-Enter returns `-1` only for a corrupt ring object or invalid flags — everything
-about an individual operation is reported through its completion.
+Enter, like REGISTER, answers `-T_E_BADF` for a descriptor that names no ring
+(closed, or another kind of object; operator vote 6, 2026-10-13), so a client
+can tell a ring closed under it from its own error. Otherwise it returns `-1`
+only for a corrupt ring object or invalid flags — everything about an
+individual operation is reported through its completion.
 
 Two counters in the header are diagnostics: dropped submissions (a bad
 indirection index) and overflowed completions (which the admission rule is meant

@@ -495,7 +495,10 @@ be one 4 KiB staging buffer per round trip.
 
 - **The two return conventions are not converging.** New syscalls use errno, old
   ones use `-1`, and there is no migration underway. A caller handling both must
-  know which is which per call.
+  know which is which per call. One exception, 2026-10-13 (operator vote 6):
+  Loom's ENTER and REGISTER answer a descriptor that names no ring with
+  `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`; their other
+  legacy refusals keep `-1`.
 - **The `svc` immediate is unused.** Reserved as a class selector; nothing reads
   it.
 - **Environment pass-through at spawn was reserved and never built.** The

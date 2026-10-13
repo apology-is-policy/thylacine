@@ -195,9 +195,8 @@ impl<K: Kernel> Shared<K> {
         rc
     }
     /// Whether the descriptor still names the ring, asked with a QUERY of the
-    /// zero reference: a live ring answers -ENOENT, a dead number -EBADF. ENTER
-    /// cannot say: the kernel answers it -1 for a dead number (syscall.c).
-    pub(crate) fn gone(&self) -> bool {
+    /// zero reference: a live ring answers -ENOENT, a dead number -EBADF.
+    fn gone(&self) -> bool {
         let fd = self.fd.get();
         if fd < 0 {
             return self.lost.get();

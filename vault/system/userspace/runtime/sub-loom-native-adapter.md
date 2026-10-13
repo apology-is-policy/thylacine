@@ -57,24 +57,23 @@ enabled by it.
   SQ are -ENOSPC; a closed ring is -ECANCELED; a failed ring (a corrupt or stale
   CQE) is -EIO. A changed `dropped` count panics: the adapter never writes an
   out-of-range index, so it is a broken invariant.
-- **A ring closed under the adapter is forgotten, never closed again.** Any
-  REGISTER answered -EBADF (`syscall.c` checks the descriptor before the
-  record), ENTER answered -ECANCELED, or poll answering POLLHUP or POLLNVAL,
-  means another thread closed the ring's only descriptor: a private ring is never
-  duplicated (handle.c, `handle_dup`) or inherited across fork
+- **A ring closed under the adapter is forgotten, never closed again.** ENTER
+  answered -EBADF or -ECANCELED, any REGISTER answered -EBADF (`syscall.c`
+  checks the descriptor before the record), or poll answering POLLHUP or
+  POLLNVAL, means another thread closed the ring's only descriptor: a private
+  ring is never duplicated (handle.c, `handle_dup`) or inherited across fork
   (`handle_slot_may_alias`), and exec latches it only past the point of no
   return (proc.c, `proc_exec_replace`). The number may already name another
-  file, so `Shared` drops it unclosed and the ring answers -ECANCELED. The
-  kernel's ENTER answers a dead number with a bare -1
-  (`sys_loom_enter_for_proc`), so any other ENTER refusal is asked of
-  REGISTER with a QUERY of the zero reference, which a live ring answers
-  -ENOENT. A TARGET's -EBADF can name its registry descriptor; the same probe
-  decides. Detection waits for the adapter's next REGISTER, ENTER or poll. A
-  number reused by another kind of file is caught by the next REGISTER; one
-  reused by another private ring of the same program is not, and a poll waits
-  on the new file. Closing the ring's only descriptor from another thread is
-  the program's fault, and without descriptor generations EL0 cannot see a
-  reuse sooner.
+  file, so `Shared` drops it unclosed and the ring answers -ECANCELED. A
+  TARGET's -EBADF can name its registry descriptor instead, so there a QUERY
+  of the zero reference decides: a live ring answers it -ENOENT. Detection
+  waits for the adapter's next REGISTER, ENTER or poll. A number reused by a
+  file of another kind is caught by the next REGISTER or ENTER, but a poll
+  issued first waits on the new file. One reused by another Loom of the same
+  program, legacy or private, is caught by none of the three: a REGISTER
+  answers -EOPNOTSUPP or goes to the other ring, and ENTER and poll go to it.
+  Closing the ring's only descriptor from another thread is the program's
+  fault, and without descriptor generations EL0 cannot see a reuse sooner.
 - **Slot drops.** A failed WALK's reservation is reaped without a CLUNK (the
   kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
   answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
@@ -171,7 +170,7 @@ completion path allocates.
   further SQE meanwhile, and `engine_visit` runs the engine's retirement
   between two adapter calls. The sim's ENTER posts every deferred completion
   before it consumes, which the kernel's zero-submit ENTER does not. Its ENTER
-  answers a dead number -1 and its REGISTER -EBADF, as the kernel does. Known divergence: an operation on a fid that is not READY, under a
+  and REGISTER answer a dead number -EBADF, as the kernel does. Known divergence: an operation on a fid that is not READY, under a
   READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
   adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
@@ -203,8 +202,9 @@ completion path allocates.
 4. Paths no host test reaches yet: `Fid::walk` from a fid that is not the
    root, a refused
    `Payload::try_return`, POLLERR and -EINTR (the sim returns neither), an ENTER
-   refusal the probe does not confirm, and an explicit `Ring::close` with
-   handles alive.
+   error other than -ECANCELED and -EBADF, an explicit `Ring::close` with
+   handles alive, and a closing pool's REAP (`destroy_pool`) answered
+   -ECANCELED once the ring is lost.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
