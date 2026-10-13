@@ -23,6 +23,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/larder.h>
 #include <thylacine/loom.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -673,9 +674,11 @@ static struct Proc   *volatile g_xw_proc;
 static struct Thread *volatile g_xw_thread;
 static volatile bool           g_xw_last_out;
 static volatile bool           g_xw_window;
+static volatile bool           g_xw_hook_ran;
 
 static void xw_window_kill(void) {
     proc_exit_close_test_set_window_hook(NULL);
+    g_xw_hook_ran = true;
     irq_state_t s = proc_table_lock_acquire();
     proc_group_kill(current_thread()->proc);
     proc_table_lock_release(s);
@@ -707,9 +710,9 @@ static bool xw_in_close(void) {
 }
 
 struct xw_obs {
-    bool opened, started, installed, slept, forced, reaped;
+    bool opened, started, installed, slept, forced, hook_ran, reaped;
     int  status;
-    u32  nwrite, write_len, write_sum;
+    u32  before, nwrite, write_len, write_sum;
 };
 
 static void xw_run(bool last_out, bool window, struct xw_obs *o) {
@@ -723,6 +726,7 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         g_xw_thread   = NULL;
         g_xw_last_out = last_out;
         g_xw_window   = window;
+        g_xw_hook_ran = false;
         hold_reader(w.a->client, true);
         g_mq_a.eagain_budget = 0xffffffffu;
         int pid = rfork(RFPROC, xw_child, NULL);
@@ -741,12 +745,20 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
             }
             o->forced = xw_zombie();             // before the server answered
         }
+        o->hook_ran = g_xw_hook_ran;
+        o->before   = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
         wbc_unstall(&w);
         if (o->started) {
+            // A close that never ends fails here rather than hanging the
+            // suite; the fixture it still uses is then left alone.
+            TEST_YIELD_UNTIL_SOFT(xw_zombie());
             int st = -1;
-            o->reaped = wait_pid_for(pid, WAIT_PACKED, &st) == pid;
+            if (xw_zombie())
+                o->reaped = wait_pid_for(pid, WAIT_PACKED, &st) == pid;
             o->status = st;
         }
+        proc_exit_close_test_set_window_hook(NULL);
+        if (o->started && !o->reaped) return;
         TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
         TEST_YIELD_UNTIL_SOFT(closer_quiet());
     }
@@ -761,6 +773,7 @@ static void xw_expect(const struct xw_obs *o, int code) {
     TEST_ASSERT(o->started && o->installed, "a child holding it in its handle table");
     TEST_ASSERT(o->reaped, "the child was reaped");
     TEST_ASSERT(o->forced, "the kill forced the final close: it ended before the server answered");
+    TEST_EXPECT_EQ((u64)o->before, 0ull, "nothing reached the server before the unstall");
     TEST_EXPECT_NE(o->status, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
         "the kill replaced the exit's status");
     TEST_EXPECT_EQ(o->status, WAIT_STATUS_EXITED(code), "the exit's own status stands");
@@ -785,6 +798,7 @@ void test_p9_closer_kill_at_final_close_start_forces_it(void) {
     struct xw_obs ex = {0}, lo = {0};
     xw_run(false, true, &ex);
     xw_run(true,  true, &lo);
+    TEST_ASSERT(ex.hook_ran && lo.hook_ran, "premise: each kill landed in the window");
     xw_expect(&ex, 5);
     xw_expect(&lo, 0);
 }

@@ -203,8 +203,9 @@ kernel records that note's POSIX signal beside the exit status
 whole Proc, in the same set-once claim that decides the group's status (I-24):
 a thread that faults while its group is already dying leaves with what the
 group already claimed. One exit stands against a later claim: once a Proc's
-last thread has marked its final close with no claim in place, its own exit is
-the status, and a kill arriving during the close only forces the close
+last thread has committed to exit with no claim in place (it reads the claim
+under the proc-table lock, in the hold that marks its final close), its own exit
+is the status, and a kill arriving later only forces the close
 (ARCHITECTURE 7.9.1 part B). That is Linux's rule for an exiting task, and it
 holds whether the last thread left by `exits` or by `SYS_THREAD_EXIT`
 (operator vote 2026-10-13).

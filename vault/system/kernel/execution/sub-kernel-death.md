@@ -541,7 +541,10 @@ What a change **must** re-establish:
   a kill that lands after it forces the close and leaves the exit's status
   (operator vote, [[dec-2026-10-13-exit-wins-final-close]]; gcpark-b audit F5).
   The window between the commit and the close is a few instructions with no
-  sleep, so only the `KERNEL_TESTS` hook can put a kill there.
+  sleep: a kill from another CPU can land there, but it has no runtime witness
+  except through the `KERNEL_TESTS` hook, the only way a test can put a kill
+  there. A Proc with no handle table publishes no mark, and its exit still wins:
+  the rule is the commit's claim read, the mark only what a kill forces.
 - **The multi-thread `exits()` gate is gone.** `exits()` with live peers is
   no longer an extinction — since #811 it routes through the same cascade as
   `exit_group` and then self-exits. The absorbed reference doc still said
