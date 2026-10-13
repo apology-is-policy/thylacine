@@ -545,6 +545,8 @@ void test_jit_charges_once_per_page(void);
 void test_jit_max_region_is_a_reservation(void);
 void test_jit_decommit_refuses_code(void);
 void test_jit_icache_policy_decode(void);
+void test_jit_region_is_128_mib(void);
+void test_jit_space_sync_targets(void);
 void test_jit_commit_invalidates_icache(void);
 void test_jit_fetch_admission(void);
 void test_jit_icache_aliasing_invalidates_all(void);
@@ -2677,6 +2679,8 @@ struct test_case g_tests[] = {
     { "jit.icache_sync_gate",             test_jit_icache_sync_gate,          false, NULL },
     { "jit.write_visible_at_exec_alias",  test_jit_write_through_writer_visible_at_exec, false, NULL },
     { "jit.icache_policy_decode",         test_jit_icache_policy_decode,      false, NULL },
+    { "jit.region_is_128_mib",            test_jit_region_is_128_mib,         false, NULL },
+    { "jit.space_sync_targets",           test_jit_space_sync_targets,        false, NULL },
     { "jit.commit_invalidates_icache",    test_jit_commit_invalidates_icache, false, NULL },
     { "jit.fetch_admission",              test_jit_fetch_admission,           false, NULL },
     { "jit.icache_aliasing_invalidates_all", test_jit_icache_aliasing_invalidates_all, false, NULL },

@@ -558,7 +558,13 @@ enum {
 // B-2b appends SYS_JIT_CREATE_SEALED at 127, the last number below that row.
 // The NEXT native append lands on 128 and must give restart_syscall a
 // per-number argument (as pselect6 and ppoll have) before the ceiling moves.
-#define VIV_NATIVE_CEILING 127
+//
+// B-2e2 appends SYS_ICACHE_SYNC_SPACE at 128, and restart_syscall's argument
+// is now per-number (vivarium.c): its row is VIV_ENOSYS, consumed before the
+// native switch, so a Linux Proc's 128 never reaches the sync, and a native
+// program mis-declared as Linux loses the sync, which confers nothing anyway.
+// The lowest signal-family number still argued by the ceiling is kill (129).
+#define VIV_NATIVE_CEILING 128
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

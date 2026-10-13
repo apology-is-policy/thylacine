@@ -984,6 +984,74 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
     cs->prev_to_clear_on_cpu = prev;
 }
 
+// B-2e2 (JIT-ON-WX-DESIGN B-2 item 4): the address space each CPU last
+// installed, compared by value and never dereferenced -- a freed space's
+// address reused by a new one can only add an interrupt, never lose one. The
+// ASID allocator's active slot cannot serve: a rollover zeroes it while the
+// CPU keeps running on its reserved ASID.
+static struct AddrSpace *g_cpu_space[DTB_MAX_CPUS];
+
+// The DSB is the switch's half of the store-buffering argument: a
+// sched_sync_space that misses this store read its record after its own DSB,
+// so the invalidation it published completed before this CPU's eret.
+static void sched_record_space(struct AddrSpace *as) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS)
+        __atomic_store_n(&g_cpu_space[cpu], as, __ATOMIC_RELAXED);
+    __asm__ __volatile__("dsb ish" ::: "memory");
+}
+
+const struct AddrSpace *sched_cpu_space(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return NULL;
+    return __atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED);
+}
+
+// Checks of an outstanding ticket between offers of the CPU. An IPI round trip
+// is microseconds; the kernel is not preemptible in a syscall (ARCH 8.12), so
+// a target slow to unmask must not hold the caller's CPU from its other
+// threads (Plan 9's procflushseg calls sched() in the same wait).
+#define SYNC_SPACE_SPINS 4096u
+
+u64 sched_sync_space(const struct AddrSpace *as) {
+    u64 tickets[DTB_MAX_CPUS];
+    u64 mask = 0;
+    if (!as) return 0;
+    // Everything the caller published (SYS_ICACHE_SYNC ends in DSB ISH too)
+    // is complete before any record is read.
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    // IRQs masked: the calling CPU cannot change while the records are read.
+    // A thread of `as` that switches in on it later does so after the DSB.
+    irq_state_t s = spin_lock_irqsave(NULL);
+    unsigned self = smp_cpu_idx_self();
+    unsigned n = smp_cpu_count();
+    for (unsigned cpu = 0; cpu < n && cpu < DTB_MAX_CPUS; cpu++) {
+        if (cpu == self) continue;
+        if (__atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED) != as) continue;
+        u64 ticket = gic_barrier_send(cpu);
+        // Refused only for a CPU that never came online, whose record is
+        // NULL; skipping one that runs `as` would void the call's guarantee.
+        if (!ticket) extinction("sched_sync_space: barrier IPI refused for a CPU running the space");
+        tickets[cpu] = ticket;
+        mask |= 1ull << cpu;
+    }
+    spin_unlock_irqrestore(NULL, s);
+    // No timeout: a target takes the IPI when it next unmasks IRQs, and the
+    // kernel's masked spans are bounded. An error here would let a stalled
+    // vCPU change the caller's outcome rather than its duration.
+    for (unsigned cpu = 0; cpu < DTB_MAX_CPUS; cpu++) {
+        if (!(mask & (1ull << cpu))) continue;
+        unsigned spins = 0;
+        while (!gic_barrier_reached(cpu, tickets[cpu])) {
+            __asm__ __volatile__("yield" ::: "memory");
+            if (++spins == SYNC_SPACE_SPINS) {
+                spins = 0;
+                (void)sched_yield_hint();
+            }
+        }
+    }
+    return mask;
+}
+
 // RW-1 B-F1: the context-switch ASID pre-hook. Resolves next's Proc to its
 // current-generation rolling ASID (asid_resolve; spec asid.tla FastSwitch /
 // SlowSwitch) and composes the TTBR0_EL1 value into next's Context, so the asm
@@ -994,12 +1062,18 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
 // run-queue lock is held at the sched() call site (and thread_switch is the
 // single-threaded test primitive), so smp_cpu_idx_self() names next's CPU and
 // the per-CPU active slot the resolve publishes into is the right one.
+//
+// B-2e2: it also records the space this CPU is about to run (NULL for a kernel
+// thread), for SYS_ICACHE_SYNC_SPACE, and every caller passes through here
+// before next can fetch an EL0 instruction.
 void sched_install_asid_ttbr0(struct Thread *next) {
     struct Proc *p = next->proc;
-    if (p && p->as) {
-        u64 asid = asid_resolve(&p->as->context_id, smp_cpu_idx_self());
-        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)p->as->pgtable_root;
+    struct AddrSpace *as = p ? p->as : NULL;
+    if (as) {
+        u64 asid = asid_resolve(&as->context_id, smp_cpu_idx_self());
+        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)as->pgtable_root;
     }
+    sched_record_space(as);
 }
 
 // LINEAGE L-2: install `t`'s CURRENT address space in the hardware, right now.

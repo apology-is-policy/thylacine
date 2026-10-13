@@ -7493,6 +7493,16 @@ static s64 sys_icache_sync_handler(u64 vaddr, u64 length) {
     return sys_icache_sync_for_proc(t->proc, vaddr, length);
 }
 
+// SYS_ICACHE_SYNC_SPACE: the context-synchronization event SYS_ICACHE_SYNC
+// gives the calling CPU, for every other CPU running a thread of the same
+// address space (sched_sync_space; JIT-ON-WX-DESIGN B-2 item 4).
+static s64 sys_icache_sync_space_handler(void) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || !t->proc->as)              return -T_E_INVAL;
+    (void)sched_sync_space(t->proc->as);
+    return 0;
+}
+
 // =============================================================================
 // Weft -- the per-flow capability network dataplane EL0 delivery (Weft-6a-2;
 // NET-THROUGHPUT.md section 6). kernel/weft.c owns the share_id registry + the
@@ -16028,6 +16038,10 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_jit_create_sealed_handler(ctx->regs[0],
                                                           ctx->regs[1],
                                                           ctx->regs[2]);
+        return;
+
+    case SYS_ICACHE_SYNC_SPACE:
+        ctx->regs[0] = (u64)sys_icache_sync_space_handler();
         return;
 
     case SYS_WALK_CREATE:

@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -208,6 +208,43 @@ CPU can still be walking the old root, which is precisely the precondition
 the outgoing address space's teardown needs. Removing it does not just
 risk a stale fetch — it removes the licence to free the old tables.
 
+### The per-CPU space record and `sched_sync_space` (B-2e2)
+
+`sched_install_asid_ttbr0` also records, in `g_cpu_space[cpu]`, the address
+space the CPU is about to run (NULL for a kernel thread, the idle thread
+included), then executes `DSB ISH`. All three callers pass through it before
+the incoming thread can fetch an EL0 instruction: `sched()`, the test
+primitive `thread_switch`, and `sched_activate_addrspace` (execve). The record
+is compared by value and never dereferenced, so a space torn down concurrently
+is no lifetime hazard, and a freed space's address reused by a new one can
+only add an interrupt. The ASID allocator's per-CPU slot could not serve: a
+rollover zeroes it while the CPU runs on its reserved ASID.
+
+`sched_sync_space(as)` is `SYS_ICACHE_SYNC_SPACE`'s mechanism
+([[sub-kernel-syscall-dispatch]]): `DSB ISH`; with IRQs masked, note the
+calling CPU, read every other online CPU's record and send a barrier IPI by
+ticket ([[sub-kernel-gic]]) to each that names `as`; then, IRQs unmasked, wait
+for every ticket with no timeout, offering the CPU (`sched_yield_hint`) every
+4096 checks. It returns the mask it interrupted. Why it is enough is
+`membarrier`'s store-buffering argument (`JIT-ON-WX-DESIGN.md` B-2 item 4): a
+call that reads a record interrupts that CPU, and its handler's `eret` follows
+its read of a ticket taken after the invalidation; a call that misses a store
+read it before the switcher's `DSB` completed, so the invalidation completed
+before the switcher's `eret`. The switch-side `DSB` is new with B-2e2; Linux's
+arm64 `__switch_to` has one. A ticket the GIC refuses for a CPU whose record
+names the space extincts: skipping it would void the guarantee, and only a CPU
+that never came online can be refused, whose record is NULL.
+
+`jit.space_sync_targets` runs a kernel spinner of each of two child Procs on
+its own CPU and checks both ways that the space's CPU is interrupted and
+served and the other space's CPU takes no ticket, measured only in a window
+where neither CPU switched (`sched_cpu_ctxt`). The suite's scheduler is
+UP-like (`g_sched_notify_enabled` off until `joey_run`), so a cross-CPU
+`ready_on` does not wake its idle target: the test kicks each spinner's CPU
+with `IPI_RESCHED`, as `test_smp` does, and reaps its children by polling
+(`WAIT_WNOHANG`), since a child exiting on another CPU would not wake a
+parent sleeping in idle. Its first version did neither and hung the boot.
+
 ## Data structures
 
 `struct CpuSched g_cpu_sched[DTB_MAX_CPUS]` — one slot per CPU, indexed
@@ -225,6 +262,9 @@ by `smp_cpu_idx_self()` (MPIDR.Aff0).
 | `idle_in_wfi` | "this CPU's current is its idle"; read by peers |
 | `capacity` | normalized DTB capacity, `[0, 1024]`; write-once at boot |
 | `idle_ns`, `nctxt` | read-only telemetry (prowl, VIVARIUM) |
+
+`g_cpu_space[]` (B-2e2) holds each CPU's last-installed address space, for
+`sched_sync_space`; written only by its own CPU with IRQs masked.
 
 Two file-scope arrays sit beside it: `g_need_resched[]` (per-CPU u8,
 RELAXED atomics because `ready_on` made it a genuine cross-CPU producer)

@@ -43,12 +43,21 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is restart_syscall
-// (128); execve (221) is the newest. If the ceiling ever rises past one of
-// these, the build stops and the reader is forced back to the argument instead
-// of inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RESTART_SYSCALL > VIV_NATIVE_CEILING,
+// rather than by a per-number one. The lowest such number is kill (129);
+// execve (221) is the newest. If the ceiling ever rises past one of these, the
+// build stops and the reader is forced back to the argument instead of
+// inheriting a claim that has quietly become false.
+_Static_assert(VIV_LINUX_KILL > VIV_NATIVE_CEILING,
                "the signal family's collision argument is the ceiling one");
+// Linux restart_syscall (128) collides with SYS_ICACHE_SYNC_SPACE (B-2e2). The
+// row is VIV_ENOSYS (below) and viv_linux_dispatch consumes every phenotyped
+// number that is not TRANSLATED before the native switch, so a Linux Proc
+// never reaches the sync; a native program mis-declared as Linux loses it,
+// and the sync takes no argument and grants nothing it could misuse. Keep the
+// row: removing it leaves 128 to FORWARD, which also answers ENOSYS, but the
+// per-number argument names the row.
+_Static_assert(VIV_LINUX_RESTART_SYSCALL == SYS_ICACHE_SYNC_SPACE,
+               "revisit restart_syscall / ICACHE_SYNC_SPACE collision on renumber");
 _Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
                "the socket family's collision argument is the ceiling one");
 _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,

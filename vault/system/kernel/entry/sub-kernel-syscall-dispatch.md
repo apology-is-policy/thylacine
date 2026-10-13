@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1616,3 +1616,26 @@ A params-copyout fault in the SYS_LOOM_SETUP handler calls
 `sys_burrow_detach_for_proc`. It no longer uses the unsettled `burrow_unmap`, so a
 faulting caller never leaks the ring's charge. Mechanism and the setup's own
 reference: [[sub-kernel-loom]].
+
+## B-2e2: `SYS_ICACHE_SYNC_SPACE` and 128 MiB regions (2026-10-13)
+
+Dispatch 128 (`sys_icache_sync_space_handler`) takes no argument: it refuses
+only a caller with no address space (unreachable from EL0) and otherwise calls
+[[sub-kernel-sched]]'s `sched_sync_space` on the caller's space and returns 0.
+That returns once every other CPU whose per-CPU record names the space has
+acknowledged a barrier IPI by ticket ([[sub-kernel-gic]]), the event
+`SYS_ICACHE_SYNC` gives only the calling CPU, for code published to threads
+that never pass a resume point (Wasm's BBQ and OMG, B-2e3). It is not gated:
+it interrupts only CPUs running the caller's own threads, reads no memory and
+changes no mapping. It has no timeout and yields between checks, the kernel
+being non-preemptible in a syscall. Design: `JIT-ON-WX-DESIGN.md` B-2 item 4;
+decision `dec-2026-10-13-icache-sync-space`.
+
+`JIT_REGION_MAX` is 128 MiB (operator vote `dec-2026-10-13-jit-region-128`),
+JavaScriptCore's ARM64 pool without jump islands. Every quantity sized by it
+is a bound, not an allocation: `SYS_JIT_CREATE`'s length check, the
+`SYS_ICACHE_SYNC` range check and its page walk (32768 slots at most, paid by
+the caller's own length), and the slot table, whose nodes are charged as a
+touch creates them. `jit.max_region_is_a_reservation` creates a region of
+exactly the bound and touches its last page; `jit.region_is_128_mib` pins the
+value; `jit.create_rejects_bad_args` refuses one byte more.

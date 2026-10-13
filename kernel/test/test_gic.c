@@ -10,6 +10,7 @@
 
 #include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/hwfeat.h"
+#include "../../arch/arm64/timer.h"
 #include <thylacine/dtb.h>
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
@@ -89,9 +90,26 @@ void test_gic_cpu_irq_counter_geometry(void) {
 
 void test_gic_irq_barrier(void) {
     TEST_ASSERT(!gic_synchronize_cpu(DTB_MAX_CPUS, 100000000ull), "invalid barrier CPU rejected");
+    TEST_ASSERT(gic_barrier_send(DTB_MAX_CPUS) == 0, "invalid barrier CPU takes no ticket");
     for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
         if (cpu && !g_cpu_alive[cpu]) continue;
         TEST_ASSERT(gic_synchronize_cpu(cpu, 100000000ull), "IPI IRQ barrier reaches live CPU");
+    }
+    // The ticket: served by the handler that read it, and by nothing earlier.
+    // Nothing else sends barriers while the suite runs, so done stops at the
+    // last ticket taken, and the next ticket is outstanding until its own send.
+    unsigned self = smp_cpu_idx_self();
+    for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+        if (cpu == self || !g_cpu_alive[cpu]) continue;
+        u64 ticket = gic_barrier_send(cpu);
+        TEST_ASSERT(ticket != 0, "a ticket is taken for a live peer");
+        TEST_EXPECT_EQ(gic_barrier_requests(cpu), ticket, "the ticket is the request count");
+        u64 start = timer_now_ns();
+        while (!gic_barrier_reached(cpu, ticket) && timer_now_ns() - start < 100000000ull)
+            __asm__ volatile("yield" ::: "memory");
+        TEST_ASSERT(gic_barrier_reached(cpu, ticket), "the peer serves its ticket");
+        TEST_ASSERT(!gic_barrier_reached(cpu, ticket + 1),
+                    "a ticket not yet taken is not served by an earlier handler");
     }
     TEST_ASSERT(!gic_intid_dispatchable(1020) && !gic_intid_dispatchable(1023),
                 "special IAR values are never dispatched");

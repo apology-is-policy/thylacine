@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -574,7 +574,7 @@ its reasoning fails a test rather than passing quietly.
   as task #163.
 - **`VIV_NATIVE_CEILING`'s declaration comment used to repeat the number the
   symbol exists to stop repeating, and went stale seven times.** The constant
-  is now **127** (`SYS_JIT_CREATE_SEALED`, B-2b). The remedy was never going to be
+  is now **128** (`SYS_ICACHE_SYNC_SPACE`, B-2e2). The remedy was never going to be
   a person remembering: since the 2026-09-17 PCI rewrite the assert is pinned
   to the `SYS__NATIVE_TOP - 1` sentinel, which the compiler recomputes on every
   append, and the declaration comment narrates that drift history instead of a
@@ -1001,3 +1001,19 @@ an absolute deadline of 0 is not slept on), `clock.nanosleep_wall_step` (a step
 past the instant ends the sleep, a step back does not, a relative sleep ignores
 both), and viv-pheno-probe L319-L328, which report together: on a kernel
 without the rows every leg reads ENOSYS.
+
+## Native ceiling 128 (2026-10-13)
+
+B-2e2 appends `SYS_ICACHE_SYNC_SPACE` at 128, the number Linux arm64 gives
+`restart_syscall`, so that row's collision check leaves the ceiling argument:
+`vivarium.c` now asserts `VIV_LINUX_RESTART_SYSCALL == SYS_ICACHE_SYNC_SPACE`
+with the per-number paragraph, and the signal family's ceiling assert moves to
+`kill` (129), its lowest number still above the ceiling. The argument:
+`viv_linux_dispatch` consumes every phenotyped number that is not TRANSLATED
+before the native switch, and 128's row is `VIV_ENOSYS`, so a Linux Proc never
+reaches the sync; a native program mis-declared as Linux loses the sync, which
+takes no argument and grants nothing. The row stays even though FORWARD would
+also answer `ENOSYS`, because the per-number argument names it. An unlanded
+peer branch numbers calls 127-131 and renumbers on its next merge (handoff 048;
+operator vote 6 makes Linux kill/tkill/tgkill Tier-2 rows later, so an assert
+pinning those rows' kind to ENOSYS would go stale).

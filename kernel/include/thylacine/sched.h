@@ -89,6 +89,16 @@ void sched_install_asid_ttbr0(struct Thread *next);
 // tear the OUTGOING address space down.
 void sched_activate_addrspace(struct Thread *t);
 
+// B-2e2, SYS_ICACHE_SYNC_SPACE (JIT-ON-WX-DESIGN B-2 item 4): interrupt every
+// other CPU whose last-installed address space is `as`, and return once each
+// has acknowledged an interrupt taken after the call began. No timeout; the
+// wait yields. Returns the mask of CPUs interrupted. Thread context, IRQs on.
+struct AddrSpace;
+u64 sched_sync_space(const struct AddrSpace *as);
+// The address space `cpu` last installed at a switch (NULL: a kernel thread,
+// or the CPU never switched). A snapshot, for tests and diagnostics.
+const struct AddrSpace *sched_cpu_space(unsigned cpu);
+
 // Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
 // installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main
 // idle). NULL if sched_init has not yet been called for cpu_idx, or

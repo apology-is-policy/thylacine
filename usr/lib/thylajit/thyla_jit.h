@@ -27,6 +27,12 @@
  *       publishes them, and maps ONE execute-only alias at a random address:
  *       no writer ever exists and EL0 cannot read the bytes back. For a small
  *       thunk that must never be patched (the JIT's write stub).
+ *   thyla_jit_icache_sync_space()   -- SYS_ICACHE_SYNC_SPACE (128), not gated.
+ *       Returns once every other CPU running a thread of the caller's address
+ *       space has taken an interrupt after the call began, so those threads
+ *       next execute what thyla_jit_icache_sync published. For code reached
+ *       by threads that never pass a context-synchronization event of their
+ *       own (Linux's membarrier SYNC_CORE).
  *
  * The numbers are ABI (kernel/include/thylacine/syscall.h). Issued as inline
  * SVC rather than through libc: musl carries no wrapper for a Thylacine-private
@@ -50,7 +56,8 @@
 #define THYLA_SYS_JIT_DESTROY 102L
 #define THYLA_SYS_ICACHE_SYNC 103L
 #define THYLA_SYS_JIT_CREATE_SEALED 127L
-#define THYLA_JIT_REGION_MAX  (64u * 1024u * 1024u)
+#define THYLA_SYS_ICACHE_SYNC_SPACE 128L
+#define THYLA_JIT_REGION_MAX  (128u * 1024u * 1024u)
 #define THYLA_JIT_SEALED_MAX  (1u * 1024u * 1024u)
 
 /* struct t_jit_region -- the SYS_JIT_CREATE out-parameter. Layout pinned by
@@ -84,6 +91,15 @@ static inline long thyla_jit_icache_sync(void *va, size_t length)
     register long x1 __asm__("x1") = (long)length;
     register long x8 __asm__("x8") = THYLA_SYS_ICACHE_SYNC;
     __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
+    return x0;
+}
+
+/* SYS_ICACHE_SYNC_SPACE. No arguments; returns 0. */
+static inline long thyla_jit_icache_sync_space(void)
+{
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = THYLA_SYS_ICACHE_SYNC_SPACE;
+    __asm__ volatile("svc #0" : "=r"(x0) : "r"(x8) : "memory", "cc");
     return x0;
 }
 

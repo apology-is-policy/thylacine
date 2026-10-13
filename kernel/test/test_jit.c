@@ -17,8 +17,10 @@
 #include "test.h"
 
 #include "../../arch/arm64/fault.h"
+#include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/hwfeat.h"
 #include "../../arch/arm64/mmu.h"
+#include "../../arch/arm64/timer.h"
 #include "../../mm/phys.h"
 
 #include <thylacine/burrow.h>
@@ -28,7 +30,10 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -351,7 +356,7 @@ void test_jit_max_region_is_a_reservation(void) {
     jit_fault_in(p, reg.writer_va, /*is_write=*/true);
     jit_fault_in(p, reg.writer_va + last, /*is_write=*/true);
     jit_fault_in(p, reg.exec_va + last, /*is_write=*/false);
-    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 2u, "two pages committed of 16384");
+    TEST_EXPECT_EQ(burrow_lazy_resident_count(b), 2u, "two pages committed of the whole region");
     u32 fp = burrow_lazy_footprint(b);
     TEST_ASSERT(fp > 2u, "the footprint includes the map's nodes");
     TEST_EXPECT_EQ(jit_pages(p), fp, "the charge is that footprint");
@@ -1050,4 +1055,162 @@ void test_jit_sealed_fill_failure_refunds(void) {
     TEST_EXPECT_EQ(c_end, c0, "the first page and the nodes are refunded");
     TEST_EXPECT_EQ(pool_end, pool0, "and given back to the pool");
     TEST_ASSERT(unmapped, "and nothing is mapped");
+}
+
+// ---------------------------------------------------------------------------
+// jit.region_is_128_mib (B-2e2, operator vote dec-2026-10-13-jit-region-128)
+// ---------------------------------------------------------------------------
+
+void test_jit_region_is_128_mib(void) {
+    TEST_EXPECT_EQ((u64)JIT_REGION_MAX, 128ull * 1024 * 1024,
+                   "a code region may be 128 MiB, JavaScriptCore's ARM64 pool");
+}
+
+// ---------------------------------------------------------------------------
+// jit.space_sync_targets (B-2e2; JIT-ON-WX-DESIGN B-2 item 4)
+//
+// Two child Procs, each with its own address space, each run one kernel-mode
+// spinner pinned to its own CPU. sched_sync_space(A) must interrupt A's CPU
+// (its ticket served before the call returns) and take no ticket for B's, and
+// the other way round. The measurement is kept only from a window in which
+// neither CPU switched (sched_cpu_ctxt unchanged), so a background thread
+// preempting a spinner retries the window instead of failing the leg.
+// ---------------------------------------------------------------------------
+
+#define SS_LEGS 2u
+
+static volatile u32 g_ss_stop;
+static const struct AddrSpace *volatile g_ss_space[SS_LEGS];
+static volatile u32 g_ss_cpu[SS_LEGS];          // the spinner's CPU + 1 once it runs
+
+struct ss_leg { unsigned leg; unsigned cpu; };
+static struct ss_leg g_ss_legs[SS_LEGS];
+
+static void ss_spin_entry(void *arg) {
+    unsigned leg = (unsigned)(uintptr_t)arg;
+    g_ss_space[leg] = current_thread()->proc->as;
+    __atomic_store_n(&g_ss_cpu[leg], smp_cpu_idx_self() + 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_ss_stop, __ATOMIC_ACQUIRE))
+        __asm__ __volatile__("yield" ::: "memory");
+    exits("ok");
+}
+
+static void ss_main_entry(void *arg) {
+    const struct ss_leg *l = arg;
+    struct Thread *t = thread_create_with_arg(current_thread()->proc, ss_spin_entry,
+                                              (void *)(uintptr_t)l->leg);
+    if (!t) extinction("ss_main_entry: thread_create_with_arg failed");
+    t->cpu_pinned = true;
+    ready_on(l->cpu, t);
+    // The in-kernel test phase keeps the scheduler UP-like: a cross-CPU
+    // enqueue does not wake its idle target, so kick it as test_smp does.
+    (void)gic_send_ipi(l->cpu, IPI_RESCHED);
+    thread_exit_self();
+}
+
+struct ss_window {
+    bool ok;                 // neither CPU switched across the measurement
+    bool rec_a, rec_b;       // each CPU's record names its own spinner's space
+    u64  mask;               // sched_sync_space(space of `leg`)
+    bool served;             // the target's ticket is served on return
+    bool other_untouched;    // no ticket was taken for the other CPU
+};
+
+static struct ss_window ss_measure(unsigned leg, unsigned np, const unsigned *cpu) {
+    struct ss_window w = { 0 };
+    unsigned other = leg ^ 1u;
+    u64 c0 = sched_cpu_ctxt(cpu[0]);
+    u64 c1 = np > 1 ? sched_cpu_ctxt(cpu[1]) : 0;
+    w.rec_a = sched_cpu_space(cpu[0]) == g_ss_space[0];
+    w.rec_b = np < 2 || sched_cpu_space(cpu[1]) == g_ss_space[1];
+    u64 req_t = gic_barrier_requests(cpu[leg]);
+    u64 req_o = np > 1 ? gic_barrier_requests(cpu[other]) : 0;
+    w.mask = sched_sync_space(g_ss_space[leg]);
+    w.served = gic_barrier_requests(cpu[leg]) == req_t + 1 &&
+               gic_barrier_reached(cpu[leg], req_t + 1);
+    w.other_untouched = np < 2 || gic_barrier_requests(cpu[other]) == req_o;
+    w.ok = sched_cpu_ctxt(cpu[0]) == c0 && (np < 2 || sched_cpu_ctxt(cpu[1]) == c1);
+    return w;
+}
+
+void test_jit_space_sync_targets(void) {
+    TEST_EXPECT_EQ(sched_sync_space(NULL), 0ull, "no space interrupts no CPU");
+
+    unsigned self = smp_cpu_idx_self();
+    unsigned cpu[SS_LEGS];
+    unsigned np = 0;
+    for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS && np < SS_LEGS; c++)
+        if (c != self && g_cpu_alive[c]) cpu[np++] = c;
+    if (np == 0) return;     // one CPU: nothing to interrupt; the legs need a peer
+
+    __atomic_store_n(&g_ss_stop, 0u, __ATOMIC_RELEASE);
+    int pid[SS_LEGS] = { 0, 0 };
+    unsigned forked = 0;
+    for (unsigned i = 0; i < np; i++) {
+        g_ss_cpu[i] = 0;
+        g_ss_space[i] = NULL;
+        g_ss_legs[i].leg = i;
+        g_ss_legs[i].cpu = cpu[i];
+        pid[i] = rfork(RFPROC, ss_main_entry, &g_ss_legs[i]);
+        if (pid[i] <= 0) break;
+        forked++;
+    }
+
+    bool up = forked == np;
+    u64 start = timer_now_ns();
+    while (up) {
+        bool all = true;
+        for (unsigned i = 0; i < np; i++)
+            if (!__atomic_load_n(&g_ss_cpu[i], __ATOMIC_ACQUIRE)) all = false;
+        if (all) break;
+        if (timer_now_ns() - start > 2000000000ull) { up = false; break; }
+        (void)sched_yield_hint();
+    }
+
+    bool placed = up;
+    for (unsigned i = 0; up && i < np; i++)
+        if (g_ss_cpu[i] != cpu[i] + 1) placed = false;
+
+    struct ss_window wa = { 0 }, wb = { 0 };
+    unsigned tries = 0;
+    if (placed) {
+        for (tries = 0; tries < 100; tries++) {
+            wa = ss_measure(0, np, cpu);
+            if (np > 1) wb = ss_measure(1, np, cpu);
+            if (wa.ok && (np < 2 || wb.ok)) break;
+        }
+    }
+
+    // Release before asserting: the spinners hold two CPUs until they stop.
+    __atomic_store_n(&g_ss_stop, 1u, __ATOMIC_RELEASE);
+    int reaped = 0;
+    // Poll, never block: a child exits on its spinner's CPU, and with the
+    // scheduler UP-like during the suite its wake of a sleeping parent would
+    // not kick this CPU out of idle.
+    for (unsigned i = 0; i < forked; i++) {
+        int status = -1;
+        int r = 0;
+        u64 t0 = timer_now_ns();
+        while ((r = wait_pid_for(pid[i], WAIT_WNOHANG, &status)) == 0 &&
+               timer_now_ns() - t0 < 2000000000ull)
+            (void)sched_yield_hint();
+        if (r == pid[i] && status == 0) reaped++;
+    }
+
+    TEST_EXPECT_EQ(forked, np, "a child Proc per leg");
+    TEST_ASSERT(up, "each spinner runs within 2 s");
+    TEST_ASSERT(placed, "each spinner runs on the CPU it was pinned to");
+    TEST_ASSERT(tries < 100, "a window with no switch on either CPU");
+    TEST_EXPECT_EQ(reaped, (int)forked, "each child exits cleanly and is reaped");
+    TEST_ASSERT(np < 2 || g_ss_space[0] != g_ss_space[1], "the two children have two spaces");
+    TEST_ASSERT(wa.rec_a && wa.rec_b, "each CPU records the space it is running");
+    TEST_ASSERT(wa.mask & (1ull << cpu[0]), "the CPU running a thread of the space is interrupted");
+    TEST_ASSERT(wa.served, "and its ticket is served before the call returns");
+    if (np > 1) {
+        TEST_ASSERT(!(wa.mask & (1ull << cpu[1])), "a CPU running another space is not interrupted");
+        TEST_ASSERT(wa.other_untouched, "and no ticket is taken for it");
+        TEST_ASSERT(wb.mask & (1ull << cpu[1]), "the other space's CPU is interrupted for its own space");
+        TEST_ASSERT(wb.served && wb.other_untouched, "served, and the first CPU untouched");
+        TEST_ASSERT(!(wb.mask & (1ull << cpu[0])), "the first CPU is not interrupted for the other space");
+    }
 }

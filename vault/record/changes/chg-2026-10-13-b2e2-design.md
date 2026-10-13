@@ -4,7 +4,7 @@ type: chg
 title: "B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket"
 date: 2026-10-13
 arc: arc-boosty
-commits: ["*(pending)*"]
+commits: ["e06bdd38f"]
 touched:
   - sub-kernel-syscall-dispatch
   - sub-webkit

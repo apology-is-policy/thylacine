@@ -218,6 +218,7 @@ pub const T_SYS_JIT_CREATE: u64       = 101;    // (length, out_va) -> 0; CAP_JI
 pub const T_SYS_JIT_DESTROY: u64      = 102;    // (writer_va) -> 0
 pub const T_SYS_ICACHE_SYNC: u64      = 103;    // (vaddr, length) -> 0
 pub const T_SYS_JIT_CREATE_SEALED: u64 = 127;   // (src_va, length, out_va) -> 0; CAP_JIT-gated
+pub const T_SYS_ICACHE_SYNC_SPACE: u64 = 128;   // () -> 0; the space's other CPUs take a CSE
 pub const T_SYS_STAT: u64             = 88;
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
 // contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
@@ -3257,6 +3258,24 @@ pub unsafe fn t_icache_sync(vaddr: u64, length: u64) -> i64 {
         in("x8") T_SYS_ICACHE_SYNC,
         options(nostack)
     );
+    x0
+}
+
+// t_icache_sync_space — return once every other CPU that was running a thread
+// of the caller's address space has taken an interrupt after the call began,
+// so those threads next execute what t_icache_sync published (Linux's
+// membarrier SYNC_CORE). Always returns 0.
+#[inline(always)]
+pub fn t_icache_sync_space() -> i64 {
+    let mut x0: i64;
+    unsafe {
+        asm!(
+            "svc #0",
+            lateout("x0") x0,
+            in("x8") T_SYS_ICACHE_SYNC_SPACE,
+            options(nostack)
+        );
+    }
     x0
 }
 

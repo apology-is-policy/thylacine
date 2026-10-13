@@ -2044,9 +2044,9 @@ enum {
     //   thread's code after an ISB on the JS thread, and the JS thread runs one
     //   wherever it resumes the VM's code (MachineThreads::unparkCurrentThread),
     //   which covers code the collector patched with the world stopped and a
-    //   JSLock handed across CPUs. No mode of this syscall
-    //   broadcasts an ISB to the Proc's other running threads (Linux's
-    //   membarrier SYNC_CORE); B-2e decides one for Wasm's cache reset.
+    //   JSLock handed across CPUs. Code published to threads that never
+    //   pass such a point (Wasm's BBQ and OMG tiers) needs the event on the
+    //   other CPUs as well: SYS_ICACHE_SYNC_SPACE (128) provides it.
     //
     //   Errors: -EINVAL (range empty, wraps, or is not contained in a single
     //   live code-region alias of this Proc).
@@ -2462,6 +2462,29 @@ enum {
     //   allocator). A failure leaves nothing mapped and nothing charged.
     SYS_JIT_CREATE_SEALED = 127,  // arg: src_va (x0), length (x1), out_va (x2)
 
+    // SYS_ICACHE_SYNC_SPACE() -> 0 (B-2e2; JIT-ON-WX-DESIGN B-2 item 4).
+    //   Returns once every OTHER CPU that was running a thread of the caller's
+    //   address space when the call began has taken an interrupt it
+    //   acknowledged after the call began. The interrupt's return is a
+    //   context-synchronization event, so code the caller published with
+    //   SYS_ICACHE_SYNC is what those threads execute next -- the event
+    //   SYS_ICACHE_SYNC gives only the calling CPU. A thread of the space not
+    //   running takes its event at its next switch-in's eret. Linux's
+    //   membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE); Plan 9's
+    //   procflushseg.
+    //
+    //   No arguments (operator vote 2026-10-13: its own number, not a mode of
+    //   SYS_ICACHE_SYNC, whose callers leave x2 unset). No capability: it
+    //   interrupts only CPUs running the caller's own threads, reads no
+    //   memory and changes no mapping. No timeout: it waits until every
+    //   target unmasks IRQs, and offers its CPU to other threads meanwhile.
+    //
+    //   Linux arm64's 128 is restart_syscall, which the vivarium answers with
+    //   ENOSYS before native dispatch (vivarium.c, the per-number check).
+    //
+    //   Errors: -EINVAL only for a caller with no address space (never EL0).
+    SYS_ICACHE_SYNC_SPACE = 128,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2541,7 +2564,7 @@ _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_r
 // inside AArch64's +-128 MiB direct-branch range. The region is a reservation,
 // so the bound is on address space; the pages a JIT touches are charged one at
 // a time against the I-32 page budget, as SYS_BURROW_ATTACH_LAZY's are.
-#define JIT_REGION_MAX  (64u * 1024u * 1024u)
+#define JIT_REGION_MAX  (128u * 1024u * 1024u)
 
 // Largest sealed region (SYS_JIT_CREATE_SEALED). A sealed region holds a
 // thunk or a few trampolines, and the create commits and copies every page of

@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -142,6 +142,20 @@ is 128 and `VIV_NATIVE_CEILING` 127. Re-measured on this tree, not
 incremented: **125** live numbers, the span runs to 127 with the same three
 holes, `syscall_dispatch_body` has exactly 125 arms, and both set differences
 are empty. The section at the end of this dossier carries the record.
+
+**B-2e2 append (2026-10-13).** `SYS_ICACHE_SYNC_SPACE` = 128 (no arguments;
+`dec-2026-10-13-icache-sync-space`); `SYS__NATIVE_TOP` is 129 and
+`VIV_NATIVE_CEILING` 128. Re-measured on this tree, not incremented: **126**
+live numbers, the span runs to 128 with the same three holes (26, 30, 43),
+`syscall_dispatch_body` has exactly 126 arms, and both set differences are
+empty. It is the first native number that is also a Linux arm64 number above
+the old ceiling (`restart_syscall`); [[sub-kernel-vivarium]] carries its
+per-number collision argument. The Rust mirror gains
+`T_SYS_ICACHE_SYNC_SPACE` and `t_icache_sync_space`; libt carries no JIT call,
+the subset rule below. The C JIT header `usr/lib/thylajit/thyla_jit.h`
+(owned by [[sub-dosbox]], consumed by JavaScriptCore too) gains
+`THYLA_SYS_ICACHE_SYNC_SPACE` and `thyla_jit_icache_sync_space`, and its
+`THYLA_JIT_REGION_MAX` follows the kernel's `JIT_REGION_MAX` to 128 MiB.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
