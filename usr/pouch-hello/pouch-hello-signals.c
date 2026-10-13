@@ -95,6 +95,8 @@ static int test_deaths(void) {
         { "raise",  SIGABRT, "SIGABRT" },
         { "killself", SIGABRT, "SIGABRT" },
     };
+    // Every leg runs and reports, so one regression cannot hide another.
+    int bad = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
         char *cargv[] = { (char *)SELF, (char *)"die", (char *)legs[i].how, NULL };
         pid_t pid;
@@ -112,12 +114,13 @@ static int test_deaths(void) {
         if (!WIFSIGNALED(st) || WTERMSIG(st) != legs[i].sig) {
             printf("pouch-hello-signals: death %s: status %#x (want WIFSIGNALED %s)\n",
                    legs[i].how, (unsigned)st, legs[i].name);
-            return -1;
+            bad = 1;
+            continue;
         }
         printf("pouch-hello-signals: death %s reads WIFSIGNALED %s\n",
                legs[i].how, legs[i].name);
     }
-    return 0;
+    return bad ? -1 : 0;
 }
 
 // kill(pid, SIGTERM) posts `term`, and the child's death reads back as SIGTERM.
@@ -409,14 +412,13 @@ int main(int argc, char **argv) {
     }
     fflush(stdout);
 
-    if (test_deaths() != 0) {
-        fflush(stdout);
-        return 15;
-    }
-    if (test_term_death() != 0) {
-        fflush(stdout);
-        return 14;
-    }
+    // The death legs are separate processes: both groups run before either
+    // verdict, so a failure in one does not hide the other.
+    int deaths = test_deaths();
+    int term_death = test_term_death();
+    fflush(stdout);
+    if (deaths != 0) return 15;
+    if (term_death != 0) return 14;
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);
