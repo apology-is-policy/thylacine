@@ -19,7 +19,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native adapter (October 12)\""
 created: 2026-10-12
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -98,6 +98,13 @@ enabled by it.
   Live, Clunk (a dropped fid, clunked when the SQ has room), Clunking, Reap
   (REAP retried each turn, and before a reservation answers -ENOSPC). Pools are
   the cores' and are reaped through `destroy_pool`.
+- **Retirement.** `retire` closes admission and aborts every scope. `retired()`
+  holds once every scope's QUERY reports RETIRED with no active operation and no
+  pending terminal, and then the SQ and the CQ are drained; the drain check
+  follows the queries. RETIRED alone is not proof: the engine retires a scope in
+  the visit that cancels its last operation and posts that terminal on a later
+  one (`loom_service_engine.c`, `engine_ready_visit`). Retirement discards only
+  abandoned book entries, so a future held across it keeps its terminal.
 - **Teardown.** `close` (and dropping the `Ring`) aborts every scope and closes
   the descriptor. `Shared` detaches the mapping, then the buffers, when its last
   owner goes: after the CQ reader and every payload lease.
@@ -143,11 +150,14 @@ completion path allocates.
   decode and loom.c define them; each test names the behaviour it pins. It
   panics on a second close of a descriptor. A WALK in flight borrows its
   destination (the kernel's claim pins it), so REAP refuses that slot until the
-  WALK ends. Known divergence: an operation on a fid that is not READY, under a
+  WALK ends. A scope's QUERY reports its operations in flight and its
+  terminals not yet posted; `hold_terminals` keeps an abort's terminals back
+  after the scope retires, and `engine_visit` runs the engine's retirement
+  between two adapter calls. Known divergence: an operation on a fid that is not READY, under a
   READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
   adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
-  targeted adapter edit (31 cases), and each red was read for the intended
+  targeted adapter edit (35 cases), and each red was read for the intended
   assertion.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,
@@ -171,7 +181,7 @@ completion path allocates.
    slot phase: the kernel's RETIRING FID is reachable by REAP only through
    `control_retiring_fid`, which only the guest test exercises.
 4. Paths no host test reaches yet: `Fid::walk` from a fid that is not the
-   root, a stream dropped before its end with shots still arriving, a refused
+   root, a refused
    `Payload::try_return`, POLLERR and -EINTR (the sim returns neither), an ENTER
    error other than -ECANCELED and -EBADF, and an explicit `Ring::close` with
    handles alive.

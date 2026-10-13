@@ -185,7 +185,11 @@ impl<K: Kernel> Ring<K> {
         };
         // Validates every region, the header and the receipts; closes on refusal.
         let cq = OwnedMapping::new(map, params).map_err(|_| -EIO)?;
-        shared.set_ring(base.as_ptr() as usize, params.ring_size as usize);
+        shared.set_ring(
+            base.as_ptr() as usize,
+            params.ring_size as usize,
+            base.as_ptr() as usize + params.hdr_off as usize,
+        );
         if params.sq_entries != entries {
             shared.close_fd();
             return Err(-EIO);
@@ -299,8 +303,9 @@ impl<K: Kernel> Ring<K> {
         }
     }
     /// Stop admission and abort every scope; turns then drive the ring until
-    /// retired() reports that the kernel retired every scope and no fixed or
-    /// pooled buffer is still lent out. A scope's retirement is not a poll
+    /// retired() reports that the kernel retired every scope, every terminal
+    /// has been routed, and no fixed or pooled buffer is still lent out. A
+    /// future still held keeps its terminal. A scope's retirement is not a poll
     /// event, so a caller waiting for retired() passes turn a deadline.
     pub fn retire(&self) {
         self.inner.begin_retire();

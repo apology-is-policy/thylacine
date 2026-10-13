@@ -133,6 +133,19 @@ CASES = [
     'Some(e) if e.r == scope => { e.aborted = true; true }')]),
  ('reap-busy-dropped', 'a_target_dropped_under_its_connect_is_reaped_after_it',
   [('native/kernel.rs', '} else if rc != -(EBUSY as i64) {', '} else {')]),
+ ('book-wiped', 'a_future_held_across_retirement_keeps_its_terminal',
+  [('request_book.rs', '''            if entry.as_ref().is_some_and(|e| e.abandoned) {
+                *entry = None;
+            }''', '''            *entry = None;''')]),
+ ('retired-before-posted', 'retirement_waits_for_terminals_posted_after_the_scope_retires',
+  [('native/kernel.rs', '''s.state == SERVICE_RETIRED && s.active_ops == 0 && s.pending_terminals == 0''',
+    '''s.state == SERVICE_RETIRED''')]),
+ ('sq-undrained', 'an_sqe_not_yet_entered_holds_retirement_back',
+  [('native/kernel.rs', '''        word(SQ_HEAD).load(Ordering::Acquire) == word(SQ_TAIL).load(Ordering::Relaxed)
+            && word(CQ_TAIL)''', '''        word(CQ_TAIL)''')]),
+ ('cq-unrouted', 'a_terminal_posted_but_not_yet_routed_holds_retirement_back',
+  [('native/kernel.rs', '''
+            && word(CQ_TAIL).load(Ordering::Acquire) == word(CQ_HEAD).load(Ordering::Relaxed)''', '')]),
 ]
 
 

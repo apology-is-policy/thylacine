@@ -618,3 +618,122 @@ fn an_exhausted_slot_table_reaps_before_it_refuses() {
     let fid = run(&r, scope.walk(b"f", None).unwrap());
     assert!(fid.is_ok(), "the walk took the reaped slot");
 }
+
+fn scope_retired_in_kernel(sim: &Sim) -> bool {
+    sim.s()
+        .slots
+        .iter()
+        .flatten()
+        .any(|s| s.kind == SlotKind::Scope && s.state == RETIRED)
+}
+fn turn_until_retired(r: &Ring<SimKernel>) {
+    let deadline = r.now() + 10 * MS;
+    while !r.retired() && r.now() < deadline {
+        r.turn(Some(deadline)).unwrap();
+    }
+    assert!(r.retired());
+}
+
+#[test]
+fn a_future_held_across_retirement_keeps_its_terminal() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    sim.s().hold = true;
+    let walk = scope.walk(b"f", None).unwrap();
+    r.retire();
+    turn_until_retired(&r);
+    assert_eq!(
+        run(&r, walk).err(),
+        Some(ECANCELED as i32),
+        "the WALK keeps the terminal its abort gave it"
+    );
+    assert!(sim.s().closed_fds.is_empty(), "no future closes the ring");
+    drop(scope);
+}
+
+#[test]
+fn retirement_waits_for_terminals_posted_after_the_scope_retires() {
+    let sim = Sim::new();
+    file(&sim, "f", b"data");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    sim.s().hold = true;
+    sim.s().hold_terminals = true;
+    drop(fid.read(range(0, 0, 4), 0, None).unwrap());
+    r.retire();
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert!(scope_retired_in_kernel(&sim), "the scope retired first");
+    assert!(!r.retired(), "retired() waits for the READ's terminal");
+    sim.release_terminals();
+    turn_until_retired(&r);
+    assert!(sim.s().closed_fds.is_empty(), "the late terminal did not fail the ring");
+    drop((fid, scope));
+}
+
+#[test]
+fn an_sqe_not_yet_entered_holds_retirement_back() {
+    let sim = Sim::new();
+    file(&sim, "f", b"data");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    sim.s().enter_limit = Some(0);
+    drop(fid.read(range(0, 0, 4), 0, None).unwrap());
+    r.retire();
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(
+        sim.hdr_word(1).wrapping_sub(sim.hdr_word(0)),
+        1,
+        "the READ is still queued"
+    );
+    assert!(scope_retired_in_kernel(&sim), "the scope retired first");
+    assert!(!r.retired(), "retired() waits for the queued READ's terminal");
+    sim.s().enter_limit = None;
+    turn_until_retired(&r);
+    assert!(sim.s().closed_fds.is_empty(), "the late terminal did not fail the ring");
+    drop((fid, scope));
+}
+
+#[test]
+fn a_terminal_posted_but_not_yet_routed_holds_retirement_back() {
+    // Two SQ slots and four CQ slots: eight shots and the end overflow the CQ,
+    // and the ENTER after each drain posts what was deferred.
+    let sim = Sim::new();
+    file(&sim, "burst", b"");
+    sim.s()
+        .shots
+        .insert(b"burst".to_vec(), (0..8).map(|i| vec![b'a' + i; 4]).collect());
+    let r = ring(&sim, 2, &[4096]);
+    let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
+    let pool = r.pool(&members).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"burst", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let stream = fid.stream(&pool, 0, 64, true, None).unwrap();
+    // The server answers every shot; the first four are routed to the stream.
+    r.turn(Some(r.now() + MS)).unwrap();
+    drop(stream);
+    r.retire();
+    sim.engine_visit();
+    assert!(scope_retired_in_kernel(&sim), "the scope retired first");
+    // Route four shots; the ENTER that follows posts the end.
+    assert_eq!(r.turn(Some(r.now() + MS)).unwrap(), 4);
+    assert!(!r.retired(), "retired() waits for the end still in the CQ");
+    turn_until_retired(&r);
+    assert!(sim.s().closed_fds.is_empty(), "the end did not fail the ring");
+    assert_eq!(sim.s().returns, 8, "every shot's lease went back");
+    drop((fid, scope, pool));
+}

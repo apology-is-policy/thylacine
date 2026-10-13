@@ -4,6 +4,7 @@ extern crate alloc;
 use crate::{
     owned_mapping::{Mapping, Setup},
     ring_payload::RingBackend,
+    ring_records::{CQ_HEAD, CQ_TAIL, SQ_HEAD, SQ_TAIL},
     service_abi::{
         BufferReceipt, BufferReturn, Control, PoolCreate, PoolMember, REGISTER_ABORT_SCOPE,
         REGISTER_QUERY_SERVICE_SLOT, REGISTER_REAP_SERVICE_SLOT, REGISTER_RETURN_SERVICE_BUFFER,
@@ -15,6 +16,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::{
     cell::{Cell, RefCell},
     ptr::NonNull,
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 pub const POLLIN: i16 = 0x001;
@@ -103,6 +105,7 @@ pub(crate) struct Shared<K: Kernel> {
     pub kernel: K,
     fd: Cell<i32>,
     ring: Cell<Option<(usize, usize)>>,
+    hdr: Cell<usize>,
     regions: Box<[(usize, usize)]>,
     /// The regions the client cores may name; the last one is the name arena.
     pub buffers: usize,
@@ -130,6 +133,7 @@ impl<K: Kernel> Shared<K> {
             kernel,
             fd: Cell::new(-1),
             ring: Cell::new(None),
+            hdr: Cell::new(0),
             regions: regions.into_boxed_slice(),
             buffers,
             slots: RefCell::new([None; 64]),
@@ -140,8 +144,20 @@ impl<K: Kernel> Shared<K> {
         self.fd.set(fd);
     }
     /// Called only once the mapping's geometry has been validated.
-    pub(crate) fn set_ring(&self, base: usize, len: usize) {
+    pub(crate) fn set_ring(&self, base: usize, len: usize, hdr: usize) {
         self.ring.set(Some((base, len)));
+        self.hdr.set(hdr);
+    }
+    /// The kernel has consumed every SQE and the reader every CQE. Only the
+    /// creator thread enters, so no SQE is consumed concurrently.
+    fn drained(&self) -> bool {
+        let hdr = self.hdr.get();
+        if hdr == 0 {
+            return false;
+        }
+        let word = |offset: usize| unsafe { &*((hdr + offset) as *const AtomicU32) };
+        word(SQ_HEAD).load(Ordering::Acquire) == word(SQ_TAIL).load(Ordering::Relaxed)
+            && word(CQ_TAIL).load(Ordering::Acquire) == word(CQ_HEAD).load(Ordering::Relaxed)
     }
     pub(crate) fn fd(&self) -> i32 {
         self.fd.get()
@@ -202,7 +218,7 @@ impl<K: Kernel> Shared<K> {
         }
         Ok(r.result)
     }
-    pub(crate) fn state(&self, object: SlotRef) -> Result<u32, i32> {
+    pub(crate) fn snapshot(&self, object: SlotRef) -> Result<Snapshot, i32> {
         let mut s = Snapshot {
             size: 64,
             version: 1,
@@ -217,7 +233,7 @@ impl<K: Kernel> Shared<K> {
             status_flags: 0,
         };
         let rc = self.register(REGISTER_QUERY_SERVICE_SLOT, &mut s);
-        if rc < 0 { Err(rc as i32) } else { Ok(s.state) }
+        if rc < 0 { Err(rc as i32) } else { Ok(s) }
     }
     pub(crate) fn track(&self, entry: SlotEntry) {
         let mut slots = self.slots.borrow_mut();
@@ -292,8 +308,9 @@ pub(crate) struct Backend<K: Kernel>(pub alloc::rc::Rc<Shared<K>>);
 // SAFETY: the regions are eager and stay attached until Shared drops, after the
 // last core reference. Pool records go to the kernel unchanged, and a refused
 // creation leaves the output zero. retired() reports true only once admission is
-// closed and the kernel reports every scope RETIRED, and no other writer exists:
-// every fixed or pooled operation belongs to a scope.
+// closed, the kernel reports every scope RETIRED with every terminal posted, and
+// the CQ is drained, so no other writer exists and no completion is still to
+// come: every fixed or pooled operation belongs to a scope.
 unsafe impl<K: Kernel> RingBackend for Backend<K> {
     fn register_pool(&self, ranges: &[PoolMember], out: &mut SlotRef) -> i64 {
         let empty = PoolMember {
@@ -358,18 +375,26 @@ unsafe impl<K: Kernel> RingBackend for Backend<K> {
         if self.0.admission.get() || self.0.fd() < 0 {
             return false;
         }
-        (0..64).all(|i| {
+        // RETIRED is the engine's quiescence, not proof that the scope's
+        // terminals were posted: the engine retires a scope in the visit that
+        // cancels its last operation and posts that terminal on a later one. A
+        // query sees a terminal as pending until the visit that publishes the CQ
+        // tail, so the drain check must follow every query.
+        let posted = (0..64).all(|i| {
             let scope = self.0.slots.borrow()[i]
                 .filter(|e| e.kind == SlotKind::Scope)
                 .map(|e| e.r);
             match scope {
                 None => true,
-                Some(r) => match self.0.state(r) {
-                    Ok(state) => state == SERVICE_RETIRED,
+                Some(r) => match self.0.snapshot(r) {
+                    Ok(s) => {
+                        s.state == SERVICE_RETIRED && s.active_ops == 0 && s.pending_terminals == 0
+                    }
                     Err(e) => e == -ENOENT,
                 },
             }
-        })
+        });
+        posted && self.0.drained()
     }
     fn close(&self) {
         self.0.close_fd();

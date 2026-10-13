@@ -39,7 +39,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native Rust client cores (October 12)\""
 created: 2026-10-12
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -101,7 +101,8 @@ outside test builds.
   the member count; the envelope refuses a pool that would pass 64 members. An
   uncertain registration quarantines the pool and closes the owner.
 - **request_book** -- cookie correlation of CQEs to requests, cookies from a
-  process-wide counter. `Kind::Slot` (NA-4b) is CONNECT's and WALK's: their
+  process-wide counter. At whole-owner retirement `clear_retired` discards only
+  abandoned entries (since NA-4b); a live owner takes or drops its own. `Kind::Slot` (NA-4b) is CONNECT's and WALK's: their
   success result is the reserved destination slot, which the book requires
   exactly; `Kind::Control` keeps accepting no positive result.
 - **fixed_requests**, **fixed_futures** -- typed fixed I/O over a `RingClient`
@@ -208,7 +209,8 @@ entries: one per CQ slot, at most 8192. A pool costs a few small allocations at
    program calls them yet. Only the host runs them.
 2. The equivalence with Astra's originals was NA-3's evidence, not a standing
    gate. NA-4b's edits (`Kind::Slot`, the request driver's `route` and
-   `BookRequest`, `RingOwner::abort_scope`, `Pool::identity`, the public `Setup`)
+   `BookRequest`, `RingOwner::abort_scope`, `Pool::identity`, the public `Setup`,
+   `clear_retired` keeping a live owner's entry)
    end it, deliberately: `na3_install.py --check` and `na3-mutants.py` are NA-3's
    historical evidence and no longer apply to the tree. The NA-4b audit close
    ran rustfmt (edition 2024) over the whole crate: it reflowed one line of

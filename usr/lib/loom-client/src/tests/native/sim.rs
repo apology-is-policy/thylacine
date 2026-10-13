@@ -112,13 +112,20 @@ pub struct State {
     buffers: Vec<(usize, usize)>,
     pools: HashMap<usize, Vec<Member>>,
     ops: VecDeque<Op>,
-    deferred: VecDeque<(u64, i32, u32, BufferReceipt)>,
+    /// Completions waiting for CQ room, each with the scope of its operation
+    /// (none for an SQE ENTER refused).
+    deferred: VecDeque<(Option<usize>, u64, i32, u32, BufferReceipt)>,
     pub files: HashMap<Vec<u8>, Vec<u8>>,
     pub shots: HashMap<Vec<u8>, VecDeque<Vec<u8>>>,
     pub services: Vec<Vec<u8>>,
     pub registry_fd: i32,
     /// The server answers nothing while held.
     pub hold: bool,
+    /// An abort's terminals wait for release_terminals: the kernel retires a
+    /// scope in the visit that cancels its operations and posts their
+    /// terminals on a later one.
+    pub hold_terminals: bool,
+    held: Vec<(usize, u64, i32)>,
     /// ENTER consumes at most this many SQEs per call.
     pub enter_limit: Option<u32>,
     pub polls: Vec<i32>,
@@ -158,6 +165,8 @@ impl Sim {
             services: vec![b"clip".to_vec()],
             registry_fd: 5,
             hold: false,
+            hold_terminals: false,
+            held: Vec::new(),
             enter_limit: None,
             polls: Vec::new(),
             enters: 0,
@@ -186,6 +195,19 @@ impl Sim {
     }
     pub fn pending_ops(&self) -> usize {
         self.0.borrow().ops.len()
+    }
+    /// One visit of the kernel's engine, which runs beside the adapter: it
+    /// retires every aborted scope with nothing in flight.
+    pub fn engine_visit(&self) {
+        self.0.borrow_mut().settle();
+    }
+    /// Post the terminals hold_terminals kept back, and stop holding.
+    pub fn release_terminals(&self) {
+        let mut s = self.0.borrow_mut();
+        s.hold_terminals = false;
+        for (scope, user_data, result) in std::mem::take(&mut s.held) {
+            s.post(Some(scope), user_data, result, 0, zero());
+        }
     }
     /// Another thread closes the ring's descriptor: the number is gone, so
     /// ENTER answers -EBADF and poll POLLNVAL.
@@ -292,14 +314,22 @@ impl State {
         let r = self.ring();
         r.cq_tail.wrapping_sub(self.word(4).load(Ordering::Acquire)) < r.p.cq_entries
     }
-    fn post(&mut self, user_data: u64, result: i32, flags: u32, receipt: BufferReceipt) {
-        self.deferred.push_back((user_data, result, flags, receipt));
+    fn post(
+        &mut self,
+        scope: Option<usize>,
+        user_data: u64,
+        result: i32,
+        flags: u32,
+        receipt: BufferReceipt,
+    ) {
+        self.deferred
+            .push_back((scope, user_data, result, flags, receipt));
         self.flush();
     }
     /// Post deferred completions in order while the CQ has room.
     fn flush(&mut self) {
         while self.cq_room() {
-            let Some((user_data, result, flags, receipt)) = self.deferred.pop_front() else {
+            let Some((_, user_data, result, flags, receipt)) = self.deferred.pop_front() else {
                 break;
             };
             let user_data = self.forge_next.take().unwrap_or(user_data);
@@ -341,7 +371,11 @@ impl State {
         let (gone, kept): (Vec<Op>, Vec<Op>) = self.ops.drain(..).partition(|o| o.scope == scope);
         self.ops = kept.into();
         for op in gone {
-            self.post(op.user_data, result as i32, 0, zero());
+            if self.hold_terminals {
+                self.held.push((scope, op.user_data, result as i32));
+            } else {
+                self.post(Some(scope), op.user_data, result as i32, 0, zero());
+            }
         }
         if let Some(s) = self.slots[scope].as_mut() {
             if s.state != RETIRED && s.state != RESERVED {
@@ -424,7 +458,7 @@ impl State {
                 } else {
                     ECANCELED
                 };
-                self.post(op.user_data, r as i32, 0, zero());
+                self.post(Some(scope), op.user_data, r as i32, 0, zero());
             }
             if let Some(s) = self.slots[scope].as_mut() {
                 s.state = ABORTING;
@@ -527,7 +561,7 @@ impl State {
                         }
                     };
                     let Some(shot) = next else {
-                        self.post(op.user_data, 0, 0, zero());
+                        self.post(Some(op.scope), op.user_data, 0, 0, zero());
                         return None;
                     };
                     assert!(shot.len() as u32 <= limit, "a scripted shot fits its limit");
@@ -563,6 +597,7 @@ impl State {
                     };
                     let more = if multi { CQE_MORE } else { 0 };
                     self.post(
+                        Some(op.scope),
                         op.user_data,
                         shot.len() as i32,
                         CQE_SERVICE_BUFFER | more,
@@ -579,7 +614,7 @@ impl State {
                 0
             }
         };
-        self.post(op.user_data, rc as i32, 0, zero());
+        self.post(Some(op.scope), op.user_data, rc as i32, 0, zero());
         None
     }
     /// ENTER's admission of one copied SQE: shape, then the slots it names.
@@ -886,6 +921,19 @@ unsafe impl Kernel for SimKernel {
                     return ENOENT;
                 };
                 q.state = sl.state;
+                if sl.kind == SlotKind::Scope {
+                    // loom_private_service_query: operations not yet terminal,
+                    // and terminals not yet posted.
+                    let i = q.object.slot as usize;
+                    q.active_ops = s.ops.iter().filter(|o| o.scope == i).count() as u32;
+                    let deferred = s
+                        .deferred
+                        .iter()
+                        .filter(|d| d.0 == Some(i) && d.3 & CQE_MORE == 0)
+                        .count();
+                    let held = s.held.iter().filter(|h| h.0 == i).count();
+                    q.pending_terminals = (deferred + held) as u32;
+                }
                 q.kind = match sl.kind {
                     SlotKind::Target => 1,
                     SlotKind::Scope => 2,
@@ -1015,7 +1063,7 @@ unsafe impl Kernel for SimKernel {
             if let Some(copy) = copy {
                 let rc = s.admit(copy);
                 if rc < 0 {
-                    s.post(copy.user_data, rc as i32, 0, zero());
+                    s.post(None, copy.user_data, rc as i32, 0, zero());
                 }
             }
         }

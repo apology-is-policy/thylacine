@@ -230,12 +230,16 @@ impl RequestBook {
         }
         Ok(self.entries[i].take().unwrap().terminal.unwrap())
     }
+    /// Discards abandoned entries; a live owner still takes or drops its own.
+    ///
     /// # Safety
     /// Whole-owner retirement proved, consumer detached, all fixed/payload
     /// borrowers settled by the outer owner; no future completion is deliverable.
     pub(crate) unsafe fn clear_retired(&mut self) {
         for entry in self.entries.iter_mut() {
-            *entry = None;
+            if entry.as_ref().is_some_and(|e| e.abandoned) {
+                *entry = None;
+            }
         }
     }
     pub(crate) fn occupied(&self) -> usize {
