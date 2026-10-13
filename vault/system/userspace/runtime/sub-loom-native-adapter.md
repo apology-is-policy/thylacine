@@ -163,7 +163,8 @@ completion path allocates.
   READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
   adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
-  targeted adapter edit (35 cases), and each red was read for the intended
+  targeted adapter edit (38 cases; the seven added by audit rounds 2 and 3 are
+  written and await their run), and each red was read for the intended
   assertion.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,
