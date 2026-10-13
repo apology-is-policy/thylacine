@@ -365,6 +365,8 @@ static const char *loom_setup_identity_fixture_run(void) {
     if (!p) return "identity proc";
     hidx_t rd = -1, wr = -1;
     int pipe_rc = sys_pipe_for_proc(p, &rd, &wr);
+    // Ballast, so a refund taken twice shows: from zero it would clamp unseen.
+    s64 ballast = sys_burrow_attach_for_proc(p, 4 * PAGE_SIZE);
     u32 base = p->as->page_count;
     u64 destroyed0 = loom_total_destroyed();
     struct loom_params kp = { 0 };
@@ -428,7 +430,7 @@ static const char *loom_setup_identity_fixture_run(void) {
     test_proc_drop(p);
 
 #define BR(cond, msg) do { if (!error && !(cond)) error = msg; } while (0)
-    BR(pipe_rc == 0 && a_rc == 0, "an ordinary ring to roll back");
+    BR(pipe_rc == 0 && ballast > 0 && base >= 4 && a_rc == 0, "an ordinary ring to roll back");
     BR(a_dup == a_fd, "the sibling's file took the ring's number");
     BR(a_kept, "the rollback spares a file that reused the ring's number");
     BR(a_unmapped, "the rollback detaches the ring it still maps");

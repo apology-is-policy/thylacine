@@ -884,6 +884,8 @@ void test_loom_setup_resource_refusals(void) {
     int pipe_rc = sys_pipe_for_proc(p, &rd, &wr);
     for (int i = 0; pipe_rc == 0 && i < PROC_HANDLE_MAX; i++)
         if (handle_dup(p, rd, RIGHT_READ) < 0) break;
+    // Ballast, so a refund taken twice shows: from zero it would clamp unseen.
+    s64 ballast = sys_burrow_attach_for_proc(p, 4 * PAGE_SIZE);
     u32 pages1 = p->as->page_count;
     int full_rc = sys_loom_setup_for_proc(p, 8, 0, &kp, &fd);
     u64 full_freed = loom_total_destroyed() - destroyed0;
@@ -893,6 +895,7 @@ void test_loom_setup_resource_refusals(void) {
     TEST_EXPECT_EQ(cap_rc, -T_E_NOMEM, "the page cap answers -ENOMEM");
     TEST_EXPECT_EQ(cap_freed, (u64)1, "the ring refused at the page cap was reclaimed");
     TEST_EXPECT_EQ(pipe_rc, 0, "pipe pair");
+    TEST_ASSERT(ballast > 0 && pages1 >= 4, "a ballast region under the refund");
     TEST_EXPECT_EQ(full_rc, -T_E_MFILE, "a full handle table answers -EMFILE");
     TEST_EXPECT_EQ(full_freed, (u64)2, "the ring refused for a slot was reclaimed");
     TEST_EXPECT_EQ((u64)pages2, (u64)pages1, "and its pages were refunded");
