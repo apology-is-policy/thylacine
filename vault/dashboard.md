@@ -132,6 +132,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-13 [[chg-2026-10-13-jsc-dfg]] — JavaScriptCore's DFG runs on the sealed code region; a thread resumes the VM's code behind an ISB
 - 2026-10-13 [[chg-2026-10-13-jsc-ftl]] — JavaScriptCore's FTL runs on the sealed code region; every Wasm instance takes an ISB before its exit stubs; worker threads get 1 MiB stacks
 - 2026-10-13 [[chg-2026-10-13-jsc-wasm-tiers]] — JavaScriptCore's Wasm BBQ and OMG on the space sync: patch 0006, the pool at 128 MiB, the ref.cast null check kept, CanFail exit stubs
+- 2026-10-13 [[chg-2026-10-13-sig-s1-exit-wins]] — The exit wins in the final close; ut reads every wait packed (sig S-1)
 - 2026-10-12 [[chg-2026-10-12-abort-signalled-death]] — Pouch's abort() ends in snare:abort, and a death by a note reaps as a signalled wait word
-- 2026-10-12 [[chg-2026-10-12-group-status-first-claim]] — A dying group keeps its status; a page-in its death abandoned is that death
 <!-- generated:end -->
