@@ -290,6 +290,29 @@ structured client API the design rests on):
   submission is automatic; `ENTER` is used only to wake an idled poll-thread or
   to wait for completions (the zero-syscall steady state).
 
+### 8.2a Refusals (operator votes, 2026-10-13)
+
+No Loom syscall answers a bare -1 (ERRORS.md: -1 is `-T_E_PERM`). On the
+ordinary ring every refusal answers the errno the private route, or another
+handler, already gives for the same condition:
+
+| Condition | Answer |
+|---|---|
+| params block or a REGISTER array the kernel cannot read or write | `-T_E_FAULT` |
+| a descriptor (the ring's, or one in a HANDLES array) that names nothing, or names something that is not a Loom (ring) or a Spoor (array) | `-T_E_BADF` |
+| an unknown flag bit (SETUP, ENTER); entries 0, past `LOOM_MAX_ENTRIES` or not a power of two; nargs past the op's cap; an unknown op | `-T_E_INVAL` |
+| a buffer that does not resolve: length 0 or past 4 GiB, a wrapping range, an unmapped VA, memory that is not anonymous or not writable, a range across two VMAs | `-T_E_INVAL` |
+| a HANDLES entry whose 9P client cannot do a deadline receive, on an SQPOLL ring | `-T_E_OPNOTSUPP` |
+| no VA gap for the ring, the per-address-space page cap, a mapping failure, the SQPOLL thread failing to start | `-T_E_NOMEM` |
+| the SQPOLL thread over the Proc's thread cap | `-T_E_AGAIN` |
+| a full handle table | `-T_E_MFILE` |
+| any argument with bits above its declared width (ERRORS.md principle 6) | `-T_E_BADF` for a descriptor, `-T_E_INVAL` otherwise |
+
+The params block is read before either route is chosen, so its `-T_E_FAULT`
+is the same on both. In an image built without the qualification lever, a
+private REGISTER op still answers `-T_E_OPNOTSUPP` before its descriptor is
+looked up.
+
 ### 8.3 Ring entries (design-level)
 
 - `loom_sqe` (fixed size, `_Static_assert`'d at impl): `{ u8 opcode; u8 flags

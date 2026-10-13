@@ -62,6 +62,27 @@ v1.0 forward.
    Stratum's `libstratum-9p` C ABI (where `stm_status_t` stays as-is).
    The two systems coexist at the boundary; neither subsumes the other.
 
+6. **An argument that does not fit its declared width is refused, never
+   truncated** (operator vote, 2026-10-13). Every syscall argument arrives
+   in a 64-bit register. libt's Loom wrappers declare `long` and `unsigned
+   long` and libthyla-rs's declare `u64`, so the caller's whole value
+   reaches the kernel. A handler that reads a 32-bit descriptor, count, op
+   or flags word refuses a value whose high bits are set; it does not cast
+   them away. A cast turns a caller's bug into a different, successful
+   request: an entries count of 2^32+8 would make an 8-entry ring, and a
+   descriptor of 2^32+5 would name the caller's descriptor 5. A descriptor
+   that does not fit answers `-T_E_BADF`, as a descriptor that names
+   nothing does; every other argument answers `-T_E_INVAL`. A handler that
+   checks something before its descriptor lookup keeps that order: the
+   too-wide descriptor is turned into an index that names nothing, and the
+   lookup refuses it. Linux, 9front and Zircon truncate instead; the C
+   declaration there is the narrow type, which libt's is not. Handlers
+   that predate the rule and still cast are a tracked sweep. A wrapper
+   that declares a narrower signed type sign-extends it, so a 32-bit flags
+   word with bit 31 set arrives with its high bits set too. The sweep
+   therefore checks each handler against its wrapper's declared type, and
+   keeps any negative descriptor sentinel a handler accepts.
+
 ## Errno registry
 
 The canonical source is `kernel/include/thylacine/errno.h`. The values
@@ -388,6 +409,7 @@ See CLAUDE.md §"Audit-triggering changes" for the row.
 | Pouch `snare:*` → POSIX signal mapping     | DEFERRED | v1.x      |
 | Structured 64-bit exit_status              | DEFERRED | v1.x      |
 | Retroactive `-T_E_*` rollout to old syscalls | DEFERRED | per-touch |
+| Argument-width rule (principle 6)          | Loom: votes-7/8 chunk; other handlers: one sweep | 2026-10-13 vote |
 
 ### Imperium integration (2026-09-17)
 

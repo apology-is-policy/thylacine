@@ -65,7 +65,9 @@ Control is used by ABORT and REAP. QUERY uses snapshot, with only the header and
 object set on input; everything else zero. Success returns0 and fills the record.
 ABORT returns0 for a newly accepted abort,1 if already terminal/aborting.
 Stale or absent references return-ENOENT; QUERY reads LIVE slots only, so it
-answers -ENOENT for a clunked FID, which REAP still frees. Busy reap returns-EBUSY; unsupported
+answers -ENOENT for a clunked FID, which REAP still frees (operator vote,
+2026-10-13: the CLUNK's terminal CQE is the notice; REAP answers 0, -EBUSY
+while the CLUNK runs, or -ENOENT once the slot is gone). Busy reap returns-EBUSY; unsupported
 private mode returns-EOPNOTSUPP; exhaustion-ENOSPC; allocation failure-ENOMEM.
 This adds no errno number. Protocol failure uses-EIO plus a recorded phase;
 timeout-ETIMEDOUT and cancellation-ECANCELED retain their current numeric values.
@@ -198,7 +200,10 @@ With the lever, the syscalls route to the existing internal private stack:
 
 -EFAULT and the other codes are existing registry values; no errno is added.
 The flags that choose the route live inside params, so a params block the kernel
-cannot validate or read returns the legacy -1 before any route is chosen.
+cannot validate or read returns -EFAULT before any route is chosen (LOOM.md
+8.2a). An argument with bits above its declared width is refused, never
+truncated: a descriptor answers -EBADF, anything else -EINVAL (ERRORS.md
+principle 6).
 
 **The EL0 probe (NA-2).** `loom-bridge-probe`, a native C program, ships in every
 image's ramfs and reaches these syscalls from EL0 through the real argument and
