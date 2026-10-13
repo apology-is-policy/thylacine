@@ -1,7 +1,7 @@
 ---
 id: sub-webkit
 type: sub
-title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline, DFG, FTL and regexp JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
+title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline, DFG, FTL, regexp and Wasm BBQ and OMG JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
 parent: moc-userspace
 code:
   - usr/ports/webkit/README.md
@@ -10,6 +10,7 @@ code:
   - usr/ports/webkit/patches/0003-thylacine-jsc-gc-park.patch
   - usr/ports/webkit/patches/0004-thylacine-jsc-dfg-b2d.patch
   - usr/ports/webkit/patches/0005-thylacine-jsc-ftl-b2e1.patch
+  - usr/ports/webkit/patches/0006-thylacine-jsc-wasm-b2e3.patch
   - cmake/Toolchain-aarch64-pouch-cxx.cmake
   - cmake/Platform/Thylacine.cmake
   - usr/ports/webkit/sunspider-run.js
@@ -37,8 +38,8 @@ before any kernel work was designed — the findings list in
 `docs/browser-status.md` is its product as much as the binary is. Since B-2c
 the Baseline JIT and the regexp (YARR) JIT run, on one `SYS_JIT_CREATE` code
 region whose writer is reachable only through a sealed write thunk, and since
-B-2d the DFG, and since B-2e1 the FTL; Wasm's BBQ and OMG are built and held
-off at run time until their own chunk opens them
+B-2d the DFG, since B-2e1 the FTL, and since B-2e3 Wasm's BBQ and OMG: every
+tier upstream builds, each held off at run time until its own chunk opened it
 ([[dec-2026-10-08-jsc-tiers-run-time]]).
 
 The source is NOT vendored. WebKit is about 13 GB; it lives in a sparse,
@@ -55,11 +56,22 @@ series; `tools/forage.sh webkit` gathers the source and the ICU tarball, and
   segment both writable and executable ([[inv-i12]]: the image never is; JIT
   code exists only in the code region below).
 - Tiers: the offlineasm LLInt (`ENABLE_C_LOOP=OFF`) and IPInt for
-  WebAssembly always; the Baseline JIT, the DFG, the FTL and the YARR JIT when
-  the process holds `CAP_JIT`. Wasm's BBQ and OMG are compiled in (upstream no
-  longer builds JIT-on with them off on ARM64) and forced off in
-  `Options::notifyOptionsChanged` under `OS(THYLACINE)`, after which the
-  options are frozen: no flag can turn them on.
+  WebAssembly always; the Baseline JIT, the DFG, the FTL, the YARR JIT and
+  Wasm's BBQ and OMG when the process holds `CAP_JIT`. Each was forced off in
+  `Options::notifyOptionsChanged` under `OS(THYLACINE)` until its chunk opened
+  it; patch 0006 removed the last of that gate (BBQ and OMG).
+- Every BBQ and OMG install runs `Wasm::resetInstructionCacheOnAllThreads`
+  after it writes the code and before it publishes it, and that function is
+  `SYS_ICACHE_SYNC_SPACE` ([[dec-2026-10-13-wasm-space-sync]]): every other
+  CPU running a thread of the process takes an interrupt, and a thread not
+  running takes an `eret` before it runs. A failed sync is a
+  `RELEASE_ASSERT`. The build refuses a `jsc` whose function does not put 128
+  in `x8` before an `svc #0`.
+- With no fault handler, no tier drops a null check on the strength of a
+  fault: `maxAcceptableOffsetForNullReference` answers -1.
+- A Wasm module's exit stubs are allocations that may fail: a full pool makes
+  the compile a `CompileError` (an instance's wasm-to-wasm stubs: a
+  `LinkError`), not a crash.
 - A thread that resumes running the VM's code executes an ISB first
   (`MachineThreads::unparkCurrentThread`), so code another CPU patched -- the
   collector with the world stopped, a previous JSLock holder -- is never run
@@ -71,7 +83,7 @@ series; `tools/forage.sh webkit` gathers the source and the ICU tarball, and
   `finalizeCreation`'s comes after its first call into the module record.
 - Every thread WTF creates (compilers, collector helpers, the Wasm worklist)
   gets a 1 MiB stack, not musl's 128 KiB default.
-- The JIT pool is one 64 MiB code region: its exec alias (RX) is the
+- The JIT pool is one 128 MiB code region (64 MiB until B-2e3): its exec alias (RX) is the
   reservation, the writer alias's address lives only as immediates inside an
   execute-only thunk sealed by `SYS_JIT_CREATE_SEALED`, and every write into
   the pool goes through that thunk, which traps (`brk #0xc471`, the Proc dies
@@ -134,8 +146,9 @@ JavaScriptCore except two.** The whole delta is one patch, ten files,
   because WTF ignores those results itself (F4, F5).
 
 **The JIT (B-2c, patch 0002, five files).** `PlatformEnable.h` selects the
-separated-WX heap for `OS(THYLACINE)` with no jump islands and a 64 MiB pool,
-so one near branch reaches the whole pool (a `static_assert` proves it).
+separated-WX heap for `OS(THYLACINE)` with no jump islands and a 64 MiB pool
+(128 MiB since B-2e3, still one near branch's reach), so one near branch
+reaches the whole pool (a `static_assert` proves it).
 `ExecutableAllocator.cpp` `createThylacineJITPool` calls `SYS_JIT_CREATE`,
 has `thyla_jit_thunk_create` emit and seal the write thunk, scrubs the
 returned `thyla_jit_region` with volatile stores, installs the thunk as
@@ -229,6 +242,53 @@ threads ran on 128 KiB (jsc's `PT_GNU_STACK` is empty, which leaves musl's
 `__default_stacksize` alone), the same size as JSC's own soft reserved zone.
 Patch 0005 adds `OS(THYLACINE)` to the arm.
 
+**Wasm's BBQ and OMG (B-2e3, patch 0006, six files).** `Options.cpp` no
+longer forces them off. Their code is written by a Wasm worklist thread (or
+by the JS thread, for a plan it waits on) and reached by threads that pass no
+fence of their own: a call into a BBQ or OMG function is a near `bl` that
+`CalleeGroup::installOptimizedCallee` retargets in each caller
+(`updateCallsitesToCallUs`), and an OMG loop entry is a callee
+`OSREntryPlan` publishes for a running BBQ loop to jump into; the rest is
+data. Upstream suspends every thread that ever entered a VM so that each
+takes a context-synchronization event at its signal handler's return. Both
+installers call `resetInstructionCacheOnAllThreads` after the new code is
+written (its own outgoing calls linked) and before anything lets another
+thread reach it -- the indirect-call entrypoint store and the callers'
+retargeted calls, or the OSR-entry callee's publication -- under the
+CalleeGroup's lock; patch 0006 makes it `SYS_ICACHE_SYNC_SPACE` (B-2e2,
+[[sub-kernel-sched]]), whose wait depends on no userspace lock, only on other
+CPUs taking an interrupt. The thread set upstream walked is no longer tracked.
+`build_jsc` disassembles the function and requires that the last write to
+`x8` before an `svc #0` put 128 there; the B-2e1 `jsc` (the thread walk, 90
+instructions) fails it.
+
+The pool rises to 128 MiB ([[dec-2026-10-13-jit-region-128]]), the kernel's
+`JIT_REGION_MAX` since B-2e2 and exactly `nearJumpRange`, so the pool-size
+`static_assert` still proves every branch in range without jump islands.
+
+`maxAcceptableOffsetForNullReference` answered 0 with the fault handler off,
+and BBQ's `emitRefTestOrCast` and B3's ref.cast lowering compare
+`offset <= answer` without asking whether the handler is on (the other two
+callers do ask). A `ref.cast` of a nullable reference to a non-null struct or
+array type therefore dropped its null check and loaded the structure ID, at
+offset 0, from null; the macOS `jsc` with `--useWasmFaultSignalHandler=false`
+dies of SIGSEGV there under BBQ and under OMG and throws under IPInt. The
+answer is now -1 wherever no offset is safe (no handler, no unmapped room
+above null, off ADDRESS64), so every caller keeps its check and none changes.
+
+`wasmToWasm` (`WasmBinding.cpp`) and `wasmToJS` (`WasmToJS.cpp`) asked the
+pool `JITCompilationMustSucceed` and then tested `didFailToAllocate`, which
+cannot fire: a full pool crashed the process where `EntryPlan` meant a
+`CompileError` ("Out of executable memory at stub generation"). They ask
+`JITCompilationCanFail`, so a stub fails at the pool's 25% reserve: a
+wasm-to-JS stub (the module's validation plan) fails the compile with a
+`CompileError`, a wasm-to-wasm stub (an instance's group) the instantiation
+with a `LinkError`. The builtin trampoline keeps MustSucceed; it is reached
+only under `JIT_CAGE`, which this port does not build. The `Wasm::Thunks`
+(each generated by the first BBQ or OMG compile that needs it) and the
+JSToWasm shared thunk also stay MustSucceed, as upstream's reserve intends: a
+pool already full past the reserve at the first tier-up crashes there.
+
 **The write thunk** is 33 hand-encoded A64 words from
 `usr/lib/thylajit/thyla_jit_thunk.h`, never assembled at run time, so no
 LinkBuffer ever holds a readable copy of the writer address. `write(offset,
@@ -318,9 +378,38 @@ its exit stubs 1001 times. `stack`: a runaway recursion on a `$.agent` thread
 (a WTF thread like the compilers) must reach more than 131072/48 calls; an
 LLInt frame is at least 48 bytes, so no 128 KiB stack holds that many
 (`--useJIT=false` keeps one call per frame). `loop-dfg` and `sunspider-dfg`
-record the FTL-off times; `tiers` reads Baseline, DFG and FTL on and BBQ and
-OMG off although asked for; `gc-jettison` pins `--useFTLJIT=false`, because
+record the FTL-off times; `gc-jettison` pins `--useFTLJIT=false`, because
 its probe reads a DFG tier.
+
+B-2e3 adds the Wasm tier legs, on hand-encoded modules (the host has no
+`wat2wasm`; each module was validated, and each leg's exact command run, on
+the macOS `jsc` first). A function reads its own tier as
+`10*callerIsBBQOrOMGCompiled() + $vm.omgTrue()`, both imports looking at the
+calling Wasm frame: 0 interpreted, 10 BBQ, 11 OMG. `wasm-tier` calls one until
+it reads 11; `-bbq` (`--useOMGJIT=false`) stops at 10, `-ipint`
+(`--useBBQJIT=false`) and `-deny` stay at 0. `wasm-patch`: `a(x)` calls `c()`
+(when x is 1) through the near call BBQ links at a's install; `a(0)` runs until
+a runs BBQ code, so c is still interpreted, then c alone is called until it
+runs OMG code, and `a(1)` reads 11 only if c's installs retargeted a's call
+(left alone it lands in c's interpreted code and reads 10).
+`wasm-osr` and its `-bbq` and `-ipint` twins: one call of a 1e8-iteration
+loop that then reads its own tier, so a call that starts interpreted and ends
+in OMG (or BBQ) code entered it by loop OSR; each prints its time, the
+benchmark. `refcast-bbq`, `-omg`, `-ipint`: a null `ref.cast` to a struct type
+after the function reached each tier must throw a `RuntimeError`.
+`wasm-canfail`: with `--useExecutableAllocationFuzz=true
+--fireExecutableAllocationFuzzAtOrAfter=1` every CanFail allocation fails, and
+a module with imports must be a `CompileError` naming the stubs, compiled
+synchronously and by `WebAssembly.compile`; its twin without the fuzzer
+compiles both ways. The macOS `jsc` (MustSucceed stubs) compiles under the
+fuzzer, the behaviour the leg refuses. `wasm-canfail-group` covers the other
+kind: one run counts the CanFail allocations a module costs (the verbose
+fuzzer prints the count at exit), a second lets exactly those succeed, and
+the instance's group must fail its first wasm-to-wasm stub with a
+`LinkError`. Every Wasm leg, `wasm-sync` and `wasm-async` included, now needs
+exit status 0 as well as its reading: with upstream's thread walk restored,
+those two printed their readings and then died of `snare:abort` at a
+background BBQ install, and passed. `tiers` reads every tier on.
 
 ## Data structures
 
@@ -364,12 +453,14 @@ previous holder on another CPU. Both are covered by the ISB in
 `MachineThreads::unparkCurrentThread`, which every resume passes (see
 Mechanism). The FTL's compiler threads are the DFG's rule again (the
 finalizer's fence). Wasm's exit stubs, written off the JS thread, are fenced
-where an instance is created (B-2e1). BBQ and OMG are the open part:
-upstream publishes their code by suspending every VM thread
-(`resetInstructionCacheOnAllThreads`), fatal here; by operator vote
-([[dec-2026-10-13-wasm-space-sync]]) `SYS_ICACHE_SYNC` gains a mode that
-interrupts every CPU running a thread of the caller's address space (B-2e2),
-and BBQ and OMG run on it (B-2e3).
+where an instance is created (B-2e1). BBQ and OMG code reaches threads that
+pass no fence: upstream suspends every VM thread to publish it
+(`resetInstructionCacheOnAllThreads`), and here that function is
+`SYS_ICACHE_SYNC_SPACE` (B-2e3; [[dec-2026-10-13-wasm-space-sync]]), which
+interrupts every other CPU running a thread of the process and returns once
+each has taken the interrupt; a thread not running takes an `eret` before it
+runs (B-2e2, [[sub-kernel-sched]]). It is called under the CalleeGroup's lock
+(and the tier-up counter's); the kernel's wait takes no userspace lock.
 
 JSC's GC and compiler threads exist as pthreads. B-0 recorded that the
 collector's stop-the-world uses `Thread::suspend` "and no B-0 workload reached
@@ -382,9 +473,9 @@ resumes (`acquireAccessSlow` parks on `stoppedBit`). The thread group's lock
 guards the records as well; records are per heap, so a thread using two VMs
 cannot race one VM's scan with its record for the other. `Atomics.wait` blocks
 holding access in this WebKit, so it is not a release and needs no image. The
-remaining `Thread::suspend` users (a sampling profiler, signal-based VM traps,
-Wasm's instruction-cache reset) stay off; a kernel thread suspend for them is a
-separate question.
+remaining `Thread::suspend` users (a sampling profiler, signal-based VM traps)
+stay off, and Wasm's instruction-cache reset no longer suspends (B-2e3); a
+kernel thread suspend for the others is a separate question.
 
 ## Invariants enforced
 
@@ -394,7 +485,8 @@ separate question.
   the fail-loud `SYS_ICACHE_SYNC` publish, and the thread that next runs
   patched code synchronizes its own CPU first (the `eret` after its own
   publish, `crossModifyingCodeFence` before installing a compiler thread's
-  code, the ISB in `unparkCurrentThread` after any other CPU's); without
+  code, the ISB in `unparkCurrentThread` after any other CPU's, and for
+  BBQ and OMG code the space sync before it is published); without
   `CAP_JIT` the pool is empty and nothing is generated.
 - The thunk's bounds: no write through it lands outside the region
   (witnessed by `thunk-oob`).
@@ -410,7 +502,11 @@ empty (the region is destroyed if the thunk was refused), `canUseJIT` is
 false, and JSC runs the LLInt and IPInt; EACCES is the deny path and prints
 nothing, any other errno is logged. A write outside the pool executes the
 thunk's `brk` and the Proc dies of `snare:brk`; a failed publish is a
-`RELEASE_ASSERT`.
+`RELEASE_ASSERT`, and so is a failed space sync (the call returns 0). A Wasm
+exit stub the pool refuses fails the module's compile with a `CompileError`,
+or an instance's with a `LinkError` ("Out of executable memory at stub
+generation" either way); a BBQ or OMG compile the
+pool refuses leaves the function on its current tier.
 
 A thread in the heap's group that is neither scanning, conducting nor parked
 when the scan runs is fatal (`FATAL: the conservative scan found thread N
@@ -471,7 +567,10 @@ gain needs a longer benchmark.
   rules, the multi-instruction property-cache rewrites on the JS thread only
   and never inside a range it is executing, the two plan consumers' fences
   covering every path to the stubs, the tier gate with BBQ and OMG still off,
-  and the worker stack size.
+  and the worker stack size. B-2e3 (patch 0006) has its own row: every path
+  that publishes BBQ or OMG code or retargets a call to it reaches the space
+  sync after the write and before the publishing store; no tier drops a null
+  check on a fault; a refused stub reaches a `CompileError` on every route.
 - Writer-address residue beyond the scrubbed struct and array (compiler
   temporaries, the kernel's out-struct copy) and a `CAP_JIT` that is never
   dropped are recorded (Fable r1 F4); the answer is a kernel-emitted thunk
@@ -485,9 +584,10 @@ a conversation first. B-2c carries three owned obligations (OPEN-BUGS
 2026-10-08): the content process must run without `/proc` in its namespace
 (`/proc/self/maps` shows the writer row to the target itself); the
 kernel-emitted thunk and the `CAP_JIT` drop; and the Wasm cross-PE publish,
-whose plan half closed at B-2e1 and whose BBQ and OMG half is B-2e2 and B-2e3.
-B-2e3 also fixes a `ref.cast` that drops its null check when no fault handler
-exists (OPEN-BUGS 2026-10-13), before BBQ runs.
+whose plan half closed at B-2e1 and whose BBQ and OMG half closed at B-2e3 on
+B-2e2's kernel sync. B-2e3 also fixed the `ref.cast` that dropped its null
+check with no fault handler and the exit stubs that crashed on a full pool
+(both OPEN-BUGS 2026-10-13).
 
 ## Caveats
 
@@ -503,10 +603,10 @@ exists (OPEN-BUGS 2026-10-13), before BBQ runs.
 - A long BBQ or OMG loop polls no trap, upstream too (the signal path of
   `VMTraps` handles JS only), so once they run the only way to stop one is to
   kill the process.
-- The pool stays 64 MiB until B-2e3 raises it to 128
-  ([[dec-2026-10-13-jit-region-128]]): above 48 MiB JSC refuses the optimizing
-  compiles that may fail, and a stub that must succeed crashes the process if
-  the last 16 MiB fill.
+- The pool is 128 MiB ([[dec-2026-10-13-jit-region-128]]): above 96 MiB
+  JSC refuses every compile that may fail (the optimizing tiers and, since
+  B-2e3, the Wasm exit stubs), and an allocation that must succeed (a JS
+  thunk, a lazy stub) crashes the process if the last 32 MiB fill.
 - B-0 found three Pouch libc defects by running (0033, 0034, 0035); they
   are described where they live, in [[sub-pouch-thread]] and
   [[sub-pouch-seam]].

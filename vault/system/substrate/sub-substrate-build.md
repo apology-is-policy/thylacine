@@ -387,8 +387,14 @@ label and, optionally, the mangled prefix of a call the `isb` must precede:
 come before its first call into `WebAssemblyModuleRecord::initializeExports`.
 That test uses address order for program order and fails closed when the call
 is laid out first or absent (both controls refuse on the device `jsc`). A
-refusal names the label and the patch that owes it. Then it strips
-into `build/webkit/stage`.
+refusal names the label and the patch that owes it. Since B-2e3 it also asks
+`Wasm::resetInstructionCacheOnAllThreads` for `SYS_ICACHE_SYNC_SPACE`: at
+least three instructions, and the last write to `x8` before an `svc #0` must
+be a `mov` of 128 (any other write to `x8`, a store from it included, clears
+the match, so the check fails closed). The B-2e1 `jsc`, whose function is
+upstream's 90-instruction thread walk, is refused, as are a wrong number, a
+write to `x8` between the `mov` and the `svc`, and an `svc` before the `mov`.
+Then it strips into `build/webkit/stage`.
 Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
 sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a
 speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the same
