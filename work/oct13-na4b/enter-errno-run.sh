@@ -136,6 +136,24 @@ for f in $FILES; do
   [ "$(/usr/bin/grep -c MUTANT "$f" || true)" = 0 ] || { echo "REFUSING: $f already names a MUTANT"; exit 3; }
   cp "$f" "$(pristine "$f")"
 done
+# Every mutant's anchor must occur exactly once in the committed file BEFORE
+# the control is built: a rotten anchor found after the control wastes the
+# lease (it did, 2026-10-13T09:07Z: E1's anchor occurred 0 times).
+ANCHORS=$(awk '/^mutant [a-z0-9]+ kernel\/syscall.c \\$/ {print $2}' "$0" | tr '\n' ' ')
+[ "$(echo $ANCHORS | wc -w | tr -d ' ')" = 6 ] || { echo "REFUSING: found mutants '$ANCHORS', expected 6"; exit 3; }
+python3 - "$0" kernel/syscall.c <<'CENSUS' || exit 3
+import re, sys
+script, target = open(sys.argv[1]).read(), open(sys.argv[2]).read()
+calls = re.findall(r"^mutant (\w+) kernel/syscall\.c \\\n'(.*?)' \\\n'(.*?)'\n", script, re.S | re.M)
+bad = 0
+for lab, old, new in calls:
+    n, m = target.count(old), target.count(new)
+    print("census %s: anchor x%d, mutant text x%d, MUTANT in new: %s" % (lab, n, m, "MUTANT" in new))
+    if n != 1 or m != 0 or "MUTANT" not in new: bad += 1
+if len(calls) != 6 or bad:
+    raise SystemExit("REFUSING: census %d calls, %d bad" % (len(calls), bad))
+CENSUS
+record "anchor census: 6 mutants, each anchor once in kernel/syscall.c"
 floor pre
 echo "=== CONTROL ==="
 lease control
@@ -211,12 +229,12 @@ mutant e1 kernel/syscall.c \
 '    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
     if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
     struct Loom *l = (struct Loom *)lh.obj;
-    int rc = loom_is_private(l)
+    int rc = loom_is_private(l) ? loom_private_enter(l, p, to_submit, min_complete, flags)
 ' \
 '    if (handle_get(p, loom_fd, &lh) != 0)  return -1; // MUTANT E1
     if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
     struct Loom *l = (struct Loom *)lh.obj;
-    int rc = loom_is_private(l)
+    int rc = loom_is_private(l) ? loom_private_enter(l, p, to_submit, min_complete, flags)
 '
 expect_fails E1 2 "$T_REG|$W_ENTER_BAD" "$T_BRG|$W_BRG"
 record "E1 DISCRIMINATED: $((EXPECT - 2))/$EXPECT, exactly $T_REG and $T_BRG FAIL at their named assertions; extinction set = the suite's own"
@@ -225,12 +243,12 @@ mutant e2 kernel/syscall.c \
 '    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
     if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
     struct Loom *l = (struct Loom *)lh.obj;
-    int rc = loom_is_private(l)
+    int rc = loom_is_private(l) ? loom_private_enter(l, p, to_submit, min_complete, flags)
 ' \
 '    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
     if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; } // MUTANT E2
     struct Loom *l = (struct Loom *)lh.obj;
-    int rc = loom_is_private(l)
+    int rc = loom_is_private(l) ? loom_private_enter(l, p, to_submit, min_complete, flags)
 '
 expect_fails E2 1 "$T_REG|$W_ENTER_KIND"
 record "E2 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_REG FAILs at '$W_ENTER_KIND'; extinction set = the suite's own"
