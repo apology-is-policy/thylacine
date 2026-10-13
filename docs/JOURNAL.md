@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-10-12..13 (main, Opus 5.5, effort max) -- JavaScriptCore's DFG runs on the sealed code region (B-2d) (in progress)
+## 2026-10-12..13 (main, Opus 5.5, effort max) -- JavaScriptCore's DFG runs on the sealed code region (B-2d) (landed)
 
 **What the run is for.** B-2c opened Baseline and the regexp JIT; B-2d opens
 the DFG, the optimizing tier, on the same region. The new thing the DFG brings
@@ -96,6 +96,29 @@ osr leg did not wait for the worker's compile. F4: a misread upstream comment.
 (78-80 s each). SunSpider 1.0.2: 68 ms all JITs, 105 ms DFG off, 346 ms denied
 (B-2c's Baseline: 111 ms); int32 loop 193 / 433 / 917 ms. REDs: R-fence build
 refused, R-dfg red at dfg (`JSCP-TRUE-FALSE`), R-watch red at watch.
+
+**Land gates on e693ca4d2.** ls-jsc twice more (gc-jettison 9 of 20 both
+times, its twin 0); a scratch scenario ran the leg's script with the DFG off
+(every round "never DFG") and under the default collector (nothing discarded);
+the watch RED re-run now fails on the exception at once; suite 1991/1991;
+test-fault 8/8. The first ci-smp-gate was stopped by my disk watchdog: free
+space fell 7568 -> 3748 MiB in about a minute during ubsan-smp8 boot 2 and came
+back within a minute, swap flat -- the second such dip (OPEN-BUGS 19:41Z). Not
+the guest: run-vm.sh passes no discard option, so the guest's pool writes stay
+allocated until QEMU closes the image, and the space returned while that QEMU
+still held it. Not the per-boot pool restore (`cp -c`, a clone). The re-run
+carried a new per-process writer sampler (`proc_pid_rusage`'s bytes written for
+this user's processes): its only large writer was the host `stratumd` baking
+pools during the gate's own builds, ~0.9 GiB per burst, minimum 6401 MiB free
+-- the likeliest author of the dip, not confirmed. ci-smp-gate N=10 then 50/50,
+0 corruption; check-production --all PASS.
+
+**Two mistakes of mine in that episode.** The watchdog's kill pattern named
+ci-smp-gate.sh and test.sh but not smp-multiboot.sh or QEMU, so the multiboot
+loop ran boots 3-10 against an orphaned QEMU that still held `disk.img`'s
+write lock (eight instant "Failed to get write lock" fails). And I deleted
+that run's failure logs before reading one of them (boot 6, 220 KB). The
+watchdog now kills the whole tree including QEMU.
 
 **Also fixed on the way.** `check-doc-tables.sh` found two older ARCHITECTURE.md
 table defects (a severed spec-table row; an I-39 row split by a pipe inside a
