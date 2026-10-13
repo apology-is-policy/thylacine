@@ -464,9 +464,10 @@ latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty and pipe
 latches. It became free when the caught-note latch and claim sub-fields (bits
 11..17 and 22..28) left for `Proc.note_caught`. `PROC_FLAGS_ALL` names every
 flag, and a `_Static_assert` that the popcount of their union equals the sum
-of their popcounts proves them disjoint -- derived, not pairwise, so an alias
-anywhere fails. Membership in the list is still by hand: a flag added to
-`proc.h` and not to the list escapes the check.
+of their popcounts proves them disjoint at compile time. Membership in that
+list is by hand, so the build's guard is `tools/check-flag-words.py`, which
+derives every `PROC_FLAG_*` define from the header and fails on a shared bit
+(after S-2 it reads bits 12..17 and 22..28 free).
 
 `proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
 (bit 29), stamped by the test link helpers (`proc_test_link`,

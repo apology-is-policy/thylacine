@@ -362,8 +362,10 @@ atomic snapshot of a sub-field together with another `proc_flags` bit.
 The macros were renamed rather than kept, so code that still applies them to
 `proc_flags` cannot compile: one test armed a tty caught bit through
 `proc_flags` with the old shift, which would have set `PROC_FLAG_LEGATE_ROOT`
-silently. `PROC_FLAGS_ALL` and a derived popcount `_Static_assert` now prove
-every `proc_flags` bit disjoint, so a new flag cannot land on an old one.
+silently. `tools/check-flag-words.py` (build.sh) derives every `proc_flags`
+define from the header and fails on a shared bit, so the freed bits cannot be
+taken twice; `PROC_FLAGS_ALL`'s popcount `_Static_assert` repeats that at
+compile time for the flags it lists.
 
 ### Which thread takes a caught note, and every EL0 return delivers it (2026-10-12)
 
