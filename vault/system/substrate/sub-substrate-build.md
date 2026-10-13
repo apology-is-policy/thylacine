@@ -372,12 +372,18 @@ depend on the sysroot and survive it. `libc.a` is not a ninja input, so
 `build_jsc` removes `bin/jsc` to force the relink. After the link it asserts the
 shape the platform requires -- `ET_EXEC`, no `PT_DYNAMIC`, no `LOAD` segment both
 writable and executable, and at least two `LOAD` segments seen, so a parse that
-matched nothing cannot read as "no W+X" -- and, since B-2d, that
-`MachineThreads::unparkCurrentThread` in the symbol-bearing binary holds an `isb`
-(`llvm-objdump --disassemble-symbols`; at least eight instructions first, so a
-missing symbol cannot pass): the fence that lets a thread run code another CPU
-patched has no run-time witness, so the build asks the binary for it (RED on the
-B-2c `jsc`, which has none). Then it strips into `build/webkit/stage`.
+matched nothing cannot read as "no W+X" -- and that each function on a list
+holds an `isb` in the symbol-bearing binary (`llvm-objdump
+--disassemble-symbols`; at least eight instructions first, so a missing symbol
+cannot pass). A fence that lets a thread run code another CPU wrote or patched
+has no run-time witness, so the build asks the binary for each: since B-2d
+`MachineThreads::unparkCurrentThread` (RED on the B-2c `jsc`, which has none),
+since B-2e1 the two places a thread takes a finished Wasm plan
+(`Wasm::Module::compileSync`, `JSWebAssemblyInstance::finalizeCreation`; the
+B-2d `jsc` holds no `isb` in either) and the FTL's `JITFinalizer::finalize`,
+whose fence is upstream's. The list is a quoted heredoc of mangled name and
+label; a refusal names the label and the patch that owes it. Then it strips
+into `build/webkit/stage`.
 Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
 sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a
 speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the same

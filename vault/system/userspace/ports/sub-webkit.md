@@ -1,7 +1,7 @@
 ---
 id: sub-webkit
 type: sub
-title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline, DFG and regexp JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
+title: "WebKit (Boosty) — JavaScriptCore on Pouch, its Baseline, DFG, FTL and regexp JITs on one sealed code region, a collector that never suspends a thread, and what the engine asked the platform for"
 parent: moc-userspace
 code:
   - usr/ports/webkit/README.md
@@ -9,6 +9,7 @@ code:
   - usr/ports/webkit/patches/0002-thylacine-jsc-jit-b2c.patch
   - usr/ports/webkit/patches/0003-thylacine-jsc-gc-park.patch
   - usr/ports/webkit/patches/0004-thylacine-jsc-dfg-b2d.patch
+  - usr/ports/webkit/patches/0005-thylacine-jsc-ftl-b2e1.patch
   - cmake/Toolchain-aarch64-pouch-cxx.cmake
   - cmake/Platform/Thylacine.cmake
   - usr/ports/webkit/sunspider-run.js
@@ -36,8 +37,9 @@ before any kernel work was designed — the findings list in
 `docs/browser-status.md` is its product as much as the binary is. Since B-2c
 the Baseline JIT and the regexp (YARR) JIT run, on one `SYS_JIT_CREATE` code
 region whose writer is reachable only through a sealed write thunk, and since
-B-2d the DFG; FTL and Wasm's BBQ and OMG are built and held off at run time
-until their own chunk opens them ([[dec-2026-10-08-jsc-tiers-run-time]]).
+B-2d the DFG, and since B-2e1 the FTL; Wasm's BBQ and OMG are built and held
+off at run time until their own chunk opens them
+([[dec-2026-10-08-jsc-tiers-run-time]]).
 
 The source is NOT vendored. WebKit is about 13 GB; it lives in a sparse,
 partial clone beside the other forks (`~/projects/webkit-thylacine`, branch
@@ -53,16 +55,20 @@ series; `tools/forage.sh webkit` gathers the source and the ICU tarball, and
   segment both writable and executable ([[inv-i12]]: the image never is; JIT
   code exists only in the code region below).
 - Tiers: the offlineasm LLInt (`ENABLE_C_LOOP=OFF`) and IPInt for
-  WebAssembly always; the Baseline JIT, the DFG and the YARR JIT when the
-  process holds `CAP_JIT`. FTL and Wasm's BBQ and OMG are compiled in
-  (upstream no longer builds JIT-on with them off on ARM64) and forced off in
+  WebAssembly always; the Baseline JIT, the DFG, the FTL and the YARR JIT when
+  the process holds `CAP_JIT`. Wasm's BBQ and OMG are compiled in (upstream no
+  longer builds JIT-on with them off on ARM64) and forced off in
   `Options::notifyOptionsChanged` under `OS(THYLACINE)`, after which the
   options are frozen: no flag can turn them on.
 - A thread that resumes running the VM's code executes an ISB first
   (`MachineThreads::unparkCurrentThread`), so code another CPU patched -- the
   collector with the world stopped, a previous JSLock holder -- is never run
-  from stale prefetch; the build refuses a `jsc` whose
-  `unparkCurrentThread` holds no `isb`.
+  from stale prefetch. A thread that takes a finished Wasm plan executes one
+  too before it runs the plan's stubs (`Wasm::Module::compileSync`,
+  `JSWebAssemblyInstance::finalizeCreation`). The build refuses a `jsc` in
+  which any of the four functions that must hold an `isb` holds none.
+- Every thread WTF creates (compilers, collector helpers, the Wasm worklist)
+  gets a 1 MiB stack, not musl's 128 KiB default.
 - The JIT pool is one 64 MiB code region: its exec alias (RX) is the
   reservation, the writer alias's address lives only as immediates inside an
   execute-only thunk sealed by `SYS_JIT_CREATE_SEALED`, and every write into
@@ -174,6 +180,43 @@ a target outside it. The DFG emits ARMv8.0 code only: Pouch compiles for
 `armv8-a`, and `collectCPUFeatures` has no Thylacine arm, so LSE atomics,
 `FJCVTZS`, FP16 and `FRINT` read their compile-time default, off.
 
+**The FTL and the Wasm plan fence (B-2e1, patch 0005, four files).**
+`Options.cpp` lets the FTL run; BBQ and OMG stay off. The FTL adds one kind of
+rewrite to the DFG's: its property caches are code, not data (upstream forces
+`useHandlerICInFTL` off), so `linkCodeInline` rewrites an access's whole
+inline region in place, or `replaceWithJump` points it at a stub. A rewrite of
+more than one instruction runs only on the JS thread, which is never inside
+the region it rewrites (the slow-path call that triggers it sits outside);
+the collector's resets are single instructions written with the world
+stopped. Everything else the FTL patches -- OSR-exit jumps, lazy slow paths,
+invalidation points, direct calls, arithmetic caches -- is a DFG kind made by
+the same three kinds of thread, so B-2d's three rules cover it, and the FTL's
+`JITFinalizer::finalize` runs `crossModifyingCodeFence` before it installs a
+compiler thread's code, as the DFG's does. The FTL polls for traps
+(`CheckTraps` lowers to a load and a lazy slow path), so a runaway FTL loop is
+interruptible like a DFG one.
+
+A Wasm module's wasm-to-wasm and wasm-to-JS exit stubs are JIT code written by
+whichever thread finishes its plan (`EntryPlan`), usually a Wasm worklist
+thread, and a synchronous compile's wait (`Plan::waitForCompletion`) returns
+without sleeping when the plan is already done: the JS thread could run stubs
+another CPU wrote with no context-synchronization event between. Upstream has
+the same gap. `Wasm::Module::compileSync`, after `waitUntilFinished`, and
+`JSWebAssemblyInstance::finalizeCreation`, where an asynchronous compile's
+result is taken, now run `WTF::crossModifyingCodeFence()` first
+([[dec-2026-10-13-wasm-plan-isb]]). `build_jsc`'s ISB check became a list of
+four functions: `unparkCurrentThread` (patch 0004), the two plan consumers
+(0005) and `FTL::JITFinalizer::finalize` (upstream's fence, asked for so that
+a merge cannot drop it). The B-2d `jsc` holds no `isb` in either plan
+consumer, so the check can fail.
+
+`WTF::stackSize()` gives every thread WTF creates 1 MiB on a libc that is
+neither glibc nor bionic, because musl's default stack is 128 KiB; the arm
+named only `OS(LINUX)`, so on Thylacine the compiler, collector and worklist
+threads ran on 128 KiB (jsc's `PT_GNU_STACK` is empty, which leaves musl's
+`__default_stacksize` alone), the same size as JSC's own soft reserved zone.
+Patch 0005 adds `OS(THYLACINE)` to the arm.
+
 **The write thunk** is 33 hand-encoded A64 words from
 `usr/lib/thylajit/thyla_jit_thunk.h`, never assembled at run time, so no
 LinkBuffer ever holds a readable copy of the writer address. `write(offset,
@@ -242,6 +285,26 @@ block: it passed with the DFG off (Fable r1 F1). Which thread conducted each end
 observable. `loop-baseline` and `sunspider-baseline` record the DFG-off times
 beside the all-on ones.
 
+B-2e1 adds the FTL legs, the DFG's again: `ftl` (`$vm.ftlTrue()` folds to true
+only in FTL code, and is false in DFG code, so it is never vacuous), `ftl-off`
+(`--useFTLJIT=false` stops at the DFG), `ftl-deny`, `ftl-sync`. `ftl-osr`: an
+FTL function speculating int32 takes a double and then a string, two exits
+through one exit, and `--verboseFTLOSRExit` must log exactly one exit-stub
+compile: the second exit took the jump the first patched. The tier probes
+match the JIT-type word in `$vm.codeBlockFor`'s dump (`, FTLFunction`), since
+the dump also prints `(FTLFail)` and `(HadFTLReplacement)` for other tiers.
+`ftl-ic`: an FTL property cache meets four new shapes, one a getter, 1000
+times each, and must stay in the same FTL code block (a call that left FTL
+code would add 1000); with the FTL off it reads red. `wasm-sync` and
+`wasm-async`: a module whose export calls a JS import, compiled each way, runs
+its exit stubs 1001 times. `stack`: a runaway recursion on a `$.agent` thread
+(a WTF thread like the compilers) must reach more than 131072/48 calls; an
+LLInt frame is at least 48 bytes, so no 128 KiB stack holds that many
+(`--useJIT=false` keeps one call per frame). `loop-dfg` and `sunspider-dfg`
+record the FTL-off times; `tiers` reads Baseline, DFG and FTL on and BBQ and
+OMG off although asked for; `gc-jettison` pins `--useFTLJIT=false`, because
+its probe reads a DFG tier.
+
 ## Data structures
 
 None of its own.
@@ -282,11 +345,14 @@ writers that are not the thread that runs the code next: the collector, which
 patches with the world stopped while the JS thread is parked, and a JSLock's
 previous holder on another CPU. Both are covered by the ISB in
 `MachineThreads::unparkCurrentThread`, which every resume passes (see
-Mechanism). Wasm thunks generated on one agent thread and entered from
-another, and Wasm's `resetInstructionCacheOnAllThreads` (a signal to every VM
-thread), are B-2e's question, and with it whether `SYS_ICACHE_SYNC` gains a
-mode that synchronizes the address space's other running threads (Linux's
-`membarrier` SYNC_CORE).
+Mechanism). The FTL's compiler threads are the DFG's rule again (the
+finalizer's fence). Wasm's exit stubs, written by a worklist thread, are fenced
+where a thread takes the finished plan (B-2e1). BBQ and OMG are the open part:
+upstream publishes their code by suspending every VM thread
+(`resetInstructionCacheOnAllThreads`), fatal here; by operator vote
+([[dec-2026-10-13-wasm-space-sync]]) `SYS_ICACHE_SYNC` gains a mode that
+interrupts every CPU running a thread of the caller's address space (B-2e2),
+and BBQ and OMG run on it (B-2e3).
 
 JSC's GC and compiler threads exist as pthreads. B-0 recorded that the
 collector's stop-the-world uses `Thread::suspend` "and no B-0 workload reached
@@ -356,7 +422,12 @@ JIT (B-2c, HVF, one run of `ls-jsc` on 2026-10-12): SunSpider 1.0.2 totals
 112 ms with the JIT and 352 ms denied (each test the mean of three runs);
 the 2e7-iteration int32 loop takes 442 ms against 931 ms. With the DFG (B-2d,
 HVF, `ls-jsc` on 2026-10-13, one run): SunSpider 68 ms with every JIT on, 105
-ms with the DFG off, 346 ms denied; the loop 193 / 433 / 917 ms.
+ms with the DFG off, 346 ms denied; the loop 193 / 433 / 917 ms. With the FTL
+(B-2e1, HVF, `ls-jsc` on 2026-10-13, one run): SunSpider 95 ms with every JIT
+on, 68 ms with the FTL off, 107 ms with the DFG off, 342 ms denied; the loop
+220 / 192 / 437 / 1008 ms. The FTL makes both short runs slower (its compile
+costs more than these runs save); claiming any FTL gain needs a longer
+benchmark.
 
 ## Prosecution
 
@@ -378,6 +449,11 @@ ms with the DFG off, 346 ms denied; the loop 193 / 433 / 917 ms.
   release of heap access parks and every acquire unparks, that the image is a
   copy covering the callee-saves and the stack to its origin, the exclusion
   that keeps records stable, and that no `Thread::suspend` caller is reachable.
+  B-2e1 (patch 0005) has its own row: every FTL rewrite placed under B-2d's
+  rules, the multi-instruction property-cache rewrites on the JS thread only
+  and never inside a range it is executing, the two plan consumers' fences
+  covering every path to the stubs, the tier gate with BBQ and OMG still off,
+  and the worker stack size.
 - Writer-address residue beyond the scrubbed struct and array (compiler
   temporaries, the kernel's out-struct copy) and a `CAP_JIT` that is never
   dropped are recorded (Fable r1 F4); the answer is a kernel-emitted thunk
@@ -390,8 +466,10 @@ seams, and by the operator's direction (2026-09-21) their kernel design is
 a conversation first. B-2c carries three owned obligations (OPEN-BUGS
 2026-10-08): the content process must run without `/proc` in its namespace
 (`/proc/self/maps` shows the writer row to the target itself); the
-kernel-emitted thunk and the `CAP_JIT` drop; and the Wasm cross-PE publish at
-B-2e.
+kernel-emitted thunk and the `CAP_JIT` drop; and the Wasm cross-PE publish,
+whose plan half closed at B-2e1 and whose BBQ and OMG half is B-2e2 and B-2e3.
+B-2e3 also fixes a `ref.cast` that drops its null check when no fault handler
+exists (OPEN-BUGS 2026-10-13), before BBQ runs.
 
 ## Caveats
 
@@ -404,6 +482,13 @@ B-2e.
 - `tools/forage.sh webkit` widens an existing checkout's sparse cone with
   `sparse-checkout add`, never `set`, so a directory added by hand survives
   a re-forage.
+- A long BBQ or OMG loop polls no trap, upstream too (the signal path of
+  `VMTraps` handles JS only), so once they run the only way to stop one is to
+  kill the process.
+- The pool stays 64 MiB until B-2e3 raises it to 128
+  ([[dec-2026-10-13-jit-region-128]]): above 48 MiB JSC refuses the optimizing
+  compiles that may fail, and a stub that must succeed crashes the process if
+  the last 16 MiB fill.
 - B-0 found three Pouch libc defects by running (0033, 0034, 0035); they
   are described where they live, in [[sub-pouch-thread]] and
   [[sub-pouch-seam]].
