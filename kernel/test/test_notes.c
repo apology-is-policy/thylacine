@@ -1739,6 +1739,8 @@ void test_notes_default_action_table(void) {
                    (int)NOTE_DFL_TERMINATE, "tty:quit terminates");
     TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_HUP),
                    (int)NOTE_DFL_TERMINATE, "tty:hup terminates");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TERM),
+                   (int)NOTE_DFL_TERMINATE, "term terminates (POSIX SIGTERM)");
 
     // STOP -- one row, and the whole reason #15 exists.
     TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_SUSP),
@@ -1787,6 +1789,9 @@ void test_notes_default_action_table(void) {
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_PIPE),
                    (int)PROC_FLAG_PIPE_TERMINATE_PENDING,
                    "pipe -> PIPE latch (#237)");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TERM),
+                   (int)PROC_FLAG_TERM_TERMINATE_PENDING,
+                   "term -> its own latch, never interrupt's");
 }
 
 // Drive notes_noted_default through its two RETURNING dispositions. The
@@ -2149,6 +2154,10 @@ void test_notes_kill_family_gate(void) {
     s64 r_sprobe = viv_kill_for_test(caller, 0, 0, 0);
     child->state = PROC_STATE_ZOMBIE;
     s64 r_dead   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGTERM);
+    u32 c_term3  = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_dprobe = viv_kill_for_test(caller, child->pid, 0, 0);
+    other->state = PROC_STATE_ZOMBIE;
+    s64 r_odead  = viv_kill_for_test(caller, other->pid, 0, VIV_SIGTERM);
 
     proc_test_unlink(other);
     other->threads = NULL;
@@ -2184,7 +2193,10 @@ void test_notes_kill_family_gate(void) {
     TEST_EXPECT_EQ(r_tself, (s64)0, "tkill(own tid) is self-directed");
     TEST_EXPECT_EQ(s_term, 1u, "and the caller holds its own term");
     TEST_EXPECT_EQ(r_sprobe, (s64)0, "kill(0, 0) probes the caller");
-    TEST_EXPECT_EQ(r_dead, -(s64)T_E_SRCH, "a dead child is ESRCH");
+    TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it, as Linux's zombie does");
+    TEST_EXPECT_EQ(c_term3, 1u, "and nothing was queued to it");
+    TEST_EXPECT_EQ(r_dprobe, (s64)0, "kill(dead child, 0) succeeds, as for a zombie");
+    TEST_EXPECT_EQ(r_odead, -(s64)T_E_PERM, "a dead non-child reads EPERM: the gate is asked first");
 }
 
 // aux#253: the SELF arm's twin of the above. Round-2 F4 -- a self `kill` used
@@ -3326,7 +3338,19 @@ void test_notes_death_signal_table(void) {
     for (u32 v = 1; v < VIV_SIGNOTE_COUNT; v++) {
         const char *name = viv_signote_note_name((enum viv_signote)v);
         if (!name) continue;
-        if (notes_default_action(name) == NOTE_DFL_TERMINATE) terminating++;
+        enum note_default dfl = notes_default_action(name);
+        if (dfl == NOTE_DFL_TERMINATE) terminating++;
+        // The phenotype answers a SIG_DFL guest from its own two default
+        // tables; I-19 allows one default per note, so both must say what
+        // g_known_notes says. `kill` is the terminate table's one omission: the
+        // dispatcher's kill branch ends the Proc before any disposition is read.
+        if (v != VIV_SIGNOTE_KILL)
+            TEST_EXPECT_EQ((u64)viv_signote_default_is_terminate((enum viv_signote)v),
+                           (u64)(dfl == NOTE_DFL_TERMINATE),
+                           "the phenotype's terminate table is g_known_notes' dfl");
+        TEST_EXPECT_EQ((u64)viv_signote_default_is_ignore((enum viv_signote)v),
+                       (u64)(dfl == NOTE_DFL_IGNORE),
+                       "the phenotype's ignore table is g_known_notes' dfl");
         int sig = notes_death_signal(name);
         if (sig == 0) continue;
         TEST_EXPECT_EQ((u64)sig, viv_signote_to_signal((enum viv_signote)v),

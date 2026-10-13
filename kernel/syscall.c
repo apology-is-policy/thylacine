@@ -5691,6 +5691,8 @@ struct postnote_walk_ctx {
     s64           err;           // with result -1: why, as -T_E_* (ESRCH a dead
                                   // or mismatched target, EPERM the gate, EAGAIN
                                   // a full queue). SYS_POSTNOTE reports -1 alone.
+    bool          target_dead;   // with result -1: the gate admitted the caller
+                                  // and the target is no longer ALIVE
 };
 
 // Does `p` hold the thread `tid`? Caller holds g_proc_table_lock, which every
@@ -5750,8 +5752,9 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // ever again); the post would be wasted work that returns success
     // misleadingly. wait_pid is the proper channel for ZOMBIE state.
     if (target->state != PROC_STATE_ALIVE) {
-        w->result = -1;
-        w->err    = -(s64)T_E_SRCH;
+        w->result      = -1;
+        w->err         = -(s64)T_E_SRCH;
+        w->target_dead = true;
         return 1;
     }
 
@@ -13762,10 +13765,15 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
         .name       = (kind == VIV_KILL_PROBE) ? NULL : name,
         .result     = 0,
         .err        = 0,
+        .target_dead = false,
     };
     (void)proc_for_each(postnote_walk_cb, &w);
     if (w.result == 1) return 0;
     if (w.result == 0) return -(s64)T_E_SRCH;   // no Proc has that pid or tid
+    // A child that has died and is not yet reaped is Linux's zombie: the
+    // signal is accepted and nothing receives it. The gate was asked first,
+    // so this answer reaches only the caller's own children.
+    if (w.target_dead) return 0;
     return w.err ? w.err : -(s64)T_E_PERM;
 }
 
@@ -13779,19 +13787,23 @@ s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
+    // pid, tid and sig are each an int in Linux's prototype, so the high half
+    // of the register is not part of the argument: Linux narrows it away, and
+    // so does the shell. A negative sig stays negative, and out of range.
     case VIV_LINUX_KILL:
-        // kill(pid, sig): x0 pid, x1 sig. pid_t is an int.
-        return viv_kill(ctx, p, (int)(s32)args[0], 0, args[1]);
+        // kill(pid, sig): x0 pid, x1 sig.
+        return viv_kill(ctx, p, (int)(s32)args[0], 0, (u64)(s64)(s32)args[1]);
 
     case VIV_LINUX_TKILL:
         // tkill(tid, sig): Linux refuses a tid <= 0 with EINVAL.
         if ((s32)args[0] <= 0) return -(s64)T_E_INVAL;
-        return viv_kill(ctx, p, 0, (int)(s32)args[0], args[1]);
+        return viv_kill(ctx, p, 0, (int)(s32)args[0], (u64)(s64)(s32)args[1]);
 
     case VIV_LINUX_TGKILL:
         // tgkill(tgid, tid, sig): both ids must be positive (EINVAL).
         if ((s32)args[0] <= 0 || (s32)args[1] <= 0) return -(s64)T_E_INVAL;
-        return viv_kill(ctx, p, (int)(s32)args[0], (int)(s32)args[1], args[2]);
+        return viv_kill(ctx, p, (int)(s32)args[0], (int)(s32)args[1],
+                        (u64)(s64)(s32)args[2]);
 
     case VIV_LINUX_OPENAT: {
         // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags,

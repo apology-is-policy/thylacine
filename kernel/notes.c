@@ -1954,13 +1954,12 @@ again:
 
         // SIG_DFL with a TERMINATING Linux default: act here, on the
         // candidate, with the Linux table -- not by falling through to the
-        // native uncaught arm. That arm scans for the native terminate LATCH,
-        // and `pipe` has none (#237, a native-ABI question this does not
-        // touch): a SIG_DFL SIGPIPE fell through, the terminate scan skipped
-        // it, the stop consumer skipped it, and "leave it queued for the fd
-        // reader" stranded it at the head of a queue no fd will ever read --
-        // every later caught signal blocked behind it for the life of the
-        // guest. Linux terminates; so does this. exits_note() with the
+        // native uncaught arm, whose terminate scan answers the native rules
+        // (masks, latches, self-managing), not Linux's. Before #237 gave
+        // `pipe` a latch, a SIG_DFL SIGPIPE fell through, the terminate scan
+        // skipped it, and it stranded at the head of a queue no fd will ever
+        // read -- every later caught signal blocked behind it for the life of
+        // the guest. Linux terminates; so does this. exits_note() with the
         // canonical .rodata name, the same way the native arm reports
         // interrupt/hup/quit, so the death records the note's signal and the
         // phenotype wait4 reports it WIFSIGNALED, as Linux does. The lock is

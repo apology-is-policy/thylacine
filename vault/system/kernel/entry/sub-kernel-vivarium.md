@@ -523,7 +523,15 @@ What a change must re-establish:
   statement about `vivarium_clone_decide`'s admitted words and must be
   re-derived if those change;
 - **allow-lists, not deny-lists**, for every flag word. Measured, aarch64
-  defines flags a deny-list silently admits.
+  defines flags a deny-list silently admits;
+- **no reach the native ABI lacks** (I-43). The kill family posts to
+  another Proc only through `proc_for_each` + `postnote_walk_cb`, the gate
+  before liveness and the post; a tid resolves to its Proc and meets the same
+  gate; a `snare:*` death is the caller's own. A new cross-Proc row names the
+  native gate it reuses, never a new one;
+- **Linux's narrowing, in the shell.** A Tier-2 shell narrows each word its
+  Linux prototype declares 32-bit (`kill`'s `pid` and `sig` are `int`): a
+  guest may leave the high half unspecified, and Linux ignores it.
 
 The strongest existing evidence is the file's own negative space: the
 tests assert the *rejects* as well as the rows, so a row promoted without

@@ -16,7 +16,7 @@
 #define POUCH_CENSUS_SOCKETS \
     "pouch-hello-sockets: legs=refusals,paths,round-trip,peercred,stdio,ppoll,ppoll-eof,slots,xproc-gate,fdset-guard: exit 0"
 #define POUCH_CENSUS_SIGNALS \
-    "pouch-hello-signals: legs=handler,fp-simd,sig-ign,einval,deaths: exit 0"
+    "pouch-hello-signals: legs=handler,fp-simd,sig-ign,einval,term-apart,deaths,term-death: exit 0"
 #define POUCH_CENSUS_FOPEN \
     "pouch-hello-fopen: legs=create,append-omode,truncate,excl,unlink,remove,tmpfile,scan: exit 0"
 #define POUCH_CENSUS_IDENTITY \

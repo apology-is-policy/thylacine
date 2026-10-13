@@ -48,9 +48,9 @@ The third path is not a third *queue* — it is a second **frame shape** over th
 same one queue, and it sits *above* the native handler branch in the deliverer
 for a specific reason recorded below.
 
-**Seven** families of note name (this count has lagged its table twice -- four
-against five rows until 2026-08-16, five against six after `pipe` -- so count
-the rows), distinguished by **who may post** and **what an uncaught one does**:
+**Eight** families of note name (this count has lagged its table three times --
+four against five rows until 2026-08-16, five against six after `pipe`, and
+`sak` was missing from the table until 2026-10-13 -- so count the rows), distinguished by **who may post** and **what an uncaught one does**:
 
 | family | postable by | uncaught default |
 |---|---|---|
@@ -60,6 +60,7 @@ the rows), distinguished by **who may post** and **what an uncaught one does**:
 | `pipe` | kernel | terminate (SIGPIPE's default; a reader-less write posts it) |
 | `child_exit` | kernel | nothing — queue for the fd reader |
 | `tty:*` | **kernel only**, catchable | quit/hup terminate; susp stops; winch/cont informational |
+| `sak` | **kernel only** (the trusted path, I-27) | nothing — catchable, ignored by default, so the TCB is never ended by it |
 | `snare:*` | **kernel only** | terminate — and not deliverable at all today |
 
 Each terminating death records its POSIX signal for a packed wait (below,

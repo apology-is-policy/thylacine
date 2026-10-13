@@ -2472,7 +2472,7 @@ rather than new machinery:
 | `SIGKILL` | `kill` | non-catchable both sides (I-19 N-4) |
 | `SIGPIPE` | `pipe` | catchable; maskable |
 | `SIGCHLD` | `child_exit` | catchable; default ignore |
-| `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | catchable; default terminate |
+| `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | never caught or ignored (a handler is refused); the fault ends the Proc |
 | `SIGHUP`/`SIGQUIT`/`SIGWINCH`/`SIGTSTP`/`SIGCONT` | `tty:*` | PTY-1 semantics |
 | `SIGABRT` | none; a self-directed one ends the caller as `snare:abort` | default only; see below |
 | `SIGALRM`, `SIGUSR1/2` | — | no note exists; see below |
@@ -2510,8 +2510,11 @@ default), and the signal chunk's S-2 gave it its own note, `term`
   reaches whichever thread of that Proc takes the note, not necessarily the
   thread named (a stated imprecision; `tgkill` still refuses a tid outside the
   named thread group with `ESRCH`). Signal 0 runs the gate and posts nothing. A
-  missing or dead target is `ESRCH`, a refusal by the gate `EPERM`, a full note
-  queue `EAGAIN`. A signal no note carries, or whose note only the kernel posts
+  missing target, or a child already reaped, is `ESRCH`; a refusal by the gate
+  is `EPERM`, and the gate is asked first, so a dead Proc that is not the
+  caller's child reads `EPERM` too. A child that has died but is not yet reaped
+  takes nothing and the call succeeds, as Linux answers for a zombie. A full
+  note queue is `EAGAIN`. A signal no note carries, or whose note only the kernel posts
   (`tty:*`), is `EINVAL`, with one exception: a SELF-directed signal that a
   `snare:*` death carries (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE`)
   ends the caller with that death, as a fault or Pouch's `abort()` would.

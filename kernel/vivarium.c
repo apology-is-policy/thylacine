@@ -3010,15 +3010,14 @@ bool viv_signote_default_is_ignore(enum viv_signote note) {
 
 bool viv_signote_default_is_terminate(enum viv_signote note) {
     switch (note) {
-    // SIGPIPE / SIGINT / SIGHUP / SIGQUIT: the POSIX default is to terminate.
-    // PIPE is the row that earns this function its existence: the native
-    // `pipe` note has no terminate latch (a Plan 9 ABI question, task #237),
-    // so the native uncaught arm never acts on it -- and a Linux guest, which
-    // has no notes fd, would otherwise carry a SIG_DFL SIGPIPE at the head of
-    // its queue for the rest of its life. The Linux default is not in
-    // question, so the phenotype branch answers it here, for its own Procs.
+    // SIGPIPE / SIGINT / SIGTERM / SIGHUP / SIGQUIT: the POSIX default is to
+    // terminate. The phenotype branch answers a SIG_DFL guest from this table,
+    // never from the native latch scan, so every terminating row must be here:
+    // notes.death_signal_table derives the answer from g_known_notes' dfl for
+    // every named row, so a row added to either side and missed here fails.
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TERM:
     case VIV_SIGNOTE_TTY_HUP:
     case VIV_SIGNOTE_TTY_QUIT:
         return true;

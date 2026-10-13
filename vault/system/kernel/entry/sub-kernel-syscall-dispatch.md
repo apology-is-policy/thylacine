@@ -1614,10 +1614,17 @@ three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
 - `err`: with `result` -1, why -- `ESRCH` for a dead or mismatched target,
   `EPERM` for the gate (the caller is not the target's parent), `EAGAIN` for a
   full queue. `SYS_POSTNOTE` still reports -1 alone.
+- `target_dead`: with `result` -1, the gate admitted the caller and the target
+  is no longer ALIVE. `viv_kill` answers 0 for it, Linux's answer for a
+  zombie: the signal is accepted and nothing receives it. Only the caller's
+  own children can reach that answer.
 
 A NULL `name` is signal 0: the gate runs, nothing is posted. The order inside
 the walk is the old one -- the gate, then ALIVE, then the post -- so a zombie
 that is not the caller's child reads `EPERM`, as it reads -1 to `SYS_POSTNOTE`.
+`viv_tier2` narrows `pid`, `tid` and `sig` to `int` before the shell sees
+them, as Linux's prototypes do: a guest may leave the high half of a register
+unspecified.
 `viv_kill_for_test` drives the real shell with an explicit caller and a NULL
 `ctx`; a self-directed `snare:*` death answers 1 there instead of ending the
 harness (`notes.kill_family_gate`).

@@ -5072,7 +5072,10 @@ unsafe fn run_linux() -> ! {
     // A refusal that posted instead could end the probe (SIGHUP's tty:hup
     // terminates by default), so the leg is stamped across the calls.
     stamp_armed(rep, b"L337\n");
-    let kf_cases: [(u8, i64, i64); 14] = [
+    // 'o'-'r': pid, tid and sig are ints, so a register's high half is not
+    // part of them (Linux narrows it away); a sign-extended -1 stays EINVAL.
+    let kf_junk = 0xdead_beef_0000_0000u64;
+    let kf_cases: [(u8, i64, i64); 18] = [
         (b'a', svc3(NR_KILL, KF_NO_ID, 0, 0), NEG_ESRCH),
         (b'b', svc3(NR_KILL, (-1i64) as u64, 0, 0), NEG_EPERM),   // a group
         (b'c', svc3(NR_KILL, 0, 65, 0), NEG_EINVAL),              // past _NSIG
@@ -5087,6 +5090,10 @@ unsafe fn run_linux() -> ! {
         (b'l', svc3(NR_KILL, kf_pid as u64, 0, 0), 0),
         (b'm', svc3(NR_TKILL, kf_tid as u64, 0, 0), 0),
         (b'n', svc3(NR_TGKILL, kf_pid as u64, kf_tid as u64, 0), 0),
+        (b'o', svc3(NR_KILL, kf_pid as u64, kf_junk, 0), 0),
+        (b'p', svc3(NR_KILL, kf_junk | kf_pid as u64, 0, 0), 0),
+        (b'q', svc3(NR_KILL, 0, (-1i64) as u64, 0), NEG_EINVAL),
+        (b'r', svc3(NR_TGKILL, kf_pid as u64, kf_tid as u64, kf_junk), 0),
     ];
     stamp_disarm(rep);
     let mut kc_mk = [0u8; 200];
