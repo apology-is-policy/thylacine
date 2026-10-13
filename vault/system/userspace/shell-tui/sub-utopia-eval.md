@@ -243,7 +243,8 @@ statuses on every path. A raw 1 read through the decoder would be SIGHUP (129)
 and a packed exit read raw would be N << 8, so the flag and the decode change
 together at each site. `status_of_packed_reads_exits_and_deaths` is the host
 test; `pty-4.exp` requires 130 after `fg` + Ctrl-C, and 139 for
-`pouch-hello-fault` in a `let x = $(...)` and in a script.
+`pouch-hello-fault` in a `let x = $(...)` and as a script's exit code (a
+failed command ends a script, which exits with that `$status`).
 
 The pts slave is not directly pollable — `dev9p.poll` reports it always-ready —
 so for fd-0 input readiness the shell polls a side fd, `/dev/pts/<n>ready`

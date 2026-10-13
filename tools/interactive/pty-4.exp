@@ -129,12 +129,13 @@ lc_run_expect_hardfail_re "echo pty-fg-\$status | tr a-z A-Z" "PTY-FG- 130" {PTY
 # Every other ut wait packs too (dec-2026-10-13-ut-status-packed): a death by
 # note reads 128 plus the signal outside job control as well. pouch-hello-fault
 # dies of snare:segv, so 139; the raw word these waits used to take read 1. A
-# command substitution keeps its status through the `let`; a script runs in a
-# ut with no job control, so its by-pid wait is the plain one.
+# command substitution keeps its status through the `let`. A script runs in a ut
+# with no job control, so its by-pid wait is the plain one; a failed command ends
+# a script, which exits with that `$status`, so this shell reads the script's
+# decode as its exit code.
 lc_run_expect_hardfail_re "let sx = \$(pouch-hello-fault); echo pty-cs-\$status | tr a-z A-Z" "PTY-CS- 139" {PTY-CS- ?[0-9]+[\r\n]}
 lc_send "echo 'pouch-hello-fault' > /tmp/sigst.ut"
-lc_send "echo 'echo pty-sx-\$status | tr a-z A-Z' >> /tmp/sigst.ut"
-lc_run_expect_hardfail_re "ut /tmp/sigst.ut" "PTY-SX- 139" {PTY-SX- ?[0-9]+[\r\n]}
+lc_run_expect_hardfail_re "ut /tmp/sigst.ut; echo pty-sx-\$status | tr a-z A-Z" "PTY-SX- 139" {PTY-SX- ?[0-9]+[\r\n]}
 
 # THE TYPE-AHEAD LEG (PTY-DESIGN "Mode writes deliver, never discard",
 # 2026-08-17). A line typed WHILE a foreground job runs is assembled by the
