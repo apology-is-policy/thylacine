@@ -181,7 +181,8 @@ LSE patcher, turned outward and gated as a capability.**
 
 The browser arc (`docs/BROWSER-DESIGN.md` section 7) brings the first
 *untrusted* JIT: JavaScriptCore running a web page's script. The operator voted
-the shape on 2026-09-28; three things change.
+the shape on 2026-09-28; three things change, and Wasm brought a fourth
+(2026-10-13).
 
 1. **The region is a reservation** (B-2a). JavaScriptCore reserves one
    executable pool at startup (its ARM64 default is 128 MiB without jump
@@ -241,6 +242,116 @@ the shape on 2026-09-28; three things change.
    keeps the diorama, which reads every pid's `maps` as itself for clients of
    any principal, from becoming a deputy: it refuses to serve while it holds
    one.
+4. **The address space's other CPUs take a context-synchronization event on
+   request** (B-2e2; `dec-2026-10-13-icache-sync-space`, which supersedes
+   `dec-2026-10-13-wasm-space-sync`). `SYS_ICACHE_SYNC` makes new code
+   fetchable by every CPU (`IC IVAU` broadcast, then `DSB ISH`), but only the
+   calling CPU takes a context-synchronization event (CSE). A peer thread
+   already running in the address space may go on executing instructions it
+   fetched before the invalidation completed. Wasm's BBQ and OMG publish code
+   to such peers with no point at which they pass through C++ (BROWSER-DESIGN
+   7, B-2e), so the kernel provides the event. `SYS_ICACHE_SYNC_SPACE` takes no
+   arguments and returns 0 once every other CPU that was running a thread of
+   the caller's address space has taken an interrupt it acknowledged after
+   the call began.
+
+   *Which CPUs.* At every context switch a CPU records the address space whose
+   tables it installs (`cpu_space[cpu]`; NULL for a kernel thread, the idle
+   thread included), then executes `DSB ISH`. The record is written where the
+   switch resolves the ASID (`sched_install_asid_ttbr0`, IRQs masked under
+   the run-queue lock) and where `execve` installs a new space
+   (`sched_activate_addrspace`). It is compared by value and never
+   dereferenced, so a space torn down concurrently is no lifetime hazard; a
+   freed space's address reused by a new one can only add an interrupt, never
+   lose one. The ASID allocator's per-CPU active slot cannot serve: a rollover
+   zeroes it while the CPU keeps running on its reserved ASID. Thylacine's
+   switch had an `ISB` after the `TTBR0` write and no `DSB`; Linux's arm64
+   `__switch_to` has one, and `membarrier` relies on it.
+
+   *The acknowledgement is a ticket.* Each CPU has a request count and a done
+   count. A sender adds one to the target's request count (the new value is
+   its ticket), executes `DSB ISH` and sends the barrier IPI; the target's
+   handler reads its request count and stores that value as done; the sender
+   waits until done reaches its ticket. The handler's read comes after the
+   send that its ticket was taken before, so the interrupt that served it was
+   acknowledged after the call began, and the handler's `eret` is a CSE that
+   follows its read. This is the ARM ARM's idiom for code modified while
+   another PE may run it: invalidate, `DSB`, publish a flag; observe the
+   flag, then a CSE. The GICv3 acknowledge executes `DSB SY` after reading
+   `ICC_IAR1_EL1`, as Linux's `gic_read_iar_common` does, so the handler's
+   read cannot be satisfied before the interrupt is acknowledged; the GICv2
+   read already drains. The kernel's previous witness, a per-CPU count of
+   barrier interrupts that `gic_synchronize_cpu` compared with the value it
+   read before sending, could be satisfied by an earlier sender's handler
+   whose increment landed late; `gic_synchronize_cpu` moves to tickets with
+   this change (it serves the ITS's interrupt drain, which had the same gap).
+
+   *The call.* (1) `DSB ISH`. (2) With IRQs masked: note the calling CPU, read
+   `cpu_space[x]` for every other online CPU, and for each that names the
+   caller's space take a ticket and send the IPI. (3) With IRQs unmasked, wait
+   for every ticket. The calling CPU needs nothing: its thread returns through
+   `eret`, and any thread of the space that switches in on it afterwards does
+   so after the call's `DSB`, in program order. Masking IRQs across (2) keeps
+   "the calling CPU" true while the slots are read.
+
+   *Why it is enough* (`membarrier`'s store-buffering argument). The switch
+   stores `cpu_space[x]`, executes `DSB ISH`, and later `eret`s into the
+   thread. The call completes the invalidation with its `DSB`, then reads the
+   slot. Take any thread of the space that runs on CPU x after the call
+   returns, and its last switch-in on x:
+   - if the call's read saw that store, x was interrupted, and the
+     ticket's handler `eret`ed after observing a request made after the
+     invalidation completed;
+   - if the read did not see it, the store was not yet visible to every
+     observer, so the switcher's `DSB` completed after the read, which came
+     after the call's `DSB`: the invalidation completed before the switcher's
+     `eret`, and every instruction x fetches for the thread is fetched after
+     it.
+   A slot naming another space, or NULL, means x switched away; the thread's
+   next run on x is a later switch-in, covered the same way.
+
+   *No timeout.* An IPI is taken as soon as its target unmasks IRQs, and the
+   kernel's IRQ-masked spans are bounded (I-8 rests on the same property), so
+   the wait ends. Plan 9's `procflushseg` and Linux's `smp_call_function`
+   wait without a bound too. A timeout returning an error would let a
+   descheduled vCPU on a loaded host crash JavaScriptCore, which treats a
+   failed sync as fatal: contention would change the outcome, not only the
+   duration. The kernel is not preemptible inside a syscall (ARCH 8.12), so
+   the wait offers the CPU to other runnable threads between checks
+   (`sched_yield_hint`), as `procflushseg` calls `sched()`.
+
+   *No capability.* The call interrupts only CPUs running the caller's own
+   threads, so its cost lands on the caller, as with any syscall those threads
+   make; it reads no memory and changes no mapping. Linux's `membarrier` is
+   unprivileged for the same reason. W^X and the publish (I-42) are
+   untouched: the sync publishes nothing a code region's writer had not
+   already published through `SYS_ICACHE_SYNC`.
+
+   *The number.* The operator chose a new syscall over a mode of
+   `SYS_ICACHE_SYNC` (vote 2026-10-13): that call's callers set only `x0`,
+   `x1` and `x8`, so a flags word in `x2` would read garbage, and a zero
+   length as the selector was declined. `SYS_ICACHE_SYNC_SPACE` is 128, the
+   next native number. Linux's 128 is `restart_syscall`, which the vivarium
+   answers with a mandatory `ENOSYS` row before native dispatch, so a
+   Linux-phenotype Proc never reaches the sync and a native program
+   mis-declared as Linux only loses it; the native ceiling moves to 128, and
+   `restart_syscall`'s collision check moves from the ceiling argument to a
+   per-number one.
+
+   *Heritage.* Plan 9's `procflushseg` (`port/proc.c`) marks each processor
+   whose current process maps the segment and waits until each has taken its
+   next clock interrupt; this is that rule with an IPI in place of the tick.
+   Linux: `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE)`, which
+   interrupts the CPUs running the caller's mm.
+
+   *Witnesses.* Kernel tests: a thread of the space on another CPU is
+   interrupted (its ticket is served) and a CPU running another space is not
+   (no ticket is taken); a ticket is not served by a handler that read the
+   request count before the ticket was taken; the GIC barrier still reaches
+   every live CPU. A thread that switches in during the call needs no IPI by
+   the argument above; no test can schedule that window, so the audit checks
+   the switch-side `DSB` by reading the code. 128 MiB: `SYS_JIT_CREATE`
+   accepts 128 MiB and refuses 128 MiB plus one page.
 
 ## Status / handoff
 

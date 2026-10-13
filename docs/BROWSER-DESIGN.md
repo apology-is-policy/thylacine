@@ -632,11 +632,13 @@ before any syscall, and the engine then runs its interpreter.
   loop has no checkpoint, and Wasm reaches the new code without passing
   through C++. Thread suspension is fatal on Thylacine (B-0), so BBQ and OMG
   as they stand would crash at their first install.
-- **Decided 2026-10-13 (operator vote, `dec-2026-10-13-wasm-space-sync`): the
-  kernel synchronizes the address space's CPUs.** `SYS_ICACHE_SYNC` gains a
-  mode that interrupts every other CPU currently running a thread of the
-  caller's address space and returns once each has taken the interrupt;
-  `Wasm::resetInstructionCacheOnAllThreads` calls it. A running thread takes
+- **Decided 2026-10-13 (operator votes, `dec-2026-10-13-icache-sync-space`):
+  the kernel synchronizes the address space's CPUs.** A new syscall,
+  `SYS_ICACHE_SYNC_SPACE`, interrupts every other CPU currently running a
+  thread of the caller's address space and returns once each has taken the
+  interrupt; `Wasm::resetInstructionCacheOnAllThreads` calls it. (The first
+  vote made it a mode of `SYS_ICACHE_SYNC`; the second chose its own number,
+  because that call's callers leave its third register unset.) A running thread takes
   the event at the interrupt; a thread that is not running takes one at its
   next `eret`. This is Plan 9's `procflushseg`, which marks the processors
   running a process that maps the segment and waits for each one's clock
@@ -675,9 +677,9 @@ before any syscall, and the engine then runs its interpreter.
   before BBQ runs. Like upstream, a long BBQ or OMG loop polls no trap, so the
   way to stop one is to kill the process.
 - **Three chunks.** B-2e1: the consuming thread's fence for Wasm plans, and the
-  FTL on. B-2e2, the kernel, audit-bearing: the address-space mode of
-  `SYS_ICACHE_SYNC` (its mechanism designed in `JIT-ON-WX-DESIGN.md` first) and
-  the 128 MiB region. B-2e3: BBQ and OMG on that mode, the pool at 128 MiB,
+  FTL on. B-2e2, the kernel, audit-bearing: `SYS_ICACHE_SYNC_SPACE`
+  (its mechanism designed in `JIT-ON-WX-DESIGN.md` first) and the 128 MiB
+  region. B-2e3: BBQ and OMG on that call, the pool at 128 MiB,
   the `ref.cast` fix, and the Wasm exit stubs asked of the pool as compiles
   that may fail (today they must succeed, so a full pool kills the process
   where a `CompileError` was meant; B-2e1 Fable round, F3).

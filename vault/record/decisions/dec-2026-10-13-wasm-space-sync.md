@@ -3,10 +3,11 @@ id: dec-2026-10-13-wasm-space-sync
 type: dec
 title: "B-2e: SYS_ICACHE_SYNC gains a mode that context-synchronizes every CPU running a thread of the caller's address space; it replaces JavaScriptCore's suspend-every-thread walk for Wasm"
 date: 2026-10-13
-status: standing
+status: superseded
 decided-by: user-vote
 affects: [sub-webkit, sub-kernel-syscall-dispatch]
 created: 2026-10-13
+superseded-by: dec-2026-10-13-icache-sync-space
 ---
 ## Fork
 

@@ -127,11 +127,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
+- 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
 - 2026-10-13 [[chg-2026-10-13-jsc-dfg]] — JavaScriptCore's DFG runs on the sealed code region; a thread resumes the VM's code behind an ISB
 - 2026-10-13 [[chg-2026-10-13-jsc-ftl]] — JavaScriptCore's FTL runs on the sealed code region; every Wasm instance takes an ISB before its exit stubs; worker threads get 1 MiB stacks
 - 2026-10-12 [[chg-2026-10-12-abort-signalled-death]] — Pouch's abort() ends in snare:abort, and a death by a note reaps as a signalled wait word
 - 2026-10-12 [[chg-2026-10-12-group-status-first-claim]] — A dying group keeps its status; a page-in its death abandoned is that death
 - 2026-10-12 [[chg-2026-10-12-jsc-baseline-jit]] — JavaScriptCore's Baseline and regexp JITs run on one code region, written only through a sealed thunk
 - 2026-10-12 [[chg-2026-10-12-jsc-cooperative-scan]] — JavaScriptCore's conservative scan reads the stack image a thread parks when it releases heap access; no thread is suspended
-- 2026-10-12 [[chg-2026-10-12-loom-setup-ref-and-settle]] — Loom setup holds its own reference across the install; the rollback settles
 <!-- generated:end -->
