@@ -18,7 +18,12 @@
 #   R3  the legacy BUFFERS REGISTER's dead-descriptor check answers -1.
 #       Predicted: register_buffers_rejects at "BUFFERS on a bad loom_fd
 #       answers -EBADF".
+#   R4  its non-Loom check answers -1. Predicted: register_buffers_rejects at
+#       "BUFFERS on a non-Loom loom_fd answers -EBADF".
 #   U1  an unknown REGISTER op answers -1. Predicted: bridge_probe only.
+#   CONTROL-Q and U1Q  the same two in the qualification image (the lever on,
+#       its own kernel dir): the probe runs its qualification path, whose op-10
+#       check must agree with the kernel (audit round 7 F1).
 # A bridge_probe failure prints one kernel message whichever EL0 check failed,
 # so each mutant that fails it also names the probe's own FAIL line.
 # Each predicted message is checked, before any build, to lie inside the
@@ -44,10 +49,14 @@ W_ENTER_KIND='ENTER on a non-Loom descriptor answers -EBADF'
 W_REG_BAD='bad loom_fd answers -EBADF'
 W_REG_KIND='non-Loom loom_fd answers -EBADF'
 W_BUF_BAD='BUFFERS on a bad loom_fd answers -EBADF'
+W_BUF_KIND='BUFFERS on a non-Loom loom_fd answers -EBADF'
 W_BRG="loom-bridge-probe's verdict matches this kernel's qualification lever"
 P_ENTER="ENTER on a closed ring's number is -EBADF (got -1)"
 P_REG="REGISTER on a closed ring's number is -EBADF (got -1)"
 P_UNK="an unknown register op is -EINVAL (got -1)"
+P_UNK_Q="op 10 is no private op: -EINVAL (got -1)"
+QDIR=build/kernel-private-async-qual
+QUAL_LINE='PRIVATE-ASYNC QUALIFICATION build'
 SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
@@ -80,7 +89,7 @@ on_exit() {
   if [ "$MUTATED" = 1 ]; then
     restore && echo "-- $FILES restored and verified against HEAD" || _rc=9
     echo "!! build/ may hold the MUTANT kernel. Rebuild before any other boot:"
-    echo "   STRATUM_SRC=$STRATUM_SRC tools/build.sh kernel --config ci"
+    echo "   STRATUM_SRC=$STRATUM_SRC tools/build.sh kernel --config ci [--set PRIVATE_ASYNC_QUAL=y]"
   fi
   record "exit $_rc"
   exit $_rc
@@ -106,15 +115,22 @@ verdict() { # verdict <boot log> <test>: prints PASS, FAIL: <msg>, or NONE
 }
 fails() { /usr/bin/grep -E '^FAIL:|\[test\] [^ ]+ \.\.\. FAIL:' "$1" || true; }
 tally() { /usr/bin/grep -E '  tests: [0-9]+/[0-9]+' "$1" | tail -1 | sed -E 's/.*tests: ([0-9]+)\/([0-9]+).*/\1 \2/'; }
-run_suite() { # run_suite <label>
-  ( set +e; tools/test.sh > "$OUT/$1-test.log" 2>&1; echo $? > "$OUT/$1.rc" )
-  suite_rc=$(cat "$OUT/$1.rc")
-  [ -f build/test-boot.log ] || { echo "!! no build/test-boot.log after $1"; exit 1; }
-  cp build/test-boot.log "$OUT/$1-boot.log"
-  record "$1: test.sh exit $suite_rc"
+run_suite() { # run_suite <label> [test.sh args]
+  _l=$1; shift
+  rm -f build/test-boot.log
+  ( set +e; tools/test.sh "$@" > "$OUT/$_l-test.log" 2>&1; echo $? > "$OUT/$_l.rc" )
+  suite_rc=$(cat "$OUT/$_l.rc")
+  [ -f build/test-boot.log ] || { echo "!! no build/test-boot.log after $_l"; exit 1; }
+  cp build/test-boot.log "$OUT/$_l-boot.log"
+  record "$_l: test.sh exit $suite_rc"
 }
-inputs() { # inputs <label>: hash what the boot consumed
-  for f in build/kernel/thylacine.bin build/kernel/thylacine.elf build/ramfs.cpio build/disk.img; do
+probe_status() { # probe_status <boot log> <status>: the probe's verdict line, once
+  _c=$(/usr/bin/grep -cF "loom-bridge-probe status=$2 expected=$2" "$1" || true)
+  [ "$_c" = 1 ] || { echo "no single 'status=$2 expected=$2' in $1"; /usr/bin/grep -F 'loom-bridge-probe' "$1" | head -4; exit 1; }
+}
+inputs() { # inputs <label> [kernel dir]: hash what the boot consumed
+  _k=${2:-build/kernel}
+  for f in "$_k/thylacine.bin" "$_k/thylacine.elf" build/ramfs.cpio build/disk.img; do
     [ -f "$f" ] && shasum -a 256 "$f"
   done > "$OUT/$1-inputs.sha256"
 }
@@ -126,7 +142,7 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 HEAD_SHA=$(git rev-parse HEAD)
 record "HEAD $HEAD_SHA"
-for w in "$W_ENTER_BAD" "$W_ENTER_KIND" "$W_REG_BAD" "$W_REG_KIND" "$W_BUF_BAD" "$W_BRG"; do
+for w in "$W_ENTER_BAD" "$W_ENTER_KIND" "$W_REG_BAD" "$W_REG_KIND" "$W_BUF_BAD" "$W_BUF_KIND" "$W_BRG"; do
   [ -n "$w" ] || { echo "REFUSING: empty prediction"; exit 3; }
   c=$(cat kernel/test/test_loom.c kernel/test/test_loom_bridge_probe.c | /usr/bin/grep -cF "\"$w\"" || true)
   [ "$c" = 1 ] || { echo "REFUSING: '$w' occurs $c times in the two test sources"; exit 3; }
@@ -135,7 +151,7 @@ for t in "$T_REG" "$T_BUF" "$T_BRG"; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
 python3 - "$T_REG" "$W_ENTER_BAD" "$T_REG" "$W_ENTER_KIND" "$T_REG" "$W_REG_BAD" \
-  "$T_REG" "$W_REG_KIND" "$T_BUF" "$W_BUF_BAD" "$T_BRG" "$W_BRG" <<'MEMBER' || exit 3
+  "$T_REG" "$W_REG_KIND" "$T_BUF" "$W_BUF_BAD" "$T_BUF" "$W_BUF_KIND" "$T_BRG" "$W_BRG" <<'MEMBER' || exit 3
 import re, sys
 reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
 src = open('kernel/test/test_loom.c').read() + open('kernel/test/test_loom_bridge_probe.c').read()
@@ -147,11 +163,11 @@ for test, msg in zip(a[0::2], a[1::2]):
         raise SystemExit("REFUSING: '%s' is not inside %s (registered as %s)" % (msg, fn, test))
     print("member: %s (%s) holds '%s'" % (test, fn, msg))
 MEMBER
-for w in "$P_ENTER" "$P_REG" "$P_UNK"; do
+for w in "$P_ENTER" "$P_REG" "$P_UNK" "$P_UNK_Q"; do
   c=$(/usr/bin/grep -cF "\"${w% (got -1)}\"" usr/loom-bridge-probe/loom-bridge-probe.c || true)
   [ "$c" = 1 ] || { echo "REFUSING: probe check '${w% (got -1)}' occurs $c times"; exit 3; }
 done
-record "predictions derived: each message inside its registered test's function; three probe checks present"
+record "predictions derived: each message inside its registered test's function; four probe checks present"
 EXPECT=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c)
 [ "$EXPECT" -ge 1000 ] || { echo "REFUSING: derived only $EXPECT registrations"; exit 3; }
 record "expected tests (derived from test.c): $EXPECT"
@@ -167,7 +183,7 @@ done
 # the control is built: a rotten anchor found after the control wastes the
 # lease (it did, 2026-10-13T09:07Z: E1's anchor occurred 0 times).
 ANCHORS=$(awk '/^mutant [a-z0-9]+ kernel\/syscall.c \\$/ {print $2}' "$0" | tr '\n' ' ')
-[ "$(echo $ANCHORS | wc -w | tr -d ' ')" = 6 ] || { echo "REFUSING: found mutants '$ANCHORS', expected 6"; exit 3; }
+[ "$(echo $ANCHORS | wc -w | tr -d ' ')" = 8 ] || { echo "REFUSING: found mutants '$ANCHORS', expected 8"; exit 3; }
 python3 - "$0" kernel/syscall.c <<'CENSUS' || exit 3
 import re, sys
 script, target = open(sys.argv[1]).read(), open(sys.argv[2]).read()
@@ -177,10 +193,10 @@ for lab, old, new in calls:
     n, m = target.count(old), target.count(new)
     print("census %s: anchor x%d, mutant text x%d, MUTANT in new: %s" % (lab, n, m, "MUTANT" in new))
     if n != 1 or m != 0 or "MUTANT" not in new: bad += 1
-if len(calls) != 6 or bad:
+if len(calls) != 8 or bad:
     raise SystemExit("REFUSING: census %d calls, %d bad" % (len(calls), bad))
 CENSUS
-record "anchor census: 6 mutants, each anchor once in kernel/syscall.c"
+record "anchor census: 8 mutants, each anchor once in kernel/syscall.c"
 floor pre
 echo "=== CONTROL ==="
 lease control
@@ -198,10 +214,34 @@ for t in "$T_REG" "$T_BUF" "$T_BRG"; do
   v=$(verdict "$B" "$t")
   [ "$v" = PASS ] || { echo "control: $t verdict '$v'"; exit 1; }
 done
-record "CONTROL GREEN: $EXPECT/$EXPECT, $T_REG, $T_BUF and $T_BRG PASS, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
-SEEN_BINS=$CONTROL_BIN
+probe_status "$B" 70
+/usr/bin/grep -qF "$QUAL_LINE" "$OUT/control-build.log" && { echo "CONTROL: the default build saw the lever"; exit 1; } || true
+record "CONTROL GREEN: $EXPECT/$EXPECT, $T_REG, $T_BUF and $T_BRG PASS, probe status 70, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
+echo "=== CONTROL-Q ==="
+lease control-q
+tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y > "$OUT/control-q-build.log" 2>&1 || { echo "control-q build failed"; exit 1; }
+/usr/bin/grep -qF "$QUAL_LINE" "$OUT/control-q-build.log" || { echo "CONTROL-Q: cmake never saw the lever"; exit 1; }
+floor post-control-q-build
+inputs control-q "$QDIR"
+Q_BIN=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
+[ "$Q_BIN" != "$CONTROL_BIN" ] || { echo "CONTROL-Q: the qualification kernel equals the default one"; exit 1; }
+[ "$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)" = "$CONTROL_BIN" ] || { echo "CONTROL-Q: the qual build replaced the default kernel"; exit 1; }
+run_suite control-q --private-async-qual
+B=$OUT/control-q-boot.log
+/usr/bin/grep -q '^EXTINCTION:' "$B" && { echo "CONTROL-Q EXTINCTED"; fails "$B" | head; exit 1; } || true
+set -- $(tally "$B")
+[ "${2:-}" = "$EXPECT" ] && [ "${1:-}" = "$EXPECT" ] || { echo "control-q tally '$*' != $EXPECT/$EXPECT"; fails "$B" | head; exit 1; }
+[ "$suite_rc" = 0 ] || { echo "control-q test.sh exit $suite_rc"; exit 1; }
+for t in "$T_REG" "$T_BUF" "$T_BRG"; do
+  v=$(verdict "$B" "$t")
+  [ "$v" = PASS ] || { echo "control-q: $t verdict '$v'"; exit 1; }
+done
+probe_status "$B" 71
+record "CONTROL-Q GREEN: $EXPECT/$EXPECT, $T_REG, $T_BUF and $T_BRG PASS, probe status 71 (qualification path), bin ${Q_BIN%"${Q_BIN#????????????????}"}"
+SEEN_BINS="$CONTROL_BIN $Q_BIN"
 # mutant <label> <file> <python old> <python new> -- applied to the PRISTINE
 # file, built, booted; sets B to its boot log. The caller checks the prediction.
+# A label ending in q builds and boots the qualification image.
 mutant() {
   lease "$1"; floor "pre-$1"
   restore || exit 9
@@ -221,16 +261,25 @@ PY
     [ "$(/usr/bin/grep -c 'MUTANT' "$f" || true)" = "$_want" ] || { echo "REFUSING: $f MUTANT count is not $_want"; exit 5; }
   done
   diff -u "$(pristine "$2")" "$2" > "$OUT/$1.diff" || true
-  tools/build.sh kernel --config ci > "$OUT/$1-build.log" 2>&1 || { echo "$1 build failed"; exit 5; }
+  case $1 in
+    *q) _kd=$QDIR; _set="--set PRIVATE_ASYNC_QUAL=y"; _ta=--private-async-qual ;;
+    *)  _kd=build/kernel; _set=; _ta= ;;
+  esac
+  tools/build.sh kernel --config ci $_set > "$OUT/$1-build.log" 2>&1 || { echo "$1 build failed"; exit 5; }
+  if [ -n "$_set" ]; then
+    /usr/bin/grep -qF "$QUAL_LINE" "$OUT/$1-build.log" || { echo "$1: cmake never saw the lever"; exit 5; }
+  else
+    ! /usr/bin/grep -qF "$QUAL_LINE" "$OUT/$1-build.log" || { echo "$1: the default build saw the lever"; exit 5; }
+  fi
   floor "post-$1-build"
-  inputs "$1"
-  _bin=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
+  inputs "$1" "$_kd"
+  _bin=$(shasum -a 256 "$_kd/thylacine.bin" | cut -d' ' -f1)
   case " $SEEN_BINS " in *" $_bin "*) echo "REFUSING: the $1 kernel equals an earlier kernel of this run"; exit 5;; esac
   SEEN_BINS="$SEEN_BINS $_bin"
   mkdir -p "$OUT/$1-artifacts-DO-NOT-BOOT"
-  cp build/kernel/thylacine.bin "$OUT/$1-artifacts-DO-NOT-BOOT/"
+  cp "$_kd/thylacine.bin" "$OUT/$1-artifacts-DO-NOT-BOOT/"
   echo "MUTANT $1 kernel. Never boot or promote." > "$OUT/$1-artifacts-DO-NOT-BOOT/WARNING.txt"
-  run_suite "$1"
+  run_suite "$1" $_ta
   B=$OUT/$1-boot.log
   _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
   [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
@@ -328,6 +377,22 @@ mutant r3 kernel/syscall.c \
 '
 expect_fails R3 1 "$T_BUF|$W_BUF_BAD"
 record "R3 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_BUF FAILs at '$W_BUF_BAD'; extinction set = the suite's own"
+echo "=== R4: BUFFERS REGISTER answers -1 for a non-Loom descriptor ==="
+mutant r4 kernel/syscall.c \
+'    if (n > 0 && !bufs)               return -1;
+
+    struct Handle lh;
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_BADF; }
+' \
+'    if (n > 0 && !bufs)               return -1;
+
+    struct Handle lh;
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; } // MUTANT R4
+'
+expect_fails R4 1 "$T_BUF|$W_BUF_KIND"
+record "R4 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_BUF FAILs at '$W_BUF_KIND'; extinction set = the suite's own"
 echo "=== U1: an unknown REGISTER op answers -1 ==="
 mutant u1 kernel/syscall.c \
 '    return -T_E_INVAL;   // unknown register op
@@ -337,12 +402,25 @@ mutant u1 kernel/syscall.c \
 expect_fails U1 1 "$T_BRG|$W_BRG"
 expect_probe U1 "$P_UNK"
 record "U1 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_BRG FAILs, the probe at '$P_UNK'; extinction set = the suite's own"
+echo "=== U1Q: an unknown REGISTER op answers -1, qualification image ==="
+mutant u1q kernel/syscall.c \
+'    return -T_E_INVAL;   // unknown register op
+' \
+'    return -1;   // MUTANT U1Q: unknown register op
+'
+expect_fails U1Q 1 "$T_BRG|$W_BRG"
+expect_probe U1Q "$P_UNK_Q"
+record "U1Q DISCRIMINATED: $((EXPECT - 1))/$EXPECT in the qualification image, exactly $T_BRG FAILs, the probe at '$P_UNK_Q'; extinction set = the suite's own"
 echo "=== rebuild the committed tree, then SHAPE ==="
 lease rebuild
 tools/build.sh kernel --config ci > "$OUT/rebuild.log" 2>&1 || { echo "rebuild failed"; exit 1; }
 REB_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
 [ "$REB_BIN" = "$CONTROL_BIN" ] && record "rebuild byte-identical to the control kernel" \
   || record "rebuild differs from the control kernel (recorded, not claimed identical)"
+tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y > "$OUT/rebuild-q.log" 2>&1 || { echo "rebuild-q failed"; exit 1; }
+REB_Q=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
+[ "$REB_Q" = "$Q_BIN" ] && record "rebuild-q byte-identical to CONTROL-Q" \
+  || record "rebuild-q differs from CONTROL-Q (recorded, not claimed identical)"
 lease shape; floor pre-shape
 ( set +e; tools/check-production.sh --all > "$OUT/production.log" 2>&1; echo $? > "$OUT/production.rc" )
 [ "$(cat "$OUT/production.rc")" = 0 ] || { echo "SHAPE: check-production.sh --all exit $(cat "$OUT/production.rc")"; tail -20 "$OUT/production.log"; exit 7; }

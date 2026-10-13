@@ -1477,7 +1477,8 @@ enum {
     //                  rights snapshotted (the I-30 submit-time-pin substrate).
     //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES.
     // -T_E_BADF when loom_fd names no ring; -T_E_INVAL for an op no route knows;
-    // -1 on nargs out of range / a non-KOBJ_SPOOR fd in the list.
+    // -1 on nargs out of range / a non-KOBJ_SPOOR fd in the list. loom_fd, op
+    // and nargs are read as 32-bit values: their high words are ignored.
     SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
 
     // SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) -> n / -1  (Loom-3)
@@ -1491,7 +1492,8 @@ enum {
     //                       cannot arrive). The wait is death-interruptible (#811).
     //   x3 = flags        : LOOM_ENTER_* (LOOM_ENTER_GETEVENTS / _NONBLOCK).
     // Returns the number of SQEs consumed (>= 0), -T_E_BADF when loom_fd names
-    // no ring, or -1 on bad args. Per-op
+    // no ring, or -1 on bad args. Every argument is read as a 32-bit value:
+    // its high word is ignored. Per-op
     // failures (bad opcode / handle / rights) surface as an error CQE (result <
     // 0), NOT a syscall error -- the SQE was still consumed. v1.0 dispatches the
     // no-payload opcodes (NOP / FSYNC); the payload opcodes (READ/WRITE/GETATTR/

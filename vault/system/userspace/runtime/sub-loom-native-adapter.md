@@ -174,9 +174,9 @@ completion path allocates.
   READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
   adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
-  targeted adapter edit: 45 cases, every one red at its intended assertion
-  in the run of October 13, 08:37Z (`work/oct13-na4b/sabotage-20261013T083704Z`),
-  on the tree that carries audit round 5's fixes. A case whose anchor no
+  targeted adapter edit: 48 cases, every one red at its intended assertion
+  in the run of October 13, 09:02Z (`work/oct13-na4b/sabotage-20261013T090219Z`),
+  on the tree that carries vote 6 and audit round 6's fixes. A case whose anchor no
   longer matches reports ANCHOR-ROT and counts as not red.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,

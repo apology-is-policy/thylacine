@@ -373,7 +373,8 @@ static void qual_register(long fd) {
     put16(g_rec, 4, 2);
     CHECK(t_loom_register(fd, T_LOOM_REGISTER_SERVICE_SLOT, g_rec, 1) == -E_INVAL,
           "an unknown record version", 0);
-    CHECK(t_loom_register(fd, 10, g_rec, 1) == -1, "op 10 is not a private op", 0);
+    rc = t_loom_register(fd, 10, g_rec, 1);
+    CHECK(rc == -E_INVAL, "op 10 is no private op: -EINVAL", rc);
 
     record(g_rec, sizeof(struct t_loom_service_snapshot));
     ref_into(g_rec, 8, s1, i1);

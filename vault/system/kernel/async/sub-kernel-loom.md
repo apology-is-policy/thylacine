@@ -615,7 +615,11 @@ Enter, like REGISTER, answers `-T_E_BADF` for a descriptor that names no ring
 (closed, or another kind of object; operator vote 6, 2026-10-13), so a client
 can tell a ring closed under it from its own error. Otherwise it returns `-1`
 only for a corrupt ring object or invalid flags — everything about an
-individual operation is reported through its completion.
+individual operation is reported through its completion. The kernel tests
+`loom.register_rejects` and `loom.register_buffers_rejects` pin each
+descriptor check against a dead slot and a pipe; `loom-bridge-probe` pins
+ENTER and REGISTER on a closed ring's number, and the unknown op, from EL0 in
+both images.
 
 Two counters in the header are diagnostics: dropped submissions (a bad
 indirection index) and overflowed completions (which the admission rule is meant

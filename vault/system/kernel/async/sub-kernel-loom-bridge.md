@@ -171,7 +171,7 @@ What it checks, by image:
     by every op. Result-copyout faults are also driven for QUERY, POOL and POOL
     QUERY; TARGET's needs a registry and is faulted in-kernel;
   - the argument refusals (nargs, null, kernel address, closed fd, a pipe, an
-    unknown version, op 10);
+    unknown version, op 10, which answers -EINVAL in both images since vote 6);
   - QUERY, REAP and ABORT, a TARGET with an absent registry fd, and the pool
     round trip;
   - ENTER's refusals and three rejected SQEs. An unknown opcode completes

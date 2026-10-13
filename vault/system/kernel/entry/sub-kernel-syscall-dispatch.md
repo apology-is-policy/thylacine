@@ -1373,11 +1373,15 @@ private-ring VMA, so no other Proc can map one ([[sub-kernel-weft]]). Mechanism
 and fixes: [[sub-kernel-loom-bridge]].
 
 A descriptor that names no ring (a dead slot, or a handle of another kind)
-answers -T_E_BADF from ENTER and from every REGISTER op, legacy and private,
-and an unknown REGISTER op answers -T_E_INVAL (operator vote 6, 2026-10-13;
-before it ENTER and the legacy REGISTER answered -1, which ERRORS.md forbids).
-A client tells a ring closed under it from its own error by this answer. The
-legacy REGISTER's argument refusals still answer -1.
+answers -T_E_BADF from ENTER and, once its arguments pass, from REGISTER: the
+legacy ops in every image, the private ops in the qualification image (without
+the lever a private op answers -T_E_OPNOTSUPP before any lookup). An unknown
+REGISTER op answers -T_E_INVAL (operator vote 6, 2026-10-13; before it ENTER
+and the legacy REGISTER answered -1, which ERRORS.md forbids). A client tells
+a ring closed under it from its own error by this answer. The legacy
+REGISTER's argument refusals still answer -1, and they come first. The
+handlers read loom_fd and op as 32-bit values and ignore their high words
+([[sub-kernel-syscall-abi]] records which handlers refuse a high word instead).
 
 ## Terminal interaction suboperations
 

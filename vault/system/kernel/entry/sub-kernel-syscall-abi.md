@@ -499,6 +499,18 @@ be one 4 KiB staging buffer per round trip.
   Loom's ENTER and REGISTER answer a descriptor that names no ring with
   `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`; their other
   legacy refusals keep `-1`.
+- **Loom reads its handle and op arguments as 32-bit values.** Its handlers
+  cast `loom_fd` to `hidx_t` and `op`, `nargs` and ENTER's counts and flags to
+  `u32`, so a high word is ignored: op `0x1_0000_0002` routes as op 2, and
+  descriptor `0x1_0000_0005` names the caller's own descriptor 5. Handlers
+  differ on this. Some refuse a high word (the PCI IRQ handle bound in
+  `sys_pci_irq_create_handler`, the PTY interaction fds in
+  `sys_pty_register_for_proc`, the srv registry's `source_fd`, the console
+  episode op, `pci_map_range`'s protection); others cast it away. No authority
+  crosses a Proc through the cast (the alias is in the caller's own table), but
+  a caller that builds an argument wrongly gets a known op rather than a
+  refusal. Which rule the whole syscall surface should follow is an open
+  question.
 - **The `svc` immediate is unused.** Reserved as a class selector; nothing reads
   it.
 - **Environment pass-through at spawn was reserved and never built.** The

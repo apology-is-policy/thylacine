@@ -1062,6 +1062,10 @@ void test_loom_register_buffers_rejects(void) {
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -1, "unmapped VA rejected");
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -T_E_BADF,
                    "BUFFERS on a bad loom_fd answers -EBADF");
+    hidx_t rd = -1, wr = -1;
+    TEST_ASSERT(sys_pipe_for_proc(p, &rd, &wr) == 0, "pipe pair");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, rd, &one, 1), -T_E_BADF,
+                   "BUFFERS on a non-Loom loom_fd answers -EBADF");
 
     // Every reject is atomic: the table stays empty + no ref leaked.
     struct Handle h;
