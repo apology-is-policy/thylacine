@@ -130,9 +130,142 @@ build warnings equal to NA-3's. Not proven: SMP, sanitizers, a real EL0 client
   as the fix; on that tree it would have failed exactly like the control. A
   mutant's failure means something only beside a green control.
 
+**Audit rounds 2-7 (holotype-reviewer on Fable 5.1, start and end lines equal
+each round).** Round 2 found every round-1 fix sound and one P2 that had stood
+since NA-4a (b25c8c75f): retirement wiped the request book while futures still
+held entries. `FixedDriver::progress` cleared every entry once the backend said
+retired, and the backend trusted QUERY RETIRED alone. The engine retires a
+scope one visit before it posts that scope's last terminal
+(loom_service_engine.c:306, loom_service_ready.c:66-67), so the late CQE found
+no entry and failed the ring. Each later round audited the one before:
+
+- 41c1aa8fd (round 2): retired() waited for QUERY's active_ops and
+  pending_terminals to reach zero, then for the SQ and CQ to drain;
+  `clear_retired` discards only abandoned entries.
+- 037625d43 (round 3 found two P2s in that): a refusal ENTER precharges
+  against a full CQ (frontend.c:86-96) is no request record, so QUERY never
+  counts it; and a shot routed after retire() met a closing pool and was
+  dropped without a RETURN. The proof became a count: SQEs pushed equal
+  terminal CQEs taken (I-29), plus every scope RETIRED or gone. A late shot is
+  now returned.
+- 8a59ec65d (round 4 found a regression in that): the new RETURN arm failed
+  the ring on -EBADF, and failing closes the descriptor, a number another
+  thread had already closed. The arm now forgets the descriptor, as ENTER
+  does.
+- b9cec7564 (round 5: a P1 and a P2). P1: the adapter's ENTER rule forgot the
+  descriptor on -EBADF, and the kernel's ENTER never answered -EBADF. It
+  answered a dead or non-Loom number with a bare -1
+  (sys_loom_enter_for_proc), which docs/ERRORS.md:73 forbids. The simulated
+  kernel answered -EBADF, so the ENTER test and its sabotage proved the sim,
+  not the kernel. P2: every REGISTER path but the late-shot arm discarded a
+  kernel -EBADF, so a Ring drop then closed the number; I had found the same
+  thing myself at 08:08Z, while the round ran. Fix: one REGISTER choke point
+  (`Shared::register`) forgets on -EBADF, latches the loss and answers
+  -ECANCELED; a TARGET, whose -EBADF can name its registry descriptor
+  (loom.c:1650), asks a zero-reference QUERY instead; every public entry learns
+  the latch; a turn re-checks after its leading ENTER.
+- ec6bf9437 (operator vote 6, then round 6 clean: 0/0/0, 4 P3). The kernel
+  half of the round-5 P1 changed a syscall's answer, so it went to the
+  operator. Vote 6: ENTER and the legacy REGISTER (handles and buffers) answer
+  -T_E_BADF on both descriptor checks, and an unknown REGISTER op answers
+  -T_E_INVAL. The adapter's ENTER rule went back to the direct test
+  (`rc == -ECANCELED || rc == -EBADF`) and the QUERY probe became TARGET-only.
+  Round 6's four P3s are fixed in the same commit.
+- 1e4668a4f (round 7: 0/0/1/4). The P2 was mine to find: the probe is one
+  binary for both images, and I changed the unknown-op check on the default
+  path only. Its qualification path still expected -1, so that image's suite
+  was red, and every kernel run since the vote had built the ci image alone.
+  The P3s: the BUFFERS non-Loom check had no pin (now one, and mutant R4); the
+  dispatch dossier claimed -EBADF from every REGISTER op in every image
+  (without the lever a private op answers -EOPNOTSUPP first); the adapter
+  dossier cited the 45-case sabotage run; and the handlers ignore the high
+  word of a descriptor or op. That last one is not fixed in code: syscall.c is
+  split on it (five handlers refuse a high word, the rest cast it away), and
+  an argument's width is an ABI decision, so it is documented and queued for
+  the operator.
+
+**Wrong turns (rounds 2-7).**
+- My round-2 fix trusted QUERY's counters. They count request records, and a
+  refusal ENTER precharges is not one. Round 3 found it by enumerating the
+  kernel's post paths; I had enumerated only the records.
+- My round-2 CQ test asserted 8 RETURNs that my code could not produce: the
+  four late shots met a closing pool and were dropped. The test was written,
+  never run (the mac was held), and the false expectation stood until round 3
+  traced it.
+- My round-3 RETURN arm failed the ring on any refusal but -ENOENT, -EBADF
+  included, and failing closes the descriptor. The NA-4b P1 rule (never close
+  a number the kernel says is gone) was one function away.
+- Fixes rotted sabotage anchors twice (round 4's fix: two anchors matched
+  twice; round 5's recheck: one). A read-only census of every anchor caught
+  each before a run. The census exists because round 4 found one rotten anchor
+  that would have stopped a whole run at case 5.
+- The ENTER rule was written against the sim's answer, never the kernel's.
+  Nothing I ran could have caught it: every host test talks to the sim. The
+  reviewer read syscall.c.
+- Asking vote 6, I wrote that no kernel test or program depended on the -1,
+  "searched". Two kernel assertions held it: "bad loom_fd rejected" in
+  `loom.register_rejects` and in `loom.register_buffers_rejects`
+  (test_loom.c:907 and :1055 before the change), each expecting -1 for
+  descriptor 999. My grep pattern did not match how they spell it. The claim
+  was false; the decision did not rest on it. Both now expect -T_E_BADF.
+- Two new tests failed at setup with -EBUSY: I gave two READs one fixed
+  buffer. Each got its own.
+- The sabotage register-ebadf-kept-retired first came back GREEN against a
+  broken adapter: the test's turn polled first, and the sim's POLLNVAL masked
+  the REGISTER path the case removes. The test now drives a deadline-now turn
+  and is red at its assertion.
+- Round 5 suggested a fail() guard; I decided not to take it, said so in the
+  commit, and left the edit in the code. Round 6 found the dead guard.
+- The kernel harness for vote 6 failed twice before any mutant was judged.
+  First (09:07Z) its E1 anchor matched nothing: I wrote it from memory of
+  ENTER's line, which continues past where my anchor ended; the control had
+  already been built and booted. 7a4ae554e added a census that checks every
+  anchor before any build. Second (09:12Z) the E1 kernel did exactly what
+  was predicted (1869/1871, FAIL at "ENTER on a bad descriptor answers
+  -EBADF"), and the harness still stopped: it read that verdict from
+  `loom.register_handles`, while the assertion lives in
+  `loom.register_rejects` (and the BUFFERS one in
+  `loom.register_buffers_rejects`). I had named the tests after the functions
+  I edited around, never from test.c's registrations, so the control's
+  "register_handles PASS" was true but said nothing about the pins. The
+  ec6bf9437 commit message carries the same wrong names. 7ec7815a1 names
+  the registered tests and checks, before any build, that each predicted
+  message lies inside its test's function; both checks were run both ways.
+  The same boot showed the probe's diagnostic lying: "(got 0)" where ENTER
+  answered -1, because those checks passed a literal 0. They now pass the rc,
+  and the harness asserts the probe's own line.
+- Self-audit for round 7: libthyla-rs `t::loom::Ring` reports every refusal
+  as InvalidArgument, so a legacy client still cannot see the -EBADF vote 6
+  made distinct (OPEN-BUGS 09:13Z; no caller matches on InvalidArgument).
+
+**Evidence.** Host, at ec6bf9437 (work/oct13-na4b, run 20261013T090219Z):
+`tools/test-loom-client.sh` passes 187 of 187 Rust tests in both profiles; all
+48 sabotage cases red, each at its intended assertion; sources restored (sha
+mismatches 0); the crate rustfmt-clean (`cargo fmt -p loom-client --check`
+exit 0 at 1e4668a4f, where loom-client is byte-identical to ec6bf9437;
+work/oct13-na4b/fmt-20261013T110941Z.log); the guest build's warning set equal
+to NA-3's. Kernel: at 1e4668a4f (work/oct13-na4b/enter-errno-20261013T110949Z,
+mac axis, one boot per leg), the control passes 1871 of 1871 in both images
+(the probe's status 70 in the default image, 71 on its qualification path),
+with `loom.register_rejects`, `loom.register_buffers_rejects` and
+`loom.bridge_probe` among them. Eight mutants each put one -1 back, and each
+fails exactly its predicted tests at their named assertions, with the suite's
+own extinction and no other: ENTER on a dead descriptor (`register_rejects`,
+and the probe's EL0 ENTER on a closed ring's number, "got -1") and on a
+non-Loom one (`register_rejects`); the legacy HANDLES REGISTER on a dead
+descriptor (`register_rejects`, and the probe's EL0 REGISTER) and on a
+non-Loom one (`register_rejects`); the BUFFERS REGISTER on a dead and on a
+non-Loom descriptor (`register_buffers_rejects`, one assertion each); and an
+unknown REGISTER op in each image (the probe, at that path's own check). Both
+rebuilds are byte-identical to their controls, and `tools/check-production.sh
+--all` passes. Not proven: SMP, sanitizers, a real EL0 client of the private
+ring (NA-4d).
+
 **Operator decisions this run:** vote 4, explicit REAP (04:59:44Z October 13);
 vote 5, a 7000 MiB disk floor for this run, queued behind main's RED bakes
-(05:32:43Z October 13).
+(05:32:43Z October 13); vote 6, Loom's ENTER and legacy REGISTER answer
+-T_E_BADF for a descriptor that names no ring and an unknown REGISTER op
+-T_E_INVAL (08:51:01Z October 13, the answer as the transcript records it).
 
 ## October 12: NA-3 -- Astra's Rust client cores, installed as the crate loom-client (Corona)
 

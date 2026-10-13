@@ -4272,10 +4272,11 @@ REAPed once their streams end. The Rust adapter (NA-4b) comes before the C one
 (NA-4c). NA-4d adds the EL0 fixture server and the qualification probe, because
 no EL0 program can reach a private CONNECT today.
 
-### NA-4b: the Rust adapter (verified; audit round 1 closed, round 2 owed)
+### NA-4b: the Rust adapter (verified; audit rounds 1-7 closed)
 
 The adapter is `loom_client::native` (`Kernel`, `Ring`, the handles and futures)
-with `ThylaKernel` in libthyla-rs, 24 host tests against a simulated kernel
+with `ThylaKernel` in libthyla-rs, host tests against a simulated kernel (187
+at the round-7 close)
 (`tests/native.rs`, `tests/native/sim.rs`), the fixed driver made the ring's one
 request driver (`route`, `BookRequest`, `Kind::Slot`), the adapter's ring twins
 in the ABI checker, the trigger row "Native Loom adapter (October 12)", and the
@@ -4328,5 +4329,59 @@ untested paths now tested, the rest named in the dossier's caveats; F7 P3 a
 dossier caveat. Host: 171 of 171 loom-client tests in both profiles
 (`tools/test-loom-client.sh`), 31 of 31 sabotage cases red at their intended
 assertions, the crate rustfmt-clean, and the guest build's warning set equal
-to NA-3's. The round closed dirty (a P0), so a round 2 on the fixes is owed
-before the arc's merge.
+to NA-3's. The round closed dirty (a P0), so a round 2 on the fixes followed.
+
+Audit rounds 2-7 (holotype-reviewer on Fable 5.1 each round). Round 2 found the
+round-1 fixes sound and a P2 that had stood since NA-4a: retirement wiped the
+request book while futures still held entries. The adapter trusted QUERY
+RETIRED, and the kernel retires a scope one visit before it posts that scope's
+last terminal. Rounds 3 and 4 found two P2s and a regression in the fixes.
+Retirement is now decided by a count (SQEs pushed equal terminal CQEs taken,
+and every scope is RETIRED or gone), and a shot routed after retirement is
+RETURNed. Round 5 found that the adapter's ENTER forget rule keyed on -EBADF
+while the kernel's ENTER answered a dead descriptor with a bare -1, and that
+every REGISTER path but one discarded -EBADF. REGISTER now has one choke point:
+it forgets the descriptor on -EBADF and answers -ECANCELED, except a TARGET,
+whose -EBADF can name its registry descriptor, which a zero-reference QUERY
+decides. The kernel half changed a syscall's answer and went to the operator
+(vote 6, October 13): ENTER and the legacy REGISTER answer -T_E_BADF for a
+descriptor that names no ring, and an unknown REGISTER op answers -T_E_INVAL
+(ec6bf9437; pinned by `loom.register_rejects`, `loom.register_buffers_rejects`
+and `loom-bridge-probe`). Round 6 was clean (four P3s, fixed). Round 7: 0 P0, 0
+P1, 1 P2 and 4 P3. The P2: the probe's qualification path still expected -1 for
+an unknown op, so the qualification image's suite was red, and no run had built
+that image since the vote; fixed, and the harness now boots that image too. The
+P3s: the BUFFERS non-Loom check gained a pin and a mutant; two dossier
+sentences were corrected; and the handlers read their descriptor and op as
+32-bit values, now documented and put to the operator with the other
+conformance items (1e4668a4f).
+
+Evidence. Host, at ec6bf9437 (work/oct13-na4b, run 20261013T090219Z): 187 of
+187 loom-client tests in both profiles, 48 of 48 sabotage cases red at their
+intended assertions, the crate rustfmt-clean (`cargo fmt -p loom-client
+--check` exit 0 at 1e4668a4f, where loom-client is byte-identical to ec6bf9437;
+work/oct13-na4b/fmt-20261013T110941Z.log), and the guest build's warning set
+equal to NA-3's. Kernel: at 1e4668a4f
+(work/oct13-na4b/enter-errno-20261013T110949Z, mac axis, one boot per leg), the
+control passes 1871 of 1871 in both images (the probe's status 70 in the
+default image, 71 on its qualification path), with `loom.register_rejects`,
+`loom.register_buffers_rejects` and `loom.bridge_probe` among them. Eight
+mutants each put one -1 back, and each fails exactly its predicted tests at
+their named assertions, with the suite's own extinction and no other: ENTER on
+a dead descriptor (`register_rejects`, and the probe's EL0 ENTER on a closed
+ring's number, "got -1") and on a non-Loom one (`register_rejects`); the legacy
+HANDLES REGISTER on a dead descriptor (`register_rejects`, and the probe's EL0
+REGISTER) and on a non-Loom one (`register_rejects`); the BUFFERS REGISTER on a
+dead and on a non-Loom descriptor (`register_buffers_rejects`, one assertion
+each); and an unknown REGISTER op in each image (the probe, at that path's own
+check). Both rebuilds are byte-identical to their controls, and
+`tools/check-production.sh --all` passes.
+
+Still open: the legacy REGISTER's argument refusals and the legacy SETUP answer
+-1 (a further syscall-result change, its own vote); libthyla-rs `t::loom::Ring`
+reports every refusal as `InvalidArgument`; five untested adapter paths and
+`destroy_pool`'s -ECANCELED; the simulated kernel's ECANCELED where the kernel
+answers ENOENT; QUERY of a clunked FID (a vote before NA-4d); a syscall-level
+witness of REAP refusing a mid-CLUNK FID; the late-shot RETURN bypassing the
+ledger's checks; and whether the Loom handlers should refuse the high word of a
+descriptor or op (a vote, batched with the legacy -1s). Each is in OPEN-BUGS.
