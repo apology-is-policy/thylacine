@@ -111,6 +111,11 @@ CASES = [
             inner.shared().reap_pass();
             inner.shared().reserve(kind, scope)
         }''', '''        Err(e) if e == -ENOSPC => Err(e),''')]),
+ ('reap-one-pass', 'a_dropped_scope_is_reaped_after_its_fids_without_clunking_them',
+  [('native/kernel.rs', '''            if !freed {
+                break;
+            }''', '''            let _ = freed;
+            break;''')]),
 ]
 
 
