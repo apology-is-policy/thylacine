@@ -47,9 +47,13 @@
 #           ($vm.ftlTrue() is false outside FTL code) and the code block must be
 #           the one it started with. With the FTL off it reads x4000 (DFG code
 #           is not FTL code); --forceICFailure=true also turns it red, but by
-#           changing the compile, so what it shows about a rewrite that silently
-#           did nothing is settled by B-2e1's red run, not assumed; ftl-osr is
-#           the FTL's discriminating patch witness
+#           changing the compile. A rewrite that does nothing it cannot see:
+#           with replaceWithJump gone from rewireStubAsJumpInAccess and
+#           linkCodeInline refusing (B-2e1's red run, 2026-10-13) it still
+#           passes, because every access then takes the slow path, which answers
+#           right and returns into the same FTL code. So it shows the rewrites
+#           run without breaking the code; ftl-osr is the FTL's discriminating
+#           patch witness
 #   wasm-sync / wasm-async   a module whose export calls a JS import, compiled
 #           synchronously and by WebAssembly.instantiate: its exit stubs are
 #           JIT code a worklist thread may write, run by the JS thread, which
@@ -62,7 +66,9 @@
 #           (an inlined call would share its caller's)
 #   tiers   Baseline, DFG and FTL on; BBQ and OMG stay off although each is
 #           asked for by flag; --useDollarVM=true in the same line reads on, so the
-#           flags were parsed (jscOptions() reports a bool as the number 0 or 1)
+#           flags were parsed (jscOptions() reports a bool as the number 0 or 1).
+#           Any other complete reading fails at once (the FTL forced off read
+#           JSCO-1-0-0-0-1-1 and, before the fail arm, waited out the timeout)
 #   osr     a DFG function speculating int32 is handed a double and a string: two
 #           OSR exits through the one ramp compiled on the first (its jump patched
 #           in place), and both answers right. The leg calls on until the DFG
@@ -232,8 +238,8 @@ lc_run_expect_hardfail_re "/webkit/jsc --useConcurrentJIT=false --useDollarVM=tr
 lc_pass "ls-jsc(dfg-sync): compiled on the JS thread, the same"
 
 set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
-lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
-    "JSCO-1-1-0-0-1-1"
+lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
+    "JSCO-1-1-0-0-1-1" {JSCO-[0-9](-[0-9]){5}[^-0-9]}
 lc_pass "ls-jsc(tiers): Baseline, DFG and FTL on, BBQ/OMG off; the flags were parsed"
 
 set osr {function h(x){return x+1} var s=0, i=0; for(;i<1e5||(i<1e7&&numberOfDFGCompiles(h)<1);i++)s=h(i); s=h(99999); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}

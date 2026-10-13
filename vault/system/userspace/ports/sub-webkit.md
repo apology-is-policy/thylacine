@@ -295,7 +295,12 @@ match the JIT-type word in `$vm.codeBlockFor`'s dump (`, FTLFunction`), since
 the dump also prints `(FTLFail)` and `(HadFTLReplacement)` for other tiers.
 `ftl-ic`: an FTL property cache meets four new shapes, one a getter, 1000
 times each, and must stay in the same FTL code block (a call that left FTL
-code would add 1000); with the FTL off it reads red. `wasm-sync` and
+code would add 1000); with the FTL off it reads red. It cannot see a rewrite
+that does nothing: with `replaceWithJump` gone from
+`rewireStubAsJumpInAccess` and `linkCodeInline` refusing, it still passes,
+since every access then takes the slow path, which answers right and returns
+into the same code. It shows that the rewrites run without breaking the code;
+`ftl-osr` is the discriminating patch witness. `wasm-sync` and
 `wasm-async`: a module whose export calls a JS import, compiled each way, runs
 its exit stubs 1001 times. `stack`: a runaway recursion on a `$.agent` thread
 (a WTF thread like the compilers) must reach more than 131072/48 calls; an
@@ -423,11 +428,12 @@ JIT (B-2c, HVF, one run of `ls-jsc` on 2026-10-12): SunSpider 1.0.2 totals
 the 2e7-iteration int32 loop takes 442 ms against 931 ms. With the DFG (B-2d,
 HVF, `ls-jsc` on 2026-10-13, one run): SunSpider 68 ms with every JIT on, 105
 ms with the DFG off, 346 ms denied; the loop 193 / 433 / 917 ms. With the FTL
-(B-2e1, HVF, `ls-jsc` on 2026-10-13, one run): SunSpider 95 ms with every JIT
-on, 68 ms with the FTL off, 107 ms with the DFG off, 342 ms denied; the loop
-220 / 192 / 437 / 1008 ms. The FTL makes both short runs slower (its compile
-costs more than these runs save); claiming any FTL gain needs a longer
-benchmark.
+(B-2e1, HVF, three `ls-jsc` runs on 2026-10-13): SunSpider 95 / 91 / 97 ms with
+every JIT on, 68 / 82 / 69 ms with the FTL off, 107 / 111 / 106 ms with the DFG
+off, 342 / 367 / 347 ms denied; the loop 220 / 221 / 220, 192 / 193 / 193,
+437 / 435 / 435 and 1008 / 916 / 915 ms. The FTL makes both short runs slower
+in every run (its compile costs more than these runs save); claiming any FTL
+gain needs a longer benchmark.
 
 ## Prosecution
 
