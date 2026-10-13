@@ -189,3 +189,16 @@ int loom_fid_reap(struct loom_slot_table *t,struct loom_service_node_table *node
     (void)loom_slot_unpin(t,parent);
     return 0;
 }
+int loom_fid_reap_retired(struct loom_slot_table *t,struct loom_service_node_table *nodes,
+    struct loom_service_ref source) {
+    struct loom_service_node *n=fid_exact(t,nodes,source,true);
+    if(!n || t->slots[source.slot].kind!=LOOM_SERVICE_FID)return -T_E_NOENT;
+    if(n->state!=LOOM_SERVICE_RETIRED) {
+        // Only a RETIRED scope proves the abort quiescence retire_aborted needs.
+        struct loom_service_node *p=fid_exact(t,nodes,n->parent,true);
+        if(!p || p->state!=LOOM_SERVICE_RETIRED || t->slots[source.slot].pins)return -T_E_BUSY;
+        int rc=loom_fid_retire_aborted(t,nodes,source);
+        if(rc)return rc;
+    }
+    return loom_fid_reap(t,nodes,source);
+}

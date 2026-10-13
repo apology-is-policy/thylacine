@@ -745,6 +745,8 @@ int loom_private_node_prepare(struct Loom *, struct Proc *,
 int loom_private_node_publish(struct Loom *, struct loom_service_ref);
 int loom_private_node_rollback(struct Loom *, struct loom_service_ref);
 int loom_private_node_reap_unused(struct Loom *, struct loom_service_ref);
+// A walked FID, once retired (loom_fid_reap_retired); its scope stays pinned until then.
+int loom_private_fid_reap(struct Loom *, struct loom_service_ref);
 
 // Internal target registration: complete immutable kernel record, retained owner
 // and creator in its stable syscall image. Resolves the actual registry_fd via

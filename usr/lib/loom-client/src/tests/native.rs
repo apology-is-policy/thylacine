@@ -409,6 +409,26 @@ fn a_dropped_fid_is_clunked_then_reaped() {
 }
 
 #[test]
+fn a_dropped_scope_is_reaped_after_its_fids_without_clunking_them() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let a = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    let b = run(&r, scope.walk(b"", None).unwrap()).unwrap();
+    run(&r, a.open(0, None).unwrap()).unwrap();
+    assert_eq!(sim.live_slots(), 4);
+    // The abort ends the session, so no fid is clunked. Each fid is reaped once
+    // the scope has retired, and the scope after its fids, in the same turn.
+    drop((a, b, scope));
+    r.turn(Some(r.now() + MS)).unwrap();
+    assert_eq!(sim.live_slots(), 1, "only the target remains");
+    assert_eq!(sim.s().clunks, 0);
+    assert_eq!(sim.s().aborts.len(), 1);
+}
+
+#[test]
 fn an_exhausted_slot_table_reaps_before_it_refuses() {
     let sim = Sim::new();
     file(&sim, "f", b"x");

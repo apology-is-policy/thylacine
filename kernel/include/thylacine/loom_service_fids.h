@@ -52,4 +52,9 @@ int loom_fid_finish_clunk(struct loom_slot_table *,struct loom_service_node_tabl
 int loom_fid_retire_aborted(struct loom_slot_table *,struct loom_service_node_table *,
     struct loom_service_ref source);
 int loom_fid_reap(struct loom_slot_table *,struct loom_service_node_table *,struct loom_service_ref);
+// REAP of a walked FID: one its CLUNK retired, or one of a locally RETIRED scope
+// that no operation claims or borrows, retired here first. A refusal changes
+// nothing; success unpins the scope.
+int loom_fid_reap_retired(struct loom_slot_table *,struct loom_service_node_table *,
+    struct loom_service_ref source);
 #endif

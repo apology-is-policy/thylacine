@@ -117,6 +117,7 @@ int loom_private_service_reap(struct Loom *l,struct Proc *p,const struct loom_se
     if(kind==LOOM_SERVICE_TARGET)return loom_private_target_reap(l,in->object);
     if(kind==LOOM_SERVICE_POOL)return l->receipt_size ? loom_private_pool_reap(l,in->object) : -T_E_OPNOTSUPP;
     if(kind==LOOM_SERVICE_SCOPE && state==LOOM_SERVICE_RETIRED)return loom_private_connect_reap(l,in->object);
+    if(kind==LOOM_SERVICE_FID && state!=LOOM_SERVICE_RESERVED)return loom_private_fid_reap(l,in->object);
     if(kind==LOOM_SERVICE_SCOPE || kind==LOOM_SERVICE_FID)return loom_private_node_reap_unused(l,in->object);
     return -T_E_INVAL;
 }

@@ -248,16 +248,24 @@ impl<K: Kernel> Shared<K> {
             self.control(REGISTER_ABORT_SCOPE, scope);
         }
     }
-    /// One REAP attempt for every slot waiting on it. A busy slot is retried on a
-    /// later pass; a refusal other than EBUSY leaves it for close to reclaim.
+    /// REAP every slot waiting on it. A scope's fids pin it, so passes repeat
+    /// while one frees a slot. A busy slot is retried on a later turn; a refusal
+    /// other than EBUSY leaves it for close to reclaim.
     pub(crate) fn reap_pass(&self) {
-        for i in 0..64 {
-            let due = self.slots.borrow()[i].filter(|e| e.state == SlotState::Reap);
-            if let Some(e) = due {
-                let rc = self.control(REGISTER_REAP_SERVICE_SLOT, e.r);
-                if rc == 0 || rc == -(ENOENT as i64) {
-                    self.slots.borrow_mut()[i] = None;
+        loop {
+            let mut freed = false;
+            for i in 0..64 {
+                let due = self.slots.borrow()[i].filter(|e| e.state == SlotState::Reap);
+                if let Some(e) = due {
+                    let rc = self.control(REGISTER_REAP_SERVICE_SLOT, e.r);
+                    if rc == 0 || rc == -(ENOENT as i64) {
+                        self.slots.borrow_mut()[i] = None;
+                        freed = true;
+                    }
                 }
+            }
+            if !freed {
+                break;
             }
         }
     }

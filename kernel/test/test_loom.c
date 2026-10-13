@@ -118,6 +118,13 @@ void test_loom_service_nodes(void) {
     TEST_ASSERT(!error, error);
 }
 
+#include "loom_fids_fixture.h"
+void test_loom_service_fid_reap(void);
+void test_loom_service_fid_reap(void) {
+    const char *error = loom_fids_fixture();
+    TEST_ASSERT(!error, error);
+}
+
 #include "loom_requests_fixture.h"
 void test_loom_service_requests(void);
 void test_loom_service_requests(void) {
@@ -3222,7 +3229,7 @@ struct loom_native_peer {
 static int loom_native_peer_step(struct SrvConn *cn,struct loom_native_peer *peer) {
     static const u8 sequence[]={P9_TVERSION,P9_TATTACH,P9_TGETATTR,P9_TWALK,
         P9_TGETATTR,P9_TLOPEN,P9_TREAD,P9_TWRITE,
-        P9_TREAD,P9_TREAD,P9_TREAD,P9_TREAD,P9_TCLUNK};
+        P9_TREAD,P9_TREAD,P9_TREAD,P9_TREAD,P9_TCLUNK,P9_TWALK,P9_TGETATTR};
     long n=srvconn_server_recv(cn,peer->request+peer->used,sizeof(peer->request)-peer->used);
     if(n<0)return -1;
     peer->used+=(u32)n;
@@ -3708,11 +3715,50 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
        loom_native_completion_flags(l,server,&peer,107,0,0,&receipt) && !receipt.lease,
        "native EOF ends MORE without transferring an empty payload lease");
     NO(!loom_private_pool_reap(l,pool),"native completed stream releases every pool hold");
+    struct loom_service_control child_control={.size=sizeof(child_control),.version=1,.object=child};
+    NO(loom_private_service_reap(l,creator,&child_control)==-T_E_BUSY,"native open FID refuses REAP before CLUNK");
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_CLUNK,
        .handle_idx=child.slot,.user_data=105,._resv1={0,child.incarnation,0,0}}) &&
        loom_native_completion(l,server,&peer,105,0),"native CLUNK completes");
     NO(peer.seen==13 && !peer.used && !l->service_fixed_count && l->service_requests.occupied==1,
        "native exact wire sequence frees general request and fixed owners");
+    NO(!loom_private_service_reap(l,creator,&child_control) &&
+       loom_private_service_reap(l,creator,&child_control)==-T_E_NOENT,
+       "native clunked FID reaps once while its ring lives");
+    // A walked FID that is never clunked: its scope's abort ends the session, the
+    // FID reaps once the scope has retired, and the scope reaps after it.
+    struct loom_service_ref orphan={0};
+    NO(!loom_private_node_prepare(l,creator,&reserve,&orphan) && !loom_private_node_publish(l,orphan),
+       "native second child reservation");
+    bytes[0]='f';bytes[1]='i';bytes[2]='l';bytes[3]='e';
+    NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_WALK,
+       .handle_idx=scope.slot,.offset=orphan.slot,.len=4,.user_data=108,
+       ._resv1={0,scope.incarnation,orphan.incarnation,0}}) &&
+       loom_native_completion(l,server,&peer,108,(s32)orphan.slot),"native second WALK completion");
+    struct loom_service_control orphan_control={.size=sizeof(orphan_control),.version=1,.object=orphan};
+    struct loom_service_control scope_control={.size=sizeof(scope_control),.version=1,.object=scope};
+    NO(loom_private_service_reap(l,creator,&orphan_control)==-T_E_BUSY,
+       "native walked FID of a live scope refuses REAP");
+    NO(!loom_engine_put(l,scope,held),"native returns observation pin");held=NULL;
+    NO(!loom_private_service_abort(l,creator,&scope_control),"native scope abort");
+    {
+        int reaped=-T_E_BUSY;u64 end=timer_now_ns()+2000000000ull;
+        do {
+            reaped=loom_private_service_reap(l,creator,&orphan_control);
+            if(reaped!=-T_E_BUSY)break;
+            sched();
+        }while(timer_now_ns()<end);
+        struct loom_service_snapshot after;
+        NO(!reaped && !control_native_query(l,creator,scope,&after) && after.state==LOOM_SERVICE_RETIRED,
+           "native walked FID reaps once its aborted scope retires");
+        do {
+            reaped=loom_private_service_reap(l,creator,&scope_control);
+            if(reaped!=-T_E_BUSY)break;
+            sched();
+        }while(timer_now_ns()<end);
+        NO(!reaped && loom_private_service_reap(l,creator,&scope_control)==-T_E_NOENT,
+           "native scope reaps after its FIDs");
+    }
     NO(!loom_private_register_buffers(l,creator,NULL,0),"native unregister after physical retirement");
     NO(!sys_burrow_detach_for_proc(creator,va,PAGE_SIZE),"native payload mapping release");va=0;
 done:

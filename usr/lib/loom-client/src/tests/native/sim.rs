@@ -105,6 +105,7 @@ pub struct State {
     pub enters: usize,
     pub aborts: Vec<usize>,
     pub reaps: Vec<usize>,
+    pub clunks: usize,
     pub returns: usize,
     pub closed_fds: Vec<i32>,
     next_lease: u64,
@@ -141,6 +142,7 @@ impl Sim {
             enters: 0,
             aborts: Vec::new(),
             reaps: Vec::new(),
+            clunks: 0,
             returns: 0,
             closed_fds: Vec::new(),
             next_lease: 1,
@@ -300,7 +302,8 @@ impl State {
             }
         }
     }
-    /// Retire aborted scopes with nothing in flight, and fids whose scope retired.
+    /// Retire aborted scopes with nothing in flight. A fid never retires with
+    /// its scope: REAP retires it (loom_fid_reap_retired).
     fn settle(&mut self) {
         for i in 0..64 {
             let busy = self.ops.iter().any(|o| o.scope == i);
@@ -310,13 +313,33 @@ impl State {
                 }
             }
         }
-        for i in 0..64 {
-            let parent = match self.slots[i].as_ref() {
-                Some(s) if s.kind == SlotKind::Fid => s.scope,
-                _ => continue,
-            };
-            if self.slots[parent].as_ref().is_none_or(|p| p.state == RETIRED) {
-                self.slots[i].as_mut().unwrap().state = RETIRED;
+    }
+    /// loom_private_service_reap: a target or pool once unborrowed; a scope once
+    /// unused or RETIRED and no fid pins it; a fid once unused, clunked, or of a
+    /// RETIRED scope, and unborrowed.
+    fn reapable(&self, i: usize, sl: &Slot) -> bool {
+        let borrowed = self.ops.iter().any(|o| {
+            o.source == i || o.scope == i || matches!(o.kind, OpKind::Connect { target } if target == i)
+                || matches!(o.kind, OpKind::Pooled { pool, .. } if pool == i)
+        });
+        if borrowed {
+            return false;
+        }
+        match sl.kind {
+            SlotKind::Target => true,
+            SlotKind::Pool => self.pools[&i].iter().all(|m| m.lease.is_none()),
+            SlotKind::Scope => {
+                let pinned = self
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .any(|(j, f)| j != i && f.as_ref().is_some_and(|f| f.kind == SlotKind::Fid && f.scope == i));
+                !pinned && (sl.state == RESERVED || sl.state == RETIRED)
+            }
+            SlotKind::Fid => {
+                sl.state == RESERVED
+                    || sl.state == RETIRED
+                    || self.slots[sl.scope].as_ref().is_some_and(|p| p.state == RETIRED)
             }
         }
     }
@@ -467,6 +490,7 @@ impl State {
                 }
             }
             OpKind::Clunk => {
+                self.clunks += 1;
                 self.slots[op.source].as_mut().unwrap().state = RETIRED;
                 0
             }
@@ -739,16 +763,7 @@ unsafe impl Kernel for SimKernel {
                 let c = unsafe { &*arg.cast::<Control>() };
                 let Some(sl) = s.live(c.object).cloned() else { return ENOENT };
                 let i = c.object.slot as usize;
-                let borrowed = s.ops.iter().any(|o| {
-                    o.source == i || o.scope == i || matches!(o.kind, OpKind::Connect { target } if target == i)
-                        || matches!(o.kind, OpKind::Pooled { pool, .. } if pool == i)
-                });
-                let free = match sl.kind {
-                    SlotKind::Target => !borrowed,
-                    SlotKind::Pool => !borrowed && s.pools[&i].iter().all(|m| m.lease.is_none()),
-                    _ => !borrowed && (sl.state == RESERVED || sl.state == RETIRED),
-                };
-                if !free {
+                if !s.reapable(i, &sl) {
                     return EBUSY;
                 }
                 s.slots[i] = None;

@@ -4272,7 +4272,7 @@ REAPed once their streams end. The Rust adapter (NA-4b) comes before the C one
 (NA-4c). NA-4d adds the EL0 fixture server and the qualification probe, because
 no EL0 program can reach a private CONNECT today.
 
-### NA-4b: the Rust adapter (host-verified; blocked on a kernel REAP vote)
+### NA-4b: the Rust adapter (host-verified; the kernel REAP fix awaits its guest legs)
 
 The adapter is `loom_client::native` (`Kernel`, `Ring`, the handles and futures)
 with `ThylaKernel` in libthyla-rs, 24 host tests against a simulated kernel
@@ -4293,9 +4293,17 @@ profiles). Each new test was turned red by a targeted sabotage
 `Submission` field and a changed `CQE_MORE`. The guest build's warning set
 equals NA-3's.
 
-Blocked: the kernel cannot reap a walked fid while its ring lives (OPEN-BUGS,
-2026-10-12 23:16Z), so a scope that walked, and its fids, hold their slots until
-the ring closes. The simulated kernel's REAP is more permissive than the real
-one, and the test `a_dropped_fid_is_clunked_then_reaped` passes only against
-it. The fix changes what REAP accepts, an ABI change put to the operator. Owed
-after it: the self-audit and the cross-family audit round.
+Found by that build: the kernel could not reap a walked fid while its ring
+lived (OPEN-BUGS, 2026-10-12 23:16Z), so a scope that walked, and its fids, held
+their slots until the ring closed. The simulated kernel's REAP had been more
+permissive than the real one. The operator voted explicit REAP (October 13,
+04:59Z; scripture d43f7ccd9). The kernel now REAPs a walked fid once it is
+clunked, or once its scope has RETIRED and nothing holds it
+(`loom_fid_reap_retired`). The simulated kernel follows that rule, and the
+adapter repeats its REAP pass while a pass frees a slot. Host evidence: 166 of
+166 loom-client tests; `tools/test-loom-service-fids.py` passes its control,
+and its four mutants each fail at their named assertion. The runner defaults to
+Homebrew LLVM clang, because Apple clang's ASan hangs at startup on this mac
+(OPEN-BUGS, 2026-10-13). Owed: the kernel guest legs (a control boot plus two
+mutant boots), the sabotage of the new adapter test, the self-audit, and the
+cross-family audit round.

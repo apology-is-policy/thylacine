@@ -1602,6 +1602,13 @@ int loom_private_node_reap_unused(struct Loom *l, struct loom_service_ref ref) {
     spin_unlock(&l->lock);
     return rc;
 }
+int loom_private_fid_reap(struct Loom *l, struct loom_service_ref ref) {
+    if (!l || l->magic != LOOM_MAGIC || !loom_is_private(l)) return -T_E_INVAL;
+    spin_lock(&l->lock);
+    int rc = loom_fid_reap_retired(l->service_slots, l->service_nodes, ref);
+    spin_unlock(&l->lock);
+    return rc;
+}
 
 // TARGET transactions consume the shared slot quota before resolving the actual
 // handle. Native capture and all handle/registry drops occur outside the ring

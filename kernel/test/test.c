@@ -668,6 +668,7 @@ void test_loom_create_geometry(void);
 void test_loom_private_owner_lifecycle(void);
 void test_loom_service_slots(void);
 void test_loom_service_nodes(void);
+void test_loom_service_fid_reap(void);
 void test_loom_service_requests(void);
 void test_loom_private_requests(void);
 void test_loom_private_protocol(void);
@@ -2797,6 +2798,7 @@ struct test_case g_tests[] = {
     { "loom.private_operation_storage",  test_loom_private_operation_storage,  false, NULL },
     { "loom.private_close",              test_loom_private_close,              false, NULL },
     { "loom.service_nodes",              test_loom_service_nodes,              false, NULL },
+    { "loom.service_fid_reap",           test_loom_service_fid_reap,           false, NULL },
     { "loom.service_slots",              test_loom_service_slots,              false, NULL },
     { "loom.private_owner_lifecycle",    test_loom_private_owner_lifecycle,    false, NULL },
     { "loom.create_rejects_bad_args",    test_loom_create_rejects_bad_args,    false, NULL },

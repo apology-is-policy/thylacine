@@ -3611,3 +3611,23 @@ client cores' own copies of the setup record and the CQE (`t_owned_setup` and
 `t_owned_cqe` in C, `Setup` and `Completion` in [[sub-loom-client]]) are checked
 field by field too. The service mirror's Rust leg now compiles
 `usr/lib/loom-client/src/service_abi.rs`.
+
+**A walked FID is reapable (Corona, 2026-10-13; operator vote: explicit REAP).**
+Until this change no REGISTER freed a FID that was ever walked. REAP of a FID
+reached only `loom_private_node_reap_unused`, which needs a LIVE, RESERVED node,
+so a clunked FID (slot RETIRING) answered -ENOENT and kept its slot.
+`loom_fid_reap` and `loom_fid_retire_aborted` ran only at ring destruction. Each
+FID pins its scope, so the scope stayed too. Now `loom_private_service_reap`
+sends a FID that is not RESERVED to `loom_private_fid_reap`, which runs
+`loom_fid_reap_retired` under the ring lock:
+- a RETIRED FID (its CLUNK finished) is reaped;
+- any other FID needs a RETIRED scope, no slot pin, and no claim or borrow.
+  RETIRED, because `loom_fid_retire_aborted` requires the engine's proof of
+  abort quiescence and local retirement is that proof. It is retired, then
+  reaped.
+Every refusal precedes the first transition, and success unpins the scope.
+Witnesses: `loom.service_fid_reap`, which runs the shared `loom_fids_fixture.h`
+over the real slot, node and FID modules (also on the host,
+`tools/test-loom-service-fids.py`, with four named mutants). The success path
+of `loom.private_native_operations` and `_isolation` now REAPs a clunked FID,
+then walks a second FID, aborts the scope, and REAPs the FID and then the scope.

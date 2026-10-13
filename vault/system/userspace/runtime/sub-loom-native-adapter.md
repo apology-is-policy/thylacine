@@ -85,7 +85,8 @@ enabled by it.
   millisecond. POLLHUP and POLLNVAL forget the descriptor and close the ring;
   POLLERR fails the wait with -EBADF.
 - **Deadlines** go in each SQE; the kernel enforces them and aborts the scope.
-- **Slots.** `Shared` tracks every target, scope and fid the adapter minted:
+- **Slots.** A scope's fids pin it, so `reap_pass` repeats while a pass frees
+  a slot. `Shared` tracks every target, scope and fid the adapter minted:
   Live, Clunk (a dropped fid, clunked when the SQ has room), Clunking, Reap
   (REAP retried each turn, and before a reservation answers -ENOSPC). Pools are
   the cores' and are reaped through `destroy_pool`.
@@ -151,14 +152,10 @@ completion path allocates.
 1. No guest program uses the adapter yet; only the host runs it (NA-4d).
 2. Retirement and REAP are not poll events. A caller waiting for `retired()`
    turns with a deadline.
-3. **The kernel cannot yet reap a walked fid while the ring lives.** REAP of a
-   clunked fid answers -ENOENT and frees nothing, a fid of an aborted scope has
-   no retire path before ring destruction, and each fid pins its scope
-   (loom_service_control.c, `loom_private_service_reap`; loom_service_fids.c,
-   `loom_fid_reap`). So a scope that walked, and its fids, hold their slots
-   until the ring closes, and the simulated kernel's REAP is more permissive
-   than the real one. Owned in OPEN-BUGS (2026-10-12 23:16Z); the ABI fix is
-   an operator vote.
+3. The simulated kernel's REAP follows `loom_private_service_reap` as of
+   October 13 (a walked fid reaps once clunked or once its scope has RETIRED;
+   fids pin their scope). Until then no kernel path freed a walked fid while
+   its ring lived, and the sim was more lenient than the kernel.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
