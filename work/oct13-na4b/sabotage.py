@@ -57,6 +57,8 @@ CASES = [
  ('no-turn-enter', 'a_short_enter_leaves_the_rest_queued_for_a_later_turn',
   [('native/mod.rs', '''        if self.sq.pending() != 0 {
             self.enter();
+            // A close learnt here must not reach the routing below as a failure.
+            self.check()?;
         }''', '')]),
  ('no-space-check', 'a_full_sq_answers_enospc',
   [('native/mod.rs', '''        if !self.sq.space() {
@@ -87,16 +89,16 @@ CASES = [
                 self.kernel.detach(va, len);
             }
         }''')]),
- ('enter-ebadf-ignored', 'an_enter_that_finds_the_descriptor_closed_forgets_it',
-  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+ ('enter-probe-skipped', 'an_enter_that_finds_the_descriptor_closed_forgets_it',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || (rc < 0 && self.shared.gone()) {
             self.lost();
-        }''', '''if rc == -(ECANCELED as i64) {
+        }''', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
             self.lost();
         }''')]),
  ('enter-ecanceled-ignored', 'an_enter_that_races_the_close_forgets_the_descriptor',
-  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || (rc < 0 && self.shared.gone()) {
             self.lost();
-        }''', '''if rc == -(EBADF as i64) {
+        }''', '''if rc < 0 && self.shared.gone() {
             self.lost();
         }''')]),
  ('pollnval-ignored', 'a_poll_that_finds_the_descriptor_closed_forgets_it',
@@ -171,10 +173,26 @@ CASES = [
   [('native/mod.rs', '''                        if cqe.result > 0 {
                             let rc = self.shared.return_buffer(d.record.receipt);''', '''                        if false {
                             let rc = self.shared.return_buffer(d.record.receipt);''')]),
- ('return-ebadf-ignored', 'a_late_shot_after_the_ring_closed_under_forgets_the_descriptor',
-  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
-                                self.lost();''', '''if rc == -(ECANCELED as i64) {
+ ('return-lost-ignored', 'a_late_shot_after_the_ring_closed_under_forgets_the_descriptor',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) {
+                                self.lost();''', '''if false {
                                 self.lost();''')]),
+ ('register-ebadf-kept', 'a_scope_dropped_after_the_ring_closed_under_never_closes_the_number',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-retired', 'a_ring_whose_register_finds_it_closed_never_reports_retired',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('target-probe-skipped', 'a_target_refused_for_its_registry_keeps_the_ring',
+  [('native/kernel.rs', '(op != REGISTER_SERVICE_TARGET || self.gone())', '(op != REGISTER_SERVICE_TARGET || true)')]),
+ ('target-ebadf-kept', 'a_target_registered_after_the_ring_closed_under_never_closes_the_number',
+  [('native/kernel.rs', '(op != REGISTER_SERVICE_TARGET || self.gone())', '(op != REGISTER_SERVICE_TARGET)')]),
+ ('enter-recheck-skipped', 'a_close_learnt_by_the_turns_enter_is_reported_as_a_close',
+  [('native/mod.rs', '''            self.enter();
+            // A close learnt here must not reach the routing below as a failure.
+            self.check()?;''', '''            self.enter();''')]),
+ ('claim-gate-open', 'a_held_refusal_claims_no_further_sqe',
+  [('tests/native/sim.rs', ' || !s.rejected.is_empty()', '')]),
  ('dropped-stream-lease-kept', 'a_stream_dropped_before_its_end_returns_the_shots_still_arriving',
   [('native/mod.rs', 'drop(rejected); // An abandoned stream', 'core::mem::forget(rejected); // An abandoned stream')]),
 ]

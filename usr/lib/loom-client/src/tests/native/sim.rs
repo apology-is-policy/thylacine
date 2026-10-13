@@ -22,6 +22,8 @@ use std::{
 };
 
 pub const EBADF: i64 = -9;
+/// What the kernel's ENTER answers for a closed or foreign number (-T_E_PERM).
+pub const ENTER_DEAD: i64 = -1;
 pub const EBUSY: i64 = -16;
 pub const EINVAL: i64 = -22;
 pub const ENOENT: i64 = -2;
@@ -224,7 +226,7 @@ impl Sim {
         }
     }
     /// Another thread closes the ring's descriptor: the number is gone, so
-    /// ENTER answers -EBADF and poll POLLNVAL.
+    /// REGISTER answers -EBADF, ENTER -1 and poll POLLNVAL.
     pub fn close_under(&self) {
         let mut s = self.0.borrow_mut();
         let fd = s.ring().fd;
@@ -1031,8 +1033,10 @@ unsafe impl Kernel for SimKernel {
     }
     fn enter(&self, fd: i32, to_submit: u32, min_complete: u32, flags: u32) -> i64 {
         let mut s = self.0.s();
+        // The kernel's ENTER answers a dead number with a bare -1, where its
+        // REGISTER answers -EBADF (sys_loom_enter_for_proc).
         if s.ring.as_ref().is_none_or(|r| r.fd != fd) || s.closed_fds.contains(&fd) {
-            return EBADF;
+            return ENTER_DEAD;
         }
         if min_complete != 0 || flags != 2 {
             return EINVAL;
@@ -1049,7 +1053,11 @@ unsafe impl Kernel for SimKernel {
         let mut consumed = 0;
         for _ in 0..budget {
             let tail = s.word(1).load(Ordering::Acquire);
-            if !s.cq_room() || !s.deferred.is_empty() || !s.rejected.is_empty() || tail == s.ring().sq_head {
+            if !s.cq_room()
+                || !s.deferred.is_empty()
+                || !s.rejected.is_empty()
+                || tail == s.ring().sq_head
+            {
                 break;
             }
             let p = s.ring().p;

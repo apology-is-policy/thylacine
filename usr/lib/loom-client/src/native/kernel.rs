@@ -7,8 +7,8 @@ use crate::{
     service_abi::{
         BufferReceipt, BufferReturn, Control, PoolCreate, PoolMember, REGISTER_ABORT_SCOPE,
         REGISTER_QUERY_SERVICE_SLOT, REGISTER_REAP_SERVICE_SLOT, REGISTER_RETURN_SERVICE_BUFFER,
-        REGISTER_SERVICE_POOL, REGISTER_SERVICE_SLOT, Reservation, SERVICE_RETIRED, SlotRef,
-        Snapshot,
+        REGISTER_SERVICE_POOL, REGISTER_SERVICE_SLOT, REGISTER_SERVICE_TARGET, Reservation,
+        SERVICE_RETIRED, SlotRef, Snapshot,
     },
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -111,6 +111,8 @@ pub(crate) struct Shared<K: Kernel> {
     /// SQEs pushed to the kernel, and terminal CQEs taken from the CQ.
     pub submitted: Cell<u64>,
     pub ended: Cell<u64>,
+    /// The kernel said the descriptor no longer names the ring.
+    lost: Cell<bool>,
 }
 impl<K: Kernel> Shared<K> {
     /// Attach every region, or none: a refusal detaches what was attached.
@@ -139,6 +141,7 @@ impl<K: Kernel> Shared<K> {
             admission: Cell::new(true),
             submitted: Cell::new(0),
             ended: Cell::new(0),
+            lost: Cell::new(false),
         })
     }
     pub(crate) fn set_fd(&self, fd: i32) {
@@ -169,14 +172,49 @@ impl<K: Kernel> Shared<K> {
     /// number may already name another file: it is dropped, never closed.
     pub(crate) fn forget_fd(&self) {
         self.fd.set(-1);
+        self.lost.set(true);
+    }
+    pub(crate) fn is_lost(&self) -> bool {
+        self.lost.get()
     }
     /// One versioned record; after close the ring is gone and nothing is sent.
+    /// The kernel checks the ring's descriptor before it reads the record, so
+    /// -EBADF says the number is closed or names another kind of file: it is
+    /// forgotten, and the call answers -ECANCELED as a closed ring does. A
+    /// TARGET's registry descriptor earns the same answer, so a probe decides.
     pub(crate) fn register<T>(&self, op: u32, record: &mut T) -> i64 {
         let fd = self.fd.get();
         if fd < 0 {
             return -(ECANCELED as i64);
         }
-        unsafe { self.kernel.register(fd, op, (record as *mut T).cast(), 1) }
+        let rc = unsafe { self.kernel.register(fd, op, (record as *mut T).cast(), 1) };
+        if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {
+            self.forget_fd();
+            return -(ECANCELED as i64);
+        }
+        rc
+    }
+    /// Whether the descriptor still names the ring, asked with a QUERY of the
+    /// zero reference: a live ring answers -ENOENT, a dead number -EBADF. ENTER
+    /// cannot say: the kernel answers it -1 for a dead number (syscall.c).
+    pub(crate) fn gone(&self) -> bool {
+        let fd = self.fd.get();
+        if fd < 0 {
+            return self.lost.get();
+        }
+        let mut s = snapshot(ZERO_REF);
+        let rc = unsafe {
+            self.kernel.register(
+                fd,
+                REGISTER_QUERY_SERVICE_SLOT,
+                (&mut s as *mut Snapshot).cast(),
+                1,
+            )
+        };
+        if rc == -(EBADF as i64) {
+            self.forget_fd();
+        }
+        rc == -(EBADF as i64)
     }
     pub(crate) fn control(&self, op: u32, object: SlotRef) -> i64 {
         let mut c = Control {
@@ -217,19 +255,7 @@ impl<K: Kernel> Shared<K> {
         Ok(r.result)
     }
     pub(crate) fn state(&self, object: SlotRef) -> Result<u32, i32> {
-        let mut s = Snapshot {
-            size: 64,
-            version: 1,
-            flags: 0,
-            object,
-            kind: 0,
-            state: 0,
-            scope: ZERO_REF,
-            active_ops: 0,
-            pending_terminals: 0,
-            reason: 0,
-            status_flags: 0,
-        };
+        let mut s = snapshot(object);
         let rc = self.register(REGISTER_QUERY_SERVICE_SLOT, &mut s);
         if rc < 0 { Err(rc as i32) } else { Ok(s.state) }
     }
@@ -287,6 +313,21 @@ impl<K: Kernel> Shared<K> {
                 break;
             }
         }
+    }
+}
+fn snapshot(object: SlotRef) -> Snapshot {
+    Snapshot {
+        size: 64,
+        version: 1,
+        flags: 0,
+        object,
+        kind: 0,
+        state: 0,
+        scope: ZERO_REF,
+        active_ops: 0,
+        pending_terminals: 0,
+        reason: 0,
+        status_flags: 0,
     }
 }
 impl<K: Kernel> Drop for Shared<K> {

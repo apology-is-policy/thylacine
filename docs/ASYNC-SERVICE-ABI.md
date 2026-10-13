@@ -446,8 +446,13 @@ the deadline on the recheck. POLLHUP means the ring is closing. A private ring
 has exactly one descriptor: it is never duplicated or inherited across fork, and
 exec latches it only past the point of no return. So a ring that closes under the
 adapter had that descriptor closed by another thread, whether poll reports it
-(POLLHUP or POLLNVAL) or ENTER does (-ECANCELED or -EBADF). The number may already
-name another file, so the adapter forgets it without closing it. A pool RETURN, a
+(POLLHUP or POLLNVAL), ENTER does (-ECANCELED, the ring latched closing) or a
+REGISTER does (-EBADF: the kernel checks the descriptor before it reads the
+record). The kernel's ENTER answers a dead number with a bare -1, so the adapter
+asks REGISTER, with a QUERY of the zero reference, whenever ENTER refuses; a
+TARGET's -EBADF can name its registry descriptor, so the same probe decides
+there. The number may already name another file, so the adapter forgets it
+without closing it. A pool RETURN, a
 REAP and a scope's retirement are synchronous REGISTER results, not poll events.
 The loop turn rechecks them as local progress. ENTER never sleeps, by the
 October 12 vote.

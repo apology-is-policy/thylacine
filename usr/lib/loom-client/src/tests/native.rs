@@ -1,7 +1,7 @@
 //! The native adapter against a simulated kernel (sim.rs).
 mod sim;
 use crate::native::{PoolMember, Ring, Shot};
-use sim::{ECANCELED, EINVAL, ENOENT, ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind};
+use sim::{EBADF, ECANCELED, EINVAL, ENOENT, ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind};
 use std::future::Future;
 
 const MS: u64 = 1_000_000;
@@ -375,27 +375,36 @@ fn closing_with_leases_held_keeps_their_bytes_until_they_drop() {
 /// another file. `latch` is a close that races the adapter's call.
 fn closed_under(latch: bool, in_flight: bool) -> Vec<i32> {
     let sim = Sim::new();
+    file(&sim, "f", b"data");
     let r = ring(&sim, 8, &[4096]);
     let target = r.target(5, b"clip").unwrap();
     let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
     sim.s().hold = true;
-    let walk = in_flight.then(|| scope.walk(b"", None).unwrap());
+    // A READ reserves no slot, so nothing REGISTERs after it ends: only the
+    // ENTER that follows its routing can learn of the close.
+    let read = in_flight.then(|| fid.read(range(0, 0, 4), 0, None).unwrap());
     if latch {
         sim.latch_under()
     } else {
         sim.close_under()
     }
-    match walk {
-        // Its cancellation is routed, and the ENTER after it learns of the close.
-        Some(walk) => {
-            let out = r.block_on(walk, None).and_then(|w| w.map(drop));
+    match read {
+        Some(read) => {
+            let out = r.block_on(read, None).and_then(|n| n.map(drop));
             assert_eq!(out.err(), Some(ECANCELED as i32));
+            assert_eq!(
+                r.turn(Some(r.now())).err(),
+                Some(ECANCELED as i32),
+                "the ENTER after the cancellation learnt of the close"
+            );
         }
         // Nothing to route: the wait learns of it.
         None => assert_eq!(r.turn(None).err(), Some(ECANCELED as i32)),
     }
     assert_eq!(scope.walk(b"", None).err(), Some(ECANCELED as i32));
-    drop((scope, target, r));
+    drop((fid, scope, target, r));
     let closed = sim.s().closed_fds.clone();
     closed
 }
@@ -674,7 +683,10 @@ fn retirement_waits_for_terminals_posted_after_the_scope_retires() {
     assert!(!r.retired(), "retired() waits for the READ's terminal");
     sim.release_terminals();
     turn_until_retired(&r);
-    assert!(sim.s().closed_fds.is_empty(), "the late terminal did not fail the ring");
+    assert!(
+        sim.s().closed_fds.is_empty(),
+        "the late terminal did not fail the ring"
+    );
     drop((fid, scope));
 }
 
@@ -699,10 +711,16 @@ fn an_sqe_not_yet_entered_holds_retirement_back() {
         "the READ is still queued"
     );
     assert!(scope_retired_in_kernel(&sim), "the scope retired first");
-    assert!(!r.retired(), "retired() waits for the queued READ's terminal");
+    assert!(
+        !r.retired(),
+        "retired() waits for the queued READ's terminal"
+    );
     sim.s().enter_limit = None;
     turn_until_retired(&r);
-    assert!(sim.s().closed_fds.is_empty(), "the late terminal did not fail the ring");
+    assert!(
+        sim.s().closed_fds.is_empty(),
+        "the late terminal did not fail the ring"
+    );
     drop((fid, scope));
 }
 
@@ -712,9 +730,10 @@ fn a_terminal_posted_but_not_yet_routed_holds_retirement_back() {
     // and the ENTER after each drain posts what was deferred.
     let sim = Sim::new();
     file(&sim, "burst", b"");
-    sim.s()
-        .shots
-        .insert(b"burst".to_vec(), (0..8).map(|i| vec![b'a' + i; 4]).collect());
+    sim.s().shots.insert(
+        b"burst".to_vec(),
+        (0..8).map(|i| vec![b'a' + i; 4]).collect(),
+    );
     let r = ring(&sim, 2, &[4096]);
     let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
     let pool = r.pool(&members).unwrap();
@@ -733,7 +752,10 @@ fn a_terminal_posted_but_not_yet_routed_holds_retirement_back() {
     assert_eq!(r.turn(Some(r.now() + MS)).unwrap(), 4);
     assert!(!r.retired(), "retired() waits for the end still in the CQ");
     turn_until_retired(&r);
-    assert!(sim.s().closed_fds.is_empty(), "the end did not fail the ring");
+    assert!(
+        sim.s().closed_fds.is_empty(),
+        "the end did not fail the ring"
+    );
     // The four shots routed after retire() go back although no pool takes them.
     assert_eq!(sim.s().returns, 8, "every shot's lease went back");
     drop((fid, scope, pool));
@@ -758,10 +780,16 @@ fn an_enter_refusal_not_yet_posted_holds_retirement_back() {
     }
     assert_eq!(sim.hdr_word(1), sim.hdr_word(0), "ENTER consumed the READ");
     assert!(scope_retired_in_kernel(&sim), "the scope retired first");
-    assert!(!r.retired(), "retired() waits for the refusal still to be posted");
+    assert!(
+        !r.retired(),
+        "retired() waits for the refusal still to be posted"
+    );
     sim.release_rejections();
     turn_until_retired(&r);
-    assert!(sim.s().closed_fds.is_empty(), "the late refusal did not fail the ring");
+    assert!(
+        sim.s().closed_fds.is_empty(),
+        "the late refusal did not fail the ring"
+    );
     drop((fid, scope));
 }
 
@@ -769,9 +797,10 @@ fn an_enter_refusal_not_yet_posted_holds_retirement_back() {
 fn a_stream_dropped_before_its_end_returns_the_shots_still_arriving() {
     let sim = Sim::new();
     file(&sim, "burst", b"");
-    sim.s()
-        .shots
-        .insert(b"burst".to_vec(), (0..8).map(|i| vec![b'a' + i; 4]).collect());
+    sim.s().shots.insert(
+        b"burst".to_vec(),
+        (0..8).map(|i| vec![b'a' + i; 4]).collect(),
+    );
     let r = ring(&sim, 2, &[4096]);
     let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
     let pool = r.pool(&members).unwrap();
@@ -785,7 +814,11 @@ fn a_stream_dropped_before_its_end_returns_the_shots_still_arriving() {
     assert_eq!(sim.s().returns, 4, "the four payloads the stream held");
     // The next four arrive for a stream that is gone.
     assert_eq!(r.turn(Some(r.now() + MS)).unwrap(), 4);
-    assert_eq!(sim.s().returns, 8, "each late shot's lease went straight back");
+    assert_eq!(
+        sim.s().returns,
+        8,
+        "each late shot's lease went straight back"
+    );
     drop((fid, scope, pool));
 }
 
@@ -793,9 +826,10 @@ fn a_stream_dropped_before_its_end_returns_the_shots_still_arriving() {
 fn a_late_shot_after_the_ring_closed_under_forgets_the_descriptor() {
     let sim = Sim::new();
     file(&sim, "burst", b"");
-    sim.s()
-        .shots
-        .insert(b"burst".to_vec(), (0..8).map(|i| vec![b'a' + i; 4]).collect());
+    sim.s().shots.insert(
+        b"burst".to_vec(),
+        (0..8).map(|i| vec![b'a' + i; 4]).collect(),
+    );
     let r = ring(&sim, 2, &[4096]);
     let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
     let pool = r.pool(&members).unwrap();
@@ -811,5 +845,130 @@ fn a_late_shot_after_the_ring_closed_under_forgets_the_descriptor() {
     // The first late shot's RETURN finds the descriptor gone.
     assert_eq!(r.turn(Some(r.now() + MS)).err(), Some(ECANCELED as i32));
     drop((fid, scope, pool, r));
-    assert_eq!(sim.s().closed_fds, vec![7], "the lost number is never closed");
+    assert_eq!(
+        sim.s().closed_fds,
+        vec![7],
+        "the lost number is never closed"
+    );
+}
+
+#[test]
+fn a_scope_dropped_after_the_ring_closed_under_never_closes_the_number() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    sim.close_under();
+    // Its ABORT is answered -EBADF, and no turn follows before the ring drops.
+    drop(scope);
+    drop((target, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_ring_whose_register_finds_it_closed_never_reports_retired() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    drop(scope);
+    r.retire();
+    sim.close_under();
+    // The QUERY and the REAP of the dropped scope are both answered -EBADF. A
+    // deadline already passed keeps the turn from polling, which would learn
+    // of the close by POLLNVAL instead.
+    assert_eq!(
+        r.turn(Some(r.now())).err(),
+        Some(ECANCELED as i32),
+        "the REGISTER that found the number dead closed the ring"
+    );
+    assert!(!r.retired(), "a lost ring never retires");
+    drop((target, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_target_refused_for_its_registry_keeps_the_ring() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    assert_eq!(
+        r.target(99, b"clip").err(),
+        Some(EBADF as i32),
+        "the registry's -EBADF"
+    );
+    assert!(r.target(5, b"clip").is_ok(), "the ring still lives");
+}
+
+#[test]
+fn a_target_registered_after_the_ring_closed_under_never_closes_the_number() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    sim.close_under();
+    assert_eq!(
+        r.target(5, b"clip").err(),
+        Some(ECANCELED as i32),
+        "the ring's -EBADF"
+    );
+    drop(r);
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_close_learnt_by_the_turns_enter_is_reported_as_a_close() {
+    let sim = Sim::new();
+    file(&sim, "f", b"data");
+    let r = ring(&sim, 8, &[4096, 4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    sim.s().hold = true;
+    let first = fid.read(range(0, 0, 4), 0, None).unwrap();
+    sim.s().enter_limit = Some(0);
+    let second = fid.read(range(1, 0, 4), 0, None).unwrap();
+    // The first READ's cancellation waits in the CQ; the second is queued, so
+    // the turn ENTERs before it routes.
+    sim.close_under();
+    assert_eq!(
+        r.turn(Some(r.now() + MS)).err(),
+        Some(ECANCELED as i32),
+        "a closed ring, not a failed one"
+    );
+    drop((first, second, fid, scope, target, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+#[test]
+fn a_held_refusal_claims_no_further_sqe() {
+    let sim = Sim::new();
+    file(&sim, "f", b"data");
+    let r = ring(&sim, 8, &[4096, 4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    sim.s().enter_limit = Some(0);
+    drop(fid.read(range(0, 0, 4), 0, None).unwrap());
+    drop(fid.read(range(1, 0, 4), 0, None).unwrap());
+    let head = sim.hdr_word(0);
+    r.retire();
+    sim.s().hold_rejections = true;
+    sim.s().enter_limit = None;
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    // frontend.c stops claiming while a refusal waits for CQ room.
+    assert_eq!(
+        sim.hdr_word(0).wrapping_sub(head),
+        1,
+        "one READ claimed and held"
+    );
+    sim.release_rejections();
+    turn_until_retired(&r);
+    assert_eq!(
+        sim.hdr_word(0).wrapping_sub(head),
+        2,
+        "the second claimed after it"
+    );
+    drop((fid, scope));
 }

@@ -410,6 +410,7 @@ impl<K: Kernel> WaitSource for RingWait<'_, K> {
 
 impl<K: Kernel> Inner<K> {
     fn check(&self) -> Result<()> {
+        self.learn();
         match self.state.get() {
             State::Open | State::Retiring => Ok(()),
             State::Closed => Err(-ECANCELED),
@@ -417,6 +418,7 @@ impl<K: Kernel> Inner<K> {
         }
     }
     pub(crate) fn admit(&self) -> Result<()> {
+        self.learn();
         match self.state.get() {
             State::Open => Ok(()),
             State::Retiring | State::Closed => Err(-ECANCELED),
@@ -486,7 +488,9 @@ impl<K: Kernel> Inner<K> {
         if self.sq.dropped_changed() {
             panic!("loom-client: the kernel dropped an SQE the adapter wrote in range");
         }
-        if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+        // A latched ring answers -ECANCELED; a dead number gets -1 from the
+        // kernel, which REGISTER's probe turns into a definite answer.
+        if rc == -(ECANCELED as i64) || (rc < 0 && self.shared.gone()) {
             self.lost();
         }
     }
@@ -511,6 +515,8 @@ impl<K: Kernel> Inner<K> {
         self.check()?;
         if self.sq.pending() != 0 {
             self.enter();
+            // A close learnt here must not reach the routing below as a failure.
+            self.check()?;
         }
         let mut routed = 0;
         while routed < self.cq_entries {
@@ -588,8 +594,8 @@ impl<K: Kernel> Inner<K> {
                     Err(StorageError::Closing) => {
                         if cqe.result > 0 {
                             let rc = self.shared.return_buffer(d.record.receipt);
-                            // As at ENTER: the ring was closed under the adapter.
-                            if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+                            // REGISTER found the descriptor gone and forgot it.
+                            if rc == -(ECANCELED as i64) {
                                 self.lost();
                                 return Err(-ECANCELED);
                             }
@@ -728,8 +734,17 @@ impl<K: Kernel> Inner<K> {
         self.driver.borrow_mut().begin_retire();
         self.wake_all();
     }
+    /// A REGISTER that found the descriptor gone forgot it; close the ring.
+    fn learn(&self) {
+        if self.shared.is_lost() && matches!(self.state.get(), State::Open | State::Retiring) {
+            self.lost();
+        }
+    }
     fn fail(&self) {
-        self.state.set(State::Failed);
+        // A ring already closed stays closed: what fails after is its teardown.
+        if self.state.get() != State::Closed {
+            self.state.set(State::Failed);
+        }
         self.shutdown();
     }
     /// The kernel closed the ring under the adapter: forget its descriptor.

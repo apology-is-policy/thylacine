@@ -57,17 +57,24 @@ enabled by it.
   SQ are -ENOSPC; a closed ring is -ECANCELED; a failed ring (a corrupt or stale
   CQE) is -EIO. A changed `dropped` count panics: the adapter never writes an
   out-of-range index, so it is a broken invariant.
-- **A ring closed under the adapter is forgotten, never closed again.** ENTER
-  answering -EBADF or -ECANCELED, or poll answering POLLHUP or POLLNVAL, means
-  another thread closed the ring's only descriptor: a private ring is never
+- **A ring closed under the adapter is forgotten, never closed again.** Any
+  REGISTER answered -EBADF (`syscall.c` checks the descriptor before the
+  record), ENTER answered -ECANCELED, or poll answering POLLHUP or POLLNVAL,
+  means another thread closed the ring's only descriptor: a private ring is never
   duplicated (handle.c, `handle_dup`) or inherited across fork
   (`handle_slot_may_alias`), and exec latches it only past the point of no
   return (proc.c, `proc_exec_replace`). The number may already name another
-  file, so the adapter drops it unclosed and the ring answers -ECANCELED.
-  Detection waits for the adapter's next ENTER or poll: if the number is
-  reused first, a poll waits on the new file, and a REGISTER issued in between
-  goes to it. Closing the ring's only descriptor from another thread is the
-  program's fault, and without descriptor generations EL0 cannot see it sooner.
+  file, so `Shared` drops it unclosed and the ring answers -ECANCELED. The
+  kernel's ENTER answers a dead number with a bare -1
+  (`sys_loom_enter_for_proc`), so any other ENTER refusal is asked of
+  REGISTER with a QUERY of the zero reference, which a live ring answers
+  -ENOENT. A TARGET's -EBADF can name its registry descriptor; the same probe
+  decides. Detection waits for the adapter's next REGISTER, ENTER or poll. A
+  number reused by another kind of file is caught by the next REGISTER; one
+  reused by another private ring of the same program is not, and a poll waits
+  on the new file. Closing the ring's only descriptor from another thread is
+  the program's fault, and without descriptor generations EL0 cannot see a
+  reuse sooner.
 - **Slot drops.** A failed WALK's reservation is reaped without a CLUNK (the
   kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
   answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
@@ -110,8 +117,8 @@ enabled by it.
   (`loom_service_frontend.c`) that no request record counts. Retirement discards
   only abandoned book entries, so a future held across it keeps its terminal. A
   shot routed once retirement has begun is refused by its pool and RETURNed at
-  once, so REAP can free the pool; a RETURN answered -EBADF or -ECANCELED means
-  the ring was closed under the adapter, as at ENTER.
+  once, so REAP can free the pool; a RETURN that finds the descriptor gone
+  forgets it as any REGISTER does, and the turn answers -ECANCELED.
 - **Teardown.** `close` (and dropping the `Ring`) aborts every scope and closes
   the descriptor. `Shared` detaches the mapping, then the buffers, when its last
   owner goes: after the CQ reader and every payload lease.
@@ -163,14 +170,15 @@ completion path allocates.
   does against a full CQ (the sim holds it whatever the room) and consumes no
   further SQE meanwhile, and `engine_visit` runs the engine's retirement
   between two adapter calls. The sim's ENTER posts every deferred completion
-  before it consumes, which the kernel's zero-submit ENTER does not. Known divergence: an operation on a fid that is not READY, under a
+  before it consumes, which the kernel's zero-submit ENTER does not. Its ENTER
+  answers a dead number -1 and its REGISTER -EBADF, as the kernel does. Known divergence: an operation on a fid that is not READY, under a
   READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
   adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
-  targeted adapter edit (39 cases; the eight added by audit rounds 2-4 are
-  written and await their run). Each red was read for the intended
-  assertion; a case whose anchor no longer matches reports ANCHOR-ROT and
-  counts as not red.
+  targeted adapter edit: 45 cases, every one red at its intended assertion
+  in the run of October 13, 08:37Z (`work/oct13-na4b/sabotage-20261013T083704Z`),
+  on the tree that carries audit round 5's fixes. A case whose anchor no
+  longer matches reports ANCHOR-ROT and counts as not red.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,
   against the ring layout table.
@@ -195,7 +203,7 @@ completion path allocates.
 4. Paths no host test reaches yet: `Fid::walk` from a fid that is not the
    root, a refused
    `Payload::try_return`, POLLERR and -EINTR (the sim returns neither), an ENTER
-   error other than -ECANCELED and -EBADF, and an explicit `Ring::close` with
+   refusal the probe does not confirm, and an explicit `Ring::close` with
    handles alive.
 
 ## Provenance
