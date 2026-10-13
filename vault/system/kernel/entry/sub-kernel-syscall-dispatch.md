@@ -5,6 +5,9 @@ parent: moc-kernel-entry
 title: "The syscall dispatcher — argument marshalling, the staging tiers, and where a gate is allowed to live"
 code:
   - kernel/syscall.c
+  - kernel/test/test_argwidth_probe.c
+  - usr/argwidth-probe/argwidth-probe.c
+  - tools/check-arg-width.py
 audit: hard
 guarded-by: [inv-i12, inv-i13, inv-i32, inv-i22, inv-i27, inv-i34, inv-i43, inv-i44]
 validated-by: [prose, gate-smp, gate-interactive]
@@ -15,7 +18,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Session registry factory
 
@@ -1581,3 +1584,33 @@ not always. A caller killed while waiting unwinds (#811), and its own death then
 kills the child through the orphan rule. `sys_spawn_full_argv_debug_for_proc`
 and its budget wrapper are the kernel-test entries, declared where the tests
 call them.
+
+## Argument width (2026-10-13, vote 8)
+
+Every argument reaches a handler as a whole register, and a handler that reads
+a narrower type refuses a value that does not fit instead of casting the high
+bits away (ERRORS.md principle 6; the forms are in [[sub-kernel-syscall-abi]]).
+The helpers sit at the top of `syscall.c`: `sys_hidx_arg` (a descriptor wider
+than an index becomes -1, so the lookup refuses it after any check that
+precedes the lookup), `sys_s32_arg` (pids, poll's timeout: exactly the
+sign-extension an `int` binding produces) and `sys_word32_arg` (torpor's
+expected value: either extension). An unsigned 32-bit word is compared against
+`0xffffffff` where the cast used to be, so every earlier refusal keeps its
+order. `tools/check-arg-width.py` runs in `build_ramfs` beside the invariant
+registry check, self-tests first, and fails on any cast of a `u64` parameter to
+a narrower type in `syscall.c` that no full-width compare, mask with a 64-bit
+complement or helper precedes; a deliberate narrowing carries a `// width:`
+note on its line or the line above (exits' status byte, pci_claim's packed
+ordinal, a protection word `burrow_prot_word_check` or `sys_attach_9p_flags_ok`
+already refused). It reads the cast, not the value: a constant bound named in
+capitals passes unread, and a comparison whose result is ignored would pass,
+so the audit still reads each guard. Functions named `viv_*` are exempt: they
+translate Linux calls, whose narrowing is Linux's ([[sub-kernel-vivarium]]).
+`/bin/argwidth-probe`, spawned by `syscall.argwidth_probe`, makes each covered
+call twice from EL0, the second time with a bit set above the declared width,
+and requires the refusal from the wide call and anything else from the narrow
+one. Not covered at runtime, because their refusals share the flat -1 (ER-3)
+or need hardware or a service: the hardware handles (irq_wait, mmio_map,
+dma_map, dma_segments, pci_info, burrow_from_hostmem), weft_map, mount,
+attach_9p and attach_9p_srv, srv_accept and srv_peer, the tty pair,
+walk_create and the create form of open. Those rest on the static check.

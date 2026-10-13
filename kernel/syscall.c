@@ -65,6 +65,38 @@
 #include "../mm/slub.h"
 
 // =============================================================================
+// Argument width (ERRORS.md principle 6): every argument arrives as a whole
+// register, and one that does not fit the type a handler reads is refused, never
+// cast down. tools/check-arg-width.py fails the build on a narrowing cast of a
+// raw argument that none of these, or a full-width compare, has checked first.
+// =============================================================================
+
+// A descriptor wider than an index names nothing, so the lookup refuses it after
+// any check that precedes the lookup. A negative descriptor is refused the same
+// way, however its binding extended it.
+static hidx_t sys_hidx_arg(u64 raw) {
+    return raw > 0x7fffffffull ? (hidx_t)-1 : (hidx_t)raw;
+}
+
+// A signed 32-bit argument (a pid, a timeout): its binding sign-extends it, so a
+// negative value arrives with its high bits set and fits only as that extension.
+static bool sys_s32_arg(u64 raw, s32 *out) {
+    if ((s64)raw < -0x80000000ll || (s64)raw > 0x7fffffffll) return false;
+    *out = (s32)(s64)raw;
+    return true;
+}
+
+// A 32-bit word compared bit for bit (torpor's expected value): a binding that
+// declares it int sign-extends it and one that declares it unsigned
+// zero-extends it, and both name the same word.
+static bool sys_word32_arg(u64 raw, u32 *out) {
+    u64 hi = raw >> 32;
+    if (hi != 0 && !(hi == 0xffffffffull && (raw & 0x80000000ull))) return false;
+    *out = (u32)raw;
+    return true;
+}
+
+// =============================================================================
 // SYS_EXITS — terminate calling process.
 // =============================================================================
 //
@@ -92,7 +124,7 @@ static void sys_exits_handler(u64 status) {
     // WEXITSTATUS == N, instead of the pre-#91 collapse to exit_status 0/1. The
     // display msg tracks the CODE, not the raw arg: a status whose low byte is 0
     // is a success even with high bits set, matching Linux (status & 0xff).
-    int code = (int)(status & 0xff);
+    int code = (int)(status & 0xff); // width: the low byte is the status
     exits_code(code, code ? "fail" : "ok");
     // Unreachable -- exits_code() is noreturn.
     extinction("sys_exits returned");
@@ -113,7 +145,7 @@ static void sys_exit_group_handler(u64 status) {
     // #91: the real low byte reaches the parent's wait as WEXITSTATUS == N (the
     // load-bearing path -- busybox / musl exit via exit_group). The display msg
     // tracks the code, not the raw arg (see sys_exits_handler).
-    int code = (int)(status & 0xff);
+    int code = (int)(status & 0xff); // width: the low byte is the status
     const char *msg = code ? "fail" : "ok";
     if (p && p->magic == PROC_MAGIC) {
         // proc_group_terminate's universal death-wake walks p->threads, which
@@ -381,17 +413,16 @@ static s64 sys_irq_wait_handler(u64 hraw, u64 timeout_ns) {
     // R9 F144 (P1) close: removed the redundant `hraw > PROC_HANDLE_MAX`
     // pre-check (which was an off-by-one — should have been `>=`).
     // handle_get is the canonical bound-checker: `h < 0 ||
-    // h >= PROC_HANDLE_MAX → NULL`. Casting u64 → hidx_t (int) safely
-    // saturates large u64 values to negative ints, which handle_get
-    // rejects via `h < 0`.
+    // h >= PROC_HANDLE_MAX → NULL`. A cast to hidx_t never saturated: it
+    // dropped the high word, so 2^32 + h named handle h. sys_hidx_arg turns
+    // a value wider than an index into -1, which handle_get refuses.
     // #844: handle_get takes a snapshot + HOLDS a ref on the obj (k) under the
     // handle-table lock, so the ref is live across the blocking kobj_irq_wait
     // even if a sibling thread closes this slot concurrently. This subsumes
     // the old explicit kobj_irq_ref/unref borrow (R9 F143): the snapshot's ref
-    // IS the borrow now. handle_put on every exit drops it. The (hidx_t)hraw
-    // cast saturates large u64 to negative, which handle_get rejects (h < 0).
+    // IS the borrow now. handle_put on every exit drops it.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (handle_get(p, sys_hidx_arg(hraw), &hh) < 0)  return -1;
     if (hh.kind != KOBJ_IRQ)               { handle_put(&hh); return -1; }
 
     // RIGHT_SIGNAL gates waits on KObj_IRQ — a holder without SIGNAL can pass
@@ -453,13 +484,14 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // ref). The ref is held until handle_put below so km->size stays valid
     // across burrow_map. handle_put on EVERY exit path.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (handle_get(p, sys_hidx_arg(hraw), &hh) < 0)  return -1;
     if (hh.kind != KOBJ_MMIO)              { handle_put(&hh); return -1; }
     if ((hh.rights & RIGHT_MAP) == 0)      { handle_put(&hh); return -1; }
 
     // Bound requested prot by the handle's rights. R+W → handle must have
     // RIGHT_WRITE; R → handle must have RIGHT_READ. EXEC is rejected entirely
     // for MMIO mappings (device-memory PTEs aren't usefully executable).
+    if (prot_raw > 0xffffffffull)                    { handle_put(&hh); return -T_E_INVAL; }
     u32 prot = (u32)prot_raw;
     if (prot == 0)                                   { handle_put(&hh); return -1; }
     if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
@@ -710,7 +742,7 @@ static s64 sys_burrow_from_hostmem_handler(u64 pci_hraw, u64 shmid, u64 offset,
     // block). The held handle keeps k alive across burrow_create_hostmem (which
     // takes its OWN kobj_pci ref); handle_put balances every exit.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)pci_hraw, &hh) < 0)    return -1;
+    if (handle_get(p, sys_hidx_arg(pci_hraw), &hh) < 0) return -1;
     if (hh.kind != KOBJ_PCI)            { handle_put(&hh); return -1; }
     if ((hh.rights & RIGHT_MAP) == 0)   { handle_put(&hh); return -1; }
     struct KObj_PCI *k = (struct KObj_PCI *)hh.obj;
@@ -888,13 +920,14 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // (which takes its own kobj_dma ref) and keeps kd->size / kd->pa valid
     // across burrow_map. handle_put on EVERY exit path.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (handle_get(p, sys_hidx_arg(hraw), &hh) < 0)  return -1;
     if (hh.kind != KOBJ_DMA)               { handle_put(&hh); return -1; }
     if ((hh.rights & RIGHT_MAP) == 0)      { handle_put(&hh); return -1; }
 
     // Bound requested prot by the handle's rights. EXEC is rejected
     // unconditionally — DMA buffers carry data, never code (W^X invariant
     // I-12 + structural defense against ELF-loaded code executing from DMA).
+    if (prot_raw > 0xffffffffull)                    { handle_put(&hh); return -T_E_INVAL; }
     u32 prot = (u32)prot_raw;
     if (prot == 0)                                   { handle_put(&hh); return -1; }
     if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
@@ -1019,7 +1052,7 @@ s64 sys_dma_segments_handler(u64 hraw, u64 buf_va, u64 max_entries) {
     // blk[] snapshot cannot be freed under us by a sibling thread's close.
     // handle_put on EVERY exit path.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (handle_get(p, sys_hidx_arg(hraw), &hh) < 0)  return -1;
     if (hh.kind != KOBJ_DMA)               { handle_put(&hh); return -1; }
     if ((hh.rights & RIGHT_MAP) == 0)      { handle_put(&hh); return -1; }
 
@@ -1092,8 +1125,8 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
     // Every pre-G-7c caller passes a bare id (typed u64 wrappers zero the
     // high word by construction) -> nth 0 -> the historical first-match
     // behavior, byte-identical. An over-large nth resolves no device (-1).
-    u32 id  = (u32)(virtio_device_id & 0xFFFFFFFFu);
-    u32 nth = (u32)(virtio_device_id >> 32);
+    u32 id  = (u32)(virtio_device_id & 0xFFFFFFFFu); // width: the low word is the id
+    u32 nth = (u32)(virtio_device_id >> 32); // width: the high word is the ordinal
     if (id > 0xFFFFu)                                return -1;
 
     // I-34 CreateBegin (specs/allowance.tla; build-arc step 6): SYS_PCI_CLAIM is
@@ -1268,7 +1301,7 @@ s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
     if (!sys_validate_user_buf(info_va, sizeof(struct t_pci_info))) return -1;
 
     struct Handle hh;
-    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (handle_get(p, sys_hidx_arg(hraw), &hh) < 0)  return -1;
     if (hh.kind != KOBJ_PCI)              { handle_put(&hh); return -1; }
     if ((hh.rights & RIGHT_READ) == 0)    { handle_put(&hh); return -1; }
 
@@ -1795,7 +1828,7 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     // unaffected (they fall straight through to the byte-copy path).
     if (len >= WEFT_HYBRID_THRESHOLD) {
         bool weft_handled = false;
-        s64 wr = sys_write_weft_fastpath(p, (hidx_t)hraw, buf_va, len, &weft_handled);
+        s64 wr = sys_write_weft_fastpath(p, sys_hidx_arg(hraw), buf_va, len, &weft_handled);
         if (weft_handled) return wr;
     }
 
@@ -1808,7 +1841,7 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
         // code below returned the flat -1 that reads as EPERM to a Linux guest.
         // #844: the lookup transfers a Spoor ref; release it immediately
         // (validation only -- no I/O on a zero-length write).
-        struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
+        struct Spoor *c0 = sys_lookup_rw_handle(p, sys_hidx_arg(hraw), RIGHT_WRITE);
         if (!c0)                                     return -T_E_BADF;
         // #81 F1: the gate must cover the len==0 fast-path too (it short-circuits
         // before sys_write_for_proc) -- an O_PATH handle does NO byte I/O, incl. 0.
@@ -1817,7 +1850,7 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
         return 0;
     }
 
-    return sys_write_staged(p, (hidx_t)hraw, NULL, buf_va, len);
+    return sys_write_staged(p, sys_hidx_arg(hraw), NULL, buf_va, len);
 }
 
 // Weft-6b-3 data drive (RX): the zero-copy read fast-path. A large read whose
@@ -1863,14 +1896,14 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     // unaffected (they fall straight through to the byte-copy path).
     if (len >= WEFT_HYBRID_THRESHOLD) {
         bool weft_handled = false;
-        s64 rd = sys_read_weft_fastpath(p, (hidx_t)hraw, buf_va, len, &weft_handled);
+        s64 rd = sys_read_weft_fastpath(p, sys_hidx_arg(hraw), buf_va, len, &weft_handled);
         if (weft_handled) return rd;
     }
 
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     if (len == 0) {
-        struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
+        struct Spoor *c0 = sys_lookup_rw_handle(p, sys_hidx_arg(hraw), RIGHT_READ);
         if (!c0)                              return -T_E_BADF;   // #844: validate + release
         // #81 F1: the gate must cover the len==0 fast-path too (it short-circuits
         // before sys_read_for_proc) -- an O_PATH handle does NO byte I/O, incl. 0.
@@ -1894,7 +1927,7 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
         }
         if (!heap_scratch) len = SYS_RW_STACK;
     }
-    s64 got = sys_read_for_proc(p, (hidx_t)hraw, scratch, len);
+    s64 got = sys_read_for_proc(p, sys_hidx_arg(hraw), scratch, len);
     // Bulk copy-out; on fault, return -1 — partial bytes already in
     // user-VA are not "uncopied" but bytes consumed beyond the fault are
     // LOST. Documented caveat (unchanged from the per-byte era).
@@ -1939,7 +1972,7 @@ static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
         }
         if (!heap_scratch) len = SYS_RW_STACK;
     }
-    s64 got = sys_pread_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
+    s64 got = sys_pread_for_proc(p, sys_hidx_arg(hraw), scratch, len, (s64)off_raw);
     // Bulk copy-out; the SYS_READ partial-copy caveat applies -- but unlike
     // SYS_READ nothing is LOST on a fault: the cursor never moved, so the
     // caller can simply repeat the pread.
@@ -1977,7 +2010,7 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
         if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
         return -T_E_FAULT;
     }
-    s64 wr = sys_pwrite_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
+    s64 wr = sys_pwrite_for_proc(p, sys_hidx_arg(hraw), scratch, len, (s64)off_raw);
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return wr;
 }
@@ -2008,7 +2041,7 @@ static s64 sys_close_handler(u64 hraw) {
     // handle" -- EBADF, the only failure close(2) has. Mapped HERE rather than
     // inside handle_close so the internal contract (and its ~20 kernel callers,
     // which test == 0 or ignore the result) stays byte-unchanged.
-    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF);
+    return handle_close(p, sys_hidx_arg(hraw)) == 0 ? 0 : (s64)(-T_E_BADF);
 }
 
 // =============================================================================
@@ -2095,7 +2128,7 @@ static s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
     // SYS_LSEEK rights-0 precedent. #844: c is REF-HELD; spoor_clunk on
     // every exit -- the ref keeps c alive across the (possibly blocking)
     // dev->stat_native.
-    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
+    struct Spoor *c = sys_lookup_rw_handle(p, sys_hidx_arg(hraw), 0);
     if (!c)                                           return -1;
 
     // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's
@@ -2140,25 +2173,13 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     // structurally invalid calls. #100 (ER-3): EINVAL, POSIX's answer for an
     // unrecognized whence.
     //
-    // #102 F6: whence is a 32-bit selector, so only the low half of x2 is
-    // significant. POSIX declares it `int` — which this comment already appeals
-    // to — and fd, the far more dangerous argument, is ALREADY narrowed the same
-    // way three lines down (`(hidx_t)hraw`, and hidx_t is int). The full-width
-    // compare was an artifact of the raw argument arriving as u64, not a
-    // designed strictness: nothing rests on the high bits of an enum, and
-    // libthyla-rs already declares the parameter u32.
-    //
-    // It matters because of who else reaches here. VIVARIUM's T1 table renumbers
-    // Linux lseek onto this handler and copies the argument words VERBATIM
-    // (vivarium.c, viv_linux_dispatch), and Linux's own SYSCALL_DEFINE narrows
-    // `unsigned int whence` by construction — so a guest that leaves junk in
-    // x2[63:32] gets EINVAL here for a seek Linux would have performed. Every
-    // pure translator in vivarium.c narrows its int arguments for this reason;
-    // this is the one place the T1 row's "identical in width" claim was
-    // enforced by caller convention rather than by code.
-    //
-    // Narrowing costs nothing: a bad low half (3, or -1 == 0xFFFFFFFF) still
-    // fails the range check below, exactly as Linux's does.
+    // A whence that does not fit 32 bits is refused like one that names no
+    // seek (ERRORS.md principle 6; this narrowed it from #102 F6 until the
+    // operator's 2026-10-13 vote). A Linux guest may leave junk in x2[63:32],
+    // because Linux's SYSCALL_DEFINE narrows `unsigned int whence`; the
+    // vivarium's lseek row narrows that word before this handler runs, so the
+    // truncation stays Linux's and never becomes the native ABI.
+    if (whence_raw > 0xffffffffull)                  return -T_E_INVAL;
     u32 whence = (u32)whence_raw;
     if (whence != T_SEEK_SET &&
         whence != T_SEEK_CUR &&
@@ -2168,7 +2189,7 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     // #844: c is REF-HELD (sys_lookup_rw_handle kind-gates to KOBJ_SPOOR +
     // RIGHT 0); the ref keeps c alive across the SEEK_END dev->stat_native
     // (which may block). spoor_clunk on EVERY exit below.
-    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
+    struct Spoor *c = sys_lookup_rw_handle(p, sys_hidx_arg(hraw), 0);
     if (!c)                                           return -T_E_BADF;   // #100
 
     // Reject lseek on a non-seekable Dev (POSIX lseek(2) on a pipe -> ESPIPE).
@@ -2512,9 +2533,9 @@ s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
     // userspace closing the original fds doesn't free Spoors out from
     // under the attach. The original fds keep their own ref via the
     // handle table; we add ours on top.
-    struct Spoor *tx = sys_lookup_spoor(p, (hidx_t)tx_fd_raw, RIGHT_WRITE);
+    struct Spoor *tx = sys_lookup_spoor(p, sys_hidx_arg(tx_fd_raw), RIGHT_WRITE);
     if (!tx)                                         return -1;
-    struct Spoor *rx = sys_lookup_spoor(p, (hidx_t)rx_fd_raw, RIGHT_READ);
+    struct Spoor *rx = sys_lookup_spoor(p, sys_hidx_arg(rx_fd_raw), RIGHT_READ);
     if (!rx)                                       { spoor_clunk(tx); return -1; }
     // The follow-up round's F1 (the round-B CNBFRAME fix left a hole). The spoor
     // transport is sound only over a NON-BLOCKING tx -- CNBFRAME is honored by
@@ -2786,7 +2807,7 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
     // which takes its OWN srvconn_ref on the embedded SrvConn. handle_put on
     // EVERY exit below.
     struct Handle hh;
-    if (handle_get(p, (hidx_t)srv_fd_raw, &hh) < 0)  return -1;
+    if (handle_get(p, sys_hidx_arg(srv_fd_raw), &hh) < 0) return -1;
     if (hh.kind != KOBJ_SPOOR)             { handle_put(&hh); return -1; }
     if (!hh.obj)                           { handle_put(&hh); return -1; }
     if ((hh.rights & (RIGHT_READ | RIGHT_WRITE))
@@ -2816,8 +2837,10 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
     // service marked remote, whatever `flags` says: the helper reads both marks
     // off the conn itself.
     int aerr = 0;
+    // width: flags_ok refused every bit outside a u32 set
+    u32 attach_flags = (u32)flags;
     struct Spoor *root = srvconn_attach_dev9p_root(
-        cn, aname_len > 0 ? aname : NULL, aname_len, p, (u32)flags, &aerr);
+        cn, aname_len > 0 ? aname : NULL, aname_len, p, attach_flags, &aerr);
     if (!root) {
         // A-3c/M6: surface the Tattach Rlerror ecode (e.g. -T_E_ACCES on a
         // per-user stratumd dataset-scope refusal) rather than a bare -1.
@@ -2993,7 +3016,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // #80: covers both "no such handle" and "the handle lacks RIGHT_READ" --
         // EBADF either way, which is what POSIX says about an fd that cannot
         // serve the requested operation.
-        src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);   // ref-held
+        src = sys_lookup_spoor(p, sys_hidx_arg(spoor_fd_raw), RIGHT_READ);   // ref-held
         if (!src)                                     return -T_E_BADF;
     }
 
@@ -3447,7 +3470,7 @@ static s64 sys_fd2path_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw, u64 a3) 
 
     // #844: sys_lookup_spoor TRANSFERS the ref -- spoor_clunk on every exit.
     // rights == 0 -> any KOBJ_SPOOR handle (no access right required).
-    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, 0);
+    struct Spoor *c = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), 0);
     if (!c)                                          return -1;
 
     // c is ref-held, so c->path (if non-NULL) is alive + immutable (I-33). Read
@@ -3496,7 +3519,7 @@ static s64 sys_fd_devclass_handler(u64 fd_raw) {
     struct Proc *p = t->proc;                        if (!p) return -T_E_BADF;
 
     // #844: sys_lookup_spoor TRANSFERS the ref -- spoor_clunk on every exit.
-    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, 0);
+    struct Spoor *c = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), 0);
     if (!c)                                          return -T_E_BADF;
 
     int dc = spoor_devclass(c);
@@ -3555,21 +3578,27 @@ s64 sys_setpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
-    return (s64)proc_setpgid(p, (int)(s64)a0, (int)(s64)a1);
+    s32 pid = 0, pgid = 0;
+    if (!sys_s32_arg(a0, &pid) || !sys_s32_arg(a1, &pgid)) return -T_E_INVAL;
+    return (s64)proc_setpgid(p, pid, pgid);
 }
 
 s64 sys_getpgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
-    return (s64)proc_getpgid(p, (int)(s64)a0);
+    s32 pid = 0;
+    if (!sys_s32_arg(a0, &pid)) return -T_E_INVAL;
+    return (s64)proc_getpgid(p, pid);
 }
 
 s64 sys_getsid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
-    return (s64)proc_getsid(p, (int)(s64)a0);
+    s32 pid = 0;
+    if (!sys_s32_arg(a0, &pid)) return -T_E_INVAL;
+    return (s64)proc_getsid(p, pid);
 }
 
 // =============================================================================
@@ -3703,12 +3732,13 @@ s64 sys_pty_register_test_native(u64 op, u64 a1, u64 a2, u64 a3) {
 
 s64 sys_tty_signal_for_proc(struct Proc *p, u64 pts_id, u64 sig_class) {
     if (!p) return -T_E_INVAL;
+    if (sig_class > 0xffffffffull) return -T_E_INVAL;
     return pts_tty_signal(p, pts_id, (u32)sig_class);
 }
 
 s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
     if (!p) return -T_E_INVAL;
-    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
     if (!sp) return -T_E_INVAL;
     struct SrvConn *cn = NULL;
     u64 qid = 0;
@@ -3716,8 +3746,14 @@ s64 sys_tty_fd_op_for_proc(struct Proc *p, u64 fd_raw, u64 op_num, u64 arg) {
     if (r == 0) {
         switch (op_num) {
         case SYS_TTY_ACQUIRE: r = pts_tty_acquire(p, cn, qid);            break;
-        case SYS_TTY_SET_FG:  r = pts_tty_set_fg(p, cn, qid, (u32)arg);   break;
-        case SYS_TTY_CONT:    r = pts_tty_cont(p, cn, qid, (u32)arg);     break;
+        case SYS_TTY_SET_FG:
+        case SYS_TTY_CONT: {
+            s32 pgid = 0;
+            if (!sys_s32_arg(arg, &pgid))      r = -T_E_INVAL;
+            else if (op_num == SYS_TTY_SET_FG) r = pts_tty_set_fg(p, cn, qid, (u32)pgid);
+            else                               r = pts_tty_cont(p, cn, qid, (u32)pgid);
+            break;
+        }
         default:              r = pts_tty_get_fg(p, cn, qid);             break;
         }
     }
@@ -3925,7 +3961,7 @@ static s64 sys_resolve_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
         start = territory_root_ref(p->territory);
         if (!start)                                  return -1;
     } else {
-        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);   // ref-held
+        start = sys_lookup_spoor(p, sys_hidx_arg(start_fd_raw), RIGHT_READ);   // ref-held
         if (!start)                                  return -1;
     }
 
@@ -4149,7 +4185,7 @@ s64 sys_walk_create_kname_for_proc(struct Proc *p, u64 parent_fd_raw,
         src = territory_root_ref(p->territory);
         if (!src)                                     return -T_E_INVAL;
     } else {
-        src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);   // ref-held
+        src = sys_lookup_spoor(p, sys_hidx_arg(parent_fd_raw), RIGHT_WRITE);   // ref-held
         if (!src)                                     return -T_E_BADF;
     }
 
@@ -4313,6 +4349,7 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // spoor_clunk runs dev->close -> clunks it.
     // D-1: strip the resolution flag (vacuous for create -- a created child is
     // never a symlink -- but it must not reach a Dev or be stored in Spoor.mode).
+    // width: both callers refused omode bits outside the valid set
     u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
     struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_dev,
                                             perm, p->primary_gid);
@@ -4521,7 +4558,7 @@ s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
         start = territory_root_ref(p->territory);
         if (!start)                                 return -T_E_INVAL;
     } else {
-        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);
+        start = sys_lookup_spoor(p, sys_hidx_arg(start_fd_raw), RIGHT_READ);
         if (!start)                                 return -T_E_BADF;
     }
 
@@ -4604,7 +4641,7 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
     // -1 until the phenotype rows arrived, and a bare -1 crossing the viv
     // boundary reads as Linux EPERM -- the wrong claim twice over. BADF for a
     // missing/underqualified handle; OPNOTSUPP for a Dev with no .fsync slot.
-    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
+    struct Spoor *c = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);
     if (!c)                                          return -T_E_BADF;
     if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
@@ -4843,7 +4880,7 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
 
     // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
-    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    struct Spoor *c = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
     if (!c)                                          return -1;
 
     u8 scratch[SYS_RW_STACK];
@@ -5222,7 +5259,8 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    return sys_wstat_for_proc(p, (hidx_t)hraw, (u32)valid_raw, (u32)mode_raw,
+    if ((valid_raw | mode_raw | uid_raw | gid_raw) > 0xffffffffull) return -T_E_INVAL;
+    return sys_wstat_for_proc(p, sys_hidx_arg(hraw), (u32)valid_raw, (u32)mode_raw,
                               (u32)uid_raw, (u32)gid_raw, size_raw);
 }
 
@@ -5951,7 +5989,8 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     }
     buf[(u32)name_len_raw] = 0;
 
-    int target_pid = (int)pid_raw;
+    s32 target_pid = 0;
+    if (!sys_s32_arg(pid_raw, &target_pid))          return -T_E_INVAL;
 
     // Fast-path self-post: we ARE the target. No lookup needed; the Proc
     // can't be freed while we're running it. pid_raw == 0 is the
@@ -6423,7 +6462,7 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // rather than left standing as the in-code twin of a premise the D-close
     // arc round already falsified in scripture.
     // #844: the ref is TRANSFERRED to us -- spoor_clunk on every path below.
-    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
     if (!sp)                                         return -(s64)T_E_BADF;
 
     // A PLAIN FILE only. A directory has no byte stream to page from; a symlink
@@ -6663,7 +6702,7 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     // must be followed (#184); an append-only file has no stable byte positions;
     // an O_PATH handle carries no byte-I/O authority (#81); a Dev with no read
     // slot cannot serve a page-in.
-    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    struct Spoor *sp = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
     if (!sp)                                         return -(s64)T_E_BADF;
     if ((sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) ||
         (sp->flag & CWALKONLY) || !sp->dev || !sp->dev->read) {
@@ -6899,6 +6938,7 @@ s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
         spin_unlock(&p->as->lock);
         return -(s64)T_E_NOMEM;
     }
+    // width: burrow_prot_word_check refused every high bit
     int rc = burrow_map(p, b, vaddr, length, (u32)prot_raw);
     if (rc == 0) {
         // The mint's ceiling is RW whatever prot it starts at (ARCH 6.5): this
@@ -6939,6 +6979,7 @@ s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
     // it. What may be protected is decided by the mapping (its type, flags and
     // ceiling), not by its address -- burrow_protect's precheck.
     spin_lock(&p->as->lock);
+    // width: burrow_prot_word_check refused every high bit
     int rc = burrow_protect(p, vaddr_raw, (size_t)length, (u32)prot_raw,
                             (flags_raw & BURROW_PROTECT_SEAL) != 0);
     spin_unlock(&p->as->lock);
@@ -7704,7 +7745,7 @@ static s64 sys_weft_unshare_handler(u64 share_id) {
 static s64 sys_weft_map_handler(u64 data_fd_raw, u64 hint_va) {
     struct Thread *t = current_thread();
     if (!t || !t->proc)                              return -1;
-    return sys_weft_map_for_proc(t->proc, (hidx_t)data_fd_raw, hint_va);
+    return sys_weft_map_for_proc(t->proc, sys_hidx_arg(data_fd_raw), hint_va);
 }
 
 // =============================================================================
@@ -7869,12 +7910,6 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     int rc = sys_loom_setup_held_for_proc(p, entries, flags, out, out_fd, &l);
     if (rc == 0) loom_unref(l);   // may free it, if the fd is already closed
     return rc;
-}
-
-// A descriptor argument wider than an index names nothing, so the lookup refuses
-// it after any check that precedes the lookup (ERRORS.md principle 6).
-static hidx_t sys_hidx_arg(u64 raw) {
-    return raw > 0x7fffffffull ? (hidx_t)-1 : (hidx_t)raw;
 }
 
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
@@ -8146,14 +8181,16 @@ static s64 sys_torpor_wait_handler(u64 addr_va, u64 expected_raw,
                                    u64 timeout_us_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return TORPOR_ERR_EINVAL;
-    return sys_torpor_wait_for_proc(t->proc, addr_va,
-                                    (u32)expected_raw,
+    u32 expected = 0;
+    if (!sys_word32_arg(expected_raw, &expected))    return TORPOR_ERR_EINVAL;
+    return sys_torpor_wait_for_proc(t->proc, addr_va, expected,
                                     (s64)timeout_us_raw);
 }
 
 static s64 sys_torpor_wake_handler(u64 addr_va, u64 count_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return TORPOR_ERR_EINVAL;
+    if (count_raw > 0xffffffffull)                   return TORPOR_ERR_EINVAL;
     return sys_torpor_wake_for_proc(t->proc, addr_va, (u32)count_raw);
 }
 
@@ -8165,7 +8202,7 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     // handle_dup validates rights subset internally; the static_assert
     // on RIGHT_ALL bounds the legal bit-set range.
     if (new_rights_raw & ~(u64)RIGHT_ALL)             return -1;
-    hidx_t nh = handle_dup(p, (hidx_t)hraw, (rights_t)new_rights_raw);
+    hidx_t nh = handle_dup(p, sys_hidx_arg(hraw), (rights_t)new_rights_raw);
     return (s64)nh;
 }
 
@@ -8319,7 +8356,7 @@ static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,
     struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw);
     if (!mp)                                          return -1;
 
-    s64 rc = (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw, mp,
+    s64 rc = (s64)sys_mount_for_proc(p, sys_hidx_arg(source_fd_raw), mp,
                                      (u32)flags_raw);
     // territory.c::mount copied mp's identity (and took its own ref where it
     // keeps mp as a union's covered member) -- release ours.
@@ -10736,7 +10773,8 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
     struct Proc *p = t->proc;
     if (!p)                                            return -1;
 
-    int want_pid = (int)(s64)want_pid_u;   // -1 (any), a pid, 0/-N (pgrp)
+    s32 want_pid = 0;                       // -1 (any), a pid, 0/-N (pgrp)
+    if (!sys_s32_arg(want_pid_u, &want_pid))           return -T_E_INVAL;
     // Reject unknown/garbage flag bits (the full x1, before narrowing) so the
     // flag space stays clean for future additions and a fat-fingered flags
     // value fails loudly rather than silently behaving as blocking. Matches
@@ -10849,7 +10887,7 @@ static s64 sys_srv_accept_handler(u64 service_h_raw) {
     if (!t)                                            return -1;
     struct Proc *p = t->proc;
     if (!p)                                            return -1;
-    return (s64)sys_srv_accept_for_proc(p, (hidx_t)service_h_raw);
+    return (s64)sys_srv_accept_for_proc(p, sys_hidx_arg(service_h_raw));
 }
 
 // =============================================================================
@@ -10999,7 +11037,7 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
         return -1;
 
     struct srv_peer_info info = {0};
-    if (sys_srv_peer_for_proc(p, (hidx_t)conn_h_raw, &info) != 0)
+    if (sys_srv_peer_for_proc(p, sys_hidx_arg(conn_h_raw), &info) != 0)
         return -1;
 
     // Store the struct per-byte with fault fixup (the sys_wait_pid_handler
@@ -11151,10 +11189,11 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
         if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0)    return -1;
     }
 
-    // s32 cast for timeout — Linux semantics: negative = block forever,
-    // 0 = non-blocking, positive = ms. The raw u64 we get from x2
-    // truncates to s32 here.
-    s32 timeout_ms = (s32)(s64)timeout_ms_raw;
+    // timeout is an int, Linux semantics: negative = block forever,
+    // 0 = non-blocking, positive = ms. Its binding sign-extends it, so a
+    // negative timeout fits; anything wider than an int is refused.
+    s32 timeout_ms = 0;
+    if (!sys_s32_arg(timeout_ms_raw, &timeout_ms))       return -T_E_INVAL;
 
     s64 result = sys_poll_for_proc(p, kfds, nfds, timeout_ms);
     if (result < 0) return result;
@@ -13868,7 +13907,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // fsyncs directory fds when core.fsync is enabled; milestone A runs
         // core.fsync=none). Relaxing the native gate is an ABI change --
         // signoff-gated, not this chunk's call to make silently.
-        return sys_fsync_handler(args[0],
+        // fsync/fdatasync(unsigned int fd).
+        return sys_fsync_handler((u64)(u32)args[0],
                                  (linux_nr == VIV_LINUX_FDATASYNC) ? 1 : 0);
     }
 
@@ -14139,9 +14179,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     }
 
     case VIV_LINUX_FSTAT: {
-        // fstat(fd, statbuf): x0 fd, x1 statbuf.
+        // fstat(unsigned int fd, statbuf): x0 fd, x1 statbuf.
         struct t_stat ks;
-        s64 rc = sys_fstat_for_proc(p, args[0], &ks);
+        s64 rc = sys_fstat_for_proc(p, (u64)(u32)args[0], &ks);
         if (rc != 0)                                 return rc;
         return viv_stat_copy_out(args[1], &ks);
     }
@@ -14194,7 +14234,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // `len` is judged in the shell, not the decide, for the same reason
             // the anon arm judges it here: Linux answers EINVAL for 0 and ENOMEM
             // for too-large, and sys_mmap_file_for_proc reproduces both.
-            return sys_mmap_file_for_proc(p, args[4], args[1],
+            // Linux reads the fd through fget(unsigned int).
+            return sys_mmap_file_for_proc(p, (u64)(u32)args[4], args[1],
                                           ((u32)args[2] & VIV_PROT_EXEC) != 0,
                                           args[5]);
         }
@@ -14204,7 +14245,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // the ordering here cannot shadow anything.
         if (vivarium_mmap_fixed_file_decide(args[0], args[2], args[3],
                                             args[4], args[5]) == VIV_TRANSLATED) {
-            return sys_mmap_fixed_file_for_proc(p, args[0], args[4], args[1],
+            return sys_mmap_fixed_file_for_proc(p, args[0], (u64)(u32)args[4], args[1],
                                                 (u32)args[2], args[5]);
         }
         if (vivarium_mmap_fixed_anon_decide(args[0], args[2], args[3],
@@ -14839,6 +14880,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // validated inside sys_readlink_for_proc, against the exact span.
         if (vivarium_faccessat_decide(args[0]) != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;
+        // bufsiz is an int: Linux refuses one that is not positive before it
+        // reads the path, and never copies more than the low half asks for.
+        s32 bufsiz = (s32)(u32)args[3];
+        if (bufsiz <= 0)                               return -(s64)T_E_INVAL;
         u32 path_len = 0;
         s64 mrc = viv_measure_user_path(args[1], &path_len);
         if (mrc != 0)                                return mrc;
@@ -14851,7 +14896,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         }
         path_scratch[path_len] = '\0';
         return sys_readlink_for_proc(p, path_scratch, path_len,
-                                     args[2], args[3]);
+                                     args[2], (u64)bufsiz);
     }
 
     case VIV_LINUX_GETRANDOM: {
@@ -14859,7 +14904,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // native SYS_GETRANDOM is shape-identical and does its own buffer
         // validation + copy-out (the F237 partial-fault scrub included), and
         // gates on CAP_CSPRNG_READ -- kept under I-43 (shape, not authority).
-        s64 rc = sys_getrandom_handler(args[0], args[1], args[2]);
+        // flags is an unsigned int, so Linux drops the high half.
+        s64 rc = sys_getrandom_handler(args[0], args[1], (u64)(u32)args[2]);
         // The native handler signals every failure (no cap / not seeded /
         // fault) with a bare -1. -1 would read as EPERM at the libc; map it to
         // EAGAIN, Linux getrandom's "entropy not available yet" errno and the

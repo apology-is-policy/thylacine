@@ -42,8 +42,15 @@
 #include <thylacine/dev.h>           // C2-k1b F1: devcons/devramfs + spoor_is_console
 
 #include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
+#include "../../arch/arm64/exception.h"
+#include <thylacine/errno.h>
+#include <thylacine/thread.h>
 
 void test_vivarium_t1_renumbers(void);
+void test_vivarium_t1_narrows_linux_widths(void);
+void test_vivarium_t2_shells_narrow_linux_widths(void);
+
+extern bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_fails_closed(void);
@@ -108,6 +115,76 @@ void test_vivarium_t1_renumbers(void) {
     TEST_EXPECT_EQ((int)T_SEEK_SET, 0, "T_SEEK_SET == Linux SEEK_SET");
     TEST_EXPECT_EQ((int)T_SEEK_CUR, 1, "T_SEEK_CUR == Linux SEEK_CUR");
     TEST_EXPECT_EQ((int)T_SEEK_END, 2, "T_SEEK_END == Linux SEEK_END");
+}
+
+// A word Linux declares narrower than a register arrives with an unspecified
+// high half (AAPCS64), and Linux's SYSCALL_DEFINE narrows it by construction.
+// The native handlers refuse a word that does not fit (ERRORS.md principle 6),
+// so a T1 row narrows exactly the words Linux's prototype names and carries the
+// rest whole. The expected widths are Linux's prototypes, not the table:
+//   read/write/close(unsigned int fd, ...), lseek(unsigned int fd, off_t,
+//   unsigned int whence), pread64/pwrite64(unsigned int fd, ...),
+//   getpgid/getsid(pid_t), exit_group(int) (the native handler keeps only the
+//   low byte, so the row leaves it whole).
+void test_vivarium_t1_narrows_linux_widths(void) {
+    static const struct { u64 nr; u8 u32w, s32w; const char *what; } rows[] = {
+        { VIV_LINUX_READ,       0x1, 0,   "read" },
+        { VIV_LINUX_WRITE,      0x1, 0,   "write" },
+        { VIV_LINUX_CLOSE,      0x1, 0,   "close" },
+        { VIV_LINUX_LSEEK,      0x5, 0,   "lseek" },
+        { VIV_LINUX_PREAD64,    0x1, 0,   "pread64" },
+        { VIV_LINUX_PWRITE64,   0x1, 0,   "pwrite64" },
+        { VIV_LINUX_GETPGID,    0,   0x1, "getpgid" },
+        { VIV_LINUX_GETSID,     0,   0x1, "getsid" },
+        { VIV_LINUX_EXIT_GROUP, 0,   0,   "exit_group" },
+    };
+    for (u32 r = 0; r < sizeof rows / sizeof rows[0]; r++) {
+        u64 args[VIV_NARGS];
+        struct viv_call out;
+        // Junk above every low half, and bit 31 set in it, so a zero-extension
+        // and a sign-extension give different words.
+        for (u32 i = 0; i < VIV_NARGS; i++) args[i] = 0xA5A5000000000000ull | (0x80001000u + i);
+        TEST_EXPECT_EQ((int)vivarium_translate(rows[r].nr, args, &out), (int)VIV_TRANSLATED,
+                       rows[r].what);
+        for (u32 i = 0; i < VIV_NARGS; i++) {
+            u64 want = args[i];
+            if (rows[r].u32w & (1u << i))      want = (u64)(u32)args[i];
+            else if (rows[r].s32w & (1u << i)) want = (u64)(s64)(s32)(u32)args[i];
+            TEST_EXPECT_EQ(out.args[i], want, rows[r].what);
+        }
+    }
+}
+
+static s64 viv_shell_call(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3) {
+    struct exception_context c;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = nr;
+    c.regs[0] = a0; c.regs[1] = a1; c.regs[2] = a2; c.regs[3] = a3;
+    bool native = viv_linux_dispatch_for_test(&c, kproc());
+    current_thread()->note_interruptible = false;   // syscall_dispatch's job on the way out
+    return native ? (s64)0x7fffffffffffffffll : (s64)c.regs[0];
+}
+
+// A T2 shell narrows its own words by its own Linux prototype. readlinkat's
+// bufsiz is an int: Linux refuses one that is not positive before it reads the
+// path, and a high half it never sees cannot widen the copy. getrandom's flags
+// is an unsigned int: a high half Linux drops must not reach the native
+// handler, which refuses one.
+void test_vivarium_t2_shells_narrow_linux_widths(void) {
+    const u64 at_fdcwd = (u64)(s64)VIV_AT_FDCWD, bad_path = 0x10;
+    s64 neg  = viv_shell_call(VIV_LINUX_READLINKAT, at_fdcwd, bad_path, 0x20, (u64)-1ll);
+    s64 zero = viv_shell_call(VIV_LINUX_READLINKAT, at_fdcwd, bad_path, 0x20, 0);
+    s64 junk = viv_shell_call(VIV_LINUX_READLINKAT, at_fdcwd, bad_path, 0x20,
+                              0xFFFFFFFF00000010ull);
+    s64 rnd0 = viv_shell_call(VIV_LINUX_GETRANDOM, 0, 0, 0, 0);
+    s64 rndw = viv_shell_call(VIV_LINUX_GETRANDOM, 0, 0, 1ull << 32, 0);
+
+    TEST_EXPECT_EQ(neg, -(s64)T_E_INVAL, "readlinkat: a negative bufsiz is refused before the path");
+    TEST_EXPECT_EQ(zero, -(s64)T_E_INVAL, "readlinkat: a zero bufsiz is refused");
+    TEST_EXPECT_EQ(junk, -(s64)T_E_FAULT,
+                   "readlinkat: junk over a positive low half reaches the path read");
+    TEST_EXPECT_EQ(rnd0, (s64)0, "getrandom: an empty request answers 0");
+    TEST_EXPECT_EQ(rndw, rnd0, "getrandom: a high half in flags is Linux's to drop");
 }
 
 // The rejections are DECISIONS, not gaps, so they are asserted by name. If a

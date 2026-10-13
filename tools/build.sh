@@ -553,7 +553,7 @@ EOF
     # into the initrd's bin/. The list is curated below (not glob) so an
     # accidental CMake byproduct doesn't get shipped. Each binary's
     # source-of-truth comment lives in usr/<name>/CMakeLists.txt.
-    local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" "stub-driver" "stub-fs-probe" "stub-walk-probe" "thread-probe" "thread-fault-probe" "loom-bridge-probe" )
+    local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" "stub-driver" "stub-fs-probe" "stub-walk-probe" "thread-probe" "thread-fault-probe" "loom-bridge-probe" "argwidth-probe" )
     for bin in "${usr_bins[@]}"; do
         local src="$USR_BUILD/$bin/$bin"
         if [[ -f "$src" ]]; then
@@ -846,6 +846,14 @@ DOSBOXCONF
     python3 "$REPO_ROOT/tools/check-invariants.py" \
         || { echo "==> invariant registry check FAILED -- ARCH section 28 and" >&2
              echo "    CLAUDE.md's condensed table must carry the same rows" >&2
+             exit 1; }
+
+    # ERRORS.md principle 6: a syscall argument that does not fit is refused,
+    # never cast down. Fatal, self-testing, sub-second.
+    echo "==> argument width check (ERRORS.md principle 6)"
+    python3 "$REPO_ROOT/tools/check-arg-width.py" "$REPO_ROOT/kernel/syscall.c" \
+        || { echo "==> argument width check FAILED -- a raw syscall argument is" >&2
+             echo "    narrowed with no full-width check first" >&2
              exit 1; }
 }
 

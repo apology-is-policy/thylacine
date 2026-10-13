@@ -1914,7 +1914,7 @@ five qualify:
 
 | Linux | tier | why |
 |---|---|---|
-| `read` 63 → `SYS_READ` 9 | **T1** | args identical in order, width, meaning |
+| `read` 63 → `SYS_READ` 9 | **T1** | args identical in order and meaning; `unsigned int fd` is narrowed as Linux narrows it (2026-10-13: the native handler refuses a word that does not fit, ERRORS.md principle 6) |
 | `write` 64 → `SYS_WRITE` 10 | **T1** | ditto |
 | `close` 57 → `SYS_CLOSE` 11 | **T1** | ditto |
 | `lseek` 62 → `SYS_LSEEK` 51 | **T1** | `T_SEEK_*` are 0/1/2, so are Linux's `SEEK_*` — the enumerations coincide, so there is nothing to map |

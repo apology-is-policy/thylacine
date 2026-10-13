@@ -21,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Session registry factory ABI
 
@@ -501,20 +501,40 @@ be one 4 KiB staging buffer per round trip.
   same day every Loom refusal is an errno (LOOM.md 8.2a), as the comments on
   libthyla-rs's raw `t_loom_*` wrappers now say.
 - **A too-wide argument is refused, never truncated (operator vote 8,
-  2026-10-13; ERRORS.md principle 6).** Loom conforms (the next sentences
-  describe it before the vote). Handlers that still cast a high word away
-  are one tracked sweep. Before: its handlers
-  cast `loom_fd` to `hidx_t` and `op`, `nargs` and ENTER's counts and flags to
-  `u32`, so a high word is ignored: op `0x1_0000_0002` routes as op 2, and
-  descriptor `0x1_0000_0005` names the caller's own descriptor 5. Handlers
-  differ on this. Some refuse a high word (the PCI IRQ handle bound in
-  `sys_pci_irq_create_handler`, the PTY interaction fds in
-  `sys_pty_register_for_proc`, the srv registry's `source_fd`, the console
-  episode op, `pci_map_range`'s protection); others cast it away. No authority
-  crosses a Proc through the cast (the alias is in the caller's own table), but
-  a caller that builds an argument wrongly gets a known op rather than a
-  refusal. Which rule the whole syscall surface should follow is an open
-  question.
+  2026-10-13; ERRORS.md principle 6).** Loom conformed first; a sweep the same
+  day brought every native handler in `kernel/syscall.c` under the rule, and
+  `tools/check-arg-width.py`, run by `build.sh` on every ramfs bake, fails the
+  build on a cast of a raw argument to a narrower type that no full-width
+  check precedes. A handler reads an argument in one of four ways. A
+  descriptor goes through `sys_hidx_arg`: a value wider than an index becomes
+  -1, so the handler gives its own answer for a descriptor that names nothing,
+  after any check that precedes its lookup. An unsigned 32-bit word (a count,
+  a whence, a protection, wstat's fields, a signal class) with a high bit set
+  answers `-T_E_INVAL`. A signed one (a pid, poll's timeout) goes through
+  `sys_s32_arg`, which accepts exactly the sign-extension an `int` binding
+  produces, so -1 still means "any child" and "wait forever". Torpor's
+  expected value goes through `sys_word32_arg`, which accepts either
+  extension: pouch passes it as `int` (musl's lock words are negative) and
+  libt as `unsigned int`, and both name the same word. Two narrowings stay on
+  purpose, each marked `// width:` where it happens: exits and exit_group
+  keep the status's low byte, as Linux does, and pci_claim's high word is the
+  ordinal. The Linux phenotype keeps Linux's truncation in the phenotype: a
+  T1 row narrows the words Linux's prototype declares 32-bit before the
+  renumber, and a T2 shell narrows its own (see [[sub-kernel-vivarium]]).
+  `/bin/argwidth-probe` (kernel test `syscall.argwidth_probe`) makes each
+  covered call twice, one bit apart, from EL0.
+  Before the vote, Loom's handlers cast `loom_fd` to `hidx_t` and `op`, `nargs`
+  and ENTER's counts and flags to `u32`, so a high word was ignored: op
+  `0x1_0000_0002` routed as op 2, and descriptor `0x1_0000_0005` named the
+  caller's own descriptor 5. The other handlers differed. Some refused a high
+  word (the PCI IRQ handle bound in `sys_pci_irq_create_handler`, the PTY
+  interaction fds in `sys_pty_register_for_proc`, the srv registry's
+  `source_fd`, the console episode op, `pci_map_range`'s protection); 37
+  descriptor reads in 32 functions and nineteen other words cast it away. A
+  postnote to pid `2^32 + self` posted to the caller itself. No authority
+  crossed a Proc through a cast (each alias was in the caller's own table or the
+  caller itself), but a caller that built an argument wrongly got a different,
+  successful request instead of a refusal.
 - **The `svc` immediate is unused.** Reserved as a class selector; nothing reads
   it.
 - **Environment pass-through at spawn was reserved and never built.** The

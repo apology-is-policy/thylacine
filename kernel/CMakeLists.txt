@@ -279,6 +279,7 @@ set(KERNEL_TEST_SRCS
     test/test_thread_spawn.c
     test/test_pipe_probe.c
     test/test_loom_bridge_probe.c
+    test/test_argwidth_probe.c
     test/test_attach_probe.c
     test/test_stratumd_stub.c
     test/test_stub_driver.c

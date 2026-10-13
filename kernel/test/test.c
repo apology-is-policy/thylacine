@@ -529,6 +529,9 @@ void test_syscall_dispatch_exit_group_code(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
 void test_syscall_opath_walkonly_no_byte_io(void);
+void test_syscall_argwidth_probe(void);
+void test_vivarium_t1_narrows_linux_widths(void);
+void test_vivarium_t2_shells_narrow_linux_widths(void);
 void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
@@ -2599,6 +2602,7 @@ struct test_case g_tests[] = {
     { "syscall.opath_walkonly_no_byte_io",
                                        test_syscall_opath_walkonly_no_byte_io,
                                                                            false, NULL },
+    { "syscall.argwidth_probe",        test_syscall_argwidth_probe,        false, NULL },
     { "uaccess.fixup_table_well_formed",
                                        test_uaccess_fixup_table_well_formed,
                                                                            false, NULL },
@@ -3093,6 +3097,8 @@ struct test_case g_tests[] = {
     { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
     { "cons.sys_puts_uses_shared_console_path", test_cons_sys_puts_uses_shared_console_path, false, NULL },
     { "vivarium.t1_renumbers",           test_vivarium_t1_renumbers,           false, NULL },
+    { "vivarium.t1_narrows_linux_widths", test_vivarium_t1_narrows_linux_widths, false, NULL },
+    { "vivarium.t2_shells_narrow_linux_widths", test_vivarium_t2_shells_narrow_linux_widths, false, NULL },
     { "vivarium.rejects_are_deliberate", test_vivarium_rejects_are_deliberate, false, NULL },
     { "vivarium.unknown_forwards",       test_vivarium_unknown_forwards,       false, NULL },
     { "vivarium.git_chunk_rows",         test_vivarium_git_chunk_rows,         false, NULL },

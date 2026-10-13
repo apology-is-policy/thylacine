@@ -97,19 +97,31 @@ _Static_assert(VIV_LINUX_GETSID  > VIV_NATIVE_CEILING, "getsid above the ceiling
 // as garbage and the native handler ignores them exactly as it does for a native
 // caller). It is recorded because it documents WHICH words the equivalence claim
 // actually covers, and the tests assert on it.
+//
+// The two masks name the words Linux declares narrower than a register (bit n =
+// word n): `u32` words are cut to their low half as `unsigned int`, `s32` words
+// sign-extended from it as `int` / `pid_t`. Linux's SYSCALL_DEFINE narrows those
+// by construction and AAPCS64 leaves their high half unspecified, so a guest may
+// leave junk there; the native handler refuses a word that does not fit
+// (ERRORS.md principle 6), so the row narrows first. A row that omits them
+// carries every word whole.
 struct viv_row {
     u16 linux_nr;
     u16 thyla_nr;
     u8  nargs;
+    u8  u32_words;
+    u8  s32_words;
 };
 
 // -----------------------------------------------------------------------------
 // TIER 1 — pure renumbers.
 //
 // Every row here satisfies the §4 rule in its strictest form: the argument words
-// are identical in order, width, and MEANING, so the translation is the number
-// substitution alone. Each row's equivalence was checked against the Thylacine
-// side's documented contract in syscall.h, not against argument shape.
+// are identical in order and MEANING, so the translation is the number
+// substitution alone, plus the narrowing Linux applies to a word it declares
+// narrower than a register (the row's masks; struct viv_row). Each row's
+// equivalence was checked against the Thylacine side's documented contract in
+// syscall.h, not against argument shape.
 //
 // The claims, one per row, so a future reader can re-check them without
 // re-deriving:
@@ -204,10 +216,12 @@ struct viv_row {
 // -----------------------------------------------------------------------------
 
 static const struct viv_row g_viv_t1[] = {
-    { VIV_LINUX_READ,       SYS_READ,       3 },
-    { VIV_LINUX_WRITE,      SYS_WRITE,      3 },
-    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1 },
-    { VIV_LINUX_LSEEK,      SYS_LSEEK,      3 },
+    // read/write/close(unsigned int fd, ...), lseek(unsigned int fd, off_t,
+    // unsigned int whence), pread64/pwrite64(unsigned int fd, ...).
+    { VIV_LINUX_READ,       SYS_READ,       3, 0x1 },
+    { VIV_LINUX_WRITE,      SYS_WRITE,      3, 0x1 },
+    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1, 0x1 },
+    { VIV_LINUX_LSEEK,      SYS_LSEEK,      3, 0x5 },
     // pread64/pwrite64 (the git 6.27 clone arm): identical (fd, buf, count,
     // offset) shape to SYS_PREAD/SYS_PWRITE, and the native handlers validate
     // the buffer + gate on off>=0 / RIGHT_* exactly as read/write do -- so a
@@ -215,8 +229,10 @@ static const struct viv_row g_viv_t1[] = {
     // the cloned pack via pread; without this it FORWARDs to ENOSYS. The
     // sub-ceiling collision with the LOOM pair is the read/write renumbers'
     // damage-envelope argument (see vivarium.h).
-    { VIV_LINUX_PREAD64,    SYS_PREAD,      4 },
-    { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4 },
+    { VIV_LINUX_PREAD64,    SYS_PREAD,      4, 0x1 },
+    { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4, 0x1 },
+    // exit_group(int): the native handler keeps only the low byte, which no
+    // narrowing changes.
     { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1 },
 
     // N-3: a musl THREAD (not the process) exits via SYS_exit(93), always with
@@ -256,8 +272,9 @@ static const struct viv_row g_viv_t1[] = {
     // pgid/sid (a plain id < 2^32, never in the errno band) or -T_E_SRCH, which
     // IS Linux ESRCH; pid 0 = self in both. No errno remap is needed, unlike
     // their setsid/setpgid siblings (which are TIER2 shells for the EPERM remap).
-    { VIV_LINUX_GETPGID,    SYS_GETPGID,    1 },
-    { VIV_LINUX_GETSID,     SYS_GETSID,     1 },
+    // getpgid/getsid(pid_t pid).
+    { VIV_LINUX_GETPGID,    SYS_GETPGID,    1, 0, 0x1 },
+    { VIV_LINUX_GETSID,     SYS_GETSID,     1, 0, 0x1 },
 };
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
@@ -561,7 +578,12 @@ enum viv_verdict vivarium_translate(u64 linux_nr, const u64 *args_in,
         if (g_viv_t1[i].linux_nr != (u16)linux_nr) continue;
 
         out->nr = (u64)g_viv_t1[i].thyla_nr;
-        for (u32 a = 0; a < VIV_NARGS; a++) out->args[a] = args_in[a];
+        for (u32 a = 0; a < VIV_NARGS; a++) {
+            u64 w = args_in[a];
+            if (g_viv_t1[i].u32_words & (1u << a))      w = (u64)(u32)w;
+            else if (g_viv_t1[i].s32_words & (1u << a)) w = (u64)(s64)(s32)(u32)w;
+            out->args[a] = w;
+        }
         return VIV_TRANSLATED;
     }
 

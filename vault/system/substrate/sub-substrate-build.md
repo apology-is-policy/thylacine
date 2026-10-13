@@ -26,7 +26,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -508,3 +508,11 @@ The native workspace and ramfs lists retain Lantern, the existing capacity and
 bus probes, and the optional Track-R r1hello fixture together. Corvus authority
 is a workspace library, not a staged executable. Merged CI build and production
 shape compile; no absent optional fixture is counted as coverage.
+
+## The argument width check (2026-10-13)
+
+`build_ramfs` runs `tools/check-arg-width.py` on `kernel/syscall.c` right after
+the invariant registry check: fatal, no skip switch, self-testing (it refuses to
+run if its own planted cases do not read as expected). It fails a build that
+casts a raw syscall argument to a narrower type with no full-width check first
+(ERRORS.md principle 6; [[sub-kernel-syscall-dispatch]]).

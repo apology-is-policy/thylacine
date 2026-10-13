@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+# ERRORS.md principle 6: a syscall argument that does not fit its declared
+# width is refused, never truncated. Every argument arrives as a u64 parameter;
+# this check fails on any explicit cast of such a parameter to a narrower type
+# unless the function first compared that parameter at full width, or the cast
+# line says why it may narrow (`// width: <reason>`).
+#
+#   tools/check-arg-width.py [--self-test] [file ...]
+#
+# Functions named viv_* are exempt: they translate a Linux call, and Linux's
+# declared C types narrow by construction (the phenotype is ABI shape, I-43).
+# Implicit narrowing is the compiler's half (-Werror=shorten-64-to-32).
+import re, sys
+
+NARROW = r'(?:hidx_t|u32|s32|int|u16|s16|u8|unsigned|unsigned int|rights_t|pid_t|uid_t|gid_t|mode_t)'
+WIDE = r'(?:\(\s*(?:u64|s64|long|unsigned long|uintptr_t)\s*\)\s*)?'
+HELPERS = ('sys_hidx_arg', 'sys_s32_arg', 'sys_u32_arg', 'sys_word32_arg')
+FN = re.compile(r'^(?:static )?(?:inline )?[\w ]*?\b(\w+)\(([^;{)]*)\)\s*\{', re.M)
+
+def guards(p):
+    q = re.escape(p)
+    return [
+        r'\b' + q + r'\s*>=?\s*(?:\(u64\)\s*)?(?:0x[0-9a-fA-F]+u?l*l*|[A-Z][A-Z0-9_]*)',
+        r'\b' + q + r'\s*&\s*~\s*\(\s*u64\s*\)',
+        r'\([^;()]*\b' + q + r'\b[^;()]*\)\s*>\s*0x[fF]{8}',
+        r'\b(?:' + '|'.join(HELPERS) + r')\(\s*' + q + r'\b',
+    ]
+
+def strip_comments(text):
+    # blank every comment, keeping offsets and newlines
+    def blank(m):
+        return ''.join('\n' if ch == '\n' else ' ' for ch in m.group(0))
+    return re.sub(r'//[^\n]*|/\*.*?\*/', blank, text, flags=re.S)
+
+def check(src, name):
+    bad = []
+    for m in FN.finditer(src):
+        fn, params = m.group(1), m.group(2)
+        if fn.startswith('viv_') or fn in HELPERS:
+            continue
+        ps = [x.strip().split()[-1].lstrip('*') for x in params.split(',')
+              if re.match(r'\s*(?:const\s+)?u64\s+\w+\s*$', x)]
+        if not ps:
+            continue
+        body_start = m.end()
+        end = src.find('\n}\n', body_start)
+        raw = src[body_start:end if end >= 0 else len(src)]
+        body = strip_comments(raw)
+        # a mask held in a u64 local is a full-width mask too
+        masks = re.findall(r'\bu64\s+(\w+)\s*=', body)
+        base = src[:body_start].count('\n') + 1
+        for p in ps:
+            cast = re.compile(r'\(\s*' + NARROW + r'\s*\)\s*' + WIDE + r'\(?\s*' + re.escape(p) + r'\b')
+            for c in cast.finditer(body):
+                line_start = raw.rfind('\n', 0, c.start()) + 1
+                line_end = raw.find('\n', c.end())
+                line = raw[line_start:line_end if line_end >= 0 else len(raw)]
+                above = raw[raw.rfind('\n', 0, max(line_start - 1, 0)) + 1:line_start]
+                if '// width:' in line or above.strip().startswith('// width:'):
+                    continue
+                before = body[:c.start()]
+                gs = guards(p) + [r'\b' + re.escape(p) + r'\s*&\s*~\s*' + v + r'\b' for v in masks]
+                if any(re.search(g, before) for g in gs):
+                    continue
+                ln = base + body[:c.start()].count('\n')
+                bad.append('%s:%d: %s narrows %s with no full-width check first' % (name, ln, fn, p))
+    return bad
+
+def self_test():
+    ok = 'static s64 sys_a(u64 x) {\n    if (x > 0xffffffffull) return -1;\n    return f((u32)x);\n}\n'
+    helper = 'static s64 sys_b(u64 fd) {\n    return g(sys_hidx_arg(fd));\n}\n'
+    noted = 'static s64 sys_c(u64 s) {\n    int c = (int)(s & 0xff); // width: the status byte\n    return c;\n}\n'
+    above = 'static s64 sys_l(u64 s) {\n    // width: the status byte\n    int c = (int)(s & 0xff);\n    return c;\n}\n'
+    far = 'static s64 sys_m(u64 s) {\n    // width: the status byte\n    int k = 0;\n    int c = (int)(s & 0xff);\n    return c + k;\n}\n'
+    bad = 'static s64 sys_d(u64 fd) {\n    return g((hidx_t)fd);\n}\n'
+    late = 'static s64 sys_e(u64 x) {\n    u32 v = (u32)x;\n    if (x > 0xffffffffull) return -1;\n    return v;\n}\n'
+    double = 'static s64 sys_f(u64 pid) {\n    return h((int)(s64)pid);\n}\n'
+    viv = 'static s64 viv_g(u64 fd) {\n    return g((hidx_t)fd);\n}\n'
+    comment = 'static s64 sys_h(u64 fd) {\n    // the old code did (hidx_t)fd here\n    return g(sys_hidx_arg(fd));\n}\n'
+    ored = 'static s64 sys_i(u64 a, u64 b) {\n    if ((a | b) > 0xffffffffull) return -1;\n    return f((u32)a, (u32)b);\n}\n'
+    u32mask = 'static s64 sys_j(u64 x) {\n    const u32 m = 7;\n    if (x & ~m) return -1;\n    return f((u32)x);\n}\n'
+    u64mask = 'static s64 sys_k(u64 x) {\n    const u64 m = 7;\n    if (x & ~m) return -1;\n    return f((u32)x);\n}\n'
+    want = {ok: 0, helper: 0, noted: 0, bad: 1, late: 1, double: 1, viv: 0,
+            comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1}
+    for src, n in want.items():
+        got = len(check(src, 'self-test'))
+        if got != n:
+            print('check-arg-width self-test FAILED on:\n' + src + 'want %d, got %d' % (n, got))
+            return 1
+    return 0
+
+def main(argv):
+    if argv[:1] == ['--self-test']:
+        return self_test()
+    if self_test():
+        return 1
+    files = argv or ['kernel/syscall.c']
+    bad = []
+    for f in files:
+        bad += check(open(f).read(), f)
+    for b in bad:
+        print(b)
+    if bad:
+        print('check-arg-width: %d narrowing cast(s) of a raw argument (ERRORS.md principle 6)' % len(bad))
+        return 1
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

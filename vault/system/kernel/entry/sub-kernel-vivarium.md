@@ -3,14 +3,14 @@ id: sub-kernel-vivarium
 type: sub
 title: "The Linux phenotype: the syscall translation table"
 parent: moc-kernel-entry
-code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c"]
+code: ["kernel/vivarium.c", "kernel/include/thylacine/vivarium.h", "kernel/test/test_viv_sock.c", "kernel/test/test_vivarium.c"]
 audit: hard
 guarded-by: [inv-i43]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-01
+updated: 2026-10-13
 ---
 ## Native ceiling 127
 
@@ -887,3 +887,29 @@ open: a second thread connecting the same socket reads `ECONNREFUSED` where Linu
 waits; `connect(AF_UNSPEC)` is unserved in every state; and `read` or `write` on a
 socket that never connected still reaches `ctl`, where Linux says `ENOTCONN` or
 `EPIPE`.
+
+## Linux's narrow words stay in the phenotype (2026-10-13, vote 8)
+
+A Linux guest may leave junk in the high half of a word its prototype declares
+`int` or `unsigned int`: AAPCS64 leaves those bits unspecified and Linux's
+`SYSCALL_DEFINE` narrows them by construction. Since operator vote 8 the native
+handlers refuse a word that does not fit (ERRORS.md principle 6,
+[[sub-kernel-syscall-abi]]), so the phenotype narrows first and the truncation
+stays Linux's. `struct viv_row` gains two masks, `u32_words` and `s32_words`
+(bit n = word n), zero when a row omits them; `vivarium_translate` cuts a
+`u32` word to its low half and sign-extends an `s32` word from it, and copies
+every other word whole. The filled rows are read, write, close, pread64 and
+pwrite64 (`unsigned int fd`), lseek (fd and `unsigned int whence`), and
+getpgid and getsid (`pid_t`). exit_group stays whole: the native handler keeps
+only the status byte. The T2 shells narrow their own words by their own
+prototype: fsync and fdatasync, fstat and both mmap file arms pass the fd as
+`unsigned int` (mmap reads it through `fget(unsigned int)`), getrandom drops
+the high half of `unsigned int flags`, and readlinkat reads `int bufsiz`,
+refusing a value that is not positive before the path, as Linux does. Until
+then readlinkat passed bufsiz whole, so a negative bufsiz, or junk over a
+positive one, copied the whole link target into a buffer the guest had sized
+by the low half: an overrun inside the guest (the copy-out is still validated,
+so no kernel memory was reached). getrandom's shell answered EAGAIN for a high
+half Linux drops. Tests: `vivarium.t1_narrows_linux_widths` (every row's
+words against Linux's prototypes) and `vivarium.t2_shells_narrow_linux_widths`
+(readlinkat's bufsiz, getrandom's flags).
