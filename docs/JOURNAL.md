@@ -42,6 +42,15 @@ needed the operator.
 
 By research, without a vote: the thread that takes a finished Wasm plan runs an ISB (`dec-2026-10-13-wasm-plan-isb`). B-2e is split into three chunks: B-2e1 (the plan ISB and the FTL), B-2e2 (the kernel) and B-2e3 (BBQ/OMG).
 
+**B-2e1 so far (scripture a34e48ca1, WIP de1a1e5e9, AT row b8f2596d9; fork 716399c8d0, patch 0005).**
+- *Build check.* `build_jsc` now asks four functions for an `isb`. Run against the B-2d jsc as a control, both new Wasm sites read `isb=0`, so that binary would be refused.
+- *Legs.* Every new leg's script was extracted from the `.exp` by tclsh and run on the macOS jsc before it went to the device. Two corrections came out of that:
+  - The tier probe matches the JIT-type word, because the dump also prints `(FTLFail)` and `(HadFTLReplacement)` for other tiers.
+  - The `ftl-ic` comment had claimed `--forceICFailure` passes it. On the host it reads x4000: that option changes the compile itself, so the claim was withdrawn, not shipped.
+- *First device green (05:25Z).* CI bake plus jsc rebuild, then ls-jsc 44 of 44 (B-2d's 34 and 10 new). The binary is the same size as B-2d's, 69,383,560 bytes stripped. That is padding: the FTL legs and the new `isb` prove it is a new binary.
+- *Timings* (HVF, one run each): the int32 loop takes 220 ms with every JIT, 192 with the FTL off, 437 with the DFG off and 1008 interpreted. SunSpider takes 95, 68, 107 and 342 ms. With the FTL on, both short runs are SLOWER than with it off: its compile cost on runs too short to repay it. A long benchmark is owed before claiming an FTL gain.
+- *Self-audit finding, enqueued.* On OS(THYLACINE), WTF gives worker threads musl's 128 KiB default stack (`Threading.cpp:100-134` and `pthread_impl.h:205`). That covers the DFG and FTL compilers and the Wasm worklist. The fix goes into patch 0005 before the red runs.
+
 ## 2026-10-12..13 (main, Opus 5.5, effort max) -- JavaScriptCore's DFG runs on the sealed code region (B-2d) (landed)
 
 **What the run is for.** B-2c opened Baseline and the regexp JIT; B-2d opens
