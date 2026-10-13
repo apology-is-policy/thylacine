@@ -4385,3 +4385,69 @@ answers ENOENT; QUERY of a clunked FID (a vote before NA-4d); a syscall-level
 witness of REAP refusing a mid-CLUNK FID; the late-shot RETURN bypassing the
 ledger's checks; and whether the Loom handlers should refuse the high word of a
 descriptor or op (a vote, batched with the legacy -1s). Each is in OPEN-BUGS.
+
+## Loom refusals and argument widths: votes 7-9 (Corona, October 13 -- audit rounds 1-2 closed)
+
+Operator votes 7-9 (12:16Z October 13) finish what vote 6 began. Vote 7: every
+legacy Loom refusal that answered a bare -1 answers the errno the private
+route, or another handler, gives for the same condition; LOOM.md 8.2a is the
+table. Listing them found 19 sites reachable from EL0 (11 in SETUP, 7 in
+REGISTER, 1 in ENTER); the ENTER one, an unknown flag bit in loom_enter, was
+missing from the open-bugs entry. Vote 8: an argument with bits above its
+declared width is refused, never truncated (ERRORS.md design principle 6). The
+Loom handlers conform: a wide descriptor maps to an invalid index (-EBADF,
+after the default image's private-op -EOPNOTSUPP), a wide entries, op, nargs,
+count or flags is -EINVAL. The other handlers that cast are one queued sweep.
+Vote 9: QUERY of a clunked FID keeps -ENOENT; QUERY reads LIVE slots only, and
+REAP answers -EBUSY while the CLUNK runs.
+
+Scripture c1fe601fc. Code d3e252f04 (kernel errnos and width checks;
+libthyla-rs's `Ring` reports the kernel's errno through
+`Error::from_syscall_return`; the adapter's late-shot RETURN passes the lease
+ledger's checks first through `Pool::refuse`; an ENTER refusal other than a
+close fails the ring instead of hanging its futures; POLLERR fails the ring
+with -EIO; ten host tests for the paths none reached). 4dc48a668 pins the one
+vote-7 refusal no test reached, an SQPOLL ring's -EOPNOTSUPP for a 9P handle
+without a receive deadline (`9p_client.loom_sqpoll_refuses_undeadlined`), and
+adds the guest harness. Audit round 1 (Fable 5.1, max effort, cross-family)
+found 1 P0 and 5 P3, fixed in f23dbe047: the P0 was that
+kernel/test/test_loom.c did not compile, so the WIP commit's "kernel unrun"
+also meant "kernel never built". Round 2 (Fable 5.1) re-derived the fixes and
+the guest evidence below and found 0 P0, 0 P1, 0 P2 and 3 P3: a dossier
+sentence that still overclaimed the probe (fixed), and two taken into the next
+chunk -- register_rejects's fixture asserts can still return before the drop,
+and the harness hashes a ramfs it cannot compare instead of the probe binary.
+
+Evidence. Host, at d3e252f04: tools/test-loom-client.sh PASS, 197 of 197
+declared Rust tests in the dev and release profiles, the ownership checks PASS
+(work/oct13-v78/host-gate-20261013T124357Z.log); 59 of 59 sabotage cases RED at
+their own assertions, sources restored
+(work/oct13-v78/sabotage-20261013T124432Z.txt). Kernel, at f23dbe047
+(work/oct13-v78/kernel-20261013T145616Z, mac axis, one boot per leg): the
+control passes 1873 of 1873 in both images (the probe's status 70 in the
+default image, 71 on its qualification path), with the ten named tests among
+them. Seventeen one-line mutants each fail exactly their predicted tests at
+their named assertions, with the suite's own extinction and no other: each
+SETUP refusal put back to -1 (`loom.setup_rejects`,
+`loom.setup_resource_refusals` twice, `loom.sqpoll_charges_thread_budget`); a
+listed non-Spoor, an unresolved buffer and ENTER's unknown flag put back to -1
+(their kernel pins, and the probe at its own check); the pre-route params check
+and the copyout fault put back to -1, and each width check removed (the probe
+alone, at its own check, in the qualification image too for the descriptor);
+REAP without the RETIRING lookup and QUERY that sees a RETIRING FID (both
+native tests, at the mid-CLUNK REAP and QUERY assertions, with
+`loom.service_fid_reap` passing); and the undeadlined-9P refusal put back to
+-1. Both rebuilds are byte-identical to their controls, and
+`tools/check-production.sh --all` passes.
+
+Closed by this batch (OPEN-BUGS): the legacy -1 residue (vote 7) and the
+argument width (vote 8); `Ring`'s flattened errnos; the five untested adapter
+paths and `destroy_pool`'s -ECANCELED; the late-shot RETURN bypassing the
+ledger; the simulated kernel's ECANCELED where the kernel answers ENOENT; QUERY
+of a clunked FID (vote 9); the syscall-level witness of REAP refusing a
+mid-CLUNK FID; and two adapter defects found while writing the tests (an
+ignored ENTER refusal, POLLERR as -EBADF on a ring kept open). Still open: the
+sweep of the other casting handlers (a census at 4dc48a668 counts 35 explicitly
+narrowed parameters with no guard, and implicit narrowing is not covered); the
+setup rollback that closes the ring by number after publishing it (P3, next);
+libthyla-rs loom.rs's six pre-existing rustfmt hunks.

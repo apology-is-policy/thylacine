@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/loom.c	2026-10-13 16:56:16
++++ kernel/loom.c	2026-10-13 17:17:23
+@@ -1252,7 +1252,7 @@
+             struct p9_client *cl; u32 fid;
+             if (dev9p_client_fid(spoors[i], &cl, &fid) == 0 &&
+                 !p9_client_recv_is_deadline_capable(cl)) {
+-                return -T_E_OPNOTSUPP;
++                return -1; // MUTANT M16
+             }
+         }
+     }

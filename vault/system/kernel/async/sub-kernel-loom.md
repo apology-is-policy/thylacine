@@ -625,9 +625,9 @@ handle table) and `loom.sqpoll_charges_thread_budget` (-EAGAIN) pin SETUP's;
 `9p_client.loom_sqpoll_refuses_undeadlined` pins REGISTER's -EOPNOTSUPP for a
 9P handle whose transport cannot time out a receive on an SQPOLL ring;
 `loom-bridge-probe` pins ENTER and REGISTER on a closed ring's number, the
-unknown op, every argument refusal (-EINVAL, -EFAULT, -EBADF) and every
-too-wide argument, from EL0 in both images; the resource refusals have kernel
-pins only. The native operations test holds the peer at TCLUNK and pins
+unknown op, one representative of each argument-refusal errno (-EINVAL,
+-EFAULT, -EBADF) and every too-wide argument, from EL0 in both images; the
+other argument conditions and the resource refusals have kernel pins only. The native operations test holds the peer at TCLUNK and pins
 REAP of the clunking FID at -EBUSY and its QUERY at -ENOENT (QUERY reads LIVE
 slots only, operator vote 9).
 

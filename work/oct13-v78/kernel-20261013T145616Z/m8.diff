@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:07:58
+@@ -7957,7 +7957,7 @@
+     if (!t || !t->proc)                              return -T_E_INVAL;
+     struct Proc *p = t->proc;
+     if (entries_raw > 0xffffffffull)                 return -T_E_INVAL;
+-    if (!sys_validate_user_buf(params_va, sizeof(struct loom_params))) return -T_E_FAULT;
++    if (!sys_validate_user_buf(params_va, sizeof(struct loom_params))) return -1; // MUTANT M8
+ 
+     // Read the one IN field (params.flags, u32 at offset 0); the rest is OUT.
+     u8 fb[4];

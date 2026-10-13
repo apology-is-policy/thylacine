@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:04:52
+@@ -7899,7 +7899,7 @@
+     struct Spoor *spoors[LOOM_MAX_REG_HANDLES];
+     rights_t      rights[LOOM_MAX_REG_HANDLES];
+     u32 got = 0;
+-    int rc = -T_E_BADF;   // a listed descriptor names nothing, or not a Spoor
++    int rc = -1; // MUTANT M5
+     for (u32 i = 0; i < n; i++) {
+         struct Handle sh;
+         if (handle_get(p, fds[i], &sh) != 0)   goto rollback;

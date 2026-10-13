@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:01:46
+@@ -7769,7 +7769,7 @@
+     if (!proc_page_charge(p, ring_pages)) {
+         spin_unlock(&p->as->lock);
+         loom_unref(l);
+-        return -T_E_NOMEM;                           // over the per-Proc page cap
++        return -1; // MUTANT M2: over the per-Proc page cap
+     }
+     if (burrow_map(p, l->ring, vaddr, (size_t)l->ring_size, VMA_PROT_RW) != 0) {
+         proc_page_uncharge(p, ring_pages);

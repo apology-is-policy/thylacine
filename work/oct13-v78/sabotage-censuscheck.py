@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""Turn every native-adapter test red once with a targeted adapter sabotage.
+
+Each case edits the tree, runs exactly its test, and must see that test FAIL
+(or, for a should_panic test, not panic). The file is restored from the bytes
+read before the edit, never from git, so uncommitted work survives.
+Usage: sabotage.py <out-dir> [case-name ...]
+"""
+import os, subprocess, sys
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+SRC = os.path.join(ROOT, 'usr/lib/loom-client/src')
+HOST = subprocess.run(['rustc', '-vV'], capture_output=True, text=True).stdout
+HOST = next(l.split()[1] for l in HOST.splitlines() if l.startswith('host:'))
+
+# (case, test, [(file, old, new), ...])
+CASES = [
+ ('ctl-notest', 'no_such_test_exists', [('native/mod.rs', 'self.inner.close();', 'self.inner.close();')]),
+ ('ctl-rot', 'a_poll_error_fails_the_ring', [('native/mod.rs', 'THIS TEXT IS NOWHERE', '')]),
+ ('ring-detach', 'setup_registers_every_buffer_and_drop_detaches_every_region',
+  [('native/kernel.rs', '''        if let Some((va, len)) = self.ring.take() {
+            self.kernel.detach(va, len);
+        }''', '''        let _ = self.ring.take();''')]),
+ ('attach-unwind', 'a_refused_attach_detaches_what_was_attached',
+  [('native/kernel.rs', '''                for &(va, len) in &regions {
+                    kernel.detach(va, len);
+                }''', '')]),
+ ('fixed-offset', 'connect_walk_open_write_then_read_round_trips',
+  [('native/handles.rs', 's.args[0] = range.offset;', 's.args[0] = 0;')]),
+ ('connect-drop-reap', 'a_failed_connect_reaps_its_scope',
+  [('native/handles.rs', '''            self.inner.shared().abort(scope);
+            self.inner.shared().set_state(scope, SlotState::Reap);''',
+    '''            self.inner.shared().abort(scope);''')]),
+ ('name-late', 'each_walk_name_is_read_inside_the_enter_that_consumes_it',
+  [('native/mod.rs', '''        unsafe { self.sq.push(&sqe) };
+        self.shared.submitted.set(self.shared.submitted.get() + 1);
+        self.enter();
+        Ok(cookie)''', '''        let late = self.sq.next_slot() as usize;
+        unsafe { core::ptr::write_bytes(self.sq.names.add(late * NAME_CELL), 0, NAME_CELL) };
+        unsafe { self.sq.push(&sqe) };
+        self.shared.submitted.set(self.shared.submitted.get() + 1);
+        self.enter();
+        Ok(cookie)''')]),
+ ('name-one-cell', 'queued_walks_keep_their_own_name_cells',
+  [('native/mod.rs', 'self.sq.names.add(slot * NAME_CELL),', 'self.sq.names,'),
+   ('native/mod.rs', 'sqe.args[0] = (slot * NAME_CELL) as u64;', 'sqe.args[0] = 0;')]),
+ ('stream-order', 'a_multishot_stream_runs_on_out_of_order_returns',
+  [('native/mod.rs', 's.payloads.push_back(payload);', 's.payloads.push_front(payload);')]),
+ ('no-deadline', 'a_deadline_ends_the_operation_and_aborts_its_scope',
+  [('native/handles.rs', 'deadline.map_or(0, |d| d.max(1))', 'deadline.map_or(0, |_| 0)')]),
+ ('poll-floor', 'poll_rounds_the_time_left_up_to_a_whole_millisecond',
+  [('native/mod.rs', 'left.div_ceil(1_000_000)', '(left / 1_000_000)')]),
+ ('no-abort', 'dropping_a_future_aborts_its_scope_and_settles_its_entry',
+  [('native/kernel.rs', '''    fn abort_scope(&self, scope: SlotRef) {
+        self.0.abort(scope);
+    }''', '''    fn abort_scope(&self, _scope: SlotRef) {}''')]),
+ ('burst-loss', 'a_full_cq_defers_completions_and_loses_none',
+  [('native/mod.rs', 'if s.open {', 'if s.open && s.payloads.len() < 3 {')]),
+ ('no-turn-enter', 'a_short_enter_leaves_the_rest_queued_for_a_later_turn',
+  [('native/mod.rs', '''        if self.sq.pending() != 0 {
+            self.enter();
+            // A close learnt here must not reach the routing below as a failure.
+            self.check()?;
+        }''', '')]),
+ ('no-space-check', 'a_full_sq_answers_enospc',
+  [('native/mod.rs', '''        if !self.sq.space() {
+            return Err(-ENOSPC);
+        }''', '')]),
+ ('open-masks-errno', 'a_rejected_sqe_ends_its_future_with_the_kernels_errno',
+  [('native/handles.rs', 'r.and_then(|c| if c.result < 0 { Err(c.result) } else { Ok(()) })',
+    'r.map(|_| ())')]),
+ ('dropped-ignored', 'a_dropped_sqe_ends_the_process',
+  [('native/mod.rs', '''            panic!("loom-client: the kernel dropped an SQE the adapter wrote in range");''', '')]),
+ ('forged-not-failed', 'a_forged_completion_fails_the_ring',
+  [('native/mod.rs', '''        let cookie = match routed {
+            Err(_) => {
+                self.fail();
+                return Err(-EIO);
+            }''', '''        let cookie = match routed {
+            Err(_) => {
+                return Err(-EIO);
+            }''')]),
+ ('close-detaches', 'closing_with_leases_held_keeps_their_bytes_until_they_drop',
+  [('native/kernel.rs', '''        let fd = self.fd.replace(-1);
+        if fd >= 0 {
+            self.kernel.close(fd);
+        }''', '''        let fd = self.fd.replace(-1);
+        if fd >= 0 {
+            self.kernel.close(fd);
+            for &(va, len) in self.regions.iter() {
+                self.kernel.detach(va, len);
+            }
+        }''')]),
+ ('enter-ebadf-ignored', 'an_enter_that_finds_the_descriptor_closed_forgets_it',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+            self.lost();
+        }''', '''if rc == -(ECANCELED as i64) {
+            self.lost();
+        }''')]),
+ ('enter-ecanceled-ignored', 'an_enter_that_races_the_close_forgets_the_descriptor',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+            self.lost();
+        }''', '''if rc == -(EBADF as i64) {
+            self.lost();
+        }''')]),
+ ('pollnval-ignored', 'a_poll_that_finds_the_descriptor_closed_forgets_it',
+  [('native/mod.rs', 'if events & (POLLHUP | POLLNVAL) != 0 {', 'if events & POLLHUP != 0 {')]),
+ ('pollhup-ignored', 'a_hangup_while_polling_forgets_the_descriptor',
+  [('native/mod.rs', 'if events & (POLLHUP | POLLNVAL) != 0 {', 'if events & POLLNVAL != 0 {')]),
+ ('lost-closes', 'an_enter_that_races_the_close_forgets_the_descriptor',
+  [('native/mod.rs', '''        self.shared.forget_fd();
+        self.close();''', '''        self.close();''')]),
+ ('retire-no-abort', 'retire_waits_until_the_kernel_retires_every_scope',
+  [('native/kernel.rs', '''        for scope in scopes.into_iter().flatten() {
+            self.0.abort(scope);
+        }''', '''        let _ = scopes;''')]),
+ ('retired-early', 'retire_waits_until_the_kernel_retires_every_scope',
+  [('native/kernel.rs', '''        if self.0.admission.get() || self.0.fd() < 0 {
+            return false;
+        }''', '''        if !self.0.admission.get() {
+            return true;
+        }''')]),
+ ('no-reap-retry', 'an_exhausted_slot_table_reaps_before_it_refuses',
+  [('native/handles.rs', '''        Err(e) if e == -ENOSPC => {
+            inner.shared().reap_pass();
+            inner.shared().reserve(kind, scope)
+        }''', '''        Err(e) if e == -ENOSPC => Err(e),''')]),
+ ('reap-one-pass', 'a_dropped_scope_is_reaped_after_its_fids_without_clunking_them',
+  [('native/kernel.rs', '''            if !freed {
+                break;
+            }''', '''            let _ = freed;
+            break;''')]),
+ ('walk-drop-clunks', 'a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk',
+  [('native/handles.rs', '''            let state = match self.request.take() {
+                Ok(Some(c)) if c.result < 0 => SlotState::Reap,
+                _ => SlotState::Clunk,
+            };''', '''            let state = SlotState::Clunk;''')]),
+ ('clunk-aborted-scope', 'a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked',
+  [('native/mod.rs', '.is_some_and(|s| !s.aborted && s.state == kernel::SlotState::Live);',
+    '.is_some_and(|s| s.state == kernel::SlotState::Live);')]),
+ ('abandon-no-abort', 'an_open_dropped_in_flight_aborts_its_scope',
+  [('fixed_requests.rs', '''                if let Some(scope) = c.book.abandon(self.cookie).expect("active owner") {
+                    c.owner.abort_scope(scope);
+                }''', '''                let _ = c.book.abandon(self.cookie).expect("active owner");''')]),
+ ('abort-twice', 'an_explicit_scope_abort_ends_its_operations_once',
+  [('native/kernel.rs', 'Some(e) if e.r == scope => !core::mem::replace(&mut e.aborted, true),',
+    'Some(e) if e.r == scope => { e.aborted = true; true }')]),
+ ('reap-busy-dropped', 'a_target_dropped_under_its_connect_is_reaped_after_it',
+  [('native/kernel.rs', '} else if rc != -(EBUSY as i64) {', '} else {')]),
+ ('book-wiped', 'a_future_held_across_retirement_keeps_its_terminal',
+  [('request_book.rs', '''            if entry.as_ref().is_some_and(|e| e.abandoned) {
+                *entry = None;
+            }''', '''            *entry = None;''')]),
+ ('retired-before-posted', 'retirement_waits_for_terminals_posted_after_the_scope_retires',
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('unentered-sqe', 'an_sqe_not_yet_entered_holds_retirement_back',
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('cq-unrouted', 'a_terminal_posted_but_not_yet_routed_holds_retirement_back',
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('refusal-unposted', 'an_enter_refusal_not_yet_posted_holds_retirement_back',
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('closing-lease-kept', 'a_terminal_posted_but_not_yet_routed_holds_retirement_back',
+  [('native/mod.rs', '''                        if let Some(receipt) = refused {
+                            let rc = self.shared.return_buffer(receipt);''', '''                        if let Some(receipt) = refused.filter(|_| false) {
+                            let rc = self.shared.return_buffer(receipt);''')]),
+ ('return-lost-ignored', 'a_late_shot_after_the_ring_closed_under_forgets_the_descriptor',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) {
+                                self.lost();''', '''if false {
+                                self.lost();''')]),
+ ('register-ebadf-kept', 'a_scope_dropped_after_the_ring_closed_under_never_closes_the_number',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-retired', 'a_ring_whose_register_finds_it_closed_never_reports_retired',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-connect', 'a_connect_after_the_ring_closed_under_answers_a_close',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-pool', 'a_pool_made_after_the_ring_closed_under_answers_a_close',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('register-ebadf-kept-payload', 'a_payload_dropped_after_the_ring_closed_under_closes_the_ring',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+ ('target-probe-skipped', 'a_target_refused_for_its_registry_keeps_the_ring',
+  [('native/kernel.rs', '(op != REGISTER_SERVICE_TARGET || self.gone())', '(op != REGISTER_SERVICE_TARGET || true)')]),
+ ('target-ebadf-kept', 'a_target_registered_after_the_ring_closed_under_never_closes_the_number',
+  [('native/kernel.rs', '(op != REGISTER_SERVICE_TARGET || self.gone())', '(op != REGISTER_SERVICE_TARGET)')]),
+ ('enter-recheck-skipped', 'a_close_learnt_by_the_turns_enter_is_reported_as_a_close',
+  [('native/mod.rs', '''            self.enter();
+            // A close learnt here must not reach the routing below as a failure.
+            self.check()?;''', '''            self.enter();''')]),
+ ('claim-gate-open', 'a_held_refusal_claims_no_further_sqe',
+  [('tests/native/sim.rs', ' || !s.rejected.is_empty()', '')]),
+ ('dropped-stream-lease-kept', 'a_stream_dropped_before_its_end_returns_the_shots_still_arriving',
+  [('native/mod.rs', 'drop(rejected); // An abandoned stream', 'core::mem::forget(rejected); // An abandoned stream')]),
+ ('replay-returned', 'a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return',
+  [('lease_ledger.rs', '''        self.members[i].last = receipt.lease;
+        Ok(Some(receipt))''', '''        let _ = i;
+        Ok(Some(receipt))''')]),
+ ('refuse-unchecked', 'lease_ledger::a_refused_read_takes_no_lease_but_passes_every_check',
+  [('lease_ledger.rs', '''        let Some(i) = self.check_read(result, flags, receipt)? else {
+            return Ok(None);
+        };
+        self.members[i].last = receipt.lease;
+        Ok(Some(receipt))''', '''        Ok((result > 0).then_some(receipt))''')]),
+ ('refuse-no-advance', 'lease_ledger::a_refused_read_takes_no_lease_but_passes_every_check',
+  [('lease_ledger.rs', '''        self.members[i].last = receipt.lease;
+        Ok(Some(receipt))''', '''        let _ = i;
+        Ok(Some(receipt))''')]),
+ ('sim-fid-ecanceled', 'an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled',
+  [('tests/native/sim.rs', '''                if src.state != READY {
+                    return ENOENT;''', '''                if src.state != READY {
+                    return ECANCELED;''')]),
+ ('walk-from-root', 'a_walk_from_a_file_fid_clones_it_or_answers_enotdir',
+  [('native/handles.rs', 'walk(&self.scope, self.r, name, deadline)', 'walk(&self.scope, self.scope.r, name, deadline)')]),
+ ('return-refusal-ok', 'a_refused_return_hands_the_payload_back',
+  [('ring_payload.rs', 'if rc == 0 { Ok(()) } else { Err((rc, token)) }', 'let _ = rc; drop(token); Ok(())')]),
+ ('enter-refusal-ignored', 'an_enter_refusal_that_is_not_a_close_fails_the_ring',
+  [('native/mod.rs', '''            self.lost();
+        } else if rc < 0 {
+            self.fail();
+        }''', '''            self.lost();
+        }''')]),
+ ('eintr-error', 'a_poll_interrupted_by_a_note_is_a_spurious_wake',
+  [('native/mod.rs', 'return if rc == -(EINTR as i64) {', 'return if false {')]),
+ ('pollerr-kept', 'a_poll_error_fails_the_ring',
+  [('native/mod.rs', '''            self.inner.fail();
+            return Err(-EIO);''', '''            return Err(-EBADF);''')]),
+ ('close-kept-open', 'an_explicit_close_with_live_handles_cancels_their_use',
+  [('native/mod.rs', '''    pub fn close(&self) {
+        self.inner.close();
+    }''', '''    pub fn close(&self) {}''')]),
+ ('register-ebadf-kept-destroy', 'a_pool_dropped_after_the_ring_closed_under_never_closes_the_number',
+  [('native/kernel.rs', 'if rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {',
+    'if false && rc == -(EBADF as i64) && (op != REGISTER_SERVICE_TARGET || self.gone()) {')]),
+]
+
+
+def run_one(test, log):
+    name = 'tests::' + test if '::' in test else 'tests::native::' + test
+    cmd = ['cargo', 'test', '-p', 'loom-client', '--lib', '--target', HOST, '--',
+           name, '--exact']
+    p = subprocess.run(cmd, cwd=os.path.join(ROOT, 'usr'), capture_output=True, text=True)
+    with open(log, 'w') as f:
+        f.write(p.stdout + p.stderr)
+    return p.returncode, p.stdout + p.stderr
+
+
+def census():
+    # Read-only: every edit applies exactly once on the text the case would see,
+    # and every named test exists as a #[test] fn in its module.
+    problems = 0
+    for case, test, edits in CASES:
+        texts = {}
+        for rel, old, new in edits:
+            path = os.path.join(SRC, rel)
+            text = texts.get(path, open(path).read())
+            if text.count(old) != 1:
+                print(f'ROT   {case}: {rel}: {text.count(old)} matches')
+                problems += 1
+                break
+            texts[path] = text.replace(old, new)
+        mod, fn = (test.split('::') if '::' in test else ('native', test))
+        tfile = os.path.join(SRC, 'tests', mod + '.rs')
+        body = open(tfile).read()
+        if body.count('fn ' + fn + '(') != 1:
+            print(f'NOTEST {case}: {fn} x{body.count("fn " + fn + "(")} in {tfile}')
+            problems += 1
+    print(f'census: {len(CASES)} cases, {problems} problems')
+    sys.exit(1 if problems else 0)
+
+
+def main():
+    if sys.argv[1] == '--census':
+        census()
+    out = sys.argv[1]
+    only = set(sys.argv[2:])
+    os.makedirs(out, exist_ok=True)
+    bad = []
+    for case, test, edits in CASES:
+        if only and case not in only:
+            continue
+        saved = {}
+        rotten = None
+        try:
+            for rel, old, new in edits:
+                path = os.path.join(SRC, rel)
+                if path not in saved:
+                    saved[path] = open(path).read()
+                text = open(path).read()
+                if text.count(old) != 1:
+                    # A case that cannot apply is a verdict of its own, never a
+                    # reason to stop the census before the cases after it.
+                    rotten = f'{rel}: {text.count(old)} matches for {old[:50]!r}'
+                    break
+                open(path, 'w').write(text.replace(old, new))
+            if rotten is None:
+                rc, text = run_one(test, os.path.join(out, case + '.log'))
+        finally:
+            for path, body in saved.items():
+                open(path, 'w').write(body)
+        if rotten is not None:
+            verdict = 'ANCHOR-ROT'
+            print(f'{verdict:12} {case:24} {rotten}')
+            bad.append(case)
+            continue
+        if 'error[' in text or 'could not compile' in text:
+            verdict = 'BUILD-ERROR'
+        elif 'running 1 test' not in text:
+            verdict = 'RAN-NOTHING'
+        elif rc != 0 and ('test result: FAILED. 0 passed; 1 failed' in text or 'process didn\'t exit successfully' in text):
+            verdict = 'RED'
+        else:
+            verdict = 'GREEN'
+        print(f'{verdict:12} {case:24} {test}')
+        if verdict != 'RED':
+            bad.append(case)
+    print('sabotage: ' + ('every case red' if not bad else 'NOT RED: ' + ' '.join(bad)))
+    sys.exit(1 if bad else 0)
+
+
+main()

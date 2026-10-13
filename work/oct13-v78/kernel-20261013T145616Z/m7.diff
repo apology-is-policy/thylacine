@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/loom.c	2026-10-13 16:56:16
++++ kernel/loom.c	2026-10-13 17:06:57
+@@ -3526,7 +3526,7 @@
+ 
+ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
+     if (!l || l->magic != LOOM_MAGIC) return -T_E_INVAL;
+-    if (flags & ~LOOM_ENTER_VALID)    return -T_E_INVAL;
++    if (flags & ~LOOM_ENTER_VALID)    return -1; // MUTANT M7
+ 
+     if (loom_is_private(l)) {
+         spin_lock(&l->lock);

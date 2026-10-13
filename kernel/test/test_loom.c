@@ -931,8 +931,8 @@ void test_loom_register_rejects(void) {
     hidx_t rd = -1, wr = -1;
     TEST_ASSERT(sys_pipe_for_proc(p, &rd, &wr) == 0, "pipe pair");
 
-    // Every answer is read and the Proc dropped before any assertion, so a
-    // failed check (which returns) leaks neither the Proc nor its ring.
+    // Every answer below is read and the Proc dropped before it is asserted, so
+    // a failed answer check leaks neither the Proc nor its ring.
     hidx_t one[1] = { rd };
     // Unsupported op (BUFFERS reserved for Loom-6).
     int wrong_op = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1);

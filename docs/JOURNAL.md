@@ -1,6 +1,82 @@
 # The autonomous-run journal
 
 
+## October 13: votes 7-9 -- Loom's refusals become errnos, and a wide argument is refused (Corona)
+
+Three questions left open by the NA-4b close went to the operator as one vote
+batch at 12:16Z: the legacy Loom refusals that still answered a bare -1, the
+handlers that truncate a 64-bit argument to its declared type, and whether
+QUERY should see a clunked FID. Before asking, I listed the -1 sites reachable
+from EL0 (19: 11 in SETUP, 7 in REGISTER, 1 in ENTER) and every consumer that
+pinned one (13 kernel assertions, two probe lines; no userspace program
+branched on a Loom -1). The ENTER site, an unknown flag bit in loom_enter, was
+missing from the open-bugs entry; the census, not the entry, was the list I
+asked about. The operator took the recommended option each time: the private
+route's errnos (vote 7), refusal as a system rule with Loom conforming now and
+the other handlers as one sweep (vote 8), and QUERY keeping -ENOENT (vote 9).
+Scripture c1fe601fc wrote the table (LOOM.md 8.2a) and the rule (ERRORS.md
+principle 6) first.
+
+The code (d3e252f04) also closed the adapter items the NA-4b close left open.
+Writing the tests for the five untested adapter paths found two defects of
+their own: the adapter ignored every ENTER refusal but a close, so a permanent
+one (-EACCES, -EINVAL) left queued SQEs unrun and their futures hung until a
+deadline; and it answered POLLERR with -EBADF while keeping the ring open,
+though -EBADF means "the number is gone" everywhere else in it. Both now fail
+the ring.
+
+Wrong turns, and what caught them:
+- A sabotage case (replay-returned) came back GREEN twice. The first time it
+  edited the wrong line. The second time the test itself was hollow: it
+  replayed the shot after retire(), so the cancel terminal had already removed
+  the route under both the old and the new code. The test now replays before
+  retire(), and the case is red at the assertion it names.
+- The walk-from-root sabotage went red through a panic in the simulated
+  kernel, not at the test's assertion. The sim now answers -EISDIR for a byte
+  READ of the root, and the case is red at the test line.
+- An anchor in the sabotage census rotted; the census refused it before any
+  run.
+- My resume note predicted that the REAP mutant would fail at the mid-CLUNK
+  REAP. Reading the dispatcher before the run showed that the open-FID REAP a
+  few lines earlier takes the same guard and would fail first. I used NA-4b's
+  mutant instead (REAP without the RETIRING lookup), which leaves the open-FID
+  REAP alone, and added a mutant for the rejected vote-9 option. The run
+  confirmed both predictions.
+- The width census for the vote-8 sweep first read the Loom ENTER handler as
+  unguarded: its guard ORs three arguments into one comparison. The Loom
+  handlers were the census's control, so it caught its own blind spot.
+- Audit round 1 (Fable 5.1) found a P0: kernel/test/test_loom.c did not
+  compile. The mid-CLUNK witness declared an `int held` in a function whose
+  scope already held a pointer of that name. The WIP commit said "kernel
+  unrun"; it was also kernel never built, and the harness's dry run checks
+  anchors and messages, not compilation. Fixed in f23dbe047 with five P3s; the
+  run that followed was the first build of the batch.
+- The audit also found that three tests the mutants target asserted between
+  steps, so a failing check leaked its Proc; under the SQPOLL mutant that was
+  a Proc with a parked kernel thread. They now read, release, then assert.
+- Round 2 (Fable 5.1) re-derived the fixes and the evidence from the boot
+  logs: 0 P0, 0 P1, 0 P2, 3 P3. It could not make the harness pass vacuously,
+  and it noticed that the per-leg ramfs hashes differ on every leg (the pool
+  fixture's key is random per bake), so they cannot show that the probe binary
+  was the same in every leg; the probe's FAIL line numbers matching the
+  committed source showed it here. The next harness hashes the probe binary
+  itself.
+
+Evidence. Host at d3e252f04: tools/test-loom-client.sh PASS, 197 of 197 Rust
+tests in both profiles (work/oct13-v78/host-gate-20261013T124357Z.log); 59 of
+59 sabotage cases red (work/oct13-v78/sabotage-20261013T124432Z.txt). Kernel
+at f23dbe047 (work/oct13-v78/kernel-20261013T145616Z): 1873 of 1873 in the ci
+and the qualification image, probe status 70 and 71; 17 mutants each fail
+exactly their predicted tests at their named assertions; both rebuilds
+byte-identical; check-production --all exit 0. "Fixed" covers the Loom
+handlers and the adapter. It does not cover the other casting handlers (35
+explicitly narrowed parameters with no guard at 4dc48a668, implicit narrowing
+not counted) or the setup rollback that closes the ring by number after
+publishing it (round 1's note, P3, enqueued next).
+
+**Operator decisions this run:** votes 7, 8 and 9 (12:16:03Z October 13), each
+the recommended option.
+
 ## October 13: NA-4b -- the Rust native adapter, and the kernel REAP of a walked FID (Corona)
 
 NA-4b composes the Rust client cores of NA-3 into one client that drives one

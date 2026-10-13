@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:03:51
+@@ -7796,7 +7796,7 @@
+             proc_page_uncharge(p, ring_pages);
+             spin_unlock(&p->as->lock);
+             loom_unref(l);
+-            return -T_E_AGAIN;                       // as a thread create over the cap
++            return -1; // MUTANT M4
+         }
+         l->sqpoll_owner = p;
+         l->sqpoll_charged = true;

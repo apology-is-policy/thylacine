@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:09:00
+@@ -7956,7 +7956,7 @@
+     struct Thread *t = current_thread();
+     if (!t || !t->proc)                              return -T_E_INVAL;
+     struct Proc *p = t->proc;
+-    if (entries_raw > 0xffffffffull)                 return -T_E_INVAL;
++    // MUTANT M9: the entries width check dropped
+     if (!sys_validate_user_buf(params_va, sizeof(struct loom_params))) return -T_E_FAULT;
+ 
+     // Read the one IN field (params.flags, u32 at offset 0); the rest is OUT.

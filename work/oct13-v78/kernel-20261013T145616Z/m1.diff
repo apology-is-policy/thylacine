@@ -1,0 +1,11 @@
+--- work/oct13-v78/kernel-20261013T145616Z/pristine/syscall.c	2026-10-13 16:56:16
++++ kernel/syscall.c	2026-10-13 17:00:43
+@@ -7720,7 +7720,7 @@
+     // Loom-4c accepts LOOM_SETUP_SQPOLL; LOOM_SETUP_CQSIZE (caller-chosen cq)
+     // is still reserved until its sub-chunk lands, so reject it + any unknown bit.
+     if (flags & ~LOOM_SETUP_SQPOLL)                  return -T_E_INVAL;
+-    if (entries == 0 || entries > LOOM_MAX_ENTRIES)  return -T_E_INVAL;
++    if (entries == 0 || entries > LOOM_MAX_ENTRIES)  return -1; // MUTANT M1
+     if ((entries & (entries - 1u)) != 0)             return -T_E_INVAL;  // power of two
+ 
+     // io_uring default: CQ twice the SQ. `entries` is a power of two <=
