@@ -3,21 +3,27 @@
 # answer -T_E_BADF for a descriptor that names no ring, and an unknown REGISTER
 # op -T_E_INVAL (they answered a bare -1, against ERRORS.md). The guest legs,
 # in one lease window:
-#   CONTROL  the committed tree: the whole suite passes, loom.register_handles,
-#            loom.register_buffers and loom.bridge_probe PASS.
+#   CONTROL  the committed tree: the whole suite passes, loom.register_rejects,
+#            loom.register_buffers_rejects and loom.bridge_probe PASS.
 #   E1  ENTER's dead-descriptor check answers -1 again. Predicted: exactly
-#       register_handles ("ENTER on a bad descriptor answers -EBADF") and
+#       register_rejects ("ENTER on a bad descriptor answers -EBADF") and
 #       bridge_probe (its EL0 ENTER on a closed ring's number) FAIL.
-#   E2  ENTER's non-Loom check answers -1. Predicted: exactly register_handles
+#   E2  ENTER's non-Loom check answers -1. Predicted: exactly register_rejects
 #       at "ENTER on a non-Loom descriptor answers -EBADF".
 #   R1  the legacy HANDLES REGISTER's dead-descriptor check answers -1.
-#       Predicted: register_handles at "bad loom_fd answers -EBADF" and
+#       Predicted: register_rejects at "bad loom_fd answers -EBADF" and
 #       bridge_probe (its EL0 REGISTER on a closed ring's number).
-#   R2  its non-Loom check answers -1. Predicted: register_handles at
+#   R2  its non-Loom check answers -1. Predicted: register_rejects at
 #       "non-Loom loom_fd answers -EBADF".
 #   R3  the legacy BUFFERS REGISTER's dead-descriptor check answers -1.
-#       Predicted: register_buffers at "BUFFERS on a bad loom_fd answers -EBADF".
+#       Predicted: register_buffers_rejects at "BUFFERS on a bad loom_fd
+#       answers -EBADF".
 #   U1  an unknown REGISTER op answers -1. Predicted: bridge_probe only.
+# A bridge_probe failure prints one kernel message whichever EL0 check failed,
+# so each mutant that fails it also names the probe's own FAIL line.
+# Each predicted message is checked, before any build, to lie inside the
+# function test.c registers under the predicted test name (the first run
+# named loom.register_handles, a test that holds none of these assertions).
 #   SHAPE    tools/check-production.sh --all: the KERNEL_TESTS=OFF kernel builds.
 # A failed suite always ends in "EXTINCTION: kernel test suite failed"
 # (kernel/main.c): a mutant run must show exactly that extinction and no other.
@@ -30,8 +36,8 @@ OUT=work/oct13-na4b/enter-errno-$STAMP
 mkdir -p "$OUT"
 YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
 FLOOR_MB=${FLOOR_MB:-8192}
-T_REG=loom.register_handles
-T_BUF=loom.register_buffers
+T_REG=loom.register_rejects
+T_BUF=loom.register_buffers_rejects
 T_BRG=loom.bridge_probe
 W_ENTER_BAD='ENTER on a bad descriptor answers -EBADF'
 W_ENTER_KIND='ENTER on a non-Loom descriptor answers -EBADF'
@@ -39,6 +45,9 @@ W_REG_BAD='bad loom_fd answers -EBADF'
 W_REG_KIND='non-Loom loom_fd answers -EBADF'
 W_BUF_BAD='BUFFERS on a bad loom_fd answers -EBADF'
 W_BRG="loom-bridge-probe's verdict matches this kernel's qualification lever"
+P_ENTER="ENTER on a closed ring's number is -EBADF (got -1)"
+P_REG="REGISTER on a closed ring's number is -EBADF (got -1)"
+P_UNK="an unknown register op is -EINVAL (got -1)"
 SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
@@ -125,6 +134,24 @@ done
 for t in "$T_REG" "$T_BUF" "$T_BRG"; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
+python3 - "$T_REG" "$W_ENTER_BAD" "$T_REG" "$W_ENTER_KIND" "$T_REG" "$W_REG_BAD" \
+  "$T_REG" "$W_REG_KIND" "$T_BUF" "$W_BUF_BAD" "$T_BRG" "$W_BRG" <<'MEMBER' || exit 3
+import re, sys
+reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
+src = open('kernel/test/test_loom.c').read() + open('kernel/test/test_loom_bridge_probe.c').read()
+a = sys.argv[1:]
+for test, msg in zip(a[0::2], a[1::2]):
+    fn = reg.get(test)
+    m = fn and re.search(r'^void ' + fn + r'\(void\) \{\n(.*?)^\}', src, re.S | re.M)
+    if not m or ('"%s"' % msg) not in m.group(1):
+        raise SystemExit("REFUSING: '%s' is not inside %s (registered as %s)" % (msg, fn, test))
+    print("member: %s (%s) holds '%s'" % (test, fn, msg))
+MEMBER
+for w in "$P_ENTER" "$P_REG" "$P_UNK"; do
+  c=$(/usr/bin/grep -cF "\"${w% (got -1)}\"" usr/loom-bridge-probe/loom-bridge-probe.c || true)
+  [ "$c" = 1 ] || { echo "REFUSING: probe check '${w% (got -1)}' occurs $c times"; exit 3; }
+done
+record "predictions derived: each message inside its registered test's function; three probe checks present"
 EXPECT=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c)
 [ "$EXPECT" -ge 1000 ] || { echo "REFUSING: derived only $EXPECT registrations"; exit 3; }
 record "expected tests (derived from test.c): $EXPECT"
@@ -223,6 +250,11 @@ expect_fails() { # expect_fails <label> <count> then "<test>|<message>" pairs
   _nf=$(fails "$B" | wc -l | tr -d ' ')
   [ "$_nf" = "$_n" ] || { echo "$_lab: $_nf FAIL lines, predicted $_n"; fails "$B"; exit 2; }
 }
+expect_probe() { # expect_probe <label> <why>: the probe's one FAIL line names <why>
+  _pl=$(/usr/bin/grep -F 'loom-bridge-probe: FAIL line ' "$B" | tr -d '\r')
+  [ "$(printf '%s\n' "$_pl" | /usr/bin/grep -c .)" = 1 ] || { echo "$1: probe FAIL lines: '$_pl'"; exit 2; }
+  case "$_pl" in *": $2") ;; *) echo "$1: probe said '$_pl', predicted ': $2'"; exit 2;; esac
+}
 
 echo "=== E1: ENTER answers -1 for a dead descriptor ==="
 mutant e1 kernel/syscall.c \
@@ -237,7 +269,8 @@ mutant e1 kernel/syscall.c \
     int rc = loom_is_private(l) ? loom_private_enter(l, p, to_submit, min_complete, flags)
 '
 expect_fails E1 2 "$T_REG|$W_ENTER_BAD" "$T_BRG|$W_BRG"
-record "E1 DISCRIMINATED: $((EXPECT - 2))/$EXPECT, exactly $T_REG and $T_BRG FAIL at their named assertions; extinction set = the suite's own"
+expect_probe E1 "$P_ENTER"
+record "E1 DISCRIMINATED: $((EXPECT - 2))/$EXPECT, exactly $T_REG and $T_BRG FAIL at their named assertions, the probe at '$P_ENTER'; extinction set = the suite's own"
 echo "=== E2: ENTER answers -1 for a non-Loom descriptor ==="
 mutant e2 kernel/syscall.c \
 '    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
@@ -265,7 +298,8 @@ mutant r1 kernel/syscall.c \
     // A private ring names its services through registered targets instead.
 '
 expect_fails R1 2 "$T_REG|$W_REG_BAD" "$T_BRG|$W_BRG"
-record "R1 DISCRIMINATED: $((EXPECT - 2))/$EXPECT, exactly $T_REG and $T_BRG FAIL at their named assertions; extinction set = the suite's own"
+expect_probe R1 "$P_REG"
+record "R1 DISCRIMINATED: $((EXPECT - 2))/$EXPECT, exactly $T_REG and $T_BRG FAIL at their named assertions, the probe at '$P_REG'; extinction set = the suite's own"
 echo "=== R2: HANDLES REGISTER answers -1 for a non-Loom descriptor ==="
 mutant r2 kernel/syscall.c \
 '    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
@@ -301,7 +335,8 @@ mutant u1 kernel/syscall.c \
 '    return -1;   // MUTANT U1: unknown register op
 '
 expect_fails U1 1 "$T_BRG|$W_BRG"
-record "U1 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_BRG FAILs; extinction set = the suite's own"
+expect_probe U1 "$P_UNK"
+record "U1 DISCRIMINATED: $((EXPECT - 1))/$EXPECT, exactly $T_BRG FAILs, the probe at '$P_UNK'; extinction set = the suite's own"
 echo "=== rebuild the committed tree, then SHAPE ==="
 lease rebuild
 tools/build.sh kernel --config ci > "$OUT/rebuild.log" 2>&1 || { echo "rebuild failed"; exit 1; }

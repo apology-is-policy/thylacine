@@ -219,12 +219,14 @@ static int run_default(long fd0, uint64_t va0) {
     for (unsigned long op = 2; op <= 9; op++)
         CHECK(t_loom_register(fd, op, g_rec, 1) == -E_OPNOTSUPP,
               "the default image refuses a private op on an ordinary ring", op);
-    CHECK(t_loom_register(fd, 10, g_rec, 1) == -E_INVAL, "an unknown register op is -EINVAL", 0);
+    long rc = t_loom_register(fd, 10, g_rec, 1);
+    CHECK(rc == -E_INVAL, "an unknown register op is -EINVAL", rc);
     close_ring(fd, &g_params);
     // A client tells a ring closed under it from its own error by -EBADF.
-    CHECK(t_loom_enter(fd, 0, 0, 0) == -E_BADF, "ENTER on a closed ring's number is -EBADF", 0);
-    CHECK(t_loom_register(fd, 0, 0, 0) == -E_BADF,
-          "REGISTER on a closed ring's number is -EBADF", 0);
+    rc = t_loom_enter(fd, 0, 0, 0);
+    CHECK(rc == -E_BADF, "ENTER on a closed ring's number is -EBADF", rc);
+    rc = t_loom_register(fd, 0, 0, 0);
+    CHECK(rc == -E_BADF, "REGISTER on a closed ring's number is -EBADF", rc);
     t_putstr("loom-bridge-probe: default image refuses every private route\n");
     return PASS_DEFAULT;
 }
