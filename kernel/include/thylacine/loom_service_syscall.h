@@ -23,6 +23,11 @@ u32 loom_private_record_size(u32 op);
 // executor, installs the handle, fills *out. Unwinds completely on failure.
 int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                                 struct loom_params *out, hidx_t *out_fd);
+// The same, also handing the caller its own reference on the ring (*out_l, on
+// success only), as sys_loom_setup_held_for_proc does.
+int loom_private_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
+                                     struct loom_params *out, hidx_t *out_fd,
+                                     struct Loom **out_l);
 // LOOM_REGISTER_BUFFERS on a private ring: the private registration.
 int loom_private_register_buffers_routed(struct Loom *l, struct Proc *p,
                                          const struct loom_buf_reg *bufs, u32 n);

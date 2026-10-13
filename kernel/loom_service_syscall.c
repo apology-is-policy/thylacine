@@ -44,11 +44,20 @@ u32 loom_private_record_size(u32 op) {
     }
 }
 
-#ifndef LOOM_PRIVATE_QUALIFICATION
-
 int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                                 struct loom_params *out, hidx_t *out_fd) {
-    (void)p; (void)entries; (void)flags; (void)out; (void)out_fd;
+    struct Loom *l = NULL;
+    int rc = loom_private_setup_held_for_proc(p, entries, flags, out, out_fd, &l);
+    if (rc == 0) loom_unref(l);
+    return rc;
+}
+
+#ifndef LOOM_PRIVATE_QUALIFICATION
+
+int loom_private_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
+                                     struct loom_params *out, hidx_t *out_fd,
+                                     struct Loom **out_l) {
+    (void)p; (void)entries; (void)flags; (void)out; (void)out_fd; (void)out_l;
     return -T_E_OPNOTSUPP;
 }
 int loom_private_register_buffers_routed(struct Loom *l, struct Proc *p,
@@ -70,10 +79,12 @@ int loom_private_register_record(struct Loom *l, struct Proc *p, u32 op,
 
 #else
 
-int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
-                                struct loom_params *out, hidx_t *out_fd) {
+int loom_private_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
+                                     struct loom_params *out, hidx_t *out_fd,
+                                     struct Loom **out_l) {
     const u32 known = LOOM_SETUP_PRIVATE_SERVICE | LOOM_SETUP_SERVICE_BUFFERS;
-    if (!p || p->magic != PROC_MAGIC || !p->as || !out || !out_fd) return -T_E_INVAL;
+    if (!p || p->magic != PROC_MAGIC || !p->as || !out || !out_fd || !out_l)
+        return -T_E_INVAL;
     if (!(flags & LOOM_SETUP_PRIVATE_SERVICE) || (flags & ~known))  return -T_E_INVAL;
     if (!entries || entries > LOOM_MAX_ENTRIES || (entries & (entries - 1u)))
         return -T_E_INVAL;
@@ -105,7 +116,8 @@ int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     if (!rc) rc = loom_private_start_executor(l);
 
     // Everything the caller learns is read before the handle exists: once it is
-    // installed a sibling thread may close it, and l is then not ours to touch.
+    // installed a sibling thread may close it. Only the reference taken for the
+    // caller, before the install, keeps l after that.
     if (!rc) {
         *out = (struct loom_params){
             .flags = flags, .sq_entries = l->sq_entries, .cq_entries = l->cq_entries,
@@ -119,13 +131,16 @@ int loom_private_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
             out->_resv1[1] = l->receipt_size;
             out->_resv1[2] = sizeof(struct loom_service_buffer_receipt);
         }
+        loom_ref(l);
         hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
-        if (fd >= 0) { *out_fd = fd; return 0; }
+        if (fd >= 0) { *out_fd = fd; *out_l = l; return 0; }
+        loom_unref(l);
         rc = -T_E_MFILE;
     }
     // Both drops settle: the detach refunds nothing while the Loom holds the
-    // ring, and the retirer's final drop then claims the charge.
-    if (mapped) (void)sys_burrow_detach_for_proc(p, va, ring_size);
+    // ring, and the retirer's final drop then claims the charge. Only the
+    // mapping still exactly the ring goes: the lock dropped after the map.
+    if (mapped) (void)sys_loom_ring_detach(p, l, va, ring_size);
     loom_unref(l);
     return rc;
 }

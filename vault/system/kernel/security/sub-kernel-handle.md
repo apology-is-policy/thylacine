@@ -33,6 +33,14 @@ index, or `-1`. The caller must **already** have accounted for one reference
 on `obj` (the `burrow_create_anon`-consumed-reference convention);
 `handle_close` releases it.
 
+`handle_close_obj(p, h, kind, obj)` is `handle_close` that acts only while slot
+`h` still names `(kind, obj)`, decided in the same lock hold as the vacate, and
+answers `-1` with the slot untouched otherwise. It is for an unwind that runs
+after its descriptor was published: a sibling thread may have closed the number
+and been handed it back for another file in between. Pointer equality is
+identity only while the caller holds its **own** reference on `obj`; without
+one, `obj` can be freed and a new object installed at `h` from the same address.
+
 `handle_get(p, h, out)` returns a **by-value snapshot** with the object's
 refcount already bumped; `handle_put` drops that borrowed reference. The
 pairing is mandatory — see Concurrency.
@@ -368,6 +376,11 @@ atomics for diagnostics only.
 - A new kind whose object is refcounted **must** bump in
   `handle_acquire_obj`. `KOBJ_SRV` pins its containing registry, because
   its service pointer is interior to that allocation.
+- An unwind that closes a descriptor it published earlier must close it by
+  **identity** (`handle_close_obj`, holding its own reference on the object),
+  never by number: between the publish and the unwind the number is the whole
+  Proc's to close and reuse. The Loom setup rollback does (2026-10-13); ten
+  other syscall sites still close by number, queued as one sweep.
 - Any new fd-creating path must install through `handle_install_locked`
   under the table lock — the `#844` F1 lesson, now with four callers. It is
   the single install chokepoint and takes the starting index and the

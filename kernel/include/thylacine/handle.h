@@ -258,6 +258,14 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
 
+// handle_close, but only while slot h still names (kind, obj); -1 and the slot
+// untouched otherwise (and for a NULL obj). For an unwind that must not close a
+// number a sibling thread has since closed and reused. Pointer equality is
+// identity only while the caller holds its OWN reference on obj: without one,
+// obj can be freed and a new object installed at h from the same address.
+// A guarded HandleClose(p, h): it adds no transition the spec lacks.
+int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj);
+
 // Swap what a LIVE handle denotes, in place, keeping the same slot index.
 // Returns 0 on success, -1 on any refusal (out-of-range h, empty slot, bad
 // args, or a kind outside the permitted pair). On success the outgoing object

@@ -37,19 +37,18 @@ static const char *loom_bridge_fixture_run(void) {
     // Every private register op on an ordinary ring, and ENTER, refuse too.
     struct loom_params kp;
     hidx_t lfd = -1;
-    int legacy = sys_loom_setup_for_proc(p, 2, 0, &kp, &lfd);
+    struct Loom *ll = NULL;
+    int legacy = sys_loom_setup_held_for_proc(p, 2, 0, &kp, &lfd, &ll);
     u32 refused = 0;
     int enter = 0;
-    struct Handle h;
-    if (!legacy && handle_get(p, lfd, &h) == 0) {
+    if (!legacy) {
         bridge_zero();
         for (u32 op = LOOM_REGISTER_SERVICE_TARGET; op <= LOOM_REGISTER_QUERY_SERVICE_POOL; op++)
-            if (loom_private_register_record((struct Loom *)h.obj, p, op, bridge_record,
+            if (loom_private_register_record(ll, p, op, bridge_record,
                                              bridge_copyout, NULL) == -T_E_OPNOTSUPP) refused++;
-        enter = loom_private_enter((struct Loom *)h.obj, p, 0, 0, 0);
-        handle_put(&h);
+        enter = loom_private_enter(ll, p, 0, 0, 0);
+        sys_loom_setup_rollback(p, lfd, ll, kp.ring_va, kp.ring_size);
     }
-    if (!legacy) sys_loom_setup_rollback(p, lfd, kp.ring_va, kp.ring_size);
     u32 settled = p->as->page_count;
     test_proc_drop(p);
 #define BR(cond, msg) do { if (!error && !(cond)) error = msg; } while (0)
@@ -121,7 +120,7 @@ static const char *loom_bridge_fixture_run(void) {
     struct Proc *p = test_proc_make(), *q = test_proc_make(), *poster = test_proc_make();
     struct SrvRegistry *reg = NULL;
     struct Spoor *root = NULL;
-    struct Loom *l = NULL;
+    struct Loom *l = NULL, *pl = NULL;
     struct Handle h;
     bool held = false, linked = false, ring_open = false;
     struct loom_params out;
@@ -149,7 +148,7 @@ static const char *loom_bridge_fixture_run(void) {
     BQ(p->as->page_count == base && !p->as->private_rings, "refused setups charge nothing");
 
     // A private ring with receipts.
-    BQ(loom_private_setup_for_proc(p, 2, P | B, &out, &fd) == 0, "private setup succeeds");
+    BQ(loom_private_setup_held_for_proc(p, 2, P | B, &out, &fd, &pl) == 0, "private setup succeeds");
     ++goal; ring_open = true;
     BQ(handle_get(p, fd, &h) == 0 && h.kind == KOBJ_LOOM, "the private ring's handle");
     held = true; l = (struct Loom *)h.obj;
@@ -189,16 +188,15 @@ static const char *loom_bridge_fixture_run(void) {
     // An ordinary ring in the same image stays out of the private inners.
     struct loom_params kp;
     hidx_t lfd = -1;
-    int legacy = sys_loom_setup_for_proc(p, 2, 0, &kp, &lfd);
+    struct Loom *ll = NULL;
+    int legacy = sys_loom_setup_held_for_proc(p, 2, 0, &kp, &lfd, &ll);
     int legacy_enter = 0, legacy_reg = 0;
-    struct Handle lh;
-    if (!legacy && handle_get(p, lfd, &lh) == 0) {
+    if (!legacy) {
         bridge_header(sizeof(struct loom_service_reserve));
-        legacy_enter = loom_private_enter((struct Loom *)lh.obj, p, 0, 0, 0);
-        legacy_reg = bridge_reg((struct Loom *)lh.obj, p, LOOM_REGISTER_SERVICE_SLOT, NULL);
-        handle_put(&lh);
+        legacy_enter = loom_private_enter(ll, p, 0, 0, 0);
+        legacy_reg = bridge_reg(ll, p, LOOM_REGISTER_SERVICE_SLOT, NULL);
+        sys_loom_setup_rollback(p, lfd, ll, kp.ring_va, kp.ring_size);
     }
-    if (!legacy) sys_loom_setup_rollback(p, lfd, kp.ring_va, kp.ring_size);
     BQ(legacy == 0, "an ordinary ring beside the private one");
     BQ(legacy_enter == -T_E_INVAL, "private ENTER refuses an ordinary ring");
     BQ(legacy_reg == -T_E_OPNOTSUPP, "a private register op refuses an ordinary ring");
@@ -304,7 +302,7 @@ static const char *loom_bridge_fixture_run(void) {
 
 done:
     if (held) handle_put(&h);
-    if (ring_open) sys_loom_setup_rollback(p, fd, out.ring_va, out.ring_size);
+    if (ring_open) sys_loom_setup_rollback(p, fd, pl, out.ring_va, out.ring_size);
     if (buf_va > 0) (void)sys_burrow_detach_for_proc(p, (u64)buf_va, PAGE_SIZE);
     if (!lp_wait(goal) && !error) error = "bridge ring retirement timeout";
     if (p && !error && (p->as->page_count != base || p->as->private_rings))
@@ -327,9 +325,10 @@ static const char *loom_setup_rollback_fixture_run(void) {
     u32 base = p->as->page_count;
     struct loom_params kp;
     hidx_t fd = -1;
-    int rc = sys_loom_setup_for_proc(p, 4, 0, &kp, &fd);
+    struct Loom *l = NULL;
+    int rc = sys_loom_setup_held_for_proc(p, 4, 0, &kp, &fd, &l);
     u32 charged = p->as->page_count;
-    if (!rc) sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
+    if (!rc) sys_loom_setup_rollback(p, fd, l, kp.ring_va, kp.ring_size);
     struct Handle h;
     bool closed = !rc && handle_get(p, fd, &h) != 0;
     if (!closed && !rc) handle_put(&h);
@@ -340,4 +339,169 @@ static const char *loom_setup_rollback_fixture_run(void) {
     if (!closed) return "the rollback closes the handle";
     if (settled != base) return "the rollback settles the ring's charge exactly";
     return NULL;
+}
+
+// The rollback after a setup published its descriptor and its ring. A sibling
+// thread may close and reuse the number, or detach the ring and map its own
+// region at the VA, before the rollback runs: it must undo only what is still
+// this ring's. And a setup refused after the map must leave a ring mapping it
+// could not detach still charged, settling when that mapping's last drop goes.
+static u64 setup_trim_va;
+static s64 setup_trim_rc;
+static void setup_trim_ring(struct Proc *p, u64 va) {
+    setup_trim_va = va;
+    setup_trim_rc = sys_burrow_detach_for_proc(p, va, PAGE_SIZE);
+}
+static bool setup_maps_region_at(struct Proc *p, u64 va, const struct Burrow *ring) {
+    spin_lock(&p->as->lock);
+    struct Vma *v = vma_lookup_in(p->as, va);
+    bool yes = v && v->vaddr_start == va && v->burrow && v->burrow != ring;
+    spin_unlock(&p->as->lock);
+    return yes;
+}
+static const char *loom_setup_identity_fixture_run(void) {
+    const char *error = NULL;
+    struct Proc *p = test_proc_make();
+    if (!p) return "identity proc";
+    hidx_t rd = -1, wr = -1;
+    int pipe_rc = sys_pipe_for_proc(p, &rd, &wr);
+    u32 base = p->as->page_count;
+    u64 destroyed0 = loom_total_destroyed();
+    struct loom_params kp = { 0 };
+    hidx_t fd = -1;
+    struct Loom *l = NULL;
+
+    // A: the number closed and reused for another file.
+    int a_rc = pipe_rc ? -1 : sys_loom_setup_held_for_proc(p, 4, 0, &kp, &fd, &l);
+    hidx_t a_fd = fd, a_dup = -1;
+    u64 a_va = kp.ring_va;
+    bool a_kept = false, a_unmapped = false;
+    if (!a_rc) {
+        (void)handle_close(p, fd);
+        a_dup = handle_dup(p, rd, RIGHT_READ);
+        sys_loom_setup_rollback(p, fd, l, kp.ring_va, kp.ring_size);
+        struct Handle h;
+        if (handle_get(p, fd, &h) == 0) { a_kept = h.kind == KOBJ_SPOOR; handle_put(&h); }
+        a_unmapped = vma_lookup(p, a_va) == NULL;
+        if (a_dup >= 0) (void)handle_close(p, a_dup);
+    }
+    u64 a_destroyed = loom_total_destroyed() - destroyed0;
+    u32 a_settled = p->as->page_count;
+
+    // B: the ring detached and another region mapped at its VA.
+    int b_rc = a_rc ? -1 : sys_loom_setup_held_for_proc(p, 4, 0, &kp, &fd, &l);
+    s64 b_va = -1;
+    bool b_closed = false, b_kept = false;
+    u64 b_ring_va = kp.ring_va;
+    if (!b_rc) {
+        (void)sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size);
+        b_va = sys_burrow_attach_for_proc(p, kp.ring_size);
+        struct Burrow *ring = l->ring;
+        sys_loom_setup_rollback(p, fd, l, kp.ring_va, kp.ring_size);
+        struct Handle h;
+        b_closed = handle_get(p, fd, &h) != 0;
+        if (!b_closed) handle_put(&h);
+        b_kept = setup_maps_region_at(p, kp.ring_va, ring);
+        if (b_va > 0) (void)sys_burrow_detach_for_proc(p, (u64)b_va, kp.ring_size);
+    }
+    u64 b_destroyed = loom_total_destroyed() - destroyed0;
+    u32 b_settled = p->as->page_count;
+
+    // C: a setup refused for a slot after a sibling trimmed its ring.
+    for (int i = 0; !pipe_rc && i < PROC_HANDLE_MAX; i++)
+        if (handle_dup(p, rd, RIGHT_READ) < 0) break;
+    setup_trim_va = 0;
+    setup_trim_rc = -1;
+    loom_setup_mapped_hook_for_test(setup_trim_ring);
+    int c_rc = sys_loom_setup_for_proc(p, 64, 0, &kp, &fd);
+    loom_setup_mapped_hook_for_test(NULL);
+    u64 c_destroyed = loom_total_destroyed() - destroyed0;
+    u64 rest = setup_trim_va + PAGE_SIZE, rest_end = 0;
+    spin_lock(&p->as->lock);
+    struct Vma *cv = setup_trim_va ? vma_lookup_in(p->as, rest) : NULL;
+    if (cv && cv->vaddr_start == rest && cv->burrow) rest_end = cv->vaddr_end;
+    spin_unlock(&p->as->lock);
+    u32 c_charged = p->as->page_count;
+    u32 c_want = rest_end ? base + (u32)burrow_backing_pages((size_t)(rest_end - setup_trim_va)) : 0;
+    s64 c_detached = rest_end ? sys_burrow_detach_for_proc(p, rest, rest_end - rest) : -1;
+    u32 c_settled = p->as->page_count;
+    test_proc_drop(p);
+
+#define BR(cond, msg) do { if (!error && !(cond)) error = msg; } while (0)
+    BR(pipe_rc == 0 && a_rc == 0, "an ordinary ring to roll back");
+    BR(a_dup == a_fd, "the sibling's file took the ring's number");
+    BR(a_kept, "the rollback spares a file that reused the ring's number");
+    BR(a_unmapped, "the rollback detaches the ring it still maps");
+    BR(a_destroyed == 1 && a_settled == base, "the rollback frees the ring and settles its charge");
+    BR(b_rc == 0 && b_va > 0 && (u64)b_va == b_ring_va, "the sibling's region took the ring's VA");
+    BR(b_closed, "the rollback closes the ring's own descriptor");
+    BR(b_kept, "the rollback spares a region mapped at the ring's VA");
+    BR(b_destroyed == 2 && b_settled == base, "a ring detached by a sibling settles at its last drop");
+    BR(c_rc == -T_E_MFILE && setup_trim_rc == 0, "a refused setup whose ring a sibling trimmed");
+    BR(c_destroyed == 3, "the refused setup frees its Loom");
+    BR(rest_end > rest, "the trimmed ring's remainder stays mapped");
+    BR(c_charged == c_want, "a refused setup's ring stays charged while a mapping of it survives");
+    BR(c_detached == 0 && c_settled == base, "the surviving mapping's last drop settles the ring");
+#undef BR
+    return error;
+}
+
+// The same rollback for a private ring. The default image refuses the held
+// setup as it refuses every private one.
+static const char *loom_private_setup_identity_fixture_run(void) {
+    struct loom_params kp = { 0 };
+    hidx_t fd = -1;
+    struct Loom *l = NULL;
+#ifndef LOOM_PRIVATE_QUALIFICATION
+    struct Proc *p = test_proc_make();
+    if (!p) return "identity proc";
+    u32 base = p->as->page_count;
+    int rc = loom_private_setup_held_for_proc(p, 2, LOOM_SETUP_PRIVATE_SERVICE, &kp, &fd, &l);
+    bool untouched = p->as->page_count == base && !p->as->private_rings && !l;
+    test_proc_drop(p);
+    if (rc != -T_E_OPNOTSUPP) return "default image: a held private setup refuses EOPNOTSUPP";
+    if (!untouched) return "default image: a refused held private setup charges nothing";
+    return NULL;
+#else
+    const char *error = NULL;
+    struct Proc *p = test_proc_make();
+    if (!p) return "identity proc";
+    proc_test_link(p);
+    hidx_t rd = -1, wr = -1;
+    int pipe_rc = sys_pipe_for_proc(p, &rd, &wr);
+    u32 base = p->as->page_count;
+    u64 goal = loom_private_retired();
+    int rc = pipe_rc ? -1 : loom_private_setup_held_for_proc(p, 2, LOOM_SETUP_PRIVATE_SERVICE,
+                                                             &kp, &fd, &l);
+    hidx_t dup = -1;
+    s64 va = -1;
+    bool kept_fd = false, kept_va = false;
+    if (!rc) {
+        ++goal;
+        (void)handle_close(p, fd);
+        dup = handle_dup(p, rd, RIGHT_READ);
+        (void)sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size);
+        va = sys_burrow_attach_for_proc(p, kp.ring_size);
+        struct Burrow *ring = l->ring;
+        sys_loom_setup_rollback(p, fd, l, kp.ring_va, kp.ring_size);
+        struct Handle h;
+        if (handle_get(p, fd, &h) == 0) { kept_fd = h.kind == KOBJ_SPOOR; handle_put(&h); }
+        kept_va = setup_maps_region_at(p, kp.ring_va, ring);
+        if (va > 0) (void)sys_burrow_detach_for_proc(p, (u64)va, kp.ring_size);
+    }
+    bool retired = lp_wait(goal);
+    u32 settled = p->as->page_count;
+    u32 rings = p->as->private_rings;
+    proc_test_unlink(p);
+    test_proc_drop(p);
+#define BR(cond, msg) do { if (!error && !(cond)) error = msg; } while (0)
+    BR(pipe_rc == 0 && rc == 0, "a private ring to roll back");
+    BR(dup == fd && va > 0 && (u64)va == kp.ring_va,
+       "the sibling's file and region took the private ring's number and VA");
+    BR(kept_fd, "the private rollback spares a file that reused the ring's number");
+    BR(kept_va, "the private rollback spares a region mapped at the ring's VA");
+    BR(retired && settled == base && !rings, "the rolled-back private ring retires and settles");
+#undef BR
+    return error;
+#endif
 }

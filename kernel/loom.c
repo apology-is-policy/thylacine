@@ -1095,24 +1095,13 @@ static void loom_free(struct Loom *l) {
     // That is the I-32-breaking direction, the one every other tie in this
     // mechanism is deliberately broken away from.
     //
-    // The two arms are NOT interchangeable, which is why this is not simply
-    // loom_owner_live(l). `owner` binds LAST in setup (after the final failure
-    // path) and `sqpoll_owner` binds FIRST (at the charge), on purpose: the
-    // rollbacks uncharge pages explicitly and must not be double-refunded,
-    // while they deliberately do NOT settle the thread charge and leave it to
-    // this function. So on a rollback `owner` is still NULL and routing through
-    // loom_owner_live would return NULL, SKIP the uncharge, and leak a thread
-    // charge for the Proc's whole life -- turning a backstop into a defect on
-    // paths that are actually exercised (sqpoll start failure, handle_alloc
-    // failure).
-    //
-    // owner == NULL is instead PROOF the Proc is alive: it means setup never
-    // reached its last stanza, so no handle exists, so the only reference is
-    // the local one in sys_loom_setup -- we are executing inside the creator's
-    // own syscall. Validate when there is something to validate; rely on the
-    // synchronous path when there is not.
+    // Setup binds `owner` with the ring's page charge, before it takes this
+    // one, so a charged Loom always has an owner here. Setup's own rollbacks
+    // leave the thread charge to this function; they run inside the creator's
+    // syscall, so loom_owner_live finds the creator alive and the uncharge is
+    // never skipped on those (exercised) paths.
     if (l->sqpoll_charged) {
-        struct Proc *so = l->owner ? loom_owner_live(l) : l->sqpoll_owner;
+        struct Proc *so = loom_owner_live(l);
         if (so) proc_sqpoll_uncharge(so);
         l->sqpoll_charged = false;
     }
@@ -3383,6 +3372,15 @@ void loom_setup_installed_for_test(struct Proc *p, hidx_t fd) {
     void (*hook)(struct Proc *, hidx_t) =
         __atomic_load_n(&loom_setup_installed_hook, __ATOMIC_ACQUIRE);
     if (hook) hook(p, fd);
+}
+static void (*loom_setup_mapped_hook)(struct Proc *, u64);
+void loom_setup_mapped_hook_for_test(void (*hook)(struct Proc *, u64)) {
+    __atomic_store_n(&loom_setup_mapped_hook, hook, __ATOMIC_RELEASE);
+}
+void loom_setup_mapped_for_test(struct Proc *p, u64 ring_va) {
+    void (*hook)(struct Proc *, u64) =
+        __atomic_load_n(&loom_setup_mapped_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(p, ring_va);
 }
 #endif
 

@@ -416,8 +416,10 @@ struct Loom {
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
     // #130: the I-32 charge ledger. `owner`/`owner_pid` are the Proc
     // SYS_LOOM_SETUP charged (see loom_owner_live for why the pointer is safe
-    // and why the pid backstops it). All three are set once at setup and never
-    // mutated -- a Loom cannot change hands.
+    // and why the pid backstops it). All three are set once at setup -- in the
+    // as->lock hold that charges and maps the ring, before anything can fail
+    // after it -- and never mutated: a Loom cannot change hands. A private ring
+    // never binds them (its charge is recorded on its ring at creation).
     //
     // #132: `ring_pages` is now INFORMATIONAL ONLY. The settle amount comes from
     // the Burrow's own charge record (burrow_charge_claim), because a pin this
@@ -432,11 +434,11 @@ struct Loom {
     // against -- the creating Proc, read LIVE at each submit (so a legate's caps
     // count only while its scope holds them). Stamped by SYS_LOOM_SETUP right
     // after loom_create, BEFORE the handle publishes, so no submit can precede
-    // it; `owner` cannot serve, since it binds LAST for the #130 ledger and a
-    // sibling thread may ENTER in between. Sound without a ref for the reason
-    // sqpoll_owner is: KObj_Loom is non-transferable, so every submitter is a
-    // thread of this Proc. Validated at use (magic + pid) like `owner`; NULL
-    // (a kernel-internal Loom) fails those ops closed.
+    // it. Not `owner`: that names who PAID, a ledger fact, and an authority must
+    // not be read off a ledger. Sound without a ref: KObj_Loom is
+    // non-transferable, so every submitter is a thread of this Proc. Validated
+    // at use (magic + pid) like `owner`; NULL (a kernel-internal Loom) fails
+    // those ops closed.
     struct Proc         *ident;
     int                  ident_pid;
     // Geometry (immutable after loom_create). Mirrors loom_params.
@@ -567,22 +569,11 @@ struct Loom {
     struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
     struct Rendez           sqpoll_join;     // the JOINER sleeps here; woken by the kthread's terminal
     // The fid-lift audit F1 charge: the kthread counts against the CREATING
-    // Proc's thread budget. `sqpoll_owner` is lifetime-safe without a ref:
-    // KObj_Loom is I-5 non-transferable, so the creator's handle is the only
-    // handle and loom_free runs at the latest during the creator's own
-    // handle-close-at-exit -- always before proc_free. `sqpoll_charged` keys
-    // the uncharge (set iff the charge succeeded, whether or not the kthread
-    // then started), so every unwind path settles the budget exactly once.
-    //
-    // That argument is still believed, and is no longer TRUSTED at the use --
-    // loom_free validates before the decrement, mirroring what #130 did for
-    // the page ledger. The two pointers below and `owner` above must stay
-    // SEPARATE: they bind at opposite ends of setup on purpose (`owner` last,
-    // after the final failure path, so rollbacks cannot be double-refunded;
-    // `sqpoll_owner` first, at the charge, because rollbacks deliberately do
-    // not settle it). Merging them to remove the duplication breaks one of the
-    // two ledgers; so does moving either binding toward the other.
-    struct Proc            *sqpoll_owner;
+    // Proc's thread budget, settled against `owner` -- which setup binds with
+    // the ring's page charge, BEFORE it can take this one, so a charged thread
+    // always has a payer. `sqpoll_charged` keys the uncharge (set iff the
+    // charge succeeded, whether or not the kthread then started), so every
+    // unwind path settles the budget exactly once, in loom_free.
     bool                    sqpoll_charged;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
@@ -669,6 +660,10 @@ void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
 // close of the new fd can land.
 void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
 void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
+// Runs in an ordinary setup right after the ring is mapped and the lock that
+// mapped it dropped: where a sibling thread can first reach the mapping.
+void loom_setup_mapped_hook_for_test(void (*hook)(struct Proc *, u64));
+void loom_setup_mapped_for_test(struct Proc *p, u64 ring_va);
 // Deterministic unlocked owner-boundary interleavings, test builds only.
 void loom_private_close_hook_for_test(void (*hook)(struct Loom *, u32));
 void loom_private_close_boundary_for_test(struct Loom *, u32);
@@ -832,15 +827,28 @@ int loom_private_start_executor(struct Loom *l);
 // KObj_Loom handle in p, fills `*out` + `*out_fd`. `flags` accepts
 // LOOM_SETUP_SQPOLL (Loom-4c: spawns the poll-thread before the handle is
 // returned); other LOOM_SETUP_* bits reject until their sub-chunk lands.
-// Returns 0 on success, -1 on bad args / OOM / handle-table-full / SQPOLL
-// spawn failure (rolling back the map + the Loom -- which joins any spawned
-// kthread -- on any failure).
+// Returns 0 on success, else a negated errno (-EINVAL, -ENOMEM, -EAGAIN at the
+// thread cap, -EMFILE), rolling back the map + the Loom -- which joins any
+// spawned kthread -- on any failure.
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd);
-// Undo a successful setup (legacy or private) whose params never reached the
-// caller: close the handle, then detach the ring through the charge-settling
-// path -- after the close that detach can be the ring's final drop.
-void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size);
+// The same, also handing the caller a reference of its own on the new Loom
+// (*out_l, on success only): a sibling thread can close the published fd at
+// once, and the reference is what keeps the Loom -- and its identity -- for
+// the caller's rollback. The caller drops it, or passes it to the rollback.
+int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
+                                 struct loom_params *out, hidx_t *out_fd,
+                                 struct Loom **out_l);
+// Detach the ring mapping a setup made, through the charge-settling core, only
+// while the mapping at ring_va is still exactly l's ring; true if it did.
+// Caller holds a reference on l.
+bool sys_loom_ring_detach(struct Proc *p, struct Loom *l, u64 ring_va, u32 ring_size);
+// Undo a successful held setup (legacy or private) whose params never reached
+// the caller: close fd only while it still names l, detach only l's own ring
+// mapping, then drop the caller's reference -- which can be the Loom's last,
+// whose final drop of the ring settles its charge. Consumes that reference.
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, struct Loom *l,
+                             u64 ring_va, u32 ring_size);
 
 // Testable register inner. Resolves the `n` fds in `fds[]` (each must be a
 // KOBJ_SPOOR handle in p) into the ring at `loom_fd`'s registered-handle table.

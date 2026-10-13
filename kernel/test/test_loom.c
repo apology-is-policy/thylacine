@@ -110,6 +110,16 @@ void test_loom_setup_rollback_settles(void) {
     const char *error = loom_setup_rollback_fixture_run();
     TEST_ASSERT(!error, error);
 }
+void test_loom_setup_rollback_identity(void);
+void test_loom_setup_rollback_identity(void) {
+    const char *error = loom_setup_identity_fixture_run();
+    TEST_ASSERT(!error, error);
+}
+void test_loom_private_setup_rollback_identity(void);
+void test_loom_private_setup_rollback_identity(void) {
+    const char *error = loom_private_setup_identity_fixture_run();
+    TEST_ASSERT(!error, error);
+}
 #include "loom_slots_fixture.h"
 #include "loom_nodes_fixture.h"
 
@@ -924,15 +934,16 @@ void test_loom_register_rejects(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc returned NULL");
 
+    // Every answer below, the fixture's included, is read and the Proc dropped
+    // before it is asserted, so a failed check leaks neither the Proc nor its
+    // ring. A failed setup or pipe leaves descriptors that name nothing, which
+    // the calls below only refuse.
     struct loom_params kp;
     hidx_t loom_fd = -1;
-    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
-
+    int setup_rc = sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd);
     hidx_t rd = -1, wr = -1;
-    TEST_ASSERT(sys_pipe_for_proc(p, &rd, &wr) == 0, "pipe pair");
+    int pipe_rc = sys_pipe_for_proc(p, &rd, &wr);
 
-    // Every answer below is read and the Proc dropped before it is asserted, so
-    // a failed answer check leaks neither the Proc nor its ring.
     hidx_t one[1] = { rd };
     // Unsupported op (BUFFERS reserved for Loom-6).
     int wrong_op = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1);
@@ -955,6 +966,8 @@ void test_loom_register_rejects(void) {
     int enter_kind = sys_loom_enter_for_proc(p, rd, 0, 0, 0);
     test_proc_drop(p);
 
+    TEST_EXPECT_EQ(setup_rc, 0, "setup");
+    TEST_EXPECT_EQ(pipe_rc, 0, "pipe pair");
     TEST_EXPECT_EQ(wrong_op, -T_E_INVAL,
                    "LOOM_REGISTER_BUFFERS through the HANDLES entry answers -EINVAL");
     TEST_EXPECT_EQ(over_cap, -T_E_INVAL, "nargs over cap answers -EINVAL");

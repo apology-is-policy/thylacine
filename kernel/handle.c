@@ -487,7 +487,10 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
     return h;   // -1 if the table is full
 }
 
-int handle_close(struct Proc *p, hidx_t h) {
+// handle_close, and handle_close_obj when `obj` is non-NULL: the slot is vacated
+// only while it still names (kind, obj), decided in the same hold as the vacate.
+static int handle_close_matching(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                                 const void *obj) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     if (h < 0 || h >= PROC_HANDLE_MAX)  return -1;
@@ -499,12 +502,13 @@ int handle_close(struct Proc *p, hidx_t h) {
     // (and fails) -- never a torn read, never a freed obj under a live ref.
     spin_lock(&t->lock);
     struct Handle *slot = &t->slots[h];
-    if (slot->magic != HANDLE_MAGIC) {
+    if (slot->magic != HANDLE_MAGIC ||
+        (obj && (slot->kind != kind || slot->obj != obj))) {
         spin_unlock(&t->lock);
         return -1;
     }
-    enum kobj_kind kind = slot->kind;
-    void          *obj  = slot->obj;
+    enum kobj_kind gone_kind = slot->kind;
+    void          *gone_obj  = slot->obj;
     slot->magic  = 0;
     slot->kind   = KOBJ_INVALID;
     slot->rights = RIGHT_NONE;
@@ -518,8 +522,17 @@ int handle_close(struct Proc *p, hidx_t h) {
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    handle_release_owner(kind, obj);
+    handle_release_owner(gone_kind, gone_obj);
     return 0;
+}
+
+int handle_close(struct Proc *p, hidx_t h) {
+    return handle_close_matching(p, h, KOBJ_INVALID, NULL);
+}
+
+int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj) {
+    if (!obj) return -1;
+    return handle_close_matching(p, h, kind, obj);
 }
 
 // VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in

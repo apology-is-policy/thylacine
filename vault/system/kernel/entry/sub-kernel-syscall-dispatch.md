@@ -1362,13 +1362,18 @@ image. The new Aux test calls use the existing non-exempt false argument.
 ## Loom private routing (NA-1, 2026-10-12)
 
 The SETUP handler sends PRIVATE_SERVICE or SERVICE_BUFFERS to
-`loom_private_setup_for_proc` and returns its negative errno. The legacy path
+`loom_private_setup_held_for_proc`, everything else to
+`sys_loom_setup_held_for_proc`, and returns a refusal's negative errno. The legacy path
 returns the errnos of LOOM.md 8.2a (operator vote 7, 2026-10-13; it answered -1
 before). REGISTER ops 2..9 go to `sys_loom_register_private`, which
 copies the op's fixed-size record once into kmalloc'd memory, and results return
 through `loom_record_copyout_user`. HANDLES on a private ring is -EOPNOTSUPP.
-BUFFERS and ENTER branch on `loom_is_private`. A params copyout fault on either
-ring kind calls `sys_loom_setup_rollback`. Without the qualification lever,
+BUFFERS and ENTER branch on `loom_is_private`. Both held setups hand the handler its own
+ring reference, kept across the params copyout; a copyout fault on either ring
+kind passes it to `sys_loom_setup_rollback`, which closes the descriptor and
+detaches the ring only while they still name this ring (2026-10-13: by number
+and by range before, which a sibling thread's reuse turned against its own
+file or mapping). Without the qualification lever,
 every private arm is -EOPNOTSUPP. `sys_weft_share_for_proc` refuses a
 private-ring VMA, so no other Proc can map one ([[sub-kernel-weft]]). Mechanism
 and fixes: [[sub-kernel-loom-bridge]].

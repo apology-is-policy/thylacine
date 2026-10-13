@@ -436,26 +436,36 @@ and the repair are in [[sub-kernel-burrow]].
 early; an under-charge inflates its budget, which is the bound failing. Every
 tie in this mechanism is broken toward over-charging.
 
-### The two owner pointers must stay apart
+### One owner, bound with the charge
 
-The ring records the same Proc twice — once for the page ledger, once for the
-thread ledger — and the two are bound at **opposite ends** of setup. That looks
-like duplication and is not.
+The ring records its paying process once, and both ledgers settle against it.
+Setup binds that owner, and stamps the page charge on the ring itself, in the
+**same lock hold** that charges the pages and maps the ring -- before anything
+after the map can fail, and before the poll-thread charge can be taken. Every
+later failure path settles the pages by **claim**: the drop that ends the ring,
+whether the teardown's or the detach of a mapping that outlived the ring object,
+refunds them, and the claim clears the record, so no second refund can find it.
+The rollbacks never refund the pages themselves.
 
-The page owner is bound **last**, after the final failure path, so it marks a
-fully-constructed ring. Every rollback before that point uncharges explicitly
-and then tears down a ring whose page owner is still unset, so teardown cannot
-refund what the rollback already did.
+**Until 2026-10-13 the design was the opposite**, and documented as load-bearing:
+a page owner bound **last**, after the final failure path, beside a separate
+thread owner bound **first**. The rollbacks refunded the pages explicitly, so the
+page owner had to stay unset or the teardown would refund them again, while the
+thread charge was left to the teardown and needed an owner recorded early. The
+warning then on this page -- merging the two pointers, or moving either binding
+toward the other, breaks a ledger -- was true **of that discipline**.
 
-The thread owner is bound **first**, at the moment the charge succeeds, for the
-identical reason read the other way: the rollbacks do *not* refund it, so
-teardown must, which means it has to be recorded before anything can fail.
-
-Same goal — settle exactly once — reached by inverting the discipline, because
-one ledger is settled by the rollback and the other by the teardown. Merging
-the two pointers, or moving either binding toward the other, silently breaks
-whichever it was not written for: one double-refunds, the other leaks. **The
-source now says this**, where previously nothing did.
+The discipline itself was unsound. The explicit refund ran after the map's lock
+had dropped, beside an unmap that matched the exact geometry and ignored its own
+failure. A sibling thread that trimmed one page off the ring (a range detach) or
+split it (a reprotect) in that window made the unmap miss: the rest of the ring
+stayed mapped and resident, the refund ran anyway, and the record that would
+have settled the final drop had not been stamped yet. Each refused setup could
+leave a ring's pages resident and uncharged, bounded only by the mapping cap
+([[inv-i32]]). The fix had to move the binding, and moving the binding is safe
+only because the explicit refunds went with it: nothing after the binding
+refunds pages except a claim. With the owner bound before the thread charge,
+the second pointer had nothing left to do and was removed.
 
 ### The thread ledger is backstopped, and the shape of the backstop is the point
 
@@ -474,30 +484,23 @@ under-count on a process that never charged, inflating its thread budget. The
 [[inv-i32]]-breaking direction, and the one every other tie here is deliberately
 broken away from.
 
-**The obvious one-line fix is wrong, and wrong on paths that are exercised.**
-Routing the settle unconditionally through the page ledger's liveness helper
-reads the **page** owner — the one bound *last*. Both rollbacks (poll-thread
-start failure, handle allocation failure) reach teardown with the thread charge
-outstanding and the page owner still unset, so the helper returns nothing, the
-uncharge is **skipped**, and a thread charge leaks for the process's whole life.
-That converts a backstop into a defect.
+**Under the old binding order, the obvious one-line fix was wrong, on paths
+that are exercised.** Routing the settle unconditionally through the liveness
+helper read the page owner, then bound *last*: both rollbacks (poll-thread start
+failure, handle allocation failure) reached teardown with the thread charge
+outstanding and the page owner unset, so the helper returned nothing and a
+thread charge leaked for the process's whole life. The form that shipped then
+validated only when there was something to validate, falling back to a separate
+thread owner when the page owner was unset -- an unset page owner being proof
+the creator was alive, inside its own setup call.
 
-The correct form validates only when there is something to validate:
-
-> take the liveness-checked owner **if the page owner is bound**; otherwise use
-> the thread owner directly.
-
-And the reason the fallback is safe is the good part: **an unset page owner is
-itself proof the process is alive.** It means setup never reached its last
-stanza, so no handle exists, so the only reference to the ring is the local one
-in the setup syscall — execution is inside the creator's own call. *Validate when
-there is something to validate; rely on the synchronous path when there is not.*
-
-**A defence and its subject can require opposite treatments at one call site.**
-The instinct that produced the wrong fix is exactly the instinct the section
-above warns against — treating the two pointers as duplication — and it survives
-knowing better, because a substitution that removes a redundant-looking read
-looks like tidying rather than like a semantic change.
+Since 2026-10-13 the owner binds before the thread charge can be taken, so the
+liveness-checked owner is always there to read and the one-line form is the
+correct one: every rollback runs inside the creator's own call, where the check
+finds it alive. **A defence and its subject can require opposite treatments at
+one call site** -- and the substitution that was wrong before is right now only
+because the binding moved first. Change one without the other and the old leak
+returns.
 
 ## Data structures
 
@@ -3599,6 +3602,26 @@ reading this path. Both were live on main a7353c36f, and both are fixed in
   `sys_loom_setup_rollback`: `handle_close` followed by a settling detach.
   Witnesses: `loom.setup_rollback_settles`, and the default body of
   `loom.private_bridge`.
+
+**The setup rollback by identity (October 13, Corona).** The params-copyout
+rollback closed the descriptor **by number** and detached the ring **by range**,
+after the descriptor and the mapping were published. A sibling thread could
+close the number and reuse it, or detach the ring and map its own region at the
+VA, before the copyout faulted; the rollback then closed the sibling's file and
+removed its mapping. Same process only: no authority crosses a process. Setup now
+hands the caller a reference of its own (`sys_loom_setup_held_for_proc`, and the
+private route's held twin), the handler holds it across the copyout, and the
+rollback closes the descriptor only while its slot still names this ring
+(`handle_close_obj`) and detaches only the mapping that is still exactly the
+ring (`sys_loom_ring_detach`, decided in the lock hold that removes it). Every
+unwind inside both setups uses the same detach. Reading this path also found the
+refund defect described under *One owner, bound with the charge*, fixed in the
+same change. Witnesses: `loom.setup_rollback_identity` (a reused number, a
+reused VA, and a refused setup whose ring a sibling trimmed: still charged while
+mapped, settled at its last drop) and `loom.private_setup_rollback_identity`.
+The same close-by-number pattern remains at ten other syscall sites (pipe2,
+accept, socket setup, the dup aliases, mkdirat, chmod); it is queued in the
+open-bugs list as one sweep.
 
 **NA-2a (October 12).** `loom.bridge_probe` drives the same routes from EL0
 through `/bin/loom-bridge-probe`. The status it requires comes from the

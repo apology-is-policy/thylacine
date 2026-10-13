@@ -100,14 +100,19 @@ settles it exactly once.
 
 ### Rollback when params cannot reach the caller
 
-The SETUP handler copies params out byte by byte. A fault calls
-`sys_loom_setup_rollback`, which runs `handle_close` and then
-`sys_burrow_detach_for_proc` on the ring range. The rollback serves the legacy
-and the private ring alike. It does not use `burrow_unmap`, which drops the
-mapping with no payer. After the close, the detach can be the ring's final
-drop, and an unsettled final drop loses the charge record and leaks the ring's
-pages from the caller's budget. That was a live P3 on main (OPEN-BUGS 08:43Z,
-2026-10-12), fixed here.
+The SETUP handler copies params out byte by byte, holding its own reference
+on the ring from the held setup of either route. A fault calls
+`sys_loom_setup_rollback`, which closes the descriptor only while its slot
+still names this ring (`handle_close_obj`), detaches only the mapping that is
+still exactly the ring (`sys_loom_ring_detach`), and then drops the reference.
+The descriptor and the mapping were published before the copyout, so a sibling
+thread may have reused the number or the VA by then; until 2026-10-13 the
+rollback closed by number and detached by range, and so closed or unmapped
+whatever was there. The rollback serves the legacy and the private ring alike.
+Its detach goes through the charge-settling core, never `burrow_unmap`, which
+drops the mapping with no payer: when that is the ring's final drop, an
+unsettled drop loses the charge record and leaks the ring's pages from the
+caller's budget. That was a live P3 on main (OPEN-BUGS 08:43Z, 2026-10-12).
 
 ### The legacy setup reference
 
@@ -206,7 +211,9 @@ POOL create, is 1568 bytes), not stack-allocated.
 - **I-32.** Every ring a setup creates is settled exactly once on every unwind:
   the create's own refusals, executor start, `handle_alloc`, and the params
   copyout fault. `loom.setup_rollback_settles` and both bridge bodies assert
-  the exact page count after rollback.
+  the exact page count after rollback; `loom.setup_rollback_identity` and
+  `loom.private_setup_rollback_identity` assert that a rollback after a sibling
+  reused the number or the VA leaves the sibling's file and region alone.
 - **I-5.** The private-ring VMA tag is set under the same lock hold as the map.
   The tag is what keeps the ring in its creator's image: fork omits it, and
   `SYS_WEFT_SHARE` refuses it (audit close S1).

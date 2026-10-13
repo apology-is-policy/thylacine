@@ -7714,9 +7714,10 @@ static s64 sys_weft_map_handler(u64 data_fd_raw, u64 hint_va) {
 // SQE dispatch + the submit-time pin + the CQE post (SYS_LOOM_ENTER) are Loom-3.
 // =============================================================================
 
-int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
-                            struct loom_params *out, hidx_t *out_fd) {
-    if (!p || !out || !out_fd)                       return -T_E_INVAL;
+int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
+                                 struct loom_params *out, hidx_t *out_fd,
+                                 struct Loom **out_l) {
+    if (!p || !out || !out_fd || !out_l)             return -T_E_INVAL;
     // Loom-4c accepts LOOM_SETUP_SQPOLL; LOOM_SETUP_CQSIZE (caller-chosen cq)
     // is still reserved until its sub-chunk lands, so reject it + any unknown bit.
     if (flags & ~LOOM_SETUP_SQPOLL)                  return -T_E_INVAL;
@@ -7752,6 +7753,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // from the exact-matched VMA length -- the same ring_size -- so charge and
     // refund agree.
     u32 ring_pages = (u32)burrow_backing_pages((size_t)l->ring_size);
+    u32 ring_size  = l->ring_size;
 
     // Map the ring RW into the burrow-attach window. burrow_map takes its OWN
     // mapping_count ref (vma_alloc -> burrow_acquire_mapping); the Loom keeps
@@ -7777,7 +7779,23 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         loom_unref(l);
         return -T_E_NOMEM;
     }
+    // #130/#131: bind the I-32 charge ledger in the SAME hold as the charge and
+    // the map, so the charge follows the ring Burrow from the instant a sibling
+    // thread can reach the mapping (the lock drops just below). Every later
+    // failure path then settles by CLAIM: whichever drop frees the ring --
+    // loom_free's, or a detach of a mapping that outlived the Loom -- refunds
+    // it, exactly once. Refunding explicitly there instead was wrong whenever
+    // the mapping survived the rollback (a sibling that trims or splits it
+    // defeats an exact-geometry unmap): the pages stayed resident, refunded,
+    // with no record left for their final drop to settle.
+    l->owner      = p;
+    l->owner_pid  = p->pid;
+    l->ring_pages = ring_pages;
+    burrow_charge_record(l->ring, p, ring_pages);
     spin_unlock(&p->as->lock);
+#ifdef KERNEL_TESTS
+    loom_setup_mapped_for_test(p, vaddr);
+#endif
 
     // Loom-4c: spawn the SQPOLL poll-thread BEFORE installing the handle, so
     // every failure path below reclaims it through loom_unref -> loom_free's
@@ -7791,21 +7809,14 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         // above. loom_unref -> loom_free settles the charge via
         // sqpoll_charged on every later path, including a start failure.
         if (!proc_sqpoll_charge(p)) {
-            spin_lock(&p->as->lock);
-            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
-            proc_page_uncharge(p, ring_pages);
-            spin_unlock(&p->as->lock);
+            (void)sys_loom_ring_detach(p, l, vaddr, ring_size);
             loom_unref(l);
             return -T_E_AGAIN;                       // as a thread create over the cap
         }
-        l->sqpoll_owner = p;
         l->sqpoll_charged = true;
         int src = loom_start_sqpoll(l);
         if (src != 0) {
-            spin_lock(&p->as->lock);
-            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
-            proc_page_uncharge(p, ring_pages);       // #65: the ring VMA freed
-            spin_unlock(&p->as->lock);
+            (void)sys_loom_ring_detach(p, l, vaddr, ring_size);
             loom_unref(l);
             return src;
         }
@@ -7813,20 +7824,18 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 
     // Install the handle. It ADOPTS the Loom's creation refcount (=1): a later
     // handle_close -> handle_release_obj(KOBJ_LOOM) -> loom_unref drops it. On
-    // alloc failure, unmap + loom_unref fully reclaims (handle_count to 0 via
-    // loom_free's burrow_unref -- which first JOINS any spawned SQPOLL kthread --
-    // mapping_count to 0 via burrow_unmap).
+    // alloc failure, the ring detach + loom_unref fully reclaim (handle_count to
+    // 0 via loom_free's settled drop -- which first JOINS any spawned SQPOLL
+    // kthread -- mapping_count to 0 via the detach).
     //
     // The instant the handle is installed a sibling thread can close it, and that
-    // close drops the only reference and frees the Loom synchronously. Everything
-    // below still touches l, so hold a reference of our own until the end.
+    // close drops the only reference and frees the Loom synchronously. So the
+    // caller gets a reference of its own, taken before the install: everything
+    // below, and the caller's rollback, still touch l.
     loom_ref(l);
     hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
     if (fd < 0) {
-        spin_lock(&p->as->lock);
-        (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
-        proc_page_uncharge(p, ring_pages);           // #65: the ring VMA freed
-        spin_unlock(&p->as->lock);
+        (void)sys_loom_ring_detach(p, l, vaddr, ring_size);
         loom_unref(l);
         loom_unref(l);
         return -T_E_MFILE;
@@ -7834,21 +7843,6 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 #ifdef KERNEL_TESTS
     loom_setup_installed_for_test(p, fd);
 #endif
-
-    // #130: bind the I-32 charge ledger. Deliberately LAST -- after the final
-    // failure path -- so it marks a fully-constructed Loom. Every rollback
-    // above uncharges explicitly and then loom_unref's a Loom whose owner is
-    // still NULL, so loom_free's uncharge cannot double-refund them. From here
-    // on the Loom owns the settlement: whichever of {the ring VA's detach,
-    // loom_free} frees the pages does the single uncharge.
-    l->owner      = p;
-    l->owner_pid  = p->pid;
-    l->ring_pages = ring_pages;
-    // #131/#132: and stamp the payer on the ring itself, so loom_free settles
-    // by CLAIM rather than by trusting ring_pages. That makes the ring's refund
-    // exactly-once against the ring VA's detach (which claims the same record)
-    // instead of resting on the argument that the two can never both free it.
-    burrow_charge_record(l->ring, p, ring_pages);
 
     out->flags         = flags;   // echo the granted setup flags (LOOM_SETUP_SQPOLL)
     out->sq_entries    = l->sq_entries;
@@ -7865,8 +7859,16 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     out->_resv0        = 0;
     out->_resv1[0] = out->_resv1[1] = out->_resv1[2] = out->_resv1[3] = 0;
     *out_fd = fd;
-    loom_unref(l);   // may free it, if the fd is already closed; l is not touched again
+    *out_l  = l;
     return 0;
+}
+
+int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
+                            struct loom_params *out, hidx_t *out_fd) {
+    struct Loom *l = NULL;
+    int rc = sys_loom_setup_held_for_proc(p, entries, flags, out, out_fd, &l);
+    if (rc == 0) loom_unref(l);   // may free it, if the fd is already closed
+    return rc;
 }
 
 // A descriptor argument wider than an index names nothing, so the lookup refuses
@@ -7945,11 +7947,29 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
     return rc;
 }
 
-void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size) {
-    (void)handle_close(p, fd);
-    // Not burrow_unmap: that drops the mapping with no payer, so when it is the
-    // final drop the ring's charge record dies unrefunded.
-    (void)sys_burrow_detach_for_proc(p, ring_va, ring_size);
+bool sys_loom_ring_detach(struct Proc *p, struct Loom *l, u64 ring_va, u32 ring_size) {
+    struct Burrow *dead = NULL;
+    bool detached = false;
+    spin_lock(&p->as->lock);
+    // The exact mapping setup made, decided in the hold that removes it: a range
+    // detach would remove whatever a sibling thread mapped there since. Not
+    // burrow_unmap either: that drops the mapping with no payer, so when it is
+    // the final drop the ring's charge record dies unrefunded.
+    struct Vma *v = vma_lookup_in(p->as, ring_va);
+    if (v && v->burrow == l->ring && v->vaddr_start == ring_va &&
+        v->vaddr_end == ring_va + (u64)ring_size)
+        detached = vma_detach_range_in(p->as, proc_resource_exempt(p), p,
+                                       ring_va, ring_size, 0, &dead) == 0;
+    spin_unlock(&p->as->lock);
+    burrow_free_deferred(dead);
+    return detached;
+}
+
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, struct Loom *l,
+                             u64 ring_va, u32 ring_size) {
+    (void)handle_close_obj(p, fd, KOBJ_LOOM, l);
+    (void)sys_loom_ring_detach(p, l, ring_va, ring_size);
+    loom_unref(l);
 }
 
 static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
@@ -7967,23 +7987,28 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
 
     struct loom_params kp;
     hidx_t fd;
+    struct Loom *l = NULL;
     // The private service bits route to their own inner, which reports an errno
     // (-EOPNOTSUPP in every image built without the qualification lever).
     bool private_ring = (flags & (LOOM_SETUP_PRIVATE_SERVICE | LOOM_SETUP_SERVICE_BUFFERS)) != 0;
     int rc = private_ring
-        ? loom_private_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd)
-        : sys_loom_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd);
+        ? loom_private_setup_held_for_proc(p, (u32)entries_raw, flags, &kp, &fd, &l)
+        : sys_loom_setup_held_for_proc(p, (u32)entries_raw, flags, &kp, &fd, &l);
     if (rc != 0) return rc;
 
     // Copy the geometry back. A fault mid-writeback fully rolls back the setup,
     // so a faulting caller never leaks a ring -- or its charge -- it cannot see.
+    // The descriptor is already published, so a sibling thread may have closed
+    // and reused its number, or remapped the ring's VA: the reference held here
+    // is what lets the rollback undo only what is still this ring.
     const u8 *src = (const u8 *)&kp;
     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
-            sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
+            sys_loom_setup_rollback(p, fd, l, kp.ring_va, kp.ring_size);
             return -T_E_FAULT;
         }
     }
+    loom_unref(l);
     return (s64)fd;
 }
 
