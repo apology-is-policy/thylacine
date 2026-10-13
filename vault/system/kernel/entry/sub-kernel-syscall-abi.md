@@ -509,8 +509,8 @@ be one 4 KiB staging buffer per round trip.
   descriptor goes through `sys_hidx_arg`: a value wider than an index becomes
   -1, so the handler gives its own answer for a descriptor that names nothing,
   after any check that precedes its lookup. An unsigned 32-bit word (a count,
-  a whence, a protection, wstat's fields, a signal class) with a high bit set
-  answers `-T_E_INVAL`. A signed one (a pid, poll's timeout) goes through
+  a whence, a protection, wstat's fields, a signal class, rfork's flags) with
+  a high bit set answers `-T_E_INVAL`. A signed one (a pid, poll's timeout) goes through
   `sys_s32_arg`, which accepts exactly the sign-extension an `int` binding
   produces, so -1 still means "any child" and "wait forever". Torpor's
   expected value goes through `sys_word32_arg`, which accepts either

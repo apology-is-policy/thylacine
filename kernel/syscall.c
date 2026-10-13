@@ -10726,6 +10726,8 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
 // which is what makes that coverage possible from kproc.
 s64 sys_rfork_handler(struct exception_context *ctx) {
     if (!ctx) return -(s64)T_E_INVAL;
+    // A flags word that does not fit is refused like an unknown flag.
+    if (ctx->regs[0] > 0xffffffffull) return -(s64)T_E_INVAL;
     return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1],
                           ctx->regs[2]);
 }

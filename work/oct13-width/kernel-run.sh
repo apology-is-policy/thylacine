@@ -16,6 +16,10 @@
 #   M8         sys_s32_arg accepts only a zero-extended word: a sign-extended
 #              -1 pid is refused (other tests may fail too; the set is recorded).
 #   M9         M1's cast with no note: the build must FAIL at the width checker.
+#   M10        rfork drops its flags compare (annotated): the wide flags word
+#              reaches the fork as RFPROC.
+#   M11        M10 with no note: the build must FAIL at the width checker, on
+#              the register-word rule.
 # Each predicted kernel message is checked, before any build, to lie inside the
 # function test.c registers under the predicted test name; each predicted probe
 # message is checked to be one the probe can print. Each mutant anchor is
@@ -36,10 +40,12 @@ T_PRB=syscall.argwidth_probe
 T_T1=vivarium.t1_narrows_linux_widths
 T_T2=vivarium.t2_shells_narrow_linux_widths
 T_BRG=loom.bridge_probe
+T_FORK=fork.rfork_arg_rejection
 W_PRB="every too-wide argument the probe passed was refused"
 W_T1CLOSE="close"
 W_T2NEG="readlinkat: a negative bufsiz is refused before the path"
 W_T2RND="getrandom: a high half in flags is Linux's to drop"
+W_FORK="a flags word wider than 32 bits must be refused, not cut down to RFPROC"
 PROBE_SRC=usr/argwidth-probe/argwidth-probe.c
 AW_BIN=build/ramfs-src/bin/argwidth-probe
 BR_BIN=build/ramfs-src/bin/loom-bridge-probe
@@ -49,7 +55,7 @@ SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
 FILES="kernel/syscall.c kernel/vivarium.c"
-NMUT=9
+NMUT=11
 MUTATED=0
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
@@ -143,7 +149,7 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 HEAD_SHA=$(git rev-parse HEAD)
 record "HEAD $HEAD_SHA"
-NAMED="$T_PRB $T_T1 $T_T2 $T_BRG"
+NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK"
 for t in $NAMED; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
@@ -151,7 +157,8 @@ python3 tools/check-arg-width.py --self-test || { echo "REFUSING: the width chec
 python3 tools/check-arg-width.py kernel/syscall.c || { echo "REFUSING: the committed tree fails the width checker"; exit 3; }
 record "width checker: self-test and the committed syscall.c pass"
 python3 - "$T_PRB" "$W_PRB" test_argwidth_probe.c "$T_T1" "$W_T1CLOSE" test_vivarium.c \
-  "$T_T2" "$W_T2NEG" test_vivarium.c "$T_T2" "$W_T2RND" test_vivarium.c <<'MEMBER' || exit 3
+  "$T_T2" "$W_T2NEG" test_vivarium.c "$T_T2" "$W_T2RND" test_vivarium.c \
+  "$T_FORK" "$W_FORK" test_fork.c <<'MEMBER' || exit 3
 import re, sys
 reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
 a = sys.argv[1:]
@@ -231,7 +238,7 @@ all_pass control "$B"
 status_once "$B" argwidth-probe 72
 status_once "$B" loom-bridge-probe 70
 /usr/bin/grep -qF "$QUAL_LINE" "$OUT/control-build.log" && { echo "CONTROL: the default build saw the lever"; exit 1; } || true
-record "CONTROL GREEN: $EXPECT/$EXPECT, the four named tests PASS, argwidth-probe 72, loom-bridge-probe 70, probes ${CONTROL_PROBES%"${CONTROL_PROBES#????????????????}"}, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
+record "CONTROL GREEN: $EXPECT/$EXPECT, the five named tests PASS, argwidth-probe 72, loom-bridge-probe 70, probes ${CONTROL_PROBES%"${CONTROL_PROBES#????????????????}"}, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
 echo "=== CONTROL-Q ==="
 lease control-q
 tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y > "$OUT/control-q-build.log" 2>&1 || { echo "control-q build failed"; exit 1; }
@@ -251,7 +258,7 @@ set -- $(tally "$B")
 all_pass control-q "$B"
 status_once "$B" argwidth-probe 72
 status_once "$B" loom-bridge-probe 71
-record "CONTROL-Q GREEN: $EXPECT/$EXPECT, the four named tests PASS, argwidth-probe 72, loom-bridge-probe 71 (qualification path), bin ${Q_BIN%"${Q_BIN#????????????????}"}"
+record "CONTROL-Q GREEN: $EXPECT/$EXPECT, the five named tests PASS, argwidth-probe 72, loom-bridge-probe 71 (qualification path), bin ${Q_BIN%"${Q_BIN#????????????????}"}"
 SEEN_BINS="$CONTROL_BIN $Q_BIN"
 apply() { # apply <label> <file> <old> <new>: the mutation, on the PRISTINE file
   lease "$1"; floor "pre-$1"
@@ -423,6 +430,24 @@ mutant_build m9 kernel/syscall.c \
 '    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF); // MUTANT M9 no note
 '
 record "M9 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== M10: rfork drops its flags compare ==="
+mutant m10 kernel/syscall.c \
+'    if (ctx->regs[0] > 0xffffffffull) return -(s64)T_E_INVAL;
+    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1],
+' \
+'    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1], // width: MUTANT M10 no compare
+'
+expect_fails M10 1 "$T_FORK|$W_FORK"
+ok M10 "exactly $T_FORK at '$W_FORK'"
+echo "=== M11: M10 with no note -- the build refuses ==="
+CHECK_LINE="kernel/syscall.c:$(( $(/usr/bin/grep -nF '    if (ctx->regs[0] > 0xffffffffull) return -(s64)T_E_INVAL;' "$(pristine kernel/syscall.c)" | cut -d: -f1) )): sys_rfork_handler narrows ctx->regs[0]"
+mutant_build m11 kernel/syscall.c \
+'    if (ctx->regs[0] > 0xffffffffull) return -(s64)T_E_INVAL;
+    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1],
+' \
+'    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1]  /* MUTANT M11 no note */,
+'
+record "M11 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
 echo "=== rebuild the committed tree, then SHAPE ==="
 lease rebuild
 tools/build.sh kernel --config ci > "$OUT/rebuild.log" 2>&1 || { echo "rebuild failed"; exit 1; }

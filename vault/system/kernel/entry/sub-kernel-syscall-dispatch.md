@@ -1597,9 +1597,14 @@ sign-extension an `int` binding produces) and `sys_word32_arg` (torpor's
 expected value: either extension). An unsigned 32-bit word is compared against
 `0xffffffff` where the cast used to be, so every earlier refusal keeps its
 order. `tools/check-arg-width.py` runs in `build_ramfs` beside the invariant
-registry check, self-tests first, and fails on any cast of a `u64` parameter to
-a narrower type in `syscall.c` that no full-width compare, mask with a 64-bit
-complement or helper precedes; a deliberate narrowing carries a `// width:`
+registry check, self-tests first, and fails on any cast to a narrower type in
+`syscall.c` of a raw word (a `u64` parameter, a register read from the
+exception frame such as `ctx->regs[0]`, or a `u64` local copied from one) that
+no full-width compare, mask with a 64-bit complement or helper precedes. The
+frame rule found `sys_rfork_handler`, which took the whole frame and cast its
+flags word down: it now refuses a flags word wider than 32 bits with -EINVAL,
+and `fork.rfork_arg_rejection` pins it against the RFPROC leg one bit away. A
+deliberate narrowing carries a `// width:`
 note on its line or the line above (exits' status byte, pci_claim's packed
 ordinal, a protection word `burrow_prot_word_check` or `sys_attach_9p_flags_ok`
 already refused). It reads the cast, not the value: a constant bound named in

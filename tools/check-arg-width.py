@@ -7,8 +7,10 @@
 #
 #   tools/check-arg-width.py [--self-test] [file ...]
 #
-# Functions named viv_* are exempt: they translate a Linux call, and Linux's
-# declared C types narrow by construction (the phenotype is ABI shape, I-43).
+# A raw argument is a u64 parameter, a register word read from the exception
+# frame (`ctx->regs[N]`), or a u64 local copied from one. Functions named viv_*
+# are exempt: they translate a Linux call, and Linux's declared C types narrow
+# by construction (the phenotype is ABI shape, I-43).
 # Implicit narrowing is the compiler's half (-Werror=shorten-64-to-32).
 import re, sys
 
@@ -22,8 +24,8 @@ def guards(p):
     return [
         r'\b' + q + r'\s*>=?\s*(?:\(u64\)\s*)?(?:0x[0-9a-fA-F]+u?l*l*|[A-Z][A-Z0-9_]*)',
         r'\b' + q + r'\s*&\s*~\s*\(\s*u64\s*\)',
-        r'\([^;()]*\b' + q + r'\b[^;()]*\)\s*>\s*0x[fF]{8}',
-        r'\b(?:' + '|'.join(HELPERS) + r')\(\s*' + q + r'\b',
+        r'\([^;()]*\b' + q + r'(?!\w)[^;()]*\)\s*>\s*0x[fF]{8}',
+        r'\b(?:' + '|'.join(HELPERS) + r')\(\s*' + q + r'(?!\w)',
     ]
 
 def strip_comments(text):
@@ -40,17 +42,20 @@ def check(src, name):
             continue
         ps = [x.strip().split()[-1].lstrip('*') for x in params.split(',')
               if re.match(r'\s*(?:const\s+)?u64\s+\w+\s*$', x)]
-        if not ps:
-            continue
         body_start = m.end()
         end = src.find('\n}\n', body_start)
         raw = src[body_start:end if end >= 0 else len(src)]
         body = strip_comments(raw)
+        regs = sorted(set(re.findall(r'\b\w+->regs\[\d+\]', body)))
+        copies = re.findall(r'\bu64\s+(\w+)\s*=\s*\w+->regs\[\d+\]\s*;', body)
+        ps = ps + regs + [c for c in copies if c not in ps]
+        if not ps:
+            continue
         # a mask held in a u64 local is a full-width mask too
         masks = re.findall(r'\bu64\s+(\w+)\s*=', body)
         base = src[:body_start].count('\n') + 1
         for p in ps:
-            cast = re.compile(r'\(\s*' + NARROW + r'\s*\)\s*' + WIDE + r'\(?\s*' + re.escape(p) + r'\b')
+            cast = re.compile(r'\(\s*' + NARROW + r'\s*\)\s*' + WIDE + r'\(?\s*' + re.escape(p) + r'(?!\w)')
             for c in cast.finditer(body):
                 line_start = raw.rfind('\n', 0, c.start()) + 1
                 line_end = raw.find('\n', c.end())
@@ -59,7 +64,7 @@ def check(src, name):
                 if '// width:' in line or above.strip().startswith('// width:'):
                     continue
                 before = body[:c.start()]
-                gs = guards(p) + [r'\b' + re.escape(p) + r'\s*&\s*~\s*' + v + r'\b' for v in masks]
+                gs = guards(p) + [r'\b' + re.escape(p) + r'\s*&\s*~\s*' + v + r'(?!\w)' for v in masks]
                 if any(re.search(g, before) for g in gs):
                     continue
                 ln = base + body[:c.start()].count('\n')
@@ -80,8 +85,14 @@ def self_test():
     ored = 'static s64 sys_i(u64 a, u64 b) {\n    if ((a | b) > 0xffffffffull) return -1;\n    return f((u32)a, (u32)b);\n}\n'
     u32mask = 'static s64 sys_j(u64 x) {\n    const u32 m = 7;\n    if (x & ~m) return -1;\n    return f((u32)x);\n}\n'
     u64mask = 'static s64 sys_k(u64 x) {\n    const u64 m = 7;\n    if (x & ~m) return -1;\n    return f((u32)x);\n}\n'
+    regbad = 's64 sys_n(struct exception_context *ctx) {\n    return f((unsigned)ctx->regs[0]);\n}\n'
+    regok = 's64 sys_o(struct exception_context *ctx) {\n    if (ctx->regs[0] > 0xffffffffull) return -1;\n    return f((unsigned)ctx->regs[0]);\n}\n'
+    regother = 's64 sys_p(struct exception_context *ctx) {\n    if (ctx->regs[1] > 0xffffffffull) return -1;\n    return f((unsigned)ctx->regs[0]);\n}\n'
+    regcopy = 's64 sys_q(struct exception_context *ctx) {\n    u64 fd = ctx->regs[0];\n    return g((hidx_t)fd);\n}\n'
+    prefix = 'static s64 sys_r(u64 fd, u64 fd2) {\n    if (fd2 > 0xffffffffull) return -1;\n    return g((hidx_t)fd);\n}\n'
     want = {ok: 0, helper: 0, noted: 0, bad: 1, late: 1, double: 1, viv: 0,
-            comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1}
+            comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1,
+            regbad: 1, regok: 0, regother: 1, regcopy: 1, prefix: 1}
     for src, n in want.items():
         got = len(check(src, 'self-test'))
         if got != n:

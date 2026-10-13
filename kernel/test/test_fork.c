@@ -111,10 +111,10 @@ void test_fork_frame_init(void) {
 // below lands BEFORE rfork_forked, so running as kproc (no address space) does
 // not mask any of them -- which is why the validation lives in the handler
 // rather than inside rfork_internal.
-static s64 rfork_call(unsigned flags, u64 child_sp, u64 child_tls, u64 self_sp) {
+static s64 rfork_call(u64 flags, u64 child_sp, u64 child_tls, u64 self_sp) {
     struct exception_context ctx;
     fill_frame(&ctx);
-    ctx.regs[0] = (u64)flags;
+    ctx.regs[0] = flags;
     ctx.regs[1] = child_sp;
     ctx.regs[2] = child_tls;
     ctx.sp      = self_sp;
@@ -195,6 +195,10 @@ void test_fork_rfork_arg_rejection(void) {
                    "RFPROC alone must reach the fork -- the child gets a COW "
                    "clone of the parent's address space (L-4b), so the L-3b "
                    "refusal is retired");
+    // The same word with a bit above 32: refused, never cut down to the RFPROC
+    // it carries (ERRORS.md principle 6). The leg above is its control.
+    TEST_EXPECT_EQ(rfork_call((1ull << 32) | RFPROC, ok_sp, 0, self_sp), -(s64)T_E_INVAL,
+                   "a flags word wider than 32 bits must be refused, not cut down to RFPROC");
 
     // The two SP values that are ERRORS under RFMEM and NORMAL under RFPROC --
     // the same two legs as above, inverted. A plain fork() supplies NEITHER a
