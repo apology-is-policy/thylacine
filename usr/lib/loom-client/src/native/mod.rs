@@ -19,8 +19,8 @@ use crate::{
     request_book::Error as BookError,
     ring_payload::{Error as StorageError, Payload as CorePayload, Pool as CorePool},
     ring_records::{
-        BufferRange, CQ_HEAD, CQ_TAIL, DROPPED, ENTER_NONBLOCK, MAX_REG_BUFFERS, REGISTER_BUFFERS,
-        SQ_HEAD, SQ_TAIL, Submission,
+        BufferRange, CQ_HEAD, CQ_TAIL, CQE_MORE, DROPPED, ENTER_NONBLOCK, MAX_REG_BUFFERS,
+        REGISTER_BUFFERS, SQ_HEAD, SQ_TAIL, Submission,
     },
     service_abi::{SETUP_PRIVATE_SERVICE, SETUP_SERVICE_BUFFERS},
 };
@@ -33,7 +33,9 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
     task::{Context, Poll, Waker},
 };
-use kernel::{Backend, EBADF, ECANCELED, EINTR, EINVAL, EIO, ENOSPC, ETIMEDOUT, Map, PAGE, Shared};
+use kernel::{
+    Backend, EBADF, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOSPC, ETIMEDOUT, Map, PAGE, Shared,
+};
 
 /// A negative errno.
 pub type Result<T> = core::result::Result<T, i32>;
@@ -185,11 +187,7 @@ impl<K: Kernel> Ring<K> {
         };
         // Validates every region, the header and the receipts; closes on refusal.
         let cq = OwnedMapping::new(map, params).map_err(|_| -EIO)?;
-        shared.set_ring(
-            base.as_ptr() as usize,
-            params.ring_size as usize,
-            base.as_ptr() as usize + params.hdr_off as usize,
-        );
+        shared.set_ring(base.as_ptr() as usize, params.ring_size as usize);
         if params.sq_entries != entries {
             shared.close_fd();
             return Err(-EIO);
@@ -470,6 +468,7 @@ impl<K: Kernel> Inner<K> {
             sqe.len = name.len() as u32;
         }
         unsafe { self.sq.push(&sqe) };
+        self.shared.submitted.set(self.shared.submitted.get() + 1);
         self.enter();
         Ok(cookie)
     }
@@ -518,6 +517,9 @@ impl<K: Kernel> Inner<K> {
             let record = self.cq.borrow_mut().reap();
             match record {
                 Ok(Some(record)) => {
+                    if record.cqe.flags & CQE_MORE == 0 {
+                        self.shared.ended.set(self.shared.ended.get() + 1);
+                    }
                     self.deliver(record)?;
                     routed += 1;
                 }
@@ -578,7 +580,20 @@ impl<K: Kernel> Inner<K> {
                         };
                         drop(rejected); // An abandoned stream's lease goes straight back.
                     }
-                    Ok(None) | Err(StorageError::Closing) => {}
+                    Ok(None) => {}
+                    // A retiring ring's pools take no new lease, but a shot can
+                    // still arrive: one already in the CQ, or one the kernel held
+                    // for CQ room and delivers before the abort's terminal.
+                    // Unreturned, its member stays leased and REAP refuses the pool.
+                    Err(StorageError::Closing) => {
+                        if cqe.result > 0 {
+                            let rc = self.shared.return_buffer(d.record.receipt);
+                            if rc != 0 && rc != -(ENOENT as i64) && rc != -(ECANCELED as i64) {
+                                self.fail();
+                                return Err(-EIO);
+                            }
+                        }
+                    }
                     Err(_) => {
                         self.fail();
                         return Err(-EIO);

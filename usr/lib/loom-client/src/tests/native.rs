@@ -734,6 +734,57 @@ fn a_terminal_posted_but_not_yet_routed_holds_retirement_back() {
     assert!(!r.retired(), "retired() waits for the end still in the CQ");
     turn_until_retired(&r);
     assert!(sim.s().closed_fds.is_empty(), "the end did not fail the ring");
+    // The four shots routed after retire() go back although no pool takes them.
     assert_eq!(sim.s().returns, 8, "every shot's lease went back");
+    drop((fid, scope, pool));
+}
+
+#[test]
+fn an_enter_refusal_not_yet_posted_holds_retirement_back() {
+    let sim = Sim::new();
+    file(&sim, "f", b"data");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    sim.s().enter_limit = Some(0);
+    drop(fid.read(range(0, 0, 4), 0, None).unwrap());
+    r.retire();
+    sim.s().hold_rejections = true;
+    sim.s().enter_limit = None;
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(sim.hdr_word(1), sim.hdr_word(0), "ENTER consumed the READ");
+    assert!(scope_retired_in_kernel(&sim), "the scope retired first");
+    assert!(!r.retired(), "retired() waits for the refusal still to be posted");
+    sim.release_rejections();
+    turn_until_retired(&r);
+    assert!(sim.s().closed_fds.is_empty(), "the late refusal did not fail the ring");
+    drop((fid, scope));
+}
+
+#[test]
+fn a_stream_dropped_before_its_end_returns_the_shots_still_arriving() {
+    let sim = Sim::new();
+    file(&sim, "burst", b"");
+    sim.s()
+        .shots
+        .insert(b"burst".to_vec(), (0..8).map(|i| vec![b'a' + i; 4]).collect());
+    let r = ring(&sim, 2, &[4096]);
+    let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
+    let pool = r.pool(&members).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"burst", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let stream = fid.stream(&pool, 0, 64, true, None).unwrap();
+    r.turn(Some(r.now() + MS)).unwrap();
+    drop(stream);
+    assert_eq!(sim.s().returns, 4, "the four payloads the stream held");
+    // The next four arrive for a stream that is gone.
+    assert_eq!(r.turn(Some(r.now() + MS)).unwrap(), 4);
+    assert_eq!(sim.s().returns, 8, "each late shot's lease went straight back");
     drop((fid, scope, pool));
 }

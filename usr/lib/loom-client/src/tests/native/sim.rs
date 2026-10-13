@@ -126,6 +126,10 @@ pub struct State {
     /// terminals on a later one.
     pub hold_terminals: bool,
     held: Vec<(usize, u64, i32)>,
+    /// ENTER's refusals wait for release_rejections: the kernel precharges a
+    /// refusal it cannot post into a full CQ and posts it on a later visit.
+    pub hold_rejections: bool,
+    rejected: Vec<(u64, i32)>,
     /// ENTER consumes at most this many SQEs per call.
     pub enter_limit: Option<u32>,
     pub polls: Vec<i32>,
@@ -167,6 +171,8 @@ impl Sim {
             hold: false,
             hold_terminals: false,
             held: Vec::new(),
+            hold_rejections: false,
+            rejected: Vec::new(),
             enter_limit: None,
             polls: Vec::new(),
             enters: 0,
@@ -200,6 +206,14 @@ impl Sim {
     /// retires every aborted scope with nothing in flight.
     pub fn engine_visit(&self) {
         self.0.borrow_mut().settle();
+    }
+    /// Post the refusals hold_rejections kept back, and stop holding.
+    pub fn release_rejections(&self) {
+        let mut s = self.0.borrow_mut();
+        s.hold_rejections = false;
+        for (user_data, result) in std::mem::take(&mut s.rejected) {
+            s.post(None, user_data, result, 0, zero());
+        }
     }
     /// Post the terminals hold_terminals kept back, and stop holding.
     pub fn release_terminals(&self) {
@@ -1063,7 +1077,11 @@ unsafe impl Kernel for SimKernel {
             if let Some(copy) = copy {
                 let rc = s.admit(copy);
                 if rc < 0 {
-                    s.post(None, copy.user_data, rc as i32, 0, zero());
+                    if s.hold_rejections {
+                        s.rejected.push((copy.user_data, rc as i32));
+                    } else {
+                        s.post(None, copy.user_data, rc as i32, 0, zero());
+                    }
                 }
             }
         }

@@ -138,14 +138,31 @@ CASES = [
                 *entry = None;
             }''', '''            *entry = None;''')]),
  ('retired-before-posted', 'retirement_waits_for_terminals_posted_after_the_scope_retires',
-  [('native/kernel.rs', '''s.state == SERVICE_RETIRED && s.active_ops == 0 && s.pending_terminals == 0''',
-    '''s.state == SERVICE_RETIRED''')]),
- ('sq-undrained', 'an_sqe_not_yet_entered_holds_retirement_back',
-  [('native/kernel.rs', '''        word(SQ_HEAD).load(Ordering::Acquire) == word(SQ_TAIL).load(Ordering::Relaxed)
-            && word(CQ_TAIL)''', '''        word(CQ_TAIL)''')]),
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('unentered-sqe', 'an_sqe_not_yet_entered_holds_retirement_back',
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
  ('cq-unrouted', 'a_terminal_posted_but_not_yet_routed_holds_retirement_back',
-  [('native/kernel.rs', '''
-            && word(CQ_TAIL).load(Ordering::Acquire) == word(CQ_HEAD).load(Ordering::Relaxed)''', '')]),
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('refusal-unposted', 'an_enter_refusal_not_yet_posted_holds_retirement_back',
+  [('native/kernel.rs', '''        if self.0.submitted.get() != self.0.ended.get() {
+            return false;
+        }
+''', '')]),
+ ('closing-lease-kept', 'a_terminal_posted_but_not_yet_routed_holds_retirement_back',
+  [('native/mod.rs', '''                        if cqe.result > 0 {
+                            let rc = self.shared.return_buffer(d.record.receipt);''', '''                        if false {
+                            let rc = self.shared.return_buffer(d.record.receipt);''')]),
+ ('dropped-stream-lease-kept', 'a_stream_dropped_before_its_end_returns_the_shots_still_arriving',
+  [('native/mod.rs', 'drop(rejected); // An abandoned stream', 'core::mem::forget(rejected); // An abandoned stream')]),
 ]
 
 

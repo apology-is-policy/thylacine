@@ -99,12 +99,16 @@ enabled by it.
   (REAP retried each turn, and before a reservation answers -ENOSPC). Pools are
   the cores' and are reaped through `destroy_pool`.
 - **Retirement.** `retire` closes admission and aborts every scope. `retired()`
-  holds once every scope's QUERY reports RETIRED with no active operation and no
-  pending terminal, and then the SQ and the CQ are drained; the drain check
-  follows the queries. RETIRED alone is not proof: the engine retires a scope in
-  the visit that cancels its last operation and posts that terminal on a later
-  one (`loom_service_engine.c`, `engine_ready_visit`). Retirement discards only
-  abandoned book entries, so a future held across it keeps its terminal.
+  holds once every SQE pushed has had its terminal CQE taken (`Shared`'s
+  `submitted` and `ended`; each SQE the kernel consumes ends in exactly one
+  terminal, I-29) and every scope's QUERY reports RETIRED. RETIRED alone is not
+  proof: the engine retires a scope in the visit that cancels its last
+  operation and posts that terminal on a later one (`loom_service_engine.c`,
+  `engine_ready_visit`), and ENTER can precharge a refusal against a full CQ
+  (`loom_service_frontend.c`) that no request record counts. Retirement discards
+  only abandoned book entries, so a future held across it keeps its terminal. A
+  shot routed once retirement has begun is refused by its pool and RETURNed at
+  once, so REAP can free the pool.
 - **Teardown.** `close` (and dropping the `Ring`) aborts every scope and closes
   the descriptor. `Shared` detaches the mapping, then the buffers, when its last
   owner goes: after the CQ reader and every payload lease.
@@ -152,8 +156,10 @@ completion path allocates.
   destination (the kernel's claim pins it), so REAP refuses that slot until the
   WALK ends. A scope's QUERY reports its operations in flight and its
   terminals not yet posted; `hold_terminals` keeps an abort's terminals back
-  after the scope retires, and `engine_visit` runs the engine's retirement
-  between two adapter calls. Known divergence: an operation on a fid that is not READY, under a
+  after the scope retires, `hold_rejections` keeps ENTER's refusals back as the
+  kernel's precharge does, and `engine_visit` runs the engine's retirement
+  between two adapter calls. The sim's ENTER posts every deferred completion
+  before it consumes, which the kernel's zero-submit ENTER does not. Known divergence: an operation on a fid that is not READY, under a
   READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
   adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one

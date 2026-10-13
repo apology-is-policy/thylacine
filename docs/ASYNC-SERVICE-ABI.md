@@ -475,13 +475,16 @@ retire, and REAP refuses a pool while any stream, busy, pending or leased
 member remains. So each progress turn retries REAP until it succeeds. The
 backend's whole-ring calls map as follows:
 - `begin_retire` closes local admission and aborts every scope the adapter owns;
-- `retired` holds once each of those scopes reports RETIRED with no active
-  operation and no pending terminal, the SQ and the CQ are drained, and no fixed
-  or pool reference remains. RETIRED alone is not enough: the engine retires a
-  scope in the visit that cancels its last operation and posts that terminal on
-  a later one, and a terminal posted but not yet routed, or an SQE not yet
-  entered, would find its request gone. Retirement then discards only abandoned
-  request entries; a future still held keeps its terminal for its owner;
+- `retired` holds once every SQE the adapter pushed has had its terminal CQE
+  taken (each SQE the kernel consumes ends in exactly one, I-29), each of those
+  scopes reports RETIRED, and no fixed or pool reference remains. RETIRED alone
+  is not enough: the engine retires a scope in the visit that cancels its last
+  operation and posts that terminal on a later one, and ENTER can hold a refusal
+  back against a full CQ that no request record (and so no QUERY) counts.
+  Retirement then discards only abandoned request entries; a future still held
+  keeps its terminal for its owner. A shot that arrives once retirement has begun
+  goes straight back by RETURN, or its member would stay leased and REAP would
+  refuse the pool;
 - `close` closes the ring fd. The mapping and the buffers are detached when
   their last owner is gone, after the paired reader and every payload lease,
   because closing does not unmap and those read them until the end. A mapping
