@@ -21,6 +21,7 @@
 #include "../../arch/arm64/hwfeat.h"
 #include "../../arch/arm64/mmu.h"
 #include "../../arch/arm64/timer.h"
+#include "../../arch/arm64/uart.h"
 #include "../../mm/phys.h"
 
 #include <thylacine/burrow.h>
@@ -1074,7 +1075,9 @@ void test_jit_region_is_128_mib(void) {
 // (its ticket served before the call returns) and take no ticket for B's, and
 // the other way round. The measurement is kept only from a window in which
 // neither CPU switched (sched_cpu_ctxt unchanged), so a background thread
-// preempting a spinner retries the window instead of failing the leg.
+// preempting a spinner retries the window instead of failing the leg. A last
+// leg holds A's CPU with IRQs masked until a deadline: the call cannot return
+// before it, which an IPI's latency alone cannot fake.
 // ---------------------------------------------------------------------------
 
 #define SS_LEGS 2u
@@ -1082,6 +1085,11 @@ void test_jit_region_is_128_mib(void) {
 static volatile u32 g_ss_stop;
 static const struct AddrSpace *volatile g_ss_space[SS_LEGS];
 static volatile u32 g_ss_cpu[SS_LEGS];          // the spinner's CPU + 1 once it runs
+// Leg 0's IRQ-masked hold: the test raises req; the spinner masks, publishes
+// the deadline, acks req, and unmasks at the deadline.
+#define SS_HOLD_NS 20000000ull
+static volatile u32 g_ss_hold_req, g_ss_hold_ack;
+static volatile u64 g_ss_hold_until;
 
 struct ss_leg { unsigned leg; unsigned cpu; };
 static struct ss_leg g_ss_legs[SS_LEGS];
@@ -1090,8 +1098,21 @@ static void ss_spin_entry(void *arg) {
     unsigned leg = (unsigned)(uintptr_t)arg;
     g_ss_space[leg] = current_thread()->proc->as;
     __atomic_store_n(&g_ss_cpu[leg], smp_cpu_idx_self() + 1, __ATOMIC_RELEASE);
-    while (!__atomic_load_n(&g_ss_stop, __ATOMIC_ACQUIRE))
+    u32 held = 0;
+    while (!__atomic_load_n(&g_ss_stop, __ATOMIC_ACQUIRE)) {
+        u32 want = __atomic_load_n(&g_ss_hold_req, __ATOMIC_ACQUIRE);
+        if (leg == 0 && want != held) {
+            irq_state_t s = spin_lock_irqsave(NULL);
+            u64 until = timer_now_ns() + SS_HOLD_NS;
+            __atomic_store_n(&g_ss_hold_until, until, __ATOMIC_RELAXED);
+            __atomic_store_n(&g_ss_hold_ack, want, __ATOMIC_RELEASE);
+            while (timer_now_ns() < until)
+                __asm__ __volatile__("yield" ::: "memory");
+            spin_unlock_irqrestore(NULL, s);
+            held = want;
+        }
         __asm__ __volatile__("yield" ::: "memory");
+    }
     exits("ok");
 }
 
@@ -1133,6 +1154,37 @@ static struct ss_window ss_measure(unsigned leg, unsigned np, const unsigned *cp
     return w;
 }
 
+struct ss_hold {
+    bool ok;                 // the call began before the target's deadline
+    u64  mask;
+    u64  until, returned;    // the target's unmask deadline; the call's return
+    bool served;
+};
+
+static struct ss_hold ss_measure_hold(unsigned cpu0) {
+    struct ss_hold h = { 0 };
+    for (u32 k = 1; k <= 10 && !h.ok; k++) {
+        u64 req_t = gic_barrier_requests(cpu0);
+        __atomic_store_n(&g_ss_hold_req, k, __ATOMIC_RELEASE);
+        u64 start = timer_now_ns();
+        while (__atomic_load_n(&g_ss_hold_ack, __ATOMIC_ACQUIRE) != k)
+            if (timer_now_ns() - start > 2000000000ull) return h;
+        u64 until = __atomic_load_n(&g_ss_hold_until, __ATOMIC_RELAXED);
+        // Begun too late, the call could return after the deadline without
+        // waiting; let the hold lapse and take another.
+        if (timer_now_ns() + SS_HOLD_NS / 2 > until) {
+            while (timer_now_ns() < until) (void)sched_yield_hint();
+            continue;
+        }
+        h.mask = sched_sync_space(g_ss_space[0]);
+        h.returned = timer_now_ns();
+        h.served = gic_barrier_reached(cpu0, req_t + 1);
+        h.until = until;
+        h.ok = true;
+    }
+    return h;
+}
+
 void test_jit_space_sync_targets(void) {
     TEST_EXPECT_EQ(sched_sync_space(NULL), 0ull, "no space interrupts no CPU");
 
@@ -1141,9 +1193,14 @@ void test_jit_space_sync_targets(void) {
     unsigned np = 0;
     for (unsigned c = 0; c < smp_cpu_count() && c < DTB_MAX_CPUS && np < SS_LEGS; c++)
         if (c != self && g_cpu_alive[c]) cpu[np++] = c;
-    if (np == 0) return;     // one CPU: nothing to interrupt; the legs need a peer
+    if (np == 0) {
+        uart_puts("  jit.space_sync_targets: one CPU, so no leg ran\n");
+        return;
+    }
 
     __atomic_store_n(&g_ss_stop, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_ss_hold_req, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_ss_hold_ack, 0u, __ATOMIC_RELEASE);
     int pid[SS_LEGS] = { 0, 0 };
     unsigned forked = 0;
     for (unsigned i = 0; i < np; i++) {
@@ -1180,6 +1237,8 @@ void test_jit_space_sync_targets(void) {
             if (wa.ok && (np < 2 || wb.ok)) break;
         }
     }
+    struct ss_hold hold = { 0 };
+    if (placed) hold = ss_measure_hold(cpu[0]);
 
     // Release before asserting: the spinners hold two CPUs until they stop.
     __atomic_store_n(&g_ss_stop, 1u, __ATOMIC_RELEASE);
@@ -1213,4 +1272,9 @@ void test_jit_space_sync_targets(void) {
         TEST_ASSERT(wb.served && wb.other_untouched, "served, and the first CPU untouched");
         TEST_ASSERT(!(wb.mask & (1ull << cpu[0])), "the first CPU is not interrupted for the other space");
     }
+    TEST_ASSERT(hold.ok, "a hold of the space's CPU, the call begun well before its deadline");
+    TEST_ASSERT(hold.mask & (1ull << cpu[0]), "the held CPU is interrupted");
+    TEST_ASSERT(hold.returned >= hold.until,
+                "the call returns only after the held CPU unmasks and takes the interrupt");
+    TEST_ASSERT(hold.served, "with its ticket served");
 }

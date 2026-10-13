@@ -1016,6 +1016,8 @@ u64 sched_sync_space(const struct AddrSpace *as) {
     u64 tickets[DTB_MAX_CPUS];
     u64 mask = 0;
     if (!as) return 0;
+    // A masked wait could deadlock against a peer waiting on this CPU's ticket.
+    ASSERT_IRQS_ENABLED("sched_sync_space waits for other CPUs' interrupts");
     // Everything the caller published (SYS_ICACHE_SYNC ends in DSB ISH too)
     // is complete before any record is read.
     __asm__ __volatile__("dsb ish" ::: "memory");
@@ -1028,8 +1030,9 @@ u64 sched_sync_space(const struct AddrSpace *as) {
         if (cpu == self) continue;
         if (__atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED) != as) continue;
         u64 ticket = gic_barrier_send(cpu);
-        // Refused only for a CPU that never came online, whose record is
-        // NULL; skipping one that runs `as` would void the call's guarantee.
+        // Unreachable: every CPU below smp_cpu_count() came online (bring-up
+        // refuses a degraded boot) and is an SGI target (gic.c asserts
+        // DTB_MAX_CPUS fits GICv2's list). Skipping one would void the call.
         if (!ticket) extinction("sched_sync_space: barrier IPI refused for a CPU running the space");
         tickets[cpu] = ticket;
         mask |= 1ull << cpu;

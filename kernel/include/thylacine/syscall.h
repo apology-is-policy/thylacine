@@ -2464,14 +2464,14 @@ enum {
 
     // SYS_ICACHE_SYNC_SPACE() -> 0 (B-2e2; JIT-ON-WX-DESIGN B-2 item 4).
     //   Returns once every OTHER CPU that was running a thread of the caller's
-    //   address space when the call began has taken an interrupt it
-    //   acknowledged after the call began. The interrupt's return is a
-    //   context-synchronization event, so code the caller published with
-    //   SYS_ICACHE_SYNC is what those threads execute next -- the event
-    //   SYS_ICACHE_SYNC gives only the calling CPU. A thread of the space not
-    //   running takes its event at its next switch-in's eret. Linux's
-    //   membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE); Plan 9's
-    //   procflushseg.
+    //   address space when the call began has run the barrier interrupt's
+    //   handler after observing this call's request, and returned from it.
+    //   That return is a context-synchronization event, so code the caller
+    //   published with SYS_ICACHE_SYNC is what those threads execute next --
+    //   the event SYS_ICACHE_SYNC gives only the calling CPU. A thread of the
+    //   space not running takes its event at its next switch-in's eret.
+    //   Linux's membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE); Plan
+    //   9's procflushseg.
     //
     //   No arguments (operator vote 2026-10-13: its own number, not a mode of
     //   SYS_ICACHE_SYNC, whose callers leave x2 unset). No capability: it

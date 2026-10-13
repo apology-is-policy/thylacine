@@ -1639,3 +1639,14 @@ the caller's own length), and the slot table, whose nodes are charged as a
 touch creates them. `jit.max_region_is_a_reservation` creates a region of
 exactly the bound and touches its last page; `jit.region_is_128_mib` pins the
 value; `jit.create_rejects_bad_args` refuses one byte more.
+
+The doubling has a cost the bound does not hide. A syscall body is not
+preemptible, so a `SYS_ICACHE_SYNC` of a whole region keeps its CPU from every
+other thread for the whole walk, twice as long as at 64 MiB: interrupts are
+still taken, the walk is bounded, and the caller pays with its own length
+(JavaScriptCore syncs only what it has just emitted). On a part whose I-cache
+aliases, `arch_icache_sync_range` invalidates the whole I-cache once per page,
+32768 broadcast invalidates for a full region where one after the walk would
+do; no current target takes that path (QEMU and the Pi are PIPT,
+`arch/arm64/hwfeat.h`). Both were weighed in the B-2e2 audit (round 1, F4, P3)
+and left as they are.

@@ -29,10 +29,10 @@
  *       thunk that must never be patched (the JIT's write stub).
  *   thyla_jit_icache_sync_space()   -- SYS_ICACHE_SYNC_SPACE (128), not gated.
  *       Returns once every other CPU running a thread of the caller's address
- *       space has taken an interrupt after the call began, so those threads
- *       next execute what thyla_jit_icache_sync published. For code reached
- *       by threads that never pass a context-synchronization event of their
- *       own (Linux's membarrier SYNC_CORE).
+ *       space has handled an interrupt that observed this call, so those
+ *       threads next execute what thyla_jit_icache_sync published. For code
+ *       reached by threads that never pass a context-synchronization event of
+ *       their own (Linux's membarrier SYNC_CORE).
  *
  * The numbers are ABI (kernel/include/thylacine/syscall.h). Issued as inline
  * SVC rather than through libc: musl carries no wrapper for a Thylacine-private

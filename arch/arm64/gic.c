@@ -97,6 +97,10 @@
 // bitmask indexed by Aff0 (== cpu_idx on QEMU virt / GIC-400, max 8 CPUs).
 #define GICD_SGIR_TGT_LIST_SHIFT   16
 #define GICD_SGIR_MAX_TARGET       7
+// Every CPU the kernel can bring up must be an SGI target, or a barrier to it
+// is refused: sched_sync_space extincts on a refusal rather than skip a CPU.
+_Static_assert(DTB_MAX_CPUS <= GICD_SGIR_MAX_TARGET + 1u,
+               "a GICv2 SGI must reach every CPU index below DTB_MAX_CPUS");
 
 // ---------------------------------------------------------------------------
 // GICv2 CPU-interface (GICC) register offsets (relative to the GICC base,
@@ -207,9 +211,10 @@ static struct gic_irq_slot g_handlers[GIC_NUM_INTIDS];
 static struct gic_irq_slot g_lpi_handlers[GIC_LPI_COUNT];
 // The barrier IPI's tickets. A sender adds one to the target's request count
 // and sends; the target's handler stores the request count it reads as done.
-// A ticket is served only by a handler that read it, so by an interrupt the
-// target acknowledged after the send -- a count of interrupts taken would also
-// be satisfied by an earlier sender's handler whose increment landed late.
+// A ticket is served only by a handler that observed it and then returns (a
+// CSE); a handler already running for an earlier sender may be that one. A
+// count of interrupts taken would also be satisfied by an earlier sender's
+// handler whose increment landed late, before any handler saw the request.
 // done[cpu] has one writer, that CPU's own handler (handlers do not nest).
 static u64 g_barrier_req[DTB_MAX_CPUS];
 static u64 g_barrier_done[DTB_MAX_CPUS];

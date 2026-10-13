@@ -3262,8 +3262,8 @@ pub unsafe fn t_icache_sync(vaddr: u64, length: u64) -> i64 {
 }
 
 // t_icache_sync_space — return once every other CPU that was running a thread
-// of the caller's address space has taken an interrupt after the call began,
-// so those threads next execute what t_icache_sync published (Linux's
+// of the caller's address space has handled an interrupt that observed this
+// call, so those threads next execute what t_icache_sync published (Linux's
 // membarrier SYNC_CORE). Always returns 0.
 #[inline(always)]
 pub fn t_icache_sync_space() -> i64 {

@@ -369,10 +369,16 @@ one to the target's request count (`gic_barrier_send`; the new value is its
 ticket), executes `DSB SY` and sends SGI 15; the target's handler reads its
 request count and stores that value as done, then executes `DSB SY` so the
 exception return (the CSE the ticket promises) follows that read;
-`gic_barrier_reached` is true once done has reached the ticket. Done has one writer, the target's own handler. A
-ticket is served only by a handler that read it, so by an interrupt the target
-acknowledged after the send; a ticket whose send fails stays outstanding and
-the next barrier to that CPU serves it. The previous witness compared a count
+`gic_barrier_reached` is true once done has reached the ticket. Done has one
+writer, the target's own handler. A ticket is served only by a handler that
+observed it and then returned, which is the guarantee (observe the request,
+then a CSE); the interrupt need not have been acknowledged after the send, as
+a handler already running for an earlier sender can read the newer request.
+The acknowledge's `DSB SY` keeps a ticket from being stranded: an SGI merged
+into one already pending is acknowledged after both sends, so its handler's
+read sees both. A ticket whose send fails stays outstanding and the next
+barrier to that CPU serves it; none can fail for a CPU the kernel brought up,
+since `gic.c` asserts `DTB_MAX_CPUS` fits GICv2's eight-entry target list. The previous witness compared a count
 of barrier interrupts with the value read before the send, which an earlier
 sender's handler whose increment landed late could satisfy: the ITS drain
 (`gic_its_retire`) could have freed a lease while a handler was still due, and

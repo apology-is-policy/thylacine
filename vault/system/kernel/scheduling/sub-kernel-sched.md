@@ -232,8 +232,12 @@ its read of a ticket taken after the invalidation; a call that misses a store
 read it before the switcher's `DSB` completed, so the invalidation completed
 before the switcher's `eret`. The switch-side `DSB` is new with B-2e2; Linux's
 arm64 `__switch_to` has one. A ticket the GIC refuses for a CPU whose record
-names the space extincts: skipping it would void the guarantee, and only a CPU
-that never came online can be refused, whose record is NULL.
+names the space extincts, since skipping it would void the guarantee; no
+refusal is reachable, because every CPU below `smp_cpu_count()` came online
+(bring-up refuses a degraded boot) and is an SGI target (`gic.c` asserts
+`DTB_MAX_CPUS` fits GICv2's list). The caller must have IRQs enabled, and the
+function asserts it: two masked callers whose CPUs each named the other's space
+would each wait for an interrupt the other cannot take.
 
 `jit.space_sync_targets` runs a kernel spinner of each of two child Procs on
 its own CPU and checks both ways that the space's CPU is interrupted and
@@ -244,6 +248,12 @@ UP-like (`g_sched_notify_enabled` off until `joey_run`), so a cross-CPU
 with `IPI_RESCHED`, as `test_smp` does, and reaps its children by polling
 (`WAIT_WNOHANG`), since a child exiting on another CPU would not wake a
 parent sleeping in idle. Its first version did neither and hung the boot.
+A last leg has the first spinner mask IRQs until a deadline it publishes; the
+call, begun well before the deadline, must return after it with its ticket
+served. Without that leg the wait was witnessed only by an IPI's latency: a
+call with no wait loop would usually still find its ticket served a few
+microseconds later (B-2e2 audit, round 1, F2). On one CPU the test prints
+that no leg ran.
 
 ## Data structures
 

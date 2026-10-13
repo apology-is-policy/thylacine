@@ -252,8 +252,8 @@ the shape on 2026-09-28; three things change, and Wasm brought a fourth
    to such peers with no point at which they pass through C++ (BROWSER-DESIGN
    7, B-2e), so the kernel provides the event. `SYS_ICACHE_SYNC_SPACE` takes no
    arguments and returns 0 once every other CPU that was running a thread of
-   the caller's address space has taken an interrupt it acknowledged after
-   the call began.
+   the caller's address space has run the barrier interrupt's handler after
+   observing a request this call made, and returned from it.
 
    *Which CPUs.* At every context switch a CPU records the address space whose
    tables it installs (`cpu_space[cpu]`; NULL for a kernel thread, the idle
@@ -270,21 +270,28 @@ the shape on 2026-09-28; three things change, and Wasm brought a fourth
 
    *The acknowledgement is a ticket.* Each CPU has a request count and a done
    count. A sender adds one to the target's request count (the new value is
-   its ticket), executes `DSB ISH` and sends the barrier IPI; the target's
+   its ticket), executes `DSB SY` and sends the barrier IPI; the target's
    handler reads its request count and stores that value as done; the sender
-   waits until done reaches its ticket. The handler's read comes after the
-   send that its ticket was taken before, so the interrupt that served it was
-   acknowledged after the call began, and the handler's `eret` is a CSE that
-   follows its read: a `DSB` sits between them, because a CSE does not by
-   itself wait for an earlier load to complete. This is the ARM ARM's idiom for code modified while
-   another PE may run it: invalidate, `DSB`, publish a flag; observe the
-   flag, then a CSE. The GICv3 acknowledge executes `DSB SY` after reading
-   `ICC_IAR1_EL1`, as Linux's `gic_read_iar_common` does, so the handler's
-   read cannot be satisfied before the interrupt is acknowledged; the GICv2
-   read already drains. The kernel's previous witness, a per-CPU count of
-   barrier interrupts that `gic_synchronize_cpu` compared with the value it
-   read before sending, could be satisfied by an earlier sender's handler
-   whose increment landed late; `gic_synchronize_cpu` moves to tickets with
+   waits until done reaches its ticket. A ticket is therefore served only by
+   a handler that observed the request, which the call made after its
+   invalidation completed, and the handler's `eret` is a CSE that follows
+   that read: a `DSB` sits between them, because a CSE does not by itself
+   wait for an earlier load to complete. This is the ARM ARM's idiom for
+   code modified while another PE may run it: invalidate, `DSB`, publish a
+   flag; observe the flag, then a CSE. The interrupt that served a ticket
+   need not have been acknowledged after its send: a handler already running
+   for an earlier sender can read the newer request, and that is enough,
+   because what the guarantee needs is the observation followed by the CSE,
+   not the acknowledgement. The GICv3 acknowledge executes `DSB SY` after
+   reading `ICC_IAR1_EL1`, as Linux's `gic_read_iar_common` does, so a
+   handler's read cannot be satisfied before its interrupt is acknowledged;
+   the GICv2 read already drains. That keeps a ticket from being stranded:
+   an SGI merged into one already pending is acknowledged after both sends,
+   and its handler's read must see both requests. The kernel's previous
+   witness, a per-CPU count of barrier interrupts that `gic_synchronize_cpu`
+   compared with the value it read before sending, could be satisfied by an
+   earlier sender's handler whose increment landed late, before any handler
+   had observed the new request; `gic_synchronize_cpu` moves to tickets with
    this change (it serves the ITS's interrupt drain, which had the same gap).
 
    *The call.* (1) `DSB ISH`. (2) With IRQs masked: note the calling CPU, read
@@ -347,9 +354,10 @@ the shape on 2026-09-28; three things change, and Wasm brought a fourth
 
    *Witnesses.* Kernel tests: a thread of the space on another CPU is
    interrupted (its ticket is served) and a CPU running another space is not
-   (no ticket is taken); a ticket is not served by a handler that read the
-   request count before the ticket was taken; the GIC barrier still reaches
-   every live CPU. A thread that switches in during the call needs no IPI by
+   (no ticket is taken); the call does not return until a CPU of the space
+   holding IRQs masked has unmasked and taken the interrupt; a ticket is not
+   served by a handler that read the request count before the ticket was
+   taken; the GIC barrier still reaches every live CPU. A thread that switches in during the call needs no IPI by
    the argument above; no test can schedule that window, so the audit checks
    the switch-side `DSB` by reading the code. 128 MiB: `SYS_JIT_CREATE`
    accepts 128 MiB and refuses 128 MiB plus one page.
