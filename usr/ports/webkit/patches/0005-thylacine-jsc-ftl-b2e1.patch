@@ -1,0 +1,80 @@
+From e71d2d2a14738a347d096f42fab9465113c7c94c Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <noreply@example.invalid>
+Date: Tue, 13 Oct 2026 07:15:49 +0200
+Subject: [PATCH] thylacine: B-2e1 the FTL on at run time, an ISB where a
+ thread takes a finished Wasm plan
+
+The FTL joins Baseline, the DFG and the RegExp JIT at run time; Wasm's BBQ
+and OMG stay off until their own step. Every rewrite of installed FTL code
+falls under the rules B-2d set (the JS thread's own patches return through
+eret; a compiler thread's code is installed after crossModifyingCodeFence;
+the collector patches with the world stopped and a resuming thread runs an
+ISB), and its new kind, a property cache that rewrites code, rewrites more
+than one instruction only on the JS thread, outside the region it rewrites.
+
+A Wasm module's exit stubs are JIT-compiled by whichever thread finishes
+its plan, and a synchronous compile's wait returns without sleeping when
+the plan is already done, so the JS thread could run stubs written on
+another CPU with no context-synchronization event in between.
+Wasm::Module::compileSync and JSWebAssemblyInstance::finalizeCreation, the
+two points where a thread takes a finished plan (a synchronous wait, an
+asynchronous compile's ticket), now run WTF::crossModifyingCodeFence() (an
+ISB) first: the DFG finalizer's rule.
+---
+ Source/JavaScriptCore/runtime/Options.cpp               | 7 +++----
+ Source/JavaScriptCore/wasm/WasmModule.cpp               | 4 ++++
+ Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp | 5 +++++
+ 3 files changed, 12 insertions(+), 4 deletions(-)
+
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 2bcf75b6a1..8bcc90b7b2 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -838,10 +838,9 @@ void Options::notifyOptionsChanged()
+ 
+ #if OS(THYLACINE)
+     // As on RISCV64, every JIT tier is built (the configuration upstream builds) and
+-    // the tiers not yet opened on Thylacine are off at run time: Baseline, the DFG and
+-    // the RegExp JIT run; FTL and Wasm's BBQ and OMG stay off whatever a flag or the
+-    // environment asked, until each is opened in its own audited step.
+-    Options::useFTLJIT() = false;
++    // the tiers not yet opened on Thylacine are off at run time: Baseline, the DFG, the
++    // FTL and the RegExp JIT run; Wasm's BBQ and OMG stay off whatever a flag or the
++    // environment asked, until they are opened in their own audited step.
+     Options::useBBQJIT() = false;
+     Options::useOMGJIT() = false;
+ #endif
+diff --git a/Source/JavaScriptCore/wasm/WasmModule.cpp b/Source/JavaScriptCore/wasm/WasmModule.cpp
+index 59984286fb..a40ff3b576 100644
+--- a/Source/JavaScriptCore/wasm/WasmModule.cpp
++++ b/Source/JavaScriptCore/wasm/WasmModule.cpp
+@@ -119,6 +119,10 @@ Ref<CalleeGroup> Module::compileSync(VM& vm, MemoryMode mode)
+ {
+     Ref<CalleeGroup> calleeGroup = getOrCreateCalleeGroup(vm, mode);
+     calleeGroup->waitUntilFinished();
++    // The plan's exit stubs may have been written on another CPU, and the wait returns
++    // without sleeping when the plan is already done, so this CPU may not have taken a
++    // context-synchronization event since. The caller runs them next.
++    WTF::crossModifyingCodeFence();
+     return calleeGroup;
+ }
+ 
+diff --git a/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp b/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp
+index 807d8b5158..cd512c2463 100644
+--- a/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp
++++ b/Source/JavaScriptCore/wasm/js/JSWebAssemblyInstance.cpp
+@@ -247,6 +247,11 @@ void JSWebAssemblyInstance::finalizeCreation(VM& vm, JSGlobalObject* globalObjec
+         return;
+     }
+ 
++    // The CalleeGroup reaches this thread here, from a synchronous wait or an asynchronous
++    // compile's ticket, after the plan's exit stubs were written on whichever CPU finished
++    // it; synchronize this one before the instance runs them.
++    WTF::crossModifyingCodeFence();
++
+     // When memory is imported, we will initialize all memory modes with the initial IPInt compilation
+     // results, so that later when memory imports become available, the appropriate CalleeGroup can be used.
+     // If IPInt is disabled, we instead defer compilation to module evaluation.
+-- 
+2.43.0
+

@@ -1,7 +1,7 @@
 #!/usr/bin/expect -f
 # tools/interactive/ls-jsc.exp -- Boosty over a real PTY: JavaScriptCore (WebKit's
-# JSCOnly port, static; the Baseline, DFG (B-2d) and regexp JITs on one
-# SYS_JIT_CREATE code region; FTL, BBQ and OMG are built and held off at run time)
+# JSCOnly port, static; the Baseline, DFG (B-2d), FTL (B-2e1) and regexp JITs on one
+# SYS_JIT_CREATE code region; Wasm's BBQ and OMG are built and held off at run time)
 # runs as the
 # logged-in user from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md;
 # docs/browser-status.md.
@@ -26,12 +26,35 @@
 #           each: every JIT on, the DFG off (--useDFGJIT=false), and denied; 23 of
 #           its 26 tests check their own result (date-format-tofte,
 #           date-format-xparb and string-validate-input check nothing); the totals
-#           are the record (loop-baseline is the same split for the loop)
+#           are the record (loop-baseline is the same split for the loop;
+#           sunspider-dfg and loop-dfg turn only the FTL off)
 #   dfg / dfg-off / dfg-deny / dfg-sync   a hot function reaches DFG code
 #           ($vm.dfgTrue() folds to true only there); --useDFGJIT=false, one flag
 #           away, stops at Baseline; --thylacine-no-cap-jit reaches neither;
 #           --useConcurrentJIT=false compiles on the JS thread and gets there too
-#   tiers   Baseline and DFG on; FTL, BBQ and OMG stay off although every one is
+#   ftl / ftl-off / ftl-deny / ftl-sync   the DFG legs again for the FTL:
+#           $vm.ftlTrue() folds to true only in FTL code (never vacuously:
+#           false in DFG code too); --useFTLJIT=false stops at the DFG
+#   ftl-osr an FTL function speculating int32 takes a double and then a string:
+#           two exits through ONE exit, and --verboseFTLOSRExit must log exactly
+#           one exit-stub compile -- the second exit took the jump the first
+#           patched (a jump never patched compiles the stub twice). The tier is
+#           read with $vm.codeBlockFor matched on the JIT-type word: the dump
+#           also prints "(FTLFail)" and "(HadFTLReplacement)" for other tiers
+#   ftl-ic  an FTL property cache (FTL caches rewrite code; Baseline's and the
+#           DFG's are data) meets four new shapes, one a getter, 1000 times
+#           each without leaving FTL code: a call that left would add 1000
+#           ($vm.ftlTrue() is false outside FTL code) and the code block must be
+#           the one it started with. With the FTL off it reads x4000 (DFG code
+#           is not FTL code); --forceICFailure=true also turns it red, but by
+#           changing the compile, so what it shows about a rewrite that silently
+#           did nothing is settled by B-2e1's red run, not assumed; ftl-osr is
+#           the FTL's discriminating patch witness
+#   wasm-sync / wasm-async   a module whose export calls a JS import, compiled
+#           synchronously and by WebAssembly.instantiate: its exit stubs are
+#           JIT code a worklist thread may write, run by the JS thread, which
+#           takes an ISB first (patch 0005; build_jsc asks the binary for it)
+#   tiers   Baseline, DFG and FTL on; BBQ and OMG stay off although each is
 #           asked for by flag; --useDollarVM=true in the same line reads on, so the
 #           flags were parsed (jscOptions() reports a bool as the number 0 or 1)
 #   osr     a DFG function speculating int32 is handed a double and a string: two
@@ -60,7 +83,9 @@
 #           invalidation points and unlinking its callers -- code patched by the
 #           thread that conducts. $vm.codeBlockFor reads the function's tier
 #           without calling it, so a DFG block gone back to Baseline with no call
-#           in between was discarded by a collection. The leg needs every round to
+#           in between was discarded by a collection. It runs with the FTL off:
+#           its subject is DFG code, and a round that reached FTL code would
+#           read as never reaching the DFG. The leg needs every round to
 #           reach DFG code first (with the DFG off none does: red), every call
 #           right, and at least one discard; its twin keeps each closure alive
 #           and must see none. Measured on the macOS jsc, this script: 10-13 of 20
@@ -202,8 +227,8 @@ lc_pass "ls-jsc(dfg-sync): compiled on the JS thread, the same"
 
 set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
 lc_run_expect "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
-    "JSCO-1-0-0-0-1-1"
-lc_pass "ls-jsc(tiers): Baseline and DFG on, FTL/BBQ/OMG off; the flags were parsed"
+    "JSCO-1-1-0-0-1-1"
+lc_pass "ls-jsc(tiers): Baseline, DFG and FTL on, BBQ/OMG off; the flags were parsed"
 
 set osr {function h(x){return x+1} var s=0, i=0; for(;i<1e5||(i<1e7&&numberOfDFGCompiles(h)<1);i++)s=h(i); s=h(99999); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}
 lc_run_expect_hardfail "/webkit/jsc -e '[string map {@T jscx} $osr]' | tr a-z A-Z" "JSCX-OK-C" "JSCX-BAD"
@@ -214,6 +239,71 @@ lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T js
     "JSCY-1-TRUE-42" {JSCY-(0|1-FALSE|1-TRUE-([^4]|4[^2]|42[^\r\n]))|EXCEPTION: [^\r\n]*}
 lc_pass "ls-jsc(watch): a watchpoint discards running DFG code; the hole reads 42"
 
+# B-2e1. The FTL, as the DFG legs: ftlTrue folds to true only in FTL code.
+set ftl {function g(){return $vm.dfgTrue()}; function f(){return $vm.ftlTrue()}; var d=false, t=false; for(var i=0;i<2e7&&!(d&&t);i++){if(!d)d=g(); if(!t)t=f()} print("@T-"+d+"-"+t)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jsdd} $ftl]' | tr a-z A-Z" \
+    "JSDD-TRUE-TRUE" {JSDD-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(ftl): a hot function runs FTL code"
+lc_run_expect_hardfail_re "/webkit/jsc --useFTLJIT=false --useDollarVM=true -e '[string map {@T jsde} $ftl]' | tr a-z A-Z" \
+    "JSDE-TRUE-FALSE" {JSDE-(FALSE|TRUE-TRUE)}
+lc_pass "ls-jsc(ftl-off): with --useFTLJIT=false it stops at the DFG"
+lc_run_expect_hardfail_re "/webkit/jsc --thylacine-no-cap-jit --useDollarVM=true -e '[string map {@T jsdf} $ftl]' | tr a-z A-Z" \
+    "JSDF-FALSE-FALSE" {JSDF-TRUE|CAP_JIT acquired}
+lc_pass "ls-jsc(ftl-deny): without CAP_JIT, no optimizing tier"
+lc_run_expect_hardfail_re "/webkit/jsc --useConcurrentJIT=false --useDollarVM=true -e '[string map {@T jsdg} $ftl]' | tr a-z A-Z" \
+    "JSDG-TRUE-TRUE" {JSDG-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(ftl-sync): compiled on the JS thread, the same"
+
+# The tier from the code block's JIT-type word; h(0) gives h a code block first.
+set ftltier {function tier(f){var m=/, (FTL|DFG|Baseline)Function/.exec(String($vm.codeBlockFor(f))); return m?{FTL:3,DFG:2,Baseline:1}[m[1]]:0}}
+set ftlosr "$ftltier [string map {@T jsdh} {var F=false; function h(x){F=$vm.ftlTrue(); return x+1} noInline(h); h(0); var s=0, i=0; for(;i<1e7&&tier(h)<3;i++)s=h(i); var w=tier(h); s=h(99999); var f1=F; var d=h(0.5), t=h("q"); print(("@T-"+(w==3&&f1&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-w"+w+"-"+d+"-"+t).toUpperCase())}]"
+proc ftlosr_leg {} {
+    global lc_cmd_timeout timeout ftlosr
+    lc_send "/webkit/jsc --useDollarVM=true --verboseFTLOSRExit=true -e '$ftlosr'; echo jsdh-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set n 0
+    set out ""
+    set st ""
+    # One alternation, so the leftmost line in the stream is taken first.
+    expect {
+        -re "Compiling OSR exit with exitID|JSDH-(OK|BAD)\[^\r\n\]*\[\r\n\]|JSDH-ST- ?\[0-9\]+\[\r\n\]|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXCEPTION: \[^\r\n\]*|EXTINCTION:" {
+            set m $expect_out(0,string)
+            if {$m eq "Compiling OSR exit with exitID"} {
+                incr n
+                exp_continue
+            } elseif {[regexp {^JSDH-ST- ?([0-9]+)} $m -> st]} {
+            } elseif {[regexp {^JSDH-(OK|BAD)} $m]} {
+                set out [string trim $m]
+                exp_continue
+            } elseif {$m eq "EXTINCTION:"} {
+                lc_extinction_fail "kernel extinction during ftl-osr"
+            } else {
+                lc_fail "ftl-osr: \[[string trim $m]\]"
+            }
+        }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in ftl-osr: out=$out compiles=$n" }
+    }
+    if {![string match "JSDH-OK-*" $out] || $n != 1 || $st ne "0"} {
+        lc_fail "ftl-osr: out=$out exit-stub compiles=$n status=$st (want JSDH-OK, exactly 1, 0)"
+    }
+    lc_pass "ls-jsc(ftl-osr): $out -- two FTL exits through one exit, one exit-stub compile (the second took the patched jump), exit 0"
+}
+ftlosr_leg
+
+set ftlic "$ftltier [string map {@T jsdi} {function g(o){var v=o.p; return v+($vm.ftlTrue()?0:1000)} noInline(g); var A=[{p:1},{a:0,p:2},Object.create({get p(){return 5}})]; g(A[0]); var q=0, i=0; for(;i<1e7&&tier(g)<3;i++){g(A[q]); q=q==2?0:q+1} var w=tier(g), cb=String($vm.codeBlockFor(g)); var B=[{b:0,c:0,p:3},{d:0,p:4},{e:0,f:0,h:0,p:6},Object.create({get p(){return 6*7}})]; var r=0, x=0; for(var k=0;k<1000;k++) for(var j=0;j<4;j++){var v=g(B[j]); r+=v; if(v>=1000)x++} var w2=tier(g), same=String($vm.codeBlockFor(g))===cb; print("@T-"+(w==3&&w2==3&&same&&x==0&&r==55000?"ok":"bad")+"-w"+w+"-"+w2+"-x"+x+"-"+same+"-r"+r)}]"
+lc_run_expect_hardfail "/webkit/jsc --useDollarVM=true -e '$ftlic' | tr a-z A-Z" \
+    "JSDI-OK-W3-3-X0-TRUE-R55000" "JSDI-BAD"
+lc_pass "ls-jsc(ftl-ic): an FTL property cache took four new shapes without leaving FTL code (functional)"
+
+# A module whose export g(x) returns the import f(x) + 1; f(x) = 2x.
+set wasmmod {new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,2,7,1,1,109,1,102,0,0,3,2,1,0,7,5,1,1,103,0,1,10,11,1,9,0,32,0,16,0,65,1,106,11])}
+set wasmsync "var b=$wasmmod; [string map {@T jsdj} {var n=0; var i=new WebAssembly.Instance(new WebAssembly.Module(b),{m:{f:function(x){n++;return x*2}}}); var s=0; for(var k=0;k<1000;k++)s+=i.exports.g(k); print("@T-"+i.exports.g(6*7)+"-"+s+"-"+n)}]"
+set wasmasync "var b=$wasmmod; [string map {@T jsdk} {var n=0; WebAssembly.instantiate(b,{m:{f:function(x){n++;return x*2}}}).then(function(r){var s=0; for(var k=0;k<1000;k++)s+=r.instance.exports.g(k); print("@T-"+r.instance.exports.g(6*7)+"-"+s+"-"+n)},function(e){print("@T-err-"+e)})}]"
+lc_run_expect_hardfail "/webkit/jsc -e '$wasmsync' | tr a-z A-Z" "JSDJ-85-1000000-1001" "EXCEPTION"
+lc_pass "ls-jsc(wasm-sync): a compiled module calls its JS import through JIT exit stubs, 1001 times"
+lc_run_expect_hardfail "/webkit/jsc -e '$wasmasync' | tr a-z A-Z" "JSDK-85-1000000-1001" "JSDK-ERR"
+lc_pass "ls-jsc(wasm-async): the same module through WebAssembly.instantiate"
+
 # Each leg prints its marker upper-cased by the script itself, then its exit status
 # through tr, so the echo of the typed line satisfies neither. @K keeps each round's
 # closure alive (the twin).
@@ -221,7 +311,7 @@ set gcjet {function tier(f){var s=String($vm.codeBlockFor(f)); return s.indexOf(
 proc gcjet_leg {what tag keep} {
     global lc_cmd_timeout timeout gcjet
     set T [string toupper $tag]
-    lc_send "/webkit/jsc --useDollarVM=true --collectContinuously=true -e '[string map [list @T $tag @K $keep] $gcjet]'; echo $tag-st-\$status | tr a-z A-Z"
+    lc_send "/webkit/jsc --useDollarVM=true --useFTLJIT=false --collectContinuously=true -e '[string map [list @T $tag @K $keep] $gcjet]'; echo $tag-st-\$status | tr a-z A-Z"
     set timeout $lc_cmd_timeout
     set out ""
     # One alternation, so the leftmost line in the stream is taken first.
@@ -325,6 +415,8 @@ lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI
 lc_pass "ls-jsc(loop): JSCI-820578176 (every JIT on)"
 lc_run_expect "/webkit/jsc --useDFGJIT=false -e '[string map {@T jsdc} $loop]' | tr a-z A-Z" "JSDC-820578176-"
 lc_pass "ls-jsc(loop-baseline): JSDC-820578176 (the DFG off)"
+lc_run_expect "/webkit/jsc --useFTLJIT=false -e '[string map {@T jsdl} $loop]' | tr a-z A-Z" "JSDL-820578176-"
+lc_pass "ls-jsc(loop-dfg): JSDL-820578176 (the FTL off)"
 lc_run_expect "/webkit/jsc --thylacine-no-cap-jit -e '[string map {@T jscj} $loop]' | tr a-z A-Z" "JSCJ-820578176-"
 lc_pass "ls-jsc(loop-deny): JSCJ-820578176 (interpreted)"
 
@@ -332,6 +424,8 @@ lc_run_expect_hardfail "/webkit/jsc /webkit/sunspider/run.js -- jscm | tr a-z A-
 lc_pass "ls-jsc(sunspider): all 26 ran (23 self-checking) with every JIT on"
 lc_run_expect_hardfail "/webkit/jsc --useDFGJIT=false /webkit/sunspider/run.js -- jsdb | tr a-z A-Z" "JSDB-OK-26-" "JSDB-FAIL"
 lc_pass "ls-jsc(sunspider-baseline): all 26 ran (23 self-checking) with the DFG off"
+lc_run_expect_hardfail "/webkit/jsc --useFTLJIT=false /webkit/sunspider/run.js -- jsdm | tr a-z A-Z" "JSDM-OK-26-" "JSDM-FAIL"
+lc_pass "ls-jsc(sunspider-dfg): all 26 ran (23 self-checking) with the FTL off"
 lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit /webkit/sunspider/run.js -- jscn | tr a-z A-Z" "JSCN-OK-26-" "JSCN-FAIL"
 lc_pass "ls-jsc(sunspider-deny): all 26 ran (23 self-checking) interpreted"
 

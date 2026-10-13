@@ -6646,8 +6646,9 @@ build_libcxx() {
 
 # --- Boosty (the browser arc, docs/BROWSER-DESIGN.md): ICU + JavaScriptCore -------
 # B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: every JIT tier is
-# built (upstream no longer builds JIT without DFG/FTL on ARM64) and patch 0002 forces
-# DFG, FTL, BBQ and OMG off at run time, so the Baseline JIT and the YARR regexp JIT run;
+# built (upstream no longer builds JIT without DFG/FTL on ARM64) and patch 0002 forced
+# DFG, FTL, BBQ and OMG off at run time, so the Baseline JIT and the YARR regexp JIT ran;
+# patch 0004 (B-2d) opened the DFG and patch 0005 (B-2e1) the FTL;
 # the pool is one SYS_JIT_CREATE region written through a sealed execute-only thunk
 # (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
 # Without CAP_JIT the pool is refused and JSC runs its LLInt + IPInt interpreters. DEFAULT-OFF (CHUNK_WEBKIT /
@@ -6850,12 +6851,12 @@ build_jsc() {
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
             stage_jsc_bench "$wk" "$stage" "$port_dir"
-            ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + YARR on): REUSED (cached + up-to-date)"
+            ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + FTL + YARR on): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built, Baseline + DFG + YARR on, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built, Baseline + DFG + FTL + YARR on, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6889,21 +6890,30 @@ build_jsc() {
     fi
     [[ "$(grep -cE '^[[:space:]]*LOAD[[:space:]]' <<< "$ph")" -ge 2 ]] \
         || { echo "==> jsc: readelf printed no LOAD segments -- the W+X check saw nothing" >&2; exit 1; }
-    # The ISB a thread runs where it resumes the VM's code (patch 0004) is what lets it
-    # run code the collector or another CPU patched (BROWSER-DESIGN 7, B-2d), and no run
-    # can show it missing: so the built binary is asked for it.
-    local unpark
-    unpark="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
-        --disassemble-symbols=_ZN3JSC14MachineThreads19unparkCurrentThreadEv "$out")"
-    [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$unpark")" -ge 8 ]] \
-        || { echo "==> jsc: no MachineThreads::unparkCurrentThread to disassemble -- the ISB check saw nothing" >&2; exit 1; }
-    grep -qE '^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)' <<< "$unpark" \
-        || { echo "==> jsc: MachineThreads::unparkCurrentThread has no isb (patch 0004)" >&2; exit 1; }
+    # A thread runs an ISB before it runs code written or patched on another CPU: where
+    # it resumes the VM's code (patch 0004), where it takes a finished Wasm plan's stubs
+    # (patch 0005), and where the FTL installs a compiler thread's code (upstream's).
+    # No run can show one missing (BROWSER-DESIGN 7, B-2d and B-2e), so the built binary
+    # is asked for each.
+    local isbsym isbname isbdis
+    while read -r isbsym isbname; do
+        isbdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+            --disassemble-symbols="$isbsym" "$out")"
+        [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$isbdis")" -ge 8 ]] \
+            || { echo "==> jsc: no $isbname to disassemble -- the ISB check saw nothing" >&2; exit 1; }
+        grep -qE '^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)' <<< "$isbdis" \
+            || { echo "==> jsc: $isbname has no isb" >&2; exit 1; }
+    done <<'ISBSYMS'
+_ZN3JSC14MachineThreads19unparkCurrentThreadEv MachineThreads::unparkCurrentThread(patch-0004)
+_ZN3JSC4Wasm6Module11compileSyncERNS_2VMENS_10MemoryModeE Wasm::Module::compileSync(patch-0005)
+_ZN3JSC21JSWebAssemblyInstance16finalizeCreationERNS_2VMEPNS_14JSGlobalObjectEON3WTF3RefINS_4Wasm11CalleeGroupENS5_12RawPtrTraitsIS8_EENS5_21DefaultRefDerefTraitsIS8_EEEENS7_12CreationModeE JSWebAssemblyInstance::finalizeCreation(patch-0005)
+_ZN3JSC3FTL12JITFinalizer8finalizeEv FTL::JITFinalizer::finalize(upstream)
+ISBSYMS
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
     stage_jsc_bench "$wk" "$stage" "$port_dir"
-    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, the resume ISB present)"
-    ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + YARR on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, every cross-CPU ISB present)"
+    ledger "jsc (JavaScriptCore, every tier built, Baseline + DFG + FTL + YARR on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {
