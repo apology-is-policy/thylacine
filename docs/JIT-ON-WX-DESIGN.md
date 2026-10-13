@@ -185,8 +185,8 @@ the shape on 2026-09-28; three things change.
 
 1. **The region is a reservation** (B-2a). JavaScriptCore reserves one
    executable pool at startup (its ARM64 default is 128 MiB without jump
-   islands; Thylacine runs it at 64 MiB, `JIT_REGION_MAX`, inside the +-128 MiB
-   branch range) and fills it as it compiles. An eager region charged and
+   islands; Thylacine ran it at 64 MiB, `JIT_REGION_MAX`, inside the +-128 MiB
+   branch range, until B-2e2 raised the limit to 128 MiB, upstream's size) and fills it as it compiles. An eager region charged and
    zeroed the whole pool at startup and needed one physically contiguous buddy
    block. The code Burrow is now demand-zero, like `SYS_BURROW_ATTACH_LAZY`'s
    memory: a page is committed, zeroed, I-cache-invalidated and charged once,

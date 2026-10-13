@@ -22,6 +22,26 @@ needed the operator.
 
 
 ---
+## 2026-10-13 (main, Opus 5.5, effort max) -- the FTL and Wasm's BBQ/OMG tiers on the sealed code region (B-2e) (in progress)
+
+**Research (two read-only agents on fork 714fd13d6c, ~80 calls each; main re-read the marked items).**
+- *FTL:* every rewrite of installed FTL code falls under B-2d's three rules. The one new kind is a property cache that patches code (upstream forces `useHandlerICInFTL` off, `Options.cpp:863`). Its rewrites of more than one instruction run only on the JS thread, outside the region being rewritten; the collector's resets are single words written with the world stopped. The FTL polls traps (`FTLLowerDFGToB3.cpp:19321-19340`), and LSE, FJCVTZS and FRINTTS are gated at run time.
+- *Wasm:* upstream's thread walk (`WasmMachineThreads.cpp:54-64`) is not a stop-the-world. It suspends each thread so that the thread's signal-handler return gives it a context-synchronization event. On Thylacine it would hit patch 0001's `RELEASE_ASSERT` in `Thread::suspend` at the first BBQ install. A fence on the resume path cannot replace it: BBQ and OMG poll no traps.
+- *Two defects, enqueued in OPEN-BUGS at once:*
+  - **A live cross-CPU gap, confirmed by main.** EntryPlan JIT-compiles a module's exit stubs on the finishing thread, and a synchronous compile's wait (`WasmPlan.cpp:77-83`) returns without sleeping, so the JS thread can run those stubs with no ISB. The gap exists today with IPInt and Baseline.
+  - **A latent `ref.cast` null-check elision.** With the fault handler off it loads from null; it becomes reachable once BBQ or OMG runs.
+- *Heritage, checked at the source:* Plan 9's `procflushseg` (`port/proc.c`) targets the processors running a process that maps the segment and waits for each one's clock interrupt. Linux `membarrier` SYNC_CORE (4.16+) gives the same guarantee. APE's `sigtab` maps "term" to SIGTERM and "abort" to SIGABRT.
+
+**Operator votes (05:04Z, `project_votes_1013_main`):**
+- the kernel synchronizes the address space's CPUs for Wasm (`dec-2026-10-13-wasm-space-sync`);
+- the JIT region is 128 MiB (`dec-2026-10-13-jit-region-128`);
+- gcpark F3: ut reports 128+signal on every wait;
+- gcpark F5: the exit wins over a kill during the final close;
+- SIGTERM gets a `term` note;
+- the Linux phenotype gets kill, tkill and tgkill.
+
+By research, without a vote: the thread that takes a finished Wasm plan runs an ISB (`dec-2026-10-13-wasm-plan-isb`). B-2e is split into three chunks: B-2e1 (the plan ISB and the FTL), B-2e2 (the kernel) and B-2e3 (BBQ/OMG).
+
 ## 2026-10-12..13 (main, Opus 5.5, effort max) -- JavaScriptCore's DFG runs on the sealed code region (B-2d) (landed)
 
 **What the run is for.** B-2c opened Baseline and the regexp JIT; B-2d opens

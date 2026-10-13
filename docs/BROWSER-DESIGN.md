@@ -608,6 +608,74 @@ before any syscall, and the engine then runs its interpreter.
   queries, which have no Thylacine arm, read their compile-time defaults (no
   LSE atomics, no `FJCVTZS`, no FP16, no `FRINT`).
 
+*B-2e, 2026-10-13: the FTL and Wasm's BBQ and OMG on the same region.*
+
+- **The FTL adds one kind of rewrite: property caches that patch code.**
+  Upstream keeps the FTL's caches as code (`useHandlerICInFTL` is forced off),
+  so a property access in FTL code is rewritten in place: its whole inline
+  region at once (`linkCodeInline`), a jump to a stub, or the call to its slow
+  path. The rewrites of more than one instruction run only on the JS thread,
+  which is never inside the region it rewrites (the slow call sits outside it);
+  the collector's resets are single instructions written with the world
+  stopped. The FTL's other rewrites -- OSR-exit jumps, lazy slow paths,
+  invalidation points, direct calls, arithmetic caches -- are the DFG's kinds
+  made by the same threads, so B-2d's three rules cover all of them, and the
+  FTL's finalizer runs `crossModifyingCodeFence` as the DFG's does. The FTL
+  polls for traps too (`CheckTraps` becomes a load and a lazy slow path).
+- **Wasm publishes code to threads that never stop.** Upstream walks every
+  thread that has ever entered a VM, a set shared by the whole process, and
+  suspends and resumes each one. The point is not to stop them: each takes a
+  context-synchronization event, its signal handler's return, after a BBQ or
+  OMG function is written and before it is published. The rewrites themselves
+  are single `bl` retargets in callers, and the rest is data. A fence on the
+  resume path cannot replace the walk: BBQ and OMG code polls no traps, an OMG
+  loop has no checkpoint, and Wasm reaches the new code without passing
+  through C++. Thread suspension is fatal on Thylacine (B-0), so BBQ and OMG
+  as they stand would crash at their first install.
+- **Decided 2026-10-13 (operator vote, `dec-2026-10-13-wasm-space-sync`): the
+  kernel synchronizes the address space's CPUs.** `SYS_ICACHE_SYNC` gains a
+  mode that interrupts every other CPU currently running a thread of the
+  caller's address space and returns once each has taken the interrupt;
+  `Wasm::resetInstructionCacheOnAllThreads` calls it. A running thread takes
+  the event at the interrupt; a thread that is not running takes one at its
+  next `eret`. This is Plan 9's `procflushseg`, which marks the processors
+  running a process that maps the segment and waits for each one's clock
+  interrupt, with an IPI in place of the tick; Linux has it as `membarrier`'s
+  `PRIVATE_EXPEDITED_SYNC_CORE`. It interrupts only the caller's own threads.
+  Declined: interrupting every CPU, and per-thread signals in Pouch so that
+  upstream's walk runs as written.
+- **The same gap is open today for a module's stubs, and closes on the thread
+  that consumes them** (`dec-2026-10-13-wasm-plan-isb`, by research). A
+  module's wasm-to-wasm and wasm-to-JS exit stubs are JIT-compiled by whichever
+  thread finishes the module's plan, usually a Wasm worklist thread, and a
+  synchronous compile's wait returns without sleeping when the plan is already
+  done. So the JS thread can run the stubs with no context-synchronization
+  event, with IPInt and the Baseline JIT on. The thread that takes a finished
+  plan runs `crossModifyingCodeFence` first, the DFG finalizer's rule.
+  Upstream has the same gap.
+- **Decided 2026-10-13 (operator vote, `dec-2026-10-13-jit-region-128`): the
+  region is 128 MiB.** This is upstream's ARM64 size without jump islands; the
+  kernel's `JIT_REGION_MAX` rises from 64 to 128 MiB. A region is a reservation
+  charged per touched page, so the size costs nothing until used, and the
+  static assert still proves every branch inside it in range (the farthest is
+  128 MiB less one instruction). At 64 MiB the optimizing tiers would stop
+  compiling at 48 MiB, and the stubs that must succeed would crash the process
+  if the last 16 filled.
+- **BBQ and OMG keep the interpreter's memory model.** With the fault handler
+  off (B-0) every memory is bounds-checked, maps exactly its size and grows by
+  copy; a trap is a branch to a throw thunk and the stack check is a compare.
+  Shared memories stay refused, so Wasm threads stay off. One elision still
+  assumes the handler: a `ref.cast` to a struct or array type drops its null
+  check when the field it reads sits at offset 0, then loads from null. It is
+  fixed from the handler's own answer (no offset is safe without a handler)
+  before BBQ runs. Like upstream, a long BBQ or OMG loop polls no trap, so the
+  way to stop one is to kill the process.
+- **Three chunks.** B-2e1: the consuming thread's fence for Wasm plans, and the
+  FTL on. B-2e2, the kernel, audit-bearing: the address-space mode of
+  `SYS_ICACHE_SYNC` (its mechanism designed in `JIT-ON-WX-DESIGN.md` first) and
+  the 128 MiB region. B-2e3: BBQ and OMG on that mode, the pool at 128 MiB,
+  the `ref.cast` fix.
+
 The YARR regex JIT, the CSS selector JIT and the Wasm tiers share the one
 allocator. The kernel side changes too (B-2a/B-2b): the region is a
 reservation committed page by page, and the writer alias is hardened before
@@ -755,7 +823,7 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-2a | kernel: the code Burrow becomes a reservation (demand-zero, charged per touched page, no physical contiguity); the I-cache sync exact on aliasing I-caches. Audit-bearing. | a 64 MiB region created for nothing; each witness RED once; audit closed |
 | B-2b | kernel: the writer alias hardened (random placement; the thunk in a region born sealed, `SYS_JIT_CREATE_SEALED`, execute-only, voted 2026-10-07; `LDTR`/`STTR` user copies; the debug reader refuses an execute-only leaf). Audit-bearing. | a syscall refuses to read an execute-only page; audit closed |
 | B-2c | JavaScriptCore's Thylacine separated-WX arm; `jsc` takes `CAP_JIT`; Baseline + YARR. | the benchmark with the JIT on; the deny probe; `ls-jsc` |
-| B-2d / B-2e | DFG; then FTL (B3) + Wasm BBQ/OMG, each its own chunk and audit. | the same benchmark |
+| B-2d / B-2e | DFG; then FTL (B3) + Wasm BBQ/OMG, each its own chunk and audit. B-2e splits in three (2026-10-13): B-2e1 the Wasm plan ISB + the FTL; B-2e2 the kernel's address-space sync + the 128 MiB region; B-2e3 BBQ/OMG. | the same benchmark |
 | **B-3** | P3: the libraries, ICU first. | each library's own tests under Pouch |
 | **B-4** | P2: design document, then the primitive, then WebKit's `Platform/IPC` + `SharedMemory` backend. | two-process message + shared-bitmap witness; audit |
 | **B-5** | WebCore + WebKit2 bring-up, headless: `PORT=Thylacine`, modelled on PlayStation. P5 resolved here. | `WKPagePaint` renders a local page to a PNG on the device |
