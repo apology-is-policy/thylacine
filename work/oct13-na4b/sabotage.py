@@ -31,10 +31,12 @@ CASES = [
     '''            self.inner.shared().abort(scope);''')]),
  ('name-late', 'each_walk_name_is_read_inside_the_enter_that_consumes_it',
   [('native/mod.rs', '''        unsafe { self.sq.push(&sqe) };
+        self.shared.submitted.set(self.shared.submitted.get() + 1);
         self.enter();
         Ok(cookie)''', '''        let late = self.sq.next_slot() as usize;
         unsafe { core::ptr::write_bytes(self.sq.names.add(late * NAME_CELL), 0, NAME_CELL) };
         unsafe { self.sq.push(&sqe) };
+        self.shared.submitted.set(self.shared.submitted.get() + 1);
         self.enter();
         Ok(cookie)''')]),
  ('name-one-cell', 'queued_walks_keep_their_own_name_cells',
@@ -86,9 +88,17 @@ CASES = [
             }
         }''')]),
  ('enter-ebadf-ignored', 'an_enter_that_finds_the_descriptor_closed_forgets_it',
-  [('native/mod.rs', 'if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {', 'if rc == -(ECANCELED as i64) {')]),
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+            self.lost();
+        }''', '''if rc == -(ECANCELED as i64) {
+            self.lost();
+        }''')]),
  ('enter-ecanceled-ignored', 'an_enter_that_races_the_close_forgets_the_descriptor',
-  [('native/mod.rs', 'if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {', 'if rc == -(EBADF as i64) {')]),
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+            self.lost();
+        }''', '''if rc == -(EBADF as i64) {
+            self.lost();
+        }''')]),
  ('pollnval-ignored', 'a_poll_that_finds_the_descriptor_closed_forgets_it',
   [('native/mod.rs', 'if events & (POLLHUP | POLLNVAL) != 0 {', 'if events & POLLHUP != 0 {')]),
  ('pollhup-ignored', 'a_hangup_while_polling_forgets_the_descriptor',
@@ -161,6 +171,10 @@ CASES = [
   [('native/mod.rs', '''                        if cqe.result > 0 {
                             let rc = self.shared.return_buffer(d.record.receipt);''', '''                        if false {
                             let rc = self.shared.return_buffer(d.record.receipt);''')]),
+ ('return-ebadf-ignored', 'a_late_shot_after_the_ring_closed_under_forgets_the_descriptor',
+  [('native/mod.rs', '''if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+                                self.lost();''', '''if rc == -(ECANCELED as i64) {
+                                self.lost();''')]),
  ('dropped-stream-lease-kept', 'a_stream_dropped_before_its_end_returns_the_shots_still_arriving',
   [('native/mod.rs', 'drop(rejected); // An abandoned stream', 'core::mem::forget(rejected); // An abandoned stream')]),
 ]
@@ -184,6 +198,7 @@ def main():
         if only and case not in only:
             continue
         saved = {}
+        rotten = None
         try:
             for rel, old, new in edits:
                 path = os.path.join(SRC, rel)
@@ -191,12 +206,21 @@ def main():
                     saved[path] = open(path).read()
                 text = open(path).read()
                 if text.count(old) != 1:
-                    raise SystemExit(f'{case}: anchor not unique in {rel}: {old[:50]!r}')
+                    # A case that cannot apply is a verdict of its own, never a
+                    # reason to stop the census before the cases after it.
+                    rotten = f'{rel}: {text.count(old)} matches for {old[:50]!r}'
+                    break
                 open(path, 'w').write(text.replace(old, new))
-            rc, text = run_one(test, os.path.join(out, case + '.log'))
+            if rotten is None:
+                rc, text = run_one(test, os.path.join(out, case + '.log'))
         finally:
             for path, body in saved.items():
                 open(path, 'w').write(body)
+        if rotten is not None:
+            verdict = 'ANCHOR-ROT'
+            print(f'{verdict:12} {case:24} {rotten}')
+            bad.append(case)
+            continue
         if 'error[' in text or 'could not compile' in text:
             verdict = 'BUILD-ERROR'
         elif 'running 1 test' not in text:

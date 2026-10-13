@@ -1049,7 +1049,7 @@ unsafe impl Kernel for SimKernel {
         let mut consumed = 0;
         for _ in 0..budget {
             let tail = s.word(1).load(Ordering::Acquire);
-            if !s.cq_room() || !s.deferred.is_empty() || tail == s.ring().sq_head {
+            if !s.cq_room() || !s.deferred.is_empty() || !s.rejected.is_empty() || tail == s.ring().sq_head {
                 break;
             }
             let p = s.ring().p;

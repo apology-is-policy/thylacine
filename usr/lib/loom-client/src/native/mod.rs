@@ -588,7 +588,12 @@ impl<K: Kernel> Inner<K> {
                     Err(StorageError::Closing) => {
                         if cqe.result > 0 {
                             let rc = self.shared.return_buffer(d.record.receipt);
-                            if rc != 0 && rc != -(ENOENT as i64) && rc != -(ECANCELED as i64) {
+                            // As at ENTER: the ring was closed under the adapter.
+                            if rc == -(ECANCELED as i64) || rc == -(EBADF as i64) {
+                                self.lost();
+                                return Err(-ECANCELED);
+                            }
+                            if rc != 0 && rc != -(ENOENT as i64) {
                                 self.fail();
                                 return Err(-EIO);
                             }

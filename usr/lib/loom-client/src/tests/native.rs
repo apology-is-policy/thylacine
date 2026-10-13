@@ -788,3 +788,28 @@ fn a_stream_dropped_before_its_end_returns_the_shots_still_arriving() {
     assert_eq!(sim.s().returns, 8, "each late shot's lease went straight back");
     drop((fid, scope, pool));
 }
+
+#[test]
+fn a_late_shot_after_the_ring_closed_under_forgets_the_descriptor() {
+    let sim = Sim::new();
+    file(&sim, "burst", b"");
+    sim.s()
+        .shots
+        .insert(b"burst".to_vec(), (0..8).map(|i| vec![b'a' + i; 4]).collect());
+    let r = ring(&sim, 2, &[4096]);
+    let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
+    let pool = r.pool(&members).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"burst", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let stream = fid.stream(&pool, 0, 64, true, None).unwrap();
+    r.turn(Some(r.now() + MS)).unwrap();
+    drop(stream);
+    r.retire();
+    sim.close_under();
+    // The first late shot's RETURN finds the descriptor gone.
+    assert_eq!(r.turn(Some(r.now() + MS)).err(), Some(ECANCELED as i32));
+    drop((fid, scope, pool, r));
+    assert_eq!(sim.s().closed_fds, vec![7], "the lost number is never closed");
+}

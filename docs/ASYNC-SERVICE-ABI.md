@@ -476,8 +476,10 @@ member remains. So each progress turn retries REAP until it succeeds. The
 backend's whole-ring calls map as follows:
 - `begin_retire` closes local admission and aborts every scope the adapter owns;
 - `retired` holds once every SQE the adapter pushed has had its terminal CQE
-  taken (each SQE the kernel consumes ends in exactly one, I-29), each of those
-  scopes reports RETIRED, and no fixed or pool reference remains. RETIRED alone
+  taken, each of those scopes reports RETIRED, and no fixed buffer or payload
+  lease remains. The private frontend ends every SQE it consumes in exactly one
+  terminal: an admitted one by I-29, a refused one through its precharged
+  refusal; a dropped SQE ends in none, and the adapter panics on one. RETIRED alone
   is not enough: the engine retires a scope in the visit that cancels its last
   operation and posts that terminal on a later one, and ENTER can hold a refusal
   back against a full CQ that no request record (and so no QUERY) counts.
