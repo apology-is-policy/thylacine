@@ -129,14 +129,19 @@ static void descriptors(void) {
     long neg = t_lseek(file, 0, -1);
     CHECK(neg == -E_INVAL, "lseek: a negative whence is still refused", neg);
 
-    // wstat: every field that does not fit is refused before the file is asked.
-    PAIR(t_wstat(file, T_WSTAT_MODE, 0644, 0, 0), t_wstat(file, W | T_WSTAT_MODE, 0644, 0, 0),
+    // wstat: every field that does not fit is refused before the descriptor is
+    // looked up. A closed descriptor keeps the narrow call from changing any
+    // file: it passes the width check and stops at the lookup's -1.
+    long dead = t_dup(file, T_RIGHT_READ);
+    CHECK(dead >= 0, "dup for wstat", dead);
+    CHECK(t_close(dead) == 0, "close for wstat", dead);
+    PAIR(t_wstat(dead, T_WSTAT_MODE, 0644, 0, 0), t_wstat(dead, W | T_WSTAT_MODE, 0644, 0, 0),
          -E_INVAL, "wstat valid");
-    PAIR(t_wstat(file, T_WSTAT_MODE, 0644, 0, 0), t_wstat(file, T_WSTAT_MODE, W | 0644, 0, 0),
+    PAIR(t_wstat(dead, T_WSTAT_MODE, 0644, 0, 0), t_wstat(dead, T_WSTAT_MODE, W | 0644, 0, 0),
          -E_INVAL, "wstat mode");
-    PAIR(t_wstat(file, T_WSTAT_UID, 0, 5, 0), t_wstat(file, T_WSTAT_UID, 0, W | 5, 0),
+    PAIR(t_wstat(dead, T_WSTAT_UID, 0, 5, 0), t_wstat(dead, T_WSTAT_UID, 0, W | 5, 0),
          -E_INVAL, "wstat uid");
-    PAIR(t_wstat(file, T_WSTAT_GID, 0, 0, 5), t_wstat(file, T_WSTAT_GID, 0, 0, W | 5),
+    PAIR(t_wstat(dead, T_WSTAT_GID, 0, 0, 5), t_wstat(dead, T_WSTAT_GID, 0, 0, W | 5),
          -E_INVAL, "wstat gid");
 
     t_close(dir);

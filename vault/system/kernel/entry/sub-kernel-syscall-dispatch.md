@@ -1609,7 +1609,10 @@ translate Linux calls, whose narrowing is Linux's ([[sub-kernel-vivarium]]).
 `/bin/argwidth-probe`, spawned by `syscall.argwidth_probe`, makes each covered
 call twice from EL0, the second time with a bit set above the declared width,
 and requires the refusal from the wide call and anything else from the narrow
-one. Not covered at runtime, because their refusals share the flat -1 (ER-3)
+one. A narrow call that could change a shared file (wstat) names a closed
+descriptor, so it passes the width check and stops at the lookup's -1: the
+probe runs inside the suite, and a chmod of a ramfs binary would outlive it.
+Not covered at runtime, because their refusals share the flat -1 (ER-3)
 or need hardware or a service: the hardware handles (irq_wait, mmio_map,
 dma_map, dma_segments, pci_info, burrow_from_hostmem), weft_map, mount,
 attach_9p and attach_9p_srv, srv_accept and srv_peer, the tty pair,
