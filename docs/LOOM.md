@@ -303,7 +303,7 @@ handler, already gives for the same condition:
 | an unknown flag bit (SETUP, ENTER); entries 0, past `LOOM_MAX_ENTRIES` or not a power of two; nargs past the op's cap; an unknown op | `-T_E_INVAL` |
 | a buffer that does not resolve: length 0 or past 4 GiB, a wrapping range, an unmapped VA, memory that is not anonymous or not writable, a range across two VMAs | `-T_E_INVAL` |
 | a HANDLES entry whose 9P client cannot do a deadline receive, on an SQPOLL ring | `-T_E_OPNOTSUPP` |
-| no VA gap for the ring, the per-address-space page cap, a mapping failure, the SQPOLL thread failing to start | `-T_E_NOMEM` |
+| the ring's own allocation (kernel heap or the user page pool), no VA gap for the ring, the per-address-space page cap, a mapping failure, the SQPOLL thread failing to start | `-T_E_NOMEM` |
 | the SQPOLL thread over the Proc's thread cap | `-T_E_AGAIN` |
 | a full handle table | `-T_E_MFILE` |
 | any argument with bits above its declared width (ERRORS.md principle 6) | `-T_E_BADF` for a descriptor, `-T_E_INVAL` otherwise |

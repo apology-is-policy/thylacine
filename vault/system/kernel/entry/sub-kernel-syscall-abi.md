@@ -498,7 +498,8 @@ be one 4 KiB staging buffer per round trip.
   know which is which per call. One exception, 2026-10-13 (operator vote 6):
   Loom's ENTER and REGISTER answer a descriptor that names no ring with
   `-T_E_BADF`, and an unknown REGISTER op with `-T_E_INVAL`. Since vote 7 the
-  same day every Loom refusal is an errno (LOOM.md 8.2a).
+  same day every Loom refusal is an errno (LOOM.md 8.2a), as the comments on
+  libthyla-rs's raw `t_loom_*` wrappers now say.
 - **A too-wide argument is refused, never truncated (operator vote 8,
   2026-10-13; ERRORS.md principle 6).** Loom conforms (the next sentences
   describe it before the vote). Handlers that still cast a high word away

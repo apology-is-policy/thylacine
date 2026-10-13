@@ -834,22 +834,24 @@ void test_loom_setup_rejects(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc returned NULL");
 
+    // Read every answer, drop the Proc, then assert: a failed check (which
+    // returns) must not leak the Proc into later tests.
     struct loom_params kp;
     hidx_t fd = -1;
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 0, 0, &kp, &fd), -T_E_INVAL,
-                   "entries 0 answers -EINVAL");
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 3, 0, &kp, &fd), -T_E_INVAL,
-                   "non-pow2 answers -EINVAL");
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, LOOM_MAX_ENTRIES * 2u, 0, &kp, &fd), -T_E_INVAL,
-                   "over-max answers -EINVAL");
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_CQSIZE, &kp, &fd), -T_E_INVAL,
-                   "still-reserved LOOM_SETUP_CQSIZE flag answers -EINVAL");
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, 0x80000000u, &kp, &fd), -T_E_INVAL,
-                   "unknown high setup-flag bit answers -EINVAL");
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(NULL, 8, 0, &kp, &fd), -T_E_INVAL,
-                   "NULL proc answers -EINVAL");
-
+    int zero    = sys_loom_setup_for_proc(p, 0, 0, &kp, &fd);
+    int npow2   = sys_loom_setup_for_proc(p, 3, 0, &kp, &fd);
+    int overmax = sys_loom_setup_for_proc(p, LOOM_MAX_ENTRIES * 2u, 0, &kp, &fd);
+    int cqsize  = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_CQSIZE, &kp, &fd);
+    int highbit = sys_loom_setup_for_proc(p, 8, 0x80000000u, &kp, &fd);
+    int noproc  = sys_loom_setup_for_proc(NULL, 8, 0, &kp, &fd);
     test_proc_drop(p);
+
+    TEST_EXPECT_EQ(zero, -T_E_INVAL, "entries 0 answers -EINVAL");
+    TEST_EXPECT_EQ(npow2, -T_E_INVAL, "non-pow2 answers -EINVAL");
+    TEST_EXPECT_EQ(overmax, -T_E_INVAL, "over-max answers -EINVAL");
+    TEST_EXPECT_EQ(cqsize, -T_E_INVAL, "still-reserved LOOM_SETUP_CQSIZE flag answers -EINVAL");
+    TEST_EXPECT_EQ(highbit, -T_E_INVAL, "unknown high setup-flag bit answers -EINVAL");
+    TEST_EXPECT_EQ(noproc, -T_E_INVAL, "NULL proc answers -EINVAL");
 }
 
 // The two resource refusals a plain setup can meet after the ring exists: each
@@ -929,37 +931,40 @@ void test_loom_register_rejects(void) {
     hidx_t rd = -1, wr = -1;
     TEST_ASSERT(sys_pipe_for_proc(p, &rd, &wr) == 0, "pipe pair");
 
+    // Every answer is read and the Proc dropped before any assertion, so a
+    // failed check (which returns) leaks neither the Proc nor its ring.
     hidx_t one[1] = { rd };
     // Unsupported op (BUFFERS reserved for Loom-6).
-    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1),
-                   -T_E_INVAL, "LOOM_REGISTER_BUFFERS through the HANDLES entry answers -EINVAL");
+    int wrong_op = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1);
     // nargs over the table cap.
-    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, one,
-                                              LOOM_MAX_REG_HANDLES + 1u),
-                   -T_E_INVAL, "nargs over cap answers -EINVAL");
+    int over_cap = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, one,
+                                              LOOM_MAX_REG_HANDLES + 1u);
     // A listed descriptor that is not a Spoor (the loom fd itself), or names
     // nothing, answers -EBADF.
     hidx_t bad[1] = { loom_fd };
-    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1),
-                   -T_E_BADF, "a listed non-Spoor answers -EBADF");
+    int listed_kind = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1);
     hidx_t dead[2] = { rd, (hidx_t)999 };
-    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, dead, 2),
-                   -T_E_BADF, "a listed descriptor naming nothing answers -EBADF");
-    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, loom_fd, 0, 0, 0x80000000u), -T_E_INVAL,
-                   "ENTER with an unknown flag bit answers -EINVAL");
+    int listed_dead = sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, dead, 2);
+    int enter_flag = sys_loom_enter_for_proc(p, loom_fd, 0, 0, 0x80000000u);
     // A bogus loom_fd is rejected.
-    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1),
-                   -T_E_BADF, "bad loom_fd answers -EBADF");
+    int ring_dead = sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1);
     // A descriptor naming no Loom answers -EBADF too, and so does ENTER: a
     // client tells a ring closed under it from its own error by this answer.
-    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, rd, LOOM_REGISTER_HANDLES, one, 1),
-                   -T_E_BADF, "non-Loom loom_fd answers -EBADF");
-    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, (hidx_t)999, 0, 0, 0), -T_E_BADF,
-                   "ENTER on a bad descriptor answers -EBADF");
-    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, rd, 0, 0, 0), -T_E_BADF,
-                   "ENTER on a non-Loom descriptor answers -EBADF");
-
+    int ring_kind = sys_loom_register_for_proc(p, rd, LOOM_REGISTER_HANDLES, one, 1);
+    int enter_dead = sys_loom_enter_for_proc(p, (hidx_t)999, 0, 0, 0);
+    int enter_kind = sys_loom_enter_for_proc(p, rd, 0, 0, 0);
     test_proc_drop(p);
+
+    TEST_EXPECT_EQ(wrong_op, -T_E_INVAL,
+                   "LOOM_REGISTER_BUFFERS through the HANDLES entry answers -EINVAL");
+    TEST_EXPECT_EQ(over_cap, -T_E_INVAL, "nargs over cap answers -EINVAL");
+    TEST_EXPECT_EQ(listed_kind, -T_E_BADF, "a listed non-Spoor answers -EBADF");
+    TEST_EXPECT_EQ(listed_dead, -T_E_BADF, "a listed descriptor naming nothing answers -EBADF");
+    TEST_EXPECT_EQ(enter_flag, -T_E_INVAL, "ENTER with an unknown flag bit answers -EINVAL");
+    TEST_EXPECT_EQ(ring_dead, -T_E_BADF, "bad loom_fd answers -EBADF");
+    TEST_EXPECT_EQ(ring_kind, -T_E_BADF, "non-Loom loom_fd answers -EBADF");
+    TEST_EXPECT_EQ(enter_dead, -T_E_BADF, "ENTER on a bad descriptor answers -EBADF");
+    TEST_EXPECT_EQ(enter_kind, -T_E_BADF, "ENTER on a non-Loom descriptor answers -EBADF");
 }
 
 void test_loom_register_replaces(void) {
@@ -1961,41 +1966,44 @@ void test_loom_sqpoll_charges_thread_budget(void) {
 
     p->thread_count = PROC_THREAD_MAX - 1;    // boundary without 255 real threads
 
-    // At cap-1: one SQPOLL setup fits and takes the charge.
+    // Every reading is taken and the Proc dropped before any assertion: a failed
+    // check (which returns) must not leave behind a Proc with a pre-loaded
+    // thread count and a parked kthread.
     struct loom_params kp;
-    hidx_t fd1 = -1;
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd1), 0,
-                   "SQPOLL setup at cap-1 succeeds");
-    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)1, "kthread charged to the creator");
-
+    hidx_t fd1 = -1, fd2 = -1, fd3 = -1, fd4 = -1;
+    // At cap-1: one SQPOLL setup fits and takes the charge.
+    int at_cap1 = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd1);
+    u64 charged = (u64)p->loom_sqpoll_count;
     // At the cap: the next SQPOLL setup is REFUSED (pre-F1 it succeeded and the
-    // kthread escaped the budget entirely).
-    hidx_t fd2 = -1;
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd2), -T_E_AGAIN,
-                   "SQPOLL setup at the thread cap answers -EAGAIN");
-    // The refused ring never took a charge, and its free must not settle one
-    // (sqpoll_charged gates the uncharge): still exactly 1.
-    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)1, "refusal did not over-settle");
-    TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1,
-                   "the refused ring itself was reclaimed");
-
+    // kthread escaped the budget entirely). The refused ring never took a
+    // charge, and its free must not settle one (sqpoll_charged gates the
+    // uncharge): still exactly 1.
+    int at_cap = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd2);
+    u64 after_refusal = (u64)p->loom_sqpoll_count;
+    u64 refused_freed = loom_total_destroyed() - destroyed0;
     // A plain (non-SQPOLL) ring is not thread-charged -- the budget bounds
     // kthreads, not rings.
-    hidx_t fd3 = -1;
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, 0, &kp, &fd3), 0,
-                   "a plain ring still fits at the thread cap");
-    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)1, "plain ring took no charge");
-
+    int plain = sys_loom_setup_for_proc(p, 8, 0, &kp, &fd3);
+    u64 after_plain = (u64)p->loom_sqpoll_count;
     // Close the charged ring: loom_free joins the kthread and settles the
     // charge exactly once; the freed budget admits a new SQPOLL setup.
-    TEST_EXPECT_EQ(handle_close(p, fd1), 0, "close the SQPOLL ring");
-    TEST_EXPECT_EQ((u64)p->loom_sqpoll_count, (u64)0, "charge settled on close");
-    hidx_t fd4 = -1;
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd4), 0,
-                   "SQPOLL setup fits again after the close (uncharge proof)");
+    int closed = handle_close(p, fd1);
+    u64 after_close = (u64)p->loom_sqpoll_count;
+    int again = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd4);
 
     p->thread_count = 0;                      // reset for proc_free's gate
     test_proc_drop(p);
+
+    TEST_EXPECT_EQ(at_cap1, 0, "SQPOLL setup at cap-1 succeeds");
+    TEST_EXPECT_EQ(charged, (u64)1, "kthread charged to the creator");
+    TEST_EXPECT_EQ(at_cap, -T_E_AGAIN, "SQPOLL setup at the thread cap answers -EAGAIN");
+    TEST_EXPECT_EQ(after_refusal, (u64)1, "refusal did not over-settle");
+    TEST_EXPECT_EQ(refused_freed, (u64)1, "the refused ring itself was reclaimed");
+    TEST_EXPECT_EQ(plain, 0, "a plain ring still fits at the thread cap");
+    TEST_EXPECT_EQ(after_plain, (u64)1, "plain ring took no charge");
+    TEST_EXPECT_EQ(closed, 0, "close the SQPOLL ring");
+    TEST_EXPECT_EQ(after_close, (u64)0, "charge settled on close");
+    TEST_EXPECT_EQ(again, 0, "SQPOLL setup fits again after the close (uncharge proof)");
 }
 
 // ---------------------------------------------------------------------------
@@ -3788,12 +3796,12 @@ static const char *loom_native_operations_case(struct Loom *l,struct Proc *creat
     NO(loom_native_submit(l,creator,(struct loom_sqe){.opcode=LOOM_OP_CLUNK,
        .handle_idx=child.slot,.user_data=105,._resv1={0,child.incarnation,0,0}}),
        "native CLUNK submitted");
-    int held=0;
-    for(u64 end=timer_now_ns()+2000000000ull;!held && timer_now_ns()<end;) {
-        sched();held=loom_native_peer_step(server,&peer);
+    int step=0;
+    for(u64 end=timer_now_ns()+2000000000ull;!step && timer_now_ns()<end;) {
+        sched();step=loom_native_peer_step(server,&peer);
     }
     // Read, release, then assert: a failed check must not leave TCLUNK held.
-    bool was_held=held==2 && peer.seen==12;
+    bool was_held=step==2 && peer.seen==12;
     struct loom_service_snapshot clunking;
     int reap_mid=loom_private_service_reap(l,creator,&child_control);
     int query_mid=control_native_query(l,creator,child,&clunking);

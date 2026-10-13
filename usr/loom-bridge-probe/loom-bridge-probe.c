@@ -201,9 +201,11 @@ static void pre_route_refusals(void) {
 // cast would turn into a request that succeeds.
 static void ordinary_refusals(void) {
     fill(&g_params, 0xA5, sizeof(g_params));
-    CHECK(setup_at(&g_params, 0, 3) == -E_INVAL, "ordinary setup: entries 3", 0);
-    CHECK(setup_at(&g_params, 0x100u, 2) == -E_INVAL, "ordinary setup: an unknown flag", 0);
-    long rc = setup_at(&g_params, 0, (1ul << 32) | 2);
+    long rc = setup_at(&g_params, 0, 3);
+    CHECK(rc == -E_INVAL, "ordinary setup: entries 3", rc);
+    rc = setup_at(&g_params, 0x100u, 2);
+    CHECK(rc == -E_INVAL, "ordinary setup: an unknown flag", rc);
+    rc = setup_at(&g_params, 0, (1ul << 32) | 2);
     CHECK(rc == -E_INVAL, "setup entries above 32 bits: -EINVAL", rc);
     p1_writable(1);
     fill(g_p1, 0, sizeof(struct t_loom_params));
