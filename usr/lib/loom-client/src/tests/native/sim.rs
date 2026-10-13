@@ -5,9 +5,12 @@
 //! reports POLLIN for a non-empty CQ and POLLHUP while closing. The service is
 //! a strict 9P server with a flat file tree, answering on the next poll.
 use crate::native::{Kernel, POLLHUP, POLLIN, POLLNVAL, Setup};
-use crate::ring_records::{BufferRange, CQE_MORE, OP_CLUNK, OP_LOPEN, OP_READ, OP_WALK, OP_WRITE, SQE_MULTISHOT, Submission};
+use crate::ring_records::{
+    BufferRange, CQE_MORE, OP_CLUNK, OP_LOPEN, OP_READ, OP_WALK, OP_WRITE, SQE_MULTISHOT,
+    Submission,
+};
 use crate::service_abi::{
-    BufferReceipt, BufferReturn, Control, CQE_SERVICE_BUFFER, OP_SERVICE_CONNECT, PoolCreate,
+    BufferReceipt, BufferReturn, CQE_SERVICE_BUFFER, Control, OP_SERVICE_CONNECT, PoolCreate,
     PoolMember, Reservation, SQE_BUFFER_SELECT, SlotRef, Snapshot, Target,
 };
 use std::{
@@ -52,12 +55,29 @@ pub struct Slot {
 }
 #[derive(Clone, Debug)]
 enum OpKind {
-    Connect { target: usize },
-    Walk { dest: usize, name: Vec<u8> },
+    Connect {
+        target: usize,
+    },
+    Walk {
+        dest: usize,
+        name: Vec<u8>,
+    },
     Open,
-    Read { buf: u32, at: u64, len: u32 },
-    Write { buf: u32, at: u64, len: u32 },
-    Pooled { pool: usize, limit: u32, multi: bool },
+    Read {
+        buf: u32,
+        at: u64,
+        len: u32,
+    },
+    Write {
+        buf: u32,
+        at: u64,
+        len: u32,
+    },
+    Pooled {
+        pool: usize,
+        limit: u32,
+        multi: bool,
+    },
     Clunk,
 }
 #[derive(Clone, Debug)]
@@ -106,6 +126,7 @@ pub struct State {
     pub aborts: Vec<usize>,
     pub reaps: Vec<usize>,
     pub clunks: usize,
+    pub clunk_sqes: usize,
     pub returns: usize,
     pub closed_fds: Vec<i32>,
     next_lease: u64,
@@ -143,6 +164,7 @@ impl Sim {
             aborts: Vec::new(),
             reaps: Vec::new(),
             clunks: 0,
+            clunk_sqes: 0,
             returns: 0,
             closed_fds: Vec::new(),
             next_lease: 1,
@@ -199,7 +221,11 @@ fn shape(s: &Submission, pools: bool) -> i64 {
         return EINVAL;
     }
     let pooled = s.opcode == OP_READ && s.flags as u32 & SQE_BUFFER_SELECT != 0;
-    let allowed = if pooled { SQE_BUFFER_SELECT as u8 | SQE_MULTISHOT } else { 0 };
+    let allowed = if pooled {
+        SQE_BUFFER_SELECT as u8 | SQE_MULTISHOT
+    } else {
+        0
+    };
     if s.flags & !allowed != 0 {
         return EINVAL;
     }
@@ -207,19 +233,41 @@ fn shape(s: &Submission, pools: bool) -> i64 {
         OP_SERVICE_CONNECT if !no_buffer || !dest => EINVAL,
         OP_SERVICE_CONNECT => 0,
         o if o == OP_WALK as u32 => {
-            if !dest || s.len > 255 || if s.len != 0 { !fixed } else { !no_buffer } { EINVAL } else { 0 }
+            if !dest || s.len > 255 || if s.len != 0 { !fixed } else { !no_buffer } {
+                EINVAL
+            } else {
+                0
+            }
         }
         o if o == OP_LOPEN as u32 => {
-            if s.offset > 2 || s.args[2] != 0 || !no_buffer { EINVAL } else { 0 }
+            if s.offset > 2 || s.args[2] != 0 || !no_buffer {
+                EINVAL
+            } else {
+                0
+            }
         }
         o if o == OP_READ as u32 && pooled => {
-            if !pools { -95 } else if s.len == 0 || s.buf_idx_or_off >= 64 || s.args[2] == 0 || s.args[0] != 0 { EINVAL } else { 0 }
+            if !pools {
+                -95
+            } else if s.len == 0 || s.buf_idx_or_off >= 64 || s.args[2] == 0 || s.args[0] != 0 {
+                EINVAL
+            } else {
+                0
+            }
         }
         o if o == OP_READ as u32 || o == OP_WRITE as u32 => {
-            if s.args[2] != 0 || !fixed { EINVAL } else { 0 }
+            if s.args[2] != 0 || !fixed {
+                EINVAL
+            } else {
+                0
+            }
         }
         o if o == OP_CLUNK as u32 => {
-            if s.offset != 0 || s.args[2] != 0 || !no_buffer { EINVAL } else { 0 }
+            if s.offset != 0 || s.args[2] != 0 || !no_buffer {
+                EINVAL
+            } else {
+                0
+            }
         }
         _ => -95,
     }
@@ -234,7 +282,11 @@ impl State {
     }
     fn word(&self, i: usize) -> &AtomicU32 {
         let r = self.ring();
-        unsafe { &*(r.va as *mut u8).add(r.p.hdr_off as usize + 4 * i).cast::<AtomicU32>() }
+        unsafe {
+            &*(r.va as *mut u8)
+                .add(r.p.hdr_off as usize + 4 * i)
+                .cast::<AtomicU32>()
+        }
     }
     fn cq_room(&self) -> bool {
         let r = self.ring();
@@ -247,7 +299,9 @@ impl State {
     /// Post deferred completions in order while the CQ has room.
     fn flush(&mut self) {
         while self.cq_room() {
-            let Some((user_data, result, flags, receipt)) = self.deferred.pop_front() else { break };
+            let Some((user_data, result, flags, receipt)) = self.deferred.pop_front() else {
+                break;
+            };
             let user_data = self.forge_next.take().unwrap_or(user_data);
             let base = self.base();
             let r = self.ring.as_mut().unwrap();
@@ -297,7 +351,10 @@ impl State {
     }
     fn abort_all(&mut self) {
         for i in 0..64 {
-            if self.slots[i].as_ref().is_some_and(|s| s.kind == SlotKind::Scope) {
+            if self.slots[i]
+                .as_ref()
+                .is_some_and(|s| s.kind == SlotKind::Scope)
+            {
                 self.cancel_scope(i, ECANCELED);
             }
         }
@@ -321,6 +378,8 @@ impl State {
         let borrowed = self.ops.iter().any(|o| {
             o.source == i || o.scope == i || matches!(o.kind, OpKind::Connect { target } if target == i)
                 || matches!(o.kind, OpKind::Pooled { pool, .. } if pool == i)
+                // loom_fid_claim_walk pins the destination until the WALK ends.
+                || matches!(o.kind, OpKind::Walk { dest, .. } if dest == i)
         });
         if borrowed {
             return false;
@@ -329,17 +388,19 @@ impl State {
             SlotKind::Target => true,
             SlotKind::Pool => self.pools[&i].iter().all(|m| m.lease.is_none()),
             SlotKind::Scope => {
-                let pinned = self
-                    .slots
-                    .iter()
-                    .enumerate()
-                    .any(|(j, f)| j != i && f.as_ref().is_some_and(|f| f.kind == SlotKind::Fid && f.scope == i));
+                let pinned = self.slots.iter().enumerate().any(|(j, f)| {
+                    j != i
+                        && f.as_ref()
+                            .is_some_and(|f| f.kind == SlotKind::Fid && f.scope == i)
+                });
                 !pinned && (sl.state == RESERVED || sl.state == RETIRED)
             }
             SlotKind::Fid => {
                 sl.state == RESERVED
                     || sl.state == RETIRED
-                    || self.slots[sl.scope].as_ref().is_some_and(|p| p.state == RETIRED)
+                    || self.slots[sl.scope]
+                        .as_ref()
+                        .is_some_and(|p| p.state == RETIRED)
             }
         }
     }
@@ -354,10 +415,15 @@ impl State {
             .collect();
         for scope in expired {
             // Any operation timeout terminally aborts its whole scope.
-            let (gone, kept): (Vec<Op>, Vec<Op>) = self.ops.drain(..).partition(|o| o.scope == scope);
+            let (gone, kept): (Vec<Op>, Vec<Op>) =
+                self.ops.drain(..).partition(|o| o.scope == scope);
             self.ops = kept.into();
             for op in gone {
-                let r = if op.deadline != 0 && op.deadline <= now { ETIMEDOUT } else { ECANCELED };
+                let r = if op.deadline != 0 && op.deadline <= now {
+                    ETIMEDOUT
+                } else {
+                    ECANCELED
+                };
                 self.post(op.user_data, r as i32, 0, zero());
             }
             if let Some(s) = self.slots[scope].as_mut() {
@@ -388,7 +454,10 @@ impl State {
         let file = self.slots[op.source].as_ref().and_then(|s| s.name.clone());
         let rc: i64 = match &op.kind {
             OpKind::Connect { target } => {
-                let name = self.slots[*target].as_ref().and_then(|t| t.name.clone()).unwrap();
+                let name = self.slots[*target]
+                    .as_ref()
+                    .and_then(|t| t.name.clone())
+                    .unwrap();
                 let scope = self.slots[op.scope].as_mut().unwrap();
                 if self.services.contains(&name) {
                     scope.state = READY;
@@ -404,7 +473,11 @@ impl State {
                 } else if name.is_empty() || self.files.contains_key(name) {
                     let d = self.slots[*dest].as_mut().unwrap();
                     d.state = READY;
-                    d.name = if name.is_empty() { file } else { Some(name.clone()) };
+                    d.name = if name.is_empty() {
+                        file
+                    } else {
+                        Some(name.clone())
+                    };
                     *dest as i64
                 } else {
                     ENOENT
@@ -415,7 +488,11 @@ impl State {
                 0
             }
             OpKind::Read { buf, at, len } => {
-                let data = self.files.get(file.as_ref().unwrap()).cloned().unwrap_or_default();
+                let data = self
+                    .files
+                    .get(file.as_ref().unwrap())
+                    .cloned()
+                    .unwrap_or_default();
                 let start = (op.offset as usize).min(data.len());
                 let n = (data.len() - start).min(*len as usize);
                 let dst = self.buffer(*buf, *at, *len).unwrap();
@@ -470,7 +547,9 @@ impl State {
                     members[m].lease = Some(lease);
                     let range = members[m].range;
                     self.next_lease += 1;
-                    let dst = self.buffer(range.buffer_index, range.offset, shot.len() as u32).unwrap();
+                    let dst = self
+                        .buffer(range.buffer_index, range.offset, shot.len() as u32)
+                        .unwrap();
                     unsafe { std::ptr::copy_nonoverlapping(shot.as_ptr(), dst, shot.len()) };
                     let receipt = BufferReceipt {
                         pool: SlotRef {
@@ -483,7 +562,12 @@ impl State {
                         lease,
                     };
                     let more = if multi { CQE_MORE } else { 0 };
-                    self.post(op.user_data, shot.len() as i32, CQE_SERVICE_BUFFER | more, receipt);
+                    self.post(
+                        op.user_data,
+                        shot.len() as i32,
+                        CQE_SERVICE_BUFFER | more,
+                        receipt,
+                    );
                     if !multi {
                         return None;
                     }
@@ -509,7 +593,9 @@ impl State {
             reserved: 0,
             incarnation: s.args[1],
         };
-        let Some(src) = self.live(source).cloned() else { return ENOENT };
+        let Some(src) = self.live(source).cloned() else {
+            return ENOENT;
+        };
         let dest = SlotRef {
             slot: s.offset as u32,
             reserved: 0,
@@ -517,13 +603,24 @@ impl State {
         };
         let (scope, kind) = match s.opcode as u32 {
             OP_SERVICE_CONNECT => {
-                let Some(d) = self.live(dest) else { return ENOENT };
-                if src.kind != SlotKind::Target || d.kind != SlotKind::Scope || d.state != RESERVED {
+                let Some(d) = self.live(dest) else {
+                    return ENOENT;
+                };
+                if src.kind != SlotKind::Target || d.kind != SlotKind::Scope || d.state != RESERVED
+                {
                     return ENOENT;
                 }
-                (dest.slot as usize, OpKind::Connect { target: source.slot as usize })
+                (
+                    dest.slot as usize,
+                    OpKind::Connect {
+                        target: source.slot as usize,
+                    },
+                )
             }
             o => {
+                if o == OP_CLUNK as u32 {
+                    self.clunk_sqes += 1;
+                }
                 let scope = match src.kind {
                     SlotKind::Scope => source.slot as usize,
                     SlotKind::Fid => src.scope,
@@ -533,21 +630,28 @@ impl State {
                     return ECANCELED;
                 }
                 let kind = if o == OP_WALK as u32 {
-                    let Some(d) = self.live(dest) else { return ENOENT };
+                    let Some(d) = self.live(dest) else {
+                        return ENOENT;
+                    };
                     if d.kind != SlotKind::Fid || d.state != RESERVED || d.scope != scope {
                         return ENOENT;
                     }
                     let name = if s.len == 0 {
                         Vec::new()
                     } else {
-                        let Some(p) = self.buffer(s.buf_idx_or_off, s.args[0], s.len) else { return EINVAL };
+                        let Some(p) = self.buffer(s.buf_idx_or_off, s.args[0], s.len) else {
+                            return EINVAL;
+                        };
                         // Copied here, inside ENTER, as loom_private_io_prepare does.
                         unsafe { std::slice::from_raw_parts(p, s.len as usize) }.to_vec()
                     };
                     if name.iter().any(|&b| b == 0 || b == b'/') || name == b"." || name == b".." {
                         return EINVAL;
                     }
-                    OpKind::Walk { dest: dest.slot as usize, name }
+                    OpKind::Walk {
+                        dest: dest.slot as usize,
+                        name,
+                    }
                 } else if o == OP_LOPEN as u32 {
                     OpKind::Open
                 } else if o == OP_CLUNK as u32 {
@@ -661,7 +765,8 @@ unsafe impl Kernel for SimKernel {
             if nargs > 64 || !s.pools.is_empty() {
                 return if nargs > 64 { EINVAL } else { EBUSY };
             }
-            let table = unsafe { std::slice::from_raw_parts(arg.cast::<BufferRange>(), nargs as usize) };
+            let table =
+                unsafe { std::slice::from_raw_parts(arg.cast::<BufferRange>(), nargs as usize) };
             let mut fresh = Vec::new();
             for b in table {
                 let inside = s.regions.iter().any(|(&va, l)| {
@@ -682,7 +787,10 @@ unsafe impl Kernel for SimKernel {
         match op {
             2 => {
                 let t = unsafe { &mut *arg.cast::<Target>() };
-                if !header_ok(t.size, 288, t.version, t.flags) || t.name_len == 0 || t.name_len > 255 {
+                if !header_ok(t.size, 288, t.version, t.flags)
+                    || t.name_len == 0
+                    || t.name_len > 255
+                {
                     return EINVAL;
                 }
                 if closing {
@@ -695,7 +803,14 @@ unsafe impl Kernel for SimKernel {
                 if name.iter().any(|&b| b == 0 || b == b'/') {
                     return EINVAL;
                 }
-                let Some(r) = s.mint(Slot { kind: SlotKind::Target, inc: 0, state: READY, scope: 0, name: Some(name), open: false }) else {
+                let Some(r) = s.mint(Slot {
+                    kind: SlotKind::Target,
+                    inc: 0,
+                    state: READY,
+                    scope: 0,
+                    name: Some(name),
+                    open: false,
+                }) else {
                     return ENOSPC;
                 };
                 t.result = r;
@@ -710,13 +825,29 @@ unsafe impl Kernel for SimKernel {
                     return ECANCELED;
                 }
                 let slot = match rec.kind {
-                    2 if rec.scope == zero().pool => Slot { kind: SlotKind::Scope, inc: 0, state: RESERVED, scope: 0, name: None, open: false },
+                    2 if rec.scope == zero().pool => Slot {
+                        kind: SlotKind::Scope,
+                        inc: 0,
+                        state: RESERVED,
+                        scope: 0,
+                        name: None,
+                        open: false,
+                    },
                     3 => {
-                        let Some(sc) = s.live(rec.scope) else { return ENOENT };
+                        let Some(sc) = s.live(rec.scope) else {
+                            return ENOENT;
+                        };
                         if sc.kind != SlotKind::Scope || sc.state != READY {
                             return ENOENT;
                         }
-                        Slot { kind: SlotKind::Fid, inc: 0, state: RESERVED, scope: rec.scope.slot as usize, name: None, open: false }
+                        Slot {
+                            kind: SlotKind::Fid,
+                            inc: 0,
+                            state: RESERVED,
+                            scope: rec.scope.slot as usize,
+                            name: None,
+                            open: false,
+                        }
                     }
                     _ => return EINVAL,
                 };
@@ -729,7 +860,9 @@ unsafe impl Kernel for SimKernel {
             }
             4 => {
                 let c = unsafe { &*arg.cast::<Control>() };
-                let Some(sl) = s.live(c.object).cloned() else { return ENOENT };
+                let Some(sl) = s.live(c.object).cloned() else {
+                    return ENOENT;
+                };
                 if sl.kind != SlotKind::Scope {
                     return EINVAL;
                 }
@@ -749,7 +882,9 @@ unsafe impl Kernel for SimKernel {
             }
             5 => {
                 let q = unsafe { &mut *arg.cast::<Snapshot>() };
-                let Some(sl) = s.live(q.object).cloned() else { return ENOENT };
+                let Some(sl) = s.live(q.object).cloned() else {
+                    return ENOENT;
+                };
                 q.state = sl.state;
                 q.kind = match sl.kind {
                     SlotKind::Target => 1,
@@ -761,7 +896,9 @@ unsafe impl Kernel for SimKernel {
             }
             6 => {
                 let c = unsafe { &*arg.cast::<Control>() };
-                let Some(sl) = s.live(c.object).cloned() else { return ENOENT };
+                let Some(sl) = s.live(c.object).cloned() else {
+                    return ENOENT;
+                };
                 let i = c.object.slot as usize;
                 if !s.reapable(i, &sl) {
                     return EBUSY;
@@ -784,11 +921,20 @@ unsafe impl Kernel for SimKernel {
                     .map(|&range| Member { range, lease: None })
                     .collect();
                 for m in &members {
-                    if s.buffer(m.range.buffer_index, m.range.offset, m.range.length as u32).is_none() {
+                    if s.buffer(m.range.buffer_index, m.range.offset, m.range.length as u32)
+                        .is_none()
+                    {
                         return EINVAL;
                     }
                 }
-                let Some(r) = s.mint(Slot { kind: SlotKind::Pool, inc: 0, state: READY, scope: 0, name: None, open: false }) else {
+                let Some(r) = s.mint(Slot {
+                    kind: SlotKind::Pool,
+                    inc: 0,
+                    state: READY,
+                    scope: 0,
+                    name: None,
+                    open: false,
+                }) else {
                     return ENOSPC;
                 };
                 s.pools.insert(r.slot as usize, members);
@@ -804,7 +950,11 @@ unsafe impl Kernel for SimKernel {
                 if s.live(r.pool).is_none() {
                     return ENOENT;
                 }
-                let Some(m) = s.pools.get_mut(&(r.pool.slot as usize)).and_then(|p| p.get_mut(r.member as usize)) else {
+                let Some(m) = s
+                    .pools
+                    .get_mut(&(r.pool.slot as usize))
+                    .and_then(|p| p.get_mut(r.member as usize))
+                else {
                     return EINVAL;
                 };
                 if m.lease != Some(r.lease) {
@@ -831,7 +981,9 @@ unsafe impl Kernel for SimKernel {
         s.enters += 1;
         s.flush();
         let entries = s.ring().p.sq_entries;
-        let budget = to_submit.min(entries).min(s.enter_limit.unwrap_or(u32::MAX));
+        let budget = to_submit
+            .min(entries)
+            .min(s.enter_limit.unwrap_or(u32::MAX));
         let mut consumed = 0;
         for _ in 0..budget {
             let tail = s.word(1).load(Ordering::Acquire);
@@ -841,11 +993,16 @@ unsafe impl Kernel for SimKernel {
             let p = s.ring().p;
             let head = s.ring().sq_head;
             let index = unsafe {
-                (*s.base().add(p.sq_array_off as usize + 4 * (head & (entries - 1)) as usize).cast::<AtomicU32>())
-                    .load(Ordering::Acquire)
+                (*s.base()
+                    .add(p.sq_array_off as usize + 4 * (head & (entries - 1)) as usize)
+                    .cast::<AtomicU32>())
+                .load(Ordering::Acquire)
             };
             let copy = (index < entries).then(|| unsafe {
-                s.base().add(p.sqe_off as usize + 64 * index as usize).cast::<Submission>().read()
+                s.base()
+                    .add(p.sqe_off as usize + 64 * index as usize)
+                    .cast::<Submission>()
+                    .read()
             });
             if copy.is_none() {
                 s.dropped += 1;
@@ -874,7 +1031,8 @@ unsafe impl Kernel for SimKernel {
         if s.ring().closing {
             return POLLHUP as i64;
         }
-        let ready = |s: &State| s.word(5).load(Ordering::Acquire) != s.word(4).load(Ordering::Acquire);
+        let ready =
+            |s: &State| s.word(5).load(Ordering::Acquire) != s.word(4).load(Ordering::Acquire);
         if ready(&s) {
             return POLLIN as i64;
         }
@@ -884,11 +1042,18 @@ unsafe impl Kernel for SimKernel {
         }
         // Sleep until the timeout or the earliest operation deadline, whose
         // expiry the kernel posts as a completion.
-        let due = s.ops.iter().filter(|o| o.deadline != 0).map(|o| o.deadline).min();
+        let due = s
+            .ops
+            .iter()
+            .filter(|o| o.deadline != 0)
+            .map(|o| o.deadline)
+            .min();
         let until = (timeout_ms >= 0).then(|| s.clock + timeout_ms as u64 * 1_000_000);
         let wake = match (until, due) {
             (Some(a), Some(b)) => a.min(b),
-            (a, b) => a.or(b).expect("poll would block forever: nothing in flight can complete"),
+            (a, b) => a
+                .or(b)
+                .expect("poll would block forever: nothing in flight can complete"),
         };
         s.clock = s.clock.max(wake);
         s.step();
@@ -896,7 +1061,10 @@ unsafe impl Kernel for SimKernel {
     }
     fn close(&self, fd: i32) -> i64 {
         let mut s = self.0.s();
-        assert!(!s.closed_fds.contains(&fd), "a second close of fd {fd}, which may name another file now");
+        assert!(
+            !s.closed_fds.contains(&fd),
+            "a second close of fd {fd}, which may name another file now"
+        );
         if s.ring.as_ref().is_none_or(|r| r.fd != fd) {
             return EBADF;
         }
@@ -911,7 +1079,10 @@ unsafe impl Kernel for SimKernel {
         if s.attach_fail_at == Some(s.attaches) {
             return -12;
         }
-        assert!(len > 0 && len % 4096 == 0, "the adapter attaches whole pages");
+        assert!(
+            len > 0 && len % 4096 == 0,
+            "the adapter attaches whole pages"
+        );
         let layout = Layout::from_size_align(len, 4096).unwrap();
         let va = unsafe { alloc_zeroed(layout) } as usize;
         s.regions.insert(va, layout);
@@ -919,7 +1090,10 @@ unsafe impl Kernel for SimKernel {
     }
     fn detach(&self, va: usize, len: usize) -> i64 {
         let mut s = self.0.s();
-        let layout = s.regions.remove(&va).expect("detach names an attached region");
+        let layout = s
+            .regions
+            .remove(&va)
+            .expect("detach names an attached region");
         assert_eq!(layout.size(), len, "detach names the whole region");
         unsafe { dealloc(va as *mut u8, layout) };
         0

@@ -83,7 +83,11 @@ fn poll_book<K: Kernel>(
     }
 }
 
-pub(crate) fn target<K: Kernel>(inner: &Rc<Inner<K>>, registry_fd: i32, name: &[u8]) -> Result<Target<K>> {
+pub(crate) fn target<K: Kernel>(
+    inner: &Rc<Inner<K>>,
+    registry_fd: i32,
+    name: &[u8],
+) -> Result<Target<K>> {
     inner.admit()?;
     if name.is_empty() || name.len() > 255 {
         return Err(-EINVAL);
@@ -98,7 +102,9 @@ pub(crate) fn target<K: Kernel>(inner: &Rc<Inner<K>>, registry_fd: i32, name: &[
         result: ZERO_REF,
     };
     record.name[..name.len()].copy_from_slice(name);
-    let rc = inner.shared().register(REGISTER_SERVICE_TARGET, &mut record);
+    let rc = inner
+        .shared()
+        .register(REGISTER_SERVICE_TARGET, &mut record);
     if rc < 0 {
         return Err(rc as i32);
     }
@@ -303,8 +309,13 @@ impl<K: Kernel> Drop for Walk<K> {
     fn drop(&mut self) {
         self.scope.inner.forget(self.request.cookie());
         if let Some(fid) = self.fid.take() {
-            // A walk that finished unobserved left a live fid: clunk it.
-            self.scope.inner.shared().set_state(fid, SlotState::Clunk);
+            // Only a WALK that succeeded unobserved left a live fid to clunk; a
+            // failed one left the reservation, which REAP frees.
+            let state = match self.request.take() {
+                Ok(Some(c)) if c.result < 0 => SlotState::Reap,
+                _ => SlotState::Clunk,
+            };
+            self.scope.inner.shared().set_state(fid, state);
         }
     }
 }
@@ -418,7 +429,10 @@ impl<K: Kernel> Fid<K> {
 }
 impl<K: Kernel> Drop for Fid<K> {
     fn drop(&mut self) {
-        self.scope.inner.shared().set_state(self.r, SlotState::Clunk);
+        self.scope
+            .inner
+            .shared()
+            .set_state(self.r, SlotState::Clunk);
     }
 }
 fn fixed_sqe(
@@ -445,9 +459,8 @@ impl<K: Kernel> Future for Open<K> {
     type Output = Result<()>;
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let me = self.get_mut();
-        poll_book(&me.scope.inner, &mut me.request, cx).map(|r| {
-            r.and_then(|c| if c.result < 0 { Err(c.result) } else { Ok(()) })
-        })
+        poll_book(&me.scope.inner, &mut me.request, cx)
+            .map(|r| r.and_then(|c| if c.result < 0 { Err(c.result) } else { Ok(()) }))
     }
 }
 impl<K: Kernel> Drop for Open<K> {
@@ -514,7 +527,11 @@ impl<K: Kernel> Future for Write<K> {
         match me.request.try_complete() {
             Ok(Some(c)) => {
                 me.scope.inner.forget(me.cookie);
-                Poll::Ready(if c.result < 0 { Err(c.result) } else { Ok(c.result as usize) })
+                Poll::Ready(if c.result < 0 {
+                    Err(c.result)
+                } else {
+                    Ok(c.result as usize)
+                })
             }
             Ok(None) => {
                 me.scope.inner.register(me.cookie, cx.waker());
@@ -551,7 +568,11 @@ impl<K: Kernel> Payload<K> {
     /// Return the lease now; a refusal hands the payload back with the errno.
     pub fn try_return(self) -> core::result::Result<(), (i32, Payload<K>)> {
         self.0.try_return().map_err(|(rc, p)| {
-            let rc = if rc < 0 && rc >= i32::MIN as i64 { rc as i32 } else { -EIO };
+            let rc = if rc < 0 && rc >= i32::MIN as i64 {
+                rc as i32
+            } else {
+                -EIO
+            };
             (rc, Payload(p))
         })
     }

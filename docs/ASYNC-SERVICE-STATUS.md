@@ -4272,7 +4272,7 @@ REAPed once their streams end. The Rust adapter (NA-4b) comes before the C one
 (NA-4c). NA-4d adds the EL0 fixture server and the qualification probe, because
 no EL0 program can reach a private CONNECT today.
 
-### NA-4b: the Rust adapter (host-verified; the kernel REAP fix awaits its guest legs)
+### NA-4b: the Rust adapter (verified; audit round 1 closed, round 2 owed)
 
 The adapter is `loom_client::native` (`Kernel`, `Ring`, the handles and futures)
 with `ThylaKernel` in libthyla-rs, 24 host tests against a simulated kernel
@@ -4299,11 +4299,34 @@ their slots until the ring closed. The simulated kernel's REAP had been more
 permissive than the real one. The operator voted explicit REAP (October 13,
 04:59Z; scripture d43f7ccd9). The kernel now REAPs a walked fid once it is
 clunked, or once its scope has RETIRED and nothing holds it
-(`loom_fid_reap_retired`). The simulated kernel follows that rule, and the
-adapter repeats its REAP pass while a pass frees a slot. Host evidence: 166 of
-166 loom-client tests; `tools/test-loom-service-fids.py` passes its control,
-and its four mutants each fail at their named assertion. The runner defaults to
-Homebrew LLVM clang, because Apple clang's ASan hangs at startup on this mac
-(OPEN-BUGS, 2026-10-13). Owed: the kernel guest legs (a control boot plus two
-mutant boots), the sabotage of the new adapter test, the self-audit, and the
-cross-family audit round.
+(`loom_fid_reap_retired`, a2b463fdd). The first guest boot of that fix failed:
+CLUNK leaves the fid's slot RETIRING and the REAP lookup accepted only LIVE, so
+the new routing was unreachable for a clunked fid; `control_retiring_fid`
+(083910e87) admits a RETIRING fid to REAP only. The second boot failed in the
+test itself (the peer script had the second WALK's stat and TWALK in the wrong
+order; 3bb975619).
+
+Evidence at 3bb975619 (work/oct13-na4b/kernel-20261013T060612Z, mac axis, one
+boot per leg, disk floor 7000 MiB by operator vote of 05:32Z): the control
+passes 1871 of 1871. Three mutants each fail exactly their predicted tests at
+their named assertions and nothing else: the routing line removed and the
+RETIRING lookup removed each fail `loom.private_native_operations` and
+`_isolation` at "native clunked FID reaps once while its ring lives";
+`loom_fid_reap_retired` refusing an unclunked fid fails those two at "native
+walked FID reaps once its aborted scope retires" and `loom.service_fid_reap` at
+its own assertion. The rebuild is byte-identical to the control kernel, and
+`tools/check-production.sh --all` passes. Which witness covers which layer:
+`loom.service_fid_reap` and `tools/test-loom-service-fids.py` cover the FID
+primitive only; the native test covers the REAP syscall's lookup and dispatch.
+
+Audit round 1 (holotype-reviewer on Fable 5.1): F1 P0 (the RETIRING lookup,
+found independently by the guest boot) fixed; F2 P2 (the witnesses' layers
+were overclaimed) fixed in the evidence and this text; F3-F5 P3 fixed (the sim
+counts a WALK's destination as borrowed; `reap_pass` retries only -EBUSY; a
+failed, unobserved WALK is reaped without a CLUNK); F6 P3 five of eleven
+untested paths now tested, the rest named in the dossier's caveats; F7 P3 a
+dossier caveat. Host: 171 of 171 loom-client tests in both profiles
+(`tools/test-loom-client.sh`), 31 of 31 sabotage cases red at their intended
+assertions, the crate rustfmt-clean, and the guest build's warning set equal
+to NA-3's. The round closed dirty (a P0), so a round 2 on the fixes is owed
+before the arc's merge.

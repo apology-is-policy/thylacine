@@ -1,0 +1,22 @@
+
+running 1 test
+test tests::native::a_short_enter_leaves_the_rest_queued_for_a_later_turn ... FAILED
+
+failures:
+
+---- tests::native::a_short_enter_leaves_the_rest_queued_for_a_later_turn stdout ----
+
+thread 'tests::native::a_short_enter_leaves_the_rest_queued_for_a_later_turn' (33620720) panicked at lib/loom-client/src/tests/native/sim.rs:1056:18:
+poll would block forever: nothing in flight can complete
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::native::a_short_enter_leaves_the_rest_queued_for_a_later_turn
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 170 filtered out; finished in 0.00s
+
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+error: test failed, to rerun pass `-p loom-client --lib`

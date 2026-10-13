@@ -1,6 +1,139 @@
 # The autonomous-run journal
 
 
+## October 13: NA-4b -- the Rust native adapter, and the kernel REAP of a walked FID (Corona)
+
+NA-4b composes the Rust client cores of NA-3 into one client that drives one
+private service ring from EL0: a `Kernel` trait with the libthyla-rs
+implementation `ThylaKernel`, the SQ producer, one dispatcher that routes every
+CQE through the fixed driver's single request book, a poll-based wait, and the
+handles and futures over them. It is tested on the host against a simulated
+kernel (`tests/native/sim.rs`). Scripture 37ab7c5f1 (NA-4a), WIP 8cbee0c17
+(written while main held the mac, 23:05Z October 12), first build b25c8c75f,
+REAP scripture d43f7ccd9, kernel fix a2b463fdd, its lookup fix 083910e87, test fix
+3bb975619, audit round 1 close in the commit that adds this entry.
+
+**The first build found a P1 in the adapter, not in the kernel.** The adapter
+closed its ring descriptor on drop, and the kernel can close that descriptor
+first. A private ring has exactly one handle: `handle_dup` refuses
+non-transferable kinds (handle.c:775), fork does not copy it
+(`handle_slot_may_alias`, handle.c:643), and exec latches it at the point of no
+return (proc.c:4675). So a close from another thread or an exec would make the
+adapter's drop close a number that might by then name an unrelated object. Now
+ENTER's -ECANCELED and -EBADF, and POLLHUP and POLLNVAL, make the adapter
+forget the number (`Shared::forget_fd`); POLLERR still fails the wait. The
+simulated kernel's `close()` panics on a double close, so the class is caught by
+construction, and four tests separate "the number is gone" (`close_under`) from
+"a close raced the call" (`latch_under`).
+
+**Making the simulated kernel faithful exposed a kernel defect.** REAP of a FID
+went to `node_reap_unused` (loom_service_control.c:120), which needs a LIVE,
+RESERVED node. A clunked FID's slot is RETIRING, so REAP answered -ENOENT and
+the slot stayed. `loom_fid_reap` and `loom_fid_retire_aborted` ran only at ring
+destruction (loom.c:705-706). Each FID pins its scope, so the scope's REAP
+answered EBUSY too: a long-lived ring leaked one slot per walked FID, and a
+64-slot table runs out. The adapter's test passed only because the sim's REAP
+was more lenient than the kernel's, and because the adapter treated -ENOENT as
+freed, which hid it. Enqueued as OPEN-BUGS 2026-10-12 23:16Z (P1).
+
+**The fix was an ABI decision, so it went to the operator.** Asked at about
+23:25Z October 12, answered 04:59:44Z October 13 (5.5 hours; the work waited
+on it). Options: explicit REAP of a retired FID (recommended: one rule for every
+slot kind, the client REAPs what it reserved), or implicit release by the
+kernel at CLUNK completion and scope retirement (9P clunk(5), io_uring direct
+descriptors). The operator chose explicit REAP. Scripture d43f7ccd9.
+
+**The kernel change** (a2b463fdd): the dispatcher sends a non-RESERVED FID to
+`loom_private_fid_reap`, which runs `loom_fid_reap_retired` under the lock. A
+RETIRED FID reaps. Otherwise the parent scope must be RETIRED (not ABORTING:
+`loom_fid_retire_aborted` requires the engine's abort-quiescence proof, which
+only `engine_retire_locked` gives, after every operation is terminal and no
+member holds a claim or borrow, loom_service_engine.c:200-225) and the FID
+unpinned; then retire and reap. Every refusal comes before any transition. My self-audit re-derived the
+dispatcher race (a FID never returns to RESERVED, and the primitive re-checks
+the exact identity under the lock) and RETIRED as quiescence (both paths to
+RETIRED need every operation finished, and each FID is still checked for a
+claim, a borrow and a pin). It found nothing, because it never read the lookup
+above the dispatch.
+
+**The first guest boot of that fix failed, and it was right to.** The control
+boot of a2b463fdd (05:53Z) failed `loom.private_native_operations` and
+`_isolation` at "native clunked FID reaps once while its ring lives",
+1869/1871. The routing line was unreachable for a clunked FID: CLUNK leaves the
+slot RETIRING (`loom_fid_begin_clunk`), and the REAP lookup `control_exact`
+accepts only LIVE (loom_service_control.c:24-28), so REAP answered -ENOENT
+before any dispatch. The host fixture calls the FID primitive directly and
+could not see the lookup; my self-audit read the changed function and the
+primitive below it, never the lookup above it. My predicted M1 failure was
+reasoned from the same wrong model: on a2b463fdd it would have failed exactly
+like the control, so only a green control makes a mutant's failure mean
+anything. Fixed in 083910e87: `control_retiring_fid` admits a RETIRING slot of
+kind FID to REAP only. No other kind stays RETIRING outside one lock hold
+(node_remove, pool reap and target remove retire and reap in the same hold).
+The dossier had repeated the wrong diagnosis and is corrected.
+
+**The second guest boot failed in my own test.** The peer script expected the
+second WALK as TWALK then TGETATTR. A temporary diagnostic boot printed the
+refused request: a TGETATTR on wire fid 0. A WALK with a name runs its STAT
+first (loom_service_program.c:18-20): request 2 of the old script was the first
+WALK's stat, never CONNECT's. The script now expects TGETATTR, TWALK, and
+answers QTDIR for the fid TATTACH bound instead of for request index 2.
+
+**The audit round.** holotype-reviewer on Fable 5.1 (start and end lines
+agree), read-only, over 37ab7c5f1..17e2476cd while the guest legs waited for the
+mac. Its F1 (P0) is the RETIRING lookup, found independently of the guest boot:
+two routes to one defect. F2 (P2): the status text claimed the primitive's
+witnesses for the syscall path. F3 to F7 (P3): the sim ignored a WALK's
+destination borrow; `reap_pass` retried every refusal while its comment said
+only -EBUSY; a failed, unobserved WALK was clunked; eleven adapter paths had no
+test; the forget rule's detection is late by design. All fixed except six of
+the untested paths (OPEN-BUGS, P3) and F3, which no adapter test can observe,
+so it is recorded as read against the kernel, not as witnessed. The round closed
+dirty on the P0, so round 2 on the fixes is owed.
+
+**Evidence** (3bb975619 plus the round-1 fixes; mac axis, one boot per leg):
+the control boot passes 1871 of 1871 (work/oct13-na4b/kernel-20261013T060612Z).
+Removing the routing line (M1) or the RETIRING lookup (M3) fails exactly
+`loom.private_native_operations` and `_isolation` at "native clunked FID reaps
+once while its ring lives"; refusing an unclunked FID under a RETIRED scope (M2)
+fails exactly those two at "native walked FID reaps once its aborted scope
+retires" and `loom.service_fid_reap` at its own assertion. Each mutant's only
+extinction is the suite's own. The rebuild is byte-identical to the control;
+`tools/check-production.sh --all` passes. Host: 171 of 171 loom-client tests in
+both profiles, 31 of 31 sabotage cases red, each read at its assertion
+(work/oct13-na4b/sabotage-20261013T061724Z), the crate rustfmt-clean, guest
+build warnings equal to NA-3's. Not proven: SMP, sanitizers, a real EL0 client
+(NA-4d).
+
+**Wrong turns.**
+- The sabotage classifier first read a `should_panic` test's failure as GREEN.
+  It now requires "test result: FAILED. 0 passed; 1 failed".
+- Lease slip: one `cargo test -p loom-client` started at 05:10:39Z, 11 seconds
+  before the 05:10:50Z hold (measured from the session transcript). The mac
+  was free; the rule is to hold first regardless.
+- The first kernel run refused at its clean-tree precondition: the new
+  sabotage case was an uncommitted edit to a tracked file. The refusal was
+  right (the boot must be HEAD's); the case was committed as 17e2476cd.
+- 11 sanitized host runners hang under Apple clang 17 on macOS 26.4 (ASan stops
+  in `__asan::AsanInitFromRtl` before main). The new FID runner defaults to
+  Homebrew LLVM plus the SDK sysroot; the other 11 are OPEN-BUGS 2026-10-13
+  (P3, tooling).
+
+- The guest run's first attempt stopped at its own floor check after the
+  control build: free space went from 8786 MiB (05:26:02Z) to 8046 MiB
+  (05:27:27Z), under the 8 GiB floor of October 8. I released the mac without
+  booting. Main had nothing it could free (both its build trees are live) and
+  works to its own floors: build.sh's 6 GB default and a 7000 MiB stop in its
+  bake scripts. The two floors had never been reconciled, which is how
+  two agents sharing one disk came to hold different rules. Put to the operator.
+- My predicted M1 failure on a2b463fdd was reasoned from the same wrong model
+  as the fix; on that tree it would have failed exactly like the control. A
+  mutant's failure means something only beside a green control.
+
+**Operator decisions this run:** vote 4, explicit REAP (04:59:44Z October 13);
+vote 5, a 7000 MiB disk floor for this run, queued behind main's RED bakes
+(05:32:43Z October 13).
+
 ## October 12: NA-3 -- Astra's Rust client cores, installed as the crate loom-client (Corona)
 
 Astra's eleven Rust owned-client cores were written and host-tested

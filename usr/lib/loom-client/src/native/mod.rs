@@ -4,10 +4,12 @@ extern crate alloc;
 mod handles;
 mod kernel;
 
-pub use handles::{Connect, Fid, Open, Payload, Pool, Read, ReadDone, Scope, Shot, Stream, Target, Walk, Write};
-pub use kernel::{Kernel, POLLERR, POLLHUP, POLLIN, POLLNVAL};
 pub use crate::owned_mapping::Setup;
 pub use crate::service_abi::PoolMember;
+pub use handles::{
+    Connect, Fid, Open, Payload, Pool, Read, ReadDone, Scope, Shot, Stream, Target, Walk, Write,
+};
+pub use kernel::{Kernel, POLLERR, POLLHUP, POLLIN, POLLNVAL};
 
 use crate::{
     fixed_requests::{Error as DriverError, FixedDriver, Routed},
@@ -15,10 +17,10 @@ use crate::{
     owned_mapping::OwnedMapping,
     paired_cq::Record,
     request_book::Error as BookError,
-    ring_payload::{Error as StorageError, Pool as CorePool, Payload as CorePayload},
+    ring_payload::{Error as StorageError, Payload as CorePayload, Pool as CorePool},
     ring_records::{
-        BufferRange, CQ_HEAD, CQ_TAIL, DROPPED, ENTER_NONBLOCK, MAX_REG_BUFFERS,
-        REGISTER_BUFFERS, SQ_HEAD, SQ_TAIL, Submission,
+        BufferRange, CQ_HEAD, CQ_TAIL, DROPPED, ENTER_NONBLOCK, MAX_REG_BUFFERS, REGISTER_BUFFERS,
+        SQ_HEAD, SQ_TAIL, Submission,
     },
     service_abi::{SETUP_PRIVATE_SERVICE, SETUP_SERVICE_BUFFERS},
 };
@@ -328,7 +330,11 @@ pub(crate) fn errno(e: DriverError) -> i32 {
         | DriverError::Storage(StorageError::Ledger(_)) => -EINVAL,
         DriverError::Storage(StorageError::Busy) => -kernel::EBUSY,
         DriverError::Storage(StorageError::Backend(rc) | StorageError::Uncertain(rc)) => {
-            if rc < 0 && rc >= i32::MIN as i64 { rc as i32 } else { -EIO }
+            if rc < 0 && rc >= i32::MIN as i64 {
+                rc as i32
+            } else {
+                -EIO
+            }
         }
         DriverError::Consumed => -EINVAL,
         DriverError::Book(_) | DriverError::Storage(StorageError::Stale) => -EIO,
@@ -354,7 +360,11 @@ impl<K: Kernel> WaitSource for RingWait<'_, K> {
     fn ready(&mut self) -> bool {
         self.inner.sq.cq_ready()
     }
-    fn wait(&mut self, ticket: u32, deadline: Option<u64>) -> core::result::Result<WakeReason, i32> {
+    fn wait(
+        &mut self,
+        ticket: u32,
+        deadline: Option<u64>,
+    ) -> core::result::Result<WakeReason, i32> {
         if self.inner.sq.word(CQ_TAIL).load(Ordering::Acquire) != ticket {
             return Ok(WakeReason::Event);
         }
@@ -412,7 +422,11 @@ impl<K: Kernel> Inner<K> {
     }
     /// A request's error as its owner sees it: a failed ring is -EIO.
     pub(crate) fn fault(&self, e: DriverError) -> i32 {
-        if self.state.get() == State::Failed { -EIO } else { errno(e) }
+        if self.state.get() == State::Failed {
+            -EIO
+        } else {
+            errno(e)
+        }
     }
     pub(crate) fn shared(&self) -> &Shared<K> {
         &self.shared

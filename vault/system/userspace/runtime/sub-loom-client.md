@@ -210,7 +210,10 @@ entries: one per CQ slot, at most 8192. A pool costs a few small allocations at
    gate. NA-4b's edits (`Kind::Slot`, the request driver's `route` and
    `BookRequest`, `RingOwner::abort_scope`, `Pool::identity`, the public `Setup`)
    end it, deliberately: `na3_install.py --check` and `na3-mutants.py` are NA-3's
-   historical evidence and no longer apply to the tree.
+   historical evidence and no longer apply to the tree. The NA-4b audit close
+   ran rustfmt (edition 2024) over the whole crate: it reflowed one line of
+   `route` and removed a doubled blank line in `service_abi.rs`; the crate is
+   rustfmt-clean, which no gate checks yet.
 3. `cargo test` runs the tests on parallel threads, which share the three
    process-wide counters. No test depends on a specific id.
 

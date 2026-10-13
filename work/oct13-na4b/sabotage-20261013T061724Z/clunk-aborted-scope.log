@@ -1,0 +1,24 @@
+
+running 1 test
+test tests::native::a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked ... FAILED
+
+failures:
+
+---- tests::native::a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked stdout ----
+
+thread 'tests::native::a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked' (33625332) panicked at lib/loom-client/src/tests/native.rs:545:5:
+assertion `left == right` failed: an aborted scope's fid is not clunked
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::native::a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 170 filtered out; finished in 0.00s
+
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+error: test failed, to rerun pass `-p loom-client --lib`

@@ -545,7 +545,14 @@ unsafe impl native::Kernel for ThylaKernel {
         unsafe { t_loom_register(fd as u64, op as u64, arg as u64, nargs as u64) }
     }
     fn enter(&self, fd: i32, to_submit: u32, min_complete: u32, flags: u32) -> i64 {
-        unsafe { t_loom_enter(fd as u64, to_submit as u64, min_complete as u64, flags as u64) }
+        unsafe {
+            t_loom_enter(
+                fd as u64,
+                to_submit as u64,
+                min_complete as u64,
+                flags as u64,
+            )
+        }
     }
     fn poll(&self, fd: i32, events: i16, timeout_ms: i32) -> i64 {
         let mut p = crate::TPollFd {

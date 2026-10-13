@@ -199,7 +199,8 @@ impl<B: RingBackend> FixedDriver<B> {
         let cookie = delivery.cookie;
         match delivery.kind {
             Kind::FixedRead(_) | Kind::FixedWrite(_) => {
-                if let Err(e) = unsafe { c.owner.finish_fixed(cookie, delivery.record.cqe.result) } {
+                if let Err(e) = unsafe { c.owner.finish_fixed(cookie, delivery.record.cqe.result) }
+                {
                     c.fail();
                     return Err(Error::Storage(e));
                 }

@@ -1,0 +1,6 @@
+2026-10-13T05:26:02Z  HEAD 17e2476cd6c0673103094c9bbb1931cb3740800e
+2026-10-13T05:26:02Z  expected tests (derived from test.c): 1871
+2026-10-13T05:26:02Z  stratum /Users/northkillpd/projects/stratum-astra/v2 at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, clean
+2026-10-13T05:26:02Z  disk pre: 8786 MiB free (floor 8192)
+2026-10-13T05:27:27Z  disk post-control-build: 8046 MiB free (floor 8192)
+2026-10-13T05:27:27Z  exit 3

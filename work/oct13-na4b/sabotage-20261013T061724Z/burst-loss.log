@@ -1,0 +1,24 @@
+
+running 1 test
+test tests::native::a_full_cq_defers_completions_and_loses_none ... FAILED
+
+failures:
+
+---- tests::native::a_full_cq_defers_completions_and_loses_none stdout ----
+
+thread 'tests::native::a_full_cq_defers_completions_and_loses_none' (33620445) panicked at lib/loom-client/src/tests/native.rs:270:5:
+assertion `left == right` failed
+  left: [[97, 97, 97, 97], [98, 98, 98, 98], [99, 99, 99, 99], [101, 101, 101, 101], [102, 102, 102, 102], [103, 103, 103, 103]]
+ right: [[97, 97, 97, 97], [98, 98, 98, 98], [99, 99, 99, 99], [100, 100, 100, 100], [101, 101, 101, 101], [102, 102, 102, 102], [103, 103, 103, 103], [104, 104, 104, 104]]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::native::a_full_cq_defers_completions_and_loses_none
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 170 filtered out; finished in 0.00s
+
+   Compiling loom-client v0.1.0 (/Users/northkillpd/projects/thylacine-corona/usr/lib/loom-client)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running unittests src/lib.rs (../build/usr-rs/aarch64-apple-darwin/debug/deps/loom_client-307421b25add1807)
+error: test failed, to rerun pass `-p loom-client --lib`

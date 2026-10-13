@@ -21,7 +21,9 @@ fn range(buffer_index: u32, offset: u64, length: u64) -> PoolMember {
     }
 }
 fn file(sim: &Sim, name: &str, bytes: &[u8]) {
-    sim.s().files.insert(name.as_bytes().to_vec(), bytes.to_vec());
+    sim.s()
+        .files
+        .insert(name.as_bytes().to_vec(), bytes.to_vec());
 }
 
 #[test]
@@ -65,7 +67,10 @@ fn a_failed_connect_reaps_its_scope() {
     let sim = Sim::new();
     let r = ring(&sim, 8, &[4096]);
     let target = r.target(5, b"absent").unwrap();
-    assert_eq!(run(&r, target.connect(None).unwrap()).err(), Some(ENOENT as i32));
+    assert_eq!(
+        run(&r, target.connect(None).unwrap()).err(),
+        Some(ENOENT as i32)
+    );
     r.turn(Some(r.now())).unwrap();
     assert_eq!(sim.live_slots(), 1, "only the target remains");
     drop(target);
@@ -89,8 +94,18 @@ fn each_walk_name_is_read_inside_the_enter_that_consumes_it() {
     let b = run(&r, wb).unwrap();
     run(&r, a.open(0, None).unwrap()).unwrap();
     run(&r, b.open(0, None).unwrap()).unwrap();
-    assert_eq!(run(&r, a.read(range(0, 0, 16), 0, None).unwrap()).unwrap().bytes(), b"first");
-    assert_eq!(run(&r, b.read(range(0, 0, 16), 0, None).unwrap()).unwrap().bytes(), b"second");
+    assert_eq!(
+        run(&r, a.read(range(0, 0, 16), 0, None).unwrap())
+            .unwrap()
+            .bytes(),
+        b"first"
+    );
+    assert_eq!(
+        run(&r, b.read(range(0, 0, 16), 0, None).unwrap())
+            .unwrap()
+            .bytes(),
+        b"second"
+    );
 }
 
 #[test]
@@ -111,8 +126,18 @@ fn queued_walks_keep_their_own_name_cells() {
     let b = run(&r, wb).unwrap();
     run(&r, a.open(0, None).unwrap()).unwrap();
     run(&r, b.open(0, None).unwrap()).unwrap();
-    assert_eq!(run(&r, a.read(range(0, 0, 16), 0, None).unwrap()).unwrap().bytes(), b"first");
-    assert_eq!(run(&r, b.read(range(0, 0, 16), 0, None).unwrap()).unwrap().bytes(), b"second");
+    assert_eq!(
+        run(&r, a.read(range(0, 0, 16), 0, None).unwrap())
+            .unwrap()
+            .bytes(),
+        b"first"
+    );
+    assert_eq!(
+        run(&r, b.read(range(0, 0, 16), 0, None).unwrap())
+            .unwrap()
+            .bytes(),
+        b"second"
+    );
 }
 
 #[test]
@@ -204,7 +229,10 @@ fn dropping_a_future_aborts_its_scope_and_settles_its_entry() {
     assert_eq!(sim.pending_ops(), 0);
     // The scope is gone: new work on it ends -ECANCELED.
     sim.s().hold = false;
-    assert_eq!(run(&r, fid.read(range(0, 0, 4), 0, None).unwrap()).err(), Some(ECANCELED as i32));
+    assert_eq!(
+        run(&r, fid.read(range(0, 0, 4), 0, None).unwrap()).err(),
+        Some(ECANCELED as i32)
+    );
 }
 
 #[test]
@@ -214,7 +242,9 @@ fn a_full_cq_defers_completions_and_loses_none() {
     let sim = Sim::new();
     file(&sim, "burst", b"");
     let shots: Vec<Vec<u8>> = (0..8).map(|i| vec![b'a' + i; 4]).collect();
-    sim.s().shots.insert(b"burst".to_vec(), shots.iter().cloned().collect());
+    sim.s()
+        .shots
+        .insert(b"burst".to_vec(), shots.iter().cloned().collect());
     let r = ring(&sim, 2, &[4096]);
     let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
     let pool = r.pool(&members).unwrap();
@@ -249,7 +279,11 @@ fn a_short_enter_leaves_the_rest_queued_for_a_later_turn() {
     let scope = run(&r, target.connect(None).unwrap()).unwrap();
     sim.s().enter_limit = Some(0);
     let walks: Vec<_> = (0..3).map(|_| scope.walk(b"f", None).unwrap()).collect();
-    assert_eq!(sim.hdr_word(1).wrapping_sub(sim.hdr_word(0)), 3, "all three queued");
+    assert_eq!(
+        sim.hdr_word(1).wrapping_sub(sim.hdr_word(0)),
+        3,
+        "all three queued"
+    );
     sim.s().enter_limit = Some(1);
     for w in walks {
         assert!(run(&r, w).is_ok());
@@ -278,8 +312,14 @@ fn a_rejected_sqe_ends_its_future_with_the_kernels_errno() {
     let target = r.target(5, b"clip").unwrap();
     let scope = run(&r, target.connect(None).unwrap()).unwrap();
     let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
-    assert_eq!(run(&r, fid.open(7, None).unwrap()).err(), Some(EINVAL as i32));
-    assert_eq!(run(&r, scope.walk(b"..", None).unwrap()).err(), Some(EINVAL as i32));
+    assert_eq!(
+        run(&r, fid.open(7, None).unwrap()).err(),
+        Some(EINVAL as i32)
+    );
+    assert_eq!(
+        run(&r, scope.walk(b"..", None).unwrap()).err(),
+        Some(EINVAL as i32)
+    );
 }
 
 #[test]
@@ -299,7 +339,10 @@ fn a_forged_completion_fails_the_ring() {
     sim.s().forge_next = Some(0xdead);
     let connect = target.connect(None).unwrap();
     assert_eq!(r.turn(None).err(), Some(-5));
-    assert_eq!(r.block_on(connect, None).and_then(|c| c.map(drop)).err(), Some(-5));
+    assert_eq!(
+        r.block_on(connect, None).and_then(|c| c.map(drop)).err(),
+        Some(-5)
+    );
     assert_eq!(sim.s().closed_fds, vec![7], "a failed ring is closed");
 }
 
@@ -314,7 +357,9 @@ fn closing_with_leases_held_keeps_their_bytes_until_they_drop() {
     let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
     run(&r, fid.open(0, None).unwrap()).unwrap();
     let mut stream = fid.stream(&pool, 0, 64, false, None).unwrap();
-    let Shot::Payload(p) = run(&r, stream.next()).unwrap() else { panic!("a payload") };
+    let Shot::Payload(p) = run(&r, stream.next()).unwrap() else {
+        panic!("a payload")
+    };
     drop((stream, fid, scope, target, pool));
     drop(r);
     assert_eq!(sim.s().closed_fds, vec![7]);
@@ -335,7 +380,11 @@ fn closed_under(latch: bool, in_flight: bool) -> Vec<i32> {
     let scope = run(&r, target.connect(None).unwrap()).unwrap();
     sim.s().hold = true;
     let walk = in_flight.then(|| scope.walk(b"", None).unwrap());
-    if latch { sim.latch_under() } else { sim.close_under() }
+    if latch {
+        sim.latch_under()
+    } else {
+        sim.close_under()
+    }
     match walk {
         // Its cancellation is routed, and the ENTER after it learns of the close.
         Some(walk) => {
@@ -353,7 +402,11 @@ fn closed_under(latch: bool, in_flight: bool) -> Vec<i32> {
 
 #[test]
 fn an_enter_that_finds_the_descriptor_closed_forgets_it() {
-    assert_eq!(closed_under(false, true), vec![7], "only the other thread's close");
+    assert_eq!(
+        closed_under(false, true),
+        vec![7],
+        "only the other thread's close"
+    );
 }
 
 #[test]
@@ -363,7 +416,11 @@ fn an_enter_that_races_the_close_forgets_the_descriptor() {
 
 #[test]
 fn a_poll_that_finds_the_descriptor_closed_forgets_it() {
-    assert_eq!(closed_under(false, false), vec![7], "only the other thread's close");
+    assert_eq!(
+        closed_under(false, false),
+        vec![7],
+        "only the other thread's close"
+    );
 }
 
 #[test]
@@ -386,8 +443,16 @@ fn retire_waits_until_the_kernel_retires_every_scope() {
     }
     assert!(r.retired());
     assert_eq!(sim.s().aborts.len(), 1);
-    let kernel_retired = sim.s().slots.iter().flatten().any(|s| s.kind == SlotKind::Scope && s.state == RETIRED);
-    assert!(kernel_retired, "retired() answered only after the kernel retired the scope");
+    let kernel_retired = sim
+        .s()
+        .slots
+        .iter()
+        .flatten()
+        .any(|s| s.kind == SlotKind::Scope && s.state == RETIRED);
+    assert!(
+        kernel_retired,
+        "retired() answered only after the kernel retired the scope"
+    );
     drop(scope);
 }
 
@@ -426,6 +491,117 @@ fn a_dropped_scope_is_reaped_after_its_fids_without_clunking_them() {
     assert_eq!(sim.live_slots(), 1, "only the target remains");
     assert_eq!(sim.s().clunks, 0);
     assert_eq!(sim.s().aborts.len(), 1);
+}
+
+#[test]
+fn a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let walk = scope.walk(b"missing", None).unwrap();
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(
+        sim.pending_ops(),
+        0,
+        "the WALK's -ENOENT arrived unobserved"
+    );
+    drop(walk);
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(sim.live_slots(), 2, "the reservation is reaped");
+    assert_eq!(
+        sim.s().clunk_sqes,
+        0,
+        "a fid that never walked is not clunked"
+    );
+    assert!(sim.s().aborts.is_empty());
+}
+
+#[test]
+fn a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    sim.s().hold = true;
+    let walk = scope.walk(b"f", None).unwrap();
+    assert_eq!(sim.live_slots(), 3);
+    drop(walk);
+    assert_eq!(sim.s().aborts.len(), 1, "one ABORT for the drop");
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(sim.pending_ops(), 0);
+    assert_eq!(
+        sim.live_slots(),
+        2,
+        "the destination is reaped once its WALK ends"
+    );
+    assert_eq!(
+        sim.s().clunk_sqes,
+        0,
+        "an aborted scope's fid is not clunked"
+    );
+}
+
+#[test]
+fn an_open_dropped_in_flight_aborts_its_scope() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    sim.s().hold = true;
+    let open = fid.open(0, None).unwrap();
+    drop(open);
+    assert_eq!(sim.s().aborts.len(), 1, "one ABORT for the drop");
+    r.turn(Some(r.now() + MS)).unwrap();
+    assert_eq!(sim.pending_ops(), 0);
+    sim.s().hold = false;
+    assert_eq!(
+        run(&r, fid.open(0, None).unwrap()).err(),
+        Some(ECANCELED as i32)
+    );
+}
+
+#[test]
+fn an_explicit_scope_abort_ends_its_operations_once() {
+    let sim = Sim::new();
+    file(&sim, "f", b"data");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    sim.s().hold = true;
+    let read = fid.read(range(0, 0, 4), 0, None).unwrap();
+    scope.abort();
+    scope.abort();
+    assert_eq!(sim.s().aborts.len(), 1, "the second abort issues nothing");
+    assert_eq!(run(&r, read).err(), Some(ECANCELED as i32));
+}
+
+#[test]
+fn a_target_dropped_under_its_connect_is_reaped_after_it() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    sim.s().hold = true;
+    let connect = target.connect(None).unwrap();
+    drop(target);
+    r.turn(Some(r.now() + MS)).unwrap();
+    assert_eq!(sim.live_slots(), 2, "the CONNECT still borrows its target");
+    sim.s().hold = false;
+    let scope = run(&r, connect).unwrap();
+    r.turn(Some(r.now() + MS)).unwrap();
+    assert_eq!(sim.live_slots(), 1, "only the scope remains");
+    drop(scope);
 }
 
 #[test]

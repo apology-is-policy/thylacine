@@ -222,7 +222,10 @@ impl<K: Kernel> Shared<K> {
     pub(crate) fn track(&self, entry: SlotEntry) {
         let mut slots = self.slots.borrow_mut();
         let cell = &mut slots[entry.r.slot as usize];
-        assert!(cell.is_none(), "the kernel minted a slot the adapter still holds");
+        assert!(
+            cell.is_none(),
+            "the kernel minted a slot the adapter still holds"
+        );
         *cell = Some(entry);
     }
     pub(crate) fn entry(&self, r: SlotRef) -> Option<SlotEntry> {
@@ -261,6 +264,8 @@ impl<K: Kernel> Shared<K> {
                     if rc == 0 || rc == -(ENOENT as i64) {
                         self.slots.borrow_mut()[i] = None;
                         freed = true;
+                    } else if rc != -(EBUSY as i64) {
+                        self.slots.borrow_mut()[i] = None;
                     }
                 }
             }

@@ -64,6 +64,14 @@ enabled by it.
   (`handle_slot_may_alias`), and exec latches it only past the point of no
   return (proc.c, `proc_exec_replace`). The number may already name another
   file, so the adapter drops it unclosed and the ring answers -ECANCELED.
+  Detection waits for the adapter's next ENTER or poll: if the number is
+  reused first, a poll waits on the new file, and a REGISTER issued in between
+  goes to it. Closing the ring's only descriptor from another thread is the
+  program's fault, and without descriptor generations EL0 cannot see it sooner.
+- **Slot drops.** A failed WALK's reservation is reaped without a CLUNK (the
+  kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
+  answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
+  drops the adapter's entry and leaves the slot for close to reclaim.
 
 ## Mechanism
 
@@ -133,9 +141,13 @@ completion path allocates.
 - **The simulated kernel** (`tests/native/sim.rs`) ports the private SQE shape
   check and models ENTER, poll, REGISTER and close as the kernel's frontend,
   decode and loom.c define them; each test names the behaviour it pins. It
-  panics on a second close of a descriptor.
+  panics on a second close of a descriptor. A WALK in flight borrows its
+  destination (the kernel's claim pins it), so REAP refuses that slot until the
+  WALK ends. Known divergence: an operation on a fid that is not READY, under a
+  READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
+  adapter path depends on the errno.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
-  targeted adapter edit (25 cases), and each red was read for the intended
+  targeted adapter edit (31 cases), and each red was read for the intended
   assertion.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,
@@ -155,7 +167,14 @@ completion path allocates.
 3. The simulated kernel's REAP follows `loom_private_service_reap` as of
    October 13 (a walked fid reaps once clunked or once its scope has RETIRED;
    fids pin their scope). Until then no kernel path freed a walked fid while
-   its ring lived, and the sim was more lenient than the kernel.
+   its ring lived, and the sim was more lenient than the kernel. The sim has no
+   slot phase: the kernel's RETIRING FID is reachable by REAP only through
+   `control_retiring_fid`, which only the guest test exercises.
+4. Paths no host test reaches yet: `Fid::walk` from a fid that is not the
+   root, a stream dropped before its end with shots still arriving, a refused
+   `Payload::try_return`, POLLERR and -EINTR (the sim returns neither), an ENTER
+   error other than -ECANCELED and -EBADF, and an explicit `Ring::close` with
+   handles alive.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

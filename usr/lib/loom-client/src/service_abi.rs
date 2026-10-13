@@ -121,7 +121,6 @@ const _: () = assert!(core::mem::offset_of!(Snapshot, pending_terminals) == 52);
 const _: () = assert!(core::mem::offset_of!(Snapshot, reason) == 56);
 const _: () = assert!(core::mem::offset_of!(Snapshot, status_flags) == 60);
 
-
 // Provided-buffer reservations, scripture30695b43e. No runtime activation.
 pub const SETUP_SERVICE_BUFFERS: u32 = 8;
 pub const REGISTER_SERVICE_POOL: u32 = 7;

@@ -116,6 +116,23 @@ CASES = [
                 break;
             }''', '''            let _ = freed;
             break;''')]),
+ ('walk-drop-clunks', 'a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk',
+  [('native/handles.rs', '''            let state = match self.request.take() {
+                Ok(Some(c)) if c.result < 0 => SlotState::Reap,
+                _ => SlotState::Clunk,
+            };''', '''            let state = SlotState::Clunk;''')]),
+ ('clunk-aborted-scope', 'a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked',
+  [('native/mod.rs', '.is_some_and(|s| !s.aborted && s.state == kernel::SlotState::Live);',
+    '.is_some_and(|s| s.state == kernel::SlotState::Live);')]),
+ ('abandon-no-abort', 'an_open_dropped_in_flight_aborts_its_scope',
+  [('fixed_requests.rs', '''                if let Some(scope) = c.book.abandon(self.cookie).expect("active owner") {
+                    c.owner.abort_scope(scope);
+                }''', '''                let _ = c.book.abandon(self.cookie).expect("active owner");''')]),
+ ('abort-twice', 'an_explicit_scope_abort_ends_its_operations_once',
+  [('native/kernel.rs', 'Some(e) if e.r == scope => !core::mem::replace(&mut e.aborted, true),',
+    'Some(e) if e.r == scope => { e.aborted = true; true }')]),
+ ('reap-busy-dropped', 'a_target_dropped_under_its_connect_is_reaped_after_it',
+  [('native/kernel.rs', '} else if rc != -(EBUSY as i64) {', '} else {')]),
 ]
 
 
