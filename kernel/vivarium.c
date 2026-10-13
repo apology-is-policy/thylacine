@@ -278,6 +278,10 @@ static const struct viv_row g_viv_t1[] = {
 };
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
+// vivarium.t1_narrows_linux_widths checks each row's masks against Linux's
+// prototype, so a new row must join its list.
+_Static_assert(sizeof(g_viv_t1) / sizeof(g_viv_t1[0]) == 11,
+               "a new T1 row joins vivarium.t1_narrows_linux_widths");
 
 // The calls we have DECIDED are not table rows. Keeping them as an explicit list
 // rather than letting them fall through to a default matters: a Linux number that

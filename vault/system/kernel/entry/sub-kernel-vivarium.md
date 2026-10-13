@@ -911,5 +911,7 @@ positive one, copied the whole link target into a buffer the guest had sized
 by the low half: an overrun inside the guest (the copy-out is still validated,
 so no kernel memory was reached). getrandom's shell answered EAGAIN for a high
 half Linux drops. Tests: `vivarium.t1_narrows_linux_widths` (every row's
-words against Linux's prototypes) and `vivarium.t2_shells_narrow_linux_widths`
-(readlinkat's bufsiz, getrandom's flags).
+words against Linux's prototypes; a `_Static_assert` on the table's row count
+beside `VIV_T1_COUNT` makes a new row join the test's list) and
+`vivarium.t2_shells_narrow_linux_widths` (readlinkat's bufsiz, getrandom's
+flags).

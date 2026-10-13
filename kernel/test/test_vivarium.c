@@ -125,7 +125,8 @@ void test_vivarium_t1_renumbers(void) {
 //   read/write/close(unsigned int fd, ...), lseek(unsigned int fd, off_t,
 //   unsigned int whence), pread64/pwrite64(unsigned int fd, ...),
 //   getpgid/getsid(pid_t), exit_group(int) (the native handler keeps only the
-//   low byte, so the row leaves it whole).
+//   low byte, so the row leaves it whole). exit and getpid read no word. The
+//   list is every row of g_viv_t1.
 void test_vivarium_t1_narrows_linux_widths(void) {
     static const struct { u64 nr; u8 u32w, s32w; const char *what; } rows[] = {
         { VIV_LINUX_READ,       0x1, 0,   "read" },
@@ -137,6 +138,8 @@ void test_vivarium_t1_narrows_linux_widths(void) {
         { VIV_LINUX_GETPGID,    0,   0x1, "getpgid" },
         { VIV_LINUX_GETSID,     0,   0x1, "getsid" },
         { VIV_LINUX_EXIT_GROUP, 0,   0,   "exit_group" },
+        { VIV_LINUX_EXIT,       0,   0,   "exit" },
+        { VIV_LINUX_GETPID,     0,   0,   "getpid" },
     };
     for (u32 r = 0; r < sizeof rows / sizeof rows[0]; r++) {
         u64 args[VIV_NARGS];
