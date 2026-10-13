@@ -1,0 +1,440 @@
+#!/bin/sh
+# The vote-8 argument-width sweep (2026-10-13): the guest legs, in one lease
+# window. Derived from work/oct13-rollback/kernel-run.sh.
+#   CONTROL    the committed tree, ci image: the whole suite passes, every named
+#              test PASSes, argwidth-probe reports 72 and loom-bridge-probe 70.
+#   CONTROL-Q  the qualification image: the same, loom-bridge-probe 71.
+#   M1         close casts its descriptor down (annotated, so the checker lets
+#              it build): the probe's wide close closes the narrow descriptor.
+#   M2         getpgid casts its pid down: the wide getpgid answers a pgid.
+#   M3         lseek drops the whence compare: the wide whence seeks.
+#   M4         sys_word32_arg accepts only a zero-extended word: torpor refuses
+#              the sign-extended word every pouch lock passes.
+#   M5         the vivarium's close row loses its width mask.
+#   M6         the vivarium's readlinkat shell loses its bufsiz check.
+#   M7         the vivarium's getrandom shell passes flags whole.
+#   M8         sys_s32_arg accepts only a zero-extended word: a sign-extended
+#              -1 pid is refused (other tests may fail too; the set is recorded).
+#   M9         M1's cast with no note: the build must FAIL at the width checker.
+# Each predicted kernel message is checked, before any build, to lie inside the
+# function test.c registers under the predicted test name; each predicted probe
+# message is checked to be one the probe can print. Each mutant anchor is
+# censused before the control build. Both probes must hash equal to their
+# control's in every leg (a kernel mutant must not move userspace).
+#   SHAPE      tools/check-production.sh --all: the KERNEL_TESTS=OFF kernel builds.
+# A failed suite always ends in "EXTINCTION: kernel test suite failed"
+# (kernel/main.c): a mutant run must show exactly that extinction and no other.
+set -e
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+STAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+OUT=work/oct13-width/kernel-$STAMP
+mkdir -p "$OUT"
+YIP="${THYLA_WAKE_YIP:-$(command -v yip || echo "$HOME/.local/bin/yip")}"
+FLOOR_MB=${FLOOR_MB:-8192}
+T_PRB=syscall.argwidth_probe
+T_T1=vivarium.t1_narrows_linux_widths
+T_T2=vivarium.t2_shells_narrow_linux_widths
+T_BRG=loom.bridge_probe
+W_PRB="every too-wide argument the probe passed was refused"
+W_T1CLOSE="close"
+W_T2NEG="readlinkat: a negative bufsiz is refused before the path"
+W_T2RND="getrandom: a high half in flags is Linux's to drop"
+PROBE_SRC=usr/argwidth-probe/argwidth-probe.c
+AW_BIN=build/ramfs-src/bin/argwidth-probe
+BR_BIN=build/ramfs-src/bin/loom-bridge-probe
+QDIR=build/kernel-private-async-qual
+QUAL_LINE='PRIVATE-ASYNC QUALIFICATION build'
+SUITE_EXT='EXTINCTION: kernel test suite failed'
+STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
+export STRATUM_SRC=$HOME/projects/stratum-astra/v2
+FILES="kernel/syscall.c kernel/vivarium.c"
+NMUT=9
+MUTATED=0
+record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
+free_mb() { df -m . | awk 'NR==2 {print $4}'; }
+floor() {
+  _f=$(free_mb); record "disk $1: $_f MiB free (floor $FLOOR_MB)"
+  [ "$_f" -ge "$FLOOR_MB" ] || { echo "REFUSING at $1: under the floor"; exit 3; }
+}
+lease() {
+  [ -z "${DRYRUN:-}" ] || return 0
+  "$YIP" resources > "$OUT/lease-$1.txt" 2>&1 || true
+  /usr/bin/grep -qE '^mac +HELD by you' "$OUT/lease-$1.txt" || {
+    echo "STOPPING before $1: the mac lease is not mine"; exit 6; }
+}
+pristine() { echo "$OUT/pristine/$(basename "$1")"; }
+restore() {
+  for f in $FILES; do
+    _p=$(pristine "$f")
+    [ -f "$_p" ] || continue
+    cp "$_p" "$f"
+    [ "$(shasum -a 256 "$f" | cut -d' ' -f1)" = "$(shasum -a 256 "$_p" | cut -d' ' -f1)" ] || {
+      echo "!! $f did NOT return to pristine"; return 1; }
+    git diff --quiet -- "$f" || { echo "!! $f differs from HEAD"; return 1; }
+  done
+}
+on_exit() {
+  _rc=$?
+  if [ "$MUTATED" = 1 ]; then
+    restore && echo "-- $FILES restored and verified against HEAD" || _rc=9
+    echo "!! build/ may hold the MUTANT kernel. Rebuild before any other boot:"
+    echo "   STRATUM_SRC=$STRATUM_SRC tools/build.sh kernel --config ci [--set PRIVATE_ASYNC_QUAL=y]"
+  fi
+  record "exit $_rc"
+  exit $_rc
+}
+trap on_exit EXIT
+
+# The verdict for one test: on its announcement line when it printed nothing,
+# else on a line of its own before the next announcement.
+verdict() { # verdict <boot log> <test>: prints PASS, FAIL: <msg>, or NONE
+  awk -v t="$2" '
+    /\[test\] [^ ]+ \.\.\./ {
+      if (inblk) exit
+      if (index($0, "[test] " t " ... ") > 0) {
+        inblk = 1; rest = substr($0, index($0, " ... ") + 5)
+        sub(/\r$/, "", rest)
+        if (rest ~ /^(PASS|FAIL)/) { print rest; found = 1; exit }
+        next
+      }
+    }
+    inblk { sub(/\r$/, ""); if ($0 ~ /^(PASS|FAIL)/) { print; found = 1; exit } }
+    END { if (!found) print "NONE" }
+  ' "$1"
+}
+fails() { /usr/bin/grep -E '^FAIL:|\[test\] [^ ]+ \.\.\. FAIL:' "$1" || true; }
+tally() { /usr/bin/grep -E '  tests: [0-9]+/[0-9]+' "$1" | tail -1 | sed -E 's/.*tests: ([0-9]+)\/([0-9]+).*/\1 \2/'; }
+run_suite() { # run_suite <label> [test.sh args]
+  _l=$1; shift
+  rm -f build/test-boot.log
+  ( set +e; tools/test.sh "$@" > "$OUT/$_l-test.log" 2>&1; echo $? > "$OUT/$_l.rc" )
+  suite_rc=$(cat "$OUT/$_l.rc")
+  [ -f build/test-boot.log ] || { echo "!! no build/test-boot.log after $_l"; exit 1; }
+  cp build/test-boot.log "$OUT/$_l-boot.log"
+  record "$_l: test.sh exit $suite_rc"
+}
+status_once() { # status_once <boot log> <probe> <status>: the probe's verdict line, once
+  _c=$(/usr/bin/grep -cF "$2 status=$3 expected=$3" "$1" || true)
+  [ "$_c" = 1 ] || { echo "no single '$2 status=$3 expected=$3' in $1"; /usr/bin/grep -F "$2" "$1" | head -4; exit 1; }
+}
+inputs() { # inputs <label> [kernel dir]: hash what the boot consumed
+  _k=${2:-build/kernel}
+  for f in "$_k/thylacine.bin" "$_k/thylacine.elf" build/ramfs.cpio build/disk.img "$AW_BIN" "$BR_BIN"; do
+    [ -f "$f" ] && shasum -a 256 "$f"
+  done > "$OUT/$1-inputs.sha256"
+}
+probes_hash() { cat "$AW_BIN" "$BR_BIN" | shasum -a 256 | cut -d' ' -f1; }
+probes_same() { # probes_same <label> <reference hash>
+  _ph=$(probes_hash)
+  [ "$_ph" = "$2" ] || { echo "$1: probe hash $_ph differs from its control's $2"; exit 2; }
+}
+all_pass() { # all_pass <label> <boot log>: every named test PASSes
+  for t in $NAMED; do
+    v=$(verdict "$2" "$t")
+    [ "$v" = PASS ] || { echo "$1: $t verdict '$v'"; exit 1; }
+  done
+}
+
+echo "=== preconditions ==="
+[ -x "$YIP" ] || { echo "REFUSING: no yip at $YIP"; exit 3; }
+lease pre
+dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
+[ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
+HEAD_SHA=$(git rev-parse HEAD)
+record "HEAD $HEAD_SHA"
+NAMED="$T_PRB $T_T1 $T_T2 $T_BRG"
+for t in $NAMED; do
+  /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
+done
+python3 tools/check-arg-width.py --self-test || { echo "REFUSING: the width checker's self-test fails"; exit 3; }
+python3 tools/check-arg-width.py kernel/syscall.c || { echo "REFUSING: the committed tree fails the width checker"; exit 3; }
+record "width checker: self-test and the committed syscall.c pass"
+python3 - "$T_PRB" "$W_PRB" test_argwidth_probe.c "$T_T1" "$W_T1CLOSE" test_vivarium.c \
+  "$T_T2" "$W_T2NEG" test_vivarium.c "$T_T2" "$W_T2RND" test_vivarium.c <<'MEMBER' || exit 3
+import re, sys
+reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
+a = sys.argv[1:]
+for test, msg, f in zip(a[0::3], a[1::3], a[2::3]):
+    src = open('kernel/test/' + f).read()
+    q = '"%s"' % msg
+    if src.count(q) != 1:
+        raise SystemExit("REFUSING: '%s' occurs %d times in %s" % (msg, src.count(q), f))
+    fn = reg.get(test)
+    m = fn and re.search(r'^void ' + fn + r'\(void\) \{\n(.*?)^\}', src, re.S | re.M)
+    if not (m and q in m.group(1)):
+        raise SystemExit("REFUSING: '%s' is not inside %s (registered as %s)" % (msg, fn, test))
+    print("member: %s (%s) holds '%s'" % (test, fn, msg))
+MEMBER
+# A predicted probe message is either a literal the probe prints, or a PAIR's
+# name followed by the PAIR's fixed suffix.
+python3 - "$PROBE_SRC" "close: the wide call is refused" "getpgid: the wide call is refused" \
+  "lseek whence: the wide call is refused" "torpor_wait: the sign-extended word matches" \
+  "getpgid: a sign-extended -1 is a pid, not a width" <<'PROBEMSG' || exit 3
+import re, sys
+src = open(sys.argv[1]).read()
+for why in sys.argv[2:]:
+    lit = src.count('"%s"' % why)
+    pair = 0
+    if why.endswith(': the wide call is refused'):
+        what = why[:-len(': the wide call is refused')]
+        pair = len(re.findall(r'PAIR\((?:[^;]|\n)*?"%s"\);' % re.escape(what), src))
+    if lit + pair != 1:
+        raise SystemExit("REFUSING: probe message '%s': %d literal + %d PAIR sites" % (why, lit, pair))
+    print("probe message: '%s' (%s)" % (why, 'literal' if lit else 'PAIR'))
+PROBEMSG
+record "predictions derived: each kernel message inside its registered test, each probe message printable once"
+EXPECT=$(/usr/bin/grep -c -E '^[[:space:]]*\{[[:space:]]*"[^"]+"' kernel/test/test.c)
+[ "$EXPECT" -ge 1000 ] || { echo "REFUSING: derived only $EXPECT registrations"; exit 3; }
+record "expected tests (derived from test.c): $EXPECT"
+[ "$(git -C "$STRATUM_SRC" rev-parse HEAD)" = "$STRATUM_PIN" ] || { echo "REFUSING: Stratum HEAD is not $STRATUM_PIN"; exit 3; }
+[ -z "$(git -C "$STRATUM_SRC" status --porcelain)" ] || { echo "REFUSING: Stratum tree dirty"; exit 3; }
+record "stratum $STRATUM_SRC at $STRATUM_PIN, clean"
+mkdir -p "$OUT/pristine"
+for f in $FILES; do
+  [ "$(/usr/bin/grep -c MUTANT "$f" || true)" = 0 ] || { echo "REFUSING: $f already names a MUTANT"; exit 3; }
+  cp "$f" "$(pristine "$f")"
+done
+# Every mutant's anchor must occur exactly once in its committed file BEFORE the
+# control is built: a rotten anchor found after the control wastes the lease.
+python3 - "$0" "$NMUT" <<'CENSUS' || exit 3
+import re, sys
+script, want = open(sys.argv[1]).read(), int(sys.argv[2])
+calls = re.findall(r"^mutant(?:_build)? (\w+) (kernel/\S+) \\\n'(.*?)' \\\n'(.*?)'\n", script, re.S | re.M)
+bad = 0
+for lab, path, old, new in calls:
+    target = open(path).read()
+    n, m = target.count(old), target.count(new)
+    print("census %s %s: anchor x%d, mutant text x%d, MUTANT in new: %s" % (lab, path, n, m, "MUTANT" in new))
+    if n != 1 or m != 0 or "MUTANT" not in new: bad += 1
+if len(calls) != want or bad or len(set(c[0] for c in calls)) != len(calls):
+    raise SystemExit("REFUSING: census %d calls (want %d), %d bad" % (len(calls), want, bad))
+CENSUS
+record "anchor census: $NMUT mutants, each anchor once in its file"
+[ -z "${DRYRUN:-}" ] || { record "DRYRUN: the preconditions hold; stopping before any build"; exit 0; }
+floor pre
+echo "=== CONTROL ==="
+lease control
+tools/build.sh kernel --config ci > "$OUT/control-build.log" 2>&1 || { echo "control build failed"; tail -20 "$OUT/control-build.log"; exit 1; }
+/usr/bin/grep -qF '==> argument width check' "$OUT/control-build.log" || { echo "CONTROL: the build never ran the width check"; exit 1; }
+floor post-control-build
+inputs control
+CONTROL_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
+CONTROL_PROBES=$(probes_hash)
+run_suite control
+B=$OUT/control-boot.log
+/usr/bin/grep -q '^EXTINCTION:' "$B" && { echo "CONTROL EXTINCTED"; fails "$B" | head; /usr/bin/grep -F 'argwidth-probe' "$B" | head -4; exit 1; } || true
+set -- $(tally "$B")
+[ "${2:-}" = "$EXPECT" ] && [ "${1:-}" = "$EXPECT" ] || { echo "control tally '$*' != $EXPECT/$EXPECT"; fails "$B" | head; exit 1; }
+[ "$suite_rc" = 0 ] || { echo "control test.sh exit $suite_rc"; exit 1; }
+all_pass control "$B"
+status_once "$B" argwidth-probe 72
+status_once "$B" loom-bridge-probe 70
+/usr/bin/grep -qF "$QUAL_LINE" "$OUT/control-build.log" && { echo "CONTROL: the default build saw the lever"; exit 1; } || true
+record "CONTROL GREEN: $EXPECT/$EXPECT, the four named tests PASS, argwidth-probe 72, loom-bridge-probe 70, probes ${CONTROL_PROBES%"${CONTROL_PROBES#????????????????}"}, bin ${CONTROL_BIN%"${CONTROL_BIN#????????????????}"}"
+echo "=== CONTROL-Q ==="
+lease control-q
+tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y > "$OUT/control-q-build.log" 2>&1 || { echo "control-q build failed"; exit 1; }
+/usr/bin/grep -qF "$QUAL_LINE" "$OUT/control-q-build.log" || { echo "CONTROL-Q: cmake never saw the lever"; exit 1; }
+floor post-control-q-build
+inputs control-q "$QDIR"
+Q_BIN=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
+probes_same control-q "$CONTROL_PROBES"
+[ "$Q_BIN" != "$CONTROL_BIN" ] || { echo "CONTROL-Q: the qualification kernel equals the default one"; exit 1; }
+[ "$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)" = "$CONTROL_BIN" ] || { echo "CONTROL-Q: the qual build replaced the default kernel"; exit 1; }
+run_suite control-q --private-async-qual
+B=$OUT/control-q-boot.log
+/usr/bin/grep -q '^EXTINCTION:' "$B" && { echo "CONTROL-Q EXTINCTED"; fails "$B" | head; exit 1; } || true
+set -- $(tally "$B")
+[ "${2:-}" = "$EXPECT" ] && [ "${1:-}" = "$EXPECT" ] || { echo "control-q tally '$*' != $EXPECT/$EXPECT"; fails "$B" | head; exit 1; }
+[ "$suite_rc" = 0 ] || { echo "control-q test.sh exit $suite_rc"; exit 1; }
+all_pass control-q "$B"
+status_once "$B" argwidth-probe 72
+status_once "$B" loom-bridge-probe 71
+record "CONTROL-Q GREEN: $EXPECT/$EXPECT, the four named tests PASS, argwidth-probe 72, loom-bridge-probe 71 (qualification path), bin ${Q_BIN%"${Q_BIN#????????????????}"}"
+SEEN_BINS="$CONTROL_BIN $Q_BIN"
+apply() { # apply <label> <file> <old> <new>: the mutation, on the PRISTINE file
+  lease "$1"; floor "pre-$1"
+  restore || exit 9
+  MUTATED=1
+  P=$2 OLD=$3 NEW=$4 LAB=$1 python3 - <<'PY' || exit 5
+import os
+p = os.environ['P']
+s = open(p).read()
+old, new, lab = os.environ['OLD'], os.environ['NEW'], os.environ['LAB']
+n = s.count(old)
+if n != 1:
+    raise SystemExit("REFUSING: %s anchor occurs %d times" % (lab, n))
+open(p, 'w').write(s.replace(old, new, 1))
+PY
+  for f in $FILES; do
+    _want=0; [ "$f" = "$2" ] && _want=1
+    [ "$(/usr/bin/grep -c 'MUTANT' "$f" || true)" = "$_want" ] || { echo "REFUSING: $f MUTANT count is not $_want"; exit 5; }
+  done
+  diff -u "$(pristine "$2")" "$2" > "$OUT/$1.diff" || true
+}
+# mutant <label> <file> <python old> <python new> -- built (default image) and
+# booted; sets B to its boot log. The caller checks the prediction.
+mutant() {
+  apply "$@"
+  tools/build.sh kernel --config ci > "$OUT/$1-build.log" 2>&1 || { echo "$1 build failed"; tail -12 "$OUT/$1-build.log"; exit 5; }
+  ! /usr/bin/grep -qF "$QUAL_LINE" "$OUT/$1-build.log" || { echo "$1: the default build saw the lever"; exit 5; }
+  floor "post-$1-build"
+  inputs "$1"
+  probes_same "$1" "$CONTROL_PROBES"
+  _bin=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
+  case " $SEEN_BINS " in *" $_bin "*) echo "REFUSING: the $1 kernel equals an earlier kernel of this run"; exit 5;; esac
+  SEEN_BINS="$SEEN_BINS $_bin"
+  mkdir -p "$OUT/$1-artifacts-DO-NOT-BOOT"
+  cp build/kernel/thylacine.bin "$OUT/$1-artifacts-DO-NOT-BOOT/"
+  echo "MUTANT $1 kernel. Never boot or promote." > "$OUT/$1-artifacts-DO-NOT-BOOT/WARNING.txt"
+  run_suite "$1"
+  B=$OUT/$1-boot.log
+  _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
+  [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
+  [ "$suite_rc" != 0 ] || { echo "HARNESS: test.sh exit 0 under $1"; exit 2; }
+  restore || exit 9
+  MUTATED=0
+}
+# mutant_build <label> <file> <old> <new>: the build itself must refuse it, at
+# the width checker, naming <file>:<line> -- set CHECK_LINE before the call.
+mutant_build() {
+  apply "$@"
+  ( set +e; tools/build.sh kernel --config ci > "$OUT/$1-build.log" 2>&1; echo $? > "$OUT/$1-build.rc" )
+  _brc=$(cat "$OUT/$1-build.rc")
+  record "$1: build exit $_brc"
+  [ "$_brc" != 0 ] || { echo "$1: the build ACCEPTED an unannotated narrowing cast"; exit 2; }
+  /usr/bin/grep -qF '==> argument width check FAILED' "$OUT/$1-build.log" || { echo "$1: the build failed, but not at the width check"; tail -12 "$OUT/$1-build.log"; exit 2; }
+  _hits=$(/usr/bin/grep -E ': [a-z_0-9]+ narrows [a-z_0-9]+ with no full-width check first$' "$OUT/$1-build.log" || true)
+  [ "$(printf '%s\n' "$_hits" | /usr/bin/grep -c .)" = 1 ] || { echo "$1: checker hits: '$_hits'"; exit 2; }
+  case "$_hits" in *"$CHECK_LINE"*) ;; *) echo "$1: checker said '$_hits', predicted '$CHECK_LINE'"; exit 2;; esac
+  /usr/bin/grep -qF 'check-arg-width: 1 narrowing cast(s)' "$OUT/$1-build.log" || { echo "$1: no checker tally line"; exit 2; }
+  restore || exit 9
+  MUTATED=0
+}
+expect_fails() { # expect_fails <label> <count> then "<test>|<message>" pairs
+  _lab=$1; _n=$2; shift 2
+  _t=$(tally "$B")
+  [ "$_t" = "$((EXPECT - _n)) $EXPECT" ] || { echo "$_lab tally '$_t', predicted $((EXPECT - _n)) $EXPECT"; fails "$B"; exit 2; }
+  for _p in "$@"; do
+    _tn=${_p%%|*}; _m=${_p#*|}
+    _v=$(verdict "$B" "$_tn")
+    [ "$_v" = "FAIL: $_m" ] || { echo "$_lab: $_tn verdict '$_v', predicted 'FAIL: $_m'"; exit 2; }
+  done
+  _nf=$(fails "$B" | wc -l | tr -d ' ')
+  [ "$_nf" = "$_n" ] || { echo "$_lab: $_nf FAIL lines, predicted $_n"; fails "$B"; exit 2; }
+}
+# The probe's one FAIL line names <why> by MESSAGE, and its value: <got>, or ANY
+# non-negative number.
+expect_probe() { # expect_probe <label> <why> <got|ANY>
+  _pl=$(/usr/bin/grep -F 'argwidth-probe: FAIL line ' "$B" | tr -d '\r')
+  [ "$(printf '%s\n' "$_pl" | /usr/bin/grep -c .)" = 1 ] || { echo "$1: probe FAIL lines: '$_pl'"; exit 2; }
+  _pre=${_pl%% (got *}; _got=${_pl##* (got }; _got=${_got%)}
+  case "$_pre" in *": $2") ;; *) echo "$1: probe said '$_pl', predicted ': $2'"; exit 2;; esac
+  if [ "$3" = ANY ]; then
+    case "$_got" in ''|*[!0-9]*) echo "$1: probe value '$_got', predicted a non-negative number"; exit 2;; esac
+  else
+    [ "$_got" = "$3" ] || { echo "$1: probe value '$_got', predicted '$3'"; exit 2; }
+  fi
+}
+ok() { record "$1 DISCRIMINATED: $2; extinction set = the suite's own"; }
+
+echo "=== M1: close casts its descriptor down ==="
+mutant m1 kernel/syscall.c \
+'    return handle_close(p, sys_hidx_arg(hraw)) == 0 ? 0 : (s64)(-T_E_BADF);
+' \
+'    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF); // width: MUTANT M1 truncates
+'
+expect_fails M1 1 "$T_PRB|$W_PRB"
+expect_probe M1 "close: the wide call is refused" 0
+ok M1 "exactly $T_PRB, the probe at 'close: the wide call is refused' (got 0)"
+echo "=== M2: getpgid casts its pid down ==="
+mutant m2 kernel/syscall.c \
+'    if (!sys_s32_arg(a0, &pid)) return -T_E_INVAL;
+    return (s64)proc_getpgid(p, pid);
+' \
+'    pid = (s32)a0; // width: MUTANT M2 truncates
+    return (s64)proc_getpgid(p, pid);
+'
+expect_fails M2 1 "$T_PRB|$W_PRB"
+expect_probe M2 "getpgid: the wide call is refused" ANY
+ok M2 "exactly $T_PRB, the probe at 'getpgid: the wide call is refused'"
+echo "=== M3: lseek drops the whence compare ==="
+mutant m3 kernel/syscall.c \
+'    if (whence_raw > 0xffffffffull)                  return -T_E_INVAL;
+    u32 whence = (u32)whence_raw;
+' \
+'    u32 whence = (u32)whence_raw; // width: MUTANT M3 no compare
+'
+expect_fails M3 1 "$T_PRB|$W_PRB"
+expect_probe M3 "lseek whence: the wide call is refused" 0
+ok M3 "exactly $T_PRB, the probe at 'lseek whence: the wide call is refused' (got 0)"
+echo "=== M4: sys_word32_arg accepts only a zero-extended word ==="
+mutant m4 kernel/syscall.c \
+'    if (hi != 0 && !(hi == 0xffffffffull && (raw & 0x80000000ull))) return false;
+' \
+'    if (hi != 0) return false; // MUTANT M4: zero extension only
+'
+expect_fails M4 1 "$T_PRB|$W_PRB"
+expect_probe M4 "torpor_wait: the sign-extended word matches" -22
+ok M4 "exactly $T_PRB, the probe at 'torpor_wait: the sign-extended word matches' (got -22)"
+echo "=== M5: the vivarium close row loses its width mask ==="
+mutant m5 kernel/vivarium.c \
+'    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1, 0x1 },
+' \
+'    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1 }, // MUTANT M5: no width mask
+'
+expect_fails M5 1 "$T_T1|$W_T1CLOSE"
+ok M5 "exactly $T_T1 at '$W_T1CLOSE'"
+echo "=== M6: the readlinkat shell loses its bufsiz check ==="
+mutant m6 kernel/syscall.c \
+'        if (bufsiz <= 0)                               return -(s64)T_E_INVAL;
+' \
+'        (void)0; // MUTANT M6: no bufsiz check
+'
+expect_fails M6 1 "$T_T2|$W_T2NEG"
+ok M6 "exactly $T_T2 at '$W_T2NEG'"
+echo "=== M7: the getrandom shell passes flags whole ==="
+mutant m7 kernel/syscall.c \
+'        s64 rc = sys_getrandom_handler(args[0], args[1], (u64)(u32)args[2]);
+' \
+'        s64 rc = sys_getrandom_handler(args[0], args[1], args[2]); // MUTANT M7: flags whole
+'
+expect_fails M7 1 "$T_T2|$W_T2RND"
+ok M7 "exactly $T_T2 at '$W_T2RND'"
+echo "=== M8: sys_s32_arg accepts only a zero-extended word ==="
+mutant m8 kernel/syscall.c \
+'    if ((s64)raw < -0x80000000ll || (s64)raw > 0x7fffffffll) return false;
+' \
+'    if (raw > 0x7fffffffull) return false; // MUTANT M8: zero extension only
+'
+# Other callers pass a sign-extended negative too (wait for any child, poll
+# forever): the probe's verdict is predicted, the rest is recorded.
+_v=$(verdict "$B" "$T_PRB")
+[ "$_v" = "FAIL: $W_PRB" ] || { echo "M8: $T_PRB verdict '$_v'"; exit 2; }
+expect_probe M8 "getpgid: a sign-extended -1 is a pid, not a width" -22
+fails "$B" > "$OUT/m8-fail-set.txt"
+record "M8 DISCRIMINATED: $T_PRB, the probe at 'getpgid: a sign-extended -1 is a pid, not a width' (got -22); $(wc -l < "$OUT/m8-fail-set.txt" | tr -d ' ') FAIL line(s) in all, recorded in m8-fail-set.txt"
+echo "=== M9: M1's cast with no note -- the build refuses ==="
+CHECK_LINE="kernel/syscall.c:$(/usr/bin/grep -nF '    return handle_close(p, sys_hidx_arg(hraw)) == 0 ? 0 : (s64)(-T_E_BADF);' "$(pristine kernel/syscall.c)" | cut -d: -f1): sys_close_handler narrows hraw"
+mutant_build m9 kernel/syscall.c \
+'    return handle_close(p, sys_hidx_arg(hraw)) == 0 ? 0 : (s64)(-T_E_BADF);
+' \
+'    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF); // MUTANT M9 no note
+'
+record "M9 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== rebuild the committed tree, then SHAPE ==="
+lease rebuild
+tools/build.sh kernel --config ci > "$OUT/rebuild.log" 2>&1 || { echo "rebuild failed"; exit 1; }
+REB_BIN=$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)
+[ "$REB_BIN" = "$CONTROL_BIN" ] && record "rebuild byte-identical to the control kernel" \
+  || record "rebuild differs from the control kernel (recorded, not claimed identical)"
+tools/build.sh kernel --config ci --set PRIVATE_ASYNC_QUAL=y > "$OUT/rebuild-q.log" 2>&1 || { echo "rebuild-q failed"; exit 1; }
+REB_Q=$(shasum -a 256 "$QDIR/thylacine.bin" | cut -d' ' -f1)
+[ "$REB_Q" = "$Q_BIN" ] && record "rebuild-q byte-identical to CONTROL-Q" \
+  || record "rebuild-q differs from CONTROL-Q (recorded, not claimed identical)"
+lease shape; floor pre-shape
+( set +e; tools/check-production.sh --all > "$OUT/production.log" 2>&1; echo $? > "$OUT/production.rc" )
+[ "$(cat "$OUT/production.rc")" = 0 ] || { echo "SHAPE: check-production.sh --all exit $(cat "$OUT/production.rc")"; tail -20 "$OUT/production.log"; exit 7; }
+record "SHAPE: tools/check-production.sh --all exit 0"
+echo "-- done: $OUT"
