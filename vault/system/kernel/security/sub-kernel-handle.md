@@ -379,7 +379,7 @@ atomics for diagnostics only.
 - An unwind that closes a descriptor it published earlier must close it by
   **identity** (`handle_close_obj`, holding its own reference on the object),
   never by number: between the publish and the unwind the number is the whole
-  Proc's to close and reuse. The Loom setup rollback does (2026-10-13); ten
+  Proc's to close and reuse. The Loom setup rollback does (2026-10-13); twelve
   other syscall sites still close by number, queued as one sweep.
 - Any new fd-creating path must install through `handle_install_locked`
   under the table lock — the `#844` F1 lesson, now with four callers. It is

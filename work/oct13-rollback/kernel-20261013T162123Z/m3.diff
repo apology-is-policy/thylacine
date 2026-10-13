@@ -1,0 +1,10 @@
+--- work/oct13-rollback/kernel-20261013T162123Z/pristine/syscall.c	2026-10-13 18:21:23
++++ kernel/syscall.c	2026-10-13 18:29:33
+@@ -7836,6 +7836,7 @@
+     hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
+     if (fd < 0) {
+         (void)sys_loom_ring_detach(p, l, vaddr, ring_size);
++        proc_page_uncharge(p, ring_pages); // MUTANT M3: an explicit refund beside the claim
+         loom_unref(l);
+         loom_unref(l);
+         return -T_E_MFILE;

@@ -352,7 +352,9 @@ HandleAlloc(p, k, granted) ==
 (***************************************************************************)
 (* HandleClose(p, h) — releases h from p's table.                         *)
 (*                                                                         *)
-(* Maps to `kernel/handle.c::handle_close` (P2-Fc).                        *)
+(* Maps to `kernel/handle.c::handle_close` (P2-Fc), and to                 *)
+(* `handle_close_obj`, which only adds a guard (the slot must still name   *)
+(* the caller's object): no transition this action lacks.                  *)
 (***************************************************************************)
 HandleClose(p, h) ==
     /\ h \in handles[p]

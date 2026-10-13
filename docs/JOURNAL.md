@@ -1,6 +1,66 @@
 # The autonomous-run journal
 
 
+## October 13: the Loom setup rollback by identity -- and the refund that ran while the ring was still mapped (Corona)
+
+The chunk opened on a P3 the votes 7-9 audit noted: SYS_LOOM_SETUP's
+copyout-fault rollback closes the new descriptor by number and detaches the
+ring by range, after both were published (kernel/syscall.c, 071197156 ~7948).
+The design was already recorded in OPEN-BUGS: an identity-checked rollback,
+since handle.c has no slot reservation to copy Linux's reserve, copy, install
+order from. I wrote `handle_close_obj` (close only while the slot still names
+the object), a held variant of each setup route so the handler keeps its own
+Loom reference across the copyout, and `sys_loom_ring_detach` (detach only the
+exact ring VMA, decided in the as->lock hold that removes it).
+
+Reading the setup's other unwinds for the same pattern found a worse defect.
+The three failure paths after the map (SQPOLL thread cap, SQPOLL start,
+-EMFILE) ran after as->lock dropped, unmapped through `burrow_unmap` (exact
+geometry, result ignored) and refunded the ring's pages unconditionally. A
+sibling that range-detaches one page of the ring in that window (B-1a' trims a
+head) makes the unmap miss: the rest stays mapped and resident, refunded, and
+the ring carries no charge record yet, so its final drop refunds nothing
+either. I enqueued it (OPEN-BUGS 15:48Z, P2 latent, I-32) before touching it,
+with the census of the remaining close-by-number sites as a separate entry.
+
+The fix ran straight into a documented prohibition. loom.h, loom.c and the
+sub-kernel-loom dossier all said the page owner must bind LAST and must stay a
+separate pointer from the thread owner, and that moving either binding breaks a
+ledger; the dossier added that the "obvious one-line fix" to the thread settle
+had once leaked a thread charge. The prohibition was true of the discipline it
+served (rollbacks that refund explicitly), and that discipline was the bug. So
+the ledger now binds in the hold that charges and maps the ring, every later
+failure path settles by claim, the owner precedes the thread charge, and the
+one-line settle becomes correct. I rewrote the three texts with the history
+rather than deleting it; for the audit's F4, a superseding change note now
+answers the August record that first stated the rule (records are append-only).
+
+Two wrong turns. I first sketched a fourth mutant for "the ledger bound late"
+that was not a coherent single-hunk change (a charge and uncharge that cancel)
+and dropped it: M3, an explicit refund beside the claim, turns the trimmed-ring
+check red the same way the pre-fix code would. Then, checking M3's predicted
+second failure, I found it could not happen: a fresh test Proc charges no
+pages, and the uncharge clamps at zero, so a double refund from zero lands on
+zero and `loom.setup_resource_refusals`' "and its pages were refunded" passes.
+8809cdd5c adds a four-page ballast under both tests' refund checks, before any
+run. The audit found the same thing independently (F1).
+
+Evidence: work/oct13-rollback/kernel-20261013T162123Z at 8809cdd5c -- 1875 of
+1875 in the ci and qualification images (probe 70 and 71), M1 (handle_close_obj
+ignoring the object), M1Q, M2 (the detach without the identity check), M2Q and
+M3 each red at exactly the predicted tests and messages, the probe binary hash
+equal across legs (votes 7-9 round 2 F3 carried in), rebuilds byte-identical,
+check-production --all exit 0. Audit: Fable 5.1, max effort, 0 P0 / 0 P1 /
+0 P2 / 5 P3, clean in one round. At the close: the ci kernel rebuilt byte-identical to that control (the
+close changes comments only), and handles.tla's eleven buggy cfgs each still
+find a counterexample, handles_srv.cfg none (work/oct13-rollback/tlc-20261013T183605Z).
+
+"Fixed" covers: the setup rollback on both routes, every unwind inside both
+setups, and the refund-while-mapped hole. It does not cover the twelve other
+syscall sites that still close a published descriptor by number (the first
+count said ten; the audit's F2 recount found twelve), which are one queued
+sweep. No user decisions this chunk; votes 1-9 stand.
+
 ## October 13: votes 7-9 -- Loom's refusals become errnos, and a wide argument is refused (Corona)
 
 Three questions left open by the NA-4b close went to the operator as one vote

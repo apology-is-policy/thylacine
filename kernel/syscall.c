@@ -7748,10 +7748,10 @@ int sys_loom_setup_held_for_proc(struct Proc *p, u32 entries, u32 flags,
     // #106: the buddy-rounded occupancy. loom_create's ring Burrow is an
     // ordinary burrow_create_anon, and ring_size is page-rounded but NOT
     // power-of-two rounded (it is the sum of four 64-aligned regions), so a
-    // 3-page ring occupies 4. The ring is detached through the ordinary
-    // SYS_BURROW_DETACH path, whose ANON arm recomputes burrow_backing_pages
-    // from the exact-matched VMA length -- the same ring_size -- so charge and
-    // refund agree.
+    // 3-page ring occupies 4. That occupancy is what the ring's charge record
+    // carries, and the record -- never a size recomputed at a detach -- is what
+    // the drop that frees the ring claims back: loom_free's, or the detach of a
+    // mapping that outlived the Loom.
     u32 ring_pages = (u32)burrow_backing_pages((size_t)l->ring_size);
     u32 ring_size  = l->ring_size;
 

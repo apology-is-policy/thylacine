@@ -3619,9 +3619,11 @@ refund defect described under *One owner, bound with the charge*, fixed in the
 same change. Witnesses: `loom.setup_rollback_identity` (a reused number, a
 reused VA, and a refused setup whose ring a sibling trimmed: still charged while
 mapped, settled at its last drop) and `loom.private_setup_rollback_identity`.
-The same close-by-number pattern remains at ten other syscall sites (pipe2,
-accept, socket setup, the dup aliases, mkdirat, chmod); it is queued in the
-open-bugs list as one sweep.
+The same close-by-number pattern remains at twelve other syscall sites, as of
+071197156: pipe's second-install unwind, three socket-setup unwinds, accept's
+socktab-claim unwind and its copyout fault, openat's O_DIRECTORY refusal,
+mkdirat, the two dup socktab-alias unwinds, pipe2's copyout fault and chmod. The
+open-bugs list holds them as one sweep.
 
 **NA-2a (October 12).** `loom.bridge_probe` drives the same routes from EL0
 through `/bin/loom-bridge-probe`. The status it requires comes from the

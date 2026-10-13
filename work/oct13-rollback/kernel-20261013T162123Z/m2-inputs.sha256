@@ -1,0 +1,5 @@
+b690fea62ab27d625599a87bc4f01ef8aadd743ca97e48b9cc306e3aca499b27  build/kernel/thylacine.bin
+f1a0027f4df027949adc1b15ede4454c07bca0ba958488d3e2327e6192db1ec4  build/kernel/thylacine.elf
+3c511802cd9d8e6007ec00ab0d5cb159388341de60107c169da097a970e87074  build/ramfs.cpio
+08d8c861a8fc808026a465ff32b70b16ad2a48aee476e0235cc569c57c3ebd97  build/disk.img
+6cfd78064b7921b373e37e61362c8f737af85e336b0476dc92fbb293ea36644f  build/ramfs-src/bin/loom-bridge-probe

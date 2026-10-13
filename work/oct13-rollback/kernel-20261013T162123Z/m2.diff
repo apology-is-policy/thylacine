@@ -1,0 +1,12 @@
+--- work/oct13-rollback/kernel-20261013T162123Z/pristine/syscall.c	2026-10-13 18:21:23
++++ kernel/syscall.c	2026-10-13 18:27:28
+@@ -7956,8 +7956,7 @@
+     // burrow_unmap either: that drops the mapping with no payer, so when it is
+     // the final drop the ring's charge record dies unrefunded.
+     struct Vma *v = vma_lookup_in(p->as, ring_va);
+-    if (v && v->burrow == l->ring && v->vaddr_start == ring_va &&
+-        v->vaddr_end == ring_va + (u64)ring_size)
++    (void)v; // MUTANT M2: a range detach, whatever is mapped there
+         detached = vma_detach_range_in(p->as, proc_resource_exempt(p), p,
+                                        ring_va, ring_size, 0, &dead) == 0;
+     spin_unlock(&p->as->lock);

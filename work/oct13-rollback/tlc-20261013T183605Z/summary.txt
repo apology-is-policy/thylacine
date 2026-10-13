@@ -1,0 +1,12 @@
+handles_srv: Model checking completed. No error has been found.
+handles_buggy_elevate: Error: Invariant Invariants is violated.
+handles_buggy_hw: Error: Invariant Invariants is violated.
+handles_buggy_direct: Error: Invariant Invariants is violated.
+handles_buggy_caps: Error: Invariant Invariants is violated.
+handles_buggy_hw_dup: Error: Invariant Invariants is violated.
+handles_buggy_hw_overlap: Error: Invariant Invariants is violated.
+handles_buggy_hw_nocap: Error: Invariant Invariants is violated.
+handles_buggy_rfork_elevate: Error: Invariant Invariants is violated.
+handles_buggy_spawn_fds_elevate: Error: Invariant Invariants is violated.
+handles_buggy_rfork_hostowner: Error: Invariant Invariants is violated.
+handles_buggy_srv_walk_tx: Error: Invariant Invariants is violated.

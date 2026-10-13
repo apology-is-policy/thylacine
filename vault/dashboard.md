@@ -134,6 +134,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-10-13 [[chg-2026-10-13-loom-ledger-one-owner]] — Loom's I-32 ledger: one owner, bound with the charge
 - 2026-10-05 [[chg-2026-10-05-halcyon-mode-chips]] — Show the focused transcript mode in an accent-filled status chip
 - 2026-10-04 [[chg-2026-10-04-async-buffer-pool-abi]] — Pin provided-buffer records in three compiled mirrors
 - 2026-10-04 [[chg-2026-10-04-async-buffer-pool-core]] — Implement bounded internal payload pool transitions
@@ -141,5 +142,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-10-04 [[chg-2026-10-04-async-buffer-pool-model]] — Model payload ownership separately from completion consumption
 - 2026-10-04 [[chg-2026-10-04-async-memory-approved]] — Ratify both lifecycle contracts and async-first delivery
 - 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
-- 2026-10-04 [[chg-2026-10-04-async-native-admission]] — Prepare exact native service admission before backlog publication
 <!-- generated:end -->

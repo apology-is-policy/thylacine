@@ -4451,3 +4451,64 @@ sweep of the other casting handlers (a census at 4dc48a668 counts 35 explicitly
 narrowed parameters with no guard, and implicit narrowing is not covered); the
 setup rollback that closes the ring by number after publishing it (P3, next);
 libthyla-rs loom.rs's six pre-existing rustfmt hunks.
+
+## The Loom setup rollback by identity, and the ring's ledger bound with its charge (Corona, October 13 -- audit closed)
+
+SYS_LOOM_SETUP publishes the ring's descriptor and maps the ring before it
+copies the params out. The rollback for a faulted copyout closed the descriptor
+by number and detached the ring by range, so a sibling thread that had closed
+and reused the number, or detached the ring and mapped its own region at the
+VA, lost that file or that mapping to the rollback (OPEN-BUGS 13:4xZ, P3, both
+routes, the same Proc only). The fix is identity: setup hands the handler a
+reference of its own on the ring (`sys_loom_setup_held_for_proc` and the
+private route's `loom_private_setup_held_for_proc`), and the rollback closes
+the descriptor only while its slot still names this ring (`handle_close_obj`,
+new in handle.c) and detaches only the mapping that is still exactly the ring
+(`sys_loom_ring_detach`, decided in the lock hold that removes it).
+
+Reading the setup path found a worse defect (OPEN-BUGS 15:48Z, P2 latent,
+I-32). The failure paths after the map (the SQPOLL thread cap, an SQPOLL start
+failure, a full handle table) unmapped by exact geometry, ignored the result,
+and refunded the ring's pages regardless. A sibling that trimmed or split the
+ring in that window left the rest mapped and resident with its pages refunded,
+and with no charge record yet for its final drop to settle. A process could
+repeat that up to its mapping cap. The ring's ledger (`l->owner` and the ring's
+charge record) is now bound in the lock hold that charges and maps the ring,
+and every later failure path settles by claim, never by an explicit refund.
+That reverses the documented order (the owner bound last), which was right
+only for the explicit-refund discipline it served; the owner now binds before
+the thread charge, so `loom_free` settles both ledgers through one pointer and
+`sqpoll_owner` is gone.
+
+Code df458fae4; 8809cdd5c adds a ballast region under the refund checks (a
+fresh test Proc charges no pages and the uncharge clamps at zero, so a double
+refund was invisible). Audit round 1 (Fable 5.1, max effort, cross-family):
+0 P0, 0 P1, 0 P2, 5 P3 -- clean. F1 was the zero-base blind spot, already
+fixed; F2-F5 were text (the remaining close-by-number sites' list, a stale
+refund comment, a superseding note for the August ledger record, the handles.tla
+code map), fixed at the close. The recount for F2 found twelve such sites, not
+the ten first enqueued.
+
+Evidence. Kernel, at 8809cdd5c (work/oct13-rollback/kernel-20261013T162123Z,
+mac axis, one boot per leg): 1875 of 1875 in both images, the probe at 70 and
+71, the eight named tests among them. Five mutants each fail exactly their
+predicted tests at their named assertions, with the suite's own extinction and
+no other: `handle_close_obj` ignoring the object (the reused-number check; in
+the qualification image the private ring's too), the ring detach without its
+identity check (the reused-VA check, both images), and an explicit refund
+beside the claim (`loom.setup_resource_refusals` and the trimmed-ring check).
+Every leg's loom-bridge-probe binary hashes equal to its control's. Both
+rebuilds are byte-identical to their controls; `tools/check-production.sh
+--all` passes. At the close commit (comments and text only on top of 8809cdd5c) the ci
+kernel rebuilds byte-identical to that control
+(work/oct13-rollback/tlc-20261013T183605Z/close-rebuild.sha256), and the
+handles.tla re-run (`handle_close` was refactored, and the spec's code map
+now names `handle_close_obj`) finds a counterexample in every one of the
+eleven buggy cfgs (each checks the `Invariants` conjunction) and none in
+`handles_srv.cfg` (26,784 distinct states, as documented).
+
+Closed (OPEN-BUGS): the setup rollback by number (13:4xZ) and the refund while
+mapped (15:48Z, P2). Still open: the same close-by-number pattern at twelve
+other syscall sites (one sweep, next after the width sweep); the width sweep of
+the other casting handlers; libthyla-rs loom.rs's six pre-existing rustfmt
+hunks.
