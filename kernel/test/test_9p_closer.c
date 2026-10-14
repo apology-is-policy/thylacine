@@ -819,7 +819,7 @@ struct xw_obs {
     // first death (g_p9_dead_ev) placed among the phases by g_p9_dead_n.
     bool pre_dead, pre_mq_closed, post_dead;
     int  pre_ref, pre_tstate, unstall_rc;
-    u32  pre_sends, dn[9];
+    u32  pre_sends, post_budget, dn[9];
     bool died, dead_dying, dead_devgone;
     int  dead_tid;
     u32  dead_idx, close_phase;
@@ -879,6 +879,7 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         o->pre_ref       = __atomic_load_n(&w.a->ref, __ATOMIC_RELAXED);
         o->unstall_rc    = wbc_unstall(&w);
         o->post_dead     = w.a->client->dead;
+        o->post_budget   = __atomic_load_n(&g_mq_a.eagain_budget, __ATOMIC_RELAXED);
         o->dn[4] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
         __atomic_store_n(&g_xw_phase, 5u, __ATOMIC_RELAXED);
         if (o->started) {
@@ -994,6 +995,7 @@ static void xw_diag(const struct xw_obs *o, int code) {
     xw_put("pre_sends", o->pre_sends); xw_put("pre_ref", (u64)o->pre_ref);
     xw_put("unstall_rc", (u64)(s64)o->unstall_rc);
     xw_put("post_dead", o->post_dead);
+    xw_put("post_budget", o->post_budget);
     xw_put("close_phase", o->close_phase);
     xw_put("close_tid", (u64)(s64)o->close_tid);
     uart_puts("\n    xw-diag death:");
