@@ -16,6 +16,7 @@ mirrors:
   - "usr/lib/pouch/patches/0011-pouch-abort.patch: abort() = brk #0xab06 (the SNARE_ABORT_BRK_IMM literal)"
   - "usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch: SIGTERM -> term, POUCH_NOTE_BIT_TERM; raise/kill of self with SIGABRT -> abort()"
   - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
+  - "usr/lib/pouch/patches/0050-pouch-self-fault-signals-errnos.patch: raise/kill of self with SIGSEGV, SIGBUS, SIGILL or SIGFPE -> the snare:* self-post; kill's EACCES -> EPERM"
 created: 2026-08-02
 updated: 2026-10-14
 ---

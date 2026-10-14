@@ -22,7 +22,7 @@ needed the operator.
 
 
 ---
-## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3) (in progress)
+## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 
 - *The two votes.* S-2's land prep left three owned items in OPEN-BUGS. Two
   needed the operator, asked together in one question with the heritage
@@ -158,6 +158,8 @@ needed the operator.
   under the same rule. My concurrent self-audit found np_teardown storing the
   budget before joining its poller: the same lost store, latent, already
   covered.
+- *REDs (scratchpad `sig3_reds.sh`):* Twelve REDs at 90e147757, each red at its own leg. Kernel: the gate answering PERM plus `snare:align` in the self set (1998/2000: postnote_errnos, self_death_snare); viv_kill's EPERM mapping gone plus a full queue back to -1 (1996/2000: four tests); a dead child refused again (1998/2000); ESRCH and an unknown name back to -1 (1997/2000); the name no longer judged first (1999/2000). Device, each with the kernel suite green: the syscall's self-snare branch gone (the four self-fault deaths read status 0); Pouch's EACCES mapping and raise's snare gone (kill(parent) reads errno 13; raise-segv and raise-ill read 0 while kill's two stay signalled); ESRCH flattened to -1 at the syscall (Pouch reads EIO, u-job-test's reaped pid and go-exec's missing pid red); the name no longer judged first, with the kernel's pins silenced (u-job-test 12's bad name to the dead child reads 0); ut's two messages swapped (u-job-test 11b). Go, on a private copy of the fork: Signal through ctl again (EPERM); the raw wait word again (/bin/false reads -1, the packed decode's first consumer). The closing green run: 2000/2000 and every device leg green. Two mistakes in my runner cost a re-run: its `G*` case matched `GREEN` first, so the first closing run never ran, and D4's silencing predated round 2's two new pins, so its first run went red in the kernel suite and hid the device leg.
+- *Land gates on cdfe2e22d:* Two reds at 90e147757, each hunted to an observed cause and fixed: pty-4's type-ahead anchor required a CRLF that tapestryd's bare-LF test-mode line can split (a witness defect, also red on main; a5dd0cb9c), and p9_closer.kill_in_final_close_keeps_exit's smp8 red was a lost store of the mq loopback's EAGAIN budget in the test (a29cef5ac; Fable 5.1 0/0/0/4, fixed 43d18cac4), verified by a 300-trial in-boot hunt -- Mac default-smp8 40/40 and thyla-pi KVM smp8 200/200, against about one boot in six to twenty-three before. On cdfe2e22d: CI image (b2c, webkit fork 7cf380d5ea): build, ls-jsc 59/59, pty-4 PASS (FG 130, CS 139, SX 139). Default image: build, suite PASS (2000/2000, boot OK), test-fault 8/8, ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption, check-production --all PASS. S-3 landed with this bullet's commit and was pushed to both mirrors.
 
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 
