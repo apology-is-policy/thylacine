@@ -1808,20 +1808,21 @@ __attribute__((noreturn))
 void exits_note(const char *name);
 
 // P6 hardening #3a (scripture e45a571): terminate the calling Thread's
-// Proc on EL0 unhandled fault. Called from
-// arch/arm64/exception.c::exception_sync_lower_el for every EL0 sync
-// exception that previously called extinction_with_addr.
+// Proc with a snare:* death. Three callers: arch/arm64/exception.c::
+// exception_sync_lower_el for every EL0 sync exception that previously
+// called extinction_with_addr, and the two syscall paths where a Proc
+// chooses the death for itself -- SYS_POSTNOTE's self arm
+// (notes_self_death_snare) and the Linux phenotype's kill (viv_kill).
 //
 // `name` MUST be one of the NOTE_NAME_SNARE_* constants from
 // <thylacine/notes.h>. `faulting_addr` is FAR_EL1 (data abort) or
-// ELR_EL1 (other EL0 EC), printed in the diagnostic for forensics.
+// ELR_EL1 (other EL0 EC); for a chosen death it is the ELR of the
+// SVC, the instruction after the call. Printed in the diagnostic.
 //
-// NEVER returns. Emits a uart diagnostic line + calls exits(name).
-// In multi-thread Procs (thread_count > 1) it extincts with a
-// specific message (v1.0 lacks cross-thread shootdown). In all
-// other corruption / impossible cases (no current thread, no
-// proc, kproc-routed, ...) it extincts with a defense-in-depth
-// message.
+// NEVER returns. Emits a uart diagnostic line + calls exits(name),
+// which routes a multi-thread Proc through the group cascade (I-24).
+// In the corruption / impossible cases (no current thread, no proc,
+// kproc-routed, ...) it extincts with a defense-in-depth message.
 //
 // See docs/ERRORS.md "Fault-note naming -- the snare:* family" for
 // the design rationale + the per-cause `snare:*` table.

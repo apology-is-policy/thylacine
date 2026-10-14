@@ -10,9 +10,9 @@
 //   notes.queue_alloc_free_smoke      — alloc + free without leak
 //   notes.post_dequeue_smoke          — single post → single dequeue
 //   notes.post_ordering               — three posts dequeued in order
-//   notes.unknown_name_rejected       — notes_post with unknown name → -1
-//   notes.snare_forge_rejected        — user-path snare:* post → -1 (ABI)
-//   notes.queue_full_returns_minus1   — non-synthetic posts fail at full
+//   notes.unknown_name_rejected       — notes_post with unknown name → -EINVAL
+//   notes.snare_forge_rejected        — user-path snare:* post → -EINVAL (ABI)
+//   notes.queue_full_returns_eagain   — non-synthetic posts fail at full: -EAGAIN
 //   notes.coalesce_synthetic          — synthetic poster merges at threshold
 //   notes.mask_defers                 — masked entries skipped at dequeue
 //   notes.kill_dequeue_smoke          — kill dequeues normally (no special
@@ -64,7 +64,7 @@ void test_notes_post_dequeue_smoke(void);
 void test_notes_post_ordering(void);
 void test_notes_unknown_name_rejected(void);
 void test_notes_snare_forge_rejected(void);
-void test_notes_queue_full_returns_minus1(void);
+void test_notes_queue_full_returns_eagain(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
@@ -1698,7 +1698,7 @@ void test_notes_discard_name_purges_pending(void) {
     // full). Sixteen pipes, purge, sixteen more posts land.
     for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
         TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, i, NULL, false), 0, "fill");
-    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, false), -(int)T_E_AGAIN,
                    "full: a userspace post is refused");
     TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_PIPE), (u32)NOTE_QUEUE_DEPTH,
                    "all sixteen removed");
@@ -3384,6 +3384,7 @@ void test_notes_postnote_errnos(void) {
     s64 r_other = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
     u32 o_term  = ndflt_note_count(other, NOTE_NAME_TERM);
     s64 r_nopid = sys_postnote_cross_for_test(caller, NO_PID, NOTE_NAME_TERM);
+    s64 r_nbogus = sys_postnote_cross_for_test(caller, NO_PID, "bogus");
     s64 r_bogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
     s64 r_tty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_SUSP);
     s64 r_sak   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SAK);
@@ -3418,6 +3419,9 @@ void test_notes_postnote_errnos(void) {
     child->state = PROC_STATE_ZOMBIE;
     u32 c_before = child->notes->count;
     s64 r_dead  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_INTERRUPT);
+    s64 r_dbogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
+    s64 r_dsnare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
+    s64 r_dtty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_CONT);
     u32 c_after = child->notes->count;
     other->state = PROC_STATE_ZOMBIE;
     s64 r_odead = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
@@ -3438,6 +3442,7 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(r_other, -(s64)T_E_ACCES, "a non-child is EACCES: the parent gate, never -1");
     TEST_EXPECT_EQ(o_term, 0u, "and nothing reached it");
     TEST_EXPECT_EQ(r_nopid, -(s64)T_E_SRCH, "no such pid is ESRCH");
+    TEST_EXPECT_EQ(r_nbogus, -(s64)T_E_INVAL, "the name is judged before the pid is looked for");
     TEST_EXPECT_EQ(r_bogus, -(s64)T_E_INVAL, "a name that is no note is EINVAL");
     TEST_EXPECT_EQ(r_tty, -(s64)T_E_INVAL, "tty:susp is the kernel's to post: EINVAL");
     TEST_EXPECT_EQ(r_sak, -(s64)T_E_INVAL, "sak is the kernel's to post: EINVAL");
@@ -3451,6 +3456,9 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(s_fill_bad, 0u, "the self fill posts all landed");
     TEST_EXPECT_EQ(s_full, -(s64)T_E_AGAIN, "self: a full ring is EAGAIN");
     TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it");
+    TEST_EXPECT_EQ(r_dbogus, -(s64)T_E_INVAL, "but not a name that is no note");
+    TEST_EXPECT_EQ(r_dsnare, -(s64)T_E_INVAL, "nor a snare: a dead child is still another Proc");
+    TEST_EXPECT_EQ(r_dtty, -(s64)T_E_INVAL, "nor a tty name");
     TEST_EXPECT_EQ(c_after, c_before, "and nothing was queued to it");
     TEST_EXPECT_EQ(r_odead, -(s64)T_E_ACCES, "a dead non-child reads EACCES: the gate is asked first");
 }

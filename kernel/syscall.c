@@ -5837,6 +5837,12 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
 // (drop q->lock, still hold proc_table_lock) -> rendez.lock. None of those
 // reverse-takes proc_table_lock so the chain is acyclic.
 static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name) {
+    // The name is judged before the target is looked for, as the phenotype's
+    // kill judges its signal before its walk: the walk answers a dead child 0
+    // without reaching notes_post's gates, so a name they refuse is refused
+    // here, whatever the target's state.
+    if (!notes_name_user_postable(name)) return -(s64)T_E_INVAL;
+
     struct postnote_walk_ctx wctx = {
         .target_pid = target_pid,
         .caller     = caller,

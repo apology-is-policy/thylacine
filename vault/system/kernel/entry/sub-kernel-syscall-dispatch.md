@@ -1631,8 +1631,11 @@ harness (`notes.kill_family_gate`).
 with its own errno ([[dec-2026-10-14-postnote-errnos]]): `-T_E_INVAL` for a
 zero or over-long length, a NUL or non-printable byte, or a name `notes_post`
 refuses; `-T_E_FAULT` for a name it cannot read; then the arms' own answers.
-The cross arm is `postnote_cross(caller, pid, name)`: the walk under
-`proc_for_each`, then 0, `-T_E_SRCH` when no Proc holds the pid, or the walk's
+The cross arm is `postnote_cross(caller, pid, name)`: first the name, through
+`notes_name_user_postable` (the gates `notes_post` asks of every userspace
+post, in one function), so a refused name is `-T_E_INVAL` whatever the target
+-- dead, missing or alive -- as the phenotype's `kill` judges its signal
+before its walk; then the walk under `proc_for_each`, then 0, `-T_E_SRCH` when no Proc holds the pid, or the walk's
 `err` -- `-T_E_ACCES` from the gate, never `-T_E_PERM`, which is the flat `-1`
 Pouch's seam reads as `EIO`. The walk accepts a post to a target past ALIVE
 and posts nothing: only the caller's own children get past the gate, and a

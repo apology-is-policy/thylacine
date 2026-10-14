@@ -240,9 +240,9 @@ void test_tty_note_post_gate(void) {
     // load-bearing F4 gate (the names ARE in the supported set, so this
     // prefix gate is the only barrier; without it a parent could post
     // tty:cont to a debug-stopped child, the I-39 leak).
-    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_CONT, 0u, NULL, false) == -1,
+    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_CONT, 0u, NULL, false) == -(int)T_E_INVAL,
                 "userspace tty:cont post not rejected");
-    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_HUP, 0u, NULL, false) == -1,
+    TEST_ASSERT(notes_post(p, NOTE_NAME_TTY_HUP, 0u, NULL, false) == -(int)T_E_INVAL,
                 "userspace tty:hup post not rejected");
     TEST_ASSERT(tty_count_named(p, NOTE_NAME_TTY_CONT) == 0,
                 "rejected post left a queue entry");
@@ -255,11 +255,11 @@ void test_tty_note_post_gate(void) {
 
     // A tty:-prefixed name OUTSIDE the supported set rejects even synthetic
     // (the supported-set validation, unchanged).
-    TEST_ASSERT(notes_post(p, "tty:bogus", 0u, NULL, true) == -1,
+    TEST_ASSERT(notes_post(p, "tty:bogus", 0u, NULL, true) == -(int)T_E_INVAL,
                 "unknown tty name accepted");
 
     // The snare gate is unregressed.
-    TEST_ASSERT(notes_post(p, "snare:segv", 0u, NULL, false) == -1,
+    TEST_ASSERT(notes_post(p, "snare:segv", 0u, NULL, false) == -(int)T_E_INVAL,
                 "userspace snare post not rejected");
 
     pgrp_drop_linked(p);

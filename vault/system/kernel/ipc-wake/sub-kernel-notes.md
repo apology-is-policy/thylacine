@@ -79,6 +79,11 @@ load-bearing.
 a full queue -- the values its header always documented; until S-3
 (2026-10-14) the code answered a bare -1 to both, and `SYS_POSTNOTE` passed
 it on ([[sub-kernel-syscall-dispatch]], [[dec-2026-10-14-postnote-errnos]]).
+The userspace name gates live in one PURE predicate,
+`notes_name_user_postable(name)`, which `notes_post` asks of every
+non-synthetic post and `SYS_POSTNOTE`'s cross arm asks before its walk, so a
+refused name is refused even where the walk would answer without posting (a
+dead child).
 No `snare:` name is ever queued, but a Proc may END itself with one:
 `notes_self_death_snare(name)` returns the kernel's own literal for
 `snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` and `snare:abort` (NULL

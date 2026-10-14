@@ -913,8 +913,10 @@ enum {
     //   -T_E_ACCES  the target is not the caller's child (never -T_E_PERM,
     //               which is -1, the flat sentinel)
     //   -T_E_AGAIN  the target's note queue is full
-    // A child that is dead but not yet reaped answers 0 and receives nothing.
-    // A self-post of snare:segv, snare:bus, snare:ill, snare:fpe or
+    // The name is judged first, before the pid is looked for: a refused name is
+    // -T_E_INVAL whatever the target, a missing one included. A child that is
+    // dead but not yet reaped answers 0 to a name it may be sent and receives
+    // nothing. A self-post of snare:segv, snare:bus, snare:ill, snare:fpe or
     // snare:abort NEVER RETURNS: the kernel ends the caller with that snare
     // through its fault path (notes_self_death_snare).
     SYS_POSTNOTE     = 47,

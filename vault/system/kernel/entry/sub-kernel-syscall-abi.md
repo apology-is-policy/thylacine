@@ -888,7 +888,9 @@ Existing numbers whose answers changed, no number or record moved:
   one alias; an exec alias of a writable region is still refused.
 - `SYS_POSTNOTE` (47) moved from the bare -1 set to the errno set
   ([[dec-2026-10-14-postnote-errnos]]): `-ESRCH`, `-EACCES` (not the caller's
-  child), `-EAGAIN`, `-EINVAL`, `-EFAULT`; a dead unreaped child answers 0;
+  child), `-EAGAIN`, `-EINVAL`, `-EFAULT`; the name is judged before the
+  pid is looked for, so a refused name is `-EINVAL` whatever the target; a
+  dead unreaped child answers 0 to a name it may be sent;
   and a self-post of `snare:segv`/`bus`/`ill`/`fpe`/`abort` does not return
   ([[dec-2026-10-14-self-death-snare]]).
 - `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set

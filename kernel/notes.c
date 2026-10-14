@@ -269,6 +269,18 @@ static int notes_name_has_snare_prefix(const char *name) {
     return 1;
 }
 
+// Contract in <thylacine/notes.h>. The three kernel-synthetic-only families
+// (their reasons sit on the prefix helpers above and on NOTE_NAME_SAK) and the
+// supported set: notes_post asks this of every userspace post, and
+// SYS_POSTNOTE's cross arm asks it before it looks for the target.
+bool notes_name_user_postable(const char *name) {
+    if (!name) return false;
+    if (notes_name_has_snare_prefix(name)) return false;
+    if (notes_name_has_tty_prefix(name)) return false;
+    if (notes_name_eq(name, NOTE_NAME_SAK)) return false;
+    return notes_name_to_bit(name) >= 0;
+}
+
 // R4-F4 audit close: notes_name_is_kill is now declared in the public
 // header (`<thylacine/notes.h>`) -- the prior forward decl block here
 // and the function-local extern decls in syscall.c are removed.
@@ -643,21 +655,22 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // below also rejects -- this explicit prefix check future-proofs
     // against snare:* being added to the supported set for kernel-
     // synthetic-only delivery.)
-    if (!synthetic && notes_name_has_snare_prefix(name)) return -(int)T_E_INVAL;
-
+    //
     // PTY-1b (round-1 F4): the tty:* family is kernel-synthetic-only on the
-    // POST axis. Unlike the snare gate above this one is load-bearing TODAY
-    // (the tty names are in the supported set below).
-    if (!synthetic && notes_name_has_tty_prefix(name)) return -(int)T_E_INVAL;
-
+    // POST axis. Unlike the snare gate this one is load-bearing TODAY (the
+    // tty names are in the supported set).
+    //
     // IM-1: `sak` is kernel-synthetic-only on the POST axis for the same
     // reason -- a userspace poster could otherwise fake the operator's
     // attention gesture and steer the trusted login authority into a prompt
-    // nobody pressed the SAK for. Exact name (no family), so the gate is one
-    // comparison.
-    if (!synthetic && notes_name_eq(name, NOTE_NAME_SAK)) return -(int)T_E_INVAL;
+    // nobody pressed the SAK for.
+    //
+    // All three live in notes_name_user_postable, the one definition
+    // SYS_POSTNOTE's cross arm also asks before its walk.
+    if (!synthetic && !notes_name_user_postable(name)) return -(int)T_E_INVAL;
 
-    // Validate name is in the v1.0 supported set.
+    // Validate name is in the v1.0 supported set (a synthetic post meets this
+    // gate alone).
     if (notes_name_to_bit(name) < 0) return -(int)T_E_INVAL;
 
     u32 sender_pid = sender ? (u32)sender->pid : 0u;

@@ -398,6 +398,14 @@ int notes_death_signal(const char *name);
 // the literal, never a caller's buffer -- or NULL for every other name. PURE.
 const char *notes_self_death_snare(const char *name);
 
+// True when a userspace post may carry `name`: a supported note outside the
+// kernel-synthetic-only families (snare:*, tty:*, sak). notes_post refuses any
+// other name from userspace with -T_E_INVAL; SYS_POSTNOTE's cross arm asks it
+// before the walk, so a refused name is refused whatever the target's state.
+// The self-death snares are not postable: the self arm ends the caller with
+// them before it posts. PURE.
+bool notes_name_user_postable(const char *name);
+
 // ============================================================================
 // Public API
 // ============================================================================

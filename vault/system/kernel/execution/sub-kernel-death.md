@@ -38,7 +38,7 @@ consequence of getting it wrong is a hang rather than a crash.
 | `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b); `exits_note` on a name with no signal is an extinction |
 | `proc_group_terminate(p, sig, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait; `sig` is the death signal the claim records (0 for an exit) |
 | `el0_return_die_check()` | at every return-to-EL0 | if flagged, `thread_exit_self()` (noreturn) |
-| `proc_fault_terminate(name, addr)` | EL0 unhandled fault | diagnose + `exits_note(snare:*)`; noreturn |
+| `proc_fault_terminate(name, addr)` | EL0 unhandled fault; a snare death a Proc chooses for itself (`SYS_POSTNOTE`'s self arm, the phenotype's `kill`; `addr` is then the SVC's ELR) | diagnose (`user fault:`, the line the gates watch) + `exits_note(snare:*)`; noreturn |
 
 `proc_group_terminate`'s lock precondition is not stylistic: the cascade
 walks `p->threads`, and that list is mutated only under the table lock, so a

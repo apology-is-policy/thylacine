@@ -61,6 +61,21 @@ needed the operator.
 - *Found and enqueued:* Pouch's `kill(pid, 0)` existence probe answers `EINVAL`
   (no native probe arm; an ABI addition, so a vote), and `getppid` is
   unimplemented in Pouch.
+- *Audit round 1 (Fable 5.1, before any build): 1 P0 + 1 P1 + 0 P2 + 1 P3.*
+  F1: my sweep for callers that pinned `notes_post` to -1 stopped at the two
+  test files I had open; five more pins sat in `test_pgrp.c` and an older leg of
+  `test_notes.c`, and two registered tests would have gone red on the first boot.
+  A two-line awk over `kernel/` now finds the five in the committed files and
+  none after. F2 was the real one: moving the zombie rule into the walk put the
+  ALIVE check BEFORE `notes_post`'s name gates, so a dead child accepted a name
+  no program may send (`bogus`, a snare, `tty:cont`), unlike every document I had
+  written that morning and unlike the phenotype, which judges its signal before
+  its walk -- and u-job-test 12's `kill %1 bogus`, sent right after `kill %1`,
+  raced the child's death. The name is now judged first, through one predicate
+  (`notes_name_user_postable`) that `notes_post` shares; the device leg sends the
+  bad name before the kill, then waits for ZOMBIE in `/proc/<pid>/status` and
+  asks both again. F3: `proc_fault_terminate`'s contract still named one caller
+  of three; the `user fault:` line stays as it is because ten gates key on it.
 
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 

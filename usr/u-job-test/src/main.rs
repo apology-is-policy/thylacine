@@ -395,15 +395,30 @@ pub extern "C" fn rs_main() -> i64 {
             drop(child.stderr.take());
             let pid = child.pid();
             env_k.jobs_mut().add(vec![pid], String::from("tr a-z A-Z"));
+            let _ = eval_source(&mut env_k, "kill %1 bogus");
+            if env_k.status() != 1 || env_k.errstr() != "kill: bogus: not a note a program can send" {
+                return fail("kill %1 bogus should read `not a note a program can send`");
+            }
             if eval_source(&mut env_k, "kill %1").is_err() {
                 return fail("kill: `kill %1` errored");
             }
             if env_k.status() != 0 {
                 return fail("kill %1 to a live child should report success");
             }
+            // Dead and not yet waited for, the child is still a process: a real
+            // note is accepted (and changes nothing), a bad name still refused.
+            if !proc_reads_zombie(pid) {
+                return fail("the child killed by `term` never read ZOMBIE");
+            }
             let _ = eval_source(&mut env_k, "kill %1 bogus");
             if env_k.status() != 1 || env_k.errstr() != "kill: bogus: not a note a program can send" {
-                return fail("kill %1 bogus should read `not a note a program can send`");
+                return fail("kill %1 bogus to a dead child should still read `not a note a program can send`");
+            }
+            if eval_source(&mut env_k, "kill %1").is_err() {
+                return fail("kill: `kill %1` to a dead child errored");
+            }
+            if env_k.status() != 0 {
+                return fail("kill %1 to a dead, unwaited child should report success");
             }
             drop(child.stdin.take());
             if eval_source(&mut env_k, "wait %1").is_err() {
@@ -868,6 +883,26 @@ fn parent_pid() -> Option<i32> {
     let text = core::str::from_utf8(&buf[..n]).ok()?;
     let line = text.lines().find(|l| l.starts_with("ppid:"))?;
     line["ppid:".len()..].trim().parse::<i32>().ok().filter(|p| *p > 0)
+}
+
+/// Whether `pid`'s /proc status reads ZOMBIE within a bounded wait (it dies
+/// on its own CPU, asynchronously to the post that killed it).
+fn proc_reads_zombie(pid: i32) -> bool {
+    use libthyla_rs::io::Read as _;
+    let path = alloc::format!("/proc/{}/status", pid);
+    for _ in 0..2000 {
+        if let Ok(mut f) = libthyla_rs::fs::File::open(path.as_str()) {
+            let mut buf = [0u8; 512];
+            if let Ok(n) = f.read(&mut buf) {
+                let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                if text.lines().any(|l| l.starts_with("state:") && l["state:".len()..].trim() == "ZOMBIE") {
+                    return true;
+                }
+            }
+        }
+        let _ = time::sleep(Duration::from_millis(2));
+    }
+    false
 }
 
 fn fail(tag: &str) -> i64 {

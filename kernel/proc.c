@@ -4194,7 +4194,11 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
 // fault. Called from arch/arm64/exception.c::exception_sync_lower_el
 // for every EL0 sync exception that previously called
 // extinction_with_addr (FAULT_UNHANDLED_USER, FAULT_FATAL,
-// EC_PC_ALIGN, EC_SP_ALIGN, EC_BTI, EC_BRK, default).
+// EC_PC_ALIGN, EC_SP_ALIGN, EC_BTI, EC_BRK, default), and from the
+// two syscall paths where a Proc chooses a snare death for itself
+// (SYS_POSTNOTE's self arm; the phenotype's viv_kill). A chosen death
+// prints the same `user fault:` line -- the gates that watch for a
+// userspace death key on it -- with the SVC's ELR as its addr.
 //
 // CONTRACT:
 //   - `name` MUST be one of the snare:* string-literal constants from
@@ -4227,9 +4231,9 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
 __attribute__((noreturn))
 void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // F2 audit close: defense-in-depth on `name` itself. The contract
-    // says `name` MUST be a NOTE_NAME_SNARE_* string literal; today's
-    // only callers in arch/arm64/exception.c pass literals, so the
-    // NULL case is latent. But the function downstream passes `name`
+    // says `name` MUST be a NOTE_NAME_SNARE_* string literal; every
+    // caller passes one (exception.c's literals; the syscall paths'
+    // table rows), so the NULL case is latent. But the function downstream passes `name`
     // to the console emit and to exits (which strcmp's against "ok").
     // A NULL passed in via a future caller bug would NULL-deref the
     // kernel from the console layer -- cons_diag_line_puts happens to guard
