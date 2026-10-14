@@ -113,6 +113,51 @@ needed the operator.
   its sender. default-smp8 x30 on it: 30/30 clean -- with 2/20 before, not a
   significant difference (Fisher ~0.15); hunting on (thyla-pi KVM smp8 x60, then
   the Mac).
+- *A, reproduced; the first cause I named was wrong.* An in-boot hunt
+  (a16aaf850: the trial 300 times a boot) caught it on both hosts with one
+  signature -- four requests on the wire (Tversion, Tattach, Twalk, Tlcreate:
+  not even the unstall's Twalk), nwrite 0, the closer's job dropped (jobs+1
+  dropped+1 sent+0), still so 20 s later: Mac hvf boots 9 and 16 of 20 (trials
+  148, 74), thyla-pi KVM boot 23 (trial 259). I read it as a fixture race --
+  every trial reuses static `g_mq_a`, and a session's teardown, on its last
+  reference (possibly a closer's, dropped late), would close the NEXT
+  session's transport -- and wrote 7020ef795 (wait for each session's close
+  before the loopback is reused) plus a dossier paragraph (110cb25a9) stating
+  that cause. It was a hypothesis from code reading, never observed: the fix
+  image went red on thyla-pi at boot 3, trial 124, with `released=1` (the
+  previous close HAD run) and the same signature. Both are reverted
+  (b0d3c7c47): closer_quiet() already closes that window on every passing
+  path, since the one closer is asleep at its idle tsleep only after
+  closer_serve dropped each reference.
+- *A, root-caused by observation: a lost store in the test scaffold.* Probes
+  (37a8b9022) recorded each client's first death -- the caller of
+  client_mark_dead_locked, the thread, whether it was dying -- and the trial's
+  phases. Wrong turn two: that image ran 100/100 on the pi and 30/30 on the
+  Mac, because one probe took `c->lock` just before the unstall, the lock the
+  closer's send runs under, which serialized the race away. Without it
+  (44ccd28a6) the red came back (pi boot 14 trial 41; Mac boots 6, 7) with one
+  answer each time: the client was live before the unstall; the unstall's own
+  Twalk met EAGAIN; the test thread self-pumped as reader
+  (client_pump_or_park_locked, 9p_client.c:949); the mq loopback reads an
+  empty FIFO as EOF; the session died (devgone) -- and then the closer's job
+  found the fid gone. EAGAIN, though wbc_unstall had just stored
+  `eagain_budget = 0`: a plain store, while mq_send decrements the budget
+  under `mq->lock` and the closer's first send of the handed-off run can be in
+  flight then. A read of the budget AFTER the unstall (9bd66d00e, which cannot
+  move the timing) showed 4294967292 in the red trial (Mac boot 3, trial 291)
+  and 0 in every passing one. Fix a29cef5ac: locked accessors
+  (`p9_mq_loopback_set_eagain_budget` / `_eagain_budget`) used by all 34 test
+  sites, not only the ones a sender can race; a responder, already under the
+  lock, keeps its direct store.
+- *A, verified and audited.* The fix with the hunt still in: Mac default-smp8
+  40/40 clean (12,000 trials; the same images went red about one boot in six
+  before it). Fable 5.1 round on a29cef5ac: 0/0/0/4, all fixed in 43d18cac4
+  -- the budget read died-not-sentinel (all ones is a value the tests arm),
+  the destroy under the lock (a timed-out wait could destroy under a closer's
+  recv and over-read the ring), a dossier fragment, and the scribble knob put
+  under the same rule. My concurrent self-audit found np_teardown storing the
+  budget before joining its poller: the same lost store, latent, already
+  covered.
 
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 
