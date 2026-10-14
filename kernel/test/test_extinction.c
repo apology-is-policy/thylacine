@@ -166,9 +166,7 @@ void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void) {
 
     TEST_ASSERT(admitted == 1, "an unclaimed console admits the byte");
     TEST_ASSERT(during == before + 1u,
-        "an admitted byte holds its thread's preempt count: a switch mid-byte "
-        "would let another thread's exit clear the cpu's mark, or move the "
-        "byte to a cpu that never raised it");
+        "an admitted byte holds its thread's preempt count, so the thread cannot leave its cpu mid-byte");
     TEST_ASSERT(after == before, "exit releases the hold");
 }
 
