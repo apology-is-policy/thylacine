@@ -413,6 +413,10 @@ build_kernel() {
     # ~40 min cold on this host, and the source is a sibling sparse clone. Must
     # follow build_libcxx (it links libc++) and precede the pool fixture.
     [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" ]] && build_jsc
+    # Boosty B-3: the browser libraries' compiled upstream tests and their data
+    # (-> /var/icu_tests in the pool; ls-libs runs them). DEFAULT-OFF: ~200 MiB
+    # staged and ~10 min of ICU on a cold build.
+    [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" ]] && build_lib_tests
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -3570,6 +3574,11 @@ build_stratum_pool_fixture() {
         # clade-only -> 3072M; stacked with GOROOT (2560M) -> 5120M.
         if [[ "$pool_size" == "2560M" ]]; then pool_size="5120M"; else pool_size="3072M"; fi
     fi
+    # B-3: the library tests stage ~200 MiB (~660 MiB at the 3.3x bake
+    # amplification above) and write their own scratch files when they run.
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -d "$BUILD_DIR/pouch/lib-tests/stage" ]]; then
+        pool_size="$(( ${pool_size%M} + 1024 ))M"
+    fi
     # #101: the SILENT-DESTRUCTION warning. This function is reached by every
     # `build.sh kernel` (build_kernel calls it) as well as `build.sh pool`, so
     # any harness that builds before testing re-mints pool.img from the AMBIENT
@@ -4011,6 +4020,24 @@ populate_stratum_pool() {
         || { echo "==> populate pool: system-recovery-wrap readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     rm -rf "$cm_out"
     echo "==> populate pool: system identity baked + readback-verified at /var/lib/corvus (system-wrap + system-recovery-wrap, SYSTEM-owned)"
+
+    # --- Boosty B-3: the browser libraries' compiled upstream tests (staged by
+    # build_lib_tests). ICU's test programs carry their data root compiled in
+    # (/var/icu_tests, upstream's QNX_TARGET layout), and intltest reads its
+    # shared MessageFormat 2 data at that root's ../testdata. Keyed on the flag
+    # AND the stage, like /webkit. Read-only SYSTEM masters; the tests run with
+    # a writable cwd. ---
+    local libt_stage="$BUILD_DIR/pouch/lib-tests/stage"
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/var/icu_tests/bin/intltest" ]]; then
+        echo "==> populate pool: baking the library tests ($libt_stage/var -> /var, $(du -sh "$libt_stage" | cut -f1))"
+        for d in icu_tests testdata; do
+            "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/var/$d" "/var/$d" \
+                || { echo "==> populate pool: put /var/$d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after the library tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: library tests baked at /var/icu_tests"
+    fi
 
     # --- net-4a: bake the network database at /lib/ndb/local ---
     # netd (a confined warden-bound leaf driver, I-34) compiles in a
@@ -4496,6 +4523,7 @@ populate_stratum_pool() {
     local vp_tombraider="$BUILD_DIR/tombraider/stage"
     local vp_dbxconf="$BUILD_DIR/dosbox-x-sysconf/dosbox-x.conf"
     local vp_webkit="$BUILD_DIR/webkit/stage"
+    local vp_libtests="$BUILD_DIR/pouch/lib-tests/stage"
 
     # /thylacine-version is written unconditionally near the top of this
     # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
@@ -4548,6 +4576,12 @@ DBXCONF /lib/dosbox-x/dosbox-x.conf"
         bake_want="$bake_want
 WEBKIT /webkit/jsc
 SUNSPIDER /webkit/sunspider/run.js"
+    fi
+    if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$vp_libtests/var/icu_tests/bin/intltest" ]]; then
+        bake_want="$bake_want
+ICUTEST /var/icu_tests/bin/intltest
+ICUDATA /var/icu_tests/test/testdata/out/testdata/root.res
+MF2DATA /var/testdata/message2/valid-tests.json"
     fi
 
     local bake_missing=""
@@ -6707,9 +6741,26 @@ build_icu() {
     fi
     [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
 
+    # U_HAVE_MMAP=0: a data file ICU opens by path (the tests' packages; none of
+    # the common data, which libicudata.a carries) is read into memory, not
+    # mapped MAP_SHARED. --enable-tests only generates the test makefiles
+    # (build_lib_tests runs them); `make all` builds no test.
+    local tflags="--target=aarch64-thylacine -march=armv8-a -moutline-atomics"
+    local cflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -DU_HAVE_MMAP=0 -isystem $sysroot/include"
+    local cxxflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -DU_HAVE_MMAP=0 -isystem $sysroot/include/c++/v1 -isystem $sysroot/include"
+    local cfgargs=( --host=aarch64-unknown-linux-musl --with-cross-build="$host"
+          --disable-shared --enable-static --with-data-packaging=static --enable-tests
+          --disable-samples --disable-extras --disable-icuio --disable-layoutex
+          --disable-dyload --prefix=/ )
+    # The reuse test compares the flags too: a stage built under other flags is
+    # not up to date because its files are newer than their inputs.
+    local stamp="$stage/.thylacine-config"
+    local want_stamp="$tflags | $cflags | $cxxflags | ${cfgargs[*]}"
+
     if [[ -f "$stage/lib/libicuuc.a" && -f "$stage/lib/libicui18n.a" && -f "$stage/lib/libicudata.a" \
           && ! "$sysroot/lib/libc++.a" -nt "$stage/lib/libicuuc.a" \
-          && ! "$tgz" -nt "$stage/lib/libicuuc.a" ]]; then
+          && ! "$tgz" -nt "$stage/lib/libicuuc.a" \
+          && -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" ]]; then
         ledger "icu $ICU_VER: REUSED (cached + up-to-date)"
         return 0
     fi
@@ -6728,24 +6779,72 @@ build_icu() {
             || { echo "==> icu: HOST build failed -- see $host/{configure,build}.log" >&2; exit 1; }
     fi
 
-    local tflags="--target=aarch64-thylacine -march=armv8-a -moutline-atomics"
-    local cflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -isystem $sysroot/include"
-    local cxxflags="-O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 -isystem $sysroot/include/c++/v1 -isystem $sysroot/include"
     ( cd "$base/cross" && \
       CC="$clang_c $tflags" CXX="$clangxx $tflags" \
       CFLAGS="$cflags" CXXFLAGS="$cxxflags" LDFLAGS="--sysroot=$sysroot -static" \
       AR="$LLVM_PREFIX/bin/llvm-ar" RANLIB="$LLVM_PREFIX/bin/llvm-ranlib" \
-      "$src/configure" --host=aarch64-unknown-linux-musl --with-cross-build="$host" \
-          --disable-shared --enable-static --with-data-packaging=static --disable-tests \
-          --disable-samples --disable-extras --disable-icuio --disable-layoutex \
-          --disable-dyload --prefix=/ > configure.log 2>&1 \
+      "$src/configure" "${cfgargs[@]}" > configure.log 2>&1 \
       && make -j"$jobs" > build.log 2>&1 \
       && make install DESTDIR="$stage" > install.log 2>&1 ) \
         || { echo "==> icu: CROSS build failed -- see $base/cross/{configure,build,install}.log" >&2; exit 1; }
     [[ -f "$stage/lib/libicuuc.a" && -f "$stage/include/unicode/uversion.h" ]] \
         || { echo "==> icu: install produced no libicuuc.a / headers under $stage" >&2; exit 1; }
+    printf '%s' "$want_stamp" > "$stamp"
     echo "    icu: $(du -sh "$stage/lib" | cut -f1) of static libs at $stage"
     ledger "icu $ICU_VER: BUILT (static, data packaged in libicudata.a)"
+}
+
+build_lib_tests() {
+    # Boosty B-3 (dec-2026-10-14-b3-test-bar): each browser library's compiled
+    # upstream test programs, cross-built against the same static archives the
+    # browser links, staged with the data they read for the pool's /var
+    # (tools/interactive/ls-libs.exp runs them). Under build/pouch/ ON PURPOSE:
+    # a sysroot rebuild wipes it, as it must every binary linked to the old libc.
+    #
+    # ICU (B-3c): cintltst and intltest. QNX_TARGET=1 is upstream's switch for
+    # a target whose tree is not the build host's: it compiles the data root in
+    # as /var/icu_tests (source and build trees merged there), with no patch.
+    # iotest needs icuio, which this ICU is built without.
+    build_icu
+    local base="$BUILD_DIR/pouch/icu"
+    local src="$base/src/icu/source" cross="$base/cross"
+    # build_icu skips, announced, without the LLVM fork; the chunk asked for
+    # these tests by name, so that is an error here.
+    [[ -f "$base/stage/lib/libicuuc.a" ]] \
+        || { echo "==> lib tests: ICU is not built (see above) -- CHUNK_LIBTESTS needs it" >&2; exit 1; }
+    local out="$BUILD_DIR/pouch/lib-tests"
+    local stage="$out/stage"
+    local icu_root="$stage/var/icu_tests"
+    local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+
+    if [[ -x "$icu_root/bin/intltest" && -x "$icu_root/bin/cintltst" \
+          && ! "$base/stage/lib/libicuuc.a" -nt "$icu_root/bin/intltest" ]]; then
+        ledger "lib tests: REUSED (ICU's tests newer than its archives)"
+        return 0
+    fi
+    echo "==> building the library tests (ICU $ICU_VER: testdata, cintltst, intltest)"
+    rm -rf "$stage"; mkdir -p "$icu_root/bin" "$icu_root/test" "$icu_root/data/out" "$stage/var/testdata"
+    local t
+    for t in test/testdata test/cintltst test/intltest; do
+        make -C "$cross/$t" -j"$jobs" QNX_TARGET=1 > "$out/${t//\//-}.log" 2>&1 \
+            || { echo "==> lib tests: ICU $t failed -- see $out/${t//\//-}.log" >&2; exit 1; }
+    done
+    # Stripped into the pool (the unstripped pair stays in $cross for addr2line).
+    for t in cintltst intltest; do
+        "$LLVM_PREFIX/bin/llvm-strip" -o "$icu_root/bin/$t" "$cross/test/$t/$t" \
+            || { echo "==> lib tests: llvm-strip $t failed" >&2; exit 1; }
+    done
+    # The source test data, with the build's out/ (the testdata package) merged in.
+    cp -R "$src/test/testdata" "$icu_root/test/testdata"
+    cp -R "$cross/test/testdata/out" "$icu_root/test/testdata/out"
+    # The Unicode data files and StringPrep profiles the tests parse; the rest of
+    # source/data is the prebuilt archive the build already consumed.
+    cp -R "$src/data/unidata" "$src/data/sprep" "$icu_root/data/"
+    # The unpacked common data (ICU_DATA for cintltst's by-path opens).
+    cp -R "$cross/data/out/build" "$icu_root/data/out/build"
+    cp -R "$src/../testdata/message2" "$stage/var/testdata/message2"
+    echo "    lib tests: $(du -sh "$stage" | cut -f1) staged at $stage"
+    ledger "lib tests: BUILT (ICU cintltst + intltest + data)"
 }
 
 # The tree the pin plus the patch series builds, applied IN ORDER in a scratch
@@ -7612,6 +7711,7 @@ case "$target" in
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
     icu)         build_icu         ;;
+    lib-tests)   build_lib_tests   ;;
     jsc)         build_jsc         ;;
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;
@@ -7637,7 +7737,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, lib-tests, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

@@ -99,7 +99,10 @@ bc_def bake DOSBOX_CPU_PRESET "choice:xt,286,386,486,pentium,pentium2" pentium "
   "The emulated CPU class the baked system config (/lib/dosbox-x/dosbox-x.conf) pins as the default fixed cycle count: xt=500, 286=3000, 386=12000, 486=45000, pentium=60000, pentium2=200000 cycles/ms. A plain 'dosbox-x' launch runs at this speed; the shipped games carry their own per-game config (Pentium class); any launch overrides with -set \"cpu cycles=fixed N\". pentium suits most 1994-97 titles. Ignored when CHUNK_DOSBOX=n."
 bc_def bake CHUNK_WEBKIT bool n "env:THYLACINE_BAKE_WEBKIT" \
   "JavaScriptCore (Boosty B-0, /webkit/jsc)" \
-  "Builds ICU 78.3 and WebKit's JSCOnly port (static, every JIT tier off: the LLInt + IPInt interpreters) and bakes the stripped shell at /webkit/jsc. SLOW: ~40 min cold on an 8-core/8-GiB host, and a sysroot rebuild wipes it. Needs the sparse WebKit checkout + the ICU tarball -- run 'tools/forage.sh webkit'; an absent input is an ERROR here, not a skip, because the chunk was asked for. The ls-jsc gate needs this chunk."
+  "Builds ICU 78.3 and WebKit's JSCOnly port (static; the LLInt and IPInt interpreters plus the Baseline, DFG, FTL, regexp and Wasm BBQ/OMG JITs, which run when jsc holds CAP_JIT) and bakes the stripped shell at /webkit/jsc with SunSpider at /webkit/sunspider. SLOW: ~40 min cold on an 8-core/8-GiB host, and a sysroot rebuild wipes it. Needs the sparse WebKit checkout + the ICU tarball -- run 'tools/forage.sh webkit'; an absent input is an ERROR here, not a skip, because the chunk was asked for. The ls-jsc gate needs this chunk."
+bc_def bake CHUNK_LIBTESTS bool n "env:THYLACINE_BAKE_LIBS" \
+  "Browser library tests (Boosty B-3, /var/icu_tests)" \
+  "Builds the browser libraries' compiled upstream test programs against the same static archives the browser links, and bakes them with their data: ICU's cintltst and intltest at /var/icu_tests (and intltest's MessageFormat 2 data at /var/testdata). ~200 MiB staged, so the pool grows by 1 GiB; ~15 min cold for ICU. Needs the ICU tarball -- run 'tools/forage.sh webkit'. The ls-libs gate needs this chunk."
 bc_def bake CHUNK_AURORA_CFG bool n "env:THYLACINE_AURORA_CFG4" \
   "Aurora config-4 payload" \
   "An opt-in Aurora renderer config-4 payload."

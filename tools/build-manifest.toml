@@ -146,7 +146,7 @@ file       = "icu4c-78.3-sources.tgz"
 dir        = "build/cache"
 url        = "https://github.com/unicode-org/icu/releases/download/release-78.3/icu4c-78.3-sources.tgz"
 sha256     = "3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0"
-feeds      = "CHUNK_WEBKIT (ICU 78.3, cross-built static for JavaScriptCore's Intl)"
+feeds      = "CHUNK_WEBKIT (ICU 78.3, cross-built static for JavaScriptCore's Intl); CHUNK_LIBTESTS (ICU's cintltst + intltest and their data)"
 forageable = "download"
 
 # --- network: build.sh fetches it itself at build time -----------------------

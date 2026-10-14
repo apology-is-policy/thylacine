@@ -1,0 +1,86 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-libs.exp -- Boosty B-3 over a real PTY: the browser
+# libraries' compiled upstream test programs run on the device as the logged-in
+# user, from the pool's /var (THYLACINE_BAKE_LIBS=1; build_lib_tests stages
+# them). The exit bar is dec-2026-10-14-b3-test-bar: each library's compiled C
+# tests, with their data; the suites an interpreter drives are listed as
+# skipped in docs/browser-status.md. docs/BROWSER-DESIGN.md section 9.
+#
+# Each leg runs one program with its output in a file under /tmp (a full run
+# prints thousands of lines, which the console need not carry), then asserts
+# TWO things, because either alone is satisfied by a broken run:
+#   - the exit status is 0 (a crash, a snare, or a counted failure is not), and
+#   - the program's own all-passed verdict is in its log (a program that exits
+#     0 having run nothing prints no verdict).
+# On a red leg the log's last 40 lines (each program ends with its failure
+# summary) are printed before the scenario fails.
+#
+#   icu-c   ICU's C API tests (cintltst): "[All tests passed successfully...]"
+#   icu-cxx ICU's C++ API tests (intltest): "OK: All tests passed without error."
+#           Data errors count: intltest runs without -w, so a test that cannot
+#           find its data fails rather than warns.
+#
+# EVERY verdict is grepped in lower case (the device's grep matches a literal,
+# -i for case) and asserted in UPPER case through `tr`: the terminal echoes
+# what is typed, and an expect the echo can satisfy proves nothing. ut
+# word-splits `icuc-$status` into two words, so the status reads "ICUC- 0".
+#
+# G-3: HVF -- CPU-bound and boot-dominated, with no GIC/timer/BAR surface of
+# its own.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+if {![lc_pool_has ICUTEST]} {
+    puts "LS-CI SKIP: this pool holds no library tests (build/pool-contents has no\
+          ICUTEST payload -- THYLACINE_BAKE_LIBS unset, or a pool baked before it existed)"
+    exit 77
+}
+foreach need {ICUDATA MF2DATA} {
+    if {![lc_pool_has $need]} {
+        puts "LS-CI FAIL: this pool holds ICU's tests but not their $need payload\
+              (a partial bake; rebake with THYLACINE_BAKE_LIBS=1)"
+        exit 1
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_send "cd /tmp"
+
+# One program's leg: run it into its log, read back the status, then the
+# verdict line. `verdict` is lower case as typed; the log holds it in mixed
+# case, so the grep is case-blind and the match is on the upper-cased line.
+proc lib_leg {tag prog log verdict} {
+    global lc_cmd_timeout
+    set tagU [string toupper $tag]
+    lc_send "$prog > $log; echo $tag-\$status | tr a-z A-Z"
+    expect {
+        -ex "$tagU- 0\r"           { lc_step "saw: $prog exited 0" }
+        -re "$tagU- (\[1-9\]\[0-9\]*)" {
+            set rc $expect_out(1,string)
+            lc_send "tail -n 40 $log"
+            # Read (and so log) the tail before failing: output nobody expects
+            # for never reaches the transcript.
+            expect -timeout 5 timeout {}
+            lc_fail "$prog exited $rc (failure lines above, from $log)"
+        }
+        -re {EXTINCTION:}          { lc_extinction_fail "kernel extinction during $prog" }
+        timeout                    { lc_fail "timeout (${lc_cmd_timeout}s) waiting for $prog's exit" }
+        eof                        { lc_fail "unexpected EOF during $prog" }
+    }
+    lc_run_expect "grep -i '$verdict' $log | tr a-z A-Z" [string toupper $verdict]
+}
+
+# A full ICU run is minutes, not seconds.
+set ::lc_cmd_timeout 1800
+set timeout 1800
+
+lib_leg icuc /var/icu_tests/bin/cintltst /tmp/icu-c.log "all tests passed successfully"
+lc_pass "ls-libs(icu-c): cintltst exit 0, all tests passed"
+
+lib_leg icux /var/icu_tests/bin/intltest /tmp/icu-cxx.log "all tests passed without error"
+lc_pass "ls-libs(icu-cxx): intltest exit 0, all tests passed"
+
+lc_quit
+exit 0

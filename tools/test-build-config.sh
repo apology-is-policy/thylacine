@@ -34,6 +34,7 @@ eq "default CHUNK_DUKE3D"  "$(bc_get CHUNK_DUKE3D)"  "y"
 eq "default CHUNK_TOMBRAIDER" "$(bc_get CHUNK_TOMBRAIDER)" "y"
 eq "default DOSBOX_CPU_PRESET" "$(bc_get DOSBOX_CPU_PRESET)" "pentium"
 eq "default CHUNK_WEBKIT (slow + foraged -> off)" "$(bc_get CHUNK_WEBKIT)" "n"
+eq "default CHUNK_LIBTESTS (slow + foraged -> off)" "$(bc_get CHUNK_LIBTESTS)" "n"
 
 echo "== preset: production =="
 bc_reset; bc_apply_preset production

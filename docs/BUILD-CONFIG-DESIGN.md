@@ -122,6 +122,7 @@ CHUNK_DUKE3D=y            # needs CHUNK_DOSBOX (lowered without it)
 CHUNK_TOMBRAIDER=y        # needs CHUNK_DOSBOX (lowered without it)
 DOSBOX_CPU_PRESET=pentium # xt|286|386|486|pentium|pentium2 -> the baked cycles=fixed N
 CHUNK_WEBKIT=n            # Boosty B-0: ICU + JavaScriptCore -> /webkit/jsc (SLOW; foraged)
+CHUNK_LIBTESTS=n          # Boosty B-3: the browser libraries' compiled tests -> /var/icu_tests (SLOW; foraged)
 CHUNK_AURORA_CFG=n
 DISK_SIZE=16M
 MKFS_SEED=                # empty = random
@@ -151,7 +152,9 @@ it once, in the schema.
   and its source is foraged, not vendored. It differs from every other chunk in
   one way, on purpose: with the chunk ON, an absent input is an ERROR, not an
   announced skip. A chunk that defaults off was asked for by name, so "skipped"
-  would be the silent omission section 5.3 exists to end.
+  would be the silent omission section 5.3 exists to end. `CHUNK_LIBTESTS`
+  (Boosty B-3, 2026-10-14) follows the same rule: the browser libraries'
+  compiled upstream tests and their data, default OFF for the same cost.
 - **display** (added 2026-09-09) — `HALCYON_SESSION`, `HALCYON_CONSOLE`,
   `HALCYON_THEME`. The Halcyon axes, which had lived only as raw `THYLACINE_*`
   env vars and so were invisible to the configurator.
