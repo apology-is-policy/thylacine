@@ -303,9 +303,16 @@ static void provoke_el1_sync_runaway(void) {
 
 static u32 g_chatter_running;
 
+// Bounded, so a kernel without the gate (whose banner never forms) leaves a
+// small log for test-fault.sh to time out on, not minutes of chatter.
+#define CHATTER_NS (5000ull * 1000ull * 1000ull)
+
 static void chatter_entry(void) {
     __atomic_fetch_add(&g_chatter_running, 1u, __ATOMIC_RELEASE);
-    for (;;) uart_puts("  chatter: a peer cpu writes the console directly\n");
+    u64 t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < CHATTER_NS)
+        uart_puts("  chatter: a peer cpu writes the console directly\n");
+    for (;;) __asm__ __volatile__("wfe" ::: "memory");
 }
 
 __attribute__((noinline))
@@ -341,6 +348,15 @@ static void provoke_extinction_peer_chatter(void) {
     t0 = timer_now_ns();
     while (timer_now_ns() - t0 < 20ull * 1000ull * 1000ull)
         __asm__ __volatile__("yield" ::: "memory");
+    // The extinction entry must mask IRQs before it claims; test-fault.sh
+    // forbids the line a claim taken with IRQs on prints. Only a caller with
+    // IRQs on can tell the two apart.
+    u64 daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    if (daif & (1ull << 7)) {
+        uart_puts("FAIL: extinction_peer_chatter must extinct with irqs on\n");
+        return;
+    }
     extinction("peer chatter: this banner must reach the wire whole");
 }
 #endif

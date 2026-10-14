@@ -932,3 +932,9 @@ Linux's pselect6. Tests: `vivarium.t1_keeps_guest_registers` (a child Proc
 turned Linux guest, through the real dispatch) and writev/readv legs in
 `vivarium.t2_shells_narrow_linux_widths`. sendto/recvfrom have no runtime leg:
 no socket test drives either call.
+
+**Width audit round 2 append (2026-10-14).** The guest's x1-x5 and x8 go back
+when the native handler returns, not before: a debugger reading a Linux
+guest's registers while that thread is stopped inside a T1 call (blocked in
+read, say) sees the native number in x8 and the narrowed words in x1-x5. Every
+return to EL0 sees the guest's own.

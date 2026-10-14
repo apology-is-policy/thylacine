@@ -36,8 +36,13 @@
 #              return): the build refuses -- a compare is not a guard.
 #   M19        the console gate's per-CPU mark is a flag again (store 1 / store
 #              0), so a nested byte's exit clears the outer byte's mark.
+#   M20        the gate stops holding the byte's thread on its CPU (no preempt
+#              hold across enter..exit).
 #   B1         uart_putc without the console gate: tools/test-fault.sh's
-#              extinction_peer_chatter must FAIL (the banner is torn).
+#              extinction_peer_chatter must FAIL (the banner is torn), after the
+#              chatter ran.
+#   B4         extinction() claims the console with IRQs still on: the variant
+#              must FAIL on the forbidden "console-claim: taken with irqs on".
 #   B2         the committed gate: the same variant PASSes, the banner whole.
 #   B3         every test-fault variant PASSes (the claim now waits for peers).
 # Each predicted kernel message is checked, before any build, to lie inside the
@@ -65,6 +70,7 @@ T_REG=vivarium.t1_keeps_guest_registers
 T_EXG=extinction.tx_gate_admits_only_the_owner_once_claimed
 T_EXW=extinction.tx_wait_waits_out_a_peer_byte
 T_EXN=extinction.tx_gate_counts_nested_bytes
+T_EXP=extinction.tx_enter_holds_the_thread_on_its_cpu
 W_PRB="every too-wide argument the probe passed was refused"
 W_T1CLOSE="close"
 W_T2NEG="readlinkat: a negative bufsiz is refused before the path"
@@ -73,6 +79,7 @@ W_FORK="a flags word wider than 32 bits must be refused, not cut down to RFPROC"
 W_T2WV="writev: a high half on the fd is Linux's to drop"
 W_REG="a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half"
 W_EXN="a nested byte on the same cpu is counted, not merged with the outer one"
+W_EXP="an admitted byte holds its thread's preempt count: a switch mid-byte would let another thread's exit clear the cpu's mark, or move the byte to a cpu that never raised it"
 PROBE_SRC=usr/argwidth-probe/argwidth-probe.c
 AW_BIN=build/ramfs-src/bin/argwidth-probe
 BR_BIN=build/ramfs-src/bin/loom-bridge-probe
@@ -82,7 +89,7 @@ SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
 FILES="kernel/syscall.c kernel/vivarium.c arch/arm64/uart.c kernel/extinction.c"
-NMUT=20
+NMUT=22
 MUTATED=0
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
@@ -176,7 +183,7 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 HEAD_SHA=$(git rev-parse HEAD)
 record "HEAD $HEAD_SHA"
-NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK $T_REG $T_EXG $T_EXW $T_EXN"
+NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK $T_REG $T_EXG $T_EXW $T_EXN $T_EXP"
 for t in $NAMED; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
@@ -186,7 +193,7 @@ record "width checker: self-test and the committed syscall.c pass"
 python3 - "$T_PRB" "$W_PRB" test_argwidth_probe.c "$T_T1" "$W_T1CLOSE" test_vivarium.c \
   "$T_T2" "$W_T2NEG" test_vivarium.c "$T_T2" "$W_T2RND" test_vivarium.c \
   "$T_FORK" "$W_FORK" test_fork.c "$T_T2" "$W_T2WV" test_vivarium.c \
-  "$T_REG" "$W_REG" test_vivarium.c "$T_EXN" "$W_EXN" test_extinction.c <<'MEMBER' || exit 3
+  "$T_REG" "$W_REG" test_vivarium.c "$T_EXN" "$W_EXN" test_extinction.c "$T_EXP" "$W_EXP" test_extinction.c <<'MEMBER' || exit 3
 import re, sys
 reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
 a = sys.argv[1:]
@@ -364,13 +371,22 @@ mutant_build() {
 }
 # mutant_fault <label> <file> <old> <new>: tools/test-fault.sh's
 # extinction_peer_chatter must FAIL on the mutant (it builds its own kernel
-# under build/kernel-fault-*; build/kernel is untouched).
+# under build/kernel-fault-*; build/kernel is untouched), for the reason MF_WHY
+# (an ERE on the variant's FAIL line), and with MF_SEEN in its boot log when set
+# (so a timeout is one the provoker reached). MF_TIMEOUT is its BOOT_TIMEOUT.
+FAULT_QLOG=build/test-fault-extinction_peer_chatter.log
 mutant_fault() {
   apply "$@"
-  ( set +e; BOOT_TIMEOUT=300 tools/test-fault.sh extinction_peer_chatter > "$OUT/$1-fault.log" 2>&1; echo $? > "$OUT/$1-fault.rc" )
+  ( set +e; BOOT_TIMEOUT=$MF_TIMEOUT tools/test-fault.sh extinction_peer_chatter > "$OUT/$1-fault.log" 2>&1; echo $? > "$OUT/$1-fault.rc" )
+  cp "$FAULT_QLOG" "$OUT/$1-qemu.log" 2>/dev/null || true
   record "$1: test-fault exit $(cat "$OUT/$1-fault.rc")"
-  [ "$(cat "$OUT/$1-fault.rc")" != 0 ] || { echo "$1: extinction_peer_chatter PASSED without the gate -- the witness cannot fail"; exit 2; }
-  /usr/bin/grep -qE '^==> \[extinction_peer_chatter\] FAIL' "$OUT/$1-fault.log" || { echo "$1: test-fault failed, but not at the variant"; tail -12 "$OUT/$1-fault.log"; exit 2; }
+  [ "$(cat "$OUT/$1-fault.rc")" != 0 ] || { echo "$1: extinction_peer_chatter PASSED on the mutant -- the witness cannot fail"; exit 2; }
+  _fl=$(/usr/bin/grep -E '^==> \[extinction_peer_chatter\] FAIL' "$OUT/$1-fault.log" | head -1)
+  [ -n "$_fl" ] || { echo "$1: test-fault failed, but not at the variant"; tail -12 "$OUT/$1-fault.log"; exit 2; }
+  printf '%s\n' "$_fl" | /usr/bin/grep -qE "$MF_WHY" || { echo "$1: the variant failed for another reason: '$_fl' (predicted /$MF_WHY/)"; exit 2; }
+  if [ -n "$MF_SEEN" ]; then
+    /usr/bin/grep -qF "$MF_SEEN" "$OUT/$1-qemu.log" || { echo "$1: '$MF_SEEN' never printed -- the provoker did not run"; exit 2; }
+  fi
   restore || exit 9
   MUTATED=0
 }
@@ -590,8 +606,46 @@ void extinction_tx_exit_core(volatile u8 *busy) {
 '
 expect_fails M19 1 "$T_EXN|$W_EXN"
 ok M19 "exactly $T_EXN at '$W_EXN'"
-echo "=== B1-B3: the extinction banner against peer chatter (tools/test-fault.sh) ==="
+echo "=== M20: the gate no longer holds the byte's thread on its CPU ==="
+mutant m20 kernel/extinction.c \
+'int extinction_tx_enter(void) {
+    spin_preempt_inc();
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    if (extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                g_extinction_owner[cpu]))
+        return 1;
+    spin_preempt_dec();
+    return 0;
+}
+
+void extinction_tx_exit(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+    spin_preempt_dec();
+}
+' \
+'int extinction_tx_enter(void) {
+    unsigned cpu = smp_cpu_idx_self();   // MUTANT M20 no preempt hold
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    return extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                   g_extinction_owner[cpu]);
+}
+
+void extinction_tx_exit(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+}
+'
+expect_fails M20 1 "$T_EXP|$W_EXP"
+ok M20 "exactly $T_EXP at '$W_EXP'"
+echo "=== B1-B4: the extinction banner against peer chatter (tools/test-fault.sh) ==="
 lease fault; floor pre-fault
+# Without the gate no ^EXTINCTION: line forms, so the variant times out (or,
+# if the prefix survives, fails the whole-line check); the chatter must have run.
+MF_TIMEOUT=60; MF_WHY='timeout|is not a whole line'; MF_SEEN='chatter: a peer cpu writes the console directly'
 mutant_fault b1 arch/arm64/uart.c \
 'void uart_putc(char c) {
     if (!extinction_tx_enter()) return;
@@ -604,6 +658,15 @@ mutant_fault b1 arch/arm64/uart.c \
 }
 '
 record "B1 DISCRIMINATED: without the gate extinction_peer_chatter FAILS: $(/usr/bin/grep -E '^==> \[extinction_peer_chatter\] FAIL' "$OUT/b1-fault.log" | head -1 | cut -c1-160)"
+MF_TIMEOUT=300; MF_WHY="ALSO 'console-claim: taken with irqs on'"; MF_SEEN=''
+mutant_fault b4 kernel/extinction.c \
+'    // restored: every path from here parks.
+    irq_mask_local();
+' \
+'    // restored: every path from here parks.
+    // MUTANT B4 no mask before the claim
+'
+record "B4 DISCRIMINATED: a claim with IRQs on FAILS the variant: $(/usr/bin/grep -E '^==> \[extinction_peer_chatter\] FAIL' "$OUT/b4-fault.log" | head -1 | cut -c1-160)"
 ( set +e; BOOT_TIMEOUT=300 tools/test-fault.sh extinction_peer_chatter > "$OUT/b2-fault.log" 2>&1; echo $? > "$OUT/b2-fault.rc" )
 [ "$(cat "$OUT/b2-fault.rc")" = 0 ] && /usr/bin/grep -qE '^==> \[extinction_peer_chatter\] PASS' "$OUT/b2-fault.log" \
   || { echo "B2: the gated build did not PASS extinction_peer_chatter"; tail -12 "$OUT/b2-fault.log"; exit 2; }

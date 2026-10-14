@@ -312,3 +312,18 @@ exception taken inside `uart_putc` may print through the gate again, and a
 flag cleared by that inner exit (or by its refusal under a fresh claim) would
 let the outer byte land unwaited inside the banner
 (`extinction.tx_gate_counts_nested_bytes`).
+
+**Console gate round 2 append (2026-10-14).** The mark is per CPU, so two
+facts must stay on one CPU, and both had relied on a kernel thread not being
+switched out. `extinction_tx_enter` now holds the calling thread's preempt
+count until `extinction_tx_exit`: a thread switched out mid-byte would have
+let another thread's exit clear the mark, or carried its byte to a CPU that
+never raised one. `extinction()` and `extinction_with_addr()` mask IRQs as
+their first statement, before the re-entry guard and the claim: the wait
+after the claim runs up to its bound, and a dying kernel thread switched out
+in it could resume on a CPU the gate does not admit, every byte of its banner
+dropped. The wait has one bound for all peers together (50 ms, or 2^24
+iterations before the timer runs), where it had one per peer. A claim taken
+with IRQs on prints `console-claim: taken with irqs on` after the dump; no
+fixed path can, and test-fault.sh forbids it for `extinction_peer_chatter`.
+Test: `extinction.tx_enter_holds_the_thread_on_its_cpu`.

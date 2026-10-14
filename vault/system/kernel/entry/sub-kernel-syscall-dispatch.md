@@ -1636,3 +1636,11 @@ phenotype branch stays in `syscall_dispatch_body`. Probe pairs: unlink's
 parent fd and rename's two directory fds, through a path handle and a missing
 name. chroot and pivot_root are covered statically only (the probe shares its
 parent's namespace).
+
+**Width audit round 2 append (2026-10-14).** The checker keeps char literals
+whole when it strips comments (a `'"'` had paired with a string's quote and
+blanked the rest of its line), and a compare on a cast of the word (`(u32)x >=
+N`) no longer counts as a guard: it is a low-half compare. A guard that returns
+any value counts, `return 0;` included; the cast never sees the wide word,
+and the answer's errno is review's question. Self-test cases charq, castcmp,
+castmask and clamp.

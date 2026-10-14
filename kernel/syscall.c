@@ -11766,7 +11766,7 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
                         struct viv_sock *out) {
     if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
-    if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)fd_raw) < 0)
+    if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0)
         return -(s64)T_E_BADF;
     return -(s64)T_E_NOTSOCK;
 }
@@ -13927,7 +13927,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // half: a negative-as-int fd is still above it, and junk above bit 31
         // is Linux's to drop.
         if ((u32)args[0] >= (u32)PROC_HANDLE_MAX)    return -(s64)T_E_BADF;
-        hidx_t fd = (hidx_t)args[0];
+        hidx_t fd = (hidx_t)(u32)args[0];
 
         switch (op) {
         case VIV_FCNTL_GETFD: {

@@ -376,3 +376,8 @@ lifecycle, the barrier that keeps one cookie per frame, and `__stack_chk_fail` â
 chattering thread to every peer CPU (enabling notify itself, since
 `fault_test_run` runs before main.c does) and extincts on cpu0;
 tools/test-fault.sh requires the banner as a whole line.
+
+The chatter threads stop after 5 s, so a kernel without the gate leaves a
+small log to time out on. The provoker refuses to extinct with IRQs masked
+(only a caller with IRQs on can tell a masked claim from an unmasked one), and
+test-fault.sh forbids `console-claim: taken with irqs on` for the variant.

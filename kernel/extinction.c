@@ -10,6 +10,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/extinction.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
 
 #include "../arch/arm64/halls.h"
 #include "../arch/arm64/timer.h"
@@ -99,7 +100,8 @@ int extinction_console_claimed(void) {
 static volatile u8 g_extinction_tx_busy[DTB_MAX_CPUS];
 
 // A peer's committed byte can sit in uart_putc's bounded TXFF wait (20 ms); past
-// this the winner prints anyway, as cons_tx_claim_for_dump does.
+// this the winner prints anyway, as cons_tx_claim_for_dump does. One bound for
+// the whole wait, however many peers are mid-byte.
 #define EXTINCTION_TX_WAIT_MAX_NS    (50ull * 1000ull * 1000ull)
 #define EXTINCTION_TX_WAIT_MAX_ITERS (1u << 24)
 
@@ -116,34 +118,49 @@ void extinction_tx_exit_core(volatile u8 *busy) {
 }
 
 int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) {
-    int all_clear = 1;
+    u32 iters = 0;
+    u64 t0 = 0;
     for (unsigned c = 0; c < n; c++) {
         if (c == self) continue;
-        u32 iters = 0;
-        u64 t0 = 0;
         while (__atomic_load_n(&busy[c], __ATOMIC_SEQ_CST) != 0u) {
-            if (++iters >= EXTINCTION_TX_WAIT_MAX_ITERS) { all_clear = 0; break; }
+            if (++iters >= EXTINCTION_TX_WAIT_MAX_ITERS) return 0;
             u64 now = timer_now_ns();                      // 0 before timer_init
             if (t0 == 0) t0 = now;
-            else if (now - t0 >= EXTINCTION_TX_WAIT_MAX_NS) { all_clear = 0; break; }
+            else if (now - t0 >= EXTINCTION_TX_WAIT_MAX_NS) return 0;
             __asm__ __volatile__("yield" ::: "memory");
         }
     }
-    return all_clear;
+    return 1;
 }
 
+// The mark is per CPU, so the byte's thread must not leave the CPU between
+// enter and exit: a switch would let another thread's exit clear the mark,
+// and a migration would drop it on a CPU that never raised it. Holding the
+// thread's preempt count defers any switch to the first IRQ return after
+// exit; IRQs themselves stay on through the TXFF wait (#67).
 int extinction_tx_enter(void) {
+    spin_preempt_inc();
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
-    return extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
-                                   g_extinction_owner[cpu]);
+    if (extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                g_extinction_owner[cpu]))
+        return 1;
+    spin_preempt_dec();
+    return 0;
 }
 
 void extinction_tx_exit(void) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
+    spin_preempt_dec();
 }
+
+// Set if the claim ran with IRQs on: the claiming thread could then be switched
+// out mid-wait and resume on a CPU the gate does not admit, every byte of its
+// banner dropped. Both extinction entries mask IRQs first, so this reports only
+// a path that forgot to (test-fault.sh forbids the line).
+static u8 g_extinction_claim_irqs_on;
 
 // TRUE for exactly one CPU per boot. The winner returns only once no peer has a
 // byte in flight (or the wait's bound has passed), so the banner it prints next
@@ -151,6 +168,9 @@ void extinction_tx_exit(void) {
 static int extinction_claim_console(void) {
     if (!extinction_claim_word(&g_extinction_console))
         return 0;
+    u64 daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    if (!(daif & (1ull << 7))) g_extinction_claim_irqs_on = 1u;
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     g_extinction_owner[cpu] = 1u;
@@ -231,6 +251,11 @@ static void extinction_claim_ring(void) {
 
 // Printed by the winner AFTER halls_dump (the ABI line stays first). Same
 // wording rules as the peer report: no "EXTINCTION" token, nothing at column 0.
+static void extinction_report_claim(void) {
+    if (g_extinction_claim_irqs_on)
+        uart_puts("  console-claim: taken with irqs on (the claiming thread could leave the owning cpu)\n");
+}
+
 static void extinction_report_ring(void) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
@@ -242,6 +267,10 @@ static void extinction_report_ring(void) {
 }
 
 void extinction(const char *msg) {
+    // First: every per-CPU fact below (depth, owner, the gate's admission) is
+    // this CPU's only while the dying thread cannot be switched out. Never
+    // restored: every path from here parks.
+    irq_mask_local();
     extinction_reentry_guard(msg);
     if (!extinction_claim_console()) extinction_park_suppressed();
     extinction_claim_ring();
@@ -256,10 +285,12 @@ void extinction(const char *msg) {
     halls_dump((void *)0);
     extinction_report_suppressed();
     extinction_report_ring();
+    extinction_report_claim();
     _torpor();
 }
 
 void extinction_with_addr(const char *msg, uintptr_t addr) {
+    irq_mask_local();                       // first, as in extinction()
     extinction_reentry_guard(msg);
     if (!extinction_claim_console()) extinction_park_suppressed();
     extinction_claim_ring();
@@ -289,5 +320,6 @@ void extinction_with_addr(const char *msg, uintptr_t addr) {
     halls_dump((void *)0);
     extinction_report_suppressed();
     extinction_report_ring();
+    extinction_report_claim();
     _torpor();
 }

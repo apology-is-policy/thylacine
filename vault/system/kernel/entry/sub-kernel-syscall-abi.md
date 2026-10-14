@@ -939,3 +939,7 @@ rename now refuse a descriptor wider than an index like every other
 descriptor argument (they had cast it down). A Linux guest's syscall number is
 read by its low 32 bits, and a renumbered call returns its registers as Linux
 does: only x0 changes.
+
+**Width audit round 2 append (2026-10-14).** The fcntl arm and `viv_sock_row`
+convert the descriptor through `(u32)` before `hidx_t`, so a high half above a
+bounded low half is dropped by a defined conversion.

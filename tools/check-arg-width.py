@@ -16,6 +16,10 @@
 # census until it lands. Not seen here: a guard in another branch than the cast,
 # a bound whose constant is wider than the cast, and a raw word that is not the
 # first operand of the cast's expression -- review and the compiler cover those.
+# A compare on a cast of the word (`(u32)x >= N`) is a low-half compare and does
+# not count. A guard that returns any value counts, `return 0;` included: the
+# cast never sees the wide word, and whether the answer is the right errno is
+# review's question (ERRORS.md principle 6), not this check's.
 import re, sys
 
 NARROW = r'(?:hidx_t|u32|s32|int|u16|s16|u8|unsigned|unsigned int|rights_t|pid_t|uid_t|gid_t|mode_t)'
@@ -24,12 +28,14 @@ HELPERS = ('sys_hidx_arg', 'sys_s32_arg', 'sys_u32_arg', 'sys_word32_arg')
 FN = re.compile(r'^(?:static )?(?:inline )?[\w \*]*?\b(\w+)\(([^;{)]*)\)\s*\{', re.M)
 # A guard refuses: its statement returns an error or opens a block that returns.
 REFUSE = r'\)\s*(?:return\s*[-(]|return\s+\w+\s*;|\{[^{}]*\breturn\b)'
+# The word itself, not a cast of it.
+UNCAST = r'(?<!\))(?<!\)\s)'
 
 def guards(p):
     q = re.escape(p)
     return [
-        r'\bif\s*\([^;{}]*\b' + q + r'\s*>=?\s*(?:\(u64\)\s*)?(?:0x[0-9a-fA-F]+u?l*l*|[A-Z][A-Z0-9_]*)[^;{}]*' + REFUSE,
-        r'\bif\s*\([^;{}]*\b' + q + r'\s*&\s*~\s*\(\s*u64\s*\)[^;{}]*' + REFUSE,
+        r'\bif\s*\([^;{}]*' + UNCAST + r'\b' + q + r'\s*>=?\s*(?:\(u64\)\s*)?(?:0x[0-9a-fA-F]+u?l*l*|[A-Z][A-Z0-9_]*)[^;{}]*' + REFUSE,
+        r'\bif\s*\([^;{}]*' + UNCAST + r'\b' + q + r'\s*&\s*~\s*\(\s*u64\s*\)[^;{}]*' + REFUSE,
         r'\bif\s*\([^;{}]*\([^;()]*\b' + q + r'(?!\w)[^;()]*\)\s*>\s*0x[fF]{8}[^;{}]*' + REFUSE,
         r'\b(?:' + '|'.join(HELPERS) + r')\(\s*' + q + r'(?!\w)',
     ]
@@ -105,11 +111,14 @@ def self_test():
     strip = 'static s64 sys_w(u64 m) {\n    u64 k = m & ~(u64)FLAG;\n    return f((u32)m) + k;\n}\n'
     instr = 'static s64 sys_x(u64 x) {\n    return f("// width: lol", (u32)x);\n}\n'
     charq = 'static s64 sys_z(u64 x) {\n    return f(\'"\', "// width: lol", (u32)x);\n}\n'
+    castcmp = 'static s64 sys_aa(u64 x) {\n    if ((u32)x >= LIMIT) return -1;\n    return f((u32)x);\n}\n'
+    castmask = 'static s64 sys_ab(u64 x) {\n    if ((u32) x & ~(u64)M) return -1;\n    return f((u32)x);\n}\n'
+    clamp = 'static s64 sys_ac(u64 x) {\n    if (x >= LIMIT) return 0;\n    return f((u32)x);\n}\n'
     blockok = 'static s64 sys_y(u64 x) {\n    if (x > 0xffffffffull) { put(); return -1; }\n    return f((u32)x);\n}\n'
     want = {ok: 0, helper: 0, noted: 0, bad: 1, late: 1, double: 1, viv: 0,
             comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1,
             regbad: 1, regok: 0, regother: 1, regcopy: 1, prefix: 1,
-            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, charq: 1, blockok: 0}
+            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, charq: 1, castcmp: 2, castmask: 2, clamp: 0, blockok: 0}
     for src, n in want.items():
         got = len(check(src, 'self-test'))
         if got != n:

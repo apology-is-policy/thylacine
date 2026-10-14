@@ -81,6 +81,7 @@ whole_line_for() {
 forbid_for() {
     case "$1" in
         el1_sync_runaway) echo "console-ring: NOT held" ;;
+        extinction_peer_chatter) echo "console-claim: taken with irqs on" ;;
         *)                echo "" ;;
     esac
 }

@@ -38,6 +38,7 @@
 #include "test.h"
 
 #include <thylacine/extinction.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 void test_extinction_claim_word_exactly_one_winner(void);
@@ -83,6 +84,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 //
 //   extinction.tx_gate_admits_only_the_owner_once_claimed
 //   extinction.tx_gate_counts_nested_bytes
+//   extinction.tx_enter_holds_the_thread_on_its_cpu
 //   extinction.tx_wait_waits_out_a_peer_byte
 //
 // Like the claim test these are sequential: they pin each side's decision, not
@@ -91,6 +93,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
 void test_extinction_tx_gate_counts_nested_bytes(void);
+void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void);
 void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
@@ -149,6 +152,24 @@ void test_extinction_tx_gate_counts_nested_bytes(void) {
     TEST_ASSERT(refused == 0 && after_refusal == 1,
         "a nested byte refused by a fresh claim leaves the outer byte in flight");
     TEST_ASSERT(after_outer == 0, "the outer byte's exit clears the cpu");
+}
+
+// The live gate, on the unclaimed console: the mark is per CPU, so the byte's
+// thread must stay on its CPU from enter to exit.
+void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void) {
+    struct Thread *me = current_thread();
+    u32 before = me->preempt_count;
+    int admitted = extinction_tx_enter();
+    u32 during = me->preempt_count;
+    if (admitted) extinction_tx_exit();
+    u32 after = me->preempt_count;
+
+    TEST_ASSERT(admitted == 1, "an unclaimed console admits the byte");
+    TEST_ASSERT(during == before + 1u,
+        "an admitted byte holds its thread's preempt count: a switch mid-byte "
+        "would let another thread's exit clear the cpu's mark, or move the "
+        "byte to a cpu that never raised it");
+    TEST_ASSERT(after == before, "exit releases the hold");
 }
 
 void test_extinction_tx_wait_waits_out_a_peer_byte(void) {
