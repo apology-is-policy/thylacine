@@ -133,6 +133,21 @@ static bool mq_recv_ready(void *ctx, struct poll_waiter *pw) {
     return ready;
 }
 
+void p9_mq_loopback_set_eagain_budget(struct p9_mq_loopback *mq, u32 n) {
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return;
+    spin_lock(&mq->lock);
+    mq->eagain_budget = n;
+    spin_unlock(&mq->lock);
+}
+
+u32 p9_mq_loopback_eagain_budget(struct p9_mq_loopback *mq) {
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return 0xffffffffu;
+    spin_lock(&mq->lock);
+    u32 n = mq->eagain_budget;
+    spin_unlock(&mq->lock);
+    return n;
+}
+
 struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq) {
     struct p9_transport_ops ops;
     ops.send              = mq_send;

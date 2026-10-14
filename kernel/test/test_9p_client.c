@@ -3892,14 +3892,15 @@ void test_9p_client_send_backpressure_self_pump(void) {
     TEST_ASSERT(!g_async_op.completed, "A not completed before B's self-pump drains it");
 
     // Arm ONE EAGAIN: op B's NEXT send hits a transiently-full-but-alive ring.
-    g_mq.eagain_budget = 1;
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);
 
     // Op B: sync Twalk(21). Its send EAGAINs once -> client_send_flow self-pumps
     // (drains A's Rclunk, completing A) -> retries -> B is accepted and completes.
     rc = p9_client_walk_one(&g_client, 0, 21, (const u8 *)"g", 1, NULL);
     TEST_EXPECT_EQ(rc, 0, "sync op B survives c2s back-pressure (self-pump + retry)");
 
-    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the armed EAGAIN actually fired");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                   "the armed EAGAIN actually fired");
     TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
     TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)0,
                    "op A completed with SUCCESS, not -EIO (the session never died)");
@@ -4021,7 +4022,7 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
     // Arm ONE EAGAIN (op B's first send back-pressures) + the peer-write model:
     // the recv inside B's self-pump overwrites the head of the SHARED out_buf --
     // where B's built frame sits -- exactly as a peer's build would.
-    g_mq.eagain_budget = 1;
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);
     g_mq.scribble_buf  = g_client.out_buf;
     g_mq.scribble_len  = 64;
     g_mq.scribble_arm  = 1;
@@ -4033,7 +4034,8 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
     rc = p9_client_walk_one(&g_client, 0, 21, (const u8 *)"g", 1, NULL);
     TEST_EXPECT_EQ(rc, 0, "op B survives a peer rebuilding out_buf during its park (#375)");
 
-    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the armed EAGAIN actually fired");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                   "the armed EAGAIN actually fired");
     TEST_EXPECT_EQ((u64)g_mq.scribble_arm, (u64)0, "the peer-write model actually fired");
     TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
     TEST_ASSERT(!g_client.dead, "session stayed LIVE (no clobbered frame reached the wire)");
@@ -4080,9 +4082,10 @@ void test_9p_client_abandon_async_eagain_keeps_session_alive(void) {
     u16 vt = g_async_op.rpc.tag;
 
     // The abandon's Tflush hits a transiently-full ring: ONE EAGAIN.
-    g_mq.eagain_budget = 1;
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);
     p9_client_abandon_async(&g_client, &g_async_op.rpc);
-    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the flush send consumed the EAGAIN");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                   "the flush send consumed the EAGAIN");
 
     // The #53 core: back-pressure is NOT a break.
     TEST_ASSERT(!g_client.dead, "session ALIVE after EAGAIN'd abandon flush");
@@ -4140,9 +4143,10 @@ void test_9p_client_async_send_eagain_keeps_session_alive(void) {
     g_async_op.rpc.on_complete = test_async_on_complete;
     u32 fid = 40;
 
-    g_mq.eagain_budget = 1;
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);
     rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
-    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the async send met the full ring");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                   "the async send met the full ring");
     TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)-P9_E_AGAIN,
                    "submit_async returns the retryable -P9_E_AGAIN");
     TEST_ASSERT(g_async_op.completed, "the op completed");
@@ -4506,7 +4510,7 @@ void test_9p_client_clunk_killed_while_parked(void) {
     for (int i = 0; i < 2; i++) {
         u64 sends = g_mq.sends;
         dy_hold_reader(true);
-        g_mq.eagain_budget = 1;                  // the Tclunk meets a full c2s ring
+        p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the Tclunk meets a full c2s ring
         TEST_ASSERT(dy_start(ops[i], fids[i], /*dying=*/false), "sender");
         TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && g_client.send_waiters == 1);
         TEST_ASSERT(!p9_session_fid_bound(&g_client.session, fids[i]),
@@ -4525,7 +4529,8 @@ void test_9p_client_clunk_killed_while_parked(void) {
                        "the tag is free");
         TEST_EXPECT_EQ((u64)p9_session_n_reserved_slots(&g_client.session), (u64)0,
                        "no slot held");
-        TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the send met the full ring");
+        TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                       "the send met the full ring");
         TEST_EXPECT_EQ(g_mq.sends, sends, "nothing reached the wire");
     }
     TEST_ASSERT(!g_client.dead, "the session stays live");
@@ -4623,7 +4628,7 @@ void test_9p_client_nowait_clunk_full_ring_takes_back(void) {
     u64 sends = g_mq.sends;
 
     dy_hold_reader(true);
-    g_mq.eagain_budget = 1;                      // the Tclunk meets a full c2s ring
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the Tclunk meets a full c2s ring
     bool started = dy_start(DY_CLUNK_NOWAIT, 42, /*dying=*/false);
     TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dy));
     bool returned = started && test_dying_done(&g_dy);
@@ -4637,7 +4642,7 @@ void test_9p_client_nowait_clunk_full_ring_takes_back(void) {
     bool held     = p9_session_fid_bound(&g_client.session, 42);
     u64  inflight = (u64)p9_session_inflight(&g_client.session);
     u64  reserved = (u64)p9_session_n_reserved_slots(&g_client.session);
-    u32  budget   = g_mq.eagain_budget;
+    u32  budget   = p9_mq_loopback_eagain_budget(&g_mq);
     u64  sent     = g_mq.sends - sends;
     int  wrc      = p9_client_clunk_async(&g_client, 42);
     u64  tclunks  = (u64)rec_count(P9_TCLUNK);
@@ -4747,11 +4752,12 @@ void test_9p_client_abandoned_walk_late_reply_kept(void) {
     dy_hold_reader(true);
     TEST_ASSERT(dy_start(DY_WALK, 70, /*dying=*/false), "walker");
     TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
-    g_mq.eagain_budget = 1;                      // the owner's Tflush meets a full ring
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the owner's Tflush meets a full ring
     test_dying_kill(&g_dy);
     TEST_YIELD_UNTIL(test_dying_done(&g_dy));
     test_dying_reap(&g_dy);
-    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the Tflush met the full ring");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                   "the Tflush met the full ring");
     TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "no Tflush reached the server");
     TEST_EXPECT_EQ((u64)dy_count_abandoned(), (u64)1, "the walk is abandoned");
 
@@ -4860,11 +4866,12 @@ void test_9p_client_abandoned_walk_malformed_late_reply_fails_closed(void) {
     dy_hold_reader(true);
     TEST_ASSERT(dy_start(DY_WALK, 110, /*dying=*/false), "walker");
     TEST_YIELD_UNTIL(test_dying_parked(&g_dy) && rec_count(P9_TWALK) == 1);
-    g_mq.eagain_budget = 1;                      // the owner's Tflush meets a full ring
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the owner's Tflush meets a full ring
     test_dying_kill(&g_dy);
     TEST_YIELD_UNTIL(test_dying_done(&g_dy));
     test_dying_reap(&g_dy);
-    TEST_EXPECT_EQ((u64)g_mq.eagain_budget, (u64)0, "the Tflush met the full ring");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
+                   "the Tflush met the full ring");
     TEST_EXPECT_EQ((u64)rec_count(P9_TFLUSH), (u64)0, "the walk is abandoned unflushed");
 
     dy_hold_reader(false);
@@ -5266,17 +5273,17 @@ void test_9p_client_note_flush_reply_beats_unsent_flush(void) {
     TEST_YIELD_UNTIL_SOFT(!started ||
                           (test_dying_parked(&g_dy) && rec_count(P9_TREAD) == 1));
     bool parked = started && test_dying_parked(&g_dy) && !test_dying_done(&g_dy);
-    g_mq.eagain_budget = 1;                     // the Tflush's first send meets a full ring
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // the Tflush's first send meets a full ring
     if (parked) dy_post_child_exit(g_dy.proc);
     TEST_YIELD_UNTIL_SOFT(!parked || test_dying_done(&g_dy) ||
                           (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
     bool on_list = parked && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
-    u32  unfired = g_mq.eagain_budget;
+    u32  unfired = p9_mq_loopback_eagain_budget(&g_mq);
     dy_hold_reader(false);
     int  pr = on_list ? p9_client_reader_pump_ready(&g_client) : 0;   // the Rread
     bool killed = false;
     if (started) dy_finish(&killed);
-    g_mq.eagain_budget = 0;
+    p9_mq_loopback_set_eagain_budget(&g_mq, 0);
     u64  end      = p9_session_inflight(&g_client.session);
     u32  flushes  = rec_count(P9_TFLUSH);
     u64  honoured = g_client.flush_honoured;
@@ -5462,12 +5469,12 @@ void test_9p_client_handoff_skips_send_parked(void) {
     TEST_EXPECT_EQ(dy_bind(140) + dy_bind(141), 2u, "walks bind 140 and 141");
 
     dy_hold_reader(true);
-    g_mq.eagain_budget = 1;                         // S's Tread meets a full ring
+    p9_mq_loopback_set_eagain_budget(&g_mq, 1);  // S's Tread meets a full ring
     bool started = dy_start(DY_READ, 140, /*dying=*/false);
     TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_dy) ||
                           (g_client.send_waiters == 1 && test_dying_parked(&g_dy)));
     bool s_parked  = started && g_client.send_waiters == 1 && !test_dying_done(&g_dy);
-    u32  unfired   = g_mq.eagain_budget;
+    u32  unfired   = p9_mq_loopback_eagain_budget(&g_mq);
     int  s_tag     = dy_registered_tag_above(-1);
     bool x_started = s_parked && dyx_start(141);
     TEST_YIELD_UNTIL_SOFT(!x_started ||
@@ -5483,7 +5490,7 @@ void test_9p_client_handoff_skips_send_parked(void) {
     bool x_killed = false, s_killed = false;
     if (x_started) dy_finish_of(&g_dyx, &x_killed);
     if (started) dy_finish(&s_killed);
-    g_mq.eagain_budget = 0;
+    p9_mq_loopback_set_eagain_budget(&g_mq, 0);
     bool dead = g_client.dead;
     u64  end  = p9_session_inflight(&g_client.session);
     dy_client_close();

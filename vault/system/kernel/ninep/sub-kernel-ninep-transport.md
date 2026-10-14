@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -174,7 +174,17 @@ paths find the session dead.
 replies concurrently — the multi-in-flight harness. Knobs the audits lean
 on: `eagain_budget` (reject the next N sends with `P9_TRANSPORT_EAGAIN`,
 synthesizing nothing — models #349 back-pressure where a real full ring
-drops nothing), and the **#375 scribble knob** (`scribble_buf`/`len`/`arm`:
+drops nothing). A send decrements it under the mq lock, so a test sets and
+reads it through `p9_mq_loopback_set_eagain_budget` /
+`p9_mq_loopback_eagain_budget`, which take that lock; only a responder,
+already under it, stores it directly. A plain store from a test thread can
+be overwritten by a send in flight: the closer tests' unstall stored 0
+while a closer's job was sending, the decrement left the budget near 2^32,
+the next send met EAGAIN and self-pumped an empty FIFO (EOF here), and the
+session died (2026-10-14: `p9_closer.kill_in_final_close_keeps_exit`'s
+smp8 red, about one trial in 6,000). The read gives all ones for a loopback
+that is not initialized, so an "it fired" check (`== 0`) fails there. And
+the **#375 scribble knob** (`scribble_buf`/`len`/`arm`:
 on the next recv — which runs inside the client's pump/park window where
 `c->lock` is dropped — overwrite the given buffer with 0x5A, deterministically
 modeling a peer rebuilding the shared `out_buf`; the

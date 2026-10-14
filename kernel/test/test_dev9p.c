@@ -1723,6 +1723,7 @@ static int np_responder(void *ctx, const u8 *req, size_t req_len,
             g_np_snaps++;
             g_np_snap_tag = tag;
             if (g_np_hung) return 0;
+            // A responder runs under mq->lock: the store is the locked one.
             if (g_np_eagain_after_snap) g_np_mq.eagain_budget = g_np_eagain_after_snap;
             return np_rread(resp, resp_cap, tag, rv);
         }
@@ -1853,7 +1854,7 @@ static struct np_fixture *np_setup(void) {
 // a client freed under a thread still using it.
 static void np_teardown(struct np_fixture *f) {
     g_np_eagain_after_snap = 0;
-    g_np_mq.eagain_budget = 0;
+    p9_mq_loopback_set_eagain_budget(&g_np_mq, 0);
     for (int i = 0; i < NP_HOOKS; i++) poll_waiter_list_unregister(&f->pw[i]);
     if (f->poller) {
         test_kthread_join_free(f->poller, &g_np_poll_exited);
@@ -2115,10 +2116,10 @@ void test_dev9p_poll_snapshot_shortage_is_resent(void) {
     TEST_ASSERT(f != NULL, "fixture");
     g_np_level = POLLOUT;
     u64 fs0 = poll_total_snap_failsafes();
-    g_np_mq.eagain_budget = 1;              // the snapshot's first send meets a full ring
+    p9_mq_loopback_set_eagain_budget(&g_np_mq, 1);  // the snapshot's first send meets a full ring
     struct pollfd pfd = { .fd = f->fd, .events = POLLOUT, .revents = 0 };
     s64 r = sys_poll_for_proc(f->proc, &pfd, 1, 0);
-    TEST_EXPECT_EQ((u64)g_np_mq.eagain_budget, (u64)0, "the full ring was met");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_np_mq), (u64)0, "the full ring was met");
     TEST_EXPECT_EQ(r, 1L, "resent, and answered ready");
     TEST_EXPECT_EQ((s64)pfd.revents, (s64)POLLOUT, "revents POLLOUT");
     TEST_EXPECT_EQ((u64)g_np_snaps, (u64)1, "the server saw the resend, not the refused send");
@@ -2241,10 +2242,10 @@ void test_dev9p_poll_widen_keeps_the_old_arm_until_replaced(void) {
 
     // The widen meets a full ring. Two refusals, so that a flush sent before
     // the replacement would be refused too rather than take the only one.
-    g_np_mq.eagain_budget = 2;
+    p9_mq_loopback_set_eagain_budget(&g_np_mq, 2);
     TEST_EXPECT_EQ((s64)dev9p_poll_arm(f->ready, (short)POLLOUT, pw3), 0L,
                    "a widen that meets a full ring is uncovered");
-    g_np_mq.eagain_budget = 0;
+    p9_mq_loopback_set_eagain_budget(&g_np_mq, 0);
     np_inject_rread(first, POLLIN);         // the server answers the old arm
     TEST_YIELD_UNTIL(pw1->ready && pw2->ready);   // its pollers were still covered
     TEST_EXPECT_EQ((u64)g_np_flushes, (u64)0, "and the old arm was kept, not flushed");

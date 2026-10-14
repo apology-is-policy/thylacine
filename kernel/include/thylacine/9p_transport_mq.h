@@ -50,13 +50,17 @@ struct p9_mq_loopback {
     // recv_ready's hooks, walked after every reply appended and at close. An
     // empty FIFO models a real transport's blocking recv: not ready.
     struct poll_waiter_list ready_list;
-    // Back-pressure knob (#349 regression). A test sets eagain_budget = K to make
+    // Back-pressure knob (#349 regression). A test sets it to K, through
+    // p9_mq_loopback_set_eagain_budget, to make
     // the next K send calls return P9_TRANSPORT_EAGAIN (a transiently-full-but-ALIVE
     // c2s ring) and REJECT the frame -- no reply synthesized, no acceptance --
     // exactly like a real full ring. The reply is generated only when the frame is
     // accepted (budget exhausted), so a prior op's already-queued reply stays
     // drainable: the production shape where client_send_flow's self-pump drains an
     // OTHER op's reply, frees the slot, then the rejected frame's retry is accepted.
+    // mq_send decrements it under `lock`, so a test thread's plain store can be
+    // overwritten by a send in flight and lost: only a responder, which runs
+    // under `lock`, stores it directly.
     u32                    eagain_budget;
     // Clobber knob (#375 regression). While armed, the next `scribble_arm` recv
     // calls overwrite scribble_buf[0..scribble_len) with 0x5A BEFORE returning the
@@ -79,5 +83,10 @@ void p9_mq_loopback_destroy(struct p9_mq_loopback *mq);
 
 // Build a transport_ops vtable that delegates to this transport.
 struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq);
+
+// The back-pressure knob, under the lock. The read gives all ones for a
+// loopback that is not initialized, so an "it fired" check (== 0) fails there.
+void p9_mq_loopback_set_eagain_budget(struct p9_mq_loopback *mq, u32 n);
+u32  p9_mq_loopback_eagain_budget(struct p9_mq_loopback *mq);
 
 #endif  // THYLACINE_9P_TRANSPORT_MQ_H

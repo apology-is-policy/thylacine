@@ -307,7 +307,7 @@ void test_p9_closer_exit_close_hands_off_tclunk(void) {
     // reader departure signals it. All before any assert below.
     g_t1_spoor = walked;
     hold_reader(a->client, true);
-    g_mq_a.eagain_budget = 1;                    // the Tclunk meets a full ring
+    p9_mq_loopback_set_eagain_budget(&g_mq_a, 1);  // the Tclunk meets a full ring
     bool started = test_dying_start(&g_ec_thread, ec_drop, NULL, /*dead_now=*/false);
     TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_ec_thread));
     bool returned = started && test_dying_done(&g_ec_thread);
@@ -318,7 +318,7 @@ void test_p9_closer_exit_close_hands_off_tclunk(void) {
         TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_ec_thread));
     }
     if (started) test_dying_reap(&g_ec_thread);
-    u32 budget = g_mq_a.eagain_budget;
+    u32 budget = p9_mq_loopback_eagain_budget(&g_mq_a);
     TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, fid));
     TEST_YIELD_UNTIL_SOFT(closer_quiet());
     struct p9_closer_stats st = closer_now();
@@ -403,7 +403,7 @@ static void wbc_end(struct wbc *w) {
 // The server answers again: the ring takes frames, the reader is free, and a
 // walk's reader departure wakes whoever parked for progress meanwhile.
 static void wbc_unstall(struct wbc *w) {
-    g_mq_a.eagain_budget = 0;
+    p9_mq_loopback_set_eagain_budget(&g_mq_a, 0);
     hold_reader(w->a->client, false);
     (void)p9_client_walk_one(w->a->client, 0, p9_client_alloc_fid(w->a->client),
                              (const u8 *)"u", 1, NULL);
@@ -482,7 +482,7 @@ void test_p9_closer_forced_exit_close_hands_off_flush(void) {
         g_t1_spoor = w.f;
         g_wbc_crc  = 1;
         hold_reader(w.a->client, true);
-        g_mq_a.eagain_budget = 0xffffffffu;
+        p9_mq_loopback_set_eagain_budget(&g_mq_a, 0xffffffffu);
         started = test_dying_start(&g_wbc_thread, wbc_exit_drop, NULL,
                                    /*dead_now=*/true);
         if (started) {
@@ -555,7 +555,7 @@ void test_p9_closer_kthread_close_hands_off_staged_run(void) {
         g_kc_done   = false;
         g_kc_exited = false;
         hold_reader(w.a->client, true);
-        g_mq_a.eagain_budget = 0xffffffffu;
+        p9_mq_loopback_set_eagain_budget(&g_mq_a, 0xffffffffu);
         t = thread_create(kproc(), kc_entry);
         if (t) {
             ready(t);
@@ -655,7 +655,7 @@ void test_p9_closer_first_kill_forces_exits_close(void) {
         g_t1_spoor = w.f;                         // the handle table adopts it
         g_xc_fd    = -1;
         hold_reader(w.a->client, true);
-        g_mq_a.eagain_budget = 0xffffffffu;
+        p9_mq_loopback_set_eagain_budget(&g_mq_a, 0xffffffffu);
         started = test_dying_start(&g_wbc_thread, xc_exit_close, NULL,
                                    /*dead_now=*/false);
         if (started) {
@@ -784,7 +784,7 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         g_xw_window   = window;
         g_xw_hook_ran = false;
         hold_reader(w.a->client, true);
-        g_mq_a.eagain_budget = 0xffffffffu;
+        p9_mq_loopback_set_eagain_budget(&g_mq_a, 0xffffffffu);
         int pid = rfork(RFPROC, xw_child, NULL);
         o->started   = pid > 0;
         o->child_pid = pid;
