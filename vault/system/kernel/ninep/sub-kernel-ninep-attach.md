@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-14
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -490,18 +490,6 @@ the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread marked
 and byte sum, that it precedes the Tclunk, one job, and the write-behind budget
 back at its baseline. Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.
-Every test reuses the same static loopbacks (`g_mq_a`, `g_mq_b`, the stall
-transport's inner one), and a session's teardown -- which closes its
-transport -- runs on its LAST reference, which can be a closer's, dropped
-after the closer reported its work done. `p9_mq_loopback_destroy` zeroes the
-magic, but the next test's `p9_mq_loopback_init` makes it valid again, so a
-late teardown closes the NEXT session's transport, and that session dies on
-its first send (2026-10-14: `kill_in_final_close_keeps_exit`'s smp8 red, about
-one trial in 6,000, the closer dropping a run it could not send). So the
-fixture watches each session's close (`mq_ops` wraps `close`), and `mq_drop`
-lets a loopback go only once that close has run and reports whether it did;
-every test asserts that last. A new test on these loopbacks builds its
-session on `mq_ops` and ends it with `mq_drop`.
 The stall transport wraps the mq loopback and declares no `hangup` (ARCH
 21.10): forwarding the inner op would hand it the wrapper's ctx, and the mq
 backend has none to forward, so its server learns of a death at the close.

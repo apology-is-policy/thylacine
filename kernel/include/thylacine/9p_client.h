@@ -438,18 +438,6 @@ void p9_client_destroy(struct p9_client *c);
 // Graceful close: closes the transport, then session.
 int  p9_client_close(struct p9_client *c);
 
-// HUNT (not for landing): the p9_closer smp8 hunt's record of first deaths.
-#define P9_DEAD_EV 16u
-struct p9_dead_ev {
-    const struct p9_client *c;
-    u64                     ra;
-    int                     tid;
-    bool                    dying, devgone;
-    u32                     seq;              // index + 1, written last
-};
-extern struct p9_dead_ev g_p9_dead_ev[P9_DEAD_EV];
-extern u32               g_p9_dead_n;
-
 // =============================================================================
 // #210 /ctl/9p-sessions snapshot.
 // =============================================================================
