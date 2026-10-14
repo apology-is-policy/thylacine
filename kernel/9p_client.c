@@ -208,10 +208,26 @@ static void client_unregister(struct p9_client *c, u32 tag, struct p9_rpc *rpc) 
 // Only the async (POST_CQE) path carries the reason: the sync (WAKE_RENDEZ)
 // front-end keeps its audited -P9_E_IO return (client_run's CLIENT_WAIT_DEAD),
 // so this change does not touch the #841 synchronous surface or the boot path.
+// HUNT (not for landing): every first death, with its caller and thread.
+struct p9_dead_ev g_p9_dead_ev[P9_DEAD_EV];
+u32               g_p9_dead_n;
+
+__attribute__((noinline))
 static void client_mark_dead_locked(struct p9_client *c, bool devgone) {
     int async_status = devgone ? -P9_E_NODEV : -P9_E_IO;
     bool was_dead = c->dead;
     c->dead = true;
+    if (!was_dead) {
+        u32 i = __atomic_fetch_add(&g_p9_dead_n, 1u, __ATOMIC_RELAXED);
+        struct p9_dead_ev *ev = &g_p9_dead_ev[i % P9_DEAD_EV];
+        struct Thread *t = current_thread();
+        ev->c       = c;
+        ev->ra      = (u64)(uintptr_t)__builtin_return_address(0);
+        ev->tid     = t ? t->tid : -1;
+        ev->dying   = t ? thread_die_pending(t) : false;
+        ev->devgone = devgone;
+        __atomic_store_n(&ev->seq, i + 1u, __ATOMIC_RELEASE);
+    }
     // ARCH 21.10, "A death hangs up": tell the server now, not at the mount's
     // last close. Once, on the edge -- every later call finds the session
     // already dead. The op is spinlocks and wakes whose locks nest under
