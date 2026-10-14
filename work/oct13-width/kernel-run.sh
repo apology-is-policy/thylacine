@@ -643,9 +643,11 @@ expect_fails M20 1 "$T_EXP|$W_EXP"
 ok M20 "exactly $T_EXP at '$W_EXP'"
 echo "=== B1-B4: the extinction banner against peer chatter (tools/test-fault.sh) ==="
 lease fault; floor pre-fault
-# Without the gate no ^EXTINCTION: line forms, so the variant times out (or,
-# if the prefix survives, fails the whole-line check); the chatter must have run.
-MF_TIMEOUT=60; MF_WHY='timeout|is not a whole line'; MF_SEEN='chatter: a peer cpu writes the console directly'
+# Without the gate no ^EXTINCTION: line forms, so the variant times out; if the
+# prefix survives at column 0, a torn body reads as a wrong message, and a whole
+# body with a peer byte beside it fails the whole-line check. The chatter must
+# have run.
+MF_TIMEOUT=60; MF_WHY='timeout|wrong extinction message|is not a whole line'; MF_SEEN='chatter: a peer cpu writes the console directly'
 mutant_fault b1 arch/arm64/uart.c \
 'void uart_putc(char c) {
     if (!extinction_tx_enter()) return;
