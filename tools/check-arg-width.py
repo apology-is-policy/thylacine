@@ -37,10 +37,10 @@ def guards(p):
 def strip_comments(text):
     # blank every comment, keeping offsets and newlines
     def blank(m):
-        if m.group(0).startswith('"'):
+        if m.group(0)[0] in '"\'':
             return m.group(0)
         return ''.join('\n' if ch == '\n' else ' ' for ch in m.group(0))
-    return re.sub(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*.*?\*/', blank, text, flags=re.S)
+    return re.sub(r"'(?:\\.|[^'\\\n])'|\"(?:\\.|[^\"\\\n])*\"|//[^\n]*|/\*.*?\*/", blank, text, flags=re.S)
 
 def check(src, name):
     bad = []
@@ -104,11 +104,12 @@ def self_test():
     lower = 'static s64 sys_v(u64 len) {\n    if (len >= WEFT_HYBRID_THRESHOLD) return g((u32)len);\n    return 0;\n}\n'
     strip = 'static s64 sys_w(u64 m) {\n    u64 k = m & ~(u64)FLAG;\n    return f((u32)m) + k;\n}\n'
     instr = 'static s64 sys_x(u64 x) {\n    return f("// width: lol", (u32)x);\n}\n'
+    charq = 'static s64 sys_z(u64 x) {\n    return f(\'"\', "// width: lol", (u32)x);\n}\n'
     blockok = 'static s64 sys_y(u64 x) {\n    if (x > 0xffffffffull) { put(); return -1; }\n    return f((u32)x);\n}\n'
     want = {ok: 0, helper: 0, noted: 0, bad: 1, late: 1, double: 1, viv: 0,
             comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1,
             regbad: 1, regok: 0, regother: 1, regcopy: 1, prefix: 1,
-            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, blockok: 0}
+            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, charq: 1, blockok: 0}
     for src, n in want.items():
         got = len(check(src, 'self-test'))
         if got != n:
