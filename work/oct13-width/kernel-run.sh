@@ -306,7 +306,14 @@ mutant() {
   run_suite "$1"
   B=$OUT/$1-boot.log
   _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
-  [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
+  if [ "$1" = m8 ]; then
+    # M8 breaks every sign-extended pid, so a waiter that orphans its child
+    # cascades into later tests' waits (test_caps' flow thunk extincts on the
+    # mismatch). Its extinction set is recorded, not predicted.
+    printf '%s\n' "$_ext" > "$OUT/m8-extinctions.txt"
+  else
+    [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
+  fi
   [ "$suite_rc" != 0 ] || { echo "HARNESS: test.sh exit 0 under $1"; exit 2; }
   restore || exit 9
   MUTATED=0
@@ -429,7 +436,7 @@ _v=$(verdict "$B" "$T_PRB")
 [ "$_v" = "FAIL: $W_PRB" ] || { echo "M8: $T_PRB verdict '$_v'"; exit 2; }
 expect_probe M8 "getpgid: a sign-extended -1 is a pid, not a width" -22
 fails "$B" > "$OUT/m8-fail-set.txt"
-record "M8 DISCRIMINATED: $T_PRB, the probe at 'getpgid: a sign-extended -1 is a pid, not a width' (got -22); $(wc -l < "$OUT/m8-fail-set.txt" | tr -d ' ') FAIL line(s) in all, recorded in m8-fail-set.txt"
+record "M8 DISCRIMINATED: $T_PRB, the probe at 'getpgid: a sign-extended -1 is a pid, not a width' (got -22); $(wc -l < "$OUT/m8-fail-set.txt" | tr -d ' ') FAIL line(s) and $(/usr/bin/grep -c . "$OUT/m8-extinctions.txt") extinction line(s) in all, recorded in m8-fail-set.txt and m8-extinctions.txt"
 echo "=== M9: M1's cast with no note -- the build refuses ==="
 CHECK_LINE="kernel/syscall.c:$(/usr/bin/grep -nF '    return handle_close(p, sys_hidx_arg(hraw)) == 0 ? 0 : (s64)(-T_E_BADF);' "$(pristine kernel/syscall.c)" | cut -d: -f1): sys_close_handler narrows hraw"
 mutant_build m9 kernel/syscall.c \
