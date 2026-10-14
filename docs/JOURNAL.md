@@ -22,6 +22,58 @@ needed the operator.
 
 
 ---
+## 2026-10-14 (main, Opus 5.5, effort max) -- B-3 opens: seven votes, and B-3a's fd surface (Pouch fsync, vectored I/O, a socket's seeks)
+
+- *The split and the votes.* B-3 (the browser's C libraries) was surveyed
+  against WebKit 2.54's PlayStation options, then split B-3a..B-3l
+  (`64b89461a`). Seven operator votes, all the recommended option, recorded in
+  `vault/record/decisions/dec-2026-10-14-b3-*` and memory
+  `project_votes_1014_b3.md`: Skia (bundled) rather than Cairo; fontconfig
+  ported with fonts in `/lib/font`; each library's compiled upstream C tests as
+  the bar, interpreter-driven suites listed as skipped; SQLite on 9P byte-range
+  locks in EXCLUSIVE mode; a POSTNOTE empty-name probe and `SYS_GETPPID`. The
+  fd-call vote was asked twice: the first answer (two new native syscalls) was
+  superseded when the survey found Astra's operator-approved descriptor calls
+  (2026-10-11, on `codex/astra`) over the same handle primitives, and the
+  operator chose to build on hers (`dec-2026-10-14-fd-calls-on-astra`,
+  `2dfa276fc`, handoff 049).
+- *B-3a as first written was wrong about the kernel, and only the audit could
+  have said so before a boot.* The draft (`26240e674`) gathered a vector into
+  a buffer of up to 1 MiB and wrote it chunk by chunk, stopping at the first
+  short write. The kernel clamps one read or write at `SYS_RW_MAX` (128 KiB,
+  `syscall.h:3298`), 4096 under bounce pressure, and dev9p makes one RPC cut at
+  the session's write payload (`9p_client.c` `p9_client_write`). So the chunk
+  loop never took a second pass, and the prover's 3 MiB `pwritev` leg could
+  not pass: a boot-fatal red (round 1 F1, P0). The audit's own preferred fix --
+  a 128 KiB chunk that continues on a whole accept -- also fails, because 9P's
+  payload is below 128 KiB. The close makes ONE transfer per call (in place, or
+  a gathered buffer of at most 128 KiB) and answers its count; the leg resumes
+  short counts, as a stream caller does.
+- *Two stale header contracts misled the draft.* `syscall.h` still documents
+  `SYS_FSYNC` and `SYS_PREAD/PWRITE` as "-1 on ...", while the handlers answer
+  `-T_E_BADF`/`-T_E_OPNOTSUPP`/`-T_E_INVAL` (F2, F3). The draft's errno story
+  (everything reads as EIO) and its "negative offset is EINVAL here, not EIO"
+  rationale were both false. Fixed in the headers; Pouch now maps fsync's
+  `EOPNOTSUPP` to POSIX's `EINVAL`, and checks a negative offset before the
+  descriptor, the order Linux uses, which makes that check load-bearing for
+  sockets.
+- *A wrong turn of mine: an edit during a build.* Rewriting the 0051 patch file
+  while the RED build ran (0051 was commented out of the series, so I judged it
+  inert) made the build's staleness check see "a pouch patch newer than libc.a"
+  a second time, mid-build; that sysroot rebuild wiped `pouch-hello-dlopen` and
+  `libdlprobe.so`, which nothing rebuilt, and mkcpio's required-file check
+  deleted the archive. The check did its job. The rule: nothing under
+  `usr/lib/pouch/patches/` changes while a build runs, commented out or not.
+- *Evidence for the close.* With 0051 out of the series and the close's
+  prover, all nine legs red on the device (seven ENOSYS from the sentinel,
+  sock-seek EBADF, sock-fstat EIO), joey's B-3a probe fatal. With it, all nine
+  green, the suite 2000/2000, boot OK (23:39Z). On the host, the auditor's
+  guard-page harness, re-oracled for one transfer per call, ran 4000 cases
+  clean and turned red under four of five sabotages; the fifth (an empty
+  element's null base handed to memcpy) is UB the host libc does not trap, so
+  that guard has no witness. Round 1 was a dirty close (a P0), so round 2
+  audits the redesign.
+---
 ## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 
 - *The two votes.* S-2's land prep left three owned items in OPEN-BUGS. Two

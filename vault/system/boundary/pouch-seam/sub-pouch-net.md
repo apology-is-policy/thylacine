@@ -354,7 +354,11 @@ round against this surface before it had a node).
   a port that needs one needs a patch. Since 0051 (B-3a) `fstat(sock)`
   answers `S_IFSOCK`, `lseek`/`pread`/`pwrite` on a socket `ESPIPE`, and
   `readv`/`writev` reach a socket through the tag-aware `read`/`write` as one
-  gathered transfer, so a datagram stays whole ([[sub-pouch-fs]]). `fcntl`,
+  gathered transfer, so a datagram is not split by the vector
+  ([[sub-pouch-fs]]) -- for a pouch slot only: the conn fd an AF_UNIX
+  `accept()` returns is a kernel handle, which the kernel reports `S_IFREG`.
+  A datagram larger than the session's write payload is still cut by the 9P
+  client (OPEN-BUGS 2026-10-14). `fcntl`,
   `dup` and `dup3` still never reach the kernel: their numbers are
   sentinel-parked for EVERY fd (`ENOSYS`; `dup2` onto a target is a
   documented kernel seam, [[sub-pouch-process]]), until B-3b's native dup and

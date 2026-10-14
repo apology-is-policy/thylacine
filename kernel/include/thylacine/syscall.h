@@ -1241,14 +1241,16 @@ enum {
     // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_WALK_CREATE  = 54,   // arg: parent_fd, name_va, name_len, omode, perm
 
-    // SYS_FSYNC(fd, datasync) -> 0 / -1 (FS-mutation foundation; §9.2).
+    // SYS_FSYNC(fd, datasync) -> 0 / -errno (FS-mutation foundation; §9.2).
     //   x0 = fd        (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- fsync is the
     //                   write-side durability barrier.)
     //   x1 = datasync  (u32; 0 = full fsync [data + metadata], 1 = data only.)
     // The "write-then-fsync = durable" contract on the integrity FS. Dispatches
     // dev->fsync (dev9p -> p9_client_fsync -> Stratum Tsync; in-memory-durable
-    // Devs no-op success). Returns -1 on: fd not KOBJ_SPOOR / missing
-    // RIGHT_WRITE; the Dev has no .fsync slot; server Rlerror.
+    // Devs no-op success). Returns -T_E_BADF for an fd that is not a
+    // KOBJ_SPOOR or lacks RIGHT_WRITE; -T_E_OPNOTSUPP when the Dev has no
+    // .fsync slot (a pipe, the console); the Dev's -errno (a server Rlerror)
+    // otherwise, or a legacy Dev's bare -1.
     // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_FSYNC        = 55,   // arg: fd (x0), datasync (x1)
 
@@ -1704,11 +1706,11 @@ enum {
     //              rejected, as SYS_READ.)
     //   x1 = buf  (user VA; validated + staged exactly like SYS_READ.)
     //   x2 = len  (clamped to SYS_RW_MAX per call; short reads are normal.)
-    //   x3 = off  (s64 absolute byte offset. off < 0 -> -1; off + len past
-    //              INT64_MAX -> -1. Requires dev->seekable (the SYS_LSEEK
-    //              gate) -- positioned I/O on a pipe/cons/srv stream fails up
-    //              front (the POSIX ESPIPE shape), never silently acts as a
-    //              cursor read.)
+    //   x3 = off  (s64 absolute byte offset. off < 0 -> -T_E_INVAL; off + len
+    //              past INT64_MAX -> -T_E_INVAL. Requires dev->seekable (the
+    //              SYS_LSEEK gate) -- positioned I/O on a pipe/cons/srv stream
+    //              fails up front with the flat -1 (the POSIX ESPIPE shape),
+    //              never silently acts as a cursor read.)
     //   Returns like SYS_READ: bytes read, 0 at EOF, -1 sentinel, or the
     //   Dev's -errno passthrough (#3). The Spoor cursor is untouched on
     //   every path, success or failure.

@@ -230,26 +230,32 @@ because a shared `/proc` mount's `self` resolves to the MOUNTER.
 `fsync` and `fdatasync` trap `SYS_FSYNC(fd, datasync)` -- 0 for the full
 barrier, 1 for data only. Until 0051 both sat at the 0001 sentinel and
 answered `ENOSYS`, though the kernel had served the call since the
-FS-mutation work; SQLite's commit path fails on exactly that. The kernel
-still answers a flat `-1`, which decodes to `EIO`: a handle without
-`RIGHT_WRITE`, a Dev with no fsync slot (a pipe, the console) and a server
-error read alike. A pouch socket number answers `EINVAL` before the trap
-(a vacant slot `EBADF`).
+FS-mutation work; SQLite's commit path fails on exactly that. A file that
+does not support synchronization answers `EINVAL`, as POSIX and Linux say: a
+pouch socket number (answered before the trap; a vacant slot `EBADF`), and a
+kernel handle whose Dev has no fsync slot (a pipe, the console), which the
+kernel answers `EOPNOTSUPP` (`kernel/syscall.c`, `sys_fsync_handler`) and
+pouch maps. A handle without `RIGHT_WRITE` is the kernel's `EBADF`, and a
+server error arrives as its own errno.
 
 `readv`, `writev`, `preadv` and `pwritev` have no kernel call behind them.
 One `read`/`write` per iovec would split a record the caller hands over
 whole -- a UDP datagram, or a pipe write within `PIPE_BUF` that POSIX makes
-atomic -- so `_pouch_iov.c` gathers the vector into one buffer and moves it
-with ONE call of the tag-aware wrapper, then scatters a read back. Up to
-4096 bytes ride the stack; more ride a heap buffer of at most 1 MiB, freed
-by a cleanup handler if the thread is cancelled inside the transfer. A read
-moves at most one buffer, a short read every reader accepts. A write moves
-the vector buffer by buffer and stops at the first short write or error,
-answering the bytes written so far. A vector with one non-empty element
-moves in place. Validation is Linux's (`rw_copy_check_uvector`): a count
-outside `[0, IOV_MAX]` or lengths summing past `SSIZE_MAX` is `EINVAL`, and
-so is a positional offset that is negative or would pass `LLONG_MAX`. A
-heap buffer that cannot be had answers `ENOMEM`.
+atomic -- so `_pouch_iov.c` makes ONE transfer per call. A vector with one
+non-empty element moves in place; otherwise up to 128 KiB of it (the
+kernel's `SYS_RW_MAX`, the most one read or write moves) is gathered into
+one buffer and moved by one call of the tag-aware wrapper, and a read is
+scattered back. The answer is that transfer's count: the kernel and the 9P
+client cut a transfer at their own bounds (`SYS_RW_MAX`; the session's
+largest write payload), so a large vector answers a short count, as a large
+`write` does, and the caller resumes. Up to 4096 bytes are gathered on the
+stack, in an out-of-line helper so the in-place and refusal paths do not
+carry the frame; more on the heap, freed by a cleanup handler if the thread
+is cancelled inside the transfer; a heap buffer that cannot be had answers
+`ENOMEM`. Validation is POSIX's: a count outside `[0, IOV_MAX]` or lengths
+summing past `SSIZE_MAX` is `EINVAL` (Linux caps the sum instead), and so is
+a positional offset that is negative or would pass `LLONG_MAX`. `preadv2`
+and `pwritev2` without flags run on `preadv` and `pwritev`.
 
 The witness for "one transfer" is the pipe's atomicity, not the bytes: on a
 nonblocking pipe with two bytes free, a four-byte `writev` of two two-byte
@@ -258,10 +264,14 @@ pieces must answer `EAGAIN` and write nothing (`pouch-hello-fd`,
 the bytes read back would be the same either way.
 
 `lseek`, `pread` and `pwrite` on a pouch socket answer `ESPIPE` (a socket
-has no offset) instead of handing the kernel a number it never issued; a
-negative `pread`/`pwrite` offset is `EINVAL` here, where the kernel's flat
-`-1` would have read as `EIO`. `fstat` of a socket answers a zeroed stat
-with `S_IFSOCK | 0777`, one link, and the slot (plus one) as `st_ino`.
+has no offset) instead of handing the kernel a number it never issued. A
+negative `pread`/`pwrite` offset is `EINVAL` before the descriptor is looked
+at, the order Linux checks them in (the kernel answers `EINVAL` too, for its
+own handles). `fstat` of a socket answers a zeroed stat with
+`S_IFSOCK | 0777`, one link, the slot (plus one) as `st_ino`, and all bits
+set as `st_dev` -- a device number the kernel's counter (from 1, upward)
+never issues, so no file or pipe shares the `(st_dev, st_ino)` pair (static
+Devs report 0).
 
 ## Data structures
 
@@ -366,13 +376,25 @@ in-place translation pass.
   "absolute paths only", both retired — read it as history, and
   `openat.c`'s current text as truth.
 - **`fsync` on a read-only handle fails where POSIX succeeds.** The kernel's
-  `SYS_FSYNC` requires `RIGHT_WRITE` ("the write-side durability barrier"),
-  and its flat `-1` reads as `EIO`. SQLite's directory fsync opens the
-  directory read-only and ignores the result, so B-3's SQLite is unaffected;
-  a program that fsyncs a file through a read-only descriptor is not.
+  `SYS_FSYNC` requires `RIGHT_WRITE` ("the write-side durability barrier")
+  and answers `EBADF`. SQLite's directory fsync opens the directory read-only
+  and ignores the result, so B-3's SQLite is unaffected; a program that
+  fsyncs a file through a read-only descriptor is not.
+- **A regular-file `write` or `writev` past the transfer bounds is short.**
+  One call moves at most `SYS_RW_MAX` (128 KiB), and over 9P at most the
+  session's largest write payload, where Linux writes a regular file whole.
+  POSIX allows it and stdio resumes; a program that treats a short
+  regular-file write as an error does not (OPEN-BUGS, 2026-10-14).
+- **The read half of "one transfer" has no device witness.** A byte source
+  (a pipe, a file) answers one gathered read and a read per iovec alike; only
+  a record source, a datagram, tells them apart.
 - **`fcntl`, `dup`, `dup2`/`dup3` onto a number are still `ENOSYS`** after
-  0051: they need the native dup and descriptor-status syscalls B-3b adds
-  (`dec-2026-10-14-native-fd-calls`).
+  0051: they need the native descriptor calls B-3b brings onto main
+  (`dec-2026-10-14-fd-calls-on-astra`).
+- **A socket `accept()` returns is a kernel conn fd, not a pouch slot**, so
+  the socket answers above do not reach it: the kernel reports it
+  `S_IFREG`, and its seeks and positional I/O read as `EIO`. B-3k makes
+  sockets kernel descriptors.
 
 ## Provenance
 

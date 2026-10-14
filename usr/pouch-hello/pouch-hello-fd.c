@@ -5,7 +5,9 @@
 // boot-fatal via the joey expect string:
 //
 //   fsync         : fsync and fdatasync of a written file answer 0 (0001 parked
-//                   both at the ENOSYS sentinel); fsync(-1) is EBADF.
+//                   both at the ENOSYS sentinel); a pipe, whose Dev has nothing
+//                   to synchronize, answers EINVAL (so a stub answering 0 is
+//                   red); fsync(-1) is EBADF.
 //   fsync-sock    : a socket answers EINVAL (nothing to synchronize); a closed
 //                   socket's number EBADF.
 //   writev        : three pieces written by writev read back, by pread, as one
@@ -15,17 +17,25 @@
 //                   NOTHING -- one gathered write, which POSIX makes atomic at
 //                   or under PIPE_BUF. A write per piece would land "ab".
 //   readv         : ten bytes in a pipe scatter across three iovecs in order.
-//   heap          : a 3 MiB two-piece pwritev (past the 1 MiB buffer, so the
-//                   chunk loop) reads back byte-exact through preadv.
+//                   A byte source cannot tell one gathered read from a read
+//                   per iovec; the read half of "one transfer" has no witness
+//                   here (a record source -- a datagram -- would be one).
+//   heap          : a 3 MiB two-piece pwritev, resumed after each short count
+//                   (one call moves at most one buffer, and the kernel and the
+//                   9P client cut a transfer shorter still), reads back
+//                   byte-exact through preadv, resumed the same way.
 //   iov-errnos    : a negative count, a count past IOV_MAX, lengths summing
 //                   past SSIZE_MAX and a negative preadv offset are EINVAL.
 //   sock-seek     : lseek, pread and pwrite on a socket are ESPIPE; a negative
-//                   pread offset on a file EINVAL.
-//   sock-fstat    : fstat of a socket is S_ISSOCK, two sockets differ in
-//                   st_ino, and a closed socket's number is EBADF.
+//                   pread or pwrite offset on a socket EINVAL, as Linux checks
+//                   the offset before the descriptor.
+//   sock-fstat    : fstat of a socket is S_ISSOCK on a nonzero st_dev (the
+//                   static Devs' devno is 0), two sockets differ in st_ino, and
+//                   a closed socket's number is EBADF.
 //
-// fd 1 is a pipe write-end joey relays to the boot log. Cross-compiled with
-// tools/pouch-clang against the pouch sysroot.
+// Every leg runs, so a red run names each failing leg; the census line prints
+// only when all pass. fd 1 is a pipe write-end joey relays to the boot log.
+// Cross-compiled with tools/pouch-clang against the pouch sysroot.
 
 #include "pouch-census.h"
 #include <errno.h>
@@ -64,6 +74,12 @@ static int leg_fsync(void) {
     if (fsync(fd) != 0) return fail("fsync");
     if (fdatasync(fd) != 0) return fail("fdatasync");
     close(fd);
+    int p[2];
+    if (pipe(p) != 0) return fail("fsync pipe");
+    errno = 0;
+    if (!refused(fsync(p[1]), EINVAL)) return fail("fsync(pipe) not EINVAL");
+    close(p[0]);
+    close(p[1]);
     errno = 0;
     if (!refused(fsync(-1), EBADF)) return fail("fsync(-1) not EBADF");
     return 0;
@@ -134,6 +150,18 @@ static int leg_readv(void) {
     return 0;
 }
 
+// Points v[0..cnt) past the first `skip` bytes; answers the first element
+// still holding any.
+static int iov_skip(struct iovec *v, int cnt, size_t skip) {
+    int i = 0;
+    while (i < cnt && skip >= v[i].iov_len) skip -= v[i++].iov_len;
+    if (i < cnt) {
+        v[i].iov_base = (char *)v[i].iov_base + skip;
+        v[i].iov_len -= skip;
+    }
+    return i;
+}
+
 static int leg_heap(void) {
     const size_t half = 3u << 19;   // 1.5 MiB: two pieces, 3 MiB in all
     unsigned char *a = malloc(half), *b = malloc(half);
@@ -145,17 +173,18 @@ static int leg_heap(void) {
     }
     int fd = open(PROBE, O_RDWR | O_TRUNC);
     if (fd < 0) return fail("heap open");
-    struct iovec w[2] = { { a, half }, { b, half } };
-    if (pwritev(fd, w, 2, 4096) != (ssize_t)(2 * half)) return fail("heap pwritev");
+    size_t put = 0;
+    while (put < 2 * half) {
+        struct iovec w[2] = { { a, half }, { b, half } };
+        int i = iov_skip(w, 2, put);
+        ssize_t n = pwritev(fd, w + i, 2 - i, 4096 + (off_t)put);
+        if (n <= 0) return fail("heap pwritev");
+        put += (size_t)n;
+    }
     size_t got = 0;
     while (got < 2 * half) {
         struct iovec r[2] = { { ra, half }, { rb, half } };
-        // Resume where the last short read stopped: skip what is already in.
-        size_t skip = got;
-        int i = 0;
-        while (skip >= r[i].iov_len) skip -= r[i++].iov_len;
-        r[i].iov_base = (char *)r[i].iov_base + skip;
-        r[i].iov_len -= skip;
+        int i = iov_skip(r, 2, got);
         ssize_t n = preadv(fd, r + i, 2 - i, 4096 + (off_t)got);
         if (n <= 0) return fail("heap preadv");
         got += (size_t)n;
@@ -180,8 +209,6 @@ static int leg_iov_errnos(void) {
     if (!refused(writev(fd, huge, 2), EINVAL)) return fail("writev sum past SSIZE_MAX");
     errno = 0;
     if (!refused(preadv(fd, &one, 1, -1), EINVAL)) return fail("preadv offset -1");
-    errno = 0;
-    if (!refused(pread(fd, &x, 1, -1), EINVAL)) return fail("pread offset -1");
     close(fd);
     return 0;
 }
@@ -196,6 +223,10 @@ static int leg_sock_seek(void) {
     if (!refused(pread(s, &x, 1, 0), ESPIPE)) return fail("pread(sock) not ESPIPE");
     errno = 0;
     if (!refused(pwrite(s, &x, 1, 0), ESPIPE)) return fail("pwrite(sock) not ESPIPE");
+    errno = 0;
+    if (!refused(pread(s, &x, 1, -1), EINVAL)) return fail("pread(sock, -1) not EINVAL");
+    errno = 0;
+    if (!refused(pwrite(s, &x, 1, -1), EINVAL)) return fail("pwrite(sock, -1) not EINVAL");
     close(s);
     return 0;
 }
@@ -207,6 +238,7 @@ static int leg_sock_fstat(void) {
     struct stat a, b;
     if (fstat(s1, &a) != 0 || fstat(s2, &b) != 0) return fail("fstat(sock)");
     if (!S_ISSOCK(a.st_mode) || !S_ISSOCK(b.st_mode)) return fail("fstat not S_ISSOCK");
+    if (a.st_dev == 0) return fail("fstat socket st_dev 0 (a static Dev's devno)");
     if (a.st_ino == b.st_ino) return fail("fstat sockets share st_ino");
     close(s1);
     close(s2);
@@ -216,25 +248,23 @@ static int leg_sock_fstat(void) {
 }
 
 int main(void) {
-    if (leg_fsync()) return 1;
-    puts("pouch-hello-fd: fsync OK");
-    if (leg_fsync_sock()) return 1;
-    puts("pouch-hello-fd: fsync-sock OK");
-    if (leg_writev()) return 1;
-    puts("pouch-hello-fd: writev OK");
-    if (leg_writev_atomic()) return 1;
-    puts("pouch-hello-fd: writev-atomic OK");
-    if (leg_readv()) return 1;
-    puts("pouch-hello-fd: readv OK");
-    if (leg_heap()) return 1;
-    puts("pouch-hello-fd: heap OK");
-    if (leg_iov_errnos()) return 1;
-    puts("pouch-hello-fd: iov-errnos OK");
-    if (leg_sock_seek()) return 1;
-    puts("pouch-hello-fd: sock-seek OK");
-    if (leg_sock_fstat()) return 1;
-    puts("pouch-hello-fd: sock-fstat OK");
+    static const struct { const char *name; int (*run)(void); } legs[] = {
+        { "fsync", leg_fsync },           { "fsync-sock", leg_fsync_sock },
+        { "writev", leg_writev },         { "writev-atomic", leg_writev_atomic },
+        { "readv", leg_readv },           { "heap", leg_heap },
+        { "iov-errnos", leg_iov_errnos }, { "sock-seek", leg_sock_seek },
+        { "sock-fstat", leg_sock_fstat },
+    };
+    int failed = 0;
+    for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
+        if (legs[i].run()) failed++;
+        else printf("pouch-hello-fd: %s OK\n", legs[i].name);
+    }
     unlink(PROBE);
+    if (failed) {
+        printf("pouch-hello-fd: %d leg(s) FAILED\n", failed);
+        return 1;
+    }
     puts(POUCH_CENSUS_FD);
     return 0;
 }
