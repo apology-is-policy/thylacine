@@ -38,6 +38,9 @@
 #include "test.h"
 
 #include <thylacine/extinction.h>
+#include <thylacine/sched.h>
+#include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -85,6 +88,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 //   extinction.tx_gate_admits_only_the_owner_once_claimed
 //   extinction.tx_gate_counts_nested_bytes
 //   extinction.tx_enter_holds_the_thread_on_its_cpu
+//   extinction.tx_exit_takes_a_pending_preempt
 //   extinction.tx_wait_waits_out_a_peer_byte
 //
 // Like the claim test these are sequential: they pin each side's decision, not
@@ -94,6 +98,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
 void test_extinction_tx_gate_counts_nested_bytes(void);
 void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void);
+void test_extinction_tx_exit_takes_a_pending_preempt(void);
 void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
@@ -155,19 +160,44 @@ void test_extinction_tx_gate_counts_nested_bytes(void) {
 }
 
 // The live gate, on the unclaimed console: the mark is per CPU, so the byte's
-// thread must stay on its CPU from enter to exit.
+// thread must stay on its CPU from enter to exit. With IRQs masked nothing can
+// move it, and the gate must not read thread state at all: every exception
+// path and extinction() itself print masked, and TPIDR_EL1 may be wild there.
 void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void) {
     struct Thread *me = current_thread();
     u32 before = me->preempt_count;
-    int admitted = extinction_tx_enter();
+    int token = extinction_tx_enter();
     u32 during = me->preempt_count;
-    if (admitted) extinction_tx_exit();
+    if (token) extinction_tx_exit(token);
     u32 after = me->preempt_count;
 
-    TEST_ASSERT(admitted == 1, "an unclaimed console admits the byte");
+    irq_state_t s = spin_lock_irqsave(NULL);
+    int mtoken = extinction_tx_enter();
+    u32 mduring = me->preempt_count;
+    if (mtoken) extinction_tx_exit(mtoken);
+    spin_unlock_irqrestore(NULL, s);
+
+    TEST_ASSERT(token == EXTINCTION_TX_HELD, "an unclaimed console admits the byte, held");
     TEST_ASSERT(during == before + 1u,
         "an admitted byte holds its thread's preempt count, so the thread cannot leave its cpu mid-byte");
     TEST_ASSERT(after == before, "exit releases the hold");
+    TEST_ASSERT(mtoken == EXTINCTION_TX_BYTE && mduring == before,
+        "with irqs masked the gate admits the byte without touching thread state");
+}
+
+// A preempt that came due while a byte held the thread is taken when the hold
+// drops, not left for an IRQ that happens to land between two bytes: a thread
+// printing a long line is otherwise non-preemptible for most of it.
+void test_extinction_tx_exit_takes_a_pending_preempt(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    sched_set_need_resched_for_test(cpu);
+    int token = extinction_tx_enter();
+    if (token) extinction_tx_exit(token);
+    bool still = sched_need_resched_pending(cpu);
+    sched_clear_need_resched_for_test(cpu);
+
+    TEST_ASSERT(token == EXTINCTION_TX_HELD, "the suite runs with irqs on, so the byte is held");
+    TEST_ASSERT(!still, "the hold's drop takes the preempt that came due under it");
 }
 
 void test_extinction_tx_wait_waits_out_a_peer_byte(void) {

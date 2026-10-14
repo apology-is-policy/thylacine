@@ -182,6 +182,17 @@ for variant in $selected; do
     while [[ $(date +%s) -lt $deadline ]]; do
         if [[ -f "$log_file" ]] && grep -qF "$expect" "$log_file"; then
             result="pass"
+            # The whole-line and forbid checks below read what the kernel
+            # prints AFTER the banner (the dump, then the report lines): let
+            # the log stop growing before QEMU is killed, or a late line is
+            # judged absent from a log cut short. Bounded at ~5 s.
+            prev=-1
+            for _ in $(seq 1 25); do
+                size=$(wc -c < "$log_file" | tr -d ' ')
+                [[ "$size" == "$prev" ]] && break
+                prev=$size
+                sleep 0.2
+            done
             break
         fi
         # If we see "Thylacine boot OK" without the expected fault, the

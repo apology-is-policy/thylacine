@@ -381,3 +381,8 @@ The chatter threads stop after 5 s, so a kernel without the gate leaves a
 small log to time out on. The provoker refuses to extinct with IRQs masked
 (only a caller with IRQs on can tell a masked claim from an unmasked one), and
 test-fault.sh forbids `console-claim: taken with irqs on` for the variant.
+
+test-fault.sh lets the log stop growing (bounded, ~5 s) before it kills a
+variant that printed its expected line: the whole-line and forbidden-line
+checks read what the kernel prints after the banner, and a log cut short
+would judge a late line absent.

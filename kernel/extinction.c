@@ -10,6 +10,7 @@
 #include <thylacine/cons.h>
 #include <thylacine/extinction.h>
 #include <thylacine/smp.h>
+#include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 
 #include "../arch/arm64/halls.h"
@@ -135,25 +136,35 @@ int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) 
 
 // The mark is per CPU, so the byte's thread must not leave the CPU between
 // enter and exit: a switch would let another thread's exit clear the mark,
-// and a migration would drop it on a CPU that never raised it. Holding the
-// thread's preempt count defers any switch to the first IRQ return after
-// exit; IRQs themselves stay on through the TXFF wait (#67).
+// and a migration would drop it on a CPU that never raised it. With IRQs on,
+// the thread's preempt count is held across the byte (IRQs themselves stay on
+// through the TXFF wait, #67) and a preempt deferred meanwhile is taken at
+// exit. With IRQs masked nothing can switch the thread, and no thread state is
+// read: that is every exception path and the whole of extinction(), where
+// TPIDR_EL1 may be wild (#806) and a fault on the banner's first byte would
+// park the CPU with nothing printed.
 int extinction_tx_enter(void) {
-    spin_preempt_inc();
+    u64 daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+    int held = !(daif & (1ull << 7));
+    if (held) spin_preempt_inc();
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     if (extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
                                 g_extinction_owner[cpu]))
-        return 1;
-    spin_preempt_dec();
+        return held ? EXTINCTION_TX_HELD : EXTINCTION_TX_BYTE;
+    if (held) spin_preempt_dec();
     return 0;
 }
 
-void extinction_tx_exit(void) {
+void extinction_tx_exit(int token) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
-    spin_preempt_dec();
+    if (token == EXTINCTION_TX_HELD) {
+        spin_preempt_dec();
+        sched_preempt_point();
+    }
 }
 
 // Set if the claim ran with IRQs on: the claiming thread could then be switched

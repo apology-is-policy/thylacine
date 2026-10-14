@@ -51,9 +51,13 @@ int extinction_claim_word(uint32_t *word);
 
 // The console gate every direct UART byte passes (uart_putc). Enter returns 0
 // when a PEER owns the console: the caller drops the byte and does not call exit.
-// Otherwise the byte is in flight until extinction_tx_exit.
+// Otherwise the byte is in flight until extinction_tx_exit, which takes enter's
+// token: HELD when IRQs were on and the thread's preempt count is held across
+// the byte, BYTE when IRQs were masked and no thread state was touched.
+#define EXTINCTION_TX_BYTE 1
+#define EXTINCTION_TX_HELD 2
 int  extinction_tx_enter(void);
-void extinction_tx_exit(void);
+void extinction_tx_exit(int token);
 
 // The gate's pure cores, exported so a test can drive them on its own words (the
 // live ones cannot be claimed without silencing the rest of the boot). gate:

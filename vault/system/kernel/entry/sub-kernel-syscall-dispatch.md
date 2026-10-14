@@ -1644,3 +1644,7 @@ N`) no longer counts as a guard: it is a low-half compare. A guard that returns
 any value counts, `return 0;` included; the cast never sees the wide word,
 and the answer's errno is review's question. Self-test cases charq, castcmp,
 castmask and clamp.
+
+**Width audit round 3 append (2026-10-14).** The checker normalises spacing
+before it searches for a guard, so `(u32)  x >= N` is still a cast compare
+(self-test castnote), and the mask guard takes the same uncast rule.

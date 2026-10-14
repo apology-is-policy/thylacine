@@ -423,3 +423,10 @@ Absorbed `docs/reference/15-scheduler.md` at
 [[chg-2026-08-01-sched-sweep]]. The LINEAGE address-space extraction and
 the execve immediate-install, plus the #214 F1 depth reset, are
 [[chg-2026-08-16-sched-addrspace-install]].
+
+**`sched_preempt_point` (2026-10-14).** `preempt_check_irq` from thread
+context: it masks IRQs, runs the same check (scheduler up, a resched pending,
+a valid thread, preempt count 0, not in a syscall body) and restores. It is
+for a preempt hold that drops with IRQs on: the console gate's per-byte hold
+(sub-kernel-halls). An IRQ landing on the next instruction would run the same
+check, so it adds no switch point a caller could not already meet.

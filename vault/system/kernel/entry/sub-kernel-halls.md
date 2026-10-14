@@ -327,3 +327,18 @@ iterations before the timer runs), where it had one per peer. A claim taken
 with IRQs on prints `console-claim: taken with irqs on` after the dump; no
 fixed path can, and test-fault.sh forbids it for `extinction_peer_chatter`.
 Test: `extinction.tx_enter_holds_the_thread_on_its_cpu`.
+
+**Console gate round 3 append (2026-10-14).** The round-2 hold read
+`current_thread()` on every byte, the dying path's included: under a wild
+TPIDR_EL1 (the #806 class, which recursive_kernel_fault and el1_sync_runaway
+construct) the banner's first byte faulted and the CPU parked with nothing
+printed, the same silence the counted trylock once caused in the runaway's
+flush. The hold is now taken only when IRQs are on: with IRQs masked nothing
+can switch the thread, and every exception path and all of `extinction()`
+run masked, so the dying path reads no thread state. `extinction_tx_enter`
+returns a token (`EXTINCTION_TX_HELD` or `EXTINCTION_TX_BYTE`) that
+`extinction_tx_exit` takes. When a held byte's hold drops, a preempt that
+came due under it is taken at once (`sched_preempt_point`), so a kernel
+thread printing a long line is not left non-preemptible for most of it.
+Tests: the masked leg of `extinction.tx_enter_holds_the_thread_on_its_cpu`,
+and `extinction.tx_exit_takes_a_pending_preempt`.

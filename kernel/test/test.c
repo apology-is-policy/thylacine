@@ -157,6 +157,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void);
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
 void test_extinction_tx_gate_counts_nested_bytes(void);
 void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void);
+void test_extinction_tx_exit_takes_a_pending_preempt(void);
 void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
@@ -2067,6 +2068,7 @@ struct test_case g_tests[] = {
     { "extinction.tx_gate_admits_only_the_owner_once_claimed", test_extinction_tx_gate_admits_only_the_owner_once_claimed, false, NULL },
     { "extinction.tx_gate_counts_nested_bytes", test_extinction_tx_gate_counts_nested_bytes, false, NULL },
     { "extinction.tx_enter_holds_the_thread_on_its_cpu", test_extinction_tx_enter_holds_the_thread_on_its_cpu, false, NULL },
+    { "extinction.tx_exit_takes_a_pending_preempt", test_extinction_tx_exit_takes_a_pending_preempt, false, NULL },
     { "extinction.tx_wait_waits_out_a_peer_byte", test_extinction_tx_wait_waits_out_a_peer_byte, false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },

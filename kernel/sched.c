@@ -2760,6 +2760,17 @@ void preempt_check_irq(void) {
     sched();
 }
 
+// The thread-context twin, for a preempt hold that drops with IRQs on (the
+// console gate's per-byte hold): a preempt deferred while the hold was up fires
+// here, not at whichever IRQ happens to land between two holds. An IRQ taken on
+// the next instruction would run the same check, so this adds no switch point a
+// caller could not already meet.
+void sched_preempt_point(void) {
+    irq_state_t s = spin_lock_irqsave(NULL);
+    preempt_check_irq();
+    spin_unlock_irqrestore(NULL, s);
+}
+
 // ============================================================================
 
 int wakeup(struct Rendez *r) {

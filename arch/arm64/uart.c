@@ -278,9 +278,10 @@ static void uart_putc_wire(char c) {
 // Once a peer's extinction owns the console, this CPU's byte is dropped: the
 // banner must reach the wire whole, and every gate matches it at column 0.
 void uart_putc(char c) {
-    if (!extinction_tx_enter()) return;
+    int token = extinction_tx_enter();
+    if (!token) return;
     uart_putc_wire(c);
-    extinction_tx_exit();
+    extinction_tx_exit(token);
 }
 
 // #67 regression (test-only; production callers never touch this). Proves

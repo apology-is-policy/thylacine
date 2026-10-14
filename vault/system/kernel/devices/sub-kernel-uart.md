@@ -253,3 +253,7 @@ room inside the window.
 bytes are dropped so the banner reaches the wire whole (sub-kernel-halls).
 `uart_tx_try_putc` (the ring drain) stays ungated: it runs under the ring lock
 the winner holds.
+
+`uart_putc` passes enter's token to exit: with IRQs on the byte holds its
+thread's preempt count, and with IRQs masked it touches no thread state
+(sub-kernel-halls, round 3).
