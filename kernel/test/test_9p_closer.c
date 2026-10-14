@@ -91,12 +91,47 @@ struct srv_rec {
     u32 nwrite_refused;
 };
 
+// Every request on the session wbc_open builds, in arrival order, with the
+// thread that sent it: the responder runs inside the sender's send, under the
+// ring's lock. xw_diag prints it, so a second Twrite names its sender.
+#define WIRE_LOG 16u
+struct wire_ent {
+    u8  type;
+    u16 tag;
+    int tid, pid;
+    u64 off;
+    u32 len;
+};
+static struct srv_rec *g_wire_rec;
+static u32             g_wire_n;
+static struct wire_ent g_wire[WIRE_LOG];
+
+static void wire_log(u8 type, u16 tag, const u8 *req, size_t req_len) {
+    u32 n = g_wire_n;
+    if (n >= WIRE_LOG) return;
+    struct wire_ent *e = &g_wire[n];
+    struct Thread *t = current_thread();
+    e->type = type;
+    e->tag  = tag;
+    e->tid  = t ? t->tid : -1;
+    e->pid  = t && t->proc ? t->proc->pid : -1;
+    e->off  = 0;
+    e->len  = 0;
+    if (type == P9_TWRITE && req_len >= P9_HDR_LEN + 16) {
+        const u8 *b = req + P9_HDR_LEN + 4;
+        for (u32 i = 0; i < 8; i++) e->off |= (u64)b[i] << (8 * i);
+        e->len = (u32)b[8] | (u32)b[9] << 8 | (u32)b[10] << 16 | (u32)b[11] << 24;
+    }
+    g_wire_n = n + 1;
+}
+
 static int rec_responder(void *ctx, const u8 *req, size_t req_len,
                          u8 *resp, size_t resp_cap) {
     struct srv_rec *r = (struct srv_rec *)ctx;
     u32 size; u8 type; u16 tag;
     if (r && p9_peek_header(req, req_len, &size, &type, &tag) == 0) {
         r->nmsg++;
+        if (r == g_wire_rec) wire_log(type, tag, req, req_len);
         if (type == P9_TWRITE && req_len >= P9_HDR_LEN + 16 && r->fail_writes) {
             r->fail_writes--;
             __atomic_store_n(&r->nwrite_refused, r->nwrite_refused + 1,
@@ -332,6 +367,8 @@ static u32 wbc_sum(void) {
 
 static bool wbc_open(struct wbc *w) {
     g_rec_a = (struct srv_rec){0};
+    g_wire_rec = &g_rec_a;
+    g_wire_n   = 0;
     if (p9_mq_loopback_init(&g_mq_a, rec_responder, &g_rec_a) != 0) return false;
     w->a = closer_session(p9_mq_loopback_ops_for(&g_mq_a));
     if (!w->a) { p9_mq_loopback_destroy(&g_mq_a); return false; }
@@ -726,6 +763,9 @@ struct xw_obs {
     u32  late_nwrite;
     u64  late_wait_ns;
     struct p9_closer_stats late;
+    int  self_tid, child_pid;
+    u32  nwire;
+    struct wire_ent wire[WIRE_LOG];
 };
 
 static void xw_run(bool last_out, bool window, struct xw_obs *o) {
@@ -745,7 +785,8 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         hold_reader(w.a->client, true);
         g_mq_a.eagain_budget = 0xffffffffu;
         int pid = rfork(RFPROC, xw_child, NULL);
-        o->started = pid > 0;
+        o->started   = pid > 0;
+        o->child_pid = pid;
         if (o->started) {
             TEST_YIELD_UNTIL_SOFT(xw_zombie() || xw_in_close());
             o->installed = g_xc_fd >= 0;
@@ -804,6 +845,9 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         o->late_quiet   = closer_quiet();
         o->late         = closer_now();
     }
+    o->self_tid = current_thread()->tid;
+    o->nwire    = g_wire_n;
+    for (u32 i = 0; i < g_wire_n && i < WIRE_LOG; i++) o->wire[i] = g_wire[i];
     wbc_end(&w);
 }
 
@@ -839,6 +883,17 @@ static void xw_diag(const struct xw_obs *o, int code) {
     xw_put("job_errors+", o->late.job_errors - o->base.job_errors);
     xw_put("dropped+", o->late.dropped - o->base.dropped);
     xw_put("pending", o->late.pending);
+    uart_puts("\n    xw-diag wire:");
+    xw_put("self_tid", (u64)o->self_tid);
+    xw_put("child_pid", (u64)o->child_pid);
+    xw_put("n", o->nwire);
+    for (u32 i = 0; i < o->nwire && i < WIRE_LOG; i++) {
+        const struct wire_ent *e = &o->wire[i];
+        uart_puts("\n    xw-diag wire:");
+        xw_put("type", e->type);  xw_put("tag", e->tag);
+        xw_put("tid", (u64)e->tid); xw_put("pid", (u64)e->pid);
+        if (e->type == P9_TWRITE) { xw_put("off", e->off); xw_put("len", e->len); }
+    }
     uart_puts("\n");
 }
 
@@ -855,7 +910,7 @@ static void xw_expect(const struct xw_obs *o, int code) {
     TEST_EXPECT_NE(o->status, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
         "the kill replaced the exit's status");
     TEST_EXPECT_EQ(o->status, WAIT_STATUS_EXITED(code), "the exit's own status stands");
-    if (o->nwrite != 1 || !o->clunked || !o->quiet) xw_diag(o, code);
+    xw_diag(o, code);           // every run while the smp8 double write is hunted
     TEST_EXPECT_EQ((u64)o->nwrite, 1ull, "the closer wrote the run");
     TEST_EXPECT_EQ((u64)o->write_len, (u64)WBC_LEN, "all of it");
     TEST_EXPECT_EQ((u64)o->write_sum, (u64)wbc_sum(), "the bytes write() took");
