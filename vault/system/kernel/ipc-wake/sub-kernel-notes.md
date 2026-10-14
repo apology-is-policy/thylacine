@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -73,6 +73,20 @@ would be postable through the ordinary parent-to-child path, letting an
 unprivileged parent resume a debugger-stopped child. That is an
 [[inv-i39]] hole closed by a string comparison, and the source labels it
 load-bearing.
+
+`notes_post` answers `-T_E_INVAL` for every name it refuses (no note, a
+`tty:`/`snare:` prefix or `sak` from a userspace poster) and `-T_E_AGAIN` for
+a full queue -- the values its header always documented; until S-3
+(2026-10-14) the code answered a bare -1 to both, and `SYS_POSTNOTE` passed
+it on ([[sub-kernel-syscall-dispatch]], [[dec-2026-10-14-postnote-errnos]]).
+No `snare:` name is ever queued, but a Proc may END itself with one:
+`notes_self_death_snare(name)` returns the kernel's own literal for
+`snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` and `snare:abort` (NULL
+for everything else, `align`, `bti` and `brk` included), and `SYS_POSTNOTE`'s
+self arm calls `proc_fault_terminate` with it
+([[dec-2026-10-14-self-death-snare]]). The set is the Linux phenotype's
+self-death set; `notes.self_death_snare` compares the two row by row over
+the death table.
 
 The `snare:` gate is future-proofing by comparison: those names are not in the
 table, so the name lookup already rejects them. The gate exists so the rejection

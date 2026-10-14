@@ -392,6 +392,12 @@ enum note_death_sig {
 // IGNORE or STOP row) and for a name that is no note at all. PURE.
 int notes_death_signal(const char *name);
 
+// A snare death the caller may post to itself: SYS_POSTNOTE's self arm ends the
+// caller with it rather than queueing it (operator vote 2026-10-14). Returns the
+// matching NOTE_NAME_SNARE_* literal -- proc_fault_terminate's contract wants
+// the literal, never a caller's buffer -- or NULL for every other name. PURE.
+const char *notes_self_death_snare(const char *name);
+
 // ============================================================================
 // Public API
 // ============================================================================

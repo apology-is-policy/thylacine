@@ -12,7 +12,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -44,7 +44,13 @@ own note since 0049, 2026-10-13; before it SIGTERM shared `interrupt`),
 default is its only disposition. `abort()` does not raise it — it executes
 the `brk` the kernel ends as `snare:abort` ([[sub-pouch-process]]) — and since
 0049 `raise(SIGABRT)` and a `kill` of the caller with it call `abort()`; a
-`SIGABRT` to another process answers `EINVAL`, since no note carries it. The reverse direction
+`SIGABRT` to another process answers `EINVAL`, since no note carries it.
+`SIGSEGV`, `SIGBUS`, `SIGILL` and `SIGFPE` are outside the set the same way,
+and since 0050 (2026-10-14) `raise()` of one, or `kill()` of one to the caller
+(pid 0 or `getpid()`), posts the snare it names (`__pouch_self_snare`) to the
+caller, and the kernel ends the process with it
+([[dec-2026-10-14-self-death-snare]]); to another process they answer
+`EINVAL`. The reverse direction
 does carry signals since gcpark-b (2026-10-12): the kernel records the
 signal of every death by note, a fault (`snare:segv` → `SIGSEGV`, …,
 `snare:abort` → `SIGABRT`) or an uncaught terminating note (`interrupt` →
@@ -146,9 +152,13 @@ from.
 ## Error paths
 
 `EINVAL` for an unsupported signum or `SIG_ERR`. `EPERM` for a
-`kill`/`raise` of the tty family. `EIO` for a genuine `SYS_POSTNOTE`
-failure (the flat-`-1` collapse — so `ESRCH` and `EPERM` from the kernel's
-own post gate are indistinguishable to a caller).
+`kill`/`raise` of the tty family. Since 0050 a refused `SYS_POSTNOTE` reads
+as the kernel names it ([[dec-2026-10-14-postnote-errnos]]): `ESRCH` for a
+missing pid, `EAGAIN` for a full note queue, `EINVAL` for a name the kernel
+refuses, and `EPERM` for a process that is not the caller's child -- the
+kernel answers `-EACCES`, and `kill()` sets `EPERM` itself, because `-EPERM`
+is `-1`, which the seam reads as `EIO`. Until 0050 every one of these read
+`EIO`.
 
 ## Performance
 
@@ -183,12 +193,13 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   override that shipped** in 0011 — documented in a different reference
   doc (`86-pouch-stratumd-boot.md`), so the two never met. That override
   (`_Exit(127)`) was itself replaced at gcpark-b by the `snare:abort` death.
-- **A self-directed fault signal other than `SIGABRT` answers `EINVAL`.**
-  `raise(SIGSEGV)` (and `SIGBUS`, `SIGILL`, `SIGFPE`) runs on, where the
-  Linux phenotype ends the caller with the matching `snare:*` death
-  ([[sub-kernel-vivarium]]). Pouch has one trap the kernel names, abort's
-  `brk`; the others would need their own. `sigaction` refuses all five, so no
-  handler-then-reraise program reaches this.
+- **A raised fault signal ends the process at once, even with it blocked.**
+  Since 0050 `raise(SIGSEGV)` (and `SIGBUS`, `SIGILL`, `SIGFPE`) dies of the
+  snare; on Linux a blocked one stays pending. Pouch's mask has no bit for
+  these signals and `sigaction` refuses all four, so no program can block or
+  catch one first. (Until 0050 they answered `EINVAL` and ran on.)
+- **`kill(pid, 0)`, the existence probe, answers `EINVAL`**: no signal 0
+  mapping and no native probe arm (OPEN-BUGS, 2026-10-14).
 - `sigset_t` round-trip is lossy (unsupported signums drop) and spuriously
   additive within the tty family, which shares one bit (reading back a mask
   containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).

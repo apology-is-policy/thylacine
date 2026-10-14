@@ -26,7 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -333,6 +333,13 @@ bash ignores SIGTERM, while a script never opens its notes, so a `term` ends
 it by the kernel's default. `u-job-test` item 12 reads 143 for `kill %1`;
 `u-7-test` flow 5 ends a blocked sleeper once per latch (`kill <pid>
 interrupt` 130, the default 143).
+
+`kill` sends to every pid it names and sets `$errstr` to the first refusal,
+worded from the kernel's reason (2026-10-14,
+[[dec-2026-10-14-postnote-errnos]]): `kill: N: no such process`, `kill: N:
+not a child of this shell`, `kill: N: its note queue is full`, or `kill:
+NAME: not a note a program can send`; until then one message covered all of
+them. A job that has died but not yet been reaped accepts the note.
 
 ### A backslash counts only where a word is a pattern
 

@@ -878,10 +878,12 @@ The `RFNOTEG` rfork bit (already reserved in `proc.h`) selects share-vs-copy of 
 | 44 | `SYS_NOTE_OPEN` | (none) | fd of the calling Proc's note Spoor read end |
 | 45 | `SYS_NOTIFY` | `handler_va` | 0 / -EINVAL — register the async handler (0 clears) |
 | 46 | `SYS_NOTED` | `arg` (0 = NCONT, 1 = NDFLT) | NEVER RETURNS NORMALLY (or -EINVAL if outside a handler) |
-| 47 | `SYS_POSTNOTE` | `pid`, `name_va`, `name_len` | 0 / -EINVAL / -EPERM / -ESRCH / -EAGAIN |
+| 47 | `SYS_POSTNOTE` | `pid`, `name_va`, `name_len` | 0 / -EINVAL / -EFAULT / -EACCES / -ESRCH / -EAGAIN; a self-post of a fault snare does not return |
 | 48 | `SYS_NOTE_MASK` | `new_mask`, `old_mask_out_va` | 0 / -EINVAL |
 
 **`SYS_POSTNOTE` permission gate at v1.0**: caller must be the target's parent OR `pid == self_pid`. **A-4b (IDENTITY-DESIGN §9.8) generalizes cross-process kill** via `write "kill"`/`"killgrp"` to `/proc/<pid>/ctl`, two-axis-authorized (owner-rwx on the ctl file OR `CAP_HOSTOWNER` OR the new elevation-only `CAP_KILL`); `SYS_POSTNOTE` stays the parent/self fast path. The general `/proc/<pid>/note`-file form (posting *arbitrary* notes by namespace write-rights on the Spoor) remains the later composition (§7.6.8 [OPEN Q 7.6.A]).
+
+**`SYS_POSTNOTE` answers** (operator votes 2026-10-14, `dec-2026-10-14-postnote-errnos`): every refusal is its own errno, never a bare `-1`. `-ESRCH`: no Proc holds `pid`. `-EACCES`: the target is not the caller's child -- `EACCES`, not `EPERM`, because `-EPERM` is `-1`, the flat sentinel Pouch's seam reads as `EIO` (ERRORS.md); Pouch's `kill` and the Linux phenotype's both spell it `EPERM` at their own boundary. `-EAGAIN`: the target's note queue is full. `-EINVAL`: an empty, over-long or non-printable name, or one no program may post (unknown, `tty:*`, `sak`, or a `snare:*` name sent to another Proc). `-EFAULT`: the name cannot be read. A child that has died and is not yet reaped accepts the post and nothing receives it -- it is still a process until its parent waits, as POSIX and Linux treat a zombie; the gate is asked first, so this reaches only the caller's own children. **A self-post of a fault snare** -- `snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` or `snare:abort` with `pid` 0 or the caller's own -- ends the caller through the fault path (`proc_fault_terminate`), recording that snare's signal, and never returns (`dec-2026-10-14-self-death-snare`): the same five deaths the Linux phenotype's `kill` already gives a self-directed fault signal, so both phenotypes spell it one way. Pouch's `raise(SIGSEGV)` and `kill(getpid(), SIGBUS)` reach it. Posted to another Proc, every `snare:*` name stays `-EINVAL`: a fault is never another Proc's to cause.
 
 ### 7.6.4 Delivery discipline
 

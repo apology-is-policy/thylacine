@@ -5674,7 +5674,10 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
 
 // SYS_POSTNOTE(pid, name_va, name_len) — post a note to another Proc.
 // Permission gate at v1.0: caller must be the target's parent OR
-// pid == self_pid (self-post is always allowed).
+// pid == self_pid (self-post is always allowed). Every refusal is an errno
+// (operator vote 2026-10-14): -T_E_SRCH no such Proc, -T_E_ACCES not the
+// caller's child, -T_E_AGAIN the target's queue is full, -T_E_INVAL a name no
+// program may post, -T_E_FAULT an unreadable name.
 #define NOTES_POSTNOTE_NAME_MAX  (NOTE_NAME_MAX - 1)
 
 struct postnote_walk_ctx {
@@ -5685,14 +5688,11 @@ struct postnote_walk_ctx {
     struct Proc  *caller;
     const char   *name;          // NULL: signal 0 -- the gate alone, no post
     int           result;        // 0 = not yet found (continue walk);
-                                  // +1 = post succeeded (stop walk);
-                                  // -1 = post failed / permission denied
-                                  //      (stop walk).
-    s64           err;           // with result -1: why, as -T_E_* (ESRCH a dead
-                                  // or mismatched target, EPERM the gate, EAGAIN
-                                  // a full queue). SYS_POSTNOTE reports -1 alone.
-    bool          target_dead;   // with result -1: the gate admitted the caller
-                                  // and the target is no longer ALIVE
+                                  // +1 = accepted (stop walk);
+                                  // -1 = refused (stop walk).
+    s64           err;           // with result -1: why, as SYS_POSTNOTE answers
+                                  // it (ESRCH a mismatched tgid, ACCES the gate,
+                                  // notes_post's own EINVAL or EAGAIN)
 };
 
 // Does `p` hold the thread `tid`? Caller holds g_proc_table_lock, which every
@@ -5740,21 +5740,23 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         return 0;     // keep walking
     }
 
-    // Found the target. Permission gate: caller must be the parent.
+    // Found the target. Permission gate: caller must be the parent. ACCES,
+    // never PERM: -T_E_PERM is -1, the flat sentinel Pouch reads as EIO
+    // (errno.h). The phenotype's shell turns it back into Linux's EPERM.
     if (target->parent != w->caller) {
         w->result = -1;
-        w->err    = -(s64)T_E_PERM;
+        w->err    = -(s64)T_E_ACCES;
         return 1;     // stop walk (non-zero return)
     }
 
-    // R2-F9 audit close: refuse posts to non-ALIVE targets. A target in
-    // ZOMBIE/INVALID state has no consumer (no thread will EL0-return
-    // ever again); the post would be wasted work that returns success
-    // misleadingly. wait_pid is the proper channel for ZOMBIE state.
+    // A target past ALIVE has no thread that will reach an EL0-return again,
+    // so nothing is posted (R2-F9). It is still a process until its parent
+    // reaps it, and POSIX and Linux both accept a signal to one, so the call
+    // succeeds: a caller asking "is my child still there?" learns that from
+    // wait, never from a refused post. The gate was asked first, so only the
+    // caller's own children reach here.
     if (target->state != PROC_STATE_ALIVE) {
-        w->result      = -1;
-        w->err         = -(s64)T_E_SRCH;
-        w->target_dead = true;
+        w->result = 1;
         return 1;
     }
 
@@ -5822,28 +5824,44 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         proc_caught_note_wake(target);   // item 11: caught-note twin
     }
     w->result = (rc == 0) ? 1 : -1;
-    if (rc != 0) w->err = -(s64)T_E_AGAIN;
+    if (rc != 0) w->err = (s64)rc;
     return 1;
 }
 
-// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
-// from any header -- the harness extern-declares it, and there is no
-// production caller. It runs the REAL cross-Proc post: proc_for_each +
-// postnote_walk_cb under g_proc_table_lock, exactly as sys_postnote_handler
-// does, rather than a reimplementation the test could quietly drift from.
-// Returns the walk's canonical result (+1 posted / -1 refused / 0 not found).
-int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
-                                const char *name);
-int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
-                                const char *name) {
+// The CROSS arm: the syscall's own answer for a post to some other Proc.
+//
+// Cross-Proc post: walk the proc tree via proc_for_each, which runs its
+// callback under g_proc_table_lock. The find + permission check + post happen
+// inside the callback so the target Proc cannot be reaped + freed
+// mid-operation. Lock order: proc_table_lock -> q->lock -> poll_list.lock ->
+// (drop q->lock, still hold proc_table_lock) -> rendez.lock. None of those
+// reverse-takes proc_table_lock so the chain is acyclic.
+static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name) {
     struct postnote_walk_ctx wctx = {
         .target_pid = target_pid,
         .caller     = caller,
         .name       = name,
         .result     = 0,
+        .err        = 0,
     };
     (void)proc_for_each(postnote_walk_cb, &wctx);
-    return wctx.result;
+    if (wctx.result == 1) return 0;
+    if (wctx.result == 0) return -(s64)T_E_SRCH;   // no Proc has that pid
+    // Every refusing arm of the walk sets err; a refusal without one must
+    // still read as a refusal, never as the 0 of success.
+    return wctx.err ? wctx.err : -(s64)T_E_INVAL;
+}
+
+// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
+// from any header -- the harness extern-declares it, and there is no
+// production caller. It drives the REAL cross arm, the function the syscall
+// calls, rather than a reimplementation the test could quietly drift from.
+// Returns the syscall's own answer: 0, or a negative errno.
+s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name);
+s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name) {
+    return postnote_cross(caller, target_pid, name);
 }
 
 // The SELF arm, extracted from sys_postnote_handler so it has a name a test can
@@ -5851,7 +5869,9 @@ int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
 // after that resolution uses only `p` and the validated name, so the arm splits
 // cleanly here and the syscall keeps driving THIS function rather than a copy.
 //
-// Returns the syscall's own value: 0 posted-or-killed, -1 refused.
+// Returns the syscall's own value: 0 posted-or-killed, else notes_post's errno.
+// A self-chosen snare death never reaches here: it needs the caller's exception
+// frame, which the syscall entry holds and the phenotype's shell holds.
 static s64 postnote_self(struct Proc *p, const char *name) {
     // Unlike the cross arm we are not already under g_proc_table_lock, so take
     // it around the cascade. `p` is self and cannot be reaped while running it.
@@ -5875,7 +5895,7 @@ static s64 postnote_self(struct Proc *p, const char *name) {
         proc_caught_note_wake(p);   // item 11: caught-note twin
         proc_table_lock_release(ws);
     }
-    return (rc == 0) ? 0 : (s64)-1;
+    return (s64)rc;
 }
 
 // Test support, the sys_postnote_cross_for_test twin: drives the REAL self arm
@@ -5887,27 +5907,28 @@ s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
     return postnote_self(caller, name);
 }
 
-static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
+static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
+                                 u64 name_va, u64 name_len_raw) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc) return -1;
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
     struct Proc *p = t->proc;
 
-    if (name_len_raw == 0) return -1;
-    if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -1;
-    if (name_va == 0) return -1;
-    if (name_va >= UACCESS_USER_VA_TOP) return -1;
-    if (name_va + name_len_raw > UACCESS_USER_VA_TOP) return -1;
+    if (name_len_raw == 0) return -(s64)T_E_INVAL;
+    if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -(s64)T_E_INVAL;
+    if (name_va == 0) return -(s64)T_E_FAULT;
+    if (name_va >= UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
+    if (name_va + name_len_raw > UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
 
     char buf[NOTE_NAME_MAX];
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) buf[i] = 0;
     for (u32 i = 0; i < (u32)name_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0) return -1;
+        if (uaccess_load_u8(name_va + i, &b) != 0) return -(s64)T_E_FAULT;
         // Reject embedded NUL and non-printable bytes. notes_post checks
         // the name against g_known_notes and refuses the kernel-only
         // ones; this only turns obvious garbage away at the boundary.
-        if (b == 0) return -1;
-        if (b < 0x20 || b > 0x7e) return -1;
+        if (b == 0) return -(s64)T_E_INVAL;
+        if (b < 0x20 || b > 0x7e) return -(s64)T_E_INVAL;
         buf[i] = (char)b;
     }
     buf[(u32)name_len_raw] = 0;
@@ -5932,26 +5953,18 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     // its lock discipline live on postnote_self; WHY the kill decision is
     // shared with the cross arm (round-2 F4, aux#253) lives on
     // postnote_kill_cascade_locked.
-    if (target_pid == p->pid || pid_raw == 0) return postnote_self(p, buf);
+    if (target_pid == p->pid || pid_raw == 0) {
+        // A snare death the caller names for itself ends it here, through the
+        // fault path, as Pouch's raise(SIGSEGV) must and as the phenotype's
+        // kill already does (operator vote 2026-10-14). Posted to anyone else
+        // the name is notes_post's to refuse: a fault is never another Proc's
+        // to cause.
+        const char *snare = notes_self_death_snare(buf);
+        if (snare) proc_fault_terminate(snare, ctx->elr);
+        return postnote_self(p, buf);
+    }
 
-    // Cross-Proc post: walk the proc tree via proc_for_each, which runs
-    // its callback under g_proc_table_lock. We do the find + permission-
-    // check + post inside the callback so the target Proc cannot be
-    // reaped + freed mid-operation. Lock order: proc_table_lock → q->lock
-    // → poll_list.lock → (drop q->lock, still hold proc_table_lock) →
-    // rendez.lock. None of those reverse-takes proc_table_lock so the
-    // chain is acyclic.
-    struct postnote_walk_ctx wctx = {
-        .target_pid = target_pid,
-        .caller     = p,
-        .name       = buf,
-        .result     = 0,
-    };
-    int rv = proc_for_each(postnote_walk_cb, &wctx);
-    (void)rv;     // proc_for_each returns the first non-zero callback
-                  // result; wctx.result carries the canonical answer
-    if (wctx.result == 1) return 0;     // post succeeded
-    return -1;                            // not found / permission / EAGAIN
+    return postnote_cross(p, target_pid, buf);
 }
 
 // SYS_NOTE_MASK(new_mask, old_mask_out_va) — swap-and-return mask.
@@ -13753,7 +13766,7 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
             if (!ctx) return 1;
             proc_fault_terminate(name, ctx->elr);
         }
-        return postnote_self(p, name) == 0 ? 0 : -(s64)T_E_AGAIN;
+        return postnote_self(p, name);
     }
     // A snare:* death is the caller's own to choose, never another Proc's.
     if (kind == VIV_KILL_SELF_DEATH) return -(s64)T_E_INVAL;
@@ -13765,15 +13778,13 @@ static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int 
         .name       = (kind == VIV_KILL_PROBE) ? NULL : name,
         .result     = 0,
         .err        = 0,
-        .target_dead = false,
     };
     (void)proc_for_each(postnote_walk_cb, &w);
     if (w.result == 1) return 0;
     if (w.result == 0) return -(s64)T_E_SRCH;   // no Proc has that pid or tid
-    // A child that has died and is not yet reaped is Linux's zombie: the
-    // signal is accepted and nothing receives it. The gate was asked first,
-    // so this answer reaches only the caller's own children.
-    if (w.target_dead) return 0;
+    // Linux's kill spells the gate's refusal EPERM, and in the Linux ABI -1 IS
+    // EPERM: the native ban on -T_E_PERM stops at this boundary.
+    if (w.err == -(s64)T_E_ACCES) return -(s64)T_E_PERM;
     return w.err ? w.err : -(s64)T_E_PERM;
 }
 
@@ -16350,7 +16361,7 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         return;
 
     case SYS_POSTNOTE:
-        ctx->regs[0] = (u64)sys_postnote_handler(ctx->regs[0],
+        ctx->regs[0] = (u64)sys_postnote_handler(ctx, ctx->regs[0],
                                                   ctx->regs[1],
                                                   ctx->regs[2]);
         return;

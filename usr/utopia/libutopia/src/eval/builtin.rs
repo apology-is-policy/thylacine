@@ -112,6 +112,7 @@ use core::fmt::Write as _;
 
 use libthyla_rs::fs::{self, Component, Path};
 use libthyla_rs::io::Read as _;
+use libthyla_rs::err::Error;
 use libthyla_rs::notes::{self, NoteTarget};
 use libthyla_rs::{t_wait_pid_for, T_WAIT_PACKED, T_WAIT_WNOHANG};
 
@@ -1042,19 +1043,31 @@ fn bi_kill(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if pids.is_empty() {
         return fail(env, "kill: no matching processes".to_string(), 1);
     }
-    let mut send_err = false;
+    // Every pid is sent to; the first refusal is the one $errstr names.
+    let mut first_err: Option<String> = None;
     for pid in pids {
-        if notes::send(NoteTarget::Pid(pid), name).is_err() {
-            send_err = true;
+        if let Err(e) = notes::send(NoteTarget::Pid(pid), name) {
+            if first_err.is_none() {
+                first_err = Some(kill_refusal(pid, name, e));
+            }
         }
     }
-    if send_err {
-        return fail(
-            env,
-            "kill: send failed (no such process or not a child)".to_string(),
-            1,
-        );
+    if let Some(m) = first_err {
+        return fail(env, m, 1);
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)
+}
+
+// The kernel names each refusal (SYS_POSTNOTE's errnos), so the message can.
+fn kill_refusal(pid: i32, name: &str, e: Error) -> String {
+    let mut s = String::new();
+    let _ = match e {
+        Error::NoSuchProcess => write!(&mut s, "kill: {}: no such process", pid),
+        Error::PermissionDenied => write!(&mut s, "kill: {}: not a child of this shell", pid),
+        Error::WouldBlock => write!(&mut s, "kill: {}: its note queue is full", pid),
+        Error::InvalidArgument => write!(&mut s, "kill: {}: not a note a program can send", name),
+        other => write!(&mut s, "kill: {}: {}", pid, other),
+    };
+    s
 }

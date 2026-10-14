@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -1048,11 +1048,15 @@ through `postnote_self`, a probe as 0, and a SELF_DEATH through
 other Proc goes through `SYS_POSTNOTE`'s parent-gated walk, and a SELF_DEATH
 aimed at it is `EINVAL`: a `snare:*` death is the kernel's to cause. So a
 guest reaches exactly the Procs a Pouch program's `kill` reaches -- itself and
-its own live children -- and no third gate exists ([[inv-i43]]: the phenotype
+its own children, a dead one answering 0 until it is reaped -- and no third
+gate exists ([[inv-i43]]: the phenotype
 confers shape, never authority; [[dec-2026-10-13-phenotype-kill-family]]).
 Generalizing the vote's SIGABRT to all five fault signals is this chunk's
 call, stated in VIVARIUM 6.22: each is a death the caller could already reach
-by faulting.
+by faulting. Since S-3 (2026-10-14) the walk records the gate's refusal as the
+native `EACCES`, which `viv_kill` turns back into Linux's `EPERM`, and the
+native `SYS_POSTNOTE` self arm accepts the same five snares
+([[dec-2026-10-14-self-death-snare]]), so the set lives in one table.
 
 Tests: `vivarium.kill_decide` (the table), `notes.kill_family_gate` (the real
 shell with an explicit caller: self, a child, a non-child, a missing pid, a

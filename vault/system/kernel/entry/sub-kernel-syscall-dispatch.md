@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -1604,30 +1604,54 @@ The Linux phenotype's `kill`, `tkill` and `tgkill` ([[sub-kernel-vivarium]],
 gate of their own: `postnote_self` for the caller, and the parent-gated walk
 for anyone else. One shell, `viv_kill(ctx, p, pid, tid, sig)`, serves all
 three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
-`EINVAL` first, as Linux does). The walk's context gained two fields, and
-`SYS_POSTNOTE`'s own answers are unchanged:
+`EINVAL` first, as Linux does). The walk's context gained two fields:
 
 - `target_tid` (> 0): the target is the Proc holding that thread, found with
   `proc_holds_tid_locked` under `g_proc_table_lock`, the lock every thread
   list walk holds (#811); a `tgkill` whose tgid is a different Proc names no
   thread (`ESRCH`).
-- `err`: with `result` -1, why -- `ESRCH` for a dead or mismatched target,
-  `EPERM` for the gate (the caller is not the target's parent), `EAGAIN` for a
-  full queue. `SYS_POSTNOTE` still reports -1 alone.
-- `target_dead`: with `result` -1, the gate admitted the caller and the target
-  is no longer ALIVE. `viv_kill` answers 0 for it, Linux's answer for a
-  zombie: the signal is accepted and nothing receives it. Only the caller's
-  own children can reach that answer.
+- `err`: with `result` -1, why, as `SYS_POSTNOTE` answers it since S-3 (below):
+  `ESRCH` for a mismatched tgid, `EACCES` for the gate, `notes_post`'s own
+  `EINVAL` or `EAGAIN`. `viv_kill` turns `EACCES` back into Linux's `EPERM`.
 
 A NULL `name` is signal 0: the gate runs, nothing is posted. The order inside
-the walk is the old one -- the gate, then ALIVE, then the post -- so a zombie
-that is not the caller's child reads `EPERM`, as it reads -1 to `SYS_POSTNOTE`.
+the walk is the gate, then ALIVE, then the post, so a dead target that is not
+the caller's child reads the gate's refusal. (S-2 added a `target_dead` field
+for the phenotype's zombie answer; S-3 moved that rule into the walk itself.)
 `viv_tier2` narrows `pid`, `tid` and `sig` to `int` before the shell sees
 them, as Linux's prototypes do: a guest may leave the high half of a register
 unspecified.
 `viv_kill_for_test` drives the real shell with an explicit caller and a NULL
 `ctx`; a self-directed `snare:*` death answers 1 there instead of ending the
 harness (`notes.kill_family_gate`).
+
+## SYS_POSTNOTE answers errnos; a self-posted fault snare ends the caller (2026-10-14, S-3)
+
+`sys_postnote_handler(ctx, pid, name_va, name_len)` answers every refusal
+with its own errno ([[dec-2026-10-14-postnote-errnos]]): `-T_E_INVAL` for a
+zero or over-long length, a NUL or non-printable byte, or a name `notes_post`
+refuses; `-T_E_FAULT` for a name it cannot read; then the arms' own answers.
+The cross arm is `postnote_cross(caller, pid, name)`: the walk under
+`proc_for_each`, then 0, `-T_E_SRCH` when no Proc holds the pid, or the walk's
+`err` -- `-T_E_ACCES` from the gate, never `-T_E_PERM`, which is the flat `-1`
+Pouch's seam reads as `EIO`. The walk accepts a post to a target past ALIVE
+and posts nothing: only the caller's own children get past the gate, and a
+dead one is still a process until it is reaped. `postnote_self` returns
+`notes_post`'s errno.
+
+The handler takes `ctx` for one reason. Before the self arm it asks
+`notes_self_death_snare(name)` ([[sub-kernel-notes]]); a self-post of
+`snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` or `snare:abort` calls
+`proc_fault_terminate(snare, ctx->elr)` with the kernel's own literal and
+never returns ([[dec-2026-10-14-self-death-snare]]) -- the death `viv_kill`'s
+SELF_DEATH arm gives the Linux phenotype, so the two phenotypes share one
+spelling. A snare posted to another Proc reaches `notes_post`, which refuses
+it.
+
+`sys_postnote_cross_for_test` now drives `postnote_cross` and returns the
+syscall's own answer. `notes.postnote_errnos` pins each refusal on both arms
+against a control post that lands, and `notes.self_death_snare` compares the
+native set with the phenotype's row by row.
 
 ## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
 

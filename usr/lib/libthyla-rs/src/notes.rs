@@ -25,10 +25,12 @@
 //   v1.0 has no CAP_KILL; v1.x will extend the gate.
 //
 // `snare:` PREFIX:
-//   `snare:*` names are reserved for kernel-synthetic fault posters.
-//   The kernel rejects userspace SYS_POSTNOTE with a `snare:`-prefixed
-//   name; libthyla-rs surfaces that rejection cleanly via
-//   Error::InvalidArgument.
+//   `snare:*` names are reserved for kernel-synthetic fault posters. The
+//   kernel refuses a userspace SYS_POSTNOTE of one to another Proc, and a
+//   self-post of segv, bus, ill, fpe or abort ENDS the caller with that
+//   snare instead of queueing it (operator vote 2026-10-14) -- the path
+//   Pouch's raise(SIGSEGV) takes. `send` returns, so it refuses every
+//   `snare:` name with Error::InvalidArgument before the kernel sees it.
 
 use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
@@ -442,14 +444,17 @@ impl AsFd for Notes {
 /// Permission gate (v1.0): SelfProc always allowed; `Pid(p)`
 /// requires the caller to be the target's parent OR equal to `p`.
 ///
-/// Errors:
+/// Errors, each the kernel's own answer (operator vote 2026-10-14):
 ///   - `Error::InvalidArgument`: bad name (length / chars / `snare:`
-///     prefix) OR target name not in the kernel's supported set OR
-///     bad pid.
-///   - `Error::NotFound`: target pid does not exist.
+///     prefix), or a name that is no note a program may post (unknown,
+///     `tty:*`, `sak`).
+///   - `Error::NoSuchProcess`: no Proc holds the target pid.
 ///   - `Error::PermissionDenied`: caller is not the target's parent.
-///   - `Error::Again`: target's note queue is full (best-effort
+///   - `Error::WouldBlock`: target's note queue is full (best-effort
 ///     retry; coalesce is kernel-synthetic-only).
+///
+/// A child that has died and is not yet reaped accepts the note: it is
+/// still a process, and nothing receives it.
 pub fn send(target: NoteTarget, name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidArgument);
@@ -464,14 +469,7 @@ pub fn send(target: NoteTarget, name: &str) -> Result<()> {
     // SAFETY: bytes points to name.len() readable bytes in the
     // caller's user-VA memory (a &str borrows that).
     let rc = unsafe { t_postnote(target.to_kernel_pid(), bytes.as_ptr(), bytes.len()) };
-    if rc < 0 {
-        // The kernel collapses every failure to -1 at v1.0; we
-        // surface as InvalidArgument since we can't distinguish.
-        // A v1.x kernel ABI upgrade (per docs/ERRORS.md) will return
-        // specific errno values we can map here.
-        return Err(Error::InvalidArgument);
-    }
-    Ok(())
+    Error::from_syscall_return(rc).map(|_| ())
 }
 
 /// Set the calling Thread's note mask and return the previous mask.

@@ -899,7 +899,7 @@ void test_notes_post_ordering(void);
 void test_notes_linux_sigign_discard(void);      // VIVARIUM V-6b
 void test_notes_unknown_name_rejected(void);
 void test_notes_snare_forge_rejected(void);
-void test_notes_queue_full_returns_minus1(void);
+void test_notes_queue_full_returns_eagain(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
@@ -934,6 +934,8 @@ void test_notes_forced_close_lifts_the_hold(void);
 void test_notes_pipe_die_pending(void);
 void test_notes_term_die_pending(void);
 void test_notes_kill_family_gate(void);
+void test_notes_postnote_errnos(void);
+void test_notes_self_death_snare(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_claim_once(void);
@@ -3143,7 +3145,7 @@ struct test_case g_tests[] = {
     { "notes.linux_sigign_discard",            test_notes_linux_sigign_discard,            false, NULL },
     { "notes.unknown_name_rejected",           test_notes_unknown_name_rejected,           false, NULL },
     { "notes.snare_forge_rejected",            test_notes_snare_forge_rejected,            false, NULL },
-    { "notes.queue_full_returns_minus1",       test_notes_queue_full_returns_minus1,       false, NULL },
+    { "notes.queue_full_returns_eagain",       test_notes_queue_full_returns_eagain,       false, NULL },
     { "notes.coalesce_synthetic",              test_notes_coalesce_synthetic,              false, NULL },
     { "notes.mask_defers",                     test_notes_mask_defers,                     false, NULL },
     { "notes.kill_dequeue_smoke",              test_notes_kill_dequeue_smoke,              false, NULL },
@@ -3178,6 +3180,8 @@ struct test_case g_tests[] = {
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
     { "notes.term_die_pending",                test_notes_term_die_pending,                false, NULL },
     { "notes.kill_family_gate",                test_notes_kill_family_gate,                false, NULL },
+    { "notes.postnote_errnos",                 test_notes_postnote_errnos,                 false, NULL },
+    { "notes.self_death_snare",                test_notes_self_death_snare,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
     { "notes.caught_note_claim_once",            test_notes_caught_note_claim_once,            false, NULL },

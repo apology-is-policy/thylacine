@@ -903,14 +903,20 @@ enum {
     // namespace-shape (write to /proc/<pid>/note when path resolution
     // arrives).
     //
-    // Returns 0 on success, -1 on:
-    //   - bad name_len bounds (0 or > NOTE_NAME_MAX - 1)
-    //   - name_va outside the user-VA bound / unmapped
-    //   - name not in the v1.0 supported set (NOTE_NAME_* enumerated in
-    //     <thylacine/notes.h>)
-    //   - target pid not found (-ESRCH-equivalent collapsed to -1)
-    //   - target Proc's queue is full (-EAGAIN-equivalent)
-    //   - permission denied (caller is not the parent + pid != self)
+    // Returns 0 on success, else a negative errno (operator vote 2026-10-14):
+    //   -T_E_INVAL  name_len 0 or > NOTE_NAME_MAX - 1; a NUL or non-printable
+    //               byte; a name not in the supported set (NOTE_NAME_* in
+    //               <thylacine/notes.h>); a kernel-only name (tty:*, sak,
+    //               a snare:* to another Proc)
+    //   -T_E_FAULT  name_va outside the user-VA bound / unmapped
+    //   -T_E_SRCH   no Proc holds pid
+    //   -T_E_ACCES  the target is not the caller's child (never -T_E_PERM,
+    //               which is -1, the flat sentinel)
+    //   -T_E_AGAIN  the target's note queue is full
+    // A child that is dead but not yet reaped answers 0 and receives nothing.
+    // A self-post of snare:segv, snare:bus, snare:ill, snare:fpe or
+    // snare:abort NEVER RETURNS: the kernel ends the caller with that snare
+    // through its fault path (notes_self_death_snare).
     SYS_POSTNOTE     = 47,
 
     // SYS_NOTE_MASK(new_mask, old_mask_out_va) — set the calling Thread's

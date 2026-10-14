@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-10-05
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -67,6 +67,9 @@ the fault smoke (a worker's write into its own guard dies of `snare:segv`);
 matches `/pouch-hello-signals` on `POUCH_CENSUS_SIGNALS` too: its `deaths` leg
 (abort, assert, `brk #1` and a NULL store, each read back as the signal it
 died of) is what tells the new binary from an old one that also exits 0.
+Signal chunk S-3 (2026-10-14) grows that census by `self-faults` (children
+that raise or kill themselves with SIGSEGV, SIGBUS, SIGILL and SIGFPE read
+each signal) and `errnos` (`kill()` refusals read ESRCH and EPERM, not EIO).
 Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).

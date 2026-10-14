@@ -53,7 +53,7 @@ extern int  notes_noted_restore(struct exception_context *ctx, struct Thread *t)
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
-extern int  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+extern s64  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                         const char *name);   // #241
 extern s64  viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
 extern s64  sys_postnote_self_for_test(struct Proc *caller,
@@ -182,11 +182,11 @@ void test_notes_unknown_name_rejected(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
-    TEST_EXPECT_EQ(notes_post(p, "alarm",      0u, NULL, true), -1,
+    TEST_EXPECT_EQ(notes_post(p, "alarm",      0u, NULL, true), -(int)T_E_INVAL,
                    "post(alarm) rejected (deferred at v1.0)");
-    TEST_EXPECT_EQ(notes_post(p, "garbage",    0u, NULL, true), -1,
+    TEST_EXPECT_EQ(notes_post(p, "garbage",    0u, NULL, true), -(int)T_E_INVAL,
                    "post(garbage) rejected");
-    TEST_EXPECT_EQ(notes_post(p, "",           0u, NULL, true), -1,
+    TEST_EXPECT_EQ(notes_post(p, "",           0u, NULL, true), -(int)T_E_INVAL,
                    "post(empty) rejected");
     TEST_EXPECT_EQ(p->notes->count, 0u, "no rejected post landed in queue");
 
@@ -206,11 +206,11 @@ void test_notes_snare_forge_rejected(void) {
     // kernel-synthetic posters. A userspace-path post (synthetic=false,
     // the SYS_POSTNOTE shape) of ANY snare:* name must be rejected —
     // independent of whether snare:* ever joins the supported name set.
-    TEST_EXPECT_EQ(notes_post(p, "snare:segv", 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, "snare:segv", 0u, NULL, false), -(int)T_E_INVAL,
                    "user-path post(snare:segv) rejected");
-    TEST_EXPECT_EQ(notes_post(p, "snare:bus", 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, "snare:bus", 0u, NULL, false), -(int)T_E_INVAL,
                    "user-path post(snare:bus) rejected");
-    TEST_EXPECT_EQ(notes_post(p, "snare:", 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, "snare:", 0u, NULL, false), -(int)T_E_INVAL,
                    "user-path post(snare:) rejected");
     TEST_EXPECT_EQ(p->notes->count, 0u, "no forged snare landed in queue");
 
@@ -224,10 +224,10 @@ void test_notes_snare_forge_rejected(void) {
 }
 
 // ---------------------------------------------------------------------------
-// queue_full_returns_minus1
+// queue_full_returns_eagain
 // ---------------------------------------------------------------------------
 
-void test_notes_queue_full_returns_minus1(void) {
+void test_notes_queue_full_returns_eagain(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
@@ -244,8 +244,8 @@ void test_notes_queue_full_returns_minus1(void) {
                    "queue at full depth");
 
     // Next non-synthetic post must fail.
-    TEST_EXPECT_EQ(notes_post(p, "interrupt", 99u, NULL, false), -1,
-                   "post at full → -1");
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 99u, NULL, false), -(int)T_E_AGAIN,
+                   "post at full -> -EAGAIN");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -2050,8 +2050,8 @@ void test_notes_kill_terminates_single_thread(void) {
     TEST_ASSERT(target->group_exit_msg == NULL,
                 "precondition: target is not already terminating");
 
-    int rc = sys_postnote_cross_for_test(parent, target->pid, NOTE_NAME_KILL);
-    TEST_EXPECT_EQ(rc, 1, "the cross-Proc kill post reports success");
+    s64 rc = sys_postnote_cross_for_test(parent, target->pid, NOTE_NAME_KILL);
+    TEST_EXPECT_EQ(rc, (s64)0, "the cross-Proc kill post reports success");
 
     // POSITIVE: the cascade ran. Fails closed -- any fixture defect that makes
     // proc_group_terminate bail early leaves this NULL.
@@ -2079,7 +2079,7 @@ void test_notes_kill_terminates_single_thread(void) {
     ctl->threads = &cth;
 
     TEST_EXPECT_EQ(sys_postnote_cross_for_test(parent, ctl->pid,
-                                               NOTE_NAME_INTERRUPT), 1,
+                                               NOTE_NAME_INTERRUPT), (s64)0,
                    "the control post reports success");
     TEST_EXPECT_EQ((int)ndflt_note_count(ctl, NOTE_NAME_INTERRUPT), 1,
                    "control: a non-kill note IS queued (so 0 above means 0)");
@@ -3359,4 +3359,133 @@ void test_notes_death_signal_table(void) {
     }
     TEST_ASSERT(terminating > 0 && compared == terminating,
                 "the phenotype cross-check compared every terminating note it names");
+}
+
+// SYS_POSTNOTE answers each refusal with its own errno (operator vote
+// 2026-10-14), driven through the syscall's two arms. A bare -1 used to answer
+// all of them, and Pouch's seam reads -1 as EIO.
+void test_notes_postnote_errnos(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    struct Proc *other  = proc_alloc();
+    TEST_ASSERT(caller && child && other, "proc_alloc x3");
+    proc_test_link(caller);
+    proc_test_link_child(caller, child);
+    proc_test_link(other);                       // alive, not the caller's child
+
+    static struct Thread cth, kth, oth;
+    kfg_thread(&cth, caller, 0x3e000001);
+    kfg_thread(&kth, child,  0x3e000002);
+    kfg_thread(&oth, other,  0x3e000003);
+    const int NO_PID = 0x3ffffff0;
+
+    s64 r_post  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TERM);
+    u32 c_term1 = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_other = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
+    u32 o_term  = ndflt_note_count(other, NOTE_NAME_TERM);
+    s64 r_nopid = sys_postnote_cross_for_test(caller, NO_PID, NOTE_NAME_TERM);
+    s64 r_bogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
+    s64 r_tty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_SUSP);
+    s64 r_sak   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SAK);
+    s64 r_snare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
+    u32 c_count = child->notes->count;
+
+    // Fill the child's ring with posts that arm nothing, then one more.
+    u32 c_fill_bad = 0;
+    while (child->notes->count < NOTE_QUEUE_DEPTH) {
+        if (sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_CHILD_EXIT) != 0) {
+            c_fill_bad++;
+            break;
+        }
+    }
+    s64 r_full  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TERM);
+
+    // The self arm: its own refusals, and a snare it never queues.
+    s64 s_tty   = sys_postnote_self_for_test(caller, NOTE_NAME_TTY_SUSP);
+    s64 s_snare = sys_postnote_self_for_test(caller, NOTE_NAME_SNARE_SEGV);
+    u32 s_count = caller->notes->count;
+    u32 s_fill_bad = 0;
+    while (caller->notes->count < NOTE_QUEUE_DEPTH) {
+        if (sys_postnote_self_for_test(caller, NOTE_NAME_CHILD_EXIT) != 0) {
+            s_fill_bad++;
+            break;
+        }
+    }
+    s64 s_full  = sys_postnote_self_for_test(caller, NOTE_NAME_TERM);
+
+    // A dead child is still a process until it is reaped; a dead non-child is
+    // still not the caller's to signal.
+    child->state = PROC_STATE_ZOMBIE;
+    u32 c_before = child->notes->count;
+    s64 r_dead  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_INTERRUPT);
+    u32 c_after = child->notes->count;
+    other->state = PROC_STATE_ZOMBIE;
+    s64 r_odead = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
+
+    proc_test_unlink(other);
+    other->threads = NULL;
+    proc_free(other);
+    proc_test_unlink(child);
+    child->threads = NULL;
+    proc_free(child);
+    proc_test_unlink(caller);
+    caller->threads = NULL;
+    caller->state   = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+
+    TEST_EXPECT_EQ(r_post, (s64)0, "post(child, term) succeeds");
+    TEST_EXPECT_EQ(c_term1, 1u, "and the child holds one queued term");
+    TEST_EXPECT_EQ(r_other, -(s64)T_E_ACCES, "a non-child is EACCES: the parent gate, never -1");
+    TEST_EXPECT_EQ(o_term, 0u, "and nothing reached it");
+    TEST_EXPECT_EQ(r_nopid, -(s64)T_E_SRCH, "no such pid is ESRCH");
+    TEST_EXPECT_EQ(r_bogus, -(s64)T_E_INVAL, "a name that is no note is EINVAL");
+    TEST_EXPECT_EQ(r_tty, -(s64)T_E_INVAL, "tty:susp is the kernel's to post: EINVAL");
+    TEST_EXPECT_EQ(r_sak, -(s64)T_E_INVAL, "sak is the kernel's to post: EINVAL");
+    TEST_EXPECT_EQ(r_snare, -(s64)T_E_INVAL, "a snare to another Proc is EINVAL: a fault is its own");
+    TEST_EXPECT_EQ(c_count, 1u, "no refused post reached the child's ring");
+    TEST_EXPECT_EQ(c_fill_bad, 0u, "the fill posts all landed");
+    TEST_EXPECT_EQ(r_full, -(s64)T_E_AGAIN, "a full ring is EAGAIN");
+    TEST_EXPECT_EQ(s_tty, -(s64)T_E_INVAL, "self: tty:susp is EINVAL");
+    TEST_EXPECT_EQ(s_snare, -(s64)T_E_INVAL, "self arm: a snare is never queued (the entry ends the caller)");
+    TEST_EXPECT_EQ(s_count, 0u, "and the caller's ring stayed empty");
+    TEST_EXPECT_EQ(s_fill_bad, 0u, "the self fill posts all landed");
+    TEST_EXPECT_EQ(s_full, -(s64)T_E_AGAIN, "self: a full ring is EAGAIN");
+    TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it");
+    TEST_EXPECT_EQ(c_after, c_before, "and nothing was queued to it");
+    TEST_EXPECT_EQ(r_odead, -(s64)T_E_ACCES, "a dead non-child reads EACCES: the gate is asked first");
+}
+
+// The snares a Proc may post to itself are exactly the ones the phenotype's
+// kill ends its caller with: one set, compared row by row against the death
+// table rather than against a list a second change could forget.
+void test_notes_self_death_snare(void) {
+    u32 rows = 0, phen = 0, native = 0;
+    for (u32 i = 0; notes_snare_death_name_for_test(i); i++) {
+        const char *row = notes_snare_death_name_for_test(i);
+        rows++;
+        bool by_phenotype = false;
+        for (u64 sig = 1; sig <= VIV_NSIG; sig++) {
+            const char *name = NULL;
+            if (vivarium_kill_decide(sig, &name) == VIV_KILL_SELF_DEATH &&
+                name && fdl_str_eq(name, row)) {
+                by_phenotype = true;
+            }
+        }
+        const char *got = notes_self_death_snare(row);
+        if (by_phenotype) phen++;
+        if (got) native++;
+        TEST_ASSERT((got != NULL) == by_phenotype,
+                    "a snare is self-postable natively iff the phenotype's kill ends its caller with it");
+        TEST_ASSERT(!got || fdl_str_eq(got, row), "and it answers with that snare's own name");
+    }
+    TEST_ASSERT(rows > 0 && phen > 0, "the walk saw the death table and the phenotype's self deaths");
+    TEST_EXPECT_EQ(native, phen, "the two sets have the same size");
+
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_SNARE_ALIGN) == NULL, "snare:align stays the kernel's");
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_SNARE_BTI) == NULL, "snare:bti stays the kernel's");
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_SNARE_BRK) == NULL, "snare:brk stays the kernel's");
+    TEST_ASSERT(notes_self_death_snare("snare:") == NULL, "the bare prefix is no snare");
+    TEST_ASSERT(notes_self_death_snare("snare:segvx") == NULL, "nor is a longer name");
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_TERM) == NULL, "an ordinary note is not a death");
+    TEST_ASSERT(notes_self_death_snare(NULL) == NULL, "NULL is refused");
 }

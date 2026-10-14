@@ -72,15 +72,15 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_OK`        | 0     | (success)    | Operation succeeded |
 | `T_E_PERM`      | 1     | `EPERM`      | Operation not permitted (capability check failed). **DO NOT RETURN FROM A SYSCALL HANDLER** — `-1` collides with pouch's flat-error sentinel; use `T_E_ACCES` instead. The name remains for translation-from-userspace code. See errno.h for the full rationale. |
 | `T_E_NOENT`     | 2     | `ENOENT`     | No such file or namespace entry |
-| `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour) |
+| `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour; `SYS_POSTNOTE` to a pid nobody holds) |
 | `T_E_INTR`      | 4     | `EINTR`      | A blocking wait was interrupted by a deliverable **caught** note before its condition became true (item 11 / note-interruptible waits). Distinct from the terminate latch: `thread_die_pending` unwinds a wait to KILL the Thread, `T_E_INTR` unwinds it so a caught note (a Linux-phenotype `sigaction` handler, or a native self-managing notes-fd reader) is delivered at the EL0-return tail while the Thread lives. A native caller re-issues the wait after servicing the note; a Linux-phenotype caller restarts the syscall iff the handler carried `SA_RESTART`, else observes `EINTR` (ARCH 8.8.2, VIVARIUM 6.22). Slot 4 was the last free low errno; operator-ratified 2026-08-18 (Q3=A) |
 | `T_E_IO`        | 5     | `EIO`        | I/O error (storage, device, network) |
 | `T_E_2BIG`      | 7     | `E2BIG`      | Argument list too long — the argv/envp asked for does not fit the new image's frame budget. Distinct from `EINVAL` in the way a caller acts on: `EINVAL` says the request was malformed and retrying it verbatim is pointless, `E2BIG` says it was well-formed and too large, so splitting it will work (which is what `xargs` exists to do). Appended for the LINEAGE L-6c envp projection (#140), the commit wiring its first consumer, under the 2026-08-03 signoff (#142). Emitted by the ENVIRONMENT bounds only (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, in both the `/env` projection and the vivarium `envp` walk); the neighbouring **argv** bounds still answer `T_E_INVAL`, because that is a landed native ABI (`SYS_EXECVE`, L-2a) whose error code is its own deliberate decision, reserved to the #142 rollout rather than changed as a side effect of adding envp |
 | `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd |
 | `T_E_CHILD`     | 10    | `ECHILD`     | No child processes — a wait names no matching child. The termination condition of every reap loop, which is why the near-miss answers will not do: a bare `-1` reads to a Linux guest as `EPERM`, the #100 class of wrong answer. Appended for the LINEAGE L-6b `wait4` row. `wait_pid_for`'s two `-1` conditions (no matching child; a #811 death-interrupted sleep) both map here — sound because the death path returns through the sync-from-EL0 tail, where `el0_return_die_check` is noreturn on the die branch, so no observer can tell them apart |
-| `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full; would block) |
+| `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full, e.g. `SYS_POSTNOTE` to a full note queue; would block) |
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
-| `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation) |
+| `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation; `SYS_POSTNOTE` to a Proc that is not the caller's child, which Pouch's `kill` and the phenotype's report as `EPERM`) |
 | `T_E_FAULT`     | 14    | `EFAULT`     | Bad address (uaccess fault on user VA) |
 | `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention; mount-busy) |
 | `T_E_EXIST`     | 17    | `EEXIST`     | Already exists (mount over existing point; create-excl) |
@@ -135,9 +135,23 @@ signal the parent's packed wait word reports when the note kills a Proc
 
 The `snare:` prefix is reserved for kernel-synthetic fault notes. User
 processes that want to define their own structured event names should
-NOT use the `snare:` prefix (the kernel rejects, returning -1 from,
-`notes_post` with a `snare:`-prefixed `name` from a non-kernel-synthetic
-caller; see `kernel/notes.c::notes_post`).
+NOT use the `snare:` prefix: `notes_post` refuses a `snare:`-prefixed
+`name` from a non-kernel-synthetic caller with `-T_E_INVAL`, so no
+`snare:*` note is ever queued (`kernel/notes.c::notes_post`).
+
+**A Proc may end itself with a fault snare** (operator vote 2026-10-14,
+signal chunk S-3). A `SYS_POSTNOTE` of `snare:segv`, `snare:bus`,
+`snare:ill`, `snare:fpe` or `snare:abort` whose target is the caller
+itself (pid 0 or its own) does not post anything: the kernel ends the
+caller through `proc_fault_terminate`, exactly as a real fault would, and
+the parent reads that snare's signal. These are the five deaths the Linux
+phenotype's `kill` gives a self-directed `SIGSEGV`, `SIGBUS`, `SIGILL`,
+`SIGFPE` or `SIGABRT`, and Pouch's `raise()` and `kill(getpid(), ...)` of
+the first four reach the same call (patch 0050; `SIGABRT` keeps `abort()`'s
+`brk`). `snare:align`, `snare:bti` and `snare:brk` are not on the list:
+two share a signal with `bus` and `ill`, and no signal names `brk` to the
+phenotype. Sent to another Proc, every `snare:*` name is `-T_E_INVAL`: a
+fault is never another Proc's to cause.
 
 **Bit-position assignment in `note_mask`**: each `snare:*` shares the
 existing `NOTE_BIT_*` block (extends with `NOTE_BIT_SNARE`). Setting

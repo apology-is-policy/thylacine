@@ -29,6 +29,15 @@
 //                                         SIGTRAP, SIGSEGV, SIGABRT, SIGABRT --
 //                                         never WIFEXITED (docs/ERRORS.md
 //                                         "The wait status").
+//   self faults (signal chunk S-3)     -> children that raise(SIGSEGV),
+//                                         kill(getpid(), SIGBUS), raise(SIGILL)
+//                                         and kill(0, SIGFPE) read WIFSIGNALED
+//                                         with that signal. Before patch 0050
+//                                         each answered EINVAL and ran on.
+//   errnos (signal chunk S-3)          -> kill() of a missing pid reads ESRCH,
+//                                         and a child's kill() of its parent
+//                                         reads EPERM; both read EIO before
+//                                         SYS_POSTNOTE answered errnos.
 //   SIGTERM apart (signal chunk S-2)   -> with SIGINT ignored, raise(SIGINT)
 //                                         must not run the SIGTERM handler, and
 //                                         with SIGINT blocked raise(SIGTERM) must
@@ -48,7 +57,9 @@
 //   pouch-hello-signals: unsupported sigaction returns EINVAL
 //   pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT
 //   pouch-hello-signals: death abort reads WIFSIGNALED SIGABRT  (x4 legs)
+//   pouch-hello-signals: death raise-segv reads WIFSIGNALED SIGSEGV  (x4 legs)
 //   pouch-hello-signals: death term reads WIFSIGNALED SIGTERM
+//   pouch-hello-signals: kill errnos read ESRCH and EPERM
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
@@ -78,14 +89,32 @@ static int die(const char *how) {
     if (!strcmp(how, "segv"))   { volatile int *bad = (volatile int *)0; *bad = 1; }
     if (!strcmp(how, "raise"))  raise(SIGABRT);
     if (!strcmp(how, "killself")) kill(getpid(), SIGABRT);
+    if (!strcmp(how, "raise-segv")) raise(SIGSEGV);
+    if (!strcmp(how, "kill-bus"))   kill(getpid(), SIGBUS);
+    if (!strcmp(how, "raise-ill"))  raise(SIGILL);
+    if (!strcmp(how, "kill0-fpe"))  kill(0, SIGFPE);
     if (!strcmp(how, "wait"))   for (;;) sleep(1);
     return 0;
+}
+
+// CHILD: kill() its parent, which is not its child, and exit 0 only if the
+// refusal reads EPERM. SIGCHLD's note is one the parent ignores by default, so
+// a broken gate would still leave the parent standing to report it.
+static int kill_parent(const char *ppid_arg) {
+    pid_t ppid = (pid_t)atoi(ppid_arg);
+    errno = 0;
+    int rc = kill(ppid, SIGCHLD);
+    if (rc == -1 && errno == EPERM) return 0;
+    printf("pouch-hello-signals: kill(parent) rc=%d errno=%d (want -1 EPERM=%d)\n",
+           rc, errno, EPERM);
+    return 3;
 }
 
 // Each death must reach the parent as the signal the kernel recorded for it.
 // Before gcpark-b every one read WIFEXITED: abort() as 127, the faults as 1.
 // Before patch 0049 raise(SIGABRT) and kill(getpid(), SIGABRT) answered
-// EINVAL and the child ran on to exit 0.
+// EINVAL and the child ran on to exit 0; before patch 0050 so did the four
+// fault signals sent to oneself.
 static int test_deaths(void) {
     static const struct { const char *how; int sig; const char *name; } legs[] = {
         { "abort",  SIGABRT, "SIGABRT" },
@@ -94,6 +123,10 @@ static int test_deaths(void) {
         { "segv",   SIGSEGV, "SIGSEGV" },
         { "raise",  SIGABRT, "SIGABRT" },
         { "killself", SIGABRT, "SIGABRT" },
+        { "raise-segv", SIGSEGV, "SIGSEGV" },
+        { "kill-bus",   SIGBUS,  "SIGBUS"  },
+        { "raise-ill",  SIGILL,  "SIGILL"  },
+        { "kill0-fpe",  SIGFPE,  "SIGFPE"  },
     };
     // Every leg runs and reports, so one regression cannot hide another.
     int bad = 0;
@@ -149,6 +182,41 @@ static int test_term_death(void) {
         return -1;
     }
     printf("pouch-hello-signals: death term reads WIFSIGNALED SIGTERM\n");
+    return 0;
+}
+
+// kill() names its refusals the way POSIX does. The missing pid is far above the
+// live pid counter. The not-a-child case runs in a child, because Pouch has no
+// getppid: the child is handed this process's pid and kills it.
+static int test_errnos(void) {
+    int bad = 0;
+    errno = 0;
+    int rc = kill((pid_t)0x3ffffff0, SIGCHLD);
+    if (rc != -1 || errno != ESRCH) {
+        printf("pouch-hello-signals: kill(missing pid) rc=%d errno=%d (want -1 ESRCH=%d)\n",
+               rc, errno, ESRCH);
+        bad = 1;
+    }
+
+    char ppid[16];
+    snprintf(ppid, sizeof ppid, "%d", (int)getpid());
+    char *cargv[] = { (char *)SELF, (char *)"kill-parent", ppid, NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("pouch-hello-signals: kill-parent: respawn failed errno=%d\n", errno);
+        return -1;
+    }
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("pouch-hello-signals: kill-parent: waitpid failed errno=%d\n", errno);
+        return -1;
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("pouch-hello-signals: kill-parent: status %#x (want exit 0)\n", (unsigned)st);
+        bad = 1;
+    }
+    if (bad) return -1;
+    printf("pouch-hello-signals: kill errnos read ESRCH and EPERM\n");
     return 0;
 }
 
@@ -235,6 +303,7 @@ static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
 
 int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "die")) return die(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "kill-parent")) return kill_parent(argv[2]);
 
     printf("pouch-hello-signals: install handler\n");
     fflush(stdout);
@@ -416,9 +485,11 @@ int main(int argc, char **argv) {
     // verdict, so a failure in one does not hide the other.
     int deaths = test_deaths();
     int term_death = test_term_death();
+    int errnos = test_errnos();
     fflush(stdout);
     if (deaths != 0) return 15;
     if (term_death != 0) return 14;
+    if (errnos != 0) return 16;
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);

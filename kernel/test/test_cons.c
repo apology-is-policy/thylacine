@@ -3294,7 +3294,7 @@ void test_cons_episode_begins_on_sak(void) {
         else if (!name_eq(got.name, NOTE_NAME_SAK)) err = "the note is `sak`";
     }
     if (!err) {
-        if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, false) != -1) err = "a userspace `sak` post is refused";
+        if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, false) != -(int)T_E_INVAL) err = "a userspace `sak` post is refused";
         else if (f.trusted->notes->count != 0u)                          err = "...and queues nothing";
         else if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, true) != 0) err = "the kernel-synthetic post is accepted";
     }

@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**548 owned · 47 unowned · 595 files (92% owned) · ~12860 unswept lines.**
+**548 owned · 47 unowned · 595 files (92% owned) · ~12931 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **78 files, ~38434 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~38473 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 12 | 17 | 2654 |
+| usr/pouch-hello | 12 | 17 | 2725 |
 | kernel | 130 | 13 | 1958 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -132,7 +132,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38434 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1033 |
-| usr/pouch-hello/pouch-hello-signals.c | 426 |
+| usr/pouch-hello/pouch-hello-signals.c | 497 |
 | kernel/include/thylacine/errno.h | 389 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |

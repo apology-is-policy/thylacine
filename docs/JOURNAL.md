@@ -22,6 +22,46 @@ needed the operator.
 
 
 ---
+## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3) (in progress)
+
+- *The two votes.* S-2's land prep left three owned items in OPEN-BUGS. Two
+  needed the operator, asked together in one question with the heritage
+  attached: ARCH 7.6 said `SYS_POSTNOTE` answers errnos while the code answered
+  a bare -1, which Pouch's seam reads as `EIO`, so Pouch's `kill()` of a missing
+  pid reported `EIO` where POSIX says `ESRCH`; and Pouch's `raise(SIGSEGV)` (and
+  `SIGBUS`, `SIGILL`, `SIGFPE`) answered `EINVAL` and the program ran on. The
+  operator chose errnos (vote 9, `dec-2026-10-14-postnote-errnos`) and a
+  self-post of the snare through the self arm over a `brk` immediate per snare
+  (vote 10, `dec-2026-10-14-self-death-snare`). The third item, Go sending no
+  note but `kill`, needed no vote and rides the same chunk because its error
+  mapping depends on vote 9.
+- *What the code had drifted from.* `notes.h` already documented `notes_post`
+  as answering `-EINVAL`/`-EAGAIN`; the code answered -1 to both. Fixing it made
+  two kernel tests that pinned `-1` pin the specific errno instead, and one was
+  renamed (`queue_full_returns_minus1` -> `_eagain`).
+- *Calls made in the chunk, not by the votes.* (1) The gate's refusal is
+  `-EACCES`, not the `-EPERM` ARCH's table named: ERRORS.md forbids `-T_E_PERM`
+  from a handler because it is -1; Pouch's `kill` and the phenotype's `viv_kill`
+  turn it back into `EPERM`. (2) A dead, unreaped child now answers 0 on the
+  native path too, as POSIX counts a zombie a process; the phenotype had
+  answered that way since S-2's audit, and the rule moved into the walk so the
+  two arms cannot drift. (3) The native self-death set includes `snare:abort`,
+  so it equals the phenotype's set exactly (`notes.self_death_snare` compares
+  the two row by row over the death table rather than a list).
+- *The Go port.* `(*Process).signal` wrote every note as a /proc ctl verb; it
+  now posts non-kill notes through a new `syscall.Postnote`, keeping `kill` on
+  ctl for I-26. Its witness needed Go to SEE a death by note, and Go's wait read
+  the raw word (1 for a note death and for `exit(1)` alike), so the packed wait
+  was pulled forward: `Waitmsg.Sig`, `Signaled()`, `ExitCode() == -1`.
+- *A shared fork is read mid-edit.* corona's harness baked
+  ~/projects/go-thylacine between two of my edits and failed on an undefined
+  `waitPacked`; the fork is every checkout's default GOFORK. It was committed
+  local (3471e2a) at once, and the RED runs build the Go sabotages against a
+  private APFS copy.
+- *Found and enqueued:* Pouch's `kill(pid, 0)` existence probe answers `EINVAL`
+  (no native probe arm; an ABI addition, so a vote), and `getppid` is
+  unimplemented in Pouch.
+
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 
 Four operator votes of 2026-10-13 05:00Z (3-6) decide it; no vote is owed. Started after B-2e3 landed (01330b422, committed 14:57Z).

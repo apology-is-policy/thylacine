@@ -23,6 +23,7 @@
 #include <thylacine/notes.h>
 
 #include <thylacine/context.h>      // #96: fp_save_area / fp_restore_area
+#include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
@@ -193,6 +194,29 @@ int notes_death_signal(const char *name) {
         }
     }
     return 0;
+}
+
+// The snare deaths a Proc may choose for itself (operator vote 2026-10-14): the
+// five the phenotype's kill already ends its caller with, so both phenotypes
+// spell a self-directed fault signal one way (notes.self_death_snare pins the
+// two sets equal). align and bti share SIGBUS and SIGILL with bus and ill, and
+// no signal names brk to the phenotype, so those three stay the kernel's.
+static const char *const g_self_death_snares[] = {
+    NOTE_NAME_SNARE_SEGV, NOTE_NAME_SNARE_BUS, NOTE_NAME_SNARE_ILL,
+    NOTE_NAME_SNARE_FPE,  NOTE_NAME_SNARE_ABORT,
+};
+#define NOTE_NUM_SELF_DEATH_SNARES \
+    (sizeof(g_self_death_snares) / sizeof(g_self_death_snares[0]))
+
+// Contract in <thylacine/notes.h>.
+const char *notes_self_death_snare(const char *name) {
+    if (!name) return NULL;
+    for (u32 i = 0; i < NOTE_NUM_SELF_DEATH_SNARES; i++) {
+        if (notes_name_eq(name, g_self_death_snares[i])) {
+            return g_self_death_snares[i];
+        }
+    }
+    return NULL;
 }
 
 // P6 hardening #3a (scripture e45a571 -- docs/ERRORS.md): the `snare:`
@@ -605,9 +629,9 @@ static void notes_drain_caught_note_locked(struct Proc *p, struct NoteQueue *q,
 
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic) {
-    if (!p) return -1;
-    if (!p->notes) return -1;
-    if (!name) return -1;
+    if (!p) return -(int)T_E_INVAL;
+    if (!p->notes) return -(int)T_E_INVAL;
+    if (!name) return -(int)T_E_INVAL;
 
     // P6 hardening #3a (scripture e45a571): the snare:* fault-note
     // prefix is reserved for kernel-synthetic posters. Userspace
@@ -619,22 +643,22 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // below also rejects -- this explicit prefix check future-proofs
     // against snare:* being added to the supported set for kernel-
     // synthetic-only delivery.)
-    if (!synthetic && notes_name_has_snare_prefix(name)) return -1;
+    if (!synthetic && notes_name_has_snare_prefix(name)) return -(int)T_E_INVAL;
 
     // PTY-1b (round-1 F4): the tty:* family is kernel-synthetic-only on the
     // POST axis. Unlike the snare gate above this one is load-bearing TODAY
     // (the tty names are in the supported set below).
-    if (!synthetic && notes_name_has_tty_prefix(name)) return -1;
+    if (!synthetic && notes_name_has_tty_prefix(name)) return -(int)T_E_INVAL;
 
     // IM-1: `sak` is kernel-synthetic-only on the POST axis for the same
     // reason -- a userspace poster could otherwise fake the operator's
     // attention gesture and steer the trusted login authority into a prompt
     // nobody pressed the SAK for. Exact name (no family), so the gate is one
     // comparison.
-    if (!synthetic && notes_name_eq(name, NOTE_NAME_SAK)) return -1;
+    if (!synthetic && notes_name_eq(name, NOTE_NAME_SAK)) return -(int)T_E_INVAL;
 
     // Validate name is in the v1.0 supported set.
-    if (notes_name_to_bit(name) < 0) return -1;
+    if (notes_name_to_bit(name) < 0) return -(int)T_E_INVAL;
 
     u32 sender_pid = sender ? (u32)sender->pid : 0u;
     u64 ts = timer_now_ns();
@@ -710,7 +734,7 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // Full and no coalesce: -EAGAIN.
     if (q->count >= NOTE_QUEUE_DEPTH) {
         spin_unlock(&q->lock);
-        return -1;
+        return -(int)T_E_AGAIN;
     }
 
     // Enqueue at tail.

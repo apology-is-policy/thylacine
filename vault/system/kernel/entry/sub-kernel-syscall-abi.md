@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -886,6 +886,11 @@ Existing numbers whose answers changed, no number or record moved:
   independent random address, and none is drawn while the CSPRNG is unseeded.
 - `SYS_JIT_DESTROY` (102) also takes a sealed region's VA, the base of its
   one alias; an exec alias of a writable region is still refused.
+- `SYS_POSTNOTE` (47) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-14-postnote-errnos]]): `-ESRCH`, `-EACCES` (not the caller's
+  child), `-EAGAIN`, `-EINVAL`, `-EFAULT`; a dead unreaped child answers 0;
+  and a self-post of `snare:segv`/`bus`/`ill`/`fpe`/`abort` does not return
+  ([[dec-2026-10-14-self-death-snare]]).
 - `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set
   ([[dec-2026-10-07-loom-register-errno]]): `-EBADF` for a `loom_fd` or listed
   fd that is not open, `-EFAULT` for an argument array the kernel cannot read,

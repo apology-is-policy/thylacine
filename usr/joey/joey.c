@@ -1086,6 +1086,9 @@ static int do_pouch_hello_smoke(void) {
     //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
     //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);
     //     raise(SIGABRT) and kill(getpid(), SIGABRT) read SIGABRT (S-2)
+    //     and raise/kill(self) of SIGSEGV, SIGBUS, SIGILL and SIGFPE read
+    //     that signal (S-3)
+    //   - kill() refusals read ESRCH and EPERM, not the seam's EIO (S-3)
     //   - SIGTERM rides `term`: its handler runs apart from SIGINT's ignore
     //     and mask, and a child killed by it reads WIFSIGNALED SIGTERM
     // Closes POUCH-DESIGN.md §6.4 / §14 sub-chunk 13b's exit criterion.

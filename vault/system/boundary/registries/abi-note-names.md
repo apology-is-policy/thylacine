@@ -17,7 +17,7 @@ mirrors:
   - "usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch: SIGTERM -> term, POUCH_NOTE_BIT_TERM; raise/kill of self with SIGABRT -> abort()"
   - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
 created: 2026-08-02
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## The surface
 
@@ -112,14 +112,18 @@ unified, and they are not.
 
 - **`SYS_POSTNOTE`** to another Proc requires the caller be the target's
   **parent**. Not owner-identity, not a capability — parenthood. A
-  non-parent gets `-1` whatever the name and whatever it holds.
+  non-parent gets `-EACCES` whatever the name and whatever it holds (a bare
+  `-1` until 2026-10-14, [[dec-2026-10-14-postnote-errnos]]).
 - **`/proc/<pid>/ctl`** uses the I-26 two-axis gate: owner-identity on the
   `0600` ctl file, OR `CAP_HOSTOWNER`, OR `CAP_KILL`.
 
 So a supervisor holding `CAP_KILL` kills through the filesystem, never
-through `SYS_POSTNOTE`. Additionally, `SYS_POSTNOTE` refuses any target not
-`ALIVE` — a post to a zombie has no consumer and would return success
-misleadingly; `wait_pid` is that channel.
+through `SYS_POSTNOTE`. A target past `ALIVE` gets no post: a zombie has no
+consumer. Since 2026-10-14 the call still answers 0 for a dead child of the
+caller, as POSIX and Linux do for a zombie, rather than refusing it; `wait_pid`
+is the channel that reports the death. A `snare:*` name is never posted, but
+a self-post of `snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` or
+`snare:abort` ends the caller with it ([[dec-2026-10-14-self-death-snare]]).
 
 A multi-thread target receiving `kill` is cascade-terminated via
 `proc_group_terminate` rather than refused (the earlier `kill` → `EIO`

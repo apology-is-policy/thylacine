@@ -1620,9 +1620,11 @@ pub unsafe fn t_note_open() -> i64 {
 // required (`name_len` is authoritative). Permission gate: caller
 // must be self OR the target's parent.
 //
-// Returns 0 on success, -1 on bad name / bad target / queue full /
-// permission denied / not-in-supported-set / `snare:`-prefixed name
-// (reserved for kernel-synthetic posters).
+// Returns 0 on success, else a negative errno: -T_E_SRCH no such Proc,
+// -T_E_ACCES not the caller's child, -T_E_AGAIN the target's queue is full,
+// -T_E_INVAL a name no program may post, -T_E_FAULT an unreadable name. A
+// self-post of `snare:segv`/`bus`/`ill`/`fpe`/`abort` does not return: the
+// kernel ends the caller with that snare.
 //
 // Safety: `name_va` must point to `name_len` readable bytes in user-
 // VA memory.

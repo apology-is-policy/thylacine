@@ -25,9 +25,12 @@
 //   8. `wait` (no args) blocks on ALL jobs.
 //   9. `fg %N` blocks to completion + removes the job silently (no Done line).
 //   10. `bg %N` reports the already-running job (status 0), no removal.
-//   11. `kill` error paths (usage / no-such-job / snare:* reserved).
+//   11. `kill` error paths (usage / no-such-job / snare:* reserved), and
+//       $errstr naming the kernel's refusal of our parent: not a child.
 //   12. `kill %N` posts `term` to a LIVE child's pid (the %N -> pid mapping),
-//       and `wait %1` reads the death as $status 143.
+//       and `wait %1` reads the death as $status 143; around it, a note the
+//       kernel refuses reads `not a note a program can send`, and the reaped
+//       pid reads `no such process`.
 //
 //   U-7c-a (note runtime delivery):
 //   13. `on note 'interrupt' { ... }` registers a handler that fires when the
@@ -351,6 +354,19 @@ pub extern "C" fn rs_main() -> i64 {
     if env_ke.status() == 0 {
         return fail("`kill ... snare:term` should be rejected (kernel-reserved)");
     }
+    // 11b. The kernel names each refusal (SYS_POSTNOTE's errnos, S-3), and
+    //      $errstr says which. Our parent is alive and is not our child; the
+    //      note is `child_exit`, which it ignores if the gate ever let it by.
+    let ppid = match parent_pid() {
+        Some(p) => p,
+        None => return fail("kill: could not read our ppid from /proc/<pid>/status"),
+    };
+    let _ = eval_source(&mut env_ke, &alloc::format!("kill {} child_exit", ppid));
+    if env_ke.status() != 1
+        || env_ke.errstr() != alloc::format!("kill: {}: not a child of this shell", ppid)
+    {
+        return fail("kill of a non-child should read `not a child of this shell`");
+    }
 
     // 12. `kill %N` SUCCESS to a LIVE child. Spawn `tr` with a piped stdin we
     //     hold open -> it blocks reading (cannot exit) -> register it as job
@@ -385,12 +401,23 @@ pub extern "C" fn rs_main() -> i64 {
             if env_k.status() != 0 {
                 return fail("kill %1 to a live child should report success");
             }
+            let _ = eval_source(&mut env_k, "kill %1 bogus");
+            if env_k.status() != 1 || env_k.errstr() != "kill: bogus: not a note a program can send" {
+                return fail("kill %1 bogus should read `not a note a program can send`");
+            }
             drop(child.stdin.take());
             if eval_source(&mut env_k, "wait %1").is_err() {
                 return fail("kill: `wait %1` errored");
             }
             if env_k.status() != 143 {
                 return fail("kill %1 should end the child by `term`: $status 128+15");
+            }
+            // Reaped, the pid names no process at all.
+            let _ = eval_source(&mut env_k, &alloc::format!("kill {}", pid));
+            if env_k.status() != 1
+                || env_k.errstr() != alloc::format!("kill: {}: no such process", pid)
+            {
+                return fail("kill of a reaped pid should read `no such process`");
             }
         }
         Err(_) => return fail("kill: could not spawn the `tr` blocker"),
@@ -829,6 +856,18 @@ pub extern "C" fn rs_main() -> i64 {
 
     t_putstr("u-job-test: all OK\n");
     0
+}
+
+// Our parent's pid, from the `ppid:` line of /proc/<our pid>/status.
+fn parent_pid() -> Option<i32> {
+    use libthyla_rs::io::Read as _;
+    let me = unsafe { libthyla_rs::t_getpid() };
+    let mut f = libthyla_rs::fs::File::open(alloc::format!("/proc/{}/status", me).as_str()).ok()?;
+    let mut buf = [0u8; 512];
+    let n = f.read(&mut buf).ok()?;
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    let line = text.lines().find(|l| l.starts_with("ppid:"))?;
+    line["ppid:".len()..].trim().parse::<i32>().ok().filter(|p| *p > 0)
 }
 
 fn fail(tag: &str) -> i64 {

@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -74,6 +74,15 @@ SRV_ACCEPT and SRV_PEER wrappers; it grants itself no authority in userspace.
 eighth class in `NoteClass::ALL`. The runtime does not mask it at startup (it
 masks only `pipe`), so a native program with no handler and no notes reader
 dies of a `term` by the kernel's default, as of an `interrupt`.
+
+**`notes::send` reports the kernel's reason (2026-10-14).** `SYS_POSTNOTE`
+answers errnos ([[dec-2026-10-14-postnote-errnos]]), and `send` maps them
+through `Error::from_syscall_return` instead of flattening every failure to
+`InvalidArgument`: `NoSuchProcess` (a new variant, `T_E_SRCH` = 3),
+`PermissionDenied` (not the caller's child), `WouldBlock` (a full queue),
+`InvalidArgument` (a name no program may post). It still refuses a `snare:`
+name before the kernel sees it: the kernel ENDS a caller that self-posts a
+fault snare ([[dec-2026-10-14-self-death-snare]]), and `send` returns.
 
 
 A native binary does three things and gets a runtime:
