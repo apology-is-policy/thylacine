@@ -121,12 +121,15 @@ stalled). And `verify-kaslr.sh` is the ROADMAP §4.2 exit-criterion gate for
 take an invariant's only runtime witness with it.
 
 **The `EXTINCTION:` prefix is ABI; the message body after it is not — except
-that one gate depends on six of them.** `tools/test-fault.sh` runs eight
-variants (`ALL_VARIANTS`), and its `expected_for` case matches six bodies:
+that one gate depends on seven of them.** `tools/test-fault.sh` runs nine
+variants (`ALL_VARIANTS`), and its `expected_for` case matches seven bodies:
 `EXTINCTION: stack canary mismatch`, `... PTE violates W^X`, `... BTI fault`,
 `... kernel stack overflow` (three provokers), `... recursive kernel fault`,
-and `... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
-guard, not by `extinction()`). The comment directly above it says "Keep the
+`... el1-sync recursion` (printed by `arch/arm64/exception.c`'s recursion
+guard, not by `extinction()`), and, since 2026-10-14, `EXTINCTION: peer chatter:
+this banner must reach the wire whole` (`extinction_peer_chatter`, which
+`whole_line_for` matches as an entire line, so a banner torn by a peer's
+console byte fails it). The comment directly above it says "Keep the
 case below in sync with this" — an instruction to a person, inside the file,
 which is the weakest form of the guarantee ([[dec-2026-08-15-cutover]]).
 Reword one of those messages for clarity and the corresponding
@@ -463,7 +466,7 @@ That is the implementation track's call.
   that this note called it informational for two weeks. `verify-kaslr.sh` is
   I-16's runtime witness.
 - A reworded extinction **message** is an ABI break for `test-fault.sh`'s
-  eight matched variants (six bodies), which is not what "the prefix is the
+  nine matched variants (seven bodies), which is not what "the prefix is the
   ABI" leads a reader to expect.
 - **Settled 2026-09-25** (the item the 2026-09 recount left open): the
   `el1_sync_runaway` body is already in the pinned set. `test-fault.sh` lists
