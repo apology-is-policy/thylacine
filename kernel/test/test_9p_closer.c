@@ -730,6 +730,7 @@ struct xw_obs {
 
 static void xw_run(bool last_out, bool window, struct xw_obs *o) {
     struct wbc w = {0};
+    for (size_t i = 0; i < sizeof(*o); i++) ((u8 *)o)[i] = 0;
     o->status = -1;
     o->base   = closer_now();
     o->opened = wbc_open(&w);
@@ -841,6 +842,10 @@ static void xw_diag(const struct xw_obs *o, int code) {
     uart_puts("\n");
 }
 
+// Static: two observations with their stats copies are too big for the stack
+// the suite runs on.
+static struct xw_obs g_xw_ex, g_xw_lo;
+
 static void xw_expect(const struct xw_obs *o, int code) {
     TEST_ASSERT(o->opened, "a staged file on a closer session");
     TEST_ASSERT(o->started && o->installed, "a child holding it in its handle table");
@@ -858,23 +863,23 @@ static void xw_expect(const struct xw_obs *o, int code) {
 
 void test_p9_closer_kill_in_final_close_keeps_exit(void) {
     TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
-    struct xw_obs ex = {0}, lo = {0};
-    xw_run(false, false, &ex);
-    xw_run(true,  false, &lo);
-    TEST_ASSERT(ex.slept && lo.slept,
+    struct xw_obs *ex = &g_xw_ex, *lo = &g_xw_lo;
+    xw_run(false, false, ex);
+    xw_run(true,  false, lo);
+    TEST_ASSERT(ex->slept && lo->slept,
         "premise: each close waited for its server until the kill");
-    xw_expect(&ex, 5);                           // exits_code(5)
-    xw_expect(&lo, 0);                           // the SYS_THREAD_EXIT convention
+    xw_expect(ex, 5);                            // exits_code(5)
+    xw_expect(lo, 0);                            // the SYS_THREAD_EXIT convention
 }
 
 void test_p9_closer_kill_at_final_close_start_forces_it(void) {
     TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
-    struct xw_obs ex = {0}, lo = {0};
-    xw_run(false, true, &ex);
-    xw_run(true,  true, &lo);
-    TEST_ASSERT(ex.hook_ran && lo.hook_ran, "premise: each kill landed in the window");
-    xw_expect(&ex, 5);
-    xw_expect(&lo, 0);
+    struct xw_obs *ex = &g_xw_ex, *lo = &g_xw_lo;
+    xw_run(false, true, ex);
+    xw_run(true,  true, lo);
+    TEST_ASSERT(ex->hook_ran && lo->hook_ran, "premise: each kill landed in the window");
+    xw_expect(ex, 5);
+    xw_expect(lo, 0);
 }
 
 // A Loom op drives the fid straight to the wire, past every write-behind path,
