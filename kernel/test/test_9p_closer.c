@@ -30,6 +30,8 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/thread.h>
+
+#include "../../arch/arm64/uart.h"
 #include <thylacine/types.h>
 
 void test_p9_closer_dying_close_delivers_tclunk(void);
@@ -713,11 +715,23 @@ struct xw_obs {
     bool opened, started, installed, slept, forced, hook_ran, reaped;
     int  status;
     u32  before, nwrite, write_len, write_sum;
+    // What the server and the pool showed when the waits for the clunk and the
+    // quiet pool ended, and how long each took: on a mismatch xw_expect prints
+    // them, and a second, longer look tells a slow closer from a stuck one.
+    bool clunked, quiet;
+    u32  nclunk, nmsg;
+    u64  clunk_wait_ns, quiet_wait_ns;
+    struct p9_closer_stats base, at;
+    bool late_clunked, late_quiet;
+    u32  late_nwrite;
+    u64  late_wait_ns;
+    struct p9_closer_stats late;
 };
 
 static void xw_run(bool last_out, bool window, struct xw_obs *o) {
     struct wbc w = {0};
     o->status = -1;
+    o->base   = closer_now();
     o->opened = wbc_open(&w);
     if (o->opened) {
         g_t1_spoor    = w.f;                     // the child's handle table adopts it
@@ -759,13 +773,72 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         }
         proc_exit_close_test_set_window_hook(NULL);
         if (o->started && !o->reaped) return;
+        u64 t0 = timer_now_ns();
         TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
+        u64 t1 = timer_now_ns();
         TEST_YIELD_UNTIL_SOFT(closer_quiet());
+        u64 t2 = timer_now_ns();
+        o->clunk_wait_ns = t1 - t0;
+        o->quiet_wait_ns = t2 - t1;
+        o->clunked = srv_clunked(&g_rec_a, w.fid);
+        o->quiet   = closer_quiet();
+        o->at      = closer_now();
+        o->nclunk  = __atomic_load_n(&g_rec_a.nclunk, __ATOMIC_ACQUIRE);
+        o->nmsg    = g_rec_a.nmsg;
     }
-    o->nwrite    = g_rec_a.nwrite;
+    o->nwrite    = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
     o->write_len = g_rec_a.write_len;
     o->write_sum = g_rec_a.write_sum;
+    if (o->opened && (o->nwrite != 1 || !o->clunked || !o->quiet)) {
+        // The second look: up to ten budgets more for the write, the clunk and
+        // a quiet pool. A closer that is only slow gets there; a lost one never.
+        u64 t3 = timer_now_ns(), stop = t3 + 10ull * TEST_YIELD_BUDGET_NS;
+        while (!(__atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE) >= 1 &&
+                 srv_clunked(&g_rec_a, w.fid) && closer_quiet()) &&
+               timer_now_ns() < stop)
+            sched();
+        o->late_wait_ns = timer_now_ns() - t3;
+        o->late_nwrite  = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
+        o->late_clunked = srv_clunked(&g_rec_a, w.fid);
+        o->late_quiet   = closer_quiet();
+        o->late         = closer_now();
+    }
     wbc_end(&w);
+}
+
+static void xw_put(const char *k, u64 v) {
+    uart_puts(" ");
+    uart_puts(k);
+    uart_puts("=");
+    uart_putdec(v);
+}
+
+static void xw_diag(const struct xw_obs *o, int code) {
+    uart_puts("    xw-diag code=");
+    uart_putdec((u64)code);
+    xw_put("nwrite", o->nwrite);       xw_put("write_len", o->write_len);
+    xw_put("nclunk", o->nclunk);       xw_put("nmsg", o->nmsg);
+    xw_put("clunked", o->clunked);     xw_put("quiet", o->quiet);
+    xw_put("clunk_wait_ms", o->clunk_wait_ns / 1000000ull);
+    xw_put("quiet_wait_ms", o->quiet_wait_ns / 1000000ull);
+    xw_put("jobs+", o->at.jobs - o->base.jobs);
+    xw_put("job_errors+", o->at.job_errors - o->base.job_errors);
+    xw_put("dropped+", o->at.dropped - o->base.dropped);
+    xw_put("refused+", o->at.refused - o->base.refused);
+    xw_put("sent+", o->at.sent - o->base.sent);
+    xw_put("threads", o->at.threads);  xw_put("idle", o->at.idle);
+    xw_put("idle_parked", o->at.idle_parked);
+    xw_put("retired", o->at.retired);  xw_put("runq", o->at.runq);
+    xw_put("pending", o->at.pending);
+    uart_puts("\n    xw-diag late:");
+    xw_put("wait_ms", o->late_wait_ns / 1000000ull);
+    xw_put("nwrite", o->late_nwrite);  xw_put("clunked", o->late_clunked);
+    xw_put("quiet", o->late_quiet);
+    xw_put("jobs+", o->late.jobs - o->base.jobs);
+    xw_put("job_errors+", o->late.job_errors - o->base.job_errors);
+    xw_put("dropped+", o->late.dropped - o->base.dropped);
+    xw_put("pending", o->late.pending);
+    uart_puts("\n");
 }
 
 static void xw_expect(const struct xw_obs *o, int code) {
@@ -777,6 +850,7 @@ static void xw_expect(const struct xw_obs *o, int code) {
     TEST_EXPECT_NE(o->status, WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
         "the kill replaced the exit's status");
     TEST_EXPECT_EQ(o->status, WAIT_STATUS_EXITED(code), "the exit's own status stands");
+    if (o->nwrite != 1 || !o->clunked || !o->quiet) xw_diag(o, code);
     TEST_EXPECT_EQ((u64)o->nwrite, 1ull, "the closer wrote the run");
     TEST_EXPECT_EQ((u64)o->write_len, (u64)WBC_LEN, "all of it");
     TEST_EXPECT_EQ((u64)o->write_sum, (u64)wbc_sum(), "the bytes write() took");
