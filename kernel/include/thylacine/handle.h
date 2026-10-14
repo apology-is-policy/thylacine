@@ -46,6 +46,14 @@ struct Proc;
 // all-free at alloc; handle_close zeros the slot on release).
 #define HANDLE_MAGIC 0x48414e444c45BAD2ULL    // 'HANDLE' | 0xBAD2
 
+// HANDLE_RESERVED -- a number a call holds and has not filled yet (Linux's
+// get_unused_fd_flags). Not free: no scan and no dup3 takes it. Not live: get,
+// close, replace, the flag setters, close-on-exec, the fork copy and the count
+// pass it by. Only the reserving call fills it or returns it, so a failed call
+// never publishes a descriptor and never unwinds another thread's
+// (vault dec-2026-10-14-descriptor-slot-reservation).
+#define HANDLE_RESERVED 0x5245534552564544ULL // 'RESERVED'
+
 // Per ARCH §18.2. Eight kinds. Order matters — _Static_asserts pin the
 // enum values to specific bits in the transferable + hw masks below.
 enum kobj_kind {
@@ -203,14 +211,18 @@ struct HandleTable {
     // peer threads that race over the slots, so it takes the same protection.
     spin_lock_t   lock;
     u32           _pad_lock;
+    // Objects ever installed at a number of this table (under `lock`). A
+    // reservation is not an install, so a call that fails after reserving
+    // leaves it unchanged: the tests' witness that nothing was published.
+    u64           installs;
     u64           cloexec[HANDLE_CLOEXEC_WORDS];
     struct Handle slots[PROC_HANDLE_MAX];
 };
 
 _Static_assert(sizeof(struct HandleTable) ==
-                   8 + 8 * HANDLE_CLOEXEC_WORDS + 24 * PROC_HANDLE_MAX,
-               "HandleTable size pinned at 8 (lock + pad) + the cloexec bitmap "
-               "+ PROC_HANDLE_MAX * sizeof(Handle)");
+                   16 + 8 * HANDLE_CLOEXEC_WORDS + 24 * PROC_HANDLE_MAX,
+               "HandleTable size pinned at 8 (lock + pad) + the install count "
+               "+ the cloexec bitmap + PROC_HANDLE_MAX * sizeof(Handle)");
 _Static_assert(HANDLE_CLOEXEC_WORDS * 64 >= PROC_HANDLE_MAX,
                "the cloexec bitmap must cover every slot -- a short bitmap "
                "would silently drop the flag on the high slots");
@@ -249,6 +261,25 @@ void handle_table_free(struct HandleTable *t);
 // Maps to specs/handles.tla::HandleAlloc(p, k, granted).
 hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
                     rights_t rights, void *obj);
+
+// handle_alloc with the close-on-exec bit set in the same hold (O_CLOEXEC).
+hidx_t handle_alloc_cloexec(struct Proc *p, enum kobj_kind kind,
+                            rights_t rights, void *obj, bool cloexec);
+
+// The three-step life of a descriptor whose call can still fail after it knows
+// its number (a copy-out, a row keyed on the number). handle_reserve takes the
+// lowest free index >= from (-1 when full). handle_install_reserved fills it and
+// cannot fail: its arguments obey handle_alloc's contract, and a bad one, or a
+// slot that is not this call's reservation, is a kernel bug and extincts.
+// handle_dup_into_reserved fills it with a dup of `src` under handle_dup_posix's
+// rules; -1, with the reservation kept, when src is not live or may not be
+// duplicated. handle_unreserve returns an unfilled reservation.
+hidx_t handle_reserve(struct Proc *p, hidx_t from);
+void   handle_install_reserved(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                               rights_t rights, void *obj, bool cloexec);
+int    handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec);
+void   handle_unreserve(struct Proc *p, hidx_t h);
+bool   handle_is_reserved(struct Proc *p, hidx_t h);
 
 // Release a handle. Returns 0 on success, -1 if the slot is empty
 // (already-closed or never-allocated) or out-of-range. At v1.0 P2-Fc
@@ -463,7 +494,9 @@ hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
 // Returns `new_h` on success, -1 on: either index out of range, old == new_h
 // (refused rather than made a no-op -- the caller's own EINVAL should have
 // caught it, and a primitive that cannot corrupt beats one that happens not
-// to), an empty `old`, or a source the alias gate rejects.
+// to), an empty `old`, or a source the alias gate rejects; HANDLE_DUP_TO_BUSY
+// when `new_h` is another call's reservation (Linux's EBUSY).
+#define HANDLE_DUP_TO_BUSY (-2)
 hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
 
 // #151: read / write a slot's close-on-exec flag. Returns 0 or 1 (get) and 0
@@ -509,6 +542,9 @@ bool kobj_kind_is_srv(enum kobj_kind k);
 // Per-Proc count of in-use handle slots (linear scan; for tests +
 // diagnostics, not perf-critical).
 int handle_table_count(const struct HandleTable *t);
+
+// p's table's install count (struct HandleTable.installs).
+u64 handle_table_installs(struct Proc *p);
 
 // Diagnostics — cumulative cache statistics.
 u64 handle_total_allocated(void);

@@ -4177,3 +4177,66 @@ void test_stalk_open_create_containment_and_denials(void) {
                    "neither symlink row created anything");
     ocp_teardown(p);
 }
+
+// The finish policy the close-by-number sweep moved mkdirat, fchmodat and
+// openat onto (vault dec-2026-10-14-descriptor-slot-reservation): a kept Spoor
+// installs nothing, O_DIRECTORY refuses a non-directory before any install,
+// and close-on-exec lands in the install itself.
+extern s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
+                                    u64 omode, bool create, u64 perm, bool cloexec,
+                                    bool dir_required, struct Spoor **keep);
+
+void test_stalk_open_finish_policy(void);
+void test_stalk_open_finish_policy(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc(NULL);
+    TEST_ASSERT(p != NULL, "proc");
+
+    // A create that keeps its Spoor (mkdirat's shape): made, nothing installed.
+    struct Spoor *kept = NULL;
+    u64 i0      = handle_table_installs(p);
+    s64 kc      = sys_open_finish_for_test(p, "/a/kept", 7, 1 /*OWRITE*/, true,
+                                           0644, false, false, &kept);
+    u64 i_keep  = handle_table_installs(p) - i0;
+    u32 creates = (u32)g_fix_create_calls;
+    bool have   = kept != NULL;
+    if (kept) spoor_clunk(kept);
+
+    // An open that keeps its Spoor (fchmodat's shape).
+    struct Spoor *ko = NULL;
+    u64 i1     = handle_table_installs(p);
+    s64 kr     = sys_open_finish_for_test(p, "/a", 2, 0, false, 0, false, false, &ko);
+    u64 i_ko   = handle_table_installs(p) - i1;
+    bool have_o = ko != NULL;
+    if (ko) spoor_clunk(ko);
+
+    // O_DIRECTORY on the file just made: refused, nothing installed. The
+    // control, one variable away: the directory opens and installs once.
+    u64 i2     = handle_table_installs(p);
+    s64 nd     = sys_open_finish_for_test(p, "/a/kept", 7, 0, false, 0, false, true, NULL);
+    u64 i_nd   = handle_table_installs(p) - i2;
+    s64 dd     = sys_open_finish_for_test(p, "/a", 2, 0, false, 0, false, true, NULL);
+    u64 i_dd   = handle_table_installs(p) - i2;
+
+    // close-on-exec from the policy, on both cores.
+    s64 cx     = sys_open_finish_for_test(p, "/a", 2, 0, false, 0, true, false, NULL);
+    int cx_bit = cx >= 0 ? handle_get_cloexec(p, (hidx_t)cx) : -1;
+    s64 cc     = sys_open_finish_for_test(p, "/a/kept2", 8, 1, true, 0644, true, false, NULL);
+    int cc_bit = cc >= 0 ? handle_get_cloexec(p, (hidx_t)cc) : -1;
+
+    ocp_teardown(p);
+
+    TEST_EXPECT_EQ(kc, (s64)0, "a kept create answers 0");
+    TEST_ASSERT(have, "and hands back the Spoor");
+    TEST_EXPECT_EQ(creates, (u32)1, "the leaf was created");
+    TEST_EXPECT_EQ(i_keep, (u64)0, "and no descriptor was installed");
+    TEST_EXPECT_EQ(kr, (s64)0, "a kept open answers 0");
+    TEST_ASSERT(have_o, "and hands back the Spoor");
+    TEST_EXPECT_EQ(i_ko, (u64)0, "and installs nothing");
+    TEST_EXPECT_EQ(nd, -(s64)T_E_NOTDIR, "O_DIRECTORY refuses a file");
+    TEST_EXPECT_EQ(i_nd, (u64)0, "before anything is installed");
+    TEST_ASSERT(dd >= 0, "O_DIRECTORY opens a directory");
+    TEST_EXPECT_EQ(i_dd, (u64)1, "with one install");
+    TEST_EXPECT_EQ(cx_bit, 1, "an open's close-on-exec is set at install");
+    TEST_EXPECT_EQ(cc_bit, 1, "a create's close-on-exec is set at install");
+}

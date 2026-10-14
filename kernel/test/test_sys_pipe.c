@@ -691,3 +691,43 @@ void test_sys_pipe_fstat_reports_fifo(void) {
     handle_put(&h_wr);
     drop_test_proc(p);
 }
+
+// A pipe that cannot get both numbers publishes neither: both are reserved
+// before either end is installed. The by-number unwind this replaced installed
+// the read end, then closed it -- one install, and a window in which a peer
+// thread could reuse the number and have its own file closed.
+void test_sys_pipe_full_table_publishes_nothing(void);
+void test_sys_pipe_full_table_publishes_nothing(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    while (handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL) >= 0) {}
+    int top_closed = handle_close(p, PROC_HANDLE_MAX - 1);
+
+    u64    i0 = handle_table_installs(p);
+    hidx_t rd = -1, wr = -1;
+    int    one     = sys_pipe_for_proc(p, &rd, &wr);
+    u64    i_one   = handle_table_installs(p) - i0;
+    bool   top_res = handle_is_reserved(p, PROC_HANDLE_MAX - 1);
+    hidx_t top     = handle_reserve(p, 0);
+    if (top >= 0) handle_unreserve(p, top);
+
+    int    mid_closed = handle_close(p, 7);
+    u64    i1    = handle_table_installs(p);
+    int    two   = sys_pipe_for_proc(p, &rd, &wr);
+    u64    i_two = handle_table_installs(p) - i1;
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(top_closed, 0, "the top slot was freed");
+    TEST_EXPECT_EQ(one, -1, "one free number is not enough for a pipe");
+    TEST_EXPECT_EQ(i_one, (u64)0, "the refused pipe installed nothing");
+    TEST_ASSERT(!top_res, "and left no reservation behind");
+    TEST_EXPECT_EQ((int)top, PROC_HANDLE_MAX - 1, "the free number is still free");
+    TEST_EXPECT_EQ(mid_closed, 0, "a second number was freed");
+    TEST_EXPECT_EQ(two, 0, "two free numbers make a pipe");
+    TEST_EXPECT_EQ((int)rd, 7, "the read end takes the lower number");
+    TEST_EXPECT_EQ((int)wr, PROC_HANDLE_MAX - 1, "the write end the higher");
+    TEST_EXPECT_EQ(i_two, (u64)2, "two installs, one per end");
+}

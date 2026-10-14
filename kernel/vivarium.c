@@ -1933,6 +1933,23 @@ bool viv_socktab_has_room(struct viv_socktab *tab) {
     return false;
 }
 
+// The close hook's drop. A number another call holds RESERVED carries that
+// call's own row (socket, accept, the dup alias claim before they install), and
+// the close will answer EBADF, so the row stays. Asked under the table lock:
+// a call that reserves after the question cannot claim until the drop is done.
+// Nesting: the socket table lock, then the handle table's.
+void viv_socktab_drop_closing(struct viv_socktab *tab, struct Proc *p, s32 fd) {
+    if (!tab) return;
+    spin_lock(&tab->lock);
+    if (fd >= 0 && handle_is_reserved(p, (hidx_t)fd)) {
+        spin_unlock(&tab->lock);
+        return;
+    }
+    struct Spoor *ready = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
+    spin_unlock(&tab->lock);
+    spoor_clunk(ready);
+}
+
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
     if (!tab) return;
     spin_lock(&tab->lock);

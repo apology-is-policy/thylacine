@@ -21,7 +21,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Session registry factory ABI
 
@@ -943,3 +943,21 @@ does: only x0 changes.
 **Width audit round 2 append (2026-10-14).** The fcntl arm and `viv_sock_row`
 convert the descriptor through `(u32)` before `hidx_t`, so a high half above a
 bounded low half is dropped by a defined conversion.
+
+## Descriptor numbers in a failed call (2026-10-14, vote 10)
+
+No answer a native caller sees changed. A failed pipe never installs a
+descriptor, and SYS_PIPE answers -1 exactly as before. For the Linux
+phenotype, four answers follow Linux more closely:
+- dup3 onto a number another thread's call holds reserved answers EBUSY
+  (Linux's own dup2/dup3 errno for that race).
+- socket and accept take their number before anything else that can fail,
+  so a full table answers EMFILE: before the /net open, and before accept
+  blocks. accept used to fail that way only after a peer had connected, and
+  socket answered a bare -1.
+- fchmodat and mkdirat no longer take a descriptor, so a full table does not
+  refuse them.
+- close of a reserved number answers EBADF, as it does on Linux.
+
+The rationale is in [[dec-2026-10-14-descriptor-slot-reservation]].
+

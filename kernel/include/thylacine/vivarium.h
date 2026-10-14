@@ -1523,6 +1523,10 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
 // row's cached readiness Spoor, if any, is clunked after the unlock, so this
 // may block on that Spoor's Tclunk.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
+// close()'s hook: viv_socktab_drop, except while `fd` is another call's
+// reservation (that call's own row).
+struct Proc;
+void viv_socktab_drop_closing(struct viv_socktab *tab, struct Proc *p, s32 fd);
 
 // The readiness cache (NP-5). ready_get snapshots `fd`'s row into `*out` (may
 // be NULL) and returns true iff the row exists; `*ready_out` gets the cached

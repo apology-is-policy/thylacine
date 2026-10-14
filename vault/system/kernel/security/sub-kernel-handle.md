@@ -11,9 +11,9 @@ guarded-by: []
 validated-by: [prose, gate-smp]
 locks: []
 abis: []
-design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla"]
+design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -351,6 +351,51 @@ after releasing, making a double put a no-op.
 The one rollback: if `handle_dup`'s install fails on a full table, the
 acquired reference is released **outside** the lock.
 
+## Reserved numbers (2026-10-14, vote 10)
+
+A slot has a third state beside free (magic 0) and live (`HANDLE_MAGIC`):
+**reserved** (`HANDLE_RESERVED`), a number a call holds and has not filled.
+It is Linux's `get_unused_fd_flags` -> `fd_install` / `put_unused_fd` split
+([[dec-2026-10-14-descriptor-slot-reservation]]), for a call that can still
+fail after it knows its number: a copy-out of the number (pipe2), a peer
+address copy-out (accept), a socket-table row keyed on the number (socket,
+accept, the dup alias).
+
+- `handle_reserve(p, from)` takes the lowest free index at or above `from`.
+- `handle_install_reserved` fills it and cannot fail. A bad argument, or a
+  slot that is not reserved, is a kernel bug and extincts: no other path
+  writes a reserved slot, so the reserving call has lost its own number.
+- `handle_dup_into_reserved` fills it with a dup under `handle_dup_posix`'s
+  rules. A refused source answers -1 and leaves the reservation in place for
+  its caller to return.
+- `handle_unreserve` returns it.
+
+The state is not free: `handle_install_locked`'s scan, `handle_reserve` and
+the fork copy's destination check all want magic 0. It is not live: get,
+close, replace, the flag setters, close-on-exec, the fork copy's source walk
+and `handle_table_count` all want `HANDLE_MAGIC`. `handle_dup_to` onto a
+reserved number returns `HANDLE_DUP_TO_BUSY`, which the phenotype's dup3
+answers EBUSY (Linux's own answer). So a failed call publishes nothing, and
+its unwind touches only a number no other thread could see.
+`handle_table_free` has no reserved arm: a reservation lives inside one
+syscall of a live thread. The table is freed only when no live thread remains
+(the premise every handle operation already rests on, and the one any
+cross-Proc accessor would break).
+
+`handle_alloc_cloexec` is the fused form for a call with nothing left to fail
+(O_CLOEXEC set in the install's own hold). `struct HandleTable.installs`
+counts objects ever installed (`handle_table_installs`). A reservation is not
+an install, which is how the tests show that a failed call published nothing.
+
+`specs/handle_slots.tla` models the numbers, which `handles.tla` does not.
+Its three buggy configurations each find a counterexample:
+- an unwind by number closes a peer's object;
+- a failed call's object was visible;
+- dup3 overwrites a reservation.
+
+Lock nesting added here: the vivarium's socket-table lock, then this table's
+lock (`viv_socktab_drop_closing` asks `handle_is_reserved` under it).
+
 ## Performance
 
 Linear scan for a free index — **O(1024)** worst case on every fd creation,
@@ -440,4 +485,5 @@ sides), are stated Phase-5+ items.
 [[chg-2026-08-02-authority-sweep]] → #91-follow (`34ff46df`, 2026-08-27): the
 per-open-file nonblocking flag → the socktab-across-images audit close
 (`4e694e5f`, 2026-09-02): the hooked fork copy → NP-5 (2026-09-29):
-`handle_snapshot_spoor`, the snapshot for a Spoor held outside the table.
+`handle_snapshot_spoor`, the snapshot for a Spoor held outside the table →
+the close-by-number sweep (2026-10-14, vote 10): reserved numbers.

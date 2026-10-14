@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Native ceiling 127
 
@@ -938,3 +938,35 @@ when the native handler returns, not before: a debugger reading a Linux
 guest's registers while that thread is stopped inside a T1 call (blocked in
 read, say) sees the native number in x8 and the narrowed words in x1-x5. Every
 return to EL0 sees the guest's own.
+
+## Every phenotype unwind returns a reservation (2026-10-14, vote 10)
+
+The T2 shells that could fail after their descriptor existed now reserve the
+number first ([[sub-kernel-handle]]).
+- **socket**: reserve, the private /net open, N read off the Spoor
+  (`spoor_read_on`), the FRESH row on the reserved number, the nonblock bit
+  and the netd verb on the Spoor, then install with SOCK_CLOEXEC in the same
+  hold. `viv_sock_sync_nonblock_fd` is gone.
+- **accept**: reserves before it blocks (Linux's order), so a full table
+  never hangs up on a connected peer. It claims the CONNECTED row and copies
+  out the peer address before the install. A fault drops the row keyed on its
+  own number, returns the number, and clunks the data Spoor, which frees M.
+- **dup and F_DUPFD**: reserve, copy the alias row onto the number, then
+  `handle_dup_into_reserved`. A refused dup drops that row and returns the
+  number.
+- **pipe2**: copies the two numbers out between the reservation and the
+  install.
+- **openat** (both arms): installs close-on-exec in the install's hold, and
+  checks O_DIRECTORY before any install.
+- **mkdirat and fchmodat**: never take a descriptor. fchmodat's old shape
+  looked its number up a second time for the wstat, so a peer that closed and
+  reused the number in between would have had its own file's mode changed.
+- **dup3** answers EBUSY onto a reserved number.
+- **close()**: its hook now calls `viv_socktab_drop_closing`, which keeps the
+  row while the number is reserved: that row is the reserving call's own, and
+  the close answers EBADF. The question is asked under the socket-table lock,
+  so a call that reserves after it cannot claim its row until the drop is done.
+  The witness is `vivarium.close_keeps_a_reserved_row`, through the real
+  dispatcher. `vivarium.unwinds_publish_nothing` drives each failure past a
+  reservation.
+

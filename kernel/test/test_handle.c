@@ -728,3 +728,116 @@ void test_handles_dup_to(void) {
 
     test_proc_drop(p);
 }
+
+// The reserved slot (vault dec-2026-10-14-descriptor-slot-reservation): not
+// free, not live, and only its own call fills or returns it. Every operation
+// that could otherwise reach the number is driven against it.
+void test_handles_reservation(void);
+void test_handles_reservation(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+    struct Proc *child = test_proc_make();
+    if (!child) { test_proc_drop(p); TEST_ASSERT(false, "child proc"); }
+
+    hidx_t src = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    u64    i0  = handle_table_installs(p);
+    int    n0  = handle_table_count(p->handles);
+
+    // (1) A reservation takes the lowest free number and publishes nothing.
+    hidx_t r = handle_reserve(p, 0);
+    bool   r_is   = handle_is_reserved(p, r);
+    u64    i_res  = handle_table_installs(p) - i0;
+    int    n_res  = handle_table_count(p->handles) - n0;
+    struct Handle got;
+    int    get_rc   = handle_get(p, r, &got);
+    int    close_rc = handle_close(p, r);
+    int    setcx_rc = handle_set_cloexec(p, r, true);
+    int    getcx_rc = handle_get_cloexec(p, r);
+    int    setnb_rc = handle_set_nonblock(p, r, true);
+    bool   still_after_ops = handle_is_reserved(p, r);
+
+    // (2) Nothing that looks for a free slot takes it.
+    hidx_t a      = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    hidx_t r2     = handle_reserve(p, r);
+    hidx_t dpos   = handle_dup_posix(p, src, r, false);
+    hidx_t dto    = handle_dup_to(p, src, r, false);
+    bool   still_after_scans = handle_is_reserved(p, r);
+
+    // (3) The fork copy and close-on-exec pass it by.
+    int  copy_rc  = handle_table_copy_into(child, p);
+    bool child_r  = handle_is_reserved(child, r);
+    int  child_get = handle_get(child, r, &got);
+    if (child_get == 0) handle_put(&got);
+    int  coe_rc   = handle_close_on_exec(p);
+    bool still_after_coe = handle_is_reserved(p, r);
+
+    // (4) The reserving call fills it: live, its kind, close-on-exec from the
+    // argument, and the install counted once.
+    u64 i_pre = handle_table_installs(p);
+    handle_install_reserved(p, r, KOBJ_THREAD, RIGHT_READ, NULL, /*cloexec=*/true);
+    int  fill_get = handle_get(p, r, &got);
+    int  fill_kind = fill_get == 0 ? (int)got.kind : -1;
+    if (fill_get == 0) handle_put(&got);
+    int  fill_cx  = handle_get_cloexec(p, r);
+    u64  i_fill   = handle_table_installs(p) - i_pre;
+    bool fill_res = handle_is_reserved(p, r);
+
+    // (5) A returned reservation is free again, and returning it publishes nothing.
+    u64  i_pre2 = handle_table_installs(p);
+    handle_unreserve(p, r2);
+    bool r2_res = handle_is_reserved(p, r2);
+    hidx_t back = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    u64  i_unres = handle_table_installs(p) - i_pre2;   // the alloc's one
+
+    // (6) A dup fills a reservation; a refused dup keeps it.
+    hidx_t d = handle_reserve(p, 0);
+    int  dup_rc  = handle_dup_into_reserved(p, src, d, /*cloexec=*/true);
+    int  dup_get = handle_get(p, d, &got);
+    int  dup_kind = dup_get == 0 ? (int)got.kind : -1;
+    rights_t dup_rights = dup_get == 0 ? got.rights : RIGHT_NONE;
+    if (dup_get == 0) handle_put(&got);
+    int  dup_cx = handle_get_cloexec(p, d);
+    hidx_t e = handle_reserve(p, 0);
+    int  bad_rc  = handle_dup_into_reserved(p, 60, e, false);   // 60: never opened
+    bool e_kept  = handle_is_reserved(p, e);
+    handle_unreserve(p, e);
+
+    test_proc_drop(child);
+    test_proc_drop(p);
+
+    TEST_EXPECT_EQ((int)r, 1, "the reservation takes the lowest free number");
+    TEST_ASSERT(r_is, "and the slot reads reserved");
+    TEST_EXPECT_EQ(i_res, (u64)0, "a reservation is not an install");
+    TEST_EXPECT_EQ(n_res, 0, "nor a live handle");
+    TEST_EXPECT_EQ(get_rc, -1, "get refuses a reserved number");
+    TEST_EXPECT_EQ(close_rc, -1, "close refuses it (Linux: EBADF)");
+    TEST_EXPECT_EQ(setcx_rc, -1, "the cloexec setter refuses it");
+    TEST_EXPECT_EQ(getcx_rc, -1, "the cloexec getter refuses it");
+    TEST_EXPECT_EQ(setnb_rc, -1, "the nonblock setter refuses it");
+    TEST_ASSERT(still_after_ops, "and none of them disturbed it");
+    TEST_EXPECT_EQ((int)a, 2, "an alloc skips the reserved number");
+    TEST_EXPECT_EQ((int)r2, 3, "a second reservation skips it");
+    TEST_EXPECT_EQ((int)dpos, 4, "a dup from min skips it");
+    TEST_EXPECT_EQ((int)dto, (int)HANDLE_DUP_TO_BUSY, "dup3 onto it is BUSY");
+    TEST_ASSERT(still_after_scans, "and it is still reserved");
+    TEST_ASSERT(copy_rc >= 0, "the fork copy ran");
+    TEST_ASSERT(!child_r, "the fork copy does not carry a reservation");
+    TEST_EXPECT_EQ(child_get, -1, "the child has nothing at that number");
+    TEST_ASSERT(coe_rc >= 0, "close-on-exec ran");
+    TEST_ASSERT(still_after_coe, "close-on-exec passed it by");
+    TEST_EXPECT_EQ(fill_get, 0, "the filled reservation is live");
+    TEST_EXPECT_EQ(fill_kind, (int)KOBJ_THREAD, "with the kind installed");
+    TEST_EXPECT_EQ(fill_cx, 1, "and close-on-exec set in the install");
+    TEST_EXPECT_EQ(i_fill, (u64)1, "the fill is one install");
+    TEST_ASSERT(!fill_res, "and the slot is no longer reserved");
+    TEST_ASSERT(!r2_res, "a returned reservation is free");
+    TEST_EXPECT_EQ((int)back, 3, "and the next alloc takes it");
+    TEST_EXPECT_EQ(i_unres, (u64)1, "returning it published nothing");
+    TEST_EXPECT_EQ(dup_rc, 0, "a dup fills a reservation");
+    TEST_EXPECT_EQ(dup_kind, (int)KOBJ_PROCESS, "with the source's object");
+    TEST_EXPECT_EQ((u64)dup_rights, (u64)(RIGHT_READ | RIGHT_TRANSFER),
+                   "rights verbatim (I-6)");
+    TEST_EXPECT_EQ(dup_cx, 1, "close-on-exec from the argument");
+    TEST_EXPECT_EQ(bad_rc, -1, "a dup of a closed number is refused");
+    TEST_ASSERT(e_kept, "and the reservation is kept for its caller to return");
+}

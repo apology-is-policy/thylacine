@@ -3105,3 +3105,21 @@ actual-C fixtures. Run tools/check-loom-service-index.py --logs <fresh-dir>.
 No claim of C weak-memory correctness, allocator behavior, wire/parser safety,
 whole-ring close queue progress or multi-scope fairness from this finite model.
 Those require separate source review, native witnesses and runtime gates.
+
+## handle_slots.tla -- descriptor numbers under a call that can fail after it knows its number (2026-10-14, vote 10)
+
+| Spec | Code | Notes |
+|---|---|---|
+| `CTake` (correct arm) | `kernel/handle.c::handle_reserve` | the lowest free number becomes RESERVED |
+| `CInstall` | `handle_install_reserved`, `handle_dup_into_reserved` | fills only this call's reservation |
+| `CUnreserve` | `handle_unreserve` | a failed call returns its number |
+| `PClose` | `handle_close` | a reserved number is not live: EBADF |
+| `PAlloc` | `handle_install_locked`'s scan, `handle_reserve` | both want magic 0 |
+| `PDup3` | `handle_dup_to` | a reserved target answers `HANDLE_DUP_TO_BUSY` (the phenotype's EBUSY) |
+| `CTake` + `CFailByNumber` (BUGGY_CLOSE_BY_NUMBER) | the twelve pre-sweep sites | `handle_slots_buggy_close_by_number.cfg` (NoForeignClose) and `handle_slots_buggy_published.cfg` (FailedPublishesNothing) |
+| `PDup3` without the refusal (BUGGY_DUP3_TAKES_RESERVED) | -- | `handle_slots_buggy_dup3.cfg` (InstallFillsOwnReservation) |
+
+The model has one failing call and one peer thread; the sites, the finish
+policy and the vivarium shells are in the sub-kernel-handle /
+sub-kernel-syscall-dispatch / sub-kernel-vivarium dossiers.
+

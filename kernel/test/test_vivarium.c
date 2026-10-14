@@ -5923,3 +5923,173 @@ void test_vivarium_fd_is_slow_cached(void) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+
+// ---------------------------------------------------------------------------
+// The close-by-number sweep (vault dec-2026-10-14-descriptor-slot-reservation):
+// every call that can fail after it knows its descriptor's number reserves the
+// number, does the failing work, and installs last. Each leg drives a failure
+// past the reservation and checks the call published nothing (the table's
+// install count), returned its number, and left no row behind.
+// ---------------------------------------------------------------------------
+extern s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);
+extern s64 viv_accept_for_test(struct Proc *p, u64 fd);
+
+static int viv_reserved_count(struct Proc *p) {
+    int n = 0;
+    for (hidx_t i = 0; i < PROC_HANDLE_MAX; i++)
+        if (handle_is_reserved(p, i)) n++;
+    return n;
+}
+
+static u32 viv_row_count(const struct viv_socktab *tab) {
+    u32 n = 0;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (tab->s[i].state != VIV_SOCK_FREE) n++;
+    return n;
+}
+
+void test_vivarium_unwinds_publish_nothing(void);
+void test_vivarium_unwinds_publish_nothing(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->phenotype = PHENO_LINUX;
+    p->socktab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    if (!p->socktab) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        TEST_ASSERT(false, "socktab alloc");
+    }
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) p->socktab->s[i].fd = -1;
+
+    // pipe2 into an in-range, unmapped array: both numbers are reserved, the
+    // copy-out faults, and nothing was installed (the old flow installed both
+    // ends and closed them by number: two installs).
+    u64 i0     = handle_table_installs(p);
+    s64 p2     = viv_pipe2_for_test(p, 0x40000ull, 0);
+    u64 i_p2   = handle_table_installs(p) - i0;
+    int res_p2 = viv_reserved_count(p);
+
+    // dup and F_DUPFD of a source that carries a socket row but may not be
+    // duplicated (a hardware kind): the row is copied onto the reserved
+    // number, the dup refuses, and the unwind drops that row and returns the
+    // number.
+    // The control, one variable away: a duplicable source with a row dups,
+    // installs once and gains an alias row -- so the fixture's table has room
+    // and the refusals below come from the dup, not an earlier gate.
+    hidx_t ls = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    struct viv_sock le;
+    bool ls_row = ls >= 0 &&
+                  viv_socktab_claim(p->socktab, (s32)ls, VIV_NET_TCP, 301, VIV_SOCK_FRESH) &&
+                  viv_socktab_get(p->socktab, (s32)ls, &le) &&
+                  viv_socktab_set_state(p->socktab, (s32)ls, le.epoch, VIV_SOCK_LISTENING);
+    u32 rows_c0 = viv_row_count(p->socktab);
+    u64 ic      = handle_table_installs(p);
+    s64 d_ok    = viv_dup_for_test(p, (u64)ls);
+    u64 i_ok    = handle_table_installs(p) - ic;
+    u32 rows_ok = viv_row_count(p->socktab) - rows_c0;
+
+    hidx_t mm = handle_alloc(p, KOBJ_MMIO, RIGHT_READ, NULL);
+    bool   mm_row = mm >= 0 && viv_socktab_claim(p->socktab, (s32)mm, VIV_NET_TCP,
+                                                 300, VIV_SOCK_FRESH);
+    u32 rows_pre = viv_row_count(p->socktab);
+    u64 i1      = handle_table_installs(p);
+    s64 d_dup   = viv_dup_for_test(p, (u64)mm);
+    s64 d_fcntl = viv_fcntl_for_test(p, (u64)mm, VIV_F_DUPFD, 5);
+    u64 i_dup   = handle_table_installs(p) - i1;
+    int res_dup = viv_reserved_count(p);
+    u32 rows_dup = viv_row_count(p->socktab);
+
+    // accept on the listening row with no /net: the number is reserved before
+    // the block, the open fails with its own -1 (no territory; every gate
+    // before the reservation answers an errno), and the number comes back.
+    u64 i2     = handle_table_installs(p);
+    s64 acc    = viv_accept_for_test(p, (u64)ls);
+    u64 i_acc  = handle_table_installs(p) - i2;
+    int res_acc = viv_reserved_count(p);
+
+    // dup3 onto another call's reserved number: Linux's EBUSY, and the
+    // reservation untouched.
+    hidx_t rsv   = handle_reserve(p, 0);
+    s64    d3    = viv_dup3_for_test(p, (u64)ls, (u64)rsv, 0);
+    bool   rsv_k = handle_is_reserved(p, rsv);
+    if (rsv >= 0) handle_unreserve(p, rsv);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_EXPECT_EQ(p2, -(s64)T_E_FAULT, "pipe2: the copy-out faults");
+    TEST_EXPECT_EQ(i_p2, (u64)0, "pipe2: a faulted copy-out installed nothing");
+    TEST_EXPECT_EQ(res_p2, 0, "pipe2: and returned both numbers");
+    TEST_ASSERT(ls_row, "a listening row");
+    TEST_ASSERT(d_ok >= 0, "dup control: a duplicable socket source dups");
+    TEST_EXPECT_EQ(i_ok, (u64)1, "dup control: one install");
+    TEST_EXPECT_EQ(rows_ok, (u32)1, "dup control: one alias row");
+    TEST_ASSERT(mm_row, "dup: the source carries a row");
+    TEST_EXPECT_EQ(d_dup, -(s64)T_E_MFILE, "dup: a live but non-duplicable source is EMFILE");
+    TEST_EXPECT_EQ(d_fcntl, -(s64)T_E_MFILE, "F_DUPFD: the same");
+    TEST_EXPECT_EQ(i_dup, (u64)0, "dup, F_DUPFD: nothing installed");
+    TEST_EXPECT_EQ(res_dup, 0, "dup, F_DUPFD: the numbers returned");
+    TEST_EXPECT_EQ(rows_dup, rows_pre, "dup, F_DUPFD: the alias rows dropped, the source's kept");
+    TEST_EXPECT_EQ(acc, (s64)-1, "accept: past the reservation, the open's own -1");
+    TEST_EXPECT_EQ(i_acc, (u64)0, "accept: nothing installed");
+    TEST_EXPECT_EQ(res_acc, 0, "accept: the number returned");
+    TEST_EXPECT_EQ(d3, -(s64)T_E_BUSY, "dup3 onto a reserved number is EBUSY");
+    TEST_ASSERT(rsv_k, "and the reservation is untouched");
+}
+
+// close() of a reserved number, through the real dispatcher: the hook must not
+// drop the row the reserving call has claimed on it (close answers EBADF, as
+// Linux's does for a reserved fd). The control, one variable away: the same
+// number returned, the close drops the row.
+static void viv_close_reserved_child(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    u32 bad = 0;
+    self->phenotype = PHENO_LINUX;
+
+    struct viv_socktab *tab = (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    if (!tab) { self->phenotype = PHENO_NATIVE; exits("fail"); }
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) tab->s[i].fd = -1;
+    __atomic_store_n(&self->socktab, tab, __ATOMIC_RELEASE);
+
+    hidx_t r = handle_reserve(self, 0);
+    if (r < 0 || !viv_socktab_claim(tab, (s32)r, VIV_NET_TCP, 400, VIV_SOCK_FRESH))
+        bad |= 1u << 0;
+
+    struct exception_context c;
+    struct viv_sock e;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_CLOSE;
+    c.regs[0] = (u64)r;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 1;
+    if (!viv_socktab_get(tab, (s32)r, &e))           bad |= 1u << 2;
+    if (!handle_is_reserved(self, r))                bad |= 1u << 3;
+
+    handle_unreserve(self, r);
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_CLOSE;
+    c.regs[0] = (u64)r;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 4;
+    if (viv_socktab_get(tab, (s32)r, &e))            bad |= 1u << 5;
+
+    self->phenotype = PHENO_NATIVE;
+    if (bad) {
+        uart_puts("    viv_close_reserved_child: failed checks mask ");
+        uart_puthex64(bad);
+        uart_puts("\n");
+    }
+    exits(bad ? "fail" : "ok");
+}
+
+void test_vivarium_close_keeps_a_reserved_row(void);
+void test_vivarium_close_keeps_a_reserved_row(void) {
+    int pid = rfork(RFPROC, viv_close_reserved_child, NULL);
+    TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
+    TEST_EXPECT_EQ(status, 0,
+        "close of a reserved number keeps the reserving call's row; of a free one drops it");
+}

@@ -413,30 +413,33 @@ static bool valid_alloc_args(enum kobj_kind kind, rights_t rights) {
 // -- the close-side clear is hygiene (it keeps "bit set => slot live" true, an
 // invariant nothing currently reads) and is the one that could be dropped; this
 // one cannot, because of the paragraph above.
+static void handle_fill_locked(struct HandleTable *t, hidx_t i, enum kobj_kind kind,
+                               rights_t rights, void *obj, bool cloexec) {
+    t->installs++;
+    t->slots[i].magic  = HANDLE_MAGIC;
+    t->slots[i].kind   = kind;
+    t->slots[i].rights = rights;
+    t->slots[i].obj    = obj;
+    cloexec_set_locked(t, i, cloexec);
+    __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+}
+
 static hidx_t handle_install_locked(struct HandleTable *t, enum kobj_kind kind,
                                     rights_t rights, void *obj, hidx_t from,
                                     bool cloexec) {
     if (from < 0) from = 0;
     for (int i = (int)from; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == 0) {
-            t->slots[i].magic  = HANDLE_MAGIC;
-            t->slots[i].kind   = kind;
-            t->slots[i].rights = rights;
-            t->slots[i].obj    = obj;
-            cloexec_set_locked(t, (hidx_t)i, cloexec);
-            __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+            handle_fill_locked(t, (hidx_t)i, kind, rights, obj, cloexec);
             return (hidx_t)i;
         }
     }
     return -1;
 }
 
-hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
-                    rights_t rights, void *obj) {
-    struct HandleTable *t = proc_handles_or_extinct(p);
-
-    if (!valid_alloc_args(kind, rights)) return -1;
-
+// The accounted-reference guards every install of a fresh object passes:
+// handle_alloc, handle_alloc_cloexec and handle_install_reserved.
+static void alloc_obj_accounted(enum kobj_kind kind, void *obj) {
     // R5-F F49 close: defensive runtime check for KOBJ_BURROW. The
     // contract is "the caller has already accounted for one ref"
     // (typically: burrow_create_anon's initial handle_count=1, OR a
@@ -471,6 +474,19 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
             extinction("handle_alloc(KOBJ_LOOM): caller has not accounted for the "
                        "slot's reference (loom_create's initial refcount=1 convention)");
     }
+}
+
+hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
+                    rights_t rights, void *obj) {
+    return handle_alloc_cloexec(p, kind, rights, obj, false);
+}
+
+hidx_t handle_alloc_cloexec(struct Proc *p, enum kobj_kind kind,
+                            rights_t rights, void *obj, bool cloexec) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+
+    if (!valid_alloc_args(kind, rights)) return -1;
+    alloc_obj_accounted(kind, obj);
 
     // #844 audit F1: scan + install UNDER the table lock, via the same
     // handle_install_locked that handle_dup uses. Without the lock, two peer
@@ -482,9 +498,73 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
     // get/close/dup. The g_handle_allocated bump inside handle_install_locked
     // is atomic (closes the F4 diagnostics race too).
     spin_lock(&t->lock);
-    hidx_t h = handle_install_locked(t, kind, rights, obj, 0, /*cloexec=*/false);
+    hidx_t h = handle_install_locked(t, kind, rights, obj, 0, cloexec);
     spin_unlock(&t->lock);
     return h;   // -1 if the table is full
+}
+
+hidx_t handle_reserve(struct Proc *p, hidx_t from) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (from < 0 || from >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    for (int i = (int)from; i < PROC_HANDLE_MAX; i++) {
+        if (t->slots[i].magic == 0) {
+            t->slots[i].magic = HANDLE_RESERVED;
+            spin_unlock(&t->lock);
+            return (hidx_t)i;
+        }
+    }
+    spin_unlock(&t->lock);
+    return -1;
+}
+
+// No other path writes a reserved slot (every scan wants magic 0, every
+// live-slot operation wants HANDLE_MAGIC, dup3 refuses it), so a slot that is
+// not RESERVED here means this caller lost track of its own number.
+static struct Handle *reserved_slot_locked(struct HandleTable *t, hidx_t h,
+                                           const char *who) {
+    if (h < 0 || h >= PROC_HANDLE_MAX || t->slots[h].magic != HANDLE_RESERVED)
+        extinction(who);
+    return &t->slots[h];
+}
+
+void handle_install_reserved(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                             rights_t rights, void *obj, bool cloexec) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (!valid_alloc_args(kind, rights))
+        extinction("handle_install_reserved: invalid kind or rights");
+    alloc_obj_accounted(kind, obj);
+
+    spin_lock(&t->lock);
+    (void)reserved_slot_locked(t, h, "handle_install_reserved: slot not reserved");
+    handle_fill_locked(t, h, kind, rights, obj, cloexec);
+    spin_unlock(&t->lock);
+}
+
+u64 handle_table_installs(struct Proc *p) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    spin_lock(&t->lock);
+    u64 n = t->installs;
+    spin_unlock(&t->lock);
+    return n;
+}
+
+bool handle_is_reserved(struct Proc *p, hidx_t h) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return false;
+    spin_lock(&t->lock);
+    bool r = t->slots[h].magic == HANDLE_RESERVED;
+    spin_unlock(&t->lock);
+    return r;
+}
+
+void handle_unreserve(struct Proc *p, hidx_t h) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    spin_lock(&t->lock);
+    struct Handle *slot = reserved_slot_locked(t, h, "handle_unreserve: slot not reserved");
+    slot->magic = 0;
+    spin_unlock(&t->lock);
 }
 
 // handle_close, and handle_close_obj when `obj` is non-NULL: the slot is vacated
@@ -723,6 +803,7 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
         // handle_table_free at death) releases it. Non-blocking under the lock,
         // exactly as handle_dup does it.
         handle_acquire_obj(s->kind, s->obj);
+        dt->installs++;
         dt->slots[i].magic  = HANDLE_MAGIC;
         dt->slots[i].kind   = s->kind;
         // Rights VERBATIM. I-6 requires rights to be non-increasing across a
@@ -758,9 +839,11 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // non-transferable refusal, the devsrv-Spoor refusal, the one-lock-hold TOCTOU
 // discipline, the rollback -- is identical and must stay that way, because both
 // create a second handle naming one object and so face the same hazards.
+// `into` >= 0 fills that reservation instead of scanning from min_idx; a
+// refusal then leaves the reservation in place for the caller to return.
 static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
                                 bool inherit_rights, hidx_t min_idx,
-                                bool cloexec) {
+                                bool cloexec, hidx_t into) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
     if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) return -1;
@@ -831,8 +914,14 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     // The dup'd handle is a NEW reference; its eventual handle_close releases
     // it. Acquire under the lock (non-blocking).
     handle_acquire_obj(kind, obj);
-    hidx_t child = handle_install_locked(t, kind, new_rights, obj, min_idx,
-                                         cloexec);
+    hidx_t child;
+    if (into >= 0) {
+        (void)reserved_slot_locked(t, into, "handle_dup_into_reserved: slot not reserved");
+        handle_fill_locked(t, into, kind, new_rights, obj, cloexec);
+        child = into;
+    } else {
+        child = handle_install_locked(t, kind, new_rights, obj, min_idx, cloexec);
+    }
     spin_unlock(&t->lock);
 
     if (child < 0) {
@@ -845,12 +934,19 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
 
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     return handle_dup_common(p, h, new_rights, /*inherit_rights=*/false,
-                             /*min_idx=*/0, /*cloexec=*/false);
+                             /*min_idx=*/0, /*cloexec=*/false, /*into=*/-1);
 }
 
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) {
     return handle_dup_common(p, h, RIGHT_NONE, /*inherit_rights=*/true,
-                             min_idx, cloexec);
+                             min_idx, cloexec, /*into=*/-1);
+}
+
+int handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec) {
+    if (h < 0 || h >= PROC_HANDLE_MAX)
+        extinction("handle_dup_into_reserved: slot not reserved");
+    return handle_dup_common(p, src, RIGHT_NONE, /*inherit_rights=*/true,
+                             /*min_idx=*/0, cloexec, h) < 0 ? -1 : 0;
 }
 
 // #157: dup onto a SPECIFIC index. The header carries the contract and why this
@@ -880,6 +976,13 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
         return -1;
     }
 
+    // Another call's number in flight: Linux's dup2/dup3 answer EBUSY here.
+    // Taking the slot would let that call's install overwrite this dup.
+    if (t->slots[new_h].magic == HANDLE_RESERVED) {
+        spin_unlock(&t->lock);
+        return HANDLE_DUP_TO_BUSY;
+    }
+
     enum kobj_kind kind   = src->kind;
     rights_t       rights = src->rights;    // VERBATIM (POSIX; I-6 non-increasing)
     void          *obj    = src->obj;
@@ -897,6 +1000,7 @@ hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
     enum kobj_kind old_kind = had ? dst->kind : KOBJ_INVALID;
     void          *old_obj  = had ? dst->obj  : NULL;
 
+    t->installs++;
     dst->magic  = HANDLE_MAGIC;
     dst->kind   = kind;
     dst->rights = rights;

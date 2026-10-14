@@ -18,7 +18,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-13
+updated: 2026-10-14
 ---
 ## Session registry factory
 
@@ -1652,3 +1652,35 @@ before it searches for a guard, so `(u32)  x >= N` is still a cast compare
 The guard search normalises every run of whitespace, newlines included, so a
 cast split from its word across a line is still a cast compare (self-test
 castnl).
+
+## A failed call publishes no descriptor (2026-10-14, vote 10)
+
+Twelve sites installed a descriptor and, on a later failure, closed it by
+number. A peer thread could close and reuse the number in between and have
+its own file closed. The sweep moved every one of them onto the reserved slot
+of [[sub-kernel-handle]] ([[dec-2026-10-14-descriptor-slot-reservation]]).
+The pattern is reserve, do the work that can fail, install last.
+
+- **The open and create cores take a finish policy** (`struct
+  sys_open_finish`: `cloexec`, `dir_required`, `keep`). `sys_open_finish`
+  checks O_DIRECTORY on the resolved Spoor's qid before anything is
+  installed. It sets close-on-exec in the install's own hold
+  (`handle_alloc_cloexec`), or hands the Spoor back instead of installing
+  it. `sys_open_kpath_how` and `sys_open_create_kpath_how` thread the policy
+  through `open_create_try_create` and `spoor_create_install`. The `_for_proc`
+  names keep their old behaviour with a NULL policy.
+- `sys_copy_open_path` is SYS_OPEN's user-path copy, shared with the
+  phenotype's openat and fchmodat.
+- `sys_wstat_spoor_consume` is the wstat core's second half: field words
+  already checked, the Spoor's reference consumed. fchmodat calls it on a
+  Spoor it never installed.
+- **pipe**: `sys_pipe_reserve` takes both numbers and creates the pipe,
+  `sys_pipe_install` fills both, and `sys_pipe_abandon` returns both. Native
+  SYS_PIPE is reserve plus install. A table with one free number now refuses
+  before anything is published, where it used to install the read end and
+  close it.
+
+`sys_open_kpath_for_proc` still answers -1 for a full table, and
+`spoor_create_install` still answers -ENOMEM; `sys_open_finish` takes each
+core's answer as `full_rc`. The phenotype sites are in [[sub-kernel-vivarium]].
+

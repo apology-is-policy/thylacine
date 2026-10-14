@@ -372,6 +372,7 @@ void test_handles_cloexec_exec_sweep(void);
 void test_handles_cloexec_fork_preserves(void);
 void test_handles_dup_posix(void);
 void test_handles_dup_to(void);          // #157
+void test_handles_reservation(void);
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);
 void test_vmo_map_unmap_lifecycle(void);
@@ -994,6 +995,8 @@ void test_vivarium_fcntl_dupfd_errnos(void);            // c8ab2744 close: EBADF
 void test_vivarium_fcntl_nonblock_roundtrip(void);      // git-stash: fcntl->handle->Spoor
 void test_vivarium_ioctl_decide(void);                  // C2-k1a: terminal ioctl decode
 void test_vivarium_dup_arm(void);                      // git-remote-https: dup(23) TIER2
+void test_vivarium_unwinds_publish_nothing(void);
+void test_vivarium_close_keeps_a_reserved_row(void);
 void test_vivarium_exec_drops_cloexec_sockets(void);   // 6b: exec cloexec socktab sweep
 void test_vivarium_exec_sweep_prevents_fd_reuse_misroute(void); // 6b: fd-reuse misroute, runtime sequence
 void test_vivarium_sigtab_fork_exec_rule(void);          // #127: fork copies, exec keeps SIG_IGN
@@ -1292,6 +1295,7 @@ void test_stalk_symlink_stat_vs_lstat(void);
 void test_stalk_symlink_pounce_split(void);
 void test_stalk_symlink_lifetime(void);
 void test_stalk_open_create_cwd_parity(void);
+void test_stalk_open_finish_policy(void);
 void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
 void test_stalk_open_create_leaf_rows(void);
@@ -1887,6 +1891,7 @@ void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
+void test_sys_pipe_full_table_publishes_nothing(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
 void test_sys_attach_9p_names_root_by_its_pipe(void);
@@ -2379,6 +2384,7 @@ struct test_case g_tests[] = {
       test_handles_cloexec_fork_preserves, false, NULL },
     { "handles.dup_posix",             test_handles_dup_posix,             false, NULL },
     { "handles.dup_to",                test_handles_dup_to,                false, NULL },
+    { "handles.reservation",           test_handles_reservation,           false, NULL },
     { "burrow.create_close_round_trip",   test_vmo_create_close_round_trip,   false, NULL },
     { "burrow.refcount_lifecycle",        test_vmo_refcount_lifecycle,        false, NULL },
     { "burrow.map_unmap_lifecycle",       test_vmo_map_unmap_lifecycle,       false, NULL },
@@ -3142,6 +3148,8 @@ struct test_case g_tests[] = {
     { "vivarium.fcntl_nonblock_roundtrip", test_vivarium_fcntl_nonblock_roundtrip, false, NULL },
     { "vivarium.ioctl_decide",           test_vivarium_ioctl_decide,           false, NULL },
     { "vivarium.dup_arm",                test_vivarium_dup_arm,                false, NULL },
+    { "vivarium.unwinds_publish_nothing",    test_vivarium_unwinds_publish_nothing,    false, NULL },
+    { "vivarium.close_keeps_a_reserved_row", test_vivarium_close_keeps_a_reserved_row, false, NULL },
     { "vivarium.exec_drops_cloexec_sockets", test_vivarium_exec_drops_cloexec_sockets, false, NULL },
     { "vivarium.exec_sweep_prevents_fd_reuse_misroute", test_vivarium_exec_sweep_prevents_fd_reuse_misroute, false, NULL },
     { "vivarium.sigtab_fork_exec_rule",  test_vivarium_sigtab_fork_exec_rule,  false, NULL },
@@ -4189,6 +4197,7 @@ struct test_case g_tests[] = {
     { "sys_prw.pread_devramfs_offset_and_cursor",       test_sys_pread_devramfs_offset_and_cursor,           false, NULL },
     { "sys_prw.rights_and_walkonly",                    test_sys_prw_rights_and_walkonly,                    false, NULL },
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
+    { "sys_pipe.full_table_publishes_nothing",         test_sys_pipe_full_table_publishes_nothing,         false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
     { "sys_attach_9p.names_root_by_its_pipe",          test_sys_attach_9p_names_root_by_its_pipe,          false, NULL },
@@ -4518,6 +4527,7 @@ struct test_case g_tests[] = {
     { "stalk.symlink_pounce_split",    test_stalk_symlink_pounce_split,    false, NULL },
     { "stalk.symlink_lifetime",        test_stalk_symlink_lifetime,        false, NULL },
     { "stalk.open_create_cwd_parity",  test_stalk_open_create_cwd_parity,  false, NULL },
+    { "stalk.open_finish_policy",        test_stalk_open_finish_policy,        false, NULL },
     { "stalk.open_create_open_if_present", test_stalk_open_create_open_if_present, false, NULL },
     { "stalk.open_create_mkdir_and_nest", test_stalk_open_create_mkdir_and_nest, false, NULL },
     { "stalk.open_create_leaf_rows",   test_stalk_open_create_leaf_rows,   false, NULL },
