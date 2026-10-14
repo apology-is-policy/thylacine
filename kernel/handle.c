@@ -619,8 +619,8 @@ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *
 // place. The header carries the rationale + the invariant argument; this body
 // is close's capture-under-lock followed by an install into the SAME slot,
 // with the outgoing release outside the lock exactly as close does it.
-int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
-                   rights_t rights, void *obj) {
+int handle_replace(struct Proc *p, hidx_t h, const void *expect,
+                   enum kobj_kind kind, rights_t rights, void *obj) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     if (h < 0 || h >= PROC_HANDLE_MAX)      return -1;
@@ -644,6 +644,12 @@ int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
         // KObj_MMIO/IRQ/DMA/PCI handle out of a live fd is a lifetime event
         // I-5 gives no path for, and this primitive is not the place to
         // invent one.
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    if (slot->obj != expect) {
+        // The caller's object is no longer at this number: a peer thread closed
+        // it and put its own file there while the caller slept.
         spin_unlock(&t->lock);
         return -1;
     }

@@ -23,6 +23,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
+#include <thylacine/pipe.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
@@ -38,6 +39,7 @@
 
 extern s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
 extern s64 viv_accept_for_test(struct Proc *p, u64 fd);
+extern s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
 extern s64 viv_sendto_empty_for_test(struct Proc *p, u64 fd);
 extern s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
 extern s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
@@ -47,6 +49,8 @@ extern bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Pr
 void test_vivsock_accept_wait_is_over(void);
 void test_vivsock_connect_tcp_holds_the_dial(void);
 void test_vivsock_connect_udp_never_waits(void);
+void test_vivsock_connect_keeps_a_reused_number(void);
+void test_vivsock_socket_unwind_publishes_nothing(void);
 void test_vivsock_connect_eintr_then_retry(void);
 void test_vivsock_connect_connecting_resumes(void);
 void test_vivsock_connect_failure_verdicts(void);
@@ -71,13 +75,20 @@ static struct ns_fid g_ns_fid[NS_FIDS];
 
 static struct {
     bool listen_intr, read_intr, data_intr, dial_intr;   // the caller's flag at each
-    u32  listen_opens, data_opens, ctl_reads, ctl_writes;
+    u32  listen_opens, data_opens, ctl_reads, ctl_writes, ctl_clunks;
+    u32  clone_n;         // the conversation a clone walk lands on
     u32  data_fail;       // != 0: the NEXT data Tlopen answers Rlerror(this)
     u32  accept_n;        // the conversation a listen open hands back
     const char *status;   // a status file's content; NULL: there is no status file
     u32  status_reads;
     char verb[48];
     u32  verb_len;
+    // != NULL: the NEXT data Tlopen stands in for a peer thread that closes
+    // swap_fd and opens swap_in, landing on the same number while connect
+    // sleeps in that open; swap_got is the number it landed on.
+    struct Proc  *swap_p;
+    struct Spoor *swap_in;
+    s64           swap_fd, swap_got;
 } g_ns;
 
 static void ns_put32(u8 *b, u32 v) {
@@ -124,6 +135,7 @@ static bool ns_step(u8 *kind, u32 *n, u64 *qpath, const u8 *nm, u16 len) {
              ns_name_is(nm, len, "tcp") ||
              ns_name_is(nm, len, "udp"))              k = NS_DIR;
     else if (ns_name_is(nm, len, "ctl"))              k = NS_CTL;
+    else if (ns_name_is(nm, len, "clone"))            { k = NS_CTL; *n = g_ns.clone_n; }
     else if (ns_name_is(nm, len, "data"))             k = NS_DATA;
     else if (ns_name_is(nm, len, "listen"))           k = NS_LISTEN;
     else if (ns_name_is(nm, len, "remote"))           k = NS_FILE;
@@ -240,6 +252,12 @@ static int ns_responder(void *ctx, const u8 *req, size_t req_len,
         } else if (f->kind == NS_DATA) {
             g_ns.data_opens++;
             g_ns.data_intr = intr;
+            if (g_ns.swap_in) {
+                (void)handle_close(g_ns.swap_p, (hidx_t)g_ns.swap_fd);
+                g_ns.swap_got = handle_alloc(g_ns.swap_p, KOBJ_SPOOR, RIGHT_READ,
+                                             g_ns.swap_in);
+                g_ns.swap_in  = NULL;
+            }
             if (g_ns.data_fail) {
                 u32 ec = g_ns.data_fail;
                 g_ns.data_fail = 0;
@@ -299,6 +317,7 @@ static int ns_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TCLUNK) {
         struct ns_fid *f = (req_len >= P9_HDR_LEN + 4) ? ns_find(ns_get32(req + 7)) : NULL;
+        if (f && f->kind == NS_CTL) g_ns.ctl_clunks++;
         if (f) f->used = 0;
         return ns_hdr(resp, resp_cap, P9_HDR_LEN, P9_RCLUNK, tag);
     }
@@ -475,6 +494,130 @@ void test_vivsock_connect_tcp_holds_the_dial(void) {
     TEST_ASSERT(row && e.state == VIV_SOCK_CONNECTED && e.remote_addr == 0x0A000002u &&
                 e.remote_port == 80, "CONNECTED to the peer");
     TEST_EXPECT_EQ(kind, (u8)NS_DATA, "the fd was swapped onto data");
+}
+
+static bool ns_fd_nonblock(struct Proc *p, s64 fd) {
+    struct Handle h;
+    if (fd < 0 || handle_get(p, (hidx_t)fd, &h) < 0) return false;
+    bool nb = h.kind == KOBJ_SPOOR && (spoor_flag_get((struct Spoor *)h.obj) & CNONBLOCK);
+    handle_put(&h);
+    return nb;
+}
+
+// A peer thread that closes the socket while connect sleeps in the handshake,
+// and opens its own file at the same number, keeps that file: the swap is keyed
+// on the ctl Spoor the call started from, not on whatever the number names by
+// the time the handshake ends.
+void test_vivsock_connect_keeps_a_reused_number(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+
+    // Control: an unraced nonblocking socket connects, its number names data,
+    // and data carries ctl's O_NONBLOCK across the swap.
+    s64 cfd = ns_socket(p, VIV_NET_TCP, 7, VIV_SOCK_FRESH);
+    struct Handle ch;
+    bool cgot = cfd >= 0 && handle_get(p, (hidx_t)cfd, &ch) == 0;
+    if (cgot) {
+        spoor_flag_set((struct Spoor *)ch.obj, CNONBLOCK);
+        handle_put(&ch);
+    }
+    s64  crc   = cgot ? viv_sock_connect_for_test(p, (u64)cfd, g_ns_peer, 80) : -1;
+    u8   ckind = ns_fd_kind(p, cfd);
+    bool cnb   = ns_fd_nonblock(p, cfd);
+
+    // The raced socket. The test's own reference on its ctl keeps the peer's
+    // close from being ctl's last, so a connect that holds none still cannot
+    // send a Tclunk from inside the stub's reply.
+    s64 fd = ns_socket(p, VIV_NET_TCP, 9, VIV_SOCK_FRESH);
+    struct Handle sh;
+    bool sgot = fd >= 0 && handle_get(p, (hidx_t)fd, &sh) == 0;
+    if (sgot) spoor_flag_set((struct Spoor *)sh.obj, CNONBLOCK);
+    struct Spoor *prd = NULL, *pwr = NULL;
+    bool piped = pipe_create(&prd, &pwr) == 0;
+    if (piped && sgot) {
+        g_ns.swap_p   = p;
+        g_ns.swap_fd  = fd;
+        g_ns.swap_got = -1;
+        g_ns.swap_in  = prd;
+    }
+    s64 rc = (piped && sgot) ? viv_sock_connect_for_test(p, (u64)fd, g_ns_peer, 80) : -1;
+    s64 landed = g_ns.swap_got;
+    struct Handle ah;
+    bool aget       = fd >= 0 && handle_get(p, (hidx_t)fd, &ah) == 0;
+    bool names_pipe = aget && ah.kind == KOBJ_SPOOR && ah.obj == prd;
+    if (aget) handle_put(&ah);
+    if (sgot) handle_put(&sh);
+    // The pipe end is the table's once it landed; otherwise still the test's.
+    if (piped && (g_ns.swap_in || landed < 0)) spoor_clunk(prd);
+    g_ns.swap_in = NULL;
+    if (pwr) spoor_clunk(pwr);
+    ns_free(p);
+
+    TEST_ASSERT(cfd >= 0 && crc == 0, "control: an unraced connect succeeds");
+    TEST_EXPECT_EQ(ckind, (u8)NS_DATA, "control: its number names data");
+    TEST_ASSERT(cnb, "control: data carries ctl's O_NONBLOCK across the swap");
+    TEST_ASSERT(fd >= 0 && sgot && piped, "fixture: the raced socket and the peer's pipe");
+    TEST_EXPECT_EQ(landed, fd, "the peer's open landed on the socket's own number");
+    TEST_EXPECT_EQ(rc, -(s64)T_E_IO,
+        "connect refuses to swap a number that no longer names its socket");
+    TEST_ASSERT(names_pipe,
+        "the number still names the peer's pipe -- not swapped out and released");
+}
+
+static int ns_reserved_count(struct Proc *p) {
+    int n = 0;
+    for (hidx_t i = 0; i < PROC_HANDLE_MAX; i++)
+        if (handle_is_reserved(p, i)) n++;
+    return n;
+}
+
+// socket() reserves its number before the open: a refusal past the open and the
+// read of N (no row left in the socket table) installs nothing, returns the
+// number, and clunks the clone's ctl, which frees the conversation at netd. The
+// control, one variable away: with a row free the same call installs once and
+// keeps its ctl.
+void test_vivsock_socket_unwind_publishes_nothing(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+    g_ns.clone_n = 5;
+
+    u64 i0   = handle_table_installs(p);
+    u32 c0   = g_ns.ctl_clunks;
+    s64 ok   = viv_socket_for_test(p, 2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
+    u64 i_ok = handle_table_installs(p) - i0;
+    u32 c_ok = g_ns.ctl_clunks - c0;
+    struct viv_sock e;
+    bool row  = ns_row(p, ok, &e);
+    u8   kind = ns_fd_kind(p, ok);
+
+    u32 filled = 0;   // rows on numbers no handle names: the table only counts
+    while (filled < VIV_SOCK_MAX + 1u &&
+           viv_socktab_claim(p->socktab, (s32)(PROC_HANDLE_MAX - 1 - (int)filled),
+                             VIV_NET_TCP, 60u + filled, VIV_SOCK_FRESH))
+        filled++;
+    u64 i1     = handle_table_installs(p);
+    u32 c1     = g_ns.ctl_clunks;
+    u32 r1     = g_ns.ctl_reads;
+    s64 full   = viv_socket_for_test(p, 2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
+    u64 i_full = handle_table_installs(p) - i1;
+    u32 c_full = g_ns.ctl_clunks - c1;
+    u32 r_full = g_ns.ctl_reads - r1;
+    int res    = ns_reserved_count(p);
+    ns_free(p);
+
+    TEST_ASSERT(ok >= 0, "control: socket() returns a descriptor");
+    TEST_EXPECT_EQ(i_ok, (u64)1, "control: one install");
+    TEST_EXPECT_EQ(c_ok, 0u, "control: the clone's ctl stays open");
+    TEST_ASSERT(row && e.state == VIV_SOCK_FRESH && e.n == 5,
+                "control: a FRESH row on the conversation the ctl named");
+    TEST_EXPECT_EQ(kind, (u8)NS_CTL, "control: the descriptor names the ctl");
+    TEST_ASSERT(filled > 0 && filled < VIV_SOCK_MAX + 1u, "fixture: the socket table filled");
+    TEST_EXPECT_EQ(full, -(s64)T_E_MFILE, "socket: a full socket table is EMFILE");
+    TEST_EXPECT_EQ(r_full, 1u,
+        "socket: N was read first, so the refusal came past the open and the reservation");
+    TEST_EXPECT_EQ(i_full, (u64)0, "socket: the refusal installed nothing");
+    TEST_EXPECT_EQ(res, 0, "socket: and returned its number");
+    TEST_EXPECT_EQ(c_full, 1u, "socket: and clunked the clone's ctl, freeing the conversation");
 }
 
 // A UDP connect never waits (Linux's is a table update), so none of it is

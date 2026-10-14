@@ -11874,10 +11874,12 @@ static s64 viv_sock_connect_row(struct Proc *p, struct viv_socktab *tab,
 
 // connect()'s dial and its wait, given the peer as a kernel address. A
 // CONNECTING row ignores `ip4`/`port` and resumes the wait on the peer it
-// dialed, as Linux ignores a retry's address in SS_CONNECTING.
-static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
-                                 u64 fd_raw, const struct viv_sock *e,
-                                 const u8 ip4[4], u16 port) {
+// dialed, as Linux ignores a retry's address in SS_CONNECTING. `ctl` is the
+// socket's own ctl Spoor, ref-held by the caller for the whole call.
+static s64 viv_sock_connect_dial_on(struct Proc *p, struct viv_socktab *tab,
+                                    u64 fd_raw, struct Spoor *ctl,
+                                    const struct viv_sock *e,
+                                    const u8 ip4[4], u16 port) {
     char path[64];
     u32  plen = viv_net_path(path, sizeof(path),
                              (enum viv_net_proto)e->proto, true, e->n, "data");
@@ -11901,7 +11903,7 @@ static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
         // slow one. Unreachable today (clen <= 48, far under any negotiated
         // msize) and checked anyway, because "wrote some of a command" must
         // never read as success.
-        s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+        s64 w = spoor_write_on(ctl, (const u8 *)cmd, clen, false, 0);
         if (w != (s64)clen)       return -(s64)T_E_CONNREFUSED;
         raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
               | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
@@ -11936,38 +11938,46 @@ static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
         return (rc == -(s64)T_E_TIMEDOUT) ? rc : -(s64)T_E_CONNREFUSED;
     }
 
-    // Read the socket's nonblocking state off ctl BEFORE the swap. Since N-1a
-    // admits SOCK_NONBLOCK, a socket(NONBLOCK)+connect() must stay nonblocking --
-    // but CNONBLOCK is a per-Spoor flag, and handle_replace installs a fresh data
-    // Spoor that does not carry it. Capture it here, re-apply after the swap.
-    // (netd's copy of the mode is per connection, so the swap keeps it.)
-    int  ctl_omode = 0;
-    bool ctl_nonblock = false;
-    (void)handle_get_status_flags(p, (hidx_t)fd_raw, &ctl_omode, &ctl_nonblock);
+    // Since N-1a admits SOCK_NONBLOCK, a socket(NONBLOCK)+connect() must stay
+    // nonblocking -- but CNONBLOCK is a per-Spoor flag and the data Spoor is
+    // fresh, so ctl's bit is copied onto data while data is still private (set
+    // after the swap, by number, it could flag whatever a peer thread had put
+    // at that number by then). netd's copy of the mode is per connection, so
+    // the swap keeps it.
+    if (spoor_flag_get(ctl) & CNONBLOCK) spoor_flag_set(dsp, CNONBLOCK);
 
-    if (handle_replace(p, (hidx_t)fd_raw, KOBJ_SPOOR, dr, dsp) < 0) {
+    // Keyed on ctl: a peer thread that closed this number while the call slept
+    // and put its own file there is refused, not swapped out and released.
+    if (handle_replace(p, (hidx_t)fd_raw, ctl, KOBJ_SPOOR, dr, dsp) < 0) {
         spoor_clunk(dsp);
         return -(s64)T_E_IO;
     }
-    // Re-apply to the fd, which now names data. A failure is unreachable (the fd
-    // was just installed by handle_replace) and DELIBERATELY tolerated rather than
-    // unwound: connect() has already committed the connection, and a socket that
-    // is connected-but-blocking is a lesser evil than tearing down an established
-    // connection because a flag re-apply we cannot actually reach failed (F5c).
-    if (ctl_nonblock)
-        (void)handle_set_nonblock(p, (hidx_t)fd_raw, true);
 
     // Record the peer so a recvmsg on this connected socket can synthesize
     // msg_name (the same field the datagram sendto path records), and transition
     // CONNECTED -- both under one lock hold, KEYED on the socket we snapshotted
-    // (e->n). If a peer thread closed and recycled this fd while we blocked in the
-    // data open, the write lands nowhere rather than marking a stranger's fresh
-    // socket connected-to-our-peer. connect() still returns success: the
-    // connection was made; a guest that closes an fd it is connecting on another
-    // thread has raced its own descriptor.
+    // (e->n, e->epoch). The swap above already refused a number that no longer
+    // names this socket's ctl; if the row was re-made meanwhile (the same ctl
+    // dup'd back onto the number), the write lands nowhere rather than marking
+    // a row connect() did not start from. connect() still returns success: the
+    // connection was made and the number names it.
     (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, rport,
                                     /*also_connect=*/true);
     return 0;
+}
+
+// The socket's ctl Spoor is taken once, so the dial is written to it, its mode
+// is read off it and the swap is keyed on it: a peer thread that closes and
+// reuses the number while the call sleeps gets none of the three.
+static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
+                                 u64 fd_raw, const struct viv_sock *e,
+                                 const u8 ip4[4], u16 port) {
+    rights_t want = (e->state == VIV_SOCK_CONNECTING) ? 0 : RIGHT_WRITE;
+    struct Spoor *ctl = sys_lookup_rw_handle(p, (hidx_t)fd_raw, want);
+    if (!ctl)                     return -(s64)T_E_BADF;
+    s64 rc = viv_sock_connect_dial_on(p, tab, fd_raw, ctl, e, ip4, port);
+    spoor_clunk(ctl);
+    return rc;
 }
 
 // A CONNECTING row is a connect() a caught signal interrupted, and POSIX has
@@ -14949,9 +14959,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // perm_check-EXEMPT navigation handle is the correct base (an O_RDONLY
         // open would wrongly fail for an owner who lacks read). FROM_ROOT is
         // cwd-aware for a relative path (the openat AT_FDCWD correspondence).
-        // sys_open_handler returns the real errno (ER-1 rollout: ENOENT /
-        // ENOTDIR / EACCES from the walk), which IS the fchmodat answer.
-        // The Spoor is kept, never installed: a descriptor would be looked up
+        // The open core returns the real errno (ER-1 rollout: ENOENT / ENOTDIR /
+        // EACCES from the walk), which IS the fchmodat answer. The Spoor is
+        // kept, never installed: a descriptor would be looked up
         // again by number for the wstat, and a peer thread could close and
         // reuse that number in between and have ITS file's mode changed.
         char kpath[SYS_OPEN_PATH_MAX + 1];
@@ -15326,6 +15336,12 @@ s64 sys_open_finish_for_test(struct Proc *p, const char *kpath, u64 klen,
         return sys_open_create_kpath_how(p, SYS_WALK_OPEN_FROM_ROOT, kpath, klen,
                                          omode, perm, &how);
     return sys_open_kpath_how(p, SYS_WALK_OPEN_FROM_ROOT, kpath, klen, omode, &how);
+}
+
+s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol);
+s64 viv_socket_for_test(struct Proc *p, u64 domain, u64 type, u64 protocol) {
+    u64 args[VIV_NARGS] = { domain, type, protocol, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_SOCKET, args);
 }
 
 s64 viv_pipe2_for_test(struct Proc *p, u64 fds_va, u64 flags);

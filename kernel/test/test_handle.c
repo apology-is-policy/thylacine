@@ -398,7 +398,7 @@ void test_handles_replace(void) {
 
     // THE INDEX IS PRESERVED. That is the entire reason the primitive exists --
     // the guest is holding this number across connect().
-    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, NULL) == 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, NULL) == 0,
                 "replace of a live Spoor slot succeeds");
     TEST_EXPECT_EQ(handle_table_count(p->handles), count_before,
         "replace does not change the number of live handles");
@@ -412,7 +412,7 @@ void test_handles_replace(void) {
         "rights are the caller's, exactly");
     handle_put(&got);
 
-    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_READ, NULL) == 0, "narrowing replace");
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) == 0, "narrowing replace");
     TEST_ASSERT(handle_get(p, h, &got) == 0, "handle_get after narrowing");
     TEST_EXPECT_EQ(got.rights, (u64)RIGHT_READ,
         "rights NARROWED -- the outgoing R|W was discarded, never inherited or "
@@ -421,13 +421,23 @@ void test_handles_replace(void) {
 
     // THE INCOMING KIND IS GATED. Every non-Spoor kind is refused, so no path
     // here can make a hardware handle appear at an arbitrary fd (I-5).
-    TEST_ASSERT(handle_replace(p, h, KOBJ_MMIO, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_MMIO, RIGHT_READ, NULL) < 0,
                 "incoming KOBJ_MMIO refused (I-5)");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_BURROW, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_BURROW, RIGHT_READ, NULL) < 0,
                 "incoming KOBJ_BURROW refused");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_PROCESS, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_PROCESS, RIGHT_READ, NULL) < 0,
                 "incoming KOBJ_PROCESS refused -- the gate is an ALLOW-list of "
                 "one kind, not a deny-list of hardware");
+
+    // THE SWAP IS KEYED ON THE CALLER'S OBJECT. connect() sleeps between taking
+    // the socket and the swap; a number a peer thread closed and reused in that
+    // time names another object, and replacing it would release that thread's
+    // file. The successful replaces above, expecting the slot's own object, are
+    // the control one variable away.
+    static int s_peer_file;
+    TEST_ASSERT(handle_replace(p, h, &s_peer_file, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
+                               NULL) < 0,
+                "a slot that no longer names the caller's object is refused");
 
     // The refusals left the slot exactly as it was.
     TEST_ASSERT(handle_get(p, h, &got) == 0, "slot survives a refused replace");
@@ -440,26 +450,26 @@ void test_handles_replace(void) {
     // I-5 gives no path for.
     hidx_t hp = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, p);
     TEST_ASSERT(hp >= 0, "handle_alloc(PROCESS) returned -1");
-    TEST_ASSERT(handle_replace(p, hp, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, hp, p, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
                 "outgoing KOBJ_PROCESS refused");
     TEST_ASSERT(handle_get(p, hp, &got) == 0, "the PROCESS slot survives");
     TEST_EXPECT_EQ(got.kind, KOBJ_PROCESS, "outgoing kind unchanged");
     handle_put(&got);
 
     // Argument validation, all fail-closed.
-    TEST_ASSERT(handle_replace(p, -1, KOBJ_SPOOR, RIGHT_READ, NULL) < 0, "negative fd");
-    TEST_ASSERT(handle_replace(p, PROC_HANDLE_MAX, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, -1, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) < 0, "negative fd");
+    TEST_ASSERT(handle_replace(p, PROC_HANDLE_MAX, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
                 "out-of-range fd");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_NONE, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_SPOOR, RIGHT_NONE, NULL) < 0,
                 "RIGHT_NONE refused (valid_alloc_args)");
-    TEST_ASSERT(handle_replace(p, h, KOBJ_INVALID, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, h, NULL, KOBJ_INVALID, RIGHT_READ, NULL) < 0,
                 "KOBJ_INVALID refused");
 
     // An empty slot is not replaceable -- replace is not a back-door alloc.
     hidx_t hfree = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
     TEST_ASSERT(hfree >= 0, "third alloc");
     TEST_ASSERT(handle_close(p, hfree) == 0, "close it");
-    TEST_ASSERT(handle_replace(p, hfree, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+    TEST_ASSERT(handle_replace(p, hfree, NULL, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
                 "replacing a CLOSED slot is refused -- replace never creates");
 
     test_proc_drop(p);
@@ -772,9 +782,13 @@ void test_handles_reservation(void) {
     bool still_after_coe = handle_is_reserved(p, r);
 
     // (4) The reserving call fills it: live, its kind, close-on-exec from the
-    // argument, and the install counted once.
+    // argument, and the install counted once. Each fill and return below is
+    // asked first whether the slot is still reserved: on a slot an earlier step
+    // disturbed they extinct (by design), and the assertions then report which
+    // step it was instead.
     u64 i_pre = handle_table_installs(p);
-    handle_install_reserved(p, r, KOBJ_THREAD, RIGHT_READ, NULL, /*cloexec=*/true);
+    if (handle_is_reserved(p, r))
+        handle_install_reserved(p, r, KOBJ_THREAD, RIGHT_READ, NULL, /*cloexec=*/true);
     int  fill_get = handle_get(p, r, &got);
     int  fill_kind = fill_get == 0 ? (int)got.kind : -1;
     if (fill_get == 0) handle_put(&got);
@@ -784,7 +798,7 @@ void test_handles_reservation(void) {
 
     // (5) A returned reservation is free again, and returning it publishes nothing.
     u64  i_pre2 = handle_table_installs(p);
-    handle_unreserve(p, r2);
+    if (handle_is_reserved(p, r2)) handle_unreserve(p, r2);
     bool r2_res = handle_is_reserved(p, r2);
     hidx_t back = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
     u64  i_unres = handle_table_installs(p) - i_pre2;   // the alloc's one
@@ -800,7 +814,7 @@ void test_handles_reservation(void) {
     hidx_t e = handle_reserve(p, 0);
     int  bad_rc  = handle_dup_into_reserved(p, 60, e, false);   // 60: never opened
     bool e_kept  = handle_is_reserved(p, e);
-    handle_unreserve(p, e);
+    if (e_kept) handle_unreserve(p, e);
 
     test_proc_drop(child);
     test_proc_drop(p);

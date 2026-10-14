@@ -962,6 +962,15 @@ number first ([[sub-kernel-handle]]).
   looked its number up a second time for the wstat, so a peer that closed and
   reused the number in between would have had its own file's mode changed.
 - **dup3** answers EBUSY onto a reserved number.
+- **connect** takes the socket's ctl Spoor once, before it sleeps. The dial is
+  written to it and its O_NONBLOCK bit is copied onto the private data Spoor,
+  and `handle_replace` swaps only while the number still names that ctl. Before,
+  the dial was written by number, the swap took whatever Spoor the number named
+  once the TCP handshake ended, and the bit was set by number afterwards. A
+  peer that closed the socket during the handshake and opened its own file at
+  the number lost that file to the connection. Now connect answers EIO and the
+  file stays. The witness is `vivsock.connect_keeps_a_reused_number`, whose /net
+  stub stages the peer's close and reuse inside the data open.
 - **close()**: its hook now calls `viv_socktab_drop_closing`, which keeps the
   row while the number is reserved: that row is the reserving call's own, and
   the close answers EBADF. The question is asked under the socket-table lock,

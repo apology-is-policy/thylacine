@@ -35,9 +35,11 @@ CONSTANTS N, BUGGY_CLOSE_BY_NUMBER, BUGGY_DUP3_TAKES_RESERVED
 Slots == 0..(N-1)
 States == {"free", "reserved", "mine", "peer"}
 
-VARIABLES slot, cpc, cnum, foreign_closed, failed_seen_live
+\* published: the call's object has been live at its number (set by the
+\* writes of "mine", wherever they happen, never by a failure action).
+VARIABLES slot, cpc, cnum, foreign_closed, published
 
-vars == <<slot, cpc, cnum, foreign_closed, failed_seen_live>>
+vars == <<slot, cpc, cnum, foreign_closed, published>>
 
 LowestFree == IF \E i \in Slots : slot[i] = "free"
               THEN CHOOSE i \in Slots : slot[i] = "free" /\ \A j \in Slots : (j < i => slot[j] # "free")
@@ -48,14 +50,14 @@ TypeOk ==
     /\ cpc \in {"idle", "held", "published", "done", "failed"}
     /\ cnum \in Slots \cup {N}
     /\ foreign_closed \in BOOLEAN
-    /\ failed_seen_live \in BOOLEAN
+    /\ published \in BOOLEAN
 
 Init ==
     /\ slot = [i \in Slots |-> "free"]
     /\ cpc = "idle"
     /\ cnum = N
     /\ foreign_closed = FALSE
-    /\ failed_seen_live = FALSE
+    /\ published = FALSE
 
 \* ---- the call ----
 CTake ==
@@ -65,9 +67,11 @@ CTake ==
     /\ IF BUGGY_CLOSE_BY_NUMBER
           THEN /\ slot' = [slot EXCEPT ![LowestFree] = "mine"]
                /\ cpc' = "published"
+               /\ published' = TRUE
           ELSE /\ slot' = [slot EXCEPT ![LowestFree] = "reserved"]
                /\ cpc' = "held"
-    /\ UNCHANGED <<foreign_closed, failed_seen_live>>
+               /\ UNCHANGED published
+    /\ UNCHANGED foreign_closed
 
 \* Correct shape: the fallible work ends in an install or an unreserve.
 CInstall ==
@@ -75,44 +79,44 @@ CInstall ==
     /\ slot[cnum] = "reserved"
     /\ slot' = [slot EXCEPT ![cnum] = "mine"]
     /\ cpc' = "done"
-    /\ UNCHANGED <<cnum, foreign_closed, failed_seen_live>>
+    /\ published' = TRUE
+    /\ UNCHANGED <<cnum, foreign_closed>>
 
 CUnreserve ==
     /\ cpc = "held"
     /\ slot[cnum] = "reserved"
     /\ slot' = [slot EXCEPT ![cnum] = "free"]
     /\ cpc' = "failed"
-    /\ UNCHANGED <<cnum, foreign_closed, failed_seen_live>>
+    /\ UNCHANGED <<cnum, foreign_closed, published>>
 
 \* Buggy shape: the object was live from the take; a failure closes the NUMBER.
 CSucceedPublished ==
     /\ cpc = "published"
     /\ cpc' = "done"
-    /\ UNCHANGED <<slot, cnum, foreign_closed, failed_seen_live>>
+    /\ UNCHANGED <<slot, cnum, foreign_closed, published>>
 
 CFailByNumber ==
     /\ cpc = "published"
     /\ foreign_closed' = (slot[cnum] = "peer")
     /\ slot' = [slot EXCEPT ![cnum] = "free"]
     /\ cpc' = "failed"
-    /\ failed_seen_live' = TRUE      \* its object was live at cnum from the take
-    /\ UNCHANGED cnum
+    /\ UNCHANGED <<cnum, published>>
 
 \* ---- the peer thread (EL0's whole reach over the table) ----
 PClose(i) ==
     /\ slot[i] \in {"mine", "peer"}  \* a reserved number answers EBADF
     /\ slot' = [slot EXCEPT ![i] = "free"]
-    /\ UNCHANGED <<cpc, cnum, foreign_closed, failed_seen_live>>
+    /\ UNCHANGED <<cpc, cnum, foreign_closed, published>>
 
 PAlloc ==
     /\ LowestFree < N
     /\ slot' = [slot EXCEPT ![LowestFree] = "peer"]
-    /\ UNCHANGED <<cpc, cnum, foreign_closed, failed_seen_live>>
+    /\ UNCHANGED <<cpc, cnum, foreign_closed, published>>
 
 PDup3(i) ==
     /\ BUGGY_DUP3_TAKES_RESERVED \/ slot[i] # "reserved"   \* else EBUSY
     /\ slot' = [slot EXCEPT ![i] = "peer"]
-    /\ UNCHANGED <<cpc, cnum, foreign_closed, failed_seen_live>>
+    /\ UNCHANGED <<cpc, cnum, foreign_closed, published>>
 
 Next ==
     \/ CTake \/ CInstall \/ CUnreserve \/ CSucceedPublished \/ CFailByNumber
@@ -122,6 +126,6 @@ Next ==
 Spec == Init /\ [][Next]_vars
 
 NoForeignClose == ~foreign_closed
-FailedPublishesNothing == (cpc = "failed") => ~failed_seen_live
+FailedPublishesNothing == (cpc = "failed") => ~published
 InstallFillsOwnReservation == (cpc = "held") => slot[cnum] = "reserved"
 ====

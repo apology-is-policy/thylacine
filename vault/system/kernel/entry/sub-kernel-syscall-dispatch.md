@@ -1680,6 +1680,12 @@ The pattern is reserve, do the work that can fail, install last.
   before anything is published, where it used to install the read end and
   close it.
 
+- **connect**: `viv_sock_connect_dial` takes the socket's ctl Spoor once and
+  runs `viv_sock_connect_dial_on` on it. The dial is written to it, and
+  `handle_replace` swaps only while the number still names it
+  ([[sub-kernel-vivarium]]). `viv_socket_for_test` drives the real socket arm
+  through `viv_tier2`.
+
 `sys_open_kpath_for_proc` still answers -1 for a full table, and
 `spoor_create_install` still answers -ENOMEM; `sys_open_finish` takes each
 core's answer as `full_rc`. The phenotype sites are in [[sub-kernel-vivarium]].

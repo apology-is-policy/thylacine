@@ -958,6 +958,12 @@ phenotype, four answers follow Linux more closely:
 - fchmodat and mkdirat no longer take a descriptor, so a full table does not
   refuse them.
 - close of a reserved number answers EBADF, as it does on Linux.
+- connect whose socket a peer thread closed during the handshake, putting
+  its own file at the number, answers EIO and leaves that file in place.
+  Before, the swap released the peer's file and connect answered 0. If the
+  number names nothing a write can reach when the dial is about to be
+  written, connect now answers EBADF (it was ECONNREFUSED, from the failed
+  write by number).
 
 The rationale is in [[dec-2026-10-14-descriptor-slot-reservation]].
 

@@ -537,8 +537,12 @@ the diorama rests on (§6.2): a reformatter, never a new authority.
 
 The socket fd is the `ctl` fd from `socket()` until `connect()`, and the `data` fd
 afterwards. `connect` performs that swap **in place**, via a new
-`handle_replace(p, fd, kind, rights, obj)` primitive — `handle_dup` cannot serve,
-because it allocates a *new* slot and the guest is holding a specific number.
+`handle_replace(p, fd, expect, kind, rights, obj)` primitive — `handle_dup` cannot
+serve, because it allocates a *new* slot and the guest is holding a specific
+number. `expect` is the `ctl` Spoor connect took before it slept: the swap
+happens only while the number still names it, so a peer thread that closed the
+socket during the handshake and reused the number keeps its own file
+(2026-10-14).
 
 Three properties make the swap correct, each measured in §4.1.1:
 

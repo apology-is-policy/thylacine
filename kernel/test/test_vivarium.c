@@ -6012,7 +6012,7 @@ void test_vivarium_unwinds_publish_nothing(void) {
     hidx_t rsv   = handle_reserve(p, 0);
     s64    d3    = viv_dup3_for_test(p, (u64)ls, (u64)rsv, 0);
     bool   rsv_k = handle_is_reserved(p, rsv);
-    if (rsv >= 0) handle_unreserve(p, rsv);
+    if (rsv_k) handle_unreserve(p, rsv);
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -6064,9 +6064,10 @@ static void viv_close_reserved_child(void *arg) {
     TEST_SYSCALL_DISPATCH(&c);
     if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 1;
     if (!viv_socktab_get(tab, (s32)r, &e))           bad |= 1u << 2;
-    if (!handle_is_reserved(self, r))                bad |= 1u << 3;
+    bool still = handle_is_reserved(self, r);
+    if (!still)                                      bad |= 1u << 3;
 
-    handle_unreserve(self, r);
+    if (still) handle_unreserve(self, r);
     for (int i = 0; i < 31; i++) c.regs[i] = 0;
     c.regs[8] = VIV_LINUX_CLOSE;
     c.regs[0] = (u64)r;

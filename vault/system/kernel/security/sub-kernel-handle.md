@@ -87,7 +87,7 @@ from, and whether the destination may already be occupied:
 | | source | destination |
 |---|---|---|
 | `handle_dup_posix` | a slot | first free ≥ `min_idx`; the index is an **output** |
-| `handle_replace` | a caller-held object | a fixed index that must be **live**; outgoing released |
+| `handle_replace` | a caller-held object | a fixed index that must be **live** and still name the caller's `expect`; outgoing released |
 | `handle_table_copy_into` | a slot in **another** table | the same fixed index, which must be free |
 | `handle_dup_to` | a slot | a fixed index, free **or** live; outgoing released if live |
 
@@ -386,6 +386,14 @@ cross-Proc accessor would break).
 (O_CLOEXEC set in the install's own hold). `struct HandleTable.installs`
 counts objects ever installed (`handle_table_installs`). A reservation is not
 an install, which is how the tests show that a failed call published nothing.
+
+`handle_replace(p, h, expect, ...)` swaps only while the slot still names
+`expect`, an object the caller holds its own reference on. Its one caller,
+connect, sleeps between taking the socket's ctl Spoor and the swap. A number a
+peer closed and reused in that time names another object, so the swap is
+refused rather than releasing the peer's file. Pointer identity is enough
+here, although it cannot tell two dups of one object apart: the object is the
+socket itself, so a dup of the same ctl at the number is the same socket.
 
 `specs/handle_slots.tla` models the numbers, which `handles.tla` does not.
 Its three buggy configurations each find a counterexample:

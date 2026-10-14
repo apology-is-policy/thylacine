@@ -33,6 +33,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/errno.h>    // errno-rollout: T_E_NOENT / T_E_ACCES assertions
+#include <thylacine/handle.h>
 #include <thylacine/path.h>     // #66: quarry->path assertions
 #include <thylacine/perm.h>
 #include <thylacine/proc.h>

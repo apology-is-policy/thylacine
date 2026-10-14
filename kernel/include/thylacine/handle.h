@@ -297,11 +297,17 @@ int handle_close(struct Proc *p, hidx_t h);
 // A guarded HandleClose(p, h): it adds no transition the spec lacks.
 int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj);
 
-// Swap what a LIVE handle denotes, in place, keeping the same slot index.
+// Swap what a LIVE handle denotes, in place, keeping the same slot index, and
+// only while the slot still names `expect` -- an object the caller holds its
+// OWN reference on, so its address cannot be freed and handed to a newcomer.
+// connect() sleeps between choosing the socket and the swap; a number a peer
+// thread closed and reused meanwhile names another object and is refused,
+// never swapped out from under that thread.
 // Returns 0 on success, -1 on any refusal (out-of-range h, empty slot, bad
-// args, or a kind outside the permitted pair). On success the outgoing object
-// is released exactly once; on any refusal nothing is touched and the caller
-// still owns the reference it passed in.
+// args, a kind outside the permitted pair, or a slot that no longer names
+// `expect`). On success the outgoing object is released exactly once; on any
+// refusal nothing is touched and the caller still owns the reference it passed
+// in.
 //
 // WHY THIS EXISTS, AND WHY IT IS THIS NARROW (VIVARIUM V-5, docs/VIVARIUM.md
 // section 5.5.1). A Linux `connect()` must turn the guest's socket fd from the
@@ -332,8 +338,8 @@ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *
 // the phenotype's socket translators, which have already validated the guest's
 // arguments. Exposing it as a syscall would be a new ABI with none of the
 // above applied by whoever called it.
-int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
-                   rights_t rights, void *obj);
+int handle_replace(struct Proc *p, hidx_t h, const void *expect,
+                   enum kobj_kind kind, rights_t rights, void *obj);
 
 // Look up a handle into a caller-owned snapshot, with a reference HELD on
 // the underlying kobj. Returns 0 on success (*out filled: kind / rights /

@@ -1044,6 +1044,8 @@ void test_vivarium_socktab_connecting(void);
 void test_vivsock_accept_wait_is_over(void);
 void test_vivsock_connect_tcp_holds_the_dial(void);
 void test_vivsock_connect_udp_never_waits(void);
+void test_vivsock_connect_keeps_a_reused_number(void);
+void test_vivsock_socket_unwind_publishes_nothing(void);
 void test_vivsock_connect_eintr_then_retry(void);
 void test_vivsock_connect_connecting_resumes(void);
 void test_vivsock_connect_failure_verdicts(void);
@@ -3197,6 +3199,8 @@ struct test_case g_tests[] = {
     { "vivsock.accept_wait_is_over",         test_vivsock_accept_wait_is_over,         false, NULL },
     { "vivsock.connect_tcp_holds_the_dial",  test_vivsock_connect_tcp_holds_the_dial,  false, NULL },
     { "vivsock.connect_udp_never_waits",     test_vivsock_connect_udp_never_waits,     false, NULL },
+    { "vivsock.connect_keeps_a_reused_number", test_vivsock_connect_keeps_a_reused_number, false, NULL },
+    { "vivsock.socket_unwind_publishes_nothing", test_vivsock_socket_unwind_publishes_nothing, false, NULL },
     { "vivsock.connect_eintr_then_retry",    test_vivsock_connect_eintr_then_retry,    false, NULL },
     { "vivsock.connect_connecting_resumes",  test_vivsock_connect_connecting_resumes,  false, NULL },
     { "vivsock.connect_failure_verdicts",    test_vivsock_connect_failure_verdicts,    false, NULL },
