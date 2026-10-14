@@ -338,7 +338,13 @@ can switch the thread, and every exception path and all of `extinction()`
 run masked, so the dying path reads no thread state. `extinction_tx_enter`
 returns a token (`EXTINCTION_TX_HELD` or `EXTINCTION_TX_BYTE`) that
 `extinction_tx_exit` takes. When a held byte's hold drops, a preempt that
-came due under it is taken at once (`sched_preempt_point`), so a kernel
+came due under it is taken at once (`sched_take_deferred_preempt`), so a kernel
 thread printing a long line is not left non-preemptible for most of it.
 Tests: the masked leg of `extinction.tx_enter_holds_the_thread_on_its_cpu`,
 and `extinction.tx_exit_takes_a_pending_preempt`.
+
+The function is `sched_take_deferred_preempt`; ARCH 8.12's deleted
+`sched_preempt_point` was a different mechanism (an unmask window inside a
+masked syscall body). `extinction.tx_exit_takes_a_pending_preempt` reads its
+verdict from an iteration no timer tick crossed (up to eight tries), since a
+tick in the test's short unheld windows would take the preempt itself.

@@ -424,7 +424,7 @@ Absorbed `docs/reference/15-scheduler.md` at
 the execve immediate-install, plus the #214 F1 depth reset, are
 [[chg-2026-08-16-sched-addrspace-install]].
 
-**`sched_preempt_point` (2026-10-14).** `preempt_check_irq` from thread
+**`sched_take_deferred_preempt` (2026-10-14).** (Not ARCH 8.12's deleted `sched_preempt_point`, which unmasked a window inside a masked syscall body; this one masks.) `preempt_check_irq` from thread
 context: it masks IRQs, runs the same check (scheduler up, a resched pending,
 a valid thread, preempt count 0, not in a syscall body) and restores. It is
 for a preempt hold that drops with IRQs on: the console gate's per-byte hold

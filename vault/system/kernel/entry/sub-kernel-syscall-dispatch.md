@@ -1648,3 +1648,7 @@ castmask and clamp.
 **Width audit round 3 append (2026-10-14).** The checker normalises spacing
 before it searches for a guard, so `(u32)  x >= N` is still a cast compare
 (self-test castnote), and the mask guard takes the same uncast rule.
+
+The guard search normalises every run of whitespace, newlines included, so a
+cast split from its word across a line is still a cast compare (self-test
+castnl).

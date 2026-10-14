@@ -163,7 +163,7 @@ void extinction_tx_exit(int token) {
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
     if (token == EXTINCTION_TX_HELD) {
         spin_preempt_dec();
-        sched_preempt_point();
+        sched_take_deferred_preempt();
     }
 }
 

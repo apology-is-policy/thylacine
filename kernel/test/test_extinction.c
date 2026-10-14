@@ -42,6 +42,8 @@
 #include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
+
+#include "../../arch/arm64/timer.h"
 #include <thylacine/types.h>
 
 void test_extinction_claim_word_exactly_one_winner(void);
@@ -188,14 +190,23 @@ void test_extinction_tx_enter_holds_the_thread_on_its_cpu(void) {
 // A preempt that came due while a byte held the thread is taken when the hold
 // drops, not left for an IRQ that happens to land between two bytes: a thread
 // printing a long line is otherwise non-preemptible for most of it.
+// A tick between the set and the read would take the preempt itself and pass a
+// gate that never does, so the verdict comes from an iteration no tick crossed.
 void test_extinction_tx_exit_takes_a_pending_preempt(void) {
     unsigned cpu = smp_cpu_idx_self();
-    sched_set_need_resched_for_test(cpu);
-    int token = extinction_tx_enter();
-    if (token) extinction_tx_exit(token);
-    bool still = sched_need_resched_pending(cpu);
-    sched_clear_need_resched_for_test(cpu);
+    int token = 0;
+    bool still = true, quiet = false;
+    for (int i = 0; i < 8 && !quiet; i++) {
+        u64 t0 = timer_get_ticks();
+        sched_set_need_resched_for_test(cpu);
+        token = extinction_tx_enter();
+        if (token) extinction_tx_exit(token);
+        still = sched_need_resched_pending(cpu);
+        sched_clear_need_resched_for_test(cpu);
+        quiet = timer_get_ticks() == t0;
+    }
 
+    TEST_ASSERT(quiet, "eight iterations each crossed a tick; no verdict");
     TEST_ASSERT(token == EXTINCTION_TX_HELD, "the suite runs with irqs on, so the byte is held");
     TEST_ASSERT(!still, "the hold's drop takes the preempt that came due under it");
 }

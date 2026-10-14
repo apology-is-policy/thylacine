@@ -384,7 +384,7 @@ mutant_build() {
 # (so a timeout is one the provoker reached). MF_TIMEOUT is its BOOT_TIMEOUT.
 mutant_fault() {
   apply "$@"
-  ( set +e; BOOT_TIMEOUT=$MF_TIMEOUT tools/test-fault.sh "$MF_VARIANT" > "$OUT/$1-fault.log" 2>&1; echo $? > "$OUT/$1-fault.rc" )
+  ( set +e; BOOT_TIMEOUT=$MF_TIMEOUT THYLACINE_FAULT_BUILD_ARGS="$MF_BUILD_ARGS" tools/test-fault.sh "$MF_VARIANT" > "$OUT/$1-fault.log" 2>&1; echo $? > "$OUT/$1-fault.rc" )
   cp "build/test-fault-$MF_VARIANT.log" "$OUT/$1-qemu.log" 2>/dev/null || true
   record "$1: test-fault exit $(cat "$OUT/$1-fault.rc")"
   [ "$(cat "$OUT/$1-fault.rc")" != 0 ] || { echo "$1: $MF_VARIANT PASSED on the mutant -- the witness cannot fail"; exit 2; }
@@ -635,7 +635,7 @@ void extinction_tx_exit(int token) {
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
     if (token == EXTINCTION_TX_HELD) {
         spin_preempt_dec();
-        sched_preempt_point();
+        sched_take_deferred_preempt();
     }
 }
 ' \
@@ -657,7 +657,7 @@ void extinction_tx_exit(int token) {
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
     if (token == EXTINCTION_TX_HELD) {
-        sched_preempt_point();
+        sched_take_deferred_preempt();
     }
 }
 '
@@ -666,7 +666,7 @@ ok M20 "exactly $T_EXP at '$W_EXP'"
 echo "=== M21: the hold's drop no longer takes a pending preempt ==="
 mutant m21 kernel/extinction.c \
 '        spin_preempt_dec();
-        sched_preempt_point();
+        sched_take_deferred_preempt();
 ' \
 '        spin_preempt_dec();              // MUTANT M21 no preempt point
 '
@@ -694,7 +694,7 @@ void extinction_tx_exit(int token) {
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
     if (token == EXTINCTION_TX_HELD) {
         spin_preempt_dec();
-        sched_preempt_point();
+        sched_take_deferred_preempt();
     }
 }
 ' \
@@ -725,7 +725,7 @@ lease fault; floor pre-fault
 # prefix survives at column 0, a torn body reads as a wrong message, and a whole
 # body with a peer byte beside it fails the whole-line check. The chatter must
 # have run.
-MF_VARIANT=extinction_peer_chatter; MF_TIMEOUT=60; MF_WHY='timeout|wrong extinction message|is not a whole line'; MF_SEEN='fault-test: invoking extinction_peer_chatter'
+MF_BUILD_ARGS=''; MF_VARIANT=extinction_peer_chatter; MF_TIMEOUT=60; MF_WHY='timeout|wrong extinction message|is not a whole line'; MF_SEEN='fault-test: invoking extinction_peer_chatter'
 mutant_fault b1 arch/arm64/uart.c \
 'void uart_putc(char c) {
     int token = extinction_tx_enter();
@@ -739,7 +739,7 @@ mutant_fault b1 arch/arm64/uart.c \
 }
 '
 record "B1 DISCRIMINATED: without the gate extinction_peer_chatter FAILS: $(/usr/bin/grep -E '^==> \[extinction_peer_chatter\] FAIL' "$OUT/b1-fault.log" | head -1 | cut -c1-160)"
-MF_VARIANT=extinction_peer_chatter; MF_TIMEOUT=300; MF_WHY="ALSO 'console-claim: taken with irqs on'"; MF_SEEN=''
+MF_BUILD_ARGS=''; MF_VARIANT=extinction_peer_chatter; MF_TIMEOUT=300; MF_WHY="ALSO 'console-claim: taken with irqs on'"; MF_SEEN=''
 mutant_fault b4 kernel/extinction.c \
 '    // restored: every path from here parks.
     irq_mask_local();
@@ -750,8 +750,10 @@ mutant_fault b4 kernel/extinction.c \
 record "B4 DISCRIMINATED: a claim with IRQs on FAILS the variant: $(/usr/bin/grep -E '^==> \[extinction_peer_chatter\] FAIL' "$OUT/b4-fault.log" | head -1 | cut -c1-160)"
 # The round-2 gate read current_thread() on every byte, the dying path's
 # included: under recursive_kernel_fault's wild TPIDR_EL1 the banner's first
-# byte faults, and the CPU parks with nothing printed.
-MF_VARIANT=recursive_kernel_fault; MF_TIMEOUT=60; MF_WHY='timeout'; MF_SEEN='fault-test: invoking recursive_kernel_fault'
+# byte faults, and the CPU parks with nothing printed. That gate also fails two
+# suite tests, and the fault image runs the suite before its provoker, so this
+# leg's kernel is built without the suite (the default preset, TESTS=n).
+MF_BUILD_ARGS='--config default --set TESTS=n'; MF_VARIANT=recursive_kernel_fault; MF_TIMEOUT=60; MF_WHY='timeout'; MF_SEEN='fault-test: invoking recursive_kernel_fault'
 mutant_fault b5 kernel/extinction.c \
 'int extinction_tx_enter(void) {
     u64 daif;
@@ -773,7 +775,7 @@ void extinction_tx_exit(int token) {
     extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
     if (token == EXTINCTION_TX_HELD) {
         spin_preempt_dec();
-        sched_preempt_point();
+        sched_take_deferred_preempt();
     }
 }
 ' \

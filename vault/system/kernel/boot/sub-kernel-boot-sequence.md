@@ -386,3 +386,8 @@ test-fault.sh lets the log stop growing (bounded, ~5 s) before it kills a
 variant that printed its expected line: the whole-line and forbidden-line
 checks read what the kernel prints after the banner, and a log cut short
 would judge a late line absent.
+
+test-fault.sh passes `THYLACINE_FAULT_BUILD_ARGS` (word-split) to build.sh
+before the variant's define. A harness whose mutant fails a suite test, which
+would extinct before the provoker, builds that variant with `--config default
+--set TESTS=n`.

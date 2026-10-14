@@ -77,8 +77,8 @@ def check(src, name):
                 above = raw[raw.rfind('\n', 0, max(line_start - 1, 0)) + 1:line_start]
                 if re.search(r'^[^"]*// width:', line) or above.strip().startswith('// width:'):
                     continue
-                # spacing normalised, so UNCAST's fixed-width lookbehind sees a cast
-                before = re.sub(r'[ \t]+', ' ', body[:c.start()])
+                # whitespace normalised, so UNCAST's fixed-width lookbehind sees a cast
+                before = re.sub(r'\s+', ' ', body[:c.start()])
                 gs = guards(p) + [r'\bif\s*\([^;{}]*' + UNCAST + r'\b' + re.escape(p) + r'\s*&\s*~\s*' + v + r'(?!\w)[^;{}]*' + REFUSE for v in masks]
                 if any(re.search(g, before) for g in gs):
                     continue
@@ -115,12 +115,13 @@ def self_test():
     castcmp = 'static s64 sys_aa(u64 x) {\n    if ((u32)x >= LIMIT) return -1;\n    return f((u32)x);\n}\n'
     castmask = 'static s64 sys_ab(u64 x) {\n    if ((u32) x & ~(u64)M) return -1;\n    return f((u32)x);\n}\n'
     castnote = 'static s64 sys_ad(u64 x) {\n    if ((u32)  x >= LIMIT) return -1; // width: low half\n    return f((u32)x);\n}\n'
+    castnl = 'static s64 sys_ae(u64 x) {\n    if ((u32)\n        x >= LIMIT) return -1; // width: low half\n    return f((u32)x);\n}\n'
     clamp = 'static s64 sys_ac(u64 x) {\n    if (x >= LIMIT) return 0;\n    return f((u32)x);\n}\n'
     blockok = 'static s64 sys_y(u64 x) {\n    if (x > 0xffffffffull) { put(); return -1; }\n    return f((u32)x);\n}\n'
     want = {ok: 0, helper: 0, noted: 0, bad: 1, late: 1, double: 1, viv: 0,
             comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1,
             regbad: 1, regok: 0, regother: 1, regcopy: 1, prefix: 1,
-            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, charq: 1, castcmp: 2, castmask: 2, castnote: 1, clamp: 0, blockok: 0}
+            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, charq: 1, castcmp: 2, castmask: 2, castnote: 1, castnl: 1, clamp: 0, blockok: 0}
     for src, n in want.items():
         got = len(check(src, 'self-test'))
         if got != n:

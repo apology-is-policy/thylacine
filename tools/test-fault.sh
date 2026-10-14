@@ -161,8 +161,13 @@ for variant in $selected; do
     # destruction of a clade-baked pool (#101). Surfacing build.sh's bake config
     # line makes both visible without restoring the full build spew.
     bake_log="$BUILD_DIR_BASE/test-fault-$variant-build.log"
+    # THYLACINE_FAULT_BUILD_ARGS: extra build.sh arguments, word-split (a
+    # harness that must reach a provoker past a suite its mutant fails passes
+    # "--config default --set TESTS=n").
+    read -r -a fault_build_args <<< "${THYLACINE_FAULT_BUILD_ARGS:-}"
     if ! "$REPO_ROOT/tools/build.sh" kernel \
         --build-dir="$build_dir" \
+        ${fault_build_args[@]+"${fault_build_args[@]}"} \
         -- -DTHYLACINE_FAULT_TEST="$variant" > "$bake_log" 2>&1; then
         echo "==> [$variant] BUILD FAILED -- tail of $bake_log:" >&2
         tail -20 "$bake_log" >&2

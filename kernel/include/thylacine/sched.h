@@ -421,6 +421,6 @@ void preempt_check_irq(void);
 
 // preempt_check_irq from thread context with IRQs on: masks, runs the same
 // check, restores. For a preempt hold that drops outside any IRQ.
-void sched_preempt_point(void);
+void sched_take_deferred_preempt(void);
 
 #endif // THYLACINE_SCHED_H

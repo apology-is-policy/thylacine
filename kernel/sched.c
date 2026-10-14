@@ -2765,7 +2765,7 @@ void preempt_check_irq(void) {
 // here, not at whichever IRQ happens to land between two holds. An IRQ taken on
 // the next instruction would run the same check, so this adds no switch point a
 // caller could not already meet.
-void sched_preempt_point(void) {
+void sched_take_deferred_preempt(void) {
     irq_state_t s = spin_lock_irqsave(NULL);
     preempt_check_irq();
     spin_unlock_irqrestore(NULL, s);
