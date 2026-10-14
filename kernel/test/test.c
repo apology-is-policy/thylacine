@@ -155,6 +155,7 @@ void test_timer_arm_oneshot_restores(void);
 void test_extinction_claim_word_exactly_one_winner(void);
 void test_extinction_console_unclaimed_on_clean_boot(void);
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
+void test_extinction_tx_gate_counts_nested_bytes(void);
 void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
@@ -2063,6 +2064,7 @@ struct test_case g_tests[] = {
     { "extinction.claim_word_exactly_one_winner", test_extinction_claim_word_exactly_one_winner, false, NULL },
     { "extinction.console_unclaimed_on_clean_boot", test_extinction_console_unclaimed_on_clean_boot, false, NULL },
     { "extinction.tx_gate_admits_only_the_owner_once_claimed", test_extinction_tx_gate_admits_only_the_owner_once_claimed, false, NULL },
+    { "extinction.tx_gate_counts_nested_bytes", test_extinction_tx_gate_counts_nested_bytes, false, NULL },
     { "extinction.tx_wait_waits_out_a_peer_byte", test_extinction_tx_wait_waits_out_a_peer_byte, false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },

@@ -57,11 +57,13 @@ void extinction_tx_exit(void);
 
 // The gate's pure cores, exported so a test can drive them on its own words (the
 // live ones cannot be claimed without silencing the rest of the boot). gate:
-// publish `busy`, then admit iff `word` is unclaimed or `owner`; on refusal
-// `busy` is cleared again. wait: wait out every busy[c], c != self, under a
-// bound; 1 iff every flag cleared in time.
-int extinction_tx_gate_core(volatile uint8_t *busy, const uint32_t *word, uint8_t owner);
-int extinction_tx_wait_core(const volatile uint8_t *busy, unsigned n, unsigned self);
+// raise `busy` by one, then admit iff `word` is unclaimed or `owner`; on refusal
+// `busy` drops back. exit: drop it by one (a depth, so a nested byte's exit
+// leaves the outer byte marked). wait: wait out every busy[c], c != self, under
+// a bound; 1 iff every flag reached zero in time.
+int  extinction_tx_gate_core(volatile uint8_t *busy, const uint32_t *word, uint8_t owner);
+void extinction_tx_exit_core(volatile uint8_t *busy);
+int  extinction_tx_wait_core(const volatile uint8_t *busy, unsigned n, unsigned self);
 
 // Convenience macro for assert-style checks. The expression that fails
 // shows up in the message verbatim so a developer can grep the source.

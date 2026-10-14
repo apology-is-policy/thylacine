@@ -82,6 +82,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 // uart_putc). Its cores run on the test's own words, for the reason above.
 //
 //   extinction.tx_gate_admits_only_the_owner_once_claimed
+//   extinction.tx_gate_counts_nested_bytes
 //   extinction.tx_wait_waits_out_a_peer_byte
 //
 // Like the claim test these are sequential: they pin each side's decision, not
@@ -89,6 +90,7 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
 // extinction_peer_chatter variant, which tears the banner without the gate.
 
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
+void test_extinction_tx_gate_counts_nested_bytes(void);
 void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 
 void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
@@ -118,6 +120,35 @@ void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
         "its whole bound");
     TEST_ASSERT(owner == 1 && owner_busy == 1,
         "the owner's own bytes (the banner, the dump) still pass");
+}
+
+// An exception taken inside uart_putc (after the gate, before the byte) can
+// print through the gate again on the same cpu. Its exit, or its refusal by a
+// claim that landed meanwhile, must leave the outer byte marked in flight.
+void test_extinction_tx_gate_counts_nested_bytes(void) {
+    volatile uint8_t busy = 0;
+    uint32_t word = 0;
+
+    int outer = extinction_tx_gate_core(&busy, &word, 0);
+    int inner = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t both = busy;
+    extinction_tx_exit_core(&busy);
+    uint8_t after_inner = busy;
+
+    word = 1;
+    int refused = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t after_refusal = busy;
+    extinction_tx_exit_core(&busy);
+    uint8_t after_outer = busy;
+
+    TEST_ASSERT(outer == 1 && inner == 1 && both == 2,
+        "a nested byte on the same cpu is counted, not merged with the outer one");
+    TEST_ASSERT(after_inner == 1,
+        "the nested byte's exit leaves the outer byte in flight, so a winner "
+        "still waits for it");
+    TEST_ASSERT(refused == 0 && after_refusal == 1,
+        "a nested byte refused by a fresh claim leaves the outer byte in flight");
+    TEST_ASSERT(after_outer == 0, "the outer byte's exit clears the cpu");
 }
 
 void test_extinction_tx_wait_waits_out_a_peer_byte(void) {

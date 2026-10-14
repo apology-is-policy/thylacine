@@ -94,6 +94,8 @@ int extinction_console_claimed(void) {
 // winner before its banner. Dekker order: the peer publishes its flag and then
 // reads the claim, the winner publishes the claim and then reads every flag,
 // each with a full barrier between -- so at least one side sees the other.
+// The flag is a depth, not a boolean: an exception taken inside uart_putc may
+// print through it again, and its exit must not clear the outer byte's mark.
 static volatile u8 g_extinction_tx_busy[DTB_MAX_CPUS];
 
 // A peer's committed byte can sit in uart_putc's bounded TXFF wait (20 ms); past
@@ -102,11 +104,15 @@ static volatile u8 g_extinction_tx_busy[DTB_MAX_CPUS];
 #define EXTINCTION_TX_WAIT_MAX_ITERS (1u << 24)
 
 int extinction_tx_gate_core(volatile u8 *busy, const uint32_t *word, u8 owner) {
-    __atomic_store_n(busy, 1u, __ATOMIC_SEQ_CST);
+    (void)__atomic_fetch_add(busy, 1u, __ATOMIC_SEQ_CST);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (__atomic_load_n(word, __ATOMIC_SEQ_CST) == 0u || owner) return 1;
-    __atomic_store_n(busy, 0u, __ATOMIC_RELEASE);
+    extinction_tx_exit_core(busy);
     return 0;
+}
+
+void extinction_tx_exit_core(volatile u8 *busy) {
+    (void)__atomic_fetch_sub(busy, 1u, __ATOMIC_RELEASE);
 }
 
 int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) {
@@ -136,7 +142,7 @@ int extinction_tx_enter(void) {
 void extinction_tx_exit(void) {
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
-    __atomic_store_n(&g_extinction_tx_busy[cpu], 0u, __ATOMIC_RELEASE);
+    extinction_tx_exit_core(&g_extinction_tx_busy[cpu]);
 }
 
 // TRUE for exactly one CPU per boot. The winner returns only once no peer has a

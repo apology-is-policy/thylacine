@@ -307,4 +307,8 @@ already committed to (Dekker order, seq_cst both sides). Tests:
 `extinction.tx_gate_admits_only_the_owner_once_claimed`,
 `extinction.tx_wait_waits_out_a_peer_byte`, and test-fault.sh's
 `extinction_peer_chatter`, matched as a whole line. IPI_HALT (stopping the
-peers) stays a reservation.
+peers) stays a reservation. The per-CPU mark is a depth, not a flag: an
+exception taken inside `uart_putc` may print through the gate again, and a
+flag cleared by that inner exit (or by its refusal under a fresh claim) would
+let the outer byte land unwaited inside the banner
+(`extinction.tx_gate_counts_nested_bytes`).

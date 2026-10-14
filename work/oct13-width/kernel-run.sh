@@ -34,6 +34,8 @@
 #              refused where Linux runs the call its low half names.
 #   M18        lseek's whence guard stops refusing (a statement that does not
 #              return): the build refuses -- a compare is not a guard.
+#   M19        the console gate's per-CPU mark is a flag again (store 1 / store
+#              0), so a nested byte's exit clears the outer byte's mark.
 #   B1         uart_putc without the console gate: tools/test-fault.sh's
 #              extinction_peer_chatter must FAIL (the banner is torn).
 #   B2         the committed gate: the same variant PASSes, the banner whole.
@@ -62,6 +64,7 @@ T_FORK=fork.rfork_arg_rejection
 T_REG=vivarium.t1_keeps_guest_registers
 T_EXG=extinction.tx_gate_admits_only_the_owner_once_claimed
 T_EXW=extinction.tx_wait_waits_out_a_peer_byte
+T_EXN=extinction.tx_gate_counts_nested_bytes
 W_PRB="every too-wide argument the probe passed was refused"
 W_T1CLOSE="close"
 W_T2NEG="readlinkat: a negative bufsiz is refused before the path"
@@ -69,6 +72,7 @@ W_T2RND="getrandom: a high half in flags is Linux's to drop"
 W_FORK="a flags word wider than 32 bits must be refused, not cut down to RFPROC"
 W_T2WV="writev: a high half on the fd is Linux's to drop"
 W_REG="a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half"
+W_EXN="a nested byte on the same cpu is counted, not merged with the outer one"
 PROBE_SRC=usr/argwidth-probe/argwidth-probe.c
 AW_BIN=build/ramfs-src/bin/argwidth-probe
 BR_BIN=build/ramfs-src/bin/loom-bridge-probe
@@ -77,8 +81,8 @@ QUAL_LINE='PRIVATE-ASYNC QUALIFICATION build'
 SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
-FILES="kernel/syscall.c kernel/vivarium.c arch/arm64/uart.c"
-NMUT=19
+FILES="kernel/syscall.c kernel/vivarium.c arch/arm64/uart.c kernel/extinction.c"
+NMUT=20
 MUTATED=0
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
@@ -172,7 +176,7 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 HEAD_SHA=$(git rev-parse HEAD)
 record "HEAD $HEAD_SHA"
-NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK $T_REG $T_EXG $T_EXW"
+NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK $T_REG $T_EXG $T_EXW $T_EXN"
 for t in $NAMED; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
@@ -182,7 +186,7 @@ record "width checker: self-test and the committed syscall.c pass"
 python3 - "$T_PRB" "$W_PRB" test_argwidth_probe.c "$T_T1" "$W_T1CLOSE" test_vivarium.c \
   "$T_T2" "$W_T2NEG" test_vivarium.c "$T_T2" "$W_T2RND" test_vivarium.c \
   "$T_FORK" "$W_FORK" test_fork.c "$T_T2" "$W_T2WV" test_vivarium.c \
-  "$T_REG" "$W_REG" test_vivarium.c <<'MEMBER' || exit 3
+  "$T_REG" "$W_REG" test_vivarium.c "$T_EXN" "$W_EXN" test_extinction.c <<'MEMBER' || exit 3
 import re, sys
 reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
 a = sys.argv[1:]
@@ -560,6 +564,32 @@ mutant_build m18 kernel/syscall.c \
 '    if (whence_raw > 0xffffffffull)                  (void)0; /* MUTANT M18 no refusal */
 '
 record "M18 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== M19: the console gate's mark is a flag, not a depth ==="
+mutant m19 kernel/extinction.c \
+'    (void)__atomic_fetch_add(busy, 1u, __ATOMIC_SEQ_CST);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(word, __ATOMIC_SEQ_CST) == 0u || owner) return 1;
+    extinction_tx_exit_core(busy);
+    return 0;
+}
+
+void extinction_tx_exit_core(volatile u8 *busy) {
+    (void)__atomic_fetch_sub(busy, 1u, __ATOMIC_RELEASE);
+}
+' \
+'    __atomic_store_n(busy, 1u, __ATOMIC_SEQ_CST); // MUTANT M19 a flag, not a depth
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(word, __ATOMIC_SEQ_CST) == 0u || owner) return 1;
+    __atomic_store_n(busy, 0u, __ATOMIC_RELEASE);
+    return 0;
+}
+
+void extinction_tx_exit_core(volatile u8 *busy) {
+    __atomic_store_n(busy, 0u, __ATOMIC_RELEASE);
+}
+'
+expect_fails M19 1 "$T_EXN|$W_EXN"
+ok M19 "exactly $T_EXN at '$W_EXN'"
 echo "=== B1-B3: the extinction banner against peer chatter (tools/test-fault.sh) ==="
 lease fault; floor pre-fault
 mutant_fault b1 arch/arm64/uart.c \
