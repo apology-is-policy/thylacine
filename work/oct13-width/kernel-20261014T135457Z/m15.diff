@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:12:54
+@@ -14652,7 +14652,7 @@
+ 
+     case VIV_LINUX_WRITEV:
+         // writev(fd, iov, iovcnt): x0..x2.
+-        return viv_writev((u64)(u32)args[0], args[1], args[2]);  // fdget_pos(unsigned int)
++        return viv_writev(args[0], args[1], args[2]);  // MUTANT M15 whole fd
+ 
+     case VIV_LINUX_IOCTL:
+         // ioctl(fd, request, argp): x0..x2. C2-k1b: terminal control on a cons

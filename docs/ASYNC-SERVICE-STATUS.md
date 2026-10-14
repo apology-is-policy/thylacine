@@ -4512,3 +4512,165 @@ mapped (15:48Z, P2). Still open: the same close-by-number pattern at twelve
 other syscall sites (one sweep, next after the width sweep); the width sweep of
 the other casting handlers; libthyla-rs loom.rs's six pre-existing rustfmt
 hunks.
+
+## Syscall argument width: a too-wide argument is refused, never cast down (Corona, October 14 -- audit closed)
+
+Operator vote 8 (October 13) made refusal the rule (ERRORS.md principle 6):
+an argument that does not fit the type its handler reads is refused, never
+cast down to whatever its low half names. Loom conformed with the votes 7-9
+batch; this is the one sweep over the rest of kernel/syscall.c. The dispatch
+hands every frame register to a 64-bit parameter at all 113 call sites; across
+the handlers and their raw-argument helpers, 37 descriptor reads in 32
+functions and 19 other words were cast down with no full-width check.
+
+Three helpers at the top of syscall.c carry the rule. `sys_hidx_arg` turns a
+descriptor wider than an index into -1, so the handler gives its own
+dead-descriptor answer, in its existing order. `sys_s32_arg` accepts a signed
+word only as the sign-extension an `int` binding produces, so -1 still means
+any child and wait forever. `sys_word32_arg` accepts torpor's expected value
+under either extension: pouch passes `int val` (musl's lock words are
+negative) and libt `unsigned int`, and a zero-extension-only check would spin
+every contended pouch lock. Unsigned 32-bit words refuse a high half with
+-EINVAL where the cast was. Kept on purpose, each with a `// width:` note:
+exits' status byte, pci_claim's packed ordinal, three words a full-width check
+already refused, and the rfork flags compare (below).
+
+The Linux phenotype keeps Linux's truncation, because Linux's prototypes
+declare those words `int` or `unsigned int` and AAPCS64 leaves the high half
+unspecified (I-43: the phenotype confers shape, not authority). `struct
+viv_row` gains `u32_words`/`s32_words` masks, set on the eleven T1 rows from
+Linux's prototypes; the T2 shells narrow their own (fsync, fstat, both mmap
+file arms, getrandom's flags, readlinkat's `int bufsiz`).
+
+Defects found along the way, each pre-existing:
+- readlinkat's T2 shell passed bufsiz whole, so a negative or junk-high bufsiz
+  copied the whole link target into a buffer the guest sized by the low half
+  (OPEN-BUGS 19:16Z). It now reads `int` and refuses <= 0 before the path, as
+  Linux does.
+- `sys_rfork_handler` read `(unsigned)ctx->regs[0]`, so flags
+  `(1<<32)|RFPROC` forked as RFPROC (OPEN-BUGS 19:45Z). It refuses with
+  -EINVAL. The census had missed it because the handler takes the frame, not
+  parameters.
+- joey's boot probe pinned the old lseek narrowing (hiwhence expected 0) and
+  stopped the first full boot. It now expects -22.
+- The probe's own narrow wstat calls named /bin/hello and would have changed
+  its mode and owner for every later test; they use a closed descriptor.
+- The Linux syscall number itself (x8) was compared full-width by the
+  vivarium, where Linux reads an `int`: it is now read by its low 32 bits.
+- A T1 call came back with the guest's x8 holding the native number (getpid's
+  72 is Linux's pselect6) and, after the sweep, narrowed words in x1-x5.
+  Linux hands back every register but x0, and musl declares them asm inputs,
+  so compiled code may keep them live. The native arms moved into
+  `syscall_native_switch`, and the phenotype branch restores the guest's
+  x1-x5 and x8 after a translated call.
+
+Audit round 1 (Fable 5.1, max effort, cross-family) found one P1: four T2
+shells (readv, writev, sendto, recvfrom) handed Linux's fd whole to the
+native read and write handlers, which now refuse a wide word where Linux
+reads the low half. They narrow at the call sites, and `viv_sock_row` and the
+fcntl arm compare the low half too. Its P2 was the harness's own filter. The
+self-audit that ran alongside found two descriptor helpers the sweep had
+missed, `sys_lookup_root_source` (chroot, pivot_root) and
+`sys_resolve_dir_wr` (unlink, rename): the checker skipped functions that
+return a pointer, and the auditor's census had reused the checker's pattern,
+so both missed the same two. The checker now reads that shape, and counts a
+compare as a guard only when its statement refuses. sendto and recvfrom have
+no runtime leg (no socket test drives either call); chroot and pivot_root are
+witnessed only by a build the checker refuses.
+
+
+The same run showed a defect outside the sweep: an `EXTINCTION:` banner torn
+character by character by other CPUs' test output, so the gate never saw it
+and reported a timeout. In the wrong circumstances (a crash on a CPU nothing
+waits on, then a passing suite) that would read as a clean boot. Every direct
+console byte now passes a per-CPU gate. Once a CPU owns the console, other
+CPUs' bytes are dropped, and the winner waits, under one bound for all peers,
+for any byte already in flight. Three more audit rounds shaped it:
+- The mark is a depth, so an exception's nested byte cannot clear the outer
+  one.
+- A byte printed with interrupts on holds its thread's preempt count, so the
+  thread cannot migrate between marking a CPU and clearing it. The hold's drop
+  takes any preempt that came due under it (`sched_take_deferred_preempt`,
+  not ARCH 8.12's deleted preempt point).
+- With interrupts masked, the gate reads no thread state at all. The dying
+  path may run on a wild TPIDR_EL1.
+- `extinction()` masks interrupts before it claims the console. The claim
+  records DAIF, and a claim taken with interrupts on prints
+  "console-claim: taken with irqs on".
+
+tools/test-fault.sh gained `extinction_peer_chatter`, which runs chatter on
+every other CPU and requires the banner as one whole line, with the claim
+witness forbidden. It also waits for the log to settle before it judges
+(post-banner output was cut off by the kill), and honours
+THYLACINE_FAULT_BUILD_ARGS.
+
+The static guard is tools/check-arg-width.py, run fatally by build.sh with a
+self-test of 31 cases. It fails the build on a narrowing cast of a raw word (a
+u64 parameter, a frame register, or a u64 copy of one) unless a full-width
+check comes first: a compare whose statement refuses, a mask, or a width
+helper. A `// width:` note on the line or the line above also passes it.
+Strings and char literals are kept whole, whitespace is normalised, and a
+compare on a cast of the word does not count. A -Wshorten-64-to-32 compile of
+syscall.c under the kernel's flags lists none (control: a planted narrowing
+was reported).
+
+Code 7409b1830 (the sweep), 3fa78bc41, 2a3dad17d, 3b0900d9f, da4651da6; the
+round-1 close 902ace443; 6dcd343ca, bbcd54328, the round-2 close b335c6cd8,
+e4615fed6, 984179e8a, the round-3 close 5025e0fe7, the round-4 close
+71386536c; harness b5e6b2ada, 4469a0bee, 8fd4b318b.
+
+Audit: four rounds, all Fable 5.1 at max effort, cross-family, with
+MODEL(start) equal to MODEL(end).
+- Round 1: 0 P0, 1 P1, 1 P2, 3 P3. The P1 is the T2 descriptor shells.
+- Round 2: 0/0/2/5. The gate's mark was per CPU while a byte belongs to a
+  thread, and the claim ran with interrupts on.
+- Round 3: 1 P0, 0 P1, 2 P2, 3 P3. Round 2's preempt hold read the current
+  thread on every byte, including the dying path. A fault with a wild thread
+  pointer then parked silently: the bug class 7dd5be19 fixed, one layer lower.
+- Round 4: 0/0/1/3. The kernel side is clean. The P2 was a harness leg that
+  could not reach its verdict, because the suite ran before the provoker.
+
+Every P0, P1 and P2 is fixed. Each P3 is fixed or stated:
+- sendto and recvfrom have no runtime leg (OPEN-BUGS 13:05Z).
+- mmio_map's and dma_map's mixed EINVAL texture is sanctioned by ERRORS.md
+  principle 6.
+- A debugger reading a thread stopped inside a T1 call sees the native
+  registers. This is recorded in sub-kernel-vivarium.
+
+Evidence. Kernel, at 71386536c (work/oct13-width/kernel-20261014T135457Z, mac
+axis, one boot per leg): 1884 of 1884 in both images, the five named tests
+PASS, argwidth-probe 72 checks, loom-bridge-probe at 70 and 71.
+
+Twenty-two mutants were each run against the suite:
+- M1-M7 and M12, M15-M17 and M19-M22 each fail exactly their predicted test
+  at its named assertion. M22 is the whole round-2 gate, and it fails both of
+  its predicted tests.
+- M8 (sys_s32_arg checking zero-extension only) fails the probe at
+  "getpgid: a sign-extended -1 is a pid, not a width" and cascades. The
+  refused wait(-1) orphans a child that later tests' waits reap, and
+  test_caps' flow thunk extincts. The harness records that set (six FAIL
+  lines, one extinction) instead of predicting it.
+- M9, M11, M13, M14 and M18 are refused by the build, each at the line
+  predicted (syscall.c:2044, :10731, :4926, :2896, :2183).
+
+Five test-fault legs:
+- B1, the console without the gate: the chatter variant FAILs, timing out.
+- B4, a claim with interrupts on: the banner arrives, but so does the
+  forbidden witness.
+- B5, the round-2 gate under recursive_kernel_fault: a silent timeout.
+- B2: the committed gate passes the chatter variant with the banner whole.
+- B3: all nine variants pass.
+
+Both probes hash equal to their controls in every leg. Both rebuilds are
+byte-identical to their controls, and `tools/check-production.sh --all`
+passes. The Go fork was pinned to a clean private clone at a6567ba for the
+run, after a bake read the shared fork mid-edit; it was unchanged across the
+run. Successful build logs and the mutant kernels are not committed. B1's
+QEMU log is committed gzipped.
+
+Closed (OPEN-BUGS): readlinkat's bufsiz (19:16Z), rfork's flags (19:45Z), the
+x8 width (10:56Z), the two descriptor helpers the sweep missed (11:03Z), the
+T1 register write-back (11:07Z), the torn banner (11:14Z), the nested byte
+(11:49Z), and the vote-8 rule itself (October 13, 12:16Z). Still open: sendto/recvfrom's runtime leg
+(13:05Z), and the close-by-number sweep (15:48Z, next; re-read October 14 with
+four more findings).

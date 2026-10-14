@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:12:03
+@@ -2893,7 +2893,7 @@
+ // closure from a pipe or /dev/null reaches almost nothing), so pivoting back to
+ // a held directory fd no longer restores the namespace.
+ static struct Spoor *sys_lookup_root_source(struct Proc *p, u64 fd_raw) {
+-    struct Spoor *source = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
++    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ); /* MUTANT M14 no note */
+     if (!source)                                     return NULL;
+     if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return NULL; }
+     return source;

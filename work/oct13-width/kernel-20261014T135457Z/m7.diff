@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:05:20
+@@ -14908,7 +14908,7 @@
+         // validation + copy-out (the F237 partial-fault scrub included), and
+         // gates on CAP_CSPRNG_READ -- kept under I-43 (shape, not authority).
+         // flags is an unsigned int, so Linux drops the high half.
+-        s64 rc = sys_getrandom_handler(args[0], args[1], (u64)(u32)args[2]);
++        s64 rc = sys_getrandom_handler(args[0], args[1], args[2]); // MUTANT M7: flags whole
+         // The native handler signals every failure (no cap / not seeded /
+         // fault) with a bare -1. -1 would read as EPERM at the libc; map it to
+         // EAGAIN, Linux getrandom's "entropy not available yet" errno and the

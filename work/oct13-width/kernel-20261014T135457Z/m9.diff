@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:07:24
+@@ -2041,7 +2041,7 @@
+     // handle" -- EBADF, the only failure close(2) has. Mapped HERE rather than
+     // inside handle_close so the internal contract (and its ~20 kernel callers,
+     // which test == 0 or ignore the result) stays byte-unchanged.
+-    return handle_close(p, sys_hidx_arg(hraw)) == 0 ? 0 : (s64)(-T_E_BADF);
++    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF); // MUTANT M9 no note
+ }
+ 
+ // =============================================================================

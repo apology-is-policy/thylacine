@@ -1,0 +1,14 @@
+==> [recursive_kernel_fault] building...
+==> populate pool: bake config CLADE=0 GOROOT=1; payloads verified PRESENT in the pool: GOROOT GOCACHE GO4C QUAKE DUKE3D TOMBRAIDER DBXCONF
+==> [recursive_kernel_fault] booting (expecting: EXTINCTION: recursive kernel fault)...
+==> [recursive_kernel_fault] FAIL: timeout (60s) — neither expected fault nor unrelated termination.
+  sched:   topology homogeneous caps=[1024 1024 1024 1024] (scale=1024; HMP placement inert when homogeneous)
+  cons:  UART RX live (INTID 33); console_mgr kthread up
+  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=5 (counts console_mgr work; per-CPU idles are BAND_IDLE, excluded)
+  tests: DISABLED (KERNEL_TESTS=OFF production build)
+  ticks: 21 (kernel breathing)
+  boot-time: 32.2 ms (target < 500 ms per VISION §4)
+  phase: P3-F
+  fault-test: invoking recursive_kernel_fault...
+
+==> Summary: 0 PASS, 1 FAIL out of 1

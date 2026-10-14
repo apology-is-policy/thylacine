@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:06:21
+@@ -81,7 +81,7 @@
+ // A signed 32-bit argument (a pid, a timeout): its binding sign-extends it, so a
+ // negative value arrives with its high bits set and fits only as that extension.
+ static bool sys_s32_arg(u64 raw, s32 *out) {
+-    if ((s64)raw < -0x80000000ll || (s64)raw > 0x7fffffffll) return false;
++    if (raw > 0x7fffffffull) return false; // MUTANT M8: zero extension only
+     *out = (s32)(s64)raw;
+     return true;
+ }

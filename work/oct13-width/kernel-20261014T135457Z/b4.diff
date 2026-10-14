@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/extinction.c	2026-10-14 15:54:58
++++ kernel/extinction.c	2026-10-14 16:23:43
+@@ -281,7 +281,7 @@
+     // First: every per-CPU fact below (depth, owner, the gate's admission) is
+     // this CPU's only while the dying thread cannot be switched out. Never
+     // restored: every path from here parks.
+-    irq_mask_local();
++    // MUTANT B4 no mask before the claim
+     extinction_reentry_guard(msg);
+     if (!extinction_claim_console()) extinction_park_suppressed();
+     extinction_claim_ring();

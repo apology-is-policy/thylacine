@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:16:11
+@@ -2179,7 +2179,7 @@
+     // because Linux's SYSCALL_DEFINE narrows `unsigned int whence`; the
+     // vivarium's lseek row narrows that word before this handler runs, so the
+     // truncation stays Linux's and never becomes the native ABI.
+-    if (whence_raw > 0xffffffffull)                  return -T_E_INVAL;
++    if (whence_raw > 0xffffffffull)                  (void)0; /* MUTANT M18 no refusal */
+     u32 whence = (u32)whence_raw;
+     if (whence != T_SEEK_SET &&
+         whence != T_SEEK_CUR &&

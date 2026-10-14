@@ -1,0 +1,12 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:13:59
+@@ -15553,8 +15553,7 @@
+             u64 kept_x8 = ctx->regs[8];
+             if (!viv_linux_dispatch(ctx, vp)) return;
+             syscall_native_switch(ctx);
+-            for (u32 i = 1; i < VIV_NARGS; i++) ctx->regs[i] = kept[i];
+-            ctx->regs[8] = kept_x8;
++            (void)kept; (void)kept_x8; // MUTANT M16 no restore
+             return;
+         }
+     }

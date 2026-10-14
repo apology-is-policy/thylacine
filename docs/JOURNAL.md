@@ -1,6 +1,94 @@
 # The autonomous-run journal
 
 
+## October 13-14: the argument-width sweep -- and the six places a census did not look (Corona)
+
+Vote 8 said a too-wide argument is refused, never cast down. The sweep's plan
+was a census: every dispatch call site hands the handler a u64 (113 of 113,
+with a planted u32 parameter as the control), then every cast of a u64
+parameter to something narrower. The first census regex missed `(int)(s64)x`
+double casts; fixing it gave 37 descriptor reads in 32 functions and 19 other
+words. Three helpers carry the rule (syscall.c 77-97). The one design point
+that needed care was torpor's expected value: pouch 0004's `__futexwait`
+passes `int val` sign-extended and musl's lock words are negative, so a
+zero-extension-only check would have spun every contended pouch lock.
+`sys_word32_arg` takes either extension.
+
+The census was right about what it searched and wrong about what it covered,
+six times:
+- **Frame registers.** `sys_rfork_handler` takes the exception frame and read
+  `(unsigned)ctx->regs[0]`; a parameter-based census cannot see it. A second
+  self-audit found it (OPEN-BUGS 19:45Z: flags `(1<<32)|RFPROC` forked as
+  RFPROC). The checker now treats `X->regs[N]` and u64 copies of one as raw
+  words, and on the old HEAD it flags exactly that line.
+- **Userspace pins.** The first control boot extincted at joey probe100,
+  "hiwhence=-22 want 0": #102 F6 had pinned the old lseek narrowing in a boot
+  probe. A rule change needs a census of the tests and probes that assert the
+  old rule, not just of the code that implements it. The follow-up census of
+  usr/, kernel/test and tools found no other pin.
+- **The positive control's side effects.** The probe's narrow wstat calls --
+  the "one bit away, must pass" half of each pair -- named /bin/hello, so a
+  passing run would have changed the mode and owner of a shared ramfs binary
+  under every later test. They now use a descriptor that was dup'd and
+  closed.
+- **The T1 test's row list** skipped exit and getpid; a count
+  `_Static_assert` beside VIV_T1_COUNT now pins it.
+- **The syscall number.** While the Fable round ran, a pass over everything
+  that reads x8 found the vivarium compares a Linux guest's syscall number
+  full-width where Linux truncates it to `int` (OPEN-BUGS 10:56Z, P3). The
+  same pass found the worse one: a T1 call came back with x8 holding the
+  native number (OPEN-BUGS 11:07Z). Both fixed in 902ace443.
+- **The checker's own shape.** Round 1's census, and mine, used the checker's
+  function pattern, which skipped functions returning a pointer. Two fd
+  helpers (chroot/pivot_root, unlink/rename) were missed by both for that one
+  reason (OPEN-BUGS 11:03Z). A census that reuses the checker's parser
+  shares its blind spot; census by callee.
+
+The run that tested the round-1 fixes' predecessor also showed a defect outside
+the sweep: M8's suite failed as predicted, but the child's banner came out
+torn by peers' "[test] ... PASS" lines, and main's own extinction lost the
+claim and parked silently, so the leg read "timeout (300s)" (OPEN-BUGS
+11:14Z). The console gate in 902ace443 closes it; the round-2 self-audit then
+found the gate's mark was a flag an exception's nested print could clear
+(OPEN-BUGS 11:49Z), made a depth in 6dcd343ca.
+
+Two harness failures were the harness's, and both taught something. M7's
+bake failed with "undefined: waitPacked": ~/projects/go-thylacine is every
+checkout's default GOFORK, and main was between two edits of sig S-3. The
+harness now takes GOFORK from the environment, refuses a dirty one, records
+its HEAD and checks it is unchanged at the end; this run used a private clone
+at a6567ba. Main has since committed the fork (3471e2a) and edits it only in
+compiling states (yip 0220). M8 (sys_s32_arg zero-extension only) failed the
+probe at exactly the predicted line, then cascaded: stub-driver's refused
+`t_wait_pid(-1)` orphans its child, later tests' waits reap the wrong pid, and
+test_caps.c:330 extincts. My prediction named only the probe line. A mutant
+that breaks a primitive this widely used has a failure set nobody should
+predict by hand; the leg now records it.
+
+The disk ran under the 8 GiB floor (7.2 GiB) mid-run, cause unfound: swap,
+local snapshots and my own files were ruled out. The operator produced a
+GrandPerspective report and asked for as much space as possible. I deleted
+regenerable caches (10.5 GiB) and, on the operator's choice of "Old
+toolchains", LLVM 20.1.8 (nothing linked it) and the floating Rust nightly
+(build.sh pins nightly-2026-09-20, which stays): about 20 GiB free. The
+operator did not choose the Codex caches, Claude data or the Firefox cache,
+and they were not touched.
+
+The console gate took three more rounds. Round 2 found its mark was per CPU while a byte belongs to
+a thread (a preempted printer let another thread clear it), and that the claim ran with interrupts
+on. My fix for the first held preemption across every byte -- by reading current_thread() --
+and round 3 found that read on the dying path: recursive_kernel_fault leaves TPIDR_EL1 wild, the
+banner's first byte faulted, and the machine parked with nothing printed. That is 7dd5be19's bug
+one layer lower, and the close that shipped it ran no test-fault, which would have caught it in
+one boot. The hold now runs only with interrupts on and reads no thread state when masked; B5
+rebuilds the round-2 gate to prove the old shape goes silent. Round 4 found a harness leg that
+could never reach its predicted verdict (the suite runs before the provoker), and closed clean
+on the kernel side.
+
+Evidence: work/oct13-width/kernel-20261014T135457Z at 71386536c -- 1884/1884 in the ci and qualification images, argwidth-probe 72, loom-bridge-probe 70/71; 22 mutants each discriminated as predicted (M8's cascade recorded: six FAIL lines, one extinction); B1, B4 and B5 fail as predicted, B2 passes and B3 passes all nine test-fault variants; both rebuilds byte-identical; check-production --all green. Audit: four rounds, Fable 5.1 at max effort, cross-family: r1 0/1/1/3, r2 0/0/2/5, r3 1/0/2/3 (dirty: the P0), r4 0/0/1/3 (kernel clean). Decisions the user made: vote 8 (10-13);
+the cleanup scope (10-14).
+
+
 ## October 13: the Loom setup rollback by identity -- and the refund that ran while the ring was still mapped (Corona)
 
 The chunk opened on a P3 the votes 7-9 audit noted: SYS_LOOM_SETUP's

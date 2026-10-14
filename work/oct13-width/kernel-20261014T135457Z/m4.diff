@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:02:15
+@@ -91,7 +91,7 @@
+ // zero-extends it, and both name the same word.
+ static bool sys_word32_arg(u64 raw, u32 *out) {
+     u64 hi = raw >> 32;
+-    if (hi != 0 && !(hi == 0xffffffffull && (raw & 0x80000000ull))) return false;
++    if (hi != 0) return false; // MUTANT M4: zero extension only
+     *out = (u32)raw;
+     return true;
+ }

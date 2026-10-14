@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/vivarium.c	2026-10-14 15:54:58
++++ kernel/vivarium.c	2026-10-14 16:03:18
+@@ -220,7 +220,7 @@
+     // unsigned int whence), pread64/pwrite64(unsigned int fd, ...).
+     { VIV_LINUX_READ,       SYS_READ,       3, 0x1 },
+     { VIV_LINUX_WRITE,      SYS_WRITE,      3, 0x1 },
+-    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1, 0x1 },
++    { VIV_LINUX_CLOSE,      SYS_CLOSE,      1 }, // MUTANT M5: no width mask
+     { VIV_LINUX_LSEEK,      SYS_LSEEK,      3, 0x5 },
+     // pread64/pwrite64 (the git 6.27 clone arm): identical (fd, buf, count,
+     // offset) shape to SYS_PREAD/SYS_PWRITE, and the native handlers validate

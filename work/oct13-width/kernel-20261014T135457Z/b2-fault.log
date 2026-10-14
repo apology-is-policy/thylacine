@@ -1,0 +1,6 @@
+==> [extinction_peer_chatter] building...
+==> populate pool: bake config CLADE=0 GOROOT=1; payloads verified PRESENT in the pool: GOROOT GOCACHE GO4C QUAKE DUKE3D TOMBRAIDER DBXCONF
+==> [extinction_peer_chatter] booting (expecting: EXTINCTION: peer chatter: this banner must reach the wire whole)...
+==> [extinction_peer_chatter] PASS (saw 'EXTINCTION: peer chatter: this banner must reach the wire whole'; 'console-claim: taken with irqs on' absent)
+
+==> Summary: 1 PASS, 0 FAIL out of 1

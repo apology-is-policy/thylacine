@@ -1,0 +1,11 @@
+--- work/oct13-width/kernel-20261014T135457Z/pristine/syscall.c	2026-10-14 15:54:58
++++ kernel/syscall.c	2026-10-14 16:11:14
+@@ -4923,7 +4923,7 @@
+         // NULL Territory) -- the prior read-then-ref raced a concurrent pivot_root.
+         return territory_root_ref(p->territory);
+     }
+-    return sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);
++    return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE); /* MUTANT M13 no note */
+ }
+ 
+ // Copy + validate a single-component name from user-VA into `scratch` (NUL-
