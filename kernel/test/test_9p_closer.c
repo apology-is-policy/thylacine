@@ -42,6 +42,7 @@ void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
 void test_p9_closer_kill_in_final_close_keeps_exit(void);
+void test_p9_closer_hunt_kill_in_final_close(void);
 void test_p9_closer_kill_at_final_close_start_forces_it(void);
 void test_p9_closer_loom_register_flushes_staged_run(void);
 extern void proc_close_handles_at_exit_for_test(struct Proc *p);
@@ -925,6 +926,35 @@ void test_p9_closer_kill_in_final_close_keeps_exit(void) {
         "premise: each close waited for its server until the kill");
     xw_expect(ex, 5);                            // exits_code(5)
     xw_expect(lo, 0);                            // the SYS_THREAD_EXIT convention
+}
+
+// HUNT (not for landing): kill_in_final_close_keeps_exit's trial, many times
+// a boot, alternating exits() and the last SYS_THREAD_EXIT. The first trial
+// that does not end with one write, a clunk and a quiet pool prints its diag
+// (with the late look and the wire) and fails the test there.
+#define XW_HUNT_TRIALS 300u
+void test_p9_closer_hunt_kill_in_final_close(void) {
+    TEST_ASSERT(closer_quiet(), "the pool is quiet at entry");
+    struct xw_obs *o = &g_xw_ex;
+    u64 t0 = timer_now_ns();
+    for (u32 i = 0; i < XW_HUNT_TRIALS; i++) {
+        bool last_out = (i & 1u) != 0;
+        xw_run(last_out, false, o);
+        if (o->opened && o->started && o->installed && o->slept && o->forced &&
+            o->reaped && o->nwrite == 1 && o->clunked && o->quiet)
+            continue;
+        uart_puts("    xw-hunt: trial ");
+        uart_putdec(i);
+        uart_puts(last_out ? " (last thread out)" : " (exits)");
+        xw_put("slept", o->slept); xw_put("forced", o->forced);
+        xw_put("reaped", o->reaped); xw_put("before", o->before);
+        uart_puts("\n");
+        xw_expect(o, last_out ? 0 : 5);
+        TEST_ASSERT(false, "a hunt trial missed");
+    }
+    uart_puts("    xw-hunt: all trials clean in ");
+    uart_putdec((timer_now_ns() - t0) / 1000000ull);
+    uart_puts(" ms\n");
 }
 
 void test_p9_closer_kill_at_final_close_start_forces_it(void) {
