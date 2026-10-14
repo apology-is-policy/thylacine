@@ -2073,9 +2073,10 @@ void viv_socktab_free(struct viv_socktab *tab) {
 // the table's life and a keyed write from before the reset lands nowhere.
 // The lock is a leaf and this runs in execve's sole-live-thread window, so
 // taking it costs nothing and keeps the "held only over array ops" rule
-// uniform (drop_cloexec skips it only because it nests under the handle
-// table's lock; this does not). Exit runs it as well, in the last thread's
-// at-exit close, to release the cached readiness Spoors with the fds.
+// uniform (drop_cloexec skips it because its handle_get_cloexec would take the
+// handle table's lock inside the leaf; this takes none). Exit runs it as well,
+// in the last thread's at-exit close, to release the cached readiness Spoors
+// with the fds.
 // NULL-safe: a Proc that was never Linux has no table.
 void viv_socktab_reset(struct viv_socktab *tab) {
     if (!tab) return;

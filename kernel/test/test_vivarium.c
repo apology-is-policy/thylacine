@@ -6042,7 +6042,8 @@ void test_vivarium_unwinds_publish_nothing(void) {
 // Linux's does for a reserved fd). The control, one variable away: the same
 // number returned, the close drops the row. bind on the reserved number is
 // EBADF too, though its row is FRESH; the control is a live slot with the same
-// row, which reaches bind's own address check (addrlen 0: EINVAL).
+// row, which passes the slot, the row and the state gate and reaches bind's
+// address copy (a NULL address: EFAULT, which no earlier gate answers).
 static void viv_close_reserved_child(void *arg) {
     (void)arg;
     struct Proc *self = current_thread()->proc;
@@ -6067,11 +6068,13 @@ static void viv_close_reserved_child(void *arg) {
     for (int i = 0; i < 31; i++) c.regs[i] = 0;
     c.regs[8] = VIV_LINUX_BIND;
     c.regs[0] = (u64)live;
+    c.regs[2] = 16;
     TEST_SYSCALL_DISPATCH(&c);
-    if (c.regs[0] != (u64)-(s64)T_E_INVAL)           bad |= 1u << 7;
+    if (c.regs[0] != (u64)-(s64)T_E_FAULT)           bad |= 1u << 7;
     for (int i = 0; i < 31; i++) c.regs[i] = 0;
     c.regs[8] = VIV_LINUX_BIND;
     c.regs[0] = (u64)r;
+    c.regs[2] = 16;
     TEST_SYSCALL_DISPATCH(&c);
     if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 8;
     if (live >= 0) {

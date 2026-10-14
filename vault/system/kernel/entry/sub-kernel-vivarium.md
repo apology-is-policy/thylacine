@@ -979,14 +979,14 @@ number first ([[sub-kernel-handle]]).
   nests inside that hold, as the fork snapshot nests it; the first version
   nested them the other way, a deadlock against a concurrent fork (audit r1
   F1). The socket-table lock is now a marked leaf (`socktab_lock`), and a
-  handle-table acquire under it extincts.
+  handle-table acquire under it extincts. The witness is
+  `vivarium.close_keeps_a_reserved_row`, through the real dispatcher.
+  `vivarium.unwinds_publish_nothing` drives each failure past a reservation.
 - **The socket arms** (`viv_sock_row`: bind, listen, accept, connect,
   getsockopt, sendto, recvfrom, recvmsg) ask the slot before the row. socket()
   and accept() claim their row while the number is still reserved, so a peer's
   bind on that number found a FRESH row and succeeded where Linux answers
   EBADF. The witness is the bind leg of `vivarium.close_keeps_a_reserved_row`,
-  whose control is a live slot carrying the same row.
-  The witness is `vivarium.close_keeps_a_reserved_row`, through the real
-  dispatcher. `vivarium.unwinds_publish_nothing` drives each failure past a
-  reservation.
+  whose control is a live slot carrying the same row: it reaches bind's address
+  copy (EFAULT for a NULL address), the one gate past the row and its state.
 
