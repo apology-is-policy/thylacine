@@ -78,7 +78,7 @@ SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
 FILES="kernel/syscall.c kernel/vivarium.c arch/arm64/uart.c"
-NMUT=18
+NMUT=19
 MUTATED=0
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
