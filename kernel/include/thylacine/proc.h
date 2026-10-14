@@ -1815,12 +1815,14 @@ void exits_note(const char *name);
 // (notes_self_death_snare) and the Linux phenotype's kill (viv_kill).
 //
 // `name` MUST be one of the NOTE_NAME_SNARE_* constants from
-// <thylacine/notes.h>. `faulting_addr` is FAR_EL1 (data abort) or
-// ELR_EL1 (other EL0 EC); for a chosen death it is the ELR of the
-// SVC, the instruction after the call. Printed in the diagnostic.
+// <thylacine/notes.h>. `faulting_addr` is FAR_EL1 (data abort, SP
+// alignment), ELR_EL1 (PC alignment, BTI, BRK) or ESR_EL1 (an illegal
+// instruction); for a chosen death it is the ELR of the SVC, the
+// instruction after the call. Printed in the diagnostic.
 //
-// NEVER returns. Emits a uart diagnostic line + calls exits(name),
-// which routes a multi-thread Proc through the group cascade (I-24).
+// NEVER returns. Emits a uart diagnostic line + calls exits_note(name),
+// which records the snare's signal (notes_death_signal) and routes a
+// multi-thread Proc through the group cascade (I-24).
 // In the corruption / impossible cases (no current thread, no proc,
 // kproc-routed, ...) it extincts with a defense-in-depth message.
 //

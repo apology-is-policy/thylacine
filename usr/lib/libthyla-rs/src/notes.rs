@@ -453,8 +453,9 @@ impl AsFd for Notes {
 ///   - `Error::WouldBlock`: target's note queue is full (best-effort
 ///     retry; coalesce is kernel-synthetic-only).
 ///
-/// A child that has died and is not yet reaped accepts the note: it is
-/// still a process, and nothing receives it.
+/// A child that has died and is not yet reaped accepts a note it may be
+/// sent: it is still a process, and nothing receives it. A name the kernel
+/// refuses is `Error::InvalidArgument` whatever the target's state.
 pub fn send(target: NoteTarget, name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidArgument);

@@ -1823,8 +1823,8 @@ enum viv_kill_kind vivarium_kill_decide(u64 sig, const char **name_out) {
     if (sig > VIV_NSIG) return VIV_KILL_REFUSE;
     enum viv_signote note = viv_signal_note(sig);
     switch (note) {
-    // Notes any program may post (notes_post refuses only the tty:* prefix and
-    // `sak` from a userspace poster), so SYS_POSTNOTE's gate is the whole
+    // Notes any program may post (notes_name_user_postable refuses only
+    // snare:*, tty:* and `sak` from a userspace poster), so SYS_POSTNOTE's gate is the whole
     // authority question -- the one Pouch's kill already answers.
     case VIV_SIGNOTE_INTERRUPT:
     case VIV_SIGNOTE_TERM:

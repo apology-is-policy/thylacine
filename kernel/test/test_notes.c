@@ -2156,6 +2156,9 @@ void test_notes_kill_family_gate(void) {
     s64 r_dead   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGTERM);
     u32 c_term3  = ndflt_note_count(child, NOTE_NAME_TERM);
     s64 r_dprobe = viv_kill_for_test(caller, child->pid, 0, 0);
+    s64 r_dtty   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGHUP);
+    s64 r_drange = viv_kill_for_test(caller, child->pid, 0, 65);
+    s64 r_ntty   = viv_kill_for_test(caller, NO_PID, 0, VIV_SIGHUP);
     other->state = PROC_STATE_ZOMBIE;
     s64 r_odead  = viv_kill_for_test(caller, other->pid, 0, VIV_SIGTERM);
 
@@ -2196,6 +2199,9 @@ void test_notes_kill_family_gate(void) {
     TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it, as Linux's zombie does");
     TEST_EXPECT_EQ(c_term3, 1u, "and nothing was queued to it");
     TEST_EXPECT_EQ(r_dprobe, (s64)0, "kill(dead child, 0) succeeds, as for a zombie");
+    TEST_EXPECT_EQ(r_dtty, -(s64)T_E_INVAL, "SIGHUP to the dead child: the signal is judged before the walk");
+    TEST_EXPECT_EQ(r_drange, -(s64)T_E_INVAL, "signal 65 to the dead child: EINVAL, not the zombie's 0");
+    TEST_EXPECT_EQ(r_ntty, -(s64)T_E_INVAL, "SIGHUP to no such pid: EINVAL before ESRCH");
     TEST_EXPECT_EQ(r_odead, -(s64)T_E_PERM, "a dead non-child reads EPERM: the gate is asked first");
 }
 
@@ -3383,6 +3389,7 @@ void test_notes_postnote_errnos(void) {
     u32 c_term1 = ndflt_note_count(child, NOTE_NAME_TERM);
     s64 r_other = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
     u32 o_term  = ndflt_note_count(other, NOTE_NAME_TERM);
+    s64 r_obogus = sys_postnote_cross_for_test(caller, other->pid, "bogus");
     s64 r_nopid = sys_postnote_cross_for_test(caller, NO_PID, NOTE_NAME_TERM);
     s64 r_nbogus = sys_postnote_cross_for_test(caller, NO_PID, "bogus");
     s64 r_bogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
@@ -3425,6 +3432,7 @@ void test_notes_postnote_errnos(void) {
     u32 c_after = child->notes->count;
     other->state = PROC_STATE_ZOMBIE;
     s64 r_odead = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
+    s64 r_odbogus = sys_postnote_cross_for_test(caller, other->pid, "bogus");
 
     proc_test_unlink(other);
     other->threads = NULL;
@@ -3441,6 +3449,7 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(c_term1, 1u, "and the child holds one queued term");
     TEST_EXPECT_EQ(r_other, -(s64)T_E_ACCES, "a non-child is EACCES: the parent gate, never -1");
     TEST_EXPECT_EQ(o_term, 0u, "and nothing reached it");
+    TEST_EXPECT_EQ(r_obogus, -(s64)T_E_INVAL, "a non-child with a refused name: the name is judged before the gate");
     TEST_EXPECT_EQ(r_nopid, -(s64)T_E_SRCH, "no such pid is ESRCH");
     TEST_EXPECT_EQ(r_nbogus, -(s64)T_E_INVAL, "the name is judged before the pid is looked for");
     TEST_EXPECT_EQ(r_bogus, -(s64)T_E_INVAL, "a name that is no note is EINVAL");
@@ -3461,6 +3470,7 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(r_dtty, -(s64)T_E_INVAL, "nor a tty name");
     TEST_EXPECT_EQ(c_after, c_before, "and nothing was queued to it");
     TEST_EXPECT_EQ(r_odead, -(s64)T_E_ACCES, "a dead non-child reads EACCES: the gate is asked first");
+    TEST_EXPECT_EQ(r_odbogus, -(s64)T_E_INVAL, "and a refused name to it reads EINVAL: the name before the gate");
 }
 
 // The snares a Proc may post to itself are exactly the ones the phenotype's

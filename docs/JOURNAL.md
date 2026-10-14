@@ -75,7 +75,16 @@ needed the operator.
   (`notes_name_user_postable`) that `notes_post` shares; the device leg sends the
   bad name before the kill, then waits for ZOMBIE in `/proc/<pid>/status` and
   asks both again. F3: `proc_fault_terminate`'s contract still named one caller
-  of three; the `user fault:` line stays as it is because ten gates key on it.
+  of three; the `user fault:` line stays as it is because the gates key on it
+  (ls-jsc on the full `user fault: pid=N reason="snare:..."` form, fourteen more
+  gates and benches on the bare substring -- round 2 corrected my count of "ten").
+- *Audit round 2 (Fable 5.1, on da9018c31): 0 P0 + 0 P1 + 0 P2 + 4 P3, clean.*
+  The reorder survived a full (target state x name class) matrix against the
+  phenotype. The P3s: my rewritten contract named `exits` where the body calls
+  `exits_note` (the function that records the signal); that count; three cells
+  the reorder changed had no pin (a non-child, live or dead, with a refused name;
+  the phenotype's refused signal to a dead child and to a missing pid); and two
+  comments still spelled the gate set by hand. All fixed.
 
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 
