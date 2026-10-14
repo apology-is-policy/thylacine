@@ -7,7 +7,10 @@
 #   CONTROL-Q  the qualification image: the same, loom-bridge-probe 71.
 #   TLC        handle_slots.cfg clean; each handle_slots buggy cfg violates the
 #              invariant it names; handles.cfg + handles_srv.cfg clean; each
-#              handles buggy cfg still finds its counterexample.
+#              handles buggy cfg still finds its counterexample. TLC_FROM=<run
+#              dir> carries an earlier run's TLC verdicts instead, only when
+#              specs/ is byte-identical between that run's HEAD and this one and
+#              the TLC jar is older than that run.
 #   M1         handle_dup_to stops answering BUSY: dup3 takes a reservation.
 #   M2         handle_install_locked's scan takes a reserved slot.
 #   M3         close vacates a reserved slot.
@@ -275,6 +278,19 @@ SEEN_BINS="$CONTROL_BIN $Q_BIN"
 
 echo "=== TLC ==="
 lease tlc
+if [ -n "${TLC_FROM:-}" ]; then
+  _fh=$(sed -nE 's/^[^ ]+  HEAD ([0-9a-f]{40})$/\1/p' "$TLC_FROM/stages.txt" | head -1)
+  [ -n "$_fh" ] || { echo "TLC_FROM: no HEAD in $TLC_FROM/stages.txt"; exit 4; }
+  git diff --quiet "$_fh" HEAD -- specs/ || { echo "TLC_FROM: specs/ differs between $_fh and HEAD"; exit 4; }
+  [ "$TLA_JAR" -ot "$TLC_FROM/stages.txt" ] || { echo "TLC_FROM: $TLA_JAR is newer than $TLC_FROM"; exit 4; }
+  _want=$((4 + 2 + $(ls specs/handles_buggy_*.cfg | wc -l)))
+  _got=$(/usr/bin/grep -cE '  TLC [^ ]+ (clean|counterexample): ' "$TLC_FROM/stages.txt" || true)
+  [ "$_got" = "$_want" ] || { echo "TLC_FROM: $_got verdicts in $TLC_FROM, want $_want"; exit 4; }
+  mkdir -p "$OUT/tlc-carried"
+  cp "$TLC_FROM"/tlc-*.log "$OUT/tlc-carried/"
+  record "TLC carried from $TLC_FROM: specs/ identical at $_fh and $(git rev-parse HEAD), jar $(shasum -a 256 "$TLA_JAR" | cut -c1-16) older than that run"
+  /usr/bin/grep -E '  TLC [^ ]+ (clean|counterexample): ' "$TLC_FROM/stages.txt" | sed 's/^/  carried: /' | tee -a "$OUT/stages.txt"
+else
 tlc() { # tlc <label> <spec> <cfg>: one model check, its log in $OUT
   ( cd specs && "$JAVA_BIN/java" -XX:+UseParallelGC -cp "$TLA_JAR" tlc2.TLC -workers auto -deadlock \
       -noGenerateSpecTE -metadir "$ROOT/$OUT/tlc-states/$1" -config "$3" "$2" ) > "$OUT/tlc-$1.log" 2>&1 || true
@@ -306,6 +322,7 @@ for c in specs/handles_buggy_*.cfg; do
   _b=$(basename "$c" .cfg)
   tlc_buggy "$_b" handles.tla "$_b.cfg"
 done
+fi
 
 apply() { # apply <label> <file> <old> <new>: the mutation, on the PRISTINE file
   lease "$1"; floor "pre-$1"
@@ -398,8 +415,9 @@ mutant m2 kernel/handle.c \
 '        if (t->slots[i].magic == 0 || t->slots[i].magic == HANDLE_RESERVED) { // MUTANT M2: an alloc takes a reservation
             handle_fill_locked(t, (hidx_t)i, kind, rights, obj, cloexec);
 '
-expect_fails M2 1 "$T_RES|$W_RES_ALLOC"
-ok M2 "exactly $T_RES ($W_RES_ALLOC)"
+expect_fails M2 2 "$T_RES|$W_RES_ALLOC" "$T_CLO|$W_CLO"
+mask_is M2 0x000000000000010c
+ok M2 "exactly $T_RES ($W_RES_ALLOC) and $T_CLO (mask 0x10c: its alloc took the reservation)"
 
 echo "=== M3: close vacates a reservation ==="
 mutant m3 kernel/handle.c \
