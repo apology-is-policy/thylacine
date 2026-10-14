@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**681 owned · 44 unowned · 725 files (93% owned) · ~11866 unswept lines.**
+**681 owned · 44 unowned · 725 files (93% owned) · ~11878 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **90 files, ~41068 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,7 +74,7 @@ Excluded as harness and counted here rather than dropped: **90 files, ~41068 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 11 | 17 | 2486 |
 | usr/ports | 19 | 5 | 1691 |
-| kernel | 186 | 11 | 1406 |
+| kernel | 186 | 11 | 1418 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
@@ -134,9 +134,9 @@ Excluded as harness and counted here rather than dropped: **90 files, ~41068 lin
 | usr/quarry/src/main.rs | 1033 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
+| kernel/include/thylacine/spinlock.h | 287 |
 | kernel/include/thylacine/smp.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 277 |
-| kernel/include/thylacine/spinlock.h | 275 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |

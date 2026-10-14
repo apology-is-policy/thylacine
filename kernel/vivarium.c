@@ -1835,6 +1835,21 @@ enum {
     VIV_IPPROTO_UDP    = 17,
 };
 
+// The socket table's lock is a LEAF (spinlock.h): every hold covers array
+// work, reference counts and its own Spoors' refs, and it nests INSIDE the
+// handle table's lock (the fork snapshot, the close hook's drop), never
+// around it. The wrappers mark the hold so a handle-table acquire under it
+// extincts on its first run.
+static void socktab_lock(struct viv_socktab *tab) {
+    spin_lock(&tab->lock);
+    spin_leaf_enter();
+}
+
+static void socktab_unlock(struct viv_socktab *tab) {
+    spin_leaf_exit();
+    spin_unlock(&tab->lock);
+}
+
 // The building block: find the entry for `fd`, or NULL. The caller MUST hold
 // tab->lock (or be in the exec-alone window). A returned pointer is valid only
 // while the lock is held -- the public readers snapshot through it and drop it.
@@ -1874,18 +1889,18 @@ static struct Spoor *socktab_clear_slot(struct viv_socktab *tab, struct viv_sock
 
 bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool found = (e != NULL);
     if (found && out) *out = *e;   // snapshot under the lock; safe past unlock
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return found;
 }
 
 bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
                        enum viv_net_proto proto, u32 n, enum viv_sock_state born) {
     if (!tab || fd < 0) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     // Replace-on-claim (Design D audit F2): the fd table is the truth. The
     // caller was just handed `fd` by handle_alloc, so any row still keyed on
     // it is STALE -- an fd closed by a path this table never saw -- and must
@@ -1911,50 +1926,59 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
             tab->s[i].bound_port  = 0;
             tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
             tab->s[i].remote_port = 0;
-            spin_unlock(&tab->lock);
+            socktab_unlock(tab);
             spoor_clunk(stale);
             return true;
         }
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     spoor_clunk(stale);
     return false;   // full -> EMFILE
 }
 
 bool viv_socktab_has_room(struct viv_socktab *tab) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     for (u32 i = 0; i < VIV_SOCK_MAX; i++)
         if (tab->s[i].state == VIV_SOCK_FREE) {
-            spin_unlock(&tab->lock);
+            socktab_unlock(tab);
             return true;
         }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return false;
+}
+
+struct socktab_closing {
+    struct viv_socktab *tab;
+    s32                 fd;
+    struct Spoor       *ready;
+};
+
+static void socktab_drop_closing_locked(void *arg) {
+    struct socktab_closing *c = (struct socktab_closing *)arg;
+    socktab_lock(c->tab);
+    c->ready = socktab_clear_slot(c->tab, socktab_find_locked(c->tab, c->fd));
+    socktab_unlock(c->tab);
 }
 
 // The close hook's drop. A number another call holds RESERVED carries that
 // call's own row (socket, accept, the dup alias claim before they install), and
-// the close will answer EBADF, so the row stays. Asked under the table lock:
-// a call that reserves after the question cannot claim until the drop is done.
-// Nesting: the socket table lock, then the handle table's.
+// the close will answer EBADF, so the row stays. The drop runs inside the
+// handle table's hold that answered the question, so no call can reserve the
+// number between the answer and the drop; the socket table's lock nests inside
+// it, the order the fork snapshot takes them in.
 void viv_socktab_drop_closing(struct viv_socktab *tab, struct Proc *p, s32 fd) {
     if (!tab) return;
-    spin_lock(&tab->lock);
-    if (fd >= 0 && handle_is_reserved(p, (hidx_t)fd)) {
-        spin_unlock(&tab->lock);
-        return;
-    }
-    struct Spoor *ready = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
-    spin_unlock(&tab->lock);
-    spoor_clunk(ready);
+    struct socktab_closing c = { .tab = tab, .fd = fd, .ready = NULL };
+    (void)handle_locked_unless_reserved(p, (hidx_t)fd, socktab_drop_closing_locked, &c);
+    spoor_clunk(c.ready);
 }
 
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
     if (!tab) return;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct Spoor *ready = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     spoor_clunk(ready);
 }
 
@@ -1977,7 +2001,7 @@ bool viv_socktab_ready_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out
                            struct Spoor **ready_out) {
     if (ready_out) *ready_out = NULL;
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     if (e) {
         if (out) *out = *e;
@@ -1997,14 +2021,14 @@ bool viv_socktab_ready_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out
             *ready_out = sp;
         }
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return e != NULL;
 }
 
 bool viv_socktab_ready_install(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                struct Spoor *sp) {
     if (!tab || !sp) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     // Keyed and identity-guarded like the set_* writers: a row a peer closed or
     // recycled while the caller opened the file carries another epoch, and one
     // a peer already filled keeps its Spoor -- either way the offer is refused
@@ -2023,7 +2047,7 @@ bool viv_socktab_ready_install(struct viv_socktab *tab, s32 fd, u64 expect_epoch
             installed = true;
         }
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return installed;
 }
 
@@ -2056,9 +2080,9 @@ void viv_socktab_free(struct viv_socktab *tab) {
 void viv_socktab_reset(struct viv_socktab *tab) {
     if (!tab) return;
     struct Spoor *ready[VIV_SOCK_MAX];
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) ready[i] = socktab_clear_slot(tab, &tab->s[i]);
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) spoor_clunk(ready[i]);
 }
 
@@ -2094,8 +2118,8 @@ static void socktab_copy_row_locked(struct viv_socktab *tab, struct viv_sock *ds
 // the child could carry the OLD data Spoor at fd N beside a row naming the
 // NEW socket's connection, and its socket arms would then drive a
 // connection its fd never held (the socktab holotype F1). The nesting is
-// cycle-free: the socktab lock is a leaf (every hold covers array ops only;
-// nothing takes it and then a handle lock).
+// cycle-free because the socktab lock is a leaf: no hold takes a handle lock,
+// and socktab_lock's mark makes one that tried extinct (spinlock.h).
 //
 // The epoch counter is copied too, so the child's future claims continue the
 // parent's monotonic sequence and every copied row keeps an epoch unique
@@ -2130,10 +2154,10 @@ void viv_socktab_fork_snapshot(void *arg) {
     if (!src) return;
     // Entries + the counter, field-wise -- never the struct, whose lock word
     // is HELD while we read it.
-    spin_lock(&src->lock);
+    socktab_lock(src);
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) f->dst->s[i] = src->s[i];
     f->dst->next_epoch = src->next_epoch;
-    spin_unlock(&src->lock);
+    socktab_unlock(src);
 }
 
 void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f) {
@@ -2171,9 +2195,9 @@ void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f) {
 // install. Lock-held for the whole find+clear+claim: one critical section.
 int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
     if (!tab || oldfd < 0 || newfd < 0 || oldfd == newfd) return 0;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *src = socktab_find_locked(tab, oldfd);
-    if (!src) { spin_unlock(&tab->lock); return 0; }
+    if (!src) { socktab_unlock(tab); return 0; }
     struct viv_sock snap = *src;                      // the clear below may hit
     struct Spoor *old = socktab_clear_slot(tab, socktab_find_locked(tab, newfd));
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {         // (a slot; snapshot first)
@@ -2181,12 +2205,12 @@ int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
             // The alias starts uncached (a FREE slot's ready is NULL); its first
             // poll shares the source row's Spoor, one per connection.
             socktab_copy_row_locked(tab, &tab->s[i], &snap, newfd);
-            spin_unlock(&tab->lock);
+            socktab_unlock(tab);
             spoor_clunk(old);
             return 1;
         }
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     spoor_clunk(old);
     return -1;
 }
@@ -2199,14 +2223,14 @@ int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
 // table; the alias then returns -1 and the caller unwinds what it can.
 bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
     if (!tab || oldfd < 0) return true;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     bool fits = (socktab_find_locked(tab, oldfd) == NULL)
              || (socktab_find_locked(tab, newfd) != NULL);
     if (!fits) {
         for (u32 i = 0; i < VIV_SOCK_MAX; i++)
             if (tab->s[i].state == VIV_SOCK_FREE) { fits = true; break; }
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return fits;
 }
 
@@ -2219,29 +2243,29 @@ bool viv_socktab_alias_fits(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
 bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            enum viv_sock_state st) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool ok = (e && e->epoch == expect_epoch);
     if (ok) e->state = (u8)st;
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return ok;
 }
 
 bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool ok = (e && e->epoch == expect_epoch);
     if (ok) { e->bound_addr = addr; e->bound_port = port; }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return ok;
 }
 
 bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port, bool also_connect) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool ok = (e && e->epoch == expect_epoch);
     if (ok) {
@@ -2251,14 +2275,14 @@ bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch
         e->remote_port = port;
         if (also_connect) e->state = (u8)VIV_SOCK_CONNECTED;
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return ok;
 }
 
 bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool ok = (e && e->epoch == expect_epoch && e->state == (u8)VIV_SOCK_FRESH);
     if (ok) {
@@ -2266,13 +2290,13 @@ bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch
         e->remote_port = port;
         e->state       = (u8)VIV_SOCK_CONNECTING;
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return ok;
 }
 
 bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch) {
     if (!tab) return false;
-    spin_lock(&tab->lock);
+    socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool ok = (e && e->epoch == expect_epoch && e->state == (u8)VIV_SOCK_CONNECTING);
     if (ok) {
@@ -2280,7 +2304,7 @@ bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch
         e->remote_port = 0;
         e->state       = (u8)VIV_SOCK_FRESH;
     }
-    spin_unlock(&tab->lock);
+    socktab_unlock(tab);
     return ok;
 }
 
@@ -2293,8 +2317,9 @@ bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch
 // fd necessarily agree on it. Clears BY SLOT (the pointer is in hand). The
 // caller (sys_execve_core) runs this in execve's sole-live-thread window
 // (proc_exec_alone), so it takes NO socktab lock -- there is no peer thread to
-// race, and locking here would nest tab->lock under the handle table's t->lock
-// (handle_get_cloexec requires it). NULL-safe: a native Proc has no socktab.
+// race, and locking here would take the handle table's lock (handle_get_cloexec)
+// inside the socket table's, the nesting the leaf guard refuses. NULL-safe: a
+// native Proc has no socktab.
 void viv_socktab_drop_cloexec(struct Proc *p) {
     if (!p) return;
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);

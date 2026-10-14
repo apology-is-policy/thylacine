@@ -773,12 +773,17 @@ void test_handles_reservation(void) {
     hidx_t dto    = handle_dup_to(p, src, r, false);
     bool   still_after_scans = handle_is_reserved(p, r);
 
-    // (3) The fork copy and close-on-exec pass it by.
+    // (3) The fork copy and close-on-exec pass it by. A live slot carries the
+    // bit, so the sweep closes something and its passing the reservation by
+    // is a choice, not an empty table.
     int  copy_rc  = handle_table_copy_into(child, p);
     bool child_r  = handle_is_reserved(child, r);
     int  child_get = handle_get(child, r, &got);
     if (child_get == 0) handle_put(&got);
+    int  dpos_cx  = handle_set_cloexec(p, dpos, true);
     int  coe_rc   = handle_close_on_exec(p);
+    int  dpos_get = handle_get(p, dpos, &got);
+    if (dpos_get == 0) handle_put(&got);
     bool still_after_coe = handle_is_reserved(p, r);
 
     // (4) The reserving call fills it: live, its kind, close-on-exec from the
@@ -837,8 +842,10 @@ void test_handles_reservation(void) {
     TEST_ASSERT(copy_rc >= 0, "the fork copy ran");
     TEST_ASSERT(!child_r, "the fork copy does not carry a reservation");
     TEST_EXPECT_EQ(child_get, -1, "the child has nothing at that number");
-    TEST_ASSERT(coe_rc >= 0, "close-on-exec ran");
-    TEST_ASSERT(still_after_coe, "close-on-exec passed it by");
+    TEST_EXPECT_EQ(dpos_cx, 0, "close-on-exec set on a live slot");
+    TEST_EXPECT_EQ(coe_rc, 1, "close-on-exec closed that one slot");
+    TEST_EXPECT_EQ(dpos_get, -1, "and it is gone");
+    TEST_ASSERT(still_after_coe, "close-on-exec passed the reservation by");
     TEST_EXPECT_EQ(fill_get, 0, "the filled reservation is live");
     TEST_EXPECT_EQ(fill_kind, (int)KOBJ_THREAD, "with the kind installed");
     TEST_EXPECT_EQ(fill_cx, 1, "and close-on-exec set in the install");

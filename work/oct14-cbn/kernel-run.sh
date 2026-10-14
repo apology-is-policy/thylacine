@@ -23,6 +23,10 @@
 #   M13        handle_replace ignores `expect`.
 #   M14        connect keys its swap on whatever the number names now.
 #   M15        connect stops carrying ctl's O_NONBLOCK onto data.
+#   M16        the close hook asks the handle table under the socket table's
+#              lock (r1 F1's ABBA): the leaf guard extincts in the first test
+#              that closes through the hook with a socket table.
+#   M17        the socket arms read the row before the slot (r1 F2).
 # Each predicted kernel message is checked, before any build, to lie inside the
 # function test.c registers under the predicted test name. Each mutant anchor is
 # censused before the control build. Both probes must hash equal to their
@@ -30,6 +34,8 @@
 #   SHAPE      tools/check-production.sh --all: the KERNEL_TESTS=OFF kernel builds.
 # A failed suite always ends in "EXTINCTION: kernel test suite failed"
 # (kernel/main.c): a mutant run must show exactly that extinction and no other.
+# An EXT mutant (mutant_ext) must instead show exactly its predicted extinction,
+# no suite tally, and the predicted test as the last one announced.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
@@ -55,7 +61,9 @@ W_UNW_P2="pipe2: a faulted copy-out installed nothing"
 W_UNW_ROWS="dup, F_DUPFD: the alias rows dropped, the source's kept"
 W_UNW_ACC="accept: the number returned"
 W_UNW_D3="dup3 onto a reserved number is EBUSY"
-W_CLO="close of a reserved number keeps the reserving call's row; of a free one drops it"
+W_CLO="a reserved number: close keeps its row, bind is EBADF; a free one's close drops it"
+CLO_MASK="viv_close_reserved_child: failed checks mask"
+X_LEAF="EXTINCTION: handle table lock taken under a leaf lock"
 W_FIN_KEEP="and no descriptor was installed"
 W_FIN_DIR="before anything is installed"
 W_CON="connect refuses to swap a number that no longer names its socket"
@@ -70,8 +78,8 @@ STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
 TLA_JAR=/tmp/tla2tools.jar
 JAVA_BIN=/opt/homebrew/opt/openjdk/bin
-FILES="kernel/handle.c kernel/syscall.c"
-NMUT=15
+FILES="kernel/handle.c kernel/syscall.c kernel/vivarium.c"
+NMUT=17
 MUTATED=0
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
@@ -212,7 +220,7 @@ done
 python3 - "$0" "$NMUT" <<'CENSUS' || exit 3
 import re, sys
 script, want = open(sys.argv[1]).read(), int(sys.argv[2])
-calls = re.findall(r"^mutant (\w+) (kernel/\S+) \\\n'(.*?)' \\\n'(.*?)'\n", script, re.S | re.M)
+calls = re.findall(r"^mutant(?:_ext)? (\w+) (kernel/\S+) \\\n'(.*?)' \\\n'(.*?)'\n", script, re.S | re.M)
 bad = 0
 for lab, path, old, new in calls:
     target = open(path).read()
@@ -321,7 +329,7 @@ PY
 }
 # mutant <label> <file> <python old> <python new> -- built (default image) and
 # booted; sets B to its boot log. The caller checks the prediction.
-mutant() {
+mutant_boot() {
   apply "$@"
   tools/build.sh kernel --config ci > "$OUT/$1-build.log" 2>&1 || { echo "$1 build failed"; tail -12 "$OUT/$1-build.log"; exit 5; }
   ! /usr/bin/grep -qF "$QUAL_LINE" "$OUT/$1-build.log" || { echo "$1: the default build saw the lever"; exit 5; }
@@ -333,11 +341,31 @@ mutant() {
   SEEN_BINS="$SEEN_BINS $_bin"
   run_suite "$1"
   B=$OUT/$1-boot.log
-  _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
-  [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
   [ "$suite_rc" != 0 ] || { echo "HARNESS: test.sh exit 0 under $1"; exit 2; }
   restore || exit 9
   MUTATED=0
+}
+mutant() {
+  mutant_boot "$@"
+  _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
+  [ "$_ext" = "$SUITE_EXT" ] || { echo "$1: the extinction set is not exactly the suite's own:"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
+}
+# mutant_ext: the same build and boot; the suite must die with exactly $X_WANT,
+# print no tally, and have announced $X_TEST last.
+mutant_ext() {
+  mutant_boot "$@"
+  _ext=$(/usr/bin/grep -E '^EXTINCTION:' "$B" | tr -d '\r')
+  [ "$_ext" = "$X_WANT" ] || { echo "$1: extinction set '$_ext', predicted exactly '$X_WANT'"; /usr/bin/grep -nE '^EXTINCTION:' "$B" | head -4; exit 2; }
+  [ -z "$(tally "$B")" ] || { echo "$1: the suite printed a tally; predicted it died first"; exit 2; }
+  _last=$(/usr/bin/grep -oE '\[test\] [^ ]+ \.\.\.' "$B" | tail -1 | sed -E 's/^\[test\] ([^ ]+) \.\.\./\1/')
+  [ "$_last" = "$X_TEST" ] || { echo "$1: last announced test '$_last', predicted '$X_TEST'"; exit 2; }
+}
+mask_is() { # mask_is <label> <hex>: the close child printed exactly that mask, once
+  _mc=$(tr -d '\r' < "$B" | /usr/bin/grep -cF "$CLO_MASK" || true)
+  [ "$_mc" = 1 ] || { echo "$1: $_mc mask lines, predicted 1"; exit 2; }
+  # Fixed-width hex, so a substring cannot match a longer mask; the child may
+  # print on its test's announcement line.
+  tr -d '\r' < "$B" | /usr/bin/grep -qF "$CLO_MASK $2" || { echo "$1: mask line"; /usr/bin/grep -F "$CLO_MASK" "$B"; echo "predicted $2"; exit 2; }
 }
 expect_fails() { # expect_fails <label> <count> then "<test>|<message>" pairs
   _lab=$1; _n=$2; shift 2
@@ -451,7 +479,8 @@ mutant m8 kernel/syscall.c \
 '        if (st) viv_socktab_drop(st, (s32)(s64)ctx->regs[0]); // MUTANT M8: the hook drops the row of a reserved number
 '
 expect_fails M8 1 "$T_CLO|$W_CLO"
-ok M8 "exactly $T_CLO"
+mask_is M8 0x0000000000000004
+ok M8 "exactly $T_CLO (mask 0x4: the row dropped)"
 
 echo "=== M9: a kept Spoor is installed, then closed ==="
 mutant m9 kernel/syscall.c \
@@ -548,6 +577,33 @@ mutant m15 kernel/syscall.c \
 '
 expect_fails M15 1 "$T_CON|$W_CON_NB"
 ok M15 "exactly $T_CON ($W_CON_NB)"
+
+echo "=== M16: the close hook nests the handle table inside the socket table ==="
+X_WANT=$X_LEAF X_TEST=$T_CLO
+mutant_ext m16 kernel/vivarium.c \
+'    (void)handle_locked_unless_reserved(p, (hidx_t)fd, socktab_drop_closing_locked, &c);
+' \
+'    socktab_lock(tab);   // MUTANT M16: the old nesting, the handle table inside the socket table
+    if (!(fd >= 0 && handle_is_reserved(p, (hidx_t)fd)))
+        c.ready = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
+    socktab_unlock(tab);
+    (void)socktab_drop_closing_locked;
+'
+record "M16 DISCRIMINATED: exactly '$X_LEAF', no tally, last announced $T_CLO"
+
+echo "=== M17: the socket arms read the row before the slot ==="
+mutant m17 kernel/syscall.c \
+'    if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0)
+        return -(s64)T_E_BADF;
+    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
+' \
+'    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0; // MUTANT M17: the row before the slot
+    if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0)
+        return -(s64)T_E_BADF;
+'
+expect_fails M17 1 "$T_CLO|$W_CLO"
+mask_is M17 0x0000000000000100
+ok M17 "exactly $T_CLO (mask 0x100: bind on the reserved number)"
 
 echo "=== rebuild the committed tree, then SHAPE ==="
 lease rebuild

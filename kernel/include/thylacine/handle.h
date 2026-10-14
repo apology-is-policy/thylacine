@@ -280,6 +280,12 @@ void   handle_install_reserved(struct Proc *p, hidx_t h, enum kobj_kind kind,
 int    handle_dup_into_reserved(struct Proc *p, hidx_t src, hidx_t h, bool cloexec);
 void   handle_unreserve(struct Proc *p, hidx_t h);
 bool   handle_is_reserved(struct Proc *p, hidx_t h);
+// Runs fn(arg) under the table lock unless `h` is a reservation, and says
+// whether it ran. A reservation cannot be taken while fn runs, so fn's answer
+// holds against every reserving call. Any lock fn takes must be a leaf
+// (spinlock.h): the table lock is refused inside one.
+bool   handle_locked_unless_reserved(struct Proc *p, hidx_t h,
+                                     void (*fn)(void *), void *arg);
 
 // Release a handle. Returns 0 on success, -1 if the slot is empty
 // (already-closed or never-allocated) or out-of-range. At v1.0 P2-Fc

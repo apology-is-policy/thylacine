@@ -964,6 +964,10 @@ phenotype, four answers follow Linux more closely:
   number names nothing a write can reach when the dial is about to be
   written, connect now answers EBADF (it was ECONNREFUSED, from the failed
   write by number).
+- bind, listen, accept, connect, getsockopt, sendto, recvfrom and recvmsg on a
+  number another call holds reserved answer EBADF. socket() and accept() claim
+  their row before they install, so these used to find the row and answer as
+  if the socket were there.
 
 The rationale is in [[dec-2026-10-14-descriptor-slot-reservation]].
 

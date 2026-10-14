@@ -11843,12 +11843,15 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 // lookup fails before any socket check), a live fd with no row is ENOTSOCK.
 // Every row-less fd used to answer ENOTSOCK, which is what the probe's L198
 // pinned as the meaning of "closed" until the socktab holotype (F5) caught it.
+// The slot is asked first: socket() and accept() claim their row while the
+// number is still RESERVED, and until they install it the number is no socket
+// to anyone else (Linux's fd lookup fails before it reaches the socket).
 // 0 with *out filled, or the negative errno.
 static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
                         struct viv_sock *out) {
-    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
     if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0)
         return -(s64)T_E_BADF;
+    if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
     return -(s64)T_E_NOTSOCK;
 }
 

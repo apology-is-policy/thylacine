@@ -401,8 +401,22 @@ Its three buggy configurations each find a counterexample:
 - a failed call's object was visible;
 - dup3 overwrites a reservation.
 
-Lock nesting added here: the vivarium's socket-table lock, then this table's
-lock (`viv_socktab_drop_closing` asks `handle_is_reserved` under it).
+`handle_locked_unless_reserved(p, h, fn, arg)` runs `fn` inside the table
+hold unless `h` is a reservation, so no call can reserve the number between
+the answer and what `fn` does with it. The close hook's drop
+(`viv_socktab_drop_closing`) is its caller, and nests the vivarium's
+socket-table lock inside this table's lock: the order the fork snapshot
+(`handle_table_copy_into_hooked`) already took. The first version asked
+`handle_is_reserved` under the socket-table lock, the reverse order, which
+deadlocks a close on one CPU against a fork of the same Proc on another.
+
+The socket-table lock is a LEAF and the order is enforced, not argued: every
+acquire of this table's lock goes through `table_lock`, which calls
+`spin_leaf_refuse` first, and every socket-table hold is marked with
+`spin_leaf_enter`/`spin_leaf_exit`. An inverted nesting extincts with "handle
+table lock taken under a leaf lock" the first time it runs, contended or not.
+`handle_replace` counts its swap in `installs`: it publishes a new object at
+the number.
 
 ## Performance
 

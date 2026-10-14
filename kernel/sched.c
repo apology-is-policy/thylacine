@@ -233,6 +233,34 @@ void spin_preempt_dec(void) {
     t->preempt_count--;
 }
 
+// spinlock.h's leaf discipline. Written only by the holder, between its
+// counted acquire and release, so no other CPU touches this CPU's slot.
+static u32 g_spin_leaf_depth[DTB_MAX_CPUS];
+
+void spin_leaf_enter(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS) g_spin_leaf_depth[cpu]++;
+}
+
+void spin_leaf_exit(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) return;
+    if (g_spin_leaf_depth[cpu] == 0u)
+        extinction_with_addr("spin_leaf_exit without a leaf hold",
+                             (uintptr_t)__builtin_return_address(0));
+    g_spin_leaf_depth[cpu]--;
+}
+
+void spin_leaf_refuse(const char *who) {
+    // A thread holding no counted lock holds no leaf, and may migrate, so this
+    // CPU's depth would be a stranger's. One that holds any lock is pinned
+    // here, so the depth is its own.
+    struct Thread *t = current_thread();
+    if (t && t->magic == THREAD_MAGIC && t->preempt_count == 0u) return;
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS && g_spin_leaf_depth[cpu] != 0u) extinction(who);
+}
+
 // #361 (audit-360 F2): the extinction tail of the EL0-return leak detector.
 // The fast-path check (t->preempt_count != 0) is inlined at
 // el0_return_die_check (kernel/proc.c) -- this out-of-line body exists only

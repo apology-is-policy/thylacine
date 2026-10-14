@@ -1685,6 +1685,11 @@ The pattern is reserve, do the work that can fail, install last.
   `handle_replace` swaps only while the number still names it
   ([[sub-kernel-vivarium]]). `viv_socket_for_test` drives the real socket arm
   through `viv_tier2`.
+- **The socket arms' row lookup** (`viv_sock_row`) refuses a number that is not
+  live before it reads the row, so a reserved number's row is EBADF.
+- **close's hook** (`viv_socktab_drop_closing`) drops the row inside the
+  handle-table hold that answers whether the number is reserved
+  (`handle_locked_unless_reserved`, [[sub-kernel-handle]]).
 
 `sys_open_kpath_for_proc` still answers -1 for a full table, and
 `spoor_create_install` still answers -ENOMEM; `sys_open_finish` takes each

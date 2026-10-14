@@ -6040,7 +6040,9 @@ void test_vivarium_unwinds_publish_nothing(void) {
 // close() of a reserved number, through the real dispatcher: the hook must not
 // drop the row the reserving call has claimed on it (close answers EBADF, as
 // Linux's does for a reserved fd). The control, one variable away: the same
-// number returned, the close drops the row.
+// number returned, the close drops the row. bind on the reserved number is
+// EBADF too, though its row is FRESH; the control is a live slot with the same
+// row, which reaches bind's own address check (addrlen 0: EINVAL).
 static void viv_close_reserved_child(void *arg) {
     (void)arg;
     struct Proc *self = current_thread()->proc;
@@ -6058,6 +6060,24 @@ static void viv_close_reserved_child(void *arg) {
 
     struct exception_context c;
     struct viv_sock e;
+
+    hidx_t live = handle_alloc(self, KOBJ_MMIO, RIGHT_READ, NULL);
+    if (live < 0 || !viv_socktab_claim(tab, (s32)live, VIV_NET_TCP, 401, VIV_SOCK_FRESH))
+        bad |= 1u << 6;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_BIND;
+    c.regs[0] = (u64)live;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_INVAL)           bad |= 1u << 7;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_BIND;
+    c.regs[0] = (u64)r;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)            bad |= 1u << 8;
+    if (live >= 0) {
+        viv_socktab_drop(tab, (s32)live);
+        (void)handle_close(self, live);
+    }
     for (int i = 0; i < 31; i++) c.regs[i] = 0;
     c.regs[8] = VIV_LINUX_CLOSE;
     c.regs[0] = (u64)r;
@@ -6092,5 +6112,5 @@ void test_vivarium_close_keeps_a_reserved_row(void) {
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
     TEST_EXPECT_EQ(status, 0,
-        "close of a reserved number keeps the reserving call's row; of a free one drops it");
+        "a reserved number: close keeps its row, bind is EBADF; a free one's close drops it");
 }

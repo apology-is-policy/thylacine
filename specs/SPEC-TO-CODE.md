@@ -3123,3 +3123,15 @@ The model has one failing call and one peer thread; the sites, the finish
 policy and the vivarium shells are in the sub-kernel-handle /
 sub-kernel-syscall-dispatch / sub-kernel-vivarium dossiers.
 
+What the clean cfg does NOT show. It holds NoForeignClose and
+FailedPublishesNothing by construction: with the buggy arm off, no action
+writes a number the call does not own, so those two invariants are guards
+against the buggy arms, not evidence about the clean one (InstallFillsOwnReservation
+and the dup3 refusal are the clean cfg's real content). The peer never
+reserves, so two reserving calls racing for one number are argued (each
+reservation is taken under the table lock) rather than modelled. The vivarium
+socket table's rows and the lock order between its lock and the handle table's
+are outside the model entirely: the order is held by the leaf guard
+(`spin_leaf_refuse` in every handle-table acquire, `socktab_lock` marking the
+socket table's holds), which extincts on the first inverted acquire.
+
