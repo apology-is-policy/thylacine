@@ -915,3 +915,20 @@ words against Linux's prototypes; a `_Static_assert` on the table's row count
 beside `VIV_T1_COUNT` makes a new row join the test's list) and
 `vivarium.t2_shells_narrow_linux_widths` (readlinkat's bufsiz, getrandom's
 flags).
+
+**Width audit round 1 append (2026-10-14).** The narrowing is now pinned to
+the table's derived count (`vivarium_t1_count_for_test`; the literal
+`_Static_assert` is gone), and exit_group's row narrows its `int` status
+(`s32_words` 0x1). Four more T2 shells hand Linux's fd to a native handler and
+now narrow it first: readv and writev (`fdget_pos(unsigned int)`), sendto and
+recvfrom (`int fd`). `viv_sock_row` and fcntl compare a Linux fd by its low
+half. The dispatch reads x8 by its low 32 bits, as Linux's `int scno` does,
+and a renumbered (T1) call returns the guest's x1-x5 and x8 untouched: the
+renumber writes the native number and the narrowed words into the frame for
+the native switch (`syscall_native_switch`, split out of
+`syscall_dispatch_body`), and Linux hands back every register but x0, which
+musl's asm relies on. Before, a guest that reused x8 after getpid issued 72,
+Linux's pselect6. Tests: `vivarium.t1_keeps_guest_registers` (a child Proc
+turned Linux guest, through the real dispatch) and writev/readv legs in
+`vivarium.t2_shells_narrow_linux_widths`. sendto/recvfrom have no runtime leg:
+no socket test drives either call.

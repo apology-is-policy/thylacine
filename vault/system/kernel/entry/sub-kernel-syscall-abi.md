@@ -933,3 +933,9 @@ stay behind the kernel's qualification lever ([[sub-kernel-loom-bridge]]).
 against the kernel's own writes. `thyla/loom.h` also mirrors the full opcode list
 (NOP 0 .. STATFS 18), which `tools/check-loom-service-abi.py` compares with the
 kernel's.
+
+**Width audit round 1 append (2026-10-14).** chroot, pivot_root, unlink and
+rename now refuse a descriptor wider than an index like every other
+descriptor argument (they had cast it down). A Linux guest's syscall number is
+read by its low 32 bits, and a renumbered call returns its registers as Linux
+does: only x0 changes.

@@ -261,7 +261,7 @@ bool uart_tx_fifo_empty(void) {
 #define UART_TX_SPIN_MAX_NS    (20ull * 1000ull * 1000ull)   // 20 ms wall-clock
 #define UART_TX_SPIN_MAX_ITERS (1u << 24)                    // ~16.7M FR-read backstop
 
-void uart_putc(char c) {
+static void uart_putc_wire(char c) {
     uintptr_t base = pl011_base;
     uint32_t iters = 0;
     uint64_t t0 = 0;   // wall-clock anchor; set lazily on the FIRST spin (0 = unset / pre-init)
@@ -273,6 +273,14 @@ void uart_putc(char c) {
             return;                                       // deadline: drop the byte
     }
     mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
+}
+
+// Once a peer's extinction owns the console, this CPU's byte is dropped: the
+// banner must reach the wire whole, and every gate matches it at column 0.
+void uart_putc(char c) {
+    if (!extinction_tx_enter()) return;
+    uart_putc_wire(c);
+    extinction_tx_exit();
 }
 
 // #67 regression (test-only; production callers never touch this). Proves

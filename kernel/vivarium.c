@@ -231,9 +231,9 @@ static const struct viv_row g_viv_t1[] = {
     // damage-envelope argument (see vivarium.h).
     { VIV_LINUX_PREAD64,    SYS_PREAD,      4, 0x1 },
     { VIV_LINUX_PWRITE64,   SYS_PWRITE,     4, 0x1 },
-    // exit_group(int): the native handler keeps only the low byte, which no
-    // narrowing changes.
-    { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1 },
+    // exit_group(int): narrowed as Linux declares it, though the native handler
+    // keeps only the low byte, which the narrowing does not change.
+    { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1, 0, 0x1 },
 
     // N-3: a musl THREAD (not the process) exits via SYS_exit(93), always with
     // status 0 (pthread_create.c: `for(;;) __syscall(SYS_exit,0)`), NEVER
@@ -278,10 +278,11 @@ static const struct viv_row g_viv_t1[] = {
 };
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
+
 // vivarium.t1_narrows_linux_widths checks each row's masks against Linux's
-// prototype, so a new row must join its list.
-_Static_assert(sizeof(g_viv_t1) / sizeof(g_viv_t1[0]) == 11,
-               "a new T1 row joins vivarium.t1_narrows_linux_widths");
+// prototype and requires its list to be as long as the table.
+u32 vivarium_t1_count_for_test(void);
+u32 vivarium_t1_count_for_test(void) { return VIV_T1_COUNT; }
 
 // The calls we have DECIDED are not table rows. Keeping them as an explicit list
 // rather than letting them fall through to a default matters: a Linux number that

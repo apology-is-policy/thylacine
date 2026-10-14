@@ -77,3 +77,65 @@ void test_extinction_console_unclaimed_on_clean_boot(void) {
         "the extinction console must be unclaimed on a healthy boot; a claim "
         "here means every later extinction banner is silently suppressed");
 }
+
+// The per-byte console gate (the third tearing source: a peer's direct
+// uart_putc). Its cores run on the test's own words, for the reason above.
+//
+//   extinction.tx_gate_admits_only_the_owner_once_claimed
+//   extinction.tx_wait_waits_out_a_peer_byte
+//
+// Like the claim test these are sequential: they pin each side's decision, not
+// the Dekker race between them. The race is tools/test-fault.sh's
+// extinction_peer_chatter variant, which tears the banner without the gate.
+
+void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
+void test_extinction_tx_wait_waits_out_a_peer_byte(void);
+
+void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void) {
+    volatile uint8_t busy = 0;
+    uint32_t word = 0;
+
+    int open = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t open_busy = busy;
+
+    busy = 0;
+    word = 1;
+    int peer = extinction_tx_gate_core(&busy, &word, 0);
+    uint8_t peer_busy = busy;
+
+    busy = 0;
+    int owner = extinction_tx_gate_core(&busy, &word, 1);
+    uint8_t owner_busy = busy;
+
+    TEST_ASSERT(open == 1, "an unclaimed console admits every cpu's byte");
+    TEST_ASSERT(open_busy == 1,
+        "an admitted byte is published as in flight, so a winner can wait it out");
+    TEST_ASSERT(peer == 0,
+        "once a peer owns the console this cpu's byte is dropped -- it would land "
+        "inside the banner");
+    TEST_ASSERT(peer_busy == 0,
+        "a dropped byte must not stay published: the winner would wait on it for "
+        "its whole bound");
+    TEST_ASSERT(owner == 1 && owner_busy == 1,
+        "the owner's own bytes (the banner, the dump) still pass");
+}
+
+void test_extinction_tx_wait_waits_out_a_peer_byte(void) {
+    volatile uint8_t busy[4] = { 0, 0, 0, 0 };
+
+    int clear = extinction_tx_wait_core(busy, 4, 0);
+
+    busy[0] = 1;                                   // the winner's own flag
+    int self_only = extinction_tx_wait_core(busy, 4, 0);
+
+    busy[0] = 0;
+    busy[2] = 1;                                   // a peer that never finishes
+    int stuck = extinction_tx_wait_core(busy, 4, 0);
+
+    TEST_ASSERT(clear == 1, "no byte in flight: the winner proceeds at once");
+    TEST_ASSERT(self_only == 1,
+        "the winner does not wait on its own flag (it would wait out its bound)");
+    TEST_ASSERT(stuck == 0,
+        "a peer byte still in flight is waited on, and the wait is bounded: it "
+        "reports the miss rather than parking the dying machine");
+}

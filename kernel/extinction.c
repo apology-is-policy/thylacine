@@ -12,6 +12,7 @@
 #include <thylacine/smp.h>
 
 #include "../arch/arm64/halls.h"
+#include "../arch/arm64/timer.h"
 #include "../arch/arm64/uart.h"
 
 extern void _torpor(void) __attribute__((noreturn));
@@ -55,11 +56,11 @@ static volatile u8 g_extinction_depth[DTB_MAX_CPUS];
 // primitive, different shape, on purpose: THIS word's holder is a dying peer
 // that never releases (try-once is right); the ring's holder is a healthy peer
 // mid-push that will release in microseconds (a bounded spin is right, and a
-// try-once would fail in exactly the case it exists for). Still owed: IPI_HALT,
-// so the winner STOPS its peers rather than out-racing them -- a commented-out
-// reservation in smp.h; it would also cover the residual this leaves, the few
-// kernel diagnostics that still write the UART directly instead of through the
-// ring (they are outside the ring lock's reach).
+// try-once would fail in exactly the case it exists for). The THIRD source --
+// a peer's direct uart_putc, which is most kernel output, the test runner's
+// included -- is closed by the per-byte gate below. Peers keep running after
+// the claim, their bytes dropped; stopping them outright is IPI_HALT, still a
+// commented-out reservation in smp.h.
 static uint32_t g_extinction_console;
 
 // Best-effort count of peers whose banner we suppressed, printed by the winner
@@ -85,13 +86,70 @@ int extinction_console_claimed(void) {
     return __atomic_load_n(&g_extinction_console, __ATOMIC_RELAXED) != 0u;
 }
 
-// TRUE for exactly one CPU per boot.
+// The THIRD tearing source: a peer's DIRECT write (uart_putc -- the kernel test
+// runner, the boot diagnostics, every uart_puts), which never touches the TX ring
+// and so is outside cons_tx_claim_for_dump's reach. Each byte uart_putc emits is
+// bracketed by extinction_tx_enter/exit. Once a CPU owns the console, a peer's
+// byte is dropped; a byte a peer had already committed to is waited out by the
+// winner before its banner. Dekker order: the peer publishes its flag and then
+// reads the claim, the winner publishes the claim and then reads every flag,
+// each with a full barrier between -- so at least one side sees the other.
+static volatile u8 g_extinction_tx_busy[DTB_MAX_CPUS];
+
+// A peer's committed byte can sit in uart_putc's bounded TXFF wait (20 ms); past
+// this the winner prints anyway, as cons_tx_claim_for_dump does.
+#define EXTINCTION_TX_WAIT_MAX_NS    (50ull * 1000ull * 1000ull)
+#define EXTINCTION_TX_WAIT_MAX_ITERS (1u << 24)
+
+int extinction_tx_gate_core(volatile u8 *busy, const uint32_t *word, u8 owner) {
+    __atomic_store_n(busy, 1u, __ATOMIC_SEQ_CST);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (__atomic_load_n(word, __ATOMIC_SEQ_CST) == 0u || owner) return 1;
+    __atomic_store_n(busy, 0u, __ATOMIC_RELEASE);
+    return 0;
+}
+
+int extinction_tx_wait_core(const volatile u8 *busy, unsigned n, unsigned self) {
+    int all_clear = 1;
+    for (unsigned c = 0; c < n; c++) {
+        if (c == self) continue;
+        u32 iters = 0;
+        u64 t0 = 0;
+        while (__atomic_load_n(&busy[c], __ATOMIC_SEQ_CST) != 0u) {
+            if (++iters >= EXTINCTION_TX_WAIT_MAX_ITERS) { all_clear = 0; break; }
+            u64 now = timer_now_ns();                      // 0 before timer_init
+            if (t0 == 0) t0 = now;
+            else if (now - t0 >= EXTINCTION_TX_WAIT_MAX_NS) { all_clear = 0; break; }
+            __asm__ __volatile__("yield" ::: "memory");
+        }
+    }
+    return all_clear;
+}
+
+int extinction_tx_enter(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    return extinction_tx_gate_core(&g_extinction_tx_busy[cpu], &g_extinction_console,
+                                   g_extinction_owner[cpu]);
+}
+
+void extinction_tx_exit(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    __atomic_store_n(&g_extinction_tx_busy[cpu], 0u, __ATOMIC_RELEASE);
+}
+
+// TRUE for exactly one CPU per boot. The winner returns only once no peer has a
+// byte in flight (or the wait's bound has passed), so the banner it prints next
+// starts a line no peer can split.
 static int extinction_claim_console(void) {
     if (!extinction_claim_word(&g_extinction_console))
         return 0;
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) cpu = 0;
     g_extinction_owner[cpu] = 1u;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    (void)extinction_tx_wait_core(g_extinction_tx_busy, DTB_MAX_CPUS, cpu);
     return 1;
 }
 

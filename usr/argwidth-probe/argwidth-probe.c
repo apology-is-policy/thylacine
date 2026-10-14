@@ -144,6 +144,19 @@ static void descriptors(void) {
     PAIR(t_wstat(dead, T_WSTAT_GID, 0, 0, 5), t_wstat(dead, T_WSTAT_GID, 0, 0, W | 5),
          -E_INVAL, "wstat gid");
 
+    // A directory a mutation names (a path handle is born with write rights):
+    // the narrow call reaches the directory and stops at the missing name, so
+    // nothing changes; no answer past the lookup is EBADF.
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/bin", 4, T_OPATH);
+    CHECK(pd >= 0, "open /bin as a path", pd);
+    PAIR(t_unlink(pd, "argwidth-none", 13, 0), t_unlink(pd | W, "argwidth-none", 13, 0),
+         -E_BADF, "unlink parent fd");
+    PAIR(t_rename(pd, "argwidth-none", 13, pd, "argwidth-nil", 12),
+         t_rename(pd | W, "argwidth-none", 13, pd, "argwidth-nil", 12), -E_BADF, "rename old dir fd");
+    PAIR(t_rename(pd, "argwidth-none", 13, pd, "argwidth-nil", 12),
+         t_rename(pd, "argwidth-none", 13, pd | W, "argwidth-nil", 12), -E_BADF, "rename new dir fd");
+    t_close(pd);
+
     t_close(dir);
     t_close(file);
     t_close(rd);

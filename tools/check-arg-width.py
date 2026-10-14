@@ -11,28 +11,36 @@
 # frame (`ctx->regs[N]`), or a u64 local copied from one. Functions named viv_*
 # are exempt: they translate a Linux call, and Linux's declared C types narrow
 # by construction (the phenotype is ABI shape, I-43).
-# Implicit narrowing is the compiler's half (-Werror=shorten-64-to-32).
+# Implicit narrowing is the compiler's half: -Werror=shorten-64-to-32 (aux-3
+# 30f807e0a) is not on in this tree yet, so work/oct13-width/shorten.sh is that
+# census until it lands. Not seen here: a guard in another branch than the cast,
+# a bound whose constant is wider than the cast, and a raw word that is not the
+# first operand of the cast's expression -- review and the compiler cover those.
 import re, sys
 
 NARROW = r'(?:hidx_t|u32|s32|int|u16|s16|u8|unsigned|unsigned int|rights_t|pid_t|uid_t|gid_t|mode_t)'
 WIDE = r'(?:\(\s*(?:u64|s64|long|unsigned long|uintptr_t)\s*\)\s*)?'
 HELPERS = ('sys_hidx_arg', 'sys_s32_arg', 'sys_u32_arg', 'sys_word32_arg')
-FN = re.compile(r'^(?:static )?(?:inline )?[\w ]*?\b(\w+)\(([^;{)]*)\)\s*\{', re.M)
+FN = re.compile(r'^(?:static )?(?:inline )?[\w \*]*?\b(\w+)\(([^;{)]*)\)\s*\{', re.M)
+# A guard refuses: its statement returns an error or opens a block that returns.
+REFUSE = r'\)\s*(?:return\s*[-(]|return\s+\w+\s*;|\{[^{}]*\breturn\b)'
 
 def guards(p):
     q = re.escape(p)
     return [
-        r'\b' + q + r'\s*>=?\s*(?:\(u64\)\s*)?(?:0x[0-9a-fA-F]+u?l*l*|[A-Z][A-Z0-9_]*)',
-        r'\b' + q + r'\s*&\s*~\s*\(\s*u64\s*\)',
-        r'\([^;()]*\b' + q + r'(?!\w)[^;()]*\)\s*>\s*0x[fF]{8}',
+        r'\bif\s*\([^;{}]*\b' + q + r'\s*>=?\s*(?:\(u64\)\s*)?(?:0x[0-9a-fA-F]+u?l*l*|[A-Z][A-Z0-9_]*)[^;{}]*' + REFUSE,
+        r'\bif\s*\([^;{}]*\b' + q + r'\s*&\s*~\s*\(\s*u64\s*\)[^;{}]*' + REFUSE,
+        r'\bif\s*\([^;{}]*\([^;()]*\b' + q + r'(?!\w)[^;()]*\)\s*>\s*0x[fF]{8}[^;{}]*' + REFUSE,
         r'\b(?:' + '|'.join(HELPERS) + r')\(\s*' + q + r'(?!\w)',
     ]
 
 def strip_comments(text):
     # blank every comment, keeping offsets and newlines
     def blank(m):
+        if m.group(0).startswith('"'):
+            return m.group(0)
         return ''.join('\n' if ch == '\n' else ' ' for ch in m.group(0))
-    return re.sub(r'//[^\n]*|/\*.*?\*/', blank, text, flags=re.S)
+    return re.sub(r'"(?:\\.|[^"\\\n])*"|//[^\n]*|/\*.*?\*/', blank, text, flags=re.S)
 
 def check(src, name):
     bad = []
@@ -61,10 +69,10 @@ def check(src, name):
                 line_end = raw.find('\n', c.end())
                 line = raw[line_start:line_end if line_end >= 0 else len(raw)]
                 above = raw[raw.rfind('\n', 0, max(line_start - 1, 0)) + 1:line_start]
-                if '// width:' in line or above.strip().startswith('// width:'):
+                if re.search(r'^[^"]*// width:', line) or above.strip().startswith('// width:'):
                     continue
                 before = body[:c.start()]
-                gs = guards(p) + [r'\b' + re.escape(p) + r'\s*&\s*~\s*' + v + r'(?!\w)' for v in masks]
+                gs = guards(p) + [r'\bif\s*\([^;{}]*\b' + re.escape(p) + r'\s*&\s*~\s*' + v + r'(?!\w)[^;{}]*' + REFUSE for v in masks]
                 if any(re.search(g, before) for g in gs):
                     continue
                 ln = base + body[:c.start()].count('\n')
@@ -90,9 +98,17 @@ def self_test():
     regother = 's64 sys_p(struct exception_context *ctx) {\n    if (ctx->regs[1] > 0xffffffffull) return -1;\n    return f((unsigned)ctx->regs[0]);\n}\n'
     regcopy = 's64 sys_q(struct exception_context *ctx) {\n    u64 fd = ctx->regs[0];\n    return g((hidx_t)fd);\n}\n'
     prefix = 'static s64 sys_r(u64 fd, u64 fd2) {\n    if (fd2 > 0xffffffffull) return -1;\n    return g((hidx_t)fd);\n}\n'
+    ptrret = 'static struct Spoor *sys_s(struct Proc *p, u64 fd) {\n    return lookup(p, (hidx_t)fd);\n}\n'
+    noreturn = 'static s64 sys_t(u64 x) {\n    bool w = x > 0xffffffffull;\n    return f((u32)x) + w;\n}\n'
+    logonly = 'static s64 sys_u(u64 x, u64 y) {\n    if (x > 0xffffffffull || y) log_it();\n    return f((u32)x);\n}\n'
+    lower = 'static s64 sys_v(u64 len) {\n    if (len >= WEFT_HYBRID_THRESHOLD) return g((u32)len);\n    return 0;\n}\n'
+    strip = 'static s64 sys_w(u64 m) {\n    u64 k = m & ~(u64)FLAG;\n    return f((u32)m) + k;\n}\n'
+    instr = 'static s64 sys_x(u64 x) {\n    return f("// width: lol", (u32)x);\n}\n'
+    blockok = 'static s64 sys_y(u64 x) {\n    if (x > 0xffffffffull) { put(); return -1; }\n    return f((u32)x);\n}\n'
     want = {ok: 0, helper: 0, noted: 0, bad: 1, late: 1, double: 1, viv: 0,
             comment: 0, ored: 0, u32mask: 1, u64mask: 0, above: 0, far: 1,
-            regbad: 1, regok: 0, regother: 1, regcopy: 1, prefix: 1}
+            regbad: 1, regok: 0, regother: 1, regcopy: 1, prefix: 1,
+            ptrret: 1, noreturn: 1, logonly: 1, lower: 1, strip: 1, instr: 1, blockok: 0}
     for src, n in want.items():
         got = len(check(src, 'self-test'))
         if got != n:

@@ -154,6 +154,8 @@ void test_timer_oneshot_tval_clamps(void);
 void test_timer_arm_oneshot_restores(void);
 void test_extinction_claim_word_exactly_one_winner(void);
 void test_extinction_console_unclaimed_on_clean_boot(void);
+void test_extinction_tx_gate_admits_only_the_owner_once_claimed(void);
+void test_extinction_tx_wait_waits_out_a_peer_byte(void);
 void test_clock_monotonic_advances(void);
 void test_clock_realtime_anchored(void);
 void test_clock_wallclock_offset_math(void);
@@ -532,6 +534,7 @@ void test_syscall_opath_walkonly_no_byte_io(void);
 void test_syscall_argwidth_probe(void);
 void test_vivarium_t1_narrows_linux_widths(void);
 void test_vivarium_t2_shells_narrow_linux_widths(void);
+void test_vivarium_t1_keeps_guest_registers(void);
 void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
@@ -2059,6 +2062,8 @@ struct test_case g_tests[] = {
     { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
     { "extinction.claim_word_exactly_one_winner", test_extinction_claim_word_exactly_one_winner, false, NULL },
     { "extinction.console_unclaimed_on_clean_boot", test_extinction_console_unclaimed_on_clean_boot, false, NULL },
+    { "extinction.tx_gate_admits_only_the_owner_once_claimed", test_extinction_tx_gate_admits_only_the_owner_once_claimed, false, NULL },
+    { "extinction.tx_wait_waits_out_a_peer_byte", test_extinction_tx_wait_waits_out_a_peer_byte, false, NULL },
     { "clock.monotonic_advances",      test_clock_monotonic_advances,      false, NULL },
     { "clock.realtime_anchored",       test_clock_realtime_anchored,       false, NULL },
     { "clock.wallclock_offset_math",   test_clock_wallclock_offset_math,   false, NULL },
@@ -3098,6 +3103,7 @@ struct test_case g_tests[] = {
     { "cons.sys_puts_uses_shared_console_path", test_cons_sys_puts_uses_shared_console_path, false, NULL },
     { "vivarium.t1_renumbers",           test_vivarium_t1_renumbers,           false, NULL },
     { "vivarium.t1_narrows_linux_widths", test_vivarium_t1_narrows_linux_widths, false, NULL },
+    { "vivarium.t1_keeps_guest_registers", test_vivarium_t1_keeps_guest_registers, false, NULL },
     { "vivarium.t2_shells_narrow_linux_widths", test_vivarium_t2_shells_narrow_linux_widths, false, NULL },
     { "vivarium.rejects_are_deliberate", test_vivarium_rejects_are_deliberate, false, NULL },
     { "vivarium.unknown_forwards",       test_vivarium_unknown_forwards,       false, NULL },

@@ -288,6 +288,64 @@ static void provoke_el1_sync_runaway(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// extinction_peer_chatter -- every peer CPU writes the console directly
+// (uart_puts, the path the kernel test runner takes) in a tight loop, and cpu0
+// extincts mid-chatter. The banner must still start its own line and end it:
+// test-fault.sh matches the WHOLE line. Without the per-byte console gate
+// (extinction_tx_enter) the peers' bytes land inside the banner and no
+// `^EXTINCTION:` line exists at all.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_extinction_peer_chatter
+#include <thylacine/extinction.h>
+#include <thylacine/smp.h>
+#include "../arch/arm64/timer.h"
+
+static u32 g_chatter_running;
+
+static void chatter_entry(void) {
+    __atomic_fetch_add(&g_chatter_running, 1u, __ATOMIC_RELEASE);
+    for (;;) uart_puts("  chatter: a peer cpu writes the console directly\n");
+}
+
+__attribute__((noinline))
+static void provoke_extinction_peer_chatter(void) {
+    unsigned self = smp_cpu_idx_self();
+    unsigned n = smp_cpu_count();
+    if (n > DTB_MAX_CPUS) n = DTB_MAX_CPUS;
+    // The peers are parked (notify is off through the suite, and main.c turns it
+    // on only after this hook); ready_on must wake them.
+    sched_set_notify_enabled(true);
+    u32 want = 0;
+    for (unsigned c = 0; c < n; c++) {
+        if (c == self) continue;
+        struct Thread *t = thread_create(kproc(), chatter_entry);
+        if (!t) continue;
+        t->cpu_pinned = true;
+        ready_on(c, t);
+        want++;
+    }
+    if (want == 0) {
+        uart_puts("FAIL: extinction_peer_chatter needs a peer cpu (-smp >= 2)\n");
+        return;
+    }
+    u64 t0 = timer_now_ns();
+    while (__atomic_load_n(&g_chatter_running, __ATOMIC_ACQUIRE) < want) {
+        if (timer_now_ns() - t0 > 2000ull * 1000ull * 1000ull) {
+            uart_puts("FAIL: extinction_peer_chatter: the peers never started chattering\n");
+            return;
+        }
+        __asm__ __volatile__("yield" ::: "memory");
+    }
+    // Let every peer get well into its loop before the banner.
+    t0 = timer_now_ns();
+    while (timer_now_ns() - t0 < 20ull * 1000ull * 1000ull)
+        __asm__ __volatile__("yield" ::: "memory");
+    extinction("peer chatter: this banner must reach the wire whole");
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.
@@ -326,6 +384,9 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking el1_sync_runaway...\n");
     provoke_el1_sync_runaway();
     uart_puts("FAIL: provoke_el1_sync_runaway returned (no fault fired)\n");
+#elif defined(THYLACINE_FAULT_TEST_extinction_peer_chatter)
+    uart_puts("  fault-test: invoking extinction_peer_chatter...\n");
+    provoke_extinction_peer_chatter();
 #else
     // No fault test selected — production build.
 #endif

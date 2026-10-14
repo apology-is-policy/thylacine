@@ -2893,7 +2893,7 @@ s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
 // closure from a pipe or /dev/null reaches almost nothing), so pivoting back to
 // a held directory fd no longer restores the namespace.
 static struct Spoor *sys_lookup_root_source(struct Proc *p, u64 fd_raw) {
-    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    struct Spoor *source = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
     if (!source)                                     return NULL;
     if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return NULL; }
     return source;
@@ -4394,6 +4394,7 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // path (mkdir_or_open) creates with OREAD then CLOSES the handle and walks
     // T_OPATH for the navigation base, so the OREAD->RIGHT_READ create handle
     // is never used as a create base. Normally-opened -> RIGHT_TRANSFER.
+    // width: both callers refused omode bits outside the valid set
     rights_t r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
@@ -4922,7 +4923,7 @@ static struct Spoor *sys_resolve_dir_wr(struct Proc *p, u64 fd_raw) {
         // NULL Territory) -- the prior read-then-ref raced a concurrent pivot_root.
         return territory_root_ref(p->territory);
     }
-    return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
+    return sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);
 }
 
 // Copy + validate a single-component name from user-VA into `scratch` (NUL-
@@ -11765,7 +11766,7 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
 static s64 viv_sock_row(struct Proc *p, struct viv_socktab *tab, u64 fd_raw,
                         struct viv_sock *out) {
     if (viv_socktab_get(tab, (s32)(s64)fd_raw, out)) return 0;
-    if (fd_raw >= (u64)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)fd_raw) < 0)
+    if ((u32)fd_raw >= (u32)PROC_HANDLE_MAX || handle_get_cloexec(p, (hidx_t)fd_raw) < 0)
         return -(s64)T_E_BADF;
     return -(s64)T_E_NOTSOCK;
 }
@@ -13922,10 +13923,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (vivarium_fcntl_decide(args[1], args[2], &op, &cloexec, &min_fd)
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // an unserved cmd; see vivarium.h
-        // Bound BEFORE narrowing to hidx_t, so a huge or negative-as-int fd
-        // cannot wrap into a valid-looking index. The callees range-check too;
-        // this exists so the conversion itself is well-defined.
-        if (args[0] >= (u64)PROC_HANDLE_MAX)         return -(s64)T_E_BADF;
+        // Linux reads fcntl's fd as unsigned int, so the bound is on the low
+        // half: a negative-as-int fd is still above it, and junk above bit 31
+        // is Linux's to drop.
+        if ((u32)args[0] >= (u32)PROC_HANDLE_MAX)    return -(s64)T_E_BADF;
         hidx_t fd = (hidx_t)args[0];
 
         switch (op) {
@@ -14556,7 +14557,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
 
     case VIV_LINUX_SENDTO:
         // sendto(fd, buf, len, flags, addr, addrlen): x0..x5.
-        return viv_sock_sendto(p, args[0], args[1], args[2], args[3],
+        return viv_sock_sendto(p, (u64)(u32)args[0], args[1], args[2], args[3],   // int fd
                                args[4], args[5]);
 
     case VIV_LINUX_RECVFROM:
@@ -14565,7 +14566,7 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // non-NULL addr (x4), and with no address written back there is no
         // length to report -- reading x5 would consult a register the served
         // shape leaves as garbage (the clone garbage-register rule).
-        return viv_sock_recvfrom(p, args[0], args[1], args[2], args[3],
+        return viv_sock_recvfrom(p, (u64)(u32)args[0], args[1], args[2], args[3], // int fd
                                  args[4]);
 
     case VIV_LINUX_RECVMSG:
@@ -14647,11 +14648,11 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
 
     case VIV_LINUX_READV:
         // readv(fd, iov, iovcnt): x0..x2. N-5: writev's read twin.
-        return viv_readv(args[0], args[1], args[2]);
+        return viv_readv((u64)(u32)args[0], args[1], args[2]);   // fdget_pos(unsigned int)
 
     case VIV_LINUX_WRITEV:
         // writev(fd, iov, iovcnt): x0..x2.
-        return viv_writev(args[0], args[1], args[2]);
+        return viv_writev((u64)(u32)args[0], args[1], args[2]);  // fdget_pos(unsigned int)
 
     case VIV_LINUX_IOCTL:
         // ioctl(fd, request, argp): x0..x2. C2-k1b: terminal control on a cons
@@ -15315,8 +15316,11 @@ bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd);
 bool viv_fd_is_slow_for_test(struct Proc *p, u64 fd) { return viv_fd_is_slow(p, fd); }
 
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
+    // Linux reads x8 as `int scno` (el0_svc_common), so a number with bits
+    // above 31 runs the call its low half names; x8 itself stays as written.
+    u64 nr = ctx->regs[8] & 0xffffffffull;
 #if VIV_TRACE
-    viv_trace_call(ctx->regs[8], p);
+    viv_trace_call(nr, p);
 #endif
     // rt_sigreturn is the phenotyped spelling of SYS_NOTED(NCONT) (§6.22), and
     // it is handled HERE rather than by a table row or a viv_tier2 case because
@@ -15335,7 +15339,7 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // failure viv_tier2's default arm fails closed on. The interception IS the
     // implementation, and the in-guest handler round-trip is its regression --
     // delete this branch and every guest handler runs once and then dies.
-    if (ctx->regs[8] == VIV_LINUX_RT_SIGRETURN) {
+    if (nr == VIV_LINUX_RT_SIGRETURN) {
         sys_noted_handler(ctx, 0);      // NCONT: restore from the Thread snapshot
         return false;                   // ctx is already final; write no result
     }
@@ -15374,7 +15378,7 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // viv_socktab_drop is a no-op for an fd with no entry (every ordinary
     // file), and the table pointer is read without allocating, so a guest that
     // never made a socket pays one NULL test per close.
-    if (ctx->regs[8] == VIV_LINUX_CLOSE) {
+    if (nr == VIV_LINUX_CLOSE) {
         struct viv_socktab *st = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
         if (st) viv_socktab_drop(st, (s32)(s64)ctx->regs[0]);
     }
@@ -15383,7 +15387,7 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // answer, taken once from the Linux number before it is renumbered.
     // syscall_dispatch clears it on the way out.
     current_thread()->note_interruptible =
-        viv_call_interruptible(p, ctx->regs[8], args);
+        viv_call_interruptible(p, nr, args);
 
     // A CONNECTING socket's fd still names ctl, so read and write finish its
     // interrupted connect before they reach the file. A hook, as close's is,
@@ -15391,9 +15395,9 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     // positioned pair is Linux's ESPIPE on any socket, which the errno registry
     // cannot say yet (ERRORS.md ER-3's residual); until it can, they reach the
     // file a connected socket's would.
-    if (ctx->regs[8] == VIV_LINUX_READ    || ctx->regs[8] == VIV_LINUX_WRITE   ||
-        ctx->regs[8] == VIV_LINUX_READV   || ctx->regs[8] == VIV_LINUX_WRITEV  ||
-        ctx->regs[8] == VIV_LINUX_PREAD64 || ctx->regs[8] == VIV_LINUX_PWRITE64) {
+    if (nr == VIV_LINUX_READ    || nr == VIV_LINUX_WRITE   ||
+        nr == VIV_LINUX_READV   || nr == VIV_LINUX_WRITEV  ||
+        nr == VIV_LINUX_PREAD64 || nr == VIV_LINUX_PWRITE64) {
         s64 fr = viv_sock_finish_before_io(p, args[0]);
         if (fr < 0) {
             ctx->regs[0] = (u64)fr;
@@ -15402,21 +15406,21 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
     }
 
     struct viv_call call;
-    switch (vivarium_translate(ctx->regs[8], args, &call)) {
+    switch (vivarium_translate(nr, args, &call)) {
     case VIV_TRANSLATED:
         ctx->regs[8] = call.nr;
         for (u32 i = 0; i < VIV_NARGS; i++) ctx->regs[i] = call.args[i];
         return true;                            // the NATIVE handler runs
 
     case VIV_TIER2: {
-        s64 t2 = viv_tier2(ctx, p, ctx->regs[8], args);
+        s64 t2 = viv_tier2(ctx, p, nr, args);
         // A T2 row that declines is a DIFFERENT fact from a missing row: the
         // translator exists and this ARGUMENT combination fell outside its
         // domain (VIVARIUM.md section 4). Naming them apart is what turns a
         // failing guest into a work list -- "widen this domain" and "write
         // this translator" are different jobs.
         if (t2 == -(s64)T_E_NOSYS)
-            viv_report_unserved(ctx->regs[8], "T2 row declined these arguments");
+            viv_report_unserved(nr, "T2 row declined these arguments");
         ctx->regs[0] = (u64)t2;
         return false;
     }
@@ -15425,7 +15429,7 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         // V-3 hands this to the userspace supervisor. Until then the honest
         // answer is the same one ENOSYS gives; this arm exists so that change
         // is one line.
-        viv_report_unserved(ctx->regs[8], "no translator (FORWARD)");
+        viv_report_unserved(nr, "no translator (FORWARD)");
         ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
         return false;
 
@@ -15435,12 +15439,12 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         // Still reported, because "we decided against it" is the answer a
         // guest-side failure most needs to hear, and hiding it would make the
         // considered case indistinguishable from the never-considered one.
-        viv_report_unserved(ctx->regs[8], "declined by policy");
+        viv_report_unserved(nr, "declined by policy");
         ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
         return false;
 
     default:
-        viv_report_unserved(ctx->regs[8], "not in the table at all");
+        viv_report_unserved(nr, "not in the table at all");
         ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
         return false;
     }
@@ -15455,6 +15459,7 @@ bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p) 
 }
 
 static void syscall_dispatch_body(struct exception_context *ctx);
+static void syscall_native_switch(struct exception_context *ctx);
 
 // ARCH 8.12. THE SYSCALL BODY RUNS WITH INTERRUPTS ON, AND IS STILL
 // NON-PREEMPTIBLE. This wrapper is the whole mechanism; the body below is
@@ -15539,10 +15544,24 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         struct Thread *vt = current_thread();
         struct Proc   *vp = vt ? vt->proc : NULL;
         if (vp && vp->phenotype == PHENO_LINUX) {
+            // Linux hands back every register but x0 as the guest left it, and a
+            // compiler may keep x1-x5 or x8 live across the svc (musl declares
+            // them asm inputs). A renumber rewrites them for the native switch,
+            // so the guest's own words go back after it.
+            u64 kept[VIV_NARGS];
+            for (u32 i = 1; i < VIV_NARGS; i++) kept[i] = ctx->regs[i];
+            u64 kept_x8 = ctx->regs[8];
             if (!viv_linux_dispatch(ctx, vp)) return;
+            syscall_native_switch(ctx);
+            for (u32 i = 1; i < VIV_NARGS; i++) ctx->regs[i] = kept[i];
+            ctx->regs[8] = kept_x8;
+            return;
         }
     }
+    syscall_native_switch(ctx);
+}
 
+static void syscall_native_switch(struct exception_context *ctx) {
     u64 nr = ctx->regs[8];
 
     switch (nr) {

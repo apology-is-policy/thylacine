@@ -43,6 +43,7 @@
 
 #include "../../mm/slub.h"          // #127: a real sigtab, so proc_free frees it
 #include "../../arch/arm64/exception.h"
+#include "../../arch/arm64/uart.h"
 #include <thylacine/errno.h>
 #include <thylacine/thread.h>
 
@@ -51,6 +52,7 @@ void test_vivarium_t1_narrows_linux_widths(void);
 void test_vivarium_t2_shells_narrow_linux_widths(void);
 
 extern bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
+extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_fails_closed(void);
@@ -124,9 +126,9 @@ void test_vivarium_t1_renumbers(void) {
 // rest whole. The expected widths are Linux's prototypes, not the table:
 //   read/write/close(unsigned int fd, ...), lseek(unsigned int fd, off_t,
 //   unsigned int whence), pread64/pwrite64(unsigned int fd, ...),
-//   getpgid/getsid(pid_t), exit_group(int) (the native handler keeps only the
-//   low byte, so the row leaves it whole). exit and getpid read no word. The
-//   list is every row of g_viv_t1.
+//   getpgid/getsid(pid_t), exit_group(int). exit and getpid read no word. The
+//   list is every row of g_viv_t1, and its length is checked against the table.
+extern u32 vivarium_t1_count_for_test(void);
 void test_vivarium_t1_narrows_linux_widths(void) {
     static const struct { u64 nr; u8 u32w, s32w; const char *what; } rows[] = {
         { VIV_LINUX_READ,       0x1, 0,   "read" },
@@ -137,10 +139,12 @@ void test_vivarium_t1_narrows_linux_widths(void) {
         { VIV_LINUX_PWRITE64,   0x1, 0,   "pwrite64" },
         { VIV_LINUX_GETPGID,    0,   0x1, "getpgid" },
         { VIV_LINUX_GETSID,     0,   0x1, "getsid" },
-        { VIV_LINUX_EXIT_GROUP, 0,   0,   "exit_group" },
+        { VIV_LINUX_EXIT_GROUP, 0,   0x1, "exit_group" },
         { VIV_LINUX_EXIT,       0,   0,   "exit" },
         { VIV_LINUX_GETPID,     0,   0,   "getpid" },
     };
+    TEST_EXPECT_EQ((u64)(sizeof rows / sizeof rows[0]), (u64)vivarium_t1_count_for_test(),
+                   "the list names every T1 row: a new row joins it");
     for (u32 r = 0; r < sizeof rows / sizeof rows[0]; r++) {
         u64 args[VIV_NARGS];
         struct viv_call out;
@@ -181,6 +185,16 @@ void test_vivarium_t2_shells_narrow_linux_widths(void) {
                               0xFFFFFFFF00000010ull);
     s64 rnd0 = viv_shell_call(VIV_LINUX_GETRANDOM, 0, 0, 0, 0);
     s64 rndw = viv_shell_call(VIV_LINUX_GETRANDOM, 0, 0, 1ull << 32, 0);
+    // writev/readv take the fd as fdget_pos's unsigned int. A zero-count call
+    // still looks the fd up (a dead one answers EBADF), so the narrow call is
+    // the control and the wide one must answer the same.
+    hidx_t rd = -1, wr = -1;
+    int pipe_rc = sys_pipe_for_proc(kproc(), &rd, &wr);
+    s64 wv  = viv_shell_call(VIV_LINUX_WRITEV, (u64)wr, 0, 0, 0);
+    s64 wvw = viv_shell_call(VIV_LINUX_WRITEV, (1ull << 32) | (u64)wr, 0, 0, 0);
+    s64 rv  = viv_shell_call(VIV_LINUX_READV, (u64)rd, 0, 0, 0);
+    s64 rvw = viv_shell_call(VIV_LINUX_READV, (1ull << 32) | (u64)rd, 0, 0, 0);
+    if (pipe_rc == 0) { (void)handle_close(kproc(), rd); (void)handle_close(kproc(), wr); }
 
     TEST_EXPECT_EQ(neg, -(s64)T_E_INVAL, "readlinkat: a negative bufsiz is refused before the path");
     TEST_EXPECT_EQ(zero, -(s64)T_E_INVAL, "readlinkat: a zero bufsiz is refused");
@@ -188,6 +202,65 @@ void test_vivarium_t2_shells_narrow_linux_widths(void) {
                    "readlinkat: junk over a positive low half reaches the path read");
     TEST_EXPECT_EQ(rnd0, (s64)0, "getrandom: an empty request answers 0");
     TEST_EXPECT_EQ(rndw, rnd0, "getrandom: a high half in flags is Linux's to drop");
+    TEST_ASSERT(pipe_rc == 0, "fixture: a pipe in the dispatching Proc");
+    TEST_EXPECT_EQ(wv, (s64)0, "writev: a zero-count call on a live fd answers 0");
+    TEST_EXPECT_EQ(wvw, wv, "writev: a high half on the fd is Linux's to drop");
+    TEST_EXPECT_EQ(rv, (s64)0, "readv: a zero-count call on a live fd answers 0");
+    TEST_EXPECT_EQ(rvw, rv, "readv: a high half on the fd is Linux's to drop");
+}
+
+// A renumbered (T1) call hands back every register but x0 as the guest left it,
+// as Linux does (ret_to_user restores pt_regs); musl's syscall asm declares x8
+// and x1-x5 inputs, so a compiler may reuse them after the svc. Before the
+// restore the guest's x8 came back as the native number -- getpid's 72 is
+// Linux's pselect6 -- and a narrowed word came back narrowed. And Linux reads
+// x8 as an int, so a number with junk above bit 31 is the call its low half
+// names. Run in a child Proc that turns itself into a Linux guest, through the
+// real dispatch.
+#define VIV_REGS_JUNK 0xA5A5000000000000ull
+static void viv_t1_regs_child(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    self->phenotype = PHENO_LINUX;
+    u32 bad = 0;
+
+    struct exception_context c;
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = (1ull << 32) | VIV_LINUX_GETPID;
+    for (u32 i = 1; i < VIV_NARGS; i++) c.regs[i] = VIV_REGS_JUNK | i;
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)self->pid)                    bad |= 1u << 0;
+    if (c.regs[8] != ((1ull << 32) | VIV_LINUX_GETPID)) bad |= 1u << 1;
+    for (u32 i = 1; i < VIV_NARGS; i++)
+        if (c.regs[i] != (VIV_REGS_JUNK | i))           bad |= 1u << 2;
+
+    for (int i = 0; i < 31; i++) c.regs[i] = 0;
+    c.regs[8] = VIV_LINUX_LSEEK;
+    c.regs[0] = 0x7ffff000u;                            // no such fd
+    c.regs[1] = 0;
+    c.regs[2] = VIV_REGS_JUNK | 0u;                     // SEEK_SET under junk
+    TEST_SYSCALL_DISPATCH(&c);
+    if (c.regs[0] != (u64)-(s64)T_E_BADF)               bad |= 1u << 3;
+    if (c.regs[2] != (VIV_REGS_JUNK | 0u))              bad |= 1u << 4;
+    if (c.regs[8] != VIV_LINUX_LSEEK)                   bad |= 1u << 5;
+
+    self->phenotype = PHENO_NATIVE;
+    if (bad) {
+        uart_puts("    viv_t1_regs_child: failed checks mask ");
+        uart_puthex64(bad);
+        uart_puts("\n");
+    }
+    exits(bad ? "fail" : "ok");
+}
+
+void test_vivarium_t1_keeps_guest_registers(void) {
+    int pid = rfork(RFPROC, viv_t1_regs_child, NULL);
+    TEST_ASSERT(pid > 0, "rfork for the Linux-guest child");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid returned the child");
+    TEST_EXPECT_EQ(status, 0,
+        "a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half");
 }
 
 // The rejections are DECISIONS, not gaps, so they are asserted by name. If a

@@ -247,3 +247,9 @@ room inside the window.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
+
+**Console gate append (2026-10-14).** `uart_putc` is the gated wrapper over
+`uart_putc_wire`: after a peer's extinction claims the console, this CPU's
+bytes are dropped so the banner reaches the wire whole (sub-kernel-halls).
+`uart_tx_try_putc` (the ring drain) stays ungated: it runs under the ring lock
+the winner holds.

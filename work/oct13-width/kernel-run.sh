@@ -20,6 +20,24 @@
 #              reaches the fork as RFPROC.
 #   M11        M10 with no note: the build must FAIL at the width checker, on
 #              the register-word rule.
+#   M12        sys_resolve_dir_wr casts its fd down (annotated): the probe's wide
+#              unlink reaches the directory.
+#   M13        M12 with no note: the build refuses -- the checker now reads a
+#              function that returns a pointer.
+#   M14        sys_lookup_root_source (chroot, pivot_root) casts its fd down with
+#              no note: the build refuses. Its only witness is static (a probe
+#              chroot would move the root of the namespace it shares).
+#   M15        the writev shell passes Linux's fd whole: the native handler
+#              refuses what Linux reads as the low half.
+#   M16        a T1 call no longer restores the guest's x1-x5 and x8.
+#   M17        the vivarium reads x8 whole: a number with junk above bit 31 is
+#              refused where Linux runs the call its low half names.
+#   M18        lseek's whence guard stops refusing (a statement that does not
+#              return): the build refuses -- a compare is not a guard.
+#   B1         uart_putc without the console gate: tools/test-fault.sh's
+#              extinction_peer_chatter must FAIL (the banner is torn).
+#   B2         the committed gate: the same variant PASSes, the banner whole.
+#   B3         every test-fault variant PASSes (the claim now waits for peers).
 # Each predicted kernel message is checked, before any build, to lie inside the
 # function test.c registers under the predicted test name; each predicted probe
 # message is checked to be one the probe can print. Each mutant anchor is
@@ -41,11 +59,16 @@ T_T1=vivarium.t1_narrows_linux_widths
 T_T2=vivarium.t2_shells_narrow_linux_widths
 T_BRG=loom.bridge_probe
 T_FORK=fork.rfork_arg_rejection
+T_REG=vivarium.t1_keeps_guest_registers
+T_EXG=extinction.tx_gate_admits_only_the_owner_once_claimed
+T_EXW=extinction.tx_wait_waits_out_a_peer_byte
 W_PRB="every too-wide argument the probe passed was refused"
 W_T1CLOSE="close"
 W_T2NEG="readlinkat: a negative bufsiz is refused before the path"
 W_T2RND="getrandom: a high half in flags is Linux's to drop"
 W_FORK="a flags word wider than 32 bits must be refused, not cut down to RFPROC"
+W_T2WV="writev: a high half on the fd is Linux's to drop"
+W_REG="a T1 call returns the guest's x1-x5 and x8 untouched, and reads x8 by its low half"
 PROBE_SRC=usr/argwidth-probe/argwidth-probe.c
 AW_BIN=build/ramfs-src/bin/argwidth-probe
 BR_BIN=build/ramfs-src/bin/loom-bridge-probe
@@ -54,8 +77,8 @@ QUAL_LINE='PRIVATE-ASYNC QUALIFICATION build'
 SUITE_EXT='EXTINCTION: kernel test suite failed'
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
 export STRATUM_SRC=$HOME/projects/stratum-astra/v2
-FILES="kernel/syscall.c kernel/vivarium.c"
-NMUT=11
+FILES="kernel/syscall.c kernel/vivarium.c arch/arm64/uart.c"
+NMUT=18
 MUTATED=0
 record() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')  $*" | tee -a "$OUT/stages.txt"; }
 free_mb() { df -m . | awk 'NR==2 {print $4}'; }
@@ -149,7 +172,7 @@ dirty=$(git status --porcelain --untracked-files=no | wc -l | tr -d ' ')
 [ "$dirty" = 0 ] || { echo "REFUSING: $dirty tracked modification(s); commit first"; exit 3; }
 HEAD_SHA=$(git rev-parse HEAD)
 record "HEAD $HEAD_SHA"
-NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK"
+NAMED="$T_PRB $T_T1 $T_T2 $T_BRG $T_FORK $T_REG $T_EXG $T_EXW"
 for t in $NAMED; do
   /usr/bin/grep -qF "{ \"$t\"," kernel/test/test.c || { echo "REFUSING: $t not registered"; exit 3; }
 done
@@ -158,7 +181,8 @@ python3 tools/check-arg-width.py kernel/syscall.c || { echo "REFUSING: the commi
 record "width checker: self-test and the committed syscall.c pass"
 python3 - "$T_PRB" "$W_PRB" test_argwidth_probe.c "$T_T1" "$W_T1CLOSE" test_vivarium.c \
   "$T_T2" "$W_T2NEG" test_vivarium.c "$T_T2" "$W_T2RND" test_vivarium.c \
-  "$T_FORK" "$W_FORK" test_fork.c <<'MEMBER' || exit 3
+  "$T_FORK" "$W_FORK" test_fork.c "$T_T2" "$W_T2WV" test_vivarium.c \
+  "$T_REG" "$W_REG" test_vivarium.c <<'MEMBER' || exit 3
 import re, sys
 reg = dict(re.findall(r'\{\s*"([^"]+)",\s*(\w+),', open('kernel/test/test.c').read()))
 a = sys.argv[1:]
@@ -177,7 +201,7 @@ MEMBER
 # name followed by the PAIR's fixed suffix.
 python3 - "$PROBE_SRC" "close: the wide call is refused" "getpgid: the wide call is refused" \
   "lseek whence: the wide call is refused" "torpor_wait: the sign-extended word matches" \
-  "getpgid: a sign-extended -1 is a pid, not a width" <<'PROBEMSG' || exit 3
+  "getpgid: a sign-extended -1 is a pid, not a width" "unlink parent fd: the wide call is refused" <<'PROBEMSG' || exit 3
 import re, sys
 src = open(sys.argv[1]).read()
 for why in sys.argv[2:]:
@@ -215,7 +239,7 @@ done
 python3 - "$0" "$NMUT" <<'CENSUS' || exit 3
 import re, sys
 script, want = open(sys.argv[1]).read(), int(sys.argv[2])
-calls = re.findall(r"^mutant(?:_build)? (\w+) (kernel/\S+) \\\n'(.*?)' \\\n'(.*?)'\n", script, re.S | re.M)
+calls = re.findall(r"^mutant(?:_build|_fault)? (\w+) ((?:kernel|arch)/\S+) \\\n'(.*?)' \\\n'(.*?)'\n", script, re.S | re.M)
 bad = 0
 for lab, path, old, new in calls:
     target = open(path).read()
@@ -327,10 +351,22 @@ mutant_build() {
   record "$1: build exit $_brc"
   [ "$_brc" != 0 ] || { echo "$1: the build ACCEPTED an unannotated narrowing cast"; exit 2; }
   /usr/bin/grep -qF '==> argument width check FAILED' "$OUT/$1-build.log" || { echo "$1: the build failed, but not at the width check"; tail -12 "$OUT/$1-build.log"; exit 2; }
-  _hits=$(/usr/bin/grep -E ': [a-z_0-9]+ narrows [a-z_0-9]+ with no full-width check first$' "$OUT/$1-build.log" || true)
+  _hits=$(/usr/bin/grep -E ': [a-z_0-9]+ narrows [^ ]+ with no full-width check first$' "$OUT/$1-build.log" || true)
   [ "$(printf '%s\n' "$_hits" | /usr/bin/grep -c .)" = 1 ] || { echo "$1: checker hits: '$_hits'"; exit 2; }
   case "$_hits" in *"$CHECK_LINE"*) ;; *) echo "$1: checker said '$_hits', predicted '$CHECK_LINE'"; exit 2;; esac
   /usr/bin/grep -qF 'check-arg-width: 1 narrowing cast(s)' "$OUT/$1-build.log" || { echo "$1: no checker tally line"; exit 2; }
+  restore || exit 9
+  MUTATED=0
+}
+# mutant_fault <label> <file> <old> <new>: tools/test-fault.sh's
+# extinction_peer_chatter must FAIL on the mutant (it builds its own kernel
+# under build/kernel-fault-*; build/kernel is untouched).
+mutant_fault() {
+  apply "$@"
+  ( set +e; BOOT_TIMEOUT=300 tools/test-fault.sh extinction_peer_chatter > "$OUT/$1-fault.log" 2>&1; echo $? > "$OUT/$1-fault.rc" )
+  record "$1: test-fault exit $(cat "$OUT/$1-fault.rc")"
+  [ "$(cat "$OUT/$1-fault.rc")" != 0 ] || { echo "$1: extinction_peer_chatter PASSED without the gate -- the witness cannot fail"; exit 2; }
+  /usr/bin/grep -qE '^==> \[extinction_peer_chatter\] FAIL' "$OUT/$1-fault.log" || { echo "$1: test-fault failed, but not at the variant"; tail -12 "$OUT/$1-fault.log"; exit 2; }
   restore || exit 9
   MUTATED=0
 }
@@ -353,7 +389,10 @@ expect_probe() { # expect_probe <label> <why> <got|ANY>
   [ "$(printf '%s\n' "$_pl" | /usr/bin/grep -c .)" = 1 ] || { echo "$1: probe FAIL lines: '$_pl'"; exit 2; }
   _pre=${_pl%% (got *}; _got=${_pl##* (got }; _got=${_got%)}
   case "$_pre" in *": $2") ;; *) echo "$1: probe said '$_pl', predicted ': $2'"; exit 2;; esac
-  if [ "$3" = ANY ]; then
+  if [ "${3#NOT}" != "$3" ]; then
+    case "$_got" in ''|*[!0-9-]*) echo "$1: probe value '$_got' is not a number"; exit 2;; esac
+    [ "$_got" != "${3#NOT}" ] || { echo "$1: probe value '$_got', predicted anything but ${3#NOT}"; exit 2; }
+  elif [ "$3" = ANY ]; then
     case "$_got" in ''|*[!0-9]*) echo "$1: probe value '$_got', predicted a non-negative number"; exit 2;; esac
   else
     [ "$_got" = "$3" ] || { echo "$1: probe value '$_got', predicted '$3'"; exit 2; }
@@ -463,6 +502,85 @@ mutant_build m11 kernel/syscall.c \
 '    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1]  /* MUTANT M11 no note */,
 '
 record "M11 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== M12: sys_resolve_dir_wr casts its fd down ==="
+mutant m12 kernel/syscall.c \
+'    return sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);
+' \
+'    return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE); // width: MUTANT M12 truncates
+'
+expect_fails M12 1 "$T_PRB|$W_PRB"
+expect_probe M12 "unlink parent fd: the wide call is refused" NOT-9
+ok M12 "exactly $T_PRB, the probe at 'unlink parent fd: the wide call is refused' (got $_got)"
+echo "=== M13: M12 with no note -- the build refuses ==="
+CHECK_LINE="kernel/syscall.c:$(/usr/bin/grep -nF '    return sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);' "$(pristine kernel/syscall.c)" | cut -d: -f1): sys_resolve_dir_wr narrows fd_raw"
+mutant_build m13 kernel/syscall.c \
+'    return sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_WRITE);
+' \
+'    return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE); /* MUTANT M13 no note */
+'
+record "M13 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== M14: sys_lookup_root_source casts its fd down -- the build refuses ==="
+CHECK_LINE="kernel/syscall.c:$(/usr/bin/grep -nF '    struct Spoor *source = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);' "$(pristine kernel/syscall.c)" | cut -d: -f1): sys_lookup_root_source narrows fd_raw"
+mutant_build m14 kernel/syscall.c \
+'    struct Spoor *source = sys_lookup_spoor(p, sys_hidx_arg(fd_raw), RIGHT_READ);
+' \
+'    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ); /* MUTANT M14 no note */
+'
+record "M14 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== M15: the writev shell passes Linux's fd whole ==="
+mutant m15 kernel/syscall.c \
+'        return viv_writev((u64)(u32)args[0], args[1], args[2]);  // fdget_pos(unsigned int)
+' \
+'        return viv_writev(args[0], args[1], args[2]);  // MUTANT M15 whole fd
+'
+expect_fails M15 1 "$T_T2|$W_T2WV"
+ok M15 "exactly $T_T2 at '$W_T2WV'"
+echo "=== M16: a T1 call keeps the renumbered registers ==="
+mutant m16 kernel/syscall.c \
+'            for (u32 i = 1; i < VIV_NARGS; i++) ctx->regs[i] = kept[i];
+            ctx->regs[8] = kept_x8;
+' \
+'            (void)kept; (void)kept_x8; // MUTANT M16 no restore
+'
+expect_fails M16 1 "$T_REG|$W_REG"
+ok M16 "exactly $T_REG at '$W_REG'"
+echo "=== M17: the vivarium reads x8 whole ==="
+mutant m17 kernel/syscall.c \
+'    u64 nr = ctx->regs[8] & 0xffffffffull;
+' \
+'    u64 nr = ctx->regs[8]; // MUTANT M17 whole x8
+'
+expect_fails M17 1 "$T_REG|$W_REG"
+ok M17 "exactly $T_REG at '$W_REG'"
+echo "=== M18: lseek's whence compare stops refusing -- the build refuses ==="
+CHECK_LINE="kernel/syscall.c:$(( $(/usr/bin/grep -nF '    if (whence_raw > 0xffffffffull)                  return -T_E_INVAL;' "$(pristine kernel/syscall.c)" | cut -d: -f1) + 1 )): sys_lseek_handler narrows whence_raw"
+mutant_build m18 kernel/syscall.c \
+'    if (whence_raw > 0xffffffffull)                  return -T_E_INVAL;
+' \
+'    if (whence_raw > 0xffffffffull)                  (void)0; /* MUTANT M18 no refusal */
+'
+record "M18 DISCRIMINATED: the build refused at the width check, naming '$CHECK_LINE'"
+echo "=== B1-B3: the extinction banner against peer chatter (tools/test-fault.sh) ==="
+lease fault; floor pre-fault
+mutant_fault b1 arch/arm64/uart.c \
+'void uart_putc(char c) {
+    if (!extinction_tx_enter()) return;
+    uart_putc_wire(c);
+    extinction_tx_exit();
+}
+' \
+'void uart_putc(char c) {
+    uart_putc_wire(c);   // MUTANT B1 no gate
+}
+'
+record "B1 DISCRIMINATED: without the gate extinction_peer_chatter FAILS: $(/usr/bin/grep -E '^==> \[extinction_peer_chatter\] FAIL' "$OUT/b1-fault.log" | head -1 | cut -c1-160)"
+( set +e; BOOT_TIMEOUT=300 tools/test-fault.sh extinction_peer_chatter > "$OUT/b2-fault.log" 2>&1; echo $? > "$OUT/b2-fault.rc" )
+[ "$(cat "$OUT/b2-fault.rc")" = 0 ] && /usr/bin/grep -qE '^==> \[extinction_peer_chatter\] PASS' "$OUT/b2-fault.log" \
+  || { echo "B2: the gated build did not PASS extinction_peer_chatter"; tail -12 "$OUT/b2-fault.log"; exit 2; }
+record "B2: with the gate extinction_peer_chatter PASSes, the banner a whole line"
+( set +e; BOOT_TIMEOUT=300 tools/test-fault.sh > "$OUT/b3-fault.log" 2>&1; echo $? > "$OUT/b3-fault.rc" )
+[ "$(cat "$OUT/b3-fault.rc")" = 0 ] || { echo "B3: test-fault.sh exit $(cat "$OUT/b3-fault.rc")"; tail -14 "$OUT/b3-fault.log"; exit 2; }
+record "B3: $(/usr/bin/grep -E '^==> Summary' "$OUT/b3-fault.log")"
 echo "=== rebuild the committed tree, then SHAPE ==="
 lease rebuild
 tools/build.sh kernel --config ci > "$OUT/rebuild.log" 2>&1 || { echo "rebuild failed"; exit 1; }

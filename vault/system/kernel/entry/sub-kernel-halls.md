@@ -294,3 +294,17 @@ a dump end to end.
 unowned) — the `extinction()`/`extinction_with_addr` ELE entry, the `EXTINCTION:`
 tooling-ABI marker, the recursive-extinction suppression, the `_torpor` halt, and
 the owed-`IPI_HALT` line-tearing seam (#243) — at the 04-extinction absorption.
+
+**Console gate append (2026-10-14).** A peer CPU's direct console write
+(`uart_putc`: the kernel test runner, every boot diagnostic) could land inside
+an extinction banner; the TX ring lock never covered it. Observed in a mutant
+boot: the banner came out interleaved with peers' test lines, no
+`^EXTINCTION:` line existed, and main's own extinction lost the claim and
+parked silently, so the gate read a timeout. `uart_putc` now brackets every
+byte with `extinction_tx_enter`/`exit`: once a CPU owns the console a peer's
+byte is dropped, and the winner waits (bounded, 50 ms) for a byte a peer had
+already committed to (Dekker order, seq_cst both sides). Tests:
+`extinction.tx_gate_admits_only_the_owner_once_claimed`,
+`extinction.tx_wait_waits_out_a_peer_byte`, and test-fault.sh's
+`extinction_peer_chatter`, matched as a whole line. IPI_HALT (stopping the
+peers) stays a reservation.

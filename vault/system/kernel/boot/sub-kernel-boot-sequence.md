@@ -371,3 +371,8 @@ emitter's writer role — the delivery half of [[abi-boot-banner]] — is
 unowned) — the `__stack_chk_guard` link-time-magic → KASLR-seeded-runtime-cookie
 lifecycle, the barrier that keeps one cookie per frame, and `__stack_chk_fail` →
 `extinction` — at the 12-hardening absorption.
+
+**Fault variant append (2026-10-14).** `extinction_peer_chatter` pins a
+chattering thread to every peer CPU (enabling notify itself, since
+`fault_test_run` runs before main.c does) and extincts on cpu0;
+tools/test-fault.sh requires the banner as a whole line.

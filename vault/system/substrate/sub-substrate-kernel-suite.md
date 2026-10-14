@@ -1279,3 +1279,6 @@ without userspace may skip it. The guest runner also requires:
   `loom-bridge-probe status=N expected=N`, and the ring line
   `loom-bridge-probe rings made=N retired=N expected=N`, each exactly once;
 - that the baked binary matches the built one.
+
+**Append (2026-10-14).** New tests: `extinction.tx_gate_admits_only_the_owner_once_claimed`,
+`extinction.tx_wait_waits_out_a_peer_byte`, `vivarium.t1_keeps_guest_registers`.

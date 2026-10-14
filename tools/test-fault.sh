@@ -26,6 +26,11 @@
 #   el1_sync_runaway — a fault taken from INSIDE the extinction path drives
 #                     the EL1-sync depth to EL1_SYNC_DEPTH_MAX (#246) →
 #                     "EXTINCTION: el1-sync recursion"
+#   extinction_peer_chatter — every peer CPU writes the console directly while
+#                     cpu0 extincts; the banner must reach the wire WHOLE
+#                     (the per-byte console gate) →
+#                     "EXTINCTION: peer chatter: this banner must reach the wire whole"
+#                     matched as the ENTIRE line, not a substring
 #
 # This list is the one place a reader learns what exists, so keep it equal to
 # ALL_VARIANTS below. It was short by two (bootcpu_idle_guard,
@@ -58,11 +63,21 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault el1_sync_runaway extinction_peer_chatter"
 
 # A substring that must NOT appear for a variant to PASS. Empty = no such
 # requirement. Paired with expected_for: "the right line appeared" and "the
 # wrong line did not" are SEPARATE claims and need separate checks.
+# Variants whose expected line must be the WHOLE line: a peer byte before the
+# prefix or inside the message is the failure the variant exists to catch, and a
+# substring match would pass a banner torn after its last expected byte.
+whole_line_for() {
+    case "$1" in
+        extinction_peer_chatter) echo 1 ;;
+        *)                       echo "" ;;
+    esac
+}
+
 forbid_for() {
     case "$1" in
         el1_sync_runaway) echo "console-ring: NOT held" ;;
@@ -80,6 +95,7 @@ expected_for() {
         bootcpu_idle_guard)    echo "EXTINCTION: kernel stack overflow" ;;
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         el1_sync_runaway)      echo "EXTINCTION: el1-sync recursion" ;;
+        extinction_peer_chatter) echo "EXTINCTION: peer chatter: this banner must reach the wire whole" ;;
         # ROUND F6: the variant REACHES cons_tx_claim_for_dump's
         # already-ours arm but could not FAIL if it were wrong -- delete that
         # arm and the re-entrant claim burns its bound, returns false, and the
@@ -210,7 +226,12 @@ for variant in $selected; do
             # banner the slow way (a broken re-entrant claim burning its bound
             # and emitting unserialized) prints the expected string too.
             forbid="$(forbid_for "$variant")"
-            if [[ -n "$forbid" ]] && grep -qF "$forbid" "$log_file"; then
+            if [[ -n "$(whole_line_for "$variant")" ]] \
+               && ! tr -d '\r' < "$log_file" | grep -qxF "$expect"; then
+                fail=$((fail + 1))
+                echo "==> [$variant] FAIL: '$expect' is not a whole line -- the banner was torn:"
+                grep -aF "$expect" "$log_file" | head -2 | sed 's/^/    /'
+            elif [[ -n "$forbid" ]] && grep -qF "$forbid" "$log_file"; then
                 fail=$((fail + 1))
                 echo "==> [$variant] FAIL: saw '$expect' but ALSO '$forbid'"
                 echo "    the banner printed, but not the way the variant exists to prove:"

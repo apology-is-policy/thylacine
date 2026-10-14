@@ -1622,3 +1622,17 @@ or need hardware or a service: the hardware handles (irq_wait, mmio_map,
 dma_map, dma_segments, pci_info, burrow_from_hostmem), weft_map, mount,
 attach_9p and attach_9p_srv, srv_accept and srv_peer, the tty pair,
 walk_create and the create form of open. Those rest on the static check.
+
+**Width audit round 1 append (2026-10-14).** `sys_lookup_root_source` (chroot,
+pivot_root) and `sys_resolve_dir_wr` (unlink, both rename directories) cast a
+raw fd down unchecked; both now take `sys_hidx_arg`. The width checker had
+never read them: its function pattern stopped at a `*` in the return type. It
+now reads pointer-returning functions, ignores a `// width:` inside a string,
+and counts a compare as a guard only when its statement refuses (returns, or
+opens a block that returns). `spoor_create_install`'s rights cast carries a
+note naming its callers' full-width omode check, which the old rule had taken
+from a strip. The native arms now live in `syscall_native_switch`; the
+phenotype branch stays in `syscall_dispatch_body`. Probe pairs: unlink's
+parent fd and rename's two directory fds, through a path handle and a missing
+name. chroot and pivot_root are covered statically only (the probe shares its
+parent's namespace).
