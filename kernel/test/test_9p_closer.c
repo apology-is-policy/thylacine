@@ -220,7 +220,7 @@ static int g_xw_close_tid;
 static int mq_watched_close(void *ctx) {
     struct p9_mq_loopback *mq = (struct p9_mq_loopback *)ctx;
     if (mq == &g_mq_a) {
-        g_xw_close_phase = __atomic_load_n(&g_xw_phase, __ATOMIC_ACQUIRE);
+        g_xw_close_phase = __atomic_load_n(&g_xw_phase, __ATOMIC_RELAXED);
         g_xw_close_tid   = current_thread()->tid;
     }
     int rc = p9_mq_loopback_ops_for(mq).close(ctx);
@@ -817,7 +817,7 @@ struct xw_obs {
     struct wire_ent wire[WIRE_LOG];
     // HUNT probes: the session just before and after the unstall, and its
     // first death (g_p9_dead_ev) placed among the phases by g_p9_dead_n.
-    bool pre_dead, pre_held, pre_mq_closed, post_dead;
+    bool pre_dead, pre_mq_closed, post_dead;
     int  pre_ref, pre_tstate, unstall_rc;
     u32  pre_sends, dn[9];
     bool died, dead_dying, dead_devgone;
@@ -834,11 +834,11 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
     o->base   = closer_now();
     g_xw_close_phase = 0;
     g_xw_close_tid   = -1;
-    o->dn[0]  = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&g_xw_phase, 1u, __ATOMIC_RELEASE);
+    o->dn[0]  = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_xw_phase, 1u, __ATOMIC_RELAXED);
     o->opened = wbc_open(&w);
-    o->dn[1]  = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&g_xw_phase, 2u, __ATOMIC_RELEASE);
+    o->dn[1]  = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_xw_phase, 2u, __ATOMIC_RELAXED);
     if (o->opened) {
         g_t1_spoor    = w.f;                     // the child's handle table adopts it
         g_xc_fd       = -1;
@@ -850,8 +850,8 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         hold_reader(w.a->client, true);
         g_mq_a.eagain_budget = 0xffffffffu;
         int pid = rfork(RFPROC, xw_child, NULL);
-        o->dn[2]     = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&g_xw_phase, 3u, __ATOMIC_RELEASE);
+        o->dn[2]     = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_xw_phase, 3u, __ATOMIC_RELAXED);
         o->started   = pid > 0;
         o->child_pid = pid;
         if (o->started) {
@@ -868,20 +868,19 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
             }
             o->forced = xw_zombie();             // before the server answered
         }
-        o->dn[3] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&g_xw_phase, 4u, __ATOMIC_RELEASE);
+        o->dn[3] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_xw_phase, 4u, __ATOMIC_RELAXED);
         o->hook_ran = g_xw_hook_ran;
         o->before   = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
         o->pre_dead      = w.a->client->dead;
-        o->pre_held      = p9_client_fid_held(w.a->client, w.fid);
         o->pre_tstate    = (int)w.a->client->transport.state;
         o->pre_mq_closed = g_mq_a.closed;
         o->pre_sends     = g_mq_a.sends;
-        o->pre_ref       = __atomic_load_n(&w.a->ref, __ATOMIC_ACQUIRE);
+        o->pre_ref       = __atomic_load_n(&w.a->ref, __ATOMIC_RELAXED);
         o->unstall_rc    = wbc_unstall(&w);
         o->post_dead     = w.a->client->dead;
-        o->dn[4] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&g_xw_phase, 5u, __ATOMIC_RELEASE);
+        o->dn[4] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_xw_phase, 5u, __ATOMIC_RELAXED);
         if (o->started) {
             // A close that never ends fails here rather than hanging the
             // suite; the fixture it still uses is then left alone.
@@ -892,8 +891,8 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
             o->status = st;
         }
         proc_exit_close_test_set_window_hook(NULL);
-        o->dn[5] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-        __atomic_store_n(&g_xw_phase, 6u, __ATOMIC_RELEASE);
+        o->dn[5] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_xw_phase, 6u, __ATOMIC_RELAXED);
         if (o->started && !o->reaped) return;
         u64 t0 = timer_now_ns();
         TEST_YIELD_UNTIL_SOFT(srv_clunked(&g_rec_a, w.fid));
@@ -908,8 +907,8 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
         o->nclunk  = __atomic_load_n(&g_rec_a.nclunk, __ATOMIC_ACQUIRE);
         o->nmsg    = g_rec_a.nmsg;
     }
-    o->dn[6] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&g_xw_phase, 7u, __ATOMIC_RELEASE);
+    o->dn[6] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_xw_phase, 7u, __ATOMIC_RELAXED);
     o->nwrite    = __atomic_load_n(&g_rec_a.nwrite, __ATOMIC_ACQUIRE);
     o->write_len = g_rec_a.write_len;
     o->write_sum = g_rec_a.write_sum;
@@ -930,7 +929,7 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
     o->self_tid = current_thread()->tid;
     o->nwire    = g_wire_n;
     for (u32 i = 0; i < g_wire_n && i < WIRE_LOG; i++) o->wire[i] = g_wire[i];
-    o->dn[7] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
+    o->dn[7] = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
     if (o->opened) {
         // A client freed in an earlier trial may share this one's address:
         // only deaths since this trial began count.
@@ -947,12 +946,12 @@ static void xw_run(bool last_out, bool window, struct xw_obs *o) {
             break;
         }
     }
-    __atomic_store_n(&g_xw_phase, 8u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xw_phase, 8u, __ATOMIC_RELAXED);
     o->released = wbc_end(&w);
-    o->dn[8]       = __atomic_load_n(&g_p9_dead_n, __ATOMIC_ACQUIRE);
+    o->dn[8]       = __atomic_load_n(&g_p9_dead_n, __ATOMIC_RELAXED);
     o->close_phase = g_xw_close_phase;
     o->close_tid   = g_xw_close_tid;
-    __atomic_store_n(&g_xw_phase, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xw_phase, 0u, __ATOMIC_RELAXED);
 }
 
 static void xw_put(const char *k, u64 v) {
@@ -989,7 +988,7 @@ static void xw_diag(const struct xw_obs *o, int code) {
     xw_put("dropped+", o->late.dropped - o->base.dropped);
     xw_put("pending", o->late.pending);
     uart_puts("\n    xw-diag probe:");
-    xw_put("pre_dead", o->pre_dead);   xw_put("pre_held", o->pre_held);
+    xw_put("pre_dead", o->pre_dead);
     xw_put("pre_tstate", (u64)o->pre_tstate);
     xw_put("pre_mq_closed", o->pre_mq_closed);
     xw_put("pre_sends", o->pre_sends); xw_put("pre_ref", (u64)o->pre_ref);
