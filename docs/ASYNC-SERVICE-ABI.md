@@ -398,9 +398,32 @@ kernel, and the cores stay crate-private. The C adapter is
 `thyla/loom_client/adapter.h` and `src/loom_client/adapter.c` in libt, over a
 table of the same calls that libt fills with its `svc` stubs and the host tests
 fill with a simulation. Following the October 12 vote, its storage is one
-caller-provided object that holds the mapping, the client storage and the
-executor. The Rust adapter comes first, because the clipboard client that AS-4
+caller-provided object, `T_LOOM_RING_STORAGE(entries)`, that holds the mapping,
+the client storage and the adapter's own tables. It holds no retirement
+executor. Like the Rust adapter, it drives the ring's request driver itself,
+and caller storage already outlives the client, because it is reused only once
+it is idle. The Rust adapter comes first, because the clipboard client that AS-4
 adopts is Rust.
+
+**The C interface.** C has no futures, so each operation is an opaque handle,
+as ASYNC-SERVICE-LIFECYCLE section 7 says: submit, poll, cancel, reap. A submit
+call returns the handle: CONNECT, WALK, LOPEN, a fixed READ or WRITE, or a
+pooled stream. `t_loom_turn` is the loop turn: it submits, routes and waits
+once, as the Rust `Ring::turn` does. Each kind has its own completion call. It
+answers 0 while the operation is pending. It answers 1 once the operation is
+done, with the CQE's result and, for CONNECT and WALK, the new scope or fid. It
+answers a negative errno when the ring itself has closed (-ECANCELED) or failed
+(-EIO). An answer of 1 consumes the handle; any other answer leaves it with the
+caller. Dropping a pending handle cancels it, which aborts its scope. Asking a
+handle for another kind's completion answers -EINVAL and leaves it alone. A
+finished fixed READ keeps its buffer range until its result is dropped, and a
+stream yields each payload as a lease that its drop returns. Every table is
+bounded: at most `2*entries` operation handles at once, the kernel's 64-slot
+table for targets, scopes and fids, and the 64-member bank for pools and
+payloads. A full table answers -ENOSPC. The storage is reused only once
+`t_loom_idle` answers 1: the ring is closed and every handle, read result and
+payload has been dropped. The mapping and the buffers are detached at that
+point.
 
 **One book per ring.** Every request takes its cookie from one request book of
 `cq_entries` entries (NA-2b F3): control operations (CONNECT, WALK, LOPEN,
