@@ -197,6 +197,14 @@ record "expected tests (derived from test.c): $EXPECT"
 [ "$(git -C "$STRATUM_SRC" rev-parse HEAD)" = "$STRATUM_PIN" ] || { echo "REFUSING: Stratum HEAD is not $STRATUM_PIN"; exit 3; }
 [ -z "$(git -C "$STRATUM_SRC" status --porcelain)" ] || { echo "REFUSING: Stratum tree dirty"; exit 3; }
 record "stratum $STRATUM_SRC at $STRATUM_PIN, clean"
+# The Go fork is baked into every image (tools/build.sh GOFORK). The shared
+# ~/projects/go-thylacine is edited live by other tracks, and a bake that reads
+# it mid-edit fails or bakes a state nobody committed: pin a clean tree.
+GOFORK=${GOFORK:-$HOME/projects/go-thylacine}
+export GOFORK
+GOFORK_HEAD=$(git -C "$GOFORK" rev-parse HEAD 2>/dev/null) || { echo "REFUSING: GOFORK $GOFORK is not a git tree"; exit 3; }
+[ -z "$(git -C "$GOFORK" status --porcelain)" ] || { echo "REFUSING: GOFORK $GOFORK has uncommitted changes"; exit 3; }
+record "go fork $GOFORK at $GOFORK_HEAD, clean"
 mkdir -p "$OUT/pristine"
 for f in $FILES; do
   [ "$(/usr/bin/grep -c MUTANT "$f" || true)" = 0 ] || { echo "REFUSING: $f already names a MUTANT"; exit 3; }
@@ -462,4 +470,7 @@ lease shape; floor pre-shape
 ( set +e; tools/check-production.sh --all > "$OUT/production.log" 2>&1; echo $? > "$OUT/production.rc" )
 [ "$(cat "$OUT/production.rc")" = 0 ] || { echo "SHAPE: check-production.sh --all exit $(cat "$OUT/production.rc")"; tail -20 "$OUT/production.log"; exit 7; }
 record "SHAPE: tools/check-production.sh --all exit 0"
+[ "$(git -C "$GOFORK" rev-parse HEAD)" = "$GOFORK_HEAD" ] && [ -z "$(git -C "$GOFORK" status --porcelain)" ] \
+  || { echo "GOFORK moved or changed during the run"; exit 8; }
+record "go fork unchanged across the run"
 echo "-- done: $OUT"
