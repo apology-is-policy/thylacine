@@ -17,7 +17,8 @@ int t_request_create(struct t_request_book *b,struct t_request_entry *entries,si
 }
 void t_request_destroy(struct t_request_book *b){b->count=0;b->entries=NULL;}
 int t_request_reserve(struct t_request_book *b,struct t_loom_service_ref scope,struct t_request_spec spec,uint64_t *out){
- if(!b||!b->entries||!out||!valid(scope)||spec.kind<T_REQ_CONTROL||spec.kind>T_REQ_POOLED_READ)return T_REQ_GEOMETRY;
+ if(!b||!b->entries||!out||!valid(scope)||spec.kind<T_REQ_CONTROL||spec.kind>T_REQ_SLOT)return T_REQ_GEOMETRY;
+ if(spec.kind==T_REQ_SLOT?spec.slot>=64:spec.slot!=0)return T_REQ_GEOMETRY;
  if(spec.kind==T_REQ_POOLED_READ){if(!valid(spec.pool)||!spec.limit||spec.multi>1)return T_REQ_GEOMETRY;}
  else if(spec.multi||spec.pool.slot||spec.pool.reserved||spec.pool.incarnation)return T_REQ_GEOMETRY;
  for(size_t i=0;i<b->count;++i)if(b->entries[i].phase==FREE){
@@ -42,6 +43,7 @@ int t_request_accept(struct t_request_book *b,const struct t_paired_record *r,st
  }else{
   if(flags||!zero(r->receipt))return T_REQ_RECORD;
   if(e->spec.kind==T_REQ_CONTROL&&result>0)return T_REQ_RECORD;
+  if(e->spec.kind==T_REQ_SLOT&&result>=0&&(uint32_t)result!=e->spec.slot)return T_REQ_RECORD;
   if((e->spec.kind==T_REQ_FIXED_READ||e->spec.kind==T_REQ_FIXED_WRITE)&&result>0&&(uint32_t)result>e->spec.limit)return T_REQ_RECORD;
  }
  unsigned terminal=!(flags&1u);
@@ -62,4 +64,4 @@ int t_request_exhausted_test(void){_Atomic uint64_t n=UINT64_MAX-1;uint64_t out=
  return cookie(&n,&out)==0&&out==UINT64_MAX-1&&cookie(&n,&out)==T_REQ_EXHAUSTED&&cookie(&n,&out)==T_REQ_EXHAUSTED;
 }
 #endif
-void t_request_clear_retired(struct t_request_book *b){for(size_t i=0;i<b->count;++i)b->entries[i].phase=FREE;}
+void t_request_clear_retired(struct t_request_book *b){for(size_t i=0;i<b->count;++i)if(b->entries[i].abandoned)b->entries[i].phase=FREE;}

@@ -2,8 +2,9 @@
 #define THYLA_LOOM_CLIENT_FIXED_REQUESTS_H
 #include <thyla/loom_client/ring_payload.h>
 #include <thyla/loom_client/request_book.h>
-/* Uninstalled single-creator typed controller. No callback reentry. SQ publisher,
- * event wakeup/executor and native adapter remain absent. No extra close owner. */
+/* The ring's request driver: one book for fixed, control, slot and pooled
+ * requests. Single creator, no callback reentry, no SQ publishing; the native
+ * adapter publishes. No extra close owner. */
 struct t_fixed_storage;struct t_fixed_request;
 struct t_fixed_driver{struct t_fixed_storage *storage;struct t_ring_owner *owner;struct t_ring_client *client;struct t_request_book *book;size_t refs;unsigned failed,alive;};
 struct t_fixed_read_result{struct t_fixed_request *allocation;struct t_ring_fixed *fixed;struct t_owned_cqe cqe;};
@@ -32,6 +33,29 @@ int t_fixed_write(struct t_fixed_driver *,struct t_loom_service_ref,struct t_loo
 /* Integrator activates immediately before release-SQ-tail, with no fallible
  * work after success. Returned cookie is mandatory. Native publisher is parked. */
 int t_fixed_publish(struct t_fixed_request *,uint64_t *);
+/* A control, slot or pooled request: book metadata only, no fixed buffer. The
+ * caller's storage; reserve fills it and holds a driver reference until take
+ * answers 1 or drop. */
+struct t_fixed_book{struct t_fixed_driver *driver;uint64_t cookie;unsigned published;};
+/* Fixed kinds answer T_REQ_GEOMETRY: they own a buffer and use read or write. */
+int t_fixed_book_reserve(struct t_fixed_driver *,struct t_loom_service_ref,struct t_request_spec,struct t_fixed_book *);
+/* As t_fixed_publish: the SQE carries this cookie, and the SQ tail is released
+ * next with no fallible work between. */
+int t_fixed_book_publish(struct t_fixed_book *,uint64_t *);
+/* 1 takes the terminal and ends the request, 0 pending, T_FIXED_CLOSING once the
+ * driver has closed or failed (the request is kept for drop). */
+int t_fixed_book_take(struct t_fixed_book *,struct t_owned_cqe *);
+/* An unpublished request is withdrawn; a published one whose terminal has not
+ * arrived is abandoned, and only the first abandonment aborts its scope. */
+void t_fixed_book_drop(struct t_fixed_book *);
+/* What an accepted completion was. Fixed and control terminals stay in the book
+ * for their owners; a pooled shot's receipt is not yet anyone's: the caller
+ * hands it to its pool's accept before any other ring work. */
+enum t_fixed_route_kind{T_ROUTED_FIXED=1,T_ROUTED_CONTROL,T_ROUTED_POOLED};
+struct t_fixed_routed{enum t_fixed_route_kind kind;uint64_t cookie;struct t_request_delivery delivery;};
+/* Same input requirement as t_fixed_receive, which is route without the kind. */
+int t_fixed_route(struct t_fixed_driver *,const struct t_paired_record *,struct t_fixed_routed *);
+int64_t t_fixed_register_pool(struct t_fixed_driver *,const struct t_loom_service_pool_member *,size_t,struct t_ring_pool **,int64_t *native_rc);
 /* Requires authenticated paired CQ from this exact exclusive mapping, after
  * final local buffer access. Never synthesize from ENTER or ABORT return code. */
 int t_fixed_receive(struct t_fixed_driver *,const struct t_paired_record *);

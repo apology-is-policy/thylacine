@@ -54,10 +54,13 @@ static struct t_lease_member *member(const struct t_lease_ledger *b,uint32_t ord
     }
     t_loom_client_fatal(__func__,__LINE__);
 }
-int t_lease_accept_read(struct t_lease_ledger *b,int32_t result,uint32_t flags,
-    struct t_loom_service_buffer_receipt r,struct t_lease_token *out) {
+/* The member a payload record may lease, NULL for a nonpayload terminal, or an
+ * error with the ledger unchanged. */
+static int check_read(struct t_lease_ledger *b,int32_t result,uint32_t flags,
+    struct t_loom_service_buffer_receipt r,struct t_lease_member **out) {
+    *out=NULL;
     if(b && !b->bound)return T_LEASE_STATE;
-    if(!b || !out || (flags & ~(1u|T_LOOM_CQE_SERVICE_BUFFER)))return T_LEASE_RECEIPT;
+    if(!b || (flags & ~(1u|T_LOOM_CQE_SERVICE_BUFFER)))return T_LEASE_RECEIPT;
     if(!(flags&T_LOOM_CQE_SERVICE_BUFFER)) {
         if(flags || result>0 || r.pool.slot || r.pool.reserved || r.pool.incarnation || r.member || r.reserved || r.lease)
             return T_LEASE_RECEIPT;
@@ -69,8 +72,20 @@ int t_lease_accept_read(struct t_lease_ledger *b,int32_t result,uint32_t flags,
     if((uint64_t)result>m->range.length)return T_LEASE_RECEIPT;
     if(m->state!=AVAILABLE)return T_LEASE_BUSY;
     if(r.lease<=m->last)return T_LEASE_STALE;
+    *out=m;return 0;
+}
+int t_lease_accept_read(struct t_lease_ledger *b,int32_t result,uint32_t flags,
+    struct t_loom_service_buffer_receipt r,struct t_lease_token *out) {
+    if(b && b->bound && !out)return T_LEASE_RECEIPT;
+    struct t_lease_member *m;int rc=check_read(b,result,flags,r,&m);if(rc||!m)return rc;
     m->last=r.lease;m->state=LEASED;++b->outstanding;
     *out=(struct t_lease_token){.owner=b->owner,.receipt=r,.length=(size_t)result};return 1;
+}
+int t_lease_refuse_read(struct t_lease_ledger *b,int32_t result,uint32_t flags,
+    struct t_loom_service_buffer_receipt r,struct t_loom_service_buffer_receipt *out) {
+    if(b && b->bound && !out)return T_LEASE_RECEIPT;
+    struct t_lease_member *m;int rc=check_read(b,result,flags,r,&m);if(rc||!m)return rc;
+    m->last=r.lease;*out=r;return 1;
 }
 static struct t_lease_member *exact(struct t_lease_ledger *b,const struct t_lease_token *t) {
     if(!b || !t || t->owner!=b->owner || !same_ref(t->receipt.pool,b->pool) ||

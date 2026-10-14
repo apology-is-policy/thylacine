@@ -42,6 +42,13 @@ int64_t t_ring_register_pool(struct t_ring_client *,const struct t_loom_service_
 int t_ring_attach(struct t_ring_client *,struct t_loom_service_ref,const struct t_loom_service_pool_member *,size_t,struct t_ring_pool **);
 /* Input must be authenticated paired READ for this pool. */
 int t_ring_accept(struct t_ring_pool *,int32_t,uint32_t,struct t_loom_service_buffer_receipt,struct t_ring_payload **);
+/* For a record accept refused as closing: no payload is made, but the record
+ * passes the ledger's checks before its receipt goes back to RETURN. Same input
+ * requirement as accept; 1 hands the receipt back, 0 is a nonpayload terminal. */
+int t_ring_refuse(struct t_ring_pool *,int32_t,uint32_t,struct t_loom_service_buffer_receipt,struct t_loom_service_buffer_receipt *);
+struct t_loom_service_ref t_ring_pool_identity(const struct t_ring_pool *);
+/* Scope-wide abort for a request the ring's driver abandoned; never after close. */
+void t_ring_owner_abort_scope(struct t_ring_owner *,struct t_loom_service_ref);
 /* End every view use before return/abandon. Never use consumed handles again. */
 const unsigned char *t_ring_bytes(const struct t_ring_payload *,size_t *);
 int64_t t_ring_return(struct t_ring_payload *);

@@ -35,11 +35,47 @@ int t_fixed_publish(struct t_fixed_request *r,uint64_t *cookie){
  int rc=t_ring_fixed_publish(r->fixed);if(rc)return rc;
  T_LOOM_CHECK(!t_request_publish(d->book,r->cookie));r->published=1;*cookie=r->cookie;return 0;
 }
-int t_fixed_receive(struct t_fixed_driver *d,const struct t_paired_record *record){
- T_LOOM_CHECK(d->alive&&record);if(d->failed)return T_FIXED_CLOSING;struct t_request_delivery delivery;
+int t_fixed_route(struct t_fixed_driver *d,const struct t_paired_record *record,struct t_fixed_routed *out){
+ T_LOOM_CHECK(d->alive&&record&&out);if(d->failed)return T_FIXED_CLOSING;struct t_request_delivery delivery;
  int rc=t_request_accept(d->book,record,&delivery);if(rc){fail(d);return rc;}
- rc=t_ring_fixed_finish(d->owner,delivery.cookie,delivery.record.cqe.result);if(rc){fail(d);return rc;}
- if(delivery.abandoned){struct t_owned_cqe ignored;T_LOOM_CHECK(!t_request_take_terminal(d->book,delivery.cookie,&ignored));}return 0;
+ struct t_owned_cqe ignored;unsigned take=delivery.abandoned;enum t_fixed_route_kind kind;
+ switch(delivery.spec.kind){
+ case T_REQ_FIXED_READ:case T_REQ_FIXED_WRITE:
+  rc=t_ring_fixed_finish(d->owner,delivery.cookie,delivery.record.cqe.result);if(rc){fail(d);return rc;}
+  kind=T_ROUTED_FIXED;break;
+ case T_REQ_CONTROL:case T_REQ_SLOT:kind=T_ROUTED_CONTROL;break;
+ default:take=delivery.terminal&&delivery.abandoned;kind=T_ROUTED_POOLED;break;
+ }
+ if(take)T_LOOM_CHECK(!t_request_take_terminal(d->book,delivery.cookie,&ignored));
+ *out=(struct t_fixed_routed){.kind=kind,.cookie=delivery.cookie,.delivery=delivery};return 0;
+}
+int t_fixed_receive(struct t_fixed_driver *d,const struct t_paired_record *record){struct t_fixed_routed routed;return t_fixed_route(d,record,&routed);}
+int t_fixed_book_reserve(struct t_fixed_driver *d,struct t_loom_service_ref scope,struct t_request_spec spec,struct t_fixed_book *out){
+ T_LOOM_CHECK(d->alive&&out);*out=(struct t_fixed_book){0};if(d->failed||!d->client)return T_FIXED_CLOSING;
+ if(spec.kind==T_REQ_FIXED_READ||spec.kind==T_REQ_FIXED_WRITE)return T_REQ_GEOMETRY;
+ uint64_t cookie=0;int rc=t_request_reserve(d->book,scope,spec,&cookie);if(rc)return rc;
+ out->driver=d;out->cookie=cookie;++d->refs;return 0;
+}
+int t_fixed_book_publish(struct t_fixed_book *q,uint64_t *cookie){
+ T_LOOM_CHECK(q->driver&&cookie);*cookie=0;struct t_fixed_driver *d=q->driver;if(d->failed||!d->client)return T_FIXED_CLOSING;if(q->published)return T_REQ_STATE;
+ T_LOOM_CHECK(!t_request_publish(d->book,q->cookie));q->published=1;*cookie=q->cookie;return 0;
+}
+int t_fixed_book_take(struct t_fixed_book *q,struct t_owned_cqe *out){
+ struct t_fixed_driver *d=q->driver;T_LOOM_CHECK(d&&out);if(d->failed)return T_FIXED_CLOSING;if(!q->published)return d->client?0:T_FIXED_CLOSING;
+ int rc=t_request_take_terminal(d->book,q->cookie,out);if(rc==T_REQ_STATE)return d->client?0:T_FIXED_CLOSING;if(rc)return rc;
+ q->driver=NULL;unref(d);return 1;
+}
+void t_fixed_book_drop(struct t_fixed_book *q){
+ struct t_fixed_driver *d=q->driver;T_LOOM_CHECK(d);q->driver=NULL;
+ if(!q->published){T_LOOM_CHECK(!t_request_cancel_unpublished(d->book,q->cookie));}
+ else{struct t_owned_cqe ignored;int rc=t_request_take_terminal(d->book,q->cookie,&ignored);
+  if(rc==T_REQ_STATE){struct t_loom_service_ref scope;int first=t_request_abandon(d->book,q->cookie,&scope);T_LOOM_CHECK(first>=0);if(first==1)t_ring_owner_abort_scope(d->owner,scope);}
+  else if(rc)fail(d);}
+ unref(d);
+}
+int64_t t_fixed_register_pool(struct t_fixed_driver *d,const struct t_loom_service_pool_member *ranges,size_t n,struct t_ring_pool **out,int64_t *native_rc){
+ T_LOOM_CHECK(d->alive&&out&&native_rc);*out=NULL;*native_rc=0;if(d->failed||!d->client)return T_FIXED_CLOSING;
+ return t_ring_register_pool(d->client,ranges,n,out,native_rc);
 }
 static int take(struct t_fixed_request *r,struct t_owned_cqe *out){
  struct t_fixed_driver *d=r->driver;T_LOOM_CHECK(d);if(d->failed)return T_FIXED_CLOSING;if(!r->published)return d->client?0:T_FIXED_CLOSING;

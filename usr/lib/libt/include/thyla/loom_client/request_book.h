@@ -3,8 +3,9 @@
 #include <thyla/loom_client/paired_cq.h>
 /* Internal metadata only. Caller retains actual I/O/pool/scope owners. Exclusive
  * creator consumer, no copying/reentry. Never expose user-chosen cookies. */
-enum t_request_kind { T_REQ_CONTROL, T_REQ_FIXED_READ, T_REQ_FIXED_WRITE, T_REQ_POOLED_READ };
-struct t_request_spec { enum t_request_kind kind;uint32_t limit,multi;struct t_loom_service_ref pool; };
+/* T_REQ_SLOT: CONNECT and WALK, which succeed with their reserved destination slot. */
+enum t_request_kind { T_REQ_CONTROL, T_REQ_FIXED_READ, T_REQ_FIXED_WRITE, T_REQ_POOLED_READ, T_REQ_SLOT };
+struct t_request_spec { enum t_request_kind kind;uint32_t limit,multi;struct t_loom_service_ref pool;uint32_t slot; };
 struct t_request_delivery { uint64_t cookie;struct t_loom_service_ref scope;struct t_request_spec spec;unsigned terminal,abandoned;struct t_paired_record record; };
 /* T_REQ_FULL is -ENOSPC on purpose: the kernel's own request table answers it too. */
 enum t_request_error { T_REQ_GEOMETRY=-1201,T_REQ_FULL=T_LOOM_CLIENT_ENOSPC,T_REQ_EXHAUSTED=-1203,T_REQ_STALE=-1204,T_REQ_STATE=-1205,T_REQ_RECORD=-1206 };
@@ -31,7 +32,8 @@ int t_request_accept(struct t_request_book *,const struct t_paired_record *,stru
 int t_request_abandon(struct t_request_book *,uint64_t,struct t_loom_service_ref *);
 /* Consume after payload transfer/fixed-owner settlement; no payload return. */
 int t_request_take_terminal(struct t_request_book *,uint64_t,struct t_owned_cqe *);
-/* Requires proven whole-owner retirement, detached consumer and settled local
+/* Discards abandoned entries; a live owner still takes or drops its own.
+ * Requires proven whole-owner retirement, detached consumer and settled local
  * fixed/payload borrowers; no future completion can be delivered. */
 void t_request_clear_retired(struct t_request_book *);
 size_t t_request_occupied(const struct t_request_book *);

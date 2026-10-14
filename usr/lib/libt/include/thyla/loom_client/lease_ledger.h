@@ -25,6 +25,11 @@ int t_lease_bind(struct t_lease_ledger *,struct t_loom_service_ref);
 /* 1 transfers metadata token,0 is nonpayload terminal,negative rejects unchanged. */
 int t_lease_accept_read(struct t_lease_ledger *,int32_t,uint32_t,
     struct t_loom_service_buffer_receipt,struct t_lease_token *);
+/* For a payload no one will hold (its ring or pool is closing): the same checks
+ * as accept_read, and the member's lease order advances, but no lease is taken.
+ * 1 hands the receipt back for RETURN, 0 is a nonpayload terminal. */
+int t_lease_refuse_read(struct t_lease_ledger *,int32_t,uint32_t,
+    struct t_loom_service_buffer_receipt,struct t_loom_service_buffer_receipt *);
 int t_lease_begin_return(struct t_lease_ledger *,const struct t_lease_token *);
 int t_lease_finish_return(struct t_lease_ledger *,const struct t_lease_token *,int64_t);
 /* Bank index of a live member, for storage kept beside the bank. */
