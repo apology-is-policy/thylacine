@@ -1,0 +1,23 @@
+TLC2 Version 2026.10.06.014338 (rev: 94d0c50)
+Running breadth-first search Model-Checking with fp 25 and seed -1026711638495170730 with 8 workers on 8 cores with 1820MB heap and 64MB offheap memory [pid: 4524] (Mac OS X 26.4 aarch64, Homebrew 25.0.2 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/northkillpd/projects/thylacine-corona/specs/handles.tla
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9355065097202595517/Naturals.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9355065097202595517/FiniteSets.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/cj/03wrl54n7rs4tsk2kmc521wr0000gn/T/tlc-9355065097202595517/Sequences.tla (jar:file:/private/tmp/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module handles
+Linting of module handles
+Starting... (2026-10-15 00:41:11)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-15 00:41:11.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 2.5E-10
+  based on the actual fingerprints:  val = 7.1E-11
+202033 states generated, 26784 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 12.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 19 and the 95th percentile is 3).
+Finished in 01s at (2026-10-15 00:41:12)

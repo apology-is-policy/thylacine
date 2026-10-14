@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/handle.c	2026-10-15 00:46:40
++++ kernel/handle.c	2026-10-15 00:50:37
+@@ -1004,7 +1004,7 @@
+ 
+     // Another call's number in flight: Linux's dup2/dup3 answer EBUSY here.
+     // Taking the slot would let that call's install overwrite this dup.
+-    if (t->slots[new_h].magic == HANDLE_RESERVED) {
++    if (0 && t->slots[new_h].magic == HANDLE_RESERVED) { // MUTANT M1: dup3 takes a reservation
+         spin_unlock(&t->lock);
+         return HANDLE_DUP_TO_BUSY;
+     }

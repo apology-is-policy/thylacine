@@ -1,6 +1,116 @@
 # The autonomous-run journal
 
 
+## October 14: the close-by-number sweep -- a reserved number, and the connect that swapped a stranger's file (Corona)
+
+OPEN-BUGS 15:48Z listed twelve sites that installed a descriptor and, on a
+later failure, closed it by number. Re-reading them at 71386536c before the
+design fork found four more facts: chmod looked the number up a second time
+for the wstat (a wrong-target metadata write, not just an unwind); the
+setup-rollback's `handle_close_obj` compares object pointers, so it cannot
+tell two dups of one object apart and does not fix the dup sites; accept and
+socket dropped their socket-table row by number; and pipe2's comment saying
+"Linux has the identical window" was false -- `do_pipe2` reserves, copies
+the numbers out, and only then `fd_install`s. The operator chose slot
+reservation (vote 10, 16:39Z; dec-2026-10-14-descriptor-slot-reservation),
+Linux's `get_unused_fd_flags` / `fd_install` / `put_unused_fd` split, over
+an identity unwind.
+
+The implementation (6c1fefca2) was written while the mac was held by main's
+S-3 hunt, and committed unbuilt. Self-auditing it during the wait found:
+- **connect, the same class with a long window.** It wrote the dial by
+  number, slept until TCP ESTABLISHED, then `handle_replace` swapped
+  whatever live Spoor the number named and set O_NONBLOCK on it by number.
+  A peer that closed the socket during the handshake and opened a file at
+  the number lost that file to the connection. The fix keys the swap on the
+  ctl Spoor the call took before sleeping (`handle_replace` gains `expect`).
+  Pointer identity is right here and wrong for the close sites: the object
+  IS the socket. The witness stages the peer from inside the /net stub's
+  data Tlopen -- the one point where connect is asleep.
+- **The spec compared a rule with itself.** handle_slots.tla's
+  FailedPublishesNothing read a flag that the failing action set to TRUE
+  unconditionally, so it could only ever fail in the configuration written
+  to fail. The flag is now set by the writes that make the object live.
+- **Every primitive mutant converged on one extinction.** The reservation
+  test filled its slot unconditionally; any broken primitive left the slot
+  unreserved and the fill extincted (by design) before any assertion could
+  say which step broke. Each fill and return now asks first.
+- **socket() had no runtime witness**: the stub learned `clone` and counts
+  ctl clunks.
+- One more of the class is tracked, not fixed (OPEN-BUGS 17:09Z): the socket
+  arms look up the row and the slot separately, and dup3 installs before it
+  drops the row.
+
+**Round 1 (Fable 5.1, cross-family): 0 P0 / 1 P1 / 0 P2 / 3 P3.** The P1 was
+mine and it was a deadlock. The close hook asked `handle_is_reserved` under
+the socket-table lock: socket table, then handle table. The fork copy holds
+the parent's handle-table lock and its snapshot hook takes the socket-table
+lock: handle table, then socket table. A Linux guest forking on one CPU while
+a peer thread closes on another would spin both forever. The AUDIT-TRIGGERS
+row-39 addendum on the hooked copy already said the socket-table lock
+qualifies as a leaf only because "nothing takes it and then a handle lock",
+and that any new code must be checked for the reverse edge. The self-audit
+grepped handle.c for socktab and found nothing, because the edge runs through
+a callback registered with the lock holder, not a direct call. The fix keeps
+the fork's order (`handle_locked_unless_reserved` runs the drop inside the
+handle-table hold) and makes the rule a check rather than a sentence: every
+handle-table acquire refuses a leaf hold, every socket-table hold is marked,
+and the inverted order extincts on its first run, contended or not (harness
+M16 restores the old nesting and predicts that extinction). The P3s: socket
+arms answered from a reserved number's row (bind succeeded where Linux says
+EBADF); the reservation test's close-on-exec leg could not fail; the spec note
+on what the clean cfg does not show. Fixes in c5ae37bb8.
+
+**Round 2 (Fable 5.1): 0/0/0/3, clean.** Owed because the fix restructured a
+lock order. It re-derived the guard's soundness: the refuse skips a thread
+holding no counted lock, which may migrate, and every leaf holder is pinned.
+It found two comments that still gave the rationale inverted, saying "nests
+under the handle table's lock" (the order the guard allows) as the reason to
+avoid the lock. It also caught a test control whose EINVAL the FRESH-state
+gate answers too. Both bind legs now pass a NULL address with addrlen 16. The
+control must answer EFAULT, which only the address copy produces (165ca638a).
+
+The first guest run stopped at its CONTROL (kernel-20261014T212132Z). The
+kernel suite passed 1891 of 1891, and then joey exited non-zero: "go tool
+compile: wait: operation not permitted". The shared Go fork had moved one
+commit since the last green run, to 3471e2a, whose Wait passes SYS_WAIT_PID's
+WAIT_PACKED. That flag is main's S-3, which landed on main (115465888) and is
+not in this branch's kernel, so the kernel refused it. This is skew between
+two trees, not a bug in either. The rerun pins the fork to the clean private
+clone at a6567ba, as the width run did, and the pin stays until this branch
+integrates main.
+
+The second run (kernel-20261014T212828Z) passed both controls and every TLC
+verdict, then stopped at M2 on a wrong prediction. M2 lets an allocation's
+scan take a reservation, and it also failed the close test. That test's new
+bind legs reserve a number and then allocate the live control, and under M2
+the allocation lands on the reservation (child mask 0x10c). The test caught a
+real break. The prediction missed it, and so did round 2's hand trace, which
+checked M3 against the new legs but not M2. When a test gains a leg, every
+mutant has to be traced against it again, not only those aimed at its surface.
+The third run carries the second run's TLC verdicts (specs/ byte-identical,
+the jar older; handles.cfg alone took 69 minutes) and reruns everything else.
+
+The third run (kernel-20261014T224640Z, kernel 165ca638a, harness 803a9fc7a)
+is the evidence: 1891 of 1891 in both images; seventeen of seventeen mutants
+fail exactly as predicted, M16 among them with exactly "EXTINCTION: handle table
+lock taken under a leaf lock" in the close test; both rebuilds byte-identical;
+check-production clean. The guard turned red once, under its mutant, and
+stayed silent across both controls: it holds on every path the suite runs.
+
+What "fixed" covers: the twelve sites, the rows accept and socket dropped by
+number, and connect's swap no longer publish a descriptor on a path that can
+fail, or act on a number after a sleep. The
+close hook's lock order is checked on every acquire. Three things stay argued
+rather than witnessed:
+- O_CLOEXEC set in the install's own hold. A single-threaded test sees the bit
+  either way.
+- The leaf guard's silence on paths the suite does not run. A guard that never
+  fires proves only that no executed path inverts the order.
+- The socket calls still look up the slot and the row in two holds, and dup3
+  installs before it drops the old row (OPEN-BUGS 17:09Z, open).
+
+
 ## October 13-14: the argument-width sweep -- and the six places a census did not look (Corona)
 
 Vote 8 said a too-wide argument is refused, never cast down. The sweep's plan

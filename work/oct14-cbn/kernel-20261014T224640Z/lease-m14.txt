@@ -1,0 +1,9 @@
+mac   HELD by you for 1.8h, 2.3h left
+        why: corona: close-by-number sweep harness (CONTROL ci+qual, TLC, 17 mutant boots, rebuilds, SHAPE) at 165ca638a; all cores; ~3h, duration uncertain
+        phase: corona: harness run 3 work/oct14-cbn/kernel-20261014T224640Z at 803a9fc7a (kernel = 165ca638a), Go fork pinned a6567ba, TLC carried from run 2 -- controls, 17 mutants, rebuilds, SHAPE (~45 min)
+        runner: Mac pid 13597 alive (start Thu Oct 15 00:46:40 2026)
+        pids: [13597] (their registered work -- not a kill list)
+        queue 1: main (1.4h waiting)
+        queue 2: astra (21m waiting)
+pi    FREE
+disk: 10.8 GiB available at /Users/northkillpd/projects/thylacine-corona

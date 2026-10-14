@@ -1,0 +1,18 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 00:56:29
+@@ -14272,10 +14272,14 @@
+         // nothing, where closing installed descriptors by number would close
+         // whatever a peer thread had put there by then.
+         s32 pair[2] = { (s32)rd, (s32)wr };
++        (void)&sys_pipe_abandon;
++        sys_pipe_install(p, rd, wr, rsp, wsp, cloexec);   // MUTANT M5: published before the copy-out
+         if (uaccess_copy_out(args[0], pair, sizeof(pair)) != 0) {
+-            sys_pipe_abandon(p, rd, wr, rsp, wsp);
++            handle_close(p, rd);
++            handle_close(p, wr);
+             return -(s64)T_E_FAULT;
+         }
++        return 0;
+ 
+         // #151: close-on-exec is a property of the DESCRIPTOR; pipe2's flag is
+         // not per-end, and it lands in each install's own hold.

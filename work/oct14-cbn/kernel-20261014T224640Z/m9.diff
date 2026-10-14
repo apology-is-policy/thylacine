@@ -1,0 +1,12 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:01:54
+@@ -4063,6 +4063,9 @@
+         return -(s64)T_E_NOTDIR;
+     }
+     if (how && how->keep) {
++        spoor_ref(sp);   // MUTANT M9: a kept Spoor published, then closed by number
++        hidx_t m = handle_alloc(p, KOBJ_SPOOR, r, sp);
++        if (m >= 0) handle_close(p, m); else spoor_clunk(sp);
+         *how->keep = sp;
+         return 0;
+     }

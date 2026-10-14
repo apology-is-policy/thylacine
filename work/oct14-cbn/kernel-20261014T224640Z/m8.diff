@@ -1,0 +1,11 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:00:40
+@@ -15516,7 +15516,7 @@
+     // never made a socket pays one NULL test per close.
+     if (nr == VIV_LINUX_CLOSE) {
+         struct viv_socktab *st = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+-        if (st) viv_socktab_drop_closing(st, p, (s32)(s64)ctx->regs[0]);
++        if (st) viv_socktab_drop(st, (s32)(s64)ctx->regs[0]); // MUTANT M8: the hook drops the row of a reserved number
+     }
+ 
+     // ARCH 8.8.3: whether a caught note may interrupt this call is Linux's

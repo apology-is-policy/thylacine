@@ -1,0 +1,13 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:05:18
+@@ -11797,8 +11797,8 @@
+     }
+ 
+     if (!viv_socktab_claim(tab, (s32)fd, proto, n, VIV_SOCK_FRESH)) {
+-        handle_unreserve(p, fd);
+-        spoor_clunk(ctl);
++        handle_install_reserved(p, fd, KOBJ_SPOOR, cr, ctl, false);   // MUTANT M12: published, then closed by number
++        handle_close(p, fd);
+         return -(s64)T_E_MFILE;
+     }
+ 

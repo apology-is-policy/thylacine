@@ -1,0 +1,12 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 01:03:01
+@@ -4059,7 +4059,8 @@
+ static s64 sys_open_finish(struct Proc *p, struct Spoor *sp, rights_t r,
+                            const struct sys_open_finish *how, s64 full_rc) {
+     if (how && how->dir_required && !(sp->qid.type & QTDIR)) {
+-        spoor_clunk(sp);
++        hidx_t m = handle_alloc(p, KOBJ_SPOOR, r, sp);   // MUTANT M10: published, then refused
++        if (m >= 0) handle_close(p, m); else spoor_clunk(sp);
+         return -(s64)T_E_NOTDIR;
+     }
+     if (how && how->keep) {

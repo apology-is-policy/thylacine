@@ -4674,3 +4674,92 @@ T1 register write-back (11:07Z), the torn banner (11:14Z), the nested byte
 (11:49Z), and the vote-8 rule itself (October 13, 12:16Z). Still open: sendto/recvfrom's runtime leg
 (13:05Z), and the close-by-number sweep (15:48Z, next; re-read October 14 with
 four more findings).
+
+## The close-by-number sweep: a descriptor is reserved, filled, then installed (Corona, October 14 -- audit closed)
+
+OPEN-BUGS 15:48Z listed twelve sites that installed a descriptor and, when a
+later step failed, closed it by number. Between the install and the close a
+peer thread of the same Proc can see the descriptor, close it, and open its
+own file at the number, which the unwind then closes. Re-reading the sites
+before the design fork found four more: chmod looked its number up a second
+time for the wstat, the setup rollback's identity close cannot tell two dups
+of one object apart, accept and socket dropped their socket-table row by
+number, and pipe2's comment claimed Linux had the same window (it does not:
+`do_pipe2` reserves, copies the numbers out, then installs). Operator vote 10
+(16:39Z, dec-2026-10-14-descriptor-slot-reservation) chose Linux's
+`get_unused_fd_flags` / `fd_install` / `put_unused_fd` split.
+
+A slot now has a third state, RESERVED: not free, not live. `handle_reserve`
+takes the lowest free number, `handle_install_reserved` and
+`handle_dup_into_reserved` fill only the caller's own reservation, and
+`handle_unreserve` returns it. Every scan wants a free slot, every live
+operation wants a live one, and dup3 onto a reservation answers EBUSY.
+`HandleTable.installs` counts objects published, which is how the tests show
+a failed call published nothing.
+
+The sites: pipe, pipe2 (the copy-out between reserve and install), socket,
+accept, the dup and F_DUPFD arms, both openat arms (O_DIRECTORY checked before
+any install, close-on-exec set in the install's hold), mkdirat and fchmodat
+(which no longer take a descriptor at all), and close of a reserved number
+(EBADF, and the reserving call's row kept).
+
+Found along the way:
+- connect wrote its dial by number, slept until the handshake ended, then
+  swapped whatever the number named. A peer that closed the socket during the
+  handshake and opened a file at the number lost that file. `handle_replace`
+  now swaps only while the slot names the ctl Spoor connect took before it
+  slept (fcdad85a2).
+- The socket calls answered from a reserved number's row: bind on a peer's
+  in-flight socket() number succeeded where Linux answers EBADF. They ask the
+  slot first.
+- handle_slots.tla's FailedPublishesNothing read a flag the failing action
+  set itself.
+
+Audit (holotype-reviewer, Fable 5.1 against an Opus 5.5 implementer):
+- Round 1: 0/1/0/3. The P1 was a deadlock the sweep introduced. The close hook
+  took the socket-table lock and then the handle table's; fork takes them the
+  other way round, through a callback. The fix keeps fork's order and enforces
+  it: the socket-table lock is a marked leaf, every handle-table acquire
+  refuses one, and the inverted order extincts the first time it runs.
+- Round 2: 0/0/0/3, clean. Two inverted comments, a dossier paragraph out of
+  place, and a test control whose errno two gates shared.
+
+Every P1 is fixed, and every P3 is fixed or stated. Still open: the socket
+calls look up the row and the slot in two separate holds, and dup3 installs
+before it drops the old row (OPEN-BUGS 17:09Z).
+
+Evidence. Kernel, at 165ca638a with the harness at 803a9fc7a
+(work/oct14-cbn/kernel-20261014T224640Z, mac axis, one boot per leg): 1891 of
+1891 in both images, the eight named tests PASS, argwidth-probe 72 checks,
+loom-bridge-probe at 70 and 71. The Go fork is pinned to a clean private clone
+at a6567ba. The shared fork's head (3471e2a) passes SYS_WAIT_PID's WAIT_PACKED,
+which only main's kernel has (S-3), so with it the first run's joey stopped at
+"go tool compile: wait: operation not permitted" (kernel-20261014T212132Z).
+That is skew between the trees, not a defect in either.
+
+TLC, from the second run (kernel-20261014T212828Z) and carried into the third
+with specs/ byte-identical: handle_slots.cfg clean (80 distinct states); its
+three buggy cfgs each violate the invariant they name (NoForeignClose,
+FailedPublishesNothing, InstallFillsOwnReservation); handles.cfg clean
+(51,744,096 distinct states) and handles_srv.cfg clean; all eleven handles
+buggy cfgs still find their counterexample.
+
+Seventeen mutants, each failing exactly its predicted tests at the named
+assertion, with the suite's own extinction and no other:
+- M1-M15 cover the reservation primitives, every converted site, and connect's
+  swap. M2 also fails the close test, child mask 0x10c (its allocation lands on
+  the test's reservation). The second run stopped there on a wrong prediction,
+  not a wrong kernel.
+- M16 restores the old lock nesting. The suite dies with exactly "EXTINCTION:
+  handle table lock taken under a leaf lock", prints no tally, and the last
+  test announced is vivarium.close_keeps_a_reserved_row.
+- M17 reads the row before the slot: the close test alone, mask 0x100. M8's
+  mask is 0x4.
+
+Both rebuilds are byte-identical to their controls, `tools/check-production.sh
+--all` passes, and the Go fork was unchanged across the run. Successful build
+logs and the mutant kernels are not committed.
+
+Closed (OPEN-BUGS): the close-by-number sweep (15:48Z). Still open:
+sendto/recvfrom's runtime leg (13:05Z) and the socket calls' separate row and
+slot lookups (17:09Z).

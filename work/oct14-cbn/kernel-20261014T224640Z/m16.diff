@@ -1,0 +1,15 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/vivarium.c	2026-10-15 00:46:40
++++ kernel/vivarium.c	2026-10-15 01:09:54
+@@ -1970,7 +1970,11 @@
+ void viv_socktab_drop_closing(struct viv_socktab *tab, struct Proc *p, s32 fd) {
+     if (!tab) return;
+     struct socktab_closing c = { .tab = tab, .fd = fd, .ready = NULL };
+-    (void)handle_locked_unless_reserved(p, (hidx_t)fd, socktab_drop_closing_locked, &c);
++    socktab_lock(tab);   // MUTANT M16: the old nesting, the handle table inside the socket table
++    if (!(fd >= 0 && handle_is_reserved(p, (hidx_t)fd)))
++        c.ready = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
++    socktab_unlock(tab);
++    (void)socktab_drop_closing_locked;
+     spoor_clunk(c.ready);
+ }
+ 

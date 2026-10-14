@@ -1,0 +1,15 @@
+--- work/oct14-cbn/kernel-20261014T224640Z/pristine/syscall.c	2026-10-15 00:46:40
++++ kernel/syscall.c	2026-10-15 00:54:58
+@@ -1458,6 +1458,12 @@
+     hidx_t b = handle_reserve(p, 0);
+     if (b < 0) {
+         handle_unreserve(p, a);
++        struct Spoor *r0 = NULL, *w0 = NULL;   // MUTANT M4: the read end published, then closed by number
++        if (pipe_create(&r0, &w0) == 0) {
++            hidx_t f = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, r0);
++            if (f >= 0) handle_close(p, f); else spoor_clunk(r0);
++            spoor_clunk(w0);
++        }
+         return -1;
+     }
+ 
