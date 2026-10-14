@@ -85,6 +85,34 @@ needed the operator.
   the reorder changed had no pin (a non-child, live or dead, with a refused name;
   the phenotype's refused signal to a dead child and to a missing pid); and two
   comments still spelled the gate set by hand. All fixed.
+- *Land gates on 90e147757: two reds, both nondeterministic, both hunted.*
+  (A) `p9_closer.kill_in_final_close_keeps_exit` failed "the closer wrote the
+  run" on one boot in ten of default-smp8 (13:19Z) and of ubsan-smp8 (13:47Z);
+  smp1/smp4 clean. (B) pty-4's type-ahead leg timed out on its cooked-echo
+  anchor.
+- *B, root-caused: a witness, not the guest.* It reproduced 1/3 at the S-3 tip
+  AND 1/3 at main a253c7424, so it predates S-3 (the leg dates from 56b5a412f).
+  Wrong turn: the target was in the transcript and a post-hoc tclsh regexp on
+  the transcript matched, so for an hour the guest looked slow and expect looked
+  broken. The transcript is expect's stdout, which writes every LF as CRLF; it is
+  not the buffer. Expect's own trace (exp_internal armed around that leg only,
+  549 KB) showed the buffer: tapestryd's test-mode `idle-throttle` lines between
+  the accepted line's CRLF and the cooked echo, each ending in a bare LF (the
+  editor holds the console raw; CONS_ONLCR is off for every userspace writer,
+  as on a POSIX tty in raw mode), so `\r\necho` could not match. a5dd0cb9c
+  anchors on the LF. Real buffer: old 0 / new 1; the echo removed, new 0 (still
+  discriminates); the throttle lines removed, old 1 (why most runs pass). On the
+  device: 6/6 green, five of them with a daemon line before the echo.
+- *A, still open.* My first reading -- a double write, because "all of it" and
+  "the bytes" printed no FAIL -- was wrong: TEST_EXPECT_EQ is TEST_ASSERT, which
+  returns, so they never ran (the pinned lesson, missed). What holds: nothing
+  reached the server before the unstall, and the child was a ZOMBIE by then.
+  The first diagnostic (66f8e6573) never linked -- the kernel has no memset and
+  the grown struct's `= {0}` wanted one; the hunt's own build was its first
+  build (9418ae69b fixes it). 8c0115189 logs session A's wire per request with
+  its sender. default-smp8 x30 on it: 30/30 clean -- with 2/20 before, not a
+  significant difference (Fisher ~0.15); hunting on (thyla-pi KVM smp8 x60, then
+  the Mac).
 
 ## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
 
