@@ -6678,8 +6678,9 @@ webkit_jobs() {
 build_icu() {
     # Two passes, because ICU's build runs its own tools (genrb, pkgdata, icupkg):
     # a HOST build supplies them, the CROSS build consumes it via --with-cross-build.
-    # Static data packaging + --disable-dyload: Thylacine links statically and has
-    # no dlopen. The target triple goes in CC/CXX THEMSELVES -- with --target only
+    # Static data packaging + --disable-dyload: jsc links statically, and ICU's
+    # data rides in libicudata.a rather than a file it would map MAP_SHARED,
+    # which Pouch does not serve. The target triple goes in CC/CXX THEMSELVES -- with --target only
     # in CFLAGS, ICU's dependency-generation steps compile for the host.
     local sysroot="$BUILD_DIR/sysroot"
     local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"

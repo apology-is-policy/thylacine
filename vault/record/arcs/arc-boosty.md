@@ -17,6 +17,14 @@ exit-criteria:
   - "[ ] B-2: WebCore + a caller-owned-buffer paint into a Tapestry surface"
   - "[ ] B-3: networking (curl over Pouch sockets) + the first page over the wire"
   - "[ ] Servo second, on the Rust std port (the aux track R)"
+  - "RENUMBERED 2026-09-23 (BROWSER-DESIGN 9): the B-1..B-3 lines above are the first plan; the phases below are the arc's phases now, and docs/browser-status.md carries their state"
+  - "[x] B-1 (renumbered): the kernel tranche -- permissions, capacity, dlmalloc, dlopen (B-1a..B-1d)"
+  - "[x] B-2 (renumbered): the JIT on the separated-WX code region, JSC Baseline through FTL and Wasm (B-2a..B-2e3)"
+  - "[ ] B-3 (renumbered): the C libraries under Pouch, each library's compiled upstream tests on the device (B-3a..B-3l, votes 2026-10-14)"
+  - "[ ] B-4: the IPC primitive and WebKit's Platform/IPC + SharedMemory backend"
+  - "[ ] B-5: WebCore + WebKit2 headless renders a local page to a PNG on the device"
+  - "[ ] B-6: the chrome on Tapestry; a TLS page in a tile; content Proc unable to open /net"
+  - "[ ] B-7: hardening, fuzz posture, the invariant ENFORCED, the manual section"
 created: 2026-09-21
 ---
 ## Goal

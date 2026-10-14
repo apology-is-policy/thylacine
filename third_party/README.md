@@ -112,6 +112,26 @@ that `./configure` would normally generate supplied via `-D` flags on the
 compile command line. `version.h` is generated at build time from
 `version.h.in` (placeholder substitution); the vendored tree stays clean.
 
+### zlib 1.3.1 (pruned) — `third_party/zlib/`
+
+The deflate library, vendored for DOSBox-X (DX-1) and installed into the pouch
+sysroot as `libz.a` + `zlib.h` / `zconf.h`; the browser arc's libpng, libxml2,
+FreeType and curl link it (B-3).
+
+| Field | Value |
+|---|---|
+| Version | 1.3.1 (released 2024-01-22) |
+| Source | `https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz` |
+| sha256 | `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23` |
+| License | zlib — see `third_party/zlib/LICENSE` |
+| Patch series | none — zlib is portable C |
+| Built by | `tools/build.sh` (`build_zlib`): 15 `.c` files compiled directly with the pouch clang |
+
+Pruned to the 28 files the library itself needs (its `.c`/`.h` sources,
+`LICENSE`, `README`); the tarball's examples, `contrib/`, tests and build
+systems are not vendored. Every vendored file is byte-identical to the
+release (checked 2026-10-14 against the tarball above).
+
 ### DejaVu fonts 2.37 (pruned) — `third_party/dejavu-fonts/`
 
 Halcyon's proportional face (HALCYON.md §3: **DejaVu Sans Condensed**,

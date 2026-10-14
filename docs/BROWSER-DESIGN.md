@@ -99,6 +99,13 @@ Measured at `99e19194` by grep, not recalled. This is the honest starting line.
 | Fonts | IBM Plex, Cornucopia, DejaVu vendored; `skrifa` + `zeno` rasteriser inside halcyond (Rust, not a C library) | a system font directory convention |
 | Limits (I-32) | 256 MiB default page budget, 4 GiB hard ceiling by spawn-time budget; 256 threads; 256 children; 65536 VMAs; 1024 handles; 128 MiB shared-map pages | -- |
 
+The table is the starting line at `99e19194`, kept as measured. Since then
+(as of 2026-10-14) B-1 landed `mprotect`, `madvise`, partial `munmap`,
+`MAP_FIXED`, file-backed `mmap` (`MAP_PRIVATE`, read-only or executable;
+`MAP_SHARED` is still ENOSYS) and `dlopen` with `libc.so`; B-2 landed the
+JIT; and ICU 78.3 is built static for `jsc`. `docs/browser-status.md` carries
+the current state.
+
 Two of these rows decide most of what follows. **The memory row**: every large
 engine's allocator assumes aligned reservations, guard pages, decommit and
 partial unmap. **The IPC row**: every multi-process engine assumes fd passing
@@ -427,6 +434,20 @@ OpenSSL**. Routine Pouch ports; ICU's data is linked statically (no file
 either a port or a small static-configuration shim (open question O-4). Each
 new POSIX surface a port touches gets a Pouch patch and the Pouch audit
 discipline.
+
+Decided 2026-10-14 (operator votes and research, B-3): WebKit draws with
+Skia, bundled, not Cairo (`dec-2026-10-14-b3-raster-skia`);
+fontconfig is ported and fonts live in `/lib/font`
+(`dec-2026-10-14-b3-fontconfig-port`, which resolves O-4); the exit bar is
+each library's compiled upstream test programs, the interpreter-driven
+suites listed as skipped (`dec-2026-10-14-b3-test-bar`); file locks are 9P
+byte-range locks and SQLite runs in EXCLUSIVE locking mode
+(`dec-2026-10-14-b3-sqlite-9p-locks`); native programs reach POSIX dup and a
+descriptor's status through two new syscalls
+(`dec-2026-10-14-native-fd-calls`); `kill(pid, 0)` is a `SYS_POSTNOTE` probe
+and `getppid` a syscall (`dec-2026-10-14-postnote-probe-getppid`); and the
+port policy (fetched sources, current releases, static archives, OpenSSL by
+`getauxval`, names through `/net/dns`) is `dec-2026-10-14-b3-port-policy`.
 
 **P4. Rust `std` for Thylacine.** Needed by: Servo, Ladybird, Gecko,
 SpiderMonkey. A `target_family = "unix"` target over the Pouch libc: a
@@ -832,7 +853,19 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-2b | kernel: the writer alias hardened (random placement; the thunk in a region born sealed, `SYS_JIT_CREATE_SEALED`, execute-only, voted 2026-10-07; `LDTR`/`STTR` user copies; the debug reader refuses an execute-only leaf). Audit-bearing. | a syscall refuses to read an execute-only page; audit closed |
 | B-2c | JavaScriptCore's Thylacine separated-WX arm; `jsc` takes `CAP_JIT`; Baseline + YARR. | the benchmark with the JIT on; the deny probe; `ls-jsc` |
 | B-2d / B-2e | DFG; then FTL (B3) + Wasm BBQ/OMG, each its own chunk and audit. B-2e splits in three (2026-10-13): B-2e1 the Wasm plan ISB + the FTL; B-2e2 the kernel's address-space sync + the 128 MiB region; B-2e3 BBQ/OMG. | the same benchmark |
-| **B-3** | P3: the libraries, ICU first. | each library's own tests under Pouch |
+| **B-3** | P3: the libraries, split 2026-10-14 by the operator's votes (see P3). Kernel and Pouch work first, then the libraries in dependency order; each library is fetched, built static, and its compiled upstream tests run on the device under a census. | each library's compiled upstream tests under Pouch; skipped suites listed |
+| B-3a | Pouch, no new ABI: `fsync`/`fdatasync` on `SYS_FSYNC`; `readv`/`writev`/`preadv`/`pwritev` as one gathered transfer; a socket's `lseek`/`pread`/`pwrite` answer ESPIPE and its `fstat` S_IFSOCK. | `pouch-hello-fd` census, RED on the old libc |
+| B-3b | kernel + Pouch: the native dup and descriptor-status syscalls; `fcntl` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD[_CLOEXEC]`), `dup`/`dup2`/`dup3`; the `SYS_POSTNOTE` empty-name probe for `kill(pid, 0)`; `SYS_GETPPID`. Audit-bearing. | kernel tests + `pouch-hello-fd` legs, each RED once; audit closed |
+| B-3c | ICU with its compiled tests (`cintltst`, `intltest`); file data through `U_HAVE_MMAP=0`. | the census on the device |
+| B-3d | libpng, libjpeg-turbo, libwebp. | pngtest; tjunittest; a cwebp/dwebp round trip |
+| B-3e | libxml2. | runtest, testapi, testchar with their data in the pool |
+| B-3f | FreeType (without HarfBuzz, to break the cycle), then HarfBuzz over FreeType + ICU. | hb-shape over `test/shape` |
+| B-3g | fontconfig with libxml2; `/lib/font` populated; host gperf. | fc-match against the fixed font set |
+| B-3h | kernel + Pouch: the 9P `Tlock`/`Tgetlock` client and a native lock call; Pouch `fcntl` `F_SETLK`/`F_SETLKW`/`F_GETLK` and `flock`. Audit-bearing. | kernel tests against Stratum's lock table; two Procs contending, each RED once; audit closed |
+| B-3i | SQLite in EXCLUSIVE locking mode on the unix VFS over B-3h's locks. | fuzzcheck, mptest, speedtest1 |
+| B-3j | OpenSSL 3.5 LTS; CPU features through `getauxval`. | its compiled C tests with their data (evp_test) |
+| B-3k | Pouch: a socket's number becomes a kernel descriptor (B-3b's dup onto it), the table past eight sockets; `select()`/`FD_SET` on sockets. Audit-bearing. | `pouch-hello-sockets` legs: 64 sockets, `select` on one; audit closed |
+| B-3l | libpsl, then libcurl over OpenSSL; `getaddrinfo` through `/net/dns`. | libpsl's tests; an HTTPS fetch from the device |
 | **B-4** | P2: design document, then the primitive, then WebKit's `Platform/IPC` + `SharedMemory` backend. | two-process message + shared-bitmap witness; audit |
 | **B-5** | WebCore + WebKit2 bring-up, headless: `PORT=Thylacine`, modelled on PlayStation. P5 resolved here. | `WKPagePaint` renders a local page to a PNG on the device |
 | **B-6** | The chrome on Tapestry; P6; the constructed namespaces of 8.3 with their deny-path probes. | a page loads over TLS from the network in a tile; content Proc proven unable to open `/net` |
@@ -915,7 +948,9 @@ it after B-5.
   are only tested for GTK and WPE). To be measured at B-5.
 - **O-3** P2: generalise the Weft share gate, or build Mycelium. Its own
   design document.
-- **O-4** fontconfig: port, or a static-configuration shim.
+- **O-4** fontconfig: port, or a static-configuration shim. **RESOLVED
+  2026-10-14: port it (2.18, libxml2 as its XML parser); fonts live in
+  `/lib/font`** (operator vote, `dec-2026-10-14-b3-fontconfig-port`).
 - **O-5** Whether Rust-`std`-on-Pouch is for ports only or a sanctioned third
   way to write Thylacine programs (ARCHITECTURE 3.5).
 - **O-6** The name -- **RESOLVED 2026-09-21: the browser is named Boosty**,
