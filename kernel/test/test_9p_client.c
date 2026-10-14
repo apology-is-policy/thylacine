@@ -4023,9 +4023,7 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
     // the recv inside B's self-pump overwrites the head of the SHARED out_buf --
     // where B's built frame sits -- exactly as a peer's build would.
     p9_mq_loopback_set_eagain_budget(&g_mq, 1);
-    g_mq.scribble_buf  = g_client.out_buf;
-    g_mq.scribble_len  = 64;
-    g_mq.scribble_arm  = 1;
+    p9_mq_loopback_arm_scribble(&g_mq, g_client.out_buf, 64, 1);
 
     // Op B: sync Twalk. Send -> EAGAIN -> self-pump (drops c->lock; the recv
     // fires the scribble + drains A's Rclunk) -> retry. Pre-spill the retry
@@ -4036,11 +4034,12 @@ void test_9p_client_send_backpressure_spill_survives_outbuf_reuse(void) {
 
     TEST_EXPECT_EQ((u64)p9_mq_loopback_eagain_budget(&g_mq), (u64)0,
                    "the armed EAGAIN actually fired");
-    TEST_EXPECT_EQ((u64)g_mq.scribble_arm, (u64)0, "the peer-write model actually fired");
+    TEST_EXPECT_EQ((u64)p9_mq_loopback_scribble_armed(&g_mq), (u64)0,
+                   "the peer-write model actually fired");
     TEST_ASSERT(g_async_op.completed, "op A completed (its reply drained by B's self-pump)");
     TEST_ASSERT(!g_client.dead, "session stayed LIVE (no clobbered frame reached the wire)");
 
-    g_mq.scribble_buf = NULL;
+    p9_mq_loopback_arm_scribble(&g_mq, NULL, 0, 0);
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_mq_loopback_destroy(&g_mq);

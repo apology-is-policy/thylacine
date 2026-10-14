@@ -62,9 +62,10 @@ struct p9_mq_loopback {
     // overwritten by a send in flight and lost: only a responder, which runs
     // under `lock`, stores it directly.
     u32                    eagain_budget;
-    // Clobber knob (#375 regression). While armed, the next `scribble_arm` recv
-    // calls overwrite scribble_buf[0..scribble_len) with 0x5A BEFORE returning the
-    // frame -- modeling a PEER legally rebuilding the SHARED c->out_buf in the
+    // Clobber knob (#375 regression), set through p9_mq_loopback_arm_scribble
+    // (mq_recv decrements scribble_arm under `lock`). While armed, the next
+    // `scribble_arm` recv calls overwrite scribble_buf[0..scribble_len) with 0x5A
+    // BEFORE returning the frame -- modeling a PEER legally rebuilding the SHARED c->out_buf in the
     // exact window where client_send_flow's pump/park has dropped c->lock (the
     // self-pump arm's recv sits inside that window). A back-pressured sender that
     // re-reads out_buf after the window (the pre-spill #375 clobber) sends the
@@ -84,9 +85,12 @@ void p9_mq_loopback_destroy(struct p9_mq_loopback *mq);
 // Build a transport_ops vtable that delegates to this transport.
 struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq);
 
-// The back-pressure knob, under the lock. The read gives all ones for a
-// loopback that is not initialized, so an "it fired" check (== 0) fails there.
+// The two knobs, under the lock. A read of a loopback that is not live dies:
+// every value is one a test may arm, so none can stand for "not live".
 void p9_mq_loopback_set_eagain_budget(struct p9_mq_loopback *mq, u32 n);
 u32  p9_mq_loopback_eagain_budget(struct p9_mq_loopback *mq);
+void p9_mq_loopback_arm_scribble(struct p9_mq_loopback *mq, u8 *buf, u32 len,
+                                 u32 n);
+u32  p9_mq_loopback_scribble_armed(struct p9_mq_loopback *mq);
 
 #endif  // THYLACINE_9P_TRANSPORT_MQ_H

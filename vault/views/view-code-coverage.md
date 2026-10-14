@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**548 owned · 47 unowned · 595 files (92% owned) · ~12940 unswept lines.**
+**548 owned · 47 unowned · 595 files (92% owned) · ~12944 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **78 files, ~38508 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -73,7 +73,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38508 lin
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 12 | 17 | 2725 |
-| kernel | 130 | 13 | 1967 |
+| kernel | 130 | 13 | 1971 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/kaua-term | 3 | 1 | 276 |
@@ -153,7 +153,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38508 lin
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | kernel/include/thylacine/9p_transport_loopback.h | 99 |
-| kernel/include/thylacine/9p_transport_mq.h | 92 |
+| kernel/include/thylacine/9p_transport_mq.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
