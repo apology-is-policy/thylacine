@@ -25,6 +25,8 @@
     "pouch-hello-mem: legs=prot-ladder,x-refused,prot-errnos,madvise-dontneed,madvise-free,madvise-hint,madvise-errnos,partial-munmap,aligned-reserve,map-fixed,mallocng-trim,tls: exit 0"
 #define POUCH_CENSUS_DLOPEN \
     "pouch-hello-dlopen: legs=interp,noexec,confined,load,segments,relro-data,relro: exit 0"
+#define POUCH_CENSUS_FD \
+    "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,sock-seek,sock-fstat: exit 0"
 // The FAULT child's marker: joey requires it AND a non-zero exit status, so the
 // census here is the one line it prints BEFORE the write that kills it.
 #define POUCH_CENSUS_GUARD \

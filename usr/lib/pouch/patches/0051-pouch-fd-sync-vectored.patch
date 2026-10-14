@@ -1,0 +1,413 @@
+B-3a (library ports) -- the fd calls the browser's libraries reach first:
+fsync and fdatasync reach the kernel, the vectored calls move one record, and a
+socket answers seeks, positional I/O and fstat as a socket.
+
+fsync / fdatasync: 0001 parked __NR_fsync and __NR_fdatasync at the 0xFFFF
+sentinel, so every ported program's fsync answered ENOSYS, though the kernel
+has served SYS_FSYNC (55; fd, datasync) since the FS-mutation work. sqlite's
+commit path fails SQLITE_IOERR_FSYNC on exactly this. Both now trap
+SYS_FSYNC; a pouch socket fd answers EINVAL (nothing to synchronize, as POSIX
+says and Linux answers for a socket), a vacant slot EBADF. The kernel's flat
+-1 still decodes to EIO, so a handle without RIGHT_WRITE, a Dev with no fsync
+(a pipe, the console) and a server error read alike.
+
+readv / writev / preadv / pwritev: the kernel has no vectored I/O and the four
+answered ENOSYS (0002 rewrote only stdio's backends around the absence). One
+call per iovec would split a record the caller hands over whole -- a UDP
+datagram, a pipe write within PIPE_BUF that POSIX makes atomic -- so
+_pouch_iov.c gathers the vector into one buffer and moves it with one read or
+write (the tag-aware wrappers, so a socket reaches its data handle), then
+scatters a read back. Up to 4096 bytes ride the stack; more ride a heap buffer
+of at most 1 MiB. A read moves at most one buffer (a short read). A write moves
+the vector buffer by buffer and stops at the first short write or error,
+answering the bytes written so far. A vector with one non-empty element moves
+in place, without a copy. A cancelled thread's heap buffer is freed by a
+cleanup handler. Validation is Linux's: count in [0, IOV_MAX], lengths summed
+within SSIZE_MAX, else EINVAL; a positional offset that is negative or would
+pass LLONG_MAX, EINVAL. A heap buffer that cannot be had answers ENOMEM.
+
+lseek / pread / pwrite / fstat on a socket: a pouch socket fd is a libc slot
+(0006, 0016), and these four handed its tagged number to the kernel, which
+never issued it: EBADF, or EIO through the flat -1. Now a seek or positional
+transfer answers ESPIPE (EBADF for a vacant slot), a negative pread/pwrite
+offset EINVAL, and fstat a zeroed stat with S_IFSOCK | 0777, one link, and
+the slot as its inode.
+
+Not here, recorded: fcntl, dup and dup2/dup3 onto a number need the kernel's
+POSIX dup and status-flag primitives, which today only the Linux phenotype
+reaches; exposing them natively is a syscall addition (a vote). fsync on a
+handle without RIGHT_WRITE fails where POSIX succeeds.
+
+Device-side pin: usr/pouch-hello/pouch-hello-fd.c, census POUCH_CENSUS_FD.
+
+diff --color -ruN a/src/internal/_pouch_fd.h b/src/internal/_pouch_fd.h
+--- a/src/internal/_pouch_fd.h	1970-01-01 01:00:00
++++ b/src/internal/_pouch_fd.h	2026-10-14 23:36:37
+@@ -0,0 +1,35 @@
++#ifndef _POUCH_FD_H
++#define _POUCH_FD_H
++
++/* pouch fd-surface helpers shared by the calls that are not socket-aware on
++ * their own (fsync, seeks, positional and vectored I/O). The including .c file
++ * must `#include "syscall.h"` first, for `hidden` (the _pouch_socket.h rule). */
++
++#include <errno.h>
++#include <sys/types.h>
++#include <sys/uio.h>
++#include "_pouch_socket.h"
++
++/* fd is a pouch socket number: the tag bit, on a non-negative int. A negative
++ * fd has every bit set, so the sign test comes first. */
++static inline int __pouch_fd_is_sock(int fd)
++{
++	return fd >= 0 && (fd & POUCH_SOCK_TAG) != 0;
++}
++
++/* A pouch socket fd reached a call with no meaning on a socket: EBADF when the
++ * slot is vacant, else `err` (ESPIPE for a seek or positional I/O, EINVAL for
++ * fsync). */
++static inline int __pouch_sock_refuse(int fd, int err)
++{
++	errno = pouch_sock_resolve(fd) ? err : EBADF;
++	return -1;
++}
++
++#define POUCH_IOV_WRITE 1   /* writev / pwritev, else readv / preadv */
++#define POUCH_IOV_AT    2   /* positional: preadv / pwritev at `off` */
++
++hidden ssize_t __pouch_iov_rw(int fd, const struct iovec *iov, int cnt,
++                              off_t off, int flags);
++
++#endif
+diff --color -ruN a/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
+--- a/src/internal/_pouch_fs.h	2026-10-14 23:36:06
++++ b/src/internal/_pouch_fs.h	2026-10-14 23:37:13
+@@ -26,6 +26,7 @@
+ #define SYS_thyla_rename       57   /* (olddir_fd, old, oldlen, newdir_fd, new, newlen) */
+ #define SYS_thyla_unlink       58   /* (parent_fd, name, len, flags) */
+ #define SYS_thyla_walk_create  54   /* (parent_fd, name, len, omode, perm) */
++#define SYS_thyla_fsync        55   /* (fd, datasync) -> 0 / -1 */
+ #define SYS_thyla_chdir        69   /* (path, len) */
+ #define SYS_thyla_getcwd       70   /* (buf, len) -> len */
+ #define SYS_thyla_getpid       72   /* () -> pid */
+diff --color -ruN a/src/stat/fstat.c b/src/stat/fstat.c
+--- a/src/stat/fstat.c	2026-10-14 23:36:07
++++ b/src/stat/fstat.c	2026-10-14 23:37:26
+@@ -22,6 +22,7 @@
+ #include <sys/stat.h>
+ #include <errno.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ /* Mirror of <thylacine/syscall.h> struct t_stat. Hand-rolled here so
+  * the patch is self-contained against vendored musl without pulling in
+@@ -56,6 +57,19 @@
+ 
+ 	if (fd < 0)    return __syscall_ret(-EBADF);
+ 	if (!st)       return __syscall_ret(-EFAULT);
++
++	/* A pouch socket is a libc slot, not a kernel handle: answer for it here,
++	 * as a socket (S_IFSOCK, the 0777 Linux reports), with the slot as its
++	 * inode so two open sockets differ. */
++	if (__pouch_fd_is_sock(fd)) {
++		if (!pouch_sock_resolve(fd)) return __syscall_ret(-EBADF);
++		for (i = 0; i < sizeof(*st); i++) ((unsigned char *)st)[i] = 0;
++		st->st_mode    = S_IFSOCK | 0777;
++		st->st_nlink   = 1;
++		st->st_ino     = (ino_t)(fd & ~POUCH_SOCK_TAG) + 1;
++		st->st_blksize = 4096;
++		return 0;
++	}
+ 
+ 	/* R16b-gamma-mount-close audit F6+F11 close: zero `t` BEFORE the
+ 	 * syscall so a partial uaccess fault inside the kernel's per-byte
+diff --color -ruN a/src/unistd/_pouch_iov.c b/src/unistd/_pouch_iov.c
+--- a/src/unistd/_pouch_iov.c	1970-01-01 01:00:00
++++ b/src/unistd/_pouch_iov.c	2026-10-14 23:37:12
+@@ -0,0 +1,142 @@
++/* pouch -- readv / writev / preadv / pwritev as ONE read or write of a
++ * gathered buffer.
++ *
++ * The kernel has no vectored I/O. One call per iovec would split what the
++ * caller hands over as one record: a UDP datagram, a pipe write within
++ * PIPE_BUF that POSIX makes atomic. So the vector is gathered into one buffer
++ * and moved by one read or write (tag-aware: a pouch socket fd reaches its
++ * data handle), then scattered back after a read.
++ *
++ * Up to POUCH_IOV_STACK bytes are gathered on the stack, more in a heap buffer
++ * of at most POUCH_IOV_CHUNK bytes. A read moves at most one buffer (a short
++ * read, which every reader accepts). A write moves the vector buffer by buffer
++ * and stops at the first short write or error, answering the bytes written so
++ * far, as a short writev does. A vector with one non-empty element is moved in
++ * place, without a copy. A heap buffer that cannot be had answers ENOMEM.
++ *
++ * Cancellation: the heap buffer is released by a cleanup handler, so a thread
++ * cancelled inside the transfer does not leak it. */
++#include <sys/uio.h>
++#include <unistd.h>
++#include <limits.h>
++#include <stdlib.h>
++#include <string.h>
++#include <pthread.h>
++#include "syscall.h"
++#include "_pouch_fd.h"
++
++#define POUCH_IOV_STACK 4096u        /* PIPE_BUF */
++#define POUCH_IOV_CHUNK (1u << 20)
++
++/* Linux's rw_copy_check_uvector rules: cnt in [0, IOV_MAX], and the lengths
++ * summed within SSIZE_MAX. Answers the total, or -1 with EINVAL. */
++static ssize_t iov_total(const struct iovec *iov, int cnt)
++{
++	size_t total = 0;
++	if (cnt < 0 || cnt > IOV_MAX) { errno = EINVAL; return -1; }
++	for (int i = 0; i < cnt; i++) {
++		if (iov[i].iov_len > (size_t)SSIZE_MAX - total) {
++			errno = EINVAL;
++			return -1;
++		}
++		total += iov[i].iov_len;
++	}
++	return (ssize_t)total;
++}
++
++static ssize_t xfer(int fd, void *buf, size_t len, off_t off, int flags)
++{
++	if (flags & POUCH_IOV_AT)
++		return (flags & POUCH_IOV_WRITE) ? pwrite(fd, buf, len, off)
++		                                 : pread(fd, buf, len, off);
++	return (flags & POUCH_IOV_WRITE) ? write(fd, buf, len)
++	                                 : read(fd, buf, len);
++}
++
++/* Copies up to `cap` bytes of the vector, starting `skip` bytes in, to dst. */
++static size_t gather(char *dst, size_t cap, const struct iovec *iov, int cnt,
++                     size_t skip)
++{
++	size_t n = 0;
++	for (int i = 0; i < cnt && n < cap; i++) {
++		size_t len = iov[i].iov_len;
++		if (skip >= len) { skip -= len; continue; }
++		size_t take = len - skip;
++		if (take > cap - n) take = cap - n;
++		memcpy(dst + n, (const char *)iov[i].iov_base + skip, take);
++		n += take;
++		skip = 0;
++	}
++	return n;
++}
++
++static void scatter(const struct iovec *iov, int cnt, const char *src, size_t n)
++{
++	for (int i = 0; i < cnt && n; i++) {
++		size_t take = iov[i].iov_len < n ? iov[i].iov_len : n;
++		memcpy(iov[i].iov_base, src, take);
++		src += take;
++		n -= take;
++	}
++}
++
++static void free_heap(void *p)
++{
++	free(p);
++}
++
++ssize_t __pouch_iov_rw(int fd, const struct iovec *iov, int cnt, off_t off,
++                       int flags)
++{
++	ssize_t total = iov_total(iov, cnt);
++	if (total < 0) return -1;
++	if ((flags & POUCH_IOV_AT) && (off < 0 || total > LLONG_MAX - off)) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	int only = -1, nonempty = 0;
++	for (int i = 0; i < cnt; i++)
++		if (iov[i].iov_len) { only = i; nonempty++; }
++	if (nonempty <= 1) {
++		char none;
++		return only < 0 ? xfer(fd, &none, 0, off, flags)
++		                : xfer(fd, iov[only].iov_base, iov[only].iov_len,
++		                       off, flags);
++	}
++
++	char stack[POUCH_IOV_STACK];
++	char *heap = 0, *buf = stack;
++	size_t cap = (size_t)total;
++	if (cap > POUCH_IOV_STACK) {
++		if (cap > POUCH_IOV_CHUNK) cap = POUCH_IOV_CHUNK;
++		heap = malloc(cap);
++		if (!heap) { errno = ENOMEM; return -1; }
++		buf = heap;
++	}
++
++	ssize_t ret;
++	int saved;
++	pthread_cleanup_push(free_heap, heap);
++	if (!(flags & POUCH_IOV_WRITE)) {
++		ret = xfer(fd, buf, cap, off, flags);
++		if (ret > 0) scatter(iov, cnt, buf, (size_t)ret);
++	} else {
++		size_t done = 0, n;
++		ret = 0;
++		while ((n = gather(buf, cap, iov, cnt, done)) != 0) {
++			ssize_t w = xfer(fd, buf, n, off + (off_t)done, flags);
++			if (w < 0) {
++				if (!done) ret = -1;
++				break;
++			}
++			done += (size_t)w;
++			if ((size_t)w < n) break;
++		}
++		if (ret == 0) ret = (ssize_t)done;
++	}
++	saved = errno;
++	pthread_cleanup_pop(1);
++	errno = saved;
++	return ret;
++}
+diff --color -ruN a/src/unistd/fdatasync.c b/src/unistd/fdatasync.c
+--- a/src/unistd/fdatasync.c	2026-10-14 23:36:06
++++ b/src/unistd/fdatasync.c	2026-10-14 23:37:12
+@@ -1,7 +1,12 @@
++/* pouch -- fdatasync(2): fsync.c's rules, with SYS_FSYNC's datasync = 1. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
++#include "_pouch_fd.h"
+ 
+ int fdatasync(int fd)
+ {
+-	return syscall_cp(SYS_fdatasync, fd);
++	if (fd < 0) { errno = EBADF; return -1; }
++	if (__pouch_fd_is_sock(fd)) return __pouch_sock_refuse(fd, EINVAL);
++	return syscall_cp(SYS_thyla_fsync, fd, 1);
+ }
+diff --color -ruN a/src/unistd/fsync.c b/src/unistd/fsync.c
+--- a/src/unistd/fsync.c	2026-10-14 23:36:06
++++ b/src/unistd/fsync.c	2026-10-14 23:37:12
+@@ -1,7 +1,18 @@
++/* pouch -- fsync(2) on SYS_FSYNC(fd, datasync = 0), the kernel's write-side
++ * durability barrier (dev9p -> Tsync; an in-memory Dev answers at once).
++ *
++ * A pouch socket fd names nothing to synchronize: EINVAL, as POSIX answers
++ * for a file that does not support synchronization (and Linux for a socket).
++ * The kernel's flat -1 decodes to EIO: a handle without RIGHT_WRITE, a Dev
++ * with no fsync (a pipe, the console) and a server error read alike. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
++#include "_pouch_fd.h"
+ 
+ int fsync(int fd)
+ {
+-	return syscall_cp(SYS_fsync, fd);
++	if (fd < 0) { errno = EBADF; return -1; }
++	if (__pouch_fd_is_sock(fd)) return __pouch_sock_refuse(fd, EINVAL);
++	return syscall_cp(SYS_thyla_fsync, fd, 0);
+ }
+diff --color -ruN a/src/unistd/lseek.c b/src/unistd/lseek.c
+--- a/src/unistd/lseek.c	2026-10-14 23:36:07
++++ b/src/unistd/lseek.c	2026-10-14 23:37:12
+@@ -1,8 +1,12 @@
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ off_t __lseek(int fd, off_t offset, int whence)
+ {
++	/* pouch: a socket has no offset (ESPIPE), and the kernel never issued
++	 * a pouch socket number. */
++	if (__pouch_fd_is_sock(fd)) return __pouch_sock_refuse(fd, ESPIPE);
+ #ifdef SYS__llseek
+ 	off_t result;
+ 	return syscall(SYS__llseek, fd, offset>>32, offset, &result, whence) ? -1 : result;
+diff --color -ruN a/src/unistd/pread.c b/src/unistd/pread.c
+--- a/src/unistd/pread.c	2026-10-14 23:36:06
++++ b/src/unistd/pread.c	2026-10-14 23:37:12
+@@ -1,7 +1,13 @@
++/* pouch -- pread(2) on SYS_PREAD. A socket has no offset: ESPIPE for a pouch
++ * socket fd, before the kernel is asked about a number it never issued. A
++ * negative offset is EINVAL here, not the kernel's flat -1 (EIO). */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ ssize_t pread(int fd, void *buf, size_t size, off_t ofs)
+ {
++	if (__pouch_fd_is_sock(fd)) return __pouch_sock_refuse(fd, ESPIPE);
++	if (ofs < 0) { errno = EINVAL; return -1; }
+ 	return syscall_cp(SYS_pread, fd, buf, size, __SYSCALL_LL_PRW(ofs));
+ }
+diff --color -ruN a/src/unistd/preadv.c b/src/unistd/preadv.c
+--- a/src/unistd/preadv.c	2026-10-14 23:36:06
++++ b/src/unistd/preadv.c	2026-10-14 23:37:12
+@@ -2,9 +2,9 @@
+ #include <sys/uio.h>
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ ssize_t preadv(int fd, const struct iovec *iov, int count, off_t ofs)
+ {
+-	return syscall_cp(SYS_preadv, fd, iov, count,
+-		(long)(ofs), (long)(ofs>>32));
++	return __pouch_iov_rw(fd, iov, count, ofs, POUCH_IOV_AT);
+ }
+diff --color -ruN a/src/unistd/pwrite.c b/src/unistd/pwrite.c
+--- a/src/unistd/pwrite.c	2026-10-14 23:36:06
++++ b/src/unistd/pwrite.c	2026-10-14 23:37:12
+@@ -1,7 +1,11 @@
++/* pouch -- pwrite(2): pread.c's rules, on SYS_PWRITE. */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ ssize_t pwrite(int fd, const void *buf, size_t size, off_t ofs)
+ {
++	if (__pouch_fd_is_sock(fd)) return __pouch_sock_refuse(fd, ESPIPE);
++	if (ofs < 0) { errno = EINVAL; return -1; }
+ 	return syscall_cp(SYS_pwrite, fd, buf, size, __SYSCALL_LL_PRW(ofs));
+ }
+diff --color -ruN a/src/unistd/pwritev.c b/src/unistd/pwritev.c
+--- a/src/unistd/pwritev.c	2026-10-14 23:36:06
++++ b/src/unistd/pwritev.c	2026-10-14 23:37:12
+@@ -2,9 +2,9 @@
+ #include <sys/uio.h>
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ ssize_t pwritev(int fd, const struct iovec *iov, int count, off_t ofs)
+ {
+-	return syscall_cp(SYS_pwritev, fd, iov, count,
+-		(long)(ofs), (long)(ofs>>32));
++	return __pouch_iov_rw(fd, iov, count, ofs, POUCH_IOV_WRITE | POUCH_IOV_AT);
+ }
+diff --color -ruN a/src/unistd/readv.c b/src/unistd/readv.c
+--- a/src/unistd/readv.c	2026-10-14 23:36:06
++++ b/src/unistd/readv.c	2026-10-14 23:37:12
+@@ -1,7 +1,8 @@
+ #include <sys/uio.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ ssize_t readv(int fd, const struct iovec *iov, int count)
+ {
+-	return syscall_cp(SYS_readv, fd, iov, count);
++	return __pouch_iov_rw(fd, iov, count, 0, 0);
+ }
+diff --color -ruN a/src/unistd/writev.c b/src/unistd/writev.c
+--- a/src/unistd/writev.c	2026-10-14 23:36:06
++++ b/src/unistd/writev.c	2026-10-14 23:37:12
+@@ -1,7 +1,8 @@
+ #include <sys/uio.h>
+ #include "syscall.h"
++#include "_pouch_fd.h"
+ 
+ ssize_t writev(int fd, const struct iovec *iov, int count)
+ {
+-	return syscall_cp(SYS_writev, fd, iov, count);
++	return __pouch_iov_rw(fd, iov, count, 0, POUCH_IOV_WRITE);
+ }

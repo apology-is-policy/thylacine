@@ -13,6 +13,8 @@ code:
   - usr/lib/pouch/patches/0030-pouch-fopen-append.patch
   - usr/lib/pouch/patches/0031-pouch-readlink.patch
   - usr/lib/pouch/patches/0040-pouch-o-append-omode.patch
+  - usr/lib/pouch/patches/0051-pouch-fd-sync-vectored.patch
+  - usr/pouch-hello/pouch-hello-fd.c
 audit: hard
 guarded-by: [inv-i28]
 validated-by: [prose, gate-smp]
@@ -223,6 +225,44 @@ arm and answers `EINVAL`, which is literally true of every file served.
 `self` is rewritten to the caller's own pid rather than passed through,
 because a shared `/proc` mount's `self` resolves to the MOUNTER.
 
+### fsync, and the vectored calls as one transfer (0051)
+
+`fsync` and `fdatasync` trap `SYS_FSYNC(fd, datasync)` -- 0 for the full
+barrier, 1 for data only. Until 0051 both sat at the 0001 sentinel and
+answered `ENOSYS`, though the kernel had served the call since the
+FS-mutation work; SQLite's commit path fails on exactly that. The kernel
+still answers a flat `-1`, which decodes to `EIO`: a handle without
+`RIGHT_WRITE`, a Dev with no fsync slot (a pipe, the console) and a server
+error read alike. A pouch socket number answers `EINVAL` before the trap
+(a vacant slot `EBADF`).
+
+`readv`, `writev`, `preadv` and `pwritev` have no kernel call behind them.
+One `read`/`write` per iovec would split a record the caller hands over
+whole -- a UDP datagram, or a pipe write within `PIPE_BUF` that POSIX makes
+atomic -- so `_pouch_iov.c` gathers the vector into one buffer and moves it
+with ONE call of the tag-aware wrapper, then scatters a read back. Up to
+4096 bytes ride the stack; more ride a heap buffer of at most 1 MiB, freed
+by a cleanup handler if the thread is cancelled inside the transfer. A read
+moves at most one buffer, a short read every reader accepts. A write moves
+the vector buffer by buffer and stops at the first short write or error,
+answering the bytes written so far. A vector with one non-empty element
+moves in place. Validation is Linux's (`rw_copy_check_uvector`): a count
+outside `[0, IOV_MAX]` or lengths summing past `SSIZE_MAX` is `EINVAL`, and
+so is a positional offset that is negative or would pass `LLONG_MAX`. A
+heap buffer that cannot be had answers `ENOMEM`.
+
+The witness for "one transfer" is the pipe's atomicity, not the bytes: on a
+nonblocking pipe with two bytes free, a four-byte `writev` of two two-byte
+pieces must answer `EAGAIN` and write nothing (`pouch-hello-fd`,
+`writev-atomic`). A write per piece lands the first piece and answers 2;
+the bytes read back would be the same either way.
+
+`lseek`, `pread` and `pwrite` on a pouch socket answer `ESPIPE` (a socket
+has no offset) instead of handing the kernel a number it never issued; a
+negative `pread`/`pwrite` offset is `EINVAL` here, where the kernel's flat
+`-1` would have read as `EIO`. `fstat` of a socket answers a zeroed stat
+with `S_IFSOCK | 0777`, one link, and the slot (plus one) as `st_ino`.
+
 ## Data structures
 
 `struct t_stat` — the kernel's stat ABI, **mirrored by hand in three
@@ -325,6 +365,14 @@ in-place translation pass.
 - The 0009 patch header still describes the per-component walk loop and
   "absolute paths only", both retired — read it as history, and
   `openat.c`'s current text as truth.
+- **`fsync` on a read-only handle fails where POSIX succeeds.** The kernel's
+  `SYS_FSYNC` requires `RIGHT_WRITE` ("the write-side durability barrier"),
+  and its flat `-1` reads as `EIO`. SQLite's directory fsync opens the
+  directory read-only and ignores the result, so B-3's SQLite is unaffected;
+  a program that fsyncs a file through a read-only descriptor is not.
+- **`fcntl`, `dup`, `dup2`/`dup3` onto a number are still `ENOSYS`** after
+  0051: they need the native dup and descriptor-status syscalls B-3b adds
+  (`dec-2026-10-14-native-fd-calls`).
 
 ## Provenance
 

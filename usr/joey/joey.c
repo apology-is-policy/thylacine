@@ -11786,6 +11786,24 @@ int main(void) {
                      " + SYS_UNLINK)\n");
         }
 
+        // B-3a: the fd-surface prover (0051). Spawn /bin/pouch-hello-fd -- it
+        // fsyncs a file on the Stratum FS (a real Tsync), refuses fsync on a
+        // socket, proves writev is ONE gathered write (EAGAIN with nothing
+        // written on a nonblocking pipe with two bytes free), scatters a readv,
+        // round-trips 3 MiB through pwritev/preadv, and reads ESPIPE / S_ISSOCK
+        // for a socket's seek, positional I/O and fstat. Boot-fatal.
+        {
+            const char fd_name[]   = "/bin/pouch-hello-fd";
+            const char fd_expect[] = POUCH_CENSUS_FD;
+            if (pouch_smoke_one(fd_name, sizeof(fd_name) - 1,
+                                fd_expect, sizeof(fd_expect) - 1) != 0) {
+                t_putstr("joey: B-3a PROBE pouch-hello-fd FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: B-3a PROBE OK (fd surface: fsync, vectored I/O as "
+                     "one transfer, a socket's seek/pread/fstat)\n");
+        }
+
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;

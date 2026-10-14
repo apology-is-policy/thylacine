@@ -351,15 +351,18 @@ round against this surface before it had a node).
   its first version claimed here that every remaining call "fails
   visibly". Of the scalar-fd calls that remain, each does fail visibly, so
   none fabricates a value or leaks a slot — they are missing surface, and
-  a port that needs one needs a patch. `fstat(sock)` reaches the kernel with a
-  number it never issued and gets `EBADF` (no `S_ISSOCK` test). `fcntl`,
-  `dup`, `dup3`, `readv`, `writev` never reach it at all: their numbers are
+  a port that needs one needs a patch. Since 0051 (B-3a) `fstat(sock)`
+  answers `S_IFSOCK`, `lseek`/`pread`/`pwrite` on a socket `ESPIPE`, and
+  `readv`/`writev` reach a socket through the tag-aware `read`/`write` as one
+  gathered transfer, so a datagram stays whole ([[sub-pouch-fs]]). `fcntl`,
+  `dup` and `dup3` still never reach the kernel: their numbers are
   sentinel-parked for EVERY fd (`ENOSYS`; `dup2` onto a target is a
-  documented kernel seam, [[sub-pouch-process]]). So the commonest way to
-  make a socket non-blocking, `fcntl(sock, F_SETFL, O_NONBLOCK)`, does not
-  work — `ioctl(FIONBIO)` and 0028's `SOCK_NONBLOCK` do — and `writev` to a
-  socket does not exist, although 0002 rewrote the stdio backends around
-  exactly that absence. OPEN, tracked with the pouch-net completeness work.
+  documented kernel seam, [[sub-pouch-process]]), until B-3b's native dup and
+  descriptor-status syscalls (`dec-2026-10-14-native-fd-calls`). So the
+  commonest way to make a socket non-blocking, `fcntl(sock, F_SETFL,
+  O_NONBLOCK)`, does not work yet — `ioctl(FIONBIO)` and 0028's
+  `SOCK_NONBLOCK` do. OPEN, owned by B-3b; small-integer socket numbers by
+  B-3k.
 - **A stale doc-comment contradicts the live `SO_PEERCRED` marshal.**
   `getsockopt.c`'s top-of-file comment still says `ucred.uid` / `ucred.gid`
   are "0 at v1.0 (Thylacine has no uid model)"; the live A-3 marshal below

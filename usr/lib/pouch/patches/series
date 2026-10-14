@@ -169,3 +169,6 @@
 # 0050 (signal chunk S-3): raise()/kill(self) of SIGSEGV/SIGBUS/SIGILL/SIGFPE post
 # the snare to self and die of that signal; kill() reads ESRCH/EPERM, not EIO.
 0050-pouch-self-fault-signals-errnos.patch
+# 0051 (B-3a): fsync/fdatasync on SYS_FSYNC; readv/writev/preadv/pwritev as one
+# gathered transfer; a socket answers lseek/pread/pwrite ESPIPE and fstat S_IFSOCK.
+0051-pouch-fd-sync-vectored.patch
