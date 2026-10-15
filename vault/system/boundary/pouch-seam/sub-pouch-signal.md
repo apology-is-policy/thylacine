@@ -26,6 +26,19 @@ unreaped included), ESRCH for a missing pid, and the gate's EACCES, which
 signal 0 maps to no note. `pouch-hello-signals`' `probe` leg proves each case
 on the device, with a child probing its parent through `getppid()`.
 
+The kernel's gate admits one process at a time. A negative pid (a process
+group, or every process) is refused EPERM by `kill` for every signal, 0
+included, before any call, as the Linux phenotype refuses it (round 2; the
+kernel itself answers a negative pid ESRCH, since it names no Proc). pid 0,
+POSIX's "the caller's process group", is the kernel's self sentinel and
+reaches only the caller. `tools/test-pouch-kill-probe.py` pins the call
+shape on the host (the post's number derived from the kernel header, x1 = x2
+= 0, EACCES spelled EPERM, both group refusals, getppid's 132) against five
+mutants. Both are divergences for a caller whose group has
+other members: `killpg(pgid, 0)` and `kill(-pgid, sig)` are refused, and
+`kill(0, sig)` signals only the caller. Process groups exist (PTY-1a), but
+only the tty path posts to one.
+
 ## Purpose
 
 `sigaction` / `raise` / `kill` / `sigprocmask` on a kernel that has

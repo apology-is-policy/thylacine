@@ -88,6 +88,7 @@
 #include <unistd.h>
 
 #define PROBE "/pouch-fd-probe.bin"
+#define PROBE_NEW "/pouch-fd-probe-new.bin"
 
 static int fail(const char *leg) {
     printf("pouch-hello-fd: FAIL %s (errno %d)\n", leg, errno);
@@ -436,6 +437,30 @@ static int leg_cloexec(void) {
     f = freopen(NULL, "r", f);
     if (!f) return fail("freopen without a name");
     if (fileno(f) != d) return fail("freopen without a name moved the descriptor");
+    fclose(f);
+    // openat's create arm and its exists-already arm flag what they return.
+    unlink(PROBE_NEW);
+    int c = open(PROBE_NEW, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (c < 0 || fcntl(c, F_GETFD) != FD_CLOEXEC) return fail("create O_CLOEXEC left the flag clear");
+    int e = open(PROBE_NEW, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (e < 0 || fcntl(e, F_GETFD) != FD_CLOEXEC) return fail("O_CREAT of an existing name left the flag clear");
+    close(c);
+    close(e);
+    unlink(PROBE_NEW);
+    // freopen with no name: "e" sets the flag; a mode other than "a" keeps an
+    // append descriptor's append rather than refusing to change it; "a" on a
+    // descriptor opened without O_APPEND is refused, and the stream closed.
+    d = dup(plain);
+    if (d < 0 || !(f = fdopen(d, "r+"))) return fail("freopen setup");
+    f = freopen(NULL, "r+e", f);
+    if (!f || fileno(f) != d || fcntl(d, F_GETFD) != FD_CLOEXEC) return fail("freopen e left the flag clear");
+    errno = 0;
+    if (freopen(NULL, "a", f) || errno != EINVAL) return fail("freopen a on a descriptor without O_APPEND");
+    int ap = open(PROBE, O_RDWR | O_APPEND);
+    if (ap < 0 || !(f = fdopen(ap, "a+"))) return fail("freopen append setup");
+    f = freopen(NULL, "r+", f);
+    if (!f || fileno(f) != ap) return fail("freopen r+ closed an append stream");
+    if (!(fcntl(ap, F_GETFL) & O_APPEND)) return fail("freopen r+ lost the descriptor's append");
     fclose(f);
     close(plain);
     return 0;

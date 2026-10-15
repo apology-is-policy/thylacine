@@ -265,6 +265,16 @@ static int test_probe(void) {
                rc, errno, ESRCH);
         bad = 1;
     }
+    // A negative pid is a group, or every process: refused, as the phenotype
+    // refuses it, never answered as a missing pid.
+    errno = 0;
+    rc = kill(-1, 0);
+    int grc = kill(-(int)getpid(), 0), gerr = errno;
+    if (rc != -1 || grc != -1 || gerr != EPERM) {
+        printf("pouch-hello-signals: probe(group) rc=%d/%d errno=%d (want -1 EPERM=%d)\n",
+               rc, grc, gerr, EPERM);
+        bad = 1;
+    }
 
     char ppid[16];
     snprintf(ppid, sizeof ppid, "%d", (int)getpid());

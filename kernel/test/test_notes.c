@@ -3399,9 +3399,14 @@ void test_notes_postnote_errnos(void) {
     s64 r_snare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
 
     // The probe (kill(pid, 0), vote 2026-10-14 #6): the gate's verdict and no
-    // post. A narrowed pid aliases as a post's does: 2^32 + pid is pid.
+    // post. A narrowed pid aliases as a post's does: 2^32 + pid is pid, and
+    // 2^32 alone is pid 0 -- kproc, the walk's root, through the cross arm (a
+    // post's self sentinel is the whole 64-bit 0, never the narrowed one).
+    // "No post" is witnessed as the rings' counts; a stray wake on the probe
+    // path would not show here.
     s64 p_self  = sys_postnote_probe_for_test(caller, (u64)caller->pid);
     s64 p_zero  = sys_postnote_probe_for_test(caller, 0);
+    s64 p_w0    = sys_postnote_probe_for_test(caller, 1ull << 32);
     s64 p_child = sys_postnote_probe_for_test(caller, (u64)child->pid);
     s64 p_wide  = sys_postnote_probe_for_test(caller, (1ull << 32) | (u64)child->pid);
     s64 p_other = sys_postnote_probe_for_test(caller, (u64)other->pid);
@@ -3472,6 +3477,8 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(r_snare, -(s64)T_E_INVAL, "a snare to another Proc is EINVAL: a fault is its own");
     TEST_EXPECT_EQ(p_self, (s64)0, "probe of oneself is 0");
     TEST_EXPECT_EQ(p_zero, (s64)0, "probe of pid 0, the self sentinel, is 0");
+    TEST_EXPECT_EQ(p_w0, -(s64)T_E_ACCES,
+                   "probe of 2^32 is kproc through the gate, as a post of it is: EACCES");
     TEST_EXPECT_EQ(p_child, (s64)0, "probe of a child is 0");
     TEST_EXPECT_EQ(p_wide, (s64)0, "probe of 2^32 + child pid reads the child, as a post does");
     TEST_EXPECT_EQ(p_other, -(s64)T_E_ACCES, "probe of a non-child is EACCES: the post's gate");

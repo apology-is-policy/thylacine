@@ -43,13 +43,15 @@ floor 0; fcntl's F_DUPFD / F_DUPFD_CLOEXEC pass their floor (a negative one
 widens and the kernel refuses it after a closed fd's EBADF); F_GETFL decodes
 FLAGS_GET's status word; F_SETFL changes O_NONBLOCK only (native 123),
 accepts a restated O_APPEND and refuses a flipped one; `pipe2` now honours
-O_CLOEXEC (FLAGS_SET) and O_NONBLOCK (123) on both ends, closing both if a set
-fails. Astra's four guest witnesses (descriptor-ops, dup2-self, handle-query,
+O_CLOEXEC (FLAGS_SET) and O_NONBLOCK (123) on both ends; a set that fails
+fails the call and closes both ends, except an end whose own set answered
+EBADF (a peer thread closed it, and its number may already be another
+thread's; round 2). Astra's four guest witnesses (descriptor-ops, dup2-self, handle-query,
 spawn-actions) were built and run by nothing on main; B-3b compiles them into
 `/bin` and `tools/interactive/ls-descriptors.exp` runs each as uid 1000.
 
-The round-1 close (2026-10-15): `pipe2`'s failure unwind closes both ends with
-the raw `__syscall(SYS_close)`, as `popen` does, never the cancellable
+The round-1 close (2026-10-15): `pipe2`'s failure unwind closes with the raw
+`__syscall(SYS_close)`, as `popen` does, never the cancellable
 `close()`. The descriptor-ops witness reads a std stream's FLAGS_GET word as
 the flag bit plus status (a console stream is ORDWR, word 0x200), testing
 bit0 alone. With `pipe2(O_CLOEXEC)` flagging both ends, a `popen("r")` whose
@@ -406,11 +408,15 @@ the child inherits `/env` via the kernel clone).
 
 ## Caveats
 
-- **`popen("r")` with fd 0 closed fails `EINVAL`** (since 0056): the pipe's
-  read end lands at fd 0 flagged close-on-exec, spawn's final exclusion drops
-  it, and the hole at child fd 0 is the sparse list spawn refuses. Linux would
-  give the child no stdin. Before 0056 the child inherited the read end as
-  its stdin. OPEN-BUGS 2026-10-15 owns the inheritance model this belongs to.
+- **A close-on-exec descriptor at fd 0 or 1 makes a stdio-inheriting spawn
+  fail `EINVAL`** (since 0056) when a higher standard stream is open. A
+  process with fd 0 (or 1) closed that opens anything O_CLOEXEC -- open,
+  fopen "e", opendir, shm_open, mkostemp, the loader's opens, Rust std's
+  File::open, the read end of `popen("r")`'s pipe -- gets it there flagged;
+  spawn's final exclusion drops it from the child, and the hole is the
+  sparse list spawn refuses. Linux would give the child a closed fd 0. Before
+  0056 open ignored O_CLOEXEC and the child inherited the descriptor.
+  OPEN-BUGS 2026-10-15 owns the inheritance model this belongs to.
 
 - `posix_spawnattr` (SETSID / SETPGROUP / RESETIDS / SETSIG*) is ignored:
   there is no post-spawn child hook, and a fresh child inherits session,

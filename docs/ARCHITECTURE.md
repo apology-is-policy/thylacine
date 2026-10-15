@@ -2985,7 +2985,7 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `rendezvous(tag, val)` | Synchronous handoff |
 | `nsec()` | Nanosecond clock |
 | `getpid()` | Process ID |
-| `getppid()` | Parent's process ID; 0 for a parentless Proc (native 132, operator vote 2026-10-14 #6) |
+| `getppid()` | Parent's process ID; 0 when the parent is kproc (init, an orphan adopted while init is down) or for kproc itself (native 132, operator vote 2026-10-14 #6) |
 | `gettid()` | Thread ID |
 | `errstr(buf, n)` | Read per-thread errstr |
 
@@ -4385,7 +4385,7 @@ Thylacine exposes two clocks through a single POSIX-shaped `SYS_CLOCK_GETTIME(cl
 
 **No new invariant.** LS-K introduces no §28 invariant: it is a read-only introspection surface (no privilege, no mutation, no lifetime), covered by the existing **I-15** (the PL031 view derives entirely from the DTB) and **I-5** (the RTC MMIO slot is kernel-reserved). The implementation obligations are ordinary correctness — uaccess fault routing (`-EFAULT`), a bad `clk_id` (`-EINVAL`), and no overflow in the `epoch·1e9 + delta` arithmetic (an epoch of ~`1.7e18` ns stays well inside `i64`).
 
-**The identity syscalls.** Alongside the clock, LS-K adds `SYS_GETPID` / `SYS_GETUID` / `SYS_GETGID` — trivial read-only returns of the calling Proc's `pid` / `principal_id` / `primary_gid` (all already durable Proc fields, A-1a). They carry no capability and mutate nothing. `SYS_GETPPID` (132, operator vote 2026-10-14 #6) joins them for Pouch's `getppid`: the parent's pid, read under `g_proc_table_lock` because a parent's exit rewrites the link, 0 for a parentless Proc.
+**The identity syscalls.** Alongside the clock, LS-K adds `SYS_GETPID` / `SYS_GETUID` / `SYS_GETGID` — trivial read-only returns of the calling Proc's `pid` / `principal_id` / `primary_gid` (all already durable Proc fields, A-1a). They carry no capability and mutate nothing. `SYS_GETPPID` (132, operator vote 2026-10-14 #6) joins them for Pouch's `getppid`: the parent's pid, read under `g_proc_table_lock` because a parent's exit rewrites the link; 0 when the parent is kproc (pid 0: init, and an orphan adopted while init is not alive) or for kproc itself.
 
 **Setting the wall clock (net-7a).** The LS-K settability seam is closed by `SYS_CLOCK_SETTIME(clk_id, timespec)` (`= 79`), pulled forward into the network arc so SNTP can actually synchronize (NET-DESIGN §10). Only `CLOCK_REALTIME` is settable (`CLOCK_MONOTONIC` is the boot-counter timebase — `-EINVAL`). The "who may set the clock" capability is **`CAP_HOSTOWNER`** — a clock step is system-global, so it is the host owner's authority, never an identity's (I-22; `-EACCES` otherwise). It re-anchors the **single** wall-clock offset (`g_wallclock_offset_ns`, NOT a two-field anchor) at full-nanosecond granularity via one atomic `u64` store: `CLOCK_REALTIME = timer_now_ns() + offset`, so a runtime re-anchor races GETTIME readers only on a single aligned `u64` — each reads old-or-new, coherent, no seqlock (the LS-K single-`u64` design is what makes the setter SMP-safe). `CLOCK_MONOTONIC` is untouched. The handler validates `clk_id` + the cap before any buffer read, bounds `tv_sec` so `tv_sec·1e9 + tv_nsec` cannot overflow, and routes a bad VA to `-EFAULT`. A non-elevated tool gets `-EACCES`; the SNTP client (net-7a-2) is the consumer, and an admin steps the clock through it.
 

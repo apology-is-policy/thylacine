@@ -130,8 +130,20 @@ int main(void) {
  RESET(0);CASE("pipe2-both",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==0 && calls==4 && numbers[0]==130 && numbers[1]==123 && numbers[2]==130 && numbers[3]==123 && args0[0]==5 && args0[1]==5 && args0[2]==6 && args0[3]==6);
  RESET(0);CASE("pipe2-bad-flag",tested_pipe2(pf,O_APPEND)==-1 && errno==EINVAL && pipe_calls==0 && calls==0);
  pf[0]=pf[1]=-7;
- RESET2(0,-EBADF);CASE("pipe2-set-fails-closes-both",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==-1 && errno==EBADF && calls==2 && close_calls==2 && closed[0]==5 && closed[1]==6 && cancellable_closes==0 && args0[0]==5 && args0[1]==5 && pf[0]==-7 && pf[1]==-7);
+ /* EBADF means a peer closed that end: its number may be another thread's,
+  * so only the other end is closed. Any other failure closes both. */
+ RESET2(0,-EBADF);CASE("pipe2-gone-end-not-closed",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==-1 && errno==EBADF && calls==2 && close_calls==1 && closed[0]==6 && cancellable_closes==0 && args0[0]==5 && args0[1]==5 && pf[0]==-7 && pf[1]==-7);
+ RESET2(0,-EBADF);CASE("pipe2-gone-second-end",tested_pipe2(pf,O_CLOEXEC)==-1 && errno==EBADF && calls==2 && close_calls==1 && closed[0]==5 && args0[1]==6 && pf[0]==-7);
+ RESET2(0,-EINVAL);CASE("pipe2-set-fails-closes-both",tested_pipe2(pf,O_CLOEXEC|O_NONBLOCK)==-1 && errno==EINVAL && close_calls==2 && closed[0]==5 && closed[1]==6 && cancellable_closes==0);
  RESET2(-1,0);CASE("pipe2-old-kernel",tested_pipe2(pf,O_CLOEXEC)==-1 && errno==ENOSYS && close_calls==2 && closed[0]==5 && closed[1]==6 && cancellable_closes==0 && args0[0]==5);
  RESET(0);pipe_fail=1;CASE("pipe2-pipe-fails",tested_pipe2(pf,O_CLOEXEC)==-1 && errno==EMFILE && calls==0 && close_calls==0);
+ /* pouch_set_cloexec (open, fdopen "e", freopen "e"): a tagged socket never
+  * reaches the native call. */
+ RESET(0);CASE("cloexec-native",pouch_set_cloexec(8)==0 && calls==1 && number==130 && a1==1 && all_x0(8));
+ RESET(-1);CASE("cloexec-old-kernel",pouch_set_cloexec(8)==-ENOSYS && all_x0(8));
+ RESET(0);CASE("cloexec-socket",pouch_set_cloexec(POUCH_SOCK_TAG)==-ENOSYS && calls==0);
+ live_socket=0;
+ RESET(0);CASE("cloexec-closed-socket",pouch_set_cloexec(POUCH_SOCK_TAG)==-EBADF && calls==0);
+ live_socket=1;
  printf("tests=%d failures=%d\n",checks,failures);return !!failures;
 }

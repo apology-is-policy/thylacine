@@ -523,7 +523,7 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_READV,           VIV_TIER2 },  // N-5: writev's twin, same iovec judgement (git protocol-v2)
     { VIV_LINUX_WRITEV,          VIV_TIER2 },  // the arity rule's sharpest case
     { VIV_LINUX_GETCWD,          VIV_TIER2 },  // +1 on the length, and ERANGE
-    { VIV_LINUX_GETPPID,         VIV_TIER2 },  // no native twin exists
+    { VIV_LINUX_GETPPID,         VIV_TIER2 },  // reads SYS_GETPPID's accessor
     { VIV_LINUX_GETUID,          VIV_TIER2 },  // the PRINCIPAL_SYSTEM mapping
     { VIV_LINUX_GETGID,          VIV_TIER2 },  // the GID_SYSTEM mapping
     { VIV_LINUX_UNAME,           VIV_TIER2 },  // a fabrication; see the header

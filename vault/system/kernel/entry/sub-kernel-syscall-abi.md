@@ -48,9 +48,10 @@ confer no authority.
   closed fd outranks a bad floor, as on Linux), the floor's range EINVAL, a
   forbidden alias EACCES, no free index at or above the floor EMFILE. Rights
   are copied verbatim, never widened.
-- `SYS_GETPPID` (132, vote 6) returns the parent's pid, 0 for a parentless
-  Proc (only kproc), through `proc_parent_pid` under `g_proc_table_lock`. It
-  never fails for a Proc, as `SYS_GETPID` does not.
+- `SYS_GETPPID` (132, vote 6) returns the parent's pid through
+  `proc_parent_pid` under `g_proc_table_lock`: 0 when the parent is kproc
+  (pid 0 -- init, and an orphan adopted while init is not alive) and for
+  kproc itself. It never fails for a Proc, as `SYS_GETPID` does not.
 
 No call returns EPERM. Linux 129-131 (kill, tkill, tgkill) are Vivarium TIER2
 rows and Linux 132 (sigaltstack) a VIV_ENOSYS row, all consumed before native

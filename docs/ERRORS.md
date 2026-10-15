@@ -592,11 +592,25 @@ refuses the same way: flipping O_APPEND, O_ASYNC, O_DIRECT and O_NOATIME are
 EINVAL, a restated O_APPEND is served, O_LARGEFILE is dropped.
 
 open and openat honour O_CLOEXEC by setting the descriptor flag once the open
-has its number; a set that fails closes the descriptor and fails the open with
-the set's errno. fopen "e", fdopen "e" and freopen with no name set it the same
-way, and freopen with no name changes the status through fcntl's F_SETFL, so it
-answers F_SETFL's errnos (EINVAL for a mode that flips O_APPEND) and, as
-before, closes the stream when it fails.
+has its number, so a peer thread's spawn in between sees the descriptor
+unflagged (Linux's single call has no such window). pipe2(O_CLOEXEC) shares
+the window; dup3 and F_DUPFD_CLOEXEC do not, since DUP_TO sets the flag in the
+same call. A set that fails fails the open with the set's errno and
+closes the descriptor, unless the set answered EBADF: a peer thread closed it
+first, and the number may already be another thread's. fopen "e" is open's
+O_CLOEXEC. fdopen "e" and freopen with no name and "e" set the flag too but,
+as upstream musl, ignore a set that fails; a tagged Pouch socket is never
+flagged (ENOSYS), so fdopen "e" leaves it unflagged. A flagged descriptor at
+fd 0, 1 or 2 is left out of a posix_spawn child; if a lower standard stream is
+then missing while a higher one is open, spawn refuses with EINVAL (the sparse
+spawn contract), so a process that opens anything O_CLOEXEC with fd 0 or 1
+closed cannot spawn a child that inherits its standard streams.
+
+freopen with no name changes the status through fcntl's F_SETFL. The append bit
+is fixed when the file is opened, so a mode other than "a" restates the
+descriptor's own (an append descriptor keeps appending, where Linux would stop),
+and "a" on a descriptor opened without O_APPEND is EINVAL and, as POSIX directs
+for a failed freopen, closes the stream.
 
 ### Probe and parent (B-3b, vote 6)
 
@@ -604,9 +618,16 @@ SYS_POSTNOTE with an empty name is the probe kill(pid, 0) maps to: nothing is
 posted and the name pointer is not read. Self (pid 0 or the caller's own)
 answers 0; another pid answers the post's gate: 0 for the caller's child (dead
 but unreaped included), -T_E_ACCES for any other Proc, -T_E_SRCH for no Proc.
-A probe is never -T_E_INVAL or -T_E_AGAIN. Pouch's kill(pid, 0) spells the
-EACCES as EPERM, as it does for every signal. SYS_GETPPID (132) returns the
-parent's pid, 0 for a parentless Proc; it never fails.
+A probe is never -T_E_INVAL or -T_E_AGAIN. A negative pid names no Proc
+(-T_E_SRCH). Pouch's kill spells the EACCES as EPERM, as it does for every
+signal, and refuses a negative pid (a process group, or every process) with
+EPERM for every signal, 0 included, as the Linux phenotype does: the gate admits
+one process at a time, so a group target is refused rather than widened, and
+pid 0 (the caller's group in POSIX) reaches only the caller. SYS_GETPPID (132)
+returns the parent's pid; it never fails. It is 0 when the parent is kproc --
+init's case, and an orphan's adopted while init is not alive -- and for kproc
+itself, which has none. init's pid is not fixed, so Linux's `getppid() == 1`
+orphan test does not hold.
 
 ### Positioned I/O and create order (B-3b)
 

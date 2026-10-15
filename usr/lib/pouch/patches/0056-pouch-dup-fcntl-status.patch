@@ -42,31 +42,35 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
  static inline int pouch_descriptor_check(int fd)
  {
      if (fd < 0) return EBADF;
-@@ -19,4 +28,13 @@
+@@ -19,4 +28,16 @@
  {
      return result == -1 ? -ENOSYS : result;
  }
 +
 +/* O_CLOEXEC is the native descriptor flag, set after the descriptor exists:
 + * a peer thread's spawn in between sees it unflagged, which Linux's single
-+ * call rules out. */
++ * call rules out. A tagged socket has no native slot to flag: ENOSYS while it
++ * is live, EBADF once it is not. */
 +static inline long pouch_set_cloexec(int fd)
 +{
++    int e = pouch_descriptor_check(fd);
++    if (e) return -e;
 +    return pouch_descriptor_result(
 +        __syscall2(SYS_thyla_handle_flags_set, fd, POUCH_HANDLE_CLOSE_ON_EXEC));
 +}
  #endif
 --- a/src/fcntl/fcntl.c
 +++ b/src/fcntl/fcntl.c
-@@ -3,26 +3,86 @@
+@@ -3,26 +3,87 @@
  #include <errno.h>
  #include "_pouch_descriptor.h"
  
 +/* The open-file status the kernel can change after open is O_NONBLOCK only:
 + * O_APPEND lives in the server's open of the file, so F_SETFL may restate it
 + * but not flip it, and O_ASYNC, O_DIRECT and O_NOATIME have no mechanism.
-+ * Those answer EINVAL, as Linux does for a status flag a file cannot take;
-+ * every other bit is ignored, as Linux ignores it. */
++ * Those answer EINVAL where Linux would serve each on a file that takes it:
++ * a refusal rather than a silent drop. Every other bit is ignored, as Linux
++ * ignores it. */
 +static int status_flags(long word)
 +{
 +	int mode = (int)((word & POUCH_HANDLE_OMODE_MASK) >> POUCH_HANDLE_OMODE_SHIFT);
@@ -179,7 +183,7 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
  }
 --- a/src/unistd/pipe2.c
 +++ b/src/unistd/pipe2.c
-@@ -3,14 +3,36 @@
+@@ -3,14 +3,37 @@
  #include <fcntl.h>
  #include "syscall.h"
  #include "_pouch_process.h"
@@ -195,8 +199,9 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 + * out of the child, native exec closes it) and O_NONBLOCK through the native
 + * per-open-file flag. A peer thread's spawn between the two steps could see
 + * an unflagged end, which Linux's single call rules out. A failed flag set
-+ * closes both ends and fails the call. Any other flag is EINVAL (musl's
-+ * contract). */
++ * fails the call and closes both ends, except an end whose own set answered
++ * EBADF: a peer thread closed it first, and the number may already be another
++ * thread's. Any other flag is EINVAL (musl's contract). */
  int pipe2(int fd[2], int flag)
  {
  	if (flag & ~(O_CLOEXEC | O_NONBLOCK)) { errno = EINVAL; return -1; }
@@ -212,8 +217,8 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 +			r = __syscall2(SYS_thyla_set_nonblock, p[i], 1);
 +		r = pouch_descriptor_result(r);
 +		if (r < 0) {
-+			__syscall(SYS_close, p[0]);
-+			__syscall(SYS_close, p[1]);
++			if (r != -EBADF || i != 0) __syscall(SYS_close, p[0]);
++			if (r != -EBADF || i != 1) __syscall(SYS_close, p[1]);
 +			errno = (int)-r;
 +			return -1;
 +		}
@@ -232,15 +237,29 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
  
  /* SYS_open +OTRUNC (SYS_WALK_OPEN_OMODE_VALID includes OTRUNC = 0x10). */
  #define POUCH_OTRUNC  0x10u
-@@ -59,11 +60,21 @@
+@@ -45,8 +46,9 @@
+  * The bit fixes the single-writer cases above; that atomicity is ABSENT.
+  *
+  * (2) The one-time seek, kept: for an append fd the kernel cursor is advisory,
+- * and musl's __fdopen cannot set it (its fcntl(F_SETFL) is ENOSYS here), so
+- * this is what makes ftell() and the first read of an "a+" stream start at
++ * and musl's __fdopen cannot add the append bit (fcntl's F_SETFL refuses an
++ * O_APPEND change), so this is what makes ftell() and the first read of an
++ * "a+" stream start at
+  * end-of-file, as they have since 0030. Divergences from Linux, all of them:
+  *   - the initial read position of an "a+" stream is END (the BSD choice);
+  *     musl-on-Linux and glibc start it at 0;
+@@ -59,11 +61,23 @@
   * Both are applied where every open exit routes through -- the omode before
   * the three opens, the seek in one helper -- rather than per return site:
   * openat() has three successful exits (create-ok, EEXIST-fallback-open,
 - * plain-open) and a per-site fix would silently miss one. */
 + * plain-open) and a per-site fix would silently miss one. O_CLOEXEC rides the
 + * same helper: the native descriptor flag, which spawn and native exec honour.
-+ * A set that fails closes the descriptor and fails the open (a file it just
-+ * created stays created). */
++ * A set that fails fails the open with its errno and closes the descriptor,
++ * unless the set answered EBADF: a peer thread closed it first, and the
++ * number may already be another thread's. A file it just created stays
++ * created. */
  #define POUCH_OAPPEND 0x40u
  
  static int pouch_open_ret(long r, int flags)
@@ -248,7 +267,7 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 +	if (r >= 0 && (flags & O_CLOEXEC)) {
 +		long s = pouch_set_cloexec(r);
 +		if (s < 0) {
-+			__syscall(SYS_close, r);
++			if (s != -EBADF) __syscall(SYS_close, r);
 +			return __syscall_ret(s);
 +		}
 +	}
@@ -330,7 +349,7 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
  
  /* The basic idea of this implementation is to open a new FILE,
   * hack the necessary parts of the new FILE into the old one, then
-@@ -21,9 +22,11 @@
+@@ -21,9 +22,21 @@
  
  	if (!filename) {
  		if (fl&O_CLOEXEC)
@@ -339,7 +358,17 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
  		fl &= ~(O_CREAT|O_EXCL|O_CLOEXEC);
 -		if (syscall(SYS_fcntl, f->fd, F_SETFL, fl) < 0)
 +		/* pouch: SYS_fcntl is the 0xFFFF sentinel, which failed every
-+		 * call here and closed the stream; fcntl() carries F_SETFL. */
++		 * call here and closed the stream; fcntl() carries F_SETFL. The
++		 * append bit is fixed when the file is opened and F_SETFL refuses
++		 * to flip it, so a mode other than "a" restates the descriptor's
++		 * own bit (an append descriptor keeps appending) and only "a" on
++		 * a descriptor opened without O_APPEND fails. */
++		if (*mode != 'a') {
++			int cur = fcntl(f->fd, F_GETFL);
++			if (cur < 0)
++				goto fail;
++			fl = (fl & ~O_APPEND) | (cur & O_APPEND);
++		}
 +		if (fcntl(f->fd, F_SETFL, fl) < 0)
  			goto fail;
  	} else {

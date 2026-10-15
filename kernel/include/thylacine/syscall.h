@@ -887,12 +887,13 @@ enum {
     //   x0 = pid        target Proc's pid, OR the self-post sentinel
     //                    pid == 0 (P6-pouch-signals sub-chunk 13b — used
     //                    by pouch's raise() since pouch has no userspace
-    //                    getpid path at v1.0; matches POSIX kill(0, sig)
-    //                    semantics, which says "send to every process in
-    //                    the calling process's group" — Thylacine has
-    //                    no process groups, so the closest equivalent is
-    //                    "self"; the sentinel is the canonical name for
-    //                    that mapping)
+    //                    getpid path at v1.0). POSIX kill(0, sig) means
+    //                    every process in the caller's process group; the
+    //                    gate below admits one Proc at a time, so the
+    //                    sentinel reaches only the caller. A negative pid
+    //                    names no Proc (-T_E_SRCH); Pouch's kill and the
+    //                    phenotype's refuse a group target with EPERM
+    //                    before they get here
     //   x1 = name_va    user-VA pointer to the note name bytes
     //   x2 = name_len   bytes (1..NOTE_NAME_MAX-1; NUL not required —
     //                    name_len is authoritative). 0 is the PROBE
@@ -2525,8 +2526,11 @@ enum {
     SYS_HANDLE_FLAGS_SET = 130, // x0 fd, x1 flags -> 0
     SYS_HANDLE_DUP_TO = 131,    // x0 source, x1 target or floor, x2 flags -> new index
 
-    // The calling Proc's parent's pid; 0 for a parentless Proc (only kproc:
-    // an orphan reparents to init). No args, no memory, no capability, and
+    // The calling Proc's parent's pid. 0 when the parent is kproc (pid 0) --
+    // init, and an orphan adopted while init is not alive -- or there is none
+    // (kproc itself). init's pid is not fixed (a test kernel allocates Procs
+    // before it), so Linux's `getppid() == 1` orphan test does not hold here.
+    // No args, no memory, no capability, and
     // like SYS_GETPID it never fails for a Proc (operator vote 2026-10-14
     // #6, the twin Pouch's getppid needs). The value is a snapshot: the parent
     // may exit and the Proc be reparented the moment after.

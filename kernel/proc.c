@@ -932,9 +932,11 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
 // find one Proc's parent, and so the locking lives here with the rest of the
 // tree discipline rather than being re-derived per call site.
 //
-// 0 for a parentless Proc. Only kproc is genuinely parentless -- an orphan
-// reparents to init rather than to nothing -- and 0 is also what Linux reports
-// for the same case, so the sentinel needs no translation.
+// 0 for a parentless Proc, and 0 for a child of kproc, whose pid is 0: init,
+// and an orphan adopted while init is not alive (proc_reparent_children falls
+// back to kproc). Only kproc is genuinely parentless. Linux also reports 0 for
+// a parent outside the caller's pid namespace, so the value needs no
+// translation.
 int proc_parent_pid(struct Proc *p) {
     if (!p) return 0;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);

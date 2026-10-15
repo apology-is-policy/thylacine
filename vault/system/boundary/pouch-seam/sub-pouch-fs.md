@@ -40,20 +40,32 @@ the most: `openat.c` alone has three generations.
   `SYS_WALK_CREATE`; `O_TRUNC` → `+OTRUNC`; `O_APPEND` → the `OAPPEND`
   omode bit (0040) plus a post-open seek-to-END (0030); `O_CLOEXEC` → the
   native descriptor flag (FLAGS_SET, 0056), set in the same exit helper once
-  the open has its number -- a set that fails closes the descriptor and fails
-  the open. A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
+  the open has its number, so a peer thread's spawn in between sees it
+  unflagged (Linux's single call has no window). A set that fails fails the
+  open and closes the descriptor, except on EBADF: a peer thread closed it
+  first and the number may already be another thread's (round 2). The
+  helper is every successful exit's (plain, create, exists-already);
+  `tools/test-pouch-open-cloexec.py` pins each. A real dirfd is `ENOTSUP`;
+  `O_TMPFILE` is `ENOTSUP`.
 - The descriptor family (0055, 0056): `dup`, `dup2`, `dup3`, `fcntl`'s
   F_GETFD / F_SETFD / F_DUPFD / F_DUPFD_CLOEXEC / F_GETFL / F_SETFL over native
   129-131 and 123 (`docs/ERRORS.md`, "Pouch fcntl and dup"). musl's own raw
   `SYS_fcntl` callers -- the `0xFFFF` sentinel -- moved to the native calls:
   `fopen "e"` and `__fopen_rb_ca` rely on `open`'s O_CLOEXEC, `__fdopen "e"`
-  sets the flag, `freopen` with no name sets it and changes the status
-  through `fcntl` (every such call used to fail and close the stream). The
+  sets the flag (ignoring a failed set, as upstream; a tagged socket is
+  never flagged -- `pouch_set_cloexec` checks the tag), `freopen` with no
+  name sets it and changes the status through `fcntl` (every such call used
+  to fail and close the stream). The append bit is fixed at open, so a
+  `freopen(NULL, mode)` other than "a" restates the descriptor's own (an
+  append descriptor keeps appending, where Linux would stop) and "a" on a
+  descriptor without O_APPEND is EINVAL, closing the stream. The
   rest are unreachable and stay: `fchdir` / `fchown` (their own calls are
   sentinels and answer first), `socketpair` and `signalfd` (the same).
 - `fstat` → `SYS_FSTAT` (50); `stat`/`lstat`/`fstatat(path)` →
   `SYS_STAT` (88), the POUNCE walk-query; `fstatat(fd,"",AT_EMPTY_PATH)`
-  delegates to `fstat`. `lstat == stat` (no symlinks, G11).
+  delegates to `fstat`. `lstat == stat`: `fstatat` treats
+  AT_SYMLINK_NOFOLLOW as following, a premise (G11, no symlinks) the kernel
+  outgrew at D-1 -- OPEN-BUGS 2026-10-15 08:24Z owns the gap.
 - `readdir(DIR*)` refills via `SYS_READDIR` (56) and translates the 9P
   Treaddir stream into Linux `struct dirent` records.
 - The mutation family maps onto the parent-fd+leaf kernel primitives

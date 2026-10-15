@@ -2487,8 +2487,8 @@ static inline long t_handle_dup_to(long source, long target, unsigned long flags
     return x0;
 }
 
-// t_getppid -- the caller's parent's pid, 0 for a parentless Proc (SYS_GETPPID,
-// vote 2026-10-14 #6). Never fails.
+// t_getppid -- the caller's parent's pid, 0 when that parent is kproc or there
+// is none (SYS_GETPPID, vote 2026-10-14 #6). Never fails.
 #define T_SYS_GETPPID 132
 __attribute__((always_inline))
 static inline long t_getppid(void) {

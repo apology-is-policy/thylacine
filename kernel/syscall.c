@@ -6028,10 +6028,11 @@ static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
     // self-post sentinel (P6-pouch-signals sub-chunk 13b): pouch's
     // raise() has no userspace getpid path at v1.0, so it passes 0 and
     // relies on this kernel-side mapping. POSIX semantics: kill(0, sig)
-    // means "send to every process in the calling process's group" —
-    // Thylacine has no process groups at v1.0, so the closest equivalent
-    // is "send to my own Proc" and the sentinel-shaped collapse is
-    // POSIX-conforming. The sentinel is documented as ABI in
+    // means "send to every process in the calling process's group". The
+    // gate admits one Proc at a time (a group post is the tty path's
+    // notes_post_pgrp, never this call), so the sentinel reaches only the
+    // caller: a divergence for a caller whose group has other members. The
+    // sentinel is documented as ABI in
     // kernel/include/thylacine/syscall.h (SYS_POSTNOTE docblock).
     //
     // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
@@ -11431,8 +11432,9 @@ hidx_t sys_console_open_for_proc(struct Proc *p) {
     if (!cs)                           return -1;
     // The handle is R|W, so the descriptor's open-file status says so: F_GETFL
     // reads Spoor.mode, which an attach that never runs Dev.open leaves 0
-    // (OREAD). 2 is ORDWR; handle.c's status readers are the field's only
-    // readers.
+    // (OREAD). 2 is ORDWR. handle.c's status readers report it and
+    // spoor_clone copies it; no Dev or write path consults it, so it carries
+    // no authority (the handle's rights do).
     cs->mode = 2;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     if (fd < 0) {
@@ -14280,8 +14282,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // mechanism here: O_APPEND lives in the server's open of the file,
             // and the other three have none. So a request that restates
             // O_APPEND is served, and one that flips it, or asks for any of the
-            // three, is EINVAL (Linux's answer for a flag a file cannot take,
-            // and Pouch's for the same request) rather than silently dropped.
+            // three, is EINVAL (Pouch's answer for the same request) rather
+            // than silently dropped. Linux would serve each of them on a file
+            // that takes it, so this is a refusal where Linux serves, chosen
+            // over a silent drop (OPEN-BUGS O4, 2026-10-14).
             // The arg is args[2]. On a /net socket the mode lives at netd too
             // (NP-5c), so the socket arm carries it there.
             struct handle_status cur;

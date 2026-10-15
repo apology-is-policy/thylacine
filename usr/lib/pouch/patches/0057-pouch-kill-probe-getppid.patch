@@ -15,13 +15,28 @@ It is now native SYS_GETPPID (132), as getpid is native 72; it never fails.
  #define SYS_thyla_getpid       72   /* () -> pid */
  #define SYS_thyla_getuid       73   /* () -> principal_id (A-1a; NEVER fails) */
  #define SYS_thyla_getgid       74   /* () -> primary_gid  (A-1a; NEVER fails) */
-+#define SYS_thyla_getppid     132   /* () -> parent pid, 0 if none (NEVER fails) */
++#define SYS_thyla_getppid     132   /* () -> parent pid, 0 if kproc or none (NEVER fails) */
  
  /* SYS_open sentinels / omode (mirror kernel/include/thylacine/syscall.h). */
  #define POUCH_FROM_ROOT   ((long)-1)   /* SYS_WALK_OPEN_FROM_ROOT */
 --- a/src/signal/kill.c
 +++ b/src/signal/kill.c
-@@ -20,6 +20,18 @@
+@@ -3,10 +3,10 @@
+  * post gates: the kernel allows the post if (a) the caller is the
+  * target's parent, OR (b) pid == self_pid (or sentinel pid=0).
+  *
+- * pid == 0 is interpreted by the kernel as self-post (POSIX says it
+- * means "send to every process in the calling process's group"; we
+- * don't have process groups at v1.0, and a target of "all processes in
+- * my group" reduces to "my Proc itself").
++ * The gate admits one process at a time. POSIX's pid 0 (the caller's
++ * process group) is the kernel's self sentinel, so it reaches only the
++ * caller; a negative pid (a group, or every process) is refused with
++ * EPERM, as the Linux phenotype refuses it, rather than widened.
+  */
+ 
+ #include <signal.h>
+@@ -20,6 +20,22 @@
  
  int kill(pid_t pid, int sig)
  {
@@ -29,6 +44,10 @@ It is now native SYS_GETPPID (132), as getpid is native 72; it never fails.
 +	 * kernel's probe, which runs the gate below and posts nothing (operator
 +	 * vote 2026-10-14 #6). */
 +	if (sig == 0) {
++		if (pid < 0) {
++			errno = EPERM;
++			return -1;
++		}
 +		long r = __syscall(SYS_postnote, (long)pid, 0L, 0UL);
 +		if (r == -EACCES) {
 +			errno = EPERM;
@@ -40,6 +59,17 @@ It is now native SYS_GETPPID (132), as getpid is native 72; it never fails.
  	/* A SIGABRT to the caller itself is raise(SIGABRT): abort()'s death.
  	 * To another process it stays EINVAL below: no note carries it, and a
  	 * snare:* death is never another process's to cause. pid 0 is the
+@@ -61,6 +77,10 @@
+ 	 * seam reads as EIO. POSIX kill spells that refusal EPERM, so it is
+ 	 * set here rather than through the seam. ESRCH, EAGAIN and EINVAL
+ 	 * pass through as the kernel names them. */
++	if (pid < 0) {
++		errno = EPERM;
++		return -1;
++	}
+ 	unsigned long len = (unsigned long)strlen(name);
+ 	long r = __syscall(SYS_postnote, (long)pid, name, len);
+ 	if (r == -EACCES) {
 --- a/src/unistd/getppid.c
 +++ b/src/unistd/getppid.c
 @@ -1,7 +1,11 @@
