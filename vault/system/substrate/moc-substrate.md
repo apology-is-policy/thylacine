@@ -20,6 +20,8 @@ counts. Five dossiers:
   `smp-multiboot.sh`, `ci-smp-gate.sh`, `check-v80-floor.py`.
 - **[[sub-substrate-interactive]]** — LS-CI: the only harness that can
   type, and the richest failure-attribution taxonomy in the tree.
+- **[[sub-substrate-libtests]]** — the browser libraries' upstream test
+  lists, translated from CTest for the device and run there by `muster`.
 - **[[sub-substrate-builders]]** — the remote GCP builders, disposable and
   permanent.
 - **[[sub-substrate-remote-host]]** — `tools/warp-host.sh`: the remote

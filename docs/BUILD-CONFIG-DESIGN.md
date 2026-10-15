@@ -122,7 +122,7 @@ CHUNK_DUKE3D=y            # needs CHUNK_DOSBOX (lowered without it)
 CHUNK_TOMBRAIDER=y        # needs CHUNK_DOSBOX (lowered without it)
 DOSBOX_CPU_PRESET=pentium # xt|286|386|486|pentium|pentium2 -> the baked cycles=fixed N
 CHUNK_WEBKIT=n            # Boosty B-0: ICU + JavaScriptCore -> /webkit/jsc (SLOW; foraged)
-CHUNK_LIBTESTS=n          # Boosty B-3: the browser libraries' compiled tests -> /var/icu_tests (SLOW; foraged)
+CHUNK_LIBTESTS=n          # Boosty B-3: the browser libraries' compiled tests -> /var/icu_tests, /var/lib_tests (SLOW; foraged)
 CHUNK_AURORA_CFG=n
 DISK_SIZE=16M
 MKFS_SEED=                # empty = random

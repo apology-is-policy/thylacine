@@ -1,0 +1,98 @@
+From: Michal Frdlik <noreply@example.invalid>
+Subject: [PATCH] Build and register the tests against the static library
+
+libpng registers its tests only when it builds the shared library, and links
+them to png_shared. Thylacine's Pouch userland is static-only: its CMake
+platform does not support shared libraries, and CMake 4 refuses
+add_library(SHARED) there outright (CMP0164, set NEW by this project's
+policy range). So with PNG_SHARED off the tests now link png_static; with it
+on, nothing changes.
+
+---
+diff --color -ru a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -761,9 +761,16 @@
+                      "PNG_SHARED, PNG_STATIC, PNG_FRAMEWORK")
+ endif()
+ 
+-if(PNG_TESTS AND PNG_SHARED)
++if(PNG_TESTS AND (PNG_SHARED OR PNG_STATIC))
+   enable_testing()
+ 
++  # The tests link the shared library when there is one, else the static.
++  if(PNG_SHARED)
++    set(PNG_TEST_LIBRARY png_shared)
++  else()
++    set(PNG_TEST_LIBRARY png_static)
++  endif()
++
+   # Include the internal module PNGTest.cmake
+   include("${CMAKE_CURRENT_SOURCE_DIR}/scripts/cmake/PNGTest.cmake")
+ 
+@@ -782,7 +789,7 @@
+   # Basic read/write roundtrip using the sequential API.
+   add_executable(pngtest ${pngtest_sources})
+   target_link_libraries(pngtest
+-                        PRIVATE png_shared)
++                        PRIVATE ${PNG_TEST_LIBRARY})
+ 
+   png_add_test(NAME pngtest
+                COMMAND pngtest
+@@ -796,7 +803,7 @@
+   # Getter-to-setter roundtrips for various chunk types.
+   add_executable(pnggetset ${pnggetset_sources})
+   target_link_libraries(pnggetset
+-                        PRIVATE png_shared)
++                        PRIVATE ${PNG_TEST_LIBRARY})
+ 
+   png_add_test(NAME pnggetset
+                COMMAND pnggetset)
+@@ -806,7 +813,7 @@
+   # transforms, and gamma handling.
+   add_executable(pngvalid ${pngvalid_sources})
+   target_link_libraries(pngvalid
+-                        PRIVATE png_shared)
++                        PRIVATE ${PNG_TEST_LIBRARY})
+ 
+   png_add_test(NAME pngvalid-gamma-16-to-8
+                COMMAND pngvalid
+@@ -856,7 +863,7 @@
+   # by gamma type and alpha type.
+   add_executable(pngstest ${pngstest_sources})
+   target_link_libraries(pngstest
+-                        PRIVATE png_shared)
++                        PRIVATE ${PNG_TEST_LIBRARY})
+ 
+   foreach(gamma_type 1.8 linear none sRGB)
+     foreach(alpha_type none alpha)
+@@ -954,7 +961,7 @@
+   # Unknown chunk handling under various read policies.
+   add_executable(pngunknown ${pngunknown_sources})
+   target_link_libraries(pngunknown
+-                        PRIVATE png_shared)
++                        PRIVATE ${PNG_TEST_LIBRARY})
+ 
+   png_add_test(NAME pngunknown-discard
+                COMMAND pngunknown
+@@ -990,7 +997,7 @@
+   # Image read validation against the pngsuite corpus.
+   add_executable(pngimage ${pngimage_sources})
+   target_link_libraries(pngimage
+-                        PRIVATE png_shared)
++                        PRIVATE ${PNG_TEST_LIBRARY})
+ 
+   png_add_test(NAME pngimage-quick
+                COMMAND pngimage
+diff --color -ru a/scripts/cmake/PNGTest.cmake b/scripts/cmake/PNGTest.cmake
+--- a/scripts/cmake/PNGTest.cmake
++++ b/scripts/cmake/PNGTest.cmake
+@@ -36,7 +36,7 @@
+                  @ONLY)
+   add_test(NAME "${_PAT_NAME}"
+            COMMAND "${CMAKE_COMMAND}"
+-                   "-DLIBPNG=$<TARGET_FILE:png_shared>"
++                   "-DLIBPNG=$<TARGET_FILE:${PNG_TEST_LIBRARY}>"
+                    "-DTEST_COMMAND=$<TARGET_FILE:${_PAT_COMMAND}>"
+                    -P "${CMAKE_CURRENT_BINARY_DIR}/tests/${_PAT_NAME}.cmake")
+ endfunction()

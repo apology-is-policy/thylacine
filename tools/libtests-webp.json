@@ -1,0 +1,31 @@
+{
+  "comment": "libwebp registers no CTest tests (its tests/ is fuzzers; its test vectors are a separate repository driven by shell scripts). These are the checks in CTest's own JSON shape, so tools/libtests-manifest.py translates them like upstream lists. dwebp-ref is upstream's documented verification (doc/tools.md: dwebp test.webp -ppm must equal test_ref.ppm byte for byte); the rest round-trip test_ref.ppm through the lossless encoder (exact), through a PNG written and read back (libpng), and through the lossy encoder (a bitstream webpinfo accepts and dwebp decodes). @BUILD@ and @SRC@ are the build and source trees.",
+  "kind": "ctestInfo",
+  "version": { "major": 1, "minor": 0 },
+  "tests": [
+    { "name": "dwebp-ref", "command": ["@BUILD@/dwebp", "@SRC@/examples/test.webp", "-ppm", "-o", "ref.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }] },
+    { "name": "dwebp-ref-cmp", "command": ["cmake", "-E", "compare_files", "ref.ppm", "@SRC@/examples/test_ref.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["dwebp-ref"] }] },
+    { "name": "cwebp-lossless", "command": ["@BUILD@/cwebp", "-lossless", "@SRC@/examples/test_ref.ppm", "-o", "ll.webp"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }] },
+    { "name": "dwebp-lossless", "command": ["@BUILD@/dwebp", "ll.webp", "-ppm", "-o", "ll.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["cwebp-lossless"] }] },
+    { "name": "lossless-cmp", "command": ["cmake", "-E", "compare_files", "ll.ppm", "@SRC@/examples/test_ref.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["dwebp-lossless"] }] },
+    { "name": "dwebp-png", "command": ["@BUILD@/dwebp", "ll.webp", "-png", "-o", "ll.png"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["cwebp-lossless"] }] },
+    { "name": "cwebp-png", "command": ["@BUILD@/cwebp", "-lossless", "ll.png", "-o", "png.webp"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["dwebp-png"] }] },
+    { "name": "dwebp-png-back", "command": ["@BUILD@/dwebp", "png.webp", "-ppm", "-o", "png.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["cwebp-png"] }] },
+    { "name": "png-cmp", "command": ["cmake", "-E", "compare_files", "png.ppm", "@SRC@/examples/test_ref.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["dwebp-png-back"] }] },
+    { "name": "cwebp-lossy", "command": ["@BUILD@/cwebp", "-q", "75", "@SRC@/examples/test_ref.ppm", "-o", "lossy.webp"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }] },
+    { "name": "webpinfo-lossy", "command": ["@BUILD@/webpinfo", "lossy.webp"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["cwebp-lossy"] }] },
+    { "name": "dwebp-lossy", "command": ["@BUILD@/dwebp", "lossy.webp", "-ppm", "-o", "lossy.ppm"],
+      "properties": [{ "name": "WORKING_DIRECTORY", "value": "@BUILD@" }, { "name": "DEPENDS", "value": ["cwebp-lossy"] }] }
+  ]
+}

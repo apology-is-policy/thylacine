@@ -149,6 +149,30 @@ sha256     = "3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0"
 feeds      = "CHUNK_WEBKIT (ICU 78.3, cross-built static for JavaScriptCore's Intl); CHUNK_LIBTESTS (ICU's cintltst + intltest and their data)"
 forageable = "download"
 
+[cache.libpng]
+file       = "libpng-1.6.59.tar.xz"
+dir        = "build/cache"
+url        = "https://download.sourceforge.net/libpng/libpng-1.6.59.tar.xz"
+sha256     = "d80dd2a38a37f803cb9b6ac7b14bd6e74ddc3b654780a8380bdf93523fdb4389"
+feeds      = "CHUNK_LIBTESTS (libpng 1.6.59 static, with upstream's CTest list run by muster; usr/ports/libpng/patches)"
+forageable = "download"
+
+[cache.libjpeg-turbo]
+file       = "libjpeg-turbo-3.2.0.tar.gz"
+dir        = "build/cache"
+url        = "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz"
+sha256     = "6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e"
+feeds      = "CHUNK_LIBTESTS (libjpeg-turbo 3.2.0 static, with upstream's CTest list run by muster)"
+forageable = "download"
+
+[cache.libwebp]
+file       = "libwebp-1.6.0.tar.gz"
+dir        = "build/cache"
+url        = "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz"
+sha256     = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+feeds      = "CHUNK_LIBTESTS (libwebp 1.6.0 static; tools/libtests-webp.json's checks run by muster)"
+forageable = "download"
+
 # --- network: build.sh fetches it itself at build time -----------------------
 
 [network.quake]

@@ -20,6 +20,13 @@
 #   icu-cxx ICU's C++ API tests (intltest): "OK: All tests passed without error."
 #           Data errors count: intltest runs without -w, so a test that cannot
 #           find its data fails rather than warns.
+#   libpng, libjpeg-turbo, libwebp (B-3d): /var/lib_tests/bin/muster runs each
+#           library's CTest list (tools/libtests-manifest.py wrote it from
+#           upstream's registration; libwebp's from tools/libtests-webp.json),
+#           ending "muster: <lib>: N of N passed". N is read from the host's
+#           build/pouch/lib-tests/<lib>.count, the build's own count of the
+#           manifest, so a device run of fewer tests than the build listed
+#           cannot match.
 #
 # EVERY verdict is grepped in lower case (the device's grep matches a literal,
 # -i for case) and asserted in UPPER case through `tr`: the terminal echoes
@@ -37,7 +44,7 @@ if {![lc_pool_has ICUTEST]} {
           ICUTEST payload -- THYLACINE_BAKE_LIBS unset, or a pool baked before it existed)"
     exit 77
 }
-foreach need {ICUDATA MF2DATA} {
+foreach need {ICUDATA MF2DATA MUSTER PNGTESTS JPEGTESTS WEBPTESTS} {
     if {![lc_pool_has $need]} {
         puts "LS-CI FAIL: this pool holds ICU's tests but not their $need payload\
               (a partial bake; rebake with THYLACINE_BAKE_LIBS=1)"
@@ -85,6 +92,16 @@ if {[lib_leg icuc /var/icu_tests/bin/cintltst /tmp/icu-c.log "all tests passed s
 }
 if {[lib_leg icux /var/icu_tests/bin/intltest /tmp/icu-cxx.log "all tests passed without error"]} {
     lc_pass "ls-libs(icu-cxx): intltest exit 0, all tests passed"
+}
+# The codecs' lists: each manifest's count as the build wrote it.
+foreach lib {libpng libjpeg-turbo libwebp} tag {png jpg webp} {
+    set cf [file join $::lc_repo build pouch lib-tests $lib.count]
+    if {[catch {set fh [open $cf r]; set n [string trim [read $fh]]; close $fh}] || ![string is integer -strict $n] || $n < 1} {
+        lc_fail "no test count for $lib at $cf (the bake and this tree disagree; rebake)"
+    }
+    if {[lib_leg $tag "/var/lib_tests/bin/muster /var/lib_tests/$lib.manifest" /tmp/muster-$lib.log "$lib: $n of $n passed"]} {
+        lc_pass "ls-libs($lib): muster exit 0, $n of $n passed"
+    }
 }
 if {[llength $::lib_red]} {
     lc_fail "[join $::lib_red {; }] (each log's tail is above)"

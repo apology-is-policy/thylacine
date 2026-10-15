@@ -7,7 +7,7 @@
 # section 5.
 #
 #   forage.sh                 report the status of every input
-#   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|webkit|icu|
+#   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|webkit|icu|codecs|
 #                             alpine|busybox|static-curl|static-git|quake|duke3d|tombraider|
 #                             clade|clade-gl
 #   forage.sh all             gather everything that can be gathered automatically
@@ -281,6 +281,7 @@ target_sections() {
         mesa)     echo "fork.mesa" ;;
         webkit)   echo "source.webkit cache.icu4c" ;;
         icu)      echo "cache.icu4c" ;;
+        codecs)   echo "cache.libpng cache.libjpeg-turbo cache.libwebp" ;;
         alpine)   echo "cache.alpine cache.busybox" ;;
         busybox)  echo "cache.busybox" ;;
         static-curl) echo "cache.static-curl" ;;
