@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# tools/test-loom-client.sh -- the native Loom client cores: the C cores in
-# libt's thyla/loom_client/ and their Rust twins in usr/lib/loom-client. Their
-# HOST tests, and the proof that the C cores build and link freestanding the way
-# libt builds them (docs/ASYNC-SERVICE-ABI.md, "Native C client storage" and
-# "Native Rust client cores").
+# tools/test-loom-client.sh -- the native Loom client: the C cores and the C
+# adapter in libt's thyla/loom_client/, and their Rust twins in
+# usr/lib/loom-client. Their HOST tests (the adapter's against a simulated
+# kernel), and the proof that the C cores and adapter build and link
+# freestanding the way libt builds them (docs/ASYNC-SERVICE-ABI.md, "Native C
+# client storage", "Native Rust client cores" and "Native adapter").
 #
 # Four stages; any failure fails the script.
 #   sanitized     every test, cores and test at -O0 under ASan + UBSan, with
@@ -18,7 +19,9 @@
 #                 address of every public function. No object may import a
 #                 mem* routine: libt has none, and -O2 inlines every aggregate
 #                 copy. The control builds the same objects at -O0, where clang
-#                 calls memcpy, and requires that link to fail on it.
+#                 calls memcpy, and requires that link to fail on it. libt's
+#                 kernel call table (native_kernel.c) makes system calls, so it
+#                 is built only here.
 #   rust          the Rust twins' tests with cargo, in the dev profile and in
 #                 the release profile the guest builds (opt-level "z", overflow
 #                 checks on). A run passes only when every #[test] the crate
@@ -51,7 +54,7 @@ done
 SRC="$ROOT/usr/lib/libt/src/loom_client"
 TESTS="$ROOT/usr/lib/libt/tests/loom_client"
 INC="$ROOT/usr/lib/libt/include"
-CORES="fixed_requests lease_ledger owned_mapping paired_cq request_book retirement_executor ring_payload"
+CORES="adapter fixed_requests lease_ledger owned_mapping paired_cq request_book retirement_executor ring_payload"
 # test name -> the PASS line it prints
 PASS_LINES=(
     "test_lease_ledger:C lease ledger ownership and malformed-vector checks PASS"
@@ -65,7 +68,15 @@ PASS_LINES=(
     "test_retirement_executor:C eight retirement owner scenarios PASS"
     "test_retirement_timers:C six retirement timer scenarios PASS"
     "test_fatal:C seven fatal invariant scenarios PASS"
+    "test_adapter:C fifty-five native adapter scenarios PASS"
 )
+# test name -> the test sources it links beside its own
+extra_sources() {
+    case $1 in
+        test_adapter) extra=("$TESTS/sim_kernel.c") ;;
+        *) extra=() ;;
+    esac
+}
 SDK=()
 if command -v xcrun >/dev/null 2>&1; then SDK=(-isysroot "$(xcrun --show-sdk-path)"); fi
 WARN=(-Wall -Wextra -Werror)
@@ -84,11 +95,12 @@ run_profile() { # run_profile <name> <core flags...> -- <test flags...>
     done
     "$CC" "${SDK[@]}" "${WARN[@]}" -std=c11 "${test_flags[@]}" -I"$INC" \
         -c "$TESTS/host_fatal.c" -o "$dir/host_fatal.o"
-    local entry t want
+    local entry t want extra
     for entry in "${PASS_LINES[@]}"; do
         t=${entry%%:*}; want=${entry#*:}
+        extra_sources "$t"
         "$CC" "${SDK[@]}" "${WARN[@]}" -std=c11 "${test_flags[@]}" -DT_REQUEST_TEST -I"$INC" \
-            "$TESTS/$t.c" "${objs[@]}" "$dir/host_fatal.o" -lpthread -o "$dir/$t"
+            "$TESTS/$t.c" ${extra[@]+"${extra[@]}"} "${objs[@]}" "$dir/host_fatal.o" -lpthread -o "$dir/$t"
         if ! "$dir/$t" > "$dir/$t.log" 2>&1; then
             cat "$dir/$t.log"; echo "test-loom-client: $name $t FAILED"; exit 1
         fi
@@ -130,7 +142,7 @@ TARGET=(--target=aarch64-none-elf -march=armv8-a -ffreestanding -fno-builtin -fn
         -Wmissing-prototypes -Wno-unused-parameter -Wno-unused-command-line-argument
         -Werror -std=c99 -O2 -g)
 fs_objs=()
-for c in $CORES fatal; do
+for c in $CORES native_kernel fatal; do
     "$CC" "${TARGET[@]}" -I"$INC" -c "$SRC/$c.c" -o "$FS/$c.o"
     fs_objs+=("$FS/$c.o")
 done
@@ -144,8 +156,9 @@ publics=$(cat "$INC"/thyla/loom_client/*.h | tr -d '\n' | tr ';' '\n' \
     | /usr/bin/grep -oE '(^|[ *])t_[a-z_]+\(' | /usr/bin/grep -oE 't_[a-z_]+' \
     | /usr/bin/grep -vxE 't_loom_client_fatal|t_request_exhausted_test' | sort -u)
 nfn=$(printf '%s\n' "$publics" | /usr/bin/grep -c .)
-[ "$nfn" -ge 60 ] || { echo "test-loom-client: found only $nfn public functions"; exit 1; }
+[ "$nfn" -ge 120 ] || { echo "test-loom-client: found only $nfn public functions"; exit 1; }
 {
+    echo '#include <thyla/loom_client/adapter.h>'
     echo '#include <thyla/loom_client/owned_mapping.h>'
     echo '#include <thyla/loom_client/retirement_executor.h>'
     echo 'int main(void);'
@@ -162,7 +175,7 @@ echo "  freestanding: $nfn public functions link under --no-undefined"
 # Control: the same build at -O0 must import memcpy and fail the same link, or
 # neither check above could have failed.
 O0="$OUT/freestanding-O0"; mkdir -p "$O0"; o0_objs=()
-for c in $CORES fatal; do
+for c in $CORES native_kernel fatal; do
     "$CC" "${TARGET[@]}" -O0 -I"$INC" -c "$SRC/$c.c" -o "$O0/$c.o"; o0_objs+=("$O0/$c.o")
 done
 "$NM" -u "${o0_objs[@]}" | /usr/bin/grep -qE ' memcpy$' || {

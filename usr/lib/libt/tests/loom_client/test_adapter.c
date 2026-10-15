@@ -581,7 +581,6 @@ static void retire_waits_until_the_kernel_retires_every_scope(void) {
     finish(&f);
 }
 
-/* ---- PART 2 ---- */
 static void turns(struct t_loom_ring *r, int n) {
     for (int i = 0; i < n; ++i) turn_until(r, t_loom_now(r) + MS);
 }
@@ -910,4 +909,409 @@ static void a_scope_dropped_after_the_ring_closed_under_never_closes_the_number(
     finish(&f);
 }
 
-/* ---- PART 3 ---- */
+static void closed_once(const struct sim *s) { assert(s->nclosed == 1 && s->closed_fds[0] == 7); }
+static void a_ring_whose_register_finds_it_closed_never_reports_retired(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    t_loom_scope_drop(connect_ok(f.r, t));
+    t_loom_retire(f.r);
+    sim_close_under(f.sim);
+    /* The QUERY and the REAP of the dropped scope are both answered -EBADF. A
+     * deadline already passed keeps the turn from polling, which would learn of
+     * the close by POLLNVAL instead. */
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r)) == SIM_ECANCELED);
+    assert(!t_loom_retired(f.r)); /* a lost ring never retires */
+    drop_all(&f, NULL, NULL, t);
+    closed_once(f.sim); /* only the other thread's close */
+    finish(&f);
+}
+static void a_target_refused_for_its_registry_keeps_the_ring(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = NULL;
+    assert(t_loom_target(f.r, 99, "clip", 4, &t) == SIM_EBADF && !t); /* the registry's -EBADF */
+    t = target_ok(f.r, "clip");                                         /* the ring still lives */
+    drop_all(&f, NULL, NULL, t);
+    finish(&f);
+}
+static void a_target_registered_after_the_ring_closed_under_never_closes_the_number(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    sim_close_under(f.sim);
+    struct t_loom_target *t = NULL;
+    assert(t_loom_target(f.r, 5, "clip", 4, &t) == SIM_ECANCELED && !t); /* the ring's -EBADF */
+    t_loom_ring_drop(f.r);
+    closed_once(f.sim);
+    finish(&f);
+}
+static void a_close_learnt_by_the_turns_enter_is_reported_as_a_close(void) {
+    size_t b[] = { 4096, 4096 };
+    struct fx f = ring_of(8, b, 2);
+    file(f.sim, "f", "data");
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    opened(&f, "f", &t, &s, &fid);
+    f.sim->hold = 1;
+    struct t_loom_op *first = read_op(fid, range(0, 0, 4), 0, 0);
+    f.sim->has_enter_limit = 1;
+    f.sim->enter_limit = 0;
+    struct t_loom_op *second = read_op(fid, range(1, 0, 4), 0, 0);
+    /* The first READ's cancellation waits in the CQ; the second is queued, so
+     * the turn ENTERs before it routes. */
+    sim_close_under(f.sim);
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_ECANCELED); /* a closed ring, not a failed one */
+    t_loom_op_drop(first);
+    t_loom_op_drop(second);
+    drop_all(&f, fid, s, t);
+    closed_once(f.sim);
+    finish(&f);
+}
+static void a_held_refusal_claims_no_further_sqe(void) {
+    size_t b[] = { 4096, 4096 };
+    struct fx f = ring_of(8, b, 2);
+    file(f.sim, "f", "data");
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    opened(&f, "f", &t, &s, &fid);
+    f.sim->has_enter_limit = 1;
+    f.sim->enter_limit = 0;
+    a_dropped_read(fid);
+    t_loom_op_drop(read_op(fid, range(1, 0, 4), 0, 0));
+    uint32_t head = sim_hdr_word(f.sim, 0);
+    t_loom_retire(f.r);
+    f.sim->hold_rejections = 1;
+    f.sim->has_enter_limit = 0;
+    turns(f.r, 3);
+    /* frontend.c stops claiming while a refusal waits for CQ room. */
+    assert(sim_hdr_word(f.sim, 0) - head == 1); /* one READ claimed and held */
+    sim_release_rejections(f.sim);
+    turn_until_retired(f.r);
+    assert(sim_hdr_word(f.sim, 0) - head == 2); /* the second claimed after it */
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+static void a_connect_after_the_ring_closed_under_answers_a_close(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    sim_close_under(f.sim);
+    /* Its reservation is the first REGISTER to find the number dead. */
+    struct t_loom_op *op = NULL;
+    assert(t_loom_connect(t, 0, 0, &op) == SIM_ECANCELED && !op);
+    drop_all(&f, NULL, NULL, t);
+    closed_once(f.sim);
+    finish(&f);
+}
+static void a_pool_made_after_the_ring_closed_under_answers_a_close(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    sim_close_under(f.sim);
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    struct t_loom_pool *p = NULL;
+    assert(t_loom_pool(f.r, m, 1, &p) == SIM_ECANCELED && !p);
+    t_loom_ring_drop(f.r);
+    closed_once(f.sim);
+    finish(&f);
+}
+/* A fid of `name` opened, a pool of one 64-byte member, and the stream's first
+ * payload. */
+static struct t_loom_op *first_payload(struct fx *f, const char *name, int multishot, struct t_loom_pool **p,
+                                       struct t_loom_target **t, struct t_loom_scope **s, struct t_loom_fid **fid,
+                                       struct t_ring_payload **pl) {
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    *p = pool_ok(f->r, m, 1);
+    opened(f, name, t, s, fid);
+    struct t_loom_op *stream = stream_op(*fid, *p, multishot);
+    int32_t end;
+    assert(next_shot(f->r, stream, pl, &end) == 1);
+    return stream;
+}
+static void payload_is(const struct t_ring_payload *pl, const char *want) {
+    size_t len = 0;
+    const unsigned char *bytes = t_loom_payload_bytes(pl, &len);
+    assert(len == strlen(want) && !memcmp(bytes, want, len));
+}
+static void a_payload_dropped_after_the_ring_closed_under_closes_the_ring(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "kept");
+    struct t_loom_pool *p;
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    struct t_ring_payload *pl;
+    struct t_loom_op *stream = first_payload(&f, "f", 0, &p, &t, &s, &fid, &pl);
+    sim_close_under(f.sim);
+    /* Its RETURN is the first REGISTER to find the number dead; a deadline
+     * already passed keeps the turn from polling. */
+    t_loom_payload_drop(pl);
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r)) == SIM_ECANCELED);
+    t_loom_op_drop(stream);
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    closed_once(f.sim);
+    finish(&f);
+}
+/* A shot CQE replayed after retire (an I-29 breach) names a member a live
+ * payload still reads: the ring fails, and the member is never RETURNed. */
+static void a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "burst", "");
+    sim_shot(f.sim, "burst", "kept", 4);
+    sim_shot(f.sim, "burst", "next", 4);
+    struct t_loom_pool *p;
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    struct t_ring_payload *pl;
+    /* One member: the second shot waits for it, so the stream stays routed. */
+    struct t_loom_op *stream = first_payload(&f, "burst", 1, &p, &t, &s, &fid, &pl);
+    /* Replayed before retire aborts the scope, so it is routed ahead of the
+     * stream's cancel terminal, while the route still stands. */
+    sim_replay_last_shot(f.sim);
+    t_loom_retire(f.r);
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_EIO);
+    assert(f.sim->returns == 0); /* the held member was not returned */
+    payload_is(pl, "kept");
+    t_loom_payload_drop(pl);
+    t_loom_op_drop(stream);
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+/* Set the first live slot of `kind` (a fid: the one of file "f") to `state`;
+ * answers its old state. */
+static uint32_t set_state(struct sim *s, unsigned kind, uint32_t state) {
+    for (size_t i = 0; i < 64; ++i) {
+        struct sim_slot *x = &s->slots[i];
+        if (!x->used || x->kind != kind) continue;
+        if (kind == SIM_FID && !(x->has_name && x->name_len == 1 && x->name[0] == 'f')) continue;
+        uint32_t was = x->state;
+        x->state = state;
+        return was;
+    }
+    assert(0);
+    return 0;
+}
+/* The kernel checks an operation's scope before its FID (loom_fid_borrow): a
+ * scope that is not READY answers -ECANCELED, then a FID that is not READY
+ * -ENOENT. The states are set in the simulated kernel directly: no adapter
+ * handle can reach a FID in that state. */
+static void an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    uint32_t was = set_state(f.sim, SIM_FID, SIM_ABORTING);
+    assert(open_rc(f.r, fid, 0) == SIM_ENOENT);
+    set_state(f.sim, SIM_FID, was);
+    was = set_state(f.sim, SIM_SCOPE, SIM_ABORTING);
+    assert(open_rc(f.r, fid, 0) == SIM_ECANCELED);
+    set_state(f.sim, SIM_SCOPE, was);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+static struct t_loom_op *walk_fid_op(struct t_loom_fid *fid, const char *name) {
+    struct t_loom_op *op = NULL;
+    assert(t_loom_walk_fid(fid, name, strlen(name), 0, 0, &op) == 0 && op);
+    return op;
+}
+/* A WALK from a FID other than the root: an empty name clones that FID, and a
+ * name below a file answers -ENOTDIR. */
+static void a_walk_from_a_file_fid_clones_it_or_answers_enotdir(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "bytes");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    struct res o;
+    assert(run(f.r, K_WALK, walk_fid_op(fid, ""), &o) >= 0 && o.fid);
+    struct t_loom_fid *clone = o.fid;
+    assert(open_rc(f.r, clone, 0) == 0);
+    read_is(f.r, clone, range(0, 0, 5), "bytes");
+    assert(run(f.r, K_WALK, walk_fid_op(fid, "g"), &o) == SIM_ENOTDIR && !o.fid);
+    t_loom_fid_drop(clone);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+/* A RETURN the kernel refuses hands the payload back whole: its bytes stay
+ * readable, and a later return succeeds. */
+static void a_refused_return_hands_the_payload_back(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "kept");
+    struct t_loom_pool *p;
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    struct t_ring_payload *pl;
+    struct t_loom_op *stream = first_payload(&f, "f", 0, &p, &t, &s, &fid, &pl);
+    f.sim->has_refuse_return = 1;
+    f.sim->refuse_return = SIM_EINVAL;
+    assert(t_loom_payload_return(pl) == SIM_EINVAL);
+    payload_is(pl, "kept");
+    assert(f.sim->returns == 0);
+    assert(t_loom_payload_return(pl) == 0);
+    assert(f.sim->returns == 1);
+    t_loom_op_drop(stream);
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+/* An ENTER refusal that is not a close (-EACCES: this image is not the ring's
+ * creator) would repeat on every turn, so the ring fails and closes its own
+ * descriptor. */
+static void an_enter_refusal_that_is_not_a_close_fails_the_ring(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    f.sim->has_enter_errno = 1;
+    f.sim->enter_errno = SIM_EACCES;
+    struct t_loom_op *op;
+    assert(t_loom_connect(t, 0, 0, &op) == 0);
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_EIO);
+    struct res o = { 0 };
+    assert(wait_op(f.r, K_CONNECT, op, &o) == SIM_EIO);
+    closed_once(f.sim); /* a failed ring is closed */
+    t_loom_op_drop(op);
+    drop_all(&f, NULL, NULL, t);
+    finish(&f);
+}
+/* poll's -EINTR is a spurious wake: the turn ends early, and the next one waits
+ * out its deadline. */
+static void a_poll_interrupted_by_a_note_is_a_spurious_wake(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    uint64_t deadline = t_loom_now(f.r) + 3 * MS;
+    f.sim->has_poll_answer = 1;
+    f.sim->poll_answer = SIM_EINTR;
+    assert(t_loom_turn(f.r, 1, deadline) == 0);
+    assert(t_loom_now(f.r) < deadline); /* the interrupted wait returned at once */
+    assert(t_loom_turn(f.r, 1, deadline) == 0);
+    assert(t_loom_now(f.r) >= deadline);
+    assert(f.sim->npolls == 2);
+    t_loom_ring_drop(f.r);
+    finish(&f);
+}
+/* POLLERR names a Loom object the kernel no longer recognises: the ring fails. */
+static void a_poll_error_fails_the_ring(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    f.sim->has_poll_answer = 1;
+    f.sim->poll_answer = POLLERR;
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r) + MS) == SIM_EIO);
+    assert(t_loom_turn(f.r, 0, 0) == SIM_EIO); /* and stays failed */
+    closed_once(f.sim);                         /* a failed ring is closed */
+    t_loom_ring_drop(f.r);
+    finish(&f);
+}
+/* An explicit close with handles still alive: every later use answers a close,
+ * a held payload keeps its bytes, and the descriptor is closed once. */
+static void an_explicit_close_with_live_handles_cancels_their_use(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "kept");
+    struct t_loom_pool *p;
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    struct t_ring_payload *pl;
+    struct t_loom_op *stream = first_payload(&f, "f", 0, &p, &t, &s, &fid, &pl);
+    t_loom_close(f.r);
+    closed_once(f.sim);
+    struct t_loom_op *op = NULL;
+    assert(t_loom_walk_fid(fid, "", 0, 0, 0, &op) == SIM_ECANCELED && !op);
+    assert(t_loom_walk(s, "f", 1, 0, 0, &op) == SIM_ECANCELED && !op);
+    assert(t_loom_turn(f.r, 0, 0) == SIM_ECANCELED);
+    payload_is(pl, "kept");
+    t_loom_payload_drop(pl);
+    t_loom_op_drop(stream);
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    closed_once(f.sim); /* closed once */
+    finish(&f);
+}
+/* A pool's REAP that finds the descriptor gone: the adapter forgets the number
+ * and reports a close. */
+static void a_pool_dropped_after_the_ring_closed_under_never_closes_the_number(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    t_loom_pool_drop(pool_ok(f.r, m, 1));
+    sim_close_under(f.sim);
+    assert(t_loom_turn(f.r, 1, t_loom_now(f.r)) == SIM_ECANCELED);
+    t_loom_ring_drop(f.r);
+    closed_once(f.sim); /* only the other thread's close */
+    finish(&f);
+}
+
+int main(void) {
+    static void (*const tests[])(void) = {
+        setup_registers_every_buffer_and_drop_detaches_every_region,
+        a_refused_attach_detaches_what_was_attached,
+        connect_walk_open_write_then_read_round_trips,
+        a_failed_connect_reaps_its_scope,
+        each_walk_name_is_read_inside_the_enter_that_consumes_it,
+        queued_walks_keep_their_own_name_cells,
+        a_multishot_stream_runs_on_out_of_order_returns,
+        a_deadline_ends_the_operation_and_aborts_its_scope,
+        poll_rounds_the_time_left_up_to_a_whole_millisecond,
+        dropping_an_operation_aborts_its_scope_and_settles_its_entry,
+        a_full_cq_defers_completions_and_loses_none,
+        a_short_enter_leaves_the_rest_queued_for_a_later_turn,
+        a_full_sq_answers_enospc,
+        a_rejected_sqe_ends_its_operation_with_the_kernels_errno,
+        a_dropped_sqe_ends_the_process,
+        a_forged_completion_fails_the_ring,
+        closing_with_leases_held_keeps_their_bytes_until_they_drop,
+        an_enter_that_finds_the_descriptor_closed_forgets_it,
+        an_enter_that_races_the_close_forgets_the_descriptor,
+        a_poll_that_finds_the_descriptor_closed_forgets_it,
+        a_hangup_while_polling_forgets_the_descriptor,
+        retire_waits_until_the_kernel_retires_every_scope,
+        a_dropped_fid_is_clunked_then_reaped,
+        a_dropped_scope_is_reaped_after_its_fids_without_clunking_them,
+        a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk,
+        a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked,
+        an_open_dropped_in_flight_aborts_its_scope,
+        an_explicit_scope_abort_ends_its_operations_once,
+        a_target_dropped_under_its_connect_is_reaped_after_it,
+        an_exhausted_slot_table_reaps_before_it_refuses,
+        an_operation_held_across_retirement_keeps_its_terminal,
+        retirement_waits_for_terminals_posted_after_the_scope_retires,
+        an_sqe_not_yet_entered_holds_retirement_back,
+        a_terminal_posted_but_not_yet_routed_holds_retirement_back,
+        an_enter_refusal_not_yet_posted_holds_retirement_back,
+        a_stream_dropped_before_its_end_returns_the_shots_still_arriving,
+        a_late_shot_after_the_ring_closed_under_forgets_the_descriptor,
+        a_scope_dropped_after_the_ring_closed_under_never_closes_the_number,
+        a_ring_whose_register_finds_it_closed_never_reports_retired,
+        a_target_refused_for_its_registry_keeps_the_ring,
+        a_target_registered_after_the_ring_closed_under_never_closes_the_number,
+        a_close_learnt_by_the_turns_enter_is_reported_as_a_close,
+        a_held_refusal_claims_no_further_sqe,
+        a_connect_after_the_ring_closed_under_answers_a_close,
+        a_pool_made_after_the_ring_closed_under_answers_a_close,
+        a_payload_dropped_after_the_ring_closed_under_closes_the_ring,
+        a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return,
+        an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled,
+        a_walk_from_a_file_fid_clones_it_or_answers_enotdir,
+        a_refused_return_hands_the_payload_back,
+        an_enter_refusal_that_is_not_a_close_fails_the_ring,
+        a_poll_interrupted_by_a_note_is_a_spurious_wake,
+        a_poll_error_fails_the_ring,
+        an_explicit_close_with_live_handles_cancels_their_use,
+        a_pool_dropped_after_the_ring_closed_under_never_closes_the_number,
+    };
+    _Static_assert(sizeof(tests) / sizeof(tests[0]) == 55, "every scenario of tests/native.rs");
+    for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) tests[i]();
+    puts("C fifty-five native adapter scenarios PASS");
+    return 0;
+}
