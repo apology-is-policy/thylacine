@@ -275,8 +275,9 @@ fn a_full_cq_defers_completions_and_loses_none() {
 
 #[test]
 fn backlog_counts_what_the_kernel_posted_and_no_turn_routed() {
-    // The ENTER that submits the stream lets the kernel post: four shots fill
-    // the CQ and the rest wait. Only a turn routes them, and its kick lets the
+    // The simulated server runs only when the adapter polls, so the stream's
+    // ENTER posts nothing. One server step posts four shots, which fill the CQ,
+    // and defers the rest. Only a turn routes them, and its kick lets the
     // kernel post again.
     let sim = Sim::new();
     file(&sim, "burst", b"");
@@ -293,6 +294,8 @@ fn backlog_counts_what_the_kernel_posted_and_no_turn_routed() {
     run(&r, fid.open(0, None).unwrap()).unwrap();
     assert_eq!(r.backlog(), 0);
     let mut stream = fid.stream(&pool, 0, 64, true, None).unwrap();
+    assert_eq!(r.backlog(), 0, "nothing posted before the server runs");
+    sim.s().step();
     assert_eq!(r.backlog(), 4, "the CQ is full");
     assert_eq!(r.turn(None).unwrap(), 4, "a turn routes all four");
     assert_eq!(r.backlog(), 4, "its kick posted the next four");

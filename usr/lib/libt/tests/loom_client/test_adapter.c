@@ -399,8 +399,9 @@ static void a_full_cq_defers_completions_and_loses_none(void) {
     finish(&f);
 }
 static void backlog_counts_what_the_kernel_posted_and_no_turn_routed(void) {
-    /* The ENTER that submits the stream lets the kernel post: four shots fill
-     * the CQ and the rest wait. Only a turn routes them, and its kick lets the
+    /* The simulated server runs only when the adapter polls, so the stream's
+     * ENTER posts nothing. One server step posts four shots, which fill the CQ,
+     * and defers the rest. Only a turn routes them, and its kick lets the
      * kernel post again. */
     size_t b[] = { 4096 };
     struct fx f = ring_of(2, b, 1);
@@ -419,6 +420,8 @@ static void backlog_counts_what_the_kernel_posted_and_no_turn_routed(void) {
     opened(&f, "burst", &t, &s, &fid);
     assert(t_loom_backlog(f.r) == 0);
     struct t_loom_op *stream = stream_op(fid, p, 1);
+    assert(t_loom_backlog(f.r) == 0);
+    sim_step(f.sim);
     assert(t_loom_backlog(f.r) == 4);
     assert(t_loom_turn(f.r, 0, 0) == 4);
     assert(t_loom_backlog(f.r) == 4);
