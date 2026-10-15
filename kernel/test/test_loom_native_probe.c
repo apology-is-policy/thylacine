@@ -10,6 +10,7 @@
 // the run made must be freed, and the registry must be destroyed once the test
 // lets go of it.
 #include "test.h"
+#include <thylacine/dev.h>
 #include <thylacine/devramfs.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/exec.h>
