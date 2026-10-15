@@ -4842,6 +4842,7 @@ void test_stalk_open_create_exists_before_access(void) {
     s64 x_kid  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, excl, 0644);
     s64 x_new  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/new", 7, excl, 0644);
     s64 m_nox  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/nox/sekret", 11, 0, mk);
+    s64 p_lnk  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/lnk", 7, 1, 0644);
     u64 live_after = spoor_total_allocated() - spoor_total_freed();
     int calls = g_fix_create_calls;
     ocp_teardown(p);
@@ -4855,6 +4856,8 @@ void test_stalk_open_create_exists_before_access(void) {
     TEST_EXPECT_EQ(x_new,  -(s64)T_E_ACCES, "CONTROL: an exclusive create of an absent name is EACCES");
     TEST_EXPECT_EQ(m_nox,  -(s64)T_E_ACCES,
                    "no search right, no disclosure: a held name in a no-X dir is EACCES");
+    TEST_EXPECT_EQ(p_lnk,  -(s64)T_E_NOENT,
+                   "a plain O_CREAT through a dangling link is NOENT, never EEXIST");
     TEST_EXPECT_EQ(calls, 0, "no leg reached the Dev's create");
     TEST_EXPECT_EQ(live_after, live_before, "the existence probe leaks no Spoor");
 }

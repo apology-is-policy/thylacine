@@ -1064,6 +1064,11 @@ void test_cons_console_open(void) {
     TEST_EXPECT_EQ(h.rights, (rights_t)(RIGHT_READ | RIGHT_WRITE),
         "console handle rights are R|W");
     handle_put(&h);
+    // F_GETFL reads the open-file status, and the session's stdout must not
+    // read as O_RDONLY: the console is opened ORDWR, like its rights.
+    struct handle_status st;
+    TEST_ASSERT(handle_get_status(p, fd, &st) == 0, "console status readable");
+    TEST_EXPECT_EQ((u64)(st.omode & 3u), (u64)2, "console status reads ORDWR");
 
     // Seed the RX ring + read through the handle (the login-reads-the-tty path).
     cons_test_reset();

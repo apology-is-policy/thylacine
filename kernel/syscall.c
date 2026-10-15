@@ -4519,7 +4519,10 @@ s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
                                                        SYS_WALK_OPEN_OTRUNC),
                                     perm);
         if (rc >= 0 || rc != -(s64)T_E_EXIST) break;
-        if (attempt >= 1) { rc = -(s64)T_E_EXIST; break; }
+        // Twice "not there" from the open and "exists" from the create: the
+        // name is a link to nothing (a create never follows one). A plain
+        // O_CREAT never answers EEXIST, so the answer is the open's.
+        if (attempt >= 1) { rc = -(s64)T_E_NOENT; break; }
     }
     spoor_clunk(start);
     return rc;
@@ -11388,6 +11391,11 @@ hidx_t sys_console_open_for_proc(struct Proc *p) {
     if (!p)                            return -1;
     struct Spoor *cs = devcons.attach(NULL);   // dev_simple_attach -> ref=1
     if (!cs)                           return -1;
+    // The handle is R|W, so the descriptor's open-file status says so: F_GETFL
+    // reads Spoor.mode, which an attach that never runs Dev.open leaves 0
+    // (OREAD). 2 is ORDWR; handle.c's status readers are the field's only
+    // readers.
+    cs->mode = 2;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     if (fd < 0) {
         spoor_clunk(cs);
@@ -14156,11 +14164,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (vivarium_fcntl_decide(args[1], args[2], &op, &cloexec, &min_fd)
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // an unserved cmd; see vivarium.h
-        // Bound BEFORE narrowing to hidx_t, so a huge or negative-as-int fd
-        // cannot wrap into a valid-looking index. The callees range-check too;
-        // this exists so the conversion itself is well-defined.
-        if (args[0] >= (u64)PROC_HANDLE_MAX)         return -(s64)T_E_BADF;
-        hidx_t fd = (hidx_t)args[0];
+        // Linux declares the fd an unsigned int: only the low 32 bits name it,
+        // as for cmd and the F_DUPFD minimum. Bound BEFORE narrowing to hidx_t,
+        // so a negative-as-int fd cannot wrap into a valid-looking index.
+        u32 fd32 = (u32)args[0];
+        if (fd32 >= (u32)PROC_HANDLE_MAX)            return -(s64)T_E_BADF;
+        hidx_t fd = (hidx_t)fd32;
 
         switch (op) {
         case VIV_FCNTL_GETFD: {
@@ -14228,11 +14237,22 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             return (s64)fl;
         }
         case VIV_FCNTL_SETFL: {
-            // Serve O_NONBLOCK; ignore O_APPEND/O_ASYNC/O_DIRECT and the access
-            // mode, exactly as Linux's F_SETFL does (it silently drops every
-            // non-status bit rather than erroring). The arg is args[2]. On a
-            // /net socket the mode lives at netd too (NP-5c), so the socket arm
-            // carries it there.
+            // Linux's F_SETFL changes O_APPEND, O_ASYNC, O_DIRECT, O_NOATIME and
+            // O_NONBLOCK, and drops every other bit. Only O_NONBLOCK has a
+            // mechanism here: O_APPEND lives in the server's open of the file,
+            // and the other three have none. So a request that restates
+            // O_APPEND is served, and one that flips it, or asks for any of the
+            // three, is EINVAL (Linux's answer for a flag a file cannot take,
+            // and Pouch's for the same request) rather than silently dropped.
+            // The arg is args[2]. On a /net socket the mode lives at netd too
+            // (NP-5c), so the socket arm carries it there.
+            struct handle_status cur;
+            if (handle_get_status(p, fd, &cur) != 0)  return -(s64)T_E_BADF;
+            bool was_append = (cur.omode & SYS_WALK_OPEN_OAPPEND) != 0;
+            bool want_append = (args[2] & (u64)VIV_O_APPEND) != 0;
+            if (was_append != want_append ||
+                (args[2] & (u64)(VIV_O_ASYNC | VIV_O_DIRECT | VIV_O_NOATIME)))
+                return -(s64)T_E_INVAL;
             bool on = (args[2] & (u64)VIV_O_NONBLOCK) != 0;
             struct viv_socktab *ntab =
                 __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);

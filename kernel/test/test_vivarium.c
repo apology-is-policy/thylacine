@@ -4316,14 +4316,26 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
     s64 g2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
     s64 gw  = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
     s64 bad = viv_fcntl_for_test(p, 5, VIV_F_SETFL, VIV_O_NONBLOCK);   // fd 5 is closed
+    // The fd is an unsigned int to Linux: a stale upper half still names rd.
+    s64 ghi = viv_fcntl_for_test(p, (1ull << 32) + (u64)rd, VIV_F_GETFL, 0);
+    // Flags with no mechanism are refused, never dropped; an unrelated bit
+    // (O_LARGEFILE, which musl ORs into every F_SETFL) still is dropped.
+    s64 son   = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_APPEND);
+    s64 sasy  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_ASYNC);
+    s64 sdir  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_DIRECT);
+    s64 snoa  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_NOATIME);
+    s64 slrg  = viv_fcntl_for_test(p, (u64)rd, VIV_F_SETFL, VIV_O_LARGEFILE);
     // O_APPEND rides the open-time mode, which no Dev a kernel test can open
     // honours; stamp the write end's mode, read, restore (before any assert).
-    s64 ga = -1;
+    s64 ga = -1, soff = -1, skeep = -1;
     if (pr == 0) {
         struct Spoor *ws = (struct Spoor *)p->handles->slots[wr].obj;
         int wsaved = ws->mode;
         ws->mode = 1 | (int)SYS_WALK_OPEN_OAPPEND;
         ga = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
+        soff  = viv_fcntl_for_test(p, (u64)wr, VIV_F_SETFL, 0);
+        skeep = viv_fcntl_for_test(p, (u64)wr, VIV_F_SETFL,
+                                   VIV_O_APPEND | VIV_O_NONBLOCK);
         ws->mode = wsaved;
     }
 
@@ -4344,6 +4356,15 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
     TEST_EXPECT_EQ(bad, -(s64)T_E_BADF, "F_SETFL on a closed fd is EBADF, not silent success");
     TEST_EXPECT_EQ(ga, (s64)(VIV_O_WRONLY | VIV_O_APPEND),
                    "F_GETFL reports O_APPEND for an append open");
+    TEST_EXPECT_EQ(ghi, g2, "F_GETFL on 2^32 + fd reads fd (pre-fix EBADF)");
+    TEST_EXPECT_EQ(son, -(s64)T_E_INVAL,
+                   "F_SETFL turning O_APPEND on is EINVAL (pre-fix: silently dropped)");
+    TEST_EXPECT_EQ(sasy, -(s64)T_E_INVAL, "F_SETFL O_ASYNC is EINVAL");
+    TEST_EXPECT_EQ(sdir, -(s64)T_E_INVAL, "F_SETFL O_DIRECT is EINVAL");
+    TEST_EXPECT_EQ(snoa, -(s64)T_E_INVAL, "F_SETFL O_NOATIME is EINVAL");
+    TEST_EXPECT_EQ(slrg, 0, "F_SETFL drops O_LARGEFILE, as Linux does");
+    TEST_EXPECT_EQ(soff, -(s64)T_E_INVAL, "F_SETFL turning O_APPEND off is EINVAL");
+    TEST_EXPECT_EQ(skeep, 0, "F_SETFL restating O_APPEND with O_NONBLOCK is served");
 }
 
 // The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a

@@ -29,7 +29,7 @@ source [file join [file dirname [info script]] lib.exp]
 
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
-lc_run_expect "mkdir /tmp/dops && cd /tmp/dops && pwd | tr a-z A-Z" "/TMP/DOPS"
+lc_run_expect "mkdir /tmp/dops && cd /tmp/dops && /bin/pwd | tr a-z A-Z" "/TMP/DOPS"
 
 set ::ops_red {}
 proc ops_leg {tag prog verdict} {
