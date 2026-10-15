@@ -8,6 +8,7 @@ code:
   - tools/libtests-manifest.py
   - tools/libtests-webp.json
   - usr/ports/libpng/patches/0001-tests-link-the-static-library.patch
+  - usr/ports/libxml2/patches/0001-tests-restore-the-cmake-test-scripts.patch
 audit: none
 guarded-by: []
 validated-by: [prose, gate-interactive]
@@ -41,9 +42,11 @@ directly by `tools/interactive/ls-libs.exp`).
   or a relative argument that resolves elsewhere on the device than on the
   host.
 - `muster <manifest>` runs the tests in file order and exits 0 iff every test
-  exited 0; its last line is `muster: <lib>: <n> of <n> passed`, or
+  passed (a test passes when each of its steps does, in order); its last
+  line is `muster: <lib>: <n> of <n> passed`, or
   `muster: <lib>: <k> of <n> FAILED` with status 1. A failing test prints its
-  name, its status and the last 1536 bytes of each of its two logs. All of it
+  name, the step that failed and why, and the last 1536 bytes of that step's
+  stdout and stderr. All of it
   goes to descriptor 1, so a shell redirect captures the run; libthyla-rs's
   `t_putstr` would not do: it is `SYS_PUTS`, which writes the console.
 - A manifest whose `count` line disagrees with the tests it holds is refused
@@ -55,9 +58,13 @@ directly by `tools/interactive/ls-libs.exp`).
 
 **The manifest.** One keyword per line and the rest of the line its value:
 `lib`, `count`, `logs` once; then per test `test <name>`, `cwd <dir>`, one
-`arg` per argv element (the first is the program), optionally `builtin copy`,
-`builtin cmp` or `builtin sha256`, and `end`. A line format, so the native parser is a split
-on the first space and no quoting exists to get wrong.
+or more steps, and `end`. A step is `step`, then optionally `builtin <kind>`
+(`copy`, `cmp`, `sha256`, `mkdir`, `rmtree`), one `arg` per argv element or
+operand (for a program the first is the program), and for a program
+optionally `stdin`, `stdout`, `stderr` (paths) and `status any`. A line
+format, so the native parser is a split on the first space and no quoting
+exists to get wrong; a builtin with the wrong number of operands, or with a
+redirect, is refused at parse time.
 
 **The translation.** CTest's `--show-only=json-v1` gives each test's argv,
 working directory and dependencies. Host paths are rewritten through the
@@ -65,7 +72,7 @@ maps, longest host prefix first; the build tree and the source tree map side
 by side (`<lib>/build`, `<lib>/src`) so a path a test names relative to its
 directory resolves the same on both. The tests are ordered so each follows
 the tests it `DEPENDS` on, declaration order otherwise (CTest's own serial
-order). Four `cmake` command shapes are understood and no other:
+order). Six `cmake` command shapes are understood and no other:
 `-E copy_if_different A B` (libjpeg-turbo's tjbench setup) becomes the
 runner's `builtin copy`; `-E compare_files A B` becomes `builtin cmp`;
 `-E sha256sum F` under a `PASS_REGULAR_EXPRESSION` of exactly
@@ -75,14 +82,29 @@ libpng's wrapper, `-DLIBPNG=.. -DTEST_COMMAND=<exe> -P tests/<name>.cmake`,
 is unwrapped to `<exe>` with the script's `TEST_OPTIONS` and `TEST_FILES`.
 The wrapper script is checked against libpng's `scripts/cmake/test.cmake.in`
 with those two values removed, so a libpng that changes how a test runs is
-refused rather than mistranslated.
+refused rather than mistranslated. The last two are libxml2's scripts,
+checked by their sha256 for the same reason, and translated into the steps
+they perform: `run_and_diff.cmake` runs `PROG --shell XML` in `WORKDIR` with
+its stdin from `STDIN` (both relative to `WORKDIR`, where CMake's
+`execute_process` resolves them -- measured on the host build, whose test
+directory holds no `test/`), its outputs to `STDOUT` and `STDERR` and its
+status only reported, so the step is `status any`; then stdout against
+`EXPECTED_STDOUT`, and stderr against `EXPECTED_STDERR` when that file
+exists. `test_xmlcatalog_add_del.cmake` empties and makes its work directory
+(script mode's `CMAKE_CURRENT_BINARY_DIR` is the directory cmake runs in),
+then `xmlcatalog --create`, three `--add`, a compare, three `--del`, a
+compare, each command required to succeed.
 
 **The runner.** `muster` is native (libthyla-rs): it is authored here and only
 spawns the ported test programs. libthyla-rs's `Command` has no working
 directory of its own, so muster sets its own (`set_current_dir`, which a
-spawned child inherits) before each test, builtins included. Each test's
-stdin is an empty file, so a test that reads it sees end-of-file instead of
-the console; its stdout and stderr go to `<logs>/<test>.out` and `.err`.
+spawned child inherits) before each test, builtins included. A step's stdin
+is an empty file unless it names one, so a test that reads it sees
+end-of-file instead of the console; its stdout and stderr go to
+`<logs>/<test>.<k>.out` and `.err` unless it redirects them, and a redirect's
+parent directories are made first, as libxml2's wrapper makes them. The
+first failing step ends the test, as a CMake script's first fatal error
+does.
 
 **The libraries (B-3d).** libpng and libjpeg-turbo use their CTest lists.
 libpng registers its tests only when it builds the shared library, which the
@@ -102,10 +124,22 @@ recomputes the three the same way; a stale digest is red, never skipped. The
 lossless round trip is exact against `test_ref.ppm`, and a PNG written and
 read back through libpng (dwebp's default format) is exact against it too.
 
+**libxml2 (B-3e).** 2.15.4's whole CTest list, 23 tests: the nine compiled
+tests (runtest, runsuite, runxmlconf, testapi, testcatalog, testchar,
+testdict, testparser, testrecurse -- runxmlconf registered because the W3C
+XML conformance suite is unpacked as `xmlconf/`, as upstream's CI image
+installs it), the seven xmllint shell scripts and six xmlcatalog scripts
+under `run_and_diff.cmake`, and the catalog add/delete test. The release
+tarball ships neither CMake script, so all fourteen script tests fail on any
+host as packaged; the port's patch 0001 restores both from the tag. Before a
+boot the translated list ran 23 of 23 on the host build against a pruned
+copy holding only what the device stages: the stage list's 54 files and the
+`test/`, `result/` and `xmlconf/` trees.
+
 ## Data structures
 
 The manifest (above) and the stage list: `<kind> <host path> <device path>`
-per line, read by `build.sh`'s `lib_tests_codecs`.
+per line, read by `build.sh`'s `lib_tests_muster`.
 
 ## Concurrency
 

@@ -454,10 +454,28 @@ into `/var/lib_tests/<lib>.manifest` plus the files it needs
 ([[sub-substrate-libtests]]), stages them (programs stripped) with the native
 runner at `/var/lib_tests/bin/muster`, and writes each manifest's test count to
 `build/pouch/lib-tests/<lib>.count`, which ls-libs reads as the number the
-device must report. The populate arm puts `/var/lib_tests` and stamps each
-library's build tree 1777 (the tests write their outputs there, as in
-upstream's own tree); bake-verify adds `MUSTER`, `PNGTESTS`, `JPEGTESTS` and
-`WEBPTESTS`.
+device must report. The populate arm puts `/var/lib_tests` and stamps 1777
+each directory the staging listed in `build/pouch/lib-tests/writable` (every
+library's build tree, where its tests write their outputs as in upstream's
+own tree, and libxml2's source top, where runsuite and runxmlconf write their
+logs): a list the staging derives, so a library added there cannot be
+missed by a list in populate. bake-verify adds `MUSTER`, `PNGTESTS`,
+`JPEGTESTS`, `WEBPTESTS`, `XMLTESTS` and `XMLCONF`.
+
+**libxml2 (B-3e, 2026-10-15).** `build_libxml2` configures 2.15.4 as
+upstream's static CMake CI job does (`.gitlab-ci.yml` cmake:linux:gcc:static,
+`.gitlab-ci/test_cmake.sh`: schematron, zlib and the HTTP ABI stubs on; the
+Python bindings off). `cmake_lib` takes a second pinned tarball as a leading
+`+<tarball>=<sha256>`, checked like the first, unpacked into the source top
+after the patches and carried in the reuse stamp: here the W3C XML
+conformance suite (`[cache.xmlts]`), unpacked as `xmlconf/` the way
+upstream's CI image installs it, which is what registers `runxmlconf`. The
+port's patch 0001 restores the two CMake test scripts the release tarball
+omits. The muster half also stages libxml2's `test/`, `result/` and
+`xmlconf/` trees whole (merged by tar: the stage list already put some of
+their files there), since runtest, runsuite and runxmlconf walk them rather
+than naming their files; `tools/build.sh libxml2` builds it alone,
+`tools/forage.sh libxml2` gathers both tarballs.
 
 ## Data structures
 

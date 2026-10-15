@@ -217,6 +217,9 @@ fn create(path: &str) -> Result<File, Error> {
     OpenOptions::new().write(true).create(true).truncate(true).open(path)
 }
 
+// An existing component is skipped, not created: a mkdir of an existing name
+// in a directory the caller cannot write (`/tmp` under `/`) answers
+// PermissionDenied here, not Exists.
 fn mkdir_p(path: &str) -> Result<(), Error> {
     let mut at = String::from(if path.starts_with('/') { "/" } else { "" });
     for part in path.split('/').filter(|p| !p.is_empty()) {
@@ -224,6 +227,9 @@ fn mkdir_p(path: &str) -> Result<(), Error> {
             at.push('/');
         }
         at.push_str(part);
+        if fs::is_dir(at.as_str()) {
+            continue;
+        }
         match fs::create_dir(at.as_str()) {
             Ok(()) | Err(Error::Exists) => {}
             Err(e) => return Err(e),
