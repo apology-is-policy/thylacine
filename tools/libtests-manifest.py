@@ -21,14 +21,18 @@ reads the result) and lists the files the device needs.
 
 Refused, so the build fails rather than ship a list that runs less than
 upstream's: a test with no command, a property other than WORKING_DIRECTORY
-and DEPENDS, a `cmake` command that is not one of the two shapes below, a
-path outside every --map, an argument holding a newline, and a relative
-argument that would resolve elsewhere on the device than on the host.
+and DEPENDS (PASS_REGULAR_EXPRESSION only in the digest shape below), a
+`cmake` command that is not one of the shapes below, a path outside every
+--map, an argument holding a newline, and a relative argument that would
+resolve elsewhere on the device than on the host.
 
 The `cmake` shapes:
   - `cmake -E copy_if_different A B` (libjpeg-turbo's tjbench setup): the
     runner's builtin copy;
   - `cmake -E compare_files A B`: the runner's builtin cmp;
+  - `cmake -E sha256sum F` with PASS_REGULAR_EXPRESSION exactly
+    `^<64 lowercase hex>  ` (CMake prints `<digest>  <file>`): the runner's
+    builtin sha256, which passes when F's digest is that one;
   - `cmake -DLIBPNG=... -DTEST_COMMAND=<exe> -P <tests/NAME.cmake>` (every
     libpng test): the generated script only runs <exe> with its
     TEST_OPTIONS and TEST_FILES and checks the status, which is what the
@@ -42,7 +46,8 @@ import os
 import re
 import sys
 
-ALLOWED_PROPS = {"WORKING_DIRECTORY", "DEPENDS"}
+ALLOWED_PROPS = {"WORKING_DIRECTORY", "DEPENDS", "PASS_REGULAR_EXPRESSION"}
+DIGEST_REGEX = re.compile(r"\^([0-9a-f]{64})  ")
 
 
 def die(msg):
@@ -104,7 +109,17 @@ def translate(test, args, mapper):
         die(f"test {name!r} has no WORKING_DIRECTORY")
     cmd = list(test["command"])
     builtin = None
-    if os.path.basename(cmd[0]) == "cmake":
+    passre = props.get("PASS_REGULAR_EXPRESSION")
+    if passre is not None:
+        if isinstance(passre, str):
+            passre = cmake_list(passre)
+        m = DIGEST_REGEX.fullmatch(passre[0]) if len(passre) == 1 else None
+        if not (m and os.path.basename(cmd[0]) == "cmake"
+                and cmd[1:3] == ["-E", "sha256sum"] and len(cmd) == 4):
+            die(f"test {name!r}: PASS_REGULAR_EXPRESSION {passre} is supported only"
+                " as a SHA-256 digest on `cmake -E sha256sum FILE`")
+        builtin, cmd = "sha256", [m.group(1), cmd[3]]
+    elif os.path.basename(cmd[0]) == "cmake":
         if cmd[1:3] == ["-E", "copy_if_different"] and len(cmd) == 5:
             builtin, cmd = "copy", cmd[3:]
         elif cmd[1:3] == ["-E", "compare_files"] and len(cmd) == 5:

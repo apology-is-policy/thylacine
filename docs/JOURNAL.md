@@ -22,6 +22,78 @@ needed the operator.
 
 
 ---
+## 2026-10-15 (main, Opus 5.5, effort max) -- B-3d: the image codecs' upstream tests on the device
+
+- *B-3d: the codecs run upstream's own lists, not a copy of them.* libpng
+  1.6.59 and libjpeg-turbo 3.2.0 register their tests with CTest; the build
+  dumps the registration (`ctest --show-only=json-v1`, which omits a test's
+  command until its program is built), `tools/libtests-manifest.py` rewrites
+  each argv for the device, and `usr/muster`, a native runner, works through
+  it there. The translator fails the build rather than ship a shorter list: a
+  property it does not carry, a `cmake` command of an unknown shape, a path
+  outside the maps. libwebp 1.6.0 registers no tests (its fuzzers need
+  fuzztest), so `tools/libtests-webp.json` holds 12 checks in CTest's shape
+  around upstream's documented `dwebp test.webp -ppm == test_ref.ppm`. Counts:
+  37, 332, 12.
+- *libpng's tests needed a patch, and the policy knob does not reach it.*
+  libpng registers its tests only `if(PNG_TESTS AND PNG_SHARED)`; the
+  Thylacine platform is static-only, and libpng's version range sets CMP0164
+  NEW, under which `add_library(SHARED)` is an error. A version-set policy
+  ignores `CMAKE_POLICY_DEFAULT_CMP0164`, so patch 0001 links the six test
+  programs to `png_static` instead.
+- *Two misses of mine, each caught before a boot needed it.* An install with
+  `CMAKE_INSTALL_PREFIX=/` and `DESTDIR=<stage>` left `stage/lib` empty:
+  GNUInstallDirs maps a `/` prefix's libdir to `/usr/lib`. The prefix is now
+  the stage itself, and `cmake_lib` refuses a stage without `lib/` and
+  `include/`. (WIP 2's message, `682759387`, credits that fix to itself; it
+  was already in `07ccb0eec`.)
+- *The first device run passed and failed: the verdict went to the console.*
+  muster printed with libthyla-rs's `t_putstr`, which is `SYS_PUTS`, the
+  console, not descriptor 1. So the console showed "muster: libpng: 37 of 37
+  passed" while `muster ... > /tmp/muster-libpng.log` captured nothing, and
+  the leg's verdict grep waited out its 1800 s. muster now writes through
+  `io::stdout()`. The ICU legs passed in that run; jpeg and webp never ran.
+- *B-3a round 2's message names the wrong dossier.* `9d0ae0b7e`'s trailer says
+  the census line is mirrored by sub-pouch-fs; its owner is sub-pouch-seam,
+  and neither restates it. Recorded here rather than rewritten.
+- *Deviation, as in B-3c:* the vote's "census line joey checks" is the
+  `ls-libs` gate's check, because a full run is minutes and joey's census
+  runs at every boot.
+- *The second device run: libpng 37/37 and libjpeg-turbo 332/332, libwebp 5
+  of 12 red -- and every red was my check list.* dwebp has no `-png` flag (PNG
+  is its default format), which took four checks down. The fifth was
+  upstream's documented verification itself: rebuilt natively on this Mac
+  (Apple clang, arm64, Homebrew libpng), the same twelve checks failed the
+  same five, so the device was not the variable. 1.6.0's decode of
+  `test.webp` differs from `test_ref.ppm` by exactly +-1 in 13265 of 49152
+  samples (6605 down, 6660 up), with `-noasm` and NEON in exact agreement;
+  libwebp's NEWS for 0.5.0 (2015) says the YUV-to-RGB speed-up changes the
+  results slightly, and `doc/tools.md` was never updated. The lesson is an
+  old one ([M-PIN] "RUN a new checker before committing it"): I translated
+  the JSON on the host but never RAN its checks, and a native build of the
+  pinned source was a few minutes away.
+- *What replaced it.* Three pinned SHA-256s (the lossy decode, the `-q 75`
+  encode, its decode), each the reference implementation's output on the
+  host with C and NEON agreeing, written in CTest's own shape (`cmake -E
+  sha256sum F` under a `PASS_REGULAR_EXPRESSION` of the digest) so the
+  translator accepts it only there, and muster checks it with RustCrypto's
+  `sha2` (already in the workspace through corvus-crypto). libjpeg-turbo pins
+  md5s the same way. 14 checks, all green on the host before the device saw
+  them.
+- *The gate hid a failing test's name.* A red leg printed its log's last 40
+  lines, and dwebp's 40-line usage text pushed the fifth FAIL out of them; a
+  red muster leg now prints every `muster: FAIL` line first.
+- *The RED was predicted by upstream's runner, not by me.* I broke one input
+  per codec and guessed the failures from the file names; native builds of
+  libpng and libjpeg-turbo with CTest over the same corruption were sharper:
+  of the four tests that name `testimgari.jpg`, only three `-cmp` checks
+  fail; the fourth, a 53x53 crop at the image's top-left, passes under CTest
+  too (presumably the damaged byte lies past what it decodes; not checked). The
+  device matched CTest exactly (1, 3 and 1 failures), the ICU legs green, and
+  each staged copy's digest was checked changed before the boot -- the
+  B-3c control that tested nothing is why.
+---
+
 ## 2026-10-14 (main, Opus 5.5, effort max) -- B-3 opens: seven votes, and B-3a's fd surface (Pouch fsync, vectored I/O, a socket's seeks)
 
 - *The split and the votes.* B-3 (the browser's C libraries) was surveyed

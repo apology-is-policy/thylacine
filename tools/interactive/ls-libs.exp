@@ -13,8 +13,10 @@
 #   - the program's own all-passed verdict is in its log (a program that exits
 #     0 having run nothing prints no verdict).
 # Every leg runs, so one boot reports each program; a red leg prints its log's
-# last 40 lines (each program ends with its failure summary), and the scenario
-# fails after the last leg if any was red.
+# last 40 lines (each program ends with its failure summary) -- a muster leg
+# first prints every `muster: FAIL` line, since one failing test's output can
+# push the others out of a tail -- and the scenario fails after the last leg if
+# any was red.
 #
 #   icu-c   ICU's C API tests (cintltst): "[All tests passed successfully...]"
 #   icu-cxx ICU's C++ API tests (intltest): "OK: All tests passed without error."
@@ -60,7 +62,7 @@ lc_send "cd /tmp"
 # verdict line. `verdict` is lower case as typed; the log holds it in mixed
 # case, so the grep is case-blind and the match is on the upper-cased line.
 set ::lib_red {}
-proc lib_leg {tag prog log verdict} {
+proc lib_leg {tag prog log verdict {fails {}}} {
     global lc_cmd_timeout
     set tagU [string toupper $tag]
     lc_send "$prog > $log; echo $tag-\$status | tr a-z A-Z"
@@ -68,7 +70,9 @@ proc lib_leg {tag prog log verdict} {
         -ex "$tagU- 0\r"           { lc_step "saw: $prog exited 0" }
         -re "$tagU- (\[1-9\]\[0-9\]*)" {
             set rc $expect_out(1,string)
-            lc_send "tail -n 40 $log"
+            set show "tail -n 40 $log"
+            if {$fails ne {}} { set show "grep '$fails' $log; $show" }
+            lc_send $show
             # Read (and so log) the tail: output nobody expects for never
             # reaches the transcript.
             expect -timeout 5 timeout {}
@@ -99,7 +103,7 @@ foreach lib {libpng libjpeg-turbo libwebp} tag {png jpg webp} {
     if {[catch {set fh [open $cf r]; set n [string trim [read $fh]]; close $fh}] || ![string is integer -strict $n] || $n < 1} {
         lc_fail "no test count for $lib at $cf (the bake and this tree disagree; rebake)"
     }
-    if {[lib_leg $tag "/var/lib_tests/bin/muster /var/lib_tests/$lib.manifest" /tmp/muster-$lib.log "$lib: $n of $n passed"]} {
+    if {[lib_leg $tag "/var/lib_tests/bin/muster /var/lib_tests/$lib.manifest" /tmp/muster-$lib.log "$lib: $n of $n passed" "muster: FAIL"]} {
         lc_pass "ls-libs($lib): muster exit 0, $n of $n passed"
     }
 }

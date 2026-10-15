@@ -35,14 +35,17 @@ directly by `tools/interactive/ls-libs.exp`).
   stripped when staged; `file` for each input a test names that exists
   before any test runs). It FAILS the build rather than write a list that runs
   less than upstream's: a test with no command (its program is not built), a
-  property other than `WORKING_DIRECTORY` and `DEPENDS`, a `cmake` command of
+  property other than `WORKING_DIRECTORY` and `DEPENDS` (and
+  `PASS_REGULAR_EXPRESSION` in the digest shape alone), a `cmake` command of
   an unknown shape, a path outside every map, an argument holding a newline,
   or a relative argument that resolves elsewhere on the device than on the
   host.
 - `muster <manifest>` runs the tests in file order and exits 0 iff every test
   exited 0; its last line is `muster: <lib>: <n> of <n> passed`, or
   `muster: <lib>: <k> of <n> FAILED` with status 1. A failing test prints its
-  name, its status and the last 1536 bytes of each of its two logs.
+  name, its status and the last 1536 bytes of each of its two logs. All of it
+  goes to descriptor 1, so a shell redirect captures the run; libthyla-rs's
+  `t_putstr` would not do: it is `SYS_PUTS`, which writes the console.
 - A manifest whose `count` line disagrees with the tests it holds is refused
   (exit 2), and ls-libs compares the verdict's count with the count the build
   recorded (`build/pouch/lib-tests/<lib>.count`), so a run of fewer tests
@@ -52,8 +55,8 @@ directly by `tools/interactive/ls-libs.exp`).
 
 **The manifest.** One keyword per line and the rest of the line its value:
 `lib`, `count`, `logs` once; then per test `test <name>`, `cwd <dir>`, one
-`arg` per argv element (the first is the program), optionally `builtin copy`
-or `builtin cmp`, and `end`. A line format, so the native parser is a split
+`arg` per argv element (the first is the program), optionally `builtin copy`,
+`builtin cmp` or `builtin sha256`, and `end`. A line format, so the native parser is a split
 on the first space and no quoting exists to get wrong.
 
 **The translation.** CTest's `--show-only=json-v1` gives each test's argv,
@@ -62,9 +65,12 @@ maps, longest host prefix first; the build tree and the source tree map side
 by side (`<lib>/build`, `<lib>/src`) so a path a test names relative to its
 directory resolves the same on both. The tests are ordered so each follows
 the tests it `DEPENDS` on, declaration order otherwise (CTest's own serial
-order). Three `cmake` command shapes are understood and no other:
+order). Four `cmake` command shapes are understood and no other:
 `-E copy_if_different A B` (libjpeg-turbo's tjbench setup) becomes the
-runner's `builtin copy`; `-E compare_files A B` becomes `builtin cmp`; and
+runner's `builtin copy`; `-E compare_files A B` becomes `builtin cmp`;
+`-E sha256sum F` under a `PASS_REGULAR_EXPRESSION` of exactly
+`^<64 lowercase hex>  ` (CMake prints `<digest>  <file>`) becomes
+`builtin sha256 <digest> F`, muster hashing with RustCrypto's `sha2`; and
 libpng's wrapper, `-DLIBPNG=.. -DTEST_COMMAND=<exe> -P tests/<name>.cmake`,
 is unwrapped to `<exe>` with the script's `TEST_OPTIONS` and `TEST_FILES`.
 The wrapper script is checked against libpng's `scripts/cmake/test.cmake.in`
@@ -83,11 +89,18 @@ libpng registers its tests only when it builds the shared library, which the
 static-only Thylacine platform cannot (CMake 4 refuses `add_library(SHARED)`
 there: CMP0164, which libpng's policy range sets NEW), so the port's patch
 0001 links them against the static library instead. libwebp registers no
-tests; `tools/libtests-webp.json` holds its checks in CTest's shape, so they
-go through the same translation: upstream's documented verification (`dwebp
-test.webp -ppm` equal byte for byte to `test_ref.ppm`, `doc/tools.md`), and
-round trips of `test_ref.ppm` through the lossless encoder, through a PNG
-written and read back, and through the lossy encoder.
+tests; `tools/libtests-webp.json` holds its 14 checks in CTest's shape, so
+they go through the same translation. Upstream's documented verification
+(`doc/tools.md`: `dwebp test.webp -ppm` equal byte for byte to
+`test_ref.ppm`) has not held since 0.5.0 changed the YUV-to-RGB rounding
+(its NEWS says so): 1.6.0's decode differs from `test_ref.ppm` by exactly 1
+in 13265 of 49152 samples, on a native host build, through the C path and
+NEON alike. So the lossy decode, the lossy encode at `-q 75` and its decode
+each check a pinned SHA-256: libwebp 1.6.0's own output built natively on an
+arm64 host, where `-noasm` (C) and NEON agree byte for byte. A new pin
+recomputes the three the same way; a stale digest is red, never skipped. The
+lossless round trip is exact against `test_ref.ppm`, and a PNG written and
+read back through libpng (dwebp's default format) is exact against it too.
 
 ## Data structures
 
@@ -114,7 +127,9 @@ continues. A malformed or miscounted manifest: exit 2 before any test runs.
 
 ## Performance
 
-Not measured yet.
+The `ls-libs` gate's five legs (ICU's two and the three codec lists) take
+262 s with the boot, under HVF on the Mac (2026-10-15); B-3c's two ICU legs
+alone took 118 s with the boot. The legs are not timed one by one.
 
 ## Prosecution
 
@@ -133,8 +148,10 @@ Not measured yet.
 
 - A test program that reads a file it does not name on its command line
   gets only what `build.sh` stages beyond the translator's list.
-- libwebp's lossy round trip checks that the bitstream is valid and decodes,
-  not its quality: `get_disto` reports a distortion but judges none.
+- libwebp's lossy digests are the reference implementation's output, not an
+  independent oracle: they prove the Pouch build decodes and encodes exactly
+  as libwebp 1.6.0 does natively, and upstream's own reference image agrees
+  with that decode to within 1 per sample.
 
 ## Provenance
 

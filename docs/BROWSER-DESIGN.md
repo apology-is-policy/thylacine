@@ -857,7 +857,7 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-3a | Pouch, no new ABI: `fsync`/`fdatasync` on `SYS_FSYNC`; `readv`/`writev`/`preadv`/`pwritev` as one gathered transfer; a socket's `lseek`/`pread`/`pwrite` answer ESPIPE and its `fstat` S_IFSOCK. | `pouch-hello-fd` census, RED on the old libc |
 | B-3b | kernel + Pouch (after B-3g): Astra's approved native descriptor calls brought onto main and extended (`dec-2026-10-14-fd-calls-on-astra`, handoff 049); `fcntl` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD[_CLOEXEC]`), `dup`/`dup2`/`dup3`; the `SYS_POSTNOTE` empty-name probe for `kill(pid, 0)`; `SYS_GETPPID`. Audit-bearing. | kernel tests + `pouch-hello-fd` legs, each RED once; audit closed |
 | B-3c | ICU with its compiled tests (`cintltst`, `intltest`); file data through `U_HAVE_MMAP=0`. | the census on the device |
-| B-3d | libpng, libjpeg-turbo, libwebp. | pngtest; tjunittest; a cwebp/dwebp round trip |
+| B-3d | libpng, libjpeg-turbo, libwebp. | each library's CTest list on the device, `pngtest` and `tjunittest` among them; libwebp, which registers none, its cwebp/dwebp round trips and three pinned digests |
 | B-3e | libxml2. | runtest, testapi, testchar with their data in the pool |
 | B-3f | FreeType (without HarfBuzz, to break the cycle), then HarfBuzz over FreeType + ICU. | hb-shape over `test/shape` |
 | B-3g | fontconfig with libxml2; `/lib/font` populated; host gperf. | fc-match against the fixed font set |

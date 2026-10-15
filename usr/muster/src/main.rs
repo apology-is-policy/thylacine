@@ -16,6 +16,9 @@
 //                    `-E copy_if_different`, which a test uses as setup)
 //   builtin cmp      instead of a program: pass when arg 1 and arg 2 hold the
 //                    same bytes (CMake's `-E compare_files`)
+//   builtin sha256   instead of a program: pass when the file arg 2 has the
+//                    SHA-256 digest arg 1, in lowercase hex (CMake's
+//                    `-E sha256sum` under a PASS_REGULAR_EXPRESSION)
 //   end              closes the test
 // Tests run in file order, which the translator made DEPENDS-respecting.
 // stdin is an empty file, so a test that reads it sees EOF, not the console.
@@ -38,6 +41,7 @@ use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, File, OpenOptions};
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::process::{Command, Stdio};
+use sha2::{Digest, Sha256};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -55,6 +59,7 @@ enum Builtin {
     None,
     Copy,
     Cmp,
+    Sha256,
 }
 
 struct Test {
@@ -95,6 +100,7 @@ fn parse(text: &str) -> Result<Manifest, String> {
             ("arg", Some(t)) => t.argv.push(String::from(rest)),
             ("builtin", Some(t)) if t.builtin == Builtin::None && rest == "copy" => t.builtin = Builtin::Copy,
             ("builtin", Some(t)) if t.builtin == Builtin::None && rest == "cmp" => t.builtin = Builtin::Cmp,
+            ("builtin", Some(t)) if t.builtin == Builtin::None && rest == "sha256" => t.builtin = Builtin::Sha256,
             ("end", Some(_)) => {
                 let t = open.take().unwrap();
                 if t.name.is_empty() || t.cwd.is_empty() {
@@ -172,6 +178,15 @@ fn run(t: &Test, out: &str, err: &str, empty: &str) -> Result<i32, String> {
                 Ok(0)
             } else {
                 Err(format!("{} ({} bytes) and {} ({} bytes) differ", t.argv[0], a.len(), t.argv[1], b.len()))
+            };
+        }
+        Builtin::Sha256 => {
+            let bytes = read_file(&t.argv[1]).map_err(|e| format!("read {}: {}", t.argv[1], e))?;
+            let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{:02x}", b)).collect();
+            return if got == t.argv[0] {
+                Ok(0)
+            } else {
+                Err(format!("{} ({} bytes) has SHA-256 {}, not {}", t.argv[1], bytes.len(), got, t.argv[0]))
             };
         }
         Builtin::None => {}

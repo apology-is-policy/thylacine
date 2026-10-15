@@ -9,3 +9,5 @@ path = "src/main.rs"
 
 [dependencies]
 libthyla-rs = { path = "../lib/libthyla-rs" }
+# The digest builtin: RustCrypto, no_std, as corvus-crypto uses it.
+sha2 = { version = "0.10", default-features = false }
