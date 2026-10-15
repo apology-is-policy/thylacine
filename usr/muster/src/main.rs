@@ -12,6 +12,8 @@
 //                    (created if absent)
 //   test <name>      opens a test
 //   cwd <dir>        its working directory (each child inherits it)
+//   env <NAME>=<val> set for the test's steps through /env/NAME, which each
+//                    child inherits (meson's per-test env); restored after
 //   step             opens one of the test's steps, which run in order; the
 //                    first that fails fails the test
 //   arg <word>       one argv element, in order; the first is the program
@@ -30,6 +32,8 @@
 //                    PASS_REGULAR_EXPRESSION)
 //   builtin mkdir    make the directory arg 1 and its parents
 //   builtin rmtree   remove arg 1 and everything under it; absent is fine
+//   builtin tap      pass when the file arg 1 (an earlier step's stdout) is
+//                    TAP output meson would pass; see tap.rs
 //   end              closes the test
 // Tests run in file order, which the translator made DEPENDS-respecting.
 //
@@ -42,6 +46,8 @@
 #![no_main]
 
 extern crate alloc;
+
+mod tap;
 
 use alloc::format;
 use alloc::string::String;
@@ -73,6 +79,7 @@ enum Builtin {
     Sha256,
     Mkdir,
     Rmtree,
+    Tap,
 }
 
 impl Builtin {
@@ -83,6 +90,7 @@ impl Builtin {
             "sha256" => Some(Builtin::Sha256),
             "mkdir" => Some(Builtin::Mkdir),
             "rmtree" => Some(Builtin::Rmtree),
+            "tap" => Some(Builtin::Tap),
             _ => None,
         }
     }
@@ -91,7 +99,7 @@ impl Builtin {
         match self {
             Builtin::None => 0,
             Builtin::Copy | Builtin::Cmp | Builtin::Sha256 => 2,
-            Builtin::Mkdir | Builtin::Rmtree => 1,
+            Builtin::Mkdir | Builtin::Rmtree | Builtin::Tap => 1,
         }
     }
 }
@@ -108,6 +116,7 @@ struct Step {
 struct Test {
     name: String,
     cwd: String,
+    env: Vec<(String, String)>,
     steps: Vec<Step>,
 }
 
@@ -158,13 +167,22 @@ fn parse(text: &str) -> Result<Manifest, String> {
                     count = Some(rest.parse().map_err(|_| format!("{}count {:?} is not a number", at(), rest))?)
                 }
                 "logs" => logs = Some(String::from(rest)),
-                "test" => open = Some(Test { name: String::from(rest), cwd: String::new(), steps: Vec::new() }),
+                "test" => {
+                    open = Some(Test { name: String::from(rest), cwd: String::new(), env: Vec::new(), steps: Vec::new() })
+                }
                 _ => return Err(bad()),
             }
             continue;
         };
         match key {
             "cwd" if t.steps.is_empty() => t.cwd = String::from(rest),
+            "env" if t.steps.is_empty() => {
+                let (name, value) = rest.split_once('=').ok_or_else(bad)?;
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    return Err(bad());
+                }
+                t.env.push((String::from(name), String::from(value)));
+            }
             "step" if rest.is_empty() => t.steps.push(Step {
                 argv: Vec::new(),
                 builtin: Builtin::None,
@@ -311,6 +329,10 @@ fn builtin(s: &Step) -> Result<(), String> {
         }
         Builtin::Mkdir => mkdir_p(&a[0]).map_err(|e| format!("mkdir {}: {}", a[0], e)),
         Builtin::Rmtree => rmtree(&a[0]).map_err(|e| format!("rmtree {}: {}", a[0], e)),
+        Builtin::Tap => {
+            let bytes = read_file(&a[0]).map_err(|e| format!("read {}: {}", a[0], e))?;
+            tap::verdict(&String::from_utf8_lossy(&bytes)).map(|_| ())
+        }
         Builtin::None => Err(String::from("not a builtin")),
     }
 }
@@ -336,8 +358,64 @@ fn program(s: &Step, out: &str, err: &str, empty: &str) -> Result<(), String> {
     Ok(())
 }
 
+// One saved /env entry: its path and what it held before the test, if anything.
+type Saved = (String, Option<Vec<u8>>);
+
+// Sets the test's env lines, recording each variable's old value first so a
+// failure part way still restores the ones already set.
+fn env_set(vars: &[(String, String)], saved: &mut Vec<Saved>) -> Result<(), String> {
+    for (name, value) in vars {
+        let path = format!("/env/{}", name);
+        let old = if fs::exists(&path) {
+            Some(read_file(&path).map_err(|e| format!("read {}: {}", path, e))?)
+        } else {
+            None
+        };
+        saved.push((path.clone(), old));
+        create(&path)
+            .and_then(|mut f| f.write_all(value.as_bytes()))
+            .map_err(|e| format!("set {}: {}", path, e))?;
+    }
+    Ok(())
+}
+
+// Puts the saved values back, newest first, so a name set twice ends as it began.
+fn env_restore(saved: Vec<Saved>) -> Result<(), String> {
+    let mut first = Ok(());
+    for (path, old) in saved.into_iter().rev() {
+        let r = match old {
+            Some(bytes) => create(&path).and_then(|mut f| f.write_all(&bytes)),
+            None => fs::remove_file(&path),
+        };
+        if let Err(e) = r {
+            if first.is_ok() {
+                first = Err(format!("restore {}: {}", path, e));
+            }
+        }
+    }
+    first
+}
+
 // Runs the test's steps in order and reports the first failure; true if none.
 fn run(t: &Test, base: &str, empty: &str) -> bool {
+    let mut saved = Vec::new();
+    let mut ok = match env_set(&t.env, &mut saved) {
+        Ok(()) => steps(t, base, empty),
+        Err(why) => {
+            say(&format!("muster: FAIL {}: {}\n", t.name, why));
+            false
+        }
+    };
+    // A variable left set would reach every later test, so a failed restore
+    // fails this one.
+    if let Err(why) = env_restore(saved) {
+        say(&format!("muster: FAIL {}: {}\n", t.name, why));
+        ok = false;
+    }
+    ok
+}
+
+fn steps(t: &Test, base: &str, empty: &str) -> bool {
     // Before a builtin too: its paths may be relative to the test's directory.
     if let Err(e) = env::set_current_dir(&t.cwd) {
         say(&format!("muster: FAIL {}: chdir {}: {}\n", t.name, t.cwd, e));

@@ -192,6 +192,46 @@ sha256     = "96151685cec997e1f9f3387e3626d61e6284d4d6e66e0e440c209286c03e9cc7"
 feeds      = "CHUNK_LIBTESTS (libxml2's runxmlconf, unpacked into its source tree)"
 forageable = "download"
 
+# FreeType and HarfBuzz register their tests only with meson, which this host
+# lacks; build.sh runs meson.py from this tarball (GitHub's published digest).
+[cache.meson]
+file       = "meson-1.12.1.tar.gz"
+dir        = "build/cache"
+url        = "https://github.com/mesonbuild/meson/releases/download/1.12.1/meson-1.12.1.tar.gz"
+sha256     = "ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743"
+feeds      = "CHUNK_LIBTESTS (the meson that builds FreeType and HarfBuzz and lists their tests)"
+forageable = "download"
+
+# The digest agrees across savannah, SourceForge and Homebrew's formula; the
+# release's .sig was not checked (no gpg on the build host).
+[cache.freetype]
+file       = "freetype-2.15.0.tar.xz"
+dir        = "build/cache"
+url        = "https://download.savannah.gnu.org/releases/freetype/freetype-2.15.0.tar.xz"
+sha256     = "93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5"
+feeds      = "CHUNK_LIBTESTS (FreeType 2.15.0 static, built twice around HarfBuzz; its meson tests run by muster)"
+forageable = "download"
+
+# The font FreeType's issue-1063 test opens, which its
+# tests/scripts/download-test-fonts.py fetches. The zip's sha256 is the first
+# fetch's (2026-10-15); the font inside is also checked by its own sha256, whose
+# first 8 bytes are the digest upstream's script pins (ef146bbc2673b387).
+[cache.ftfont]
+file       = "As.I.Lay.Dying.zip"
+dir        = "build/cache"
+url        = "https://github.com/python-pillow/Pillow/files/6622147/As.I.Lay.Dying.zip"
+sha256     = "09fceee7c335975a454500b000f75ee7f7b5c4f14b2dc241d6416f77967e9d1b"
+feeds      = "CHUNK_LIBTESTS (FreeType's tests/data, for issue-1063)"
+forageable = "download"
+
+[cache.harfbuzz]
+file       = "harfbuzz-14.6.0.tar.xz"
+dir        = "build/cache"
+url        = "https://github.com/harfbuzz/harfbuzz/releases/download/14.6.0/harfbuzz-14.6.0.tar.xz"
+sha256     = "d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586"
+feeds      = "CHUNK_LIBTESTS (HarfBuzz 14.6.0 static with FreeType and ICU, GitHub's published digest; its meson tests run by muster)"
+forageable = "download"
+
 # --- network: build.sh fetches it itself at build time -----------------------
 
 [network.quake]

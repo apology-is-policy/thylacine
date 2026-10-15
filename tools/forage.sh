@@ -7,7 +7,7 @@
 # section 5.
 #
 #   forage.sh                 report the status of every input
-#   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|webkit|icu|codecs|libxml2|
+#   forage.sh <target>        gather one: go|ambush|stratum|gopls|llvm|mesa|webkit|icu|codecs|libxml2|fonts|
 #                             alpine|busybox|static-curl|static-git|quake|duke3d|tombraider|
 #                             clade|clade-gl
 #   forage.sh all             gather everything that can be gathered automatically
@@ -283,6 +283,7 @@ target_sections() {
         icu)      echo "cache.icu4c" ;;
         codecs)   echo "cache.libpng cache.libjpeg-turbo cache.libwebp" ;;
         libxml2)  echo "cache.libxml2 cache.xmlts" ;;
+        fonts)    echo "cache.meson cache.freetype cache.ftfont cache.harfbuzz" ;;
         alpine)   echo "cache.alpine cache.busybox" ;;
         busybox)  echo "cache.busybox" ;;
         static-curl) echo "cache.static-curl" ;;

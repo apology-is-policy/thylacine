@@ -4614,7 +4614,11 @@ PNGTESTS /var/lib_tests/libpng.manifest
 JPEGTESTS /var/lib_tests/libjpeg-turbo.manifest
 WEBPTESTS /var/lib_tests/libwebp.manifest
 XMLTESTS /var/lib_tests/libxml2.manifest
-XMLCONF /var/lib_tests/libxml2/src/libxml2-$XML_VER/xmlconf/xmlconf.xml"
+XMLCONF /var/lib_tests/libxml2/src/libxml2-$XML_VER/xmlconf/xmlconf.xml
+FTTESTS /var/lib_tests/freetype.manifest
+FTFONT /var/lib_tests/freetype/src/freetype-$FT_VER/tests/data/As.I.Lay.Dying.ttf
+HBTESTS /var/lib_tests/harfbuzz.manifest
+HBFONTS /var/lib_tests/harfbuzz/src/harfbuzz-$HB_VER/perf/fonts/Roboto-Regular.ttf"
     fi
 
     local bake_missing=""
@@ -5924,7 +5928,7 @@ build_zlib() {
     if sysroot_is_stale; then build_sysroot; fi
 
     # Staleness: reuse the archive when newer than the vendored tree + this recipe.
-    if [[ -f "$archive" && -f "$sysroot/include/zlib.h" ]]; then
+    if [[ -f "$archive" && -f "$sysroot/include/zlib.h" && -f "$sysroot/lib/pkgconfig/zlib.pc" ]]; then
         local stale
         stale="$(find "$vendor" -type f -newer "$archive" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "${BASH_SOURCE[0]}" -nt "$archive" ]]; then
@@ -5948,6 +5952,24 @@ build_zlib() {
     "$ar_tool" rcs "$archive.tmp" "$obj"/*.o
     mv "$archive.tmp" "$archive"
     cp "$vendor/zlib.h" "$vendor/zconf.h" "$sysroot/include/"
+    # zlib's own zlib.pc.in, filled in (the vendored tree omits it): libpng's
+    # .pc requires zlib, and a static pkg-config lookup (meson's, B-3f)
+    # follows Requires.private.
+    mkdir -p "$sysroot/lib/pkgconfig"
+    cat > "$sysroot/lib/pkgconfig/zlib.pc" <<EOF_ZPC
+prefix=$sysroot
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: zlib
+Description: zlib compression library
+Version: $(sed -n 's/^#define ZLIB_VERSION "\(.*\)"$/\1/p' "$vendor/zlib.h")
+
+Requires:
+Libs: -L\${libdir} -lz
+Cflags: -I\${includedir}
+EOF_ZPC
     echo "    libz.a: $n objects -> $(wc -c < "$archive" | tr -d ' ') bytes"
     ledger "libz.a (zlib 1.3.1): BUILT"
 }
@@ -6749,6 +6771,24 @@ XML_TARBALL="libxml2-2.15.4.tar.xz"
 XML_SHA256="98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821"
 XMLTS_TARBALL="xmlts20080827.tar.gz"
 XMLTS_SHA256="96151685cec997e1f9f3387e3626d61e6284d4d6e66e0e440c209286c03e9cc7"
+# --- Boosty B-3f: FreeType and HarfBuzz. Both register their tests with meson,
+# so meson is pinned too, run from its release tarball. FreeType's issue-1063
+# reads a font its download script fetches; the zip is trusted on first fetch
+# and the font in it is checked by the digest upstream's script pins the head
+# of. Pins mirror [cache.meson] / [cache.freetype] / [cache.ftfont] /
+# [cache.harfbuzz]. ---
+MESON_VER="1.12.1"
+MESON_TARBALL="meson-1.12.1.tar.gz"
+MESON_SHA256="ab0a6ca09f8ef70c564c8241fb5a23957886a0b53fb58412b5e07eaf07dba743"
+FT_VER="2.15.0"
+FT_TARBALL="freetype-2.15.0.tar.xz"
+FT_SHA256="93cd47eb719c325107f2d3cf087d06299e944c3b48a40b55537302304dea1dd5"
+FTFONT_ZIP="As.I.Lay.Dying.zip"
+FTFONT_SHA256="09fceee7c335975a454500b000f75ee7f7b5c4f14b2dc241d6416f77967e9d1b"
+FTFONT_TTF_SHA256="ef146bbc2673b38715afcc70dca484cc64457438da8627a27cf95680e982f0a6"
+HB_VER="14.6.0"
+HB_TARBALL="harfbuzz-14.6.0.tar.xz"
+HB_SHA256="d07a007327277708a2a73ae437887cdbaf282937f6d03ca5467723e9099af586"
 
 webkit_jobs() {
     # JSC's unified sources peak well over 1 GiB per job; this host has 8 GiB.
@@ -6893,7 +6933,17 @@ cmake_lib() {
     # The patches by content: an edited patch rebuilds even when its name stays.
     local patch_sums=""
     (( ${#patches[@]} )) && patch_sums="$(shasum -a 256 "${patches[@]}" | awk '{print $1}' | tr '\n' ' ')"
-    local want_stamp="$sha | $patch_sums | ${extras[*]-} | $*"
+    # So are the archives an option names (libwebp's -DPNG_LIBRARY=...): a
+    # dependency rebuilt with other bytes relinks the tests here, and one
+    # rebuilt byte for byte does not.
+    local dep_sums="" arg val
+    for arg in "$@"; do
+        val="${arg#-D*=}"
+        if [[ "$val" != "$arg" && -f "$val" ]]; then
+            dep_sums="$dep_sums$(shasum -a 256 "$val" | awk '{print $1}') "
+        fi
+    done
+    local want_stamp="$sha | $patch_sums | ${extras[*]-} | $dep_sums| $*"
     local stamp="$stage/.thylacine-config"
     if [[ -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" \
           && ! "$sysroot/lib/libc.a" -nt "$stamp" && ! "$sysroot/lib/libc++.a" -nt "$stamp" \
@@ -6979,6 +7029,220 @@ build_libxml2() {
         -DZLIB_LIBRARY="$sysroot/lib/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/include"
 }
 
+# The pinned meson, unpacked once from its release tarball: meson.py runs from
+# the tree, and this host has no meson of its own. Prints the meson.py path.
+meson_tool() {
+    local file="$BUILD_DIR/cache/$MESON_TARBALL" dir="$BUILD_DIR/meson"
+    local py="$dir/meson-$MESON_VER/meson.py"
+    if [[ -f "$py" && "$(cat "$dir/.sha256" 2>/dev/null)" == "$MESON_SHA256" ]]; then
+        echo "$py"
+        return 0
+    fi
+    [[ -f "$file" ]] \
+        || { echo "==> meson: $file is absent -- run 'tools/forage.sh cache.meson'" >&2; exit 1; }
+    local have; have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$MESON_SHA256" ]] \
+        || { echo "==> meson: $MESON_TARBALL sha256 mismatch (got $have, want $MESON_SHA256)" >&2; exit 1; }
+    rm -rf "$dir"; mkdir -p "$dir"
+    tar -xzf "$file" -C "$dir" && [[ -f "$py" ]] \
+        || { echo "==> meson: $MESON_TARBALL did not unpack to meson-$MESON_VER/meson.py" >&2; exit 1; }
+    printf '%s' "$MESON_SHA256" > "$dir/.sha256"
+    echo "$py"
+}
+
+# cmake_lib's contract for a project whose tests only meson registers: a
+# pinned tarball, the port's patches (usr/ports/<project>/patches, the project
+# named by the tarball's top directory, so FreeType's two passes share one
+# series), static, its tests built, a stamp of every input. `--pc DIR`
+# (repeated, first) names a dependency's pkg-config directory; the rest are
+# meson -D options. The cross file is cmake/Toolchain-aarch64-pouch-cxx.cmake
+# in meson's terms, and only the named pkg-config directories are searched,
+# so nothing from this host's own libraries can be found. The toolchain flags
+# sit in the compiler exelist, as tools/clade-mesa-cross.sh measured they must:
+# meson's header and function checks drop an `-isystem <dir>` pair from
+# c_args, and with -nostdlibinc that leaves no libc headers at all (measured
+# here too: FreeType's checks found no unistd.h, fcntl.h or sys/mman.h).
+meson_lib() {
+    local name="$1" tarball="$2" sha="$3" top="$4"; shift 4
+    local sysroot="$BUILD_DIR/sysroot"
+    local -a pcdirs=( "$sysroot/lib/pkgconfig" )
+    while [[ "${1:-}" == --pc ]]; do pcdirs+=("$2"); shift 2; done
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local base="$BUILD_DIR/pouch/$name"
+    local src="$base/src/$top" bdir="$base/build" stage="$base/stage"
+    local file="$BUILD_DIR/cache/$tarball"
+    local cc="$fork/build/bin/clang" cxx="$fork/build/bin/clang++"
+    local jobs; jobs="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+    local -a patches=()
+    local p
+    for p in "$REPO_ROOT/usr/ports/${top%-*}/patches"/*.patch; do
+        [[ -e "$p" ]] && patches+=("$p")
+    done
+
+    [[ -x "$cxx" ]] \
+        || { echo "==> $name: fork clang++ not found at $cxx (build the LLVM fork)" >&2; exit 1; }
+    [[ -f "$file" ]] \
+        || { echo "==> $name: $file is absent -- run 'tools/forage.sh' for its [cache.*] pin" >&2; exit 1; }
+    local have; have="$(shasum -a 256 "$file" | awk '{print $1}')"
+    [[ "$have" == "$sha" ]] \
+        || { echo "==> $name: $tarball sha256 mismatch (got $have, want $sha)" >&2; exit 1; }
+    [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
+    local meson; meson="$(meson_tool)" || exit 1
+    local pkgconf; pkgconf="$(command -v pkg-config)" \
+        || { echo "==> $name: this host has no pkg-config (brew install pkgconf)" >&2; exit 1; }
+
+    local d pclist=""
+    for d in "${pcdirs[@]}"; do
+        [[ -d "$d" ]] || { echo "==> $name: pkg-config directory $d is absent" >&2; exit 1; }
+        pclist="$pclist${pclist:+, }'$d'"
+    done
+    local flags="'--target=aarch64-thylacine', '--sysroot=$sysroot', '-march=armv8-a', '-moutline-atomics', '-fno-pie', '-nostdlibinc'"
+    local cross="[binaries]
+c = ['$cc', $flags, '-isystem', '$sysroot/include']
+cpp = ['$cxx', $flags, '-isystem', '$sysroot/include/c++/v1', '-isystem', '$sysroot/include']
+ar = '$LLVM_PREFIX/bin/llvm-ar'
+nm = '$LLVM_PREFIX/bin/llvm-nm'
+ranlib = '$LLVM_PREFIX/bin/llvm-ranlib'
+strip = '$LLVM_PREFIX/bin/llvm-strip'
+objcopy = '$LLVM_PREFIX/bin/llvm-objcopy'
+pkg-config = '$pkgconf'
+# A dependency pkg-config cannot find would otherwise be looked for among this
+# host's own CMake packages (measured: \"tried pkg-config and cmake\").
+cmake = 'false'
+
+[properties]
+needs_exe_wrapper = true
+pkg_config_libdir = [$pclist]
+
+[built-in options]
+c_args = ['-D_GNU_SOURCE=1']
+cpp_args = ['-D_GNU_SOURCE=1']
+c_link_args = ['-static']
+cpp_link_args = ['-static']
+default_library = 'static'
+prefer_static = true
+
+[host_machine]
+system = 'thylacine'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+"
+
+    # Every input by content: the tarball, the patches, the cross file (this
+    # function's text), and the archives and .pc files of each dependency
+    # directory -- the sysroot's included, so a new libc relinks the tests.
+    local patch_sums="" dep_sums cross_sum
+    (( ${#patches[@]} )) && patch_sums="$(shasum -a 256 "${patches[@]}" | awk '{print $1}' | tr '\n' ' ')"
+    dep_sums="$(for d in "${pcdirs[@]}"; do find "$d" "$d/.." -maxdepth 1 -type f \( -name '*.pc' -o -name '*.a' \); done \
+                | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')"
+    cross_sum="$(printf '%s' "$cross" | shasum -a 256 | awk '{print $1}')"
+    local want_stamp="$sha | $patch_sums | meson $MESON_VER | cross $cross_sum | deps $dep_sums | $*"
+    local stamp="$stage/.thylacine-config"
+    if [[ -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" ]]; then
+        ledger "$name: REUSED (cached + up-to-date)"
+        return 0
+    fi
+
+    echo "==> building $name (static, meson, with upstream's tests, -j$jobs)"
+    rm -rf "$base"; mkdir -p "$base/src"
+    tar -xf "$file" -C "$base/src"
+    [[ -f "$src/meson.build" ]] \
+        || { echo "==> $name: unexpected tarball layout (no $top/meson.build)" >&2; exit 1; }
+    for p in ${patches[@]+"${patches[@]}"}; do
+        patch -d "$src" -p1 -t -F 0 -s < "$p" \
+            || { echo "==> $name: patch $(basename "$p") does not apply" >&2; exit 1; }
+    done
+    printf '%s' "$cross" > "$base/cross.ini"
+    # nofallback: a dependency comes from the directories above or not at all,
+    # never from a subproject meson would fetch.
+    python3 "$meson" setup "$bdir" "$src" --cross-file "$base/cross.ini" \
+        --prefix "$stage" --libdir lib --wrap-mode=nofallback "$@" > "$base/configure.log" 2>&1 \
+        || { echo "==> $name: meson setup failed -- see $base/configure.log" >&2; tail -20 "$base/configure.log" >&2; exit 1; }
+    ninja -C "$bdir" -j"$jobs" > "$base/build.log" 2>&1 \
+        || { echo "==> $name: build failed -- see $base/build.log" >&2; tail -30 "$base/build.log" >&2; exit 1; }
+    python3 "$meson" install -C "$bdir" > "$base/install.log" 2>&1 \
+        || { echo "==> $name: install failed -- see $base/install.log" >&2; exit 1; }
+    [[ -d "$stage/lib" && -d "$stage/include" ]] \
+        || { echo "==> $name: the install left no lib/ and include/ under $stage" >&2; exit 1; }
+    printf '%s' "$want_stamp" > "$stamp"
+    ledger "$name: BUILT (static, meson $MESON_VER, $(du -sh "$stage/lib" | cut -f1) of libs at $stage)"
+}
+
+# FreeType and HarfBuzz each use the other: HarfBuzz shapes FreeType faces, and
+# FreeType's autohinter finds a script's glyphs through HarfBuzz. So FreeType
+# builds twice, the order distributions use: without HarfBuzz, for HarfBuzz to
+# build against, then with it (which also registers FreeType's issue-1441).
+# PNG for colour bitmap glyphs (libpng, B-3d); zlib from the sysroot; brotli
+# (WOFF2 inside FreeType) and bzip2 off.
+FT_OPTIONS=( -Dpng=enabled -Dzlib=system -Dbrotli=disabled -Dbzip2=disabled )
+
+build_freetype_nohb() {
+    build_libpng
+    meson_lib freetype-nohb "$FT_TARBALL" "$FT_SHA256" "freetype-$FT_VER" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        "${FT_OPTIONS[@]}" -Dharfbuzz=disabled -Dtests=disabled
+}
+
+# Upstream's defaults (buildtype debugoptimized, b_ndebug if-release: its tests
+# and the fuzzer driver assert), with ICU and FreeType on. GLib is off, and with
+# it the utilities (hb-shape, hb-subset: util/meson.build builds them only with
+# GLib) and the suites they drive -- test/api, test/shape, test/subset:
+# dec-2026-10-14-b3-test-bar skips HarfBuzz's GLib suites. The utilities option
+# stays at its default, on: it also registers test/vector. Cairo, chafa, the
+# docs and introspection need GLib or the host.
+build_harfbuzz() {
+    build_freetype_nohb
+    build_icu
+    local icu="$BUILD_DIR/pouch/icu/stage" f
+    [[ -f "$icu/lib/libicuuc.a" ]] \
+        || { echo "==> harfbuzz: ICU is not built (see above)" >&2; exit 1; }
+    # ICU installs with prefix / under DESTDIR=<stage>, so its .pc files name
+    # -L/lib; meson gets copies naming the stage instead (ICU itself, which
+    # JSC links, is left as it is). Beside lib/pkgconfig, so meson_lib's stamp
+    # still hashes the archives in lib/.
+    rm -rf "$icu/lib/pkgconfig-staged"; mkdir -p "$icu/lib/pkgconfig-staged"
+    for f in "$icu/lib/pkgconfig"/*.pc; do
+        sed "s|^prefix = /\$|prefix = $icu|" "$f" > "$icu/lib/pkgconfig-staged/$(basename "$f")"
+        grep -q "^prefix = $icu\$" "$icu/lib/pkgconfig-staged/$(basename "$f")" \
+            || { echo "==> harfbuzz: $f has no 'prefix = /' line to rewrite" >&2; exit 1; }
+    done
+    meson_lib harfbuzz "$HB_TARBALL" "$HB_SHA256" "harfbuzz-$HB_VER" \
+        --pc "$BUILD_DIR/pouch/freetype-nohb/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        --pc "$icu/lib/pkgconfig-staged" \
+        -Dfreetype=enabled -Dicu=enabled -Dglib=disabled -Dgobject=disabled \
+        -Dcairo=disabled -Dchafa=disabled -Ddocs=disabled -Dintrospection=disabled \
+        -Dtests=enabled
+}
+
+# The FreeType the browser links, and the one whose tests run (harfbuzz.pc
+# requires freetype2, which the first pass provides). issue-1063's font goes
+# into tests/data, checked by its own digest as well as the zip's.
+build_freetype() {
+    build_harfbuzz
+    meson_lib freetype "$FT_TARBALL" "$FT_SHA256" "freetype-$FT_VER" \
+        --pc "$BUILD_DIR/pouch/libpng/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/harfbuzz/stage/lib/pkgconfig" \
+        --pc "$BUILD_DIR/pouch/freetype-nohb/stage/lib/pkgconfig" \
+        "${FT_OPTIONS[@]}" -Dharfbuzz=enabled -Dtests=enabled
+    local data="$BUILD_DIR/pouch/freetype/src/freetype-$FT_VER/tests/data"
+    local ttf="$data/As.I.Lay.Dying.ttf" zip="$BUILD_DIR/cache/$FTFONT_ZIP" have
+    if [[ "$(shasum -a 256 "$ttf" 2>/dev/null | awk '{print $1}')" != "$FTFONT_TTF_SHA256" ]]; then
+        [[ -f "$zip" ]] \
+            || { echo "==> freetype: $zip is absent -- run 'tools/forage.sh cache.ftfont'" >&2; exit 1; }
+        have="$(shasum -a 256 "$zip" | awk '{print $1}')"
+        [[ "$have" == "$FTFONT_SHA256" ]] \
+            || { echo "==> freetype: $FTFONT_ZIP sha256 mismatch (got $have, want $FTFONT_SHA256)" >&2; exit 1; }
+        unzip -p "$zip" "As I Lay Dying.ttf" > "$ttf.tmp" \
+            || { echo "==> freetype: $FTFONT_ZIP holds no 'As I Lay Dying.ttf'" >&2; exit 1; }
+        have="$(shasum -a 256 "$ttf.tmp" | awk '{print $1}')"
+        [[ "$have" == "$FTFONT_TTF_SHA256" ]] \
+            || { echo "==> freetype: the font in $FTFONT_ZIP has sha256 $have, not $FTFONT_TTF_SHA256" >&2; exit 1; }
+        mv "$ttf.tmp" "$ttf"
+    fi
+}
+
 build_lib_tests() {
     # Boosty B-3 (dec-2026-10-14-b3-test-bar): each browser library's compiled
     # upstream test programs, cross-built against the same static archives the
@@ -7044,6 +7308,8 @@ lib_tests_icu() {
 lib_tests_muster() {
     build_libwebp           # libpng and libjpeg-turbo first
     build_libxml2
+    build_freetype          # HarfBuzz, and FreeType's first pass, first
+    local meson; meson="$(meson_tool)" || exit 1
     local out="$BUILD_DIR/pouch/lib-tests"
     local stage="$out/stage"
     local lt="$stage/var/lib_tests"
@@ -7054,18 +7320,30 @@ lib_tests_muster() {
     "$LLVM_PREFIX/bin/llvm-strip" -o "$lt/bin/muster" "$muster" \
         || { echo "==> lib tests: llvm-strip muster failed" >&2; exit 1; }
     local lib lbase top dev json kind host devp d
-    local -a extra
+    local -a extra skips
     : > "$out/writable"
-    for lib in libpng libjpeg-turbo libwebp libxml2; do
+    for lib in libpng libjpeg-turbo libwebp libxml2 freetype harfbuzz; do
         lbase="$BUILD_DIR/pouch/$lib"
         top="$(basename "$(find "$lbase/src" -mindepth 1 -maxdepth 1 -type d)")"
         dev="/var/lib_tests/$lib"
         json="$out/$lib.ctest.json"
         extra=()
         case "$lib" in
-            libpng)  extra=( --png-template "$lbase/src/$top/scripts/cmake/test.cmake.in" ) ;;
+            libpng)   extra=( --png-template "$lbase/src/$top/scripts/cmake/test.cmake.in" ) ;;
         esac
-        if [[ "$lib" == libwebp ]]; then
+        # HarfBuzz's Python tests check its source tree and NEWS on the build
+        # host; dec-2026-10-14-b3-test-bar skips them by name. (A cross build
+        # registers no check-symbols, check-static-inits or check-libstdc++:
+        # src/meson.build wants the build host's own tools for those.)
+        skips=()
+        [[ "$lib" == harfbuzz ]] && skips=( --skip check-c-linkage-decls --skip check-externs
+            --skip check-header-guards --skip check-includes --skip check-release-notes )
+        if [[ "$lib" == freetype || "$lib" == harfbuzz ]]; then
+            json="$out/$lib.meson.json"
+            python3 "$meson" introspect --tests "$lbase/build" > "$json" \
+                || { echo "==> lib tests: meson could not list $lib's tests" >&2; exit 1; }
+            extra=( --meson "$json" --meson-build "$lbase/build" --meson-source "$lbase/src/$top" )
+        elif [[ "$lib" == libwebp ]]; then
             sed -e "s|@BUILD@|$lbase/build|g" -e "s|@SRC@|$lbase/src/$top|g" \
                 "$REPO_ROOT/tools/libtests-webp.json" > "$json"
         else
@@ -7074,9 +7352,10 @@ lib_tests_muster() {
         fi
         # The build and source trees map side by side, so a path one test
         # names relative to its directory resolves the same on the device.
-        python3 "$REPO_ROOT/tools/libtests-manifest.py" --json "$json" --lib "$lib" \
+        [[ "${extra[0]:-}" == --meson ]] || extra=( --json "$json" ${extra[@]+"${extra[@]}"} )
+        python3 "$REPO_ROOT/tools/libtests-manifest.py" --lib "$lib" \
             --map "$lbase/build=$dev/build" --map "$lbase/src=$dev/src" \
-            --logs "/tmp/muster-$lib" ${extra[@]+"${extra[@]}"} \
+            --logs "/tmp/muster-$lib" ${extra[@]+"${extra[@]}"} ${skips[@]+"${skips[@]}"} \
             --out "$lt/$lib.manifest" --stage "$out/$lib.stage" \
             || { echo "==> lib tests: $lib's test list cannot run on the device (see above)" >&2; exit 1; }
         while read -r kind host devp; do
@@ -7085,6 +7364,10 @@ lib_tests_muster() {
                 exe)  "$LLVM_PREFIX/bin/llvm-strip" -o "$stage$devp" "$host" \
                           || { echo "==> lib tests: llvm-strip $host failed" >&2; exit 1; } ;;
                 file) cp "$host" "$stage$devp" ;;
+                # A tar pipe merges: `cp -R dir existing-dir` would nest.
+                tree) mkdir -p "$stage$devp"
+                      ( cd "$host" && tar -cf - . ) | ( cd "$stage$devp" && tar -xf - ) \
+                          || { echo "==> lib tests: $host did not stage" >&2; exit 1; } ;;
                 *)    echo "==> lib tests: $out/$lib.stage: unknown kind $kind" >&2; exit 1 ;;
             esac
         done < "$out/$lib.stage"
@@ -7105,9 +7388,18 @@ lib_tests_muster() {
             done
             echo "$dev/src/$top" >> "$out/writable"
         fi
+        if [[ "$lib" == harfbuzz ]]; then
+            # The thread tests read fonts and texts their source names
+            # (test/threads/*.cc default_tests), run from the source top.
+            for d in perf/fonts perf/texts test/subset/data/fonts; do
+                mkdir -p "$stage$dev/src/$top/$d"
+                ( cd "$lbase/src/$top/$d" && tar -cf - . ) | ( cd "$stage$dev/src/$top/$d" && tar -xf - ) \
+                    || { echo "==> lib tests: $lib's $d/ did not stage" >&2; exit 1; }
+            done
+        fi
         grep -c '^test ' "$lt/$lib.manifest" > "$out/$lib.count"
     done
-    ledger "lib tests: muster lists STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count"), libxml2 $(cat "$out/libxml2.count") tests)"
+    ledger "lib tests: muster lists STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count"), libxml2 $(cat "$out/libxml2.count"), freetype $(cat "$out/freetype.count"), harfbuzz $(cat "$out/harfbuzz.count") tests)"
 }
 
 # The tree the pin plus the patch series builds, applied IN ORDER in a scratch
@@ -7977,6 +8269,7 @@ case "$target" in
     lib-tests)   build_lib_tests   ;;
     codecs)      build_libwebp     ;;
     libxml2)     build_libxml2     ;;
+    fonts)       build_freetype    ;;
     jsc)         build_jsc         ;;
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;
@@ -8002,7 +8295,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, lib-tests, codecs, libxml2, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, lib-tests, codecs, libxml2, fonts, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

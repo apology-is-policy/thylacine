@@ -5,6 +5,7 @@ parent: moc-substrate
 title: "The library tests — upstream's own test lists, translated for the device and run by muster"
 code:
   - usr/muster/src/main.rs
+  - usr/muster/src/tap.rs
   - tools/libtests-manifest.py
   - tools/libtests-webp.json
   - usr/ports/libpng/patches/0001-tests-link-the-static-library.patch
