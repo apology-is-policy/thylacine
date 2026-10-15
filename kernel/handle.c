@@ -733,12 +733,19 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // non-transferable refusal, the devsrv-Spoor refusal, the one-lock-hold TOCTOU
 // discipline, the rollback -- is identical and must stay that way, because both
 // create a second handle naming one object and so face the same hazards.
-static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
-                                bool inherit_rights, hidx_t min_idx,
-                                bool cloexec) {
+//
+// B-3b: the reason for a refusal is decided HERE, under the lock that decided
+// it -- -T_E_BADF (no such source), -T_E_INVAL (min_idx out of range),
+// -T_E_ACCES (a kind or rights the dup may not copy), -T_E_MFILE (no free slot
+// at or above min_idx) -- so no caller has to re-query a slot to tell them
+// apart (a re-query races a peer's close or reuse). The flat-error wrappers
+// below keep their -1 contract.
+static int handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
+                             bool inherit_rights, hidx_t min_idx,
+                             bool cloexec) {
     struct HandleTable *t = proc_handles_or_extinct(p);
-    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
-    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) return -1;
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -T_E_BADF;
+    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) return -T_E_INVAL;
 
     // #844: validate the parent + acquire the child's ref + install the child
     // slot under ONE table-lock hold, so a concurrent handle_close of the
@@ -750,7 +757,7 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     struct Handle *parent = &t->slots[h];
     if (parent->magic != HANDLE_MAGIC) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_BADF;
     }
 
     // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: dup is forbidden for every
@@ -762,7 +769,7 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     //   - Srv: exactly one connection Spoor per Proc (CORVUS-DESIGN.md §6.2).
     if (!kobj_kind_is_transferable(parent->kind)) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // stalk-3b-β NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a
@@ -773,7 +780,7 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     if (parent->kind == KOBJ_SPOOR && parent->obj &&
         ((struct Spoor *)parent->obj)->dc == 's') {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // #151: POSIX dup gives the new descriptor the SAME access as the old, so
@@ -791,11 +798,11 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     // where `new_rights` comes from should still have to clear this bar.
     if ((new_rights & parent->rights) != new_rights) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
     if (!valid_alloc_args(parent->kind, new_rights)) {
         spin_unlock(&t->lock);
-        return -1;
+        return -T_E_ACCES;
     }
 
     // Capture BEFORE install (the install skips the occupied parent slot, so
@@ -814,16 +821,24 @@ static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
         // Roll back the acquire on table-full, OUTSIDE the lock (release may
         // sleep for a Spoor's last drop; harmless for the kinds dup allows).
         handle_release_obj(kind, obj);
+        return -T_E_MFILE;
     }
     return child;
 }
 
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
-    return handle_dup_common(p, h, new_rights, /*inherit_rights=*/false,
-                             /*min_idx=*/0, /*cloexec=*/false);
+    int r = handle_dup_common(p, h, new_rights, /*inherit_rights=*/false,
+                              /*min_idx=*/0, /*cloexec=*/false);
+    return r < 0 ? -1 : (hidx_t)r;
 }
 
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) {
+    int r = handle_dup_posix_checked(p, h, min_idx, cloexec);
+    return r < 0 ? -1 : (hidx_t)r;
+}
+
+int handle_dup_posix_checked(struct Proc *p, hidx_t h, hidx_t min_idx,
+                             bool cloexec) {
     return handle_dup_common(p, h, RIGHT_NONE, /*inherit_rights=*/true,
                              min_idx, cloexec);
 }
@@ -988,6 +1003,29 @@ int handle_get_status_flags(struct Proc *p, hidx_t h,
         // flag is RMW'd from other lock domains (see handle_set_nonblock) --
         // read it atomically even under this table's lock.
         if (nonblock_out) *nonblock_out = (spoor_flag_get(s) & CNONBLOCK) != 0;
+    }
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+int handle_get_status(struct Proc *p, hidx_t h, struct handle_status *out) {
+    out->cloexec  = false;
+    out->omode    = 0;
+    out->nonblock = false;
+
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    if (t->slots[h].magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    out->cloexec = cloexec_get_locked(t, h);
+    if (t->slots[h].kind == KOBJ_SPOOR && t->slots[h].obj) {
+        struct Spoor *s = (struct Spoor *)t->slots[h].obj;
+        out->omode    = (u32)s->mode;                        // open-time, plain
+        out->nonblock = (spoor_flag_get(s) & CNONBLOCK) != 0; // see handle_set_nonblock
     }
     spin_unlock(&t->lock);
     return 0;

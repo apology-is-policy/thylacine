@@ -416,6 +416,12 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // slot, non-transferable kind, devsrv Spoor, table full) plus an out-of-range
 // min_idx.
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
+// B-3b: handle_dup_posix with the refusal's reason, decided under the table
+// lock: the new index, or -T_E_BADF (no live source), -T_E_INVAL (min_idx out of
+// range), -T_E_ACCES (a kind the alias rules refuse), -T_E_MFILE (no free slot
+// at or above min_idx). SYS_HANDLE_DUP_TO's lowest-free form is this call.
+int handle_dup_posix_checked(struct Proc *p, hidx_t h, hidx_t min_idx,
+                             bool cloexec);
 
 // #157: dup `old` onto the SPECIFIC index `new_h`, closing whatever was there.
 // This is POSIX dup2 / Linux dup3, and it is a genuinely new combination rather
@@ -485,6 +491,19 @@ int handle_get_cloexec(struct Proc *p, hidx_t h);
 int handle_set_nonblock(struct Proc *p, hidx_t h, bool on);
 int handle_get_status_flags(struct Proc *p, hidx_t h,
                             int *omode_out, bool *nonblock_out);
+
+// B-3b: everything F_GETFD and F_GETFL report, read under ONE table-lock hold so
+// the descriptor flag and the open-file status describe the same occupant of
+// the slot (two calls could straddle a peer's close and reuse). `omode` is the
+// Spoor's open-time omode word, unmasked (access mode, OTRUNC, OAPPEND); a
+// non-Spoor fd reports 0 and nonblock false. Returns 0, or -1 for an
+// out-of-range or free slot.
+struct handle_status {
+    bool cloexec;
+    u32  omode;
+    bool nonblock;
+};
+int handle_get_status(struct Proc *p, hidx_t h, struct handle_status *out);
 
 // #151: close every handle whose close-on-exec flag is set. Returns the number
 // closed. Called from execve AFTER the commit point, for two reasons that pull

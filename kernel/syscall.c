@@ -8190,9 +8190,13 @@ static s64 sys_handle_flags_get_handler(u64 hraw) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -(s64)T_E_INVAL;
     if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
-    int on = handle_get_cloexec(t->proc, (hidx_t)hraw);
-    if (on < 0) return -(s64)T_E_BADF;
-    return on ? (s64)SYS_HANDLE_CLOSE_ON_EXEC : 0;
+    struct handle_status st;
+    if (handle_get_status(t->proc, (hidx_t)hraw, &st) != 0) return -(s64)T_E_BADF;
+    u64 word = st.cloexec ? (u64)SYS_HANDLE_CLOSE_ON_EXEC : 0;
+    word |= (u64)(st.omode & 3u) << SYS_HANDLE_STATUS_OMODE_SHIFT;
+    if (st.nonblock)                       word |= SYS_HANDLE_STATUS_NONBLOCK;
+    if (st.omode & SYS_WALK_OPEN_OAPPEND)  word |= SYS_HANDLE_STATUS_APPEND;
+    return (s64)word;
 }
 
 // The descriptor flag and target replacement share existing table ownership.
@@ -8206,14 +8210,24 @@ static s64 sys_handle_flags_set_handler(u64 hraw, u64 flags) {
         ? -(s64)T_E_BADF : 0;
 }
 
+// SYS_HANDLE_DUP_LOWEST makes `target` a floor: POSIX F_DUPFD answers EINVAL
+// for a floor out of range (an argument error) where dup2 answers EBADF for a
+// target out of range, and a source may equal its floor -- the result never
+// can, since the source's own slot is occupied.
 static s64 sys_handle_dup_to_handler(u64 old, u64 target, u64 flags) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -(s64)T_E_INVAL;
-    if (flags & ~(u64)SYS_HANDLE_CLOSE_ON_EXEC) return -(s64)T_E_INVAL;
-    if (old >= (u64)PROC_HANDLE_MAX || target >= (u64)PROC_HANDLE_MAX)
-        return -(s64)T_E_BADF;
+    if (flags & ~(u64)(SYS_HANDLE_CLOSE_ON_EXEC | SYS_HANDLE_DUP_LOWEST))
+        return -(s64)T_E_INVAL;
+    bool cloexec = (flags & SYS_HANDLE_CLOSE_ON_EXEC) != 0;
+    if (old >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+    if (flags & SYS_HANDLE_DUP_LOWEST) {
+        if (target >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_INVAL;
+        return handle_dup_posix_checked(t->proc, (hidx_t)old, (hidx_t)target, cloexec);
+    }
+    if (target >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
     if (old == target) return -(s64)T_E_INVAL;
-    return handle_dup_to_checked(t->proc, (hidx_t)old, (hidx_t)target, flags != 0);
+    return handle_dup_to_checked(t->proc, (hidx_t)old, (hidx_t)target, cloexec);
 }
 
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
@@ -14102,26 +14116,22 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                 __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
             if (!viv_socktab_alias_fits(dstab, (s32)fd, -1))
                 return -(s64)T_E_MFILE;
-            hidx_t nfd = handle_dup_posix(p, fd, (hidx_t)min_fd, cloexec);
-            // handle_dup_posix folds "no such fd" and "table full" into one -1;
-            // split them here, because the two errnos are LOAD-BEARING to a
-            // shell and not interchangeable. This used to answer EMFILE for
-            // both, on the argument that a guest which just used the fd knows
-            // it exists -- but busybox ash's redirect() probes the TARGET fd of
-            // every `N>&M` with fcntl(N, F_DUPFD, 10) precisely to learn
-            // whether N is open: EBADF means "not open, nothing to save", and
-            // ANY other errno is "strange" and aborts the command
+            // The two errnos are LOAD-BEARING to a shell and not
+            // interchangeable: busybox ash's redirect() probes the TARGET fd of
+            // every `N>&M` with fcntl(N, F_DUPFD, 10) precisely to learn whether
+            // N is open -- EBADF means "not open, nothing to save", and ANY
+            // other errno is "strange" and aborts the command
             // (`fcntl(3,F_DUPFD,10): No file descriptors available`, once per
             // `3>&1` in the L-6c gate). POSIX: closed fd -> EBADF; table full
-            // -> EMFILE. The liveness re-check is the same lookup the GETFD arm
-            // uses; the residual -1 set (table full, a non-dup-able kind, a
-            // rights failure) stays EMFILE. A peer closing the fd between the
-            // dup and this lookup misreports one errno -- unreachable for a
-            // single-threaded phenotype Proc, and harmless if it were not.
-            if (nfd < 0) {
-                if (handle_get_cloexec(p, fd) < 0)  return -(s64)T_E_BADF;
-                return -(s64)T_E_MFILE;
-            }
+            // -> EMFILE. The checked core decides which under the table lock
+            // that decided the dup (B-3b; this arm used to re-query the fd
+            // afterwards, which a peer's close could fool); a non-dup-able
+            // kind stays EMFILE, as Linux has no "exists but cannot be
+            // duplicated" answer.
+            int dr = handle_dup_posix_checked(p, fd, (hidx_t)min_fd, cloexec);
+            if (dr < 0)
+                return dr == -T_E_BADF ? -(s64)T_E_BADF : -(s64)T_E_MFILE;
+            hidx_t nfd = (hidx_t)dr;
             if (viv_socktab_alias(dstab, (s32)fd, (s32)nfd) < 0) {
                 handle_close(p, nfd);            // fresh number: exact unwind
                 return -(s64)T_E_MFILE;
@@ -14188,15 +14198,14 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (!viv_socktab_alias_fits(stab, (s32)oldfd, -1))
             return -(s64)T_E_MFILE;
 
-        hidx_t nfd = handle_dup_posix(p, (hidx_t)oldfd, 0, false);
         // Split EBADF (closed source) from EMFILE (table full / a non-dup-able
         // kind), exactly as the F_DUPFD arm: the two errnos are load-bearing and
-        // not interchangeable. handle_dup_posix folds them into one -1, so the
-        // liveness re-check (the same lookup GETFD uses) disambiguates.
-        if (nfd < 0) {
-            if (handle_get_cloexec(p, (hidx_t)oldfd) < 0)  return -(s64)T_E_BADF;
-            return -(s64)T_E_MFILE;
-        }
+        // not interchangeable, and the checked core decides which under the
+        // table lock that decided the dup.
+        int dr = handle_dup_posix_checked(p, (hidx_t)oldfd, 0, false);
+        if (dr < 0)
+            return dr == -T_E_BADF ? -(s64)T_E_BADF : -(s64)T_E_MFILE;
+        hidx_t nfd = (hidx_t)dr;
         if (viv_socktab_alias(stab, (s32)oldfd, (s32)nfd) < 0) {
             // Lost the room to a peer. The number was fresh, so closing it
             // restores the pre-call state exactly -- better than handing back a

@@ -2498,17 +2498,24 @@ enum {
     SYS_ICACHE_SYNC_SPACE = 128,
 
     // Read metadata from the caller's own handle slot without allocating,
-    // borrowing the object, or requiring READ/WRITE rights. Returns the native
-    // close-on-image-replacement bit (0 or SYS_HANDLE_CLOSE_ON_EXEC), -EBADF
-    // for a non-live/out-of-range slot, -EINVAL without a current Proc.
-    // This is an instantaneous query, not a pin against concurrent close/reuse.
+    // borrowing the object, or requiring READ/WRITE rights. Returns a flag word:
+    // the close-on-image-replacement bit (SYS_HANDLE_CLOSE_ON_EXEC) and the
+    // open-file status (SYS_HANDLE_STATUS_*: open mode, nonblock, append), all
+    // read under one table-lock hold; -EBADF for a non-live/out-of-range slot,
+    // -EINVAL without a current Proc. This is an instantaneous query, not a pin
+    // against concurrent close/reuse.
     SYS_HANDLE_FLAGS_GET = 129, // arg: fd (x0); no user-memory pointer
-    // Caller-local metadata / exact-target replacement. Flags are 0 or bit0.
-    // Validate Proc, flags, full-width bounds, then (DUP_TO) distinct indices;
-    // locked validity/alias checks follow. Errors: EINVAL, EBADF, and DUP_TO
-    // EACCES for forbidden alias kinds. No EPERM; no cross-Proc authority.
+    // Caller-local metadata / exact-target replacement. SET takes 0 or bit0.
+    // DUP_TO takes bit0 and SYS_HANDLE_DUP_LOWEST: without it x1 is the exact
+    // target; with it x1 is a floor and the new descriptor goes to the lowest
+    // free index at or above it (dup, F_DUPFD). Validate Proc, flags, the
+    // source's full-width bound, then the target's (EBADF) or the floor's
+    // (EINVAL), then (exact) distinct indices; locked validity/alias checks
+    // follow. Errors: EINVAL, EBADF, DUP_TO EACCES for forbidden alias kinds,
+    // and lowest-free EMFILE when no index at or above the floor is free.
+    // No EPERM; no cross-Proc authority.
     SYS_HANDLE_FLAGS_SET = 130, // x0 fd, x1 flags -> 0
-    SYS_HANDLE_DUP_TO = 131,    // x0 source, x1 target, x2 flags -> target
+    SYS_HANDLE_DUP_TO = 131,    // x0 source, x1 target or floor, x2 flags -> new index
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
@@ -2528,6 +2535,26 @@ enum {
 
 #define SYS_HANDLE_CLOSE_ON_EXEC 1u
 _Static_assert(SYS_HANDLE_CLOSE_ON_EXEC == 1u, "handle flag ABI");
+// SYS_HANDLE_DUP_TO only: x1 is a floor, not a target (B-3b, vote 7).
+#define SYS_HANDLE_DUP_LOWEST    2u
+// SYS_HANDLE_FLAGS_GET's open-file status, beside bit0 and never accepted by
+// SYS_HANDLE_FLAGS_SET. The open mode is the Spoor's OREAD/OWRITE/ORDWR/OEXEC
+// (0-3; 0-2 are byte-equal to Linux O_RDONLY/O_WRONLY/O_RDWR); NONBLOCK is the
+// open file's CNONBLOCK; APPEND that it was opened SYS_WALK_OPEN_OAPPEND. A
+// non-Spoor descriptor reports mode 0 with neither bit.
+#define SYS_HANDLE_STATUS_OMODE_SHIFT 8u
+#define SYS_HANDLE_STATUS_OMODE_MASK  (3u << SYS_HANDLE_STATUS_OMODE_SHIFT)
+#define SYS_HANDLE_STATUS_NONBLOCK    (1u << 10)
+#define SYS_HANDLE_STATUS_APPEND      (1u << 11)
+_Static_assert(SYS_HANDLE_DUP_LOWEST == 2u &&
+               SYS_HANDLE_STATUS_OMODE_MASK == 0x300u &&
+               SYS_HANDLE_STATUS_NONBLOCK == 0x400u &&
+               SYS_HANDLE_STATUS_APPEND == 0x800u,
+               "handle flag ABI: mirrored by libt, libthyla-rs and Pouch");
+_Static_assert(((SYS_HANDLE_CLOSE_ON_EXEC | SYS_HANDLE_DUP_LOWEST) &
+                (SYS_HANDLE_STATUS_OMODE_MASK | SYS_HANDLE_STATUS_NONBLOCK |
+                 SYS_HANDLE_STATUS_APPEND)) == 0,
+               "the status bits never overlap a flag DUP_TO or SET accepts");
 
 // SYS_CONSOLE_EPISODE ops (x0). ABI: mirrored by libthyla-rs
 // T_CONSOLE_EPISODE_* and docs/ERRORS.md.

@@ -2453,6 +2453,13 @@ static inline long t_pivot_root(long new_root_fd) {
 // Instantaneous metadata query on the caller's own handle; no rights probe.
 #define T_SYS_HANDLE_FLAGS_GET 129
 #define T_HANDLE_CLOSE_ON_EXEC 1u
+// T_SYS_HANDLE_DUP_TO only: the target is a floor (lowest free at or above).
+#define T_HANDLE_DUP_LOWEST 2u
+// t_handle_flags_get's open-file status beside bit0 (kernel SYS_HANDLE_STATUS_*).
+#define T_HANDLE_STATUS_OMODE_SHIFT 8u
+#define T_HANDLE_STATUS_OMODE_MASK  0x300u
+#define T_HANDLE_STATUS_NONBLOCK    0x400u
+#define T_HANDLE_STATUS_APPEND      0x800u
 __attribute__((always_inline))
 static inline long t_handle_flags_get(long fd) {
     register long x0 __asm__("x0") = fd;

@@ -3942,6 +3942,13 @@ macro_rules! eprintln {
 /// Native descriptor metadata, not a lifetime pin. Returns -EBADF if absent.
 pub const T_SYS_HANDLE_FLAGS_GET: u64 = 129;
 pub const T_HANDLE_CLOSE_ON_EXEC: u64 = 1;
+/// `t_handle_dup_to` only: the target is a floor (lowest free at or above).
+pub const T_HANDLE_DUP_LOWEST: u64 = 2;
+/// `t_handle_flags_get`'s open-file status beside bit0 (kernel SYS_HANDLE_STATUS_*).
+pub const T_HANDLE_STATUS_OMODE_SHIFT: u64 = 8;
+pub const T_HANDLE_STATUS_OMODE_MASK: u64 = 0x300;
+pub const T_HANDLE_STATUS_NONBLOCK: u64 = 0x400;
+pub const T_HANDLE_STATUS_APPEND: u64 = 0x800;
 pub unsafe fn t_handle_flags_get(fd: i64) -> i64 {
     let mut x0 = fd;
     asm!("svc #0", inout("x0") x0, in("x8") T_SYS_HANDLE_FLAGS_GET,
