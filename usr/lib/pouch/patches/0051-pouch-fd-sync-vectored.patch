@@ -35,7 +35,7 @@ lseek / pread / pwrite / fstat on a socket: a pouch socket fd is a libc slot
 never issued it: EBADF, or EIO through the flat -1. Now a seek or positional
 transfer answers ESPIPE (EBADF for a vacant slot), after a negative offset's
 EINVAL (Linux checks the offset first), and fstat answers a zeroed stat with
-S_IFSOCK | 0777, one link, the slot as its inode, and a device number the
+S_IFSOCK | 0777, one link, the slot plus one as its inode, and a device number the
 kernel never issues (all bits set; the kernel's count starts at 1).
 
 Not here, recorded: fcntl, dup and dup2/dup3 onto a number (B-3b, on Astra's
@@ -136,7 +136,7 @@ diff --color -ruN a/src/linux/pwritev2.c b/src/linux/pwritev2.c
  }
 diff --color -ruN a/src/stat/fstat.c b/src/stat/fstat.c
 --- a/src/stat/fstat.c	2026-10-15 01:18:05
-+++ b/src/stat/fstat.c	2026-10-15 01:19:35
++++ b/src/stat/fstat.c	2026-10-15 02:28:51
 @@ -22,6 +22,7 @@
  #include <sys/stat.h>
  #include <errno.h>
@@ -151,8 +151,8 @@ diff --color -ruN a/src/stat/fstat.c b/src/stat/fstat.c
  	if (!st)       return __syscall_ret(-EFAULT);
 +
 +	/* A pouch socket is a libc slot, not a kernel handle: answer for it here,
-+	 * as a socket (S_IFSOCK, the 0777 Linux reports), with the slot as its
-+	 * inode so two open sockets differ, on a device number the kernel never
++	 * as a socket (S_IFSOCK, the 0777 Linux reports), with the slot plus one
++	 * as its inode so two open sockets differ, on a device number the kernel never
 +	 * issues (its counter starts at 1 and climbs; static Devs report 0), so
 +	 * no file or pipe shares the pair. */
 +	if (__pouch_fd_is_sock(fd)) {
@@ -170,8 +170,8 @@ diff --color -ruN a/src/stat/fstat.c b/src/stat/fstat.c
  	 * syscall so a partial uaccess fault inside the kernel's per-byte
 diff --color -ruN a/src/unistd/_pouch_iov.c b/src/unistd/_pouch_iov.c
 --- a/src/unistd/_pouch_iov.c	1970-01-01 01:00:00
-+++ b/src/unistd/_pouch_iov.c	2026-10-15 01:24:18
-@@ -0,0 +1,155 @@
++++ b/src/unistd/_pouch_iov.c	2026-10-15 02:28:43
+@@ -0,0 +1,159 @@
 +/* pouch -- readv / writev / preadv / pwritev as ONE read or write.
 + *
 + * The kernel has no vectored I/O. One call per iovec would split what the
@@ -192,9 +192,13 @@ diff --color -ruN a/src/unistd/_pouch_iov.c b/src/unistd/_pouch_iov.c
 + * thread is cancelled inside the transfer. A heap buffer that cannot be had
 + * answers ENOMEM.
 + *
-+ * Unlike musl's single syscall, a gathered vector past POUCH_IOV_STACK bytes
-+ * calls malloc (not async-signal-safe), and a bad iov_base there faults in
-+ * the copy rather than answering EFAULT. */
++ * Unlike musl's single syscall, which answers EFAULT for a bad address: a bad
++ * iov array faults in the validation, on every path; a bad iov_base faults in
++ * the copy whenever the vector is gathered (more than one non-empty element),
++ * stack tier included. Past POUCH_IOV_STACK bytes the gather calls malloc,
++ * which is not async-signal-safe, and pushes a cleanup handler: a signal
++ * handler that siglongjmps out of that transfer strands the handler's record,
++ * and a later pthread_exit runs it through the abandoned frame. */
 +#include <sys/uio.h>
 +#include <unistd.h>
 +#include <limits.h>

@@ -11790,7 +11790,8 @@ int main(void) {
         // fsyncs a file on the Stratum FS (a real Tsync), refuses fsync on a
         // socket, proves writev is ONE gathered write (EAGAIN with nothing
         // written on a nonblocking pipe with two bytes free), scatters a readv,
-        // round-trips 3 MiB through pwritev/preadv, and reads ESPIPE / S_ISSOCK
+        // round-trips 3 MiB through pwritev/preadv, runs preadv2/pwritev2
+        // without flags on them, and reads ESPIPE / S_ISSOCK
         // for a socket's seek, positional I/O and fstat. Boot-fatal.
         {
             const char fd_name[]   = "/bin/pouch-hello-fd";

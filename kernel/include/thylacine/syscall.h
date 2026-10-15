@@ -1704,7 +1704,9 @@ enum {
     // SYS_PREAD(fd, buf, len, off) -> bytes read (0 = EOF) / -1 / -errno
     //   x0 = fd   (hidx_t; KOBJ_SPOOR with RIGHT_READ; CWALKONLY/O_PATH
     //              rejected, as SYS_READ.)
-    //   x1 = buf  (user VA; validated + staged exactly like SYS_READ.)
+    //   x1 = buf  (user VA; staged like SYS_READ, but a buffer that fails
+    //              validation answers the flat -1 where SYS_READ answers
+    //              -T_E_FAULT; a fault in the copy is -T_E_FAULT on both.)
     //   x2 = len  (clamped to SYS_RW_MAX per call; short reads are normal.)
     //   x3 = off  (s64 absolute byte offset. off < 0 -> -T_E_INVAL; off + len
     //              past INT64_MAX -> -T_E_INVAL. Requires dev->seekable (the

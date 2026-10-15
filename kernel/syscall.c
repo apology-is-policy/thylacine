@@ -4514,7 +4514,8 @@ static s64 sys_open_create_handler(u64 start_fd_raw, u64 path_va,
 
 // =============================================================================
 // SYS_FSYNC — durability barrier (FS-mutation foundation; IDENTITY-DESIGN.md
-// §9.2). RIGHT_WRITE (fsync is the write-side flush). NULL .fsync slot -> -1.
+// §9.2). RIGHT_WRITE (fsync is the write-side flush), else -T_E_BADF; a Dev
+// with a NULL .fsync slot -> -T_E_OPNOTSUPP.
 // =============================================================================
 
 static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {

@@ -26,17 +26,27 @@
 //                   byte-exact through preadv, resumed the same way.
 //   iov-errnos    : a negative count, a count past IOV_MAX, lengths summing
 //                   past SSIZE_MAX and a negative preadv offset are EINVAL.
+//   v2            : preadv2 and pwritev2 without flags are preadv and pwritev:
+//                   offset -1 writes at the cursor and advances it, offset 0
+//                   reads without moving it, offset -2 is EINVAL; a flag
+//                   (RWF_HIPRI) is ENOSYS, as the kernel has none.
 //   sock-seek     : lseek, pread and pwrite on a socket are ESPIPE; a negative
 //                   pread or pwrite offset on a socket EINVAL, as Linux checks
 //                   the offset before the descriptor.
-//   sock-fstat    : fstat of a socket is S_ISSOCK on a nonzero st_dev (the
-//                   static Devs' devno is 0), two sockets differ in st_ino, and
-//                   a closed socket's number is EBADF.
+//   sock-fstat    : fstat of a socket is S_ISSOCK on st_dev all bits set (a
+//                   devno the kernel never issues: static Devs report 0 and
+//                   its counter starts at 1), two sockets differ in st_ino,
+//                   and a closed socket's number is EBADF.
 //
-// Every leg runs, so a red run names each failing leg; the census line prints
-// only when all pass. fd 1 is a pipe write-end joey relays to the boot log.
+// Every leg runs, and each opens the probe file itself, so a red run names
+// each failing leg and only those; the census line prints only when all pass.
+// fd 1 is a pipe write-end joey relays to the boot log, line-buffered so a leg
+// that crashes is preceded by every earlier leg's line.
 // Cross-compiled with tools/pouch-clang against the pouch sysroot.
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "pouch-census.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -99,7 +109,7 @@ static int leg_fsync_sock(void) {
 }
 
 static int leg_writev(void) {
-    int fd = open(PROBE, O_RDWR | O_TRUNC);
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return fail("writev open");
     if (write(fd, "<<", 2) != 2) return fail("writev lead");
     struct iovec v[3] = {
@@ -171,7 +181,7 @@ static int leg_heap(void) {
         a[i] = (unsigned char)(i * 7u + 1u);
         b[i] = (unsigned char)(i * 13u + 5u);
     }
-    int fd = open(PROBE, O_RDWR | O_TRUNC);
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return fail("heap open");
     size_t put = 0;
     while (put < 2 * half) {
@@ -196,7 +206,7 @@ static int leg_heap(void) {
 }
 
 static int leg_iov_errnos(void) {
-    int fd = open(PROBE, O_RDWR);
+    int fd = open(PROBE, O_RDWR | O_CREAT, 0644);
     if (fd < 0) return fail("errnos open");
     char x;
     struct iovec one = { &x, 1 };
@@ -209,6 +219,28 @@ static int leg_iov_errnos(void) {
     if (!refused(writev(fd, huge, 2), EINVAL)) return fail("writev sum past SSIZE_MAX");
     errno = 0;
     if (!refused(preadv(fd, &one, 1, -1), EINVAL)) return fail("preadv offset -1");
+    close(fd);
+    return 0;
+}
+
+static int leg_v2(void) {
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return fail("v2 open");
+    if (write(fd, "<<", 2) != 2) return fail("v2 lead");
+    struct iovec w[2] = { { (void *)"left-", 5 }, { (void *)"right", 5 } };
+    if (pwritev2(fd, w, 2, -1, 0) != 10) return fail("pwritev2 at the cursor");
+    if (lseek(fd, 0, SEEK_CUR) != 12) return fail("pwritev2(-1) left the cursor");
+    char a[4], b[8];
+    struct iovec r[2] = { { a, 4 }, { b, 8 } };
+    if (preadv2(fd, r, 2, 0, 0) != 12) return fail("preadv2 at 0");
+    if (memcmp(a, "<<le", 4) || memcmp(b, "ft-right", 8)) return fail("preadv2 bytes");
+    if (lseek(fd, 0, SEEK_CUR) != 12) return fail("preadv2(0) moved the cursor");
+    errno = 0;
+    if (!refused(preadv2(fd, r, 2, -2, 0), EINVAL)) return fail("preadv2 offset -2 not EINVAL");
+    errno = 0;
+    if (!refused(pwritev2(fd, w, 2, -2, 0), EINVAL)) return fail("pwritev2 offset -2 not EINVAL");
+    errno = 0;
+    if (!refused(preadv2(fd, r, 2, 0, RWF_HIPRI), ENOSYS)) return fail("preadv2 RWF_HIPRI not ENOSYS");
     close(fd);
     return 0;
 }
@@ -238,7 +270,8 @@ static int leg_sock_fstat(void) {
     struct stat a, b;
     if (fstat(s1, &a) != 0 || fstat(s2, &b) != 0) return fail("fstat(sock)");
     if (!S_ISSOCK(a.st_mode) || !S_ISSOCK(b.st_mode)) return fail("fstat not S_ISSOCK");
-    if (a.st_dev == 0) return fail("fstat socket st_dev 0 (a static Dev's devno)");
+    if (a.st_dev != (dev_t)-1 || b.st_dev != (dev_t)-1)
+        return fail("fstat socket st_dev not all bits set");
     if (a.st_ino == b.st_ino) return fail("fstat sockets share st_ino");
     close(s1);
     close(s2);
@@ -248,12 +281,13 @@ static int leg_sock_fstat(void) {
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
     static const struct { const char *name; int (*run)(void); } legs[] = {
         { "fsync", leg_fsync },           { "fsync-sock", leg_fsync_sock },
         { "writev", leg_writev },         { "writev-atomic", leg_writev_atomic },
         { "readv", leg_readv },           { "heap", leg_heap },
-        { "iov-errnos", leg_iov_errnos }, { "sock-seek", leg_sock_seek },
-        { "sock-fstat", leg_sock_fstat },
+        { "iov-errnos", leg_iov_errnos }, { "v2", leg_v2 },
+        { "sock-seek", leg_sock_seek },   { "sock-fstat", leg_sock_fstat },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

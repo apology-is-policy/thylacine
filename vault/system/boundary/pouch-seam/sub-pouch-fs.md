@@ -22,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-09-21
+updated: 2026-10-15
 ---
 ## Purpose
 
@@ -377,9 +377,23 @@ in-place translation pass.
   `openat.c`'s current text as truth.
 - **`fsync` on a read-only handle fails where POSIX succeeds.** The kernel's
   `SYS_FSYNC` requires `RIGHT_WRITE` ("the write-side durability barrier")
-  and answers `EBADF`. SQLite's directory fsync opens the directory read-only
-  and ignores the result, so B-3's SQLite is unaffected; a program that
-  fsyncs a file through a read-only descriptor is not.
+  and answers `EBADF`. SQLite opens a directory read-only to fsync it. Its
+  sync path ignores the result, but `unixDelete` with `dirSync` set does not:
+  a multi-database commit deleting its super-journal, and a rollback
+  journal's delete under `SYNCHRONOUS=EXTRA`, fail `SQLITE_IOERR_DIR_FSYNC`
+  (read from `os_unix.c`; B-3i runs it). An operator vote precedes B-3i: the
+  kernel drops `RIGHT_WRITE` for `fsync`, or SQLite builds with
+  `SQLITE_DISABLE_DIRSYNC` (OPEN-BUGS, 2026-10-15). A program that fsyncs a
+  file through a read-only descriptor fails either way until the first.
+- **The vectored calls fault where musl answers `EFAULT`, and lose
+  async-signal safety past 4096 gathered bytes.** A bad iov array faults on
+  every path; a bad `iov_base` faults whenever the vector is gathered (more
+  than one non-empty element), stack tier included. A gathered vector over
+  4096 bytes calls `malloc` and pushes a cleanup handler: a signal handler
+  that `siglongjmp`s out of that transfer strands the handler's record, and
+  a later `pthread_exit` calls through the abandoned frame. At or under 4096
+  bytes nothing is pushed, so a small `readv`/`writev` stays as safe as
+  POSIX lists it.
 - **A regular-file `write` or `writev` past the transfer bounds is short.**
   One call moves at most `SYS_RW_MAX` (128 KiB), and over 9P at most the
   session's largest write payload, where Linux writes a regular file whole.

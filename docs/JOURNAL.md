@@ -88,6 +88,21 @@ needed the operator.
   legs (cintltst exit 1, intltest exit 65). The first bake had also failed
   bake-verify, correctly: its predicate named a loose `.res` the package build
   never leaves.
+- *B-3a round 2: clean, and right that it was not finished.* Round 2 (Opus
+  fallback, over `a422c203b`) found no P0-P2 but six P3s, and two of them
+  were claims of round 1's close that were false: that the heap path's lost
+  async-signal safety was in the dossier (it was not), and that SQLite ignores
+  its directory fsync's result (only its sync path does; `unixDelete` with
+  `dirSync` fails `SQLITE_IOERR_DIR_FSYNC`, so the RIGHT_WRITE vote is now due
+  before B-3i). Two were witnesses that could not fail: round 1's
+  preadv2/pwritev2 fix had no leg, and the socket `st_dev` check (`!= 0`)
+  passed a regression to 1, the first devno the kernel issues.
+- *The round-2 RED reverted the fixes, not the patch.* The round-1 RED
+  removed 0051 whole, under which every leg fails and a new leg proves
+  nothing in particular. This RED kept 0051 and reverted exactly the two
+  fixes the new checks are for (upstream's `preadv2.c`/`pwritev2.c`; a socket
+  `st_dev` of 1): eight legs passed and exactly `v2` ("preadv2 at 0", errno
+  38) and `sock-fstat` failed, in one boot.
 ---
 ## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 
