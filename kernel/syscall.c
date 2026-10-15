@@ -3547,11 +3547,23 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
 
 // The parent link is rewritten when a parent exits (proc_reparent_children),
 // so it is read under g_proc_table_lock, which proc_parent_pid takes.
+static s64 getppid_of(struct Proc *p) {
+    return (s64)proc_parent_pid(p);
+}
+
 s64 sys_getppid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     (void)a0; (void)a1; (void)a2; (void)a3;
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
-    return (s64)proc_parent_pid(p);
+    return getppid_of(p);
+}
+
+// Test support, as sys_postnote_cross_for_test: the handler's own arm for a
+// Proc the test names. The test thread runs as kproc, whose pid and parent pid
+// are both 0, so only a named child can tell the parent from the Proc itself.
+s64 sys_getppid_for_test(struct Proc *p);
+s64 sys_getppid_for_test(struct Proc *p) {
+    return getppid_of(p);
 }
 
 // =============================================================================

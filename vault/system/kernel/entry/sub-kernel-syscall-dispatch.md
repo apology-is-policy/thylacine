@@ -1720,10 +1720,13 @@ post with a valid name does not. `sys_postnote_probe_for_test` drives it;
 non-child, missing pid, a child probing its parent, a dead child and a dead
 non-child, with no note queued by any of them.
 
-`sys_getppid_handler` (132) returns `proc_parent_pid(p)`, the accessor the
-phenotype's getppid shell already used, under `g_proc_table_lock`.
-`clock.identity_syscalls` pins it against the accessor and the accessor
-against a linked pair.
+`sys_getppid_handler` (132) returns `proc_parent_pid(p)` through its arm
+`getppid_of`, the accessor the phenotype's getppid shell already used, under
+`g_proc_table_lock`. `clock.identity_syscalls` asks the handler as the test
+thread, which runs as kproc, whose pid and parent pid are both 0, so that
+assert alone cannot tell the parent from the Proc itself; it also asks the arm
+(`sys_getppid_for_test`) and the accessor of the child of a linked pair, where
+the two differ.
 
 ## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
 
