@@ -70,6 +70,48 @@ musl's own raw `SYS_fcntl` callers now use the native calls. Until then they hit
 
 **Planning the red controls found a test that could not fail.** `clock.identity_syscalls` asked the getppid handler as the test thread, which runs as kproc, with pid 0 and parent pid 0. A handler answering the caller's own pid therefore passed. The linked-pair legs asked only the accessor, never the handler. `f75cd868e` gives the handler a static arm and asks that arm of a linked child. The sabotage that would have slipped through is now part of the red-control set K1.
 
+**The first four red controls failed exactly as predicted** (08:35Z; logs `build/b3b-red-<set>-{build,test,boot}.log`). Kernel tests fail before joey starts, and joey's probes stop the boot, so each set needs its own build.
+- **K1** broke five fixes in one build. The kernel tests ran 1999/2004, and the five failures were exactly those five. The getppid failure came only from the new child assert; the old kproc assert passed, which shows `f75cd868e` was needed.
+- **K2** let the phenotype flip O_APPEND and made the probe post a real note: 2002/2004, with both expected failures.
+- **P1** made open skip close-on-exec. joey stopped at pouch-hello-fd: "open O_CLOEXEC left the flag clear".
+- **P2** made kill(pid, 0) answer EINVAL. Every probe check failed with errno 22.
+
+`5950bb27e` then passed on a clean build: 2004/2004, and test-fault 8/8.
+
+**Round 2 (Opus reviewing Opus, told to re-derive) returned 0 P0, 0 P1, 0 P2 and 7 P3, a clean close.** It found the kernel half of vote 6 sound, and its own measure of the syscall census matched the dossier's: 130 live numbers over 0-132, holes at 26, 30 and 43, and 130 dispatch arms. Its findings, all fixed in `f5f482144`:
+- **Process groups.** Pouch's kill(pid < 0) answered ESRCH, where the phenotype answers EPERM. Three texts I had written said Thylacine has no process groups, but it has had them since PTY-1a. Pouch now refuses a negative pid with EPERM after judging the signal, as viv_kill does.
+- **A close that could hit another thread's file.** open and pipe2 closed a descriptor whose close-on-exec set had answered EBADF. EBADF there means a peer already closed it, and the number may by then belong to another thread's open. They leave it alone now.
+- **freopen.** freopen(NULL, mode) closed the stream whenever the mode differed from the descriptor only in append. Every mode but "a" now restates the descriptor's own append.
+- **Sockets.** pouch_set_cloexec did not check Pouch's socket tag, so a tagged number reached the native call.
+- **Two host harnesses were missing.** pouch-kill-probe has 15 checks and 5 mutants, and takes its call numbers from the kernel header and musl's `__NR_postnote`. pouch-open-cloexec has 11 checks and 6 mutants, and drives open through musl's own argument-count macros.
+- **f75cd868e's gap**, found on its own (R2-F5a).
+
+Three of its observations belong to other code and are now OPEN-BUGS entries (09:05Z):
+- raise(0) answers EINVAL, and pthread_kill(t, 0) is inverted.
+- musl's raw sys_open reaches native SYS_OPEN with the wrong arguments, so __map_file, which loads time zones and locales, fails quietly.
+- kill to a process group is refused; making it work is an ABI change for the operator.
+
+**A sentence I drafted was false, and so was a time I typed.** The ERRORS draft said F_DUPFD_CLOEXEC shares open's close-on-exec window. It does not: DUP_TO sets the flag in the same call that makes the copy. I also typed "09:20Z" into OPEN-BUGS for an entry written at 09:05Z; the measured time replaced it.
+
+**`f5f482144` is green, and its three new red controls failed as predicted** (one Mac lease, 09:46-10:55Z).
+- **K3** let the probe gate admit pid 2^32 as kproc: 2003/2004, the one failure being "probe of 2^32 is kproc through the gate, as a post of it is: EACCES".
+- **P3** made freopen close every append-only change: pouch-hello-fd "freopen r+ closed an append stream (errno 22)".
+- **P4** removed the negative-pid refusal: "probe(group) rc=-1/-1 errno=3 (want -1 EPERM=1)". With the refusal gone the call reached the kernel, whose walk finds no negative pid and answers ESRCH; Pouch now refuses before making the call.
+- **The clean gate:** build exit 0, 2004/2004, test-fault 8/8. pouch-hello-fd's census includes `cloexec`, and pouch-hello-signals' includes `probe`.
+- **The clean CI image** (thylacine-b3e): ls-descriptors passed. ls-libs matched the earlier baseline exactly: ICU's C and C++ suites green, libpng 37/37, libjpeg 332/332, libwebp 14/14, harfbuzz 76/76; libxml2 7/23 and FreeType 4/5, as before.
+
+**A wrong turn of my own: I read P4's boot log as a kernel crash.** It ends in an EXTINCTION line and a HALLS backtrace, and for a minute I treated that as a guest program bringing the kernel down. It was joey's own exit. joey's probes are boot-fatal by design, so a red leg ends the boot that way, and the line before it was exactly the predicted failure. My grep for "FAIL" had missed it only because that leg does not print the word.
+
+**The CI red control was the finding.** C1 makes FLAGS_GET hide close-on-exec from uid 1000. The 08:03Z plan predicted all four of ls-descriptors' witnesses would go red. One did: descriptor-ops, at set-readback. The other three passed:
+- **handle-query** read FLAGS_GET three times and expected 0 each time. It never set the flag, so a query that answers 0 for every live slot passes it.
+- **dup2-self** opened its source without the flag. Its "preserves the flags" check compared 0 with 0, and its "the new target is cleared" check looked for the absence of a flag that was never there.
+- **spawn-actions** opens nothing close-on-exec, so C1 cannot reach it.
+These witnesses came from Astra's branch, and I adopted them in B-3b without running a red control against them. The plan's prediction was a guess about tests I had not read for a positive reading. `778de0c74` makes handle-query and dup2-self set the flag and expect it back exactly, keeping the zero reading of an unflagged handle as the negative one step away. spawn-actions gets its own sabotage, S1, which makes posix_spawn's addclose a no-op for uid 1000.
+
+**The run that would prove the fix did not happen: the disk ran out.** Free space was 10.0 GB when `778de0c74` was committed, 4.5 GB when the runner's check ran at 11:07Z, and 3.4 GB a minute later; a peer worktree had written two 2.7 GB pool images at 11:01Z. The 7 GB floor check stopped the runner before it changed anything, and I released the Mac. Deleting the previous CI image's two pool files in thylacine-b3e brought back only 820 MiB, because APFS clones shared most of their blocks, so free space is 4.3 GB. Space only comes back if a peer or the operator frees some, so the run is the first item of the next session: `scratchpad/b3b/run-ci2.sh`, on thylacine-b3e at `778de0c74`. It bakes C2, where all four witnesses should go red, then a clean image, where all four should pass.
+
+**What "done" covers for B-3b.** `f5f482144` is green on the default image (suite and fault witnesses) and on the CI image (ls-descriptors, ls-libs at baseline). Every red control on the default image failed as predicted. The two witnesses repaired in `778de0c74` compile, but have not yet run on the device, either way. Two operator decisions are still open and B-3b does not depend on them: the owner of a user's create on the shared pool, and the Pouch heap's VMA ceiling.
+
 ## 2026-10-15 (main, Opus 5.5, effort max) -- B-3e: libxml2 on the device finds two platform gaps (dup, a new directory's owner); the shared disk vanishes and returns
 
 - *B-3e: libxml2's release tarball cannot pass its own CTest list.* 2.15.4's
