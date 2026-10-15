@@ -96,6 +96,13 @@ struct Member {
     range: PoolMember,
     lease: Option<u64>,
 }
+/// An attached region; `base` and `layout` are what dealloc takes, since a
+/// region off its page starts inside its allocation.
+struct Region {
+    base: usize,
+    layout: Layout,
+    len: usize,
+}
 struct Ring {
     fd: i32,
     va: usize,
@@ -106,7 +113,7 @@ struct Ring {
 }
 pub struct State {
     pub clock: u64,
-    regions: HashMap<usize, Layout>,
+    regions: HashMap<usize, Region>,
     pub attach_fail_at: Option<usize>,
     attaches: usize,
     ring: Option<Ring>,
@@ -156,6 +163,23 @@ pub struct State {
     pub poll_answer: Option<i64>,
     /// The next RETURN answers this instead of releasing its member.
     pub refuse_return: Option<i64>,
+    /// Setup answers this errno, mapping nothing.
+    pub setup_errno: Option<i64>,
+    /// Setup answers a descriptor but no mapping.
+    pub setup_unmapped: bool,
+    /// Setup writes an SQ mask the mapping's validation refuses.
+    pub setup_bad_mask: bool,
+    /// Setup maps a ring of twice the entries asked for.
+    pub setup_doubles: bool,
+    /// REGISTER_BUFFERS answers this.
+    pub buffers_errno: Option<i64>,
+    /// This attach (counted from 1) answers a region that does not start on a
+    /// page.
+    pub attach_misalign_at: Option<usize>,
+    /// The next SERVICE_POOL answers 0 with the last pool's identity, minting
+    /// nothing: a stale identity, which the kernel never writes.
+    pub stale_pool: bool,
+    last_pool: Option<SlotRef>,
 }
 #[derive(Clone)]
 pub struct Sim(pub Rc<RefCell<State>>);
@@ -200,6 +224,14 @@ impl Sim {
             enter_errno: None,
             poll_answer: None,
             refuse_return: None,
+            setup_errno: None,
+            setup_unmapped: false,
+            setup_bad_mask: false,
+            setup_doubles: false,
+            buffers_errno: None,
+            attach_misalign_at: None,
+            stale_pool: false,
+            last_pool: None,
         })))
     }
     pub fn kernel(&self) -> SimKernel {
@@ -798,6 +830,37 @@ unsafe impl Kernel for SimKernel {
         if p.flags != 12 || entries == 0 || entries > 4096 || !entries.is_power_of_two() {
             return EINVAL;
         }
+        if let Some(rc) = s.setup_errno {
+            return rc;
+        }
+        if s.setup_unmapped {
+            *p = Setup {
+                flags: 12,
+                sq_entries: 0,
+                cq_entries: 0,
+                ring_size: 0,
+                ring_va: 0,
+                hdr_off: 0,
+                sq_array_off: 0,
+                sqe_off: 0,
+                cqe_off: 0,
+                sq_array_size: 0,
+                sqe_size: 0,
+                cqe_size: 0,
+                reserved: 0,
+                receipt: [0; 4],
+            };
+            s.ring = Some(Ring {
+                fd: 7,
+                va: 0,
+                p: *p,
+                closing: false,
+                sq_head: 0,
+                cq_tail: 0,
+            });
+            return 7;
+        }
+        let entries = if s.setup_doubles { entries * 2 } else { entries };
         let cq = entries * 2;
         let up = |n: u32| (n + 63) & !63;
         let sq_array_off = 64;
@@ -807,7 +870,14 @@ unsafe impl Kernel for SimKernel {
         let size = (receipt_off + cq * 32 + 4095) & !4095;
         let layout = Layout::from_size_align(size as usize, 4096).unwrap();
         let va = unsafe { alloc_zeroed(layout) } as usize;
-        s.regions.insert(va, layout);
+        s.regions.insert(
+            va,
+            Region {
+                base: va,
+                layout,
+                len: size as usize,
+            },
+        );
         *p = Setup {
             flags: 12,
             sq_entries: entries,
@@ -835,6 +905,9 @@ unsafe impl Kernel for SimKernel {
         for (i, v) in [(2, entries - 1), (3, entries), (6, cq - 1), (7, cq)] {
             s.word(i).store(v, Ordering::Release);
         }
+        if s.setup_bad_mask {
+            s.word(2).store(0, Ordering::Release);
+        }
         7
     }
     unsafe fn register(&self, fd: i32, op: u32, arg: *mut u8, nargs: u32) -> i64 {
@@ -843,6 +916,9 @@ unsafe impl Kernel for SimKernel {
             return EBADF;
         }
         if op == 1 {
+            if let Some(rc) = s.buffers_errno {
+                return rc;
+            }
             if nargs > 64 || !s.pools.is_empty() {
                 return if nargs > 64 { EINVAL } else { EBUSY };
             }
@@ -851,7 +927,7 @@ unsafe impl Kernel for SimKernel {
             let mut fresh = Vec::new();
             for b in table {
                 let inside = s.regions.iter().any(|(&va, l)| {
-                    b.va as usize >= va && b.va as usize + b.len as usize <= va + l.size()
+                    b.va as usize >= va && b.va as usize + b.len as usize <= va + l.len
                 });
                 if !inside || b.va as usize == s.ring().va {
                     return EINVAL;
@@ -1022,6 +1098,11 @@ unsafe impl Kernel for SimKernel {
                         return EINVAL;
                     }
                 }
+                if s.stale_pool {
+                    s.stale_pool = false;
+                    p.result = s.last_pool.expect("a pool registered before");
+                    return 0;
+                }
                 let Some(r) = s.mint(Slot {
                     kind: SlotKind::Pool,
                     inc: 0,
@@ -1033,6 +1114,7 @@ unsafe impl Kernel for SimKernel {
                     return ENOSPC;
                 };
                 s.pools.insert(r.slot as usize, members);
+                s.last_pool = Some(r);
                 p.result = r;
                 0
             }
@@ -1195,19 +1277,22 @@ unsafe impl Kernel for SimKernel {
             len > 0 && len % 4096 == 0,
             "the adapter attaches whole pages"
         );
-        let layout = Layout::from_size_align(len, 4096).unwrap();
-        let va = unsafe { alloc_zeroed(layout) } as usize;
-        s.regions.insert(va, layout);
+        let misaligned = s.attach_misalign_at == Some(s.attaches);
+        let extra = if misaligned { 4096 } else { 0 };
+        let layout = Layout::from_size_align(len + extra, 4096).unwrap();
+        let base = unsafe { alloc_zeroed(layout) } as usize;
+        let va = if misaligned { base + 64 } else { base };
+        s.regions.insert(va, Region { base, layout, len });
         va as i64
     }
     fn detach(&self, va: usize, len: usize) -> i64 {
         let mut s = self.0.s();
-        let layout = s
+        let region = s
             .regions
             .remove(&va)
             .expect("detach names an attached region");
-        assert_eq!(layout.size(), len, "detach names the whole region");
-        unsafe { dealloc(va as *mut u8, layout) };
+        assert_eq!(region.len, len, "detach names the whole region");
+        unsafe { dealloc(region.base as *mut u8, region.layout) };
         0
     }
     fn now(&self) -> u64 {

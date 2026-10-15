@@ -1,6 +1,8 @@
 // The native C adapter: drives one private service ring from EL0 over the
 // client cores (docs/ASYNC-SERVICE-ABI.md, "Native adapter"). Creator thread
-// only. Each operation is an opaque handle: submit returns it, the ring's turn
+// only: a forked child must neither use nor drop the ring, since fork carries
+// neither its mapping nor its descriptor and the number may already name one
+// of the child's own files. Each operation is an opaque handle: submit returns it, the ring's turn
 // progresses it, a completion call ends it, and dropping it while it is pending
 // cancels it, which aborts its whole scope.
 #ifndef THYLA_LOOM_CLIENT_ADAPTER_H
@@ -32,7 +34,8 @@ struct t_loom_kernel t_loom_kernel_native(void);
 
 struct t_loom_ring;
 // Handles into the ring's storage. Never copy one, and never use one again
-// after the call that consumes or drops it.
+// after the call that consumes or drops it: while its cell is free that ends
+// the process, but a reused cell names another handle's object.
 struct t_loom_target { struct t_loom_ring *ring; uint32_t slot; };
 struct t_loom_scope { struct t_loom_ring *ring; uint32_t slot; };
 struct t_loom_fid { struct t_loom_ring *ring; uint32_t slot; };
@@ -101,7 +104,7 @@ struct t_loom_ring {
     struct t_fixed_storage client;
     struct t_fixed_driver *driver;
     struct t_loom_op *ops;
-    size_t op_count;
+    size_t op_count, op_next;
     struct t_request_entry *book;
 };
 
@@ -129,7 +132,7 @@ uint64_t t_loom_now(struct t_loom_ring *);
 // holds and retry deferred cleanup. If none of that found work, wait once for a
 // completion or until the deadline (absolute monotonic ns, when has_deadline).
 // Answers the completions routed, or a negative errno: -ECANCELED once the ring
-// is closed, -EIO once it has failed.
+// is closed, -EIO once it has failed, or poll's own refusal.
 int64_t t_loom_turn(struct t_loom_ring *, int has_deadline, uint64_t deadline);
 // Stop admission and abort every scope; turns then drive the ring until
 // t_loom_retired. A scope's retirement is not a poll event, so a caller waiting
@@ -179,8 +182,10 @@ int t_loom_stream(struct t_loom_fid *, struct t_loom_pool *, uint64_t offset, ui
 
 // Completions: 0 while pending (the handle is kept); 1 once done, which
 // consumes the handle and gives the CQE's result (a negative errno for a failed
-// operation); a negative errno when the ring itself has closed (-ECANCELED) or
-// failed (-EIO), or -EINVAL for another kind's handle, and the handle is kept.
+// operation); a negative errno when the ring has closed or is retiring
+// (-ECANCELED; a retiring ring's operation can still answer 1 once its terminal
+// is routed) or has failed (-EIO), or -EINVAL for another kind's handle, and
+// the handle is kept.
 int t_loom_connect_done(struct t_loom_op *, int32_t *result, struct t_loom_scope **);
 int t_loom_walk_done(struct t_loom_op *, int32_t *result, struct t_loom_fid **);
 int t_loom_open_done(struct t_loom_op *, int32_t *result);

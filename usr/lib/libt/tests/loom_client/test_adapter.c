@@ -1,6 +1,6 @@
-/* The native C adapter against the simulated kernel (sim_kernel.c), test for
- * test the C twin of loom-client's tests/native.rs. Every test also ends with
- * the ring's storage idle and every region detached. */
+/* The native C adapter against the simulated kernel (sim_kernel.c): test for
+ * test the C twin of loom-client's tests/native.rs, then the C interface's own.
+ * Every test also ends with the ring's storage idle and every region detached. */
 #include "sim_kernel.h"
 #include <assert.h>
 #include <stdio.h>
@@ -1252,6 +1252,327 @@ static void a_pool_dropped_after_the_ring_closed_under_never_closes_the_number(v
     finish(&f);
 }
 
+/* A pool registration answered 0 with an identity that names no new pool: the
+ * core cannot tell what the kernel holds and closes the descriptor, so the ring
+ * fails rather than admit work that could never enter. */
+static void an_uncertain_pool_registration_fails_the_ring(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    t_loom_pool_drop(pool_ok(f.r, m, 1));
+    turns(f.r, 1);
+    assert(f.sim->nreaps == 1); /* the identity the kernel answers next is stale */
+    f.sim->stale_pool = 1;
+    struct t_loom_pool *p = (struct t_loom_pool *)1;
+    assert(t_loom_pool(f.r, m, 1, &p) == SIM_EIO && !p);
+    closed_once(f.sim); /* the core closed the descriptor */
+    struct t_loom_target *t = (struct t_loom_target *)1;
+    assert(t_loom_target(f.r, 5, "clip", 4, &t) == SIM_EIO && !t);
+    assert(t_loom_turn(f.r, 0, 0) == SIM_EIO); /* and the ring has failed */
+    t_loom_ring_drop(f.r);
+    closed_once(f.sim); /* closed once */
+    finish(&f);
+}
+/* Setup's own refusal passes through, and every region attached before it is
+ * detached; there is no descriptor to close. */
+static void a_refused_setup_detaches_every_region(void) {
+    struct fx f = { .sim = new_sim() };
+    f.sim->has_setup_errno = 1;
+    f.sim->setup_errno = SIM_ENOMEM;
+    size_t b[] = { 4096 };
+    assert(setup_on(&f, 8, b, 1) == SIM_ENOMEM && !f.r);
+    assert(!f.sim->nclosed);
+    finish(&f);
+}
+static void a_setup_without_a_mapping_closes_its_descriptor(void) {
+    struct fx f = { .sim = new_sim() };
+    f.sim->setup_unmapped = 1;
+    size_t b[] = { 4096 };
+    assert(setup_on(&f, 8, b, 1) == SIM_EIO && !f.r);
+    closed_once(f.sim);
+    finish(&f);
+}
+/* A mapping that fails validation is closed and left mapped: nothing says its
+ * base and length name the kernel's mapping, so nothing detaches them. */
+static void a_mapping_that_fails_validation_is_closed_and_left_mapped(void) {
+    struct fx f = { .sim = new_sim() };
+    f.sim->setup_bad_mask = 1;
+    size_t b[] = { 4096 };
+    assert(setup_on(&f, 8, b, 1) == SIM_EIO && !f.r);
+    closed_once(f.sim);
+    /* Only the ring mapping is left, and the test detaches it. */
+    assert(f.sim->nregions == 1 && f.sim->regions[0].va == f.sim->ring_va);
+    assert(f.k.detach(f.k.context, f.sim->ring_va, f.sim->regions[0].len) == 0);
+    finish(&f);
+}
+/* A validated ring of entries the adapter did not ask for is closed, and its
+ * mapping detached with the rest. */
+static void a_ring_of_another_geometry_is_closed_and_detached(void) {
+    struct fx f = { .sim = new_sim() };
+    f.sim->setup_doubles = 1;
+    size_t b[] = { 4096 };
+    assert(setup_on(&f, 8, b, 1) == SIM_EIO && !f.r);
+    closed_once(f.sim);
+    finish(&f);
+}
+static void a_refused_buffer_registration_closes_the_ring(void) {
+    struct fx f = { .sim = new_sim() };
+    f.sim->has_buffers_errno = 1;
+    f.sim->buffers_errno = SIM_EBUSY;
+    size_t b[] = { 4096 };
+    assert(setup_on(&f, 8, b, 1) == SIM_EBUSY && !f.r);
+    closed_once(f.sim);
+    finish(&f);
+}
+/* An attach that answers a region off its page is refused and detached with
+ * every region before it. */
+static void a_misaligned_attach_is_detached(void) {
+    struct fx f = { .sim = new_sim() };
+    f.sim->attach_misalign_at = 2;
+    size_t b[] = { 4096, 4096 };
+    assert(setup_on(&f, 8, b, 2) == SIM_EIO && !f.r);
+    assert(!f.sim->nclosed);
+    finish(&f);
+}
+/* A finished READ's result keeps its buffer, and with it every region, past
+ * the ring's drop; its own drop detaches them. */
+static void a_read_result_keeps_the_storage_until_it_drops(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "kept");
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    opened(&f, "f", &t, &s, &fid);
+    struct res o;
+    assert(run(f.r, K_READ, read_op(fid, range(0, 0, 64), 0, 0), &o) == 4 && o.read);
+    drop_all(&f, fid, s, t);
+    closed_once(f.sim);
+    /* The buffer, the name arena and the ring mapping, all still attached. */
+    assert(f.sim->nregions == 3 && !t_loom_idle(f.base));
+    size_t len = 0;
+    const unsigned char *bytes = t_loom_read_bytes(o.read, &len);
+    assert(len == 4 && !memcmp(bytes, "kept", 4));
+    t_loom_read_drop(o.read);
+    finish(&f);
+}
+
+/* ---- The C interface's own: shapes, kinds, tables and stale handles. */
+
+/* The adapter's own checks refuse before anything reaches the kernel, and the
+ * same storage then sets up. */
+static void setup_refuses_a_bad_shape_before_the_kernel(void) {
+    struct sim *s = new_sim();
+    struct t_loom_kernel k = sim_kernel(s);
+    ring4 *st = calloc(1, sizeof(*st));
+    assert(st);
+    size_t b[] = { 4096 }, zero[] = { 0 };
+    struct t_loom_ring *r = NULL;
+    /* Storage for four entries holds eight operations, not a ring of eight's sixteen. */
+    assert(t_loom_ring_setup(&st->base, st->book, st->ops, 8, &k, 8, b, 1, &r) == SIM_EINVAL && !r);
+    assert(t_loom_ring_setup(&st->base, st->book, st->ops, 6, &k, 3, b, 1, &r) == SIM_EINVAL && !r);
+    assert(T_LOOM_RING_SETUP(st, &k, 4, b, 0, &r) == SIM_EINVAL && !r);
+    assert(T_LOOM_RING_SETUP(st, &k, 4, zero, 1, &r) == SIM_EINVAL && !r);
+    assert(!s->attaches && t_loom_idle(&st->base));
+    assert(T_LOOM_RING_SETUP(st, &k, 4, b, 1, &r) == 0 && r);
+    t_loom_ring_drop(r);
+    assert(t_loom_idle(&st->base) && !s->nregions);
+    free(st);
+    free(s);
+}
+/* Another kind's completion answers -EINVAL and leaves the handle alone: the
+ * terminal routed before the questions is still there for the right one. */
+static void asking_for_another_kinds_completion_answers_einval(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_op *op;
+    assert(t_loom_connect(t, 0, 0, &op) == 0);
+    turns(f.r, 1);
+    struct res o;
+    struct t_ring_payload *pl;
+    int end;
+    assert(complete(K_WALK, op, &o) == SIM_EINVAL);
+    assert(complete(K_OPEN, op, &o) == SIM_EINVAL);
+    assert(complete(K_READ, op, &o) == SIM_EINVAL);
+    assert(complete(K_WRITE, op, &o) == SIM_EINVAL);
+    assert(t_loom_stream_next(op, &pl, &end, &o.result) == SIM_EINVAL);
+    memset(&o, 0, sizeof(o));
+    assert(complete(K_CONNECT, op, &o) == 1 && o.result >= 0 && o.scope);
+    struct t_loom_scope *s = o.scope;
+    struct t_loom_op *w = walk_op(s, "");
+    turns(f.r, 1);
+    assert(complete(K_CONNECT, w, &o) == SIM_EINVAL);
+    memset(&o, 0, sizeof(o));
+    assert(complete(K_WALK, w, &o) == 1 && o.result >= 0 && o.fid);
+    drop_all(&f, o.fid, s, t);
+    finish(&f);
+}
+/* Every operation handle holds a cell, and so does a stream's route once its
+ * handle is gone: with every cell taken a submission refuses before the kernel,
+ * and the route's end frees its cell. */
+static void a_full_operation_table_refuses_before_the_kernel(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(1, b, 1); /* two cells */
+    file(f.sim, "f", "data");
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    struct t_loom_pool *p = pool_ok(f.r, m, 1);
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    opened(&f, "f", &t, &s, &fid);
+    f.sim->hold = 1;
+    f.sim->hold_terminals = 1;
+    t_loom_op_drop(stream_op(fid, p, 1));
+    struct t_loom_op *first;
+    assert(t_loom_connect(t, 0, 0, &first) == 0);
+    size_t live = sim_live_slots(f.sim);
+    struct t_loom_op *op = (struct t_loom_op *)1;
+    assert(t_loom_connect(t, 0, 0, &op) == SIM_ENOSPC && !op);
+    assert(sim_live_slots(f.sim) == live); /* nothing reached the kernel */
+    sim_release_terminals(f.sim);
+    f.sim->hold = 0;
+    turns(f.r, 2);
+    assert(t_loom_connect(t, 0, 0, &op) == 0);
+    struct res o;
+    assert(run(f.r, K_CONNECT, first, &o) >= 0 && o.scope);
+    struct t_loom_scope *s1 = o.scope;
+    assert(run(f.r, K_CONNECT, op, &o) >= 0 && o.scope);
+    t_loom_scope_drop(o.scope);
+    t_loom_scope_drop(s1);
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+/* A pool is its ring's: another ring's answers -EINVAL, and the ring's own runs. */
+static void a_pool_of_another_ring_answers_einval(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1), g = ring_of(8, b, 1);
+    file(f.sim, "f", "data");
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    struct t_loom_pool *other = pool_ok(g.r, m, 1), *own = pool_ok(f.r, m, 1);
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    opened(&f, "f", &t, &s, &fid);
+    struct t_loom_op *op = (struct t_loom_op *)1;
+    assert(t_loom_stream(fid, other, 0, 64, 0, 0, 0, &op) == SIM_EINVAL && !op);
+    op = stream_op(fid, own, 0);
+    struct t_ring_payload *pl;
+    int32_t end;
+    assert(next_shot(f.r, op, &pl, &end) == 1);
+    payload_is(pl, "data");
+    t_loom_payload_drop(pl);
+    t_loom_op_drop(op);
+    t_loom_pool_drop(own);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+    t_loom_pool_drop(other);
+    t_loom_ring_drop(g.r);
+    finish(&g);
+}
+/* A stream yields nothing after its end: asking again answers -EINVAL. */
+static void a_stream_asked_again_after_its_end_answers_einval(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "data");
+    struct t_loom_pool *p;
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    struct t_ring_payload *pl;
+    struct t_loom_op *stream = first_payload(&f, "f", 0, &p, &t, &s, &fid, &pl);
+    payload_is(pl, "data");
+    t_loom_payload_drop(pl);
+    int32_t end = -1;
+    assert(next_shot(f.r, stream, &pl, &end) == 0 && end == 4); /* a one-shot's end is its shot's result */
+    int ended = 0;
+    assert(t_loom_stream_next(stream, &pl, &ended, &end) == SIM_EINVAL);
+    t_loom_op_drop(stream);
+    assert(f.sim->naborts == 0); /* an ended stream's drop cancels nothing */
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+static void drop_a_consumed_operation(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_op *op;
+    assert(t_loom_connect(t, 0, 0, &op) == 0);
+    struct res o;
+    assert(run(f.r, K_CONNECT, op, &o) >= 0 && o.scope);
+    /* The next operation takes another cell, so the stale handle finds its own free. */
+    (void)walk_op(o.scope, "");
+    t_loom_op_drop(op);
+}
+static void a_consumed_operation_dropped_again_ends_the_process(void) {
+    expect_fatal("op_ring", drop_a_consumed_operation);
+}
+static void drop_a_reaped_target(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    t_loom_target_drop(t);
+    turns(f.r, 1);
+    assert(f.sim->nreaps == 1);
+    t_loom_target_drop(t);
+}
+static void abort_a_reaped_scope(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    t_loom_scope_drop(s);
+    sim_engine_visit(f.sim);
+    turns(f.r, 1);
+    assert(f.sim->nreaps == 1);
+    t_loom_scope_abort(s);
+}
+static void drop_a_reaped_fid(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "");
+    t_loom_fid_drop(fid);
+    turns(f.r, 3);
+    assert(f.sim->nreaps == 1);
+    t_loom_fid_drop(fid);
+}
+static void drop_a_released_pool(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    struct t_loom_service_pool_member m[] = { range(0, 0, 64) };
+    struct t_loom_pool *p = pool_ok(f.r, m, 1);
+    t_loom_pool_drop(p);
+    t_loom_pool_drop(p);
+}
+/* A handle whose slot or cell was freed reads zero, and its next use ends the
+ * process instead of reading through it. */
+static void a_handle_whose_slot_was_freed_ends_the_process(void) {
+    expect_fatal("held", drop_a_reaped_target);
+    expect_fatal("held", abort_a_reaped_scope);
+    expect_fatal("held", drop_a_reaped_fid);
+    expect_fatal("pool_of", drop_a_released_pool);
+}
+static void read_a_dropped_rings_clock(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    t_loom_ring_drop(f.r);
+    (void)t_loom_now(f.r);
+}
+static void ask_a_dropped_ring_if_retired(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    t_loom_ring_drop(f.r);
+    (void)t_loom_retired(f.r);
+}
+static void a_dropped_ring_used_again_ends_the_process(void) {
+    expect_fatal("t_loom_now", read_a_dropped_rings_clock);
+    expect_fatal("t_loom_retired", ask_a_dropped_ring_if_retired);
+}
+
 #define T(name) { #name, name }
 static const struct { const char *name; void (*run)(void); } tests[] = {
     T(setup_registers_every_buffer_and_drop_detaches_every_region),
@@ -1309,9 +1630,27 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(a_poll_error_fails_the_ring),
     T(an_explicit_close_with_live_handles_cancels_their_use),
     T(a_pool_dropped_after_the_ring_closed_under_never_closes_the_number),
+    T(an_uncertain_pool_registration_fails_the_ring),
+    T(a_refused_setup_detaches_every_region),
+    T(a_setup_without_a_mapping_closes_its_descriptor),
+    T(a_mapping_that_fails_validation_is_closed_and_left_mapped),
+    T(a_ring_of_another_geometry_is_closed_and_detached),
+    T(a_refused_buffer_registration_closes_the_ring),
+    T(a_misaligned_attach_is_detached),
+    T(a_read_result_keeps_the_storage_until_it_drops),
+    /* The C interface's own. */
+    T(setup_refuses_a_bad_shape_before_the_kernel),
+    T(asking_for_another_kinds_completion_answers_einval),
+    T(a_full_operation_table_refuses_before_the_kernel),
+    T(a_pool_of_another_ring_answers_einval),
+    T(a_stream_asked_again_after_its_end_answers_einval),
+    T(a_consumed_operation_dropped_again_ends_the_process),
+    T(a_handle_whose_slot_was_freed_ends_the_process),
+    T(a_dropped_ring_used_again_ends_the_process),
 };
 #undef T
-_Static_assert(sizeof(tests) / sizeof(tests[0]) == 55, "every scenario of tests/native.rs");
+/* The 63 scenarios of tests/native.rs, then the C interface's own eight. */
+_Static_assert(sizeof(tests) / sizeof(tests[0]) == 71, "every scenario of tests/native.rs and the C interface's own");
 
 /* With a name, runs only that scenario (exit 2 for an unknown one). */
 int main(int argc, char **argv) {
@@ -1328,6 +1667,6 @@ int main(int argc, char **argv) {
         printf("C native adapter scenario %s PASS\n", argv[1]);
         return 0;
     }
-    puts("C fifty-five native adapter scenarios PASS");
+    puts("C seventy-one native adapter scenarios PASS");
     return 0;
 }

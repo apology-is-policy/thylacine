@@ -507,12 +507,22 @@ static void *region(struct sim *s, size_t len) {
     assert(!posix_memalign(&va, 4096, len));
     memset(va, 0, len);
     assert(s->nregions < 128);
-    s->regions[s->nregions++] = (struct sim_region){ (uintptr_t)va, len };
+    s->regions[s->nregions++] = (struct sim_region){ (uintptr_t)va, len, va };
     return va;
 }
 static int64_t k_setup(void *v, uint32_t entries, struct t_owned_setup *p) {
     struct sim *s = v;
     if (p->flags != 12 || !entries || entries > 4096 || (entries & (entries - 1))) return SIM_EINVAL;
+    if (s->has_setup_errno) return s->setup_errno;
+    if (s->setup_unmapped) {
+        *p = (struct t_owned_setup){ .flags = 12 };
+        s->has_ring = 1;
+        s->ring_fd = 7;
+        s->ring_va = 0;
+        s->closing = 0;
+        return 7;
+    }
+    if (s->setup_doubles) entries *= 2;
     uint32_t cq = entries * 2;
 #define UP(n) (((n) + 63u) & ~63u)
     uint32_t sq_array_off = 64, sqe_off = UP(sq_array_off + entries * 4), cqe_off = UP(sqe_off + entries * 64);
@@ -535,12 +545,14 @@ static int64_t k_setup(void *v, uint32_t entries, struct t_owned_setup *p) {
     sim_poke_hdr(s, 3, entries);
     sim_poke_hdr(s, 6, cq - 1);
     sim_poke_hdr(s, 7, cq);
+    if (s->setup_bad_mask) sim_poke_hdr(s, 2, 0);
     return 7;
 }
 static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs) {
     struct sim *s = v;
     if (!s->has_ring || s->ring_fd != fd || sim_closed(s, fd)) return SIM_EBADF;
     if (op == T_LOOM_REGISTER_BUFFERS) {
+        if (s->has_buffers_errno) return s->buffers_errno;
         int used = 0;
         for (size_t i = 0; i < 64; ++i) used |= s->pool_members[i] != 0;
         if (nargs > 64) return SIM_EINVAL;
@@ -553,7 +565,7 @@ static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs
                           table[i].va + table[i].len <= s->regions[j].va + s->regions[j].len;
             if (!inside || table[i].va == s->ring_va) return SIM_EINVAL;
         }
-        for (uint32_t i = 0; i < nargs; ++i) s->buffers[i] = (struct sim_region){ table[i].va, table[i].len };
+        for (uint32_t i = 0; i < nargs; ++i) s->buffers[i] = (struct sim_region){ table[i].va, table[i].len, NULL };
         s->nbuffers = nargs;
         return 0;
     }
@@ -644,8 +656,16 @@ static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs
         for (uint32_t i = 0; i < p->count; ++i)
             if (!buffer(s, p->members[i].buffer_index, p->members[i].offset, (uint32_t)p->members[i].length))
                 return SIM_EINVAL;
+        if (s->stale_pool) {
+            assert(s->has_last_pool);
+            s->stale_pool = 0;
+            p->result = s->last_pool;
+            return 0;
+        }
         struct sim_slot slot = { .kind = SIM_POOL, .state = SIM_READY };
         if (!mint(s, slot, &p->result)) return SIM_ENOSPC;
+        s->last_pool = p->result;
+        s->has_last_pool = 1;
         size_t i = p->result.slot;
         for (uint32_t m = 0; m < p->count; ++m) s->pools[i][m] = (struct sim_member){ p->members[m], 0, 0 };
         s->pool_members[i] = p->count;
@@ -765,6 +785,14 @@ static int64_t k_attach(void *v, size_t len) {
     if (++s->attaches == s->attach_fail_at) return SIM_ENOMEM;
     /* The adapter attaches whole pages. */
     assert(len && !(len % 4096));
+    if (s->attaches == s->attach_misalign_at) {
+        void *alloc = NULL;
+        assert(!posix_memalign(&alloc, 4096, len + 4096));
+        assert(s->nregions < 128);
+        uintptr_t va = (uintptr_t)alloc + 64;
+        s->regions[s->nregions++] = (struct sim_region){ va, len, alloc };
+        return (int64_t)va;
+    }
     return (int64_t)(uintptr_t)region(s, len);
 }
 static int64_t k_detach(void *v, uintptr_t va, size_t len) {
@@ -773,7 +801,7 @@ static int64_t k_detach(void *v, uintptr_t va, size_t len) {
         if (s->regions[i].va != va) continue;
         /* Detach names the whole region. */
         assert(s->regions[i].len == len);
-        free((void *)va);
+        free(s->regions[i].alloc);
         s->regions[i] = s->regions[--s->nregions];
         return 0;
     }

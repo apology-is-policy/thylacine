@@ -2,8 +2,8 @@
 mod sim;
 use crate::native::{POLLERR, PoolMember, Ring, Shot};
 use sim::{
-    ABORTING, EACCES, EBADF, ECANCELED, EINTR, EINVAL, ENOENT, ENOTDIR, ETIMEDOUT, RETIRED, Sim,
-    SimKernel, SlotKind,
+    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, ENOENT, ENOTDIR, ETIMEDOUT, RETIRED,
+    Sim, SimKernel, SlotKind,
 };
 use std::future::Future;
 
@@ -1220,4 +1220,114 @@ fn a_pool_dropped_after_the_ring_closed_under_never_closes_the_number() {
     assert_eq!(r.turn(Some(r.now())).err(), Some(ECANCELED as i32));
     drop(r);
     assert_eq!(sim.s().closed_fds, vec![7], "only the other thread's close");
+}
+
+/// A pool registration answered 0 with an identity that names no new pool: the
+/// core cannot tell what the kernel holds and closes the descriptor, so the
+/// ring fails rather than admit work that could never enter.
+#[test]
+fn an_uncertain_pool_registration_fails_the_ring() {
+    let sim = Sim::new();
+    let r = ring(&sim, 8, &[4096]);
+    drop(r.pool(&[range(0, 0, 64)]).unwrap());
+    r.turn(Some(r.now())).unwrap();
+    assert_eq!(sim.s().reaps.len(), 1, "the identity the kernel answers next is stale");
+    sim.s().stale_pool = true;
+    assert_eq!(r.pool(&[range(0, 0, 64)]).err(), Some(-5));
+    assert_eq!(sim.s().closed_fds, vec![7], "the core closed the descriptor");
+    assert_eq!(r.target(5, b"clip").err(), Some(-5));
+    assert_eq!(r.turn(None).err(), Some(-5), "and the ring has failed");
+    drop(r);
+    assert_eq!(sim.s().closed_fds, vec![7], "closed once");
+    assert_eq!(sim.regions(), 0);
+}
+
+/// Setup's own refusal passes through, and every region attached before it is
+/// detached; there is no descriptor to close.
+#[test]
+fn a_refused_setup_detaches_every_region() {
+    let sim = Sim::new();
+    sim.s().setup_errno = Some(-12);
+    assert_eq!(Ring::setup(sim.kernel(), 8, &[4096]).err(), Some(-12));
+    assert_eq!(sim.regions(), 0);
+    assert!(sim.s().closed_fds.is_empty());
+}
+
+#[test]
+fn a_setup_without_a_mapping_closes_its_descriptor() {
+    let sim = Sim::new();
+    sim.s().setup_unmapped = true;
+    assert_eq!(Ring::setup(sim.kernel(), 8, &[4096]).err(), Some(-5));
+    assert_eq!(sim.s().closed_fds, vec![7]);
+    assert_eq!(sim.regions(), 0);
+}
+
+/// A mapping that fails validation is closed and left mapped: nothing says its
+/// base and length name the kernel's mapping, so nothing detaches them.
+#[test]
+fn a_mapping_that_fails_validation_is_closed_and_left_mapped() {
+    let sim = Sim::new();
+    sim.s().setup_bad_mask = true;
+    assert_eq!(Ring::setup(sim.kernel(), 8, &[4096]).err(), Some(-5));
+    assert_eq!(sim.s().closed_fds, vec![7]);
+    assert_eq!(sim.regions(), 1, "only the ring mapping is left");
+}
+
+/// A validated ring of entries the adapter did not ask for is closed, and its
+/// mapping detached with the rest.
+#[test]
+fn a_ring_of_another_geometry_is_closed_and_detached() {
+    let sim = Sim::new();
+    sim.s().setup_doubles = true;
+    assert_eq!(Ring::setup(sim.kernel(), 8, &[4096]).err(), Some(-5));
+    assert_eq!(sim.s().closed_fds, vec![7]);
+    assert_eq!(sim.regions(), 0);
+}
+
+#[test]
+fn a_refused_buffer_registration_closes_the_ring() {
+    let sim = Sim::new();
+    sim.s().buffers_errno = Some(EBUSY);
+    assert_eq!(
+        Ring::setup(sim.kernel(), 8, &[4096]).err(),
+        Some(EBUSY as i32)
+    );
+    assert_eq!(sim.s().closed_fds, vec![7]);
+    assert_eq!(sim.regions(), 0);
+}
+
+/// An attach that answers a region off its page is refused and detached with
+/// every region before it.
+#[test]
+fn a_misaligned_attach_is_detached() {
+    let sim = Sim::new();
+    sim.s().attach_misalign_at = Some(2);
+    assert_eq!(
+        Ring::setup(sim.kernel(), 8, &[4096, 4096]).err(),
+        Some(-5)
+    );
+    assert_eq!(sim.regions(), 0);
+    assert!(sim.s().closed_fds.is_empty());
+}
+
+/// A finished READ's result keeps its buffer, and with it every region, past
+/// the ring's drop; its own drop detaches them.
+#[test]
+fn a_read_result_keeps_the_storage_until_it_drops() {
+    let sim = Sim::new();
+    file(&sim, "f", b"kept");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    let done = run(&r, fid.read(range(0, 0, 64), 0, None).unwrap()).unwrap();
+    drop((fid, scope, target));
+    drop(r);
+    assert_eq!(sim.s().closed_fds, vec![7]);
+    // The buffer, the name arena and the ring mapping, all still attached.
+    assert_eq!(sim.regions(), 3);
+    assert_eq!(done.bytes(), b"kept");
+    drop(done);
+    assert_eq!(sim.regions(), 0);
 }

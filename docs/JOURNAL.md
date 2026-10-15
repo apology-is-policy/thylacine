@@ -1,6 +1,90 @@
 # The autonomous-run journal
 
 
+## October 14-15: NA-4c -- the C native adapter, written blind and then made to fail (Corona)
+
+NA-4c is the C twin of NA-4b's Rust adapter: libt's `adapter.h`/`adapter.c`
+over the C client cores, `native_kernel.c` over libt's system-call stubs, and
+a C port of the simulated kernel with the 55 Rust scenarios. The shape was not
+a design fork: ASYNC-SERVICE-LIFECYCLE section 7 fixes the C interface
+(opaque handles; submit, poll, cancel, reap) and the October 12 vote 3 fixes
+caller storage. Writing the scripture paragraph (ae30e0cb1) turned up a
+sentence of my own NA-4a text, never voted, that gave the ring storage a
+retirement executor. The Rust adapter has none -- it drives the fixed driver
+directly, and caller storage already outlives the client -- so the sentence
+went.
+
+Main held the mac for the whole of the writing (B-3a/B-3c), with Astra queued,
+so the adapter, the core hooks, the sim and all 55 tests were committed
+unbuilt across one self-compaction (c0b676288 .. f680b59f2). Two things done
+in the wait mattered later:
+- **The hooks had no C tests.** The Rust NA-4b core edits came with
+  `a_refused_read_takes_no_lease_but_passes_every_check`; the C port had
+  nothing. Porting it led to the slot check, which had no direct test in
+  EITHER language: the adapter tests reached `Kind::Slot`/`T_REQ_SLOT` only
+  through the sim. A test now pins it on both sides (f680b59f2).
+- **The census anchors moved.** `na2b-mutants.py --dry` found two of 87
+  anchors rotted by my `fixed_requests.c` edits (one at 0 matches, one at 2:
+  the new book reserve copies prepare's bytes). Both are ported to the new
+  spelling through the script's own PORTED mechanism.
+- **A dossier contradicted itself.** `sub-loom-native-adapter` called the sim's
+  answer for a not-READY FID a "known divergence" (-ECANCELED) in Prosecution,
+  while its caveat 4 and the Rust test say -ENOENT. Fixed in the C-half pass.
+
+The wake came at 00:20Z. The first build (00:21:43Z) compiled about 2,500
+lines of never-compiled C without one error or warning under -Werror, and
+every stage of `tools/test-loom-client.sh` passed. That is the moment the
+discipline is for: a first build that green proves nothing about the tests.
+`work/oct15-na4c/sabotage.py` (63 cases, a control leg first) turned every
+one of the 55 scenarios red with one targeted adapter edit, each at its own
+assertion (`sabotage-20261015T002248Z.txt`); 87 NA-2b mutants were rejected
+by named checks; the ABI checker passed. The lease went back at 00:27Z, six
+minutes after it arrived.
+
+The audit (Opus on Opus: Fable answered HTTP 429 at spawn, out of credits)
+found 0 P0, 0 P1, 1 P2, 4 P3. The P2 was a sentence of mine: the dossier said
+a misused handle ends the process. It does so only while the handle's cell is
+free, and two things made that rare: a reaped slot is zeroed, so its handle
+reads a NULL ring and dereferences it, and `claim_op` took the lowest free
+cell, so the operation submitted right after a consume took the consumed
+handle's cell and a stray drop aborted that operation's scope. The fix is
+guards at every handle entry and a rotating claim; generations would close the
+last case (a cell reused by a handle of the same kind) and are an interface
+change I did not make. F2 was the one finding shared with the Rust twin: an
+uncertain pool registration closed the descriptor in the core while the ring
+stayed open, in both languages, behind a kernel answer that cannot happen.
+Adding the C knobs for F5 would have broken a property the audit had just
+verified -- "the C sim is sim.rs, knob for knob" -- so every setup knob went
+into sim.rs too, with a Rust twin of each scenario.
+
+Wrong turn: the stale-pool test first assumed a dropped pool is reaped at
+once. Reading `t_ring_pool_drop` showed the REAP waits for the next turn's
+`t_ring_progress`; without a turn the knob's identity would have been a
+colliding live one, not a stale one, and the pool death test would have
+asserted a reap that had not happened (in a forked child, where a failed
+assert reads as a missing fatal). Both tests now turn first or assert nothing
+about the reap.
+
+The second lease came at 02:57Z, behind astra's 50-boot gate and main. The
+first compile of the fixes failed (-Wmissing-field-initializers): the new
+`alloc` field of `struct sim_region` also types the simulator's buffer
+table, a second literal I had not looked for. With that line fixed every stage
+passed: 71 scenarios in each profile, 206 of 206 Rust tests. All 96 sabotage
+cases went red after a control of 81 scenarios. Reading the failure lines
+mattered here: the one-line summary of a multi-child death test shows the
+first child's EXPECTED fatal, not the failing one, so the six guard cases were
+checked in their own logs (each "no fatal there" at its own `expect_fatal`),
+and `route-cell-claimable` failed at the live-slot pin, not the -ENOSPC one,
+because CONNECT reserves its kernel slot before the book refuses (the F3b
+behaviour the test was written to pin). The lease went back after seven
+minutes. Free disk read 7.6 GiB at 02:57Z, under the 8 GiB floor; the run's
+footprint is about 0.2 GiB transient, pruned to under 1 MB of logs, so I ran
+it with a note to the peers and deleted nothing of anyone's.
+
+Evidence: the run log, sabotage table, mutant log and checker log are under
+`work/oct15-na4c/`. Decisions the user made: none new; votes 3 (caller
+storage) and the 10-12 set bound the shape.
+
 ## October 14: the close-by-number sweep -- a reserved number, and the connect that swapped a stranger's file (Corona)
 
 OPEN-BUGS 15:48Z listed twelve sites that installed a descriptor and, on a

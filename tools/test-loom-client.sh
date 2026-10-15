@@ -68,7 +68,7 @@ PASS_LINES=(
     "test_retirement_executor:C eight retirement owner scenarios PASS"
     "test_retirement_timers:C six retirement timer scenarios PASS"
     "test_fatal:C seven fatal invariant scenarios PASS"
-    "test_adapter:C fifty-five native adapter scenarios PASS"
+    "test_adapter:C seventy-one native adapter scenarios PASS"
 )
 # test name -> the test sources it links beside its own
 extra_sources() {

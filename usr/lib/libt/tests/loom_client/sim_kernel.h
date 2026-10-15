@@ -51,7 +51,8 @@ struct sim_shots {
     size_t name_len, head, count;
     struct { unsigned char b[256]; size_t len; } q[64];
 };
-struct sim_region { uintptr_t va; size_t len; };
+/* alloc is what free takes: a region off its page starts inside it. */
+struct sim_region { uintptr_t va; size_t len; void *alloc; };
 
 struct sim {
     uint64_t clock;
@@ -118,6 +119,26 @@ struct sim {
     /* The next RETURN answers this instead of releasing its member. */
     int has_refuse_return;
     int64_t refuse_return;
+    /* Setup answers this errno, mapping nothing. */
+    int has_setup_errno;
+    int64_t setup_errno;
+    /* Setup answers a descriptor but no mapping. */
+    int setup_unmapped;
+    /* Setup writes an SQ mask the mapping's validation refuses. */
+    int setup_bad_mask;
+    /* Setup maps a ring of twice the entries asked for. */
+    int setup_doubles;
+    /* REGISTER_BUFFERS answers this. */
+    int has_buffers_errno;
+    int64_t buffers_errno;
+    /* This attach (counted from 1) answers a region that does not start on a
+     * page. */
+    size_t attach_misalign_at;
+    /* The next SERVICE_POOL answers 0 with the last pool's identity, minting
+     * nothing: a stale identity, which the kernel never writes. */
+    int stale_pool;
+    int has_last_pool;
+    struct t_loom_service_ref last_pool;
 };
 
 void sim_init(struct sim *);

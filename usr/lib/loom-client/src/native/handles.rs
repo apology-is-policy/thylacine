@@ -7,10 +7,10 @@ use super::{
     kernel::{Backend, EINVAL, EIO, ENOSPC, SlotEntry, SlotKind, SlotState, ZERO_REF},
 };
 use crate::{
-    fixed_requests::{BookRequest, ReadCompletion, ReadRequest, WriteRequest},
+    fixed_requests::{BookRequest, Error as DriverError, ReadCompletion, ReadRequest, WriteRequest},
     paired_cq::Completion,
     request_book::Kind,
-    ring_payload::{Payload as CorePayload, Pool as CorePool},
+    ring_payload::{Error as StorageError, Payload as CorePayload, Pool as CorePool},
     ring_records::{OP_CLUNK, OP_LOPEN, OP_READ, OP_WALK, OP_WRITE, SQE_MULTISHOT, Submission},
     service_abi::{
         OP_SERVICE_CONNECT, PoolMember, REGISTER_SERVICE_TARGET, SERVICE_FID, SERVICE_SCOPE,
@@ -120,7 +120,15 @@ pub(crate) fn target<K: Kernel>(
 
 pub(crate) fn pool<K: Kernel>(inner: &Rc<Inner<K>>, ranges: &[PoolMember]) -> Result<Pool<K>> {
     inner.admit()?;
-    let core = inner.driver().register_pool(ranges).map_err(errno)?;
+    let registered = inner.driver().register_pool(ranges);
+    let core = registered.map_err(|e| {
+        // The core cannot tell what the kernel holds and has closed the
+        // descriptor, so nothing queued could ever enter: the ring fails.
+        if matches!(e, DriverError::Storage(StorageError::Uncertain(_))) {
+            inner.fail();
+        }
+        errno(e)
+    })?;
     Ok(Pool {
         inner: inner.clone(),
         r: core.identity(),

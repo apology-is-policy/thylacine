@@ -33,11 +33,14 @@ SIM = 'tests/loom_client/sim_kernel.c'
 L = 'src/loom_client/lease_ledger.c'
 RB = 'src/loom_client/request_book.c'
 RUST = '../loom-client/src/request_book.rs'
+RH = '../loom-client/src/native/handles.rs'
+RM = '../loom-client/src/native/mod.rs'
+RK = '../loom-client/src/native/kernel.rs'
 
 REG_EBADF = (A, '    if (rc == -E_BADF && (op != T_LOOM_REGISTER_SERVICE_TARGET || gone(r))) {',
              '    if (rc == -E_BADF && op == T_LOOM_REGISTER_SERVICE_TARGET && gone(r)) {')
 UNSETTLED = (A, '    if (r->submitted != r->ended) return 0;\n', '')
-OPEN_RESULT = '    if (rc != 1) return rc;\n    *result = c.result;\n    consumed(op->ring, op, 1);'
+OPEN_RESULT = '    if (rc != 1) return rc;\n    *result = c.result;\n    consumed(r, op, 1);'
 
 # (case, scenario, [(file under usr/lib/libt, old, new), ...])
 CASES = [
@@ -186,6 +189,83 @@ CASES = [
  ('close-noop', 'an_explicit_close_with_live_handles_cancels_their_use',
   [(A, 'void t_loom_close(struct t_loom_ring *r) {\n    T_LOOM_CHECK(r->root);\n    close_ring(r);',
     'void t_loom_close(struct t_loom_ring *r) {\n    T_LOOM_CHECK(r->root);')]),
+ # Audit round 1: setup refusals, the C interface's own checks and the stale-handle guards.
+ ('uncertain-pool-kept-open', 'an_uncertain_pool_registration_fails_the_ring',
+  [(A, '        fail(r);\n        return native < 0 && native > -1000', '        return native < 0 && native > -1000')]),
+ ('setup-errno-masked', 'a_refused_setup_detaches_every_region',
+  [(A, '        return fd < 0 ? (int)fd : -E_IO;', '        return -E_IO;')]),
+ ('setup-regions-kept', 'a_refused_setup_detaches_every_region',
+  [(A, '    if (fd < 0 || fd > INT32_MAX) {\n        release_holder(r);',
+    '    if (fd < 0 || fd > INT32_MAX) {\n        r->regions = 0;\n        release_holder(r);')]),
+ ('unmapped-fd-forgotten', 'a_setup_without_a_mapping_closes_its_descriptor',
+  [(A, '    if (!p.ring_va) {\n        release_holder(r);', '    if (!p.ring_va) {\n        r->fd = -1;\n        release_holder(r);')]),
+ ('unvalidated-ring-detached', 'a_mapping_that_fails_validation_is_closed_and_left_mapped',
+  [(A, '    if (r->ring_valid) r->k.detach(', '    if (r->ring_va) r->k.detach(')]),
+ ('geometry-unchecked', 'a_ring_of_another_geometry_is_closed_and_detached',
+  [(A, '    if (p.sq_entries != entries || p.cq_entries != cq) {', '    if (0) {')]),
+ ('buffers-fd-forgotten', 'a_refused_buffer_registration_closes_the_ring',
+  [(A, '    if (rc < 0) {\n        t_mapping_destroy(&r->map);', '    if (rc < 0) {\n        r->fd = -1;\n        t_mapping_destroy(&r->map);')]),
+ ('misaligned-kept', 'a_misaligned_attach_is_detached',
+  [(A, '            if (va > 0) k->detach(k->context, (uintptr_t)va, len[i]);\n', '')]),
+ ('core-not-a-holder', 'a_read_result_keeps_the_storage_until_it_drops',
+  [(A, '    ++r->holders;\n    struct t_ring_backend b =', '    struct t_ring_backend b =')]),
+ ('shape-cq-unchecked', 'setup_refuses_a_bad_shape_before_the_kernel',
+  [(A, '    if (cq != 2 * (size_t)entries) return -E_INVAL;\n', '')]),
+ ('kind-connect', 'asking_for_another_kinds_completion_answers_einval',
+  [(A, '    if (op->kind != OP_CONNECT) return -E_INVAL;\n', '')]),
+ ('kind-walk', 'asking_for_another_kinds_completion_answers_einval',
+  [(A, '    if (op->kind != OP_WALK) return -E_INVAL;\n', '')]),
+ ('kind-open', 'asking_for_another_kinds_completion_answers_einval',
+  [(A, '    if (op->kind != OP_OPEN) return -E_INVAL;\n', '')]),
+ ('kind-read', 'asking_for_another_kinds_completion_answers_einval',
+  [(A, '    if (op->kind != OP_READ) return -E_INVAL;\n', '')]),
+ ('kind-write', 'asking_for_another_kinds_completion_answers_einval',
+  [(A, '    if (op->kind != OP_WRITE) return -E_INVAL;\n', '')]),
+ ('kind-stream', 'asking_for_another_kinds_completion_answers_einval',
+  [(A, '    if (op->kind != OP_STREAM || op->ended) return -E_INVAL;', '    if (op->ended) return -E_INVAL;')]),
+ ('route-cell-claimable', 'a_full_operation_table_refuses_before_the_kernel',
+  [(A, '        if (r->ops[i].kind) continue;', '        if (r->ops[i].handle) continue;')]),
+ ('route-cell-kept', 'a_full_operation_table_refuses_before_the_kernel',
+  [(A, '        op->route = 0;\n        if (!op->handle) free_op(op);\n', '        op->route = 0;\n')]),
+ ('foreign-pool-accepted', 'a_pool_of_another_ring_answers_einval',
+  [(A, '    if (pool->ring != r) return -E_INVAL;\n', '')]),
+ ('stream-end-unlatched', 'a_stream_asked_again_after_its_end_answers_einval',
+  [(A, '    if (op->kind != OP_STREAM || op->ended) return -E_INVAL;', '    if (op->kind != OP_STREAM) return -E_INVAL;')]),
+ ('claim-lowest-first', 'a_consumed_operation_dropped_again_ends_the_process',
+  [(A, '        size_t i = (r->op_next + k) % r->op_count;', '        size_t i = k;')]),
+ ('op-guard-off', 'a_consumed_operation_dropped_again_ends_the_process',
+  [(A, '    T_LOOM_CHECK(op->handle && r && (uintptr_t)op >= (uintptr_t)r->ops &&\n'
+       '                 (uintptr_t)op < (uintptr_t)(r->ops + r->op_count));\n', '')]),
+ ('slot-guard-off', 'a_handle_whose_slot_was_freed_ends_the_process',
+  [(A, '    T_LOOM_CHECK(r && slot < 64);\n', '')]),
+ ('pool-guard-off', 'a_handle_whose_slot_was_freed_ends_the_process',
+  [(A, '    T_LOOM_CHECK(h->ring && h->cell < 64);\n', '')]),
+ ('clock-guard-off', 'a_dropped_ring_used_again_ends_the_process',
+  [(A, 'uint64_t t_loom_now(struct t_loom_ring *r) {\n    T_LOOM_CHECK(r->root);\n',
+    'uint64_t t_loom_now(struct t_loom_ring *r) {\n')]),
+ ('retired-guard-off', 'a_dropped_ring_used_again_ends_the_process',
+  [(A, 'int t_loom_retired(const struct t_loom_ring *r) {\n    T_LOOM_CHECK(r->root);\n',
+    'int t_loom_retired(const struct t_loom_ring *r) {\n')]),
+ # The Rust twins of the same refusals.
+ ('rust-uncertain-pool-kept-open', 'rust:tests::native::an_uncertain_pool_registration_fails_the_ring',
+  [(RH, '            inner.fail();\n', '')]),
+ ('rust-setup-errno-masked', 'rust:tests::native::a_refused_setup_detaches_every_region',
+  [(RM, '            return Err(fd as i32);', '            return Err(-EIO);')]),
+ ('rust-unmapped-fd-forgotten', 'rust:tests::native::a_setup_without_a_mapping_closes_its_descriptor',
+  [(RM, '        let Some(base) = NonNull::new(params.ring_va as usize as *mut u8) else {\n            shared.close_fd();',
+    '        let Some(base) = NonNull::new(params.ring_va as usize as *mut u8) else {\n            shared.forget_fd();')]),
+ ('rust-unvalidated-ring-detached', 'rust:tests::native::a_mapping_that_fails_validation_is_closed_and_left_mapped',
+  [(RM, '        let cq = OwnedMapping::new(map, params).map_err(|_| -EIO)?;\n'
+        '        shared.set_ring(base.as_ptr() as usize, params.ring_size as usize);\n',
+    '        shared.set_ring(base.as_ptr() as usize, params.ring_size as usize);\n'
+    '        let cq = OwnedMapping::new(map, params).map_err(|_| -EIO)?;\n')]),
+ ('rust-geometry-unchecked', 'rust:tests::native::a_ring_of_another_geometry_is_closed_and_detached',
+  [(RM, '        if params.sq_entries != entries {', '        if false {')]),
+ ('rust-buffers-fd-forgotten', 'rust:tests::native::a_refused_buffer_registration_closes_the_ring',
+  [(RM, '        if rc < 0 {\n            shared.close_fd();\n            return Err(rc as i32);',
+    '        if rc < 0 {\n            shared.forget_fd();\n            return Err(rc as i32);')]),
+ ('rust-misaligned-kept', 'rust:tests::native::a_misaligned_attach_is_detached',
+  [(RK, '                if va > 0 {\n                    kernel.detach(va as usize, len);\n                }\n', '')]),
  # The core edits' own tests.
  ('refuse-takes-lease', 'test_lease_ledger',
   [(L, '    m->last=r.lease;*out=r;return 1;', '    m->last=r.lease;m->state=LEASED;++b->outstanding;*out=r;return 1;')]),

@@ -115,6 +115,14 @@ static struct t_loom_slot *entry(struct t_loom_ring *r, struct t_loom_service_re
     struct t_loom_slot *e = &r->slots[ref.slot];
     return e->kind && same_ref(e->ref, ref) ? e : NULL;
 }
+// A caller's handle into a slot. A handle whose slot was freed reads zero and
+// ends the process here; one whose slot was reused names the new tenant.
+static struct t_loom_slot *held(struct t_loom_ring *r, uint32_t slot, unsigned kind) {
+    T_LOOM_CHECK(r && slot < 64);
+    struct t_loom_slot *e = &r->slots[slot];
+    T_LOOM_CHECK(e->kind == kind && e->handle);
+    return e;
+}
 static void set_state(struct t_loom_ring *r, struct t_loom_service_ref ref, unsigned state) {
     struct t_loom_slot *e = entry(r, ref);
     if (e) e->state = state;
@@ -369,10 +377,30 @@ static void pool_unref(struct t_loom_ring *r, uint32_t cell) {
     t_bytes_zero(p, sizeof(*p));
     t_ring_pool_drop(core);
 }
+// Claims rotate through the table, so a freed cell is not claimed again until
+// the cursor comes round to it: a handle used again soon after its end finds
+// its cell free rather than another operation's.
 static struct t_loom_op *claim_op(struct t_loom_ring *r) {
-    for (size_t i = 0; i < r->op_count; ++i)
-        if (!r->ops[i].kind) return &r->ops[i];
+    for (size_t k = 0; k < r->op_count; ++k) {
+        size_t i = (r->op_next + k) % r->op_count;
+        if (r->ops[i].kind) continue;
+        r->op_next = (i + 1) % r->op_count;
+        return &r->ops[i];
+    }
     return NULL;
+}
+// An operation handle. One whose cell is free reads zero and ends the process.
+static struct t_loom_ring *op_ring(const struct t_loom_op *op) {
+    struct t_loom_ring *r = op->ring;
+    T_LOOM_CHECK(op->handle && r && (uintptr_t)op >= (uintptr_t)r->ops &&
+                 (uintptr_t)op < (uintptr_t)(r->ops + r->op_count));
+    return r;
+}
+static struct t_loom_pool_cell *pool_of(struct t_loom_pool *h) {
+    T_LOOM_CHECK(h->ring && h->cell < 64);
+    struct t_loom_pool_cell *p = &h->ring->pools[h->cell];
+    T_LOOM_CHECK(p->handle);
+    return p;
 }
 static void free_op(struct t_loom_op *op) { t_bytes_zero(op, sizeof(*op)); }
 static void queue_push(struct t_loom_ring *r, struct t_loom_op *op, struct t_ring_payload *payload) {
@@ -688,7 +716,10 @@ int t_loom_ring_setup(struct t_loom_ring *r, struct t_request_entry *book, struc
     return 0;
 }
 int t_loom_idle(const struct t_loom_ring *r) { return !r->used; }
-uint64_t t_loom_now(struct t_loom_ring *r) { return r->k.now(r->k.context); }
+uint64_t t_loom_now(struct t_loom_ring *r) {
+    T_LOOM_CHECK(r->root);
+    return r->k.now(r->k.context);
+}
 int64_t t_loom_turn(struct t_loom_ring *r, int has_deadline, uint64_t deadline) {
     T_LOOM_CHECK(r->root);
     int64_t routed = service(r);
@@ -701,7 +732,10 @@ void t_loom_retire(struct t_loom_ring *r) {
     T_LOOM_CHECK(r->root);
     begin_retire(r);
 }
-int t_loom_retired(const struct t_loom_ring *r) { return (int)r->retired; }
+int t_loom_retired(const struct t_loom_ring *r) {
+    T_LOOM_CHECK(r->root);
+    return (int)r->retired;
+}
 void t_loom_close(struct t_loom_ring *r) {
     T_LOOM_CHECK(r->root);
     close_ring(r);
@@ -742,8 +776,7 @@ int t_loom_target(struct t_loom_ring *r, int32_t registry_fd, const void *name, 
 }
 void t_loom_target_drop(struct t_loom_target *t) {
     struct t_loom_ring *r = t->ring;
-    struct t_loom_slot *e = &r->slots[t->slot];
-    T_LOOM_CHECK(e->kind == S_TARGET && e->handle);
+    struct t_loom_slot *e = held(r, t->slot, S_TARGET);
     e->handle = 0;
     e->state = S_REAP;
     handle_gone(r);
@@ -762,7 +795,12 @@ int t_loom_pool(struct t_loom_ring *r, const struct t_loom_service_pool_member *
     if (!p) return -E_NOSPC;
     struct t_ring_pool *core = NULL;
     int64_t native = 0, got = t_fixed_register_pool(r->driver, ranges, n, &core, &native);
-    if (got == T_RING_UNCERTAIN) return native < 0 && native > -1000 ? (int)native : -E_IO;
+    if (got == T_RING_UNCERTAIN) {
+        // The core cannot tell what the kernel holds and has closed the
+        // descriptor, so nothing queued could ever enter: the ring fails.
+        fail(r);
+        return native < 0 && native > -1000 ? (int)native : -E_IO;
+    }
     if (got) return errno_of(got);
     *p = (struct t_loom_pool_cell){ .core = core, .ref = t_ring_pool_identity(core), .refs = 1, .members = n,
                                     .handle = 1 };
@@ -773,8 +811,7 @@ int t_loom_pool(struct t_loom_ring *r, const struct t_loom_service_pool_member *
 }
 void t_loom_pool_drop(struct t_loom_pool *h) {
     struct t_loom_ring *r = h->ring;
-    struct t_loom_pool_cell *p = &r->pools[h->cell];
-    T_LOOM_CHECK(p->handle);
+    struct t_loom_pool_cell *p = pool_of(h);
     p->handle = 0;
     pool_unref(r, h->cell);
     handle_gone(r);
@@ -803,8 +840,8 @@ static void op_issued(struct t_loom_ring *r, struct t_loom_op *op, uint64_t cook
 
 int t_loom_connect(struct t_loom_target *t, int has_deadline, uint64_t deadline, struct t_loom_op **out) {
     struct t_loom_ring *r = t->ring;
-    struct t_loom_slot *target = &r->slots[t->slot];
-    T_LOOM_CHECK(target->kind == S_TARGET && target->handle && out);
+    struct t_loom_slot *target = held(r, t->slot, S_TARGET);
+    T_LOOM_CHECK(out);
     *out = NULL;
     int rc = admit(r);
     if (rc) return rc;
@@ -877,21 +914,15 @@ static int walk(struct t_loom_ring *r, uint32_t scope_slot, struct t_loom_servic
 }
 int t_loom_walk(struct t_loom_scope *s, const void *name, size_t len, int has_deadline, uint64_t deadline,
                 struct t_loom_op **out) {
-    struct t_loom_slot *e = &s->ring->slots[s->slot];
-    T_LOOM_CHECK(e->kind == S_SCOPE && e->handle);
+    struct t_loom_slot *e = held(s->ring, s->slot, S_SCOPE);
     return walk(s->ring, s->slot, e->ref, name, len, has_deadline, deadline, out);
 }
 int t_loom_walk_fid(struct t_loom_fid *f, const void *name, size_t len, int has_deadline, uint64_t deadline,
                     struct t_loom_op **out) {
-    struct t_loom_slot *e = &f->ring->slots[f->slot];
-    T_LOOM_CHECK(e->kind == S_FID && e->handle);
+    struct t_loom_slot *e = held(f->ring, f->slot, S_FID);
     return walk(f->ring, e->scope.slot, e->ref, name, len, has_deadline, deadline, out);
 }
-static struct t_loom_slot *fid_of(struct t_loom_fid *f) {
-    struct t_loom_slot *e = &f->ring->slots[f->slot];
-    T_LOOM_CHECK(e->kind == S_FID && e->handle);
-    return e;
-}
+static struct t_loom_slot *fid_of(struct t_loom_fid *f) { return held(f->ring, f->slot, S_FID); }
 int t_loom_open(struct t_loom_fid *f, uint32_t mode, int has_deadline, uint64_t deadline, struct t_loom_op **out) {
     struct t_loom_ring *r = f->ring;
     struct t_loom_slot *e = fid_of(f);
@@ -963,13 +994,12 @@ int t_loom_stream(struct t_loom_fid *f, struct t_loom_pool *pool, uint64_t offse
                   int has_deadline, uint64_t deadline, struct t_loom_op **out) {
     struct t_loom_ring *r = f->ring;
     struct t_loom_slot *e = fid_of(f);
+    struct t_loom_pool_cell *p = pool_of(pool);
     T_LOOM_CHECK(out);
     *out = NULL;
     int rc = admit(r);
     if (rc) return rc;
     if (pool->ring != r) return -E_INVAL;
-    struct t_loom_pool_cell *p = &r->pools[pool->cell];
-    T_LOOM_CHECK(p->handle);
     struct t_loom_op *op = new_op(r, OP_STREAM, e->scope.slot);
     if (!op) return -E_NOSPC;
     struct t_request_spec spec = { .kind = T_REQ_POOLED_READ, .limit = limit, .multi = !!multishot, .pool = p->ref };
@@ -1013,9 +1043,9 @@ static void consumed(struct t_loom_ring *r, struct t_loom_op *op, int holds_scop
     handle_gone(r);
 }
 int t_loom_connect_done(struct t_loom_op *op, int32_t *result, struct t_loom_scope **scope) {
-    T_LOOM_CHECK(op->handle && result && scope);
+    struct t_loom_ring *r = op_ring(op);
+    T_LOOM_CHECK(result && scope);
     if (op->kind != OP_CONNECT) return -E_INVAL;
-    struct t_loom_ring *r = op->ring;
     struct t_owned_cqe c;
     int rc = take_book(op, &c);
     if (rc != 1) return rc;
@@ -1038,9 +1068,9 @@ int t_loom_connect_done(struct t_loom_op *op, int32_t *result, struct t_loom_sco
     return 1;
 }
 int t_loom_walk_done(struct t_loom_op *op, int32_t *result, struct t_loom_fid **fid) {
-    T_LOOM_CHECK(op->handle && result && fid);
+    struct t_loom_ring *r = op_ring(op);
+    T_LOOM_CHECK(result && fid);
     if (op->kind != OP_WALK) return -E_INVAL;
-    struct t_loom_ring *r = op->ring;
     struct t_owned_cqe c;
     int rc = take_book(op, &c);
     if (rc != 1) return rc;
@@ -1061,19 +1091,20 @@ int t_loom_walk_done(struct t_loom_op *op, int32_t *result, struct t_loom_fid **
     return 1;
 }
 int t_loom_open_done(struct t_loom_op *op, int32_t *result) {
-    T_LOOM_CHECK(op->handle && result);
+    struct t_loom_ring *r = op_ring(op);
+    T_LOOM_CHECK(result);
     if (op->kind != OP_OPEN) return -E_INVAL;
     struct t_owned_cqe c;
     int rc = take_book(op, &c);
     if (rc != 1) return rc;
     *result = c.result;
-    consumed(op->ring, op, 1);
+    consumed(r, op, 1);
     return 1;
 }
 int t_loom_read_done(struct t_loom_op *op, int32_t *result, struct t_fixed_read_result **done) {
-    T_LOOM_CHECK(op->handle && result && done);
+    struct t_loom_ring *r = op_ring(op);
+    T_LOOM_CHECK(result && done);
     if (op->kind != OP_READ) return -E_INVAL;
-    struct t_loom_ring *r = op->ring;
     struct t_fixed_read_result *got = NULL;
     int rc = t_fixed_read_complete(op->fixed, &got);
     if (rc == 0) return 0;
@@ -1088,20 +1119,22 @@ int t_loom_read_done(struct t_loom_op *op, int32_t *result, struct t_fixed_read_
     return 1;
 }
 int t_loom_write_done(struct t_loom_op *op, int32_t *result) {
-    T_LOOM_CHECK(op->handle && result);
+    struct t_loom_ring *r = op_ring(op);
+    T_LOOM_CHECK(result);
     if (op->kind != OP_WRITE) return -E_INVAL;
     struct t_owned_cqe c;
     int rc = t_fixed_write_complete(op->fixed, &c);
     if (rc == 0) return 0;
-    if (rc < 0) return fault(op->ring, rc);
+    if (rc < 0) return fault(r, rc);
     *result = c.result;
-    consumed(op->ring, op, 1);
+    consumed(r, op, 1);
     return 1;
 }
 int t_loom_stream_next(struct t_loom_op *op, struct t_ring_payload **payload, int *end, int32_t *result) {
-    T_LOOM_CHECK(op->handle && payload && end && result);
+    struct t_loom_ring *r = op_ring(op);
+    T_LOOM_CHECK(payload && end && result);
     if (op->kind != OP_STREAM || op->ended) return -E_INVAL;
-    *payload = queue_pop(op->ring, op);
+    *payload = queue_pop(r, op);
     *end = 0;
     if (*payload) return 1;
     struct t_owned_cqe c;
@@ -1114,8 +1147,7 @@ int t_loom_stream_next(struct t_loom_op *op, struct t_ring_payload **payload, in
     return 1;
 }
 void t_loom_op_drop(struct t_loom_op *op) {
-    struct t_loom_ring *r = op->ring;
-    T_LOOM_CHECK(op->handle);
+    struct t_loom_ring *r = op_ring(op);
     switch (op->kind) {
     case OP_CONNECT:
         abort_scope(r, op->dest);
@@ -1178,15 +1210,13 @@ int t_loom_payload_return(struct t_ring_payload *payload) {
 }
 void t_loom_payload_drop(struct t_ring_payload *payload) { t_ring_abandon(payload); }
 void t_loom_scope_abort(struct t_loom_scope *s) {
-    struct t_loom_slot *e = &s->ring->slots[s->slot];
-    T_LOOM_CHECK(e->kind == S_SCOPE && e->handle);
+    struct t_loom_slot *e = held(s->ring, s->slot, S_SCOPE);
     abort_scope(s->ring, e->ref);
 }
 void t_loom_scope_drop(struct t_loom_scope *s) {
     struct t_loom_ring *r = s->ring;
     uint32_t slot = s->slot;
-    struct t_loom_slot *e = &r->slots[slot];
-    T_LOOM_CHECK(e->kind == S_SCOPE && e->handle);
+    struct t_loom_slot *e = held(r, slot, S_SCOPE);
     e->handle = 0;
     scope_unref(r, slot);
     handle_gone(r);

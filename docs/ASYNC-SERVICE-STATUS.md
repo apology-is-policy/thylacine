@@ -4386,6 +4386,80 @@ witness of REAP refusing a mid-CLUNK FID; the late-shot RETURN bypassing the
 ledger's checks; and whether the Loom handlers should refuse the high word of a
 descriptor or op (a vote, batched with the legacy -1s). Each is in OPEN-BUGS.
 
+### NA-4c: the C adapter (host-verified; audit closed after one round)
+
+The adapter is libt's `thyla/loom_client/adapter.h` and `adapter.c`, the C twin
+of NA-4b over the C cores, with `native_kernel.c` (`t_loom_kernel_native()`,
+libt's system-call stubs) and host tests against a C port of the simulated
+kernel (`tests/loom_client/sim_kernel.{c,h}`, `test_adapter.c`). Scripture is
+the "C interface" paragraph added to "Native adapter (October 12)" (ae30e0cb1),
+which also drops a sentence of my NA-4a text that gave the storage a
+retirement executor: neither adapter has one. The shape is LIFECYCLE section 7
+and vote 3, so no design fork was raised. The C cores gained the NA-4b hooks
+(the request book's SLOT kind and abandoned-only clear, the ledger's refused
+read, the ring core's refusal, pool identity and owner abort, the fixed
+driver's book requests, route and pool registration). libt's CMakeLists now
+builds both new sources; the dossiers are `sub-loom-native-adapter` (its C
+half) and `sub-libt-loom-client` (the hooks), and the trigger row "Native Loom
+adapter (October 12)" gains the C twin's questions.
+
+Everything was written while main held the mac, and committed unbuilt
+(c0b676288 to f680b59f2). The first build under the lease (October 15,
+00:21:43Z) compiled without an error or a warning and passed every stage of
+`tools/test-loom-client.sh`: the 55 scenarios sanitized and at -O2 (55
+"running" lines each), 128 public functions linked freestanding under
+`--no-undefined` with no mem\* import, and 198 of 198 Rust tests in both
+profiles. A first build that green is a claim to test, not a result, so
+`work/oct15-na4c/sabotage.py` (63 cases) turned each of the 55 scenarios red
+with one targeted adapter edit, after a control leg ran every named scenario
+green on the unedited tree; each case failed at its own assertion
+(`work/oct15-na4c/sabotage-20261015T002248Z.txt`). Two fail at the simulated
+kernel's "poll would block forever" check, which is how a hang shows there.
+
+The hooks had no tests of their own on the C side. The Rust refused-read test
+is ported to `test_lease_ledger.c`, and a SLOT-kind test is new in both
+languages (neither had one: the adapter tests reached the check only through
+the simulated kernel); four core cases and one Rust case in the sabotage set
+turn them red. The NA-2b mutant census rejected all 87 mutants, each by a
+named check, before and after the audit fixes
+(`work/oct15-na4c/na2b-mutants-20261015T030250Z.log`).
+
+Audit round 1 ran on Opus (Fable was out of credits, so a same-family round,
+valid under the reviewer rule) and found 0 P0, 0 P1, 1 P2 and 4 P3, all fixed:
+- F1 [P2]: a stale or doubly dropped handle was fatal only while its cell
+  happened to be free; once the cell was reaped it dereferenced a NULL ring,
+  and the lowest-first operation table handed a just-freed cell to the next
+  operation, so a drop after a consume aborted an unrelated scope. Every handle
+  entry is now guarded (`held`, `pool_of`, `op_ring`, the root checks of
+  `t_loom_now` and `t_loom_retired`), and operation cells are claimed in
+  rotation. A cell reused by a newer handle of the same kind still aliases it;
+  closing that needs a generation in every handle, an interface change not
+  made.
+- F2 [P3]: an uncertain pool registration (`T_RING_UNCERTAIN`) closed the
+  descriptor in the core but left the ring open; both adapters now fail the
+  ring. The kernel cannot produce the answer; both simulators gain a knob that
+  does.
+- F3 and F4 [P3]: doc texts (a stream keeps its handle, a retiring ring
+  answers -ECANCELED, CONNECT and WALK reserve their slot first, the case count,
+  the fork caveat), fixed in dd736e14b, 3efbe25a1 and `adapter.h`.
+- F5 [P3]: C paths no test reached. Both simulators gain six setup knobs and a
+  stale-pool knob, eight scenarios run in both languages, and eight more are
+  the C interface's own, three of them death tests. Two refusals stay
+  untested because nothing can reach them (`t_fixed_create` on the validated
+  geometry, and a full pool table before a full member bank).
+
+The fixes were measured under a second lease (October 15, 02:57Z to 03:04Z).
+The first compile failed on one missing field initializer in the simulator
+(`work/oct15-na4c/run-20261015T025736Z-compile-error.log`); after that line,
+`tools/test-loom-client.sh` passed every stage
+(`run-20261015T025844Z.log`): 71 scenarios sanitized and optimized, 128
+public functions freestanding, and 206 of 206 Rust tests in both profiles.
+`sabotage.py`, now 96 cases, turned every one red after a control of 81
+scenarios (`sabotage-20261015T025941Z.txt`), the ABI checker passed, and the
+87 mutants were rejected again. No second round is owed: the close is clean
+and the fixes add guards, a claim order and tests without restructuring a
+mechanism.
+
 ## Loom refusals and argument widths: votes 7-9 (Corona, October 13 -- audit rounds 1-2 closed)
 
 Operator votes 7-9 (12:16Z October 13) finish what vote 6 began. Vote 7: every

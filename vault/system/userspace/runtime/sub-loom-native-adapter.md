@@ -43,8 +43,9 @@ enabled by it.
 The C twin (NA-4c) is libt's `thyla/loom_client/adapter.h`. It composes the C
 cores ([[sub-libt-loom-client]]) the same way, over `struct t_loom_kernel`, a
 table of the same raw calls; `t_loom_kernel_native()` (`native_kernel.c`) fills
-it with libt's system-call stubs. Its host tests run the Rust tests' 55
-scenarios, one for one, against a C port of the simulated kernel. Where the
+it with libt's system-call stubs. Its host tests run the Rust tests' 63
+scenarios, one for one, and eight of the C interface's own, against a C port
+of the simulated kernel. Where the
 two differ, the sections below say which side they describe.
 
 ## Contract
@@ -100,23 +101,32 @@ two differ, the sections below say which side they describe.
     operation, `t_loom_turn` progresses the ring, and the kind's completion
     call answers 0 while pending, 1 once done (the handle is consumed, and a
     CONNECT's scope or a WALK's fid is handed over), or a negative errno with
-    the handle kept: -ECANCELED for a closed ring, -EIO for a failed one,
-    -EINVAL for another kind's handle. `t_loom_op_drop` of a pending operation
+    the handle kept: -ECANCELED for a closed or retiring ring (a retiring
+    ring's operation can still answer 1 once its terminal is routed), -EIO for
+    a failed one, -EINVAL for another kind's handle. `t_loom_op_drop` of a pending operation
     aborts its scope. A stream yields its shots through `t_loom_stream_next`
     and is dropped explicitly; payloads already delivered stay valid.
   - A full table answers -ENOSPC: no free operation handle, SQ slot or pool
     cell. CONNECT and WALK reserve their kernel slot first, so a full SQ or
-    book is found after that reservation, which is then reaped. A client core's code becomes an errno:
-    CLOSING and a ledger STATE are -ECANCELED, a full book or exhausted
+    book is found after that reservation, which is then reaped. A client
+    core's code becomes an errno: CLOSING and a ledger STATE are -ECANCELED, a full book or exhausted
     cookies -ENOSPC, a busy lease -EBUSY, geometry and receipt codes -EINVAL;
     kernel errnos pass through and anything else is -EIO.
-  - A misused handle ends the process through `T_LOOM_CHECK` only while its
-    cell is still free: the `handle`, `active` and `used` flags catch a use
-    after a drop until the cell is reused. A stale handle whose cell was
-    reaped and zeroed dereferences a NULL ring pointer, and one whose cell was
-    reused by a newer handle aliases the new occupant, as in the cores
-    (caveat 3 of [[sub-libt-loom-client]]). A pool handle of another ring
+  - A misused handle ends the process through `T_LOOM_CHECK` while its cell
+    is free. A slot or pool handle whose cell was freed reads a zero ring and
+    fails its guard (`held`, `pool_of`); an operation handle whose cell is
+    free fails `op_ring`; a dropped ring's `t_loom_now` and
+    `t_loom_retired` fail their root check. Operation cells are claimed
+    round-robin, so a handle used again soon after its end finds its cell free
+    rather than a newer operation's. A cell reused by a newer handle of the
+    same kind still aliases the new occupant, as in the cores (caveat 3 of
+    [[sub-libt-loom-client]]): ending that would put a generation in every
+    handle, an interface change not made. A pool handle of another ring
     answers -EINVAL.
+  - A pool registration the kernel answers 0 with an identity that names no
+    new pool is uncertain to the core, which closes the descriptor; the ring
+    then fails (-EIO), in both adapters, since nothing queued could enter.
+    The kernel never writes such an identity (`finish_reservation`).
 - **Slot drops.** A failed WALK's reservation is reaped without a CLUNK (the
   kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
   answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
@@ -242,19 +252,28 @@ completion path allocates.
   on a FID that is not READY, under a READY scope, answers -ENOENT as
   `loom_fid_borrow` does (caveat 4).
 - **The C twin's tests.** `tests/loom_client/sim_kernel.c` ports `sim.rs`
-  knob for knob, and `test_adapter.c` runs the 55 scenarios of
-  `tests/native.rs` under their Rust names (`future` reads `operation`); a
-  `_Static_assert` pins the count. Each scenario also ends with the storage
+  knob for knob (the setup refusals, the misaligned attach and the stale pool
+  identity are knobs in both), and `test_adapter.c` runs the 63 scenarios of
+  `tests/native.rs` under their Rust names (`future` reads `operation`),
+  then eight of the C interface's own: a bad setup shape, another kind's
+  completion, a full operation table with a route-only stream cell, a
+  foreign pool, a stream asked again after its end, and three death tests
+  for stale handles. A `_Static_assert` pins the count of 71. Each scenario also ends with the storage
   idle and every region detached. `tools/test-loom-client.sh` runs them
   sanitized (-O0, ASan and UBSan, no recovery) and optimized, and links
   `adapter.c` and `native_kernel.c` freestanding under `--no-undefined` with
   no mem\* import.
-- **C sabotage.** `work/oct15-na4c/sabotage.py` turns each of the 55
+- **C sabotage.** `work/oct15-na4c/sabotage.py` turns each of the 71
   scenarios red with one targeted edit, after a control leg runs every named
-  scenario green on the unedited tree. 63 cases (58 over the 55 scenarios,
-  three of which have two, four core cases and one Rust case) were every one red at its own assertion in
-  the run of October 15, 00:22:48Z
-  (`work/oct15-na4c/sabotage-20261015T002248Z.txt`). A case whose anchor no
+  scenario green on the unedited tree. 96 cases (84 over the 71 scenarios,
+  four core cases and eight Rust cases, seven of them the Rust twins of the
+  setup and stale-pool scenarios) were every one red in the run of October 15,
+  02:59:41Z (`work/oct15-na4c/sabotage-20261015T025941Z.txt`), after a control
+  of 81 scenarios. Most fail at their own assertion; a removed kind check, a
+  removed end latch or a removed guard fails inside the call it guarded, and
+  each death test fails at its own `expect_fatal`. The Rust twin of
+  `a_read_result_keeps_the_storage_until_it_drops` has no case: `Rc`
+  ownership keeps that storage, and no one-line edit removes it. A case whose anchor no
   longer matches reports ANCHOR-ROT and counts as not red.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
   targeted adapter edit: 48 cases, every one red at its intended assertion
