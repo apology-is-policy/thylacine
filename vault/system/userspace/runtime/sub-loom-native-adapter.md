@@ -104,13 +104,19 @@ two differ, the sections below say which side they describe.
     -EINVAL for another kind's handle. `t_loom_op_drop` of a pending operation
     aborts its scope. A stream yields its shots through `t_loom_stream_next`
     and is dropped explicitly; payloads already delivered stay valid.
-  - A full table refuses before the kernel: no free operation handle, SQ slot
-    or pool cell answers -ENOSPC. A client core's code becomes an errno:
+  - A full table answers -ENOSPC: no free operation handle, SQ slot or pool
+    cell. CONNECT and WALK reserve their kernel slot first, so a full SQ or
+    book is found after that reservation, which is then reaped. A client core's code becomes an errno:
     CLOSING and a ledger STATE are -ECANCELED, a full book or exhausted
     cookies -ENOSPC, a busy lease -EBUSY, geometry and receipt codes -EINVAL;
     kernel errnos pass through and anything else is -EIO.
-  - A misused handle (a stale one, another ring's, a drop twice) ends the
-    process through `T_LOOM_CHECK`, as in the cores.
+  - A misused handle ends the process through `T_LOOM_CHECK` only while its
+    cell is still free: the `handle`, `active` and `used` flags catch a use
+    after a drop until the cell is reused. A stale handle whose cell was
+    reaped and zeroed dereferences a NULL ring pointer, and one whose cell was
+    reused by a newer handle aliases the new occupant, as in the cores
+    (caveat 3 of [[sub-libt-loom-client]]). A pool handle of another ring
+    answers -EINVAL.
 - **Slot drops.** A failed WALK's reservation is reaped without a CLUNK (the
   kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
   answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
@@ -245,8 +251,8 @@ completion path allocates.
   no mem\* import.
 - **C sabotage.** `work/oct15-na4c/sabotage.py` turns each of the 55
   scenarios red with one targeted edit, after a control leg runs every named
-  scenario green on the unedited tree. 63 cases (the 55 scenarios, four
-  core cases and one Rust case) were every one red at its own assertion in
+  scenario green on the unedited tree. 63 cases (58 over the 55 scenarios,
+  three of which have two, four core cases and one Rust case) were every one red at its own assertion in
   the run of October 15, 00:22:48Z
   (`work/oct15-na4c/sabotage-20261015T002248Z.txt`). A case whose anchor no
   longer matches reports ANCHOR-ROT and counts as not red.
