@@ -486,7 +486,8 @@ live ring answers -ENOENT. The number may already name another file, so the
 adapter forgets it without closing it. A pool RETURN, a
 REAP and a scope's retirement are synchronous REGISTER results, not poll events.
 The loop turn rechecks them as local progress. ENTER never sleeps, by the
-October 12 vote.
+October 12 vote. Each adapter reports its backlog, the CQEs the kernel has
+posted that no turn has routed yet; a full CQ reads its entry count.
 
 **Scopes and cancellation.** The adapter creates scopes. It reserves the slot
 (REGISTER SLOT, kind SCOPE), submits CONNECT with an absolute deadline, and
@@ -541,13 +542,19 @@ then answers -EIO. The adapter adds no errno.
 - NA-4c: the C adapter, tested the same way.
 - NA-4d: the guest qualification. No EL0 program can reach a private CONNECT
   today, because the kernel's tests serve from kernel threads on registries
-  they create themselves. NA-4d adds an EL0 fixture, a strict 9P server posted
-  in a registry the probe can name, and a qualification-image probe. The probe
-  drives both adapters through: connect, walk, open, fixed reads and writes, a
-  multishot pooled stream with out-of-order returns, a deadline that aborts its
-  scope, cancellation by drop, a full CQ, and closing the whole ring with leases
-  still held. A kernel test pins the probe's exit status by image, as
-  `loom.bridge_probe` does.
+  they create themselves. NA-4d adds an EL0 fixture, `/bin/loom-fixture`, a
+  strict 9P server, and one qualification probe per adapter:
+  `/bin/loom-native-probe` drives the Rust adapter and `/bin/loom-c-probe` the
+  C one. A kernel test makes a registry and gives its walk-only root to the
+  fixture, which posts in it, and to the probe, which names it in TARGET. Each
+  probe drives its adapter through: connect, walk, open, fixed reads and
+  writes, a multishot pooled stream with out-of-order returns, a deadline that
+  aborts its scope, cancellation by drop, a full CQ, and closing the whole ring
+  with leases still held. The fixture answers every message a correct client
+  never sends with Rlerror and counts it, and a stats file tells the probe what
+  the server saw. A kernel test pins each program's exit status by image, as
+  `loom.bridge_probe` does, and requires the run's rings, connections and
+  registry to be released.
 
 Each sub-chunk is audit-bearing, and NA-4b adds the trigger row for the
 adapter.

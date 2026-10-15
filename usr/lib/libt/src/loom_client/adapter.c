@@ -246,9 +246,12 @@ static void sq_push(struct t_loom_ring *r, const struct t_loom_sqe *sqe) {
     r->sq_array[slot] = slot;
     atomic_store_explicit(tail_word, tail + 1, memory_order_release);
 }
-static int cq_ready(struct t_loom_ring *r) {
-    return atomic_load_explicit(word(r, offsetof(struct t_loom_ring_hdr, cq_tail)), memory_order_acquire) !=
+static uint32_t cq_backlog(struct t_loom_ring *r) {
+    return atomic_load_explicit(word(r, offsetof(struct t_loom_ring_hdr, cq_tail)), memory_order_acquire) -
            atomic_load_explicit(word(r, offsetof(struct t_loom_ring_hdr, cq_head)), memory_order_relaxed);
+}
+static int cq_ready(struct t_loom_ring *r) {
+    return cq_backlog(r) != 0;
 }
 
 // ---- Ring state.
@@ -719,6 +722,10 @@ int t_loom_idle(const struct t_loom_ring *r) { return !r->used; }
 uint64_t t_loom_now(struct t_loom_ring *r) {
     T_LOOM_CHECK(r->root);
     return r->k.now(r->k.context);
+}
+size_t t_loom_backlog(struct t_loom_ring *r) {
+    T_LOOM_CHECK(r->root);
+    return cq_backlog(r);
 }
 int64_t t_loom_turn(struct t_loom_ring *r, int has_deadline, uint64_t deadline) {
     T_LOOM_CHECK(r->root);

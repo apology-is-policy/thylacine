@@ -398,6 +398,47 @@ static void a_full_cq_defers_completions_and_loses_none(void) {
     drop_all(&f, fid, s, t);
     finish(&f);
 }
+static void backlog_counts_what_the_kernel_posted_and_no_turn_routed(void) {
+    /* The ENTER that submits the stream lets the kernel post: four shots fill
+     * the CQ and the rest wait. Only a turn routes them, and its kick lets the
+     * kernel post again. */
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(2, b, 1);
+    file(f.sim, "burst", "");
+    char shots[8][4];
+    for (int i = 0; i < 8; ++i) {
+        memset(shots[i], 'a' + i, 4);
+        sim_shot(f.sim, "burst", shots[i], 4);
+    }
+    struct t_loom_service_pool_member m[8];
+    for (int i = 0; i < 8; ++i) m[i] = range(0, (uint64_t)i * 64, 64);
+    struct t_loom_pool *p = pool_ok(f.r, m, 8);
+    struct t_loom_target *t;
+    struct t_loom_scope *s;
+    struct t_loom_fid *fid;
+    opened(&f, "burst", &t, &s, &fid);
+    assert(t_loom_backlog(f.r) == 0);
+    struct t_loom_op *stream = stream_op(fid, p, 1);
+    assert(t_loom_backlog(f.r) == 4);
+    assert(t_loom_turn(f.r, 0, 0) == 4);
+    assert(t_loom_backlog(f.r) == 4);
+    struct t_ring_payload *held[8], *pl;
+    size_t got = 0;
+    int32_t end = -1;
+    while (next_shot(f.r, stream, &pl, &end)) {
+        size_t len;
+        const unsigned char *bytes = t_loom_payload_bytes(pl, &len);
+        assert(got < 8 && len == 4 && !memcmp(bytes, shots[got], 4));
+        held[got++] = pl;
+    }
+    assert(end == 0 && got == 8);
+    assert(t_loom_backlog(f.r) == 0);
+    for (size_t i = 0; i < got; ++i) t_loom_payload_drop(held[i]);
+    t_loom_op_drop(stream);
+    t_loom_pool_drop(p);
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
 static void a_short_enter_leaves_the_rest_queued_for_a_later_turn(void) {
     size_t b[] = { 4096 };
     struct fx f = ring_of(4, b, 1);
@@ -1586,6 +1627,7 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(poll_rounds_the_time_left_up_to_a_whole_millisecond),
     T(dropping_an_operation_aborts_its_scope_and_settles_its_entry),
     T(a_full_cq_defers_completions_and_loses_none),
+    T(backlog_counts_what_the_kernel_posted_and_no_turn_routed),
     T(a_short_enter_leaves_the_rest_queued_for_a_later_turn),
     T(a_full_sq_answers_enospc),
     T(a_rejected_sqe_ends_its_operation_with_the_kernels_errno),
@@ -1650,7 +1692,7 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
 };
 #undef T
 /* The 63 scenarios of tests/native.rs, then the C interface's own eight. */
-_Static_assert(sizeof(tests) / sizeof(tests[0]) == 71, "every scenario of tests/native.rs and the C interface's own");
+_Static_assert(sizeof(tests) / sizeof(tests[0]) == 72, "every scenario of tests/native.rs and the C interface's own");
 
 /* With a name, runs only that scenario (exit 2 for an unknown one). */
 int main(int argc, char **argv) {
@@ -1667,6 +1709,6 @@ int main(int argc, char **argv) {
         printf("C native adapter scenario %s PASS\n", argv[1]);
         return 0;
     }
-    puts("C seventy-one native adapter scenarios PASS");
+    puts("C seventy-two native adapter scenarios PASS");
     return 0;
 }

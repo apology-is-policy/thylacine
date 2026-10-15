@@ -93,7 +93,11 @@ impl Producer {
         self.word(DROPPED).load(Ordering::Acquire) != self.dropped
     }
     fn cq_ready(&self) -> bool {
-        self.word(CQ_TAIL).load(Ordering::Acquire) != self.word(CQ_HEAD).load(Ordering::Relaxed)
+        self.cq_backlog() != 0
+    }
+    fn cq_backlog(&self) -> u32 {
+        let tail = self.word(CQ_TAIL).load(Ordering::Acquire);
+        tail.wrapping_sub(self.word(CQ_HEAD).load(Ordering::Relaxed))
     }
 }
 
@@ -240,6 +244,12 @@ impl<K: Kernel> Ring<K> {
     /// The kernel's monotonic clock, in the nanoseconds every deadline uses.
     pub fn now(&self) -> u64 {
         self.inner.shared.kernel.now()
+    }
+    /// Completions the kernel has posted that no turn has routed yet. It reads
+    /// the CQ's entry count when the CQ is full; the kernel holds what it cannot
+    /// post until a turn makes room.
+    pub fn backlog(&self) -> usize {
+        self.inner.sq.cq_backlog() as usize
     }
     /// Name a strict 9P service posted in the registry `registry_fd` (from
     /// open("/srv", O_PATH)). Synchronous: the kernel checks the name now and

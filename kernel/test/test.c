@@ -728,6 +728,8 @@ void test_loom_private_sq_release_after_copy(void);
 void test_loom_private_sq_release_after_index(void);
 void test_loom_private_bridge(void);
 void test_loom_bridge_probe(void);
+void test_loom_native_probe_rust(void);
+void test_loom_native_probe_c(void);
 void test_loom_setup_rollback_settles(void);
 void test_loom_setup_rollback_identity(void);
 void test_loom_private_setup_rollback_identity(void);
@@ -2854,6 +2856,8 @@ struct test_case g_tests[] = {
     { "loom.private_sq_release_after_index", test_loom_private_sq_release_after_index, false, NULL },
     { "loom.private_bridge",            test_loom_private_bridge,             false, NULL },
     { "loom.bridge_probe",              test_loom_bridge_probe,               false, NULL },
+    { "loom.native_probe_rust",         test_loom_native_probe_rust,          false, NULL },
+    { "loom.native_probe_c",            test_loom_native_probe_c,             false, NULL },
     { "loom.setup_rollback_settles",    test_loom_setup_rollback_settles,     false, NULL },
     { "loom.setup_rollback_identity",   test_loom_setup_rollback_identity,    false, NULL },
     { "loom.private_setup_rollback_identity", test_loom_private_setup_rollback_identity, false, NULL },

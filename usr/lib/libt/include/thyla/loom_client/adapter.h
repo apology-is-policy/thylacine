@@ -128,6 +128,10 @@ int t_loom_ring_setup(struct t_loom_ring *, struct t_request_entry *book, struct
 // result and payload with it.
 int t_loom_idle(const struct t_loom_ring *);
 uint64_t t_loom_now(struct t_loom_ring *);
+// Completions the kernel has posted that no turn has routed yet. It reads the
+// CQ's entry count when the CQ is full; the kernel holds what it cannot post
+// until a turn makes room.
+size_t t_loom_backlog(struct t_loom_ring *);
 // One bounded step: submit what the SQ holds, route every completion the CQ
 // holds and retry deferred cleanup. If none of that found work, wait once for a
 // completion or until the deadline (absolute monotonic ns, when has_deadline).

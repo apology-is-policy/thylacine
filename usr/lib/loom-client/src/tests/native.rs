@@ -274,6 +274,47 @@ fn a_full_cq_defers_completions_and_loses_none() {
 }
 
 #[test]
+fn backlog_counts_what_the_kernel_posted_and_no_turn_routed() {
+    // The ENTER that submits the stream lets the kernel post: four shots fill
+    // the CQ and the rest wait. Only a turn routes them, and its kick lets the
+    // kernel post again.
+    let sim = Sim::new();
+    file(&sim, "burst", b"");
+    let shots: Vec<Vec<u8>> = (0..8).map(|i| vec![b'a' + i; 4]).collect();
+    sim.s()
+        .shots
+        .insert(b"burst".to_vec(), shots.iter().cloned().collect());
+    let r = ring(&sim, 2, &[4096]);
+    let members: Vec<PoolMember> = (0..8).map(|i| range(0, i * 64, 64)).collect();
+    let pool = r.pool(&members).unwrap();
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"burst", None).unwrap()).unwrap();
+    run(&r, fid.open(0, None).unwrap()).unwrap();
+    assert_eq!(r.backlog(), 0);
+    let mut stream = fid.stream(&pool, 0, 64, true, None).unwrap();
+    assert_eq!(r.backlog(), 4, "the CQ is full");
+    assert_eq!(r.turn(None).unwrap(), 4, "a turn routes all four");
+    assert_eq!(r.backlog(), 4, "its kick posted the next four");
+    let mut got = Vec::new();
+    let mut held = Vec::new();
+    loop {
+        match run(&r, stream.next()).unwrap() {
+            Shot::Payload(p) => {
+                got.push(p.bytes().to_vec());
+                held.push(p);
+            }
+            Shot::End(rc) => {
+                assert_eq!(rc, 0);
+                break;
+            }
+        }
+    }
+    assert_eq!(got, shots);
+    assert_eq!(r.backlog(), 0);
+}
+
+#[test]
 fn a_short_enter_leaves_the_rest_queued_for_a_later_turn() {
     let sim = Sim::new();
     file(&sim, "f", b"x");
