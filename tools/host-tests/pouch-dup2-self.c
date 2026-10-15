@@ -5,6 +5,7 @@
 #include <unistd.h>
 #define POUCH_SOCK_TAG 0x40000000
 #define SYS_thyla_handle_flags_get 129
+#define SYS_thyla_handle_flags_set 130
 #define SYS_thyla_handle_dup_to 131
 static long reply;
 static int queries, resolves, failures;
@@ -21,6 +22,10 @@ static __attribute__((unused)) long __syscall1(long number, long fd) {
 }
 static __attribute__((unused)) long __syscall3(long number, long old, long target, long flags) {
     assert(number==SYS_thyla_handle_dup_to && old==8 && target==9 && flags==0); ++queries; return reply;
+}
+/* The shared header's flag setter; dup2 never sets a flag. */
+static __attribute__((unused)) long __syscall2(long number, long fd, long flags) {
+    (void)number; (void)fd; (void)flags; assert(0); return -1;
 }
 #include "descriptor-under-test.h"
 #define dup2 tested_dup2

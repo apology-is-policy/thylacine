@@ -14,6 +14,14 @@ ignored, as Linux ignores it). pipe2 now honours O_CLOEXEC (FLAGS_SET) and
 O_NONBLOCK (123) on both ends, set after the pipe exists, closing both if a
 set fails (it accepted and ignored both). fdopendir's `fcntl(fd, F_GETFL) & O_PATH` read
 -1 & O_PATH as set and answered EBADF for every directory; it now works.
+open/openat honour O_CLOEXEC with the same flag (they accepted and ignored
+it, from when no Thylacine descriptor outlived a spawn), and musl's own
+callers of the raw SYS_fcntl -- the 0xFFFF sentinel -- move to the native
+calls: fopen "e" and __fopen_rb_ca rely on open(); __fdopen "e" sets the flag;
+freopen without a name sets it and goes through fcntl() for F_SETFL (every
+such call failed and closed the stream). The unreachable ones stay: fchdir and
+fchown (their own calls are sentinels and answer first), socketpair and
+signalfd (the same).
 Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 
 --- a/src/internal/_pouch_descriptor.h
@@ -34,9 +42,23 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
  static inline int pouch_descriptor_check(int fd)
  {
      if (fd < 0) return EBADF;
+@@ -19,4 +28,13 @@
+ {
+     return result == -1 ? -ENOSYS : result;
+ }
++
++/* O_CLOEXEC is the native descriptor flag, set after the descriptor exists:
++ * a peer thread's spawn in between sees it unflagged, which Linux's single
++ * call rules out. */
++static inline long pouch_set_cloexec(int fd)
++{
++    return pouch_descriptor_result(
++        __syscall2(SYS_thyla_handle_flags_set, fd, POUCH_HANDLE_CLOSE_ON_EXEC));
++}
+ #endif
 --- a/src/fcntl/fcntl.c
 +++ b/src/fcntl/fcntl.c
-@@ -3,26 +3,83 @@
+@@ -3,26 +3,86 @@
  #include <errno.h>
  #include "_pouch_descriptor.h"
  
@@ -117,6 +139,9 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 +    case F_GETFL:
 +        return status_flags(ret);
 +    case F_SETFL:
++        /* Two calls where Linux has one: a peer thread that closes fd and
++         * opens another file into its number between them gets the
++         * nonblock set, checked against the old file's append bit. */
 +        if (!(arg & O_APPEND) != !(ret & POUCH_HANDLE_APPEND)
 +            || (arg & (O_ASYNC | O_DIRECT | O_NOATIME))) {
 +            errno = EINVAL;
@@ -187,8 +212,8 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 +			r = __syscall2(SYS_thyla_set_nonblock, p[i], 1);
 +		r = pouch_descriptor_result(r);
 +		if (r < 0) {
-+			close(p[0]);
-+			close(p[1]);
++			__syscall(SYS_close, p[0]);
++			__syscall(SYS_close, p[1]);
 +			errno = (int)-r;
 +			return -1;
 +		}
@@ -197,6 +222,128 @@ Tagged Pouch sockets keep ENOSYS here (B-3k gives them kernel descriptors).
 +	fd[1] = p[1];
 +	return 0;
  }
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -25,6 +25,7 @@
+ #include <unistd.h>
+ #include "syscall.h"
+ #include "_pouch_fs.h"
++#include "_pouch_descriptor.h"
+ 
+ /* SYS_open +OTRUNC (SYS_WALK_OPEN_OMODE_VALID includes OTRUNC = 0x10). */
+ #define POUCH_OTRUNC  0x10u
+@@ -59,11 +60,21 @@
+  * Both are applied where every open exit routes through -- the omode before
+  * the three opens, the seek in one helper -- rather than per return site:
+  * openat() has three successful exits (create-ok, EEXIST-fallback-open,
+- * plain-open) and a per-site fix would silently miss one. */
++ * plain-open) and a per-site fix would silently miss one. O_CLOEXEC rides the
++ * same helper: the native descriptor flag, which spawn and native exec honour.
++ * A set that fails closes the descriptor and fails the open (a file it just
++ * created stays created). */
+ #define POUCH_OAPPEND 0x40u
+ 
+ static int pouch_open_ret(long r, int flags)
+ {
++	if (r >= 0 && (flags & O_CLOEXEC)) {
++		long s = pouch_set_cloexec(r);
++		if (s < 0) {
++			__syscall(SYS_close, r);
++			return __syscall_ret(s);
++		}
++	}
+ 	if (r >= 0 && (flags & O_APPEND))
+ 		__syscall(SYS_lseek, r, 0, SEEK_END);
+ 	return __syscall_ret(r);
+--- a/src/fcntl/open.c
++++ b/src/fcntl/open.c
+@@ -9,9 +9,8 @@
+  * never called from inside musl because of this bypass.
+  *
+  * The fix is straight-line: forward open() to openat(AT_FDCWD, ...)
+- * which IS the patched openat C function. O_CLOEXEC is silently
+- * accepted (every Thylacine handle is cloexec by construction —
+- * documented in patch 0009).
++ * which IS the patched openat C function, where O_CLOEXEC becomes the
++ * native descriptor flag.
+  */
+ #include <fcntl.h>
+ #include <stdarg.h>
+--- a/src/stdio/fopen.c
++++ b/src/stdio/fopen.c
+@@ -23,8 +23,7 @@
+ 	 * boundary-line (SYS_open = 65 stalk resolution). */
+ 	fd = open(filename, flags, 0666);
+ 	if (fd < 0) return 0;
+-	if (flags & O_CLOEXEC)
+-		__syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
++	/* pouch: open() has set O_CLOEXEC's descriptor flag (openat.c). */
+ 
+ 	f = __fdopen(fd, mode);
+ 	if (f) return f;
+--- a/src/stdio/__fopen_rb_ca.c
++++ b/src/stdio/__fopen_rb_ca.c
+@@ -9,7 +9,7 @@
+ 	/* pouch: route through the patched open() -- see fopen.c. */
+ 	f->fd = open(filename, O_RDONLY|O_CLOEXEC);
+ 	if (f->fd < 0) return 0;
+-	__syscall(SYS_fcntl, f->fd, F_SETFD, FD_CLOEXEC);
++	/* pouch: open() has set O_CLOEXEC's descriptor flag (openat.c). */
+ 
+ 	f->flags = F_NOWR | F_PERM;
+ 	f->buf = buf + UNGET;
+--- a/src/stdio/__fdopen.c
++++ b/src/stdio/__fdopen.c
+@@ -5,6 +5,7 @@
+ #include <errno.h>
+ #include <string.h>
+ #include "libc.h"
++#include "_pouch_descriptor.h"
+ 
+ FILE *__fdopen(int fd, const char *mode)
+ {
+@@ -27,13 +28,13 @@
+ 	if (!strchr(mode, '+')) f->flags = (*mode == 'r') ? F_NOWR : F_NORD;
+ 
+ 	/* Apply close-on-exec flag */
+-	if (strchr(mode, 'e')) __syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
++	if (strchr(mode, 'e')) pouch_set_cloexec(fd);
+ 
+ 	/* Set append mode on fd if opened for append */
+ 	if (*mode == 'a') {
+-		int flags = __syscall(SYS_fcntl, fd, F_GETFL);
+-		if (!(flags & O_APPEND))
+-			__syscall(SYS_fcntl, fd, F_SETFL, flags | O_APPEND);
++		/* pouch: the append bit lives in the server's open of the file and
++		 * F_SETFL cannot add it (fcntl.c), so a descriptor opened without
++		 * O_APPEND keeps writing at its offset. */
+ 		f->flags |= F_APP;
+ 	}
+ 
+--- a/src/stdio/freopen.c
++++ b/src/stdio/freopen.c
+@@ -1,6 +1,7 @@
+ #include "stdio_impl.h"
+ #include <fcntl.h>
+ #include <unistd.h>
++#include "_pouch_descriptor.h"
+ 
+ /* The basic idea of this implementation is to open a new FILE,
+  * hack the necessary parts of the new FILE into the old one, then
+@@ -21,9 +22,11 @@
+ 
+ 	if (!filename) {
+ 		if (fl&O_CLOEXEC)
+-			__syscall(SYS_fcntl, f->fd, F_SETFD, FD_CLOEXEC);
++			pouch_set_cloexec(f->fd);
+ 		fl &= ~(O_CREAT|O_EXCL|O_CLOEXEC);
+-		if (syscall(SYS_fcntl, f->fd, F_SETFL, fl) < 0)
++		/* pouch: SYS_fcntl is the 0xFFFF sentinel, which failed every
++		 * call here and closed the stream; fcntl() carries F_SETFL. */
++		if (fcntl(f->fd, F_SETFL, fl) < 0)
+ 			goto fail;
+ 	} else {
+ 		f2 = fopen(filename, mode);
 --- a/arch/aarch64/bits/syscall.h.in
 +++ b/arch/aarch64/bits/syscall.h.in
 @@ -471,6 +471,9 @@

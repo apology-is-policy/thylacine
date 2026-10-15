@@ -6,14 +6,26 @@ title: "POSIX signals over kernel notes"
 code:
   - usr/lib/pouch/patches/0007-pouch-signals.patch
   - usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch
+  - usr/lib/pouch/patches/0057-pouch-kill-probe-getppid.patch
+  - usr/pouch-hello/pouch-hello-signals.c
 audit: hard
 guarded-by: [inv-i24]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-14
+updated: 2026-10-15
 ---
+## kill(pid, 0) is the kernel's probe (B-3b, vote 6, 2026-10-15)
+
+Patch 0057: `kill(pid, 0)` is `SYS_postnote(pid, NULL, 0)`, the empty-name
+probe ([[sub-kernel-syscall-dispatch]]). The kernel asks the post's gate and
+posts nothing: 0 for the caller itself, pid 0 and its child (dead but
+unreaped included), ESRCH for a missing pid, and the gate's EACCES, which
+`kill` spells EPERM as it does for every signal. It answered EINVAL before:
+signal 0 maps to no note. `pouch-hello-signals`' `probe` leg proves each case
+on the device, with a child probing its parent through `getppid()`.
+
 ## Purpose
 
 `sigaction` / `raise` / `kill` / `sigprocmask` on a kernel that has
@@ -198,8 +210,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
   snare; on Linux a blocked one stays pending. Pouch's mask has no bit for
   these signals and `sigaction` refuses all four, so no program can block or
   catch one first. (Until 0050 they answered `EINVAL` and ran on.)
-- **`kill(pid, 0)`, the existence probe, answers `EINVAL`**: no signal 0
-  mapping and no native probe arm (OPEN-BUGS, 2026-10-14).
 - `sigset_t` round-trip is lossy (unsupported signums drop) and spuriously
   additive within the tty family, which shares one bit (reading back a mask
   containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).

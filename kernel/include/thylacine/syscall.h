@@ -895,7 +895,14 @@ enum {
     //                    that mapping)
     //   x1 = name_va    user-VA pointer to the note name bytes
     //   x2 = name_len   bytes (1..NOTE_NAME_MAX-1; NUL not required —
-    //                    name_len is authoritative)
+    //                    name_len is authoritative). 0 is the PROBE
+    //                    (kill(pid, 0); operator vote 2026-10-14 #6): the
+    //                    gate below is asked and nothing is posted; x1 is
+    //                    not read. Self (pid == 0 or the caller's own)
+    //                    answers 0; another pid answers the post's own
+    //                    gate: 0 for the caller's child (dead but unreaped
+    //                    included), -T_E_ACCES for any other Proc,
+    //                    -T_E_SRCH for none.
     //
     // Permission gate at v1.0: caller must be the target's parent OR
     // pid == caller's own pid OR pid == 0 (self-post is always allowed).
@@ -904,7 +911,7 @@ enum {
     // arrives).
     //
     // Returns 0 on success, else a negative errno (operator vote 2026-10-14):
-    //   -T_E_INVAL  name_len 0 or > NOTE_NAME_MAX - 1; a NUL or non-printable
+    //   -T_E_INVAL  name_len > NOTE_NAME_MAX - 1; a NUL or non-printable
     //               byte; a name not in the supported set (NOTE_NAME_* in
     //               <thylacine/notes.h>); a kernel-only name (tty:*, sak,
     //               a snare:* to another Proc)
@@ -1704,9 +1711,8 @@ enum {
     // SYS_PREAD(fd, buf, len, off) -> bytes read (0 = EOF) / -1 / -errno
     //   x0 = fd   (hidx_t; KOBJ_SPOOR with RIGHT_READ; CWALKONLY/O_PATH
     //              rejected, as SYS_READ.)
-    //   x1 = buf  (user VA; staged like SYS_READ, but a buffer that fails
-    //              validation answers the flat -1 where SYS_READ answers
-    //              -T_E_FAULT; a fault in the copy is -T_E_FAULT on both.)
+    //   x1 = buf  (user VA; staged like SYS_READ: a buffer that fails
+    //              validation or faults in the copy is -T_E_FAULT.)
     //   x2 = len  (clamped to SYS_RW_MAX per call; short reads are normal.)
     //   x3 = off  (s64 absolute byte offset. off < 0 -> -T_E_INVAL; off + len
     //              past INT64_MAX -> -T_E_INVAL. Requires dev->seekable (the
@@ -2508,14 +2514,23 @@ enum {
     // Caller-local metadata / exact-target replacement. SET takes 0 or bit0.
     // DUP_TO takes bit0 and SYS_HANDLE_DUP_LOWEST: without it x1 is the exact
     // target; with it x1 is a floor and the new descriptor goes to the lowest
-    // free index at or above it (dup, F_DUPFD). Validate Proc, flags, the
-    // source's full-width bound, then the target's (EBADF) or the floor's
-    // (EINVAL), then (exact) distinct indices; locked validity/alias checks
-    // follow. Errors: EINVAL, EBADF, DUP_TO EACCES for forbidden alias kinds,
-    // and lowest-free EMFILE when no index at or above the floor is free.
+    // free index at or above it (dup, F_DUPFD). Validate Proc, flags and the
+    // source's full-width bound (EBADF). Exact form: the target's bound
+    // (EBADF), distinct indices (EINVAL), then under the table lock a
+    // non-live source (EBADF) and a forbidden alias kind (EACCES). Lowest
+    // form, all under the lock: a non-live source (EBADF, so a closed fd
+    // outranks a bad floor), the floor's bound (EINVAL), a forbidden alias
+    // kind (EACCES), no free index at or above the floor (EMFILE).
     // No EPERM; no cross-Proc authority.
     SYS_HANDLE_FLAGS_SET = 130, // x0 fd, x1 flags -> 0
     SYS_HANDLE_DUP_TO = 131,    // x0 source, x1 target or floor, x2 flags -> new index
+
+    // The calling Proc's parent's pid; 0 for a parentless Proc (only kproc:
+    // an orphan reparents to init). No args, no memory, no capability, and
+    // like SYS_GETPID it never fails for a Proc (operator vote 2026-10-14
+    // #6, the twin Pouch's getppid needs). The value is a snapshot: the parent
+    // may exit and the Proc be reparented the moment after.
+    SYS_GETPPID = 132,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes

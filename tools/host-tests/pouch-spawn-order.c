@@ -84,6 +84,9 @@ static void reset(void) {
     while (head) { struct fdop *next = head->next; free(head); head = next; }
     memset(handles, 0, sizeof handles);
     memset(descriptor_flags, 0, sizeof descriptor_flags); want_count=3;
+    /* Real FLAGS_GET words carry the open-file status beside bit0: write
+     * mode on the output streams, read-write + nonblock on fd 8. */
+    descriptor_flags[1] = descriptor_flags[2] = 0x100; descriptor_flags[8] = 0x600;
     memset(spawned, 0, sizeof spawned);
     for (int i = 0; i < 3; ++i) handles[i] = 100 + i;
     handles[8] = 108; handles[100] = 200;
@@ -160,17 +163,17 @@ int main(void) {
     check("legacy-query-unavailable-fails-before-spawn", ENOSYS, 0, 0);
     reset(); query_error = 1;
     check("legacy-query-unavailable-standard-streams", ENOSYS, 0, 0);
-    reset(); descriptor_flags[2]=1; want_count=2;
+    reset(); descriptor_flags[2]|=1; want_count=2;
     check("flagged-trailing-stream-excluded",0,101,0);
-    reset(); descriptor_flags[1]=1;
+    reset(); descriptor_flags[1]|=1;
     check("flagged-interior-stream-refused",EINVAL,0,0);
-    reset(); descriptor_flags[1]=1; add(FDOP_DUP2,1,1);
+    reset(); descriptor_flags[1]|=1; add(FDOP_DUP2,1,1);
     check("spawn-self-action-clears-child-flag",0,101,0);
-    reset(); descriptor_flags[1]=1; add(FDOP_DUP2,1,8);
+    reset(); descriptor_flags[1]|=1; add(FDOP_DUP2,1,8);
     check("spawn-distinct-action-clears-child-flag",0,108,0);
-    reset(); descriptor_flags[1]=1; add(FDOP_OPEN,1,0);
+    reset(); descriptor_flags[1]|=1; add(FDOP_OPEN,1,0);
     check("spawn-open-clears-child-flag",0,900,1);
-    reset(); descriptor_flags[2]=1; add(FDOP_DUP2,1,2); want_count=2;
+    reset(); descriptor_flags[2]|=1; add(FDOP_DUP2,1,2); want_count=2;
     check("flagged-source-available-before-final-close",0,102,0);
     reset(); add(FDOP_OPEN,1,0); add(FDOP_OPEN,2,0); head->oflag=O_CLOEXEC;
     check("unsupported-open-flags-before-temporaries",ENOSYS,0,0);

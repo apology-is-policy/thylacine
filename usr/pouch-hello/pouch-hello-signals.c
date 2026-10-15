@@ -38,6 +38,15 @@
 //                                         and a child's kill() of its parent
 //                                         reads EPERM; both read EIO before
 //                                         SYS_POSTNOTE answered errnos.
+//   probe (operator vote 2026-10-14 #6) -> kill(pid, 0) asks the gate and
+//                                         posts nothing: 0 for itself, pid 0
+//                                         and a child (live, or dead and not
+//                                         yet reaped), ESRCH for a missing or
+//                                         reaped pid, and EPERM from a child
+//                                         probing its parent, whose pid
+//                                         getppid() reports. Before it, both
+//                                         calls failed: kill(pid, 0) EINVAL,
+//                                         getppid() -38.
 //   SIGTERM apart (signal chunk S-2)   -> with SIGINT ignored, raise(SIGINT)
 //                                         must not run the SIGTERM handler, and
 //                                         with SIGINT blocked raise(SIGTERM) must
@@ -60,6 +69,7 @@
 //   pouch-hello-signals: death raise-segv reads WIFSIGNALED SIGSEGV  (x4 legs)
 //   pouch-hello-signals: death term reads WIFSIGNALED SIGTERM
 //   pouch-hello-signals: kill errnos read ESRCH and EPERM
+//   pouch-hello-signals: kill(pid, 0) probes and getppid reads the parent
 //   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
@@ -108,6 +118,23 @@ static int kill_parent(const char *ppid_arg) {
     printf("pouch-hello-signals: kill(parent) rc=%d errno=%d (want -1 EPERM=%d)\n",
            rc, errno, EPERM);
     return 3;
+}
+
+// CHILD: getppid() must name the parent the argument names, and a probe of it
+// must read EPERM: the parent is not this child's to signal.
+static int probe_parent(const char *ppid_arg) {
+    pid_t ppid = (pid_t)atoi(ppid_arg);
+    pid_t got = getppid();
+    if (got != ppid) {
+        printf("pouch-hello-signals: getppid()=%d (want %d)\n", (int)got, (int)ppid);
+        return 4;
+    }
+    errno = 0;
+    int rc = kill(ppid, 0);
+    if (rc == -1 && errno == EPERM) return 0;
+    printf("pouch-hello-signals: kill(parent, 0) rc=%d errno=%d (want -1 EPERM=%d)\n",
+           rc, errno, EPERM);
+    return 5;
 }
 
 // Each death must reach the parent as the signal the kernel recorded for it.
@@ -186,8 +213,8 @@ static int test_term_death(void) {
 }
 
 // kill() names its refusals the way POSIX does. The missing pid is far above the
-// live pid counter. The not-a-child case runs in a child, because Pouch has no
-// getppid: the child is handed this process's pid and kills it.
+// live pid counter. The not-a-child case runs in a child, which is handed this
+// process's pid and kills it.
 static int test_errnos(void) {
     int bad = 0;
     errno = 0;
@@ -217,6 +244,61 @@ static int test_errnos(void) {
     }
     if (bad) return -1;
     printf("pouch-hello-signals: kill errnos read ESRCH and EPERM\n");
+    return 0;
+}
+
+// kill(pid, 0): the kernel's gate, nothing posted. pids are never reused (a
+// monotonic counter), so a reaped child's pid is missing for good.
+static int test_probe(void) {
+    int bad = 0;
+    errno = 0;
+    int self = kill(getpid(), 0), zero = kill(0, 0);
+    if (self != 0 || zero != 0) {
+        printf("pouch-hello-signals: probe self rc=%d pid0 rc=%d errno=%d (want 0, 0)\n",
+               self, zero, errno);
+        bad = 1;
+    }
+    errno = 0;
+    int rc = kill((pid_t)0x3ffffff0, 0);
+    if (rc != -1 || errno != ESRCH) {
+        printf("pouch-hello-signals: probe(missing pid) rc=%d errno=%d (want -1 ESRCH=%d)\n",
+               rc, errno, ESRCH);
+        bad = 1;
+    }
+
+    char ppid[16];
+    snprintf(ppid, sizeof ppid, "%d", (int)getpid());
+    char *cargv[] = { (char *)SELF, (char *)"probe-parent", ppid, NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("pouch-hello-signals: probe-parent: respawn failed errno=%d\n", errno);
+        return -1;
+    }
+    // Live or dead, the child is this process's until it is reaped.
+    errno = 0;
+    rc = kill(pid, 0);
+    if (rc != 0) {
+        printf("pouch-hello-signals: probe(child) rc=%d errno=%d (want 0)\n", rc, errno);
+        bad = 1;
+    }
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("pouch-hello-signals: probe-parent: waitpid failed errno=%d\n", errno);
+        return -1;
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("pouch-hello-signals: probe-parent: status %#x (want exit 0)\n", (unsigned)st);
+        bad = 1;
+    }
+    errno = 0;
+    rc = kill(pid, 0);
+    if (rc != -1 || errno != ESRCH) {
+        printf("pouch-hello-signals: probe(reaped child) rc=%d errno=%d (want -1 ESRCH=%d)\n",
+               rc, errno, ESRCH);
+        bad = 1;
+    }
+    if (bad) return -1;
+    printf("pouch-hello-signals: kill(pid, 0) probes and getppid reads the parent\n");
     return 0;
 }
 
@@ -304,6 +386,7 @@ static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
 int main(int argc, char **argv) {
     if (argc >= 3 && !strcmp(argv[1], "die")) return die(argv[2]);
     if (argc >= 3 && !strcmp(argv[1], "kill-parent")) return kill_parent(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "probe-parent")) return probe_parent(argv[2]);
 
     printf("pouch-hello-signals: install handler\n");
     fflush(stdout);
@@ -486,10 +569,12 @@ int main(int argc, char **argv) {
     int deaths = test_deaths();
     int term_death = test_term_death();
     int errnos = test_errnos();
+    int probe = test_probe();
     fflush(stdout);
     if (deaths != 0) return 15;
     if (term_death != 0) return 14;
     if (errnos != 0) return 16;
+    if (probe != 0) return 17;
 
     printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);

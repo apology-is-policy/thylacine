@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-12
+updated: 2026-10-15
 ---
 ## Purpose
 
@@ -419,7 +419,9 @@ per-call errno approximation built on top of it.
 
 ## Caveats
 
-- **OPEN (found 2026-09-21): the identity calls return the raw sentinel.**
+- **CLOSED (A-6, 0043; `getppid` B-3b vote 6, 0057, 2026-10-15) -- recorded
+  for the class, not as a live defect: the identity calls returned the raw
+  sentinel.**
   `getuid` / `geteuid` / `getgid` / `getegid` / `getppid` are
   `return __syscall(SYS_getuid)`-shaped and their numbers are `0xFFFF`, so
   each returns `(uid_t)-38` = `0xFFFFFFDA`. The kernel HAS `SYS_GETUID` = 73
@@ -493,7 +495,9 @@ per-call errno approximation built on top of it.
   compiled against the old string, joey against the new one.
   `pouch-hello-signals` joined the census at gcpark-b (2026-10-12): its new
   `deaths` leg is the only thing that tells a binary built for the
-  signalled wait from an older one that exits 0 just the same.
+  signalled wait from an older one that exits 0 just the same. B-3b's round-1
+  close (2026-10-15) adds `pouch-hello-fd`'s `cloexec` leg and
+  `pouch-hello-signals`' `probe` leg to their census lines.
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

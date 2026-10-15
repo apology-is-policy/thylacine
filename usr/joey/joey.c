@@ -11786,23 +11786,26 @@ int main(void) {
                      " + SYS_UNLINK)\n");
         }
 
-        // B-3a: the fd-surface prover (0051). Spawn /bin/pouch-hello-fd -- it
-        // fsyncs a file on the Stratum FS (a real Tsync), refuses fsync on a
-        // socket, proves writev is ONE gathered write (EAGAIN with nothing
-        // written on a nonblocking pipe with two bytes free), scatters a readv,
-        // round-trips 3 MiB through pwritev/preadv, runs preadv2/pwritev2
-        // without flags on them, and reads ESPIPE / S_ISSOCK
-        // for a socket's seek, positional I/O and fstat. Boot-fatal.
+        // B-3a/B-3b: the fd-surface prover (0051, 0056). Spawn
+        // /bin/pouch-hello-fd -- it fsyncs a file on the Stratum FS (a real
+        // Tsync), refuses fsync on a socket, proves writev is ONE gathered
+        // write (EAGAIN with nothing written on a nonblocking pipe with two
+        // bytes free), scatters a readv, round-trips 3 MiB through
+        // pwritev/preadv, runs preadv2/pwritev2 without flags on them, reads
+        // ESPIPE / S_ISSOCK for a socket's seek, positional I/O and fstat, and
+        // drives dup, F_DUPFD, F_GETFL, F_SETFL, O_CLOEXEC on open and stdio,
+        // and fdopendir. Boot-fatal.
         {
             const char fd_name[]   = "/bin/pouch-hello-fd";
             const char fd_expect[] = POUCH_CENSUS_FD;
             if (pouch_smoke_one(fd_name, sizeof(fd_name) - 1,
                                 fd_expect, sizeof(fd_expect) - 1) != 0) {
-                t_putstr("joey: B-3a PROBE pouch-hello-fd FAILED\n");
+                t_putstr("joey: B-3a/B-3b PROBE pouch-hello-fd FAILED\n");
                 return 1;
             }
-            t_putstr("joey: B-3a PROBE OK (fd surface: fsync, vectored I/O as "
-                     "one transfer, a socket's seek/pread/fstat)\n");
+            t_putstr("joey: B-3a/B-3b PROBE OK (fd surface: fsync, vectored I/O "
+                     "as one transfer, a socket's seek/pread/fstat, dup, fcntl, "
+                     "close-on-exec)\n");
         }
 
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a

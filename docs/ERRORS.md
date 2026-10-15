@@ -88,11 +88,22 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed from the `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory. Eight producers. Four share that rule: `stalk`'s real-component gate (#79); `stalk`'s `.`/`..` gate, since both are path components and the position they resolve in must be a directory too (#81); `stalk`'s trailing-slash gate, where the separator asserts the whole path names a directory (#82, POSIX 4.13 — three sites, since two success exits skip the quarry); and the single-hop `SYS_WALK_OPEN` / `SYS_WALK_CREATE` handlers, on both the source's type and a source Dev with no `.walk` slot (#80, #81). The `.`/`..` gate reads the tip UNCROSSED and the trailing-slash gate the quarry CROSSED — they ask different questions (where resolution stands vs what the path names), see `docs/reference/104-stalk.md`. The fifth is `SYS_MOUNT`'s Plan 9 `Emount` (ARCH §9.6.1, operator votes 2026-09-25, as Linux answers a bind of a file over a directory): the source's directory-ness differs from the mount point's, or a mount without `MREPL` names a point that is not a directory. `SYS_MOUNT`'s other refusals are still `-1`, and that includes a trailing `/` on a point that is not a directory: `stalk`'s trailing-slash gate refuses the path before the type check runs, and a resolution failure is `-1` in this call. The last three are the Linux phenotype's (VIVARIUM): a trailing `/` on an `unlinkat` without `AT_REMOVEDIR` or on either `renameat` path, `getdents64` on a descriptor that is not a directory, and `openat` with `O_DIRECTORY` on a file |
 | `T_E_ISDIR`     | 21    | `EISDIR`     | Is a directory — the operation names a directory where a non-directory is required. Named with user signoff at #50 (2026-08-25); mints NO new ABI value: a server-side `EISDIR` (Stratum, on write-opening a directory) already reached EL0 through the `[-4095,-2]` Rlerror passthrough. Kernel producer: `SYS_OPEN_CREATE`'s lexical leaf rows — a create against a trailing-slash / `.` / `..` / root leaf (the Linux `open_last_lookups` rows), answered before any RPC |
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
+| `T_E_MFILE`     | 24    | `EMFILE`     | Too many open files: the phenotype's per-Proc socket table (`VIV_SOCK_MAX`) is full, or no handle slot at or above a `SYS_HANDLE_DUP_LOWEST` floor is free (B-3b; dup, `F_DUPFD`). The kernel's other full-handle-table answer is still `T_E_NOMEM` (#80 seam) |
+| `T_E_NOTTY`     | 25    | `ENOTTY`     | Not a terminal: the phenotype ioctl shell (C2-k1b) answers it for a `TC*`/`TIOC*` request on a non-tty fd and for any request the terminal surface does not serve; `isatty()` reads it as "not a tty" |
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
 | `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. TWO emitters share the code, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead |
+| `T_E_NOTSOCK`   | 88    | `ENOTSOCK`   | Not a socket: a socket call names an fd with no socktab entry (a plain file, or a socket whose entry was dropped) |
+| `T_E_PROTONOSUPPORT` | 93 | `EPROTONOSUPPORT` | Protocol not supported: a `SOCK_*` type or `IPPROTO_*` the `/net` tree has no directory for |
+| `T_E_OPNOTSUPP` | 95    | `EOPNOTSUPP` | Operation not supported. Reserved, append-only: its first emitter (`SYS_TTY_SIGNAL`'s stop class) became live at PTY-1f; kept for future not-yet-supported dispositions |
+| `T_E_AFNOSUPPORT` | 97  | `EAFNOSUPPORT` | Address family not supported: everything that is not `AF_INET` (`AF_INET6` included) |
+| `T_E_ADDRINUSE` | 98    | `EADDRINUSE` | Address in use: netd refused an `announce` for the port; reported by `listen()`, where the announce happens, not `bind()` |
+| `T_E_CONNABORTED` | 103 | `ECONNABORTED` | Connection aborted before it was handed back: an `accept()` whose listen fid produced a connection the data open then refused |
+| `T_E_ISCONN`    | 106   | `EISCONN`    | Already connected: a second `connect()` on a connected socket |
+| `T_E_NOTCONN`   | 107   | `ENOTCONN`   | Not connected: `getpeername()` / `shutdown()` on a socket that never connected |
 | `T_E_TIMEDOUT`  | 110   | `ETIMEDOUT`  | Operation timed out |
+| `T_E_CONNREFUSED` | 111 | `ECONNREFUSED` | Connection refused: netd rejected the dial, or the data open failed after the connect verb was accepted |
 | `T_E_CANCELED`  | 125   | `ECANCELED`  | Operation canceled (Loom LINK-chain cancel: a CQE for a linked SQE dropped when an earlier link failed) |
 
 The values follow Linux's errno numbering (which musl + glibc agree on
@@ -549,7 +560,7 @@ is answered by the Vivarium's kill translation rather than entering this handler
 
 ### Native descriptor mutation (130/131)
 
-HANDLE_FLAGS_SET(fd,flags) returns0; HANDLE_DUP_TO(source,target,flags) returns
+HANDLE_FLAGS_SET(fd,flags) returns 0; HANDLE_DUP_TO(source,target,flags) returns
 the target. FLAGS_SET accepts only close-on-exec bit0. In order: missing
 Proc/thread EINVAL, unknown flag bits EINVAL, full-width index bounds EBADF,
 same-index dup EINVAL, locked non-live source EBADF; prohibited duplication
@@ -576,7 +587,26 @@ O_NONBLOCK only (through SYS_SET_NONBLOCK); restating the current O_APPEND is
 accepted, flipping it is EINVAL (the append lives in the server's open of the
 file), O_ASYNC, O_DIRECT and O_NOATIME are EINVAL, and every other bit is
 ignored, as Linux ignores it. A tagged Pouch socket answers these commands
-ENOSYS. Other fcntl commands remain ENOSYS.
+ENOSYS. Other fcntl commands remain ENOSYS. The Linux phenotype's F_SETFL
+refuses the same way: flipping O_APPEND, O_ASYNC, O_DIRECT and O_NOATIME are
+EINVAL, a restated O_APPEND is served, O_LARGEFILE is dropped.
+
+open and openat honour O_CLOEXEC by setting the descriptor flag once the open
+has its number; a set that fails closes the descriptor and fails the open with
+the set's errno. fopen "e", fdopen "e" and freopen with no name set it the same
+way, and freopen with no name changes the status through fcntl's F_SETFL, so it
+answers F_SETFL's errnos (EINVAL for a mode that flips O_APPEND) and, as
+before, closes the stream when it fails.
+
+### Probe and parent (B-3b, vote 6)
+
+SYS_POSTNOTE with an empty name is the probe kill(pid, 0) maps to: nothing is
+posted and the name pointer is not read. Self (pid 0 or the caller's own)
+answers 0; another pid answers the post's gate: 0 for the caller's child (dead
+but unreaped included), -T_E_ACCES for any other Proc, -T_E_SRCH for no Proc.
+A probe is never -T_E_INVAL or -T_E_AGAIN. Pouch's kill(pid, 0) spells the
+EACCES as EPERM, as it does for every signal. SYS_GETPPID (132) returns the
+parent's pid, 0 for a parentless Proc; it never fails.
 
 ### Positioned I/O and create order (B-3b)
 
@@ -585,4 +615,7 @@ nonzero length) -T_E_FAULT, as SYS_READ and SYS_WRITE do; they answered a flat
 -1 before. An exclusive create or mkdir of a name that already exists answers
 -T_E_EXIST even when the caller may not write the directory, provided it may
 search it (X); without X it answers -T_E_ACCES and discloses nothing. The
-existence probe does not follow a final symlink.
+existence probe does not follow a final symlink. A plain create (no
+exclusive flag) through a dangling final symlink answers -T_E_NOENT: the
+open finds nothing to open and the create does not create through the link;
+it answered -T_E_EXIST before.

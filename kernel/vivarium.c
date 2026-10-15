@@ -43,12 +43,19 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is sigaltstack (132);
-// execve (221) is the newest. If the ceiling ever rises past one of these, the
-// build stops and the reader is forced back to the argument instead of
-// inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_SIGALTSTACK > VIV_NATIVE_CEILING,
-               "sigaltstack's collision argument is the ceiling one");
+// rather than by a per-number one. The lowest such number is rt_sigsuspend
+// (133); execve (221) is the newest. If the ceiling ever rises past one of
+// these, the build stops and the reader is forced back to the argument instead
+// of inheriting a claim that has quietly become false.
+_Static_assert(VIV_LINUX_RT_SIGSUSPEND > VIV_NATIVE_CEILING,
+               "rt_sigsuspend's collision argument is the ceiling one");
+// Linux sigaltstack (132) collides with SYS_GETPPID (vote 6). Its row is
+// VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
+// before the native switch, so a Linux Proc's sigaltstack never reads its
+// parent; test_vivarium pins the ENOSYS verdict, which the 6.23 escape
+// detector (notes.c) also leans on. Serving sigaltstack must re-argue both.
+_Static_assert(VIV_LINUX_SIGALTSTACK == SYS_GETPPID,
+               "revisit sigaltstack / GETPPID collision on renumber");
 // Linux restart_syscall (128) collides with SYS_ICACHE_SYNC_SPACE (B-2e2). The
 // row is VIV_ENOSYS (below) and viv_linux_dispatch consumes every phenotyped
 // number that is not TRANSLATED before the native switch, so a Linux Proc

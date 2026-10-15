@@ -12,6 +12,24 @@ design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
 updated: 2026-10-15
 ---
+## Native ceiling 132 (B-3b, vote 6)
+
+`SYS_GETPPID` lands at 132 (operator vote 2026-10-14 #6), over Linux
+sigaltstack, a VIV_ENOSYS row consumed before the native switch, so a Linux
+Proc's sigaltstack never reads its parent. `vivarium.c` replaces
+sigaltstack's above-ceiling assertion with a per-number collision pin
+(`VIV_LINUX_SIGALTSTACK == SYS_GETPPID`), test_vivarium's sigaltstack leg
+already pins the ENOSYS verdict (which the 6.23 escape detector also leans
+on), and rt_sigsuspend (133, VIV_ENOSYS) now carries the ceiling argument.
+The getppid shell (Linux 173) stays a shell: it reads `proc_parent_pid`, the
+accessor the native handler reads.
+
+The fcntl shell's F_SETFL refuses what it cannot apply instead of dropping
+it, as Pouch's 0056 does: flipping O_APPEND (it lives in the server's open of
+the file), O_ASYNC, O_DIRECT and O_NOATIME are EINVAL; a restated O_APPEND is
+served and O_LARGEFILE dropped. Its fd is narrowed to 32 bits before the range
+check, as Linux declares it `unsigned int`.
+
 ## Native ceiling 131 (B-3b)
 
 Astra's native descriptor calls land on main as HANDLE_FLAGS_GET (129),
@@ -566,9 +584,14 @@ its reasoning fails a test rather than passing quietly.
   Proc takes the note (the caught-note walk's pick), not necessarily the
   thread named -- a stated imprecision (VIVARIUM 6.22). A program that sends
   one thread a signal to wake it alone gets a Proc-wide note.
-- **`dup3` on a socket declines** rather than half-serving. Reproducing
-  Linux needs a *refcounted* socktab entry, a real change to a table V-5
-  audited; the idiom turned away is the inetd shape.
+- **`dup3` on a socket aliases, it does not share.** The alias rule
+  (operator-voted, VIVARIUM 5.5.2) replaced the decline this seam used to
+  name: `dup2(sockfd, 0)`, the inetd idiom, works, and the target number gets
+  its OWN copy of the source's socktab row (replace-on-claim; a full table is
+  EMFILE before any mutation). What Linux has and this does not is one
+  shared description: a state mutation through one alias (`connect`, `bind`,
+  `listen`, which also swap THAT handle ctl to data) is not seen through
+  another (VIVARIUM 5.5.2; section 9 records the faithful resolution).
 - **CLONE_THREAD** has a correct target already (SYS_THREAD_SPAWN) and
   should arrive with its own reasoning — and it invalidates the lock-free
   table argument when it does.

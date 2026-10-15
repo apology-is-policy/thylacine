@@ -17,36 +17,51 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-15
 ---
-## Native descriptor mutation ABI (October 11; main B-3b)
+## Native descriptor calls 129-131 and SYS_GETPPID 132 (B-3b, 2026-10-15)
 
-Approved HANDLE_FLAGS_SET (native 130 on main; Astra's 129) takes fd/flags and
-returns 0; HANDLE_DUP_TO (native 131; Astra's 130) takes source/target/flags and
-returns target. Only close-on-exec bit0 is accepted. Current process, flags,
-full-width bounds and distinct targets are validated before the locked
-operation. Invalid slots give EBADF, invalid flags/self-target EINVAL,
-forbidden source aliases EACCES. EPERM is excluded. C and Rust mirrors carry
-the register-only contract; there is no user-memory record or new authority.
-Linux 130/131 are tkill/tgkill, Vivarium TIER2 rows consumed before native
-dispatch; the native ceiling is 131. Design:
-docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md; qualification is recorded
-separately in NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md.
+Three operator-approved descriptor calls, designed by Astra on codex/astra
+(her 128-130) and numbered 129-131 on main (main's 128 is
+`SYS_ICACHE_SYNC_SPACE`); all take registers only, read no user memory and
+confer no authority.
 
-## Native handle metadata query (October 11; main B-3b)
+- `SYS_HANDLE_FLAGS_GET` (129, fd) returns a word read under one table-lock
+  hold: bit0 `SYS_HANDLE_CLOSE_ON_EXEC`, and the open-file status F_GETFL
+  reports (B-3b, vote 7) -- `SYS_HANDLE_STATUS_OMODE` (omode & 3) at bits 8-9,
+  `SYS_HANDLE_STATUS_NONBLOCK` bit 10, `SYS_HANDLE_STATUS_APPEND` bit 11. A
+  non-Spoor kind reports no status. -EBADF for an out-of-range (full-width) or
+  absent slot, -EINVAL without a current Proc. An instant observation, not a
+  pin against close and reuse.
+- `SYS_HANDLE_FLAGS_SET` (130, fd, flags) returns 0. Only bit0 is accepted;
+  the status bits are read-only and a static assert keeps them disjoint from
+  every SET and DUP_TO flag.
+- `SYS_HANDLE_DUP_TO` (131, source, target, flags) returns the new index.
+  Flags are bit0 (the copy's close-on-exec) and `SYS_HANDLE_DUP_LOWEST` (2,
+  B-3b): without it x1 is the exact target, replaced atomically; with it x1 is
+  a floor and the copy goes to the lowest free index at or above it (dup is
+  floor 0, F_DUPFD the caller's). Errno order: unknown flags EINVAL, source
+  out of range EBADF; then the exact form checks the target's range (EBADF)
+  and distinct indices (EINVAL) before the lock, and under one table-lock
+  hold a non-live source EBADF and a forbidden alias kind EACCES; the lowest
+  form decides everything else under the hold -- a non-live source EBADF (a
+  closed fd outranks a bad floor, as on Linux), the floor's range EINVAL, a
+  forbidden alias EACCES, no free index at or above the floor EMFILE. Rights
+  are copied verbatim, never widened.
+- `SYS_GETPPID` (132, vote 6) returns the parent's pid, 0 for a parentless
+  Proc (only kproc), through `proc_parent_pid` under `g_proc_table_lock`. It
+  never fails for a Proc, as `SYS_GETPID` does not.
 
-Operator-approved `SYS_HANDLE_FLAGS_GET` takes a full-width handle index in
-x0 and returns 0 or `SYS_HANDLE_CLOSE_ON_EXEC = 1`, or negative errno. Astra
-designed it as 128 on codex/astra; main numbers it 129 (main's 128 is
-`SYS_ICACHE_SYNC_SPACE`). Out-of-range and absent slots return EBADF; a
-missing current process/thread returns EINVAL. It reads the existing flag
-under the handle-table lock without allocating, acquiring an object reference,
-or requiring I/O rights. The result is an instant observation, not a pin
-against close/reuse. Native C/Rust wrappers mirror number and flag;
-`tools/test-native-handle-query.py` checks the mirrors and the actual handler.
-Linux 129 is kill, answered by the Vivarium's kill translation (a TIER2 row,
-consumed before native dispatch). See `docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`
-for approval and qualification.
+No call returns EPERM. Linux 129-131 (kill, tkill, tgkill) are Vivarium TIER2
+rows and Linux 132 (sigaltstack) a VIV_ENOSYS row, all consumed before native
+dispatch; each carries a per-number collision pin in `vivarium.c`, and the
+native ceiling is 132 ([[sub-kernel-vivarium]]). The C (libt) and Rust
+mirrors carry all four (`t_handle_flags_get/_set`, `t_handle_dup_to`,
+`t_getppid`); Pouch reaches them through patches 0053-0057
+([[sub-pouch-fs]], [[sub-pouch-process]]). `tools/test-native-handle-query.py`
+pins the query's mirrors, the ceiling and the collision asserts; designs and
+qualification: `docs/NATIVE-HANDLE-QUERY-PROPOSAL.md`,
+`docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md` and its REVIEW.
 
 ## Purpose
 
@@ -186,6 +201,14 @@ the subset rule below. The C JIT header `usr/lib/thylajit/thyla_jit.h`
 (owned by [[sub-dosbox]], consumed by JavaScriptCore too) gains
 `THYLA_SYS_ICACHE_SYNC_SPACE` and `thyla_jit_icache_sync_space`, and its
 `THYLA_JIT_REGION_MAX` follows the kernel's `JIT_REGION_MAX` to 128 MiB.
+
+**B-3b append (2026-10-15).** `SYS_HANDLE_FLAGS_GET` = 129,
+`SYS_HANDLE_FLAGS_SET` = 130, `SYS_HANDLE_DUP_TO` = 131 and `SYS_GETPPID` =
+132; `SYS__NATIVE_TOP` is 133 and `VIV_NATIVE_CEILING` 132. Re-measured on this
+tree after the last append, not incremented: **130** live numbers, the span
+runs 0-132 with the same three holes (26, 30, 43), `syscall_dispatch_body` has
+exactly 130 arms, and both set differences are empty. The section at the top
+of this dossier carries the contracts.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —

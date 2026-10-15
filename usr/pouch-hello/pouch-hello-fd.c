@@ -43,17 +43,24 @@
 //                   through the copy moves the original's offset), never
 //                   carries close-on-exec, and a closed or negative fd is
 //                   EBADF.
-//   dupfd         : F_DUPFD lands at its floor when free and at the next free
-//                   number above it when not; F_DUPFD_CLOEXEC sets the flag;
-//                   the last slot is taken once, then EMFILE; a floor past
-//                   the table or negative is EINVAL, but a closed fd is EBADF
-//                   whatever the floor; dup2 and dup3 land on their target.
+//   dupfd         : F_DUPFD lands a copy of its source (a write through it
+//                   moves the source's offset) at its floor when free and at
+//                   the next free number above it when not; F_DUPFD_CLOEXEC
+//                   sets the flag; the last slot is taken once, then EMFILE;
+//                   a floor past the table or negative is EINVAL, but a
+//                   closed fd is EBADF whatever the floor; dup2 and dup3 land
+//                   on their target.
 //   getfl         : F_GETFL reports exactly the access mode, O_APPEND and
 //                   O_NONBLOCK; restating O_APPEND in F_SETFL is accepted,
 //                   flipping it is EINVAL.
-//   setfl         : F_SETFL O_NONBLOCK makes an empty pipe's read EAGAIN and
-//                   clearing it reads back clear; the flag belongs to the
-//                   open file, so a dup sees it.
+//   setfl         : F_SETFL O_NONBLOCK reads back on that end only, makes an
+//                   empty pipe's read EAGAIN, and clearing it reads back
+//                   clear; the flag belongs to the open file, so a dup sees
+//                   it.
+//   cloexec       : open O_CLOEXEC, fopen "e" and fdopen "e" set the flag and
+//                   a plain open does not; freopen without a name keeps its
+//                   descriptor (its F_SETFL used to answer ENOSYS and close
+//                   the stream).
 //   fdopendir     : fdopendir over an open directory reads its entries (its
 //                   O_PATH test is F_GETFL, which used to answer -1).
 //
@@ -339,6 +346,8 @@ static int leg_dupfd(void) {
         return fail("dupfd: a probe slot is already open");
     if (fcntl(fd, F_DUPFD, 100) != 100) return fail("F_DUPFD did not land at its free floor");
     if (fcntl(100, F_GETFD) != 0) return fail("F_DUPFD set close-on-exec");
+    if (write(100, "dupfd", 5) != 5) return fail("F_DUPFD write through the copy");
+    if (lseek(fd, 0, SEEK_CUR) != 5) return fail("F_DUPFD: not a copy of the source");
     if (fcntl(fd, F_DUPFD_CLOEXEC, 100) != 101)
         return fail("F_DUPFD_CLOEXEC did not take the next free number above its floor");
     if (fcntl(101, F_GETFD) != FD_CLOEXEC) return fail("F_DUPFD_CLOEXEC left the flag clear");
@@ -390,6 +399,10 @@ static int leg_setfl(void) {
     if (fcntl(p[0], F_GETFL) != O_RDONLY || fcntl(p[1], F_GETFL) != O_WRONLY)
         return fail("F_GETFL of the pipe ends");
     if (fcntl(p[0], F_SETFL, O_NONBLOCK) != 0) return fail("F_SETFL O_NONBLOCK");
+    // Read back before the read: a flag set on the wrong descriptor would
+    // otherwise block this read forever instead of failing the leg.
+    if (fcntl(p[0], F_GETFL) != (O_RDONLY | O_NONBLOCK) || fcntl(p[1], F_GETFL) != O_WRONLY)
+        return fail("F_SETFL O_NONBLOCK did not land on its own descriptor");
     char c;
     errno = 0;
     if (!refused(read(p[0], &c, 1), EAGAIN)) return fail("nonblocking read of an empty pipe not EAGAIN");
@@ -401,6 +414,30 @@ static int leg_setfl(void) {
     close(d);
     close(p[0]);
     close(p[1]);
+    return 0;
+}
+
+static int leg_cloexec(void) {
+    int plain = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    int fd = open(PROBE, O_RDONLY | O_CLOEXEC);
+    if (plain < 0 || fd < 0) return fail("cloexec opens");
+    if (fcntl(plain, F_GETFD) != 0) return fail("open without O_CLOEXEC set the flag");
+    if (fcntl(fd, F_GETFD) != FD_CLOEXEC) return fail("open O_CLOEXEC left the flag clear");
+    close(fd);
+    FILE *f = fopen(PROBE, "re");
+    if (!f) return fail("fopen re");
+    if (fcntl(fileno(f), F_GETFD) != FD_CLOEXEC) return fail("fopen e left the flag clear");
+    fclose(f);
+    int d = dup(plain);
+    if (d < 0) return fail("cloexec dup");
+    f = fdopen(d, "r+e");
+    if (!f) return fail("fdopen r+e");
+    if (fcntl(d, F_GETFD) != FD_CLOEXEC) return fail("fdopen e left the flag clear");
+    f = freopen(NULL, "r", f);
+    if (!f) return fail("freopen without a name");
+    if (fileno(f) != d) return fail("freopen without a name moved the descriptor");
+    fclose(f);
+    close(plain);
     return 0;
 }
 
@@ -426,7 +463,7 @@ int main(void) {
         { "sock-seek", leg_sock_seek },   { "sock-fstat", leg_sock_fstat },
         { "dup", leg_dup },               { "dupfd", leg_dupfd },
         { "getfl", leg_getfl },           { "setfl", leg_setfl },
-        { "fdopendir", leg_fdopendir },
+        { "cloexec", leg_cloexec },       { "fdopendir", leg_fdopendir },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

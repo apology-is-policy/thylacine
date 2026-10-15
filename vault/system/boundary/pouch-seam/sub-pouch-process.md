@@ -9,6 +9,7 @@ code:
   - usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch
   - usr/lib/pouch/patches/0054-pouch-dup2-self-query.patch
   - usr/lib/pouch/patches/0055-pouch-descriptor-operations.patch
+  - usr/lib/pouch/patches/0057-pouch-kill-probe-getppid.patch
   - usr/pouch-hello/pouch-hello-descriptor-ops.c
   - usr/pouch-hello/pouch-hello-dup2-self.c
   - usr/pouch-hello/pouch-hello-handle-query.c
@@ -47,6 +48,16 @@ fails. Astra's four guest witnesses (descriptor-ops, dup2-self, handle-query,
 spawn-actions) were built and run by nothing on main; B-3b compiles them into
 `/bin` and `tools/interactive/ls-descriptors.exp` runs each as uid 1000.
 
+The round-1 close (2026-10-15): `pipe2`'s failure unwind closes both ends with
+the raw `__syscall(SYS_close)`, as `popen` does, never the cancellable
+`close()`. The descriptor-ops witness reads a std stream's FLAGS_GET word as
+the flag bit plus status (a console stream is ORDWR, word 0x200), testing
+bit0 alone. With `pipe2(O_CLOEXEC)` flagging both ends, a `popen("r")` whose
+caller has fd 0 closed gets its read end at fd 0, which spawn's final
+exclusion then removes from the child, leaving a hole at child fd 0: spawn
+refuses it EINVAL (the approved sparse-spawn contract) where it used to hand
+the child the read end as its stdin (a Caveat below; OPEN-BUGS).
+
 ## Identity — the calls that could not report failure (A-6)
 
 A program's own identity belongs here with the rest of what it knows about
@@ -80,9 +91,11 @@ is the no-ambient-authority invariant holding by construction. A future change
 that made `geteuid()` diverge would be an invariant violation before it was an
 ABI change.
 
-`getppid` is deliberately **left parked** — it is the only one of the five with
-no kernel call behind it, and it has zero callers in the tree. A known lie, by
-decision rather than oversight.
+`getppid` was **left parked** here -- the only one of the five with no kernel
+call behind it, returning the sentinel's -38 as a pid. Vote 6 (2026-10-14)
+gave it native `SYS_GETPPID` (132); patch 0057 points it there, as `getpid`
+points at 72, and `pouch-hello-signals`' `probe` leg checks a child's
+`getppid()` against the pid its parent handed it.
 
 The witness is `pouch-hello-identity`, and it deliberately does **not** assert a
 literal principal — that would pass for the wrong reason the moment the boot
@@ -392,6 +405,12 @@ non-functional) · [[seam-pouch-spawn-envp]] (the passed `envp` is ignored;
 the child inherits `/env` via the kernel clone).
 
 ## Caveats
+
+- **`popen("r")` with fd 0 closed fails `EINVAL`** (since 0056): the pipe's
+  read end lands at fd 0 flagged close-on-exec, spawn's final exclusion drops
+  it, and the hole at child fd 0 is the sparse list spawn refuses. Linux would
+  give the child no stdin. Before 0056 the child inherited the read end as
+  its stdin. OPEN-BUGS 2026-10-15 owns the inheritance model this belongs to.
 
 - `posix_spawnattr` (SETSID / SETPGROUP / RESETIDS / SETSIG*) is ignored:
   there is no post-spawn child hook, and a fresh child inherits session,

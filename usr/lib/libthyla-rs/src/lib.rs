@@ -3971,3 +3971,11 @@ pub unsafe fn t_handle_dup_to(source: i64, target: i64, flags: u64) -> i64 {
          in("x8") T_SYS_HANDLE_DUP_TO, options(nostack));
     x0 as i64
 }
+pub const T_SYS_GETPPID: u64 = 132;
+/// The caller's parent's pid, 0 for a parentless Proc (vote 2026-10-14 #6).
+#[inline(always)]
+pub unsafe fn t_getppid() -> i64 {
+    let mut x0: i64 = 0;
+    asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPPID, options(nostack));
+    x0
+}

@@ -38,7 +38,19 @@ the most: `openat.c` alone has three generations.
 - `openat(AT_FDCWD, path, flags[, mode])` — one `SYS_open` (65) through
   the stalk resolver; `O_CREAT` splits into (parent, leaf) +
   `SYS_WALK_CREATE`; `O_TRUNC` → `+OTRUNC`; `O_APPEND` → the `OAPPEND`
-  omode bit (0040) plus a post-open seek-to-END (0030). A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
+  omode bit (0040) plus a post-open seek-to-END (0030); `O_CLOEXEC` → the
+  native descriptor flag (FLAGS_SET, 0056), set in the same exit helper once
+  the open has its number -- a set that fails closes the descriptor and fails
+  the open. A real dirfd is `ENOTSUP`; `O_TMPFILE` is `ENOTSUP`.
+- The descriptor family (0055, 0056): `dup`, `dup2`, `dup3`, `fcntl`'s
+  F_GETFD / F_SETFD / F_DUPFD / F_DUPFD_CLOEXEC / F_GETFL / F_SETFL over native
+  129-131 and 123 (`docs/ERRORS.md`, "Pouch fcntl and dup"). musl's own raw
+  `SYS_fcntl` callers -- the `0xFFFF` sentinel -- moved to the native calls:
+  `fopen "e"` and `__fopen_rb_ca` rely on `open`'s O_CLOEXEC, `__fdopen "e"`
+  sets the flag, `freopen` with no name sets it and changes the status
+  through `fcntl` (every such call used to fail and close the stream). The
+  rest are unreachable and stay: `fchdir` / `fchown` (their own calls are
+  sentinels and answer first), `socketpair` and `signalfd` (the same).
 - `fstat` → `SYS_FSTAT` (50); `stat`/`lstat`/`fstatat(path)` →
   `SYS_STAT` (88), the POUNCE walk-query; `fstatat(fd,"",AT_EMPTY_PATH)`
   delegates to `fstat`. `lstat == stat` (no symlinks, G11).
@@ -158,8 +170,9 @@ errno-loss), so 0027 dispatches on an `lstat` instead: a directory →
 
 **`O_APPEND`, in two halves, and the history is why.** musl's `__fdopen`
 asks for append via a raw `__syscall(SYS_fcntl, F_SETFL)` — the `0xFFFF`
-sentinel, so `ENOSYS` (the public `fcntl` gained F_GETFL / F_SETFL in 0056,
-where flipping O_APPEND after open is EINVAL: the append is fixed at open),
+sentinel, so `ENOSYS` (0056 removed the raw call: the public `fcntl`'s
+F_SETFL refuses flipping O_APPEND after open, EINVAL, because the append is
+fixed at open, so `__fdopen` now only marks the stream),
 leaving the cursor at 0 and making every `fopen("a")` write CLOBBER the
 file at offset 0. 0030 (2026-07-27) seeks to END once at open, in a helper
 every successful-open exit routes through (`pouch_open_ret`) precisely
@@ -406,9 +419,15 @@ in-place translation pass.
 - **The read half of "one transfer" has no device witness.** A byte source
   (a pipe, a file) answers one gathered read and a read per iovec alike; only
   a record source, a datagram, tells them apart.
-- **`fcntl`, `dup`, `dup2`/`dup3` onto a number are still `ENOSYS`** after
-  0051: they need the native descriptor calls B-3b brings onto main
-  (`dec-2026-10-14-fd-calls-on-astra`).
+- **`dup` of a socket `accept()` returned answers `EACCES`**, which POSIX
+  does not list for dup: the accepted connection is a plain kernel
+  descriptor over an untagged devsrv Spoor, and DUP_TO's alias gate refuses
+  that kind ([[sub-kernel-handle]]); `dup`, `dup2`, `dup3` and `F_DUPFD`
+  pass the EACCES through (the Linux phenotype answers EMFILE or EBADF).
+  B-3k replaces the accepted-connection path (OPEN-BUGS 2026-10-15).
+- **`fdopen(fd, "a")` cannot add `O_APPEND`** to a descriptor opened without
+  it: the append is fixed in the server's open, so the stream writes at the
+  descriptor's offset where Linux would append.
 - **A socket `accept()` returns is a kernel conn fd, not a pouch slot**, so
   the socket answers above do not reach it: the kernel reports it
   `S_IFREG`, and its seeks and positional I/O read as `EIO`. B-3k makes

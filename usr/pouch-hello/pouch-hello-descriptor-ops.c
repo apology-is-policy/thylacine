@@ -26,7 +26,7 @@ static long image_replace(const char *path){
 }
 int main(int argc,char **argv){
  if(argc==2 && !strcmp(argv[1],"stderr-closed"))return t_handle_flags_get(2)==-EBADF?0:21;
- if(argc==2 && !strcmp(argv[1],"stderr-open"))return t_handle_flags_get(2)==0?0:22;
+ if(argc==2 && !strcmp(argv[1],"stderr-open")){long w=t_handle_flags_get(2);return w>=0 && !(w&T_HANDLE_CLOSE_ON_EXEC)?0:22;}
  if(argc==2 && !strcmp(argv[1],"exec-check")){
   int ok=t_handle_flags_get(40)==-EBADF && t_handle_flags_get(41)==0;
   if(t_close(41)!=0)ok=0;return ok?0:23;

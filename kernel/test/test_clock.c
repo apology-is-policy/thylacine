@@ -24,6 +24,10 @@
 extern s64 sys_getpid_handler(u64, u64, u64, u64);
 extern s64 sys_getuid_handler(u64, u64, u64, u64);
 extern s64 sys_getgid_handler(u64, u64, u64, u64);
+extern s64 sys_getppid_handler(u64, u64, u64, u64);
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
 extern s64 sys_clock_gettime_handler(u64, u64, u64, u64);
 extern s64 sys_clock_settime_handler(u64, u64, u64, u64);   // net-7a
 
@@ -90,6 +94,30 @@ void test_clock_identity_syscalls(void) {
         "SYS_GETUID must return principal_id");
     TEST_ASSERT(sys_getgid_handler(0, 0, 0, 0) == (s64)(u64)p->primary_gid,
         "SYS_GETGID must return primary_gid");
+
+    // SYS_GETPPID (vote 2026-10-14 #6) reads the parent through
+    // proc_parent_pid. The test context's Proc may be parentless, where its
+    // own pid and its parent's could both read 0, so the accessor is also
+    // asked of a linked pair, where reading the wrong Proc shows.
+    s64 here = sys_getppid_handler(0, 0, 0, 0);
+    int want_here = proc_parent_pid(p);
+    struct Proc *par = proc_alloc();
+    struct Proc *kid = proc_alloc();
+    TEST_ASSERT(par && kid, "proc_alloc x2");
+    proc_test_link(par);
+    proc_test_link_child(par, kid);
+    int kid_ppid = proc_parent_pid(kid), kid_pid = kid->pid, par_pid = par->pid;
+    proc_test_unlink(kid);
+    kid->threads = NULL;
+    kid->state   = PROC_STATE_ZOMBIE;
+    proc_free(kid);
+    proc_test_unlink(par);
+    par->threads = NULL;
+    par->state   = PROC_STATE_ZOMBIE;
+    proc_free(par);
+    TEST_ASSERT(here == (s64)want_here, "SYS_GETPPID must return the parent's pid");
+    TEST_ASSERT(kid_ppid == par_pid && kid_ppid != kid_pid,
+        "proc_parent_pid reads the parent, not the Proc itself");
 }
 
 void test_clock_gettime_errors(void) {

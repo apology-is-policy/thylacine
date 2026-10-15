@@ -576,7 +576,13 @@ enum {
 // rows consumed before the native switch exactly as kill's is, so each now
 // has a per-number argument (vivarium.c). The lowest row still argued by the
 // ceiling is sigaltstack (132), a VIV_ENOSYS row.
-#define VIV_NATIVE_CEILING 131
+//
+// Vote 6 (2026-10-14) appends SYS_GETPPID at 132. Linux 132 is sigaltstack, a
+// VIV_ENOSYS row consumed before the native switch, so a Linux Proc's
+// sigaltstack never reaches getppid; its argument is now per-number
+// (vivarium.c). The lowest row still argued by the ceiling is rt_sigsuspend
+// (133), also VIV_ENOSYS.
+#define VIV_NATIVE_CEILING 132
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

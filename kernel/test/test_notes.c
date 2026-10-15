@@ -58,6 +58,7 @@ extern s64  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
 extern s64  viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
 extern s64  sys_postnote_self_for_test(struct Proc *caller,
                                        const char *name);    // aux#253
+extern s64  sys_postnote_probe_for_test(struct Proc *caller, u64 pid_raw);
 
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -3396,6 +3397,17 @@ void test_notes_postnote_errnos(void) {
     s64 r_tty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_SUSP);
     s64 r_sak   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SAK);
     s64 r_snare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
+
+    // The probe (kill(pid, 0), vote 2026-10-14 #6): the gate's verdict and no
+    // post. A narrowed pid aliases as a post's does: 2^32 + pid is pid.
+    s64 p_self  = sys_postnote_probe_for_test(caller, (u64)caller->pid);
+    s64 p_zero  = sys_postnote_probe_for_test(caller, 0);
+    s64 p_child = sys_postnote_probe_for_test(caller, (u64)child->pid);
+    s64 p_wide  = sys_postnote_probe_for_test(caller, (1ull << 32) | (u64)child->pid);
+    s64 p_other = sys_postnote_probe_for_test(caller, (u64)other->pid);
+    s64 p_nopid = sys_postnote_probe_for_test(caller, (u64)NO_PID);
+    s64 p_up    = sys_postnote_probe_for_test(child, (u64)caller->pid);
+    u32 p_self_count = caller->notes->count;
     u32 c_count = child->notes->count;
 
     // Fill the child's ring with posts that arm nothing, then one more.
@@ -3429,10 +3441,12 @@ void test_notes_postnote_errnos(void) {
     s64 r_dbogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
     s64 r_dsnare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
     s64 r_dtty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_CONT);
+    s64 p_dead   = sys_postnote_probe_for_test(caller, (u64)child->pid);
     u32 c_after = child->notes->count;
     other->state = PROC_STATE_ZOMBIE;
     s64 r_odead = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
     s64 r_odbogus = sys_postnote_cross_for_test(caller, other->pid, "bogus");
+    s64 p_odead = sys_postnote_probe_for_test(caller, (u64)other->pid);
 
     proc_test_unlink(other);
     other->threads = NULL;
@@ -3456,7 +3470,15 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(r_tty, -(s64)T_E_INVAL, "tty:susp is the kernel's to post: EINVAL");
     TEST_EXPECT_EQ(r_sak, -(s64)T_E_INVAL, "sak is the kernel's to post: EINVAL");
     TEST_EXPECT_EQ(r_snare, -(s64)T_E_INVAL, "a snare to another Proc is EINVAL: a fault is its own");
-    TEST_EXPECT_EQ(c_count, 1u, "no refused post reached the child's ring");
+    TEST_EXPECT_EQ(p_self, (s64)0, "probe of oneself is 0");
+    TEST_EXPECT_EQ(p_zero, (s64)0, "probe of pid 0, the self sentinel, is 0");
+    TEST_EXPECT_EQ(p_child, (s64)0, "probe of a child is 0");
+    TEST_EXPECT_EQ(p_wide, (s64)0, "probe of 2^32 + child pid reads the child, as a post does");
+    TEST_EXPECT_EQ(p_other, -(s64)T_E_ACCES, "probe of a non-child is EACCES: the post's gate");
+    TEST_EXPECT_EQ(p_nopid, -(s64)T_E_SRCH, "probe of no such pid is ESRCH");
+    TEST_EXPECT_EQ(p_up, -(s64)T_E_ACCES, "a child's probe of its parent is EACCES");
+    TEST_EXPECT_EQ(p_self_count, 0u, "no probe queued anything to the caller");
+    TEST_EXPECT_EQ(c_count, 1u, "no refused post or probe reached the child's ring");
     TEST_EXPECT_EQ(c_fill_bad, 0u, "the fill posts all landed");
     TEST_EXPECT_EQ(r_full, -(s64)T_E_AGAIN, "a full ring is EAGAIN");
     TEST_EXPECT_EQ(s_tty, -(s64)T_E_INVAL, "self: tty:susp is EINVAL");
@@ -3468,9 +3490,11 @@ void test_notes_postnote_errnos(void) {
     TEST_EXPECT_EQ(r_dbogus, -(s64)T_E_INVAL, "but not a name that is no note");
     TEST_EXPECT_EQ(r_dsnare, -(s64)T_E_INVAL, "nor a snare: a dead child is still another Proc");
     TEST_EXPECT_EQ(r_dtty, -(s64)T_E_INVAL, "nor a tty name");
+    TEST_EXPECT_EQ(p_dead, (s64)0, "probe of a dead, unreaped child is 0");
     TEST_EXPECT_EQ(c_after, c_before, "and nothing was queued to it");
     TEST_EXPECT_EQ(r_odead, -(s64)T_E_ACCES, "a dead non-child reads EACCES: the gate is asked first");
     TEST_EXPECT_EQ(r_odbogus, -(s64)T_E_INVAL, "and a refused name to it reads EINVAL: the name before the gate");
+    TEST_EXPECT_EQ(p_odead, -(s64)T_E_ACCES, "probe of a dead non-child is EACCES");
 }
 
 // The snares a Proc may post to itself are exactly the ones the phenotype's

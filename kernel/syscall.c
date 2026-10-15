@@ -3313,9 +3313,9 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
-        // #80 seam: POSIX names a full per-process fd table EMFILE (24), which
-        // is not in the errno registry (an ERRORS.md append needs signoff).
-        // ENOMEM is the registered out-of-resources code and is at least true.
+        // #80 seam: POSIX names a full per-process fd table EMFILE (24). It
+        // was not registered when this was written and is now (errno.h); the
+        // switch from ENOMEM is an errno change for a vote, not made here.
         return -T_E_NOMEM;
     }
     return (s64)fd;
@@ -3543,6 +3543,15 @@ s64 sys_getgid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p) return -1;
     return (s64)(u64)p->primary_gid;
+}
+
+// The parent link is rewritten when a parent exits (proc_reparent_children),
+// so it is read under g_proc_table_lock, which proc_parent_pid takes.
+s64 sys_getppid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return (s64)proc_parent_pid(p);
 }
 
 // =============================================================================
@@ -4325,7 +4334,7 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
-        return -T_E_NOMEM;   // #80: full fd table (EMFILE unregistered)
+        return -T_E_NOMEM;   // #80: full fd table (EMFILE: see the seam above)
     }
     return (s64)fd;
 }
@@ -5884,8 +5893,9 @@ static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name)
     // The name is judged before the target is looked for, as the phenotype's
     // kill judges its signal before its walk: the walk answers a dead child 0
     // without reaching notes_post's gates, so a name they refuse is refused
-    // here, whatever the target's state.
-    if (!notes_name_user_postable(name)) return -(s64)T_E_INVAL;
+    // here, whatever the target's state. A NULL name is the probe, which the
+    // walk answers after the gate without posting.
+    if (name && !notes_name_user_postable(name)) return -(s64)T_E_INVAL;
 
     struct postnote_walk_ctx wctx = {
         .target_pid = target_pid,
@@ -5912,6 +5922,22 @@ s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
 s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                 const char *name) {
     return postnote_cross(caller, target_pid, name);
+}
+
+// The probe: kill(pid, 0), an empty name (operator vote 2026-10-14 #6). Self
+// needs no gate; another pid gets the cross arm's walk with no name, which
+// answers the gate's verdict and posts nothing. It discloses no more than a
+// post does: a post names ESRCH and EACCES the same way.
+static s64 postnote_probe(struct Proc *p, u64 pid_raw) {
+    int target_pid = (int)pid_raw;
+    if (target_pid == p->pid || pid_raw == 0) return 0;
+    return postnote_cross(p, target_pid, NULL);
+}
+
+// Test support, as sys_postnote_cross_for_test.
+s64 sys_postnote_probe_for_test(struct Proc *caller, u64 pid_raw);
+s64 sys_postnote_probe_for_test(struct Proc *caller, u64 pid_raw) {
+    return postnote_probe(caller, pid_raw);
 }
 
 // The SELF arm, extracted from sys_postnote_handler so it has a name a test can
@@ -5963,7 +5989,7 @@ static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
     if (!t || !t->proc) return -(s64)T_E_INVAL;
     struct Proc *p = t->proc;
 
-    if (name_len_raw == 0) return -(s64)T_E_INVAL;
+    if (name_len_raw == 0) return postnote_probe(p, pid_raw);
     if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -(s64)T_E_INVAL;
     if (name_va == 0) return -(s64)T_E_FAULT;
     if (name_va >= UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
@@ -14941,10 +14967,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     }
 
     case VIV_LINUX_GETPPID: {
-        // getppid(void). A shell because there IS no native twin -- Thylacine
-        // exposes pid/uid/gid (72/73/74) and stops. Adding SYS_GETPPID would be
-        // a syscall-interface change, which is an escalation, and it would buy
-        // nothing a phenotype-local read does not already give.
+        // getppid(void). Its native twin, SYS_GETPPID (132, operator vote
+        // 2026-10-14 #6), came later; this shell reads the same accessor the
+        // native handler does, so the two cannot answer differently.
         //
         // proc_parent_pid takes g_proc_table_lock, which is not optional and not
         // available here: `parent` is rewritten by proc_reparent_children when a
@@ -16178,6 +16203,11 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_GETPID:
         ctx->regs[0] = (u64)sys_getpid_handler(ctx->regs[0], ctx->regs[1],
                                                ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_GETPPID:
+        ctx->regs[0] = (u64)sys_getppid_handler(ctx->regs[0], ctx->regs[1],
+                                                ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_GETUID:

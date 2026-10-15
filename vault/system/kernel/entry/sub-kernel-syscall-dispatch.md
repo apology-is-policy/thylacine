@@ -697,8 +697,12 @@ refuses: when the caller lacks W|X on a perm-enforced parent but holds X, it
 probes the leaf with `stalk_union_has_child` (a one-component walk: no perm
 check, no symlink follow) and answers -T_E_EXIST if the name is there,
 -T_E_ACCES if not. Without X it answers EACCES and discloses nothing. Every
-exclusive create and mkdir takes this path; a plain create opens first and
-never reaches it for an existing name. Ported code's `mkdir(p) < 0 && errno
+exclusive create and mkdir takes this path. A plain create opens first, so an
+existing name is opened there; the one name a plain create can still meet
+here is a dangling final link (the open finds nothing, the create never
+follows a link and answers EEXIST), and after the retry that case answers
+-T_E_NOENT, never EEXIST (`stalk.open_create_exists_before_access`'s
+`p_lnk` leg). Ported code's `mkdir(p) < 0 && errno
 != EEXIST` relies on Linux's lookup-then-may_create order
 (`stalk.open_create_exists_before_access`).
 
@@ -1699,6 +1703,27 @@ it.
 syscall's own answer. `notes.postnote_errnos` pins each refusal on both arms
 against a control post that lands, and `notes.self_death_snare` compares the
 native set with the phenotype's row by row.
+
+## The empty name is the probe; SYS_GETPPID (2026-10-15, B-3b vote 6)
+
+A zero `name_len` no longer answers `-T_E_INVAL`: it is the probe `kill(pid,
+0)` maps to, handled by `postnote_probe(p, pid_raw)` before the name is
+read (x1 is ignored). Self -- `pid` 0, or the caller's own after the same
+`(int)` narrowing a post applies -- answers 0 with no gate; any other pid goes
+to `postnote_cross(p, pid, NULL)`, whose name check now skips a NULL name, and
+the walk's existing `!w->name` arm answers after the parent gate and the
+past-ALIVE check without posting. So a probe answers 0 for the caller's child
+(dead but unreaped included), `-T_E_ACCES` for any other Proc and `-T_E_SRCH`
+for none, and never `-T_E_INVAL` or `-T_E_AGAIN`; it discloses nothing a
+post with a valid name does not. `sys_postnote_probe_for_test` drives it;
+`notes.postnote_errnos` pins self, pid 0, child, a 2^32-aliased child,
+non-child, missing pid, a child probing its parent, a dead child and a dead
+non-child, with no note queued by any of them.
+
+`sys_getppid_handler` (132) returns `proc_parent_pid(p)`, the accessor the
+phenotype's getppid shell already used, under `g_proc_table_lock`.
+`clock.identity_syscalls` pins it against the accessor and the accessor
+against a linked pair.
 
 ## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
 

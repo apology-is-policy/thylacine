@@ -12,7 +12,7 @@ hazards: []
 abis: [abi-note-names]
 design: ["docs/ARCHITECTURE.md", "docs/ERRORS.md"]
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-15
 ---
 ## Purpose
 
@@ -83,7 +83,10 @@ The userspace name gates live in one PURE predicate,
 `notes_name_user_postable(name)`, which `notes_post` asks of every
 non-synthetic post and `SYS_POSTNOTE`'s cross arm asks before its walk, so a
 refused name is refused even where the walk would answer without posting (a
-dead child).
+dead child). The cross arm skips it for a NULL name: since B-3b (vote 6,
+[[dec-2026-10-14-postnote-probe-getppid]]) an empty `SYS_POSTNOTE` name is
+the probe, the same NULL-name walk the phenotype's `kill(pid, 0)` uses,
+answered after the parent gate with nothing posted.
 No `snare:` name is ever queued, but a Proc may END itself with one:
 `notes_self_death_snare(name)` returns the kernel's own literal for
 `snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` and `snare:abort` (NULL
@@ -693,7 +696,8 @@ path.
 
 ## Error paths
 
-A bad name, an empty name, or a reserved prefix from userspace: rejected.
+A bad name or a reserved prefix from userspace: rejected. An empty name at
+`SYS_POSTNOTE` is the probe, never a post.
 A full queue: coalesce for the kernel, "try again" for userspace. A bad stack
 pointer, a failed push, an impossible dequeue: re-enqueue and return, leaving
 the note for the next attempt. A failed kill re-enqueue: extinction, on purpose.
