@@ -167,9 +167,11 @@ static void np_run(const char *path, const char *label, int want) {
         // Each install takes one reference; the test keeps its own on the root.
         spoor_ref(root);
         spoor_ref(root);
+        // Posting is a create in the registry (sys_walk_create wants
+        // RIGHT_WRITE on the parent); TARGET takes any handle.
         struct np_child server = {
             .blob = &fixture, .fd = { root, ctl_rd, note_wr },
-            .rights = { RIGHT_READ, RIGHT_READ | RIGHT_WRITE, RIGHT_READ | RIGHT_WRITE },
+            .rights = { RIGHT_READ | RIGHT_WRITE, RIGHT_READ | RIGHT_WRITE, RIGHT_READ | RIGHT_WRITE },
             .posts = true, .label = "loom-fixture",
         };
         struct np_child client = {
