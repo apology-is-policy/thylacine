@@ -287,6 +287,8 @@ fn run() -> R<i64> {
 
     say("a deadline aborts its scope");
     let s2 = connect(&ring, &target)?;
+    let near = walk(&ring, &s2, b"data")?;
+    open(&ring, &near, 0)?;
     let stall = walk(&ring, &s2, b"stall")?;
     open(&ring, &stall, 0)?;
     let base = stats(&ring, &stats_fid)?;
@@ -298,20 +300,26 @@ fn run() -> R<i64> {
         Ok(Ok(_)) => check!(false, "a READ the server never answered completed", 0),
         Err(e) => check!(false, "the held READ ended", e),
     }
-    done_refused!(ring, ok!(s2.walk(b"data", soon(&ring)), "submit a WALK"), E_CANCELED,
-                  "the deadline aborted the whole scope");
+    // The abort latched the scope out of READY: admission refuses a sibling's
+    // operation, and no FID reserves under the scope.
+    done_refused!(ring, ok!(near.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
+                  "the deadline aborted the open sibling too");
+    refused!(s2.walk(b"data", soon(&ring)), E_NOENT, "no FID reserves under the scope the deadline aborted");
     stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
 
     say("cancellation by drop");
     let s3 = connect(&ring, &target)?;
+    let near = walk(&ring, &s3, b"data")?;
+    open(&ring, &near, 0)?;
     let stall = walk(&ring, &s3, b"stall")?;
     open(&ring, &stall, 0)?;
     let base = stats(&ring, &stats_fid)?;
     let rd = ok!(stall.read(range(4, 0, PAGE), 0, None), "submit a READ the server holds");
     stats_until(&ring, &stats_fid, STALLED, base[STALLED] + 1)?;
     drop(rd);
-    done_refused!(ring, ok!(s3.walk(b"data", soon(&ring)), "submit a WALK"), E_CANCELED,
-                  "dropping a pending READ aborted its scope");
+    done_refused!(ring, ok!(near.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
+                  "dropping a pending READ aborted the open sibling too");
+    refused!(s3.walk(b"data", soon(&ring)), E_NOENT, "no FID reserves under the scope the drop aborted");
     stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
     let r = done!(ring, ok!(data.read(range(0, 0, PAGE), PAGE, soon(&ring)), "submit a READ"), "a READ");
     check!(r.bytes().len() == PAGE as usize && matches(r.bytes(), PAGE as usize),

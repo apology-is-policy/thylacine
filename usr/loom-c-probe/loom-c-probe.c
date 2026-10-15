@@ -153,6 +153,14 @@ static struct t_loom_fid *walk(struct t_loom_scope *s, const char *name, int32_t
     return fid;
 }
 
+// A WALK refused at submit: the kernel reserves its FID first, and no FID
+// reserves under a scope that is no longer READY.
+static void walk_refused(struct t_loom_scope *s, const char *name, int want, const char *why) {
+    struct t_loom_op *op = NULL;
+    int rc = t_loom_walk(s, name, name_len(name), 1, soon(), &op);
+    CHECK(rc == want && !op, why, rc);
+}
+
 static void open_as(struct t_loom_fid *fid, uint32_t mode, int32_t want) {
     struct t_loom_op *op;
     int rc = t_loom_open(fid, mode, 1, soon(), &op);
@@ -174,6 +182,17 @@ static struct t_fixed_read_result *read_at(struct t_loom_fid *fid, struct t_loom
     *bytes = t_loom_read_bytes(rr, len);
     CHECK(*len == (size_t)res, "a READ's bytes are its result", *len);
     return rr;
+}
+
+// A READ the kernel refuses with `want` and no bytes.
+static void read_refused(struct t_loom_fid *fid, int32_t want, const char *why) {
+    struct t_loom_op *op;
+    int rc = t_loom_read(fid, range(0, 0, PAGE), 0, 1, soon(), &op);
+    CHECK(rc == 0, "submit a READ", rc);
+    int32_t res = 0;
+    struct t_fixed_read_result *rr = NULL;
+    AWAIT(t_loom_read_done(op, &res, &rr), "a refused READ");
+    CHECK(res == want && !rr, why, res);
 }
 
 static void stats(struct t_loom_fid *fid, uint32_t v[STAT_COUNT]) {
@@ -352,6 +371,8 @@ static int run(void) {
 
     say("a deadline aborts its scope");
     struct t_loom_scope *s2 = connect(t);
+    struct t_loom_fid *near2 = walk(s2, "data", 0);
+    open_as(near2, 0, 0);
     struct t_loom_fid *stall2 = walk(s2, "stall", 0);
     open_as(stall2, 0, 0);
     stats(sf, base);
@@ -363,11 +384,16 @@ static int run(void) {
     res = 0;
     AWAIT(t_loom_read_done(op, &res, &rr), "the held READ");
     CHECK(res == -E_TIMEDOUT && !rr, "the deadline ends the held READ", res);
-    walk(s2, "data", -E_CANCELED);
+    // The abort latched the scope out of READY: admission refuses a sibling's
+    // operation, and no FID reserves under the scope.
+    read_refused(near2, -E_CANCELED, "the deadline aborted the open sibling too");
+    walk_refused(s2, "data", -E_NOENT, "no FID reserves under the scope the deadline aborted");
     stats_until(sf, ENDED, base[ENDED] + 1, v);
 
     say("cancellation by drop");
     struct t_loom_scope *s3 = connect(t);
+    struct t_loom_fid *near3 = walk(s3, "data", 0);
+    open_as(near3, 0, 0);
     struct t_loom_fid *stall3 = walk(s3, "stall", 0);
     open_as(stall3, 0, 0);
     stats(sf, base);
@@ -375,7 +401,8 @@ static int run(void) {
     CHECK(rc == 0, "submit a READ the server holds", rc);
     stats_until(sf, STALLED, base[STALLED] + 1, v);
     t_loom_op_drop(op);
-    walk(s3, "data", -E_CANCELED);
+    read_refused(near3, -E_CANCELED, "dropping a pending READ aborted the open sibling too");
+    walk_refused(s3, "data", -E_NOENT, "no FID reserves under the scope the drop aborted");
     stats_until(sf, ENDED, base[ENDED] + 1, v);
     rr = read_at(data, range(0, 0, PAGE), PAGE, &bytes, &len);
     CHECK(len == PAGE && matches(bytes, len, PAGE), "a scope beside the aborted ones still reads", len);
@@ -405,7 +432,7 @@ static int run(void) {
     t_loom_payload_drop(p2);
     t_loom_read_drop(rr);
     t_loom_op_drop(st);
-    struct t_loom_fid *fids[] = { third, stall3, stall2, second, first, sink, data, sf };
+    struct t_loom_fid *fids[] = { third, stall3, near3, stall2, near2, second, first, sink, data, sf };
     for (unsigned i = 0; i < sizeof(fids) / sizeof(fids[0]); i++) t_loom_fid_drop(fids[i]);
     t_loom_scope_drop(s3);
     t_loom_scope_drop(s2);
