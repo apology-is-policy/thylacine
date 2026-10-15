@@ -22,9 +22,10 @@
 #   icu-cxx ICU's C++ API tests (intltest): "OK: All tests passed without error."
 #           Data errors count: intltest runs without -w, so a test that cannot
 #           find its data fails rather than warns.
-#   libpng, libjpeg-turbo, libwebp (B-3d): /var/lib_tests/bin/muster runs each
-#           library's CTest list (tools/libtests-manifest.py wrote it from
-#           upstream's registration; libwebp's from tools/libtests-webp.json),
+#   libpng, libjpeg-turbo, libwebp (B-3d), libxml2 (B-3e):
+#           /var/lib_tests/bin/muster runs each library's CTest list
+#           (tools/libtests-manifest.py wrote it from upstream's registration;
+#           libwebp's from tools/libtests-webp.json),
 #           ending "muster: <lib>: N of N passed". N is read from the host's
 #           build/pouch/lib-tests/<lib>.count, the build's own count of the
 #           manifest, so a device run of fewer tests than the build listed
@@ -46,7 +47,7 @@ if {![lc_pool_has ICUTEST]} {
           ICUTEST payload -- THYLACINE_BAKE_LIBS unset, or a pool baked before it existed)"
     exit 77
 }
-foreach need {ICUDATA MF2DATA MUSTER PNGTESTS JPEGTESTS WEBPTESTS} {
+foreach need {ICUDATA MF2DATA MUSTER PNGTESTS JPEGTESTS WEBPTESTS XMLTESTS XMLCONF} {
     if {![lc_pool_has $need]} {
         puts "LS-CI FAIL: this pool holds ICU's tests but not their $need payload\
               (a partial bake; rebake with THYLACINE_BAKE_LIBS=1)"
@@ -97,8 +98,8 @@ if {[lib_leg icuc /var/icu_tests/bin/cintltst /tmp/icu-c.log "all tests passed s
 if {[lib_leg icux /var/icu_tests/bin/intltest /tmp/icu-cxx.log "all tests passed without error"]} {
     lc_pass "ls-libs(icu-cxx): intltest exit 0, all tests passed"
 }
-# The codecs' lists: each manifest's count as the build wrote it.
-foreach lib {libpng libjpeg-turbo libwebp} tag {png jpg webp} {
+# The muster lists: each manifest's count as the build wrote it.
+foreach lib {libpng libjpeg-turbo libwebp libxml2} tag {png jpg webp xml} {
     set cf [file join $::lc_repo build pouch lib-tests $lib.count]
     if {[catch {set fh [open $cf r]; set n [string trim [read $fh]]; close $fh}] || ![string is integer -strict $n] || $n < 1} {
         lc_fail "no test count for $lib at $cf (the bake and this tree disagree; rebake)"

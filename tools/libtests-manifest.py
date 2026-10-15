@@ -37,7 +37,16 @@ The `cmake` shapes:
     libpng test): the generated script only runs <exe> with its
     TEST_OPTIONS and TEST_FILES and checks the status, which is what the
     runner does; the script's text is checked against the template so a
-    libpng that changes the wrapper is refused.
+    libpng that changes the wrapper is refused;
+  - `cmake -D... -P run_and_diff.cmake` and `-P test_xmlcatalog_add_del.cmake`
+    (libxml2's script suites and its catalog test): each becomes the steps
+    the script performs -- a program with its stdin and outputs redirected
+    and its status unchecked, then the comparisons; or the catalog's create,
+    adds, compare, deletes, compare -- and each script is checked by its
+    sha256, so a changed script is refused.
+
+A test is one or more steps (`step` in the manifest); every shape above but
+the two libxml2 scripts is one.
 """
 
 import argparse
@@ -96,6 +105,105 @@ def png_unwrap(script_path, template_path):
     return cmake_list(opts.group(1)) + cmake_list(files.group(1))
 
 
+# The two CMake scripts libxml2's tests run (restored by its port patch 0001),
+# by content: a script that changes is refused rather than mistranslated.
+LIBXML2_WRAPPERS = {
+    "run_and_diff.cmake": "f40cdbab613908006a554f586c96042663e85f762a07b702cc615339e80b20a3",
+    "test_xmlcatalog_add_del.cmake": "1339088a9235f15d9feb52453d6dcd18f726336c910d4ec8d80bae5824d680c7",
+}
+
+
+def defines(name, cmd, keys):
+    """The -DKEY=VALUE arguments of `cmake -D... -P SCRIPT`, which must be exactly `keys`."""
+    got = {}
+    for a in cmd[1:-2]:
+        k, sep, v = a[2:].partition("=")
+        if not a.startswith("-D") or not sep or k in got:
+            die(f"test {name!r}: {a!r} is not one -DKEY=VALUE")
+        got[k] = v
+    if set(got) != set(keys):
+        die(f"test {name!r}: defines {sorted(got)}, the script takes {sorted(keys)}")
+    return got
+
+
+def wrapper(name, cmd):
+    """The libxml2 script a `cmake -D... -P SCRIPT` test runs, checked by content."""
+    if len(cmd) < 3 or cmd[-2] != "-P":
+        return None
+    base = os.path.basename(cmd[-1])
+    if base not in LIBXML2_WRAPPERS:
+        return None
+    import hashlib
+    have = hashlib.sha256(open(cmd[-1], "rb").read()).hexdigest()
+    if have != LIBXML2_WRAPPERS[base]:
+        die(f"test {name!r}: {cmd[-1]} is not the script this translator knows"
+            f" (sha256 {have}); teach this script the new shape")
+    return base
+
+
+def step(argv, builtin=None, stdin=None, stdout=None, stderr=None, any_status=False):
+    return {"argv": argv, "builtin": builtin, "stdin": stdin, "stdout": stdout,
+            "stderr": stderr, "any": any_status}
+
+
+def steps_of(test, args, props, host_cwd):
+    """The test as muster steps, in host terms; and the directory they run in."""
+    name = test["name"]
+    cmd = list(test["command"])
+    passre = props.get("PASS_REGULAR_EXPRESSION")
+    if passre is not None:
+        if isinstance(passre, str):
+            passre = cmake_list(passre)
+        m = DIGEST_REGEX.fullmatch(passre[0]) if len(passre) == 1 else None
+        if not (m and os.path.basename(cmd[0]) == "cmake"
+                and cmd[1:3] == ["-E", "sha256sum"] and len(cmd) == 4):
+            die(f"test {name!r}: PASS_REGULAR_EXPRESSION {passre} is supported only"
+                " as a SHA-256 digest on `cmake -E sha256sum FILE`")
+        return [step([m.group(1), cmd[3]], "sha256")], host_cwd
+    if os.path.basename(cmd[0]) != "cmake":
+        return [step(cmd)], host_cwd
+    if cmd[1:3] == ["-E", "copy_if_different"] and len(cmd) == 5:
+        return [step(cmd[3:], "copy")], host_cwd
+    if cmd[1:3] == ["-E", "compare_files"] and len(cmd) == 5:
+        return [step(cmd[3:], "cmp")], host_cwd
+    if (len(cmd) == 5 and cmd[1].startswith("-DLIBPNG=")
+            and cmd[2].startswith("-DTEST_COMMAND=") and cmd[3] == "-P"):
+        if not args.png_template:
+            die(f"test {name!r} is a libpng wrapper; pass --png-template")
+        return [step([cmd[2][len("-DTEST_COMMAND="):]] + png_unwrap(cmd[4], args.png_template))], host_cwd
+    script = wrapper(name, cmd)
+    if script == "run_and_diff.cmake":
+        # PROG --shell XML in WORKDIR, stdin from STDIN (both relative to
+        # WORKDIR, where execute_process resolves them); its status is only
+        # reported; then stdout against the expected, and stderr when an
+        # expected stderr exists.
+        d = defines(name, cmd, ["PROG", "STDIN", "XML", "STDOUT", "STDERR",
+                                "EXPECTED_STDOUT", "EXPECTED_STDERR", "WORKDIR"])
+        st = [step([d["PROG"], "--shell", d["XML"]], stdin=d["STDIN"], stdout=d["STDOUT"],
+                   stderr=d["STDERR"], any_status=True),
+              step([d["STDOUT"], d["EXPECTED_STDOUT"]], "cmp")]
+        if os.path.exists(d["EXPECTED_STDERR"]):
+            st.append(step([d["STDERR"], d["EXPECTED_STDERR"]], "cmp"))
+        return st, d["WORKDIR"]
+    if script == "test_xmlcatalog_add_del.cmake":
+        # In script mode CMAKE_CURRENT_BINARY_DIR is the directory cmake runs in.
+        d = defines(name, cmd, ["XMLCAT", "EXPECTED_FULL", "EXPECTED_EMPTY"])
+        work = os.path.join(host_cwd, "catalog_add_del_work")
+        cat = os.path.join(work, "mycatalog")
+        x = d["XMLCAT"]
+        return [step([work], "rmtree"), step([work], "mkdir"),
+                step([x, "--create", "--noout", cat]),
+                step([x, "--noout", "--add", "public", "Pubid", "sysid", cat]),
+                step([x, "--noout", "--add", "public", "Pubid2", "sysid2", cat]),
+                step([x, "--noout", "--add", "public", "Pubid3", "sysid3", cat]),
+                step([cat, d["EXPECTED_FULL"]], "cmp"),
+                step([x, "--noout", "--del", "sysid", cat]),
+                step([x, "--noout", "--del", "sysid3", cat]),
+                step([x, "--noout", "--del", "sysid2", cat]),
+                step([cat, d["EXPECTED_EMPTY"]], "cmp")], host_cwd
+    die(f"test {name!r}: cmake command {cmd[1:]} is not a supported shape")
+
+
 def translate(test, args, mapper):
     name = test["name"]
     if "command" not in test:
@@ -107,66 +215,70 @@ def translate(test, args, mapper):
     host_cwd = props.get("WORKING_DIRECTORY")
     if not host_cwd:
         die(f"test {name!r} has no WORKING_DIRECTORY")
-    cmd = list(test["command"])
-    builtin = None
-    passre = props.get("PASS_REGULAR_EXPRESSION")
-    if passre is not None:
-        if isinstance(passre, str):
-            passre = cmake_list(passre)
-        m = DIGEST_REGEX.fullmatch(passre[0]) if len(passre) == 1 else None
-        if not (m and os.path.basename(cmd[0]) == "cmake"
-                and cmd[1:3] == ["-E", "sha256sum"] and len(cmd) == 4):
-            die(f"test {name!r}: PASS_REGULAR_EXPRESSION {passre} is supported only"
-                " as a SHA-256 digest on `cmake -E sha256sum FILE`")
-        builtin, cmd = "sha256", [m.group(1), cmd[3]]
-    elif os.path.basename(cmd[0]) == "cmake":
-        if cmd[1:3] == ["-E", "copy_if_different"] and len(cmd) == 5:
-            builtin, cmd = "copy", cmd[3:]
-        elif cmd[1:3] == ["-E", "compare_files"] and len(cmd) == 5:
-            builtin, cmd = "cmp", cmd[3:]
-        elif (len(cmd) == 5 and cmd[1].startswith("-DLIBPNG=")
-              and cmd[2].startswith("-DTEST_COMMAND=") and cmd[3] == "-P"):
-            if not args.png_template:
-                die(f"test {name!r} is a libpng wrapper; pass --png-template")
-            cmd = [cmd[2][len("-DTEST_COMMAND="):]] + png_unwrap(cmd[4], args.png_template)
-        else:
-            die(f"test {name!r}: cmake command {cmd[1:]} is not a supported shape")
-
+    steps, host_cwd = steps_of(test, args, props, host_cwd)
     dev_cwd = mapper.device(host_cwd)
     if dev_cwd is None:
-        die(f"test {name!r}: WORKING_DIRECTORY {host_cwd} is outside every --map")
-    stage, argv = [], []
-    for i, a in enumerate(cmd):
+        die(f"test {name!r}: its directory {host_cwd} is outside every --map")
+    stage = []
+
+    def relative_input(a):
+        """A relative path naming an existing file: staged where the device resolves it."""
+        host = os.path.join(host_cwd, a)
+        dev = mapper.device(host)
+        want = os.path.normpath(os.path.join(dev_cwd, a))
+        if dev is None or dev != want:
+            die(f"test {name!r}: {a} resolves to {dev} on the device's map but"
+                f" to {want} from the device cwd (keep the trees' relative layout)")
+        stage.append(("file", os.path.realpath(host), dev))
+
+    def path(a, what):
+        """A redirect: an absolute path mapped, a relative one kept (and staged if it exists)."""
         if "\n" in a:
-            die(f"test {name!r}: an argument holds a newline")
-        host = a if os.path.isabs(a) else os.path.join(host_cwd, a)
-        program = i == 0 and builtin is None
-        if program or os.path.isabs(a):
-            dev = mapper.device(host)
-            if dev is None:
-                if program or os.path.exists(host):
-                    die(f"test {name!r}: {a} is outside every --map")
-                argv.append(a)          # an absolute non-path option value
+            die(f"test {name!r}: a {what} path holds a newline")
+        if not os.path.isabs(a):
+            if os.path.isfile(os.path.join(host_cwd, a)):
+                relative_input(a)
+            return a
+        dev = mapper.device(a)
+        if dev is None:
+            die(f"test {name!r}: {what} {a} is outside every --map")
+        if os.path.isfile(a):
+            stage.append(("file", os.path.realpath(a), dev))
+        return dev
+
+    out = []
+    for s in steps:
+        argv = []
+        for i, a in enumerate(s["argv"]):
+            if "\n" in a:
+                die(f"test {name!r}: an argument holds a newline")
+            host = a if os.path.isabs(a) else os.path.join(host_cwd, a)
+            program = i == 0 and s["builtin"] is None
+            if program or os.path.isabs(a):
+                dev = mapper.device(host)
+                if dev is None:
+                    if program or os.path.exists(host):
+                        die(f"test {name!r}: {a} is outside every --map")
+                    argv.append(a)          # an absolute non-path option value
+                    continue
+                if program:
+                    stage.append(("exe", os.path.realpath(host), dev))
+                elif os.path.isfile(host):
+                    stage.append(("file", os.path.realpath(host), dev))
+                argv.append(dev)
                 continue
-            if program:
-                stage.append(("exe", os.path.realpath(host), dev))
-            elif os.path.isfile(host):
-                stage.append(("file", os.path.realpath(host), dev))
-            argv.append(dev)
-            continue
-        if os.path.isfile(host):
-            dev = mapper.device(host)
-            want = os.path.normpath(os.path.join(dev_cwd, a))
-            if dev is None or dev != want:
-                die(f"test {name!r}: {a} resolves to {dev} on the device's map but"
-                    f" to {want} from the device cwd (keep the trees' relative layout)")
-            stage.append(("file", os.path.realpath(host), dev))
-        argv.append(a)              # a relative output, option or input
+            if os.path.isfile(host):
+                relative_input(a)
+            argv.append(a)              # a relative output, option or input
+        if s["stdin"] is not None and not os.path.isfile(
+                s["stdin"] if os.path.isabs(s["stdin"]) else os.path.join(host_cwd, s["stdin"])):
+            die(f"test {name!r}: its stdin {s['stdin']} does not exist")
+        out.append(dict(s, argv=argv, **{k: path(s[k], k) for k in ("stdin", "stdout", "stderr")
+                                          if s[k] is not None}))
     deps = props.get("DEPENDS", [])
     if isinstance(deps, str):
         deps = cmake_list(deps)
-    return {"name": name, "cwd": dev_cwd, "argv": argv, "builtin": builtin,
-            "depends": list(deps)}, stage
+    return {"name": name, "cwd": dev_cwd, "steps": out, "depends": list(deps)}, stage
 
 
 def order(tests):
@@ -221,10 +333,17 @@ def main():
         f.write(f"lib {args.lib}\ncount {len(tests)}\nlogs {args.logs}\n")
         for t in tests:
             f.write(f"test {t['name']}\ncwd {t['cwd']}\n")
-            if t["builtin"]:
-                f.write(f"builtin {t['builtin']}\n")
-            for a in t["argv"]:
-                f.write(f"arg {a}\n")
+            for s in t["steps"]:
+                f.write("step\n")
+                if s["builtin"]:
+                    f.write(f"builtin {s['builtin']}\n")
+                for a in s["argv"]:
+                    f.write(f"arg {a}\n")
+                for k in ("stdin", "stdout", "stderr"):
+                    if s[k] is not None:
+                        f.write(f"{k} {s[k]}\n")
+                if s["any"]:
+                    f.write("status any\n")
             f.write("end\n")
     with open(args.stage, "w") as f:
         for dev in sorted(stage):

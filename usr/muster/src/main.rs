@@ -7,25 +7,36 @@
 //   lib <name>       the library, first and once
 //   count <n>        how many tests follow; a file holding another number of
 //                    tests is refused, so a truncated or padded list is red
-//   logs <dir>       each test's stdout and stderr land here, as
-//                    <test>.out / <test>.err (created if absent)
+//   logs <dir>       each step's stdout and stderr land here, as
+//                    <test>.<k>.out / .err, unless the step redirects them
+//                    (created if absent)
 //   test <name>      opens a test
-//   cwd <dir>        its working directory (the child inherits it)
+//   cwd <dir>        its working directory (each child inherits it)
+//   step             opens one of the test's steps, which run in order; the
+//                    first that fails fails the test
 //   arg <word>       one argv element, in order; the first is the program
+//   stdin <path>     the step's stdin (default: an empty file, so a test that
+//                    reads it sees EOF, not the console)
+//   stdout <path>    where its stdout goes, parent directories made
+//   stderr <path>    likewise for stderr
+//   status any       its exit status is not checked (a step whose outputs
+//                    later steps compare)
 //   builtin copy     instead of a program: copy arg 1 to arg 2 (CMake's
-//                    `-E copy_if_different`, which a test uses as setup)
-//   builtin cmp      instead of a program: pass when arg 1 and arg 2 hold the
-//                    same bytes (CMake's `-E compare_files`)
-//   builtin sha256   instead of a program: pass when the file arg 2 has the
-//                    SHA-256 digest arg 1, in lowercase hex (CMake's
-//                    `-E sha256sum` under a PASS_REGULAR_EXPRESSION)
+//                    `-E copy_if_different`)
+//   builtin cmp      pass when arg 1 and arg 2 hold the same bytes (CMake's
+//                    `-E compare_files`)
+//   builtin sha256   pass when the file arg 2 has the SHA-256 digest arg 1,
+//                    in lowercase hex (CMake's `-E sha256sum` under a
+//                    PASS_REGULAR_EXPRESSION)
+//   builtin mkdir    make the directory arg 1 and its parents
+//   builtin rmtree   remove arg 1 and everything under it; absent is fine
 //   end              closes the test
 // Tests run in file order, which the translator made DEPENDS-respecting.
-// stdin is an empty file, so a test that reads it sees EOF, not the console.
 //
-// A test passes when it exits 0. A failing test prints its name, its status
-// and the tails of its two logs; the last line is the verdict --
-// "muster: <lib>: <n> of <n> passed", or "... <k> of <n> FAILED" with status 1.
+// A test passes when every step does. A failing test prints its name, the
+// step and why, and the tails of that step's output; the last line is the
+// verdict -- "muster: <lib>: <n> of <n> passed", or "... <k> of <n> FAILED"
+// with status 1.
 
 #![no_std]
 #![no_main]
@@ -46,7 +57,7 @@ use sha2::{Digest, Sha256};
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-// How much of each log a failing test prints: a failure summary, not the log.
+// How much of each output a failing step prints: a failure summary, not the log.
 const TAIL: usize = 1536;
 
 // To fd 1, so a shell redirect captures the run (t_putstr is the console).
@@ -54,25 +65,77 @@ fn say(s: &str) {
     let _ = libthyla_rs::io::stdout().write_all(s.as_bytes());
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum Builtin {
     None,
     Copy,
     Cmp,
     Sha256,
+    Mkdir,
+    Rmtree,
+}
+
+impl Builtin {
+    fn parse(s: &str) -> Option<Builtin> {
+        match s {
+            "copy" => Some(Builtin::Copy),
+            "cmp" => Some(Builtin::Cmp),
+            "sha256" => Some(Builtin::Sha256),
+            "mkdir" => Some(Builtin::Mkdir),
+            "rmtree" => Some(Builtin::Rmtree),
+            _ => None,
+        }
+    }
+
+    fn operands(self) -> usize {
+        match self {
+            Builtin::None => 0,
+            Builtin::Copy | Builtin::Cmp | Builtin::Sha256 => 2,
+            Builtin::Mkdir | Builtin::Rmtree => 1,
+        }
+    }
+}
+
+struct Step {
+    argv: Vec<String>,
+    builtin: Builtin,
+    stdin: Option<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    any_status: bool,
 }
 
 struct Test {
     name: String,
     cwd: String,
-    argv: Vec<String>,
-    builtin: Builtin,
+    steps: Vec<Step>,
 }
 
 struct Manifest {
     lib: String,
     logs: String,
     tests: Vec<Test>,
+}
+
+fn check(t: &Test) -> Result<(), String> {
+    if t.name.is_empty() || t.cwd.is_empty() || t.steps.is_empty() {
+        return Err(format!("test {:?} has no name, no cwd or no step", t.name));
+    }
+    for (k, s) in t.steps.iter().enumerate() {
+        let ok = if s.builtin == Builtin::None {
+            !s.argv.is_empty()
+        } else {
+            s.argv.len() == s.builtin.operands()
+                && s.stdin.is_none()
+                && s.stdout.is_none()
+                && s.stderr.is_none()
+                && !s.any_status
+        };
+        if !ok {
+            return Err(format!("test {:?}: step {} is malformed", t.name, k + 1));
+        }
+    }
+    Ok(())
 }
 
 fn parse(text: &str) -> Result<Manifest, String> {
@@ -87,31 +150,48 @@ fn parse(text: &str) -> Result<Manifest, String> {
         }
         let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
         let at = || format!("line {}: ", n + 1);
-        match (key, open.as_mut()) {
-            ("lib", None) if lib.is_none() && tests.is_empty() => lib = Some(String::from(rest)),
-            ("count", None) => {
-                count = Some(rest.parse().map_err(|_| format!("{}count {:?} is not a number", at(), rest))?)
+        let bad = || format!("{}unexpected {:?}", at(), line);
+        let Some(t) = open.as_mut() else {
+            match key {
+                "lib" if lib.is_none() && tests.is_empty() => lib = Some(String::from(rest)),
+                "count" => {
+                    count = Some(rest.parse().map_err(|_| format!("{}count {:?} is not a number", at(), rest))?)
+                }
+                "logs" => logs = Some(String::from(rest)),
+                "test" => open = Some(Test { name: String::from(rest), cwd: String::new(), steps: Vec::new() }),
+                _ => return Err(bad()),
             }
-            ("logs", None) => logs = Some(String::from(rest)),
-            ("test", None) => {
-                open = Some(Test { name: String::from(rest), cwd: String::new(), argv: Vec::new(), builtin: Builtin::None })
-            }
-            ("cwd", Some(t)) => t.cwd = String::from(rest),
-            ("arg", Some(t)) => t.argv.push(String::from(rest)),
-            ("builtin", Some(t)) if t.builtin == Builtin::None && rest == "copy" => t.builtin = Builtin::Copy,
-            ("builtin", Some(t)) if t.builtin == Builtin::None && rest == "cmp" => t.builtin = Builtin::Cmp,
-            ("builtin", Some(t)) if t.builtin == Builtin::None && rest == "sha256" => t.builtin = Builtin::Sha256,
-            ("end", Some(_)) => {
+            continue;
+        };
+        match key {
+            "cwd" if t.steps.is_empty() => t.cwd = String::from(rest),
+            "step" if rest.is_empty() => t.steps.push(Step {
+                argv: Vec::new(),
+                builtin: Builtin::None,
+                stdin: None,
+                stdout: None,
+                stderr: None,
+                any_status: false,
+            }),
+            "end" => {
                 let t = open.take().unwrap();
-                if t.name.is_empty() || t.cwd.is_empty() {
-                    return Err(format!("{}test {:?} has no name or no cwd", at(), t.name));
-                }
-                if (t.builtin != Builtin::None && t.argv.len() != 2) || t.argv.is_empty() {
-                    return Err(format!("{}test {:?} has a malformed argv", at(), t.name));
-                }
+                check(&t).map_err(|e| format!("{}{}", at(), e))?;
                 tests.push(t);
             }
-            _ => return Err(format!("{}unexpected {:?}", at(), line)),
+            _ => {
+                let Some(s) = t.steps.last_mut() else { return Err(bad()) };
+                match key {
+                    "arg" => s.argv.push(String::from(rest)),
+                    "builtin" if s.builtin == Builtin::None && s.argv.is_empty() => {
+                        s.builtin = Builtin::parse(rest).ok_or_else(bad)?
+                    }
+                    "stdin" if s.stdin.is_none() => s.stdin = Some(String::from(rest)),
+                    "stdout" if s.stdout.is_none() => s.stdout = Some(String::from(rest)),
+                    "stderr" if s.stderr.is_none() => s.stderr = Some(String::from(rest)),
+                    "status" if rest == "any" => s.any_status = true,
+                    _ => return Err(bad()),
+                }
+            }
         }
     }
     if open.is_some() {
@@ -137,12 +217,50 @@ fn create(path: &str) -> Result<File, Error> {
     OpenOptions::new().write(true).create(true).truncate(true).open(path)
 }
 
-fn copy(from: &str, to: &str) -> Result<(), Error> {
-    let bytes = read_file(from)?;
-    create(to)?.write_all(&bytes)
+fn mkdir_p(path: &str) -> Result<(), Error> {
+    let mut at = String::from(if path.starts_with('/') { "/" } else { "" });
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        if !at.is_empty() && !at.ends_with('/') {
+            at.push('/');
+        }
+        at.push_str(part);
+        match fs::create_dir(at.as_str()) {
+            Ok(()) | Err(Error::Exists) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
-// Prints the end of a log, starting at a line boundary when one is in reach.
+fn rmtree(path: &str) -> Result<(), Error> {
+    if !fs::exists(path) {
+        return Ok(());
+    }
+    if !fs::is_dir(path) {
+        return fs::remove_file(path);
+    }
+    let mut names = Vec::new();
+    for entry in fs::read_dir(path)? {
+        let name = entry?.into_file_name();
+        if name != "." && name != ".." {
+            names.push(name);
+        }
+    }
+    for name in names {
+        rmtree(&format!("{}/{}", path, name))?;
+    }
+    fs::remove_dir(path)
+}
+
+// Makes an output path's parent directories, as libxml2's test wrapper does.
+fn parent_made(path: &str) -> Result<(), String> {
+    match path.rfind('/') {
+        Some(0) | None => Ok(()),
+        Some(i) => mkdir_p(&path[..i]).map_err(|e| format!("mkdir {}: {}", &path[..i], e)),
+    }
+}
+
+// Prints the end of an output, starting at a line boundary when one is in reach.
 fn tail(label: &str, path: &str) {
     let Ok(bytes) = read_file(path) else { return };
     if bytes.is_empty() {
@@ -161,48 +279,84 @@ fn tail(label: &str, path: &str) {
     }
 }
 
-// Answers the test's exit status, or why it could not be run.
-fn run(t: &Test, out: &str, err: &str, empty: &str) -> Result<i32, String> {
-    // Before a builtin too: its paths may be relative to the test's directory.
-    env::set_current_dir(&t.cwd).map_err(|e| format!("chdir {}: {}", t.cwd, e))?;
-    match t.builtin {
-        Builtin::Copy => {
-            return copy(&t.argv[0], &t.argv[1])
-                .map(|()| 0)
-                .map_err(|e| format!("copy {} -> {}: {}", t.argv[0], t.argv[1], e));
-        }
+fn builtin(s: &Step) -> Result<(), String> {
+    let a = &s.argv;
+    match s.builtin {
+        Builtin::Copy => read_file(&a[0])
+            .and_then(|bytes| create(&a[1])?.write_all(&bytes))
+            .map_err(|e| format!("copy {} -> {}: {}", a[0], a[1], e)),
         Builtin::Cmp => {
-            let a = read_file(&t.argv[0]).map_err(|e| format!("read {}: {}", t.argv[0], e))?;
-            let b = read_file(&t.argv[1]).map_err(|e| format!("read {}: {}", t.argv[1], e))?;
-            return if a == b {
-                Ok(0)
+            let x = read_file(&a[0]).map_err(|e| format!("read {}: {}", a[0], e))?;
+            let y = read_file(&a[1]).map_err(|e| format!("read {}: {}", a[1], e))?;
+            if x == y {
+                Ok(())
             } else {
-                Err(format!("{} ({} bytes) and {} ({} bytes) differ", t.argv[0], a.len(), t.argv[1], b.len()))
-            };
+                Err(format!("{} ({} bytes) and {} ({} bytes) differ", a[0], x.len(), a[1], y.len()))
+            }
         }
         Builtin::Sha256 => {
-            let bytes = read_file(&t.argv[1]).map_err(|e| format!("read {}: {}", t.argv[1], e))?;
+            let bytes = read_file(&a[1]).map_err(|e| format!("read {}: {}", a[1], e))?;
             let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{:02x}", b)).collect();
-            return if got == t.argv[0] {
-                Ok(0)
+            if got == a[0] {
+                Ok(())
             } else {
-                Err(format!("{} ({} bytes) has SHA-256 {}, not {}", t.argv[1], bytes.len(), got, t.argv[0]))
-            };
+                Err(format!("{} ({} bytes) has SHA-256 {}, not {}", a[1], bytes.len(), got, a[0]))
+            }
         }
-        Builtin::None => {}
+        Builtin::Mkdir => mkdir_p(&a[0]).map_err(|e| format!("mkdir {}: {}", a[0], e)),
+        Builtin::Rmtree => rmtree(&a[0]).map_err(|e| format!("rmtree {}: {}", a[0], e)),
+        Builtin::None => Err(String::from("not a builtin")),
     }
+}
+
+fn program(s: &Step, out: &str, err: &str, empty: &str) -> Result<(), String> {
+    parent_made(out)?;
+    parent_made(err)?;
     let so = create(out).map_err(|e| format!("create {}: {}", out, e))?;
     let se = create(err).map_err(|e| format!("create {}: {}", err, e))?;
-    let si = File::open(empty).map_err(|e| format!("open {}: {}", empty, e))?;
-    let mut child = Command::new(t.argv[0].as_str())
-        .args(t.argv[1..].iter().map(String::as_str))
+    let input = s.stdin.as_deref().unwrap_or(empty);
+    let si = File::open(input).map_err(|e| format!("open {}: {}", input, e))?;
+    let mut child = Command::new(s.argv[0].as_str())
+        .args(s.argv[1..].iter().map(String::as_str))
         .stdin(Stdio::File(si))
         .stdout(Stdio::File(so))
         .stderr(Stdio::File(se))
         .spawn()
-        .map_err(|e| format!("spawn {}: {}", t.argv[0], e))?;
-    let status = child.wait().map_err(|e| format!("wait: {}", e))?;
-    Ok(status.raw())
+        .map_err(|e| format!("spawn {}: {}", s.argv[0], e))?;
+    let status = child.wait().map_err(|e| format!("wait: {}", e))?.raw();
+    if status != 0 && !s.any_status {
+        return Err(format!("exit status {}", status));
+    }
+    Ok(())
+}
+
+// Runs the test's steps in order and reports the first failure; true if none.
+fn run(t: &Test, base: &str, empty: &str) -> bool {
+    // Before a builtin too: its paths may be relative to the test's directory.
+    if let Err(e) = env::set_current_dir(&t.cwd) {
+        say(&format!("muster: FAIL {}: chdir {}: {}\n", t.name, t.cwd, e));
+        return false;
+    }
+    let n = t.steps.len();
+    for (k, s) in t.steps.iter().enumerate() {
+        let (result, outputs) = if s.builtin != Builtin::None {
+            (builtin(s), None)
+        } else {
+            let out = s.stdout.clone().unwrap_or_else(|| format!("{}.{}.out", base, k + 1));
+            let err = s.stderr.clone().unwrap_or_else(|| format!("{}.{}.err", base, k + 1));
+            (program(s, &out, &err, empty), Some((out, err)))
+        };
+        if let Err(why) = result {
+            let which = if n > 1 { format!("step {} of {}: ", k + 1, n) } else { String::new() };
+            say(&format!("muster: FAIL {}: {}{}\n", t.name, which, why));
+            if let Some((out, err)) = outputs {
+                tail("stdout", &out);
+                tail("stderr", &err);
+            }
+            return false;
+        }
+    }
+    true
 }
 
 fn log_name(test: &str) -> String {
@@ -233,12 +387,9 @@ pub extern "C" fn rs_main() -> i64 {
             return 2;
         }
     };
-    match fs::create_dir(m.logs.as_str()) {
-        Ok(()) | Err(Error::Exists) => {}
-        Err(e) => {
-            say(&format!("muster: logs {}: {}\n", m.logs, e));
-            return 2;
-        }
+    if let Err(e) = mkdir_p(&m.logs) {
+        say(&format!("muster: logs {}: {}\n", m.logs, e));
+        return 2;
     }
     let empty = format!("{}/stdin.empty", m.logs);
     if let Err(e) = create(&empty) {
@@ -248,20 +399,8 @@ pub extern "C" fn rs_main() -> i64 {
 
     let mut failed = 0usize;
     for t in &m.tests {
-        let base = format!("{}/{}", m.logs, log_name(&t.name));
-        let (out, err) = (format!("{}.out", base), format!("{}.err", base));
-        match run(t, &out, &err, &empty) {
-            Ok(0) => {}
-            Ok(status) => {
-                failed += 1;
-                say(&format!("muster: FAIL {}: exit status {}\n", t.name, status));
-                tail("stdout", &out);
-                tail("stderr", &err);
-            }
-            Err(why) => {
-                failed += 1;
-                say(&format!("muster: FAIL {}: {}\n", t.name, why));
-            }
+        if !run(t, &format!("{}/{}", m.logs, log_name(&t.name)), &empty) {
+            failed += 1;
         }
     }
     let n = m.tests.len();

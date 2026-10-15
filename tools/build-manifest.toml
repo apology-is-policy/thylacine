@@ -173,6 +173,25 @@ sha256     = "e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
 feeds      = "CHUNK_LIBTESTS (libwebp 1.6.0 static; tools/libtests-webp.json's checks run by muster)"
 forageable = "download"
 
+[cache.libxml2]
+file       = "libxml2-2.15.4.tar.xz"
+dir        = "build/cache"
+url        = "https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz"
+sha256     = "98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821"
+feeds      = "CHUNK_LIBTESTS (libxml2 2.15.4 static, GNOME's published sha256; its CTest list run by muster)"
+forageable = "download"
+
+# The W3C XML conformance suite, which libxml2's CI image installs as xmlconf/
+# (its .gitlab-ci/Dockerfile) and which registers runxmlconf. W3C publishes no
+# checksum: the sha256 is the one measured on the first fetch, 2026-10-15.
+[cache.xmlts]
+file       = "xmlts20080827.tar.gz"
+dir        = "build/cache"
+url        = "https://www.w3.org/XML/Test/xmlts20080827.tar.gz"
+sha256     = "96151685cec997e1f9f3387e3626d61e6284d4d6e66e0e440c209286c03e9cc7"
+feeds      = "CHUNK_LIBTESTS (libxml2's runxmlconf, unpacked into its source tree)"
+forageable = "download"
+
 # --- network: build.sh fetches it itself at build time -----------------------
 
 [network.quake]

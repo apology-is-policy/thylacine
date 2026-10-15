@@ -4045,20 +4045,22 @@ populate_stratum_pool() {
             || { echo "==> populate pool: sync after the library tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: library tests baked at /var/icu_tests"
     fi
-    # B-3d: the codecs' test programs, inputs and manifests under /var/lib_tests,
-    # run by muster. Each library's tests write their outputs into its build
-    # tree, as upstream's run in their own: 1777, as above.
+    # B-3d/B-3e: the muster libraries' test programs, inputs and manifests
+    # under /var/lib_tests. The tests write into the directories the staging
+    # listed (each build tree, as upstream's run in their own): 1777, as above.
     if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/var/lib_tests/bin/muster" ]]; then
+        local lt_writable="$BUILD_DIR/pouch/lib-tests/writable" lt_dir
+        [[ -s "$lt_writable" ]] \
+            || { echo "==> populate pool: $lt_writable lists nothing (restage: tools/build.sh lib-tests)" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/var/lib_tests" /var/lib_tests \
             || { echo "==> populate pool: put /var/lib_tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        local lt_lib
-        for lt_lib in libpng libjpeg-turbo libwebp; do
-            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "/var/lib_tests/$lt_lib/build" \
-                || { echo "==> populate pool: chmod /var/lib_tests/$lt_lib/build FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        done
+        while read -r lt_dir; do
+            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "$lt_dir" \
+                || { echo "==> populate pool: chmod $lt_dir FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        done < "$lt_writable"
         "$stratum_fs_bin" -s "$sock_path" sync \
-            || { echo "==> populate pool: sync after the codec tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        echo "==> populate pool: codec tests baked at /var/lib_tests"
+            || { echo "==> populate pool: sync after the muster tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: muster tests baked at /var/lib_tests ($(wc -l < "$lt_writable" | tr -d ' ') writable dirs)"
     fi
 
     # --- net-4a: bake the network database at /lib/ndb/local ---
@@ -4610,7 +4612,9 @@ MF2DATA /var/testdata/message2/valid-tests.json"
 MUSTER /var/lib_tests/bin/muster
 PNGTESTS /var/lib_tests/libpng.manifest
 JPEGTESTS /var/lib_tests/libjpeg-turbo.manifest
-WEBPTESTS /var/lib_tests/libwebp.manifest"
+WEBPTESTS /var/lib_tests/libwebp.manifest
+XMLTESTS /var/lib_tests/libxml2.manifest
+XMLCONF /var/lib_tests/libxml2/src/libxml2-$XML_VER/xmlconf/xmlconf.xml"
     fi
 
     local bake_missing=""
@@ -6738,6 +6742,13 @@ JPEG_SHA256="6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e"
 WEBP_VER="1.6.0"
 WEBP_TARBALL="libwebp-1.6.0.tar.gz"
 WEBP_SHA256="e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564"
+# --- Boosty B-3e: libxml2, with the W3C XML conformance suite its CI runs
+# (runxmlconf). Pins mirror [cache.libxml2] / [cache.xmlts]. ---
+XML_VER="2.15.4"
+XML_TARBALL="libxml2-2.15.4.tar.xz"
+XML_SHA256="98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821"
+XMLTS_TARBALL="xmlts20080827.tar.gz"
+XMLTS_SHA256="96151685cec997e1f9f3387e3626d61e6284d4d6e66e0e440c209286c03e9cc7"
 
 webkit_jobs() {
     # JSC's unified sources peak well over 1 GiB per job; this host has 8 GiB.
@@ -6840,10 +6851,14 @@ build_icu() {
 # order), configured with the pouch C++ toolchain, built WHOLE -- the library
 # and upstream's test programs, which build_lib_tests runs -- and the library
 # installed into <name>/stage. Reused when the stamp (pin, patch contents,
-# configure line) matches and neither libc nor the toolchain is newer.
-#   cmake_lib <name> <tarball> <sha256> <top-dir> [cmake args...]
+# configure line) matches and neither libc nor the toolchain is newer. A
+# leading `+<tarball>=<sha256>` is a second pinned tarball (test data upstream
+# fetches separately), unpacked into the source top after the patches.
+#   cmake_lib <name> <tarball> <sha256> <top-dir> [+<tarball>=<sha256>...] [cmake args...]
 cmake_lib() {
     local name="$1" tarball="$2" sha="$3" top="$4"; shift 4
+    local -a extras=()
+    while [[ "${1:-}" == +* ]]; do extras+=("${1#+}"); shift; done
     local sysroot="$BUILD_DIR/sysroot"
     local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
     local base="$BUILD_DIR/pouch/$name"
@@ -6860,16 +6875,25 @@ cmake_lib() {
     [[ -x "$fork/build/bin/clang++" ]] \
         || { echo "==> $name: fork clang++ not found at $fork/build/bin/clang++ (build the LLVM fork)" >&2; exit 1; }
     [[ -f "$file" ]] \
-        || { echo "==> $name: $file is absent -- run 'tools/forage.sh codecs' (pin: [cache.$name])" >&2; exit 1; }
+        || { echo "==> $name: $file is absent -- run 'tools/forage.sh cache.$name'" >&2; exit 1; }
     local have; have="$(shasum -a 256 "$file" | awk '{print $1}')"
     [[ "$have" == "$sha" ]] \
         || { echo "==> $name: $tarball sha256 mismatch (got $have, want $sha)" >&2; exit 1; }
+    local x xf
+    for x in ${extras[@]+"${extras[@]}"}; do
+        xf="$BUILD_DIR/cache/${x%%=*}"
+        [[ -f "$xf" ]] \
+            || { echo "==> $name: $xf is absent -- run 'tools/forage.sh' for its [cache.*] pin" >&2; exit 1; }
+        have="$(shasum -a 256 "$xf" | awk '{print $1}')"
+        [[ "$have" == "${x#*=}" ]] \
+            || { echo "==> $name: ${x%%=*} sha256 mismatch (got $have, want ${x#*=})" >&2; exit 1; }
+    done
     [[ -f "$sysroot/lib/libc++.a" ]] || build_libcxx
 
     # The patches by content: an edited patch rebuilds even when its name stays.
     local patch_sums=""
     (( ${#patches[@]} )) && patch_sums="$(shasum -a 256 "${patches[@]}" | awk '{print $1}' | tr '\n' ' ')"
-    local want_stamp="$sha | $patch_sums | $*"
+    local want_stamp="$sha | $patch_sums | ${extras[*]-} | $*"
     local stamp="$stage/.thylacine-config"
     if [[ -f "$stamp" && "$(cat "$stamp")" == "$want_stamp" \
           && ! "$sysroot/lib/libc.a" -nt "$stamp" && ! "$sysroot/lib/libc++.a" -nt "$stamp" \
@@ -6886,6 +6910,10 @@ cmake_lib() {
     for p in ${patches[@]+"${patches[@]}"}; do
         patch -d "$src" -p1 -t -F 0 -s < "$p" \
             || { echo "==> $name: patch $(basename "$p") does not apply" >&2; exit 1; }
+    done
+    for x in ${extras[@]+"${extras[@]}"}; do
+        tar -xf "$BUILD_DIR/cache/${x%%=*}" -C "$src" \
+            || { echo "==> $name: ${x%%=*} does not unpack" >&2; exit 1; }
     done
     cmake -S "$src" -B "$bdir" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
         -DLLVMFORK="$fork/build" -DHOSTLLVM="$LLVM_PREFIX" -DTHYLACINE_SYSROOT="$sysroot" \
@@ -6936,6 +6964,21 @@ build_libwebp() {
         -DJPEG_LIBRARY="$jpeg/lib/libjpeg.a" -DJPEG_INCLUDE_DIR="$jpeg/include"
 }
 
+# The configuration of upstream's static CMake CI job (.gitlab-ci.yml
+# cmake:linux:gcc:static, .gitlab-ci/test_cmake.sh): schematron, zlib and the
+# HTTP ABI stubs on; the Python bindings, which carry no C tests, off. The W3C
+# suite unpacks as xmlconf/, which registers runxmlconf, as upstream's CI
+# image links it.
+build_libxml2() {
+    build_zlib
+    local sysroot="$BUILD_DIR/sysroot"
+    cmake_lib libxml2 "$XML_TARBALL" "$XML_SHA256" "libxml2-$XML_VER" "+$XMLTS_TARBALL=$XMLTS_SHA256" \
+        -DBUILD_SHARED_LIBS=OFF -DLIBXML2_WITH_TESTS=ON -DLIBXML2_WITH_PROGRAMS=ON \
+        -DLIBXML2_WITH_HTTP=ON -DLIBXML2_WITH_SCHEMATRON=ON -DLIBXML2_WITH_ZLIB=ON \
+        -DLIBXML2_WITH_PYTHON=OFF -DLIBXML2_WITH_DOCS=OFF \
+        -DZLIB_LIBRARY="$sysroot/lib/libz.a" -DZLIB_INCLUDE_DIR="$sysroot/include"
+}
+
 build_lib_tests() {
     # Boosty B-3 (dec-2026-10-14-b3-test-bar): each browser library's compiled
     # upstream test programs, cross-built against the same static archives the
@@ -6944,7 +6987,7 @@ build_lib_tests() {
     # a sysroot rebuild wipes it, as it must every binary linked to the old libc.
     # Each half stages its own part of the stage and leaves the other's alone.
     lib_tests_icu
-    lib_tests_codecs
+    lib_tests_muster
 }
 
 lib_tests_icu() {
@@ -6994,10 +7037,13 @@ lib_tests_icu() {
     ledger "lib tests: BUILT (ICU cintltst + intltest + data)"
 }
 
-# --- build_lib_tests, codec half (B-3d). Called after the ICU half, which
-# must neither return early past it nor rm -rf the whole stage. ---
-lib_tests_codecs() {
+# --- build_lib_tests, muster half (B-3d codecs, B-3e libxml2). Called after
+# the ICU half, which must neither return early past it nor rm -rf the whole
+# stage. Writes `writable`, the device directories the tests write into, which
+# populate makes 1777. ---
+lib_tests_muster() {
     build_libwebp           # libpng and libjpeg-turbo first
+    build_libxml2
     local out="$BUILD_DIR/pouch/lib-tests"
     local stage="$out/stage"
     local lt="$stage/var/lib_tests"
@@ -7007,9 +7053,10 @@ lib_tests_codecs() {
     rm -rf "$lt"; mkdir -p "$lt/bin"
     "$LLVM_PREFIX/bin/llvm-strip" -o "$lt/bin/muster" "$muster" \
         || { echo "==> lib tests: llvm-strip muster failed" >&2; exit 1; }
-    local lib lbase top dev json kind host devp
+    local lib lbase top dev json kind host devp d
     local -a extra
-    for lib in libpng libjpeg-turbo libwebp; do
+    : > "$out/writable"
+    for lib in libpng libjpeg-turbo libwebp libxml2; do
         lbase="$BUILD_DIR/pouch/$lib"
         top="$(basename "$(find "$lbase/src" -mindepth 1 -maxdepth 1 -type d)")"
         dev="/var/lib_tests/$lib"
@@ -7043,9 +7090,24 @@ lib_tests_codecs() {
         done < "$out/$lib.stage"
         # The tests write their outputs into their build tree (populate makes it 1777).
         mkdir -p "$stage$dev/build"
+        echo "$dev/build" >> "$out/writable"
+        if [[ "$lib" == libxml2 ]]; then
+            # runtest, runsuite and runxmlconf walk these trees rather than
+            # naming their files, and the last two write their logs at the
+            # source top (not the tarball's stale runsuite.log, which the
+            # logged-in user could not replace).
+            # Merged by tar: the stage list already put some of these files
+            # there, and `cp -R dir existing-dir` nests rather than merges.
+            mkdir -p "$stage$dev/src/$top"
+            for d in test result xmlconf; do
+                ( cd "$lbase/src/$top" && tar -cf - "$d" ) | ( cd "$stage$dev/src/$top" && tar -xf - ) \
+                    || { echo "==> lib tests: $lib's $d/ did not stage" >&2; exit 1; }
+            done
+            echo "$dev/src/$top" >> "$out/writable"
+        fi
         grep -c '^test ' "$lt/$lib.manifest" > "$out/$lib.count"
     done
-    ledger "lib tests: codecs STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count") tests)"
+    ledger "lib tests: muster lists STAGED (libpng $(cat "$out/libpng.count"), libjpeg-turbo $(cat "$out/libjpeg-turbo.count"), libwebp $(cat "$out/libwebp.count"), libxml2 $(cat "$out/libxml2.count") tests)"
 }
 
 # The tree the pin plus the patch series builds, applied IN ORDER in a scratch
@@ -7914,6 +7976,7 @@ case "$target" in
     icu)         build_icu         ;;
     lib-tests)   build_lib_tests   ;;
     codecs)      build_libwebp     ;;
+    libxml2)     build_libxml2     ;;
     jsc)         build_jsc         ;;
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;
@@ -7939,7 +8002,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, lib-tests, codecs, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, rust-progs, sdl2, tyrquake, vkquake, dosbox-x, gnumake, libcxx, icu, lib-tests, codecs, libxml2, jsc, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac
