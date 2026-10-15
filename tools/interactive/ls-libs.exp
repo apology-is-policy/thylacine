@@ -12,8 +12,9 @@
 #   - the exit status is 0 (a crash, a snare, or a counted failure is not), and
 #   - the program's own all-passed verdict is in its log (a program that exits
 #     0 having run nothing prints no verdict).
-# On a red leg the log's last 40 lines (each program ends with its failure
-# summary) are printed before the scenario fails.
+# Every leg runs, so one boot reports each program; a red leg prints its log's
+# last 40 lines (each program ends with its failure summary), and the scenario
+# fails after the last leg if any was red.
 #
 #   icu-c   ICU's C API tests (cintltst): "[All tests passed successfully...]"
 #   icu-cxx ICU's C++ API tests (intltest): "OK: All tests passed without error."
@@ -51,6 +52,7 @@ lc_send "cd /tmp"
 # One program's leg: run it into its log, read back the status, then the
 # verdict line. `verdict` is lower case as typed; the log holds it in mixed
 # case, so the grep is case-blind and the match is on the upper-cased line.
+set ::lib_red {}
 proc lib_leg {tag prog log verdict} {
     global lc_cmd_timeout
     set tagU [string toupper $tag]
@@ -60,27 +62,33 @@ proc lib_leg {tag prog log verdict} {
         -re "$tagU- (\[1-9\]\[0-9\]*)" {
             set rc $expect_out(1,string)
             lc_send "tail -n 40 $log"
-            # Read (and so log) the tail before failing: output nobody expects
-            # for never reaches the transcript.
+            # Read (and so log) the tail: output nobody expects for never
+            # reaches the transcript.
             expect -timeout 5 timeout {}
-            lc_fail "$prog exited $rc (failure lines above, from $log)"
+            lappend ::lib_red "$prog exited $rc"
+            return 0
         }
         -re {EXTINCTION:}          { lc_extinction_fail "kernel extinction during $prog" }
         timeout                    { lc_fail "timeout (${lc_cmd_timeout}s) waiting for $prog's exit" }
         eof                        { lc_fail "unexpected EOF during $prog" }
     }
     lc_run_expect "grep -i '$verdict' $log | tr a-z A-Z" [string toupper $verdict]
+    return 1
 }
 
 # A full ICU run is minutes, not seconds.
 set ::lc_cmd_timeout 1800
 set timeout 1800
 
-lib_leg icuc /var/icu_tests/bin/cintltst /tmp/icu-c.log "all tests passed successfully"
-lc_pass "ls-libs(icu-c): cintltst exit 0, all tests passed"
-
-lib_leg icux /var/icu_tests/bin/intltest /tmp/icu-cxx.log "all tests passed without error"
-lc_pass "ls-libs(icu-cxx): intltest exit 0, all tests passed"
+if {[lib_leg icuc /var/icu_tests/bin/cintltst /tmp/icu-c.log "all tests passed successfully"]} {
+    lc_pass "ls-libs(icu-c): cintltst exit 0, all tests passed"
+}
+if {[lib_leg icux /var/icu_tests/bin/intltest /tmp/icu-cxx.log "all tests passed without error"]} {
+    lc_pass "ls-libs(icu-cxx): intltest exit 0, all tests passed"
+}
+if {[llength $::lib_red]} {
+    lc_fail "[join $::lib_red {; }] (each log's tail is above)"
+}
 
 lc_quit
 exit 0

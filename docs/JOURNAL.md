@@ -73,6 +73,21 @@ needed the operator.
   element's null base handed to memcpy) is UB the host libc does not trap, so
   that guard has no witness. Round 1 was a dirty close (a P0), so round 2
   audits the redesign.
+- *B-3c: ICU's own tests, on the device, both green.* ICU needed no patch:
+  `QNX_TARGET=1` is upstream's switch for a target whose tree is not the build
+  host's, and compiles the data root in as `/var/icu_tests`. The first gate run
+  failed exactly two cintltst checks, both in `TestFileStream`, which writes a
+  scratch file beside the data package: the masters are read-only for the
+  logged-in user, so `test/testdata/out` is now 1777. Then cintltst and
+  intltest both pass with exit 0 and their own all-passed lines.
+- *A control that tested nothing, caught by reading it.* The first red control
+  moved the data package to /tmp and the gate still PASSED. The transcript
+  showed `mv ... invalid argument`: a rename across Devs answers EINVAL (code
+  seam #80, never queued -- now in OPEN-BUGS), so nothing moved. Renamed in
+  place, with the rename's own status asserted, the control is red on both
+  legs (cintltst exit 1, intltest exit 65). The first bake had also failed
+  bake-verify, correctly: its predicate named a loose `.res` the package build
+  never leaves.
 ---
 ## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 

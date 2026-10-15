@@ -4034,6 +4034,13 @@ populate_stratum_pool() {
             "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/var/$d" "/var/$d" \
                 || { echo "==> populate pool: put /var/$d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         done
+        # ICU's tests write a scratch file beside their data package (cintltst's
+        # TestFileStream: testdata.tmp next to testdata.dat), as they would in
+        # upstream's own writable build tree. 1777 like the viv bundles' /tmp:
+        # the masters stay SYSTEM's, and the day sticky is enforced a user
+        # cannot remove another's files.
+        "$stratum_fs_bin" -s "$sock_path" chmod 1777 /var/icu_tests/test/testdata/out \
+            || { echo "==> populate pool: chmod /var/icu_tests/test/testdata/out FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after the library tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: library tests baked at /var/icu_tests"
@@ -4580,7 +4587,7 @@ SUNSPIDER /webkit/sunspider/run.js"
     if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$vp_libtests/var/icu_tests/bin/intltest" ]]; then
         bake_want="$bake_want
 ICUTEST /var/icu_tests/bin/intltest
-ICUDATA /var/icu_tests/test/testdata/out/testdata/root.res
+ICUDATA /var/icu_tests/test/testdata/out/testdata.dat
 MF2DATA /var/testdata/message2/valid-tests.json"
     fi
 

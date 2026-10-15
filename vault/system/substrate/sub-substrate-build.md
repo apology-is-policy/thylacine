@@ -402,6 +402,37 @@ predicate the populate arm uses; `check-v80-floor.py --all` scans the stage; the
 device gate is `tools/interactive/ls-jsc.exp` (SKIPs with 77 when nothing is
 staged).
 
+**`CHUNK_LIBTESTS` (default OFF, since Boosty B-3, 2026-10-14;
+`THYLACINE_BAKE_LIBS`)** builds the browser libraries' compiled upstream test
+programs against the same static archives the browser links
+(`dec-2026-10-14-b3-test-bar`) and bakes them with their data under `/var`.
+`build_lib_tests` (also the `lib-tests` subcommand) stages
+`build/pouch/lib-tests/stage/var/...`, under `build/pouch/` for the same reason
+as ICU and `jsc`: a sysroot rebuild must take every binary linked to the old
+`libc.a` with it. ICU's tests need no patch for a target whose tree is not the
+build host's: `make QNX_TARGET=1` in `test/intltest` and `test/cintltst` is
+upstream's switch, compiling the data root in as `/var/icu_tests` (the source
+and build trees merged there: `bin/`, `data/{unidata,sprep,out/build}`,
+`test/testdata` plus its built `out/`), and intltest's shared MessageFormat 2
+data sits at that root's `../testdata`, so the stage carries `/var/testdata`
+too. The populate arm keys on the flag AND the staged `intltest`, the pool grows
+by 1 GiB when it bakes, and bake-verify expects three payloads (`ICUTEST`,
+`ICUDATA` = the built package `out/testdata.dat`, `MF2DATA`) so
+`tools/interactive/ls-libs.exp` can tell "no tests baked" (SKIP 77) from a
+partial bake (FAIL); its first bake named a loose `.res` that the package build
+never leaves, and bake-verify refused the pool. The masters are SYSTEM's and
+read-only except `test/testdata/out`, re-stamped 1777 after the put: cintltst's
+`TestFileStream` writes `testdata.tmp` beside `testdata.dat`, as it would in
+upstream's own writable build tree, and failed twice (create, remove) as the
+logged-in user without it. Like `CHUNK_WEBKIT`, a missing input is an error
+once the chunk is on.
+
+`build_icu`'s reuse test also compares a stamp of the configure line and flags
+(`stage/.thylacine-config`). Before B-3c it compared only timestamps, so a stage
+built under different flags (B-3c added `-DU_HAVE_MMAP=0` and `--enable-tests`)
+counted as up to date because its files were newer than their inputs: the same
+stale-artifact class as the four guards above, for a flag rather than a file.
+
 ## Data structures
 
 `build/` layout: `kernel/` and `kernel-undefined/` (parallel sanitizer
