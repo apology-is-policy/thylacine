@@ -50,6 +50,26 @@ Still owed for B-3b:
 - the pread EFAULT and mkdir EEXIST fixes;
 - a build, a boot, the suite and the audit round.
 
+**The first boot of Astra's chain on b3 was red, and the fault was a stale expectation.** `18ab519ac` (06:26Z) carried the rest of the list above. Its first default-image boot stopped joey at pouch-hello-spawn: "dup2 onto-target not ENOSYS". That leg was written before her FLAGS_SET/DUP_TO patch (now 0055) existed, and her chain had never booted on b3. The leg now expects EBADF for a closed source and success onto a free target. The rebuild was green at 06:46Z (suite exit 0, test-fault 8/8). A self-review then found that the phenotype's F_DUPFD minimum kept all 64 bits, where Linux reads an int; `a64094930` narrows it.
+
+**Round 1 (Opus reviewing Opus, told to re-derive) returned 0 P0, 0 P1, 1 P2 and 10 P3.** The P2 was documentation: the syscall-ABI dossier still described FLAGS_GET as a 0/1 answer and had no census for 129-131, a fold `c79b432e6` had promised. Three P3s were sabotages its own harnesses let through, among them an F_SETFL aimed at fd+1 and a spawn mock that only ever answered 0 or 1. The full list and dispositions are in `memory/audit_b3b_closed_list.md`.
+
+**The CI image of `a64094930` (thylacine-b3e) moved libxml2 from 4 to 7 of 23.** runsuite, testcatalog and testrecurse turned green, so dup works on the device. ls-descriptors passed in 68 s, but only after a scenario fix: it had been committed unrun, and its first run failed because ut's `pwd` builtin cannot be a pipeline element (`/bin/pwd` now, in `0cf4f12b8`). harfbuzz was 76/76; FreeType was 1/5 (issue-1441, B-3f). Of libxml2's remaining reds:
+- 14, plus runtest, are the ownership fork. For runtest, an A/B settled it: the SVG tests give 47/47 errors with `--out` on the pool and 0 with `--out /tmp/rt`.
+- testparser is new. On an instrumented kernel it stops at `vma_count=65536`. musl's mallocng maps small-object groups one page at a time; each mapping is a VMA, the kernel neither merges anonymous VMAs nor keeps them in anything but a list, and PROC_VMA_MAX is 65536. So a Pouch heap of small objects tops out near 256 MiB. That is a second operator fork; the options are in memory `design_pouch_heap_vma_ceiling.md`.
+
+**The round-1 close (`0cf4f12b8`, `8de547e9b`) carried vote 6 and one defect nobody had reported.** Vote 6:
+- kill(pid, 0) is SYS_POSTNOTE with an empty name. The kernel's walk asks the same parent gate a post asks and posts nothing.
+- getppid is the new SYS_GETPPID, 132. Linux's sigaltstack is also 132; a static assert keeps it refused before the native switch.
+The unreported defect: Pouch's open and openat accepted O_CLOEXEC and ignored it. They rested on patch 0009's premise that every handle is close-on-exec by construction, which stopped being true once spawn honoured the flag. A file opened at fd 0-2 with O_CLOEXEC therefore reached the child. 0056's `pouch_open_ret` now sets the flag. If the set fails, it closes the fd and fails the open.
+musl's own raw `SYS_fcntl` callers now use the native calls. Until then they hit the 0xFFFF sentinel, so fopen "e" silently leaked its fd across exec, and freopen with no name failed every time and closed the stream.
+
+**Two comments I wrote were false, and both were caught before the commit.** One claimed a T1 row for the phenotype's getppid. The other, the DUP_TO header in syscall.h, put the floor's EINVAL before the source check; the core decides it under the lock, after the source. A comment about a mechanism is a claim, and both times reading the code was what caught it. A third slip was a shell one: zsh does not word-split `$VAR`, so a flag list kept in a variable reached the compiler as a single argument. The musl cross-check moved into a bash script (`msyn.sh`), whose control, a planted undeclared call, fails as it should.
+
+**`8de547e9b` is green on the default image** (08:16Z). The build exited 0, the kernel tests ran 2004/2004, and joey's censuses include the new `cloexec` and `probe` legs.
+
+**Planning the red controls found a test that could not fail.** `clock.identity_syscalls` asked the getppid handler as the test thread, which runs as kproc, with pid 0 and parent pid 0. A handler answering the caller's own pid therefore passed. The linked-pair legs asked only the accessor, never the handler. `f75cd868e` gives the handler a static arm and asks that arm of a linked child. The sabotage that would have slipped through is now part of the red-control set K1.
+
 ## 2026-10-15 (main, Opus 5.5, effort max) -- B-3e: libxml2 on the device finds two platform gaps (dup, a new directory's owner); the shared disk vanishes and returns
 
 - *B-3e: libxml2's release tarball cannot pass its own CTest list.* 2.15.4's
