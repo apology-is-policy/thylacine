@@ -3,7 +3,7 @@
 // loom.native_probe_c starts both and requires 74 from the default image, where
 // setup refuses -EOPNOTSUPP, or 75 from the qualification image, where every
 // leg below passed. The legs are loom-native-probe's, through the C interface,
-// and each one reads the fixture's stats file for what the server saw.
+// and they read the fixture's stats file for what the server saw.
 //
 // fd 0 is the registry the fixture posts in, fd 1 the control pipe (closed at
 // exit, which ends the fixture) and fd 2 the notify pipe.
@@ -22,6 +22,7 @@
 // The kernel's errno registry (kernel/include/thylacine/errno.h).
 #define E_NOENT      2
 #define E_ACCES     13
+#define E_NOSPC     28
 #define E_OPNOTSUPP 95
 #define E_TIMEDOUT 110
 #define E_CANCELED 125
@@ -30,21 +31,32 @@
 #define ENTRIES    2u
 #define CQ_ENTRIES 4u
 #define WAIT_NS    5000000000ull
+// Targets, scopes, fids and pools share the kernel's LOOM_SERVICE_SLOT_COUNT
+// slots (kernel/include/thylacine/loom_service_abi.h).
+#define SLOTS      64u
 
 // The fixture's files and its stats counters (usr/loom-fixture).
 #define DATA_LEN   (3u * 4096u + 1000u)
+#define LEAF_LEN   600u
 #define STREAM_LEN 2600u
 #define SHOT       512u
 #define ACCEPTED   0
 #define ENDED      1
 #define VIOLATIONS 2
 #define STALLED    3
+#define CLUNKS     5
+#define WALKS      7
 #define STAT_COUNT 11
 
 static T_LOOM_RING_STORAGE(ENTRIES) g_store;
+static T_LOOM_RING_STORAGE(ENTRIES) g_store2;
 static struct t_loom_ring *g_ring;
+static struct t_loom_ring *g_ring2;
+// The ring the helpers below turn and read the clock of.
+static struct t_loom_ring *g_cur;
 static struct t_loom_kernel g_kernel;
 static unsigned char g_got[STREAM_LEN];
+static struct t_loom_fid *g_held[SLOTS];
 
 static void put_dec(long v) {
     char b[24];
@@ -85,11 +97,12 @@ static int matches(const unsigned char *b, size_t len, size_t from) {
         if (v[i] != (unsigned char)((from + i) % 251)) return 0;
     return 1;
 }
+// Copies what fits in g_got and returns the true total, so surplus bytes show.
 static size_t append(size_t at, const unsigned char *b, size_t len) {
     const volatile unsigned char *v = b;
     volatile unsigned char *d = g_got;
-    for (size_t i = 0; i < len && at < sizeof(g_got); i++) d[at++] = v[i];
-    return at;
+    for (size_t i = 0; i < len && at + i < sizeof(g_got); i++) d[at + i] = v[i];
+    return at + len;
 }
 static size_t name_len(const char *s) {
     size_t n = 0;
@@ -107,7 +120,7 @@ static struct t_loom_service_pool_member range(uint32_t buffer, uint64_t offset,
 }
 
 static uint64_t soon(void) {
-    return t_loom_now(g_ring) + WAIT_NS;
+    return t_loom_now(g_cur) + WAIT_NS;
 }
 
 // Sleeps up to ms on the notify pipe, which the fixture writes only once.
@@ -122,8 +135,8 @@ static void nap(long ms) {
     uint64_t until_ = soon(); \
     int answer_; \
     while ((answer_ = (call)) == 0) { \
-        CHECK(t_loom_now(g_ring) < until_, why ": no completion", 0); \
-        int64_t turned_ = t_loom_turn(g_ring, 1, until_); \
+        CHECK(t_loom_now(g_cur) < until_, why ": no completion", 0); \
+        int64_t turned_ = t_loom_turn(g_cur, 1, until_); \
         CHECK(turned_ >= 0, why ": a turn", turned_); \
     } \
     CHECK(answer_ == 1, why ": the completion call", answer_); \
@@ -212,9 +225,15 @@ static void stats_until(struct t_loom_fid *fid, int at, uint32_t want, uint32_t 
     for (;;) {
         stats(fid, v);
         if (v[at] >= want) return;
-        CHECK(t_loom_now(g_ring) < until, "a fixture counter reaches its value", at);
+        CHECK(t_loom_now(g_cur) < until, "a fixture counter reaches its value", at);
         nap(5);
     }
+}
+
+// The kernel must accept a lease's return.
+static void give_back(struct t_ring_payload *p, const char *why) {
+    int rc = t_loom_payload_return(p);
+    CHECK(rc == 0, why, rc);
 }
 
 // Every byte a multishot stream yields, in arrival order, after checking it
@@ -240,25 +259,21 @@ static size_t drain(struct t_loom_op *st, int swap) {
             const unsigned char *hb = t_loom_payload_bytes(held, &hl);
             n = append(n, hb, hl);
             n = append(n, b, len);
-            int rc = t_loom_payload_return(p);
-            CHECK(rc == 0, "return the newer lease first", rc);
-            rc = t_loom_payload_return(held);
-            CHECK(rc == 0, "then the older one", rc);
+            give_back(p, "return the newer lease first");
+            give_back(held, "then the older one");
             held = NULL;
         } else if (swap) {
             held = p;
         } else {
             n = append(n, b, len);
-            int rc = t_loom_payload_return(p);
-            CHECK(rc == 0, "return a lease", rc);
+            give_back(p, "return a lease");
         }
     }
     if (held) {
         size_t hl;
         const unsigned char *hb = t_loom_payload_bytes(held, &hl);
         n = append(n, hb, hl);
-        int rc = t_loom_payload_return(held);
-        CHECK(rc == 0, "return the last lease", rc);
+        give_back(held, "return the last lease");
     }
     return n;
 }
@@ -279,6 +294,28 @@ static struct t_loom_op *stream(struct t_loom_fid *fid, struct t_loom_pool *pool
     return op;
 }
 
+// Walks data under s until the slot table is full, which refuses the next WALK
+// -ENOSPC at submit, then drops every fid it walked. Returns how many fit.
+static unsigned fill(struct t_loom_scope *s) {
+    unsigned n = 0;
+    for (;;) {
+        struct t_loom_op *op = NULL;
+        int rc = t_loom_walk(s, "data", 4, 1, soon(), &op);
+        if (rc != 0) {
+            CHECK(rc == -E_NOSPC && !op, "a full slot table refuses the WALK at submit", rc);
+            break;
+        }
+        int32_t res = 0;
+        struct t_loom_fid *fid = NULL;
+        AWAIT(t_loom_walk_done(op, &res, &fid), "a WALK into a free slot");
+        CHECK(res >= 0 && fid, "a WALK into a free slot", res);
+        CHECK(n < SLOTS, "the slot table holds at most its slots", n + 1);
+        g_held[n++] = fid;
+    }
+    for (unsigned i = 0; i < n; i++) t_loom_fid_drop(g_held[i]);
+    return n;
+}
+
 static int run(void) {
     unsigned char b = 0;
     long n = t_read(NOTIFY, &b, 1);
@@ -292,6 +329,7 @@ static int run(void) {
         return PASS_DEFAULT;
     }
     CHECK(rc == 0 && g_ring, "a private ring in the qualification image", rc);
+    g_cur = g_ring;
 
     say("connect, walk, open");
     struct t_loom_target *t = NULL;
@@ -306,16 +344,33 @@ static int run(void) {
     stats(sf, base);
     CHECK(base[ACCEPTED] == 1 && base[ENDED] == 0, "the fixture holds one session", base[ACCEPTED]);
     walk(s1, "nosuch", -E_NOENT);
+    stats(sf, v);
+    CHECK(v[WALKS] == base[WALKS] + 1 && v[VIOLATIONS] == base[VIOLATIONS],
+          "the server answered that Twalk itself", v[WALKS]);
     struct t_loom_fid *data = walk(s1, "data", 0);
     open_as(data, 1, -E_ACCES);
     open_as(data, 0, 0);
     struct t_loom_fid *sink = walk(s1, "sink", 0);
     open_as(sink, 2, 0);
 
-    say("fixed reads and writes");
+    say("a walk from a fid below the root");
+    struct t_loom_fid *dir = walk(s1, "dir", 0);
+    struct t_loom_op *op;
+    rc = t_loom_walk_fid(dir, "leaf", 4, 1, soon(), &op);
+    CHECK(rc == 0, "submit a WALK from a directory fid", rc);
+    int32_t res = -1;
+    struct t_loom_fid *leaf = NULL;
+    AWAIT(t_loom_walk_done(op, &res, &leaf), "a WALK from a directory fid");
+    CHECK(res >= 0 && leaf, "a WALK from a directory fid", res);
+    open_as(leaf, 0, 0);
     const unsigned char *bytes;
     size_t len;
-    struct t_fixed_read_result *rr = read_at(data, range(0, 0, PAGE), 0, &bytes, &len);
+    struct t_fixed_read_result *rr = read_at(leaf, range(0, 0, PAGE), 0, &bytes, &len);
+    CHECK(len == LEAF_LEN && matches(bytes, len, 0), "the file below a directory", len);
+    t_loom_read_drop(rr);
+
+    say("fixed reads and writes");
+    rr = read_at(data, range(0, 0, PAGE), 0, &bytes, &len);
     CHECK(len == PAGE && matches(bytes, len, 0), "a fixed READ's bytes", len);
     t_loom_read_drop(rr);
     rr = read_at(data, range(0, 0, PAGE), 3 * PAGE, &bytes, &len);
@@ -324,10 +379,9 @@ static int run(void) {
     static unsigned char msg[100];
     volatile unsigned char *m = msg;
     for (int i = 0; i < 100; i++) m[i] = (unsigned char)(i * 7 + 1);
-    struct t_loom_op *op;
     rc = t_loom_write(sink, range(0, 0, 100), 0, msg, 100, 1, soon(), &op);
     CHECK(rc == 0, "submit a WRITE", rc);
-    int32_t res = -1;
+    res = -1;
     AWAIT(t_loom_write_done(op, &res), "a WRITE");
     CHECK(res == 100, "a fixed WRITE's count", res);
     rr = read_at(sink, range(0, 0, PAGE), 0, &bytes, &len);
@@ -355,6 +409,7 @@ static int run(void) {
     CHECK(rc == 0 && pool_b, "pool B", rc);
     struct t_loom_fid *second = walk(s1, "stream", 0);
     open_as(second, 0, 0);
+    CHECK(t_loom_backlog(g_ring) == 0, "the CQ is empty before the stream", t_loom_backlog(g_ring));
     st = stream(second, pool_b);
     // Submitting entered the SQE; the executor runs without a turn.
     uint64_t until = soon();
@@ -362,6 +417,8 @@ static int run(void) {
         CHECK(t_loom_now(g_ring) < until, "the CQ fills while no turn reaps it", t_loom_backlog(g_ring));
         nap(1);
     }
+    // Long enough for an engine that ignored the full CQ to post past it.
+    nap(100);
     CHECK(t_loom_backlog(g_ring) == CQ_ENTRIES, "a full CQ holds exactly its entries", t_loom_backlog(g_ring));
     int64_t routed = t_loom_turn(g_ring, 0, 0);
     CHECK(routed == CQ_ENTRIES, "one turn routes the whole CQ", routed);
@@ -376,7 +433,7 @@ static int run(void) {
     struct t_loom_fid *stall2 = walk(s2, "stall", 0);
     open_as(stall2, 0, 0);
     stats(sf, base);
-    uint64_t deadline = t_loom_now(g_ring) + 1000000000ull;
+    uint64_t deadline = t_loom_now(g_ring) + 3000000000ull;
     rc = t_loom_read(stall2, range(4, 0, PAGE), 0, 1, deadline, &op);
     CHECK(rc == 0, "submit a READ the server holds", rc);
     stats_until(sf, STALLED, base[STALLED] + 1, v);
@@ -408,36 +465,124 @@ static int run(void) {
     CHECK(len == PAGE && matches(bytes, len, PAGE), "a scope beside the aborted ones still reads", len);
     t_loom_read_drop(rr);
 
-    say("closing the ring with leases held");
-    stats(sf, v);
-    CHECK(v[VIOLATIONS] == 0, "the fixture saw no protocol violation", v[VIOLATIONS]);
-    struct t_loom_fid *third = walk(s1, "stream", 0);
+    say("a stream dropped before its end");
+    struct t_loom_scope *s4 = connect(t);
+    struct t_loom_fid *fourth = walk(s4, "stream", 0);
+    open_as(fourth, 0, 0);
+    stats(sf, base);
+    st = stream(fourth, pool_a);
+    struct t_ring_payload *p = shot(st);
+    t_loom_op_drop(st);
+    const unsigned char *pb = t_loom_payload_bytes(p, &len);
+    CHECK(len == SHOT && matches(pb, len, 0), "a lease outlives its dropped stream", len);
+    give_back(p, "a dropped stream's lease returns");
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+    // Pool A has two members: a stream drains only if both came back.
+    struct t_loom_fid *fifth = walk(s1, "stream", 0);
+    open_as(fifth, 0, 0);
+    st = stream(fifth, pool_a);
+    got = drain(st, 0);
+    CHECK(got == STREAM_LEN && matches(g_got, got, 0), "the dropped stream's pool streams again", got);
+    t_loom_op_drop(st);
+
+    say("an explicit abort");
+    struct t_loom_scope *s5 = connect(t);
+    struct t_loom_fid *near5 = walk(s5, "data", 0);
+    open_as(near5, 0, 0);
+    stats(sf, base);
+    t_loom_scope_abort(s5);
+    read_refused(near5, -E_CANCELED, "an explicit abort refuses the open fid");
+    walk_refused(s5, "data", -E_NOENT, "no FID reserves under the scope abort ended");
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
+
+    say("dropped fids, scopes, pools and targets are reaped");
+    struct t_loom_target *t2 = NULL;
+    rc = t_loom_target(g_ring, REGISTRY, "fixture", 7, &t2);
+    CHECK(rc == 0 && t2, "a second TARGET of the fixture", rc);
+    // Held: two targets; s1 and its eight fids; pools A and B; s2, s3 and s5
+    // with their two, two and one fids; s4 and its one.
+    const unsigned held = 2 + 1 + 8 + 2 + 3 + 3 + 2 + 2;
+    stats(sf, base);
+    unsigned f1 = fill(s1);
+    CHECK(f1 == SLOTS - held, "the free slots are those no live handle holds", f1);
+    stats_until(sf, CLUNKS, base[CLUNKS] + f1, v);
+    struct t_loom_fid *gone[] = { near2, stall2, near3, stall3, fourth, near5 };
+    for (unsigned i = 0; i < sizeof(gone) / sizeof(gone[0]); i++) t_loom_fid_drop(gone[i]);
+    t_loom_scope_drop(s2);
+    t_loom_scope_drop(s3);
+    t_loom_scope_drop(s4);
+    t_loom_scope_drop(s5);
+    t_loom_pool_drop(pool_b);
+    t_loom_target_drop(t2);
+    const unsigned dropped = 12;
+    unsigned f2 = fill(s1);
+    CHECK(f2 == f1 + dropped, "every dropped handle's slot came back", f2);
+    stats_until(sf, CLUNKS, base[CLUNKS] + f1 + f2, v);
+    CHECK(v[CLUNKS] == base[CLUNKS] + f1 + f2 && v[VIOLATIONS] == base[VIOLATIONS],
+          "a Tclunk for each live scope's dropped fid, and no other", v[CLUNKS]);
+
+    say("closing a ring with leases held");
+    rc = T_LOOM_RING_SETUP(&g_store2, &g_kernel, ENTRIES, lengths, 5, &g_ring2);
+    CHECK(rc == 0 && g_ring2, "a second private ring", rc);
+    struct t_loom_target *target2 = NULL;
+    rc = t_loom_target(g_ring2, REGISTRY, "fixture", 7, &target2);
+    CHECK(rc == 0 && target2, "TARGET from the second ring", rc);
+    stats(sf, base);
+    g_cur = g_ring2;
+    struct t_loom_scope *s6 = connect(target2);
+    struct t_loom_fid *third = walk(s6, "stream", 0);
     open_as(third, 0, 0);
-    st = stream(third, pool_a);
+    struct t_loom_fid *data6 = walk(s6, "data", 0);
+    open_as(data6, 0, 0);
+    struct t_loom_pool *pool_c = NULL;
+    rc = t_loom_pool(g_ring2, two, 2, &pool_c);
+    CHECK(rc == 0 && pool_c, "pool C", rc);
+    st = stream(third, pool_c);
     struct t_ring_payload *p1 = shot(st);
     struct t_ring_payload *p2 = shot(st);
-    rr = read_at(data, range(0, 0, PAGE), 0, &bytes, &len);
-    t_loom_close(g_ring);
+    rr = read_at(data6, range(0, 0, PAGE), 0, &bytes, &len);
+    t_loom_close(g_ring2);
+    g_cur = g_ring;
     size_t l1, l2;
     const unsigned char *b1 = t_loom_payload_bytes(p1, &l1);
     const unsigned char *b2 = t_loom_payload_bytes(p2, &l2);
     CHECK(l1 == SHOT && matches(b1, l1, 0) && l2 == SHOT && matches(b2, l2, SHOT) &&
           len == PAGE && matches(bytes, len, 0), "leases keep their bytes after the ring closes", l1);
     struct t_loom_target *late = NULL;
-    rc = t_loom_target(g_ring, REGISTRY, "fixture", 7, &late);
+    rc = t_loom_target(g_ring2, REGISTRY, "fixture", 7, &late);
     CHECK(rc == -E_CANCELED && !late, "a closed ring admits no TARGET", rc);
-    rc = t_loom_walk(s1, "data", 4, 0, 0, &op);
+    rc = t_loom_walk(s6, "data", 4, 0, 0, &op);
     CHECK(rc == -E_CANCELED, "a closed ring admits no WALK", rc);
+    // The close reached the kernel: the server saw the session end while this
+    // program still runs.
+    stats_until(sf, ENDED, base[ENDED] + 1, v);
     t_loom_payload_drop(p1);
     t_loom_payload_drop(p2);
     t_loom_read_drop(rr);
     t_loom_op_drop(st);
-    struct t_loom_fid *fids[] = { third, stall3, near3, stall2, near2, second, first, sink, data, sf };
+    t_loom_fid_drop(data6);
+    t_loom_fid_drop(third);
+    t_loom_scope_drop(s6);
+    t_loom_pool_drop(pool_c);
+    t_loom_target_drop(target2);
+    t_loom_ring_drop(g_ring2);
+    CHECK(t_loom_idle(&g_store2.base) == 1, "every handle dropped leaves the closed ring's storage idle", 0);
+
+    say("retiring a ring");
+    stats(sf, v);
+    CHECK(v[VIOLATIONS] == 0, "the fixture saw no protocol violation", v[VIOLATIONS]);
+    t_loom_retire(g_ring);
+    until = soon();
+    while (!t_loom_retired(g_ring)) {
+        CHECK(t_loom_now(g_ring) < until, "every scope retires and every terminal is routed", 0);
+        int64_t turned = t_loom_turn(g_ring, 1, t_loom_now(g_ring) + 10000000ull);
+        CHECK(turned >= 0, "a turn while the ring retires", turned);
+    }
+    rc = t_loom_target(g_ring, REGISTRY, "fixture", 7, &late);
+    CHECK(rc == -E_CANCELED && !late, "a retired ring admits no TARGET", rc);
+    struct t_loom_fid *fids[] = { fifth, second, first, leaf, dir, sink, data, sf };
     for (unsigned i = 0; i < sizeof(fids) / sizeof(fids[0]); i++) t_loom_fid_drop(fids[i]);
-    t_loom_scope_drop(s3);
-    t_loom_scope_drop(s2);
     t_loom_scope_drop(s1);
-    t_loom_pool_drop(pool_b);
     t_loom_pool_drop(pool_a);
     t_loom_target_drop(t);
     t_loom_ring_drop(g_ring);

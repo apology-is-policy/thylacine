@@ -1,13 +1,13 @@
 // /bin/loom-native-probe -- the Rust native Loom adapter driven from EL0
 // against /bin/loom-fixture (docs/ASYNC-SERVICE-ABI.md, NA-4d). The kernel test
-// loom.native_probe_rust starts both and requires 72 from the default image,
-// where setup refuses -EOPNOTSUPP, or 73 from the qualification image, where
-// every leg below passed.
+// loom.native_probe_rust starts both and requires 78 from the default image,
+// where setup refuses -EOPNOTSUPP, or 79 from the qualification image, where
+// every leg below passed. No other program exits with either code.
 //
 // fd 0 is the registry the fixture posts in, fd 1 the control pipe (closed at
-// exit, which ends the fixture) and fd 2 the notify pipe. Every leg reads the
-// fixture's stats file for what the server saw, so a refusal the kernel made
-// locally cannot pass for one the server answered, and the reverse.
+// exit, which ends the fixture) and fd 2 the notify pipe. The legs read the
+// fixture's stats file for what the server saw: the sessions it accepted and
+// ended, its stalled reads, Twalks and Tclunks, and the violations it counted.
 
 #![no_std]
 #![no_main]
@@ -26,14 +26,15 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 type K = ThylaKernel;
 
-const PASS_DEFAULT: i64 = 72;
-const PASS_QUAL: i64 = 73;
+const PASS_DEFAULT: i64 = 78;
+const PASS_QUAL: i64 = 79;
 const REGISTRY: i32 = 0;
 const NOTIFY: i64 = 2;
 
 // The kernel's errno registry (kernel/include/thylacine/errno.h).
 const E_NOENT: i32 = 2;
 const E_ACCES: i32 = 13;
+const E_NOSPC: i32 = 28;
 const E_OPNOTSUPP: i32 = 95;
 const E_TIMEDOUT: i32 = 110;
 const E_CANCELED: i32 = 125;
@@ -44,15 +45,21 @@ const CQ_ENTRIES: usize = 4;
 // 0: fixed data and sink I/O; 1: pool A; 2: stats; 3: pool B; 4: stalled reads.
 const BUFFERS: [usize; 5] = [PAGE as usize; 5];
 const WAIT_NS: u64 = 5_000_000_000;
+// Targets, scopes, fids and pools share the kernel's LOOM_SERVICE_SLOT_COUNT
+// slots (kernel/include/thylacine/loom_service_abi.h).
+const SLOTS: usize = 64;
 
 // The fixture's files and its stats counters (usr/loom-fixture).
 const DATA_LEN: usize = 3 * 4096 + 1000;
+const LEAF_LEN: usize = 600;
 const STREAM_LEN: usize = 2600;
 const SHOT: u64 = 512;
 const ACCEPTED: usize = 0;
 const ENDED: usize = 1;
 const VIOLATIONS: usize = 2;
 const STALLED: usize = 3;
+const CLUNKS: usize = 5;
+const WALKS: usize = 7;
 const STAT_COUNT: usize = 11;
 
 struct Fail {
@@ -114,6 +121,14 @@ macro_rules! done_refused {
             }
         }
     }};
+}
+// Return a lease now; the kernel must accept it.
+macro_rules! returned {
+    ($p:expr, $why:literal) => {
+        if let Err((e, _)) = $p.try_return() {
+            return Err(Fail { line: line!(), why: $why, got: e as i64 });
+        }
+    };
 }
 
 fn say(line: &str) {
@@ -184,11 +199,14 @@ fn drain(ring: &ServiceRing, st: &mut Stream<K>, swap: bool) -> R<Vec<u8>> {
                     Some(older) => {
                         got.extend_from_slice(older.bytes());
                         got.extend_from_slice(p.bytes());
-                        drop(p);
-                        drop(older);
+                        returned!(p, "return the newer lease first");
+                        returned!(older, "then the older one");
                     }
                     None if swap => held = Some(p),
-                    None => got.extend_from_slice(p.bytes()),
+                    None => {
+                        got.extend_from_slice(p.bytes());
+                        returned!(p, "return a lease");
+                    }
                 }
             }
             Shot::End(rc) => {
@@ -199,6 +217,7 @@ fn drain(ring: &ServiceRing, st: &mut Stream<K>, swap: bool) -> R<Vec<u8>> {
     }
     if let Some(p) = held.take() {
         got.extend_from_slice(p.bytes());
+        returned!(p, "return the last lease");
     }
     Ok(got)
 }
@@ -208,6 +227,24 @@ fn shot(ring: &ServiceRing, st: &mut Stream<K>) -> R<Payload<K>> {
         Shot::Payload(p) => Ok(p),
         Shot::End(rc) => Err(Fail { line: line!(), why: "a stream ended before its shot", got: rc as i64 }),
     }
+}
+
+// Walks `data` under `scope` until the slot table is full, which refuses the
+// next WALK -ENOSPC at submit, then drops every fid it walked. Returns how many
+// fit.
+fn fill(ring: &ServiceRing, scope: &Scope<K>) -> R<usize> {
+    let mut held = Vec::new();
+    loop {
+        match scope.walk(b"data", soon(ring)) {
+            Ok(w) => held.push(done!(ring, w, "a WALK into a free slot")),
+            Err(e) => {
+                check!(e == -E_NOSPC, "a full slot table refuses the WALK at submit", e);
+                break;
+            }
+        }
+        check!(held.len() <= SLOTS, "the slot table holds at most its slots", held.len());
+    }
+    Ok(held.len())
 }
 
 fn run() -> R<i64> {
@@ -231,13 +268,25 @@ fn run() -> R<i64> {
     let base = stats(&ring, &stats_fid)?;
     check!(base[ACCEPTED] == 1 && base[ENDED] == 0, "the fixture holds one session", base[ACCEPTED]);
     done_refused!(ring, ok!(s1.walk(b"nosuch", soon(&ring)), "submit a WALK"), E_NOENT,
-                  "the server's Rlerror for a missing name passes through");
+                  "a missing name's WALK is refused");
+    let v = stats(&ring, &stats_fid)?;
+    check!(v[WALKS] == base[WALKS] + 1 && v[VIOLATIONS] == base[VIOLATIONS],
+           "the server answered that Twalk itself", v[WALKS]);
     let data = walk(&ring, &s1, b"data")?;
     done_refused!(ring, ok!(data.open(1, soon(&ring)), "submit an LOPEN"), E_ACCES,
                   "the kernel's own stat check refuses writing a 0444 file");
     open(&ring, &data, 0)?;
     let sink = walk(&ring, &s1, b"sink")?;
     open(&ring, &sink, 2)?;
+
+    say("a walk from a fid below the root");
+    let dir = walk(&ring, &s1, b"dir")?;
+    let leaf = done!(ring, ok!(dir.walk(b"leaf", soon(&ring)), "submit a WALK from a directory fid"),
+                     "a WALK from a directory fid");
+    open(&ring, &leaf, 0)?;
+    let r = done!(ring, ok!(leaf.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), "a READ");
+    check!(r.bytes().len() == LEAF_LEN && matches(r.bytes(), 0), "the file below a directory", r.bytes().len());
+    drop(r);
 
     say("fixed reads and writes");
     let r = done!(ring, ok!(data.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), "a READ");
@@ -271,6 +320,7 @@ fn run() -> R<i64> {
     let pool_b = ok!(ring.pool(&members), "pool B");
     let second = walk(&ring, &s1, b"stream")?;
     open(&ring, &second, 0)?;
+    check!(ring.backlog() == 0, "the CQ is empty before the stream", ring.backlog());
     let mut st = ok!(second.stream(&pool_b, 0, SHOT as u32, true, None), "a multishot stream");
     // Submitting entered the SQE; the executor runs without a turn.
     let until = ring.now() + WAIT_NS;
@@ -278,6 +328,8 @@ fn run() -> R<i64> {
         check!(ring.now() < until, "the CQ fills while no turn reaps it", ring.backlog());
         let _ = libthyla_rs::time::sleep(Duration::from_millis(1));
     }
+    // Long enough for an engine that ignored the full CQ to post past it.
+    let _ = libthyla_rs::time::sleep(Duration::from_millis(100));
     check!(ring.backlog() == CQ_ENTRIES, "a full CQ holds exactly its entries", ring.backlog());
     let routed = ok!(ring.turn(None), "a turn over the full CQ");
     check!(routed == CQ_ENTRIES, "one turn routes the whole CQ", routed);
@@ -287,13 +339,13 @@ fn run() -> R<i64> {
 
     say("a deadline aborts its scope");
     let s2 = connect(&ring, &target)?;
-    let near = walk(&ring, &s2, b"data")?;
-    open(&ring, &near, 0)?;
-    let stall = walk(&ring, &s2, b"stall")?;
-    open(&ring, &stall, 0)?;
+    let near2 = walk(&ring, &s2, b"data")?;
+    open(&ring, &near2, 0)?;
+    let stall2 = walk(&ring, &s2, b"stall")?;
+    open(&ring, &stall2, 0)?;
     let base = stats(&ring, &stats_fid)?;
-    let deadline = ring.now() + 1_000_000_000;
-    let rd = ok!(stall.read(range(4, 0, PAGE), 0, Some(deadline)), "submit a READ the server holds");
+    let deadline = ring.now() + 3_000_000_000;
+    let rd = ok!(stall2.read(range(4, 0, PAGE), 0, Some(deadline)), "submit a READ the server holds");
     stats_until(&ring, &stats_fid, STALLED, base[STALLED] + 1)?;
     match ring.block_on(rd, Some(deadline + WAIT_NS)) {
         Ok(Err(e)) => check!(e == -E_TIMEDOUT, "the deadline ends the held READ", e),
@@ -302,22 +354,22 @@ fn run() -> R<i64> {
     }
     // The abort latched the scope out of READY: admission refuses a sibling's
     // operation, and no FID reserves under the scope.
-    done_refused!(ring, ok!(near.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
+    done_refused!(ring, ok!(near2.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
                   "the deadline aborted the open sibling too");
     refused!(s2.walk(b"data", soon(&ring)), E_NOENT, "no FID reserves under the scope the deadline aborted");
     stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
 
     say("cancellation by drop");
     let s3 = connect(&ring, &target)?;
-    let near = walk(&ring, &s3, b"data")?;
-    open(&ring, &near, 0)?;
-    let stall = walk(&ring, &s3, b"stall")?;
-    open(&ring, &stall, 0)?;
+    let near3 = walk(&ring, &s3, b"data")?;
+    open(&ring, &near3, 0)?;
+    let stall3 = walk(&ring, &s3, b"stall")?;
+    open(&ring, &stall3, 0)?;
     let base = stats(&ring, &stats_fid)?;
-    let rd = ok!(stall.read(range(4, 0, PAGE), 0, None), "submit a READ the server holds");
+    let rd = ok!(stall3.read(range(4, 0, PAGE), 0, None), "submit a READ the server holds");
     stats_until(&ring, &stats_fid, STALLED, base[STALLED] + 1)?;
     drop(rd);
-    done_refused!(ring, ok!(near.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
+    done_refused!(ring, ok!(near3.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
                   "dropping a pending READ aborted the open sibling too");
     refused!(s3.walk(b"data", soon(&ring)), E_NOENT, "no FID reserves under the scope the drop aborted");
     stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
@@ -326,23 +378,92 @@ fn run() -> R<i64> {
            "a scope beside the aborted ones still reads", r.bytes().len());
     drop(r);
 
-    say("closing the ring with leases held");
-    let v = stats(&ring, &stats_fid)?;
-    check!(v[VIOLATIONS] == 0, "the fixture saw no protocol violation", v[VIOLATIONS]);
-    let third = walk(&ring, &s1, b"stream")?;
-    open(&ring, &third, 0)?;
-    let mut st = ok!(third.stream(&pool_a, 0, SHOT as u32, true, None), "a multishot stream");
-    let p1 = shot(&ring, &mut st)?;
-    let p2 = shot(&ring, &mut st)?;
-    let held = done!(ring, ok!(data.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), "a READ");
-    ring.close();
-    check!(matches(p1.bytes(), 0) && matches(p2.bytes(), SHOT as usize) && matches(held.bytes(), 0),
+    say("a stream dropped before its end");
+    let s4 = connect(&ring, &target)?;
+    let fourth = walk(&ring, &s4, b"stream")?;
+    open(&ring, &fourth, 0)?;
+    let base = stats(&ring, &stats_fid)?;
+    let mut st = ok!(fourth.stream(&pool_a, 0, SHOT as u32, true, None), "a multishot stream");
+    let p = shot(&ring, &mut st)?;
+    drop(st);
+    check!(p.bytes().len() == SHOT as usize && matches(p.bytes(), 0), "a lease outlives its dropped stream",
+           p.bytes().len());
+    returned!(p, "a dropped stream's lease returns");
+    stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
+    // Pool A has two members: a stream drains only if both came back.
+    let fifth = walk(&ring, &s1, b"stream")?;
+    open(&ring, &fifth, 0)?;
+    let mut st = ok!(fifth.stream(&pool_a, 0, SHOT as u32, true, None), "a multishot stream");
+    let got = drain(&ring, &mut st, false)?;
+    check!(got.len() == STREAM_LEN && matches(&got, 0), "the dropped stream's pool streams again", got.len());
+    drop(st);
+
+    say("an explicit abort");
+    let s5 = connect(&ring, &target)?;
+    let near5 = walk(&ring, &s5, b"data")?;
+    open(&ring, &near5, 0)?;
+    let base = stats(&ring, &stats_fid)?;
+    s5.abort();
+    done_refused!(ring, ok!(near5.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), E_CANCELED,
+                  "an explicit abort refuses the open fid");
+    refused!(s5.walk(b"data", soon(&ring)), E_NOENT, "no FID reserves under the scope abort ended");
+    stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
+
+    say("dropped fids, scopes, pools and targets are reaped");
+    let t2 = ok!(ring.target(REGISTRY, b"fixture"), "a second TARGET of the fixture");
+    // Held: two targets; s1 and its eight fids; pools A and B; s2, s3 and s5
+    // with their two, two and one fids; s4 and its one.
+    const HELD: usize = 2 + 1 + 8 + 2 + 3 + 3 + 2 + 2;
+    let base = stats(&ring, &stats_fid)?;
+    let f1 = fill(&ring, &s1)?;
+    check!(f1 == SLOTS - HELD, "the free slots are those no live handle holds", f1);
+    stats_until(&ring, &stats_fid, CLUNKS, base[CLUNKS] + f1 as u32)?;
+    drop((near2, stall2, s2, near3, stall3, s3, fourth, s4, near5, s5, pool_b, t2));
+    const DROPPED: usize = 12;
+    let f2 = fill(&ring, &s1)?;
+    check!(f2 == f1 + DROPPED, "every dropped handle's slot came back", f2);
+    let v = stats_until(&ring, &stats_fid, CLUNKS, base[CLUNKS] + (f1 + f2) as u32)?;
+    check!(v[CLUNKS] == base[CLUNKS] + (f1 + f2) as u32 && v[VIOLATIONS] == base[VIOLATIONS],
+           "a Tclunk for each live scope's dropped fid, and no other", v[CLUNKS]);
+
+    say("closing a ring with leases held");
+    let ring2 = ok!(ServiceRing::setup(ThylaKernel, ENTRIES, &BUFFERS), "a second private ring");
+    let target2 = ok!(ring2.target(REGISTRY, b"fixture"), "TARGET from the second ring");
+    let base = stats(&ring, &stats_fid)?;
+    let s6 = connect(&ring2, &target2)?;
+    let third = walk(&ring2, &s6, b"stream")?;
+    open(&ring2, &third, 0)?;
+    let data6 = walk(&ring2, &s6, b"data")?;
+    open(&ring2, &data6, 0)?;
+    let pool_c = ok!(ring2.pool(&[range(1, 0, SHOT), range(1, SHOT, SHOT)]), "pool C");
+    let mut st = ok!(third.stream(&pool_c, 0, SHOT as u32, true, None), "a multishot stream");
+    let p1 = shot(&ring2, &mut st)?;
+    let p2 = shot(&ring2, &mut st)?;
+    let held = done!(ring2, ok!(data6.read(range(0, 0, PAGE), 0, soon(&ring2)), "submit a READ"), "a READ");
+    ring2.close();
+    check!(p1.bytes().len() == SHOT as usize && p2.bytes().len() == SHOT as usize &&
+           held.bytes().len() == PAGE as usize && matches(p1.bytes(), 0) &&
+           matches(p2.bytes(), SHOT as usize) && matches(held.bytes(), 0),
            "leases keep their bytes after the ring closes", p1.bytes().len());
-    refused!(ring.target(REGISTRY, b"fixture"), E_CANCELED, "a closed ring admits no TARGET");
-    refused!(s1.walk(b"data", None), E_CANCELED, "a closed ring admits no WALK");
+    refused!(ring2.target(REGISTRY, b"fixture"), E_CANCELED, "a closed ring admits no TARGET");
+    refused!(s6.walk(b"data", None), E_CANCELED, "a closed ring admits no WALK");
+    // The close reached the kernel: the server saw the session end while this
+    // program still runs.
+    stats_until(&ring, &stats_fid, ENDED, base[ENDED] + 1)?;
     drop(p1);
     drop(p2);
     drop(held);
+
+    say("retiring a ring");
+    let v = stats(&ring, &stats_fid)?;
+    check!(v[VIOLATIONS] == 0, "the fixture saw no protocol violation", v[VIOLATIONS]);
+    ring.retire();
+    let until = ring.now() + WAIT_NS;
+    while !ring.retired() {
+        check!(ring.now() < until, "every scope retires and every terminal is routed", 0);
+        ok!(ring.turn(Some(ring.now() + 10_000_000)), "a turn while the ring retires");
+    }
+    refused!(ring.target(REGISTRY, b"fixture"), E_CANCELED, "a retired ring admits no TARGET");
     say("qualification image drives every leg through the Rust adapter");
     Ok(PASS_QUAL)
 }

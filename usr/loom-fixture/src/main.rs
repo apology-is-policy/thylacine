@@ -9,12 +9,19 @@
 // serves every connection until fd 1 reaches EOF. Every session must then end
 // within SETTLE_NS: the probe has exited, so its rings are closed.
 //
-// Strict: a message a correct client never sends answers Rlerror and counts a
-// violation. That is anything before Tversion, an unknown or reused fid, a walk
-// from an opened fid or from a file, an open of an opened fid, I/O on a fid not
-// opened for it, a tag still in use, an open the node's mode refuses, and a
-// WALK with a name or an LOPEN whose fid had no Tgetattr first (the private
-// engine checks permission with one before either).
+// Strict: each message below is one the kernel's client never sends, and it
+// counts a violation. Most answer Rlerror: anything before Tversion, a second
+// Tversion (9P allows one; the kernel never re-versions a session), NOTAG on
+// another message, a frame whose size is not its body's, an unknown, reused or
+// NOFID fid, a walk from an opened fid or from a file, a walk of "." or "..",
+// an open of an opened fid, I/O on a fid not opened for it, a tag still in
+// use, an open the node's mode refuses, a Tread count above msize less 11, and
+// a WALK with a name or an LOPEN on a fid with no Tgetattr first (the private
+// engine checks permission with one before either). The Tgetattr credit is
+// per fid: the wire carries no operation identity, so a credit the kernel's
+// own permission refusal left unspent can pay for a later LOPEN. A Tversion
+// that is not 9P2000.L answers Rversion "unknown", and a frame that cannot be
+// parsed, or whose size is out of range, ends its session.
 //
 // Exit 76: no session was accepted (the default image). 77: at least one
 // session, every one ended, no violation. 1: a violation or a setup failure.
@@ -51,15 +58,21 @@ const SINK: u64 = 3;
 const STALL: u64 = 4;
 const STATS: u64 = 5;
 const STREAM: u64 = 6;
-const NODES: [(&[u8], u64); 5] = [
+const DIR: u64 = 7;
+const LEAF: u64 = 8;
+const ROOT_NODES: [(&[u8], u64); 6] = [
     (b"data", DATA),
+    (b"dir", DIR),
     (b"sink", SINK),
     (b"stall", STALL),
     (b"stats", STATS),
     (b"stream", STREAM),
 ];
+const DIR_NODES: [(&[u8], u64); 1] = [(b"leaf", LEAF)];
 
 const DATA_LEN: u64 = 3 * 4096 + 1000;
+// Shorter than a page, so a WALK that reached `data` instead reads longer.
+const LEAF_LEN: u64 = 600;
 // A multishot read repeats its offset, as a read of a pipe would, so `stream`
 // ignores the offset: each read takes the next bytes from the fid's cursor, and
 // a read at the end answers 0.
@@ -97,9 +110,21 @@ fn now() -> u64 {
     libthyla_rs::time::monotonic_ns()
 }
 
+fn is_dir(node: u64) -> bool {
+    node == ROOT || node == DIR
+}
+
+fn children(node: u64) -> &'static [(&'static [u8], u64)] {
+    match node {
+        ROOT => &ROOT_NODES,
+        DIR => &DIR_NODES,
+        _ => &[],
+    }
+}
+
 fn mode_of(node: u64) -> u32 {
     match node {
-        ROOT => 0o040555,
+        ROOT | DIR => 0o040555,
         SINK => 0o100666,
         _ => 0o100444,
     }
@@ -107,7 +132,7 @@ fn mode_of(node: u64) -> u32 {
 
 fn qid_of(node: u64) -> p9::Qid {
     p9::Qid {
-        kind: if node == ROOT { p9::P9_QTDIR } else { p9::P9_QTFILE },
+        kind: if is_dir(node) { p9::P9_QTDIR } else { p9::P9_QTFILE },
         version: 0,
         path: node,
     }
@@ -140,6 +165,30 @@ enum Reply {
     Send(usize),
     Held,
     Fatal,
+}
+
+// The exact frame length of a message this server answers, from its parsed
+// fields; None for a type it refuses anyway.
+fn body_len(mtype: u8, frame: &[u8]) -> Result<Option<usize>, ()> {
+    let h = p9::P9_HDR_LEN;
+    Ok(Some(match mtype {
+        p9::P9_TVERSION => h + 4 + 2 + p9::parse_tversion(frame)?.version.len(),
+        p9::P9_TATTACH => {
+            let a = p9::parse_tattach(frame)?;
+            h + 4 + 4 + 2 + a.uname.len() + 2 + a.aname.len() + 4
+        }
+        p9::P9_TGETATTR => h + 4 + 8,
+        p9::P9_TWALK => {
+            let a = p9::parse_twalk(frame)?;
+            h + 4 + 4 + 2 + a.names[..a.nwname as usize].iter().map(|n| 2 + n.len()).sum::<usize>()
+        }
+        p9::P9_TLOPEN => h + 4 + 4,
+        p9::P9_TREAD => h + 4 + 8 + 4,
+        p9::P9_TWRITE => h + 4 + 8 + 4 + p9::parse_twrite(frame)?.data.len(),
+        p9::P9_TCLUNK => h + 4,
+        p9::P9_TFLUSH => h + 2,
+        _ => return Ok(None),
+    }))
 }
 
 impl Server {
@@ -176,6 +225,16 @@ impl Server {
         if !c.versioned && h.mtype != p9::P9_TVERSION {
             return self.refuse(h.tag, p9::E_PROTO, "a message before Tversion");
         }
+        if h.tag == p9::P9_NOTAG && h.mtype != p9::P9_TVERSION {
+            return self.refuse(h.tag, p9::E_PROTO, "NOTAG on a message other than Tversion");
+        }
+        match body_len(h.mtype, frame) {
+            Ok(Some(want)) if want != frame.len() => {
+                return self.refuse(h.tag, p9::E_PROTO, "a frame whose size is not its body's");
+            }
+            Err(()) => return Reply::Fatal,
+            _ => {}
+        }
         match h.mtype {
             p9::P9_TVERSION => self.version(c, frame, h.tag),
             p9::P9_TATTACH => self.attach(c, frame, h.tag),
@@ -209,6 +268,9 @@ impl Server {
         if a.afid != p9::P9_NOFID {
             return self.refuse(tag, p9::E_PROTO, "a Tattach with an auth fid");
         }
+        if a.fid == p9::P9_NOFID {
+            return self.refuse(tag, p9::E_BADF, "Tattach to NOFID");
+        }
         if c.fids.contains_key(&a.fid) {
             return self.refuse(tag, p9::E_BADF, "Tattach to a fid in use");
         }
@@ -226,6 +288,7 @@ impl Server {
         let node = f.node;
         let size = match node {
             DATA => DATA_LEN,
+            LEAF => LEAF_LEN,
             STREAM => STREAM_LEN,
             SINK => self.sink.len() as u64,
             _ => 0,
@@ -235,7 +298,7 @@ impl Server {
             | p9::P9_GETATTR_UID
             | p9::P9_GETATTR_GID
             | P9_GETATTR_SIZE;
-        let nlink = if node == ROOT { 2 } else { 1 };
+        let nlink = if is_dir(node) { 2 } else { 1 };
         Self::built(p9::build_rgetattr(
             &mut self.out, tag, valid, &qid_of(node), mode_of(node), 0, 0, nlink, size,
         ))
@@ -257,19 +320,26 @@ impl Server {
             }
             src.stats -= 1;
         }
+        if a.newfid == p9::P9_NOFID {
+            return self.refuse(tag, p9::E_BADF, "Twalk to NOFID");
+        }
         if a.newfid != a.fid && c.fids.contains_key(&a.newfid) {
             return self.refuse(tag, p9::E_BADF, "Twalk to a newfid in use");
         }
-        if a.nwname > 0 && node != ROOT {
+        if a.nwname > 0 && !is_dir(node) {
             return self.refuse(tag, p9::E_NOTDIR, "Twalk with a name from a file");
+        }
+        // The kernel's builder refuses both names (loom_service_wire.c).
+        if a.names[..a.nwname as usize].iter().any(|n| *n == b"." || *n == b"..") {
+            return self.refuse(tag, p9::E_INVAL, "a Twalk of . or ..");
         }
         let mut qids = Vec::new();
         let mut at = node;
         for i in 0..a.nwname as usize {
-            if at != ROOT {
+            if !is_dir(at) {
                 break;
             }
-            match NODES.iter().find(|(n, _)| *n == a.names[i]) {
+            match children(at).iter().find(|(n, _)| *n == a.names[i]) {
                 Some(&(_, next)) => {
                     at = next;
                     qids.push(qid_of(next));
@@ -317,11 +387,16 @@ impl Server {
         if f.open.is_none() || f.open == Some(1) {
             return self.refuse(tag, p9::E_BADF, "Tread of a fid not opened for reading");
         }
+        // The kernel bounds a count by its msize less Rread's 11 bytes
+        // (loom_service_wire.c), and the session's msize is this server's.
         let room = (c.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
-        let count = (a.count as usize).min(room);
+        if a.count as usize > room {
+            return self.refuse(tag, p9::E_INVAL, "a Tread count above msize less 11");
+        }
+        let count = a.count as usize;
         let mut bytes = Vec::new();
         match node {
-            ROOT => return self.lerror(tag, p9::E_ISDIR),
+            ROOT | DIR => return self.lerror(tag, p9::E_ISDIR),
             STALL => {
                 self.count[STALLED] += 1;
                 c.stalled.push(tag);
@@ -332,8 +407,9 @@ impl Server {
                     bytes.extend_from_slice(&v.to_le_bytes());
                 }
             }
-            DATA => {
-                for at in a.offset..DATA_LEN.min(a.offset.saturating_add(count as u64)) {
+            DATA | LEAF => {
+                let len = if node == DATA { DATA_LEN } else { LEAF_LEN };
+                for at in a.offset..len.min(a.offset.saturating_add(count as u64)) {
                     bytes.push(data_byte(at));
                 }
             }
@@ -349,7 +425,7 @@ impl Server {
         if node != STATS {
             self.count[READS] += 1;
         }
-        if node != DATA && node != STREAM {
+        if node != DATA && node != LEAF && node != STREAM {
             let from = (a.offset as usize).min(bytes.len());
             let to = from.saturating_add(count).min(bytes.len());
             bytes = bytes[from..to].to_vec();

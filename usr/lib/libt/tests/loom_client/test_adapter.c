@@ -1694,7 +1694,7 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(a_dropped_ring_used_again_ends_the_process),
 };
 #undef T
-/* The 63 scenarios of tests/native.rs, then the C interface's own eight. */
+/* The 64 scenarios of tests/native.rs, then the C interface's own eight. */
 _Static_assert(sizeof(tests) / sizeof(tests[0]) == 72, "every scenario of tests/native.rs and the C interface's own");
 
 /* With a name, runs only that scenario (exit 2 for an unknown one). */

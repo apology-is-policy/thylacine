@@ -33,15 +33,18 @@
 void test_loom_native_probe_rust(void);
 void test_loom_native_probe_c(void);
 
+// Each probe makes two rings: one it retires, one it closes with leases held.
+// Its connections are six scopes: the main one, the deadline, the dropped READ,
+// the dropped stream, the explicit abort and the second ring's.
 #ifdef LOOM_PRIVATE_QUALIFICATION
 #define NP_FIXTURE_STATUS 77
-#define NP_RUST_STATUS    73
+#define NP_RUST_STATUS    79
 #define NP_C_STATUS       75
-#define NP_RINGS          1ull
-#define NP_CONNECTS       3ull
+#define NP_RINGS          2ull
+#define NP_CONNECTS       6ull
 #else
 #define NP_FIXTURE_STATUS 76
-#define NP_RUST_STATUS    72
+#define NP_RUST_STATUS    78
 #define NP_C_STATUS       74
 #define NP_RINGS          0ull
 #define NP_CONNECTS       0ull
@@ -49,12 +52,13 @@ void test_loom_native_probe_c(void);
 
 // Each program gets pages of its own: cpio data is 4-aligned where the ELF
 // loader needs 8, and both children read their copy while they exec.
-#define NP_BLOB_ORDER 8u
+#define NP_BLOB_MAX_ORDER 8u
 
 struct np_blob {
     struct page *pages;
     u8          *bytes;
     size_t       size;
+    unsigned     order;
 };
 
 struct np_child {
@@ -69,9 +73,12 @@ static const char *np_load(const char *name, struct np_blob *b) {
     const void *src = NULL;
     size_t size = 0;
     if (devramfs_lookup(name, &src, &size) != 0) return "the program is in ramfs";
-    if (size > (PAGE_SIZE << NP_BLOB_ORDER)) return "the program fits its pages";
-    b->pages = alloc_pages(NP_BLOB_ORDER, KP_ZERO);
+    unsigned order = 0;
+    while (order < NP_BLOB_MAX_ORDER && (PAGE_SIZE << order) < size) order++;
+    if (size > (PAGE_SIZE << order)) return "the program fits its pages";
+    b->pages = alloc_pages(order, KP_ZERO);
     if (!b->pages) return "pages for the program";
+    b->order = order;
     b->bytes = pa_to_kva(page_to_pa(b->pages));
     for (size_t i = 0; i < size; i++) b->bytes[i] = ((const u8 *)src)[i];
     b->size = size;
@@ -79,7 +86,7 @@ static const char *np_load(const char *name, struct np_blob *b) {
 }
 
 static void np_free(struct np_blob *b) {
-    if (b->pages) free_pages(b->pages, NP_BLOB_ORDER);
+    if (b->pages) free_pages(b->pages, b->order);
     *b = (struct np_blob){0};
 }
 
@@ -193,13 +200,12 @@ static void np_run(const char *path, const char *label, int want) {
         if (note_rd) spoor_clunk(note_rd);
         if (note_wr) spoor_clunk(note_wr);
         ctl_rd = ctl_wr = note_rd = note_wr = NULL;
-        for (int n = (fixture_pid > 0) + (probe_pid > 0); n > 0; n--) {
-            int status = -42;
-            int pid = wait_pid(&status);
-            if (pid == fixture_pid) fixture_status = status;
-            else if (pid == probe_pid) probe_status = status;
-            else NP(false, "wait_pid reaps only the run's children");
-        }
+        // By pid: a zombie another test left must not stand in for one of
+        // these, or the block would end while a child still reads it.
+        if (fixture_pid > 0)
+            NP(wait_pid_for(fixture_pid, 0, &fixture_status) == fixture_pid, "reap the fixture");
+        if (probe_pid > 0)
+            NP(wait_pid_for(probe_pid, 0, &probe_status) == probe_pid, "reap the probe");
     }
 
     // The retirer is its own thread, and connections and the registry go with
@@ -208,10 +214,11 @@ static void np_run(const char *path, const char *label, int want) {
     while (loom_private_retired() - gone0 < loom_private_created() - made0 &&
            timer_now_ns() < deadline)
         sched();
+    bool made_registry = root != NULL;
     if (root) spoor_clunk(root);
     root = NULL;
     while ((srvconn_total_freed() - freed0 < srvconn_total_created() - conns0 ||
-            srv_registry_total_destroyed() == regs0) && timer_now_ns() < deadline)
+            (made_registry && srv_registry_total_destroyed() == regs0)) && timer_now_ns() < deadline)
         sched();
     u64 made = loom_private_created() - made0, gone = loom_private_retired() - gone0;
     u64 conns = srvconn_total_created() - conns0, freed = srvconn_total_freed() - freed0;

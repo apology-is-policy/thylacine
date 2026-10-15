@@ -547,14 +547,17 @@ then answers -EIO. The adapter adds no errno.
   `/bin/loom-native-probe` drives the Rust adapter and `/bin/loom-c-probe` the
   C one. A kernel test makes a registry and gives its walk-only root to the
   fixture, which posts in it, and to the probe, which names it in TARGET. Each
-  probe drives its adapter through: connect, walk, open, fixed reads and
-  writes, a multishot pooled stream with out-of-order returns, a deadline that
-  aborts its scope, cancellation by drop, a full CQ, and closing the whole ring
-  with leases still held. The fixture answers every message a correct client
-  never sends with Rlerror and counts it, and a stats file tells the probe what
-  the server saw. A kernel test pins each program's exit status by image, as
-  `loom.bridge_probe` does, and requires the run's rings, connections and
-  registry to be released.
+  probe drives its adapter through: connect, walk (from the root and from a
+  directory fid), open, fixed reads and writes, a multishot pooled stream with
+  out-of-order returns, a full CQ, a deadline that aborts its scope,
+  cancellation by drop, a stream dropped before its end, an explicit abort,
+  the reaping of dropped fids, scopes, pools and targets, retiring the ring,
+  and closing a second ring with leases still held. The fixture counts as a
+  violation every message on its list of those the kernel's client never
+  sends (its header gives the list; most are answered with Rlerror), and a
+  stats file tells the probe what the server saw. A kernel test pins each
+  program's exit status by image, as `loom.bridge_probe` does, and requires
+  the run's rings, connections and registry to be released.
 
 Each sub-chunk is audit-bearing, and NA-4b adds the trigger row for the
 adapter.
