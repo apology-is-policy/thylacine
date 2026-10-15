@@ -16,6 +16,14 @@ int main(void){struct t_request_book *b=&bs,*other=&os;struct t_request_delivery
  assert(!t_request_create(b,es,1)&&!t_request_create(other,eo,1));assert(!t_request_reserve(b,id(1,1),spec(T_REQ_CONTROL,0),&a));assert(!t_request_reserve(other,id(1,1),spec(T_REQ_CONTROL,0),&c)&&a!=c);assert(!t_request_publish(b,a)&&!t_request_publish(other,c));assert(accept(b,rec(c,0,0),&d)<0&&accept(other,rec(a,0,0),&d)<0);assert(!accept(b,rec(a,0,0),&d)&&!accept(other,rec(c,0,0),&d));assert(!t_request_take_terminal(b,a,&out)&&!t_request_take_terminal(other,c,&out));t_request_destroy(b);t_request_destroy(other);
  assert(t_request_create(b,es,0)<0&&t_request_create(b,es,3)<0&&t_request_create(b,es,16384)<0);assert(!t_request_create(b,es,8192));assert(t_request_reserve(b,id(64,1),spec(T_REQ_CONTROL,0),&a)<0);assert(t_request_reserve(b,id(0,0),spec(T_REQ_POOLED_READ,1),&a)<0);struct t_request_spec invalid=spec(T_REQ_POOLED_READ,1);invalid.limit=0;assert(t_request_reserve(b,id(0,1),invalid,&a)<0);uint64_t ids[8192];for(unsigned i=0;i<8192;++i)assert(!t_request_reserve(b,id(0,1),spec(T_REQ_CONTROL,0),&ids[i]));assert(t_request_occupied(b)==8192&&t_request_reserve(b,id(0,1),spec(T_REQ_CONTROL,0),&a)==T_REQ_FULL);for(unsigned i=0;i<8192;++i)assert(!t_request_cancel_unpublished(b,ids[i]));assert(!t_request_occupied(b)&&t_request_exhausted_test());t_request_destroy(b);
  assert(!t_request_occupied(b)&&t_request_reserve(b,id(0,1),spec(T_REQ_CONTROL,0),&a)==T_REQ_GEOMETRY&&t_request_publish(b,ids[0])==T_REQ_STALE);
+ /* A SLOT request (CONNECT, WALK) succeeds only with its own reserved slot, and a failure names none; another kind names no slot. */
+ {struct t_request_spec s5={.kind=T_REQ_SLOT,.slot=5},s64={.kind=T_REQ_SLOT,.slot=64},c5={.kind=T_REQ_CONTROL,.slot=5};
+ assert(!t_request_create(b,es,1)&&t_request_reserve(b,id(1,1),s64,&a)==T_REQ_GEOMETRY&&t_request_reserve(b,id(1,1),c5,&a)==T_REQ_GEOMETRY);
+ assert(!t_request_reserve(b,id(1,1),s5,&a)&&!t_request_publish(b,a));
+ struct t_paired_record wide=rec(a,5,0);wide.receipt=payload(a,0).receipt;
+ assert(accept(b,rec(a,6,0),&d)==T_REQ_RECORD&&accept(b,rec(a,5,1),&d)==T_REQ_RECORD&&accept(b,wide,&d)==T_REQ_RECORD);
+ assert(!accept(b,rec(a,5,0),&d)&&d.terminal&&!t_request_take_terminal(b,a,&out)&&out.result==5);
+ assert(!t_request_reserve(b,id(1,1),s5,&c)&&!t_request_publish(b,c)&&!accept(b,rec(c,-2,0),&d)&&!t_request_take_terminal(b,c,&out)&&out.result==-2&&!t_request_occupied(b));}
  /* A full book answers the kernel's own errno for a full table. */
  assert(T_REQ_FULL==T_LOOM_CLIENT_ENOSPC&&T_LOOM_CLIENT_ENOSPC==-28);
  /* Create zeroes the caller's entries: a recycled array carries no stale cookie. */

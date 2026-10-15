@@ -71,6 +71,9 @@ PORTED = {
         ('if(n>64-c->members)return T_LOOM_CLIENT_ENOSPC;', '')],
     ('run-registration-c.py', 'rollback-no-refund'): [
         ('c->members-=n;release_pool(p);return result;', 'release_pool(p);return result;')],
+    # NA-4c: the route takes an abandoned terminal through one `take` flag.
+    ('run-fixed-requests-c.py', 'lost-abandoned-terminal'): [
+        ('if(take)T_LOOM_CHECK(!t_request_take_terminal(', 'if(0 && take)T_LOOM_CHECK(!t_request_take_terminal(')],
     ('run-retirement-executor-c.py', 'missing-retire'): [
         ('cell->retiring=1;cell->client_alive=0;t_fixed_begin_retire(cell->driver);',
          'cell->retiring=1;cell->client_alive=0;')],
@@ -106,7 +109,8 @@ NA2B = {
         'test_fatal', r't_retirement_create: no fatal there'),
     'fixed-write-drops-bytes': ('ring_payload', [('t_bytes_copy((unsigned char *)c->b.buffer(c->b.context,f->range.buffer_index)+(size_t)f->range.offset,bytes,len);', '(void)bytes;', 1)],
         'test_ring_payload', r'.'),
-    'request-claimed-before-book': ('fixed_requests', [('uint64_t cookie=0;int rc=t_request_reserve(', 'if(!d->failed)(void)claim(d);uint64_t cookie=0;int rc=t_request_reserve(', 1)],
+    # NA-4c's book requests reserve the same way: the anchor names prepare's.
+    'request-claimed-before-book': ('fixed_requests', [('uint64_t cookie=0;int rc=t_request_reserve(d->book,scope,spec,&cookie);if(rc)return rc;\n struct t_ring_fixed *fixed=NULL;', 'if(!d->failed)(void)claim(d);uint64_t cookie=0;int rc=t_request_reserve(d->book,scope,spec,&cookie);if(rc)return rc;\n struct t_ring_fixed *fixed=NULL;', 1)],
         'test_fixed_requests', r'.'),
     'read-drop-keeps-cell': ('fixed_requests', [('t_ring_fixed_drop(r->fixed);release_request(cell);}', 't_ring_fixed_drop(r->fixed);}', 1)],
         'test_fixed_requests', r't_fixed_storage_idle'),

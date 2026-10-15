@@ -77,6 +77,27 @@ fn bounded_prepublication_and_terminal_retention() {
     assert!(b.take_terminal(c).is_err());
 }
 #[test]
+fn a_slot_request_ends_with_its_own_slot_or_an_errno() {
+    let mut b = RequestBook::new(1).unwrap();
+    assert_eq!(b.reserve(id(1, 1), Kind::Slot(64)), Err(Error::Geometry));
+    let a = b.reserve(id(1, 1), Kind::Slot(5)).unwrap();
+    b.publish(a).unwrap();
+    // Another slot, a flag or a receipt is a record the kernel never posts.
+    assert_eq!(b.accept(rec(a, 6, 0)).err(), Some(Error::Record));
+    assert_eq!(b.accept(rec(a, 5, 1)).err(), Some(Error::Record));
+    let mut wide = rec(a, 5, 0);
+    wide.receipt = payload(a, 0).receipt;
+    assert_eq!(b.accept(wide).err(), Some(Error::Record));
+    assert!(b.accept(rec(a, 5, 0)).unwrap().terminal);
+    assert_eq!(b.take_terminal(a).unwrap().result, 5);
+    // A failure names no slot.
+    let c = b.reserve(id(1, 1), Kind::Slot(5)).unwrap();
+    b.publish(c).unwrap();
+    assert!(b.accept(rec(c, -2, 0)).unwrap().terminal);
+    assert_eq!(b.take_terminal(c).unwrap().result, -2);
+    assert_eq!(b.occupied(), 0);
+}
+#[test]
 fn multishot_more_and_final_keep_payload_separate() {
     let mut b = RequestBook::new(2).unwrap();
     let a = b.reserve(id(1, 3), pooled(true)).unwrap();

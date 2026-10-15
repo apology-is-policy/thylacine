@@ -59,5 +59,18 @@ int main(void){
  assert(!t_lease_init(&s,&bank,pool(),three,3,eight,1)&&free_cells()==59&&t_lease_cell(&s,0)==0&&t_lease_cell(&s,1)==1&&t_lease_cell(&s,2)==4);
  for(unsigned k=0;k<3;++k){assert(t_lease_accept_read(&s,(int32_t)k+2,4,receipt(k,1),&ignored)<0);assert(t_lease_accept_read(&s,(int32_t)k+1,4,receipt(k,1),&tokens[k])==1&&tokens[k].length==k+1);}
  assert(s.outstanding==3&&!q.outstanding);t_lease_release(&s);t_lease_release(&q);assert(free_cells()==64);
+ /* A refused read takes no lease but passes every check. */
+ {struct t_lease_ledger rb=book();struct t_lease_token held;struct t_loom_service_buffer_receipt back;
+ assert(t_lease_accept_read(&rb,4,5,receipt(0,11),&held)==1);
+ /* A replay of a member a payload holds, a member past the pool, a shot longer than its member. */
+ assert(t_lease_refuse_read(&rb,4,5,receipt(0,12),&back)==T_LEASE_BUSY);
+ assert(t_lease_refuse_read(&rb,4,5,receipt(2,12),&back)==T_LEASE_RECEIPT);
+ assert(t_lease_refuse_read(&rb,5,5,receipt(1,12),&back)==T_LEASE_RECEIPT);
+ /* A fresh shot for a free member goes back as its receipt; no lease is taken and its lease order advances, so the same record replayed is stale. */
+ assert(t_lease_refuse_read(&rb,4,5,receipt(1,12),&back)==1&&back.member==1&&back.lease==12&&rb.outstanding==1);
+ assert(t_lease_refuse_read(&rb,4,5,receipt(1,12),&back)==T_LEASE_STALE);
+ /* A non-payload record carries nothing to return. */
+ assert(!t_lease_refuse_read(&rb,0,0,(struct t_loom_service_buffer_receipt){0},&back));
+ assert(!t_lease_begin_return(&rb,&held)&&!t_lease_finish_return(&rb,&held,0)&&!rb.outstanding);t_lease_release(&rb);assert(free_cells()==64);}
  puts("C lease ledger ownership and malformed-vector checks PASS");return 0;
 }

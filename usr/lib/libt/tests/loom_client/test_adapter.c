@@ -1252,66 +1252,82 @@ static void a_pool_dropped_after_the_ring_closed_under_never_closes_the_number(v
     finish(&f);
 }
 
-int main(void) {
-    static void (*const tests[])(void) = {
-        setup_registers_every_buffer_and_drop_detaches_every_region,
-        a_refused_attach_detaches_what_was_attached,
-        connect_walk_open_write_then_read_round_trips,
-        a_failed_connect_reaps_its_scope,
-        each_walk_name_is_read_inside_the_enter_that_consumes_it,
-        queued_walks_keep_their_own_name_cells,
-        a_multishot_stream_runs_on_out_of_order_returns,
-        a_deadline_ends_the_operation_and_aborts_its_scope,
-        poll_rounds_the_time_left_up_to_a_whole_millisecond,
-        dropping_an_operation_aborts_its_scope_and_settles_its_entry,
-        a_full_cq_defers_completions_and_loses_none,
-        a_short_enter_leaves_the_rest_queued_for_a_later_turn,
-        a_full_sq_answers_enospc,
-        a_rejected_sqe_ends_its_operation_with_the_kernels_errno,
-        a_dropped_sqe_ends_the_process,
-        a_forged_completion_fails_the_ring,
-        closing_with_leases_held_keeps_their_bytes_until_they_drop,
-        an_enter_that_finds_the_descriptor_closed_forgets_it,
-        an_enter_that_races_the_close_forgets_the_descriptor,
-        a_poll_that_finds_the_descriptor_closed_forgets_it,
-        a_hangup_while_polling_forgets_the_descriptor,
-        retire_waits_until_the_kernel_retires_every_scope,
-        a_dropped_fid_is_clunked_then_reaped,
-        a_dropped_scope_is_reaped_after_its_fids_without_clunking_them,
-        a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk,
-        a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked,
-        an_open_dropped_in_flight_aborts_its_scope,
-        an_explicit_scope_abort_ends_its_operations_once,
-        a_target_dropped_under_its_connect_is_reaped_after_it,
-        an_exhausted_slot_table_reaps_before_it_refuses,
-        an_operation_held_across_retirement_keeps_its_terminal,
-        retirement_waits_for_terminals_posted_after_the_scope_retires,
-        an_sqe_not_yet_entered_holds_retirement_back,
-        a_terminal_posted_but_not_yet_routed_holds_retirement_back,
-        an_enter_refusal_not_yet_posted_holds_retirement_back,
-        a_stream_dropped_before_its_end_returns_the_shots_still_arriving,
-        a_late_shot_after_the_ring_closed_under_forgets_the_descriptor,
-        a_scope_dropped_after_the_ring_closed_under_never_closes_the_number,
-        a_ring_whose_register_finds_it_closed_never_reports_retired,
-        a_target_refused_for_its_registry_keeps_the_ring,
-        a_target_registered_after_the_ring_closed_under_never_closes_the_number,
-        a_close_learnt_by_the_turns_enter_is_reported_as_a_close,
-        a_held_refusal_claims_no_further_sqe,
-        a_connect_after_the_ring_closed_under_answers_a_close,
-        a_pool_made_after_the_ring_closed_under_answers_a_close,
-        a_payload_dropped_after_the_ring_closed_under_closes_the_ring,
-        a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return,
-        an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled,
-        a_walk_from_a_file_fid_clones_it_or_answers_enotdir,
-        a_refused_return_hands_the_payload_back,
-        an_enter_refusal_that_is_not_a_close_fails_the_ring,
-        a_poll_interrupted_by_a_note_is_a_spurious_wake,
-        a_poll_error_fails_the_ring,
-        an_explicit_close_with_live_handles_cancels_their_use,
-        a_pool_dropped_after_the_ring_closed_under_never_closes_the_number,
-    };
-    _Static_assert(sizeof(tests) / sizeof(tests[0]) == 55, "every scenario of tests/native.rs");
-    for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) tests[i]();
+#define T(name) { #name, name }
+static const struct { const char *name; void (*run)(void); } tests[] = {
+    T(setup_registers_every_buffer_and_drop_detaches_every_region),
+    T(a_refused_attach_detaches_what_was_attached),
+    T(connect_walk_open_write_then_read_round_trips),
+    T(a_failed_connect_reaps_its_scope),
+    T(each_walk_name_is_read_inside_the_enter_that_consumes_it),
+    T(queued_walks_keep_their_own_name_cells),
+    T(a_multishot_stream_runs_on_out_of_order_returns),
+    T(a_deadline_ends_the_operation_and_aborts_its_scope),
+    T(poll_rounds_the_time_left_up_to_a_whole_millisecond),
+    T(dropping_an_operation_aborts_its_scope_and_settles_its_entry),
+    T(a_full_cq_defers_completions_and_loses_none),
+    T(a_short_enter_leaves_the_rest_queued_for_a_later_turn),
+    T(a_full_sq_answers_enospc),
+    T(a_rejected_sqe_ends_its_operation_with_the_kernels_errno),
+    T(a_dropped_sqe_ends_the_process),
+    T(a_forged_completion_fails_the_ring),
+    T(closing_with_leases_held_keeps_their_bytes_until_they_drop),
+    T(an_enter_that_finds_the_descriptor_closed_forgets_it),
+    T(an_enter_that_races_the_close_forgets_the_descriptor),
+    T(a_poll_that_finds_the_descriptor_closed_forgets_it),
+    T(a_hangup_while_polling_forgets_the_descriptor),
+    T(retire_waits_until_the_kernel_retires_every_scope),
+    T(a_dropped_fid_is_clunked_then_reaped),
+    T(a_dropped_scope_is_reaped_after_its_fids_without_clunking_them),
+    T(a_failed_walk_dropped_unobserved_is_reaped_without_a_clunk),
+    T(a_walk_dropped_in_flight_aborts_and_reaps_its_reservation_unclunked),
+    T(an_open_dropped_in_flight_aborts_its_scope),
+    T(an_explicit_scope_abort_ends_its_operations_once),
+    T(a_target_dropped_under_its_connect_is_reaped_after_it),
+    T(an_exhausted_slot_table_reaps_before_it_refuses),
+    T(an_operation_held_across_retirement_keeps_its_terminal),
+    T(retirement_waits_for_terminals_posted_after_the_scope_retires),
+    T(an_sqe_not_yet_entered_holds_retirement_back),
+    T(a_terminal_posted_but_not_yet_routed_holds_retirement_back),
+    T(an_enter_refusal_not_yet_posted_holds_retirement_back),
+    T(a_stream_dropped_before_its_end_returns_the_shots_still_arriving),
+    T(a_late_shot_after_the_ring_closed_under_forgets_the_descriptor),
+    T(a_scope_dropped_after_the_ring_closed_under_never_closes_the_number),
+    T(a_ring_whose_register_finds_it_closed_never_reports_retired),
+    T(a_target_refused_for_its_registry_keeps_the_ring),
+    T(a_target_registered_after_the_ring_closed_under_never_closes_the_number),
+    T(a_close_learnt_by_the_turns_enter_is_reported_as_a_close),
+    T(a_held_refusal_claims_no_further_sqe),
+    T(a_connect_after_the_ring_closed_under_answers_a_close),
+    T(a_pool_made_after_the_ring_closed_under_answers_a_close),
+    T(a_payload_dropped_after_the_ring_closed_under_closes_the_ring),
+    T(a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return),
+    T(an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled),
+    T(a_walk_from_a_file_fid_clones_it_or_answers_enotdir),
+    T(a_refused_return_hands_the_payload_back),
+    T(an_enter_refusal_that_is_not_a_close_fails_the_ring),
+    T(a_poll_interrupted_by_a_note_is_a_spurious_wake),
+    T(a_poll_error_fails_the_ring),
+    T(an_explicit_close_with_live_handles_cancels_their_use),
+    T(a_pool_dropped_after_the_ring_closed_under_never_closes_the_number),
+};
+#undef T
+_Static_assert(sizeof(tests) / sizeof(tests[0]) == 55, "every scenario of tests/native.rs");
+
+/* With a name, runs only that scenario (exit 2 for an unknown one). */
+int main(int argc, char **argv) {
+    size_t n = sizeof(tests) / sizeof(tests[0]), ran = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (argc > 1 && strcmp(argv[1], tests[i].name)) continue;
+        printf("running %s\n", tests[i].name);
+        fflush(stdout);
+        tests[i].run();
+        ++ran;
+    }
+    if (argc > 1) {
+        if (!ran) return 2;
+        printf("C native adapter scenario %s PASS\n", argv[1]);
+        return 0;
+    }
     puts("C fifty-five native adapter scenarios PASS");
     return 0;
 }
