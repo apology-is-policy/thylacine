@@ -26,9 +26,11 @@ int main(int argc, char **argv) {
         printf("DUP2-OLD-END tests=%d\n", checks); return 0;
     }
     check(argc == 1, "expected-mode");
+    /* The flag is set so that keeping it (self) and clearing it (a new target) both show. */
+    check(t_handle_flags_set(fd, T_HANDLE_CLOSE_ON_EXEC) == 0, "set-cloexec");
     long flags = t_handle_flags_get(fd);
     errno = EDOM;
-    check(flags >= 0 && dup2(fd, fd) == fd && errno == EDOM &&
+    check(flags == T_HANDLE_CLOSE_ON_EXEC && dup2(fd, fd) == fd && errno == EDOM &&
           t_handle_flags_get(fd) == flags, "live-native-preserves-flags");
     errno = 0;
     check(dup2(-1, -1) == -1 && errno == EBADF, "negative");

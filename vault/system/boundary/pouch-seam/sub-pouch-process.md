@@ -49,6 +49,9 @@ EBADF (a peer thread closed it, and its number may already be another
 thread's; round 2). Astra's four guest witnesses (descriptor-ops, dup2-self, handle-query,
 spawn-actions) were built and run by nothing on main; B-3b compiles them into
 `/bin` and `tools/interactive/ls-descriptors.exp` runs each as uid 1000.
+dup2-self and handle-query set close-on-exec before they read it. As written,
+both read only a clear flag, and a CI image whose FLAGS_GET hid the flag from
+uid 1000 passed them; descriptor-ops alone turned red (2026-10-15).
 
 The round-1 close (2026-10-15): `pipe2`'s failure unwind closes with the raw
 `__syscall(SYS_close)`, as `popen` does, never the cancellable

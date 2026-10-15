@@ -66,7 +66,10 @@ int main(int argc, char **argv) {
     char byte;
     check(t_read(narrow, &byte, 1) < 0 && t_write(narrow, &byte, 1) < 0,
           "transfer-only-denies-io");
-    check(t_handle_flags_get(narrow) == 0, "query-without-io-rights");
+    /* Set, so a query answering 0 for every live slot cannot pass. */
+    check(t_handle_flags_set(narrow, T_HANDLE_CLOSE_ON_EXEC) == 0 &&
+          t_handle_flags_get(narrow) == T_HANDLE_CLOSE_ON_EXEC,
+          "query-without-io-rights");
     /* Dup the same existing object, avoiding a thousand device opens. No
      * allocations/stdio while full; query before releasing any slot. */
     long held[1024]; int n = 0;
@@ -84,7 +87,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < n; ++i) close_failures += t_close(held[i]) != 0;
     check(live == 1024 && n > 900 && n < 1024 && retry < 0, "parent-table-saturated");
     check(close_failures == 0, "saturated-table-cleanup");
-    check(full_flags == 0, "query-while-table-full");
+    check(full_flags == T_HANDLE_CLOSE_ON_EXEC, "query-while-table-full");
     check(t_close(narrow) == 0 && t_handle_flags_get(narrow) == -EBADF,
           "closed-slot");
     check(close(fd) == 0, "cleanup");
