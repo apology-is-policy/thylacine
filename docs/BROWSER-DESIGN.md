@@ -858,7 +858,7 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-3b | kernel + Pouch (after B-3g): Astra's approved native descriptor calls brought onto main and extended (`dec-2026-10-14-fd-calls-on-astra`, handoff 049); `fcntl` (`F_GETFD`/`F_SETFD`/`F_GETFL`/`F_SETFL`/`F_DUPFD[_CLOEXEC]`), `dup`/`dup2`/`dup3`; the `SYS_POSTNOTE` empty-name probe for `kill(pid, 0)`; `SYS_GETPPID`. Audit-bearing. | kernel tests + `pouch-hello-fd` legs, each RED once; audit closed |
 | B-3c | ICU with its compiled tests (`cintltst`, `intltest`); file data through `U_HAVE_MMAP=0`. | the census on the device |
 | B-3d | libpng, libjpeg-turbo, libwebp. | each library's CTest list on the device, `pngtest` and `tjunittest` among them; libwebp, which registers none, its cwebp/dwebp round trips and three pinned digests |
-| B-3e | libxml2. | runtest, testapi, testchar with their data in the pool |
+| B-3e | libxml2, with the W3C XML conformance suite its CI installs. | libxml2's whole CTest list on the device (23: runtest, runsuite, runxmlconf and six more compiled programs, the xmllint and xmlcatalog script tests, the catalog add/delete test), its two CMake scripts restored by the port (the tarball omits them) and translated as the steps they run |
 | B-3f | FreeType (without HarfBuzz, to break the cycle), then HarfBuzz over FreeType + ICU. | hb-shape over `test/shape` |
 | B-3g | fontconfig with libxml2; `/lib/font` populated; host gperf. | fc-match against the fixed font set |
 | B-3h | kernel + Pouch: the 9P `Tlock`/`Tgetlock` client and a native lock call; Pouch `fcntl` `F_SETLK`/`F_SETLKW`/`F_GETLK` and `flock`. Audit-bearing. | kernel tests against Stratum's lock table; two Procs contending, each RED once; audit closed |

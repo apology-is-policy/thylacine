@@ -22,6 +22,96 @@ needed the operator.
 
 
 ---
+## 2026-10-15 (main, Opus 5.5, effort max) -- B-3e: libxml2 on the device finds two platform gaps (dup, a new directory's owner); the shared disk vanishes and returns
+
+- *B-3e: libxml2's release tarball cannot pass its own CTest list.* 2.15.4's
+  CMakeLists registers 22 tests (23 with the W3C suite), fourteen of them
+  through `cmake -P run_and_diff.cmake` and `-P test_xmlcatalog_add_del.cmake`,
+  and the tarball ships neither script: on a native build here, 14 of 22
+  fail "Not a file". The port's patch 0001 restores both, byte for byte from
+  the tag; with them all 23 pass natively.
+- *The bar is upstream's CI, read from its files.* `.gitlab-ci.yml` and
+  `test_cmake.sh` at the tag configure schematron, zlib and the HTTP stubs,
+  and the CI image's Dockerfile unpacks the W3C XML conformance suite as
+  `xmlconf/`, which is what registers `runxmlconf`. B-3e builds that
+  configuration (Python bindings aside: they carry no C tests) and pins the
+  suite (`[cache.xmlts]`; W3C publishes no checksum, so the sha256 is the
+  first fetch's).
+- *Two scripts, translated as the steps they perform.* A test became a list
+  of steps in the manifest; `run_and_diff.cmake` is the shell run with its
+  status only reported, then the comparisons, and the catalog script its
+  eleven commands. Each script is pinned by sha256 in the translator, the way
+  libpng's wrapper is checked against its template. One semantic was
+  measured, not read: the script's relative `INPUT_FILE` resolves against
+  `WORKDIR` (the host build's test directory has no `test/`, and the run's
+  output still matched the expected).
+- *B-3d's lesson, applied before the device saw anything.* A Python twin of
+  muster ran the translated manifest of the NATIVE build against a pruned
+  tree holding only what the device would get (the stage list's 54 files
+  plus `test/`, `result/`, `xmlconf/`): 23 of 23. (The first dry run staged
+  69: the native tree still held 15 outputs of earlier CTest runs, which the
+  translator stages as inputs because they exist; each is truncated or
+  removed by its step before it is read, and the rerun from a clean tree
+  staged the device's 54. WIP `2a49c446c`'s message says 69.) Native CTest also predicted
+  the RED's failing set (three tests) before the bake started.
+- *A trap caught in review, not by a run:* the first staging draft merged the
+  data trees with `cp -R dir dest/dir`, which NESTS (`dest/dir/dir`) when the
+  stage list has already created `dest/dir`; it is a tar pipe now.
+- *The first device run: ICU green, every muster leg exit 2 -- my regression,
+  and my twin could not see it.* The steps rewrite made muster create its log
+  directory with a new mkdir -p, which asks `create_dir("/tmp")` first; on
+  the device a mkdir of an EXISTING name in a directory the user cannot write
+  answers PermissionDenied (Linux: EEXIST), so `muster: logs
+  /tmp/muster-<lib>: permission denied` on all four legs. B-3d's muster
+  created only the leaf. The Python twin's `os.makedirs` stats first, so the
+  dry run proved the translation and the staging but not muster's own calls
+  on this kernel: a twin is faithful only in what it reimplements. mkdir_p
+  now skips existing components; the errno order is OPEN-BUGS (with B-3b,
+  and a thing to check in fontconfig's cache-dir code at B-3g).
+- *Then the shared disk went: 10.6 GB free at 03:55Z, 3.58 GB at 04:02Z, and
+  no agent wrote it.* The second bake refused at build.sh's 6 GB floor (its
+  log: refused at its first step, already at 3580 MB), so the gate booted the
+  old image and its exit 2 was not evidence. A search of every file this user
+  can read, by inode-change time (which a `ditto` or `rsync -a` copy cannot
+  backdate), found about 1 GB new; corona and Astra measured the same and had
+  deleted nothing. What did move at that minute: `softwareupdated` restarted
+  at 04:00:13Z (install.log), and the Update volume's restore.log shows it
+  looping "Will prepare target for install ... Reverting to snapshot" through
+  04:21Z. The space came back by itself at about 05:03Z: free went 2607 ->
+  10319 MiB while I deleted only a 1.1 GB scratch build. The updater is the
+  lead, not a finding -- its staging is root-only, and I could not see it.
+  The hour went to B-3f's research and code instead (B-3f's entry).
+- *A question the Release build raised, answered: no landed test is hollow.*
+  `cmake_lib` configures Release, which defines NDEBUG, and an upstream test
+  that checks with `assert()` would check nothing. None of B-3d's or B-3e's
+  registered tests rests on one: libpng's `tarith` (6 asserts) is not
+  registered; `pngimage`'s three are its own bookkeeping; libjpeg-turbo has
+  none; libxml2's and libwebp's are in library and tool code.
+- *The device run (05:03-05:09Z, the CI image of `d82cb6b61`, warm bake 64 s,
+  gate 297 s): ICU and the codecs green, libxml2 19 of 23 red, for two
+  reasons, neither muster's.* Green: icu-c, icu-cxx, libpng 37/37,
+  libjpeg-turbo 332/332, libwebp 14/14. libxml2 passed testapi, testchar,
+  testdict and runxmlconf. (1) runtest, runsuite, testcatalog, testparser and
+  testrecurse exit 1 with every file load "Function not implemented":
+  libxml2 2.15's `xmlInputFromFd` (xmlIO.c:1198, 1230) `dup()`s each file it
+  opens, and Pouch's plain `dup` is `__NR_dup 0xFFFF`, ENOSYS (seam patch
+  0001; 0026 wired dup2/dup3 onto 0-2 only). The real dup is B-3b's, on
+  Astra's DUP_TO (vote 7), so B-3b is pulled forward ahead of this close: a
+  dependency, not a scope change. (2) The thirteen script and catalog tests
+  die in muster's own `mkdir -p` of `build/result/scripts`: PermissionDenied.
+  A single-level mkdir in the same 1777 `build/` succeeded
+  (catalog_add_del's step 2), and creating inside that new directory then
+  failed ("could not open .../mycatalog for saving"). The reading so far: a
+  directory the user makes on the pool is not the user's -- dev9p_create
+  sends only a gid, and Tmkdir creates as the session's attach identity --
+  so its creator gets the 0755's other bits. That is a hypothesis; a
+  one-boot device probe is queued behind Astra's 36-boot lease. Both are in
+  OPEN-BUGS.
+- *What the dry run could not have seen, again.* Both causes sit below
+  anything the host twin reimplements: the twin's `os.dup` and `os.makedirs`
+  are the host's. A twin proves the translation and the staging; only the
+  device proves the platform.
+
 ## 2026-10-15 (main, Opus 5.5, effort max) -- B-3d: the image codecs' upstream tests on the device
 
 - *B-3d: the codecs run upstream's own lists, not a copy of them.* libpng
