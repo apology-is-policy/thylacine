@@ -26,6 +26,14 @@ sigaltstack (132, VIV_ENOSYS) now carries the ceiling argument.
 Restart_syscall (128) keeps its ENOSYS row against `SYS_ICACHE_SYNC_SPACE`.
 See [[sub-kernel-syscall-abi]] and `docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md`.
 
+The fcntl shell's F_DUPFD and dup arms now share the native lowest-free core
+(`handle_dup_posix_checked`), which decides EBADF, EINVAL and EMFILE under the
+table lock. Before, each arm re-queried the fd after a failed dup. F_GETFL
+reports O_APPEND. `vivarium_fcntl_decide` narrows the F_DUPFD minimum to 32
+bits, as the narrowing rule below requires: Linux's `do_fcntl` passes it as an
+int, so 2^32 + 10 asks for 10, and a sign-extended -1 is past every table.
+Before the fix it was kept whole, and both answered EINVAL.
+
 ## Purpose
 
 A Linux binary issues Linux syscall numbers. This layer decides, for each

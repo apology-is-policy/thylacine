@@ -1106,15 +1106,18 @@ enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
         *cloexec_out = (arg & VIV_FD_CLOEXEC) != 0;
         return VIV_TRANSLATED;
 
+    // The minimum is narrowed as `cmd` is: Linux's do_fcntl hands f_dupfd the
+    // argument as an int (`argi`), so a stale upper half selects nothing, and a
+    // sign-extended negative reads 0xFFFFFFFF -- past every table, EINVAL.
     case VIV_F_DUPFD:
         *op_out     = VIV_FCNTL_DUPFD;
-        *min_fd_out = arg;
+        *min_fd_out = (u32)arg;
         return VIV_TRANSLATED;
 
     case VIV_F_DUPFD_CLOEXEC:
         *op_out      = VIV_FCNTL_DUPFD;
         *cloexec_out = true;
-        *min_fd_out  = arg;
+        *min_fd_out  = (u32)arg;
         return VIV_TRANSLATED;
 
     case VIV_F_GETFL:

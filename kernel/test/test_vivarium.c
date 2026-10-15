@@ -3817,6 +3817,17 @@ void test_vivarium_fcntl_domain(void) {
     TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "the plain form leaves the flag off");
     TEST_EXPECT_EQ(minfd, (u64)3, "and carries its minimum");
 
+    // The minimum is an int to Linux: only its low 32 bits are significant.
+    minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_DUPFD, (1ull << 32) | 10u, &op, &cx,
+                                              &minfd),
+                   (int)VIV_TRANSLATED, "F_DUPFD with a stale upper half is served");
+    TEST_EXPECT_EQ(minfd, (u64)10, "the minimum is the low 32 bits");
+    minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_DUPFD_CLOEXEC, ~0ull, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_DUPFD_CLOEXEC(-1) is served (the shell refuses it)");
+    TEST_EXPECT_EQ(minfd, (u64)0xFFFFFFFFu, "a sign-extended -1 narrows to 0xFFFFFFFF");
+
     op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
     TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, &cx, &minfd),
                    (int)VIV_TRANSLATED, "F_GETFD is served");
@@ -4218,6 +4229,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     // arm reaches handle_dup_posix and honours the minimum first.
     hidx_t live = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
     s64 ctl = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, 10);
+    // The minimum is an int to Linux: 2^32 + 10 asks for 10, not past the table.
+    s64 ctl_hi = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (1ull << 32) + 10u);
 
     // ---- LEG A: F_DUPFD on a CLOSED fd is EBADF -- the ash probe. ---------
     // fd 3 is closed in a fresh Proc (the control's source took slot 0 and its
@@ -4243,6 +4256,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
 
     // ---- LEG C: a minimum at or past the table is EINVAL (Linux: RLIMIT). --
     s64 c = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
+    // A sign-extended -1 narrows to 0xFFFFFFFF: past the table, EINVAL.
+    s64 c2 = viv_fcntl_for_test(p, (u64)live, VIV_F_DUPFD, ~0ull);
 
     // ---- TEARDOWN, then assert. ---------------------------------------
     p->state = PROC_STATE_ZOMBIE;
@@ -4252,6 +4267,9 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     TEST_ASSERT(ctl >= 10,
                 "CONTROL: F_DUPFD(live, 10) lands at or above 10 -- the arm is "
                 "wired and honours the minimum");
+    TEST_ASSERT(ctl_hi >= 10,
+                "CONTROL: F_DUPFD(live, 2^32 + 10) lands at or above 10 -- Linux "
+                "reads the minimum as an int (pre-fix: EINVAL)");
     TEST_EXPECT_EQ(a_closed, -1, "A precondition: fd 3 is CLOSED");
     TEST_EXPECT_EQ(a, -(s64)T_E_BADF,
                    "A: F_DUPFD on a closed fd is EBADF -- ash's `N>&M` probe "
@@ -4269,6 +4287,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
                    "would fail here)");
     TEST_EXPECT_EQ(c, -(s64)T_E_INVAL,
                    "C: a minimum at the table size is EINVAL, not EMFILE");
+    TEST_EXPECT_EQ(c2, -(s64)T_E_INVAL,
+                   "C: a sign-extended -1 minimum is EINVAL");
 }
 
 // F_GETFL / F_SETFL round-trip through the REAL fcntl shell -> handle_set_nonblock
