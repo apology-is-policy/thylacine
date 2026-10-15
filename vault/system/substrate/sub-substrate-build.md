@@ -22,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-15
 ---
 ## Purpose
 
@@ -432,6 +432,32 @@ once the chunk is on.
 built under different flags (B-3c added `-DU_HAVE_MMAP=0` and `--enable-tests`)
 counted as up to date because its files were newer than their inputs: the same
 stale-artifact class as the four guards above, for a flag rather than a file.
+
+**The codecs (B-3d, 2026-10-15).** `cmake_lib` builds one CMake library under
+`build/pouch/<name>`: the tarball checked against its pin (`[cache.libpng]`,
+`[cache.libjpeg-turbo]`, `[cache.libwebp]`; `tools/forage.sh codecs`),
+unpacked fresh with the port's patches in order (`usr/ports/<name>/patches`),
+configured with the pouch C++ toolchain, built whole -- the library and
+upstream's test programs -- and installed at `<name>/stage`. It installs with
+the stage as the prefix, not under `DESTDIR` with a prefix of `/`:
+GNUInstallDirs maps that prefix to `/usr`, and the first build left the
+stages' `lib/` empty for libwebp's link to miss. Its reuse stamp carries the
+pin, each patch's sha256 and the configure line, and libc, libc++ and the
+toolchain files are checked against it by time. `build_libwebp` builds
+libpng and libjpeg-turbo first and links cwebp/dwebp to them, so libwebp's
+checks also cross the other two codecs (`tools/build.sh codecs`).
+`build_lib_tests` is now two halves, ICU's and the codecs', each staging only
+its own part of the stage; before the split, ICU's up-to-date return would have
+skipped the codecs and its rebuild deleted the whole stage. The codec half
+dumps each library's CTest list, has `tools/libtests-manifest.py` translate it
+into `/var/lib_tests/<lib>.manifest` plus the files it needs
+([[sub-substrate-libtests]]), stages them (programs stripped) with the native
+runner at `/var/lib_tests/bin/muster`, and writes each manifest's test count to
+`build/pouch/lib-tests/<lib>.count`, which ls-libs reads as the number the
+device must report. The populate arm puts `/var/lib_tests` and stamps each
+library's build tree 1777 (the tests write their outputs there, as in
+upstream's own tree); bake-verify adds `MUSTER`, `PNGTESTS`, `JPEGTESTS` and
+`WEBPTESTS`.
 
 ## Data structures
 

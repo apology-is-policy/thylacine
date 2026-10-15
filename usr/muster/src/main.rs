@@ -38,13 +38,17 @@ use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, File, OpenOptions};
 use libthyla_rs::io::{Read, Write};
 use libthyla_rs::process::{Command, Stdio};
-use libthyla_rs::t_putstr;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 // How much of each log a failing test prints: a failure summary, not the log.
 const TAIL: usize = 1536;
+
+// To fd 1, so a shell redirect captures the run (t_putstr is the console).
+fn say(s: &str) {
+    let _ = libthyla_rs::io::stdout().write_all(s.as_bytes());
+}
 
 #[derive(PartialEq)]
 enum Builtin {
@@ -144,10 +148,10 @@ fn tail(label: &str, path: &str) {
             from += nl + 1;
         }
     }
-    t_putstr(&format!("  --- {} (last {} bytes) ---\n", label, bytes.len() - from));
-    t_putstr(&String::from_utf8_lossy(&bytes[from..]));
+    say(&format!("  --- {} (last {} bytes) ---\n", label, bytes.len() - from));
+    say(&String::from_utf8_lossy(&bytes[from..]));
     if bytes.last() != Some(&b'\n') {
-        t_putstr("\n");
+        say("\n");
     }
 }
 
@@ -196,34 +200,34 @@ pub extern "C" fn rs_main() -> i64 {
     let path = match args.get_str(1) {
         Some(p) if args.len() == 2 => p,
         _ => {
-            t_putstr("usage: muster <manifest>\n");
+            say("usage: muster <manifest>\n");
             return 2;
         }
     };
     let text = match read_file(path) {
         Ok(b) => b,
         Err(e) => {
-            t_putstr(&format!("muster: {}: {}\n", path, e));
+            say(&format!("muster: {}: {}\n", path, e));
             return 2;
         }
     };
     let m = match core::str::from_utf8(&text).map_err(|_| String::from("not UTF-8")).and_then(parse) {
         Ok(m) => m,
         Err(e) => {
-            t_putstr(&format!("muster: {}: {}\n", path, e));
+            say(&format!("muster: {}: {}\n", path, e));
             return 2;
         }
     };
     match fs::create_dir(m.logs.as_str()) {
         Ok(()) | Err(Error::Exists) => {}
         Err(e) => {
-            t_putstr(&format!("muster: logs {}: {}\n", m.logs, e));
+            say(&format!("muster: logs {}: {}\n", m.logs, e));
             return 2;
         }
     }
     let empty = format!("{}/stdin.empty", m.logs);
     if let Err(e) = create(&empty) {
-        t_putstr(&format!("muster: {}: {}\n", empty, e));
+        say(&format!("muster: {}: {}\n", empty, e));
         return 2;
     }
 
@@ -235,22 +239,22 @@ pub extern "C" fn rs_main() -> i64 {
             Ok(0) => {}
             Ok(status) => {
                 failed += 1;
-                t_putstr(&format!("muster: FAIL {}: exit status {}\n", t.name, status));
+                say(&format!("muster: FAIL {}: exit status {}\n", t.name, status));
                 tail("stdout", &out);
                 tail("stderr", &err);
             }
             Err(why) => {
                 failed += 1;
-                t_putstr(&format!("muster: FAIL {}: {}\n", t.name, why));
+                say(&format!("muster: FAIL {}: {}\n", t.name, why));
             }
         }
     }
     let n = m.tests.len();
     if failed == 0 {
-        t_putstr(&format!("muster: {}: {} of {} passed\n", m.lib, n, n));
+        say(&format!("muster: {}: {} of {} passed\n", m.lib, n, n));
         0
     } else {
-        t_putstr(&format!("muster: {}: {} of {} FAILED\n", m.lib, failed, n));
+        say(&format!("muster: {}: {} of {} FAILED\n", m.lib, failed, n));
         1
     }
 }
