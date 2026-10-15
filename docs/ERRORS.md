@@ -532,8 +532,12 @@ Shell `mount`/`unmount` translate these failures to status 1 plus `$errstr`.
 
 ## Native handle metadata query (operator-approved, October 11)
 
-`SYS_HANDLE_FLAGS_GET` (129) returns a nonnegative flag word, currently 0 or
-bit0 CLOSE_ON_EXEC. It returns `-T_E_BADF` for a full-width out-of-range index
+`SYS_HANDLE_FLAGS_GET` (129) returns a nonnegative flag word: bit0
+CLOSE_ON_EXEC, and the open-file status F_GETFL reports (B-3b) -- the access
+mode (omode & 3) at bits 8-9, NONBLOCK at bit 10, APPEND (opened
+SYS_WALK_OPEN_OAPPEND) at bit 11; a non-Spoor descriptor reports no status. The
+word is read under one table-lock hold, so the flag and the status describe the
+same occupant of the slot. It returns `-T_E_BADF` for a full-width out-of-range index
 or absent slot, and `-T_E_INVAL` for a missing internal current thread/process.
 No allocation or I/O is attempted. Native callers receive the raw negative
 errno. Pouch spawn returns the positive errno to its caller. Historical native
@@ -546,8 +550,39 @@ is answered by the Vivarium's kill translation rather than entering this handler
 ### Native descriptor mutation (130/131)
 
 HANDLE_FLAGS_SET(fd,flags) returns0; HANDLE_DUP_TO(source,target,flags) returns
-the target. Both accept only close-on-exec bit0. In order: missing Proc/thread
-EINVAL, unknown flag bits EINVAL, full-width index bounds EBADF, same-index dup
-EINVAL, locked non-live source EBADF; prohibited duplication aliases EACCES.
-No EPERM is returned. Failures do not mutate slots or flags. Pouch alone maps
-legacy unknown-call raw-1 to ENOSYS at these boundaries; native wrappers stay raw.
+the target. FLAGS_SET accepts only close-on-exec bit0. In order: missing
+Proc/thread EINVAL, unknown flag bits EINVAL, full-width index bounds EBADF,
+same-index dup EINVAL, locked non-live source EBADF; prohibited duplication
+aliases EACCES. No EPERM is returned. Failures do not mutate slots or flags.
+Pouch alone maps legacy unknown-call raw-1 to ENOSYS at these boundaries;
+native wrappers stay raw.
+
+DUP_TO also takes bit1 DUP_LOWEST (B-3b): `target` is then a floor and the
+call returns the lowest free slot at or above it (F_DUPFD; dup is floor 0).
+In order: unknown flag bits EINVAL, a source out of range EBADF, then under the
+table lock a non-live source EBADF, a floor out of range EINVAL (a closed source
+outranks a bad floor, as Linux looks the descriptor up first), a prohibited
+alias EACCES, and no free slot at or above the floor EMFILE. A source may be
+its own floor. The Linux phenotype's dup and F_DUPFD answer from the same
+checked core (EACCES reads there as EMFILE: Linux has no "exists but cannot be
+duplicated" answer).
+
+### Pouch fcntl and dup (B-3b)
+
+dup, dup2, dup3, F_DUPFD and F_DUPFD_CLOEXEC answer the DUP_TO errnos above.
+F_GETFL returns O_RDONLY / O_WRONLY / O_RDWR from the access mode (Plan 9's
+OEXEC reads as O_RDONLY) with O_NONBLOCK and O_APPEND. F_SETFL changes
+O_NONBLOCK only (through SYS_SET_NONBLOCK); restating the current O_APPEND is
+accepted, flipping it is EINVAL (the append lives in the server's open of the
+file), O_ASYNC, O_DIRECT and O_NOATIME are EINVAL, and every other bit is
+ignored, as Linux ignores it. A tagged Pouch socket answers these commands
+ENOSYS. Other fcntl commands remain ENOSYS.
+
+### Positioned I/O and create order (B-3b)
+
+SYS_PREAD and SYS_PWRITE answer a buffer outside the user half (or NULL with a
+nonzero length) -T_E_FAULT, as SYS_READ and SYS_WRITE do; they answered a flat
+-1 before. An exclusive create or mkdir of a name that already exists answers
+-T_E_EXIST even when the caller may not write the directory, provided it may
+search it (X); without X it answers -T_E_ACCES and discloses nothing. The
+existence probe does not follow a final symlink.

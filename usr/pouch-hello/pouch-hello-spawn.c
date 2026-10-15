@@ -54,17 +54,18 @@ int main(int argc, char **argv) {
 	// exactly what proves argv pass-through end to end.
 	const char *self = "pouch-hello-spawn";
 
-	// === dup2 micro-test: old==new returns new (the clear-CLOEXEC idiom, the
-	//     only dup2 case Thylacine supports -- onto-target has no kernel
-	//     primitive; a negative fd is EBADF). old==new on a live fd is NOT
-	//     validated beyond old>=0 (no rights-independent fd-existence probe). ===
+	// === dup2 micro-test: old==new returns new after validating old (0054); a
+	//     negative fd is EBADF; onto a target is native DUP_TO (0055): a closed
+	//     source is EBADF and a live one lands on the exact target. ===
 	if (dup2(1, 1) != 1) return fail("dup2(1,1)!=1", 0);
 	errno = 0;
 	if (dup2(-1, -1) != -1 || errno != EBADF) return fail("dup2(-1,-1) not EBADF", 0);
-	// onto-target (old != new) has no kernel primitive -> ENOSYS, deterministic
-	// regardless of whether 3/4 are open (the resolver never runs).
 	errno = 0;
-	if (dup2(3, 4) != -1 || errno != ENOSYS) return fail("dup2 onto-target not ENOSYS", 0);
+	if (dup2(200, 200) != -1 || errno != EBADF) return fail("dup2 of a closed fd onto itself not EBADF", 0);
+	errno = 0;
+	if (dup2(200, 201) != -1 || errno != EBADF) return fail("dup2 of a closed source not EBADF", 0);
+	if (dup2(1, 201) != 201) return fail("dup2 onto a free target", 0);
+	close(201);
 
 	// === test 1: pipe2(O_CLOEXEC) + posix_spawn("ok") redirecting the child's
 	//     stdout into the pipe; capture + reap; expect WEXITSTATUS 0 ===

@@ -1,0 +1,67 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-descriptors.exp -- Boosty B-3b over a real PTY: the
+# native descriptor witnesses run as the logged-in user (uid 1000; each refuses
+# any other), from a fresh directory under /tmp (spawn-actions creates and
+# removes its target file in the working directory).
+#
+#   descriptor-ops  FLAGS_SET / DUP_TO through Pouch and libt: bad flags and
+#                   narrowed indices refused, rights never widened, a full
+#                   table, spawn and native exec consuming close-on-exec,
+#                   sockets refused.            Ends "OPS-END tests=N filled=M".
+#   dup2-self       dup2(fd, fd) validates without changing the flag.
+#                                               Ends "DUP2-END tests=N filled=M".
+#   handle-query    FLAGS_GET: ranges, a transfer-only handle, a full table.
+#                                               Ends "QUERY-END filled=M".
+#   spawn-actions   posix_spawn's ordered descriptor actions over a child.
+#                                               Ends "SPAWN-ACTIONS-END tests=N failures=0".
+#
+# Each probe prints a PASS line per check and exits 1 at its first FAIL, so a
+# leg asserts its exit status AND its end line: a probe that exits 0 having
+# run nothing prints no end line. Every verdict is grepped in lower case and
+# asserted in UPPER case through `tr` -- the terminal echoes what is typed, and
+# an expect the echo can satisfy proves nothing. Every leg runs; a red leg
+# prints its log's tail and the scenario fails after the last leg.
+#
+# G-3: HVF -- no GIC/timer/BAR surface of its own.
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+lc_run_expect "mkdir /tmp/dops && cd /tmp/dops && pwd | tr a-z A-Z" "/TMP/DOPS"
+
+set ::ops_red {}
+proc ops_leg {tag prog verdict} {
+    global lc_cmd_timeout
+    set tagU [string toupper $tag]
+    set log /tmp/dops-$tag.log
+    lc_send "$prog > $log; echo $tag-\$status | tr a-z A-Z"
+    expect {
+        -ex "$tagU- 0\r"           { lc_step "saw: $prog exited 0" }
+        -re "$tagU- (\[1-9\]\[0-9\]*)" {
+            set rc $expect_out(1,string)
+            lc_send "tail -n 20 $log"
+            expect -timeout 5 timeout {}
+            lappend ::ops_red "$prog exited $rc"
+            return 0
+        }
+        -re {EXTINCTION:}          { lc_extinction_fail "kernel extinction during $prog" }
+        timeout                    { lc_fail "timeout (${lc_cmd_timeout}s) waiting for $prog's exit" }
+        eof                        { lc_fail "unexpected EOF during $prog" }
+    }
+    lc_run_expect "grep -i '$verdict' $log | tr a-z A-Z" [string toupper $verdict]
+    return 1
+}
+
+foreach tag {ops dup2 query spawn} prog {descriptor-ops dup2-self handle-query spawn-actions} verdict {"ops-end tests=" "dup2-end tests=" "query-end filled=" "failures=0"} {
+    if {[ops_leg $tag /bin/pouch-hello-$prog $verdict]} {
+        lc_pass "ls-descriptors($prog): exit 0, end line present"
+    }
+}
+if {[llength $::ops_red]} {
+    lc_fail "[join $::ops_red {; }] (each log's tail is above)"
+}
+
+lc_quit
+exit 0

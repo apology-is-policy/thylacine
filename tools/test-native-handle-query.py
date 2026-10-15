@@ -43,9 +43,12 @@ for name, patterns in checks.items():
 source = r / 'kernel/syscall.c'
 s = source.read_text()
 assert 'sys_handle_flags_get_handler(ctx->regs[0])' in s
-start = s.index('static s64 sys_handle_flags_get_handler(')
-end = s.index('\n}', start) + 2
-handler = s[start:end]
+parts = []
+for name in ['sys_handle_flags_get_in', 'sys_handle_flags_get_handler']:
+    start = s.index('static s64 ' + name + '(')
+    end = s.index('\n}', start) + 2
+    parts.append(s[start:end])
+handler = '\n'.join(parts)
 a.output.mkdir(parents=True, exist_ok=False)
 (a.output / 'handler.c').write_text(handler+'\n')
 inputs = [r / n for n in checks] + [source, Path(__file__), r / 'tools/host-tests/native-handle-query.c']

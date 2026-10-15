@@ -1,6 +1,6 @@
 /* Pouch native guest witness for ordered spawn descriptor actions.
  * Run from a writable user directory. argv[0] must resolve in child namespace.
- * Build/run explicitly; not added to the boot registry or production image. */
+ * tools/interactive/ls-descriptors.exp runs it as uid 1000 from a fresh dir. */
 #define _GNU_SOURCE
 #include <spawn.h>
 #include <sys/wait.h>

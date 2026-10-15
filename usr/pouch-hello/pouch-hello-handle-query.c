@@ -1,6 +1,8 @@
-/* Explicit guest ABI witness; not a boot/production component.
- * Build with Pouch and -Iusr/lib/libt/include. Pass "old-kernel" only when
- * testing fail-closed compatibility against a kernel predating syscall 128. */
+/* Guest ABI witness; tools/interactive/ls-descriptors.exp runs its default
+ * mode as uid 1000. Pass "old-kernel" only when testing fail-closed
+ * compatibility against a kernel predating the query (129 on main). The
+ * "linux-collision" mode assumes a Linux 129 with no translation; on main
+ * Linux 129 is kill, so that mode is not run here. */
 #include <thyla/syscall.h>
 #include <thyla/syscall.h>
 #include <stdio.h>

@@ -26,6 +26,27 @@ live-slot flag setter; 131 (HANDLE_DUP_TO; codex/astra 130) uses the checked
 replacement core. Both are caller-local. See `docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md`
 for concurrency/refcount witnesses and qualification limits.
 
+## Lowest-free dup and the status word (B-3b, October 15)
+
+`handle_dup_common` now answers each refusal's reason, decided under the
+table lock that decided it: -T_E_BADF (no live source), -T_E_INVAL (`min_idx`
+out of range), -T_E_ACCES (a kind or rights the alias rules refuse),
+-T_E_MFILE (nothing free at or above `min_idx`). The source is tested before
+the minimum, so a closed source is EBADF whatever the minimum (Linux's fcntl
+looks the descriptor up first). `handle_dup_posix_checked` is that core with
+rights inherited; `handle_dup` and `handle_dup_posix` keep their -1 wrappers.
+A refused install gives back the reference it took (`handle.dup_lowest`
+watches a pipe Spoor's refcount across an EMFILE). HANDLE_DUP_TO's
+DUP_LOWEST flag is this call with the target as the floor.
+
+`handle_get_status(p, h, &st)` reads the cloexec bit, the Spoor's open-time
+omode (unmasked: access mode, OTRUNC, OAPPEND) and CNONBLOCK in ONE lock hold,
+so F_GETFD and F_GETFL describe the same occupant of the slot; a non-Spoor
+reports omode 0 and blocking. HANDLE_FLAGS_GET packs it (access mode at bits
+8-9, NONBLOCK bit 10, APPEND bit 11); the Linux phenotype's F_GETFL reads it
+too and now reports O_APPEND. `handle.status_word` drives the word through
+the handler with each field at its own bit.
+
 ## Purpose
 
 Every kernel object a Proc can name — a Burrow, a Spoor, an MMIO window, a

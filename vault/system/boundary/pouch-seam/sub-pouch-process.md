@@ -37,6 +37,16 @@ after actions; self-DUP2 actions clear the child flag. OPEN with O_CLOEXEC is
 rejected before temporaries; sparse lists still fail. Raw internal SYS_fcntl
 callers and general inheritance remain gaps. See `docs/NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md` for actual-source tests, audit reasoning and source-matched qualification limits.
 
+Patch0056 (B-3b) completes the family: `dup` is DUP_TO with DUP_LOWEST and
+floor 0; fcntl's F_DUPFD / F_DUPFD_CLOEXEC pass their floor (a negative one
+widens and the kernel refuses it after a closed fd's EBADF); F_GETFL decodes
+FLAGS_GET's status word; F_SETFL changes O_NONBLOCK only (native 123),
+accepts a restated O_APPEND and refuses a flipped one; `pipe2` now honours
+O_CLOEXEC (FLAGS_SET) and O_NONBLOCK (123) on both ends, closing both if a set
+fails. Astra's four guest witnesses (descriptor-ops, dup2-self, handle-query,
+spawn-actions) were built and run by nothing on main; B-3b compiles them into
+`/bin` and `tools/interactive/ls-descriptors.exp` runs each as uid 1000.
+
 ## Identity — the calls that could not report failure (A-6)
 
 A program's own identity belongs here with the rest of what it knows about
@@ -173,10 +183,8 @@ and the write fd in `x1`; musl's `__syscall` captures only `x0`, so
 shape). It is therefore OUTSIDE the seam's sentinel guard by
 construction — correct only because it names a real number.
 
-**`dup2` onto a target has no primitive and no consumer.** `handle_dup`
-allocates the lowest free slot — that is `dup()`, not `dup2()`. The
-toolchain never needs it (posix_spawn resolves statically), so
-onto-target still fails with `ENOSYS`. Patch0054 validates `old == new`
+**`dup2` onto a target** was ENOSYS until patch0055 (DUP_TO); `dup` until
+patch0056 (DUP_TO's DUP_LOWEST). Patch0054 validates `old == new`
 using native129 for a kernel descriptor or the existing locked Pouch socket
 resolver for a tagged socket, including fresh sockets without kernel handles.
 Absent slots return EBADF; historical native unknown-call -1 maps to ENOSYS.
@@ -390,8 +398,9 @@ the child inherits `/env` via the kernel clone).
   pgroup, identity, and default note dispositions — which satisfies the
   toolchain's (unset) attr by construction, but would silently ignore a
   program that set one.
-- `pipe2(O_NONBLOCK)` is accepted and not honored (no `F_SETFL`);
-  `O_CLOEXEC` is a true no-op (a child inherits only listed fds).
+- `pipe2` sets its flags after SYS_PIPE creates the ends, so a peer
+  thread's spawn between the two steps can see an unflagged end (Linux's one
+  call cannot).
 - The `/env` populate caps at 512 variables / 256-byte names /
   8 KiB values, and silently skips a variable removed between readdir and
   open.

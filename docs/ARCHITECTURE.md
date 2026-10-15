@@ -3064,6 +3064,12 @@ See NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md for the approved register/error
 contract; on main the Linux 129-131 collisions are the kill family's Vivarium
 TIER2 rows, consumed before native dispatch. Qualification is tracked
 in NATIVE-DESCRIPTOR-OPERATIONS-REVIEW.md, not inferred from the getter's tests.
+B-3b (operator vote 7, 2026-10-14) extends both: DUP_TO's DUP_LOWEST flag makes
+the target a floor (the lowest free slot at or above it, POSIX dup and F_DUPFD),
+picked and filled under the same lock hold; FLAGS_GET also reports the open
+file's status (access mode, nonblock, append) for F_GETFL, read in the same hold
+as the descriptor flag. Pouch's dup and fcntl stand on them; ERRORS.md carries
+the errno order.
 
 The operator-approved native handle query is implemented separately from the
 rights-query design row. Its C/Rust mirrors and Vivarium 129 collision contract

@@ -12,10 +12,11 @@
 //                   socket's number EBADF.
 //   writev        : three pieces written by writev read back, by pread, as one
 //                   run at the file offset writev advanced.
-//   writev-atomic : on a nonblocking pipe with two bytes free, a four-byte
-//                   writev of two two-byte pieces answers EAGAIN and writes
-//                   NOTHING -- one gathered write, which POSIX makes atomic at
-//                   or under PIPE_BUF. A write per piece would land "ab".
+//   writev-atomic : on a pipe made nonblocking through the F_GETFL / F_SETFL
+//                   idiom, with two bytes free, a four-byte writev of two
+//                   two-byte pieces answers EAGAIN and writes NOTHING -- one
+//                   gathered write, which POSIX makes atomic at or under
+//                   PIPE_BUF. A write per piece would land "ab".
 //   readv         : ten bytes in a pipe scatter across three iovecs in order.
 //                   A byte source cannot tell one gathered read from a read
 //                   per iovec; the read half of "one transfer" has no witness
@@ -37,6 +38,24 @@
 //                   devno the kernel never issues: static Devs report 0 and
 //                   its counter starts at 1), two sockets differ in st_ino,
 //                   and a closed socket's number is EBADF.
+//   dup           : dup takes the LOWEST free number (a hole made below
+//                   two fresh opens), names the SAME open file (a write
+//                   through the copy moves the original's offset), never
+//                   carries close-on-exec, and a closed or negative fd is
+//                   EBADF.
+//   dupfd         : F_DUPFD lands at its floor when free and at the next free
+//                   number above it when not; F_DUPFD_CLOEXEC sets the flag;
+//                   the last slot is taken once, then EMFILE; a floor past
+//                   the table or negative is EINVAL, but a closed fd is EBADF
+//                   whatever the floor; dup2 and dup3 land on their target.
+//   getfl         : F_GETFL reports exactly the access mode, O_APPEND and
+//                   O_NONBLOCK; restating O_APPEND in F_SETFL is accepted,
+//                   flipping it is EINVAL.
+//   setfl         : F_SETFL O_NONBLOCK makes an empty pipe's read EAGAIN and
+//                   clearing it reads back clear; the flag belongs to the
+//                   open file, so a dup sees it.
+//   fdopendir     : fdopendir over an open directory reads its entries (its
+//                   O_PATH test is F_GETFL, which used to answer -1).
 //
 // Every leg runs, and each opens the probe file itself, so a red run names
 // each failing leg and only those; the census line prints only when all pass.
@@ -57,15 +76,11 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/uio.h>
+#include <dirent.h>
 #include <unistd.h>
 
 #define PROBE "/pouch-fd-probe.bin"
-
-// SYS_SET_NONBLOCK (kernel/include/thylacine/syscall.h): fcntl(F_SETFL) does
-// not reach it from pouch yet, so the atomic leg asks the kernel directly.
-#define THYLA_SYS_SET_NONBLOCK 123
 
 static int fail(const char *leg) {
     printf("pouch-hello-fd: FAIL %s (errno %d)\n", leg, errno);
@@ -127,7 +142,8 @@ static int leg_writev(void) {
 static int leg_writev_atomic(void) {
     int p[2];
     if (pipe(p) != 0) return fail("atomic pipe");
-    if (syscall(THYLA_SYS_SET_NONBLOCK, p[1], 1) != 0) return fail("atomic nonblock");
+    if (fcntl(p[1], F_SETFL, fcntl(p[1], F_GETFL) | O_NONBLOCK) != 0)
+        return fail("atomic nonblock");
     static char fill[4094];
     memset(fill, 'x', sizeof fill);
     if (write(p[1], fill, sizeof fill) != (ssize_t)sizeof fill) return fail("atomic fill");
@@ -280,6 +296,126 @@ static int leg_sock_fstat(void) {
     return 0;
 }
 
+// True when `fd` is not open -- each exact-number leg proves its slot free first.
+static int is_free(int fd) {
+    errno = 0;
+    return refused(fcntl(fd, F_GETFD), EBADF);
+}
+
+static int leg_dup(void) {
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return fail("dup open");
+    if (write(fd, "dup!", 4) != 4) return fail("dup write");
+    int a = open(PROBE, O_RDONLY);
+    int b = open(PROBE, O_RDONLY);
+    if (a < 0 || b < 0) return fail("dup reopen");
+    int hole = a < b ? a : b;
+    int keep = a < b ? b : a;
+    close(hole);
+    int d = dup(fd);
+    if (d != hole) return fail("dup did not take the lowest free number");
+    if (write(d, "++", 2) != 2) return fail("dup write through the copy");
+    if (lseek(fd, 0, SEEK_CUR) != 6) return fail("dup: not the same open file");
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) return fail("dup flag the source");
+    int d2 = dup(fd);
+    if (d2 < 0) return fail("dup of a flagged fd");
+    if (fcntl(d2, F_GETFD) != 0) return fail("dup carried close-on-exec");
+    close(d2);
+    close(d);
+    close(keep);
+    errno = 0;
+    if (!refused(dup(d), EBADF)) return fail("dup(closed) not EBADF");
+    errno = 0;
+    if (!refused(dup(-1), EBADF)) return fail("dup(-1) not EBADF");
+    close(fd);
+    return 0;
+}
+
+static int leg_dupfd(void) {
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return fail("dupfd open");
+    if (!is_free(100) || !is_free(101) || !is_free(110) || !is_free(111) ||
+        !is_free(1023))
+        return fail("dupfd: a probe slot is already open");
+    if (fcntl(fd, F_DUPFD, 100) != 100) return fail("F_DUPFD did not land at its free floor");
+    if (fcntl(100, F_GETFD) != 0) return fail("F_DUPFD set close-on-exec");
+    if (fcntl(fd, F_DUPFD_CLOEXEC, 100) != 101)
+        return fail("F_DUPFD_CLOEXEC did not take the next free number above its floor");
+    if (fcntl(101, F_GETFD) != FD_CLOEXEC) return fail("F_DUPFD_CLOEXEC left the flag clear");
+    if (fcntl(fd, F_DUPFD, 1023) != 1023) return fail("F_DUPFD at the last slot");
+    errno = 0;
+    if (!refused(fcntl(fd, F_DUPFD, 1023), EMFILE)) return fail("nothing free at or above 1023 not EMFILE");
+    errno = 0;
+    if (!refused(fcntl(fd, F_DUPFD, 1024), EINVAL)) return fail("F_DUPFD floor past the table not EINVAL");
+    errno = 0;
+    if (!refused(fcntl(fd, F_DUPFD, -1), EINVAL)) return fail("F_DUPFD negative floor not EINVAL");
+    close(1023);
+    close(101);
+    close(100);
+    errno = 0;
+    if (!refused(fcntl(100, F_DUPFD, -1), EBADF)) return fail("F_DUPFD on a closed fd not EBADF");
+    if (dup2(fd, 110) != 110 || fcntl(110, F_GETFD) != 0) return fail("dup2 onto a free target");
+    if (dup3(fd, 111, O_CLOEXEC) != 111 || fcntl(111, F_GETFD) != FD_CLOEXEC)
+        return fail("dup3 O_CLOEXEC onto a free target");
+    close(111);
+    close(110);
+    close(fd);
+    return 0;
+}
+
+static int leg_getfl(void) {
+    int w = open(PROBE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int r = open(PROBE, O_RDONLY);
+    int a = open(PROBE, O_RDWR | O_APPEND);
+    if (w < 0 || r < 0 || a < 0) return fail("getfl opens");
+    if (fcntl(r, F_GETFL) != O_RDONLY) return fail("F_GETFL of O_RDONLY");
+    if (fcntl(w, F_GETFL) != O_WRONLY) return fail("F_GETFL of O_WRONLY|O_CREAT|O_TRUNC");
+    if (fcntl(a, F_GETFL) != (O_RDWR | O_APPEND)) return fail("F_GETFL of O_RDWR|O_APPEND");
+    errno = 0;
+    if (!refused(fcntl(r, F_SETFL, O_APPEND), EINVAL)) return fail("F_SETFL turning O_APPEND on not EINVAL");
+    errno = 0;
+    if (!refused(fcntl(a, F_SETFL, 0), EINVAL)) return fail("F_SETFL turning O_APPEND off not EINVAL");
+    if (fcntl(a, F_SETFL, fcntl(a, F_GETFL) | O_NONBLOCK) != 0)
+        return fail("F_SETFL restating O_APPEND with O_NONBLOCK");
+    if (fcntl(a, F_GETFL) != (O_RDWR | O_APPEND | O_NONBLOCK)) return fail("F_GETFL after F_SETFL");
+    close(a);
+    close(r);
+    close(w);
+    return 0;
+}
+
+static int leg_setfl(void) {
+    int p[2];
+    if (pipe(p) != 0) return fail("setfl pipe");
+    if (fcntl(p[0], F_GETFL) != O_RDONLY || fcntl(p[1], F_GETFL) != O_WRONLY)
+        return fail("F_GETFL of the pipe ends");
+    if (fcntl(p[0], F_SETFL, O_NONBLOCK) != 0) return fail("F_SETFL O_NONBLOCK");
+    char c;
+    errno = 0;
+    if (!refused(read(p[0], &c, 1), EAGAIN)) return fail("nonblocking read of an empty pipe not EAGAIN");
+    int d = dup(p[0]);
+    if (d < 0) return fail("setfl dup");
+    if (!(fcntl(d, F_GETFL) & O_NONBLOCK)) return fail("O_NONBLOCK not shared by the open file's dup");
+    if (fcntl(p[0], F_SETFL, 0) != 0) return fail("F_SETFL 0");
+    if (fcntl(d, F_GETFL) != O_RDONLY) return fail("O_NONBLOCK did not clear");
+    close(d);
+    close(p[0]);
+    close(p[1]);
+    return 0;
+}
+
+static int leg_fdopendir(void) {
+    int fd = open("/", O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return fail("fdopendir open");
+    DIR *dir = fdopendir(fd);
+    if (!dir) return fail("fdopendir");
+    int n = 0;
+    while (readdir(dir)) n++;
+    closedir(dir);
+    if (n == 0) return fail("fdopendir read no entries");
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     static const struct { const char *name; int (*run)(void); } legs[] = {
@@ -288,6 +424,9 @@ int main(void) {
         { "readv", leg_readv },           { "heap", leg_heap },
         { "iov-errnos", leg_iov_errnos }, { "v2", leg_v2 },
         { "sock-seek", leg_sock_seek },   { "sock-fstat", leg_sock_fstat },
+        { "dup", leg_dup },               { "dupfd", leg_dupfd },
+        { "getfl", leg_getfl },           { "setfl", leg_setfl },
+        { "fdopendir", leg_fdopendir },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

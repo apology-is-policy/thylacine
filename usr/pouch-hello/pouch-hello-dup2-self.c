@@ -1,4 +1,5 @@
-/* Explicit native guest witness, linked with the series-built Pouch libc. */
+/* Native guest witness, linked with the series-built Pouch libc;
+ * tools/interactive/ls-descriptors.exp runs its default mode as uid 1000. */
 #include <thyla/syscall.h>
 #include <unistd.h>
 #include <fcntl.h>

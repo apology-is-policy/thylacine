@@ -1920,12 +1920,11 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
 // validate-then-0 path (the POSIX EBADF discipline incl. the #81 O_PATH
 // gate and the positioned off/seekable gates).
 
-static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-    if (!sys_validate_user_buf(buf_va, len))         return -1;
+static s64 sys_pread_in(struct Proc *p, u64 hraw, u64 buf_va, u64 len,
+                          u64 off_raw) {
+    // A range check only (the copy below catches an unmapped page), but a bad
+    // buffer is EFAULT here exactly as in SYS_READ (#100).
+    if (!sys_validate_user_buf(buf_va, len))         return -T_E_FAULT;
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     // CF-3 A: two-tier bounce (see sys_read_handler).
@@ -1950,12 +1949,11 @@ static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     return got;
 }
 
-static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-    if (!sys_validate_user_buf(buf_va, len))         return -1;
+static s64 sys_pwrite_in(struct Proc *p, u64 hraw, u64 buf_va, u64 len,
+                          u64 off_raw) {
+    // A range check only (the copy below catches an unmapped page), but a bad
+    // buffer is EFAULT here exactly as in SYS_WRITE (#100).
+    if (!sys_validate_user_buf(buf_va, len))         return -T_E_FAULT;
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     // CF-3 A: two-tier bounce (see sys_write_handler).
@@ -1982,6 +1980,33 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return wr;
 }
+
+static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return sys_pread_in(p, hraw, buf_va, len, off_raw);
+}
+
+static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return sys_pwrite_in(p, hraw, buf_va, len, off_raw);
+}
+
+#ifdef KERNEL_TESTS
+s64 sys_pread_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off);
+s64 sys_pread_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
+    return sys_pread_in(p, h, buf_va, len, off);
+}
+s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off);
+s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off) {
+    return sys_pwrite_in(p, h, buf_va, len, off);
+}
+#endif
 
 // =============================================================================
 // SYS_CLOSE / SYS_DUP — handle table operations (P5-fd-syscalls).
@@ -4131,10 +4156,25 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // .create stub returns NULL) so this is effectively dead there, but correct:
     // a non-system principal lacks other-w on a 0755 dir and is denied here
     // before the create attempt. fail-closed on no stat.
+    //
+    // A name that already exists answers EEXIST even when the caller may not
+    // write the directory, as Linux's lookup-then-may_create order gives, so
+    // ported code's `mkdir(p) < 0 && errno != EEXIST` sees what it tests for.
+    // POSIX permits either answer; the lookup discloses only what the caller's
+    // search (X) right already does, so it runs only when X is granted. The
+    // probe neither follows a final symlink nor checks the child's own bits:
+    // any entry by that name is "exists", as for Linux's exclusive lookup.
     if (src->dev->perm_enforced) {
         struct t_stat parent_st;
         if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -T_E_IO; }
-        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -T_E_ACCES; }
+        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
+            s64 deny = -T_E_ACCES;
+            if (perm_check(p, &parent_st, PERM_X) == 0 &&
+                stalk_union_has_child(p, src, name_scratch, (u32)name_len_raw))
+                deny = -T_E_EXIST;
+            spoor_clunk(src);
+            return deny;
+        }
     }
 
     // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
@@ -8186,12 +8226,10 @@ static s64 sys_torpor_wake_handler(u64 addr_va, u64 count_raw) {
 // Read only slot metadata under the existing handle-table lock. No object
 // reference, capability, or rights are acquired; allocation pressure cannot
 // turn a live descriptor into an invalid one. Range-check before narrowing.
-static s64 sys_handle_flags_get_handler(u64 hraw) {
-    struct Thread *t = current_thread();
-    if (!t || !t->proc) return -(s64)T_E_INVAL;
+static s64 sys_handle_flags_get_in(struct Proc *p, u64 hraw) {
     if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
     struct handle_status st;
-    if (handle_get_status(t->proc, (hidx_t)hraw, &st) != 0) return -(s64)T_E_BADF;
+    if (handle_get_status(p, (hidx_t)hraw, &st) != 0) return -(s64)T_E_BADF;
     u64 word = st.cloexec ? (u64)SYS_HANDLE_CLOSE_ON_EXEC : 0;
     word |= (u64)(st.omode & 3u) << SYS_HANDLE_STATUS_OMODE_SHIFT;
     if (st.nonblock)                       word |= SYS_HANDLE_STATUS_NONBLOCK;
@@ -8201,34 +8239,66 @@ static s64 sys_handle_flags_get_handler(u64 hraw) {
 
 // The descriptor flag and target replacement share existing table ownership.
 // Range checks precede narrowing; a failed mutation never re-queries a slot.
-static s64 sys_handle_flags_set_handler(u64 hraw, u64 flags) {
-    struct Thread *t = current_thread();
-    if (!t || !t->proc) return -(s64)T_E_INVAL;
+static s64 sys_handle_flags_set_in(struct Proc *p, u64 hraw, u64 flags) {
     if (flags & ~(u64)SYS_HANDLE_CLOSE_ON_EXEC) return -(s64)T_E_INVAL;
     if (hraw >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
-    return handle_set_cloexec(t->proc, (hidx_t)hraw, flags != 0) < 0
+    return handle_set_cloexec(p, (hidx_t)hraw, flags != 0) < 0
         ? -(s64)T_E_BADF : 0;
 }
 
 // SYS_HANDLE_DUP_LOWEST makes `target` a floor: POSIX F_DUPFD answers EINVAL
 // for a floor out of range (an argument error) where dup2 answers EBADF for a
 // target out of range, and a source may equal its floor -- the result never
-// can, since the source's own slot is occupied.
-static s64 sys_handle_dup_to_handler(u64 old, u64 target, u64 flags) {
-    struct Thread *t = current_thread();
-    if (!t || !t->proc) return -(s64)T_E_INVAL;
+// can, since the source's own slot is occupied. An out-of-range floor is
+// clamped to PROC_HANDLE_MAX rather than refused here, so the checked core
+// decides it AFTER the source (a closed source is EBADF whatever the floor).
+static s64 sys_handle_dup_to_in(struct Proc *p, u64 old, u64 target, u64 flags) {
     if (flags & ~(u64)(SYS_HANDLE_CLOSE_ON_EXEC | SYS_HANDLE_DUP_LOWEST))
         return -(s64)T_E_INVAL;
     bool cloexec = (flags & SYS_HANDLE_CLOSE_ON_EXEC) != 0;
     if (old >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
     if (flags & SYS_HANDLE_DUP_LOWEST) {
-        if (target >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_INVAL;
-        return handle_dup_posix_checked(t->proc, (hidx_t)old, (hidx_t)target, cloexec);
+        hidx_t floor = target >= (u64)PROC_HANDLE_MAX ? PROC_HANDLE_MAX
+                                                      : (hidx_t)target;
+        return handle_dup_posix_checked(p, (hidx_t)old, floor, cloexec);
     }
     if (target >= (u64)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
     if (old == target) return -(s64)T_E_INVAL;
-    return handle_dup_to_checked(t->proc, (hidx_t)old, (hidx_t)target, cloexec);
+    return handle_dup_to_checked(p, (hidx_t)old, (hidx_t)target, cloexec);
 }
+
+static s64 sys_handle_flags_get_handler(u64 hraw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    return sys_handle_flags_get_in(t->proc, hraw);
+}
+
+static s64 sys_handle_flags_set_handler(u64 hraw, u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    return sys_handle_flags_set_in(t->proc, hraw, flags);
+}
+
+static s64 sys_handle_dup_to_handler(u64 old, u64 target, u64 flags) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
+    return sys_handle_dup_to_in(t->proc, old, target, flags);
+}
+
+#ifdef KERNEL_TESTS
+s64 sys_handle_flags_get_for_test(struct Proc *p, u64 h);
+s64 sys_handle_flags_get_for_test(struct Proc *p, u64 h) {
+    return sys_handle_flags_get_in(p, h);
+}
+s64 sys_handle_flags_set_for_test(struct Proc *p, u64 h, u64 flags);
+s64 sys_handle_flags_set_for_test(struct Proc *p, u64 h, u64 flags) {
+    return sys_handle_flags_set_in(p, h, flags);
+}
+s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags);
+s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags) {
+    return sys_handle_dup_to_in(p, old, target, flags);
+}
+#endif
 
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
@@ -14104,9 +14174,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         case VIV_FCNTL_DUPFD: {
             // Linux answers EINVAL when the minimum exceeds the fd limit -- an
             // ARGUMENT error, distinct from the EMFILE it gives when the limit
-            // is merely reached. The range lives here rather than in the pure
-            // decide because PROC_HANDLE_MAX is a fact about the handle table.
-            if (min_fd >= (u64)PROC_HANDLE_MAX)      return -(s64)T_E_INVAL;
+            // is merely reached -- but only for an OPEN fd: it looks the
+            // descriptor up first. So the minimum is clamped (narrowing a huge
+            // one could wrap into range) and the checked core, which tests
+            // the source before the minimum, decides between the two.
+            hidx_t floor = min_fd >= (u64)PROC_HANDLE_MAX ? PROC_HANDLE_MAX
+                                                          : (hidx_t)min_fd;
             // The alias rule (VIVARIUM 5.5.2): a socket source's row is copied
             // onto the new number after the install; room checked first so a
             // refused fcntl leaves the table untouched. Before this, F_DUPFD of
@@ -14128,9 +14201,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             // afterwards, which a peer's close could fool); a non-dup-able
             // kind stays EMFILE, as Linux has no "exists but cannot be
             // duplicated" answer.
-            int dr = handle_dup_posix_checked(p, fd, (hidx_t)min_fd, cloexec);
+            int dr = handle_dup_posix_checked(p, fd, floor, cloexec);
             if (dr < 0)
-                return dr == -T_E_BADF ? -(s64)T_E_BADF : -(s64)T_E_MFILE;
+                return dr == -T_E_BADF || dr == -T_E_INVAL ? (s64)dr
+                                                           : -(s64)T_E_MFILE;
             hidx_t nfd = (hidx_t)dr;
             if (viv_socktab_alias(dstab, (s32)fd, (s32)nfd) < 0) {
                 handle_close(p, nfd);            // fresh number: exact unwind
@@ -14139,17 +14213,19 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             return (s64)nfd;
         }
         case VIV_FCNTL_GETFL: {
-            // The open-file status word: the access mode + O_NONBLOCK. Plan 9
-            // OREAD/OWRITE/ORDWR (0/1/2) share their encoding byte-for-byte with
-            // Linux O_RDONLY/WRONLY/RDWR, so `omode & 3` IS the Linux access
-            // mode. git's `F_GETFL` -> `F_SETFL(flags | O_NONBLOCK)` idiom
-            // round-trips the access mode through F_SETFL (which ignores it), so
-            // this is exact for that path and faithful for a reader of the mode.
-            int omode = 0;
-            bool nb = false;
-            if (handle_get_status_flags(p, fd, &omode, &nb) != 0)
-                return -(s64)T_E_BADF;
-            return (s64)((u64)(omode & 3) | (nb ? (u64)VIV_O_NONBLOCK : 0));
+            // The open-file status word: the access mode, O_NONBLOCK and
+            // O_APPEND. Plan 9 OREAD/OWRITE/ORDWR (0/1/2) share their encoding
+            // byte-for-byte with Linux O_RDONLY/WRONLY/RDWR, so `omode & 3` IS
+            // the Linux access mode. git's `F_GETFL` -> `F_SETFL(flags |
+            // O_NONBLOCK)` idiom round-trips the access mode through F_SETFL
+            // (which ignores it), so this is exact for that path and faithful
+            // for a reader of the mode.
+            struct handle_status st;
+            if (handle_get_status(p, fd, &st) != 0)  return -(s64)T_E_BADF;
+            u64 fl = (u64)(st.omode & 3u);
+            if (st.nonblock)                      fl |= (u64)VIV_O_NONBLOCK;
+            if (st.omode & SYS_WALK_OPEN_OAPPEND) fl |= (u64)VIV_O_APPEND;
+            return (s64)fl;
         }
         case VIV_FCNTL_SETFL: {
             // Serve O_NONBLOCK; ignore O_APPEND/O_ASYNC/O_DIRECT and the access

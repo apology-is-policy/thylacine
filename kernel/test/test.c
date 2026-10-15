@@ -531,6 +531,8 @@ void test_handles_cloexec_exec_sweep(void);
 void test_handles_cloexec_fork_preserves(void);
 void test_handles_dup_posix(void);
 void test_handles_dup_to(void);          // #157
+void test_handles_dup_lowest(void);      // B-3b
+void test_handles_status_word(void);     // B-3b
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);
 void test_vmo_map_unmap_lifecycle(void);
@@ -1489,6 +1491,7 @@ void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
 void test_stalk_open_create_leaf_rows(void);
 void test_stalk_open_create_containment_and_denials(void);
+void test_stalk_open_create_exists_before_access(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -2141,6 +2144,7 @@ void test_sys_rw_write_after_read_close_returns_epipe(void);
 void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
+void test_sys_prw_bad_buffer_is_efault(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
@@ -2664,6 +2668,8 @@ struct test_case g_tests[] = {
       test_handles_cloexec_fork_preserves, false, NULL },
     { "handles.dup_posix",             test_handles_dup_posix,             false, NULL },
     { "handles.dup_to",                test_handles_dup_to,                false, NULL },
+    { "handles.dup_lowest",            test_handles_dup_lowest,            false, NULL },
+    { "handles.status_word",           test_handles_status_word,           false, NULL },
     { "burrow.create_close_round_trip",   test_vmo_create_close_round_trip,   false, NULL },
     { "burrow.refcount_lifecycle",        test_vmo_refcount_lifecycle,        false, NULL },
     { "burrow.map_unmap_lifecycle",       test_vmo_map_unmap_lifecycle,       false, NULL },
@@ -4588,6 +4594,7 @@ struct test_case g_tests[] = {
     { "sys_prw.pipe_not_seekable",                      test_sys_prw_pipe_not_seekable,                      false, NULL },
     { "sys_prw.pread_devramfs_offset_and_cursor",       test_sys_pread_devramfs_offset_and_cursor,           false, NULL },
     { "sys_prw.rights_and_walkonly",                    test_sys_prw_rights_and_walkonly,                    false, NULL },
+    { "sys_prw.bad_buffer_is_efault",                   test_sys_prw_bad_buffer_is_efault,                   false, NULL },
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
@@ -4935,6 +4942,7 @@ struct test_case g_tests[] = {
     { "stalk.open_create_mkdir_and_nest", test_stalk_open_create_mkdir_and_nest, false, NULL },
     { "stalk.open_create_leaf_rows",   test_stalk_open_create_leaf_rows,   false, NULL },
     { "stalk.open_create_containment_and_denials", test_stalk_open_create_containment_and_denials, false, NULL },
+    { "stalk.open_create_exists_before_access", test_stalk_open_create_exists_before_access, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

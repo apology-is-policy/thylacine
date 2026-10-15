@@ -63,6 +63,7 @@ void test_sys_rw_write_after_read_close_returns_epipe(void);
 void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
+void test_sys_prw_bad_buffer_is_efault(void);
 void test_sys_attach_9p_rejection_paths(void);
 void test_sys_attach_9p_names_root_by_its_pipe(void);
 void test_sys_attach_9p_declarations(void);
@@ -555,6 +556,37 @@ void test_sys_prw_pipe_not_seekable(void) {
     TEST_ASSERT(got[0] == 1 && got[3] == 4, "payload intact");
 
     drop_test_proc(p);
+}
+
+// A buffer outside the user half is EFAULT for the positioned twins exactly as
+// for SYS_READ / SYS_WRITE (#100); it used to be a flat -1, which a Linux-shaped
+// caller reads as EPERM and Pouch as EIO. The control is the same call with an
+// in-range buffer: the guard passes it and the free fd answers instead, so an
+// EFAULT from the kernel-range leg is the guard's and nobody else's.
+extern s64 sys_pread_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off);
+extern s64 sys_pwrite_for_test(struct Proc *p, u64 h, u64 buf_va, u64 len, u64 off);
+void test_sys_prw_bad_buffer_is_efault(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    const u64 kern_va = 0x0000800000000000ull;   // == UACCESS_USER_VA_TOP
+    const u64 user_ok = 0x40000ull;
+
+    s64 rk = sys_pread_for_test(p, 5, kern_va, 1, 0);
+    s64 wk = sys_pwrite_for_test(p, 5, kern_va, 1, 0);
+    s64 rn = sys_pread_for_test(p, 5, 0, 1, 0);
+    s64 wn = sys_pwrite_for_test(p, 5, 0, 1, 0);
+    s64 rc = sys_pread_for_test(p, 5, user_ok, 1, 0);
+    s64 wz = sys_pwrite_for_test(p, 5, kern_va, 0, 0);
+    drop_test_proc(p);
+
+    TEST_EXPECT_EQ(rk, -(s64)T_E_FAULT, "pread into the kernel half is EFAULT");
+    TEST_EXPECT_EQ(wk, -(s64)T_E_FAULT, "pwrite from the kernel half is EFAULT");
+    TEST_EXPECT_EQ(rn, -(s64)T_E_FAULT, "pread into NULL is EFAULT");
+    TEST_EXPECT_EQ(wn, -(s64)T_E_FAULT, "pwrite from NULL is EFAULT");
+    TEST_ASSERT(rc < 0 && rc != -(s64)T_E_FAULT,
+                "CONTROL: an in-range buffer passes the guard; the free fd refuses");
+    TEST_ASSERT(wz < 0 && wz != -(s64)T_E_FAULT,
+                "CONTROL: zero length touches no buffer; the free fd refuses");
 }
 
 void test_sys_pread_devramfs_offset_and_cursor(void) {

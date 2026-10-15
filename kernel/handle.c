@@ -739,13 +739,13 @@ int handle_table_copy_into_hooked(struct Proc *dst, struct Proc *src,
 // -T_E_ACCES (a kind or rights the dup may not copy), -T_E_MFILE (no free slot
 // at or above min_idx) -- so no caller has to re-query a slot to tell them
 // apart (a re-query races a peer's close or reuse). The flat-error wrappers
-// below keep their -1 contract.
+// below keep their -1 contract. A closed source outranks a bad minimum, as
+// Linux's fcntl looks the descriptor up before it reads the argument.
 static int handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
                              bool inherit_rights, hidx_t min_idx,
                              bool cloexec) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     if (h < 0 || h >= PROC_HANDLE_MAX) return -T_E_BADF;
-    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) return -T_E_INVAL;
 
     // #844: validate the parent + acquire the child's ref + install the child
     // slot under ONE table-lock hold, so a concurrent handle_close of the
@@ -758,6 +758,10 @@ static int handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
     if (parent->magic != HANDLE_MAGIC) {
         spin_unlock(&t->lock);
         return -T_E_BADF;
+    }
+    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) {
+        spin_unlock(&t->lock);
+        return -T_E_INVAL;
     }
 
     // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: dup is forbidden for every

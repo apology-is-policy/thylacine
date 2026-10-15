@@ -42,6 +42,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-manual.exp (EXTINCTION: only — the Operator's Manual's Halcyon tasks on the default image)"
   - "tools/interactive/ls-jsc.exp (EXTINCTION: only — the JIT write thunk's out-of-bounds legs)"
   - "tools/interactive/ls-libs.exp (EXTINCTION: only — the browser library tests' gate)"
+  - "tools/interactive/ls-descriptors.exp (EXTINCTION: only — the native descriptor witnesses' gate)"
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"
@@ -89,7 +90,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-15
 ---
 ## The surface
 

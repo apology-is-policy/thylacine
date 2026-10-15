@@ -65,14 +65,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**555 owned · 47 unowned · 602 files (92% owned) · ~12944 unswept lines.**
+**555 owned · 47 unowned · 602 files (92% owned) · ~12945 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **78 files, ~38508 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 17 | 17 | 2725 |
+| usr/pouch-hello | 17 | 17 | 2726 |
 | kernel | 130 | 13 | 1971 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/quarry | 0 | 1 | 1033 |
@@ -151,7 +151,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38508 lin
 | kernel/cpio.c | 152 |
 | usr/susp-mask-child/src/main.rs | 139 |
 | usr/pouch-hello/pouch-hello-reentry.c | 133 |
-| usr/pouch-hello/pouch-hello-spawn.c | 127 |
+| usr/pouch-hello/pouch-hello-spawn.c | 128 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | kernel/include/thylacine/9p_transport_loopback.h | 99 |
 | kernel/include/thylacine/9p_transport_mq.h | 96 |

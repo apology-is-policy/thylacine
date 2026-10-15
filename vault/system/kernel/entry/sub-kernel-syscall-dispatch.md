@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-15
 ---
 ## Native descriptor mutations (October 11; main B-3b)
 
@@ -664,6 +664,10 @@ Three positioned-specific gates guard the offset, and their ORDER is load-bearin
 - **`len > INT64_MAX - off` is rejected** as a `u64`-arithmetic overflow guard, so
   the offset addition never wraps.
 
+A buffer the range check refuses (outside the user half, or NULL with a nonzero
+length) answers -T_E_FAULT before any of them, as `SYS_READ` / `SYS_WRITE` do
+(#100); until B-3b it was a flat -1, which Pouch read as EIO
+(`sys_prw.bad_buffer_is_efault`, with an in-range buffer as its control).
 Everything else is byte-identical to the cursored path: the ref-held lookup, the
 `CWALKONLY` reject, the errno clamp. One asymmetry is worth holding onto — a
 copy-out fault mid-`pread` loses nothing, because the cursor never moved and the
@@ -676,6 +680,27 @@ The soundness pin on the metadata sibling — `dev_register` extincts a
 `wstat_native` Dev that is not `perm_enforced`, since `perm_wstat_check` is the
 only write-authority gate there — lives with the Dev registration
 ([[sub-kernel-dev]]), not here.
+
+### The native descriptor handlers and the create order (B-3b)
+
+HANDLE_FLAGS_GET / FLAGS_SET / DUP_TO (129-131) are thin `_handler` wrappers
+over `sys_handle_*_in(p, ...)` bodies, so the kernel tests drive the real
+argument checks on a synthetic Proc (`sys_handle_*_for_test`). DUP_TO's
+DUP_LOWEST flag never narrows a floor: one at or past `PROC_HANDLE_MAX` is
+CLAMPED to it and handed to `handle_dup_posix_checked`, which tests the source
+first and answers the floor EINVAL second -- a closed fd is EBADF whatever the
+floor, and a 64-bit floor such as 2^32+10 cannot alias slot 10. The Linux
+F_DUPFD arm does the same and passes EBADF and EINVAL through.
+
+`spoor_create_install`'s A-2d parent check now asks existence before it
+refuses: when the caller lacks W|X on a perm-enforced parent but holds X, it
+probes the leaf with `stalk_union_has_child` (a one-component walk: no perm
+check, no symlink follow) and answers -T_E_EXIST if the name is there,
+-T_E_ACCES if not. Without X it answers EACCES and discloses nothing. Every
+exclusive create and mkdir takes this path; a plain create opens first and
+never reaches it for an existing name. Ported code's `mkdir(p) < 0 && errno
+!= EEXIST` relies on Linux's lookup-then-may_create order
+(`stalk.open_create_exists_before_access`).
 
 ### The hardware-mint sequence, and where the same idea is factored and where it is copied
 

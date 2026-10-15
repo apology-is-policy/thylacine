@@ -4,7 +4,7 @@ from pathlib import Path
 import argparse,subprocess,json,hashlib,re
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('output',type=Path);a=p.parse_args();r=Path(__file__).resolve().parent.parent;a.output.mkdir(parents=True,exist_ok=False)
 s=(r/'kernel/syscall.c').read_text();parts=[]
-for name in ['sys_handle_flags_set_handler','sys_handle_dup_to_handler']:
+for name in ['sys_handle_flags_set_in','sys_handle_dup_to_in','sys_handle_flags_set_handler','sys_handle_dup_to_handler']:
  start=s.index('static s64 '+name+'(');end=s.index('\n}',start)+2;parts.append(s[start:end])
 (a.output/'handlers.c').write_text('\n'.join(parts)+'\n')
 files=[r/'kernel/syscall.c',r/'tools/host-tests/native-descriptor-ops.c',Path(__file__)]

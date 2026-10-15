@@ -157,6 +157,7 @@ void test_stalk_open_create_open_if_present(void);
 void test_stalk_open_create_mkdir_and_nest(void);
 void test_stalk_open_create_leaf_rows(void);
 void test_stalk_open_create_containment_and_denials(void);
+void test_stalk_open_create_exists_before_access(void);
 
 // =============================================================================
 // The fixture Dev.
@@ -294,6 +295,13 @@ static const struct fixnode g_fix[] = {
     // name walks back to them (stalk.landed_name's union legs).
     { 64, 48, "lnsub",  QTSYMLINK, 0777u, "sub" },
     { 65, 51, "ln3",    QTSYMLINK, 0777u, "../sub" },
+    // The create errno order: `rx` may be searched but not written by its owner,
+    // and holds a file, a directory and a dangling link. Nothing else references
+    // these nodes (the phx pattern).
+    { 66,  0, "rx",     QTDIR,     0555u, NULL },
+    { 67, 66, "kid",    QTFILE,    0644u, NULL },
+    { 68, 66, "sub",    QTDIR,     0755u, NULL },
+    { 69, 66, "lnk",    QTSYMLINK, 0777u, "nosuch" },
 };
 #define FIX_SRV_LO 37u
 #define FIX_SRV_HI 53u
@@ -4812,6 +4820,43 @@ void test_stalk_open_create_containment_and_denials(void) {
     TEST_EXPECT_EQ((u64)g_fixmade_n, (u64)made_before,
                    "neither symlink row created anything");
     ocp_teardown(p);
+}
+
+// An existing name in a directory the caller may search but not write answers
+// EEXIST from mkdir and an exclusive create, where it used to answer EACCES:
+// the write check ran before existence was asked. The ABSENT name in the same
+// directory is the control one variable away (still EACCES), and a directory
+// the caller cannot SEARCH discloses nothing (EACCES for a name it holds).
+void test_stalk_open_create_exists_before_access(void) {
+    fixmade_reset();
+    struct Proc *p = ocp_proc("/");
+    TEST_ASSERT(p != NULL, "proc");
+    const u64 mk   = (u64)SYS_WALK_CREATE_DMDIR | 0755;
+    const u64 excl = 1 | (u64)SYS_WALK_OPEN_OEXCL;
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    s64 m_dir  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/sub", 7, 0, mk);
+    s64 m_file = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, 0, mk);
+    s64 m_lnk  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/lnk", 7, 0, mk);
+    s64 m_new  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/new", 7, 0, mk);
+    s64 x_kid  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/kid", 7, excl, 0644);
+    s64 x_new  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/rx/new", 7, excl, 0644);
+    s64 m_nox  = sys_open_create_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, "/nox/sekret", 11, 0, mk);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    int calls = g_fix_create_calls;
+    ocp_teardown(p);
+
+    TEST_EXPECT_EQ(m_dir,  -(s64)T_E_EXIST, "mkdir of an existing directory is EEXIST");
+    TEST_EXPECT_EQ(m_file, -(s64)T_E_EXIST, "mkdir over an existing file is EEXIST");
+    TEST_EXPECT_EQ(m_lnk,  -(s64)T_E_EXIST,
+                   "mkdir over a dangling link is EEXIST: the probe does not follow");
+    TEST_EXPECT_EQ(m_new,  -(s64)T_E_ACCES, "CONTROL: an absent name is still EACCES");
+    TEST_EXPECT_EQ(x_kid,  -(s64)T_E_EXIST, "an exclusive create of an existing file is EEXIST");
+    TEST_EXPECT_EQ(x_new,  -(s64)T_E_ACCES, "CONTROL: an exclusive create of an absent name is EACCES");
+    TEST_EXPECT_EQ(m_nox,  -(s64)T_E_ACCES,
+                   "no search right, no disclosure: a held name in a no-X dir is EACCES");
+    TEST_EXPECT_EQ(calls, 0, "no leg reached the Dev's create");
+    TEST_EXPECT_EQ(live_after, live_before, "the existence probe leaks no Spoor");
 }
 
 // =============================================================================

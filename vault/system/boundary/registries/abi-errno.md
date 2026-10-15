@@ -10,7 +10,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-09-24
+updated: 2026-10-15
 ---
 ## The surface
 
@@ -35,12 +35,12 @@ anywhere.
 | 13 | `T_E_ACCES` | EACCES | **the "denied" code handlers actually use** |
 | 14 | `T_E_FAULT` | EFAULT | a `uaccess` touch faulted on the supplied user VA |
 | 16 | `T_E_BUSY` | EBUSY | per-Proc lock held and the op cannot wait; mount busy |
-| 17 | `T_E_EXIST` | EEXIST | mount point taken; create collision |
+| 17 | `T_E_EXIST` | EEXIST | mount point taken; create collision -- answered before the parent's W check when the caller may search it (B-3b, Linux's order) |
 | 19 | `T_E_NODEV` | ENODEV | the backing endpoint went away (any clean server-side close; Loom device-gone) |
 | 20 | `T_E_NOTDIR` | ENOTDIR | X-search on a non-directory component — precedes the X-check, so 0755 and 0644 answer alike; distinct from `NOENT` ("safe to create") |
 | 21 | `T_E_ISDIR` | EISDIR | write/create names a directory — the 9P server, or `SYS_OPEN_CREATE`'s lexical leaf rows |
 | 22 | `T_E_INVAL` | EINVAL | structurally malformed argument |
-| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`) |
+| 24 | `T_E_MFILE` | EMFILE | a per-Proc table is full (the socket table `VIV_SOCK_MAX`); no free handle at or above a dup floor (HANDLE_DUP_TO's DUP_LOWEST, F_DUPFD) |
 | 25 | `T_E_NOTTY` | ENOTTY | a `TC*`/`TIOC*` op on a non-tty fd; `isatty()` reads it via a failed `TIOCGWINSZ` |
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |

@@ -48,9 +48,12 @@
 
 #include "test.h"
 
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 void test_handles_alloc_close_smoke(void);
@@ -59,6 +62,8 @@ void test_handles_dup_lifecycle(void);
 void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
 void test_handles_srv_kind(void);
+void test_handles_dup_lowest(void);
+void test_handles_status_word(void);
 
 // Shared test helper: allocate a Proc, exercise it, then transition to
 // ZOMBIE + free. proc_alloc has already allocated a fresh empty handle
@@ -733,6 +738,181 @@ void test_handles_dup_to(void) {
                 "a non-aliasable source refuses (NoSrvDup)");
     TEST_ASSERT(handle_get(p, 44, &got) != 0,
                 "and the refusal left the target slot alone");
+
+    test_proc_drop(p);
+}
+
+// B-3b: the native lowest-free dup (SYS_HANDLE_DUP_TO + SYS_HANDLE_DUP_LOWEST),
+// which Pouch's dup and F_DUPFD stand on. Each refusal is a DIFFERENT errno and
+// the guest acts on which one it gets (a shell's redirect probe reads EBADF as
+// "not open" and anything else as fatal), so every leg asserts the value.
+extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+extern s64 sys_handle_dup_to_for_test(struct Proc *p, u64 old, u64 target, u64 flags);
+extern s64 sys_handle_flags_get_for_test(struct Proc *p, u64 h);
+extern s64 sys_handle_flags_set_for_test(struct Proc *p, u64 h, u64 flags);
+
+void test_handles_dup_lowest(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    hidx_t src = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    TEST_ASSERT(src >= 0, "src alloc failed");
+
+    // (1) THE FLOOR SKIPS OCCUPIED SLOTS: 10 and 11 are taken, so the lowest
+    // free at or above 10 is 12 -- neither the floor itself (an exact-target
+    // dup) nor the table's lowest free slot (a floorless dup).
+    TEST_ASSERT(handle_dup_to(p, src, 10, false) == 10, "occupy 10");
+    TEST_ASSERT(handle_dup_to(p, src, 11, false) == 11, "occupy 11");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, src, 10, false), 12,
+                   "lowest free at or above the floor");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, 12, 12, false), 13,
+                   "a source may be its own floor; the result never is");
+
+    // (2) RIGHTS VERBATIM, CLOSE-ON-EXEC FROM THE ARGUMENT.
+    TEST_ASSERT(handle_set_cloexec(p, src, true) == 0, "flag the source");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, src, 20, false), 20, "dup at 20");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 20), 0,
+                   "a flagged source does not flag the dup");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, src, 21, true), 21, "dup at 21");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 21), 1, "cloexec=true is honoured");
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, 21, &got) == 0, "get the dup");
+    TEST_EXPECT_EQ((u64)got.rights, (u64)(RIGHT_READ | RIGHT_TRANSFER),
+                   "the dup carries the source's rights unchanged");
+    handle_put(&got);
+
+    // (3) REFUSALS, each with its own errno. A free slot in range is EBADF
+    // whatever the floor says: the source is decided first, as Linux's fcntl
+    // looks the descriptor up before reading its argument.
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, 45, 0, false), -T_E_BADF,
+                   "a free source is EBADF");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, 45, -1, false), -T_E_BADF,
+                   "a free source with a bad floor is still EBADF");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, -1, 0, false), -T_E_BADF,
+                   "a negative source is EBADF");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, PROC_HANDLE_MAX, 0, false), -T_E_BADF,
+                   "a source past the table is EBADF");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, src, -1, false), -T_E_INVAL,
+                   "a negative floor is EINVAL");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, src, PROC_HANDLE_MAX, false), -T_E_INVAL,
+                   "a floor past the table is EINVAL");
+    hidx_t srv = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, NULL);
+    TEST_ASSERT(srv >= 0, "srv alloc failed");
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, srv, 0, false), -T_E_ACCES,
+                   "a connection the alias rules pin is EACCES");
+
+    // (4) EMFILE AT THE TOP, with the reference given back. A pipe end is the
+    // source because a Spoor's refcount is observable: the refused dup's
+    // acquire must be released, or every failed dup leaks one reference.
+    hidx_t rd = -1, wr = -1;
+    TEST_ASSERT(sys_pipe_for_proc(p, &rd, &wr) == 0, "pipe");
+    struct Spoor *rs = (struct Spoor *)p->handles->slots[rd].obj;
+    int ref0 = __atomic_load_n(&rs->ref, __ATOMIC_ACQUIRE);
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, rd, PROC_HANDLE_MAX - 1, false),
+                   PROC_HANDLE_MAX - 1, "the last slot is free and taken");
+    TEST_EXPECT_EQ(__atomic_load_n(&rs->ref, __ATOMIC_ACQUIRE), ref0 + 1,
+                   "a successful dup holds one more reference");
+    u64 a0 = handle_total_allocated(), f0 = handle_total_freed();
+    TEST_EXPECT_EQ(handle_dup_posix_checked(p, rd, PROC_HANDLE_MAX - 1, false),
+                   -T_E_MFILE, "nothing free at or above the last slot is EMFILE");
+    TEST_EXPECT_EQ(__atomic_load_n(&rs->ref, __ATOMIC_ACQUIRE), ref0 + 1,
+                   "the refused dup gave its reference back");
+    TEST_EXPECT_EQ((handle_total_allocated() - a0) - (handle_total_freed() - f0),
+                   (u64)0, "and installed nothing");
+
+    // (5) THE SYSCALL HANDLER: the flag selects floor semantics, a floor out of
+    // range is EINVAL where an exact target out of range is EBADF, and a huge
+    // floor cannot narrow into range.
+    const u64 low = SYS_HANDLE_DUP_LOWEST;
+    const u64 cx  = SYS_HANDLE_CLOSE_ON_EXEC;
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, 10, low), (s64)14,
+                   "LOWEST: 10..13 are taken, so 14");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, 30, low | cx), (s64)30,
+                   "LOWEST|CLOSE_ON_EXEC at a free floor");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 30), 1, "and the flag is set");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, (u64)PROC_HANDLE_MAX, low),
+                   -(s64)T_E_INVAL, "a floor past the table is EINVAL");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, (1ull << 32) + 10, low),
+                   -(s64)T_E_INVAL, "a floor that would narrow to 10 is EINVAL");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, 45, (u64)PROC_HANDLE_MAX, low),
+                   -(s64)T_E_BADF, "a free source outranks a bad floor");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, (u64)PROC_HANDLE_MAX, 0),
+                   -(s64)T_E_BADF, "an EXACT target past the table is EBADF");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, (u64)src, low) > (s64)src, 1,
+                   "LOWEST permits source == floor");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, (u64)src, 0),
+                   -(s64)T_E_INVAL, "an exact target equal to the source is EINVAL");
+    TEST_EXPECT_EQ(sys_handle_dup_to_for_test(p, (u64)src, 31, 4), -(s64)T_E_INVAL,
+                   "an unknown flag bit is EINVAL");
+    TEST_ASSERT(handle_get(p, 31, &got) != 0, "and the refusal installed nothing");
+
+    test_proc_drop(p);
+}
+
+// B-3b: everything F_GETFD and F_GETFL report, in one word read under one lock
+// hold. A pipe is the fixture because its two ends are open for different
+// access modes and its nonblock flag is real (devpipe acts on it).
+void test_handles_status_word(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    hidx_t rd = -1, wr = -1;
+    TEST_ASSERT(sys_pipe_for_proc(p, &rd, &wr) == 0, "pipe");
+    hidx_t kobj = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, p);
+    TEST_ASSERT(kobj >= 0, "kobj alloc failed");
+
+    // (1) THE PRIMITIVE.
+    struct handle_status st;
+    TEST_EXPECT_EQ(handle_get_status(p, wr, &st), 0, "status of the write end");
+    TEST_EXPECT_EQ((int)st.omode, 1, "the write end is open OWRITE");
+    TEST_EXPECT_EQ((int)st.nonblock, 0, "and blocking");
+    TEST_EXPECT_EQ((int)st.cloexec, 0, "and not close-on-exec");
+    TEST_ASSERT(handle_set_nonblock(p, wr, true) == 0, "set nonblock");
+    TEST_ASSERT(handle_set_cloexec(p, wr, true) == 0, "set cloexec");
+    TEST_EXPECT_EQ(handle_get_status(p, wr, &st), 0, "status again");
+    TEST_EXPECT_EQ((int)st.nonblock, 1, "nonblock reads back");
+    TEST_EXPECT_EQ((int)st.cloexec, 1, "cloexec reads back");
+    TEST_EXPECT_EQ(handle_get_status(p, kobj, &st), 0, "status of a non-Spoor");
+    TEST_EXPECT_EQ((int)st.omode, 0, "a non-Spoor reports no open mode");
+    TEST_EXPECT_EQ(handle_get_status(p, 45, &st), -1, "a free slot refuses");
+    TEST_EXPECT_EQ(handle_get_status(p, PROC_HANDLE_MAX, &st), -1,
+                   "a slot past the table refuses");
+
+    // (2) THE WORD. Each field at its own bit, so a field written to the wrong
+    // place reads as a wrong value rather than a lucky one.
+    s64 w = sys_handle_flags_get_for_test(p, (u64)wr);
+    TEST_EXPECT_EQ(w, (s64)(SYS_HANDLE_CLOSE_ON_EXEC |
+                            (1u << SYS_HANDLE_STATUS_OMODE_SHIFT) |
+                            SYS_HANDLE_STATUS_NONBLOCK),
+                   "write end: cloexec | OWRITE | nonblock");
+    TEST_EXPECT_EQ(sys_handle_flags_get_for_test(p, (u64)rd), (s64)0,
+                   "read end: nothing set, OREAD is zero");
+
+    // APPEND rides the open mode; no Dev a kernel test can open honours it, so
+    // the fixture stamps the read end's open-time mode and restores it. ORDWR
+    // in the same stamp proves the access mode is masked, not shifted whole.
+    struct Spoor *rs = (struct Spoor *)p->handles->slots[rd].obj;
+    int saved = rs->mode;
+    rs->mode = 2 | (int)SYS_WALK_OPEN_OAPPEND | (int)SYS_WALK_OPEN_OTRUNC;
+    s64 wa = sys_handle_flags_get_for_test(p, (u64)rd);
+    rs->mode = saved;
+    TEST_EXPECT_EQ(wa, (s64)((2u << SYS_HANDLE_STATUS_OMODE_SHIFT) |
+                             SYS_HANDLE_STATUS_APPEND),
+                   "ORDWR|OAPPEND|OTRUNC reads as ORDWR + APPEND, OTRUNC dropped");
+
+    TEST_EXPECT_EQ(sys_handle_flags_get_for_test(p, 45), -(s64)T_E_BADF,
+                   "a free slot is EBADF");
+    TEST_EXPECT_EQ(sys_handle_flags_get_for_test(p, (1ull << 32) + (u64)wr),
+                   -(s64)T_E_BADF, "an index that would narrow into range is EBADF");
+
+    // (3) FLAGS_SET takes close-on-exec only: a status bit is not a descriptor
+    // flag, and accepting one would promise an F_SETFL this call does not do.
+    TEST_EXPECT_EQ(sys_handle_flags_set_for_test(p, (u64)wr, 0), (s64)0, "clear cloexec");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, wr), 0, "cleared");
+    TEST_EXPECT_EQ(sys_handle_flags_set_for_test(p, (u64)wr, SYS_HANDLE_STATUS_NONBLOCK),
+                   -(s64)T_E_INVAL, "a status bit is EINVAL");
+    TEST_EXPECT_EQ(sys_handle_flags_set_for_test(p, 45, SYS_HANDLE_CLOSE_ON_EXEC),
+                   -(s64)T_E_BADF, "a free slot is EBADF");
 
     test_proc_drop(p);
 }

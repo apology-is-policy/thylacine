@@ -1,4 +1,5 @@
-/* Ordinary-user native descriptor witness. Static, explicitly invoked only. */
+/* Ordinary-user native descriptor witness; tools/interactive/ls-descriptors.exp
+ * runs it as uid 1000 (the default mode; the others are its own children). */
 #define _GNU_SOURCE
 #include <thyla/syscall.h>
 #include <unistd.h>

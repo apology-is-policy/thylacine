@@ -4226,6 +4226,9 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
     s64 a = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, 10);
     // The CLOEXEC spelling is the same op with the flag on -- same answer.
     s64 a2 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD_CLOEXEC, 10);
+    // A closed fd with a bad minimum too: Linux looks the fd up first, so the
+    // probe's answer must not depend on the minimum it passed.
+    s64 a3 = viv_fcntl_for_test(p, 3, VIV_F_DUPFD, (u64)PROC_HANDLE_MAX);
 
     // ---- LEG B: F_DUPFD on a LIVE fd with a FULL table is EMFILE. ---------
     // Fill every free slot, prove fullness two ways (the count and a live
@@ -4255,6 +4258,8 @@ void test_vivarium_fcntl_dupfd_errnos(void) {
                    "reads any other errno as fatal (pre-fix: EMFILE)");
     TEST_EXPECT_EQ(a2, -(s64)T_E_BADF,
                    "A: F_DUPFD_CLOEXEC on a closed fd is EBADF too");
+    TEST_EXPECT_EQ(a3, -(s64)T_E_BADF,
+                   "A: a closed fd is EBADF even with a minimum past the table");
     TEST_ASSERT(filled > 0, "B precondition: the fill allocated something");
     TEST_EXPECT_EQ(b_count, PROC_HANDLE_MAX, "B precondition: the table is FULL");
     TEST_EXPECT_EQ(b_refused, -1, "B precondition: a live alloc is now refused");
@@ -4291,6 +4296,16 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
     s64 g2  = viv_fcntl_for_test(p, (u64)rd, VIV_F_GETFL, 0);
     s64 gw  = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
     s64 bad = viv_fcntl_for_test(p, 5, VIV_F_SETFL, VIV_O_NONBLOCK);   // fd 5 is closed
+    // O_APPEND rides the open-time mode, which no Dev a kernel test can open
+    // honours; stamp the write end's mode, read, restore (before any assert).
+    s64 ga = -1;
+    if (pr == 0) {
+        struct Spoor *ws = (struct Spoor *)p->handles->slots[wr].obj;
+        int wsaved = ws->mode;
+        ws->mode = 1 | (int)SYS_WALK_OPEN_OAPPEND;
+        ga = viv_fcntl_for_test(p, (u64)wr, VIV_F_GETFL, 0);
+        ws->mode = wsaved;
+    }
 
     // Observe -> teardown -> assert (TEST_* may early-return).
     p->state = PROC_STATE_ZOMBIE;
@@ -4307,6 +4322,8 @@ void test_vivarium_fcntl_nonblock_roundtrip(void) {
     TEST_EXPECT_EQ((s64)(g2 & (s64)VIV_O_NONBLOCK), 0, "F_SETFL 0 CLEARS O_NONBLOCK");
     TEST_EXPECT_EQ((s64)(gw & 3), 1, "F_GETFL: write end reports OWRITE (1) -- the F2 mode fix");
     TEST_EXPECT_EQ(bad, -(s64)T_E_BADF, "F_SETFL on a closed fd is EBADF, not silent success");
+    TEST_EXPECT_EQ(ga, (s64)(VIV_O_WRONLY | VIV_O_APPEND),
+                   "F_GETFL reports O_APPEND for an append open");
 }
 
 // The dup(2) arm (git-remote-https' helper pipe). Drives viv_dup_for_test on a

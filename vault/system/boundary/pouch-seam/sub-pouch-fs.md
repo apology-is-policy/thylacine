@@ -157,7 +157,9 @@ errno-loss), so 0027 dispatches on an `lstat` instead: a directory →
 `rmdir`, anything else → `unlink`.
 
 **`O_APPEND`, in two halves, and the history is why.** musl's `__fdopen`
-asks for append via `fcntl(F_SETFL)` — which pouch answers `ENOSYS`,
+asks for append via a raw `__syscall(SYS_fcntl, F_SETFL)` — the `0xFFFF`
+sentinel, so `ENOSYS` (the public `fcntl` gained F_GETFL / F_SETFL in 0056,
+where flipping O_APPEND after open is EINVAL: the append is fixed at open),
 leaving the cursor at 0 and making every `fopen("a")` write CLOBBER the
 file at offset 0. 0030 (2026-07-27) seeks to END once at open, in a helper
 every successful-open exit routes through (`pouch_open_ret`) precisely
@@ -176,8 +178,10 @@ append fd the kernel cursor is advisory and the seek is what makes
 since 0030. On a Dev with no append notion the bit is inert — NOT because
 "each switches on `omode & 3`", as this paragraph first said (14 of the 16
 other `Dev.open` slots are `dev_simple_open`, which stores the whole omode
-and switches on nothing), but because `Spoor.mode` has one reader and that
-reader masks it (`kernel/handle.c`, `s->mode & 3`). Conclusion true,
+and switches on nothing), but because `Spoor.mode` is read only in
+`kernel/handle.c`, and only for status: `s->mode & 3` for the access mode,
+and since B-3b `handle_get_status` reports the bit as F_GETFL's O_APPEND, as
+Linux reports it for any fd opened so. No Dev reads it. Conclusion true,
 mechanism false (audit r3 F7). `/bin/pouch-hello-fopen` pins it: on the file
 its create + append legs left as `alpha\nbeta\n`, reopen `"a+"`, seek 0,
 write `gamma\n`, require `alpha\nbeta\ngamma\n` (the 0030 emulation yields
