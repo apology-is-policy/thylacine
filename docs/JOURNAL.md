@@ -22,6 +22,34 @@ needed the operator.
 
 
 ---
+## 2026-10-15 (main, Opus 5.5, effort max) -- B-3b pulled forward: Astra's descriptor calls on b3; the new-directory finding is an ownership fork
+
+**The probe answered the B-3e question.** One boot of the CI image of d82cb6b61 (05:34-05:36Z, `tools/interactive/probe-mkdir.exp`, untracked, in the B-3e worktree; log `build/ls-ci-probe-mkdir.log` there). As michael in `/var/lib_tests/libxml2/build` (mode 1777), `echo hi > topfile` succeeds and `ls -l` shows `-rw-r--r-- system 3 ... topfile`: **the file is owned by system, not by its creator.** `mkdir p1` works; `mkdir p1/p2` and `echo hi > p1/f` are refused, since p1 is system's 0755. The same nesting under `/tmp` works. The hypothesis written at 05:12Z ("owned by the session's attach identity") is now an observation.
+
+**Why it happens, and why it is not mine to decide.** The shared pool mount is one 9P session attached by the boot chain (PRINCIPAL_SYSTEM). Stratum ignores `n_uname` and stamps each create with the connection's SO_PEERCRED uid (`server.c` Tlcreate/Tmkdir, `s->auth_uid`). IDENTITY-DESIGN A-3 M6 accepts that only because the kernel's per-Proc `perm_check` stops a non-system Proc from creating in a system-owned directory. A world-writable directory voids that premise, and `tools/build.sh` stamps 1777 at three sites:
+- #50, every `/vivarium` bundle's `rootfs/tmp`;
+- B-3c's ICU `testdata/out`;
+- B-3d/e's `lib_tests` build trees.
+
+So the defect predates B-3 (#50). Through any such directory an ordinary user can create files owned by SYSTEM, with contents of their choosing: an identity acting with authority it was never given, which is I-22 territory. And the kernel enforces no sticky bit. The fix is a design choice with consumers (the viv-run scenario, the test layout), so on Opus it goes to the operator, under the 2026-09-01 rule, rather than being decided here. The options, with the Plan 9 heritage (newns re-attaches as the user) and the capability SOTA, are in memory `design_shared_mount_create_owner.md`: per-user attach at login, the kernel chowning to the creator, or fail closed and remove the world-writable directories. The recommendation is the third, now, with the first recorded as the long-term shape.
+
+**B-3b, the descriptor calls (vote 7).** Astra's chain is cherry-picked onto b3 with her authorship and dates. It is seven commits, her four plus the three docs commits they depend on (`714871a1e`..`b8e55cb28`):
+- **Renumbering.** FLAGS_GET, FLAGS_SET and DUP_TO move from 128-130 to 129-131, because main's 128 is `SYS_ICACHE_SYNC_SPACE`. Her Pouch patches 0049-0052 become 0052-0055, after main's 0049-0051.
+- **The collision is the real difference.** Her branch guards Linux kill/tkill with ENOSYS rows. On main, Linux 129-131 are kill/tkill/tgkill, real TIER2 translations since S-3. `viv_linux_dispatch` hands only TRANSLATED verdicts to the native switch, so main's rows stand. Each collision is pinned per number with a static assert, and `test_vivarium` checks the three TIER2 verdicts. Her two Linux-collision witnesses test rows main does not have, so they stay on codex/astra.
+- **Her host harnesses run on b3.** All six pass at O0 and O2 under ASan+UBSan, against a musl tree patched with b3's whole series (fuzz 0, no offsets). All 15 of their mutants fail as they should. One harness caught a literal 130 I had not renumbered.
+- **A slip, caught.** My `git add -A` swept in the untracked `tools/interactive/ls-gfx-compose.exp`. The vault render failed on it, and I unstaged it before committing.
+
+**The vote-7 extensions, kernel side (`c79b432e6`, WIP, not built).**
+- **DUP_TO gains `SYS_HANDLE_DUP_LOWEST`.** x1 becomes a floor, which gives dup, F_DUPFD and F_DUPFD_CLOEXEC. Its core is `handle_dup_posix_checked`: `handle_dup_common` now returns why it refused (EBADF, EINVAL, EACCES, EMFILE), decided under the table lock.
+- **FLAGS_GET returns the open-file status.** Beside close-on-exec it reports the open mode (bits 8-9), NONBLOCK (0x400) and APPEND (0x800), all read in one lock hold by `handle_get_status`.
+- **The Linux phenotype's dup and F_DUPFD arms use the same core.** Each used to re-query the fd after a failed dup, a lookup a peer's close could fool.
+
+Still owed for B-3b:
+- kernel tests;
+- Pouch 0056 (dup, F_DUPFD, F_GETFL, F_SETFL) and its guest legs;
+- the pread EFAULT and mkdir EEXIST fixes;
+- a build, a boot, the suite and the audit round.
+
 ## 2026-10-15 (main, Opus 5.5, effort max) -- B-3e: libxml2 on the device finds two platform gaps (dup, a new directory's owner); the shared disk vanishes and returns
 
 - *B-3e: libxml2's release tarball cannot pass its own CTest list.* 2.15.4's
