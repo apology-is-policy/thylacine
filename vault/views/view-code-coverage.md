@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**681 owned · 47 unowned · 728 files (93% owned) · ~13345 unswept lines.**
+**684 owned · 44 unowned · 728 files (93% owned) · ~11878 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **90 files, ~41068 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -74,13 +74,13 @@ Excluded as harness and counted here rather than dropped: **90 files, ~41068 lin
 | usr/warp-prove | 0 | 1 | 4349 |
 | usr/pouch-hello | 11 | 17 | 2486 |
 | usr/ports | 19 | 5 | 1691 |
-| usr/lib | 119 | 4 | 1539 |
 | kernel | 186 | 11 | 1418 |
 | usr/quarry | 0 | 1 | 1033 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
+| usr/lib | 122 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 11 | 2 | 23 |
 | mm | 8 | 0 | 0 |
@@ -131,7 +131,6 @@ Excluded as harness and counted here rather than dropped: **90 files, ~41068 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/lib/libt/src/loom_client/adapter.c | 1201 |
 | usr/quarry/src/main.rs | 1033 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
@@ -141,7 +140,6 @@ Excluded as harness and counted here rather than dropped: **90 files, ~41068 lin
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
 | usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
-| usr/lib/libt/include/thyla/loom_client/adapter.h | 218 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
@@ -169,7 +167,6 @@ Excluded as harness and counted here rather than dropped: **90 files, ~41068 lin
 | usr/ports/rust/r1-hello/src/main.rs | 60 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
-| usr/lib/libt/src/loom_client/native_kernel.c | 48 |
 | usr/ports/vkquake/thy_vkloader.c | 47 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |

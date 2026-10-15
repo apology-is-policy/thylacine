@@ -10,6 +10,12 @@ code:
   - usr/lib/loom-client/src/ring_records.rs
   - usr/lib/loom-client/src/tests/native.rs
   - usr/lib/loom-client/src/tests/native/sim.rs
+  - usr/lib/libt/include/thyla/loom_client/adapter.h
+  - usr/lib/libt/src/loom_client/adapter.c
+  - usr/lib/libt/src/loom_client/native_kernel.c
+  - usr/lib/libt/tests/loom_client/test_adapter.c
+  - usr/lib/libt/tests/loom_client/sim_kernel.h
+  - usr/lib/libt/tests/loom_client/sim_kernel.c
 audit: hard
 guarded-by: [inv-i29, inv-i30, inv-i7]
 validated-by: [prose]
@@ -19,7 +25,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native adapter (October 12)\""
 created: 2026-10-12
-updated: 2026-10-13
+updated: 2026-10-15
 ---
 ## Purpose
 
@@ -33,6 +39,13 @@ a simulated kernel. libthyla-rs implements `Kernel` as `ThylaKernel` and names
 the ring `ServiceRing` ([[sub-libthyla-rs]]). Setup succeeds only in the
 qualification image; elsewhere the kernel answers -EOPNOTSUPP. Nothing is
 enabled by it.
+
+The C twin (NA-4c) is libt's `thyla/loom_client/adapter.h`. It composes the C
+cores ([[sub-libt-loom-client]]) the same way, over `struct t_loom_kernel`, a
+table of the same raw calls; `t_loom_kernel_native()` (`native_kernel.c`) fills
+it with libt's system-call stubs. Its host tests run the Rust tests' 55
+scenarios, one for one, against a C port of the simulated kernel. Where the
+two differ, the sections below say which side they describe.
 
 ## Contract
 
@@ -74,6 +87,30 @@ enabled by it.
   answers -EOPNOTSUPP or goes to the other ring, and ENTER and poll go to it.
   Closing the ring's only descriptor from another thread is the program's
   fault, and without descriptor generations EL0 cannot see a reuse sooner.
+- **The C interface** (ASYNC-SERVICE-LIFECYCLE section 7: opaque handles,
+  submit, poll, cancel, reap):
+  - `T_LOOM_RING_STORAGE(entries)` declares one ring's storage: the ring, one
+    request-book entry and one operation handle per CQ slot (`2 * entries` of
+    each). It is zero before its first use and reused only once `t_loom_idle`
+    answers 1. `T_LOOM_RING_SETUP` passes the counts; setup refuses a count
+    that is not the CQ's (-EINVAL) and a ring whose kernel geometry differs
+    (-EIO).
+  - Targets, scopes, fids and pools are cells of the ring's 64-entry tables;
+    operations are `struct t_loom_op` cells. A submission returns its
+    operation, `t_loom_turn` progresses the ring, and the kind's completion
+    call answers 0 while pending, 1 once done (the handle is consumed, and a
+    CONNECT's scope or a WALK's fid is handed over), or a negative errno with
+    the handle kept: -ECANCELED for a closed ring, -EIO for a failed one,
+    -EINVAL for another kind's handle. `t_loom_op_drop` of a pending operation
+    aborts its scope. A stream yields its shots through `t_loom_stream_next`
+    and is dropped explicitly; payloads already delivered stay valid.
+  - A full table refuses before the kernel: no free operation handle, SQ slot
+    or pool cell answers -ENOSPC. A client core's code becomes an errno:
+    CLOSING and a ledger STATE are -ECANCELED, a full book or exhausted
+    cookies -ENOSPC, a busy lease -EBUSY, geometry and receipt codes -EINVAL;
+    kernel errnos pass through and anything else is -EIO.
+  - A misused handle (a stale one, another ring's, a drop twice) ends the
+    process through `T_LOOM_CHECK`, as in the cores.
 - **Slot drops.** A failed WALK's reservation is reaped without a CLUNK (the
   kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
   answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
@@ -125,6 +162,20 @@ enabled by it.
 - **Teardown.** `close` (and dropping the `Ring`) aborts every scope and closes
   the descriptor. `Shared` detaches the mapping, then the buffers, when its last
   owner goes: after the CQ reader and every payload lease.
+- **The C release levels** stand for `Inner` and `Shared`. `handles` counts the
+  caller's handles; once the ring handle and the last of them are gone, the
+  fixed driver and the mapping are dropped and the ring gives up its own hold.
+  `holders` counts that hold, the core backend (kept alive by read results and
+  payload leases) and the mapping backend. At zero the descriptor is closed,
+  the mapping (only once validated) and every region are detached, and the
+  storage is zeroed, which is what `t_loom_idle` reads. Setup's every refusal
+  goes through the same release, so a failed setup leaves the storage idle.
+- **C stream routes.** A stream dropped before its end keeps its operation
+  cell as a route (handle cleared), holding its pool, so the shots still
+  arriving are routed and their leases returned; the cell is freed with the
+  stream's final completion, or when the ring's last handle goes. Delivered
+  payloads wait in a 64-cell queue ordered by arrival; each holds one of the
+  bank's 64 members, so a full queue is a broken invariant.
 
 ## Data structures
 
@@ -133,9 +184,16 @@ enabled by it.
 `FixedDriver`, a waker table and a stream-route table of `cq_entries` cells
 each, and a background-CLUNK table of 64.
 
+C: `struct t_loom_ring` holds the kernel table, the descriptor and ring state,
+the 64 regions, the SQ producer's pointers, `slots[64]` (each with its embedded
+handle and background CLUNK book), `pools[64]`, the payload queue `shots[64]`,
+the `t_owned_mapping`, the cores' `t_fixed_storage`, and pointers to the
+caller's book entries and operation cells. Nothing is allocated.
+
 ## Concurrency
 
-Creator thread only (`Rc`, `RefCell`). No other thread may close the ring's
+Creator thread only (`Rc`, `RefCell`; the C storage has no lock and the
+header says so). No other thread may close the ring's
 descriptor; if one does, the adapter forgets the number rather than close a
 file it may now name. No borrow is held across a waker's `wake` or a payload's
 drop. The kernel's poll registers its waiter before it
@@ -174,9 +232,24 @@ completion path allocates.
   further SQE meanwhile, and `engine_visit` runs the engine's retirement
   between two adapter calls. The sim's ENTER posts every deferred completion
   before it consumes, which the kernel's zero-submit ENTER does not. Its ENTER
-  and REGISTER answer a dead number -EBADF, as the kernel does. Known divergence: an operation on a fid that is not READY, under a
-  READY scope, answers -ECANCELED in the sim and -ENOENT in the kernel; no
-  adapter path depends on the errno.
+  and REGISTER answer a dead number -EBADF, as the kernel does. An operation
+  on a FID that is not READY, under a READY scope, answers -ENOENT as
+  `loom_fid_borrow` does (caveat 4).
+- **The C twin's tests.** `tests/loom_client/sim_kernel.c` ports `sim.rs`
+  knob for knob, and `test_adapter.c` runs the 55 scenarios of
+  `tests/native.rs` under their Rust names (`future` reads `operation`); a
+  `_Static_assert` pins the count. Each scenario also ends with the storage
+  idle and every region detached. `tools/test-loom-client.sh` runs them
+  sanitized (-O0, ASan and UBSan, no recovery) and optimized, and links
+  `adapter.c` and `native_kernel.c` freestanding under `--no-undefined` with
+  no mem\* import.
+- **C sabotage.** `work/oct15-na4c/sabotage.py` turns each of the 55
+  scenarios red with one targeted edit, after a control leg runs every named
+  scenario green on the unedited tree. 63 cases (the 55 scenarios, four
+  core cases and one Rust case) were every one red at its own assertion in
+  the run of October 15, 00:22:48Z
+  (`work/oct15-na4c/sabotage-20261015T002248Z.txt`). A case whose anchor no
+  longer matches reports ANCHOR-ROT and counts as not red.
 - **Sabotage.** `work/oct13-na4b/sabotage.py` turns each test red with one
   targeted adapter edit: 48 cases, every one red at its intended assertion
   in the run of October 13, 09:02Z (`work/oct13-na4b/sabotage-20261013T090219Z`),
@@ -188,13 +261,15 @@ completion path allocates.
 
 ## Seams
 
-- **NA-4c**, the C adapter in libt, follows the same section.
+- **NA-4c**, the C adapter in libt, is this dossier's C half.
 - **NA-4d** runs this adapter in the guest against an EL0 strict-9P fixture.
 - **AS-4** adopts it for the clipboard client.
 
 ## Caveats
 
 1. No guest program uses the adapter yet; only the host runs it (NA-4d).
+   `native_kernel.c` is compiled and linked by the freestanding stage, but no
+   boot executes it.
 2. Retirement and REAP are not poll events. A caller waiting for `retired()`
    turns with a deadline.
 3. The simulated kernel's REAP follows `loom_private_service_reap` as of

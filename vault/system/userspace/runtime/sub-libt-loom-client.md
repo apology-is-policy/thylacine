@@ -46,7 +46,7 @@ design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native C client storage (October 12)\""
   - "docs/ASYNC-SERVICE-STATUS.md \"NA-2b\""
 created: 2026-10-12
-updated: 2026-10-12
+updated: 2026-10-15
 ---
 ## Purpose
 
@@ -57,8 +57,9 @@ uninstalled, as C and Rust twins (`work/oct5-as-r9/astra-takeover/owned-clients`
 NA-2b installs the C twins into libt. libt is freestanding (no heap, no memcpy,
 no assert), and the operator voted on 2026-10-12 that the cores take
 caller-provided storage, so they never allocate. The Rust twins keep ThylaAlloc
-(NA-3). None of these cores makes a syscall: the native adapter that wires them
-to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
+(NA-3). None of these cores makes a syscall: the native C adapter
+([[sub-loom-native-adapter]], NA-4c) wires them to SYS_LOOM_SETUP, REGISTER
+and ENTER, and NA-4c added the hooks it needs (below).
 
 ## Contract
 
@@ -101,6 +102,28 @@ to SYS_LOOM_SETUP, REGISTER and ENTER is still to come.
   then calls `t_exit_group(134)`. The checks are always compiled in: NDEBUG does
   not remove them, and the runner's optimized stage builds the cores with
   `-DNDEBUG` so that `test_fatal` shows it.
+- **The adapter's hooks (NA-4c)**, the C twins of the Rust cores' NA-4b
+  edits:
+  - The request book has a SLOT kind for CONNECT and WALK. `spec.slot`
+    names the reserved destination slot (below 64, and 0 for every other
+    kind), and a success must answer exactly that slot, with no flag and no
+    receipt. `t_request_clear_retired` frees only abandoned entries, so a
+    request held across retirement keeps its terminal.
+  - `t_lease_refuse_read` runs every check `t_lease_accept_read` runs and
+    advances the member's lease order, but takes no lease: it hands the
+    receipt back for a RETURN. A record naming a member a payload still
+    holds is BUSY, so a replayed shot can never return a live member.
+  - The ring core adds `t_ring_refuse` (a pool's refusal of a shot that
+    arrives once its ring is retiring), `t_ring_pool_identity` and
+    `t_ring_owner_abort_scope` (a backend abort, unless the core is closed).
+  - The fixed driver adds book requests for CONTROL, SLOT and POOLED kinds:
+    `t_fixed_book_reserve`, `_publish`, `_take` (1 with the terminal, 0
+    pending) and `_drop`, which cancels an unpublished request, takes a posted
+    terminal or abandons the entry; only the first abandon aborts the scope.
+    `t_fixed_route` reports what each CQE was (FIXED, CONTROL, or POOLED with
+    its delivery), takes an abandoned request's terminal itself, and
+    `t_fixed_receive` is route without the report. `t_fixed_register_pool`
+    registers a pool through the driver's ring core.
 - The other per-function contracts are Astra's, unchanged. They are written at
   each declaration in the headers.
 
@@ -219,14 +242,23 @@ Create zeroes the whole object.
 - **Mutants.** `work/oct12-na2b/na2b-mutants.py` applies every C mutant from
   Astra's drivers to the installed cores, plus 14 storage mutants. A mutant
   counts only when its named test fails at a named check. All 85 are rejected
-  (October 12). It also runs the ABI checker on a cloned root with
+  (October 12). NA-4c's fixed-driver edits moved two anchors, which the
+  script's PORTED table now spells anew; all 87 are rejected, each by a named
+  check (October 15, `work/oct15-na4c/na2b-mutants-20261015T002436Z.log`).
+- **The hooks' own tests.** `test_lease_ledger.c` refuses a read for a held
+  member, a member past the pool and a shot longer than its member, hands a
+  fresh one back without a lease, and finds the same record stale after.
+  `test_request_book.c` (and its Rust twin) holds a SLOT request to its own
+  slot. Each turns red under its own edit in `work/oct15-na4c/sabotage.py`.
+  The book requests, the route and the ring-core hooks are exercised through
+  the adapter's scenarios. It also runs the ABI checker on a cloned root with
   `T_LOOM_CLIENT_ENOSPC` sabotaged. Three storage mutants are argued
   equivalent in the script.
 
 ## Seams
 
-- **The native adapter** (backend callbacks over SYS_LOOM_*) is not written.
-  Until it is, `t_ring_backend` and `t_mapping_backend` are only test fixtures.
+- **The native C adapter** ([[sub-loom-native-adapter]]) implements
+  `t_ring_backend` and `t_mapping_backend` over SYS_LOOM_* (NA-4c).
 - **The Rust twins** are [[sub-loom-client]]. Their errors are typed; the
   full-table outcomes match this side's (NA-3).
 
