@@ -412,9 +412,11 @@ pooled stream. `t_loom_turn` is the loop turn: it submits, routes and waits
 once, as the Rust `Ring::turn` does. Each kind has its own completion call. It
 answers 0 while the operation is pending. It answers 1 once the operation is
 done, with the CQE's result and, for CONNECT and WALK, the new scope or fid. It
-answers a negative errno when the ring itself has closed (-ECANCELED) or failed
-(-EIO). An answer of 1 consumes the handle; any other answer leaves it with the
-caller. Dropping a pending handle cancels it, which aborts its scope. Asking a
+answers a negative errno when the ring has closed or is retiring (-ECANCELED;
+a retiring ring's operation can still answer 1 once its terminal is routed) or
+has failed (-EIO). An answer of 1 consumes the handle, except a stream's: a
+stream answers 1 for each shot and for its end, and keeps its handle until it
+is dropped. Any other answer leaves the handle with the caller. Dropping a pending handle cancels it, which aborts its scope. Asking a
 handle for another kind's completion answers -EINVAL and leaves it alone. A
 finished fixed READ keeps its buffer range until its result is dropped, and a
 stream yields each payload as a lease that its drop returns. Every table is
@@ -423,7 +425,9 @@ table for targets, scopes and fids, and the 64-member bank for pools and
 payloads. A full table answers -ENOSPC. The storage is reused only once
 `t_loom_idle` answers 1: the ring is closed and every handle, read result and
 payload has been dropped. The mapping and the buffers are detached at that
-point.
+point. Only the creator thread uses the ring. A forked child must neither use
+nor drop it: fork carries neither the ring's mapping nor its descriptor, and
+the number may already name one of the child's own files.
 
 **One book per ring.** Every request takes its cookie from one request book of
 `cq_entries` entries (NA-2b F3): control operations (CONNECT, WALK, LOPEN,
