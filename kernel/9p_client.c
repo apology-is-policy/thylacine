@@ -1699,6 +1699,8 @@ int p9_client_init(struct p9_client *c,
     c->cape_uid        = 0;
     c->cape_gid        = 0;
     c->remote          = false;
+    c->client_end      = PRINCIPAL_INVALID;
+    c->server_end      = PRINCIPAL_INVALID;
     c->cacheable       = false;
     c->wga_unsupported = false;
     c->orphan_sink     = NULL;

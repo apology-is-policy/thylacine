@@ -1954,6 +1954,12 @@ void test_dev9p_wstat_size(void);
 void test_dev9p_cape(void);
 void test_dev9p_path_create_refuses_dmsrvcape(void);
 void test_dev9p_walk_create_refuses_dmsrv_bits(void);
+void test_dev9p_create_admits_session_ends(void);
+void test_dev9p_create_refuses_invalid_principal(void);
+void test_dev9p_create_refusal_keeps_eexist(void);
+void test_dev9p_create_refusal_without_rwx_enforcement(void);
+void test_dev9p_open_create_refuses_non_end(void);
+void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
 void test_dev9p_walk_attrs(void);
@@ -2032,6 +2038,7 @@ void test_9p_srvconn_transport_cape_attach_srv(void);
 void test_9p_srvconn_transport_srv_attach_names_root(void);
 void test_9p_srvconn_transport_remote_attach(void);
 void test_9p_srvconn_transport_remote_attach_srv(void);
+void test_9p_srvconn_transport_attach_stamps_conn_ends(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
@@ -2149,6 +2156,7 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
 void test_sys_attach_9p_names_root_by_its_pipe(void);
+void test_sys_attach_9p_stamps_attacher_end(void);
 void test_sys_attach_9p_declarations(void);
 void test_sys_mount_happy_path_grafts_pipe_spoor(void);
 void test_sys_mount_idempotent_on_duplicate(void);
@@ -4390,6 +4398,12 @@ struct test_case g_tests[] = {
     { "dev9p.cape",                    test_dev9p_cape,                       false, NULL },
     { "dev9p.path_create_refuses_dmsrvcape", test_dev9p_path_create_refuses_dmsrvcape, false, NULL },
     { "dev9p.walk_create_refuses_dmsrv_bits", test_dev9p_walk_create_refuses_dmsrv_bits, false, NULL },
+    { "dev9p.create_admits_session_ends", test_dev9p_create_admits_session_ends, false, NULL },
+    { "dev9p.create_refuses_invalid_principal", test_dev9p_create_refuses_invalid_principal, false, NULL },
+    { "dev9p.create_refusal_keeps_eexist", test_dev9p_create_refusal_keeps_eexist, false, NULL },
+    { "dev9p.create_refusal_without_rwx", test_dev9p_create_refusal_without_rwx_enforcement, false, NULL },
+    { "dev9p.open_create_refuses_non_end", test_dev9p_open_create_refuses_non_end, false, NULL },
+    { "dev9p.client_init_clears_ends", test_dev9p_client_init_clears_ends, false, NULL },
     { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },
     { "dev9p.walk_attrs",              test_dev9p_walk_attrs,                 false, NULL },
@@ -4500,6 +4514,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.srv_attach_names_root",         test_9p_srvconn_transport_srv_attach_names_root,         false, NULL },
     { "9p_srvconn_transport.remote_attach",                 test_9p_srvconn_transport_remote_attach,                 false, NULL },
     { "9p_srvconn_transport.remote_attach_srv",             test_9p_srvconn_transport_remote_attach_srv,             false, NULL },
+    { "9p_srvconn_transport.attach_stamps_conn_ends",       test_9p_srvconn_transport_attach_stamps_conn_ends,       false, NULL },
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },
@@ -4599,6 +4614,7 @@ struct test_case g_tests[] = {
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
     { "sys_attach_9p.names_root_by_its_pipe",          test_sys_attach_9p_names_root_by_its_pipe,          false, NULL },
+    { "sys_attach_9p.stamps_attacher_end",             test_sys_attach_9p_stamps_attacher_end,             false, NULL },
     { "sys_attach_9p.declarations",                    test_sys_attach_9p_declarations,                    false, NULL },
     { "sys_mount.happy_path_grafts_pipe_spoor",        test_sys_mount_happy_path_grafts_pipe_spoor,        false, NULL },
     { "sys_mount.idempotent_on_duplicate",             test_sys_mount_idempotent_on_duplicate,             false, NULL },

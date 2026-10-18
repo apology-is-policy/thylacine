@@ -382,6 +382,15 @@ struct p9_client {
     // permission, caches or vouches for exec consults it. Stamped once by the
     // attach path before the root Spoor publishes, like `cape`, never flipped.
     bool                 remote;
+    // The session's two ends (IDENTITY-DESIGN 9.7 M7): the principal the server
+    // authenticates (a /srv conn's opener, or a caller-supplied transport's
+    // attacher) and the /srv poster (PRINCIPAL_INVALID for a caller-supplied
+    // transport). A create through the session is admitted only to one of them
+    // (dev9p_create_admits). Stamped once by the attach path before the root
+    // Spoor publishes, like `cape`, never flipped; a client never stamped holds
+    // PRINCIPAL_INVALID in both and admits no create.
+    u32                  client_end;
+    u32                  server_end;
     // The Larder -- the guest-side FS cache (L1c; docs/LARDER-DESIGN.md, I-38).
     // Shared by every Proc/thread resolving through this mount; protected by its
     // OWN near-leaf lock (never held with c->lock -- the RPCs that take c->lock
@@ -417,6 +426,13 @@ static inline void p9_client_set_cape(struct p9_client *c, u32 uid, u32 gid) {
 // Stamp the remote declaration, under the same rule as the cape.
 static inline void p9_client_set_remote(struct p9_client *c) {
     c->remote = true;
+}
+
+// Stamp the session's two ends, under the same rule as the cape.
+static inline void p9_client_set_ends(struct p9_client *c, u32 client_end,
+                                      u32 server_end) {
+    c->client_end = client_end;
+    c->server_end = server_end;
 }
 
 // =============================================================================

@@ -426,6 +426,11 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // Its ends: the attaching Proc and the conn's server.
     p9_attached_set_ctl_owners(att, __atomic_load_n(&who->principal_id, __ATOMIC_ACQUIRE),
                                cn->server_principal);
+    // The create ends (M7) are the conn's: the server stamps a create with what
+    // SO_PEERCRED reports, the opener, who differs from `who` when a conn
+    // handle was passed on.
+    if (att->client)
+        p9_client_set_ends(att->client, cn->peer_principal, cn->server_principal);
 
     // B1 per-attach loose mode (I-38 opt-in), the identity cape and the remote
     // declaration: stamped on the still-private client BEFORE the root Spoor

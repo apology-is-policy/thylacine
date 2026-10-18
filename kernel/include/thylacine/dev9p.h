@@ -311,6 +311,13 @@ bool dev9p_spoor_origin(struct Spoor *c, const struct Path **name, char *dc);
 // errno (e.g. -T_E_EXIST). Self-gating: returns -1 (the prior generic-failure
 // sentinel) for a non-dev9p Spoor, an unrecorded value, or an out-of-range one.
 s64 dev9p_create_errno(struct Spoor *c);
+
+// M7 (IDENTITY-DESIGN 9.7): may `principal` create through the 9P session `c`
+// belongs to? True only for one of the session's two recorded ends
+// (p9_client_set_ends), and never for PRINCIPAL_INVALID, so a session whose ends
+// were never stamped admits no create. A Spoor of any other Dev is not a 9P
+// session and answers true; a dev9p Spoor without a valid priv answers false.
+bool dev9p_create_admits(struct Spoor *c, u32 principal);
 // Failed Tlopen cause in [-4095,-2], otherwise -1; only before clunk.
 s64 dev9p_open_errno(struct Spoor *c);
 

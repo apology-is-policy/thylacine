@@ -1469,6 +1469,47 @@ static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_re
     return r;
 }
 
+// M7 (IDENTITY-DESIGN 9.7): an attach over a /srv conn stamps the conn's two
+// ends -- its opener and its poster -- and not the attaching Proc, who may hold
+// a conn handle passed on to it; the server stamps creates with the opener.
+void test_9p_srvconn_transport_attach_stamps_conn_ends(void) {
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "proc");
+    client->principal_id = 0x1234u;   // the attacher: at neither end
+    client->primary_gid  = 0x5678u;
+    bool attached = false, opener = false, poster = false, attacher = true;
+    u32  ce = 0xBADu, se = 0xBADu;
+    struct SrvConn *cn = srvconn_create(0, client->pid, 0x2222u, false, 0, 0x3333u,
+                                        SRVCONN_MSIZE);
+    if (cn) {
+        if (sc_stage_reply(cn, P9_TVERSION, P9_NOTAG) == 0 &&
+            sc_stage_reply(cn, P9_TATTACH, 0) == 0) {
+            int err = 0;
+            struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, client, 0, &err);
+            if (root) {
+                struct dev9p_priv *rp = dev9p_priv_of(root);
+                attached = rp != NULL && rp->client != NULL;
+                if (attached) {
+                    ce = rp->client->client_end;
+                    se = rp->client->server_end;
+                }
+                opener   = dev9p_create_admits(root, 0x2222u);
+                poster   = dev9p_create_admits(root, 0x3333u);
+                attacher = dev9p_create_admits(root, 0x1234u);
+                srvconn_teardown(cn);
+                spoor_clunk(root);
+            }
+        }
+        srvconn_unref(cn);
+    }
+    drop_test_proc(client);
+    TEST_ASSERT(attached, "the attach attached");
+    TEST_EXPECT_EQ((u64)ce, 0x2222ull, "client end = the conn's opener");
+    TEST_EXPECT_EQ((u64)se, 0x3333ull, "server end = the conn's poster");
+    TEST_ASSERT(opener && poster, "both ends may create");
+    TEST_ASSERT(!attacher, "the attacher, at neither end, may not");
+}
+
 extern s64 sys_attach_9p_srv_for_proc(struct Proc *p, u64 srv_fd_raw,
                                       const u8 *aname, u64 aname_len,
                                       u64 n_uname, u64 flags);

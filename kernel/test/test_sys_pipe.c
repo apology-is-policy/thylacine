@@ -329,6 +329,7 @@ struct pa_seen {
     s64  sent;       // bytes written to the client-to-server pipe; < 0: fixture failed
     bool origin, origin_named;   // the root's /proc/<pid>/ns name (dev9p_spoor_origin)
     char origin_dc;
+    u32  client_end, server_end; // the session's create ends (M7)
 };
 
 static int pa_stage(struct Proc *p, hidx_t wr, u8 type, u16 tag) {
@@ -359,7 +360,7 @@ static const u8 g_pa_aname[SYS_ATTACH_ANAME_MAX + 8] = { '/' };
 
 static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
                                      bool null_aname, enum pa_ends ends) {
-    struct pa_seen r = { 0x7BAD, false, false, false, -1, false, false, 0 };
+    struct pa_seen r = { 0x7BAD, false, false, false, -1, false, false, 0, 0xBADu, 0xBADu };
     struct Proc *p = make_test_proc();
     if (!p) return r;
     p->principal_id = 0x1234u;
@@ -386,8 +387,10 @@ static struct pa_seen pipe_attach_ex(u64 flags, u64 n_uname, u64 aname_len,
                                         ? dev9p_priv_of((struct Spoor *)h.obj) : NULL;
             r.attached = rp != NULL && rp->client != NULL;
             if (r.attached) {
-                r.cape   = rp->client->cape;
-                r.remote = rp->client->remote;
+                r.cape       = rp->client->cape;
+                r.remote     = rp->client->remote;
+                r.client_end = rp->client->client_end;
+                r.server_end = rp->client->server_end;
                 const struct Path *on = NULL;
                 r.origin = dev9p_spoor_origin((struct Spoor *)h.obj, &on, &r.origin_dc);
                 r.origin_named = on != NULL;
@@ -417,6 +420,15 @@ void test_sys_attach_9p_names_root_by_its_pipe(void) {
     TEST_ASSERT(r.origin, "its root carries the name of the file it came over");
     TEST_ASSERT(!r.origin_named, "a pipe has no name");
     TEST_EXPECT_EQ((u64)(u8)r.origin_dc, (u64)(u8)DEVPIPE_DC, "so the root reads the pipe's device spec");
+}
+
+// M7 (IDENTITY-DESIGN 9.7): the kernel does not know the server behind a
+// caller-supplied transport, so the session has one recorded end, the attacher.
+void test_sys_attach_9p_stamps_attacher_end(void) {
+    struct pa_seen r = pipe_attach(0);
+    TEST_ASSERT(r.ret >= 0 && r.attached, "a pipe attach attaches");
+    TEST_EXPECT_EQ((u64)r.client_end, 0x1234ull, "client end = the attacher");
+    TEST_EXPECT_EQ((u64)r.server_end, (u64)PRINCIPAL_INVALID, "no server end");
 }
 
 // SYS_ATTACH_9P's refusals, each before a byte reaches the wire. The admitted

@@ -149,6 +149,10 @@ static u32  g_dev9p_wga_partial_n;
 // #50: Tlcreate arrival counter -- the open-first economy + retry-vs-recreate
 // discrimination reads it.
 static u32  g_tlcreate_seen;
+// M7: answer the next N NAMED Twalks Rlerror(ENOENT), then behave. The plain
+// Twalk otherwise reports every component present, so without it a create's
+// existence probe could never find a name absent.
+static u32  g_twalk_enoent_n;
 
 // F1 write-behind: wire-op counters, sequencing, payload capture + fault
 // injection for the wb_* tests. g_wire_seq bumps on EVERY request the
@@ -253,6 +257,16 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         // fid(4) + newfid(4) = 15; nwname at 15..17.
         if (req_len < P9_HDR_LEN + 4 + 4 + 2) return -1;
         u16 nwname = (u16)req[15] | ((u16)req[16] << 8);
+        if (g_twalk_enoent_n > 0 && nwname > 0) {
+            g_twalk_enoent_n--;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = 2; resp[8] = 0; resp[9] = 0; resp[10] = 0;     // ENOENT
+            return (int)etotal;
+        }
         size_t body_len = 2 + (size_t)nwname * P9_QID_LEN;
         size_t total = P9_HDR_LEN + body_len;
         if (resp_cap < total) return -1;
@@ -4117,6 +4131,8 @@ extern s64 sys_open_create_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
 // Rgetattr reports S_IFREG|0644/uid 0x1234, which would fail the A-2d W|X
 // parent gate; the cap bypasses rwx (perm_check), and the A-2d denial row
 // itself is proven in the stalk battery -- nothing is lost by bypassing here.
+// The cap does not admit a create (M7): the session's ends do, so the Proc is
+// stamped as its client end, as an attach over its own transport would be.
 static struct Proc *oc9_proc(struct Spoor *root, hidx_t *fd_out) {
     struct Spoor *nc = spoor_clone(root);
     if (!nc) return NULL;
@@ -4128,6 +4144,7 @@ static struct Proc *oc9_proc(struct Spoor *root, hidx_t *fd_out) {
     p->principal_id = 0x1234u;
     p->primary_gid  = 0x5678u;
     p->caps         = CAP_DAC_OVERRIDE;
+    p9_client_set_ends(dev9p_priv_of(root)->client, p->principal_id, PRINCIPAL_INVALID);
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, nc);
     if (fd < 0) { spoor_clunk(nc); p->state = PROC_STATE_ZOMBIE; proc_free(p); return NULL; }
     *fd_out = fd;
@@ -4435,6 +4452,153 @@ void test_dev9p_walk_create_refuses_dmsrv_bits(void) {
     }
     TEST_EXPECT_EQ((u64)tried, (u64)SYS_WALK_CREATE_DMSRV_BITS, "every DMSRV bit was tried");
     TEST_ASSERT(tried & SYS_WALK_CREATE_DMSRVREMOTE, "the remote declaration among them");
+}
+
+// =============================================================================
+// M7 (IDENTITY-DESIGN 9.7): a create through a 9P session is admitted only to a
+// principal at one of the session's two ends. Every creator here holds
+// CAP_DAC_OVERRIDE (oc9_proc), so the mode bits admit it and only M7 can
+// refuse; each refusal sits beside an admitted control one variable away.
+// =============================================================================
+
+#define M7_CREATOR 0x1234u   // oc9_proc's principal
+#define M7_OTHER_A 0x9999u
+#define M7_OTHER_B 0x8888u
+
+// One fd create of "m7file" on a fresh session whose ends are (client_end,
+// server_end), by a Proc of `principal`. absent: the existence probe finds no
+// such name. dev: the parent's Dev (NULL keeps dev9p). Returns the create's
+// answer; *seen = the Tlcreates it sent.
+static s64 m7_create(u32 client_end, u32 server_end, u32 principal, bool absent,
+                     struct Dev *dev, u32 *seen) {
+    *seen = 0xBADu;
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return 0x7BAD;
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    if (!p) { teardown(root); return 0x7BAE; }
+    p->principal_id = principal;
+    p9_client_set_ends(&g_client, client_end, server_end);
+    struct Handle h;
+    if (dev && handle_get(p, base, &h) == 0) {
+        ((struct Spoor *)h.obj)->dev = dev;
+        handle_put(&h);
+    }
+    g_tlcreate_seen  = 0;
+    g_twalk_enoent_n = absent ? 1 : 0;
+    s64 r = sys_walk_create_kname_for_proc(p, (u64)base, "m7file", 6, 1 /*OWRITE*/, 0644);
+    g_twalk_enoent_n = 0;    // fixture hygiene: an admitted create never consumes it
+    *seen = g_tlcreate_seen;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    return r;
+}
+
+void test_dev9p_create_admits_session_ends(void) {
+    u32 seen = 0;
+    TEST_ASSERT(m7_create(M7_CREATOR, PRINCIPAL_INVALID, M7_CREATOR, true, NULL, &seen) >= 0,
+                "control: the client end creates");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "control: its create reached the wire");
+    TEST_ASSERT(m7_create(M7_OTHER_A, M7_CREATOR, M7_CREATOR, true, NULL, &seen) >= 0,
+                "the server end creates");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "the server end's create reached the wire");
+    TEST_EXPECT_EQ((u64)m7_create(M7_OTHER_A, M7_OTHER_B, M7_CREATOR, true, NULL, &seen),
+                   (u64)(s64)-T_E_ACCES, "a principal at neither end: EACCES, DAC override held");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "the refused create sent no Tlcreate");
+    TEST_EXPECT_EQ((u64)m7_create(PRINCIPAL_INVALID, PRINCIPAL_INVALID, M7_CREATOR, true, NULL,
+                                  &seen),
+                   (u64)(s64)-T_E_ACCES, "a session whose ends were never recorded admits none");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "nothing reached the wire");
+}
+
+void test_dev9p_create_refuses_invalid_principal(void) {
+    u32 seen = 0;
+    TEST_ASSERT(m7_create(M7_CREATOR, PRINCIPAL_INVALID, M7_CREATOR, true, NULL, &seen) >= 0,
+                "control: a recorded principal at an end creates");
+    TEST_EXPECT_EQ((u64)m7_create(PRINCIPAL_INVALID, PRINCIPAL_INVALID, PRINCIPAL_INVALID, true,
+                                  NULL, &seen),
+                   (u64)(s64)-T_E_ACCES, "PRINCIPAL_INVALID never matches an unrecorded end");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "nothing reached the wire");
+}
+
+void test_dev9p_create_refusal_keeps_eexist(void) {
+    u32 seen = 0;
+    TEST_EXPECT_EQ((u64)m7_create(M7_OTHER_A, M7_OTHER_B, M7_CREATOR, true, NULL, &seen),
+                   (u64)(s64)-T_E_ACCES, "control: an absent name is refused EACCES");
+    TEST_EXPECT_EQ((u64)m7_create(M7_OTHER_A, M7_OTHER_B, M7_CREATOR, false, NULL, &seen),
+                   (u64)(s64)-T_E_EXIST, "an existing name answers EEXIST, the A-2d order");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "nothing reached the wire");
+}
+
+void test_dev9p_create_refusal_without_rwx_enforcement(void) {
+    struct Dev d9 = dev9p;
+    d9.perm_enforced = false;
+    u32 seen = 0;
+    TEST_ASSERT(m7_create(M7_CREATOR, PRINCIPAL_INVALID, M7_CREATOR, true, &d9, &seen) >= 0,
+                "control: the client end creates through a Dev enforcing no rwx");
+    TEST_EXPECT_EQ((u64)seen, 1ull, "control: its create reached the wire");
+    TEST_EXPECT_EQ((u64)m7_create(M7_OTHER_A, M7_OTHER_B, M7_CREATOR, true, &d9, &seen),
+                   (u64)(s64)-T_E_ACCES, "M7 refuses where the Dev enforces no rwx");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "nothing reached the wire");
+}
+
+// SYS_OPEN_CREATE's open-or-create reaches the same chokepoint once its open
+// leg misses. Its control is test_dev9p_open_create_noent_then_create: the same
+// call with the creator at the client end.
+void test_dev9p_open_create_refuses_non_end(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    TEST_ASSERT(p != NULL, "proc + start fd");
+    p9_client_set_ends(&g_client, M7_OTHER_A, M7_OTHER_B);
+    g_tlcreate_seen       = 0;
+    g_dev9p_wga_partial_n = 1;   // the open leg misses
+    g_twalk_enoent_n      = 1;   // and so does the existence probe
+    s64 rc = sys_open_create_kpath_for_proc(p, (u64)base, "newfile", 7, 1 /*OWRITE*/, 0644);
+    g_dev9p_wga_partial_n = 0;   // fixture hygiene, before any assert
+    g_twalk_enoent_n      = 0;
+    u32 seen = g_tlcreate_seen;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_ACCES, "open-or-create by a non-end: EACCES");
+    TEST_EXPECT_EQ((u64)seen, 0ull, "no Tlcreate");
+}
+
+// p9_client_init clears the ends, so a client re-initialized in place (this
+// file's g_client, every test) never carries its last life's. And the
+// predicate's answers off a live session.
+void test_dev9p_client_init_clears_ends(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "client+root");
+    p9_client_set_ends(&g_client, M7_CREATOR, M7_OTHER_A);
+    bool stamped = dev9p_create_admits(root, M7_CREATOR) &&
+                   dev9p_create_admits(root, M7_OTHER_A) &&
+                   !dev9p_create_admits(root, M7_OTHER_B);
+    teardown(root);
+    root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "the same client, re-initialized");
+    u32 ce = g_client.client_end, se = g_client.server_end;
+    bool readmits = dev9p_create_admits(root, M7_CREATOR) ||
+                    dev9p_create_admits(root, M7_OTHER_A);
+    teardown(root);
+    TEST_ASSERT(stamped, "control: a stamped session admits its two ends and no other");
+    TEST_EXPECT_EQ((u64)ce, (u64)PRINCIPAL_INVALID, "re-init clears the client end");
+    TEST_EXPECT_EQ((u64)se, (u64)PRINCIPAL_INVALID, "re-init clears the server end");
+    TEST_ASSERT(!readmits, "so the next life admits no create");
+
+    struct Spoor *bare = spoor_alloc(&dev9p);   // a dev9p Spoor with no priv
+    struct Spoor *other = spoor_alloc(&devnone);
+    TEST_ASSERT(bare != NULL && other != NULL, "two bare Spoors");
+    bool bare_admits  = dev9p_create_admits(bare, M7_CREATOR);
+    bool other_admits = dev9p_create_admits(other, M7_CREATOR);
+    spoor_unref(bare);
+    spoor_unref(other);
+    TEST_ASSERT(!bare_admits, "a dev9p Spoor without a priv refuses");
+    TEST_ASSERT(other_admits, "another Dev's Spoor is not a 9P session");
+    TEST_ASSERT(!dev9p_create_admits(NULL, M7_CREATOR), "no Spoor refuses");
 }
 
 // LR-1 (HAUL-DESIGN 4.8): the remote declaration on the mount list. A member

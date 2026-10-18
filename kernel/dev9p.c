@@ -131,6 +131,16 @@ s64 dev9p_create_errno(struct Spoor *c) {
     return (e <= -2 && e >= -4095) ? (s64)e : -1;
 }
 
+// M7: see the header contract. The dc test comes first so that a dev9p Spoor
+// whose priv fails the magic check refuses rather than passing as "not 9P".
+bool dev9p_create_admits(struct Spoor *c, u32 principal) {
+    if (!c) return false;
+    if (c->dc != DEV9P_DC) return true;
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !p->client || principal == PRINCIPAL_INVALID) return false;
+    return principal == p->client->client_end || principal == p->client->server_end;
+}
+
 // Like create, open is performed on a freshly walked, unpublished Spoor.
 // Preserve resource refusals so callers can distinguish admission from I/O
 // failure. Non-9P devices and invalid/unspecified wire errors keep EIO.

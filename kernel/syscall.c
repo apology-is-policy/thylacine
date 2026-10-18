@@ -2650,9 +2650,11 @@ s64 sys_attach_9p_for_proc(struct Proc *p, u64 tx_fd_raw, u64 rx_fd_raw,
     // last-ref destroy handles adapter + transport cleanup.
 
     // The server behind a caller-supplied transport is not known to the kernel:
-    // the attacher is the session's one recorded end (/ctl/9p-sessions).
-    p9_attached_set_ctl_owners(att, __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE),
-                               PRINCIPAL_INVALID);
+    // the attacher is the session's one recorded end (/ctl/9p-sessions), and the
+    // one principal its creates are admitted to (M7).
+    u32 attacher = __atomic_load_n(&p->principal_id, __ATOMIC_ACQUIRE);
+    p9_attached_set_ctl_owners(att, attacher, PRINCIPAL_INVALID);
+    p9_client_set_ends(att->client, attacher, PRINCIPAL_INVALID);
 
     // The identity cape and the remote declaration: stamped on the still-private
     // client before the root Spoor exists (the handle publication below orders
@@ -4185,10 +4187,20 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // search (X) right already does, so it runs only when X is granted. The
     // probe neither follows a final symlink nor checks the child's own bits:
     // any entry by that name is "exists", as for Linux's exclusive lookup.
-    if (src->dev->perm_enforced) {
+    //
+    // M7 (IDENTITY-DESIGN 9.7): the server stamps a create with its session's
+    // credential, never the caller's, so a create through a 9P session is
+    // admitted only to a principal at one of the session's two ends. The
+    // refusal joins the W|X one -- an existing name keeps its EEXIST answer --
+    // and is decided even where the Dev does not enforce rwx, and whatever the
+    // caller's DAC override: perm_check answers for the mode bits, not for whom
+    // the server will name as the creator.
+    bool admitted = dev9p_create_admits(src, __atomic_load_n(&p->principal_id,
+                                                             __ATOMIC_ACQUIRE));
+    if (src->dev->perm_enforced || !admitted) {
         struct t_stat parent_st;
         if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -T_E_IO; }
-        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
+        if (!admitted || perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
             s64 deny = -T_E_ACCES;
             if (perm_check(p, &parent_st, PERM_X) == 0 &&
                 stalk_union_has_child(p, src, name_scratch, (u32)name_len_raw))
