@@ -22,11 +22,15 @@ int loom_fid_commit_walk(struct loom_slot_table *,struct loom_service_node_table
 // remains RESERVED for ordinary unused reap. Does not undo remote wire effects.
 int loom_fid_release_claim(struct loom_slot_table *,struct loom_service_node_table *,
     struct loom_service_ref dest,u64 request_id);
-// need=0 for metadata/WALK, READ/WRITE for actual data access. Resolves ONLY an
+// need=0 for metadata, READ/WRITE for actual data access. Resolves ONLY an
 // already committed mapping, retaining source slot; output unchanged on refusal.
 // Caller still owes fresh ordinary stat/DAC/search proof where required.
 int loom_fid_borrow(struct loom_slot_table *,struct loom_service_node_table *,
     struct loom_service_ref source,struct loom_service_ref scope,u32 need,u32 *wire_fid);
+// A WALK source: borrow with need=0 that refuses an opened fid -T_E_BADF,
+// since 9P walks only from a fid no Tlopen has opened.
+int loom_fid_borrow_walk(struct loom_slot_table *,struct loom_service_node_table *,
+    struct loom_service_ref source,struct loom_service_ref scope,u32 *wire_fid);
 // Ordinary LOPEN mode0/1/2; owner supplies successful stat/DAC/protocol proof.
 // Requires its exact exclusive open claim, retained through physical cleanup.
 int loom_fid_commit_open(struct loom_slot_table *,struct loom_service_node_table *,

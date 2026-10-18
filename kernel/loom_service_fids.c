@@ -79,8 +79,8 @@ int loom_fid_release_claim(struct loom_slot_table *t,struct loom_service_node_ta
     if(!rc){n->fid_claim=0;n->fid_flags&=~LFID_OPENING;}
     return rc;
 }
-int loom_fid_borrow(struct loom_slot_table *t,struct loom_service_node_table *nodes,
-    struct loom_service_ref source,struct loom_service_ref scope,u32 need,u32 *wire) {
+static int fid_borrow(struct loom_slot_table *t,struct loom_service_node_table *nodes,
+    struct loom_service_ref source,struct loom_service_ref scope,u32 need,bool walk,u32 *wire) {
     if(!wire || (need&~(LFID_READ|LFID_WRITE)))return -T_E_INVAL;
     struct loom_service_node *n=fid_exact(t,nodes,source,false);
     if(!n)return -T_E_NOENT;
@@ -89,9 +89,19 @@ int loom_fid_borrow(struct loom_slot_table *t,struct loom_service_node_table *no
     if(n->fid_claim)return -T_E_BUSY;
     if(n->fid_borrows==UINT32_MAX)return -T_E_NOSPC;
     if(need && (!(n->fid_flags&LFID_OPEN) || (n->fid_access&need)!=need))return -T_E_ACCES;
+    // walk(5): a fid opened for I/O is no longer a walk source.
+    if(walk && (n->fid_flags&LFID_OPEN))return -T_E_BADF;
     int rc=loom_slot_pin(t,source,t->slots[source.slot].kind);
     if(!rc){++n->fid_borrows;*wire=n->wire_fid;}
     return rc;
+}
+int loom_fid_borrow(struct loom_slot_table *t,struct loom_service_node_table *nodes,
+    struct loom_service_ref source,struct loom_service_ref scope,u32 need,u32 *wire) {
+    return fid_borrow(t,nodes,source,scope,need,false,wire);
+}
+int loom_fid_borrow_walk(struct loom_slot_table *t,struct loom_service_node_table *nodes,
+    struct loom_service_ref source,struct loom_service_ref scope,u32 *wire) {
+    return fid_borrow(t,nodes,source,scope,0,true,wire);
 }
 int loom_fid_commit_open(struct loom_slot_table *t,struct loom_service_node_table *nodes,
     struct loom_service_ref source,struct loom_service_ref scope,u64 id,u32 mode) {

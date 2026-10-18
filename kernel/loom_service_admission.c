@@ -52,8 +52,9 @@ int loom_admission_enqueue_locked(struct loom_service_operation *o,
        admission_same(source,destination)))return -T_E_INVAL;
     o->source=source;o->destination=destination;
     if(kind==P9_TREAD || kind==P9_TWRITE || kind==P9_TWALK) {
-        u32 need=kind==P9_TREAD?LFID_READ:kind==P9_TWRITE?LFID_WRITE:0;
-        rc=loom_fid_borrow(l->service_slots,l->service_nodes,source,scope,need,&wire);
+        rc=kind==P9_TWALK?loom_fid_borrow_walk(l->service_slots,l->service_nodes,source,scope,&wire):
+           loom_fid_borrow(l->service_slots,l->service_nodes,source,scope,
+                           kind==P9_TREAD?LFID_READ:LFID_WRITE,&wire);
         if(rc)return rc;
         o->source_borrow=true;
         if(kind==P9_TWALK) {
