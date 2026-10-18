@@ -6,7 +6,8 @@
 // and they read the fixture's stats file for what the server saw.
 //
 // fd 0 is the registry the fixture posts in, fd 1 the control pipe (closed at
-// exit, which ends the fixture) and fd 2 the notify pipe.
+// exit, which ends the fixture) and fd 2 the notify pipe. A 'Q' on fd 1 asks the
+// fixture for a 'Z' on fd 2 once it holds no session.
 
 #include <stdint.h>
 #include <stddef.h>
@@ -17,10 +18,12 @@
 #define PASS_DEFAULT 74
 #define PASS_QUAL    75
 #define REGISTRY     0
+#define CONTROL      1
 #define NOTIFY       2
 
 // The kernel's errno registry (kernel/include/thylacine/errno.h).
 #define E_NOENT      2
+#define E_BADF       9
 #define E_ACCES     13
 #define E_NOSPC     28
 #define E_OPNOTSUPP 95
@@ -45,6 +48,7 @@
 #define VIOLATIONS 2
 #define STALLED    3
 #define CLUNKS     5
+#define GETATTRS   6
 #define WALKS      7
 #define STAT_COUNT 11
 
@@ -123,7 +127,8 @@ static uint64_t soon(void) {
     return t_loom_now(g_cur) + WAIT_NS;
 }
 
-// Sleeps up to ms on the notify pipe, which the fixture writes only once.
+// Sleeps up to ms on the notify pipe: after the fixture's 'R', nothing arrives
+// there until the probe asks for the 'Z'.
 static void nap(long ms) {
     struct pollfd p = { .fd = NOTIFY, .events = POLLIN, .revents = 0 };
     (void)t_poll(&p, 1, ms);
@@ -369,6 +374,22 @@ static int run(void) {
     CHECK(len == LEAF_LEN && matches(bytes, len, 0), "the file below a directory", len);
     t_loom_read_drop(rr);
 
+    say("a walk from an opened fid");
+    // The fixture refuses this WALK with the same errno, so only its counters
+    // tell the kernel's refusal at submit from the server's.
+    struct t_loom_fid *odir = walk(s1, "dir", 0);
+    open_as(odir, 0, 0);
+    stats(sf, base);
+    rc = t_loom_walk_fid(odir, "leaf", 4, 1, soon(), &op);
+    CHECK(rc == 0, "submit a WALK from an opened fid", rc);
+    res = 0;
+    struct t_loom_fid *child = NULL;
+    AWAIT(t_loom_walk_done(op, &res, &child), "a WALK from an opened fid");
+    CHECK(res == -E_BADF && !child, "the kernel refuses a WALK from an opened fid", res);
+    stats(sf, v);
+    uint32_t reached = (v[WALKS] - base[WALKS]) + (v[GETATTRS] - base[GETATTRS]) + (v[VIOLATIONS] - base[VIOLATIONS]);
+    CHECK(reached == 0, "no Tgetattr or Twalk reached the server", reached);
+
     say("fixed reads and writes");
     rr = read_at(data, range(0, 0, PAGE), 0, &bytes, &len);
     CHECK(len == PAGE && matches(bytes, len, 0), "a fixed READ's bytes", len);
@@ -481,7 +502,7 @@ static int run(void) {
     struct t_loom_fid *fifth = walk(s1, "stream", 0);
     open_as(fifth, 0, 0);
     st = stream(fifth, pool_a);
-    got = drain(st, 0);
+    got = drain(st, 1);
     CHECK(got == STREAM_LEN && matches(g_got, got, 0), "the dropped stream's pool streams again", got);
     t_loom_op_drop(st);
 
@@ -499,9 +520,9 @@ static int run(void) {
     struct t_loom_target *t2 = NULL;
     rc = t_loom_target(g_ring, REGISTRY, "fixture", 7, &t2);
     CHECK(rc == 0 && t2, "a second TARGET of the fixture", rc);
-    // Held: two targets; s1 and its eight fids; pools A and B; s2, s3 and s5
+    // Held: two targets; s1 and its nine fids; pools A and B; s2, s3 and s5
     // with their two, two and one fids; s4 and its one.
-    const unsigned held = 2 + 1 + 8 + 2 + 3 + 3 + 2 + 2;
+    const unsigned held = 2 + 1 + 9 + 2 + 3 + 3 + 2 + 2;
     stats(sf, base);
     unsigned f1 = fill(s1);
     CHECK(f1 == SLOTS - held, "the free slots are those no live handle holds", f1);
@@ -551,8 +572,9 @@ static int run(void) {
     struct t_loom_target *late = NULL;
     rc = t_loom_target(g_ring2, REGISTRY, "fixture", 7, &late);
     CHECK(rc == -E_CANCELED && !late, "a closed ring admits no TARGET", rc);
+    op = NULL;
     rc = t_loom_walk(s6, "data", 4, 0, 0, &op);
-    CHECK(rc == -E_CANCELED, "a closed ring admits no WALK", rc);
+    CHECK(rc == -E_CANCELED && !op, "a closed ring admits no WALK", rc);
     // The close reached the kernel: the server saw the session end while this
     // program still runs.
     stats_until(sf, ENDED, base[ENDED] + 1, v);
@@ -580,7 +602,16 @@ static int run(void) {
     }
     rc = t_loom_target(g_ring, REGISTRY, "fixture", 7, &late);
     CHECK(rc == -E_CANCELED && !late, "a retired ring admits no TARGET", rc);
-    struct t_loom_fid *fids[] = { fifth, second, first, leaf, dir, sink, data, sf };
+    // The fixture serves only this program: once the ring retired, it holds
+    // no session.
+    n = t_write(CONTROL, "Q", 1);
+    CHECK(n == 1, "ask the fixture to answer once it holds no session", n);
+    struct pollfd idle = { .fd = NOTIFY, .events = POLLIN, .revents = 0 };
+    n = t_poll(&idle, 1, 5000);
+    CHECK(n == 1, "the fixture holds no session once the ring retired", n);
+    n = t_read(NOTIFY, &b, 1);
+    CHECK(n == 1 && b == 'Z', "the fixture's answer", n);
+    struct t_loom_fid *fids[] = { fifth, second, first, odir, leaf, dir, sink, data, sf };
     for (unsigned i = 0; i < sizeof(fids) / sizeof(fids[0]); i++) t_loom_fid_drop(fids[i]);
     t_loom_scope_drop(s1);
     t_loom_pool_drop(pool_a);

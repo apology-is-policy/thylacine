@@ -5,9 +5,11 @@
 // every leg below passed. No other program exits with either code.
 //
 // fd 0 is the registry the fixture posts in, fd 1 the control pipe (closed at
-// exit, which ends the fixture) and fd 2 the notify pipe. The legs read the
+// exit, which ends the fixture) and fd 2 the notify pipe. A 'Q' on fd 1 asks the
+// fixture for a 'Z' on fd 2 once it holds no session. The legs read the
 // fixture's stats file for what the server saw: the sessions it accepted and
-// ended, its stalled reads, Twalks and Tclunks, and the violations it counted.
+// ended, its stalled reads, Tgetattrs, Twalks and Tclunks, and the violations it
+// counted.
 
 #![no_std]
 #![no_main]
@@ -19,7 +21,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 use libthyla_rs::loom::native::{Fid, Payload, PoolMember, Scope, Shot, Stream, Target};
 use libthyla_rs::loom::{ServiceRing, ThylaKernel};
-use libthyla_rs::{t_putstr, t_read};
+use libthyla_rs::{t_poll, t_putstr, t_read, t_write, TPollFd, T_POLLIN};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
@@ -29,10 +31,12 @@ type K = ThylaKernel;
 const PASS_DEFAULT: i64 = 78;
 const PASS_QUAL: i64 = 79;
 const REGISTRY: i32 = 0;
+const CONTROL: i64 = 1;
 const NOTIFY: i64 = 2;
 
 // The kernel's errno registry (kernel/include/thylacine/errno.h).
 const E_NOENT: i32 = 2;
+const E_BADF: i32 = 9;
 const E_ACCES: i32 = 13;
 const E_NOSPC: i32 = 28;
 const E_OPNOTSUPP: i32 = 95;
@@ -59,6 +63,7 @@ const ENDED: usize = 1;
 const VIOLATIONS: usize = 2;
 const STALLED: usize = 3;
 const CLUNKS: usize = 5;
+const GETATTRS: usize = 6;
 const WALKS: usize = 7;
 const STAT_COUNT: usize = 11;
 
@@ -288,6 +293,18 @@ fn run() -> R<i64> {
     check!(r.bytes().len() == LEAF_LEN && matches(r.bytes(), 0), "the file below a directory", r.bytes().len());
     drop(r);
 
+    say("a walk from an opened fid");
+    // The fixture refuses this WALK with the same errno, so only its counters
+    // tell the kernel's refusal at submit from the server's.
+    let odir = walk(&ring, &s1, b"dir")?;
+    open(&ring, &odir, 0)?;
+    let base = stats(&ring, &stats_fid)?;
+    done_refused!(ring, ok!(odir.walk(b"leaf", soon(&ring)), "submit a WALK from an opened fid"), E_BADF,
+                  "the kernel refuses a WALK from an opened fid");
+    let v = stats(&ring, &stats_fid)?;
+    let reached = (v[WALKS] - base[WALKS]) + (v[GETATTRS] - base[GETATTRS]) + (v[VIOLATIONS] - base[VIOLATIONS]);
+    check!(reached == 0, "no Tgetattr or Twalk reached the server", reached);
+
     say("fixed reads and writes");
     let r = done!(ring, ok!(data.read(range(0, 0, PAGE), 0, soon(&ring)), "submit a READ"), "a READ");
     check!(r.bytes().len() == PAGE as usize && matches(r.bytes(), 0), "a fixed READ's bytes", r.bytes().len());
@@ -394,7 +411,7 @@ fn run() -> R<i64> {
     let fifth = walk(&ring, &s1, b"stream")?;
     open(&ring, &fifth, 0)?;
     let mut st = ok!(fifth.stream(&pool_a, 0, SHOT as u32, true, None), "a multishot stream");
-    let got = drain(&ring, &mut st, false)?;
+    let got = drain(&ring, &mut st, true)?;
     check!(got.len() == STREAM_LEN && matches(&got, 0), "the dropped stream's pool streams again", got.len());
     drop(st);
 
@@ -411,9 +428,9 @@ fn run() -> R<i64> {
 
     say("dropped fids, scopes, pools and targets are reaped");
     let t2 = ok!(ring.target(REGISTRY, b"fixture"), "a second TARGET of the fixture");
-    // Held: two targets; s1 and its eight fids; pools A and B; s2, s3 and s5
+    // Held: two targets; s1 and its nine fids; pools A and B; s2, s3 and s5
     // with their two, two and one fids; s4 and its one.
-    const HELD: usize = 2 + 1 + 8 + 2 + 3 + 3 + 2 + 2;
+    const HELD: usize = 2 + 1 + 9 + 2 + 3 + 3 + 2 + 2;
     let base = stats(&ring, &stats_fid)?;
     let f1 = fill(&ring, &s1)?;
     check!(f1 == SLOTS - HELD, "the free slots are those no live handle holds", f1);
@@ -464,6 +481,15 @@ fn run() -> R<i64> {
         ok!(ring.turn(Some(ring.now() + 10_000_000)), "a turn while the ring retires");
     }
     refused!(ring.target(REGISTRY, b"fixture"), E_CANCELED, "a retired ring admits no TARGET");
+    // The fixture serves only this program: once the ring retired, it holds
+    // no session.
+    let n = unsafe { t_write(CONTROL, b"Q".as_ptr(), 1) };
+    check!(n == 1, "ask the fixture to answer once it holds no session", n);
+    let mut idle = [TPollFd { fd: NOTIFY as i32, events: T_POLLIN, revents: 0 }];
+    let n = unsafe { t_poll(idle.as_mut_ptr(), 1, 5000) };
+    check!(n == 1, "the fixture holds no session once the ring retired", n);
+    let n = unsafe { t_read(NOTIFY, b.as_mut_ptr(), 1) };
+    check!(n == 1 && b[0] == b'Z', "the fixture's answer", n);
     say("qualification image drives every leg through the Rust adapter");
     Ok(PASS_QUAL)
 }

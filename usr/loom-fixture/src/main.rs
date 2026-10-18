@@ -5,9 +5,11 @@
 //
 // fd 0 is the walk-only root of a registry the kernel test made for this run,
 // fd 1 the read end of the probe's control pipe, and fd 2 the write end of the
-// notify pipe. It posts "fixture" in the registry, writes one byte to fd 2, and
+// notify pipe. It posts "fixture" in the registry, writes 'R' to fd 2, and
 // serves every connection until fd 1 reaches EOF. Every session must then end
-// within SETTLE_NS: the probe has exited, so its rings are closed.
+// within SETTLE_NS: the probe has exited, so its rings are closed. A 'Q' read
+// from fd 1 asks for one 'Z' on fd 2 once no session is left. Nothing else is
+// ever written there: a probe sleeps by polling fd 2 while it stays empty.
 //
 // Strict: each message below is one the kernel's client never sends, and it
 // counts a violation. Most answer Rlerror: anything before Tversion, a second
@@ -537,7 +539,17 @@ fn run() -> i64 {
     let mut s = Server { count: [0; STAT_COUNT], sink: Vec::new(), out: Vec::new() };
     let mut conns: Vec<Conn> = Vec::new();
     let mut settle: Option<u64> = None;
+    let (mut asked, mut answered) = (false, false);
     loop {
+        if asked && !answered && conns.is_empty() {
+            answered = true;
+            // A probe that stopped waiting has exited and closed the pipe's
+            // read end (the runtime masks the pipe note): it failed already.
+            let rc = unsafe { t_write(NOTIFY, b"Z".as_ptr(), 1) };
+            if rc != 1 {
+                say(&format!("the probe left before its answer ({})", rc));
+            }
+        }
         if let Some(until) = settle {
             if conns.is_empty() {
                 break;
@@ -572,6 +584,7 @@ fn run() -> i64 {
             if n == 0 {
                 settle = Some(now() + SETTLE_NS);
             }
+            asked |= b[..n as usize].contains(&b'Q');
         }
         for i in (0..conns.len()).rev() {
             let ev = fds[base + i].revents;
