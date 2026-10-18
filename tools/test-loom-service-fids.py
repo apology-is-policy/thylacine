@@ -32,7 +32,7 @@ MUTANTS = [
     ('reap-keeps-parent-pin', '    (void)loom_slot_reap(t,source);\n    (void)loom_slot_unpin(t,parent);',
      '    (void)loom_slot_reap(t,source);',
      'a clunked FID reaps once and unpins its scope'),
-    ('walk-opened', '    if(walk && (n->fid_flags&LFID_OPEN))return -T_E_BADF;\n', '',
+    ('walk-opened', '    if(walk && (n->fid_flags&LFID_OPEN))return -T_E_BADF;\n', '    (void)walk;\n',
      'an opened FID is no WALK source, and the refusal changes nothing'),
     ('walk-never', '    return fid_borrow(t,nodes,source,scope,0,true,wire);',
      '    (void)source;(void)scope;(void)wire;(void)t;(void)nodes;return -T_E_BADF;',
