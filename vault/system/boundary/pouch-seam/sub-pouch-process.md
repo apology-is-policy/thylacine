@@ -54,10 +54,12 @@ both read only a clear flag, and a CI image whose FLAGS_GET hid the flag from
 uid 1000 passed them; descriptor-ops alone turned red (2026-10-15).
 With that image and a posix_spawn whose addclose did nothing for uid 1000, all
 four turned red (2026-10-18), but spawn-actions only where the skipped close
-left a hole in the child's table, which posix_spawn refuses with EINVAL. Where
-the table stayed dense (dup-then-close, high-dup-then-close) the child kept the
-descriptor and both cases passed. The child now checks that each slot it was
-told to close answers EBADF.
+left a hole in the child's table, which posix_spawn refuses with EINVAL. The
+child gets only stdio and the slots its actions establish (the F7 inheritance
+gap), so closing any other descriptor is a no-op, and a skipped close that
+leaves the table dense is invisible from the parent. The child now checks that
+each slot it was told to close answers EBADF, and established-close-dense
+closes a slot established directly above stdio.
 
 The round-1 close (2026-10-15): `pipe2`'s failure unwind closes with the raw
 `__syscall(SYS_close)`, as `popen` does, never the cancellable

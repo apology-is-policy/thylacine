@@ -83,6 +83,12 @@ int main(int argc, char **argv) {
     run("dup-then-close", &fa, 0, GONE(src));
     require(close(src) == 0, "close original");
 
+    /* The child gets only stdio and the slots its actions establish, so a
+     * skipped close of one directly above stdio leaves its table dense, which
+     * nothing on the parent's side can see. */
+    INIT(); OPEN(3); DUP(3,1); CLOSE(3);
+    run("established-close-dense", &fa, 0, GONE(3));
+
     INIT(); CLOSE(8); OPEN(8); DUP(8,1); CLOSE(8);
     run("close-open-dup-close", &fa, 0, GONE(8));
     src = target();
