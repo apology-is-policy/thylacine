@@ -11,7 +11,7 @@ static const char *loom_requests_fixture(void) {
     for (size_t i=0;i<sizeof(s);++i) ((u8 *)&s)[i]=0;
     for (size_t i=0;i<sizeof(n);++i) ((u8 *)&n)[i]=0;
     for (size_t i=0;i<sizeof(records);++i) ((u8 *)records)[i]=0;
-    struct loom_request_table t={.records=records,.capacity=2};
+    struct loom_request_table t={.records=records,.capacity=2,.admit=2};
     struct loom_service_ref scope,zero={0};
     struct loom_request_ref a,b,stale,out={.index=999,.identity=999};
     u64 data=999; s32 result=999;
@@ -102,6 +102,38 @@ static const char *loom_requests_fixture(void) {
        "rejected terminal is immutable");
     RQ(!loom_request_deliver(&t,a) && !loom_request_reap(&t,&s,a),"rejected terminal cleanup");
     RQ(!loom_service_node_reap_unused(&s,&n,scope) && loom_requests_empty(&t),"parent cleanup after all requests");
+    // One admitted request at a time, as a book of one CQ slot allows, on a
+    // table sized like an owner's: the delivered records stop counting.
+    static struct loom_service_request wide[2u+LOOM_SERVICE_SLOT_COUNT];
+    for (size_t i=0;i<sizeof(wide);++i) ((u8 *)wide)[i]=0;
+    struct loom_request_table w={.records=wide,.capacity=loom_request_records(1),.admit=1};
+    struct loom_request_ref held[2u+LOOM_SERVICE_SLOT_COUNT];
+    RQ(sizeof(wide)/sizeof(wide[0])==w.capacity,"an owner's table holds admit twice and a slot's worth");
+    RQ(!loom_service_node_prepare(&s,&n,LOOM_SERVICE_SCOPE,zero,&scope) &&
+       !loom_service_node_publish(&s,&n,scope),"second scope allocated");
+    RQ(!loom_request_prepare(&w,&s,&n,scope,1,0,30,&held[0]) &&
+       loom_request_prepare(&w,&s,&n,scope,1,0,30,&out)==-T_E_NOSPC && w.occupied==1,
+       "admission counts the requests awaiting a terminal");
+    u32 made=0;
+    for (;;) {
+        struct loom_request_ref r=held[made];
+        RQ(!loom_request_admit(&w,&s,&n,r,30) && !loom_request_finish(&w,&s,&n,r,0),
+           "a request reaches its terminal");
+        if (!loom_request_deliver_room(&w)) break;
+        RQ(!loom_request_deliver(&w,r) && w.delivered==made+1u,"delivery counts the record");
+        ++made;
+        RQ(made<w.capacity && !loom_request_prepare(&w,&s,&n,scope,1,0,30,&held[made]) &&
+           w.occupied==made+1u,"a delivered record no longer counts against admission");
+    }
+    RQ(made==w.admit+LOOM_SERVICE_SLOT_COUNT && w.occupied==made+1u && w.occupied<=w.capacity,
+       "the delivered bound leaves a record for every admitted request");
+    RQ(loom_request_deliver(&w,held[made])==-T_E_AGAIN && w.delivered==made &&
+       wide[held[made].index].phase==LREQ_TERMINAL,"delivery waits at the delivered bound");
+    RQ(!loom_request_reap(&w,&s,held[0]) && w.delivered==made-1u && loom_request_deliver_room(&w) &&
+       !loom_request_deliver(&w,held[made]) && w.delivered==made,"a reaped record lets delivery resume");
+    for (u32 i=1;i<=made;++i) RQ(!loom_request_reap(&w,&s,held[i]),"every delivered record reaps");
+    RQ(loom_requests_empty(&w) && !w.delivered && !loom_service_node_reap_unused(&s,&n,scope),
+       "the owner-sized table drains");
 #undef RQ
     return NULL;
 }

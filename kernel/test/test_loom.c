@@ -164,7 +164,9 @@ static const char *loom_request_owner_fixture(void) {
        !p->as->private_rings,"request allocation failure unwinds tables and charge");
     l=loom_create_private(p,2,2,true);
     if (l) ++goal;
-    RO(l && l->service_requests.records && l->service_requests.capacity==l->cq_entries &&
+    RO(l && l->service_requests.records &&
+       l->service_requests.capacity==loom_request_records(l->cq_entries) &&
+       l->service_requests.admit==l->cq_entries &&
        loom_requests_empty(&l->service_requests),"CQ-sized zeroed request storage owned");
     struct loom_service_reserve in={.size=sizeof(in),.version=1,.kind=LOOM_SERVICE_SCOPE};
     RO(!loom_private_node_prepare(l,p,&in,&scope) && !loom_private_node_publish(l,scope),"request owner scope");

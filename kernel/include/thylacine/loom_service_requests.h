@@ -14,12 +14,22 @@ struct loom_service_request {
 struct loom_request_table {
     struct loom_service_request *records;
     u64 next_identity;
-    u32 capacity, occupied;
+    u32 capacity, occupied;   // physical records; those not FREE
+    u32 admit, delivered;     // most requests awaiting a terminal CQE; DELIVERED records
     bool detached;
 };
 _Static_assert(sizeof(struct loom_service_request) == 56, "request obligation storage");
-_Static_assert(sizeof(struct loom_request_table) == 32, "request table storage");
-// Owner precharges/zeros records[capacity], with capacity equal to its CQ size.
+_Static_assert(sizeof(struct loom_request_table) == 40, "request table storage");
+// Admission counts only requests whose terminal is not yet DELIVERED: what a
+// client's request book, one entry per CQ slot, can see. A DELIVERED record
+// keeps its storage until its owner reaps it, a CONNECT's for its protocol's
+// life (one per slot) and an operation's until the engine frees it. Delivery
+// waits while admit + LOOM_SERVICE_SLOT_COUNT records are DELIVERED, so outside
+// close a request the admission count accepts always finds a FREE record.
+static inline u32 loom_request_records(u32 admit) {
+    return 2u * admit + LOOM_SERVICE_SLOT_COUNT;
+}
+// Owner precharges/zeros records[loom_request_records(cq)], admit = its CQ size.
 // All calls hold the SAME Loom lock as nodes/slots. Caller retains the Loom and
 // all enclosing protocol storage. No allocation, callbacks, usercopy or drops.
 // Each occupied record pins its exact SCOPE; user_data never names a request.
@@ -62,7 +72,9 @@ int loom_request_peek(const struct loom_request_table *, struct loom_request_ref
 // Only after owner copies into reserved CQ capacity, before publishing CQ tail.
 // Terminal records carry the final non-MORE obligation; provided-buffer receipt
 // and multishot intermediate-result ownership remain in the pool ledger.
+// -EAGAIN while the delivered bound holds; callers check deliver_room first.
 int loom_request_deliver(struct loom_request_table *, struct loom_request_ref);
+bool loom_request_deliver_room(const struct loom_request_table *);
 // Owner has detached the consumer and ended every local protocol/buffer borrow.
 // Closing slots and zero recorded borrows are necessary but not sufficient
 // proof of that external lifetime fact. They are checked here as backstops.

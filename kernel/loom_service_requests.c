@@ -37,11 +37,13 @@ static bool request_scope_open(const struct loom_slot_table *s,
 int loom_request_prepare(struct loom_request_table *t, struct loom_slot_table *s,
                          struct loom_service_node_table *n, struct loom_service_ref scope,
                          u64 user_data, u64 deadline, u64 now, struct loom_request_ref *out) {
-    if (!t || !t->records || !t->capacity || !s || !n || !out) return -T_E_INVAL;
+    if (!t || !t->records || !t->capacity || !t->admit || t->delivered > t->occupied ||
+        !s || !n || !out) return -T_E_INVAL;
     if (t->detached || s->closing) return -T_E_CANCELED;
     if (deadline && deadline <= now) return -T_E_TIMEDOUT;
     if (!request_scope_open(s,n,scope)) return -T_E_NOENT;
-    if (t->occupied >= t->capacity || t->next_identity == UINT64_MAX) return -T_E_NOSPC;
+    if (t->occupied - t->delivered >= t->admit || t->next_identity == UINT64_MAX)
+        return -T_E_NOSPC;
     for (u32 i=0;i<t->capacity;++i) {
         struct loom_service_request *r = &t->records[i];
         if (r->phase != LREQ_FREE) continue;
@@ -101,9 +103,11 @@ static int request_remove(struct loom_request_table *t, struct loom_slot_table *
     if (!r) return -T_E_NOENT;
     if (r->phase != phase || r->borrows || r->owners) return -T_E_BUSY;
     if (!t->occupied || !request_scope_held(s,r->scope)) return -T_E_INVAL;
+    if (phase == LREQ_DELIVERED && !t->delivered) return -T_E_INVAL;
     struct loom_service_ref scope = r->scope;
     *r = (struct loom_service_request){0};
     --t->occupied;
+    if (phase == LREQ_DELIVERED) --t->delivered;
     (void)loom_slot_unpin(s,scope);
     return 0;
 }
@@ -153,8 +157,13 @@ int loom_request_deliver(struct loom_request_table *t, struct loom_request_ref r
     if (!r) return -T_E_NOENT;
     if (r->phase != LREQ_TERMINAL || r->borrows) return -T_E_BUSY;
     if (t->detached) return -T_E_CANCELED;
+    if (!loom_request_deliver_room(t)) return -T_E_AGAIN;
     r->phase = LREQ_DELIVERED;
+    ++t->delivered;
     return 0;
+}
+bool loom_request_deliver_room(const struct loom_request_table *t) {
+    return t && t->delivered < t->admit + LOOM_SERVICE_SLOT_COUNT;
 }
 int loom_requests_detach(struct loom_request_table *t, const struct loom_slot_table *s) {
     if (!t || !t->records || !s) return -T_E_INVAL;
@@ -168,6 +177,7 @@ int loom_request_discard(struct loom_request_table *t, struct loom_request_ref r
     if (!r) return -T_E_NOENT;
     if (!t->detached || r->phase != LREQ_TERMINAL || r->borrows) return -T_E_BUSY;
     r->phase = LREQ_DELIVERED;
+    ++t->delivered;
     return 0;
 }
 int loom_request_reap(struct loom_request_table *t, struct loom_slot_table *s,
@@ -175,7 +185,7 @@ int loom_request_reap(struct loom_request_table *t, struct loom_slot_table *s,
     return request_remove(t,s,ref,LREQ_DELIVERED);
 }
 bool loom_requests_empty(const struct loom_request_table *t) {
-    if (!t || !t->records || t->occupied) return false;
+    if (!t || !t->records || t->occupied || t->delivered) return false;
     for (u32 i=0;i<t->capacity;++i) {
         const struct loom_service_request *r=&t->records[i];
         if (r->phase != LREQ_FREE || r->identity || r->scope.incarnation || r->scope.slot ||
@@ -191,5 +201,5 @@ int loom_request_discard_closed_owner(struct loom_request_table *t,
     if(!r)return -T_E_NOENT;
     if(!s || !s->closing || !request_scope_held(s,r->scope) ||
        r->phase!=LREQ_TERMINAL || r->borrows || r->owners!=1)return -T_E_BUSY;
-    r->phase=LREQ_DELIVERED;return 0;
+    r->phase=LREQ_DELIVERED;++t->delivered;return 0;
 }

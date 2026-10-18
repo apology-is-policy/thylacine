@@ -34,6 +34,11 @@ MUTANTS = [
     ('live-discard', 'if (!t->detached || r->phase != LREQ_TERMINAL || r->borrows)', 'if (r->phase != LREQ_TERMINAL || r->borrows)', 'undelivered terminal cannot be discarded or freed'),
     ('wrap', ' || t->next_identity == UINT64_MAX', '', 'request identity wrap refused'),
     ('detach-borrow', 'if (t->records[i].borrows)', 'if (t->records[i].borrows && false)', 'live borrows prevent consumer detach'),
+    ('admit-delivered', 'if (t->occupied - t->delivered >= t->admit', 'if (t->occupied >= t->admit', 'a delivered record no longer counts against admission'),
+    ('deliver-unbounded', '    if (!loom_request_deliver_room(t)) return -T_E_AGAIN;\n', '', 'delivery waits at the delivered bound'),
+    ('room-unbounded', 'return t && t->delivered < t->admit + LOOM_SERVICE_SLOT_COUNT;', 'return t != 0;', 'a delivered record no longer counts against admission'),
+    ('reap-keeps-delivered', '    if (phase == LREQ_DELIVERED) --t->delivered;\n', '', 'detached consumer discards quiescent terminal'),
+    ('discard-uncounted', '    r->phase = LREQ_DELIVERED;\n    ++t->delivered;\n    return 0;\n}\nint loom_request_reap', '    r->phase = LREQ_DELIVERED;\n    return 0;\n}\nint loom_request_reap', 'detached consumer discards quiescent terminal'),
 ]
 
 

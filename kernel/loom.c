@@ -533,7 +533,7 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     // Geometry already bounds cq to 8192. Allocate at least a buddy page even
     // for tiny rings: the charge follows real physical allocation, not a slab.
     _Static_assert(sizeof(struct loom_service_engine) <= PAGE_SIZE, "protocol index page");
-    size_t request_bytes = (size_t)cq * sizeof(struct loom_service_request);
+    size_t request_bytes = (size_t)loom_request_records(cq) * sizeof(struct loom_service_request);
     if (request_bytes < PAGE_SIZE) request_bytes = PAGE_SIZE;
     u32 metadata = (u32)burrow_backing_pages(sizeof(struct Loom)) + 1u
         + (u32)burrow_backing_pages(sizeof(struct loom_service_pool_table))
@@ -576,7 +576,8 @@ struct Loom *loom_create_private_why(struct Proc *p, u32 sq, u32 cq, bool receip
     l->service_pools = pools;
     l->service_targets = targets;
     l->service_nodes = nodes;
-    l->service_requests = (struct loom_request_table){ .records=requests, .capacity=cq };
+    l->service_requests = (struct loom_request_table){ .records=requests,
+        .capacity=loom_request_records(cq), .admit=cq };
     l->service_as = as;
     l->service_creator = p->stripes;
     l->service_metadata_pages = metadata;
@@ -735,7 +736,8 @@ static void loom_private_requests_destroy(struct Loom *l) {
     // no external effects and can unwind locally. Admitted requests require the
     // engine's terminal/local-retirement cleanup before it drops its last ref.
     struct loom_request_table *t = &l->service_requests;
-    if (!t->records || t->capacity != l->cq_entries)
+    if (!t->records || t->capacity != loom_request_records(l->cq_entries) ||
+        t->admit != l->cq_entries)
         extinction("private Loom lost request storage");
     for (u32 i=0;i<t->capacity;++i) {
         struct loom_service_request *r = &t->records[i];
@@ -1887,7 +1889,7 @@ int loom_private_post_terminal(struct Loom *l, struct loom_request_ref ref) {
     struct loom_ring_hdr *h = (void *)(l->ring_kva+l->hdr_off);
     u32 tail = l->cq_tail;
     u32 head = __atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
-    if ((u32)(tail-head) >= l->cq_entries) {
+    if ((u32)(tail-head) >= l->cq_entries || !loom_request_deliver_room(t)) {
         spin_unlock(&l->lock);
         return -T_E_AGAIN;
     }

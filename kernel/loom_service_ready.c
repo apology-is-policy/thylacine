@@ -34,6 +34,9 @@ static struct loom_ready_interest ready_scan(struct loom_service_protocol *p,u64
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
     bool room=(u32)(l->cq_tail-head)<l->cq_entries;
+    // A terminal also needs the request table's delivered bound. Holding only
+    // that post leaves the engine free to reach the FREE that makes room.
+    bool post_room=room && loom_request_deliver_room(&l->service_requests);
     bool wire=room && !reason && !p->locally_retired && !p->progress.io.tx &&
               p9_session_has_free_tag(&p->client.session);
     u32 seen=0;struct loom_service_operation *previous=NULL;
@@ -62,10 +65,10 @@ static struct loom_ready_interest ready_scan(struct loom_service_protocol *p,u64
             if(o->fid_claim!=P9_TCLUNK || !l->service_nodes->nodes[o->source.slot].fid_borrows)
                 action=LREADY_CANCEL;
         }
-        else if(o->pool_pending && room)action=LREADY_DELIVER;
+        else if(o->pool_pending && (o->pool_terminal?post_room:room))action=LREADY_DELIVER;
         else if(o->phase==LRPC_TERMINAL) {
             if(r->phase==LREQ_DELIVERED)action=LREADY_FREE;
-            else if(!o->pool_pending && room)action=LREADY_POST;
+            else if(!o->pool_pending && post_room)action=LREADY_POST;
         } else if(o->phase==LRPC_INFLIGHT && o->callback_seen && !o->rpc.sending)
             action=LREADY_ADVANCE;
         else if(o->phase==LRPC_SETTLING && !o->pool_pending)

@@ -161,7 +161,8 @@ int loom_provided_deliver(struct loom_service_operation *o) {
     }
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
     u32 tail=l->cq_tail,head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
-    if((u32)(tail-head)>=l->cq_entries){rc=-T_E_AGAIN;goto done;}
+    if((u32)(tail-head)>=l->cq_entries ||
+       (o->pool_terminal && !loom_request_deliver_room(&l->service_requests))){rc=-T_E_AGAIN;goto done;}
     u32 idx=tail&(l->cq_entries-1u);
     struct loom_cqe *cq=(void *)(l->ring_kva+l->cqe_off);
     struct loom_service_buffer_receipt *receipts=(void *)(l->ring_kva+l->receipt_off);

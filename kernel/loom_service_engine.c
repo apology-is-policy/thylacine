@@ -237,7 +237,8 @@ static struct engine_interest engine_interest_locked(struct Loom *l,
     if(e->phase!=LENGINE_LIVE || !r)return a;
     struct loom_ring_hdr *h=(void *)(l->ring_kva+l->hdr_off);
     u32 head=__atomic_load_n(&h->cq_head,__ATOMIC_ACQUIRE);
-    a.post=!l->service_closing && r->phase==LREQ_TERMINAL && (u32)(l->cq_tail-head)<l->cq_entries;
+    a.post=!l->service_closing && r->phase==LREQ_TERMINAL && (u32)(l->cq_tail-head)<l->cq_entries &&
+           loom_request_deliver_room(&l->service_requests);
     a.collect=p->locally_retired && !p->op_count && !p->users && !p->driving &&
               r->phase==LREQ_DELIVERED && !r->borrows && e->pins==own_pins;
     if(p->driving || p->users)return a;
