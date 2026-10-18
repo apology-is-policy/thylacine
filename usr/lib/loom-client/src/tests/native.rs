@@ -2,8 +2,8 @@
 mod sim;
 use crate::native::{POLLERR, PoolMember, Ring, Shot};
 use sim::{
-    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, ENOENT, ENOTDIR, ETIMEDOUT, RETIRED,
-    Sim, SimKernel, SlotKind,
+    ABORTING, EACCES, EBADF, EBUSY, ECANCELED, EINTR, EINVAL, EIO, ENOENT, ENOSPC, ENOTDIR,
+    ETIMEDOUT, RETIRED, Sim, SimKernel, SlotKind,
 };
 use std::future::Future;
 
@@ -1152,6 +1152,140 @@ fn a_walk_from_a_file_fid_clones_it_or_answers_enotdir() {
         run(&r, fid.walk(b"g", None).unwrap()).err(),
         Some(ENOTDIR as i32)
     );
+}
+
+/// walk(5): the kernel refuses a WALK from a fid an LOPEN opened at submit,
+/// before the server sees it, and the walk's reservation is reaped.
+#[test]
+fn a_walk_from_an_opened_fid_is_refused_at_submit() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let root = run(&r, scope.walk(b"", None).unwrap()).unwrap();
+    run(&r, root.open(0, None).unwrap()).unwrap();
+    let slots = sim.live_slots();
+    assert_eq!(
+        run(&r, root.walk(b"f", None).unwrap()).err(),
+        Some(EBADF as i32)
+    );
+    r.turn(Some(r.now() + MS)).unwrap();
+    assert_eq!(sim.live_slots(), slots, "the reservation is reaped");
+    // One variable away: the same WALK from a fid no LOPEN opened.
+    let clone = run(&r, scope.walk(b"", None).unwrap()).unwrap();
+    assert!(run(&r, clone.walk(b"f", None).unwrap()).is_ok());
+}
+
+/// The kernel refuses a fid's CLUNK while its LOPEN claims it
+/// (loom_fid_begin_clunk): a fid dropped under its own LOPEN is clunked once
+/// that terminal is routed.
+#[test]
+fn a_fid_dropped_mid_open_is_clunked_after_its_open() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    sim.s().hold = true;
+    let open = fid.open(0, None).unwrap();
+    drop(fid);
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(sim.s().clunk_sqes, 0, "no CLUNK while the LOPEN claims the fid");
+    // Routed but not yet taken: the caller still holds the LOPEN's terminal.
+    sim.s().hold = false;
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(sim.s().clunk_sqes, 1);
+    assert_eq!(sim.s().clunks, 1);
+    assert_eq!(sim.live_slots(), 2, "the fid's slot is free");
+    assert!(sim.s().aborts.is_empty(), "a clunk is not a cancel");
+    assert_eq!(run(&r, open), Ok(()));
+}
+
+/// The kernel's fid rules (loom_fid_claim_open, loom_fid_borrow): an LOPEN in
+/// flight claims its fid against every other use, a fid opens once, and data
+/// moves only through a fid opened for it.
+#[test]
+fn an_lopen_claims_its_fid_and_grants_only_its_mode() {
+    let sim = Sim::new();
+    file(&sim, "f", b"bytes");
+    let r = ring(&sim, 8, &[4096, 4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    assert_eq!(
+        run(&r, fid.read(range(0, 0, 5), 0, None).unwrap()).err(),
+        Some(EACCES as i32)
+    );
+    // Refused at ENTER: no answer from the held server is awaited.
+    sim.s().hold = true;
+    let open = fid.open(0, None).unwrap();
+    let soon = || Some(r.now() + 10 * MS);
+    let read = r.block_on(fid.read(range(0, 0, 5), 0, None).unwrap(), soon());
+    assert_eq!(read.unwrap().err(), Some(EBUSY as i32));
+    let walk = r.block_on(fid.walk(b"", None).unwrap(), soon());
+    assert_eq!(walk.unwrap().err(), Some(EBUSY as i32));
+    let again = r.block_on(fid.open(0, None).unwrap(), soon());
+    assert_eq!(again.unwrap(), Err(ENOENT as i32));
+    sim.s().hold = false;
+    assert_eq!(run(&r, open), Ok(()));
+    assert_eq!(run(&r, fid.open(0, None).unwrap()), Err(ENOENT as i32));
+    let write = fid.write(range(1, 0, 5), 0, b"BYTES", None).unwrap();
+    assert_eq!(run(&r, write).err(), Some(EACCES as i32));
+    let done = run(&r, fid.read(range(0, 0, 5), 0, None).unwrap()).unwrap();
+    assert_eq!(done.bytes(), b"bytes");
+}
+
+/// A CLUNK refused while the fid and its scope are both READY leaves a fid
+/// nothing will ever free: the ring fails rather than leak it.
+#[test]
+fn a_clunk_refused_under_a_ready_scope_fails_the_ring() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    sim.s().refuse_clunk = Some(ENOSPC);
+    drop(fid);
+    let failed = (0..3).find_map(|_| r.turn(Some(r.now() + MS)).err());
+    assert_eq!(failed, Some(EIO as i32));
+    assert_eq!(sim.s().clunk_sqes, 1);
+    assert_eq!(scope.walk(b"f", None).err(), Some(EIO as i32));
+}
+
+/// A CLUNK refused because the kernel aborted the scope before the adapter
+/// saw it is a race, not a fault: the fid is reaped once the scope retires,
+/// and the ring stays up.
+#[test]
+fn a_clunk_refused_under_an_aborting_scope_is_reaped() {
+    let sim = Sim::new();
+    file(&sim, "f", b"x");
+    let r = ring(&sim, 8, &[4096]);
+    let target = r.target(5, b"clip").unwrap();
+    let scope = run(&r, target.connect(None).unwrap()).unwrap();
+    let fid = run(&r, scope.walk(b"f", None).unwrap()).unwrap();
+    // An abort no terminal has told the adapter of yet: a deadline's, say.
+    sim.s()
+        .slots
+        .iter_mut()
+        .flatten()
+        .find(|s| s.kind == SlotKind::Scope)
+        .unwrap()
+        .state = ABORTING;
+    drop(fid);
+    for _ in 0..3 {
+        r.turn(Some(r.now() + MS)).unwrap();
+    }
+    assert_eq!(sim.s().clunk_sqes, 1, "the CLUNK was sent");
+    assert_eq!(sim.s().clunks, 0, "and refused");
+    assert_eq!(sim.live_slots(), 2, "the fid is reaped once its scope retired");
+    drop(scope);
 }
 
 /// A RETURN the kernel refuses hands the payload back whole: its bytes stay

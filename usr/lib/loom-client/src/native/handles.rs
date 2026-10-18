@@ -347,7 +347,8 @@ impl<K: Kernel> Fid<K> {
             .driver()
             .request(self.scope.r, Kind::Control)
             .map_err(errno)?;
-        inner.submit(s, &[], || unsafe { request.publish() })?;
+        let cookie = inner.submit(s, &[], || unsafe { request.publish() })?;
+        inner.opening(cookie, self.r);
         Ok(Open {
             scope: self.scope.clone(),
             request,
@@ -474,6 +475,9 @@ impl<K: Kernel> Future for Open<K> {
 impl<K: Kernel> Drop for Open<K> {
     fn drop(&mut self) {
         self.scope.inner.forget(self.request.cookie());
+        // Dropped pending, the request aborts the scope: its fid is reaped,
+        // never clunked.
+        self.scope.inner.opened(self.request.cookie());
     }
 }
 

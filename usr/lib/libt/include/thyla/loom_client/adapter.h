@@ -67,9 +67,9 @@ struct t_loom_op {
     struct t_loom_ring *ring;
     unsigned kind, handle, route, ended;
     uint32_t scope, pool;
-    // CONNECT's scope or WALK's fid, while it is still the operation's.
+    // CONNECT's scope or WALK's fid, while it is still the operation's; LOPEN's
+    // fid, whose CLUNK waits until the LOPEN has ended (its terminal routed).
     struct t_loom_service_ref dest;
-    unsigned has_dest;
     struct t_fixed_book book;
     struct t_fixed_request *fixed;
     uint64_t cookie;

@@ -451,16 +451,41 @@ static struct t_loom_op *route_of(struct t_loom_ring *r, uint64_t cookie) {
         if (r->ops[i].kind == OP_STREAM && r->ops[i].route && r->ops[i].cookie == cookie) return &r->ops[i];
     return NULL;
 }
-static void clunk_done(struct t_loom_ring *r, uint64_t cookie) {
+// An LOPEN's terminal is routed: the kernel no longer claims its fid.
+static void open_routed(struct t_loom_ring *r, uint64_t cookie) {
+    for (size_t i = 0; i < r->op_count; ++i)
+        if (r->ops[i].kind == OP_OPEN && r->ops[i].cookie == cookie) r->ops[i].ended = 1;
+}
+static int opening(struct t_loom_ring *r, struct t_loom_service_ref fid) {
+    for (size_t i = 0; i < r->op_count; ++i)
+        if (r->ops[i].kind == OP_OPEN && !r->ops[i].ended && same_ref(r->ops[i].dest, fid)) return 1;
+    return 0;
+}
+static int ready(struct t_loom_ring *r, struct t_loom_service_ref ref) {
+    uint32_t state = 0;
+    return !query_state(r, ref, &state) && state == T_LOOM_SERVICE_READY;
+}
+// A refused CLUNK leaves a fid that only its scope's retirement frees. Under a
+// scope no longer READY that is a race the kernel won (an abort the adapter has
+// not seen yet), and the fid is reaped once the scope retires. Under a READY one
+// nothing ever frees it: the kernel admits every request the book admits, so
+// the ring fails.
+static int clunk_done(struct t_loom_ring *r, uint64_t cookie) {
     for (size_t i = 0; i < 64; ++i) {
         struct t_loom_slot *e = &r->slots[i];
         if (!e->clunking || e->clunk.cookie != cookie) continue;
         struct t_owned_cqe c;
         e->clunking = 0;
-        if (t_fixed_book_take(&e->clunk, &c) != 1) t_fixed_book_drop(&e->clunk);
+        int taken = t_fixed_book_take(&e->clunk, &c);
+        if (taken != 1) t_fixed_book_drop(&e->clunk);
+        if (taken == 1 && c.result < 0 && ready(r, e->ref) && ready(r, e->scope)) {
+            fail(r);
+            return -E_IO;
+        }
         e->state = S_REAP;
-        return;
+        return 0;
     }
+    return 0;
 }
 static int deliver(struct t_loom_ring *r, const struct t_paired_record *record) {
     struct t_fixed_routed routed;
@@ -468,7 +493,10 @@ static int deliver(struct t_loom_ring *r, const struct t_paired_record *record) 
         fail(r);
         return -E_IO;
     }
-    if (routed.kind == T_ROUTED_CONTROL) clunk_done(r, routed.cookie);
+    if (routed.kind == T_ROUTED_CONTROL) {
+        open_routed(r, routed.cookie);
+        return clunk_done(r, routed.cookie);
+    }
     if (routed.kind != T_ROUTED_POOLED) return 0;
     struct t_request_delivery *d = &routed.delivery;
     struct t_loom_op *op = route_of(r, d->cookie);
@@ -531,6 +559,9 @@ static void clunk_pass(struct t_loom_ring *r) {
             e->state = S_REAP;
             continue;
         }
+        // The kernel refuses a fid's CLUNK while its LOPEN claims it
+        // (loom_fid_begin_clunk): a fid dropped under its own LOPEN waits.
+        if (opening(r, e->ref)) continue;
         if (!sq_space(r) || check(r)) return;
         struct t_request_spec spec = { .kind = T_REQ_CONTROL };
         if (t_fixed_book_reserve(r->driver, e->scope, spec, &e->clunk)) return;
@@ -877,7 +908,6 @@ int t_loom_connect(struct t_loom_target *t, int has_deadline, uint64_t deadline,
     }
     op->scope = scope.slot;
     op->dest = scope;
-    op->has_dest = 1;
     op_issued(r, op, cookie);
     *out = op;
     return 0;
@@ -913,7 +943,6 @@ static int walk(struct t_loom_ring *r, uint32_t scope_slot, struct t_loom_servic
         return rc;
     }
     op->dest = fid;
-    op->has_dest = 1;
     scope_ref(r, scope_slot);
     op_issued(r, op, cookie);
     *out = op;
@@ -952,6 +981,7 @@ int t_loom_open(struct t_loom_fid *f, uint32_t mode, int has_deadline, uint64_t 
         free_op(op);
         return rc;
     }
+    op->dest = e->ref;
     scope_ref(r, e->scope.slot);
     op_issued(r, op, cookie);
     *out = op;

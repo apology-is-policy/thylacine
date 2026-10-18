@@ -270,8 +270,9 @@ static int answer(struct sim *s, struct sim_op *op) {
             rc = SIM_ENOENT;
         }
         break;
+    /* loom_fid_commit_open: mode 0 reads, 1 writes, 2 does both. */
     case SIM_OP_OPEN:
-        src->open = 1;
+        src->open = (unsigned)op->offset + 1;
         break;
     case SIM_OP_READ: {
         /* The root is the service's only directory: a byte READ of it fails. */
@@ -428,6 +429,19 @@ static int64_t shape(const struct t_loom_sqe *q) {
         return -95;
     }
 }
+/* Whether an admitted LOPEN still claims slot i, and whether a WALK, READ,
+ * WRITE or pooled READ admitted from it still borrows it. */
+static void uses(const struct sim *s, size_t i, int *claimed, int *borrowed) {
+    *claimed = *borrowed = 0;
+    for (size_t j = 0; j < s->nops; ++j) {
+        const struct sim_op *o = &s->ops[j];
+        if (o->source != i) continue;
+        if (o->kind == SIM_OP_OPEN) *claimed = 1;
+        if (o->kind == SIM_OP_WALK || o->kind == SIM_OP_READ || o->kind == SIM_OP_WRITE ||
+            o->kind == SIM_OP_POOLED)
+            *borrowed = 1;
+    }
+}
 /* ENTER's admission of one copied SQE: shape, then the slots it names. */
 static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
     int64_t rc = shape(q);
@@ -457,8 +471,15 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
          * scope first, then the FID itself. */
         if (s->slots[scope].state != SIM_READY) return SIM_ECANCELED;
         if (src->state != SIM_READY) return SIM_ENOENT;
+        int claimed, borrowed;
+        uses(s, source.slot, &claimed, &borrowed);
+        unsigned need = q->opcode == T_LOOM_OP_READ ? 1 : 2;
         op.scope = scope;
         if (q->opcode == T_LOOM_OP_WALK) {
+            /* loom_fid_borrow_walk; walk(5) walks no further from a fid opened
+             * for I/O. */
+            if (claimed) return SIM_EBUSY;
+            if (src->open) return SIM_EBADF;
             struct sim_slot *d = live(s, dest);
             if (!d || d->kind != SIM_FID || d->state != SIM_RESERVED || d->scope != scope) return SIM_ENOENT;
             if (q->len) {
@@ -475,9 +496,24 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
             op.kind = SIM_OP_WALK;
             op.dest = dest.slot;
         } else if (q->opcode == T_LOOM_OP_LOPEN) {
+            /* loom_fid_claim_open: one LOPEN per fid, none beside a borrow. */
+            if (src->open || claimed) return SIM_ENOENT;
+            if (borrowed) return SIM_EBUSY;
             op.kind = SIM_OP_OPEN;
         } else if (q->opcode == T_LOOM_OP_CLUNK) {
+            if (s->has_refuse_clunk) {
+                s->has_refuse_clunk = 0;
+                return s->refuse_clunk;
+            }
+            /* loom_fid_begin_clunk. */
+            if (claimed) return SIM_EBUSY;
             op.kind = SIM_OP_CLUNK;
+        } else if (claimed) {
+            /* loom_fid_borrow. */
+            return SIM_EBUSY;
+        } else if ((src->open & need) != need) {
+            /* Data moves only through a fid opened for it. */
+            return SIM_EACCES;
         } else if (q->flags & T_LOOM_SQE_BUFFER_SELECT) {
             struct t_loom_service_ref pool = { q->buf_idx_or_off, 0, q->_resv1[2] };
             struct sim_slot *p = live(s, pool);

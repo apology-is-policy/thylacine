@@ -22,7 +22,7 @@ use crate::{
         BufferRange, CQ_HEAD, CQ_TAIL, CQE_MORE, DROPPED, ENTER_NONBLOCK, MAX_REG_BUFFERS,
         REGISTER_BUFFERS, SQ_HEAD, SQ_TAIL, Submission,
     },
-    service_abi::{SETUP_PRIVATE_SERVICE, SETUP_SERVICE_BUFFERS},
+    service_abi::{SERVICE_READY, SETUP_PRIVATE_SERVICE, SETUP_SERVICE_BUFFERS, SlotRef},
 };
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, sync::Arc, task::Wake, vec::Vec};
 use core::{
@@ -119,6 +119,9 @@ pub(crate) struct Inner<K: Kernel> {
     wakers: RefCell<Box<[Option<(u64, Waker)>]>>,
     routes: RefCell<Box<[Option<Route<K>>]>>,
     clunks: RefCell<[Option<crate::fixed_requests::BookRequest<Backend<K>>>; 64]>,
+    /// Each LOPEN not yet routed, by cookie, and its fid: the kernel refuses
+    /// that fid's CLUNK while the LOPEN claims it (loom_fid_begin_clunk).
+    opens: RefCell<Box<[Option<(u64, SlotRef)>]>>,
     state: Cell<State>,
     retired: Cell<bool>,
     cq_entries: usize,
@@ -235,6 +238,7 @@ impl<K: Kernel> Ring<K> {
                 wakers: RefCell::new((0..cq_entries).map(|_| None).collect()),
                 routes: RefCell::new((0..cq_entries).map(|_| None).collect()),
                 clunks: RefCell::new(core::array::from_fn(|_| None)),
+                opens: RefCell::new((0..cq_entries).map(|_| None).collect()),
                 state: Cell::new(State::Open),
                 retired: Cell::new(false),
                 cq_entries,
@@ -572,7 +576,8 @@ impl<K: Kernel> Inner<K> {
             }
             Ok(Routed::Fixed(cookie)) => cookie,
             Ok(Routed::Control(cookie)) => {
-                self.finish_clunk(cookie);
+                self.opened(cookie);
+                self.finish_clunk(cookie)?;
                 cookie
             }
             Ok(Routed::Pooled(d)) => {
@@ -670,6 +675,25 @@ impl<K: Kernel> Inner<K> {
         };
         drop(old);
     }
+    pub(crate) fn opening(&self, cookie: u64, fid: SlotRef) {
+        let mut opens = self.opens.borrow_mut();
+        let cell = opens
+            .iter_mut()
+            .find(|o| o.is_none())
+            .expect("one LOPEN per book entry");
+        *cell = Some((cookie, fid));
+    }
+    /// The LOPEN's terminal is routed, or its handle is gone: either way the
+    /// kernel no longer claims its fid.
+    pub(crate) fn opened(&self, cookie: u64) {
+        let mut opens = self.opens.borrow_mut();
+        if let Some(o) = opens
+            .iter_mut()
+            .find(|o| o.is_some_and(|(c, _)| c == cookie))
+        {
+            *o = None;
+        }
+    }
     pub(crate) fn forget(&self, cookie: u64) {
         let old = {
             let mut w = self.wakers.borrow_mut();
@@ -716,6 +740,15 @@ impl<K: Kernel> Inner<K> {
                 self.shared.set_state(e.r, kernel::SlotState::Reap);
                 continue;
             }
+            // A fid dropped under its own LOPEN waits for that terminal.
+            let opening = self
+                .opens
+                .borrow()
+                .iter()
+                .any(|o| o.is_some_and(|(_, fid)| fid == e.r));
+            if opening {
+                continue;
+            }
             if !self.sq.space() || self.check().is_err() {
                 return;
             }
@@ -733,7 +766,12 @@ impl<K: Kernel> Inner<K> {
             }
         }
     }
-    fn finish_clunk(&self, cookie: u64) {
+    /// A refused CLUNK leaves a fid that only its scope's retirement frees.
+    /// Under a scope no longer READY that is a race the kernel won (an abort
+    /// the adapter has not seen yet), and the fid is reaped once the scope
+    /// retires. Under a READY one nothing ever frees it: the kernel admits
+    /// every request the book admits, so the ring fails.
+    fn finish_clunk(&self, cookie: u64) -> Result<()> {
         let done = {
             let mut clunks = self.clunks.borrow_mut();
             let at = clunks
@@ -741,14 +779,22 @@ impl<K: Kernel> Inner<K> {
                 .position(|c| c.as_ref().is_some_and(|c| c.cookie() == cookie));
             at.map(|i| (i, clunks[i].take().unwrap()))
         };
-        if let Some((i, mut request)) = done {
-            let _ = request.take();
-            drop(request);
-            let entry = self.shared.slots.borrow()[i];
-            if let Some(e) = entry {
-                self.shared.set_state(e.r, kernel::SlotState::Reap);
-            }
+        let Some((i, mut request)) = done else {
+            return Ok(());
+        };
+        let refused = matches!(request.take(), Ok(Some(c)) if c.result < 0);
+        drop(request);
+        let entry = self.shared.slots.borrow()[i];
+        let Some(e) = entry else {
+            return Ok(());
+        };
+        let ready = |r| self.shared.state(r) == Ok(SERVICE_READY);
+        if refused && ready(e.r) && ready(e.scope) {
+            self.fail();
+            return Err(-EIO);
         }
+        self.shared.set_state(e.r, kernel::SlotState::Reap);
+        Ok(())
     }
     fn begin_retire(&self) {
         if self.state.get() != State::Open {

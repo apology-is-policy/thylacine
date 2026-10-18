@@ -19,7 +19,9 @@ enum { SIM_OP_CONNECT = 1, SIM_OP_WALK, SIM_OP_OPEN, SIM_OP_READ, SIM_OP_WRITE, 
 #define SIM_MAX 512
 
 struct sim_slot {
-    unsigned used, kind, open, has_name;
+    unsigned used, kind, has_name;
+    /* A fid's access once an LOPEN opened it: 1 read, 2 write, 3 both. */
+    unsigned open;
     uint64_t inc;
     uint32_t state;
     /* A fid's scope slot; a scope's own. */
@@ -119,6 +121,9 @@ struct sim {
     /* The next RETURN answers this instead of releasing its member. */
     int has_refuse_return;
     int64_t refuse_return;
+    /* ENTER refuses the next CLUNK with this errno. */
+    int has_refuse_clunk;
+    int64_t refuse_clunk;
     /* Setup answers this errno, mapping nothing. */
     int has_setup_errno;
     int64_t setup_errno;

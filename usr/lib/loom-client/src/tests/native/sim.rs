@@ -21,6 +21,7 @@ use std::{
     sync::atomic::{AtomicU32, Ordering},
 };
 
+pub const EIO: i64 = -5;
 pub const EBADF: i64 = -9;
 pub const EBUSY: i64 = -16;
 pub const EINVAL: i64 = -22;
@@ -54,7 +55,8 @@ pub struct Slot {
     pub scope: usize,
     /// A fid's file, None for the root; a target's service name.
     pub name: Option<Vec<u8>>,
-    pub open: bool,
+    /// A fid's access once an LOPEN opened it: 1 read, 2 write, 3 both.
+    pub open: Option<u32>,
 }
 #[derive(Clone, Debug)]
 enum OpKind {
@@ -163,6 +165,8 @@ pub struct State {
     pub poll_answer: Option<i64>,
     /// The next RETURN answers this instead of releasing its member.
     pub refuse_return: Option<i64>,
+    /// ENTER refuses the next CLUNK with this errno.
+    pub refuse_clunk: Option<i64>,
     /// Setup answers this errno, mapping nothing.
     pub setup_errno: Option<i64>,
     /// Setup answers a descriptor but no mapping.
@@ -224,6 +228,7 @@ impl Sim {
             enter_errno: None,
             poll_answer: None,
             refuse_return: None,
+            refuse_clunk: None,
             setup_errno: None,
             setup_unmapped: false,
             setup_bad_mask: false,
@@ -588,8 +593,9 @@ impl State {
                     ENOENT
                 }
             }
+            // loom_fid_commit_open: mode 0 reads, 1 writes, 2 does both.
             OpKind::Open => {
-                self.slots[op.source].as_mut().unwrap().open = true;
+                self.slots[op.source].as_mut().unwrap().open = Some(op.offset as u32 + 1);
                 0
             }
             // The root is the service's only directory: a byte READ of it fails.
@@ -690,6 +696,22 @@ impl State {
         self.post(Some(op.scope), op.user_data, rc as i32, 0, zero());
         None
     }
+    /// Whether an admitted LOPEN still claims slot `i`, and whether a WALK,
+    /// READ, WRITE or pooled READ admitted from it still borrows it.
+    fn uses(&self, i: usize) -> (bool, bool) {
+        let mut from = self.ops.iter().filter(|o| o.source == i);
+        let claimed = from.clone().any(|o| matches!(o.kind, OpKind::Open));
+        let borrowed = from.any(|o| {
+            matches!(
+                o.kind,
+                OpKind::Walk { .. }
+                    | OpKind::Read { .. }
+                    | OpKind::Write { .. }
+                    | OpKind::Pooled { .. }
+            )
+        });
+        (claimed, borrowed)
+    }
     /// ENTER's admission of one copied SQE: shape, then the slots it names.
     fn admit(&mut self, s: Submission) -> i64 {
         let rc = shape(&s, true);
@@ -742,7 +764,17 @@ impl State {
                 if src.state != READY {
                     return ENOENT;
                 }
+                let (claimed, borrowed) = self.uses(source.slot as usize);
+                let need = if o == OP_READ as u32 { 1 } else { 2 };
                 let kind = if o == OP_WALK as u32 {
+                    // loom_fid_borrow_walk; walk(5) walks no further from a fid
+                    // opened for I/O.
+                    if claimed {
+                        return EBUSY;
+                    }
+                    if src.open.is_some() {
+                        return EBADF;
+                    }
                     let Some(d) = self.live(dest) else {
                         return ENOENT;
                     };
@@ -766,9 +798,29 @@ impl State {
                         name,
                     }
                 } else if o == OP_LOPEN as u32 {
+                    // loom_fid_claim_open: one LOPEN per fid, none beside a borrow.
+                    if src.open.is_some() || claimed {
+                        return ENOENT;
+                    }
+                    if borrowed {
+                        return EBUSY;
+                    }
                     OpKind::Open
                 } else if o == OP_CLUNK as u32 {
+                    if let Some(rc) = self.refuse_clunk.take() {
+                        return rc;
+                    }
+                    // loom_fid_begin_clunk.
+                    if claimed {
+                        return EBUSY;
+                    }
                     OpKind::Clunk
+                } else if claimed {
+                    // loom_fid_borrow.
+                    return EBUSY;
+                } else if src.open.is_none_or(|access| access & need != need) {
+                    // Data moves only through a fid opened for it.
+                    return EACCES;
                 } else if s.flags as u32 & SQE_BUFFER_SELECT != 0 {
                     let pool = SlotRef {
                         slot: s.buf_idx_or_off,
@@ -967,7 +1019,7 @@ unsafe impl Kernel for SimKernel {
                     state: READY,
                     scope: 0,
                     name: Some(name),
-                    open: false,
+                    open: None,
                 }) else {
                     return ENOSPC;
                 };
@@ -989,7 +1041,7 @@ unsafe impl Kernel for SimKernel {
                         state: RESERVED,
                         scope: 0,
                         name: None,
-                        open: false,
+                        open: None,
                     },
                     3 => {
                         let Some(sc) = s.live(rec.scope) else {
@@ -1004,7 +1056,7 @@ unsafe impl Kernel for SimKernel {
                             state: RESERVED,
                             scope: rec.scope.slot as usize,
                             name: None,
-                            open: false,
+                            open: None,
                         }
                     }
                     _ => return EINVAL,
@@ -1109,7 +1161,7 @@ unsafe impl Kernel for SimKernel {
                     state: READY,
                     scope: 0,
                     name: None,
-                    open: false,
+                    open: None,
                 }) else {
                     return ENOSPC;
                 };

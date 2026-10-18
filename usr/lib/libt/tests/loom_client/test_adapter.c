@@ -1185,6 +1185,135 @@ static void a_walk_from_a_file_fid_clones_it_or_answers_enotdir(void) {
     drop_all(&f, fid, s, t);
     finish(&f);
 }
+/* walk(5): the kernel refuses a WALK from a fid an LOPEN opened at submit,
+ * before the server sees it, and the walk's reservation is reaped. */
+static void a_walk_from_an_opened_fid_is_refused_at_submit(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *root = walk_ok(f.r, s, "");
+    assert(open_rc(f.r, root, 0) == 0);
+    size_t slots = sim_live_slots(f.sim);
+    struct res o;
+    assert(run(f.r, K_WALK, walk_fid_op(root, "f"), &o) == SIM_EBADF && !o.fid);
+    turns(f.r, 1);
+    assert(sim_live_slots(f.sim) == slots); /* the reservation is reaped */
+    /* One variable away: the same WALK from a fid no LOPEN opened. */
+    struct t_loom_fid *clone = walk_ok(f.r, s, "");
+    assert(run(f.r, K_WALK, walk_fid_op(clone, "f"), &o) >= 0 && o.fid);
+    t_loom_fid_drop(o.fid);
+    t_loom_fid_drop(clone);
+    t_loom_fid_drop(root);
+    drop_all(&f, NULL, s, t);
+    finish(&f);
+}
+/* The kernel refuses a fid's CLUNK while its LOPEN claims it
+ * (loom_fid_begin_clunk): a fid dropped under its own LOPEN is clunked once that
+ * terminal is routed. */
+static void a_fid_dropped_mid_open_is_clunked_after_its_open(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    f.sim->hold = 1;
+    struct t_loom_op *open;
+    assert(t_loom_open(fid, 0, 0, 0, &open) == 0);
+    t_loom_fid_drop(fid);
+    turns(f.r, 3);
+    assert(f.sim->clunk_sqes == 0); /* no CLUNK while the LOPEN claims the fid */
+    /* Routed but not yet taken: the caller still holds the LOPEN's terminal. */
+    f.sim->hold = 0;
+    turns(f.r, 3);
+    assert(f.sim->clunk_sqes == 1 && f.sim->clunks == 1);
+    assert(sim_live_slots(f.sim) == 2); /* the fid's slot is free */
+    assert(f.sim->naborts == 0);        /* a clunk is not a cancel */
+    struct res o;
+    assert(run(f.r, K_OPEN, open, &o) == 0);
+    drop_all(&f, NULL, s, t);
+    finish(&f);
+}
+/* An operation the kernel refuses at ENTER: its errno, never waiting on the
+ * server. */
+static int32_t refused(struct t_loom_ring *r, unsigned kind, struct t_loom_op *op) {
+    struct res o;
+    memset(&o, 0, sizeof(o));
+    uint64_t deadline = t_loom_now(r) + 10 * MS;
+    int rc;
+    while (!(rc = complete(kind, op, &o)) && t_loom_now(r) < deadline) turn_until(r, deadline);
+    assert(rc == 1 && !o.fid && !o.read);
+    return o.result;
+}
+/* The kernel's fid rules (loom_fid_claim_open, loom_fid_borrow): an LOPEN in
+ * flight claims its fid against every other use, a fid opens once, and data
+ * moves only through a fid opened for it. */
+static void an_lopen_claims_its_fid_and_grants_only_its_mode(void) {
+    size_t b[] = { 4096, 4096 };
+    struct fx f = ring_of(8, b, 2);
+    file(f.sim, "f", "bytes");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    struct res o;
+    assert(run(f.r, K_READ, read_op(fid, range(0, 0, 5), 0, 0), &o) == SIM_EACCES && !o.read);
+    f.sim->hold = 1;
+    struct t_loom_op *open, *op;
+    assert(t_loom_open(fid, 0, 0, 0, &open) == 0);
+    assert(refused(f.r, K_READ, read_op(fid, range(0, 0, 5), 0, 0)) == SIM_EBUSY);
+    assert(refused(f.r, K_WALK, walk_fid_op(fid, "")) == SIM_EBUSY);
+    assert(t_loom_open(fid, 0, 0, 0, &op) == 0);
+    assert(refused(f.r, K_OPEN, op) == SIM_ENOENT);
+    f.sim->hold = 0;
+    assert(run(f.r, K_OPEN, open, &o) == 0);
+    assert(open_rc(f.r, fid, 0) == SIM_ENOENT);
+    assert(t_loom_write(fid, range(1, 0, 5), 0, "BYTES", 5, 0, 0, &op) == 0);
+    assert(run(f.r, K_WRITE, op, &o) == SIM_EACCES);
+    read_is(f.r, fid, range(0, 0, 5), "bytes");
+    drop_all(&f, fid, s, t);
+    finish(&f);
+}
+/* A CLUNK refused while the fid and its scope are both READY leaves a fid
+ * nothing will ever free: the ring fails rather than leak it. */
+static void a_clunk_refused_under_a_ready_scope_fails_the_ring(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    f.sim->has_refuse_clunk = 1;
+    f.sim->refuse_clunk = SIM_ENOSPC;
+    t_loom_fid_drop(fid);
+    int64_t rc = 0;
+    for (int i = 0; i < 3 && rc >= 0; ++i) rc = t_loom_turn(f.r, 1, t_loom_now(f.r) + MS);
+    assert(rc == SIM_EIO && f.sim->clunk_sqes == 1);
+    struct t_loom_op *op = NULL;
+    assert(t_loom_walk(s, "f", 1, 0, 0, &op) == SIM_EIO && !op);
+    drop_all(&f, NULL, s, t);
+    finish(&f);
+}
+/* A CLUNK refused because the kernel aborted the scope before the adapter saw it
+ * is a race, not a fault: the fid is reaped once the scope retires, and the ring
+ * stays up. */
+static void a_clunk_refused_under_an_aborting_scope_is_reaped(void) {
+    size_t b[] = { 4096 };
+    struct fx f = ring_of(8, b, 1);
+    file(f.sim, "f", "x");
+    struct t_loom_target *t = target_ok(f.r, "clip");
+    struct t_loom_scope *s = connect_ok(f.r, t);
+    struct t_loom_fid *fid = walk_ok(f.r, s, "f");
+    /* An abort no terminal has told the adapter of yet: a deadline's, say. */
+    set_state(f.sim, SIM_SCOPE, SIM_ABORTING);
+    t_loom_fid_drop(fid);
+    turns(f.r, 3);
+    assert(f.sim->clunk_sqes == 1 && f.sim->clunks == 0); /* sent, and refused */
+    assert(sim_live_slots(f.sim) == 2);                   /* reaped once its scope retired */
+    drop_all(&f, NULL, s, t);
+    finish(&f);
+}
 /* A RETURN the kernel refuses hands the payload back whole: its bytes stay
  * readable, and a later return succeeds. */
 static void a_refused_return_hands_the_payload_back(void) {
@@ -1669,6 +1798,11 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(a_replayed_shot_under_a_held_payload_fails_the_ring_without_a_return),
     T(an_op_on_a_fid_not_ready_answers_enoent_and_on_a_scope_not_ready_ecanceled),
     T(a_walk_from_a_file_fid_clones_it_or_answers_enotdir),
+    T(a_walk_from_an_opened_fid_is_refused_at_submit),
+    T(a_fid_dropped_mid_open_is_clunked_after_its_open),
+    T(an_lopen_claims_its_fid_and_grants_only_its_mode),
+    T(a_clunk_refused_under_a_ready_scope_fails_the_ring),
+    T(a_clunk_refused_under_an_aborting_scope_is_reaped),
     T(a_refused_return_hands_the_payload_back),
     T(an_enter_refusal_that_is_not_a_close_fails_the_ring),
     T(a_poll_interrupted_by_a_note_is_a_spurious_wake),
@@ -1694,8 +1828,8 @@ static const struct { const char *name; void (*run)(void); } tests[] = {
     T(a_dropped_ring_used_again_ends_the_process),
 };
 #undef T
-/* The 64 scenarios of tests/native.rs, then the C interface's own eight. */
-_Static_assert(sizeof(tests) / sizeof(tests[0]) == 72, "every scenario of tests/native.rs and the C interface's own");
+/* The 69 scenarios of tests/native.rs, then the C interface's own eight. */
+_Static_assert(sizeof(tests) / sizeof(tests[0]) == 77, "every scenario of tests/native.rs and the C interface's own");
 
 /* With a name, runs only that scenario (exit 2 for an unknown one). */
 int main(int argc, char **argv) {
@@ -1712,6 +1846,6 @@ int main(int argc, char **argv) {
         printf("C native adapter scenario %s PASS\n", argv[1]);
         return 0;
     }
-    puts("C seventy-two native adapter scenarios PASS");
+    puts("C seventy-seven native adapter scenarios PASS");
     return 0;
 }
