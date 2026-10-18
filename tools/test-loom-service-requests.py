@@ -12,9 +12,13 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
+# Apple clang's ASan runtime hangs at startup on macOS 26 (before main); the
+# Homebrew LLVM toolchain test-loom-client.sh uses does not.
+LLVM_CC = Path(os.environ.get('LLVM_PREFIX', '/opt/homebrew/opt/llvm')) / 'bin/clang'
 MUTANTS = [
     ('reject-success', 'if (reason >= 0)', 'if (reason >= 0 && false)', 'rejected admission validates identity and negative result'),
     ('reject-borrow', 'if (r->phase != LREQ_PREPARED || r->borrows)', 'if (r->phase != LREQ_PREPARED)', 'rejected admission waits for local borrow'),
@@ -74,11 +78,16 @@ def main():
             original.splitlines(True), source.splitlines(True),
             fromfile='kernel/loom_service_requests.c', tofile=name + '.c')))
         exe = path.with_suffix('')
-        cmd = [os.environ.get('CC', 'clang'), '-std=c11', '-O1', '-Wall',
+        cc = os.environ.get('CC') or (str(LLVM_CC) if LLVM_CC.exists() else 'clang')
+        cmd = [cc, '-std=c11', '-O1', '-Wall',
                '-Wextra', '-Werror', '-I', str(ROOT / 'kernel/include'),
                str(path), str(inputs[4]), str(ROOT / 'kernel/loom_service_slots.c'), str(ROOT / 'kernel/loom_service_nodes.c'), '-o', str(exe),
                '-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
         cmd += shlex.split(os.environ.get('CFLAGS', ''))
+        sdk = subprocess.run(['xcrun', '--show-sdk-path'], capture_output=True, text=True) \
+            if shutil.which('xcrun') else None
+        if sdk and sdk.returncode == 0 and '-isysroot' not in cmd:
+            cmd += ['-isysroot', sdk.stdout.strip()]
         (args.logs / (name + '-command.json')).write_text(json.dumps(cmd) + '\n')
         with (args.logs / (name + '-build.log')).open('wb') as out:
             subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, check=True)
