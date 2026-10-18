@@ -89,6 +89,36 @@ proc lib_leg {tag prog log verdict {fails {}}} {
     return 1
 }
 
+# The test trees are SYSTEM's, on the pool, and a create through the pool's 9P
+# session is admitted only to the session's two ends, both system
+# (IDENTITY-DESIGN 9.7 M7). So each directory a test writes into takes a layer
+# this user owns: `bind -bc` puts it first in a union whose creates land in it,
+# while reads still find the baked files beneath. The binds are this shell's,
+# and every leg's program inherits them.
+proc lib_layer {n dir} {
+    set layer /tmp/ls-libs/w$n
+    lc_send "mkdir -p $layer; bind -bc $layer $dir; echo layer$n-\$status | tr a-z A-Z"
+    expect {
+        -ex "LAYER$n- 0\r"     { lc_step "saw: $layer layered over $dir" }
+        -re "LAYER$n- \[1-9\]" {
+            lc_send "echo \$errstr"
+            expect -timeout 5 timeout {}
+            lc_fail "bind -bc $layer $dir failed (its errstr is above)"
+        }
+        -re {EXTINCTION:}      { lc_extinction_fail "kernel extinction while layering $dir" }
+        timeout                { lc_fail "timeout layering $dir" }
+        eof                    { lc_fail "unexpected EOF layering $dir" }
+    }
+}
+set wf [file join $::lc_repo build pouch lib-tests writable]
+if {[catch {set fh [open $wf r]; set wdirs [split [string trim [read $fh]] "\n"]; close $fh}] || [llength $wdirs] < 1} {
+    lc_fail "no list of the directories the tests write into at $wf (the bake and this tree disagree; rebake)"
+}
+set n 0
+foreach d [linsert $wdirs 0 /var/icu_tests/test/testdata/out] {
+    lib_layer [incr n] $d
+}
+
 # A full ICU run is minutes, not seconds.
 set ::lc_cmd_timeout 1800
 set timeout 1800

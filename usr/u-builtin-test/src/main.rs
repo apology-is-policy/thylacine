@@ -17,6 +17,8 @@
 //   exit              -- sets the pending-exit request + $status and
 //                        unwinds the statement stack (Return), including
 //                        out of a called function.
+//   bind / unmount    -- a relative name joins $cwd; -a unions; unmount
+//                        removes the member; a grammar error is $status 1.
 //
 // The special-var bridge (scripture 8.5) is checked directly: $status /
 // $errstr / $cwd read in-script resolve to their Env fields. Item 8b reads
@@ -316,8 +318,53 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // 14. bind: a relative name joins $cwd, `-a` builds a union whose later
+    //     member answers a name the first lacks, and `unmount` takes it away.
+    //     Last, because a bind changes this process's namespace for every
+    //     probe after it.
+    {
+        let mut e = fresh();
+        if run(&mut e, "cd /") != 0 {
+            return fail("bind: cd /");
+        }
+        if run(&mut e, "bind -a lib bin") != 0 {
+            return fail("bind -a lib bin status");
+        }
+        let union_ok = exists("/bin/libc.so") && exists("/bin/u-builtin-test");
+        if run(&mut e, "unmount bin") != 0 {
+            return fail("unmount bin status");
+        }
+        if !union_ok {
+            return fail("bind -a: the union lacks a member's name");
+        }
+        if exists("/bin/libc.so") {
+            return fail("unmount left /lib under /bin");
+        }
+        if run(&mut e, "bind -ab /lib /bin") != 1
+            || e.get("errstr").as_scalar() != "bind: -b and -a are mutually exclusive"
+        {
+            return fail("bind -ab refusal");
+        }
+    }
+
     t_putstr("u-builtin-test: all OK\n");
     0
+}
+
+fn exists(path: &str) -> bool {
+    let fd = unsafe {
+        libthyla_rs::t_open(
+            libthyla_rs::T_WALK_OPEN_FROM_ROOT,
+            path.as_ptr(),
+            path.len(),
+            libthyla_rs::T_OPATH,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let _ = unsafe { libthyla_rs::t_close(fd) };
+    true
 }
 
 /// A fresh interactive Env (interactive suppresses implicit-fail so a

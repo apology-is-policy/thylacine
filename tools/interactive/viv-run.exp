@@ -64,8 +64,9 @@ if {$have_ash} {
 
     # --- #50: the path-mutation family, end-to-end from EL0 (VIVARIUM.md
     # 6.24). One pipeline per row, each witnessed by an UPPERCASE token only
-    # the pipeline can produce (the echo discipline above). /tmp is 1777 in
-    # the Alpine minirootfs, so the writes clear A-2d for any principal.
+    # the pipeline can produce (the echo discipline above). The container's
+    # /tmp is this user's own /tmp/.viv/vivarium/alpine-ash/rootfs/tmp, which
+    # viv binds over the rootfs's, so the writes are the user's.
     #   >file        = openat(O_CREAT|O_WRONLY|O_TRUNC) -- the keystone
     #   mkdir        = mkdirat
     #   mv           = renameat (busybox mv -> musl rename -> renameat(38))

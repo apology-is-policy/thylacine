@@ -3976,9 +3976,11 @@ static int clade_gate(void) {
     (void)t_close(probe);
 
     // Writable scratch on the pool root for the source + build outputs.
+    // 0755, as the bake makes it: system's own scratch, which no other
+    // principal writes (IDENTITY-DESIGN 9.7 M7).
     {
         long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3, T_OREAD,
-                               T_WALK_CREATE_DMDIR | 0777u);
+                               T_WALK_CREATE_DMDIR | 0755u);
         if (m >= 0) (void)t_close(m);
     }
 
@@ -7970,7 +7972,7 @@ int main(void) {
                 // persists across boots).
                 {
                     long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
-                                           T_OREAD, T_WALK_CREATE_DMDIR | 0777u);
+                                           T_OREAD, T_WALK_CREATE_DMDIR | 0755u);
                     if (m >= 0) (void)t_close(m);
                 }
                 long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
@@ -8078,7 +8080,7 @@ int main(void) {
                     {
                         long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
                                                T_OREAD,
-                                               T_WALK_CREATE_DMDIR | 0777u);
+                                               T_WALK_CREATE_DMDIR | 0755u);
                         if (m >= 0) (void)t_close(m);
                     }
                     // The Go env -> joey's /env. GO111MODULE=off (GOPATH/script

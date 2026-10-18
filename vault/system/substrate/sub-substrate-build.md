@@ -22,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-15
+updated: 2026-10-18
 ---
 ## Purpose
 
@@ -168,6 +168,20 @@ finishes by cloning `pool.img` and `system.key` to `.baked-snapshot`
 siblings (`cp -c`, APFS clonefile, plain copy elsewhere). Those twins are
 what every downstream harness restores from per boot or per attempt — and
 why the key twin can be compared to prove a restore is coherent.
+
+**No directory the bake makes on the pool is world-writable (2026-10-18).** A
+create through the pool's session is admitted only to system (IDENTITY-DESIGN
+9.7 M7), and M7 does not cover remove or rename, so a world-writable directory
+there would still let any user delete system's files. `stratum-fs put` carries
+a host directory's permission bits and bakes every file 0644 or 0755 by its
+exec bit. Four stamps made pool directories world-writable and are gone: each
+viv bundle's `rootfs/tmp` 1777 (viv binds the invoker's own `/tmp` there), ICU's
+`testdata/out` and the muster build trees 1777 (ls-libs layers a user-owned
+directory over them), and Quake's game directories 0777, which populate now
+sets 0755, since a stage an earlier bake left 0777 would otherwise carry over.
+The git-net push token, the one file whose host mode matters, is restamped 0600
+after the put. Runtime creates are another matter: nothing masks a create's
+mode yet (OPEN-BUGS, 2026-10-18).
 
 **A third check now runs before any target does, and it is the file's best
 structural argument.** A hand-written patch series is validated for
@@ -421,10 +435,12 @@ by 1 GiB when it bakes, and bake-verify expects three payloads (`ICUTEST`,
 `tools/interactive/ls-libs.exp` can tell "no tests baked" (SKIP 77) from a
 partial bake (FAIL); its first bake named a loose `.res` that the package build
 never leaves, and bake-verify refused the pool. The masters are SYSTEM's and
-read-only except `test/testdata/out`, re-stamped 1777 after the put: cintltst's
-`TestFileStream` writes `testdata.tmp` beside `testdata.dat`, as it would in
-upstream's own writable build tree, and failed twice (create, remove) as the
-logged-in user without it. Like `CHUNK_WEBKIT`, a missing input is an error
+read-only, `test/testdata/out` included: cintltst's `TestFileStream` writes
+`testdata.tmp` beside `testdata.dat`, as it would in upstream's own writable
+build tree, so ls-libs binds a directory the logged-in user owns over
+`testdata/out` first (`bind -bc`). Until 2026-10-18 populate re-stamped it 1777,
+which let any user make system-owned files there; a create through the pool's
+session is now admitted only to system (IDENTITY-DESIGN 9.7 M7). Like `CHUNK_WEBKIT`, a missing input is an error
 once the chunk is on.
 
 `build_icu`'s reuse test also compares a stamp of the configure line and flags
@@ -454,12 +470,13 @@ into `/var/lib_tests/<lib>.manifest` plus the files it needs
 ([[sub-substrate-libtests]]), stages them (programs stripped) with the native
 runner at `/var/lib_tests/bin/muster`, and writes each manifest's test count to
 `build/pouch/lib-tests/<lib>.count`, which ls-libs reads as the number the
-device must report. The populate arm puts `/var/lib_tests` and stamps 1777
-each directory the staging listed in `build/pouch/lib-tests/writable` (every
+device must report. The populate arm puts `/var/lib_tests`, and ls-libs layers a
+directory of the user's own over each directory the staging listed in
+`build/pouch/lib-tests/writable` (every
 library's build tree, where its tests write their outputs as in upstream's
 own tree, and libxml2's source top, where runsuite and runxmlconf write their
 logs): a list the staging derives, so a library added there cannot be
-missed by a list in populate. bake-verify adds `MUSTER`, `PNGTESTS`,
+missed by a hand-written list in ls-libs. bake-verify adds `MUSTER`, `PNGTESTS`,
 `JPEGTESTS`, `WEBPTESTS`, `XMLTESTS` and `XMLCONF`.
 
 **libxml2 (B-3e, 2026-10-15).** `build_libxml2` configures 2.15.4 as

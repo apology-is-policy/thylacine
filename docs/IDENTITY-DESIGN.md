@@ -1774,8 +1774,9 @@ the chokepoint) already denies a non-system Proc's write to a SYSTEM-owned dir B
 the create reaches the server, so enforcement is per-Proc-correct even over the shared
 mount. **Corrected 2026-10-18:** that holds only while no directory on the shared mount
 grants a non-system principal write. Three `tools/build.sh` sites stamped 1777 on the
-pool, and a 2026-10-15 probe showed uid 1000's create in one of them owned by system.
-M7 closes the hole in the kernel.
+pool and a fourth stamped Quake's game directories 0777 (found at implementation), and a
+2026-10-15 probe showed uid 1000's create in one of them owned by system. M7 closes the
+hole in the kernel.
 
 **M7 -- a create speaks for a session end (kernel; operator vote 2026-10-18,
 `dec-2026-10-18-create-speaks-for-a-session-end`).** A create through a 9P session is
@@ -1797,9 +1798,17 @@ to a caller that may search the directory, the A-2d order.
   home as system, but the home's server end is the per-user proxy, which runs as the
   user and relays as the user. So the user's creates in the home, and in the `/tmp`
   that ut binds from it, are admitted and stamped as the user.
-- **The pool's 1777 directories go.** Their consumers write where the running user owns
-  the storage: `viv run` binds a per-run directory from the invoker's `/tmp` over the
-  bundle's `/tmp`, and the library test trees take a writable layer the user owns.
+- **The pool's world-writable directories go.** Their consumers write where the running
+  user owns the storage. `viv run` binds the invoker's own `/tmp/.viv/<rootfs path>/tmp`
+  over the bundle's `/tmp`, made on first use and kept as the rootfs's own was
+  (VIVARIUM 7.2). The user who runs the library tests binds a layer of their own over
+  each tree a test writes into (`bind -bc`). Quake writes under `$HOME`. World-writable
+  directories matter beyond create: M7 does not cover remove or rename, so one on the
+  pool would still let any user delete system's files there. **Open (2026-10-18):** no
+  create applies a mask. F-5's "mode = default & umask" was never built (Pouch's and the
+  phenotype's `umask` answer `ENOSYS`, and the kernel passes the mode through), so a
+  system program that asks for 0666 or 0777 still makes a world-writable file or
+  directory on the pool. The choice of mask is the operator's.
 - **Elevation is not an end.** The legate grants `CAP_HOSTOWNER` / `CAP_DAC_OVERRIDE`,
   which override rwx; neither makes a Proc a session end. An elevated user may modify
   existing objects on system's mount but cannot create there; administration that

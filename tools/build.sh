@@ -2017,16 +2017,16 @@ git fetch --unshallow origin >/dev/null 2>&1 && echo GITHTTPS-FETCH || { echo GI
 # N-6: push over https. Runs ONLY when the bake provisioned a push target
 # (THYLACINE_GITNET_PUSH_URL + a PAT) -- absent by default, so the standard
 # git-net gate stays clone+fetch only and the hermetic suite never pushes. The
-# token reaches the guest as /tmp/.gitnet-push-token, a 0600 file the bake wrote
+# token reaches the guest as /etc/gitnet/push-token, a 0600 file the bake wrote
 # from the operator's env (a gitignored build artifact -- NEVER a tracked file).
 # The remote URL is CLEAN: the token is supplied by an inline credential helper
 # (git never echoes helper output), so it appears in NO git output and NO boot
 # log. The push proves the smart-push path (git-remote-https POST
 # git-receive-pack) end to end -- the helper-pipe I/O rides readv (served at
 # N-5) + writev, the SAME transport the clone above proved.
-if [ -f /tmp/.gitnet-push-url ] && [ -f /tmp/.gitnet-push-token ]; then
-	GITNET_PUSH_URL=$(cat /tmp/.gitnet-push-url)
-	GITNET_TOK=$(cat /tmp/.gitnet-push-token)
+if [ -f /etc/gitnet/push-url ] && [ -f /etc/gitnet/push-token ]; then
+	GITNET_PUSH_URL=$(cat /etc/gitnet/push-url)
+	GITNET_TOK=$(cat /etc/gitnet/push-token)
 	export GITNET_TOK
 	git config --global credential.helper \
 		'!f() { test "$1" = get && printf "username=x-access-token\npassword=%s\n" "$GITNET_TOK"; }; f' \
@@ -2068,14 +2068,18 @@ VIVEOF
                             # token is written in a subshell with trace OFF + umask 077
                             # so it cannot reach a build log, and this (tracked) script
                             # holds only the env var NAME, never the secret. Absent ->
-                            # the gate is clone+fetch only (the default).
+                            # the gate is clone+fetch only (the default). They sit in
+                            # /etc/gitnet, not /tmp: viv binds the invoker's own
+                            # directory over the container's /tmp, hiding anything
+                            # baked there. The put bakes every file 0644; populate
+                            # restamps the token 0600.
                             if [[ -n "${THYLACINE_GITNET_PUSH_URL:-}" && -n "${THYLACINE_GITNET_PAT:-}" ]]; then
-                                mkdir -p "$gnb/rootfs/tmp"
+                                mkdir -p "$gnb/rootfs/etc/gitnet"
                                 printf '%s\n' "$THYLACINE_GITNET_PUSH_URL" \
-                                    > "$gnb/rootfs/tmp/.gitnet-push-url"
+                                    > "$gnb/rootfs/etc/gitnet/push-url"
                                 ( set +x 2>/dev/null; umask 077
                                   printf '%s\n' "$THYLACINE_GITNET_PAT" \
-                                      > "$gnb/rootfs/tmp/.gitnet-push-token" )
+                                      > "$gnb/rootfs/etc/gitnet/push-token" )
                                 echo "==> viv bundles: git-net PUSH target provisioned (URL ${THYLACINE_GITNET_PUSH_URL}; token in the gitignored guest artifact only, never a tracked file or log)"
                             fi
                             echo "==> viv bundles: git-net staged at $gnb (THYLACINE_BAKE_GITNET=1: net-granted clone-https boot vehicle -- the B3 gate; default bakes OMIT it, so the hermetic suite stays internet-free)"
@@ -3878,13 +3882,13 @@ populate_stratum_pool() {
     # gracefully when the stage is absent (a THYLACINE-minimal build). ---
     local quake_stage="$BUILD_DIR/quake/stage"
     if [[ -f "$quake_stage/id1/pak0.pak" ]]; then
-        # Task #50: config.cfg persistence. Quake writes into its
-        # com_gamedir (/quake/id1) as the SESSION user, but the bake
-        # stamps SYSTEM ownership -- the game dirs must be world-writable
-        # for the created config.cfg / demo files (the put carries host
-        # modes; single-user policy, the per-user game-dir copy is the
-        # v1.x shape). The pak files stay 0644 read-only.
-        chmod 0777 "$quake_stage" "$quake_stage/id1"
+        # The game dirs are SYSTEM's read-only masters, like the pak files.
+        # With HOME set, as login sets it, Quake writes its config and demos
+        # under $HOME/.tyrquake/id1 (common.c's last COM_AddGameDirectory),
+        # and a create through the pool's session is admitted only to system
+        # (IDENTITY-DESIGN 9.7 M7). The put carries host directory modes and
+        # an earlier bake left this stage 0777, so the mode is set, not kept.
+        chmod 0755 "$quake_stage" "$quake_stage/id1"
         echo "==> populate pool: baking Quake shareware data ($quake_stage -> /quake, $(du -sh "$quake_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$quake_stage" /quake \
             || { echo "==> populate pool: put /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -3950,24 +3954,16 @@ populate_stratum_pool() {
         echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
             || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        # #50: `put` preserves only the exec bit (dirs bake 0755), so the
-        # containers' /tmp loses its 1777 and a NON-system principal running
-        # `viv run` cannot write anywhere in the rootfs -- the A-2d W|X check
-        # denies the phenotype's openat(O_CREAT)/mkdirat legs (measured:
-        # "can't create /tmp/f50: Permission denied" from the viv-run
-        # scenario's user shell). Re-stamp each staged bundle's /tmp 1777
-        # after the put (stratum-fs chmod -> Tsetattr; the parser admits
-        # 4-digit octal). The kernel enforces no sticky bit at v1.0, so
-        # today 1777 behaves as 0777 -- baking the REAL Linux mode now means
-        # the fixture needs no revisit on the day sticky enforcement lands
-        # (the #50 holotype's F4). A bundle without a rootfs/tmp skips.
-        local vb
-        for vb in "$viv_stage"/*/rootfs/tmp; do
-            [[ -d "$vb" ]] || continue
-            local vrel="/vivarium${vb#"$viv_stage"}"
-            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "$vrel" \
-                || { echo "==> populate pool: chmod $vrel FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        done
+        # A bundle's rootfs/tmp stays SYSTEM's: it is the anchor `viv run`
+        # binds the invoker's own /tmp/.viv/<rootfs>/tmp over, because a
+        # create through the pool's session is admitted only to system
+        # (IDENTITY-DESIGN 9.7 M7). Files bake 0644 or 0755 whatever their
+        # host mode, so the git-net push token is restamped 0600 here.
+        local gn_token=/vivarium/git-net/rootfs/etc/gitnet/push-token
+        if [[ -f "$viv_stage${gn_token#/vivarium}" ]]; then
+            "$stratum_fs_bin" -s "$sock_path" chmod 0600 "$gn_token" \
+                || { echo "==> populate pool: chmod $gn_token FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        fi
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: viv bundles baked at /vivarium"
@@ -4036,31 +4032,28 @@ populate_stratum_pool() {
         done
         # ICU's tests write a scratch file beside their data package (cintltst's
         # TestFileStream: testdata.tmp next to testdata.dat), as they would in
-        # upstream's own writable build tree. 1777 like the viv bundles' /tmp:
-        # the masters stay SYSTEM's, and the day sticky is enforced a user
-        # cannot remove another's files.
-        "$stratum_fs_bin" -s "$sock_path" chmod 1777 /var/icu_tests/test/testdata/out \
-            || { echo "==> populate pool: chmod /var/icu_tests/test/testdata/out FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        # upstream's own writable build tree. The tree stays SYSTEM's: a create
+        # through the pool's session is admitted only to system (IDENTITY-DESIGN
+        # 9.7 M7), so the user who runs the tests binds a directory of their own
+        # over testdata/out first (`bind -bc`, tools/interactive/ls-libs.exp).
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after the library tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: library tests baked at /var/icu_tests"
     fi
     # B-3d/B-3e: the muster libraries' test programs, inputs and manifests
     # under /var/lib_tests. The tests write into the directories the staging
-    # listed (each build tree, as upstream's run in their own): 1777, as above.
+    # listed (each build tree, as upstream's run in their own), and the user
+    # who runs them layers a directory of their own over each one, as above;
+    # ls-libs.exp reads the list.
     if [[ "${THYLACINE_BAKE_LIBS:-0}" == "1" && -x "$libt_stage/var/lib_tests/bin/muster" ]]; then
-        local lt_writable="$BUILD_DIR/pouch/lib-tests/writable" lt_dir
+        local lt_writable="$BUILD_DIR/pouch/lib-tests/writable"
         [[ -s "$lt_writable" ]] \
             || { echo "==> populate pool: $lt_writable lists nothing (restage: tools/build.sh lib-tests)" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         "$stratum_fs_bin" -s "$sock_path" put "$libt_stage/var/lib_tests" /var/lib_tests \
             || { echo "==> populate pool: put /var/lib_tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        while read -r lt_dir; do
-            "$stratum_fs_bin" -s "$sock_path" chmod 1777 "$lt_dir" \
-                || { echo "==> populate pool: chmod $lt_dir FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        done < "$lt_writable"
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after the muster tests FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-        echo "==> populate pool: muster tests baked at /var/lib_tests ($(wc -l < "$lt_writable" | tr -d ' ') writable dirs)"
+        echo "==> populate pool: muster tests baked at /var/lib_tests ($(wc -l < "$lt_writable" | tr -d ' ') dirs the tests write into)"
     fi
 
     # --- net-4a: bake the network database at /lib/ndb/local ---
@@ -7308,7 +7301,7 @@ lib_tests_icu() {
 # --- build_lib_tests, muster half (B-3d codecs, B-3e libxml2). Called after
 # the ICU half, which must neither return early past it nor rm -rf the whole
 # stage. Writes `writable`, the device directories the tests write into, which
-# populate makes 1777. ---
+# the runner layers a directory of its own over (ls-libs.exp). ---
 lib_tests_muster() {
     build_libwebp           # libpng and libjpeg-turbo first
     build_libxml2
@@ -7375,7 +7368,7 @@ lib_tests_muster() {
                 *)    echo "==> lib tests: $out/$lib.stage: unknown kind $kind" >&2; exit 1 ;;
             esac
         done < "$out/$lib.stage"
-        # The tests write their outputs into their build tree (populate makes it 1777).
+        # The tests write their outputs into their build tree.
         mkdir -p "$stage$dev/build"
         echo "$dev/build" >> "$out/writable"
         if [[ "$lib" == libxml2 ]]; then

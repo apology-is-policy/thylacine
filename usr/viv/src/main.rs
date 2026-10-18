@@ -55,10 +55,10 @@ mod json;
 use libthyla_rs::{
     t_attach_9p, t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_note_mask, t_open,
     t_pipe, t_putstr, t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create,
-    t_write, TSpawnArgs, T_CAP_CSPRNG_READ, T_MNOEXEC, T_MREPL, T_NOTE_BIT_INTERRUPT,
-    T_NOTE_BIT_PIPE, T_OPATH,
-    T_OREAD, T_OWRITE,
-    T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_OPEN_FROM_ROOT,
+    t_walk_open, t_write, TSpawnArgs, T_CAP_CSPRNG_READ, T_MNOEXEC, T_MREPL,
+    T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_PIPE, T_OPATH,
+    T_OREAD, T_OWRITE, T_S_IFDIR, T_S_IFMT,
+    T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 use libthyla_rs::notes::{send, Notes, NoteTarget};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
@@ -454,6 +454,65 @@ fn tty_bind_source() -> Option<i64> {
     Some(fd)
 }
 
+/// The bind source for the container's /tmp: the INVOKER's directory
+/// /tmp/.viv/<rootfs path>/tmp, made on first use and kept, as the rootfs's own
+/// /tmp was. A create through a 9P session is admitted only to one of its two
+/// ends (IDENTITY-DESIGN 9.7 M7), so a /tmp on the system pool takes creates
+/// from system alone; the invoker's /tmp (for a user, ut's bind from the home)
+/// takes them as the invoker. Mirroring the rootfs path keeps one /tmp per
+/// rootfs and invoker. None when the rootfs has no /tmp anchor: that container
+/// has no /tmp.
+fn container_tmp(rootfs_path: &str) -> Result<Option<i64>, &'static str> {
+    let anchor = open_from_root(&format!("{}/tmp", rootfs_path), T_OPATH);
+    if anchor < 0 {
+        return Ok(None);
+    }
+    let _ = unsafe { t_close(anchor) };
+    let mut comps: Vec<&str> = Vec::new();
+    comps.push(".viv");
+    for c in rootfs_path.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if comps.len() > 1 {
+                    comps.pop();
+                }
+            }
+            _ => comps.push(c),
+        }
+    }
+    comps.push("tmp");
+    let mut dir = open_from_root("/tmp", T_OPATH);
+    if dir < 0 {
+        return Err("open the invoker's /tmp");
+    }
+    for c in &comps {
+        // Create, then open: a directory that already exists refuses the
+        // create, and the open decides.
+        let made = unsafe {
+            t_walk_create(dir, c.as_ptr(), c.len(), T_OREAD, T_WALK_CREATE_DMDIR | 0o700)
+        };
+        if made >= 0 {
+            let _ = unsafe { t_close(made) };
+        }
+        let next = unsafe { t_walk_open(dir, c.as_ptr(), c.len(), T_OPATH) };
+        let _ = unsafe { t_close(dir) };
+        if next < 0 {
+            return Err("make the container's /tmp under the invoker's /tmp");
+        }
+        dir = next;
+    }
+    // st_mode is at offset 40 of struct t_stat.
+    let mut st = [0u8; 88];
+    let is_dir = unsafe { t_fstat(dir, st.as_mut_ptr()) } == 0
+        && u32::from_le_bytes([st[40], st[41], st[42], st[43]]) & T_S_IFMT == T_S_IFDIR;
+    if !is_dir {
+        let _ = unsafe { t_close(dir) };
+        return Err("the container's /tmp under the invoker's /tmp is not a directory");
+    }
+    Ok(Some(dir))
+}
+
 /// Kill + reap the per-container diorama through the pre-opened ctl fd (its
 /// /proc path is unreachable post-chroot; the ctl_fd < 0 fallback opens the
 /// path, which only works pre-chroot). Best-effort by design: a diorama that
@@ -558,14 +617,21 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
     // Mount the diorama over our own /dio (the mount point joey creates on
     // the pivoted root for exactly this per-client use) and take O_PATH fds
     // of the two subtrees the container recipe binds.
-    // T_MNOEXEC (#217) on EVERY mount viv makes. The rule is simple enough to
-    // hold in the head: the only tree a container must execute from is its
-    // rootfs, and the rootfs arrives by chroot, not by mount -- so every entry
-    // in this table can be noexec without costing the container anything, and
-    // a writable 9P-backed surface the SYSTEM hands it stops being a way to turn
-    // bytes into code. /dio covers the diorama's whole 9P session, which is
-    // where /proc and /sys are opened from, so those inherit the verdict by
-    // device instance rather than needing their own.
+    // T_MNOEXEC (#217) on every mount viv makes but /tmp. The rule is simple
+    // enough to hold in the head: the only tree a container must execute from
+    // is its rootfs, and the rootfs arrives by chroot, not by mount -- so every
+    // other entry in this table can be noexec without costing the container
+    // anything, and a writable 9P-backed surface the SYSTEM hands it stops
+    // being a way to turn bytes into code. /dio covers the diorama's whole 9P
+    // session, which is where /proc and /sys are opened from, so those inherit
+    // the verdict by device instance rather than needing their own.
+    //
+    // /tmp cannot be noexec, because the verdict follows the session, not the
+    // mount (mount_noexec_covers matches the source's device instance anywhere
+    // in the Territory): a system invoker's /tmp is on the pool, the rootfs's
+    // own session, and a noexec /tmp would refuse every exec in the rootfs. It
+    // is the invoker's own storage, not a surface the system hands over, and it
+    // keeps the verdict the rootfs's /tmp had before it was a mount.
     //
     // NOT /env, and the flag here is belt-and-braces rather than the thing that
     // closes it (#217 F1): devenv stamps the CALLING Proc's env devno at walk
@@ -619,6 +685,10 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
         -1
     };
     let tty = tty_bind_source();
+    let tmp = match container_tmp(&rootfs_path) {
+        Ok(t) => t,
+        Err(e) => fail!(e),
+    };
 
     // --- enter the container world -----------------------------------------
     if unsafe { t_chroot(rootfs) } != 0 {
@@ -629,21 +699,25 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
     // The recipe mounts (docs/VIVARIUM.md section 7.2). Every target is a
     // bake-provided anchor inside the rootfs; a missing anchor is a bundle
     // defect and fails the run closed.
-    let mut binds: Vec<(&str, i64)> = Vec::new();
-    binds.push(("/proc", dio_proc));
-    binds.push(("/sys", dio_sys));
-    binds.push(("/env", env_dev));
+    let noexec = T_MREPL | T_MNOEXEC;
+    let mut binds: Vec<(&str, i64, u32)> = Vec::new();
+    binds.push(("/proc", dio_proc, noexec));
+    binds.push(("/sys", dio_sys, noexec));
+    binds.push(("/env", env_dev, noexec));
     for (i, path) in dev_leaves.iter().enumerate() {
-        binds.push((path, leaf_fds[i]));
+        binds.push((path, leaf_fds[i], noexec));
     }
     if net_root >= 0 {
-        binds.push(("/net", net_root));
+        binds.push(("/net", net_root, noexec));
     }
     if let Some(t) = tty {
-        binds.push(("/dev/tty", t));
+        binds.push(("/dev/tty", t, noexec));
     }
-    for (path, fd) in &binds {
-        let rc = unsafe { t_mount(path.as_ptr(), path.len(), *fd, T_MREPL | T_MNOEXEC) };
+    if let Some(t) = tmp {
+        binds.push(("/tmp", t, T_MREPL));
+    }
+    for (path, fd, flags) in &binds {
+        let rc = unsafe { t_mount(path.as_ptr(), path.len(), *fd, *flags) };
         if rc != 0 {
             reap_diorama(dio_pid, dio_ctl);
             // -ENOTDIR is Plan 9's Emount: the anchor exists but is the other
@@ -655,7 +729,7 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
             });
         }
     }
-    for (_, fd) in &binds {
+    for (_, fd, _) in &binds {
         let _ = unsafe { t_close(*fd) };
     }
 

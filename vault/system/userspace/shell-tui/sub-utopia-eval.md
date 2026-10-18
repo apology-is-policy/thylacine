@@ -16,6 +16,7 @@ code:
   - usr/utopia/libutopia/src/eval/discipline.rs
   - usr/utopia/libutopia/src/eval/value.rs
   - usr/utopia/libutopia/src/eval/error.rs
+  - usr/utopia/libutopia/src/eval/mountargs.rs
   - usr/u-glob-test/src/main.rs
 audit: light
 guarded-by: [inv-i19, inv-i20, inv-i27, inv-i28]
@@ -26,7 +27,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-18
 ---
 ## Purpose
 
@@ -60,6 +61,21 @@ leg, the mount itself, names a cause only when the kernel gives one: since the
 PATH: not a directory" (an attach root is a directory), and the kernel's flat
 -1 still reads "mount: cannot mount at PATH".
 
+
+**`bind` (B-3e, 2026-10-18).** `bind [-b|-a] [-c] new old` grafts `new`, a name
+that already resolves in the shell's namespace, over `old`: one `t_open` of `new`
+with `T_OPATH`, then `t_mount` with Plan 9's flags. It was pulled forward because
+IDENTITY-DESIGN 9.7 M7 admits a create through a 9P session only to the session's
+ends, so a user who runs tests in a tree on the system pool layers a directory of
+their own over it (`bind -bc`) and the creates land in that layer. The grammar of
+`mount` and `bind` lives in `mountargs`, outside the `backend` gate, so its tests
+run on the host (`tools/test-rust.sh libutopia`); `builtin` asserts that its four
+flag values equal libthyla-rs's. A repeated ordering flag (`-bb`) is accepted;
+only `-b` with `-a` is refused. All three namespace builtins resolve their names
+against `$cwd` with the same lexical `normalize_abs` that `cd` uses, because the
+kernel resolves a mount point from the root only (`sys_resolve_mountpoint`):
+before 2026-10-18 a relative mount point named the root's entry, not one below
+`$cwd`.
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned
@@ -112,12 +128,12 @@ the kernel against the caller's namespace. `/` left the list at B-1d: it was
 there for the flat initrd root, where the pre-pivot shell found its programs;
 the initrd now keeps them in `bin/`, which is `/bin` on both sides of the pivot
 ([[dec-2026-09-25-initrd-bin-directory]]), and a `/` entry would only have
-searched the disk root ahead of the toolchain dirs. There are seventeen builtins under
-nineteen names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
+searched the disk root ahead of the toolchain dirs. There are eighteen builtins under
+twenty names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
 option processing — the one way to enter a directory whose name begins with
 `-`), and `BUILTIN_NAMES` — the list
 `is_builtin` tests and `type` answers from — agrees exactly with `try_builtin`'s
-dispatch arms. `mount` and `unmount` are builtins for a structural reason their
+dispatch arms. `mount`, `bind` and `unmount` are builtins for a structural reason their
 module states: Thylacine clones the namespace at every fork, so a mount made by
 a spawned command would land in the child's namespace and vanish with it. They
 landed at `5c22f90d`, whose title says they compile but do not yet work in the

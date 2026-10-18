@@ -10,7 +10,7 @@ validated-by: [prose]
 locks: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-06
-updated: 2026-09-29
+updated: 2026-10-18
 ---
 ## Purpose
 
@@ -80,8 +80,9 @@ worth reading twice:
    hold only that.
 3. **Pre-open every capability the container world needs as an fd**: the
    rootfs, the `/dio/proc` and `/dio/sys` subtrees, the trivial `/dev`
-   leaves, `/env`, `/net` when granted, and the diorama's `/proc/<pid>/ctl`
-   kill channel. **fds survive chroot; paths do not.**
+   leaves, `/env`, `/net` when granted, the container's `/tmp` source (below)
+   and the diorama's `/proc/<pid>/ctl` kill channel. **fds survive chroot;
+   paths do not.**
 4. `chroot` to the rootfs — viv itself enters the container world, because
    nothing it still needs is path-reachable — then mount the held fds over
    the rootfs's anchor paths, `chdir`, and spawn the entrypoint.
@@ -95,6 +96,27 @@ its `/proc` path is unreachable post-chroot **and the container's own
 not a member of its own view. So an unopenable ctl on a *live* diorama is
 fatal early, while the path-based kill still works — proceeding without
 one risks waiting on an unkillable child.
+
+**The container's `/tmp` is the invoker's own (2026-10-18).** A create through a
+9P session is admitted only to the session's two ends (IDENTITY-DESIGN 9.7 M7),
+so a rootfs `/tmp` on the system pool takes creates from system alone. Until
+then the bake stamped every bundle's `rootfs/tmp` 1777, which let any user make
+system-owned files there and gave every user of a bundle one shared `/tmp`.
+`container_tmp` now walks the invoker's `/tmp` (for a user, ut's bind from the
+home) down `/tmp/.viv/<rootfs path, lexically normalized>/tmp`, creating each
+missing directory 0700 (create, then open: an existing one refuses the create
+and the open decides), checks the leaf is a directory, and hands back its
+`O_PATH` fd for the recipe to bind over the rootfs's `/tmp`. It persists across
+runs, as the rootfs's own did, one per rootfs and invoker. A rootfs without a
+`/tmp` anchor gets no bind. The leaf is 0700, not the old 1777: the create call
+admits only the low nine mode bits, and the container's only principal is the
+invoker. **`/tmp` is the one recipe mount without `MNOEXEC`.** The noexec verdict
+follows the session, not the mount (`mount_noexec_covers` matches the source's
+device instance anywhere in the Territory), and a system invoker's `/tmp` is on
+the pool, the rootfs's own session, so a noexec `/tmp` would refuse every exec in
+the rootfs; it keeps the verdict the rootfs's `/tmp` had. The git-net bundle's
+push target moved from its `rootfs/tmp` to `/etc/gitnet`, since a file baked
+into the rootfs's `/tmp` is now hidden.
 
 **The phenotype declaration lands at exactly one call.** The diorama is a
 native Thylacine server that happens to serve a Linux-shaped world, so it

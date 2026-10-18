@@ -3431,6 +3431,7 @@ the manifest does not name:
 | `/dev` | assembled **by bind** per §6's finding (the trivial devdev leaves; `/dev/tty` = a bind of the pts slave `viv`'s session controls, per its §6 row; omitted when `viv` has none) | binding is the answer for `/dev`; no server interposed |
 | `/env` | a bind of the kernel env device (as-built completion, V-7) | zero-authority substrate: devenv resolves the **calling** Proc's own `Env` at op time, so one bind serves every container Proc its own environment (native binaries read env through `/env`); carries nothing across the boundary |
 | `/net` | only if the manifest grants it | I-1: the namespace firewall is the grant |
+| `/tmp` | a bind of the **invoker's own** `/tmp/.viv/<rootfs path>/tmp`, made on first use and kept across runs as the rootfs's own `/tmp` was; only when the rootfs has a `/tmp` anchor (added 2026-10-18) | a create through a 9P session is admitted only to its two ends (`IDENTITY-DESIGN.md` 9.7 M7), so the rootfs's `/tmp` on the system pool takes creates from system alone, and the invoker's storage takes them as the invoker. The one recipe mount without `MNOEXEC`: the verdict follows the session, and a system invoker's `/tmp` is on the rootfs's own |
 
 Native `/proc` and `/ctl` are **not mounted** into the container — a
 per-territory pid *view* would be a new kernel surface §7 forbids, and
