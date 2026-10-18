@@ -3178,7 +3178,7 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
     struct loom_service_ref scope={0},child={0};
     bool root_borrow=false;
     struct loom_service_protocol *prepared=NULL,*held=NULL;
-    struct loom_service_operation *op=NULL,*other=NULL;
+    struct loom_service_operation *op=NULL,*other=NULL,*third=NULL;
     struct SrvConn *server=NULL;
     struct loom_service_reserve reserve={.size=sizeof(reserve),.version=1,.kind=LOOM_SERVICE_SCOPE};
     u32 old_budget=creator->as->page_budget;
@@ -3249,9 +3249,18 @@ static const char *loom_operation_storage_case(struct Loom *l,struct Proc *creat
        l->service_requests.records[op->request.index].owners==1 &&
        l->service_engine->entries[scope.slot].pins==1,
        "operation storage exact buddy charge and physical owner");
-    OS(loom_private_operation_prepare(l,scope,905,0,0,&other)==-T_E_NOSPC && !other &&
-       creator->as->page_count==baseline+1 && l->service_engine->entries[scope.slot].pins==1,
+    // Admission counts the requests awaiting a terminal CQE, one per CQ entry;
+    // the CONNECT's retained DELIVERED record is not one of them.
+    OS(!loom_private_operation_prepare(l,scope,905,0,0,&other) && other &&
+       creator->as->page_count==baseline+2 && l->service_requests.occupied==3 &&
+       l->service_requests.occupied-l->service_requests.delivered==l->cq_entries &&
+       l->service_engine->entries[scope.slot].pins==2,
+       "operation storage admits a request per CQ entry beside the retained CONNECT");
+    OS(loom_private_operation_prepare(l,scope,908,0,0,&third)==-T_E_NOSPC && !third &&
+       creator->as->page_count==baseline+2 && l->service_requests.occupied==3 &&
+       l->service_engine->entries[scope.slot].pins==2,
        "operation storage capacity refuses before allocation");
+    OS(!loom_private_operation_release_unused(other),"operation storage second unused destruction");other=NULL;
     struct loom_request_ref old=op->request;
     OS(!loom_private_operation_release_unused(op),"operation storage unused destruction");op=NULL;
     OS(creator->as->page_count==baseline && l->service_requests.occupied==1 &&
@@ -3291,6 +3300,7 @@ done:
         loom_private_close_changed(l);
     }
     spin_lock(&creator->as->lock);creator->as->page_budget=old_budget;spin_unlock(&creator->as->lock);
+    if(third)(void)loom_private_operation_release_unused(third);
     if(other)(void)loom_private_operation_release_unused(other);
     if(op)(void)loom_private_operation_release_unused(op);
     if(held)(void)loom_engine_put(l,scope,held);
