@@ -81,7 +81,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-19
 ---
 
 ## Approved private service lifecycle
@@ -3680,3 +3680,63 @@ then walks a second FID, aborts the scope, and REAPs the FID and then the scope.
 The host fixture calls the FID primitive directly, so only the native test
 reaches the lookup: its first guest boot, without `control_retiring_fid`, failed
 at "native clunked FID reaps once while its ring lives".
+
+## October 18: admission counts the undelivered, and a WALK from an opened fid refuses (votes 11-12, Corona)
+
+Two operator votes (October 15, recorded) refine the private service.
+
+**Vote 11 -- private request admission counts only UNDELIVERED requests.**
+`loom_service_requests.c` holds a physical table of `loom_request_records(cq)`
+= `2*cq + 64` cells and admits against `admit` = the CQ size. `loom_request_prepare`
+refuses -ENOSPC once `occupied - delivered >= admit`; a record counts as
+`delivered` from its terminal CQE until `request_remove` frees it, so a
+delivered-but-unreaped record no longer occupies the admission window.
+`loom_request_deliver_room` caps `delivered < admit + LOOM_SERVICE_SLOT_COUNT`,
+so the delivered set never outruns the physical table. The increment lives in
+`loom_request_deliver` and `loom_request_discard` (and the closed-owner
+discard), each invoked from a terminal-delivery site in `loom_service_ready.c`,
+`loom_service_provided.c` and `loom_service_engine.c`; the decrement lives only
+in `request_remove`'s `LREQ_DELIVERED` phase. `delivered <= occupied <=
+capacity` is defended at `loom_request_prepare`.
+
+Why the change. The old table counted a record as occupied until it was FREE --
+until the adapter CLUNKed and reaped the fid. An adapter whose CLUNK the kernel
+refused (the deadline race, or a fid dropped under its own in-flight LOPEN)
+could not free the record, and the next admission wedged on a full book while
+the CQ had room -- audit round 2's F1, the reaping-leg red the October 15
+lease-run found. Counting the *undelivered* set makes the kernel's admission
+room always at least the adapter book's room (the book admits `cq` outstanding;
+an undelivered request is one the book holds), so **the kernel admits every
+request the book admits** and never answers -ENOSPC on a terminal the book has
+already accepted. The wedge is closed at the mechanism, not by a retry.
+
+The adapter clause of the vote -- "fail the ring loudly if a CLUNK is ever
+refused" -- was reported back refined, because the literal reading kills a ring
+on a *legal* race: a CLUNK refused under a scope the kernel already aborted (a
+deadline the adapter had not yet routed) is reaped as before, not a fault. The
+adapter backstop fails the ring -EIO only when a QUERY finds the fid AND its
+scope both READY, the one case nothing will ever retire. See
+[[sub-loom-native-adapter]].
+
+**Vote 12 -- a WALK from an opened fid answers -EBADF at submit.**
+`loom_fid_borrow` gains a walk flag, and `loom_fid_borrow_walk` answers
+`-T_E_BADF` when the source fid is `LFID_OPEN`, after the ACCES check and only
+for a walk (9P walk(5): a fid opened for I/O is no longer a walk source).
+`loom_service_admission.c` routes a `P9_TWALK` through `loom_fid_borrow_walk`
+and every other borrow through `loom_fid_borrow`. `docs/ERRORS.md` gains the
+`T_E_BADF` row ([[abi-errno]]).
+
+**Witnesses.** `loom.private_operation_storage` fills admission to the vote-11
+bound (two ops admitted beside the retained CONNECT on a CQ of two, the third
+-ENOSPC before allocation); `loom_requests_fixture.h` and
+`tools/test-loom-service-requests.py` (control + 22 mutants) turn each
+admission-accounting assertion red on the host. `loom_fids_fixture.h` and
+`tools/test-loom-service-fids.py` (the `walk-opened` and `walk-never` mutants)
+turn the borrow-walk refusal red. Both votes are proven end to end in the guest
+by the NA-4d qualification ([[sub-loom-fixture]]): the walk-from-an-opened-fid
+probe leg confirms the kernel refuses at admission (violations 0, no server
+contact), and the admission bound is what lets the reaping leg's CLUNKs all
+land. Audit round 3 (same-family, Opus on Opus, context-independent)
+re-derived the accounting and the borrow and closed 0 P0 / 0 P1 / 0 P2 / 1
+documented P3 (a sim-oracle edge unreachable via the safe API;
+[[sub-loom-native-adapter]] caveats).

@@ -25,7 +25,7 @@ abis: [abi-loom-service, abi-loom-ring]
 design:
   - "docs/ASYNC-SERVICE-ABI.md \"Native adapter (October 12)\""
 created: 2026-10-12
-updated: 2026-10-15
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -43,7 +43,7 @@ enabled by it.
 The C twin (NA-4c) is libt's `thyla/loom_client/adapter.h`. It composes the C
 cores ([[sub-libt-loom-client]]) the same way, over `struct t_loom_kernel`, a
 table of the same raw calls; `t_loom_kernel_native()` (`native_kernel.c`) fills
-it with libt's system-call stubs. Its host tests run the Rust tests' 63
+it with libt's system-call stubs. Its host tests run the Rust tests' 69
 scenarios, one for one, and eight of the C interface's own, against a C port
 of the simulated kernel. Where the
 two differ, the sections below say which side they describe.
@@ -131,6 +131,25 @@ two differ, the sections below say which side they describe.
   kernel would refuse one: `loom_fid_begin_clunk` wants a READY fid). A REAP
   answered -EBUSY is retried on a later turn; any other refusal but -ENOENT
   drops the adapter's entry and leaves the slot for close to reclaim.
+- **A CLUNK is deferred under its own in-flight LOPEN.** A `Fid` dropped while
+  the adapter's own LOPEN on it has not routed would clunk at once, and the
+  kernel refuses that CLUNK -EBUSY (`loom_fid_begin_clunk` finds the LOPEN
+  holding the fid claim) -- a slot leak until the scope ended. So the adapter
+  records each in-flight LOPEN (Rust `Inner.opens`, a `(cookie, fid)` filled by
+  `Fid::open` and cleared by the Control route `opened()` or `Open::drop`; C the
+  `OP_OPEN` op's `dest`, marked ended by the routed Control arm), and
+  `clunk_pass` / `clunk_done` skip a Clunk fid listed there -- after the
+  scope-live check -- until the LOPEN terminal routes.
+- **The backstop.** On a CLUNK terminal with a negative errno, `finish_clunk`
+  (Rust) / `clunk_done` (C) QUERY the fid and its scope. Both `SERVICE_READY`
+  means nothing will ever retire it -- vote 11 makes the kernel admit every
+  request the book admits, so a CLUNK refused under a live, ready scope is a
+  broken invariant -- and the ring fails -EIO. Any other state (the scope
+  aborting behind a deadline race, the fid already gone) is reaped as before.
+  This is the refinement of vote 11's "fail on any refused CLUNK": the literal
+  reading would kill a ring on the legal deadline race. The scope's `reason` is
+  set only atomically with a state that is not READY (`loom_service_control.c`),
+  so a -ECANCELED CLUNK never coincides with a ready scope -- no false red.
 
 ## Mechanism
 
@@ -198,7 +217,8 @@ two differ, the sections below say which side they describe.
 `Shared`: the kernel, the descriptor, the validated mapping, the regions and a
 `[Option<SlotEntry>; 64]`. `Inner`: the `OwnedMapping`, the SQ `Producer`, the
 `FixedDriver`, a waker table and a stream-route table of `cq_entries` cells
-each, and a background-CLUNK table of 64.
+each, a background-CLUNK table of 64, and `opens`, one `(cookie, fid)` per
+in-flight LOPEN so a dropped fid's CLUNK defers until its open routes.
 
 C: `struct t_loom_ring` holds the kernel table, the descriptor and ring state,
 the 64 regions, the SQ producer's pointers, `slots[64]` (each with its embedded
@@ -250,15 +270,20 @@ completion path allocates.
   before it consumes, which the kernel's zero-submit ENTER does not. Its ENTER
   and REGISTER answer a dead number -EBADF, as the kernel does. An operation
   on a FID that is not READY, under a READY scope, answers -ENOENT as
-  `loom_fid_borrow` does (caveat 4).
+  `loom_fid_borrow` does (caveat 4). Since NA-4d it also models the kernel's fid
+  claim: a CLUNK of a fid whose admitted LOPEN is still queued answers -EBUSY, a
+  WALK from an opened fid -EBADF, a READ or WRITE on a fid no LOPEN opened
+  -EACCES, a second LOPEN of an opening fid -ENOENT -- claim before ACCES, ACCES
+  before BADF, as `loom_fid_borrow` orders them -- and a `refuse_clunk` knob
+  refuses the next CLUNK at admission so the backstop's ring-fail can be driven.
 - **The C twin's tests.** `tests/loom_client/sim_kernel.c` ports `sim.rs`
   knob for knob (the setup refusals, the misaligned attach and the stale pool
-  identity are knobs in both), and `test_adapter.c` runs the 63 scenarios of
+  identity are knobs in both), and `test_adapter.c` runs the 69 scenarios of
   `tests/native.rs` under their Rust names (`future` reads `operation`),
   then eight of the C interface's own: a bad setup shape, another kind's
   completion, a full operation table with a route-only stream cell, a
   foreign pool, a stream asked again after its end, and three death tests
-  for stale handles. A `_Static_assert` pins the count of 71. Each scenario also ends with the storage
+  for stale handles. A `_Static_assert` pins the count of 77. Each scenario also ends with the storage
   idle and every region detached. `tools/test-loom-client.sh` runs them
   sanitized (-O0, ASan and UBSan, no recovery) and optimized, and links
   `adapter.c` and `native_kernel.c` freestanding under `--no-undefined` with
@@ -283,18 +308,28 @@ completion path allocates.
 - **The twins.** `tools/check-loom-service-abi.py` checks `ring_records`'
   `Submission`, `Header` and `BufferRange` field by field, and its constants,
   against the ring layout table.
+- **The guest qualification.** [[sub-loom-fixture]] runs both adapters in EL0
+  against a strict 9P server on the real kernel ring -- the sims-as-oracle loop
+  closed. `work/oct15-na4d/guest-sabotage.py` (27 mutants) turns the kernel or an
+  adapter red one at a time; `work/oct15-na4d/host-sabotage.py` is now 118 cases.
+  A fifth host test per language, `an_lopen_claims_its_fid_and_grants_only_its_mode`,
+  pins the sims' new claim model directly -- a sim rule nothing exercises proves
+  nothing -- with a 10 ms deadline on its held arms so a regressed sim fails
+  instead of hanging.
 
 ## Seams
 
 - **NA-4c**, the C adapter in libt, is this dossier's C half.
-- **NA-4d** runs this adapter in the guest against an EL0 strict-9P fixture.
+- **NA-4d** runs both adapters in the guest against an EL0 strict-9P fixture;
+  the fixture, the kernel test and the qualification are [[sub-loom-fixture]].
 - **AS-4** adopts it for the clipboard client.
 
 ## Caveats
 
-1. No guest program uses the adapter yet; only the host runs it (NA-4d).
-   `native_kernel.c` is compiled and linked by the freestanding stage, but no
-   boot executes it.
+1. No production guest program uses the adapter yet; the NA-4d probes exercise
+   both adapters in the guest ([[sub-loom-fixture]]), and AS-4 (the clipboard
+   client) is the first real consumer. `native_kernel.c` is compiled and linked
+   by the freestanding stage, and the C probe executes it in the guest.
 2. Retirement and REAP are not poll events. A caller waiting for `retired()`
    turns with a deadline.
 3. The simulated kernel's REAP follows `loom_private_service_reap` as of
@@ -302,7 +337,11 @@ completion path allocates.
    fids pin their scope). Until then no kernel path freed a walked fid while
    its ring lived, and the sim was more lenient than the kernel. The sim has no
    slot phase: the kernel's RETIRING FID is reachable by REAP only through
-   `control_retiring_fid`, which only the guest test exercises.
+   `control_retiring_fid`, which only the guest test exercises. Since NA-4d the
+   sim also models the kernel's fid claim at admission (EBUSY under an in-flight
+   LOPEN, EBADF on a walk from an opened fid, EACCES on an unopened-fid I/O), and
+   the guest qualification ([[sub-loom-fixture]]) drives the clunk-and-reap path
+   against the real kernel.
 4. The six paths round 1 left untested have host tests since 2026-10-13,
    each red under its own sabotage: `Fid::walk` from a file fid, a refused
    `Payload::try_return`, poll's -EINTR and POLLERR (sim knobs), an ENTER
@@ -310,6 +349,16 @@ completion path allocates.
    and `destroy_pool` answered -EBADF once the ring is lost. The sim answers
    -ENOENT for an operation on a FID that is not READY under a READY scope, as
    `loom_fid_borrow` does, and -EISDIR for a byte READ of the root.
+5. One sim-oracle edge remains, documented and unreachable (audit r3 P3-1):
+   both sims check a pooled READ's fid-access (EACCES) before resolving the pool
+   reference, the reverse of the kernel's order (pool first, then the fid
+   borrowed at publish), so for a fid no LOPEN opened for read plus an invalid
+   pool reference the sims answer EACCES where the kernel answers ENOENT. It is
+   unreachable through the safe `Fid::stream(&Pool)` API -- a `Stream` is built
+   only from a resolved pool -- so no host test or real program reaches it, and
+   the scoped change that added the access check was a net fidelity gain. A fix
+   would reorder the admit chain in both sims (invasive, warranting a re-audit
+   for an unreachable edge); it is tracked, not taken.
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

@@ -65,7 +65,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**684 owned · 45 unowned · 729 files (93% owned) · ~12522 unswept lines.**
+**685 owned · 44 unowned · 729 files (93% owned) · ~11878 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **92 files, ~42201 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -76,7 +76,6 @@ Excluded as harness and counted here rather than dropped: **92 files, ~42201 lin
 | usr/ports | 19 | 5 | 1691 |
 | kernel | 186 | 11 | 1418 |
 | usr/quarry | 0 | 1 | 1033 |
-| usr/loom-fixture | 0 | 1 | 644 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 34 | 1 | 196 |
 | arch | 41 | 2 | 146 |
@@ -102,6 +101,7 @@ Excluded as harness and counted here rather than dropped: **92 files, ~42201 lin
 | usr/lantern | 4 | 0 | 0 |
 | usr/lictor | 31 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
+| usr/loom-fixture | 1 | 0 | 0 |
 | usr/loom-stress | 1 | 0 | 0 |
 | usr/manual | 7 | 0 | 0 |
 | usr/net-echo | 1 | 0 | 0 |
@@ -133,7 +133,6 @@ Excluded as harness and counted here rather than dropped: **92 files, ~42201 lin
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/quarry/src/main.rs | 1033 |
-| usr/loom-fixture/src/main.rs | 644 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
 | kernel/include/thylacine/spinlock.h | 287 |

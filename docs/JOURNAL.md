@@ -1,6 +1,119 @@
 # The autonomous-run journal
 
 
+## 2026-10-18 -- NA-4d guest qualification: vote 11/12, the adapter backstop, the probe legs (corona)
+
+Picked up NA-4d at fd5181370 (the audit-r2 fix batch, which the 10-15 lease-run
+had shown RED at the reaping leg: the kernel counted a request record until FREE,
+so an adapter's refused CLUNK -> Reap wedged -- audit r2 F1). The operator voted
+(11) private request admission counts only UNDELIVERED requests and (12) a WALK
+from an opened fid answers -EBADF at submit.
+
+**Vote 11 (5cd0d0ff9, verified green 9f8caaff4).** loom_service_requests.c: the
+physical table is loom_request_records(cq) = 2cq+64; admission admits while
+occupied-delivered < cq; a delivered record no longer occupies the admission
+window (++/--delivered on deliver / request_remove, the sole free path;
+delivered <= occupied <= capacity defended at prepare; deliver_room caps the
+physical table). The first run (195214Z) FAILED loom.private_operation_storage
+because that test still filled admission the OLD way; 9f8caaff4 fixed the test to
+admit two ops beside the retained CONNECT on cq 2, the third -ENOSPC before
+allocation. REFINEMENT REPORTED TO OPERATOR: "fail the ring loudly if a CLUNK is
+ever refused" (vote 11's adapter clause) would kill a ring on a LEGAL race -- a
+CLUNK refused under a scope the kernel already aborted (a deadline the adapter
+had not routed). So the backstop fails the ring -EIO only when a QUERY finds the
+fid AND its scope both READY (the case nothing will ever free); under a
+not-READY scope the fid is reaped as before.
+
+**Vote 12 (cf6999b99).** loom_fid_borrow_walk returns -EBADF on LFID_OPEN, after
+the ACCES check, only for a walk (walk(5): a fid opened for I/O is no longer a
+walk source). Admission's TWALK uses it; ERRORS.md gains the T_E_BADF row.
+
+**The adapter backstop + CLUNK deferral (558b90d00).** A fid dropped while its
+own LOPEN is still unrouted: the kernel refuses that fid's CLUNK -EBUSY
+(loom_fid_begin_clunk holds the claim), and the adapters used to mark it REAP,
+leaking the slot until the scope ended (OPEN-BUGS, enqueued 10-18). Fix: both
+adapters DEFER the CLUNK while an in-flight LOPEN claims the fid (Rust
+Inner.opens (cookie,fid) per LOPEN filled by Fid::open, cleared by the Control
+route or Open::drop; C the OP_OPEN op->dest + open_routed marking ended), then
+clunk once the LOPEN terminal routes. Self-audit (both languages) confirmed no
+leak: every Open lifecycle -- route, drop-held, drop-pending -- clears the defer
+or reaps via the dead scope; opening() can't overflow (LOPENs in flight <= book
+admit <= capacity); consumed()->free_op zeros the C op cell so opening() stops
+blocking. Both sims now model the kernel's fid claim (EBUSY/ENOENT/EACCES/EBADF +
+refuse_clunk), closing the OPEN-BUGS P3 that the sims let any fid move data.
+
+**The fifth host test (69/77, not the planned 68/76).** A sim rule nothing
+exercises proves nothing, so an_lopen_claims_its_fid_and_grants_only_its_mode
+drives the sims' new claim model directly; its held arms use a 10 ms deadline so
+a regressed sim fails instead of hanging.
+
+**Step c -- the probe legs (5f4ea0af4).** Both probes gained a walk-from-an-
+opened-DIR-fid leg: the kernel and the fixture refuse it with the SAME errno, so
+only the WALKS/GETATTRS/VIOLATIONS counters tell the kernel's submit refusal from
+the server's -- the leg requires all three deltas zero (a single-line check so
+the guest FAIL line is unambiguous). The qual boot confirmed it: violations 0,
+so the kernel refused at admission, never reaching the server. The retire leg
+gained a 'Q'/'Z' handshake: after the ring retired, the probe asks the fixture
+(which serves only this program) to confirm it holds no session -- closing audit
+r1 F6 / self S1 (only close() had had a server witness). The Q/Z logic has no
+race: `asked` is sticky, so even if the ask is read before the last connection's
+POLLHUP, Z is sent once conns empties.
+
+**Verification.** kernel-run GREEN on 5f4ea0af4 (21:34Z): HOST suite (rust 212,
+C 77, both profiles), CONTROL ci 1893/1893 (fixture 76, rust 78, c 74), CONTROL-Q
+1893/1893 (fixture 77, rust 79, c 75, rings 2/2, conns 6/6; fixture line clunks 92
+getattrs 127 walks 110 opens 16 violations 0 -- the predicted shift). Host
+sabotage 118/118 RED.
+
+**Guest sabotage -- the harness earns its keep.** The first full run of the
+27-mutant set (2026-10-18 21:41Z) discriminated 24 at their predicted check and
+got value, and flagged 3 -- k6, a4, a4c -- UNPREDICTED (test.sh exit 0 under the
+mutant: the mutant built and nothing failed). None is a kernel or shipped-adapter
+defect, and none a weak probe check; all three are mis-designed mutants masked by
+legitimate redundancy, which is exactly what a sabotage-of-the-sabotage exists to
+catch. k6 (the CQ-overfill off-by-one) broke 2 of the 3 redundant overfill guards
+-- deliver-selection (ready.c:68) and the post gate (provided.c:164) -- but left
+the wire gate (ready.c:40, `wire=room && ...`) intact, and that gate withholds the
+read submission that would overfill, so the kernel never overfilled (backlog stayed
+4, no shot lost, violations 0 -- ground truth, not theory). Breaking any single
+guard is masked by the other two: I-29 ("CQ never overfilled") holds under any
+single-point failure. a4/a4c (no-op close_fd) targeted the fd-syscall cleanup,
+while the session end the close-leg asserts (main.rs:469) is driven by
+driver.close/t_fixed_close, and a leaked descriptor is reclaimed at process exit --
+so the mutation was invisible. The fixes are edit-only, every prediction tuple
+unchanged: k6 gains a third edit breaking the wire gate (now the kernel overfills
+exactly one past, backlog 5); a4/a4c re-target to the session-ending call. The
+full-CQ overfill check had been a witness never run red; the corrected k6 gives it
+its red run (bug_215 / the run-every-witness-both-ways discipline). The subset re-run (b4yhwkf9n)
+confirmed all three at their own check: k6 now overfills -- both probes fail
+"a full CQ holds exactly its entries" (got 5), the overfill witness's first red
+run -- and a4/a4c leave the session alive (got 1).
+
+**A committed test that had never run.** The two host unit tests under the same
+lease split: the request-table mutation test was clean (14/14), but the FID-module
+mutation test (tools/test-loom-service-fids.py, landed with vote 12 and, it turned
+out, never run) aborted at its `walk-opened` mutant. That mutant DELETED the
+vote-12 line `if(walk && (n->fid_flags&LFID_OPEN))return -T_E_BADF;`, which was the
+sole use of the `walk` parameter, so the mutant did not compile (-Werror
+-Wunused-parameter) -- and the harness builds before it runs, so walk-opened and
+walk-never had never been validated. The mutant now voids `walk` rather than
+deleting the line (a one-line test fix folded into this close), and the FID test
+passes 7/7. Vote 12 itself was already proven end to end by the guest v12 mutant
+(got 3); this only restored the host-unit coverage. The lesson is the stewardship
+one: a committed test is not a passing test until something has run it.
+
+Audit round 3 (same-family, Opus auditing Opus -- context independence, not family
+diversity): 0 P0 / 0 P1 / 0 P2 / 1 documented P3 (holotype af2d9071e412ea43a, Opus 4.8 both ends; the lone P3 a sim-oracle precedence edge unreachable via the safe Fid::stream(&Pool) API, documented not fixed).
+
+**Wrong turns.** (1) Used `cd` five times against the standing no-cd rule -- in
+the host-sabotage window, running the census, and once more diagnosing k6 after
+the compaction; none was needed (the scripts and the absolute `$R` make it inert; the self-compact invocation and a post-resume status check are the fourth and fifth). (2) A commit time first read 22:43Z because
+`git log --date=format-local` prints LOCAL (CEST); re-measured TZ=UTC 20:43Z.
+(3) The k6 guest mutant's anchor went stale when vote 11 rewrote ready.c/
+provided.c -- caught by the census (fast, before any build), re-expressed against
+the ternary/split-condition form. Decisions the operator made: votes 11 and 12,
+and the vote-11 refinement reported back (not re-asked).
+
 ## October 14-15: NA-4c -- the C native adapter, written blind and then made to fail (Corona)
 
 NA-4c is the C twin of NA-4b's Rust adapter: libt's `adapter.h`/`adapter.c`

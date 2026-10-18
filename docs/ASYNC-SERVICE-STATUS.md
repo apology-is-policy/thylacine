@@ -4460,6 +4460,64 @@ scenarios (`sabotage-20261015T025941Z.txt`), the ABI checker passed, and the
 and the fixes add guards, a claim order and tests without restructuring a
 mechanism.
 
+### NA-4d: the guest qualification (both adapters; audit closed after three rounds)
+
+Both native adapters now run in the guest. `/bin/loom-fixture`
+(usr/loom-fixture, no_std Rust over lib/ninep's codecs) is a strict 9P2000.L
+server in EL0: it posts `fixture` in a registry it is handed, serves every
+connection until its control pipe reaches EOF, and answers every message a
+correct client never sends -- a T-message before Tversion, an unknown fid, a
+walk from an opened fid, a reused live newfid, I/O on an unopened fid, a tag in
+use, `.`/`..`/NOFID/NOTAG, a trailing or oversized count -- with Rlerror and a
+counted violation. Its `stats` file reports what the server saw, so each probe
+check can tell a refusal the kernel made at admission from one the server
+answered. `/bin/loom-native-probe` drives the Rust adapter and `/bin/loom-c-probe`
+the C one, leg for leg: connect, walk and open, fixed reads and writes, a
+multishot pooled stream whose leases return newest first, a full CQ read through
+the `backlog` call, a deadline that aborts its scope, cancellation by drop, a
+walk from an opened fid (refused at admission, told from a server refusal by
+zero WALKS/GETATTRS/VIOLATIONS deltas), and closing the ring with leases held.
+`kernel/test/test_loom_native_probe.c` (`loom.native_probe_rust`,
+`loom.native_probe_c`) boots the fixture and one probe with fds 0..2 installed
+and pins every value from `LOOM_PRIVATE_QUALIFICATION`: the default image
+refuses setup (the Rust probe exits 78, the C probe 74, the fixture 76, no ring
+made), the qualification image passes every leg (79, 75, 77, two rings and six
+connections, all released). The fixture and the kernel test are a new dossier,
+`sub-loom-fixture`; the two probes are harness.
+
+Two operator votes landed with the qualification. Vote 11: private request
+admission counts only UNDELIVERED requests (`loom_service_requests.c`: a
+`2*cq+64` physical table, `admit` = the CQ size, a `delivered` count freed only
+at `request_remove`), so a delivered-but-unreaped record no longer wedges
+admission -- the mechanism-level close of audit round 2's F1 reap/clunk wedge,
+which the October 15 lease-run had found red. Vote 12: a WALK from an opened fid
+answers -EBADF at submit (`loom_fid_borrow_walk` on `LFID_OPEN`, after the ACCES
+check; `docs/ERRORS.md` gains the `T_E_BADF` row). The vote-11 adapter clause
+was reported back refined: the adapters defer a dropped fid's CLUNK while its
+own LOPEN is in flight, and the backstop fails the ring -EIO only when a QUERY
+finds the fid and its scope both READY -- a literal "fail on any refused CLUNK"
+would kill a ring on the legal deadline race. Both sims gained the kernel's
+fid-claim model, closing the leniency the host tests had rested on; the host
+counts are 69 Rust / 77 C.
+
+Evidence, measured on 5f4ea0af4 (work/oct15-na4d, October 18): the host suite
+passes (Rust 212, C 77, both profiles); the ci image 1893/1893 (fixture 76,
+probes 78 and 74, no ring); the qualification image 1893/1893 (fixture 77,
+probes 79 and 75, two rings and six connections, violations 0). Host sabotage
+118/118 red. The guest sabotage (27 mutants) discriminated every one at its own
+check -- three (k6, a4, a4c) were mis-designed mutants masked by legitimate
+redundancy (the triple CQ-overfill guard; the driver-close session end),
+re-targeted rather than treated as defects. The two kernel-module host tests
+pass (requests 14/14, fids 7/7); the FID-module test had never compiled before
+this close, a committed-but-never-run test restored.
+
+Audit rounds 1-3 (r1 0/0/2/11, r2 0/1/2/3, r3 0/0/0/1), all same-family (Opus on
+Opus, Fable out), each closing clean. The round-3 P3 is a sim-oracle precedence
+edge -- a pooled READ's access check runs before the pool resolution, the
+reverse of the kernel's order -- unreachable through the safe `Fid::stream(&Pool)`
+API; documented as an accepted oracle simplification and tracked for a cheap sim
+reorder, not fixed.
+
 ## Loom refusals and argument widths: votes 7-9 (Corona, October 13 -- audit rounds 1-2 closed)
 
 Operator votes 7-9 (12:16Z October 13) finish what vote 6 began. Vote 7: every

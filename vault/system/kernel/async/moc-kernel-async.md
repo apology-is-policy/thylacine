@@ -4,7 +4,7 @@ type: moc
 title: "Async — rings, shared pages, and the memory both sides can write"
 parent: moc-kernel
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-19
 ---
 Two mechanisms that move a boundary crossing off the data path. [[sub-kernel-loom]]
 takes the *request* out of the syscall — it becomes a slot in a shared ring.
@@ -79,6 +79,8 @@ looking for it.
 - [[sub-kernel-loom-pools]] — private pool storage and exact payload leases.
 - [[sub-kernel-loom-bridge]] — the private syscall bridge, reachable only in a
   kernel built with the qualification lever.
+- [[sub-loom-fixture]] — the strict 9P fixture and the guest qualification of
+  the two native adapters: the sims-as-oracle loop closed against the real ring.
 - [[sub-kernel-weft]] — the cross-Proc shared page: the share registry, the
   descriptor ring, the readiness poke, and the orphan reaper.
 
