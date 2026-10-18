@@ -640,3 +640,11 @@ existence probe does not follow a final symlink. A plain create (no
 exclusive flag) through a dangling final symlink answers -T_E_NOENT: the
 open finds nothing to open and the create does not create through the link;
 it answered -T_E_EXIST before.
+
+A create or mkdir through a 9P session answers -T_E_ACCES unless the caller
+is at one of the session's two ends (IDENTITY-DESIGN 9.7 M7). The client
+end is the identity the server authenticates: a `/srv` connection's opener,
+or the attacher of a transport the caller supplies. The server end is the
+service's poster. The directory's mode does not change the answer, and
+neither does an elevation's DAC override. A name that already exists still
+answers -T_E_EXIST to a caller who may search the directory, as above.

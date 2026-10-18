@@ -3437,7 +3437,7 @@ Stratum exposes a second 9P surface (admin / observability) per `stratum/v2/docs
     └── clear-events                   — clear audit log
 ```
 
-Auth is via `SO_PEERCRED` on the Unix socket (stratumd reads the connecting process's UID and gates admin verbs server-side). Thylacine's kernel preserves this credential through the 9P attach path so the trust boundary is intact.
+Auth is via `SO_PEERCRED` on the Unix socket (stratumd reads the connecting process's UID and gates admin verbs server-side). Thylacine's kernel preserves this credential through the 9P attach path so the trust boundary is intact. Stratum stamps a create with its connection's credential rather than the caller's, so the kernel admits a create through a 9P session only from a principal at one of the session's two ends (IDENTITY-DESIGN 9.7 M7).
 
 Coordination with Thylacine's `/ctl` (kernel admin Dev introduced at Phase 4 P4-D): the two surfaces are distinct namespaces. Thylacine's `/ctl` is OS-level (procs, memory, devices, kernel-base, sched); Stratum's `/ctl/` is storage-level (pools, datasets, snapshots, scrub). Userspace tools dial both as needed.
 

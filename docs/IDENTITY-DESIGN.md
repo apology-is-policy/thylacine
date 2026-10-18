@@ -1772,13 +1772,51 @@ is correct. The "shared mount stamps the attacher's principal" limitation is exa
 what per-user stratumd resolves at login -- and the kernel `perm_check` (per-Proc, at
 the chokepoint) already denies a non-system Proc's write to a SYSTEM-owned dir BEFORE
 the create reaches the server, so enforcement is per-Proc-correct even over the shared
-mount.
+mount. **Corrected 2026-10-18:** that holds only while no directory on the shared mount
+grants a non-system principal write. Three `tools/build.sh` sites stamped 1777 on the
+pool, and a 2026-10-15 probe showed uid 1000's create in one of them owned by system.
+M7 closes the hole in the kernel.
+
+**M7 -- a create speaks for a session end (kernel; operator vote 2026-10-18,
+`dec-2026-10-18-create-speaks-for-a-session-end`).** A create through a 9P session is
+admitted only to a principal at one of the session's two ends:
+- the **client end**, the identity the server authenticates: a `/srv` connection's
+  opener (`SrvConn.peer_principal`, what `SO_PEERCRED` reports), or the attaching Proc
+  for a transport the caller supplies (`SYS_ATTACH_9P`);
+- the **server end**, the service's poster (`SrvConn.server_principal`). A
+  caller-supplied transport has none.
+
+Any other principal gets `EACCES`; this covers a Proc creating through a mount it
+inherited from another identity. A session whose ends were never recorded admits no
+create. The check sits at the one create chokepoint (`spoor_create_install`) and runs
+whether or not the Dev enforces rwx. A name that already exists still answers `EEXIST`
+to a caller that may search the directory, the A-2d order.
+- **Why both ends.** The server stamps a create with its connection's credential, or
+  with its own when it relays, never with the asking Proc's. The pool's two ends are
+  system, so an ordinary user cannot make a system-owned file there. login attaches a
+  home as system, but the home's server end is the per-user proxy, which runs as the
+  user and relays as the user. So the user's creates in the home, and in the `/tmp`
+  that ut binds from it, are admitted and stamped as the user.
+- **The pool's 1777 directories go.** Their consumers write where the running user owns
+  the storage: `viv run` binds a per-run directory from the invoker's `/tmp` over the
+  bundle's `/tmp`, and the library test trees take a writable layer the user owns.
+- **Elevation is not an end.** The legate grants `CAP_HOSTOWNER` / `CAP_DAC_OVERRIDE`,
+  which override rwx; neither makes a Proc a session end. An elevated user may modify
+  existing objects on system's mount but cannot create there; administration that
+  must create on the system pool runs as system.
+- **No ABI change.** The syscall arguments and the wire are unchanged. The only new
+  behaviour is a refusal, and `EACCES` is already in the create errno set.
+- **Long term:** per-user attach (Plan 9's newns), where each login attaches the pool as
+  the user so the server sees and stamps the real principal, remains the faithful
+  shape. M7 is the kernel's floor until then.
 
 **Invariants.**
 - **I-22 preserved** -- the `SO_PEERCRED` principal is kernel-stamped (`SYS_srv_peer`),
   not client-asserted; no identity self-elevates. `CAP_HOSTOWNER` remains the only
-  DAC-override (a capability, not an identity).
-- **I-2 / I-4 / I-6 unaffected** -- M1-M6 add no capability, no handle-transfer path, no
+  DAC-override (a capability, not an identity). M7 (2026-10-18) closes the way round it:
+  a Proc can no longer create, through a session it inherited, files stamped as that
+  session's identity.
+- **I-2 / I-4 / I-6 unaffected** -- M1-M7 add no capability, no handle-transfer path, no
   rights expansion. F1 *narrows* the handle-rights envelope (omode-derived) --
   monotonic-reduction-friendly.
 - **A-1.7 (I-23) preserved** -- F1's `T_OPATH` carve-out keeps the storage-capability
