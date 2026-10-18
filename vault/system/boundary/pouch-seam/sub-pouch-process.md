@@ -26,7 +26,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-15
+updated: 2026-10-18
 ---
 ## Descriptor operations checkpoint (October 11; main B-3b)
 
@@ -52,6 +52,12 @@ spawn-actions) were built and run by nothing on main; B-3b compiles them into
 dup2-self and handle-query set close-on-exec before they read it. As written,
 both read only a clear flag, and a CI image whose FLAGS_GET hid the flag from
 uid 1000 passed them; descriptor-ops alone turned red (2026-10-15).
+With that image and a posix_spawn whose addclose did nothing for uid 1000, all
+four turned red (2026-10-18), but spawn-actions only where the skipped close
+left a hole in the child's table, which posix_spawn refuses with EINVAL. Where
+the table stayed dense (dup-then-close, high-dup-then-close) the child kept the
+descriptor and both cases passed. The child now checks that each slot it was
+told to close answers EBADF.
 
 The round-1 close (2026-10-15): `pipe2`'s failure unwind closes with the raw
 `__syscall(SYS_close)`, as `popen` does, never the cancellable

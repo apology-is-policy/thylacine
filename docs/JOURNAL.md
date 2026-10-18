@@ -22,6 +22,24 @@ needed the operator.
 
 
 ---
+## 2026-10-18 (main, Opus 5.5, effort max) -- two votes; B-3b's last red control finds a third blind witness
+
+**The operator came back and settled both forks (19:24Z, by AskUserQuestion).**
+- **Who owns a user's create on the shared pool:** fail closed now. The three 1777 stamps in `tools/build.sh` go, and per-user attach (Plan 9's newns) is recorded as the long-term shape.
+- **The rule itself.** Researching the change, I found that login attaches each user's home as system (`usr/login/src/main.rs:929`), while the home's server, the per-user proxy, runs as the user (`:868-874`). The rule I had put to the operator, "the creator must be the attacher", would therefore have refused every create in every home. I asked again (19:35Z), and the operator chose this rule: a create through a 9P session is admitted only to a principal at one of the session's two ends.
+- **The Pouch heap's VMA ceiling:** the kernel merges adjacent anonymous mappings. My recommendation had been a heap arena inside Pouch; the operator chose the kernel merge.
+
+**C2 ran: the CI red control the disk stopped on 10-15** (thylacine-b3e at `778de0c74`; one Mac lease, 19:24-19:44Z; logs `build/b3b-ci-C2-{bake,lsd}.log`, 19:32Z and 19:33Z). C2 is C1, where FLAGS_GET hides close-on-exec from uid 1000, plus S1, where posix_spawn's addclose does nothing for uid 1000. All four witnesses turned red:
+- **descriptor-ops** exited 1. Its failing check is not in the transcript tail the gate kept, and the clean run that followed removed that attempt's own log. Under C1 alone it failed at set-readback.
+- **dup2-self** failed at live-native-preserves-flags; set-cloexec passed, as predicted, since FLAGS_SET is untouched.
+- **handle-query** failed at query-without-io-rights.
+- **spawn-actions** failed 4 of its 16 cases, all with rc=22: the three predicted (close-open-dup-close, chain-survives-original-close, close-dup-reestablishes) and one I had not predicted, child-open-establishes-same-number.
+
+The clean image that followed passed all four (ls-descriptors PASS in 68s; 19:40Z bake, 19:42Z gate; descriptor-ops 34 checks, spawn-actions 16 with 0 failures).
+
+**The unpredicted red was the finding.** All four spawn failures were EINVAL from posix_spawn itself. Each skipped close left a hole in the child's descriptor table, and posix_spawn refuses a table with a hole. The witness's child never reported what it held, so a skipped close that left the table dense went unseen. dup-then-close (slot 3 of 0-3) and high-dup-then-close (slot 64, above 3-63 held open) both passed under S1 with the child holding the descriptor it had been told to close. The witness tested addclose only through posix_spawn's own consistency check. My prediction missed child-open-establishes-same-number because I had not traced where its temporary lands: slot 4, with the lowest free slot 3 (the run's `TEMPORARY-SLOT 4 lowest-slot 3`), so its skipped close leaves a hole at 3. This is the third of Astra's four witnesses found reading only one side, after handle-query and dup2-self on 10-15.
+
+---
 ## 2026-10-15 (main, Opus 5.5, effort max) -- B-3b pulled forward: Astra's descriptor calls on b3; the new-directory finding is an ownership fork
 
 **The probe answered the B-3e question.** One boot of the CI image of d82cb6b61 (05:34-05:36Z, `tools/interactive/probe-mkdir.exp`, untracked, in the B-3e worktree; log `build/ls-ci-probe-mkdir.log` there). As michael in `/var/lib_tests/libxml2/build` (mode 1777), `echo hi > topfile` succeeds and `ls -l` shows `-rw-r--r-- system 3 ... topfile`: **the file is owned by system, not by its creator.** `mkdir p1` works; `mkdir p1/p2` and `echo hi > p1/f` are refused, since p1 is system's 0755. The same nesting under `/tmp` works. The hypothesis written at 05:12Z ("owned by the session's attach identity") is now an observation.
