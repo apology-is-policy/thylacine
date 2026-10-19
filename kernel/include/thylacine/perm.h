@@ -59,4 +59,12 @@ rights_t rights_for_omode(u32 omode);
 //   GID  -> (owner AND member of new_gid) OR CAP_HOSTOWNER
 int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid);
 
+// perm_create_mode — the rwx bits a create sends (IDENTITY-DESIGN 9.7 M8).
+// `mode` is the asked mode, `umask` the creator's mask, `dir` the parent's stat,
+// or NULL where the Dev does not enforce rwx. First the umask; then Plan 9
+// open(5)'s bound: a file's rw bits are ANDed with the directory's and its
+// execute bits pass, a directory's rwx are ANDed with the directory's. Only the
+// low nine bits of each input count, and only they are returned.
+u32 perm_create_mode(u32 mode, bool is_dir, u32 umask, const struct t_stat *dir);
+
 #endif // THYLACINE_PERM_H

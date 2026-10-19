@@ -2498,4 +2498,16 @@ static inline long t_getppid(void) {
     return x0;
 }
 
+// t_umask -- set the caller's creation mask and return the previous one
+// (SYS_UMASK, IDENTITY-DESIGN 9.7 M8). A mask with a bit outside 0777 is
+// -T_E_INVAL and changes nothing.
+#define T_SYS_UMASK 133
+__attribute__((always_inline))
+static inline long t_umask(unsigned long mask) {
+    register long x0 __asm__("x0") = (long)mask;
+    register long x8 __asm__("x8") = T_SYS_UMASK;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
+    return x0;
+}
+
 #endif // THYLA_SYSCALL_H

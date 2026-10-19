@@ -2536,6 +2536,15 @@ enum {
     // may exit and the Proc be reparented the moment after.
     SYS_GETPPID = 132,
 
+    // The calling Proc's creation mask (IDENTITY-DESIGN 9.7 M8; operator vote
+    // 2026-10-19): set it to x0 and return the previous one. Every create
+    // drops these rwx bits before the parent directory's bound applies. A mask
+    // with a bit outside 0777 is -EINVAL and changes nothing, as SYS_WSTAT
+    // refuses stray mode bits; the POSIX front ends pass mask & 0777, so their
+    // umask cannot fail. No memory, no capability; the Proc's threads share it
+    // and a spawned child inherits it.
+    SYS_UMASK = 133,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.

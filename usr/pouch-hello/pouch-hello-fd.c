@@ -63,6 +63,11 @@
 //                   the stream).
 //   fdopendir     : fdopendir over an open directory reads its entries (its
 //                   O_PATH test is F_GETFL, which used to answer -1).
+//   umask         : umask answers the mask it replaces, 022 from boot (patch
+//                   0058; it answered -1), and the kernel applies it: a create
+//                   asking 0666 is the mode less the mask, bounded by the
+//                   directory's (M8), each derived from the pool root's mode.
+//                   A bit above 0777 is cut, never refused.
 //
 // Every leg runs, and each opens the probe file itself, so a red run names
 // each failing leg and only those; the census line prints only when all pass.
@@ -466,6 +471,42 @@ static int leg_cloexec(void) {
     return 0;
 }
 
+// The expected modes come from the pool root's own mode, and a root whose
+// mode could not tell the mask or the bound from their absence fails the leg.
+static mode_t umask_create_probe(int *rc) {
+    unlink(PROBE_NEW);
+    int fd = open(PROBE_NEW, O_RDWR | O_CREAT | O_EXCL, 0666);
+    struct stat st;
+    *rc = fd >= 0 ? fstat(fd, &st) : -1;
+    if (fd >= 0) close(fd);
+    unlink(PROBE_NEW);
+    return *rc == 0 ? (st.st_mode & 0777) : 0;
+}
+
+static int leg_umask(void) {
+    struct stat root;
+    if (stat("/", &root) != 0) return fail("umask stat /");
+    mode_t bound = ~(mode_t)0666 | (root.st_mode & 0666);
+    mode_t want_masked = 0666 & ~(mode_t)027 & bound;
+    mode_t want_bound = 0666 & bound;
+    if (want_masked == want_bound || want_bound == 0666)
+        return fail("umask: the pool root's mode cannot show the mask and the bound");
+    int rc1 = -1, rc2 = -1;
+    mode_t was = umask(027);
+    mode_t masked = umask_create_probe(&rc1);
+    mode_t back = umask(0);
+    mode_t bounded = umask_create_probe(&rc2);
+    mode_t cut = umask(01022);         // 01000 is above 0777
+    mode_t now = umask(was);
+    if (was != 022) return fail("umask did not answer the boot mask 022");
+    if (rc1 != 0 || rc2 != 0) return fail("umask create or fstat");
+    if (masked != want_masked) return fail("umask: the mask did not apply");
+    if (bounded != want_bound) return fail("umask: the directory's bound did not apply");
+    if (back != 027 || cut != 0) return fail("umask did not answer the mask it replaced");
+    if (now != 022) return fail("umask(01022) was not cut to 022");
+    return 0;
+}
+
 static int leg_fdopendir(void) {
     int fd = open("/", O_RDONLY | O_DIRECTORY);
     if (fd < 0) return fail("fdopendir open");
@@ -489,6 +530,7 @@ int main(void) {
         { "dup", leg_dup },               { "dupfd", leg_dupfd },
         { "getfl", leg_getfl },           { "setfl", leg_setfl },
         { "cloexec", leg_cloexec },       { "fdopendir", leg_fdopendir },
+        { "umask", leg_umask },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

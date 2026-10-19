@@ -184,3 +184,5 @@
 0056-pouch-dup-fcntl-status.patch
 # 0057 (B-3b, vote 6): kill(pid, 0) over the SYS_POSTNOTE empty-name probe; getppid over native SYS_GETPPID 132.
 0057-pouch-kill-probe-getppid.patch
+# 0058 (M8, operator vote 2026-10-19): umask over native SYS_UMASK 133, mask & 0777 so it never fails.
+0058-pouch-umask.patch

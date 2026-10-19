@@ -451,6 +451,8 @@ void test_proc_identity_spawn_set_accepted_with_cap(void);
 void test_proc_identity_set_rejects_reserved(void);
 void test_proc_identity_set_rejects_system_supp_gid(void);
 void test_proc_identity_peer_snapshot_by_stripes(void);
+void test_proc_identity_umask_default_and_inherit(void);
+void test_proc_identity_umask_syscall(void);
 void test_proc_identity_peer_snapshot_console_owner(void);
 void test_proc_wait_pid_for_no_match(void);
 void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
@@ -1377,6 +1379,7 @@ void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
 void test_perm_in_group(void);
 void test_perm_want_for_omode(void);
+void test_perm_create_mode(void);
 void test_perm_rights_for_omode(void);
 void test_perm_oexec_no_read_leak(void);
 void test_perm_wstat_policy(void);
@@ -1959,6 +1962,7 @@ void test_dev9p_create_refuses_invalid_principal(void);
 void test_dev9p_create_refusal_keeps_eexist(void);
 void test_dev9p_create_refusal_without_rwx_enforcement(void);
 void test_dev9p_open_create_refuses_non_end(void);
+void test_dev9p_create_mode_on_the_wire(void);
 void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
@@ -2599,6 +2603,11 @@ struct test_case g_tests[] = {
                                        false, NULL },
     { "proc_identity.peer_snapshot_by_stripes",
                                        test_proc_identity_peer_snapshot_by_stripes,
+                                       false, NULL },
+    { "proc_identity.umask_default_and_inherit",
+                                       test_proc_identity_umask_default_and_inherit,
+                                       false, NULL },
+    { "proc_identity.umask_syscall",   test_proc_identity_umask_syscall,
                                        false, NULL },
     { "proc_identity.peer_snapshot_console_owner",
                                        test_proc_identity_peer_snapshot_console_owner,
@@ -4403,6 +4412,7 @@ struct test_case g_tests[] = {
     { "dev9p.create_refusal_keeps_eexist", test_dev9p_create_refusal_keeps_eexist, false, NULL },
     { "dev9p.create_refusal_without_rwx", test_dev9p_create_refusal_without_rwx_enforcement, false, NULL },
     { "dev9p.open_create_refuses_non_end", test_dev9p_open_create_refuses_non_end, false, NULL },
+    { "dev9p.create_mode_on_the_wire", test_dev9p_create_mode_on_the_wire, false, NULL },
     { "dev9p.client_init_clears_ends", test_dev9p_client_init_clears_ends, false, NULL },
     { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },
@@ -4843,6 +4853,7 @@ struct test_case g_tests[] = {
     { "perm.check_hostowner_override", test_perm_check_hostowner_override, false, NULL },
     { "perm.in_group",                 test_perm_in_group,                 false, NULL },
     { "perm.want_for_omode",           test_perm_want_for_omode,           false, NULL },
+    { "perm.create_mode",              test_perm_create_mode,              false, NULL },
     { "perm.rights_for_omode",         test_perm_rights_for_omode,         false, NULL },
     { "perm.oexec_no_read_leak",       test_perm_oexec_no_read_leak,       false, NULL },
     { "perm.wstat_policy",             test_perm_wstat_policy,             false, NULL },

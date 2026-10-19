@@ -217,6 +217,12 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SIGALTSTACK, args, &out),
                    (int)VIV_ENOSYS,
                    "sigaltstack stays ENOSYS -- load-bearing for the 6.23 escape detector");
+    // rt_sigsuspend (133) shares its number with the native SYS_UMASK (M8); its
+    // ENOSYS row is what keeps a Linux Proc's call from reaching the mask
+    // (vivarium.c's per-number pin names this test).
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
+                   (int)VIV_ENOSYS,
+                   "rt_sigsuspend stays ENOSYS -- consumed before native 133, SYS_UMASK");
 
     // VIVARIUM 6.29: the sleep rows. Until them both FORWARDed to ENOSYS, and
     // musl's sleep() and usleep() returned at once.
@@ -3420,6 +3426,9 @@ void test_vivarium_startup_batch_rows(void) {
 
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETPPID, args, &out),
                    (int)VIV_TIER2, "getppid is T2 -- there is no native twin");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UMASK, args, &out),
+                   (int)VIV_TIER2,
+                   "umask is T2 -- it keeps mask & 0777, which the native call would refuse");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UNAME, args, &out),
                    (int)VIV_TIER2, "uname is T2 (a fabrication, not a translation)");
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SET_TID_ADDRESS, args, &out),

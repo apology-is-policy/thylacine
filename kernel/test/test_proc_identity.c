@@ -14,6 +14,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/errno.h>
 
 // Defined in kernel/syscall.c; identity passed as scalars so this test needs
 // no kernel-internal struct spawn_identity. The trailing want_allowance
@@ -38,6 +39,12 @@ void test_proc_identity_spawn_set_accepted_with_cap(void);
 void test_proc_identity_set_rejects_reserved(void);
 void test_proc_identity_set_rejects_system_supp_gid(void);
 void test_proc_identity_peer_snapshot_by_stripes(void);
+void test_proc_identity_umask_default_and_inherit(void);
+void test_proc_identity_umask_syscall(void);
+
+extern s64 sys_umask_handler(u64, u64, u64, u64);
+extern s64 sys_umask_for_test(struct Proc *p, u64 mask);
+extern s64 viv_umask_for_test(struct Proc *p, u64 mask);
 
 static void drain_zombies(void) {
     int status = 0;
@@ -324,3 +331,82 @@ void test_proc_identity_peer_snapshot_console_owner(void) {
     TEST_ASSERT(found_none, "peer snapshot still found the proc with no owner");
     TEST_ASSERT(!co_none, "B: no owner (sid held constant) -> CLEAR (owner-global dependence)");
 }
+
+// M8 (IDENTITY-DESIGN 9.7): kproc and a fresh Proc start at PROC_UMASK_DEFAULT,
+// and rfork copies the PARENT's mask. The child is made under a non-default
+// parent mask, so a child given the default instead reads 0022, not 0077.
+static u32 inh_umask;
+static void umask_child_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) extinction("umask_child: no proc");
+    inh_umask = proc_umask(t->proc);
+    exits("ok");
+}
+void test_proc_identity_umask_default_and_inherit(void) {
+    struct Proc *kp = kproc();
+    u32 kp_mask = proc_umask(kp);
+    struct Proc *fresh = proc_alloc();
+    TEST_ASSERT(fresh != NULL, "proc_alloc");
+    u32 fresh_mask = proc_umask(fresh);
+    fresh->state = PROC_STATE_ZOMBIE;
+    proc_free(fresh);
+
+    drain_zombies();
+    inh_umask = 0xDEADu;
+    u32 was = proc_umask_exchange(kp, 0077u);
+    int pid = rfork(RFPROC, umask_child_thunk, NULL);
+    int status = -42;
+    int reaped = pid > 0 ? wait_pid(&status) : -1;
+    (void)proc_umask_exchange(kp, was);
+
+    TEST_EXPECT_EQ(kp_mask, PROC_UMASK_DEFAULT, "kproc starts at the default mask");
+    TEST_EXPECT_EQ(fresh_mask, PROC_UMASK_DEFAULT,
+                   "proc_alloc starts at the default mask, not KP_ZERO's 0");
+    TEST_ASSERT(pid > 0, "rfork failed");
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid pid");
+    TEST_EXPECT_EQ(status, 0, "child exit status");
+    TEST_EXPECT_EQ(inh_umask, 0077u, "the child inherits its parent's mask");
+}
+
+// M8: SYS_UMASK exchanges and returns the previous mask, and refuses a bit
+// outside 0777 anywhere in the register without changing the mask. The
+// phenotype's umask masks instead of refusing, through the same accessor.
+void test_proc_identity_umask_syscall(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    s64 r1 = sys_umask_for_test(p, 0077u);
+    s64 r2 = sys_umask_for_test(p, 0u);
+    s64 r3 = sys_umask_for_test(p, 0777u);
+    s64 bad_bit  = sys_umask_for_test(p, 01000u);
+    s64 bad_high = sys_umask_for_test(p, 1ull << 32);
+    u32 after_bad = proc_umask(p);
+    s64 v1 = viv_umask_for_test(p, 01027u);
+    u32 after_v1 = proc_umask(p);
+    s64 v2 = viv_umask_for_test(p, (1ull << 32) | 0022u);
+    u32 after_v2 = proc_umask(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    // The handler's own register, on the test thread's Proc (kproc), with junk
+    // in x1-x3; the mask is put back whatever the handler answered.
+    struct Proc *kp = kproc();
+    u32 kp_was = proc_umask(kp);
+    s64 h1 = sys_umask_handler(0077u, 0777u, 0777u, 0777u);
+    s64 h2 = sys_umask_handler((u64)kp_was, 0, 0, 0);
+    (void)proc_umask_exchange(kp, kp_was);
+
+    TEST_EXPECT_EQ(r1, (s64)PROC_UMASK_DEFAULT, "the first exchange returns the default");
+    TEST_EXPECT_EQ(r2, (s64)0077, "the next returns the mask the first set");
+    TEST_EXPECT_EQ(r3, (s64)0, "a zero mask is a mask");
+    TEST_EXPECT_EQ(bad_bit, (s64)-T_E_INVAL, "a bit above 0777 is EINVAL");
+    TEST_EXPECT_EQ(bad_high, (s64)-T_E_INVAL, "a bit above 32 is EINVAL: the full register");
+    TEST_EXPECT_EQ(after_bad, 0777u, "a refused mask changes nothing");
+    TEST_EXPECT_EQ(v1, (s64)0777, "the phenotype's umask returns the shared mask");
+    TEST_EXPECT_EQ(after_v1, 0027u, "the phenotype keeps mask & 0777");
+    TEST_EXPECT_EQ(v2, (s64)0027, "the phenotype returns what it kept");
+    TEST_EXPECT_EQ(after_v2, 0022u, "the phenotype drops bits above 32 as well");
+    TEST_EXPECT_EQ(h1, (s64)kp_was, "the handler answers kproc's mask, reading x0");
+    TEST_EXPECT_EQ(h2, (s64)0077, "the handler set the mask it was given");
+}
+

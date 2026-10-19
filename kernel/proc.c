@@ -221,6 +221,9 @@ static void proc_init_fields(struct Proc *p, int pid) {
     // fault in a single anon page. rfork_internal overwrites it with the
     // parent's.
     p->page_budget = proc_default_page_budget();
+    // M8: the same chokepoint, for the same reason -- KP_ZERO's 0 is the widest
+    // creation mask. rfork_internal overwrites it with the parent's.
+    p->umask = PROC_UMASK_DEFAULT;
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
     // (post-phys_init) installs a real pgtable_root and leaves context_id 0
@@ -1634,6 +1637,9 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     child->page_budget    = parent->page_budget;
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
+    // M8: POSIX fork semantics. Another thread of the parent may be exchanging
+    // the mask; the child gets one value the parent held.
+    child->umask          = proc_umask(parent);
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
     // below. The loop is already bounded by PROC_SUPP_GIDS_MAX; clamping the
     // stored count too means a (corruption-induced) parent count > 15 can

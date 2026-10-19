@@ -99,6 +99,10 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // membership and a consumer resolves beyond the cache by principal_id.
 #define PROC_SUPP_GIDS_MAX 15
 
+// The creation mask a Proc starts with (IDENTITY-DESIGN 9.7 M8): POSIX's
+// conventional 022. kproc carries it and every child inherits its parent's.
+#define PROC_UMASK_DEFAULT 0022u
+
 // #65 (invariant I-32): the per-Proc resource floor. Fixed maxima that bound a
 // non-TCB Proc's resource use so a fork/thread/memory bomb is bounded, not
 // box-extincting. Tunable; generous for any v1.0 user workload (shell +
@@ -977,6 +981,14 @@ struct Proc {
     // park reads it lock-free. KP_ZERO-fresh NONE; never rfork-inherited. Fills
     // the deliberate u32 tail pad, so sizeof is unchanged.
     u32                debug_birth_hold;
+
+    // M8 (IDENTITY-DESIGN 9.7): the creation mask, the rwx bits every create
+    // drops before the parent directory's bound applies. Identity-adjacent in
+    // meaning, appended here so no offset moves. proc_init_fields sets
+    // PROC_UMASK_DEFAULT (KP_ZERO's 0 would be the widest mask), rfork_internal
+    // copies the parent's, SYS_UMASK exchanges it. Atomic (proc_umask /
+    // proc_umask_exchange): any thread may exchange it while another creates.
+    u32                umask;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -995,6 +1007,15 @@ struct Proc {
 // resolving Territory declares Linux (territory_root_pheno); else native -- the
 // section-12.1 rule-3 fail-safe. A phenotype is the ABI of the LOADED IMAGE:
 // decided at every image load, preserved by rfork (no new image).
+// M8: the mask is the whole payload, so relaxed ordering suffices.
+static inline u32 proc_umask(struct Proc *p) {
+    return __atomic_load_n(&p->umask, __ATOMIC_RELAXED);
+}
+
+static inline u32 proc_umask_exchange(struct Proc *p, u32 mask) {
+    return __atomic_exchange_n(&p->umask, mask, __ATOMIC_RELAXED);
+}
+
 static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
     return (crossed_pheno || territory_linux) ? PHENO_LINUX : PHENO_NATIVE;
 }
@@ -1294,8 +1315,10 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 408,
- "struct Proc size: IM-2 appended the propagating-legate pair (legate_caps "
+_Static_assert(sizeof(struct Proc) == 416,
+ "struct Proc size: M8 appended the creation mask (umask u32, tail-padded to "
+ "the 8-byte struct alignment): 408 -> 416. Before that: "
+ "IM-2 appended the propagating-legate pair (legate_caps "
  "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
  "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
@@ -1428,6 +1451,9 @@ _Static_assert(__builtin_offsetof(struct Proc, debug_birth_hold) == 404,
  "the birth hold (DEBUG-FS-DESIGN 5f) is that next u32: it fills the tail "
  "pad after legate_flags, so sizeof stays 408 -- the sizeof assert above is "
  "the control.");
+_Static_assert(__builtin_offsetof(struct Proc, umask) == 408,
+ "M8's creation mask appends after debug_birth_hold, which filled the last "
+ "tail pad; the struct grows to 416 with a new 4-byte tail pad after it.");
 // CL-5 page_budget, placed by the aux-2 merge. On main it sat at 392 in a
 // 400-byte Proc; aux's L-1 had moved the whole address-space block OUT of Proc
 // (pgtable_root, vma_lock, vma_count, page_count, shared_map_pages,

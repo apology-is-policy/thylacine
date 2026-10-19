@@ -25,6 +25,7 @@ void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
 void test_perm_in_group(void);
 void test_perm_want_for_omode(void);
+void test_perm_create_mode(void);
 void test_perm_rights_for_omode(void);
 void test_perm_oexec_no_read_leak(void);
 void test_perm_wstat_policy(void);
@@ -401,3 +402,46 @@ void test_perm_wstat_rejects_unknown_valid_bit(void) {
     TEST_EXPECT_EQ(perm_wstat_check(&q, 100u, T_WSTAT_SIZE | T_WSTAT_MODE, 0u), -1,
                    "non-owner SIZE|MODE still denied by the mode policy");
 }
+
+// M8 (IDENTITY-DESIGN 9.7): the umask, then Plan 9 open(5)'s bound. Each row
+// differs from a neighbour in one input, so a dropped umask, a bound applied to
+// the wrong bits, or a missing file/directory split each fails a row.
+void test_perm_create_mode(void) {
+    struct t_stat d755 = { .mode = 040755u }, d700 = { .mode = 040700u },
+                  d777 = { .mode = 040777u }, d750 = { .mode = 040750u };
+    // Without a parent stat (a Dev that does not enforce rwx) only the umask.
+    TEST_EXPECT_EQ(perm_create_mode(0666u, false, 0022u, NULL), 0644u,
+                   "file 0666, umask 022, unbounded -> 0644");
+    TEST_EXPECT_EQ(perm_create_mode(0777u, true, 0077u, NULL), 0700u,
+                   "dir 0777, umask 077, unbounded -> 0700");
+    // The bound alone (umask 0): a daemon that clears its mask.
+    TEST_EXPECT_EQ(perm_create_mode(0666u, false, 0u, &d755), 0644u,
+                   "file 0666, umask 0, in 0755 -> 0644 (the bound alone)");
+    TEST_EXPECT_EQ(perm_create_mode(0777u, true, 0u, &d755), 0755u,
+                   "dir 0777, umask 0, in 0755 -> 0755");
+    TEST_EXPECT_EQ(perm_create_mode(0666u, false, 0u, &d777), 0666u,
+                   "file 0666, umask 0, in 0777 -> 0666 (a world-writable dir allows it)");
+    // A file's execute bits pass the bound; a directory's do not.
+    TEST_EXPECT_EQ(perm_create_mode(0777u, false, 0u, &d700), 0711u,
+                   "file 0777 in 0700 -> 0711 (rw bounded, x passes)");
+    TEST_EXPECT_EQ(perm_create_mode(0777u, true, 0u, &d700), 0700u,
+                   "dir 0777 in 0700 -> 0700 (rwx bounded)");
+    TEST_EXPECT_EQ(perm_create_mode(0777u, true, 0u, &d750), 0750u,
+                   "dir 0777 in 0750 -> 0750");
+    // The umask narrows below the bound.
+    TEST_EXPECT_EQ(perm_create_mode(0666u, false, 0077u, &d777), 0600u,
+                   "file 0666, umask 077, in 0777 -> 0600 (the umask alone narrows)");
+    TEST_EXPECT_EQ(perm_create_mode(0777u, false, 0022u, &d700), 0711u,
+                   "file 0777, umask 022, in 0700 -> 0711");
+    // Native code's own modes pass unchanged under the defaults.
+    TEST_EXPECT_EQ(perm_create_mode(0644u, false, 0022u, &d755), 0644u,
+                   "file 0644, umask 022, in 0755 -> 0644 (native unchanged)");
+    TEST_EXPECT_EQ(perm_create_mode(0755u, true, 0022u, &d755), 0755u,
+                   "dir 0755, umask 022, in 0755 -> 0755 (native unchanged)");
+    // Only the low nine bits of each input count, and only they come back.
+    TEST_EXPECT_EQ(perm_create_mode(SYS_WALK_CREATE_DMDIR | 0777u, true, 0u, &d755), 0755u,
+                   "DMDIR is not returned");
+    TEST_EXPECT_EQ(perm_create_mode(0644u, false, 0xFFFFF000u, &d755), 0644u,
+                   "umask bits above the nine are ignored");
+}
+

@@ -21,26 +21,34 @@ checks = {
     'kernel/include/thylacine/syscall.h': [
         r'\bSYS_HANDLE_FLAGS_GET\s*=\s*129\b',
         r'#define SYS_HANDLE_CLOSE_ON_EXEC 1u\b',
-        r'\bSYS_GETPPID\s*=\s*132\b'],
+        r'\bSYS_GETPPID\s*=\s*132\b',
+        r'\bSYS_UMASK\s*=\s*133\b'],
     'usr/lib/libt/include/thyla/syscall.h': [
         r'#define T_SYS_HANDLE_FLAGS_GET 129\b',
         r'#define T_HANDLE_CLOSE_ON_EXEC 1u\b',
-        r'#define T_SYS_GETPPID 132\b'],
+        r'#define T_SYS_GETPPID 132\b',
+        r'#define T_SYS_UMASK 133\b'],
     'usr/lib/libthyla-rs/src/lib.rs': [
         r'pub const T_SYS_HANDLE_FLAGS_GET: u64 = 129;',
         r'pub const T_HANDLE_CLOSE_ON_EXEC: u64 = 1;',
-        r'pub const T_SYS_GETPPID: u64 = 132;'],
+        r'pub const T_SYS_GETPPID: u64 = 132;',
+        r'pub const T_SYS_UMASK: u64 = 133;'],
     'usr/lib/pouch/patches/0053-pouch-spawn-source-query.patch': [
         r'\+#define __NR_thyla_handle_flags_get 129\b',
         r'\+#define SYS_thyla_handle_flags_get 129\b'],
     'usr/lib/pouch/patches/0057-pouch-kill-probe-getppid.patch': [
         r'\+#define SYS_thyla_getppid\s+132\b'],
-    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+132\b'],
+    'usr/lib/pouch/patches/0058-pouch-umask.patch': [
+        r'\+#define SYS_thyla_umask\s+133\b',
+        r'\+\treturn __syscall\(SYS_thyla_umask, mode & 0777\);'],
+    'kernel/include/thylacine/vivarium.h': [r'#define VIV_NATIVE_CEILING\s+133\b'],
     'kernel/vivarium.c': [
         r'VIV_LINUX_KILL == SYS_HANDLE_FLAGS_GET',
         r'\{ VIV_LINUX_KILL,\s+VIV_TIER2 \}',
         r'VIV_LINUX_SIGALTSTACK == SYS_GETPPID',
-        r'VIV_LINUX_RT_SIGSUSPEND > VIV_NATIVE_CEILING'],
+        r'VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK',
+        r'\{ VIV_LINUX_UMASK,\s+VIV_TIER2 \}',
+        r'VIV_LINUX_RT_SIGACTION > VIV_NATIVE_CEILING'],
 }
 for name, patterns in checks.items():
     source = (r / name).read_text()

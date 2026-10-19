@@ -166,6 +166,8 @@ static u32  g_tlopen_fail_ecode; // one-shot Tlopen errno control
 static u32  g_tlcreate_fail_ecode;   // #99: != 0: the NEXT Tlcreate answers Rlerror(ecode), then clears
 static u64  g_ga_valid = 0x7ffu;     // the Rgetattr valid mask (default BASIC)
 static u32  g_create_gid;            // the gid the last Tlcreate / Tmkdir carried
+static u32  g_create_mode;           // M8: the mode the last Tlcreate / Tmkdir carried
+static u32  g_ga_mode = 0100644u;    // M8: the mode every attribute reply reports
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
 static u32  g_twrite_cap_len;
@@ -415,6 +417,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         if (req_len >= (size_t)P9_HDR_LEN + 6) {
             size_t go = (size_t)P9_HDR_LEN + 6 + ((u32)req[11] | ((u32)req[12] << 8)) + 8;
             if (req_len >= go + 4) g_create_gid = le32_at(req + go);
+            if (req_len >= go)     g_create_mode = le32_at(req + go - 4);
         }
         if (g_tlcreate_fail_ecode) {              // #99: inject an Rlerror (e.g. EEXIST)
             u32 ec = g_tlcreate_fail_ecode;
@@ -446,6 +449,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         if (req_len >= (size_t)P9_HDR_LEN + 6) {
             size_t go = (size_t)P9_HDR_LEN + 6 + ((u32)req[11] | ((u32)req[12] << 8)) + 4;
             if (req_len >= go + 4) g_create_gid = le32_at(req + go);
+            if (req_len >= go)     g_create_mode = le32_at(req + go - 4);
         }
         // Rmkdir = qid(13). path 0x55 distinguishes a mkdir'd dir.
         size_t total = P9_HDR_LEN + P9_QID_LEN;
@@ -552,7 +556,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         for (int b = 0; b < 8; b++) resp[o + b] = (u8)(g_ga_valid >> (8 * b));
         o += 8;                                              // valid (BASIC unless a test narrows it)
         resp[o] = P9_QTFILE; o += 1 + 4; resp[o] = 0x33; o += 8;   // qid (path 0x33)
-        { u32 m = 0100644u;                                  // mode S_IFREG|0644
+        { u32 m = g_ga_mode;                                 // mode (S_IFREG|0644 unless a test sets it)
           resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
           resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
         resp[o] = 0x34; resp[o + 1] = 0x12; o += 4;          // uid = 0x1234
@@ -613,7 +617,7 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
               resp[o + 3] = (u8)(v >> 16); resp[o + 4] = (u8)(v >> 24); }
             o += 1 + 4;
             resp[o] = (u8)(g_wga_path_base + e); o += 8;    // qid.path
-            { u32 m = 0100644u;                              // mode
+            { u32 m = g_ga_mode;                             // mode
               resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
               resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
             resp[o] = 0x11; resp[o + 1] = 0x11; o += 4;      // uid = 0x1111
@@ -4565,6 +4569,58 @@ void test_dev9p_open_create_refuses_non_end(void) {
     teardown(root);
     TEST_EXPECT_EQ((u64)rc, (u64)(s64)-T_E_ACCES, "open-or-create by a non-end: EACCES");
     TEST_EXPECT_EQ((u64)seen, 0ull, "no Tlcreate");
+}
+
+// M8 (IDENTITY-DESIGN 9.7): the mode that reaches the wire is the asked mode
+// less the creator's umask, bounded by the parent's mode, through both create
+// doors. The parent's mode is the fake's g_ga_mode. Returns the wire mode.
+static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open, s64 *rc) {
+    *rc = 0x7BAD;
+    struct Spoor *root = make_open_client_and_root();
+    if (!root) return 0xBAD0u;
+    hidx_t base = -1;
+    struct Proc *p = oc9_proc(root, &base);
+    if (!p) { teardown(root); return 0xBAD1u; }
+    (void)proc_umask_exchange(p, umask);
+    p9_client_set_ends(&g_client, M7_CREATOR, PRINCIPAL_INVALID);
+    g_ga_mode     = parent_mode;
+    g_create_mode = 0xDEADBEEFu;
+    if (via_open) {
+        g_dev9p_wga_partial_n = 1;   // the open leg misses
+        *rc = sys_open_create_kpath_for_proc(p, (u64)base, "m8file", 6, 1 /*OWRITE*/, perm);
+        g_dev9p_wga_partial_n = 0;
+    } else {
+        bool dir = (perm & SYS_WALK_CREATE_DMDIR) != 0;
+        *rc = sys_walk_create_kname_for_proc(p, (u64)base, "m8file", 6,
+                                             dir ? 0 /*OREAD*/ : 1 /*OWRITE*/, perm);
+    }
+    g_ga_mode = 0100644u;            // fixture hygiene, before any assert
+    u32 wire = g_create_mode;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    teardown(root);
+    return wire;
+}
+
+// Each leg differs from a neighbour in one input. The first is the positive
+// control: native code's own 0644 passes unchanged, M8 or not.
+void test_dev9p_create_mode_on_the_wire(void) {
+    s64 rc[7];
+    u32 w0 = m8_wire_mode(040755u, 0022u, 0644u, false, &rc[0]);
+    u32 w1 = m8_wire_mode(040755u, 0022u, 0666u, false, &rc[1]);
+    u32 w2 = m8_wire_mode(040755u, 0u,    0666u, false, &rc[2]);
+    u32 w3 = m8_wire_mode(040777u, 0077u, 0666u, false, &rc[3]);
+    u32 w4 = m8_wire_mode(040700u, 0u,    0777u, false, &rc[4]);
+    u32 w5 = m8_wire_mode(040750u, 0u,    SYS_WALK_CREATE_DMDIR | 0777u, false, &rc[5]);
+    u32 w6 = m8_wire_mode(040755u, 0u,    0666u, true,  &rc[6]);
+    for (int i = 0; i < 7; i++) TEST_ASSERT(rc[i] >= 0, "every create succeeded");
+    TEST_EXPECT_EQ(w0, 0644u, "0644 under 022 in 0755 -> 0644: native unchanged");
+    TEST_EXPECT_EQ(w1, 0644u, "0666 under 022 in 0755 -> 0644");
+    TEST_EXPECT_EQ(w2, 0644u, "0666 under 0 in 0755 -> 0644: the bound alone");
+    TEST_EXPECT_EQ(w3, 0600u, "0666 under 077 in 0777 -> 0600: the umask alone");
+    TEST_EXPECT_EQ(w4, 0711u, "0777 under 0 in 0700 -> 0711: a file's x passes");
+    TEST_EXPECT_EQ(w5, 0750u, "dir 0777 under 0 in 0750 -> 0750 on the Tmkdir");
+    TEST_EXPECT_EQ(w6, 0644u, "the open-create door bounds the same way");
 }
 
 // p9_client_init clears the ends, so a client re-initialized in place (this

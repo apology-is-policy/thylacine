@@ -121,3 +121,12 @@ int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) 
     // combined bits.
     return 0;
 }
+
+u32 perm_create_mode(u32 mode, bool is_dir, u32 umask, const struct t_stat *dir) {
+    mode &= 0777u & ~umask;
+    if (dir) {
+        u32 bounded = is_dir ? 0777u : 0666u;
+        mode &= ~bounded | (dir->mode & bounded);
+    }
+    return mode;
+}

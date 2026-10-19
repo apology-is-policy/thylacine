@@ -43,12 +43,19 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is rt_sigsuspend
-// (133); execve (221) is the newest. If the ceiling ever rises past one of
+// rather than by a per-number one. The lowest such number is rt_sigaction
+// (134); execve (221) is the newest. If the ceiling ever rises past one of
 // these, the build stops and the reader is forced back to the argument instead
 // of inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RT_SIGSUSPEND > VIV_NATIVE_CEILING,
-               "rt_sigsuspend's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_RT_SIGACTION > VIV_NATIVE_CEILING,
+               "rt_sigaction's collision argument is the ceiling one");
+// Linux rt_sigsuspend (133) collides with SYS_UMASK (M8). Its row is
+// VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
+// before the native switch, so a Linux Proc's rt_sigsuspend never sets its
+// creation mask; test_vivarium pins the ENOSYS verdict. Serving rt_sigsuspend
+// must re-argue this.
+_Static_assert(VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK,
+               "revisit rt_sigsuspend / UMASK collision on renumber");
 // Linux sigaltstack (132) collides with SYS_GETPPID (vote 6). Its row is
 // VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
 // before the native switch, so a Linux Proc's sigaltstack never reads its
@@ -524,6 +531,7 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_WRITEV,          VIV_TIER2 },  // the arity rule's sharpest case
     { VIV_LINUX_GETCWD,          VIV_TIER2 },  // +1 on the length, and ERANGE
     { VIV_LINUX_GETPPID,         VIV_TIER2 },  // reads SYS_GETPPID's accessor
+    { VIV_LINUX_UMASK,           VIV_TIER2 },  // SYS_UMASK's accessor, after & 0777
     { VIV_LINUX_GETUID,          VIV_TIER2 },  // the PRINCIPAL_SYSTEM mapping
     { VIV_LINUX_GETGID,          VIV_TIER2 },  // the GID_SYSTEM mapping
     { VIV_LINUX_UNAME,           VIV_TIER2 },  // a fabrication; see the header

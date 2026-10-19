@@ -330,6 +330,9 @@ enum {
     VIV_LINUX_SETGID          = 144,
     VIV_LINUX_SETUID          = 146,
     VIV_LINUX_UNAME           = 160,
+    // M8: a Tier-2 shell onto SYS_UMASK's accessor, masking to 0777 first
+    // (Linux never fails a umask; the native call refuses stray bits).
+    VIV_LINUX_UMASK           = 166,
     VIV_LINUX_GETPID          = 172,
     VIV_LINUX_GETPPID         = 173,
     VIV_LINUX_GETUID          = 174,
@@ -582,7 +585,13 @@ enum {
 // sigaltstack never reaches getppid; its argument is now per-number
 // (vivarium.c). The lowest row still argued by the ceiling is rt_sigsuspend
 // (133), also VIV_ENOSYS.
-#define VIV_NATIVE_CEILING 132
+//
+// M8 (operator vote 2026-10-19) appends SYS_UMASK at 133. Linux 133 is
+// rt_sigsuspend, a VIV_ENOSYS row consumed before the native switch, so a
+// Linux Proc's rt_sigsuspend never sets its mask; its argument is now
+// per-number (vivarium.c). The lowest row still argued by the ceiling is
+// rt_sigaction (134), a VIV_TIER2 row.
+#define VIV_NATIVE_CEILING 133
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

@@ -3560,6 +3560,26 @@ s64 sys_getppid_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
     return getppid_of(p);
 }
 
+// M8: the full register is checked, so a stray high bit is refused rather than
+// dropped, as sys_wstat refuses stray mode bits.
+static s64 umask_of(struct Proc *p, u64 mask) {
+    if (mask & ~(u64)0777u) return -T_E_INVAL;
+    return (s64)proc_umask_exchange(p, (u32)mask);
+}
+
+s64 sys_umask_handler(u64 a0, u64 a1, u64 a2, u64 a3);
+s64 sys_umask_handler(u64 a0, u64 a1, u64 a2, u64 a3) {
+    (void)a1; (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p) return -1;
+    return umask_of(p, a0);
+}
+
+s64 sys_umask_for_test(struct Proc *p, u64 mask);
+s64 sys_umask_for_test(struct Proc *p, u64 mask) {
+    return umask_of(p, mask);
+}
+
 // Test support, as sys_postnote_cross_for_test: the handler's own arm for a
 // Proc the test names. The test thread runs as kproc, whose pid and parent pid
 // are both 0, so only a named child can tell the parent from the Proc itself.
@@ -4197,9 +4217,13 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // the server will name as the creator.
     bool admitted = dev9p_create_admits(src, __atomic_load_n(&p->principal_id,
                                                              __ATOMIC_ACQUIRE));
+    // The parent's stat also bounds the new mode below (M8), wherever the Dev
+    // enforces rwx.
+    struct t_stat parent_st;
+    const struct t_stat *bound_by = NULL;
     if (src->dev->perm_enforced || !admitted) {
-        struct t_stat parent_st;
         if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -T_E_IO; }
+        if (src->dev->perm_enforced) bound_by = &parent_st;
         if (!admitted || perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
             s64 deny = -T_E_ACCES;
             if (perm_check(p, &parent_st, PERM_X) == 0 &&
@@ -4246,6 +4270,16 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // create perm (e.g. a dev9p Tlcreate), where the high bits would corrupt
     // the wire perm -- reject them.
     if (perm & SYS_WALK_CREATE_DMSRV_BITS)              { spoor_clunk(src); return -T_E_INVAL; }
+
+    // M8 (IDENTITY-DESIGN 9.7): the creator's umask, then the parent
+    // directory's bound (Plan 9 open(5)). The server applies neither --
+    // Stratum stamps mode & 07777, the 9P2000.L convention in which the client
+    // masks -- so this is the one place a mask can apply. Without bound_by
+    // (a Dev that does not enforce rwx, where a mode carries no authority)
+    // only the umask applies.
+    perm = (perm & ~0777u) |
+           perm_create_mode(perm, (perm & SYS_WALK_CREATE_DMDIR) != 0,
+                            proc_umask(p), bound_by);
 
     // Clone the parent, then CLONE-walk so nc carries its own fid at the
     // parent dir (a 0-component walk). create then mutates nc's fid into the
@@ -13979,6 +14013,18 @@ s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
     return viv_kill(NULL, caller, pid, tid, sig);
 }
 
+// umask(mask). Linux keeps mask & 0777 and never fails; the native SYS_UMASK
+// refuses stray bits, so the shell masks first. It exchanges through the native
+// handler's accessor, so the two share one mask.
+static s64 viv_umask(struct Proc *p, u64 mask) {
+    return (s64)proc_umask_exchange(p, (u32)mask & 0777u);
+}
+
+s64 viv_umask_for_test(struct Proc *p, u64 mask);
+s64 viv_umask_for_test(struct Proc *p, u64 mask) {
+    return viv_umask(p, mask);
+}
+
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
@@ -15007,6 +15053,9 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // which is why the accessor lives in proc.c beside the tree it walks.
         return (s64)proc_parent_pid(p);
     }
+
+    case VIV_LINUX_UMASK:
+        return viv_umask(p, args[0]);
 
     case VIV_LINUX_GETTID: {
         // gettid(void) -> the per-Thread tid. getpid stays per-Proc (Proc.pid,
@@ -16236,6 +16285,11 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_GETPPID:
         ctx->regs[0] = (u64)sys_getppid_handler(ctx->regs[0], ctx->regs[1],
                                                 ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_UMASK:
+        ctx->regs[0] = (u64)sys_umask_handler(ctx->regs[0], ctx->regs[1],
+                                              ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_GETUID:

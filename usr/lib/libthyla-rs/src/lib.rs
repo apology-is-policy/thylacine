@@ -3980,3 +3980,12 @@ pub unsafe fn t_getppid() -> i64 {
     asm!("svc #0", inlateout("x0") x0, in("x8") T_SYS_GETPPID, options(nostack));
     x0
 }
+pub const T_SYS_UMASK: u64 = 133;
+/// Set the caller's creation mask and return the previous one (IDENTITY-DESIGN
+/// 9.7 M8). A mask with a bit outside 0o777 is `-T_E_INVAL` and changes nothing.
+#[inline(always)]
+pub unsafe fn t_umask(mask: u64) -> i64 {
+    let mut x0 = mask;
+    asm!("svc #0", inout("x0") x0, in("x8") T_SYS_UMASK, options(nostack));
+    x0 as i64
+}
