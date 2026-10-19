@@ -249,10 +249,11 @@ struct Dev {
     //                    c is mutated to refer to the new opened object and
     //                    returned (Plan 9 create semantics; mirrors open's
     //                    return shape). `perm` low 9 bits = mode; the DMDIR
-    //                    bit selects a directory. `gid` is the creator's
-    //                    primary group, carried into the 9P gid field (the
-    //                    Dev treats it as an opaque number -- identity-
-    //                    agnostic). Returns NULL on failure (the caller
+    //                    bit selects a directory. `gid` is the new object's
+    //                    group -- the parent directory's (IDENTITY-DESIGN 3.5
+    //                    F-5) -- carried into the 9P gid field (the Dev treats
+    //                    it as an opaque number -- identity-agnostic).
+    //                    Returns NULL on failure (the caller
     //                    spoor_clunks c, which clunks the walked fid).
     //                    A read-only Dev returns NULL.
     //   close(c)       — release any per-Spoor resources held while open.

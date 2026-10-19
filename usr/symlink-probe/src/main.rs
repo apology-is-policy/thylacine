@@ -70,7 +70,6 @@ use alloc::vec::Vec;
 use libthyla_rs::err::{Error, Result};
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Read;
-use libthyla_rs::identity;
 use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe};
 use libthyla_rs::{t_chroot, t_exits, t_pivot_root, t_putstr};
 
@@ -251,7 +250,9 @@ fn append_leg(c: &mut Checker) {
 // control, one variable away -- must take one. Both chmods go through another
 // fid, so the leg also proves the gate reads the directory at SUBMIT, not a
 // mode latched when the handle was registered. The link's group is the
-// creator's primary group, because the SQE carries gid 0.
+// directory's, because the SQE carries gid 0 (IDENTITY-DESIGN 3.5 F-5). Here
+// that is also the creator's primary group; the kernel's
+// 9p_client.loom_create_gid tells the two apart.
 const DAC_DIR: &str = "/d1-symlink/dac";
 const DAC_HANDLE: u32 = 1;
 
@@ -267,11 +268,12 @@ fn dac_leg(c: &mut Checker, ring: &Ring, buf: &mut RegisteredBuffer) {
         "O dac: a link into the 0755 directory lands",
         mklink(ring, buf, DAC_HANDLE, "l_allowed", "target").is_ok(),
     );
+    let dir_gid = fs::metadata(DAC_DIR).map(|m| m.gid()).ok();
     let gid_ok = File::open_link(&format!("{}/l_allowed", DAC_DIR))
         .and_then(|f| f.metadata())
-        .map(|m| m.is_symlink() && m.gid() == identity::gid())
+        .map(|m| m.is_symlink() && Some(m.gid()) == dir_gid)
         .unwrap_or(false);
-    c.ok("O dac: the link's group is the creator's primary group", gid_ok);
+    c.ok("O dac: the link's group is the directory's", gid_ok);
 }
 
 const UNION_DIR: &str = "/d1-union";

@@ -1924,8 +1924,9 @@ static inline long t_open(long start_fd, const char *path,
 // for the Territory root). Returns a new opened KOBJ_SPOOR fd referring to the
 // created object (file, or directory when perm carries T_WALK_CREATE_DMDIR).
 // perm's low 9 bits are the rwxrwxrwx mode; the created object's group is the
-// caller's primary_gid. omode is the Plan 9 open mode for the returned fd
-// (T_OREAD / T_OWRITE / T_ORDWR [+ T_OTRUNC]); a directory is opened OREAD.
+// directory's (IDENTITY-DESIGN 3.5 F-5). omode is the Plan 9 open mode for the
+// returned fd (T_OREAD / T_OWRITE / T_ORDWR [+ T_OTRUNC]); a directory is
+// opened OREAD.
 // Returns the new fd (>=0), -1 on any error (see SYS_WALK_CREATE). FS-mutation
 // foundation (IDENTITY-DESIGN.md section 9.2).
 #define T_WALK_CREATE_DMDIR  0x80000000u

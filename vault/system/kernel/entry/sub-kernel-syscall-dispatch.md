@@ -54,6 +54,18 @@ the new file with the access asked, never checked against its new mode (Plan 9
 and POSIX create semantics): a file created 0400 is writable through the
 descriptor that created it.
 
+**The created group (2026-10-19, [[dec-2026-10-19-create-group-from-parent]],
+IDENTITY-DESIGN 3.5 F-5).** The create sends the parent directory's group,
+`parent_st.gid`, where it sent the caller's `primary_gid` before: Stratum stamps
+the gid it is sent, so a group directory now keeps what is made in it. The stat
+block above runs only where the Dev enforces rwx or the create is not admitted;
+on every other Dev the parent's stat is taken after the DMSRV reject, so a
+`/srv` post still takes none. A parent that cannot be stat'd refuses the create
+with -T_E_IO, as on the enforcing Devs, and a parent whose stat names no group
+(GID_INVALID: the server left the gid out of Rgetattr) passes GID_INVALID on. A
+caped session's create still carries `P9_NOGID` ([[sub-kernel-ninep-dev9p]]),
+and Loom's gid-0 default asks the same of its own stat ([[sub-kernel-loom]]).
+
 `sys_umask_handler` (133) calls `umask_of`: a bit outside 0777 anywhere in the
 64-bit argument is -T_E_INVAL with the mask unchanged, as `sys_wstat` refuses
 stray mode bits; otherwise `proc_umask_exchange` stores the new mask and

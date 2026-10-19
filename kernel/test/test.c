@@ -1965,6 +1965,7 @@ void test_dev9p_create_refusal_keeps_eexist(void);
 void test_dev9p_create_refusal_without_rwx_enforcement(void);
 void test_dev9p_open_create_refuses_non_end(void);
 void test_dev9p_create_mode_on_the_wire(void);
+void test_dev9p_create_group_from_parent(void);
 void test_dev9p_client_init_clears_ends(void);
 void test_dev9p_remote_format_ns(void);
 void test_dev9p_origin_format_ns(void);
@@ -4419,6 +4420,7 @@ struct test_case g_tests[] = {
     { "dev9p.create_refusal_without_rwx", test_dev9p_create_refusal_without_rwx_enforcement, false, NULL },
     { "dev9p.open_create_refuses_non_end", test_dev9p_open_create_refuses_non_end, false, NULL },
     { "dev9p.create_mode_on_the_wire", test_dev9p_create_mode_on_the_wire, false, NULL },
+    { "dev9p.create_group_from_parent", test_dev9p_create_group_from_parent, false, NULL },
     { "dev9p.client_init_clears_ends", test_dev9p_client_init_clears_ends, false, NULL },
     { "dev9p.remote_format_ns",        test_dev9p_remote_format_ns,        false, NULL },
     { "dev9p.origin_format_ns",        test_dev9p_origin_format_ns,        false, NULL },

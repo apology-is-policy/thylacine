@@ -326,9 +326,8 @@ impl Sqe {
     /// the two ends of the directory's 9P session and that the directory grants
     /// it write and search permission (`EACCES` otherwise; IDENTITY-DESIGN 9.7
     /// M7), and refuses the op on an SQPOLL ring (`EOPNOTSUPP`). `gid` 0 means
-    /// the creator's primary
-    /// group; any other value must be a group the creator is in (`EACCES`
-    /// otherwise). LOOM.md 8.5.1.
+    /// the directory's group (IDENTITY-DESIGN 3.5 F-5); any other value must be
+    /// a group the creator is in (`EACCES` otherwise). LOOM.md 8.5.1.
     ///
     /// Both strings live in ONE registered-buffer span: `name` occupies
     /// `[buf_off, buf_off + name_len)` and `target` the rest, up to

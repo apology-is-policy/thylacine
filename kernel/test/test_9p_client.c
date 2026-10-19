@@ -2845,7 +2845,7 @@ static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
 void test_9p_client_loom_mkdir_e2e(void) {
     g_loom_mname_len = 0; g_loom_mname_mode = 0;
     loom_ga_reset();
-    loom_ga_dir(0755u, 0x1234u, 0x5678u);   // the creator's own dir (8.5.1 passes)
+    loom_ga_dir(0755u, 0x1234u, 0x4321u);   // the creator's own dir (8.5.1 passes), another group
     int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
                               loom_mut_capture_responder, NULL);
     TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
@@ -2891,8 +2891,8 @@ void test_9p_client_loom_mkdir_e2e(void) {
     TEST_ASSERT(g_loom_mname[0]=='s' && g_loom_mname[3]=='d' && g_loom_mname[5]=='r',
                 "mkdir name bytes read from the pinned buffer");
     TEST_EXPECT_EQ((u64)g_loom_mname_mode, (u64)0755u, "mkdir mode decoded from the SQE");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u,
-                   "SQE gid 0 -> the creator's primary group on the wire (8.5.1)");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4321u,
+                   "SQE gid 0 -> the directory's group on the wire, not the creator's (F-5)");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
     TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
 
@@ -3323,13 +3323,15 @@ void test_9p_client_loom_dirmut_sqpoll(void) {
     p9_loopback_destroy(&g_loopback);
 }
 
-// The create ops' SQE gid: 0 is the creator's primary group; any other value must
-// be a group the creator is in unless it holds chown-any authority (CAP_HOSTOWNER
-// or CAP_CHOWN) -- perm_wstat_check's chgrp rule applied at birth. The wire gid is
-// the RESOLVED one. MKDIR/SYMLINK carry it in _resv1[2], MKNOD in `offset`.
+// The create ops' SQE gid: 0 is the directory's group (IDENTITY-DESIGN 3.5 F-5),
+// which here is neither the creator's primary group (0x5678) nor its
+// supplementary one; any other value must be a group the creator is in unless it
+// holds chown-any authority (CAP_HOSTOWNER or CAP_CHOWN) -- perm_wstat_check's
+// chgrp rule applied at birth. The wire gid is the RESOLVED one. MKDIR/SYMLINK
+// carry it in _resv1[2], MKNOD in `offset`.
 void test_9p_client_loom_create_gid(void) {
     loom_ga_reset();
-    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    loom_ga_dir(0755u, 0x1234u, 0x6789u);
     struct Spoor *root = loom_mut_open();
     TEST_ASSERT(root != NULL, "capture client + root");
     struct Loom *l = loom_create(8, 16, false);
@@ -3346,7 +3348,17 @@ void test_9p_client_loom_create_gid(void) {
 
     // MKDIR (gid in _resv1[2]).
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0, "gid 0");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "gid 0 -> the primary group on the wire");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x6789u, "gid 0 -> the directory's group on the wire");
+    g_loom_ga_gid = 0x678Au;                         // the control: the directory's group moves
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0,
+                   "gid 0, another group");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x678Au, "and the wire gid follows it");
+    g_loom_ga_valid_clear = P9_GETATTR_GID;          // a stat that names no group
+    TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0,
+                   "gid 0, no group reported");
+    g_loom_ga_valid_clear = 0;
+    g_loom_ga_gid = 0x6789u;
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)GID_INVALID, "passes none on");
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0x4444u, 0), (u64)0,
                    "a supplementary group");
     TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4444u, "the supplementary group on the wire");
@@ -3368,14 +3380,14 @@ void test_9p_client_loom_create_gid(void) {
 
     // SYMLINK (gid in _resv1[2]; _resv1[1] is the name split).
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_SYMLINK, 6, 0, 3, 0, 0), (u64)0, "SYMLINK gid 0");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "SYMLINK: the primary group on the wire");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x6789u, "SYMLINK: the directory's group on the wire");
     loom_dm_leg(l, LOOM_OP_SYMLINK, 6, 0, 3, 0x3333u, 0, -(s32)T_E_ACCES,
                 "SYMLINK into a foreign group -> -EACCES");
 
     // MKNOD (gid in `offset`; _resv1[1..3] are mode/major/minor).
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0, 0010644u, 0, 0), (u64)0,
                    "MKNOD gid 0");
-    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x5678u, "MKNOD: the primary group on the wire");
+    TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x6789u, "MKNOD: the directory's group on the wire");
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKNOD, 3, 0x4444u, 0010644u, 0, 0), (u64)0,
                    "MKNOD into a supplementary group");
     TEST_EXPECT_EQ((u64)g_loom_wire_gid, (u64)0x4444u, "MKNOD: the supplementary group on the wire");

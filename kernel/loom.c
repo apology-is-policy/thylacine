@@ -1205,12 +1205,13 @@ static bool loom_op_creates(u8 opcode) {
 // the owner's exit). `dir2` is RENAMEAT's newdir; LINK's second handle is its
 // SOURCE, which POSIX link does not ask to be writable, so it is not checked.
 // For the create ops, *gid_out is the resolved group: SQE gid 0 (GID_INVALID) is
-// the creator's primary group, as the sync create always uses; any other must be
-// one the creator may chgrp a file it owns to (perm_wstat_check, cur_uid = the
-// creator: a member group, or chown-any authority). On a caped session
-// (IDENTITY-DESIGN 3.2) the group is the cape's and the wire carries P9_NOGID, so
-// the server leaves its own alone; naming a group there is a chgrp, which the cape
-// refuses.
+// the parent directory's group (IDENTITY-DESIGN 3.5 F-5), as the sync create
+// sends, read from the parent's stat (taken for it where the Dev enforces no rwx
+// and loom_dir_writable took none); any other must be one the creator may chgrp
+// a file it owns to (perm_wstat_check, cur_uid = the creator: a member group, or
+// chown-any authority). On a caped session (IDENTITY-DESIGN 3.2) the group is
+// the cape's and the wire carries P9_NOGID, so the server leaves its own alone;
+// naming a group there is a chgrp, which the cape refuses.
 //
 // M7: the server stamps a create with its session's credential, never the
 // submitter's, so a create is admitted only to a principal at one of the
@@ -1248,7 +1249,8 @@ static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *s
         if (gid != GID_INVALID)                      return -(s32)T_E_ACCES;
         gid = P9_NOGID;
     } else if (gid == GID_INVALID) {
-        gid = who->primary_gid;
+        if (!bound_by && spoor_stat_native(dir, &st) != 0) return -(s32)T_E_IO;
+        gid = st.gid;
     } else if (perm_wstat_check(who, who->principal_id, T_WSTAT_GID, gid) != 0) {
         return -(s32)T_E_ACCES;
     }

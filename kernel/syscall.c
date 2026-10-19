@@ -4033,14 +4033,14 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
 //   2. spoor_clone(parent) -> nc (shallow aux = parent's fid).
 //   3. CLONE-walk nc (dev->walk with nname=0) so nc holds its OWN fid still
 //      pointing at the parent dir (so create doesn't mutate the parent's fid).
-//   4. nc->dev->create(nc, name, omode, perm, primary_gid) — does Tlcreate
+//   4. nc->dev->create(nc, name, omode, perm, parent's gid) — does Tlcreate
 //      (file) or Tmkdir+walk+lopen (dir) on nc's fid, leaving nc opened on the
 //      new object. Returns nc on success, NULL on failure.
 //   5. install nc in the handle table (R|W|TRANSFER, matching SYS_WALK_OPEN).
 //
-// The created object's group is the CALLER's primary_gid (A-1a identity on the
-// Proc), carried into the 9P gid field. Per-file rwx ENFORCEMENT is A-2d; this
-// is the create MECHANISM (I-22 holds — nothing enforces rwx yet to bypass).
+// The created object's group is the parent directory's (IDENTITY-DESIGN 3.5
+// F-5), carried into the 9P gid field; its mode is the asked mode less the
+// caller's umask, bounded by the parent's (9.7 M8).
 // =============================================================================
 
 // #50 (VIVARIUM.md section 6.24): the create MECHANICS, extracted from
@@ -4218,11 +4218,13 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     bool admitted = dev9p_create_admits(src, __atomic_load_n(&p->principal_id,
                                                              __ATOMIC_ACQUIRE));
     // The parent's stat also bounds the new mode below (M8), wherever the Dev
-    // enforces rwx.
+    // enforces rwx, and names the new object's group (F-5) on every Dev.
     struct t_stat parent_st;
+    bool have_parent_st = false;
     const struct t_stat *bound_by = NULL;
     if (src->dev->perm_enforced || !admitted) {
         if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -T_E_IO; }
+        have_parent_st = true;
         if (src->dev->perm_enforced) bound_by = &parent_st;
         if (!admitted || perm_check(p, &parent_st, PERM_W | PERM_X) != 0) {
             s64 deny = -T_E_ACCES;
@@ -4270,6 +4272,20 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // create perm (e.g. a dev9p Tlcreate), where the high bits would corrupt
     // the wire perm -- reject them.
     if (perm & SYS_WALK_CREATE_DMSRV_BITS)              { spoor_clunk(src); return -T_E_INVAL; }
+
+    // F-5 (IDENTITY-DESIGN 3.5): the new object's group is the parent
+    // directory's, as Plan 9's open(5) and BSD stamp it, never the creator's
+    // primary group. The server stamps the gid it is sent, so the kernel sends
+    // the parent's -- here and in Loom's create ops (loom_dir_mutation_gate).
+    // A Dev that does not enforce rwx took no stat above, so it is taken here,
+    // and a create whose parent cannot be stat'd is refused, as on the Devs
+    // that do. A parent whose stat names no group (GID_INVALID: the server left
+    // it out) passes none on. On a caped session dev9p_create sends P9_NOGID
+    // whatever this names.
+    if (!have_parent_st && spoor_stat_native(src, &parent_st) != 0) {
+        spoor_clunk(src);
+        return -T_E_IO;
+    }
 
     // M8 (IDENTITY-DESIGN 9.7): the creator's umask, then the parent
     // directory's bound (Plan 9 open(5)). The server applies neither --
@@ -4347,7 +4363,7 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // never a symlink -- but it must not reach a Dev or be stored in Spoor.mode).
     u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
     struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_dev,
-                                            perm, p->primary_gid);
+                                            perm, parent_st.gid);
     if (!opened) {
         // #99 (#102 errno-loss): propagate the real create errno the Dev
         // recorded (dev9p maps its Tlcreate/Tmkdir Rlerror -- e.g. -EEXIST on a

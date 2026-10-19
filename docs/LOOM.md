@@ -380,10 +380,13 @@ rule below closes it.
   there without blocking, so the ops fail closed there. This is the same
   disposition 8.5's SETATTR took for identity-setattr, and no SQPOLL consumer
   issues these ops. Mutation ops belong on a non-SQPOLL ring.
-- **The create ops' group is the creator's own.** The SQE's gid (`MKDIR`/`SYMLINK`
-  `_resv1[2]`, `MKNOD` `offset`) is resolved at submit:
-  - 0 (`GID_INVALID`) means the creator's primary group, as the sync create
-    always uses;
+- **The create ops' group is the directory's, or one the creator chooses.** The
+  SQE's gid (`MKDIR`/`SYMLINK` `_resv1[2]`, `MKNOD` `offset`) is resolved at
+  submit:
+  - 0 (`GID_INVALID`) means the parent directory's group (IDENTITY-DESIGN.md
+    3.5 F-5), as the sync create sends, read from the parent's stat (taken for
+    it where the Dev does not enforce rwx; `-EIO` without one). A directory
+    whose stat names no group passes none on;
   - any other value must be a group the creator is in, unless it holds
     `CAP_HOSTOWNER` or `CAP_CHOWN`: perm_wstat_check's chgrp rule applied at
     birth;

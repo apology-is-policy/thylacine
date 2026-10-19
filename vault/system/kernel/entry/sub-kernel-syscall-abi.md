@@ -1018,3 +1018,11 @@ the point. `T_E_NOSPC` (28) joins `errno.h`. A caller that tested `rc != 0` or
 `libthyla_rs` gains `Error::NoSpace`, and `territory::unmount` maps the value
 instead of answering `NotFound` for every failure; ut's `unmount` names the
 cause, as `bind` and `mount` already did for any code but -1.
+
+## SYS_WALK_CREATE's group is the directory's (2026-10-19)
+
+[[dec-2026-10-19-create-group-from-parent]] (IDENTITY-DESIGN 3.5 F-5): the
+group a create sends is the parent directory's, not the caller's
+`primary_gid`. The argument record is unchanged; the `SYS_WALK_CREATE` comment
+in `kernel/include/thylacine/syscall.h` and libt's `t_walk_create` comment say
+so. The mechanism is [[sub-kernel-syscall-dispatch]]'s.

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -32,6 +32,13 @@ be the interface's simplest possible instances. Each substantial Dev
 has its own dossier.
 
 ## Contract
+
+**`Dev.create`'s `gid` is the new object's group (2026-10-19).** The caller
+passes the parent directory's group (IDENTITY-DESIGN 3.5 F-5,
+[[dec-2026-10-19-create-group-from-parent]]), read from the parent's stat;
+before that it passed the creator's `primary_gid`. Only
+[[sub-kernel-ninep-dev9p]] uses it, as the 9P gid field (`P9_NOGID` on a caped
+session); the other seventeen create slots ignore it.
 
 **`Dev.close` returns `int` (2026-10-07).** Plan 9's close is `void`; ours
 returns 0, or a negative error for work the close could not finish. Only

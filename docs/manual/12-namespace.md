@@ -163,6 +163,11 @@ holding elevated capabilities from Imperium as well: those capabilities
 override the permission checks on existing files and leave this rule
 unchanged.
 
+A new file or directory belongs to the group of the directory it is created
+in, not to the creating user's primary group, as on Plan 9 and BSD. Files that
+any member creates in a directory that belongs to a shared group therefore
+belong to that group. Through a remote mount the host assigns the group instead.
+
 The system's disk is one connection, opened and posted by the system, so every
 user's create there is refused. A user's home is served by a per-user service
 that runs as that user and posts the home; login opens the connection as the

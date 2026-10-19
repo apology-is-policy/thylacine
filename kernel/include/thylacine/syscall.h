@@ -1233,10 +1233,9 @@ enum {
     //                    (Tmkdir) instead of a file (Tlcreate). Bits outside
     //                    SYS_WALK_CREATE_PERM_VALID are rejected.)
     //
-    // The created object's group is stamped from the CALLER's primary_gid
-    // (carried into the 9P Tlcreate/Tmkdir gid field). Full owner attribution
-    // (= caller principal_id) and per-file rwx ENFORCEMENT are A-2 (this is the
-    // create MECHANISM; I-22 holds -- nothing enforces rwx yet to bypass).
+    // The created object's group is the parent directory's (IDENTITY-DESIGN
+    // 3.5 F-5), carried into the 9P Tlcreate/Tmkdir gid field; its mode is the
+    // asked mode less the caller's umask, bounded by the parent's (9.7 M8).
     //
     // Returns: x0 = opened KOBJ_SPOOR fd (>=0; R|W|TRANSFER, matching
     // SYS_WALK_OPEN) on success, or -1 on:

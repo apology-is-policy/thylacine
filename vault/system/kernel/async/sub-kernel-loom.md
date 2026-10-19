@@ -221,8 +221,11 @@ The gate now does what the sync twins do:
   every submitter;
 - refuse the six ops on an SQPOLL ring (`-EOPNOTSUPP`) before any stat, because
   the poll thread must never block on a wire RPC;
-- resolve a create's gid: 0 means the primary group, anything else goes through
-  the chgrp rule of `perm_wstat_check`, and the wire carries the resolved value.
+- resolve a create's gid: 0 means the parent directory's group, read from its
+  stat (IDENTITY-DESIGN 3.5 F-5, [[dec-2026-10-19-create-group-from-parent]];
+  taken for it where the Dev enforces no rwx, `-EIO` without one), anything
+  else goes through the chgrp rule of `perm_wstat_check`, and the wire carries
+  the resolved value.
   On a caped session (IDENTITY-DESIGN 3.2) 0 goes out as `P9_NOGID`, so the
   server keeps its own group, and a named gid, even the primary one, is a chgrp
   the cape refuses (`-EACCES`);
@@ -241,7 +244,10 @@ seam), and it joins this gate when it is.
 checked against the server's own count of what reached it;
 `9p_client.loom_dirmut_names` holds the name rule.
 `9p_client.loom_dirmut_sqpoll` and `9p_client.loom_create_gid` hold the other
-rules; the last also reads the create mode off the wire.
+rules; the last also reads the create mode off the wire, and gives the
+directory a group the creator does not hold, then moves it, so a gid-0 create
+that sent the creator's group fails it. `9p_client.loom_mkdir_e2e` does the
+same end to end.
 `9p_client.loom_create_session_ends` and `9p_client.loom_create_mode` hold M7
 and M8.
 

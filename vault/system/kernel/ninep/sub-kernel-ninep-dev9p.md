@@ -53,6 +53,18 @@ false still refuses), `dev9p.open_create_refuses_non_end`,
 creator holds CAP_DAC_OVERRIDE, so only M7 can refuse, and each refusal sits
 beside an admitted control one variable away.
 
+F-5 ([[dec-2026-10-19-create-group-from-parent]]): the gid a create carries is
+the parent directory's, which `spoor_create_install` reads from the parent's
+stat ([[sub-kernel-syscall-dispatch]]); `dev9p_create` still replaces it with
+`P9_NOGID` on a caped session. The fake's Rgetattr reports `g_ga_gid` (0x5678
+by default, the primary group of the identity under test, so the witness moves
+it), and `g_ga_fail_ecode` answers every Tgetattr Rlerror; `m8_wire_mode` arms
+it from `g_create_ga_fail` around its create alone. Witness:
+`dev9p.create_group_from_parent`: both create doors, a file and a directory, a
+copy of the Dev with `perm_enforced` false (the stat taken for the group
+alone), a parent whose stat leaves the gid out (GID_INVALID on the wire), and a
+parent that cannot be stat'd (-EIO, and no Tlcreate reaches the server).
+
 ## Purpose
 
 The Dev (`dc='9'`, `.name "9p"`) that makes a remote 9P server

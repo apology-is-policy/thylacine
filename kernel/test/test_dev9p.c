@@ -168,6 +168,9 @@ static u64  g_ga_valid = 0x7ffu;     // the Rgetattr valid mask (default BASIC)
 static u32  g_create_gid;            // the gid the last Tlcreate / Tmkdir carried
 static u32  g_create_mode;           // M8: the mode the last Tlcreate / Tmkdir carried
 static u32  g_ga_mode = 0100644u;    // M8: the mode every attribute reply reports
+static u32  g_ga_gid = 0x5678u;      // F-5: the gid every Rgetattr reports
+static u32  g_ga_fail_ecode;         // != 0: every Tgetattr answers Rlerror(ecode)
+static u32  g_create_ga_fail;        // F-5: m8_wire_mode's create alone runs under it
 static u8  *g_twrite_cap_buf;        // payload capture of the LAST Twrite (heap, 8 KiB)
 #define WB_CAP_BUF_SZ 8192u
 static u32  g_twrite_cap_len;
@@ -543,6 +546,17 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TGETATTR) {
+        if (g_ga_fail_ecode) {
+            u32 ec = g_ga_fail_ecode;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);         resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Rgetattr body: valid(8)+qid(13)+mode(4)+uid(4)+gid(4)+15*u64 = 153.
         // Distinguishable mode/uid/gid so the test can prove dev9p_stat_native
         // maps them into struct t_stat.
@@ -560,7 +574,9 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
           resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
           resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
         resp[o] = 0x34; resp[o + 1] = 0x12; o += 4;          // uid = 0x1234
-        resp[o] = 0x78; resp[o + 1] = 0x56; o += 4;          // gid = 0x5678
+        { u32 g = g_ga_gid;                                  // gid (0x5678 unless a test sets it)
+          resp[o] = (u8)g; resp[o + 1] = (u8)(g >> 8);
+          resp[o + 2] = (u8)(g >> 16); resp[o + 3] = (u8)(g >> 24); o += 4; }
         resp[o] = 1; o += 8;                                 // nlink = 1
         o += 8;                                              // rdev = 0
         resp[o] = 0x00; resp[o + 1] = 0x01; o += 8;          // size = 0x100
@@ -4604,6 +4620,7 @@ static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open,
     p9_client_set_ends(&g_client, M7_CREATOR, PRINCIPAL_INVALID);
     g_ga_mode     = parent_mode;
     g_create_mode = 0xDEADBEEFu;
+    g_ga_fail_ecode = g_create_ga_fail;
     if (via_open) {
         g_dev9p_wga_partial_n = 1;   // the open leg misses
         *rc = sys_open_create_kpath_for_proc(p, (u64)base, "m8file", 6, 1 /*OWRITE*/, perm);
@@ -4613,7 +4630,8 @@ static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open,
         *rc = sys_walk_create_kname_for_proc(p, (u64)base, "m8file", 6,
                                              dir ? 0 /*OREAD*/ : 1 /*OWRITE*/, perm);
     }
-    g_ga_mode = 0100644u;            // fixture hygiene, before any assert
+    g_ga_fail_ecode = 0;             // fixture hygiene, before any assert
+    g_ga_mode = 0100644u;
     u32 wire = g_create_mode;
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -4624,7 +4642,8 @@ static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open,
 // Each leg differs from a neighbour in one input. The first is the positive
 // control: native code's own 0644 passes unchanged, M8 or not. The last is w4
 // through a copy of dev9p that enforces no rwx (a byte loop, not a struct copy:
-// the kernel has no memcpy), where no stat is taken and the umask alone applies.
+// the kernel has no memcpy), where the parent's mode bounds nothing and the
+// umask alone applies.
 void test_dev9p_create_mode_on_the_wire(void) {
     struct Dev d9;
     volatile u8 *dst = (volatile u8 *)&d9;
@@ -4649,6 +4668,54 @@ void test_dev9p_create_mode_on_the_wire(void) {
     TEST_EXPECT_EQ(w5, 0750u, "dir 0777 under 0 in 0750 -> 0750 on the Tmkdir");
     TEST_EXPECT_EQ(w6, 0644u, "the open-create door bounds the same way");
     TEST_EXPECT_EQ(w7, 0777u, "w4 where rwx is not enforced -> 0777: no bound, the umask alone");
+}
+
+// F-5 (IDENTITY-DESIGN 3.5): the group that reaches the wire is the parent
+// directory's, the fake's g_ga_gid. The creator's primary group is oc9_proc's
+// 0x5678, which no leg's parent reports, so a create that sent the creator's
+// group fails its leg. Returns the wire gid.
+static u32 f5_wire_gid(u32 parent_gid, u32 perm, bool via_open, struct Dev *dev,
+                       s64 *rc) {
+    g_ga_gid     = parent_gid;
+    g_create_gid = 0xDEADBEEFu;
+    (void)m8_wire_mode(040755u, 0u, perm, via_open, dev, rc);
+    g_ga_gid     = 0x5678u;          // fixture hygiene, before any assert
+    return g_create_gid;
+}
+
+// Both doors, a file and a directory, and a copy of dev9p that enforces no rwx,
+// where the stat is taken for the group alone. g1 is the control one variable
+// from g0. A parent that reports no group passes none on, and one that cannot
+// be stat'd refuses the create before it reaches the server.
+void test_dev9p_create_group_from_parent(void) {
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
+    d9.perm_enforced = false;
+    s64 rc[7];
+    u32 g0 = f5_wire_gid(0x4242u, 0644u, false, NULL, &rc[0]);
+    u32 g1 = f5_wire_gid(0x4343u, 0644u, false, NULL, &rc[1]);
+    u32 g2 = f5_wire_gid(0x4242u, SYS_WALK_CREATE_DMDIR | 0755u, false, NULL, &rc[2]);
+    u32 g3 = f5_wire_gid(0x4242u, 0644u, true, NULL, &rc[3]);
+    u32 g4 = f5_wire_gid(0x4242u, 0644u, false, &d9, &rc[4]);
+    g_ga_valid = 0x7ffu & ~(u64)P9_GETATTR_GID;
+    u32 g5 = f5_wire_gid(0x4242u, 0644u, false, NULL, &rc[5]);
+    g_ga_valid       = 0x7ffu;
+    g_tlcreate_seen  = 0;
+    g_create_ga_fail = T_E_NOENT;
+    (void)f5_wire_gid(0x4242u, 0644u, false, &d9, &rc[6]);
+    g_create_ga_fail = 0;            // fixture hygiene, before any assert
+    u32 created = g_tlcreate_seen;
+    for (int i = 0; i < 6; i++) TEST_ASSERT(rc[i] >= 0, "the first six creates succeeded");
+    TEST_EXPECT_EQ(g0, 0x4242u, "a file takes its directory's group, not the creator's");
+    TEST_EXPECT_EQ(g1, 0x4343u, "another directory, another group");
+    TEST_EXPECT_EQ(g2, 0x4242u, "a directory takes its parent's group on the Tmkdir");
+    TEST_EXPECT_EQ(g3, 0x4242u, "the open-create door sends the same group");
+    TEST_EXPECT_EQ(g4, 0x4242u, "where rwx is not enforced the stat is taken for the group");
+    TEST_EXPECT_EQ(g5, GID_INVALID, "a parent that reports no group passes none on");
+    TEST_EXPECT_EQ((u64)rc[6], (u64)(s64)-T_E_IO, "a parent that cannot be stat'd: EIO");
+    TEST_EXPECT_EQ((u64)created, 0ull, "and no Tlcreate reached the server");
 }
 
 // p9_client_init clears the ends, so a client re-initialized in place (this
