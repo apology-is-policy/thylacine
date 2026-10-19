@@ -1708,8 +1708,10 @@ native callers.
   fresh dial, no right for a CONNECTING finish, which writes nothing -- and
   `viv_sock_connect_dial_on`'s swap is `handle_replace_hooked` with connect's
   commit (`viv_socktab_connected_locked`) as the hook, so the swap and the
-  CONNECTED transition are one step ([[sub-kernel-handle]]). A refused swap
-  whose same-epoch row is CONNECTED returns 0: a peer finished the same connect.
+  CONNECTED transition are one step ([[sub-kernel-handle]]). The commit carries
+  the ctl Spoor the swap took out, so it also lands on a row a peer re-made
+  with that identity. A refused swap whose same-epoch row is CONNECTED returns
+  0: a peer finished the same connect.
 - **the datagram sendto.** `viv_sock_dgram_sendto` copies and parses the
   destination and hands it to `viv_sock_dgram_send`, which pins, writes the
   re-dial to the pin, and holds the pin through the data open and the send: a

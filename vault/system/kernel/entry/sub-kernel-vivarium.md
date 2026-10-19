@@ -1048,8 +1048,14 @@ detaches its ctl (handed back for the caller to release), and connect runs it
 inside the swap's own handle-table hold (`handle_replace_hooked`,
 [[sub-kernel-handle]]): handle -> socktab, the order the fork snapshot and the
 close hook take. The detach keeps netd at one fid per connection once the fd is
-data. `record_remote` lost its `also_connect` flag; the datagram sendto is its
-only caller. A refused swap whose same-epoch row is now CONNECTED returns 0:
+data. The commit lands on the row connect snapshotted (its epoch) or on a row a
+peer re-made meanwhile with the same ctl identity: a dup of the socket dup3'd
+back onto the number leaves the number's slot on ctl, so connect's swap goes
+through, and the re-made row (a fresh epoch) is the same socket. Keyed on the
+epoch alone, as first written, that row stayed CONNECTING over a data fd and
+the number answered ENOTSOCK to every later use (audit r1 F1;
+`vivsock.connect_commits_a_realiased_row`). `record_remote` lost its
+`also_connect` flag; the datagram sendto is its only caller. A refused swap whose same-epoch row is now CONNECTED returns 0:
 two threads can finish one interrupted connect (a read on the CONNECTING fd
 while connect() is retried), and the loser's refusal used to answer EIO.
 
@@ -1063,9 +1069,9 @@ up and releases the ctl fid. `vivsock.ctl_verbs_meet_a_racing_peer` runs a peer
 thread's connect or close between the row read and the pin (a KERNEL_TESTS hook
 at the top of `viv_sock_pin_ctl`) and derives the expected errnos from the
 decides. `vivsock.ctl_identity_travels_with_the_fd` drives dup and fork with
-exact reference counts, and `vivsock.connect_finished_by_a_peer` stages the
-double finish. Each went RED under its sabotage (work/oct19-1709z/mutate.py
-M1-M10). One property has no unit form: that the commit stays inside the swap's
+exact reference counts, `vivsock.connect_finished_by_a_peer` stages the double
+finish, and `vivsock.connect_commits_a_realiased_row` the re-made row. Each went
+RED under its sabotage (work/oct19-1709z/mutate.py M1-M11). One property has no unit form: that the commit stays inside the swap's
 hold needs an SMP interleaving, so it rests on the audit's reading.
 
 The arms that open a /net file by path from the row's N (accept's listen walk,

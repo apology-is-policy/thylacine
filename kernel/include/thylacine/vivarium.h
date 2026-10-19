@@ -1547,8 +1547,8 @@ bool viv_socktab_ctl_is(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
 // Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
 // plain file, or a socket already dropped) is a no-op, which is what lets the
 // close hook run unconditionally for a phenotyped Proc. Takes the lock; the
-// row's cached readiness Spoor, if any, is clunked after the unlock, so this
-// may block on that Spoor's Tclunk.
+// Spoors the row holds (its readiness cache and its ctl identity) are clunked
+// after the unlock, so this may block on a Tclunk.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
 // close()'s hook: viv_socktab_drop, except while `fd` is another call's
 // reservation (that call's own row).
@@ -1693,13 +1693,18 @@ bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch
 // are ONE step to anything that reads both: an arm whose pinned Spoor is no
 // longer the row's ctl finds the row CONNECTED whenever the swap is why. The
 // remote is written before the state, so a reader that sees CONNECTED sees the
-// peer. `detached` comes back holding the row's ctl reference, for the caller
-// to clunk once it holds no lock; `ok` says whether the row was still the one
-// the caller snapshotted.
+// peer. It lands on the row the caller snapshotted (`expect_epoch`), or on one
+// re-made meanwhile that carries the same ctl identity (`ctl`, the Spoor the
+// swap took out): a dup of the socket dup3'd back onto the number is the same
+// socket, and the fd now holds its connection -- left CONNECTING over data, the
+// number would refuse every later use. `detached` comes back holding the row's
+// ctl reference, for the caller to clunk once it holds no lock; `ok` says
+// whether the commit landed.
 struct viv_socktab_connected {
     struct viv_socktab *tab;
     s32                 fd;
     u64                 expect_epoch;
+    const struct Spoor *ctl;
     u32                 addr;
     u16                 port;
     bool                ok;

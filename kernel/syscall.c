@@ -12001,15 +12001,14 @@ static s64 viv_sock_connect_dial_on(struct Proc *p, struct viv_socktab *tab,
     //
     // The commit rides INSIDE the swap's hold: the peer is recorded (a recvmsg
     // on the connected socket synthesizes msg_name from it, as from the datagram
-    // sendto's), the row goes CONNECTED and gives up its ctl identity, all KEYED
-    // on the socket we snapshotted (e->epoch) -- so no arm can see the fd on
-    // data while the row still reads CONNECTING. If the row was re-made
-    // meanwhile (the same ctl dup'd back onto the number), the commit lands
-    // nowhere rather than marking a row connect() did not start from; connect()
-    // still returns success, since the connection was made and the number names
-    // it.
+    // sendto's), the row goes CONNECTED and gives up its ctl identity -- so no
+    // arm can see the fd on data while the row still reads CONNECTING. It is
+    // keyed on the socket we snapshotted (e->epoch) or, for a row a peer re-made
+    // meanwhile (a dup of this socket dup3'd back onto the number), on the ctl
+    // identity the swap took out: that row is the same socket, and the number
+    // now holds its connection.
     struct viv_socktab_connected commit = {
-        .tab = tab, .fd = (s32)(s64)fd_raw, .expect_epoch = e->epoch,
+        .tab = tab, .fd = (s32)(s64)fd_raw, .expect_epoch = e->epoch, .ctl = ctl,
         .addr = raddr, .port = rport, .ok = false, .detached = NULL,
     };
     if (handle_replace_hooked(p, (hidx_t)fd_raw, ctl, KOBJ_SPOOR, dr, dsp,

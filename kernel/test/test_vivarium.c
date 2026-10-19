@@ -2714,8 +2714,8 @@ void test_vivarium_socktab_bind_fields(void) {
 static bool socktab_commit(struct viv_socktab *tab, s32 fd, u64 epoch,
                            u32 addr, u16 port) {
     struct viv_socktab_connected c = {
-        .tab = tab, .fd = fd, .expect_epoch = epoch, .addr = addr, .port = port,
-        .ok = false, .detached = NULL,
+        .tab = tab, .fd = fd, .expect_epoch = epoch, .ctl = NULL,
+        .addr = addr, .port = port, .ok = false, .detached = NULL,
     };
     viv_socktab_connected_locked(&c);
     spoor_clunk(c.detached);

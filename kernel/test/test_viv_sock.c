@@ -20,6 +20,7 @@
 #include <thylacine/9p_transport_loopback.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/caps.h>
+#include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
@@ -49,6 +50,7 @@ extern s64 viv_listen_for_test(struct Proc *p, u64 fd);
 extern s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
 extern void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
 extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
+extern s64 viv_dup3_for_test(struct Proc *p, u64 oldfd, u64 newfd, u64 flags);
 
 void test_vivsock_accept_wait_is_over(void);
 void test_vivsock_connect_tcp_holds_the_dial(void);
@@ -68,6 +70,7 @@ void test_vivsock_ctl_verbs_need_their_ctl(void);
 void test_vivsock_ctl_verbs_meet_a_racing_peer(void);
 void test_vivsock_ctl_identity_travels_with_the_fd(void);
 void test_vivsock_connect_finished_by_a_peer(void);
+void test_vivsock_connect_commits_a_realiased_row(void);
 
 // ---------------------------------------------------------------------------
 // The /net stub: net/{tcp,udp}/<n>/{ctl,data,listen,remote,status}. A qid
@@ -106,6 +109,12 @@ static struct {
     struct Spoor *finish_dsp, *finish_detached;
     s64           finish_fd;
     bool          finish_ok;
+    // != NULL: the NEXT data Tlopen stands in for a peer thread that re-makes
+    // realias_fd's row while connect sleeps: dup(realias_fd) -> realias_got,
+    // then dup3(realias_got, realias_fd), through the real dup and dup3 arms.
+    struct Proc  *realias_p;
+    s64           realias_fd, realias_got;
+    bool          realias_done;
     u32  file_writes;     // Twrites to a non-/net-verb file (a `remote`)
     u32  data_clunks;
 } g_ns;
@@ -279,27 +288,39 @@ static int ns_responder(void *ctx, const u8 *req, size_t req_len,
             }
             if (g_ns.finish_dsp) {
                 // No RPC from inside the reply: the data fid was opened ahead,
-                // and the swap releases only the slot's own ctl reference.
+                // and neither the swap nor the snapshot's put drops a last
+                // reference to ctl (the row and connect's own pin hold it).
                 struct viv_sock e;
                 struct Handle   h;
                 struct Proc    *fp = g_ns.finish_p;
                 if (viv_socktab_get(fp->socktab, (s32)g_ns.finish_fd, &e) &&
                     handle_get(fp, (hidx_t)g_ns.finish_fd, &h) == 0) {
-                    void *was = h.obj;
-                    handle_put(&h);
                     struct viv_socktab_connected c = {
                         .tab = fp->socktab, .fd = (s32)g_ns.finish_fd,
-                        .expect_epoch = e.epoch, .addr = e.remote_addr,
-                        .port = e.remote_port, .ok = false, .detached = NULL,
+                        .expect_epoch = e.epoch, .ctl = (const struct Spoor *)h.obj,
+                        .addr = e.remote_addr, .port = e.remote_port,
+                        .ok = false, .detached = NULL,
                     };
-                    if (handle_replace_hooked(fp, (hidx_t)g_ns.finish_fd, was, KOBJ_SPOOR,
+                    // The key is held across the replace: handle_get's reference.
+                    if (handle_replace_hooked(fp, (hidx_t)g_ns.finish_fd, h.obj, KOBJ_SPOOR,
                                               RIGHT_READ | RIGHT_WRITE, g_ns.finish_dsp,
                                               viv_socktab_connected_locked, &c) == 0) {
                         g_ns.finish_dsp      = NULL;   // the slot's now
                         g_ns.finish_ok       = c.ok;
                         g_ns.finish_detached = c.detached;
                     }
+                    handle_put(&h);
                 }
+            }
+            if (g_ns.realias_p) {
+                // Neither arm sends an RPC: each reference they drop on ctl
+                // leaves one held by a row, a slot or connect's own pin.
+                struct Proc *rp = g_ns.realias_p;
+                g_ns.realias_p   = NULL;
+                g_ns.realias_got = viv_dup_for_test(rp, (u64)g_ns.realias_fd);
+                g_ns.realias_done = g_ns.realias_got >= 0 &&
+                    viv_dup3_for_test(rp, (u64)g_ns.realias_got, (u64)g_ns.realias_fd, 0) ==
+                        g_ns.realias_fd;
             }
             if (g_ns.data_fail) {
                 u32 ec = g_ns.data_fail;
@@ -1190,13 +1211,13 @@ static bool ns_bind_row(struct Proc *p, s64 fd, u16 port) {
 static bool ns_dup3_window(struct Proc *p, s64 fd, struct Spoor *file) {
     struct Handle h;
     if (fd < 0 || !file || handle_get(p, (hidx_t)fd, &h) < 0) return false;
-    void *was = h.obj;
-    handle_put(&h);
     spoor_ref(file);
-    if (handle_replace(p, (hidx_t)fd, was, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, file) == 0)
-        return true;
-    spoor_clunk(file);
-    return false;
+    // The key is held across the replace: handle_get's reference.
+    bool held = handle_replace(p, (hidx_t)fd, h.obj, KOBJ_SPOOR,
+                               RIGHT_READ | RIGHT_WRITE, file) == 0;
+    if (!held) spoor_clunk(file);
+    handle_put(&h);
+    return held;
 }
 
 static bool ns_slot_is(struct Proc *p, s64 fd, const struct Spoor *sp) {
@@ -1232,6 +1253,9 @@ void test_vivsock_ctl_verbs_need_their_ctl(void) {
     TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
     int ferr = 0;
     struct Spoor *file = ns_open(p, VIV_NET_TCP, 0, "remote", &ferr);   // the peer's file
+    u32  fw0  = g_ns.file_writes;
+    long fput = file ? file->dev->write(file, "x", 1, 0) : -1;
+    u32  fwc  = g_ns.file_writes - fw0;
 
     s64  ccfd   = ns_socket(p, VIV_NET_TCP, 31, VIV_SOCK_FRESH);
     const struct Spoor *ccid = ns_row_ctl(p->socktab, ccfd);
@@ -1273,6 +1297,8 @@ void test_vivsock_ctl_verbs_need_their_ctl(void) {
     ns_free(p);
 
     TEST_ASSERT(file != NULL, "fixture: the peer's file, a writable /net file that is no ctl");
+    TEST_EXPECT_EQ(fput, 1, "control: a byte written to the file lands");
+    TEST_EXPECT_EQ(fwc, 1u, "control: and the stub counts it, so the zero below is a count");
     TEST_ASSERT(ccid != NULL, "a socket()-made row names its ctl");
     TEST_EXPECT_EQ(ccref, 2, "with a reference of its own beside the fd's");
     TEST_EXPECT_EQ(ccrc, 0, "control: connect on an unraced socket succeeds");
@@ -1327,18 +1353,19 @@ static void ns_peer_at_pin(struct Proc *p, u64 fd) {
     if (!g_peer.dsp || !viv_socktab_get(p->socktab, (s32)fd, &e) ||
         handle_get(p, (hidx_t)fd, &h) < 0)
         return;
-    void *was = h.obj;
-    handle_put(&h);
     struct viv_socktab_connected c = {
         .tab = p->socktab, .fd = (s32)fd, .expect_epoch = e.epoch,
-        .addr = 0x0A000002u, .port = 80, .ok = false, .detached = NULL,
+        .ctl = (const struct Spoor *)h.obj, .addr = 0x0A000002u, .port = 80,
+        .ok = false, .detached = NULL,
     };
-    if (handle_replace_hooked(p, (hidx_t)fd, was, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
+    // The key is held across the replace: handle_get's reference.
+    if (handle_replace_hooked(p, (hidx_t)fd, h.obj, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
                               g_peer.dsp, viv_socktab_connected_locked, &c) == 0) {
         g_peer.dsp      = NULL;           // the slot's now
         g_peer.detached = c.detached;
         g_peer.done     = c.ok;
     }
+    handle_put(&h);
 }
 
 // Arm the peer for the next pin; a connecting peer opens its data fid now.
@@ -1544,4 +1571,46 @@ void test_vivsock_connect_finished_by_a_peer(void) {
     TEST_EXPECT_EQ(opens, 1u, "the call waited once");
     TEST_EXPECT_EQ(dclunks, 1u, "and released the data fid it no longer needs");
     TEST_EXPECT_EQ(writes, 0u, "dialing nothing: the dial was the interrupted connect's");
+}
+
+// A peer thread can re-make the socket's row while connect() waits for the
+// handshake: dup the socket, then dup3 the dup back onto the number. The number
+// still holds the socket's own ctl, so connect's swap goes through, and the
+// re-made row -- a fresh epoch over the same ctl identity -- is the same socket:
+// the commit must land on it. Left CONNECTING over a data fd, the number would
+// answer ENOTSOCK to every later use. The control: the dup, whose slot still
+// holds ctl, keeps its row and its ctl identity.
+void test_vivsock_connect_commits_a_realiased_row(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+    s64  fd = ns_socket(p, VIV_NET_TCP, 50, VIV_SOCK_FRESH);
+    const struct Spoor *id = ns_row_ctl(p->socktab, fd);
+    struct viv_sock e0;
+    bool r0 = ns_row(p, fd, &e0);
+    if (r0) {
+        g_ns.realias_p  = p;
+        g_ns.realias_fd = fd;
+    }
+    s64  rc   = r0 ? viv_sock_connect_for_test(p, (u64)fd, g_ns_peer, 80) : -1;
+    s64  dup  = g_ns.realias_got;
+    bool made = g_ns.realias_done;
+    struct viv_sock e, ed;
+    bool row  = ns_row(p, fd, &e);
+    bool drow = ns_row(p, dup, &ed);
+    const struct Spoor *rid = ns_row_ctl(p->socktab, fd);
+    const struct Spoor *did = ns_row_ctl(p->socktab, dup);
+    u8   kind  = ns_fd_kind(p, fd);
+    s64  again = row ? viv_sock_connect_for_test(p, (u64)fd, g_ns_peer, 80) : -1;
+    ns_free(p);
+
+    TEST_ASSERT(r0 && id != NULL, "fixture: a FRESH socket naming its ctl");
+    TEST_ASSERT(made && dup >= 0, "fixture: a peer re-made the row while connect waited");
+    TEST_ASSERT(row && e.epoch != e0.epoch, "the number's row is the re-made one");
+    TEST_EXPECT_EQ(rc, 0, "connect succeeds");
+    TEST_EXPECT_EQ(kind, (u8)NS_DATA, "and the number holds the connection");
+    TEST_ASSERT(e.state == VIV_SOCK_CONNECTED && e.remote_port == 80,
+                "the commit landed on the re-made row");
+    TEST_ASSERT(rid == NULL, "which gave its ctl identity up");
+    TEST_EXPECT_EQ(again, -(s64)T_E_ISCONN, "so the number answers as the connected socket");
+    TEST_ASSERT(drow && did == id, "control: the dup keeps the ctl its slot still holds");
 }

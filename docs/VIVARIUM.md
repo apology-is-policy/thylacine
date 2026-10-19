@@ -588,6 +588,20 @@ that round: the socket arms split Linux's two "no socket here" errnos — a CLOS
 `EBADF` (the fd lookup fails first), a live non-socket fd is `ENOTSOCK` (`viv_sock_row`);
 every row-less fd answered `ENOTSOCK` before.
 
+**The verb arms no longer cross that gap (17:09Z, 2026-10-19).** The arms that write netd
+a ctl verb — connect's dial, listen's announce, the datagram sendto's re-dial — read the
+row by number and then the fd's slot by number, and `dup3` installs before it drops the
+old row, so a peer thread's `dup3` between the two left the socket's row over a slot that
+held a file, and the verb went into the file. Each socket()-born row now carries its ctl
+Spoor's identity (`viv_socktab.ctl[]`, one reference the row owns; NULL once the fd is
+data), copied with a reference by the fork copy and the alias, and each verb arm proves
+the Spoor it pinned is that one before it writes (`ENOTSOCK` otherwise, `EBADF` for a
+closed number). connect's swap and its CONNECTED transition run in one handle-table hold
+(`handle_replace_hooked`), so the check never refuses a peer's legitimate verb while the
+fd moves to data, and the transition lands on a row a peer re-made with the same identity
+(a dup dup3'd back onto the number). The arms that open a /net file by path from the
+row's `N` (`accept`, `recvmsg`) still trust the row, so for them the F2 gap above stands.
+
 It is unavoidable, and the alternatives were measured rather than assumed:
 
 - **`N`** is re-readable from `ctl`, but only while the fd still *is* `ctl`.

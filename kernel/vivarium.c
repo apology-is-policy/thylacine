@@ -2330,7 +2330,8 @@ void viv_socktab_connected_locked(void *arg) {
     if (!c->tab) return;
     socktab_lock(c->tab);
     struct viv_sock *e = socktab_find_locked(c->tab, c->fd);
-    if (e && e->epoch == c->expect_epoch) {
+    if (e && (e->epoch == c->expect_epoch ||
+              (c->ctl && c->tab->ctl[e - c->tab->s] == c->ctl))) {
         // remote first, THEN the state transition -- so a peer that observes
         // CONNECTED (under this same lock) always sees the remote already set.
         e->remote_addr = c->addr;

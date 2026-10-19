@@ -780,11 +780,12 @@ void proc_free(struct Proc *p) {
     p->sigtab = NULL;
 
     // VIVARIUM V-5: release the per-Proc Linux socket table, same discipline.
-    // A socket's ctl/data Spoors live in the handle table, and the table's own
-    // cached readiness Spoors (NP-5) were released with it at exit
-    // (proc_close_handles_at_exit). On the direct `state=ZOMBIE; proc_free()`
-    // paths that never ran that close, any still cached are clunked here, with
-    // the same Tclunk the handle_table_free above sends there.
+    // A socket's ctl/data Spoors live in the handle table, and the Spoors the
+    // rows hold -- the readiness cache (NP-5) and each socket()-born row's ctl
+    // identity -- were released with it at exit (proc_close_handles_at_exit).
+    // On the direct `state=ZOMBIE; proc_free()` paths that never ran that close,
+    // any still held are clunked here, with the same Tclunk the
+    // handle_table_free above sends there.
     viv_socktab_free(p->socktab);
     p->socktab = NULL;
 
@@ -3912,9 +3913,9 @@ static void proc_close_handles_at_exit(struct Proc *p) {
         handle_table_free(p->handles);
         p->handles = NULL;
         // The Linux socket rows go with the fds they describe, and with them the
-        // readiness Spoors the rows cache (NP-5): each holds a netd fid, which a
-        // zombie must not pin until its parent reaps it -- the reason the handle
-        // table itself closes here. Inside exit_close_active for the same
+        // Spoors the rows hold (NP-5's readiness cache, the ctl identity): each
+        // holds a netd fid, which a zombie must not pin until its parent reaps
+        // it -- the reason the handle table itself closes here. Inside exit_close_active for the same
         // close-time Tclunk. NULL-safe (a native Proc has no table).
         viv_socktab_reset(__atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE));
         closer->exit_close_active = false;

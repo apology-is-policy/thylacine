@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-07
+updated: 2026-10-19
 ---
 ## Session registry retirement
 
@@ -563,7 +563,11 @@ reasons as the handle table's (the thread is still RUNNING, the Proc still
 ALIVE). The table itself is still freed at `proc_free`
 ([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
 `proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
-(`vivarium.socktab_ready_release_paths`).
+(`vivarium.socktab_ready_release_paths`). Since 17:09Z (2026-10-19) each
+socket()-born row also holds a reference to its ctl Spoor, the identity its
+verb arms check ([[sub-kernel-vivarium]]); that is the fid the fd holds, and
+the same reset releases the row's reference, so the ctl fid closes with the fds
+rather than at reap.
 
 ## AS-2b admission (October 4)
 
