@@ -800,8 +800,7 @@ struct Proc {
     // running the parent's binary; every v1.0 spawn then execs and replaces
     // it), released at proc_free. Read locklessly by /proc: the Path string is
     // immutable and its ref is held for the whole read window by the reader's
-    // g_proc_table_lock (the #57a-F2 envelope), exactly as format_ns reads the
-    // Territory's mount Paths.
+    // g_proc_table_lock (the #57a-F2 envelope).
     struct Path       *exe_path;
 
     // CL-5 (Clade F4; docs/LLVM-DESIGN.md section 7): this Proc's anon-page

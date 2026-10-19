@@ -2777,11 +2777,13 @@ HAUL-DESIGN.md 4.8). The declaration behind ` remote` has one other reader, the
 resolver, which contains a link the session serves beneath its mount (DISTRO 4.6, I-28)
 and so only narrows. A Territory that
 declares the Linux phenotype adds a `root: pheno-linux` line after the count.
-`devproc.c::format_ns` calls it inside the `proc_for_each` callback, so the read runs
-under `g_proc_table_lock` (the #57a F2 envelope keeps `p→territory` alive) AND, briefly,
-`ns_lock` (the mount entries + their ref-held immutable `Path` strings are stable for the
-copy); that `g_proc_table_lock → ns_lock` edge is acyclic (nothing held under `ns_lock`
-takes `g_proc_table_lock`). The native `ns [pid]` tool (`usr/coreutils/src/bin/ns.rs`,
+`devproc_read` takes a ref on the Territory in its `proc_for_each` callback, under
+`g_proc_table_lock`, and renders it after the walk with no lock held but `ns_lock`
+(`territory_format_ns` asserts IRQs are on: a shed can hold `ns_lock` for a long time, and
+no CPU may wait on it with IRQs masked). A second walk then asks the admission again under
+the table lock, so a seal or a none wall that landed during the render refuses the read,
+and a Territory detached by the Proc's exit reads as the empty file. `ns_lock` is never
+taken under `g_proc_table_lock`. The native `ns [pid]` tool (`usr/coreutils/src/bin/ns.rs`,
 default pid 0 = kproc) reads `/proc/<pid>/ns`.
 
 `/proc/<pid>/fd` is **deferred to #66c** (seam): a cross-Proc fd-list read of a LIVE
@@ -2794,10 +2796,13 @@ fold-in. **The territory itself no longer "lives until reap"** as of the arm-6 f
 (IDENTITY-DESIGN §9.9.1, Part D): a Proc now releases its `territory` at EXIT (so a
 zombie stops pinning its inherited 9P mount sessions), but *safely* — via a
 **locked-detach + unlocked-free split** (`p->territory = NULL` under `g_proc_table_lock`,
-serializing with `format_ns`, then `territory_unref` the detached pointer outside the
-lock). That split is the sound template #66c can adopt for the handle table in place of
-the lives-until-reap restructure; `format_ns`/`format_cwd` are already NULL-safe for the
-detached-territory zombie.
+serializing with the ns read's two walks, then `territory_unref` the detached pointer
+outside the lock). That split is the sound template #66c can adopt for the handle table in
+place of the lives-until-reap restructure; the ns read and `format_cwd` are NULL-safe for
+the detached-territory zombie. Since the ns read holds a ref across its render (B-3
+votes 5-7), a reader that took its ref before the detach keeps the Territory alive past
+the exit and drops the last ref itself, so the release -- and any wait a 9P clunk in it
+makes -- runs on the reader's thread (a tracked P3: OPEN-BUGS SA-5, round 2's F1).
 
 **Split**: #66a (the substrate + `SYS_FD2PATH` + kernel tests) → #66b (`/proc/<pid>/ns`
 via the refcounted `PgrpMount.mp_path` + the `ns` tool + docs) → #66c (`/proc/<pid>/fd`,

@@ -7174,9 +7174,10 @@ int main(void) {
     // #66b: /proc/<pid>/ns -- the Plan 9 `ns` substrate (the territory mount
     // list). Read kproc's (/proc/0/ns): pid 0 ALWAYS exists + carries the boot
     // mounts (/srv, /proc, /ctl, /dev), so the rendered list is non-empty + has
-    // a "mount " line. Proves the devproc_read -> format_ns -> territory_format_ns
-    // path end-to-end through the REAL syscall (the g_proc_table_lock + ns_lock
-    // nesting), not just the unit test's direct territory_format_ns call. T_OREAD
+    // a "mount " line. Proves the devproc_read -> territory_format_ns path
+    // end-to-end through the REAL syscall (the walk, the render outside the table
+    // lock, the second walk), not just the unit test's direct territory_format_ns
+    // call. T_OREAD
     // (a real read, NOT T_OPATH -- #81 blocks byte I/O on O_PATH handles).
     {
         long nf = t_open(T_WALK_OPEN_FROM_ROOT, "/proc/0/ns", 10, T_OREAD);

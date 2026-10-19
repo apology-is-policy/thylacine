@@ -2814,13 +2814,18 @@ deadlock -- logout hangs, no getty respawn, no new prompt.
   its Territory at **EXIT**, not reap -- the direct analog of #68/#926 moving the
   handle-table close to exit so a peer sees EOF immediately. So an
   exited/zombie session member stops pinning the home mount without waiting to be
-  reaped. Because `/proc/<pid>/ns` (`devproc format_ns`) reads `p->territory`
-  under `g_proc_table_lock` (the #57a F2 envelope), the release uses a
+  reaped. Because `/proc/<pid>/ns` reads `p->territory` under
+  `g_proc_table_lock`, the release uses a
   **locked-detach + unlocked-free split**: under `g_proc_table_lock` set
-  `p->territory = NULL` (serializes with `format_ns`, which then renders empty --
-  `territory_format_ns(NULL)`/`format_cwd` are both NULL-safe), then
-  `territory_unref` the detached pointer OUTSIDE the lock (the `spoor_clunk` may
-  sleep on `Tclunk`; the detached pointer is unreachable by any reader).
+  `p->territory = NULL` (serializes with the ns read's walks: one that finds NULL
+  renders empty -- `territory_format_ns(NULL)`/`format_cwd` are both NULL-safe),
+  then `territory_unref` the detached pointer OUTSIDE the lock (the `spoor_clunk`
+  may sleep on `Tclunk`). Since B-3 votes 5-7 the ns read holds a ref across its
+  render, so a reader that took its ref before the detach keeps the Territory
+  alive and drops the last ref itself: the release then runs on the reader's
+  thread, and a clunk in it may wait, killably, on the dead Proc's 9P server --
+  the zombie stops pinning its sessions when that read ends, not at the instant
+  of death (a tracked P3: OPEN-BUGS SA-5, round 2's F1).
   Idempotent with `proc_free`'s `territory_unref(NULL)`. **Part D alone closes
   the imperium (killed-zombie) case** -- the abdicate-swept job already exited, so
   it releases its mount ref at exit.

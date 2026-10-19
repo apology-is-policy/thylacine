@@ -4149,8 +4149,10 @@ static inline void exit_close_test_window(void) {}
 // first renders from the Territory it holds, and its second look, finding
 // NULL, answers the empty file), THEN territory_unref the detached
 // pointer with the lock DROPPED
-// (territory_unref's spoor_clunk may sleep on a 9P Tclunk; the detached pointer
-// is unreachable by any reader, so the sleep is safe).
+// (territory_unref's spoor_clunk may sleep on a 9P Tclunk, and nothing is held
+// here, so the sleep is safe). No new reader can reach the detached pointer; one
+// that took its ref before the detach drops the last ref itself after its
+// render, and the release then runs on that reader's thread.
 //
 // CALLED with g_proc_table_lock HELD (*s = the saved irq state); on return the
 // lock is re-held with *s refreshed. CALLED only from the last-live-thread exit

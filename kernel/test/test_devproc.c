@@ -596,7 +596,10 @@ void test_devproc_ns_reads_past_the_buffer(void) {
 // there refuses the read, an exit there reads as the exiting Proc's empty file
 // while the reader's own ref keeps the detached Territory alive for the render,
 // and a target unlinked there reads as gone. The control installs a hook that
-// does nothing, so it walks the same path.
+// does nothing, so it walks the same path. Every leg also checks that the
+// reader dropped the ref it took: a target that still holds its Territory is
+// back to its own one ref, and in the exit leg the reader's drop is the one
+// that frees the Territory.
 static struct Proc *g_nsw_target;
 static int          g_nsw_ref_held, g_nsw_ref_left;
 
@@ -617,6 +620,8 @@ void test_devproc_ns_admission_after_render(void) {
     enum { LEGS = (int)(sizeof(window) / sizeof(window[0])) };
     long got[LEGS];
     bool built[LEGS];
+    int  ref_after[LEGS];
+    u64  freed_by_read[LEGS];
     char buf[64];
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
@@ -625,6 +630,8 @@ void test_devproc_ns_admission_after_render(void) {
     for (int i = 0; i < LEGS; i++) {
         got[i]   = -2;
         built[i] = false;
+        ref_after[i]     = -1;
+        freed_by_read[i] = 0;
         struct Proc *tgt = proc_alloc();
         if (!tgt) continue;
         tgt->principal_id = th->proc->principal_id;
@@ -635,9 +642,12 @@ void test_devproc_ns_admission_after_render(void) {
         proc_test_link(tgt);
         struct Spoor *f = built[i] ? open_pidfile_for(tgt->pid, "ns", 0) : NULL;
         g_nsw_target = tgt;
+        u64 destroyed0 = territory_total_destroyed();
         devproc_ns_test_set_window_hook(window[i]);
         got[i] = f ? devproc.read(f, buf, (long)sizeof(buf), 0) : -3;
         devproc_ns_test_set_window_hook(NULL);
+        freed_by_read[i] = territory_total_destroyed() - destroyed0;
+        if (tgt->territory) ref_after[i] = tgt->territory->ref;
         if (f) spoor_clunk(f);
         if (window[i] != nsw_unlink) proc_test_unlink(tgt);
         tgt->state = PROC_STATE_ZOMBIE;
@@ -651,6 +661,10 @@ void test_devproc_ns_admission_after_render(void) {
     TEST_EXPECT_EQ(g_nsw_ref_held, 2, "the read held its own ref on the Territory the exit detached");
     TEST_EXPECT_EQ(g_nsw_ref_left, 1, "past the exit's release, the reader's ref alone kept it");
     TEST_EXPECT_EQ(got[3], -1L, "a Proc gone during the render reads as gone");
+    TEST_EXPECT_EQ(ref_after[0], 1, "control: the reader dropped its ref");
+    TEST_EXPECT_EQ(ref_after[1], 1, "seal: the refused reader dropped its ref");
+    TEST_EXPECT_EQ(freed_by_read[2], (u64)1, "exit: the reader's drop freed the detached Territory");
+    TEST_EXPECT_EQ(ref_after[3], 1, "unlink: the reader that found it gone dropped its ref");
 }
 
 void test_devproc_read_ctl_returns_zero(void) {

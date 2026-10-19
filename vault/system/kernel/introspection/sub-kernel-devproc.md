@@ -270,7 +270,13 @@ Two mutually exclusive machineries serve reads:
   the Proc's Territory, the render runs after the lock is dropped, and a second
   walk asks the seal and the none wall again. A refusal there refuses the read;
   a Proc that dropped its Territory meanwhile is exiting and reads empty; a pid
-  that names another Territory, or no Proc, reads as gone.
+  that names no Proc any more reads as gone. A Proc holding a DIFFERENT
+  Territory also reads as gone, but that cannot happen today: pids never
+  recycle, and a linked Proc's Territory only goes from its own to NULL, so the
+  check is a defence for a future in-place namespace swap. The reader drops its
+  ref after the second walk, with no lock held; when the Proc exited during the
+  render, that drop is the last one, and the Territory's release (its mount
+  clunks included) runs on the reader's thread (OPEN-BUGS SA-5).
 - **own read path** — a purpose-built function, because the content is not a
   formatted snapshot. Seven kinds: `mem` (VA-addressed), `regs`/`fpregs`/`kregs`
   (struct-offset), `kstack`, `wait` (blocks), `environ` (offset-aware over an

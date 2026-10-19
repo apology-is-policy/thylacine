@@ -441,9 +441,10 @@ static size_t format_cmdline(struct Proc *p, char *buf, size_t cap) {
 // lock stays in territory.c). The nested g_proc_table_lock -> dot_lock acquire
 // is acyclic: dot_lock is a documented LEAF guarding only dot_path, and nothing
 // held under it takes g_proc_table_lock. Unlike ns_lock, which the read renders
-// outside the table lock, every dot_lock hold is a bounded copy or pointer swap
-// -- no alloc, no block -- so nesting it under the table lock costs a path's
-// length at most.
+// outside the table lock, every dot_lock hold is bounded and never sleeps: a
+// copy or a pointer swap, plus, in territory_clone, the SLUB allocation of the
+// child's copy. Nesting it under the table lock costs a path's length and at
+// most one slab allocation.
 //
 // NULL dot_path renders "/" (territory_getdot's own contract), so unlike exe this
 // file is never empty for a live Proc. A NULL territory (a Proc torn down past
@@ -1293,7 +1294,11 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_NS:                               // rendered by devproc_read, unlocked
         if (r->recheck) {
             // No Territory now: the Proc is exiting, and its file reads empty.
-            // Another Territory: another Proc, under a reused pid.
+            // Another Territory cannot happen today -- pids never recycle, and
+            // a linked Proc's Territory only ever goes from its own to NULL --
+            // so `same` is a defence: an in-place namespace swap, if one is
+            // ever added, must not let this read answer for a namespace the
+            // Proc no longer has (and should re-render, not refuse).
             if (!p->territory) r->total = 0;
             r->same = !p->territory || p->territory == r->ns;
             break;
@@ -1432,7 +1437,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (r.ns && r.ns != kpgrp()) territory_unref(r.ns);
         if (!r.found) return -1;              // gone since the render
         if (r.denied) return -T_E_ACCES;
-        if (!r.same) return -1;               // the pid names another Proc now
+        if (!r.same) return -1;               // the Proc's Territory changed (unreachable today)
     }
 
     // A whole file is sliced at `off`; a window already starts there.

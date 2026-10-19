@@ -316,7 +316,12 @@ table lock (a concurrent devproc reader then renders empty, and an ns read that
 took its ref first renders from the Territory it holds, then answers the empty
 file when its second look finds NULL; [[sub-kernel-devproc]]), then
 `territory_unref` the detached pointer with the lock dropped (its `spoor_clunk`
-may sleep on a `Tclunk`).
+may sleep on a `Tclunk`). That unref is the last one unless an ns reader took
+its ref before the detach: the reader then drops the last ref after its render,
+so the release, and any wait a 9P clunk in it makes, runs on the READER's
+thread, and the zombie's sessions are released when that read ends rather than
+at the instant of death (OPEN-BUGS SA-5, the holotype round's F1; the planned
+fix gives the reader a ref that keeps only the struct).
 Idempotent with `proc_free`'s later `territory_unref(NULL)`. Since fork
 DEEP-COPIES the territory ([[sub-kernel-proc]]'s `territory_clone`; RFNAMEG
 sharing is unsupported at v1.0), no sibling shares it and I-1 is trivially
