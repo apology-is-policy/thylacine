@@ -433,18 +433,21 @@ static size_t format_cmdline(struct Proc *p, char *buf, size_t cap) {
     return off;
 }
 
-// ns: render the territory's mount list (mount-point name + source name) + the
-// bind count, via territory_format_ns (#66). The renderer takes the territory's
-// ns_lock to read mounts[] -- the entries + their ref-held, immutable Path
-// strings are stable for the read -- so format_ns runs under BOTH g_proc_table_-
-// lock (the #57a F2 envelope keeping p->territory alive) AND, briefly, ns_lock.
+// ns: render a window of the territory's mount list (mount-point name + source
+// name) + the bind count, via territory_format_ns (#66). Unlike the other kinds
+// it renders the window the read asked for, not the whole file: the listing is
+// as long as the mount table (ARCH 9.1), past any buffer here. The renderer takes
+// the territory's ns_lock to read the table -- the entries + their ref-held,
+// immutable Path strings are stable for the read -- so format_ns runs under BOTH
+// g_proc_table_lock (the #57a F2 envelope keeping p->territory alive) AND,
+// briefly, ns_lock.
 // That g_proc_table_lock -> ns_lock edge is acyclic (nothing under ns_lock takes
 // g_proc_table_lock; mount/unmount/clone only spoor_ref / path_ref / defer the
 // sleeping clunk outside the lock). Pre-#66 this read the bind COUNT locklessly
 // (a single aligned-int read); the mount LIST is a pointer walk a concurrent
 // unmount could free, so the lock is now load-bearing for the read.
-static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
-    return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
+static size_t format_ns(struct Proc *p, s64 off, char *buf, size_t cap) {
+    return (size_t)territory_format_ns(p->territory, (u64)off, buf, (u64)cap);
 }
 
 // cwd: the Territory's current working directory (VIVARIUM V-4b-1) -- the source
@@ -1136,16 +1139,16 @@ static int devproc_close(struct Spoor *c) {
 // Read: dispatch by qid kind. Generates synthetic content into a stack
 // buffer, then copies the requested [off, off+n) slice.
 //
-// Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
-// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MOUNT_CAP).
-// prowl-3b bumped 512 -> 2048: /proc/<pid>/sched formats one row per thread of a
-// possibly heavily-threaded Proc (a Go binary / stratumd), each ~40-50 B; 512
-// truncated at ~8 threads. 2048 holds ~30 thread rows (the format bounds the
-// walk cleanly on overflow either way). A deep-namespace ns render (each name up
-// to SYS_OPEN_PATH_MAX=1024) can still exceed it, truncating at a whole-line
-// boundary (territory_format_ns audit F2), best-effort per I-33. A 2 KiB frame
-// on the 16 KiB kstack is safe on the shallow Dev-read path (the DEVCTL_READ_BUF
-// precedent). (Completeness for deep namespaces is a v1.x offset-aware multi-read.)
+// Buffer cap. status fits in <128 B; cmdline is smaller. prowl-3b bumped 512 ->
+// 2048: /proc/<pid>/sched formats one row per thread of a possibly heavily-
+// threaded Proc (a Go binary / stratumd), each ~40-50 B; 512 truncated at ~8
+// threads. 2048 holds ~30 thread rows (the format bounds the walk cleanly on
+// overflow either way). ns is the exception to "the whole file fits": its listing
+// is as long as the mount table (up to PGRP_MOUNT_CAP entries, each name up to
+// SYS_OPEN_PATH_MAX), so it renders the window a read asks for
+// (territory_format_ns), and this bounds one read of it, not the file. A 2 KiB
+// frame on the 16 KiB kstack is safe on the shallow Dev-read path (the
+// DEVCTL_READ_BUF precedent).
 #define DEVPROC_READ_BUF 2048
 
 // #57a F2: format under g_proc_table_lock (the kill-path shape) so the target
@@ -1264,9 +1267,11 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 struct devproc_read_ctx {
     int                 pid;
     u32                 kind;
+    s64                 off;        // ns: the window's start in its listing
     char               *buf;
     size_t              cap;
     size_t              total;
+    bool                windowed;   // buf holds the read's window, not the whole file
     bool                found;
     // prowl-3b (OQ-4): the reading Proc (captured before proc_for_each) + the
     // gate verdict for a gated kind. `caller` is read-only identity/caps; the
@@ -1297,7 +1302,10 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     switch (r->kind) {
     case PQS_STATUS:  r->total = format_status(r->caller, p, r->buf, r->cap); break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
-    case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
+    case PQS_NS:
+        r->total    = format_ns(p, r->off, r->buf, r->cap);
+        r->windowed = true;
+        break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
     case PQS_MAPS:                             // V-4b-2; B-2b: the code rows' addresses
@@ -1378,21 +1386,29 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Proc   *caller = self ? self->proc : NULL;
 
     char content[DEVPROC_READ_BUF];
+    // ns renders only the window it is asked for, so it is asked for no more
+    // than the caller can take: the window then ends at a line end the caller
+    // receives.
+    size_t cap = sizeof(content);
+    if (kind == PQS_NS && (size_t)n < cap) cap = (size_t)n;
     struct devproc_read_ctx r = {
-        .pid = pid, .kind = kind, .buf = content, .cap = sizeof(content),
-        .total = 0, .found = false, .caller = caller, .denied = false,
+        .pid = pid, .kind = kind, .off = off, .buf = content, .cap = cap,
+        .total = 0, .windowed = false, .found = false, .caller = caller,
+        .denied = false,
     };
     proc_for_each(devproc_read_cb, &r);
     if (!r.found) return -1;                  // process gone since walk
     if (r.denied) return -T_E_ACCES;          // the seal, the none wall, or an owner gate
 
+    // A whole file is sliced at `off`; a window already starts there.
     size_t total = r.total;
-    if ((size_t)off >= total) return 0;       // EOF
-    size_t avail = total - (size_t)off;
+    size_t from  = r.windowed ? 0 : (size_t)off;
+    if (from >= total) return 0;              // EOF
+    size_t avail = total - from;
     size_t copy = avail > (size_t)n ? (size_t)n : avail;
 
     u8 *out = (u8 *)buf;
-    for (size_t i = 0; i < copy; i++) out[i] = (u8)content[(size_t)off + i];
+    for (size_t i = 0; i < copy; i++) out[i] = (u8)content[from + i];
     return (long)copy;
 }
 

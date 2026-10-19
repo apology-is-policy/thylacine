@@ -860,7 +860,7 @@ void test_territory_mount_format_ns(void) {
     TEST_EXPECT_EQ(mount(p, sb, mproc, MNOEXEC), 0, "mount /proc noexec");
 
     char buf[256];
-    u64 n = territory_format_ns(p, buf, sizeof(buf));
+    u64 n = territory_format_ns(p, 0, buf, sizeof(buf));
     TEST_ASSERT(n > 0 && n < sizeof(buf), "format_ns produced bounded output");
     buf[n] = '\0';
     TEST_ASSERT(mnt_streq(buf,
@@ -868,21 +868,54 @@ void test_territory_mount_format_ns(void) {
                 "ns renders both mounts (name + #dc / source-path), the #217 "
                 "noexec suffix on the flagged entry ONLY, + the bind count");
 
-    // F2 (audit): truncation discards a partial line at a whole-line boundary --
-    // a cap that fits line 1 ("mount /srv #-\n" = 14 B) but not line 2 yields
-    // EXACTLY the first complete line, with NO partial second line AND NO
-    // trailing "binds:" (which would falsely imply completeness).
+    // F2 (audit): a window ends at its last line end -- one that holds line 1
+    // ("mount /srv #-\n" = 14 B) and part of line 2 yields EXACTLY the first
+    // complete line, with NO partial second line AND NO "binds:" (which would
+    // falsely imply completeness).
     char mid[20];
-    u64 m = territory_format_ns(p, mid, sizeof(mid));
-    TEST_ASSERT(m == 14, "format_ns truncated to one whole line (14 B)");
+    u64 m = territory_format_ns(p, 0, mid, sizeof(mid));
+    TEST_ASSERT(m == 14, "format_ns's window ends at one whole line (14 B)");
     mid[m] = '\0';
     TEST_ASSERT(mnt_streq(mid, "mount /srv #-\n"),
-                "F2: truncation is clean -- first whole line only, no partial, no binds");
+                "F2: the window is clean -- first whole line only, no partial, no binds");
 
-    // A cap too small even for line 1 yields a clean empty result (no partial).
-    char tiny[8];
-    u64 t = territory_format_ns(p, tiny, sizeof(tiny));
-    TEST_EXPECT_EQ((int)t, 0, "F2: cap below one line -> empty (no partial 'mount ')");
+    // The listing is 51 bytes: line 1 (14), line 2 (28), "binds: 0\n" (9). Each
+    // window starts at its offset and ends at its last line end; one holding no
+    // line end holds its bytes, so a read shorter than a line still advances; at
+    // or past the end there is nothing.
+    char win[33];
+    u64 w2 = territory_format_ns(p, 14, win, 32);
+    win[w2] = '\0';
+    bool w2_line2 = w2 == 28 && mnt_streq(win, "mount /proc /realsrc noexec\n");
+    u64 w3 = territory_format_ns(p, 42, win, 32);
+    win[w3] = '\0';
+    bool w3_binds = w3 == 9 && mnt_streq(win, "binds: 0\n");
+    u64 w_mid = territory_format_ns(p, 3, win, 32);
+    win[w_mid] = '\0';
+    bool mid_line = w_mid == 11 && mnt_streq(win, "nt /srv #-\n");
+    u64 tiny_n = territory_format_ns(p, 0, win, 8);
+    win[tiny_n] = '\0';
+    bool tiny_raw = tiny_n == 8 && mnt_streq(win, "mount /s");
+    u64 at_end = territory_format_ns(p, 51, win, 32);
+    u64 past   = territory_format_ns(p, 1u << 20, win, 32);
+    // Eight bytes at a time, each window starting where the last ended, the
+    // listing comes back whole.
+    char whole[64];
+    u64 off = 0, k;
+    int steps = 0;
+    while (off < sizeof(whole) - 8 && (k = territory_format_ns(p, off, whole + off, 8)) > 0) {
+        off += k;
+        steps++;
+    }
+    whole[off] = '\0';
+    bool stepped = off == 51 && mnt_streq(whole, buf);
+    TEST_ASSERT(w2_line2, "a window at line 2's start holds line 2 alone");
+    TEST_ASSERT(w3_binds, "a window at the binds line holds it");
+    TEST_ASSERT(mid_line, "a window starting mid-line ends at that line's end");
+    TEST_ASSERT(tiny_raw, "a window shorter than line 1 holds its 8 bytes");
+    TEST_EXPECT_EQ((int)at_end, 0, "a window at the end holds nothing");
+    TEST_EXPECT_EQ((int)past, 0, "a window past the end holds nothing");
+    TEST_ASSERT(stepped && steps > 6, "8-byte windows read in turn give back the whole listing");
 
     territory_unref(p);
     spoor_unref(sa);
@@ -1238,7 +1271,7 @@ void test_territory_mount_covered_format_ns(void) {
     TEST_EXPECT_EQ(mount(p, a, mp, MBEFORE | MNOEXEC), 0, "A MBEFORE|MNOEXEC -> [A, covered]");
 
     char buf[128];
-    u64 n = territory_format_ns(p, buf, sizeof(buf));
+    u64 n = territory_format_ns(p, 0, buf, sizeof(buf));
     TEST_ASSERT(n > 0 && n < sizeof(buf), "bounded output");
     buf[n] = '\0';
     TEST_ASSERT(mnt_streq(buf, "mount /u #- noexec\nmount /u /u covered\nbinds: 0\n"),
@@ -1251,7 +1284,7 @@ void test_territory_mount_covered_format_ns(void) {
 // /proc/<pid>/ns as format_ns renders it, against what a step expects.
 static bool ns_is(struct Territory *t, const char *want) {
     char buf[512];
-    u64 n = territory_format_ns(t, buf, sizeof(buf) - 1);
+    u64 n = territory_format_ns(t, 0, buf, sizeof(buf) - 1);
     buf[n] = '\0';
     return mnt_streq(buf, want);
 }

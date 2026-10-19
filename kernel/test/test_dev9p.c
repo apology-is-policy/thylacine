@@ -4785,10 +4785,10 @@ static bool d9_ns_is(const char *got, const char *want) {
     return false;
 }
 
-// Render `t`'s mount list into buf (cap bytes) and NUL-terminate it; buf must
-// hold cap + 1.
+// Render the window of `t`'s mount list that a read of cap bytes at offset 0
+// gets into buf, and NUL-terminate it; buf must hold cap + 1.
 static u64 d9_ns(struct Territory *t, char *buf, u64 cap) {
-    u64 n = territory_format_ns(t, buf, cap);
+    u64 n = territory_format_ns(t, 0, buf, cap);
     buf[n <= cap ? n : cap] = '\0';
     return n;
 }
@@ -4846,12 +4846,16 @@ void test_dev9p_remote_format_ns(void) {
     TEST_ASSERT(d9_ns_is(buf, "mount /m / remote\nbinds: 0\n"),
                 "a member from a remote session ends in \" remote\"");
 
-    // The suffix is inside the #66b rewind: a cap that ends in the middle of
-    // it, or just after it, leaves no partial line; the whole line fits in 18.
-    TEST_EXPECT_EQ((int)d9_ns(t, buf, 13), 0, "cap inside \" remote\": no partial line");
-    TEST_EXPECT_EQ((int)d9_ns(t, buf, 17), 0, "cap before the newline: no partial line");
-    TEST_EXPECT_EQ((int)d9_ns(t, buf, 18), 18, "the whole line, and no binds line after it");
-    TEST_ASSERT(d9_ns_is(buf, "mount /m / remote\n"), "the truncated list is the whole line");
+    // The suffix belongs to its line (#66b): a window that ends inside the next
+    // line ends at this one's newline, suffix and all, and a window shorter than
+    // the line holds its first bytes -- never a line closed before its suffix.
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 13), 13, "a window inside \" remote\": its 13 bytes");
+    TEST_ASSERT(d9_ns_is(buf, "mount /m / re"), "the line's first 13 bytes, no newline");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 17), 17, "a window short of the newline: its 17 bytes");
+    TEST_ASSERT(d9_ns_is(buf, "mount /m / remote"), "the suffix whole, no newline");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 18), 18, "the whole line");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 20), 18, "a window inside the binds line ends at the line");
+    TEST_ASSERT(d9_ns_is(buf, "mount /m / remote\n"), "the window is the whole line, suffix included");
 
     TEST_EXPECT_EQ(mount(t, b, mp, MREPL), 0, "MREPL a local tree over the remote one");
     d9_ns(t, buf, sizeof(buf) - 1);
@@ -4954,11 +4958,15 @@ void test_dev9p_origin_format_ns(void) {
     d9_ns(t, buf, sizeof(buf) - 1);
     TEST_ASSERT(d9_ns_is(buf, "mount /m /srv/home-joey remote\nbinds: 0\n"),
                 "the remote suffix follows the name");
-    // "mount /m /srv/home-joey remote\n" is 31 bytes: a cap inside the name or
-    // just short of the newline leaves no partial line.
-    TEST_EXPECT_EQ((int)d9_ns(t, buf, 16), 0, "cap inside the name: no partial line");
-    TEST_EXPECT_EQ((int)d9_ns(t, buf, 30), 0, "cap before the newline: no partial line");
+    // "mount /m /srv/home-joey remote\n" is 31 bytes: a window inside the name
+    // or short of the newline holds the line's first bytes, and one that ends
+    // inside the binds line ends at this line's newline.
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 16), 16, "a window inside the name: its 16 bytes");
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /srv/ho"), "the line's first 16 bytes");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 30), 30, "a window short of the newline: its 30 bytes");
     TEST_EXPECT_EQ((int)d9_ns(t, buf, 31), 31, "the whole line");
+    TEST_EXPECT_EQ((int)d9_ns(t, buf, 35), 31, "a window inside the binds line ends at the line");
+    TEST_ASSERT(d9_ns_is(buf, "mount /m /srv/home-joey remote\n"), "the window is the whole line");
     territory_unref(t);
 
     // A walk of the root -- the clone every resolution crosses with -- has its

@@ -248,7 +248,7 @@ struct Spoor *spoor_clone(struct Spoor *c) {
 // single-instance default set in spoor_alloc_internal).
 //
 // UNIQUE AMONG LIVE INSTANCES, and three identity keys rest on that: the mount
-// key (territory.c mount_key_eq), MNOEXEC coverage (mount_noexec_covers -- #217,
+// key (territory.c mhead_find), MNOEXEC coverage (mount_noexec_covers -- #217,
 // a security decision) and the REVENANT Image cache (image.c key_match, where a
 // collision would serve one instance's cached pages for another's file, an I-1
 // alias). Every Env (env_alloc) and every dev9p / devsrv attach mints one, so an

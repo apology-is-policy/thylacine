@@ -526,8 +526,9 @@ the vtable, its first leg read the guest's own decoy (2026-10-06).
 `dev9p.origin_format_ns` pins the origin: the accessor's negatives (NULL,
 another Dev, a bare dev9p Spoor), an unstamped root's `/`, the stamp sharing
 the name (its count rises by one) and refusing a second stamp, the rendered
-name with and without ` remote`, caps inside the name and before the newline,
-a clone walk carrying no origin and refusing the stamp, a covered entry on a
+name with and without ` remote`, windows inside the name, short of the
+newline and inside the binds line (the listing is read in windows since the
+dynamic mount table, [[sub-kernel-territory]]), a clone walk carrying no origin and refusing the stamp, a covered entry on a
 stamped root keeping its own name, the root's close releasing the reference,
 a nameless transport's device spec, and a cached-open priv refusing what the
 same priv shaped as a root takes.

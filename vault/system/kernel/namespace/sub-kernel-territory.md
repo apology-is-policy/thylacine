@@ -231,11 +231,17 @@ Accepted consequences, not fixed:
 `territory_setdot` is fed only by `stalk_landed`'s name (SYS_CHDIR) and the
 boot's literal `/bin`, so `dot_path` stays clean.
 
-**`territory_format_ns`** renders `/proc/<pid>/ns` under `ns_lock`, one
-whole `mount <point> <source>` line at a time: snapshot `off`, rewind on
-any overflow to discard a partial line, and emit `binds: N` only when
-the list rendered in full (a `binds:` line after a truncation would
-falsely imply completeness). The source label is its Spoor's `->path`,
+**`territory_format_ns`** renders `/proc/<pid>/ns` under `ns_lock`: one
+`mount <point> <source>` line per entry in table order, then `binds: N`.
+The listing is as long as the table, so the function copies a window of
+it — the bytes from the read's offset, at most the caller's room, ending at
+the last line end among them (#66b F2: no partial line where a whole one
+fits), or, holding no line end, all of them, so a read shorter than a line
+still advances. A reader that loops to the end receives every line, with
+`binds:` last; a reader that stops early holds whole lines and no
+`binds:`, which is how a cut list is told from a whole one. Each read
+renders afresh, so two windows of a table edited between them are two
+renders. The source label is its Spoor's `->path`,
 or `#<dc>` — the Plan 9 device spec — when the source is a device root
 with no namespace name. A 9P session's root is the exception (operator vote
 2026-09-28, Plan 9's form): its label is the file its session came over, the
@@ -257,21 +263,21 @@ declared remote at its attach or its /srv post, asked of the source through
 mounted that entry, and its line already names the directory, even when the
 directory itself lies in a remote session (main's rule, and the test
 asserts the premise so the missing suffix is the rule's doing). Each suffix
-is inside the line's rewind, so a cap that falls inside ` remote` or just
-before the newline leaves no partial line, and `binds:` stays the proof of a
-whole list. Readers therefore treat a list without `binds:` as cut: the
+belongs to its line: a window that ends inside the next line ends at this
+one's newline, suffix and all, and `binds:` stays the proof of a whole
+list. Readers therefore treat a list without `binds:` as cut: the
 coreutils listing tools say `mount list incomplete` rather than show a
 mount point by its plain realm. This is the kernel's only use of the
 declaration. `dev9p.remote_format_ns` renders real Territories over
 unstamped roots: an unmarked
-session's `mount /m /`, a marked one's `mount /m / remote`, caps of 13, 17
-and 18 bytes, an MREPL of a local tree over the remote one, and a union at a
+session's `mount /m /`, a marked one's `mount /m / remote`, windows of 13,
+17, 18 and 20 bytes, an MREPL of a local tree over the remote one, and a union at a
 remote directory whose covered line carries no suffix. The LR-1 sabotage
 boots turned it red when the covered guard was dropped and when the suffix
 write's result was ignored. `dev9p.origin_format_ns` renders the origin the
 same way: an unstamped root's `/`, a stamped root's `mount /m /srv/home-joey`
-(then with ` remote` after the name), caps inside the name and before the
-newline, a walked clone reading its own name, a covered entry on a stamped
+(then with ` remote` after the name), windows inside the name, short of the
+newline and inside the binds line, a walked clone reading its own name, a covered entry on a stamped
 root keeping its own, and a nameless transport's device spec.
 
 ## Data structures
@@ -617,17 +623,17 @@ its index, and `mount_noexec_covers` is a scan of every entry (a source's
 instance is not a key), bounded by the cap.
 
 `territory_format_ns` holds `ns_lock` inside `g_proc_table_lock`'s
-IRQs-off window. Bounded (it stops at the first line that does not fit
-the caller's buffer — `/proc/<pid>/ns` reads into `DEVPROC_READ_BUF`,
-2 KiB — no sleep, no allocation) and comparable to the pre-existing
-`format_status` hold — a latency note, not a defect. That 2 KiB is also
-the listing's limit, and that IS a defect: a namespace past about forty
-entries is cut. Readers know a cut list by its missing `binds:` line, so it
-is never mistaken for a whole one, but they cannot see the rest. Before the
-dynamic table only long names could reach it; now a count can. The fix is
-the dynamic table's next step: an offset-aware render, which serves the
-window a read asks for from the whole listing, as `/proc/<pid>/environ`
-already does for an environment that outgrows the buffer.
+IRQs-off window. Bounded (a line before the window costs a few
+comparisons and no copy, the render stops at the window's end, and one read
+of `/proc/<pid>/ns` is at most `DEVPROC_READ_BUF`, 2 KiB; no sleep, no
+allocation) and comparable to the pre-existing `format_status` hold — a
+latency note, not a defect. Until the dynamic table's 5d step that 2 KiB
+was also the listing's limit: devproc rendered the whole file into it, so a
+namespace past about forty entries was cut, a limit only long names had
+reached under the array. Now the read's offset reaches the renderer, which
+serves that window of the whole listing, as `/proc/<pid>/environ` already
+did for an environment past the buffer
+(`devproc.ns_reads_past_the_buffer`, `territory_mount.format_ns`).
 
 ## Prosecution
 

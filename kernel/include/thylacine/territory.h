@@ -658,23 +658,28 @@ int  territory_mount_check(struct Territory *territory);
 // as an allocation failure would. Returns how many were still to fail.
 u32  territory_mount_fail_nodes_for_test(u32 n);
 
-// territory_format_ns (#66): render the mount list + bind count into `buf`
-// (NUL-NOT-appended; the caller treats [0,len) as the content) for the
-// /proc/<pid>/ns introspection file. One line per mount entry:
+// territory_format_ns (#66): the namespace listing of /proc/<pid>/ns. One line
+// per mount entry, in table order:
 //   "mount <mountpoint-name> <source-name-or-#dc>\n"
 // then "binds: <N>\n", then -- iff the Territory declares the Linux phenotype
-// (territory_root_pheno; Design D, VIVARIUM 13.10.3) -- "root: pheno-linux\n",
-// each whole-line-or-nothing. The mount-point name is the entry's ref-held mp_path
-// (I-33; "?" when unknown); the source name is its Spoor's ->path, or "#<dc>"
-// (the Plan 9 device spec) when the source is a device root with no namespace
-// name. Reads the mount table UNDER ns_lock (the entries + their ref-held,
-// immutable Path strings are stable for the read); truncates at `cap` (the
-// list is best-effort introspection -- I-33). Returns the byte count written
-// (<= cap). NULL/zero-cap -> 0. The CALLER must hold the target Proc alive
+// (territory_root_pheno; Design D, VIVARIUM 13.10.3) -- "root: pheno-linux\n".
+// The mount-point name is the entry's ref-held mp_path (I-33; "?" when unknown);
+// the source name is its Spoor's ->path, or "#<dc>" (the Plan 9 device spec)
+// when the source is a device root with no namespace name.
+//
+// The listing is as long as the table, so this copies a window of it: the
+// listing's bytes from `off`, at most `cap` of them, ending at the last line end
+// among them when there is one. A read that starts on a line therefore gets
+// whole lines, and a window shorter than a line still gets its bytes, so a
+// reader looping to the end receives the whole listing (`binds:` last). Returns
+// the count, 0 when `off` is at or past the end; NUL-NOT-appended. NULL/zero-cap
+// -> 0. Each call renders afresh UNDER ns_lock (the entries + their ref-held,
+// immutable Path strings are stable for it), so two windows of a table edited
+// between them are two renders. The CALLER must hold the target Proc alive
 // (devproc runs this inside a proc_for_each callback under g_proc_table_lock,
 // which keeps p->territory alive -- the #57a F2 envelope); the resulting
 // g_proc_table_lock -> ns_lock lock edge is acyclic (nothing under ns_lock
 // takes g_proc_table_lock).
-u64  territory_format_ns(struct Territory *territory, char *buf, u64 cap);
+u64  territory_format_ns(struct Territory *territory, u64 off, char *buf, u64 cap);
 
 #endif // THYLACINE_PGRP_H

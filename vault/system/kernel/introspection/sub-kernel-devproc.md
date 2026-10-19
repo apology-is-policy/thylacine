@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -253,6 +253,12 @@ Two mutually exclusive machineries serve reads:
 - **format-and-slice** — the whole file is generated into a 2 KiB stack buffer
   under `g_proc_table_lock`, then the `[off, off+n)` slice is copied out.
   Eight kinds: `status`, `cmdline`, `ctl`, `ns`, `sched`, `exe`, `cwd`, `maps`.
+  `ns` is the one WINDOWED kind: it shares the dispatch, so the seal and the
+  none wall reach it as they reach the rest, but its listing is as long as the
+  mount table, so the read's offset goes to `territory_format_ns`, which
+  renders that window (at most the caller's room, at most 2 KiB, ending at a
+  line end), and the read copies it from its start rather than slicing at the
+  offset ([[sub-kernel-territory]]; `devproc.ns_reads_past_the_buffer`).
 - **own read path** — a purpose-built function, because the content is not a
   formatted snapshot. Seven kinds: `mem` (VA-addressed), `regs`/`fpregs`/`kregs`
   (struct-offset), `kstack`, `wait` (blocks), `environ` (offset-aware over an
@@ -797,9 +803,10 @@ performance backlog.
 - **Single-step resumes the whole process.** Peers briefly run during a step.
 - **`wait` is level-triggered**: an already-stopped target returns immediately
   rather than delivering one message per stop edge.
-- **Deep renders truncate.** `ns` with long mount paths, `maps` with many
-  regions, and `kstack` past 2 KiB all truncate at a line boundary; the fix is
-  an offset-aware multi-read.
+- **Deep renders truncate.** `maps` with many regions and `kstack` past 2 KiB
+  truncate at a line boundary; the fix is an offset-aware multi-read, which
+  `ns` has had since the dynamic mount table made a long listing reachable
+  by count (2026-10-19).
 - **`cmdline` is a placeholder** that reports a fixed string rather than argv.
 - **Proxying `environ` needs a deputy that acts with its client's authority.**
   The gate keys on the *reader*, so a server proxying this file is authorized as

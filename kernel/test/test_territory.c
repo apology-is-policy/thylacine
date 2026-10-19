@@ -219,15 +219,15 @@ void test_territory_render_root_pheno(void) {
     TEST_ASSERT(t != NULL, "territory_alloc");
     if (!t) return;
     char buf[128];
-    u64 n0 = territory_format_ns(t, buf, sizeof(buf));
+    u64 n0 = territory_format_ns(t, 0, buf, sizeof(buf));
     bool undecl_has_root  = ns_has(buf, n0, "root: pheno-linux");
     bool undecl_has_binds = ns_has(buf, n0, "binds: 0\n");
     territory_declare_linux(t);
-    u64 n1 = territory_format_ns(t, buf, sizeof(buf));
+    u64 n1 = territory_format_ns(t, 0, buf, sizeof(buf));
     bool decl_has_root = ns_has(buf, n1, "binds: 0\nroot: pheno-linux\n");
     bool decl_ends_nl  = (n1 > 0 && buf[n1 - 1] == '\n');
     char tiny[12];   // "binds: 0\n" fits (9 bytes); "root: pheno-linux\n" (18) does not
-    u64 n2 = territory_format_ns(t, tiny, sizeof(tiny));
+    u64 n2 = territory_format_ns(t, 0, tiny, sizeof(tiny));
     bool tiny_whole = (n2 == 9) && ns_has(tiny, n2, "binds: 0\n");
     territory_unref(t);
     TEST_ASSERT(undecl_has_binds, "CONTROL: an undeclared Territory renders its binds line");

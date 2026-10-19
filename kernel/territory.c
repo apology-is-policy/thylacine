@@ -847,71 +847,72 @@ u64 territory_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __
 u64 territory_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
 
 // =============================================================================
-// /proc/<pid>/ns rendering (#66). Tiny append helpers -- each returns false on
-// overflow (the renderer then stops; the list is best-effort introspection per
-// I-33). *off advances only on a fit.
+// /proc/<pid>/ns rendering (#66). The listing is rendered from its start at every
+// call, and a window of it is copied out: ns_emit copies whatever part of a run
+// falls in the window and counts the rest, so a line before the window costs a
+// few comparisons and no copy.
 // =============================================================================
 
-static bool ns_put_str(char *buf, u64 cap, u64 *off, const char *s) {
-    u64 o = *off;
-    for (u64 i = 0; s[i] != '\0'; i++) {
-        if (o >= cap) return false;
-        buf[o++] = s[i];
+struct ns_window {
+    char *buf;
+    u64   off;     // the listing's first byte the window holds
+    u64   cap;
+    u64   pos;     // bytes of the listing rendered so far
+    u64   eol;     // window bytes up to the last line end copied; 0 if none
+};
+
+static bool ns_window_full(const struct ns_window *w) {
+    return w->pos >= w->off + w->cap;
+}
+
+static void ns_emit(struct ns_window *w, const char *s, u64 n) {
+    u64 end = w->off + w->cap;
+    u64 lo  = w->pos < w->off ? w->off - w->pos : 0;
+    u64 hi  = w->pos >= end ? 0 : (end - w->pos < n ? end - w->pos : n);
+    for (u64 i = lo; i < hi; i++) {
+        u64 at = w->pos + i - w->off;
+        w->buf[at] = s[i];
+        if (s[i] == '\n') w->eol = at + 1;
     }
-    *off = o;
-    return true;
+    w->pos += n;
 }
 
-// Append a bounded byte run (a Path string `s` is NOT necessarily reread as
-// NUL-terminated here -- we copy exactly `n` bytes, the cached path->len).
-static bool ns_put_bytes(char *buf, u64 cap, u64 *off, const char *s, u64 n) {
-    if (*off + n > cap) return false;
-    for (u64 i = 0; i < n; i++) buf[*off + i] = s[i];
-    *off += n;
-    return true;
+static void ns_emit_str(struct ns_window *w, const char *s) {
+    u64 n = 0;
+    while (s[n] != '\0') n++;
+    ns_emit(w, s, n);
 }
 
-static bool ns_put_udec(char *buf, u64 cap, u64 *off, u64 v) {
-    char tmp[24];
+static void ns_emit_udec(struct ns_window *w, u64 v) {
+    char tmp[24], out[24];
     int n = 0;
     if (v == 0) tmp[n++] = '0';
     else while (v > 0 && n < (int)sizeof(tmp)) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
-    if (*off + (u64)n > cap) return false;
-    for (int i = 0; i < n; i++) buf[(*off)++] = tmp[n - 1 - i];
-    return true;
+    for (int i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    ns_emit(w, out, (u64)n);
 }
 
-u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
+u64 territory_format_ns(struct Territory *p, u64 off, char *buf, u64 cap) {
     if (!p || !buf || cap == 0)   return 0;
     if (p->magic != PGRP_MAGIC)   extinction("territory_format_ns of corrupted Territory");
 
-    u64 off = 0;
+    struct ns_window w = { buf, off, cap, 0, 0 };
     // Read the mount table UNDER ns_lock: while held, each entry's source +
     // mp_path are ref-pinned (and source->path is ref-pinned by source + is an
     // immutable string), so every byte copied below is stable. ns_lock is a
-    // near-leaf; the bounded buffer writes take no further lock + cannot sleep.
-    // The g_proc_table_lock -> ns_lock edge the devproc caller introduces is
-    // acyclic (no ns_lock holder takes g_proc_table_lock).
+    // near-leaf; the window writes take no further lock + cannot sleep, and the
+    // render stops at the window's end, so the hold is bounded by the table, not
+    // by the listing's length. The g_proc_table_lock -> ns_lock edge the devproc
+    // caller introduces is acyclic (no ns_lock holder takes g_proc_table_lock).
     spin_lock(&p->ns_lock);
-    bool truncated = false;
-    for (const struct PgrpMount *m = p->mfirst; m; m = m->tnext) {
-        // Render a COMPLETE "mount <pt> <src>\n" line or NONE: snapshot off, and
-        // on any overflow rewind to discard the partial line (#66b audit F2 --
-        // so a truncated list never leaves a half "mount " prefix that the
-        // trailing "binds:" then concatenates into a malformed record). The
-        // output is therefore always a sequence of whole lines.
-        u64 line_start = off;
-        bool ok = ns_put_str(buf, cap, &off, "mount ");
+    for (const struct PgrpMount *m = p->mfirst; m && !ns_window_full(&w); m = m->tnext) {
+        ns_emit_str(&w, "mount ");
 
         // Mount-point name (the Plan 9 Chan.path of the dir mounted onto). NULL
         // mp_path -> "?" (a kernel-internal mountpoint with no retained name).
-        if (ok) {
-            if (m->mp_path && m->mp_path->len)
-                ok = ns_put_bytes(buf, cap, &off, m->mp_path->s, m->mp_path->len);
-            else
-                ok = ns_put_str(buf, cap, &off, "?");
-        }
-        if (ok) ok = ns_put_str(buf, cap, &off, " ");
+        if (m->mp_path && m->mp_path->len) ns_emit(&w, m->mp_path->s, m->mp_path->len);
+        else                               ns_emit_str(&w, "?");
+        ns_emit_str(&w, " ");
 
         // Source label. A 9P session's root: the file its session came over (the
         // operator's vote of 2026-09-28, Plan 9's form -- a mount line names the
@@ -920,77 +921,71 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
         // directory. Otherwise the source Spoor's namespace name when it has one
         // (a mounted sub-tree); else "#<dc>" -- the Plan 9 device spec (a device
         // root has no namespace path; '#9'=9P, '#s'=srv, '#p'=proc, ...).
-        if (ok) {
-            struct Spoor *src = m->source;
-            const struct Path *origin = NULL;
-            char odc = 0;
-            if (!(m->flags & MCOVERED) && dev9p_spoor_origin(src, &origin, &odc)) {
-                if (origin) {
-                    ok = ns_put_bytes(buf, cap, &off, origin->s, origin->len);
-                } else {
-                    char dev[3] = { '#', odc, '\0' };
-                    ok = ns_put_str(buf, cap, &off, dev);
-                }
-            } else if (src && src->path && src->path->len) {
-                ok = ns_put_bytes(buf, cap, &off, src->path->s, src->path->len);
+        struct Spoor *src = m->source;
+        const struct Path *origin = NULL;
+        char odc = 0;
+        if (!(m->flags & MCOVERED) && dev9p_spoor_origin(src, &origin, &odc)) {
+            if (origin) {
+                ns_emit(&w, origin->s, origin->len);
             } else {
-                char dev[3];
-                dev[0] = '#';
-                dev[1] = src ? (char)src->dc : '?';
-                dev[2] = '\0';
-                ok = ns_put_str(buf, cap, &off, dev);
+                char dev[3] = { '#', odc, '\0' };
+                ns_emit_str(&w, dev);
             }
+        } else if (src && src->path && src->path->len) {
+            ns_emit(&w, src->path->s, src->path->len);
+        } else {
+            char dev[3];
+            dev[0] = '#';
+            dev[1] = src ? (char)src->dc : '?';
+            dev[2] = '\0';
+            ns_emit_str(&w, dev);
         }
         // #217: render MNOEXEC. A restriction that cannot be observed cannot be
         // debugged -- an operator asking "is this container's /env actually
         // noexec?" has no other way to find out, and "the code passes the flag"
         // is not an answer about a RUNNING namespace. Rendered as a suffix so
         // every existing parse of the line's first two fields is unchanged.
-        if (ok && (m->flags & MNOEXEC)) ok = ns_put_str(buf, cap, &off, " noexec");
+        if (m->flags & MNOEXEC) ns_emit_str(&w, " noexec");
         // VIVARIUM section 13: render MPHENO_LINUX for the same reason -- a
         // declaration that cannot be observed cannot be audited. An operator
         // asking "is /viv/bin actually a pheno-linux mount?" reads it here.
-        if (ok && (m->flags & MPHENO_LINUX)) ok = ns_put_str(buf, cap, &off, " pheno-linux");
+        if (m->flags & MPHENO_LINUX) ns_emit_str(&w, " pheno-linux");
         // The covered directory is a union member in its own right (its line
         // reads "mount <pt> <pt> covered"): shown, so an operator can see that
         // the point's own names are searched and in what order.
-        if (ok && (m->flags & MCOVERED)) ok = ns_put_str(buf, cap, &off, " covered");
+        if (m->flags & MCOVERED) ns_emit_str(&w, " covered");
         // LR-1 (HAUL-DESIGN 4.8): a member whose source belongs to a 9P session
         // declared remote at its attach or its /srv post. Never the covered
         // entry: nobody mounted it, and its line already names the directory.
-        if (ok && !(m->flags & MCOVERED) && dev9p_spoor_remote(m->source))
-            ok = ns_put_str(buf, cap, &off, " remote");
-        if (ok) ok = ns_put_str(buf, cap, &off, "\n");
-
-        if (!ok) { off = line_start; truncated = true; break; }   // discard partial
+        if (!(m->flags & MCOVERED) && dev9p_spoor_remote(m->source)) ns_emit_str(&w, " remote");
+        ns_emit_str(&w, "\n");
     }
     // Bind count (binds[] are abstract path_id_t at v1.0 -- no string names to
-    // render; the count keeps the file's pre-#66 contract). Emit it ONLY when the
-    // mount list rendered in full -- a "binds:" line after a truncated list would
-    // falsely imply completeness. Rewind a partial binds line too (F2).
+    // render; the count keeps the file's pre-#66 contract). It comes after the
+    // last mount line, so a reader that holds it has the whole list.
     int nb = p->nbinds;
     spin_unlock(&p->ns_lock);
 
-    if (!truncated) {
-        u64 bstart = off;
-        if (!(ns_put_str(buf, cap, &off, "binds: ") &&
-              ns_put_udec(buf, cap, &off, (u64)(nb < 0 ? 0 : nb)) &&
-              ns_put_str(buf, cap, &off, "\n")))
-            off = bstart;
+    if (!ns_window_full(&w)) {
+        ns_emit_str(&w, "binds: ");
+        ns_emit_udec(&w, (u64)(nb < 0 ? 0 : nb));
+        ns_emit_str(&w, "\n");
         // Design D audit F6: render the Territory-level phenotype declaration
         // (VIVARIUM 13.10.3) for the reason the per-mount " pheno-linux"
         // suffix above is rendered -- a declaration that cannot be observed
-        // cannot be audited. Whole-line-or-nothing, after the binds line so
-        // every existing parse of the file is unchanged. Read through the
-        // accessor (an atomic load): the flag is set once, on the child's
-        // clone before its first EL0 instruction, and copied by clone, so it
-        // needs no ns_lock.
-        if (territory_root_pheno(p)) {
-            u64 rstart = off;
-            if (!ns_put_str(buf, cap, &off, "root: pheno-linux\n")) off = rstart;
-        }
+        // cannot be audited. After the binds line so every existing parse of
+        // the file is unchanged. Read through the accessor (an atomic load):
+        // the flag is set once, on the child's clone before its first EL0
+        // instruction, and copied by clone, so it needs no ns_lock.
+        if (territory_root_pheno(p)) ns_emit_str(&w, "root: pheno-linux\n");
     }
-    return off;
+
+    // The window ends at its last line end (#66b audit F2: no partial line
+    // where a whole one could be had), or, holding no line end, is returned
+    // whole, so a read shorter than a line still advances.
+    if (w.eol) return w.eol;
+    if (w.pos <= off) return 0;
+    return (w.pos - off < cap) ? w.pos - off : cap;
 }
 
 // =============================================================================

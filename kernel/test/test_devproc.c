@@ -23,6 +23,7 @@
 #include "../../arch/arm64/mmu.h"        // 8a-1b-gamma-1: mmu_install_user_pte + mmu_cross_proc_* + pa_to_kva
 #include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
 #include "../../mm/phys.h"               // alloc_pages / free_pages
+#include "../../mm/slub.h"               // kmalloc -- the ns windows test's buffers
 
 #include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
 #include <thylacine/caps.h>
@@ -498,6 +499,90 @@ void test_devproc_read_ns_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "binds:"), "ns contains 'binds:'");
 
     spoor_clunk(ns);
+}
+
+// /proc/<pid>/ns past devproc's 2 KiB read buffer (ARCH 9.1: the mount table is
+// as long as PGRP_MOUNT_CAP allows, and its listing with it). kproc's Territory
+// takes 48 mounts whose names make the listing past 2 KiB; reads of 4 KiB, each
+// starting where the last ended, return at most the buffer, each ends on a line,
+// and together they are exactly the listing territory_format_ns renders whole,
+// binds last. The mounts come off before anything is asserted.
+void test_devproc_ns_reads_past_the_buffer(void);
+void test_devproc_ns_reads_past_the_buffer(void) {
+    enum { NMNT = 48, CAP = 8192, CHUNK = 4096 };
+    struct Territory *k = kpgrp();
+    int base = territory_nmounts(k);
+    struct Spoor *pts[NMNT] = { 0 };
+    struct Spoor *src = spoor_alloc(&devnone);
+    int mounted = 0;
+    for (int i = 0; i < NMNT && src; i++) {
+        struct Spoor *mp = spoor_alloc(&devnone);
+        if (!mp) break;
+        pts[i] = mp;
+        mp->qid.path = 0xD5000000u + (u64)i;
+        mp->qid.type = QTDIR;
+        char name[48] = "devproc-ns-window-past-the-buffer-";
+        int nl = 0;
+        while (name[nl]) nl++;
+        name[nl++] = (char)('0' + i / 10);
+        name[nl++] = (char)('0' + i % 10);
+        struct Path *root = path_make_root();
+        mp->path = root ? path_addelem(root, name, (u64)nl) : NULL;
+        path_unref(root);
+        if (mp->path && mount(k, src, mp, 0) == 0) mounted++;
+    }
+
+    struct Spoor *proot  = devproc.attach("");
+    struct Spoor *piddir = walk_one(proot, "0");
+    struct Spoor *ns     = walk_one(piddir, "ns");
+    spoor_unref(piddir);
+    spoor_unref(proot);
+    bool opened = ns && devproc.open(ns, 0) != NULL;
+    char *got   = kmalloc(CAP, 0);
+    char *want  = kmalloc(CAP, 0);
+    char *chunk = kmalloc(CHUNK, 0);
+    u64 off = 0;
+    int reads = 0;
+    bool bounded = true, on_lines = true;
+    if (opened && got && chunk) {
+        long r;
+        while (off + CHUNK <= CAP && (r = devproc.read(ns, chunk, CHUNK, (s64)off)) > 0) {
+            if (r > 2048) bounded = false;
+            if (chunk[r - 1] != '\n') on_lines = false;
+            for (long i = 0; i < r; i++) got[off + (u64)i] = chunk[i];
+            off += (u64)r;
+            reads++;
+        }
+    }
+    u64 wn = want ? territory_format_ns(k, 0, want, CAP) : 0;
+    bool same = got && want && off == wn && off > 2048;
+    for (u64 i = 0; same && i < off; i++) same = got[i] == want[i];
+    // The last line names the bind count.
+    u64 ls = off;
+    while (ls > 0 && got && (ls == off || got[ls - 1] != '\n')) ls--;
+    bool binds_last = got && off - ls > 7 && contains(got + ls, (size_t)(off - ls), "binds: ");
+
+    if (ns) spoor_clunk(ns);
+    int unmounted = 0;
+    for (int i = 0; i < NMNT; i++) {
+        if (pts[i] && unmount(k, pts[i]) == 0) unmounted++;
+        if (pts[i]) spoor_unref(pts[i]);
+    }
+    if (src) spoor_unref(src);
+    int after = territory_nmounts(k);
+    kfree(got);
+    kfree(want);
+    kfree(chunk);
+
+    TEST_ASSERT(opened, "open /proc/0/ns");
+    TEST_EXPECT_EQ(mounted, NMNT, "kproc's Territory took the 48 mounts");
+    TEST_ASSERT(bounded, "each read returns at most devproc's 2 KiB buffer");
+    TEST_ASSERT(on_lines, "each read ends at a line end");
+    TEST_ASSERT(reads >= 2, "the listing took more than one read");
+    TEST_ASSERT(same, "the reads, end to end, are the whole listing, past 2 KiB");
+    TEST_ASSERT(binds_last, "the binds line comes last");
+    TEST_EXPECT_EQ(unmounted, mounted, "every test mount came off");
+    TEST_EXPECT_EQ(after, base, "kproc's Territory is back to its own mounts");
 }
 
 void test_devproc_read_ctl_returns_zero(void) {
