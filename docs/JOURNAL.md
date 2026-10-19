@@ -97,6 +97,17 @@ While the lease ran, aux relayed an operator priority, a demo distribution for 2
 
 One gap is enqueued, not fixed: `/proc/<pid>/ns` is read from a 2 KiB buffer (`DEVPROC_READ_BUF`), so a namespace past about forty entries truncates its listing. A namespace can now be that large, and the manual says `ns` lists every entry.
 
+**After the fourth compaction: the vote 5 docs, and the 2 KiB cut pulled forward** (`95b114442`, `018aa73cf`). The docs pass wrote the table as built into ARCH 9.1, with the array in the past tense and the chroot and pivot clunk lists the old sentence left out. It added the two new refusals to ERRORS.md and the manual (the 1024-entry limit, and out of memory), and described the new structures in the territory, stalk, dispatch and ABI dossiers. Writing the territory dossier showed its union paragraph was wrong: it said a later MBEFORE is searched after an earlier one, while the code, like Plan 9, puts it first.
+
+I first wrote the `/proc/<pid>/ns` cut up as a question for the operator, because serving a file larger than its read buffer looked like a contract change. It is not one: `/proc/<pid>/environ` already serves such a file at any offset (V-4b-6, `env_render_environ`, `kernel/devproc.c:2967`). So the fix went in as 5d, coded but not built. `territory_format_ns` now takes the read's offset, renders the listing from its start, and copies only the window, which ends at its last line end; a window shorter than a line is returned whole, so a small read still advances. Before changing what a read returns, I read every reader of the file:
+- coreutils `ns`, and `ls`, `stat` and `realm` through `meta.rs`, read it to end of file. `ls` marks a list without its closing `binds:` line as incomplete (`usr/coreutils/src/nsmount.rs:141`), and that line now arrives whenever the listing is read to its end.
+- alloc-smoke reads it to a string, and Halcyon reads up to 64 KiB, both in a loop.
+- joey reads 255 bytes once and only looks for a `mount ` line (`usr/joey/joey.c:7182`).
+
+A new test mounts 48 points on the kernel's namespace and reads `/proc/0/ns` in 4 KiB requests. Each read must return at most 2 KiB ending at a line end, and together the reads must equal the rendered listing. The suite becomes 2026 tests.
+
+The fix does not cover one thing, enqueued as P3: each read renders the listing afresh, so a mount or unmount between two reads can make the next window start partway through a line. Any reader taking the file in several reads could meet that before 5d; a reader that slurps it meets it only now, because a listing that large used to be cut instead. Plan 9 keeps a mount-id cursor per open file, so each read returns one whole line (`mntscan` in its devproc). `/proc/<pid>/maps` still cuts at 2 KiB (OPEN-BUGS, P3), and the same window fix applies to it.
+
 ## 2026-10-18 (main, Opus 5.5, effort max) -- two votes; B-3b's last red control finds a third blind witness
 
 **The operator came back and settled both forks (19:24Z, by AskUserQuestion).**
