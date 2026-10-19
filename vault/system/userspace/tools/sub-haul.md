@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: [docs/HAUL-DESIGN.md]
 created: 2026-09-17
-updated: 2026-10-06
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -226,10 +226,11 @@ ADDR -- the mount is dead`, exit 1; during the attach it is `attach
 (Thylacine refused the server's reply)`, and a refusal the server sends is
 `attach (9P handshake refused)`.
 Mount/unmount
-builtins expose failures through `$status` and `$errstr`. A private mount at a
-point that is not a directory fails with `haul: mount PATH: not a directory`,
-the kernel's `ENOTDIR` for Plan 9's `Emount`; the kernel names no other cause,
-so any other refusal says only `haul: mount`. A failed dial exits 1
+builtins expose failures through `$status` and `$errstr`. A refused private
+mount names the point and the kernel's errno, since `SYS_MOUNT` answers one per
+refusal (ERRORS.md, "Mount and unmount"): a point that is not a directory reads
+`haul: mount PATH: not a directory`, the kernel's `ENOTDIR` for Plan 9's
+`Emount`. A bare -1 still says only `haul: mount`. A failed dial exits 1
 before anything is mounted or pumped. It says `connection refused` for a RST,
 and `no answer (timed out)` at netd's deadline, preceded by the 2 s progress
 line. The texts are the operator's (manual 14).

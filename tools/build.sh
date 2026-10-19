@@ -2480,10 +2480,10 @@ build_sysroot() {
     # 2b. the Pouch adapters' host checkers, on the tree just patched: kill and
     #     getppid, openat's close-on-exec arms, dup2 onto itself, the
     #     descriptor calls, and spawn's handle order, each against a mocked
-    #     kernel (host_boundary_check, defined beside the pre-target checks).
+    #     kernel (host_boundary_check and host_boundary_sets, defined beside
+    #     the pre-target checks).
     host_boundary_check "$BUILD_DIR/host-boundaries/pouch" --musl "$musl_src" \
-        pouch-descriptor-ops pouch-dup2-self pouch-kill-probe \
-        pouch-open-cloexec pouch-spawn-order || exit 1
+        ${HOST_BOUNDARY_POUCH[@]+"${HOST_BOUNDARY_POUCH[@]}"} || exit 1
 
     # 3. configure the pouch libc out-of-tree for aarch64-thylacine. Same
     #    toolchain tools/pouch-clang wraps; clang treats "thylacine" as an
@@ -7392,6 +7392,11 @@ lib_tests_muster() {
                     || { echo "==> lib tests: $lib's $d/ did not stage" >&2; exit 1; }
             done
             echo "$dev/src/$top" >> "$out/writable"
+            # runtest names each output --out plus the input's base name with
+            # nothing between them (runtest.c resultFilename), and CTest passes
+            # the build tree with no trailing slash, so the outputs land beside
+            # build/, as build<name>.res.
+            echo "$dev" >> "$out/writable"
         fi
         if [[ "$lib" == harfbuzz ]]; then
             # The thread tests read fonts and texts their source names
@@ -8270,7 +8275,8 @@ python3 "$REPO_ROOT/tools/check-prot-mirror.py" --expect-unmirrored 5 \
 host_boundary_check() {
     local root="$1"; shift
     local musl=""
-    if [[ "$1" == --musl ]]; then musl="$2"; shift 2; fi
+    if [[ "${1:-}" == --musl ]]; then musl="$2"; shift 2; fi
+    (( $# )) || { echo "==> host boundary check: no checker named for $root" >&2; return 1; }
     rm -rf "$root"; mkdir -p "$root"
     local name i rc=0 pids=() names=()
     for name in "$@"; do
@@ -8294,13 +8300,35 @@ host_boundary_check() {
     return "$rc"
 }
 
-# The native three need only this tree, so they run before any target. The
-# Pouch five need the patched musl tree, so build_sysroot runs them. Fatal, no
+# The checkers are derived as tools/test-host-boundaries.sh derives them: every
+# tools/host-tests/<name>.c, with its driver, and the ones whose usage names a
+# musl tree are Pouch's. A hand list of names here could miss a new checker
+# with every build green.
+HOST_BOUNDARY_NATIVE=() HOST_BOUNDARY_POUCH=()
+host_boundary_sets() {
+    local src name usage
+    for src in "$REPO_ROOT"/tools/host-tests/*.c; do
+        name="$(basename "$src" .c)"
+        [[ -f "$REPO_ROOT/tools/test-$name.py" ]] \
+            || { echo "==> host boundary: tools/host-tests/$name.c has no driver tools/test-$name.py" >&2; return 1; }
+        usage="$(COLUMNS=10000 python3 "$REPO_ROOT/tools/test-$name.py" --help)" \
+            || { echo "==> host boundary: tools/test-$name.py --help failed" >&2; return 1; }
+        usage="${usage%%$'\n'*}"
+        if [[ " $usage " == *" musl "* ]]; then
+            HOST_BOUNDARY_POUCH+=("$name")
+        else
+            HOST_BOUNDARY_NATIVE+=("$name")
+        fi
+    done
+}
+
+# The native checkers need only this tree, so they run before any target. The
+# Pouch ones need the patched musl tree, so build_sysroot runs them. Fatal, no
 # skip switch.
 if [[ "$target" != clean ]]; then
+    host_boundary_sets || exit 1
     host_boundary_check "$BUILD_DIR/host-boundaries/native" \
-        handle-target-ownership native-descriptor-ops native-handle-query \
-        || exit 1
+        ${HOST_BOUNDARY_NATIVE[@]+"${HOST_BOUNDARY_NATIVE[@]}"} || exit 1
 fi
 
 case "$target" in

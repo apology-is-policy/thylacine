@@ -270,11 +270,18 @@ date, so a renumbered mirror could drift with every build green.
 log's tail: the native three (handle target replacement, the descriptor
 handlers, the handle query) before any target except `clean`, and the five
 Pouch adapters in `build_sysroot`, step 2b, on the musl tree just patched.
-`tools/test-host-boundaries.sh` runs every checker clean and under each mutant
-it declares (50 legs, 35 s measured), deriving the set from
-`tools/host-tests/*.c` and the mutants from each driver's `--help`; a checker
-that declares no mutant fails it. A planted `VIV_NATIVE_CEILING` 132 stops the
-build at the check, naming the pin.
+`host_boundary_sets` derives both sets as the gate below does, from
+`tools/host-tests/*.c`, a driver whose usage names a musl tree being Pouch's:
+a test with no driver stops the build, and an empty set is refused, where the
+two hand lists it replaced (round 1 F4) would have let a new checker join no
+build. `tools/test-host-boundaries.sh` runs every checker clean and under each
+mutant it declares (50 legs, 35 s measured), deriving the set the same way
+and the mutants from each driver's `--help`; a checker that declares no mutant
+fails it. A planted `VIV_NATIVE_CEILING` 132 stops the build at the check,
+naming the pin. Moving patch 0057's getppid number stops it there too, since
+the native handle-query checker pins that line; the Pouch call site's red is a
+kill.c body only `test-pouch-kill-probe.py` reads (2026-10-19: step 2b refused,
+three probe legs red, nothing configured after it).
 
 **Both ambush builds spawn the launch target held (2026-09-30; untagged
 2026-10-06).** The Go fork's `SysProcAttr.DebugHeld` sets the spawn record's
@@ -492,8 +499,11 @@ device must report. The populate arm puts `/var/lib_tests`, and ls-libs layers a
 directory of the user's own over each directory the staging listed in
 `build/pouch/lib-tests/writable` (every
 library's build tree, where its tests write their outputs as in upstream's
-own tree, and libxml2's source top, where runsuite and runxmlconf write their
-logs): a list the staging derives, so a library added there cannot be
+own tree; libxml2's source top, where runsuite and runxmlconf write their
+logs; and libxml2's own directory, the build tree's parent, because runtest
+names each output `--out` plus the input's base name with nothing between
+them and CTest passes the build tree with no trailing slash, so the outputs
+land beside it as `build<name>.res`): a list the staging derives, so a library added there cannot be
 missed by a hand-written list in ls-libs. bake-verify adds `MUSTER`, `PNGTESTS`,
 `JPEGTESTS`, `WEBPTESTS`, `XMLTESTS` and `XMLCONF`.
 

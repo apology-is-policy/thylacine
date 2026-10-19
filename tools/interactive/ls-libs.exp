@@ -96,12 +96,12 @@ proc lib_leg {tag prog log verdict {fails {}}} {
 # while reads still find the baked files beneath. The binds are this shell's,
 # and every leg's program inherits them.
 #
-# SYS_MOUNT answers a bare -1 for a full mount table, a point this user cannot
-# resolve and a cycle alike, so before each bind the layer records the two
-# facts that tell them apart: how many entries the shell's mount table holds
-# (PGRP_MAX_MOUNTS is 32, and a union's first mount installs two) and whether
-# the point resolves for this user. A child inherits the shell's table, so
-# `ns` run from the shell counts the shell's entries.
+# A refused bind prints ut's $errstr and the shell's mount table, and before
+# each bind the layer records the state a refusal would be judged in: how many
+# entries the shell's mount table holds (a union's first mount installs two;
+# the cap is PGRP_MOUNT_CAP, 1024) and whether the point resolves for this
+# user. A child inherits the shell's table, so `ns` run from the shell counts
+# the shell's entries.
 proc lib_ns_count {tag} {
     set c -1
     set up [string toupper $tag]

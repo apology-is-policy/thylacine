@@ -10,7 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -307,13 +307,16 @@ inherited, a per-user encrypted-home `--single-session` 9P proxy mount included;
 login's synchronous `proxy.wait()` at logout then deadlocked on an orphan the
 kernel could not reap in time (joey blocked in `wait(login)`; login blocked in
 `proxy.wait`). `proc_release_territory_at_exit` releases it in the SAME
-last-live-thread window as the handle close, with one added subtlety: devproc
-`format_ns`/`format_cwd` read `p->territory` under [[lock-proc-table]] (the #66c
-envelope), so the free cannot run lock-free the way the handle-table free does.
-It is a **detach-under-lock + free-outside-lock split** — NULL `p->territory`
-under the table lock (a concurrent devproc reader then renders empty; both
-readers are NULL-safe), then `territory_unref` the detached, now-unreachable
-pointer with the lock dropped (its `spoor_clunk` may sleep on a `Tclunk`).
+last-live-thread window as the handle close, with one added subtlety: devproc's
+ns read (which takes a ref on the Territory there) and `format_cwd` read
+`p->territory` under [[lock-proc-table]] (the #66c envelope), so the free cannot
+run lock-free the way the handle-table free does. It is a
+**detach-under-lock + free-outside-lock split** — NULL `p->territory` under the
+table lock (a concurrent devproc reader then renders empty, and an ns read that
+took its ref first renders from the Territory it holds, then answers the empty
+file when its second look finds NULL; [[sub-kernel-devproc]]), then
+`territory_unref` the detached pointer with the lock dropped (its `spoor_clunk`
+may sleep on a `Tclunk`).
 Idempotent with `proc_free`'s later `territory_unref(NULL)`. Since fork
 DEEP-COPIES the territory ([[sub-kernel-proc]]'s `territory_clone`; RFNAMEG
 sharing is unsupported at v1.0), no sibling shares it and I-1 is trivially

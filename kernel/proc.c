@@ -4146,7 +4146,8 @@ static inline void exit_close_test_window(void) {}
 // UNLOCKED-FREE split: NULL p->territory UNDER the lock (a concurrent ns read
 // then observes NULL and renders empty -- territory_format_ns(NULL) and
 // format_cwd's `if(!p->territory)` are both NULL-safe; one that took its ref
-// first renders from the Territory it holds), THEN territory_unref the detached
+// first renders from the Territory it holds, and its second look, finding
+// NULL, answers the empty file), THEN territory_unref the detached
 // pointer with the lock DROPPED
 // (territory_unref's spoor_clunk may sleep on a 9P Tclunk; the detached pointer
 // is unreachable by any reader, so the sleep is safe).
@@ -4167,6 +4168,17 @@ static void proc_release_territory_at_exit(struct Proc *p, irq_state_t *s) {
     territory_unref(dead);                                // sleep-legal, lock dropped
     *s = spin_lock_irqsave(&g_proc_table_lock);
 }
+
+// The release above, driven on a Proc a test built and never ran: the ns
+// read's window test exits its target between the read's two looks.
+#ifdef KERNEL_TESTS
+void proc_release_territory_at_exit_for_test(struct Proc *p);
+void proc_release_territory_at_exit_for_test(struct Proc *p) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_release_territory_at_exit(p, &s);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+#endif
 
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
 // (i.e. still live — RUNNING / RUNNABLE / SLEEPING / etc.) AND are not

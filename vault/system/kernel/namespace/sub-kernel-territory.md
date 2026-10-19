@@ -517,10 +517,13 @@ until RW-4 overruled the dormancy: the kernel must be sound against any
 EL0 program, and the P6 multi-thread lift had made the program
 writable.
 
-The `g_proc_table_lock -> ns_lock` edge introduced by `/proc/<pid>/ns`
-is ACYCLIC — nothing under `ns_lock` takes `g_proc_table_lock`. The
-`ns_lock -> slub c->lock` edge that `path_unref`'s `kfree` under the lock
-once made is gone with the deferred release. `kmalloc` under `dot_lock`
+The `g_proc_table_lock -> ns_lock` edge that `/proc/<pid>/ns` introduced
+is gone (2026-10-19): a shed holds `ns_lock` for about a million steps, so
+a reader waiting for it under the IRQ-masked table lock stalled every CPU
+queued there, and devproc now renders after dropping the table lock
+([[lock-territory-ns-lock]]). The `ns_lock -> slub c->lock` edge that
+`path_unref`'s `kfree` under the lock once made is gone with the deferred
+release. `kmalloc` under `dot_lock`
 in `territory_clone` is sound: SLUB knows nothing of Territory, and
 neither lock is taken from an IRQ handler.
 
@@ -609,31 +612,45 @@ N = 8 binds (~64 inner iterations). The mount cycle check visits each
 point reachable from the source's key once and looks up each of its
 members' source keys by hash, so it costs the reachable members, at most
 the table. Both run once per `bind`/`mount`, never on the resolution
-path. The shed finds a device instance's points by scanning every point
-(the hash is keyed on the whole identity), so it costs (members of the
-reached points) × (points): about a million steps at `PGRP_MOUNT_CAP`, once
-per root swap.
+path.
+
+The shed finds a device instance's points by scanning every point (the
+hash is keyed on the whole identity), so it costs (members of the reached
+points) × (points): about a million steps at `PGRP_MOUNT_CAP`, all under
+`ns_lock`, with preemption off and IRQs on. `pivot_root` is ungated, so a
+Proc can repeat that hold at will on its own Territory. It stalls that CPU
+and whoever waits for this Territory's `ns_lock`. Until 2026-10-19 that
+included every CPU queued on `g_proc_table_lock`, with IRQs masked, because
+devproc rendered `/proc/<pid>/ns` under it (audit round 1 F1). The cost
+itself is enqueued (OPEN-BUGS, P3). A per-point chain of the points that
+share an instance cannot make it linear: a source instance with no points,
+hashed into a large instance's chain, still costs that whole chain per
+member. The fix is to group the points by instance.
 
 `mount_lookup` runs at EVERY component descent in `stalk` — it is the
 hottest thing in this file. It hashes the probe's key to one of 64 chains
-and takes the point's first member, so it costs one chain, never the
-table's size; measured use (19 entries in a login shell) is under one
-point per chain, and the cap is about 16. `mount_member_at` adds a walk to
-its index, and `mount_noexec_covers` is a scan of every entry (a source's
-instance is not a key), bounded by the cap.
+and takes the point's first member, so it costs one chain. Measured use
+(19 entries in a login shell) is under one point per chain, and at the cap
+the average is 16. The hash is not keyed, though, and a user's own 9P
+server picks the qid.paths it serves, so it can put every point of its
+Territory in one chain: the worst case is the table's points (OPEN-BUGS,
+P3, with the shed). `mount_member_at` adds a walk to its index, and
+`mount_noexec_covers` is a scan of every entry (a source's instance is not
+a key), bounded by the cap.
 
-`territory_format_ns` holds `ns_lock` inside `g_proc_table_lock`'s
-IRQs-off window. Bounded (a line before the window costs a few
-comparisons and no copy, the render stops at the window's end, and one read
-of `/proc/<pid>/ns` is at most `DEVPROC_READ_BUF`, 2 KiB; no sleep, no
-allocation) and comparable to the pre-existing `format_status` hold — a
-latency note, not a defect. Until the dynamic table's 5d step that 2 KiB
-was also the listing's limit: devproc rendered the whole file into it, so a
-namespace past about forty entries was cut, a limit only long names had
-reached under the array. Now the read's offset reaches the renderer, which
-serves that window of the whole listing, as `/proc/<pid>/environ` already
-did for an environment past the buffer
-(`devproc.ns_reads_past_the_buffer`, `territory_mount.format_ns`).
+`territory_format_ns` takes `ns_lock` with IRQs enabled, and asserts it.
+A read renders one window: a line before the window costs a few
+comparisons and no copy, the render stops at the window's end, and a
+window is at most `DEVPROC_READ_BUF`, 2 KiB; no sleep, no allocation.
+Until the dynamic table's 5d step that 2 KiB was also the listing's limit:
+devproc rendered the whole file into it, so a namespace past about forty
+entries was cut, a limit only long names had reached under the array. Now
+the read's offset reaches the renderer, which serves that window of the
+whole listing, as `/proc/<pid>/environ` already did for an environment
+past the buffer (`devproc.ns_reads_past_the_buffer`,
+`territory_mount.format_ns`). devproc renders after dropping
+`g_proc_table_lock` and then asks the read's admission again
+([[sub-kernel-devproc]]).
 
 ## Prosecution
 

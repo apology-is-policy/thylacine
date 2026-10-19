@@ -10,7 +10,7 @@ validated-by: [prose]
 locks: []
 design: ["docs/VIVARIUM.md"]
 created: 2026-08-06
-updated: 2026-10-18
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -244,10 +244,13 @@ Three error messages are unusually detailed, and each earns it:
   gate and Dev open the spawn-time resolve runs, so a failed spawn with a
   passing OEXEC open points past resolution — it names the failure class
   for the operator rather than handing them an rc;
-- **the failed-recipe-mount message** names the anchor, and when the kernel
-  answers `ENOTDIR` (Plan 9's `Emount`) it says the rootfs anchor has the
-  wrong type: a directory where a device leaf needs a file, or the reverse.
-  Any other refusal still reads as a missing anchor.
+- **the failed-recipe-mount message** names the anchor and the kernel's
+  errno: `ENOENT` says the rootfs has no such anchor, `ENOTDIR` (Plan 9's
+  `Emount`) says the anchor has the wrong type (a directory where a device
+  leaf needs a file, or the reverse), and any other refusal is given by its
+  errno's text alone. It used to call every refusal but `ENOTDIR` a missing
+  anchor, which a full mount table or a cycle is not (audit round 1 F2,
+  2026-10-19).
 
 A non-zero container exit is reported with `stdio_born`, the phenotype,
 the entrypoint and the pid. Until that line existed, "the container

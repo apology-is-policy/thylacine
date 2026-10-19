@@ -41,13 +41,19 @@ runs under it.
 `spoor_ref` and `path_ref` ARE legal inside — both are atomic and
 non-sleeping — which is what lets the lookup-and-ref be one step.
 
-Two inbound edges, both acyclic: `g_proc_table_lock -> ns_lock` (devproc
-renders `/proc/<pid>/ns` inside a `proc_for_each` callback, which is
-also what keeps the Territory alive — `territory_format_ns` takes the
-lock for table STABILITY and relies on its caller for LIFETIME), and
-nothing taken under `ns_lock` ever reaches back for it. The
+**Never waited on with IRQs masked.** A shed holds this lock for
+(members of the reached points) × (points) steps, about a million at
+`PGRP_MOUNT_CAP`, and `pivot_root` lets any Proc repeat one on its own
+Territory. So `territory_format_ns` asserts that IRQs are enabled. The
+`g_proc_table_lock -> ns_lock` edge is gone (2026-10-19, audit round 1
+F1): devproc rendered `/proc/<pid>/ns` inside a `proc_for_each` callback,
+and every CPU queued on the IRQ-masked table lock waited out the shed with
+it. devproc now takes a Territory ref under the table lock and renders
+after dropping it, so the ref keeps the Territory alive (LIFETIME) and
+this lock only keeps the table still (STABILITY). The
 `ns_lock -> slub c->lock` edge that `path_unref` under the lock once made
-is gone. Process-context only.
+went with the dynamic table, and nothing taken under `ns_lock` ever
+reaches back for it. Process-context only.
 
 Deliberately separate from [[lock-territory-dot-lock]]: the cwd is
 touched on a different, much hotter path and shares no field.

@@ -1148,7 +1148,10 @@ static int devproc_close(struct Spoor *c) {
 // IRQs masked -- would wait with it. So the callback only takes a Territory ref
 // under the table lock, and devproc_read renders after dropping it: the ref
 // keeps the Territory alive past an exit that detaches it, as
-// proc_release_territory_at_exit relies on.
+// proc_release_territory_at_exit relies on. The seal's ordering is a lock, so
+// devproc_read then walks the table again and asks the admission once more,
+// of the Proc that still holds the rendered Territory: a read is refused if a
+// seal or a none wall landed during the render.
 // prowl-3b: forward-declared so devproc_read_cb (below) can apply the OQ-4 gate;
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
@@ -1251,6 +1254,8 @@ struct devproc_read_ctx {
     int                 pid;
     u32                 kind;
     struct Territory   *ns;         // ns: ref-held, rendered after the walk
+    bool                recheck;    // ns: the second look, after the render
+    bool                same;       // ns: the Proc still holds that Territory
     char               *buf;
     size_t              cap;
     size_t              total;
@@ -1286,6 +1291,13 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_STATUS:  r->total = format_status(r->caller, p, r->buf, r->cap); break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:                               // rendered by devproc_read, unlocked
+        if (r->recheck) {
+            // No Territory now: the Proc is exiting, and its file reads empty.
+            // Another Territory: another Proc, under a reused pid.
+            if (!p->territory) r->total = 0;
+            r->same = !p->territory || p->territory == r->ns;
+            break;
+        }
         r->ns = p->territory;
         if (r->ns && r->ns != kpgrp()) territory_ref(r->ns);
         break;
@@ -1324,6 +1336,29 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off);
 // it is offset-aware -- see the definition for why a format-and-slice render is
 // the wrong shape for an environment.
 static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off);
+
+// The window between an ns read's admission and its render, where a seal, a
+// none wall or an exit must be caught by the second look. A test runs a
+// function there, on the thread that set it (NULL clears it). Compiled out of
+// production.
+#ifdef KERNEL_TESTS
+static void (*g_ns_test_window)(void);
+static struct Thread *g_ns_test_owner;
+
+void devproc_ns_test_set_window_hook(void (*fn)(void));
+void devproc_ns_test_set_window_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_ns_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_ns_test_window, fn, __ATOMIC_RELEASE);
+}
+
+static inline void devproc_ns_test_window(void) {
+    void (*fn)(void) = __atomic_load_n(&g_ns_test_window, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_ns_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
+#else
+static inline void devproc_ns_test_window(void) {}
+#endif
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -1375,19 +1410,29 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     size_t cap = sizeof(content);
     if (kind == PQS_NS && (size_t)n < cap) cap = (size_t)n;
     struct devproc_read_ctx r = {
-        .pid = pid, .kind = kind, .ns = NULL, .buf = content, .cap = cap,
-        .total = 0, .windowed = false, .found = false, .caller = caller,
-        .denied = false,
+        .pid = pid, .kind = kind, .ns = NULL, .recheck = false, .same = false,
+        .buf = content, .cap = cap, .total = 0, .windowed = false, .found = false,
+        .caller = caller, .denied = false,
     };
     proc_for_each(devproc_read_cb, &r);
     if (!r.found) return -1;                  // process gone since walk
     if (r.denied) return -T_E_ACCES;          // the seal, the none wall, or an owner gate
     if (kind == PQS_NS) {
+        devproc_ns_test_window();
         // territory_format_ns(NULL) renders nothing: an exiting Proc's empty file.
         r.total    = (size_t)territory_format_ns(r.ns, (u64)off, content, (u64)cap);
         r.windowed = true;
+        // Rendered outside the table lock, so what admitted the read is asked
+        // again under it: a seal or a none wall that landed during the render
+        // refuses what was rendered, as it would refuse a read begun after it.
+        r.recheck = true;
+        r.found   = false;
+        proc_for_each(devproc_read_cb, &r);
         // The final unref may clunk a 9P source and sleep; no lock is held here.
         if (r.ns && r.ns != kpgrp()) territory_unref(r.ns);
+        if (!r.found) return -1;              // gone since the render
+        if (r.denied) return -T_E_ACCES;
+        if (!r.same) return -1;               // the pid names another Proc now
     }
 
     // A whole file is sliced at `off`; a window already starts there.

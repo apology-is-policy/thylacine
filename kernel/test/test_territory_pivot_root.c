@@ -64,8 +64,9 @@
 //     root's own instance) goes too: the rule is "unreachable from the new
 //     root", not "keyed in the old root".
 //   territory.shed_full_table_boundary
-//     32 chained entries under a union root: reach[] lands exactly on its
-//     capacity (2 seeds + 32 sources), every entry survives, nothing overflows.
+//     A full table, PGRP_MOUNT_CAP entries chained under a union root,
+//     survives a pivot whole: the shed follows the chain link by link, with
+//     no reach set to overflow.
 //   territory.shed_releases_mp_path_once
 //     Mount points with REAL Paths: a shed entry's mp_path ref is released
 //     exactly once (a NULL mp_path makes path_unref vacuous), witnessed by the

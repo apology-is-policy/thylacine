@@ -1000,6 +1000,7 @@ void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counte
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);
 void test_devproc_ns_reads_past_the_buffer(void);   // ARCH 9.1: a listing past 2 KiB
+void test_devproc_ns_admission_after_render(void);  // the seal's lock order, unlocked render
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
@@ -3281,6 +3282,7 @@ struct test_case g_tests[] = {
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
     { "devproc.ns_reads_past_the_buffer", test_devproc_ns_reads_past_the_buffer, false, NULL },
+    { "devproc.ns_admission_after_render", test_devproc_ns_admission_after_render, false, NULL },
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },

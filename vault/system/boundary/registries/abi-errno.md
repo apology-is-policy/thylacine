@@ -10,7 +10,7 @@ mirrors:
   - "usr/lib/libthyla-rs/src/err.rs: enum Error + From<i32> + as_errno + Display"
   - "usr/lib/pouch/patches/0001-pouch-syscall-seam.patch: __syscall_ret (range contract, not a value list)"
 created: 2026-08-02
-updated: 2026-10-15
+updated: 2026-10-19
 ---
 ## The surface
 
@@ -45,7 +45,7 @@ anywhere.
 | 32 | `T_E_PIPE` | EPIPE | write to a closed read end |
 | 34 | `T_E_RANGE` | ERANGE | in-range for the type, past an implementation limit |
 | 38 | `T_E_NOSYS` | ENOSYS | dispatch slot exists, handler is a placeholder |
-| 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), or `O_NOFOLLOW` on a final symlink (DISTRO D-1) |
+| 40 | `T_E_LOOP` | ELOOP | a symlink chain past `STALK_MAX_FOLLOWS` (40), `O_NOFOLLOW` on a final symlink (DISTRO D-1), or a mount that would close a cycle in the mount graph (`SYS_MOUNT`, I-3) |
 | 88 | `T_E_NOTSOCK` | ENOTSOCK | a socket call names an fd with no socktab entry |
 | 93 | `T_E_PROTONOSUPPORT` | EPROTONOSUPPORT | a `SOCK_*`/`IPPROTO_*` the `/net` tree has no directory for |
 | 95 | `T_E_OPNOTSUPP` | EOPNOTSUPP | reserved; appended at PTY-1d, no current emitter |

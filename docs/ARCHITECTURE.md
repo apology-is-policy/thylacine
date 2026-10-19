@@ -2219,7 +2219,7 @@ struct Territory {
 - A clone at spawn (`territory_clone`) copies the entries present. It counts them under the parent's `ns_lock`, allocates outside it, and allocates again for the difference if a peer thread grew the table in the gap.
 - **Bound (DoS floor).** A Territory holds at most `PGRP_MOUNT_CAP` (1024) entries: a DoS bound, as Linux's `fs.mount-max` is (100,000 per mount namespace by default), not a usage bound. At the cap a Territory holds 128 KiB of mount nodes (1024 × (64 + 64) B), copied at every spawn from it, which is 1/32 of the per-Proc VMA ceiling (`PROC_VMA_MAX`, 4 MiB of Vma slab); the figure is stated beside the define. A mount past it answers `ENOSPC` (ERRORS.md). Like `/env`'s bounds (§9.7), it composes with the per-Proc resource floor (I-32).
 - A mount's entries are allocated before `ns_lock` is taken, so an allocation failure refuses the mount (`ENOMEM`) before any edit, and an entry an edit removes is released after the lock is dropped, its source ref and its name included. `ns_lock` stays the one lock; the reader-writer lock sketched above is not part of this.
-- `specs/territory.tla` and `specs/territory_shed.tla` re-run with their buggy configs, and an audit round precedes the merge.
+- `specs/territory.tla` and `specs/territory_shed.tla` were re-run with their buggy configs on 2026-10-19: all 23 violate the invariant each names. Their clean configs were not re-run then (`territory.cfg` takes hours on the development host). Audit rounds precede the merge.
 
 **Spec**: `territory.tla` proves:
 - Cycle-freedom: no `bind` operation can create a cycle.

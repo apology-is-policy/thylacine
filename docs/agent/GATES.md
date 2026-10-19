@@ -94,7 +94,8 @@ tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
 # every mirror and the phenotype's collision asserts. All eight were run by
 # nothing until 2026-10-19. build.sh now runs every clean leg on every build
 # (host_boundary_check: the native three before any target, the five Pouch ones
-# in build_sysroot on the freshly patched musl tree), and this gate adds each
+# in build_sysroot on the freshly patched musl tree; host_boundary_sets derives
+# both sets as this gate does), and this gate adds each
 # checker's mutant legs, which prove it still refuses its defect. The checkers
 # and their mutants are derived (tools/host-tests/*.c, each driver's --help),
 # and a checker that declares no mutant fails. Needs build/pouch/musl-src

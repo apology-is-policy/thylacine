@@ -1030,6 +1030,15 @@ libt `syscall.h` comments and libthyla-rs's `territory::mount` doc
 (`Error::NoMemory`, already in its errno map); ut prints the errno's text
 (`out of memory`) as it does every other.
 
+The order of the checks is part of the answer. `SYS_MOUNT` judges two
+arguments' width before it resolves the point: flags past 32 bits answer
+`-EINVAL`, and a source handle index at or above the table size `-EBADF`.
+Every other refusal is judged after the point resolves, so a point that does
+not resolve answers the resolver's errno even beside a closed handle in range
+(ERRORS.md, "Mount and unmount"; audit round 1 F3, which also put the cycle
+refusal among `T_E_LOOP`'s emitters and `-ENOMEM` in libthyla-rs's `t_mount`
+doc).
+
 ## SYS_WALK_CREATE's group is the directory's (2026-10-19)
 
 [[dec-2026-10-19-create-group-from-parent]] (IDENTITY-DESIGN 3.5 F-5): the
