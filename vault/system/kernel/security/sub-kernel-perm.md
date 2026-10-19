@@ -25,12 +25,13 @@ execute bits pass (`mode & (~0666 | (dir->mode & 0666))`), a directory's rwx
 are ANDed with the directory's (`~0777 | (dir->mode & 0777)`). Only the low
 nine bits of each input count, and only they come back; the caller keeps the
 high bits (DMDIR and the rest) itself. A pure function: no Proc, no lock, no
-I/O. Its one caller is `spoor_create_install`
-([[sub-kernel-syscall-dispatch]]), which passes the parent's stat only where
-the Dev enforces rwx, so a Dev whose modes carry no authority gets the umask
-alone. One consequence differs from Linux: an executable asked 0755 in a 0700
-directory comes out 0711 (the execute bits pass), where Linux's umask alone
-leaves 0755.
+I/O. Its two callers are `spoor_create_install`
+([[sub-kernel-syscall-dispatch]]) and Loom's directory-mutation gate for
+`MKDIR` and `MKNOD` ([[sub-kernel-loom]]); each passes the parent's stat only
+where the Dev enforces rwx, so a Dev whose modes carry no authority gets the
+umask alone. One consequence differs from Linux: an executable asked 0755 in a
+0700 directory comes out 0711 (the execute bits pass), where Linux's umask
+alone leaves 0755.
 
 `perm.create_mode` pins it row by row, each row one input from a neighbour, so
 a dropped umask, a bound applied to the wrong bits, or a missing file/directory

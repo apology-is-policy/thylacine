@@ -1008,7 +1008,7 @@ struct Proc {
 // section-12.1 rule-3 fail-safe. A phenotype is the ABI of the LOADED IMAGE:
 // decided at every image load, preserved by rfork (no new image).
 // M8: the mask is the whole payload, so relaxed ordering suffices.
-static inline u32 proc_umask(struct Proc *p) {
+static inline u32 proc_umask(const struct Proc *p) {
     return __atomic_load_n(&p->umask, __ATOMIC_RELAXED);
 }
 

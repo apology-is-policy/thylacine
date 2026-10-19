@@ -93,6 +93,8 @@ void test_9p_client_loom_dirmut_sqpoll(void);
 void test_9p_client_loom_create_gid(void);
 void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
+void test_9p_client_loom_create_session_ends(void);
+void test_9p_client_loom_create_mode(void);
 void test_9p_client_loom_enter_reads_every_client(void);
 void test_9p_client_loom_enter_partial_set_rescans(void);
 void test_9p_client_loom_sqpoll_parks_on_a_held_role(void);
@@ -2755,6 +2757,12 @@ static void loom_test_ident_drop(struct Proc *p) {
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
+// M7: the session's ends admit a create, not the DAC. Stamp `principal` as the
+// client end with no server end, as SYS_ATTACH_9P stamps an attacher; a DAC table
+// moves it with the identity it tests, so the DAC, not M7, decides its legs.
+static void loom_admit(u32 principal) {
+    p9_client_set_ends(&g_client, principal, PRINCIPAL_INVALID);
+}
 // The gid a create T-message carries, or 0xDEADBEEF when the frame is short.
 // Layouts: Tmkdir dfid name mode gid; Tsymlink fid name symtgt gid; Tmknod dfid
 // name mode major minor gid (9P2000.L).
@@ -2859,6 +2867,7 @@ void test_9p_client_loom_mkdir_e2e(void) {
     TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write dir handle");
     struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
     TEST_ASSERT(who != NULL, "bind the creator identity");
+    loom_admit(0x1234u);
 
     struct Burrow *b; u8 *bkva;
     loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
@@ -3099,6 +3108,7 @@ static struct Spoor *loom_mut_open(void) {
     const u8 aname[] = {'/'};
     if (p9_client_handshake(&g_client, uname, sizeof(uname), aname,
                             sizeof(aname), 0) != 0) return NULL;
+    loom_admit(0x1234u);             // the owner every table starts from
     return dev9p_attach_client(&g_client, 0);
 }
 
@@ -3185,6 +3195,7 @@ void test_9p_client_loom_dirmut_dac(void) {
     // (2) A stranger (other bits r-x): each op refused, never on the wire.
     struct Proc *who = loom_test_ident(l, 0x9999u, 0x9999u, 0);
     TEST_ASSERT(who != NULL, "bind a stranger");
+    loom_admit(0x9999u);
     DM_MKDIR(l,    -(s32)T_E_ACCES, "stranger MKDIR -> -EACCES");
     DM_MKNOD(l,    -(s32)T_E_ACCES, "stranger MKNOD -> -EACCES");
     DM_SYMLINK(l,  -(s32)T_E_ACCES, "stranger SYMLINK -> -EACCES");
@@ -3194,6 +3205,7 @@ void test_9p_client_loom_dirmut_dac(void) {
 
     // (3) The owner (owner bits rwx): each op reaches the wire.
     who->principal_id = 0x1234u; who->primary_gid = 0x5678u;
+    loom_admit(0x1234u);
     DM_MKDIR(l,    0, "owner MKDIR reaches the wire");
     DM_MKNOD(l,    0, "owner MKNOD reaches the wire");
     DM_SYMLINK(l,  0, "owner SYMLINK reaches the wire");
@@ -3210,6 +3222,7 @@ void test_9p_client_loom_dirmut_dac(void) {
 
     // (5) Group: a member is judged on the group triple.
     who->principal_id = 0x7777u;                     // primary 0x5678 = the dir's group
+    loom_admit(0x7777u);
     loom_ga_dir(0755u, 0x1234u, 0x5678u);
     DM_MKDIR(l, -(s32)T_E_ACCES, "group member, group r-x -> -EACCES");
     loom_ga_dir(0775u, 0x1234u, 0x5678u);
@@ -3218,6 +3231,7 @@ void test_9p_client_loom_dirmut_dac(void) {
     // (6) The DAC override is a capability (I-22), read live: a stranger holding
     // CAP_HOSTOWNER or CAP_DAC_OVERRIDE passes; the same stranger without it does not.
     who->principal_id = 0x9999u; who->primary_gid = 0x9999u;
+    loom_admit(0x9999u);
     loom_ga_dir(0755u, 0x1234u, 0x5678u);
     who->caps = CAP_HOSTOWNER;
     DM_MKDIR(l, 0, "stranger + CAP_HOSTOWNER -> reaches the wire");
@@ -3228,6 +3242,7 @@ void test_9p_client_loom_dirmut_dac(void) {
 
     // (7) RENAMEAT checks BOTH directories; LINK checks only where the link lands.
     who->principal_id = 0x1234u; who->primary_gid = 0x5678u;
+    loom_admit(0x1234u);
     g_loom_ga_deny_fid = sub_fid;
     DM_RENAMEAT(l, -(s32)T_E_ACCES, "RENAMEAT, newdir unwritable -> -EACCES");
     DM_LINK(l, 0, "LINK whose SOURCE sits in an unwritable dir -> reaches the wire");
@@ -3368,7 +3383,11 @@ void test_9p_client_loom_create_gid(void) {
                 "MKNOD into a foreign group -> -EACCES");
 
     // The create mode: rwx only, as the sync create sends it. The 0755 legs are
-    // the control one variable away -- a plain mode crosses unchanged.
+    // the control one variable away -- a plain mode crosses unchanged. M8's
+    // umask and bound are set aside (mask 0, a 0777 parent), so these legs pin
+    // only the rwx-only rule; loom_create_mode pins M8.
+    (void)proc_umask_exchange(who, 0);
+    loom_ga_dir(0777u, 0x1234u, 0x5678u);
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0), (u64)0, "MKDIR 0755");
     TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)0755u, "MKDIR: a plain mode crosses unchanged");
     TEST_EXPECT_EQ((u64)loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 07777u, 0, 0), (u64)0, "MKDIR 07777");
@@ -3553,6 +3572,178 @@ void test_9p_client_loom_dirmut_names(void) {
     p9_loopback_destroy(&g_loopback);
 }
 #undef NM
+
+// M7 (IDENTITY-DESIGN 9.7; LOOM.md 8.5.1): MKDIR, MKNOD and SYMLINK are
+// admitted only to a principal at one of the session's two ends, before the
+// parent's stat, whether or not the Dev enforces rwx and whatever the creator's
+// DAC override. The creator owns its 0755 directory, so the DAC admits every
+// leg and only M7 can refuse; each refusal sits beside an admitted control one
+// variable away. UNLINKAT, RENAMEAT and LINK make no new file and are untouched.
+void test_9p_client_loom_create_session_ends(void) {
+    loom_ga_reset();
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    u32 sub_fid = P9_NOFID;
+    struct Spoor *sub = loom_walk_sub(root, &sub_fid);
+    TEST_ASSERT(sub != NULL, "a second directory Spoor");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    loom_install_test_handle(l, 1, sub,  RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    const char *nm = "abcdef";
+    for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the owner");
+
+    // (1) The creator is the client end: every create reaches the wire.
+    loom_admit(0x1234u);
+    DM_MKDIR(l,   0, "client end: MKDIR reaches the wire");
+    DM_MKNOD(l,   0, "client end: MKNOD reaches the wire");
+    DM_SYMLINK(l, 0, "client end: SYMLINK reaches the wire");
+
+    // (2) At neither end: each create refuses with nothing on the wire, and the
+    // three mutations that make no new file still reach it.
+    p9_client_set_ends(&g_client, 0x2222u, 0x3333u);
+    DM_MKDIR(l,    -(s32)T_E_ACCES, "neither end: MKDIR -EACCES");
+    DM_MKNOD(l,    -(s32)T_E_ACCES, "neither end: MKNOD -EACCES");
+    DM_SYMLINK(l,  -(s32)T_E_ACCES, "neither end: SYMLINK -EACCES");
+    DM_UNLINKAT(l, 0, "neither end: UNLINKAT is not a create");
+    DM_RENAMEAT(l, 0, "neither end: RENAMEAT is not a create");
+    DM_LINK(l,     0, "neither end: LINK makes no new file");
+
+    // (3) The server end admits, as the client end does.
+    p9_client_set_ends(&g_client, 0x2222u, 0x1234u);
+    DM_MKDIR(l, 0, "server end: MKDIR reaches the wire");
+
+    // (4) The DAC override is not an end.
+    p9_client_set_ends(&g_client, 0x2222u, 0x3333u);
+    who->caps = CAP_DAC_OVERRIDE;
+    DM_MKDIR(l, -(s32)T_E_ACCES, "CAP_DAC_OVERRIDE at neither end: -EACCES");
+    who->caps = 0;
+
+    // (5) A session never stamped admits no create; and PRINCIPAL_INVALID never
+    // matches an end, even an unstamped one, under a parent the DAC opens to all.
+    p9_client_set_ends(&g_client, PRINCIPAL_INVALID, PRINCIPAL_INVALID);
+    DM_MKDIR(l, -(s32)T_E_ACCES, "unstamped session: -EACCES");
+    loom_ga_dir(0777u, 0x1234u, 0x5678u);
+    who->principal_id = PRINCIPAL_INVALID;
+    DM_MKDIR(l, -(s32)T_E_ACCES, "a PRINCIPAL_INVALID creator matches no end");
+    who->principal_id = 0x1234u;
+    loom_ga_dir(0755u, 0x1234u, 0x5678u);
+
+    // (6) Decided where the Dev enforces no rwx too, where no stat is taken: a
+    // copy of dev9p with perm_enforced false (a byte loop, not a struct copy: the
+    // kernel has no memcpy), its refusal beside its control. Each answer is read
+    // before root's Dev is restored and asserted only after (TEST_EXPECT_EQ
+    // returns).
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
+    d9.perm_enforced = false;
+    struct Dev *real = root->dev;
+    root->dev = &d9;
+    p9_client_set_ends(&g_client, 0x2222u, 0x3333u);
+    u32 w0 = g_loom_wire_mut;
+    s32 refused = loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0);
+    u32 w1 = g_loom_wire_mut;
+    loom_admit(0x1234u);
+    s32 admitted = loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0755u, 0, 0);
+    u32 w2 = g_loom_wire_mut;
+    root->dev = real;
+    TEST_EXPECT_EQ((u64)(s64)refused, (u64)(s64)(-(s32)T_E_ACCES),
+                   "no rwx enforcement, neither end: MKDIR -EACCES");
+    TEST_EXPECT_EQ((u64)(w1 - w0), 0ull, "no rwx enforcement: the refusal sent nothing");
+    TEST_EXPECT_EQ((u64)(s64)admitted, 0ull, "no rwx enforcement, client end: reaches the wire");
+    TEST_EXPECT_EQ((u64)(w2 - w1), 1ull, "no rwx enforcement: the admitted MKDIR went out");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(sub);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// One MKDIR or MKNOD asking `asked`; expect it admitted and `want` on the wire.
+static void loom_mode_leg(struct Loom *l, u8 opcode, u32 asked, u32 want,
+                          const char *what) {
+    g_loom_wire_mode = 0xDEADBEEFu;
+    s32 r = loom_dm_submit(l, opcode, 3, 0, asked, 0, 0);
+    TEST_EXPECT_EQ((u64)(s64)r, 0ull, what);
+    TEST_EXPECT_EQ((u64)g_loom_wire_mode, (u64)want, what);
+}
+
+// M8 (IDENTITY-DESIGN 9.7; LOOM.md 8.5.1): MKDIR's and MKNOD's rwx on the wire
+// are the asked bits less the creator's umask, bounded by the parent's mode
+// where the Dev enforces rwx, and MKNOD keeps its type. Each leg differs from a
+// neighbour in one input; the parent's mode is the fake directory's.
+void test_9p_client_loom_create_mode(void) {
+    loom_ga_reset();
+    loom_ga_dir(0777u, 0x1234u, 0x5678u);
+    struct Spoor *root = loom_mut_open();
+    TEST_ASSERT(root != NULL, "capture client + root");
+    struct Loom *l = loom_create(8, 16, false);
+    TEST_ASSERT(l != NULL, "loom_create");
+    loom_install_test_handle(l, 0, root, RIGHT_READ | RIGHT_WRITE);
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    bkva[0] = 'a'; bkva[1] = 'b'; bkva[2] = 'c';
+    struct Proc *who = loom_test_ident(l, 0x1234u, 0x5678u, 0);
+    TEST_ASSERT(who != NULL, "bind the owner, the client end");
+    TEST_EXPECT_EQ((u64)proc_umask(who), (u64)PROC_UMASK_DEFAULT, "a fresh creator's mask is 0022");
+
+    // (1) The control: no mask and a 0777 parent, so the asked rwx cross.
+    (void)proc_umask_exchange(who, 0);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0777u,    0777u,    "mask 0, parent 0777: MKDIR 0777 crosses");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010666u, 0010666u, "mask 0, parent 0777: MKNOD 0666 crosses");
+    // (2) The umask alone.
+    (void)proc_umask_exchange(who, 027u);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0777u,    0750u,    "mask 027: MKDIR 0777 -> 0750");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010666u, 0010640u, "mask 027: MKNOD 0666 -> 0640, the type kept");
+    // (3) The bound alone: a directory's rwx are ANDed with the parent's; a
+    // file's rw bits are, and its x bits pass.
+    (void)proc_umask_exchange(who, 0);
+    loom_ga_dir(0750u, 0x1234u, 0x5678u);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0777u,    0750u,    "parent 0750: MKDIR 0777 -> 0750");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010777u, 0010751u, "parent 0750: MKNOD 0777 -> 0751");
+    // (4) Both, and Plan 9's executable in a private directory.
+    (void)proc_umask_exchange(who, 022u);
+    loom_ga_dir(0700u, 0x1234u, 0x5678u);
+    loom_mode_leg(l, LOOM_OP_MKDIR, 0755u,    0700u,    "mask 022, parent 0700: MKDIR 0755 -> 0700");
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0010755u, 0010711u, "mask 022, parent 0700: MKNOD 0755 -> 0711");
+
+    // (5) No bound where the Dev enforces no rwx: the same 0700 parent and the
+    // umask alone. Read before root's Dev is restored, asserted after.
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
+    d9.perm_enforced = false;
+    struct Dev *real = root->dev;
+    root->dev = &d9;
+    g_loom_wire_mode = 0xDEADBEEFu;
+    s32 r = loom_dm_submit(l, LOOM_OP_MKDIR, 3, 0, 0777u, 0, 0);
+    u32 m = g_loom_wire_mode;
+    root->dev = real;
+    TEST_EXPECT_EQ((u64)(s64)r, 0ull, "no rwx enforcement: MKDIR reaches the wire");
+    TEST_EXPECT_EQ((u64)m, (u64)0755u, "no rwx enforcement: the umask alone, 0777 -> 0755");
+
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "every op reaped");
+    burrow_unref(b);
+    loom_unref(l);
+    spoor_clunk(root);
+    loom_test_ident_drop(who);
+    loom_ga_reset();
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
 
 // Submit-time rejections for the mutation ops -- the rights gate + the
 // memory-safety guards, all inline (no op goes async):

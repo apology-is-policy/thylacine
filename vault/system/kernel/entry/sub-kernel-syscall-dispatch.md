@@ -17,7 +17,7 @@ design:
 created: 2026-08-03
 updated: 2026-10-19
 ---
-## The create chokepoint: session ends, the created mode, SYS_UMASK (2026-10-19, B-3e M7 + M8)
+## The sync create chokepoint: session ends, the created mode, SYS_UMASK (2026-10-19, B-3e M7 + M8)
 
 `spoor_create_install` admits a create through a 9P session only to a principal
 at one of the session's two ends
@@ -37,7 +37,9 @@ name as the creator. `sys_attach_9p_for_proc` stamps a pipe session's ends as
 (the attacher, PRINCIPAL_INVALID) beside the `/ctl/9p-sessions` owners it
 already stamped, since the kernel cannot name the server behind a
 caller-supplied transport; the `/srv` attach stamps the conn's own ends
-([[sub-kernel-ninep-attach]]).
+([[sub-kernel-ninep-attach]]). Loom's `MKDIR`, `MKNOD` and `SYMLINK`, the one
+other way to create through a session, ask the same at their own gate
+([[sub-kernel-loom]]).
 
 After the `/srv` branch and the DMSRV reject, the create's rwx bits are
 rewritten ([[dec-2026-10-19-create-mode-bound-and-umask]], M8): `perm = (perm &
@@ -46,7 +48,8 @@ rewritten ([[dec-2026-10-19-create-mode-bound-and-umask]], M8): `perm = (perm &
 took, where `dev->perm_enforced`, and NULL elsewhere, so a Dev whose modes
 carry no authority gets the umask alone. The server applies neither: Stratum
 stamps `mode & 07777` as it receives it, the 9P2000.L convention in which the
-client masks, so this is the one place a mask can apply. The create then opens
+client masks, so the kernel must, here and in Loom's `MKDIR` and `MKNOD`
+([[sub-kernel-loom]]). The create then opens
 the new file with the access asked, never checked against its new mode (Plan 9
 and POSIX create semantics): a file created 0400 is writable through the
 descriptor that created it.

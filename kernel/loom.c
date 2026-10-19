@@ -1177,14 +1177,26 @@ static const struct Proc *loom_ident_live(const struct Loom *l) {
 }
 
 // The sync twins' parent check, verbatim in shape: gated on perm_enforced, no
-// stat -> -EIO, no W|X -> -EACCES.
-static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
+// stat -> -EIO, no W|X -> -EACCES. When a stat was taken, *bound_by (if asked
+// for) points at it in *st -- M8's bound; it is NULL where the Dev enforces no
+// rwx.
+static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir,
+                             struct t_stat *st, const struct t_stat **bound_by) {
+    if (bound_by) *bound_by = NULL;
     if (!dir->dev)                                   return -(s32)T_E_IO;
     if (!dir->dev->perm_enforced)                    return 0;
-    struct t_stat st;
-    if (spoor_stat_native(dir, &st) != 0)            return -(s32)T_E_IO;
-    if (perm_check(who, &st, PERM_W | PERM_X) != 0)  return -(s32)T_E_ACCES;
+    if (spoor_stat_native(dir, st) != 0)             return -(s32)T_E_IO;
+    if (perm_check(who, st, PERM_W | PERM_X) != 0)   return -(s32)T_E_ACCES;
+    if (bound_by) *bound_by = st;
     return 0;
+}
+
+// The ops that make a new entry, and so answer to IDENTITY-DESIGN 9.7's M7 and
+// M8 as the sync create does. LINK names an existing file: like RENAMEAT, not a
+// create.
+static bool loom_op_creates(u8 opcode) {
+    return opcode == LOOM_OP_MKDIR || opcode == LOOM_OP_MKNOD ||
+           opcode == LOOM_OP_SYMLINK;
 }
 
 // The gate. Runs in the submitter's syscall context only: the caller has refused
@@ -1199,17 +1211,32 @@ static s32 loom_dir_writable(const struct Proc *who, struct Spoor *dir) {
 // (IDENTITY-DESIGN 3.2) the group is the cape's and the wire carries P9_NOGID, so
 // the server leaves its own alone; naming a group there is a chgrp, which the cape
 // refuses.
+//
+// M7: the server stamps a create with its session's credential, never the
+// submitter's, so a create is admitted only to a principal at one of the
+// session's two ends -- decided before the stat, whether or not the Dev
+// enforces rwx, and whatever the creator's DAC override, as the sync create
+// decides it. M8: *mode_out is MKDIR's or MKNOD's rwx, less the creator's umask
+// and bounded by the parent where the Dev enforces rwx.
 static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *sqe,
                                   const struct p9_client *cl,
                                   struct Spoor *dir, struct Spoor *dir2,
-                                  u32 *gid_out, bool *gid_set) {
+                                  u32 *gid_out, bool *gid_set, u32 *mode_out) {
     const struct Proc *who = loom_ident_live(l);
     if (!who)                                        return -(s32)T_E_ACCES;
-    s32 e = loom_dir_writable(who, dir);
-    if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2);
+    bool creates = loom_op_creates(sqe->opcode);
+    if (creates && !dev9p_create_admits(dir, __atomic_load_n(&who->principal_id,
+                                                             __ATOMIC_ACQUIRE)))
+        return -(s32)T_E_ACCES;
+    struct t_stat st, st2;
+    const struct t_stat *bound_by = NULL;
+    s32 e = loom_dir_writable(who, dir, &st, &bound_by);
+    if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2, &st2, NULL);
     if (e != 0)                                      return e;
-    if (sqe->opcode != LOOM_OP_MKDIR && sqe->opcode != LOOM_OP_MKNOD &&
-        sqe->opcode != LOOM_OP_SYMLINK)              return 0;
+    if (!creates)                                    return 0;
+    if (sqe->opcode != LOOM_OP_SYMLINK)
+        *mode_out = perm_create_mode((u32)sqe->_resv1[1], sqe->opcode == LOOM_OP_MKDIR,
+                                     proc_umask(who), bound_by);
     u64 raw = (sqe->opcode == LOOM_OP_MKNOD) ? sqe->offset : sqe->_resv1[2];
     if (raw > (u64)0xFFFFFFFFu)                      return -(s32)T_E_INVAL;
     u32 gid = (u32)raw;
@@ -1260,6 +1287,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     // LOOM.md 8.5.1: a create op's resolved group, written into the op's snapshot.
     u32  cgid     = 0;
     bool cgid_set = false;
+    u32  cmode    = 0;                      // M8: MKDIR's / MKNOD's rwx, from the gate
 
     // Opcode -> (Tmsg builder, primary right, secondary right). need2 != 0 marks
     // a two-fid op (RENAMEAT / LINK) whose SECOND registered-handle index lives in
@@ -1418,7 +1446,7 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         if (!op)                                        { err = -(s32)T_E_NOMEM;     goto fail; }
         loom_bufcopy(op->names, buf_kva, nlen);
         if (!loom_names_ok(sqe, op->names, count))      { err = -(s32)T_E_INVAL;     goto fail; }
-        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set);
+        err = loom_dir_mutation_gate(l, sqe, cl, sp, sp2, &cgid, &cgid_set, &cmode);
         if (err != 0) goto fail;
     }
     // Weft-6c fast-path (NET-THROUGHPUT 6; I-37): a READ/WRITE whose pinned /net
@@ -1471,14 +1499,14 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
         if (sqe->opcode == LOOM_OP_MKNOD) op->sqe.offset    = cgid;
         else                              op->sqe._resv1[2] = cgid;
     }
-    // 8.5.1: a create mode carries the rwx bits only, as the sync create's
-    // `perm & 0777` does -- setuid/setgid/sticky are never honoured and SYS_WSTAT
-    // refuses them, so a create must not be the way to plant them. MKNOD keeps
-    // its file type.
+    // 8.5.1: a create mode carries the rwx bits only, as the sync create's does
+    // -- setuid/setgid/sticky are never honoured and SYS_WSTAT refuses them, so a
+    // create must not be the way to plant them -- and since M8 those bits are the
+    // gate's: the umask, then the parent's bound. MKNOD keeps its file type.
     if (sqe->opcode == LOOM_OP_MKDIR)
-        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & 0777u;
+        op->sqe._resv1[1] = cmode;
     else if (sqe->opcode == LOOM_OP_MKNOD)
-        op->sqe._resv1[1] = (u32)sqe->_resv1[1] & (T_S_IFMT | 0777u);
+        op->sqe._resv1[1] = ((u32)sqe->_resv1[1] & T_S_IFMT) | cmode;
     op->opcode      = sqe->opcode;
     op->weft        = is_weft;            // Weft-6c: zero-copy completion (no bufcopy)
     op->terminal    = false;

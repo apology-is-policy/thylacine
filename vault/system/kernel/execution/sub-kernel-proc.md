@@ -30,8 +30,10 @@ Live reads and writes go through `proc_umask` (a relaxed load) and
 `proc_umask_exchange` (a relaxed exchange). The mask is the whole payload, so
 no ordering against another field is owed, and a thread exchanging it while a
 peer creates or forks hands the creator or the child one value the Proc held.
-No lock covers it. The writers are `SYS_UMASK` and the phenotype's umask, the
-reader `spoor_create_install` ([[sub-kernel-syscall-dispatch]]).
+No lock covers it. The writers are `SYS_UMASK` and the phenotype's umask; the
+readers are `rfork_internal`, `spoor_create_install`
+([[sub-kernel-syscall-dispatch]]) and Loom's directory-mutation gate
+([[sub-kernel-loom]]).
 `proc_identity.umask_default_and_inherit` checks kproc, a fresh Proc, and a
 child made under a non-default parent mask, so a child given the default
 instead reads 0022, not the parent's 0077.

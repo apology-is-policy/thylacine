@@ -1820,6 +1820,8 @@ void test_9p_client_loom_dirmut_sqpoll(void);
 void test_9p_client_loom_create_gid(void);
 void test_9p_client_loom_cape(void);
 void test_9p_client_loom_dirmut_names(void);
+void test_9p_client_loom_create_session_ends(void);
+void test_9p_client_loom_create_mode(void);
 void test_9p_client_loom_multi_inflight_e2e(void);
 void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_9p_client_async_clunk_burst_no_fid_leak(void);
@@ -4215,6 +4217,8 @@ struct test_case g_tests[] = {
     { "9p_client.loom_create_gid",       test_9p_client_loom_create_gid,       false, NULL },
     { "9p_client.loom_cape",             test_9p_client_loom_cape,             false, NULL },
     { "9p_client.loom_dirmut_names",     test_9p_client_loom_dirmut_names,     false, NULL },
+    { "9p_client.loom_create_session_ends", test_9p_client_loom_create_session_ends, false, NULL },
+    { "9p_client.loom_create_mode",      test_9p_client_loom_create_mode,      false, NULL },
     { "9p_client.async_clunk_burst_no_fid_leak",
                                        test_9p_client_async_clunk_burst_no_fid_leak, false, NULL },
     { "9p_client.full_pool_sync_op_gets_a_tag",

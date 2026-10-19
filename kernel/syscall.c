@@ -4274,7 +4274,8 @@ static s64 spoor_create_install(struct Proc *p, struct Spoor *src,
     // M8 (IDENTITY-DESIGN 9.7): the creator's umask, then the parent
     // directory's bound (Plan 9 open(5)). The server applies neither --
     // Stratum stamps mode & 07777, the 9P2000.L convention in which the client
-    // masks -- so this is the one place a mask can apply. Without bound_by
+    // masks -- so the kernel must: here, and in Loom's MKDIR and MKNOD
+    // (loom_dir_mutation_gate), the one other door to a create. Without bound_by
     // (a Dev that does not enforce rwx, where a mode carries no authority)
     // only the umask applies.
     perm = (perm & ~0777u) |

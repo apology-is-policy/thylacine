@@ -30,9 +30,11 @@ without a priv or a client answers false, and the dc test comes first so that
 one whose priv fails the magic check refuses rather than passing as not-9P. The
 reason is the server's: it stamps a create with its session's credential (the
 conn opener's SO_PEERCRED, or the attacher's), never the caller's, so a third
-principal sharing the mount would create entries recorded as an end's. The one
-caller is `spoor_create_install` ([[sub-kernel-syscall-dispatch]]), which
-refuses before the wire: a refused create sends no Tlcreate or Tmkdir.
+principal sharing the mount would create entries recorded as an end's. Two
+callers ask it, `spoor_create_install` ([[sub-kernel-syscall-dispatch]]) and
+Loom's directory-mutation gate for `MKDIR`, `MKNOD` and `SYMLINK`
+([[sub-kernel-loom]]), and each refuses before the wire: a refused create sends
+no Tlcreate, Tmkdir, Tmknod or Tsymlink.
 
 The mode a create carries is taken as before, `perm & 0777` into Tlcreate or
 Tmkdir, but since M8 ([[dec-2026-10-19-create-mode-bound-and-umask]]) those

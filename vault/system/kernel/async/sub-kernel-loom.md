@@ -15,8 +15,51 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-12
+updated: 2026-10-19
 ---
+## The create ops answer to M7 and M8 (2026-10-19, B-3e)
+
+`MKDIR`, `MKNOD` and `SYMLINK` make a new entry through a 9P session, as the
+sync create does, and now answer to the same two rules
+([[dec-2026-10-18-create-speaks-for-a-session-end]],
+[[dec-2026-10-19-create-mode-bound-and-umask]]; IDENTITY-DESIGN 9.7 M7 and M8,
+LOOM.md 8.5.1). `loom_dir_mutation_gate` asks
+`dev9p_create_admits(dir, principal_id)` ([[sub-kernel-ninep-dev9p]]) of the
+ring creator's live identity before the parent's stat, on every Dev and
+whatever the creator's DAC override, and refuses with `-EACCES` and nothing on
+the wire: the server stamps a create with its session's credential, never the
+submitter's, so a create from a principal at neither end would be recorded as
+an end's. `MKDIR`'s and `MKNOD`'s rwx are then `perm_create_mode(mode, is_dir,
+proc_umask(who), bound_by)` ([[sub-kernel-perm]]); `bound_by` is the parent
+stat `loom_dir_writable` took, and NULL on a Dev that enforces no rwx, so there
+the umask alone applies. The op's snapshot carries those bits, and `MKNOD`
+keeps its type. `SYMLINK` carries no mode. `UNLINKAT`, `RENAMEAT` and `LINK`
+make no new file and are not asked.
+
+Before this the gate matched the sync create as it was before M7: a user who
+could write a directory on the shared pool mount could make an entry there that
+the server recorded as system's, the case vote 1a fails closed, with a mode no
+umask or bound had touched. This gate and `spoor_create_install` are the only
+kernel paths that create through a session: `Dev->create` has that one caller,
+`p9_client_symlink`, `p9_client_link` and `p9_client_mknod` have none, and
+Loom's `LCREATE` is `-ENOSYS`. The one userspace caller of the three ops is
+`symlink-probe`, which mints its links as system on the pool, an end of that
+session, so its boot-fatal run is the admission's positive control on the
+device.
+
+`9p_client.loom_create_session_ends` holds the admission: the client end and
+the server end admitted; neither end refused for all three creates while
+`UNLINKAT`, `RENAMEAT` and `LINK` still reach the wire; `CAP_DAC_OVERRIDE` not
+an end; an unstamped session and a PRINCIPAL_INVALID creator refused; and a
+copy of dev9p with `perm_enforced` false refusing beside its admitted control.
+`9p_client.loom_create_mode` holds the mode: the umask alone, the bound alone,
+both (0755 asked in a 0700 directory under 022 gives `MKDIR` 0700 and `MKNOD`
+0711), and the umask alone where the Dev enforces no rwx. The DAC tests stamp
+the session's client end with the identity each leg tests (`loom_mut_open`
+starts every table at the owner, `loom_dirmut_dac` moves it with each
+identity), so the DAC and not M7 decides their legs; `loom_create_gid`'s mode
+legs run under mask 0 and a 0777 parent, so they pin only the rwx-only rule.
+
 ## Purpose
 
 A syscall per file operation is a trap per operation. Loom is the shared-memory
@@ -166,6 +209,9 @@ or symlink entries in it. `SYMLINK` is the only way to make a symlink in the
 guest, so the widest door was the one every symlink goes through.
 
 The gate now does what the sync twins do:
+- admit `MKDIR`, `MKNOD` and `SYMLINK` only to a principal at one of the
+  session's two ends, before any stat and on every Dev (M7, since 2026-10-19:
+  the section at the top);
 - stat each mutated directory and `perm_check` it for W|X (`RENAMEAT` both,
   `LINK` only where the link lands; `-EIO` with no stat, `-EACCES` denied);
 - check against the ring creator's LIVE identity. `ident` is stamped at setup
@@ -180,7 +226,8 @@ The gate now does what the sync twins do:
   the cape refuses (`-EACCES`);
 - send a create's mode as its rwx bits only (`MKNOD` keeps its type), as the
   sync create does, so a create cannot plant the setuid, setgid or sticky bits
-  that `SYS_WSTAT` refuses;
+  that `SYS_WSTAT` refuses; since M8 those bits are less the creator's umask
+  and bounded by the parent where the Dev enforces rwx;
 - check each child name with `sys_copy_component`'s rule (`-EINVAL` before any
   stat) on a copy taken into the op at submit. The build sends that copy, so
   userspace cannot rewrite a checked name in the shared buffer.
@@ -193,6 +240,8 @@ checked against the server's own count of what reached it;
 `9p_client.loom_dirmut_names` holds the name rule.
 `9p_client.loom_dirmut_sqpoll` and `9p_client.loom_create_gid` hold the other
 rules; the last also reads the create mode off the wire.
+`9p_client.loom_create_session_ends` and `9p_client.loom_create_mode` hold M7
+and M8.
 
 The parent's DAC needs nothing extra under the cape: the stat it checks comes
 through dev9p's one conversion, which already reports the cape's owner.
