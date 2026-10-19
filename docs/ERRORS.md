@@ -648,3 +648,14 @@ or the attacher of a transport the caller supplies. The server end is the
 service's poster. The directory's mode does not change the answer, and
 neither does an elevation's DAC override. A name that already exists still
 answers -T_E_EXIST to a caller who may search the directory, as above.
+
+### The creation mask (operator votes 2026-10-19)
+
+SYS_UMASK (133) sets the calling Proc's creation mask and returns the
+previous one. A mask with a bit outside 0777 answers -T_E_INVAL and changes
+nothing, as SYS_WSTAT refuses stray mode bits. The POSIX front ends pass
+`mask & 0777`, so their umask never fails, as POSIX requires: Pouch's
+`umask`, the phenotype's Linux `umask` (166) and go-thylacine's
+`syscall.Umask`. The mask and the parent directory's bound (IDENTITY-DESIGN
+9.7 M8) narrow a create's mode and never refuse one, so a create gains no
+errno from them.

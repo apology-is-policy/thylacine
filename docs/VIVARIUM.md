@@ -2522,7 +2522,9 @@ default), and the signal chunk's S-2 gave it its own note, `term`
 
 `sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
 `rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
-explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
+explicit `ENOSYS` rows (132 and 133 share their numbers with the native
+`SYS_GETPPID` and `SYS_UMASK`, and the rows are consumed before the native
+switch) — Tier 2, and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
 are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
 `SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
@@ -2884,9 +2886,15 @@ is a bounded client loop.** There is no third idiom.
 - A **dangling** final symlink + `O_CREAT` answers EEXIST where Linux creates
   the *target* (the open-first leg sees ENOENT, the create sees the link name
   occupied). git never creates through dangling links; recorded, not built.
-- No umask: the guest's `umask` syscall is ENOSYS and the kernel applies no
-  mask, so modes arrive unmasked (0666 where Linux yields 0644). Cosmetic
-  under A-2d; passing through literally beats inventing kernel state.
+- **umask (corrected 2026-10-19).** This read "No umask ... cosmetic under
+  A-2d". It was wrong on shared storage: a system program's 0666 on the pool
+  was writable by every user. `umask` (166) is now a Tier-2 row onto
+  `SYS_UMASK` that passes `mask & 0777`, as Linux takes it, and the kernel
+  reduces every create's mode by the caller's umask and bounds it by the
+  parent directory's mode (IDENTITY-DESIGN 9.7 M8). A create's mode is
+  therefore Linux's under the same umask, except where the directory narrows
+  it further: in a 0700 directory a file is at most 0600, and an executable
+  asked for 0777 is 0711 where Linux gives 0755.
 - `O_APPEND` stays rejected (milestone A runs git with reflogs off);
   `O_DIRECTORY` stays rejected wholesale as today.
 - Real (non-`AT_FDCWD`) dirfds stay out — the §6.20 Correction 2 handle-state

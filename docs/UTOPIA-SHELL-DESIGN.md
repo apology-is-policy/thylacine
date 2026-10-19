@@ -513,6 +513,7 @@ Must be internal (no other choice — they modify the shell's own state):
 - `true`, `false` — exit 0 / exit 1.
 - `time` — time a command or pipeline. Internal for pipeline-aware timing.
 - `kill` — send a note (§10). Default note: `term`, the catchable terminate request (POSIX `kill`'s `SIGTERM`).
+- `umask` — `umask [MODE]` — with no argument, print the creation mask as four octal digits (`0022`); with one, set it from MODE, one to four octal digits of value at most 0777. Symbolic modes are not taken. The mask is the shell's Proc state, which the commands it starts inherit (IDENTITY-DESIGN 9.7 M8; operator vote 2026-10-19).
 
 ### 9.2 The Thylacine extensions
 

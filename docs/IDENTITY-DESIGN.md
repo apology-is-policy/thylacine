@@ -375,7 +375,10 @@ reads, B writes") = namespace composition, not an ACL.
   annotation (F-3: a legate's files are owned by the durable user).
 - group = the **parent directory's group** (Plan 9 / BSD inheritance —
   collaboration-friendly; the natural partner to F-2's namespace-sharing).
-- mode = a default, masked by a umask-equivalent.
+- mode = a default, masked by a umask-equivalent. **Built 2026-10-19** (operator
+  votes, `dec-2026-10-19-create-mode-bound-and-umask`): the mode the caller asks for,
+  less the caller's umask, bounded by the parent directory's mode as Plan 9's
+  create(5) bounds it (9.7 M8).
 - Intended consequence: create cannot stamp an owner until identity exists →
   `SYS_WALK_CREATE` is formally gated on login. The original redirect-create
   thread lands here.
@@ -1804,11 +1807,9 @@ to a caller that may search the directory, the A-2d order.
   (VIVARIUM 7.2). The user who runs the library tests binds a layer of their own over
   each tree a test writes into (`bind -bc`). Quake writes under `$HOME`. World-writable
   directories matter beyond create: M7 does not cover remove or rename, so one on the
-  pool would still let any user delete system's files there. **Open (2026-10-18):** no
-  create applies a mask. F-5's "mode = default & umask" was never built (Pouch's and the
-  phenotype's `umask` answer `ENOSYS`, and the kernel passes the mode through), so a
-  system program that asks for 0666 or 0777 still makes a world-writable file or
-  directory on the pool. The choice of mask is the operator's.
+  pool would still let any user delete system's files there. No create applied a mask
+  either (F-5's was never built), so a system program that asked for 0666 or 0777 made
+  a world-writable file or directory on the pool; M8 closes that.
 - **Elevation is not an end.** The legate grants `CAP_HOSTOWNER` / `CAP_DAC_OVERRIDE`,
   which override rwx; neither makes a Proc a session end. An elevated user may modify
   existing objects on system's mount but cannot create there; administration that
@@ -1819,13 +1820,46 @@ to a caller that may search the directory, the A-2d order.
   the user so the server sees and stamps the real principal, remains the faithful
   shape. M7 is the kernel's floor until then.
 
+**M8 -- a create's mode is bounded by its directory and the creator's umask (kernel;
+operator votes 2026-10-19, `dec-2026-10-19-create-mode-bound-and-umask`).** F-5's mask,
+built. At the one create chokepoint (`spoor_create_install`), before the request reaches
+the server, the mode a create asks for is reduced twice:
+- by the creator's **umask**, a per-Proc mask that `SYS_UMASK` exchanges. It is 0022 at
+  boot, a child inherits its parent's at spawn, and a Proc's threads share it;
+- by the **parent directory's mode**, as Plan 9's create(5) bounds it. A file's read and
+  write bits are ANDed with the directory's, `perm & (~0666 | (dir.perm & 0666))`, so
+  its execute bits pass; a directory's rwx are ANDed with the directory's,
+  `perm & (~0777 | (dir.perm & 0777))`. The bound applies wherever the Dev enforces rwx,
+  which is where a mode carries authority.
+
+A `/srv` post is not a file and takes neither.
+- **Why both.** The bound is the floor no program can lower: a system program that asks
+  for 0666, clears its umask or restores modes from an archive still cannot make a file
+  in a 0755 directory that others may write. A wider mode takes an explicit chmod, which
+  only the owner may make. The umask is the creator's own restriction: ported code sets
+  it (`umask(077)` before writing a secret), and POSIX says `umask()` always succeeds.
+- **The servers apply none.** Stratum stamps `mode & 07777`, the 9P2000.L convention in
+  which the client masks, so the kernel, the client of every session, is the one place
+  a mask applies.
+- **What changes.** Native code already asks for 0644 and 0755, so under 0022 in a 0755
+  directory its modes are unchanged; ported code's 0666 and 0777 become 0644 and 0755
+  there. In a 0700 directory a new file is at most 0600 and a new directory 0700; an
+  executable asked for 0777 is 0711, Plan 9's answer, where Linux under 0022 gives 0755.
+- **ABI.** `SYS_UMASK` = 133 sets the mask and returns the previous one; a mask with a
+  bit outside 0777 is refused with `EINVAL` and changes nothing, as `SYS_WSTAT` refuses
+  stray mode bits. The POSIX front ends pass `mask & 0777`, so their `umask` always
+  succeeds: Pouch's `umask`, the phenotype's Linux `umask` (166) and go-thylacine's
+  `syscall.Umask`. ut's `umask` builtin sets the shell's mask.
+
 **Invariants.**
 - **I-22 preserved** -- the `SO_PEERCRED` principal is kernel-stamped (`SYS_srv_peer`),
   not client-asserted; no identity self-elevates. `CAP_HOSTOWNER` remains the only
   DAC-override (a capability, not an identity). M7 (2026-10-18) closes the way round it:
   a Proc can no longer create, through a session it inherited, files stamped as that
-  session's identity.
-- **I-2 / I-4 / I-6 unaffected** -- M1-M7 add no capability, no handle-transfer path, no
+  session's identity. M8 (2026-10-19) closes the other way: an identity's files cannot
+  be made writable to others by what a program asks for, only by the owner's chmod or
+  in a directory whose owner made it writable to them.
+- **I-2 / I-4 / I-6 unaffected** -- M1-M8 add no capability, no handle-transfer path, no
   rights expansion. F1 *narrows* the handle-rights envelope (omode-derived) --
   monotonic-reduction-friendly.
 - **A-1.7 (I-23) preserved** -- F1's `T_OPATH` carve-out keeps the storage-capability

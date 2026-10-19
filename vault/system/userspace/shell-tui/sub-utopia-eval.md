@@ -71,11 +71,13 @@ their own over it (`bind -bc`) and the creates land in that layer. The grammar o
 `mount` and `bind` lives in `mountargs`, outside the `backend` gate, so its tests
 run on the host (`tools/test-rust.sh libutopia`); `builtin` asserts that its four
 flag values equal libthyla-rs's. A repeated ordering flag (`-bb`) is accepted;
-only `-b` with `-a` is refused. All three namespace builtins resolve their names
-against `$cwd` with the same lexical `normalize_abs` that `cd` uses, because the
-kernel resolves a mount point from the root only (`sys_resolve_mountpoint`):
-before 2026-10-18 a relative mount point named the root's entry, not one below
-`$cwd`.
+only `-b` with `-a` is refused. All three namespace builtins pass their names
+through `ns_name`: a relative name is joined onto `$cwd` with the same lexical
+`normalize_abs` that `cd` uses, because the kernel resolves a mount point from
+the root only (`sys_resolve_mountpoint`), and before 2026-10-18 a relative mount
+point named the root's entry, not one below `$cwd`. An absolute name passes
+unchanged, and a trailing `/` survives the join: `normalize_abs` drops it, and
+the trailing slash is how a name asks to follow a final symlink.
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned

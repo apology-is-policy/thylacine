@@ -125,6 +125,8 @@ This is pouch's lower half: how each POSIX abstraction becomes a Thylacine primi
 
 POSIX `open / read / write / pread / pwrite / lseek / fstat / fsync / ftruncate / fcntl / unlink / mkdir / rmdir / rename` map onto Thylacine's Spoor + 9P-client + handle-table machinery, which already exists. A POSIX `int fd` **is** a Thylacine `hidx_t` handle index — the identity is exact, no descriptor table indirection needed. `open(path, ...)` resolves through the calling Proc's Territory (the namespace) via the walk machinery (`SYS_WALK_OPEN` and its successors).
 
+`umask` maps onto `SYS_UMASK` (operator vote 2026-10-19; it was the ENOSYS sentinel until then, so musl returned -1 from a call POSIX says cannot fail). The kernel reduces every create's mode by the caller's umask and bounds it by the parent directory's mode (IDENTITY-DESIGN 9.7 M8), so `open(O_CREAT)` and `mkdir` pass the mode they were given, and `umask` passes `mask & 0777` so that it always succeeds.
+
 **[OPEN Q 6.1]** `open()` of a *device* path (`/dev/...`) for stratumd's block device. Two options: (a) pouch's `open` resolves `/dev/...` through a `/dev`-style Thylacine namespace populated by the boot path; (b) stratumd receives the block device as an inherited handle (`SYS_SPAWN_WITH_FDS`-style) and its block layer has a thin Thylacine arm that uses the inherited fd instead of `open()`. Option (a) keeps stratumd's source more portable; option (b) is more capability-pure (Thylacine hands out the device explicitly, no ambient `/dev`). This interacts with §10 (cross-OS source story). **Lean: (b)** — capability-explicit is more Thylacine, and stratumd already has a per-OS block-layer seam; but (a) is friendlier to future ported software. Needs a decision.
 
 ### 6.2 Sockets → /srv

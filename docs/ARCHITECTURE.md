@@ -2960,7 +2960,8 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `stat(name, buf, n)` | Stat a file |
 | `wstat(name, buf, n)` | Write file metadata |
 | `fstat(fd, buf, n)` | Stat an open fd |
-| `create(name, mode, perm)` | Create a file |
+| `create(name, mode, perm)` | Create a file. Its mode is `perm` less the caller's umask, bounded by the directory's mode as Plan 9's create(5) bounds it (IDENTITY-DESIGN 9.7 M8) |
+| `umask(mask) → old` | Set the creation mask and return the previous one; 0022 at boot, inherited at spawn, shared by a Proc's threads; a bit outside 0777 is `EINVAL` (native 133, operator vote 2026-10-19) |
 | `remove(name)` | Remove a file |
 | `bind(old, new, flags)` | Bind path-to-path in territory (Plan 9 symbolic bind) |
 | `attach_9p(transport_fd, aname, n_uname) → spoor_fd` | Wrap a byte-pipe Spoor in a kernel 9P client; return a Spoor representing the 9P tree's root (§9.6) |
@@ -3437,7 +3438,7 @@ Stratum exposes a second 9P surface (admin / observability) per `stratum/v2/docs
     └── clear-events                   — clear audit log
 ```
 
-Auth is via `SO_PEERCRED` on the Unix socket (stratumd reads the connecting process's UID and gates admin verbs server-side). Thylacine's kernel preserves this credential through the 9P attach path so the trust boundary is intact. Stratum stamps a create with its connection's credential rather than the caller's, so the kernel admits a create through a 9P session only from a principal at one of the session's two ends (IDENTITY-DESIGN 9.7 M7).
+Auth is via `SO_PEERCRED` on the Unix socket (stratumd reads the connecting process's UID and gates admin verbs server-side). Thylacine's kernel preserves this credential through the 9P attach path so the trust boundary is intact. Stratum stamps a create with its connection's credential rather than the caller's, so the kernel admits a create through a 9P session only from a principal at one of the session's two ends (IDENTITY-DESIGN 9.7 M7). Stratum applies no mask to a create's mode either, so the kernel reduces it by the creator's umask and bounds it by the parent directory's mode, as Plan 9's create(5) does (M8).
 
 Coordination with Thylacine's `/ctl` (kernel admin Dev introduced at Phase 4 P4-D): the two surfaces are distinct namespaces. Thylacine's `/ctl` is OS-level (procs, memory, devices, kernel-base, sched); Stratum's `/ctl/` is storage-level (pools, datasets, snapshots, scrub). Userspace tools dial both as needed.
 
