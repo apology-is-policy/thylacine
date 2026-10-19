@@ -53,7 +53,23 @@
   sentences too. The gap pin (F4) compared a VALUE that refusals share; the
   unknown arm now counts. F5 is my own S1 seen from the other side: "decides
   before it writes anything" holds only for the flags a correct caller passes.
-- *Open:* F1 waits on the operator's ARCH vote; everything UNBUILT.
+- *Votes (operator, 2026-10-19):* delete corona's old AS-R9 gate inputs
+  (work/oct5-as-r9/*/inputs, 19 dirs; freed 3.5 GiB -- 6101 -> 9634 MiB) so
+  the backport gate's SMP leg could pass build.sh's floor, which had refused
+  it at 5982 MB; and amend ARCH 25.4 on both trees. Neither floor was
+  lowered. My delete took those dirs whole, and with them 49 TRACKED
+  provenance files (HASHES.txt, PINNED, SOURCE.txt, .config-*) that I had
+  told the operator would stay; `git status` showed the deletions before
+  any commit, and they are restored from HEAD. The vote covered the images.
+- *Found drafting F1:* corona's `burrow.tla` was byte-identical to main's
+  pre-backport model -- the backport audit's P3-4 twin had never been folded,
+  so AS-R9's race had no model witness here either. Ported (ALL CFGS AS
+  CLAIMED). And `vault/specs/spec-burrow.md` never learned the charge record
+  on EITHER tree: specs sit outside quaestor's dossier census, so no gate
+  asked. Main's tree also carried my own cb6722ddd note appended under the
+  very clause it contradicted -- a note that pointed at the correction while
+  leaving the rule standing.
+- *Open:* corona UNBUILT; the gate and the counter-pin mutants are next.
 
 ## 2026-10-19 -- 17:09Z closed: the socket verb arms check their own ctl (corona)
 

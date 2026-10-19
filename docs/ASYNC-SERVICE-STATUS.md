@@ -5037,6 +5037,17 @@ rules it fixed:
 - Pre-existing, fixed here: `vivarium.h`'s "a future row below 100" (now the
   ceiling by name) and the PCI registries' "native ceiling 123".
 
-**Posture: UNBUILT; round 1 fixed except F1 (operator vote).** Owed: F1, then
-the gate (ci, qual, UBSan, `ci-smp-gate`) batched with the pi bake, with
-mutants for the counter pin.
+F1 closed by the operator's vote (2026-10-19, amend both trees): ARCH 25.4's
+addendum and AUDIT-TRIGGERS row 107 now state the settled drop -- the claim
+inside the drop's `v->lock` hold, a stand-alone pair only with a proven
+independent reference (`SYS_JIT_DESTROY` here) -- and lose the stale names
+(`burrow_is_shared_out`, `charge_pid`) and the "recorded window" AS-R9 closed.
+Folded with it: the corona twin of the backport audit's P3-4, which
+9f8687a8c missed -- `burrow.tla`'s charge record (`NoRecordAfterFree`,
+`RefundExactlyOnce`), `burrow_buggy_claim_restore{,_ledger}.cfg` and
+`specs/check-burrow.sh`, ALL CFGS AS CLAIMED on this tree -- and
+`vault/specs/spec-burrow.md`, which neither tree's close had taught the charge
+record.
+
+**Posture: CLOSED at *(pending)*, UNBUILT.** Owed: the gate (ci, qual, UBSan,
+`ci-smp-gate`) batched with the pi bake, with mutants for the counter pin.
