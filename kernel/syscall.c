@@ -15818,6 +15818,14 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     syscall_native_switch(ctx);
 }
 
+// Every call the native switch had no case for. Its -1 cannot say that alone:
+// many native handlers refuse with the same value.
+static u64 g_syscall_unknown;
+
+u64 syscall_unknown_count(void) {
+    return __atomic_load_n(&g_syscall_unknown, __ATOMIC_RELAXED);
+}
+
 static void syscall_native_switch(struct exception_context *ctx) {
     u64 nr = ctx->regs[8];
 
@@ -16533,6 +16541,7 @@ static void syscall_native_switch(struct exception_context *ctx) {
     default:
         // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;
         // v1.0 returns -1 (ENOSYS) and lets userspace decide.
+        __atomic_fetch_add(&g_syscall_unknown, 1u, __ATOMIC_RELAXED);
         ctx->regs[0] = (u64)(s64)-1;
         return;
     }

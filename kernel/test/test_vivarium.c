@@ -386,14 +386,17 @@ void test_vivarium_rejects_are_deliberate(void) {
 
     // Vote 13 moved SYS_SRV_REGISTRY_NEW to 134, which lifted the ceiling over
     // the signal family's 128..134 (vivarium.c argues each). rt_sigaction is
-    // the one that meets a native number. A native caller mis-declared as Linux
-    // arrives with the registry's flags word -- which must be 0 -- as
-    // sigsetsize, and the decision refuses that before anything is written; the
-    // control one variable away is the same call at the size musl passes.
+    // the one that meets a native number. Its soundness is the arm's reach --
+    // the caller's own memory and its own sigtab, argued in vivarium.c -- and
+    // these asserts pin only the common case: a WELL-FORMED registry call from
+    // a native caller mis-declared as Linux arrives with its flags word, 0, as
+    // sigsetsize, and the decision refuses that before anything is written.
+    // The control one variable away is the same call at the size musl passes,
+    // which is also what a malformed flags-8 call gets: translated.
     TEST_ASSERT(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
                 "rt_sigaction collides with SYS_SRV_REGISTRY_NEW -- known, and reachable by neither");
     TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 0) == VIV_FORWARD,
-                "the registry call's shape (flags 0 as sigsetsize 0) is refused first");
+                "a well-formed registry call (flags 0 as sigsetsize 0) is refused first");
     TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 8) == VIV_TRANSLATED,
                 "control: the same call at sigsetsize 8 translates");
 

@@ -260,8 +260,8 @@ enum {
     //     never authority. A mis-declared Proc is comprehensively broken
     //     either way; I-43 is about what it can REACH, not whether it works.
     //
-    // A future row below 100 owes the same paragraph. Do not reach for the
-    // ceiling argument again without checking the number.
+    // A future row at or below VIV_NATIVE_CEILING owes the same paragraph. Do
+    // not reach for the ceiling argument again without checking the number.
     VIV_LINUX_PSELECT6    = 72,
     VIV_LINUX_PPOLL       = 73,
 

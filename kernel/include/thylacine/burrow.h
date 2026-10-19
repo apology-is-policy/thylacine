@@ -665,12 +665,17 @@ void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages);
 u32  burrow_charge_claim(struct Burrow *v, const struct Proc *p);
 void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages);
 
-// Exact-payer forms for asynchronous cleanup. Caller holds an AddrSpace owner
-// or kernel descriptor pin plus the Burrow reference being settled; neither
-// pointer is discovered from a dead Proc or a PID lookup. Claim before dropping
-// the Burrow ref, refund only when the drop actually frees it, otherwise restore.
-// A descriptor pin does not keep VMAs alive. These preserve the existing ledger
-// and limits; they are not the replacement shared-memory accounting policy.
+// The exact-AddrSpace forms of the pair above, under the same rule: legal only
+// across an interval in which the caller provably holds an independent
+// reference. The Proc wrappers delegate here for SYS_JIT_DESTROY, and tests
+// peek at a live record this way. The AddrSpace is an owner or a kernel
+// descriptor pin (which does not keep VMAs alive), never one discovered from a
+// dead Proc or a PID lookup. These are NOT a protocol for asynchronous
+// cleanup: a Loom or Weft settle can race another holder's final drop, so it
+// settles through burrow_unref_settled_in or
+// burrow_release_mapping_settled_deferred below, which take the charge inside
+// the drop. These preserve the existing ledger and limits; they are not the
+// replacement shared-memory accounting policy.
 u32 burrow_charge_claim_in(struct Burrow *v, const struct AddrSpace *as);
 void burrow_charge_restore_in(struct Burrow *v, const struct AddrSpace *as, u32 pages);
 

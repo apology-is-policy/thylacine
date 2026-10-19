@@ -55,18 +55,24 @@ _Static_assert(VIV_LINUX_RT_SIGPROCMASK > VIV_NATIVE_CEILING,
 // argument settles is a native program mis-declared as Linux.
 //
 // rt_sigaction (134) collides with SYS_SRV_REGISTRY_NEW. Its row is TIER2, and
-// the translator decides before it writes anything: the registry call's flags
-// word, which must be 0, arrives as sigsetsize, and vivarium_sigaction_decide
-// refuses every size but 8 first. The mis-declared caller gets ENOSYS, having at
-// most had its own route buffer read as an act struct, and loses a call that
-// grants nothing to a Proc without the factory role anyway.
+// what makes that sound is the arm's reach, not the caller's arguments: it
+// reads an act struct from memory the caller's own registers named (validated,
+// EFAULT if short), writes the old disposition only to such an address, and
+// installs into the caller's OWN sigtab -- pselect6's envelope (vivarium.h),
+// so a mis-declared Proc can break itself and reach nothing. A well-formed
+// registry call stops sooner: its flags word, which must be 0, arrives as
+// sigsetsize, and vivarium_sigaction_decide refuses every size but 8 first, so
+// that caller gets ENOSYS with only its route buffer read. A malformed one with
+// flags 8 is translated, within the same envelope. Either way it loses a call
+// that grants nothing to a Proc without the factory role.
 _Static_assert(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
                "revisit rt_sigaction / SRV_REGISTRY_NEW collision on renumber");
 // restart_syscall (128), kill (129), tkill (130), tgkill (131), sigaltstack
 // (132) and rt_sigsuspend (133) meet NO native number on this tree: 127..133
 // are held for other branches' syscalls and assigned nothing here, which
-// syscall.native_gap_unassigned pins (a native number landing in the gap fails
-// it). Each is consumed before the native switch regardless --
+// syscall.native_gap_unassigned pins by counting the native switch's unknown
+// arm (a native number landing in the gap fails it, whatever it returns). Each
+// is consumed before the native switch regardless --
 // restart_syscall, sigaltstack and rt_sigsuspend are VIV_ENOSYS rows, and the
 // kill family is unclassified, which FORWARDs to ENOSYS -- and
 // vivarium.rejects_are_deliberate pins each verdict by name. When the gap's

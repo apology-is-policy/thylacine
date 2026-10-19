@@ -160,7 +160,10 @@ Measured on this tree, not incremented: **125** live numbers, the span runs to
 134 with holes at 26, 30, 43 and 127..133, the native switch (now
 `syscall_native_switch`) has exactly 125 arms, and both set differences are
 empty. The 127..133 hole is deliberate and pinned
-(`syscall.native_gap_unassigned`): those numbers belong to other branches.
+(`syscall.native_gap_unassigned`, which counts each of the seven into the
+native switch's unknown arm through `syscall_unknown_count()` rather than
+trusting the -1 many handlers also return): those numbers belong to other
+branches.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —

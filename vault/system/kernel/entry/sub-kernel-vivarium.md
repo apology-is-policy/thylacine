@@ -19,11 +19,15 @@ moved it from 127 and left 127..133 to other branches' syscalls. Raising the
 ceiling from 127 to 134 put seven signal-family rows below it, and the
 ceiling assert stopped the build until each was argued on its own in
 vivarium.c. rt_sigaction (134) collides with SRV_REGISTRY_NEW: its row is
-TIER2, and a native caller mis-declared as Linux arrives with the registry's
-zero flags word as sigsetsize, which `vivarium_sigaction_decide` refuses
+TIER2, sound by the arm's reach -- it reads and writes only memory the
+caller's own registers name and installs into the caller's own sigtab, the
+pselect6 envelope -- so a native caller mis-declared as Linux can break itself
+and reach nothing. A well-formed registry call never gets that far: its zero
+flags word arrives as sigsetsize, which `vivarium_sigaction_decide` refuses
 before anything is written. restart_syscall, kill, tkill, tgkill,
 sigaltstack and rt_sigsuspend (128..133) meet an empty gap, pinned by
-`syscall.native_gap_unassigned`, and each is consumed before the native
+`syscall.native_gap_unassigned` (it counts the native switch's unknown arm,
+so a handler answering -1 cannot pass it), and each is consumed before the native
 switch (ENOSYS rows, or FORWARD for the unclassified kill family), pinned by
 name in `vivarium.rejects_are_deliberate`. The ceiling argument now starts
 at rt_sigprocmask (135). There is no Linux phenotype factory operation; the

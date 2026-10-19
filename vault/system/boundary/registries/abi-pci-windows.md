@@ -14,9 +14,9 @@ mirrors:
   - "kernel/syscall.c: map and query handlers"
   - "usr/lib/libt/include/thyla/syscall.h: t_pci_window and wrappers"
   - "usr/lib/libthyla-rs/src/lib.rs: TPciWindow and wrappers"
-  - "kernel/include/thylacine/vivarium.h: native ceiling (123 after trusted-seat/nonblocking append)"
+  - "kernel/include/thylacine/vivarium.h: VIV_NATIVE_CEILING sits above these numbers"
 created: 2026-09-17
-updated: 2026-09-18
+updated: 2026-10-19
 ---
 ## Contract
 

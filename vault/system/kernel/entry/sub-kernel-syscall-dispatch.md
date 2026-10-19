@@ -6,6 +6,7 @@ title: "The syscall dispatcher — argument marshalling, the staging tiers, and 
 code:
   - kernel/syscall.c
   - kernel/test/test_argwidth_probe.c
+  - kernel/test/test_syscall.c
   - usr/argwidth-probe/argwidth-probe.c
   - tools/check-arg-width.py
 audit: hard
@@ -31,6 +32,13 @@ All spawn-permission entry paths retain the shared grant check; public bit 10
 cannot be delegated by a caller lacking internal factory role bit 29.
 The C/kernel, C/libt and Rust compiled ABI witnesses agree on number, bit and
 record layout. See [[sub-kernel-devsrv]].
+
+Numbers 127..133 are assigned nothing on this tree (other branches hold them).
+`syscall.native_gap_unassigned` (`kernel/test/test_syscall.c`) pins the gap by
+the unknown arm's own counter, `syscall_unknown_count()`, rather than by the -1
+that arm answers, because many native handlers refuse zeroed arguments with the
+same -1. Its control, 134, answers the factory-role gate and leaves the counter
+alone.
 
 ## Trusted-seat and nonblocking entries
 
@@ -812,7 +820,10 @@ eager anonymous region". A region that was never charged now refunds nothing,
 enforced by attribution rather than by enumerating shapes. Two discriminations
 are load-bearing and easy to collapse: **shared-out**, not "does anything else
 still hold this" (the process's *own* other claim also keeps the region alive,
-and there the charge must stay); and **claim before drop**, not after.
+and there the charge must stay); and **the claim taken inside the drop**,
+under the Burrow's lock -- not after it, when a freeing drop has taken the
+record with it, and not before it with a restore on a nonfinal drop, which
+AS-R9 showed is a use-after-free write.
 
 ## Invariants enforced
 
@@ -1244,8 +1255,9 @@ lazy Burrow had one VMA, an I-32 under-count once one has several (a D-3b
 window reached it; a protect split reaches it on every thread stack); B-1a made
 it the piece's own range through `burrow_decommit` on the exact match. B-1a'
 deleted `detach_one_locked` and `detach_args_check` outright: the refund, the
-ANON arm's claim-before-drop attribution and the CODE refusal all live in
-`vma_detach_range_in`, once, for every caller (the B-1a' section below).
+ANON arm's payer attribution (claimed inside the drop since AS-R9) and the CODE
+refusal all live in `vma_detach_range_in`, once, for every caller (the B-1a'
+section below).
 
 **The phenotype `munmap`'s window confinement no longer leaks a MAP_FIXED
 mapping below the window (closed at B-1a').** The row is window-confined

@@ -12,9 +12,9 @@ mirrors:
   - kernel/syscall.c
   - usr/lib/libt/include/thyla/syscall.h
   - usr/lib/libthyla-rs/src/lib.rs
-  - "kernel/include/thylacine/vivarium.h: native ceiling 123"
+  - "kernel/include/thylacine/vivarium.h: VIV_NATIVE_CEILING sits above these numbers"
 created: 2026-09-17
-updated: 2026-09-18
+updated: 2026-10-19
 ---
 ## Calls
 

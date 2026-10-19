@@ -41,7 +41,19 @@
   On main's tree the ported test comment also called the null-Proc unmap probe
   a behaviour pin; main's wrapper dereferences `p->as` right after that guard,
   so there it is a guard pin.
-- *Open:* both changes UNBUILT and UNAUDITED at this entry.
+- *Round 1 on vote 13 (Fable 5.1, cross-family):* 0/0/2/4. The code is
+  sound; the P2s are the batch's own goal left half done. The trigger table's
+  charge-record row defers to ARCH 25.4 as the AUTHORITATIVE copy, and ARCH
+  still prescribes claim-before-drop and restore-on-`!freed` (F1); `burrow.h`
+  sold the exact-AddrSpace claim/restore forms as the protocol "for
+  asynchronous cleanup" (F2). The earlier sweep had matched phrases, so rules
+  worded "claim BEFORE the drop" or "Claim precedes" walked past it a second
+  time. The re-sweep enumerated phrasings on both trees and read every hit
+  instead of trusting a zero: main's tree has F1 and the two dispatch-dossier
+  sentences too. The gap pin (F4) compared a VALUE that refusals share; the
+  unknown arm now counts. F5 is my own S1 seen from the other side: "decides
+  before it writes anything" holds only for the flags a correct caller passes.
+- *Open:* F1 waits on the operator's ARCH vote; everything UNBUILT.
 
 ## 2026-10-19 -- 17:09Z closed: the socket verb arms check their own ctl (corona)
 

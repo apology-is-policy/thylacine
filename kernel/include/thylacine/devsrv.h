@@ -59,7 +59,7 @@ struct poll_waiter;
 // the number of usernames that have logged in since boot.
 #define SRV_MAX_SERVICES  16u
 
-// Native syscall 127 manifest; all unused name bytes must be zero.
+// SYS_SRV_REGISTRY_NEW's route manifest; all unused name bytes must be zero.
 struct srv_route { u32 name_len; u32 reserved; u8 name[32]; };
 _Static_assert(sizeof(struct srv_route) == 40, "D7 route ABI size");
 struct Spoor *devsrv_session_root(struct Proc *p, struct Spoor *source,

@@ -684,10 +684,13 @@ that shape writes through a freed Burrow when another holder's final drop lands
 between the two.) The leaf lock and claim-once semantics are unchanged; no PID
 lookup or successor image can receive the refund. A native test destroys the
 Proc, rejects a fresh address space as payer, and settles the pinned original
-account after the last buffer release. The stand-alone claim/restore pair keeps
-one legal caller, `SYS_JIT_DESTROY` (above); the legacy shared-out detach
-policy is unchanged, and the new MM hierarchy is not implemented here. Evidence
-is in ASYNC-SERVICE-SELF-REVIEW.md.
+account after the last buffer release. The stand-alone claim/restore pair, in
+both its Proc form and the exact-AddrSpace `_in` form AS-2a added for this
+cleanup, keeps one legal caller, `SYS_JIT_DESTROY` (above), plus tests that
+peek at a live record; no asynchronous path uses it. The legacy shared-out
+detach policy is unchanged, and the new MM hierarchy is not implemented here.
+Evidence is in ASYNC-SERVICE-SELF-REVIEW.md, whose claim/restore paragraph
+AS-R9 superseded (noted there).
 
 ## Provenance
 

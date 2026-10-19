@@ -328,7 +328,8 @@ supersedes the historical D7/A-5b implementation gap below. See the interaction
 status for measured acceptance and the paired Stratum dependency.
 
 D7 completion was ratified on October 1, 2026 in
-`docs/SRV-SESSION-REGISTRY-DESIGN.md`: syscall 127, dedicated spawn role bit 10,
+`docs/SRV-SESSION-REGISTRY-DESIGN.md`: syscall 127 (134 since vote 13, 2026-10-19),
+dedicated spawn role bit 10,
 fixed resident routes, a posting-membership lifetime ledger, and charged session
 resource domains. The factory replaces login's inherited `/srv` before auth;
 the selected-registry authority still lives in the namespace. Implementation

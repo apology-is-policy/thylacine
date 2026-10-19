@@ -175,6 +175,16 @@ This does not claim a new globally exact memory ledger: the approved MM arc
 will replace those semantics. An ownerless descriptor cannot admit new user
 allocations while its pending charges settle.
 
+Superseded by AS-R9 (2026-10-05, `ASYNC-SERVICE-STATUS.md`): the claim /
+release / restore protocol in the paragraph above was not conservative but a
+use-after-free write -- another holder's final release can land between a
+nonfinal release and the restore, which then writes through a freed Burrow,
+and the holder that freed it finds an empty record and refunds nothing. Every
+asynchronous settle now takes the charge inside the release that decides
+finality (`burrow_unref_settled_in`, `burrow_release_mapping_settled_deferred`).
+The exact-AddrSpace claim/restore forms remain only for a caller holding an
+independent reference across the interval (`SYS_JIT_DESTROY`, and tests).
+
 Primary precedent: Linux separates mmgrab descriptor lifetime from mmget mapping
 lifetime ([lifetime helpers](https://github.com/torvalds/linux/blob/master/include/linux/sched/mm.h)). Thylacine retains its own Proc, AddrSpace,
 Burrow, namespace and existing accounting rules.

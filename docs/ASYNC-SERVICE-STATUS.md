@@ -5008,5 +5008,35 @@ AS-2a section of `sub-kernel-burrow` told the asynchronous caller to claim befor
 the release and restore on a nonfinal drop; it now describes the settled drop
 Loom actually uses.
 
-**Posture: UNBUILT, UNAUDITED.** Owed: the audit round (Fable 5.1), then the
-gate (ci, qual, UBSan, `ci-smp-gate`) batched with the pi bake.
+**Audit round 1** (Fable 5.1, cross-family, MODEL start == end; read-only over
+6328fa4af..9f8687a8c): 0 P0 / 0 P1 / 2 P2 / 4 P3, plus two pre-existing stale
+ceiling copies. The code half is sound (the dispatch structure, the T2 arm's
+work before its decision, the `as` key, the deletion, the census). Both P2s are
+this batch's own goal left unfinished in the two places that outrank the five
+rules it fixed:
+- F1 [P2]: ARCH 25.4's resource-floor row, which AUDIT-TRIGGERS row 107 names
+  as the AUTHORITATIVE prosecution copy, still says callers claim BEFORE the
+  drop and restore where the Burrow provably survives (`!freed`) -- the AS-R9
+  shape. ARCH is binding scripture, so the amendment waits on the operator's
+  vote. Main's tree carries the same row.
+- F2 [P2]: `burrow.h` introduced the exact-AddrSpace claim/restore forms as the
+  protocol "for asynchronous cleanup": claim before dropping, otherwise
+  restore. Now: the Proc pair's independent-reference rule, and asynchronous
+  callers settle through the settled drops.
+- F3 [P3]: three more surviving prescriptions -- two in
+  `sub-kernel-syscall-dispatch` (main's tree has both) and the AS-2a
+  self-review paragraph, which now carries a supersession note.
+- F4 [P3]: `syscall.native_gap_unassigned` accepted -1, which many native
+  handlers also answer to zeroed arguments. The unknown arm now counts
+  (`syscall_unknown_count()`); the test wants +1 for each of 127..133 and +0
+  for the control, 134.
+- F5 [P3], with the self-found S1: the rt_sigaction/134 argument rested on the
+  caller passing flags 0. A malformed flags-8 call is translated; it is sound by
+  the arm's reach (own memory, own sigtab), which is now the stated argument.
+- F6 [P3]: `devsrv.h` and `STALK-DESIGN.md` still said 127.
+- Pre-existing, fixed here: `vivarium.h`'s "a future row below 100" (now the
+  ceiling by name) and the PCI registries' "native ceiling 123".
+
+**Posture: UNBUILT; round 1 fixed except F1 (operator vote).** Owed: F1, then
+the gate (ci, qual, UBSan, `ci-smp-gate`) batched with the pi bake, with
+mutants for the counter pin.

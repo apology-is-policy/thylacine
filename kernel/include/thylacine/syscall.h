@@ -3729,6 +3729,10 @@ struct exception_context;
 // thread is left in EXITING state until wait_pid reaps it.
 void syscall_dispatch(struct exception_context *ctx);
 
+// Calls that reached the native switch's unknown arm (defined in syscall.c).
+// A test tells "no native handler" from a handler that also answers -1 by it.
+u64 syscall_unknown_count(void);
+
 // The follow-up round's F1 gate predicate (defined in syscall.c): SYS_ATTACH_9P
 // admits pipe pairs ONLY -- the spoor transport is sound solely over a
 // non-blocking tx, and CNBFRAME is honored by devpipe alone (a /srv byte-conn or
