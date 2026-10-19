@@ -512,7 +512,10 @@ void test_devproc_ns_reads_past_the_buffer(void) {
     enum { NMNT = 48, CAP = 8192, CHUNK = 4096 };
     struct Territory *k = kpgrp();
     int base = territory_nmounts(k);
-    struct Spoor *pts[NMNT] = { 0 };
+    // Cleared by a loop: an initializer this size is a memset call, which the
+    // freestanding kernel does not have.
+    struct Spoor *pts[NMNT];
+    for (int i = 0; i < NMNT; i++) pts[i] = NULL;
     struct Spoor *src = spoor_alloc(&devnone);
     int mounted = 0;
     for (int i = 0; i < NMNT && src; i++) {
