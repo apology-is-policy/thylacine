@@ -2709,20 +2709,6 @@ void test_vivarium_socktab_bind_fields(void) {
                 "and a claim on it does fail -- has_room agrees with claim");
 }
 
-// N-3's concurrency-fix core invariant: a keyed write to a slot that was closed
-// and RECYCLED lands nowhere. The deterministic unit form of the race a blocked
-// op runs when a peer thread close()s and re-socket()s the fd underneath it --
-// the [[bug-254]] / lock-across-sleep hazard the identity key closes. Before N-3
-// this table was lock-free and this write would corrupt the recycled socket.
-//
-// THE F1 DISCRIMINATOR (holotype, 2026-08-31): the recycle here reuses the SAME
-// netd connection number `n=5`, because netd mints `n` as the lowest-free slot
-// index -- a close()+socket() on one fd draws the same n by default. That is
-// exactly the case an n-keyed guard would silently PASS (5 == 5), corrupting the
-// recycled socket. The epoch key must refuse it: a fresh claim takes a strictly
-// greater monotonic epoch. A test that recycled to a DIFFERENT n would pass on
-// the broken n-key too, and prove nothing.
-//
 // connect()'s commit, run as handle_replace_hooked runs it but with no handle
 // lock: the keying under test is the hook's own.
 static bool socktab_commit(struct viv_socktab *tab, s32 fd, u64 epoch,
@@ -2736,6 +2722,19 @@ static bool socktab_commit(struct viv_socktab *tab, s32 fd, u64 epoch,
     return c.ok;
 }
 
+// N-3's concurrency-fix core invariant: a keyed write to a slot that was closed
+// and RECYCLED lands nowhere. The deterministic unit form of the race a blocked
+// op runs when a peer thread close()s and re-socket()s the fd underneath it --
+// the [[bug-254]] / lock-across-sleep hazard the identity key closes. Before N-3
+// this table was lock-free and this write would corrupt the recycled socket.
+//
+// THE F1 DISCRIMINATOR (holotype, 2026-08-31): the recycle here reuses the SAME
+// netd connection number `n=5`, because netd mints `n` as the lowest-free slot
+// index -- a close()+socket() on one fd draws the same n by default. That is
+// exactly the case an n-keyed guard would silently PASS (5 == 5), corrupting the
+// recycled socket. The epoch key must refuse it: a fresh claim takes a strictly
+// greater monotonic epoch. A test that recycled to a DIFFERENT n would pass on
+// the broken n-key too, and prove nothing.
 void test_vivarium_socktab_keyed_write_identity(void);
 void test_vivarium_socktab_keyed_write_identity(void) {
     static struct viv_socktab tab;

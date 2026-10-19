@@ -1179,7 +1179,7 @@ void test_vivsock_so_error_needs_no_descriptor(void) {
 // ---------------------------------------------------------------------------
 
 // The number's row, bound to `port` as bind() leaves it.
-static bool ns_bind(struct Proc *p, s64 fd, u16 port) {
+static bool ns_bind_row(struct Proc *p, s64 fd, u16 port) {
     struct viv_sock e;
     return ns_row(p, fd, &e) && viv_socktab_set_bound(p->socktab, (s32)fd, e.epoch, 0, port);
 }
@@ -1243,7 +1243,7 @@ void test_vivsock_ctl_verbs_need_their_ctl(void) {
     bool ccgone = (ccfd >= 0) && ns_row_ctl(p->socktab, ccfd) == NULL;
 
     s64  clfd   = ns_socket(p, VIV_NET_TCP, 32, VIV_SOCK_FRESH);
-    bool clb    = ns_bind(p, clfd, 8080);
+    bool clb    = ns_bind_row(p, clfd, 8080);
     u32  m1     = g_ns.ctl_writes;
     s64  clrc   = clb ? viv_listen_for_test(p, (u64)clfd) : -1;
     u32  clw    = g_ns.ctl_writes - m1;
@@ -1258,7 +1258,7 @@ void test_vivsock_ctl_verbs_need_their_ctl(void) {
     s64  sc  = ns_socket(p, VIV_NET_TCP, 34, VIV_SOCK_FRESH);
     s64  sl  = ns_socket(p, VIV_NET_TCP, 35, VIV_SOCK_FRESH);
     s64  sd  = ns_socket(p, VIV_NET_UDP, 36, VIV_SOCK_FRESH);
-    bool slb = ns_bind(p, sl, 8081);
+    bool slb = ns_bind_row(p, sl, 8081);
     bool held = file && slb && ns_dup3_window(p, sc, file) &&
                 ns_dup3_window(p, sl, file) && ns_dup3_window(p, sd, file);
     u32  w0 = g_ns.ctl_writes, f0 = g_ns.file_writes, o0 = g_ns.data_opens;
@@ -1381,7 +1381,7 @@ void test_vivsock_ctl_verbs_meet_a_racing_peer(void) {
     s64  csettled = (cfd >= 0) ? viv_sock_connect_for_test(p, (u64)cfd, g_ns_peer, 80) : -1;
 
     s64  lfd   = ns_socket(p, VIV_NET_TCP, 41, VIV_SOCK_FRESH);
-    bool la    = ns_bind(p, lfd, 8084) && ns_peer_arm(p, VIV_NET_TCP, 41, PEER_CONNECTS);
+    bool la    = ns_bind_row(p, lfd, 8084) && ns_peer_arm(p, VIV_NET_TCP, 41, PEER_CONNECTS);
     s64  lrc   = la ? viv_listen_for_test(p, (u64)lfd) : -1;
     bool ldone = g_peer.done;
     ns_peer_settle();
@@ -1411,7 +1411,7 @@ void test_vivsock_ctl_verbs_meet_a_racing_peer(void) {
     s64  xc  = ns_socket(p, VIV_NET_TCP, 44, VIV_SOCK_FRESH);
     s64  xl  = ns_socket(p, VIV_NET_TCP, 45, VIV_SOCK_FRESH);
     s64  xd  = ns_socket(p, VIV_NET_UDP, 46, VIV_SOCK_FRESH);
-    bool xlb = ns_bind(p, xl, 8085);
+    bool xlb = ns_bind_row(p, xl, 8085);
     s64  xcrc = (xc >= 0 && ns_peer_arm(p, VIV_NET_TCP, 44, PEER_CLOSES))
               ? viv_sock_connect_for_test(p, (u64)xc, g_ns_peer, 80) : -1;
     bool xcdone = g_peer.done;
@@ -1456,7 +1456,7 @@ void test_vivsock_ctl_identity_travels_with_the_fd(void) {
     TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
 
     s64  afd  = ns_socket(p, VIV_NET_TCP, 47, VIV_SOCK_FRESH);
-    bool ab   = ns_bind(p, afd, 8086);
+    bool ab   = ns_bind_row(p, afd, 8086);
     const struct Spoor *aid = ns_row_ctl(p->socktab, afd);
     int  ar0  = ns_ref(aid);
     s64  dfd  = ab ? viv_dup_for_test(p, (u64)afd) : -1;
@@ -1468,7 +1468,7 @@ void test_vivsock_ctl_identity_travels_with_the_fd(void) {
     bool dverb = ns_verb_is("announce *!8086");
 
     s64  ffd  = ns_socket(p, VIV_NET_TCP, 48, VIV_SOCK_FRESH);
-    bool fb   = ns_bind(p, ffd, 8087);
+    bool fb   = ns_bind_row(p, ffd, 8087);
     const struct Spoor *pid = ns_row_ctl(p->socktab, ffd);
     int  fr0  = ns_ref(pid);
     struct Proc *child = proc_alloc();
