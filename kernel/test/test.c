@@ -841,6 +841,16 @@ void test_capacity_page_tables_charged_and_reclaimed(void);
 void test_capacity_memory_bomb_leaves_the_reserve(void);
 void test_capacity_fork_costs_the_pool_only_its_nodes(void);
 void test_vma_range_is_mapped(void);                     // B-1b
+// B-3e vote 2 (ARCH 6.5, adjacent anonymous mappings merge): kernel/test/test_anon_merge.c
+void test_pagemap_grow_keeps_every_page(void);
+void test_anon_merge_adjacent_reserves_share_one_mapping(void);
+void test_anon_merge_growth_crosses_every_shape(void);
+void test_anon_merge_hole_refill_joins_the_pieces(void);
+void test_anon_merge_successor_extends_into_its_offset_room(void);
+void test_anon_merge_never_across_a_boundary(void);
+void test_anon_merge_refused_growth_falls_back(void);
+void test_anon_merge_fork_clones_the_merged_burrow(void);
+void test_anon_merge_unmap_releases_lazy_slots(void);
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -3116,6 +3126,15 @@ struct test_case g_tests[] = {
     { "capacity.memory_bomb_leaves_the_reserve",   test_capacity_memory_bomb_leaves_the_reserve,   false, NULL },
     { "capacity.fork_costs_the_pool_only_its_nodes", test_capacity_fork_costs_the_pool_only_its_nodes, false, NULL },
     { "vma.range_is_mapped",              test_vma_range_is_mapped,              false, NULL },
+    { "pagemap.grow_keeps_every_page",    test_pagemap_grow_keeps_every_page,    false, NULL },
+    { "anon_merge.adjacent_reserves_share_one_mapping", test_anon_merge_adjacent_reserves_share_one_mapping, false, NULL },
+    { "anon_merge.growth_crosses_every_shape", test_anon_merge_growth_crosses_every_shape, false, NULL },
+    { "anon_merge.hole_refill_joins_the_pieces", test_anon_merge_hole_refill_joins_the_pieces, false, NULL },
+    { "anon_merge.successor_extends_into_its_offset_room", test_anon_merge_successor_extends_into_its_offset_room, false, NULL },
+    { "anon_merge.never_across_a_boundary", test_anon_merge_never_across_a_boundary, false, NULL },
+    { "anon_merge.refused_growth_falls_back", test_anon_merge_refused_growth_falls_back, false, NULL },
+    { "anon_merge.fork_clones_the_merged_burrow", test_anon_merge_fork_clones_the_merged_burrow, false, NULL },
+    { "anon_merge.unmap_releases_lazy_slots", test_anon_merge_unmap_releases_lazy_slots, false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },

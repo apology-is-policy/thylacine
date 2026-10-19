@@ -873,6 +873,10 @@ void test_capacity_fork_clone_charges_pages_and_nodes(void) {
     TEST_ASSERT(r1 > 0, "M1");
     TEST_EXPECT_EQ((int)fault(p, (u64)r1, true), (int)FAULT_HANDLED, "M1 slot 0");
     TEST_EXPECT_EQ((int)fault(p, (u64)r1 + 600 * P, true), (int)FAULT_HANDLED, "M1 slot 600");
+    // A page at another prot between them, so M2 mints its own Burrow (at an
+    // equal prot, adjacent, it would extend M1's: ARCH 6.5, the merge). It is
+    // never touched, so it costs no page, node or table.
+    TEST_ASSERT(reserve(p, P, PR_R, 0) == r1 + (s64)GIB(1), "the spacer");
     s64 r2 = reserve(p, GIB(1), PR_RW, 0);
     TEST_ASSERT(r2 > 0, "M2");
     TEST_EXPECT_EQ((int)fault(p, (u64)r2, true), (int)FAULT_HANDLED, "M2 slot 0");

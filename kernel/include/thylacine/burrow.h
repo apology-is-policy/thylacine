@@ -308,6 +308,18 @@ struct Burrow {
     // of one addrspace_clone, which clears every cursor it set before it
     // unlocks -- NULL at all other times, and never read by anything else.
     struct Burrow   *clone_cursor;
+
+    // ARCH 6.5 "Adjacent anonymous mappings merge" (B-3e): ANON_LAZY only.
+    // Every mapping of the Burrow puts its byte offset 0 at ONE address,
+    // lazy_va0 = vaddr_start - burrow_offset: a split or a trim moves start
+    // and offset together, a fork's clone is mapped at the parent's
+    // addresses, and nothing maps an ANON_LAZY Burrow by handle. That is
+    // what lets an extension reason from "these addresses are free" to
+    // "these offsets are mapped by no VMA". Stamped by the first vma_alloc
+    // of the Burrow and checked by every later one (burrow_lazy_bind_va0);
+    // under `lock`.
+    u64              lazy_va0;
+    bool             lazy_va0_set;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -548,6 +560,29 @@ bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
 // each run exactly once; failing closed beats silently miscounting the charge).
 int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
                          size_t first, size_t n);
+
+// ARCH 6.5 "Adjacent anonymous mappings merge": stamp an ANON_LAZY Burrow's
+// bias -- the address of its byte offset 0 -- at its first mapping, or check
+// a later mapping against it (struct Burrow, lazy_va0). Every mapping of such
+// a Burrow keeps one bias, so a mismatch is a kernel bug and extincts. Other
+// types return at once (a CODE Burrow's two aliases differ by design).
+// vma_alloc calls it; takes v->lock.
+void burrow_lazy_bind_va0(struct Burrow *v, u64 va0);
+
+// ARCH 6.5 "Adjacent anonymous mappings merge": make slots [first, first + n)
+// of an ANON_LAZY Burrow ready for a mapping of it to cover -- a reservation
+// an adjacent mapping absorbs instead of minting a Burrow. The caller holds
+// `as`'s lock and has found the addresses those slots sit at (at the
+// Burrow's one bias) unmapped, so no VMA maps the slots and, by NoOrphan
+// (specs/capacity.tla), none holds a page. That is CHECKED here, not
+// trusted: a resident slot in the range extincts, since it would reach EL0
+// as old memory where a fresh reservation reads zero. A Burrow that ends
+// short of the range grows to cover it (pagemap_grow; nodes charged to
+// `as`). Returns 0, or -1 with nothing changed: not a live ANON_LAZY Burrow,
+// a handle names it (another holder could reach it outside this address
+// space), or the growth was refused.
+int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                       size_t first, size_t n);
 
 // LINEAGE L-4a: the kernel direct-map address of one resident ANON_LAZY slot, or
 // NULL if the slot is not resident (or the Burrow is the wrong type / the slot is

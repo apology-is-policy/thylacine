@@ -572,9 +572,11 @@ void test_protect_multi_vma_and_hole(void) {
     struct Proc *p = mk();
     TEST_ASSERT(p != NULL, "proc_alloc");
 
-    // Two reservations first-fit adjacently in an empty window.
+    // Two reservations first-fit adjacently in an empty window, at different
+    // prots so the second mints its own Burrow (at an equal prot it would
+    // extend the first: ARCH 6.5, adjacent anonymous mappings merge).
     s64 a = reserve(p, 2 * P, PR_RW, 0);
-    s64 bb = reserve(p, 2 * P, PR_RW, 0);
+    s64 bb = reserve(p, 2 * P, PR_NONE, 0);
     TEST_ASSERT(a > 0 && bb > 0, "two reserves");
     TEST_EXPECT_EQ((u64)bb, (u64)a + 2 * P, "adjacent (first-fit)");
     TEST_EXPECT_EQ(protect(p, (u64)a, 4 * P, PR_R, 0), 0, "one protect across two Burrows");
@@ -811,11 +813,13 @@ void test_protect_range_walk_is_linear(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
     enum { K = 1024 };
 
+    // Alternating prots: an equal-prot neighbour would be extended instead of
+    // minting a mapping (ARCH 6.5, the merge), and this walk needs K of them.
     s64 base = reserve(p, P, PR_RW, 0);
     TEST_ASSERT(base > 0, "the first reserve");
     bool adjacent = true;
     for (int i = 1; i < K; i++) {
-        s64 va = reserve(p, P, PR_RW, 0);
+        s64 va = reserve(p, P, (i & 1) ? PR_NONE : PR_RW, 0);
         if (va != base + (s64)i * (s64)P) adjacent = false;
     }
     TEST_ASSERT(adjacent, "first-fit reserves land adjacently");

@@ -246,6 +246,7 @@ set(KERNEL_TEST_SRCS
     test/test_sys_burrow.c
     test/test_protect.c
     test/test_capacity.c
+    test/test_anon_merge.c
     test/test_torpor.c
     test/test_loom.c
     test/test_weft_ring.c

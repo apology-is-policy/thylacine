@@ -6407,12 +6407,60 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 // sysReserve/sysUnused (#321).
 // =============================================================================
 
-// SYS_BURROW_ATTACH_LAZY: the demand-zero twin of sys_burrow_attach_for_proc. Same
-// window placement + VMA install, but (a) the Burrow is BURROW_TYPE_ANON_LAZY (no
-// eager pages), and (b) the I-32 page_count is NOT charged here -- it is charged per
-// page at FAULT time (the whole point of a free reservation, so page_count tracks
-// true RSS). The VMA-count axis (PROC_VMA_MAX) IS charged inside vma_insert, so a
-// free lazy reservation cannot exhaust the vma slab.
+// The lazy anonymous reservation SYS_BURROW_ATTACH_LAZY and SYS_BURROW_RESERVE
+// (and the phenotype anon mmap, through the latter) all make: placed first-fit
+// in the burrow window, then served by extending an adjacent lazy mapping over
+// it (ARCH 6.5, adjacent anonymous mappings merge) or, when none qualifies, by
+// a fresh Burrow and VMA. The placement is the same either way; only the
+// representation differs. No page charge here -- a reservation commits and
+// charges per page at fault, so page_count tracks true RSS -- and the mapping's
+// ceiling is RW whatever `prot` it starts at (ARCH 6.5: the reserve-then-commit
+// idiom; an extended neighbour has that ceiling already, as part of what
+// qualified it). Returns the address, or -T_E_NOMEM.
+static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot) {
+    spin_lock(&p->as->lock);
+    u64 vaddr;
+    if (vma_find_gap_aligned(p, length, align, EXEC_USER_BURROW_BASE,
+                             EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // An extension adds no VMA; it may grow the neighbour's pagemap, whose
+    // nodes are charged like a fault's.
+    if (vma_extend_anon_in(p->as, proc_resource_exempt(p), vaddr, length, prot,
+                           EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP) == 0) {
+        spin_unlock(&p->as->lock);
+        return (s64)vaddr;
+    }
+    // A fresh mapping: the VMA-count cap inside burrow_map bounds the free
+    // reservation.
+    struct Burrow *b = burrow_create_anon_lazy(length);
+    if (!b) {
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // burrow_map installs the VMA (mapping_count -> 1, the VMA charged); the
+    // construction handle is dropped after. On a refusal (overlap / VMA cap /
+    // OOM) that handle is the only ref, and freeing an EMPTY lazy Burrow never
+    // sleeps (no Spoor, no pages), so that drop may stay under the lock.
+    if (burrow_map(p, b, vaddr, length, prot) != 0) {
+        burrow_unref(b);
+        spin_unlock(&p->as->lock);
+        return -(s64)T_E_NOMEM;
+    }
+    // vma_alloc set the ceiling to the mint prot (the safe default for every
+    // OTHER mint); raise it under the same lock hold, before anything can
+    // observe the mapping.
+    struct Vma *nv = vma_lookup(p, vaddr);
+    if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+    spin_unlock(&p->as->lock);
+    burrow_unref(b);                     // #193: the success-path drop, outside the lock
+    return (s64)vaddr;
+}
+
+// SYS_BURROW_ATTACH_LAZY: the demand-zero twin of sys_burrow_attach_for_proc --
+// the lazy reservation at RW, every refusal answered -1 as this call always
+// has.
 s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
@@ -6424,44 +6472,8 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     if (length_raw > BURROW_RESERVE_MAX)             return -1;
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
-
-    spin_lock(&p->as->lock);
-
-    u64 vaddr;
-    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
-                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->as->lock);
-        return -1;
-    }
-
-    // No proc_page_charge here -- lazy reservations commit (and charge) per page at
-    // fault time. The VMA-count cap (vma_insert -> proc_vma_charge) is the bound on
-    // the free reservation; a non-TCB Proc at PROC_VMA_MAX fails burrow_map below.
-    struct Burrow *b = burrow_create_anon_lazy(length);
-    if (!b) {
-        spin_unlock(&p->as->lock);
-        return -1;
-    }
-
-    // burrow_map installs the VMA (vma_alloc -> burrow_acquire_mapping; mapping_count
-    // -> 1; vma_insert -> proc_vma_charge). Then drop the construction handle:
-    // handle_count -> 0, mapping_count = 1 keeps the Burrow alive (Tier 1). On
-    // burrow_map failure (overlap / vma-cap / OOM) the construction handle is the
-    // only ref; burrow_unref frees the empty lazy Burrow (no pages committed).
-    if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
-        // The construction handle is the only ref; freeing an EMPTY anon-lazy
-        // Burrow never sleeps (no Spoor to clunk, no pages committed), so this
-        // one may stay under the lock.
-        burrow_unref(b);
-        spin_unlock(&p->as->lock);
-        return -1;
-    }
-    spin_unlock(&p->as->lock);
-    // #193: the success-path drop sits OUTSIDE as->lock to match the FILE arm --
-    // an anon-lazy free never sleeps today, but two success paths should not
-    // need two different safety arguments.
-    burrow_unref(b);
-    return (s64)vaddr;
+    s64 r = lazy_reserve_core(p, length, 0, VMA_PROT_RW);
+    return r < 0 ? -1 : r;
 }
 
 // DISTRO D-3: the FILE mmap arm. A read-only / executable file-backed
@@ -7009,39 +7021,8 @@ s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
     u64 align  = align_log2 ? (1ull << align_log2) : 0;
-
-    spin_lock(&p->as->lock);
-    u64 vaddr;
-    if (vma_find_gap_aligned(p, length, align, EXEC_USER_BURROW_BASE,
-                             EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->as->lock);
-        return -(s64)T_E_NOMEM;
-    }
-    // No page charge here -- a reservation commits (and charges) per page at
-    // fault; the VMA-count cap inside burrow_map bounds the free reservation
-    // (the SYS_BURROW_ATTACH_LAZY posture, byte for byte).
-    struct Burrow *b = burrow_create_anon_lazy(length);
-    if (!b) {
-        spin_unlock(&p->as->lock);
-        return -(s64)T_E_NOMEM;
-    }
-    int rc = burrow_map(p, b, vaddr, length, (u32)prot_raw);
-    if (rc == 0) {
-        // The mint's ceiling is RW whatever prot it starts at (ARCH 6.5): this
-        // is the reserve-then-commit idiom, and the commit is a later
-        // SYS_BURROW_PROTECT. vma_alloc set the ceiling to the mint prot (the
-        // safe default for every OTHER mint); raise it here, under the same
-        // lock hold, before anything can observe the mapping.
-        struct Vma *nv = vma_lookup(p, vaddr);
-        if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
-    } else {
-        burrow_unref(b);                 // the only ref; an empty lazy free never sleeps
-        spin_unlock(&p->as->lock);
-        return -(s64)T_E_NOMEM;
-    }
-    spin_unlock(&p->as->lock);
-    burrow_unref(b);                     // #193: the success-path drop, outside the lock
-    return (s64)vaddr;
+    // The commit is a later SYS_BURROW_PROTECT (the reserve-then-commit idiom).
+    return lazy_reserve_core(p, length, align, (u32)prot_raw);
 }
 
 s64 sys_burrow_protect_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw,
@@ -7794,6 +7775,17 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     return (s64)share_id;
 }
 
+// Undo a mapping of `b` this call made at [va, va + len), only while that is
+// still exactly what sits there. The caller dropped as->lock since the map,
+// and a sibling thread may have detached it and placed its own mapping at
+// the same VA: the weft clunk's identity guard (G-2 audit F1). Caller holds
+// as->lock.
+static void unmap_if_still_ours(struct Proc *p, struct Burrow *b, u64 va, size_t len) {
+    struct Vma *v = vma_lookup(p, va);
+    if (v && v->burrow == b && v->vaddr_start == va && v->vaddr_end - va == len)
+        (void)burrow_unmap(p, va, len);
+}
+
 // The claim-and-map half of SYS_WEFT_MAP (after Tweft returned a share_id).
 // Claims the share (consume-once -> the registration pin transfers to us), maps
 // the ring whole into the guest, records the binding. Returns the guest ring VA,
@@ -7859,7 +7851,7 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
         : weft_binding_alloc(v, va, (u32)bsize, ring_entries);
     if (!b) {
         spin_lock(&p->as->lock);
-        (void)burrow_unmap(p, va, bsize);
+        unmap_if_still_ours(p, v, va, bsize);
         spin_unlock(&p->as->lock);
         burrow_unref(v);
         return -1;
@@ -7874,7 +7866,7 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     if (!__atomic_compare_exchange_n(&priv->weft, &expected, b, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         spin_lock(&p->as->lock);
-        (void)burrow_unmap(p, va, bsize);
+        unmap_if_still_ours(p, v, va, bsize);
         spin_unlock(&p->as->lock);
         weft_binding_release(b);         // unrefs b->burrow (the pin) + frees b
         return (s64)expected->guest_va;  // expected == the winner's live binding
@@ -8044,7 +8036,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         // sqpoll_charged on every later path, including a start failure.
         if (!proc_sqpoll_charge(p)) {
             spin_lock(&p->as->lock);
-            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+            unmap_if_still_ours(p, l->ring, vaddr, (size_t)l->ring_size);
             proc_page_uncharge(p, ring_pages);
             spin_unlock(&p->as->lock);
             loom_unref(l);
@@ -8054,7 +8046,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         l->sqpoll_charged = true;
         if (loom_start_sqpoll(l) != 0) {
             spin_lock(&p->as->lock);
-            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+            unmap_if_still_ours(p, l->ring, vaddr, (size_t)l->ring_size);
             proc_page_uncharge(p, ring_pages);       // #65: the ring VMA freed
             spin_unlock(&p->as->lock);
             loom_unref(l);
@@ -8075,7 +8067,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
     if (fd < 0) {
         spin_lock(&p->as->lock);
-        (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+        unmap_if_still_ours(p, l->ring, vaddr, (size_t)l->ring_size);
         proc_page_uncharge(p, ring_pages);           // #65: the ring VMA freed
         spin_unlock(&p->as->lock);
         loom_unref(l);

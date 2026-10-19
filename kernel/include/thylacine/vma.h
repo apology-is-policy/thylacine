@@ -220,6 +220,24 @@ int vma_find_gap(struct Proc *p, u64 length,
 int vma_find_gap_aligned(struct Proc *p, u64 length, u64 align,
                          u64 window_start, u64 window_end, u64 *out_vaddr);
 
+// ARCH 6.5 "Adjacent anonymous mappings merge" (operator vote 2026-10-18; the
+// FreeBSD vm_object_coalesce shape over the Burrow). Serve a fresh lazy
+// anonymous reservation of the free range [vaddr, vaddr + length) at `prot` by
+// extending a neighbouring mapping over it, instead of minting a Burrow and a
+// VMA: the predecessor that ends at `vaddr` grows forward, its Burrow growing
+// if it ends short; failing that, the successor that starts at the range's end
+// grows backward, only into offsets its Burrow already has below it. A
+// neighbour qualifies when it is a plain lazy anonymous mapping at `prot` with
+// the RW ceiling and no state bits, wholly inside [win_lo, win_hi). A
+// reservation that refills the hole between two pieces of one Burrow joins
+// them into one mapping. The range's slots are checked empty
+// (burrow_lazy_extend). No VMA is charged, and a join gives one back. Caller
+// holds as->lock and found the range free under it. Returns 0 when the range
+// is mapped, or -1 with nothing changed (no neighbour qualifies, or its
+// Burrow's growth was refused) -- the caller then mints as before.
+int vma_extend_anon_in(struct AddrSpace *as, bool exempt, u64 vaddr, u64 length,
+                       u32 prot, u64 win_lo, u64 win_hi);
+
 // Walk every VMA in Proc `p`'s list and free it. Used at proc_free
 // to release all VMAs (and decrement their VMOs' mapping counts).
 // Caller (proc_free) calls this BEFORE handle_table_free — handle

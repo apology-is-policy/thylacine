@@ -123,21 +123,6 @@ int pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                     struct page **out_winner) {
     if (out_winner) *out_winner = NULL;
     if (!pm || !lock || !pg)  return -1;
-    if (idx >= pm->count)     return -1;
-
-    if (pm->depth == 0) {
-        struct page **leaf = (struct page **)pm->root;
-        spin_lock(lock);
-        if (leaf[idx]) {
-            if (out_winner) *out_winner = leaf[idx];
-            spin_unlock(lock);
-            return 1;
-        }
-        leaf[idx] = pg;
-        pm->resident++;
-        spin_unlock(lock);
-        return 0;
-    }
 
     // The pool is a PREFIX: entries [0, pool_n) are allocated nodes, consumed
     // from the front by path_build (which NULLs what it takes). At most
@@ -146,6 +131,22 @@ int pagemap_install(struct pagemap *pm, spin_lock_t *lock, size_t idx,
     u32 pool_n = 0;
     for (;;) {
         spin_lock(lock);
+        // A grow only ever raises the count and never goes back to inline, so
+        // these two arms can only be taken on the first pass, pool empty.
+        if (idx >= pm->count) { spin_unlock(lock); goto fail; }
+        if (pm->depth == 0) {
+            struct page **leaf = (struct page **)pm->root;
+            int rc = 0;
+            if (leaf[idx]) {
+                if (out_winner) *out_winner = leaf[idx];
+                rc = 1;
+            } else {
+                leaf[idx] = pg;
+                pm->resident++;
+            }
+            spin_unlock(lock);
+            return rc;
+        }
         u32 missing = path_missing(pm, idx);
         if (missing <= pool_n) {
             void **leaf = path_build(pm, idx, pool, pool_n);
@@ -222,11 +223,13 @@ void pagemap_take(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                   struct page **freed, u32 *nfreed) {
     if (out_pg) *out_pg = NULL;
     if (nfreed) *nfreed = 0;
-    if (!pm || !lock || idx >= pm->count) return;
+    if (!pm || !lock) return;
 
+    void **path[PAGEMAP_MAX_DEPTH];     // node at each level
+    spin_lock(lock);
+    if (idx >= pm->count) { spin_unlock(lock); return; }
     if (pm->depth == 0) {
         struct page **leaf = (struct page **)pm->root;
-        spin_lock(lock);
         struct page *pg = leaf[idx];
         if (pg) { leaf[idx] = NULL; pm->resident--; }
         spin_unlock(lock);
@@ -234,8 +237,6 @@ void pagemap_take(struct pagemap *pm, spin_lock_t *lock, size_t idx,
         return;
     }
 
-    void **path[PAGEMAP_MAX_DEPTH];     // node at each level
-    spin_lock(lock);
     void **node = (void **)pm->root;
     u32 level = 0;
     while (node && level < pm->depth) {
@@ -274,77 +275,80 @@ static inline size_t entry_first_slot(const struct pagemap *pm, size_t idx,
     return (prefix | e) << shift;
 }
 
+// The first resident slot in [from, hi) of a RADIX map, or `hi`, with the node
+// at each level on the way to it in `path`. Caller holds the lock.
+//
+// Descend from the root along `idx`; at each node scan forward from idx's own
+// entry for the first present child. An exhausted node resumes at the next
+// entry of the nearest ancestor that has one (never re-scanning an entry
+// already passed, so nothing below `from` is ever reached). A present entry
+// advances `idx` to the first slot beneath it; the leaf's is the answer.
+static size_t radix_next_resident(const struct pagemap *pm, size_t from, size_t hi,
+                                  void ***path, u64 *steps) {
+    if (!pm->root) return hi;
+    size_t idx = from;
+    path[0] = (void **)pm->root;
+    u32 level = 0;
+    for (;;) {
+        void **node = path[level];
+        size_t own = level_index(pm, idx, level);
+        size_t e = own;
+        while (e < PAGEMAP_NODE_ENTRIES && !node[e]) { e++; (*steps)++; }
+        if (e == PAGEMAP_NODE_ENTRIES) {
+            size_t ne;
+            do {
+                if (level == 0) return hi;
+                level--;
+                ne = level_index(pm, idx, level) + 1u;
+            } while (ne == PAGEMAP_NODE_ENTRIES);
+            idx = entry_first_slot(pm, idx, level, ne);
+            if (idx >= hi) return hi;
+            continue;
+        }
+        (*steps)++;
+        if (e != own) idx = entry_first_slot(pm, idx, level, e);
+        if (idx >= hi) return hi;
+        if (level == pm->depth - 1u) return idx;
+        path[level + 1u] = (void **)node[e];
+        level++;
+    }
+}
+
 size_t pagemap_take_next(struct pagemap *pm, spin_lock_t *lock, size_t from,
                          size_t hi, struct AddrSpace *as, struct page **out_pg,
                          struct page **freed, u32 *nfreed) {
     if (out_pg) *out_pg = NULL;
     if (nfreed) *nfreed = 0;
-    if (!pm || !lock || pm->count == 0) return hi;
-    if (hi > pm->count) hi = pm->count;
-    if (from >= hi) return hi;
+    if (!pm || !lock) return hi;
 
-    if (pm->depth == 0) {
+    void **path[PAGEMAP_MAX_DEPTH];
+    u64 steps = 0;
+    struct page *pg = NULL;
+    u32 nf = 0;
+    spin_lock(lock);
+    if (hi > pm->count) hi = pm->count;
+    size_t took = hi;
+    if (from < hi && pm->depth == 0) {
         struct page **leaf = (struct page **)pm->root;
-        size_t took = hi;
-        struct page *pg = NULL;
-        spin_lock(lock);
         for (size_t i = from; i < hi; i++) {
             if (!leaf[i]) continue;
             pg = leaf[i]; leaf[i] = NULL; pm->resident--; took = i;
             break;
         }
-        spin_unlock(lock);
-        if (out_pg) *out_pg = pg;
-        return took;
-    }
-
-    // Descend from the root along `idx`; at each node scan forward from idx's
-    // own entry for the first present child. An exhausted node resumes at the
-    // next entry of the nearest ancestor that has one (never re-scanning an
-    // entry already passed, so nothing below `from` is ever reached). A present
-    // entry advances `idx` to the first slot beneath it; the leaf's is the slot
-    // taken, unlinked upward exactly as pagemap_take does.
-    void **path[PAGEMAP_MAX_DEPTH];
-    u64 steps = 0;
-    size_t idx = from, took = hi;
-    struct page *pg = NULL;
-    u32 nf = 0;
-    spin_lock(lock);
-    if (pm->root) {
-        path[0] = (void **)pm->root;
-        u32 level = 0;
-        for (;;) {
-            void **node = path[level];
-            size_t own = level_index(pm, idx, level);
-            size_t e = own;
-            while (e < PAGEMAP_NODE_ENTRIES && !node[e]) { e++; steps++; }
-            if (e == PAGEMAP_NODE_ENTRIES) {
-                size_t ne;
-                do {
-                    if (level == 0) goto done;
-                    level--;
-                    ne = level_index(pm, idx, level) + 1u;
-                } while (ne == PAGEMAP_NODE_ENTRIES);
-                idx = entry_first_slot(pm, idx, level, ne);
-                if (idx >= hi) goto done;
-                continue;
-            }
-            steps++;
-            if (e != own) idx = entry_first_slot(pm, idx, level, e);
-            if (idx >= hi) goto done;
-            if (level == pm->depth - 1u) {
-                pg = (struct page *)node[e];
-                node[e] = NULL;
-                pm->resident--;
-                nf = unlink_emptied(pm, path, idx, freed);
-                took = idx;
-                goto done;
-            }
-            path[level + 1u] = (void **)node[e];
-            level++;
+    } else if (from < hi) {
+        // The slot found is taken and unlinked upward exactly as pagemap_take
+        // does.
+        size_t idx = radix_next_resident(pm, from, hi, path, &steps);
+        if (idx < hi) {
+            void **leaf = path[pm->depth - 1u];
+            size_t li = level_index(pm, idx, pm->depth - 1u);
+            pg = (struct page *)leaf[li];
+            leaf[li] = NULL;
+            pm->resident--;
+            nf = unlink_emptied(pm, path, idx, freed);
+            took = idx;
         }
     }
-done:
     spin_unlock(lock);
     __atomic_add_fetch(&g_pagemap_walk_steps, steps, __ATOMIC_RELAXED);
     if (nf && as) addrspace_uncharge_pages(as, nf);
@@ -353,16 +357,36 @@ done:
     return took;
 }
 
+size_t pagemap_next_resident(const struct pagemap *pm, spin_lock_t *lock,
+                             size_t from, size_t hi) {
+    if (!pm || !lock) return hi;
+    void **path[PAGEMAP_MAX_DEPTH];
+    u64 steps = 0;
+    size_t found = hi;
+    spin_lock(lock);
+    size_t lim = hi < pm->count ? hi : pm->count;
+    if (from < lim && pm->depth == 0) {
+        struct page **leaf = (struct page **)pm->root;
+        for (size_t i = from; i < lim; i++)
+            if (leaf[i]) { found = i; break; }
+    } else if (from < lim) {
+        size_t idx = radix_next_resident(pm, from, lim, path, &steps);
+        if (idx < lim) found = idx;
+    }
+    spin_unlock(lock);
+    __atomic_add_fetch(&g_pagemap_walk_steps, steps, __ATOMIC_RELAXED);
+    return found;
+}
+
 bool pagemap_swap(struct pagemap *pm, spin_lock_t *lock, size_t idx,
                   struct page *expect, struct page *replacement) {
     if (!pm || !lock || !expect || !replacement) return false;
-    if (idx >= pm->count)                         return false;
     bool ok = false;
     spin_lock(lock);
-    if (pm->depth == 0) {
+    if (idx < pm->count && pm->depth == 0) {
         struct page **leaf = (struct page **)pm->root;
         if (leaf[idx] == expect) { leaf[idx] = replacement; ok = true; }
-    } else {
+    } else if (idx < pm->count) {
         void **node = (void **)pm->root;
         for (u32 level = 0; node && level < pm->depth - 1u; level++)
             node = (void **)node[level_index(pm, idx, level)];
@@ -461,6 +485,100 @@ int pagemap_mirror(struct pagemap *dst, const struct pagemap *src,
     if (!src->root) return 0;               // nothing resident: an empty mirror
     return mirror_node(dst, (const void **)src->root, 0, &dst->root,
                        pool, pool_n, on_page, ctx);
+}
+
+// =============================================================================
+// Growth (ARCH 6.5, adjacent anonymous mappings merge).
+// =============================================================================
+
+int pagemap_grow(struct pagemap *pm, spin_lock_t *lock, size_t count,
+                 struct AddrSpace *as, bool exempt) {
+    if (!pm || !lock) return -1;
+
+    // PLAN, from the shape the caller holds still.
+    spin_lock(lock);
+    size_t old      = pm->count;
+    u32    depth    = pm->depth;
+    void  *root     = pm->root;
+    size_t resident = pm->resident;
+    spin_unlock(lock);
+    if (old == 0 || count <= old)  return -1;
+    bool inline_to = count <= PAGEMAP_INLINE_MAX;
+    u32  to_depth  = inline_to ? 0 : depth_for(count);
+    if (!inline_to && to_depth == 0) return -1;
+
+    // A larger inline leaf; or, for an inline map that turns radix with pages
+    // in it, a leaf and the chain above it; or, for a radix that deepens under
+    // a present root, its new top levels. Anything else needs no memory.
+    void *leaf = NULL;
+    u32   need = 0;
+    if (inline_to) {
+        leaf = kmalloc(count * sizeof(struct page *), KP_ZERO);
+        if (!leaf) return -1;
+    } else if (depth == 0) {
+        need = resident ? to_depth : 0;
+    } else if (root) {
+        need = to_depth - depth;
+    }
+    struct page *pool[PAGEMAP_MAX_DEPTH] = { NULL, NULL, NULL, NULL };
+    if (need) {
+        if (as && !addrspace_charge_pages(as, need, exempt)) return -1;
+        for (u32 i = 0; i < need; i++) {
+            pool[i] = node_alloc(exempt);
+            if (pool[i]) continue;
+            for (u32 k = 0; k < i; k++) free_pages(pool[k], 0);
+            if (as) addrspace_uncharge_pages(as, need);
+            return -1;
+        }
+    }
+
+    // SWAP.
+    spin_lock(lock);
+    if (pm->count != old || pm->depth != depth || pm->root != root ||
+        pm->resident != resident)
+        extinction("pagemap_grow: the map changed under a caller that must exclude its mutators");
+    void *drop = NULL;                  // the inline leaf the new shape replaced
+    if (inline_to) {
+        struct page **from = (struct page **)root, **to = (struct page **)leaf;
+        for (size_t i = 0; i < old; i++) to[i] = from[i];
+        pm->root = leaf;
+        drop = root;
+    } else if (depth == 0) {
+        // Every old slot is below PAGEMAP_INLINE_MAX, so its index at each level
+        // above the leaf is 0: pool[0] is the root, pool[need - 1] the leaf.
+        drop = root;
+        pm->root = NULL;
+        if (need) {
+            for (u32 l = 0; l + 1u < need; l++) {
+                node_kva(pool[l])[0] = node_kva(pool[l + 1u]);
+                pool[l]->refcount = 1;
+            }
+            void **lf = node_kva(pool[need - 1u]);
+            struct page **from = (struct page **)root;
+            size_t occ = 0;
+            for (size_t i = 0; i < old; i++)
+                if (from[i]) { lf[i] = from[i]; occ++; }
+            if (occ != resident)
+                extinction("pagemap_grow: the inline leaf disagrees with its resident count");
+            pool[need - 1u]->refcount = (u32)occ;
+            pm->root  = node_kva(pool[0]);
+            pm->nodes = need;
+        }
+    } else if (need) {
+        // Each new level points at the one below through entry 0, the lowest at
+        // the old root.
+        for (u32 l = 0; l < need; l++) {
+            node_kva(pool[l])[0] = (l + 1u < need) ? (void *)node_kva(pool[l + 1u]) : root;
+            pool[l]->refcount = 1;
+        }
+        pm->root   = node_kva(pool[0]);
+        pm->nodes += need;
+    }
+    pm->depth = to_depth;
+    pm->count = count;
+    spin_unlock(lock);
+    if (drop) kfree(drop);
+    return 0;
 }
 
 // =============================================================================

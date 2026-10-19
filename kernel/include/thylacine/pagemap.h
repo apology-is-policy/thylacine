@@ -14,7 +14,10 @@
 // small struct, however large it is, so the reservation caps lift to the
 // address-space window and the budget.
 //
-// Two representations, chosen by size at init and never changed:
+// Two representations, chosen by size -- at init, and again only by
+// pagemap_grow, which always lands on the one init would pick for the new
+// count (a clone inits its map at the source's count and must find the same
+// shape there):
 //   - count <= PAGEMAP_INLINE_MAX: an INLINE leaf, `count` pointers from the
 //     slab (<= 256 bytes), allocated at init, uncharged. Bounded per address
 //     space by PROC_VMA_MAX x 256 B (16 MiB), which is the same DoS floor the
@@ -36,7 +39,9 @@
 // an install allocates the missing nodes outside the lock (a retry loop, in case
 // a racer installed some of them first) and a take hands the nodes it emptied
 // back to the caller, who frees them after unlocking. The only allocation under
-// no lock at all is pagemap_init's inline leaf.
+// no lock at all is pagemap_init's inline leaf. The representation itself
+// (count, depth, root) is read and written under the lock too, since
+// pagemap_grow changes it.
 //
 // CHARGING. Metadata is charged where the data is: an install with a non-NULL
 // `as` charges the nodes it allocates to that address space (refusing, and
@@ -133,9 +138,33 @@ size_t pagemap_take_next(struct pagemap *pm, spin_lock_t *lock, size_t from,
                          size_t hi, struct AddrSpace *as, struct page **out_pg,
                          struct page **freed, u32 *nfreed);
 
-// Diagnostics: node entries visited by pagemap_take_next since boot -- the
-// witness of the bound above (the vma_scan_steps shape).
+// The first resident slot in [from, hi), or `hi` when none is: the walk
+// pagemap_take_next makes, with nothing taken. Same bound, same lock.
+size_t pagemap_next_resident(const struct pagemap *pm, spin_lock_t *lock,
+                             size_t from, size_t hi);
+
+// Diagnostics: node entries visited by pagemap_take_next and
+// pagemap_next_resident since boot -- the witness of the bound above (the
+// vma_scan_steps shape).
 u64  pagemap_walk_steps(void);
+
+// Grow the map to `count` slots (more than it has), every resident page
+// staying at its index -- Plan 9's ibrk growing a segment's map, for ARCH 6.5's
+// adjacent-mapping merge. The new representation is the one pagemap_init picks
+// for `count`: an inline leaf is reallocated larger; an inline map that turns
+// radix moves its pages into a fresh leaf under a chain of nodes at entry 0; a
+// radix that needs more levels gains new top nodes, each pointing at the old
+// root through entry 0 (a slot's lower-level indices do not change). Nodes are
+// charged to `as` (if non-NULL, under `exempt`'s policy) BEFORE they are
+// allocated, as an install's are; the inline leaf is not charged. Allocates
+// outside `lock` and swaps under it. The CALLER must exclude every other
+// mutator of the map for the whole call (an ANON_LAZY Burrow's: its address
+// space's lock) -- a shape that changes between the plan and the swap is a
+// broken caller and extincts. Returns 0, or -1 with nothing changed: not
+// live, not a growth, a count past PAGEMAP_MAX_DEPTH levels, an allocation
+// failure, or the charge refused.
+int  pagemap_grow(struct pagemap *pm, spin_lock_t *lock, size_t count,
+                  struct AddrSpace *as, bool exempt);
 
 // Replace the page in slot `idx` iff it is still `expect` (the COW break's
 // commit). Occupancy is unchanged (one page for one page). Takes `lock`.
