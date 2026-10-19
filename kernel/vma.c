@@ -857,6 +857,17 @@ static bool extend_admits(const struct Vma *n, u32 prot, u64 win_lo, u64 win_hi)
     return n->vaddr_start >= win_lo && n->vaddr_end <= win_hi;
 }
 
+// The mappings of `b` in this space, which an extension holds against the
+// Burrow's own mapping count: one mapped in another space is never extended.
+static int mappings_here(const struct AddrSpace *as, const struct Burrow *b) {
+    int n = 0;
+    for (const struct Vma *v = as->vmas; v; v = v->next) {
+        if (v->magic != VMA_MAGIC) extinction("vma_extend_anon: corrupted list entry");
+        if (v->burrow == b) n++;
+    }
+    return n;
+}
+
 int vma_extend_anon_in(struct AddrSpace *as, bool exempt, u64 vaddr, u64 length,
                        u32 prot, u64 win_lo, u64 win_hi) {
     if (!as || length == 0)                                return -1;
@@ -880,8 +891,8 @@ int vma_extend_anon_in(struct AddrSpace *as, bool exempt, u64 vaddr, u64 length,
     // its Burrow's one bias those are exactly the offsets of the free range.
     if (prev && prev->vaddr_end == vaddr && extend_admits(prev, prot, win_lo, win_hi)) {
         u64 off = prev->burrow_offset + (prev->vaddr_end - prev->vaddr_start);
-        if (burrow_lazy_extend(as, exempt, prev->burrow, (size_t)(off / PAGE_SIZE),
-                               (size_t)(length / PAGE_SIZE)) == 0) {
+        if (burrow_lazy_extend(as, exempt, prev->burrow, mappings_here(as, prev->burrow),
+                               (size_t)(off / PAGE_SIZE), (size_t)(length / PAGE_SIZE)) == 0) {
             prev->vaddr_end = end;
             reprotect_merge_in(as, vaddr, end);    // a hole refill joins the tail
             return 0;
@@ -893,8 +904,8 @@ int vma_extend_anon_in(struct AddrSpace *as, bool exempt, u64 vaddr, u64 length,
     if (next && next->vaddr_start == end && extend_admits(next, prot, win_lo, win_hi) &&
         next->burrow_offset >= length) {
         u64 off = next->burrow_offset - length;
-        if (burrow_lazy_extend(as, exempt, next->burrow, (size_t)(off / PAGE_SIZE),
-                               (size_t)(length / PAGE_SIZE)) == 0) {
+        if (burrow_lazy_extend(as, exempt, next->burrow, mappings_here(as, next->burrow),
+                               (size_t)(off / PAGE_SIZE), (size_t)(length / PAGE_SIZE)) == 0) {
             next->burrow_offset = off;
             next->vaddr_start   = vaddr;
             reprotect_merge_in(as, vaddr, end);

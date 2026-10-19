@@ -815,8 +815,14 @@ trim of its head), because growing a Burrow at its front would re-index every
 slot. Either way [[sub-kernel-burrow]]'s `burrow_lazy_extend` checks the slots
 and grows the pagemap first, and `reprotect_merge_in` then folds a hole
 refill: the piece on the other side, if it maps the same Burrow contiguously,
-joins. A refusal changes nothing, and the caller mints as before. `MAP_FIXED`
-anonymous maps (the loader's bss tails) never merge.
+joins. A refusal changes nothing, and the caller mints as before. A
+`MAP_FIXED` anonymous map (the loader's bss tails) is a replace at the
+caller's address and is never served by an extension; a later reservation the
+kernel places beside it may extend it, like any lazy mapping in the window.
+Both arms pass `burrow_lazy_extend` the Burrow's mappings in this space
+(`mappings_here`, one walk of the list under the same hold), which it holds
+against the Burrow's `mapping_count`: a Burrow another space maps is never
+extended (`anon_merge.another_space_is_never_extended`).
 
 What makes "the addresses are free" imply "no mapping covers those offsets" is
 the ONE BIAS rule: every mapping of an `ANON_LAZY` Burrow sits at one
@@ -840,7 +846,7 @@ list is still O(n) per fault and per placement (OPEN-BUGS 19:56Z; the vote
 says enqueue it, not drop it).
 
 Tests (`kernel/test/test_anon_merge.c`): `pagemap.grow_keeps_every_page` and
-nine `anon_merge.*`. Two adjacent reserves share one mapping; 600 one-page
+ten `anon_merge.*`. Two adjacent reserves share one mapping; 600 one-page
 reserves cross every pagemap shape (inline, inline to radix, one level to two)
 with each page's contents surviving every growth; a hole refill joins the
 pieces; a successor extends into its offset room; nothing merges across a
@@ -853,7 +859,9 @@ give them different ones, which keeps what each tested:
 ([[sub-kernel-protect-witness]]) and `capacity.fork_clone_charges_pages_and_nodes`
 ([[sub-kernel-pagemap]]). `anon_merge.second_bias_is_never_extended` maps one
 lazy Burrow at two addresses and finds no merge, against the same layout
-mapped once, which merges.
+mapped once, which merges; `anon_merge.another_space_is_never_extended` maps
+one into two address spaces at one address and finds no merge, against the
+same Burrow in one space, which merges.
 
 ## Referenced by
 

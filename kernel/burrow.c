@@ -675,7 +675,7 @@ void burrow_lazy_bind_va0(struct Burrow *v, u64 va0) {
 }
 
 int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
-                       size_t first, size_t n) {
+                       int maps_here, size_t first, size_t n) {
     if (!as || !v || n == 0)                     return -1;
     if (v->magic != VMO_MAGIC)                   return -1;
     if (v->type != BURROW_TYPE_ANON_LAZY)        return -1;
@@ -686,10 +686,12 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 
     spin_lock(&v->lock);
     int    handles = v->handle_count;
+    int    maps    = v->mapping_count;
     bool   multi   = v->lazy_multi_bias;
     size_t pages   = v->page_count;
     spin_unlock(&v->lock);
     if (handles != 0)                            return -1;
+    if (maps != maps_here)                       return -1;
     if (multi)                                   return -1;
 
     // ZERO READ over the slots that exist; the ones a growth adds are new.
@@ -1319,8 +1321,9 @@ int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
     // non-NULL) -- the caller holds as->lock, and a FILE Burrow's free reaches
     // a possibly-sleeping spoor_clunk. `vma_free_deferred` hands back the
     // dead Burrow; the caller frees it after the unlock. When out_free is NULL
-    // (the burrow_unmap wrapper: JIT / Loom / weft / cons -- all ANON/CODE/DMA,
-    // whose free never sleeps) the inline free is kept.
+    // (the burrow_unmap wrapper: JIT, Loom's ring setup, weft's map, clunk and
+    // reaper -- ANON/CODE/DMA/HOSTMEM, whose free never sleeps) the inline free
+    // is kept.
     bool freed;
     if (out_free) {
         *out_free = vma_free_deferred(vma, &freed);

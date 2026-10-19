@@ -581,12 +581,14 @@ void burrow_lazy_bind_va0(struct Burrow *v, u64 va0);
 // trusted: a resident slot in the range extincts, since it would reach EL0
 // as old memory where a fresh reservation reads zero. A Burrow that ends
 // short of the range grows to cover it (pagemap_grow; nodes charged to
-// `as`). Returns 0, or -1 with nothing changed: not a live ANON_LAZY Burrow,
-// a handle names it (another holder could reach it outside this address
-// space), it is mapped at a second bias (its free addresses no longer say
-// which offsets are free), or the growth was refused.
+// `as`). `maps_here` is the caller's count of the Burrow's mappings in `as`.
+// Returns 0, or -1 with nothing changed: not a live ANON_LAZY Burrow, a
+// handle names it (another holder could reach it outside this address
+// space), its mapping count exceeds `maps_here` (another space maps it),
+// it is mapped at a second bias (its free addresses no longer say which
+// offsets are free), or the growth was refused.
 int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
-                       size_t first, size_t n);
+                       int maps_here, size_t first, size_t n);
 
 // LINEAGE L-4a: the kernel direct-map address of one resident ANON_LAZY slot, or
 // NULL if the slot is not resident (or the Burrow is the wrong type / the slot is

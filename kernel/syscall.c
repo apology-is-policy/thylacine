@@ -6453,8 +6453,12 @@ static s64 lazy_reserve_core(struct Proc *p, u64 length, u64 align, u32 prot) {
     // observe the mapping.
     struct Vma *nv = vma_lookup(p, vaddr);
     if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+    // The construction handle goes in the same hold, so a reservation a sibling
+    // thread places beside this one never finds the Burrow named by a handle and
+    // mints where it would extend (ARCH 6.5): the mapping shape does not depend
+    // on scheduling. The mapping holds the Burrow, so this drop cannot free it.
+    burrow_unref(b);
     spin_unlock(&p->as->lock);
-    burrow_unref(b);                     // #193: the success-path drop, outside the lock
     return (s64)vaddr;
 }
 
@@ -6904,10 +6908,14 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
         // is admitted now that the raise exists, and it must be raisable.
         struct Vma *nv = vma_lookup(p, addr);
         if (nv) vma_set_prot_max(nv, VMA_PROT_RW);
+        // In the same hold, as lazy_reserve_core drops its own: the mapping
+        // holds the Burrow, so this drop cannot free it.
+        burrow_unref(b);
+        b = NULL;
     }
     spin_unlock(&p->as->lock);
     if (fx_free) burrow_free_deferred(fx_free);
-    burrow_unref(b);
+    if (b) burrow_unref(b);                          // refused: the last ref
     if (rc != 0)                                     return (s64)rc;   // the surgery's -T_E_* (B-1a')
     return (s64)addr;
 }

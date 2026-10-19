@@ -704,9 +704,11 @@ map one lazy Burrow twice, so a second bias disqualifies rather than
 extincts. Other types return at once: a CODE Burrow's two aliases differ by
 design.
 
-`burrow_lazy_extend(as, exempt, v, first, n)` readies slots
+`burrow_lazy_extend(as, exempt, v, maps_here, first, n)` readies slots
 `[first, first + n)` for a mapping to cover. It refuses (-1, nothing changed) a
-Burrow a handle names: a handle could reach it from outside this address
+Burrow a handle names, or one whose `mapping_count` exceeds `maps_here`, the
+caller's count of its mappings in `as` (another space maps it): a handle or a
+second space could reach it from outside this address
 space, and none does today (`ANON_LAZY` keeps no handle past construction,
 `burrow_share_into` refuses it, and Loom and weft need eager `ANON`). It then
 checks, rather than trusts, that the slots that already exist hold no page

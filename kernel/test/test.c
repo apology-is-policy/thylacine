@@ -853,6 +853,7 @@ void test_anon_merge_refused_growth_falls_back(void);
 void test_anon_merge_fork_clones_the_merged_burrow(void);
 void test_anon_merge_unmap_releases_lazy_slots(void);
 void test_anon_merge_second_bias_is_never_extended(void);
+void test_anon_merge_another_space_is_never_extended(void);
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -3139,6 +3140,7 @@ struct test_case g_tests[] = {
     { "anon_merge.fork_clones_the_merged_burrow", test_anon_merge_fork_clones_the_merged_burrow, false, NULL },
     { "anon_merge.unmap_releases_lazy_slots", test_anon_merge_unmap_releases_lazy_slots, false, NULL },
     { "anon_merge.second_bias_is_never_extended", test_anon_merge_second_bias_is_never_extended, false, NULL },
+    { "anon_merge.another_space_is_never_extended", test_anon_merge_another_space_is_never_extended, false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },

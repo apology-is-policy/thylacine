@@ -28,6 +28,11 @@
 //   - anon_merge.unmap_releases_lazy_slots: the exact-match unmap frees a lazy
 //     piece's pages (NoOrphan), so a later extension over those offsets finds
 //     them empty -- without the release it would extinct there.
+//   - anon_merge.second_bias_is_never_extended: a lazy Burrow mapped at two
+//     biases is never extended; the same layout mapped once merges.
+//   - anon_merge.another_space_is_never_extended: a lazy Burrow mapped into a
+//     second address space at the same bias is never extended; mapped into
+//     one space, it merges.
 
 #include "test.h"
 
@@ -55,6 +60,7 @@ void test_anon_merge_refused_growth_falls_back(void);
 void test_anon_merge_fork_clones_the_merged_burrow(void);
 void test_anon_merge_unmap_releases_lazy_slots(void);
 void test_anon_merge_second_bias_is_never_extended(void);
+void test_anon_merge_another_space_is_never_extended(void);
 
 extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
                                        u64 align_log2);
@@ -589,5 +595,56 @@ void test_anon_merge_second_bias_is_never_extended(void) {
     CHECK(vd, s_two == (s64)(BASE + 2 * P) && vmas_two == 3u, "no merge into a Burrow mapped at two biases");
     CHECK(vd, one_mapped, "the control's Burrow mapped once");
     CHECK(vd, s_one == (s64)(BASE + 2 * P) && vmas_one == 1u, "control: the same layout mapped once merges");
+    TEST_ASSERT(vd.why == NULL, vd.why);
+}
+
+// A lazy Burrow a kernel caller maps into a second address space, at the same
+// bias, is never extended: an extension in one space cannot see the other's
+// mapping of the offsets it would hand out. The control is the same Burrow
+// mapped into one space only, one variable away, which merges.
+void test_anon_merge_another_space_is_never_extended(void) {
+    struct verdict vd = { NULL };
+    s64 s_two = -1, s_one = -1;
+    u32 vmas_two = 0, vmas_one = 0;
+    bool two_mapped = false, one_mapped = false;
+
+    struct Proc *p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct Proc *q = mk();
+    if (!q) drop(p);
+    TEST_ASSERT(q != NULL, "proc_alloc (the second space)");
+    struct Burrow *b = burrow_create_anon_lazy(2 * P);
+    if (b) {
+        spin_lock(&p->as->lock);
+        bool in_p = burrow_map(p, b, BASE, 2 * P, VMA_PROT_RW) == 0;
+        spin_unlock(&p->as->lock);
+        spin_lock(&q->as->lock);
+        bool in_q = burrow_map(q, b, BASE, 2 * P, VMA_PROT_RW) == 0;
+        spin_unlock(&q->as->lock);
+        two_mapped = in_p && in_q;
+        burrow_unref(b);                    // no handle left, one bias: only the count refuses
+    }
+    s_two    = reserve(p, P, PR_RW);
+    vmas_two = count_vmas(p->as);
+    drop(q);
+    drop(p);
+
+    p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct Burrow *c = burrow_create_anon_lazy(2 * P);
+    if (c) {
+        spin_lock(&p->as->lock);
+        one_mapped = burrow_map(p, c, BASE, 2 * P, VMA_PROT_RW) == 0;
+        spin_unlock(&p->as->lock);
+        burrow_unref(c);
+    }
+    s_one    = reserve(p, P, PR_RW);
+    vmas_one = count_vmas(p->as);
+    drop(p);
+
+    CHECK(vd, two_mapped, "one lazy Burrow mapped into two spaces at one bias");
+    CHECK(vd, s_two == (s64)(BASE + 2 * P) && vmas_two == 2u, "no merge into a Burrow another space maps");
+    CHECK(vd, one_mapped, "the control's Burrow mapped into one space");
+    CHECK(vd, s_one == (s64)(BASE + 2 * P) && vmas_one == 1u, "control: the same Burrow in one space merges");
     TEST_ASSERT(vd.why == NULL, vd.why);
 }

@@ -3290,10 +3290,14 @@ second invariant and why both buggy cfgs are judged on it.
   `vma_insert_in` once a mapping of an ANON_LAZY Burrow is linked, stamps
   `lazy_va0` at the first and marks the Burrow `lazy_multi_bias` at a second;
   `burrow_lazy_extend` refuses a marked Burrow, so the model's `s = a` holds
-  for every Burrow an extension touches. Witnesses:
+  for every Burrow an extension touches. The model has one address space;
+  the kernel makes that true of every Burrow it extends by refusing one a
+  handle names or one whose `mapping_count` exceeds its mappings in this space
+  (`kernel/vma.c::mappings_here`). Witnesses:
   `anon_merge.hole_refill_joins_the_pieces` (a detach's pieces and the refill
   between them, one bias), `anon_merge.fork_clones_the_merged_burrow` (a clone
-  maps at the same bias) and `anon_merge.second_bias_is_never_extended`.
+  maps at the same bias), `anon_merge.second_bias_is_never_extended` and
+  `anon_merge.another_space_is_never_extended`.
 - **`ZeroRead`** -> the same empty check, "a slot no mapping covers still
   holds a page (NoOrphan broken)", which needs `NoOrphan` on EVERY unmap path:
   `kernel/burrow.c::burrow_unmap_reporting_in` now releases a plain ANON_LAZY

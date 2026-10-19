@@ -1877,8 +1877,14 @@ in the burrow window, then tries `vma_extend_anon_in` ([[sub-kernel-vma]]),
 which serves the range from an adjacent lazy mapping's Burrow and adds no VMA;
 when nothing qualifies it mints a fresh Burrow, maps it and raises the ceiling
 to RW, as before. The core answers `-T_E_NOMEM`; `SYS_BURROW_ATTACH_LAZY` still
-answers -1 for every refusal, its long-standing ABI. `MAP_FIXED` anonymous maps
-keep their own path and never merge.
+answers -1 for every refusal, its long-standing ABI. The construction handle is
+dropped in the same `as->lock` hold as the map (the mapping holds the Burrow,
+so the drop cannot free it), so a sibling thread's reservation beside it never
+finds the Burrow named by a handle and mints where it would extend: the mapping
+shape does not depend on scheduling. `MAP_FIXED` anonymous maps keep their own
+path and are never served by an extension; the anonymous arm drops its handle
+in the same hold on success, and a later kernel-placed reservation may extend
+the mapping like any lazy mapping in the window.
 
 `unmap_if_still_ours(p, b, va, len)` guards the five unmaps that re-take
 `as->lock` after dropping it since their own map -- the Loom ring setup's three
