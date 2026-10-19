@@ -7344,6 +7344,11 @@ lib_tests_muster() {
         [[ "$lib" == harfbuzz ]] && skips=( --skip check-c-linkage-decls --skip check-externs
             --skip check-header-guards --skip check-includes --skip check-release-notes )
         if [[ "$lib" == freetype || "$lib" == harfbuzz ]]; then
+            # What `meson test` builds before it runs (mtest.py rebuild_deps):
+            # a target only a test depends on -- issue-1441's two fonts -- is
+            # outside `all`, which is all meson_lib builds.
+            ninja -C "$lbase/build" meson-test-prereq > "$out/$lib.prereq.log" 2>&1 \
+                || { echo "==> lib tests: $lib's test prerequisites did not build -- see $out/$lib.prereq.log" >&2; tail -20 "$out/$lib.prereq.log" >&2; exit 1; }
             json="$out/$lib.meson.json"
             python3 "$meson" introspect --tests "$lbase/build" > "$json" \
                 || { echo "==> lib tests: meson could not list $lib's tests" >&2; exit 1; }

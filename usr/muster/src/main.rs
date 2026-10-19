@@ -2,7 +2,8 @@
 // device (Boosty B-3; dec-2026-10-14-b3-test-bar).
 //
 // The list is upstream's own: tools/libtests-manifest.py writes it from the
-// library's CTest registration, so it cannot drift from what upstream runs.
+// library's CTest or meson registration, so it cannot drift from what upstream
+// runs.
 // The manifest is line-oriented, one keyword and the rest of the line:
 //   lib <name>       the library, first and once
 //   count <n>        how many tests follow; a file holding another number of

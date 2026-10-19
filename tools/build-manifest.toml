@@ -216,6 +216,12 @@ forageable = "download"
 # tests/scripts/download-test-fonts.py fetches. The zip's sha256 is the first
 # fetch's (2026-10-15); the font inside is also checked by its own sha256, whose
 # first 8 bytes are the digest upstream's script pins (ef146bbc2673b387).
+# NOT REDISTRIBUTABLE: the font grants no licence (its name table's copyright
+# record reads "Typeface (c) (your company). 2005. All Rights Reserved"), and
+# the sites that list it say personal use only. It is fetched as upstream's
+# script fetches it, for a test run on the builder's own machines; an image
+# baked with CHUNK_LIBTESTS carries it, so that image and this zip are never
+# published or put on an install disc.
 [cache.ftfont]
 file       = "As.I.Lay.Dying.zip"
 dir        = "build/cache"

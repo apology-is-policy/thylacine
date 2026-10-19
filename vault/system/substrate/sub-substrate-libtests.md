@@ -17,15 +17,16 @@ locks: []
 abis: []
 design: ["docs/BROWSER-DESIGN.md"]
 created: 2026-10-15
-updated: 2026-10-15
+updated: 2026-10-19
 ---
 ## Purpose
 
 Run each browser library's compiled upstream tests on the device, with their
 data, as the B-3 exit bar asks (`dec-2026-10-14-b3-test-bar`), without writing
 a second copy of upstream's test list. A CMake library registers its tests
-with CTest; the build dumps that registration, `tools/libtests-manifest.py`
-rewrites it for the device, and `muster`, a native program, runs it there.
+with CTest, and a meson one (FreeType, HarfBuzz) with meson; the build dumps
+that registration, `tools/libtests-manifest.py` rewrites it for the device,
+and `muster`, a native program, runs it there.
 ICU is not here: its test programs carry their own drivers (B-3c, run
 directly by `tools/interactive/ls-libs.exp`).
 
@@ -42,6 +43,15 @@ directly by `tools/interactive/ls-libs.exp`).
   an unknown shape, a path outside every map, an argument holding a newline,
   or a relative argument that resolves elsewhere on the device than on the
   host.
+- `--meson <dump> --meson-build <dir> --meson-source <dir> [--skip <name>]...`
+  takes meson's list instead (`meson introspect --tests`, B-3f). It also
+  refuses a key the list holds that the translator does not know, a protocol
+  other than `exitcode` and `tap`, `extra_paths`, a directory argument, an
+  env path outside every map, a skipped compiled test, an unskipped Python
+  one, a source tree that mentions `should_fail` or `MESON_TEST_ITERATION`,
+  and an output of a target a test depends on that is not built or that
+  nothing stages. The stage list gains `tree <host> <device>`: a directory a
+  test's environment names, staged whole.
 - `muster <manifest>` runs the tests in file order and exits 0 iff every test
   passed (a test passes when each of its steps does, in order); its last
   line is `muster: <lib>: <n> of <n> passed`, or
@@ -58,9 +68,10 @@ directly by `tools/interactive/ls-libs.exp`).
 ## Mechanism
 
 **The manifest.** One keyword per line and the rest of the line its value:
-`lib`, `count`, `logs` once; then per test `test <name>`, `cwd <dir>`, one
-or more steps, and `end`. A step is `step`, then optionally `builtin <kind>`
-(`copy`, `cmp`, `sha256`, `mkdir`, `rmtree`), one `arg` per argv element or
+`lib`, `count`, `logs` once; then per test `test <name>`, `cwd <dir>`, any
+`env <NAME>=<value>` lines, one or more steps, and `end`. A step is `step`,
+then optionally `builtin <kind>` (`copy`, `cmp`, `sha256`, `mkdir`, `rmtree`,
+`tap`), one `arg` per argv element or
 operand (for a program the first is the program), and for a program
 optionally `stdin`, `stdout`, `stderr` (paths) and `status any`. A line
 format, so the native parser is a split on the first space and no quoting
@@ -96,6 +107,27 @@ exists. `test_xmlcatalog_add_del.cmake` empties and makes its work directory
 then `xmlcatalog --create`, three `--add`, a compare, three `--del`, a
 compare, each command required to succeed.
 
+**The meson list (B-3f).** A meson test is its command, run in its
+`workdir` or, naming none, in the build tree, where `mtest.py` runs the
+harness; with its environment as `env` lines, except the
+`LD_LIBRARY_PATH` and `DYLD_LIBRARY_PATH` meson adds for its own build tree,
+which are inert for static libraries and refused if they name anything
+outside it. A higher priority runs first, registration order otherwise, as
+`mtest.py` orders them. A `tap` test is its command with stdout kept in the
+log directory, then `builtin tap` over that file. A test's `depends` are the
+targets `meson test` builds before it runs, read through the build's
+`meson-info/intro-targets.json` as `mtest.py` reads them: each output must
+exist and must be staged, by the test's command naming it or a staged tree
+holding it. A target only a test depends on is outside `all`, so the build
+builds `meson-test-prereq` first ([[sub-substrate-build]]); the check exists
+because nothing did before B-3f's close, and the translator passed
+issue-1441's two unbuilt fonts through as an output or an option. Not carried:
+timeouts (the gate's own bound covers the run), and the harness's
+`MALLOC_PERTURB_` and sanitizer variables, which this libc does not read.
+Interpreter-driven tests are skipped by name only: `--skip` takes a test whose
+program is a Python script and nothing else, and a Python test not named is
+refused, so one upstream adds cannot drop out unseen.
+
 **The runner.** `muster` is native (libthyla-rs): it is authored here and only
 spawns the ported test programs. libthyla-rs's `Command` has no working
 directory of its own, so muster sets its own (`set_current_dir`, which a
@@ -105,7 +137,17 @@ end-of-file instead of the console; its stdout and stderr go to
 `<logs>/<test>.<k>.out` and `.err` unless it redirects them, and a redirect's
 parent directories are made first, as libxml2's wrapper makes them. The
 first failing step ends the test, as a CMake script's first fatal error
-does.
+does. A test's `env` lines are set through `/env/<NAME>`, which each child
+inherits, after each variable's old value is recorded, and restored after
+the test; a restore that fails fails the test, since the variable would
+otherwise reach every later one. `builtin tap` (`usr/muster/src/tap.rs`) is
+meson 1.12.1's TAP verdict (`mtest.py`'s `TAPParser` and
+`TestRunTAP.parse`): a `not ok`, an `ok` under TODO, a `Bail out!` or any
+parse error fails it, as in meson, and two refusals are muster's own, since
+a run that reports nothing proved nothing: no plan, and no result but SKIPs
+(meson calls that SKIP). A host harness compiled `tap.rs` unchanged and
+judged 49 crafted TAP texts beside meson's own parser: no disagreement but
+those two, and two sabotaged copies were each caught.
 
 **The libraries (B-3d).** libpng and libjpeg-turbo use their CTest lists.
 libpng registers its tests only when it builds the shared library, which the
@@ -137,10 +179,39 @@ boot the translated list ran 23 of 23 on the host build against a pruned
 copy holding only what the device stages: the stage list's 54 files and the
 `test/`, `result/` and `xmlconf/` trees.
 
+**FreeType and HarfBuzz (B-3f).** Both register their tests with meson
+alone. FreeType 2.15.0 registers five: issue-1063, varc, outline-reverse,
+issue-1469, and issue-1441, which only a build with HarfBuzz registers (the
+autofitter classifies a shared GSUB lookup's output glyphs by script through
+HarfBuzz), so FreeType builds twice ([[sub-substrate-build]]). varc and
+issue-1063 read `FREETYPE_TESTS_DATA_DIR`, the source's `tests/data`, staged
+as a tree; issue-1063's font is the one upstream's script downloads
+(`[cache.ftfont]`). issue-1469's four fonts and issue-1441's two are made at
+build time by Python scripts; issue-1441's target has no `build_by_default`,
+and until the close the device read `FT_Err_Cannot_Open_Resource` on both of
+its fonts. HarfBuzz 14.6.0 registers 81 tests in a cross build. 76 are
+compiled: 25 unit tests (with `hb_assert` live), 48 fuzzer runs over its
+checked-in corpora (TAP; a missing input is an `assert(blob)` abort), the two
+thread tests and the vector budget test. The other five are Python checks of
+its source tree and release notes, skipped by name. HarfBuzz's GLib suites
+(`test/api`, `test/shape`, `test/subset`) are skipped under the same vote
+(`dec-2026-10-14-b3-test-bar`): `hb-shape` and `hb-subset` are built only with
+GLib (`util/meson.build`), so B-3f's first bar, "hb-shape over test/shape",
+could not run here. The thread tests read the fonts and texts their source
+names in `perf/` and `test/subset/data/fonts`, which `build.sh` stages beside
+the stage list. A native build of both pins on the Mac (Apple clang; Homebrew
+libpng 1.6.58 and ICU 78.3), in the same two passes, passed 5 of 5 and 76 of
+76 under `meson test`. With three inputs broken, it failed exactly varc
+("Could not open file" for an emptied `varc-static-gvar.ttf`), issue-1441
+("wrong Cyrillic, unreachable, or small-cap style": the mixed font copied
+over the Latin one, which opens but classifies wrongly) and
+`repacker-fuzzer-chunk-0` (`Assertion failed: (blob)`, one graph removed).
+Those are the device red's predictions.
+
 ## Data structures
 
 The manifest (above) and the stage list: `<kind> <host path> <device path>`
-per line, read by `build.sh`'s `lib_tests_muster`.
+per line (`exe`, `file` or `tree`), read by `build.sh`'s `lib_tests_muster`.
 
 ## Concurrency
 
@@ -149,8 +220,8 @@ None: muster runs one test at a time, as CTest does by default.
 ## Invariants enforced
 
 - The device runs upstream's list, not a copy: every test comes from the
-  library's own CTest registration (or, for libwebp, the one JSON file),
-  and a test the translator cannot carry stops the build.
+  library's own CTest or meson registration (or, for libwebp, the one JSON
+  file), and a test the translator cannot carry stops the build.
 - A pass is an exit status of 0 from every test, and the gate checks the
   count as well as the verdict.
 
@@ -173,16 +244,31 @@ alone took 118 s with the boot. The legs are not timed one by one.
 - Is a relative input staged at the place the device resolves it? The
   translator checks each against the device working directory and refuses a
   mismatch.
+- Is an input the build makes for a test there on the device? For a meson
+  test its `depends` name it: the build builds `meson-test-prereq`, and the
+  translator refuses an output that is not built or not staged. Neither held
+  for issue-1441 until B-3f's close. CTest builds nothing before it runs a
+  test, so a CTest library's inputs are what its whole build made, or what an
+  earlier test writes.
 
 ## Seams
 
-- libthyla-rs `Command` has no `cwd` or environment; a library whose tests
-  set `ENVIRONMENT` is refused until the runner can carry it.
+- libthyla-rs `Command` has no `cwd` or environment of its own: muster sets
+  its own working directory, and a meson test's variables through `/env`,
+  which each child inherits. CTest's `ENVIRONMENT` property is still refused;
+  no library here sets it.
 
 ## Caveats
 
 - A test program that reads a file it does not name on its command line
-  gets only what `build.sh` stages beyond the translator's list.
+  gets only what `build.sh` stages beyond the translator's list (libxml2's
+  three trees, HarfBuzz's font and text trees), except a meson target it
+  depends on, which is checked.
+- issue-1063's font is not freely licensed: its copyright record reads "All
+  Rights Reserved" and grants nothing, and the sites that list it say
+  personal use only. It is fetched as upstream's script fetches it, so an
+  image baked with these tests is for the builder's own machines and is never
+  published (`tools/build-manifest.toml`, `[cache.ftfont]`).
 - libwebp's lossy digests are the reference implementation's output, not an
   independent oracle: they prove the Pouch build decodes and encodes exactly
   as libwebp 1.6.0 does natively, and upstream's own reference image agrees
@@ -190,4 +276,5 @@ alone took 118 s with the boot. The legs are not timed one by one.
 
 ## Provenance
 
-B-3d (2026-10-15), main session.
+B-3d (2026-10-15), main session; libxml2 B-3e; meson, `env` and TAP B-3f
+(2026-10-15; the `depends` check 2026-10-19).

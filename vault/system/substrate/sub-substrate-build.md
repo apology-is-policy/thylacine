@@ -522,6 +522,57 @@ their files there), since runtest, runsuite and runxmlconf walk them rather
 than naming their files; `tools/build.sh libxml2` builds it alone,
 `tools/forage.sh libxml2` gathers both tarballs.
 
+**FreeType and HarfBuzz (B-3f).** Both register their tests with meson
+alone. Meson is pinned at 1.12.1 (`[cache.meson]`) and run as `meson.py` from
+its tarball, which `meson_tool` unpacks under `build/meson`: the host has no
+meson of its own. `meson_lib` is `cmake_lib`'s contract in meson's terms. The
+pinned tarball is unpacked fresh with the port's patches
+(`usr/ports/<project>/patches`, the project named by the tarball's top
+directory, so FreeType's two passes share one series), built static with
+upstream's tests and installed at `<name>/stage`. Its reuse stamp covers every
+input by content: the tarball, each patch, meson's version, the cross file's
+text, the options, and the archives and `.pc` files of each dependency
+directory (the sysroot's among them, so a new libc relinks the tests). The
+cross file is `cmake/Toolchain-aarch64-pouch-cxx.cmake` in meson's terms. The
+toolchain flags sit in the compiler exelist, because meson's header and
+function checks drop an `-isystem <dir>` pair from `c_args`, and with
+`-nostdlibinc` that left FreeType's checks no `unistd.h` (measured, as
+`tools/clade-mesa-cross.sh` had measured for Mesa). It sets
+`cmake = 'false'`, since a dependency pkg-config cannot find would otherwise
+be looked for among the host's own CMake packages (measured). Only the named
+pkg-config directories are searched, under `--wrap-mode=nofallback`, so
+nothing comes from the host or from a subproject download.
+
+FreeType builds twice around HarfBuzz, as distributions build it:
+`freetype-nohb`, without tests, for HarfBuzz to link, then `freetype` with
+HarfBuzz and its tests, which is the one the browser links. Both have PNG
+from B-3d's libpng and zlib from the sysroot, with brotli and bzip2 off.
+HarfBuzz keeps upstream's `debugoptimized` with `b_ndebug=if-release`, so its
+tests' and the fuzzer driver's asserts stay live; ICU and FreeType are on, and
+GLib, gobject, cairo, chafa, the docs and introspection off. ICU's `.pc` files
+name `-L/lib`, because it installs with prefix `/` under `DESTDIR`, so
+HarfBuzz is handed copies naming the stage (`lib/pkgconfig-staged`).
+`build_zlib` now writes zlib's own `zlib.pc` into the sysroot, which libpng's
+`.pc` requires. `cmake_lib`'s stamp now includes the sha256 of each archive an
+option names: before, libwebp's tests kept an old `libpng16.a` after libpng's
+bytes changed. issue-1063's font comes from `[cache.ftfont]`, checked by the
+zip's sha256 and by the font's own, whose first 8 bytes are the digest
+upstream's script pins. It grants no licence (the sites that list it say
+personal use only), so an image baked with `CHUNK_LIBTESTS` stays on the
+builder's own machines and is never published.
+
+The muster half lists the two libraries' tests with `meson introspect
+--tests` after it builds each tree's `meson-test-prereq`, as `meson test`
+does before it runs them (`mtest.py`'s `rebuild_deps`). A target only a test
+depends on is outside `all`, and before B-3f's close issue-1441's two
+generated fonts were never built: the first device run read
+`FT_Err_Cannot_Open_Resource` on both, and the translator now refuses such a
+gap ([[sub-substrate-libtests]]). The muster half also stages HarfBuzz's
+`perf/fonts`, `perf/texts` and `test/subset/data/fonts` for the thread tests.
+bake-verify adds `FTTESTS`, `FTFONT`, `HBTESTS` and `HBFONTS`.
+`tools/build.sh fonts` builds the three passes, and `tools/forage.sh fonts`
+gathers meson, both tarballs and the font.
+
 ## Data structures
 
 `build/` layout: `kernel/` and `kernel-undefined/` (parallel sanitizer

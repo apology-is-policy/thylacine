@@ -63,9 +63,12 @@ are dropped, the libraries being static); a TAP test is that command with
 its stdout kept, then the runner's builtin tap, which judges it as meson
 does. Refused: a key the list has that this script does not know, another
 protocol, extra_paths, an env path outside every --map, a directory argument,
-and a source tree that mentions should_fail (introspection does not export
-it, so a test expected to fail would translate as one expected to pass) or
-MESON_TEST_ITERATION (which the harness sets and muster does not). Not
+an output of a target the test depends on that is not built (`meson test`
+builds those first, and a target only a test needs is outside `all`) or that
+nothing stages, and a source tree that mentions should_fail (introspection
+does not export it, so a test expected to fail would translate as one
+expected to pass) or MESON_TEST_ITERATION (which the harness sets and muster
+does not). Not
 carried: timeouts (the gate's own bounds the run), and the harness's
 MALLOC_PERTURB_ and sanitizer options, which this libc does not read.
 """
@@ -368,6 +371,34 @@ def meson_guard(source):
         die(f"--meson-source {source} holds no meson.build (the guard searched nothing)")
 
 
+def meson_outputs(build):
+    """Each target's outputs, from the file mtest.py reads for a test's depends."""
+    path = os.path.join(build, "meson-info", "intro-targets.json")
+    if not os.path.isfile(path):
+        die(f"{path} is absent: --meson-build is not a configured meson tree")
+    return {t["id"]: [os.path.join(build, f) for f in t["filename"]]
+            for t in json.load(open(path))}
+
+
+def depends_staged(name, depends, outputs, stage, mapper):
+    """Refuse a test whose depends `meson test` would build, unless each output is built and staged."""
+    files = {dev for kind, _host, dev in stage if kind != "tree"}
+    trees = [dev for kind, _host, dev in stage if kind == "tree"]
+    for d in sorted(set(depends)):
+        if d not in outputs:
+            die(f"test {name!r} depends on {d!r}, a target the build does not list")
+        for f in outputs[d]:
+            if not os.path.exists(f):
+                die(f"test {name!r} depends on {f}, which is not built (build the tree's"
+                    " meson-test-prereq, as `meson test` does before it runs)")
+            dev = mapper.device(f)
+            if dev is None:
+                die(f"test {name!r} depends on {f}, outside every --map")
+            if dev not in files and not any(dev.startswith(t + "/") for t in trees):
+                die(f"test {name!r} depends on {f}, which nothing stages (the test reads"
+                    " it by a name its command and env do not carry)")
+
+
 def meson_list(args, mapper):
     """The meson test list as device tests and their stage entries; and the skipped names."""
     if not args.meson_build or not args.meson_source:
@@ -376,6 +407,7 @@ def meson_list(args, mapper):
     if not isinstance(tests, list) or not tests:
         die(f"{args.meson} lists no tests")
     meson_guard(args.meson_source)
+    outputs = meson_outputs(args.meson_build)
     names = [t.get("name") for t in tests]
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
@@ -425,7 +457,9 @@ def meson_list(args, mapper):
             steps = [step(cmd, stdout=log), step([log], "tap")]
         else:
             die(f"test {name!r}: protocol {proto!r} is not supported")
-        out.append(lower(name, cwd, steps, env, [], args, mapper))
+        tr, st = lower(name, cwd, steps, env, [], args, mapper)
+        depends_staged(name, t.get("depends", []), outputs, st, mapper)
+        out.append((tr, st))
     return out, skipped
 
 
