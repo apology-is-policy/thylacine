@@ -17,6 +17,7 @@ code:
   - usr/utopia/libutopia/src/eval/value.rs
   - usr/utopia/libutopia/src/eval/error.rs
   - usr/utopia/libutopia/src/eval/mountargs.rs
+  - usr/utopia/libutopia/src/eval/umaskargs.rs
   - usr/u-glob-test/src/main.rs
 audit: light
 guarded-by: [inv-i19, inv-i20, inv-i27, inv-i28]
@@ -27,7 +28,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
-updated: 2026-10-18
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -78,6 +79,20 @@ the root only (`sys_resolve_mountpoint`), and before 2026-10-18 a relative mount
 point named the root's entry, not one below `$cwd`. An absolute name passes
 unchanged, and a trailing `/` survives the join: `normalize_abs` drops it, and
 the trailing slash is how a name asks to follow a final symlink.
+
+**`umask` (B-3e, 2026-10-19).** `umask [mode]` prints the shell Proc's creation
+mask as four octal digits, or sets it from one to four octal digits of value at
+most 0777 (UTOPIA-SHELL-DESIGN 9.1; IDENTITY-DESIGN 9.7 M8, operator vote
+2026-10-19). It is a builtin for `cd`'s reason: the mask is the calling Proc's
+own state, which every Proc it starts inherits, so a command would change only
+itself. The kernel offers only an exchange (`SYS_UMASK`), so a bare `umask` reads
+by exchanging twice, and its first exchange asks for 0777: anything this Proc
+creates in the window comes out narrower than asked, never wider. Its grammar is
+the pure `umaskargs` module (host-tested: `bad mask X`, the usage line for two
+operands, four-digit output, every mask read back); the parse runs before any
+syscall, so a refused mode changes nothing. u-builtin-test probe 14 witnesses the
+default arriving, a set, a bare read leaving the mask unchanged and a refusal
+changing nothing; viv-run.exp the printed form and the created modes.
 
 **Haul and Imperium (2026-09-17).** `mount /srv/NAME PATH [ANAME]` connects
 a byte service, attaches it through SYS_ATTACH_9P_SRV, and mounts the returned
@@ -130,8 +145,8 @@ the kernel against the caller's namespace. `/` left the list at B-1d: it was
 there for the flat initrd root, where the pre-pivot shell found its programs;
 the initrd now keeps them in `bin/`, which is `/bin` on both sides of the pivot
 ([[dec-2026-09-25-initrd-bin-directory]]), and a `/` entry would only have
-searched the disk root ahead of the toolchain dirs. There are eighteen builtins under
-twenty names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
+searched the disk root ahead of the toolchain dirs. There are nineteen builtins under
+twenty-one names (`source` / `.` and `type` / `whence` are pairs; `cd --` ends
 option processing — the one way to enter a directory whose name begins with
 `-`), and `BUILTIN_NAMES` — the list
 `is_builtin` tests and `type` answers from — agrees exactly with `try_builtin`'s

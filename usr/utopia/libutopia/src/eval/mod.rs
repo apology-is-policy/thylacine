@@ -69,6 +69,7 @@ pub mod error;
 pub mod glob;
 pub mod jobs;
 pub mod mountargs;
+pub mod umaskargs;
 pub mod value;
 
 // `expr` is gated not for a syscall of its own -- it makes none -- but because

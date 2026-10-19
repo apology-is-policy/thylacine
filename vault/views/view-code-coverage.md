@@ -65,9 +65,9 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**557 owned · 46 unowned · 603 files (92% owned) · ~12449 unswept lines.**
+**558 owned · 46 unowned · 604 files (92% owned) · ~12449 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **78 files, ~38556 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~38601 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
@@ -115,7 +115,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~38556 lin
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/ptyhost | 1 | 0 | 0 |
 | usr/sntp | 1 | 0 | 0 |
-| usr/utopia | 29 | 0 | 0 |
+| usr/utopia | 30 | 0 | 0 |
 | usr/view | 2 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
 | usr/virtio-gpu | 1 | 0 | 0 |

@@ -28,8 +28,15 @@
 #      the bundle is not staged (it needs the Alpine minirootfs + busybox
 #      apk in build/cache, like the L-6c gate).
 #
+# The creation mask (IDENTITY-DESIGN 9.7 M8) rides both vantages: the console
+# ut prints it, sets it and creates under it; the mask it leaves (027) is
+# inherited through ptyhost, the hosted ut and viv into the container, where
+# ash must print it and its own creates take ash's mask.
+#
 # Echo discipline: the pts ldisc echoes typed text, so every control matches
-# an UPPERCASE token only a `| tr a-z A-Z` pipeline can produce (pty-4).
+# an UPPERCASE token only a `| tr a-z A-Z` pipeline can produce (pty-4). A
+# built-in cannot sit in a pipeline, so `umask`'s own output is matched as a
+# whole line of digits, which no typed command line here contains.
 
 source [file join [file dirname [info script]] lib.exp]
 
@@ -47,6 +54,16 @@ lc_expect "viv-probe: FAIL: principal is not the invoker's" \
 sleep 1
 lc_run_expect "echo viv-console | tr a-z A-Z" "VIV-CONSOLE"
 
+# --- M8 at the console ut ----------------------------------------------------
+# A native create asks 0644; under 277 it is 0400, which no directory's bound
+# alone gives (a 0700 /tmp leaves 0600, a 0755 one 0644).
+lc_send "umask"
+lc_expect_re {\n0022\r?\n} "a bare umask prints the default mask as four digits"
+lc_run_expect "umask 277 && touch /tmp/m8-ut && ls -l /tmp/m8-ut | tr a-z A-Z" "-R--------"
+lc_send "rm /tmp/m8-ut && umask"
+lc_expect_re {\n0277\r?\n} "the mask set reads back"
+lc_run_expect "umask 027 && echo m8-set | tr a-z A-Z" "M8-SET"
+
 # --- 2. the pts (ptyhost) --------------------------------------------------
 if {$have_ash} {
     lc_send "ptyhost"
@@ -61,6 +78,10 @@ if {$have_ash} {
     # shell answered, not just that one did.
     lc_send "uname -s | tr a-z A-Z"
     lc_expect "LINUX" "ash answers through the pts (stdin in, stdout out; the phenotype's uname)"
+    # M8: the console ut's 027 crossed ptyhost, the hosted ut and viv; ash
+    # reads it with Linux umask (166) and prints it as busybox does, "%04o".
+    lc_send "echo m=\$(umask) | tr a-z A-Z"
+    lc_expect "M=0027" "the container inherits the invoker's creation mask"
 
     # --- #50: the path-mutation family, end-to-end from EL0 (VIVARIUM.md
     # 6.24). One pipeline per row, each witnessed by an UPPERCASE token only
@@ -116,14 +137,18 @@ if {$have_ash} {
     sleep 1
     lc_send "uname -s | tr a-z A-Z"
     lc_expect "LINUX" "ash still answers after ^C (the runner survived it; ut would say THYLACINE)"
+    # M8 inside the container: ash's `>` asks 0666, and under ash's 277 it is
+    # 0400 -- the container /tmp (0700) bound alone would leave 0600.
+    lc_send "umask 277; echo m8 > /tmp/m8; ls -l /tmp/m8 | tr a-z A-Z; rm -f /tmp/m8"
+    lc_expect "-R--------" "a container create takes ash's own mask (Linux umask sets the Proc's)"
     lc_send "exit"
     sleep 1
     lc_run_expect "echo pts-after | tr a-z A-Z" "PTS-AFTER"
     lc_send "exit"
     sleep 1
     lc_run_expect "echo viv-outer | tr a-z A-Z" "VIV-OUTER"
-    lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts, and ^C reaches the container, not the runner"
+    lc_pass "VIV-RUN: a plain user shell runs a container on the console and on a pts, ^C reaches the container, not the runner, and the creation mask reaches the container"
 } else {
     lc_step "alpine-ash bundle not staged ($ash_bundle) -- the pts half is skipped"
-    lc_pass "VIV-RUN: console half PASS; the pts half needs the Alpine bundle staged"
+    lc_pass "VIV-RUN: console half PASS (with the creation mask); the pts half needs the Alpine bundle staged"
 }

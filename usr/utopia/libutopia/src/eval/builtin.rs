@@ -101,6 +101,15 @@
 // in-process -- which generalises past these two verbs to every future
 // namespace tool. See HAUL-DESIGN.md 4.6.
 //
+// === Implemented at B-3e (the creation mask, IDENTITY-DESIGN 9.7 M8) ===
+//
+//   umask [mode]
+//               print the creation mask as four octal digits, or set it from
+//               one to four octal digits (at most 0777). A built-in for `cd`'s
+//               reason: the mask is the shell Proc's own state, which the
+//               commands it starts inherit, so a `umask` command would change
+//               only itself.
+//
 // A name outside the implemented set is NOT intercepted here
 // (`try_builtin` returns `None`), so the caller falls through to an
 // external spawn. `is_builtin` reports ONLY the implemented set, so
@@ -121,6 +130,7 @@ use super::env::Env;
 use super::error::EvalResult;
 use super::jobs::status_of_packed;
 use super::mountargs;
+use super::umaskargs;
 use super::stmt::{
     eval_source_as_command, poll_notes_once, run_foreground_jc, wait_pids_interruptible,
     StatementFlow,
@@ -137,6 +147,7 @@ use super::value::Value;
 pub const BUILTIN_NAMES: &[&str] = &[
     "cd", "pwd", "exit", "true", "false", "unset", "eval", "source", ".", "type",
     "whence", "jobs", "fg", "bg", "wait", "kill", "mount", "bind", "unmount", "abdicate",
+    "umask",
 ];
 
 /// The built-in names, for the #115a completion command index.
@@ -190,6 +201,7 @@ pub fn try_builtin(env: &mut Env, argv: &[String]) -> Option<EvalResult<Statemen
         "mount" => bi_mount(env, args),
         "bind" => bi_bind(env, args),
         "unmount" => bi_unmount(env, args),
+        "umask" => bi_umask(env, args),
         _ => return None,
     };
     Some(r)
@@ -382,6 +394,37 @@ fn ns_name(cwd: &str, arg: &str) -> String {
         s.push('/');
     }
     s
+}
+
+// ---------------------------------------------------------------------
+// umask -- the creation mask (IDENTITY-DESIGN 9.7 M8)
+// ---------------------------------------------------------------------
+
+/// `umask [mode]`: print the creation mask, or set it.
+fn bi_umask(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    let set = match umaskargs::parse_umask(args) {
+        Ok(s) => s,
+        Err(m) => return fail(env, m, 1),
+    };
+    // The kernel only exchanges the mask, so a read is two exchanges. The
+    // first asks for the narrowest mask: anything this Proc creates between
+    // them comes out narrower than asked, never wider.
+    let old = unsafe { libthyla_rs::t_umask(u64::from(set.unwrap_or(umaskargs::MASK_BITS))) };
+    if old < 0 {
+        let why = match Error::from_syscall_return(old) {
+            Err(e) if old != -1 => alloc::format!(": {}", e),
+            _ => String::new(),
+        };
+        return fail(env, alloc::format!("umask: cannot set the mask{}", why), 1);
+    }
+    if set.is_none() {
+        let _ = unsafe { libthyla_rs::t_umask(old as u64) };
+        let mut line = umaskargs::format_mask(old as u32);
+        line.push('\n');
+        env.emit_line(&line);
+    }
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
 }
 
 /// A runtime built-in failure: set `$errstr` + `$status` and report

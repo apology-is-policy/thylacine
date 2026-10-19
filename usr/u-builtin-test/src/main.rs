@@ -17,6 +17,9 @@
 //   exit              -- sets the pending-exit request + $status and
 //                        unwinds the statement stack (Return), including
 //                        out of a called function.
+//   umask             -- the default mask arrives, a mode sets the kernel's
+//                        mask, a bare umask restores what it probed, and a
+//                        bad mode or a second operand changes nothing.
 //   bind / unmount    -- a relative name joins $cwd; -a unions; unmount
 //                        removes the member; a grammar error is $status 1.
 //
@@ -318,7 +321,39 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    // 14. bind: a relative name joins $cwd, `-a` builds a union whose later
+    // 14. umask: the default reaches a spawned program, a mode sets the
+    //     kernel's mask, a bare `umask` leaves it as it found it, and a refused
+    //     mode changes nothing. What a bare `umask` prints, and what a create
+    //     comes out as, are viv-run.exp's to check: a built-in's output cannot
+    //     be captured, and the pre-pivot root takes no creates.
+    {
+        let mut e = fresh();
+        if mask_now() != 0o22 {
+            return fail("umask: the default mask is not 0022");
+        }
+        if run(&mut e, "umask 077") != 0 || mask_now() != 0o77 {
+            return fail("umask 077");
+        }
+        if run(&mut e, "umask") != 0 || mask_now() != 0o77 {
+            return fail("umask: a bare umask moved the mask");
+        }
+        if run(&mut e, "umask 8") != 1
+            || e.get("errstr").as_scalar() != "umask: bad mask 8"
+            || mask_now() != 0o77
+        {
+            return fail("umask 8 refusal");
+        }
+        if run(&mut e, "umask 022 077") != 1
+            || e.get("errstr").as_scalar() != "usage: umask [mode]"
+        {
+            return fail("umask usage");
+        }
+        if run(&mut e, "umask 0022") != 0 || mask_now() != 0o22 {
+            return fail("umask 0022");
+        }
+    }
+
+    // 15. bind: a relative name joins $cwd, `-a` builds a union whose later
     //     member answers a name the first lacks, and `unmount` takes it away.
     //     Last, because a bind changes this process's namespace for every
     //     probe after it.
@@ -349,6 +384,16 @@ pub extern "C" fn rs_main() -> i64 {
 
     t_putstr("u-builtin-test: all OK\n");
     0
+}
+
+/// This process's creation mask. The kernel only exchanges it, so a read is
+/// two exchanges.
+fn mask_now() -> i64 {
+    let m = unsafe { libthyla_rs::t_umask(0o777) };
+    if m >= 0 {
+        let _ = unsafe { libthyla_rs::t_umask(m as u64) };
+    }
+    m
 }
 
 fn exists(path: &str) -> bool {

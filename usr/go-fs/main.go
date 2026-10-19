@@ -2,8 +2,9 @@
 //
 // A Go binary that drives the os + syscall packages end-to-end against the
 // writable post-pivot Stratum FS: os.Mkdir / os.Create / (*File).Write /
-// os.ReadFile / os.Stat / (*File).Seek / os.ReadDir / os.Rename / os.Remove.
-// It runs POST-pivot (devramfs is read-only); joey spawns it under /go-fs.
+// os.ReadFile / os.Stat / (*File).Seek / os.ReadDir / os.Rename / os.Remove,
+// and the creation mask (syscall.Umask) with os.Getppid. It runs POST-pivot
+// (devramfs is read-only); joey spawns it under /go-fs.
 //
 // Self-checking: every step is asserted; any mismatch panics (exit != 0),
 // which joey's gating turns into a boot failure -- the Stage-3a regression
@@ -16,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -131,6 +133,34 @@ func main() {
 	_, ee1 := os.OpenFile(exclFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	must("O_EXCL create of an existing file reports EEXIST (not EPERM)", os.IsExist(ee1))
 	must("os.Remove(excl.txt)", os.Remove(exclFile) == nil)
+
+	// 6d. M8 (IDENTITY-DESIGN 9.7): the kernel takes a create's mode less the
+	//     creator's umask, then bounds it by the directory's. syscall.Umask
+	//     exchanges the mask, and joey left the default. Under 027 a 0666 file
+	//     and a 0777 directory in this 0755 directory come out 0640 and 0750;
+	//     with the mask ignored they would be 0644 and 0755.
+	must(fmt.Sprintf("/go-fs is 0755, the directory the mask legs assume (got %#o)", di.Mode().Perm()),
+		di.Mode().Perm() == 0o755)
+	old := syscall.Umask(0o027)
+	must(fmt.Sprintf("syscall.Umask returns the default 0022 (got %#o)", old), old == 0o022)
+	maskFile, maskDir := "/go-fs/m8.txt", "/go-fs/m8d"
+	mf, err := os.OpenFile(maskFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	must("create under umask 027", err == nil)
+	must("m8 File.Close", mf.Close() == nil)
+	must("os.Mkdir under umask 027", os.Mkdir(maskDir, 0o777) == nil)
+	back := syscall.Umask(old)
+	must(fmt.Sprintf("syscall.Umask returns the mask it set (got %#o)", back), back == 0o027)
+	mfi, err := os.Stat(maskFile)
+	must("stat m8.txt", err == nil)
+	mdi, err := os.Stat(maskDir)
+	must("stat m8d", err == nil)
+	must(fmt.Sprintf("a 0666 create under 027 is 0640 (got %#o)", mfi.Mode().Perm()), mfi.Mode().Perm() == 0o640)
+	must(fmt.Sprintf("a 0777 mkdir under 027 is 0750 (got %#o)", mdi.Mode().Perm()), mdi.Mode().Perm() == 0o750)
+	must("os.Remove(m8.txt)", os.Remove(maskFile) == nil)
+	must("os.Remove(m8d)", os.Remove(maskDir) == nil)
+	// joey spawned this probe, so its parent is neither kproc (0) nor itself.
+	ppid := os.Getppid()
+	must(fmt.Sprintf("os.Getppid names the parent (got %d)", ppid), ppid > 0 && ppid != os.Getpid())
 
 	// 7. Rename within the directory (os.Rename -> SYS_RENAME).
 	must("os.Rename", os.Rename(file, renamed) == nil)
