@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-19
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -808,11 +808,14 @@ staging buffers are private by construction. Three shared concerns:
   instruction-cache publish takes a Burrow reference under the address-space
   lock, drops the lock, does the maintenance, and releases — so a sibling
   tearing the region down concurrently frees it there instead of underneath.
-- **A charge claim is taken before the drop that could free its record.** The
+- **A charge is settled inside the drop that could free its record.** The
   detach core (`vma_detach_range_in`, [[sub-kernel-vma]] since B-1a') snapshots
   the Burrow pointer rather than the VMA — the removal frees the VMA struct, so
-  that pointer dangles the moment it returns — and claims the page charge
-  *before* the drop, because a freeing drop takes the payment record with it.
+  that pointer dangles the moment it returns — and settles the page charge
+  *inside* the mapping drop (`vma_free_settled_deferred`, AS-R9): a freeing drop
+  takes the payment record with it, and a claim taken before a non-final drop
+  could only be put back through a pointer another holder's final drop may
+  already have freed.
 
 ### Detach admission is decided by identity (2026-09-16)
 
