@@ -2891,8 +2891,10 @@ second invariant and why both buggy cfgs are judged on it.
   head/tail trim, the middle split or the whole removal. The release walks
   the pagemap by PRESENT nodes (`pagemap_take_next`), puts each page
   (`cow_page_put`) and uncharges the data pages plus the nodes each take
-  emptied. The mapping's own free is `vma_free_deferred` ->
-  `burrow_free_deferred` -> `burrow_free_internal`, after `as->lock` drops.
+  emptied. The mapping's own free is `vma_free_settled_deferred` with a NULL
+  `settle_as` (a lazy mapping settles no record; `vma_free_deferred` is that
+  no-payer form of it; AS-R9) -> `burrow_free_deferred` ->
+  `burrow_free_internal`, after `as->lock` drops.
 - **`Replace(s)`** -> `kernel/vma.c::vma_replace_range_in` = allocate the new
   piece, `vma_detach_range_in(.., extra_vmas = 1, ..)` the window (which
   releases the window's slots of the OLD Burrow), insert. F5 closed by

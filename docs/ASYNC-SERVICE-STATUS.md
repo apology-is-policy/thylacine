@@ -4997,5 +4997,16 @@ unsettled release that "settles the I-32 uncharge" (`sub-kernel-vma`). Each now
 says the charge is settled inside the drop, and the burrow rule keeps the one
 legal claim/restore caller on this tree (`SYS_JIT_DESTROY`, premise pinned).
 
+**Folded in from the AS-R9 backport's audit** (Fable 5.1 on main's form, 0 P0 /
+0 P1 / 0 P2 / 4 P3; corona has the same shapes). The callerless
+`burrow_release_mapping_deferred` is deleted and every comment and dossier line
+that named it now names the settled form. The detach arm keys the charge record
+on `as`, the space it refunds, instead of `payer->as` (the same space for every
+caller today). `vma.h`'s detach contract no longer says "the claim is restored".
+The AS-R9 tests get same-TU prototypes. And a fifth stale prescription: the
+AS-2a section of `sub-kernel-burrow` told the asynchronous caller to claim before
+the release and restore on a nonfinal drop; it now describes the settled drop
+Loom actually uses.
+
 **Posture: UNBUILT, UNAUDITED.** Owed: the audit round (Fable 5.1), then the
 gate (ci, qual, UBSan, `ci-smp-gate`) batched with the pi bake.

@@ -159,7 +159,9 @@ bool vma_free_freed(struct Vma *v) {
 void vma_free(struct Vma *v) { (void)vma_free_freed(v); }
 
 // D-3c F1: the deferred twin of vma_free_freed. Drops the mapping ref via
-// burrow_release_mapping_deferred (which does NOT free), frees the Vma struct,
+// burrow_release_mapping_settled_deferred (which does NOT free, and settles
+// `payer`'s charge record in the same hold when the drop qualifies -- AS-R9),
+// frees the Vma struct,
 // and returns the Burrow that still owes a free (or NULL). The caller pushes it
 // onto a local stack and frees it with burrow_free_deferred AFTER dropping
 // as->lock -- the FILE arm's spoor_clunk may sleep, and a sleeping free under a
@@ -390,9 +392,11 @@ int vma_detach_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
             // across three separate acquisitions. `b` is therefore never
             // dereferenced after this mapping's ref is gone -- which is what the
             // old claim/restore pair did, and a concurrent final drop by any
-            // other holder made that a use-after-free write.
+            // other holder made that a use-after-free write. The record is
+            // matched against `as`, the space this mapping leaves and the one
+            // refunded below; `payer` only opts in.
             const struct AddrSpace *settle_as =
-                (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) ? payer->as : NULL;
+                (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) ? as : NULL;
             vma_remove_in(as, v);
             u32 paid = 0;
             struct Burrow *tf = vma_free_settled_deferred(v, settle_as, NULL, &paid);

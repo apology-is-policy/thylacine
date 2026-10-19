@@ -69,6 +69,13 @@ void test_vmo_file_create_close_round_trip(void);
 void test_vmo_file_create_failure_retains_spoor(void);
 void test_vmo_file_map_unmap_lifecycle(void);
 void test_vmo_file_resident_pages_freed(void);
+void test_burrow_backing_pages_matches_alloc(void);
+// AS-R9: settled drops + the JIT remaining-reference premise.
+void test_burrow_settled_drop_retains_nonfinal_charge(void);
+void test_burrow_settled_drop_exact_payer(void);
+void test_burrow_settled_mapping_drop_defers_free(void);
+void test_burrow_unmap_failure_leaves_mapping_attached(void);
+void test_burrow_unmap_interior_start_refused(void);
 
 // Convenience: test "did we free a BURROW this turn" by snapshot diff.
 static u64 created_diff_snap;

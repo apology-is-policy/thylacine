@@ -166,10 +166,13 @@ Burrow's own free is Proc-agnostic, so a slot that stopped being mapped while
 still resident would be charged for the rest of the address space's life
 (`capacity.tla`'s `NoOrphan`; the B-1a audit's F5, and the piece-detach bug
 before it). Then the shape. A WHOLE mapping goes through `vma_remove_in` +
-`vma_free_deferred`, its Burrow chained onto `*out_dead` if that drop was the
-last; a `SHARED_IN` whole mapping uncharges the shared-in budget for its span;
-an eager `ANON` whole mapping settles its charge record for `payer` INSIDE the
-drop -- `vma_free_settled_deferred` -> `burrow_release_mapping_settled_deferred`,
+`vma_free_settled_deferred`, its Burrow chained onto `*out_dead` if that drop
+was the last, with a NULL `settle_as` (settle nothing: the form
+`vma_free_deferred` spells) unless it is the eager case below; a `SHARED_IN`
+whole mapping uncharges the shared-in budget for its span; an eager `ANON`
+whole mapping, when the caller opted in with a `payer`, settles the charge
+record of the space it leaves (`as`, the space refunded) INSIDE the drop --
+`vma_free_settled_deferred` -> `burrow_release_mapping_settled_deferred`,
 which claims iff the drop freed the pages or the region survives only in another
 Proc (`shared_out`), and otherwise leaves the record for the drop that does end
 it (#130/#131; AS-R9 moved the decision from three separate lock acquisitions in

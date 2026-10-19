@@ -30,6 +30,17 @@
   `work/oct5-as-r9/*/inputs/` (closed gate inputs; untracked; hashes in the
   committed manifests) was refused as irreversible; the disk is at 9.5 GiB free,
   above build.sh's 6 GiB floor, so the gates run one bake at a time.
+- *The backport's audit* (Fable 5.1, 0/0/0/4 P3) found shapes corona shares: a
+  callerless `burrow_release_mapping_deferred`, the detach arm keying the
+  record on `payer->as` while refunding `as`, docs naming the wrong direction.
+  Applying them turned up two more the round had not: `vma.h`'s detach contract
+  still said "the claim is restored" (both trees), and on corona the AS-2a
+  section still told the async caller to claim before the release and restore
+  on a nonfinal drop -- a fifth rule prescribing the defect, missed by the
+  sweep that found four because it searched for the phrases those four used.
+  On main's tree the ported test comment also called the null-Proc unmap probe
+  a behaviour pin; main's wrapper dereferences `p->as` right after that guard,
+  so there it is a guard pin.
 - *Open:* both changes UNBUILT and UNAUDITED at this entry.
 
 ## 2026-10-19 -- 17:09Z closed: the socket verb arms check their own ctl (corona)

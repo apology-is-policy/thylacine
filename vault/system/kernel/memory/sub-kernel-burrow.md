@@ -81,11 +81,12 @@ first Burrow entry to speak errno, because its callers are `SYS_BURROW_PROTECT`
 and the phenotype `mprotect` row, both of which hand the value to userspace as
 is.
 
-**The deferred-free pair** — `burrow_release_mapping_deferred` and
+**The deferred-free pair** — `burrow_release_mapping_settled_deferred` and
 `burrow_free_deferred` — exists because a FILE-backed Burrow's free reaches
 `spoor_clunk`, which may **sleep**, while every VMA mutator holds `as->lock`, a
-spinlock. `burrow_release_mapping_deferred` drops the mapping ref and settles the
-I-32 uncharge under the lock but does **not** free; it hands the caller the
+spinlock. `burrow_release_mapping_settled_deferred` drops the mapping ref under
+the lock but does **not** free, and takes the I-32 charge decision inside that
+same hold (a NULL `payer` settles nothing). It hands the caller the
 Burrow that still owes its physical free, collected on a `deferred_free_next`
 stack and passed to `burrow_free_deferred` after the unlock. The full mechanism —
 the `out_free` out-parameter every teardown path must thread and must never drop
@@ -265,15 +266,16 @@ repair left the `{0,0}` dual-counter decision written *twice* — once in
 settled forms — which is the same drift hazard the claim refactor above exists to
 avoid, reintroduced one layer down. It also left
 `burrow_release_mapping_deferred` with no callers at all, since
-`vma_free_deferred` had moved to the settled path. The three unsettled forms are
-now thin wrappers over the settled ones (the mapping-freed form adding only the
-inline free its non-deferred contract promises), so each decision has exactly one
-copy and a caller that holds no charge record still has a name to call that does
-not make it pass NULLs. The settled forms carry the *historical* extinction
+`vma_free_deferred` had moved to the settled path. The two unsettled forms that
+have callers are now thin wrappers over the settled ones (the mapping-freed form
+adding only the inline free its non-deferred contract promises), so each decision
+has exactly one copy and a caller that holds no charge record still has a name to
+call that does not make it pass NULLs; the callerless deferred one was deleted
+(the AS-R9 backport's audit, P3-1). The settled forms carry the *historical* extinction
 bodies, so the wrappers' messages are unchanged; none of those bodies is in the
 `tools/test-fault.sh` matched set, so they are prose rather than tooling ABI.
 
-`burrow_release_mapping_settled_deferred` keeps its twin's deferred contract —
+`burrow_release_mapping_settled_deferred` keeps the D-3c deferred contract —
 hand back the dead Burrow rather than free it under the caller's `as->lock` — and
 qualifies on `freed || shared_out`, reading `shared_out` under that same lock.
 Being monotonic false → true, observing it at drop time rather than before the
@@ -673,14 +675,19 @@ substantive rather than cosmetic: it predates the sparse backings entirely. See
 
 `burrow_charge_claim_in` and `burrow_charge_restore_in` take the exact live
 AddrSpace instead of consulting a Proc. Legacy wrappers delegate to these forms.
-The asynchronous caller must hold a descriptor pin and a Burrow reference:
-claim before release, refund only after actual storage destruction, restore on a
-nonfinal drop. This retains the existing leaf lock and claim-once semantics;
-no PID lookup or successor image can receive the refund. A native test destroys
-the Proc, rejects a fresh address space as payer, and settles the pinned original
-account after the last buffer release. The conservative claim/restore window
-and legacy shared-out detach policy are unchanged; the new MM hierarchy is not
-implemented here. Evidence is in ASYNC-SERVICE-SELF-REVIEW.md.
+The asynchronous caller holds a descriptor pin, and since AS-R9 it settles
+through the drop itself: `burrow_unref_settled_in(b, as, &refund)` takes the
+record inside the hold that decides finality, so only the drop that destroys the
+storage refunds, exactly once, to the pinned address space. (This section first
+prescribed claim before the release and restore on a nonfinal drop; AS-R9 showed
+that shape writes through a freed Burrow when another holder's final drop lands
+between the two.) The leaf lock and claim-once semantics are unchanged; no PID
+lookup or successor image can receive the refund. A native test destroys the
+Proc, rejects a fresh address space as payer, and settles the pinned original
+account after the last buffer release. The stand-alone claim/restore pair keeps
+one legal caller, `SYS_JIT_DESTROY` (above); the legacy shared-out detach
+policy is unchanged, and the new MM hierarchy is not implemented here. Evidence
+is in ASYNC-SERVICE-SELF-REVIEW.md.
 
 ## Provenance
 
