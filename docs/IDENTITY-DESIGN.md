@@ -1792,9 +1792,13 @@ admitted only to a principal at one of the session's two ends:
 
 Any other principal gets `EACCES`; this covers a Proc creating through a mount it
 inherited from another identity. A session whose ends were never recorded admits no
-create. The check sits at the one create chokepoint (`spoor_create_install`) and runs
-whether or not the Dev enforces rwx. A name that already exists still answers `EEXIST`
-to a caller that may search the directory, the A-2d order.
+create. The check sits at both kernel paths that create through a session, the sync
+chokepoint (`spoor_create_install`) and Loom's directory-mutation gate for `MKDIR`,
+`MKNOD` and `SYMLINK` (LOOM.md 8.5.1), and runs whether or not the Dev enforces rwx.
+On the sync path a name that already exists still answers `EEXIST` to a caller that may
+search the directory, the A-2d order; Loom answers `EACCES`, as its W|X refusal does.
+(Corrected 2026-10-19: this said "the one create chokepoint". Loom's three create ops
+were a second door, found by the M8 self-audit before either rule had run.)
 - **Why both ends.** The server stamps a create with its connection's credential, or
   with its own when it relays, never with the asking Proc's. The pool's two ends are
   system, so an ordinary user cannot make a system-owned file there. login attaches a
@@ -1822,8 +1826,8 @@ to a caller that may search the directory, the A-2d order.
 
 **M8 -- a create's mode is bounded by its directory and the creator's umask (kernel;
 operator votes 2026-10-19, `dec-2026-10-19-create-mode-bound-and-umask`).** F-5's mask,
-built. At the one create chokepoint (`spoor_create_install`), before the request reaches
-the server, the mode a create asks for is reduced twice:
+built. On both create paths (`spoor_create_install`, and Loom's `MKDIR` and `MKNOD`),
+before the request reaches the server, the mode a create asks for is reduced twice:
 - by the creator's **umask**, a per-Proc mask that `SYS_UMASK` exchanges. It is 0022 at
   boot, a child inherits its parent's at spawn, and a Proc's threads share it;
 - by the **parent directory's mode**, as Plan 9's create(5) bounds it. A file's read and

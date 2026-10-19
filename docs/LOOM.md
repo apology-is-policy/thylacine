@@ -396,6 +396,18 @@ rule below closes it.
   it and never the ring's bytes. (On a caped session `GETATTR` likewise hands
   userspace the cape's owner and group, with both `valid` bits set, so a ring
   and `SYS_FSTAT` report the same owner.)
+- **The create ops answer to IDENTITY-DESIGN 9.7's M7 and M8, as the sync
+  create does** (2026-10-19). `MKDIR`, `MKNOD` and `SYMLINK` are admitted only
+  to a principal at one of the session's two ends (`dev9p_create_admits`),
+  decided before the parent's stat and whether or not the Dev enforces rwx:
+  the server stamps a create with its session's credential, never the
+  submitter's, so a creator at neither end would make entries owned by an end.
+  A refusal answers `-EACCES` inline, and nothing goes on the wire. `MKDIR`'s
+  and `MKNOD`'s rwx bits are then reduced by the creator's umask and bounded
+  by the parent's mode (`perm_create_mode`, the bound only where the Dev
+  enforces rwx), and the op's SQE snapshot carries the result; `MKNOD` keeps
+  its file type. A symlink has no mode to bound. `LINK` makes no new file and
+  takes neither rule, like `RENAMEAT`.
 - **Names are checked like the sync twins', on the copy the wire carries.**
   Each child name must be 1 to 255 bytes, hold no `/` or NUL, and not be `.`
   or `..` (`sys_copy_component`'s rule); a bad one answers `-EINVAL` before
