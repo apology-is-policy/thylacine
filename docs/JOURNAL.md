@@ -146,6 +146,17 @@ My self-audit agreed with the round on everything it covered: the bind's complet
 
 **AS-R9's land had stalled on a gate that never finished.** Corona's SMP leg for the backport (`107c5c1bd`, yip 0232) stopped at `default-smp8` 8/10 at 11:15Z, when corona's session went quiet. Its stages file still ends "exit 0", written by the EXIT trap, but there is no `smp.rc` and no "SMP GREEN" record, and the UBSan rows never ran. `default-smp1` and `default-smp4` are 10/10 each, and they count. Under a Mac lease from 21:54Z I am running the three missing rows on my own checkout of the commit. If they are green I land the backport on main, and b3 then merges main, so lease 5 covers vote 2, SA-5 and AS-R9 together.
 
+**AS-R9 landed, b3 merged it, and lease 5 ran the merged tip (22:43-23:11Z).** The three missing SMP rows passed 10/10 each from 21:54Z to 22:38Z: `default-smp8`, `ubsan-smp4` and `ubsan-smp8`. Main then fast-forwarded to `107c5c1bd` on both mirrors, and b3 merged it as `1cef21e51`. That merge had three doc conflicts. I checked the code's auto-merge two ways, and every one of main's hunks sits in its own function.
+
+Lease 5's results:
+- The suite passed 2044/2044 and test-fault 8/8.
+- RA, RB (with R7) and RC each failed as predicted.
+- RD's hole refill failed as predicted. Four tests I had not listed failed with it. Each checks a tail piece's bytes, so each also sees R5's one-page shift, which shows they discriminate the tail offset too.
+- The restored kernel passed 2044/2044.
+- `capacity`, `burrow` (AS-R9's new model) and the 23 territory buggy cfgs were all as claimed.
+
+On the device, testparser passes: the merge removed the ceiling it stopped at. libxml2 is 22 of 23. runtest's path fix holds, and what is left is a different defect. Its threads section creates and joins 7 threads 500 times, and `pthread_create` fails once 256 exited threads have accumulated, because an exited peer thread is never reaped while its Proc lives. That is aux's P1 (OPEN-BUGS 15:03Z), to be fixed after the 10-20 talk. The two leak reports after the failure are artifacts of it: runtest returns without joining that round's threads, and they keep allocating during the SVG tests. B-3e's last witness waits on that fix. FreeType's issue-1441 (OPEN-BUGS 10-15) belongs to B-3f.
+
 ## 2026-10-19 (corona, Opus 5.5, effort max) -- AS-R9 backported: Burrow charges settle inside the drop (branch corona/asr9-main, for main to land)
 
 - *Why now.* The AS-R9 P1 (I-32) was fixed on `corona/async-memory` on
