@@ -8442,8 +8442,9 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
-// does the source rights gate + flags check + Plan 9's Emount (-T_E_NOTDIR;
-// every other refusal is -1) + the mount-table op). The mount
+// does the source rights gate + flags check + Plan 9's Emount + the
+// mount-table op). Each refusal answers its errno (ERRORS.md "Mount and
+// unmount"); only the NULL guards, which EL0 cannot reach, stay -1. The mount
 // table keys on the mount point's (dc, devno, qid.path) identity, extracted
 // inside territory.c::mount, which retains the mountpoint Spoor (its own ref)
 // only as the covered member of a union the mount starts.
@@ -8452,14 +8453,14 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     if (!p)                                          return -1;
     if (!p->territory)                               return -1;
     if (!mountpoint)                                 return -1;
-    if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -1;
+    if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -T_E_INVAL;
     // UM-8 F10: MREPL / MBEFORE / MAFTER are mutually-exclusive placement modes
     // (Plan 9; territory.tla models one `mb` boolean + a repl action). More than
     // one set is a caller error -- mount()'s dispatch would silently take MREPL
     // then MBEFORE -- so reject loudly rather than act on an ambiguous request.
     // (place & (place-1)) != 0 iff more than one placement bit is set.
     u32 place = flags & (u32)(MREPL | MBEFORE | MAFTER);
-    if (place & (place - 1))                          return -1;
+    if (place & (place - 1))                          return -T_E_INVAL;
 
     // RIGHT_READ on the source: a mount holder consumes the source's
     // tree (walks it, reads files through it). A handle without READ
@@ -8467,7 +8468,7 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     // separately required for cross-Proc transfer surfaces (Phase 5+),
     // not for the mount installation itself.
     struct Spoor *source = sys_lookup_spoor(p, source_fd, RIGHT_READ);
-    if (!source)                                     return -1;
+    if (!source)                                     return -T_E_BADF;
 
     // Plan 9 cmount's Emount (ARCH 9.6.1): a source whose type differs from the
     // point's would leave a name walked as one kind of file resolving as the
@@ -8484,22 +8485,26 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     }
 
     // territory.c::mount handles: idempotency (no-op on duplicate), MREPL
-    // (replace existing entry), full-table rejection, and the per-entry
-    // spoor_ref. Returns 0 / -1 / -2 (table full) -> collapse to 0 / -1.
+    // (replace existing entry), the cycle and full-table refusals, and the
+    // per-entry spoor_ref. It answers -3 for a cycle and -2 for a full table;
+    // its -1 (a NULL or corrupt Spoor) cannot arise here.
     // #844: source is REF-HELD (a borrow); mount() takes its own per-entry
     // ref, so release the borrow after.
     int rc = mount(p->territory, source, mountpoint, flags);
     spoor_clunk(source);
+    if (rc == -3)                                    return -T_E_LOOP;
+    if (rc == -2)                                    return -T_E_NOSPC;
     return rc == 0 ? 0 : -1;
 }
 
-// Inner — testable kernel-internally. Returns 0 on success, -1 if no
-// entry matches the mount point's identity.
+// Inner — testable kernel-internally. Returns 0 on success, -T_E_INVAL if no
+// entry matches the mount point's identity (nothing is mounted there; Linux's
+// umount2 answer).
 int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
     if (!p)                                          return -1;
     if (!p->territory)                               return -1;
     if (!mountpoint)                                 return -1;
-    if (unmount(p->territory, mountpoint) != 0)       return -1;
+    if (unmount(p->territory, mountpoint) != 0)       return -T_E_INVAL;
     return 0;
 }
 
@@ -8508,14 +8513,22 @@ int sys_unmount_for_proc(struct Proc *p, struct Spoor *mountpoint) {
 // NOT open -- so a re-mount onto an already-mounted point keys on the SAME
 // underlying identity and MREPL replaces it). Shared by SYS_MOUNT + UNMOUNT.
 // Returns the owned mount-point Spoor (ref==1; the caller clunks it after the
-// table op) or NULL on any failure. v1.0 resolves from root only (absolute
-// paths); a relative-mount start_fd is a v1.x add.
+// table op), or NULL with *rc_out set to the refusal: SYS_OPEN_CREATE's path
+// checks (-T_E_INVAL, -T_E_FAULT), then the resolver's errno. v1.0 resolves
+// from root only (absolute paths); a relative-mount start_fd is a v1.x add.
 static struct Spoor *sys_resolve_mountpoint(struct Proc *p,
-                                            u64 path_va, u64 path_len_raw) {
+                                            u64 path_va, u64 path_len_raw,
+                                            s64 *rc_out) {
+    *rc_out = -1;
     if (!p || !p->territory)                          return NULL;
-    if (path_len_raw == 0)                            return NULL;
-    if (path_len_raw > SYS_OPEN_PATH_MAX)             return NULL;
-    if (!sys_validate_user_buf(path_va, path_len_raw)) return NULL;
+    if (path_len_raw == 0 || path_len_raw > SYS_OPEN_PATH_MAX) {
+        *rc_out = -(s64)T_E_INVAL;
+        return NULL;
+    }
+    if (!sys_validate_user_buf(path_va, path_len_raw)) {
+        *rc_out = -(s64)T_E_FAULT;
+        return NULL;
+    }
 
     // RW-4 SA-F1: REF-HELD root (was a bare borrow -- a concurrent pivot_root
     // could free `start` while stalk walks it -> UAF). Clunked after stalk below
@@ -8529,14 +8542,27 @@ static struct Spoor *sys_resolve_mountpoint(struct Proc *p,
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     for (u64 i = 0; i < path_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)    { spoor_clunk(start); return NULL; }
-        if (b == '\0')                                { spoor_clunk(start); return NULL; }
+        if (uaccess_load_u8(path_va + i, &b) != 0) {
+            spoor_clunk(start);
+            *rc_out = -(s64)T_E_FAULT;
+            return NULL;
+        }
+        if (b == '\0') {
+            spoor_clunk(start);
+            *rc_out = -(s64)T_E_INVAL;
+            return NULL;
+        }
         path_scratch[i] = (char)b;
     }
     path_scratch[path_len_raw] = '\0';
 
-    struct Spoor *mp = stalk(p, start, path_scratch, path_len_raw, STALK_MOUNT, 0);
+    int err = 0;
+    struct Spoor *mp = stalk_err(p, start, path_scratch, path_len_raw,
+                                 STALK_MOUNT, 0, &err);
     spoor_clunk(start);   // SA-F1: release the root ref (stalk only borrowed it)
+    // stalk_err names a positive cause with every NULL; a 0 must never read as
+    // success.
+    if (!mp) *rc_out = err > 0 ? -(s64)err : -1;
     return mp;
 }
 
@@ -8546,13 +8572,16 @@ static s64 sys_mount_handler(u64 path_va, u64 path_len_raw,
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    if (flags_raw > (u64)0xFFFFFFFFu)                 return -1;
+    if (flags_raw > (u64)0xFFFFFFFFu)                 return -(s64)T_E_INVAL;
+    // At full width, before the narrowing cast: (1 << 32) + 3 must not name
+    // handle 3.
+    if (source_fd_raw >= (u64)PROC_HANDLE_MAX)        return -(s64)T_E_BADF;
 
-    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw);
-    if (!mp)                                          return -1;
+    s64 rc = -1;
+    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw, &rc);
+    if (!mp)                                          return rc;
 
-    s64 rc = (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw, mp,
-                                     (u32)flags_raw);
+    rc = (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw, mp, (u32)flags_raw);
     // territory.c::mount copied mp's identity (and took its own ref where it
     // keeps mp as a union's covered member) -- release ours.
     spoor_clunk(mp);
@@ -8565,10 +8594,11 @@ static s64 sys_unmount_handler(u64 path_va, u64 path_len_raw) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
-    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw);
-    if (!mp)                                          return -1;
+    s64 rc = -1;
+    struct Spoor *mp = sys_resolve_mountpoint(p, path_va, path_len_raw, &rc);
+    if (!mp)                                          return rc;
 
-    s64 rc = (s64)sys_unmount_for_proc(p, mp);
+    rc = (s64)sys_unmount_for_proc(p, mp);
     spoor_clunk(mp);
     return rc;
 }

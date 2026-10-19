@@ -2177,6 +2177,8 @@ void test_sys_mount_refuses_a_type_mismatch(void);
 void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
 void test_sys_mount_type_check_reads_only_qtdir(void);
 void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
+void test_sys_mount_full_table_answers_enospc(void);
+void test_sys_mount_cycle_answers_eloop(void);
 void test_attach_probe_round_trip(void);
 void test_sys_mlockall_cap_gate(void);
 void test_sys_set_dumpable_one_way_to_zero(void);
@@ -4643,6 +4645,8 @@ struct test_case g_tests[] = {
     { "sys_mount.refuses_all_but_mrepl_at_a_file",     test_sys_mount_refuses_all_but_mrepl_at_a_file,     false, NULL },
     { "sys_mount.type_check_reads_only_qtdir",         test_sys_mount_type_check_reads_only_qtdir,         false, NULL },
     { "sys_mount.accepts_an_ordered_mount_at_a_directory", test_sys_mount_accepts_an_ordered_mount_at_a_directory, false, NULL },
+    { "sys_mount.full_table_answers_enospc",           test_sys_mount_full_table_answers_enospc,           false, NULL },
+    { "sys_mount.cycle_answers_eloop",                 test_sys_mount_cycle_answers_eloop,                 false, NULL },
     { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
     { "sys_mlockall.cap_gate",                         test_sys_mlockall_cap_gate,                         false, NULL },
     { "sys_set_dumpable.one_way_to_zero",              test_sys_set_dumpable_one_way_to_zero,              false, NULL },

@@ -122,6 +122,11 @@ pub enum Error {
     /// Maps `T_E_INVAL` = 22 (POSIX `EINVAL`).
     InvalidArgument,
 
+    /// No space left: a mount into a namespace whose mount table is full, or
+    /// a server's full store, which crosses by value.
+    /// Maps `T_E_NOSPC` = 28 (POSIX `ENOSPC`).
+    NoSpace,
+
     /// Broken pipe: pipe or socket write hit a closed read end.
     /// Maps `T_E_PIPE` = 32 (POSIX `EPIPE`).
     BrokenPipe,
@@ -212,6 +217,7 @@ impl Error {
             Error::NotADirectory    => 20,
             Error::IsADirectory     => 21,
             Error::InvalidArgument  => 22,
+            Error::NoSpace          => 28,
             Error::BrokenPipe       => 32,
             Error::OutOfRange       => 34,
             Error::NotImplemented   => 38,
@@ -296,6 +302,7 @@ impl From<i32> for Error {
             20  => Error::NotADirectory,
             21  => Error::IsADirectory,
             22  => Error::InvalidArgument,
+            28  => Error::NoSpace,
             32  => Error::BrokenPipe,
             34  => Error::OutOfRange,
             38  => Error::NotImplemented,
@@ -325,6 +332,7 @@ impl fmt::Display for Error {
             Error::NotADirectory    => "not a directory",
             Error::IsADirectory     => "is a directory",
             Error::InvalidArgument  => "invalid argument",
+            Error::NoSpace          => "no space left",
             Error::BrokenPipe       => "broken pipe",
             Error::OutOfRange       => "result out of range",
             Error::NotImplemented   => "function not implemented",

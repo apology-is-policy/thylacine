@@ -158,15 +158,20 @@ impl core::ops::BitOrAssign for MountFlags {
 ///
 /// `flags` follows Plan 9 mount-semantics; see `MountFlags`.
 ///
-/// Errors:
+/// Errors, one per refusal (ERRORS.md "Mount and unmount"):
+///   - the resolver's error for a `mount_point` that does not resolve:
+///     `Error::NotFound`, `Error::PermissionDenied`, `Error::NotADirectory`,
+///     `Error::SymlinkLoop` (a trailing `/` on a point that is not a directory
+///     is unresolvable).
+///   - `Error::InvalidArgument`: an empty or over-long `mount_point`, or
+///     `flags` outside the supported set or naming two placements.
+///   - `Error::BadHandle`: `source` is not an open handle the kernel can mount,
+///     or lacks read.
 ///   - `Error::NotADirectory`: `source` and `mount_point` differ in type, or
 ///     `flags` lacks REPL at a point that is not a directory.
-///   - `Error::InvalidArgument`: every other refusal, which the kernel still
-///     reports as one generic -1: a bad or rightless `source`, `flags` outside
-///     the supported set or naming two placements, an absent or unresolvable
-///     `mount_point` (a trailing `/` on a point that is not a directory is
-///     unresolvable), a full mount table, a mount that would close a cycle in
-///     the mount graph (I-3).
+///   - `Error::SymlinkLoop`: the mount would close a cycle in the mount graph
+///     (I-3).
+///   - `Error::NoSpace`: the mount table is full.
 pub fn mount<F: AsFd + ?Sized>(
     source: &F,
     mount_point: &str,
@@ -211,13 +216,17 @@ pub fn bind_after<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<()>
 /// close runs if this was the last ref.
 ///
 /// Errors:
-///   - `Error::NotFound`: no entry at `mount_point`'s identity (or unresolvable).
+///   - the resolver's error for a `mount_point` that does not resolve, such as
+///     `Error::NotFound`.
+///   - `Error::InvalidArgument`: nothing is mounted at `mount_point`, or the
+///     path is empty or over-long.
 pub fn unmount(mount_point: &str) -> Result<()> {
     // SAFETY: t_unmount reads the path bytes; no other user-VA arguments.
     let rc = unsafe { t_unmount(mount_point.as_ptr(), mount_point.len()) };
-    if rc < 0 {
-        return Err(Error::NotFound);
+    if rc == -1 {
+        return Err(Error::InvalidArgument);
     }
+    Error::from_syscall_return(rc)?;
     Ok(())
 }
 

@@ -110,11 +110,18 @@ they fail; run `echo $errstr` to display it. The reasons from `bind` are:
 | --- | --- |
 | `bind: cannot open NEW: no such file or namespace entry` | `new` does not exist. |
 | `bind: cannot open NEW: permission denied` | A directory on the way to `new` may not be searched. |
-| `bind: cannot bind at OLD: not a directory` | One name is a directory and the other is not, or `-b` or `-a` was given at a file. |
-| `bind: cannot bind at OLD` | `old` does not exist, or the namespace has no room for another entry. |
+| `bind: cannot bind at OLD: not a directory` | One name is a directory and the other is not, `-b` or `-a` was given at a file, or a name on the way to `old` is not a directory. |
+| `bind: cannot bind at OLD: no such file or namespace entry` | `old` does not exist. |
+| `bind: cannot bind at OLD: permission denied` | A directory on the way to `old` may not be searched. |
+| `bind: cannot bind at OLD: too many levels of symbolic links` | Binding `new` at `old` would make the namespace lead back into itself, or a symbolic link on the way to `old` loops. |
+| `bind: cannot bind at OLD: no space left` | The namespace has no room for another entry. |
 | `bind: -b and -a are mutually exclusive` | Both orderings were given. |
 | `bind: unknown option -X` | An option other than `-b`, `-a` and `-c`. |
 | the usage line, starting `usage: bind` | Other than two operands. |
+
+`mount` and `unmount` name their causes the same way. `unmount` reports
+`unmount: cannot unmount NAME: invalid argument` when nothing is mounted at
+NAME.
 
 A failed `bind` leaves the namespace unchanged.
 

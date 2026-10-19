@@ -1550,6 +1550,17 @@ one named errno in a call whose other refusals stay the flat -1
 [[dec-2026-09-25-mrepl-only-at-a-file]], which replaced
 [[dec-2026-09-25-sys-mount-emount]].
 
+**Vote 6 (2026-10-19): an errno per refusal.** `sys_mount_for_proc` answers
+`-T_E_INVAL` for its flag checks and `-T_E_BADF` for a failed source lookup,
+and maps `mount()`'s -3 (cycle) to `-T_E_LOOP` and -2 (full table) to
+`-T_E_NOSPC`; `sys_unmount_for_proc` answers `-T_E_INVAL` when no entry
+matches. Only the NULL guards, which EL0 cannot reach, stay -1.
+`sys_resolve_mountpoint` reports its refusal through an out-parameter:
+`SYS_OPEN_CREATE`'s path checks, then `stalk_err`'s cause, and a 0 from it
+never reads as success. The `SYS_MOUNT` handler bounds the source index at
+full width before the cast to `hidx_t`, so 2^32 + 3 no longer names handle 3
+([[dec-2026-10-19-mount-errnos]]).
+
 ## viv_poll_translated passes a zero timeout through (2026-09-28, #98 NP-4c)
 
 The guest poll translation no longer widens a literal timeout of 0 to

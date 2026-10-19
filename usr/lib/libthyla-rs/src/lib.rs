@@ -1674,16 +1674,19 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // EXIST and be of the source's type (a directory over a directory, a file over
 // a file), and at a file only T_MREPL is accepted.
 //
-// Returns 0 on success, -20 (T_E_NOTDIR) on Plan 9's Emount (ARCH 9.6.1), and
-// -1 on every other refusal:
-//   - path absent / empty / too long / not resolvable (a trailing '/' on a
-//     point that is not a directory is unresolvable)
-//   - source_spoor_fd not a KOBJ_SPOOR or out-of-range
-//   - missing RIGHT_READ on source
-//   - flags has bits outside the supported set, or more than one of
-//     T_MREPL / T_MBEFORE / T_MAFTER
-//   - territory mount table full
-//   - the mount would close a cycle in the mount graph (I-3)
+// Returns 0 on success, or one -errno per refusal (ERRORS.md "Mount and
+// unmount"):
+//   - -22 (EINVAL): an empty, over-long or NUL-embedded path; flags with bits
+//     outside the supported set, or more than one of T_MREPL / T_MBEFORE /
+//     T_MAFTER
+//   - -14 (EFAULT): a path the kernel cannot read
+//   - the resolver's -errno for a point that does not resolve (a trailing '/'
+//     on a point that is not a directory is unresolvable)
+//   - -9 (EBADF): source_spoor_fd is not a live KOBJ_SPOOR handle, or lacks
+//     RIGHT_READ
+//   - -20 (ENOTDIR): Plan 9's Emount (ARCH 9.6.1)
+//   - -40 (ELOOP): the mount would close a cycle in the mount graph (I-3)
+//   - -28 (ENOSPC): the territory mount table is full
 #[inline(always)]
 pub unsafe fn t_mount(path: *const u8, path_len: usize,
                       source_spoor_fd: i64, flags: u32) -> i64 {
@@ -1702,7 +1705,7 @@ pub unsafe fn t_mount(path: *const u8, path_len: usize,
 
 // t_unmount — remove the mount entry whose mount-point identity matches the
 // absolute `path` (`path_len` bytes) in the calling Proc's territory. Returns
-// 0 on success, -1 if no entry matches (or the path does not resolve). Drops
+// 0 on success, -EINVAL if no entry matches, or the resolver's -errno. Drops
 // the per-entry Spoor refcount; the Spoor's Dev close runs if this was the
 // last ref.
 #[inline(always)]

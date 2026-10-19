@@ -1001,3 +1001,20 @@ old kernel fails loud instead of reading a raw word as packed. Mirrors: libt
 `<thyla/syscall.h>` (`WAIT_PACKED`, `WAIT_IF_SIGNALED`, `WAIT_TERMSIG`),
 `libthyla_rs` (`T_WAIT_PACKED`, `t_wait_if_signaled`, `t_wait_termsig`), and
 Pouch's `POUCH_WAIT_PACKED` in 0026 ([[sub-pouch-process]]).
+
+## SYS_MOUNT and SYS_UNMOUNT answer an errno per refusal (2026-10-19)
+
+No number or record changed. `SYS_MOUNT` (14) and `SYS_UNMOUNT` (15) moved from
+the bare -1 set to the errno set ([[dec-2026-10-19-mount-errnos]]; ERRORS.md
+"Mount and unmount"). `SYS_MOUNT`: `-EINVAL` for an empty, over-long or
+NUL-embedded path and for flags outside the set or naming two placements,
+`-EFAULT` for a path the kernel cannot read, the resolver's errno for a point
+that does not resolve, `-EBADF` for a source that is not a live readable Spoor
+handle (an index of 2^32 or more no longer narrows onto a live handle),
+`-ENOTDIR` as before, `-ELOOP` for a cycle and `-ENOSPC` for a full table.
+`SYS_UNMOUNT`: the same path answers, and `-EINVAL` when nothing is mounted at
+the point. `T_E_NOSPC` (28) joins `errno.h`. A caller that tested `rc != 0` or
+`rc < 0` is unaffected. Mirrors: libt's `t_mount` and `t_unmount` comments;
+`libthyla_rs` gains `Error::NoSpace`, and `territory::unmount` maps the value
+instead of answering `NotFound` for every failure; ut's `unmount` names the
+cause, as `bind` and `mount` already did for any code but -1.

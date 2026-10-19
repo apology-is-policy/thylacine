@@ -310,8 +310,8 @@ fn bi_mount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     //    logout, and unmount here is by PATH, not by fd.
     let _ = unsafe { libthyla_rs::t_close(root) };
     if rc != 0 {
-        // The kernel's flat -1 names no cause; Plan 9's type check does
-        // (-ENOTDIR: an attach root is a directory, so the point is a file).
+        // Each refusal names its errno (-ENOTDIR: an attach root is a
+        // directory, so the point is a file); a bare -1 names none.
         let why = match libthyla_rs::err::Error::from_syscall_return(rc) {
             Err(e) if rc != -1 => alloc::format!(": {}", e),
             _ => alloc::string::String::new(),
@@ -356,8 +356,9 @@ fn bi_bind(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     // The mount holds its own reference on the source, as for `mount`.
     let _ = unsafe { libthyla_rs::t_close(src) };
     if rc != 0 {
-        // -ENOTDIR is Plan 9's Emount: one of the two is a directory and the
-        // other is not, or an ordering flag was given at a file.
+        // Each refusal names its errno: -ENOTDIR is Plan 9's Emount (one of
+        // the two is a directory and the other is not, or an ordering flag was
+        // given at a file), -ENOSPC a full namespace, -ELOOP a cycle.
         let why = match Error::from_syscall_return(rc) {
             Err(e) if rc != -1 => alloc::format!(": {}", e),
             _ => String::new(),
@@ -375,7 +376,12 @@ fn bi_unmount(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     let mp = ns_name(env.cwd(), &args[0]);
     let rc = unsafe { libthyla_rs::t_unmount(mp.as_ptr(), mp.len()) };
     if rc != 0 {
-        return fail(env, alloc::format!("unmount: cannot unmount {}", mp), 1);
+        // -EINVAL: nothing is mounted there; otherwise the path's own errno.
+        let why = match Error::from_syscall_return(rc) {
+            Err(e) if rc != -1 => alloc::format!(": {}", e),
+            _ => String::new(),
+        };
+        return fail(env, alloc::format!("unmount: cannot unmount {}{}", mp, why), 1);
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)

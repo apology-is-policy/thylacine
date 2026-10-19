@@ -308,6 +308,12 @@
 // a failed TIOCGWINSZ) as "not a tty". POSIX: ENOTTY.
 #define T_E_NOTTY      25
 
+// No space left. Kernel-originated for one cause: a mount into a Territory
+// whose mount table is at its cap (SYS_MOUNT; operator vote 2026-10-19). A
+// server's ENOSPC (a full pool) crosses by value, as it always has.
+// POSIX: ENOSPC.
+#define T_E_NOSPC      28
+
 // The fd is not a socket. Returned when a socket call names an fd with no
 // socktab entry -- a plain file, or a socket whose entry was dropped.
 // POSIX: ENOTSOCK.
@@ -358,6 +364,7 @@ _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)")
 // is what a Linux guest's libc compares against.
 _Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
 _Static_assert(T_E_NOTTY          == 25,  "T_E_NOTTY ABI pin (POSIX ENOTTY)");
+_Static_assert(T_E_NOSPC          == 28,  "T_E_NOSPC ABI pin (POSIX ENOSPC)");
 _Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
 _Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
 _Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");

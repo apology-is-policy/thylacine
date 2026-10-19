@@ -42,7 +42,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -546,6 +546,12 @@ instant, and falling back to the syscall when the page is absent.
   point of different types, or a mount without `REPL` at a point that is not
   a directory. `MountFlags`' doc comments state the kernel's placements: at
   most one of `REPL` / `BEFORE` / `AFTER`, and with none the mount appends.
+  Since 2026-10-19 (operator vote 6, `dec-2026-10-19-mount-errnos`) every
+  refusal names its errno: the resolver's (`NotFound`, ...), `InvalidArgument`
+  for flags, `BadHandle` for the source, `SymlinkLoop` for a cycle and the new
+  `Error::NoSpace` (28) for a full table; `territory::unmount` maps the value
+  too (`InvalidArgument` when nothing is mounted) instead of answering
+  `NotFound` for every failure. A bare -1 still reads as `InvalidArgument`.
 
 - **`Stdio::Null` is unimplemented for a reason that expired.** Three places
   say the discard mode cannot be built for want of a kernel bit-bucket device.

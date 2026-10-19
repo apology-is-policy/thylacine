@@ -90,7 +90,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
 | `T_E_MFILE`     | 24    | `EMFILE`     | Too many open files: the phenotype's per-Proc socket table (`VIV_SOCK_MAX`) is full, or no handle slot at or above a `SYS_HANDLE_DUP_LOWEST` floor is free (B-3b; dup, `F_DUPFD`). The kernel's other full-handle-table answer is still `T_E_NOMEM` (#80 seam) |
 | `T_E_NOTTY`     | 25    | `ENOTTY`     | Not a terminal: the phenotype ioctl shell (C2-k1b) answers it for a `TC*`/`TIOC*` request on a non-tty fd and for any request the terminal surface does not serve; `isatty()` reads it as "not a tty" |
-| `T_E_NOSPC`     | 28    | `ENOSPC`     | No space left. Kernel-originated for one cause: a mount into a Territory whose mount table is at its cap (`SYS_MOUNT`, ARCH 9.1). A server's ENOSPC (a full pool) crosses by value, as it always has. Reserved by the operator's vote of 2026-10-19 (`dec-2026-10-19-mount-errnos`); `errno.h` gains it with its first emitter |
+| `T_E_NOSPC`     | 28    | `ENOSPC`     | No space left. Kernel-originated for one cause: a mount into a Territory whose mount table is at its cap (`SYS_MOUNT`, ARCH 9.1). A server's ENOSPC (a full pool) crosses by value, as it always has. Named by the operator's vote of 2026-10-19 (`dec-2026-10-19-mount-errnos`) |
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
@@ -669,9 +669,9 @@ errno from them.
 
 ### Mount and unmount (operator vote 2026-10-19)
 
-Voted 2026-10-19 (`dec-2026-10-19-mount-errnos`); not built yet. Until it
-is, SYS_MOUNT answers -T_E_NOTDIR for a type mismatch and a bare -1 for
-every other refusal, and SYS_UNMOUNT answers -1 for every refusal.
+Operator vote 2026-10-19 (`dec-2026-10-19-mount-errnos`). Before it, SYS_MOUNT
+answered -T_E_NOTDIR for a type mismatch and a bare -1 for every other
+refusal, and SYS_UNMOUNT answered -1 for every refusal.
 
 Both calls check their path as SYS_OPEN_CREATE does: an empty or over-long
 path, or one with an embedded NUL, answers -T_E_INVAL, and a path buffer the
@@ -682,7 +682,7 @@ answers the resolver's errno (`stalk_err`), such as -T_E_NOENT,
 | Refusal | SYS_MOUNT answers |
 |---|---|
 | flags outside the supported set, or naming more than one of MREPL, MBEFORE and MAFTER | -T_E_INVAL |
-| a source handle that is not live, or lacks RIGHT_READ | -T_E_BADF |
+| a source handle that is not live (an index at or above the table size, judged at full width, included), or lacks RIGHT_READ | -T_E_BADF |
 | a source whose type differs from the point's, or an ordered mount at a file | -T_E_NOTDIR, as before |
 | a mount that would close a cycle in the mount graph (I-3) | -T_E_LOOP |
 | a mount table at its cap (ARCH 9.1) | -T_E_NOSPC |

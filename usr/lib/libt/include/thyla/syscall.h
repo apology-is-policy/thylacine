@@ -798,16 +798,19 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
 // `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC /
 // T_MPHENO_LINUX (bit-or'd; at most one of the first three).
 //
-// Returns 0 on success, -T_E_NOTDIR (-20) on Plan 9's Emount (ARCH 9.6.1),
-// and -1 on every other refusal:
-//   - path absent / empty / too long / not resolvable (a trailing '/' on a
-//     point that is not a directory is unresolvable)
-//   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
-//   - source handle missing T_RIGHT_READ
-//   - flags has bits outside the valid set, or more than one of
-//     T_MREPL / T_MBEFORE / T_MAFTER
-//   - Territory mount table full (PGRP_MAX_MOUNTS, 32)
-//   - the mount would close a cycle in the mount graph (I-3)
+// Returns 0 on success, or one errno per refusal (ERRORS.md "Mount and
+// unmount"):
+//   - -T_E_INVAL: an empty, over-long or NUL-embedded path; flags with bits
+//     outside the valid set, or more than one of T_MREPL / T_MBEFORE /
+//     T_MAFTER
+//   - -T_E_FAULT: a path the kernel cannot read
+//   - the resolver's errno for a point that does not resolve (a trailing '/'
+//     on a point that is not a directory is unresolvable)
+//   - -T_E_BADF: source_spoor_fd is not a live KOBJ_SPOOR handle, or lacks
+//     T_RIGHT_READ
+//   - -T_E_NOTDIR (-20): Plan 9's Emount (ARCH 9.6.1)
+//   - -T_E_LOOP (-40): the mount would close a cycle in the mount graph (I-3)
+//   - -T_E_NOSPC (-28): the Territory mount table is full (32 entries)
 __attribute__((always_inline))
 static inline long t_mount(const char *path, unsigned long path_len,
                            long source_spoor_fd, unsigned long flags) {
@@ -829,8 +832,8 @@ static inline long t_mount(const char *path, unsigned long path_len,
 // the absolute `path` (`path_len` bytes) from the caller's Territory mount
 // table; drop the source's per-entry refcount. (Union mounts with multiple
 // entries at the same point require multiple t_unmount calls — Phase 5+ once
-// walk-side union support lands.) Returns 0 on success, -1 if no entry exists
-// (or the path does not resolve).
+// walk-side union support lands.) Returns 0 on success, -T_E_INVAL (-22) if no
+// entry exists, or the path's errno as t_mount answers it.
 __attribute__((always_inline))
 static inline long t_unmount(const char *path, unsigned long path_len) {
     register long x0 __asm__("x0") = (long)path;

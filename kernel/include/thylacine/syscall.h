@@ -156,7 +156,7 @@ enum {
     // a pipe-as-mount mostly produces -1, but the lifetime discipline
     // composes regardless), or a future cross-territory share.
     //
-    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0/-1/-T_E_NOTDIR
+    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0 or -T_E_*
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX; bytes, NUL-free)
     //   x2 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
@@ -176,20 +176,24 @@ enum {
     // link itself (the mount wins, and the path is refused). Resolves from
     // root only at v1.0 (absolute paths); a relative-mount start_fd is a v1.x
     // add.
-    // Returns: 0 on success, -1 on:
-    //   - path absent / empty / too long / not resolvable / NUL-embedded
-    //     (a trailing '/' on a point that is not a directory is unresolvable:
-    //     stalk refuses it before the type check below can run)
-    //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
-    //   - missing RIGHT_READ on the source (it must be consumable as a tree)
-    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC|
-    //     MPHENO_LINUX set, or more than one of MREPL / MBEFORE / MAFTER
-    //   - territory mount table full (PGRP_MAX_MOUNTS reached)
-    //   - the mount would close a cycle in the mount graph (I-3)
-    // and -T_E_NOTDIR on Plan 9's Emount (ARCH 9.6.1): the source's type
-    // (directory or not) differs from the mount point's, under any flag,
-    // or the flags lack MREPL at a point that is not a directory (a flagless
-    // mount appends; Plan 9's flag 0 is MREPL).
+    // Returns 0 on success, or one errno per refusal (ERRORS.md "Mount and
+    // unmount"; operator vote 2026-10-19):
+    //   - -T_E_INVAL: an empty, over-long or NUL-embedded path; flags with
+    //     bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC|MPHENO_LINUX
+    //     set, or more than one of MREPL / MBEFORE / MAFTER
+    //   - -T_E_FAULT: a path the kernel cannot read
+    //   - the resolver's errno for a point that does not resolve (a trailing
+    //     '/' on a point that is not a directory is unresolvable: stalk
+    //     refuses it before the type check below can run)
+    //   - -T_E_BADF: source_spoor_fd is not a live KOBJ_SPOOR handle (an index
+    //     at or above the table size, judged at full width, included), or
+    //     lacks RIGHT_READ (the source must be consumable as a tree)
+    //   - -T_E_NOTDIR on Plan 9's Emount (ARCH 9.6.1): the source's type
+    //     (directory or not) differs from the mount point's, under any flag,
+    //     or the flags lack MREPL at a point that is not a directory (a
+    //     flagless mount appends; Plan 9's flag 0 is MREPL)
+    //   - -T_E_LOOP: the mount would close a cycle in the mount graph (I-3)
+    //   - -T_E_NOSPC: the territory mount table is full (PGRP_MAX_MOUNTS)
     //
     // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount
     // (the mount-table entry holds its own ref). The caller can close
@@ -203,15 +207,15 @@ enum {
     // ARCH 9.5).
     SYS_MOUNT       = 14,   // arg: path_va, path_len, source_spoor_fd, flags
 
-    // SYS_UNMOUNT(path_va, path_len) → 0/-1
+    // SYS_UNMOUNT(path_va, path_len) → 0 or -T_E_*
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX)
     // stalk-2: path-keyed. The kernel `stalk`s `path` (STALK_MOUNT) to the
     // mount point's own identity and removes the FIRST mount entry matching
     // (dc, devno, qid.path).
-    // Returns: 0 on success, -1 on:
-    //   - path absent / empty / too long / not resolvable
-    //   - no entry at that mount-point identity in the caller's Territory
+    // Returns 0 on success, or: the path's -T_E_INVAL / -T_E_FAULT and the
+    // resolver's errno, as SYS_MOUNT answers them; -T_E_INVAL when no entry
+    // stands at that mount-point identity in the caller's Territory.
     //
     // Drops the per-entry Spoor ref; the Spoor's Dev close runs if
     // this was the last ref.

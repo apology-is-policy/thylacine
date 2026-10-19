@@ -1191,13 +1191,36 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     }
-    // Double-unmount: must return NotFound (no entry at /srv any more).
+    // Double-unmount: nothing is mounted at /srv any more, which is
+    // -EINVAL (InvalidArgument), as Linux's umount2 answers.
     match territory::unmount(TEST_MP) {
-        Err(Error::NotFound) => {}
+        Err(Error::InvalidArgument) => {}
         _ => {
             t_putstr("alloc-smoke: territory::unmount double-call unexpected\n");
             return 1;
         }
+    }
+    // A point that does not exist answers the resolver's -ENOENT, for an
+    // unmount and for a mount.
+    const NO_MP: &str = "/srv/no-such-point";
+    if territory::unmount(NO_MP) != Err(Error::NotFound) {
+        t_putstr("alloc-smoke: territory::unmount of a missing point did not answer NotFound\n");
+        return 1;
+    }
+    if territory::mount(&dir_src, NO_MP, MountFlags::REPL) != Err(Error::NotFound) {
+        t_putstr("alloc-smoke: territory::mount at a missing point did not answer NotFound\n");
+        return 1;
+    }
+    // A source index is judged at full width: 2^32 plus a live handle's index
+    // must answer -EBADF, never mount the handle it would narrow to.
+    let wide = (1i64 << 32) + libthyla_rs::poll::AsFd::as_raw_fd(&dir_src) as i64;
+    // SAFETY: t_mount reads the path bytes, which live for the call.
+    let rc = unsafe {
+        libthyla_rs::t_mount(TEST_MP.as_ptr(), TEST_MP.len(), wide, MountFlags::REPL.bits())
+    };
+    if rc != -9 {
+        t_putstr("alloc-smoke: SYS_MOUNT did not refuse a source index wider than 32 bits with -EBADF\n");
+        return 1;
     }
     drop(dir_src);
 
@@ -1272,9 +1295,9 @@ pub extern "C" fn rs_main() -> i64 {
     }
     drop(joey);
 
-    // mount with a handle that names nothing: the kernel refuses it with its
-    // generic -1 (InvalidArgument), before any type check. The index 999 was
-    // never allocated; mount() takes &impl AsFd, so a small adapter carries it.
+    // mount with a handle that names nothing: the kernel refuses it with
+    // -EBADF (BadHandle), before any type check. The index 999 was never
+    // allocated; mount() takes &impl AsFd, so a small adapter carries it.
     struct RawFdRef(i32);
     impl libthyla_rs::poll::AsFd for RawFdRef {
         fn as_raw_fd(&self) -> i32 {
@@ -1283,13 +1306,13 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let bogus = RawFdRef(999);
     match territory::mount(&bogus, TEST_MP, MountFlags::REPL) {
-        Err(Error::InvalidArgument) => {}
+        Err(Error::BadHandle) => {}
         Ok(_) => {
             t_putstr("alloc-smoke: territory::mount bogus fd unexpectedly succeeded\n");
             return 1;
         }
         Err(_) => {
-            t_putstr("alloc-smoke: territory::mount bogus fd refused, but not with InvalidArgument\n");
+            t_putstr("alloc-smoke: territory::mount bogus fd refused, but not with BadHandle\n");
             return 1;
         }
     }
