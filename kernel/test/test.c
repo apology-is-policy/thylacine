@@ -1053,6 +1053,7 @@ void test_vivsock_connect_connecting_resumes(void);
 void test_vivsock_connect_failure_verdicts(void);
 void test_vivsock_send_recv_finish_connect(void);
 void test_vivsock_read_write_finish_connect(void);
+void test_vivsock_sendto_recvfrom_narrow_fd(void);
 void test_vivsock_so_error_reports_the_dial(void);
 void test_vivsock_positioned_io_finishes_connect(void);
 void test_vivsock_so_error_needs_no_descriptor(void);
@@ -3210,6 +3211,7 @@ struct test_case g_tests[] = {
     { "vivsock.connect_failure_verdicts",    test_vivsock_connect_failure_verdicts,    false, NULL },
     { "vivsock.send_recv_finish_connect",    test_vivsock_send_recv_finish_connect,    false, NULL },
     { "vivsock.read_write_finish_connect",   test_vivsock_read_write_finish_connect,   false, NULL },
+    { "vivsock.sendto_recvfrom_narrow_fd",   test_vivsock_sendto_recvfrom_narrow_fd,   false, NULL },
     { "vivsock.so_error_reports_the_dial",   test_vivsock_so_error_reports_the_dial,   false, NULL },
     { "vivsock.positioned_io_finishes_connect", test_vivsock_positioned_io_finishes_connect, false, NULL },
     { "vivsock.so_error_needs_no_descriptor", test_vivsock_so_error_needs_no_descriptor, false, NULL },

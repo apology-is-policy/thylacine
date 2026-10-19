@@ -56,6 +56,7 @@ void test_vivsock_connect_connecting_resumes(void);
 void test_vivsock_connect_failure_verdicts(void);
 void test_vivsock_send_recv_finish_connect(void);
 void test_vivsock_read_write_finish_connect(void);
+void test_vivsock_sendto_recvfrom_narrow_fd(void);
 void test_vivsock_so_error_reports_the_dial(void);
 void test_vivsock_positioned_io_finishes_connect(void);
 void test_vivsock_so_error_needs_no_descriptor(void);
@@ -837,6 +838,71 @@ void test_vivsock_send_recv_finish_connect(void) {
     TEST_EXPECT_EQ(writes, 0u, "nothing dialed again: every wait was on the dial already made");
     TEST_EXPECT_EQ(frc, -(s64)T_E_NOSYS, "control: send on a FRESH socket declines as before");
     TEST_EXPECT_EQ(fopens, 0u, "without a data open");
+}
+
+// 13:05Z (width audit r1 F1): sendto/recvfrom narrow their fd to 32 bits at the
+// dispatch (Linux declares `int fd`), and the narrowing wants a RUNTIME witness,
+// not just a reading one. A connected send()/recv() (no address) delegates to
+// the native write/read handler BY NUMBER, and that handler's sys_hidx_arg
+// refuses any descriptor above 0x7fffffff -- so a word with junk above bit 31
+// that is NOT narrowed falls out as EBADF, while the narrowed low 32 bits name
+// the real socket. (viv_sock_row re-narrows internally via its own (u32) cast,
+// so the discriminating consumer is the handler, not the row lookup -- which is
+// why the mutant that drops the `(u64)(u32)` at the dispatch is caught here and
+// nowhere upstream.) A zero-length send/recv needs no user buffer and answers 0
+// on a live fd, EBADF on a wild one.
+void test_vivsock_sendto_recvfrom_narrow_fd(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+    s64 sfd = ns_socket(p, VIV_NET_TCP, 41, VIV_SOCK_CONNECTED);
+    s64 rfd = ns_socket(p, VIV_NET_TCP, 42, VIV_SOCK_CONNECTED);
+    TEST_ASSERT(sfd >= 0 && rfd >= 0, "fixture: two CONNECTED sockets");
+
+    const u64 junk = (u64)1 << 32;   // above the int fd Linux reads
+
+    // A connected send()/recv() delegates to the native write/read handler,
+    // which re-derives the Proc from current_thread() (see viv_sock_sendto's
+    // note) -- so the fixture Proc must be current for the fd to resolve, and
+    // the discriminating refusal (sys_hidx_arg rejects > 0x7fffffff) lives in
+    // that handler. Saved and restored around the dispatches (the test_pts.c
+    // pattern); a zero-length op touches no user memory, so no TTBR0 swap.
+    struct Thread *th = current_thread();
+    struct Proc   *saved = th->proc;
+    th->proc = p;
+
+    // sendto: control (clean fd) then witness (junk high word). x1..x5 stay 0,
+    // so this is a connected send() of length 0 -- no address, no buffer.
+    struct exception_context sc;
+    ns_frame(&sc, VIV_LINUX_SENDTO, sfd);
+    (void)viv_linux_dispatch_for_test(&sc, p);
+    s64 s_clean = (s64)sc.regs[0];
+
+    struct exception_context sj;
+    ns_frame(&sj, VIV_LINUX_SENDTO, sfd);
+    sj.regs[0] = junk | (u64)sfd;
+    (void)viv_linux_dispatch_for_test(&sj, p);
+    s64 s_junk = (s64)sj.regs[0];
+
+    // recvfrom: control then witness, the same shape (NULL src-addr, flags 0).
+    struct exception_context rc;
+    ns_frame(&rc, VIV_LINUX_RECVFROM, rfd);
+    (void)viv_linux_dispatch_for_test(&rc, p);
+    s64 r_clean = (s64)rc.regs[0];
+
+    struct exception_context rj;
+    ns_frame(&rj, VIV_LINUX_RECVFROM, rfd);
+    rj.regs[0] = junk | (u64)rfd;
+    (void)viv_linux_dispatch_for_test(&rj, p);
+    s64 r_junk = (s64)rj.regs[0];
+
+    th->proc = saved;
+
+    TEST_EXPECT_EQ(s_clean, 0, "sendto: a zero-length connected send on a live fd is 0");
+    TEST_EXPECT_EQ(s_junk, s_clean, "sendto narrows the fd: junk above bit 31 reaches the same socket");
+    TEST_EXPECT_NE(s_junk, -(s64)T_E_BADF, "sendto: the junk fd is not refused as a wild descriptor");
+    TEST_EXPECT_EQ(r_clean, 0, "recvfrom: a zero-length connected recv on a live fd is 0");
+    TEST_EXPECT_EQ(r_junk, r_clean, "recvfrom narrows the fd: junk above bit 31 reaches the same socket");
+    TEST_EXPECT_NE(r_junk, -(s64)T_E_BADF, "recvfrom: the junk fd is not refused as a wild descriptor");
 }
 
 // read and write reach the file an fd names, and a CONNECTING socket's names
