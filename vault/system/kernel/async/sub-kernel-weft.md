@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-10-08
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -330,7 +330,12 @@ holding that process's lock, with no way to name who paid. Sixty-four pages per
 closed flow, monotonically.
 
 The release rule is now: the sharer settles **when the region is shared out and
-this process has unmapped it**, whether or not the pages freed. Once it has
+this process has unmapped it**, whether or not the pages freed. Both of this
+file's settle sites — the explicit share unregister and the owner orphan sweep —
+take their decision inside the reference drop (`burrow_unref_settled`,
+[[sub-kernel-burrow]]): AS-R9 found that claiming the record, dropping the pin
+and restoring the record on a non-final drop left a window in which another
+holder's final drop freed the descriptor under the restore. Once it has
 handed the region across and let go of its own view, it cannot reach those pages,
 and charging a process for memory it cannot touch caps it for nothing — from
 there the consumer's own shared-mapping axis accounts them.
@@ -398,10 +403,11 @@ hybrid split the orthodox 9P transport uses.
   test to any surviving reference releases the charge while the process's own
   claim is still live — an under-count, which is the direction that breaks the
   bound.
-- **A refund goes to the recorded payer, not to whoever is dropping.** Claim
-  against the region before the drop, restore if it did not free; the reaper's
-  sweep runs the same protocol, because the owner it is sweeping is not
-  necessarily the payer.
+- **A refund goes to the recorded payer, not to whoever is dropping.** The
+  claim is taken inside the reference drop (`burrow_unref_settled`), never
+  before it with a restore after (AS-R9: a sibling's final drop in that gap
+  freed the descriptor under the restore); the reaper's sweep uses the same
+  settled drop, because the owner it is sweeping is not necessarily the payer.
 - **The two device kinds are disambiguated by test order** in both the kind
   derivation and the binding allocation. That is sound only while the two subtype
   bits are mutually exclusive by construction, which is enforced in another

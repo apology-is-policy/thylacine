@@ -146,6 +146,69 @@ My self-audit agreed with the round on everything it covered: the bind's complet
 
 **AS-R9's land had stalled on a gate that never finished.** Corona's SMP leg for the backport (`107c5c1bd`, yip 0232) stopped at `default-smp8` 8/10 at 11:15Z, when corona's session went quiet. Its stages file still ends "exit 0", written by the EXIT trap, but there is no `smp.rc` and no "SMP GREEN" record, and the UBSan rows never ran. `default-smp1` and `default-smp4` are 10/10 each, and they count. Under a Mac lease from 21:54Z I am running the three missing rows on my own checkout of the commit. If they are green I land the backport on main, and b3 then merges main, so lease 5 covers vote 2, SA-5 and AS-R9 together.
 
+## 2026-10-19 (corona, Opus 5.5, effort max) -- AS-R9 backported: Burrow charges settle inside the drop (branch corona/asr9-main, for main to land)
+
+- *Why now.* The AS-R9 P1 (I-32) was fixed on `corona/async-memory` on
+  2026-10-05 (`4c3289b1b`, then `3a202c608`, `2d722647c`, `f967f36b3`, and the
+  tests `ca9363f70`, `9857e90a9`, `df2856ca8`) and never reached main. corona's
+  bug-queue triage on 10-19 re-read main at `115465888` and found the unsettled
+  claim -> drop -> restore sequence live at five sites: `loom.c` x2, the
+  eager-ANON whole arm of `vma_detach_range_in`, `weft.c` x2. corona asked on
+  yip 0232; main chose a backport (option A) and lands it once it is gated.
+- *The defect.* The Burrow lock covered each of claim, drop and restore and
+  none of the gaps. A sibling holder's final drop between a non-final drop and
+  the restore frees the descriptor, and the restore writes
+  `charge_as_id`/`charge_pages` through it: an extinction while the slot is
+  free (the restore's magic check), a charge planted on an unrelated region if
+  SLUB reissued the slot, or the restore's own "re-charged mid-settle"
+  extinction if the reissued region was charged -- a fault its comment said
+  could not happen. The holder that freed the region read the cleared record
+  and refunded nothing.
+- *Adapted, not cherry-picked.* `git apply -3` of `4c3289b1b` conflicted on
+  corona-only code (the AddrSpace-keyed forms of the private-async arc, a
+  corona-only test), so the port was written by hand against main and every
+  call-site hunk checked to land in the same function as on corona. Two
+  adaptations are main's own: main's `SYS_JIT_DESTROY` settles by
+  `burrow_lazy_footprint` (B-2a) and never used claim/restore, so after the
+  migration `burrow_charge_claim`, `burrow_charge_restore` and
+  `burrow_is_shared_out` had no caller and were deleted -- a claim that can be
+  taken outside a drop is the primitive the defect was made of; and the tests
+  read the record through a test-local `charge_held()` under the leaf lock.
+- *Two wrong statements found on the way.* corona's `vma.h` says the settled
+  refund happens "OUTSIDE as->lock"; the only caller refunds under `as->lock`,
+  outside the Burrow's leaf lock -- the backport says so, and corona's copy is
+  owed. And corona's AS-R9 dossier pass rewrote the narrative sections but left
+  three "what to prosecute" rules saying "claim before the drop, restore if it
+  did not free" -- the defect's own shape, stated as the rule
+  (`sub-kernel-burrow`, `sub-kernel-loom`, `sub-kernel-weft`). Main's copies
+  are corrected here, with the same rule in `sub-kernel-syscall-dispatch`;
+  corona's are owed.
+- *Specs.* No spec models the charge record: `charge_as_id`, `charge_pages`
+  and claim/restore appear in no `.tla`. Two specs model code the port
+  restructures -- `burrow.tla` (`HandleClose`/`UnmapVmo`: every handle and
+  mapping drop now funnels into the settled cores) and `capacity.tla`
+  (`Detach`: the WHOLE arm's free) -- and both re-run in the gate slot.
+- *Audit round* (Fable 5.1, cross-family): 0 P0 / 0 P1 / 0 P2 / 4 P3, a
+  clean close. All four fixed: the callerless `burrow_release_mapping_deferred`
+  deleted; three doc lines that were untrue of main's tree and a test comment's
+  count; the WHOLE arm keyed on `as` (the space it refunds) rather than
+  `payer->as`, the same space for every caller today; and no durable race
+  witness -- the five tests are single-threaded contract pins. For the last,
+  `burrow.tla` now models the record: the settled drop takes it in the same
+  step as the decrement, and `BUGGY_CLAIM_RESTORE` replays the old three-step
+  shape across two threads, which TLC refutes on `NoRecordAfterFree` and,
+  judged on the ledger alone, on `RefundExactlyOnce`. The
+  clean model's count did not move, which is the check that the record
+  changed nothing it should not have. Applying the fixes found two more the
+  round had not reported: `vma.h`'s detach contract still said "the claim is
+  restored", and the ported test comment called the null-Proc unmap probe a
+  behaviour pin, which main's wrapper (it reads `p->as` right after the
+  guard) makes a guard pin.
+- *Open at this entry:* nothing has been built or run. Owed: the Fable 5.1
+  audit round on the adapted form (main counts it as the review), the specs
+  above, and the gate main named on 0232 (default `test.sh` with zero FAIL,
+  `test-fault.sh`, the ci suite, UBSan, `ci-smp-gate` N=10).
+
 ## 2026-10-18 (main, Opus 5.5, effort max) -- two votes; B-3b's last red control finds a third blind witness
 
 **The operator came back and settled both forks (19:24Z, by AskUserQuestion).**

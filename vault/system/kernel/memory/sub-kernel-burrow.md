@@ -3,7 +3,7 @@ id: sub-kernel-burrow
 type: sub
 parent: moc-kernel-memory
 title: "The Burrow — a memory object with two refcounts and six backings"
-code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h"]
+code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h", "kernel/test/test_burrow.c"]
 audit: hard
 guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
@@ -86,22 +86,26 @@ first Burrow entry to speak errno, because its callers are `SYS_BURROW_PROTECT`
 and the phenotype `mprotect` row, both of which hand the value to userspace as
 is.
 
-**The deferred-free pair** — `burrow_release_mapping_deferred` and
+**The deferred-free pair** — `burrow_release_mapping_settled_deferred` and
 `burrow_free_deferred` — exists because a FILE-backed Burrow's free reaches
 `spoor_clunk`, which may **sleep**, while every VMA mutator holds `as->lock`, a
-spinlock. `burrow_release_mapping_deferred` drops the mapping ref and settles the
-I-32 uncharge under the lock but does **not** free; it hands the caller the
+spinlock. `burrow_release_mapping_settled_deferred` drops the mapping ref under
+the lock but does **not** free, and takes the I-32 charge decision inside that
+same hold (below; a NULL `payer` settles nothing). It hands the caller the
 Burrow that still owes its physical free, collected on a `deferred_free_next`
-stack and passed to `burrow_free_deferred` after the unlock. The full mechanism —
+stack and passed to `burrow_free_deferred` after the unlock. (The unsettled
+`burrow_release_mapping_deferred` went with AS-R9: every deferred mapping drop
+is this one.) The full mechanism —
 the `out_free` out-parameter every teardown path must thread and must never drop
 (a NULL `out_free` would leak the chain) — lives on [[sub-kernel-vma]].
 `burrow_free_deferred(v)` frees `v` and every Burrow chained behind it on
 `deferred_free_next` (B-1a': a range detach drops several last refs in one
 locked pass), NULL-safe, unlinking as it goes.
 
-**Charge attribution** is three more calls — `burrow_charge_record` /
-`burrow_charge_claim` / `burrow_charge_restore` — plus
-`burrow_is_shared_out`. They exist for the same reason
+**Charge attribution** is `burrow_charge_record` plus the settled drops —
+`burrow_unref_settled` / `burrow_unref_settled_in` and
+`burrow_release_mapping_settled_deferred`, which settle the record inside the
+drop that decides it (AS-R9). They exist for the same reason
 `burrow_unmap_reporting` does, one axis over; see below.
 
 `burrow_backing_pages(size)` reports what a region of that size actually
@@ -223,27 +227,101 @@ buddy-rounded count actually billed), and `shared_out`.
 - **`burrow_charge_record`** stamps the payer at each eager charge — the
   attach and the Loom ring. (The JIT create stamped one until B-2a; a code
   region now charges per touched page and is refunded by its footprint.)
-- **`burrow_charge_claim`** is a **read-and-clear**, returning what this Proc's
-  ADDRESS SPACE paid or zero if it is not the recorded payer -- a record whose
-  space has died is never claimed: that space's count died with it and the
-  region's pages return to the pool when they are freed, so there is nothing
-  left to settle and the record simply stays. The clear is what makes a
-  refund exactly-once: two paths racing to settle the same region cannot both
-  win, so the counter can never be refunded twice — the direction that would
-  inflate a Proc's budget.
-- **`burrow_charge_restore`** puts a claim back when the caller decides not to
-  settle. Callers must claim **before** the drop, because a freeing drop takes
-  the record with it. The window's failure mode is stated and asymmetric: a
-  concurrent settler that sees the momentarily-cleared record simply skips, so
-  the charge outlives its region until the payer's next release point — an
-  over-charge on the payer, never a refund to a Proc that did not pay.
+- **The claim** (`burrow_charge_claim_locked`, static) is a **read-and-clear**
+  taken with `v->lock` already held, returning what this Proc's ADDRESS SPACE
+  paid or zero if it is not the recorded payer -- a record whose space has died
+  is never claimed: that space's count died with it and the region's pages
+  return to the pool when they are freed, so there is nothing left to settle
+  and the record simply stays. The clear is what makes a refund exactly-once:
+  two paths racing to settle the same region cannot both win, so the counter
+  can never be refunded twice — the direction that would inflate a Proc's
+  budget. It is reachable **only** from inside a settled drop: there is no
+  stand-alone claim and no restore.
+- **The settled drops** — `burrow_unref_settled` / `burrow_unref_settled_in`
+  (a handle drop) and `burrow_release_mapping_settled_deferred` (a mapping
+  drop, deferred like its unsettled twin) — run the decrement, the `{0,0}` dual
+  decision and the claim in **one** hold of `v->lock`, and return the refund as
+  a scalar so the caller applies it **outside** the leaf lock. `payer` is the
+  exact AddrSpace incarnation; `NULL` settles nothing, which is how a caller
+  whose policy predicate fails opts out. The refund is nonzero only on the drop
+  that qualified. Every handle drop and every mapping drop in the tree funnels
+  into these two cores (`burrow_unref*` and `burrow_release_mapping*` are their
+  no-payer forms).
+
+#### AS-R9: the claim/drop/restore window was a use-after-free, not an over-charge
+
+This dossier previously described a stand-alone claim and a
+`burrow_charge_restore` that put a claim back when the caller decided not to
+settle — callers claimed **before** the drop and restored after one that did
+not free — and called the window's failure mode "stated and asymmetric: a
+concurrent settler that sees the momentarily-cleared record simply skips, so
+the charge outlives its region until the payer's next release point — an
+over-charge on the payer, never a refund to a Proc that did not pay." **Both
+halves of that were wrong.**
+
+The Burrow's lock serialised each of the three operations and none of the gaps
+between them. After a drop reported non-final, another holder could make the
+**final** drop before the restore ran. Two independent failures follow:
+
+1. **The restore writes through a dead pointer.** `burrow_free_internal`
+   clobbers `magic` and returns the slot to SLUB, which does not zero it, so the
+   write lands on a slot that is either still free (`magic == 0` →
+   `extinction`, a whole-system kill reachable from an ordinary pair of
+   concurrent closes — the dominant outcome), already reissued with no charge
+   recorded (the payer's charge is **planted on an unrelated region**; it
+   becomes a wrong refund only if that region is never
+   `burrow_charge_record`'d, since that call overwrites unconditionally, and is
+   later settled against the same AddrSpace id), or already reissued **with** a
+   charge (the restore's `charge_pages != 0` arm fired
+   `extinction("... re-charged mid-settle")`, whose own comment asserted that
+   case cannot happen — a **fabricated** fault). It could also race a
+   concurrent `burrow_create` initialising that slot.
+2. **The settlement is lost.** The holder that actually frees the region reads
+   the momentarily-cleared record, claims nothing, and refunds nothing — so the
+   payer stays charged for pages that no longer exist.
+
+The repair (corona `4c3289b1b`, 2026-10-05; backported to main 2026-10-19) is
+the settled drops above. A drop that does not qualify leaves the record
+**alone**, so the holder that does qualify still finds it; a drop that
+qualifies takes it under the lock, so settlement is exactly-once. Neither form
+touches `v` after the reference it dropped is gone, which is why no caller
+needs a surviving reference. `burrow_release_mapping_settled_deferred` keeps
+its twin's deferred contract — hand back the dead Burrow rather than free it
+under the caller's `as->lock` — and qualifies on `freed || shared_out`, reading
+`shared_out` under that same lock: being monotonic false → true, observing it
+at drop time rather than before the drop can only **add** a reason to settle,
+never miss one that mattered.
+
+Five callers were migrated: `loom_drop_pin_settling`, Loom's displaced
+registered-buffer pins, Weft's share unregister and owner orphan sweep, and the
+eager-ANON arm of `vma_detach_range_in` (through `vma_free_settled_deferred`,
+of which `vma_free_deferred` is now the no-payer wrapper — [[sub-kernel-vma]]).
+On main the stand-alone `burrow_charge_claim`, `burrow_charge_restore` and
+`burrow_is_shared_out` were then **deleted** rather than kept: `SYS_JIT_DESTROY`
+settles by footprint since B-2a and never used them, so after the migration
+nothing called them, and a claim that can be taken outside a drop is the
+primitive this defect was made of.
+
+Witnesses: `burrow.settled_drop_retains_nonfinal_charge` (a non-final drop
+leaves the record for the final one, which settles it exactly once),
+`burrow.settled_drop_exact_payer` (a NULL payer and a non-payer's final drop
+settle nothing, with the payer's own final drop as the positive control one
+variable away), `burrow.settled_mapping_drop_defers_free` (the mixed-holder
+order: the handle drop leaves the record, the last mapping drop settles it and
+hands back the dead Burrow unfreed), and two pins on a premise
+`SYS_JIT_DESTROY`'s keep-the-charge arm rests on — that a refused unmap is NO
+teardown: `burrow.unmap_failure_leaves_mapping_attached` (seven refusals, the
+mapping and the record intact after each, a correctly-shaped unmap as the
+control) and `burrow.unmap_interior_start_refused` (the one refusal that is
+load-bearing rather than defence in depth).
 
 `charge_pages`, not `charge_as_id`, is the held sentinel — a charge of zero
 pages is meaningless, so zero pages IS "nothing held" (ids start at 1, but the
 rule does not lean on that).
 
 **The release rule is user-voted and is not "follow the pages".** A detach
-settles on `freed || shared_out`. `freed` is sufficient — if nothing holds the
+settles on `freed || shared_out`, decided inside the drop (above). `freed` is
+sufficient — if nothing holds the
 region, this Proc certainly does not — but not necessary: once a region is
 shared out and this Proc has unmapped it, the Proc cannot reach those pages,
 and charging it for memory it cannot touch caps it for nothing. From there the
@@ -379,9 +457,11 @@ what lets the free arm's per-type double-free guards be simple null tests.
 
 The charge triple is under the same `lock` as the counts. `shared_out` is
 **monotonic** — a region is never un-shared in a way that returns the charge to
-the sharer — which is what makes `burrow_is_shared_out` safe to read without
-the lock: false→true only ever *adds* a reason to release, so a stale read is
-stale in the harmless direction.
+the sharer — which is why the settled mapping drop may read it at the drop
+rather than before it: false→true only ever *adds* a reason to release, so the
+later read errs in the harmless direction. (`burrow_is_shared_out` went with
+AS-R9. It read under the lock too, but in an acquisition of its own BEFORE the
+drop; the one read now sits inside the drop's hold.)
 
 ## Concurrency
 
@@ -523,11 +603,13 @@ which is the point.
 - **A share-admissibility bit is minted, never asserted.** Any path that lets a
   caller set `weave` or `gpu_bo` outside its own creating syscall breaks the
   same rule `BURROW_TYPE_CODE` exists to enforce for executability.
-- **A charge is claimed before the drop, and a claim is read-and-clear.**
-  Claiming after a freeing drop reads a dead Burrow; making the claim
-  non-clearing lets two racing settlers both refund, which under-counts — the
-  direction that breaks the bound. A caller that claims and then declines must
-  `burrow_charge_restore`, never simply drop it.
+- **A charge is settled inside the drop, and a claim is read-and-clear.**
+  Claiming after a freeing drop reads a dead Burrow; claiming before the drop
+  and restoring after a non-final one writes through a dead Burrow when another
+  holder's final drop lands in the gap (AS-R9) — so the claim exists only
+  inside the settled drops, and a new settle site uses one of them, never a
+  claim of its own. Making the claim non-clearing lets two racing settlers both
+  refund, which under-counts — the direction that breaks the bound.
 - **Never snapshot the VMA to reach the Burrow across an unmap.**
   `burrow_unmap_reporting` frees the `Vma`, so `vma->burrow` dangles the moment
   it returns. Snapshot the Burrow pointer first.

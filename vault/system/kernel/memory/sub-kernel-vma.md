@@ -48,7 +48,9 @@ the phenotype `madvise` row: a hint is 0 on a mapped range and ENOMEM on a
 hole, and a release outside the burrow window is ENOMEM for a hole, ENOSYS for
 memory the core declines to release. And `vma_free_deferred` is a `vma_free` that hands the caller the Burrow still
 owing a physical free instead of freeing it inline — the discipline a
-FILE-backed Burrow forces (Concurrency, below).
+FILE-backed Burrow forces (Concurrency, below). `vma_free_settled_deferred` is
+the same with the eager charge record settled inside the mapping drop (AS-R9);
+`vma_free_deferred` is its no-payer wrapper.
 
 B-1a (2026-09-23) added the **permission ceiling** and the **multi-mapping
 reprotect**. `vma_prot_max(v)` / `vma_set_prot_max(v, prot)` read and write the
@@ -177,12 +179,21 @@ Burrow's own free is Proc-agnostic, so a slot that stopped being mapped while
 still resident would be charged for the rest of the address space's life
 (`capacity.tla`'s `NoOrphan`; the B-1a audit's F5, and the piece-detach bug
 before it). Then the shape. A WHOLE mapping goes through `vma_remove_in` +
-`vma_free_deferred`, its Burrow chained onto `*out_dead` if that drop was the
-last; a `SHARED_IN` whole mapping uncharges the shared-in budget for its span;
-an eager `ANON` whole mapping claims its charge record for `payer` BEFORE the
-drop and refunds it iff the drop freed the pages or the region survives only
-in another Proc (`shared_out`), else restores the claim for the drop that does
-end it (#130/#131, unchanged from the exact-match detach) -- so an eager
+`vma_free_settled_deferred`, its Burrow chained onto `*out_dead` if that drop
+was the last, with a NULL `settle_as` (settle nothing: the form
+`vma_free_deferred` spells) unless it is the eager case below; a `SHARED_IN`
+whole mapping uncharges the shared-in budget for its span; an eager `ANON`
+whole mapping, when the caller opted in with a `payer`, settles the charge
+record of the space it leaves (`as`, the space refunded) INSIDE the drop --
+`vma_free_settled_deferred` -> `burrow_release_mapping_settled_deferred`,
+which claims iff the drop freed the pages or the region survives only in another
+Proc (`shared_out`), and otherwise leaves the record for the drop that does end
+it (#130/#131; AS-R9 moved the decision from three separate lock acquisitions in
+this function into the drop's own critical section, because a sibling holder's
+final drop between the non-final drop and the restore left this path writing
+through freed storage -- see [[sub-kernel-burrow]]). The refund is applied to
+`page_count` after the drop returns: outside the Burrow's leaf lock, still under
+`as->lock` -- so an eager
 region's block and its charge go with its LAST piece, and a trimmed eager
 mapping refunds nothing (its pages are still allocated: an eager Burrow is one
 buddy block and cannot be split physically, stated rather than discovered). A
@@ -369,8 +380,10 @@ unconditionally over the range.
 (D-3c F1/F5).** Freeing a 9P-backed FILE Burrow reaches `spoor_clunk`, which may
 sleep — and every VMA mutator holds `as->lock`, a spinlock, so an inline free is
 the lock-across-sleep extinction. `vma_free_deferred` splits the two halves: it
-drops the mapping ref and settles the I-32 uncharge UNDER the lock (via
-`burrow_release_mapping_deferred`, which does not free), but hands the caller the
+drops the mapping ref UNDER the lock -- its settled form,
+`vma_free_settled_deferred`, takes the eager I-32 charge record inside that same
+drop (`burrow_release_mapping_settled_deferred`; neither form frees) -- but hands
+the caller the
 Burrow that still owes a physical free, to pass to `burrow_free_deferred` AFTER
 the unlock. `vma_drain_in` collects the dead Burrows on a `deferred_free_next`
 stack and drains it past `spin_unlock`; `vma_detach_range_in` and
@@ -516,8 +529,9 @@ Since B-1a', four more: that the RELEASE precedes the reshape in phase 3 for
 every plain lazy overlap -- a trim or removal that ran first would orphan the
 overlap's resident slots, charged for the address space's life
 ([[spec-capacity]], `BUGGY_DETACH_NO_REFUND`); that an eager whole mapping's
-claim is taken BEFORE the drop and restored when the region survives on this
-Proc's own claim, and that a TRIMMED eager mapping refunds nothing; that the
+charge is settled BY the drop (AS-R9), leaving the record in place when the
+region survives on this Proc's own claim, and that a TRIMMED eager mapping
+refunds nothing; that the
 headroom formula counts the removals the range makes before the piece it adds
 (and the caller's `extra_vmas`), so `vma_replace_range_in`'s insert stays
 infallible; and that no caller loops the exact-match removers (`vma_remove` /

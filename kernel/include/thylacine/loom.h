@@ -405,7 +405,7 @@ struct Loom {
     // mutated -- a Loom cannot change hands.
     //
     // #132: `ring_pages` is now INFORMATIONAL ONLY. The settle amount comes from
-    // the Burrow's own charge record (burrow_charge_claim), because a pin this
+    // the Burrow's own charge record (burrow_unref_settled), because a pin this
     // Loom holds is not necessarily a region this owner paid for -- a registered
     // buffer may be a weft ring the SHARER paid for. Kept because it is the
     // charge as billed, which is worth having in a dump; do NOT reintroduce it

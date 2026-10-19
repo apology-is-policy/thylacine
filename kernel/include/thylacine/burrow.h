@@ -285,9 +285,10 @@ struct Burrow {
     // under as->lock cannot free a Burrow inline -- the FILE arm's spoor_clunk
     // may sleep (a 9P Tclunk), and sleeping under a plain spinlock is the
     // lock-across-sleep extinction. So the locked teardown decrements the
-    // mapping ref (burrow_release_mapping_deferred), and if that was the last
-    // ref it pushes the dead Burrow onto a caller-local stack via this link and
-    // frees the whole chain (burrow_free_deferred) AFTER dropping as->lock.
+    // mapping ref (burrow_release_mapping_settled_deferred), and if that was
+    // the last ref it pushes the dead Burrow onto a caller-local stack via this
+    // link and frees the whole chain (burrow_free_deferred) AFTER dropping
+    // as->lock.
     // Meaningful ONLY while a Burrow sits on such a stack -- {handle:0,map:0},
     // unreachable by any other path, so the write needs no lock; NULL always
     // otherwise. This is the teardown twin of #193 (which hoisted the mmap
@@ -662,46 +663,72 @@ void burrow_release_mapping(struct Burrow *v);
 bool burrow_unref_freed(struct Burrow *v);
 bool burrow_release_mapping_freed(struct Burrow *v);
 
-// D-3c F1: the DEFERRED teardown pair. `_deferred` drops the mapping ref under
-// v->lock and returns the dead Burrow (or NULL) WITHOUT freeing; the caller,
-// once it has dropped as->lock, frees it with burrow_free_deferred. Together
-// they keep the FILE arm's sleeping spoor_clunk off the locked teardown path
-// (the twin of #193). See the deferred_free_next field + the burrow.c bodies.
-struct Burrow *burrow_release_mapping_deferred(struct Burrow *v);
+// D-3c F1: the DEFERRED free. A teardown under as->lock drops its mapping ref
+// with burrow_release_mapping_settled_deferred (below), which returns the dead
+// Burrow (or NULL) WITHOUT freeing; the caller, once it has dropped as->lock,
+// frees it here. Together they keep the FILE arm's sleeping spoor_clunk off the
+// locked teardown path (the twin of #193). See the deferred_free_next field.
 // Frees `v` and every Burrow chained behind it on deferred_free_next (B-1a': a
 // range detach drops several last refs in one locked pass and hands back the
 // chain). NULL-safe; unlinks as it goes.
-void           burrow_free_deferred(struct Burrow *v);
+void burrow_free_deferred(struct Burrow *v);
 
 // #131/#132: the I-32 charge record -- WHO paid, so a refund is attributed
 // instead of inferred from the region's shape (see struct Burrow above).
 //
 // burrow_charge_record: stamp the payer at the eager charge. Called by each
 // site that succeeds a proc_page_charge for a whole region (SYS_BURROW_ATTACH,
-// SYS_JIT_CREATE, SYS_LOOM_SETUP's ring).
+// SYS_LOOM_SETUP's ring).
 //
-// burrow_charge_claim: read-and-CLEAR p's charge record, returning the pages it
-// paid (0 if p is not the recorded payer, or the charge was already claimed).
-// The clear is what makes a refund exactly-once: two paths racing to settle the
-// same region cannot both win, so the counter can never be refunded twice --
-// the direction that would inflate a Proc's effective budget.
+// The record is released only by a CLAIM (read-and-clear) taken inside the drop
+// that settles it, below. The clear is what makes a refund exactly-once: two
+// paths racing to settle the same region cannot both win, so the counter can
+// never be refunded twice -- the direction that would inflate a Proc's
+// effective budget.
 //
-// burrow_charge_restore: put back a claim the caller decided NOT to settle.
-// Callers claim BEFORE the drop (the record dies with the Burrow, so it cannot
-// be read after) and restore when the drop turns out not to end the payer's
-// involvement. A concurrent settler that saw the momentarily-cleared record
-// simply skips -- so the failure mode of that window is a charge that outlives
-// its region until the payer's next release point (benign: an over-charge on
-// the payer, never a refund to a Proc that did not pay).
+// AS-R9: there is deliberately no stand-alone claim, and no restore. The old
+// sequence -- claim, drop a reference, restore the record if that drop was not
+// the last -- held v->lock for each step and for none of the gaps, and an
+// earlier version of this comment wrongly called its window benign. Between a
+// nonfinal drop and the restore, another holder can make the final drop and
+// free the descriptor; the restore then writes charge_as_id/charge_pages
+// through a pointer whose last reference is gone. That is a use-after-free
+// write, and if the storage is recycled into a live Burrow the charge is
+// planted on an UNRELATED region -- a later claim then refunds pages the payer
+// never bought for it, an UNDER-count, the direction that inflates a budget
+// and breaks I-32. The converse loss is just as real: the racing final holder
+// reads the momentarily-cleared record, claims nothing, and refunds nothing.
 void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages);
-u32  burrow_charge_claim(struct Burrow *v, const struct Proc *p);
-void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages);
 
-// burrow_is_shared_out: has this region been mapped into a SECOND Proc?
-// The discriminator the sharer's own detach needs -- see the field comment on
-// struct Burrow. Monotonic once set, so a read is never stale in the direction
-// that matters (false -> true only ever ADDS a reason to release).
-bool burrow_is_shared_out(const struct Burrow *v);
+// AS-R9: the settled drops -- a drop whose charge decision happens INSIDE the
+// same v->lock interval that decides finality, which is what makes the two
+// atomic with respect to each other. There is no window to lose: a drop that
+// does not qualify leaves the record untouched (so the holder that does qualify
+// still finds it), and a drop that does qualify takes the record with it under
+// the lock (so it is settled exactly once). Neither form touches `v` after the
+// reference it dropped is gone, so no caller needs a surviving reference.
+//
+// `payer` is the EXACT AddrSpace incarnation that paid; NULL means "settle
+// nothing" and is how a caller whose policy predicate fails opts out. The
+// returned refund is nonzero only on the drop that qualified, so a caller can
+// refund unconditionally on a nonzero scalar. Refund OUTSIDE the leaf lock --
+// these return a scalar precisely so the caller can.
+//
+// burrow_unref_settled*: handle drop. Qualifies iff this drop frees the region.
+// burrow_release_mapping_settled_deferred: mapping drop, DEFERRED (D-3c F1,
+// above) -- returns the now-dead Burrow without freeing it, for a caller
+// holding as->lock to free after the unlock. Qualifies iff this drop
+// frees the region OR the region is shared out (the sharer's own detach must
+// settle then, because the surviving foreign mapping cannot name the payer);
+// shared_out is observed under that same lock, and being monotonic false->true
+// a later observation can only ADD a reason to settle.
+bool burrow_unref_settled_in(struct Burrow *v, const struct AddrSpace *payer,
+                             u32 *out_refund);
+bool burrow_unref_settled(struct Burrow *v, const struct Proc *payer,
+                          u32 *out_refund);
+struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
+                                                       const struct AddrSpace *payer,
+                                                       u32 *out_refund);
 
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
