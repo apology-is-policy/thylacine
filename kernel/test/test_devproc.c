@@ -593,25 +593,34 @@ void test_devproc_ns_reads_past_the_buffer(void) {
 // The ns read renders outside g_proc_table_lock, so what admitted it is asked
 // again under the lock after the render. Each leg acts in the window between
 // the two looks, on a target holding a fresh Territory ("binds: 0"): a seal
-// there refuses the read, an exit there reads as the exiting Proc's empty file
-// while the reader's own ref keeps the detached Territory alive for the render,
+// there refuses the read, an exit there reads as the exiting Proc's empty file,
 // and a target unlinked there reads as gone. The control installs a hook that
-// does nothing, so it walks the same path. Every leg also checks that the
-// reader dropped the ref it took: a target that still holds its Territory is
-// back to its own one ref, and in the exit leg the reader's drop is the one
-// that frees the Territory.
-static struct Proc *g_nsw_target;
-static int          g_nsw_ref_held, g_nsw_ref_left;
+// does nothing, so it walks the same path. The reader holds a WEAK ref, and
+// every leg checks it dropped it: a target that still holds its Territory is
+// back to its one strong ref and one weak count. In the exit leg the target
+// also mounts one source: the exit releases that entry at death while the
+// reader's ref keeps only the struct, and the reader's drop frees the struct
+// and releases nothing.
+static struct Proc  *g_nsw_target;
+static struct Spoor *g_nsw_src;
+static int g_nsw_ref_held, g_nsw_weak_held, g_nsw_src_held, g_nsw_src_left, g_nsw_weak_left;
+static u64 g_nsw_freed_at_exit;
 
 static void nsw_nothing(void) {}
 static void nsw_seal(void)   { proc_seal(g_nsw_target, PROC_FLAG_NODUMP); }
 static void nsw_unlink(void) { proc_test_unlink(g_nsw_target); }
 static void nsw_exit(void) {
     struct Territory *t = g_nsw_target->territory;
-    g_nsw_ref_held = t ? t->ref : -1;               // its Proc's ref and the reader's
+    if (!t || !g_nsw_src) return;
+    g_nsw_ref_held  = t->ref;
+    g_nsw_weak_held = t->weak;
+    g_nsw_src_held  = g_nsw_src->ref;
+    u64 destroyed0  = territory_total_destroyed();
     proc_release_territory_at_exit_for_test(g_nsw_target);
-    // Only the reader's ref can be left; without one, the release freed it.
-    g_nsw_ref_left = g_nsw_ref_held >= 2 ? t->ref : -1;
+    g_nsw_freed_at_exit = territory_total_destroyed() - destroyed0;
+    g_nsw_src_left  = g_nsw_src->ref;
+    // Read only while the reader's weak ref is known to hold the struct.
+    g_nsw_weak_left = g_nsw_weak_held == 2 ? t->weak : -1;
 }
 
 void test_devproc_ns_admission_after_render(void);
@@ -620,17 +629,19 @@ void test_devproc_ns_admission_after_render(void) {
     enum { LEGS = (int)(sizeof(window) / sizeof(window[0])) };
     long got[LEGS];
     bool built[LEGS];
-    int  ref_after[LEGS];
+    int  ref_after[LEGS], weak_after[LEGS];
     u64  freed_by_read[LEGS];
     char buf[64];
     struct Thread *th = current_thread();
     TEST_ASSERT(th && th->proc, "test thread has a proc");
-    g_nsw_ref_held = -1;
-    g_nsw_ref_left = -1;
+    g_nsw_ref_held = g_nsw_weak_held = g_nsw_src_held = g_nsw_src_left = g_nsw_weak_left = -1;
+    g_nsw_freed_at_exit = (u64)-1;
+    bool mounted = false;
+    int  src_after_read = -1;
     for (int i = 0; i < LEGS; i++) {
         got[i]   = -2;
         built[i] = false;
-        ref_after[i]     = -1;
+        ref_after[i] = weak_after[i] = -1;
         freed_by_read[i] = 0;
         struct Proc *tgt = proc_alloc();
         if (!tgt) continue;
@@ -639,6 +650,20 @@ void test_devproc_ns_admission_after_render(void) {
         tgt->caps         = 0;
         tgt->territory    = territory_alloc();
         built[i] = tgt->territory != NULL;
+        struct Spoor *mp = NULL;
+        g_nsw_src = NULL;
+        if (built[i] && window[i] == nsw_exit) {
+            g_nsw_src = spoor_alloc(&devnone);
+            mp        = spoor_alloc(&devnone);
+            if (mp) {
+                mp->qid.path = 0xD5100000u;
+                mp->qid.type = QTDIR;
+                struct Path *root = path_make_root();
+                mp->path = root ? path_addelem(root, "devproc-ns-window-exit", 22) : NULL;
+                path_unref(root);
+            }
+            mounted = g_nsw_src && mp && mp->path && mount(tgt->territory, g_nsw_src, mp, 0) == 0;
+        }
         proc_test_link(tgt);
         struct Spoor *f = built[i] ? open_pidfile_for(tgt->pid, "ns", 0) : NULL;
         g_nsw_target = tgt;
@@ -647,24 +672,40 @@ void test_devproc_ns_admission_after_render(void) {
         got[i] = f ? devproc.read(f, buf, (long)sizeof(buf), 0) : -3;
         devproc_ns_test_set_window_hook(NULL);
         freed_by_read[i] = territory_total_destroyed() - destroyed0;
-        if (tgt->territory) ref_after[i] = tgt->territory->ref;
+        if (tgt->territory) {
+            ref_after[i]  = tgt->territory->ref;
+            weak_after[i] = tgt->territory->weak;
+        }
+        if (g_nsw_src) src_after_read = g_nsw_src->ref;
         if (f) spoor_clunk(f);
         if (window[i] != nsw_unlink) proc_test_unlink(tgt);
         tgt->state = PROC_STATE_ZOMBIE;
         proc_free(tgt);
+        if (mp) spoor_unref(mp);
+        if (g_nsw_src) spoor_unref(g_nsw_src);
+        g_nsw_src = NULL;
     }
 
     for (int i = 0; i < LEGS; i++) TEST_ASSERT(built[i], "alloc each leg's target and its Territory");
+    TEST_ASSERT(mounted, "the exit leg's target mounted its source");
     TEST_EXPECT_EQ(got[0], 9L, "control: past an idle window the read is the listing, binds: 0");
     TEST_EXPECT_EQ(got[1], (long)-T_E_ACCES, "a seal landing during the render refuses the read");
     TEST_EXPECT_EQ(got[2], 0L, "an exit during the render reads as the exiting Proc's empty file");
-    TEST_EXPECT_EQ(g_nsw_ref_held, 2, "the read held its own ref on the Territory the exit detached");
-    TEST_EXPECT_EQ(g_nsw_ref_left, 1, "past the exit's release, the reader's ref alone kept it");
+    TEST_EXPECT_EQ(g_nsw_ref_held, 1, "the reader took no strong ref: its Proc's own is the only one");
+    TEST_EXPECT_EQ(g_nsw_weak_held, 2, "the reader's weak ref and the strong refs' own count");
+    TEST_EXPECT_EQ(g_nsw_src_held, 2, "before the exit the target's entry held its source");
+    TEST_EXPECT_EQ(g_nsw_src_left, 1, "the exit released the namespace at death, past the reader's ref");
+    TEST_EXPECT_EQ(g_nsw_freed_at_exit, (u64)0, "the reader's weak ref kept the struct past the exit");
+    TEST_EXPECT_EQ(g_nsw_weak_left, 1, "past the exit, the reader's weak ref alone held the struct");
+    TEST_EXPECT_EQ(src_after_read, 1, "the reader's drop released nothing");
+    TEST_EXPECT_EQ(freed_by_read[2], (u64)1, "exit: the reader's drop freed the struct");
     TEST_EXPECT_EQ(got[3], -1L, "a Proc gone during the render reads as gone");
-    TEST_EXPECT_EQ(ref_after[0], 1, "control: the reader dropped its ref");
-    TEST_EXPECT_EQ(ref_after[1], 1, "seal: the refused reader dropped its ref");
-    TEST_EXPECT_EQ(freed_by_read[2], (u64)1, "exit: the reader's drop freed the detached Territory");
-    TEST_EXPECT_EQ(ref_after[3], 1, "unlink: the reader that found it gone dropped its ref");
+    TEST_EXPECT_EQ(ref_after[0], 1, "control: one strong ref, the target's own");
+    TEST_EXPECT_EQ(weak_after[0], 1, "control: the reader dropped its weak ref");
+    TEST_EXPECT_EQ(ref_after[1], 1, "seal: one strong ref, the target's own");
+    TEST_EXPECT_EQ(weak_after[1], 1, "seal: the refused reader dropped its weak ref");
+    TEST_EXPECT_EQ(ref_after[3], 1, "unlink: one strong ref, the target's own");
+    TEST_EXPECT_EQ(weak_after[3], 1, "unlink: the reader that found it gone dropped its weak ref");
 }
 
 void test_devproc_read_ctl_returns_zero(void) {

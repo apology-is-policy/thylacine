@@ -19,8 +19,9 @@
 //     - mount(): spoor_ref(source) before insert.
 //     - unmount(): spoor_clunk(source) after remove (outside the lock).
 //     - territory_clone(): spoor_ref(source) per cloned entry.
-//     - territory_unref() final release: spoor_clunk(source) for each
-//       entry BEFORE kmem_cache_free.
+//     - territory_unref() final STRONG release: spoor_clunk(source) for
+//       each entry, detached under ns_lock; the struct outlives it while a
+//       weak ref (devproc's ns read) holds it.
 //   Always spoor_clunk, never spoor_unref: the entry's ref may be the LAST
 //   (the Proc closed its fd), and the source Dev's close hook must run.
 //
@@ -340,6 +341,7 @@ static void mount_pools_free(struct PgrpMount *entries, struct PgrpMhead *points
 static void territory_init_fields(struct Territory *p) {
     p->magic      = PGRP_MAGIC;
     p->ref        = 1;
+    p->weak       = 1;      // the strong refs' own count
     p->nbinds     = 0;
     p->nmounts    = 0;
     p->npoints    = 0;
@@ -546,7 +548,79 @@ oom:
 void territory_ref(struct Territory *p) {
     if (!p) return;
     if (p->magic != PGRP_MAGIC)   extinction("territory_ref of corrupted Territory");
-    __atomic_fetch_add(&p->ref, 1, __ATOMIC_RELAXED);
+    int pre = __atomic_fetch_add(&p->ref, 1, __ATOMIC_RELAXED);
+    if (pre <= 0)                 extinction("territory_ref of a released Territory");
+}
+
+// The last strong ref's release of the contents. Models the spec's
+// "DestroyTerritory requires mounts[p] = {}" precondition: the impl satisfies
+// it by spoor_clunk'ing each entry's source here, which is equivalent to a
+// sequence of Unmount actions immediately preceding the destroy.
+//
+// If the entry loop is skipped (the BUGGY_DESTROY_LEAK class), each source's
+// refcount stays bumped while the entries vanish -- the Spoor's storage is
+// leaked. The spec's MountRefcountConsistency invariant catches that desync.
+//
+// Use spoor_clunk (Plan 9 cclose) not spoor_unref: if this is the Spoor's LAST
+// holder (e.g., the user already closed any attach_9p fd; this Territory was
+// the last mount-table entry for it), the Dev's close hook needs to run to
+// release per-Spoor Dev state (pipe endpoints, 9P sessions, etc.).
+// P5-mount-syscall closed this gap; pre-fix, spoor_unref's close-less last-drop
+// would have leaked Dev state on Territory destruction.
+//
+// A weak holder may be rendering the table, so the table and root_spoor are
+// detached under ns_lock -- the holder then reads an empty one -- and released
+// outside it, where spoor_clunk may sleep. dot_path is swapped out under
+// dot_lock. The entries are released from the last back, the order the
+// array's release used; current Dev close hooks don't touch the Territory, so
+// the direction is cosmetic.
+static void territory_release_contents(struct Territory *p) {
+    spin_lock(&p->ns_lock);
+    struct PgrpMount *m = p->mlast;
+    struct PgrpMhead *heads = NULL;
+    for (int b = 0; b < PGRP_MOUNT_HASH; b++) {
+        struct PgrpMhead *h = p->mhash[b];
+        p->mhash[b] = NULL;
+        while (h) {
+            struct PgrpMhead *next = h->hnext;
+            h->hnext = heads;
+            heads = h;
+            h = next;
+        }
+    }
+    struct Spoor *root = p->root_spoor;
+    p->mfirst     = NULL;
+    p->mlast      = NULL;
+    p->nmounts    = 0;
+    p->npoints    = 0;
+    p->root_spoor = NULL;
+    spin_unlock(&p->ns_lock);
+
+    spin_lock(&p->dot_lock);
+    char *dot   = p->dot_path;
+    p->dot_path = NULL;
+    spin_unlock(&p->dot_lock);
+
+    while (m) {
+        struct PgrpMount *prev = m->tprev;
+        // #66 (I-33): drop the entry's mount-point name ref (the matched
+        // counterpart to the path_ref at mount()/clone). path_unref is
+        // NULL-safe + non-sleeping (refcount + kfree, no Dev close hook).
+        path_unref(m->mp_path);
+        spoor_clunk(m->source);
+        kmem_cache_free(g_mount_cache, m);
+        m = prev;
+    }
+    while (heads) {
+        struct PgrpMhead *next = heads->hnext;
+        kmem_cache_free(g_mhead_cache, heads);
+        heads = next;
+    }
+    // The root_spoor pivot's per-Territory ref, by spoor_clunk for the reason
+    // the entries' are (P5-stratumd-stub-bringup-e2).
+    if (root) spoor_clunk(root);
+    // LS-4: the cwd string (NULL == "/").
+    if (dot) kfree(dot);
 }
 
 void territory_unref(struct Territory *p) {
@@ -556,79 +630,25 @@ void territory_unref(struct Territory *p) {
     int pre = __atomic_fetch_sub(&p->ref, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0)                 extinction("territory_unref of zero-ref Territory");
     if (pre == 1) {
-        // Final release. Drop each mount entry's source refcount BEFORE
-        // freeing the Territory's storage. Models the spec's
-        // "DestroyTerritory requires mounts[p] = {}" precondition: the
-        // impl satisfies it by iterating + spoor_unref'ing each entry
-        // here, which is equivalent to a sequence of Unmount actions
-        // immediately preceding the destroy.
-        //
-        // If this loop is skipped (the BUGGY_DESTROY_LEAK class), each
-        // source's refcount stays bumped while the entries vanish with
-        // the Territory — the Spoor's storage is leaked. The spec's
-        // MountRefcountConsistency invariant catches that desync.
-        //
-        // Use spoor_clunk (Plan 9 cclose) not spoor_unref: if this is
-        // the Spoor's LAST holder (e.g., the user already closed any
-        // attach_9p fd; this Territory was the last mount-table entry
-        // for it), the Dev's close hook needs to run to release
-        // per-Spoor Dev state (pipe endpoints, 9P sessions, etc.).
-        // P5-mount-syscall closed this gap; pre-fix, spoor_unref's
-        // close-less last-drop would have leaked Dev state on
-        // Territory destruction.
-        //
-        // The walk runs from the last entry back, the order the array's
-        // release used; current Dev close hooks don't touch the Territory,
-        // so the direction is cosmetic. No lock: at final release there is
-        // no concurrent accessor.
-        struct PgrpMount *m = p->mlast;
-        while (m) {
-            struct PgrpMount *prev = m->tprev;
-            // #66 (I-33): drop the entry's mount-point name ref (the matched
-            // counterpart to the path_ref at mount()/clone). path_unref is
-            // NULL-safe + non-sleeping (refcount + kfree, no Dev close hook).
-            path_unref(m->mp_path);
-            spoor_clunk(m->source);
-            kmem_cache_free(g_mount_cache, m);
-            m = prev;
-        }
-        for (int b = 0; b < PGRP_MOUNT_HASH; b++) {
-            struct PgrpMhead *h = p->mhash[b];
-            while (h) {
-                struct PgrpMhead *next = h->hnext;
-                kmem_cache_free(g_mhead_cache, h);
-                h = next;
-            }
-            p->mhash[b] = NULL;
-        }
-        // Clear the table so a post-free read (UAF) sees consistent state
-        // (zero entries) — SLUB's freelist write will clobber magic but
-        // not the count fields immediately; defensive.
-        p->mfirst  = NULL;
-        p->mlast   = NULL;
-        p->nmounts = 0;
-        p->npoints = 0;
+        territory_release_contents(p);
+        territory_weak_unref(p);
+    }
+}
 
-        // Drop the root_spoor pivot's per-Territory ref. Mirrors the
-        // mount-entry discipline above: spoor_clunk (not spoor_unref) so
-        // the Dev's close hook runs if this was the last holder
-        // (e.g., the user already closed any attach_9p fd; this Territory
-        // was the only remaining holder of the pivoted root). Same
-        // rationale as P5-mount-syscall's mount-table-drop fix.
-        // P5-stratumd-stub-bringup-e2.
-        if (p->root_spoor) {
-            struct Spoor *r = p->root_spoor;
-            p->root_spoor = NULL;
-            spoor_clunk(r);
-        }
+void territory_weak_ref(struct Territory *p) {
+    if (!p) return;
+    if (p->magic != PGRP_MAGIC)   extinction("territory_weak_ref of corrupted Territory");
+    int pre = __atomic_fetch_add(&p->weak, 1, __ATOMIC_RELAXED);
+    if (pre <= 0)                 extinction("territory_weak_ref of a freed Territory");
+}
 
-        // LS-4: free the cwd string (NULL == "/", no-op). Final release:
-        // ref == 0, no concurrent accessor, so no dot_lock is needed.
-        if (p->dot_path) {
-            kfree(p->dot_path);
-            p->dot_path = NULL;
-        }
-
+void territory_weak_unref(struct Territory *p) {
+    if (!p) return;
+    if (p->magic != PGRP_MAGIC)   extinction("territory_weak_unref of corrupted Territory");
+    if (p == g_kpgrp)             extinction("territory_weak_unref attempted on kpgrp");
+    int pre = __atomic_fetch_sub(&p->weak, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)                 extinction("territory_weak_unref of zero-ref Territory");
+    if (pre == 1) {
         kmem_cache_free(g_pgrp_cache, p);
         __atomic_fetch_add(&g_pgrp_destroyed, 1u, __ATOMIC_RELAXED);
     }

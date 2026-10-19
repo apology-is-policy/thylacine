@@ -50,6 +50,7 @@ void test_territory_chroot_idempotent_same_spoor(void);
 void test_territory_chroot_replace_clunks_old(void);
 void test_territory_chroot_clone_bumps_ref(void);
 void test_territory_chroot_destroy_drops_ref(void);
+void test_territory_weak_ref_keeps_the_struct_not_the_contents(void);
 void test_territory_chroot_null_returns_error(void);
 
 void test_territory_chroot_smoke(void) {
@@ -165,6 +166,59 @@ void test_territory_chroot_destroy_drops_ref(void) {
         "territory_unref must drop root_spoor's per-Territory ref");
 
     spoor_unref(s);
+}
+
+// A weak ref keeps the struct and nothing else: the last strong drop releases
+// the contents (here the pivoted root) at once, the weak holder then reads an
+// empty namespace, and its own drop frees the struct and releases nothing. In
+// the other order the strong drop does both.
+void test_territory_weak_ref_keeps_the_struct_not_the_contents(void) {
+    struct Territory *a = territory_alloc();
+    struct Territory *b = territory_alloc();
+    struct Spoor     *s = spoor_alloc(&devnone);
+    bool built = a && b && s && territory_chroot(a, s) == 0 && territory_chroot(b, s) == 0;
+    if (!built) {
+        territory_unref(a);
+        territory_unref(b);
+        if (s) spoor_unref(s);
+        TEST_ASSERT(false, "two Territories rooted at one Spoor");
+    }
+    int held = s->ref;                                   // the test's, a's and b's
+
+    u64 d0 = territory_total_destroyed();
+    territory_weak_ref(a);
+    territory_unref(a);
+    int  s_after_strong  = s->ref;
+    u64  freed_by_strong = territory_total_destroyed() - d0;
+    bool kept  = a->magic == PGRP_MAGIC && a->ref == 0 && a->weak == 1;
+    bool empty = a->root_spoor == NULL && territory_nmounts(a) == 0;
+    char buf[32];
+    u64  n = territory_format_ns(a, 0, buf, (u64)sizeof(buf));
+    bool reads_empty = n == 9 && buf[0] == 'b' && buf[7] == '0';
+    territory_weak_unref(a);
+    int  s_after_weak  = s->ref;
+    u64  freed_by_weak = territory_total_destroyed() - d0 - freed_by_strong;
+
+    u64 d1 = territory_total_destroyed();
+    territory_weak_ref(b);
+    territory_weak_unref(b);
+    u64 freed_by_early_weak = territory_total_destroyed() - d1;
+    territory_unref(b);
+    int s_after_b = s->ref;
+    u64 freed_b   = territory_total_destroyed() - d1;
+    spoor_unref(s);
+
+    TEST_EXPECT_EQ(held, 3, "the test and both roots hold the Spoor");
+    TEST_EXPECT_EQ(s_after_strong, 2, "the last strong drop released the root at once");
+    TEST_EXPECT_EQ(freed_by_strong, (u64)0, "the weak ref kept the struct");
+    TEST_ASSERT(kept, "the struct is intact: magic, no strong ref, the weak one");
+    TEST_ASSERT(empty, "the weak holder finds no root and no mount");
+    TEST_ASSERT(reads_empty, "the weak holder's render is the empty listing, binds: 0");
+    TEST_EXPECT_EQ(s_after_weak, 2, "the weak drop released nothing");
+    TEST_EXPECT_EQ(freed_by_weak, (u64)1, "the weak drop freed the struct");
+    TEST_EXPECT_EQ(freed_by_early_weak, (u64)0, "a weak drop with a strong ref left frees nothing");
+    TEST_EXPECT_EQ(s_after_b, 1, "the strong drop after it released the root");
+    TEST_EXPECT_EQ(freed_b, (u64)1, "and freed the struct");
 }
 
 void test_territory_chroot_null_returns_error(void) {

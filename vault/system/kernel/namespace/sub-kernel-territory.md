@@ -3,7 +3,7 @@ id: sub-kernel-territory
 type: sub
 title: "Territory — the per-Proc namespace (mount table, root, cwd)"
 parent: moc-kernel-namespace
-code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_mount.c", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
+code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_mount.c", "kernel/test/test_territory_chroot.c", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
 audit: hard
 guarded-by: [inv-i1, inv-i3, inv-i33]
 validated-by: [spec-territory, gate-smp]
@@ -164,13 +164,36 @@ allocation failure (before any entry is copied) or the `dot_path` OOM the
 child is `territory_unref`'d, whose final release drops every ref just
 taken; the parent is untouched.
 
-**Final release** walks the table list from `mlast` back, dropping each
-entry's `mp_path`, `spoor_clunk`ing its source and freeing the node, then
-frees every point, clears the table fields defensively, clunks
-`root_spoor`, and frees `dot_path` — all before `kmem_cache_free`. This
-is the spec's "DestroyTerritory requires `mounts[p] = {}`" precondition
-discharged as a sequence of Unmounts. Skipping it is
-`BUGGY_DESTROY_LEAK`.
+**Final release** has two stages, because a Territory has two kinds of
+ref (2026-10-19). A Proc holds a STRONG ref (`ref`); devproc's ns read holds
+a WEAK one, which keeps the struct and nothing else (`weak` counts the weak
+holders plus one that the strong refs hold as a set). The last strong drop
+releases the CONTENTS on the dropping thread: under `ns_lock` it detaches the
+table (`mlast`, every point chain, the counts) and `root_spoor`, under
+`dot_lock` it takes `dot_path`, and with both dropped it walks the entries
+from `mlast` back — dropping each `mp_path`, `spoor_clunk`ing the source,
+freeing the node — then frees the points, clunks `root_spoor`, frees
+`dot_path`, and drops the strong refs' weak count. The last drop of either
+kind `kmem_cache_free`s the struct. The detach is under `ns_lock` because a
+weak holder may be rendering: it sees the table whole or empty, never a
+released node. This is the spec's "DestroyTerritory requires
+`mounts[p] = {}`" precondition discharged as a sequence of Unmounts.
+Skipping it is `BUGGY_DESTROY_LEAK`.
+
+The split keeps a reader of ANOTHER Proc's namespace from running that
+Proc's release (OPEN-BUGS SA-5, the votes 5-7 round 2 F1): with one count, a
+reader whose ref outlived the target's exit dropped the last ref, so the
+target's mount clunks ran on the reader, where a walked 9P source's
+`Tclunk` could wait on the dead Proc's own server, and the namespace was
+released when the read ended rather than at the death
+([[sub-kernel-death]] Part D). Now the exit's strong drop always releases
+the namespace, and the reader's drop at most frees the struct, which never
+sleeps. `territory_ref` extincts on a Territory whose contents are gone (a
+strong ref is never revived from a weak one) and `territory_weak_ref` on a
+freed one. Witnesses: `territory.weak_ref_keeps_the_struct_not_the_contents`
+(both drop orders: the root's ref goes at the strong drop, the struct at the
+last drop, and the weak holder's render is the empty listing) and
+`devproc.ns_admission_after_render`'s exit leg.
 
 **The cwd is a cleaned absolute string, not a handle** — but *joining* to it
 and *cleaning* it are two jobs, and running them as one was a resolution
@@ -499,7 +522,10 @@ below). `mount()` allocates the most it can need — two entries and a
 point — before taking the lock and frees what it did not use after it;
 `territory_clone` allocates the child's nodes outside the parent's lock;
 every edit that removes nodes chains them on a `struct mount_dead`, which
-`mount_dead_release` frees once the lock is dropped.
+`mount_dead_release` frees once the lock is dropped. The final strong
+release is the one remover that takes `ns_lock` on a Territory no Proc
+holds any more: a weak holder's render may hold it, so the release
+detaches the table under it and frees the nodes after it.
 
 `ns_lock` is NEVER held across `stalk` (which blocks on 9P). That is why
 `mount_lookup`'s contract is OWNED, not borrowed: the lookup and the
@@ -573,8 +599,8 @@ misreports `/proc/<pid>/ns` and nothing else.
 every `root_spoor` holds exactly one ref on its Spoor, maintained at
 five sites: `mount` (bump), `unmount` (drop), `territory_chroot` /
 `territory_pivot_root` (bump new, drop old), `territory_clone` (bump per
-cloned entry + per cloned root), `territory_unref` final release (drop
-all). Four of the spec's five buggy configs are exactly the "forgot one
+cloned entry + per cloned root), `territory_unref`'s last STRONG drop
+(drop all; a weak ref never holds a Spoor). Four of the spec's five buggy configs are exactly the "forgot one
 of these" classes.
 
 ## Error paths

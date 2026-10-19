@@ -1303,8 +1303,11 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
             r->same = !p->territory || p->territory == r->ns;
             break;
         }
+        // A weak ref: if the Proc dies during the render, its own drop releases
+        // the namespace at death, and the reader's drop frees only the struct
+        // -- a reader never runs another Proc's 9P clunks.
         r->ns = p->territory;
-        if (r->ns && r->ns != kpgrp()) territory_ref(r->ns);
+        if (r->ns && r->ns != kpgrp()) territory_weak_ref(r->ns);
         break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
@@ -1433,8 +1436,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
         r.recheck = true;
         r.found   = false;
         proc_for_each(devproc_read_cb, &r);
-        // The final unref may clunk a 9P source and sleep; no lock is held here.
-        if (r.ns && r.ns != kpgrp()) territory_unref(r.ns);
+        if (r.ns && r.ns != kpgrp()) territory_weak_unref(r.ns);
         if (!r.found) return -1;              // gone since the render
         if (r.denied) return -T_E_ACCES;
         if (!r.same) return -1;               // the Proc's Territory changed (unreachable today)

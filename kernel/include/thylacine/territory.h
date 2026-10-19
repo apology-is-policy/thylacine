@@ -261,6 +261,12 @@ struct Territory {
     // entry is unlinked under the lock and released outside it, and a new one
     // is allocated before it is taken (ARCH 9.1).
     spin_lock_t          ns_lock;
+    // The struct's lifetime, apart from its contents: one count per weak holder
+    // plus one the strong refs hold as a set. `ref` counts the strong refs; the
+    // last strong drop releases the contents and then this one count; the last
+    // weak drop frees the struct. A weak holder reads the table under ns_lock
+    // and finds it empty once the contents are gone.
+    int                  weak;
 };
 
 _Static_assert(sizeof(struct Territory)
@@ -268,7 +274,7 @@ _Static_assert(sizeof(struct Territory)
                "struct Territory size pinned: 24 header + 8 root_spoor, "
                "8*PGRP_MAX_BINDS, the mount table (8*PGRP_MOUNT_HASH chains + "
                "mfirst[8] + mlast[8] + npoints[4] + mvisit[4] = 24), then "
-               "dot_lock[4] + pad[4] + dot_path[8] + ns_lock[4] + pad[4] = 24");
+               "dot_lock[4] + pad[4] + dot_path[8] + ns_lock[4] + weak[4] = 24");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
@@ -306,13 +312,22 @@ struct Territory *territory_alloc(void);
 // OOM (parent unchanged). Models the spec's ForkClone action.
 struct Territory *territory_clone(struct Territory *parent);
 
-// Increment/decrement refcount. territory_unref frees the struct when
-// the last reference goes away; the final-release path FIRST calls
-// spoor_unref on every mount entry's source (releasing the per-entry
-// reference held since mount()), THEN kmem_cache_free's the struct.
-// Both are safe to call on NULL.
+// Strong refs, one per Proc that uses the namespace. territory_ref needs one
+// already held (extinction on a released Territory). The last territory_unref
+// releases the contents on the caller's thread -- every mount entry's source
+// and root_spoor by spoor_clunk, which may sleep, then dot_path -- and drops
+// the strong refs' weak count.
+//
+// Weak refs keep only the struct, for a reader of ANOTHER Proc's namespace
+// (devproc's ns read), which must never be the thread that releases it.
+// territory_weak_ref needs a strong ref held or pinned by a lock (devproc takes
+// it under g_proc_table_lock while the Proc still names the Territory).
+// territory_weak_unref never releases contents and never sleeps; the last drop
+// of either kind frees the struct. All four are safe to call on NULL.
 void territory_ref(struct Territory *p);
 void territory_unref(struct Territory *p);
+void territory_weak_ref(struct Territory *p);
+void territory_weak_unref(struct Territory *p);
 
 // =============================================================================
 // Per-Proc cwd ("dot") -- LS-4. Name-based: a cleaned absolute path string

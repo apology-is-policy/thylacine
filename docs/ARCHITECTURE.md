@@ -2799,10 +2799,10 @@ zombie stops pinning its inherited 9P mount sessions), but *safely* — via a
 serializing with the ns read's two walks, then `territory_unref` the detached pointer
 outside the lock). That split is the sound template #66c can adopt for the handle table in
 place of the lives-until-reap restructure; the ns read and `format_cwd` are NULL-safe for
-the detached-territory zombie. Since the ns read holds a ref across its render (B-3
-votes 5-7), a reader that took its ref before the detach keeps the Territory alive past
-the exit and drops the last ref itself, so the release -- and any wait a 9P clunk in it
-makes -- runs on the reader's thread (a tracked P3: OPEN-BUGS SA-5, round 2's F1).
+the detached-territory zombie. The ns read holds a WEAK Territory ref across its render
+(B-3): a weak ref keeps only the struct, so the release -- and any wait a 9P clunk in it
+makes -- still runs at the exit, on the exiting thread, and the reader's drop frees only
+the struct.
 
 **Split**: #66a (the substrate + `SYS_FD2PATH` + kernel tests) → #66b (`/proc/<pid>/ns`
 via the refcounted `PgrpMount.mp_path` + the `ns` tool + docs) → #66c (`/proc/<pid>/fd`,

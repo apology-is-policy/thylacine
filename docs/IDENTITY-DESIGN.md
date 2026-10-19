@@ -2820,12 +2820,11 @@ deadlock -- logout hangs, no getty respawn, no new prompt.
   `p->territory = NULL` (serializes with the ns read's walks: one that finds NULL
   renders empty -- `territory_format_ns(NULL)`/`format_cwd` are both NULL-safe),
   then `territory_unref` the detached pointer OUTSIDE the lock (the `spoor_clunk`
-  may sleep on `Tclunk`). Since B-3 votes 5-7 the ns read holds a ref across its
-  render, so a reader that took its ref before the detach keeps the Territory
-  alive and drops the last ref itself: the release then runs on the reader's
-  thread, and a clunk in it may wait, killably, on the dead Proc's 9P server --
-  the zombie stops pinning its sessions when that read ends, not at the instant
-  of death (a tracked P3: OPEN-BUGS SA-5, round 2's F1).
+  may sleep on `Tclunk`). The ns read holds a WEAK ref across its render (B-3),
+  which keeps only the struct: a reader that took it before the detach does not
+  delay the release, which runs here, at death, on the exiting thread, and the
+  reader's drop frees only the struct -- a reader never waits on the dead Proc's
+  9P server.
   Idempotent with `proc_free`'s `territory_unref(NULL)`. **Part D alone closes
   the imperium (killed-zombie) case** -- the abdicate-swept job already exited, so
   it releases its mount ref at exit.

@@ -522,6 +522,7 @@ void test_territory_chroot_idempotent_same_spoor(void);
 void test_territory_chroot_replace_clunks_old(void);
 void test_territory_chroot_clone_bumps_ref(void);
 void test_territory_chroot_destroy_drops_ref(void);
+void test_territory_weak_ref_keeps_the_struct_not_the_contents(void);
 void test_territory_chroot_null_returns_error(void);
 void test_handles_alloc_close_smoke(void);
 void test_handles_rights_monotonic(void);
@@ -2676,6 +2677,7 @@ struct test_case g_tests[] = {
     { "territory.chroot_replace_clunks_old",              test_territory_chroot_replace_clunks_old,              false, NULL },
     { "territory.chroot_clone_bumps_ref",                 test_territory_chroot_clone_bumps_ref,                 false, NULL },
     { "territory.chroot_destroy_drops_ref",               test_territory_chroot_destroy_drops_ref,               false, NULL },
+    { "territory.weak_ref_keeps_the_struct_not_the_contents", test_territory_weak_ref_keeps_the_struct_not_the_contents, false, NULL },
     { "territory.chroot_null_returns_error",              test_territory_chroot_null_returns_error,              false, NULL },
     { "territory.pivot_root_smoke",                       test_territory_pivot_root_smoke,                       false, NULL },
     { "territory.pivot_root_rejects_no_initial_root",     test_territory_pivot_root_rejects_no_initial_root,     false, NULL },

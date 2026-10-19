@@ -4139,20 +4139,20 @@ static inline void exit_close_test_window(void) {}
 // sessions (the per-user home --single-session proxy) the instant it dies rather
 // than when its (possibly much later, or deadlocked) parent reaps it.
 //
-// The FOOTGUN this avoids: devproc's ns read (which takes its Territory ref
-// there) and format_cwd read p->territory under g_proc_table_lock (the #57a F2
-// envelope), so the free cannot run lock-free the way the #926 handle-table
+// The FOOTGUN this avoids: devproc's ns read (which takes its weak Territory
+// ref there) and format_cwd read p->territory under g_proc_table_lock (the #57a
+// F2 envelope), so the free cannot run lock-free the way the #926 handle-table
 // free does (ARCHITECTURE.md the #66c note). Hence the LOCKED-DETACH +
 // UNLOCKED-FREE split: NULL p->territory UNDER the lock (a concurrent ns read
 // then observes NULL and renders empty -- territory_format_ns(NULL) and
-// format_cwd's `if(!p->territory)` are both NULL-safe; one that took its ref
-// first renders from the Territory it holds, and its second look, finding
+// format_cwd's `if(!p->territory)` are both NULL-safe; one that took its weak
+// ref first renders from the struct it holds, and its second look, finding
 // NULL, answers the empty file), THEN territory_unref the detached
 // pointer with the lock DROPPED
 // (territory_unref's spoor_clunk may sleep on a 9P Tclunk, and nothing is held
-// here, so the sleep is safe). No new reader can reach the detached pointer; one
-// that took its ref before the detach drops the last ref itself after its
-// render, and the release then runs on that reader's thread.
+// here, so the sleep is safe). No new reader can reach the detached pointer, and
+// one that took its weak ref before the detach keeps only the struct: the
+// namespace is released here, at death, on this thread.
 //
 // CALLED with g_proc_table_lock HELD (*s = the saved irq state); on return the
 // lock is re-held with *s refreshed. CALLED only from the last-live-thread exit
