@@ -375,6 +375,13 @@ reads, B writes") = namespace composition, not an ACL.
   annotation (F-3: a legate's files are owned by the durable user).
 - group = the **parent directory's group** (Plan 9 / BSD inheritance —
   collaboration-friendly; the natural partner to F-2's namespace-sharing).
+  **Not built yet:** every create path stamps the creator's primary group (the
+  sync create; Loom's `MKDIR`, `MKNOD` and `SYMLINK` for a gid of 0), which
+  holotype round 1 found on 2026-10-19. The operator voted the same day to build
+  this rule (`dec-2026-10-19-create-group-from-parent`): the sync create and
+  Loom's gid-0 default send the parent's group; an explicit Loom gid keeps the
+  chgrp rule (a group the creator may chgrp a file it owns to); a caped session
+  keeps `P9_NOGID` (§3.2).
 - mode = a default, masked by a umask-equivalent. **Built 2026-10-19** (operator
   votes, `dec-2026-10-19-create-mode-bound-and-umask`): the mode the caller asks for,
   less the caller's umask, bounded by the parent directory's mode as Plan 9's
@@ -696,7 +703,8 @@ the remaining walks (brief any in full on request).
   authenticated remote = v1.x).
 - **F-5** — Ownership-on-create. **RESOLVED 2026-05-28 → §3.5** (owner = caller's
   durable principal-id, never the clearance; group inherits parent dir; mode =
-  default & umask).
+  default & umask). The group rule was found unbuilt and voted on 2026-10-19 to
+  be built (§3.5).
 - **F-6** — HW capability granularity. **RESOLVED 2026-05-28 → §3.6**: v1.0 blanket
   `CAP_HW_CREATE` (resource-scoping deferred to v1.x for consistency with F-3);
   contained by legate scope + dev-mode; representation allowlist-extensible.
@@ -1191,7 +1199,8 @@ SYS_WALK_CREATE(parent_fd, name_va, name_len, omode, perm) -> opened_fd / -1
   mode = perm & 0777, gid = caller primary_gid)`. For `devramfs` (the
   kernel-test target) the existing in-memory create path is reused.
 - **Ownership-on-create (SEAM at this chunk):** the create carries the caller's
-  `primary_gid` into the 9P `gid` field. Full owner attribution = caller
+  `primary_gid` into the 9P `gid` field (the parent directory's group once the
+  vote of 2026-10-19 is built, §3.5 F-5). Full owner attribution = caller
   `principal_id` is recorded where the KERNEL mediates the metadata -- the
   mount-cape for self-declared-non-POSIX backings (A-2c) and the kernel rwx
   layer (A-2d); for a Stratum-backed dev9p file the owner is the connection

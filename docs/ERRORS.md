@@ -90,6 +90,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
 | `T_E_MFILE`     | 24    | `EMFILE`     | Too many open files: the phenotype's per-Proc socket table (`VIV_SOCK_MAX`) is full, or no handle slot at or above a `SYS_HANDLE_DUP_LOWEST` floor is free (B-3b; dup, `F_DUPFD`). The kernel's other full-handle-table answer is still `T_E_NOMEM` (#80 seam) |
 | `T_E_NOTTY`     | 25    | `ENOTTY`     | Not a terminal: the phenotype ioctl shell (C2-k1b) answers it for a `TC*`/`TIOC*` request on a non-tty fd and for any request the terminal surface does not serve; `isatty()` reads it as "not a tty" |
+| `T_E_NOSPC`     | 28    | `ENOSPC`     | No space left. Kernel-originated for one cause: a mount into a Territory whose mount table is at its cap (`SYS_MOUNT`, ARCH 9.1). A server's ENOSPC (a full pool) crosses by value, as it always has. Reserved by the operator's vote of 2026-10-19 (`dec-2026-10-19-mount-errnos`); `errno.h` gains it with its first emitter |
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
@@ -649,6 +650,12 @@ service's poster. The directory's mode does not change the answer, and
 neither does an elevation's DAC override. A name that already exists still
 answers -T_E_EXIST to a caller who may search the directory, as above.
 
+Loom's `MKDIR`, `MKNOD` and `SYMLINK` ask the same admission when they are
+submitted and complete with -T_E_ACCES, whether or not the name exists:
+Loom's gate makes no existence probe (operator vote 2026-10-19,
+`dec-2026-10-19-loom-create-refusal-eacces`). An admitted op whose name
+exists completes with the server's error, -T_E_EXIST from Stratum.
+
 ### The creation mask (operator votes 2026-10-19)
 
 SYS_UMASK (133) sets the calling Proc's creation mask and returns the
@@ -659,3 +666,29 @@ nothing, as SYS_WSTAT refuses stray mode bits. The POSIX front ends pass
 `syscall.Umask`. The mask and the parent directory's bound (IDENTITY-DESIGN
 9.7 M8) narrow a create's mode and never refuse one, so a create gains no
 errno from them.
+
+### Mount and unmount (operator vote 2026-10-19)
+
+Voted 2026-10-19 (`dec-2026-10-19-mount-errnos`); not built yet. Until it
+is, SYS_MOUNT answers -T_E_NOTDIR for a type mismatch and a bare -1 for
+every other refusal, and SYS_UNMOUNT answers -1 for every refusal.
+
+Both calls check their path as SYS_OPEN_CREATE does: an empty or over-long
+path, or one with an embedded NUL, answers -T_E_INVAL, and a path buffer the
+kernel cannot read answers -T_E_FAULT. A mount point that does not resolve
+answers the resolver's errno (`stalk_err`), such as -T_E_NOENT,
+-T_E_ACCES, -T_E_NOTDIR or -T_E_LOOP.
+
+| Refusal | SYS_MOUNT answers |
+|---|---|
+| flags outside the supported set, or naming more than one of MREPL, MBEFORE and MAFTER | -T_E_INVAL |
+| a source handle that is not live, or lacks RIGHT_READ | -T_E_BADF |
+| a source whose type differs from the point's, or an ordered mount at a file | -T_E_NOTDIR, as before |
+| a mount that would close a cycle in the mount graph (I-3) | -T_E_LOOP |
+| a mount table at its cap (ARCH 9.1) | -T_E_NOSPC |
+| no memory for the entry, once entries are allocated (ARCH 9.1) | -T_E_NOMEM |
+
+SYS_UNMOUNT answers -T_E_INVAL when nothing is mounted at the point, as
+Linux's umount2 does. ut's `bind`, `mount` and `unmount` name the errno
+after their message, and libthyla-rs's `mount` and `unmount` return the
+matching `Error`.
