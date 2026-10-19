@@ -4536,7 +4536,13 @@ void test_dev9p_create_refusal_keeps_eexist(void) {
 }
 
 void test_dev9p_create_refusal_without_rwx_enforcement(void) {
-    struct Dev d9 = dev9p;
+    // A struct assignment this size lowers to a memcpy call, which the
+    // freestanding kernel does not provide; the volatile store keeps the loop
+    // from being recognised as one (seat_copy's idiom).
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
     d9.perm_enforced = false;
     u32 seen = 0;
     TEST_ASSERT(m7_create(M7_CREATOR, PRINCIPAL_INVALID, M7_CREATOR, true, &d9, &seen) >= 0,
