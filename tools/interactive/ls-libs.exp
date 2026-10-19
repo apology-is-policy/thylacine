@@ -95,15 +95,47 @@ proc lib_leg {tag prog log verdict {fails {}}} {
 # this user owns: `bind -bc` puts it first in a union whose creates land in it,
 # while reads still find the baked files beneath. The binds are this shell's,
 # and every leg's program inherits them.
+#
+# SYS_MOUNT answers a bare -1 for a full mount table, a point this user cannot
+# resolve and a cycle alike, so before each bind the layer records the two
+# facts that tell them apart: how many entries the shell's mount table holds
+# (PGRP_MAX_MOUNTS is 32, and a union's first mount installs two) and whether
+# the point resolves for this user. A child inherits the shell's table, so
+# `ns` run from the shell counts the shell's entries.
+proc lib_ns_count {tag} {
+    set c -1
+    set up [string toupper $tag]
+    lc_send "echo nsn$tag-\$(ns --color=never | grep -c 'mount ') | tr a-z A-Z"
+    expect {
+        -re "NSN$up- ?(\[0-9\]+)\r"  { set c $expect_out(1,string) }
+        -re {EXTINCTION:}             { lc_extinction_fail "kernel extinction counting mount entries" }
+        timeout                       { lc_fail "timeout counting mount entries ($tag)" }
+        eof                           { lc_fail "unexpected EOF counting mount entries ($tag)" }
+    }
+    lc_step "saw: $c mount entries ($tag)"
+    return $c
+}
 proc lib_layer {n dir} {
     set layer /tmp/ls-libs/w$n
+    set before [lib_ns_count $n]
+    set resolves unknown
+    lc_send "stat --color=never $dir; echo pt$n-\$status | tr a-z A-Z"
+    expect {
+        -ex "PT$n- 0\r"        { set resolves yes }
+        -re "PT$n- \[1-9\]"    { set resolves no }
+        -re {EXTINCTION:}      { lc_extinction_fail "kernel extinction resolving $dir" }
+        timeout                { lc_fail "timeout resolving $dir" }
+        eof                    { lc_fail "unexpected EOF resolving $dir" }
+    }
     lc_send "mkdir -p $layer; bind -bc $layer $dir; echo layer$n-\$status | tr a-z A-Z"
     expect {
         -ex "LAYER$n- 0\r"     { lc_step "saw: $layer layered over $dir" }
         -re "LAYER$n- \[1-9\]" {
             lc_send "echo \$errstr"
             expect -timeout 5 timeout {}
-            lc_fail "bind -bc $layer $dir failed (its errstr is above)"
+            lc_send "ns --color=never"
+            expect -timeout 5 timeout {}
+            lc_fail "bind -bc $layer $dir failed with $before mount entries before it and the point resolving: $resolves (its errstr and the table are above)"
         }
         -re {EXTINCTION:}      { lc_extinction_fail "kernel extinction while layering $dir" }
         timeout                { lc_fail "timeout layering $dir" }
@@ -118,6 +150,7 @@ set n 0
 foreach d [linsert $wdirs 0 /var/icu_tests/test/testdata/out] {
     lib_layer [incr n] $d
 }
+lib_ns_count end
 
 # A full ICU run is minutes, not seconds.
 set ::lc_cmd_timeout 1800
