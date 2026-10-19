@@ -1,6 +1,75 @@
 # The autonomous-run journal
 
 
+## 2026-10-19 -- 13:05Z closed, Stratum main gains the session-DEK leases, 17:09Z designed (corona)
+
+Picked up at c6e06b044 (13:05Z committed, unpushed) after a self-compaction, with
+two decisions owed; put both to the operator in one AskUserQuestion.
+
+**The operator's decisions.** (1) Stratum source: MERGE Astra's three
+codex/astra-session-dek commits onto canonical Stratum main -- option B, not the
+pin I recommended -- then "Please also push Stratum". (2) 17:09Z: HARDEN listen
+and dgram_sendto now -- option B, not the deferral I recommended.
+
+**Stratum main ac519fc -> 7dd103d.** Verified before acting: canonical main
+lacked 61dde37 (the object present, not an ancestor); stratum-astra is a worktree
+of the same repo, and main fast-forwards cleanly (merge-base == main's tip); both
+live remotes sat at ac519fc by ls-remote (the local origin/main tracking ref was
+a stale May ref). Compatibility for main's b3 was measured, not assumed: 61dde37's
+contract (v2/docs/reference/22-ctl.md) keeps every single-session ctl operation
+and states no wire- or disk-format change -- what changes is a SECOND
+connection's install-dek on a leased dataset (STM_EACCES -> a proven
+per-(conn, dataset) lease) and a last-lease evict that drains dirty buffers
+first. b3's login runs the same install-dek path, but D7 exists only in corona's
+joey, so main's gates never drove two logins of one user. The canonical worktree
+carries two stale tracked edits (2026-07-11) and 52 untracked notes; none is a
+build input (enumerated with --untracked-files=all, the filter proven against 157
+tracked sources), and the fast-forward left them untouched. Done UNDER the mac
+lease, so no peer build straddled the move; pushed github + codeberg, ls-remote
+verified on both. main acked on yip 0228 (b3 had not baked since) with a
+heads-up of its own (M8 bounds a dev9p create's mode by the parent's and adds a
+per-Proc umask); Astra noted on 0226.
+
+**13:05Z closed.** The push gate work/oct19-1305z/gate.sh is derived from NA-4d's
+kernel-run.sh: Stratum pinned by HEAD plus the exact tracked-edit set plus no
+untracked build input, stratumd provenance asserted (the build line and both CMake
+caches name the canonical tree), D7 required. RED first: a DRYRUN before the
+fast-forward refused at the pin, rc 3. gate-20261019T051917Z ALL GREEN: ci
+1894/1894 and qual 1894/1894, joey D7 PASS in both (it extincted against
+ac519fc), loom verdicts unchanged, one stratumd binary (42d0f1d4) staged
+everywhere. c6e06b044 pushed to both mirrors.
+
+**Wrong turns, and what caught them.**
+- I had told the operator that corona's D7 dependency rode on "a cached
+  stratumd". NA-4d's harness PINNED stratum-astra@7dd103d deliberately
+  (kernel-run.sh:28-29, 123-124: HEAD equality plus a dirty refusal).
+- A count of "home key install failed" read 0 on every ref, corona's own
+  included -- a broken `git show ref:path`. A cat-file control read 1 on corona
+  and on b3; the claim that b3 shares the login path rests on the control.
+- My first "no untracked Stratum build input" check read porcelain's COLLAPSED
+  untracked directories: a negative over a set it never enumerated. Re-run with
+  every file listed.
+- Writing "the mutant failed the narrow_fd leg" into OPEN-BUGS, my own guard
+  refused: the surviving mutant log is test.sh's stdout (tally 1893/1894 only),
+  and per-test verdicts live in build/test-boot.log, which the next run had
+  overwritten. The failing assertion line survives in the session transcript,
+  and only an un-narrowed fd can fail it (the leg returns at its first failing
+  assertion). Lesson: copy the boot log into the run directory -- gate.sh does.
+- In the 17:09Z question I had called connect "already hardened". Reading it
+  for B: connect snapshots the row (syscall.c:12059) and only later pins ctl
+  (:11979), so it shares listen's and dgram_sendto's window; its pin-once guards
+  only the sleep after the pin.
+
+**17:09Z: designed, no code yet** (memory design_1709z_socket_arm_identity).
+Each socket()-born row keeps a REF to its ctl Spoor in a parallel `ctl[]` array
+(NP-5's ready[] discipline), and every verb-writing arm checks the Spoor it pins
+against it before writing; because the row holds a reference, pointer equality
+is exact identity. Ruled out: a qid identity (AUDIT-TRIGGERS row 126 forbids
+decoding netd's qid layout, and netd's ctl qid carries no generation), a raw
+pointer field (ABA), a handle-slot generation (struct Handle has none), and
+Spoor->path (I-33). Arms: connect, listen, dgram_sendto; F_SETFL stays main's
+NP-5 item.
+
 ## 2026-10-18 -- NA-4d guest qualification: vote 11/12, the adapter backstop, the probe legs (corona)
 
 Picked up NA-4d at fd5181370 (the audit-r2 fix batch, which the 10-15 lease-run
