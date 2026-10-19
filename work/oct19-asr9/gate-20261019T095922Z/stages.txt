@@ -1,0 +1,23 @@
+2026-10-19T09:59:23Z  asr9 HEAD 107c5c1bdb7bbfaf32480eb94fbca2d2df4d7ff4 on main 11546588847f36d4f77a36b08f87b6b46a814cfd, clean
+2026-10-19T09:59:23Z  expected tests: 2005 (main's 2000 + the five)
+2026-10-19T09:59:23Z  stratum at 7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc, tracked edits exactly 'v2/.audit_r172_findings.md v2/specs/compound_ops_per_inode.tla', no untracked build input
+2026-10-19T09:59:23Z  go fork /Users/northkillpd/projects/go-thylacine at f67e51e66a99cb02b7418cedee7200665210c58b dirty=0 (shared, unpinned)
+2026-10-19T09:59:23Z  disk pre: 9391 MiB free (floor 6144)
+2026-10-19T10:06:15Z  disk post-default-build: 7424 MiB free (floor 6144)
+2026-10-19T10:06:16Z  DEFAULT: the five AS-R9 test names are in thylacine.elf
+2026-10-19T10:06:16Z  default kernel 0bd67a7c2b575b688935ec7b4173a9be154c6ec3a6f6203bb35396d7c3114660
+2026-10-19T10:07:16Z  default: test.sh exit 0
+2026-10-19T10:07:16Z  default GREEN: 2005/2005, 0 FAIL lines, no EXTINCTION, the five AS-R9 tests PASS
+2026-10-19T10:21:49Z  FAULT GREEN: ==> [el1_sync_runaway] PASS (saw 'EXTINCTION: el1-sync recursion'; 'console-ring: NOT held' absent)  ==> Summary: 8 PASS, 0 FAIL out of 8 
+2026-10-19T10:21:49Z  disk post-fault: 6740 MiB free (floor 6144)
+2026-10-19T10:22:45Z  disk post-ci-build: 6741 MiB free (floor 6144)
+2026-10-19T10:22:47Z  CI: the five AS-R9 test names are in thylacine.elf
+2026-10-19T10:22:47Z  ci kernel 0bd67a7c2b575b688935ec7b4173a9be154c6ec3a6f6203bb35396d7c3114660
+2026-10-19T10:23:46Z  ci: test.sh exit 0
+2026-10-19T10:23:46Z  ci GREEN: 2005/2005, 0 FAIL lines, no EXTINCTION, the five AS-R9 tests PASS
+2026-10-19T10:25:18Z  disk post-ubsan-build: 6665 MiB free (floor 6144)
+2026-10-19T10:25:20Z  UBSAN: the five AS-R9 test names are in thylacine.elf
+2026-10-19T10:25:20Z  ubsan kernel 2a4b8dee30d0dd161a857f1b4a17bfcef14844046e07904dfc788fb070effa24
+2026-10-19T10:26:20Z  ubsan: test.sh exit 0
+2026-10-19T10:26:20Z  ubsan GREEN: 2005/2005, 0 FAIL lines, no EXTINCTION, the five AS-R9 tests PASS
+2026-10-19T10:27:18Z  exit 0

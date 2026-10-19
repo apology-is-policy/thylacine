@@ -1,0 +1,6 @@
+mac   HELD by you for 29m, 3.5h left
+        why: corona: AS-R9 backport gate for main (asr9 worktree): TLC burrow.tla x6 + capacity, audit-close commit, worktree build/ clone, default bake + test.sh, test-fault.sh, --config ci suite, UBSan suite, ci-smp-gate N=10. Duration unknown (SMP matrix dominates). Disk 9.2 GiB: stops at the 6 GiB floor rather than lowering it.
+        queue 1: aux (22m waiting)
+        queue 2: main (52s waiting)
+pi    FREE
+disk: 6.5 GiB available at /Users/northkillpd/projects/thylacine-corona

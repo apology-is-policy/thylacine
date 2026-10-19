@@ -1,0 +1,2 @@
+cp: /Users/northkillpd/projects/thylacine/build/qmp-gate.sock is a socket (not copied).
+cp: /Users/northkillpd/projects/thylacine/build/qmp.sock is a socket (not copied).

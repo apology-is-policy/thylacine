@@ -5049,5 +5049,7 @@ Folded with it: the corona twin of the backport audit's P3-4, which
 `vault/specs/spec-burrow.md`, which neither tree's close had taught the charge
 record.
 
-**Posture: CLOSED at *(pending)*, UNBUILT.** Owed: the gate (ci, qual, UBSan,
-`ci-smp-gate`) batched with the pi bake, with mutants for the counter pin.
+**Posture: CLOSED at `acd22142d`, UNBUILT.** Owed: the gate (ci, qual, UBSan,
+production, `ci-smp-gate` N=10: `work/oct19-vote13/gate.sh`) batched with the
+pi bake, with mutants for the counter pin and the rt_sigaction pin
+(`work/oct19-vote13/mutants.sh`, M1-M5).

@@ -1,0 +1,5 @@
+corona HEAD acd22142d, 2026-10-19T10:46:26Z
+kernel: syscall, authority bit and route byte layout PASS
+libt: syscall, authority bit and route byte layout PASS
+Rust: syscall, authority bit and route byte layout PASS
+rc=0

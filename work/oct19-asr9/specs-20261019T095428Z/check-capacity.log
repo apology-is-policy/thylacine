@@ -1,0 +1,7 @@
+== clean (must run to completion) ==
+ok   capacity: rc=0, 625 distinct states
+== buggy (must violate, and violate the NAMED invariant) ==
+ok   capacity_buggy_replace_orphans: rc=12, NoOrphan violated as claimed
+ok   capacity_buggy_detach_no_refund: rc=12, NoOrphan violated as claimed
+
+capacity: ALL CFGS AS CLAIMED
