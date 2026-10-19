@@ -5,12 +5,22 @@
 # space, so its distinct-state count is a deterministic fingerprint (a change
 # means the MODEL changed); a BUGGY cfg halts at the first violation, so it is
 # judged on its verdict -- the exit status plus the NAME of the invariant that
-# fired. Both buggy cfgs list ChargeConserved AHEAD of NoOrphan and must be
-# judged on NoOrphan: the orphan is a slot that lost its mapping while still
-# resident, so page_count still equals the resident count and the counter
-# cannot see it -- that blindness is the whole reason NoOrphan exists, and a
-# run that reported ChargeConserved instead would mean the model no longer
-# says so.
+# fired. The two orphan cfgs list ChargeConserved AHEAD of NoOrphan and must
+# be judged on NoOrphan: the orphan is a slot that lost its mapping while
+# still resident, so page_count still equals the resident count and the
+# counter cannot see it -- that blindness is the whole reason NoOrphan
+# exists, and a run that reported ChargeConserved instead would mean the
+# model no longer says so. The alias cfg lists ChargeConserved, NoOrphan and
+# ZeroRead AHEAD of NoAlias and must be judged on NoAlias, for the same
+# reason: an offset mapped at two addresses is charged once, reachable, and
+# leaves every free address empty.
+#
+# The clean pin is TWO numbers. The distinct-state count cannot see the
+# B-3e Extend action: every per-address shape it reaches (old, new or free,
+# resident or not) was reachable before by detaches and replaces, so Extend
+# adds TRANSITIONS between existing states and the count stays 625. The
+# generated-state count sums every state's successors, so it moves when an
+# action is added or changed; it is deterministic for a full exploration.
 #
 # What this script CANNOT see, said so the green reads no larger: the model
 # has one address space and no metadata. The pagemap's node pages ride the
@@ -26,12 +36,13 @@ TMP=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMP"' EXIT
 STAMP="$TMP/stamp"; : > "$STAMP"
 
-# clean: cfg, expected distinct states ("-" = do not pin)
-CLEAN="capacity:625"
+# clean: cfg, expected distinct states, expected generated states ("-" = do not pin)
+CLEAN="capacity:625:5785"
 
 # buggy: cfg, invariant that must be the one reported
 BUGGY="capacity_buggy_replace_orphans:NoOrphan
-capacity_buggy_detach_no_refund:NoOrphan"
+capacity_buggy_detach_no_refund:NoOrphan
+capacity_buggy_extend_alias:NoAlias"
 
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"
@@ -41,17 +52,21 @@ run() {  # $1 = cfg basename -> sets RC and LOG
 }
 
 echo "== clean (must run to completion) =="
-echo "$CLEAN" | while IFS=: read -r cfg want; do
+echo "$CLEAN" | while IFS=: read -r cfg want wantgen; do
     run "$cfg"
     got=$(grep -o '[0-9]* distinct states found' "$LOG" | tail -1 | awk '{print $1}')
+    gen=$(grep -o '[0-9]* states generated' "$LOG" | tail -1 | awk '{print $1}')
     if [ "$RC" -ne 0 ]; then
         echo "FAIL $cfg: rc=$RC (expected 0)"; sed -n '/Error/,+4p' "$LOG" | head -8
         echo fail > "$TMP/failed"
     elif [ "$want" != "-" ] && [ "$got" != "$want" ]; then
         echo "FAIL $cfg: $got distinct states, expected $want -- the model CHANGED"
         echo fail > "$TMP/failed"
+    elif [ "$wantgen" != "-" ] && [ "$gen" != "$wantgen" ]; then
+        echo "FAIL $cfg: $gen states generated, expected $wantgen -- an action CHANGED"
+        echo fail > "$TMP/failed"
     else
-        echo "ok   $cfg: rc=0, $got distinct states"
+        echo "ok   $cfg: rc=0, $got distinct states, $gen generated"
     fi
 done
 

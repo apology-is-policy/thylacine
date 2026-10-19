@@ -5,13 +5,34 @@ title: "capacity.tla"
 models: [sub-kernel-vma, sub-kernel-burrow, sub-kernel-pagemap, sub-kernel-fault, sub-kernel-addrspace]
 pins: [inv-i32]
 cfgs:
-  - "capacity.cfg -- clean, four slots x two Burrows: TypeOk + ChargeConserved + NoOrphan + LiveIsMapped; 625 distinct states, pinned"
+  - "capacity.cfg -- clean, four addresses x two Burrows: TypeOk + ChargeConserved + NoOrphan + LiveIsMapped + NoAlias + ZeroRead; 625 distinct states and 5785 generated, both pinned (B-3e's Extend adds transitions, not states)"
   - "capacity_buggy_replace_orphans.cfg -- the D-3b window keeps the old Burrow's slots resident and charged after the swap (the B-1a audit's F5): NoOrphan, at the first Replace of a touched slot; ChargeConserved listed ahead of it and HOLDING"
   - "capacity_buggy_detach_no_refund.cfg -- a detach unmaps a resident slot without releasing it (the pre-B-1a piece-detach shape): NoOrphan, at the first Detach of a touched slot; ChargeConserved listed ahead of it and HOLDING"
+  - "capacity_buggy_extend_alias.cfg -- B-3e: the anonymous-mapping merge's extension maps whatever offset it is handed instead of the one the Burrow's bias names: NoAlias, at the first Extend onto a mapped offset; ChargeConserved, NoOrphan and ZeroRead listed ahead of it and HOLDING (the accounting cannot see an alias)"
 gate: "any change to vma_detach_range_in's phase order (the release BEFORE the reshape), to vma_replace_range_in, to burrow_release_lazy_range_in / burrow_decommit_in, to the ANON_LAZY fault arm's charge, to burrow_free_internal's Proc-agnostic free, or to alloc_user_pages / free_pages' pool charge and return (mm/phys.c), or to the MMU's table charge and reclaim; specs/check-capacity.sh runs the three cfgs, pins the clean count and judges each buggy cfg by the NAME of the invariant TLC reports"
 created: 2026-09-23
 updated: 2026-09-23
 ---
+## B-3e: the merge that reuses offsets (2026-10-19, model-first)
+
+ARCH 6.5's "Adjacent anonymous mappings merge"
+([[dec-2026-10-18-anon-mapping-merge]]) adds the first operation that maps an
+offset of a LIVE Burrow again after it was unmapped: a fresh reservation
+EXTENDS a neighbour's Burrow instead of minting one. The module was rewritten
+to name addresses (`at[a]` is what address `a` maps: `<<b, s>>` or `Free`),
+with both Burrows at bias 0, and gained `Extend(a, b)` (a free address takes
+offset `a` of a live Burrow, which must hold no page) and two invariants.
+`NoAlias`: no offset is mapped at two addresses (an alias is one page in two
+places, freed by either detach under the other). `ZeroRead`: at a free
+address, every live Burrow's offset for it holds no page, so an extension
+reads zero whichever Burrow it reuses; it follows from `NoOrphan` and the
+bias, and is what the kernel's pre-extension check asserts. Adjacency is
+abstracted away (any live Burrow may be extended), which over-approximates the
+kernel and is sound for these safety properties. Discrimination, run once:
+the model without `Extend` generates 5001 states (the pin, 5785, sees the
+action), and `ZeroRead` alone fires on `capacity_buggy_detach_no_refund`'s
+orphan.
+
 ## Abstraction
 
 The I-32 page-accounting **conservation law**, written model-first in the
