@@ -2477,6 +2477,14 @@ build_sysroot() {
         exit 1
     fi
 
+    # 2b. the Pouch adapters' host checkers, on the tree just patched: kill and
+    #     getppid, openat's close-on-exec arms, dup2 onto itself, the
+    #     descriptor calls, and spawn's handle order, each against a mocked
+    #     kernel (host_boundary_check, defined beside the pre-target checks).
+    host_boundary_check "$BUILD_DIR/host-boundaries/pouch" --musl "$musl_src" \
+        pouch-descriptor-ops pouch-dup2-self pouch-kill-probe \
+        pouch-open-cloexec pouch-spawn-order || exit 1
+
     # 3. configure the pouch libc out-of-tree for aarch64-thylacine. Same
     #    toolchain tools/pouch-clang wraps; clang treats "thylacine" as an
     #    unknown OS, so pouch drives the target explicitly (invariant P-1).
@@ -8249,6 +8257,51 @@ python3 "$REPO_ROOT/tools/check-prot-mirror.py" --expect-unmirrored 5 \
     || { echo "==> prot-mirror check FAILED -- a kernel prot bit and its" >&2
          echo "    userspace mirror disagree, or a new kernel bit has no mirror" >&2
          exit 1; }
+
+# The host boundary checkers: each tools/test-<name>.py compiles the code it
+# names from this tree, tools/host-tests/<name>.c beside it with mocked owners,
+# and runs it under ASan and UBSan at -O0 and -O2; the native ones also pin
+# the syscall numbers in every mirror and the phenotype's collision asserts.
+# Nothing ran them until 2026-10-19, so a renumbered mirror could drift with
+# every build green. Runs the named drivers in parallel, each into a fresh
+# <root>/<name>; --musl hands the Pouch drivers the patched musl tree. The
+# mutant legs, which prove each checker still refuses its defect, run in
+# tools/test-host-boundaries.sh.
+host_boundary_check() {
+    local root="$1"; shift
+    local musl=""
+    if [[ "$1" == --musl ]]; then musl="$2"; shift 2; fi
+    rm -rf "$root"; mkdir -p "$root"
+    local name i rc=0 pids=() names=()
+    for name in "$@"; do
+        if [[ -n "$musl" ]]; then
+            python3 "$REPO_ROOT/tools/test-$name.py" "$musl" "$root/$name" \
+                --cc "$LLVM_PREFIX/bin/clang" > "$root/$name.log" 2>&1 &
+        else
+            python3 "$REPO_ROOT/tools/test-$name.py" "$root/$name" \
+                --cc "$LLVM_PREFIX/bin/clang" > "$root/$name.log" 2>&1 &
+        fi
+        pids+=("$!"); names+=("$name")
+    done
+    for i in "${!pids[@]}"; do
+        if ! wait "${pids[$i]}"; then
+            echo "==> host boundary check FAILED: tools/test-${names[$i]}.py" >&2
+            echo "    (log: $root/${names[$i]}.log)" >&2
+            tail -n 20 "$root/${names[$i]}.log" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+# The native three need only this tree, so they run before any target. The
+# Pouch five need the patched musl tree, so build_sysroot runs them. Fatal, no
+# skip switch.
+if [[ "$target" != clean ]]; then
+    host_boundary_check "$BUILD_DIR/host-boundaries/native" \
+        handle-target-ownership native-descriptor-ops native-handle-query \
+        || exit 1
+fi
 
 case "$target" in
     kernel)      build_kernel      ;;

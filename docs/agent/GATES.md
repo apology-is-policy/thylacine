@@ -88,6 +88,21 @@ tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
 tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
 
+# Host boundary checkers. Each tools/test-<name>.py compiles the code it names
+# from this tree beside tools/host-tests/<name>.c with mocked owners, under ASan
+# and UBSan at -O0 and -O2; the native three also pin the syscall numbers in
+# every mirror and the phenotype's collision asserts. All eight were run by
+# nothing until 2026-10-19. build.sh now runs every clean leg on every build
+# (host_boundary_check: the native three before any target, the five Pouch ones
+# in build_sysroot on the freshly patched musl tree), and this gate adds each
+# checker's mutant legs, which prove it still refuses its defect. The checkers
+# and their mutants are derived (tools/host-tests/*.c, each driver's --help),
+# and a checker that declares no mutant fails. Needs build/pouch/musl-src
+# (tools/build.sh sysroot). Red-checked 2026-10-19: a planted
+# VIV_NATIVE_CEILING 132 fails the build at the check, and a sabotaged kill.c
+# in a musl copy fails exactly the three kill-probe legs that read it.
+tools/test-host-boundaries.sh       # 8 checkers, 50 legs, 35 s measured
+
 # Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
 # TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
 # passes only if capset id=4 (VENUS) is present in the first and ABSENT in the

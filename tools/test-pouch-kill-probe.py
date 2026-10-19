@@ -9,7 +9,7 @@ MUTANTS={
  'signal-group':('kill.c','\tif (pid < 0) {\n\t\terrno = EPERM;\n\t\treturn -1;\n\t}\n\tunsigned long len','\tunsigned long len'),
  'getppid-number':('getppid.c','__syscall(SYS_thyla_getppid)','__syscall(SYS_thyla_getppid - 1)'),
 }
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--mutant',choices=sorted(MUTANTS));a=p.parse_args();r=Path(__file__).resolve().parent.parent
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=sorted(MUTANTS));a=p.parse_args();r=Path(__file__).resolve().parent.parent
 a.output.mkdir(parents=True,exist_ok=False);inputs=[Path(__file__),r/'tools/host-tests/pouch-kill-probe.c']
 def one(path,pattern):
  found=re.findall(pattern,path.read_text());assert len(found)==1,(path,pattern,found);return int(found[0])
@@ -27,7 +27,7 @@ for source,dest in [('src/internal/_pouch_fs.h','fs-under-test.h'),('src/interna
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
 for opt in ('0','2'):
- exe=a.output.resolve()/('test-O'+opt);cmd=['/opt/homebrew/opt/llvm/bin/clang',*sdk,'-O'+opt,'-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror',*defs,'-I'+str(a.output.resolve()),str(inputs[1]),'-o',str(exe)]
+ exe=a.output.resolve()/('test-O'+opt);cmd=[a.cc,*sdk,'-O'+opt,'-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror',*defs,'-I'+str(a.output.resolve()),str(inputs[1]),'-o',str(exe)]
  (a.output/f'compile-O{opt}.json').write_text(json.dumps(cmd)+'\n')
  with (a.output/f'compile-O{opt}.log').open('w') as log:subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
  result=subprocess.run([str(exe)],capture_output=True,text=True);(a.output/f'run-O{opt}.log').write_text(result.stdout+result.stderr);print(result.stdout,end='')

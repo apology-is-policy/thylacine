@@ -2,7 +2,7 @@
 """Exercise actual Pouch descriptor adapters with mocked native/socket owners."""
 import argparse,hashlib,json,platform,subprocess
 from pathlib import Path
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--mutant',choices=['flags','tag','legacy','dup-floor','append-flip','omode-shift','oexec','pipe2-cloexec','pipe2-leak','pipe2-cancellable','pipe2-close-gone','setfl-fd','dupfd-source','cloexec-tag']);a=p.parse_args();r=Path(__file__).resolve().parent.parent
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=['flags','tag','legacy','dup-floor','append-flip','omode-shift','oexec','pipe2-cloexec','pipe2-leak','pipe2-cancellable','pipe2-close-gone','setfl-fd','dupfd-source','cloexec-tag']);a=p.parse_args();r=Path(__file__).resolve().parent.parent
 a.output.mkdir(parents=True,exist_ok=False);inputs=[Path(__file__),r/'tools/host-tests/pouch-descriptor-ops.c']
 for source,dest in [('src/internal/_pouch_descriptor.h','descriptor-under-test.h'),('src/fcntl/fcntl.c','fcntl-under-test.c'),('src/unistd/dup.c','dup-under-test.c'),('src/unistd/dup2.c','dup2-under-test.c'),('src/unistd/dup3.c','dup3-under-test.c'),('src/unistd/pipe2.c','pipe2-under-test.c')]:
  f=a.musl/source;inputs.append(f);s=f.read_text()
@@ -17,7 +17,7 @@ for source,dest in [('src/internal/_pouch_descriptor.h','descriptor-under-test.h
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
 for opt in ('0','2'):
- exe=a.output.resolve()/('test-O'+opt);cmd=['/opt/homebrew/opt/llvm/bin/clang',*sdk,'-O'+opt,'-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-I'+str(a.output.resolve()),str(inputs[1]),'-o',str(exe)]
+ exe=a.output.resolve()/('test-O'+opt);cmd=[a.cc,*sdk,'-O'+opt,'-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-I'+str(a.output.resolve()),str(inputs[1]),'-o',str(exe)]
  (a.output/f'compile-O{opt}.json').write_text(json.dumps(cmd)+'\n')
  with (a.output/f'compile-O{opt}.log').open('w') as log:subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
  result=subprocess.run([str(exe)],capture_output=True,text=True);(a.output/f'run-O{opt}.log').write_text(result.stdout+result.stderr);print(result.stdout,end='')

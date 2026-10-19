@@ -11,7 +11,7 @@ MUTANTS={
  'create-bypass':[('if (r >= 0) { __syscall(SYS_close, p); return pouch_open_ret(r, flags); }','if (r >= 0) { __syscall(SYS_close, p); return __syscall_ret(r); }')],
  'eexist-bypass':[('\t\t\treturn pouch_open_ret(o, flags);','\t\t\treturn __syscall_ret(o);')],
 }
-p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--mutant',choices=sorted(MUTANTS));a=p.parse_args();r=Path(__file__).resolve().parent.parent
+p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=sorted(MUTANTS));a=p.parse_args();r=Path(__file__).resolve().parent.parent
 a.output.mkdir(parents=True,exist_ok=False);inputs=[Path(__file__),r/'tools/host-tests/pouch-open-cloexec.c']
 for source,dest in [('src/internal/_pouch_fs.h','fs-under-test.h'),('src/internal/_pouch_descriptor.h','descriptor-under-test.h'),('src/fcntl/openat.c','openat-under-test.c')]:
  f=a.musl/source;inputs.append(f);s=f.read_text()
@@ -23,7 +23,7 @@ for source,dest in [('src/internal/_pouch_fs.h','fs-under-test.h'),('src/interna
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
 for opt in ('0','2'):
- exe=a.output.resolve()/('test-O'+opt);cmd=['/opt/homebrew/opt/llvm/bin/clang',*sdk,'-O'+opt,'-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-I'+str(a.output.resolve()),str(inputs[1]),'-o',str(exe)]
+ exe=a.output.resolve()/('test-O'+opt);cmd=[a.cc,*sdk,'-O'+opt,'-g','-fsanitize=address,undefined','-Wall','-Wextra','-Werror','-I'+str(a.output.resolve()),str(inputs[1]),'-o',str(exe)]
  (a.output/f'compile-O{opt}.json').write_text(json.dumps(cmd)+'\n')
  with (a.output/f'compile-O{opt}.log').open('w') as log:subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,check=True)
  result=subprocess.run([str(exe)],capture_output=True,text=True);(a.output/f'run-O{opt}.log').write_text(result.stdout+result.stderr);print(result.stdout,end='')

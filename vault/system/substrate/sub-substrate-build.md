@@ -15,6 +15,7 @@ code:
   - tools/configure.sh
   - tools/test-configure.sh
   - tools/check-flag-words.py
+  - tools/test-host-boundaries.sh
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -22,7 +23,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-18
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -257,6 +258,23 @@ harness could not create its output file. A refusal while there is still room
 keeps the failure inside this build. `du` counts APFS-cloned blocks in full,
 so in a worktree with a cloned `build/` the list overstates what deleting an
 entry frees; `df` is the measure.
+
+**The host boundary checkers run on every build (2026-10-19).** Each
+`tools/test-<name>.py` compiles the code it names from this tree beside
+`tools/host-tests/<name>.c` with mocked owners, and runs it under ASan and UBSan
+at -O0 and -O2; the native ones also pin the syscall numbers in every mirror and
+the phenotype's collision asserts. All eight were run by nothing until this
+date, so a renumbered mirror could drift with every build green.
+`host_boundary_check` runs named drivers in parallel, each into a fresh
+`build/host-boundaries/<set>/<name>`, and stops the build with the failing
+log's tail: the native three (handle target replacement, the descriptor
+handlers, the handle query) before any target except `clean`, and the five
+Pouch adapters in `build_sysroot`, step 2b, on the musl tree just patched.
+`tools/test-host-boundaries.sh` runs every checker clean and under each mutant
+it declares (50 legs, 35 s measured), deriving the set from
+`tools/host-tests/*.c` and the mutants from each driver's `--help`; a checker
+that declares no mutant fails it. A planted `VIV_NATIVE_CEILING` 132 stops the
+build at the check, naming the pin.
 
 **Both ambush builds spawn the launch target held (2026-09-30; untagged
 2026-10-06).** The Go fork's `SysProcAttr.DebugHeld` sets the spawn record's

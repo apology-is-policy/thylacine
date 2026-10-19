@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Check query ABI mirrors and exercise the actual native handler with mocks.
-Usage: test-native-handle-query.py OUTPUT_DIRECTORY
+Usage: test-native-handle-query.py [--mutant ceiling|append] OUTPUT_DIRECTORY
 The output must be new. This does not emulate handle locking or Vivarium;
 run the native guest witness and Linux collision witness for those boundaries.
+A mutant must be refused: ceiling moves VIV_NATIVE_CEILING in the text the pins
+read, and append drops the handler's APPEND bit from the code the test runs.
 """
 import argparse
 import hashlib
@@ -14,6 +16,7 @@ from pathlib import Path
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('output', type=Path)
 p.add_argument('--cc', default='/opt/homebrew/opt/llvm/bin/clang')
+p.add_argument('--mutant', choices=['ceiling', 'append'])
 a = p.parse_args()
 r = Path(__file__).resolve().parent.parent
 checks = {
@@ -50,10 +53,20 @@ checks = {
         r'\{ VIV_LINUX_UMASK,\s+VIV_TIER2 \}',
         r'VIV_LINUX_RT_SIGACTION > VIV_NATIVE_CEILING'],
 }
+failed = []
 for name, patterns in checks.items():
     source = (r / name).read_text()
+    if a.mutant == 'ceiling' and name.endswith('vivarium.h'):
+        source, n = re.subn(r'(#define VIV_NATIVE_CEILING\s+)133\b', r'\g<1>132', source)
+        assert n == 1
     for pattern in patterns:
-        assert len(re.findall(pattern, source)) == 1, (name, pattern)
+        if len(re.findall(pattern, source)) != 1:
+            failed.append((name, pattern))
+if a.mutant == 'ceiling':
+    assert failed == [('kernel/include/thylacine/vivarium.h', r'#define VIV_NATIVE_CEILING\s+133\b')], failed
+    print('PASS ceiling mutant refused by the pin')
+    raise SystemExit(0)
+assert not failed, failed
 source = r / 'kernel/syscall.c'
 s = source.read_text()
 assert 'sys_handle_flags_get_handler(ctx->regs[0])' in s
@@ -63,6 +76,10 @@ for name in ['sys_handle_flags_get_in', 'sys_handle_flags_get_handler']:
     end = s.index('\n}', start) + 2
     parts.append(s[start:end])
 handler = '\n'.join(parts)
+if a.mutant == 'append':
+    old = '    if (st.omode & SYS_WALK_OPEN_OAPPEND)  word |= SYS_HANDLE_STATUS_APPEND;\n'
+    assert handler.count(old) == 1
+    handler = handler.replace(old, '')
 a.output.mkdir(parents=True, exist_ok=False)
 (a.output / 'handler.c').write_text(handler+'\n')
 inputs = [r / n for n in checks] + [source, Path(__file__), r / 'tools/host-tests/native-handle-query.c']
@@ -78,5 +95,9 @@ for opt in ['0', '2']:
     run = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     (a.output / ('run-O'+opt+'.log')).write_text(run.stdout)
     print(run.stdout, end='')
-    run.check_returncode()
-print('PASS query ABI mirrors and collision declarations (runtime collision gate separate)')
+    if a.mutant:
+        assert run.returncode != 0 and re.search(r'Assertion.*failed', run.stdout), 'the append mutant was not refused'
+    else:
+        run.check_returncode()
+print('PASS append mutant refused by the handler test' if a.mutant else
+      'PASS query ABI mirrors and collision declarations (runtime collision gate separate)')
