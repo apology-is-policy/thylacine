@@ -922,26 +922,11 @@ bool burrow_release_mapping_freed(struct Burrow *v) {
 
 void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
 
-// D-3c F1: the deferred twin of burrow_release_mapping_freed. Drops the mapping
-// ref under v->lock and, if that was the last ref, returns the now-dead Burrow
-// WITHOUT freeing it -- the caller (holding as->lock) pushes it onto a local
-// stack and calls burrow_free_deferred after the unlock, so the FILE arm's
-// possibly-sleeping spoor_clunk never runs under a spinlock. Returns NULL when
-// the Burrow survives (a handle or another mapping still holds it).
-// AS-R9 self-audit: migrating vma_free_deferred to the settled form left this
-// with no callers at all AND a second copy of the {0,0} decision. Kept as the
-// no-payer spelling of the settled form rather than deleted, because it is the
-// published name for "drop a mapping, hand back the dead Burrow, settle
-// nothing" and a caller holding no charge record should not have to pass NULLs.
-struct Burrow *burrow_release_mapping_deferred(struct Burrow *v) {
-    return burrow_release_mapping_settled_deferred(v, NULL, NULL);
-}
-
 // D-3c F1: free a Burrow the caller took off a deferred-free stack. Runs the
 // same burrow_free_internal every unref/release-mapping funnels into -- but at
 // a point where NO lock is held, so a sleeping teardown is legal. The {0,0}
-// state was established under v->lock by burrow_release_mapping_deferred and
-// nothing else can reach the Burrow, so no re-check is needed.
+// state was established under v->lock by burrow_release_mapping_settled_deferred
+// and nothing else can reach the Burrow, so no re-check is needed.
 void burrow_free_deferred(struct Burrow *v) {
     while (v) {
         if (v->magic != VMO_MAGIC)
@@ -1030,10 +1015,13 @@ bool burrow_unref_settled(struct Burrow *v, const struct Proc *payer, u32 *out_r
     return burrow_unref_settled_in(v, payer ? payer->as : NULL, out_refund);
 }
 
-// AS-R9: the settled mapping drop, deferred. The twin of
-// burrow_release_mapping_deferred -- same {0,0} decision, same "return the dead
-// Burrow rather than free it under the caller's as->lock" contract -- with the
-// charge decision folded into the same critical section.
+// D-3c F1: the deferred mapping drop. Drops the mapping ref under v->lock and,
+// if that was the last ref, returns the now-dead Burrow WITHOUT freeing it --
+// the caller (holding as->lock) pushes it onto a local stack and calls
+// burrow_free_deferred after the unlock, so the FILE arm's possibly-sleeping
+// spoor_clunk never runs under a spinlock. Returns NULL when the Burrow
+// survives. AS-R9: the charge decision is folded into the same critical
+// section; a NULL payer settles nothing.
 struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
                                                        const struct AddrSpace *payer,
                                                        u32 *out_refund) {

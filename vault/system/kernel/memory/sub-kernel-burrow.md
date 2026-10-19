@@ -3,7 +3,7 @@ id: sub-kernel-burrow
 type: sub
 parent: moc-kernel-memory
 title: "The Burrow — a memory object with two refcounts and six backings"
-code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h"]
+code: ["kernel/burrow.c", "kernel/include/thylacine/burrow.h", "kernel/test/test_burrow.c"]
 audit: hard
 guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
@@ -86,15 +86,16 @@ first Burrow entry to speak errno, because its callers are `SYS_BURROW_PROTECT`
 and the phenotype `mprotect` row, both of which hand the value to userspace as
 is.
 
-**The deferred-free pair** — `burrow_release_mapping_deferred` and
+**The deferred-free pair** — `burrow_release_mapping_settled_deferred` and
 `burrow_free_deferred` — exists because a FILE-backed Burrow's free reaches
 `spoor_clunk`, which may **sleep**, while every VMA mutator holds `as->lock`, a
-spinlock. `burrow_release_mapping_deferred` drops the mapping ref under the lock
-but does **not** free (its settled twin, `burrow_release_mapping_settled_deferred`,
-also takes the I-32 charge record inside that same hold — below); it hands the
-caller the
+spinlock. `burrow_release_mapping_settled_deferred` drops the mapping ref under
+the lock but does **not** free, and takes the I-32 charge decision inside that
+same hold (below; a NULL `payer` settles nothing). It hands the caller the
 Burrow that still owes its physical free, collected on a `deferred_free_next`
-stack and passed to `burrow_free_deferred` after the unlock. The full mechanism —
+stack and passed to `burrow_free_deferred` after the unlock. (The unsettled
+`burrow_release_mapping_deferred` went with AS-R9: every deferred mapping drop
+is this one.) The full mechanism —
 the `out_free` out-parameter every teardown path must thread and must never drop
 (a NULL `out_free` would leak the chain) — lives on [[sub-kernel-vma]].
 `burrow_free_deferred(v)` frees `v` and every Burrow chained behind it on
@@ -458,8 +459,9 @@ The charge triple is under the same `lock` as the counts. `shared_out` is
 **monotonic** — a region is never un-shared in a way that returns the charge to
 the sharer — which is why the settled mapping drop may read it at the drop
 rather than before it: false→true only ever *adds* a reason to release, so the
-later read errs in the harmless direction. (`burrow_is_shared_out`, the
-unlocked reader, went with AS-R9; the one read is under the lock now.)
+later read errs in the harmless direction. (`burrow_is_shared_out` went with
+AS-R9. It read under the lock too, but in an acquisition of its own BEFORE the
+drop; the one read now sits inside the drop's hold.)
 
 ## Concurrency
 

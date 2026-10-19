@@ -69,6 +69,13 @@ void test_vmo_file_create_close_round_trip(void);
 void test_vmo_file_create_failure_retains_spoor(void);
 void test_vmo_file_map_unmap_lifecycle(void);
 void test_vmo_file_resident_pages_freed(void);
+void test_burrow_backing_pages_matches_alloc(void);
+// AS-R9: settled drops + the JIT remaining-reference premise.
+void test_burrow_settled_drop_retains_nonfinal_charge(void);
+void test_burrow_settled_drop_exact_payer(void);
+void test_burrow_settled_mapping_drop_defers_free(void);
+void test_burrow_unmap_failure_leaves_mapping_attached(void);
+void test_burrow_unmap_interior_start_refused(void);
 
 // Convenience: test "did we free a BURROW this turn" by snapshot diff.
 static u64 created_diff_snap;
@@ -768,22 +775,24 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
     TEST_ASSERT(attached >= 1, "the mapping must be attached before the refusals");
     burrow_charge_record(v, p, 1);
 
-    // burrow_unmap_reporting refuses in eight places, all of them above its
-    // first mutation (the vma_uninstall_range_in call), which is what the proof
-    // above rests on. Seven are probed here, and each must leave the mapping
+    // burrow_unmap_reporting and its _in core refuse in nine places, all of
+    // them above the first mutation (the vma_uninstall_range_in call), which is
+    // what the proof above rests on. One, the core's NULL address space, cannot
+    // be reached through burrow_unmap: a live Proc's `as` is never NULL. Seven
+    // of the other eight are probed here, and each must leave the mapping
     // attached and the charge record intact: end mismatch, no VMA at the
     // address, zero length, misaligned vaddr, misaligned length, a null Proc,
     // and a range whose end wraps past 2^64. (Named by predicate, not by line:
     // a line number here would be re-pointed by hand on the next edit to
     // burrow.c, and silently wrong until someone noticed.)
     //
-    // The last two are BEHAVIOUR pins, not guard pins, and saying so is the
-    // honest form: vma_lookup null-guards its own Proc, and no VMA can be
-    // installed spanning a wrapped range, so deleting EITHER guard still
-    // refuses -- at the no-VMA miss, with an identical observable. Neither can
-    // be made load-bearing through this API, so what the two assertions buy is
-    // that both inputs are refused without faulting and without mutating, NOT
-    // that the guard named beside them is the one that fired.
+    // The wrap is a BEHAVIOUR pin, not a guard pin, and saying so is the
+    // honest form: no VMA can be installed spanning a wrapped range, so
+    // deleting its guard still refuses -- at the no-VMA miss, with an identical
+    // observable. What that assertion buys is that the input is refused without
+    // faulting and without mutating, NOT that the guard named beside it is the
+    // one that fired. The null Proc IS a guard pin: the wrapper reads p->as
+    // right after its guard, so deleting the guard faults instead of refusing.
     //
     // The eighth, vma->vaddr_start != vaddr, IS load-bearing, and the geometry
     // that makes it so needs its own fixture -- see
@@ -836,9 +845,8 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
 // uninstalls the tail page and then vma_remove()s the WHOLE two-page VMA, a
 // partial unmap silently accepted as a full teardown, leaving the head page's
 // PTEs installed over a Burrow whose mapping reference is gone. That is why it
-// gets its own fixture: unlike the null-Proc and wrapped-end probes, which
-// collapse onto the no-VMA miss, this refusal is observably the work of the
-// guard it names.
+// gets its own fixture: unlike the wrapped-end probe, which collapses onto the
+// no-VMA miss, this refusal is observably the work of the guard it names.
 void test_burrow_unmap_interior_start_refused(void) {
     snap_counters();
     struct Proc *p = proc_alloc();

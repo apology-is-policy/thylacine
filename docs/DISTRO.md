@@ -904,7 +904,9 @@ over shared kernel core; no native mmap API is added. **AMENDED (ARCH §6.5 "Dyn
   (`burrow_release_mapping_deferred` drops the mapping ref under v->lock,
   returning the dead Burrow without freeing; `burrow_free_deferred` frees after
   the unlock; the range munmap collects the chain across ONE lock hold, so the
-  straddle-refusal atomicity is preserved, then frees after). Guest-reachable by
+  straddle-refusal atomicity is preserved, then frees after; since AS-R9 the drop
+  is `burrow_release_mapping_settled_deferred`, the unsettled name deleted).
+  Guest-reachable by
   D-3 (the first detachable sleeping-free Burrow at a guest address) but a
   pre-existing STRUCTURE. Regression = a stub Dev `.close` recording
   `current_thread()->preempt_count` at free time (asserts 0; the revert-probe

@@ -419,9 +419,11 @@ int vma_detach_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
             // across three separate acquisitions. `b` is therefore never
             // dereferenced after this mapping's ref is gone -- which is what the
             // old claim/restore pair did, and a concurrent final drop by any
-            // other holder made that a use-after-free write.
+            // other holder made that a use-after-free write. The record is
+            // matched against `as`, the space this mapping leaves and the one
+            // refunded below; `payer` only opts in.
             const struct AddrSpace *settle_as =
-                (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) ? payer->as : NULL;
+                (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) ? as : NULL;
             vma_remove_in(as, v);
             u32 paid = 0;
             struct Burrow *tf = vma_free_settled_deferred(v, settle_as, NULL, &paid);

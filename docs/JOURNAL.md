@@ -64,6 +64,22 @@ needed the operator.
   restructures -- `burrow.tla` (`HandleClose`/`UnmapVmo`: every handle and
   mapping drop now funnels into the settled cores) and `capacity.tla`
   (`Detach`: the WHOLE arm's free) -- and both re-run in the gate slot.
+- *Audit round* (Fable 5.1, cross-family): 0 P0 / 0 P1 / 0 P2 / 4 P3, a
+  clean close. All four fixed: the callerless `burrow_release_mapping_deferred`
+  deleted; three doc lines that were untrue of main's tree and a test comment's
+  count; the WHOLE arm keyed on `as` (the space it refunds) rather than
+  `payer->as`, the same space for every caller today; and no durable race
+  witness -- the five tests are single-threaded contract pins. For the last,
+  `burrow.tla` now models the record: the settled drop takes it in the same
+  step as the decrement, and `BUGGY_CLAIM_RESTORE` replays the old three-step
+  shape across two threads, which TLC refutes on `NoRecordAfterFree` and,
+  judged on the ledger alone, on `RefundExactlyOnce`. The
+  clean model's count did not move, which is the check that the record
+  changed nothing it should not have. Applying the fixes found two more the
+  round had not reported: `vma.h`'s detach contract still said "the claim is
+  restored", and the ported test comment called the null-Proc unmap probe a
+  behaviour pin, which main's wrapper (it reads `p->as` right after the
+  guard) makes a guard pin.
 - *Open at this entry:* nothing has been built or run. Owed: the Fable 5.1
   audit round on the adapted form (main counts it as the review), the specs
   above, and the gate main named on 0232 (default `test.sh` with zero FAIL,
