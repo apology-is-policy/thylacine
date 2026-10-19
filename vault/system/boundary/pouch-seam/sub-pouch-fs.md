@@ -22,8 +22,24 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-15
+updated: 2026-10-19
 ---
+## umask (2026-10-19, B-3e M8)
+
+0058 serves `umask(mode)` over native `SYS_UMASK` 133
+([[dec-2026-10-19-create-mode-bound-and-umask]]): `__syscall(SYS_thyla_umask,
+mode & 0777)`. The kernel refuses a bit outside 0777, so the mask is cut first,
+as Linux cuts it, and umask never fails. Every Pouch create gets the mask and
+the parent's bound from the kernel's create chokepoint
+([[sub-kernel-syscall-dispatch]]); Pouch applies neither itself.
+
+`pouch-hello-fd`'s `umask` leg derives its expected modes from the pool root's
+own mode and refuses a root whose mode could not tell the mask from the bound.
+It checks the boot mask (022), a 0666 create under 027 (the mask and the
+bound), a 0666 create under 0 (the bound alone), the previous mask each call
+answers, and that `umask(01022)` is cut to 022. The census line gains `umask`
+after `fdopendir`.
+
 ## Purpose
 
 Every POSIX path operation a ported program performs: `open` / `openat` /

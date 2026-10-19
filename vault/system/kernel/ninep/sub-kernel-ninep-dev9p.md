@@ -15,8 +15,42 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-19
 ---
+## Create admission by session end (2026-10-19, B-3e M7)
+
+`dev9p_create_admits(c, principal)` answers whether `principal` may create
+through the 9P session `c` belongs to
+([[dec-2026-10-18-create-speaks-for-a-session-end]], IDENTITY-DESIGN 9.7 M7):
+true only for one of the session's two recorded ends (`client->client_end`,
+`client->server_end`, [[sub-kernel-ninep-client]]) and never for
+PRINCIPAL_INVALID, so a session whose ends were never stamped admits no create.
+A Spoor of any other Dev is not a 9P session and answers true; a dev9p Spoor
+without a priv or a client answers false, and the dc test comes first so that
+one whose priv fails the magic check refuses rather than passing as not-9P. The
+reason is the server's: it stamps a create with its session's credential (the
+conn opener's SO_PEERCRED, or the attacher's), never the caller's, so a third
+principal sharing the mount would create entries recorded as an end's. The one
+caller is `spoor_create_install` ([[sub-kernel-syscall-dispatch]]), which
+refuses before the wire: a refused create sends no Tlcreate or Tmkdir.
+
+The mode a create carries is taken as before, `perm & 0777` into Tlcreate or
+Tmkdir, but since M8 ([[dec-2026-10-19-create-mode-bound-and-umask]]) those
+nine bits arrive already reduced by the creator's umask and bounded by the
+parent's mode.
+
+The test fake gained three knobs: `g_twalk_enoent_n` answers the next N named
+Twalks Rlerror(ENOENT), so a create's existence probe can find a name absent;
+`g_ga_mode` sets the mode both Rgetattr and Rwalkgetattr report;
+`g_create_mode` captures the mode the last Tlcreate or Tmkdir carried.
+Witnesses: `dev9p.create_admits_session_ends`,
+`dev9p.create_refuses_invalid_principal`, `dev9p.create_refusal_keeps_eexist`,
+`dev9p.create_refusal_without_rwx` (a copy of the Dev with `perm_enforced`
+false still refuses), `dev9p.open_create_refuses_non_end`,
+`dev9p.client_init_clears_ends` and `dev9p.create_mode_on_the_wire`. Every M7
+creator holds CAP_DAC_OVERRIDE, so only M7 can refuse, and each refusal sits
+beside an admitted control one variable away.
+
 ## Purpose
 
 The Dev (`dc='9'`, `.name "9p"`) that makes a remote 9P server

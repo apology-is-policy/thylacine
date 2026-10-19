@@ -13,14 +13,36 @@ locks: []
 abis: []
 design: ["docs/IDENTITY-DESIGN.md section 3.7.1", "docs/IDENTITY-DESIGN.md section 9.6"]
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-10-19
 ---
+## perm_create_mode: the umask, then the directory's bound (2026-10-19, B-3e M8)
+
+`perm_create_mode(mode, is_dir, umask, dir)` returns the rwx bits a create
+sends ([[dec-2026-10-19-create-mode-bound-and-umask]], IDENTITY-DESIGN 9.7 M8).
+The umask first: `mode & 0777 & ~umask`. Then, when `dir` is non-NULL, Plan 9
+open(5)'s bound: a file's rw bits are ANDed with the directory's and its
+execute bits pass (`mode & (~0666 | (dir->mode & 0666))`), a directory's rwx
+are ANDed with the directory's (`~0777 | (dir->mode & 0777)`). Only the low
+nine bits of each input count, and only they come back; the caller keeps the
+high bits (DMDIR and the rest) itself. A pure function: no Proc, no lock, no
+I/O. Its one caller is `spoor_create_install`
+([[sub-kernel-syscall-dispatch]]), which passes the parent's stat only where
+the Dev enforces rwx, so a Dev whose modes carry no authority gets the umask
+alone. One consequence differs from Linux: an executable asked 0755 in a 0700
+directory comes out 0711 (the execute bits pass), where Linux's umask alone
+leaves 0755.
+
+`perm.create_mode` pins it row by row, each row one input from a neighbour, so
+a dropped umask, a bound applied to the wrong bits, or a missing file/directory
+split each fails a row.
+
 ## Purpose
 
 Answer *may this principal do this to this object* — the identity half of
 authority, orthogonal to capabilities ([[sub-kernel-caps]]) and to handle
-rights ([[sub-kernel-handle]]). 123 lines carrying the whole rwx model, plus
-the policy governing who may change a file's owner, group, or mode.
+rights ([[sub-kernel-handle]]). 132 lines carrying the whole rwx model, the
+policy governing who may change a file's owner, group, or mode, and the rule
+that sets a new entry's mode.
 
 Thylacine enforces per-file rwx in the **kernel**, at the resolution
 chokepoint — the Linux-VFS position. The filesystem server enforces only
@@ -38,6 +60,10 @@ the question is decided.
 
 `perm_wstat_check(p, cur_uid, valid, new_gid)` adjudicates metadata changes
 for exactly `{MODE, UID, GID}`.
+
+`perm_create_mode(mode, is_dir, umask, dir)` returns the rwx bits a create
+sends: the asked mode less the umask, bounded by the parent's mode when `dir`
+is given (the 2026-10-19 section).
 
 ## Mechanism
 

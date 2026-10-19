@@ -10,8 +10,32 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-13
+updated: 2026-10-19
 ---
+## The creation mask (2026-10-19, B-3e M8)
+
+`struct Proc` gains `u32 umask`, the rwx bits every create drops before the
+parent directory's bound applies
+([[dec-2026-10-19-create-mode-bound-and-umask]]). It is appended at the tail,
+after `debug_birth_hold` filled the last tail pad, so no offset moves: offset
+408, and the struct grows 408 -> 416 with a new 4-byte tail pad; both are
+`_Static_assert`ed. `proc_init_fields` sets `PROC_UMASK_DEFAULT` (0022, POSIX's
+conventional mask), because KP_ZERO's 0 would be the widest mask; kproc gets it
+there too. `rfork_internal` copies `proc_umask(parent)` into the unpublished
+child, so every way a Proc is made (`rfork`, `rfork_forked`,
+`rfork_forked_with_caps`, `rfork_with_caps`, `rfork_spawn_held`) inherits its
+parent's mask, and nothing resets it at exec: POSIX fork and exec semantics.
+
+Live reads and writes go through `proc_umask` (a relaxed load) and
+`proc_umask_exchange` (a relaxed exchange). The mask is the whole payload, so
+no ordering against another field is owed, and a thread exchanging it while a
+peer creates or forks hands the creator or the child one value the Proc held.
+No lock covers it. The writers are `SYS_UMASK` and the phenotype's umask, the
+reader `spoor_create_install` ([[sub-kernel-syscall-dispatch]]).
+`proc_identity.umask_default_and_inherit` checks kproc, a fresh Proc, and a
+child made under a non-default parent mask, so a child given the default
+instead reads 0022, not the parent's 0077.
+
 ## Graphical seat incarnations
 
 The kernel binds one boot-designated hardware service, one normal compositor
@@ -422,7 +446,9 @@ a masked-window lever.
 
 ## Data structures
 
-`struct Proc` is 392 bytes and no longer holds a page table at all — it holds a
+`struct Proc` is 416 bytes (IM-2's propagating-legate pair took it 392 -> 408
+and M8's `umask` 408 -> 416; the `_Static_assert` expression is the authority,
+not this line) and no longer holds a page table at all — it holds a
 pointer to a refcounted address space, which is what makes the vfork and
 copy-on-write shapes above expressible. That extraction is the **only change in
 the struct's recorded history that ever made it smaller**: 408 → 376 in one

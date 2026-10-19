@@ -22,8 +22,17 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-15
+updated: 2026-10-19
 ---
+## 0058: umask over SYS_UMASK (2026-10-19, B-3e M8)
+
+The series gains 0058 ([[dec-2026-10-19-create-mode-bound-and-umask]]):
+`src/stat/umask.c` returns `__syscall(SYS_thyla_umask, mode & 0777)`, with
+`SYS_thyla_umask` 133 in `_pouch_fs.h` beside 0057's getppid. `bits/syscall.h`
+keeps `SYS_umask` at the 0xFFFF sentinel, so the seam check's list is
+unchanged; the number is pinned by `tools/test-native-handle-query.py`, as
+0057's is. The census line gains `umask` after `fdopendir` ([[sub-pouch-fs]]).
+
 ## Purpose
 
 The one place a POSIX call becomes a Thylacine syscall. musl funnels
@@ -419,9 +428,9 @@ per-call errno approximation built on top of it.
 
 ## Caveats
 
-- **CLOSED (A-6, 0043; `getppid` B-3b vote 6, 0057, 2026-10-15) -- recorded
-  for the class, not as a live defect: the identity calls returned the raw
-  sentinel.**
+- **CLOSED (A-6, 0043; `getppid` B-3b vote 6, 0057, 2026-10-15; `umask` M8,
+  0058, 2026-10-19) -- recorded for the class, not as a live defect: the
+  identity calls returned the raw sentinel.**
   `getuid` / `geteuid` / `getgid` / `getegid` / `getppid` are
   `return __syscall(SYS_getuid)`-shaped and their numbers are `0xFFFF`, so
   each returns `(uid_t)-38` = `0xFFFFFFDA`. The kernel HAS `SYS_GETUID` = 73
@@ -433,9 +442,10 @@ per-call errno approximation built on top of it.
   Changing libc's answer changes the storage daemon's security behaviour, so
   it is its own chunk on the A-3 identity surface. CONFIRMED ON THE DEVICE
   2026-09-21: `uid=4294967258`, `ppid=-38`. Of the other parked names only
-  `uname` fails VISIBLY (`-1`/`ENOSYS`): `umask()` returns `0xFFFFFFFF` as the
-  "previous mask" from an API that cannot fail and never sets the mask, and
-  `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
+  `uname` fails VISIBLY (`-1`/`ENOSYS`): `umask()` returned `0xFFFFFFFF` as
+  the "previous mask" from an API that cannot fail and never set the mask
+  (0058 serves it over `SYS_UMASK` since 2026-10-19, cut to `mode & 0777` so
+  it cannot fail), and `times()` returns `(clock_t)-38` -- not the documented `-1` -- with `*tms`
   untouched. The audit rounds' full list of this class (r1 F1 + F8, r2 F1)
   is in `memory/audit_pouch_0033_0035_closed_list.md`. Round 2 found a
   SIXTH out-struct reader round 1's list had waved through: `ualarm()`

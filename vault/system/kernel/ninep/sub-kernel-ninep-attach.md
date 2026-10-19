@@ -12,8 +12,27 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-19
 ---
+## The create ends are the conn's (2026-10-19, B-3e M7)
+
+`srvconn_attach_dev9p_root` stamps the session's create ends
+([[dec-2026-10-18-create-speaks-for-a-session-end]]) as the conn's own:
+`p9_client_set_ends(client, cn->peer_principal, cn->server_principal)`, the
+conn's opener and its poster. Not the attaching Proc (`who`): it differs from
+the opener when a conn handle was passed on, and the server stamps a create
+with what SO_PEERCRED reports, the opener. The `/ctl/9p-sessions` owners beside
+it keep the attaching Proc (`p9_attached_set_ctl_owners(att, who,
+cn->server_principal)`): the two pairs answer different questions, who may read
+the session's counters and whom the server will name as a creator. The stamp is
+made on the still-private client before the root Spoor publishes, under the
+cape's rule ([[sub-kernel-ninep-client]]), and only when the attach produced a
+client. `SYS_ATTACH_9P` stamps (the attacher, PRINCIPAL_INVALID) in
+[[sub-kernel-syscall-dispatch]]. `9p_srvconn_transport.attach_stamps_conn_ends`
+attaches through a conn whose opener, poster and attaching Proc are three
+different principals: the opener and the poster may create, the attacher may
+not.
+
 ## Purpose
 
 The mount-creation composition: wrap a transport in a heap `p9_client`,

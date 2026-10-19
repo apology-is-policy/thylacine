@@ -17,8 +17,29 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-15
+updated: 2026-10-19
 ---
+## SYS_UMASK 133 (B-3e M8, 2026-10-19)
+
+`SYS_UMASK` (133, mask) sets the calling Proc's creation mask and returns the
+previous one ([[dec-2026-10-19-create-mode-bound-and-umask]]; the operator's
+vote signed off the addition). A mask with any bit outside 0777, anywhere in
+the 64-bit register, is -EINVAL and changes nothing, as SYS_WSTAT refuses stray
+mode bits; the POSIX front ends pass `mask & 0777`, so their umask cannot fail.
+Registers only: no user memory, no capability. There is no read-only form, so a
+reader exchanges twice, as POSIX's umask has it. The Proc's threads share the
+mask and a child inherits it ([[sub-kernel-proc]]); every create applies it
+([[sub-kernel-syscall-dispatch]]).
+
+Mirrors: libt `T_SYS_UMASK` and `t_umask`, Rust `T_SYS_UMASK` and `t_umask`.
+Pouch reaches it through 0058 (`SYS_thyla_umask`, [[sub-pouch-seam]]), the
+phenotype through Linux umask 166 ([[sub-kernel-vivarium]]), and go-thylacine's
+`syscall.Umask` (mask & 0o777) calls it directly. Linux 133 is rt_sigsuspend, a
+VIV_ENOSYS row consumed before native dispatch; `VIV_NATIVE_CEILING` is 133 and
+the collision is pinned per number. `tools/test-native-handle-query.py` pins
+the kernel, libt, Rust and 0058 numbers, the ceiling and both collision
+asserts; no gate runs it yet (OPEN-BUGS 2026-10-19).
+
 ## Native descriptor calls 129-131 and SYS_GETPPID 132 (B-3b, 2026-10-15)
 
 Three operator-approved descriptor calls, designed by Astra on codex/astra
@@ -210,6 +231,15 @@ tree after the last append, not incremented: **130** live numbers, the span
 runs 0-132 with the same three holes (26, 30, 43), `syscall_dispatch_body` has
 exactly 130 arms, and both set differences are empty. The section at the top
 of this dossier carries the contracts.
+
+**M8 append (2026-10-19).** `SYS_UMASK` = 133; `SYS__NATIVE_TOP` is 134 and
+`VIV_NATIVE_CEILING` 133. Re-measured on this tree, not incremented: **131**
+live numbers, the span runs 0-133 with the same three holes (26, 30, 43),
+`syscall_dispatch_body` has exactly 131 arms, and both set differences are
+empty. Of the mirrors, the libt enum names 95 kernel numbers and the Rust
+mirror 124, and neither disagrees with the kernel on a value. The script that
+counted reproduced main's recorded 126 and 126 on main's tree, and caught a
+planted missing arm and a planted wrong Rust value.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —

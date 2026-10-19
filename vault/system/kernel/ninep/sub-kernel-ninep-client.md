@@ -19,8 +19,25 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-10-07
+updated: 2026-10-19
 ---
+## The session's create ends (2026-10-19, B-3e M7)
+
+`struct p9_client` gains `client_end` and `server_end`, two principals
+([[dec-2026-10-18-create-speaks-for-a-session-end]]): the one the server
+authenticates (a `/srv` conn's opener, or a caller-supplied transport's
+attacher) and the `/srv` poster (PRINCIPAL_INVALID for a caller-supplied
+transport). `p9_client_set_ends(c, client_end, server_end)` is their one stamp,
+made by the attach paths on the still-private client before the root Spoor
+publishes, under the cape's rule: plain fields, never flipped, ordered against
+every later op by the handle publication. `p9_client_init` resets both to
+PRINCIPAL_INVALID, so a client struct re-initialized in place never carries its
+last life's ends, and a client never stamped admits no create. The client only
+holds them: the attach layer decides them ([[sub-kernel-ninep-attach]];
+SYS_ATTACH_9P in [[sub-kernel-syscall-dispatch]]) and `dev9p_create_admits`
+consults them ([[sub-kernel-ninep-dev9p]]). `dev9p.client_init_clears_ends`
+pins the reset.
+
 ## Purpose
 
 The kernel's 9P2000.L client: consolidates the wire codec, the session state
@@ -525,7 +542,9 @@ the principals at its two ends, the system principal and a hostowner
   NARROWS: `dev9p_spoor_remote` reads it for `territory_format_ns` and, as
   dev9p's `remote` slot, for the resolver, which contains a link the session
   serves beneath its mount (DISTRO 4.6, [[sub-kernel-stalk]]); nothing that
-  checks permission, caches or vouches for exec consults it.
+  checks permission, caches or vouches for exec consults it. The create ends
+  `client_end` / `server_end` (M7) follow the same rule with their own stamp,
+  `p9_client_set_ends`, and the same reset (the 2026-10-19 section).
 - `struct p9_rpc` (stack-allocated per op): tag, `done`/`dead`/`be_reader`
   flags, `sending` (registered, not yet waiting in `client_wait`: the
   handoff skips it), its OWN single-waiter rendez, `reply_buf`, `on_complete` (the

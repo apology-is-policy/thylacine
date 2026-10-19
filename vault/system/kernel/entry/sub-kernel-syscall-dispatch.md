@@ -15,8 +15,61 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-15
+updated: 2026-10-19
 ---
+## The create chokepoint: session ends, the created mode, SYS_UMASK (2026-10-19, B-3e M7 + M8)
+
+`spoor_create_install` admits a create through a 9P session only to a principal
+at one of the session's two ends
+([[dec-2026-10-18-create-speaks-for-a-session-end]], IDENTITY-DESIGN 9.7 M7):
+the server stamps a create with its session's credential, never the caller's,
+so anyone else's create would be recorded as an end's.
+`dev9p_create_admits(src, principal_id)` ([[sub-kernel-ninep-dev9p]]) answers
+it before the `/srv` branch and answers true for every other Dev, so a service
+post is unaffected. The parent's stat block now runs where the Dev enforces rwx
+OR the create is not admitted, and the refusal joins the W|X one: -T_E_ACCES,
+except that a caller holding X on the parent gets -T_E_EXIST for a name that is
+there (the existing `stalk_union_has_child` probe), so ported code that tests
+for EEXIST after a failed mkdir keeps working on a mount it may not create on. It is
+decided where the Dev does not enforce rwx too, and whatever the caller's DAC
+override: `perm_check` answers for the mode bits, not for whom the server will
+name as the creator. `sys_attach_9p_for_proc` stamps a pipe session's ends as
+(the attacher, PRINCIPAL_INVALID) beside the `/ctl/9p-sessions` owners it
+already stamped, since the kernel cannot name the server behind a
+caller-supplied transport; the `/srv` attach stamps the conn's own ends
+([[sub-kernel-ninep-attach]]).
+
+After the `/srv` branch and the DMSRV reject, the create's rwx bits are
+rewritten ([[dec-2026-10-19-create-mode-bound-and-umask]], M8): `perm = (perm &
+~0777) | perm_create_mode(perm, perm & DMDIR, proc_umask(p), bound_by)`
+([[sub-kernel-perm]]). `bound_by` is the parent's stat, the one the block above
+took, where `dev->perm_enforced`, and NULL elsewhere, so a Dev whose modes
+carry no authority gets the umask alone. The server applies neither: Stratum
+stamps `mode & 07777` as it receives it, the 9P2000.L convention in which the
+client masks, so this is the one place a mask can apply. The create then opens
+the new file with the access asked, never checked against its new mode (Plan 9
+and POSIX create semantics): a file created 0400 is writable through the
+descriptor that created it.
+
+`sys_umask_handler` (133) calls `umask_of`: a bit outside 0777 anywhere in the
+64-bit argument is -T_E_INVAL with the mask unchanged, as `sys_wstat` refuses
+stray mode bits; otherwise `proc_umask_exchange` stores the new mask and
+returns the previous one ([[sub-kernel-proc]]). No user memory, no capability,
+no lock. The phenotype's umask (Linux 166, a Tier-2 row) is `viv_umask`: it
+keeps `mask & 0777` and exchanges through the same accessor, so the two ABIs
+share the Proc's one mask, and it never fails, as Linux's does not.
+`sys_umask_for_test` and `viv_umask_for_test` drive the two cores.
+
+Witnesses: `dev9p.create_admits_session_ends`,
+`dev9p.create_refuses_invalid_principal`, `dev9p.create_refusal_keeps_eexist`,
+`dev9p.create_refusal_without_rwx`, `dev9p.open_create_refuses_non_end`
+(SYS_OPEN_CREATE's create leg reaches the same chokepoint),
+`dev9p.create_mode_on_the_wire` (the wire mode through both create doors, each
+leg one input from a neighbour), `sys_attach_9p.stamps_attacher_end` and
+`proc_identity.umask_syscall` (the exchange, a refusal anywhere in the
+register, the phenotype's masking). Every M7 creator holds CAP_DAC_OVERRIDE, so
+the mode bits admit it and only M7 can refuse.
+
 ## Native descriptor mutations (October 11; main B-3b)
 
 Native 130/131 validate full-width arguments before invoking existing locked
@@ -693,7 +746,8 @@ floor, and a 64-bit floor such as 2^32+10 cannot alias slot 10. The Linux
 F_DUPFD arm does the same and passes EBADF and EINVAL through.
 
 `spoor_create_install`'s A-2d parent check now asks existence before it
-refuses: when the caller lacks W|X on a perm-enforced parent but holds X, it
+refuses: when the caller lacks W|X on a perm-enforced parent, or is not one of
+the 9P session's ends (M7, on any Dev; the 2026-10-19 section), but holds X, it
 probes the leaf with `stalk_union_has_child` (a one-component walk: no perm
 check, no symlink follow) and answers -T_E_EXIST if the name is there,
 -T_E_ACCES if not. Without X it answers EACCES and discloses nothing. Every

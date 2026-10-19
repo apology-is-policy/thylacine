@@ -10,8 +10,28 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-15
+updated: 2026-10-19
 ---
+## Native ceiling 133 (B-3e M8, 2026-10-19)
+
+`SYS_UMASK` lands at 133 ([[dec-2026-10-19-create-mode-bound-and-umask]]), over
+Linux rt_sigsuspend, a VIV_ENOSYS row consumed before the native switch, so a
+Linux Proc's rt_sigsuspend never sets its creation mask. `vivarium.c` replaces
+rt_sigsuspend's ceiling argument with a per-number collision pin
+(`VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK`), test_vivarium pins its ENOSYS
+verdict, and rt_sigaction (134, VIV_TIER2) now carries the ceiling argument.
+Serving rt_sigsuspend must re-argue the collision.
+
+Linux umask (166) is now a Tier-2 row (`VIV_LINUX_UMASK`) onto the native
+accessor: `viv_umask` keeps `mask & 0777` and exchanges the Proc's one mask
+([[sub-kernel-proc]]), so a Linux program and native code in the same Proc see
+one mask, and it never fails, as Linux's does not; the native call refuses
+stray bits instead. Before M8 the number had no row, so it went to the
+supervisor as unclassified, a gap VIVARIUM called cosmetic; on storage several
+principals share a created mode is authority, and VIVARIUM's "umask (corrected
+2026-10-19)" says so. test_vivarium pins the T2 verdict;
+`proc_identity.umask_syscall` drives `viv_umask_for_test`.
+
 ## Native ceiling 132 (B-3b, vote 6)
 
 `SYS_GETPPID` lands at 132 (operator vote 2026-10-14 #6), over Linux
