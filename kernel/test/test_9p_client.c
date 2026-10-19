@@ -3718,6 +3718,9 @@ void test_9p_client_loom_create_mode(void) {
     loom_ga_dir(0700u, 0x1234u, 0x5678u);
     loom_mode_leg(l, LOOM_OP_MKDIR, 0755u,    0700u,    "mask 022, parent 0700: MKDIR 0755 -> 0700");
     loom_mode_leg(l, LOOM_OP_MKNOD, 0010755u, 0010711u, "mask 022, parent 0700: MKNOD 0755 -> 0711");
+    // An MKNOD whose type is a directory takes a directory's bound: beside the
+    // FIFO above, only the type differs, and the x bits no longer pass.
+    loom_mode_leg(l, LOOM_OP_MKNOD, 0040755u, 0040700u, "mask 022, parent 0700: MKNOD dir 0755 -> 0700");
 
     // (5) No bound where the Dev enforces no rwx: the same 0700 parent and the
     // umask alone. Read before root's Dev is restored, asserted after.

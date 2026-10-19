@@ -33,7 +33,9 @@ an end's. `MKDIR`'s and `MKNOD`'s rwx are then `perm_create_mode(mode, is_dir,
 proc_umask(who), bound_by)` ([[sub-kernel-perm]]); `bound_by` is the parent
 stat `loom_dir_writable` took, and NULL on a Dev that enforces no rwx, so there
 the umask alone applies. The op's snapshot carries those bits, and `MKNOD`
-keeps its type. `SYMLINK` carries no mode. `UNLINKAT`, `RENAMEAT` and `LINK`
+keeps its type; an `MKNOD` whose type is a directory takes a directory's bound
+(the round-1 F3 close: the opcode alone had chosen the file bound, so its x
+bits passed). `SYMLINK` carries no mode. `UNLINKAT`, `RENAMEAT` and `LINK`
 make no new file and are not asked.
 
 Before this the gate matched the sync create as it was before M7: a user who

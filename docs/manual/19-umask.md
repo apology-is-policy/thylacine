@@ -112,9 +112,11 @@ shell, would receive fewer permissions than intended and never more.
 
 ### How a new entry's mode is decided
 
-The kernel applies both steps at the one point through which every create
-passes, after it has checked that the creating process may create in the
-directory and before it sends the request to the file service. It first removes
+The kernel applies both steps on each path that sends a create to a file
+service: the create call, and the directory and node creates of the
+asynchronous I/O ring. On each, it does so after it has checked that the
+creating process may create in the directory and before it sends the request
+to the file service. It first removes
 the bits of the creator's mask from the requested mode, then applies the
 directory's limit, using the directory mode it read for the permission check.
 The file service records the mode it receives. A service posted in `/srv` is

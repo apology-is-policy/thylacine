@@ -322,9 +322,11 @@ impl Sqe {
     /// `symlink` -- create `name` under the registered O_PATH directory handle
     /// `dir_idx` (requires `RIGHT_WRITE`), pointing at `target`.
     ///
-    /// The kernel also checks, at submit, that the directory grants this ring's
-    /// creator write and search permission (`EACCES` otherwise), and refuses the
-    /// op on an SQPOLL ring (`EOPNOTSUPP`). `gid` 0 means the creator's primary
+    /// The kernel also checks, at submit, that this ring's creator is at one of
+    /// the two ends of the directory's 9P session and that the directory grants
+    /// it write and search permission (`EACCES` otherwise; IDENTITY-DESIGN 9.7
+    /// M7), and refuses the op on an SQPOLL ring (`EOPNOTSUPP`). `gid` 0 means
+    /// the creator's primary
     /// group; any other value must be a group the creator is in (`EACCES`
     /// otherwise). LOOM.md 8.5.1.
     ///

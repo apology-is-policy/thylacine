@@ -4579,14 +4579,27 @@ void test_dev9p_open_create_refuses_non_end(void) {
 
 // M8 (IDENTITY-DESIGN 9.7): the mode that reaches the wire is the asked mode
 // less the creator's umask, bounded by the parent's mode, through both create
-// doors. The parent's mode is the fake's g_ga_mode. Returns the wire mode.
-static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open, s64 *rc) {
+// doors. The parent's mode is the fake's g_ga_mode; dev is the parent's Dev, as
+// m7_create's (NULL keeps dev9p). Returns the wire mode.
+static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open,
+                        struct Dev *dev, s64 *rc) {
     *rc = 0x7BAD;
     struct Spoor *root = make_open_client_and_root();
     if (!root) return 0xBAD0u;
     hidx_t base = -1;
     struct Proc *p = oc9_proc(root, &base);
     if (!p) { teardown(root); return 0xBAD1u; }
+    if (dev) {
+        struct Handle h;
+        if (handle_get(p, base, &h) != 0) {
+            p->state = PROC_STATE_ZOMBIE;
+            proc_free(p);
+            teardown(root);
+            return 0xBAD2u;
+        }
+        ((struct Spoor *)h.obj)->dev = dev;
+        handle_put(&h);
+    }
     (void)proc_umask_exchange(p, umask);
     p9_client_set_ends(&g_client, M7_CREATOR, PRINCIPAL_INVALID);
     g_ga_mode     = parent_mode;
@@ -4609,17 +4622,25 @@ static u32 m8_wire_mode(u32 parent_mode, u32 umask, u32 perm, bool via_open, s64
 }
 
 // Each leg differs from a neighbour in one input. The first is the positive
-// control: native code's own 0644 passes unchanged, M8 or not.
+// control: native code's own 0644 passes unchanged, M8 or not. The last is w4
+// through a copy of dev9p that enforces no rwx (a byte loop, not a struct copy:
+// the kernel has no memcpy), where no stat is taken and the umask alone applies.
 void test_dev9p_create_mode_on_the_wire(void) {
-    s64 rc[7];
-    u32 w0 = m8_wire_mode(040755u, 0022u, 0644u, false, &rc[0]);
-    u32 w1 = m8_wire_mode(040755u, 0022u, 0666u, false, &rc[1]);
-    u32 w2 = m8_wire_mode(040755u, 0u,    0666u, false, &rc[2]);
-    u32 w3 = m8_wire_mode(040777u, 0077u, 0666u, false, &rc[3]);
-    u32 w4 = m8_wire_mode(040700u, 0u,    0777u, false, &rc[4]);
-    u32 w5 = m8_wire_mode(040750u, 0u,    SYS_WALK_CREATE_DMDIR | 0777u, false, &rc[5]);
-    u32 w6 = m8_wire_mode(040755u, 0u,    0666u, true,  &rc[6]);
-    for (int i = 0; i < 7; i++) TEST_ASSERT(rc[i] >= 0, "every create succeeded");
+    struct Dev d9;
+    volatile u8 *dst = (volatile u8 *)&d9;
+    const u8 *src = (const u8 *)&dev9p;
+    for (u64 i = 0; i < sizeof d9; i++) dst[i] = src[i];
+    d9.perm_enforced = false;
+    s64 rc[8];
+    u32 w0 = m8_wire_mode(040755u, 0022u, 0644u, false, NULL, &rc[0]);
+    u32 w1 = m8_wire_mode(040755u, 0022u, 0666u, false, NULL, &rc[1]);
+    u32 w2 = m8_wire_mode(040755u, 0u,    0666u, false, NULL, &rc[2]);
+    u32 w3 = m8_wire_mode(040777u, 0077u, 0666u, false, NULL, &rc[3]);
+    u32 w4 = m8_wire_mode(040700u, 0u,    0777u, false, NULL, &rc[4]);
+    u32 w5 = m8_wire_mode(040750u, 0u,    SYS_WALK_CREATE_DMDIR | 0777u, false, NULL, &rc[5]);
+    u32 w6 = m8_wire_mode(040755u, 0u,    0666u, true,  NULL, &rc[6]);
+    u32 w7 = m8_wire_mode(040700u, 0u,    0777u, false, &d9,  &rc[7]);
+    for (int i = 0; i < 8; i++) TEST_ASSERT(rc[i] >= 0, "every create succeeded");
     TEST_EXPECT_EQ(w0, 0644u, "0644 under 022 in 0755 -> 0644: native unchanged");
     TEST_EXPECT_EQ(w1, 0644u, "0666 under 022 in 0755 -> 0644");
     TEST_EXPECT_EQ(w2, 0644u, "0666 under 0 in 0755 -> 0644: the bound alone");
@@ -4627,6 +4648,7 @@ void test_dev9p_create_mode_on_the_wire(void) {
     TEST_EXPECT_EQ(w4, 0711u, "0777 under 0 in 0700 -> 0711: a file's x passes");
     TEST_EXPECT_EQ(w5, 0750u, "dir 0777 under 0 in 0750 -> 0750 on the Tmkdir");
     TEST_EXPECT_EQ(w6, 0644u, "the open-create door bounds the same way");
+    TEST_EXPECT_EQ(w7, 0777u, "w4 where rwx is not enforced -> 0777: no bound, the umask alone");
 }
 
 // p9_client_init clears the ends, so a client re-initialized in place (this

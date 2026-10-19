@@ -1234,9 +1234,13 @@ static s32 loom_dir_mutation_gate(const struct Loom *l, const struct loom_sqe *s
     if (e == 0 && sqe->opcode == LOOM_OP_RENAMEAT)   e = loom_dir_writable(who, dir2, &st2, NULL);
     if (e != 0)                                      return e;
     if (!creates)                                    return 0;
-    if (sqe->opcode != LOOM_OP_SYMLINK)
-        *mode_out = perm_create_mode((u32)sqe->_resv1[1], sqe->opcode == LOOM_OP_MKDIR,
-                                     proc_umask(who), bound_by);
+    // An MKNOD whose type is a directory takes a directory's bound, as M8
+    // bounds every directory made.
+    if (sqe->opcode != LOOM_OP_SYMLINK) {
+        u32  asked  = (u32)sqe->_resv1[1];
+        bool is_dir = sqe->opcode == LOOM_OP_MKDIR || (asked & T_S_IFMT) == T_S_IFDIR;
+        *mode_out = perm_create_mode(asked, is_dir, proc_umask(who), bound_by);
+    }
     u64 raw = (sqe->opcode == LOOM_OP_MKNOD) ? sqe->offset : sqe->_resv1[2];
     if (raw > (u64)0xFFFFFFFFu)                      return -(s32)T_E_INVAL;
     u32 gid = (u32)raw;

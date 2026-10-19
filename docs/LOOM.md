@@ -406,7 +406,8 @@ rule below closes it.
   and `MKNOD`'s rwx bits are then reduced by the creator's umask and bounded
   by the parent's mode (`perm_create_mode`, the bound only where the Dev
   enforces rwx), and the op's SQE snapshot carries the result; `MKNOD` keeps
-  its file type. A symlink has no mode to bound. `LINK` makes no new file and
+  its file type, and one whose type is a directory takes a directory's bound.
+  A symlink has no mode to bound. `LINK` makes no new file and
   takes neither rule, like `RENAMEAT`.
 - **Names are checked like the sync twins', on the copy the wire carries.**
   Each child name must be 1 to 255 bytes, hold no `/` or NUL, and not be `.`
@@ -414,9 +415,10 @@ rule below closes it.
   any stat. `SYMLINK`'s target is a path and is not a name. The names are
   copied out of the registered buffer into the op at submit, and the build
   sends that copy, so userspace cannot change a name after it was checked.
-- **A create mode carries the rwx bits only.** `MKDIR` sends `mode & 0777`
-  and `MKNOD` keeps its file type plus `mode & 0777`, as the sync create's
-  `perm & 0777` does. Setuid, setgid and sticky are never honoured and
+- **A create mode carries the rwx bits only.** `MKDIR` sends the rwx bits
+  and `MKNOD` keeps its file type plus the rwx bits, as the sync create does,
+  after the umask and the parent's bound above. Setuid, setgid and sticky are
+  never honoured and
   `SYS_WSTAT` refuses them, so a create must not be a way to plant them.
 - **`LCREATE` joins this gate when it is dispatched.** It creates a child too.
   Today it answers `-ENOSYS` with the other fid-lifecycle ops (the #916 seam),
