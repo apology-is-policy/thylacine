@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-09-23
-updated: 2026-10-07
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -483,3 +483,34 @@ they named `PROC_PAGE_MAX`. The range-detach re-expressions in
 The EL0 witness is `/capacity-probe` ([[sub-kernel-protect-witness]]), and
 the model is [[spec-capacity]] (`specs/check-capacity.sh`). No sabotage
 (RED) runs have been recorded for this suite yet.
+
+## Growth (2026-10-19, B-3e vote 2)
+
+`pagemap_grow(pm, lock, count, as, exempt)` grows a map to `count` slots with
+every resident page staying at its index: Plan 9's `ibrk` growing a segment's
+map, for ARCH 6.5's merge ([[sub-kernel-burrow]]'s `burrow_lazy_extend`). The
+new representation is always the one `pagemap_init` would pick for `count`,
+because a clone inits its mirror at the source's count and must find the same
+shape there. An inline leaf is reallocated larger (uncharged, as init's is). An
+inline map that turns radix moves its pages into a fresh leaf under a chain of
+nodes at entry 0 when any page is resident (the leaf's refcount is its
+occupancy, each interior's is 1), and only takes the new depth when none is. A
+radix that needs more levels gains new top nodes, each pointing at the old root
+through entry 0, since a slot's lower-level indices do not change. Nodes are
+charged to `as` before they are allocated, as an install's are. Everything is
+allocated outside `lock` and swapped in under it; a shape that changed between
+the plan and the swap means the caller failed to exclude a mutator, and
+extincts. For an `ANON_LAZY` Burrow the caller holds the address space's lock,
+which every mutator of its map takes.
+
+Because growth changes the representation, `pagemap_install`, `_take`,
+`_take_next` and `_swap` now read `count`, `depth` and `root` under the lock.
+`pagemap_next_resident` is `take_next`'s walk with nothing taken (both use
+`radix_next_resident`): O(depth) over a range with nothing resident, which
+keeps the extension's empty check cheap even on a whole-window reservation.
+
+`capacity.fork_clone_charges_pages_and_nodes` now maps a one-page read-only
+spacer between its two GiB maps, which would otherwise merge into one Burrow.
+Witnesses of the growth: `pagemap.grow_keeps_every_page` (every shape, each
+page's contents read back after it) and `anon_merge.growth_crosses_every_shape`
+([[sub-kernel-vma]]).

@@ -1867,3 +1867,24 @@ aliases, `arch_icache_sync_range` invalidates the whole I-cache once per page,
 do; no current target takes that path (QEMU and the Pi are PIPT,
 `arch/arm64/hwfeat.h`). Both were weighed in the B-2e2 audit (round 1, F4, P3)
 and left as they are.
+
+## Lazy reservations share one core, and it merges (2026-10-19, B-3e vote 2)
+
+`lazy_reserve_core` is now the one body of `SYS_BURROW_RESERVE` (124; the
+phenotype's anonymous `mmap` reaches it through the reserve handler) and
+`SYS_BURROW_ATTACH_LAZY` (83). Under `as->lock` it places the range first-fit
+in the burrow window, then tries `vma_extend_anon_in` ([[sub-kernel-vma]]),
+which serves the range from an adjacent lazy mapping's Burrow and adds no VMA;
+when nothing qualifies it mints a fresh Burrow, maps it and raises the ceiling
+to RW, as before. The core answers `-T_E_NOMEM`; `SYS_BURROW_ATTACH_LAZY` still
+answers -1 for every refusal, its long-standing ABI. `MAP_FIXED` anonymous maps
+keep their own path and never merge.
+
+`unmap_if_still_ours(p, b, va, len)` guards the five unmaps that re-take
+`as->lock` after dropping it since their own map -- the Loom ring setup's three
+failure paths and weft map's failure and CAS-loser paths. It unmaps only while
+the VMA at `va` is still the Burrow this call mapped, over exactly that range:
+the identity check the weft clunk already made (G-2 audit F1). Without it a
+sibling thread could swap its own lazy mapping in at the VA and have it
+removed, and with the merge the orphaned slots became an extinction
+([[sub-kernel-burrow]], OPEN-BUGS 20:36Z).

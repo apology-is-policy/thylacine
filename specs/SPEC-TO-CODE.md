@@ -3273,6 +3273,30 @@ second invariant and why both buggy cfgs are judged on it.
   and `detach.range_across_burrows_and_holes` (a held Burrow ref sees the
   whole mapping ALIVE with nothing resident: the release ran before the
   mapping went).
+- **`Extend(a, b)`** (ARCH 6.5's merge, B-3e vote 2, 2026-10-19) ->
+  `kernel/vma.c::vma_extend_anon_in`, reached under `as->lock` from
+  `kernel/syscall.c::lazy_reserve_core` (`SYS_BURROW_RESERVE` 124, the
+  phenotype's anonymous mmap, `SYS_BURROW_ATTACH_LAZY` 83): the placed range
+  is served by the adjacent mapping's Burrow at the offsets its bias names
+  (`prev->burrow_offset` + the predecessor's length going forward,
+  `next->burrow_offset - length` going backward), through
+  `kernel/burrow.c::burrow_lazy_extend`, which refuses a Burrow a handle names
+  and grows the pagemap (`pagemap_grow`) when the range runs past `page_count`.
+  The model's guard `~resident[b][s]` is the kernel's pre-extension check
+  (`pagemap_next_resident` over the slots that exist), an extinction there
+  rather than a precondition.
+- **`NoAlias`** -> the one-bias rule that makes the model's `s = a` true in
+  the kernel: `kernel/burrow.c::burrow_lazy_bind_va0`, called from `vma_alloc`
+  for every mapping of an ANON_LAZY Burrow, stamps `lazy_va0` at the first and
+  extincts on a second ("an ANON_LAZY Burrow mapped at a second bias").
+  Witnesses: `anon_merge.hole_refill_joins_the_pieces` (a detach's pieces and
+  the refill between them, one bias) and
+  `anon_merge.fork_clones_the_merged_burrow` (a clone maps at the same bias).
+- **`ZeroRead`** -> the same empty check, "a slot no mapping covers still
+  holds a page (NoOrphan broken)", which needs `NoOrphan` on EVERY unmap path:
+  `kernel/burrow.c::burrow_unmap_reporting_in` now releases a plain ANON_LAZY
+  mapping's slots before the remove, as the range detach does (OPEN-BUGS
+  20:36Z). Witness: `anon_merge.unmap_releases_lazy_slots`.
 
 What the model cannot see, listed so the green reads no larger: one address
 space, so no fork clone of the pagemap (`pagemap_mirror` is `cow.tla`'s
@@ -3290,14 +3314,22 @@ F8: `demand_page.file_pages_charge_the_holder`,
 `demand_page.idle_image_reclaimed_under_pressure`); the walk bound (`pagemap_walk_steps`;
 `capacity.window_sized_reservation_releases_in_bounded_steps`: the whole
 64 TiB window reserved, two pages touched, released in a few thousand entry
-visits, not 2^34).
+visits, not 2^34). The merge's growth and its handle refusal are below the
+model too: its Burrows have a fixed number of slots and no handles
+(`pagemap.grow_keeps_every_page`, `anon_merge.growth_crosses_every_shape`,
+`anon_merge.never_across_a_boundary`); so is ADJACENCY, since an `Extend`
+may reuse any live Burrow, a superset of the kernel's neighbour.
 
 Gate: `specs/check-capacity.sh`. `capacity.cfg` clean, pinned at
-**625 distinct states** (4 slots x 2 Burrows);
+**625 distinct and 5785 generated states** (4 addresses x 2 Burrows; the
+generated count is the pin that sees an action change -- without `Extend`
+it is 5001, with the distinct count unmoved);
 `capacity_buggy_replace_orphans.cfg` and `capacity_buggy_detach_no_refund.cfg`
 must each violate `NoOrphan` with `ChargeConserved` listed ahead of it and
 HOLDING -- a run that reported the counter instead would mean the model no
-longer says the counter is blind.
+longer says the counter is blind; `capacity_buggy_extend_alias.cfg` must
+violate `NoAlias` with `ChargeConserved`, `NoOrphan` and `ZeroRead` ahead of
+it and holding.
 
 ---
 

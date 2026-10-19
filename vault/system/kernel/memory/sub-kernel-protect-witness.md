@@ -19,7 +19,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-09-23
-updated: 2026-09-23
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -43,6 +43,10 @@ from the chunk (the list, one line each, heads the file; [[sub-kernel-vma]]
 carries it too), and four from the holotype audit's close --
 `protect.range_walk_is_linear`, `protect.uninstall_range_skips_absent_subtrees`,
 `protect.noop_protect_needs_no_headroom`, `sys_mmap.fixed_anon_w_alone_maps_rw`.
+Since ARCH 6.5's merge (2026-10-19, [[sub-kernel-vma]]) two of them give
+same-kind neighbours different protections so that they stay separate VMAs:
+`protect.multi_vma_and_hole` reserves its middle mapping at `PROT_NONE`, and
+`protect.range_walk_is_linear` alternates RW and `PROT_NONE`.
 The audit's F1 pair, `protect.file_pagein_racing_protect_bails_{single,cluster}`,
 lives in `kernel/test/test_demand_page.c` beside the stub Dev it needs: the
 stub `dev->read` runs with `as->lock` dropped, so it is the one deterministic
