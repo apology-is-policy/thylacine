@@ -4139,13 +4139,15 @@ static inline void exit_close_test_window(void) {}
 // sessions (the per-user home --single-session proxy) the instant it dies rather
 // than when its (possibly much later, or deadlocked) parent reaps it.
 //
-// The FOOTGUN this avoids: devproc format_ns / format_cwd read p->territory
-// under g_proc_table_lock (the #57a F2 envelope), so the free cannot run
-// lock-free the way the #926 handle-table free does (ARCHITECTURE.md the #66c
-// note). Hence the LOCKED-DETACH + UNLOCKED-FREE split: NULL p->territory UNDER
-// the lock (a concurrent format_ns then observes NULL and renders empty --
-// territory_format_ns(NULL) and format_cwd's `if(!p->territory)` are both
-// NULL-safe), THEN territory_unref the detached pointer with the lock DROPPED
+// The FOOTGUN this avoids: devproc's ns read (which takes its Territory ref
+// there) and format_cwd read p->territory under g_proc_table_lock (the #57a F2
+// envelope), so the free cannot run lock-free the way the #926 handle-table
+// free does (ARCHITECTURE.md the #66c note). Hence the LOCKED-DETACH +
+// UNLOCKED-FREE split: NULL p->territory UNDER the lock (a concurrent ns read
+// then observes NULL and renders empty -- territory_format_ns(NULL) and
+// format_cwd's `if(!p->territory)` are both NULL-safe; one that took its ref
+// first renders from the Territory it holds), THEN territory_unref the detached
+// pointer with the lock DROPPED
 // (territory_unref's spoor_clunk may sleep on a 9P Tclunk; the detached pointer
 // is unreachable by any reader, so the sleep is safe).
 //

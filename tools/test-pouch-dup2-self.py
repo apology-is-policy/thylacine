@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the series-applied Pouch dup2 with host metadata-boundary mocks."""
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse
 import hashlib
 import json

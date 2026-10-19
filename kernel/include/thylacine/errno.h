@@ -244,13 +244,15 @@
 // or a code path is reachable but stubbed at v1.0. POSIX: ENOSYS.
 #define T_E_NOSYS      38
 
-// Too many levels of symbolic links. Two emitters, both in the resolver
+// Too many levels of symbolic links. Three emitters. Two are in the resolver
 // (DISTRO D-1, docs/DISTRO.md section 4): a resolution that exceeds
 // STALK_MAX_FOLLOWS (40, Linux parity) symlink expansions -- a cycle, or
 // a chain past the bound -- and an open carrying the no-follow flag whose
 // FINAL component is a symlink (the Linux O_NOFOLLOW contour: the caller
 // asked for not-a-symlink and got one; ELOOP is the errno Linux fixed for
-// that answer, so a guest's symlink-attack defenses read correctly).
+// that answer, so a guest's symlink-attack defenses read correctly). The
+// third is SYS_MOUNT refusing a mount that would close a cycle in the mount
+// graph (I-3; operator vote 2026-10-19, ERRORS.md "Mount and unmount").
 //
 // Registered under the 2026-08-05 DISTRO design signoff + the per-value
 // D-1 approval (the append-under-ratified-scripture precedent: T_E_SRCH /

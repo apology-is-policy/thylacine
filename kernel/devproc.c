@@ -433,33 +433,17 @@ static size_t format_cmdline(struct Proc *p, char *buf, size_t cap) {
     return off;
 }
 
-// ns: render a window of the territory's mount list (mount-point name + source
-// name) + the bind count, via territory_format_ns (#66). Unlike the other kinds
-// it renders the window the read asked for, not the whole file: the listing is
-// as long as the mount table (ARCH 9.1), past any buffer here. The renderer takes
-// the territory's ns_lock to read the table -- the entries + their ref-held,
-// immutable Path strings are stable for the read -- so format_ns runs under BOTH
-// g_proc_table_lock (the #57a F2 envelope keeping p->territory alive) AND,
-// briefly, ns_lock.
-// That g_proc_table_lock -> ns_lock edge is acyclic (nothing under ns_lock takes
-// g_proc_table_lock; mount/unmount/clone only spoor_ref / path_ref / defer the
-// sleeping clunk outside the lock). Pre-#66 this read the bind COUNT locklessly
-// (a single aligned-int read); the mount LIST is a pointer walk a concurrent
-// unmount could free, so the lock is now load-bearing for the read.
-static size_t format_ns(struct Proc *p, s64 off, char *buf, size_t cap) {
-    return (size_t)territory_format_ns(p->territory, (u64)off, buf, (u64)cap);
-}
-
 // cwd: the Territory's current working directory (VIVARIUM V-4b-1) -- the source
 // the diorama re-presents as Linux's /proc/self/cwd. Like exe, BARE bytes: no NUL
 // and no newline, because readlink("/proc/self/cwd") yields a bare path.
 //
 // A thin call into territory_getdot, which owns the dot_lock discipline (the
-// format_ns / territory_format_ns shape -- the lock stays in territory.c). The
-// nested g_proc_table_lock -> dot_lock acquire is acyclic for the same reason
-// ns_lock is: dot_lock is a documented LEAF guarding only dot_path, and nothing
-// held under it takes g_proc_table_lock. The resolve is bounded CPU under the
-// leaf -- no alloc, no block.
+// lock stays in territory.c). The nested g_proc_table_lock -> dot_lock acquire
+// is acyclic: dot_lock is a documented LEAF guarding only dot_path, and nothing
+// held under it takes g_proc_table_lock. Unlike ns_lock, which the read renders
+// outside the table lock, every dot_lock hold is a bounded copy or pointer swap
+// -- no alloc, no block -- so nesting it under the table lock costs a path's
+// length at most.
 //
 // NULL dot_path renders "/" (territory_getdot's own contract), so unlike exe this
 // file is never empty for a live Proc. A NULL territory (a Proc torn down past
@@ -719,7 +703,7 @@ static size_t format_maps(struct Proc *p, bool show_code, char *buf, size_t cap)
 //
 // Runs under g_proc_table_lock (proc_for_each), which keeps `p` alive; the Path
 // itself is immutable + ref-held for p's whole life, so the string is stable for
-// the copy. Same discipline as format_ns reading the Territory's mount Paths.
+// the copy.
 //
 // Posture: all-pids-visible for an UNSEALED Proc (devproc.perm_enforced == false,
 // Plan 9), refused for a dump-SEALED one -- the path of the image a Proc runs is
@@ -1158,14 +1142,13 @@ static int devproc_close(struct Spoor *c) {
 // matched pid (also bounding the lock-hold). g_proc_table_lock keeps p (and thus
 // p->territory + p->handles) alive across the format.
 //
-// #66: format_ns now reads the territory's mount LIST (pointer-chasing each
-// entry's mp_path / source->path), so it takes p->territory->ns_lock inside
-// territory_format_ns -- a g_proc_table_lock -> ns_lock edge. It is ACYCLIC
-// (nothing held under ns_lock takes g_proc_table_lock: mount/unmount/clone only
-// spoor_ref / path_ref and defer the sleeping spoor_clunk to OUTSIDE ns_lock).
-// The pre-#66 lockless `binds: N` read was sound only because it was a single
-// aligned-int copy; a mount-list pointer walk a concurrent unmount could free
-// genuinely needs the lock. No sleep / no allocation runs under either lock.
+// ns is the one kind NOT formatted here. Its listing is read under the target
+// Territory's ns_lock, which that Territory's own Proc can hold for as long as
+// a root swap's shed takes, and every CPU waiting on g_proc_table_lock -- with
+// IRQs masked -- would wait with it. So the callback only takes a Territory ref
+// under the table lock, and devproc_read renders after dropping it: the ref
+// keeps the Territory alive past an exit that detaches it, as
+// proc_release_territory_at_exit relies on.
 // prowl-3b: forward-declared so devproc_read_cb (below) can apply the OQ-4 gate;
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
@@ -1267,7 +1250,7 @@ size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *targe
 struct devproc_read_ctx {
     int                 pid;
     u32                 kind;
-    s64                 off;        // ns: the window's start in its listing
+    struct Territory   *ns;         // ns: ref-held, rendered after the walk
     char               *buf;
     size_t              cap;
     size_t              total;
@@ -1302,9 +1285,9 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     switch (r->kind) {
     case PQS_STATUS:  r->total = format_status(r->caller, p, r->buf, r->cap); break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
-    case PQS_NS:
-        r->total    = format_ns(p, r->off, r->buf, r->cap);
-        r->windowed = true;
+    case PQS_NS:                               // rendered by devproc_read, unlocked
+        r->ns = p->territory;
+        if (r->ns && r->ns != kpgrp()) territory_ref(r->ns);
         break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
@@ -1392,13 +1375,20 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     size_t cap = sizeof(content);
     if (kind == PQS_NS && (size_t)n < cap) cap = (size_t)n;
     struct devproc_read_ctx r = {
-        .pid = pid, .kind = kind, .off = off, .buf = content, .cap = cap,
+        .pid = pid, .kind = kind, .ns = NULL, .buf = content, .cap = cap,
         .total = 0, .windowed = false, .found = false, .caller = caller,
         .denied = false,
     };
     proc_for_each(devproc_read_cb, &r);
     if (!r.found) return -1;                  // process gone since walk
     if (r.denied) return -T_E_ACCES;          // the seal, the none wall, or an owner gate
+    if (kind == PQS_NS) {
+        // territory_format_ns(NULL) renders nothing: an exiting Proc's empty file.
+        r.total    = (size_t)territory_format_ns(r.ns, (u64)off, content, (u64)cap);
+        r.windowed = true;
+        // The final unref may clunk a 9P source and sleep; no lock is held here.
+        if (r.ns && r.ns != kpgrp()) territory_unref(r.ns);
+    }
 
     // A whole file is sliced at `off`; a window already starts there.
     size_t total = r.total;

@@ -6,6 +6,7 @@ run the native guest witness and Linux collision witness for those boundaries.
 A mutant must be refused: ceiling moves VIV_NATIVE_CEILING in the text the pins
 read, and append drops the handler's APPEND bit from the code the test runs.
 """
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse
 import hashlib
 import json

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run actual kernel target replacement against host reference/lock owners."""
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 from pathlib import Path
 import argparse,subprocess,json,hashlib,platform,re
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=['rights','flags','release']);a=p.parse_args();r=Path(__file__).resolve().parent.parent;a.output.mkdir(parents=True,exist_ok=False)

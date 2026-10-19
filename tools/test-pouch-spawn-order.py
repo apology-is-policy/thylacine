@@ -2,6 +2,7 @@
 """Build/run actual Pouch spawn source with a simulated native handle boundary.
 Pass a series-applied musl tree and an empty output directory. No sysroot edits.
 """
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse
 import hashlib
 import json

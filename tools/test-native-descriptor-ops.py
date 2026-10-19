@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compile actual native descriptor handlers with owner-boundary mocks."""
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 from pathlib import Path
 import argparse,subprocess,json,hashlib,re,platform
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=['self-dup','mirror']);a=p.parse_args();r=Path(__file__).resolve().parent.parent;a.output.mkdir(parents=True,exist_ok=False)

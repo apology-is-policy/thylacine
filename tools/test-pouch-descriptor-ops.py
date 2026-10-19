@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise actual Pouch descriptor adapters with mocked native/socket owners."""
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse,hashlib,json,platform,subprocess
 from pathlib import Path
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=['flags','tag','legacy','dup-floor','append-flip','omode-shift','oexec','pipe2-cloexec','pipe2-leak','pipe2-cancellable','pipe2-close-gone','setfl-fd','dupfd-source','cloexec-tag']);a=p.parse_args();r=Path(__file__).resolve().parent.parent

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise Pouch openat's close-on-exec arms with a mocked kernel."""
+if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse,hashlib,json,platform,re,subprocess
 from pathlib import Path
 MUTANTS={

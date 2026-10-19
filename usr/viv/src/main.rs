@@ -720,12 +720,18 @@ fn run(bundle: &str, stdio_born: bool, notes: Option<&Notes>) -> Result<i64, Str
         let rc = unsafe { t_mount(path.as_ptr(), path.len(), *fd, *flags) };
         if rc != 0 {
             reap_diorama(dio_pid, dio_ctl);
-            // -ENOTDIR is Plan 9's Emount: the anchor exists but is the other
-            // type (a directory where a device leaf needs a file, or the reverse).
-            return Err(match libthyla_rs::err::Error::from_syscall_return(rc) {
-                Err(e) if rc != -1 => format!(
+            // Each refusal names its errno (ERRORS.md "Mount and unmount"). Two
+            // point at the recipe's rootfs: -ENOENT, an anchor it lacks, and
+            // -ENOTDIR, Plan 9's Emount, an anchor of the other type (a
+            // directory where a device leaf needs a file, or the reverse).
+            use libthyla_rs::err::Error;
+            return Err(match Error::from_syscall_return(rc) {
+                Err(e @ Error::NotFound) => format!(
+                    "recipe mount {} failed: {} (the rootfs has no such anchor)", path, e),
+                Err(e @ Error::NotADirectory) => format!(
                     "recipe mount {} failed: {} (the rootfs anchor has the wrong type)", path, e),
-                _ => format!("recipe mount {} failed (missing rootfs anchor?)", path),
+                Err(e) if rc != -1 => format!("recipe mount {} failed: {}", path, e),
+                _ => format!("recipe mount {} failed", path),
             });
         }
     }

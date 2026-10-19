@@ -902,8 +902,11 @@ u64 territory_format_ns(struct Territory *p, u64 off, char *buf, u64 cap) {
     // immutable string), so every byte copied below is stable. ns_lock is a
     // near-leaf; the window writes take no further lock + cannot sleep, and the
     // render stops at the window's end, so the hold is bounded by the table, not
-    // by the listing's length. The g_proc_table_lock -> ns_lock edge the devproc
-    // caller introduces is acyclic (no ns_lock holder takes g_proc_table_lock).
+    // by the listing's length. The wait for ns_lock is not: this Territory's own
+    // Proc can hold it for a whole shed, so a caller holding an IRQ-masking lock
+    // would stall every CPU queued on that lock behind it (devproc renders after
+    // dropping g_proc_table_lock).
+    ASSERT_IRQS_ENABLED("territory_format_ns waits on an ns_lock its Proc may hold for a shed");
     spin_lock(&p->ns_lock);
     for (const struct PgrpMount *m = p->mfirst; m && !ns_window_full(&w); m = m->tnext) {
         ns_emit_str(&w, "mount ");

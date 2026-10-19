@@ -1687,6 +1687,11 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 //   - -20 (ENOTDIR): Plan 9's Emount (ARCH 9.6.1)
 //   - -40 (ELOOP): the mount would close a cycle in the mount graph (I-3)
 //   - -28 (ENOSPC): the territory mount table is full
+//   - -12 (ENOMEM): the kernel could not allocate the mount's entries; the
+//     namespace is unchanged
+//
+// The flags' width and the handle index's range are judged before the mount
+// point is resolved, everything else after it (ERRORS.md "Mount and unmount").
 #[inline(always)]
 pub unsafe fn t_mount(path: *const u8, path_len: usize,
                       source_spoor_fd: i64, flags: u32) -> i64 {

@@ -94,7 +94,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
 | `T_E_RANGE`     | 34    | `ERANGE`     | Numerical result out of range |
-| `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. TWO emitters share the code, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead |
+| `T_E_LOOP`      | 40    | `ELOOP`      | Symlink resolution did not terminate, or terminated on a link the caller refused to follow. THREE emitters share the code. Two are the resolver's, as on Linux (DISTRO D-1, user-signed-off 2026-08-05): (1) the resolver exceeded `STALK_MAX_FOLLOWS` (40) -- a cycle, or a chain deeper than the bound; (2) the final component is a symlink and the open passed `SYS_WALK_OPEN_NOFOLLOW` **without** `T_OPATH`, i.e. Linux `O_NOFOLLOW` semantics: the caller asked for not-a-symlink and got one, and a symlink cannot be opened for byte I/O. With `T_OPATH` the same flag instead RETURNS the link (the v1.0 `lstat` spelling) and no error is raised. A trailing `/` overrides the flag entirely (POSIX 4.13), so `link/` follows and can answer `T_E_NOTDIR` instead. (3) SYS_MOUNT refuses a mount that would close a cycle in the mount graph, I-3 (operator vote 2026-10-19; "Mount and unmount" below) |
 | `T_E_NOTSOCK`   | 88    | `ENOTSOCK`   | Not a socket: a socket call names an fd with no socktab entry (a plain file, or a socket whose entry was dropped) |
 | `T_E_PROTONOSUPPORT` | 93 | `EPROTONOSUPPORT` | Protocol not supported: a `SOCK_*` type or `IPPROTO_*` the `/net` tree has no directory for |
 | `T_E_OPNOTSUPP` | 95    | `EOPNOTSUPP` | Operation not supported. Reserved, append-only: its first emitter (`SYS_TTY_SIGNAL`'s stop class) became live at PTY-1f; kept for future not-yet-supported dispositions |
@@ -678,6 +678,12 @@ path, or one with an embedded NUL, answers -T_E_INVAL, and a path buffer the
 kernel cannot read answers -T_E_FAULT. A mount point that does not resolve
 answers the resolver's errno (`stalk_err`), such as -T_E_NOENT,
 -T_E_ACCES, -T_E_NOTDIR or -T_E_LOOP.
+
+SYS_MOUNT judges the width of two arguments before it resolves the mount
+point: flags past 32 bits answer -T_E_INVAL and a source handle index at or
+above the table size answers -T_E_BADF. Every other refusal in the table below
+is judged after the point resolves, so when the point does not resolve, a
+closed handle in range answers the resolver's errno, not -T_E_BADF.
 
 | Refusal | SYS_MOUNT answers |
 |---|---|
