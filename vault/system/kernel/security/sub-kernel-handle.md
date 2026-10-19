@@ -13,7 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
-updated: 2026-10-14
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -388,8 +388,9 @@ counts objects ever installed (`handle_table_installs`). A reservation is not
 an install, which is how the tests show that a failed call published nothing.
 
 `handle_replace(p, h, expect, ...)` swaps only while the slot still names
-`expect`, an object the caller holds its own reference on. Its one caller,
-connect, sleeps between taking the socket's ctl Spoor and the swap. A number a
+`expect`, an object the caller holds its own reference on. Its one kernel
+caller, connect (through the hooked form below), sleeps between taking the
+socket's ctl Spoor and the swap. A number a
 peer closed and reused in that time names another object, so the swap is
 refused rather than releasing the peer's file. Pointer identity is enough
 here, although it cannot tell two dups of one object apart: the object is the
@@ -417,6 +418,23 @@ acquire of this table's lock goes through `table_lock`, which calls
 table lock taken under a leaf lock" the first time it runs, contended or not.
 `handle_replace` counts its swap in `installs`: it publishes a new object at
 the number.
+
+## The hooked replace (2026-10-19, 17:09Z)
+
+`handle_replace_hooked(p, h, expect, kind, rights, obj, under_lock, arg)` is
+`handle_replace` with a hook run inside the swap's hold: after the slot names
+`obj` and `installs` counts it, before the lock drops, and only when the swap
+happened (every refusal returns before it). `handle_replace` is the NULL-hook
+form. It exists for the hooked copy's reason: state beside the table that is
+keyed by its indices can change in one step with the table only inside the
+table's hold. Its one hooked caller is connect, whose commit
+(`viv_socktab_connected_locked`, [[sub-kernel-vivarium]]) marks the socket's
+row CONNECTED and detaches its ctl identity in the hold that swaps the fd from
+ctl onto data, so no reader of both sees the fd on data while the row still
+reads CONNECTING. The rule is the hooked copy's: the hook may take leaf locks
+(handle -> socktab) and must neither sleep nor allocate. connect's commit
+clunks nothing inside; it hands the detached reference back for the caller to
+release after the unlock.
 
 ## Performance
 
@@ -508,4 +526,5 @@ sides), are stated Phase-5+ items.
 per-open-file nonblocking flag → the socktab-across-images audit close
 (`4e694e5f`, 2026-09-02): the hooked fork copy → NP-5 (2026-09-29):
 `handle_snapshot_spoor`, the snapshot for a Spoor held outside the table →
-the close-by-number sweep (2026-10-14, vote 10): reserved numbers.
+the close-by-number sweep (2026-10-14, vote 10): reserved numbers → 17:09Z
+(2026-10-19): the hooked replace.

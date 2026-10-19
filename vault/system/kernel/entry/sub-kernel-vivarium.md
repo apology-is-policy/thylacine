@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-14
+updated: 2026-10-19
 ---
 ## Native ceiling 127
 
@@ -261,7 +261,9 @@ row's cached readiness Spoor, beside the rows rather than inside `viv_sock` so
 that no snapshot or copy of a row can carry a borrowed pointer; each row owns
 one reference, a FREE row's is NULL, rows naming one connection (a socket and
 its dups) share one Spoor, and the cache (not the table) is released at exit
-(below). That sentence was incomplete when written — the table was also
+(below). Since 17:09Z it also holds `ctl[VIV_SOCK_MAX]`, each socket()-born
+row's ctl Spoor as an exact identity, one reference per row (the section of
+that date). That sentence was incomplete when written — the table was also
 freed at exec, unmentioned — and it became true by the other free site being
 *deleted* rather than by the prose being edited (see Concurrency). `viv_sigtab`
 is indexed by *note kind*, not by signal number, which is legitimate only
@@ -989,4 +991,84 @@ number first ([[sub-kernel-handle]]).
   EBADF. The witness is the bind leg of `vivarium.close_keeps_a_reserved_row`,
   whose control is a live slot carrying the same row: it reaches bind's address
   copy (EFAULT for a NULL address), the one gate past the row and its state.
+
+## The verb arms write only to the socket's own ctl (2026-10-19, 17:09Z)
+
+**The window.** connect's dial, listen's announce and the connectionless
+datagram sendto's re-dial each write netd a ctl verb. Each found the socket's
+row by fd number and then reached the fd's Spoor by number in a second lookup.
+`dup3` installs the new object before it drops the old row (the alias rule's
+order, operator-voted), so a peer thread's `dup3(file, sockfd)` between the two
+lookups left the socket's row over a slot that held the guest's file: the verb
+was written into the file, and connect's ctl-keyed `handle_replace` could swap
+the file out for a connection. The vote-10 pin-once defended only connect's
+later sleep, not this first window.
+
+**The identity.** `struct viv_socktab` gains `ctl[VIV_SOCK_MAX]`, parallel to
+`ready[]` and kept out of `viv_sock` for the same reason: a row is snapshotted
+and copied by value, and a copy must not carry a borrowed pointer. `ctl[i]` is
+the ctl Spoor a socket()-born row was claimed with (`viv_socktab_claim`'s
+`ctl` argument; accept passes NULL), one reference the row owns. It is NULL for
+an accepted row (born CONNECTED: its fd is data), from connect's CONNECTED
+commit on, and in a FREE slot. The reference is what makes the check exact:
+while the row lives the Spoor cannot be freed, so no other object can appear at
+its address. Rejected, each measured: a qid in the row (row 126 forbids
+decoding netd's qid layout, and netd's ctl qid carries no generation), a bare
+pointer (an ABA inside a dup3 window), a handle-slot generation (`struct
+Handle` has none), `Spoor->path` (I-33), and reordering dup3's drop
+(operator-voted).
+
+**The check.** `viv_sock_pin_ctl` ([[sub-kernel-syscall-dispatch]]) pins the
+fd with the right the write needs and asks `viv_socktab_ctl_is` -- under the
+lock: the row is present, its epoch is the arm's snapshot, and `ctl[i]` is the
+pinned Spoor -- before anything is written. A refusal answers what the number
+earns now: EBADF if it is closed, ENOTSOCK if it is anything else. The one
+exception is a row that is still the same socket and went CONNECTED meanwhile
+(a peer thread's connect swapped the fd onto data): the arm answers as the
+connected socket does -- connect EISCONN (0 for a CONNECTING snapshot, whose
+wait is over), listen EINVAL, the datagram sendto EISCONN, the errnos
+`vivarium_listen_decide` and `vivarium_sendto_decide` give a CONNECTED row.
+
+**Lifecycle.** NP-5's release rule applies verbatim: every clear detaches
+ready AND ctl under the lock and clunks both after the unlock
+(`socktab_clear_slot` returns a `struct socktab_detached`, `socktab_release`
+clunks it) -- replace-on-claim, drop, drop_closing, reset, the fork filter, an
+alias onto an occupied number, and drop_cloexec; `viv_socktab_free` clunks both
+directly. Unlike ready[], which is a cache and starts empty in a fork child or
+an alias, ctl[] is identity: the fork snapshot (inside the hooked copy's hold)
+and the alias COPY it with a reference of their own. The copied fd holds the
+same Spoor, so the copied row and its fd agree as the source's did.
+
+**The connected commit.** The check needs connect's swap and its CONNECTED
+transition to be one step to a reader of both. As two holds, a peer pinning
+just after the swap would see the fd on data while the row still read
+CONNECTING, and refuse its legitimate verb ENOTSOCK.
+`viv_socktab_connected_locked` records the peer, marks the row CONNECTED and
+detaches its ctl (handed back for the caller to release), and connect runs it
+inside the swap's own handle-table hold (`handle_replace_hooked`,
+[[sub-kernel-handle]]): handle -> socktab, the order the fork snapshot and the
+close hook take. The detach keeps netd at one fid per connection once the fd is
+data. `record_remote` lost its `also_connect` flag; the datagram sendto is its
+only caller. A refused swap whose same-epoch row is now CONNECTED returns 0:
+two threads can finish one interrupted connect (a read on the CONNECTING fd
+while connect() is retried), and the loser's refusal used to answer EIO.
+
+**Witnesses.** `vivsock.ctl_verbs_need_their_ctl` holds each arm's number at
+dup3's window (the slot swapped to a writable /net file, the row untouched) and
+requires ENOTSOCK with no byte written to the file, no verb to any ctl, no data
+file opened and the file left at the number -- beside the control one variable
+away: the same arms on unraced sockets write their verbs to ctl, a
+socket()-made row holds ctl with a reference of its own, and a connect gives it
+up and releases the ctl fid. `vivsock.ctl_verbs_meet_a_racing_peer` runs a peer
+thread's connect or close between the row read and the pin (a KERNEL_TESTS hook
+at the top of `viv_sock_pin_ctl`) and derives the expected errnos from the
+decides. `vivsock.ctl_identity_travels_with_the_fd` drives dup and fork with
+exact reference counts, and `vivsock.connect_finished_by_a_peer` stages the
+double finish. Each went RED under its sabotage (work/oct19-1709z/mutate.py
+M1-M10). One property has no unit form: that the commit stays inside the swap's
+hold needs an SMP interleaving, so it rests on the audit's reading.
+
+The arms that open a /net file by path from the row's N (accept's listen walk,
+recvmsg's data open) still trust the row; for them the socktab holotype's F2
+gap stands (VIVARIUM.md 5.5.2), closed only by the socket object.
 

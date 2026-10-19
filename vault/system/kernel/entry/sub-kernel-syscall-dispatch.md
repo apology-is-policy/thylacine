@@ -18,7 +18,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-19
 ---
 ## Session registry factory
 
@@ -1694,4 +1694,34 @@ The pattern is reserve, do the work that can fail, install last.
 `sys_open_kpath_for_proc` still answers -1 for a full table, and
 `spoor_create_install` still answers -ENOMEM; `sys_open_finish` takes each
 core's answer as `full_rc`. The phenotype sites are in [[sub-kernel-vivarium]].
+
+## The socket verb arms prove their ctl (2026-10-19, 17:09Z)
+
+`viv_sock_pin_ctl` is the one place the three arms that write netd a ctl verb
+reach the fd: it pins with `sys_lookup_rw_handle` and keeps the pin only if
+`viv_socktab_ctl_is` says it is the row's own ctl, before any side effect (the
+identity, its lifecycle and the refusal errnos are in [[sub-kernel-vivarium]]).
+None of the three writes by number any more; `spoor_write_common` keeps its
+native callers.
+
+- **connect.** `viv_sock_connect_dial` pins through it -- RIGHT_WRITE for a
+  fresh dial, no right for a CONNECTING finish, which writes nothing -- and
+  `viv_sock_connect_dial_on`'s swap is `handle_replace_hooked` with connect's
+  commit (`viv_socktab_connected_locked`) as the hook, so the swap and the
+  CONNECTED transition are one step ([[sub-kernel-handle]]). A refused swap
+  whose same-epoch row is CONNECTED returns 0: a peer finished the same connect.
+- **the datagram sendto.** `viv_sock_dgram_sendto` copies and parses the
+  destination and hands it to `viv_sock_dgram_send`, which pins, writes the
+  re-dial to the pin, and holds the pin through the data open and the send: a
+  fid on connection N keeps netd from handing N to another socket while data is
+  opened by path. A caught signal during the re-dial stays EINTR; any other
+  short write is ECONNREFUSED.
+- **listen.** `viv_sock_listen` pins after its decide and writes the announce to
+  the pin.
+
+Test drivers beside the others: `viv_listen_for_test` (the real arm through
+`viv_tier2`), `viv_sock_dgram_send_for_test` (past the parse, with a kernel
+address and an empty payload, so no user memory is read), and the KERNEL_TESTS
+hook `viv_sock_pin_hook_for_test`, which runs a test's stand-in peer thread
+between an arm's row read and its pin.
 
