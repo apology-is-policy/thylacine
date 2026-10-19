@@ -3,8 +3,8 @@
 //
 // Per ARCHITECTURE.md §9.1 + §9.6 + specs/territory.tla. Implements the
 // spec's Bind / Unbind / Mount / Unmount / ForkClone actions on a
-// SLUB-allocated Territory struct holding fixed-size bind + mount
-// tables.
+// SLUB-allocated Territory struct holding a fixed-size bind table and a
+// mount table of per-mount nodes (below).
 //
 // State invariants:
 //
@@ -35,8 +35,8 @@
 //   5. dev_init             — which internally calls spoor_init (Spoor cache)
 //
 // territory_init runs BEFORE spoor_init. Safe because territory_init
-// only allocates EMPTY Territories (nmounts = 0); the territory_unref
-// final-release path only calls spoor_unref when nmounts > 0, which
+// only allocates EMPTY Territories (no mount entry); the territory_unref
+// final-release path only clunks an entry's source when there is one, which
 // requires mount() to have been called first, which requires a Spoor,
 // which requires spoor_init. The dependency is therefore satisfied
 // automatically by call ordering, not by init ordering.
@@ -52,9 +52,286 @@
 #include "../mm/slub.h"
 
 static struct kmem_cache *g_pgrp_cache;
+static struct kmem_cache *g_mount_cache;    // struct PgrpMount
+static struct kmem_cache *g_mhead_cache;    // struct PgrpMhead
 static struct Territory  *g_kpgrp;
 static u64                g_pgrp_created;
 static u64                g_pgrp_destroyed;
+
+// =============================================================================
+// The mount table's nodes (ARCH 9.1; dec-2026-10-19-mount-table-dynamic).
+// =============================================================================
+//
+// Plan 9's shape: one PgrpMount per mount, under one PgrpMhead per mount point
+// (Plan 9's Mount and Mhead). A point is found by hashing its key into
+// Territory.mhash[]; it holds its members in search order, and it is in the
+// hash only while it hosts at least one. Every entry is also on the table-order
+// list, mfirst .. mlast: the order the mounts were placed in, which is what
+// /proc/<pid>/ns prints and territory_clone copies. MBEFORE places an entry
+// just before its point's first member and every other placement appends it,
+// so a point's members appear in the table in their search order -- the order
+// the fixed array kept, which the lists reproduce exactly.
+//
+// Nothing is allocated or freed under ns_lock: mount() and territory_clone
+// allocate before taking it, and what an edit removes under it is chained on a
+// struct mount_dead and released after it is dropped, the source clunk
+// included (a Dev close hook may sleep).
+
+// A mount entry: the Spoor `source` grafted at the point `head`. stalk, after
+// resolving a component to Spoor S, crosses to a clone of `source` iff S's
+// (dc, devno, qid.path) is head's key (Plan 9 `domount`). The entry holds one
+// ref on source, dropped when the entry is unmounted, replaced, shed, or
+// released with its Territory.
+//
+// mp_path (#66, I-33): the mount POINT's namespace name (the Plan 9 Chan.path of
+// the directory mounted onto -- "/srv", "/proc"), captured by path_ref'ing the
+// resolved mountpoint Spoor's ->path at mount() and shared, one ref each, by
+// every clone of the entry. STRICTLY introspection-only (I-33): the table keys
+// on the point's identity, NEVER on mp_path -- a NULL or stale mp_path changes
+// only what /proc/<pid>/ns displays, never which entry stalk crosses. It stays
+// per entry because two mounts at one point may have named it differently.
+// NULL when the mountpoint had no retained name (kernel-internal direct walks).
+struct PgrpMount {
+    struct PgrpMount *tnext, *tprev;   // table order
+    struct PgrpMount *next, *prev;     // head's members, in search order
+    struct PgrpMhead *head;
+    struct Spoor     *source;
+    struct Path      *mp_path;
+    u32               flags;           // MREPL / MBEFORE / MAFTER / MCREATE /
+                                       // MNOEXEC / MPHENO_LINUX, or MCOVERED alone
+    u32               _pad;
+};
+_Static_assert(sizeof(struct PgrpMount) == 64,
+               "PgrpMount is 7 pointers + flags + pad = 64 B, the figure "
+               "PGRP_MOUNT_CAP's memory cost is stated in");
+
+// A mount point: the directory identified by (dc, devno, qid_path), the Plan 9
+// (type, dev, qid) identity (stalk-2). Why the full triple: qid.path is unique
+// only WITHIN a (dc, devno) instance. Every dev9p session shares dc='9' and
+// every attach root has qid.path 0, so (dc, qid.path) alone cannot distinguish
+// two concurrent 9P sessions' mount points (the A-5b corvus + per-user-stratum-fs
+// case). devno (Plan 9 Chan.dev, minted per attach by spoor_next_devno) closes
+// that.
+//
+// `visit` and `work` belong to the passes that walk the points as a graph -- the
+// cycle check and the shed -- and mean nothing between them.
+struct PgrpMhead {
+    struct PgrpMhead *hnext;           // the hash chain
+    struct PgrpMount *first, *last;    // members, in search order; never empty
+    struct PgrpMhead *work;            // a pass's worklist link
+    u64               devno;
+    u64               qid_path;
+    int               dc;
+    u32               nmembers;
+    u32               visit;           // == Territory.mvisit: reached in this pass
+    u32               _pad;
+};
+_Static_assert(sizeof(struct PgrpMhead) == 64,
+               "PgrpMhead is 4 pointers + the 20 B key + 3 u32 = 64 B, the "
+               "figure PGRP_MOUNT_CAP's memory cost is stated in");
+_Static_assert((PGRP_MOUNT_HASH & (PGRP_MOUNT_HASH - 1)) == 0,
+               "PGRP_MOUNT_HASH must be a power of two");
+
+// Tests: mount-node allocations still to fail (territory_mount_fail_nodes_for_test).
+static u32 g_mount_fail_nodes;
+
+// Every mount node comes from here, so a test can fail one as the slab would.
+static void *mount_node_alloc(struct kmem_cache *c) {
+    u32 n = __atomic_load_n(&g_mount_fail_nodes, __ATOMIC_RELAXED);
+    while (n > 0) {
+        if (__atomic_compare_exchange_n(&g_mount_fail_nodes, &n, n - 1, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return NULL;
+    }
+    return kmem_cache_alloc(c, KP_ZERO);
+}
+
+u32 territory_mount_fail_nodes_for_test(u32 n) {
+    return __atomic_exchange_n(&g_mount_fail_nodes, n, __ATOMIC_RELAXED);
+}
+
+static u32 mhash_of(int dc, u64 devno, u64 qid_path) {
+    u64 h = (qid_path ^ ((u64)(u32)dc << 40)) + devno * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 31;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 29;
+    return (u32)h & (PGRP_MOUNT_HASH - 1);
+}
+
+// The point with this key, or NULL when nothing is mounted there. Caller holds
+// ns_lock.
+static struct PgrpMhead *mhead_find(const struct Territory *t, int dc,
+                                    u64 devno, u64 qid_path) {
+    for (struct PgrpMhead *h = t->mhash[mhash_of(dc, devno, qid_path)]; h;
+         h = h->hnext)
+        if (h->dc == dc && h->devno == devno && h->qid_path == qid_path) return h;
+    return NULL;
+}
+
+static struct PgrpMhead *mhead_of(const struct Territory *t,
+                                  const struct Spoor *s) {
+    return mhead_find(t, s->dc, s->devno, s->qid.path);
+}
+
+// Hash a new point with no member yet; the caller links one before it drops
+// ns_lock.
+static void mhead_insert(struct Territory *t, struct PgrpMhead *h,
+                         int dc, u64 devno, u64 qid_path) {
+    h->dc       = dc;
+    h->devno    = devno;
+    h->qid_path = qid_path;
+    h->first    = NULL;
+    h->last     = NULL;
+    h->work     = NULL;
+    h->nmembers = 0;
+    h->visit    = 0;
+    u32 b = mhash_of(dc, devno, qid_path);
+    h->hnext    = t->mhash[b];
+    t->mhash[b] = h;
+    t->npoints++;
+}
+
+// Take a point that no longer hosts a member out of the hash. Caller holds
+// ns_lock.
+static void mhead_remove(struct Territory *t, struct PgrpMhead *h) {
+    struct PgrpMhead **pp = &t->mhash[mhash_of(h->dc, h->devno, h->qid_path)];
+    while (*pp != h) {
+        if (!*pp) extinction("territory: a mount point is missing from its hash chain");
+        pp = &(*pp)->hnext;
+    }
+    *pp      = h->hnext;
+    h->hnext = NULL;
+    t->npoints--;
+}
+
+// Link `m` as a member of `h`. With `first` set at a point that has members
+// (MBEFORE), it goes first in h's search order and just before h's old first
+// member in the table; otherwise -- every other placement, and any placement
+// at a point with no member -- last in both. Caller holds ns_lock.
+static void mount_link(struct Territory *t, struct PgrpMhead *h,
+                       struct PgrpMount *m, bool first) {
+    struct PgrpMount *at = first ? h->first : NULL;
+    m->head = h;
+    if (at) {
+        m->tprev = at->tprev;
+        m->tnext = at;
+        if (at->tprev) at->tprev->tnext = m;
+        else           t->mfirst = m;
+        at->tprev = m;
+        m->prev   = NULL;
+        m->next   = at;
+        at->prev  = m;
+        h->first  = m;
+    } else {
+        m->tprev = t->mlast;
+        m->tnext = NULL;
+        if (t->mlast) t->mlast->tnext = m;
+        else          t->mfirst = m;
+        t->mlast = m;
+        m->prev  = h->last;
+        m->next  = NULL;
+        if (h->last) h->last->next = m;
+        else         h->first = m;
+        h->last  = m;
+    }
+    h->nmembers++;
+    t->nmounts++;
+}
+
+// Unlink `m` from the table and from its point. The point stays hashed even
+// when this empties it: the caller removes it, or links a member there again,
+// before it drops ns_lock.
+static void mount_unlink(struct Territory *t, struct PgrpMount *m) {
+    struct PgrpMhead *h = m->head;
+    if (m->tprev) m->tprev->tnext = m->tnext;
+    else          t->mfirst = m->tnext;
+    if (m->tnext) m->tnext->tprev = m->tprev;
+    else          t->mlast = m->tprev;
+    if (m->prev)  m->prev->next = m->next;
+    else          h->first = m->next;
+    if (m->next)  m->next->prev = m->prev;
+    else          h->last = m->prev;
+    m->tnext = m->tprev = m->next = m->prev = NULL;
+    m->head  = NULL;
+    h->nmembers--;
+    t->nmounts--;
+}
+
+// Open a pass over the points: a point is reached in it once its `visit` mark
+// equals the value returned. A point's mark is 0 until a pass reaches it, and a
+// wrap clears every mark, so no point starts a pass looking reached. Caller
+// holds ns_lock.
+static u32 mvisit_next(struct Territory *t) {
+    if (++t->mvisit == 0) {
+        for (int b = 0; b < PGRP_MOUNT_HASH; b++)
+            for (struct PgrpMhead *h = t->mhash[b]; h; h = h->hnext) h->visit = 0;
+        t->mvisit = 1;
+    }
+    return t->mvisit;
+}
+
+// What a table edit unlinked under ns_lock, for mount_dead_release once the
+// lock is dropped: entries in the order they were removed, and the points they
+// left empty.
+struct mount_dead {
+    struct PgrpMount  *entries;
+    struct PgrpMount **tail;
+    struct PgrpMhead  *points;
+};
+
+static void mount_dead_init(struct mount_dead *d) {
+    d->entries = NULL;
+    d->tail    = &d->entries;
+    d->points  = NULL;
+}
+
+static void mount_dead_entry(struct mount_dead *d, struct PgrpMount *m) {
+    m->tnext = NULL;
+    *d->tail = m;
+    d->tail  = &m->tnext;
+}
+
+static void mount_dead_point(struct mount_dead *d, struct PgrpMhead *h) {
+    h->hnext  = d->points;
+    d->points = h;
+}
+
+// Release each entry as unmount() always has -- its mount-point name, then its
+// source by spoor_clunk, never spoor_unref: the entry's ref may be the source's
+// LAST, and the Dev's close hook must run -- then free the nodes. Never under
+// ns_lock.
+static void mount_dead_release(struct mount_dead *d) {
+    struct PgrpMount *m = d->entries;
+    while (m) {
+        struct PgrpMount *next = m->tnext;
+        path_unref(m->mp_path);
+        spoor_clunk(m->source);
+        kmem_cache_free(g_mount_cache, m);
+        m = next;
+    }
+    struct PgrpMhead *h = d->points;
+    while (h) {
+        struct PgrpMhead *next = h->hnext;
+        kmem_cache_free(g_mhead_cache, h);
+        h = next;
+    }
+    mount_dead_init(d);
+}
+
+// Free nodes allocated for a copy and never linked (territory_clone's pools,
+// chained through tnext and hnext).
+static void mount_pools_free(struct PgrpMount *entries, struct PgrpMhead *points) {
+    while (entries) {
+        struct PgrpMount *next = entries->tnext;
+        kmem_cache_free(g_mount_cache, entries);
+        entries = next;
+    }
+    while (points) {
+        struct PgrpMhead *next = points->hnext;
+        kmem_cache_free(g_mhead_cache, points);
+        points = next;
+    }
+}
 
 // =============================================================================
 // Territory lifecycle.
@@ -65,11 +342,15 @@ static void territory_init_fields(struct Territory *p) {
     p->ref        = 1;
     p->nbinds     = 0;
     p->nmounts    = 0;
+    p->npoints    = 0;
+    p->mfirst     = NULL;
+    p->mlast      = NULL;
+    p->mvisit     = 0;
     p->root_spoor = NULL;
     spin_lock_init(&p->dot_lock);
-    spin_lock_init(&p->ns_lock);   // RW-4 SA-F1: mounts[]/binds[]/root_spoor guard
+    spin_lock_init(&p->ns_lock);   // RW-4 SA-F1: the mount table/binds[]/root_spoor guard
     p->dot_path   = NULL;   // NULL == cwd "/" (allocated lazily on first chdir)
-    // KP_ZERO already cleared binds[] and mounts[]; nothing more to do.
+    // KP_ZERO already cleared binds[] and mhash[]; nothing more to do.
 }
 
 void territory_init(void) {
@@ -81,6 +362,13 @@ void territory_init(void) {
                                      KMEM_CACHE_PANIC_ON_FAIL);
     if (!g_pgrp_cache) {
         extinction("kmem_cache_create(territory) returned NULL");
+    }
+    // No KMEM_CACHE_PANIC_ON_FAIL: a mount whose entry cannot be allocated is
+    // refused (ENOMEM), and a spawn whose copy cannot be is too.
+    g_mount_cache = kmem_cache_create("territory_mount", sizeof(struct PgrpMount), 8, 0);
+    g_mhead_cache = kmem_cache_create("territory_mhead", sizeof(struct PgrpMhead), 8, 0);
+    if (!g_mount_cache || !g_mhead_cache) {
+        extinction("kmem_cache_create(territory mount nodes) returned NULL");
     }
 
     g_kpgrp = kmem_cache_alloc(g_pgrp_cache, KP_ZERO);
@@ -122,22 +410,49 @@ struct Territory *territory_clone(struct Territory *parent) {
     // R5-H F92: defense-in-depth against single-bit-flip / partial-
     // corruption that leaves magic intact but corrupts the count
     // fields. The bound is fixed at compile time; validating here
-    // catches a torn nbinds/nmounts before the deep-copy loop reads
-    // past the array.
+    // catches a torn nbinds before the deep-copy loop reads past the
+    // array (the mount counts are checked where they are read, below).
     if ((unsigned)parent->nbinds > PGRP_MAX_BINDS)
         extinction("territory_clone: parent->nbinds out of range (corrupted Territory)");
-    if ((unsigned)parent->nmounts > PGRP_MAX_MOUNTS)
-        extinction("territory_clone: parent->nmounts out of range (corrupted Territory)");
 
     struct Territory *child = territory_alloc();
     if (!child) return NULL;
 
+    // The child's mount nodes are allocated before parent->ns_lock is taken
+    // (ARCH 9.1), sized from the counts read under it. A peer thread that grew
+    // the table in the gap sends the loop round again for the difference, and
+    // the rounds end: the pools only grow, and the table only to
+    // PGRP_MOUNT_CAP.
+    //
     // RW-4 SA-F1: the bind/mount/root deep-copy reads parent's tables -- take
     // parent->ns_lock so a concurrent mount/unmount/pivot on a peer thread (or an
     // rfork(RFNAMEG)-sharing Proc) cannot tear the copy or free a source mid-ref.
     // spoor_ref under the lock is safe (atomic, non-sleeping). Released after the
     // root copy, before the dot_path copy (which takes the separate dot_lock).
-    spin_lock(&parent->ns_lock);
+    struct PgrpMount *epool = NULL;    // chained through tnext
+    struct PgrpMhead *ppool = NULL;    // chained through hnext
+    int nepool = 0, nppool = 0;
+    for (;;) {
+        spin_lock(&parent->ns_lock);
+        int ne = parent->nmounts, np = parent->npoints;
+        // R5-H F92: a torn count would size the pools from garbage.
+        if ((unsigned)ne > PGRP_MOUNT_CAP || (unsigned)np > (unsigned)ne)
+            extinction("territory_clone: parent's mount counts out of range (corrupted Territory)");
+        if (ne <= nepool && np <= nppool) break;          // ns_lock stays held
+        spin_unlock(&parent->ns_lock);
+        for (; nepool < ne; nepool++) {
+            struct PgrpMount *m = mount_node_alloc(g_mount_cache);
+            if (!m) goto oom;
+            m->tnext = epool;
+            epool    = m;
+        }
+        for (; nppool < np; nppool++) {
+            struct PgrpMhead *h = mount_node_alloc(g_mhead_cache);
+            if (!h) goto oom;
+            h->hnext = ppool;
+            ppool    = h;
+        }
+    }
 
     // Deep-copy the bind table. Models the spec's ForkClone action's
     // bindings update: the child gets an independent function value.
@@ -146,22 +461,37 @@ struct Territory *territory_clone(struct Territory *parent) {
         child->binds[i] = parent->binds[i];
     }
 
-    // Deep-copy the mount table. For each cloned entry, spoor_ref(source)
-    // — each Territory holding an entry contributes one reference per
-    // entry. Models the spec's ForkClone refcount update:
+    // Deep-copy the mount table in table order. Appending each entry to its
+    // point carries every point's search order over too, since a point's
+    // members appear in the table in that order. For each cloned entry,
+    // spoor_ref(source) — each Territory holding an entry contributes one
+    // reference per entry. Models the spec's ForkClone refcount update:
     //   refcount' = refcount + Cardinality(entries-in-parent-pointing-at-s)
     //
     // spoor_ref extincts on a NULL or corrupted source — that's a kernel
     // invariant violation (we put a corrupted Spoor into the mount table)
     // and the extinct is the correct response.
-    child->nmounts = parent->nmounts;
-    for (int i = 0; i < parent->nmounts; i++) {
-        child->mounts[i] = parent->mounts[i];
-        spoor_ref(child->mounts[i].source);
+    for (const struct PgrpMount *pm = parent->mfirst; pm; pm = pm->tnext) {
+        const struct PgrpMhead *ph = pm->head;
+        struct PgrpMhead *ch = mhead_find(child, ph->dc, ph->devno, ph->qid_path);
+        if (!ch) {
+            if (!ppool) extinction("territory_clone: more mount points than npoints (corrupted Territory)");
+            ch    = ppool;
+            ppool = ch->hnext;
+            mhead_insert(child, ch, ph->dc, ph->devno, ph->qid_path);
+        }
+        if (!epool) extinction("territory_clone: more mount entries than nmounts (corrupted Territory)");
+        struct PgrpMount *cm = epool;
+        epool       = cm->tnext;
+        cm->source  = pm->source;
+        spoor_ref(cm->source);
         // #66 (I-33): the cloned entry SHARES the parent's mount-point name --
         // one more Path ref per clone, dropped at this child's unmount /
         // final-release. path_ref is NULL-safe (a nameless mount stays nameless).
-        path_ref(child->mounts[i].mp_path);
+        cm->mp_path = pm->mp_path;
+        path_ref(cm->mp_path);
+        cm->flags   = pm->flags;
+        mount_link(child, ch, cm, false);
     }
 
     // Deep-copy the root_spoor pivot (P5-stratumd-stub-bringup-e2). Each
@@ -181,6 +511,7 @@ struct Territory *territory_clone(struct Territory *parent) {
     // execve, silently, for the whole descendant subtree.
     child->flags = __atomic_load_n(&parent->flags, __ATOMIC_ACQUIRE);
     spin_unlock(&parent->ns_lock);
+    mount_pools_free(epool, ppool);      // what a shrinking peer left over
 
     // LS-4: copy the cwd snapshot (POSIX fork semantics -- the child inherits
     // the parent's cwd, independent thereafter). Take the PARENT's dot_lock so
@@ -204,6 +535,12 @@ struct Territory *territory_clone(struct Territory *parent) {
     }
     spin_unlock(&parent->dot_lock);
     return child;
+
+oom:
+    // No lock is held, and the child has no entry yet.
+    mount_pools_free(epool, ppool);
+    territory_unref(child);
+    return NULL;
 }
 
 void territory_ref(struct Territory *p) {
@@ -227,8 +564,8 @@ void territory_unref(struct Territory *p) {
         // immediately preceding the destroy.
         //
         // If this loop is skipped (the BUGGY_DESTROY_LEAK class), each
-        // source's refcount stays bumped while the entries vanish from
-        // mounts[] — the Spoor's storage is leaked. The spec's
+        // source's refcount stays bumped while the entries vanish with
+        // the Territory — the Spoor's storage is leaked. The spec's
         // MountRefcountConsistency invariant catches that desync.
         //
         // Use spoor_clunk (Plan 9 cclose) not spoor_unref: if this is
@@ -240,24 +577,37 @@ void territory_unref(struct Territory *p) {
         // close-less last-drop would have leaked Dev state on
         // Territory destruction.
         //
-        // Walk in reverse so the array indexing stays valid even if we
-        // ever add side-effects that clear the slot during the close
-        // path; current Dev close hooks don't touch the Territory, so
-        // the direction is cosmetic.
-        for (int i = p->nmounts - 1; i >= 0; i--) {
+        // The walk runs from the last entry back, the order the array's
+        // release used; current Dev close hooks don't touch the Territory,
+        // so the direction is cosmetic. No lock: at final release there is
+        // no concurrent accessor.
+        struct PgrpMount *m = p->mlast;
+        while (m) {
+            struct PgrpMount *prev = m->tprev;
             // #66 (I-33): drop the entry's mount-point name ref (the matched
-            // counterpart to the path_ref at mount()/MREPL/clone). path_unref is
-            // NULL-safe + non-sleeping (refcount + kfree, no Dev close hook), so
-            // it needs no defer-outside-lock; here at final release there is no
-            // concurrent accessor anyway.
-            path_unref(p->mounts[i].mp_path);
-            p->mounts[i].mp_path = NULL;
-            spoor_clunk(p->mounts[i].source);
+            // counterpart to the path_ref at mount()/clone). path_unref is
+            // NULL-safe + non-sleeping (refcount + kfree, no Dev close hook).
+            path_unref(m->mp_path);
+            spoor_clunk(m->source);
+            kmem_cache_free(g_mount_cache, m);
+            m = prev;
         }
-        // Clear nmounts so a post-free read (UAF) sees consistent state
+        for (int b = 0; b < PGRP_MOUNT_HASH; b++) {
+            struct PgrpMhead *h = p->mhash[b];
+            while (h) {
+                struct PgrpMhead *next = h->hnext;
+                kmem_cache_free(g_mhead_cache, h);
+                h = next;
+            }
+            p->mhash[b] = NULL;
+        }
+        // Clear the table so a post-free read (UAF) sees consistent state
         // (zero entries) — SLUB's freelist write will clobber magic but
         // not the count fields immediately; defensive.
+        p->mfirst  = NULL;
+        p->mlast   = NULL;
         p->nmounts = 0;
+        p->npoints = 0;
 
         // Drop the root_spoor pivot's per-Territory ref. Mirrors the
         // mount-entry discipline above: spoor_clunk (not spoor_unref) so
@@ -413,6 +763,86 @@ int territory_nmounts(struct Territory *p) {
     return p->nmounts;
 }
 
+int territory_npoints(struct Territory *p) {
+    if (!p) return 0;
+    return p->npoints;
+}
+
+u64 territory_mount_entries_live(void) { return kmem_cache_live_count(g_mount_cache); }
+u64 territory_mount_points_live(void)  { return kmem_cache_live_count(g_mhead_cache); }
+
+// territory_mount_check -- the table's structural rules, each named by the
+// number returned when it is the first found broken:
+//   1  the table list is not a consistent doubly linked list, mfirst to mlast
+//   2  nmounts is not the table's length, or the length passes PGRP_MOUNT_CAP
+//   3  a point sits in the wrong hash chain, or a key is hashed twice
+//   4  npoints is not the number of points hashed
+//   5  a point's member list is inconsistent, empty, or not nmembers long
+//   6  a member's head is not the point whose list holds it
+//   7  the points' members do not add up to nmounts
+//   8  a point's search order is not its members' order in the table
+//   9  a covered entry carries another flag, is the second at its point, or
+//      is not the point's own directory
+// O(entries x points): for tests.
+int territory_mount_check(struct Territory *t) {
+    if (!t) return 0;
+    if (t->magic != PGRP_MAGIC) extinction("territory_mount_check on corrupted Territory");
+
+    int rule = 0;
+    spin_lock(&t->ns_lock);
+    int n = 0;
+    const struct PgrpMount *prev = NULL;
+    for (const struct PgrpMount *m = t->mfirst; m; m = m->tnext) {
+        if (m->tprev != prev)             { rule = 1; goto out; }
+        if (++n > PGRP_MOUNT_CAP)         { rule = 2; goto out; }
+        prev = m;
+    }
+    if (t->mlast != prev)                 { rule = 1; goto out; }
+    if (n != t->nmounts)                  { rule = 2; goto out; }
+
+    int npts = 0, members = 0;
+    for (int b = 0; b < PGRP_MOUNT_HASH; b++) {
+        for (const struct PgrpMhead *h = t->mhash[b]; h; h = h->hnext) {
+            if (mhash_of(h->dc, h->devno, h->qid_path) != (u32)b ||
+                mhead_find(t, h->dc, h->devno, h->qid_path) != h) { rule = 3; goto out; }
+            if (++npts > PGRP_MOUNT_CAP)  { rule = 4; goto out; }
+            int k = 0, covered = 0;
+            const struct PgrpMount *mp = NULL;
+            for (const struct PgrpMount *m = h->first; m; m = m->next) {
+                if (m->prev != mp)        { rule = 5; goto out; }
+                if (m->head != h)         { rule = 6; goto out; }
+                if ((m->flags & MCOVERED) &&
+                    (m->flags != MCOVERED || ++covered > 1 || !m->source ||
+                     m->source->dc != h->dc || m->source->devno != h->devno ||
+                     m->source->qid.path != h->qid_path)) { rule = 9; goto out; }
+                if (++k > PGRP_MOUNT_CAP) { rule = 5; goto out; }
+                mp = m;
+            }
+            if (h->last != mp || k == 0 || (u32)k != h->nmembers) { rule = 5; goto out; }
+            members += k;
+        }
+    }
+    if (npts != t->npoints)               { rule = 4; goto out; }
+    if (members != t->nmounts)            { rule = 7; goto out; }
+
+    // With the counts agreeing, this also places every table entry on a
+    // hashed point's list.
+    for (int b = 0; b < PGRP_MOUNT_HASH; b++) {
+        for (const struct PgrpMhead *h = t->mhash[b]; h; h = h->hnext) {
+            const struct PgrpMount *want = h->first;
+            for (const struct PgrpMount *m = t->mfirst; m; m = m->tnext) {
+                if (m->head != h) continue;
+                if (m != want)            { rule = 8; goto out; }
+                want = want->next;
+            }
+            if (want)                     { rule = 8; goto out; }
+        }
+    }
+out:
+    spin_unlock(&t->ns_lock);
+    return rule;
+}
+
 u64 territory_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __ATOMIC_RELAXED); }
 u64 territory_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
 
@@ -464,8 +894,7 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
     // acyclic (no ns_lock holder takes g_proc_table_lock).
     spin_lock(&p->ns_lock);
     bool truncated = false;
-    for (int i = 0; i < p->nmounts; i++) {
-        struct PgrpMount *m = &p->mounts[i];
+    for (const struct PgrpMount *m = p->mfirst; m; m = m->tnext) {
         // Render a COMPLETE "mount <pt> <src>\n" line or NONE: snapshot off, and
         // on any overflow rewind to discard the partial line (#66b audit F2 --
         // so a truncated list never leaves a half "mount " prefix that the
@@ -681,22 +1110,11 @@ static bool source_is_valid(struct Spoor *s) {
     return true;
 }
 
-// Mount-point identity match (stalk-2): the Plan 9 (type, dev, qid) triple ==
-// (dc, devno, qid.path). All three compare: qid.path is unique only within a
-// (dc, devno) instance, so two dev9p sessions (same dc, both root qid.path 0)
-// are distinguished by devno.
-static inline bool mount_key_eq(const struct PgrpMount *m,
-                                const struct Spoor *s) {
-    return m->mp_dc == s->dc &&
-           m->mp_devno == s->devno &&
-           m->mp_qid_path == s->qid.path;
-}
-
 // A mount-point / source identity (Plan 9 type+dev+qid). Used by the mount
 // cycle check below.
 struct mkey { int dc; u64 devno; u64 path; };
 _Static_assert(sizeof(((struct mkey *)0)->devno) == sizeof(((struct Spoor *)0)->devno) &&
-               sizeof(((struct PgrpMount *)0)->mp_devno) == sizeof(((struct Spoor *)0)->devno),
+               sizeof(((struct PgrpMhead *)0)->devno) == sizeof(((struct Spoor *)0)->devno),
                "the mount key carries the whole devno (spoor_next_devno never wraps)");
 
 static inline bool mkey_eq(struct mkey a, struct mkey b) {
@@ -705,41 +1123,6 @@ static inline bool mkey_eq(struct mkey a, struct mkey b) {
 static inline struct mkey spoor_mkey(const struct Spoor *s) {
     struct mkey k = { s->dc, s->devno, s->qid.path };
     return k;
-}
-static bool mkey_in(const struct mkey *arr, int n, struct mkey k) {
-    for (int i = 0; i < n; i++) if (mkey_eq(arr[i], k)) return true;
-    return false;
-}
-
-// Does any entry key on `mp`? Caller holds ns_lock.
-static bool mount_point_hosts_member(const struct Territory *t,
-                                     const struct Spoor *mp) {
-    for (int i = 0; i < t->nmounts; i++)
-        if (mount_key_eq(&t->mounts[i], mp)) return true;
-    return false;
-}
-
-// Open slot `ins` (shifting [ins .. nmounts) right; each struct copy MOVES its
-// source + mp_path refs, no ref change) and fill it with an entry keyed on
-// `mountpoint`. The caller has already taken the entry's source ref and checked
-// capacity. Caller holds ns_lock.
-static void mount_install_at(struct Territory *t, int ins, struct Spoor *source,
-                             struct Spoor *mountpoint, u32 flags) {
-    for (int j = t->nmounts; j > ins; j--)
-        t->mounts[j] = t->mounts[j - 1];
-    struct PgrpMount *e = &t->mounts[ins];
-    e->source      = source;
-    // #66 (I-33): retain the mount-POINT's namespace name for /proc/<pid>/ns.
-    // path_ref is NULL-safe (a kernel-internal mountpoint with no retained name
-    // -> NULL mp_path -> rendered "?"). Introspection-only: the entry keys on
-    // the (dc, devno, qid.path) identity below, never on mp_path.
-    e->mp_path     = mountpoint->path;
-    path_ref(e->mp_path);
-    e->mp_qid_path = mountpoint->qid.path;
-    e->mp_dc       = mountpoint->dc;
-    e->mp_devno    = mountpoint->devno;
-    e->flags       = flags;
-    t->nmounts++;
 }
 
 // would_create_mount_cycle(t, source, mountpoint): would adding the mount edge
@@ -750,39 +1133,44 @@ static void mount_install_at(struct Territory *t, int ins, struct Spoor *source,
 // a two-tree oscillation could form a cycle that `cross_mounts` then resolved to
 // a silently-wrong endpoint; enforce it here so the invariant actually holds).
 //
-// Algorithm mirrors would_create_cycle: from `key(source)`, follow existing
-// mount edges to a fixed point (an entry whose mount-point key is reachable adds
-// its source key); if `key(mountpoint)` is then reachable, the new edge closes a
-// cycle (mountpoint -> source -> ... -> mountpoint). The trivial self-mount
-// (source identity == mountpoint identity) is the degenerate case. A covered
-// entry (MCOVERED) is a self-edge -- its source IS its point -- so it can never
-// add a key to `reach` and needs no exemption here.
-static bool would_create_mount_cycle(const struct Territory *t,
+// The keys reachable from `key(source)` are the least set holding it and, for
+// each point whose key it holds, the key of every source mounted there; if
+// `key(mountpoint)` is among them, the new edge closes a cycle (mountpoint ->
+// source -> ... -> mountpoint). A pass over the points finds them: each point
+// is looked up by key, marked when reached and queued on its own `work` link,
+// so the pass costs the points it reaches and needs no array. The trivial
+// self-mount (source identity == mountpoint identity) is the degenerate case. A
+// covered entry (MCOVERED) is a self-edge -- its source IS its point -- so it
+// leads back to a point already reached and needs no exemption. Caller holds
+// ns_lock.
+static bool would_create_mount_cycle(struct Territory *t,
                                      const struct Spoor *source,
                                      const struct Spoor *mountpoint) {
     struct mkey src = spoor_mkey(source);
     struct mkey dst = spoor_mkey(mountpoint);
     if (mkey_eq(src, dst)) return true;            // self-mount
 
-    struct mkey reach[PGRP_MAX_MOUNTS + 1];
-    int n = 0;
-    reach[n++] = src;
-
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (int i = 0; i < t->nmounts; i++) {
-            struct mkey e_mp  = { t->mounts[i].mp_dc, t->mounts[i].mp_devno,
-                                  t->mounts[i].mp_qid_path };
-            struct mkey e_src = spoor_mkey(t->mounts[i].source);
-            if (mkey_in(reach, n, e_mp) && !mkey_in(reach, n, e_src)) {
-                if (n >= PGRP_MAX_MOUNTS + 1) break;
-                reach[n++] = e_src;
-                changed = true;
+    u32 pass = mvisit_next(t);
+    struct PgrpMhead *work = mhead_find(t, src.dc, src.devno, src.path);
+    if (work) {
+        work->visit = pass;
+        work->work  = NULL;
+    }
+    while (work) {
+        struct PgrpMhead *h = work;
+        work = h->work;
+        for (const struct PgrpMount *m = h->first; m; m = m->next) {
+            struct mkey k = spoor_mkey(m->source);
+            if (mkey_eq(k, dst)) return true;
+            struct PgrpMhead *n = mhead_find(t, k.dc, k.devno, k.path);
+            if (n && n->visit != pass) {
+                n->visit = pass;
+                n->work  = work;
+                work     = n;
             }
         }
     }
-    return mkey_in(reach, n, dst);
+    return false;
 }
 
 int mount(struct Territory *territory, struct Spoor *source,
@@ -797,18 +1185,29 @@ int mount(struct Territory *territory, struct Spoor *source,
     if (!mountpoint)                    return -1;
     if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
-    // RW-4 SA-F1: the cycle check + idempotency scan + MREPL/append all read or
-    // write mounts[]/nmounts -- serialize under ns_lock against a concurrent
+    // ARCH 9.1: what this mount may need is allocated before ns_lock is taken,
+    // so a failed allocation refuses it before any edit. The most it needs is
+    // a union's start -- two entries (the member and the covered directory) at
+    // a new point -- and what it does not use is freed after the lock.
+    struct PgrpMount *e_new = mount_node_alloc(g_mount_cache);
+    struct PgrpMount *e_cov = mount_node_alloc(g_mount_cache);
+    struct PgrpMhead *h_new = mount_node_alloc(g_mhead_cache);
+    if (!e_new || !e_cov || !h_new) {
+        kmem_cache_free(g_mount_cache, e_new);
+        kmem_cache_free(g_mount_cache, e_cov);
+        kmem_cache_free(g_mhead_cache, h_new);
+        return -4;
+    }
+
+    // RW-4 SA-F1: the cycle check + idempotency scan + MREPL/insert all read or
+    // write the table -- serialize under ns_lock against a concurrent
     // mount/unmount/clone on a peer thread. spoor_ref is leaf-safe inside the
-    // lock; the MREPL spoor_clunk(old) is captured under the lock + deferred to
-    // OUTSIDE it (the displaced source's Dev close hook may sleep -- never hold a
-    // spinlock across it, the dot_lock free-outside-the-lock discipline).
-    // UM: MREPL replaces the whole union group at a point, so up to
-    // PGRP_MAX_MOUNTS displaced sources may need clunking -- deferred to OUTSIDE
-    // the lock (a Dev close hook may sleep). repl_nclunk stays 0 on every
-    // non-MREPL path.
-    struct Spoor *repl_clunk[PGRP_MAX_MOUNTS];
-    int repl_nclunk = 0;
+    // lock. An entry this mount removes (MREPL's group replace, a reposition) is
+    // unlinked under the lock and released after it (mount_dead): its source's
+    // Dev close hook may sleep -- never hold a spinlock across it.
+    struct mount_dead dead;
+    mount_dead_init(&dead);
+    struct PgrpMhead *h = NULL;
     int rc;
     spin_lock(&territory->ns_lock);
 
@@ -818,20 +1217,23 @@ int mount(struct Territory *territory, struct Spoor *source,
     // cyclic mount cannot be installed + then resolve to a wrong endpoint.
     if (would_create_mount_cycle(territory, source, mountpoint)) { rc = -3; goto out; }
 
+    h = mhead_of(territory, mountpoint);
+
     // Plan 9 cmount: an MBEFORE / MAFTER mount at a point with NOTHING mounted
-    // there also makes the covered directory a member (MCOVERED). Judged here,
-    // before the reposition below can remove this pair: a point that hosted it
-    // was not fresh, and re-mounting the sole member of an MREPL group must not
-    // grow a covered member (territory.tla BUGGY_FRESH_AFTER_REMOVE).
-    // MREPL wins over the ordering flags (Plan 9 encodes the three as one
-    // field), so it never starts a union; SYS_MOUNT refuses the combinations.
-    // Only a directory can be searched as a member, so no union starts at a
-    // file point. SYS_MOUNT refuses an ordered mount there (Plan 9's Emount,
-    // ARCH 9.6.1); this conjunct holds the line for mount()'s kernel callers
-    // (territory.tla BUGGY_COVER_FILE; territory_mount.covered_file_point_stays_plain).
+    // there also makes the covered directory a member (MCOVERED). A point is
+    // hashed only while it hosts a member, so "no point" is "nothing mounted".
+    // Judged here, before the reposition below can remove this pair: a point
+    // that hosted it was not fresh, and re-mounting the sole member of an MREPL
+    // group must not grow a covered member (territory.tla
+    // BUGGY_FRESH_AFTER_REMOVE). MREPL wins over the ordering flags (Plan 9
+    // encodes the three as one field), so it never starts a union; SYS_MOUNT
+    // refuses the combinations. Only a directory can be searched as a member,
+    // so no union starts at a file point. SYS_MOUNT refuses an ordered mount
+    // there (Plan 9's Emount, ARCH 9.6.1); this conjunct holds the line for
+    // mount()'s kernel callers (territory.tla BUGGY_COVER_FILE;
+    // territory_mount.covered_file_point_stays_plain).
     bool starts_union = !(flags & MREPL) && (flags & (MBEFORE | MAFTER)) &&
-                        (mountpoint->qid.type & QTDIR) &&
-                        !mount_point_hosts_member(territory, mountpoint);
+                        (mountpoint->qid.type & QTDIR) && !h;
 
     // Idempotency: (key(mountpoint), source) pair already in the table → no new
     // entry, no refcount bump. territory.tla keeps each point's members in
@@ -871,104 +1273,99 @@ int mount(struct Territory *territory, struct Spoor *source,
     // member would converge flags and leave the OTHER members in place. For a
     // flagless re-mount (no ordering change requested) converge flags in place
     // (the #219 direction). For MBEFORE/MAFTER on an EXISTING pair, MOVE it to
-    // the requested position: remove it here (deferring its source clunk +
-    // dropping its Path ref) and fall through to re-insert at the ordering index
-    // below -- else the reorder was a silent no-op that reported success (F6).
-    if (!(flags & MREPL)) {
-        for (int i = 0; i < territory->nmounts; i++) {
-            if (mount_key_eq(&territory->mounts[i], mountpoint) &&
-                territory->mounts[i].source == source) {
-                if (!(flags & (MBEFORE | MAFTER))) {
-                    territory->mounts[i].flags = flags;   // in-place converge
-                    rc = 0;
-                    goto out;
-                }
-                // Reposition: remove now, re-insert at the ordering index below.
-                // The deferred clunk drops the old entry's ref; the insert takes
-                // a fresh one (source stays alive on the caller's borrowed ref).
-                repl_clunk[repl_nclunk++] = territory->mounts[i].source;
-                path_unref(territory->mounts[i].mp_path);
-                for (int j = i; j < territory->nmounts - 1; j++)
-                    territory->mounts[j] = territory->mounts[j + 1];
-                territory->nmounts--;
-                break;   // at most one (point, source) pair
+    // the requested position: unlink it here and fall through to re-link it at
+    // the ordering position below -- else the reorder was a silent no-op that
+    // reported success (F6).
+    if (!(flags & MREPL) && h) {
+        for (struct PgrpMount *m = h->first; m; m = m->next) {
+            if (m->source != source) continue;
+            if (!(flags & (MBEFORE | MAFTER))) {
+                m->flags = flags;   // in-place converge
+                rc = 0;
+                goto out;
             }
+            // Reposition: remove now, re-insert at the ordering position below.
+            // Releasing the old entry drops its ref; the insert takes a fresh
+            // one (source stays alive on the caller's borrowed ref).
+            mount_unlink(territory, m);
+            mount_dead_entry(&dead, m);
+            break;   // at most one (point, source) pair
         }
     }
 
-    // UM (union mounts): dispatch on the ordering flags to place the new member
-    // in the point's SEARCH ORDER (ARCH 9.5/9.6; territory.tla MountRepl /
-    // MountBefore / MountAfter). A point's members are searched in mounts[]
-    // array order -- MBEFORE members first, MAFTER (and the flagless default)
-    // last -- and mount_member_at / the resolver iterate that order.
-    //
-    //   MREPL   -> replace the WHOLE group: remove every existing member at the
-    //              point (defer their source clunks; drop their Path refs), then
-    //              install this one. v1.0 single-member points make this
-    //              identical to the prior "replace the first entry", but a real
-    //              union now collapses correctly (the spec's MountRepl replaces
-    //              the sequence, not just its head).
-    //   MBEFORE -> insert at the index of the point's FIRST existing member, so
-    //              it is searched before them (Plan 9 prepend; later MBEFOREs go
-    //              to the very front, LIFO).
-    //   MAFTER / flagless -> append after the point's members (searched last,
-    //              FIFO). This preserves the pre-UM append behavior exactly.
-    if (flags & MREPL) {
-        int i = 0;
-        while (i < territory->nmounts) {
-            if (mount_key_eq(&territory->mounts[i], mountpoint)) {
-                // Defer the displaced source's clunk (its Dev close hook may
-                // sleep -- never under ns_lock); drop the mount-point Path ref
-                // now (path_unref is non-sleeping).
-                repl_clunk[repl_nclunk++] = territory->mounts[i].source;
-                path_unref(territory->mounts[i].mp_path);
-                for (int j = i; j < territory->nmounts - 1; j++)
-                    territory->mounts[j] = territory->mounts[j + 1];
-                territory->nmounts--;
-                // do NOT advance i: the shifted-down entry now occupies slot i.
-            } else {
-                i++;
-            }
+    // UM (union mounts): MREPL replaces the WHOLE group -- every member at the
+    // point is removed, then this one installed (the spec's MountRepl replaces
+    // the sequence, not just its head). The point stays: the new member is
+    // linked at it below.
+    if ((flags & MREPL) && h) {
+        while (h->first) {
+            struct PgrpMount *m = h->first;
+            mount_unlink(territory, m);
+            mount_dead_entry(&dead, m);
         }
-        // fall through to install the one new member below.
     }
 
     // A union's first mount installs two entries: the covered directory's and
-    // the new member's. (starts_union excludes the reposition above, so no slot
-    // was freed there that this refusal could strand.)
-    if (territory->nmounts + (starts_union ? 2 : 1) > PGRP_MAX_MOUNTS) { rc = -2; goto out; }
+    // the new member's. Nothing above removed an entry unless this mount's own
+    // point hosted it, and then the count fell by at least the one this
+    // mount adds (starts_union is false there), so this refusal never strands
+    // a removal.
+    if (territory->nmounts + (starts_union ? 2 : 1) > PGRP_MOUNT_CAP) { rc = -2; goto out; }
 
-    // Take the per-entry references BEFORE installing the entries. The path
+    // Take the per-entry references BEFORE linking the entries. The path
     // below is infallible after the refs, so no rollback is needed. The covered
     // entry's source is `mountpoint` itself, retained -- the one case where the
     // table keeps the point's Spoor rather than copying its key.
     spoor_ref(source);
     if (starts_union) spoor_ref(mountpoint);
 
-    // Choose the insertion index. MBEFORE opens a slot at the point's first
-    // existing member (so the new member is searched first); every other flag
-    // (MAFTER / flagless / post-MREPL) appends after the point's members. A
-    // union's first mount finds no member, so both entries append, in Plan 9's
-    // order: <new, covered> for MBEFORE, <covered, new> for MAFTER.
-    int ins = territory->nmounts;
-    if (flags & MBEFORE) {
-        for (int i = 0; i < territory->nmounts; i++) {
-            if (mount_key_eq(&territory->mounts[i], mountpoint)) { ins = i; break; }
-        }
+    if (!h) {
+        h     = h_new;
+        h_new = NULL;
+        mhead_insert(territory, h, mountpoint->dc, mountpoint->devno,
+                     mountpoint->qid.path);
     }
+    // #66 (I-33): each entry retains the mount-POINT's namespace name for
+    // /proc/<pid>/ns. path_ref is NULL-safe (a kernel-internal mountpoint with
+    // no retained name -> NULL mp_path -> rendered "?"). Introspection-only: the
+    // entry keys on its point's (dc, devno, qid.path) identity, never on mp_path.
+    struct PgrpMount *m = e_new;
+    e_new      = NULL;
+    m->source  = source;
+    m->mp_path = mountpoint->path;
+    path_ref(m->mp_path);
+    m->flags   = flags;
+    struct PgrpMount *cov = NULL;
+    if (starts_union) {
+        cov          = e_cov;
+        e_cov        = NULL;
+        cov->source  = mountpoint;
+        cov->mp_path = mountpoint->path;
+        path_ref(cov->mp_path);
+        cov->flags   = MCOVERED;
+    }
+
+    // UM (union mounts): place the new member in the point's SEARCH ORDER
+    // (ARCH 9.5/9.6; territory.tla MountRepl / MountBefore / MountAfter).
+    // MBEFORE puts it ahead of the point's members (Plan 9 prepend; later
+    // MBEFOREs go to the very front, LIFO); MAFTER, the flagless default and
+    // MREPL's replacement go after them (searched last, FIFO). A union's first
+    // mount finds no member, so both its entries append, in Plan 9's order:
+    // <new, covered> for MBEFORE, <covered, new> for MAFTER.
     bool before = (flags & MBEFORE) != 0;
-    if (starts_union && !before) {
-        mount_install_at(territory, ins, mountpoint, mountpoint, MCOVERED);
-        ins++;
-    }
-    mount_install_at(territory, ins, source, mountpoint, flags);
-    if (starts_union && before)
-        mount_install_at(territory, ins + 1, mountpoint, mountpoint, MCOVERED);
+    if (cov && !before) mount_link(territory, h, cov, false);
+    mount_link(territory, h, m, before);
+    if (cov && before)  mount_link(territory, h, cov, false);
     rc = 0;
 
 out:
+    // Every path that empties the point above links a member at it again.
+    if (h && !h->first) extinction("mount: left a mount point with no member in the hash");
     spin_unlock(&territory->ns_lock);
-    for (int k = 0; k < repl_nclunk; k++) spoor_clunk(repl_clunk[k]);
+    mount_dead_release(&dead);
+    kmem_cache_free(g_mount_cache, e_new);    // NULL when used
+    kmem_cache_free(g_mount_cache, e_cov);
+    kmem_cache_free(g_mhead_cache, h_new);
     return rc;
 }
 
@@ -978,70 +1375,56 @@ int unmount(struct Territory *territory, struct Spoor *mountpoint) {
     if (!mountpoint)                    return -1;
     if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
-    // RW-4 SA-F1: scan + swap-remove under ns_lock against a concurrent
-    // mount/unmount/clone; capture the removed source + clunk it OUTSIDE the lock
-    // (its Dev close hook may sleep).
-    struct Spoor *to_clunk = NULL;
-    struct Spoor *cov_clunk = NULL;
+    // RW-4 SA-F1: find + unlink under ns_lock against a concurrent
+    // mount/unmount/clone; the removed entry is released OUTSIDE the lock (its
+    // source's Dev close hook may sleep).
+    struct mount_dead dead;
+    mount_dead_init(&dead);
     int rc = -1;
     spin_lock(&territory->ns_lock);
-    for (int i = 0; i < territory->nmounts; i++) {
-        // The covered directory is never unmounted by itself (MCOVERED).
-        if (mount_key_eq(&territory->mounts[i], mountpoint) &&
-            !(territory->mounts[i].flags & MCOVERED)) {
-            // spoor_clunk (not spoor_unref) so the Dev's close hook runs if this
-            // is the last holder -- the ARCH 9.6.6 lifecycle where the user
-            // already closed the attach_9p fd and the mount-table was the only
-            // holder keeping the 9P session alive (P5-mount-syscall fix). Deferred
-            // to outside the lock.
-            to_clunk = territory->mounts[i].source;
-            // #66 (I-33): drop the removed entry's mount-point name BEFORE the
-            // shift overwrites the slot (else the Path ref leaks). path_unref is
-            // non-sleeping (no defer).
-            path_unref(territory->mounts[i].mp_path);
-            // UM: SHIFT-DOWN (not swap-remove) so the union SEARCH ORDER is
-            // preserved -- MBEFORE/MAFTER ordering is now load-bearing (the
-            // resolver + mount_member_at iterate mounts[] in array order). Each
-            // entry [i+1 ..] moves left, carrying its source + mp_path refs
-            // (struct move, no ref change). Removes the FIRST match; call again
-            // to drop the next union member (the contract is unchanged).
-            for (int j = i; j < territory->nmounts - 1; j++)
-                territory->mounts[j] = territory->mounts[j + 1];
-            territory->nmounts--;
-            rc = 0;
-            break;
-        }
-    }
-    // The covered directory leaves with the last member mounted at the point,
-    // so the point is a plain directory again rather than a union of itself.
-    if (rc == 0) {
-        int cov = -1;
+    struct PgrpMhead *h = mhead_of(territory, mountpoint);
+    struct PgrpMount *m = h ? h->first : NULL;
+    while (m && (m->flags & MCOVERED)) m = m->next;   // never unmounted by itself
+    if (m) {
+        // Released with spoor_clunk (not spoor_unref) so the Dev's close hook
+        // runs if this is the last holder -- the ARCH 9.6.6 lifecycle where the
+        // user already closed the attach_9p fd and the mount-table was the only
+        // holder keeping the 9P session alive (P5-mount-syscall fix). The FIRST
+        // member in search order goes, and the others keep their order; call
+        // again to drop the next union member (the contract is unchanged).
+        mount_unlink(territory, m);
+        mount_dead_entry(&dead, m);
+        rc = 0;
+        // The covered directory leaves with the last member mounted at the
+        // point, so the point is a plain directory again rather than a union of
+        // itself -- and a point left with no member leaves the hash.
+        struct PgrpMount *cov = NULL;
         bool mounted = false;
-        for (int i = 0; i < territory->nmounts; i++) {
-            if (!mount_key_eq(&territory->mounts[i], mountpoint)) continue;
-            if (territory->mounts[i].flags & MCOVERED) cov = i;
-            else                                      mounted = true;
+        for (struct PgrpMount *o = h->first; o; o = o->next) {
+            if (o->flags & MCOVERED) cov = o;
+            else                     mounted = true;
         }
-        if (cov >= 0 && !mounted) {
-            cov_clunk = territory->mounts[cov].source;
-            path_unref(territory->mounts[cov].mp_path);
-            for (int j = cov; j < territory->nmounts - 1; j++)
-                territory->mounts[j] = territory->mounts[j + 1];
-            territory->nmounts--;
+        if (cov && !mounted) {
+            mount_unlink(territory, cov);
+            mount_dead_entry(&dead, cov);
+        }
+        if (!h->first) {
+            mhead_remove(territory, h);
+            mount_dead_point(&dead, h);
         }
     }
     spin_unlock(&territory->ns_lock);
-    if (to_clunk) spoor_clunk(to_clunk);
-    if (cov_clunk) spoor_clunk(cov_clunk);
+    mount_dead_release(&dead);
     return rc;
 }
 
 // mount_lookup -- the `stalk` cross-mount probe (Plan 9 domount). Returns a
-// REF-HELD source of the FIRST entry whose mount-point identity matches `probe`'s
-// (dc, devno, qid.path), or NULL. RW-4 SA-F1: the lookup + spoor_ref happen
-// atomically under ns_lock so a concurrent unmount cannot free the source between
-// the lookup and the caller's use. THE CALLER MUST spoor_clunk the result
-// (stalk_cross_mounts clunks it after clone_walk_zero mints the crossed Spoor).
+// REF-HELD source of the FIRST member (search order) of the point whose identity
+// matches `probe`'s (dc, devno, qid.path), or NULL. RW-4 SA-F1: the lookup +
+// spoor_ref happen atomically under ns_lock so a concurrent unmount cannot free
+// the source between the lookup and the caller's use. THE CALLER MUST
+// spoor_clunk the result (stalk_cross_mounts clunks it after clone_walk_zero
+// mints the crossed Spoor).
 struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
                            u32 *flags_out) {
     if (flags_out) *flags_out = 0;
@@ -1052,28 +1435,25 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
 
     struct Spoor *src = NULL;
     spin_lock(&territory->ns_lock);
-    for (int i = 0; i < territory->nmounts; i++) {
-        if (mount_key_eq(&territory->mounts[i], probe)) {
-            src = territory->mounts[i].source;
-            spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
-            // VIVARIUM section 13: hand back the entry's flags under the same
-            // lock, so the resolver can see MPHENO_LINUX on the mount it crosses
-            // without a second scan (and without racing an unmount).
-            if (flags_out) *flags_out = territory->mounts[i].flags;
-            break;
-        }
+    struct PgrpMhead *h = mhead_of(territory, probe);
+    if (h) {
+        src = h->first->source;
+        spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+        // VIVARIUM section 13: hand back the entry's flags under the same
+        // lock, so the resolver can see MPHENO_LINUX on the mount it crosses
+        // without a second lookup (and without racing an unmount).
+        if (flags_out) *flags_out = h->first->flags;
     }
     spin_unlock(&territory->ns_lock);
     return src;
 }
 
 // mount_member_at (UM) -- the ordered union iterator. Returns a REF-HELD source
-// of the `index`-th mount entry whose mount-point identity matches `probe`, in
-// mounts[] array order (= declared search order per mount()'s ordering), or NULL
-// when `index` is past the last member. Same atomic ns_lock discipline as
-// mount_lookup. The resolver iterates index 0,1,2,... trying the next component
-// in each member and stopping at the first that resolves it. THE CALLER MUST
-// spoor_clunk the returned Spoor.
+// of the `index`-th member of the point whose identity matches `probe`, in its
+// declared search order, or NULL when `index` is past the last member. Same
+// atomic ns_lock discipline as mount_lookup. The resolver iterates index
+// 0,1,2,... trying the next component in each member and stopping at the first
+// that resolves it. THE CALLER MUST spoor_clunk the returned Spoor.
 struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
                               int index, u32 *flags_out) {
     if (flags_out) *flags_out = 0;
@@ -1084,18 +1464,14 @@ struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
     if (index < 0)                     return NULL;
 
     struct Spoor *src = NULL;
-    int seen = 0;
     spin_lock(&territory->ns_lock);
-    for (int i = 0; i < territory->nmounts; i++) {
-        if (mount_key_eq(&territory->mounts[i], probe)) {
-            if (seen == index) {
-                src = territory->mounts[i].source;
-                spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
-                if (flags_out) *flags_out = territory->mounts[i].flags;
-                break;
-            }
-            seen++;
-        }
+    struct PgrpMhead *h = mhead_of(territory, probe);
+    struct PgrpMount *m = h ? h->first : NULL;
+    for (int i = 0; m && i < index; i++) m = m->next;
+    if (m) {
+        src = m->source;
+        spoor_ref(src);   // transfer a ref to the caller (atomic vs unmount)
+        if (flags_out) *flags_out = m->flags;
     }
     spin_unlock(&territory->ns_lock);
     return src;
@@ -1103,14 +1479,16 @@ struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
 
 // mount_members_snapshot (UM, union mounts): capture EVERY member of the union
 // at `probe` in ONE ns_lock hold -- each source ref-held, its flags recorded,
-// in declared search order. Returns the count (0 if `probe` is not a mount
-// point); writes at most `max` entries. THE CALLER MUST spoor_clunk every
-// returned Spoor. This is the atomic form of iterating mount_member_at(0),(1),
-// ...: those take the lock once PER index, so a concurrent unmount can shift
-// the member set between calls (UM-7 F4 -- an index-based re-derivation then
-// crosses a DIFFERENT member than it inspected). A single-hold snapshot closes
-// that window for any operation over the WHOLE union (the readdir member
-// snapshot at open; the resolver's union walk).
+// in declared search order -- when they fit in `max`; otherwise capture nothing
+// and return the count, so the caller can retry with room for it. Returns the
+// member count (0 if `probe` is not a mount point). THE CALLER MUST spoor_clunk
+// every returned Spoor. This is the atomic form of iterating
+// mount_member_at(0),(1),...: those take the lock once PER index, so a
+// concurrent unmount can shift the member set between calls (UM-7 F4 -- an
+// index-based re-derivation then crosses a DIFFERENT member than it
+// inspected). A single-hold snapshot closes that window for any operation over
+// the WHOLE union (the readdir member snapshot at open; the resolver's union
+// walk).
 int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
                            struct Spoor **out, u32 *flags_out, int max) {
     if (!territory)                    return 0;
@@ -1120,12 +1498,16 @@ int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
 
     int n = 0;
     spin_lock(&territory->ns_lock);
-    for (int i = 0; i < territory->nmounts && n < max; i++) {
-        if (mount_key_eq(&territory->mounts[i], probe)) {
-            out[n] = territory->mounts[i].source;
-            spoor_ref(out[n]);               // transfer a ref to the caller (atomic vs unmount)
-            if (flags_out) flags_out[n] = territory->mounts[i].flags;
-            n++;
+    struct PgrpMhead *h = mhead_of(territory, probe);
+    if (h) {
+        n = (int)h->nmembers;
+        if (n <= max) {
+            int k = 0;
+            for (struct PgrpMount *m = h->first; m && k < n; m = m->next, k++) {
+                out[k] = m->source;
+                spoor_ref(out[k]);           // transfer a ref to the caller (atomic vs unmount)
+                if (flags_out) flags_out[k] = m->flags;
+            }
         }
     }
     spin_unlock(&territory->ns_lock);
@@ -1137,16 +1519,8 @@ bool mount_is_point_id(struct Territory *territory, int dc, u64 devno,
     if (!territory)                    return false;
     if (territory->magic != PGRP_MAGIC) extinction("mount_is_point_id on corrupted Territory");
 
-    bool hit = false;
     spin_lock(&territory->ns_lock);
-    for (int i = 0; i < territory->nmounts; i++) {
-        const struct PgrpMount *m = &territory->mounts[i];
-        if (m->mp_dc == dc && m->mp_devno == devno &&
-            m->mp_qid_path == qid_path) {
-            hit = true;
-            break;
-        }
-    }
+    bool hit = mhead_find(territory, dc, devno, qid_path) != NULL;
     spin_unlock(&territory->ns_lock);
     return hit;
 }
@@ -1155,10 +1529,11 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u64 devno) {
     if (!territory)                    return false;
     if (territory->magic != PGRP_MAGIC) extinction("mount_noexec_covers on corrupted Territory");
 
+    // A scan of every entry, not a lookup: the question is about a SOURCE's
+    // device instance, and the table is keyed on mount points.
     bool noexec = false;
     spin_lock(&territory->ns_lock);
-    for (int i = 0; i < territory->nmounts; i++) {
-        const struct PgrpMount *m = &territory->mounts[i];
+    for (const struct PgrpMount *m = territory->mfirst; m; m = m->tnext) {
         if (!(m->flags & MNOEXEC)) continue;
         // dc/devno are set at spoor_alloc and never mutate, so reading them
         // through the entry needs only the ns_lock that keeps `source` alive.
@@ -1178,8 +1553,9 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u64 devno) {
 //
 // unmount() takes a RESOLVED mount point, so once a root swap makes a mount
 // point unreachable its entry can never be named again: it cannot be removed,
-// it is deep-copied into every child by territory_clone, and its slot is lost
-// for the life of the namespace. The shed drops those entries at the swap.
+// it is deep-copied into every child by territory_clone, and it holds its
+// source for the life of the namespace. The shed drops those entries at the
+// swap.
 //
 // Reachability is per DEVICE INSTANCE (dc, devno), the least set R with
 //      instance(new root) in R
@@ -1201,76 +1577,65 @@ bool mount_noexec_covers(struct Territory *territory, int dc, u64 devno) {
 // (union_base = base->union_snap->point). The point lives in the tree the union
 // was mounted in, so its instance is a second seed; without it the shed drops
 // the union's own entries and every name under the new root is ENOENT.
-struct shed_inst { int dc; u64 devno; bool any_devno; };
+//
+// The pass marks the points whose instance it reaches and queues each on its
+// own `work` link, so it needs no array and allocates nothing. Finding the
+// points of an instance scans every point (the hash is keyed on the whole
+// identity), so the pass costs (members of the reached points) x (points):
+// about a million steps at PGRP_MOUNT_CAP, once per root swap.
 
-static bool shed_has(const struct shed_inst *r, int n, int dc, u64 devno) {
-    for (int i = 0; i < n; i++)
-        if (r[i].dc == dc && (r[i].any_devno || r[i].devno == devno)) return true;
-    return false;
-}
-
-#define SHED_REACH_MAX (PGRP_MAX_MOUNTS + 2)
-
-// Caller has checked !shed_has(). Capacity: the two seeds plus one instance per
-// mount entry, and each add is preceded by a miss, so n <= nmounts + 2.
-static void shed_add(struct shed_inst *r, int *n, const struct Spoor *s) {
-    if (*n >= SHED_REACH_MAX) extinction("territory shed: reach[] overflow");
-    r[*n].dc        = s->dc;
-    r[*n].devno     = s->devno;
-    r[*n].any_devno = s->dev && s->dev->devno_per_walker;
-    (*n)++;
+// Mark reached, and queue, every point not yet reached in the device instance
+// of `s` -- in its dc alone when its Dev's walk does not preserve devno.
+static void shed_reach(struct Territory *t, u32 pass, const struct Spoor *s,
+                       struct PgrpMhead **work) {
+    bool any_devno = s->dev && s->dev->devno_per_walker;
+    for (int b = 0; b < PGRP_MOUNT_HASH; b++) {
+        for (struct PgrpMhead *h = t->mhash[b]; h; h = h->hnext) {
+            if (h->visit == pass || h->dc != s->dc) continue;
+            if (!any_devno && h->devno != s->devno) continue;
+            h->visit = pass;
+            h->work  = *work;
+            *work    = h;
+        }
+    }
 }
 
 // Drop every mount entry unreachable from `root`. Called with ns_lock HELD, in
 // the same hold that installed `root` as root_spoor, so a peer thread sees
 // either the old root with the whole old table or the new root with the shed
-// one. No allocation, no sleep. Each dropped entry releases what unmount()
-// releases: its mp_path ref here (path_unref does not sleep) and its source ref
-// through clunk[] -- the caller spoor_clunk()s those OUTSIDE the lock, because a
-// Dev close hook may sleep. clunk[] holds PGRP_MAX_MOUNTS. Survivors keep their
-// relative order, which IS the union search order. Returns the clunk count.
-static int territory_shed_unreachable_locked(struct Territory *t,
-                                             const struct Spoor *root,
-                                             struct Spoor **clunk) {
-    struct shed_inst reach[SHED_REACH_MAX];
-    int nr = 0;
-    shed_add(reach, &nr, root);
+// one. No allocation, no sleep. Each dropped entry, and each point it leaves
+// with no member, is unlinked here and chained on `dead`, which the caller
+// releases OUTSIDE the lock, as unmount() does -- a Dev close hook may sleep.
+// Survivors keep their order, which IS the union search order.
+static void territory_shed_unreachable_locked(struct Territory *t,
+                                              const struct Spoor *root,
+                                              struct mount_dead *dead) {
+    u32 pass = mvisit_next(t);
+    struct PgrpMhead *work = NULL;
+    shed_reach(t, pass, root, &work);
     // union_snap is set once before the Spoor is published and freed with it,
     // and the caller holds a root ref, so this read needs no more than that.
-    if (root->union_snap && root->union_snap->point) {
-        const struct Spoor *pt = root->union_snap->point;
-        if (!shed_has(reach, nr, pt->dc, pt->devno)) shed_add(reach, &nr, pt);
+    if (root->union_snap && root->union_snap->point)
+        shed_reach(t, pass, root->union_snap->point, &work);
+    while (work) {
+        struct PgrpMhead *h = work;
+        work = h->work;
+        for (const struct PgrpMount *m = h->first; m; m = m->next)
+            shed_reach(t, pass, m->source, &work);
     }
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (int i = 0; i < t->nmounts; i++) {
-            const struct PgrpMount *m = &t->mounts[i];
-            if (!shed_has(reach, nr, m->mp_dc, m->mp_devno)) continue;
-            if (shed_has(reach, nr, m->source->dc, m->source->devno)) continue;
-            shed_add(reach, &nr, m->source);
-            changed = true;
+    struct PgrpMount *next;
+    for (struct PgrpMount *m = t->mfirst; m; m = next) {
+        next = m->tnext;
+        struct PgrpMhead *h = m->head;
+        if (h->visit == pass) continue;
+        mount_unlink(t, m);
+        mount_dead_entry(dead, m);
+        if (!h->first) {
+            mhead_remove(t, h);
+            mount_dead_point(dead, h);
         }
     }
-
-    int keep = 0, nclunk = 0;
-    for (int i = 0; i < t->nmounts; i++) {
-        struct PgrpMount *m = &t->mounts[i];
-        if (shed_has(reach, nr, m->mp_dc, m->mp_devno)) {
-            if (keep != i) t->mounts[keep] = *m;
-            keep++;
-        } else {
-            clunk[nclunk++] = m->source;
-            path_unref(m->mp_path);
-        }
-    }
-    // Vacated tail slots hold copies of pointers that now belong to a survivor
-    // or to clunk[]; clear them so nothing stale sits past nmounts.
-    for (int i = keep; i < t->nmounts; i++)
-        t->mounts[i] = (struct PgrpMount){0};
-    t->nmounts = keep;
-    return nclunk;
 }
 
 // =============================================================================
@@ -1304,8 +1669,8 @@ int territory_chroot(struct Territory *territory, struct Spoor *source) {
     // inside; the displaced root's spoor_clunk is deferred to OUTSIDE the lock (its
     // Dev close hook may sleep).
     struct Spoor *old = NULL;
-    struct Spoor *shed[PGRP_MAX_MOUNTS];
-    int nshed;
+    struct mount_dead shed;
+    mount_dead_init(&shed);
     spin_lock(&territory->ns_lock);
     // Idempotent same-pointer: same Spoor reasserted as root -> no-op success;
     // refcount unchanged, and NO shed (no swap happened). Matches spec
@@ -1320,10 +1685,10 @@ int territory_chroot(struct Territory *territory, struct Spoor *source) {
     spoor_ref(source);
     territory->root_spoor = source;
     // ARCH 9.6.10: end the old generation in the same hold as the swap.
-    nshed = territory_shed_unreachable_locked(territory, source, shed);
+    territory_shed_unreachable_locked(territory, source, &shed);
     spin_unlock(&territory->ns_lock);
 
-    for (int i = 0; i < nshed; i++) spoor_clunk(shed[i]);
+    mount_dead_release(&shed);
     if (old) {
         // spoor_clunk (not spoor_unref) -- see header comment + mount() MREPL
         // precedent. If this Territory was the last holder of `old`, the Dev's
@@ -1367,8 +1732,8 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source) {
     // the check or free `old` mid-read); the displaced root's spoor_clunk is
     // deferred to OUTSIDE the lock (its Dev close hook may sleep).
     struct Spoor *old = NULL;
-    struct Spoor *shed[PGRP_MAX_MOUNTS];
-    int nshed;
+    struct mount_dead shed;
+    mount_dead_init(&shed);
     spin_lock(&territory->ns_lock);
     if (!territory->root_spoor) {
         spin_unlock(&territory->ns_lock);
@@ -1387,11 +1752,11 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source) {
     spoor_ref(source);
     territory->root_spoor = source;
     // ARCH 9.6.10: end the old generation in the same hold as the swap. This
-    // is what returns joey's seven boot-generation slots.
-    nshed = territory_shed_unreachable_locked(territory, source, shed);
+    // is what returns joey's seven boot-generation entries.
+    territory_shed_unreachable_locked(territory, source, &shed);
     spin_unlock(&territory->ns_lock);
 
-    for (int i = 0; i < nshed; i++) spoor_clunk(shed[i]);
+    mount_dead_release(&shed);
 
     // spoor_clunk (NOT spoor_unref) on the displaced root: if THIS Territory was
     // the last holder, the Dev's close hook runs. Same discipline as

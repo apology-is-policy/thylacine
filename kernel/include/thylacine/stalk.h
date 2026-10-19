@@ -240,7 +240,7 @@ bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
 // ROOT (ref-held, mount-point name transplanted) -- the directory a remove of
 // `leaf` must act on. Plan 9 union skip: a member that fails to cross / is not
 // a directory / denies X-search / lacks `leaf` is SKIPPED; NULL means no member
-// holds it (caller answers -T_E_NOENT). *errp is set only on a clone OOM.
+// holds it (caller answers -T_E_NOENT). *errp is set only on an allocation failure.
 struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
                                          const char *leaf, int *errp);
 

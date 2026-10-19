@@ -8501,15 +8501,17 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     }
 
     // territory.c::mount handles: idempotency (no-op on duplicate), MREPL
-    // (replace existing entry), the cycle and full-table refusals, and the
-    // per-entry spoor_ref. It answers -3 for a cycle and -2 for a full table;
-    // its -1 (a NULL or corrupt Spoor) cannot arise here.
+    // (replace existing entry), the cycle, full-table and allocation refusals,
+    // and the per-entry spoor_ref. It answers -3 for a cycle, -2 for a full
+    // table and -4 when its entries cannot be allocated; its -1 (a NULL or
+    // corrupt Spoor) cannot arise here.
     // #844: source is REF-HELD (a borrow); mount() takes its own per-entry
     // ref, so release the borrow after.
     int rc = mount(p->territory, source, mountpoint, flags);
     spoor_clunk(source);
     if (rc == -3)                                    return -T_E_LOOP;
     if (rc == -2)                                    return -T_E_NOSPC;
+    if (rc == -4)                                    return -T_E_NOMEM;
     return rc == 0 ? 0 : -1;
 }
 

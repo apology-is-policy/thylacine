@@ -89,6 +89,7 @@ void test_stalk_union_create(void);             // UM-5a: MCREATE member selecte
 void test_stalk_union_create_first_wins(void);  // UM-5a: first MCREATE (declared order)
 void test_stalk_union_create_no_target(void);   // UM-5a: no MCREATE -> EACCES
 void test_stalk_union_one_member_creates_alike(void); // shed r4 F5: one member is not a union
+void test_stalk_union_past_the_inline_snapshot(void); // the dynamic table: a union past 16 members
 void test_stalk_union_member_holding(void);     // UM-8c/F3: holder, not MCREATE member
 void test_stalk_union_remove_uncrossed(void);    // UM-8c/F3: STALK_REMOVE leaves the point
 void test_stalk_union_fd_base(void);             // UM-8c/F5: fd-relative union base sees all members
@@ -2284,6 +2285,64 @@ void test_stalk_union_one_member_creates_alike(void) {
     territory_unref(p.territory);
     spoor_clunk(um1); spoor_clunk(um2); spoor_clunk(pt);
     spoor_unref(root);
+}
+
+// A union with more members than the resolver's inline snapshot holds (16,
+// stalk.c UNION_MEMBERS_INLINE) is searched whole: its snapshot is taken again
+// into a heap array sized from the count. Sixteen um1 members come first; um2,
+// the only member holding "only2" and the only one mounted MCREATE, is the
+// seventeenth. So the walk, the create target and the remove's holder reach it
+// only through the heap snapshot, and an open's readdir snapshot holds all
+// seventeen. No Spoor leaks.
+void test_stalk_union_past_the_inline_snapshot(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    struct Spoor *pt  = stalk(&p, root, "umpt", 4, STALK_MOUNT, 0);
+    struct Spoor *um2 = stalk(&p, root, "um2",  3, STALK_WALK,  0);
+    struct Spoor *um1[16];
+    int resolved = 0;
+    for (int i = 0; i < 16; i++) {
+        um1[i] = stalk(&p, root, "um1", 3, STALK_WALK, 0);
+        if (um1[i]) resolved++;
+    }
+    TEST_ASSERT(pt && um2 && resolved == 16, "resolve umpt, um2 and sixteen um1s");
+    // MREPL first, so no covered member: the union is exactly the seventeen.
+    int mounted = 0;
+    for (int i = 0; i < 16; i++)
+        if (mount(p.territory, um1[i], pt, i == 0 ? MREPL : MAFTER) == 0) mounted++;
+    int seventeenth = mount(p.territory, um2, pt, MAFTER | MCREATE);
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+
+    struct Spoor *q = stalk(&p, root, "umpt/only2", 10, STALK_OPEN, 0);
+    u64 walked = q ? q->qid.path : 0;
+    if (q) spoor_clunk(q);
+    int ce = 0, he = 0;
+    struct Spoor *cm = stalk_union_create_member(&p, pt, &ce);
+    u64 create_target = cm ? cm->qid.path : 0;
+    if (cm) spoor_clunk(cm);
+    struct Spoor *hm = stalk_union_member_holding(&p, pt, "only2", &he);
+    u64 holder = hm ? hm->qid.path : 0;
+    if (hm) spoor_clunk(hm);
+    struct Spoor *d = stalk(&p, root, "umpt", 4, STALK_OPEN, 0);
+    int opened = (d && d->union_snap) ? d->union_snap->n : -1;
+    if (d) spoor_clunk(d);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+
+    territory_unref(p.territory);
+    for (int i = 0; i < 16; i++) spoor_clunk(um1[i]);
+    spoor_clunk(um2); spoor_clunk(pt);
+    spoor_unref(root);
+
+    TEST_EXPECT_EQ(mounted, 16, "sixteen um1 members");
+    TEST_EXPECT_EQ(seventeenth, 0, "um2 MAFTER|MCREATE, the seventeenth");
+    TEST_EXPECT_EQ(walked, (u64)27, "the walk reaches um2's only2 past the inline snapshot");
+    TEST_EXPECT_EQ(ce, 0, "the create's snapshot was taken");
+    TEST_EXPECT_EQ(create_target, (u64)25, "the create target is the seventeenth member, um2");
+    TEST_EXPECT_EQ(he, 0, "the remove's snapshot was taken");
+    TEST_EXPECT_EQ(holder, (u64)25, "the member holding only2 is um2");
+    TEST_EXPECT_EQ(opened, 17, "an open of the union holds all seventeen members");
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across the four");
 }
 
 // =============================================================================

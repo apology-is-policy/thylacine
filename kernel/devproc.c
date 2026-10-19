@@ -1137,7 +1137,7 @@ static int devproc_close(struct Spoor *c) {
 // buffer, then copies the requested [off, off+n) slice.
 //
 // Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
-// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS, 32).
+// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MOUNT_CAP).
 // prowl-3b bumped 512 -> 2048: /proc/<pid>/sched formats one row per thread of a
 // possibly heavily-threaded Proc (a Go binary / stratumd), each ~40-50 B; 512
 // truncated at ~8 threads. 2048 holds ~30 thread rows (the format bounds the
@@ -1155,8 +1155,8 @@ static int devproc_close(struct Spoor *c) {
 // matched pid (also bounding the lock-hold). g_proc_table_lock keeps p (and thus
 // p->territory + p->handles) alive across the format.
 //
-// #66: format_ns now reads the territory's mount LIST (pointer-chasing
-// mounts[].mp_path / .source->path), so it takes p->territory->ns_lock inside
+// #66: format_ns now reads the territory's mount LIST (pointer-chasing each
+// entry's mp_path / source->path), so it takes p->territory->ns_lock inside
 // territory_format_ns -- a g_proc_table_lock -> ns_lock edge. It is ACYCLIC
 // (nothing held under ns_lock takes g_proc_table_lock: mount/unmount/clone only
 // spoor_ref / path_ref and defer the sleeping spoor_clunk to OUTSIDE ns_lock).

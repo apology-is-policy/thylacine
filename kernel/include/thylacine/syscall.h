@@ -193,7 +193,8 @@ enum {
     //     or the flags lack MREPL at a point that is not a directory (a
     //     flagless mount appends; Plan 9's flag 0 is MREPL)
     //   - -T_E_LOOP: the mount would close a cycle in the mount graph (I-3)
-    //   - -T_E_NOSPC: the territory mount table is full (PGRP_MAX_MOUNTS)
+    //   - -T_E_NOSPC: the territory mount table holds PGRP_MOUNT_CAP entries
+    //   - -T_E_NOMEM: the kernel could not allocate the mount's entries
     //
     // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount
     // (the mount-table entry holds its own ref). The caller can close

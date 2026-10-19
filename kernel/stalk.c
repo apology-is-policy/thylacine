@@ -39,7 +39,7 @@
 #include <thylacine/proc.h>       // struct Proc -> territory
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // SYS_WALK_OPEN_NAME_MAX + struct t_stat
-#include <thylacine/territory.h>  // mount_lookup + PGRP_MAX_MOUNTS + root_ref
+#include <thylacine/territory.h>  // mount_lookup + PGRP_MOUNT_CAP + root_ref
 
 #include "../mm/slub.h"           // kmalloc/kfree (the D-1 expansion state)
 
@@ -192,7 +192,7 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
 // NOT consume `src`'s ref (the caller clunks it). Returns the crossed root
 // (owned) or NULL on OOM / walk failure. The #66 path transplant is the
 // CALLER's job (the crossed Spoor takes the MOUNT-POINT's name, not the
-// source's). Bounded by PGRP_MAX_MOUNTS -- I-3 (would_create_mount_cycle at
+// source's). Bounded by PGRP_MOUNT_CAP -- I-3 (would_create_mount_cycle at
 // mount()) makes the graph acyclic; the bound is a defensive backstop. Extracted
 // (UM-8) so a caller holding a source from mount_members_snapshot can cross the
 // EXACT snapshot entry rather than re-deriving it by index (UM-7 F4).
@@ -207,7 +207,7 @@ static struct Spoor *stalk_cross_src(struct Proc *p, struct Spoor *src,
     if (!cur) return NULL;
     if (src_flags & MCOVERED) return cur;
     struct Spoor *id = cur;                        // identity to re-test each round
-    for (int hops = 1; hops < PGRP_MAX_MOUNTS; hops++) {
+    for (int hops = 1; hops < PGRP_MOUNT_CAP; hops++) {
         u32 mflags = 0;
         struct Spoor *next = mount_lookup(p->territory, id, &mflags);
         if (!next) break;                          // the crossed link is not itself a point
@@ -293,6 +293,56 @@ bool stalk_union_has_child(struct Proc *p, struct Spoor *dir,
     return found;
 }
 
+// A union's members, snapshotted in one ns_lock hold (mount_members_snapshot).
+// The common union fits the inline arrays; a larger one gets a heap array sized
+// from its count, snapshotted again if it grew in between. No array here is
+// sized from PGRP_MOUNT_CAP (ARCH 9.1): at the cap one would not fit a kernel
+// stack.
+#define UNION_MEMBERS_INLINE 16
+struct union_members {
+    struct Spoor **src;
+    u32           *flags;
+    int            n;
+    struct Spoor  *src_inline[UNION_MEMBERS_INLINE];
+    u32            flags_inline[UNION_MEMBERS_INLINE];
+};
+
+// Snapshot the members of the union at `point` into `um`, each ref-held.
+// Returns 0, or T_E_NOMEM with nothing held. union_members_release undoes it.
+static int union_members_take(struct Proc *p, struct Spoor *point,
+                              struct union_members *um) {
+    um->src   = um->src_inline;
+    um->flags = um->flags_inline;
+    um->n     = 0;
+    int room = UNION_MEMBERS_INLINE;
+    for (;;) {
+        int n = mount_members_snapshot(p->territory, point, um->src, um->flags, room);
+        if (n <= room) {
+            um->n = n;
+            return 0;
+        }
+        // Doubling ends the rounds: a point's members never pass the cap.
+        if (um->src != um->src_inline) kfree(um->src);
+        room = n > PGRP_MOUNT_CAP / 2 ? PGRP_MOUNT_CAP : 2 * n;
+        void *buf = kmalloc((size_t)room * (sizeof(struct Spoor *) + sizeof(u32)), 0);
+        if (!buf) {
+            um->src   = um->src_inline;
+            um->flags = um->flags_inline;
+            return T_E_NOMEM;
+        }
+        um->src   = buf;
+        um->flags = (u32 *)(um->src + room);
+    }
+}
+
+static void union_members_release(struct union_members *um) {
+    for (int k = 0; k < um->n; k++) spoor_clunk(um->src[k]);
+    if (um->src != um->src_inline) kfree(um->src);
+    um->src   = um->src_inline;
+    um->flags = um->flags_inline;
+    um->n     = 0;
+}
+
 // stalk_union_create_member (UM) -- the create-target member of the union at
 // `base`: the FIRST member (declared order) whose mount entry carries MCREATE,
 // crossed to its leaf root, ref-held (ARCH 9.5 "create in the first writable
@@ -319,22 +369,22 @@ struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
     // then RE-crossed "index k" via a second lookup -- a concurrent unmount
     // between the two could shift a non-MCREATE member into slot k, landing the
     // create in a member the caller did not flag writable.
-    struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    u32           flags[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, base, srcs, flags,
-                                      PGRP_MAX_MOUNTS);
+    struct union_members um;
+    int err = union_members_take(p, base, &um);
+    if (err) { *errp = err; return NULL; }
     struct Spoor *cm = NULL;
-    for (int k = 0; k < nsrc; k++) {
-        if ((flags[k] & MCREATE) || nsrc == 1) {
-            cm = stalk_cross_src(p, srcs[k], flags[k], NULL);   // the FIRST MCREATE member (or the only one)
+    for (int k = 0; k < um.n; k++) {
+        if ((um.flags[k] & MCREATE) || um.n == 1) {
+            cm = stalk_cross_src(p, um.src[k], um.flags[k], NULL);   // the FIRST MCREATE member (or the only one)
             if (cm) spoor_path_transplant(cm, base);  // #66: the mount-point name
             else    *errp = T_E_IO;                    // the chosen member failed to cross
             break;                                     // Plan 9: create in the FIRST writable
         }
     }
-    for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    union_members_release(&um);
     // cm NULL + *errp 0  -> no MCREATE member (caller: -T_E_ACCES);
-    // cm NULL + *errp IO -> the first MCREATE member failed to cross.
+    // cm NULL + *errp IO -> the first MCREATE member failed to cross;
+    // cm NULL + *errp NOMEM -> the snapshot could not be taken.
     return cm;
 }
 
@@ -353,14 +403,13 @@ struct Spoor *stalk_union_create_member(struct Proc *p, struct Spoor *base,
 static struct union_snap *stalk_build_union_snap(struct Proc *p,
                                                  struct Spoor *point, int *errp) {
     *errp = 0;
-    struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    u32           sflags[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, point, srcs, sflags,
-                                      PGRP_MAX_MOUNTS);
+    struct union_members um;
+    int err = union_members_take(p, point, &um);
+    if (err) { *errp = err; return NULL; }
     struct union_snap *snap =
-        kmalloc(sizeof(*snap) + (size_t)nsrc * sizeof(struct union_member), 0);
+        kmalloc(sizeof(*snap) + (size_t)um.n * sizeof(struct union_member), 0);
     if (!snap) {
-        for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);
+        union_members_release(&um);
         *errp = T_E_NOMEM;
         return NULL;
     }
@@ -370,9 +419,8 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
     snap->point = point;
     spoor_ref(point);
     snap->n = 0;
-    for (int k = 0; k < nsrc; k++) {
-        struct Spoor *root = stalk_cross_src(p, srcs[k], sflags[k], NULL);  // pheno irrelevant to readdir
-        spoor_clunk(srcs[k]);                                    // done with the source
+    for (int k = 0; k < um.n; k++) {
+        struct Spoor *root = stalk_cross_src(p, um.src[k], um.flags[k], NULL);  // pheno irrelevant to readdir
         if (!root)                              continue;        // cross hole -> skip (Plan 9)
         if (!(root->qid.type & QTDIR)) { spoor_clunk(root); continue; }  // non-directory member
         if (root->dev && root->dev->perm_enforced) {            // R-gate (F2): deny -> SKIP
@@ -394,6 +442,7 @@ static struct union_snap *stalk_build_union_snap(struct Proc *p,
         snap->m[snap->n].walkable = walkable;
         snap->n++;
     }
+    union_members_release(&um);                                  // done with the sources
     return snap;
 }
 
@@ -912,24 +961,23 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
 // is not a directory, denies X-search, or lacks the component is SKIPPED (not
 // an error) -- unlike a lone directory, where an X denial is EACCES; only
 // exhausting all members is a miss (the caller reports ENOENT). *errp is set
-// ONLY on a clone OOM (a cross failure is skipped, F8); an ordinary all-miss
-// leaves *errp 0. The phenotype of the WINNING member (only) is OR'd into
+// ONLY on an allocation failure (a cross failure is skipped, F8); an ordinary
+// all-miss leaves *errp 0. The phenotype of the WINNING member (only) is OR'd into
 // *crossed_pheno -- a losing member's Linux mount must not stamp a resolution
 // that landed elsewhere.
 static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
                                        const char *namebuf,
                                        bool *crossed_pheno, int *errp) {
     *errp = 0;
-    struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    u32           sflags[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, union_base, srcs, sflags,
-                                      PGRP_MAX_MOUNTS);
+    struct union_members um;
+    int err = union_members_take(p, union_base, &um);
+    if (err) { *errp = err; return NULL; }
     struct Spoor *hit = NULL;
-    for (int k = 0; k < nsrc && !hit; k++) {
+    for (int k = 0; k < um.n && !hit; k++) {
         // Per-member phenotype: accumulate locally, propagate only on a WIN.
         bool member_pheno = false;
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
-        struct Spoor *leaf = stalk_cross_src(p, srcs[k], sflags[k], &member_pheno);
+        struct Spoor *leaf = stalk_cross_src(p, um.src[k], um.flags[k], &member_pheno);
         // UM-8 F8: a member that fails to cross (a dead 9P session, a transient
         // clone OOM) is SKIPPED -- matching the readdir merge and Plan 9's union
         // skip-on-error -- NOT a hard failure of the whole walk, which hid a
@@ -972,7 +1020,7 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
         if (member_pheno && crossed_pheno) *crossed_pheno = true;  // winner only
         hit = nc;                      // HIT: first member with the component
     }
-    for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    union_members_release(&um);
     return hit;                        // NULL: all members exhausted -> ENOENT
 }
 
@@ -986,19 +1034,18 @@ static struct Spoor *stalk_union_child(struct Proc *p, struct Spoor *union_base,
 // that fails to cross / is not a directory / denies X-search / lacks the name
 // is SKIPPED (not an error). Returns the ref-held member (mount-point name
 // transplanted -- #66/I-33) or NULL when no member holds the name (the caller
-// answers -T_E_NOENT). *errp is set ONLY on a clone OOM.
+// answers -T_E_NOENT). *errp is set ONLY on an allocation failure.
 struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
                                          const char *leafname, int *errp) {
     *errp = 0;
     if (!p || !p->territory || !point || !leafname) return NULL;
-    struct Spoor *srcs[PGRP_MAX_MOUNTS];
-    u32           sflags[PGRP_MAX_MOUNTS];
-    int nsrc = mount_members_snapshot(p->territory, point, srcs, sflags,
-                                      PGRP_MAX_MOUNTS);
+    struct union_members um;
+    int err = union_members_take(p, point, &um);
+    if (err) { *errp = err; return NULL; }
     struct Spoor *hit = NULL;
-    for (int k = 0; k < nsrc && !hit; k++) {
+    for (int k = 0; k < um.n && !hit; k++) {
         // Cross the EXACT snapshot source (never a re-derived index -- F4).
-        struct Spoor *mroot = stalk_cross_src(p, srcs[k], sflags[k], NULL);
+        struct Spoor *mroot = stalk_cross_src(p, um.src[k], um.flags[k], NULL);
         if (!mroot)                            continue;   // F8: cross-fail -> skip
         // #66/I-33: the crossed member takes the MOUNT-POINT's namespace name.
         spoor_path_transplant(mroot, point);
@@ -1030,7 +1077,7 @@ struct Spoor *stalk_union_member_holding(struct Proc *p, struct Spoor *point,
         spoor_clunk(nc);            // the child was only an existence probe
         hit = mroot;               // HIT: first member that holds `leafname`
     }
-    for (int k = 0; k < nsrc; k++) spoor_clunk(srcs[k]);   // release the snapshot
+    union_members_release(&um);
     return hit;                    // NULL: no member holds the leaf -> ENOENT
 }
 

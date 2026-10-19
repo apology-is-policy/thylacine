@@ -514,6 +514,8 @@ void test_territory_mount_covered_self_mount_refused(void);   // Plan 9 unions
 void test_territory_mount_covered_clone(void);   // Plan 9 unions
 void test_territory_mount_covered_noexec_scoped(void);   // Plan 9 unions
 void test_territory_mount_covered_format_ns(void);   // Plan 9 unions
+void test_territory_mount_nodes_follow_every_edit(void);
+void test_territory_mount_refuses_enomem(void);
 void test_territory_root_ref_survives_pivot(void);
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);
@@ -1434,6 +1436,7 @@ void test_stalk_union_create(void);
 void test_stalk_union_create_first_wins(void);
 void test_stalk_union_create_no_target(void);
 void test_stalk_union_one_member_creates_alike(void);
+void test_stalk_union_past_the_inline_snapshot(void);
 void test_stalk_union_member_holding(void);
 void test_stalk_union_remove_uncrossed(void);
 void test_stalk_union_fd_base(void);
@@ -2179,6 +2182,7 @@ void test_sys_mount_refuses_all_but_mrepl_at_a_file(void);
 void test_sys_mount_type_check_reads_only_qtdir(void);
 void test_sys_mount_accepts_an_ordered_mount_at_a_directory(void);
 void test_sys_mount_full_table_answers_enospc(void);
+void test_sys_mount_enomem_answers_enomem(void);
 void test_sys_mount_cycle_answers_eloop(void);
 void test_attach_probe_round_trip(void);
 void test_sys_mlockall_cap_gate(void);
@@ -2652,6 +2656,8 @@ struct test_case g_tests[] = {
     { "territory_mount.covered_clone",                    test_territory_mount_covered_clone,                    false, NULL },
     { "territory_mount.covered_noexec_scoped",            test_territory_mount_covered_noexec_scoped,            false, NULL },
     { "territory_mount.covered_format_ns",                test_territory_mount_covered_format_ns,                false, NULL },
+    { "territory_mount.nodes_follow_every_edit",          test_territory_mount_nodes_follow_every_edit,          false, NULL },
+    { "territory_mount.refuses_enomem",                   test_territory_mount_refuses_enomem,                   false, NULL },
     { "territory_mount.root_ref_survives_pivot",          test_territory_root_ref_survives_pivot,                false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
     { "territory.chroot_idempotent_same_spoor",           test_territory_chroot_idempotent_same_spoor,           false, NULL },
@@ -4648,6 +4654,7 @@ struct test_case g_tests[] = {
     { "sys_mount.type_check_reads_only_qtdir",         test_sys_mount_type_check_reads_only_qtdir,         false, NULL },
     { "sys_mount.accepts_an_ordered_mount_at_a_directory", test_sys_mount_accepts_an_ordered_mount_at_a_directory, false, NULL },
     { "sys_mount.full_table_answers_enospc",           test_sys_mount_full_table_answers_enospc,           false, NULL },
+    { "sys_mount.enomem_answers_enomem",               test_sys_mount_enomem_answers_enomem,               false, NULL },
     { "sys_mount.cycle_answers_eloop",                 test_sys_mount_cycle_answers_eloop,                 false, NULL },
     { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
     { "sys_mlockall.cap_gate",                         test_sys_mlockall_cap_gate,                         false, NULL },
@@ -4920,6 +4927,7 @@ struct test_case g_tests[] = {
     { "stalk.union_create_first_wins", test_stalk_union_create_first_wins, false, NULL },
     { "stalk.union_create_no_target",  test_stalk_union_create_no_target,  false, NULL },
     { "stalk.union_one_member_creates_alike", test_stalk_union_one_member_creates_alike, false, NULL },
+    { "stalk.union_past_the_inline_snapshot", test_stalk_union_past_the_inline_snapshot, false, NULL },
     { "stalk.union_member_holding",    test_stalk_union_member_holding,    false, NULL },
     { "stalk.union_remove_uncrossed",  test_stalk_union_remove_uncrossed,  false, NULL },
     { "stalk.union_fd_base",           test_stalk_union_fd_base,           false, NULL },

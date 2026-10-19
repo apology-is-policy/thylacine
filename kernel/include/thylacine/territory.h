@@ -8,10 +8,12 @@
 //               mapping). Walking `dst` produces `src`. Cycle-checked at
 //               every bind() — invariant I-3 (mount points form a DAG).
 //
-//   mounts[]  : (target_path, Spoor *) grafts (Plan 9 `mount`, the
-//               filesystem-as-Spoor primitive of §9.6). Walking
-//               target_path dispatches through the source Spoor's Dev
-//               vtable. Each entry holds one refcount on its source.
+//   mounts    : (mount point, Spoor *) grafts (Plan 9 `mount`, the
+//               filesystem-as-Spoor primitive of §9.6), allocated per mount
+//               and grouped by mount point, as Plan 9's Mhead holds its
+//               Mount list (territory.c). Walking a mount point dispatches
+//               through the source Spoor's Dev vtable. Each entry holds one
+//               refcount on its source.
 //
 // At v1.0 path_id_t is `u32` — abstract path tokens. The fd-syscall
 // surface (deferred) populates these with real path identifiers; tests
@@ -56,21 +58,31 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // eventual ramfs + /proc + /dev + /net binds.
 #define PGRP_MAX_BINDS  8
 
-// Mount-table size. A shell in a login session holds 17 entries (measured
-// 2026-09-21: 15 that joey grafts onto the pivoted disk root, login's
-// /home/<user>, and ut's /tmp bind), and a container runner adds up to 11 recipe
-// mounts on top (/dio, eight fixed binds, /net and /dev/tty when granted). The
-// table is deep-copied per territory_clone (each entry a spoor_ref), so the cap
-// stays modest: ~1.3 KiB per spawn.
+// The mount table's bound (ARCH 9.1): at most this many entries per Territory,
+// a union's covered directory included. Entries are allocated per mount, so
+// this is not a usage limit but a DoS floor, as Linux's fs.mount-max is (100,000
+// per mount namespace -- which Linux shares by default, where a Territory is
+// copied at every spawn). Use measured 19 entries in a login shell on
+// 2026-10-19 (17 that joey makes at boot, login's /home/<user> and ut's /tmp),
+// and a container runner adds up to 11 recipe mounts. At the cap a Territory
+// holds 1024 entries at up to 1024 points: 1024 x (64 + 64) B = 128 KiB of slab,
+// copied at every spawn from it -- 1/32 of the per-Proc VMA ceiling
+// (PROC_VMA_MAX). A mount past it answers ENOSPC.
 //
-// History worth keeping: the cap went 8 -> 12 -> 16 -> 20 -> 32, every time for
-// the SAME cause. A root swap left the previous generation's entries in the table
-// -- unreachable, and un-unmountable because unmount takes a resolved mount
-// point -- so the boot generation rode along in every Proc (#80). At 32 the
-// session's 23 plus a container's 10 no longer fit and `viv run` broke. The fix
-// was never a bigger number: territory_pivot_root / territory_chroot now shed
-// what the new root cannot reach (ARCH 9.6.10), and the seven orphans are gone.
-#define PGRP_MAX_MOUNTS  32
+// History worth keeping: the table was a fixed array, and its size went 8 -> 12
+// -> 16 -> 20 -> 32. Up to 32 it grew for one cause: a root swap left the
+// previous generation's entries in the table -- unreachable, and
+// un-unmountable because unmount takes a resolved mount point -- so the boot
+// generation rode along in every Proc (#80). That fix was never a bigger
+// number: territory_pivot_root / territory_chroot shed what the new root cannot
+// reach (ARCH 9.6.10). Then use itself reached 32, and the table stopped
+// being an array (dec-2026-10-19-mount-table-dynamic).
+#define PGRP_MOUNT_CAP   1024
+
+// Hash chains per Territory: a mount point is found by hashing its (dc, devno,
+// qid.path) key, as Plan 9 hashes into its 32-chain mnthash. 64 chains keep
+// measured use near one point per chain and the cap near 16.
+#define PGRP_MOUNT_HASH  64
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
 // numeric ID the caller decides on (tests pick small integers). The
@@ -88,40 +100,11 @@ struct PgrpBind {
     path_id_t dst;
 };
 
-// One entry in the mount table: the Spoor `source` is grafted at the
-// MOUNT POINT identified by (mp_dc, mp_devno, mp_qid_path) -- the Plan 9
-// (type, dev, qid) identity of the directory mounted onto (stalk-2; was an
-// abstract path_id_t target at v1.0). `stalk`, after resolving a component to
-// Spoor S, crosses to a clone of `source` iff S's (dc, devno, qid.path) matches
-// this key (Plan 9 `domount`). The entry holds one refcount on source; dropped
-// at unmount() OR at Territory final release.
-//
-// Why the full triple: qid.path is unique only WITHIN a (dc, devno) instance.
-// Every dev9p session shares dc='9' and every attach root has qid.path 0, so
-// (dc, qid.path) alone cannot distinguish two concurrent 9P sessions' mount
-// points (the A-5b corvus + per-user-stratum-fs case). devno (Plan 9 Chan.dev,
-// minted per attach by spoor_next_devno) closes that.
-//
-// mp_path (#66, I-33): the mount-POINT's namespace name (the Plan 9 Chan.path of
-// the directory mounted onto -- "/srv", "/proc"), captured by path_ref'ing the
-// resolved mountpoint Spoor's ->path at mount()/MREPL and dropped at unmount() /
-// MREPL-displace / Territory final release / cloned per entry at territory_clone.
-// STRICTLY introspection-only (I-33): the mount table keys on the (dc, devno,
-// qid.path) identity above, NEVER on mp_path -- a NULL/stale/absent mp_path
-// changes only what /proc/<pid>/ns displays, never which entry stalk crosses.
-// NULL when the mountpoint had no retained name (kernel-internal direct walks).
-//
-// Field order: two pointers first (16B, 8-aligned), the two u64 key halves
-// (16B), then mp_dc + flags fill the last 8B. sizeof(PgrpMount) = 40.
-struct PgrpMount {
-    struct Spoor   *source;
-    struct Path    *mp_path;  // #66 (I-33): mount-point namespace name; ref-held
-    u64             mp_qid_path;
-    u64             mp_devno;
-    int             mp_dc;
-    u32             flags;    // MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC /
-                              // MPHENO_LINUX, or MCOVERED alone
-};
+// The mount table's nodes, defined in territory.c so that nothing outside it
+// walks the table without ns_lock: a PgrpMount per mount, under a PgrpMhead
+// per mount point.
+struct PgrpMount;
+struct PgrpMhead;
 
 // Mount flags (ARCH §9.6.1 — mirror Plan 9). MREPL replaces every member at
 // the point; MBEFORE / MAFTER place the new member first / last in the union's
@@ -238,7 +221,7 @@ struct Territory {
     u64                  magic;      // PGRP_MAGIC
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
     int                  nbinds;
-    int                  nmounts;
+    int                  nmounts;    // mount entries, <= PGRP_MOUNT_CAP
     u32                  flags;      // TERRITORY_* bits; occupies the old alignment pad
                                      // (Design D) so the pinned size/offsets below hold
     // P5-stratumd-stub-bringup-e2: the pivoted root Spoor (NULL until the
@@ -248,65 +231,62 @@ struct Territory {
     // dropped at re-chroot OR at territory_unref final release).
     struct Spoor        *root_spoor;
     struct PgrpBind      binds[PGRP_MAX_BINDS];
-    struct PgrpMount     mounts[PGRP_MAX_MOUNTS];
+    // The mount table (ARCH 9.1; territory.c): each mount point that hosts an
+    // entry, by its key's hash, and every entry in table order -- the order
+    // /proc/<pid>/ns prints and territory_clone copies.
+    struct PgrpMhead    *mhash[PGRP_MOUNT_HASH];
+    struct PgrpMount    *mfirst;
+    struct PgrpMount    *mlast;
+    int                  npoints;    // PgrpMheads in mhash[], each hosting >= 1 entry
+    u32                  mvisit;     // the current visit pass (territory.c mvisit_next)
     // LS-4: per-Proc cwd (the Plan 9 "dot"), name-based. A cleaned absolute
     // path string; NULL means "/" (the common case -- heap-allocated lazily
     // only when a Proc chdir's away from root, kfree'd at territory_unref).
     // dot_lock is a LEAF lock guarding ONLY dot_path: held for the short
-    // copy/swap, NEVER across stalk (which may block on 9P). Placed AFTER
-    // mounts[] so root_spoor / binds[] / mounts[] offsets are unchanged.
+    // copy/swap, NEVER across stalk (which may block on 9P).
     // Threads of a Proc SHARE dot_path (POSIX per-process cwd); a child gets an
     // independent snapshot via territory_clone. A handle-based dot Spoor is the
     // v1.x upgrade (landing with symlinks). See LIFE-SUPPORT.md LS-4 +
     // STALK-DESIGN.md 4.3.
     spin_lock_t          dot_lock;
     char                *dot_path;
-    // RW-4 SA-F1: serializes the mount table (mounts[]/nmounts), the bind table
-    // (binds[]/nbinds), and root_spoor against concurrent access by peer Threads
-    // of a Proc (which share the Territory) and by rfork(RFNAMEG)-sharing Procs.
-    // Before SA-F1 these were unlocked -- a concurrent pivot_root/unmount on one
-    // thread could free a Spoor a walking thread was mid-read on (root_spoor /
-    // mount-source UAF). A near-leaf lock: held ONLY for the table read-modify-
-    // write, NEVER across stalk or a spoor_clunk (the Dev close hook may sleep) --
-    // the displaced/removed source is captured under the lock + clunked outside it
-    // (the dot_lock free-outside-the-lock discipline). Placed last so every pinned
-    // offset above is unchanged.
+    // RW-4 SA-F1: serializes the mount table (its points, entries, counts and
+    // visit marks), the bind table (binds[]/nbinds), and root_spoor against
+    // concurrent access by peer Threads of a Proc (which share the Territory)
+    // and by rfork(RFNAMEG)-sharing Procs. Before SA-F1 these were unlocked -- a
+    // concurrent pivot_root/unmount on one thread could free a Spoor a walking
+    // thread was mid-read on (root_spoor / mount-source UAF). A near-leaf lock:
+    // held ONLY for the table read-modify-write, NEVER across stalk, a
+    // spoor_clunk (the Dev close hook may sleep) or an allocation -- a removed
+    // entry is unlinked under the lock and released outside it, and a new one
+    // is allocated before it is taken (ARCH 9.1).
     spin_lock_t          ns_lock;
 };
 
-_Static_assert(sizeof(struct PgrpMount) == 40,
-               "struct PgrpMount pinned at 40 bytes (8 source + 8 mp_path + "
-               "8 mp_qid_path + 8 mp_devno + 4 mp_dc + 4 flags). #66 "
-               "added the 8-byte mp_path (the mount-point namespace name, I-33); "
-               "stalk-2 re-keyed the target to the (dc, devno, qid.path) identity.");
 _Static_assert(sizeof(struct Territory)
-               == 32 + 8 * PGRP_MAX_BINDS + 40 * PGRP_MAX_MOUNTS + 24,
-               "struct Territory size pinned (stalk-2: 24 header + 8 root_spoor "
-               "+ 8*PGRP_MAX_BINDS + 40*PGRP_MAX_MOUNTS [#66 grew PgrpMount 32->40]; "
-               "LS-4 appended dot_lock[4] + pad[4] + dot_path[8] = 16 after "
-               "mounts[]; RW-4 SA-F1 appended ns_lock[4] + pad[4] = 8 more = 24).");
+               == 32 + 8 * PGRP_MAX_BINDS + 8 * PGRP_MOUNT_HASH + 24 + 24,
+               "struct Territory size pinned: 24 header + 8 root_spoor, "
+               "8*PGRP_MAX_BINDS, the mount table (8*PGRP_MOUNT_HASH chains + "
+               "mfirst[8] + mlast[8] + npoints[4] + mvisit[4] = 24), then "
+               "dot_lock[4] + pad[4] + dot_path[8] + ns_lock[4] + pad[4] = 24");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
-// F5 close (P5-stratumd-stub-bringup audit): pin every load-bearing
-// field offset, not just the size. A future field-reorder that shifts
-// root_spoor / binds / mounts without changing the total size would
-// silently break syscall.c::sys_walk_open_handler's FROM_ROOT path,
-// territory_chroot's ref discipline, and the mount-table iteration.
+// F5 close (P5-stratumd-stub-bringup audit): pin the load-bearing field
+// offsets, not just the size.
 _Static_assert(__builtin_offsetof(struct Territory, root_spoor) == 24,
                "root_spoor pinned at offset 24 (after 8B magic + "
                "4B ref + 4B nbinds + 4B nmounts + 4B flags [Design D: was _pad])");
 _Static_assert(__builtin_offsetof(struct Territory, binds) == 32,
                "binds[] pinned at offset 32 (after the 32B header)");
-_Static_assert(__builtin_offsetof(struct Territory, mounts)
+_Static_assert(__builtin_offsetof(struct Territory, mhash)
                == 32 + 8 * PGRP_MAX_BINDS,
-               "mounts[] pinned after binds[]");
-// LS-4: the cwd fields trail mounts[] so the offsets above stay fixed.
+               "mhash[] pinned after binds[]");
 _Static_assert(__builtin_offsetof(struct Territory, dot_lock)
-               == 32 + 8 * PGRP_MAX_BINDS + 40 * PGRP_MAX_MOUNTS,
-               "dot_lock pinned after mounts[] (LS-4; #66 grew PgrpMount 32->40)");
+               == 32 + 8 * PGRP_MAX_BINDS + 8 * PGRP_MOUNT_HASH + 24,
+               "dot_lock pinned after the mount table");
 _Static_assert(__builtin_offsetof(struct Territory, dot_path)
-               == 32 + 8 * PGRP_MAX_BINDS + 40 * PGRP_MAX_MOUNTS + 8,
+               == 32 + 8 * PGRP_MAX_BINDS + 8 * PGRP_MOUNT_HASH + 24 + 8,
                "dot_path pinned after dot_lock (4B lock + 4B pad)");
 
 // Bring up the territory subsystem. Allocates the Territory SLUB cache
@@ -445,12 +425,13 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 // Return values:
 //    0   success (entry added, or the existing entry's flags converged).
 //   -1   source or mountpoint is NULL / has corrupted magic.
-//   -2   mounts[] full (PGRP_MAX_MOUNTS reached; a mount that starts a union
-//        needs two free slots, one for the covered directory).
+//   -2   the table holds PGRP_MOUNT_CAP entries, or would past it (a mount
+//        that starts a union adds two, one for the covered directory).
 //   -3   would create a mount cycle (I-3) -- a self-mount (source identity ==
-//        mountpoint identity) or a cross-tree oscillation. The SVC layer
-//        collapses every failure to -1; the distinct code is for the C-API +
-//        tests (mirrors bind()'s -1 cycle code).
+//        mountpoint identity) or a cross-tree oscillation.
+//   -4   the entries could not be allocated. Allocation precedes ns_lock, so
+//        the table is unchanged.
+// SYS_MOUNT answers ENOSPC, ELOOP and ENOMEM for -2, -3 and -4.
 int mount(struct Territory *territory, struct Spoor *source,
           struct Spoor *mountpoint, u32 flags);
 
@@ -483,8 +464,8 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe,
 // mount_member_at (UM, union mounts): the ordered union iterator for the
 // resolver. Returns a REF-HELD source Spoor of the `index`-th mount entry
 // whose mount-point identity matches `probe`'s (dc, devno, qid.path), in
-// DECLARED SEARCH ORDER (MBEFORE members first, MAFTER last -- the mounts[]
-// array order maintained by mount()), or NULL when `index` is past the last
+// DECLARED SEARCH ORDER (MBEFORE members first, MAFTER last -- the point's
+// member list maintained by mount()), or NULL when `index` is past the last
 // member. `*flags_out` (if non-NULL) gets that member's flags. Same atomic
 // ns_lock discipline as mount_lookup (lookup + spoor_ref atomic vs a
 // concurrent unmount). THE CALLER MUST spoor_clunk the returned Spoor.
@@ -496,14 +477,17 @@ struct Spoor *mount_member_at(struct Territory *territory, struct Spoor *probe,
                               int index, u32 *flags_out);
 
 // mount_members_snapshot (UM, union mounts): the ATOMIC whole-union snapshot.
-// Refs EVERY member of the union at `probe` in ONE ns_lock hold, in declared
-// search order (at most `max`), recording each member's flags in flags_out[]
-// (if non-NULL). Returns the count (0 = not a mount point). THE CALLER MUST
-// spoor_clunk every returned Spoor. Preferred over a loop of mount_member_at
-// for any op touching the WHOLE union (the union-open member snapshot; the
-// resolver's union walk): mount_member_at takes the lock once per index, so a
-// concurrent unmount shifts the member set between calls (UM-7 F4); one hold
-// gives a consistent set.
+// Returns the number of members of the union at `probe` (0 = not a mount
+// point). When they fit in `max`, refs EVERY one in ONE ns_lock hold, in
+// declared search order, into out[], recording each member's flags in
+// flags_out[] (if non-NULL); THE CALLER MUST spoor_clunk every returned Spoor.
+// When the count exceeds `max`, nothing is written or ref'd and the caller
+// retries with room for the count -- every caller needs the whole union, and a
+// truncated one would hide its later members. Preferred over a loop of
+// mount_member_at for any op touching the WHOLE union (the union-open member
+// snapshot; the resolver's union walk): mount_member_at takes the lock once per
+// index, so a concurrent unmount shifts the member set between calls (UM-7
+// F4); one hold gives a consistent set.
 int mount_members_snapshot(struct Territory *territory, struct Spoor *probe,
                            struct Spoor **out, u32 *flags_out, int max);
 
@@ -660,8 +644,19 @@ int territory_pivot_root(struct Territory *territory, struct Spoor *source);
 // Diagnostic.
 int  territory_nbinds(struct Territory *territory);
 int  territory_nmounts(struct Territory *territory);
+int  territory_npoints(struct Territory *territory);
 u64  territory_total_created(void);
 u64  territory_total_destroyed(void);
+// Live mount entries and mount points, system-wide (their slab counts).
+u64  territory_mount_entries_live(void);
+u64  territory_mount_points_live(void);
+// territory_mount_check: walk the mount table under ns_lock and check that
+// its lists, hash and counts agree. Returns 0, or the number of the first rule
+// it finds broken (the list is at the definition, territory.c).
+int  territory_mount_check(struct Territory *territory);
+// Tests: the next `n` mount-node allocations (mount(), territory_clone) fail
+// as an allocation failure would. Returns how many were still to fail.
+u32  territory_mount_fail_nodes_for_test(u32 n);
 
 // territory_format_ns (#66): render the mount list + bind count into `buf`
 // (NUL-NOT-appended; the caller treats [0,len) as the content) for the

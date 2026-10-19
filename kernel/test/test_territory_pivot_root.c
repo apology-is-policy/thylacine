@@ -525,35 +525,53 @@ void test_territory_shed_drops_nested_orphan(void) {
     spoor_unref(mp_z);   spoor_unref(q);
 }
 
+// A full table whose entries form one chain hanging off the new root -- entry
+// i grafts tree 101+i at a directory of tree 100+i, every source a NEW
+// instance -- survives a pivot whole: the shed follows the chain from link to
+// link to the deepest. (The fixed table's reach set held exactly this many
+// instances; the dynamic table's pass holds none.) The arrays live on the
+// heap: at the cap they would not fit a kernel stack.
 void test_territory_shed_full_table_boundary(void) {
     struct Territory *p = territory_alloc();
     struct Spoor *root_a = shed_spoor(1, 0);
     struct Spoor *stale_pt = shed_spoor(90, 1);   // a point in its own tree: seed 2
     struct Spoor *uroot = shed_union_handle(100, stale_pt);
-    struct Spoor *mp[PGRP_MAX_MOUNTS], *src[PGRP_MAX_MOUNTS];
-    TEST_ASSERT(p && root_a && stale_pt && uroot, "alloc");
+    struct Spoor **mp  = kcalloc(PGRP_MOUNT_CAP, sizeof(*mp), 0);
+    struct Spoor **src = kcalloc(PGRP_MOUNT_CAP, sizeof(*src), 0);
+    TEST_ASSERT(p && root_a && stale_pt && uroot && mp && src, "alloc");
 
-    TEST_EXPECT_EQ(territory_chroot(p, root_a), 0, "chroot to A");
-    // Entry i grafts tree 101+i at a directory of tree 100+i: a chain hanging
-    // off the new root, every source a NEW instance.
-    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) {
+    int chrooted = territory_chroot(p, root_a);
+    int linked = 0;
+    for (int i = 0; i < PGRP_MOUNT_CAP; i++) {
         mp[i]  = shed_spoor(100 + (u32)i, 7);
         src[i] = shed_spoor(101 + (u32)i, 0);
-        TEST_ASSERT(mp[i] && src[i], "alloc chain link");
-        TEST_EXPECT_EQ(mount(p, src[i], mp[i], 0), 0, "chain link installs");
+        if (mp[i] && src[i] && mount(p, src[i], mp[i], 0) == 0) linked++;
     }
-    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS, "the table is full");
-
-    TEST_EXPECT_EQ(territory_pivot_root(p, uroot), 0,
-        "pivot: the closure holds 2 seeds + 32 sources, exactly its capacity");
-    TEST_EXPECT_EQ(territory_nmounts(p), PGRP_MAX_MOUNTS, "every link is reachable and kept");
-    struct Spoor *last = mount_lookup(p, mp[PGRP_MAX_MOUNTS - 1], NULL);
-    TEST_EXPECT_EQ(last == src[PGRP_MAX_MOUNTS - 1], true, "the deepest link still crosses");
+    int n_full = territory_nmounts(p);
+    int pivoted = territory_pivot_root(p, uroot);
+    int n_kept = territory_nmounts(p);
+    int check = territory_mount_check(p);
+    struct Spoor *last = mp[PGRP_MOUNT_CAP - 1]
+                       ? mount_lookup(p, mp[PGRP_MOUNT_CAP - 1], NULL) : NULL;
+    bool deepest = last && last == src[PGRP_MOUNT_CAP - 1];
     if (last) spoor_clunk(last);
 
     territory_unref(p);
-    for (int i = 0; i < PGRP_MAX_MOUNTS; i++) { spoor_unref(mp[i]); spoor_unref(src[i]); }
+    for (int i = 0; i < PGRP_MOUNT_CAP; i++) {
+        if (mp[i])  spoor_unref(mp[i]);
+        if (src[i]) spoor_unref(src[i]);
+    }
+    kfree(mp);
+    kfree(src);
     spoor_unref(uroot); spoor_unref(stale_pt); spoor_unref(root_a);
+
+    TEST_EXPECT_EQ(chrooted, 0, "chroot to A");
+    TEST_EXPECT_EQ(linked, PGRP_MOUNT_CAP, "every chain link installs");
+    TEST_EXPECT_EQ(n_full, PGRP_MOUNT_CAP, "the table is full");
+    TEST_EXPECT_EQ(pivoted, 0, "pivot to the union root");
+    TEST_EXPECT_EQ(n_kept, PGRP_MOUNT_CAP, "every link is reachable and kept");
+    TEST_EXPECT_EQ(check, 0, "the shed table's lists, hash and counts agree");
+    TEST_ASSERT(deepest, "the deepest link still crosses");
 }
 
 void test_territory_shed_releases_mp_path_once(void) {
