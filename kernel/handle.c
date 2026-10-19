@@ -640,6 +640,12 @@ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *
 // with the outgoing release outside the lock exactly as close does it.
 int handle_replace(struct Proc *p, hidx_t h, const void *expect,
                    enum kobj_kind kind, rights_t rights, void *obj) {
+    return handle_replace_hooked(p, h, expect, kind, rights, obj, NULL, NULL);
+}
+
+int handle_replace_hooked(struct Proc *p, hidx_t h, const void *expect,
+                          enum kobj_kind kind, rights_t rights, void *obj,
+                          void (*under_lock)(void *arg), void *arg) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     if (h < 0 || h >= PROC_HANDLE_MAX)      return -1;
@@ -690,6 +696,7 @@ int handle_replace(struct Proc *p, hidx_t h, const void *expect,
     slot->rights = rights;
     slot->obj    = obj;
     t->installs++;
+    if (under_lock) under_lock(arg);
     spin_unlock(&t->lock);
 
     // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after

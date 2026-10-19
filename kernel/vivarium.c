@@ -1867,12 +1867,22 @@ static struct viv_sock *socktab_find_locked(struct viv_socktab *tab, s32 fd) {
 // future claim that forgets to set it, and the bind fields make that concrete: a
 // recycled slot still carrying the previous socket's port would let a listen()
 // announce a port this socket never asked for. Lock-held (or exec-alone).
-// Returns the slot's cached readiness Spoor DETACHED -- the table's reference
-// is now the caller's, to spoor_clunk once it holds no lock -- or NULL.
-static struct Spoor *socktab_clear_slot(struct viv_socktab *tab, struct viv_sock *e) {
-    if (!e) return NULL;
-    struct Spoor *ready = tab->ready[e - tab->s];
-    tab->ready[e - tab->s] = NULL;
+// Returns the slot's two Spoors DETACHED -- the table's references are now the
+// caller's, to release with socktab_release once it holds no lock.
+struct socktab_detached {
+    struct Spoor *ready;
+    struct Spoor *ctl;
+};
+
+static struct socktab_detached socktab_clear_slot(struct viv_socktab *tab,
+                                                  struct viv_sock *e) {
+    struct socktab_detached d = { .ready = NULL, .ctl = NULL };
+    if (!e) return d;
+    u32 i = (u32)(e - tab->s);
+    d.ready       = tab->ready[i];
+    d.ctl         = tab->ctl[i];
+    tab->ready[i] = NULL;
+    tab->ctl[i]   = NULL;
     e->fd          = -1;
     e->proto       = 0;
     e->state       = VIV_SOCK_FREE;
@@ -1884,7 +1894,13 @@ static struct Spoor *socktab_clear_slot(struct viv_socktab *tab, struct viv_sock
     e->bound_port  = 0;
     e->remote_addr = 0;   // else a recycled slot reports a stranger's peer as
     e->remote_port = 0;   // this socket's, exactly as a stale bound_port would
-    return ready;
+    return d;
+}
+
+// A last clunk is a Tclunk, so this runs with no lock held.
+static void socktab_release(struct socktab_detached d) {
+    spoor_clunk(d.ready);
+    spoor_clunk(d.ctl);
 }
 
 bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out) {
@@ -1898,7 +1914,8 @@ bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out) {
 }
 
 bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
-                       enum viv_net_proto proto, u32 n, enum viv_sock_state born) {
+                       enum viv_net_proto proto, u32 n, enum viv_sock_state born,
+                       struct Spoor *ctl) {
     if (!tab || fd < 0) return false;
     socktab_lock(tab);
     // Replace-on-claim (Design D audit F2): the fd table is the truth. The
@@ -1908,7 +1925,7 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
     // a stale row ahead of the fresh one would answer every later lookup with
     // a stranger's (proto, n). Cleared under the same lock hold as the scan
     // below, so the clear, the scan and the write are one critical section.
-    struct Spoor *stale = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
+    struct socktab_detached stale = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
     // Scan + write are ONE critical section, so two peer claims cannot both see
     // the same slot FREE and stomp it -- the allocation race N-3 introduced.
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
@@ -1926,14 +1943,26 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
             tab->s[i].bound_port  = 0;
             tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
             tab->s[i].remote_port = 0;
+            if (ctl) spoor_ref(ctl);     // the row's own; a FREE slot's was NULL
+            tab->ctl[i]           = ctl;
             socktab_unlock(tab);
-            spoor_clunk(stale);
+            socktab_release(stale);
             return true;
         }
     }
     socktab_unlock(tab);
-    spoor_clunk(stale);
+    socktab_release(stale);
     return false;   // full -> EMFILE
+}
+
+bool viv_socktab_ctl_is(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                        const struct Spoor *sp) {
+    if (!tab || !sp) return false;
+    socktab_lock(tab);
+    struct viv_sock *e = socktab_find_locked(tab, fd);
+    bool is = (e && e->epoch == expect_epoch && tab->ctl[e - tab->s] == sp);
+    socktab_unlock(tab);
+    return is;
 }
 
 bool viv_socktab_has_room(struct viv_socktab *tab) {
@@ -1949,15 +1978,15 @@ bool viv_socktab_has_room(struct viv_socktab *tab) {
 }
 
 struct socktab_closing {
-    struct viv_socktab *tab;
-    s32                 fd;
-    struct Spoor       *ready;
+    struct viv_socktab     *tab;
+    s32                     fd;
+    struct socktab_detached dead;
 };
 
 static void socktab_drop_closing_locked(void *arg) {
     struct socktab_closing *c = (struct socktab_closing *)arg;
     socktab_lock(c->tab);
-    c->ready = socktab_clear_slot(c->tab, socktab_find_locked(c->tab, c->fd));
+    c->dead = socktab_clear_slot(c->tab, socktab_find_locked(c->tab, c->fd));
     socktab_unlock(c->tab);
 }
 
@@ -1969,17 +1998,18 @@ static void socktab_drop_closing_locked(void *arg) {
 // it, the order the fork snapshot takes them in.
 void viv_socktab_drop_closing(struct viv_socktab *tab, struct Proc *p, s32 fd) {
     if (!tab) return;
-    struct socktab_closing c = { .tab = tab, .fd = fd, .ready = NULL };
+    struct socktab_closing c = { .tab = tab, .fd = fd,
+                                 .dead = { .ready = NULL, .ctl = NULL } };
     (void)handle_locked_unless_reserved(p, (hidx_t)fd, socktab_drop_closing_locked, &c);
-    spoor_clunk(c.ready);
+    socktab_release(c.dead);
 }
 
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
     if (!tab) return;
     socktab_lock(tab);
-    struct Spoor *ready = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
+    struct socktab_detached dead = socktab_clear_slot(tab, socktab_find_locked(tab, fd));
     socktab_unlock(tab);
-    spoor_clunk(ready);
+    socktab_release(dead);
 }
 
 // The readiness Spoor another row caches for `e`'s connection, or NULL. Rows of
@@ -2055,7 +2085,9 @@ void viv_socktab_free(struct viv_socktab *tab) {
     if (!tab) return;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         spoor_clunk(tab->ready[i]);
+        spoor_clunk(tab->ctl[i]);
         tab->ready[i] = NULL;
+        tab->ctl[i]   = NULL;
     }
     kfree(tab);
 }
@@ -2075,16 +2107,16 @@ void viv_socktab_free(struct viv_socktab *tab) {
 // taking it costs nothing and keeps the "held only over array ops" rule
 // uniform (drop_cloexec skips it because its handle_get_cloexec would take the
 // handle table's lock inside the leaf; this takes none). Exit runs it as well,
-// in the last thread's at-exit close, to release the cached readiness Spoors
-// with the fds.
+// in the last thread's at-exit close, to release the rows' Spoors (each a netd
+// fid) with the fds.
 // NULL-safe: a Proc that was never Linux has no table.
 void viv_socktab_reset(struct viv_socktab *tab) {
     if (!tab) return;
-    struct Spoor *ready[VIV_SOCK_MAX];
+    struct socktab_detached dead[VIV_SOCK_MAX];
     socktab_lock(tab);
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) ready[i] = socktab_clear_slot(tab, &tab->s[i]);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) dead[i] = socktab_clear_slot(tab, &tab->s[i]);
     socktab_unlock(tab);
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) spoor_clunk(ready[i]);
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) socktab_release(dead[i]);
 }
 
 // Copy one live entry's socket state into the slot `dst` for fd `newfd`,
@@ -2154,9 +2186,17 @@ void viv_socktab_fork_snapshot(void *arg) {
     struct viv_socktab *src = __atomic_load_n(&f->parent->socktab, __ATOMIC_ACQUIRE);
     if (!src) return;
     // Entries + the counter, field-wise -- never the struct, whose lock word
-    // is HELD while we read it.
+    // is HELD while we read it. The ctl identity comes too, with a reference
+    // of the child's own: the handle copy hands the child the SAME Spoor at
+    // each fd, so a copied row and its copied fd agree as the parent's did.
+    // The readiness cache does not -- a child starts uncached.
     socktab_lock(src);
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) f->dst->s[i] = src->s[i];
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        f->dst->s[i] = src->s[i];
+        struct Spoor *ctl = src->ctl[i];
+        if (ctl) spoor_ref(ctl);
+        f->dst->ctl[i] = ctl;
+    }
     f->dst->next_epoch = src->next_epoch;
     socktab_unlock(src);
 }
@@ -2172,7 +2212,7 @@ void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f) {
         // The filter: keep only rows whose fd the child holds. handle_get_cloexec
         // is the existence probe the dup arms use (-1 = no such handle).
         if (handle_get_cloexec(child, (hidx_t)e->fd) < 0) {
-            spoor_clunk(socktab_clear_slot(dst, e));   // NULL: a child starts uncached
+            socktab_release(socktab_clear_slot(dst, e));   // the copied ctl reference
             continue;
         }
         live++;
@@ -2200,19 +2240,25 @@ int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
     struct viv_sock *src = socktab_find_locked(tab, oldfd);
     if (!src) { socktab_unlock(tab); return 0; }
     struct viv_sock snap = *src;                      // the clear below may hit
-    struct Spoor *old = socktab_clear_slot(tab, socktab_find_locked(tab, newfd));
-    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {         // (a slot; snapshot first)
+    struct Spoor   *ctl  = tab->ctl[src - tab->s];    // (a slot; snapshot first)
+    struct socktab_detached old = socktab_clear_slot(tab, socktab_find_locked(tab, newfd));
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         if (tab->s[i].state == VIV_SOCK_FREE) {
             // The alias starts uncached (a FREE slot's ready is NULL); its first
-            // poll shares the source row's Spoor, one per connection.
+            // poll shares the source row's Spoor, one per connection. It
+            // carries the source's ctl identity -- `newfd` now holds the same
+            // Spoor -- with a reference of its own, taken before `old` (which
+            // may be that Spoor) is released.
             socktab_copy_row_locked(tab, &tab->s[i], &snap, newfd);
+            if (ctl) spoor_ref(ctl);
+            tab->ctl[i] = ctl;
             socktab_unlock(tab);
-            spoor_clunk(old);
+            socktab_release(old);
             return 1;
         }
     }
     socktab_unlock(tab);
-    spoor_clunk(old);
+    socktab_release(old);
     return -1;
 }
 
@@ -2264,20 +2310,37 @@ bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
 }
 
 bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
-                               u32 addr, u16 port, bool also_connect) {
+                               u32 addr, u16 port) {
     if (!tab) return false;
     socktab_lock(tab);
     struct viv_sock *e = socktab_find_locked(tab, fd);
     bool ok = (e && e->epoch == expect_epoch);
     if (ok) {
-        // remote first, THEN the state transition -- so a peer that observes
-        // CONNECTED (under this same lock) always sees the remote already set.
         e->remote_addr = addr;
         e->remote_port = port;
-        if (also_connect) e->state = (u8)VIV_SOCK_CONNECTED;
     }
     socktab_unlock(tab);
     return ok;
+}
+
+void viv_socktab_connected_locked(void *arg) {
+    struct viv_socktab_connected *c = (struct viv_socktab_connected *)arg;
+    c->ok       = false;
+    c->detached = NULL;
+    if (!c->tab) return;
+    socktab_lock(c->tab);
+    struct viv_sock *e = socktab_find_locked(c->tab, c->fd);
+    if (e && e->epoch == c->expect_epoch) {
+        // remote first, THEN the state transition -- so a peer that observes
+        // CONNECTED (under this same lock) always sees the remote already set.
+        e->remote_addr = c->addr;
+        e->remote_port = c->port;
+        e->state       = (u8)VIV_SOCK_CONNECTED;
+        c->detached    = c->tab->ctl[e - c->tab->s];
+        c->tab->ctl[e - c->tab->s] = NULL;
+        c->ok          = true;
+    }
+    socktab_unlock(c->tab);
 }
 
 bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
@@ -2329,7 +2392,7 @@ void viv_socktab_drop_cloexec(struct Proc *p) {
         struct viv_sock *e = &tab->s[i];
         if (e->state != VIV_SOCK_FREE &&
             handle_get_cloexec(p, (hidx_t)e->fd) == 1)
-            spoor_clunk(socktab_clear_slot(tab, e));   // exec-alone: no lock held
+            socktab_release(socktab_clear_slot(tab, e));   // exec-alone: no lock held
     }
 }
 

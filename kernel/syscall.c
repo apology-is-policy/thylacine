@@ -11796,7 +11796,10 @@ static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
         return -(s64)T_E_IO;       // a /net that does not speak the idiom
     }
 
-    if (!viv_socktab_claim(tab, (s32)fd, proto, n, VIV_SOCK_FRESH)) {
+    // The row takes its own reference on ctl, the identity the verb-writing arms
+    // check the fd against; this call's reference is the one the install hands
+    // the fd.
+    if (!viv_socktab_claim(tab, (s32)fd, proto, n, VIV_SOCK_FRESH, ctl)) {
         handle_unreserve(p, fd);
         spoor_clunk(ctl);
         return -(s64)T_E_MFILE;
@@ -11875,6 +11878,50 @@ static s64 viv_sock_connect_row(struct Proc *p, struct viv_socktab *tab,
     return 0;
 }
 
+#ifdef KERNEL_TESTS
+// Runs where a peer thread's dup3 or connect lands in the race: after the arm
+// read the row, before it pins the fd.
+static void (*viv_sock_pin_hook)(struct Proc *, u64);
+void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
+void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64)) {
+    __atomic_store_n(&viv_sock_pin_hook, hook, __ATOMIC_RELEASE);
+}
+#endif
+
+// The ctl Spoor a verb-writing arm writes to: pinned from the fd, then proved
+// to be the ctl the row `e` snapshotted was claimed with, before anything is
+// written. The row was found by number and the slot is read by number here,
+// and a peer thread's dup3 can fall between the two -- it installs before it
+// drops the old row -- leaving the socket's row over a slot that holds a file.
+// On a refusal *err is what the number earns now: EBADF closed, ENOTSOCK
+// anything but this socket's ctl -- unless the row is still this socket and
+// went CONNECTED meanwhile (a peer thread's connect swapped the fd onto data),
+// which sets *connected for the caller to answer as the socket now is. `want`
+// stays the right the write needs: spoor_write_on sits below the handle layer,
+// so a weaker pin would write through an fd that may not.
+static struct Spoor *viv_sock_pin_ctl(struct Proc *p, struct viv_socktab *tab,
+                                      u64 fd_raw, const struct viv_sock *e,
+                                      rights_t want, bool *connected, s64 *err) {
+    *connected = false;
+    *err       = 0;
+#ifdef KERNEL_TESTS
+    void (*hook)(struct Proc *, u64) = __atomic_load_n(&viv_sock_pin_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(p, fd_raw);
+#endif
+    struct Spoor *s = sys_lookup_rw_handle(p, (hidx_t)fd_raw, want);
+    if (s && viv_socktab_ctl_is(tab, (s32)(s64)fd_raw, e->epoch, s)) return s;
+    if (s) spoor_clunk(s);
+    struct viv_sock now;
+    if (viv_socktab_get(tab, (s32)(s64)fd_raw, &now) && now.epoch == e->epoch &&
+        now.state == VIV_SOCK_CONNECTED) {
+        *connected = true;
+        return NULL;
+    }
+    *err = (handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0) ? -(s64)T_E_BADF
+                                                            : -(s64)T_E_NOTSOCK;
+    return NULL;
+}
+
 // connect()'s dial and its wait, given the peer as a kernel address. A
 // CONNECTING row ignores `ip4`/`port` and resumes the wait on the peer it
 // dialed, as Linux ignores a retry's address in SS_CONNECTING. `ctl` is the
@@ -11951,33 +11998,56 @@ static s64 viv_sock_connect_dial_on(struct Proc *p, struct viv_socktab *tab,
 
     // Keyed on ctl: a peer thread that closed this number while the call slept
     // and put its own file there is refused, not swapped out and released.
-    if (handle_replace(p, (hidx_t)fd_raw, ctl, KOBJ_SPOOR, dr, dsp) < 0) {
+    //
+    // The commit rides INSIDE the swap's hold: the peer is recorded (a recvmsg
+    // on the connected socket synthesizes msg_name from it, as from the datagram
+    // sendto's), the row goes CONNECTED and gives up its ctl identity, all KEYED
+    // on the socket we snapshotted (e->epoch) -- so no arm can see the fd on
+    // data while the row still reads CONNECTING. If the row was re-made
+    // meanwhile (the same ctl dup'd back onto the number), the commit lands
+    // nowhere rather than marking a row connect() did not start from; connect()
+    // still returns success, since the connection was made and the number names
+    // it.
+    struct viv_socktab_connected commit = {
+        .tab = tab, .fd = (s32)(s64)fd_raw, .expect_epoch = e->epoch,
+        .addr = raddr, .port = rport, .ok = false, .detached = NULL,
+    };
+    if (handle_replace_hooked(p, (hidx_t)fd_raw, ctl, KOBJ_SPOOR, dr, dsp,
+                              viv_socktab_connected_locked, &commit) < 0) {
         spoor_clunk(dsp);
+        // A peer thread finishing this same connect (a read on the CONNECTING
+        // fd, say) swapped first: the connection is made and the number names
+        // it, so the surplus data fid goes and the call succeeds.
+        struct viv_sock now;
+        if (viv_socktab_get(tab, (s32)(s64)fd_raw, &now) && now.epoch == e->epoch &&
+            now.state == VIV_SOCK_CONNECTED)
+            return 0;
         return -(s64)T_E_IO;
     }
-
-    // Record the peer so a recvmsg on this connected socket can synthesize
-    // msg_name (the same field the datagram sendto path records), and transition
-    // CONNECTED -- both under one lock hold, KEYED on the socket we snapshotted
-    // (e->n, e->epoch). The swap above already refused a number that no longer
-    // names this socket's ctl; if the row was re-made meanwhile (the same ctl
-    // dup'd back onto the number), the write lands nowhere rather than marking
-    // a row connect() did not start from. connect() still returns success: the
-    // connection was made and the number names it.
-    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, rport,
-                                    /*also_connect=*/true);
+    // The row's ctl reference; the fd's went with the swap, and the caller's
+    // own keeps ctl open until data is in place -- which it already is.
+    spoor_clunk(commit.detached);
     return 0;
 }
 
-// The socket's ctl Spoor is taken once, so the dial is written to it, its mode
-// is read off it and the swap is keyed on it: a peer thread that closes and
-// reuses the number while the call sleeps gets none of the three.
+// The socket's ctl Spoor is taken once and proved to be the row's own
+// (viv_sock_pin_ctl), so the dial is written to it, its mode is read off it and
+// the swap is keyed on it: a peer thread that reuses the number -- before the
+// pin or while the call sleeps -- gets none of the three.
 static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
                                  u64 fd_raw, const struct viv_sock *e,
                                  const u8 ip4[4], u16 port) {
     rights_t want = (e->state == VIV_SOCK_CONNECTING) ? 0 : RIGHT_WRITE;
-    struct Spoor *ctl = sys_lookup_rw_handle(p, (hidx_t)fd_raw, want);
-    if (!ctl)                     return -(s64)T_E_BADF;
+    bool connected;
+    s64  err;
+    struct Spoor *ctl = viv_sock_pin_ctl(p, tab, fd_raw, e, want, &connected, &err);
+    if (!ctl) {
+        // Connected meanwhile by a peer thread: a CONNECTING row's wait is over
+        // (Linux's blocking retry returns once the handshake completes), and a
+        // FRESH one's connect() meets a connected socket.
+        if (connected) return (e->state == VIV_SOCK_CONNECTING) ? 0 : -(s64)T_E_ISCONN;
+        return err;
+    }
     s64 rc = viv_sock_connect_dial_on(p, tab, fd_raw, ctl, e, ip4, port);
     spoor_clunk(ctl);
     return rc;
@@ -12195,6 +12265,63 @@ static s64 viv_sock_getsockopt(struct Proc *p, u64 fd_raw, u64 level,
     return 0;
 }
 
+// The datagram send past the destination's parse, given it as a kernel address.
+// Re-dial: `connect ip!port` to the socket's own ctl (the guest fd, still ctl
+// for a FRESH socket), proved to be the one this row was claimed with.
+// All-or-nothing, like connect's own verb write. The pin is held through the
+// send: it is a fid on connection N, so netd cannot hand N to another socket
+// while the data file is opened by path below.
+static s64 viv_sock_dgram_send(struct Proc *p, struct viv_socktab *tab,
+                               const struct viv_sock *e, u64 fd_raw,
+                               u64 buf_va, u64 len, const u8 ip4[4], u16 port) {
+    char cmd[48];
+    u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
+    if (clen == 0) return -(s64)T_E_INVAL;
+    bool connected;
+    s64  rc;
+    struct Spoor *ctl = viv_sock_pin_ctl(p, tab, fd_raw, e, RIGHT_WRITE, &connected, &rc);
+    if (!ctl) {
+        // A peer thread's connect() won the socket meanwhile: EISCONN, what
+        // vivarium_sendto_decide answers a destination on a socket past FRESH.
+        return connected ? -(s64)T_E_ISCONN : rc;
+    }
+    s64 w = spoor_write_on(ctl, (const u8 *)cmd, clen, false, 0);
+    if (w != (s64)clen) {
+        spoor_clunk(ctl);
+        if (w == -(s64)T_E_INTR) return w;   // a caught signal, not a refusal
+        return -(s64)T_E_CONNREFUSED;
+    }
+
+    // Move the payload on a data Spoor opened for exactly this datagram; a UDP
+    // write is one datagram. The staging is the native write's own
+    // (sys_write_staged), with the gates SYS_WRITE applies ahead of it: the range
+    // check, a zero length writing nothing, and the SYS_RW_MAX cap. (No weft
+    // fast path: a freshly opened data fid is never weft-bound.)
+    struct Spoor *dsp;
+    s64 drc = viv_sock_resolve(p, (enum viv_net_proto)e->proto, e->n, "data", &dsp);
+    if (drc < 0) {
+        spoor_clunk(ctl);
+        return drc;
+    }
+    s64 sent;
+    if (!sys_validate_user_buf(buf_va, len)) sent = -(s64)T_E_FAULT;
+    else if (len == 0)                       sent = 0;
+    else sent = sys_write_staged(p, (hidx_t)-1, dsp, buf_va,
+                                 (len > SYS_RW_MAX) ? (u64)SYS_RW_MAX : len);
+    spoor_clunk(dsp);
+    spoor_clunk(ctl);
+    if (sent < 0) return sent;
+
+    // Record the destination AFTER the send succeeds -- a failed dial must not
+    // overwrite a working remote (recvmsg would then report the wrong peer, which
+    // musl's res_msend rejects via memcmp). Keyed on the snapshot (e->epoch): a
+    // datagram that raced a peer close+reuse of this fd records nowhere.
+    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, port);
+    return sent;
+}
+
 // The connectionless UDP datagram send (N-2a): dial `addr` on the ctl fd (netd
 // re-points conn N per call, server.rs), then move the payload on a transient
 // data fid. The guest fd stays `ctl`, so a subsequent sendto to a DIFFERENT peer
@@ -12223,41 +12350,7 @@ static s64 viv_sock_dgram_sendto(struct Proc *p, struct viv_socktab *tab,
         u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
         return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
     }
-
-    // Re-dial: `connect ip!port` to ctl (the guest fd, still ctl for a FRESH
-    // socket). All-or-nothing, like connect's own verb write.
-    char cmd[48];
-    u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
-    if (clen == 0) return -(s64)T_E_INVAL;
-    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
-    if (w == -(s64)T_E_INTR) return w;   // a caught signal, not a refusal
-    if (w != (s64)clen) return -(s64)T_E_CONNREFUSED;
-
-    // Move the payload on a data Spoor opened for exactly this datagram; a UDP
-    // write is one datagram. The staging is the native write's own
-    // (sys_write_staged), with the gates SYS_WRITE applies ahead of it: the range
-    // check, a zero length writing nothing, and the SYS_RW_MAX cap. (No weft
-    // fast path: a freshly opened data fid is never weft-bound.)
-    struct Spoor *dsp;
-    s64 drc = viv_sock_resolve(p, (enum viv_net_proto)e->proto, e->n, "data", &dsp);
-    if (drc < 0) return drc;
-    s64 sent;
-    if (!sys_validate_user_buf(buf_va, len)) sent = -(s64)T_E_FAULT;
-    else if (len == 0)                       sent = 0;
-    else sent = sys_write_staged(p, (hidx_t)-1, dsp, buf_va,
-                                 (len > SYS_RW_MAX) ? (u64)SYS_RW_MAX : len);
-    spoor_clunk(dsp);
-    if (sent < 0) return sent;
-
-    // Record the destination AFTER the send succeeds -- a failed dial must not
-    // overwrite a working remote (recvmsg would then report the wrong peer, which
-    // musl's res_msend rejects via memcmp). Keyed on the snapshot (e->n): a
-    // datagram that raced a peer close+reuse of this fd records nowhere.
-    u32 raddr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
-              | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
-    (void)viv_socktab_record_remote(tab, (s32)(s64)fd_raw, e->epoch, raddr, port,
-                                    /*also_connect=*/false);
-    return sent;
+    return viv_sock_dgram_send(p, tab, e, fd_raw, buf_va, len, ip4, port);
 }
 
 // sendto(fd, buf, len, flags, addr, addrlen) / recvfrom(fd, buf, len, flags,
@@ -12474,8 +12567,19 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
     u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e.bound_port);
     if (clen == 0) return -(s64)T_E_INVAL;
 
+    // The announce goes to the socket's own ctl, proved to be the one this row
+    // was claimed with (viv_sock_pin_ctl), as connect's dial does.
+    bool connected;
+    s64  perr;
+    struct Spoor *ctl = viv_sock_pin_ctl(p, tab, fd_raw, &e, RIGHT_WRITE, &connected, &perr);
+    if (!ctl) {
+        // A peer thread's connect() won the socket meanwhile: EINVAL, what
+        // vivarium_listen_decide answers a CONNECTED socket.
+        return connected ? -(s64)T_E_INVAL : perr;
+    }
     // All-or-nothing, exactly as connect's dial verb -- see the note there.
-    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+    s64 w = spoor_write_on(ctl, (const u8 *)cmd, clen, false, 0);
+    spoor_clunk(ctl);
     if (w != (s64)clen) {
         // netd refuses an announce for a port already listening, a socket
         // already open, or a port it will not take. EADDRINUSE is the one a
@@ -12483,8 +12587,8 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
         return -(s64)T_E_ADDRINUSE;
     }
 
-    // Keyed on the snapshot (e.n): a listen that raced a peer close+reuse of this
-    // fd transitions nowhere -- the socket the guest announced is gone.
+    // Keyed on the snapshot (e.epoch): a listen that raced a peer close+reuse of
+    // this fd transitions nowhere -- the socket the guest announced is gone.
     if (!viv_socktab_set_state(tab, (s32)(s64)fd_raw, e.epoch, VIV_SOCK_LISTENING))
         return -(s64)T_E_NOTSOCK;
     return 0;
@@ -12618,10 +12722,10 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     // the end, dsp alone holds M, so clunking it on a failure frees M.
     s64 dfd = (s64)dh;
 
-    // Born CONNECTED in one lock hold -- the accepted fd IS `data`. Doing it in
-    // claim (rather than claim-then-set_state) leaves no moment at which the
-    // row reads FRESH.
-    if (!viv_socktab_claim(tab, (s32)dfd, proto, m, VIV_SOCK_CONNECTED)) {
+    // Born CONNECTED in one lock hold -- the accepted fd IS `data`, so the row
+    // has no ctl identity. Doing it in claim (rather than claim-then-set_state)
+    // leaves no moment at which the row reads FRESH.
+    if (!viv_socktab_claim(tab, (s32)dfd, proto, m, VIV_SOCK_CONNECTED, NULL)) {
         handle_unreserve(p, dh);
         spoor_clunk(dsp);                  // frees M
         return -(s64)T_E_MFILE;
@@ -15270,6 +15374,24 @@ s64 viv_sock_connect_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port)
     struct viv_sock     e;
     { s64 rr = viv_sock_connect_row(p, tab, fd, &e); if (rr < 0) return rr; }
     return viv_sock_connect_dial(p, tab, fd, &e, ip4, port);
+}
+
+// Drives the REAL listen arm through the T2 dispatcher (the LISTEN case reads
+// no frame).
+s64 viv_listen_for_test(struct Proc *p, u64 fd);
+s64 viv_listen_for_test(struct Proc *p, u64 fd) {
+    u64 args[VIV_NARGS] = { fd, 0, 0, 0, 0, 0 };
+    return viv_tier2(NULL, p, VIV_LINUX_LISTEN, args);
+}
+
+// Drives the datagram sendto past its destination's copy and parse, with a
+// KERNEL address and an empty payload, so no user memory is read.
+s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock     e;
+    { s64 lr = viv_sock_row(p, tab, fd, &e); if (lr < 0) return lr; }
+    return viv_sock_dgram_send(p, tab, &e, fd, 0, 0, ip4, port);
 }
 
 // Drives the REAL accept arm through the T2 dispatcher with no address out-

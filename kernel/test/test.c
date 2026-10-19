@@ -1057,6 +1057,10 @@ void test_vivsock_sendto_recvfrom_narrow_fd(void);
 void test_vivsock_so_error_reports_the_dial(void);
 void test_vivsock_positioned_io_finishes_connect(void);
 void test_vivsock_so_error_needs_no_descriptor(void);
+void test_vivsock_ctl_verbs_need_their_ctl(void);
+void test_vivsock_ctl_verbs_meet_a_racing_peer(void);
+void test_vivsock_ctl_identity_travels_with_the_fd(void);
+void test_vivsock_connect_finished_by_a_peer(void);
 void test_vivarium_socktab_reset(void);                             // Design D audit F2
 void test_vivarium_socktab_clone_into(void);                        // socktab across images: fork
 void test_vivarium_socktab_alias(void);                             // socktab across images: alias
@@ -3215,6 +3219,10 @@ struct test_case g_tests[] = {
     { "vivsock.so_error_reports_the_dial",   test_vivsock_so_error_reports_the_dial,   false, NULL },
     { "vivsock.positioned_io_finishes_connect", test_vivsock_positioned_io_finishes_connect, false, NULL },
     { "vivsock.so_error_needs_no_descriptor", test_vivsock_so_error_needs_no_descriptor, false, NULL },
+    { "vivsock.ctl_verbs_need_their_ctl",    test_vivsock_ctl_verbs_need_their_ctl,    false, NULL },
+    { "vivsock.ctl_verbs_meet_a_racing_peer", test_vivsock_ctl_verbs_meet_a_racing_peer, false, NULL },
+    { "vivsock.ctl_identity_travels_with_the_fd", test_vivsock_ctl_identity_travels_with_the_fd, false, NULL },
+    { "vivsock.connect_finished_by_a_peer",  test_vivsock_connect_finished_by_a_peer,  false, NULL },
     { "vivarium.socktab_reset",        test_vivarium_socktab_reset,        false, NULL },
     { "vivarium.socktab_clone_into",   test_vivarium_socktab_clone_into,   false, NULL },
     { "vivarium.socktab_alias",        test_vivarium_socktab_alias,        false, NULL },

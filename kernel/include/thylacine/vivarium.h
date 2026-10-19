@@ -1491,12 +1491,29 @@ _Static_assert(sizeof(struct viv_sock) == 32, "viv_sock pinned at 32 bytes "
 // The cache never outlives the fds it serves: exit resets the table with the
 // handle table (a zombie pins no netd fid), and exec's sweeps clear the rows
 // whose fds the exec closes.
+//
+// THE CTL IDENTITY. ctl[i] is the ctl Spoor s[i] was claimed with by socket(),
+// one reference the row owns. It is NULL for an accepted row (born CONNECTED:
+// its fd is data), from connect()'s CONNECTED commit on (the fd is data then,
+// and a held ctl would cost netd a second fid for the connection), and in a
+// FREE slot. The arms that write netd a ctl verb -- connect's dial, listen's
+// announce, the datagram sendto's re-dial -- find the row by number and then
+// the fd's Spoor by number, and a peer thread's dup3 can fall between the two
+// (it installs the new object before it drops the old row), leaving a row that
+// still names the socket over a slot that holds a file. So each such arm
+// proves the Spoor it pinned IS ctl[i] before writing (viv_socktab_ctl_is).
+// The row's reference makes that pointer comparison exact: the Spoor cannot be
+// freed, nor its address reused, while the row lives. It is identity, not a
+// cache, so UNLIKE ready[] a fork copy and an alias copy carry it, each with a
+// reference of its own -- the copied fd holds the same Spoor. Every slot clear
+// detaches it with ready[], under the lock, and clunks it after the unlock.
 struct Spoor;
 struct viv_socktab {
     spin_lock_t     lock;       // leaf; held only over array ops, never across I/O
     u64             next_epoch; // monotonic; stamps each claim's viv_sock.epoch
     struct viv_sock s[VIV_SOCK_MAX];
     struct Spoor   *ready[VIV_SOCK_MAX];
+    struct Spoor   *ctl[VIV_SOCK_MAX];
 };
 
 // Snapshot the entry for `fd` into `*out` (which may be NULL for an existence
@@ -1514,8 +1531,18 @@ bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out);
 // is cleared in the same critical section rather than left ahead of the fresh
 // row, where find_locked would keep returning it. `born` is FRESH for
 // socket() and CONNECTED for accept() (an accepted fd IS data, born connected).
+// `ctl` is the row's ctl identity: socket() passes the ctl Spoor it will
+// install, and the row takes a reference of its own (the caller keeps its
+// one); accept() passes NULL.
 bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
-                       enum viv_net_proto proto, u32 n, enum viv_sock_state born);
+                       enum viv_net_proto proto, u32 n, enum viv_sock_state born,
+                       struct Spoor *ctl);
+
+// True iff `fd`'s row still names the socket the caller snapshotted (epoch ==
+// expect_epoch) AND `sp` is that row's ctl Spoor. A ctl-verb arm asks it of the
+// Spoor it pinned from the fd, before it writes anything. Takes the lock.
+bool viv_socktab_ctl_is(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
+                        const struct Spoor *sp);
 
 // Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
 // plain file, or a socket already dropped) is a no-op, which is what lets the
@@ -1544,16 +1571,16 @@ bool viv_socktab_ready_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out
 bool viv_socktab_ready_install(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                struct Spoor *sp);
 
-// proc_free's release: clunk every cached readiness Spoor, then free the table.
-// The at-exit reset has normally emptied the cache already; this covers the
-// Procs freed without it (rollback, orphan). The Proc is past its last thread,
-// so nothing can reach the table. NULL-safe.
+// proc_free's release: clunk every Spoor the rows hold (readiness and ctl), then
+// free the table. The at-exit reset has normally emptied it already; this covers
+// the Procs freed without it (rollback, orphan). The Proc is past its last
+// thread, so nothing can reach the table. NULL-safe.
 void viv_socktab_free(struct viv_socktab *tab);
 
 // Reset the WHOLE table in place under its lock -- every slot cleared, the
 // object kept (#254: cross-Proc-reachable; proc_free is the only free), the
-// epoch counter untouched (monotonic for the table's life), every cached
-// readiness Spoor clunked after the unlock. execve's NATIVE arm calls it
+// epoch counter untouched (monotonic for the table's life), every Spoor the
+// rows held clunked after the unlock. execve's NATIVE arm calls it
 // (proc_exec_drop_image_state, Design D audit F2): a native image has no
 // sockets, and native close() never drops a row, so a Linux image's rows would
 // otherwise outlive their fds and greet the next Linux image's recycled fd
@@ -1568,9 +1595,10 @@ void viv_socktab_reset(struct viv_socktab *tab);
 //   prepare  -- allocate the child's table with no lock held; -1 on OOM and
 //               the caller fails the fork (the sigtab shape). A parent with no
 //               table leaves f->dst NULL and every later step a no-op.
-//   snapshot -- the handle_table_copy_into_hooked hook: every row + the epoch
-//               counter, copied field-wise under the PARENT's socktab lock,
-//               nested inside the parent's handle lock the copy is holding.
+//   snapshot -- the handle_table_copy_into_hooked hook: every row, its ctl
+//               identity (a reference of the child's own) and the epoch
+//               counter, copied under the PARENT's socktab lock, nested
+//               inside the parent's handle lock the copy is holding.
 //               That nesting is the whole point (the socktab holotype F1): a
 //               peer thread cannot close fd N and reopen it as a different
 //               socket between the handle snapshot and this one, because both
@@ -1596,7 +1624,8 @@ void viv_socktab_fork_snapshot(void *arg);      // arg: the struct viv_socktab_f
 void viv_socktab_fork_finish(struct Proc *child, struct viv_socktab_fork *f);
 
 // The alias rule for dup / dup3 / F_DUPFD of a socket (the same vote): the
-// new number carries its OWN copy of the source's row with a FRESH epoch. A
+// new number carries its OWN copy of the source's row with a FRESH epoch, and
+// the source's ctl identity with a reference of its own. A
 // state mutation through one alias -- connect/bind/listen, which also swaps
 // THAT handle ctl->data -- is not seen through another; Linux shares one
 // description and this does not (VIVARIUM 5.5.2 + the section-9 row record
@@ -1637,11 +1666,9 @@ bool viv_socktab_has_room(struct viv_socktab *tab);
 // snapshotted (a monotonic per-claim stamp; see the struct comment for why NOT n).
 //   set_state    -- listen(): FRESH -> LISTENING.
 //   set_bound    -- bind(): record the requested local endpoint.
-//   record_remote-- connect()/sendto(): record the peer; also_connect
-//                   additionally transitions to CONNECTED in the same lock hold
-//                   (so a peer recvmsg never sees CONNECTED with an unset
-//                   remote), which connect() passes true and the connectionless
-//                   datagram sendto passes false.
+//   record_remote-- the connectionless datagram sendto: record the peer a
+//                   recvmsg reports. connect()'s CONNECTED transition is
+//                   viv_socktab_connected_locked, below.
 //   begin_connect-- connect()'s dial was accepted: FRESH -> CONNECTING with the
 //                   dialed peer recorded, in one hold (so no reader sees a stream
 //                   row that is FRESH with a remote). False unless the row is
@@ -1654,10 +1681,31 @@ bool viv_socktab_set_state(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
 bool viv_socktab_set_bound(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                            u32 addr, u16 port);
 bool viv_socktab_record_remote(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
-                               u32 addr, u16 port, bool also_connect);
+                               u32 addr, u16 port);
 bool viv_socktab_begin_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch,
                                u32 addr, u16 port);
 bool viv_socktab_abort_connect(struct viv_socktab *tab, s32 fd, u64 expect_epoch);
+
+// connect()'s commit: the hook handle_replace_hooked runs INSIDE the hold that
+// swaps the fd from ctl onto data (handle -> socktab, the fork snapshot's
+// order). Keyed like the writers above, it records the peer, transitions the
+// row CONNECTED and detaches its ctl identity -- so the swap and the transition
+// are ONE step to anything that reads both: an arm whose pinned Spoor is no
+// longer the row's ctl finds the row CONNECTED whenever the swap is why. The
+// remote is written before the state, so a reader that sees CONNECTED sees the
+// peer. `detached` comes back holding the row's ctl reference, for the caller
+// to clunk once it holds no lock; `ok` says whether the row was still the one
+// the caller snapshotted.
+struct viv_socktab_connected {
+    struct viv_socktab *tab;
+    s32                 fd;
+    u64                 expect_epoch;
+    u32                 addr;
+    u16                 port;
+    bool                ok;
+    struct Spoor       *detached;
+};
+void viv_socktab_connected_locked(void *arg);   // arg: struct viv_socktab_connected
 
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable
 // domain, and if so which /net protocol directory it names. PURE.

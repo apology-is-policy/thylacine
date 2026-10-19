@@ -347,6 +347,16 @@ int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *
 int handle_replace(struct Proc *p, hidx_t h, const void *expect,
                    enum kobj_kind kind, rights_t rights, void *obj);
 
+// The same swap with a hook run INSIDE its hold -- after the slot names `obj`,
+// before the lock drops, and only when the swap happened. For state beside the
+// table keyed by its indices (the phenotype socket table), this makes the swap
+// and that state's change ONE step to a reader of both. The hook may take leaf
+// locks only (the socket table's nests here: handle -> socktab) and must neither
+// sleep nor allocate. `under_lock == NULL` is the plain replace.
+int handle_replace_hooked(struct Proc *p, hidx_t h, const void *expect,
+                          enum kobj_kind kind, rights_t rights, void *obj,
+                          void (*under_lock)(void *arg), void *arg);
+
 // Look up a handle into a caller-owned snapshot, with a reference HELD on
 // the underlying kobj. Returns 0 on success (*out filled: kind / rights /
 // obj, magic == HANDLE_MAGIC, and the obj's refcount bumped so it stays alive

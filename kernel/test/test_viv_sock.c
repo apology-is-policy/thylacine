@@ -45,6 +45,10 @@ extern s64 viv_recvfrom_empty_for_test(struct Proc *p, u64 fd);
 extern s64 viv_recvmsg_for_test(struct Proc *p, u64 fd, u64 msg_va);
 extern s32 viv_sock_pending_error_for_test(struct Proc *p, u64 fd);
 extern bool viv_linux_dispatch_for_test(struct exception_context *ctx, struct Proc *p);
+extern s64 viv_listen_for_test(struct Proc *p, u64 fd);
+extern s64 viv_sock_dgram_send_for_test(struct Proc *p, u64 fd, const u8 ip4[4], u16 port);
+extern void viv_sock_pin_hook_for_test(void (*hook)(struct Proc *, u64));
+extern s64 viv_dup_for_test(struct Proc *p, u64 fd);
 
 void test_vivsock_accept_wait_is_over(void);
 void test_vivsock_connect_tcp_holds_the_dial(void);
@@ -60,6 +64,10 @@ void test_vivsock_sendto_recvfrom_narrow_fd(void);
 void test_vivsock_so_error_reports_the_dial(void);
 void test_vivsock_positioned_io_finishes_connect(void);
 void test_vivsock_so_error_needs_no_descriptor(void);
+void test_vivsock_ctl_verbs_need_their_ctl(void);
+void test_vivsock_ctl_verbs_meet_a_racing_peer(void);
+void test_vivsock_ctl_identity_travels_with_the_fd(void);
+void test_vivsock_connect_finished_by_a_peer(void);
 
 // ---------------------------------------------------------------------------
 // The /net stub: net/{tcp,udp}/<n>/{ctl,data,listen,remote,status}. A qid
@@ -90,6 +98,16 @@ static struct {
     struct Proc  *swap_p;
     struct Spoor *swap_in;
     s64           swap_fd, swap_got;
+    // != NULL: the NEXT data Tlopen stands in for a peer thread finishing the
+    // same connect first -- it swaps finish_fd from ctl onto finish_dsp (a
+    // data fid it opened beforehand) with connect's commit. The commit's
+    // detached ctl reference is left for the test to clunk.
+    struct Proc  *finish_p;
+    struct Spoor *finish_dsp, *finish_detached;
+    s64           finish_fd;
+    bool          finish_ok;
+    u32  file_writes;     // Twrites to a non-/net-verb file (a `remote`)
+    u32  data_clunks;
 } g_ns;
 
 static void ns_put32(u8 *b, u32 v) {
@@ -259,6 +277,30 @@ static int ns_responder(void *ctx, const u8 *req, size_t req_len,
                                              g_ns.swap_in);
                 g_ns.swap_in  = NULL;
             }
+            if (g_ns.finish_dsp) {
+                // No RPC from inside the reply: the data fid was opened ahead,
+                // and the swap releases only the slot's own ctl reference.
+                struct viv_sock e;
+                struct Handle   h;
+                struct Proc    *fp = g_ns.finish_p;
+                if (viv_socktab_get(fp->socktab, (s32)g_ns.finish_fd, &e) &&
+                    handle_get(fp, (hidx_t)g_ns.finish_fd, &h) == 0) {
+                    void *was = h.obj;
+                    handle_put(&h);
+                    struct viv_socktab_connected c = {
+                        .tab = fp->socktab, .fd = (s32)g_ns.finish_fd,
+                        .expect_epoch = e.epoch, .addr = e.remote_addr,
+                        .port = e.remote_port, .ok = false, .detached = NULL,
+                    };
+                    if (handle_replace_hooked(fp, (hidx_t)g_ns.finish_fd, was, KOBJ_SPOOR,
+                                              RIGHT_READ | RIGHT_WRITE, g_ns.finish_dsp,
+                                              viv_socktab_connected_locked, &c) == 0) {
+                        g_ns.finish_dsp      = NULL;   // the slot's now
+                        g_ns.finish_ok       = c.ok;
+                        g_ns.finish_detached = c.detached;
+                    }
+                }
+            }
             if (g_ns.data_fail) {
                 u32 ec = g_ns.data_fail;
                 g_ns.data_fail = 0;
@@ -302,6 +344,7 @@ static int ns_responder(void *ctx, const u8 *req, size_t req_len,
         struct ns_fid *f = (req_len >= P9_HDR_LEN + 16) ? ns_find(ns_get32(req + 7)) : NULL;
         if (!f) return ns_lerror(resp, resp_cap, tag, 9);
         u32 count = ns_get32(req + 19);
+        if (f->kind == NS_FILE) g_ns.file_writes++;
         if (f->kind == NS_CTL) {
             g_ns.ctl_writes++;
             g_ns.dial_intr = intr;
@@ -319,6 +362,7 @@ static int ns_responder(void *ctx, const u8 *req, size_t req_len,
     if (type == P9_TCLUNK) {
         struct ns_fid *f = (req_len >= P9_HDR_LEN + 4) ? ns_find(ns_get32(req + 7)) : NULL;
         if (f && f->kind == NS_CTL) g_ns.ctl_clunks++;
+        if (f && f->kind == NS_DATA) g_ns.data_clunks++;
         if (f) f->used = 0;
         return ns_hdr(resp, resp_cap, P9_HDR_LEN, P9_RCLUNK, tag);
     }
@@ -383,26 +427,36 @@ static void ns_free(struct Proc *p) {
     p9_loopback_destroy(&g_ns_lb);
 }
 
-// A socket as socket() leaves one: an fd on <proto>/<n>/ctl with its row.
-static s64 ns_socket(struct Proc *p, enum viv_net_proto proto, u32 n, enum viv_sock_state st) {
-    char path[32];
+// /net/<proto>/<n>/<file> opened ORDWR through the Proc's own root, or NULL
+// with *err set.
+static struct Spoor *ns_open(struct Proc *p, enum viv_net_proto proto, u32 n,
+                             const char *file, int *err) {
+    char path[40];
     u32  len = 0;
-    const char *pd = (proto == VIV_NET_UDP) ? "net/udp/" : "net/tcp/";
-    while (*pd) path[len++] = *pd++;
+    for (const char *c = (proto == VIV_NET_UDP) ? "net/udp/" : "net/tcp/"; *c; c++)
+        path[len++] = *c;
     char rev[11];
     u32  rn = 0;
     do { rev[rn++] = (char)('0' + n % 10u); n /= 10u; } while (n && rn < 10u);
-    u32 nn = 0;
-    for (u32 i = rn; i > 0; i--) { nn = nn * 10u + (u32)(rev[i - 1] - '0'); path[len++] = rev[i - 1]; }
-    const char *tail = "/ctl";
-    while (*tail) path[len++] = *tail++;
+    while (rn) path[len++] = rev[--rn];
+    path[len++] = '/';
+    while (*file && len < sizeof(path)) path[len++] = *file++;
+    *err = 0;
+    return stalk_err(p, p->territory->root_spoor, path, len, STALK_OPEN,
+                     2u /* ORDWR */, err);
+}
+
+// A socket as socket() leaves one: an fd on <proto>/<n>/ctl with its row, which
+// names that ctl as its identity (a CONNECTED row has none: its fd is data).
+static s64 ns_socket(struct Proc *p, enum viv_net_proto proto, u32 n, enum viv_sock_state st) {
     int err = 0;
-    struct Spoor *s = stalk_err(p, p->territory->root_spoor, path, len, STALK_OPEN,
-                                2u /* ORDWR */, &err);
+    struct Spoor *s = ns_open(p, proto, n, "ctl", &err);
     if (!s) return -(s64)(err > 0 ? err : (int)T_E_IO);
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, s);
     if (fd < 0) { spoor_clunk(s); return -(s64)T_E_MFILE; }
-    if (!viv_socktab_claim(p->socktab, (s32)fd, proto, nn, st)) return -(s64)T_E_MFILE;
+    if (!viv_socktab_claim(p->socktab, (s32)fd, proto, n, st,
+                           (st == VIV_SOCK_CONNECTED) ? NULL : s))
+        return -(s64)T_E_MFILE;
     return (s64)fd;
 }
 
@@ -594,7 +648,7 @@ void test_vivsock_socket_unwind_publishes_nothing(void) {
     u32 filled = 0;   // rows on numbers no handle names: the table only counts
     while (filled < VIV_SOCK_MAX + 1u &&
            viv_socktab_claim(p->socktab, (s32)(PROC_HANDLE_MAX - 1 - (int)filled),
-                             VIV_NET_TCP, 60u + filled, VIV_SOCK_FRESH))
+                             VIV_NET_TCP, 60u + filled, VIV_SOCK_FRESH, NULL))
         filled++;
     u64 i1     = handle_table_installs(p);
     u32 c1     = g_ns.ctl_clunks;
@@ -1118,4 +1172,376 @@ void test_vivsock_so_error_needs_no_descriptor(void) {
     TEST_EXPECT_EQ(a, 0, "and the handshake it reports is in flight: no error yet");
     TEST_EXPECT_EQ(opens, 0u, "so nothing waited on the connection");
     TEST_ASSERT(arow && ea.state == VIV_SOCK_CONNECTING, "and the socket is still CONNECTING");
+}
+
+// ---------------------------------------------------------------------------
+// The ctl-verb arms write only to the socket's own ctl.
+// ---------------------------------------------------------------------------
+
+// The number's row, bound to `port` as bind() leaves it.
+static bool ns_bind(struct Proc *p, s64 fd, u16 port) {
+    struct viv_sock e;
+    return ns_row(p, fd, &e) && viv_socktab_set_bound(p->socktab, (s32)fd, e.epoch, 0, port);
+}
+
+// dup3(file, fd) held at its window: the slot already holds `file` (a reference
+// of the slot's own) while the row, which dup3 drops only after the install,
+// still names the socket.
+static bool ns_dup3_window(struct Proc *p, s64 fd, struct Spoor *file) {
+    struct Handle h;
+    if (fd < 0 || !file || handle_get(p, (hidx_t)fd, &h) < 0) return false;
+    void *was = h.obj;
+    handle_put(&h);
+    spoor_ref(file);
+    if (handle_replace(p, (hidx_t)fd, was, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, file) == 0)
+        return true;
+    spoor_clunk(file);
+    return false;
+}
+
+static bool ns_slot_is(struct Proc *p, s64 fd, const struct Spoor *sp) {
+    struct Handle h;
+    if (fd < 0 || handle_get(p, (hidx_t)fd, &h) < 0) return false;
+    bool is = (h.obj == sp);
+    handle_put(&h);
+    return is;
+}
+
+// The ctl identity `fd`'s row holds (NULL for none, or no row). White box.
+static const struct Spoor *ns_row_ctl(const struct viv_socktab *tab, s64 fd) {
+    for (u32 i = 0; tab && i < VIV_SOCK_MAX; i++)
+        if (tab->s[i].state != VIV_SOCK_FREE && tab->s[i].fd == (s32)fd) return tab->ctl[i];
+    return NULL;
+}
+
+static int ns_ref(const struct Spoor *s) {
+    return s ? __atomic_load_n(&s->ref, __ATOMIC_ACQUIRE) : -1;
+}
+
+// A peer thread's dup3(file, sockfd) installs the file BEFORE it drops the
+// socket's row, so for a moment the number's row says "socket" while its slot
+// holds the file. An arm that read the row in that moment pins the file; each
+// ctl-verb arm -- connect's dial, listen's announce, the datagram sendto's
+// re-dial -- must refuse it (ENOTSOCK: the number is a file now) before
+// writing a byte, and connect must not swap the file out for a connection. The
+// control, one variable away: the same arms on unswapped sockets write their
+// verbs to ctl -- and a socket()-made row holds its ctl with a reference of its
+// own, which a connect gives up once the fd is data.
+void test_vivsock_ctl_verbs_need_their_ctl(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+    int ferr = 0;
+    struct Spoor *file = ns_open(p, VIV_NET_TCP, 0, "remote", &ferr);   // the peer's file
+
+    s64  ccfd   = ns_socket(p, VIV_NET_TCP, 31, VIV_SOCK_FRESH);
+    const struct Spoor *ccid = ns_row_ctl(p->socktab, ccfd);
+    int  ccref  = ns_ref(ccid);
+    u32  m0 = g_ns.ctl_writes, k0 = g_ns.ctl_clunks;
+    s64  ccrc   = (ccfd >= 0) ? viv_sock_connect_for_test(p, (u64)ccfd, g_ns_peer, 80) : -1;
+    u32  ccw = g_ns.ctl_writes - m0, cck = g_ns.ctl_clunks - k0;
+    bool ccverb = ns_verb_is("connect 10.0.0.2!80");
+    bool ccgone = (ccfd >= 0) && ns_row_ctl(p->socktab, ccfd) == NULL;
+
+    s64  clfd   = ns_socket(p, VIV_NET_TCP, 32, VIV_SOCK_FRESH);
+    bool clb    = ns_bind(p, clfd, 8080);
+    u32  m1     = g_ns.ctl_writes;
+    s64  clrc   = clb ? viv_listen_for_test(p, (u64)clfd) : -1;
+    u32  clw    = g_ns.ctl_writes - m1;
+    bool clverb = ns_verb_is("announce *!8080");
+
+    s64  cdfd   = ns_socket(p, VIV_NET_UDP, 33, VIV_SOCK_FRESH);
+    u32  m2 = g_ns.ctl_writes, o2 = g_ns.data_opens;
+    s64  cdrc   = (cdfd >= 0) ? viv_sock_dgram_send_for_test(p, (u64)cdfd, g_ns_peer, 53) : -1;
+    u32  cdw = g_ns.ctl_writes - m2, cdo = g_ns.data_opens - o2;
+    bool cdverb = ns_verb_is("connect 10.0.0.2!53");
+
+    s64  sc  = ns_socket(p, VIV_NET_TCP, 34, VIV_SOCK_FRESH);
+    s64  sl  = ns_socket(p, VIV_NET_TCP, 35, VIV_SOCK_FRESH);
+    s64  sd  = ns_socket(p, VIV_NET_UDP, 36, VIV_SOCK_FRESH);
+    bool slb = ns_bind(p, sl, 8081);
+    bool held = file && slb && ns_dup3_window(p, sc, file) &&
+                ns_dup3_window(p, sl, file) && ns_dup3_window(p, sd, file);
+    u32  w0 = g_ns.ctl_writes, f0 = g_ns.file_writes, o0 = g_ns.data_opens;
+    s64  src = held ? viv_sock_connect_for_test(p, (u64)sc, g_ns_peer, 80) : -1;
+    s64  srl = held ? viv_listen_for_test(p, (u64)sl) : -1;
+    s64  srd = held ? viv_sock_dgram_send_for_test(p, (u64)sd, g_ns_peer, 53) : -1;
+    u32  sw = g_ns.ctl_writes - w0, sf = g_ns.file_writes - f0, so = g_ns.data_opens - o0;
+    bool sckeep = ns_slot_is(p, sc, file);
+    struct viv_sock el, ed;
+    bool slrow = ns_row(p, sl, &el), sdrow = ns_row(p, sd, &ed);
+    if (file) spoor_clunk(file);
+    ns_free(p);
+
+    TEST_ASSERT(file != NULL, "fixture: the peer's file, a writable /net file that is no ctl");
+    TEST_ASSERT(ccid != NULL, "a socket()-made row names its ctl");
+    TEST_EXPECT_EQ(ccref, 2, "with a reference of its own beside the fd's");
+    TEST_EXPECT_EQ(ccrc, 0, "control: connect on an unraced socket succeeds");
+    TEST_EXPECT_EQ(ccw, 1u, "control: its dial is written to ctl");
+    TEST_ASSERT(ccverb, "control: naming the peer");
+    TEST_ASSERT(ccgone, "a CONNECTED row gives its ctl identity up");
+    TEST_EXPECT_EQ(cck, 1u, "so ctl's fid is released once data holds the connection");
+    TEST_EXPECT_EQ(clrc, 0, "control: listen on an unraced socket succeeds");
+    TEST_EXPECT_EQ(clw, 1u, "control: its announce is written to ctl");
+    TEST_ASSERT(clverb, "control: for the bound port");
+    TEST_EXPECT_EQ(cdrc, 0, "control: a datagram sendto on an unraced socket succeeds");
+    TEST_EXPECT_EQ(cdw, 1u, "control: its re-dial is written to ctl");
+    TEST_ASSERT(cdverb, "control: naming the destination");
+    TEST_EXPECT_EQ(cdo, 1u, "control: and the datagram rides a data fid");
+
+    TEST_ASSERT(held, "fixture: three numbers held at dup3's window");
+    TEST_EXPECT_EQ(src, -(s64)T_E_NOTSOCK, "connect refuses a number whose slot is not its ctl");
+    TEST_EXPECT_EQ(srl, -(s64)T_E_NOTSOCK, "listen refuses it");
+    TEST_EXPECT_EQ(srd, -(s64)T_E_NOTSOCK, "the datagram sendto refuses it");
+    TEST_EXPECT_EQ(sf, 0u, "not one verb reached the file");
+    TEST_EXPECT_EQ(sw, 0u, "nor any ctl");
+    TEST_EXPECT_EQ(so, 0u, "and no data file was opened");
+    TEST_ASSERT(sckeep, "connect left the file at the number, not swapped out for a connection");
+    TEST_ASSERT(slrow && el.state == VIV_SOCK_FRESH, "listen transitioned nothing");
+    TEST_ASSERT(sdrow && ed.remote_port == 0, "the sendto recorded no destination");
+}
+
+// What a peer thread does in the moment between an arm's row read and its pin.
+enum { PEER_IDLE, PEER_CONNECTS, PEER_CLOSES };
+static struct {
+    struct Proc  *p;          // only this fixture's calls meet the peer
+    int           act;        // fires at the next pin, then goes idle
+    struct Spoor *dsp;        // PEER_CONNECTS: the data fid it opened ahead
+    struct Spoor *detached;   // its commit's ctl reference, for the test to clunk
+    bool          done;
+} g_peer;
+
+static void ns_peer_at_pin(struct Proc *p, u64 fd) {
+    if (p != g_peer.p || g_peer.act == PEER_IDLE) return;
+    int act = g_peer.act;
+    g_peer.act = PEER_IDLE;
+    if (act == PEER_CLOSES) {
+        // close() as the dispatcher runs it: the row first, then the number.
+        viv_socktab_drop_closing(p->socktab, p, (s32)fd);
+        g_peer.done = handle_close(p, (hidx_t)fd) == 0;
+        return;
+    }
+    // connect() completing on the peer thread: the fd swapped onto data, the
+    // row committed CONNECTED in the swap's own hold.
+    struct viv_sock e;
+    struct Handle   h;
+    if (!g_peer.dsp || !viv_socktab_get(p->socktab, (s32)fd, &e) ||
+        handle_get(p, (hidx_t)fd, &h) < 0)
+        return;
+    void *was = h.obj;
+    handle_put(&h);
+    struct viv_socktab_connected c = {
+        .tab = p->socktab, .fd = (s32)fd, .expect_epoch = e.epoch,
+        .addr = 0x0A000002u, .port = 80, .ok = false, .detached = NULL,
+    };
+    if (handle_replace_hooked(p, (hidx_t)fd, was, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
+                              g_peer.dsp, viv_socktab_connected_locked, &c) == 0) {
+        g_peer.dsp      = NULL;           // the slot's now
+        g_peer.detached = c.detached;
+        g_peer.done     = c.ok;
+    }
+}
+
+// Arm the peer for the next pin; a connecting peer opens its data fid now.
+static bool ns_peer_arm(struct Proc *p, enum viv_net_proto proto, u32 n, int act) {
+    g_peer.p    = p;
+    g_peer.done = false;
+    g_peer.dsp  = NULL;
+    if (act == PEER_CONNECTS) {
+        int err = 0;
+        g_peer.dsp = ns_open(p, proto, n, "data", &err);
+        if (!g_peer.dsp) return false;
+    }
+    g_peer.act = act;
+    return true;
+}
+
+static void ns_peer_settle(void) {
+    if (g_peer.dsp)      { spoor_clunk(g_peer.dsp); g_peer.dsp = NULL; }
+    if (g_peer.detached) { spoor_clunk(g_peer.detached); g_peer.detached = NULL; }
+    g_peer.act = PEER_IDLE;
+}
+
+// A peer thread can act between a ctl-verb arm's row read and its pin. If it
+// CONNECTS the socket (the fd onto data and the row CONNECTED, one hold), the
+// arm answers as the connected socket does -- the errno a call on the settled
+// socket gets, derived here from the decides that make it -- and a CONNECTING
+// socket's finish is simply over. If it CLOSES the number, the arm answers
+// EBADF. No verb is written in any of these.
+void test_vivsock_ctl_verbs_meet_a_racing_peer(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+    viv_sock_pin_hook_for_test(ns_peer_at_pin);
+    u32  w0 = g_ns.ctl_writes;
+
+    s64  cfd   = ns_socket(p, VIV_NET_TCP, 40, VIV_SOCK_FRESH);
+    bool ca    = cfd >= 0 && ns_peer_arm(p, VIV_NET_TCP, 40, PEER_CONNECTS);
+    s64  crc   = ca ? viv_sock_connect_for_test(p, (u64)cfd, g_ns_peer, 80) : -1;
+    bool cdone = g_peer.done;
+    ns_peer_settle();
+    s64  csettled = (cfd >= 0) ? viv_sock_connect_for_test(p, (u64)cfd, g_ns_peer, 80) : -1;
+
+    s64  lfd   = ns_socket(p, VIV_NET_TCP, 41, VIV_SOCK_FRESH);
+    bool la    = ns_bind(p, lfd, 8084) && ns_peer_arm(p, VIV_NET_TCP, 41, PEER_CONNECTS);
+    s64  lrc   = la ? viv_listen_for_test(p, (u64)lfd) : -1;
+    bool ldone = g_peer.done;
+    ns_peer_settle();
+    s32  lwant = 0;
+    (void)vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_CONNECTED, 8084, &lwant);
+
+    s64  dfd   = ns_socket(p, VIV_NET_UDP, 42, VIV_SOCK_FRESH);
+    bool da    = dfd >= 0 && ns_peer_arm(p, VIV_NET_UDP, 42, PEER_CONNECTS);
+    u32  o0    = g_ns.data_opens;
+    s64  drc   = da ? viv_sock_dgram_send_for_test(p, (u64)dfd, g_ns_peer, 53) : -1;
+    u32  dopens = g_ns.data_opens - o0;
+    bool ddone = g_peer.done;
+    ns_peer_settle();
+    s32  dwant = 0;
+    (void)vivarium_sendto_decide(VIV_NET_UDP, (u8)VIV_SOCK_CONNECTED, 0, 1, 16, &dwant);
+
+    s64  ffd   = ns_socket(p, VIV_NET_TCP, 43, VIV_SOCK_FRESH);
+    bool fa    = ns_connecting(p, ffd) && ns_peer_arm(p, VIV_NET_TCP, 43, PEER_CONNECTS);
+    const struct Spoor *fdata = g_peer.dsp;
+    u32  o1    = g_ns.data_opens;
+    s64  frc   = fa ? viv_sock_connect_for_test(p, (u64)ffd, g_ns_peer, 80) : -1;
+    u32  fopens = g_ns.data_opens - o1;
+    bool fdone = g_peer.done;
+    bool fnames = ns_slot_is(p, ffd, fdata);
+    ns_peer_settle();
+
+    s64  xc  = ns_socket(p, VIV_NET_TCP, 44, VIV_SOCK_FRESH);
+    s64  xl  = ns_socket(p, VIV_NET_TCP, 45, VIV_SOCK_FRESH);
+    s64  xd  = ns_socket(p, VIV_NET_UDP, 46, VIV_SOCK_FRESH);
+    bool xlb = ns_bind(p, xl, 8085);
+    s64  xcrc = (xc >= 0 && ns_peer_arm(p, VIV_NET_TCP, 44, PEER_CLOSES))
+              ? viv_sock_connect_for_test(p, (u64)xc, g_ns_peer, 80) : -1;
+    bool xcdone = g_peer.done;
+    s64  xlrc = (xlb && ns_peer_arm(p, VIV_NET_TCP, 45, PEER_CLOSES))
+              ? viv_listen_for_test(p, (u64)xl) : -1;
+    bool xldone = g_peer.done;
+    s64  xdrc = (xd >= 0 && ns_peer_arm(p, VIV_NET_UDP, 46, PEER_CLOSES))
+              ? viv_sock_dgram_send_for_test(p, (u64)xd, g_ns_peer, 53) : -1;
+    bool xddone = g_peer.done;
+    u32  writes = g_ns.ctl_writes - w0;
+    ns_peer_settle();
+    viv_sock_pin_hook_for_test(NULL);
+    g_peer.p = NULL;
+    ns_free(p);
+
+    TEST_ASSERT(ca && cdone, "fixture: a peer connected the first socket at the pin");
+    TEST_EXPECT_EQ(crc, -(s64)T_E_ISCONN, "connect meets a socket a peer connected: EISCONN");
+    TEST_EXPECT_EQ(crc, csettled, "the answer a connect on the settled socket gets");
+    TEST_ASSERT(la && ldone, "fixture: a peer connected the bound socket at the pin");
+    TEST_EXPECT_NE(lwant, 0, "the decide refuses listen on a CONNECTED socket");
+    TEST_EXPECT_EQ(lrc, -(s64)lwant, "and listen answers with the decide's errno");
+    TEST_ASSERT(da && ddone, "fixture: a peer connected the datagram socket at the pin");
+    TEST_EXPECT_NE(dwant, 0, "the decide refuses a destination on a CONNECTED socket");
+    TEST_EXPECT_EQ(drc, -(s64)dwant, "and the datagram sendto answers with its errno");
+    TEST_EXPECT_EQ(dopens, 0u, "without opening a data file");
+    TEST_ASSERT(fa && fdone, "fixture: a peer completed a CONNECTING socket's connect at the pin");
+    TEST_EXPECT_EQ(frc, 0, "the finish is over: the connection is made");
+    TEST_EXPECT_EQ(fopens, 0u, "with no wait of its own");
+    TEST_ASSERT(fnames, "and the number names the peer's connection");
+    TEST_ASSERT(xcdone && xldone && xddone, "fixture: a peer closed each number at the pin");
+    TEST_EXPECT_EQ(xcrc, -(s64)T_E_BADF, "connect on a number closed at the pin: EBADF");
+    TEST_EXPECT_EQ(xlrc, -(s64)T_E_BADF, "listen: EBADF");
+    TEST_EXPECT_EQ(xdrc, -(s64)T_E_BADF, "the datagram sendto: EBADF");
+    TEST_EXPECT_EQ(writes, 0u, "and no verb was written in any of them");
+}
+
+// dup and fork hand the new number the SAME ctl Spoor, so the row they make
+// carries the ctl identity -- each with a reference of its own -- and the
+// arms on the new number pass the check the source's do.
+void test_vivsock_ctl_identity_travels_with_the_fd(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+
+    s64  afd  = ns_socket(p, VIV_NET_TCP, 47, VIV_SOCK_FRESH);
+    bool ab   = ns_bind(p, afd, 8086);
+    const struct Spoor *aid = ns_row_ctl(p->socktab, afd);
+    int  ar0  = ns_ref(aid);
+    s64  dfd  = ab ? viv_dup_for_test(p, (u64)afd) : -1;
+    const struct Spoor *did = ns_row_ctl(p->socktab, dfd);
+    int  ar1  = ns_ref(aid);
+    u32  m0   = g_ns.ctl_writes;
+    s64  drc  = (dfd >= 0) ? viv_listen_for_test(p, (u64)dfd) : -1;
+    u32  dw   = g_ns.ctl_writes - m0;
+    bool dverb = ns_verb_is("announce *!8086");
+
+    s64  ffd  = ns_socket(p, VIV_NET_TCP, 48, VIV_SOCK_FRESH);
+    bool fb   = ns_bind(p, ffd, 8087);
+    const struct Spoor *pid = ns_row_ctl(p->socktab, ffd);
+    int  fr0  = ns_ref(pid);
+    struct Proc *child = proc_alloc();
+    bool forked = false;
+    if (child) {
+        child->phenotype = PHENO_LINUX;
+        struct viv_socktab_fork sf = { .parent = p, .dst = NULL };
+        if (viv_socktab_fork_prepare(&sf, p) == 0) {
+            handle_table_copy_into_hooked(child, p, viv_socktab_fork_snapshot, &sf);
+            viv_socktab_fork_finish(child, &sf);
+            forked = __atomic_load_n(&child->socktab, __ATOMIC_ACQUIRE) != NULL;
+        }
+    }
+    const struct Spoor *cid = forked ? ns_row_ctl(child->socktab, ffd) : NULL;
+    int  fr1  = ns_ref(pid);
+    u32  m1   = g_ns.ctl_writes;
+    s64  crc  = (forked && fb) ? viv_listen_for_test(child, (u64)ffd) : -1;
+    u32  cw   = g_ns.ctl_writes - m1;
+    bool cverb = ns_verb_is("announce *!8087");
+    if (child) { child->state = PROC_STATE_ZOMBIE; proc_free(child); }
+    int  fr2  = ns_ref(pid);
+    ns_free(p);
+
+    TEST_ASSERT(ab && aid != NULL && dfd >= 0, "fixture: a bound socket and its dup");
+    TEST_ASSERT(did == aid, "the dup's row names the source's ctl");
+    TEST_EXPECT_EQ(ar1, ar0 + 2, "with a reference of its own beside the dup's fd");
+    TEST_EXPECT_EQ(drc, 0, "listen through the dup passes the check");
+    TEST_EXPECT_EQ(dw, 1u, "and writes its announce to that ctl");
+    TEST_ASSERT(dverb, "for the bound port");
+    TEST_ASSERT(fb && pid != NULL && forked, "fixture: a bound socket and a forked child");
+    TEST_ASSERT(cid == pid, "the child's row names the parent's ctl, which its copied fd holds");
+    TEST_EXPECT_EQ(fr1, fr0 + 2, "with a reference of the child's own beside its fd's");
+    TEST_EXPECT_EQ(crc, 0, "the child's listen on the inherited socket passes the check");
+    TEST_EXPECT_EQ(cw, 1u, "and announces");
+    TEST_ASSERT(cverb, "on the bound port");
+    TEST_EXPECT_EQ(fr2, fr0, "and the child's exit gives both references back");
+}
+
+// Two threads can finish one interrupted connect -- a read on the CONNECTING fd
+// while connect() is retried, say. The first to swap the fd onto data wins; the
+// other's swap is refused, and since the row it started from is CONNECTED now,
+// the connection is made and the number names it: success, with its surplus
+// data fid released -- not the EIO a refused swap otherwise means.
+void test_vivsock_connect_finished_by_a_peer(void) {
+    struct Proc *p = ns_proc();
+    TEST_ASSERT(p != NULL, "fixture: a /net stub over dev9p");
+    s64  fd    = ns_socket(p, VIV_NET_TCP, 49, VIV_SOCK_FRESH);
+    bool begun = ns_connecting(p, fd);
+    int  derr  = 0;
+    struct Spoor *peer = begun ? ns_open(p, VIV_NET_TCP, 49, "data", &derr) : NULL;
+    if (peer) {
+        g_ns.finish_p   = p;
+        g_ns.finish_fd  = fd;
+        g_ns.finish_dsp = peer;
+    }
+    u32  o0 = g_ns.data_opens, w0 = g_ns.ctl_writes, c0 = g_ns.data_clunks;
+    s64  rc = peer ? viv_sock_connect_for_test(p, (u64)fd, g_ns_peer, 80) : -1;
+    u32  opens = g_ns.data_opens - o0, writes = g_ns.ctl_writes - w0;
+    u32  dclunks = g_ns.data_clunks - c0;
+    bool swapped = peer && g_ns.finish_dsp == NULL && g_ns.finish_ok;
+    bool names_peer = ns_slot_is(p, fd, peer);
+    struct viv_sock e;
+    bool row = ns_row(p, fd, &e);
+    if (g_ns.finish_dsp)      { spoor_clunk(g_ns.finish_dsp); g_ns.finish_dsp = NULL; }
+    if (g_ns.finish_detached) { spoor_clunk(g_ns.finish_detached); g_ns.finish_detached = NULL; }
+    ns_free(p);
+
+    TEST_ASSERT(begun && peer != NULL, "fixture: a CONNECTING socket and the peer's data fid");
+    TEST_ASSERT(swapped, "the peer finished the connect first, inside the call's wait");
+    TEST_EXPECT_EQ(rc, 0, "the call's refused swap is success: the connection is made");
+    TEST_ASSERT(names_peer, "and the number names the peer's data fid");
+    TEST_ASSERT(row && e.state == VIV_SOCK_CONNECTED, "the socket is CONNECTED");
+    TEST_EXPECT_EQ(opens, 1u, "the call waited once");
+    TEST_EXPECT_EQ(dclunks, 1u, "and released the data fid it no longer needs");
+    TEST_EXPECT_EQ(writes, 0u, "dialing nothing: the dial was the interrupted connect's");
 }
