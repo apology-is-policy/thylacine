@@ -696,10 +696,13 @@ mapping that absorbs a neighbouring reservation. Two fields and two functions
 carry it.
 
 `lazy_va0` and `lazy_va0_set` (under `v->lock`) hold the Burrow's BIAS, the
-address of its byte offset 0. `burrow_lazy_bind_va0`, called by `vma_alloc`,
-stamps it at the first mapping and compares every later one; a mismatch
-extincts ("an ANON_LAZY Burrow mapped at a second bias"). Other types return
-at once: a CODE Burrow's two aliases differ by design.
+address of its byte offset 0. `burrow_lazy_bind_va0`, called by `vma_insert_in`
+once a mapping is linked, stamps it at the first mapping and compares every
+later one; a mismatch sets `lazy_multi_bias`, and `burrow_lazy_extend`
+refuses such a Burrow. Only the merge needs one bias, and a kernel caller may
+map one lazy Burrow twice, so a second bias disqualifies rather than
+extincts. Other types return at once: a CODE Burrow's two aliases differ by
+design.
 
 `burrow_lazy_extend(as, exempt, v, first, n)` readies slots
 `[first, first + n)` for a mapping to cover. It refuses (-1, nothing changed) a

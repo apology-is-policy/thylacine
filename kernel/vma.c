@@ -90,11 +90,6 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     struct Vma *v = kmem_cache_alloc(g_vma_cache, KP_ZERO);
     if (!v) return NULL;
 
-    // ARCH 6.5, the merge's ONE BIAS: an ANON_LAZY Burrow is mapped at one
-    // address for its offset 0, stamped here at its first mapping and checked
-    // at every later one (extincts on a second bias). A no-op for other types.
-    burrow_lazy_bind_va0(burrow, vaddr_start - burrow_offset);
-
     v->magic       = VMA_MAGIC;
     v->vaddr_start = vaddr_start;
     v->vaddr_end   = vaddr_end;
@@ -268,6 +263,10 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (prev) prev->next = v;
     else      as->vmas   = v;
     if (cur)  cur->prev  = v;
+
+    // ARCH 6.5, the merge's ONE BIAS, recorded when a mapping becomes real: a
+    // VMA allocated and then refused never names its Burrow's bias.
+    if (v->burrow) burrow_lazy_bind_va0(v->burrow, v->vaddr_start - v->burrow_offset);
     return 0;
 }
 

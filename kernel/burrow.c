@@ -665,11 +665,13 @@ void burrow_lazy_bind_va0(struct Burrow *v, u64 va0) {
         extinction("burrow_lazy_bind_va0 of a corrupted BURROW");
     if (v->type != BURROW_TYPE_ANON_LAZY) return;
     spin_lock(&v->lock);
-    bool same = !v->lazy_va0_set || v->lazy_va0 == va0;
-    if (!v->lazy_va0_set) { v->lazy_va0 = va0; v->lazy_va0_set = true; }
+    if (!v->lazy_va0_set) {
+        v->lazy_va0     = va0;
+        v->lazy_va0_set = true;
+    } else if (v->lazy_va0 != va0) {
+        v->lazy_multi_bias = true;
+    }
     spin_unlock(&v->lock);
-    if (!same)
-        extinction("an ANON_LAZY Burrow mapped at a second bias (an extension could alias a live page)");
 }
 
 int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
@@ -684,9 +686,11 @@ int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
 
     spin_lock(&v->lock);
     int    handles = v->handle_count;
+    bool   multi   = v->lazy_multi_bias;
     size_t pages   = v->page_count;
     spin_unlock(&v->lock);
     if (handles != 0)                            return -1;
+    if (multi)                                   return -1;
 
     // ZERO READ over the slots that exist; the ones a growth adds are new.
     size_t have = end < pages ? end : pages;

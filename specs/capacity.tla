@@ -90,7 +90,8 @@
 (*   Extend   -> kernel/vma.c::vma_extend_anon_in, reached from the lazy    *)
 (*               reservation core (SYS_BURROW_RESERVE, _ATTACH_LAZY); the  *)
 (*               bias is the Burrow's lazy_va0, stamped and checked in      *)
-(*               vma_alloc; ZeroRead is its pre-extension empty check       *)
+(*               vma_insert_in (a second bias bars the Burrow from any      *)
+(*               Extend); ZeroRead is its pre-extension empty check         *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 

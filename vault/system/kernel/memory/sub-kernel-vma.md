@@ -820,10 +820,16 @@ anonymous maps (the loader's bss tails) never merge.
 
 What makes "the addresses are free" imply "no mapping covers those offsets" is
 the ONE BIAS rule: every mapping of an `ANON_LAZY` Burrow sits at one
-`va0 = vaddr_start - burrow_offset`. `vma_alloc` stamps it at the Burrow's
-first mapping and checks it at every later one (`burrow_lazy_bind_va0`). A
-split, a trim and a clone keep it and there is no mremap, so a second bias is
-a kernel bug and extincts. Without the rule an extension could reuse an offset
+`va0 = vaddr_start - burrow_offset`. `vma_insert_in` stamps it when the
+Burrow's first mapping is linked and compares every later one
+(`burrow_lazy_bind_va0`). A split, a trim and a clone keep it and there is no
+mremap, so only a kernel caller that maps one lazy Burrow twice makes a
+second bias; that marks the Burrow `lazy_multi_bias`, and such a Burrow is
+never extended. The stamp is taken at the insert, not at `vma_alloc`: lease 4's
+first suite extincted in `burrow.map_fixed_refusals`, where a fixed map
+refused after its `vma_alloc` had stamped the bias of a mapping that never
+existed, and a later map of the same Burrow then read as a second bias (the
+first design extincted on one). Without the rule an extension could reuse an offset
 another mapping still covers: one physical page at two addresses, freed by one
 detach under the other's PTE ([[spec-capacity]]'s `NoAlias`, and its buggy cfg
 `capacity_buggy_extend_alias`).
@@ -834,7 +840,7 @@ list is still O(n) per fault and per placement (OPEN-BUGS 19:56Z; the vote
 says enqueue it, not drop it).
 
 Tests (`kernel/test/test_anon_merge.c`): `pagemap.grow_keeps_every_page` and
-eight `anon_merge.*`. Two adjacent reserves share one mapping; 600 one-page
+nine `anon_merge.*`. Two adjacent reserves share one mapping; 600 one-page
 reserves cross every pagemap shape (inline, inline to radix, one level to two)
 with each page's contents surviving every growth; a hole refill joins the
 pieces; a successor extends into its offset room; nothing merges across a
@@ -845,7 +851,9 @@ tests assumed that two neighbours with the same `prot` stay apart, and now
 give them different ones, which keeps what each tested:
 `protect.multi_vma_and_hole`, `protect.range_walk_is_linear`
 ([[sub-kernel-protect-witness]]) and `capacity.fork_clone_charges_pages_and_nodes`
-([[sub-kernel-pagemap]]).
+([[sub-kernel-pagemap]]). `anon_merge.second_bias_is_never_extended` maps one
+lazy Burrow at two addresses and finds no merge, against the same layout
+mapped once, which merges.
 
 ## Referenced by
 

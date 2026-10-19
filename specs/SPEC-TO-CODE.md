@@ -3286,12 +3286,14 @@ second invariant and why both buggy cfgs are judged on it.
   (`pagemap_next_resident` over the slots that exist), an extinction there
   rather than a precondition.
 - **`NoAlias`** -> the one-bias rule that makes the model's `s = a` true in
-  the kernel: `kernel/burrow.c::burrow_lazy_bind_va0`, called from `vma_alloc`
-  for every mapping of an ANON_LAZY Burrow, stamps `lazy_va0` at the first and
-  extincts on a second ("an ANON_LAZY Burrow mapped at a second bias").
-  Witnesses: `anon_merge.hole_refill_joins_the_pieces` (a detach's pieces and
-  the refill between them, one bias) and
-  `anon_merge.fork_clones_the_merged_burrow` (a clone maps at the same bias).
+  the kernel: `kernel/burrow.c::burrow_lazy_bind_va0`, called from
+  `vma_insert_in` once a mapping of an ANON_LAZY Burrow is linked, stamps
+  `lazy_va0` at the first and marks the Burrow `lazy_multi_bias` at a second;
+  `burrow_lazy_extend` refuses a marked Burrow, so the model's `s = a` holds
+  for every Burrow an extension touches. Witnesses:
+  `anon_merge.hole_refill_joins_the_pieces` (a detach's pieces and the refill
+  between them, one bias), `anon_merge.fork_clones_the_merged_burrow` (a clone
+  maps at the same bias) and `anon_merge.second_bias_is_never_extended`.
 - **`ZeroRead`** -> the same empty check, "a slot no mapping covers still
   holds a page (NoOrphan broken)", which needs `NoOrphan` on EVERY unmap path:
   `kernel/burrow.c::burrow_unmap_reporting_in` now releases a plain ANON_LAZY

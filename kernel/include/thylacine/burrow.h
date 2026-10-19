@@ -315,11 +315,13 @@ struct Burrow {
     // and offset together, a fork's clone is mapped at the parent's
     // addresses, and nothing maps an ANON_LAZY Burrow by handle. That is
     // what lets an extension reason from "these addresses are free" to
-    // "these offsets are mapped by no VMA". Stamped by the first vma_alloc
-    // of the Burrow and checked by every later one (burrow_lazy_bind_va0);
-    // under `lock`.
+    // "these offsets are mapped by no VMA". Stamped when the Burrow's first
+    // mapping is inserted and compared at every later insert
+    // (burrow_lazy_bind_va0); a mapping at another bias sets
+    // lazy_multi_bias, and such a Burrow is never extended. Under `lock`.
     u64              lazy_va0;
     bool             lazy_va0_set;
+    bool             lazy_multi_bias;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -563,10 +565,11 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
 
 // ARCH 6.5 "Adjacent anonymous mappings merge": stamp an ANON_LAZY Burrow's
 // bias -- the address of its byte offset 0 -- at its first mapping, or check
-// a later mapping against it (struct Burrow, lazy_va0). Every mapping of such
-// a Burrow keeps one bias, so a mismatch is a kernel bug and extincts. Other
-// types return at once (a CODE Burrow's two aliases differ by design).
-// vma_alloc calls it; takes v->lock.
+// a later mapping against it (struct Burrow, lazy_va0). A mapping at another
+// bias marks the Burrow lazy_multi_bias, which burrow_lazy_extend refuses:
+// only the merge needs one bias, and a kernel caller may map one lazy Burrow
+// twice. Other types return at once (a CODE Burrow's two aliases differ by
+// design). vma_insert_in calls it once the mapping is linked; takes v->lock.
 void burrow_lazy_bind_va0(struct Burrow *v, u64 va0);
 
 // ARCH 6.5 "Adjacent anonymous mappings merge": make slots [first, first + n)
@@ -580,7 +583,8 @@ void burrow_lazy_bind_va0(struct Burrow *v, u64 va0);
 // short of the range grows to cover it (pagemap_grow; nodes charged to
 // `as`). Returns 0, or -1 with nothing changed: not a live ANON_LAZY Burrow,
 // a handle names it (another holder could reach it outside this address
-// space), or the growth was refused.
+// space), it is mapped at a second bias (its free addresses no longer say
+// which offsets are free), or the growth was refused.
 int burrow_lazy_extend(struct AddrSpace *as, bool exempt, struct Burrow *v,
                        size_t first, size_t n);
 

@@ -54,6 +54,7 @@ void test_anon_merge_never_across_a_boundary(void);
 void test_anon_merge_refused_growth_falls_back(void);
 void test_anon_merge_fork_clones_the_merged_burrow(void);
 void test_anon_merge_unmap_releases_lazy_slots(void);
+void test_anon_merge_second_bias_is_never_extended(void);
 
 extern s64 sys_burrow_reserve_for_proc(struct Proc *p, u64 length_raw, u64 prot_raw,
                                        u64 align_log2);
@@ -543,5 +544,50 @@ void test_anon_merge_unmap_releases_lazy_slots(void) {
     CHECK(vd, w && w[0] == 0, "a zero page, not the old one");
 
     drop(p);
+    TEST_ASSERT(vd.why == NULL, vd.why);
+}
+
+// A lazy Burrow a kernel caller maps at a second bias is never extended: its
+// free addresses no longer say which of its offsets are free. The control is
+// the same layout mapped once, one variable away, which merges.
+void test_anon_merge_second_bias_is_never_extended(void) {
+    struct verdict vd = { NULL };
+    s64 s_two = -1, s_one = -1;
+    u32 vmas_two = 0, vmas_one = 0;
+    bool marked = false, two_mapped = false, one_mapped = false;
+
+    struct Proc *p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct Burrow *b = burrow_create_anon_lazy(2 * P);
+    if (b) {
+        spin_lock(&p->as->lock);
+        two_mapped = burrow_map(p, b, BASE, 2 * P, VMA_PROT_RW) == 0 &&
+                     burrow_map(p, b, BASE + 8 * P, 2 * P, VMA_PROT_RW) == 0;
+        spin_unlock(&p->as->lock);
+        marked = b->lazy_multi_bias;
+        burrow_unref(b);                    // no handle left: only the bias refuses
+    }
+    s_two    = reserve(p, P, PR_RW);
+    vmas_two = count_vmas(p->as);
+    drop(p);
+
+    p = mk();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct Burrow *c = burrow_create_anon_lazy(2 * P);
+    if (c) {
+        spin_lock(&p->as->lock);
+        one_mapped = burrow_map(p, c, BASE, 2 * P, VMA_PROT_RW) == 0;
+        spin_unlock(&p->as->lock);
+        burrow_unref(c);
+    }
+    s_one    = reserve(p, P, PR_RW);
+    vmas_one = count_vmas(p->as);
+    drop(p);
+
+    CHECK(vd, two_mapped, "one lazy Burrow mapped at two biases");
+    CHECK(vd, marked, "the second insert marked it");
+    CHECK(vd, s_two == (s64)(BASE + 2 * P) && vmas_two == 3u, "no merge into a Burrow mapped at two biases");
+    CHECK(vd, one_mapped, "the control's Burrow mapped once");
+    CHECK(vd, s_one == (s64)(BASE + 2 * P) && vmas_one == 1u, "control: the same layout mapped once merges");
     TEST_ASSERT(vd.why == NULL, vd.why);
 }
