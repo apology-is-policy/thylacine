@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -237,7 +237,7 @@ point's); the base is crossed before the loop (the owned crossed clone
 becomes `trail[0]` since `start` is borrowed); the quarry is crossed at the
 end — EXCEPT under `STALK_MOUNT`, so `SYS_MOUNT`'s MREPL re-keys the same
 underlying point. `stalk_cross_mounts` loops a mount-over-mount chain to
-the leaf, bounded by `PGRP_MAX_MOUNTS` (32; it read 20 here, two cap raises stale) — I-3 acyclicity is ENFORCED at
+the leaf, bounded by `PGRP_MOUNT_CAP` (a chain cannot hold more mounts than the table can) — I-3 acyclicity is ENFORCED at
 `mount()` time (`would_create_mount_cycle`, the stalk-2 F1 fix,
 [[fnd-stalk2-r1-f1]]); the bound is a defensive backstop. `mount_lookup`
 returns a **ref-held** source under the Territory `ns_lock` (RW-4 SA-F1,
@@ -262,7 +262,9 @@ per member in declared order, and returns the **first hit**:
 - **Snapshot the members ATOMICALLY** (`mount_members_snapshot`, one `ns_lock`
   hold — UM-8 F4), then cross the *exact* snapshot source, never a re-derived
   index: a concurrent unmount between snapshot and cross would otherwise shift a
-  different member into slot k and cross the wrong tree.
+  different member into slot k and cross the wrong tree. The snapshot takes all
+  the members or none (`union_members_take`, below), so a union is never
+  searched cut short.
 - **Plan 9 union-skip on every non-fatal outcome.** A member that fails to cross
   (a dead 9P session, a transient clone OOM — UM-8 F8), is not a directory,
   denies X-search, or simply lacks the component is **skipped**, not an error —
@@ -697,10 +699,18 @@ between, a target scratch, a consumed-prefix record, the follow counter, the
 ref-held `owned_base` re-anchor root, and the ref-held `owned_anchor` served
 re-anchor with its `anchor_pheno`) — freed at `stalk_expand_free`;
 resolutions that never cross a symlink allocate nothing. A union component
-snapshots its member sources into a stack `struct Spoor *srcs[PGRP_MAX_MOUNTS]`.
-The mount-table entry
-(`struct PgrpMount`: source + `mp_path` + the `(mp_dc, mp_devno,
-mp_qid_path)` key, 40 B since #66b) and `Spoor.devno` (Plan 9 `Chan.dev`,
+snapshots its member sources into a `struct union_members`: 16 inline, on the
+stack, and for a larger union a `kmalloc`'d array sized from the count that
+`mount_members_snapshot` answers, taken again if the union grew in between
+(the room doubles, up to `PGRP_MOUNT_CAP`). No stack array is sized from the
+cap, which a 16 KiB kernel stack could not hold at 1024. That allocation is
+the one a union walk can fail: `union_members_take` answers `T_E_NOMEM` with
+nothing held, and each of its four callers (the union walk, the create
+member, the remove holder, the union-open snapshot) ends the resolution with
+it. The mount-table entry
+(`struct PgrpMount`, 64 B, under its point's `struct PgrpMhead`, which holds
+the `(dc, devno, qid_path)` key; both private to `territory.c` since the
+dynamic table) and `Spoor.devno` (Plan 9 `Chan.dev`,
 minted per attach session by `spoor_next_devno`) belong to the territory
 and spoor dossiers; the key's `devno` axis exists because every dev9p
 session shares `dc = '9'` and every attach root has `qid.path == 0` — two
@@ -715,7 +725,7 @@ Its two shared-state touchpoints:
   `mount_is_point_id` (membership only), and `mount_members_snapshot` (the
   whole union set + flags, atomically — UM-8 F4), all under the per-Territory
   `ns_lock` (RW-4 SA-F1; the lock lives territory-side and is never held
-  across `clone_walk_zero` or a walk). Any new `mounts[]`/`root_spoor`
+  across `clone_walk_zero` or a walk). Any new mount-table / `root_spoor`
   reader MUST go through these — a bare lock-free read reopens the multi-thread
   UAF the P6 lift exposed. The symlink re-anchor's `territory_root_ref` is the
   same accessor, so an absolute-target expansion cannot race a `pivot_root`.
@@ -878,8 +888,8 @@ authoritative audit-trigger copy):
   never reach the ordinary `return quarry`, and they read the leaf's fused
   record instead.
 - **A union crosses the EXACT snapshot source, never a re-derived index.** The
-  member set is snapshot atomically under one `ns_lock` hold; crossing member
-  `srcs[k]` (not "member k, looked up again") is what makes a concurrent unmount
+  member set is snapshot atomically under one `ns_lock` hold; crossing the
+  snapshot's `src[k]` (not "member k, looked up again") is what makes a concurrent unmount
   unable to cross a member the walk never inspected (UM-8 F4). Any new union
   operation snapshots the same way.
 - **Union resolution SKIPS a faulting member; it does not fail the walk.** A
@@ -986,7 +996,7 @@ authoritative audit-trigger copy):
   the "no batching at v1.0" performance note predates POUNCE; the
   "borrowed-start TOCTOU deferred" caveat predates #844 (closed); the
   `#848` pivot-vs-walk note predates RW-4's `ns_lock` (closed).
-  `PGRP_MAX_MOUNTS` is 20 today.
+  Its mount-table figures predate the dynamic table ([[sub-kernel-territory]]).
 
 ## Provenance
 

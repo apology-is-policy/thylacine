@@ -834,10 +834,10 @@ over shared kernel core; no native mmap API is added. **AMENDED (ARCH §6.5 "Dyn
   is an ANY-scan over it), and that table is unprivileged-mutable by its owner.
   So the restriction is revisable by the Proc it restricts, three ungated ways:
   **unmount**; **`MREPL`**, which replaces the entry wholesale; and -- since
-  #219 -- the **converged idempotent re-mount**, `kernel/territory.c:811`
-  (`territory->mounts[i].flags = flags`). Two of the three PRE-DATE #219 and are
+  #219 -- the **converged idempotent re-mount**, `mount()`'s in-place arm in
+  `kernel/territory.c` (`m->flags = flags`). Two of the three PRE-DATE #219 and are
   not created by its fix. The reasoning is already argued at the code site
-  (`kernel/territory.c:788-802`), which states outright that a mount flag "is
+  (the comment above that arm), which states outright that a mount flag "is
   not [a lock], deliberately"; this paragraph exists so scripture agrees with it
   instead of leaving the point discoverable only by reading `territory.c`.
 

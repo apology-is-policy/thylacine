@@ -810,7 +810,9 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
 //     T_RIGHT_READ
 //   - -T_E_NOTDIR (-20): Plan 9's Emount (ARCH 9.6.1)
 //   - -T_E_LOOP (-40): the mount would close a cycle in the mount graph (I-3)
-//   - -T_E_NOSPC (-28): the Territory mount table is full (32 entries)
+//   - -T_E_NOSPC (-28): the Territory mount table holds its most entries (1024)
+//   - -T_E_NOMEM (-12): the kernel could not allocate the mount's entries; the
+//     namespace is unchanged
 __attribute__((always_inline))
 static inline long t_mount(const char *path, unsigned long path_len,
                            long source_spoor_fd, unsigned long flags) {

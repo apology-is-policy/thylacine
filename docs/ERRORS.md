@@ -685,8 +685,8 @@ answers the resolver's errno (`stalk_err`), such as -T_E_NOENT,
 | a source handle that is not live (an index at or above the table size, judged at full width, included), or lacks RIGHT_READ | -T_E_BADF |
 | a source whose type differs from the point's, or an ordered mount at a file | -T_E_NOTDIR, as before |
 | a mount that would close a cycle in the mount graph (I-3) | -T_E_LOOP |
-| a mount table at its cap (ARCH 9.1) | -T_E_NOSPC |
-| no memory for the entry, once entries are allocated (ARCH 9.1) | -T_E_NOMEM |
+| a mount table holding `PGRP_MOUNT_CAP` (1024) entries, or a union's first mount, which adds two, at one below it (ARCH 9.1) | -T_E_NOSPC |
+| no memory for the mount's entries; they are allocated before the table is touched, so nothing changed (ARCH 9.1) | -T_E_NOMEM |
 
 SYS_UNMOUNT answers -T_E_INVAL when nothing is mounted at the point, as
 Linux's umount2 does. ut's `bind`, `mount` and `unmount` name the errno

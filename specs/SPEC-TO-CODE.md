@@ -347,7 +347,7 @@ its QTDIR check, and `EmountOK`, which guards `MountBefore` / `MountAfter` /
 `MountRepl`, is `kernel/syscall.c::sys_mount_for_proc`'s type check, Plan 9's
 Emount, since the 2026-09-25 votes: every source in the model is a directory,
 so no EL0 mount reaches a file point, and the kernel answers `-T_E_NOTDIR`)
-and the two `mount_install_at` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
+and the two `mount_link` calls that place the covered entry, MCOVERED alone (`<new, covered>` for MBEFORE, `<covered, new>` for
 MAFTER); `Reposition` -> the #219 / F6 reposition arm (the point is not fresh,
 so no covered entry); `Unmount` -> `::unmount` (the covered entry is never
 removed by name and leaves with the last mounted member); `NoSelfMount` ->
@@ -3175,11 +3175,13 @@ that shares no operator with the rule.
   open of a union directory; `NoPoint` otherwise). `new = root` is explored on
   purpose: the kernel skips only a swap to the SAME Spoor, and a chroot into
   another directory of the same tree is a real swap.
-- **`ImplReach` / `Seeds` / `Widen` / `Close`** -> the closure loop in
-  `territory_shed_unreachable_locked`: `shed_add` of the root's instance and of
-  the union point's instance (`Seeds`), `shed_has`'s `any_devno` arm (`Widen`;
-  set from `Dev.devno_per_walker`), the `while (changed)` fixpoint (`Close`).
-- **`Keep`** -> the compaction pass (survivors keep their relative order; that
+- **`ImplReach` / `Seeds` / `Widen` / `Close`** -> the closure pass in
+  `territory_shed_unreachable_locked`: `shed_reach` of the root and of the union
+  point (`Seeds`), `shed_reach`'s `any_devno` arm (`Widen`; set from
+  `Dev.devno_per_walker`), and the worklist loop that runs `shed_reach` on the
+  source of every member of each point it queued (`Close`). A point reached is
+  marked with the pass (`mvisit_next`) and queued on its own `work` link.
+- **`Keep`** -> the unlink pass over the table list (survivors keep their relative order; that
   order is the union search order, which this module does not model --
   `territory.tla`'s `OrderCorrect` owns it).
 - **The walker (`WalkStart` / `WalkCross` / `WalkRestamp`)** -> `stalk_core`

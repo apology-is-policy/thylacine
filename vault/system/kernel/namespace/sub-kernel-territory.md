@@ -3,7 +3,7 @@ id: sub-kernel-territory
 type: sub
 title: "Territory — the per-Proc namespace (mount table, root, cwd)"
 parent: moc-kernel-namespace
-code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
+code: ["kernel/territory.c", "kernel/include/thylacine/territory.h", "kernel/test/test_territory_mount.c", "kernel/test/test_territory_pivot_root.c", "kernel/test/test_sys_mount.c", "usr/symlink-probe/src/main.rs"]
 audit: hard
 guarded-by: [inv-i1, inv-i3, inv-i33]
 validated-by: [spec-territory, gate-smp]
@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -34,7 +34,7 @@ Five structures on `struct Territory`, four of them live:
 
 | Field | What | Reached by |
 |---|---|---|
-| `mounts[32]` | `(dc, devno, qid.path) -> source Spoor` grafts; a point may hold a UNION (several members in `MBEFORE`/`MAFTER` order) | `mount_lookup` / `mount_members_snapshot` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
+| the mount table (`mhash[64]`, `mfirst`..`mlast`) | `(dc, devno, qid.path)` mount points, each holding its `source` Spoor grafts in search order; a point with several members is a UNION. At most `PGRP_MOUNT_CAP` (1024) entries | `mount_lookup` / `mount_members_snapshot` from [[sub-kernel-stalk]]; `SYS_MOUNT`/`SYS_UNMOUNT` |
 | `root_spoor` | the resolution floor + FROM_ROOT walk base | `territory_root_ref`; `SYS_CHROOT`/`SYS_PIVOT_ROOT` |
 | `flags` | `TERRITORY_ROOT_PHENO_LINUX` — the namespace-level phenotype declaration (Design D) | `territory_root_pheno` from `stalk_core`'s `crossed_pheno` seed; `territory_declare_linux` at spawn |
 | `dot_path` | the cwd string (`NULL` == `"/"`) | `SYS_CHDIR`/`SYS_GETCWD`; the `SYS_OPEN` relative join |
@@ -61,13 +61,19 @@ yours, so mounting over a directory you can merely *search* changes only
 your own view. It is also the container keystone — a confined Proc
 composes its own namespace with no privilege at all.
 
-Return codes (the C API; **the SVC layer collapses every failure to
-`-1`**, so the distinct codes serve the kernel callers and tests only):
+Return codes (the C API). `SYS_MOUNT` and `SYS_UNMOUNT` answer an errno
+per refusal (operator vote 2026-10-19; ERRORS.md "Mount and unmount"):
+`mount`'s `-2`, `-3` and `-4` reach EL0 as `ENOSPC`, `ELOOP` and `ENOMEM`,
+`unmount`'s `-1` as `EINVAL`, and `sys_mount_for_proc` answers its own
+gates (`EINVAL` for flags, `EBADF` for the source, `ENOTDIR` for Plan 9's
+`Emount`) before the table op. Only the NULL guards EL0 cannot reach stay
+a bare `-1` ([[sub-kernel-syscall-dispatch]]).
 
 - `bind` — `0` / `-1` cycle / `-2` duplicate / `-3` table full / `-4` self-bind.
-- `mount` — `0` (added OR idempotent no-op) / `-1` bad arg / `-2` table
-  full (a union's first mount needs two free slots) / `-3` would create a
-  mount cycle.
+- `mount` — `0` (added OR idempotent no-op) / `-1` bad arg / `-2` the
+  table holds `PGRP_MOUNT_CAP` entries, or would pass it (a union's first
+  mount adds two) / `-3` would create a mount cycle / `-4` the entries
+  could not be allocated (refused before `ns_lock`, so nothing changed).
 - `unmount` — `0` / `-1` no entry at that identity.
 - `territory_chroot` — `0` (stamped or idempotent) / `-1` NULL source.
 - `territory_pivot_root` — `0` / `-1` NULL source **or no current root**
@@ -75,11 +81,12 @@ Return codes (the C API; **the SVC layer collapses every failure to
 
 ## Mechanism
 
-**Mount keying is the full Plan 9 `(type, dev, qid)` triple.** An entry
-records the mount POINT's `(mp_dc, mp_devno, mp_qid_path)`; the
-mountpoint Spoor itself is retained only as the covered member of a union
-the mount starts (the covered directory, below); otherwise the caller stalks
-it, `mount` copies the key, and the caller clunks it. All three components are
+**Mount keying is the full Plan 9 `(type, dev, qid)` triple.** A mount
+point (`struct PgrpMhead`, below) records its `(dc, devno, qid_path)`, and
+its entries hang off it; the mountpoint Spoor itself is retained only as
+the covered member of a union the mount starts (the covered directory,
+below); otherwise the caller stalks it, `mount` copies the key, and the
+caller clunks it. All three components are
 load-bearing: `qid.path` is unique only *within* a `(dc, devno)`
 instance, and every dev9p session shares `dc == '9'` with root
 `qid.path == 0` — so `(dc, qid.path)` alone collides corvus against a
@@ -98,25 +105,29 @@ underlying identity, so the existing entry is found and replaced rather
 than a second entry stacking on the crossed target.
 
 **MREPL displacement** now replaces the WHOLE union group at a point (the
-UM-8 F6 correction): remove every existing member at the matching identity,
-then install the new one, `spoor_clunk`ing each displaced source **outside**
-the lock; a fresh `spoor_ref` on the new source and `mp_path`
-ref-NEW-before-unref-OLD (so a degenerate shared `Path` object survives the
-swap). `MBEFORE`/`MAFTER`/`MCREATE` are no longer inert — see the union-mount
+UM-8 F6 correction): unlink every existing member at the matching identity,
+then link the new one at the same point, and release each displaced entry,
+its source by `spoor_clunk`, **after** the lock is dropped; a fresh
+`spoor_ref` on the new source and `mp_path` ref-NEW-before-unref-OLD (so a
+degenerate shared `Path` object survives the swap). `MBEFORE`/`MAFTER`/`MCREATE` are no longer inert — see the union-mount
 section below.
 
 **Two cycle checks, one modeled.** `would_create_cycle` guards the bind
 graph (fixed-point reachability over `binds[]`) — it is what
 `specs/territory.tla::NoCycle` proves. `would_create_mount_cycle` guards
-the MOUNT identity graph with the identical algorithm over `(dc, devno,
-qid.path)` keys, rejecting a self-mount or a cross-tree oscillation with
-`-3`. It exists because [[fnd-stalk2-r1-f1]] falsified the claim that
-I-3 held "by construction" on the mount table. Its cross-tree half is
+the MOUNT identity graph — the same reachability question over `(dc, devno,
+qid.path)` keys — rejecting a self-mount or a cross-tree oscillation with
+`-3`. It answers it with a pass over the points: from the source's key, each
+point reached is looked up by key, marked, and queued on its own `work` link,
+and every member's source key is checked against the mount point's, so the
+check needs no array (the dynamic table, below). It exists because
+[[fnd-stalk2-r1-f1]] falsified the claim that I-3 held "by construction" on
+the mount table. Its cross-tree half is
 **not modeled** — see [[spec-territory]] and [[seam-mount-graph-unmodeled]]
 — and its self-mount half is, since B-1d-u (`NoSelfMount`). The covered
 member a union's first mount installs is a self-edge by construction (its
-source IS its point): it never adds a key to `reach`, and the resolver never
-crosses it (below).
+source IS its point): it leads back to a point the pass has already
+reached, and the resolver never crosses it (below).
 
 **chroot and pivot differ only in a precondition.** `territory_chroot`
 establishes or replaces a root; `territory_pivot_root` REQUIRES an
@@ -137,16 +148,25 @@ that release it on exit, never in its own persistent context, where the
 pin would wedge a teardown that waits for the session's EOF.
 
 **`territory_clone` copies four things and takes three ref classes.**
-Under the parent's `ns_lock`: the bind array, the mount array (one
+Under the parent's `ns_lock`: the bind array, the mount table (one
 `spoor_ref` per entry's source AND one `path_ref` per entry's
-`mp_path`), and `root_spoor` (one `spoor_ref`). Then, under the parent's
+`mp_path`), and `root_spoor` (one `spoor_ref`). The child's mount nodes are
+allocated before that lock is taken, from the counts read under it: the
+clone counts, drops the lock, allocates, and takes it again, and a peer
+thread that grew the table in the gap sends it round for the difference
+(the pools only grow and the table only to the cap, so the rounds end). It
+then copies the table in table order, appending each entry at its point,
+which carries every point's search order over; what a shrinking peer left
+over is freed after the unlock. Then, under the parent's
 `dot_lock` (a separate leaf), a `kmalloc`'d copy of `dot_path` — POSIX
-fork semantics, the child gets an independent snapshot. On the
-`dot_path` OOM the child is `territory_unref`'d, whose final release
-drops every ref just taken; the parent is untouched.
+fork semantics, the child gets an independent snapshot. On a node
+allocation failure (before any entry is copied) or the `dot_path` OOM the
+child is `territory_unref`'d, whose final release drops every ref just
+taken; the parent is untouched.
 
-**Final release** walks `mounts[]` in reverse dropping `mp_path` then
-`spoor_clunk`ing each source, zeroes `nmounts` defensively, clunks
+**Final release** walks the table list from `mlast` back, dropping each
+entry's `mp_path`, `spoor_clunk`ing its source and freeing the node, then
+frees every point, clears the table fields defensively, clunks
 `root_spoor`, and frees `dot_path` — all before `kmem_cache_free`. This
 is the spec's "DestroyTerritory requires `mounts[p] = {}`" precondition
 discharged as a sequence of Unmounts. Skipping it is
@@ -256,38 +276,48 @@ root keeping its own, and a nameless transport's device spec.
 
 ## Data structures
 
-`struct PgrpMount` is pinned at **40 bytes**: `source` (8) + `mp_path`
-(8) + `mp_qid_path` (8) + `mp_devno` (8) + `mp_dc` (4) + `flags` (4).
-Two pointers first for 8-alignment, then the two u64 key halves; `mp_dc`
-and `flags` fill the last 8 bytes, so the array keeps its 8-byte stride
-with no pad. `mp_devno` and `struct mkey`'s devno are pinned by a
-`_Static_assert` to the Spoor field's width: a narrower copy would read
-instances 2^32 mints apart as one.
+The mount table's two node types are private to `territory.c`, so nothing
+outside it walks the table without `ns_lock`; `territory.h` declares them
+only. Both are pinned at **64 bytes**, the figure the cap's memory cost is
+stated in:
+- `struct PgrpMount`, one per mount: `tnext`/`tprev` (table order),
+  `next`/`prev` (its point's members, in search order), `head`, `source`,
+  `mp_path`, `flags`, and a pad.
+- `struct PgrpMhead`, one per mount point: `hnext` (its hash chain),
+  `first`/`last` (its members), `work` (a pass's worklist link), the key
+  `devno` / `qid_path` / `dc`, `nmembers`, and `visit` (the pass that last
+  reached it). Its devno and `struct mkey`'s are pinned by a
+  `_Static_assert` to the Spoor field's width: a narrower copy would read
+  instances 2^32 mints apart as one.
 
-`struct Territory` is pinned at **1400 bytes** — a 24-byte header
-(`magic`, `ref`, `nbinds`, `nmounts`, `_pad`), `root_spoor` at 24,
-`binds[8]` at 32, `mounts[32]` at 96, then `dot_lock` / `dot_path`
-(LS-4) and `ns_lock` (RW-4) appended at the tail. **The assertion is
-written as an expression over the two array bounds rather than as a
-literal**, so growing a table updates it automatically; only prose
-restating the arithmetic can rot, and this dossier's previous figure of
-920 was exactly that — correct for a twenty-entry table and stale the
-moment the cap grew. **Every load-bearing
+`struct Territory` is pinned at **656 bytes** — a 32-byte header
+(`magic`, `ref`, `nbinds`, `nmounts`, `flags`, then `root_spoor` at 24),
+`binds[8]` at 32, the mount table at 96 (`mhash[64]`, `mfirst`, `mlast`,
+`npoints`, `mvisit`), then `dot_lock` / `dot_path` (LS-4) and `ns_lock`
+(RW-4). **The assertion is
+written as an expression over the bounds (`PGRP_MAX_BINDS`,
+`PGRP_MOUNT_HASH`) rather than as a literal**, so resizing a table updates
+it automatically; only prose restating the arithmetic can rot, and this
+dossier's earlier figures of 920 and 1400 were exactly that — each correct
+for one array size and stale the moment the cap grew. **Every load-bearing
 offset is individually `_Static_assert`ed**, not just the size — a field
 reorder that preserved the total would otherwise silently break the
-FROM_ROOT path and the mount iteration ([[fnd-stube2-r1-f5]]). That is
-also why both later additions were APPENDED: the tail-append discipline
-keeps every pinned offset stable.
+FROM_ROOT path and the mount iteration ([[fnd-stube2-r1-f5]]). The dynamic
+table took the array's place at offset 96, and the offsets after it moved
+with their asserts.
 
 `magic` sits at offset 0 deliberately — SLUB's freelist write on
 `kmem_cache_free` clobbers exactly that word, so a double-free is caught
 at the next `territory_ref`/`unref` rather than corrupting silently.
-`territory_clone` additionally range-checks `nbinds`/`nmounts` against
-their compile-time caps before the copy loops, so a torn count cannot
-walk past the arrays.
+`territory_clone` additionally range-checks `nbinds` against its
+compile-time cap before the bind copy, and `nmounts` / `npoints`
+(`nmounts <= PGRP_MOUNT_CAP`, `npoints <= nmounts`) before sizing its
+pools from them; a table list that holds more entries or points than the
+counts said is an extinction when the pools run dry.
 
-`PGRP_MAX_MOUNTS` is **32**, grown 8 → 12 → 16 → 20 → 32 (`git log -G`) —
-every time for the same cause, and the fifth time the cause was fixed
+The table was a fixed array, `mounts[PGRP_MAX_MOUNTS]`, until 2026-10-19,
+and its size went 8 → 12 → 16 → 20 → 32 (`git log -G`) —
+four times for the same cause, and the fifth time the cause was fixed
 instead (2026-09-21). A root swap used to leave the previous generation's entries
 in the table. The boot namespace mounts `/srv`, `/proc`, `/ctl`, `/dev`,
 `/hw`, `/hw/pci`, `/env` on devramfs synthetic directories; joey pivots to
@@ -349,9 +379,13 @@ that rule sound rather than hopeful:
    the covered directory. The point's instance is therefore a second
    seed. `union_snap` is set once before the Spoor is published and freed
    with it, so the read under `ns_lock` needs only the root ref the
-   caller holds. `reach[]` is sized for it (`PGRP_MAX_MOUNTS + 2`: two
-   seeds + one new instance per entry), guarded, and a test lands exactly
-   on the bound.
+   caller holds. The closure is a pass over the points (the dynamic table,
+   below): each seed marks and queues every point in its instance, and
+   each queued point's members' sources do the same, so it allocates
+   nothing and a root swap cannot fail. The array it replaced was sized
+   `PGRP_MAX_MOUNTS + 2` (two seeds + one new instance per entry);
+   `territory.shed_full_table_boundary` now runs a chain of
+   `PGRP_MOUNT_CAP` entries through the pass.
 
 The spec could not have caught fact 4, and the reason is the lesson:
 round 1's `territory_shed.tla` stated `ShedLosesNothing` against the same
@@ -362,15 +396,19 @@ no error both times. It now states it against an operational WALKER
 rule, and three sabotages of the closure each fail. A check that compares
 a rule with itself is the spec-level form of a test that cannot fail.
 
-Dropped entries release what `unmount` releases: `path_unref(mp_path)`
-under the lock, `spoor_clunk(source)` deferred outside it (a Dev close
-hook may sleep). Survivors keep their relative order, which IS the union
+Dropped entries release what `unmount` releases: each is unlinked under
+the lock and chained on a `struct mount_dead`, with any point it leaves
+empty, and `path_unref(mp_path)`, `spoor_clunk(source)` and the frees run
+after the lock is dropped (a Dev close hook may sleep). Survivors keep their
+relative order, which IS the union
 search order. The idempotent same-root call swaps nothing and sheds
 nothing. `mount()` itself never sheds. Measured after the fix, same
 probe: a shell in a login session holds **17** entries (15 of joey's,
 login's `/home/<user>`, ut's `/tmp` bind), so a container's eleven at most
 (`/dio`, eight fixed binds, `/net` and `/dev/tty` when granted) fit with
-four to spare.
+four to spare. By 2026-10-19 joey's share was 17 and the shell's 19, which
+left a container's eleven two to spare under the array's 32, and the table
+became dynamic (below).
 
 **Order matters, and the text says which order.** Reachability is
 evaluated once, at the swap, over the table as it stands. joey bound the
@@ -446,8 +484,16 @@ displaced or removed `source` Spoor is captured under the lock and
 spinlock must never be held across a sleep. `dot_path`'s old string is
 freed outside `dot_lock` for the same shape (readers copy under the lock
 and never retain the pointer past their critical section). `path_unref`
-is the exception that proves the rule — it is refcount + `kfree`, no
-close hook, non-sleeping, so it runs in place.
+alone would be safe in place — it is refcount + `kfree`, no close hook,
+non-sleeping — but it releases with the rest, since the node holding the
+`Path` is freed there.
+
+**Nothing is allocated or freed under `ns_lock`** (the dynamic table,
+below). `mount()` allocates the most it can need — two entries and a
+point — before taking the lock and frees what it did not use after it;
+`territory_clone` allocates the child's nodes outside the parent's lock;
+every edit that removes nodes chains them on a `struct mount_dead`, which
+`mount_dead_release` frees once the lock is dropped.
 
 `ns_lock` is NEVER held across `stalk` (which blocks on 9P). That is why
 `mount_lookup`'s contract is OWNED, not borrowed: the lookup and the
@@ -466,11 +512,11 @@ EL0 program, and the P6 multi-thread lift had made the program
 writable.
 
 The `g_proc_table_lock -> ns_lock` edge introduced by `/proc/<pid>/ns`
-is ACYCLIC — nothing under `ns_lock` takes `g_proc_table_lock`, and the
-secondary `ns_lock -> slub c->lock` edge (via `path_unref`'s `kfree`)
-has no reverse. `kmalloc` under `dot_lock` in `territory_clone` is
-sound for the same reason: SLUB knows nothing of Territory, and neither
-lock is taken from an IRQ handler.
+is ACYCLIC — nothing under `ns_lock` takes `g_proc_table_lock`. The
+`ns_lock -> slub c->lock` edge that `path_unref`'s `kfree` under the lock
+once made is gone with the deferred release. `kmalloc` under `dot_lock`
+in `territory_clone` is sound: SLUB knows nothing of Territory, and
+neither lock is taken from an IRQ handler.
 
 ## Invariants enforced
 
@@ -507,9 +553,10 @@ atomic snapshot they rest on, [[sub-kernel-stalk]] owns the walk/readdir/
 create/remove that consume it.
 
 [[inv-i33]] — `mp_path` is the territory-side mirror of the Spoor Path,
-and it is introspection-ONLY. Every keying decision (`mount_key_eq`,
-`mount_is_point_id`, `would_create_mount_cycle`, `mount_lookup`) reads
-`(mp_dc, mp_devno, mp_qid_path)`; `territory_format_ns` is the only
+and it is introspection-ONLY. Every keying decision (`mhead_find`, under
+`mount_lookup`, `mount_member_at`, `mount_members_snapshot`,
+`mount_is_point_id`, `would_create_mount_cycle` and `mount` itself) reads
+a point's `(dc, devno, qid_path)` key; `territory_format_ns` is the only
 reader of `mp_path` anywhere. A wrong, stale, or NULL `mp_path`
 misreports `/proc/<pid>/ns` and nothing else.
 
@@ -530,11 +577,17 @@ corrupted-magic Spoor arguments return `-1`. `spoor_ref` extincts on a
 corrupted source, which is why the bump precedes every swap — the
 extinct leaves state unchanged.
 
-The table-full paths (`-2`/`-3`) take no ref, so a rejected mount cannot
-leak one. The `mount` append is infallible after its `spoor_ref`, so no
-rollback exists or is needed. `territory_clone`'s only fallible step is
-the `dot_path` `kmalloc`, and its failure path is a full
-`territory_unref` of the child.
+The refusals (`-2` full, `-3` cycle, `-4` allocation) take no ref, so a
+rejected mount cannot leak one, and `-4` is answered before `ns_lock` is
+taken, so it cannot have edited anything. A refusal that follows an
+unlink cannot strand it: only an edit at the mount's own point unlinks
+anything, and that edit has already freed at least the one entry the
+mount adds (`starts_union` is false at a point that hosted a member).
+Linking is infallible after the `spoor_ref`s, so no rollback exists or is
+needed; `mount`'s exit extincts if a hashed point is left with no member,
+the one state its paths are built never to leave. `territory_clone`'s
+fallible steps are its node allocations and the `dot_path` `kmalloc`,
+and each failure path is a full `territory_unref` of the child.
 
 `SYS_GETCWD` deliberately accepts an OVERSIZED buffer: it computes the
 cwd first, then requires only `len + 1 <= buf_len` and copies exactly
@@ -545,19 +598,36 @@ surfaced as `make: getcwd: I/O error`
 
 ## Performance
 
-Both cycle checks are fixed-point reachability: O(N²) worst case at
-N = 8 binds (~64 inner iterations) and N = 20 mounts (~400). They run
-once per `bind`/`mount`, never on the resolution path.
+The bind cycle check is fixed-point reachability: O(N²) worst case at
+N = 8 binds (~64 inner iterations). The mount cycle check visits each
+point reachable from the source's key once and looks up each of its
+members' source keys by hash, so it costs the reachable members, at most
+the table. Both run once per `bind`/`mount`, never on the resolution
+path. The shed finds a device instance's points by scanning every point
+(the hash is keyed on the whole identity), so it costs (members of the
+reached points) × (points): about a million steps at `PGRP_MOUNT_CAP`, once
+per root swap.
 
-`mount_lookup` is a linear scan of up to 20 entries under a spinlock,
-and it runs at EVERY component descent in `stalk` — it is the hottest
-thing in this file. The flat array is the right shape at N = 20; the
-RB-tree-keyed-on-qid replacement waits on a count that justifies it.
+`mount_lookup` runs at EVERY component descent in `stalk` — it is the
+hottest thing in this file. It hashes the probe's key to one of 64 chains
+and takes the point's first member, so it costs one chain, never the
+table's size; measured use (19 entries in a login shell) is under one
+point per chain, and the cap is about 16. `mount_member_at` adds a walk to
+its index, and `mount_noexec_covers` is a scan of every entry (a source's
+instance is not a key), bounded by the cap.
 
 `territory_format_ns` holds `ns_lock` inside `g_proc_table_lock`'s
-IRQs-off window. Bounded (≤ 20 lines into a 512-byte buffer, no sleep,
-no allocation) and comparable to the pre-existing `format_status` hold —
-a latency note, not a defect.
+IRQs-off window. Bounded (it stops at the first line that does not fit
+the caller's buffer — `/proc/<pid>/ns` reads into `DEVPROC_READ_BUF`,
+2 KiB — no sleep, no allocation) and comparable to the pre-existing
+`format_status` hold — a latency note, not a defect. That 2 KiB is also
+the listing's limit, and that IS a defect: a namespace past about forty
+entries is cut. Readers know a cut list by its missing `binds:` line, so it
+is never mistaken for a whole one, but they cannot see the rest. Before the
+dynamic table only long names could reach it; now a count can. The fix is
+the dynamic table's next step: an offset-aware render, which serves the
+window a read asks for from the whole listing, as `/proc/<pid>/environ`
+already does for an environment that outgrows the buffer.
 
 ## Prosecution
 
@@ -607,6 +677,30 @@ On any change to this file, prosecute:
   `unmount` already gives the same caller, and the Linux phenotype serves
   neither `chroot` nor `mount`, so a container cannot trigger it. If
   either of those ever changes, this becomes a hole.
+- **Nothing is allocated or freed under `ns_lock`.** A node allocated under
+  it would add a slab edge and a failure path inside an edit; a node freed
+  or a source clunked under it can sleep in a Dev close hook. `mount()`
+  allocates first, every removal goes through a `struct mount_dead`, and
+  `territory_clone` allocates outside the parent's lock.
+- **A point's members appear in the table in their search order.**
+  `/proc/<pid>/ns` prints table order as the union's order, and
+  `territory_clone` rebuilds every point's order by appending in table order.
+  Only `mount_link`'s `first` arm (MBEFORE at a point with members) inserts
+  mid-table, and it inserts just before the point's old first member;
+  anything else that inserts mid-table breaks the copy.
+  `territory_mount_check` (rule 8) checks it, and
+  `territory_mount.nodes_follow_every_edit` runs it after every edit.
+- **Every point in the hash hosts a member.** `mount_lookup` reads
+  `h->first->source` unguarded on that strength. `unmount` and the shed
+  unhash a point they empty; `mount` relinks at the point it emptied, and
+  its exit extincts if it did not.
+- **No array is sized from `PGRP_MOUNT_CAP`.** At the cap such an array
+  does not fit a 16 KiB kernel stack; a new consumer of a whole union or
+  of the table takes the count and allocates, as stalk's `union_members`
+  does, or walks the lists under the lock.
+- **The visit marks.** A pass is valid only while every point starts it
+  unmarked: `mvisit_next` clears every mark when the counter wraps, and a
+  new pass must open with it.
 - **Nothing may become the only enforcement by accident.** The `..` clamp was
   described as a redundant net while a duplicate mechanism upstream consumed its
   inputs; when that duplicate was removed as a defect, the clamp became load-
@@ -689,23 +783,30 @@ ordering + the snapshot; [[sub-kernel-stalk]] owns the walk/readdir/create/
 remove that consume them.
 
 - **Placement dispatch (`mount`).** A non-MREPL mount at an existing point
-  places by its ordering flag: `MBEFORE` inserts at the index of the point's
-  FIRST existing member (Plan 9 prepend; later MBEFOREs go after earlier ones),
-  `MAFTER` and the flagless default append. Members are searched in `mounts[]`
-  ARRAY ORDER — so MBEFORE members precede MAFTER members by construction, which
-  is `OrderCorrect`. An existing pair re-mounted with a new ordering flag is
-  MOVED, not duplicated (UM-8 F6). `unmount` shifts down rather than swap-removes,
-  because order stopped being cosmetic.
+  places by its ordering flag: `MBEFORE` links the entry first in the point's
+  member list (Plan 9 prepend; a later MBEFORE goes ahead of an earlier one),
+  `MAFTER` and the flagless default link it last. Members are searched in the
+  point's list order — so MBEFORE members precede MAFTER members by
+  construction, which is `OrderCorrect`. An existing pair re-mounted with a new
+  ordering flag is MOVED, not duplicated (UM-8 F6). `unmount` unlinks, which
+  keeps every other member's order. (While the table was an array, MBEFORE
+  inserted at the index of the point's first member and `unmount` shifted down
+  rather than swap-removed; the lists keep both orders the array kept.)
 - **MREPL replaces the WHOLE group** (above) — the spec's `MountRepl` collapses
   a union to one member, so it must remove every member at the point, not just
   the first.
 - **`mount_members_snapshot` — the atomic whole-union snapshot.** The resolver
-  cannot walk `mounts[]` member-by-member under a lock it must release to cross
-  (a cross may block on 9P), so it snapshots the point's members + their flags
-  ATOMICALLY under `ns_lock` into a caller array, then crosses them lock-free.
-  The atomicity is load-bearing: a member shifting into slot k between two
-  separate reads would land a create on the wrong member (the UM-8 F4 hazard the
-  snapshot closes). Ordered: MBEFORE members first, MAFTER/default last.
+  cannot walk a point's members one by one under a lock it must release to
+  cross (a cross may block on 9P), so it snapshots the point's members + their
+  flags ATOMICALLY under `ns_lock` into a caller array, then crosses them
+  lock-free. The atomicity is load-bearing: a member shifting into slot k
+  between two separate reads would land a create on the wrong member (the UM-8
+  F4 hazard the snapshot closes). Ordered: MBEFORE members first,
+  MAFTER/default last. It returns the point's member COUNT and takes the
+  members only when the array holds them all: every caller needs the whole
+  union, and a cut one would hide its later members. stalk's `union_members`
+  ([[sub-kernel-stalk]]) holds 16 inline and retakes into a heap array sized
+  from the count when a union is larger.
 - **MCREATE — the writable member.** The create path crosses the FIRST member
   carrying `MCREATE` (stalk's `stalk_union_create`); a union with no MCREATE
   member answers `-T_E_ACCES` (no writable member), never a silent misplacement.
@@ -732,7 +833,8 @@ directory as a member.
   (the restriction scopes to the instance that was mounted —
   `territory_mount.covered_noexec_scoped`).
 - **When (`starts_union`).** `!(flags & MREPL) && (flags & (MBEFORE|MAFTER))
-  && (mountpoint->qid.type & QTDIR) && !mount_point_hosts_member(...)`,
+  && (mountpoint->qid.type & QTDIR) && !h`, where `h` is the point hashed at
+  the mount point's key (a point is hashed only while it hosts a member),
   judged BEFORE the UM-8 F6 reposition: re-mounting the sole member of an
   `MREPL` group with `MBEFORE` finds the point hosting a member, so it grows
   no covered one (`territory.tla` `BUGGY_FRESH_AFTER_REMOVE`). `MREPL` wins
@@ -760,10 +862,11 @@ directory as a member.
   `starts_union` stays for kernel-internal callers, whose boot mounts (joey's
   `/dev` and `/srv`) are all directories over directories (`territory.tla`
   `KERNEL_MOUNTS` and `CovGuard`; `territory_mount.covered_file_point_stays_plain`).
-- **Order and slots.** Both entries append in Plan 9's order (`mount_install_at`):
+- **Order and room.** Both entries append in Plan 9's order (`mount_link`):
   `<new, covered>` for `MBEFORE`, `<covered, new>` for `MAFTER`. Later ordered
   mounts place around the covered entry like any member. The first mount
-  needs two free slots (`-2` otherwise, nothing installed).
+  needs room for two entries under `PGRP_MOUNT_CAP` (`-2` otherwise, nothing
+  installed), and `mount()` allocates both before taking `ns_lock`.
 - **The one retained point.** The covered entry's source IS the mount-point
   Spoor, `spoor_ref`'d before install. `unmount`, `MREPL`, the shed and
   `territory_destroy` drop it exactly once and `territory_clone` refs it, as
@@ -771,8 +874,8 @@ directory as a member.
 - **Never crossed.** [[sub-kernel-stalk]]'s `stalk_cross_src` answers
   `MCOVERED` with a clone of the point, and a mount-over-mount chain stops at
   a point whose member[0] is covered. It is therefore not an edge of the
-  mount graph (`would_create_mount_cycle` adds no key for it), and I-3 holds
-  over the edges that are crossed.
+  mount graph (`would_create_mount_cycle` reaches no new point through it),
+  and I-3 holds over the edges that are crossed.
 - **Leaving.** `unmount` removes the first NON-covered entry at the point,
   then the covered entry if no mounted member remains, so the point is a
   plain directory again, never a union of itself (`NoOrphanCovered`).
@@ -788,6 +891,77 @@ the disk's `/lib` ([[sub-stratum-boot]]). Spec: `UnionHasCovered` /
 buggy config ([[spec-territory]]). Tests: ten `territory_mount.*` cases
 (`union_keeps_covered`, `no_covered_unless_fresh`, the `covered_*` eight),
 seven `stalk.union_covered_*`, and `territory.shed_covered_shares_fate`.
+
+## The dynamic table (2026-10-19) — Plan 9's `Mhead` and `Mount`
+
+The fixed array is gone ([[dec-2026-10-19-mount-table-dynamic]]). Use had
+reached its 32: a login shell held 19 entries before any mount of its own, a
+container's recipe adds up to 11, and a gate's seventh `bind -bc` layer was
+refused. The operator voted Plan 9's shape under a DoS cap (ARCH 9.1).
+
+- **Shape.** One `PgrpMount` per mount under one `PgrpMhead` per mount
+  point, as Plan 9's `Mount` hangs off its `Mhead`. A point is found by
+  hashing its key into `Territory.mhash[PGRP_MOUNT_HASH]` (64 chains; Plan 9
+  hashes into a 32-chain `mnthash`), holds its members in search order, and
+  is hashed only while it hosts one. Every entry is also on the table-order
+  list, `mfirst` .. `mlast`, in the order the mounts were placed: MBEFORE at
+  a point with members places the entry just before that point's first
+  member, and every other placement appends. So a point's members appear in
+  the table in their search order, the order the array kept, and
+  `/proc/<pid>/ns` prints the same text it printed from the array.
+- **The cap.** `PGRP_MOUNT_CAP` is 1024 entries, a DoS bound in the shape of
+  Linux's `fs.mount-max` (100,000 per mount namespace), not a usage limit.
+  At the cap a Territory holds 1024 × (64 + 64) B = 128 KiB of mount nodes,
+  copied at every spawn from it: 1/32 of the per-Proc VMA ceiling
+  (`PROC_VMA_MAX`, 4 MiB of Vma slab). A mount past it answers `ENOSPC`.
+  4096 was weighed and refused: 512 KiB per Territory, and a shed of about
+  16 million steps.
+- **Allocation and release.** `mount()` allocates two entries and a point —
+  the most a union's start needs — before taking `ns_lock`. A failure is
+  `-4` (`ENOMEM`) with nothing changed, and whatever goes unused is freed
+  after the unlock. What an edit unlinks (a reposition, MREPL's group,
+  `unmount`'s member and covered entry, the shed's dropped entries) is
+  chained in removal order on a `struct mount_dead`, with any point it left
+  empty, and `mount_dead_release` drops each entry's `mp_path`, clunks its
+  source and frees the nodes once the lock is dropped. The node caches are
+  created without `KMEM_CACHE_PANIC_ON_FAIL`: an allocation failure refuses
+  a mount or a spawn, never panics.
+- **Passes, not arrays.** The cycle check and the shed walk the points as a
+  graph. `mvisit_next` opens a pass by bumping `Territory.mvisit`; when it
+  wraps it clears every point's mark first. A point reached is marked with
+  the pass and queued on its own `work` link, so neither check allocates,
+  and a root swap cannot fail. A heap-allocated reach set was the other
+  candidate; it would have given `chroot` and `pivot_root` an allocation
+  failure they do not have.
+- **Readers.** `mount_lookup` (the point's first member),
+  `mount_member_at` (a walk to the index), `mount_members_snapshot` (the
+  count; all members or none), `mount_is_point_id` (a hash lookup),
+  `mount_noexec_covers` (a scan of the table list) and `territory_format_ns`
+  (the table list) all hold `ns_lock`. `territory_nmounts` and
+  `territory_npoints` read a count without it, for diagnostics only.
+- **Diagnostics.** `territory_mount_check` walks the table under `ns_lock`
+  and returns the number of the first of nine rules it finds broken: the
+  table list, the counts, hash placement, the member lists and their
+  heads, the member sum, search order against table order, and the covered
+  entry's form. `territory_mount_entries_live` / `_points_live` read the
+  node caches' live counts. `territory_mount_fail_nodes_for_test(n)` fails
+  the next `n` node allocations, after the `p9_closer_fail_nodes_for_test`
+  precedent.
+- **Tests.** `territory_mount.nodes_follow_every_edit` makes nine edits and
+  checks after each the return, the rule check, the point count and the
+  exact `/proc/<pid>/ns` text; then the snapshot's short and full legs, a
+  clone's order, an MREPL's refs, a shed, and the live counts back where
+  they started. `territory_mount.refuses_enomem` fails each of a mount's
+  three allocations and then a clone's, each with its control.
+  `sys_mount.enomem_answers_enomem` takes `ENOMEM` through SYS_MOUNT's
+  errno map. `stalk.union_past_the_inline_snapshot` builds a 17-member
+  union and walks, creates and opens through it. `territory_mount.table_full`,
+  `territory_mount.covered_needs_two_slots`, `territory.shed_full_table_boundary`
+  and `sys_mount.full_table_answers_enospc` run at the real cap, on heap
+  arrays.
+- **Specs.** `territory.tla` and `territory_shed.tla` model each point's
+  member sequence and the shed's closure, not the storage, so neither
+  changes; both re-run with their buggy configs before the merge.
 
 ## VIVARIUM Design D + the pheno-mount (2026-09-05) — the phenotype declaration
 

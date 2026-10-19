@@ -1019,6 +1019,17 @@ the point. `T_E_NOSPC` (28) joins `errno.h`. A caller that tested `rc != 0` or
 instead of answering `NotFound` for every failure; ut's `unmount` names the
 cause, as `bind` and `mount` already did for any code but -1.
 
+## SYS_MOUNT answers ENOMEM; its full table is 1024 entries (2026-10-19)
+
+No number or record changed. The mount table is dynamic
+([[dec-2026-10-19-mount-table-dynamic]]; ARCH 9.1): `SYS_MOUNT` answers
+`-ENOMEM` (`T_E_NOMEM`, 12) when the kernel cannot allocate the mount's
+entries, with the namespace unchanged, and its `-ENOSPC` now means the table
+holds `PGRP_MOUNT_CAP` (1024) entries rather than 32. Mirrors: the kernel and
+libt `syscall.h` comments and libthyla-rs's `territory::mount` doc
+(`Error::NoMemory`, already in its errno map); ut prints the errno's text
+(`out of memory`) as it does every other.
+
 ## SYS_WALK_CREATE's group is the directory's (2026-10-19)
 
 [[dec-2026-10-19-create-group-from-parent]] (IDENTITY-DESIGN 3.5 F-5): the

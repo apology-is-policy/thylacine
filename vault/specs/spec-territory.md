@@ -29,7 +29,7 @@ cfgs:
   - "territory_buggy_emount.cfg -- SYS_MOUNT's type check is missing, so a mount reaches the file point (NoMemberAtFile)"
 gate: "specs/check-territory.sh -- runs all twenty-two, pins the four clean distinct-state counts, and asserts WHICH invariant each buggy cfg violates (one worker, so the attribution is deterministic). Re-run it for ANY change to a mount-table / root_spoor mutation site (mount, unmount, the reposition arm, chroot, pivot_root, clone, final release) or to the union walk, listing, create or remove selection."
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-19
 ---
 ## Abstraction
 
@@ -77,10 +77,10 @@ unreduced, so their traces read directly.
 |---|---|
 | `Init` | `territory_init` / `territory_alloc` (via `territory_init_fields`) |
 | `Bind` / `Unbind` | `bind` / `unbind` — the DEAD table (see below) |
-| `MountBefore` / `MountAfter` | `mount`'s MBEFORE insert-at-group-front / append arms; `starts_union` plus the two `mount_install_at` calls place the covered entry, MCOVERED alone; their `EmountOK` guard (and `MountRepl`'s) is `sys_mount_for_proc`'s type check (`-T_E_NOTDIR`), and `CovGuard` is `starts_union`'s `QTDIR` conjunct |
+| `MountBefore` / `MountAfter` | `mount`'s MBEFORE link-at-the-point's-front / append arms (`mount_link`); `starts_union` plus the two `mount_link` calls place the covered entry, MCOVERED alone; their `EmountOK` guard (and `MountRepl`'s) is `sys_mount_for_proc`'s type check (`-T_E_NOTDIR`), and `CovGuard` is `starts_union`'s `QTDIR` conjunct |
 | `MountRepl` | `mount`'s MREPL arm (replace the whole group, covered entry included) |
 | `Reposition` | `mount`'s #219 / F6 reposition arm: an existing member moves, and no covered entry is added |
-| `Unmount` | `unmount`'s shift-down + the deferred `spoor_clunk`; the covered entry is never removed by name and leaves with the last mounted member |
+| `Unmount` | `unmount`'s unlink + the deferred release (`mount_dead_release`: `path_unref`, `spoor_clunk`, the frees); the covered entry is never removed by name and leaves with the last mounted member |
 | `Chroot` | `territory_chroot` AND `territory_pivot_root` — the same state transition under two preconditions |
 | `ForkClone` | `territory_clone` (mount refs + root ref; the `mp_path` and `dot_path` copies are beneath the model) |
 | `WalkSel` / `ReaddirSel` / `CreateSel` / `RemoveSel` | `kernel/stalk.c`'s union walk, the union readdir merge, `stalk_union_create_member` and `stalk_union_member_holding` |

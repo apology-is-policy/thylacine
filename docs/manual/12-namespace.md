@@ -114,7 +114,8 @@ they fail; run `echo $errstr` to display it. The reasons from `bind` are:
 | `bind: cannot bind at OLD: no such file or namespace entry` | `old` does not exist. |
 | `bind: cannot bind at OLD: permission denied` | A directory on the way to `old` may not be searched. |
 | `bind: cannot bind at OLD: too many levels of symbolic links` | Binding `new` at `old` would make the namespace lead back into itself, or a symbolic link on the way to `old` loops. |
-| `bind: cannot bind at OLD: no space left` | The namespace has no room for another entry. |
+| `bind: cannot bind at OLD: no space left` | The namespace already holds 1024 entries, the most it can hold. |
+| `bind: cannot bind at OLD: out of memory` | The system could not allocate memory for the entry. |
 | `bind: -b and -a are mutually exclusive` | Both orderings were given. |
 | `bind: unknown option -X` | An option other than `-b`, `-a` and `-c`. |
 | the usage line, starting `usage: bind` | Other than two operands. |
@@ -136,6 +137,11 @@ change that a running command makes affects only that command. For this reason
 would each change their own copy and exit. Plan 9, where the design comes from,
 shares a namespace between a parent and its child unless asked otherwise;
 Thylacine always copies it.
+
+A namespace holds at most 1024 entries. Each `bind` or `mount` adds one, except
+that a `bind -b` or `bind -a` at a directory with nothing bound on it adds two:
+the directory it covers becomes an entry of the union as well. A login shell
+starts with about twenty.
 
 `bind` opens `new` as a handle that can be walked but not read or written, and
 passes the handle to the kernel's mount call with `old` and the flags. The

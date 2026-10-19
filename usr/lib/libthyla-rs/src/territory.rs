@@ -171,7 +171,9 @@ impl core::ops::BitOrAssign for MountFlags {
 ///     `flags` lacks REPL at a point that is not a directory.
 ///   - `Error::SymlinkLoop`: the mount would close a cycle in the mount graph
 ///     (I-3).
-///   - `Error::NoSpace`: the mount table is full.
+///   - `Error::NoSpace`: the mount table holds its most entries (1024).
+///   - `Error::NoMemory`: the kernel could not allocate the mount's entries;
+///     the namespace is unchanged.
 pub fn mount<F: AsFd + ?Sized>(
     source: &F,
     mount_point: &str,

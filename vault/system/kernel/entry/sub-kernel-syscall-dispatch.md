@@ -1573,6 +1573,12 @@ never reads as success. The `SYS_MOUNT` handler bounds the source index at
 full width before the cast to `hidx_t`, so 2^32 + 3 no longer names handle 3
 ([[dec-2026-10-19-mount-errnos]]).
 
+**Vote 5 (2026-10-19): -4 is ENOMEM.** The dynamic mount table
+([[dec-2026-10-19-mount-table-dynamic]]; [[sub-kernel-territory]]) allocates a
+mount's entries per mount, before `ns_lock`, and `mount()` answers -4 when it
+cannot; `sys_mount_for_proc` maps that to `-T_E_NOMEM`, the namespace
+unchanged. -2 now means the table holds `PGRP_MOUNT_CAP` (1024) entries.
+
 ## viv_poll_translated passes a zero timeout through (2026-09-28, #98 NP-4c)
 
 The guest poll translation no longer widens a literal timeout of 0 to
