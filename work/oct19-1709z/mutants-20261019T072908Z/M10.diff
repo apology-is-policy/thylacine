@@ -1,0 +1,14 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 30f29ec60..ae09e17d1 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -11917,8 +11917,7 @@ static struct Spoor *viv_sock_pin_ctl(struct Proc *p, struct viv_socktab *tab,
+         *connected = true;
+         return NULL;
+     }
+-    *err = (handle_get_cloexec(p, (hidx_t)(u32)fd_raw) < 0) ? -(s64)T_E_BADF
+-                                                            : -(s64)T_E_NOTSOCK;
++    *err = -(s64)T_E_NOTSOCK;
+     return NULL;
+ }
+ 

@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 30f29ec60..47eb0a03a 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -12039,7 +12039,9 @@ static s64 viv_sock_connect_dial(struct Proc *p, struct viv_socktab *tab,
+     rights_t want = (e->state == VIV_SOCK_CONNECTING) ? 0 : RIGHT_WRITE;
+     bool connected;
+     s64  err;
+-    struct Spoor *ctl = viv_sock_pin_ctl(p, tab, fd_raw, e, want, &connected, &err);
++    struct Spoor *ctl = sys_lookup_rw_handle(p, (hidx_t)fd_raw, want);
++    connected = false;
++    err = -(s64)T_E_BADF;
+     if (!ctl) {
+         // Connected meanwhile by a peer thread: a CONNECTING row's wait is over
+         // (Linux's blocking retry returns once the handshake completes), and a

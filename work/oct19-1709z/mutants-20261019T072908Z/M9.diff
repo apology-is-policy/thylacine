@@ -1,0 +1,53 @@
+diff --git a/kernel/vivarium.c b/kernel/vivarium.c
+index 785615c2c..ac1254ae1 100644
+--- a/kernel/vivarium.c
++++ b/kernel/vivarium.c
+@@ -1900,7 +1900,6 @@ static struct socktab_detached socktab_clear_slot(struct viv_socktab *tab,
+ // A last clunk is a Tclunk, so this runs with no lock held.
+ static void socktab_release(struct socktab_detached d) {
+     spoor_clunk(d.ready);
+-    spoor_clunk(d.ctl);
+ }
+ 
+ bool viv_socktab_get(struct viv_socktab *tab, s32 fd, struct viv_sock *out) {
+@@ -1943,7 +1942,6 @@ bool viv_socktab_claim(struct viv_socktab *tab, s32 fd,
+             tab->s[i].bound_port  = 0;
+             tab->s[i].remote_addr = 0;   // and no unconnected-sendto destination
+             tab->s[i].remote_port = 0;
+-            if (ctl) spoor_ref(ctl);     // the row's own; a FREE slot's was NULL
+             tab->ctl[i]           = ctl;
+             socktab_unlock(tab);
+             socktab_release(stale);
+@@ -2085,7 +2083,6 @@ void viv_socktab_free(struct viv_socktab *tab) {
+     if (!tab) return;
+     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+         spoor_clunk(tab->ready[i]);
+-        spoor_clunk(tab->ctl[i]);
+         tab->ready[i] = NULL;
+         tab->ctl[i]   = NULL;
+     }
+@@ -2194,7 +2191,6 @@ void viv_socktab_fork_snapshot(void *arg) {
+     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+         f->dst->s[i] = src->s[i];
+         struct Spoor *ctl = src->ctl[i];
+-        if (ctl) spoor_ref(ctl);
+         f->dst->ctl[i] = ctl;
+     }
+     f->dst->next_epoch = src->next_epoch;
+@@ -2250,7 +2246,6 @@ int viv_socktab_alias(struct viv_socktab *tab, s32 oldfd, s32 newfd) {
+             // Spoor -- with a reference of its own, taken before `old` (which
+             // may be that Spoor) is released.
+             socktab_copy_row_locked(tab, &tab->s[i], &snap, newfd);
+-            if (ctl) spoor_ref(ctl);
+             tab->ctl[i] = ctl;
+             socktab_unlock(tab);
+             socktab_release(old);
+@@ -2337,7 +2332,7 @@ void viv_socktab_connected_locked(void *arg) {
+         e->remote_addr = c->addr;
+         e->remote_port = c->port;
+         e->state       = (u8)VIV_SOCK_CONNECTED;
+-        c->detached    = c->tab->ctl[e - c->tab->s];
++        c->detached    = NULL;
+         c->tab->ctl[e - c->tab->s] = NULL;
+         c->ok          = true;
+     }

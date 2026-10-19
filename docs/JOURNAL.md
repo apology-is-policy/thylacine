@@ -1,6 +1,66 @@
 # The autonomous-run journal
 
 
+## 2026-10-19 -- 17:09Z closed: the socket verb arms check their own ctl (corona)
+
+Picked up after a self-compaction at 760fd9aa6: 17:09Z implemented, never
+compiled, the mac leased to main's b3 gates and corona queued behind it.
+
+**Desk check while queued.** Read the WIP for compile errors before any build
+and found two: a second `static ns_bind` (the /net stub already had one for its
+fid table) and a helper inserted between a test's comment and its test
+(d5647844c). The first build (07:04Z) compiled with no warning in a changed
+hunk -- checked by hunk ranges, with a control line proving the check can flag
+one -- and the first boot passed 1898/1898.
+
+**Mutants redesigned before they ran.** M9 as planned (the claim skips its
+spoor_ref) would have extincted on a use-after-free in the suite's FIRST
+connect test rather than failing the assertion that names it; it became the
+consistent bare-pointer model (no reference taken, none released), which fails
+the reference-count assertions cleanly. M10 was added for the EBADF/ENOTSOCK
+split. First run, on 0086d3071: 11/11 killed at their named assertions.
+
+**The audit.** Fable 5.1 (start == end) on Opus 5.5's work: 0/0/0/3. F1 was a
+real regression: a peer's dup and dup3 of the dup back onto the number, while
+connect slept, re-made the row under a fresh epoch over the same ctl identity;
+the swap went through, the epoch-keyed commit landed nowhere, and the number
+refused every later use, where the old code had healed itself on first use.
+The commit now keys on the identity too (c6a3dca72); its witness,
+vivsock.connect_commits_a_realiased_row, runs the real dup and dup3 arms inside
+connect's data open (M11). F2: my "no byte reached the file" negative had no
+positive control -- the stub's counter was never driven -- and three fixture
+helpers keyed a replace on an object they held no reference to. F3: stale
+comments. The reviewer agreed with both self-found P3s (S1 unreachable, S2
+pre-existing and guarded by netd).
+
+**A "not a finding" checked rather than taken.** The reviewer noted that
+dial_on's early returns skip viv_note_resume; the reachable one (a refused
+dial) has the same shape. viv_note_hold only clears a per-call flag the
+dispatcher sets at every entry, so an early error return leaves nothing
+behind.
+
+**Gate.** c6a3dca72: ci, qual and UBSan 1899/1899 each, joey D7 PASS,
+check-production --all; 12/12 mutants. The UBSan leg and the production shape
+were added to this gate because the change is invariant-bearing (row 126); SMP
+is not proven here.
+
+**Wrong turns, and what caught them.**
+- I first meant to compare this build's warning census with the previous
+  gate's. That cannot work: the header change recompiled 68 files against 15,
+  and warnings print only for recompiled files. The honest check is narrower:
+  no warning names a changed function, and none falls in a changed hunk.
+- The positive-control gap in F2 was mine. I wrote a negative assertion over a
+  counter without ever driving it, the shape the M-PIN on negatives names.
+- My self-compact was refused at the 400k line because the tree was dirty. The
+  refusal was correct: the mutant runner edits syscall.c and vivarium.c in
+  place, and the script refuses until they are restored.
+
+**Coordination.** main (yip 0229): b3's M7/M8 extends Loom's dir-mutation gate
+in the live-Proc shape corona's copy already has; corona's identity snapshot
+serves only the private-async service, which issues no create. aux (0231,
+operator priority, tomorrow's demo): told it c6a3dca72 is green, gave the merge
+hot-spots, released the mac at 07:49Z.
+
 ## 2026-10-19 -- 13:05Z closed, Stratum main gains the session-DEK leases, 17:09Z designed (corona)
 
 Picked up at c6e06b044 (13:05Z committed, unpushed) after a self-compaction, with

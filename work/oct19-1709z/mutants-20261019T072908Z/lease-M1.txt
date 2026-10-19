@@ -1,0 +1,9 @@
+mac   HELD by you for 25m, 1.6h left
+        why: corona 17:09Z: first compile of the ctl-identity WIP (d5647844c), then the push gate (ci + qual + UBSan suites) and 11 sabotage builds+boots. Uncertainty: the code has never compiled, so fixups may need extra builds.
+        phase: corona 17:09Z: 11 sabotage builds+boots (mutants.sh, ~2 min each), then the push gate (ci + qual + UBSan)
+        runner: North-Kill-PD.local pid 28988 dead (start Mon Oct 19 09:07:35 2026)
+        runner: North-Kill-PD.local pid 28992 dead (start Mon Oct 19 09:07:35 2026)
+        pids: [28988 28992] (their registered work -- not a kill list)
+        queue 1: main (5m waiting)
+pi    FREE
+disk: 13.1 GiB available at /Users/northkillpd/projects/thylacine-corona

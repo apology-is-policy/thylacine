@@ -1,0 +1,88 @@
+all 12 mutants anchor exactly once
+2026-10-19T07:29:08Z  HEAD c6a3dca72edc9d255ef96d051b282f66e2dbfdf0, clean; anchors checked; verdict self-check passes; mutants: M1 M2a M2b M2c M3 M4 M5 M7 M8 M9 M10 M11
+2026-10-19T07:30:14Z  M1: vivsock.ctl_verbs_need_their_ctl -> FAIL: connect refuses a number whose slot is not its ctl
+2026-10-19T07:30:14Z  M1: (also) vivsock.ctl_verbs_meet_a_racing_peer -> FAIL: connect meets a socket a peer connected: EISCONN
+2026-10-19T07:30:14Z  M1: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:30:14Z  M1: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:30:14Z  M1: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:30:14Z  M1: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:30:14Z  M1: KILLED
+2026-10-19T07:31:17Z  M2a: vivsock.ctl_verbs_need_their_ctl -> FAIL: connect refuses a number whose slot is not its ctl
+2026-10-19T07:31:17Z  M2a: (also) vivsock.ctl_verbs_meet_a_racing_peer -> FAIL: fixture: a peer connected the first socket at the pin
+2026-10-19T07:31:17Z  M2a: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:31:17Z  M2a: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:31:17Z  M2a: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:31:17Z  M2a: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:31:17Z  M2a: KILLED
+2026-10-19T07:32:20Z  M2b: vivsock.ctl_verbs_need_their_ctl -> FAIL: listen refuses it
+2026-10-19T07:32:20Z  M2b: (also) vivsock.ctl_verbs_meet_a_racing_peer -> FAIL: fixture: a peer connected the bound socket at the pin
+2026-10-19T07:32:20Z  M2b: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:32:20Z  M2b: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:32:20Z  M2b: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:32:20Z  M2b: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:32:20Z  M2b: KILLED
+2026-10-19T07:33:22Z  M2c: vivsock.ctl_verbs_need_their_ctl -> FAIL: the datagram sendto refuses it
+2026-10-19T07:33:22Z  M2c: (also) vivsock.ctl_verbs_meet_a_racing_peer -> FAIL: fixture: a peer connected the datagram socket at the pin
+2026-10-19T07:33:22Z  M2c: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:33:22Z  M2c: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:33:22Z  M2c: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:33:22Z  M2c: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:33:22Z  M2c: KILLED
+2026-10-19T07:34:24Z  M3: vivsock.ctl_identity_travels_with_the_fd -> FAIL: the child's row names the parent's ctl, which its copied fd holds
+2026-10-19T07:34:24Z  M3: (also) vivsock.ctl_verbs_need_their_ctl -> PASS
+2026-10-19T07:34:24Z  M3: (also) vivsock.ctl_verbs_meet_a_racing_peer -> PASS
+2026-10-19T07:34:24Z  M3: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:34:24Z  M3: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:34:24Z  M3: tally 1898/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:34:24Z  M3: KILLED
+2026-10-19T07:35:25Z  M4: vivsock.ctl_identity_travels_with_the_fd -> FAIL: the dup's row names the source's ctl
+2026-10-19T07:35:25Z  M4: (also) vivsock.ctl_verbs_need_their_ctl -> PASS
+2026-10-19T07:35:25Z  M4: (also) vivsock.ctl_verbs_meet_a_racing_peer -> PASS
+2026-10-19T07:35:25Z  M4: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:35:25Z  M4: (also) vivsock.connect_commits_a_realiased_row -> FAIL: the commit landed on the re-made row
+2026-10-19T07:35:25Z  M4: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:35:25Z  M4: KILLED
+2026-10-19T07:36:25Z  M5: vivsock.ctl_verbs_need_their_ctl -> FAIL: a CONNECTED row gives its ctl identity up
+2026-10-19T07:36:25Z  M5: (also) vivsock.ctl_verbs_meet_a_racing_peer -> PASS
+2026-10-19T07:36:25Z  M5: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:36:25Z  M5: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:36:25Z  M5: (also) vivsock.connect_commits_a_realiased_row -> FAIL: which gave its ctl identity up
+2026-10-19T07:36:25Z  M5: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:36:25Z  M5: KILLED
+2026-10-19T07:37:29Z  M7: vivsock.connect_finished_by_a_peer -> FAIL: the call's refused swap is success: the connection is made
+2026-10-19T07:37:29Z  M7: (also) vivsock.ctl_verbs_need_their_ctl -> PASS
+2026-10-19T07:37:29Z  M7: (also) vivsock.ctl_verbs_meet_a_racing_peer -> PASS
+2026-10-19T07:37:29Z  M7: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:37:29Z  M7: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:37:29Z  M7: tally 1898/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:37:29Z  M7: KILLED
+2026-10-19T07:38:32Z  M8: vivsock.ctl_verbs_meet_a_racing_peer -> FAIL: connect meets a socket a peer connected: EISCONN
+2026-10-19T07:38:32Z  M8: (also) vivsock.ctl_verbs_need_their_ctl -> PASS
+2026-10-19T07:38:32Z  M8: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:38:32Z  M8: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:38:32Z  M8: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:38:32Z  M8: tally 1898/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:38:32Z  M8: KILLED
+2026-10-19T07:39:34Z  M9: vivsock.ctl_verbs_need_their_ctl -> FAIL: with a reference of its own beside the fd's
+2026-10-19T07:39:34Z  M9: vivsock.ctl_identity_travels_with_the_fd -> FAIL: with a reference of its own beside the dup's fd
+2026-10-19T07:39:34Z  M9: (also) vivsock.ctl_verbs_meet_a_racing_peer -> PASS
+2026-10-19T07:39:34Z  M9: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:39:34Z  M9: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:39:34Z  M9: tally 1897/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:39:34Z  M9: KILLED
+2026-10-19T07:40:37Z  M10: vivsock.ctl_verbs_meet_a_racing_peer -> FAIL: connect on a number closed at the pin: EBADF
+2026-10-19T07:40:37Z  M10: (also) vivsock.ctl_verbs_need_their_ctl -> PASS
+2026-10-19T07:40:37Z  M10: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:40:37Z  M10: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:40:37Z  M10: (also) vivsock.connect_commits_a_realiased_row -> PASS
+2026-10-19T07:40:37Z  M10: tally 1898/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:40:37Z  M10: KILLED
+2026-10-19T07:41:39Z  M11: vivsock.connect_commits_a_realiased_row -> FAIL: the commit landed on the re-made row
+2026-10-19T07:41:39Z  M11: (also) vivsock.ctl_verbs_need_their_ctl -> PASS
+2026-10-19T07:41:39Z  M11: (also) vivsock.ctl_verbs_meet_a_racing_peer -> PASS
+2026-10-19T07:41:39Z  M11: (also) vivsock.ctl_identity_travels_with_the_fd -> PASS
+2026-10-19T07:41:39Z  M11: (also) vivsock.connect_finished_by_a_peer -> PASS
+2026-10-19T07:41:39Z  M11: tally 1898/1899; test.sh exit 1; EXTINCTION: kernel test suite failed
+2026-10-19T07:41:39Z  M11: KILLED
+2026-10-19T07:41:39Z  ALL KILLED: M1 M2a M2b M2c M3 M4 M5 M7 M8 M9 M10 M11 (build/ holds the last mutant's kernel -- run gate.sh next)
+2026-10-19T07:41:39Z  exit 0

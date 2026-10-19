@@ -4895,3 +4895,72 @@ logs and the mutant kernels are not committed.
 Closed (OPEN-BUGS): the close-by-number sweep (15:48Z). Still open:
 sendto/recvfrom's runtime leg (13:05Z) and the socket calls' separate row and
 slot lookups (17:09Z).
+
+## The /net socket verb arms write only to the socket's own ctl (Corona, October 19 -- audit closed)
+
+OPEN-BUGS 17:09Z. connect's dial, listen's announce and the datagram sendto's
+re-dial each found the socket's row by number and then reached the
+descriptor's Spoor by number in a second lookup. dup3 installs the new object
+before it drops the old row (the operator-voted alias order), so a peer
+thread's dup3(file, sockfd) between the two lookups left the socket's row over
+a slot that held a file: the verb was written into the file, and connect's
+swap could take the file out for a connection. Operator decision 2026-10-19:
+harden listen and the datagram sendto now. connect had the same window -- it
+read the row before it took its ctl -- and is included.
+
+Each socket()-born row now carries its ctl Spoor as an identity, one
+reference the row owns, in an array beside NP-5's readiness cache. A verb arm
+pins the descriptor and proves the pin is that Spoor before it writes. The
+row's reference is what makes the comparison exact: the Spoor cannot be freed
+and its address reused while the row lives. A refusal answers EBADF for a
+closed number and ENOTSOCK for anything else, or, when a peer thread's connect
+won the socket meanwhile, what the connected socket answers. The fork copy and
+the dup alias carry the identity with a reference of their own. connect's
+swap and its CONNECTED transition run in one handle-table hold
+(`handle_replace_hooked`), so the check never refuses a legitimate verb while
+the descriptor moves to data.
+
+Found along the way:
+- Two threads finishing one interrupted connect: the loser's refused swap
+  answered EIO. It now answers 0 when the row it started from is CONNECTED.
+- The datagram sendto now holds its ctl pin through the data open and the
+  send, so connection N cannot be handed to another socket meanwhile.
+
+Audit (holotype-reviewer, Fable 5.1 against an Opus 5.5 implementer), round 1:
+0/0/0/3, not dirty.
+- F1: connect's commit, keyed on the snapshot's epoch alone, missed a row a
+  peer re-made (dup, then dup3 of the dup back onto the number) and left the
+  number answering ENOTSOCK to every later use. The commit now also lands on
+  the row that carries the same ctl identity.
+- F2: a negative assertion over a counter nothing drove, and fixture helpers
+  that keyed a replace on an object they held no reference to.
+- F3: comments that still described one detached Spoor.
+
+Every finding is fixed. Two self-found P3s are stated: a rights-narrowed socket
+descriptor answers ENOTSOCK rather than EBADF (unreachable from a Linux guest),
+and listen's state write is keyed on the epoch, not on FRESH (pre-existing;
+netd refuses an announce on a dialed slot).
+
+Evidence. Kernel at c6a3dca72 (work/oct19-1709z/gate-20261019T074139Z, mac
+axis, one boot per leg): 1899 of 1899 in the ci, qualification and UBSan
+images, the nine named tests PASS in each, joey D7 PASS, and
+`tools/check-production.sh --all` passes. Twelve mutants on the same commit
+(work/oct19-1709z/mutants-20261019T072908Z) each failed their named test at
+the named assertion, with the suite's own extinction and no other:
+- M1-M2c: the identity check skipped, then each arm writing by number again --
+  the dup3-window test, at that arm's assertion.
+- M3, M4: the fork copy or the alias dropping the identity -- the dup and
+  fork test.
+- M5 (the commit keeping ctl) and M9 (a bare pointer, no reference) -- the
+  dup3-window test; M9 also the dup and fork test's reference counts.
+- M7: a refused swap answering EIO again -- the double-finish test.
+- M8 (no connected answer) and M10 (no EBADF) -- the racing-peer test.
+- M11: the commit keyed on the epoch alone -- the re-made-row test.
+
+One property has no unit form: that the commit stays inside the swap's hold
+needs an SMP interleaving, so it rests on the audit's reading. SMP is not
+proven here; main's land runs ci-smp-gate. The Go fork stays pinned to
+a6567ba until this branch integrates main.
+
+Closed (OPEN-BUGS): 17:09Z. Still open: 19:50Z (ten ASan host scripts on
+Apple clang; Astra's, hands-off by default, recipe recorded).

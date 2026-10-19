@@ -1,0 +1,15 @@
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 30f29ec60..d8aee5335 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -12570,7 +12570,9 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
+     // was claimed with (viv_sock_pin_ctl), as connect's dial does.
+     bool connected;
+     s64  perr;
+-    struct Spoor *ctl = viv_sock_pin_ctl(p, tab, fd_raw, &e, RIGHT_WRITE, &connected, &perr);
++    struct Spoor *ctl = sys_lookup_rw_handle(p, (hidx_t)fd_raw, RIGHT_WRITE);
++    connected = false;
++    perr = -(s64)T_E_BADF;
+     if (!ctl) {
+         // A peer thread's connect() won the socket meanwhile: EINVAL, what
+         // vivarium_listen_decide answers a CONNECTED socket.
