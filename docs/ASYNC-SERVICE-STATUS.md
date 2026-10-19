@@ -4964,3 +4964,38 @@ a6567ba until this branch integrates main.
 
 Closed (OPEN-BUGS): 17:09Z. Still open: 19:50Z (ten ASan host scripts on
 Apple clang; Astra's, hands-off by default, recipe recorded).
+
+## SYS_SRV_REGISTRY_NEW moves to 134, and the AS-R9 rules stop prescribing the defect (Corona, October 19 -- IN FLIGHT)
+
+**Vote 13** (operator, 2026-10-19 08:23Z, through main; never re-ask): corona's
+`SYS_SRV_REGISTRY_NEW` moves from 127 to 134 now, whatever order the branches
+land in. Main holds 127 (`JIT_CREATE_SEALED`) and 128 (`ICACHE_SYNC_SPACE`),
+b3 holds 129..133. The five mirrors move together: the kernel enum, libt,
+libthyla-rs (used by login), `tools/test-srv-registry-abi.py`, and
+`VIV_NATIVE_CEILING`, now 134.
+
+**What the higher ceiling exposed.** The ceiling assert was keyed to
+restart_syscall (128), the lowest signal-family row argued by the ceiling, so
+moving the ceiling to 134 would have stopped the build -- the guard doing its
+job. The seven Linux numbers 128..134 are now argued one by one in
+`vivarium.c`. rt_sigaction (134) is the only one that meets a native number:
+its row is TIER2, and a native program mis-declared as Linux arrives with the
+registry's zero flags word as sigsetsize, which `vivarium_sigaction_decide`
+refuses before anything is written. 128..133 meet an empty gap on this tree;
+`syscall.native_gap_unassigned` pins the gap (control: 134 answers its role
+gate), and `vivarium.rejects_are_deliberate` pins each row's verdict by name.
+The ceiling argument now starts at rt_sigprocmask (135). Census, measured on
+this tree: 125 live native numbers, holes at 26, 30, 43 and 127..133, 125
+switch arms, both set differences empty.
+
+**Folded in.** The `vma.h` comment named the wrong lock (the refund happens
+outside the Burrow's leaf lock, under `as->lock`); the backport to main
+found it. And four "what to prosecute" rules in corona's dossiers still
+prescribed AS-R9's own shape -- "claim before the drop, restore if it did not
+free" (`sub-kernel-burrow`, `sub-kernel-loom`, `sub-kernel-weft`) and an
+unsettled release that "settles the I-32 uncharge" (`sub-kernel-vma`). Each now
+says the charge is settled inside the drop, and the burrow rule keeps the one
+legal claim/restore caller on this tree (`SYS_JIT_DESTROY`, premise pinned).
+
+**Posture: UNBUILT, UNAUDITED.** Owed: the audit round (Fable 5.1), then the
+gate (ci, qual, UBSan, `ci-smp-gate`) batched with the pi bake.

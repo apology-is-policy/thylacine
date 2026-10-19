@@ -61,7 +61,8 @@ Proc's existing role but never mint it. Test every spawn form.
 Holding CAP_POST_SERVICE, CAP_TCB_DIAL or MAY_POST_SERVICE alone is insufficient.
 Do not add an Imperium-grantable capability for creating fresh quota domains.
 
-Reserved native syscall 127:
+Reserved native syscall 134 (127 until vote 13, 2026-10-19: 127..133 were
+assigned on other branches first, so the number was moved above them):
 
 ```
 SYS_SRV_REGISTRY_NEW(source_fd, routes, route_count, flags) -> root_fd | -errno

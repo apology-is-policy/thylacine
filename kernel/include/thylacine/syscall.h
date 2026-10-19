@@ -2419,6 +2419,15 @@ enum {
     //   cap (-ENOMEM).
     SYS_BURROW_MAP_FILE = 126,  // arg: fd (x0), offset (x1), length (x2), prot (x3), flags (x4), addr (x5)
 
+    // D7: a session's private /srv registry root (docs/SRV-SESSION-REGISTRY-
+    // DESIGN.md). Explicitly 134, not the next free number: 127..133 belong to
+    // syscalls other branches assigned first (127 JIT_CREATE_SEALED and 128
+    // ICACHE_SYNC_SPACE on main, 129..133 on b3), and the operator fixed this
+    // one at 134 so the three can land in any order (vote 13, 2026-10-19). This
+    // tree assigns nothing in 127..133; vivarium.c argues the Linux rows that
+    // the gap and the higher ceiling expose.
+    SYS_SRV_REGISTRY_NEW = 134, // boot O_PATH fd, 40-byte routes, count, flags=0
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2431,7 +2440,6 @@ enum {
     //
     // Load-bearing only while syscalls are appended in ascending order at the
     // tail -- which is the append-only rule the number space already runs on.
-    SYS_SRV_REGISTRY_NEW = 127, // boot O_PATH fd, 40-byte routes, count, flags=0
     SYS__NATIVE_TOP,
 };
 

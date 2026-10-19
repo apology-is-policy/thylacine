@@ -704,9 +704,11 @@ an exec never refunds against the successor's space (the audit's F4;
   different claims, and buffer registration accepts shared-in regions, so the
   first does not imply the second. Claim against the Burrow; refund only what
   the claim returns.
-- **Claim before the drop, restore if it did not free.** The record dies with
-  the region, so a claim after a freeing drop reads nothing and silently loses
-  the charge.
+- **Settle inside the drop, never around it.** The record dies with the
+  region, so a claim after a freeing drop reads nothing and silently loses the
+  charge; a claim before a non-final drop, restored after it, writes through a
+  freed Burrow when a sibling's final drop lands in between (AS-R9).
+  `burrow_unref_settled` decides both in one hold of the Burrow's lock.
 - **Settle the thread budget on the flag, never on the thread pointer.** A
   charge whose thread never started still owes its refund.
 

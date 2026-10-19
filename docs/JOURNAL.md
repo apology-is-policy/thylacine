@@ -1,6 +1,37 @@
 # The autonomous-run journal
 
 
+## 2026-10-19 -- vote 13 (SRV_REGISTRY_NEW -> 134) and the AS-R9 backport to main (corona)
+
+- *The backport.* AS-R9's fix had lived only on corona since 10-05 while main
+  still ran claim -> drop -> restore at five sites. Main chose a backport (yip
+  0232, option A): branch `corona/asr9-main` in worktree
+  `~/projects/thylacine-asr9` -- `f2c56dc73` (code, adapted by hand: main's
+  `SYS_JIT_DESTROY` settles by footprint, so claim/restore and
+  `burrow_is_shared_out` had no caller and were deleted) and `cb6722ddd`
+  (docs). A Fable 5.1 round runs on the adapted form; main lands it after the
+  gate.
+- *Found while porting the docs.* corona's own AS-R9 dossier pass left four
+  prosecution rules prescribing the defect ("claim before the drop, restore if
+  it did not free"). A rule is what the next reviewer checks code AGAINST, so a
+  wrong one licenses the bug it describes. Fixed on both trees; on corona the
+  burrow rule keeps `SYS_JIT_DESTROY` as the one legal claim/restore caller.
+- *Vote 13.* `SYS_SRV_REGISTRY_NEW` 127 -> 134 with its five mirrors. The
+  ceiling assert keyed to restart_syscall (128) is what made the higher ceiling
+  impossible to land silently; the seven signal-family rows it covered are
+  argued per number now. Only rt_sigaction (134) meets a native number, and the
+  registry call's zero flags word lands in sigsetsize, refused first. The
+  empty 127..133 is pinned by a dispatch test whose control is 134's role gate.
+- *Also found:* `SYS_SRV_REGISTRY_NEW` sat directly under the "NOT A SYSCALL"
+  comment that describes `SYS__NATIVE_TOP`, so a reader of the enum met the
+  sentinel's description on the real syscall. Moved above it with its own
+  comment.
+- *Not done (classifier):* deleting ten 2.5 GB pool snapshots under
+  `work/oct5-as-r9/*/inputs/` (closed gate inputs; untracked; hashes in the
+  committed manifests) was refused as irreversible; the disk is at 9.5 GiB free,
+  above build.sh's 6 GiB floor, so the gates run one bake at a time.
+- *Open:* both changes UNBUILT and UNAUDITED at this entry.
+
 ## 2026-10-19 -- 17:09Z closed: the socket verb arms check their own ctl (corona)
 
 Picked up after a self-compaction at 760fd9aa6: 17:09Z implemented, never

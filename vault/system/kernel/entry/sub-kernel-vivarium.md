@@ -12,12 +12,23 @@ design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
 updated: 2026-10-19
 ---
-## Native ceiling 127
+## Native ceiling 134
 
-The native ceiling now includes SRV_REGISTRY_NEW (127). The Vivarium
-compile-time separation assertion advances with it; there is no row at that
-number and no Linux phenotype factory operation. The new entry is native
-only and retains the kernel role gate. See [[sub-kernel-syscall-abi]].
+The native ceiling is SRV_REGISTRY_NEW, at 134 since vote 13 (2026-10-19)
+moved it from 127 and left 127..133 to other branches' syscalls. Raising the
+ceiling from 127 to 134 put seven signal-family rows below it, and the
+ceiling assert stopped the build until each was argued on its own in
+vivarium.c. rt_sigaction (134) collides with SRV_REGISTRY_NEW: its row is
+TIER2, and a native caller mis-declared as Linux arrives with the registry's
+zero flags word as sigsetsize, which `vivarium_sigaction_decide` refuses
+before anything is written. restart_syscall, kill, tkill, tgkill,
+sigaltstack and rt_sigsuspend (128..133) meet an empty gap, pinned by
+`syscall.native_gap_unassigned`, and each is consumed before the native
+switch (ENOSYS rows, or FORWARD for the unclassified kill family), pinned by
+name in `vivarium.rejects_are_deliberate`. The ceiling argument now starts
+at rt_sigprocmask (135). There is no Linux phenotype factory operation; the
+entry is native only and keeps the kernel role gate. See
+[[sub-kernel-syscall-abi]].
 
 ## Purpose
 

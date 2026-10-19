@@ -528,6 +528,7 @@ void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
 void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg C)
 void test_syscall_dispatch_unknown(void);
+void test_syscall_native_gap_unassigned(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -2616,6 +2617,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.stack_is_sparse",          test_exec_stack_is_sparse,          false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
+    { "syscall.native_gap_unassigned", test_syscall_native_gap_unassigned, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },

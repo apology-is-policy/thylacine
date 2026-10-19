@@ -500,8 +500,8 @@ enum {
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
-// above this is free of collision by construction; the two rows below it
-// (pselect6 72, ppoll 73) carry their own per-number argument, above.
+// above this is free of collision by construction; every row below it carries
+// its own per-number argument (pselect6 72 and ppoll 73 were the first).
 //
 // THE OBLIGATION, and the reason this is a symbol: a new native syscall above
 // the ceiling makes the ceiling argument stop holding for every row at or below
@@ -536,7 +536,13 @@ enum {
 // B-1d appends SYS_BURROW_MAP_FILE at 126. No vivarium row lies at 126 or 127,
 // and the lowest row argued by the ceiling is restart_syscall (128), so the
 // move voids no row's argument.
-#define VIV_NATIVE_CEILING 127
+//
+// D7 places SYS_SRV_REGISTRY_NEW at 134 (vote 13: 127..133 are held for other
+// branches' syscalls), and the ceiling rises over the signal family's 128..134.
+// Only rt_sigaction (134) meets a native number on this tree. The arguments for
+// it and for the empty 128..133 are per-number, in vivarium.c, and the lowest
+// signal-family number still argued by the ceiling is rt_sigprocmask (135).
+#define VIV_NATIVE_CEILING 134
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

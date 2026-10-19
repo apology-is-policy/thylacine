@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32, inv-i44]
 validated-by: [spec-burrow, spec-cow, spec-capacity, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -620,11 +620,15 @@ which is the point.
 - **A share-admissibility bit is minted, never asserted.** Any path that lets a
   caller set `weave` or `gpu_bo` outside its own creating syscall breaks the
   same rule `BURROW_TYPE_CODE` exists to enforce for executability.
-- **A charge is claimed before the drop, and a claim is read-and-clear.**
-  Claiming after a freeing drop reads a dead Burrow; making the claim
-  non-clearing lets two racing settlers both refund, which under-counts — the
-  direction that breaks the bound. A caller that claims and then declines must
-  `burrow_charge_restore`, never simply drop it.
+- **A charge is settled inside the drop, and a claim is read-and-clear.**
+  Claiming after a freeing drop reads a dead Burrow; claiming before the drop
+  and restoring after a non-final one writes through a dead Burrow when another
+  holder's final drop lands in the gap (AS-R9). So a settle site uses a settled
+  drop. The stand-alone claim/restore pair is legal only for a caller holding
+  an independent reference across the whole interval — `SYS_JIT_DESTROY` is the
+  one, its premise pinned by `burrow.unmap_failure_leaves_mapping_attached`.
+  Making the claim non-clearing lets two racing settlers both refund, which
+  under-counts — the direction that breaks the bound.
 - **Never snapshot the VMA to reach the Burrow across an unmap.**
   `burrow_unmap_reporting` frees the `Vma`, so `vma->burrow` dangles the moment
   it returns. Snapshot the Burrow pointer first.

@@ -42,6 +42,7 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
 
 void test_syscall_dispatch_unknown(void);
+void test_syscall_native_gap_unassigned(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -58,6 +59,33 @@ void test_syscall_dispatch_unknown(void) {
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "unknown syscall must return -1 (ENOSYS-equivalent)");
+}
+
+// 127..133 hold no native syscall on this tree: they belong to numbers other
+// branches assigned first, and SYS_SRV_REGISTRY_NEW sits above them at 134
+// (vote 13). vivarium.c's collision argument for the Linux signal rows at
+// 128..133 rests on that gap being EMPTY, so the gap is pinned here. A native
+// number assigned in it fails this test; the fix is a per-number collision
+// assert for each vivarium row at that number, and then this pin moves.
+void test_syscall_native_gap_unassigned(void) {
+    for (u64 nr = 127; nr <= 133; nr++) {
+        struct exception_context ctx;
+        for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+        ctx.regs[8] = nr;
+        TEST_SYSCALL_DISPATCH(&ctx);
+        TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
+            "a native number in 127..133 must be unassigned on this tree");
+    }
+
+    // The control one variable away: 134 IS assigned, and from this kernel
+    // thread it stops at the factory-role gate. Without it the loop above is
+    // satisfied by a dispatcher that answers -1 to everything.
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_SRV_REGISTRY_NEW;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_ACCES,
+        "134 is SYS_SRV_REGISTRY_NEW: its role gate answers, not the unknown arm");
 }
 
 void test_syscall_dispatch_puts_smoke(void) {

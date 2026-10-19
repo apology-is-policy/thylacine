@@ -41,12 +41,37 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is restart_syscall
-// (128); execve (221) is the newest. If the ceiling ever rises past one of
+// rather than by a per-number one. The lowest such number is rt_sigprocmask
+// (135); execve (221) is the newest. If the ceiling ever rises past one of
 // these, the build stops and the reader is forced back to the argument instead
 // of inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RESTART_SYSCALL > VIV_NATIVE_CEILING,
-               "the signal family's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_RT_SIGPROCMASK > VIV_NATIVE_CEILING,
+               "the signal family above rt_sigaction argues by the ceiling");
+// SYS_SRV_REGISTRY_NEW at 134 (vote 13) lifted the ceiling over the signal
+// family's 128..134, and the assert above, then keyed to restart_syscall,
+// stopped the build until each of the seven was argued on its own.
+// viv_linux_dispatch consumes every phenotyped number that is not TRANSLATED
+// before the native switch, so a Linux Proc reaches none of them; what each
+// argument settles is a native program mis-declared as Linux.
+//
+// rt_sigaction (134) collides with SYS_SRV_REGISTRY_NEW. Its row is TIER2, and
+// the translator decides before it writes anything: the registry call's flags
+// word, which must be 0, arrives as sigsetsize, and vivarium_sigaction_decide
+// refuses every size but 8 first. The mis-declared caller gets ENOSYS, having at
+// most had its own route buffer read as an act struct, and loses a call that
+// grants nothing to a Proc without the factory role anyway.
+_Static_assert(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
+               "revisit rt_sigaction / SRV_REGISTRY_NEW collision on renumber");
+// restart_syscall (128), kill (129), tkill (130), tgkill (131), sigaltstack
+// (132) and rt_sigsuspend (133) meet NO native number on this tree: 127..133
+// are held for other branches' syscalls and assigned nothing here, which
+// syscall.native_gap_unassigned pins (a native number landing in the gap fails
+// it). Each is consumed before the native switch regardless --
+// restart_syscall, sigaltstack and rt_sigsuspend are VIV_ENOSYS rows, and the
+// kill family is unclassified, which FORWARDs to ENOSYS -- and
+// vivarium.rejects_are_deliberate pins each verdict by name. When the gap's
+// natives arrive, every row there takes the collision assert its native
+// names, as restart_syscall already has against ICACHE_SYNC_SPACE on main.
 _Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
                "the socket family's collision argument is the ceiling one");
 _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,

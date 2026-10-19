@@ -21,16 +21,20 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno, abi-pty-interaction]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-14
+updated: 2026-10-19
 ---
 ## Session registry factory ABI
 
-Native syscall 127 is SRV_REGISTRY_NEW: boot O_PATH fd, route pointer, count,
-zero flags. Each route is 40 bytes (u32 length, u32 reserved, 32 name bytes).
-Public spawn bit 10 delegates the dedicated factory role. Kernel C, libt C
-and Rust wrappers agree under tools/test-srv-registry-abi.py; the native
-ceiling and Vivarium separation assertions advance to 127. No Linux-number
-translation row or Imperium capability is introduced. See [[sub-kernel-devsrv]].
+Native syscall 134 is SRV_REGISTRY_NEW: boot O_PATH fd, route pointer, count,
+zero flags. It was 127 until vote 13 (2026-10-19): 127..133 belong to syscalls
+other branches assigned first (main's 127/128, b3's 129..133), so this tree
+assigns nothing there and the number no longer depends on landing order. Each
+route is 40 bytes (u32 length, u32 reserved, 32 name bytes). Public spawn bit
+10 delegates the dedicated factory role. Kernel C, libt C and Rust wrappers
+agree under tools/test-srv-registry-abi.py; the native ceiling advances to
+134, and the Linux rows it newly covers (128..134) are argued per number in
+vivarium.c ([[sub-kernel-vivarium]]). No Linux-number translation row or
+Imperium capability is introduced. See [[sub-kernel-devsrv]].
 
 ## Purpose
 
@@ -149,6 +153,14 @@ of this dossier carries the two records.
 incremented: **124** live numbers, the span runs to 126 with the same three
 holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
 are empty.
+
+**Vote 13 (2026-10-19).** `SYS_SRV_REGISTRY_NEW` = 134 (the D7 append, first
+minted at 127); `SYS__NATIVE_TOP` is 135 and `VIV_NATIVE_CEILING` 134.
+Measured on this tree, not incremented: **125** live numbers, the span runs to
+134 with holes at 26, 30, 43 and 127..133, the native switch (now
+`syscall_native_switch`) has exactly 125 arms, and both set differences are
+empty. The 127..133 hole is deliberate and pinned
+(`syscall.native_gap_unassigned`): those numbers belong to other branches.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —

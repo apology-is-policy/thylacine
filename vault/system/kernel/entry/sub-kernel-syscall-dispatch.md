@@ -35,7 +35,7 @@ record layout. See [[sub-kernel-devsrv]].
 ## Trusted-seat and nonblocking entries
 
 Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is now 127. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+the native ceiling is now 134 (SRV_REGISTRY_NEW; [[sub-kernel-vivarium]]). [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before

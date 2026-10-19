@@ -3,7 +3,7 @@
 from pathlib import Path
 import os,re,shlex,struct,subprocess,tempfile
 root=Path(__file__).resolve().parent.parent
-expected=struct.pack('<QQII32s',127,1<<10,3,0,b'foo')
+expected=struct.pack('<QQII32s',134,1<<10,3,0,b'foo')
 cc=shlex.split(os.environ.get('CC','/opt/homebrew/opt/llvm/bin/clang --target=aarch64-none-elf'))
 objcopy=os.environ.get('OBJCOPY','/opt/homebrew/opt/llvm/bin/llvm-objcopy')
 with tempfile.TemporaryDirectory(prefix='srv-registry-abi-') as tmp:

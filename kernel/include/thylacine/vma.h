@@ -185,8 +185,9 @@ struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
 // burrow_release_mapping_settled_deferred, so the payer's I-32 charge is settled
 // in the SAME lock interval that decides whether the drop freed the region.
 // `payer` is the exact AddrSpace incarnation that paid, or NULL to settle
-// nothing; *out_refund is the pages to refund OUTSIDE as->lock, nonzero only
-// when this drop qualified. vma_free_deferred is this with no payer.
+// nothing; *out_refund is the pages to refund outside the Burrow's leaf lock
+// (the caller still holds as->lock), nonzero only when this drop qualified.
+// vma_free_deferred is this with no payer.
 struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
                                          bool *out_freed, u32 *out_refund);
 

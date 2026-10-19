@@ -2505,7 +2505,7 @@ static inline long t_pivot_root(long new_root_fd) {
     return x0;
 }
 
-#define T_SYS_SRV_REGISTRY_NEW 127
+#define T_SYS_SRV_REGISTRY_NEW 134
 struct t_srv_route { unsigned int name_len, reserved; unsigned char name[32]; };
 _Static_assert(sizeof(struct t_srv_route) == 40, "D7 route ABI");
 static inline long t_srv_registry_new(long source, const struct t_srv_route *routes,

@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-10-05
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -362,8 +362,10 @@ unconditionally over the range.
 (D-3c F1/F5).** Freeing a 9P-backed FILE Burrow reaches `spoor_clunk`, which may
 sleep — and every VMA mutator holds `as->lock`, a spinlock, so an inline free is
 the lock-across-sleep extinction. `vma_free_deferred` splits the two halves: it
-drops the mapping ref and settles the I-32 uncharge UNDER the lock (via
-`burrow_release_mapping_deferred`, which does not free), but hands the caller the
+drops the mapping ref UNDER the lock -- its settled form,
+`vma_free_settled_deferred`, takes the eager I-32 charge record inside that same
+drop (`burrow_release_mapping_settled_deferred`; neither form frees) -- but hands
+the caller the
 Burrow that still owes a physical free, to pass to `burrow_free_deferred` AFTER
 the unlock. `vma_drain_in` collects the dead Burrows on a `deferred_free_next`
 stack and drains it past `spin_unlock`; `vma_detach_range_in` and

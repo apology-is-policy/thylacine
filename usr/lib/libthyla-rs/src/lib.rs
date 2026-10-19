@@ -3902,7 +3902,7 @@ macro_rules! eprintln {
 
 // D7: explicit login-only factory role; never a fork-grantable capability.
 pub const T_SPAWN_PERM_SESSION_REGISTRY: u64 = 1 << 10;
-pub const T_SYS_SRV_REGISTRY_NEW: u64 = 127;
+pub const T_SYS_SRV_REGISTRY_NEW: u64 = 134;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SrvRoute { pub name_len: u32, pub reserved: u32, pub name: [u8; 32] }

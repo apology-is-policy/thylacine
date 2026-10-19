@@ -12,12 +12,12 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/CORVUS-DESIGN.md"]
 created: 2026-07-31
-updated: 2026-10-04
+updated: 2026-10-19
 ---
 ## D7 implementation (October 1)
 
 Login now creates and MREPL-mounts a mortal private registry before AUTH.
-`SYS_SRV_REGISTRY_NEW` (127) requires the explicit one-hop factory role
+`SYS_SRV_REGISTRY_NEW` (134) requires the explicit one-hop factory role
 (public spawn bit 10, internal Proc bit 29), a boot O_PATH root, and a
 validated immutable manifest of at most 16 forty-byte routes. It returns
 an owned root descriptor; it does not mount on behalf of userspace.

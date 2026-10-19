@@ -383,6 +383,33 @@ void test_vivarium_rejects_are_deliberate(void) {
                 "pselect6 collides with SYS_GETPID -- known, and reachable by neither");
     TEST_ASSERT(VIV_LINUX_PPOLL == SYS_GETUID,
                 "ppoll collides with SYS_GETUID -- known, and reachable by neither");
+
+    // Vote 13 moved SYS_SRV_REGISTRY_NEW to 134, which lifted the ceiling over
+    // the signal family's 128..134 (vivarium.c argues each). rt_sigaction is
+    // the one that meets a native number. A native caller mis-declared as Linux
+    // arrives with the registry's flags word -- which must be 0 -- as
+    // sigsetsize, and the decision refuses that before anything is written; the
+    // control one variable away is the same call at the size musl passes.
+    TEST_ASSERT(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
+                "rt_sigaction collides with SYS_SRV_REGISTRY_NEW -- known, and reachable by neither");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 0) == VIV_FORWARD,
+                "the registry call's shape (flags 0 as sigsetsize 0) is refused first");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 8) == VIV_TRANSLATED,
+                "control: the same call at sigsetsize 8 translates");
+
+    // The other six meet an empty gap (syscall.native_gap_unassigned pins it),
+    // and each is consumed before the native switch: its verdict, by name.
+    // (sigaltstack, 132, is pinned to ENOSYS above for the 6.23 detector.)
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RESTART_SYSCALL, args, &out),
+                   (int)VIV_ENOSYS, "restart_syscall (128) is an ENOSYS row");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_KILL, args, &out),
+                   (int)VIV_FORWARD, "kill (129) is unclassified: FORWARD to ENOSYS");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TKILL, args, &out),
+                   (int)VIV_FORWARD, "tkill (130) is unclassified: FORWARD to ENOSYS");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_TGKILL, args, &out),
+                   (int)VIV_FORWARD, "tgkill (131) is unclassified: FORWARD to ENOSYS");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
+                   (int)VIV_ENOSYS, "rt_sigsuspend (133) is an ENOSYS row");
 }
 
 void test_vivarium_unknown_forwards(void) {
