@@ -4,7 +4,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#ifndef O_PATH
+#define O_PATH 010000000
+#endif
 #ifndef O_TMPFILE
 #define O_TMPFILE (020000000 | O_DIRECTORY)
 #endif
@@ -15,7 +19,7 @@
 #define SYS_thyla_handle_flags_set 130
 #include "fs-under-test.h"
 static long nums[8], x0s[8], x1s[8];
-static int calls, failures, checks, parent_calls;
+static int calls, failures, checks, parent_calls, fstat_calls;
 static long r_open, r_create, r_set;
 static void *pouch_sock_resolve(int fd) { (void)fd; return 0; }
 static long sys(long n, long a, long b) {
@@ -45,6 +49,9 @@ int __pouch_open_parent(int atfd, const char *path, const char **leaf, size_t *l
 }
 /* The host's mode_t is promotable; the guest's is not. */
 #define mode_t unsigned
+/* Only an O_DIRECTORY open asks what it opened; no case here passes one. */
+static int mock_fstat(int fd, struct stat *st) { (void)fd; fstat_calls++; memset(st, 0, sizeof *st); return 0; }
+#define fstat mock_fstat
 #define openat tested_openat
 #include "descriptor-under-test.h"
 #include "openat-under-test.c"
@@ -70,5 +77,6 @@ int main(void) {
  RESET(7, 0, 0); CASE("append-set-before-seek", tested_openat(AT_FDCWD, "f", O_WRONLY | O_APPEND | O_CLOEXEC) == 7 && (set = at(130)) >= 0 && (seek = at(SYS_lseek)) > set && x0s[seek] == 7);
  RESET(7, 0, -1); CASE("append-failed-set-no-seek", tested_openat(AT_FDCWD, "f", O_WRONLY | O_APPEND | O_CLOEXEC) == -1 && at(SYS_lseek) < 0);
  RESET(7, 0, 0); CASE("append-no-cloexec-seeks", tested_openat(AT_FDCWD, "f", O_WRONLY | O_APPEND) == 7 && at(130) < 0 && at(SYS_lseek) == 1);
+ CASE("no-fstat-without-o-directory", fstat_calls == 0);
  printf("tests=%d failures=%d\n", checks, failures); return !!failures;
 }

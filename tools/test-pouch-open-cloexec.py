@@ -8,7 +8,7 @@ MUTANTS={
  'close-gone':[('if (s != -EBADF) __syscall(SYS_close, r);','__syscall(SYS_close, r);')],
  'no-close':[('if (s != -EBADF) __syscall(SYS_close, r);','(void)s;')],
  'seek-first':[('\tif (r >= 0 && (flags & O_APPEND))\n\t\t__syscall(SYS_lseek, r, 0, SEEK_END);\n',''),
-               ('{\n\tif (r >= 0 && (flags & O_CLOEXEC)) {','{\n\tif (r >= 0 && (flags & O_APPEND))\n\t\t__syscall(SYS_lseek, r, 0, SEEK_END);\n\tif (r >= 0 && (flags & O_CLOEXEC)) {')],
+               ('\tif (r >= 0 && (flags & O_CLOEXEC)) {','\tif (r >= 0 && (flags & O_APPEND))\n\t\t__syscall(SYS_lseek, r, 0, SEEK_END);\n\tif (r >= 0 && (flags & O_CLOEXEC)) {')],
  'create-bypass':[('if (r >= 0) { __syscall(SYS_close, p); return pouch_open_ret(r, flags); }','if (r >= 0) { __syscall(SYS_close, p); return __syscall_ret(r); }')],
  'eexist-bypass':[('\t\t\treturn pouch_open_ret(o, flags);','\t\t\treturn __syscall_ret(o);')],
 }
