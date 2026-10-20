@@ -717,7 +717,7 @@ EOF
     # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
     # -f guard in the copy loop below stages nothing when build_rust_progs
     # self-skipped off the track-R box, so this entry is inert there.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fd" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-descriptor-ops" "pouch-hello-dup2-self" "pouch-hello-handle-query" "pouch-hello-spawn-actions" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fd" "pouch-hello-links" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-descriptor-ops" "pouch-hello-dup2-self" "pouch-hello-handle-query" "pouch-hello-spawn-actions" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -4150,6 +4150,29 @@ populate_stratum_pool() {
             || { echo "==> populate pool: sync (shcompat) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: /bin/sh compat shim baked (/lib/shcompat/sh -> /viv/abin/sh; joey grafts MAFTER at /bin -- UM-6/X-11)"
     fi
+
+    # B-3f': the symlink prover's fixture -> /lib/pouch-links, real links of
+    # every shape pouch-hello-links reads (live, dangling, absolute, to a
+    # directory, a self-loop, a chain of two). Staged from nothing here, so it
+    # cannot be stale; stratum-fs put copies a link AS a link (lstat +
+    # readlink). /lib exists by now (the ndb bake). Nothing writes it after.
+    local plinks="$BUILD_DIR/pouch-links"
+    rm -rf "$plinks"; mkdir -p "$plinks/sub"
+    printf 'pouch-links target\n' > "$plinks/target"
+    printf 'pouch-links leaf\n' > "$plinks/sub/leaf"
+    ln -s target "$plinks/live"
+    ln -s nosuch "$plinks/dead"
+    ln -s sub "$plinks/dir"
+    ln -s /lib/pouch-links/target "$plinks/abs"
+    ln -s loop "$plinks/loop"
+    ln -s live "$plinks/chain"
+    "$stratum_fs_bin" -s "$sock_path" put "$plinks" /lib/pouch-links \
+        || { echo "==> populate pool: put /lib/pouch-links FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (pouch-links) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    [[ "$("$stratum_fs_bin" -s "$sock_path" readlink /lib/pouch-links/abs)" == "/lib/pouch-links/target" ]] \
+        || { echo "==> populate pool: /lib/pouch-links/abs readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "==> populate pool: /lib/pouch-links baked + readback-verified (B-3f' symlink fixture)"
     [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
     # H-3c: bake the presentation verb table at /lib/beacon/verbs (BEACON.md
@@ -4892,7 +4915,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fd pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk pouch-hello-descriptor-ops pouch-hello-dup2-self pouch-hello-handle-query pouch-hello-spawn-actions; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fd pouch-hello-links pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk pouch-hello-descriptor-ops pouch-hello-dup2-self pouch-hello-handle-query pouch-hello-spawn-actions; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

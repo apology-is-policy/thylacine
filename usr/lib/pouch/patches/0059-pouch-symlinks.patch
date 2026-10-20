@@ -1,0 +1,390 @@
+Pouch symlink truth over native SYS_LSTAT and SYS_READLINK (operator vote
+2026-10-20).
+
+The kernel has had symlinks since DISTRO D-1, but Pouch still assumed it had
+none (G11): lstat() and fstatat(AT_SYMLINK_NOFOLLOW) followed a final link,
+readlink() answered EINVAL for a live link and ENOENT for a dangling one, so
+realpath() left links unexpanded, lchmod() changed the target's mode, and
+openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
+
+- fstatat's AT_SYMLINK_NOFOLLOW is native SYS_LSTAT (136), which reports a
+  final link itself (S_IFLNK). A flag outside AT_SYMLINK_NOFOLLOW,
+  AT_EMPTY_PATH, AT_NO_AUTOMOUNT and the AT_STATX sync hints is EINVAL, and
+  a path past PATH_MAX is ENAMETOOLONG, as on Linux.
+- readlinkat's general arm is native SYS_READLINK (135), its errno verbatim.
+  The /proc whitelist arm is unchanged and still runs first.
+- openat passes O_NOFOLLOW (ELOOP on a final link, or the link itself with
+  O_PATH) and O_PATH (a walk-only descriptor) to the kernel. O_PATH beats
+  every flag but O_CLOEXEC, O_DIRECTORY and O_NOFOLLOW, as in Linux's
+  build_open_how, and O_CREAT with O_DIRECTORY is then EINVAL, as on Linux
+  since 6.4. O_DIRECTORY appends a '/', so the kernel's trailing-slash gate
+  refuses a non-directory before anything opens; with O_NOFOLLOW, which a
+  trailing slash would defeat, the descriptor is checked after the open and
+  anything but a directory is closed again, ENOTDIR.
+- fchmodat's AT_SYMLINK_NOFOLLOW opens the final component without following
+  it and answers EOPNOTSUPP for a link, as musl and glibc do; any other flag
+  is EINVAL.
+- lstat() and remove() keep their code; their comments now say what lstat
+  does.
+
+--- a/src/internal/_pouch_fs.h
++++ b/src/internal/_pouch_fs.h
+@@ -34,6 +34,8 @@
+ #define SYS_thyla_getgid       74   /* () -> primary_gid  (A-1a; NEVER fails) */
+ #define SYS_thyla_getppid     132   /* () -> parent pid, 0 if kproc or none (NEVER fails) */
+ #define SYS_thyla_umask       133   /* (mask & 0777) -> previous mask (M8; NEVER fails) */
++#define SYS_thyla_readlink    135   /* (path, len, buf, bufsiz) -> bytes placed (vote 2026-10-20) */
++#define SYS_thyla_lstat       136   /* SYS_STAT's no-follow twin (path, len, &t_stat) */
+ 
+ /* SYS_open sentinels / omode (mirror kernel/include/thylacine/syscall.h). */
+ #define POUCH_FROM_ROOT   ((long)-1)   /* SYS_WALK_OPEN_FROM_ROOT */
+@@ -41,6 +43,7 @@
+ #define POUCH_OWRITE      1u
+ #define POUCH_ORDWR       2u
+ #define POUCH_OPATH       0x80u        /* SYS_WALK_OPEN_OPATH: walk-only, born R|W */
++#define POUCH_ONOFOLLOW   0x20u        /* SYS_WALK_OPEN_NOFOLLOW: a final link is not followed */
+ 
+ /* SYS_wstat valid-mask bits. */
+ #define POUCH_WSTAT_MODE  (1u << 0)
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -16,13 +16,34 @@
+  *
+  * Relative paths are now resolved (CL-1a wired chdir/getcwd): SYS_open's
+  * FROM_ROOT arm cwd-joins a relative path (LS-4), so the old "absolute
+- * only" restriction is lifted -- make/clang emit cwd-relative paths. */
++ * only" restriction is lifted -- make/clang emit cwd-relative paths.
++ *
++ * O_NOFOLLOW and O_PATH are omode bits of the open calls. NOFOLLOW makes a
++ * final symlink answer ELOOP, or with OPATH yields the link itself; OPATH
++ * walks to the file without opening it for byte I/O, so read and write on the
++ * descriptor answer EBADF while fstat works. O_PATH beats every other flag, as
++ * in Linux's build_open_how: only O_CLOEXEC, O_DIRECTORY and O_NOFOLLOW stay
++ * beside it. O_CREAT with O_DIRECTORY is then EINVAL, as on Linux since 6.4.
++ *
++ * O_DIRECTORY has no omode bit. Without O_NOFOLLOW it appends a '/' to the
++ * path, so the kernel's trailing-slash gate (#82) refuses a non-directory
++ * before anything is opened. A trailing slash forces the follow that
++ * O_NOFOLLOW refuses, so with O_NOFOLLOW the open runs as asked and the exit
++ * helper below closes anything but a directory, ENOTDIR. There a non-directory
++ * is opened before it is refused, and without O_PATH a final link answers the
++ * kernel's ELOOP where Linux answers ENOTDIR. The exit helper checks every
++ * O_DIRECTORY open, so a path with no room for the slash is still refused.
++ *
++ * A dangling final symlink is not created through: with O_CREAT and without
++ * O_EXCL the create answers EEXIST and the open after it ENOENT, where Linux
++ * creates the target. */
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <errno.h>
+ #include <stddef.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/stat.h>
+ #include "syscall.h"
+ #include "_pouch_fs.h"
+ #include "_pouch_descriptor.h"
+@@ -71,6 +92,16 @@
+ 
+ static int pouch_open_ret(long r, int flags)
+ {
++	/* O_DIRECTORY: anything but a directory is closed again, ENOTDIR. A
++	 * failed fstat answers its own errno. */
++	if (r >= 0 && (flags & O_DIRECTORY)) {
++		struct stat st;
++		long e = fstat((int)r, &st) ? -errno : S_ISDIR(st.st_mode) ? 0 : -ENOTDIR;
++		if (e) {
++			__syscall(SYS_close, r);
++			return __syscall_ret(e);
++		}
++	}
+ 	if (r >= 0 && (flags & O_CLOEXEC)) {
+ 		long s = pouch_set_cloexec(r);
+ 		if (s < 0) {
+@@ -97,17 +128,28 @@
+ 	if (fd != AT_FDCWD) { errno = ENOTSUP; return -1; }   /* AT_FDCWD only */
+ 	if (!filename) { errno = EFAULT; return -1; }
+ 
++	if (flags & O_PATH)
++		flags &= O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW;
++
++	if ((flags & (O_CREAT | O_DIRECTORY)) == (O_CREAT | O_DIRECTORY)) {
++		errno = EINVAL;
++		return -1;
++	}
++
+ 	/* O_TMPFILE (an unnamed inode) has no Thylacine primitive at v1.0. */
+ 	if ((flags & O_TMPFILE) == O_TMPFILE) { errno = ENOTSUP; return -1; }
+ 
+ 	unsigned long omode;
+-	switch (flags & O_ACCMODE) {
++	if (flags & O_PATH) {
++		omode = POUCH_OPATH;
++	} else switch (flags & O_ACCMODE) {
+ 	case O_RDONLY: omode = POUCH_OREAD;  break;
+ 	case O_WRONLY: omode = POUCH_OWRITE; break;
+ 	case O_RDWR:   omode = POUCH_ORDWR;  break;
+ 	default:       errno = EINVAL; return -1;
+ 	}
+ 	if (flags & O_APPEND) omode |= POUCH_OAPPEND;
++	if (flags & O_NOFOLLOW) omode |= POUCH_ONOFOLLOW;
+ 
+ 	size_t len = strnlen(filename, POUCH_PATH_MAX + 1);
+ 	if (!len) { errno = ENOENT; return -1; }
+@@ -150,6 +192,13 @@
+ 	/* Non-create open: one stalk-resolved open from the Territory root
+ 	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC. */
+ 	unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
++	char slashed[POUCH_PATH_MAX];
++	if ((flags & (O_DIRECTORY | O_NOFOLLOW)) == O_DIRECTORY &&
++	    filename[len - 1] != '/' && len < POUCH_PATH_MAX) {
++		memcpy(slashed, filename, len);
++		slashed[len++] = '/';
++		filename = slashed;
++	}
+ 	return pouch_open_ret(__syscall(SYS_thyla_open, POUCH_FROM_ROOT,
+ 	                                filename, len, om), flags);
+ }
+--- a/src/stat/fstatat.c
++++ b/src/stat/fstatat.c
+@@ -1,26 +1,30 @@
+ /*
+  * pouch fstatat() -- route the PATH forms onto the Thylacine-native
+  * SYS_stat (= 88; the POUNCE walk-query, docs/POUNCE-DESIGN.md section 7)
+- * and translate the 88-byte struct t_stat into musl's aarch64 struct stat
+- * (the exact 0010-pouch-fstat-lseek translation, one source shape).
++ * and its no-follow twin SYS_lstat (= 136), and translate the 88-byte
++ * struct t_stat into musl's aarch64 struct stat (the exact
++ * 0010-pouch-fstat-lseek translation, one source shape).
+  *
+  * The upstream fstatat is the statx/newfstatat trampoline the whole musl
+  * stat() family funnels through (stat -> fstatat(AT_FDCWD, path, buf, 0);
+  * lstat -> AT_SYMLINK_NOFOLLOW; fstat's AT_EMPTY_PATH arm was already
+  * bypassed by 0010). Both Linux syscalls are 0xFFFF ENOSYS sentinels under
+- * the 0001 seam, so pouch stat(path)/lstat(path) were ENOSYS holes until
+- * this patch. Now:
++ * the 0001 seam. Here:
+  *
+- *   - dirfd == AT_FDCWD: SYS_stat(path, len, &t_stat). The kernel joins a
+- *     relative path with the Territory cwd (LS-4) -- exactly AT_FDCWD's
+- *     meaning. AT_SYMLINK_NOFOLLOW is accepted and identical (no symlinks
+- *     at v1.0, G11: stat == lstat).
++ *   - dirfd == AT_FDCWD: SYS_stat(path, len, &t_stat), or SYS_lstat for
++ *     AT_SYMLINK_NOFOLLOW, which reports a final symlink itself (S_IFLNK)
++ *     rather than its target. The kernel joins a relative path with the
++ *     Territory cwd (LS-4) -- exactly AT_FDCWD's meaning.
+  *   - an absolute path with any dirfd: the dirfd is ignored per POSIX.
+  *   - a RELATIVE path against a real dirfd: -ENOSYS (fail-closed; the
+- *     kernel has no dirfd-relative stat surface at v1.0 -- unchanged from
+- *     the pre-patch behavior where EVERY form was ENOSYS).
++ *     kernel has no dirfd-relative stat surface).
+  *   - AT_EMPTY_PATH with an empty path: delegate to fstat(dirfd) (the
+  *     0010-patched SYS_fstat path).
++ *   - a flag outside AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH, AT_NO_AUTOMOUNT and
++ *     the AT_STATX sync hints is EINVAL, as on Linux. Nothing mounts on
++ *     traversal here and no remote attribute cache needs syncing, so those
++ *     last two ask for what always happens. A path past PATH_MAX is
++ *     ENAMETOOLONG.
+  */
+ #define _BSD_SOURCE
+ #include <sys/stat.h>
+@@ -32,8 +36,8 @@
+ 
+ /* aarch64 has NO legacy __NR_stat (LP64 new-arch table), so there is no
+  * generated SYS_stat alias to repoint like 0010 did for SYS_fstat; the
+- * Thylacine number is defined locally, self-contained. */
+-#define SYS_thyla_stat 88
++ * Thylacine numbers come from the shared header. */
++#include "_pouch_fs.h"
+ 
+ /* Mirror of <thylacine/syscall.h> struct t_stat (the 0010 hand-rolled
+  * shape; only its own size assert below checks this copy). */
+@@ -66,6 +70,9 @@
+ 	unsigned i;
+ 
+ 	if (!path || !st) return __syscall_ret(-EFAULT);
++	if (flag & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH |
++	             AT_STATX_SYNC_TYPE))
++		return __syscall_ret(-EINVAL);
+ 
+ 	/* fstatat(fd, "", st, AT_EMPTY_PATH) == fstat(fd): ride the
+ 	 * 0010-patched SYS_fstat arm. */
+@@ -78,12 +85,14 @@
+ 	if (path[0] != '/' && fd != AT_FDCWD)
+ 		return __syscall_ret(-ENOSYS);
+ 
+-	len = strlen(path);
++	len = strnlen(path, POUCH_PATH_MAX + 1);
+ 	if (!len) return __syscall_ret(-ENOENT);
++	if (len > POUCH_PATH_MAX) return __syscall_ret(-ENAMETOOLONG);
+ 
+ 	for (i = 0; i < sizeof(t); i++) ((unsigned char *)&t)[i] = 0;
+ 
+-	rc = __syscall(SYS_thyla_stat, path, len, &t);
++	rc = __syscall((flag & AT_SYMLINK_NOFOLLOW) ? SYS_thyla_lstat : SYS_thyla_stat,
++	               path, len, &t);
+ 	if (rc < 0)  return __syscall_ret(rc);
+ 	if (rc != 0) return __syscall_ret(-ENOENT);
+ 
+--- a/src/stat/lstat.c
++++ b/src/stat/lstat.c
+@@ -6,9 +6,8 @@
+  * registry through a stat shape. Returning ENOENT matches the
+  * idiomatic-prep "no stale socket" answer programs expect.
+  *
+- * Non-/srv paths fall through to the existing fstatat delegation
+- * (ENOSYS via SYS_newfstatat = 0xFFFF today, preserving the broad
+- * filesystem's silently-wrong-POSIX rejection).
++ * Non-/srv paths fall through to fstatat with AT_SYMLINK_NOFOLLOW,
++ * native SYS_LSTAT, which reports a final symlink itself.
+  *
+  * See 0014-pouch-srv-stubs.patch for the design rationale. */
+ #include <sys/stat.h>
+--- a/src/stat/fchmodat.c
++++ b/src/stat/fchmodat.c
+@@ -1,8 +1,10 @@
+-/* pouch boundary-line (CL-1a): fchmodat(AT_FDCWD, path, mode, 0). Thylacine
++/* pouch boundary-line (CL-1a): fchmodat(AT_FDCWD, path, mode, flag). Thylacine
+  * SYS_WSTAT is fd-based, so resolve the PATH to an O_PATH fd (born R|W;
+  * wstat's authority is identity not rights, #47) then set the MODE axis.
+- * flag != 0 (AT_SYMLINK_NOFOLLOW) is accepted and identical -- no symlinks
+- * at v1.0, G11. A real dirfd -> ENOTSUP (P-3). */
++ * AT_SYMLINK_NOFOLLOW opens the final component without following it; if that
++ * is a symlink the answer is EOPNOTSUPP, as musl and glibc answer on Linux,
++ * because a link's mode is not changeable. Any other flag is EINVAL. A real
++ * dirfd -> ENOTSUP (P-3). */
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <errno.h>
+@@ -13,17 +15,27 @@
+ int fchmodat(int fd, const char *path, mode_t mode, int flag)
+ {
+ 	if (!path) return __syscall_ret(-EFAULT);
++	if (flag & ~AT_SYMLINK_NOFOLLOW) return __syscall_ret(-EINVAL);
+ 	if (fd != AT_FDCWD) return __syscall_ret(-ENOTSUP);
+ 
+ 	size_t len = strnlen(path, POUCH_PATH_MAX + 1);
+ 	if (!len) return __syscall_ret(-ENOENT);
+ 	if (len > POUCH_PATH_MAX) return __syscall_ret(-ENAMETOOLONG);
+ 
+-	long pfd = __syscall(SYS_thyla_open, POUCH_FROM_ROOT, path, len, POUCH_OPATH);
++	unsigned long omode = POUCH_OPATH;
++	if (flag & AT_SYMLINK_NOFOLLOW) omode |= POUCH_ONOFOLLOW;
++	long pfd = __syscall(SYS_thyla_open, POUCH_FROM_ROOT, path, len, omode);
+ 	if (pfd < 0) return __syscall_ret(pfd);
+ 
+-	long r = __syscall(SYS_thyla_wstat, (int)pfd, POUCH_WSTAT_MODE,
+-	                   (unsigned)mode & 0777u, 0, 0, 0UL);
++	long r = 0;
++	if (flag & AT_SYMLINK_NOFOLLOW) {
++		struct stat st;
++		if (fstat((int)pfd, &st)) r = -errno;
++		else if (S_ISLNK(st.st_mode)) r = -EOPNOTSUPP;
++	}
++	if (!r)
++		r = __syscall(SYS_thyla_wstat, (int)pfd, POUCH_WSTAT_MODE,
++		              (unsigned)mode & 0777u, 0, 0, 0UL);
+ 	__syscall(SYS_close, (int)pfd);
+ 	return __syscall_ret(r);
+ }
+--- a/src/unistd/readlinkat.c
++++ b/src/unistd/readlinkat.c
+@@ -1,29 +1,23 @@
+-/* pouch boundary-line: readlink() / readlinkat() on a system with no symlinks
+- * (VIVARIUM V-4b-4; docs/VIVARIUM.md section 6.11).
++/* pouch boundary-line: readlink() / readlinkat() over native SYS_READLINK
++ * (135, operator vote 2026-10-20), where the seam parked __NR_readlinkat at the
++ * 0xFFFF ENOSYS sentinel.
+  *
+- * Thylacine has NO symlink surface at all -- there is no SYS_READLINK, and no
+- * EL0 path creates or observes one. The seam therefore parked __NR_readlinkat
+- * at the 0xFFFF ENOSYS sentinel. That was the wrong answer, and not merely an
+- * unimplemented one: on a system with no symlinks the result of readlink() is
+- * KNOWN for every path, and POSIX already has the word for it. A path that
+- * exists and is not a symlink is EINVAL; a path that does not exist is that
+- * path's own error.
++ * The kernel places at most bufsize bytes of a final symlink's target, never
++ * NUL-terminated, and answers EINVAL for a path that exists and is not a
++ * symlink, or else the path's own resolution errno. Both halves are
++ * load-bearing, because musl's realpath() is a pure userspace resolver that
++ * calls readlink() on each path prefix and reads the result as a fork in the
++ * road:
+  *
+- * The distinction is load-bearing rather than pedantic, because musl's
+- * realpath() is a pure userspace resolver that calls readlink() on each path
+- * prefix and reads the errno as a fork in the road:
+- *
+  *     if (k<0) { if (errno != EINVAL) return 0; ... continue ... }
+  *
+- * EINVAL means "not a link, keep walking"; ANY other errno is fatal. Under the
+- * ENOSYS sentinel realpath() therefore failed on its very first component --
+- * so realpath() was broken for every path on the system, for every ported
+- * program, which is a good deal larger than the /proc/self/exe gap that
+- * surfaced it. The truthful EINVAL repairs it whole, with no realpath patch: on
+- * a symlink-free system musl's resolver degenerates into exactly what realpath
+- * should do there, which is canonicalize . / .. / duplicate slashes and verify
+- * that every component exists.
++ * EINVAL means "not a link, keep walking"; ANY other errno is fatal; a count is
++ * a link to expand. A wrong errno fails realpath() for every path, and a link
++ * answered as EINVAL is left unexpanded in the path realpath() returns.
+  *
++ * bufsize 0: the kernel refuses an empty buffer, so a one-byte dummy stands in
++ * and a link then reports 0, as upstream musl does.
++ *
+  * THE /proc ARM (the phenotype half). Linux presents four files as SYMLINKS
+  * that Thylacine presents as REGULAR FILES whose contents are the target path:
+  * /proc/{self,<pid>}/{exe,cwd}. Both kernel renders are deliberately bare bytes
+@@ -36,8 +30,8 @@
+  * It is NOT a licence to open-and-read arbitrary paths -- that would turn
+  * readlink() into a file-contents oracle. The match is a closed whitelist of
+  * four path shapes, and a MISS is fail-safe rather than a wrong answer: an
+- * unmatched path falls through to the general arm, whose answer for a regular
+- * file is EINVAL, which is literally true of every file we serve.
++ * unmatched path falls through to the general arm, which answers what the
++ * kernel knows of it.
+  *
+  * `self` is REWRITTEN to our own pid rather than passed through. Native /proc
+  * has no `self` entry at all (devproc's per-pid dirs are numeric), so a
+@@ -132,6 +126,7 @@
+ 	char dummy[1];
+ 	char lp[PROC_LINK_MAX];
+ 	size_t len, lplen;
++	long r;
+ 
+ 	if (!bufsize) {
+ 		buf = dummy;
+@@ -170,16 +165,8 @@
+ 		return (ssize_t)k;
+ 	}
+ 
+-	/* Everything else. Existence decides between the two truthful answers, and
+-	 * the resolution errno (ENOENT / ENOTDIR / EACCES) passes through verbatim
+-	 * -- which is what lets realpath() fail for the RIGHT reason.
+-	 *
+-	 * Reusing faccessat rather than repeating its SYS_STAT probe is deliberate:
+-	 * that probe carries an 88-byte struct t_stat ABI mirror, and a duplicated
+-	 * mirror is only ever verified against ITSELF. A kernel-side growth of
+-	 * t_stat would then smash the stack of whichever copy was forgotten -- the
+-	 * #100 lesson, which cost a boot segv. One mirror, one place. */
+-	if (faccessat(AT_FDCWD, path, F_OK, 0) != 0)
+-		return -1;                     /* errno already set, verbatim */
+-	return __syscall_ret(-EINVAL);     /* it exists, and it is not a symlink */
++	/* Everything else: the kernel's answer, its errno verbatim. */
++	r = __syscall(SYS_thyla_readlink, path, len, buf, bufsize);
++	if (buf == dummy && r > 0) r = 0;
++	return __syscall_ret(r);
+ }
+--- a/src/stdio/remove.c
++++ b/src/stdio/remove.c
+@@ -2,8 +2,9 @@
+  * RAW __syscall(SYS_unlinkat) -- the 0xFFFF/ENOSYS sentinel on pouch -- so the
+  * upstream body cannot work here regardless; it must route through the
+  * pouch-wired unlink()/rmdir() (the CL-1a unlinkat wire). lstat-dispatch: a
+- * directory -> rmdir(), anything else -> unlink(). Thylacine has no symlinks at
+- * v1.0 so lstat == stat. std::filesystem::remove uses ::remove -- surfaced by
++ * directory -> rmdir(), anything else -> unlink(). lstat does not follow a
++ * final symlink, so a link to a directory is unlinked, as POSIX asks, and its
++ * target is left alone. std::filesystem::remove uses ::remove -- surfaced by
+  * CL-2.
+  *
+  * HISTORY (#80): this patch was originally written because SYS_UNLINK ALSO

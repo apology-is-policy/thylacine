@@ -22,8 +22,10 @@
 //   rename          -> SYS_RENAME
 //   readdir         -> SYS_READDIR (9P-stream -> struct dirent translation)
 //   unlink / rmdir  -> SYS_UNLINK (+REMOVEDIR)
-//   readlink        -> open+read of /proc/{self,<pid>}/{exe,cwd}, else the
-//                      truthful EINVAL/ENOENT (V-4b-4, patch 0031)
+//   readlink        -> open+read of /proc/{self,<pid>}/{exe,cwd} (V-4b-4,
+//                      patch 0031), else native SYS_READLINK (patch 0059),
+//                      whose EINVAL/ENOENT for a non-link these legs check;
+//                      real links are pouch-hello-links' legs
 //   realpath        -> no wire of its own: musl resolves in userspace atop
 //                      readlink, so it works only once readlink tells the truth
 //   stat            -> SYS_STAT on the synthetic Devs: /ctl + /env stat as the
@@ -116,7 +118,7 @@ int main(void) {
 	if (tbuf[0] != '/') return fail("readlink(trunc)", "truncated target not a path");
 	if (tbuf[4] != 'Z') return fail("readlink(trunc)", "wrote past the buffer");
 
-	// --- readlink's GENERAL arm: no symlinks exist, so an existing path is
+	// --- readlink's GENERAL arm: an existing path that is not a link is
 	// EINVAL and an absent one is ENOENT. This is the pair musl's realpath()
 	// reads as its fork in the road -- under the old ENOSYS sentinel realpath
 	// failed on its first component, for every path on the system. ---

@@ -11811,6 +11811,24 @@ int main(void) {
                      "close-on-exec)\n");
         }
 
+        // B-3f': the symlink prover (0059, operator vote 2026-10-20). Spawn
+        // /bin/pouch-hello-links -- it reads the real links the bake puts at
+        // /lib/pouch-links: lstat (native SYS_LSTAT) reports a link where
+        // stat follows it, readlink (native SYS_READLINK) answers its target,
+        // realpath expands it, open honours O_NOFOLLOW, O_PATH and
+        // O_DIRECTORY, and lchmod refuses a link. Boot-fatal.
+        {
+            const char ln_name[]   = "/bin/pouch-hello-links";
+            const char ln_expect[] = POUCH_CENSUS_LINKS;
+            if (pouch_smoke_one(ln_name, sizeof(ln_name) - 1,
+                                ln_expect, sizeof(ln_expect) - 1) != 0) {
+                t_putstr("joey: B-3f' PROBE pouch-hello-links FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: B-3f' PROBE OK (symlinks: lstat, readlink, "
+                     "realpath, O_NOFOLLOW/O_PATH/O_DIRECTORY, lchmod)\n");
+        }
+
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;

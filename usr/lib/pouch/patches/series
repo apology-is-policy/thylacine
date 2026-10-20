@@ -186,3 +186,5 @@
 0057-pouch-kill-probe-getppid.patch
 # 0058 (M8, operator vote 2026-10-19): umask over native SYS_UMASK 133, mask & 0777 so it never fails.
 0058-pouch-umask.patch
+# 0059 (B-3f', operator vote 2026-10-20): lstat/fstatat NOFOLLOW over native SYS_LSTAT 136, readlink over SYS_READLINK 135, open O_NOFOLLOW/O_PATH/O_DIRECTORY, lchmod EOPNOTSUPP on a link.
+0059-pouch-symlinks.patch
