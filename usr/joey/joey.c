@@ -11829,6 +11829,24 @@ int main(void) {
                      "realpath, O_NOFOLLOW/O_PATH/O_DIRECTORY, lchmod)\n");
         }
 
+        // The time zone prover (patch 0060). Spawn /bin/pouch-hello-tz -- it
+        // writes a TZif file and has musl read it: tzset opens it through
+        // openat's translation and maps it private and read-only (one row of
+        // /proc/<pid>/maps, gone after a switch to UTC), localtime follows the
+        // file's transition table, and a POSIX TZ string needs no file.
+        // Boot-fatal.
+        {
+            const char tz_name[]   = "/bin/pouch-hello-tz";
+            const char tz_expect[] = POUCH_CENSUS_TZ;
+            if (pouch_smoke_one(tz_name, sizeof(tz_name) - 1,
+                                tz_expect, sizeof(tz_expect) - 1) != 0) {
+                t_putstr("joey: raw-open PROBE pouch-hello-tz FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: raw-open PROBE OK (time zone file: opened, mapped "
+                     "private, unmapped, its transition table read)\n");
+        }
+
         // PTY-4: the job-control E2E. The driver (/bin/jc-probe) hosts a
         // REAL /bin/ut on a freshly-minted pts (the ptyhost shape) and
         // scripts the ladder against the master: the session dance + prompt;

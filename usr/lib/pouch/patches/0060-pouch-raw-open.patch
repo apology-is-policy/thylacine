@@ -1,0 +1,279 @@
+Pouch: musl's raw opens through openat's translation; __map_file maps private.
+
+internal/syscall.h's sys_open family takes musl's SYS_open arm whenever
+SYS_open is defined, and Pouch defines it as 65, the native open, whose
+arguments are (start_fd, path, length, omode), not Linux's (path, flags,
+mode). So __map_file's open sent the path pointer as the start descriptor and
+the flags as the path, the kernel refused it, and every time zone file, locale
+file and message catalog (tzset, MUSL_LOCPATH, catopen, gettext) failed to
+load, softly: UTC, the C locale, untranslated messages. Patch 0023 said the
+macro reached the 0xFFFF SYS_openat sentinel and routed the stdio openers
+through open(); it reached SYS_open, and __map_file was not among them.
+
+The four macros now call __pouch_sys_open, openat's body, which answers a
+descriptor or -errno and leaves errno alone; openat() sets errno from it. The
+openers 0023 rerouted (fopen, __fopen_rb_ca, tmpfile) go back to upstream's
+sys_open, so those stdio functions no longer call the POSIX name open().
+
+Behind the open, __map_file asked for MAP_SHARED, which Pouch's mmap refuses
+with ENOSYS (no shared file mapping exists, ARCHITECTURE.md 6.5). It now maps
+MAP_PRIVATE and read-only, all its readers need. The kernel rounds the length
+up to a page and serves the partial last page; munmap rounds the same way.
+
+--- a/src/fcntl/open.c
++++ b/src/fcntl/open.c
+@@ -1,16 +1,9 @@
+ /*
+- * pouch open() — defer to the patched openat() C function rather than
+- * dispatching SYS_openat directly. P6-pouch-stratumd-boot 16b-gamma.
+- *
+- * The upstream musl open() expands __sys_open_cp into a direct
+- * __syscall(SYS_openat, AT_FDCWD, ...) which on Thylacine hits the
+- * SYS_openat = 0xFFFF ENOSYS sentinel (parked by 0001-pouch-syscall-
+- * seam.patch). The patched openat.c (0009-pouch-openat.patch) is
+- * never called from inside musl because of this bypass.
+- *
+- * The fix is straight-line: forward open() to openat(AT_FDCWD, ...)
+- * which IS the patched openat C function, where O_CLOEXEC becomes the
+- * native descriptor flag.
++ * pouch open() -- openat(AT_FDCWD, ...), the patched openat C function,
++ * where the Linux flags become the native open and O_CLOEXEC the native
++ * descriptor flag. Upstream's open() sets FD_CLOEXEC afterwards with
++ * SYS_fcntl, the 0xFFFF ENOSYS sentinel here. P6-pouch-stratumd-boot
++ * 16b-gamma.
+  */
+ #include <fcntl.h>
+ #include <stdarg.h>
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -38,7 +38,12 @@
+  *
+  * A dangling final symlink is not created through: with O_CREAT and without
+  * O_EXCL the create answers EEXIST and the open after it ENOENT, where Linux
+- * creates the target. */
++ * creates the target.
++ *
++ * The body is __pouch_sys_open, which answers a descriptor or -errno and
++ * leaves errno as it found it: openat() sets errno from its answer, and
++ * musl's own raw opens (sys_open, internal/syscall.h) call it directly,
++ * since SYS_open is the native open and not Linux's. */
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <errno.h>
+@@ -92,44 +97,32 @@
+  * created. */
+ #define POUCH_OAPPEND 0x40u
+ 
+-static int pouch_open_ret(long r, int flags)
++static long pouch_open_ret(long r, int flags)
+ {
+ 	if (r >= 0 && (flags & O_CLOEXEC)) {
+ 		long s = pouch_set_cloexec(r);
+ 		if (s < 0) {
+ 			if (s != -EBADF) __syscall(SYS_close, r);
+-			return __syscall_ret(s);
++			return s;
+ 		}
+ 	}
+ 	if (r >= 0 && (flags & O_APPEND))
+ 		__syscall(SYS_lseek, r, 0, SEEK_END);
+-	return __syscall_ret(r);
++	return r;
+ }
+ 
+-int openat(int fd, const char *filename, int flags, ...)
++hidden long __pouch_sys_open(const char *filename, int flags, mode_t mode)
+ {
+-	mode_t mode = 0;
++	if (!filename) return -EFAULT;
+ 
+-	if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+-		va_list ap;
+-		va_start(ap, flags);
+-		mode = va_arg(ap, mode_t);
+-		va_end(ap);
+-	}
+-
+-	if (fd != AT_FDCWD) { errno = ENOTSUP; return -1; }   /* AT_FDCWD only */
+-	if (!filename) { errno = EFAULT; return -1; }
+-
+ 	if (flags & O_PATH)
+ 		flags &= O_PATH | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW;
+ 
+-	if ((flags & (O_CREAT | O_DIRECTORY)) == (O_CREAT | O_DIRECTORY)) {
+-		errno = EINVAL;
+-		return -1;
+-	}
++	if ((flags & (O_CREAT | O_DIRECTORY)) == (O_CREAT | O_DIRECTORY))
++		return -EINVAL;
+ 
+ 	/* O_TMPFILE (an unnamed inode) has no Thylacine primitive at v1.0. */
+-	if ((flags & O_TMPFILE) == O_TMPFILE) { errno = ENOTSUP; return -1; }
++	if ((flags & O_TMPFILE) == O_TMPFILE) return -ENOTSUP;
+ 
+ 	unsigned long omode;
+ 	if (flags & O_PATH) {
+@@ -138,21 +131,21 @@
+ 	case O_RDONLY: omode = POUCH_OREAD;  break;
+ 	case O_WRONLY: omode = POUCH_OWRITE; break;
+ 	case O_RDWR:   omode = POUCH_ORDWR;  break;
+-	default:       errno = EINVAL; return -1;
++	default:       return -EINVAL;
+ 	}
+ 	if (flags & O_APPEND) omode |= POUCH_OAPPEND;
+ 	if (flags & O_NOFOLLOW) omode |= POUCH_ONOFOLLOW;
+ 
+ 	size_t len = strnlen(filename, POUCH_PATH_MAX + 1);
+-	if (!len) { errno = ENOENT; return -1; }
+-	if (len > POUCH_PATH_MAX) { errno = ENAMETOOLONG; return -1; }
++	if (!len) return -ENOENT;
++	if (len > POUCH_PATH_MAX) return -ENAMETOOLONG;
+ 
+ 	if (flags & O_CREAT) {
+ 		const char *leaf;
+ 		size_t llen;
+ 		int dirreq;
+ 		int p = __pouch_open_parent(AT_FDCWD, filename, &leaf, &llen, &dirreq);
+-		if (p < 0) return __syscall_ret(p);
++		if (p < 0) return p;
+ 
+ 		if (dirreq) {
+ 			/* #86: Linux answers EISDIR for O_CREAT on ANY
+@@ -162,7 +155,7 @@
+ 			 * (The non-create arm below is untouched: the kernel's
+ 			 * #82 gate already handles a plain open of "x/".) */
+ 			__syscall(SYS_close, p);
+-			return __syscall_ret(-EISDIR);
++			return -EISDIR;
+ 		}
+ 
+ 		long r = __syscall(SYS_thyla_walk_create, p, leaf, llen,
+@@ -178,7 +171,7 @@
+ 			return pouch_open_ret(o, flags);
+ 		}
+ 		__syscall(SYS_close, p);
+-		return __syscall_ret(r);
++		return r;
+ 	}
+ 
+ 	/* Non-create open: one stalk-resolved open from the Territory root
+@@ -202,13 +195,30 @@
+ 		long e = 0;
+ 		if (filename[len - 1] != '/') {
+ 			struct stat st;
++			int saved = errno;
+ 			e = fstat((int)r, &st) ? -errno : S_ISDIR(st.st_mode) ? 0 : -ENOTDIR;
++			errno = saved;
+ 		}
+ 		if (!e && (flags & O_TRUNC)) e = -EISDIR;
+ 		if (e) {
+ 			if (e != -EBADF) __syscall(SYS_close, r);
+-			return __syscall_ret(e);
++			return e;
+ 		}
+ 	}
+ 	return pouch_open_ret(r, flags);
+ }
++
++int openat(int fd, const char *filename, int flags, ...)
++{
++	mode_t mode = 0;
++
++	if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
++		va_list ap;
++		va_start(ap, flags);
++		mode = va_arg(ap, mode_t);
++		va_end(ap);
++	}
++
++	if (fd != AT_FDCWD) { errno = ENOTSUP; return -1; }   /* AT_FDCWD only */
++	return __syscall_ret(__pouch_sys_open(filename, flags, mode));
++}
+--- a/src/internal/syscall.h
++++ b/src/internal/syscall.h
+@@ -373,17 +373,17 @@
+ #define SIOCGSTAMPNS_OLD 0x8907
+ #endif
+ 
+-#ifdef SYS_open
+-#define __sys_open2(x,pn,fl) __syscall2(SYS_open, pn, (fl)|O_LARGEFILE)
+-#define __sys_open3(x,pn,fl,mo) __syscall3(SYS_open, pn, (fl)|O_LARGEFILE, mo)
+-#define __sys_open_cp2(x,pn,fl) __syscall_cp2(SYS_open, pn, (fl)|O_LARGEFILE)
+-#define __sys_open_cp3(x,pn,fl,mo) __syscall_cp3(SYS_open, pn, (fl)|O_LARGEFILE, mo)
+-#else
+-#define __sys_open2(x,pn,fl) __syscall3(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE)
+-#define __sys_open3(x,pn,fl,mo) __syscall4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
+-#define __sys_open_cp2(x,pn,fl) __syscall_cp3(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE)
+-#define __sys_open_cp3(x,pn,fl,mo) __syscall_cp4(SYS_openat, AT_FDCWD, pn, (fl)|O_LARGEFILE, mo)
+-#endif
++/* pouch: SYS_open is the native open (start_fd, path, length, omode), not
++ * Linux's open(path, flags, mode), and SYS_openat is the ENOSYS sentinel, so
++ * musl's own opens (stdio's, __map_file's, the secure start's) cannot be raw
++ * syscalls. They take openat's translation, which answers a descriptor or
++ * -errno, as the syscall would, and leaves errno alone. None is a
++ * cancellation point; Pouch's open() is not one either. */
++hidden long __pouch_sys_open(const char *, int, unsigned);
++#define __sys_open2(x,pn,fl) __pouch_sys_open(pn, fl, 0)
++#define __sys_open3(x,pn,fl,mo) __pouch_sys_open(pn, fl, mo)
++#define __sys_open_cp2(x,pn,fl) __pouch_sys_open(pn, fl, 0)
++#define __sys_open_cp3(x,pn,fl,mo) __pouch_sys_open(pn, fl, mo)
+ 
+ #define __sys_open(...) __SYSCALL_DISP(__sys_open,,__VA_ARGS__)
+ #define sys_open(...) __syscall_ret(__sys_open(__VA_ARGS__))
+--- a/src/stdio/__fopen_rb_ca.c
++++ b/src/stdio/__fopen_rb_ca.c
+@@ -6,10 +6,9 @@
+ {
+ 	memset(f, 0, sizeof *f);
+ 
+-	/* pouch: route through the patched open() -- see fopen.c. */
+-	f->fd = open(filename, O_RDONLY|O_CLOEXEC);
++	f->fd = sys_open(filename, O_RDONLY|O_CLOEXEC);
+ 	if (f->fd < 0) return 0;
+-	/* pouch: open() has set O_CLOEXEC's descriptor flag (openat.c). */
++	/* pouch: sys_open has set O_CLOEXEC's descriptor flag (openat.c). */
+ 
+ 	f->flags = F_NOWR | F_PERM;
+ 	f->buf = buf + UNGET;
+--- a/src/stdio/fopen.c
++++ b/src/stdio/fopen.c
+@@ -18,12 +18,9 @@
+ 	/* Compute the flags to pass to open() */
+ 	flags = __fmodeflags(mode);
+ 
+-	/* pouch: sys_open is the RAW SYS_openat -- an unwired 0xFFFF sentinel
+-	 * on Thylacine. Route through the public open(), the 0009/0021
+-	 * boundary-line (SYS_open = 65 stalk resolution). */
+-	fd = open(filename, flags, 0666);
++	fd = sys_open(filename, flags, 0666);
+ 	if (fd < 0) return 0;
+-	/* pouch: open() has set O_CLOEXEC's descriptor flag (openat.c). */
++	/* pouch: sys_open has set O_CLOEXEC's descriptor flag (openat.c). */
+ 
+ 	f = __fdopen(fd, mode);
+ 	if (f) return f;
+--- a/src/stdio/tmpfile.c
++++ b/src/stdio/tmpfile.c
+@@ -142,8 +142,7 @@
+ 
+ 	for (try=0; try<MAXTRIES; try++) {
+ 		__randname(s+13);
+-		/* pouch: route through the patched open() -- see fopen.c. */
+-		fd = open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
++		fd = sys_open(s, O_RDWR|O_CREAT|O_EXCL, 0600);
+ 		if (fd < 0) continue;
+ 
+ 		n->fd = fd;
+--- a/src/time/__map_file.c
++++ b/src/time/__map_file.c
+@@ -10,7 +10,9 @@
+ 	int fd = sys_open(pathname, O_RDONLY|O_CLOEXEC|O_NONBLOCK);
+ 	if (fd < 0) return 0;
+ 	if (!__fstat(fd, &st)) {
+-		map = __mmap(0, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
++		/* pouch: no shared file mapping exists (ARCHITECTURE.md 6.5);
++		 * the time zone, locale and catalog readers only read the map. */
++		map = __mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+ 		*size = st.st_size;
+ 	}
+ 	__syscall(SYS_close, fd);

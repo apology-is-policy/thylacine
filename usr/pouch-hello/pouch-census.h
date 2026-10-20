@@ -29,6 +29,8 @@
     "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,v2,sock-seek,sock-fstat,dup,dupfd,getfl,setfl,cloexec,fdopendir,umask: exit 0"
 #define POUCH_CENSUS_LINKS \
     "pouch-hello-links: legs=lstat,readlink,readlink-trunc,realpath,nofollow,opath,directory,creat-directory,lchmod,flags: exit 0"
+#define POUCH_CENSUS_TZ \
+    "pouch-hello-tz: legs=tz-file,tz-map,tz-unmap,tz-reload,tz-posix: exit 0"
 // The FAULT child's marker: joey requires it AND a non-zero exit status, so the
 // census here is the one line it prints BEFORE the write that kills it.
 #define POUCH_CENSUS_GUARD \
