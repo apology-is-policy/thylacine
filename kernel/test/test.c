@@ -715,6 +715,7 @@ void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audi
 void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg C)
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_symlink_reads(void);
+void test_syscall_fstat_errnos(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -2967,6 +2968,7 @@ struct test_case g_tests[] = {
     { "exec.stack_is_sparse",          test_exec_stack_is_sparse,          false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_symlink_reads", test_syscall_dispatch_symlink_reads, false, NULL },
+    { "syscall.fstat_errnos",          test_syscall_fstat_errnos,          false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },

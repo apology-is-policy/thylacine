@@ -68,6 +68,15 @@
 //                   asking 0666 is the mode less the mask, bounded by the
 //                   directory's (M8), each derived from the pool root's mode.
 //                   A bit above 0777 is cut, never refused.
+//   fstat-ebadf   : fstat of a closed descriptor, and of fd 1000 once fcntl
+//                   shows it free, answers EBADF (the kernel answered a bare
+//                   -1, which Pouch reads as EIO); fdopendir keeps it. The
+//                   same descriptor open is the control: fstat succeeds.
+//   isatty-ebadf  : isatty and tcgetattr of a closed descriptor answer EBADF
+//                   (patch 0061; the ioctl dispatcher folded it into ENOTTY);
+//                   isatty of the same descriptor open on a file answers
+//                   ENOTTY. Red on the old kernel too: its fstat cannot say
+//                   the descriptor is dead.
 //
 // Every leg runs, and each opens the probe file itself, so a red run names
 // each failing leg and only those; the census line prints only when all pass.
@@ -90,6 +99,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <dirent.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define PROBE "/pouch-fd-probe.bin"
@@ -519,6 +529,36 @@ static int leg_fdopendir(void) {
     return 0;
 }
 
+static int leg_fstat_ebadf(void) {
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return fail("fstat-ebadf open");
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) return fail("fstat(open file)");
+    close(fd);
+    errno = 0;
+    if (!refused(fstat(fd, &st), EBADF)) return fail("fstat(closed fd) not EBADF");
+    if (!is_free(1000)) return fail("fd 1000 is open");
+    errno = 0;
+    if (!refused(fstat(1000, &st), EBADF)) return fail("fstat(1000) not EBADF");
+    errno = 0;
+    if (fdopendir(fd) != NULL || errno != EBADF) return fail("fdopendir(closed fd) not EBADF");
+    return 0;
+}
+
+static int leg_isatty_ebadf(void) {
+    int fd = open(PROBE, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return fail("isatty-ebadf open");
+    errno = 0;
+    if (isatty(fd) != 0 || errno != ENOTTY) return fail("isatty(file) not ENOTTY");
+    close(fd);
+    errno = 0;
+    if (isatty(fd) != 0 || errno != EBADF) return fail("isatty(closed fd) not EBADF");
+    struct termios tio;
+    errno = 0;
+    if (!refused(tcgetattr(fd, &tio), EBADF)) return fail("tcgetattr(closed fd) not EBADF");
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     static const struct { const char *name; int (*run)(void); } legs[] = {
@@ -530,7 +570,8 @@ int main(void) {
         { "dup", leg_dup },               { "dupfd", leg_dupfd },
         { "getfl", leg_getfl },           { "setfl", leg_setfl },
         { "cloexec", leg_cloexec },       { "fdopendir", leg_fdopendir },
-        { "umask", leg_umask },
+        { "umask", leg_umask },         { "fstat-ebadf", leg_fstat_ebadf },
+        { "isatty-ebadf", leg_isatty_ebadf },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

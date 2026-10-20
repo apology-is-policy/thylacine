@@ -1,0 +1,230 @@
+Pouch: fstat and the terminal ioctls answer EBADF for a dead descriptor.
+
+The kernel's SYS_fstat answers -EBADF for a handle that names nothing, so a
+dead descriptor is now distinguishable from a live one that cannot be
+stat'd. fstat() passes the kernel's errno through. Its fallback, which read
+any other non-zero return as EBADF, sat behind the negative check and could
+never run (the kernel returns 0 or a negative errno). It is gone, together
+with the comment saying the kernel only ever answered -1.
+
+ioctl() folded every failure to find a terminal into ENOTTY, a dead
+descriptor included, and its comment said isatty() hid the difference. It
+does not: isatty() keeps EBADF, as Linux's does. Every exit where a request
+does not fit the descriptor now calls refuse_fd(), which answers EBADF for a
+dead one and ENOTTY otherwise. It runs only after the request has failed, so
+a call that succeeds costs no extra syscall. A tagged socket descriptor is
+judged by its libc slot, which the kernel cannot see.
+
+--- a/src/misc/ioctl.c
++++ b/src/misc/ioctl.c
+@@ -29,15 +29,15 @@
+  * A tagged pouch socket fd (POUCH_SOCK_TAG) is rejected up front.
+  *
+  * Errno posture:
+- *   - unknown request (any fd): ENOTTY (the Linux convention — Linux
++ *   - a dead fd: EBADF, whatever the request (Linux checks the
++ *     descriptor first). It is asked only after a request has failed
++ *     to fit the fd, so a call that succeeds costs nothing more: a
++ *     tagged pouch socket fd is dead when it has no live slot, any
++ *     other when SYS_fstat answers -EBADF. isatty() keeps EBADF.
++ *   - unknown request on a live fd: ENOTTY (the Linux convention — Linux
+  *     answers ENOTTY for unsupported ioctls even on real ttys; the
+  *     pre-PTY-3 pouch answered ENOSYS for ALL ioctls).
+- *   - tty request on a non-pts fd: ENOTTY. fstat failure is folded
+- *     into ENOTTY too — the kernel SYS_FSTAT answers a bare -1 for
+- *     both a bad fd and a valid statless fd (pipe/cons/notes), so
+- *     EBADF cannot be distinguished here. Documented nit: a closed fd
+- *     yields ENOTTY, not EBADF (musl's isatty() normalizes to ENOTTY
+- *     anyway, so the app-visible isatty behavior is identical).
++ *   - tty request on a live non-pts fd: ENOTTY.
+  *   - kernel tty-syscall errors pass through the standard seam decode
+  *     (T_E_* values are POSIX-aligned). One documented divergence: the
+  *     kernel's EPERM contours answer EACCES (the errno.h -1-alias
+@@ -267,6 +267,20 @@
+ 	else while (v) { dec[dl++] = (char)('0' + (v % 10)); v /= 10; }
+ 	while (dl) cmd[len++] = dec[--dl];
+ 	return len;
++}
++
++/* The refusal for an fd a request does not fit: EBADF when the fd is
++ * dead, else ENOTTY. A tagged socket fd is a libc slot the kernel
++ * cannot see, so its own table answers for it. */
++static int refuse_fd(int fd)
++{
++	struct pouch_tstat ts;
++	int dead;
++	if (fd < 0) dead = 1;
++	else if (fd & POUCH_SOCK_TAG) dead = !pouch_sock_resolve(fd);
++	else dead = __syscall(SYS_fstat, fd, &ts) == -EBADF;
++	errno = dead ? EBADF : ENOTTY;
++	return -1;
+ }
+ 
+ int ioctl(int fd, int req, ...)
+@@ -291,9 +305,8 @@
+ 		 * bridge (no session tag churn). Only a FAM_INET slot with a live
+ 		 * ctl fd; any other fd -> ENOTTY (no kernel ioctl surface). */
+ 		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
+-		if (!slot || slot->family != POUCH_SOCK_FAM_INET) {
+-			errno = ENOTTY; return -1;
+-		}
++		if (!slot || slot->family != POUCH_SOCK_FAM_INET)
++			return refuse_fd(fd);
+ 		if (!arg) { errno = EFAULT; return -1; }
+ 		int on = (*(int *)arg != 0);
+ 		slot->nonblock = (unsigned char)on;
+@@ -318,9 +331,8 @@
+ 		 * netd round trip per call; documented in
+ 		 * _pouch_socket.h). */
+ 		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
+-		if (!slot || slot->family != POUCH_SOCK_FAM_INET) {
+-			errno = ENOTTY; return -1;
+-		}
++		if (!slot || slot->family != POUCH_SOCK_FAM_INET)
++			return refuse_fd(fd);
+ 		if (!arg) { errno = EFAULT; return -1; }
+ 		int r = pouch_sock_readable(fd);
+ 		if (r < 0) return -1;   /* errno set by the probe */
+@@ -331,7 +343,7 @@
+ 		struct termios *tio = arg;
+ 		unsigned flags, cols, rows;
+ 		if (!tio) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
+ 			errno = ENOTTY;
+ 			return -1;
+@@ -364,7 +376,7 @@
+ 		 * rings — see the TCSBRK note. */
+ 		const struct termios *tio = arg;
+ 		if (!tio) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		char cmd[64];
+ 		int onlcr = (tio->c_oflag & OPOST) && (tio->c_oflag & ONLCR);
+ 		int len = 0;
+@@ -404,7 +416,7 @@
+ 				ws->ws_ypixel = 0;
+ 				return 0;
+ 			}
+-			errno = ENOTTY; return -1;
++			return refuse_fd(fd);
+ 		}
+ 		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
+ 			errno = ENOTTY;
+@@ -425,7 +437,7 @@
+ 			 * an app cannot set it. Linux-VT-resize semantics
+ 			 * are deliberately NOT offered. */
+ 			if (cons_resolve(fd) == 0) { errno = EPERM; return -1; }
+-			errno = ENOTTY; return -1;
++			return refuse_fd(fd);
+ 		}
+ 		char cmd[40];
+ 		int len = 0;
+@@ -443,10 +455,8 @@
+ 		/* ptsname_r's source. Master-only (the Linux devpts shape). */
+ 		int *out = arg;
+ 		if (!out) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER) {
+-			errno = ENOTTY;
+-			return -1;
+-		}
++		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER)
++			return refuse_fd(fd);
+ 		*out = (int)n;
+ 		return 0;
+ 	}
+@@ -454,10 +464,8 @@
+ 		/* unlockpt. Thylacine pts pairs are born unlocked (there is
+ 		 * no grant/unlock dance — the mint IS the grant); accept the
+ 		 * unlock as a no-op on a master, per the modern-devpts model. */
+-		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER) {
+-			errno = ENOTTY;
+-			return -1;
+-		}
++		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER)
++			return refuse_fd(fd);
+ 		return 0;
+ 	case TIOCSCTTY:
+ 		/* Controlling-terminal acquisition is a KERNEL syscall keyed
+@@ -467,12 +475,12 @@
+ 		 * fidelity -- a non-tty fd answers ENOTTY here instead of the
+ 		 * kernel's EINVAL/EACCES-shaped refusal; the kernel's own
+ 		 * validation remains the authority for real pts fds. */
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		return __syscall_ret(__syscall(SYS_tty_acquire, fd));
+ 	case TIOCGPGRP: {
+ 		int *out = arg;
+ 		if (!out) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		long r = __syscall(SYS_tty_get_fg, fd);
+ 		if (r < 0) return __syscall_ret(r);
+ 		/* 0 = no foreground group seated yet (kernel contract). */
+@@ -482,7 +490,7 @@
+ 	case TIOCSPGRP: {
+ 		const int *pg = arg;
+ 		if (!pg) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		return __syscall_ret(__syscall(SYS_tty_set_fg, fd, *pg));
+ 	}
+ 	case TCSBRK:
+@@ -492,13 +500,13 @@
+ 		 * lands in the peer ring before the Twrite returns; there is
+ 		 * no deeper output queue. Break: no pts representation (as on
+ 		 * Linux pts without pktmode). Both answer 0 on a pts. */
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		return 0;
+ 	case TCFLSH:
+ 		/* tcflush: the ctl grammar has no flush verb at v1.0, and a
+ 		 * silent 0 would lie about queued bytes. Honest ENOTSUP;
+ 		 * documented v1.x seam (a ctl "flush" verb). */
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		errno = ENOTSUP;
+ 		return -1;
+ 	case TIOCGSID:
+@@ -506,13 +514,12 @@
+ 		/* No kernel surface: acquisition is explicit + session-
+ 		 * scoped; there is no controlling-terminal drop nor a
+ 		 * session-of-terminal query at v1.0 (PTY-1d). */
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
+ 		errno = ENOTSUP;
+ 		return -1;
+ 	default:
+-		/* Unknown request on any fd: ENOTTY (the Linux convention;
++		/* Unknown request: ENOTTY on a live fd (the Linux convention;
+ 		 * the pre-PTY-3 pouch answered ENOSYS for every ioctl). */
+-		errno = ENOTTY;
+-		return -1;
++		return refuse_fd(fd);
+ 	}
+ }
+--- a/src/stat/fstat.c
++++ b/src/stat/fstat.c
+@@ -9,7 +9,9 @@
+  * 0xFFFF ENOSYS sentinels under the seam. We bypass the entire
+  * upstream fstat plumbing and call the Thylacine-native SYS_fstat
+  * directly. The kernel returns 0 on success and populates the
+- * 88-byte t_stat; we fill struct stat from those fields.
++ * 88-byte t_stat, which we copy into struct stat field by field. A
++ * failure is -EBADF for a dead or wrong-kind handle, -EFAULT, or the
++ * device's own errno (-EIO when it has none).
+  *
+  * The translation is straight-line: every t_stat field maps to
+  * exactly one struct stat field. uid/gid map to st_uid/st_gid (A-2a);
+@@ -83,10 +85,6 @@
+ 
+ 	rc = __syscall(SYS_fstat, fd, &t);
+ 	if (rc < 0)    return __syscall_ret(rc);
+-	/* Thylacine SYS_fstat returns -1 on any error; treat anything
+-	 * non-zero as -EBADF (the most common error after a kernel
+-	 * fd-validation rejection). Granular errno is a v1.x lift. */
+-	if (rc != 0)   return __syscall_ret(-EBADF);
+ 
+ 	/* Zero the userspace struct stat first so any field we don't
+ 	 * populate from t_stat is a defined zero (matches the v1.0

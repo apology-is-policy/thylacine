@@ -40,6 +40,7 @@
 
 s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
+s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k);
 
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
@@ -50,6 +51,7 @@ void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
 void test_syscall_opath_walkonly_no_byte_io(void);
 void test_syscall_dispatch_symlink_reads(void);
+void test_syscall_fstat_errnos(void);
 
 void test_syscall_dispatch_unknown(void) {
     struct exception_context ctx;
@@ -337,4 +339,114 @@ void test_syscall_dispatch_symlink_reads(void) {
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
         "SYS_LSTAT reaches its handler (an empty path is EINVAL)");
+}
+
+// SYS_FSTAT's errnos (ERRORS.md: a bad or wrong-kind handle is -T_E_BADF). The
+// Dev's refusal crosses the way stalk's err_code maps it, so stat and fstat
+// agree: a -errno in [-4095,-2] as itself, anything else as -T_E_IO.
+static int g_fstat_dev_rc;
+
+static int fstat_test_stat_native(struct Spoor *c, struct t_stat *out) {
+    (void)c;
+    for (u64 i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    if (g_fstat_dev_rc != 0) return g_fstat_dev_rc;
+    out->size = 42;
+    return 0;
+}
+
+static struct Dev g_fstat_test_dev = {
+    .dc          = 'F',
+    .name        = "fstattest",
+    .stat_native = fstat_test_stat_native,
+};
+
+static const struct { int dev; s64 want; const char *what; } g_fstat_dev_rows[] = {
+    { -T_E_ACCES, -(s64)T_E_ACCES, "fstat: a Dev's -errno crosses as itself" },
+    { -2,         -2,              "fstat: the band's top, -2, crosses" },
+    { -4095,      -4095,           "fstat: the band's floor, -4095, crosses" },
+    { -1,         -(s64)T_E_IO,    "fstat: a Dev's flat -1 reads EIO" },
+    { -4096,      -(s64)T_E_IO,    "fstat: a value below the band reads EIO" },
+    { 7,          -(s64)T_E_IO,    "fstat: a positive Dev failure reads EIO" },
+};
+
+// The assertions, apart from the handles: a failed TEST_ASSERT returns from
+// here, and the caller still closes what it opened.
+static void fstat_errnos_cases(struct Proc *p, hidx_t live, hidx_t dead,
+                               hidx_t other_kind, hidx_t statless) {
+    struct t_stat ks;
+    g_fstat_dev_rc = 0;
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)live, &ks), (s64)0,
+        "fstat: a live WRITE-only handle stats (no right is required)");
+    TEST_EXPECT_EQ(ks.size, (u64)42, "fstat: the Dev's record comes back");
+    for (u64 i = 0; i < sizeof(g_fstat_dev_rows) / sizeof(g_fstat_dev_rows[0]); i++) {
+        g_fstat_dev_rc = g_fstat_dev_rows[i].dev;
+        TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)live, &ks),
+                       g_fstat_dev_rows[i].want, g_fstat_dev_rows[i].what);
+    }
+    g_fstat_dev_rc = 0;
+
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)dead, &ks), -(s64)T_E_BADF,
+        "fstat: a closed handle is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)-1, &ks), -(s64)T_E_BADF,
+        "fstat: handle -1 is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)1 << 20, &ks), -(s64)T_E_BADF,
+        "fstat: an index past the table is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)other_kind, &ks), -(s64)T_E_BADF,
+        "fstat: a handle of another kind is EBADF");
+    TEST_EXPECT_EQ(sys_fstat_for_proc(p, (u64)statless, &ks), -(s64)T_E_IO,
+        "fstat: a Dev with no stat_native reads EIO");
+
+    // Through the dispatcher: the handler's own refusals. The handle lookup
+    // runs before any store, so a closed handle is EBADF with a valid-range VA.
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_FSTAT;
+    ctx.regs[0] = (u64)live;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_FAULT,
+        "SYS_FSTAT: a NULL stat_va is EFAULT");
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_FSTAT;
+    ctx.regs[0] = (u64)dead;
+    ctx.regs[1] = 0x10000;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_BADF,
+        "SYS_FSTAT: a closed handle is EBADF");
+}
+
+void test_syscall_fstat_errnos(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "test thread has a proc");
+    struct Proc *p = t->proc;
+
+    hidx_t live = -1, other_kind = -1, statless = -1;
+    struct Spoor *s = spoor_alloc(&g_fstat_test_dev);
+    if (s) {
+        s->qid.type = QTFILE;
+        live = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, s);
+        if (live < 0) spoor_clunk(s);
+    }
+    other_kind = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, NULL);
+    struct Spoor *z = devzero.attach("");
+    if (z) {
+        statless = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, z);
+        if (statless < 0) spoor_clunk(z);
+    }
+    // A freed index: allocated last and closed at once, so nothing reuses it.
+    hidx_t dead = -1;
+    struct Spoor *d = spoor_alloc(&g_fstat_test_dev);
+    if (d) {
+        dead = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, d);
+        if (dead < 0) spoor_clunk(d);
+        else          handle_close(p, dead);
+    }
+
+    if (live >= 0 && other_kind >= 0 && statless >= 0 && dead >= 0)
+        fstat_errnos_cases(p, live, dead, other_kind, statless);
+    else
+        test_fail("fstat: fixture allocation failed");
+
+    if (live >= 0)       handle_close(p, live);
+    if (other_kind >= 0) handle_close(p, other_kind);
+    if (statless >= 0)   handle_close(p, statless);
 }

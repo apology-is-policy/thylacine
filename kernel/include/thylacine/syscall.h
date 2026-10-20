@@ -1001,7 +1001,7 @@ enum {
     //   - rfork_with_caps OOM (Proc / Thread allocation)
     SYS_SPAWN_FULL_ARGV = 49,
 
-    // SYS_FSTAT(spoor_fd, stat_va) → 0 / -1 (P6-pouch-stratumd-boot sub-chunk
+    // SYS_FSTAT(spoor_fd, stat_va) → 0 / -errno (P6-pouch-stratumd-boot sub-chunk
     // 16b-gamma; A-2a grew it to 80). Populate the user-VA `struct t_stat` with
     // metadata for the file opened on `spoor_fd`. The Thylacine-native stat
     // surface — Plan 9 9P qid identity carried verbatim alongside POSIX-shaped
@@ -1013,12 +1013,8 @@ enum {
     //                   fully mapped + writable; alignment NOT required — the
     //                   kernel stores byte-by-byte for alignment tolerance)
     //
-    // The kernel dispatches to dev->stat_native if the Dev implements it.
-    // devramfs implements it (returning size from the cpio metadata and
-    // mode/qid from the in-kernel file table). Other Devs without a real
-    // stat_native (devcons / devnull / devzero / devpipe / devnotes / devsrv /
-    // SrvConn) leave the slot NULL — SYS_FSTAT on those fds returns -1, the
-    // graceful "no stat for this object" answer.
+    // The kernel dispatches to dev->stat_native. Every Dev a namespace fd can
+    // carry implements it except devcap (/cap); a slotless Dev answers -T_E_IO.
     //
     // Rights: none (kind-gate only, the SYS_LSEEK precedent) — #46. fstat
     // observes metadata, not content; POSIX fstat(2) works on any valid fd
@@ -1037,11 +1033,12 @@ enum {
     // fd-passing precedent (a passed fd conveys fstat; rights-stripping
     // bounds read/write/transfer, never metadata secrecy).
     //
-    // Returns 0 on success (out_stat populated), -1 on:
-    //   - spoor_fd not KOBJ_SPOOR / out-of-range
-    //   - stat_va outside the user-VA bound / unmapped at store time
-    //   - the Dev does not implement stat_native (NULL slot)
-    //   - dev->stat_native returned an error
+    // Returns 0 on success (out_stat populated), or:
+    //   - -T_E_BADF: spoor_fd names no Spoor (empty, closed, out of range, or
+    //     another kind -- a KOBJ_SRV listener)
+    //   - -T_E_FAULT: stat_va outside the user-VA bound / unmapped at store time
+    //   - the Dev's refusal: its -errno when in [-4095,-2] (dev9p carries the
+    //     server's), else -T_E_IO (no stat_native slot, or a flat Dev failure)
     //
     // Audit-bearing: touches `kernel/syscall.c` (rights gate + uaccess store)
     // + `kernel/devramfs.c` (the stat_native implementation). CLAUDE.md

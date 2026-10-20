@@ -149,13 +149,14 @@ struct Dev {
     //   stat_native(c, out) — Thylacine-native fstat surface (P6-pouch-
     //                    stratumd-boot sub-chunk 16b-gamma). Fill *out
     //                    with the file's metadata in struct t_stat shape.
-    //                    Returns 0 on success, -1 on failure. A NULL slot
-    //                    means "no native stat available" — SYS_FSTAT on
-    //                    a Spoor backed by such a Dev returns -1. Devs
-    //                    that have real file metadata (devramfs in
-    //                    particular) implement this; trivial leaf Devs
-    //                    (devcons / devnull / devzero / devnotes) leave
-    //                    the slot NULL.
+    //                    Returns 0 on success, else a -errno (dev9p
+    //                    returns the server's) or -1; SYS_FSTAT and stalk
+    //                    pass a -errno in [-4095,-2] through and read
+    //                    anything else as -T_E_IO. A NULL slot means "no
+    //                    native stat available" (-T_E_IO): devcap and the
+    //                    leaf Devs reached only by a direct attach
+    //                    (devnull / devzero / devfull / devrandom) leave
+    //                    it NULL.
     //   wstat_native(c, valid, mode, uid, gid, size) — Thylacine-native
     //                    chmod/chown/ftruncate surface (A-2a + Go Stage 5;
     //                    IDENTITY-DESIGN.md §9.5). Apply the subset of

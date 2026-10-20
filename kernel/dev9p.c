@@ -969,10 +969,9 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     // as [-4095,-2], one value narrower than the clamp it sits above actually
     // implements. A mistake made once in a comment, read back as a fact.)
     //
-    // AND ONLY ONE CALLER PROPAGATES IT. stalk converts it for `*errp` (ER-1, as
-    // designed); `sys_fstat_for_proc` collapses every non-zero to the flat -1
-    // sentinel, which is precisely the half ERRORS.md ER-2 still lists as owed.
-    // So do not read this as "the path already propagates" -- half of it does.
+    // Both callers apply one mapping to it: stalk's `err_code` for `*errp`
+    // (ER-1) and `sys_fstat_for_proc`'s return (ER-2). A -errno in [-4095,-2]
+    // crosses as itself; the -1, a server EPERM included, reads -T_E_IO.
     int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
     if (gr != 0)
         return gr;

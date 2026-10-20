@@ -2064,12 +2064,13 @@ s64 sys_close_for_test(struct Proc *p, u64 h) { return sys_close_in(p, h); }
 // syscalls, stratumd's keyfile_load fails at the first fstat / lseek and
 // the system-pool mount never starts.
 //
-// SYS_FSTAT routes through dev->stat_native; six Devs implement it today
-// (devramfs, dev9p, devhw, devsrv, devproc, devpci -- #46 audit F3 refresh
-// of the stale "only devramfs" 16b-gamma note). Devs without it leave the
-// slot NULL and fstat returns -1, the graceful "no stat for this kind of
-// object" answer. KOBJ_SRV handles are rejected at the kind gate; a devsrv
-// conn SPOOR (dc='s') serves fstat via devsrv_stat_native since #957.
+// SYS_FSTAT routes through dev->stat_native. Every Dev a namespace fd can carry
+// implements it except devcap (the /cap elevation leaves); the other slotless
+// Devs (devnull, devzero, devfull, devrandom, devnone) are reached only by a
+// direct attach, since /dev/* fds carry devdev. A slotless Dev answers
+// -T_E_IO. A handle that names no Spoor answers -T_E_BADF, a KOBJ_SRV listener
+// included (the kind gate); a devsrv conn SPOOR (dc='s') serves fstat via
+// devsrv_stat_native since #957.
 //
 // SYS_LSEEK manipulates the per-Spoor `s64 offset` cursor that SYS_READ /
 // SYS_WRITE advance per call. SEEK_END queries dev->stat_native for size;
@@ -2078,10 +2079,9 @@ s64 sys_close_for_test(struct Proc *p, u64 h) { return sys_close_in(p, h); }
 // from different threads is unspecified (POSIX user serializes).
 
 // Inner — kernel-side helper exposing the t_stat fill for a Spoor.
-// Returns 0 on success (out populated), -1 on:
-//   - c is NULL
-//   - dev->stat_native is NULL (Dev does not support native stat)
-//   - dev->stat_native returned an error
+// Returns 0 on success (out populated), -1 for a NULL Spoor or a Dev with no
+// stat_native slot, or the Dev's own failure verbatim (dev9p's is the server's
+// -errno; other Devs answer -1).
 // Non-static (declared in <thylacine/spoor.h>): the stalk resolver shares this
 // stat-fetch for its per-component X-search.
 int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
@@ -2114,7 +2114,15 @@ u64 spoor_file_size(struct Spoor *c) {
 // kind gate, the ref discipline and the Dev call are literally the same code
 // for a phenotyped and a native caller, which is how I-43 ("shape, never
 // authority") holds by construction rather than by review.
-static s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
+//
+// Returns 0, -T_E_BADF for a handle that names no Spoor (empty, closed, out of
+// range, or another kind), or the Dev's refusal mapped as stalk's err_code maps
+// it, so fstat and stat answer one object's failure alike: a real -errno in
+// [-4095,-2] crosses as itself, and the generic -1 (no stat_native slot, or a
+// Dev's flat failure -- the value a server EPERM also arrives as) reads -T_E_IO.
+// The phenotype returns this verbatim, so a Linux guest sees the same errno.
+s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k);
+s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
     if (!p || !out_k)                                return -1;
 
     // No rights mask (#46): fstat observes metadata, not content -- POSIX
@@ -2138,13 +2146,12 @@ static s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
     // every exit -- the ref keeps c alive across the (possibly blocking)
     // dev->stat_native.
     struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
-    if (!c)                                           return -1;
+    if (!c)                                           return -(s64)T_E_BADF;
 
-    // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's
-    // stat_native (NULL slot or error return) maps to -1 here.
-    if (spoor_stat_native(c, out_k) != 0)           { spoor_clunk(c); return -1; }
+    int sr = spoor_stat_native(c, out_k);
     spoor_clunk(c);
-    return 0;
+    if (sr == 0)                                     return 0;
+    return (sr <= -2 && sr >= -4095) ? (s64)sr : -(s64)T_E_IO;
 }
 
 static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
@@ -2157,7 +2164,8 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
     // user-VA bound; sys_validate_user_buf rejects an out-of-range
     // base or end. Alignment is not required — the per-byte store
     // loop tolerates any alignment.
-    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat)))
+        return -(s64)T_E_FAULT;
 
     struct t_stat ks;
     s64 rc = sys_fstat_for_proc(p, hraw, &ks);
@@ -2167,7 +2175,7 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
     // have partially-written bytes (consistent with SYS_READ).
     const u8 *src = (const u8 *)&ks;
     for (u64 i = 0; i < sizeof(struct t_stat); i++) {
-        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -(s64)T_E_FAULT;
     }
     return 0;
 }

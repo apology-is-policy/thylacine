@@ -190,3 +190,5 @@
 0059-pouch-symlinks.patch
 # 0060 (OPEN-BUGS 10-15 O-4, B-3b audit round 2): musl's raw opens (the sys_open family) through openat's translation, __pouch_sys_open; __map_file maps MAP_PRIVATE; 0023's stdio openers back to sys_open.
 0060-pouch-raw-open.patch
+# 0061 (raw-open audit round 1 F1; ERRORS.md ER-2, the SYS_FSTAT half): fstat passes the kernel's EBADF through; ioctl answers EBADF for a dead descriptor (refuse_fd), which isatty keeps.
+0061-pouch-fstat-ebadf.patch

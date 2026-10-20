@@ -2305,8 +2305,9 @@ _Static_assert(__builtin_offsetof(struct t_stat, devno)     == 80, "t_stat.devno
 #define T_SEEK_END 2
 
 // t_fstat — populate `*out` with metadata for `fd`. Returns 0 on success
-// (*out filled), -1 on bad fd / no native stat / uaccess fault. `out`
-// must be a writable buffer of at least sizeof(struct t_stat) bytes.
+// (*out filled), -T_E_BADF for a bad fd, -T_E_FAULT for an unwritable `out`,
+// or the Dev's -errno (-T_E_IO when it has none). `out` must be a writable
+// buffer of at least sizeof(struct t_stat) bytes.
 __attribute__((always_inline))
 static inline long t_fstat(long fd, struct t_stat *out) {
     register long x0 __asm__("x0") = fd;

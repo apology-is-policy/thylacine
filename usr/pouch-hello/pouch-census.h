@@ -26,7 +26,7 @@
 #define POUCH_CENSUS_DLOPEN \
     "pouch-hello-dlopen: legs=interp,noexec,confined,load,segments,relro-data,relro: exit 0"
 #define POUCH_CENSUS_FD \
-    "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,v2,sock-seek,sock-fstat,dup,dupfd,getfl,setfl,cloexec,fdopendir,umask: exit 0"
+    "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,v2,sock-seek,sock-fstat,dup,dupfd,getfl,setfl,cloexec,fdopendir,umask,fstat-ebadf,isatty-ebadf: exit 0"
 #define POUCH_CENSUS_LINKS \
     "pouch-hello-links: legs=lstat,readlink,readlink-trunc,realpath,nofollow,opath,directory,creat-directory,lchmod,flags: exit 0"
 #define POUCH_CENSUS_TZ \

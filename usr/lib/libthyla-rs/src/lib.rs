@@ -3334,8 +3334,8 @@ pub unsafe fn t_stat_path(path: *const u8, path_len: usize, stat_va: *mut u8) ->
 
 // t_fstat — fill a user-VA 88-byte `struct t_stat` (laid out per
 // kernel/include/thylacine/syscall.h's ABI pins) with the open Spoor's
-// metadata. Returns 0 on success, -1 on bad fd / unaligned stat_va /
-// stat_va outside user VA / Dev without stat_native vtable op.
+// metadata. Returns 0 on success, -T_E_BADF for a bad fd, -T_E_FAULT for a
+// stat_va outside user VA, or the Dev's -errno (-T_E_IO when it has none).
 //
 // `stat_va` must point to at least 88 bytes of writable, 8-byte-aligned
 // user memory. Backs t::fs::Metadata (U-2c-fs).

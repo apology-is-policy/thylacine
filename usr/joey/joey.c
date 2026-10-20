@@ -11797,7 +11797,8 @@ int main(void) {
         // pwritev/preadv, runs preadv2/pwritev2 without flags on them, reads
         // ESPIPE / S_ISSOCK for a socket's seek, positional I/O and fstat, and
         // drives dup, F_DUPFD, F_GETFL, F_SETFL, O_CLOEXEC on open and stdio,
-        // and fdopendir. Boot-fatal.
+        // and fdopendir, and reads EBADF for a closed descriptor from fstat,
+        // isatty and tcgetattr. Boot-fatal.
         {
             const char fd_name[]   = "/bin/pouch-hello-fd";
             const char fd_expect[] = POUCH_CENSUS_FD;
