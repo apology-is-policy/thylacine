@@ -23,7 +23,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-19
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -552,10 +552,11 @@ tests' and the fuzzer driver's asserts stay live; ICU and FreeType are on, and
 GLib, gobject, cairo, chafa, the docs and introspection off. ICU's `.pc` files
 name `-L/lib`, because it installs with prefix `/` under `DESTDIR`, so
 HarfBuzz is handed copies naming the stage (`lib/pkgconfig-staged`).
-`build_zlib` now writes zlib's own `zlib.pc` into the sysroot, which libpng's
-`.pc` requires. `cmake_lib`'s stamp now includes the sha256 of each archive an
-option names: before, libwebp's tests kept an old `libpng16.a` after libpng's
-bytes changed. issue-1063's font comes from `[cache.ftfont]`, checked by the
+`build_zlib` writes zlib's own `zlib.pc` into the sysroot, which libpng's `.pc`
+requires. `cmake_lib`'s stamp includes the sha256 of each archive an option
+names, so libwebp's tests relink when libpng's bytes change, and a
+byte-identical rebuild does not cascade. issue-1063's font comes from
+`[cache.ftfont]`, checked by the
 zip's sha256 and by the font's own, whose first 8 bytes are the digest
 upstream's script pins. It grants no licence (the sites that list it say
 personal use only), so an image baked with `CHUNK_LIBTESTS` stays on the
@@ -563,11 +564,10 @@ builder's own machines and is never published.
 
 The muster half lists the two libraries' tests with `meson introspect
 --tests` after it builds each tree's `meson-test-prereq`, as `meson test`
-does before it runs them (`mtest.py`'s `rebuild_deps`). A target only a test
-depends on is outside `all`, and before B-3f's close issue-1441's two
-generated fonts were never built: the first device run read
-`FT_Err_Cannot_Open_Resource` on both, and the translator now refuses such a
-gap ([[sub-substrate-libtests]]). The muster half also stages HarfBuzz's
+does before it runs them (`mtest.py`'s `rebuild_deps`): a target only a test
+depends on, such as issue-1441's two generated fonts, is outside `all`, and
+the translator refuses a test whose depends are not built or not staged
+([[sub-substrate-libtests]]). The muster half also stages HarfBuzz's
 `perf/fonts`, `perf/texts` and `test/subset/data/fonts` for the thread tests.
 bake-verify adds `FTTESTS`, `FTFONT`, `HBTESTS` and `HBFONTS`.
 `tools/build.sh fonts` builds the three passes, and `tools/forage.sh fonts`

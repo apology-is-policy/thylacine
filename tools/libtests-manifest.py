@@ -12,7 +12,8 @@ device needs.
                 command while its executable does not exist)
   --meson F     instead, meson's test list (`meson introspect --tests`)
   --meson-build D   its build directory, where a test that names no workdir
-                runs (mtest.py runs the harness there)
+                runs (mtest.py runs the harness there), and whose
+                meson-info/intro-targets.json names each target's outputs
   --meson-source D  its source tree, searched for what the list cannot carry
   --skip NAME   a meson test not translated (repeat): only one whose program
                 is a Python script, and every such test must be named, so an

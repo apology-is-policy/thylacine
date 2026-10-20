@@ -17,7 +17,7 @@ locks: []
 abis: []
 design: ["docs/BROWSER-DESIGN.md"]
 created: 2026-10-15
-updated: 2026-10-19
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -119,9 +119,9 @@ targets `meson test` builds before it runs, read through the build's
 `meson-info/intro-targets.json` as `mtest.py` reads them: each output must
 exist and must be staged, by the test's command naming it or a staged tree
 holding it. A target only a test depends on is outside `all`, so the build
-builds `meson-test-prereq` first ([[sub-substrate-build]]); the check exists
-because nothing did before B-3f's close, and the translator passed
-issue-1441's two unbuilt fonts through as an output or an option. Not carried:
+builds `meson-test-prereq` first ([[sub-substrate-build]]). Without the check
+an unbuilt input would pass as an argument like any other, since a relative
+path that does not exist reads as an output or an option. Not carried:
 timeouts (the gate's own bound covers the run), and the harness's
 `MALLOC_PERTURB_` and sanitizer variables, which this libc does not read.
 Interpreter-driven tests are skipped by name only: `--skip` takes a test whose
@@ -187,26 +187,26 @@ HarfBuzz), so FreeType builds twice ([[sub-substrate-build]]). varc and
 issue-1063 read `FREETYPE_TESTS_DATA_DIR`, the source's `tests/data`, staged
 as a tree; issue-1063's font is the one upstream's script downloads
 (`[cache.ftfont]`). issue-1469's four fonts and issue-1441's two are made at
-build time by Python scripts; issue-1441's target has no `build_by_default`,
-and until the close the device read `FT_Err_Cannot_Open_Resource` on both of
-its fonts. HarfBuzz 14.6.0 registers 81 tests in a cross build. 76 are
+build time by Python scripts, issue-1441's by a target outside `all` (it has
+no `build_by_default`), which the prerequisite build makes. HarfBuzz 14.6.0
+registers 81 tests in a cross build. 76 are
 compiled: 25 unit tests (with `hb_assert` live), 48 fuzzer runs over its
 checked-in corpora (TAP; a missing input is an `assert(blob)` abort), the two
 thread tests and the vector budget test. The other five are Python checks of
 its source tree and release notes, skipped by name. HarfBuzz's GLib suites
 (`test/api`, `test/shape`, `test/subset`) are skipped under the same vote
 (`dec-2026-10-14-b3-test-bar`): `hb-shape` and `hb-subset` are built only with
-GLib (`util/meson.build`), so B-3f's first bar, "hb-shape over test/shape",
-could not run here. The thread tests read the fonts and texts their source
+GLib (`util/meson.build`), so `test/shape` cannot run here. The thread tests
+read the fonts and texts their source
 names in `perf/` and `test/subset/data/fonts`, which `build.sh` stages beside
-the stage list. A native build of both pins on the Mac (Apple clang; Homebrew
-libpng 1.6.58 and ICU 78.3), in the same two passes, passed 5 of 5 and 76 of
-76 under `meson test`. With three inputs broken, it failed exactly varc
-("Could not open file" for an emptied `varc-static-gvar.ttf`), issue-1441
-("wrong Cyrillic, unreachable, or small-cap style": the mixed font copied
-over the Latin one, which opens but classifies wrongly) and
-`repacker-fuzzer-chunk-0` (`Assertion failed: (blob)`, one graph removed).
-Those are the device red's predictions.
+the stage list. Built natively from the same pins in the same two passes
+(Apple clang; Homebrew libpng 1.6.58 and ICU 78.3), both pass whole under
+`meson test`, as they do on the device. With the same three inputs broken, the
+native run and the device fail the same three tests with the same messages:
+varc ("Could not open file", an emptied `varc-static-gvar.ttf`), issue-1441
+("wrong Cyrillic, unreachable, or small-cap style": the mixed font copied over
+the Latin one, which opens but classifies wrongly) and
+`repacker-fuzzer-chunk-0` (an `assert(blob)` abort, one graph removed).
 
 ## Data structures
 
@@ -233,9 +233,10 @@ continues. A malformed or miscounted manifest: exit 2 before any test runs.
 
 ## Performance
 
-The `ls-libs` gate's five legs (ICU's two and the three codec lists) take
-262 s with the boot, under HVF on the Mac (2026-10-15); B-3c's two ICU legs
-alone took 118 s with the boot. The legs are not timed one by one.
+The `ls-libs` gate's eight legs (ICU's two and the six muster lists) take 336
+to 348 s with the boot, under HVF on the Mac (three runs, 2026-10-19/20); with
+B-3d's five legs it took 262 s, and B-3c's two ICU legs alone 118 s. The legs
+are not timed one by one.
 
 ## Prosecution
 
@@ -246,8 +247,9 @@ alone took 118 s with the boot. The legs are not timed one by one.
   mismatch.
 - Is an input the build makes for a test there on the device? For a meson
   test its `depends` name it: the build builds `meson-test-prereq`, and the
-  translator refuses an output that is not built or not staged. Neither held
-  for issue-1441 until B-3f's close. CTest builds nothing before it runs a
+  translator refuses an output that is not built or not staged
+  (issue-1441's two fonts are such outputs). CTest builds nothing before it
+  runs a
   test, so a CTest library's inputs are what its whole build made, or what an
   earlier test writes.
 
@@ -277,4 +279,4 @@ alone took 118 s with the boot. The legs are not timed one by one.
 ## Provenance
 
 B-3d (2026-10-15), main session; libxml2 B-3e; meson, `env` and TAP B-3f
-(2026-10-15; the `depends` check 2026-10-19).
+(2026-10-15; the `depends` check 2026-10-19, witnessed 2026-10-20).
