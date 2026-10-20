@@ -19,6 +19,24 @@ design:
 created: 2026-08-03
 updated: 2026-10-20
 ---
+## SYS_FSTAT answers an errno (2026-10-20, ERRORS.md ER-2)
+
+`SYS_FSTAT` (50; handle, stat_va) answers 0 or a -errno, where it answered a
+bare -1 for every refusal. A handle that names no Spoor (empty, closed, out of
+range, or another kind) is -EBADF, the answer `docs/ERRORS.md`'s table already
+gave it. A stat_va that is not user memory, or that faults during the copy-out,
+is -EFAULT, checked before the handle. Otherwise the Dev's refusal crosses: its
+-errno as itself, or -EIO from a Dev with no `stat_native` or a flat failure.
+No number, record or layout changes.
+
+Mirrors: the libt and Rust wrapper comments say 0 / -errno, and libthyla-rs's
+`Error::from_syscall_return` reads -9 as `BadHandle`. Pouch's `fstat` passes
+the errno through (0061, [[sub-pouch-fs]]), and the phenotype's fstat returns
+it to a Linux guest ([[sub-kernel-syscall-dispatch]]). The Go fork decodes it
+as `Errno(9)`, EBADF, unchanged; its assembly comment that the legacy file
+calls answer a generic -1 read as EPERM is stale for fstat until the fork next
+moves (corona's pin).
+
 ## SYS_READLINK 135 and SYS_LSTAT 136 (B-3f', 2026-10-20)
 
 Two native symlink reads, by operator vote
@@ -597,9 +615,10 @@ entry point.
 
 ## Error paths
 
-Two conventions, per-syscall. The bare `-1` set predates the errno set and has
-not been converted; the header documents which each call uses, individually, in
-its enum comment. A caller cannot tell from the number which convention applies.
+Two conventions, per-syscall. The bare `-1` set predates the errno set, and the
+error rollout (`docs/ERRORS.md`, ER-1 to ER-4) converts it call by call; the
+header documents which each call uses, individually, in its enum comment. A
+caller cannot tell from the number which convention applies.
 
 The unknown-number arm returns `-1` and lets userspace decide — the header notes
 that a signal-equivalent note is the eventual behaviour and was not built.
@@ -646,9 +665,12 @@ be one 4 KiB staging buffer per round trip.
 
 ## Seams
 
-- **The two return conventions are not converging.** New syscalls use errno, old
-  ones use `-1`, and there is no migration underway. A caller handling both must
-  know which is which per call.
+- **The two return conventions converge call by call.** New syscalls use errno,
+  and the old `-1` calls move to it in the error rollout's stages
+  (`docs/ERRORS.md`, ER-2 and ER-3). Most of SYS_READDIR's, SYS_WSTAT's and
+  SYS_CHDIR's refusals and SYS_STAT's path checks still answer a bare -1
+  (OPEN-BUGS 2026-10-20 08:24Z). Until a call converts, a caller handling both
+  must know which is which per call.
 - **The `svc` immediate is unused.** Reserved as a class selector; nothing reads
   it.
 - **Environment pass-through at spawn was reserved and never built.** The

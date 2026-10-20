@@ -6,13 +6,14 @@ title: "The tty ioctl dispatcher — pts and console"
 code:
   - usr/lib/pouch/patches/0021-pouch-pty.patch
   - usr/lib/pouch/patches/0029-pouch-cons-winsize.patch
+  - usr/lib/pouch/patches/0061-pouch-fstat-ebadf.patch
 audit: hard
 guarded-by: []
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -33,8 +34,9 @@ different mechanisms.
 - `ptsname` → an fstat qid decode.
 - Console (`/dev/cons`): `TIOCGWINSZ` reads the ungated `/dev/winsize`
   leaf; `TIOCSWINSZ` is `EPERM`; termios is `ENOTTY`.
-- Anything unrecognized → `ENOTTY` (the Linux convention; pre-PTY-3 pouch
-  answered `ENOSYS` for every ioctl).
+- Anything unrecognized on a live fd → `ENOTTY` (the Linux convention;
+  pre-PTY-3 pouch answered `ENOSYS` for every ioctl). A dead fd → `EBADF`,
+  whatever the request (0061), which `isatty` keeps, as Linux's does.
 
 ## Mechanism
 
@@ -121,8 +123,13 @@ about queued bytes.
 
 ## Error paths
 
-`ENOTTY` for an unknown request on any fd, and for a tty request on a
-non-pts non-cons fd. `EPERM` for a console `TIOCSWINSZ`. `ENOTSUP` for
+`EBADF` for a dead fd, whatever the request. `refuse_fd` decides at every
+exit where a request does not fit the fd, so a call that succeeds costs no
+extra syscall: a negative fd is dead, a tagged socket fd is dead when its libc
+slot is (the kernel cannot see the slot), and any other fd is dead when
+`SYS_FSTAT` answers -EBADF. `ENOTTY` for an unknown request on a live fd, and
+for a tty request on a live non-pts non-cons fd; a pts whose ctl file cannot
+be read or written keeps `ENOTTY`. `EPERM` for a console `TIOCSWINSZ`. `ENOTSUP` for
 flush / sid / notty. The kernel's tty-syscall errors pass through the
 seam decode, with one documented divergence: the kernel's EPERM contours
 answer `EACCES` (the errno.h -1-alias rule), so `tcsetpgrp`'s POSIX-EPERM
@@ -158,10 +165,6 @@ SIG_DFL `^Z` seam, shared with [[sub-pouch-signal]]).
   by the consctl delegation chain (joey → login → ut), not by apps.
 - `kill(-pgrp, sig)` has no kernel form (`SYS_POSTNOTE` has no
   process-group arm); a negative pid fails the pid lookup honestly.
-- A closed fd yields `ENOTTY` rather than `EBADF`, because `SYS_FSTAT`
-  answers a bare -1 for both a bad fd and a valid statless fd — musl's
-  `isatty()` normalizes to `ENOTTY` anyway, so the app-visible behavior is
-  identical.
 - `78-pouch.md` (absorbed) names this patch pair by stale numbers: the
   console arm is `0029`, not `0026` (which is now the process-lifecycle
   patch).

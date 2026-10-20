@@ -73,7 +73,9 @@ each signal) and `errnos` (`kill()` refusals read ESRCH and EPERM, not EIO).
 Both rungs are boot-fatal like every other. After the pivot, on the Stratum
 root, the file-surface provers run in turn on their census lines:
 `/bin/pouch-hello-fopen` (`POUCH_CENSUS_FOPEN`), `/bin/pouch-hello-fd`
-(`POUCH_CENSUS_FD`, B-3a and B-3b) and, from B-3f' (2026-10-20),
+(`POUCH_CENSUS_FD`, B-3a and B-3b; since 2026-10-20 it also reads EBADF
+for a closed descriptor from fstat, isatty and tcgetattr) and, from B-3f'
+(2026-10-20),
 `/bin/pouch-hello-links` (`POUCH_CENSUS_LINKS`): ten legs over the real links
 the bake puts at `/lib/pouch-links` ([[sub-substrate-build]]), lstat and
 readlink through the native `SYS_LSTAT` and `SYS_READLINK`

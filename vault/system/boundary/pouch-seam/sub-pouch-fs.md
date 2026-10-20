@@ -16,6 +16,7 @@ code:
   - usr/lib/pouch/patches/0051-pouch-fd-sync-vectored.patch
   - usr/lib/pouch/patches/0059-pouch-symlinks.patch
   - usr/lib/pouch/patches/0060-pouch-raw-open.patch
+  - usr/lib/pouch/patches/0061-pouch-fstat-ebadf.patch
   - usr/pouch-hello/pouch-hello-fd.c
   - usr/pouch-hello/pouch-hello-fs.c
   - usr/pouch-hello/pouch-hello-links.c
@@ -29,6 +30,25 @@ design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
 updated: 2026-10-20
 ---
+## fstat answers EBADF for a dead descriptor (2026-10-20, 0061)
+
+The kernel's `SYS_FSTAT` answers -EBADF for a handle that names no Spoor
+([[sub-kernel-syscall-abi]]), and `fstat`'s decode passes it through, as it
+passes -EFAULT and a device's own errno; 0010's fallback that read any other
+non-zero return as `EBADF` could never run and is gone. So the `O_DIRECTORY`
+unwind's `EBADF` arm (B-3f' round 1 F2) has a producer: a refused descriptor
+a peer thread closed first is not closed again. `fdopendir` keeps fstat's
+errno, and `isatty` and `tcgetattr` answer `EBADF` through the tty
+dispatcher's `refuse_fd` ([[sub-pouch-tty]]).
+
+`pouch-hello-fd`'s `fstat-ebadf` leg reads `EBADF` from `fstat` of a closed
+descriptor, from `fstat` of fd 1000 once `fcntl` shows it free, and from
+`fdopendir` of the closed one; the same descriptor open is the control.
+`isatty-ebadf` reads `ENOTTY` from `isatty` on an open file and `EBADF` from
+`isatty` and `tcgetattr` once it is closed. The census line gains both after
+`umask`. `tools/test-pouch-fstat-ebadf.py` runs the real `fstat.c`, `ioctl.c`
+and `isatty.c` over a mocked `SYS_fstat`.
+
 ## umask (2026-10-19, B-3e M8)
 
 0058 serves `umask(mode)` over native `SYS_UMASK` 133
@@ -445,10 +465,9 @@ and the same window Linux's `*at` functions have when a caller passes
 
 Real `-errno` from the stalk-resolved calls (`ENOENT` / `EACCES` /
 `ENOTDIR`, verbatim — which is what lets `realpath` fail for the right
-reason). A failed `SYS_FSTAT` reads `EIO`, a dead descriptor included: the
-kernel answers a flat -1 for every failure, where `docs/ERRORS.md`'s table
-says `-T_E_BADF` for a bad handle, and `fstat.c`'s `EBADF` fallback sits
-behind the decode and never runs ([[seam-pouch-errno-channel]]). `ENOENT` for a non-zero `SYS_STAT`. `SYS_LSTAT`
+reason). A failed `SYS_FSTAT` answers its own errno: `EBADF` for a dead
+descriptor, `EFAULT`, or the device's (`EIO` when it has none). `ENOENT` for a
+non-zero `SYS_STAT`. `SYS_LSTAT`
 and `SYS_READLINK` answer `-errno` themselves (`docs/ERRORS.md`, "Native
 lstat and readlink"), so `lstat` and `readlink` pass the kernel's errno
 through.
@@ -512,7 +531,7 @@ in-place translation pass.
 ## Seams
 
 [[seam-pouch-dirfd]] (every `*at` is AT_FDCWD-only) ·
-[[seam-pouch-errno-channel]] (the `EBADF`-for-everything fstat collapse).
+[[seam-pouch-errno-channel]] (a flat kernel `-1` reads `EIO`).
 
 ## Caveats
 
@@ -583,10 +602,6 @@ in-place translation pass.
   POSIX makes `open` and `openat` ones (upstream's `open` is
   `__sys_open_cp`). Pouch's open is several calls, and where a cancel may land
   in the create arm needs a design (OPEN-BUGS 2026-10-20).
-- **`fstat` of a dead descriptor answers `EIO`, not `EBADF`**, so the
-  `O_DIRECTORY` unwind's `EBADF` test never fires and a number a peer thread
-  closed is closed again (OPEN-BUGS 2026-10-20 07:48Z; ERRORS.md owes
-  `-T_E_BADF` from the kernel).
 - **`O_CREAT` through a dangling final link answers `ENOENT`**, where Linux
   creates the target: the create finds the link's name and answers
   `EEXIST`, and the open after it follows the link to nothing.

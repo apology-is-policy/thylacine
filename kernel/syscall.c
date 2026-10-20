@@ -2074,7 +2074,7 @@ s64 sys_close_for_test(struct Proc *p, u64 h) { return sys_close_in(p, h); }
 //
 // SYS_LSEEK manipulates the per-Spoor `s64 offset` cursor that SYS_READ /
 // SYS_WRITE advance per call. SEEK_END queries dev->stat_native for size;
-// Devs without stat_native cannot service SEEK_END (returns -1). At v1.0
+// Devs without stat_native cannot service SEEK_END (-T_E_IO). At v1.0
 // no per-Spoor cursor lock — concurrent lseek/read/write on the same fd
 // from different threads is unspecified (POSIX user serializes).
 

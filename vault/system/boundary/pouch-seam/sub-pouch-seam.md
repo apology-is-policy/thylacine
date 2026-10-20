@@ -24,6 +24,18 @@ design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
 updated: 2026-10-20
 ---
+## 0061: fstat and the tty ioctls answer EBADF (2026-10-20)
+
+The series gains 0061. The kernel's `SYS_FSTAT` answers -EBADF for a handle
+that names no Spoor ([[sub-kernel-syscall-abi]]), and `fstat`'s decode passes
+it through; 0010's fallback, which read any other non-zero return as `EBADF`,
+sat behind the decode and is gone. 0021's `ioctl` answers `EBADF` for a dead
+descriptor, where it answered `ENOTTY`, at every exit where a request does not
+fit the descriptor ([[sub-pouch-tty]]). `tools/test-pouch-fstat-ebadf.py` runs
+the real `fstat.c`, `ioctl.c`, `isatty.c` and `syscall_ret.c` over a mocked
+`SYS_fstat`. The census line `POUCH_CENSUS_FD` gains `fstat-ebadf` and
+`isatty-ebadf` ([[sub-pouch-fs]]).
+
 ## 0060: musl's raw opens through openat's translation (2026-10-20)
 
 The series gains 0060. `bits/syscall.h` names the native open, 65,
@@ -299,12 +311,14 @@ surface, which is recorded honestly rather than papered over:
 
 ## Error paths
 
-`-ENOSYS` (sentinel, both paths). `EIO` for every flat kernel `-1` —
-design-sanctioned imprecision, not a bug: Thylacine's convention carries
-no errno, so a lower-half wrapper that can determine something better
-does so itself before reaching the decode. Explicit `-errno` in
-`[-4095,-2]` passes through, which is how the stalk-resolved calls
-(`SYS_open` and friends, since ER-1) deliver real `ENOENT` / `EACCES`.
+`-ENOSYS` (sentinel, both paths). `EIO` for a flat kernel `-1` —
+design-sanctioned imprecision, not a bug: a call the error rollout has not
+converted answers a bare `-1`, which carries no errno, so a lower-half
+wrapper that can determine something better does so itself before reaching
+the decode. Explicit `-errno` in `[-4095,-2]` passes through, which is how
+the converted calls deliver real errnos: the stalk-resolved calls (`SYS_open`
+and friends, since ER-1) their `ENOENT` / `EACCES`, and `SYS_FSTAT` (since
+2026-10-20) its `EBADF`.
 
 ## Performance
 

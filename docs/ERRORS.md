@@ -446,8 +446,15 @@ trigger surfaces; self + Fable audit before the arc closes):
   Stratum FS**: unlink-a-directory → `EISDIR` (21), rmdir-a-non-empty-directory
   → `ENOTEMPTY` (39). A server errno with no `T_E_*` name crosses BY VALUE, so
   neither needed a registry append — only kernel-ORIGINATED errnos must be
-  named here. The `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR` half
-  is still owed.
+  named here. Of the `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR`
+  half, `SYS_LSEEK` (#100) and `SYS_FSYNC` (Area-F) answer their errnos, and
+  **`SYS_FSTAT` LANDED 2026-10-20**: `-T_E_BADF` for a handle that names no
+  Spoor, `-T_E_FAULT` for the destination, and a Dev's refusal mapped as the
+  resolver maps it (a `-errno` in [-4095,-2] as itself, else `-T_E_IO`).
+  `SYS_READDIR`, `SYS_WSTAT` and `SYS_CHDIR` still answer a bare `-1` at most
+  refusals (OPEN-BUGS 2026-10-20 08:24Z): `SYS_WSTAT`'s denial is POSIX's
+  `EPERM`, which the `-1` alias forbids, and `SYS_CHDIR`'s over-long path
+  wants `ENAMETOOLONG`, which this registry does not name.
 - **ER-3** — the rest of the surface: the local-validation `-1` sites
   (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
   **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,

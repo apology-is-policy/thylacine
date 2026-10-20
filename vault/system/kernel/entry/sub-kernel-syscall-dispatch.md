@@ -17,6 +17,32 @@ design:
 created: 2026-08-03
 updated: 2026-10-20
 ---
+## SYS_FSTAT's errnos (2026-10-20, ERRORS.md ER-2)
+
+`sys_fstat_for_proc(p, hraw, out_k)` is the core that `sys_fstat_handler` (50)
+and the phenotype's fstat share. It answers -T_E_BADF when
+`sys_lookup_rw_handle` finds no Spoor at the index, which covers an empty,
+closed or out-of-range slot and a handle of another kind. A failure from
+`spoor_stat_native` is mapped as stalk's `err_code` maps it, so `fstat` and
+`stat` answer one object's failure alike: a -errno in [-4095,-2] crosses as
+itself, and anything else (a NULL `stat_native`, a Dev's flat -1, a server
+EPERM arriving as -1) reads -T_E_IO. The core's `!p` and `!out_k` guards and
+the handler's `!t` and `!p` still answer -1; no EL0 call reaches them (ER-3).
+
+The handler validates the 88-byte destination before the lookup, as
+`sys_lstat_handler` does, and copies the record out a byte at a time; either
+refusal is -T_E_FAULT. A bad destination therefore answers -T_E_FAULT whatever
+the handle, where Linux asks the descriptor first. The phenotype's fstat copies
+out after the core, in Linux's order, and returns the core's answer unchanged,
+so a Linux guest reads -EBADF for a dead descriptor.
+
+The core is exported, with a prototype, so `syscall.fstat_errnos`
+(test_syscall) drives it without EL0: a live write-only handle stats; a closed,
+out-of-range or other-kind handle is -T_E_BADF; a Dev with no `stat_native`
+(devzero) is -T_E_IO; a mock Dev's refusals cross or read -T_E_IO at each edge
+of the window; and through the dispatcher a NULL destination is -T_E_FAULT and
+a closed handle -T_E_BADF.
+
 ## The native symlink reads: SYS_READLINK and SYS_LSTAT (2026-10-20, B-3f')
 
 `sys_readlink_handler` (135) marshals x0-x3 and `sys_lstat_handler` (136)

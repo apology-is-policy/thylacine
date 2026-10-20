@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-10-19
+updated: 2026-10-20
 ---
 ## Create admission by session end (2026-10-19, B-3e M7)
 
@@ -595,6 +595,7 @@ mapper rejects only ecode 0 and anything above 4095 — so it arrives as
 | rename / unlink (#80) | folded to `-T_E_ACCES` | EACCES |
 | write (#3) | returned raw | the flat sentinel → EIO |
 | create (#99) | falls outside the `[-4095,-2]` accessor window → `-1` | EIO under pouch; a blanket EPERM on go's native seam |
+| stat_native (ER-1, ER-2) | returned raw as `-1`; stat and fstat read it as `-T_E_IO` | EIO |
 
 The write path documents its collision as a known residual owed to the
 rollout. The create accessor's window silently excludes it, so a
@@ -602,14 +603,15 @@ permission-denied create and a permission-denied unlink give the same
 caller different answers to the same class of denial. Neither is a bug
 today; both are the shape the remaining ER stages exist to converge.
 
-**One comment on this surface asserts immunity it does not have.** The
-native-stat arm claims the integrity invariant bounds the code into
-`[-4095,-2]` so `-1` can never arrive, and claims both its named callers
-propagate. The mapper's clamp refutes the first; the resolver propagates
-but the stat syscall flattens to `-1`, refuting the second — and the
-resolver's own converter **guards explicitly against the value the leaf says
-cannot occur**, which is the strongest available evidence that it can.
-[[seam-fstat-errno-flattened-above-the-leaf]].
+**The native-stat arm's comment states the one mapping both its callers
+apply.** A server EPERM reaches `dev9p_stat_native` as `-1`, because the
+mapper's clamp passes ecode 1 through by value, and the comment says so: the
+resolver's `err_code` names that value, so the frame below knew it before the
+frame above. stalk's `err_code` for `*errp` (ER-1) and `sys_fstat_for_proc`'s
+return (ER-2, 2026-10-20) map the arm's answer alike: a -errno in `[-4095,-2]`
+crosses as itself, and the `-1`, a server EPERM included, reads `-T_E_IO`.
+[[seam-fstat-errno-flattened-above-the-leaf]] records the comment's earlier
+claim that both callers propagated, when the fstat half flattened to `-1`.
 
 ## Performance
 

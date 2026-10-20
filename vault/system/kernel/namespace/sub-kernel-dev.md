@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -96,9 +96,10 @@ The optional set is `stat_native`, `wstat_native`, `walk_attrs`,
 / `poll_arm`. A NULL slot has a defined meaning per slot, and the
 meanings are not uniform: a NULL `poll` (with no triple) means ALWAYS
 READY (the POSIX-correct answer for a regular file), while a NULL
-`fsync`, `readdir` or `stat_native` means the corresponding syscall
-returns -1. So one absent slot is a graceful default and another is a
-hard refusal, and only the header says which.
+`fsync` or `readdir` makes its syscall answer -T_E_OPNOTSUPP and a NULL
+`stat_native` makes `SYS_FSTAT` answer -T_E_IO. So one absent slot is a
+graceful default and another is a hard refusal, and only the header says
+which.
 
 **`remote` (2026-10-06, DISTRO 4.6)** answers whether a Spoor belongs to a
 session whose transport leaves the machine; a NULL slot means never. The
@@ -327,19 +328,16 @@ Covered by `dev.boot_registration_smoke`, `dev.vtable_slot_coverage`,
 
 ## Caveats
 
-- **The `.stat_native` documentation names two Devs that implement
-  it.** `dev.h` says "trivial leaf Devs (devcons / devnull / devzero /
-  devnotes) leave the slot NULL". devcons implements it (`cons.c`,
-  added by #55 as the is-a-cons qid contract) and devnotes implements
-  it (added by #97). devnull and devzero are still accurate. What makes
-  this worth more than a stale-comment note is WHY both changed: a Dev
-  with no `stat_native` fails `SYS_FSTAT`, and clang treats a
-  non-EBADF fstat failure on fds 0/1/2 as fatal — which silently killed
-  every concurrent `make -j4` job until #96/#97 landed. The header
-  still teaches the shape that produced the bug, by worked example, to
-  the one audience positioned to repeat it: the next author of a leaf
-  Dev. Task #19 (`/dev/winsize` has no `stat_native`) is the same
-  family and still open (task #76).
+- **A Dev that a namespace fd can carry owes a `.stat_native`.** A
+  NULL slot makes `SYS_FSTAT` answer -T_E_IO, and clang treats any
+  fstat failure on fds 0/1/2 other than EBADF as fatal, which silently
+  killed every concurrent `make -j4` job until #96/#97 gave devcons
+  and devnotes the slot. A closed descriptor answers EBADF since
+  2026-10-20, the one failure clang's standard-fd fixup repairs. The
+  `dev.h` contract names the Devs that still leave the slot NULL:
+  devcap (the `/cap` leaves) and the leaves reached only by a direct
+  attach (devnull, devzero, devfull, devrandom). The next author of a
+  leaf Dev is the audience positioned to repeat the bug.
 - **The coverage test's Dev-count assertion is a very loose lower
   bound.** `dev.vtable_slot_coverage` ends with `devs_checked >= 8`,
   and its comment enumerates the eight Devs of P4-A through P4-E. Ten
