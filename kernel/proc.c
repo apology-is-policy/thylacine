@@ -1332,7 +1332,7 @@ void proc_set_name(struct Proc *p, const char *path, size_t len) {
 // coherent cross-CPU snapshot (the page_count reader pattern).
 u64 proc_cpu_ns(const struct Proc *p) {
     if (!p) return 0;
-    u64 total = 0;
+    u64 total = p->reaped_run_ns;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc)
         total += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
     return total;
@@ -1351,7 +1351,8 @@ u64 proc_cpu_ns(const struct Proc *p) {
 u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
     if (tid_out) *tid_out = 0;
     if (!p) return 0;
-    u32 peak = 0;
+    u32 peak = p->reaped_kstack_peak;
+    if (peak && tid_out) *tid_out = p->reaped_kstack_tid;
     for (const struct Thread *t = p->threads; t; t = t->next_in_proc) {
         u32 used = thread_kstack_used(t, budget_words);
         if (used > peak) {
@@ -1360,6 +1361,50 @@ u32 proc_kstack_peak(const struct Proc *p, int *tid_out, u32 *budget_words) {
         }
     }
     return peak;
+}
+
+// An exited peer is dead for good once on_cpu clears: sched() never re-inserts
+// a THREAD_EXITING prev, ready_on refuses any non-RUNNABLE thread, and an
+// exiting tail never sleeps -- so no CPU will run it or switch out of it again.
+// That is the predicate wait_pid's zombie loop frees on, applied one thread at a
+// time while the Proc lives. Each pass finds a dead peer and unlinks it in one
+// g_proc_table_lock hold: the unlink is the claim (a concurrent reaper of the
+// same Proc no longer finds it), and every walker that can reach a Thread holds
+// that lock, so none is mid-walk over it when it is freed. The kstack scan runs
+// under the lock on purpose -- folding after the unlink would let /ctl/kstack
+// see the thread in neither place -- and is bounded by one stack.
+void proc_reap_exited_threads(void) {
+    struct Thread *self = current_thread();
+    struct Proc   *p    = self ? self->proc : NULL;
+    if (!p || p == g_kproc) return;
+    for (;;) {
+        irq_state_t s = proc_table_lock_acquire();
+        struct Thread *dead = NULL;
+        for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
+            if (t != self && t->state == THREAD_EXITING &&
+                !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+                dead = t;
+                break;
+            }
+        }
+        if (!dead) {
+            proc_table_lock_release(s);
+            return;
+        }
+        p->reaped_run_ns += __atomic_load_n(&dead->run_ns, __ATOMIC_RELAXED);
+        u32 used = thread_kstack_used(dead, NULL);
+        if (used > p->reaped_kstack_peak) {
+            p->reaped_kstack_peak = used;
+            p->reaped_kstack_tid  = dead->tid;
+        }
+        // The debug focus is validated by pointer against p->threads; a freed
+        // slot recycled into a new Thread of p would match it.
+        if (__atomic_load_n(&p->debug_focus_thread, __ATOMIC_ACQUIRE) == dead)
+            __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
+        thread_unlink_from_proc_locked(dead);
+        proc_table_lock_release(s);
+        thread_free_unlinked(dead);
+    }
 }
 
 // The whole-system peak: the deepest kernel stack ANY live thread has ever
@@ -4452,7 +4497,8 @@ static void exits_term(int code, int sig, const char *msg) {
     // so inherited pipe write ends deliver EOF at process TERMINATION, not at
     // reap (a shell draining `$(cmd)` sees EOF immediately). The gate is the
     // live_peers determination, NOT thread_count: thread_count counts
-    // unreaped EXITING peers (it decrements only at reap), so a well-formed
+    // EXITING peers until they are freed (at the Proc's next thread create,
+    // or at reap), so a well-formed
     // native multi-thread program that joins its workers then calls exits()
     // arrives with thread_count > 1 and live_peers == 0 -- the old
     // thread_count==1 gate skipped its close entirely and the #926

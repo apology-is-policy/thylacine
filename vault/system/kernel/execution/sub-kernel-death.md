@@ -168,7 +168,8 @@ the last one out (that one additionally zombies the Proc through the chokepoint
 above). An unmapped or unwritable tidptr **silently skips** both the store and the
 wake — via the `uaccess_store_u32` fixup ([[sub-kernel-uaccess]]) — rather than
 extincting: a departing Thread must not be able to crash the box with a bad address
-it registered earlier.
+it registered earlier. The departed Thread itself is freed later, by its Proc's next
+thread create or by `wait_pid` ([[sub-kernel-thread]], a thread's end of life).
 
 **The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
 `exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype

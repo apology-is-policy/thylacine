@@ -36,7 +36,7 @@ address-space extraction three of them are **not per-Proc at all**:
 | live VMAs | `vma_count` | `AddrSpace` | `PROC_VMA_MAX` | [[lock-vma]] — same |
 | shared-in pages | `shared_map_pages` | `AddrSpace` | `PROC_SHARED_MAP_MAX_PAGES` | [[lock-vma]] — same |
 | direct children | `child_count` | `Proc` | `PROC_CHILD_MAX` | [[lock-proc-table]] — bounded overshoot |
-| live threads | `thread_count` (+ the poll-thread count) | `Proc` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
+| threads not yet freed (live, plus peers exited since the Proc's last thread create, which frees them) | `thread_count` (+ the poll-thread count) | `Proc` | `PROC_THREAD_MAX` | [[lock-proc-table]] — bounded overshoot |
 
 **The first three moved with the mapping list, and that changed what they
 bound.** Two Procs sharing an address space share its pages, so one charge is

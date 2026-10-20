@@ -344,7 +344,8 @@ static size_t format_status(const struct Proc *caller, struct Proc *p, char *buf
 // at the READ site to owner-or-CAP_HOSTOWNER (devproc_sched_authorized).
 // PRECONDITION: called under g_proc_table_lock (via devproc_read_cb) -- the
 // p->threads walk + the per-thread reads are stable only under that lock
-// (thread_free holds it; the #95 walk-safety proc_cpu_ns relies on the same).
+// (every unlink from p->threads holds it, thread_free's and the in-Proc reap's;
+// the #95 walk-safety proc_cpu_ns relies on the same).
 static const char *sched_band_name(u32 band) {
     switch (band) {
     case SCHED_BAND_INTERACTIVE: return "INTR";
@@ -1759,8 +1760,9 @@ bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *tar
 // True iff every non-EXITING thread of `target` is parked on its OWN debug_rendez
 // with on_cpu==false -- the "fully stopped" predicate a coherent cross-Proc
 // mem/reg access relies on (specs/debug_stop.tla NoEL0AfterStopped). Caller holds
-// g_proc_table_lock (the p->threads walk is stable under it -- the only mutator,
-// thread_free, holds it); reads rendez_blocked_on under each peer's wait_lock (the
+// g_proc_table_lock (the p->threads walk is stable under it -- both mutators,
+// thread_free and the in-Proc reap, hold it); reads rendez_blocked_on under each
+// peer's wait_lock (the
 // same lock the park's register-then-observe takes, so it never sees a thread
 // about to proceed to EL0), then the #788 spin-until-off_cpu read (a thread
 // mid-cpu_switch_context still reads on_cpu==true until it fully deschedules).
@@ -1928,10 +1930,11 @@ static long devproc_mem_rw(struct Spoor *c, void *buf, long n, s64 off, bool is_
 // goroutine, NOT the head TID==PID); a manual stop / attach leaves it NULL. The
 // pointer is validated against the CURRENT p->threads under g_proc_table_lock
 // (every caller holds it): NO UAF, and the load-bearing reason is the GPTL PIN
-// (#95-audit F1), NOT a stop gate -- reap (wait_pid_for) does proc_unlink_child
-// under this lock BEFORE the lock-free thread_free loop, and proc_for_each walks
-// the kproc-rooted children tree, so a target a reader can still reach has not
-// been unlinked -> none of its threads is freed. A pointer that matches an
+// (#95-audit F1), NOT a stop gate -- every unlink from p->threads holds this
+// lock and comes before the free: wait_pid_for's thread_free loop, run after
+// proc_unlink_child put the target out of proc_for_each's reach, and the in-Proc
+// reap, which clears a focus naming the thread it frees in the same hold. A
+// pointer that matches an
 // in-list thread is therefore a LIVE struct; this validation loop IS the safety
 // net (do NOT delete it as "redundant" -- the 8b settled kstack drops the
 // fully-stopped gate, so this loop is the only thing turning a stale/foreign focus

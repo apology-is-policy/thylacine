@@ -898,6 +898,9 @@ void test_proc_exits_in_dying_group_keeps_group_status(void);
 void test_proc_fault_in_dying_group_keeps_group_status(void);
 void test_proc_fault_in_dying_group_reaps_exited_packed(void);   // gcpark-b
 void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
+void test_proc_reap_exited_threads_frees_peers(void);
+void test_proc_reap_keeps_thread_cap_open(void);
+void test_proc_reap_before_sqpoll_charge(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -3159,6 +3162,9 @@ struct test_case g_tests[] = {
     { "proc.fault_in_dying_group_keeps_group_status", test_proc_fault_in_dying_group_keeps_group_status, false, NULL },
     { "proc.fault_in_dying_group_reaps_exited_packed", test_proc_fault_in_dying_group_reaps_exited_packed, false, NULL },
     { "proc.note_death_with_live_peer_reaps_signalled", test_proc_note_death_with_live_peer_reaps_signalled, false, NULL },
+    { "proc.reap_exited_threads_frees_peers",   test_proc_reap_exited_threads_frees_peers,   false, NULL },
+    { "proc.reap_keeps_thread_cap_open",        test_proc_reap_keeps_thread_cap_open,        false, NULL },
+    { "proc.reap_before_sqpoll_charge",         test_proc_reap_before_sqpoll_charge,         false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },

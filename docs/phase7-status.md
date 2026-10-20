@@ -1412,6 +1412,55 @@ table still reaches its caller as ENOENT (dev9p_walk drops the server's error; O
 2026-10-08). The cost of a paste into nora in a tile
 is unmeasured.
 
+## An exited thread is freed at its Proc's next thread create — 2026-10-20
+
+OPEN-BUGS 2026-10-19 15:03Z (P1). An exited peer thread stayed on its Proc's list, counted by the thread cap, until
+the parent's `wait_pid` reaped the whole Proc: a long-lived program that starts and joins workers was refused every
+create once 256 had accumulated. OpenRCT2 froze on the demo image within the hour; libxml2's runtest fails its thread
+section the same way on b3. Code, witnesses, dossiers and the audit close in one commit, *(pending)*, squashed from
+aux-3-reap, which merged main 107c5c1bd first (ed5275e9c). The operator asked for this fix for the 10-20 talk and then
+a review of the whole thread model; that review and its overhaul plan are `docs/thread-model-review.html`.
+
+- **The reap.** `proc_reap_exited_threads` frees every peer of the caller's Proc that is `THREAD_EXITING` with
+  `on_cpu` clear, the predicate `wait_pid`'s zombie loop frees on. One `g_proc_table_lock` hold finds a dead peer and
+  unlinks it, and the unlink is the claim against a second reaper; it folds the thread's `run_ns` and kstack watermark
+  into the Proc, so `proc_cpu_ns` and `proc_kstack_peak` never shrink, and clears a debug focus that names it. The free
+  runs outside the lock (`thread_unlink_from_proc_locked`, `thread_free_unlinked`). The caller is a RUNNING thread of
+  the Proc, which keeps the Proc out of ZOMBIE.
+- **Where it runs.** Before each charge of the thread budget: `SYS_THREAD_SPAWN`, the vivarium clone, and the Loom
+  SQPOLL setup (audit F1). kproc's threads are never reaped here; the SQPOLL kthread keeps its joiner.
+- **Not at thread exit.** Kernel tests walk `p->threads` without the lock while peers exit; freeing at the switch is
+  the overhaul's chunk C1.
+- **What stays** (audit F3, the vault seam `seam-exited-threads-wait-for-a-create`). An exited peer keeps its 32 KiB
+  kstack until the next create, paid from the Proc's own cap (at most 255 for a user Proc, a whole burst for an exempt
+  one), and `tkill`/`tgkill` to it answers ESRCH only once a create has freed it.
+- **The docs said otherwise.** `proc.h`, inv-i32 and IDENTITY-DESIGN called the cap a bound on live threads while the
+  code counted every thread not yet freed, which is how the freeze shipped. `thread_count` now reads "not yet freed"
+  everywhere. struct Proc 408 -> 424 bytes.
+- Witnesses. Kernel: `proc.reap_exited_threads_frees_peers`; `proc.reap_keeps_thread_cap_open` (300 workers started
+  and finished one after another under a user principal, asserted not exempt; the cap refused at 256 before);
+  `proc.reap_before_sqpoll_charge` (255 finished workers fill the budget and the poller still fits). Guest, every boot:
+  `pouch-hello-threads` exited-counted (four joined workers held behind a mutex read 5 counted, the positive control)
+  and join-churn (300 create+join, at most 2..ncpu+1 left counted).
+- Audit round 1, Fable 5.1 reviewing Opus 5.5: 0/0/1/3, clean. F1 the SQPOLL charge (fixed; also self-found); F2
+  comments the change made false (fixed); F3 the residue (the seam); F4 a test's identity setup and its not-exempt
+  control (fixed).
+
+**Gate** (`--config ci`): suite 2012/2012 on 8b069fbc7, exited-counted OK, join-churn "2 still counted (2..5)", boot
+OK. `tools/ci-smp-gate.sh` on 191a2060d: PASS, 50 of 50 boots (default at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 each), 0 corruption, 06:43:37-07:32:04Z. Earlier, on 4dae55e7d: default-smp4, ubsan-smp4 and default-smp1,
+10/10 each, 0 corruption.
+
+**Red controls:** with the reap disabled, the first two kernel tests fail at their assertions (2009/2011) and
+join-churn reads 310 counted and stops the boot; with only the Loom setup's call removed, only
+`proc.reap_before_sqpoll_charge` fails, at its setup (2011/2012).
+
+**Still open.** The seam above, and the thread model's other findings: exec frees the old address space while an
+exiting peer may still store through it (P1, the overhaul's C0), tid and pid exhaustion is an extinction, `tkill` is
+not thread-directed, debug reads fall back to the newest thread, 256 is the wrong cap for Go, the exit tail is
+preemptible on the kthread-shaped paths, and every create and free flushes the whole TLB. The overhaul C0-C9 and six
+decisions for the operator are in `docs/thread-model-review.html`; the Fable report is
+`docs/THREAD-MODEL-REVIEW-FABLE.md`.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

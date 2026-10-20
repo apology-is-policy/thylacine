@@ -109,9 +109,11 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 //                      as->lock so it is exact). B-1a' (ARCH 6.5 "Capacity, and
 //                      the I-32 default"): no longer a constant -- see
 //                      proc_default_page_budget below.
-//   PROC_THREAD_MAX -- live threads. Tighter than the others because a thread
-//                      pins THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel
-//                      kstack (256 threads -> 8 MiB kstacks).
+//   PROC_THREAD_MAX -- threads not yet freed (the live ones, plus peers that
+//                      exited since the Proc's last thread create, which frees
+//                      them) and SQPOLL kthreads. Tighter than the others
+//                      because a thread pins THREAD_KSTACK_TOTAL bytes of
+//                      UNSWAPPABLE kernel kstack (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
 //
 // B-1a': the DEFAULT anon budget a Proc is seeded with, and the hard maximum a
@@ -631,15 +633,17 @@ struct Proc {
     // reads NULL -> head, preserving the attach/8a-2b single-thread behavior).
     // READ (ACQUIRE) under g_proc_table_lock: devproc_focus_thread validates the
     // pointer is still a thread of `target` (else head). NO UAF -- and the
-    // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): reap
-    // (wait_pid_for) does proc_unlink_child under g_proc_table_lock BEFORE the
-    // lock-free thread_free loop, and proc_for_each walks the kproc-rooted children
-    // tree, so a target a reader can still reach has not been unlinked -> none of
-    // its threads is freed; the in-list validation then rejects any stale/foreign
-    // pointer. The fully-stopped gate is an ADDITIONAL property of the mem / regs /
-    // kregs / step readers but NOT of the 8b settled kstack, so it is not the
-    // safety net -- the pin + validation are (do not delete the validation loop as
-    // "redundant"). KP_ZERO inits it NULL; NOT propagated by rfork.
+    // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): every
+    // unlink from p->threads holds g_proc_table_lock and comes before the free --
+    // wait_pid_for's thread_free loop, run after proc_unlink_child put the target
+    // out of proc_for_each's reach, and the in-Proc reap, which clears a focus
+    // naming the thread it frees in the same hold -- so a pointer that matches an
+    // in-list thread under the lock is a live struct, and the in-list validation
+    // rejects any stale/foreign one. The fully-stopped gate is an ADDITIONAL
+    // property of the mem / regs / kregs / step readers but NOT of the 8b settled
+    // kstack, so it is not the safety net -- the pin + validation are (do not
+    // delete the validation loop as "redundant"). KP_ZERO inits it NULL; NOT
+    // propagated by rfork.
     struct Thread     *debug_focus_thread;
 
     // PTY-1a (PTY-DESIGN.md section 4; POSIX sessions + process groups).
@@ -977,6 +981,16 @@ struct Proc {
     // park reads it lock-free. KP_ZERO-fresh NONE; never rfork-inherited. Fills
     // the deliberate u32 tail pad, so sizeof is unchanged.
     u32                debug_birth_hold;
+
+    // What the threads proc_reap_exited_threads has freed leave behind, so the
+    // Proc's on-CPU time (proc_cpu_ns) and its kernel-stack watermark
+    // (proc_kstack_peak, ARCH 8.12: the deepest any of its threads EVER
+    // reached) do not shrink when an exited peer is freed while the Proc lives.
+    // Written by the reap under g_proc_table_lock, read by those two under it.
+    // KP_ZERO-fresh; never rfork-inherited.
+    u64                reaped_run_ns;
+    u32                reaped_kstack_peak;
+    int                reaped_kstack_tid;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1294,8 +1308,11 @@ _Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 408,
- "struct Proc size: IM-2 appended the propagating-legate pair (legate_caps "
+_Static_assert(sizeof(struct Proc) == 424,
+ "struct Proc size: the in-Proc thread reap appended reaped_run_ns u64 + "
+ "reaped_kstack_peak u32 + reaped_kstack_tid int (what a freed exited peer "
+ "leaves behind): 408 -> 424. Before that: "
+ "IM-2 appended the propagating-legate pair (legate_caps "
  "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
  "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
@@ -1586,13 +1603,27 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 //   for the read (the thread_count write domain). The check and the later
 //   thread_link_into_proc ++ are at different lock holds, so a bounded TOCTOU
 //   overshoot (<= ncpus-1 concurrent spawners) is possible -- acceptable for a
-//   floor.
+//   floor. thread_count counts every Thread on the list, an exited one included
+//   until it is freed, so both spawn paths call proc_reap_exited_threads first.
 bool proc_thread_cap_ok(struct Proc *p);
+
+// proc_reap_exited_threads -- free every Thread of the caller's Proc that has
+//   exited (THREAD_EXITING) and fully left its CPU (on_cpu clear), folding its
+//   run_ns and kstack watermark into the Proc and clearing a debug focus that
+//   names it. Without it an exited peer stays on p->threads, pinning its kstack
+//   and counted by proc_thread_cap_ok, until wait_pid reaps the whole Proc.
+//   Caller: a RUNNING thread of that Proc, holding no lock -- being RUNNING pins
+//   the Proc ALIVE (it cannot become a ZOMBIE that wait_pid frees under us), and
+//   thread_free_unlinked takes the allocator locks. An exited peer still on a
+//   CPU is skipped; a later call frees it. kproc's threads are never reaped here.
+void proc_reap_exited_threads(void);
 
 // proc_sqpoll_charge / _uncharge -- the SQPOLL-kthread half of the shared
 //   thread budget (fid-lift audit F1). Charge is check-AND-increment under one
 //   g_proc_table_lock hold (a Loom setup has no other serialization point);
-//   false = at the cap, the setup must refuse. Counts even for exempt Procs
+//   false = at the cap, the setup must refuse. The setup frees the Proc's
+//   exited peers first (proc_reap_exited_threads), as the spawn paths do, since
+//   thread_count counts them until then. Counts even for exempt Procs
 //   (they skip only the cap), so the uncharge -- loom_free's join path, keyed
 //   on Loom.sqpoll_charged -- is unconditional.
 bool proc_sqpoll_charge(struct Proc *p);

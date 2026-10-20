@@ -85,7 +85,7 @@
 // exits() is __attribute__((noreturn)); this helper inherits the
 // no-return semantics. The user thread context is abandoned (its
 // kernel stack with the exception_context on it stays around until
-// wait_pid reaps via thread_free).
+// the thread is freed).
 __attribute__((noreturn))
 static void sys_exits_handler(u64 status) {
     // #91: carry the real low byte (0..255) so a native t_exits(N) -- and a
@@ -5328,6 +5328,10 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     // alloc -- bounding a thread bomb (each thread pins unswappable kernel
     // kstack). kproc is already rejected above; the SYSTEM boot/service chain is
     // exempt. A bounded TOCTOU overshoot (<= ncpus-1) is acceptable for a floor.
+    // The exited peers are freed first: the cap counts every Thread still on the
+    // list, so a program that starts and joins workers would otherwise reach it
+    // with a handful of live threads.
+    proc_reap_exited_threads();
     if (!proc_thread_cap_ok(p))                      return -T_E_AGAIN;
 
     struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
@@ -5443,7 +5447,9 @@ static s64 viv_clone_thread(struct exception_context *ctx, const u64 *args) {
     }
 
     // I-32: the per-Proc thread cap, BEFORE the kstack alloc (mirrors
-    // sys_thread_spawn_handler). A pthread_create storm fails clean -EAGAIN.
+    // sys_thread_spawn_handler, exited peers freed first). A pthread_create
+    // storm fails clean -EAGAIN.
+    proc_reap_exited_threads();
     if (!proc_thread_cap_ok(p))                      return -(s64)T_E_AGAIN;
 
     // The crux. thread_create_forked copies `ctx` (the parent's trap frame) with
@@ -7912,6 +7918,10 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         // refusal here is the I-32 floor working, same as the page charge
         // above. loom_unref -> loom_free settles the charge via
         // sqpoll_charged on every later path, including a start failure.
+        // thread_count counts the Proc's exited peers until they are freed,
+        // so free them first, as both thread-create arms do. Only a thread of
+        // p may (a test passes a fixture Proc that runs no thread).
+        if (p == current_thread()->proc) proc_reap_exited_threads();
         if (!proc_sqpoll_charge(p)) {
             spin_lock(&p->as->lock);
             (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
@@ -15802,14 +15812,14 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_EXITS:
         // Never returns. Kernel exits() → sched() picks another thread.
         // The exception_context stays on the EXITING thread's kstack
-        // until wait_pid → thread_free.
+        // until the thread is freed.
         sys_exits_handler(ctx->regs[0]);
 
     case SYS_EXIT_GROUP:
         // Never returns. POSIX exit_group(2): terminate the WHOLE Proc
         // (cascade peer Threads via proc_group_terminate), not just the
         // calling Thread. The exception_context stays on the EXITING thread's
-        // kstack until wait_pid -> thread_free.
+        // kstack until the thread is freed.
         sys_exit_group_handler(ctx->regs[0]);
 
     case SYS_PUTS:

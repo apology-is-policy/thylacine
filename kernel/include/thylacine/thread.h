@@ -883,6 +883,11 @@ struct Thread *thread_create_forked(struct Proc *proc,
 // runqueue. Extincts on violation.
 void thread_free(struct Thread *t);
 
+// The in-Proc reap's halves (proc_reap_exited_threads): unlink under the
+// caller's g_proc_table_lock hold, then free with no lock held.
+void thread_unlink_from_proc_locked(struct Thread *t);
+void thread_free_unlinked(struct Thread *t);
+
 // Direct context switch from current_thread to `next`. Updates state
 // fields (prev → RUNNABLE, next → RUNNING), parks `next` in TPIDR_EL1,
 // then calls cpu_switch_context.

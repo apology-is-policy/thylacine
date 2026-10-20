@@ -800,12 +800,10 @@ enum {
     //      parent's child_waiters (mirrors exits() with status 0).
     //   4. yield via sched(); never returns.
     //
-    // After-exit reaping: the Thread descriptor + kstack remain
-    // allocated until the Proc dies (then wait_pid's reap path frees
-    // every Thread in p->threads). v1.0 accepts this — short-lived
-    // programs (libsodium tests) bound the leak; long-running daemons
-    // (stratumd) join their threads at shutdown so the Proc dies
-    // shortly after. Per-Thread reaping is a v1.x extension.
+    // After-exit reaping: the Thread descriptor + kstack stay
+    // allocated, counted against PROC_THREAD_MAX, until the Proc's
+    // next thread create frees them (proc_reap_exited_threads) or,
+    // once the whole Proc is dead, wait_pid's reap does.
     //
     // Never returns to userspace — userspace must treat any return as
     // a kernel bug. The x0 the SVC dispatch writes on a fall-through
@@ -3774,7 +3772,8 @@ struct exception_context;
 //
 // SYS_EXITS doesn't return — it transitions through the kernel's exits()
 // path and sched()'s context-switch picks another thread. The user
-// thread is left in EXITING state until wait_pid reaps it.
+// thread is left in EXITING state until it is freed (wait_pid's reap,
+// or sooner a peer's thread create).
 void syscall_dispatch(struct exception_context *ctx);
 
 // The follow-up round's F1 gate predicate (defined in syscall.c): SYS_ATTACH_9P

@@ -422,12 +422,15 @@ a masked-window lever.
 
 ## Data structures
 
-`struct Proc` is 392 bytes and no longer holds a page table at all — it holds a
+`struct Proc` is 424 bytes and no longer holds a page table at all — it holds a
 pointer to a refcounted address space, which is what makes the vfork and
 copy-on-write shapes above expressible. That extraction is the **only change in
 the struct's recorded history that ever made it smaller**: 408 → 376 in one
 commit, against a run of appends before and after (it is back to 392 through a
-socket table and a ring-poll field). Worth naming because the struct is
+socket table and a ring-poll field, 408 with IM-2's propagating legate scope,
+and 424 with the in-Proc reap's folds: `reaped_run_ns`, `reaped_kstack_peak`,
+`reaped_kstack_tid`, zeroed at allocation and never inherited by rfork, which
+`proc_cpu_ns` and `proc_kstack_peak` start from). Worth naming because the struct is
 otherwise grown strictly by appending, with **every** load-bearing offset
 individually `_Static_assert`ed and each assert carrying the reason its field
 landed where it did. `magic` is at offset 0 so SLUB's
@@ -643,11 +646,14 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   `state=ZOMBIE; proc_free()` rollback and orphan paths. Reading `proc_free`
   alone gives the wrong picture of when a Proc's fds shut. See
   [[sub-kernel-death]].
-- **`thread_count` is not "live threads".** It counts *unreaped* threads and
-  decrements only at reap, so a joined-then-exits multi-thread Proc has
-  `thread_count > 1` with zero live peers. Mistaking one for the other was
-  #68 round-2 F2 ([[fnd-68-r2-f2]]); the live count is
-  `proc_count_live_peers_locked`.
+- **`thread_count` is not "live threads".** It counts threads not yet freed:
+  the live ones plus every peer that exited since the Proc's last thread create
+  (the in-Proc reap, [[sub-kernel-thread]]), so a joined-then-exits multi-thread
+  Proc can show `thread_count > 1` with zero live peers. Mistaking one for the
+  other was #68 round-2 F2 ([[fnd-68-r2-f2]]), and the other way round it let
+  exited peers fill `PROC_THREAD_MAX`, which every doc called a bound on live
+  threads, until the in-Proc reap: OpenRCT2 froze at 256 (OPEN-BUGS 2026-10-19
+  15:03Z). The live count is `proc_count_live_peers_locked`.
 - **`sizeof(struct Proc)` has been wrong in the reference doc since P2.**
   The absorbed `14-process-model.md` asserted 296.
 - `proc_set_exe_path` takes the table lock — added by V-4c-3 F1 after the

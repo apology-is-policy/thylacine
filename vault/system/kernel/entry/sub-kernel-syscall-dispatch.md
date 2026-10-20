@@ -912,7 +912,12 @@ spawn-permission bit taking the one-hop delegation shape — console-attached
 **or** an existing holder — so a chain from init through login and the shell to a
 build driver can carry it without any of them being console-attached. The bit
 gates conferring the *authority*; the raise it authorises is still bounded by
-the hard maximum.
+the hard maximum. Both thread-create arms (`sys_thread_spawn_handler` and
+`viv_clone_thread`) first free the Proc's exited peers
+(`proc_reap_exited_threads`, [[sub-kernel-thread]]), then ask
+`proc_thread_cap_ok`, so the thread cap counts what is alive plus what exited
+since the last create, not every thread the Proc ever ran. The Loom SQPOLL
+setup, the budget's third consumer, frees them too before `proc_sqpoll_charge`.
 
 **[[inv-i34]]** — the three hardware-mint handlers carry the CreateBegin /
 CreateCommit pair described above. The allowance is what bounds them; this file

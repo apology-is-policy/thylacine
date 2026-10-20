@@ -231,6 +231,16 @@ the caller's Proc).
   takes it non-recursively.
 - The sched-failure early-exit branch is unexercised by
   `/pouch-hello-threads`.
+- `/pouch-hello-threads` reads the kernel's `threads:` line of
+  `/proc/<pid>/status` in two legs. exited-counted runs before any other thread
+  exists: four workers held behind a mutex cannot finish during a create, so
+  once joined all four are still counted (5 with main), the positive control
+  that the reading sees exited threads at all. join-churn then starts and joins
+  300 workers one after another, past `PROC_THREAD_MAX`, and requires 2..ncpu+1
+  counted afterwards: main, the last worker, and one worker per other CPU still
+  finishing when the last create ran. joey runs it as the system principal,
+  which the cap exempts, so only the count shows a leak there; with the in-Proc
+  reap disabled the leg read 310 (2026-10-20).
 - C11 `thrd_create` (the `start_c11` path) is patched but untested.
 
 ## Provenance
