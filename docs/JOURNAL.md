@@ -24,7 +24,7 @@ needed the operator.
 ---
 ## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- thread-model C0: exec waits for its exiting peers, and three smaller holes closed, each witness run both ways
 
-**Why now.** The overhaul the operator asked for at 04:46:56Z ("take a very close look at multi-threading ... together suggest an overhaul -- no matter the cost") is planned in `docs/thread-model-review.html`. Its first chunk, C0, takes the four findings that need no operator decision, starting with the one P1. The reap fix had landed at 07:36Z (e7d6f2f47); C0 was cut on top of it, on aux-3-c0, and squashed onto aux-3 as *(pending)*.
+**Why now.** The overhaul the operator asked for at 04:46:56Z ("take a very close look at multi-threading ... together suggest an overhaul -- no matter the cost") is planned in `docs/thread-model-review.html`. Its first chunk, C0, takes the four findings that need no operator decision, starting with the one P1. The reap fix had landed at 07:36Z (e7d6f2f47); C0 was cut on top of it, on aux-3-c0, and squashed onto aux-3 as 099868b62.
 
 **The chunk.**
 - 6f98bf134, the code. F-1: `proc_exec_replace` now waits, spinning outside the lock, until every peer of the exec'ing thread is off its CPU, then frees them, before it swaps the address space; a peer between its EXITING commit and its last switch-out was still storing its clear-child-tid word through the old translation. F-6: `preempt_check_irq` returns without consuming `need_resched` for a thread that is not RUNNING, so an exit tail on a kthread-shaped path runs to its own `sched()`. F-8: both spawn arms refuse a dying Proc -EAGAIN. F-2: the tid and pid counters saturate by compare-and-swap and refuse (NULL, EAGAIN) instead of extincting.

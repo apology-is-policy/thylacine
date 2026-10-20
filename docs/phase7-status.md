@@ -1417,7 +1417,7 @@ is unmeasured.
 The first chunk of the thread-model overhaul the operator asked for on 10-20 ("take a very close look at
 multi-threading ... together suggest an overhaul -- no matter the cost"). The joint plan is
 `docs/thread-model-review.html`, the Fable report `docs/THREAD-MODEL-REVIEW-FABLE.md`; C0 takes the four findings that
-need no operator decision. Squashed from aux-3-c0 as *(pending)*.
+need no operator decision. Squashed from aux-3-c0 as 099868b62.
 
 - **F-1 [P1] exec against an exiting peer.** `proc_exec_replace` swapped the address space once admission counted no
   live peer, but a peer that had committed `THREAD_EXITING` could still be on another CPU, between its commit and its

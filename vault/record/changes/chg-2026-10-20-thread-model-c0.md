@@ -4,7 +4,7 @@ type: chg
 title: "Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse"
 date: 2026-10-20
 arc: arc-phase6-pouch
-commits: ["*(pending)*"]
+commits: ["099868b62"]
 touched:
   - sub-kernel-thread
   - sub-kernel-proc
