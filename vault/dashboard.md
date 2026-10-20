@@ -127,11 +127,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-20 [[chg-2026-10-20-b3f-meson-tests]] — FreeType and HarfBuzz through meson, their upstream tests on the device; a test's meson depends are built and staged (B-3f)
+- 2026-10-20 [[chg-2026-10-20-b3fprime-symlinks]] — Native lstat and readlink, and Pouch's symlink truth: lstat, readlink, realpath, O_NOFOLLOW, O_PATH, O_DIRECTORY, lchmod (B-3f')
+- 2026-10-20 [[chg-2026-10-20-raw-open]] — musl's raw opens through openat's translation, and __map_file maps private: time zone files load (0060)
 - 2026-10-19 [[chg-2026-10-19-anon-mapping-merge]] — Adjacent anonymous mappings merge; every unmap releases a lazy mapping's pages; a namespace reader keeps only the struct (B-3 vote 2 + SA-5)
 - 2026-10-19 [[chg-2026-10-19-mount-table-dynamic]] — A dynamic mount table, mount errnos, a create's group from its directory, and a windowed /proc/<pid>/ns (B-3 votes 5-7)
 - 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 - 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
 - 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
-- 2026-10-13 [[chg-2026-10-13-icache-sync-space]] — The address space's CPUs synchronized on request: SYS_ICACHE_SYNC_SPACE at 128, a per-CPU space record, the barrier IPI acknowledged by ticket, 128 MiB code regions
-- 2026-10-13 [[chg-2026-10-13-jsc-dfg]] — JavaScriptCore's DFG runs on the sealed code region; a thread resumes the VM's code behind an ISB
 <!-- generated:end -->

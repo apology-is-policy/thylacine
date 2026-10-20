@@ -607,4 +607,6 @@ the stdio openers through the public `open()`) →
 [[chg-2026-07-23-cl1a-fs-wires]] (0024, the mutation family + readdir +
 the create arm) → [[chg-2026-07-24-cl2-cxx-runtime]] (0027, `remove(3)`)
 → [[chg-2026-07-27-30-fopen-append]] (0030) →
-[[chg-2026-07-28-v4b4-readlink]] (0031).
+[[chg-2026-07-28-v4b4-readlink]] (0031) →
+[[chg-2026-10-20-b3fprime-symlinks]] (0059, native lstat and readlink) →
+[[chg-2026-10-20-raw-open]] (0060, musl's raw opens).
