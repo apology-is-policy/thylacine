@@ -43,12 +43,35 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
                "bump the constant to match the new top and re-run that check.");
 
 // Every row that discharges its collision re-check by the ceiling argument
-// rather than by a per-number one. The lowest such number is rt_sigaction
-// (134); execve (221) is the newest. If the ceiling ever rises past one of
+// rather than by a per-number one. The lowest such number is rt_sigtimedwait
+// (137); execve (221) is the newest. If the ceiling ever rises past one of
 // these, the build stops and the reader is forced back to the argument instead
 // of inheriting a claim that has quietly become false.
-_Static_assert(VIV_LINUX_RT_SIGACTION > VIV_NATIVE_CEILING,
-               "rt_sigaction's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_RT_SIGTIMEDWAIT > VIV_NATIVE_CEILING,
+               "rt_sigtimedwait's collision argument is the ceiling one");
+// Linux rt_sigprocmask (135) collides with SYS_READLINK, and rt_sigpending
+// (136) with SYS_LSTAT (vote 2026-10-20). rt_sigprocmask's row is VIV_TIER2
+// (vivarium_sigprocmask_decide and its shell) and rt_sigpending's VIV_ENOSYS;
+// viv_linux_dispatch returns before the native switch for every row that is
+// not TRANSLATED, so a Linux Proc reaches neither native call -- test_vivarium
+// pins both verdicts. A native program mis-declared as Linux loses both: its
+// readlink arrives as rt_sigprocmask with the path pointer as `how`, which the
+// decide FORWARDs unless it is 0, 1 or 2, and even then the shell reads and
+// writes only the caller's own mask and memory; its lstat arrives as
+// rt_sigpending, which is ENOSYS. A change of either row to TRANSLATED must
+// re-argue this.
+_Static_assert(VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK,
+               "revisit rt_sigprocmask / READLINK collision on renumber");
+_Static_assert(VIV_LINUX_RT_SIGPENDING == SYS_LSTAT,
+               "revisit rt_sigpending / LSTAT collision on renumber");
+// Linux rt_sigaction (134) now sits below the ceiling, at the number held for
+// corona's SYS_SRV_REGISTRY_NEW (vote 2026-10-19), which this branch does not
+// assign: the native switch has no 134, so a Linux Proc's rt_sigaction, a
+// VIV_TIER2 row answered by its own shell, has no native call to reach, and
+// test_vivarium pins the verdict. When SYS_SRV_REGISTRY_NEW lands, this
+// paragraph gives way to that collision's own argument.
+_Static_assert(VIV_LINUX_RT_SIGACTION == SYS_READLINK - 1,
+               "rt_sigaction sits at the number held for SRV_REGISTRY_NEW");
 // Linux rt_sigsuspend (133) collides with SYS_UMASK (M8). Its row is
 // VIV_ENOSYS and viv_linux_dispatch consumes every row that is not TRANSLATED
 // before the native switch, so a Linux Proc's rt_sigsuspend never sets its

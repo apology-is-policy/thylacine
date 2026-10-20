@@ -223,6 +223,20 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGSUSPEND, args, &out),
                    (int)VIV_ENOSYS,
                    "rt_sigsuspend stays ENOSYS -- consumed before native 133, SYS_UMASK");
+    // rt_sigaction (134) sits at the number held for corona's
+    // SYS_SRV_REGISTRY_NEW; rt_sigprocmask (135) and rt_sigpending (136) share
+    // theirs with SYS_READLINK and SYS_LSTAT (vote 2026-10-20). Each row is
+    // consumed before the native switch (vivarium.c's per-number pins name
+    // this test).
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGACTION, args, &out),
+                   (int)VIV_TIER2,
+                   "rt_sigaction stays T2 -- answered by its shell, never native 134");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPROCMASK, args, &out),
+                   (int)VIV_TIER2,
+                   "rt_sigprocmask stays T2 -- consumed before native 135, SYS_READLINK");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_RT_SIGPENDING, args, &out),
+                   (int)VIV_ENOSYS,
+                   "rt_sigpending stays ENOSYS -- consumed before native 136, SYS_LSTAT");
 
     // VIVARIUM 6.29: the sleep rows. Until them both FORWARDed to ENOSYS, and
     // musl's sleep() and usleep() returned at once.

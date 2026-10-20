@@ -124,6 +124,7 @@ void test_stalk_pounce_full_walk_past_mount(void);
 void test_stalk_stat_query(void);
 void test_stalk_stat_mount_leaf(void);
 void test_sys_stat_for_proc(void);
+void test_sys_lstat_readlink_for_proc(void);
 void test_stalk_pounce_unsupported_fallback(void);
 
 // FID-LIFECYCLE cached-open: the resolver arm (engagement, mode gate,
@@ -3658,6 +3659,90 @@ void test_sys_stat_for_proc(void) {
 
     territory_unref(p.territory);
     spoor_unref(root);
+}
+
+// The native SYS_LSTAT and SYS_READLINK (vote 2026-10-20) over the symlink
+// fixture, through the cores their handlers call: sys_stat_for_proc with
+// STALK_NOFOLLOW, and the readlink inner. Then each handler's own path checks,
+// which run before either core.
+extern s64 sys_readlink_target_for_proc(struct Proc *p, const char *path,
+                                        u64 path_len, char *tgt);
+extern s64 sys_lstat_handler(u64 path_va, u64 path_len_raw, u64 stat_va);
+extern s64 sys_readlink_handler(u64 path_va, u64 path_len_raw, u64 buf_va,
+                                u64 bufsiz);
+
+void test_sys_lstat_readlink_for_proc(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);   // the symlink fixture's root
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    TEST_EXPECT_EQ(territory_chroot(p.territory, root), 0, "chroot to fixture");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lnb", 4, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat /lnb");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNB_PATH, "-> the link itself (qid 10)");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFLNK, "-> S_IFLNK");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "lnb", 3, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat lnb, relative, through the cwd join");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNB_PATH, "-> the same link");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lndead", 7, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat of a dangling link succeeds");
+    TEST_EXPECT_EQ((u64)(st.mode & T_S_IFMT), (u64)T_S_IFLNK, "-> S_IFLNK");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lndead", 7, 0, &st),
+                   (u64)(s64)-T_E_NOENT, "stat of the same link -> NOENT");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lnself", 7, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat of a self-loop succeeds");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)FIX_LNSELF_PATH, "-> the link (qid 14)");
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lnself", 7, 0, &st),
+                   (u64)(s64)-T_E_LOOP, "stat of the same link -> LOOP");
+    // Only the FINAL component is held back: a link earlier in the path is
+    // followed, so this is a/deep/leaf.
+    TEST_EXPECT_EQ((u64)sys_stat_for_proc(&p, "/lndir/leaf", 11, STALK_NOFOLLOW, &st),
+                   (u64)0, "lstat through a link to a directory");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)4, "-> a/deep/leaf (qid 4)");
+
+    char tgt[SYS_OPEN_PATH_MAX + 1];
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lnb", 4, tgt), (u64)3,
+                   "readlink /lnb reads 3 bytes");
+    TEST_EXPECT_EQ((u64)(tgt[0] == 'a' && tgt[1] == '/' && tgt[2] == 'b'), (u64)1,
+                   "-> a/b");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lndead", 7, tgt), (u64)6,
+                   "readlink of a dangling link reads its target (nosuch)");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lnabs", 6, tgt), (u64)4,
+                   "readlink of an absolute link reads /a/b, unanchored");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lndir/lnleaf", 13, tgt),
+                   (u64)4, "an earlier link is followed, the final one read (leaf)");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/a/b", 4, tgt),
+                   (u64)(s64)-T_E_INVAL, "a file is not a link -> INVAL");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/a", 2, tgt),
+                   (u64)(s64)-T_E_INVAL, "a directory is not a link -> INVAL");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/nope", 5, tgt),
+                   (u64)(s64)-T_E_NOENT, "absent -> NOENT");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/nox/sekret", 11, tgt),
+                   (u64)(s64)-T_E_ACCES, "no X-search -> ACCES");
+    TEST_EXPECT_EQ((u64)sys_readlink_target_for_proc(&p, "/lnself/x", 9, tgt),
+                   (u64)(s64)-T_E_LOOP, "an intermediate loop -> LOOP");
+
+    territory_unref(p.territory);
+    spoor_unref(root);
+
+    // The handlers on the test thread's Proc. Each check fires before any
+    // resolution, and a kernel-half buffer is what a user pointer outside
+    // the user half looks like.
+    static const char kpath[] = "/lnb";
+    u64 kva = (u64)(unsigned long)kpath;
+    TEST_EXPECT_EQ(sys_lstat_handler(kva, 0, kva), (s64)-T_E_INVAL,
+                   "SYS_LSTAT: an empty path -> INVAL");
+    TEST_EXPECT_EQ(sys_lstat_handler(kva, SYS_OPEN_PATH_MAX + 1, kva),
+                   (s64)-T_E_INVAL, "SYS_LSTAT: an over-long path -> INVAL");
+    TEST_EXPECT_EQ(sys_lstat_handler(kva, 4, kva), (s64)-T_E_FAULT,
+                   "SYS_LSTAT: a path outside the user half -> FAULT");
+    TEST_EXPECT_EQ(sys_readlink_handler(kva, 0, kva, 16), (s64)-T_E_INVAL,
+                   "SYS_READLINK: an empty path -> INVAL");
+    TEST_EXPECT_EQ(sys_readlink_handler(kva, SYS_OPEN_PATH_MAX + 1, kva, 16),
+                   (s64)-T_E_INVAL, "SYS_READLINK: an over-long path -> INVAL");
+    TEST_EXPECT_EQ(sys_readlink_handler(kva, 4, kva, 16), (s64)-T_E_FAULT,
+                   "SYS_READLINK: a path outside the user half -> FAULT");
 }
 
 // A Dev whose walk_attrs always reports the backing as incapable (the netd

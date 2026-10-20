@@ -591,7 +591,15 @@ enum {
 // Linux Proc's rt_sigsuspend never sets its mask; its argument is now
 // per-number (vivarium.c). The lowest row still argued by the ceiling is
 // rt_sigaction (134), a VIV_TIER2 row.
-#define VIV_NATIVE_CEILING 133
+//
+// Vote 2026-10-20 (dec-2026-10-20-native-lstat-readlink) appends SYS_READLINK
+// at 135 and SYS_LSTAT at 136, leaving 134 to corona's SYS_SRV_REGISTRY_NEW
+// (vote 2026-10-19). Linux 134, 135 and 136 are rt_sigaction (VIV_TIER2),
+// rt_sigprocmask (VIV_TIER2) and rt_sigpending (VIV_ENOSYS), each consumed
+// before the native switch, and each now argues its number on its own
+// (vivarium.c). The lowest row still argued by the ceiling is rt_sigtimedwait
+// (137), a VIV_ENOSYS row.
+#define VIV_NATIVE_CEILING 136
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).

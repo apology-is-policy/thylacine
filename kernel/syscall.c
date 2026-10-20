@@ -2294,7 +2294,7 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 // D-1: `stalk_flags` is 0 (follow a final symlink -- POSIX stat) or
 // STALK_NOFOLLOW (the lstat shape -- the final link's OWN record); the
 // vivarium newfstatat shell passes it for AT_SYMLINK_NOFOLLOW. Native SYS_STAT
-// always passes 0 (no native lstat surface at D-1 -- a recorded seam).
+// passes 0 and native SYS_LSTAT STALK_NOFOLLOW (operator vote 2026-10-20).
 s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
                       u32 stalk_flags, struct t_stat *out_k) {
     if (!p || !path || !out_k)                       return -1;
@@ -2331,17 +2331,17 @@ s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
 // readlink core (the git chunk; VIVARIUM.md section 6.26). Resolves `path` (the
 // SYS_STAT resolution: cwd-join for a relative path, containment at root_spoor)
 // with STALK_WALK|STALK_NOFOLLOW so the LINK ITSELF is the quarry, then reads
-// its target via the Dev's .readlink slot and copies min(target, bufsiz) bytes
-// out -- readlink(2) does NOT NUL-terminate and returns the byte count. The
-// caller has already copied `path` into kernel memory (NUL-free); buf_va/bufsiz
-// are the still-user destination and are validated HERE, before the copy-out.
-static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
-                                 u64 buf_va, u64 bufsiz) {
-    if (!p || !path)                                 return -1;
+// its target via the Dev's .readlink slot into `tgt` (kernel memory, at least
+// SYS_OPEN_PATH_MAX bytes; no NUL is written). The #37 *_for_proc shape, as
+// sys_stat_for_proc: `path` is kernel memory, already NUL-free. Returns the
+// target's length (1..SYS_OPEN_PATH_MAX), -1 (structural), or -errno.
+s64 sys_readlink_target_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 char *tgt);
+s64 sys_readlink_target_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 char *tgt) {
+    if (!p || !path || !tgt)                         return -1;
     if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
     if (!p->territory)                               return -1;
-    // POSIX readlink(2): a zero-size buffer is EINVAL.
-    if (bufsiz == 0)                                 return -(s64)T_E_INVAL;
 
     struct Spoor *start = territory_root_ref(p->territory);
     if (!start)                                      return -1;
@@ -2376,7 +2376,6 @@ static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
         return -(s64)T_E_INVAL;
     }
 
-    char tgt[SYS_OPEN_PATH_MAX + 1];
     long tlen = q->dev->readlink(q, tgt, SYS_OPEN_PATH_MAX);
     spoor_clunk(q);
     // A NEGATIVE return is the Dev's REAL errno (dev9p_wire_errno bounds it:
@@ -2390,6 +2389,22 @@ static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
     // target, which IS EINVAL.
     if (tlen < 0)                                    return (s64)tlen;
     if (tlen == 0 || tlen > SYS_OPEN_PATH_MAX)       return -(s64)T_E_INVAL;
+    return (s64)tlen;
+}
+
+// The readlink shell both entries share -- the phenotype's readlinkat and the
+// native SYS_READLINK: resolve and read the target, then copy min(target,
+// bufsiz) bytes out. readlink(2) does NOT NUL-terminate and returns the byte
+// count. buf_va/bufsiz are the still-user destination, validated HERE, before
+// the copy-out.
+static s64 sys_readlink_for_proc(struct Proc *p, const char *path, u64 path_len,
+                                 u64 buf_va, u64 bufsiz) {
+    // POSIX readlink(2): a zero-size buffer is EINVAL.
+    if (bufsiz == 0)                                 return -(s64)T_E_INVAL;
+
+    char tgt[SYS_OPEN_PATH_MAX + 1];
+    s64 tlen = sys_readlink_target_for_proc(p, path, path_len, tgt);
+    if (tlen < 0)                                    return tlen;
 
     // THE COPY-OUT (the getdents64 P0 class): the destination is a raw user
     // pointer, so validate the exact span before writing. uaccess_copy_out's
@@ -2434,6 +2449,68 @@ static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
         if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
     }
     return 0;
+}
+
+// SYS_LSTAT and SYS_READLINK (operator vote 2026-10-20,
+// dec-2026-10-20-native-lstat-readlink): the native entries over the cores the
+// phenotype's newfstatat and readlinkat call. Each copies its path in as
+// SYS_STAT does, but answers SYS_OPEN_CREATE's errnos where SYS_STAT answers a
+// bare -1: -T_E_INVAL for an empty or over-long path or an embedded NUL,
+// -T_E_FAULT for one the kernel cannot read.
+s64 sys_lstat_handler(u64 path_va, u64 path_len_raw, u64 stat_va);
+s64 sys_lstat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -(s64)T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -(s64)T_E_FAULT;
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat)))
+        return -(s64)T_E_FAULT;
+
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0')                               return -(s64)T_E_INVAL;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    struct t_stat ks;
+    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, STALK_NOFOLLOW, &ks);
+    if (rc != 0)                                     return rc;
+
+    const u8 *src = (const u8 *)&ks;
+    for (u64 i = 0; i < sizeof(struct t_stat); i++) {
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -(s64)T_E_FAULT;
+    }
+    return 0;
+}
+
+s64 sys_readlink_handler(u64 path_va, u64 path_len_raw, u64 buf_va, u64 bufsiz);
+s64 sys_readlink_handler(u64 path_va, u64 path_len_raw, u64 buf_va, u64 bufsiz) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -(s64)T_E_INVAL;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -(s64)T_E_FAULT;
+
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0')                               return -(s64)T_E_INVAL;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    return sys_readlink_for_proc(p, path_scratch, path_len_raw, buf_va, bufsiz);
 }
 
 // =============================================================================
@@ -16339,6 +16416,19 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
     case SYS_UMASK:
         ctx->regs[0] = (u64)sys_umask_handler(ctx->regs[0], ctx->regs[1],
                                               ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_READLINK:
+        ctx->regs[0] = (u64)sys_readlink_handler(ctx->regs[0],   // path_va
+                                                 ctx->regs[1],   // path_len
+                                                 ctx->regs[2],   // buf_va
+                                                 ctx->regs[3]);  // bufsiz
+        return;
+
+    case SYS_LSTAT:
+        ctx->regs[0] = (u64)sys_lstat_handler(ctx->regs[0],   // path_va
+                                              ctx->regs[1],   // path_len
+                                              ctx->regs[2]);  // stat_va
         return;
 
     case SYS_GETUID:

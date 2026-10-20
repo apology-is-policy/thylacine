@@ -49,6 +49,7 @@ void test_syscall_dispatch_exit_group_code(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_syscall_dispatch_set_tid_address(void);
 void test_syscall_opath_walkonly_no_byte_io(void);
+void test_syscall_dispatch_symlink_reads(void);
 
 void test_syscall_dispatch_unknown(void) {
     struct exception_context ctx;
@@ -318,4 +319,22 @@ void test_syscall_opath_walkonly_no_byte_io(void) {
                    "#81: O_PATH zero-length read DENIED in the inner helper "
                    "(the syscall-entry len==0 fast-path is covered by the joey E2E -- #81 F1)");
     handle_close(p, wfd);
+}
+
+// Vote 2026-10-20: SYS_READLINK (135) and SYS_LSTAT (136) reach their handlers.
+// An unknown number answers -1; each handler answers -T_E_INVAL for an empty
+// path before it reads any memory.
+void test_syscall_dispatch_symlink_reads(void) {
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_READLINK;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "SYS_READLINK reaches its handler (an empty path is EINVAL)");
+
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_LSTAT;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-T_E_INVAL,
+        "SYS_LSTAT reaches its handler (an empty path is EINVAL)");
 }

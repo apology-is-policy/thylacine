@@ -1768,8 +1768,8 @@ enum {
     //   own R/W bits are irrelevant) -- but on a walk_attrs-capable Dev
     //   (dev9p/devramfs) the resolution is the stalk POUNCE walk-QUERY: the
     //   attrs arrive fused with the walk and NO handle, Spoor, or server fid
-    //   is ever created. os.Stat = 1 RPC (was 13). Symlinks do not exist at
-    //   v1.0 (G11), so stat == lstat.
+    //   is ever created. os.Stat = 1 RPC (was 13). A final symlink is
+    //   followed (DISTRO D-1); SYS_LSTAT (136) is the no-follow twin.
     //   x0 = path_va  (user VA; NUL-free; '/'-separated multi-component)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX bytes)
     //   x2 = stat_va  (user VA of an 88-byte struct t_stat; copy-out)
@@ -2548,6 +2548,34 @@ enum {
     // umask cannot fail. No memory, no capability; the Proc's threads share it
     // and a spawned child inherits it.
     SYS_UMASK = 133,
+
+    // 134 is corona's SYS_SRV_REGISTRY_NEW (operator vote 2026-10-19), unused
+    // on this branch until it lands.
+    //
+    // The native symlink reads (operator vote 2026-10-20,
+    // dec-2026-10-20-native-lstat-readlink): entries over the two cores the
+    // phenotype's readlinkat and newfstatat already call. Both resolve `path`
+    // as SYS_STAT does -- absolute from root_spoor, relative joined with the
+    // LS-4 cwd, contained at root_spoor (I-28) -- and neither follows its
+    // final component. Their path checks are SYS_OPEN_CREATE's: an empty or
+    // over-long path or an embedded NUL is -T_E_INVAL, an unreadable one
+    // -T_E_FAULT. A path that does not resolve answers the resolver's errno; a
+    // relative path whose cwd join outgrows SYS_OPEN_PATH_MAX, a bare -1.
+    //
+    // SYS_READLINK(path_va, path_len, buf_va, bufsiz) -> bytes placed / -errno
+    //   Copies min(target length, bufsiz) bytes of the final link's target to
+    //   buf_va and writes no NUL (readlink(2)). -T_E_INVAL for bufsiz 0 or a
+    //   final component that is not a link (or is one on a Dev with no
+    //   .readlink); -T_E_FAULT for an unwritable buf_va; the Dev's own errno
+    //   (-T_E_INTR, -T_E_IO) when the read of the target fails.
+    SYS_READLINK = 135,
+
+    // SYS_LSTAT(path_va, path_len, stat_va) -> 0 / -errno
+    //   SYS_STAT's no-follow twin: the same walk-query (one RPC and no handle
+    //   on a walk_attrs Dev), filling the 88-byte struct t_stat with the final
+    //   component's OWN record, so a link reports T_S_IFLNK. -T_E_FAULT for an
+    //   unwritable stat_va.
+    SYS_LSTAT = 136,
 
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes

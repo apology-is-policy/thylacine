@@ -714,6 +714,7 @@ void test_exec_load_failure_leaves_phenotype(void);    // Design D Leg B
 void test_exec_reset_follows_decided_phenotype(void);  // Design D Leg A (+ audit F1 leg)
 void test_exec_interp_dispatch_every_phenotype(void);  // B-1d (was Design D Leg C)
 void test_syscall_dispatch_unknown(void);
+void test_syscall_dispatch_symlink_reads(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
@@ -1491,6 +1492,7 @@ void test_stalk_pounce_full_walk_past_mount(void);
 void test_stalk_stat_query(void);
 void test_stalk_stat_mount_leaf(void);
 void test_sys_stat_for_proc(void);
+void test_sys_lstat_readlink_for_proc(void);
 void test_stalk_pounce_unsupported_fallback(void);
 void test_stalk_cached_open_arm(void);
 void test_stalk_cached_open_denials(void);
@@ -2964,6 +2966,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.stack_is_sparse",          test_exec_stack_is_sparse,          false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
+    { "syscall.dispatch_symlink_reads", test_syscall_dispatch_symlink_reads, false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
@@ -5006,6 +5009,7 @@ struct test_case g_tests[] = {
     { "stalk.stat_query",              test_stalk_stat_query,              false, NULL },
     { "stalk.stat_mount_leaf",         test_stalk_stat_mount_leaf,         false, NULL },
     { "sys_stat.for_proc",             test_sys_stat_for_proc,             false, NULL },
+    { "sys_stat.lstat_readlink_for_proc", test_sys_lstat_readlink_for_proc, false, NULL },
     { "stalk.pounce_unsupported_fallback", test_stalk_pounce_unsupported_fallback, false, NULL },
     { "stalk.cached_open_arm",           test_stalk_cached_open_arm,             false, NULL },
     { "stalk.cached_open_denials",       test_stalk_cached_open_denials,         false, NULL },
