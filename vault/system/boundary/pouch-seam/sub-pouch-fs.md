@@ -15,9 +15,11 @@ code:
   - usr/lib/pouch/patches/0040-pouch-o-append-omode.patch
   - usr/lib/pouch/patches/0051-pouch-fd-sync-vectored.patch
   - usr/lib/pouch/patches/0059-pouch-symlinks.patch
+  - usr/lib/pouch/patches/0060-pouch-raw-open.patch
   - usr/pouch-hello/pouch-hello-fd.c
   - usr/pouch-hello/pouch-hello-fs.c
   - usr/pouch-hello/pouch-hello-links.c
+  - usr/pouch-hello/pouch-hello-tz.c
 audit: hard
 guarded-by: [inv-i28]
 validated-by: [prose, gate-smp]
@@ -50,7 +52,9 @@ Every POSIX path operation a ported program performs: `open` / `openat` /
 `pwrite`, `readdir`, the mutation family (`rename` / `unlink` / `rmdir` /
 `mkdir` / `chmod` / `ftruncate`), and the symlink calls (`lstat`,
 `readlink`, `lchmod`, and the open flags `O_NOFOLLOW`, `O_PATH` and
-`O_DIRECTORY`). It is the largest surface in the series and the one that grew
+`O_DIRECTORY`). musl's own raw opens -- the time zone, locale and catalog
+loaders and the stdio openers -- take the same translation. It is the
+largest surface in the series and the one that grew
 the most: `openat.c` alone has three generations.
 
 ## Contract
@@ -81,11 +85,28 @@ the most: `openat.c` alone has three generations.
   close-on-exec is set. `O_TRUNC` is never sent beside `O_DIRECTORY`, so no
   refusal truncates a file, and a directory answers `EISDIR`, as on Linux.
   `tools/test-pouch-symlinks.py` pins each arm against a mocked kernel.
+- musl's own raw opens (0060): the `sys_open`, `__sys_open`, `sys_open_cp`
+  and `__sys_open_cp` macros of `src/internal/syscall.h`, at both arities, call
+  the hidden `__pouch_sys_open`, which is `openat`'s body: it answers a
+  descriptor or `-errno` and leaves `errno` as it found it (the `O_DIRECTORY`
+  arm's fstat, its one call that sets `errno`, is saved and restored around
+  it). `openat()` is the wrapper: a real dirfd is `ENOTSUP`, and otherwise it
+  sets `errno` once from the body's answer. The macros' users are
+  `__map_file` (the time zone, locale and catalog loaders), `fopen`,
+  `__fopen_rb_ca` (`/etc/passwd`, `/etc/group`, `/etc/hosts` and the other
+  system files), `tmpfile`, and the secure start's `/dev/null`, which never
+  runs: the kernel supplies no `AT_SECURE`. None is a cancellation point.
+  `__map_file` maps the file `PROT_READ` and `MAP_PRIVATE` without
+  `MAP_FIXED` ([[sub-pouch-mem]]); musl unmaps the same unaligned size, and
+  the kernel rounds both lengths up to whole pages.
+  `tools/test-pouch-raw-open.py` pins the expansions, the raw contract, the map
+  and the openers against a mocked kernel, and `/bin/pouch-hello-tz` loads a
+  zone file on the device.
 - The descriptor family (0055, 0056): `dup`, `dup2`, `dup3`, `fcntl`'s
   F_GETFD / F_SETFD / F_DUPFD / F_DUPFD_CLOEXEC / F_GETFL / F_SETFL over native
   129-131 and 123 (`docs/ERRORS.md`, "Pouch fcntl and dup"). musl's own raw
   `SYS_fcntl` callers -- the `0xFFFF` sentinel -- moved to the native calls:
-  `fopen "e"` and `__fopen_rb_ca` rely on `open`'s O_CLOEXEC, `__fdopen "e"`
+  `fopen "e"` and `__fopen_rb_ca` rely on the raw open's O_CLOEXEC (0060), `__fdopen "e"`
   sets the flag (ignoring a failed set, as upstream; a tagged socket is
   never flagged -- `pouch_set_cloexec` checks the tag), `freopen` with no
   name sets it and changes the status through `fcntl` (every such call used
@@ -361,6 +382,37 @@ set as `st_dev` -- a device number the kernel's counter (from 1, upward)
 never issues, so no file or pipe shares the `(st_dev, st_ino)` pair (static
 Devs report 0).
 
+### musl's raw opens (0060)
+
+`bits/syscall.h` gives 65 the name `__NR_open`, and 65 is the native open,
+whose arguments are (start_fd, path, length, omode). Upstream
+`src/internal/syscall.h` takes its `#ifdef SYS_open` arm whenever that name
+exists and sends Linux's (path, flags, mode), so every musl raw open was
+refused or misread, and no time zone, locale or catalog file ever loaded:
+`tzset` fell back to UTC without a word (OPEN-BUGS 2026-10-15 O-4). A second
+refusal stood behind the first. `__map_file` asked for `MAP_SHARED`, which
+Pouch refuses (`ENOSYS`; there is no shared file map, ARCHITECTURE.md 6.5),
+so mending the open alone would still have read every zone as UTC. 0060
+points the four macros at `__pouch_sys_open` and maps `MAP_PRIVATE`; the
+readers only read the map.
+
+The body is raw because the macros are. `sys_open` is `__syscall_ret` over
+`__sys_open`, so a body that set `errno` and returned -1 would turn every
+refusal into `EPERM` (-1 is -EPERM), and the secure start's bare `__sys_open`
+must not touch `errno` at all. 0023's openers, which had called the public
+`open()` to get the right shape, go back to upstream's `sys_open`, so an ISO
+C program that defines its own `open` no longer captures `fopen`.
+
+`/bin/pouch-hello-tz` is the device witness. It writes its own TZif file: zone
+THY (+05:30) with one daylight interval, TDT (+06:30), over the first day of
+1970, and the rule `THY-5:30` after it. It checks that `tzset` reads the file
+(only the file's transition table can say TDT), that the zone is one
+read-only private file row of `/proc/<pid>/maps` (matched by
+`st_dev:st_ino`), that a switch to UTC unmaps it, and that sixteen switches
+leave one row. Its control, a POSIX TZ string for the same zone, maps no file
+and has no daylight interval. Without 0060 the four file legs fail and the
+control passes.
+
 ## Data structures
 
 `struct t_stat` — the kernel's stat ABI, **mirrored by hand in three
@@ -385,7 +437,7 @@ and the same window Linux's `*at` functions have when a caller passes
   the per-component loop was doing resolution work that belongs to the
   resolver.
 - **P-3** — every unsupported form fails loud: a real dirfd `ENOTSUP`,
-  `O_TMPFILE` `ENOTSUP`, a trailing-slash create `EINVAL`, an over-long
+  `O_TMPFILE` `ENOTSUP`, a trailing-slash create `EISDIR` (#86), an over-long
   path `ENAMETOOLONG`.
 
 ## Error paths
@@ -419,6 +471,12 @@ in-place translation pass.
   kernel beside `O_DIRECTORY`; a refused `O_DIRECTORY` descriptor is closed
   exactly once (not at all after `EBADF`), before close-on-exec is set; `fchmodat` never reaches `WSTAT` on a link and
   closes its descriptor on every path.
+- **Every raw open is `openat`'s body, raw.** No expansion of the
+  `sys_open` family may reach `SYS_open` (the native shape) or set `errno`
+  itself: `sys_open` applies `__syscall_ret` to the answer, so a body that
+  returned -1 with `errno` set would turn every refusal into `EPERM`.
+  `__pouch_sys_open` answers `-errno` on every path and restores `errno`
+  around its fstat; `openat()` sets it once.
 - The `readlink` `/proc` whitelist must stay closed and strict (no `//`
   or `/./` normalization) — a loose match turns readlink into a
   file-contents oracle; a miss is fail-safe.
@@ -518,6 +576,10 @@ in-place translation pass.
   either (libc++'s `remove_all`, Rust's `remove_dir_all`). On that path,
   and on a path with no room for the slash, a non-directory is opened
   (never truncated) before it is refused.
+- **`open`, `openat` and the raw opens are not cancellation points**, where
+  POSIX makes `open` and `openat` ones (upstream's `open` is
+  `__sys_open_cp`). Pouch's open is several calls, and where a cancel may land
+  in the create arm needs a design (OPEN-BUGS 2026-10-20).
 - **`O_CREAT` through a dangling final link answers `ENOENT`**, where Linux
   creates the target: the create finds the link's name and answers
   `EEXIST`, and the open after it follows the link to nothing.

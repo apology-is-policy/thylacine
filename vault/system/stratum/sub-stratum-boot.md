@@ -77,7 +77,10 @@ root, the file-surface provers run in turn on their census lines:
 `/bin/pouch-hello-links` (`POUCH_CENSUS_LINKS`): ten legs over the real links
 the bake puts at `/lib/pouch-links` ([[sub-substrate-build]]), lstat and
 readlink through the native `SYS_LSTAT` and `SYS_READLINK`
-([[sub-pouch-fs]]). Each is boot-fatal. The marker goes out on fd 1
+([[sub-pouch-fs]]), and then `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
+legs over a TZif file the prover writes itself, which musl opens through
+`openat`'s translation and maps private (0060). Each is boot-fatal. The
+marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
 

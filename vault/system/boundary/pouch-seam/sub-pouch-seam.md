@@ -24,6 +24,25 @@ design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
 updated: 2026-10-20
 ---
+## 0060: musl's raw opens through openat's translation (2026-10-20)
+
+The series gains 0060. `bits/syscall.h` names the native open, 65,
+`__NR_open`, so upstream `src/internal/syscall.h` expanded its `sys_open`
+family to `SYS_open` with Linux's (path, flags, mode), and every musl raw open
+sent the native call the wrong shape (OPEN-BUGS 2026-10-15 O-4). The
+raw-caller rule below was not applied to it: a census for `SYS_open` finds
+only the macro block, because the callers spell `sys_open(`, so a renumbered
+call's census also counts the users of every macro that expands to it. 0060
+routes the four macros to the hidden `__pouch_sys_open` ([[sub-pouch-fs]]),
+which leaves `SYS_open` to its native callers (`bind`, `connect`,
+`_pouch_socket.c`), and returns 0023's stdio openers to upstream's
+`sys_open`. Pouch's `bits/syscall.h` adds two names aarch64 Linux lacks,
+`open` (65) and `poll` (29): `poll`'s native call takes Linux's arguments and
+`open`'s does not. `fstat` and `lseek` are renumbered onto native calls, and
+no Linux-shaped caller of either is left. `tools/test-pouch-raw-open.py` pins
+the expansions. The census gains `POUCH_CENSUS_TZ`, the five legs of the time
+zone prover.
+
 ## 0059: symlink truth over SYS_LSTAT and SYS_READLINK (2026-10-20, B-3f')
 
 The series gains 0059 ([[dec-2026-10-20-native-lstat-readlink]]).
@@ -267,7 +286,7 @@ surface, which is recorded honestly rather than papered over:
   A patch that adds a directory to that list is a P-4 review event, argued
   in its header. "stdio" is not wholly upper half: its fd-facing BACKENDS
   (`__stdio_read/write/close/seek`, the openers, `tmpfile`) are where libc
-  meets the kernel, and 0002 / 0023 / 0035 / 0036 / 0038 patch them; the
+  meets the kernel, and 0002 / 0023 / 0035 / 0036 / 0038 / 0060 patch them; the
   formatting and buffering core above them is untouched. By that
   derivation the B-0 series entered exactly TWO new directories:
   `src/legacy` (0037) and `include/sys` (0039 — the series' first PUBLIC

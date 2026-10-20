@@ -268,14 +268,14 @@ date, so a renumbered mirror could drift with every build green.
 `host_boundary_check` runs named drivers in parallel, each into a fresh
 `build/host-boundaries/<set>/<name>`, and stops the build with the failing
 log's tail: the native three (handle target replacement, the descriptor
-handlers, the handle query) before any target except `clean`, and the five
-Pouch adapters in `build_sysroot`, step 2b, on the musl tree just patched.
+handlers, the handle query) before any target except `clean`, and the Pouch
+adapters in `build_sysroot`, step 2b, on the musl tree just patched.
 `host_boundary_sets` derives both sets as the gate below does, from
 `tools/host-tests/*.c`, a driver whose usage names a musl tree being Pouch's:
 a test with no driver stops the build, and an empty set is refused, where the
 two hand lists it replaced (round 1 F4) would have let a new checker join no
 build. `tools/test-host-boundaries.sh` runs every checker clean and under each
-mutant it declares (50 legs, 35 s measured), deriving the set the same way
+mutant it declares (50 legs in 35 s when it landed), deriving the set the same way
 and the mutants from each driver's `--help`; a checker that declares no mutant
 fails it. A planted `VIV_NATIVE_CEILING` 132 stops the build at the check,
 naming the pin. Moving patch 0057's getppid number stops it there too, since
@@ -361,7 +361,8 @@ a link (lstat, readlink, `stm_9p_symlink`) and refuses to omit one; the bake
 then syncs and reads `abs` back with `stratum-fs readlink`, and a failed put,
 sync or readback stops it. `pouch-hello-links` is on both curated Pouch lists,
 `build_pouch_progs`' build list and the initrd's `bin/` list
-([[sub-stratum-boot]] runs it).
+([[sub-stratum-boot]] runs it), and `pouch-hello-tz` (0060) after it; the time
+zone prover writes its own fixture at run time, so the bake stages none.
 
 `HALCYON_PROFILE` (`choice:instrument,legacy`, default `instrument`, since
 2026-09-21) is the option that selects WHICH Halcyon UI an image draws; it bakes
