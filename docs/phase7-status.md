@@ -1417,7 +1417,7 @@ is unmeasured.
 OPEN-BUGS 2026-10-19 15:03Z (P1). An exited peer thread stayed on its Proc's list, counted by the thread cap, until
 the parent's `wait_pid` reaped the whole Proc: a long-lived program that starts and joins workers was refused every
 create once 256 had accumulated. OpenRCT2 froze on the demo image within the hour; libxml2's runtest fails its thread
-section the same way on b3. Code, witnesses, dossiers and the audit close in one commit, *(pending)*, squashed from
+section the same way on b3. Code, witnesses, dossiers and the audit close in one commit, e7d6f2f47, squashed from
 aux-3-reap, which merged main 107c5c1bd first (ed5275e9c). The operator asked for this fix for the 10-20 talk and then
 a review of the whole thread model; that review and its overhaul plan are `docs/thread-model-review.html`.
 

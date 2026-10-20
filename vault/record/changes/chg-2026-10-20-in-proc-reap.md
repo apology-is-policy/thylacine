@@ -4,7 +4,7 @@ type: chg
 title: "An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)"
 date: 2026-10-20
 arc: arc-phase6-pouch
-commits: ["*(pending)*"]
+commits: ["e7d6f2f47"]
 touched:
   - sub-kernel-thread
   - sub-kernel-proc
