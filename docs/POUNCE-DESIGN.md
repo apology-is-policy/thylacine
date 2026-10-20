@@ -264,10 +264,14 @@ it:
   `newfid = P9_NOFID`): the leaf's attrs return in the reply and NO quarry
   Spoor/fid ever exists — nothing to clunk. On a Dev without `walk_attrs`,
   fall back to walk + `stat_native` + clunk (correct everywhere).
-- Result: `os.Stat` = **1 RPC** on the pool (vs 13). Symlinks do not exist
-  at v1.0 (G11), so stat == lstat; the Go port routes both `os.Stat` and
-  `os.Lstat` here, libthyla-rs `fs::metadata` likewise, pouch `stat`/
-  `lstat`/`fstatat(path)` via the 0001 seam.
+- Result: `os.Stat` = **1 RPC** on the pool (vs 13). `SYS_STAT` follows a
+  final symlink (DISTRO D-1). Its no-follow twin `SYS_LSTAT` (136, operator
+  vote 2026-10-20, `dec-2026-10-20-native-lstat-readlink`) takes the same
+  three arguments and the same walk-query, so `lstat` also costs one RPC and
+  holds no handle. Pouch `stat`/`fstatat(path)` ride `SYS_STAT` and
+  `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` `SYS_LSTAT` (Boosty B-3f');
+  libthyla-rs `fs::metadata` rides `SYS_STAT`. The Go port still routes
+  `os.Lstat` to `SYS_STAT`, a gap that waits on the Go fork moving.
 - The amode joins `stalk_err`'s LOUD amode gate (`stalk-1 audit F1`: any new
   amode gets its own final-hop arm; a missed arm fails closed).
 

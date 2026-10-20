@@ -1431,6 +1431,16 @@ synth-dir posture). Two siblings in the same family were tracked, not fixed ther
 carry no `S_IFDIR`/`S_IFREG` bits — each needs a per-qid posture decision across a
 whole Dev, which is a chunk rather than a footnote. That chunk is §6.12.
 
+**Superseded in part: symlinks arrived (D-1), then a native readlink (2026-10-20).**
+The premise this section opens on, that no EL0 path creates or observes a symlink,
+stopped being true at DISTRO D-1, and the general arm's `EINVAL` became a wrong
+answer for a real link: a live link read as "not a link", so `realpath()` kept it
+unexpanded, and a dangling one read `ENOENT`. Operator vote 2026-10-20
+(`dec-2026-10-20-native-lstat-readlink`) gives the readlink core of §6.26 a native
+entry, `SYS_READLINK` (135), and Pouch's general arm calls it (Boosty B-3f'). The
+`/proc` arm and its closed whitelist stay as they are, because those four files
+are still regular files: `SYS_READLINK` on one answers `EINVAL`, truthfully.
+
 ### 6.12 The synthetic-Dev stat family (V-4b-5)
 
 The three gaps V-4b-4 surfaced, closed together because they are one question

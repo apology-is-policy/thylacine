@@ -698,3 +698,37 @@ SYS_UNMOUNT answers -T_E_INVAL when nothing is mounted at the point, as
 Linux's umount2 does. ut's `bind`, `mount` and `unmount` name the errno
 after their message, and libthyla-rs's `mount` and `unmount` return the
 matching `Error`.
+
+### Native lstat and readlink (operator vote 2026-10-20)
+
+Operator vote 2026-10-20 (`dec-2026-10-20-native-lstat-readlink`). SYS_READLINK
+(135) and SYS_LSTAT (136) resolve their path as SYS_STAT does and never
+follow its final component. Both check the path as SYS_OPEN_CREATE does: an
+empty or over-long path, or one with an embedded NUL, answers -T_E_INVAL,
+and a path buffer the kernel cannot read answers -T_E_FAULT. A path that
+does not resolve answers the resolver's errno (`stalk_err`), such as
+-T_E_NOENT, -T_E_ACCES, -T_E_NOTDIR, or -T_E_LOOP for an intermediate link
+that does not terminate. A relative path whose join with the cwd outgrows
+`SYS_OPEN_PATH_MAX` answers a bare -1, as SYS_STAT's does.
+
+SYS_LSTAT answers 0 and fills the 88-byte `struct t_stat` with the final
+component's own record, so a link reports `T_S_IFLNK`; a stat buffer the
+kernel cannot write answers -T_E_FAULT. SYS_READLINK answers the number of
+target bytes it placed, at most `bufsiz`, and writes no NUL. It answers
+-T_E_INVAL for a `bufsiz` of 0 and for a final component that is not a
+link, or is one on a Dev that cannot read links; -T_E_FAULT for a
+destination it cannot write; and the Dev's own errno, such as -T_E_INTR or
+-T_E_IO, when the read of the target fails. These are the answers the
+phenotype's `newfstatat` and `readlinkat` give, from the same cores.
+
+Pouch (Boosty B-3f'): `lstat` and `fstatat(AT_SYMLINK_NOFOLLOW)` return
+SYS_LSTAT's errno, and `readlink` SYS_READLINK's, except that the four
+`/proc` link-shaped files still read as their contents (VIVARIUM 6.11).
+Pouch answers `ENOENT` for an empty path and `ENAMETOOLONG` for one past
+`PATH_MAX` before the kernel sees it, and `EINVAL` for an `fstatat` or
+`fchmodat` flag it does not know. `open` and `openat` answer `ELOOP` for
+`O_NOFOLLOW` on a final link, `ENOTDIR` for `O_DIRECTORY` on anything but a
+directory (the descriptor is closed first), and `EINVAL` for `O_CREAT` with
+`O_DIRECTORY`, as Linux has since 6.4. `lchmod` and
+`fchmodat(AT_SYMLINK_NOFOLLOW)` answer `EOPNOTSUPP` for a link and change
+nothing, as musl's own `fchmodat` does on Linux.

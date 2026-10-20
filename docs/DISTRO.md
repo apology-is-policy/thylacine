@@ -278,9 +278,13 @@ amode guard (standing obligation).
   correctness first, the per-crossing readlink RPC is the honest v1.0 cost.
 - **Phenotype rows**: openat threads O_NOFOLLOW; newfstatat's
   `AT_SYMLINK_NOFOLLOW` becomes real (today vacuous — no link ever resolved);
-  readlinkat is already live. Native surfaces: none added (no SYS_SYMLINK /
-  SYS_READLINK at D-1; creation exists via Loom for whoever needs it; a
-  native pair is a seam).
+  readlinkat is already live. Native surfaces: none added at D-1 (creation
+  exists via Loom for whoever needs it). The native READS come with Boosty
+  B-3f' (operator vote 2026-10-20, `dec-2026-10-20-native-lstat-readlink`):
+  `SYS_READLINK` (135) and `SYS_LSTAT` (136) are thin entries over the two
+  cores the phenotype already calls, and Pouch's `lstat`,
+  `fstatat(AT_SYMLINK_NOFOLLOW)` and `readlink` ride them. A native
+  `SYS_SYMLINK` stays a seam.
 
 ### 4.5 Gate + coverage
 
@@ -1193,7 +1197,8 @@ D-3 -> D-4 sequential. D-5's Stratum half can land any time; its gate needs
 all of D-1..D-4.
 
 Recorded seams (not built in this arc): apk + container networking; tty in
-the vivarium; Larder symlink-target cache; native SYS_SYMLINK/SYS_READLINK;
+the vivarium; Larder symlink-target cache; native SYS_SYMLINK (the native
+reads, SYS_READLINK and SYS_LSTAT, were voted 2026-10-20 for Boosty B-3f');
 PIE base randomization (I-16); in-kernel PT_INTERP (fidelity lift);
 `/proc/self/exe` fidelity (#90); mmap charge for demand-paged FILE pages
 (the R-5 seam carries); glibc distros.
