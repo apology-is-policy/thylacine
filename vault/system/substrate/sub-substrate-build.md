@@ -351,6 +351,18 @@ pane's limit). `configs/ci.config` selects a serial shell for existing
 interactive scenarios; the default profile starts the Halcyon session.
 Use an explicit `HALCYON_SESSION=y` override for graphical session gates.
 
+Every bake's pool also carries the symlink prover's fixture at
+`/lib/pouch-links` (B-3f', 2026-10-20): the files `target` and `sub/leaf` and
+real links of each shape the prover reads -- `live -> target`,
+`dead -> nosuch`, `dir -> sub`, `abs -> /lib/pouch-links/target`,
+`loop -> loop` and `chain -> live`. They are staged from nothing under
+`$BUILD_DIR/pouch-links` and put with `stratum-fs put`, which copies a link as
+a link (lstat, readlink, `stm_9p_symlink`) and refuses to omit one; the bake
+then syncs and reads `abs` back with `stratum-fs readlink`, and a failed put,
+sync or readback stops it. `pouch-hello-links` is on both curated Pouch lists,
+`build_pouch_progs`' build list and the initrd's `bin/` list
+([[sub-stratum-boot]] runs it).
+
 `HALCYON_PROFILE` (`choice:instrument,legacy`, default `instrument`, since
 2026-09-21) is the option that selects WHICH Halcyon UI an image draws; it bakes
 `/lib/halcyon/profile`. The theme only colours the profile in force, and a

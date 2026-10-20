@@ -22,8 +22,19 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-10-19
+updated: 2026-10-20
 ---
+## 0059: symlink truth over SYS_LSTAT and SYS_READLINK (2026-10-20, B-3f')
+
+The series gains 0059 ([[dec-2026-10-20-native-lstat-readlink]]).
+`_pouch_fs.h` gains `SYS_thyla_readlink` 135 and `SYS_thyla_lstat` 136 beside
+0058's umask, and `POUCH_ONOFOLLOW` (0x20, the kernel's
+`SYS_WALK_OPEN_NOFOLLOW`). `bits/syscall.h` is untouched, so the seam check's
+list is too. `tools/test-native-handle-query.py` pins both numbers, and
+`tools/test-pouch-symlinks.py` checks them, `POUCH_ONOFOLLOW`, `POUCH_OPATH`
+and `POUCH_PATH_MAX` against the kernel header. The census gains
+`POUCH_CENSUS_LINKS`, the ten legs of the symlink prover ([[sub-pouch-fs]]).
+
 ## 0058: umask over SYS_UMASK (2026-10-19, B-3e M8)
 
 The series gains 0058 ([[dec-2026-10-19-create-mode-bound-and-umask]]):

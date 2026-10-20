@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md", "docs/POUNCE-DESIGN.md", "docs/FID-LIFECYCLE-DESIGN.md", "docs/DISTRO.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-19
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -648,6 +648,18 @@ The success exit never touches `*errp`. Fallbacks (a `walk_attrs`-less
 final Dev, a mount-point leaf — POSIX: stat reports the MOUNTED root — or
 a zero-component path) materialize a quarry, `spoor_stat_native` it, and
 clunk it: the old O_PATH+fstat shape minus the handle-table round trip.
+
+`STALK_NOFOLLOW` makes the final component's own record the answer, so a
+link reports `T_S_IFLNK`. Its callers are native `SYS_LSTAT` (136) and the
+phenotype's `newfstatat` with AT_SYMLINK_NOFOLLOW; native `SYS_STAT` passes 0
+and follows. The readlink core takes the same no-follow subject through
+`stalk_err` with `STALK_WALK | STALK_NOFOLLOW` ([[sub-kernel-syscall-dispatch]]).
+`sys_stat.lstat_readlink_for_proc` drives both over the D-1 symlink fixture:
+lstat of a live, a dangling and a self-looping link answers the link where
+stat answers the file, `T_E_NOENT` and `T_E_LOOP`; a link earlier in the
+path is followed; readlink reads relative and absolute targets verbatim and
+answers `T_E_INVAL` for a file or a directory, `T_E_NOENT`, `T_E_ACCES` at a
+component without X-search, and `T_E_LOOP` through an intermediate loop.
 
 ### The FID-LIFECYCLE cached-open arm
 

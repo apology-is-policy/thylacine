@@ -15,8 +15,47 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-20
 ---
+## The native symlink reads: SYS_READLINK and SYS_LSTAT (2026-10-20, B-3f')
+
+`sys_readlink_handler` (135) marshals x0-x3 and `sys_lstat_handler` (136)
+x0-x2; [[sub-kernel-syscall-abi]] has the contracts
+([[dec-2026-10-20-native-lstat-readlink]]). Each copies its path in as
+`sys_stat_handler` does: the span is validated as user memory, loaded a byte at
+a time with an embedded NUL refused, and NUL-terminated in a kernel scratch of
+SYS_OPEN_PATH_MAX + 1. At those steps they answer SYS_OPEN_CREATE's errnos,
+-T_E_INVAL for an empty or over-long path or a NUL and -T_E_FAULT for an
+unreadable one, where SYS_STAT answers a bare -1. `sys_lstat_handler` validates
+the 88-byte destination before the walk, runs `sys_stat_for_proc` with
+`STALK_NOFOLLOW` (the flag the phenotype's newfstatat passes for
+AT_SYMLINK_NOFOLLOW), and copies the record out a byte at a time; any fault is
+-T_E_FAULT.
+
+The readlink path is two functions, so the suite drives the core without EL0:
+
+- `sys_readlink_target_for_proc(p, path, len, tgt)` resolves with
+  `STALK_WALK | STALK_NOFOLLOW` through `stalk_err`, so a walk failure keeps its
+  cause (EACCES at a component without X-search, ELOOP on an earlier link's
+  cycle). A quarry that is not `QTSYMLINK`, or whose Dev has no `.readlink`, is
+  -T_E_INVAL. Otherwise it reads the target into kernel memory and answers the
+  length (1..SYS_OPEN_PATH_MAX). A negative answer from the Dev is its own
+  errno and passes through, because EINVAL there would tell a caller such as
+  git's real_path that the component is a plain file. An empty or over-long
+  answer is -T_E_INVAL.
+- `sys_readlink_for_proc` is the shell both entries share, the phenotype's
+  readlinkat and SYS_READLINK. bufsiz 0 is -T_E_INVAL before any walk. After
+  the core it copies min(target, bufsiz) bytes out, once `sys_validate_user_buf`
+  has checked exactly that span: `uaccess_copy_out`'s fixup engages only for
+  user-half addresses (the getdents64 P0 class). The phenotype's readlinkat
+  answers as it did before the split.
+
+The readlink entry holds three SYS_OPEN_PATH_MAX + 1 buffers on its 16 KiB
+kernel stack (the path scratch, the target, the core's cwd join), the depth
+the phenotype's readlinkat already had. Tests: `sys_stat.lstat_readlink_for_proc`
+(test_stalk, the cores over the D-1 symlink fixture) and
+`syscall.dispatch_symlink_reads` (both numbers reach their handlers).
+
 ## The sync create chokepoint: session ends, the created mode, SYS_UMASK (2026-10-19, B-3e M7 + M8)
 
 `spoor_create_install` admits a create through a 9P session only to a principal
@@ -106,8 +145,8 @@ protect against concurrent close/reuse. See [[sub-kernel-syscall-abi]].
 
 ## Trusted-seat and nonblocking entries
 
-Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK;
-the native ceiling is now 131. [[abi-trusted-seat]] and [[abi-native-nonblock]] pin
+Native calls 121/122/123 are TRUSTED_SEAT, SEAT_IMPORT and SET_NONBLOCK.
+[[abi-trusted-seat]] and [[abi-native-nonblock]] pin
 the mirrors. TRUSTED_SEAT snapshots the bounded 544-byte envelope before taking
 the process lock, scrubs temporary key material and validates copyout. SEAT_IMPORT
 checks the bound service, owned live peer connection and DMA allowance before

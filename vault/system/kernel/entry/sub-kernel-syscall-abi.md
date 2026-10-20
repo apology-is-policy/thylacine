@@ -17,8 +17,47 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-19
+updated: 2026-10-20
 ---
+## SYS_READLINK 135 and SYS_LSTAT 136 (B-3f', 2026-10-20)
+
+Two native symlink reads, by operator vote
+([[dec-2026-10-20-native-lstat-readlink]]). Each is a thin entry over a core
+the phenotype already calls.
+
+- `SYS_READLINK` (135; path_va, path_len, buf_va, bufsiz) copies
+  min(target length, bufsiz) bytes of the final link's target to buf_va, writes
+  no NUL and answers the count, as readlink(2) does. bufsiz 0 is -EINVAL, and
+  so is a final component that is not a link or is one on a Dev with no
+  `.readlink`. An unwritable buf_va is -EFAULT, and a failed read of the target
+  answers the Dev's own errno.
+- `SYS_LSTAT` (136; path_va, path_len, stat_va) is SYS_STAT's no-follow twin:
+  the same walk-query, one RPC and no handle on a walk_attrs Dev, filling the
+  88-byte struct t_stat ([[abi-t-stat]]) with the final component's own
+  record, so a link reports `T_S_IFLNK`. An unwritable stat_va is -EFAULT,
+  checked before the walk.
+
+Both resolve the path as SYS_STAT does: absolute from root_spoor, relative
+joined with the LS-4 cwd, contained at root_spoor (I-28). Neither follows the
+final component; a link earlier in the path is followed. Their path checks are
+SYS_OPEN_CREATE's: an empty or over-long path or an embedded NUL is -EINVAL and
+an unreadable one -EFAULT, where SYS_STAT answers a bare -1. A path that does
+not resolve answers the resolver's errno. A relative path whose cwd join
+outgrows SYS_OPEN_PATH_MAX answers a bare -1, which Pouch reads as EIO
+(OPEN-BUGS 2026-10-20). Neither takes a capability; the walk's per-component
+X-search gates both, as it gates SYS_STAT.
+
+Mirrors: libt and Rust carry no wrapper, since no native program calls either
+yet. Pouch reaches both through 0059 (`SYS_thyla_readlink`, `SYS_thyla_lstat`;
+[[sub-pouch-fs]]), and the phenotype's readlinkat and newfstatat call the same
+cores ([[sub-kernel-vivarium]]). Linux 134, 135 and 136 are rt_sigaction
+(VIV_TIER2), rt_sigprocmask (VIV_TIER2) and rt_sigpending (VIV_ENOSYS), each
+consumed before native dispatch; `VIV_NATIVE_CEILING` is 136 and each
+collision is pinned per number. 134 is a hole held for corona's
+SYS_SRV_REGISTRY_NEW (vote 2026-10-19), which is assigned on its own branch.
+`tools/test-native-handle-query.py` pins the kernel and 0059 numbers, the
+ceiling and the collision asserts.
+
 ## SYS_UMASK 133 (B-3e M8, 2026-10-19)
 
 `SYS_UMASK` (133, mask) sets the calling Proc's creation mask and returns the
@@ -35,10 +74,9 @@ Mirrors: libt `T_SYS_UMASK` and `t_umask`, Rust `T_SYS_UMASK` and `t_umask`.
 Pouch reaches it through 0058 (`SYS_thyla_umask`, [[sub-pouch-seam]]), the
 phenotype through Linux umask 166 ([[sub-kernel-vivarium]]), and go-thylacine's
 `syscall.Umask` (mask & 0o777) calls it directly. Linux 133 is rt_sigsuspend, a
-VIV_ENOSYS row consumed before native dispatch; `VIV_NATIVE_CEILING` is 133 and
-the collision is pinned per number. `tools/test-native-handle-query.py` pins
-the kernel, libt, Rust and 0058 numbers, the ceiling and both collision
-asserts; no gate runs it yet (OPEN-BUGS 2026-10-19).
+VIV_ENOSYS row consumed before native dispatch, and the collision is pinned per
+number. `tools/test-native-handle-query.py` pins the kernel, libt, Rust and 0058
+numbers and the collision asserts.
 
 ## Native descriptor calls 129-131 and SYS_GETPPID 132 (B-3b, 2026-10-15)
 
@@ -76,8 +114,8 @@ confer no authority.
 
 No call returns EPERM. Linux 129-131 (kill, tkill, tgkill) are Vivarium TIER2
 rows and Linux 132 (sigaltstack) a VIV_ENOSYS row, all consumed before native
-dispatch; each carries a per-number collision pin in `vivarium.c`, and the
-native ceiling is 132 ([[sub-kernel-vivarium]]). The C (libt) and Rust
+dispatch; each carries a per-number collision pin in `vivarium.c`
+([[sub-kernel-vivarium]]). The C (libt) and Rust
 mirrors carry all four (`t_handle_flags_get/_set`, `t_handle_dup_to`,
 `t_getppid`); Pouch reaches them through patches 0053-0057
 ([[sub-pouch-fs]], [[sub-pouch-process]]). `tools/test-native-handle-query.py`
@@ -93,8 +131,11 @@ the register convention, the argument records copied across, and the bounds
 every one of them is checked against.
 
 C/kernel, C/libt and Rust mirror this contract. A focused check
-(`tools/test-native-handle-query.py`) covers the native handle-query
-constants; this is not a claim that every mirror has an automated check.
+(`tools/test-native-handle-query.py`) pins the numbers appended since B-3b in
+every mirror that carries them, the native ceiling and the phenotype's
+collision asserts; build.sh runs it before every target and
+`tools/test-host-boundaries.sh` runs its mutants. This is not a claim that
+every mirror has an automated check.
 
 ## Contract
 
@@ -239,6 +280,16 @@ live numbers, the span runs 0-133 with the same three holes (26, 30, 43),
 empty. Of the mirrors, the libt enum names 95 kernel numbers and the Rust
 mirror 124, and neither disagrees with the kernel on a value. The script that
 counted reproduced main's recorded 126 and 126 on main's tree, and caught a
+planted missing arm and a planted wrong Rust value.
+
+**B-3f' append (2026-10-20).** `SYS_READLINK` = 135 and `SYS_LSTAT` = 136, with
+134 held for corona's SYS_SRV_REGISTRY_NEW; `SYS__NATIVE_TOP` is 137 and
+`VIV_NATIVE_CEILING` 136. Re-measured on this tree, not incremented: **133**
+live numbers, the span runs 0-136 with four holes (26, 30, 43 and 134),
+`syscall_dispatch_body` has exactly 133 arms, and both set differences are
+empty. The mirrors are unchanged: the libt enum names 95 kernel numbers and the
+Rust mirror 124, and neither disagrees with the kernel on a value. The script
+that counted reproduced M8's 131, 95 and 124 on the M8 tree, and caught a
 planted missing arm and a planted wrong Rust value.
 
 
@@ -670,14 +721,14 @@ the result for that class of call went from `-1` to `0`.
 ## Protected PCI windows (2026-09-17)
 
 [[abi-pci-windows]] appends `PCI_MAP_WINDOW` 113 and `PCI_WINDOWS` 114 in kernel,
-C and Rust. The native ceiling is 114. Linux clock_gettime 113 is handled by the
+C and Rust, raising the native ceiling to 114. Linux clock_gettime 113 is handled by the
 existing phenotype Tier-2 translator before native dispatch; its former ceiling
 assertion is replaced by an explicit collision pin. The old PCI_INFO record and
 four-argument whole-BAR map remain unchanged; protected whole-BAR maps now fail.
 
 ## PCI endpoint append (2026-09-17)
 
-[[abi-pci-irq]] appends calls 115..120; native ceiling is 123 after the trusted-seat/nonblocking append, with SYS__NATIVE_TOP
+[[abi-pci-irq]] appends calls 115..120; with the trusted-seat/nonblocking append after them the native ceiling reached 123, with SYS__NATIVE_TOP
 124. Kernel/C/Rust records pin event 32 bytes and info 48 bytes. Clock_gettime's
 113 collision remains consumed by its Tier-2 phenotype row. Remaining ceiling
 assertions compile. MSI-X mode currently fails ENODEV; backend implementation
@@ -686,7 +737,7 @@ must precede any support claim.
 ## Trusted-seat and nonblocking append
 
 [[abi-trusted-seat]] pins native 121/122 and [[abi-native-nonblock]] pins 123.
-The ceiling is 123, SYS__NATIVE_TOP is 124. Existing call numbers and Linux
+They took the ceiling to 123 and SYS__NATIVE_TOP to 124. Existing call numbers and Linux
 phenotype translation retain their meanings. The 2026-09-21 review changed no
 number and no envelope: `seat.h` gained names for the six chord key codes, and
 RESTORED is now also accepted in the failed phase ([[abi-trusted-seat]]).
@@ -729,7 +780,7 @@ keeps mapping -1 to `InvalidArgument`.
 
 Two new numbers rather than flags on `SYS_BURROW_ATTACH_LAZY`, per the
 2026-06-23 blast-radius precedent; both answer `-T_E_*`, never a bare -1. The
-ceiling is 125 and `SYS__NATIVE_TOP` 126 (`vivarium.c`'s static assert pins
+pair took the ceiling to 125 and `SYS__NATIVE_TOP` to 126 (`vivarium.c`'s static assert pins
 `VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1`). Linux `mprotect` is 226, above
 the ceiling, so its collision argument is discharged by construction.
 
@@ -960,9 +1011,9 @@ maps ONE execute-only alias at a random address, written as a u64 to `out_va`
 unseeded), `-ENOMEM` (page budget -- a sealed region is charged at creation --
 VMA cap, gap or allocator). 127 also named astra's unlanded
 `SYS_SRV_REGISTRY_NEW` on her base; B-2 lands first and she renumbers at her
-merge, the pre-merge-collision exception under Mechanism. The ceiling is 127,
-so the next native append, 128, is the first that owes `restart_syscall` a
-decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
+merge, the pre-merge-collision exception under Mechanism. It took the ceiling
+to 127, so the next native append, 128, was the first that owed
+`restart_syscall` a decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
 
 Existing numbers whose answers changed, no number or record moved:
 

@@ -10,8 +10,36 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-19
+updated: 2026-10-20
 ---
+## Native ceiling 136 (B-3f', 2026-10-20)
+
+`SYS_READLINK` lands at 135 and `SYS_LSTAT` at 136
+([[dec-2026-10-20-native-lstat-readlink]]), leaving 134 to corona's
+SYS_SRV_REGISTRY_NEW (vote 2026-10-19). Linux 134, 135 and 136 are
+rt_sigaction (VIV_TIER2), rt_sigprocmask (VIV_TIER2) and rt_sigpending
+(VIV_ENOSYS). `viv_linux_dispatch` returns before the native switch for every
+row that is not TRANSLATED, so a Linux Proc reaches neither native call, and
+test_vivarium pins the three verdicts. `vivarium.c` argues each number on its
+own: `VIV_LINUX_RT_SIGPROCMASK == SYS_READLINK`,
+`VIV_LINUX_RT_SIGPENDING == SYS_LSTAT`, and
+`VIV_LINUX_RT_SIGACTION == SYS_READLINK - 1` for the number below the ceiling
+that this tree leaves unassigned; when SYS_SRV_REGISTRY_NEW lands, that
+paragraph gives way to its own collision argument. A native program
+mis-declared as Linux loses both calls. Its readlink arrives as rt_sigprocmask
+with the path pointer as `how`, which the decider FORWARDs unless it is 0, 1
+or 2, and even then the shell reads and writes only the caller's own mask and
+memory. Its lstat arrives as rt_sigpending, which is ENOSYS. A change of either
+row to TRANSLATED must re-argue this. The lowest row the ceiling argues for is
+rt_sigtimedwait (137, VIV_ENOSYS).
+
+The phenotype's readlinkat (78) and newfstatat (79) rows keep their shells.
+readlinkat's calls the readlink shell it now shares with SYS_READLINK, over
+`sys_readlink_target_for_proc` ([[sub-kernel-syscall-dispatch]]), and answers
+as before. newfstatat has admitted AT_SYMLINK_NOFOLLOW since D-1; VIVARIUM
+6.20's V-2c passage, which called the flag rejected, carries a note that D-1
+superseded it.
+
 ## Native ceiling 133 (B-3e M8, 2026-10-19)
 
 `SYS_UMASK` lands at 133 ([[dec-2026-10-19-create-mode-bound-and-umask]]), over
@@ -19,7 +47,8 @@ Linux rt_sigsuspend, a VIV_ENOSYS row consumed before the native switch, so a
 Linux Proc's rt_sigsuspend never sets its creation mask. `vivarium.c` replaces
 rt_sigsuspend's ceiling argument with a per-number collision pin
 (`VIV_LINUX_RT_SIGSUSPEND == SYS_UMASK`), test_vivarium pins its ENOSYS
-verdict, and rt_sigaction (134, VIV_TIER2) now carries the ceiling argument.
+verdict, and rt_sigaction (134, VIV_TIER2) took the ceiling argument, which
+B-3f' passed to rt_sigtimedwait (137).
 Serving rt_sigsuspend must re-argue the collision.
 
 Linux umask (166) is now a Tier-2 row (`VIV_LINUX_UMASK`) onto the native
@@ -40,7 +69,7 @@ Proc's sigaltstack never reads its parent. `vivarium.c` replaces
 sigaltstack's above-ceiling assertion with a per-number collision pin
 (`VIV_LINUX_SIGALTSTACK == SYS_GETPPID`), test_vivarium's sigaltstack leg
 already pins the ENOSYS verdict (which the 6.23 escape detector also leans
-on), and rt_sigsuspend (133, VIV_ENOSYS) now carries the ceiling argument.
+on), and rt_sigsuspend (133, VIV_ENOSYS) took the ceiling argument.
 The getppid shell (Linux 173) stays a shell: it reads `proc_parent_pid`, the
 accessor the native handler reads.
 
@@ -60,7 +89,7 @@ Linux kill, tkill and tgkill. Those rows are VIV_TIER2 (`vivarium_kill_decide`
 every row that is not TRANSLATED, so a Linux kill-family call never reaches a
 handle operation. The family's above-ceiling assertion is replaced by three
 number-collision pins, test_vivarium checks the three TIER2 verdicts, and
-sigaltstack (132, VIV_ENOSYS) now carries the ceiling argument.
+sigaltstack (132, VIV_ENOSYS) took the ceiling argument.
 Restart_syscall (128) keeps its ENOSYS row against `SYS_ICACHE_SYNC_SPACE`.
 See [[sub-kernel-syscall-abi]] and `docs/NATIVE-DESCRIPTOR-OPERATIONS-PROPOSAL.md`.
 
@@ -680,9 +709,9 @@ collision; all remaining above-ceiling assertions still compile. [[abi-pci-windo
 
 ## Native ceiling 125 and the mprotect row (2026-09-23, B-1a)
 
-`VIV_NATIVE_CEILING` is 125 (`SYS_BURROW_PROTECT`), pinned to
-`SYS__NATIVE_TOP - 1` by `vivarium.c`'s static assert, so the append moved the
-sentinel and the constant with it. Linux `mprotect` (226) is above the
+B-1a moved `VIV_NATIVE_CEILING` to 125 (`SYS_BURROW_PROTECT`). The constant is
+pinned to `SYS__NATIVE_TOP - 1` by `vivarium.c`'s static assert, so the append
+moved the sentinel and the constant with it. Linux `mprotect` (226) is above the
 ceiling; its collision argument is discharged by construction.
 
 `{ VIV_LINUX_MPROTECT, VIV_TIER2 }` lands with its shell (the tier-2 rule):
@@ -773,12 +802,13 @@ the phenotype's deciders did not change.
 
 ## Native ceiling 127 (2026-10-07, B-2b)
 
-`VIV_NATIVE_CEILING` is 127 (`SYS_JIT_CREATE_SEALED`), moved by the sentinel.
+B-2b moved `VIV_NATIVE_CEILING` to 127 (`SYS_JIT_CREATE_SEALED`) with the
+sentinel.
 Of the table's 100 Linux numbers none lies between 120 and 127, so the move
 voids no row's argument. 127 is the last number below `restart_syscall`
-(128): the NEXT native append lands on that row and owes it a per-number
-collision paragraph, as `pselect6` and `ppoll` have, before the ceiling can
-move again. A sealed JIT region is native-only; the phenotype's `PROT_EXEC`
+(128), so the next native append (B-2e2's, below) landed on that row and owed
+it a per-number collision paragraph, as `pselect6` and `ppoll` have, before the
+ceiling could move again. A sealed JIT region is native-only; the phenotype's `PROT_EXEC`
 mappings stay readable, because `vma_alloc` promotes EXEC-alone to
 `READ | EXEC` everywhere but a code Burrow ([[sub-kernel-vma]]).
 
