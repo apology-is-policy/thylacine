@@ -16,6 +16,9 @@ MUTANTS = {
     'negative-asks-kernel': [('ioctl.c', '\tif (fd < 0) dead = 1;\n\telse if', '\tif (0) dead = 1;\n\telse if')],
     'winsz-site-enotty': [('ioctl.c', '\t\t\t\treturn 0;\n\t\t\t}\n\t\t\treturn refuse_fd(fd);\n',
                            '\t\t\t\treturn 0;\n\t\t\t}\n\t\t\terrno = ENOTTY; return -1;\n')],
+    'null-before-fd': [('ioctl.c', '\t\tif (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);\n\t\tif (!tio) { errno = EFAULT; return -1; }\n\t\tif (pts_ctl_read',
+                        '\t\tif (!tio) { errno = EINVAL; return -1; }\n\t\tif (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);\n\t\tif (pts_ctl_read')],
+    'cons-null-eperm': [('ioctl.c', 'errno = ws ? EPERM : EFAULT;', 'errno = EPERM;')],
     'fstat-flat': [('fstat.c', '\tif (rc < 0)    return __syscall_ret(rc);\n', '\tif (rc < 0)    return __syscall_ret(-1);\n')],
 }
 p = argparse.ArgumentParser(description=__doc__)

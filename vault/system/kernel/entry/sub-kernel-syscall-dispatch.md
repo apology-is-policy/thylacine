@@ -26,8 +26,13 @@ closed or out-of-range slot and a handle of another kind. A failure from
 `spoor_stat_native` is mapped as stalk's `err_code` maps it, so `fstat` and
 `stat` answer one object's failure alike: a -errno in [-4095,-2] crosses as
 itself, and anything else (a NULL `stat_native`, a Dev's flat -1, a server
-EPERM arriving as -1) reads -T_E_IO. The core's `!p` and `!out_k` guards and
-the handler's `!t` and `!p` still answer -1; no EL0 call reaches them (ER-3).
+EPERM arriving as -1) reads -T_E_IO. The one exception is a Dev's -T_E_BADF,
+which also reads -T_E_IO: the handle is live at that point, so a 9P server's
+EBADF about its own fid cannot pass for the handle gate's verdict, and an
+EBADF from fstat always means the number names nothing (round 1 F1: Pouch's
+`O_DIRECTORY` unwind and its ioctl refusal both rely on that). The core's
+`!p` and `!out_k` guards and the handler's `!t` and `!p` still answer -1; no
+EL0 call reaches them (ER-3).
 
 The handler validates the 88-byte destination before the lookup, as
 `sys_lstat_handler` does, and copies the record out a byte at a time; either
@@ -40,8 +45,10 @@ The core is exported, with a prototype, so `syscall.fstat_errnos`
 (test_syscall) drives it without EL0: a live write-only handle stats; a closed,
 out-of-range or other-kind handle is -T_E_BADF; a Dev with no `stat_native`
 (devzero) is -T_E_IO; a mock Dev's refusals cross or read -T_E_IO at each edge
-of the window; and through the dispatcher a NULL destination is -T_E_FAULT and
-a closed handle -T_E_BADF.
+of the window, and its -T_E_BADF reads -T_E_IO; and through the dispatcher a
+NULL destination is -T_E_FAULT, a closed handle -T_E_BADF, and a live handle
+whose destination faults at the first store (0x10000000, on kproc, whose user
+half is empty) -T_E_FAULT from the copy-out.
 
 ## The native symlink reads: SYS_READLINK and SYS_LSTAT (2026-10-20, B-3f')
 

@@ -365,6 +365,7 @@ static const struct { int dev; s64 want; const char *what; } g_fstat_dev_rows[] 
     { -2,         -2,              "fstat: the band's top, -2, crosses" },
     { -4095,      -4095,           "fstat: the band's floor, -4095, crosses" },
     { -1,         -(s64)T_E_IO,    "fstat: a Dev's flat -1 reads EIO" },
+    { -T_E_BADF,  -(s64)T_E_IO,    "fstat: a Dev's EBADF does not pass for a dead handle" },
     { -4096,      -(s64)T_E_IO,    "fstat: a value below the band reads EIO" },
     { 7,          -(s64)T_E_IO,    "fstat: a positive Dev failure reads EIO" },
 };
@@ -412,6 +413,17 @@ static void fstat_errnos_cases(struct Proc *p, hidx_t live, hidx_t dead,
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_BADF,
         "SYS_FSTAT: a closed handle is EBADF");
+
+    // kproc's user half is empty, so a valid-range destination passes the
+    // range check and faults at the first store: the copy-out arm.
+    TEST_ASSERT(p == kproc(), "fstat: the copy-out case runs on kproc");
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_FSTAT;
+    ctx.regs[0] = (u64)live;
+    ctx.regs[1] = 0x10000000ull;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], -(s64)T_E_FAULT,
+        "SYS_FSTAT: a fault in the copy-out is EFAULT");
 }
 
 void test_syscall_fstat_errnos(void) {

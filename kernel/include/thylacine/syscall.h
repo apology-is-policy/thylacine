@@ -1038,14 +1038,15 @@ enum {
     //     another kind -- a KOBJ_SRV listener)
     //   - -T_E_FAULT: stat_va outside the user-VA bound / unmapped at store time
     //   - the Dev's refusal: its -errno when in [-4095,-2] (dev9p carries the
-    //     server's), else -T_E_IO (no stat_native slot, or a flat Dev failure)
+    //     server's), else -T_E_IO (no stat_native slot, or a flat Dev failure);
+    //     a Dev's -T_E_BADF reads -T_E_IO too, since the handle is live
     //
     // Audit-bearing: touches `kernel/syscall.c` (rights gate + uaccess store)
     // + `kernel/devramfs.c` (the stat_native implementation). CLAUDE.md
     // §"stratumd boot mount close" audit-trigger row.
     SYS_FSTAT        = 50,   // arg: spoor_fd (x0), stat_va (x1)
 
-    // SYS_LSEEK(spoor_fd, offset, whence) → new_offset / -1 (P6-pouch-stratumd-
+    // SYS_LSEEK(spoor_fd, offset, whence) → new_offset / -errno (P6-pouch-stratumd-
     // boot sub-chunk 16b-gamma). Position the kernel-side read/write cursor
     // for `spoor_fd`. Maps to POSIX `lseek(2)`. The cursor is the `s64 offset`
     // field of the Spoor that SYS_READ / SYS_WRITE advance per call.
@@ -1062,7 +1063,7 @@ enum {
     //   - T_SEEK_CUR: new_offset = c->offset + offset      (overflow check)
     //   - T_SEEK_END: new_offset = file_size + offset      (overflow check;
     //                 file_size queried via dev->stat_native; Devs without
-    //                 stat_native return -1)
+    //                 stat_native answer -T_E_IO)
     //
     // The kernel rejects new_offset < 0 (POSIX EINVAL). The cursor is set
     // ATOMICALLY relative to a concurrent reader/writer on the same Spoor
@@ -1070,12 +1071,15 @@ enum {
     // threads is unspecified at v1.0 (no per-Spoor cursor lock yet); the
     // POSIX user should serialize themselves.
     //
-    // Returns the new offset (>= 0) on success, -1 on:
-    //   - spoor_fd not KOBJ_SPOOR / out-of-range
-    //   - whence not in {T_SEEK_SET, T_SEEK_CUR, T_SEEK_END}
-    //   - new_offset would be < 0 (T_SEEK_SET with offset < 0; T_SEEK_CUR
-    //     underflow; T_SEEK_END underflow)
-    //   - T_SEEK_END but Dev does not implement stat_native
+    // Returns the new offset (>= 0) on success, or:
+    //   - -T_E_BADF: spoor_fd names no Spoor (empty, closed, out of range, or
+    //     another kind)
+    //   - -T_E_INVAL: whence not in {T_SEEK_SET, T_SEEK_CUR, T_SEEK_END}, or
+    //     new_offset would be < 0 or overflow (T_SEEK_SET with offset < 0;
+    //     T_SEEK_CUR or T_SEEK_END past either end)
+    //   - -T_E_IO: T_SEEK_END on a Dev without stat_native, or its stat fails
+    //   - -1: a Dev that is not seekable (POSIX names ESPIPE, which the
+    //     registry does not yet; the #100 residual)
     //
     // Audit-bearing: per the SYS_FSTAT row in CLAUDE.md.
     SYS_LSEEK        = 51,   // arg: spoor_fd (x0), offset (x1), whence (x2)

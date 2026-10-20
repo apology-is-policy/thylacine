@@ -610,6 +610,8 @@ resolver's `err_code` names that value, so the frame below knew it before the
 frame above. stalk's `err_code` for `*errp` (ER-1) and `sys_fstat_for_proc`'s
 return (ER-2, 2026-10-20) map the arm's answer alike: a -errno in `[-4095,-2]`
 crosses as itself, and the `-1`, a server EPERM included, reads `-T_E_IO`.
+The fstat core also reads a server EBADF as `-T_E_IO`, because the handle it
+holds is live; through stalk a server EBADF still crosses as itself.
 [[seam-fstat-errno-flattened-above-the-leaf]] records the comment's earlier
 claim that both callers propagated, when the fstat half flattened to `-1`.
 

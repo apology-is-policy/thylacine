@@ -31,7 +31,9 @@ that names no Spoor ([[sub-kernel-syscall-abi]]), and `fstat`'s decode passes
 it through; 0010's fallback, which read any other non-zero return as `EBADF`,
 sat behind the decode and is gone. 0021's `ioctl` answers `EBADF` for a dead
 descriptor, where it answered `ENOTTY`, at every exit where a request does not
-fit the descriptor ([[sub-pouch-tty]]). `tools/test-pouch-fstat-ebadf.py` runs
+fit the descriptor, and refuses a NULL argument with `EFAULT` only once the
+descriptor is known to be a terminal, where it answered `EINVAL` before
+looking at the descriptor ([[sub-pouch-tty]]). `tools/test-pouch-fstat-ebadf.py` runs
 the real `fstat.c`, `ioctl.c`, `isatty.c` and `syscall_ret.c` over a mocked
 `SYS_fstat`. The census line `POUCH_CENSUS_FD` gains `fstat-ebadf` and
 `isatty-ebadf` ([[sub-pouch-fs]]).

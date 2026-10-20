@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-20
 ---
 ## Purpose
 
@@ -241,7 +241,9 @@ clunks the source and returns -1). `walkqid_alloc` returns NULL on a
 negative count or OOM. `spoor_stat_native` returns -1 when the Spoor,
 the output buffer, or the Dev's `stat_native` slot is absent — the
 NULL-slot arm that makes an fstat on a slotless Dev fail, which has
-been a live bug class twice ([[sub-kernel-dev]], Caveats).
+been a live bug class twice ([[sub-kernel-dev]], Caveats) — and
+otherwise the Dev's own answer, which for dev9p is the server's -errno
+([[sub-kernel-syscall-dispatch]] has how fstat maps it).
 
 Everything else on this surface is an extinction rather than an error
 return: allocating before `spoor_init`, initializing twice, a corrupted

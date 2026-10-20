@@ -92,7 +92,7 @@ static int mock_close(int fd) { (void)fd; return 0; }
 #undef write
 #undef close
 
-enum { FD_DEAD = 7, FD_FILE, FD_OLD, FD_MASTER, FD_SLAVE, FD_CONS, FD_EACCES, FD_EFAULT };
+enum { FD_DEAD = 7, FD_FILE, FD_OLD, FD_MASTER, FD_SLAVE, FD_CONS, FD_EACCES, FD_EFAULT, FD_EIO };
 #define S_CHR 0020000u
 #define S_REG 0100000u
 
@@ -134,6 +134,15 @@ static void ioctl_case(const char *name, int fd, int req, int want_rc, int want_
     verdict(name, ok, rc, err);
 }
 
+/* A NULL argument: the descriptor and the file are judged before the pointer. */
+static void ioctl_null_case(const char *name, int fd, int req, int want_errno, int want_calls) {
+    reset();
+    int rc = tested_ioctl(fd, req, (void *)0);
+    int err = errno;
+    verdict(name, rc == -1 && err == want_errno && g_fstat_calls == want_calls &&
+            !g_fstat_tagged && !g_other_calls, rc, err);
+}
+
 static void isatty_case(const char *name, int fd, int want_rc, int want_errno) {
     reset();
     int rc = tested_isatty(fd);
@@ -154,6 +163,7 @@ int main(void) {
     kfd(FD_CONS, 0, S_CHR | 0620, POUCH_CONS_FLAG);
     kfd(FD_EACCES, -EACCES, 0, 0);
     kfd(FD_EFAULT, -EFAULT, 0, 0);
+    kfd(FD_EIO, -EIO, 0, 0);       /* a live fd whose Dev failed, a server EBADF included */
     g_unix_slot.in_use = 1; g_unix_slot.family = POUCH_SOCK_FAM_UNIX; g_unix_slot.ctl_fd = -1;
     g_inet_slot.in_use = 1; g_inet_slot.family = POUCH_SOCK_FAM_INET; g_inet_slot.ctl_fd = -1;
 
@@ -162,6 +172,7 @@ int main(void) {
     fstat_case("fstat-old-kernel-eio", FD_OLD, -1, EIO, 1);
     fstat_case("fstat-dev-errno", FD_EACCES, -1, EACCES, 1);
     fstat_case("fstat-efault", FD_EFAULT, -1, EFAULT, 1);
+    fstat_case("fstat-dev-eio", FD_EIO, -1, EIO, 1);
     fstat_case("fstat-negative", -1, -1, EBADF, 0);
     fstat_case("fstat-socket-live", TAG_UNIX, 0, EDOM, 0);
     fstat_case("fstat-socket-dead", TAG_DEAD, -1, EBADF, 0);
@@ -169,6 +180,7 @@ int main(void) {
     isatty_case("isatty-dead-ebadf", FD_DEAD, 0, EBADF);
     isatty_case("isatty-file-enotty", FD_FILE, 0, ENOTTY);
     isatty_case("isatty-old-kernel-enotty", FD_OLD, 0, ENOTTY);
+    isatty_case("isatty-dev-eio-enotty", FD_EIO, 0, ENOTTY);
     isatty_case("isatty-negative", -1, 0, EBADF);
     isatty_case("isatty-console", FD_CONS, 1, EDOM);
     isatty_case("isatty-pts", FD_SLAVE, 0, ENOTTY);
@@ -177,6 +189,7 @@ int main(void) {
 
     ioctl_case("tcgets-dead", FD_DEAD, TCGETS, -1, EBADF, 2);
     ioctl_case("tcgets-file", FD_FILE, TCGETS, -1, ENOTTY, 2);
+    ioctl_case("tcgets-dev-eio", FD_EIO, TCGETS, -1, ENOTTY, 2);
     ioctl_case("unknown-dead", FD_DEAD, 0x7fff, -1, EBADF, 1);
     ioctl_case("unknown-file", FD_FILE, 0x7fff, -1, ENOTTY, 1);
     ioctl_case("fionbio-dead", FD_DEAD, FIONBIO, -1, EBADF, 1);
@@ -191,6 +204,24 @@ int main(void) {
     ioctl_case("swinsz-console-eperm", FD_CONS, TIOCSWINSZ, -1, EPERM, 2);
     ioctl_case("swinsz-dead", FD_DEAD, TIOCSWINSZ, -1, EBADF, 3);
     ioctl_case("sctty-dead", FD_DEAD, TIOCSCTTY, -1, EBADF, 2);
+
+    ioctl_null_case("tcgets-null-dead", FD_DEAD, TCGETS, EBADF, 2);
+    ioctl_null_case("tcgets-null-file", FD_FILE, TCGETS, ENOTTY, 2);
+    ioctl_null_case("tcgets-null-pts", FD_SLAVE, TCGETS, EFAULT, 1);
+    ioctl_null_case("tcsets-null-dead", FD_DEAD, TCSETS, EBADF, 2);
+    ioctl_null_case("tcsets-null-pts", FD_SLAVE, TCSETS, EFAULT, 1);
+    ioctl_null_case("winsz-null-dead", FD_DEAD, TIOCGWINSZ, EBADF, 3);
+    ioctl_null_case("winsz-null-cons", FD_CONS, TIOCGWINSZ, EFAULT, 2);
+    ioctl_null_case("winsz-null-pts", FD_SLAVE, TIOCGWINSZ, EFAULT, 1);
+    ioctl_null_case("swinsz-null-dead", FD_DEAD, TIOCSWINSZ, EBADF, 3);
+    ioctl_null_case("swinsz-null-cons", FD_CONS, TIOCSWINSZ, EFAULT, 2);
+    ioctl_null_case("swinsz-null-pts", FD_SLAVE, TIOCSWINSZ, EFAULT, 1);
+    ioctl_null_case("ptn-null-dead", FD_DEAD, TIOCGPTN, EBADF, 2);
+    ioctl_null_case("ptn-null-master", FD_MASTER, TIOCGPTN, EFAULT, 1);
+    ioctl_null_case("gpgrp-null-dead", FD_DEAD, TIOCGPGRP, EBADF, 2);
+    ioctl_null_case("gpgrp-null-pts", FD_SLAVE, TIOCGPGRP, EFAULT, 1);
+    ioctl_null_case("spgrp-null-dead", FD_DEAD, TIOCSPGRP, EBADF, 2);
+    ioctl_null_case("spgrp-null-pts", FD_SLAVE, TIOCSPGRP, EFAULT, 1);
 
     printf("tests=%d failures=%d\n", tests, failures);
     return !!failures;

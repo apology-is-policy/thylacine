@@ -447,10 +447,14 @@ trigger surfaces; self + Fable audit before the arc closes):
   → `ENOTEMPTY` (39). A server errno with no `T_E_*` name crosses BY VALUE, so
   neither needed a registry append — only kernel-ORIGINATED errnos must be
   named here. Of the `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR`
-  half, `SYS_LSEEK` (#100) and `SYS_FSYNC` (Area-F) answer their errnos, and
+  half, `SYS_FSYNC` (Area-F) answers its errnos, `SYS_LSEEK` (#100) answers
+  its errnos except the non-seekable refusal, still the flat `-1` (POSIX's
+  `ESPIPE`, which this registry does not name; ER-3's residual), and
   **`SYS_FSTAT` LANDED 2026-10-20**: `-T_E_BADF` for a handle that names no
   Spoor, `-T_E_FAULT` for the destination, and a Dev's refusal mapped as the
-  resolver maps it (a `-errno` in [-4095,-2] as itself, else `-T_E_IO`).
+  resolver maps it (a `-errno` in [-4095,-2] as itself, else `-T_E_IO`),
+  except that a Dev's `-T_E_BADF` reads `-T_E_IO`: the handle is live, and
+  `SYS_FSTAT`'s `EBADF` means only that the handle names nothing.
   `SYS_READDIR`, `SYS_WSTAT` and `SYS_CHDIR` still answer a bare `-1` at most
   refusals (OPEN-BUGS 2026-10-20 08:24Z): `SYS_WSTAT`'s denial is POSIX's
   `EPERM`, which the `-1` alias forbids, and `SYS_CHDIR`'s over-long path

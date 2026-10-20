@@ -15,9 +15,14 @@ dead one and ENOTTY otherwise. It runs only after the request has failed, so
 a call that succeeds costs no extra syscall. A tagged socket descriptor is
 judged by its libc slot, which the kernel cannot see.
 
+A NULL argument was refused with EINVAL before the descriptor was looked at.
+It is now refused with EFAULT, Linux's answer for a bad pointer, once the
+descriptor is known to be a terminal, so a dead descriptor still answers
+EBADF and a live one that is not a terminal ENOTTY, in Linux's order.
+
 --- a/src/misc/ioctl.c
 +++ b/src/misc/ioctl.c
-@@ -29,15 +29,15 @@
+@@ -29,15 +29,19 @@
   * A tagged pouch socket fd (POUCH_SOCK_TAG) is rejected up front.
   *
   * Errno posture:
@@ -37,15 +42,17 @@ judged by its libc slot, which the kernel cannot see.
 - *     yields ENOTTY, not EBADF (musl's isatty() normalizes to ENOTTY
 - *     anyway, so the app-visible isatty behavior is identical).
 + *   - tty request on a live non-pts fd: ENOTTY.
++ *   - a NULL argument a terminal request reads or writes: EFAULT,
++ *     asked once the fd is known to be a terminal, so a dead fd
++ *     still answers EBADF and a live non-tty ENOTTY (Linux's order:
++ *     the descriptor, the file, then the copy).
   *   - kernel tty-syscall errors pass through the standard seam decode
   *     (T_E_* values are POSIX-aligned). One documented divergence: the
   *     kernel's EPERM contours answer EACCES (the errno.h -1-alias
-@@ -267,6 +267,20 @@
- 	else while (v) { dec[dl++] = (char)('0' + (v % 10)); v /= 10; }
- 	while (dl) cmd[len++] = dec[--dl];
+@@ -269,6 +273,20 @@
  	return len;
-+}
-+
+ }
+ 
 +/* The refusal for an fd a request does not fit: EBADF when the fd is
 + * dead, else ENOTTY. A tagged socket fd is a libc slot the kernel
 + * cannot see, so its own table answers for it. */
@@ -58,10 +65,12 @@ judged by its libc slot, which the kernel cannot see.
 +	else dead = __syscall(SYS_fstat, fd, &ts) == -EBADF;
 +	errno = dead ? EBADF : ENOTTY;
 +	return -1;
- }
- 
++}
++
  int ioctl(int fd, int req, ...)
-@@ -291,9 +305,8 @@
+ {
+ 	void *arg;
+@@ -291,9 +309,8 @@
  		 * bridge (no session tag churn). Only a FAM_INET slot with a live
  		 * ctl fd; any other fd -> ENOTTY (no kernel ioctl surface). */
  		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
@@ -73,7 +82,7 @@ judged by its libc slot, which the kernel cannot see.
  		if (!arg) { errno = EFAULT; return -1; }
  		int on = (*(int *)arg != 0);
  		slot->nonblock = (unsigned char)on;
-@@ -318,9 +331,8 @@
+@@ -318,9 +335,8 @@
  		 * netd round trip per call; documented in
  		 * _pouch_socket.h). */
  		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
@@ -85,56 +94,90 @@ judged by its libc slot, which the kernel cannot see.
  		if (!arg) { errno = EFAULT; return -1; }
  		int r = pouch_sock_readable(fd);
  		if (r < 0) return -1;   /* errno set by the probe */
-@@ -331,7 +343,7 @@
+@@ -330,8 +346,8 @@
+ 	case TCGETS: {
  		struct termios *tio = arg;
  		unsigned flags, cols, rows;
- 		if (!tio) { errno = EINVAL; return -1; }
+-		if (!tio) { errno = EINVAL; return -1; }
 -		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
++		if (!tio) { errno = EFAULT; return -1; }
  		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
  			errno = ENOTTY;
  			return -1;
-@@ -364,7 +376,7 @@
+@@ -363,8 +379,8 @@
+ 		 * spelling). Drain distinctions are moot on the synchronous
  		 * rings — see the TCSBRK note. */
  		const struct termios *tio = arg;
- 		if (!tio) { errno = EINVAL; return -1; }
+-		if (!tio) { errno = EINVAL; return -1; }
 -		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
++		if (!tio) { errno = EFAULT; return -1; }
  		char cmd[64];
  		int onlcr = (tio->c_oflag & OPOST) && (tio->c_oflag & ONLCR);
  		int len = 0;
-@@ -404,7 +416,7 @@
+@@ -387,7 +403,6 @@
+ 	case TIOCGWINSZ: {
+ 		struct winsize *ws = arg;
+ 		unsigned flags, cols, rows;
+-		if (!ws) { errno = EINVAL; return -1; }
+ 		if (pts_resolve(fd, &n, &fk) != 0) {
+ 			/* #55: the console arm. TIOCGWINSZ is also musl's
+ 			 * isatty(), so SUCCESS here restores isatty truth on
+@@ -396,6 +411,7 @@
+ 			 * still IS a terminal: report 0x0 (the CPR-fallback
+ 			 * convention), never ENOTTY. */
+ 			if (cons_resolve(fd) == 0) {
++				if (!ws) { errno = EFAULT; return -1; }
+ 				unsigned cc = 0, cr = 0;
+ 				(void)cons_winsize_read(&cc, &cr);
+ 				ws->ws_col = (unsigned short)cc;
+@@ -404,8 +420,9 @@
  				ws->ws_ypixel = 0;
  				return 0;
  			}
 -			errno = ENOTTY; return -1;
 +			return refuse_fd(fd);
  		}
++		if (!ws) { errno = EFAULT; return -1; }
  		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
  			errno = ENOTTY;
-@@ -425,7 +437,7 @@
+ 			return -1;
+@@ -418,15 +435,15 @@
+ 	}
+ 	case TIOCSWINSZ: {
+ 		const struct winsize *ws = arg;
+-		if (!ws) { errno = EINVAL; return -1; }
+ 		if (pts_resolve(fd, &n, &fk) != 0) {
+ 			/* #55: the console geometry is PHYSICAL (the
+ 			 * renderer's cell grid, reported not negotiated) --
  			 * an app cannot set it. Linux-VT-resize semantics
  			 * are deliberately NOT offered. */
- 			if (cons_resolve(fd) == 0) { errno = EPERM; return -1; }
+-			if (cons_resolve(fd) == 0) { errno = EPERM; return -1; }
 -			errno = ENOTTY; return -1;
++			if (cons_resolve(fd) == 0) { errno = ws ? EPERM : EFAULT; return -1; }
 +			return refuse_fd(fd);
  		}
++		if (!ws) { errno = EFAULT; return -1; }
  		char cmd[40];
  		int len = 0;
-@@ -443,10 +455,8 @@
+ 		memcpy(cmd, "winsize ", 8); len = 8;
+@@ -442,11 +459,9 @@
+ 	case TIOCGPTN: {
  		/* ptsname_r's source. Master-only (the Linux devpts shape). */
  		int *out = arg;
- 		if (!out) { errno = EINVAL; return -1; }
+-		if (!out) { errno = EINVAL; return -1; }
 -		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER) {
 -			errno = ENOTTY;
 -			return -1;
 -		}
 +		if (pts_resolve(fd, &n, &fk) != 0 || fk != POUCH_PTS_FK_MASTER)
 +			return refuse_fd(fd);
++		if (!out) { errno = EFAULT; return -1; }
  		*out = (int)n;
  		return 0;
  	}
-@@ -454,10 +464,8 @@
+@@ -454,10 +469,8 @@
  		/* unlockpt. Thylacine pts pairs are born unlocked (there is
  		 * no grant/unlock dance — the mint IS the grant); accept the
  		 * unlock as a no-op on a master, per the modern-devpts model. */
@@ -147,7 +190,7 @@ judged by its libc slot, which the kernel cannot see.
  		return 0;
  	case TIOCSCTTY:
  		/* Controlling-terminal acquisition is a KERNEL syscall keyed
-@@ -467,12 +475,12 @@
+@@ -467,12 +480,12 @@
  		 * fidelity -- a non-tty fd answers ENOTTY here instead of the
  		 * kernel's EINVAL/EACCES-shaped refusal; the kernel's own
  		 * validation remains the authority for real pts fds. */
@@ -156,22 +199,25 @@ judged by its libc slot, which the kernel cannot see.
  		return __syscall_ret(__syscall(SYS_tty_acquire, fd));
  	case TIOCGPGRP: {
  		int *out = arg;
- 		if (!out) { errno = EINVAL; return -1; }
+-		if (!out) { errno = EINVAL; return -1; }
 -		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
++		if (!out) { errno = EFAULT; return -1; }
  		long r = __syscall(SYS_tty_get_fg, fd);
  		if (r < 0) return __syscall_ret(r);
  		/* 0 = no foreground group seated yet (kernel contract). */
-@@ -482,7 +490,7 @@
+@@ -481,8 +494,8 @@
+ 	}
  	case TIOCSPGRP: {
  		const int *pg = arg;
- 		if (!pg) { errno = EINVAL; return -1; }
+-		if (!pg) { errno = EINVAL; return -1; }
 -		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
 +		if (pts_resolve(fd, &n, &fk) != 0) return refuse_fd(fd);
++		if (!pg) { errno = EFAULT; return -1; }
  		return __syscall_ret(__syscall(SYS_tty_set_fg, fd, *pg));
  	}
  	case TCSBRK:
-@@ -492,13 +500,13 @@
+@@ -492,13 +505,13 @@
  		 * lands in the peer ring before the Twrite returns; there is
  		 * no deeper output queue. Break: no pts representation (as on
  		 * Linux pts without pktmode). Both answer 0 on a pts. */
@@ -187,7 +233,7 @@ judged by its libc slot, which the kernel cannot see.
  		errno = ENOTSUP;
  		return -1;
  	case TIOCGSID:
-@@ -506,13 +514,12 @@
+@@ -506,13 +519,12 @@
  		/* No kernel surface: acquisition is explicit + session-
  		 * scoped; there is no controlling-terminal drop nor a
  		 * session-of-terminal query at v1.0 (PTY-1d). */

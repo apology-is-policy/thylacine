@@ -152,7 +152,9 @@ struct Dev {
     //                    Returns 0 on success, else a -errno (dev9p
     //                    returns the server's) or -1; SYS_FSTAT and stalk
     //                    pass a -errno in [-4095,-2] through and read
-    //                    anything else as -T_E_IO. A NULL slot means "no
+    //                    anything else as -T_E_IO (SYS_FSTAT reads a
+    //                    -T_E_BADF as -T_E_IO too: its handle is live).
+    //                    A NULL slot means "no
     //                    native stat available" (-T_E_IO): devcap and the
     //                    leaf Devs reached only by a direct attach
     //                    (devnull / devzero / devfull / devrandom) leave

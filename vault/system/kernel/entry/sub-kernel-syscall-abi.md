@@ -27,7 +27,9 @@ range, or another kind) is -EBADF, the answer `docs/ERRORS.md`'s table already
 gave it. A stat_va that is not user memory, or that faults during the copy-out,
 is -EFAULT, checked before the handle. Otherwise the Dev's refusal crosses: its
 -errno as itself, or -EIO from a Dev with no `stat_native` or a flat failure.
-No number, record or layout changes.
+A Dev's -EBADF reads -EIO too, since the handle is live, so -EBADF from
+SYS_FSTAT always means the handle names nothing. No number, record or layout
+changes.
 
 Mirrors: the libt and Rust wrapper comments say 0 / -errno, and libthyla-rs's
 `Error::from_syscall_return` reads -9 as `BadHandle`. Pouch's `fstat` passes
