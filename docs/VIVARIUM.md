@@ -2204,6 +2204,13 @@ round trip; admitting costs correctness later, silently. **A flag whose correctn
 depends on a feature being absent is a trap, not an admission** — and the rule is
 worth more than the reach it costs here.
 
+**Superseded at DISTRO D-1, as the rule intended.** Symlinks landed with the
+resolver's no-follow walk, and `AT_SYMLINK_NOFOLLOW` has been admitted and
+translated since: the newfstatat decide hands `STALK_NOFOLLOW` to
+`sys_stat_for_proc`, which reports the link's own record (`vivarium.c`). The flag
+was forwarded until the feature it depends on existed, which is the rule above
+working. Its native twin is `SYS_LSTAT` (136, operator vote 2026-10-20).
+
 #### `statx` is why 79 is not the whole stat story
 
 musl on aarch64 defines no `__NR_fstatat` (only `__NR_newfstatat`), so `SYS_fstatat`

@@ -14,7 +14,10 @@ code:
   - usr/lib/pouch/patches/0031-pouch-readlink.patch
   - usr/lib/pouch/patches/0040-pouch-o-append-omode.patch
   - usr/lib/pouch/patches/0051-pouch-fd-sync-vectored.patch
+  - usr/lib/pouch/patches/0059-pouch-symlinks.patch
   - usr/pouch-hello/pouch-hello-fd.c
+  - usr/pouch-hello/pouch-hello-fs.c
+  - usr/pouch-hello/pouch-hello-links.c
 audit: hard
 guarded-by: [inv-i28]
 validated-by: [prose, gate-smp]
@@ -22,7 +25,7 @@ locks: []
 abis: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md", "docs/VIVARIUM.md"]
 created: 2026-08-01
-updated: 2026-10-19
+updated: 2026-10-20
 ---
 ## umask (2026-10-19, B-3e M8)
 
@@ -45,8 +48,9 @@ after `fdopendir`.
 Every POSIX path operation a ported program performs: `open` / `openat` /
 `fopen`, `stat` / `lstat` / `fstat` / `access`, `lseek` / `pread` /
 `pwrite`, `readdir`, the mutation family (`rename` / `unlink` / `rmdir` /
-`mkdir` / `chmod` / `ftruncate`), and `readlink` on a system with no
-symlinks. It is the largest surface in the series and the one that grew
+`mkdir` / `chmod` / `ftruncate`), and the symlink calls (`lstat`,
+`readlink`, `lchmod`, and the open flags `O_NOFOLLOW`, `O_PATH` and
+`O_DIRECTORY`). It is the largest surface in the series and the one that grew
 the most: `openat.c` alone has three generations.
 
 ## Contract
@@ -63,6 +67,18 @@ the most: `openat.c` alone has three generations.
   helper is every successful exit's (plain, create, exists-already);
   `tools/test-pouch-open-cloexec.py` pins each. A real dirfd is `ENOTSUP`;
   `O_TMPFILE` is `ENOTSUP`.
+- The open flags for links (0059): `O_NOFOLLOW` and `O_PATH` are omode bits
+  (`SYS_WALK_OPEN_NOFOLLOW` 0x20, `SYS_WALK_OPEN_OPATH` 0x80). A final link
+  under `O_NOFOLLOW` is `ELOOP`, or the link itself with `O_PATH` too; an
+  `O_PATH` descriptor answers `fstat` and refuses `read` and `write`,
+  `EBADF`. `O_PATH` masks every flag but `O_CLOEXEC`, `O_DIRECTORY` and
+  `O_NOFOLLOW` before any other is read, as Linux's `build_open_how` does,
+  and then `O_CREAT` with `O_DIRECTORY` is `EINVAL` (Linux 6.4 on).
+  `O_DIRECTORY` without `O_NOFOLLOW` appends a `/` to the path, so the
+  kernel's trailing-slash gate refuses a non-directory before anything
+  opens; with `O_NOFOLLOW` the exit helper fstats the new descriptor and
+  closes anything but a directory, `ENOTDIR`, before close-on-exec is set.
+  `tools/test-pouch-symlinks.py` pins each arm against a mocked kernel.
 - The descriptor family (0055, 0056): `dup`, `dup2`, `dup3`, `fcntl`'s
   F_GETFD / F_SETFD / F_DUPFD / F_DUPFD_CLOEXEC / F_GETFL / F_SETFL over native
   129-131 and 123 (`docs/ERRORS.md`, "Pouch fcntl and dup"). musl's own raw
@@ -77,18 +93,28 @@ the most: `openat.c` alone has three generations.
   descriptor without O_APPEND is EINVAL, closing the stream. The
   rest are unreachable and stay: `fchdir` / `fchown` (their own calls are
   sentinels and answer first), `socketpair` and `signalfd` (the same).
-- `fstat` → `SYS_FSTAT` (50); `stat`/`lstat`/`fstatat(path)` →
-  `SYS_STAT` (88), the POUNCE walk-query; `fstatat(fd,"",AT_EMPTY_PATH)`
-  delegates to `fstat`. `lstat == stat`: `fstatat` treats
-  AT_SYMLINK_NOFOLLOW as following, a premise (G11, no symlinks) the kernel
-  outgrew at D-1 -- OPEN-BUGS 2026-10-15 08:24Z owns the gap.
+- `fstat` → `SYS_FSTAT` (50); `stat`/`fstatat(path)` → `SYS_STAT` (88),
+  the POUNCE walk-query; `lstat`/`fstatat(AT_SYMLINK_NOFOLLOW)` → native
+  `SYS_LSTAT` (136, [[dec-2026-10-20-native-lstat-readlink]]), which reports
+  a final link itself (`S_IFLNK`, its size the target's length);
+  `fstatat(fd,"",AT_EMPTY_PATH)` delegates to `fstat`. A flag outside
+  `AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH`, `AT_NO_AUTOMOUNT` and the
+  `AT_STATX` sync hints is `EINVAL`, and a path past `PATH_MAX`
+  `ENAMETOOLONG`, as on Linux.
 - `readdir(DIR*)` refills via `SYS_READDIR` (56) and translates the 9P
   Treaddir stream into Linux `struct dirent` records.
 - The mutation family maps onto the parent-fd+leaf kernel primitives
   through one shared split (`__pouch_open_parent`).
-- `readlink(path)` on an existing non-link is `EINVAL`; on
-  `/proc/{self,<pid>}/{exe,cwd}` it is an open+read of the file whose
-  contents ARE the target.
+- `readlink(path)` → native `SYS_READLINK` (135): a link's target, at most
+  `bufsiz` bytes and never NUL-terminated; `EINVAL` for an existing
+  non-link, else the path's own resolution errno. `/proc/{self,<pid>}/
+  {exe,cwd}` is answered first, by an open+read of the file whose contents
+  ARE the target. A `bufsiz` of 0 rides a one-byte dummy and answers 0 for a
+  link, as upstream musl does.
+- `fchmodat(AT_SYMLINK_NOFOLLOW)`, so `lchmod`, opens the final component
+  `O_PATH|O_NOFOLLOW` and answers `EOPNOTSUPP` for a link, as musl and glibc
+  do on Linux; a non-link's mode is set as `chmod` sets it. Any other flag is
+  `EINVAL`.
 
 ## Mechanism
 
@@ -190,11 +216,24 @@ record (`round_up(offsetof(d_name)+L+1, 8)`) can exceed its 9P source
 worth of raw stream — guaranteeing the translated form fits and no entry
 the kernel returned is dropped mid-batch.
 
-**`remove(3)` cannot use the classic form.** musl's `remove` unlinks and
-falls through to `rmdir` on `-EISDIR`; Thylacine's `SYS_UNLINK` collapses
-every failure to a flat `-1` with no distinct `EISDIR` (the #102-class
-errno-loss), so 0027 dispatches on an `lstat` instead: a directory →
-`rmdir`, anything else → `unlink`.
+**`remove(3)` dispatches on an `lstat`.** musl's `remove` unlinks and
+falls through to `rmdir` on `-EISDIR`, a raw `SYS_unlinkat` the seam parks;
+0027 asks `lstat` instead: a directory → `rmdir`, anything else → `unlink`.
+`SYS_UNLINK` answers `EISDIR` itself (#80), so the classic form would work
+again; the dispatch stays because it is correct and costs one `lstat`.
+`lstat` does not follow a final link, so a link to a directory is unlinked
+and its target left alone, as POSIX asks.
+
+**`O_DIRECTORY` rides the kernel's trailing-slash gate.** The kernel has no
+directory-only open, and a check after the open is too late on its own:
+`O_DIRECTORY|O_TRUNC` on a file would truncate it before refusing it, and a
+device or clone file would see its open. So without `O_NOFOLLOW` the path
+gains a `/`, and the resolver's #82 gate ([[sub-kernel-stalk]]) refuses a
+non-directory before any `Dev.open`, in Linux's errno order (`ENOTDIR`
+before `EACCES`). A trailing slash forces the final link's follow (D-1),
+which `O_NOFOLLOW` refuses, so with it the open runs unslashed and the exit
+helper's fstat check decides; that check also covers a path with no room
+left for the slash.
 
 **`O_APPEND`, in two halves, and the history is why.** musl's `__fdopen`
 asks for append via a raw `__syscall(SYS_fcntl, F_SETFL)` — the `0xFFFF`
@@ -252,21 +291,18 @@ final context line; `git apply` calls the file corrupt. Found 2026-09-21 by
 applying the series under `--fuzz=0`; fixed, and
 `tools/check-patch-hunks.py` now fails the class.
 
-**`readlink` is the sharpest translation in the series.** The seam parked
-`__NR_readlinkat` at the sentinel, which is the *wrong* answer rather
-than an absent one: on a symlink-free system the result is KNOWN for
-every path, and POSIX has the words — an existing non-link is `EINVAL`.
-The distinction is load-bearing because musl's `realpath()` is a pure
-userspace resolver that calls `readlink` on each prefix and reads the
-errno as a fork: `EINVAL` means "not a link, keep walking", **any other
-errno is fatal**. Under `ENOSYS`, `realpath()` failed on its first
-component — i.e. for every path on the system, for every ported program.
-The truthful `EINVAL` repairs it whole with no realpath patch. The
-`/proc` arm is a shape translation, not a contents oracle: Linux presents
-four paths as symlinks that Thylacine presents as regular files whose
-contents are the target, so for exactly those four shapes readlink is an
-open+read — a closed whitelist, where a MISS falls through to the general
-arm and answers `EINVAL`, which is literally true of every file served.
+**`readlink` is the sharpest translation in the series.** musl's
+`realpath()` is a pure userspace resolver that calls `readlink` on each
+prefix and reads the result as a fork: `EINVAL` means "not a link, keep
+walking", a count is a link to expand, **any other errno is fatal**. Both
+halves of the answer are load-bearing: a wrong errno fails `realpath()` for
+every path on the system, and a link answered `EINVAL` is left unexpanded
+in the path it returns. So the general arm is the kernel's own answer,
+`SYS_READLINK`, verbatim. The `/proc` arm is a shape translation, not a
+contents oracle: Linux presents four paths as symlinks that Thylacine
+presents as regular files whose contents are the target, so for exactly
+those four shapes readlink is an open+read — a closed whitelist, where a
+MISS falls through to the general arm, which answers what the kernel knows.
 `self` is rewritten to the caller's own pid rather than passed through,
 because a shared `/proc` mount's `self` resolves to the MOUNTER.
 
@@ -350,7 +386,10 @@ and the same window Linux's `*at` functions have when a caller passes
 Real `-errno` from the stalk-resolved calls (`ENOENT` / `EACCES` /
 `ENOTDIR`, verbatim — which is what lets `realpath` fail for the right
 reason). `EBADF` for any non-zero `SYS_FSTAT` return (granular errno is a
-v1.x lift on both sides). `ENOENT` for a non-zero `SYS_STAT`.
+v1.x lift on both sides). `ENOENT` for a non-zero `SYS_STAT`. `SYS_LSTAT`
+and `SYS_READLINK` answer `-errno` themselves (`docs/ERRORS.md`, "Native
+lstat and readlink"), so `lstat` and `readlink` pass the kernel's errno
+through.
 
 ## Performance
 
@@ -367,6 +406,11 @@ in-place translation pass.
   halves sit at one place each and not at three call sites).
 - `__pouch_open_parent`'s parent fd must be closed on EVERY arm,
   including the EEXIST fallback and both `renameat` endpoints.
+- `O_PATH`'s mask must run before every other flag check; the
+  `O_DIRECTORY` slash is appended only without `O_NOFOLLOW` and only when it
+  fits; a refused `O_DIRECTORY` descriptor is closed exactly once, before
+  close-on-exec is set; `fchmodat` never reaches `WSTAT` on a link and
+  closes its descriptor on every path.
 - The `readlink` `/proc` whitelist must stay closed and strict (no `//`
   or `/./` normalization) — a loose match turns readlink into a
   file-contents oracle; a miss is fail-safe.
@@ -460,6 +504,19 @@ in-place translation pass.
   the socket answers above do not reach it: the kernel reports it
   `S_IFREG`, and its seeks and positional I/O read as `EIO`. B-3k makes
   sockets kernel descriptors.
+- **`O_DIRECTORY|O_NOFOLLOW` without `O_PATH` answers `ELOOP` for a final
+  link**, where current Linux answers `ENOTDIR` (its directory check precedes
+  the link refusal; the kernel refuses the link first). Robust callers take
+  either (libc++'s `remove_all`, Rust's `remove_dir_all`). On that path a
+  non-directory is opened before it is refused.
+- **`O_CREAT` through a dangling final link answers `ENOENT`**, where Linux
+  creates the target: the create finds the link's name and answers
+  `EEXIST`, and the open after it follows the link to nothing.
+- **`lstat("/srv/<name>")` answers `ENOENT` while `stat` answers the
+  record**: 0014's stale-socket short-circuit (OPEN-BUGS 2026-10-20).
+- **`F_GETFL` on an `O_PATH` descriptor reports `O_RDONLY`**: the status
+  word has no `O_PATH` bit, so `fdopendir` of one passes where Linux answers
+  `EBADF` (OPEN-BUGS 2026-10-20).
 
 ## Provenance
 
