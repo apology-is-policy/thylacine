@@ -38,7 +38,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 83
+## Open seams: 84
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-240-lo-redial]] (sub-netd-server)
@@ -64,6 +64,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
+- [[seam-exited-threads-wait-for-a-create]] (sub-kernel-thread)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
@@ -128,10 +129,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-10-20 [[chg-2026-10-20-b3f-meson-tests]] — FreeType and HarfBuzz through meson, their upstream tests on the device; a test's meson depends are built and staged (B-3f)
 - 2026-10-20 [[chg-2026-10-20-b3fprime-symlinks]] — Native lstat and readlink, and Pouch's symlink truth: lstat, readlink, realpath, O_NOFOLLOW, O_PATH, O_DIRECTORY, lchmod (B-3f')
+- 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
 - 2026-10-20 [[chg-2026-10-20-raw-open]] — musl's raw opens through openat's translation, and __map_file maps private: time zone files load (0060)
 - 2026-10-19 [[chg-2026-10-19-anon-mapping-merge]] — Adjacent anonymous mappings merge; every unmap releases a lazy mapping's pages; a namespace reader keeps only the struct (B-3 vote 2 + SA-5)
 - 2026-10-19 [[chg-2026-10-19-mount-table-dynamic]] — A dynamic mount table, mount errnos, a create's group from its directory, and a windowed /proc/<pid>/ns (B-3 votes 5-7)
 - 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 - 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
-- 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
 <!-- generated:end -->

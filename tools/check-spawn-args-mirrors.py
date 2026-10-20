@@ -35,6 +35,11 @@ Which kernel fields are addresses is checked too: every 8-byte field of the
 kernel's struct must be named *_va or be listed in NON_ADDRESS_U64, so a new
 address field cannot slip past the rule by lacking the suffix.
 
+The record's tails (SPAWN_EXT_*: a struct after the 104 bytes, announced by
+ext_flags) are held to the same rules: each kernel tail struct's offsets
+asserted, its 8-byte fields named *_va, and each in-tree mirror of it (EXT_TAILS)
+matching names, offsets and sizes.
+
 A green comparison is then proved able to fail: each source is mutated in
 memory -- a mirror missing its last field, a mirror with two fields swapped,
 the Rust mirror marked packed, a kernel field with no offset assert, each go
@@ -61,6 +66,16 @@ GO_TYPE = "spawnArgs"
 # The kernel struct's 8-byte fields that are not user addresses; every other one
 # must be named *_va.
 NON_ADDRESS_U64 = {"cap_mask"}
+# The record's tails (SPAWN_EXT_*, announced by ext_flags): each kernel tail
+# struct and its in-tree mirrors, held to the same rules as the record. The go
+# fork declares none until it sends one; a `type spawnExt<...> struct` it
+# declares that no entry here lists is a failure, so its first tail cannot go
+# unchecked.
+GO_TAIL = re.compile(r"^\s*type\s+(spawnExt\w*)\s+struct\b", re.M)
+EXT_TAILS = [
+    ("sys_spawn_ext_cwd", [("libt", "t_sys_spawn_ext_cwd", "c"),
+                           ("libthyla-rs", "TSpawnExtCwd", "rust")]),
+]
 
 # aarch64 LP64: every type here is naturally aligned (alignment == size).
 C_SIZES = {
@@ -227,8 +242,12 @@ def layout(fields):
     return out, (off + maxal - 1) // maxal * maxal
 
 
-def kernel_layout(text):
-    label, _, struct = KERNEL
+def kernel_layout(text, struct=None):
+    label = "kernel"
+    if struct is None:
+        _, _, struct = KERNEL
+    else:
+        label = f"kernel {struct}"
     lay, size = layout(parse_fields(text, struct, "kernel", label))
     m = re.search(r"_Static_assert\(\s*sizeof\(\s*struct\s+" + struct
                   + r"\s*\)\s*==\s*(\d+)", text)
@@ -303,9 +322,17 @@ def go_va_errs(go_text, kernel):
     return errs
 
 
-def u64_class_errs(text):
+def u64_class_errs(text, struct=None):
     """Every 8-byte kernel field is a user address (*_va) or listed as not one."""
-    label, _, struct = KERNEL
+    label, _, main_struct = KERNEL
+    if struct is not None:
+        label = f"kernel {struct}"
+        wide = {name for name, size, count, _ in parse_fields(text, struct, "kernel", label)
+                if size == 8 and count == 1}
+        return [f"{label}: {name} is 8 bytes but not named *_va (a user address) "
+                f"-- a tail carries addresses only, so name it *_va"
+                for name in sorted(wide) if not name.endswith("_va")]
+    struct = main_struct
     wide = {name for name, size, count, _ in parse_fields(text, struct, "kernel", label)
             if size == 8 and count == 1}
     errs = [f"{label}: {name} is 8 bytes but neither named *_va (a user address) "
@@ -330,6 +357,17 @@ def check(texts, go_text):
         lay = layout(parse_fields(go_text, GO_TYPE, "go", "go fork"))
         errs += compare("go fork", lay, kernel, names=False)
         errs += go_va_errs(go_text, kernel)
+    if go_text is not None:
+        listed = {struct for _, mirrors in EXT_TAILS for _, struct, _ in mirrors}
+        errs += [f"go fork: declares a record tail type {t} that EXT_TAILS does "
+                 f"not hold to the kernel -- list it beside its kernel tail"
+                 for t in GO_TAIL.findall(go_text) if t not in listed]
+    for kstruct, mirrors in EXT_TAILS:
+        ktail = kernel_layout(texts["kernel"], kstruct)
+        errs += u64_class_errs(texts["kernel"], kstruct)
+        for label, struct, lang in mirrors:
+            lay = layout(parse_fields(texts[label], struct, lang, f"{label} {struct}"))
+            errs += compare(f"{label} {struct}", lay, ktail, names=True)
     return kernel, errs
 
 
@@ -362,13 +400,16 @@ def edit_line(text, lang, index, fn):
 def self_test(texts, go_text):
     """Mutations this check must report; the names of those it missed."""
     missed = []
-    for label, _, struct, lang in MIRRORS:
-        fields = parse_fields(texts[label], struct, lang, label)
+    targets = [(label, struct, lang, label) for label, _, struct, lang in MIRRORS]
+    targets += [(label, struct, lang, f"{label} {struct}")
+                for _, mirrors in EXT_TAILS for label, struct, lang in mirrors]
+    for label, struct, lang, name in targets:
+        fields = parse_fields(texts[label], struct, lang, name)
         last = fields[-1][3]
         dropped = dict(texts)
         dropped[label] = edit_line(texts[label], lang, last, lambda l: "")
         if not fails(dropped, go_text):
-            missed.append(f"{label} without its last field")
+            missed.append(f"{name} without its last field")
         a, b = fields[-2], fields[-1]
         if a[1] == b[1]:
             swapped = edit_line(texts[label], lang, a[3],
@@ -378,14 +419,14 @@ def self_test(texts, go_text):
             t = dict(texts)
             t[label] = swapped
             if not fails(t, go_text):
-                missed.append(f"{label} with {a[0]} and {b[0]} swapped")
+                missed.append(f"{name} with {a[0]} and {b[0]} swapped")
         if lang == "rust":
             packed = texts[label].replace("#[repr(C)]\npub struct " + struct,
                                           "#[repr(C, packed)]\npub struct " + struct, 1)
             t = dict(texts)
             t[label] = packed
             if packed == texts[label] or not fails(t, go_text):
-                missed.append(f"{label} as #[repr(C, packed)]")
+                missed.append(f"{name} as #[repr(C, packed)]")
             plain_head = "#[repr(C)]\npub struct " + struct
             for shape, head in (
                     ("a cfg_attr repr(packed) above its #[repr(C)]",
@@ -395,7 +436,7 @@ def self_test(texts, go_text):
                 t = dict(texts)
                 t[label] = texts[label].replace(plain_head, head, 1)
                 if t[label] == texts[label] or not fails(t, go_text):
-                    missed.append(f"{label} with {shape}")
+                    missed.append(f"{name} with {shape}")
     if go_text is not None:
         fields = parse_fields(go_text, GO_TYPE, "go", "go fork")
         last = fields[-1][3]
@@ -412,6 +453,9 @@ def self_test(texts, go_text):
               zip(fields, layout(fields)[0])}
         if not vas:
             missed.append("go fork address fields (none is pointer-typed to mutate)")
+        stray = go_text + "\n\ntype spawnExtProbe struct {\n\tx uint32\n}\n"
+        if not reported(texts, stray, "EXT_TAILS does not hold"):
+            missed.append("a go fork tail type no EXT_TAILS entry lists")
         for kname, off in vas:
             integer = edit_line(go_text, "go", ln[off],
                                 lambda l: re.sub(r"\*\w+|unsafe\.Pointer", "uint64", l, count=1))
@@ -425,6 +469,18 @@ def self_test(texts, go_text):
     t["kernel"] = grown
     if not fails(t, go_text):
         missed.append("a kernel field with no offsetof assert")
+    for kstruct, _ in EXT_TAILS:
+        tf = parse_fields(texts["kernel"], kstruct, "kernel", f"kernel {kstruct}")
+        t = dict(texts)
+        t["kernel"] = edit_line(texts["kernel"], "kernel", tf[-1][3],
+                                lambda l: l + "\n    u32 unasserted_field;")
+        if not fails(t, go_text):
+            missed.append(f"a {kstruct} field with no offsetof assert")
+        t = dict(texts)
+        t["kernel"] = re.sub(r"\bcwd_va\b", "cwd_addr", texts["kernel"]) \
+            if kstruct == "sys_spawn_ext_cwd" else texts["kernel"]
+        if t["kernel"] == texts["kernel"] or not reported(t, go_text, "not named *_va"):
+            missed.append(f"a {kstruct} address field without its _va suffix")
     first_va = next(n for n, _, _, _ in kernel_layout(texts["kernel"])[0]
                     if n.endswith("_va"))
     t = dict(texts)
@@ -463,13 +519,15 @@ def main():
               + "; ".join(missed), file=sys.stderr)
         return 1
     checked = [m[0] for m in MIRRORS]
+    tails = "; ".join(f"{k} ok ({', '.join(m[0] for m in ms)})" for k, ms in EXT_TAILS)
     goline = (f"go fork ok (offsets, sizes, pointer-typed addresses; {go_path})"
               if go_text is not None
               else f"go fork SKIPPED ({go_path} absent)")
     lay, size = kernel
     print(f"spawn-args mirror check: kernel {size} B / {len(lay)} fields, every "
           f"u64 classified; "
-          f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}")
+          f"{len(checked)} in-tree mirrors ok ({', '.join(checked)}); {goline}; "
+          f"tails: {tails}")
     return 0
 
 

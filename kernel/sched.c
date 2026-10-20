@@ -1341,8 +1341,9 @@ void sched(void) {
     //                       re-insert into run tree; some peer will
     //                       wake via wakeup()/ready() later.
     //   THREAD_EXITING   → exit: caller is winding down. Same as
-    //                       SLEEPING — don't re-insert. (Phase 2 close
-    //                       lands the actual reap.)
+    //                       SLEEPING — don't re-insert, ever: once on_cpu
+    //                       clears, the next thread create of its Proc
+    //                       (proc_reap_exited_threads) or wait_pid frees it.
     //   THREAD_RUNNABLE  → INVALID — prev is current; it cannot be
     //                       both current and already runnable.
     //   _INVALID         → INVALID — magic check above caught corrupt
@@ -1437,8 +1438,9 @@ void sched(void) {
         insert_sorted(cs, prev);
     } else {
         // Block (SLEEPING) or exit (EXITING) — prev stays out of the run tree.
-        // wakeup()/ready() will re-insert SLEEPING; EXITING never returns and
-        // gets reaped at Phase 2 close. HMP foundation (#864): prev stopped
+        // wakeup()/ready() will re-insert SLEEPING; EXITING never returns, and
+        // its Proc's next thread create or wait_pid frees it once on_cpu
+        // clears. HMP foundation (#864): prev stopped
         // consuming CPU, so decay its util estimate (the dequeue-to-blocked
         // hook, ARCH §8.4.4). Inert on uniform topology + for pinned threads
         // (select_target_cpu ignores util there).

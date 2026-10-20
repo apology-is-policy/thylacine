@@ -137,11 +137,7 @@ pub extern "C" fn rs_main() -> i64 {
     };
     // Replay any keystroke typed during the launch probe so type-ahead is not
     // lost (kaua::query #117-audit F2).
-    let mut src = PollSource::with_pending(probe.pending);
-    // F2: nora's poll_all mux polls src.poll_fd() (the pts ready fd) and calls
-    // src.poll only on a fire, so a pts read is once-and-trust -- not a re-poll
-    // that would batch keystrokes or busy-loop the ready cache.
-    src.set_external_mux();
+    let mut src = PollSource::with_probe(probe);
 
     // #55c: the console-resize signal. Open the editor's note queue so a
     // `tty:winch` (posted to the session pgrp when the renderer reweaves)
@@ -200,16 +196,26 @@ fn run(
         t_putstr(&format!("nora: EXIT path=redraw1 code=1 err={:?}\n", e));
         return 1;
     }
-    // F1: replay the launch type-ahead NOW, before the poll loop. nora's mux
-    // polls the pts ready fd, which never fires for already-drained pending, so
-    // poll() alone would strand a typed-ahead command (a complete `:q` would read
-    // as a hang) until the next real keystroke. A typed-ahead quit exits here; a
-    // change repaints. (LSP on_saved re-syncs on the next real key -- a rare
-    // type-ahead `:w` does not lose its save, only the immediate LSP re-check.)
+    // F1: take the launch type-ahead (and anything else already typed) NOW,
+    // before the poll loop. nora's mux polls fd 0's readiness, which never fires
+    // for bytes the launch probe already pulled, so waiting on the mux alone
+    // would strand a typed-ahead command (a complete `:q` would read as a hang)
+    // until the next real keystroke. A typed-ahead quit exits here; a change
+    // repaints. (LSP on_saved re-syncs on the next real key -- a rare type-ahead
+    // `:w` does not lose its save, only the immediate LSP re-check.)
     {
         let mut dirty = false;
         let mut saved = false;
-        let quit = dispatch_input(src.drain_pending(), ed, term, &mut dirty, &mut saved);
+        let quit = match dispatch_burst(src, ed, term, &mut dirty, &mut saved) {
+            Ok(q) => q,
+            Err(er) => {
+                t_putstr(&format!(
+                    "nora: EXIT path=pollerr-preloop code=1 err={:?}\n",
+                    er
+                ));
+                return 1;
+            }
+        };
         let _ = saved;
         if quit {
             t_putstr("nora: EXIT path=quit code=0\n");
@@ -249,24 +255,16 @@ fn run(
         for r in ready {
             match r.tag {
                 TAG_STDIN => {
-                    // Zero timeout: the mux (poll_fd = the pts ready fd, or fd 0)
-                    // already established readability. On a pts PollSource reads
-                    // fd 0 ONCE (F2); on the console it runs its drain sweep, so
-                    // the paste and split-escape handling (#106-F2 / #173) is
-                    // unchanged there.
-                    let events = match src.poll(PollTimeout::Zero) {
-                        Ok(e) => e,
-                        Err(er) => {
-                            t_putstr(&format!("nora: EXIT path=pollerr code=1 err={:?}\n", er));
-                            return 1;
-                        }
-                    };
-                    // A wake with no decoded key (a bare HUP) loops; is_eof
-                    // breaks at the top. The console read is #811
-                    // death-interruptible, so a dying nora unwinds here rather
-                    // than wedging. Quit is handled by the loop tail's ed.quit
-                    // check, so the return is ignored here.
-                    let _ = dispatch_input(events, ed, term, &mut dirty, &mut saved);
+                    // The mux (poll_fd = the pts ready fd, or fd 0) found input:
+                    // take what is queued, a key at a time, up to a quit. A wake
+                    // with no decoded key (a bare HUP) loops; is_eof breaks at
+                    // the top. The console read is #811 death-interruptible, so a
+                    // dying nora unwinds here rather than wedging. Quit is handled
+                    // by the loop tail's ed.quit check, so the result is ignored.
+                    if let Err(er) = dispatch_burst(src, ed, term, &mut dirty, &mut saved) {
+                        t_putstr(&format!("nora: EXIT path=pollerr code=1 err={:?}\n", er));
+                        return 1;
+                    }
                 }
                 TAG_NOTES => {
                     // #55c: drain the queue; a tty:winch means the console
@@ -376,18 +374,18 @@ fn run(
     }
 }
 
-/// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
-/// Apply a batch of decoded input Events to the editor. Returns true if the
-/// editor asked to quit. Shared by the main loop's TAG_STDIN arm and the F1
-/// pre-loop type-ahead replay (drain_pending) so both dispatch identically.
-fn dispatch_input(
-    events: Vec<Event>,
+/// Handle one burst of input (kaua::intake): what fd 0 already holds, a key at
+/// a time. Returns true once a key quit the editor -- and stops there, so the
+/// keys typed behind `:q` were never read and go to the shell.
+fn dispatch_burst(
+    src: &mut PollSource,
     ed: &mut Editor,
     term: &mut Terminal,
     dirty: &mut bool,
     saved: &mut bool,
-) -> bool {
-    for ev in events {
+) -> libthyla_rs::err::Result<bool> {
+    let mut burst = src.burst(PollTimeout::Zero);
+    while let Some(ev) = burst.next()? {
         match ev {
             Event::Key(k) => {
                 ed.handle_key(k);
@@ -397,7 +395,7 @@ fn dispatch_input(
                     handle_request(ed, req);
                 }
                 if ed.quit {
-                    return true;
+                    return Ok(true);
                 }
             }
             // A late CPR the launch probe missed under HVF (the slow serial
@@ -415,9 +413,10 @@ fn dispatch_input(
             _ => {}
         }
     }
-    false
+    Ok(false)
 }
 
+/// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
 fn poll_all(
     stdin_fd: i32,
     mux: &mut Mux,

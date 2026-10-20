@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -167,13 +167,25 @@ reading for the child's first output races the child's slave open and
 gets a spurious 0. The master needs no such latch: the mint **is** its
 open, so `n_master == 0` implies it once was 1.
 
-`Conn` carries a 32-entry fid table and two flat park queues — a
+`Conn` carries a fid table and two flat park queues — a
 `Vec<PendingRead>` and, since s7 F3, a `Vec<PendingWrite>`. A
 `PendingWrite{fid, slot_n, tag, data}` owns its un-acked input bytes (a
 `Vec`, so unlike the `Copy` `PendingRead` it is moved, not copied —
-`poll_writes` indexes and `remove`s). Bounds: 8 connections, 32 fids,
+`poll_writes` indexes and `remove`s). Bounds: 8 connections, 128 fids,
 **16 pts pairs** — a bound rather than headroom, since an unbounded pts
-table is a DoS vector.
+table is a DoS vector. The fid bound is `PTS_MAX * FIDS_PER_PTS + 16`:
+seven per pts, as the code opens them -- the master; the slave three
+times, once per stdio slot (`ptyhold::spawn_on_slave`), all held by the
+hosted program for its life; the shell's ctl and item-10 ready files; the
+ready file of the kaua program it runs -- plus the attach root, walk fids
+and a winsize write's transient ctl. The selftest binds that set for
+every pts on one `Conn` and proves the bind past the bound is refused.
+Every Proc reaches ptyfs over joey's one `/dev/pts` session, so the table
+is the box's. When it is full a walk answers `E_NOMEM`, which reaches the
+caller as `ENOENT`: a shell then runs without job control on a cooked
+pts, and a kaua program polls the always-readable data fd (it says so on
+the diagnostic UART). A shell run from the shell adds two fids, a kaua
+program run by another one.
 
 ## Concurrency
 

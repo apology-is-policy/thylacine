@@ -17,7 +17,11 @@
 # `kaua::term`, the alt-screen owner. Alt-screen is the one mode that makes a
 # Halcyon tile paint its raw mono grid instead of the rich document
 # (halcyond `tile.rs` ScreenMode::AltScreen), so a presenter must never enter
-# it. lantern takes the pure VT INPUT parser and leaves the screen half alone.
+# it. lantern's bin depends on kaua's INPUT half (`source`: PollSource) and not
+# on `backend`, so lantern's own code cannot name `kaua::term`. (The workspace
+# build unifies kaua's features across its members, so the linked rlib may
+# still carry `term`; the guarantee is what lantern can reach, not what the
+# binary contains.)
 [package]
 name = "lantern"
 version = "0.1.0"
@@ -27,7 +31,7 @@ license.workspace = true
 
 [features]
 default = ["backend"]
-backend = ["dep:libthyla-rs"]
+backend = ["dep:libthyla-rs", "kaua/source"]
 
 [lib]
 name = "lantern"

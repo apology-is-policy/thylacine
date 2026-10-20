@@ -252,6 +252,12 @@ Three things about that set are not guessable and cost a round each:
   that tree and nothing else. The headers are small enough that the sysroot is
   the right place for them, and putting them there also lets the on-device
   clang++ compile GL sources.
+- **A path in the list is resolved inside the build that links.** The eight
+  ExecutionEngine/JIT archives the meson closure lacked were added to the list
+  as paths, not `-l` flags. `gl_link_program` finds a path entry by its file
+  name in this build's `clade/gl/lib` (then `clade/llvm-build/lib`), because
+  the list travels with `build/` when a worktree clones it, and a recorded path
+  can name the origin worktree's build after that is gone.
 
 ## The patches
 

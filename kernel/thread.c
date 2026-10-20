@@ -114,16 +114,17 @@ static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
     proc_table_lock_release(s);
 }
 
-static void thread_unlink_from_proc(struct Thread *t) {
-    irq_state_t s = proc_table_lock_acquire();
+// The caller holds g_proc_table_lock. Split out so proc_reap_exited_threads can
+// find an exited peer and unlink it in ONE hold: the unlink is the claim, so no
+// second reaper of the same Proc can find it afterwards. (extinction takes no
+// proc-table lock, so extincting while holding it is safe.)
+void thread_unlink_from_proc_locked(struct Thread *t) {
     struct Proc *p = t->proc;
     if (t->prev_in_proc) {
         t->prev_in_proc->next_in_proc = t->next_in_proc;
     } else {
-        if (p->threads != t) {
-            proc_table_lock_release(s);
+        if (p->threads != t)
             extinction("thread_unlink: list head mismatch");
-        }
         p->threads = t->next_in_proc;
     }
     if (t->next_in_proc) {
@@ -132,6 +133,11 @@ static void thread_unlink_from_proc(struct Thread *t) {
     t->next_in_proc = NULL;
     t->prev_in_proc = NULL;
     __atomic_fetch_sub(&p->thread_count, 1, __ATOMIC_RELEASE);   // #65 audit F6
+}
+
+static void thread_unlink_from_proc(struct Thread *t) {
+    irq_state_t s = proc_table_lock_acquire();
+    thread_unlink_from_proc_locked(t);
     proc_table_lock_release(s);
 }
 
@@ -662,7 +668,21 @@ struct Thread *thread_create_forked(struct Proc *proc,
     return t;
 }
 
+static void thread_release(struct Thread *t, bool unlink);
+
 void thread_free(struct Thread *t) {
+    thread_release(t, true);
+}
+
+// For a Thread its caller already unlinked under g_proc_table_lock (the in-Proc
+// reap). It is off every list, so nothing can find it; the gates below still run.
+void thread_free_unlinked(struct Thread *t) {
+    if (t && (t->next_in_proc || t->prev_in_proc || (t->proc && t->proc->threads == t)))
+        extinction("thread_free_unlinked of a Thread still on its Proc's list");
+    thread_release(t, false);
+}
+
+static void thread_release(struct Thread *t, bool unlink) {
     if (!t)                       extinction("thread_free(NULL)");
     // Magic check catches double-free and corrupt-Thread passes. SLUB's
     // freelist write at kmem_cache_free clobbers magic; subsequent free
@@ -734,7 +754,8 @@ void thread_free(struct Thread *t) {
         }
     }
 
-    thread_unlink_from_proc(t);
+    if (unlink)
+        thread_unlink_from_proc(t);
 
     if (t->kstack_base) {
         // P2-Dc / P3-Bca: restore guard pages to normal RW in the direct

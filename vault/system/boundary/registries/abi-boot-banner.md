@@ -80,6 +80,7 @@ mirrors:
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
   - "tools/interactive/manual.exp"
+  - "tools/interactive/pts-probe.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"

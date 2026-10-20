@@ -36,13 +36,10 @@
 //     analog whose fd we can supply without an extra open).
 //
 // DEFERRED:
-//   - `env` / environment variables: SYS_SPAWN_FULL_ARGV's `_pad_envp`
-//     field is reserved for envp pass-through but rejected non-zero at
-//     v1.0. Until the envp surface lands, environment is inherited
-//     wholesale (no per-Command override).
-//   - `current_dir`: the child starts in the caller's working directory
-//     (`t_chdir` moves the caller's own); a per-spawn override needs a
-//     kernel surface that does not exist yet.
+//   - `env` / environment variables: a per-child override would be a
+//     SYS_SPAWN_FULL_ARGV record tail that `ext_flags` announces; none
+//     exists yet, so the environment is inherited wholesale (no
+//     per-Command override).
 //   - Status decoding beyond `success() == (status == 0)` and
 //     `code() == Some(status)`. Signal-terminated processes are
 //     surfaced via t::notes (U-2e); status decode that distinguishes
@@ -53,8 +50,8 @@ use crate::fs::{File, OpenOptions};
 use crate::handle::{Handle, Rights};
 use crate::io::Write;
 use crate::{
-    t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, T_SPAWN_ALLOWANCE_SET,
-    T_SPAWN_DEBUG_HELD,
+    t_pipe, t_spawn_full_argv, t_wait_pid_for, TAllowanceDesc, TSpawnArgs, TSpawnExtCwd,
+    T_SPAWN_ALLOWANCE_SET, T_SPAWN_DEBUG_HELD, T_SPAWN_EXT_CWD,
     T_SPAWN_IDENTITY_SET, T_SPAWN_MAX_FDS, T_SPAWN_NAME_MAX, T_SYS_SPAWN_ARGV_DATA_MAX,
     T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
@@ -220,7 +217,19 @@ pub struct Command {
     // The birth hold (DEBUG-FS-DESIGN 5f): spawn the child held before its first
     // instruction (T_SPAWN_DEBUG_HELD). A debugger's launch path; default off.
     debug_held: bool,
+    // The cwd the child is born with (the T_SPAWN_EXT_CWD tail); None inherits
+    // the caller's.
+    cwd: Option<String>,
 }
+
+// The record with its cwd tail, laid out as the kernel reads it: the tail at
+// the record's address + 104.
+#[repr(C)]
+struct SpawnRecordCwd {
+    base: TSpawnArgs,
+    cwd:  TSpawnExtCwd,
+}
+const _: () = assert!(core::mem::offset_of!(SpawnRecordCwd, cwd) == 104);
 
 impl Command {
     /// Construct a Command that will spawn the binary at path `name`. The
@@ -242,6 +251,7 @@ impl Command {
             inherit_fds: Vec::new(), // #94-B-b: no extra inherited fds by default
             allowance: None, // step 5: inherit the caller's allowance by default
             debug_held: false, // 5f: run from the first instruction, as ever
+            cwd: None,       // inherit the caller's working directory
         }
     }
 
@@ -376,6 +386,18 @@ impl Command {
         self
     }
 
+    /// Start the child in `dir` rather than the caller's working directory. The
+    /// kernel resolves `dir` as `chdir` would -- relative to the caller's working
+    /// directory, a directory the caller can search -- before any child exists,
+    /// so a bad `dir` fails `spawn` with chdir's error and the caller's own
+    /// working directory never moves. A relative program name is then looked up
+    /// from `dir`, as a child that changed directory before it ran would.
+    #[inline]
+    pub fn current_dir(&mut self, dir: impl Into<String>) -> &mut Command {
+        self.cwd = Some(dir.into());
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -470,7 +492,7 @@ impl Command {
             argc,
             fd_count: fd_list.len() as u32,
             perm_flags: self.perm_flags as u32,
-            _pad_envp: 0,
+            ext_flags: if self.cwd.is_some() { T_SPAWN_EXT_CWD } else { 0 },
             cap_mask: self.cap_mask,
             principal_id: id_pid,
             primary_gid: id_gid,
@@ -493,7 +515,26 @@ impl Command {
         // (allow_desc is a Copy/no-Drop local whose storage lives to scope
         // end). PreparedStdio's keep_through_syscall Files hold any child-end
         // fds alive across the SVC. The kernel copies all data before returning.
-        let rc = unsafe { t_spawn_full_argv(&args_record as *const _) };
+        //
+        // With a cwd the record travels with its tail: `record` owns both, and
+        // `dir` (borrowed from self.cwd) outlives the call; the kernel copies
+        // the path before it returns.
+        let rc = match &self.cwd {
+            Some(dir) => {
+                let record = SpawnRecordCwd {
+                    base: args_record,
+                    cwd: TSpawnExtCwd {
+                        cwd_va: dir.as_ptr() as u64,
+                        cwd_len: dir.len() as u32,
+                        cwd_flags: 0,
+                    },
+                };
+                // The pointer is the whole record's, so it covers the tail the
+                // kernel reads past the base.
+                unsafe { t_spawn_full_argv(&record as *const SpawnRecordCwd as *const TSpawnArgs) }
+            }
+            None => unsafe { t_spawn_full_argv(&args_record as *const _) },
+        };
         let pid_or_err = Error::from_syscall_return(rc);
 
         // Whether spawn succeeded or failed, the parent's copies of

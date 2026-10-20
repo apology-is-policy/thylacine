@@ -919,6 +919,9 @@ void test_proc_exits_in_dying_group_keeps_group_status(void);
 void test_proc_fault_in_dying_group_keeps_group_status(void);
 void test_proc_fault_in_dying_group_reaps_exited_packed(void);   // gcpark-b
 void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
+void test_proc_reap_exited_threads_frees_peers(void);
+void test_proc_reap_keeps_thread_cap_open(void);
+void test_proc_reap_before_sqpoll_charge(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -1073,6 +1076,9 @@ void test_birth_hold_orphan_rule(void);
 void test_birth_hold_birth_wait_survives_latch(void);
 void test_birth_hold_held_spawn_parks(void);
 void test_birth_hold_held_spawn_death_wins(void);
+void test_spawn_cwd_child_born_in_cwd(void);
+void test_spawn_cwd_image_joins_child_cwd(void);
+void test_spawn_cwd_refusals(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -1507,6 +1513,7 @@ void test_stalk_symlink_lifetime(void);
 void test_stalk_landed_name(void);
 void test_stalk_landed_roots(void);
 void test_stalk_landed_identity(void);
+void test_stalk_dir_landed_name(void);
 void test_stalk_served_contain(void);
 void test_stalk_served_contain_nowa(void);
 void test_stalk_served_union(void);
@@ -2266,7 +2273,7 @@ void test_sys_spawn_full_argv_rejects_nul_count_mismatch(void);
 void test_sys_spawn_full_argv_rejects_argc_with_zero_data_len(void);
 void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
 void test_sys_spawn_full_argv_validate_req_golden(void);
-void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void);
+void test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits(void);
 void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
 void test_sys_spawn_full_argv_validate_req_pheno_flags(void);
 void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
@@ -3221,6 +3228,9 @@ struct test_case g_tests[] = {
     { "proc.fault_in_dying_group_keeps_group_status", test_proc_fault_in_dying_group_keeps_group_status, false, NULL },
     { "proc.fault_in_dying_group_reaps_exited_packed", test_proc_fault_in_dying_group_reaps_exited_packed, false, NULL },
     { "proc.note_death_with_live_peer_reaps_signalled", test_proc_note_death_with_live_peer_reaps_signalled, false, NULL },
+    { "proc.reap_exited_threads_frees_peers",   test_proc_reap_exited_threads_frees_peers,   false, NULL },
+    { "proc.reap_keeps_thread_cap_open",        test_proc_reap_keeps_thread_cap_open,        false, NULL },
+    { "proc.reap_before_sqpoll_charge",         test_proc_reap_before_sqpoll_charge,         false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },
@@ -4768,7 +4778,7 @@ struct test_case g_tests[] = {
     // a fresh non-attached Proc, independent of kproc's flag state).
     { "sys_spawn_full_argv.rejects_non_console_attached_perm_flags", test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags, false, NULL },
     { "sys_spawn_full_argv.validate_req_golden",       test_sys_spawn_full_argv_validate_req_golden,       false, NULL },
-    { "sys_spawn_full_argv.validate_req_rejects_pad_envp", test_sys_spawn_full_argv_validate_req_rejects_pad_envp, false, NULL },
+    { "sys_spawn_full_argv.validate_req_rejects_unknown_ext_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_ext_bits, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_unknown_perm_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits, false, NULL },
     { "sys_spawn_full_argv.validate_req_pheno_flags", test_sys_spawn_full_argv_validate_req_pheno_flags, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_oversize_fields", test_sys_spawn_full_argv_validate_req_rejects_oversize_fields, false, NULL },
@@ -4780,6 +4790,9 @@ struct test_case g_tests[] = {
     { "birth_hold.birth_wait_survives_latch",  test_birth_hold_birth_wait_survives_latch,  false, NULL },
     { "birth_hold.held_spawn_parks",           test_birth_hold_held_spawn_parks,           false, NULL },
     { "birth_hold.held_spawn_death_wins",      test_birth_hold_held_spawn_death_wins,      false, NULL },
+    { "spawn_cwd.child_born_in_cwd",           test_spawn_cwd_child_born_in_cwd,           false, NULL },
+    { "spawn_cwd.image_joins_child_cwd",       test_spawn_cwd_image_joins_child_cwd,       false, NULL },
+    { "spawn_cwd.refusals",                    test_spawn_cwd_refusals,                    false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },
@@ -5025,6 +5038,7 @@ struct test_case g_tests[] = {
     { "stalk.landed_name",             test_stalk_landed_name,             false, NULL },
     { "stalk.landed_roots",            test_stalk_landed_roots,            false, NULL },
     { "stalk.landed_identity",         test_stalk_landed_identity,         false, NULL },
+    { "stalk.dir_landed_name",         test_stalk_dir_landed_name,         false, NULL },
     { "stalk.served_contain",          test_stalk_served_contain,          false, NULL },
     { "stalk.served_contain_nowa",     test_stalk_served_contain_nowa,     false, NULL },
     { "stalk.served_union",            test_stalk_served_union,            false, NULL },

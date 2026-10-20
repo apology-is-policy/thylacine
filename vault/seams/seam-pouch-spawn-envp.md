@@ -22,7 +22,10 @@ Symmetrically, a `setenv` in the parent mutates only the in-process
 
 ## The lift
 
-The `SYS_SPAWN_FULL_ARGV` `_pad_envp` slot is reserved for exactly this:
-a per-child environment override. Landing it also gives `setenv` a
+`SYS_SPAWN_FULL_ARGV` carries a per-child environment override as a record
+tail: its old `_pad_envp` slot became `ext_flags`, whose bits each announce
+a tail after the 104-byte record ([[dec-2026-10-06-spawn-cwd]]; the cwd took
+bit 0). A u32 could never have held the vector's address, so the override is
+an `ext_flags` bit and its own tail. Landing it also gives `setenv` a
 write-back target, which is the half that makes the two directions
 consistent.

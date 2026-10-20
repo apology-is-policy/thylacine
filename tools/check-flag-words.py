@@ -41,6 +41,7 @@ WORDS = [
     ('spawn allowance flags', SYSCALL_H,   r'SPAWN_ALLOWANCE_\w+', 32),
     ('spawn phenotype flags', SYSCALL_H,   r'SPAWN_PHENO_\w+',     32),
     ('spawn debug flags',     SYSCALL_H,   r'SPAWN_DEBUG_\w+',     32),
+    ('spawn ext flags',       SYSCALL_H,   r'SPAWN_EXT_\w+',       32),
     ('walk-create mode word', SYSCALL_H,   r'SYS_WALK_CREATE_\w+', 32),
     ('9P attach flags',       SYSCALL_H,   r'SYS_ATTACH_9P_\w+',   32),
     ('mount flags',           TERRITORY_H, r'M[A-Z]+(?:_[A-Z]+)*', 32),

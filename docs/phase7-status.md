@@ -1297,6 +1297,170 @@ and a fork with neither must name `launchHeld` nowhere and set `DebugHeld` in `L
 accepts 073faaa and a simulated step-2 fork, refuses ce9154d, c60825c and a half step; the gate's bake ran it against
 073faaa. Main agreed on yip 0177; step 2b, the shared fork's commit, waits for main's merge and word.
 
+## A spawn names its child's cwd; chdir answers its errno — 2026-10-07
+
+Operator vote of 2026-10-06, "Add the cwd field" (the held launch's audit, round 2 F11: the Go fork borrowed the whole
+process's cwd for every spawn with a `Dir`). Scripture 083683fb9; code, witnesses and dossiers in one commit,
+2154b1749. Cut on aux-3 62875f9df (main 25ed27f21, the exit close, plus the wake tool and its fixes), which already carries
+aux-3 61c71525f and devno-u64.
+
+- **The record does not grow.** `_pad_envp` (offset 44, had to be 0) becomes `ext_flags`; bit 0, `SPAWN_EXT_CWD`,
+  announces a 16-byte tail at record+104 (`cwd_va`, `cwd_len`, `cwd_flags`). The kernel reads it only when announced.
+  The shared Go fork's copy is held to offsets, so it needs no change until it uses the tail (cwd-b).
+- **The spawner resolves it, as chdir does.** One resolver, `sys_dir_landed_name`, serves `SYS_CHDIR` and the spawn:
+  joined to the spawner's cwd, walked by `stalk_landed`, a directory the spawner can search. A bad cwd fails the spawn
+  with that errno and no child. The child installs the landed name before its first instruction; a relative image is
+  found from the child's cwd.
+- **chdir answers its errno** (`ENOENT`, `ENOTDIR`, `EACCES`, `EINVAL`, a stat's own errno, `EFAULT`, `ENOMEM`), never the bare -1
+  pouch and Go read as `EPERM` (OPEN-BUGS 21:30Z).
+- Mirrors: libt `t_sys_spawn_ext_cwd`, libthyla-rs `TSpawnExtCwd` + `Command::current_dir`; pouch patches and three
+  programs rename the word. Checkers: `check-spawn-args-mirrors.py` holds each tail's mirrors; `check-flag-words.py`
+  owns `SPAWN_EXT_*` (10 words, 50 mutations).
+- Witnesses: `spawn_cwd.child_born_in_cwd`, `spawn_cwd.image_joins_child_cwd`, `spawn_cwd.refusals`,
+  `stalk.dir_landed_name`, `validate_req_rejects_unknown_ext_bits`; joey's `probe_spawn_cwd` drives the real ABI
+  (a poison tail behind a clear bit must be ignored), and probe83's chdir legs answer `ENOTDIR`/`ENOENT`.
+
+Audit: round 1, Fable 5.1 reviewing Opus 5.5: 0/0/0/6; clean. F1 joey's reap bounded; F2 the relative leg could not
+tell a root join; F3 the unannounced-tail control was benign, now a poison tail; F4 withdrawn (the checker lines were
+measured); F5 a future Go tail failed open, now derived; F6 STALK-DESIGN 4.3's wording and errno list.
+Round 2, Fable 5.1 (the merge seam and the narrowing): 0/0/0/1; clean (F1 handoff 046's no-warning line, dated); self-found
+with it: both image legs now discriminate. Round 3, Fable 5.1
+(the re-cut onto seam90, the slab count, the census): 0/0/0/2; clean. F2 a failing stat or re-walk answers its own errno, not
+EIO/EINVAL; F1 a 9P walk a caught note interrupts answers ENOENT (a Dev's walk carries no errno; tracked, stated in 4.3).
+
+Not witnessed, by design: a stat's or re-walk's own errno through the resolver (no test drives a caught note or a
+failing stat into it); the handler's own `cwd_len == 0` refusal (the resolver's `EINVAL` answers first on every
+path that reaches it) and the thunk's `fail-cwd` arm (only an allocation failure inside `territory_setdot` reaches it).
+
+**Landed beside it: the kernel builds with `-Werror=shorten-64-to-32`** (30f807e0a). Re-running devno-u64's census
+found 12 narrowings, none a device number: 11 read the `u64` `note_mask` into `u32` locals (lossless under `notes.c`'s
+`note_claim` assert), and `init_cache`'s slab object count lands in the `u32` the in-use `refcount` is compared against
+(at most 2^27). The locals are `u64`; the slab count narrows explicitly under a `_Static_assert` pinned to `MAX_ORDER`
+(`slub.o` unchanged). The census takes its units from `kernel/CMakeLists.txt`: 0 over 230 (test build), 95
+(production), the `VIV_TRACE`/`NO_TICKLESS` build and the 8 fault-test variants; a devno parameter narrowed to `u32`
+fails the bake. A first census globbed `kernel/` and `arch/arm64` and never compiled `mm/`. Main agreed on yip 0178.
+
+**Gated beside it: untag step 2b** in the shared Ambush fork, c3c7914 on branch `untag-held`: `held_on_thylacine.go`
+and the `launchHeld` guard are gone, and Launch spawns held unconditionally. The gate baked it through `AMBUSHFORK`.
+The fork's master stays at 073faaa until the peer trees carry untag 2a (cf296caa1), whose `build.sh` accepts the
+untagged fork; every peer tree predates it (main measured, yip 0177).
+
+**Landed beside it: a path in `llvm-libs.list` resolves inside the build that links** (97b78469f). The gate's second bake
+failed at `gl-sdl-prove`: hunt's `build/`, cloned from the aux worktree, listed eight JIT archives by absolute path into
+that worktree's `build/`, which is gone, and `gl_link_program` passed them to the linker verbatim. It finds a path entry by
+its file name in this build's `clade/gl/lib`, then `clade/llvm-build/lib`, now.
+
+**Landed beside it: lantern reads one byte at a time** (d255a4aa6). The gate's lantern leg (f) failed 3 times in 12:
+after `q`, the shell ran `cho lnpres $status`. A diagnostic build of ut that traced its reads found the bytes missing
+before ut ever saw them: `present()` read 64 bytes at a time and returned on `q`, dropping the rest of the read. It reads
+one byte per call now, so the quit key is the last byte it takes. Leg (j) sends `q` and the next line in one write; it
+failed in both unfixed runs that reached it. Fixed, (f) and (j) passed in 8 of 8 runs. The other raw-mode children ut runs (nora, prowl,
+quarry, ptyhost) are checked for the same loss as their own item.
+
+**Gate** (aux-gate `run-cwd3.sh` on d69f2bc2f, the landing's code, 2026-10-08 08:39-10:03Z): the session image with the Instrument profile, `ls-halcyon-lantern` PASS; the gate image, suite 1939/1939, and the 12 interactive legs PASS (ls-ci, cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata, dap-nora, go6, lantern with leg (j)'s three rounds, ergo-1, dev-accounts, abin-tar). Eight kernel sabotages each turned exactly their witnesses red -- one per broken test function, since a failing `TEST_ASSERT` returns -- and joey's probes on a second boot with the four suite tests unregistered; the narrowing sabotage (a devno parameter cut to u32) failed the build three times over; the two checker sabotages (a swapped tail mirror field, a second flag on bit 0) were refused. `ci-smp-gate` PASS, 0 corruption across every configuration. The first run of the sabotage phase (on 0b0c72cc9, the same code bar one test) found that `spawn_cwd.refusals` could not see a spawner whose cwd moved; that test now stands the spawner in /, and C8 turns it red.
+
+## kaua reads one byte per read; a lone Escape is a key of its own — 2026-10-08
+
+OPEN-BUGS 2026-10-07 13:45Z and 14:20Z, and two of the three items the first audit round queued (2026-10-08 07:27Z).
+Code, witnesses, dossiers and the manual in one commit, 210b14507. Cut on aux-3
+1a1bba463 (the spawn cwd landing). Userspace only: `usr/lib/kaua`, prowl, quarry, nora, lantern, ptyfs, `tools/interactive`.
+
+- **A quit key is the last byte an app reads.** A kaua app that quits, or hands the terminal to a child, leaves what was
+  typed behind its last key to whoever reads fd 0 next. A byte read cannot be given back -- a terminal has no pushback,
+  and a TIOCSTI-like one is a forgery primitive -- so the only way to leave it is never to read it. `kaua::intake`
+  reads fd 0 one byte per read(2) and returns at the byte that completes an event, less(1)'s trade. PollSource used to
+  drain every ready byte into a batch, so prowl, quarry and nora took the type-ahead behind their quit key with them.
+- **Still one paint per burst.** A `Burst` waits the app's timeout for its first event and takes only what fd 0 already
+  holds for the rest, at most `BURST_MAX` (1024) events; `QUIET_BYTES_MAX` (4096) bounds the bytes one call reads
+  without completing an event (NULs, an over-long CSI).
+- **The ESC holdoff lives in the intake** (#173): a held bare ESC waits `ESC_HOLDOFF_MS` (50) for its continuation, then
+  is the Escape key. lantern drove the parser itself and never flushed it, so ESC then SPACE read as Alt-SPACE and the
+  advance was swallowed.
+- `kaua::source` supplies the readiness wait (fd 0, or the `/dev/pts/<n>ready` sibling on a pts) and the one-byte read.
+  The external-mux mode is gone: since #98 a zero-timeout poll of a pts ready file answers from a fresh snapshot, so
+  nora's own mux and the source may both poll it. A `source` feature splits the input half from `backend`; lantern
+  takes `source` alone.
+- prowl, quarry, nora and lantern pull a burst key by key and stop at an event that may end them; quarry also at Play,
+  so a game gets the keys typed behind Enter.
+- **The launch size probe is bounded on a pts.** It polled fd 0, which on a pts reports always readable, so it went
+  straight to a read and waited for the reply or a key: a kaua program on a pts whose far side never answers drew nothing
+  until a key. On a boot with a display aurora answers every CPR on the console, a pts's forwarded one included, so
+  this held only on a console-primary boot under ptyhost. It polls the ready sibling now and hands that fd to the
+  source (`PollSource::with_probe`), so a program opens one ready file.
+- **ptyfs counts seven fids a pts.** The table assumed four; a hosted tile holds the master, the slave three times
+  (one per stdio slot, `ptyhold::spawn_on_slave`), the shell's ctl and ready files, and the kaua program's ready file.
+  The old table of 80 filled at 13 plain shells (six fids each, before any kaua program), below `PTS_MAX` (16).
+  `FIDS_PER_PTS = 7`, `MAX_FIDS` 128, and a selftest battery binds that set for every pts and proves the bind past the
+  bound is refused. A reader whose ready file will not open says so on the diagnostic UART.
+- Witnesses: 17 intake host tests (a drain sabotage turns 7 red, no holdoff 2, no byte budget 1). Device legs:
+  `lc_quit_typeahead` in prowl-7, quarry and nora-demo -- the quit key and the next shell line in one write, three
+  rounds, a fail-fast arm when the shell's next line (sent once the app has left its screen) arrives first; lantern (k),
+  ESC, a pause, SPACE; `pts-probe`, prowl in a shell ptyhost hosts on a console-primary boot (no aurora to answer),
+  nothing typed until its first frame. ptyfs's selftest fid-budget battery.
+- Audit round 1, Fable 5.1 reviewing Opus 5.5: 0/0/0/6, clean. F1 the byte budget (fixed); F2 ptyhost (disposed: a
+  flow-control item); F3-F5 prose (fixed); F6 witness gaps (the pts path rides the gate's session legs).
+- Audit round 2 (the probe and the fid budget), Fable 5.1: 0/1/1/2. F1 the first pts-probe hosted prowl directly on a
+  cooked pts and could not pass; F2 five fids a pts undercounted; F3 the fallback line; F4 KAUA.md 4.2. All fixed.
+
+**Gate** (hunt 9a91e4a94, the Mac, run 2, 15:38-15:57Z): host tests (kaua 109, lantern 30, nora 249; the 17 intake tests by name); the ci bake; ten legs PASS -- lantern, prowl, quarry, nora-demo, pts-probe, ls-7, dap-nora, ls-ci, split173, flood-174 -- each new leg through all its rounds; suite 1939/1939, ambush-probe PASS, `ptyfs: selftest PASS`; on the session image `ls-halcyon-lantern` and `s7-nora-probe` PASS. `FIDS_PER_PTS` 7 -> 6 stops the boot on `ptyfs: selftest FAIL: fid-budget-short`. ci-smp-gate not run: no kernel change, and no boot it runs executes a kaua app.
+
+**Red control** b1ec375dd (`usr/` at aux-3, the legs kept; never lands): all five new legs FAIL on their named arm in round 1 -- lantern (k) swallowed the SPACE after Escape; prowl, quarry and nora read past their quit key; pts-probe drew nothing in 20 s, on a boot that asserted no aurora. Run 1 (dbba17c68 against 3b4aab074) was green in every clean phase, and its red phase showed two witnesses failing for the wrong reason: aurora answered pts-probe's CPR through the console, and the old drain took the sentinel line too. Both were fixed before run 2.
+
+**Still open.** ptyhost, the fifth raw-mode member, still loses type-ahead: its pump is not synchronized with the
+hosted reader, so one-byte reads would not bound it (OPEN-BUGS 07:27Z, a ptyfs flow-control design). A full ptyfs fid
+table still reaches its caller as ENOENT (dev9p_walk drops the server's error; OPEN-BUGS 2026-09-29, widened
+2026-10-08). The cost of a paste into nora in a tile
+is unmeasured.
+
+## An exited thread is freed at its Proc's next thread create — 2026-10-20
+
+OPEN-BUGS 2026-10-19 15:03Z (P1). An exited peer thread stayed on its Proc's list, counted by the thread cap, until
+the parent's `wait_pid` reaped the whole Proc: a long-lived program that starts and joins workers was refused every
+create once 256 had accumulated. OpenRCT2 froze on the demo image within the hour; libxml2's runtest fails its thread
+section the same way on b3. Code, witnesses, dossiers and the audit close in one commit, e7d6f2f47, squashed from
+aux-3-reap, which merged main 107c5c1bd first (ed5275e9c). The operator asked for this fix for the 10-20 talk and then
+a review of the whole thread model; that review and its overhaul plan are `docs/thread-model-review.html`.
+
+- **The reap.** `proc_reap_exited_threads` frees every peer of the caller's Proc that is `THREAD_EXITING` with
+  `on_cpu` clear, the predicate `wait_pid`'s zombie loop frees on. One `g_proc_table_lock` hold finds a dead peer and
+  unlinks it, and the unlink is the claim against a second reaper; it folds the thread's `run_ns` and kstack watermark
+  into the Proc, so `proc_cpu_ns` and `proc_kstack_peak` never shrink, and clears a debug focus that names it. The free
+  runs outside the lock (`thread_unlink_from_proc_locked`, `thread_free_unlinked`). The caller is a RUNNING thread of
+  the Proc, which keeps the Proc out of ZOMBIE.
+- **Where it runs.** Before each charge of the thread budget: `SYS_THREAD_SPAWN`, the vivarium clone, and the Loom
+  SQPOLL setup (audit F1). kproc's threads are never reaped here; the SQPOLL kthread keeps its joiner.
+- **Not at thread exit.** Kernel tests walk `p->threads` without the lock while peers exit; freeing at the switch is
+  the overhaul's chunk C1.
+- **What stays** (audit F3, the vault seam `seam-exited-threads-wait-for-a-create`). An exited peer keeps its 32 KiB
+  kstack until the next create, paid from the Proc's own cap (at most 255 for a user Proc, a whole burst for an exempt
+  one), and `tkill`/`tgkill` to it answers ESRCH only once a create has freed it.
+- **The docs said otherwise.** `proc.h`, inv-i32 and IDENTITY-DESIGN called the cap a bound on live threads while the
+  code counted every thread not yet freed, which is how the freeze shipped. `thread_count` now reads "not yet freed"
+  everywhere. struct Proc 408 -> 424 bytes.
+- Witnesses. Kernel: `proc.reap_exited_threads_frees_peers`; `proc.reap_keeps_thread_cap_open` (300 workers started
+  and finished one after another under a user principal, asserted not exempt; the cap refused at 256 before);
+  `proc.reap_before_sqpoll_charge` (255 finished workers fill the budget and the poller still fits). Guest, every boot:
+  `pouch-hello-threads` exited-counted (four joined workers held behind a mutex read 5 counted, the positive control)
+  and join-churn (300 create+join, at most 2..ncpu+1 left counted).
+- Audit round 1, Fable 5.1 reviewing Opus 5.5: 0/0/1/3, clean. F1 the SQPOLL charge (fixed; also self-found); F2
+  comments the change made false (fixed); F3 the residue (the seam); F4 a test's identity setup and its not-exempt
+  control (fixed).
+
+**Gate** (`--config ci`): suite 2012/2012 on 8b069fbc7, exited-counted OK, join-churn "2 still counted (2..5)", boot
+OK. `tools/ci-smp-gate.sh` on 191a2060d: PASS, 50 of 50 boots (default at 1, 4 and 8 CPUs, UBSan at 4 and 8, 10 each), 0 corruption, 06:43:37-07:32:04Z. Earlier, on 4dae55e7d: default-smp4, ubsan-smp4 and default-smp1,
+10/10 each, 0 corruption.
+
+**Red controls:** with the reap disabled, the first two kernel tests fail at their assertions (2009/2011) and
+join-churn reads 310 counted and stops the boot; with only the Loom setup's call removed, only
+`proc.reap_before_sqpoll_charge` fails, at its setup (2011/2012).
+
+**Still open.** The seam above, and the thread model's other findings: exec frees the old address space while an
+exiting peer may still store through it (P1, the overhaul's C0), tid and pid exhaustion is an extinction, `tkill` is
+not thread-directed, debug reads fall back to the newest thread, 256 is the wrong cap for Go, the exit tail is
+preemptible on the kthread-shaped paths, and every create and free flushes the whole TLB. The overhaul C0-C9 and six
+decisions for the operator are in `docs/thread-model-review.html`; the Fable report is
+`docs/THREAD-MODEL-REVIEW-FABLE.md`.
+
 ## H3 + C: the image join, and the debug taint — 2026-09-24
 
 astra raised the shared-address-space question on yip 0124 while designing the debug taint; aux widened it

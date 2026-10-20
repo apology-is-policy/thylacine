@@ -135,6 +135,17 @@ best-effort with a measured margin rather than as a guarantee.
 
 ## Caveats
 
+**ptyhost loses what is typed behind the hosted program's quit key.** The pump
+thread forwards outer input to the pts master as it arrives, without waiting
+for the hosted program to read it, so the bytes already in the pts when the
+program exits -- the next command typed straight after its quit key, or the
+tail of a paste -- die with the pts; the master cannot read the slave's ring
+back, and there is no pushback into the outer console. The four kaua programs
+keep that type-ahead by reading one byte at a time ([[sub-kaua]]); ptyhost
+cannot, because the reader is the hosted program. Bounding the loss needs flow
+control -- forward a byte only once the slave has read the last -- which is an
+open item, not a property.
+
 - **The stress program describes itself as a harness and is counted as
   production code.** Its own opening line calls it "the concurrent +
   cross-Proc-death SMP stress harness", and the coverage census — which

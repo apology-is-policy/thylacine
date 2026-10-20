@@ -1508,23 +1508,23 @@ void test_exec_reset_follows_decided_phenotype(void) {
     p->phenotype = PHENO_LINUX;
     th.note_mask = 0xFu;
     proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
-    u32 mask_l2n  = th.note_mask;
+    u64 mask_l2n  = th.note_mask;
     u32 field_l2n = p->phenotype;
 
     // (field NATIVE, decided LINUX): the native->Linux exec.
     p->phenotype = PHENO_NATIVE;
     th.note_mask = 0xFu;
     proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
-    u32 mask_n2l  = th.note_mask;
+    u64 mask_n2l  = th.note_mask;
     u32 field_n2l = p->phenotype;
 
     // Controls: field == decided, both ways.
     p->phenotype = PHENO_NATIVE; th.note_mask = 0xFu;
     proc_exec_drop_image_state_for_test(p, &th, PHENO_NATIVE);
-    u32 mask_nn = th.note_mask;
+    u64 mask_nn = th.note_mask;
     p->phenotype = PHENO_LINUX;  th.note_mask = 0xFu;
     proc_exec_drop_image_state_for_test(p, &th, PHENO_LINUX);
-    u32 mask_ll = th.note_mask;
+    u64 mask_ll = th.note_mask;
 
     // Design D audit F1 (the constructed-states sweep): the self-managing-
     // notes mark is the OLD image's; exec clears it in BOTH arms. Positive
@@ -1552,16 +1552,16 @@ void test_exec_reset_follows_decided_phenotype(void) {
     th.proc = NULL;                     // the static outlives proc_free
     drop_proc(p);
 
-    TEST_EXPECT_EQ((u64)mask_l2n, 0ull,
+    TEST_EXPECT_EQ(mask_l2n, 0ull,
         "Leg A: field LINUX + decided NATIVE -> the NATIVE arm runs (mask cleared)");
     TEST_ASSERT(field_l2n == PHENO_LINUX,
         "the reset never writes the field (only the commit does)");
-    TEST_EXPECT_EQ((u64)mask_n2l, 0xFull,
+    TEST_EXPECT_EQ(mask_n2l, 0xFull,
         "Leg A: field NATIVE + decided LINUX -> the LINUX arm runs (mask kept)");
     TEST_ASSERT(field_n2l == PHENO_NATIVE,
         "the reset never writes the field (only the commit does)");
-    TEST_EXPECT_EQ((u64)mask_nn, 0ull,  "CONTROL: native/native clears");
-    TEST_EXPECT_EQ((u64)mask_ll, 0xFull, "CONTROL: linux/linux keeps");
+    TEST_EXPECT_EQ(mask_nn, 0ull,  "CONTROL: native/native clears");
+    TEST_EXPECT_EQ(mask_ll, 0xFull, "CONTROL: linux/linux keeps");
     TEST_ASSERT(sm_before_linux && sm_before_native,
         "CONTROL: the self-managing mark reads set before each exec");
     TEST_ASSERT(!sm_after_linux,

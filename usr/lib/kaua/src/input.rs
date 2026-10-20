@@ -1,8 +1,8 @@
 // kaua::input -- the VT/ANSI input parser: raw fd-0 bytes -> KeyEvent.
 //
-// A stateful, byte-at-a-time state machine. The Terminal (kaua::term) reads a
-// chunk from the pollable console and feeds each byte to `Parser::feed`; after a
-// chunk it calls `Parser::flush` to resolve a dangling lone ESC. This is pure
+// A stateful, byte-at-a-time state machine. kaua::intake reads fd 0 one byte at
+// a time and feeds each to `Parser::feed`; when fd 0 offers nothing more within
+// its wait it calls `Parser::flush` to resolve a dangling lone ESC. This is pure
 // logic -- no I/O -- so the whole truth table is host-testable.
 //
 // AUDIT INVARIANT (the load-bearing property of this file): the parser holds
@@ -15,17 +15,16 @@
 // produces at most one event per byte and bounded memory.
 //
 // SPLIT-SEQUENCE HANDLING: a logical input -- a keypress or escape sequence --
-// usually arrives within one ring drain, and a lone Escape arrives as a single
-// 0x1b with nothing after it. But under a slow/dribbled console (HVF) or a
-// #172-batched RX IRQ, an escape sequence CAN split across two reads. CSI/SS3/
-// UTF-8 partials are RETAINED by `flush` across polls and assemble on the next
-// drain; the bare-ESC head case (an `ESC | [B` split, which would otherwise
-// mis-resolve the lone ESC to `Esc` and mis-key the tail) is bridged by the
-// source's ESC-disambiguation holdoff (#173, kaua::source::pending_escape) --
+// usually arrives back to back, and a lone Escape arrives as a single 0x1b with
+// nothing after it. But under a slow/dribbled console (HVF) or a #172-batched RX
+// IRQ, an escape sequence CAN pause mid-way. CSI/SS3/UTF-8 partials are RETAINED
+// by `flush` across waits and assemble on the next bytes; the bare-ESC head
+// case (an `ESC | [B` split, which would otherwise mis-resolve the lone ESC to `Esc` and mis-key the tail) is bridged by the
+// intake's ESC-disambiguation holdoff (#173, kaua::intake, via pending_escape) --
 // it waits a bounded window for the tail before letting `flush` resolve a
 // pending ESC. So when `flush` does resolve a bare ESC to Escape, the holdoff
 // has already confirmed no continuation was coming. `feed`/`flush` stay pure;
-// the timing lives in the source.
+// the timing lives in the intake.
 //
 // MALFORMED-INPUT POLICY: exotic/malformed sequences are *consumed safely*, not
 // recovered byte-perfectly. Specifically a byte may be dropped in three rare
@@ -127,21 +126,20 @@ impl Parser {
         }
     }
 
-    /// End-of-drain: resolve a dangling lone `ESC` to `KeyCode::Esc`. A
-    /// half-collected CSI/SS3/UTF-8 is RETAINED for the next poll, NOT dropped:
-    /// under a slow/dribbled console (HVF) a sequence can straddle a poll
-    /// boundary, and dropping the partial here would mis-key the tail as literal
-    /// chars (bug_nora_hvf_cpr_handshake -- the launch CPR reply split across
-    /// poll-drains). The local console delivers each sequence whole, so a
-    /// dangling CSI/SS3/UTF-8 never occurs there at drain end -- retention is
-    /// inert for it and only assembles the HVF-split case. The parser holds O(1)
-    /// state, so retaining is bounded; a real sequence completes on the next
-    /// poll's bytes. Call once per poll, after the drain's bytes.
+    /// End of input (fd 0 offered nothing within the wait): resolve a dangling
+    /// lone `ESC` to `KeyCode::Esc`. A half-collected CSI/SS3/UTF-8 is RETAINED
+    /// for the next wait, NOT dropped: under a slow/dribbled console (HVF) a
+    /// sequence can pause mid-way, and dropping the partial here would mis-key the
+    /// tail as literal chars (bug_nora_hvf_cpr_handshake -- the launch CPR reply
+    /// split across waits). The local console delivers each sequence back to
+    /// back, so a dangling CSI/SS3/UTF-8 never occurs there -- retention is inert
+    /// for it and only assembles the HVF-split case. The parser holds O(1)
+    /// state, so retaining is bounded; a real sequence completes on its next bytes.
     pub fn flush(&mut self) -> Option<KeyEvent> {
         match self.state {
-            // A lone ESC with nothing after it at the true end of the drain is a
-            // real Escape keypress. The source applies an ESC-disambiguation
-            // holdoff (#173, kaua::source) BEFORE this flush: a split ESC-led
+            // A lone ESC with nothing after it at the true end of input is a
+            // real Escape keypress. The intake applies an ESC-disambiguation
+            // holdoff (#173, kaua::intake) BEFORE this flush: a split ESC-led
             // sequence whose head arrived alone gets a bounded window for its
             // `[..` tail, so by the time flush() runs a still-bare ESC is
             // genuinely a lone Escape, not the head of a split arrow.
@@ -149,7 +147,7 @@ impl Parser {
                 self.reset_ground();
                 Some(KeyEvent::new(KeyCode::Esc))
             }
-            // Ground: nothing pending. Csi/Ss3/Utf8: retain across the poll.
+            // Ground: nothing pending. Csi/Ss3/Utf8: retain across the wait.
             State::Ground | State::Csi | State::Ss3 | State::Utf8 => None,
         }
     }

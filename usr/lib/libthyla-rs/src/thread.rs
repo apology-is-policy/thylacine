@@ -36,9 +36,10 @@
 //   namespace. This is the kernel-level model; pthread sits on top.
 //
 // LIFETIME:
-//   `spawn_raw` doesn't track the returned Tid. The kernel keeps the
-//   Thread descriptor + kstack live until the Proc dies; v1.0 accepts
-//   that bound. Per-Thread reaping is a v1.x extension.
+//   `spawn_raw` doesn't track the returned Tid. Once a thread exits,
+//   the kernel keeps its descriptor + kstack, counted against the
+//   Proc's thread cap, until the Proc's next thread spawn (or its
+//   death) frees them.
 
 use core::sync::atomic::AtomicU32;
 use core::time::Duration;

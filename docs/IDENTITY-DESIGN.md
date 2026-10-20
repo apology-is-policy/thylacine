@@ -805,7 +805,7 @@ backstop*.
 | Constant | v1.0 value | Bounds |
 |---|---|---|
 | `PROC_PAGE_MAX` | 65536 pages (256 MiB) | per-Proc live anon pages committed via `SYS_BURROW_ATTACH` (the memory-bomb vector) |
-| `PROC_THREAD_MAX` | 256 | per-Proc live threads (tighter — a thread pins 32 KiB of *unswappable* kernel kstack) |
+| `PROC_THREAD_MAX` | 256 | per-Proc threads not yet freed: the live ones plus peers exited since the Proc's last thread create, which frees them (tighter — a thread pins 32 KiB of *unswappable* kernel kstack) |
 | `PROC_CHILD_MAX` | 256 | per-Proc live *direct* children (the direct-fork rate) |
 
 All three are generous for any v1.0 user workload (shell + coreutils + editor)

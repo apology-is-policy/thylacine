@@ -46,7 +46,7 @@ closes the detail pane. `t` switches between the flat list and the process tree.
 `s` cycles the sort through CPU, process ID, memory and name. `r` or the space
 bar refreshes. `z` stops the selected process and `c` continues it. `k` kills it
 after a confirmation, and Escape cancels that confirmation. Otherwise `q` or
-Escape quits.
+Escape quits, and anything typed after it goes to the shell.
 
 The detail pane's first line is the selected process's footprint: its charge,
 the page tables and file pages inside it, its peak charge and its budget. Below
