@@ -19,6 +19,7 @@
 
 #include <thylacine/caps.h>
 #include <thylacine/errno.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
@@ -96,7 +97,7 @@ static int sc_release_and_reap(int pid) {
             killed = 1;
             c = proc_find_by_pid(pid);
             irq_state_t s = proc_table_lock_acquire();
-            if (c && c->state == PROC_STATE_ALIVE) proc_group_terminate(c, "killed");
+            if (c && c->state == PROC_STATE_ALIVE) proc_group_terminate(c, NOTE_SIG_KILL, "killed");
             proc_table_lock_release(s);
             deadline = timer_now_ns() + SC_BUDGET_NS;
         }
