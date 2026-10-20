@@ -80,7 +80,12 @@ static int mock_fstat(int fd, struct pouch_stat *st) {
  if (fstat_errno) { errno = fstat_errno; return -1; }
  memset(st, 0, sizeof *st); st->st_mode = fstat_mode; return 0;
 }
-#define fstat mock_fstat
+/* libc's own open asks the hidden __fstat: a call to the public name, which a
+ * program may define, is counted. */
+static int public_fstat_calls;
+static int public_fstat(int fd, struct pouch_stat *st) { public_fstat_calls++; return mock_fstat(fd, st); }
+#define __fstat mock_fstat
+#define fstat public_fstat
 /* The macros under test, and the helper they name, mocked: what each raw open asks. */
 #include "rawopen-under-test.h"
 static int so_calls, so_flags;
@@ -97,6 +102,7 @@ long __pouch_sys_open(const char *path, int flags, unsigned mode) {
 #include "openat-under-test.c"
 #undef openat
 #undef __pouch_sys_open
+#undef __fstat
 /* __map_file's own calls. */
 static long map_size_out;
 static int mm_calls, mm_prot, mm_flags, mm_fd, fst_calls, fst_fail;
@@ -125,7 +131,7 @@ static int at(long n) { for (int i = 0; i < calls && i < NCALL; i++) if (nums[i]
 static int closed(long fd) { int i = at(SYS_close); return count(SYS_close) == 1 && args[i][0] == fd; }
 #define CASE(name, expr) do { ++checks; int ok = (expr); printf("%s %s\n", ok ? "PASS" : "FAIL", name); failures += !ok; } while (0)
 static void reset(void) {
- calls = parent_calls = fstat_calls = fstat_errno = so_calls = so_flags = 0; so_mode = 0; fstat_fd = -1; fstat_mode = 0;
+ calls = parent_calls = fstat_calls = fstat_errno = so_calls = so_flags = public_fstat_calls = 0; so_mode = 0; fstat_fd = -1; fstat_mode = 0;
  r_open = 7; r_create = r_flags = 0; parent_ret = 3; so_ret = 9; memset(paths, 0, sizeof paths); so_path[0] = 0;
  mm_calls = fst_calls = fst_fail = fd_calls = 0; mm_ret = mapped; map_size_out = 166; fd_ret = stdin; fd_fd = -1;
  errno = EDOM;
@@ -162,6 +168,9 @@ int main(void) {
  reset(); r_create = 8; CASE("raw-create-ok", tested_pouch_sys_open("/f", O_WRONLY | O_CREAT | O_EXCL, 0640) == 8 && errno == EDOM && (i = at(SYS_thyla_walk_create)) >= 0 && args[i][4] == 0640 && closed(3));
  reset(); fstat_errno = EACCES; CASE("raw-fstat-errno-kept", tested_pouch_sys_open("/d", O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0) == -EACCES && errno == EDOM && fstat_fd == 7 && closed(7));
  reset(); fstat_mode = S_IFREG; CASE("raw-notdir", tested_pouch_sys_open("/f", O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0) == -ENOTDIR && errno == EDOM && closed(7));
+ /* The tripwire counts a public fstat (the control), and the helper never makes one. */
+ reset(); { struct stat t; CASE("public-fstat-tripwire", fstat(5, &t) == 0 && public_fstat_calls == 1 && fstat_calls == 1); }
+ reset(); fstat_mode = S_IFDIR; CASE("raw-odir-hidden-fstat", tested_pouch_sys_open("/d", O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0) == 7 && errno == EDOM && fstat_calls == 1 && public_fstat_calls == 0 && count(SYS_close) == 0);
  reset(); r_flags = -EIO; CASE("raw-cloexec-errno", tested_pouch_sys_open("/f", O_RDONLY | O_CLOEXEC, 0) == -EIO && errno == EDOM && closed(7));
  reset(); CASE("raw-cloexec-ok", tested_pouch_sys_open("/f", O_RDONLY | O_CLOEXEC, 0) == 7 && errno == EDOM && count(SYS_thyla_handle_flags_set) == 1 && count(SYS_close) == 0);
  /* openat() is the helper behind errno. */

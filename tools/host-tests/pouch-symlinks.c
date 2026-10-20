@@ -102,6 +102,7 @@ static int mock_fstat(int fd, struct pouch_stat *st) {
  memset(st, 0, sizeof *st); st->st_mode = fstat_mode; return 0;
 }
 #define fstat mock_fstat
+#define __fstat mock_fstat
 #include "descriptor-under-test.h"
 #define openat tested_openat
 #include "openat-under-test.c"

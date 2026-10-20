@@ -52,6 +52,7 @@ int __pouch_open_parent(int atfd, const char *path, const char **leaf, size_t *l
 /* Only an O_DIRECTORY open asks what it opened; no case here passes one. */
 static int mock_fstat(int fd, struct stat *st) { (void)fd; fstat_calls++; memset(st, 0, sizeof *st); return 0; }
 #define fstat mock_fstat
+#define __fstat mock_fstat
 #define openat tested_openat
 #include "descriptor-under-test.h"
 #include "openat-under-test.c"

@@ -7,7 +7,7 @@ surface: [sub-pouch-seam, sub-pouch-fs, sub-pouch-net]
 opened-by: chg-2026-05-22-p6-syscall-seam
 tracker: "POUCH-DESIGN.md 5.1"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-20
 ---
 ## Owed
 
@@ -17,8 +17,9 @@ Thylacine's syscall convention is a flat `-1` with no errno channel, so
 `close` never gets it. The same collapse forces every lower-half wrapper
 to GUESS: `bind` answers `EACCES` for post-gate / name-taken /
 registry-full / table-full / bad-name alike; `connect` answers
-`ECONNREFUSED` for all of its causes; `fstat` answers `EBADF` for any
-non-zero return; `posix_spawn` answers `ENOENT`; `kill` loses `ESRCH`
+`ECONNREFUSED` for all of its causes; `fstat` answers `EIO` for a dead
+descriptor too (its `EBADF` fallback sits behind the decode and never runs;
+ERRORS.md's table already owes `-T_E_BADF` from the kernel); `posix_spawn` answers `ENOENT`; `kill` loses `ESRCH`
 vs `EPERM`.
 
 `EIO` is a documented POSIX errno, so P-3 holds — this is imprecision,

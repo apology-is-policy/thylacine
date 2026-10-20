@@ -89,8 +89,9 @@ the most: `openat.c` alone has three generations.
   and `__sys_open_cp` macros of `src/internal/syscall.h`, at both arities, call
   the hidden `__pouch_sys_open`, which is `openat`'s body: it answers a
   descriptor or `-errno` and leaves `errno` as it found it (the `O_DIRECTORY`
-  arm's fstat, its one call that sets `errno`, is saved and restored around
-  it). `openat()` is the wrapper: a real dirfd is `ENOTSUP`, and otherwise it
+  arm's `__fstat`, its one call that sets `errno`, is saved and restored
+  around it; the hidden name, so a program's own `fstat` never runs inside
+  libc's open). `openat()` is the wrapper: a real dirfd is `ENOTSUP`, and otherwise it
   sets `errno` once from the body's answer. The macros' users are
   `__map_file` (the time zone, locale and catalog loaders), `fopen`,
   `__fopen_rb_ca` (`/etc/passwd`, `/etc/group`, `/etc/hosts` and the other
@@ -444,8 +445,10 @@ and the same window Linux's `*at` functions have when a caller passes
 
 Real `-errno` from the stalk-resolved calls (`ENOENT` / `EACCES` /
 `ENOTDIR`, verbatim — which is what lets `realpath` fail for the right
-reason). `EBADF` for any non-zero `SYS_FSTAT` return (granular errno is a
-v1.x lift on both sides). `ENOENT` for a non-zero `SYS_STAT`. `SYS_LSTAT`
+reason). A failed `SYS_FSTAT` reads `EIO`, a dead descriptor included: the
+kernel answers a flat -1 for every failure, where `docs/ERRORS.md`'s table
+says `-T_E_BADF` for a bad handle, and `fstat.c`'s `EBADF` fallback sits
+behind the decode and never runs ([[seam-pouch-errno-channel]]). `ENOENT` for a non-zero `SYS_STAT`. `SYS_LSTAT`
 and `SYS_READLINK` answer `-errno` themselves (`docs/ERRORS.md`, "Native
 lstat and readlink"), so `lstat` and `readlink` pass the kernel's errno
 through.
@@ -580,6 +583,10 @@ in-place translation pass.
   POSIX makes `open` and `openat` ones (upstream's `open` is
   `__sys_open_cp`). Pouch's open is several calls, and where a cancel may land
   in the create arm needs a design (OPEN-BUGS 2026-10-20).
+- **`fstat` of a dead descriptor answers `EIO`, not `EBADF`**, so the
+  `O_DIRECTORY` unwind's `EBADF` test never fires and a number a peer thread
+  closed is closed again (OPEN-BUGS 2026-10-20 07:48Z; ERRORS.md owes
+  `-T_E_BADF` from the kernel).
 - **`O_CREAT` through a dangling final link answers `ENOENT`**, where Linux
   creates the target: the create finds the link's name and answers
   `EEXIST`, and the open after it follows the link to nothing.

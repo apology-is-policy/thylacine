@@ -23,6 +23,7 @@ MUTANTS={
  'raw-fstat-errno':[('openat.c','\t\t\terrno = saved;\n','\t\t\t(void)saved;\n')],
  'raw-ret-sets-errno':[('openat.c','\t\t\tif (s != -EBADF) __syscall(SYS_close, r);\n\t\t\treturn s;\n','\t\t\tif (s != -EBADF) __syscall(SYS_close, r);\n\t\t\treturn __syscall_ret(s);\n'),
                        ('openat.c','\t\t__syscall(SYS_lseek, r, 0, SEEK_END);\n\treturn r;\n','\t\t__syscall(SYS_lseek, r, 0, SEEK_END);\n\treturn __syscall_ret(r);\n')],
+ 'odir-public-fstat':[('openat.c','\t\t\te = __fstat((int)r, &st) ? -errno','\t\t\te = fstat((int)r, &st) ? -errno')],
  'raw-refusal-sets-errno':[('openat.c','\tdefault:       return -EINVAL;\n','\tdefault:       errno = EINVAL; return -EINVAL;\n')],
  'wrapper-raw':[('openat.c','\treturn __syscall_ret(__pouch_sys_open(filename, flags, mode));\n','\treturn __pouch_sys_open(filename, flags, mode);\n')],
  'map-shared':[('__map_file.c','PROT_READ, MAP_PRIVATE, fd, 0);','PROT_READ, MAP_SHARED, fd, 0);')],
