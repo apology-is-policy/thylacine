@@ -2,13 +2,26 @@
 id: seam-devdev-winsize-statless
 type: seam
 title: "/dev/winsize answers no fstat, in a Dev whose stated rule is that every leaf does"
-status: open
+status: closed
 surface: [sub-kernel-devdev, sub-kernel-cons]
 opened-by: chg-2026-08-02-console-sweep
 tracker: "task #19"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-20
+closed-by: chg-2026-10-20-fstat-ebadf
 ---
+## Closed (2026-10-20)
+
+H-1 fixed it on 2026-09-01 (`140db8744`), when the Beacon leaf landed beside
+the geometry leaf. `devdev_stat_native` now answers both ungated report leaves
+as world-readable character files (`0444`), without the is-a-console marker.
+The geometry leaf's own test asserts that shape. The all-leaf stat test's
+header names the pair and leaves the assertions to the per-leaf tests, and the
+comment calling the leaf statless is gone ([[sub-kernel-devdev]]). The vault
+was not told at the time. [[chg-2026-10-20-fstat-ebadf]] records the closure,
+because the pass over `SYS_FSTAT`'s errnos found the seam still open. The text
+below is the seam as it stood open.
+
 ## Owed
 
 Add the geometry leaf to `devdev_stat_native`, add it to the all-leaf stat test,

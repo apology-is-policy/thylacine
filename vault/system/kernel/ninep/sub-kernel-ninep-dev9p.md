@@ -678,10 +678,6 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   file's OWN attr stale in metadata-only fields (L1f-F3);
   [[seam-larder-cacheable-proxy]] — the Twalkgetattr-success latch as
   the cacheability proxy. All three live on [[sub-kernel-larder]].
-- [[seam-fstat-errno-flattened-above-the-leaf]] — the native-stat arm's
-  comment asserts an immunity the mapper does not grant and a propagation
-  the stat syscall does not perform. Comment-only; the behaviour matches
-  the rollout's own staging.
 
 ## Caveats
 
