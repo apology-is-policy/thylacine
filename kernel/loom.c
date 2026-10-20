@@ -300,18 +300,20 @@ static struct Proc *loom_owner_live(struct Loom *l) {
     return o;
 }
 
-// Settle one of the Loom's Burrow pins: claim whatever charge the owner holds
-// on it, drop the pin, and refund only if this drop ended the occupancy. The
-// claim returns 0 for a region the owner never paid for, which is what keeps
-// a shared-in Weft ring from being refunded to its consumer.
+// Settle one of the Loom's Burrow pins: drop the pin and settle the owner's
+// charge in the SAME lock interval, refunding only if this drop ended the
+// occupancy. The claim returns 0 for a region the owner never paid for, which
+// is what keeps a shared-in Weft ring from being refunded to its consumer.
+//
+// AS-R9: this used to claim, drop, then restore on a nonfinal drop. Another
+// holder's final drop could land in that window, so the restore wrote through a
+// freed descriptor and the record was missing when the holder that DID free the
+// region looked for it. A nonzero refund now comes only from the freeing drop.
 static void loom_drop_pin_settling(struct Loom *l, struct Burrow *b) {
-    struct Proc *o  = loom_owner_live(l);
-    u32          paid = o ? burrow_charge_claim(b, o) : 0;
-    if (burrow_unref_freed(b)) {
-        if (paid) proc_page_uncharge(o, paid);
-    } else if (paid) {
-        burrow_charge_restore(b, o, paid);   // !freed => b is still live
-    }
+    struct Proc *o = loom_owner_live(l);
+    u32 refund = 0;
+    (void)burrow_unref_settled(b, o, &refund);
+    if (refund) proc_page_uncharge(o, refund);
 }
 
 // The join predicate. Read with ACQUIRE to pair with the kthread's terminal
@@ -548,16 +550,19 @@ void loom_unref(struct Loom *l) {
 
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n) {
-    if (!l || l->magic != LOOM_MAGIC)  return -1;
-    if (n > LOOM_MAX_REG_HANDLES)      return -1;
-    if (n > 0 && (!spoors || !rights)) return -1;
+    if (!l || l->magic != LOOM_MAGIC)  return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
+    if (n > 0 && (!spoors || !rights)) return -T_E_INVAL;
 
     // A Loom op bypasses dev9p's write-behind, so every new dev9p Spoor first
     // flushes its staged run and stops staging. It may wait for the server,
     // which the registering thread may (a syscall; a kill ends the wait).
-    // On a failure nothing is installed and the caller keeps its refs.
-    for (u32 i = 0; i < n; i++)
-        if (dev9p_loom_register(spoors[i]) != 0) return -1;
+    // On a failure nothing is installed and the caller keeps its refs; the
+    // flush's errno is the registration's.
+    for (u32 i = 0; i < n; i++) {
+        int fe = dev9p_loom_register(spoors[i]);
+        if (fe != 0) return fe;
+    }
 
     // Replace the whole table (IORING_REGISTER_FILES semantics). Snapshot the
     // old Spoors + install the new under the lock, then clunk the old OUTSIDE
@@ -623,9 +628,9 @@ static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
 
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n) {
-    if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
-    if (n > LOOM_MAX_REG_BUFFERS)            return -1;
-    if (n > 0 && !bufs)                      return -1;
+    if (!l || l->magic != LOOM_MAGIC || !p)  return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_BUFFERS)            return -T_E_INVAL;
+    if (n > 0 && !bufs)                      return -T_E_INVAL;
 
     // Resolve + pin the WHOLE new set first (all-or-nothing, like
     // loom_register_handles): under p->vma_lock so vma_lookup is stable. On any
@@ -643,7 +648,7 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     spin_unlock(&p->as->lock);
     if (rc != 0) {
         for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
-        return -1;
+        return -T_E_INVAL;
     }
 
     // Install: swap the table under l->lock, then unref the displaced pins OUTSIDE
@@ -671,12 +676,9 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     // claim returns 0 for exactly that case.
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
         if (old[i]) {
-            u32 paid = burrow_charge_claim(old[i], p);
-            if (burrow_unref_freed(old[i])) {
-                if (paid) proc_page_uncharge(p, paid);
-            } else if (paid) {
-                burrow_charge_restore(old[i], p, paid);   // !freed => still live
-            }
+            u32 refund = 0;   // AS-R9: settled under the Burrow's own lock
+            (void)burrow_unref_settled(old[i], p, &refund);
+            if (refund) proc_page_uncharge(p, refund);
         }
     }
     return 0;
@@ -2347,6 +2349,37 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     for (u32 i = 0; i < LOOM_FANIN_MAX; i++) fs.ent[i].hook.pw.magic = 0;
 }
 
+#ifdef KERNEL_TESTS
+static void (*loom_sq_release_hook)(struct Loom *);
+void loom_sq_release_hook_for_test(void (*hook)(struct Loom *)) {
+    __atomic_store_n(&loom_sq_release_hook, hook, __ATOMIC_RELEASE);
+}
+static void (*loom_setup_installed_hook)(struct Proc *, hidx_t);
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t)) {
+    __atomic_store_n(&loom_setup_installed_hook, hook, __ATOMIC_RELEASE);
+}
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd) {
+    void (*hook)(struct Proc *, hidx_t) =
+        __atomic_load_n(&loom_setup_installed_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(p, fd);
+}
+#endif
+
+// Advance and publish sq_head past one consumed position. The published head is
+// the producer's permission to refill that position's SQ-index entry and, under
+// the 1:1 convention Ring::try_submit follows, its SQE: so the caller must have
+// read the index and copied the SQE first. Caller holds l->lock. The only writer
+// of the published head; the test hook runs HERE, at the permission itself, so
+// it moves with any reordering.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h) {
+    l->sq_head++;
+    __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);
+#ifdef KERNEL_TESTS
+    void (*hook)(struct Loom *) = __atomic_load_n(&loom_sq_release_hook, __ATOMIC_ACQUIRE);
+    if (hook) hook(l);
+#endif
+}
+
 // Consume up to `budget` SQEs from the SQ index ring in SQ-index order, copying
 // each to kernel memory (ring TOCTOU) and either dispatching it (fast path,
 // loom_submit_one) or enqueueing it HELD in the LINK/DRAIN chain (Loom-5b).
@@ -2358,12 +2391,14 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
 // ring slot it points at is user-written, so it is range-checked before it
 // indexes the SQE array (the SA-1 discipline on the SQ side).
 //
-// F1: each per-slot claim (the sq_head read + advance + the SQE read+copy) runs
-// under l->lock so two concurrent consumers on the same ring (two ENTERs of a
-// multi-thread Proc, or an ENTER racing the SQPOLL kthread) never read the same
-// sq_head -> never double-dispatch a slot or lose an sq_head update; each
-// iteration atomically claims exactly one slot. loom_submit_one / the chain
-// enqueue run OUTSIDE the lock (a separate, non-nested acquisition).
+// F1: each per-slot claim (the sq_head read, the SQE read+copy, then the advance)
+// runs under l->lock so two concurrent consumers on the same ring (two ENTERs of a
+// multi-thread Proc; an SQPOLL ring is drained by its kthread alone) never read
+// the same sq_head -> never double-dispatch a slot or lose an sq_head update; each
+// iteration atomically claims exactly one slot. The lock excludes other kernel
+// consumers only, never the producer: see loom_sq_release (specs/loom_sq.tla).
+// loom_submit_one / the chain enqueue run OUTSIDE the lock (a separate,
+// non-nested acquisition).
 //
 // Loom-5b chain routing: an SQE is ORDERING-RELEVANT -- it goes HELD in l->chain
 // rather than dispatching immediately -- iff it sets LINK/DRAIN, OR the chain is
@@ -2418,12 +2453,11 @@ static u32 loom_drain_sq(struct Loom *l, u32 budget) {
             break;
         }
         u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
-        l->sq_head++;
-        __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);   // publish (user-readable mirror)
         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
         have = (sqe_idx < l->sq_entries);
         if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
-        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+        else __atomic_fetch_add(&h->dropped, 1u, __ATOMIC_RELEASE);
+        loom_sq_release(l, h);                              // only after the copy
         // Route under the SAME lock so the chain-non-empty test is consistent with
         // the snapshot we just took (the chain only grows during this call).
         to_chain = have && ((ksqe.flags & (LOOM_SQE_LINK | LOOM_SQE_DRAIN)) != 0 ||

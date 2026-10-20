@@ -480,7 +480,7 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
 ### 5.4 Signals (the R-3 ladder)
 
 - **Tier 0 (v1.0)**: default dispositions only. `SIGPIPE`→ignore-or-terminate,
-  `SIGINT`/`SIGTERM`/`SIGQUIT`→terminate (already the `interrupt`/`tty:*` note
+  `SIGINT`/`SIGTERM`/`SIGQUIT`→terminate (the `interrupt`/`term`/`tty:*` note
   semantics, LS-5), `SIGCHLD`→`wait4`. `rt_sigaction` for these returns success and
   records the disposition; a handler for a *fatal* signal is honored via the
   full-frame path when it lands, else the default applies.
@@ -2467,16 +2467,20 @@ rather than new machinery:
 
 | Linux | note | disposition |
 |---|---|---|
-| `SIGINT`, `SIGTERM` | `interrupt` | catchable; default terminate (LS-5) |
+| `SIGINT` | `interrupt` | catchable; default terminate (LS-5) |
+| `SIGTERM` | `term` | catchable; default terminate (operator vote 2026-10-13) |
 | `SIGKILL` | `kill` | non-catchable both sides (I-19 N-4) |
 | `SIGPIPE` | `pipe` | catchable; maskable |
 | `SIGCHLD` | `child_exit` | catchable; default ignore |
-| `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | catchable; default terminate |
+| `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | never caught or ignored (a handler is refused); the fault ends the Proc |
 | `SIGHUP`/`SIGQUIT`/`SIGWINCH`/`SIGTSTP`/`SIGCONT` | `tty:*` | PTY-1 semantics |
-| `SIGALRM`, `SIGUSR1/2`, `SIGABRT` | — | no note exists; see below |
+| `SIGABRT` | none; a self-directed one ends the caller as `snare:abort` | default only; see below |
+| `SIGALRM`, `SIGUSR1/2` | — | no note exists; see below |
 
-`SIGTERM` sharing `interrupt` with `SIGINT` is inherited from the pouch mapping
-and is a stated v1.0 imprecision, not an oversight.
+`SIGTERM` shared `interrupt` with `SIGINT` in the pouch mapping until V-6b took
+it off (a shared note cannot represent `SIGINT` ignored with `SIGTERM` at its
+default), and the signal chunk's S-2 gave it its own note, `term`
+(`dec-2026-10-13-term-note`).
 
 **The argument domains** (V-2b's rule, unchanged):
 
@@ -2494,9 +2498,26 @@ and is a stated v1.0 imprecision, not an oversight.
   which already exists for exactly this reason ("so multi-thread Procs can have
   different threads accept different signals — POSIX `pthread_sigmask`
   semantics", `notes.h:107`). Bits outside the mapped set decline.
-- **`kill` (129) / `tkill` (130) / `tgkill` (131)** map to `notes_post_pid`,
-  under the *existing* I-26 two-axis gate. A phenotype must not become a way to
-  signal a Proc the caller could not otherwise reach.
+- **`kill` (129) / `tkill` (130) / `tgkill` (131)** post the signal's note
+  through `SYS_POSTNOTE`'s own gate, the one Pouch's `kill` already passes: the
+  caller itself, or a live Proc whose parent the caller is (operator vote
+  2026-10-13, `dec-2026-10-13-phenotype-kill-family`). A phenotype must not
+  become a way to signal a Proc the caller could not otherwise reach, so there
+  is no third gate. `kill(0, sig)` is the caller, as Pouch's sentinel makes it;
+  a negative pid (a process group, or every process) is refused with `EPERM`,
+  because the gate admits no group. Notes are per-Proc, so `tkill` and `tgkill`
+  resolve the thread id to its Proc and post there: a thread-directed signal
+  reaches whichever thread of that Proc takes the note, not necessarily the
+  thread named (a stated imprecision; `tgkill` still refuses a tid outside the
+  named thread group with `ESRCH`). Signal 0 runs the gate and posts nothing. A
+  missing target, or a child already reaped, is `ESRCH`; a refusal by the gate
+  is `EPERM`, and the gate is asked first, so a dead Proc that is not the
+  caller's child reads `EPERM` too. A child that has died but is not yet reaped
+  takes nothing and the call succeeds, as Linux answers for a zombie. A full
+  note queue is `EAGAIN`. A signal no note carries, or whose note only the kernel posts
+  (`tty:*`), is `EINVAL`, with one exception: a SELF-directed signal that a
+  `snare:*` death carries (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE`)
+  ends the caller with that death, as a fault or Pouch's `abort()` would.
 - **`rt_sigreturn` (139)** is the phenotyped spelling of `SYS_NOTED(NCONT)`.
 
 `sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
@@ -2504,8 +2525,9 @@ and is a stated v1.0 imprecision, not an oversight.
 explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
 file's standard that a number never considered and one considered-and-rejected
 are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
-`SIGABRT` is reachable only via `raise`, which is `tkill` to self, so it
-terminates rather than running a handler.
+`SIGABRT` has no note: a self-directed one (`raise`, which is `tkill` to self)
+ends the caller as `snare:abort` whatever its mask, so it terminates rather than
+running a handler.
 
 **`SA_RESTART` and the `EINTR` surface (item 11).** Until item 11 (ARCH §8.8.3,
 the caught-note-interruptible sleep) no phenotype syscall could return `EINTR` at
@@ -2589,7 +2611,10 @@ and `tkill` are not table rows, and `clone` — which *is* one since LINEAGE L-3
 admits only the fork and vfork shapes, never `CLONE_THREAD`. So no guest can
 generate a signal for another Proc or spawn a peer thread to race its own
 disposition table. (Corrected at #158: the reason used to be stated as "`clone`
-is not a table row", which the clone row's landing quietly falsified.) The
+is not a table row", which the clone row's landing quietly falsified. The
+signal chunk's S-2 added the `kill`/`tkill`/`tgkill` rows on 2026-10-13, so a
+guest may now also signal a child it spawned, through `SYS_POSTNOTE`'s parent
+gate.) The
 `viv-pheno-probe` gate therefore uses the one self-inflicted route that exists:
 the bundle declares `org.thylacine.sigpipe-selftest`, `viv` hands the entrypoint
 fd 0 as the write end of a reader-less pipe, and the guest's own `write()` makes
@@ -2608,7 +2633,10 @@ sig (omitted under `SA_NODEFER`, which is therefore honoured for the mask), and
 `rt_sigreturn` restores the pre-handler mask from the kernel-side save — so a
 handler's own `rt_sigprocmask` does not outlive it, and an `execve`/`fork()`
 from inside a handler passes on what Linux passes on. The guard above is what
-still differs, and it only defers.
+still differs, and it only defers — except at a fault: an instruction in a
+handler that faults while a SIG_DFL terminating signal is pending ends the
+process there with that signal (ARCH §7.6.4), which is what Linux's send-time
+group exit for a fatal default signal would already have done.
 
 ---
 
@@ -3756,7 +3784,7 @@ formality.
 |---|---|
 | **#93** process creation (clone/execve/wait4) | **The named next chunk, and the arc gate's blocker** -- "an Alpine shell runs" needs `fork`. Not a renumber: Linux `clone(flags, stack, ptid, tls, ctid)` versus a `SYS_SPAWN_*` family that takes a *program* rather than a continuation, and `fork()` has no native counterpart at all. Wants its own scripture pass. It also **falsifies two premises the socket family rests on** -- both the socktab's lock-freedom and the transient-fd invisibility assume a `PHENO_LINUX` Proc cannot spawn a thread -- so `viv_sock_connect`'s re-read of `e->proto`/`e->n` after a blocking write is the first line to revisit when it lands |
 | **#91** exit status is boolean | Thylacine-wide, not vivarium-specific, and `docs/ERRORS.md` is ABI-bearing -- the exit-status **encoding** needs user signoff before any impl. Touches the death path (#809/#811), so it wants its own chunk with the usual death-lineage care |
-| **#95** SIGTERM needs its own note | An I-19 supported-set addition = an ABI change to the notes surface. Signoff |
+| **#95** SIGTERM needs its own note | **SIGNED OFF 2026-10-13** (operator vote, `dec-2026-10-13-term-note`): a `term` note, built in the signal chunk's S-2 |
 | **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly. **CLOSED 2026-09-28** by the SAMPLE/ARM split (netd and ptyfs at NP-3b, the kernel at NP-4c): a snapshot read answered at once is the only sample, and the 10 ms budget is deleted (§5.5.4) |
 | **#90** container `/proc/self` names the mounter | The remedies section 6.13 names both need a per-op identity channel, which is a new kernel surface |
 | **#99** pouch `select(2)`'s four defects | Userspace pouch, and the kernel translator already avoids all four (V-5c-2). Tracked, not arc-blocking |

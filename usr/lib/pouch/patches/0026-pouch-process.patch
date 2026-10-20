@@ -23,10 +23,11 @@ Wired (Linux name -> Thylacine kernel primitive):
 Two translations are load-bearing:
   * WAIT flags: kernel WAIT_CONTINUED is 4, Linux musl WCONTINUED is 8, and
     the kernel rejects unknown bits -- so the option word is mapped bit-by-bit.
-  * WAIT status: a plain wait returns the RAW exit_status (0/1); musl's W*
-    macros decode the Linux word, so it is repacked (raw & 0xff) << 8 ->
-    WIFEXITED true, WEXITSTATUS == raw. A job-control wait already returns the
-    Linux-packed word and is forwarded verbatim.
+  * WAIT status: every wait passes the kernel's WAIT_PACKED (8), so the kernel
+    writes the Linux wait(2) word itself -- exited, signalled (a child that
+    died of a note: WIFSIGNALED, WTERMSIG), stopped or continued -- and it is
+    forwarded verbatim. (Until gcpark-b a plain wait read the RAW exit status
+    and was repacked as an exit, so a killed child read WIFEXITED 1.)
 
 envp is inherited via the /env clone (the passed posix_spawn envp is a v1.x
 lift: a SYS_SPAWN_FULL_ARGV ext_flags tail). dup2/dup3 onto a chosen
@@ -39,7 +40,7 @@ Files:
   src/internal/_pouch_process.h   NEW -- SYS_thyla_* numbers + the 96-byte
                                   sys_spawn_args mirror + shared decls.
   src/process/_pouch_process.c    NEW -- __pouch_pipe (2-reg svc shim) +
-                                  __pouch_wait (flag + status translation).
+                                  __pouch_wait (flag translation; packed word).
   src/process/posix_spawn.c       rewrite -- static file_actions resolver.
   src/process/posix_spawnp.c      rewrite -- PATH search + posix_spawn.
   src/process/waitpid.c           -> __pouch_wait.
@@ -57,7 +58,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
 --- a/src/internal/_pouch_process.h	1970-01-01 01:00:00
 +++ b/src/internal/_pouch_process.h	2026-07-23 20:05:01
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,110 @@
 +/* pouch boundary-line: process-lifecycle substrate (Clade CL-1b). Shared by
 + * posix_spawn / posix_spawnp / waitpid / wait4 / pipe / pipe2 / dup2 / dup3.
 + *
@@ -86,10 +87,12 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +#define POUCH_SPAWN_ARGV_DATA_MAX 65536u
 +
 +/* Kernel WAIT_* flag values (proc.h). NOTE: WAIT_CONTINUED is 4, but Linux
-+ * musl's WCONTINUED is 8 -- the wait shim translates, it does not pass raw. */
++ * musl's WCONTINUED is 8 -- the wait shim translates, it does not pass raw.
++ * WAIT_PACKED asks the kernel for the Linux wait(2) word; it is always set. */
 +#define POUCH_WAIT_WNOHANG   1u
 +#define POUCH_WAIT_UNTRACED  2u
 +#define POUCH_WAIT_CONTINUED 4u
++#define POUCH_WAIT_PACKED    8u
 +
 +/* Handle rights (handle.h) for posix_spawn's std-fd existence probe. There is
 + * no rights-independent fd-existence check (a 0-rights dup is rejected by
@@ -218,7 +221,7 @@ diff --color -ruN a/src/linux/wait4.c b/src/linux/wait4.c
 diff --color -ruN a/src/process/_pouch_process.c b/src/process/_pouch_process.c
 --- a/src/process/_pouch_process.c	1970-01-01 01:00:00
 +++ b/src/process/_pouch_process.c	2026-07-23 19:36:33
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,64 @@
 +/* pouch boundary-line: shared process-lifecycle helpers (Clade CL-1b). See
 + * _pouch_process.h. */
 +#include <errno.h>
@@ -250,46 +253,37 @@ diff --color -ruN a/src/process/_pouch_process.c b/src/process/_pouch_process.c
 +	return 0;
 +}
 +
-+/* __pouch_wait -- waitpid/wait4 over SYS_WAIT_PID. Two translations are
-+ * load-bearing:
++/* __pouch_wait -- waitpid/wait4 over SYS_WAIT_PID.
 + *
-+ *  (1) FLAGS. The kernel WAIT_* values differ from Linux musl's: WCONTINUED
-+ *      is 8 (musl) vs 4 (kernel), and the kernel REJECTS unknown flag bits
-+ *      with -1. So the option word is mapped bit-by-bit, and any bit outside
-+ *      the three POSIX options is dropped.
++ *  FLAGS. The kernel WAIT_* values differ from Linux musl's: WCONTINUED is 8
++ *  (musl) vs 4 (kernel), and the kernel REJECTS unknown flag bits with -1. So
++ *  the option word is mapped bit-by-bit, and any bit outside the three POSIX
++ *  options is dropped.
 + *
-+ *  (2) STATUS. For a plain wait (no job-control flag) the kernel writes the
-+ *      RAW exit_status (0 = ok, 1 = any error -- v1.0 collapses non-zero to
-+ *      1). musl's W* macros decode the Linux status word, so this repacks it
-+ *      as WAIT_STATUS_EXITED: (raw & 0xff) << 8 -> WIFEXITED is true and
-+ *      WEXITSTATUS == raw. When a job-control flag was passed the kernel
-+ *      already returns the Linux-layout packed word (exited/stopped/
-+ *      continued), so it is forwarded verbatim.
++ *  STATUS. POUCH_WAIT_PACKED is always passed, so the kernel writes the Linux
++ *  wait(2) word -- exited (code << 8), signalled (a child that died of a note
++ *  or a fault: the signal in the low 7 bits, no core bit), stopped or
++ *  continued -- and musl's W* macros decode it as it stands. It is forwarded
++ *  verbatim (docs/ERRORS.md "The wait status").
 + *
 + * Returns the reaped pid (>0), 0 for WNOHANG-with-no-ready-child, or -1 with
 + * errno = ECHILD (the kernel returns a flat -1; ECHILD is the POSIX errno for
 + * "no matching child", the reachable case here). */
 +hidden int __pouch_wait(int pid, int *status, int options)
 +{
-+	unsigned long tf = 0;
++	unsigned long tf = POUCH_WAIT_PACKED;
 +	if (options & WNOHANG)    tf |= POUCH_WAIT_WNOHANG;
 +	if (options & WUNTRACED)  tf |= POUCH_WAIT_UNTRACED;
 +	if (options & WCONTINUED) tf |= POUCH_WAIT_CONTINUED;
 +
-+	int raw = 0;
-+	long r = __syscall3(SYS_thyla_wait_pid, pid, (long)tf, (long)&raw);
++	int word = 0;
++	long r = __syscall3(SYS_thyla_wait_pid, pid, (long)tf, (long)&word);
 +	if (r < 0) {
 +		errno = ECHILD;
 +		return -1;
 +	}
 +	if (r == 0) return 0;   /* WNOHANG: no reapable child; *status untouched */
-+
-+	if (status) {
-+		if (tf & (POUCH_WAIT_UNTRACED | POUCH_WAIT_CONTINUED))
-+			*status = raw;                 /* already Linux-packed */
-+		else
-+			*status = (raw & 0xff) << 8;   /* pack raw exit code as "exited" */
-+	}
++	if (status) *status = word;
 +	return (int)r;
 +}
 diff --color -ruN a/src/process/posix_spawn.c b/src/process/posix_spawn.c

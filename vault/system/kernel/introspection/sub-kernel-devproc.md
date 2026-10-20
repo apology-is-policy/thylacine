@@ -19,7 +19,7 @@ design:
   - "docs/IMPERIUM-DESIGN.md section 11.3 item 10"
   - "docs/IDENTITY-DESIGN.md reserved ids (none owns nothing)"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -345,7 +345,9 @@ NoStrand-resuming a launched child would orphan it to init to run forever — th
 debugger-launched-orphan leak. The #811 death cascade wakes the debug-parked
 threads by their **rendez blocked-on, not `debug_stop_req`**, so each hits the
 EL0-return die-check (death wins over the stop) and terminates; the last out
-ZOMBIEs and init reaps. The mark dies with the slot, and the release also
+ZOMBIEs and init reaps. The death records `SIGKILL` (`proc_group_terminate(p,
+NOTE_SIG_KILL, "debugger exited")`, gcpark-b 2026-10-12), so a waiter's packed
+word reads it as killed, as `PTRACE_O_EXITKILL` would. The mark dies with the slot, and the release also
 `hwdebug_*_clear_all`s the target's breakpoints and watchpoints — an orphaned
 target left armed would re-trap forever.
 
@@ -615,6 +617,16 @@ included. Both are telemetry; no policy reads them
 manual has no `/proc/<pid>/status` section, and the prowl telemetry
 sub-chunk that adds one folds `tables:`, `file:` and `/ctl/memory` in.
 
+## `status` shows a zombie's death signal (2026-10-12; gcpark-b audit F6)
+
+A zombie's block is `exit:` (the exit status) and, when it died of a note, a
+`signal:` line with `Proc.term_sig`, the signal its parent's packed wait word
+reports. The exit status alone reads 1 for both a death and an `exit(1)`.
+Read under `g_proc_table_lock`, as `exit:` is; `term_sig` is written before
+the ZOMBIE transition under the same lock ([[sub-kernel-death]]). Witness:
+`devproc.zombie_status_signal` (a `snare:abort` zombie shows `signal:  6`; an
+`exit(1)` zombie, one variable away, shows none).
+
 ## Data structures
 
 The Dev owns none. Every piece of state it manipulates lives on `struct Proc`
@@ -794,9 +806,13 @@ performance backlog.
   itself — which cuts both ways, and the dangerous direction is a system-principal
   proxy handing a system Proc's environment to a client of any principal. Until
   the mandate mechanism exists, a proxy must serve only its own peer.
-- **`maps` is ungated on the argument that Thylacine has no userspace ASLR.**
-  If user ASLR ever lands, this posture must be revisited in the same chunk —
-  the file would then disclose exactly what the mitigation randomizes.
+- **`maps` is ambient because nothing in it but a code alias is random.** Every
+  other address is an `exec.h` constant, an ELF link address or a first-fit
+  placement. A new source of randomness in a user layout has to be weighed here
+  in the same chunk, as B-2b's random code aliases were (below).
+- **A truncated `maps` shows a reader without debug authority no code rows at
+  all.** A listing the buffer cut short cannot say which aliases lie below the
+  cut, so it prints none of them; the owner still sees them in place.
 
 ## Caveats
 
@@ -828,9 +844,90 @@ performance backlog.
 ## The ctl `kill` forces a final close already under way (2026-10-07)
 
 The `kill` verb terminates through `proc_group_kill` instead of
-`proc_group_terminate(target, "killed")`. The termination is the same; the
+`proc_group_terminate(target, NOTE_SIG_KILL, "killed")`. The termination is the same; the
 difference is a target already terminating: there the kill sets
 `PROC_FLAG_EXIT_CLOSE_FORCED` before its death wake, so a final close waiting
 on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
 B, [[sub-kernel-death]]). The debugger-exited and launcher-exited (`exitkill`)
 terminations keep the wrapper: only an explicit kill forces.
+
+## `maps` withholds where the code aliases lie (2026-10-07; B-2b audit F2)
+
+B-2b places every alias of a code region -- writer, exec, sealed -- at its own
+random address, so the writer's address is a secret and `maps`, ambient to every
+Proc, would hand it out ([[dec-2026-10-07-maps-code-redaction]]).
+`devproc_maps_code_visible_locked` decides who may see it: the target itself, or a
+reader with debug authority over it (the I-39 predicate, image join included). The
+reflexive case is written out because I-39 refuses a NOTRACE Proc even to itself,
+and a Proc reading its own layout tells no one else anything.
+
+`format_maps(p, show_code, ...)` prints the table exactly as before when it may.
+Otherwise a code row takes no buffer during the walk: it is counted by permission
+class (r, w, x and the share flag, `maps_class`) and printed after the walk as
+`0x0-0x0 <perms> 0x0 code - -`, grouped by class. Each such row is a function of
+its class alone, so the listing holds the same bytes whichever addresses the
+aliases drew. Its place is never its address order, which would say which
+mappings an alias lies between and which alias of a region is the lower.
+
+Two rules keep a truncated listing from placing the aliases. The zeroed rows are
+printed only when the walk reached the end of the list, because a listing cut at
+some address would otherwise say which aliases lie below the cut. And a withheld
+row is counted against a budget of as many zeroed rows as the buffer holds, which
+keeps the lock hold bounded by the buffer, at most twice over. Running out of
+budget stops the walk; that is the one place left where the aliases' positions
+can show. It takes more code aliases below the last printed row than the buffer
+holds rows, and such an address space prints no code rows. When the zeroed rows
+do not fit after a complete walk, whole rows are dropped from the end to make
+room: how much is dropped depends on the count alone.
+
+Witnesses: `devproc.maps_code_visible` (the predicate's axes, the NOTRACE self
+case against I-39's own refusal as control), `devproc.maps_code_redacted` (owner
+sees every alias's address; a foreign reader sees none, gets one zeroed row per
+alias after an anon page at the window's top, in class order, and the SAME bytes
+after the region is recreated at new addresses while the owner's listing
+changes), `devproc.maps_code_truncated` (a cluster of rows above the aliases
+truncates both listings; the owner sees both aliases below the cut, the foreign
+reader no code row).
+
+**Round 2 (2026-10-07).** Two silent failures now extinct: the probe that
+measures a zeroed row, if the row ever outgrows it (every reader's listing would
+otherwise empty quietly), and the trim loop, if it runs out of rows (what a
+broken budget looks like; it would otherwise scan below the buffer). And the
+cover sees an orphaned region: since 2026-10-08 the image join weighs the
+space's record of every holder that has left it ([[sub-kernel-proc]]; it replaced
+round 2's count of code aliases), so an RFMEM child that kept its creator's
+aliases, device windows or sealed bytes is not covered by an owner the creator's
+caps would not let in, and its creator's seals still hold. That is also what bounds the diorama, which reads
+every pid's `maps` as itself for clients of any principal: holding no
+elevation-only cap, it is shown every foreign code row zeroed, and it checks
+that before it serves ([[sub-diorama]]). The two end-to-end witnesses above now
+read with `CAP_JIT` held, the target a live holder. New witnesses:
+`devproc.maps_code_trimmed` (fifty anon rows leave 13 bytes; the foreign listing
+drops the top two whole and carries all three zeroed rows),
+`devproc.maps_code_budget_stop` (one alias more than the budget of 77 zeroed
+rows, all below the top row, the count derived from the row's length: the foreign
+reader gets the header alone, the owner a listing cut among the aliases),
+`devproc.debug_cover_weighs_departed` (the orphan of an unlinked creator: admitted
+before the creator leaves, refused after it and still after the aliases are
+destroyed, admitted to a `CAP_JIT` caller), `devproc.seal_outlives_its_holder`
+(a sealed parent's orphan: `maps` EACCES and control refused after the parent is
+freed; an unsealed parent's orphan reads and is controlled),
+`devproc.taint_outlives_its_holder` (a directly tainted creator's orphan is refused
+the legate stamp; an untainted one's elevates), `devproc.zombie_records_departure`
+(a `CAP_ALL` child through the real `rfork` + `proc_seal` + `exits`: the record
+holds its caps and NODUMP while it is an unreaped zombie, and the sharer's `maps`
+read sealed after the reap) and `devproc.exec_records_departure` (the child seals
+NOTRACE and runs `proc_exec_replace` on itself; only the swap writes the old
+space's record).
+
+**A residual this section does not close.** `status` prints `tables:` (and
+`pages:`, which includes them), and the `/ctl/procs` table carries the same
+count, ambient to every reader. A page table is allocated per 512 GiB, 1 GiB
+and 2 MiB of address space actually mapped, so the count tells a reader how
+many of those spans the aliases occupy -- whether two aliases, or an alias and
+another mapping, share one -- and never where a span lies. The one case that
+places an alias is a shared top-level table with the low mappings below the
+window: an alias in the window's first 508 GiB (about 0.8% of placements)
+saves a table, and that says which 512 GiB it is in, about 7 of its 34 bits.
+Linux's world-readable `VmPTE` is the same channel. Stated rather than closed
+(B-2b audit r2, self-found SF-1).

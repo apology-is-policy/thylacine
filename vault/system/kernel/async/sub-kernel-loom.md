@@ -15,7 +15,7 @@ design:
   - "docs/LOOM.md"
   - "docs/reference/107-loom.md"
 created: 2026-08-02
-updated: 2026-10-07
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -40,7 +40,9 @@ dev9p handle first flushes its staged write-behind run and stops it staging
 wire, so none may meet bytes still staged. The flush may wait on the
 registering thread; a failure fails the registration and keeps the old table,
 and so does an error an earlier flush latched, since no operation reads the
-latch. A failure part-way through the array leaves the handles before it
+latch. The registration returns that failure's errno (`-ENOSPC`, the
+server's `-EIO`, a caught note's `-EINTR` -- after which the run is still
+staged, so a retry flushes it). A failure part-way through the array leaves the handles before it
 flushed and writing through: a cost, not a hazard. A successful registration
 drops the file's cached pages, which the ring's writes would leave stale.
 
@@ -91,6 +93,20 @@ Each consumed entry is copied whole into kernel memory before any field is
 examined. Everything downstream — the opcode switch, the bounds checks, the
 builders that encode the wire message later — reads the copy. Nothing re-reads
 the shared slot after the checks, which is what makes the checks mean anything.
+
+The copy also comes before the *release*. Publishing the submission head hands
+the position back: a well-behaved producer acquire-loads the head and refills
+that position's indirection slot and, under its one-to-one convention, the entry
+it names. So the consumer reads the indirection slot and copies the entry, and
+only then advances and publishes the head (`loom_sq_release`, which every drain
+iteration calls after its copy or its drop). The ring lock does not cover this:
+it excludes other kernel consumers, never the producer. Until October 12 the
+drain released first, and a refill landing in that window had the kernel
+consume the new entry in the old position's place and again in its own, and
+never consume the old one — a lost and a doubled submission, reachable under
+SQPOLL or a sibling-thread producer (`specs/loom_sq.tla`,
+`BUGGY_RELEASE_BEFORE_COPY`). `loom_sq_release` is the only writer
+of the published head.
 
 Operations whose encoding needs more fields than the resolved state carries keep
 the whole copied entry alongside the in-flight operation, so a builder running
@@ -323,12 +339,24 @@ also **clears** it — and refunds only what comes back. A region the owner neve
 paid for returns zero, so nothing is refunded. The clear is what makes the
 refund exactly-once: two paths racing to settle cannot both win.
 
-The claim happens **before** the drop, because a freeing drop takes the record
-with it. If the drop turns out not to free, the claim is put back. The window
+The claim happens **inside the drop**, under the Burrow's own lock, through
+`burrow_unref_settled` ([[sub-kernel-burrow]]). A drop that does not end the
+occupancy leaves the record alone; the drop that does takes it.
+
+This dossier previously recorded the older arrangement — claim, drop, and
+restore the claim if the drop turned out not to free — and said "the window
 between claim and restore is a real one, and its failure mode is deliberately
-chosen: a concurrent settler sees the cleared record and skips, leaving a
-charge that outlives its region until the payer's next release point. An
-over-charge on the payer — never a refund to a Proc that did not pay.
+chosen: a concurrent settler sees the cleared record and skips, leaving a charge
+that outlives its region until the payer's next release point. An over-charge on
+the payer — never a refund to a Proc that did not pay." **That was wrong, and it
+was not a chosen trade-off but an unnoticed defect (AS-R9).** The lock
+serialised each of the three operations and none of the gaps. A sibling holder's
+final drop inside the window freed the descriptor, so the restore wrote through
+a dead pointer — usually an `extinction`, since the free clobbers `magic` and
+SLUB does not zero the slot — and the holder that actually freed the region found
+an empty record and refunded nothing. Both `loom_drop_pin_settling` and the
+displaced registered-buffer pins now settle through the drop; the full analysis
+and the repair are in [[sub-kernel-burrow]].
 
 **The direction of the error is the whole design.** An over-charge caps a Proc
 early; an under-charge inflates its budget, which is the bound failing. Every
@@ -601,6 +629,15 @@ allocation failure. Cancellation for a chain successor whose predecessor failed.
 Enter returns `-1` only for a corrupt ring object or invalid flags — everything
 about an individual operation is reported through its completion.
 
+Register answers a negative errno since 2026-10-07
+([[dec-2026-10-07-loom-register-errno]], landed with B-2b): `-EBADF` for a ring
+or listed fd that is not open, `-EFAULT` for an argument array the kernel
+cannot read, the failed flush's own errno, and `-EINVAL` otherwise --
+`loom_register_handles` and `loom_register_buffers` themselves answer
+`-EINVAL` for bad arguments and pass `dev9p_loom_register`'s errno through.
+Before, every refusal was the bare `-1`, which libthyla-rs read as
+`InvalidArgument`, so a full disk looked like a programming error.
+
 Two counters in the header are diagnostics: dropped submissions (a bad
 indirection index) and overflowed completions (which the admission rule is meant
 to keep at zero).
@@ -675,9 +712,11 @@ an exec never refunds against the successor's space (the audit's F4;
   different claims, and buffer registration accepts shared-in regions, so the
   first does not imply the second. Claim against the Burrow; refund only what
   the claim returns.
-- **Claim before the drop, restore if it did not free.** The record dies with
-  the region, so a claim after a freeing drop reads nothing and silently loses
-  the charge.
+- **Settle inside the drop, never around it.** The record dies with the
+  region, so a claim after a freeing drop reads nothing and silently loses the
+  charge; a claim before a non-final drop, restored after it, writes through a
+  freed Burrow when a sibling's final drop lands in between (AS-R9).
+  `burrow_unref_settled` decides both in one hold of the Burrow's lock.
 - **Settle the thread budget on the flag, never on the thread pointer.** A
   charge whose thread never started still owes its refund.
 
@@ -739,3 +778,23 @@ an exec never refunds against the successor's space (the audit's F4;
 [[chg-2026-08-16-loom-backstop-closed]] (the thread-ledger backstop, and the
 one-line fix that would have leaked). 2026-09-23 (L): the identity cape's two
 Loom rules (the caped `GETATTR` copy; the caped create gid).
+
+## Setup holds its own reference across the install (2026-10-12)
+
+`sys_loom_setup_for_proc` used to write `l->owner`, `ring_pages`, the charge record
+and `*out` after `handle_alloc` had adopted the Loom's only reference. A sibling
+thread's close of the new fd in that window freed the Loom synchronously, so those
+writes landed in freed memory: a latent, EL0-reachable kernel UAF write (P1). Setup
+now takes `loom_ref` before `handle_alloc` and drops it as its last act, after
+which `l` is not touched. The `KERNEL_TESTS` hook `loom_setup_installed_for_test`
+sits at the window, and `loom.setup_close_race` closes the fd there.
+
+The SETUP handler's params-copyout-fault rollback used `burrow_unmap`. After
+`handle_close`, that unmap is the ring's final drop and carries no payer, so the
+charge record died unrefunded (P3, I-32, self-only).
+`sys_loom_setup_rollback` (`handle_close` followed by the settling
+`sys_burrow_detach_for_proc`) replaces it. Witness: `loom.setup_rollback_settles`.
+
+Both were found and fixed on corona/async-memory (6a5039788) while reading the
+private bridge's setup path. The regression mutants are M4 (no own reference) and
+M5 (the unsettled unmap), in work/oct12-na1/na1-mutants.py.

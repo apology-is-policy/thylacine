@@ -175,6 +175,16 @@ bool vma_free_freed(struct Vma *v);
 // event vma_free_freed's bool does. See burrow_free_deferred + deferred_free_next.
 struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
 
+// AS-R9: the settled form -- frees the Vma and drops its mapping ref through
+// burrow_release_mapping_settled_deferred, so the payer's I-32 charge is settled
+// in the SAME lock interval that decides whether the drop freed the region.
+// `payer` is the exact AddrSpace incarnation that paid, or NULL to settle
+// nothing; *out_refund is the pages to refund outside the Burrow's leaf lock,
+// nonzero only when this drop qualified. vma_free_deferred is this with no
+// payer.
+struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
+                                         bool *out_freed, u32 *out_refund);
+
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
 // any existing VMA in the list. Returns 0 on success, -1 on overlap
 // (caller must vma_free the rejected VMA themselves; this function
@@ -244,10 +254,11 @@ void vma_drain(struct Proc *p);
 // still resident would be charged for the rest of the address space's life
 // (NoOrphan; the B-1a audit's F5, and the piece-detach bug before it). An EAGER
 // anon region's pages are one block and go with its LAST mapping: a whole
-// mapping that goes claims the region's charge record for `payer` and refunds
-// it iff that drop freed the pages or the region survives only in another Proc
-// (shared out); otherwise the claim is restored for the drop that does end it
-// (#130/#131). A trimmed eager mapping refunds nothing -- its pages are still
+// mapping that goes settles the region's charge record inside its own drop
+// (AS-R9), matched against `as`: it claims and refunds iff that drop freed the
+// pages or the region survives only in another Proc (shared out), and
+// otherwise leaves the record for the drop that does end it (#130/#131). A
+// trimmed eager mapping refunds nothing -- its pages are still
 // allocated. A SHARED_IN mapping that goes whole uncharges the shared-in budget
 // for its span; a guard goes with no accounting at all; a DMA / MMIO / HOSTMEM
 // window's pages are the device object's.
@@ -264,8 +275,9 @@ void vma_drain(struct Proc *p);
 //   NOMEM  no I-32 headroom for the tail piece plus the `extra_vmas` the caller
 //          will insert itself (vma_replace_range_in reserves one), or no slab
 //          for the piece
-// `payer` names the Proc whose eager charges may be refunded; NULL settles none
-// (an eager region freed then stays charged -- the safe direction). `*out_dead`
+// `payer` opts in to refunding eager charges (each record is matched against
+// `as`, the space refunded); NULL settles none (an eager region freed then
+// stays charged -- the safe direction). `*out_dead`
 // (mandatory; written on every path) receives the chain (deferred_free_next) of
 // Burrows whose last mapping went, for the caller to hand to
 // burrow_free_deferred AFTER the unlock (a FILE Burrow's free may sleep).
@@ -313,6 +325,10 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
 // built FOR. Passing it in rather than a Proc keeps this layer free of identity.
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
+// True iff v sits in as's list, by its links and the head -- for a Vma in as's
+// list or in none; one interior to another space's list reads linked.
+// vma_remove_in extincts on a Vma for which this is false. Caller holds as->lock.
+bool        vma_linked_in(const struct AddrSpace *as, const struct Vma *v);
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
 
 // #199: lowest-addressed VMA overlapping [lo, hi), or NULL. Caller holds

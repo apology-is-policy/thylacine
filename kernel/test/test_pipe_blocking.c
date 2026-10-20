@@ -543,7 +543,7 @@ void test_pipe_blocking_caught_note_ends_read(void) {
     TEST_EXPECT_EQ(leg.rc, -(long)T_E_INTR, "EINTR, not the byte the release fed");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
         "control: the native reader blocked, the note posted, the read returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native reader and it slept again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native reader slept again");
     TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native read ends on the fed byte");
 }
 

@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**41 dossiered · 0 missing · 41 modules.**
+**43 dossiered · 0 missing · 43 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -42,6 +42,7 @@ reads as missing, which is the intended pressure.
 | asid.tla | [[spec-asid]] | dossiered |
 | burrow.tla | [[spec-burrow]] | dossiered |
 | capacity.tla | [[spec-capacity]] | dossiered |
+| caught_target.tla | [[spec-caught-target]] | dossiered |
 | cons_poll.tla | [[spec-cons-poll]] | dossiered |
 | corvus.tla | [[spec-corvus]] | dossiered |
 | cow.tla | [[spec-cow]] | dossiered |
@@ -56,6 +57,7 @@ reads as missing, which is the intended pressure.
 | loom_multishot.tla | [[spec-loom-multishot]] | dossiered |
 | loom_order.tla | [[spec-loom-order]] | dossiered |
 | loom_role.tla | [[spec-loom-role]] | dossiered |
+| loom_sq.tla | [[spec-loom-sq]] | dossiered |
 | net_poll.tla | [[spec-net-poll]] | dossiered |
 | net_poll_teardown.tla | [[spec-net-poll-teardown]] | dossiered |
 | pipe.tla | [[spec-pipe]] | dossiered |

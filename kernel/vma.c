@@ -69,6 +69,15 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     // syscalls already guard. Reject it here so the VMA prot matches the PTE.
     if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return NULL;
 
+    // B-2b: execute-only exists only over a code Burrow (a sealed region,
+    // SYS_JIT_CREATE_SEALED). Any other X-without-R -- a Linux PROT_EXEC mmap
+    // through Vivarium, an ELF segment flagged PF_X alone -- maps R+X, as it
+    // always has and as Linux does: those callers never asked for a page their
+    // own loads would fault on.
+    if ((prot & VMA_PROT_EXEC) && !(prot & VMA_PROT_READ) &&
+        burrow->type != BURROW_TYPE_CODE)
+        prot |= VMA_PROT_READ;
+
     // B-1a' audit F3: the mapping must lie inside the Burrow. A VMA past the
     // Burrow's end would name slots its pagemap does not have, and the range
     // release walks the mapping's own slot bound -- refused here, at the one
@@ -159,22 +168,26 @@ bool vma_free_freed(struct Vma *v) {
 void vma_free(struct Vma *v) { (void)vma_free_freed(v); }
 
 // D-3c F1: the deferred twin of vma_free_freed. Drops the mapping ref via
-// burrow_release_mapping_deferred (which does NOT free), frees the Vma struct,
+// burrow_release_mapping_settled_deferred (which does NOT free, and settles
+// `payer`'s charge record in the same hold when the drop qualifies -- AS-R9),
+// frees the Vma struct,
 // and returns the Burrow that still owes a free (or NULL). The caller pushes it
 // onto a local stack and frees it with burrow_free_deferred AFTER dropping
 // as->lock -- the FILE arm's spoor_clunk may sleep, and a sleeping free under a
 // spinlock is the lock-across-sleep extinction. *out_freed reports the same
 // event vma_free_freed's bool does, for the I-32 uncharge (which stays under
 // the lock -- only the physical free moves out).
-struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed) {
-    if (out_freed) *out_freed = false;
+struct Burrow *vma_free_settled_deferred(struct Vma *v, const struct AddrSpace *payer,
+                                         bool *out_freed, u32 *out_refund) {
+    if (out_freed)  *out_freed  = false;
+    if (out_refund) *out_refund = 0;
     if (!v)                     extinction("vma_free(NULL)");
     if (v->magic != VMA_MAGIC)  extinction("vma_free of corrupted/already-freed Vma");
     if (v->next || v->prev)     extinction("vma_free of Vma still in a list");
 
     struct Burrow *to_free = NULL;
     if (v->burrow) {
-        to_free = burrow_release_mapping_deferred(v->burrow);
+        to_free = burrow_release_mapping_settled_deferred(v->burrow, payer, out_refund);
         if (out_freed) *out_freed = (to_free != NULL);
         v->burrow = NULL;
     }
@@ -182,6 +195,10 @@ struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed) {
     kmem_cache_free(g_vma_cache, v);
     __atomic_fetch_add(&g_vma_freed, 1u, __ATOMIC_RELAXED);
     return to_free;
+}
+
+struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed) {
+    return vma_free_settled_deferred(v, NULL, out_freed, NULL);
 }
 
 // =============================================================================
@@ -198,10 +215,26 @@ int vma_insert(struct Proc *p, struct Vma *v) {
     return vma_insert_in(p->as, proc_resource_exempt(p), v);
 }
 
+// A Vma is in as's list exactly when both of its links agree: its predecessor
+// points at it (or, for the first mapping, the list head does), and its successor
+// points back. A removed or never-inserted Vma has no links and is not the head,
+// so the links alone cannot tell the SOLE mapping from an unlinked one. Exact for
+// a Vma that is in as's list or in none; one linked into ANOTHER space reads
+// unlinked only when it is that space's head, so a caller names the space it
+// found the Vma in, not a Proc's current one (an exec can swap it between).
+bool vma_linked_in(const struct AddrSpace *as, const struct Vma *v) {
+    if (v->prev ? v->prev->next != v : as->vmas != v) return false;
+    return !v->next || v->next->prev == v;
+}
+
 int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (!as || !v)               extinction("vma_insert_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_insert of corrupted Vma");
-    if (v->next || v->prev)      extinction("vma_insert of already-linked Vma");
+    // The head test catches the sole mapping, whose links are both NULL: the walk
+    // below would reject it as overlapping itself, and the caller would free it
+    // with the head still pointing at it.
+    if (v->next || v->prev || as->vmas == v)
+        extinction("vma_insert of already-linked Vma");
 
     // Walk the sorted list to find:
     //   - The insertion point (last node with start < v->start).
@@ -238,7 +271,6 @@ int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
     if (prev) prev->next = v;
     else      as->vmas   = v;
     if (cur)  cur->prev  = v;
-
     return 0;
 }
 
@@ -250,6 +282,9 @@ void vma_remove(struct Proc *p, struct Vma *v) {
 void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
     if (!as || !v)               extinction("vma_remove_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_remove of corrupted Vma");
+    // A second remove of the same Vma would take the no-predecessor arm and wipe
+    // the whole list head, and the clamp-safe uncharge below would hide it.
+    if (!vma_linked_in(as, v))   extinction("vma_remove of a Vma not linked in this address space");
 
     if (v->prev) v->prev->next = v->next;
     else         as->vmas      = v->next;
@@ -371,27 +406,29 @@ int vma_detach_range_in(struct AddrSpace *as, bool exempt, struct Proc *payer,
             if (shared_in)
                 addrspace_uncharge_shared_map(as, (u32)((hi - lo) / PAGE_SIZE));
             // The eager-ANON refund (#130/#131): the charge RECORD says who
-            // paid, never the region's shape. Claimed BEFORE the drop (a
-            // freeing drop takes the record with it) and refunded iff the drop
-            // actually freed the pages -- a Loom ring, a registered buffer and
-            // a Weft share each hold a handle_count ref that can outlive the
-            // mapping -- or the region survives only in ANOTHER Proc, which
-            // this one can no longer reach and whose eventual last drop has no
-            // way to name the payer. Alive on one of this Proc's OWN claims,
-            // the claim is put back for that claim's drop to settle.
-            bool shared_out = false;
-            u32  paid       = 0;
-            if (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) {
-                shared_out = burrow_is_shared_out(b);
-                paid       = burrow_charge_claim(b, payer);
-            }
+            // paid, never the region's shape. Refunded iff this drop actually
+            // freed the pages -- a Loom ring, a registered buffer and a Weft
+            // share each hold a handle_count ref that can outlive the mapping --
+            // or the region survives only in ANOTHER Proc, which this one can no
+            // longer reach and whose eventual last drop has no way to name the
+            // payer. Alive on one of this Proc's OWN claims, the record is left
+            // in place for that claim's drop to settle.
+            //
+            // AS-R9: the decision is the DROP's, taken under the Burrow's lock
+            // (burrow_release_mapping_settled_deferred), not this function's
+            // across three separate acquisitions. `b` is therefore never
+            // dereferenced after this mapping's ref is gone -- which is what the
+            // old claim/restore pair did, and a concurrent final drop by any
+            // other holder made that a use-after-free write. The record is
+            // matched against `as`, the space this mapping leaves and the one
+            // refunded below; `payer` only opts in.
+            const struct AddrSpace *settle_as =
+                (payer && b && !shared_in && b->type == BURROW_TYPE_ANON) ? as : NULL;
             vma_remove_in(as, v);
-            bool freed = false;
-            struct Burrow *tf = vma_free_deferred(v, &freed);
-            if (paid) {
-                if (freed || shared_out) addrspace_uncharge_pages(as, paid);
-                else                     burrow_charge_restore(b, payer, paid);
-            }
+            u32 paid = 0;
+            struct Burrow *tf = vma_free_settled_deferred(v, settle_as, NULL, &paid);
+            // Outside the Burrow leaf lock, as the ledger requires.
+            if (paid) addrspace_uncharge_pages(as, paid);
             if (tf) { tf->deferred_free_next = dead; dead = tf; }
         } else if (lo == v->vaddr_start) {
             // The range covers the mapping's head: the survivor is its tail.

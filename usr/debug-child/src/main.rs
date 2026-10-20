@@ -29,6 +29,11 @@
 //     x22 the handler's VA and x24 the loop's first instruction, whose `add` is
 //     the only write to x23. The handler counts its runs in region[3] and
 //     returns with NCONT; region[2] ends the loop as in spin mode.
+//   * `debug-child spin-tty` and `debug-child spin-note` (ARCH 8.8.3, #964;
+//     jc-probe drives them on a pty) write SPINNING to fd 1 and then spin with
+//     no syscall, so only an IRQ return can deliver a note to them. spin-tty
+//     takes `^C`'s default and dies; spin-note registers a handler that ends
+//     the loop, then writes HANDLED and exits 0.
 //   * `debug-child dirty` (5g, death wins in the exit close; jc-probe drives
 //     it) leaves a small write staged on a 9P file, writes one byte to stdout
 //     (its driver's pipe) once it has, and then spins as spin mode does.
@@ -91,11 +96,10 @@ fn yield_now() {
     }
 }
 
-// Spin mode (DEBUG-FS-DESIGN 5g). Parked at an IRQ tail -- the one with no notes
-// leg -- a thread that left its park for a latched interrupt would be back in
-// this loop with its stop still set, so the counter is the witness: stopped, it
-// must not move. The yield after the loop is the syscall at whose tail a note
-// still pending is met.
+// Spin mode (DEBUG-FS-DESIGN 5g). Parked at an IRQ tail, a thread that left its
+// park for a latched interrupt would run on with its stop still set, so the
+// counter is the witness: stopped, it must not move. A note still pending when
+// the loop ends is met at the yield's tail.
 fn spin(ptr: *mut u64) -> ! {
     unsafe {
         core::arch::asm!(
@@ -157,6 +161,58 @@ fn spin_caught(ptr: *mut u64) -> ! {
     unsafe { t_exits(0) }
 }
 
+// The pty modes (ARCH 8.8.3, #964). MUST match jc-probe.
+const SPIN_READY: &[u8] = b"SPINNING\n";
+const SPIN_HANDLED: &[u8] = b"HANDLED\n";
+
+// spin-tty: the loop never traps and nothing ends it, so the only way out is a
+// note taken at an IRQ return.
+fn spin_tty(ptr: *mut u64) -> ! {
+    // SAFETY: SVC wrapper; SPIN_READY is a valid static buffer.
+    let _ = unsafe { t_write(1, SPIN_READY.as_ptr(), SPIN_READY.len()) };
+    spin(ptr);
+}
+
+// spin-note: the handler, registered before SPINNING is written, sets
+// region[2] and returns with NCONT, which ends the loop.
+fn spin_note(ptr: *mut u64) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "adr x0, 3f",
+            "mov x8, #45",         // SYS_NOTIFY(the handler)
+            "svc #0",
+            "mov x0, #1",
+            "mov x1, x12",
+            "mov x2, x13",
+            "mov x8, #10",         // SYS_WRITE(1, SPIN_READY)
+            "svc #0",
+            "2:",
+            "ldr x10, [x21, #16]", // region[2]: the handler's exit flag
+            "cbz x10, 2b",
+            "b 4f",
+            "3:",                  // the handler: region[2] = 1, then NCONT
+            "mov x9, #1",
+            "str x9, [x21, #16]",
+            "mov x0, #0",
+            "mov x8, #46",         // SYS_NOTED(NCONT)
+            "svc #0",
+            "4:",
+            in("x21") ptr,
+            in("x12") SPIN_READY.as_ptr(),
+            in("x13") SPIN_READY.len(),
+            out("x0") _,
+            out("x1") _,
+            out("x2") _,
+            out("x8") _,
+            out("x9") _,
+            out("x10") _,
+        );
+    }
+    // SAFETY: SVC wrapper; SPIN_HANDLED is a valid static buffer.
+    let _ = unsafe { t_write(1, SPIN_HANDLED.as_ptr(), SPIN_HANDLED.len()) };
+    unsafe { t_exits(0) }
+}
+
 // Dirty mode's file and bytes. MUST match jc-probe.
 const DIRTY_PATH: &str = "/debug-child-dirty";
 const DIRTY_PAYLOAD: &[u8] = b"staged by debug-child, flushed by its exit close\n";
@@ -212,6 +268,12 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if libthyla_rs::env::args().operands().next() == Some(&b"dirty"[..]) {
         dirty(ptr);
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"spin-tty"[..]) {
+        spin_tty(ptr);
+    }
+    if libthyla_rs::env::args().operands().next() == Some(&b"spin-note"[..]) {
+        spin_note(ptr);
     }
     let bp = (bp_landmark as extern "C" fn()) as usize as u64;
 

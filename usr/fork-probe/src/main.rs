@@ -59,7 +59,7 @@ use libthyla_rs::io::{self, Write};
 use libthyla_rs::{env, rfork_spawn, t_close, t_execve, t_exits, t_getpid, t_pipe,
                   t_putstr, t_read, t_wait_pid_for, t_wait_exitstatus,
                   t_wait_if_exited, t_write, T_RFMEM, T_RFPROC, T_SYS_RFORK,
-                  T_WAIT_WNOHANG};
+                  T_WAIT_PACKED, T_WAIT_WNOHANG};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -306,7 +306,7 @@ pub extern "C" fn rs_main() -> i32 {
     // two because a blocking reap after this one would find nothing left.
     let mut status: i32 = -1;
     let reaped = unsafe {
-        t_wait_pid_for(pid as i32, T_WAIT_WNOHANG, &mut status as *mut i32)
+        t_wait_pid_for(pid as i32, T_WAIT_PACKED | T_WAIT_WNOHANG, &mut status as *mut i32)
     };
     if reaped == 0 {
         fail("the parent resumed before the child released -- a child sharing \
@@ -363,7 +363,7 @@ pub extern "C" fn rs_main() -> i32 {
         fail("the second rfork_spawn did not return a child pid");
     }
     let mut st2: i32 = -1;
-    if unsafe { t_wait_pid_for(pid2 as i32, 0, &mut st2 as *mut i32) } != pid2 {
+    if unsafe { t_wait_pid_for(pid2 as i32, T_WAIT_PACKED, &mut st2 as *mut i32) } != pid2 {
         fail("wait_pid_for did not reap the second child");
     }
     if CHILD_TLS.load(Ordering::Acquire) != EXPLICIT_TLS {
@@ -398,7 +398,7 @@ pub extern "C" fn rs_main() -> i32 {
         fail("the inherit-leg rfork_spawn did not return a child pid");
     }
     let mut st3: i32 = -1;
-    if unsafe { t_wait_pid_for(pid3 as i32, 0, &mut st3 as *mut i32) } != pid3 {
+    if unsafe { t_wait_pid_for(pid3 as i32, T_WAIT_PACKED, &mut st3 as *mut i32) } != pid3 {
         fail("wait_pid_for did not reap the inherit-leg child");
     }
     if !t_wait_if_exited(st3) || t_wait_exitstatus(st3) != 0 {
@@ -443,7 +443,7 @@ pub extern "C" fn rs_main() -> i32 {
     }
 
     let mut st4: i32 = -1;
-    let seen = unsafe { t_wait_pid_for(pid4 as i32, T_WAIT_WNOHANG, &mut st4 as *mut i32) };
+    let seen = unsafe { t_wait_pid_for(pid4 as i32, T_WAIT_PACKED | T_WAIT_WNOHANG, &mut st4 as *mut i32) };
     if seen != 0 {
         fail("the exec-leg child was already dead when the parent resumed -- \
               the parent was released by the child's DEATH, so the exec release \
@@ -456,7 +456,7 @@ pub extern "C" fn rs_main() -> i32 {
     if unsafe { t_write(jwr, b"g".as_ptr(), 1) } != 1 {
         fail("could not release the exec-leg child");
     }
-    if unsafe { t_wait_pid_for(pid4 as i32, 0, &mut st4 as *mut i32) } != pid4 {
+    if unsafe { t_wait_pid_for(pid4 as i32, T_WAIT_PACKED, &mut st4 as *mut i32) } != pid4 {
         fail("wait_pid_for did not reap the exec-leg child");
     }
     if !t_wait_if_exited(st4) || t_wait_exitstatus(st4) != 0 {
@@ -565,7 +565,7 @@ pub extern "C" fn rs_main() -> i32 {
     }
 
     let mut stk: i32 = 0;
-    if unsafe { t_wait_pid_for(r as i32, 0, &mut stk as *mut i32) } != r {
+    if unsafe { t_wait_pid_for(r as i32, T_WAIT_PACKED, &mut stk as *mut i32) } != r {
         fail("leg K: wait_pid_for did not reap the forked child");
     }
     if !t_wait_if_exited(stk) || t_wait_exitstatus(stk) != 0 {
@@ -616,7 +616,7 @@ pub extern "C" fn rs_main() -> i32 {
         fail("leg L: could not fork the write-denial prober");
     }
     let mut lst: i32 = 0;
-    if unsafe { t_wait_pid_for(lpid as i32, 0, &mut lst as *mut i32) } != lpid {
+    if unsafe { t_wait_pid_for(lpid as i32, T_WAIT_PACKED, &mut lst as *mut i32) } != lpid {
         fail("leg L: wait_pid_for did not reap the write-denial prober");
     }
     if t_wait_if_exited(lst) && t_wait_exitstatus(lst) == 0 {

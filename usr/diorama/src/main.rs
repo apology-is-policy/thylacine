@@ -92,6 +92,15 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // A deputy must be its weakest client: `maps` answers code addresses by
+    // reader, and this server reads for everyone (server::deputy_check).
+    if let Err(why) = server::deputy_check() {
+        t_putstr("diorama: refusing to serve: ");
+        t_putstr(why);
+        t_putstr("\n");
+        return 1;
+    }
+
     if vivarium {
         // The runner that handed us fds 0/1 must be our parent -- the one Proc
         // that could have made the pair. A mismatch is a wiring error, and it

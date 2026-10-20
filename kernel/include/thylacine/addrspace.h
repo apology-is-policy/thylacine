@@ -63,6 +63,7 @@
 #ifndef THYLACINE_ADDRSPACE_H
 #define THYLACINE_ADDRSPACE_H
 
+#include <thylacine/caps.h>      // caps_t
 #include <thylacine/page.h>      // paddr_t
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
@@ -146,19 +147,31 @@ struct AddrSpace {
     // pgtable_pages.
     u32            file_pages;
 
+    // The image's record of the Procs that have LEFT it (I-39; DEBUG-FS-DESIGN
+    // 3.3): the NODUMP / NOTRACE / DEBUG_TAINTED bits they carried (PROC_IMAGE_GUARDS)
+    // here, their caps in caps_ever below. A holder's authority stays in the bytes
+    // after the holder is gone -- an RFMEM child keeps the image its creator filled
+    // -- so the image join weighs the record beside its live mappers. Written at
+    // every departure (addrspace_record_holder), never cleared; exec's fresh
+    // space starts without one.
+    u32            guards_ever;
+
     // B-1a' audit F4: this space's identity, for the records that outlive it.
     // The eager charge record on a Burrow names the address space that PAID
     // (Burrow.charge_as_id), never the pid: a pid survives exec and would name
     // the successor's space, which never paid. From a global counter at
     // addrspace_alloc; never 0, never reused.
     u64            id;
+
+    // The caps half of the record above.
+    caps_t         caps_ever;
 };
 
-_Static_assert(sizeof(struct AddrSpace) == 72,
-               "AddrSpace is 72 bytes: ref+lock (8) + pgtable_root (8) + "
+_Static_assert(sizeof(struct AddrSpace) == 80,
+               "AddrSpace is 80 bytes: ref+lock (8) + pgtable_root (8) + "
                "context_id (8) + vmas (8) + the three I-32 u32 axes + "
-               "page_budget + page_peak + pgtable_pages + file_pages (28, "
-               "padded to 32) + id (8). "
+               "page_budget + page_peak + pgtable_pages + file_pages + "
+               "guards_ever (32) + id (8) + caps_ever (8). "
                "Growth is fine -- this assert is a drift alarm, not an ABI.");
 
 // Allocate an address space with a fresh, empty L0 table. Returns NULL on OOM
@@ -217,6 +230,14 @@ void addrspace_ref(struct AddrSpace *as);
 //     `isb`s BEFORE the drop -- after which no walk on this CPU reaches the old
 //     root and no lookup matches the old tag.
 void addrspace_unref(struct AddrSpace *as);
+
+// addrspace_unref in two steps, for a caller with work that must follow the
+// decision and precede the drain (exec's device reset). addrspace_release drops
+// one reference and returns true when it was the last; the caller then owns the
+// space and MUST call addrspace_destroy, under the same no-translation
+// precondition as addrspace_unref. Everyone else calls addrspace_unref.
+bool addrspace_release(struct AddrSpace *as);
+void addrspace_destroy(struct AddrSpace *as);
 
 // LINEAGE L-4b: build a COPY-ON-WRITE clone of `src` -- the address-space half of
 // fork. Returns a fresh AddrSpace with ref 1 whose VMA list mirrors `src`'s, or

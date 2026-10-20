@@ -47,6 +47,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <time.h>
 
@@ -576,7 +577,8 @@ static int test_cross_proc_gate(void)
 
 /* A socket fd does not fit an fd_set, and FD_SET must say so instead of
  * storing 128 MiB past the set. The child does exactly that and must die by
- * abort() -- 127 here -- not return, and not fault on some unmapped page. */
+ * abort() -- SIGABRT -- not return, and not fault on some unmapped page
+ * (SIGSEGV). */
 static int test_fdset_guard(void)
 {
     char *cargv[] = { (char *)SELF, (char *)"fdsetoob", NULL };
@@ -586,8 +588,8 @@ static int test_fdset_guard(void)
         printf("test: fdset guard: respawn failed errno=%d\n", errno);
         return -1;
     }
-    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 127) {
-        printf("test: fdset guard: child status %#x (want abort = exit 127)\n",
+    if (waitpid(pid, &st, 0) != pid || !WIFSIGNALED(st) || WTERMSIG(st) != SIGABRT) {
+        printf("test: fdset guard: child status %#x (want abort = WIFSIGNALED SIGABRT)\n",
                (unsigned)st);
         return -1;
     }

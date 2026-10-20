@@ -2,13 +2,24 @@
 id: seam-el0-irq-tail-no-notes
 type: seam
 title: "Notes are evaluated on only one of the two EL0 return tails, so Ctrl-C misses a CPU-bound loop"
-status: open
+status: closed
 surface: [sub-kernel-exception]
 opened-by: chg-2026-08-02-entry-sweep
 tracker: "task #21"
 created: 2026-08-02
-updated: 2026-10-06
+updated: 2026-10-12
+closed-by: chg-2026-10-12-note-target
 ---
+## Closed (2026-10-12)
+
+The 0x480 slot now branches into the synchronous slot's tail, renamed
+`.Lel0_return`, so every EL0 return runs the die-check, the stop leg and the
+notes leg ([[chg-2026-10-12-note-target]]); the handler frame saves the whole
+interrupted context. A thread computing at EL0 takes its notes at the next
+tick or kick. Held by viv-pheno-probe L332 and jc-probe's spinint and
+spinnote rungs, each red with the branch reverted, and by
+[[spec-tail-order]]'s `RunMeets`. The text below is the seam as it stood open.
+
 ## Owed
 
 Give the EL0 interrupt slot its own return trampoline — exactly as the EL0

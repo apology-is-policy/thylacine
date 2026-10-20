@@ -158,11 +158,17 @@ struct Thread;
 // mask exactly it.
 #define NOTE_BIT_SAK         6u
 
+// The `term` note (SIGTERM; docs/ERRORS.md "The terminate-request note"): a
+// request to end, catchable, default terminate. Its own bit, apart from
+// INTERRUPT's, so a Proc that ignores Ctrl-C still dies of an unhandled term.
+#define NOTE_BIT_TERM        7u
+
 // F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
 // family even though no v1.0 consumer exists; reserves the bit
 // position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live. IM-1 adds
-// NOTE_BIT_SAK (bit 6), live.
-#define NOTE_MASK_SUPPORTED  0x7fu
+// NOTE_BIT_SAK (bit 6), live. The signal chunk adds NOTE_BIT_TERM (bit 7),
+// live -- the last family the per-Thread u8 claim and designation hold.
+#define NOTE_MASK_SUPPORTED  0xffu
 
 // #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
 // One value per row of `g_known_notes`, so a note's disposition is a property
@@ -261,6 +267,13 @@ struct NoteQueue {
 // return-tail uncaught-interrupt default-terminate.
 #define NOTE_NAME_INTERRUPT "interrupt"
 
+// The request-to-end note, SIGTERM's (NOTE_BIT_TERM above). Userspace-
+// postable, like `interrupt`.
+#define NOTE_NAME_TERM "term"
+
+_Static_assert(sizeof(NOTE_NAME_TERM) <= NOTE_NAME_MAX,
+               "NOTE_NAME_TERM does not fit NOTE_NAME_MAX");
+
 // `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
 // fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
 // NOTE_NAME_MAX = 16 bytes including NUL. The `snare:` prefix is
@@ -278,6 +291,16 @@ struct NoteQueue {
 #define NOTE_NAME_SNARE_BRK    "snare:brk"    // EL0 brk #imm (assertion/debug)
 #define NOTE_NAME_SNARE_ILL    "snare:ill"    // EL0 unknown sync EC
 #define NOTE_NAME_SNARE_FPE    "snare:fpe"    // EL0 floating-point trap (reserved; no v1.0 path emits this)
+#define NOTE_NAME_SNARE_ABORT  "snare:abort"  // EL0 brk #SNARE_ABORT_BRK_IMM -- Pouch's abort()
+
+// The `brk` immediate Pouch's abort() executes (patch 0011), read back from
+// ESR's ISS by the EL0 brk handler, which reports snare:abort for it and
+// snare:brk for every other immediate. Clear of every immediate a toolchain or
+// runtime in the tree emits: 0x1 (clang __builtin_trap), 0x3e8 (gcc
+// __builtin_trap), 0xf000 (debugger breakpoints), 0x5500-0x55ff (UBSan's trap
+// mode), 0xc471 (WebKit's WTFCrash and the JSC JIT's breakpoint). Pouch's copy
+// is checked by the boot probe, which sees SIGABRT only if the two agree.
+#define SNARE_ABORT_BRK_IMM    0xab06u
 
 // Length sanity -- the longest name + NUL must fit NOTE_NAME_MAX. The
 // constants above are #define'd as string literals; sizeof on the
@@ -350,6 +373,38 @@ _Static_assert(sizeof(NOTE_NAME_SNARE_ILL)   <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_ILL does not fit NOTE_NAME_MAX");
 _Static_assert(sizeof(NOTE_NAME_SNARE_FPE)   <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_FPE does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_ABORT) <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_ABORT does not fit NOTE_NAME_MAX");
+
+// The POSIX signal a Proc's death by a note records (Proc.term_sig), which the
+// packed wait word reports (proc.h WAIT_STATUS_SIGNALED). Linux aarch64
+// numbering, the wait word's own, so the Pouch and phenotype boundary-lines pass
+// it through unchanged; vivarium.c pins each against its VIV_SIG* twin.
+// docs/ERRORS.md "Exit-status semantics" is the table in prose.
+enum note_death_sig {
+    NOTE_SIG_HUP  = 1,  NOTE_SIG_INT  = 2,  NOTE_SIG_QUIT = 3,  NOTE_SIG_ILL  = 4,
+    NOTE_SIG_TRAP = 5,  NOTE_SIG_ABRT = 6,  NOTE_SIG_BUS  = 7,  NOTE_SIG_FPE  = 8,
+    NOTE_SIG_KILL = 9,  NOTE_SIG_SEGV = 11, NOTE_SIG_PIPE = 13, NOTE_SIG_TERM = 15,
+};
+
+// The signal a death by the note `name` records: a snare:* name, or a
+// terminate-default row of g_known_notes. 0 for a note that cannot kill (an
+// IGNORE or STOP row) and for a name that is no note at all. PURE.
+int notes_death_signal(const char *name);
+
+// A snare death the caller may post to itself: SYS_POSTNOTE's self arm ends the
+// caller with it rather than queueing it (operator vote 2026-10-14). Returns the
+// matching NOTE_NAME_SNARE_* literal -- proc_fault_terminate's contract wants
+// the literal, never a caller's buffer -- or NULL for every other name. PURE.
+const char *notes_self_death_snare(const char *name);
+
+// True when a userspace post may carry `name`: a supported note outside the
+// kernel-synthetic-only families (snare:*, tty:*, sak). notes_post refuses any
+// other name from userspace with -T_E_INVAL; SYS_POSTNOTE's cross arm asks it
+// before the walk, so a refused name is refused whatever the target's state.
+// The self-death snares are not postable: the self arm ends the caller with
+// them before it posts. PURE.
+bool notes_name_user_postable(const char *name);
 
 // ============================================================================
 // Public API
@@ -564,11 +619,12 @@ int notes_post_pid(int pid, const char *name, u32 arg);
 // opening the notes fd (self-managing) AFTER an interrupt armed the latch
 // but BEFORE a latch-woken thread A reaches its EL0-return tail clears the
 // latch — but A has already unwound its blocked syscall *_INTR (e.g. a 9P
-// RPC surfaces -P9_E_IO). No wrong termination (the tail re-validates);
-// the cost is one EINTR-class return on A, the POSIX EINTR-with-handler
-// shape. Unreachable at v1.0: multi-thread Procs are stratumd-class and
-// never console-owner/foreground, and the single-thread variant requires
-// the Proc to change its own disposition concurrently with a Ctrl-C.
+// RPC surfaces -P9_E_IO). No wrong termination (the tail re-validates, and a
+// fault re-validates at the fault: notes_fault_dying_latch); the cost is one
+// EINTR-class return on A, the POSIX EINTR-with-handler shape. Reachable: a
+// phenotype guest that clones threads is multi-thread, and a phenotype
+// handler install is not one of the clearing choke points, so its latch stays
+// armed until the note is delivered or drained.
 
 // Register/clear the async note handler (the SYS_NOTIFY body). Stores
 // handler_va with RELEASE (pairs with the dispatcher's acquire, F9) and, when
@@ -600,6 +656,17 @@ bool thread_die_pending(struct Thread *t);
 // predicate of sleep_death_only (DEBUG-FS-DESIGN §5g).
 bool thread_group_death_pending(struct Thread *t);
 
+// The EL0 fault arm's act on a terminate latch: a fault left unresolved while
+// thread_die_pending read true for a latch, not a group death. exits() with the
+// first queued terminate note `t` would die of -- the tail's own pick, made
+// here because the tail defers a note while a handler runs or the user SP is
+// unusable, and the faulting instruction would re-execute into the same fault
+// forever. When no queued note of an armed class would still default-terminate
+// (a phenotype handler installed for it since the arm, which clears no latch),
+// those latches are stale: cleared under q->lock, and the call returns. Owner
+// thread only.
+void notes_fault_dying_latch(struct Thread *t);
+
 // Can a death end this thread's sleeps? Not a kernel thread's (no death
 // reaches kproc), not one inside an exit close until a kill forces it, and not
 // loom_free's kthread join: a wait either one starts ends only when its event
@@ -619,14 +686,26 @@ bool thread_death_reaches(struct Thread *t);
 bool thread_caught_note_deliverable(struct Thread *t);
 
 // ARCH 8.8.3: the sleep sites' unwind decision. True iff a family deliverable to
-// `t` is claimed by `t` already, or is not yet claimed AND `t` claims it (a CAS
+// `t` is claimed by `t` already, or designated to it by the posting walk (the
+// designation becomes the claim), or is not yet claimed AND `t` claims it (a CAS
 // on proc_flags' claim sub-field that also re-validates the caught bit, recorded
 // in t->note_claim), so one caught note unwinds ONE interruptible sleeper -- as
 // Linux interrupts one thread for a process-directed signal -- and every other
 // sleeper re-parks. The claim holds until `t`'s next EL0-return tail, which
-// releases it and wakes the Proc's sleepers if its note is still queued. The
-// sleep sites evaluate it LAST, only when every other unwind gate has passed.
+// releases it and walks the Proc again if its note is still queued. The sleep
+// sites evaluate it LAST, only when every other unwind gate has passed.
 bool thread_caught_note_claim(struct Thread *t);
+
+// ARCH 8.8.3 (dec-2026-10-12-note-target): the posting walk's designation.
+// thread_caught_wait_kind is the enum caught_wait of the wait `t` is entering
+// (sleep_common/tsleep_common publish it under t->wait_lock). notes_handoff_
+// target ends the designations that wait cannot honour, keeping only `keep`,
+// and walks again for a family still queued; no lock held. notes_exit_drop_
+// locked ends `t`'s claim and designation at its THREAD_EXITING commit, under
+// g_proc_table_lock.
+u8   thread_caught_wait_kind(const struct Thread *t, bool caught_ok);
+void notes_handoff_target(struct Thread *t, u8 keep);
+void notes_exit_drop_locked(struct Thread *t);
 
 // bug-2 (VIVARIUM 6.23): does `t` hold a PHENO_LINUX note handler that ESCAPED
 // its frame -- siglongjmp'd to an ancestor sigsetjmp point without rt_sigreturn,

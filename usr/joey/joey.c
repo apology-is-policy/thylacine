@@ -1083,9 +1083,17 @@ static int do_pouch_hello_smoke(void) {
     //   - sigaction(SIGINT, SIG_IGN)  bootstrap fast-paths to NCONT without
     //                                  invoking the user handler
     //   - sigaction(SIGUSR1, ...)     -> EINVAL (unsupported signum)
+    //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
+    //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);
+    //     raise(SIGABRT) and kill(getpid(), SIGABRT) read SIGABRT (S-2)
+    //     and raise/kill(self) of SIGSEGV, SIGBUS, SIGILL and SIGFPE read
+    //     that signal (S-3)
+    //   - kill() refusals read ESRCH and EPERM, not the seam's EIO (S-3)
+    //   - SIGTERM rides `term`: its handler runs apart from SIGINT's ignore
+    //     and mask, and a child killed by it reads WIFSIGNALED SIGTERM
     // Closes POUCH-DESIGN.md §6.4 / §14 sub-chunk 13b's exit criterion.
     static const char psig_name[]   = "pouch-hello-signals";
-    static const char psig_expect[] = "pouch-hello-signals: exit 0";
+    static const char psig_expect[] = POUCH_CENSUS_SIGNALS;
     if (pouch_smoke_one(psig_name, sizeof(psig_name) - 1,
                         psig_expect, sizeof(psig_expect) - 1) != 0)
         return -1;
@@ -1168,7 +1176,8 @@ static int do_pouch_hello_smoke(void) {
     // deliberately NULL-derefs; the kernel MUST route the EL0 fault
     // through arch/arm64/exception.c::exception_sync_lower_el ->
     // proc_fault_terminate(NOTE_NAME_SNARE_SEGV, 0) -> exits("snare:segv")
-    // -- NOT extinct. Joey reaps with exit_status = 1 (v1.0 collapse).
+    // -- NOT extinct. Joey's raw wait reads 1 (a packed wait reads
+    // WIFSIGNALED SIGSEGV; pouch-hello-signals pins that).
     // The marker "pouch-hello-fault: about to fault" proves the binary
     // actually ran the deref (not just failed to start). Pre-#3a (tip
     // 26e3156 and earlier) this binary would extinct the kernel and
@@ -6565,9 +6574,9 @@ int main(void) {
     // stratumd's 128 KiB malloc/free pattern in isolation. Report-only: the boot
     // continues regardless, so the torture's fd-1 verdict ("single-threaded OK"
     // / "REPRODUCED" / "ALL OK") -- and, when built POUCH_MALLOCNG_DIAG=1, the
-    // assert-path byte dump on fd 2 -- land in the log either way. The
-    // single-threaded phase runs first and returns before spawning threads, so a
-    // mallocng assert there is a clean _Exit(127) (no live-peer extinction).
+    // assert-path byte dump on fd 2 -- land in the log either way. A mallocng
+    // assert in either phase is abort(): the console names it snare:abort with
+    // its pc and lr, and the whole Proc dies with it (I-24).
     (void)pouch_smoke_one("pouch-hello-mallocng-torture",
                           sizeof("pouch-hello-mallocng-torture") - 1,
                           "mallocng-torture: ALL OK",
@@ -7480,11 +7489,11 @@ int main(void) {
             // this exposed the AEGIS-256 / mallocng heap-corruption bug
             // (kernel extinction via FAULT_UNHANDLED_USER on the stale-
             // PTE-routed access). With F1's mmu_uninstall_user_range +
-            // 0012's mallocng-assert -> _Exit(127), the boot should now
-            // either reach `joey: stratumd-boot /srv/stratum-fs bound
-            // after retry N` (F1 was the root cause) or reach
-            // `child exit_status=127` (F1 wasn't, mallocng still asserts
-            // -- but cleanly, NOT as kernel extinction).
+            // 0012's mallocng assert (now abort(), snare:abort), the boot
+            // should now either reach `joey: stratumd-boot /srv/stratum-fs
+            // bound after retry N` (F1 was the root cause) or print a
+            // `reason="snare:abort"` user-fault line (F1 wasn't, mallocng
+            // still asserts -- but cleanly, NOT as kernel extinction).
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
         };
 
@@ -11955,7 +11964,9 @@ int main(void) {
         // Stopped is the resume proof AND the task-#19 regression); `bg`
         // resumes it backgrounded; `fg` + ^C -> interrupt terminates it
         // (post-resume signal delivery, the F4 leg); the shell reclaims the
-        // terminal + still runs pipelines; then the `maskstop` rung, which is
+        // terminal + still runs pipelines; a job spinning with no syscall
+        // takes ^C, by default and by a handler (spinint/spinnote: only an
+        // IRQ return reaches it, ARCH 8.8.3 #964); then the `maskstop` rung, which is
         // the ONLY leg that reaches the EL0-return tail's NOTE_DFL_STOP arm --
         // /susp-mask-child masks NOTE_BIT_TTY so the ^Z fan POSTS instead of
         // stopping, keeps running through the ^Z, and takes the deferred stop
@@ -11982,7 +11993,8 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
-                     "jobs/fg-restop/bg/fg-int/maskstop/exit over a live "
+                     "jobs/fg-restop/bg/fg-int/spinint/spinnote/maskstop/"
+                     "exit over a live "
                      "pts; killst)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */

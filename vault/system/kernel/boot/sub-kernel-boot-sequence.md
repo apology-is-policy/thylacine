@@ -19,7 +19,7 @@ abis: [abi-boot-banner]
 design:
   - "docs/TOOLING.md section 10"
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -163,6 +163,15 @@ the largest span one eviction may write back, and it is the number that governs
 **false sharing**; the architecture permits them to differ, and only the second
 one tells you how far apart two hot per-CPU fields must sit
 ([[sub-kernel-gic]] is the consumer).
+
+**A third field of the same register sets the I-cache policy (B-2a, 2026-10-07).**
+`hw_cpu_ident_detect` also reads `CTR_EL0.L1Ip` on each CPU and, if any CPU
+reports an I-cache that is not PIPT (`hw_ctr_icache_aliases`; VIPT, and the
+VPIPT/AIVIVT encodings, are treated as aliasing, as Linux treats them), sets a
+sticky flag that `arch_icache_sync_range` reads ([[sub-kernel-mmu]]). The flag
+can be set after a by-VA sync already ran on another CPU without that sync
+having missed anything on the late CPU: each CPU invalidates its whole I-cache
+when it turns its MMU on (#214), before it records here.
 
 A granule field of zero is decoded as **zero, verbatim** — architecturally it
 means "this part provides no writeback-granule information", which is a

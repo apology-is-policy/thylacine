@@ -17,6 +17,7 @@
 #include <thylacine/allowance.h>
 #include <thylacine/handle.h>
 #include <thylacine/pci_handle.h>   // kobj_pci_resolve_bdf (the PCI gate leg)
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>       // VIRTIO_DEVICE_ID_RNG
@@ -413,7 +414,7 @@ void test_allowance_revoke_on_group_terminate(void) {
     // single-threaded test context has no concurrent killer or confer -- so the
     // lock guards nothing reachable. The locked path is exercised in production
     // (the warden's killgrp) + by the SMP gate.
-    proc_group_terminate(p, "test-devremoved");
+    proc_group_terminate(p, NOTE_SIG_KILL, "test-devremoved");
     TEST_ASSERT(p->allowance != NULL, "allowance struct survives terminate (freed at reap)");
     TEST_ASSERT(!allowance_permits(p, HW_RES_IRQ, 40, 0), "revoked by group_terminate");
     hidx_t h = allowance_handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
@@ -423,7 +424,7 @@ void test_allowance_revoke_on_group_terminate(void) {
     // A broad (NULL allowance) Proc terminate is a safe no-op for the revoke.
     struct Proc *b = amk();
     TEST_ASSERT(b && b->allowance == NULL, "broad proc");
-    proc_group_terminate(b, "test-broad");
+    proc_group_terminate(b, NOTE_SIG_KILL, "test-broad");
     TEST_ASSERT(b->allowance == NULL, "broad terminate: no allowance, no crash");
     adrop(b);
 }

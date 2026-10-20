@@ -3294,7 +3294,7 @@ void test_cons_episode_begins_on_sak(void) {
         else if (!name_eq(got.name, NOTE_NAME_SAK)) err = "the note is `sak`";
     }
     if (!err) {
-        if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, false) != -1) err = "a userspace `sak` post is refused";
+        if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, false) != -(int)T_E_INVAL) err = "a userspace `sak` post is refused";
         else if (f.trusted->notes->count != 0u)                          err = "...and queues nothing";
         else if (notes_post(f.trusted, NOTE_NAME_SAK, 0u, NULL, true) != 0) err = "the kernel-synthetic post is accepted";
     }
@@ -4439,7 +4439,7 @@ void test_cons_caught_note_ends_read(void) {
     TEST_ASSERT(!slot_held, "the interrupted read released the reader slot");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
         "control: the native reader waited, the note posted, the read returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native reader and it slept again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native reader slept again");
     TEST_EXPECT_EQ(ctl.rc, 1L, "control: the native read ends on the fed byte");
 }
 

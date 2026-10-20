@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-10-06
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -174,12 +174,27 @@ paths find the session dead.
 replies concurrently — the multi-in-flight harness. Knobs the audits lean
 on: `eagain_budget` (reject the next N sends with `P9_TRANSPORT_EAGAIN`,
 synthesizing nothing — models #349 back-pressure where a real full ring
-drops nothing), and the **#375 scribble knob** (`scribble_buf`/`len`/`arm`:
-on the next recv — which runs inside the client's pump/park window where
-`c->lock` is dropped — overwrite the given buffer with 0x5A, deterministically
-modeling a peer rebuilding the shared `out_buf`; the
-`send_backpressure_spill_survives_outbuf_reuse` regression is built on it).
-The ring resets head/tail to 0 on full drain. Readiness is `closed` or a
+drops nothing). A send decrements it under the mq lock, so a test sets and
+reads it through `p9_mq_loopback_set_eagain_budget` /
+`p9_mq_loopback_eagain_budget`, which take that lock; only a responder,
+already under it, stores it directly. A plain store from a test thread can
+be overwritten by a send in flight: the closer tests' unstall stored 0
+while a closer's job was sending, the decrement left the budget near 2^32,
+the next send met EAGAIN and self-pumped an empty FIFO (EOF here), and the
+session died (2026-10-14: `p9_closer.kill_in_final_close_keeps_exit`'s
+smp8 red, about one trial in 6,000). The other knob the audits lean on is
+the **#375 scribble knob** (`scribble_buf`/`len`/`arm`, armed through
+`p9_mq_loopback_arm_scribble` and read through
+`p9_mq_loopback_scribble_armed`, as a recv decrements it under the same
+lock): on the next recv — which runs inside the client's pump/park window
+where `c->lock` is dropped — overwrite the given buffer with 0x5A,
+deterministically modeling a peer rebuilding the shared `out_buf`; the
+`send_backpressure_spill_survives_outbuf_reuse` regression is built on it.
+A read of either knob on a loopback that is not live dies: every value is
+one a test may arm, so none can stand for "not live". The destroy takes
+the lock too, as a test whose wait for its closer ran out destroys the
+loopback while that closer may be inside a send or recv. The ring resets
+head/tail to 0 on full drain. Readiness is `closed` or a
 non-empty FIFO, sampled under its lock with the hook filed on `ready_list`,
 which every append, the close and the destroy walk; a test that appends a
 reply by hand must walk it too, or a fan-in waiter sleeps over it

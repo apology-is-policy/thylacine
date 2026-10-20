@@ -30,7 +30,7 @@ hazards: []
 abis: [abi-caps]
 design: ["docs/LLVM-DESIGN.md", "docs/GPU-DESIGN.md"]
 created: 2026-09-07
-updated: 2026-09-17
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -131,6 +131,10 @@ form, redeems via `SYS_CAP_USE`, and returns 0 when the Proc holds CAP_JIT else
 a distinct non-zero per failure (`ENOSRV`/`ENOCTL`/`EGRANT`/`EREDEEM`). The
 `jit` clearance level (`name b"jit", caps T_CAP_JIT`) and its default eligibility
 are corvus policy ([[sub-corvus]]). The CAP_JIT bit is `1<<11` ([[abi-caps]]).
+A program that must carry no credential defines `THYLA_CAPJIT_SELF_ONLY` before
+the include: the bearer form and its demo password compile out, a refused SELF
+form returns `ECLEAR`, and every report goes to stderr, so a program whose stdout
+is its output (`jsc`, [[sub-webkit]]) stays clean. SDL keeps both forms.
 The duplication between this header and thylajit's own copy is deliberate and
 bounded — if the corvus wire or the clearance name changes, both move
 (grep-anchored).

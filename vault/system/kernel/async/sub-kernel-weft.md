@@ -15,7 +15,7 @@ design:
   - "docs/NET-THROUGHPUT.md"
   - "docs/reference/125-weft.md"
 created: 2026-08-02
-updated: 2026-08-24
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -43,6 +43,11 @@ Three calls, and none of them hands a shared object to anyone:
   claims it, and maps the region in. Idempotent: a second call returns the same
   address.
 - **Unshare** — the registrant disarms one of its own unclaimed identifiers.
+- **Claim from a named owner** (`weft_share_claim_from`, Lictor's seat import,
+  2026-09-22) — a trusted broker claims an identifier only if its registrant's
+  stripes match the peer the broker's accepted connection names, so a mismatch
+  never consumes another peer's share. The seat-import syscall checks the seat
+  service and its hardware-creation capability before it claims.
 
 The identifier never reaches the client. It travels server-to-kernel inside a
 round-trip the kernel initiated, so a client cannot forge one, and a claim
@@ -203,6 +208,18 @@ warned; a later touch faults.
 The reaper parks indefinitely on an empty registry rather than ticking, so an
 idle machine has no periodic wakeup.
 
+The kernel test suite runs beside the live reaper thread, which sweeps on the
+real clock once a second from a real registration's wake until the registry
+empties. A test drives its own sweeps on a synthetic clock, so a live sweep
+landing inside a test's window would stamp or reclaim the test's binding and
+decide the test by when the thread's second came up. A binding a test
+registers (`weft_reap_register_for_test`) is therefore invisible to the
+thread's `weft_reap_sweep`, and its registration wakes nothing; only
+`weft_reap_sweep_for_test` sweeps it. `weft.reap_live_sweep_leaves_test_bindings`
+drives the thread's own sweep against a dead test binding. The other half --
+the test sweep never touches a real binding -- holds by the same comparison
+and has no witness: no real binding exists while the suite runs.
+
 Its liveness test reads the session's dead latch, which only an *active* receive
 path sets. So the guarantee is narrower than it looks: it reclaims a client whose
 session **observed** the death. One that maps and then never touches the session
@@ -251,8 +268,31 @@ winner's address.
 **The reaper's order** is registry lock, then the process table, then the target's
 address-space lock — acquired under the table lock and *held past its release*,
 so the per-page unmap runs with interrupts on rather than inside the table's
-interrupt-off window. Registration and unregistration both run lock-free. The
-close path unregisters before reading the binding, and the reaper nulls the
+interrupt-off window. The held lock alone keeps the space's teardown out: every
+last unref drains through `vma_drain_in`, which takes it before the page table
+or the struct is freed. The find hands back the SPACE it locked, and the sweep
+uses only that pointer, because exec swaps a Proc's space under the table lock
+alone. Until 2026-10-08 the sweep re-read the Proc's pointer three times after
+the walk; an exec in that window had it unlock the new space and leave the old
+one locked forever, and exec's drain of the old space then spun on it (vmaguard
+audit F1). It holds a lock and not a reference because the device-death
+quiesce and the image join read the reference count as "who else holds this
+space", and a transient reaper reference read as a sharer (audit r2 F1). The
+find skips a Proc whose exit close has begun (`PROC_FLAG_EXIT_CLOSING`, read
+under the lock) when it holds the space alone, and the quiesce takes and drops
+the lock before its lock-free walk ([[sub-kernel-death]]); a SHARED space is
+unmapped as usual, because the quiesce does not walk it and the survivor's
+drain would come only at the survivor's death (audit r3 F1).
+`weft.reap_unlocks_the_space_it_locked` swaps the space inside that window
+while another party holds the new space's lock, and checks that the find held
+the old lock and took no reference, that the sweep unmapped and uncharged the
+old space and unlocked its lock, and that the other party's hold survived;
+`weft.reap_skips_an_exit_closing_proc` checks the skip, and
+`weft.reap_unmaps_a_shared_exit_closing_space` that a shared space is still
+unmapped.
+
+Registration and unregistration take the registry lock alone, never the table
+or a space lock. The close path unregisters before reading the binding, and the reaper nulls the
 region pointer under the registry lock, so neither side sees a half-reclaimed
 binding.
 
@@ -290,7 +330,12 @@ holding that process's lock, with no way to name who paid. Sixty-four pages per
 closed flow, monotonically.
 
 The release rule is now: the sharer settles **when the region is shared out and
-this process has unmapped it**, whether or not the pages freed. Once it has
+this process has unmapped it**, whether or not the pages freed. Both of this
+file's settle sites — the explicit share unregister and the owner orphan sweep —
+take their decision inside the reference drop (`burrow_unref_settled`,
+[[sub-kernel-burrow]]): AS-R9 found that claiming the record, dropping the pin
+and restoring the record on a non-final drop left a window in which another
+holder's final drop freed the descriptor under the restore. Once it has
 handed the region across and let go of its own view, it cannot reach those pages,
 and charging a process for memory it cannot touch caps it for nothing — from
 there the consumer's own shared-mapping axis accounts them.
@@ -358,10 +403,11 @@ hybrid split the orthodox 9P transport uses.
   test to any surviving reference releases the charge while the process's own
   claim is still live — an under-count, which is the direction that breaks the
   bound.
-- **A refund goes to the recorded payer, not to whoever is dropping.** Claim
-  against the region before the drop, restore if it did not free; the reaper's
-  sweep runs the same protocol, because the owner it is sweeping is not
-  necessarily the payer.
+- **A refund goes to the recorded payer, not to whoever is dropping.** The
+  claim is taken inside the reference drop (`burrow_unref_settled`), never
+  before it with a restore after (AS-R9: a sibling's final drop in that gap
+  freed the descriptor under the restore); the reaper's sweep uses the same
+  settled drop, because the owner it is sweeping is not necessarily the payer.
 - **The two device kinds are disambiguated by test order** in both the kind
   derivation and the binding allocation. That is sound only while the two subtype
   bits are mutually exclusive by construction, which is enforced in another

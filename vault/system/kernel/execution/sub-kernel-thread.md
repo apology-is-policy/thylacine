@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i31, inv-i44]
 validated-by: [gate-smp]
 locks: [lock-proc-table]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -164,6 +164,12 @@ wait, set only by the vivarium dispatcher for signal(7)'s list and cleared at
 the syscall exit and around a page-in ([[sub-kernel-notes]]); and since
 2026-09-30 `note_claim`, the caught-note families this thread has claimed, which
 only the thread itself writes and its EL0-return tail releases; and since
+2026-10-12 `note_target`, the families the posting walk designated this thread
+for, set under its `wait_lock`, turned into its claim when it unwinds, released
+at its tail, handed off at a wait that cannot take them and dropped at its exit,
+and `caught_wait`, the kind of wait the thread is in (none, unwinds, holds),
+published under its `wait_lock` by the sleep cores (ARCH 8.8.3; both bytes come
+out of the padding beside `in_handler`); and since
 2026-10-05 `cons_frozen_unwound`, the console's record that a caught note
 unwound one of the thread's frozen reads, so its next console read re-takes the
 reader slot by waiting; the thread sets and consumes it, and exec clears it

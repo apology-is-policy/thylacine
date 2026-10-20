@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -39,6 +39,7 @@ a user fault. Four outcomes:
 | `FAULT_HANDLED` | resolved; the return-from-exception re-runs the faulting instruction |
 | `FAULT_UNHANDLED_USER` | bad address or denied permission — the caller terminates the Proc with `snare:segv` |
 | `FAULT_USER_BUS` | a **valid** mapping whose backing store failed, or an abort no page install can resolve — an alignment fault or a synchronous external abort on a mapped page (B-1a' round 4, F17) — `snare:bus` |
+| `FAULT_USER_DYING` | a user fault left unresolved while the faulting thread's death was pending (`thread_die_pending`, sampled before and after the page-in) — the death is its disposition: no `user fault:` line, no `snare:*` of its own (EL0 handling: [[sub-kernel-exception]]) |
 | `FAULT_FATAL` | reserved; fatal kernel paths extinct in place |
 
 The `FAULT_USER_BUS` / `FAULT_UNHANDLED_USER` distinction is the substance, not
@@ -185,6 +186,21 @@ than clears because the fault may sit inside a syscall that is itself
 interruptible. Witness: `demand_page.file_pagein_not_note_interruptible`
 ([[dec-2026-09-29-caught-signal-slow-calls]]).
 
+**A page-in a death abandoned is that death** (groupstatus, I-24). Since only a
+death can unwind the page-in's read, a fault that fails while
+`thread_die_pending` reads true is answered `FAULT_USER_DYING`, not the
+`FAULT_USER_BUS` of an I/O error. Measured before the change: jsc's clean exit
+abandoned a peer JIT thread's 9P text read (`9p: op abandoned (tag 0, death)`),
+the pager answered `snare:bus`, and the console printed a user fault that
+never happened; that thread's `exits()`, when it was the last out, recorded
+status 1 over the group's claim ([[sub-kernel-death]]). Pending is sampled before the page-in as well as after,
+so a terminate latch a peer revokes while the read unwinds (by installing a
+handler) still answers DYING; the EL0 arm then finds the latch stale and
+re-executes, and the re-executed fault meets a page-in no latch shapes.
+Witnesses: `demand_page.file_read_error_dying_is_death` (control: the same
+failed read with no death pending is BUS),
+`demand_page.file_read_revoked_latch_is_dying`.
+
 The note did not exist when this dossier was written, deliberately: half its
 enforcement was unswept, and an invariant written from half its enforcement is
 the error this arc keeps finding. It was minted once exec and the image cache
@@ -225,7 +241,7 @@ now.
 | type | resolution | notes |
 |---|---|---|
 | anonymous | contiguous chunk; offset arithmetic | the ordinary case |
-| **code** | *identical to anonymous* | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot |
+| **code** | *identical to lazy-anonymous* (B-2a; identical to anonymous before) | I-42/JIT: two aliases of one region, each installing at **its own** VMA prot; the commit invalidates the I-cache over the new page first. A sealed region (B-2b) has one alias, EXEC alone, and its pages are resident from creation: step 2 refuses a load or store of it, and a fetch hits the resident page and installs an execute-only leaf with no sync |
 | MMIO | device PA + offset, device attributes | |
 | DMA | every page resolved through `kobj_dma_pa_at` (a weave is a SKEIN of blocks since 2026-09-09; `Burrow.pa` is 0 for a DMA Burrow, deliberately), cacheable | coherent on this platform's transports |
 | **HOSTMEM** | PCI BAR PA + offset, **host-dictated** MAIR attr | Warp-6 V-2: a hostmem subrange; `kobj_pci` non-NULL is the liveness guard |
@@ -241,18 +257,29 @@ NORMAL_NC for WC), honoured exactly rather than guessed. So the arms now carry a
 fixed index (NORMAL_WB or DEVICE) and are byte-identical to the bool they
 replaced.
 
-The code arm shares the anonymous arm **because it must**: a JIT region is
+The code arm shares the lazy-anonymous arm **because it must**: a JIT region is
 mapped twice, writable at one address and executable at another, and both
-aliases fault through here. Each installs at its own VMA's prot, so no
-code-specific PTE path exists that could drift away from W^X.
+aliases fault through here. The first touch through EITHER alias commits the
+page -- charged once -- and the other alias's first touch finds it resident and
+maps it uncharged. Each installs at its own VMA's prot, so no code-specific PTE
+path exists that could drift away from W^X. A code VMA is never
+`VMA_FLAG_COW` (`addrspace_clone` refuses CODE), so the copy-on-write branch
+stays ANON_LAZY's.
 
-**But the comment on that arm overstates where the safety comes from.** It says
-the W^X decision "stays entirely in `make_user_pte_l3`, which is what makes
-'no PTE is ever W AND X' a property of the encoder." The encoder does no such
-thing — handed `WRITE|EXEC` it emits a writable, user-executable PTE faithfully.
-The property holds because `vma_alloc` refuses to create such a VMA. On the one
-surface that deliberately holds two mappings of one code region, the comment
-points at the wrong guard. Task #59.
+**The commit invalidates the I-cache first (B-2a).** A code page's commit runs
+`arch_icache_sync_range` over the fresh page before `pagemap_install`, while
+the page is private to the fault, so it precedes both aliases' leaves. Zeroing
+does not touch the I-cache and nothing on the free path does, so without it an
+exec-alias fetch of a page the Proc never published could run a previous
+owner's stale lines instead of the `UDF #0` the zeroes promise. This is the
+CL-7k-3 F1 invalidate, moved from create (which no longer allocates) to the
+commit ([[sub-kernel-mmu]]).
+
+**The arm's comment used to overstate where the safety comes from** (task #59).
+It said the W^X decision "stays entirely in `make_user_pte_l3`." The encoder
+does no such thing — handed `WRITE|EXEC` it emits a writable, user-executable
+PTE faithfully; the property holds because `vma_alloc` refuses to create such a
+VMA. B-2a rewrote the comment to name `vma_alloc` as the guard.
 
 ## The COW break — a different axis, not a seventh row
 
@@ -499,9 +526,10 @@ moment; the page-in then drops `as->lock` and sleeps on the 9P read; a sibling
 thread's `SYS_BURROW_PROTECT` to none (sealed or not) lands in that window --
 the precheck admits FILE, and a whole-mapping protect leaves the geometry the
 re-lookup verifies exactly as it was. Installing at the CURRENT `vma->prot`
-then encoded none as a user-READABLE RO leaf (`make_user_pte_l3` has no
-"no access" encoding): a guard that did not guard, with no fault ever running
-step 2 again for that page. `file_fault_still_admitted` now re-checks the
+then encoded none as a user-READABLE RO leaf (`make_user_pte_l3` had no
+"no access" encoding until B-2b, whose execute-only row gives none one too):
+a guard that did not guard, with no fault ever running step 2 again for that
+page. `file_fault_still_admitted` now re-checks the
 recorded fault type against the prot as it reads after the sleep, in BOTH
 install paths (each carries its own copy, as each carries the geometry check);
 a refusal installs nothing and answers `FAULT_UNHANDLED_USER`, which is what
@@ -518,7 +546,9 @@ Kernel faults extinct with the faulting address and a message naming the class.
 User faults return a result the caller turns into a per-Proc termination with
 the matching `snare:*` note. A read failure in the file arm is **fail-closed**:
 `FAULT_USER_BUS`, never a silent zero-fill of executable text — filling text
-with zeros on an I/O error would execute them.
+with zeros on an I/O error would execute them. A failure while the faulting
+thread's death is pending is `FAULT_USER_DYING` instead: no page is installed
+either way.
 
 **A node OOM, a refused node charge, a refused pool allocation or a refused
 table charge refuses the fault** (B-1a'): `FAULT_UNHANDLED_USER` from the
@@ -638,6 +668,10 @@ of the path, unreachable-until-COW, hidden by a constant-mirroring unit test.
 including the read-ahead cluster's per-slot byte map, its boundedness, its
 one-batched-read property, an interior short read, and the fail-closed arm. The
 production path is exercised by every EL0 first touch on every boot.
+
+B-2b: `jit.sealed_region` drives a fetch (admitted, no sync), a load and a
+store (refused at step 2) and a load of a page with no leaf (refused, nothing
+mapped) against a sealed region.
 
 B-1a: `protect.pte_uninstalled_then_reinstalled_at_prot`,
 `protect.raise_and_write_keeps_contents` and `protect.cow_split_then_break`

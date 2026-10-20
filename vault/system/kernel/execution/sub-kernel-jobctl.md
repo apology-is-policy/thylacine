@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -228,7 +228,9 @@ candidate; death is not a hot path and the fan is the rare case.
 
 The per-member order is hangup, then the terminate wake, then continue, then
 the caught-note wake, then the job resume: POSIX's order for a newly orphaned
-stopped group (SIGHUP, then SIGCONT). The hangup arms the terminate latch, and
+stopped group (SIGHUP, then SIGCONT). A member that dies of the hangup records
+`SIGHUP` for its parent's packed wait (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
+The hangup arms the terminate latch, and
 the wake unwinds the member's blocked threads to die at their tails. The
 caught-note wake comes after **both** posts because a member may ignore the
 hangup and still catch the continue; a wake between them would find nothing
@@ -470,3 +472,14 @@ One code-comment drift was surfaced and left for its owner: `proc.h` still reads
 fields grew the struct after that comment was written. The compile-time assert is
 sound; only the prose comment drifted, so this is a [[sub-kernel-vivarium]]-arc
 code fix, not a vault edit.
+
+**2026-10-08: flagged by co-tenancy, nothing owed.** `kernel/proc.c` and its
+header moved ~174 lines since the last update: exitclose (the close at exit and
+the kill that forces it), B-2b (the image join's code count, [[chg-2026-10-07-b2-jit]])
+and [[chg-2026-10-08-image-holder-record]] (the image's record of departed
+holders). Checked by hunk context: every hunk lands in `proc_free`,
+`proc_image_join_locked`, `proc_exec_replace`, the exit and group-termination
+paths, or the first line of the ZOMBIE transition, which now records the
+departing holder in its space before the legate teardown and the orphan rule run.
+None touches sessions, process groups, the group note fan, the terminal seam or
+the job-control stop.

@@ -63,6 +63,943 @@ needed the operator.
 
 **Still open.** The kernel owes the exited-thread reap (OPEN-BUGS 15:03Z, P1, audit-bearing); the demo carries only the raised cap. Upstream owes `ut --tty` and the kaua change on aux-3, with the LS-7 kaua audit round, a tile witness each, and dossiers (OPEN-BUGS 09:53Z); gallery's deck mode needs its dossier, the manual entry and a light audit (10:15Z, the place cap P2). P3s: a tag-run tile cannot create under /tmp; the production login prompt sits among daemon log lines; a raw-listed child's early error line leaves the next output mid-line (11:56Z); OpenRCT2's title sequence skips the parks that need OpenMusic (16:03Z). The demo image carries no AS-R9 fix (corona: no reconciled tree in time). The rehearsals covered 1920x1080, 2560x1664 and 1470x924, all headless; the cocoa window was seen only in the operator's own runs, and no two-display setup was tried.
 
+## 2026-10-19 (corona, Opus 5.5, effort max) -- AS-R9 backported: Burrow charges settle inside the drop (branch corona/asr9-main, for main to land)
+
+- *Why now.* The AS-R9 P1 (I-32) was fixed on `corona/async-memory` on
+  2026-10-05 (`4c3289b1b`, then `3a202c608`, `2d722647c`, `f967f36b3`, and the
+  tests `ca9363f70`, `9857e90a9`, `df2856ca8`) and never reached main. corona's
+  bug-queue triage on 10-19 re-read main at `115465888` and found the unsettled
+  claim -> drop -> restore sequence live at five sites: `loom.c` x2, the
+  eager-ANON whole arm of `vma_detach_range_in`, `weft.c` x2. corona asked on
+  yip 0232; main chose a backport (option A) and lands it once it is gated.
+- *The defect.* The Burrow lock covered each of claim, drop and restore and
+  none of the gaps. A sibling holder's final drop between a non-final drop and
+  the restore frees the descriptor, and the restore writes
+  `charge_as_id`/`charge_pages` through it: an extinction while the slot is
+  free (the restore's magic check), a charge planted on an unrelated region if
+  SLUB reissued the slot, or the restore's own "re-charged mid-settle"
+  extinction if the reissued region was charged -- a fault its comment said
+  could not happen. The holder that freed the region read the cleared record
+  and refunded nothing.
+- *Adapted, not cherry-picked.* `git apply -3` of `4c3289b1b` conflicted on
+  corona-only code (the AddrSpace-keyed forms of the private-async arc, a
+  corona-only test), so the port was written by hand against main and every
+  call-site hunk checked to land in the same function as on corona. Two
+  adaptations are main's own: main's `SYS_JIT_DESTROY` settles by
+  `burrow_lazy_footprint` (B-2a) and never used claim/restore, so after the
+  migration `burrow_charge_claim`, `burrow_charge_restore` and
+  `burrow_is_shared_out` had no caller and were deleted -- a claim that can be
+  taken outside a drop is the primitive the defect was made of; and the tests
+  read the record through a test-local `charge_held()` under the leaf lock.
+- *Two wrong statements found on the way.* corona's `vma.h` says the settled
+  refund happens "OUTSIDE as->lock"; the only caller refunds under `as->lock`,
+  outside the Burrow's leaf lock -- the backport says so, and corona's copy is
+  owed. And corona's AS-R9 dossier pass rewrote the narrative sections but left
+  three "what to prosecute" rules saying "claim before the drop, restore if it
+  did not free" -- the defect's own shape, stated as the rule
+  (`sub-kernel-burrow`, `sub-kernel-loom`, `sub-kernel-weft`). Main's copies
+  are corrected here, with the same rule in `sub-kernel-syscall-dispatch`;
+  corona's are owed.
+- *Specs.* No spec models the charge record: `charge_as_id`, `charge_pages`
+  and claim/restore appear in no `.tla`. Two specs model code the port
+  restructures -- `burrow.tla` (`HandleClose`/`UnmapVmo`: every handle and
+  mapping drop now funnels into the settled cores) and `capacity.tla`
+  (`Detach`: the WHOLE arm's free) -- and both re-run in the gate slot.
+- *Audit round* (Fable 5.1, cross-family): 0 P0 / 0 P1 / 0 P2 / 4 P3, a
+  clean close. All four fixed: the callerless `burrow_release_mapping_deferred`
+  deleted; three doc lines that were untrue of main's tree and a test comment's
+  count; the WHOLE arm keyed on `as` (the space it refunds) rather than
+  `payer->as`, the same space for every caller today; and no durable race
+  witness -- the five tests are single-threaded contract pins. For the last,
+  `burrow.tla` now models the record: the settled drop takes it in the same
+  step as the decrement, and `BUGGY_CLAIM_RESTORE` replays the old three-step
+  shape across two threads, which TLC refutes on `NoRecordAfterFree` and,
+  judged on the ledger alone, on `RefundExactlyOnce`. The
+  clean model's count did not move, which is the check that the record
+  changed nothing it should not have. Applying the fixes found two more the
+  round had not reported: `vma.h`'s detach contract still said "the claim is
+  restored", and the ported test comment called the null-Proc unmap probe a
+  behaviour pin, which main's wrapper (it reads `p->as` right after the
+  guard) makes a guard pin.
+- *Open at this entry:* nothing has been built or run. Owed: the Fable 5.1
+  audit round on the adapted form (main counts it as the review), the specs
+  above, and the gate main named on 0232 (default `test.sh` with zero FAIL,
+  `test-fault.sh`, the ci suite, UBSan, `ci-smp-gate` N=10).
+
+## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
+
+- *The two votes.* S-2's land prep left three owned items in OPEN-BUGS. Two
+  needed the operator, asked together in one question with the heritage
+  attached: ARCH 7.6 said `SYS_POSTNOTE` answers errnos while the code answered
+  a bare -1, which Pouch's seam reads as `EIO`, so Pouch's `kill()` of a missing
+  pid reported `EIO` where POSIX says `ESRCH`; and Pouch's `raise(SIGSEGV)` (and
+  `SIGBUS`, `SIGILL`, `SIGFPE`) answered `EINVAL` and the program ran on. The
+  operator chose errnos (vote 9, `dec-2026-10-14-postnote-errnos`) and a
+  self-post of the snare through the self arm over a `brk` immediate per snare
+  (vote 10, `dec-2026-10-14-self-death-snare`). The third item, Go sending no
+  note but `kill`, needed no vote and rides the same chunk because its error
+  mapping depends on vote 9.
+- *What the code had drifted from.* `notes.h` already documented `notes_post`
+  as answering `-EINVAL`/`-EAGAIN`; the code answered -1 to both. Fixing it made
+  two kernel tests that pinned `-1` pin the specific errno instead, and one was
+  renamed (`queue_full_returns_minus1` -> `_eagain`).
+- *Calls made in the chunk, not by the votes.* (1) The gate's refusal is
+  `-EACCES`, not the `-EPERM` ARCH's table named: ERRORS.md forbids `-T_E_PERM`
+  from a handler because it is -1; Pouch's `kill` and the phenotype's `viv_kill`
+  turn it back into `EPERM`. (2) A dead, unreaped child now answers 0 on the
+  native path too, as POSIX counts a zombie a process; the phenotype had
+  answered that way since S-2's audit, and the rule moved into the walk so the
+  two arms cannot drift. (3) The native self-death set includes `snare:abort`,
+  so it equals the phenotype's set exactly (`notes.self_death_snare` compares
+  the two row by row over the death table rather than a list).
+- *The Go port.* `(*Process).signal` wrote every note as a /proc ctl verb; it
+  now posts non-kill notes through a new `syscall.Postnote`, keeping `kill` on
+  ctl for I-26. Its witness needed Go to SEE a death by note, and Go's wait read
+  the raw word (1 for a note death and for `exit(1)` alike), so the packed wait
+  was pulled forward: `Waitmsg.Sig`, `Signaled()`, `ExitCode() == -1`.
+- *A shared fork is read mid-edit.* corona's harness baked
+  ~/projects/go-thylacine between two of my edits and failed on an undefined
+  `waitPacked`; the fork is every checkout's default GOFORK. It was committed
+  local (3471e2a) at once, and the RED runs build the Go sabotages against a
+  private APFS copy.
+- *Found and enqueued:* Pouch's `kill(pid, 0)` existence probe answers `EINVAL`
+  (no native probe arm; an ABI addition, so a vote), and `getppid` is
+  unimplemented in Pouch.
+- *Audit round 1 (Fable 5.1, before any build): 1 P0 + 1 P1 + 0 P2 + 1 P3.*
+  F1: my sweep for callers that pinned `notes_post` to -1 stopped at the two
+  test files I had open; five more pins sat in `test_pgrp.c` and an older leg of
+  `test_notes.c`, and two registered tests would have gone red on the first boot.
+  A two-line awk over `kernel/` now finds the five in the committed files and
+  none after. F2 was the real one: moving the zombie rule into the walk put the
+  ALIVE check BEFORE `notes_post`'s name gates, so a dead child accepted a name
+  no program may send (`bogus`, a snare, `tty:cont`), unlike every document I had
+  written that morning and unlike the phenotype, which judges its signal before
+  its walk -- and u-job-test 12's `kill %1 bogus`, sent right after `kill %1`,
+  raced the child's death. The name is now judged first, through one predicate
+  (`notes_name_user_postable`) that `notes_post` shares; the device leg sends the
+  bad name before the kill, then waits for ZOMBIE in `/proc/<pid>/status` and
+  asks both again. F3: `proc_fault_terminate`'s contract still named one caller
+  of three; the `user fault:` line stays as it is because the gates key on it
+  (ls-jsc on the full `user fault: pid=N reason="snare:..."` form, fourteen more
+  gates and benches on the bare substring -- round 2 corrected my count of "ten").
+- *Audit round 2 (Fable 5.1, on da9018c31): 0 P0 + 0 P1 + 0 P2 + 4 P3, clean.*
+  The reorder survived a full (target state x name class) matrix against the
+  phenotype. The P3s: my rewritten contract named `exits` where the body calls
+  `exits_note` (the function that records the signal); that count; three cells
+  the reorder changed had no pin (a non-child, live or dead, with a refused name;
+  the phenotype's refused signal to a dead child and to a missing pid); and two
+  comments still spelled the gate set by hand. All fixed.
+- *Land gates on 90e147757: two reds, both nondeterministic, both hunted.*
+  (A) `p9_closer.kill_in_final_close_keeps_exit` failed "the closer wrote the
+  run" on one boot in ten of default-smp8 (13:19Z) and of ubsan-smp8 (13:47Z);
+  smp1/smp4 clean. (B) pty-4's type-ahead leg timed out on its cooked-echo
+  anchor.
+- *B, root-caused: a witness, not the guest.* It reproduced 1/3 at the S-3 tip
+  AND 1/3 at main a253c7424, so it predates S-3 (the leg dates from 56b5a412f).
+  Wrong turn: the target was in the transcript and a post-hoc tclsh regexp on
+  the transcript matched, so for an hour the guest looked slow and expect looked
+  broken. The transcript is expect's stdout, which writes every LF as CRLF; it is
+  not the buffer. Expect's own trace (exp_internal armed around that leg only,
+  549 KB) showed the buffer: tapestryd's test-mode `idle-throttle` lines between
+  the accepted line's CRLF and the cooked echo, each ending in a bare LF (the
+  editor holds the console raw; CONS_ONLCR is off for every userspace writer,
+  as on a POSIX tty in raw mode), so `\r\necho` could not match. a5dd0cb9c
+  anchors on the LF. Real buffer: old 0 / new 1; the echo removed, new 0 (still
+  discriminates); the throttle lines removed, old 1 (why most runs pass). On the
+  device: 6/6 green, five of them with a daemon line before the echo.
+- *A, still open.* My first reading -- a double write, because "all of it" and
+  "the bytes" printed no FAIL -- was wrong: TEST_EXPECT_EQ is TEST_ASSERT, which
+  returns, so they never ran (the pinned lesson, missed). What holds: nothing
+  reached the server before the unstall, and the child was a ZOMBIE by then.
+  The first diagnostic (66f8e6573) never linked -- the kernel has no memset and
+  the grown struct's `= {0}` wanted one; the hunt's own build was its first
+  build (9418ae69b fixes it). 8c0115189 logs session A's wire per request with
+  its sender. default-smp8 x30 on it: 30/30 clean -- with 2/20 before, not a
+  significant difference (Fisher ~0.15); hunting on (thyla-pi KVM smp8 x60, then
+  the Mac).
+- *A, reproduced; the first cause I named was wrong.* An in-boot hunt
+  (a16aaf850: the trial 300 times a boot) caught it on both hosts with one
+  signature -- four requests on the wire (Tversion, Tattach, Twalk, Tlcreate:
+  not even the unstall's Twalk), nwrite 0, the closer's job dropped (jobs+1
+  dropped+1 sent+0), still so 20 s later: Mac hvf boots 9 and 16 of 20 (trials
+  148, 74), thyla-pi KVM boot 23 (trial 259). I read it as a fixture race --
+  every trial reuses static `g_mq_a`, and a session's teardown, on its last
+  reference (possibly a closer's, dropped late), would close the NEXT
+  session's transport -- and wrote 7020ef795 (wait for each session's close
+  before the loopback is reused) plus a dossier paragraph (110cb25a9) stating
+  that cause. It was a hypothesis from code reading, never observed: the fix
+  image went red on thyla-pi at boot 3, trial 124, with `released=1` (the
+  previous close HAD run) and the same signature. Both are reverted
+  (b0d3c7c47): closer_quiet() already closes that window on every passing
+  path, since the one closer is asleep at its idle tsleep only after
+  closer_serve dropped each reference.
+- *A, root-caused by observation: a lost store in the test scaffold.* Probes
+  (37a8b9022) recorded each client's first death -- the caller of
+  client_mark_dead_locked, the thread, whether it was dying -- and the trial's
+  phases. Wrong turn two: that image ran 100/100 on the pi and 30/30 on the
+  Mac, because one probe took `c->lock` just before the unstall, the lock the
+  closer's send runs under, which serialized the race away. Without it
+  (44ccd28a6) the red came back (pi boot 14 trial 41; Mac boots 6, 7) with one
+  answer each time: the client was live before the unstall; the unstall's own
+  Twalk met EAGAIN; the test thread self-pumped as reader
+  (client_pump_or_park_locked, 9p_client.c:949); the mq loopback reads an
+  empty FIFO as EOF; the session died (devgone) -- and then the closer's job
+  found the fid gone. EAGAIN, though wbc_unstall had just stored
+  `eagain_budget = 0`: a plain store, while mq_send decrements the budget
+  under `mq->lock` and the closer's first send of the handed-off run can be in
+  flight then. A read of the budget AFTER the unstall (9bd66d00e, which cannot
+  move the timing) showed 4294967292 in the red trial (Mac boot 3, trial 291)
+  and 0 in every passing one. Fix a29cef5ac: locked accessors
+  (`p9_mq_loopback_set_eagain_budget` / `_eagain_budget`) used by all 34 test
+  sites, not only the ones a sender can race; a responder, already under the
+  lock, keeps its direct store.
+- *A, verified and audited.* The fix with the hunt still in: Mac default-smp8
+  40/40 clean (12,000 trials; the same images went red about one boot in six
+  before it). Fable 5.1 round on a29cef5ac: 0/0/0/4, all fixed in 43d18cac4
+  -- the budget read died-not-sentinel (all ones is a value the tests arm),
+  the destroy under the lock (a timed-out wait could destroy under a closer's
+  recv and over-read the ring), a dossier fragment, and the scribble knob put
+  under the same rule. My concurrent self-audit found np_teardown storing the
+  budget before joining its poller: the same lost store, latent, already
+  covered.
+- *REDs (scratchpad `sig3_reds.sh`):* Twelve REDs at 90e147757, each red at its own leg. Kernel: the gate answering PERM plus `snare:align` in the self set (1998/2000: postnote_errnos, self_death_snare); viv_kill's EPERM mapping gone plus a full queue back to -1 (1996/2000: four tests); a dead child refused again (1998/2000); ESRCH and an unknown name back to -1 (1997/2000); the name no longer judged first (1999/2000). Device, each with the kernel suite green: the syscall's self-snare branch gone (the four self-fault deaths read status 0); Pouch's EACCES mapping and raise's snare gone (kill(parent) reads errno 13; raise-segv and raise-ill read 0 while kill's two stay signalled); ESRCH flattened to -1 at the syscall (Pouch reads EIO, u-job-test's reaped pid and go-exec's missing pid red); the name no longer judged first, with the kernel's pins silenced (u-job-test 12's bad name to the dead child reads 0); ut's two messages swapped (u-job-test 11b). Go, on a private copy of the fork: Signal through ctl again (EPERM); the raw wait word again (/bin/false reads -1, the packed decode's first consumer). The closing green run: 2000/2000 and every device leg green. Two mistakes in my runner cost a re-run: its `G*` case matched `GREEN` first, so the first closing run never ran, and D4's silencing predated round 2's two new pins, so its first run went red in the kernel suite and hid the device leg.
+- *Land gates on cdfe2e22d:* Two reds at 90e147757, each hunted to an observed cause and fixed: pty-4's type-ahead anchor required a CRLF that tapestryd's bare-LF test-mode line can split (a witness defect, also red on main; a5dd0cb9c), and p9_closer.kill_in_final_close_keeps_exit's smp8 red was a lost store of the mq loopback's EAGAIN budget in the test (a29cef5ac; Fable 5.1 0/0/0/4, fixed 43d18cac4), verified by a 300-trial in-boot hunt -- Mac default-smp8 40/40 and thyla-pi KVM smp8 200/200, against about one boot in six to twenty-three before. On cdfe2e22d: CI image (b2c, webkit fork 7cf380d5ea): build, ls-jsc 59/59, pty-4 PASS (FG 130, CS 139, SX 139). Default image: build, suite PASS (2000/2000, boot OK), test-fault 8/8, ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption, check-production --all PASS. S-3 landed with this bullet's commit and was pushed to both mirrors.
+
+## 2026-10-13 (main, Opus 5.5, effort max) -- the signal follow-up: the exit wins in the final close, ut's $status, a `term` note, the phenotype kill family (sig)
+
+Four operator votes of 2026-10-13 05:00Z (3-6) decide it; no vote is owed. Started after B-2e3 landed (01330b422, committed 14:57Z).
+
+- *Scoping (read-only map, an Explore agent, then re-read where it mattered):* two facts shape the chunk. The exit-wins rule changes ONE path: `exits_term` (proc.c ~4397) already checks the claim under the hold that marks the close and records its own exit; only `thread_exit_self`'s last-out reads `group_exit_msg` after the close (~4603). And `proc_flags` (a u32) has no free bit, while a `term` family needs a mask bit in each of the two 7-bit caught sub-fields and its own terminate latch. Split: S-1 (exit wins + ut), S-2 (`term` + the kill family).
+- *Scripture (S-1 and the four decision notes):* ARCHITECTURE I-24 and 7.9.1 part B, ERRORS.md's claim rule, raw-keeper list and ut paragraph; `dec-2026-10-13-{ut-status-packed,exit-wins-final-close,term-note,phenotype-kill-family}`; the browser-status row.
+- *S-1 code (7faf67e1d, WIP, not built):* `thread_exit_self`'s last-out reads the claim and publishes `PROC_FLAG_EXIT_CLOSING` in one `g_proc_table_lock` hold before its final close. Reading proc.c for the vote found a second defect in the same window, pre-existing since #68: the mark was set only inside `proc_close_handles_at_exit`, outside the lock, so a kill between the unlock and that store took the first claim and forced nothing, and a wedged server then held the dying Proc until a second kill (enqueued in OPEN-BUGS before the fix). A `KERNEL_TESTS`-only hook (weft's precedent) lets a test kill the exiting thread in that window. ut: all ten wait sites enumerated; the eight raw ones pass `T_WAIT_PACKED` and decode once. pty-4 gains 139 legs for `pouch-hello-fault` in a substitution and a script.
+- *Fable round 1 (Fable 5.1 start to end), run while the Mac was queued: 0 P0, 0 P1, 1 P2, 4 P3.*
+  - **F1 (P2).** The new tests used `NOTE_SIG_KILL` without `notes.h`, so the test image would not have compiled. Found before any build; my self-audit had not compiled the file in its head. Fixed with the include.
+  - **F2.** ARCH 7.9.1 part C still said the I-38 window is one "a second kill buys"; a first kill after the mark forces too. Reworded.
+  - **F3.** Scripture keyed the exit-wins rule on "marked its final close". The code keys it on the commit, and a Proc with no handle table never marks yet keeps its exit. I had seen this myself and queued it for the close. Reworded in ARCH I-24, ERRORS.md and sub-kernel-death.
+  - **F4.** The status row named 130-for-an-interrupted-command witnesses; the legs that landed read 139 for a segv. The row and the decision note now say what the legs show.
+  - **F5.** The window test had no premise that the hook ran or that nothing reached the server; the hook's owner could dangle; a close that never ends would hang the suite. Fixed: `hook_ran` and `before == 0` asserted, the hook cleared after each run, a bounded wait for the zombie before the reap.
+- *Device run (15:53-16:17Z, Mac lease; scratchpad `sig1_device.sh`):*
+  - **Default image on eaa842b8d.** Suite 1995/1995, both new tests PASS. R-late (the last-out reads the claim after the close again): both kill tests fail at "the kill replaced the exit's status" (1993/1995). R-nomark (no close mark at the commit): only `kill_at_final_close_start_forces_it` fails, at "the kill forced the final close", so the force gap is now witnessed both ways. The green rebuild read 1995/1995.
+  - **CI image, pty-4, first try: a harness bug.** It timed out on PTY-SX. A ut script stops at its first failed command (implicit fail-propagation when not interactive, `should_propagate_failure`), so the script's `echo $status` line never ran after the segv. My readings extraction also matched the FAIL line's own quoted `[PTY-SX- 139]` and reported a 139 that was never printed. Fixed in a17bf8ab1: the script holds only the faulting command and the prompt reads the script's exit code. The extraction now skips LS-CI lines.
+  - **CI image on a17bf8ab1.** pty-4 green twice (PTY-FG- 130, PTY-CS- 139, PTY-SX- 139). R-cs (the substitution wait raw) reads PTY-CS- 1. R-wpi (`wait_pids_interruptible` raw) reads PTY-SX- 1 with PTY-CS still 139.
+- *Land gates on 37269d75a (Mac lease from 17:10Z, scratchpad `sig1_land_gates.sh`):* CI image (b2c): build, ls-jsc 59/59, pty-4 PASS (FG 130, CS 139, SX 139). Default image: build, suite 1995/1995, test-fault 8/8, ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption, check-production --all PASS. S-1 landed with this bullet's commit and was pushed to both mirrors. The S-2 work continued on branch `sig2` while the gates ran: no builds, only edits and single-core syntax checks.
+- *S-2 code (58d70f702, WIP, not built; written while the Mac ran S-1's gates):* `proc_flags` had no free bit for a fourth terminate latch. I moved the caught-note latch and its claim out of it into `Proc.note_caught`, a u16 that was reserved padding beside `term_sig`, so the struct did not grow. That is sound only if no reader needs one atomic view of a caught bit together with another `proc_flags` bit. I checked every reader and writer (notes.c 11 sites, proc.c 5, test_notes 5): each touches only those two bytes, and the claim's CAS needs latch and claim in one word, which the u16 keeps. The freed bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING`. The shift and mask macros were renamed so stale `proc_flags` code cannot compile, and that caught a test that armed a TTY caught bit through `proc_flags`: on the new layout it would have set `PROC_FLAG_LEGATE_ROOT`. The phenotype's kill family is one body, `viv_kill`, that only calls SYS_POSTNOTE's own two arms, so no third gate exists (vote 6).
+- *Checks without cores:* `clang -fsyntax-only` on every changed kernel file and its dependents, `cargo check` on the Rust users of `NoteClass`, and the Pouch clang on `pouch-hello-signals`. The last found a real compile error in my own new test: `test_term_apart` used the SIGINT handler and its counters before they were defined. It also showed two checks sharing exit code 10. Fixed in d61277209; the exit codes are now unique.
+- *Vote 8 (asked once the S-1 land was pushed, so no wake line could arrive mid-question):* should ut's `kill` default to `term`? The operator chose `term` (968038ee4). u-7-test's blocked-sleeper flow had silently depended on the old default `interrupt`; it now runs once with `interrupt` (130) and once with the default (143).
+- *Pouch self-SIGABRT (e3914c1c0):* `raise(SIGABRT)` and `kill(self, SIGABRT)` answered EINVAL and the program carried on. OPEN-BUGS said to fix that together with the phenotype's self-abort. Both now call `abort()`, Pouch's single `brk #0xab06` trap, which never calls `raise`, so the redirect cannot recurse. Self-directed SIGSEGV/SIGBUS/SIGILL/SIGFPE still answer EINVAL in Pouch (enqueued in OPEN-BUGS).
+- *Dossier pass draft (833cf160d, 9b159ac19), and a hazard I withdrew:* I first queued "PROC_FLAGS_ALL lists its flags by hand, so a new flag outside it could alias". Then I found `tools/check-flag-words.py`, which `build.sh` runs and which already derives every `PROC_FLAG_*` from proc.h (20 defines, 19 bits owned). The OPEN-BUGS entry was withdrawn, and the dossiers name that script as the guard.
+- *Fable round 1 for S-2 (Fable 5.1 start to end), run while the Mac was queued: 0 P0, 0 P1, 0 P2, 6 P3.* A seventh P3 came from corona on a yip call about the vote-8 width sweep. Corona noticed that AAPCS64 leaves the high half of an `int` argument unspecified and Linux narrows it away. My `viv_kill` read `sig` as a raw u64, so a guest with junk in that half would have read EINVAL; `viv_tier2` now narrows `sig` the way it already narrowed `pid` and `tid`. The reviewer's own P3s:
+  - **F1.** The phenotype's terminate table lacked `term`. The native arm still ended the Proc, so nothing was visibly wrong, but it was a second default table quietly drifting from `g_known_notes`. Fixed, and `notes.death_signal_table` now derives both phenotype default tables from `notes_default_action`.
+  - **F2.** The default-action table test did not name `term`.
+  - **F3.** S-2 had no audit-trigger row, and IM-1's row named a macro S-2 had deleted.
+  - **F4.** Four prose errors, one of them mine: VIVARIUM said a dead target reads ESRCH, but a dead NON-child reads EPERM because the gate is asked first.
+  - **F5.** `kill` of an unreaped child answered ESRCH where Linux answers 0. Now 0: the gate runs first, so only the caller's own children can get that answer.
+  - **F6** was withdrawn. A peer's tid is linked under the table lock before its creator learns it, so only a guessed tid can race the self check.
+  Closed list: repo `memory/audit_sig2_closed_list.md`.
+- *First build of S-2 (Mac lease from 19:09Z):* it compiled with no errors, so the syntax-only checks had been enough. `specs/check-caught-target.sh`: ALL CFGS AS CLAIMED (clean 613245 states; 8 buggy cfgs on their named properties). After the audit fixes, suite 1998/1998 (1995 plus the three new kernel tests). Every pouch-hello-signals death reads its signal, including `raise` and `killself` as SIGABRT and `term` as SIGTERM; the census names the new legs; u-job-test and u-7-test reaped 0. The containered Linux probe passed: its `linux` mode writes `OK` only after L338.
+- *Device REDs on 66a8b175a (19:28-19:57Z, scratchpad `sig2_reds.sh` + `sig2_sab.py`).* A failing kernel test ends the boot before joey runs, and joey and the probe stop at their first failure, so the REDs took ten boots. Sabotages that probe Linux legs act only on real syscalls (`ctx != NULL`), so the kernel tests, which call the shell with a NULL ctx, stay green and joey reaches the probe. Before the run I made pouch-hello-signals run every death leg before its verdict (66a8b175a), so one boot could show three Pouch deaths red. Each RED failed at its own leg:
+  - **K1** (term arms interrupt's latch; the gate skipped for viv_kill; the phenotype terminate table without term; kill_decide posts SIGHUP): 1993/1998. It failed exactly at "term -> its own latch, never interrupt's", "the phenotype's terminate table is g_known_notes' dfl", "term arms its own latch", "kill(non-child) is EPERM: the parent gate" and "SIGHUP refused".
+  - **K2** (a dead child back to ESRCH): 1997/1998, at "a dead, unreaped child accepts it".
+  - **Probe:** each sabotage was red at its own leg with the kernel suite at 1998/1998.
+    - L334 (the self-death named snare:segv): ws=11.
+    - L335 (a cross SIGTERM posted as interrupt): term=0, ws=0. The child inherited SIGINT's ignore, slept, and exited 0.
+    - L336 (gate skipped on real syscalls): rc=0 for the parent.
+    - L337 (sig not narrowed): o=-22 and r=-22.
+    - L338 (a self SIGTERM posted as interrupt): `k=0/0/17` and the same for `g` and `t`, read as rc/fired/signo. Each call answered 0 and the SIGTERM handler fired 0 times; 17 is a stale SIGCHLD left by an earlier leg.
+  - **UP1** (0049's SIGTERM back to `interrupt`): "raise(SIGTERM) with SIGINT blocked: count 2 -> 2".
+  - **UP2** (the self-SIGABRT redirect gone; kill's cross SIGTERM sent as SIGINT): death raise status 0, death killself status 0, death term status 0x2.
+  - **UU** (ut's default back to `interrupt`, and joey continuing past u-job-test): "u-job-test: FAILED -- kill %1 should end the child by `term`: $status 128+15" and "u-7-test: FAILED -- flow 5: the sleeper's $status is not 128 plus its note's signal".
+  The green restore: 1998/1998, every Pouch, ut and probe line PASS, boot OK.
+- *A sweep for other SIGTERM mappings found the Go port's:* go-thylacine's `syscall.SIGTERM` was `Note("terminate")`, a name the kernel never had. It is renamed `term` (go-thylacine a6567ba, local; the operator pushes that fork). The same read showed Go can send no note but `kill`, because `(*Process).signal` writes the note name as a `/proc/<pid>/ctl` verb. That predates S-2; it is enqueued in OPEN-BUGS with the fix (post through SYS_POSTNOTE).
+- *Land gates on 66a8b175a (scratchpad `sig2_land_gates.sh`):* CI image (b2c, with the webkit fork at 7cf380d5ea): build, ls-jsc 59/59, pty-4 PASS (FG 130, CS 139, SX 139). Default image: build, suite PASS (1998/1998, boot OK), test-fault 8/8, ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption, check-production --all PASS. The CI image ran too because 0049 changes the mask musl blocks around every `pthread_create`, and JavaScriptCore runs on Pouch. In the same commit, ARCH 7.6.5's deferred list no longer names hangup, stop and continue, which PTY-1 delivered as `tty:*`. S-2 landed with this bullet's commit and was pushed to both mirrors.
+
+## 2026-10-13 (main, Opus 5.5, effort max) -- the FTL and Wasm's BBQ/OMG tiers on the sealed code region (B-2e) (landed)
+
+**Research (two read-only agents on fork 714fd13d6c, ~80 calls each; main re-read the marked items).**
+- *FTL:* every rewrite of installed FTL code falls under B-2d's three rules. The one new kind is a property cache that patches code (upstream forces `useHandlerICInFTL` off, `Options.cpp:863`). Its rewrites of more than one instruction run only on the JS thread, outside the region being rewritten; the collector's resets are single words written with the world stopped. The FTL polls traps (`FTLLowerDFGToB3.cpp:19321-19340`), and LSE, FJCVTZS and FRINTTS are gated at run time.
+- *Wasm:* upstream's thread walk (`WasmMachineThreads.cpp:54-64`) is not a stop-the-world. It suspends each thread so that the thread's signal-handler return gives it a context-synchronization event. On Thylacine it would hit patch 0001's `RELEASE_ASSERT` in `Thread::suspend` at the first BBQ install. A fence on the resume path cannot replace it: BBQ and OMG poll no traps.
+- *Two defects, enqueued in OPEN-BUGS at once:*
+  - **A live cross-CPU gap, confirmed by main.** EntryPlan JIT-compiles a module's exit stubs on the finishing thread, and a synchronous compile's wait (`WasmPlan.cpp:77-83`) returns without sleeping, so the JS thread can run those stubs with no ISB. The gap exists today with IPInt and Baseline.
+  - **A latent `ref.cast` null-check elision.** With the fault handler off it loads from null; it becomes reachable once BBQ or OMG runs.
+- *Heritage, checked at the source:* Plan 9's `procflushseg` (`port/proc.c`) targets the processors running a process that maps the segment and waits for each one's clock interrupt. Linux `membarrier` SYNC_CORE (4.16+) gives the same guarantee. APE's `sigtab` maps "term" to SIGTERM and "abort" to SIGABRT.
+
+**Operator votes (05:04Z, `project_votes_1013_main`):**
+- the kernel synchronizes the address space's CPUs for Wasm (`dec-2026-10-13-wasm-space-sync`);
+- the JIT region is 128 MiB (`dec-2026-10-13-jit-region-128`);
+- gcpark F3: ut reports 128+signal on every wait;
+- gcpark F5: the exit wins over a kill during the final close;
+- SIGTERM gets a `term` note;
+- the Linux phenotype gets kill, tkill and tgkill.
+
+By research, without a vote: the thread that takes a finished Wasm plan runs an ISB (`dec-2026-10-13-wasm-plan-isb`). B-2e is split into three chunks: B-2e1 (the plan ISB and the FTL), B-2e2 (the kernel) and B-2e3 (BBQ/OMG).
+
+**B-2e1 so far (scripture a34e48ca1, WIP de1a1e5e9, AT row b8f2596d9; fork 716399c8d0, patch 0005).**
+- *Build check.* `build_jsc` now asks four functions for an `isb`. Run against the B-2d jsc as a control, both new Wasm sites read `isb=0`, so that binary would be refused.
+- *Legs.* Every new leg's script was extracted from the `.exp` by tclsh and run on the macOS jsc before it went to the device. Two corrections came out of that:
+  - The tier probe matches the JIT-type word, because the dump also prints `(FTLFail)` and `(HadFTLReplacement)` for other tiers.
+  - The `ftl-ic` comment had claimed `--forceICFailure` passes it. On the host it reads x4000: that option changes the compile itself, so the claim was withdrawn, not shipped.
+- *First device green (05:25Z).* CI bake plus jsc rebuild, then ls-jsc 44 of 44 (B-2d's 34 and 10 new). The binary is the same size as B-2d's, 69,383,560 bytes stripped. That is padding: the FTL legs and the new `isb` prove it is a new binary.
+- *Timings* (HVF, one run each): the int32 loop takes 220 ms with every JIT, 192 with the FTL off, 437 with the DFG off and 1008 interpreted. SunSpider takes 95, 68, 107 and 342 ms. With the FTL on, both short runs are SLOWER than with it off: its compile cost on runs too short to repay it. A long benchmark is owed before claiming an FTL gain.
+- *Self-audit finding, enqueued.* On OS(THYLACINE), WTF gives worker threads musl's 128 KiB default stack (`Threading.cpp:100-134` and `pthread_impl.h:205`). That covers the DFG and FTL compilers and the Wasm worklist. The fix goes into patch 0005 before the red runs.
+- *The stack finding, measured and fixed (b9b1ef007; fork aa83f9bf4e).* `llvm-readelf -lW` on jsc: `GNU_STACK` memsz 0, so musl's `__init_tls` leaves `__default_stacksize` at 131072. Patch 0005 adds `OS(THYLACINE)` to WTF's 1 MiB arm, which upstream keeps for musl Linux. The witness had to be designed so a 128 KiB stack cannot pass whatever JSC reserves. A recursion on a `$.agent` thread must exceed 131072/48 calls: an LLInt frame is at least 48 bytes (five header slots and `this`), and `--useJIT=false` stops an inlined call from sharing a frame. On the host jsc (512 KiB threads) the agent reached 4200; capped at 384 KiB it reached 2714, which reads red. On the device, green read 9562 and the sabotage that removes the arm read **4**: JSC's 128 KiB soft reserved zone is the whole of such a stack.
+- *Green, then the reds, then green (05:34-05:52Z, b2c at b9b1ef007; scratchpad b2e1_reds.sh).* Green build 1 (the 1 MiB constant is in `WTF::Thread::create`); ls-jsc 45/45.
+  - R-isb (the `compileSync` fence removed): the build refused at "Wasm::Module::compileSync(patch-0005) has no isb". Red at its witness.
+  - R-osr (the FTL exit's `repatchJump` removed): ftl-osr failed with "exit-stub compiles=2", as predicted.
+  - R-stack: red at `stack`, JSDN-BAD-MAIN53231-AGENT4.
+  - R-ftl (`useFTLJIT` forced off again): red, but at `tiers`, one leg before the predicted `ftl`. It read JSCO-1-0-0-0-1-1 and failed only by its 120 s timeout, because the leg had no fail arm: the same gap B-2d's `watch` leg had. The leg now fails at once on any other complete reading.
+  - R-ic (`rewireStubAsJumpInAccess` without `replaceWithJump`, `linkCodeInline` refusing): **ls-jsc PASSED**, ftl-ic included. Every access then takes the slow path, which answers right and returns into the same FTL code. So ftl-ic can see a rewrite that breaks the code, but not one that does nothing; the header and the dossier now say so, and ftl-osr remains the discriminating patch witness. This was the open question the red was run for. It is recorded, not assumed.
+  - Green rebuild and ls-jsc 45/45. Timings for three runs (05:24, 05:38, 05:52Z): SunSpider 95/91/97 ms all on, 68/82/69 FTL off, 107/111/106 DFG off, 342/367/347 denied. The loop: 220/221/220, 192/193/193, 437/435/435, 1008/916/915. The FTL is slower on both short runs every time.
+  - The Mac was released at 05:52Z (8029 MiB free; 8036 at the start). corona queued behind this run after the operator set its disk floor at 7000 MiB.
+- *Fable round 1 (Fable 5.1 start to end): 0 P0, 0 P1, 0 P2, 3 P3. Clean, so no second round is owed.*
+  - **F1.** Our map of the Wasm stub gap named the wrong writer. The wasm-to-JS stubs come from the *validation* plan: `Module::Module` takes them, and a worklist thread wrote them. The IPInt group completes on the thread that creates it, so `compileSync`'s wait is not the one that skips the sleep. The fences are in the right places, but `finalizeCreation`'s is the one every instance passes, not `compileSync`'s. Verified by reading `WasmModule.cpp:43-46, 85-93` and `WasmCalleeGroup.cpp:96-99`. The scripture (with a correction note), a superseding decision record (`dec-2026-10-13-wasm-plan-isb-writers`, the call unchanged; the record plane is append-only), the AT row, the dossier, both patch comments and 0005's message are reworded (fork 5e8cf8cd83, comments only). The research agent's summary said "whichever thread finishes the plan"; I carried that into six places without reading where `m_wasmToJSExitStubs` is taken.
+  - **F2.** The `isb` check proved presence, not position. `finalizeCreation` runs the start function itself, so a fence moved below that call would pass. The ISB list now takes an optional call that the `isb` must precede: `initializeExports` for `finalizeCreation`, in address order, and it fails closed. Run on the device jsc: the real marker passes (the `isb` is on line 48 of 234). A marker laid out before the `isb` refuses with "after it", and an absent call refuses with "no such call".
+  - **F3.** The Wasm binding generators ask the pool MustSucceed and then test `didFailToAllocate`, which can never fire. A full pool therefore kills the process where a `CompileError` was meant. This dates from B-2c and upstream has it too. Enqueued (OPEN-BUGS) and written into B-2e3's scope, where the pool and the Wasm tiers change.
+- *Land gates on 823415ae1.* CI image (b2c): build, then ls-jsc 45/45 twice. Primary tree: default build, suite 1991/1991, test-fault 8/8. ci-smp-gate's first attempt (06:54Z) was killed by my own disk watchdog at 4385 MiB. Free space fell 7597 -> 5351 MiB in 4 s at the start of the gate's own CLADE=1 build. The gate turns /clade on, the suite's build before it had it off, so the gate re-bakes the 2.5 GiB pool while the old pool's snapshot still holds its blocks. That is the likeliest author, not confirmed. The writer sampler named no process: it counts I/O that has reached the disk, while APFS takes the space at `write()`. That is a limit of the instrument, not evidence of a hidden writer. Re-run with the watchdog at 3072 MiB and a 1 s free sampler: ci-smp-gate N=10 50/50, 0 corruption (lowest free 5980 MiB at 07:00:45Z, the gate's build again); check-production PASS. The suite's boot log also showed the boot stack at 15504/16384 B (880 B to its guard), the same in every saved log since 10-12. Nothing watches that margin, so it is enqueued.
+- **B-2e1 LANDED** (chg-2026-10-13-jsc-ftl). Next: B-2e2, the kernel's address-space sync. Its design draft is ready; one question on how the call selects the new mode goes to the operator first.
+
+**B-2e2: the kernel synchronizes an address space's CPUs (design, 08:30Z).**
+- *Operator vote 7 (~08:2xZ):* the sync is a new syscall, `SYS_ICACHE_SYNC_SPACE`, with no arguments. Declined: a zero-length `SYS_ICACHE_SYNC` as the mode, and a flags word in `x2`, which every existing caller leaves as garbage (JSC's `cacheFlush` sets `x0`, `x1`, `x8` only). The vote supersedes the form of `dec-2026-10-13-wasm-space-sync`, not its substance: `dec-2026-10-13-icache-sync-space` replaces it, and the old record keeps its body (the record plane is append-only).
+- *The number is 128, not 132.* I had leaned toward 132 to leave 128-131 to Astra's unlanded branch, whose calls claim them. Reading her branch showed it also numbers `SYS_SRV_REGISTRY_NEW` 127, which main gave `SYS_JIT_CREATE_SEALED` on 10-07 and her branch does not contain. She renumbers on her next merge whatever main takes, so leaving a gap would buy nothing and would cost per-number collision arguments for four numbers main does not use. Linux's 128 is `restart_syscall`, already a mandatory `ENOSYS` row consumed before native dispatch (`syscall_dispatch_body` runs `viv_linux_dispatch` first). Handoff 048 tells her, and flags that her `ENOSYS` rows for Linux kill/tkill/tgkill will be Tier-2 rows under vote 6.
+- *A pre-existing race in the tree, found while reading `gic_synchronize_cpu` (OPEN-BUGS, P2 latent; fixed in B-2e2).* Its witness is "the per-CPU count of barrier interrupts changed since I read it". An earlier sender's handler, already running on the target with its increment not yet visible, changes the count after the read: the caller returns before the target takes its own interrupt. Its user today is the ITS drain (`gic_its_retire`), which frees an LPI lease on that witness. The draft design had planned to reuse the same count, so B-2e2 would have shipped the race. The design now acknowledges by ticket: the sender takes a ticket from the target's request count, the handler stores the request count it reads as done, and the sender waits for done to reach its ticket. That is the ARM ARM's idiom for code modified while another PE may run it (observe the flag, then a CSE). It needs the handler's read ordered after the acknowledge: GICv2's IAR read already drains; GICv3's executed `DSB SY` only *before* `ICC_IAR1_EL1`, and gains one after, as Linux's `gic_read_iar_common` has. Without it, a speculated read plus an SGI merged into one already pending would strand a ticket forever.
+- *Timeout policy: none.* The kernel's IRQ-masked spans are bounded, so the wait ends. A timeout returning an error would let a descheduled vCPU crash JSC, which treats a failed sync as fatal; Plan 9's `procflushseg` and Linux's `smp_call_function` do not bound the wait either. The kernel is not preemptible inside a syscall (ARCH 8.12), so the wait yields between checks, as `procflushseg` calls `sched()`.
+- *No capability gate:* the call interrupts only CPUs running the caller's own threads (Linux's `membarrier` is unprivileged on the same ground).
+- *Code (297f641b5).* The per-CPU record and `sched_sync_space` in `sched.c`, the ticket in `gic.c`, the syscall at 128, `JIT_REGION_MAX` 128 MiB, the vivarium's per-number check, the two userspace mirrors, three tests and five dossiers.
+- *The first green HUNG at `jit.space_sync_targets` (08:44-08:49Z), and the cause was the test, not the mechanism.* Temporary markers read `up 0 c0 0 c1 0`: neither spinner ever ran, and the reap that followed blocked forever. During the in-kernel suite the scheduler is UP-like (`g_sched_notify_enabled` stays off until `joey_run`), so `ready_on` to an idle peer queues the thread without waking that CPU, and a child exiting on another CPU would not wake a parent asleep in `wait_pid`. `test_smp` already kicks its peers with `IPI_RESCHED`; the test now does the same and reaps by `WAIT_WNOHANG` polling. Second boot: masks exactly {1} for space A and {2} for space B, both children reaped, suite 1993/1993.
+- *REDs (08:57Z), all red where predicted:* a ceiling of 127 and a number of 129 stop the build at their asserts; a record storing NULL, no record compare, and an early ticket each fail their named assertion in the suite; a 64 MiB limit fails `jit.region_is_128_mib`.
+- *Self-audit, S1 (d2c31edbe).* The barrier handler stored done and returned, but an exception return is a context-synchronization event that does not wait for an earlier load to complete, so on GICv3 the CSE the ticket promises could have preceded the handler's read of the request. A `DSB SY` after the store puts the CSE after the read. Not testable; argued.
+- *Round 1, Fable 5.1 (start and end lines agree): 0 P0, 0 P1, 0 P2, 4 P3; I fixed or closed all four.* F1: the proof text claimed more than the code proves. A ticket is served by a handler that observed the request and then returned, but that interrupt may have been acknowledged before the send: a handler already running for an earlier sender can read the newer request. The guarantee needs only the observation followed by the CSE, so the mechanism stands; the design, `syscall.h`, `gic.c`, ARCH, both mirrors, the gic dossier and the OPEN-BUGS text said "acknowledged after the call began" and now say what holds. (The design also said the sender runs `DSB ISH`; the code runs `DSB SY`.) F2: the test witnessed the wait only by an IPI's latency, since a call with no wait loop would usually still see its ticket served microseconds later. A new leg has the target spinner hold IRQs masked until a deadline it publishes, and the call, begun well before the deadline, must return after it. A one-CPU boot now prints that no leg ran. F3: `sched_sync_space` asserts IRQs are enabled. The comment on its extinction gave the wrong reason a refusal is unreachable; `gic.c` now asserts `DTB_MAX_CPUS` fits GICv2's eight-entry SGI target list, the real reason. F4: 128 MiB doubles the longest non-preemptible `SYS_ICACHE_SYNC` walk, and an aliasing I-cache gets one whole-cache invalidate per page. Both were recorded in the dispatch dossier and closed: the walk is bounded and paid for by the caller's own length, and no current target aliases. Fable did not raise S1; its argument accepted the return as the CSE without asking whether it waits for the load.
+- **B-2e2 LANDED** (chg-2026-10-13-icache-sync-space). REDs on the close (09:35Z), each red at its witness: no wait loop fails the hold leg (1992/1993), a GICv2 bound of seven stops the build, a masked call dies at the assert. Land gates on `c5342df5f` (09:37-11:09Z): CI-image ls-jsc 45/45 twice, suite 1993/1993, test-fault 8/8, ci-smp-gate N=10 50/50 with 0 corruption, check-production PASS. Next: B-2e3, BBQ and OMG on the new call.
+
+**B-2e3: BBQ and OMG on the space sync (from 11:25Z).**
+- *No vote owed:* BROWSER-DESIGN 7's B-2e bullets and the 10-13 votes decide it. Scripture first (751e5a27f): the browser-status row now names the call, and the AT row (I-42/I-12) asks that every BBQ/OMG publisher reach the sync after the write and before the store that lets another thread in.
+- *Edit sites, re-read on fork 5e8cf8cd83:* three callers of `resetInstructionCacheOnAllThreads` (`WasmCalleeGroup.cpp:331`, `:423`; `WasmOSREntryPlan.cpp:170`), each under the CalleeGroup lock. The kernel's wait takes no userspace lock, so holding it is safe. `maxAcceptableOffsetForNullReference` has four callers; the two ref.cast ones (`WasmBBQJIT64.cpp:2253`, `B3LowerMacros.cpp:1435`) never ask whether the handler is on. A third MustSucceed stub generator, `WebAssemblyBuiltinTrampoline.cpp:95`, is reached only under `JIT_CAGE`, which this port does not build.
+- *The fixes (fork 7cf380d5ea, patch 0006):* the sync call; the tracking it no longer needs compiled out; the force-off gone; the pool at 128 MiB; the null answer -1 in all three none-cases (every caller keeps its check, none edited); both stub generators CanFail.
+- *Witnesses, designed on the macOS jsc before the device.* There is no wat2wasm on the host, so the modules are hand-encoded (scratchpad `wasmenc.py`). A function reads its tier as `10*callerIsBBQOrOMGCompiled() + $vm.omgTrue()`: 0, 10 or 11 for IPInt, BBQ or OMG.
+  - **The upstream defect reproduces on the host.** The macOS jsc with `--useWasmFaultSignalHandler=false` dies of SIGSEGV (rc 139) on a null `ref.cast` under BBQ and under OMG, and throws under IPInt. So the refcast legs have a ready RED.
+  - **The stub leg uses JSC's own fuzzer.** `--useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAtOrAfter=1` fails every CanFail allocation, so it needs no pool fill. The macOS jsc (MustSucceed) compiles under it, which is exactly the behaviour the leg refuses.
+  - **`wasm-patch`** discriminates the caller repatch: BBQ links a's call to c, then c alone tiers to OMG. On the host it read 10-1-11, and 10-0-10 with OMG off.
+- *Two harness bugs caught before any device run:*
+  - The tiers module first sat inside a double-quoted Tcl string, where `[0,97,...]` is command substitution (the M-PIN Tcl-bracket lesson). tclsh extraction of every leg's exact command found it, and each command then ran on the host: 12 matched, and canfail read the upstream value.
+  - The first R-sync sabotage restored upstream's walk but not the thread tracking that fills its set. That would have walked nothing and passed silently, not crashed. Caught by reading the dry run.
+- *The build check* (`build_jsc`): the last write to `x8` before an `svc #0` in `resetInstructionCacheOnAllThreads` must be a `mov` of 128. It refuses the B-2e1 jsc (its 90-instruction thread walk). Of five synthetic disassemblies it passes the two good ones and refuses a wrong number, a write between the two instructions, and the reverse order.
+- *First device run (11:57-12:34Z, b2c at 1dbd72da1, Mac lease; scratchpad `b2e3_device.sh`).* Green build, then ls-jsc 58/58. Five REDs, each a fork scratch branch `b2e3-red-*` exported as an untracked `0007-diag` patch (0006 is real now); each failed at its predicted leg:
+  - R-sync (upstream's walk and its tracking): the build printed the sync refusal (made non-fatal for this run), then `wasm-tier` died of `snare:abort`.
+  - R-null (answer 0): `refcast-bbq` died of `snare:segv` at address 0x2, the null load.
+  - R-canfail (MustSucceed): `wasm-canfail` read `COMPILED-COMPILED`.
+  - R-gate (the force-off back): `tiers` read `JSCO-1-1-0-0-1-1`.
+  - R-patch (the callers' retarget removed): `wasm-patch` read `10-1-10`.
+
+  Then a green rebuild, ls-jsc 58/58 again. The objdump of the final binary shows `mov w8, #0x80; svc #0; cbnz x0` and the 128 MiB constant in the allocator constructor. All 369 JSC and WTF objects postdate the header change, but ninja keeps only the last build of each, so the second green is the run of record.
+- *Timings (HVF, two runs):* the 1e8-iteration Wasm loop takes 123/122 ms OSR'd into OMG, 260/258 ms in BBQ and 875/879 ms interpreted. SunSpider is 90/89 ms with every JIT on.
+- **S1 (self-found, from R-sync's console):** under R-sync, jsc pids 5261 and 5263 died of `snare:abort` during B-2e1's `wasm-sync` and `wasm-async` legs, *and both legs passed*. Each printed its reading, and the background BBQ install crashed after it. Those legs checked neither the exit status nor fault lines, and my new legs checked faults but not status. Every Wasm leg now goes through one `wasm_leg` that echoes `$status` and needs exactly the reading and 0, as the gcpark legs do. The green consoles hold no such hidden death: after login, the only faults are `thunk-oob`'s four `snare:brk`.
+- *Fable round 1 (Fable 5.1 start to end): 0 P0, 0 P1, 0 P2, 3 P3.*
+  - **F1.** `wasm-patch` pinned an ordering it did not need. A slow BBQ install for `a` could let `c` reach OMG first, giving a false RED. `a(x)` now calls `c` only when x is 1, so `a(0)` reaches BBQ while `c` is still interpreted, and the leg is deterministic.
+  - **F2.** The texts said the builtin trampoline was the last MustSucceed allocation. The `Wasm::Thunks`, generated by the first BBQ or OMG compile that needs each, and the JSToWasm shared thunk also stay MustSucceed. That is upstream's design for the 25% reserve, and the texts now name them.
+  - **F3.** An instance's wasm-to-wasm stubs fail as a `LinkError`, not a `CompileError`, and the leg covered only the module route. New `wasm-canfail-group`: one run counts the CanFail allocations a module costs (the verbose fuzzer prints the count at exit), and a second lets exactly those succeed. The instance must then fail with a `LinkError` naming the stubs.
+- *Harness check of the new proc (a zsh pty, whose `$status` behaves like ut's, driving `wasm_leg` against the macOS jsc):* pass, a wrong reading, a death after the reading (status 137), and deny all behaved. The group leg's first version listed its patterns separately, so the count line, which comes later in the stream, consumed the marker before it. That is the cross-process-marker lesson again; the leg now uses one alternation.
+- *Second device pass (REDs2, 12:46-13:28Z, on the close 10a0c3f8c):* the green ls-jsc read 59/59. `wasm-canfail-group`, unproven on the device until then, counted 4 CanFail allocations and the instance read TRUE-TRUE with exactly those allowed. Three REDs, each red at its leg:
+  - R-sync: `wasm-sync` now fails, of `snare:abort` (S1's fix seen both ways: under the same sabotage in run 1 it passed).
+  - R-patch: the new `wasm-patch` reads 10-1-10.
+  - R-w2w (only `WasmBinding` MustSucceed): `wasm-canfail` still passes, the count drops to 2, and the group leg reads INSTANCE.
+
+  The first attempt stopped at its own disk floor: free fell 10413 -> 4614 MiB during the R-sync build, so build.sh refused the pool generate. That run had no sampler, and the space came back (to ~16 GB, more than it started with) within three minutes. The dip came before the pool step, so the pool re-bake, the leading suspect in OPEN-BUGS, did not cause this one. The author is still unconfirmed; the item is updated, and the re-run with a 2 s sampler and the per-process writer log stayed above 14.6 GB.
+- **B-2e3 LANDED** (chg-2026-10-13-jsc-wasm-tiers). Land gates on 10a0c3f8c: ls-jsc 59/59 twice on the CI image (a fresh jsc at the fork's 7cf380d5ea; its sync function is `mov w8, #0x80; svc #0; cbnz x0` and the pool constant 0x8000000); suite 1993/1993; test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption; check-production --all PASS. Every JavaScriptCore tier now runs on the one sealed region. Next: the signal chunk (votes 3-6 of 2026-10-13).
+
+## 2026-10-12..13 (main, Opus 5.5, effort max) -- JavaScriptCore's DFG runs on the sealed code region (B-2d) (landed)
+
+**What the run is for.** B-2c opened Baseline and the regexp JIT; B-2d opens
+the DFG, the optimizing tier, on the same region. The new thing the DFG brings
+is that it rewrites instructions that run, and some of the rewrites happen on a
+thread that is not the one that runs them next.
+
+**The design question, settled by reading rather than a vote.** The kernel's
+`SYS_ICACHE_SYNC` contract (syscall.h) says a CPU other than the caller must
+take a context-synchronization event before it runs patched code. Who patches:
+the JS thread (its own `svc` returns through `eret`), compiler threads (the JS
+thread installs their code after `crossModifyingCodeFence`, upstream's rule),
+and the collector, which discards and unlinks code in its end phase. Reading
+`Heap::stopTheMutator` (Heap.cpp ~2003): the world stops "instantly" only when
+the mutator has released heap access; a mutator that holds access is handed the
+collection and runs it itself. So a collector-thread patch always lands while
+the JS thread is parked, and gcpark had already routed every resume through
+`MachineThreads::unparkCurrentThread`. One ISB there covers it, plus a JSLock
+handed to a thread on another CPU. HotSpot's `cross_modify_fence` at safepoint
+exit is the same idea. The kernel broadcast alternative (Linux `membarrier`
+SYNC_CORE) is left to B-2e, where Wasm's `resetInstructionCacheOnAllThreads`
+needs one. Scripture 1685982a2.
+
+**What else the patch carries.** The DFG gate lifted (FTL/BBQ/OMG still off);
+`RELEASE_ASSERT` on the three 26-bit branch encoders with jump islands off
+(release builds masked an out-of-range offset into a branch to the wrong
+place). Read and found already right: `LazyJSValue`'s 3-4 instruction patch
+runs as a main-thread finalization task before install (no tearing exposure);
+the JIT's CPU-feature queries read compile-time defaults from `armv8-a`, so no
+LSE, `FJCVTZS`, FP16 or `FRINT` (the v8.0 floor holds).
+
+**The fence has no run-time witness, so the build asks the binary.**
+`build_jsc` disassembles `MachineThreads::unparkCurrentThread` and refuses a
+jsc without an `isb` (a denominator of eight instructions first). Run on the
+B-2c jsc it refused at the isb test; green passed; the R-fence sabotage build
+was refused.
+
+**Wrong turns, and what caught them.**
+- A collector-discard witness took ten host experiments on the macOS jsc.
+  Hot functions are never discarded under `--forceCodeBlockToJettisonDueToOldAge`
+  (their DFG code's references stay live); my "fresh structure per round"
+  constructs never died; a probe call on a wrong-shaped object exits before a
+  `$vm.dfgTrue()` branch and so always read Baseline (a broken probe, caught by
+  a no-collection control that also read "discarded"). JSC's own log
+  (`--dumpDFGDisassembly`, "Jettisoning ... due to JettisonDueToOldAge") showed
+  what IS discarded: old DFG code of rarely called functions. The leg counts
+  those lines; host 7-41 vs 0 over five runs each, device 18 vs 0.
+- My first gc-jettison expect block listed the discard pattern before the
+  marker: expect tries patterns in list order, so a discard logged during
+  teardown would have swallowed the marker. Rewritten as one alternation before
+  any run.
+- The watch RED (jump replacement disabled) was predicted to read `undefined`.
+  It read a Symbol (the stale loop's speculation read garbage) and the print
+  threw; the leg failed by timeout because its fail pattern named only
+  `undefined`. Red at its witness, for a reason the prediction did not name.
+
+**Fable r1 (5.1 at start and end): 0 P0, 1 P1, 1 P2, 2 P3, clean.** F1 was
+mine to catch and I did not: the gc-jettison leg counted "due to
+JettisonDueToOldAge" lines, and `ScriptExecutableInlines.h:40-46` gives an
+unmarked DFG block `JettisonDueToWeakReference` every time, so every line it
+counted was an LLInt or Baseline block -- the leg passed with the DFG off.
+My control varied the force flag, not the DFG: the "a control must prove
+discrimination, not detection" lesson, again. Rebuilt around a weak reference
+that dies (a fresh closure folded into fresh DFG code as a constant callee,
+the closure dropped, the function kept; `$vm.codeBlockFor` reads the tier
+without calling): host 10-13 of 20 discarded against 0 with the closures kept,
+and no round reaches DFG with the DFG off. F2: scripture said a finished
+Baseline function is never rewritten; Baseline's arithmetic ICs do. F3: the
+osr leg did not wait for the worker's compile. F4: a misread upstream comment.
+
+**Device evidence (HVF, b2c worktree at 211104306).** ls-jsc 34/34 three times
+(78-80 s each). SunSpider 1.0.2: 68 ms all JITs, 105 ms DFG off, 346 ms denied
+(B-2c's Baseline: 111 ms); int32 loop 193 / 433 / 917 ms. REDs: R-fence build
+refused, R-dfg red at dfg (`JSCP-TRUE-FALSE`), R-watch red at watch.
+
+**Land gates on e693ca4d2.** ls-jsc twice more (gc-jettison 9 of 20 both
+times, its twin 0); a scratch scenario ran the leg's script with the DFG off
+(every round "never DFG") and under the default collector (nothing discarded);
+the watch RED re-run now fails on the exception at once; suite 1991/1991;
+test-fault 8/8. The first ci-smp-gate was stopped by my disk watchdog: free
+space fell 7568 -> 3748 MiB in about a minute during ubsan-smp8 boot 2 and came
+back within a minute, swap flat -- the second such dip (OPEN-BUGS 19:41Z). Not
+the guest: run-vm.sh passes no discard option, so the guest's pool writes stay
+allocated until QEMU closes the image, and the space returned while that QEMU
+still held it. Not the per-boot pool restore (`cp -c`, a clone). The re-run
+carried a new per-process writer sampler (`proc_pid_rusage`'s bytes written for
+this user's processes): its only large writer was the host `stratumd` baking
+pools during the gate's own builds, ~0.9 GiB per burst, minimum 6401 MiB free
+-- the likeliest author of the dip, not confirmed. ci-smp-gate N=10 then 50/50,
+0 corruption; check-production --all PASS.
+
+**Two mistakes of mine in that episode.** The watchdog's kill pattern named
+ci-smp-gate.sh and test.sh but not smp-multiboot.sh or QEMU, so the multiboot
+loop ran boots 3-10 against an orphaned QEMU that still held `disk.img`'s
+write lock (eight instant "Failed to get write lock" fails). And I deleted
+that run's failure logs before reading one of them (boot 6, 220 KB). The
+watchdog now kills the whole tree including QEMU.
+
+**Also fixed on the way.** `check-doc-tables.sh` found two older ARCHITECTURE.md
+table defects (a severed spec-table row; an I-39 row split by a pipe inside a
+code span), fixed in 05c9393a0.
+
+---
+## 2026-10-12 (main, Opus 5.5, effort max) -- JavaScriptCore's collector scans without suspending a thread, and Pouch's abort() is a signalled death (gcpark) (landed)
+
+**What the run is for.** B-2c's research for B-2d found two defects that every
+WebContent process would hit. JavaScriptCore's conservative scan suspends
+threads, and Pouch has no per-thread signal, so jsc died with exit status 127
+at the first collection that stopped the world while its one JS thread had
+dropped heap access. And that 127 was silent because Pouch's `abort()` was
+`_Exit(127)`. The operator voted 2026-10-12: a cooperative scan with no kernel
+change, abort as a signalled death, B-2c landed first, both before B-2d
+(`dec-2026-10-12-jsc-cooperative-scan`). gcpark-a is the scan, gcpark-b the
+abort; they land together because both need the same full jsc rebuild.
+
+**gcpark-a, the shape.** Patch 0003: every release of heap access parks a copy
+of the thread's stack and callee-saved registers, every acquire unparks, and
+the scan reads the images instead of calling `Thread::suspend`. A copy and not
+a recorded stack pointer (Go's goroutine-in-syscall), because the frames below
+the release point may hold the only copy of a caller's callee-saved register.
+
+**gcpark-b, the shape.** Two more votes (18:02Z): `abort()` is one
+`brk #0xab06` that the kernel turns into a new fault note `snare:abort`
+(SIGABRT); and every death by a note records its signal, so a packed wait word
+reads `WIFSIGNALED` (`dec-2026-10-12-abort-signalled-death`). Raw native waits
+still read 1; ut's job-control `$status` is 128 + signal.
+
+**Wrong turns, and what caught them.**
+- The first green ls-jsc FAILED in its new held leg with `out=40-0`, a pass:
+  ut prints `JSCQ-ST- 0` and the status pattern did not allow the space
+  (7dd3da86b).
+- The REDs R0 (no patch) and R1 (images never marked parked) were predicted to
+  pass the held leg (a wait that holds heap access, so the mutator conducts and
+  no image is read). Both died there with no output. Three explanations were
+  refuted by reading, one of them on a wrong premise ("main never parks after
+  the script's print"). A diagnostic build (local fork branches, never
+  exported) recorded each park's return chain and, in the sabotaged variant,
+  printed the scanner and the target's last park at the FATAL: thread 3, the
+  collector, scanned main, whose last park was `JSLock::unlock` under
+  `~JSLockHolder` in `jscmain`. jsc drops and retakes its lock around the
+  script, and the continuous collector can scan there. So held is a weak leg,
+  not a control (R1: 1 run in 3); flash is the only leg that catches R2, a scan
+  that ignores the images (40-37). ls-jsc's header says this now (audit F5).
+- A zsh one-liner reported all 20 of the series' paths outside the sparse cone.
+  bash showed all 20 inside: the checker's word splitting, not forage.
+- gcpark-b's first link failed: a local struct-array initialised from a literal
+  emitted `memcpy`, which the kernel does not have (ff3bb9508).
+- The first suite run failed `notes.death_signal_table`: it asserted the
+  phenotype names at least 9 terminating notes, but `viv_signote_note_name`
+  names none of the snare faults, so 5 is right; the count is now derived.
+- The second failed `pouch-hello-dlopen`'s RELRO leg, which read a fault death
+  as "exit 1". The consumer census had searched for 127 only; a sweep of every
+  wait-status decoder (9 C files, 14 Rust, the Go port, ut, the phenotype
+  probe) found no other.
+- Two kernel REDs named the wrong first witness. K3 (`thread_exit_self`
+  passes no signal) failed `proc.group_claim_decides_signal` first, which also
+  reaps through `thread_exit_self`; K6 (the `brk` immediate never matches)
+  failed `pouch-hello-sockets`' fdset leg (status 0x5, SIGTRAP) before
+  `pouch-hello-signals` ran, because joey stops at its first failing smoke.
+  Each was rerun with the earlier witness out of the way (K3b, K6b) and went
+  red at its own. K8's verdict read "not at its witness" only because the
+  script's two-line window caught a runnable-dump line instead of the test
+  name; the boot log shows the FAIL inside the named test.
+- The land build relinked jsc in 10 minutes, not the 40-minute rebuild
+  expected: the WebKit objects were reused. Before trusting ls-jsc: the jsc
+  binary is newer than the rebuilt `libc.a`, and its `abort()` disassembles
+  to `brk #0xab06`.
+
+**Found on the way, owned.** `raise(SIGABRT)` in Pouch answers EINVAL and the
+program runs on (OPEN-BUGS, P3). During one Mac run free disk fell from 8.2 to
+2.4 GiB in about a minute and recovered after the watchdog killed the build;
+a retry with a 2 s sampler did not reproduce it (OPEN-BUGS, UNEXPLAINED). The
+green image never showed a JSLock-boundary scan in 17 held/flash runs while
+R1 hit one in 1 of 3 (OPEN-BUGS, P3; idle exercises the same park shape and
+checks its objects).
+
+**Audits.** gcpark-a Fable 5.1 r1 0/0/1/5: F1, a thread that entered the
+JSLock on access another thread held neither released nor parked at its unlock
+(fixed; no runtime witness, since jsc's main always takes access itself; owed
+when a WebCore-model consumer lands). gcpark-b Fable 5.1 r1 0/0/0/7, closed (F1 F2 F6 F7 fixed; F3 and F5 are operator vote items, F4 is queued with Pouch's `raise(SIGABRT)`)
+
+**Evidence.** Land gates on 0b4276ce0: On the tip 0b4276ce0: ls-jsc PASS on the CI image, all 25 legs (jsc relinked against the new Pouch, its `abort()` disassembles to `brk #0xab06`; SunSpider 1.0.2 111 ms with the JIT vs 363 ms denied, the int32 loop 450 vs 962 ms); pty-4 PASS (`$status` 130 after `fg` + Ctrl-C); suite 1991/1991 on the default image (deaths legs abort and assert -> SIGABRT, `brk #1` -> SIGTRAP, a NULL store -> SIGSEGV; three `snare:abort` console lines; the dlopen RELRO legs read SIGSEGV); test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8), 0 corruption; check-production --all PASS (the lean image builds, boots, and both dev accounts log in). Kernel REDs K1-K10 each red at its witness (K3 and K6 first at an earlier witness, then at their own with it removed). gcpark-a: green x3, REDs R0/R1/R2 as above, the held leg explained by a diagnostic build.
+
+**Still open.** F7's other users (a sampling profiler, signal-based VM traps,
+Wasm's instruction-cache reset) need a kernel thread suspend, a separate
+question. Next: B-2d.
+
+---
+## 2026-10-08..12 (main, Opus 5.5, effort max) -- JavaScriptCore's Baseline and regexp JITs run on one sealed code region (B-2c) (landed)
+
+**What the run is for.** B-2a and B-2b gave the kernel a code region that is a
+reservation and a write thunk that is born sealed (`dec-2026-10-07-jit-sealed-thunk`).
+B-2c puts JavaScriptCore on it: the Baseline JIT and the YARR regexp JIT, the
+first tiers of the operator's 2026-09-28 order (Baseline + YARR, then DFG, then
+FTL/BBQ/OMG).
+
+**The shape.** Patch 0002 (five files) selects JSC's separated-WX heap for
+`OS(THYLACINE)`, with no jump islands and a 64 MiB pool, so one near branch
+reaches the whole pool. The pool is the exec alias of one `SYS_JIT_CREATE`
+region, adopted through a new `PageReservation::adoptExecutable`; commit and
+decommit are no-ops there because the region is demand-zero (B-2a). The writer
+address lives only as immediates in a 33-word hand-encoded thunk sealed by
+`SYS_JIT_CREATE_SEALED`, and the `thyla_jit_region` that returned it is
+scrubbed with volatile stores. `jsc` takes `CAP_JIT` by the SELF form before
+`JSC::initialize`.
+
+**Wrong turns, and what caught them.**
+- The deny probe was first an environment variable. `ut` passes no envp to its
+  children, so it could never have been set from the shell; it became a jsc
+  flag, `--thylacine-no-cap-jit`, stripped from argv before JSC parses it
+  (fork `dbdab51d01`).
+- The first build, JIT on with DFG and FTL off, failed in seven objects:
+  upstream no longer builds that configuration on ARM64 (B3 exists only with
+  FTL, `PlatformEnable.h:839`; the Wasm code assumes JIT implies B3; a DFG
+  inline-cache variant is visited without the DFG). That is a design question,
+  so it went to the operator: **voted 16:25Z, "gate tiers at run time"**
+  (`dec-2026-10-08-jsc-tiers-run-time`). Every tier is built, as on RISC-V 64,
+  and `Options::notifyOptionsChanged` forces DFG, FTL, BBQ and OMG off under
+  `OS(THYLACINE)`, after which the options are frozen.
+- The `tiers` leg first expected `TRUE`/`FALSE`. A run of the host `jsc`
+  showed `jscOptions()` reports a bool as the number 0 or 1, and the leg was
+  fixed before it ever ran in the guest.
+- The thunk witness was first one process forking a child per out-of-bounds
+  case. A Proc holding a live code region cannot fork (`clone_one_vma` refuses
+  CODE, B-2a F3), so each case became its own invocation.
+
+**Audit round 1** (Fable 5.1, start == end) closed clean, 0/0/0/7. Fixed: F1
+the SunSpider legs on a pool without the payload (now refused before boot), F2
+"each test checks its own result" (23 of 26 do), F6 the tier leg pinned option
+values, not behaviour (a `dfg` leg now shows a hot function reaching Baseline
+code and never DFG code; on the host `jsc`, with the DFG on, `$vm.dfgTrue()`
+turned true after 1599, 8290 and 38696 iterations, and with `--useDFGJIT=false`
+it stayed false through 1e7), F7 forage's `sparse-checkout set` dropped a
+hand-added directory (now `add`; a throwaway-repo control shows `add` keeps it
+and `set` drops it). Recorded and owned (OPEN-BUGS 2026-10-08 16:41Z): F3 the
+content process must run without `/proc`, F4 writer-address residue and a
+never-dropped `CAP_JIT` (a kernel-emitted thunk after B-2e), F5 the Wasm
+cross-PE publish at B-2e.
+
+**Self-found during round 1 (SF-1): the thunk's bounds had no witness.** The
+bounds are what keep the thunk from being a write-anywhere gadget, and JSC
+never writes out of range, so `ls-jsc` could not reach them. The emitter moved
+to `usr/lib/thylajit/thyla_jit_thunk.h` (word-identical to the round-1-verified
+C++ emitter across 25 writer/size pairs), and both JSC and a new probe,
+`pouch-hello-jitthunk`, build from it. The probe writes at the region's edges
+(each store path, and a zero-length write at the end), reads every byte back
+through the exec alias, and makes four out-of-bounds calls, each of which must
+die of `snare:brk`.
+
+**Numbers** (HVF, one `ls-jsc` run of the all-tiers build `107154215`, PASS in
+59 s): SunSpider 1.0.2 totals 121 ms with the JIT and 365 ms denied; the
+2e7-iteration int32 loop takes 467 ms against 959 ms.
+
+**Audit round 2** (Fable 5.1, start == end, on the r1 fixes + SF-1) closed clean,
+0/0/0/4. R2-F1: the thunk header and the probe join sub-webkit's code list (in
+the land commit). R2-F2: `tools/forage.sh` on an existing FULL checkout died on
+git's opaque "no sparse-checkout to add to"; it now checks `core.sparseCheckout`
+first and names the path (`test-forage.sh` C5, red with the guard removed). R2-F3:
+closed with reason (0783535a9's message). R2-F4: a stray `snare:brk` from another
+process could satisfy a thunk-oob leg; deaths are now kept per pid and the leg
+requires the probe's own printed pid to die of `snare:brk`.
+
+**Paused four days.** The first all-tiers `ls-jsc` (10-08) also printed a false
+`user fault: snare:bus` after jsc's clean exit. That was a kernel defect, not
+B-2c's: a dying group's page-in looked like a fault. It preempted the chunk
+(groupstatus), and three more side quests followed (SQ-1, Loom setup,
+notetarget). B-2c was rebased onto main 97ea7437f on 10-12. It touches no kernel
+file, so the rebase was clean; the views re-rendered with no diff.
+
+**What each test proved, both ways** (rebased tip 5597a17b0, one build and one
+`ls-jsc` each, 15:09Z-15:32Z; predictions written before the runs). The thunk's
+first bounds check replaced by a nop: `thunk-oob(8@-8)` died of `snare:segv`
+(the first two cases still died of `snare:brk`, caught by check 2). The second
+check replaced: `thunk-oob(1@end)` died of `snare:segv`. The fork's run-time gate
+without the DFG line: `dfg` printed `JSCP-TRUE-TRUE`. With only the DFG line kept:
+`dfg` passed and `tiers` printed `JSCO-0-1-1-1-1-1`. `CAP_JIT` taken despite
+`--thylacine-no-cap-jit`: `jit-deny` saw "CAP_JIT acquired". `CAP_JIT` taken after
+`JSC::initialize`: `jit` printed `JSCG-FALSE`, the pool having been created and
+refused before the clearance existed. The fork sabotages were discarded detached
+commits, exported as a plain diff in place of 0002; the restored tree rebuilt green
+twice (15:34Z, 15:55Z).
+
+**A crash B-0 shipped, found while researching B-2d.** A read-only agent reading
+the fork for the DFG's platform needs found `MachineThreads::tryCopyOtherThreadStacks`
+calling `Thread::suspend`, which B-0 made a `RELEASE_ASSERT` on Thylacine (no
+per-thread signals). I re-read the path: `Heap::stopTheMutator` hands the conn to
+a mutator that HOLDS heap access, which then scans its own stack, but stops the
+world "instantly" when the mutator has RELEASED access, and the collector's
+conservative scan then suspends every other thread in the group, the mutator
+included. B-0's comment listed the suspend users it had switched off and missed
+this one. On the device, 40 rounds of allocation with a 25 ms wait: with the heap
+held, jsc completed (2/2); with it released (`flashHeapAccess(25)`), jsc exited 127
+with no output (2/2). My first control busy-waited instead of sleeping, so it differed
+in two variables; the second experiment paired `sleepSeconds(0.025)` against
+`flashHeapAccess(25)` and put a diagnostic write before `thread->suspend()`: it
+printed only in the two released legs, each followed by exit 127. The silence was a
+second defect. Pouch's `abort()` is `_Exit(127)`, a P6 workaround from when a user
+fault took the kernel down, and WTF's release `CRASH()` is `std::abort()`, so every
+failed `RELEASE_ASSERT` in jsc is a silent 127. **Operator votes 2026-10-12:** fix the
+scan cooperatively, with no kernel change (a thread that releases the heap publishes
+its registers and stack position, and the scan reads those instead of suspending it);
+make `abort()` a signalled death the kernel reports; land B-2c first, then the fix,
+before B-2d. Both are in OPEN-BUGS; the fix is the next chunk.
+
+**Land.** Gates on the rebased tip, the primary tree detached at 5597a17b0 (default image): suite 1984/1984 on the default image; test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, ubsan smp4/8), 0 corruption; check-production --all PASS (the lean image builds, boots, and both dev accounts log in). The Operator's Manual has no browser or `jsc` chapter yet (exit criterion 5), so no text changes.
+
+**Still open.** The cooperative GC scan and the `abort()` change (voted, next); the three carried
+obligations (OPEN-BUGS 2026-10-08 16:41Z: the content process without `/proc`, the kernel-emitted thunk
+and `CAP_JIT` drop, the Wasm cross-PE publish); B-2d research is in hand (the DFG patches code in place,
+including from the collector thread, where nothing context-synchronizes the mutator's PE).
+
+## 2026-10-12 (main, Opus 5.5, effort max) -- every EL0 return delivers notes, and a caught note goes to a thread that can take it soon (#964 + L285) (landed)
+
+**What the run is for.** Two defects in caught-note delivery came out of the
+groupstatus chunk, and the operator voted to fix them together before B-2c
+resumes ("#964 next, with the vote", 2026-10-12). #964 (OPEN-BUGS 07:34Z): the
+IRQ-from-EL0 vector returned through the die-check and the stop leg but no
+notes leg, so a thread that computes at EL0 without a syscall never met its
+note queue; Ctrl-C did not end a native spinner, and a phenotype spinner's
+handler never ran (the old seam-el0-irq-tail-no-notes, open since 2026-08-02).
+L285 (OPEN-BUGS 06:01Z/07:24Z): ARCH 8.8.3 let "one caught note unwind one
+sleeper, whichever claims first", so a child's SIGCHLD returned a worker's
+`ppoll` -EINTR while main ran. The operator chose "Prefer running/main",
+native and phenotype alike, and "Model it": a TLA+ model before the code,
+re-enabling spec-first for this surface.
+
+**The design** (ARCH 7.6.4 and the 8.8.3 amendment, dec-2026-10-12-note-target).
+The 0x480 slot branches into the synchronous slot's tail, renamed
+`.Lel0_return`, so every EL0 return runs the notes leg; the handler frame saves
+the whole interrupted context, and SS and BTYPE are cleared on entry. A posted
+caught note designates one thread: the poster, then main, then any thread not
+blocked, then main blocked in a wait that unwinds, then any such sleeper. The
+designation is made under the pick's `wait_lock`, where each wait publishes
+whether it unwinds or holds (`Thread.caught_wait`); a designee entering a wait
+that cannot unwind for the family hands the designation on, as does an exiting
+thread; a running designee is kicked so its IRQ tail delivers. A native Proc's
+waits never unwind, so its walk only kicks.
+
+**The model changed under the code, three times.** caught_target.tla was clean
+at 140075 states with 7 buggy cfgs before any code existed. Writing the walk
+showed three things it had wrong. The mask and the handler flag are the
+thread's own and written without a lock, so the walk's re-check reads them
+exactly only for a blocked thread (`Fresh`); a designee picked on a stale value
+must give the designation up at its next wait that cannot unwind for it
+(`uentry`, a new buggy cfg `BUGGY_STALE_KEEPS`). And a release's walk must skip
+the releasing thread (`wskip`, `wcur`): a tail can end short of the family's
+note (a frame that would not build, the pass budget spent), and the thread
+whose tail just passed the note by is the one it should not wait on. Clean 613245 distinct, 8 buggy cfgs each violating
+its named property, traces read. A 3-thread run started on the old model was
+killed. Re-run on the final model it did not finish: my first launch stopped in
+2 seconds on "Deadlock reached" because my runner left out the `-deadlock`
+flag that `check-caught-target.sh` passes (all threads exited is a legitimate
+end); relaunched with the script's flags, it reached 12,789,190 distinct states
+(depth 22, 3.4M queued) in 10 minutes on 4 workers and was stopped at the
+host's 8 GiB disk floor. `TypeOK` and `OneClaimant` held over every state
+reached; `NoStrand`, judged only at the end, was not judged. The 2-thread
+clean cfg remains the model's liveness evidence. Fresh runs at land:
+check-caught-target.sh and check-tail-order.sh both ALL AS CLAIMED; three of
+tail_order's buggy counts moved with the IRQ entry (notes-first 3146 -> 5622,
+no-repass 649 -> 870, budget-first 4368 -> 8167).
+
+**Two red builds, neither the kernel's.** s1 did not compile: a test called
+`notes_release_claims_for_test` without a prototype. s2 failed
+`rendez.caught_note_holder_rewake` at "main unwound for the first note". The
+fixture was wrong, not the walk: the idle peer spins in `sched()` between
+steps, which is exactly "awake", so the walk rightly designated the peer. The
+peer now parks in a wait that holds first, and the test asserts it stayed
+there undesignated. s3: suite 1983/1983, viv-pheno-probe L331-L333 and
+jc-probe's spinint/spinnote rungs green.
+
+**Audit r1 (Fable 5.1, start == end): 0 P0 / 0 P1 / 0 P2 / 6 P3, clean.**
+F1: jc-probe's Ctrl-C rungs could pass on the old kernel, because the ^C could
+meet the spinner at the sync tail of its own `SPINNING` write; both rungs now
+settle before the ^C. F2: a comment cited Linux's `setup_return` for clearing
+BTYPE, but Linux sets BTYPE_C; the comment is fixed and the policy (require a
+landing pad at handler entry) is an operator vote enqueued with the SCTLR
+BT0/BT1 item (OPEN-BUGS 12:06Z). F3: `caught_pick`'s comment claimed Linux
+makes the same choice; Linux's `complete_signal` prefers main whenever main
+can take the signal, waking it from an interruptible sleep even while a worker
+runs. Ours prefers a running thread; the comment and the vivarium dossier say
+so. F4: SPEC-TO-CODE named the wrong test file. F5: the holder re-wake did not
+kick a running holder; it does now (no witness: kicks are gated off in kernel
+tests, and the tick bounds a missed one). F6: four untested arms; the tsleep
+hand-off and the bounded re-pick with its wake-every-sleeper fallback got
+tests in this chunk (801d37a4a: a third hand-off leg, and
+`rendez.caught_note_repick_fallback` with a KERNEL_TESTS hook that forces
+stale picks; the control forces one fewer); the stop-park outer restore and
+the exec clear are enqueued (OPEN-BUGS 12:06Z). s4: suite 1984/1984.
+
+**What each test proved, both ways, and the one that proved nothing.** Fifteen
+mutants, one build and boot each (scratchpad nt_reds.sh, on 801d37a4a), each a
+one-variable change from the code. Dropping the hand-off call failed
+`_handoff`'s first leg; skipping it in `tsleep` alone failed only the new
+timed leg; dropping the exit drop failed `_exit_drop`; disabling the holder
+re-wake failed `_holder_rewake`; letting the release's walk re-pick the
+releaser failed `_release_wakes_peer` and `_prefers_awake`'s control; removing the poster preference failed `_poster_first`; swapping
+awake and unwinding failed the three tests that designate an awake main
+(`_prefers_awake`, `_handoff`, `_exit_drop`); removing the main preference
+failed four (`_one_unwind`, `_release_wakes_peer`, `_poster_first`, and
+`_repick_fallback`'s control); dropping the wake-all fallback
+failed `_repick_fallback` at "exactly one unwound". Reverting the 0x480
+branch failed viv-pheno-probe L332 (`spin=0`: the handler waited out the
+3 s spin), then, with that leg silenced, jc-probe's spinint and spinnote by
+watchdog. Replacing the pick with a wake-all (the pre-vote behaviour) failed
+L332 with `on_main=0 intrs=1`, the L285 shape itself. One mutant passed:
+removing the native walk's kick-only arm left the suite at 1984/1984.
+`_native_kicks_only` posted only while both native threads were blocked, and
+a native Proc's waits always hold, so no thread was ever a candidate and the
+arm was never reached. The test gained a second shape, main awake with the
+peer asleep, each shape against a Linux-Proc control (e61975590); the
+mutant then failed it at "native, main awake: the walk kicked main and
+designated no one" (1983/1984), and the clean suite stayed 1984/1984.
+
+**Gates.** On e61975590: test-fault 8/8; ci-smp-gate N=10 50/50 (default
+smp1/4/8, UBSan smp4/8; 0 corruption); check-production --all PASS
+(KERNEL_TESTS off, where the forced-stale hook compiles out: the lean image
+builds, boots and logs in).
+
+**Still open.** The handler BTYPE policy and SCTLR BT0/BT1 (operator vote);
+the stop-park restore and exec-clear coverage (OPEN-BUGS 12:06Z). The model
+does not see the preference order or the kick; the kernel tests pin the
+order, and the tick is the fairness the model assumes.
+
+## 2026-10-12 (main, Opus 5.5, effort max) -- Loom setup holds its own reference across the install; the rollback settles (Corona's fix, main's gate) (landed)
+
+**What this is.** Two defects in the ordinary `SYS_LOOM_SETUP` path, live on
+main cc422b913. Corona found them while reading that path for the private
+bridge (NA-1), enqueued them (OPEN-BUGS 2026-10-12 08:46Z and 08:43Z), fixed
+and audited them on corona/async-memory (6a5039788, guest-verified 3f816c8a4),
+and built the port: 3f4896413, one commit whose parent is main cc422b913 (yip
+0212). Main built it, gated it and landed it as a fast-forward; no
+cherry-pick was needed.
+
+**The defects.** (1) P1, latent, EL0-reachable kernel UAF write.
+`sys_loom_setup_for_proc` wrote the owner fields, the ring's charge record and
+every out field through `l` after `handle_alloc` had adopted the Loom's only
+reference. A sibling thread that closed the new fd in that window (a
+lowest-free-slot guess is enough) freed the Loom under those stores. Setup now
+takes its own reference before the install and drops it as its last act, after
+which it does not touch `l`. (2) P3, I-32, self-only. The params-copyout-fault
+rollback ran `handle_close` and then `burrow_unmap`. After the close the unmap
+is the ring's final drop, and `burrow_unmap` has no payer, so the charge record
+died unrefunded: a caller passing a read-only params page leaked the ring's
+pages from its own budget on every attempt. `sys_loom_setup_rollback` closes
+and then detaches through the settling path; whichever drop ends the ring
+claims the record.
+
+**Evidence on main's tree.** Port 3f4896413 on main cc422b913: suite 1977/1977
+(main's 1975 plus loom.setup_close_race and loom.setup_rollback_settles).
+Corona's mutants, re-taken in main's tree by name (na1-mutants.py): M4 (no own
+reference) fails exactly loom.setup_close_race, at "the Loom outlives a close
+that lands at install"; M5 (burrow_unmap in the rollback) fails exactly
+loom.setup_rollback_settles, at "the rollback settles the ring's charge
+exactly" (1976/1977 each), as Corona predicted. test-fault 8/8; ci-smp-gate
+N=10 50/50 (default smp1/4/8, ubsan smp4/8, 0 corruption); check-production
+--all PASS (the KERNEL_TESTS=OFF shape, where the new test hook compiles out,
+builds and boots).
+
+**One thing taken on trust, and why that is safe.** Corona's mutant script
+(`na1-mutants.py`) lives only in their checkout; it edits by an anchor that
+must occur exactly once and refuses otherwise, so a leg that applied is the
+named mutant. Corona warned that M4 can pass by chance if the freed page is
+reallocated inside the window (their audit F3) and asked for a second run if it
+ever did. It failed on the first run, so none was taken.
+
+**Open.** Corona's audit F2 [P3], the rollback's fd number and VA reusable by a
+sibling thread, was closed with a reason: a self-race inside one Proc, in which
+every ledger still settles exactly once.
+
+---
+## 2026-10-12 (main, Opus 5.5, effort max) -- SQ-1 lands on main: the SQ head is published only after the copy (Corona's fix, main's gate) (landed)
+
+**What this is.** Corona found, specified, fixed and audited SQ-1 on
+corona/async-memory: `loom_drain_sq` published `sq_head` before it read the
+index and copied the SQE, and `sq_head` is the producer's permission to reuse
+both. Under SQPOLL the kernel drains on another CPU while the producer runs, so
+a producer that refilled the position in that window had the kernel copy the
+newer SQE under the old submission: one op twice, one lost (I-29 at risk; I-30
+held, because the kernel validates its own copy). It was live on main
+a7353c36f (OPEN-BUGS 2026-10-12 06:42Z). Corona's own narrative, wrong turns
+included, is their journal entry on that branch (18ee6f055, "October 12:
+SQ-1"); this entry records what main did with the port.
+
+**The port and who owns what.** Corona built `corona/sq1-main` (22c343232,
+parent main a7353c36f) with `git commit-tree`, so no hook ran and nothing was
+built in that shape; main owned the build, the gates and the land (yip 0208).
+`loom_sq_release` (advance + release-store `sq_head`) is now the only writer of
+either head, called after the index read and the copy or drop; the dropped
+count is an atomic add. The spec is `specs/loom_sq.tla` (`loom.tla` copies
+atomically and cannot see the window).
+
+**Stacked, not gated twice.** groupstatus was at its last gates, and the two
+touch different files (a dry merge was clean), so SQ-1 was cherry-picked onto
+groupstatus's close (2c038fce1) and the stacked tip carried ONE full SMP
+matrix instead of two. The port had folded SQ-1 into sub-kernel-loom without
+bumping its `updated:` date, which left the dossier reading stale against the
+change it describes; 512383b31 bumps it and renders the spec-coverage view.
+
+**Evidence on main's tree.** Stacked tip 512383b31: suite 1975/1975 (main's 1972 plus the three SQ-1 tests). Corona's mutants, re-taken in main's tree: M1 (release before the copy, main's old order) fails exactly sq_release_after_copy, sq_release_after_index and sq_release_after_copy_chain at Corona's named assertions (1972/1975); M2 (the chain path re-reads the shared SQE) fails only the chain test (1974/1975). TLC: loom_sq clean 188 distinct, liveness 188, buggy_release_before_copy and buggy_unlocked_claim violate FifoFidelity, buggy_unlocked_claim_exclusive violates ClaimExclusive; loom.tla unchanged: clean 2429, liveness 1457, all 7 buggy cfgs violate their named invariants. One number differed from Corona's table: unlocked_claim stopped at 110 distinct states, not 104; at one worker it stops at 51. The count before a violation depends on the worker count; the verdict does not. ci-smp-gate N=10 50/50, test-fault 8/8, and the production shape (KERNEL_TESTS off, where the new test hook compiles out) builds and boots.
+
+**Open.** The deterministic test hook is the producer here; real concurrent
+userspace scheduling against a live SQPOLL ring is not exercised by any test.
+
+## 2026-10-12 (main, Opus 5.5, effort max) -- a dying group keeps its status; a page-in its death abandoned is that death (landed)
+
+**What the run is for.** B-2c's `ls-jsc` passed on b2c @c0bbcfbf0, but its
+console showed `9p: op abandoned (tag 0, death, flush sent)` and then
+`user fault: pid=5182 reason="snare:bus" addr=0x2d7c9a0 pc=0x2d7c9a0` right
+after jsc printed its result and exited (OPEN-BUGS 2026-10-08 17:15Z). pc ==
+addr is an instruction fetch in jsc's demand-paged text. B-2c paused behind it.
+The question that made it preemptive was not the stray line but whether that
+peer's `exits()` could change the group's exit status, turning a clean run
+into a failure.
+
+**It could, and two kernel tests made it fail on demand.** jsc's main thread
+claims the group's death (`group_exit_msg`); a peer faulting text has its 9P
+read abandoned by that death; `userland_demand_page` answers `FAULT_USER_BUS`
+(I-36 condition 6, the I/O-error answer); `proc_fault_terminate` prints the
+user-fault line and calls `exits("snare:bus")`; and `exits_code`'s last-thread
+path recorded `snare:bus`/1 over the claim. `thread_exit_self`'s last-out path
+already used the claim; `exits_code`'s did not. Witnesses
+`proc.exits_in_dying_group_keeps_group_status` and
+`proc.fault_in_dying_group_keeps_group_status` reaped 1 instead of 7 on the
+unfixed tree. b0bd631a0 fixes both halves: `exits_code` finds the claim under
+`g_proc_table_lock`, in the same hold as the `PROC_FLAG_EXIT_CLOSING` mark, and
+leaves through `thread_exit_self` (the first claim's status wins, Linux's
+`do_group_exit` precedent); and `userland_demand_page` answers the new
+`FAULT_USER_DYING` for an unresolved user fault while the thread's death is
+pending, which the EL0 arm turns into a return to the vector tail.
+
+**The gate turned red on something else, and I hunted it before going on.**
+ci-smp-gate's default-smp1 row failed 1 boot of 10 on b0bd631a0:
+`joey: V-1b linux-phenotype leg FAILED marker=L285`. L285 is NP-5's leg: a
+CLONE_THREAD peer blocked in `ppoll` on a listening socket must see POLLIN once
+main connects. My change touches exit-status selection, so it was the suspect
+until measured otherwise. 30 more boots on c855c2dd3 (which only makes the
+marker report the poller's result) passed, 1 failure in 40 overall. The marker
+could not tell me why, so I built the failure instead: a child that exits about
+100 ms into the window while main spins at EL0 without sleeping
+(scratchpad l285_exp.py). It failed on every boot with
+`L285 r=-4 ev=0 wait_ms=100 conn_ms=501 sigs=1 signo=17`, and identically on
+main's own kernel a7353c36f. The mechanism is ARCH 8.8.3's caught-note claim:
+"one caught note unwinds one sleeper", whichever claims first. The child's
+SIGCHLD found the poller as the only sleeper and returned it -EINTR. POSIX
+allows that; Linux's `complete_signal` and FreeBSD's `sigtd` would both give
+the signal to the running main thread and leave the poller alone. So the
+attribution is pre-existing, and the ownership is ours: the probe now re-issues
+an interrupted `ppoll` with the time left, as every other wait in the probe
+does (479d1218b), and the kernel half is a design fork put to the operator
+(OPEN-BUGS 2026-10-12 07:24Z).
+
+**Audit r1 (Fable 5.1): 0 P0 / 1 P1 / 0 P2 / 4 P3, and the P1 was mine to
+miss.** `FAULT_USER_DYING` caused by a terminate latch (interrupt, tty or pipe,
+not group death) relied on the EL0-return tail to act. The tail refuses while
+the thread is in a handler (N-3) and when `SP_EL0` is unusable, so the faulting
+instruction re-executed into the same fault forever; the old tree had at least
+terminated with `snare:*`. 59381c434 acts at the fault: `notes_fault_dying_latch`
+exits with the note the tail itself would pick, or clears latches no queued note
+still backs and returns. The probe has no `kill` (the phenotype serves none;
+nr 129 is unserved), so the witnesses L329/L330 raise the death with a write to
+a reader-less pipe under SIG_DFL SIGPIPE and then fault inside a SIGCHLD
+handler, the second with `SP_EL0 = 8`. P3-2 (a latch a peer revokes while the
+read unwinds leaves a false `snare:bus`) is fixed by sampling die-pending
+before and after the page-in, with its own witness (d82c0d14c).
+
+**What each test proved, both ways.** Removing the fault-arm call left L329
+and L330 "hung" (the livelock, on the real EL0 path). Breaking the helper
+failed the three new kernel tests (1969/1972); breaking only the stale-clear
+failed the stale test alone (1971/1972). Clean rebuilds followed each RED.
+
+**Audit r2 (Fable 5.1) on the fixes: 0 P0 / 0 P1 / 0 P2 / 3 P3, clean.** It
+re-derived the loop closure: an armed, live, unmasked latch is always found by
+the same scan the tail uses, so the arm either exits or leaves die-pending
+false. Its three P3s: scripture still said a default action is taken only at
+the tail (ARCH 7.6.4 and 8.8.2, VIVARIUM 6.22 now name the fault arm); the live
+kernel test asserted status 1, which a `snare:segv` death also reaps, so it now
+reads the child's exit message from its ZOMBIE (f4d6b1152); and my r1 closed
+list misdescribed L329. Its confidence notes named "#964, the
+never-syscalling gap, pre-existing and tracked". I checked the "tracked": the
+old task number survives only in closed lists and a LIFE-SUPPORT aside, with no
+live queue entry. The IRQ-from-EL0 tail (vectors.S:258-266) has no notes leg,
+so a `while(1);` program ignores Ctrl-C. Re-enqueued (OPEN-BUGS 2026-10-12
+07:34Z), sequenced after this land.
+
+**Land gates.** On the stacked tip 512383b31 (groupstatus + SQ-1): suite 1975/1975; test-fault 8/8; ci-smp-gate N=10 50/50 (default smp1/4/8, UBSan smp4/8, no corruption); the production shape (KERNEL_TESTS off) builds, boots and logs in. groupstatus alone at f4d6b1152: suite 1972/1972. REDs: removing the fault-arm call -> L329/L330 "hung"; breaking the helper -> the three new kernel tests fail (1969/1972); breaking only the stale clear -> the stale test alone (1971/1972); exiting with snare:segv -> only the live test's message assertion (1971/1972). L285: the forced construction failed every boot before the probe fix (r=-4, identical on main a7353c36f) and passes 2/2 after it, with a leg proving the retry ran. death_wake.tla clean (1422 distinct, EventuallyReaps) and its buggy cfg violates NoLostDeathWake; the model covers the cascade and the reap, not which status the ZOMBIE records, which rests on the two kernel witnesses.
+
+**Open after this run.** The caught-note thread-selection vote (OPEN-BUGS
+2026-10-12 07:24Z). A phenotype `rt_sigaction` installing a handler for a class
+whose latch is already armed does not clear the latch on the sleep side
+(OPEN-BUGS 2026-10-12 06:43Z; the fault side is closed here). A program
+spinning at EL0 without syscalls ignores Ctrl-C (#964, OPEN-BUGS 2026-10-12
+07:34Z): the IRQ-from-EL0 tail has no notes leg; the note restore is already
+full-context, so the remaining question is what the delivery path assumes about
+a syscall boundary. B-2c resumes on b2c @63c2b4ad6.
+
 ## 2026-10-08 (aux, Opus 5.5 1M, effort xhigh) -- kaua reads one byte per read: the type-ahead behind a quit key reaches the shell
 
 **Why now.** Landing lantern's one-byte read (d255a4aa6) left two items owned: prowl, quarry and nora read through kaua's PollSource, which drained every ready byte before the app acted, so the line typed behind their quit key was lost (OPEN-BUGS 2026-10-07 13:45Z); and lantern's Escape swallowed the next key, because lantern drove kaua's parser itself and never flushed a held ESC (14:20Z). Both are the same question -- who reads fd 0, and how far -- so they went in one chunk.
@@ -88,6 +1025,232 @@ needed the operator.
 **Red control** b1ec375dd (`usr/` at aux-3, the legs kept; never lands): all five new legs FAIL on their named arm in round 1 -- lantern (k) swallowed the SPACE after Escape; prowl, quarry and nora read past their quit key; pts-probe drew nothing in 20 s, on a boot that asserted no aurora. Run 1 (dbba17c68 against 3b4aab074) was green in every clean phase, and its red phase showed two witnesses failing for the wrong reason: aurora answered pts-probe's CPR through the console, and the old drain took the sentinel line too. Both were fixed before run 2.
 
 **Still open.** ptyhost flow control (OPEN-BUGS 07:27Z); a full ptyfs fid table reads as ENOENT (dev9p_walk drops the error; OPEN-BUGS 2026-09-29, widened); quarry's bench trusts a shared, world-writable log (05:58Z); the cost of a paste into nora in a tile is unmeasured.
+
+## 2026-10-08 (main, Opus 5.5, effort max) -- exec resets the image's devices; the last reference resets what is mapped (landed)
+
+**What the run is for.** vmaguard's audit r2 left a lead (OPEN-BUGS 10-08 (a)):
+exec drained the old address space with no device reset. Read in the code it
+held: `sys exec` -> `proc_exec_replace` -> `addrspace_unref(old)`, and the only
+callers of `proc_quiesce_owned_devices` were the two death sites. A driver that
+maps a DMA buffer and closes its descriptor holds the buffer only by the mapping
+(a `KObj_DMA` chunk frees when the last of its handle and Burrow references
+drops), so an exec freed it while the device that had been handed its address
+could still be armed: RW-7 R3-F1 on exec instead of death. Linux's answer (VFIO
+pins DMA pages to the device container, not the mm) is the R3-F8 device-session
+model, P5+. I asked the operator with that research; **the vote (12:41Z): exec
+resets the image's devices** -- death's two walks, when the old space is the
+exec'ing Proc's alone.
+
+**The self-audit found the walk could be skipped by anyone.** Writing exec's call,
+I asked who else reads "am I the last holder" before dropping. Every departing
+holder does: a dying Proc reads the count at its exit close and again at its
+reap, and drops its reference only at the reap. Two holders leaving at once can
+each read the other's reference and both skip the mapped-device walk; the last
+drop then drains with the device armed. That was already true of two concurrent
+reaps, and exec made a third way in. So the mapped-device walk moved to the one
+point no interleaving skips -- the last reference, inside the teardown, before
+`vma_drain_in` -- and exec runs the handle-table walk. The exit close keeps its
+own walk, because a buffer held only by a handle frees at that close, before any
+drain.
+
+**Audit r1 (Fable 5.1): 0/0/0/6, clean -- but its F1 changed the shape.** Exec's
+walk was still gated on READING the count as 1, so a sibling's reap racing the
+exec could take the last reference after the exec read two. `addrspace_unref`
+became `addrspace_release` (drop; true when it was the last) plus
+`addrspace_destroy`, and exec runs its walk exactly when its own drop is the
+last, between the two. F2 caught that the test could not see the walk's ORDER
+against the drain (moving it after the drop stayed green); a monotonic teardown
+stamp now orders them. The rest were prose (the PCI re-claim needs every IRQ
+descriptor closed too, and no hostmem client mapping a BAR), test hygiene, and a
+recorded over-approximation (an unreaped zombie sibling counts as a holder).
+
+**Audit r2 (Fable 5.1) on the restructure: 0/0/0/3, clean.** Its F-A corrected my
+record of the residual: on a shared exec the drain frees nothing, but the exec's
+own close-on-exec sweep still frees a buffer held only by a close-on-exec
+descriptor, with no reset -- death has no such gap because its walk runs
+ungated. By the vote that stays a residual (a driver setting close-on-exec on a
+buffer its device holds is releasing what the device uses), now recorded with its
+true trigger, and the audit row names what no test can reach.
+
+**RED and the land gates.** RED in the primary tree detached at the pre-rebase tip e440613e3, 13:57-14:07Z: base 1965/1965. S1 (exec's walk deleted), S2 (exec's gate always true) and S6 (exec's walk moved after the teardown) went red exactly at their predicted lines. S3 (the drain's walk deleted), S4 (the holder's == 1 gate dropped) and S5 (walk (b) over the current Proc's space) went red at their predicted first lines too, but also took down seven userspace virtio driver tests, `driver_crash_recovery` and `mmio_handle.virtio_mmio_claimable` ("virtio-mmio bank claim failed"). That was my tests, not the kernel: `TEST_EXPECT_EQ` returns on failure (test.h:86), and the last-unref test plus the two inherited death tests released their claim on the empty virtio page on their last line, so a failing assert left the page claimed for everything after it. Under S5 the inherited death test leaked first, and the exec test then failed earlier than predicted ("the child ran its three execs": the child's create was refused on the held page). Fable's r1 F4 had named the setup-path leak; I fixed that and missed the final-assert path, the M-PIN on fixtures released on a test's last line, recurred. 8db06b56c makes all three take every reading, release, then assert. The rerun, 14:09-14:14Z: S3 red at the exec test's mapping line and the last-unref line, S4 red at the control line only, S5 red at the death test's VMA-only line, the exec test's mapping line and the last-unref line, with no driver collateral; green 1965/1965. I then rebased the branch onto main 41ad15031 (weftpark) so the gated tree is the landed one; the patch is line-identical. Land gates on the rebased 8fbaa39d0: suite 1966/1966 (weftpark's 1964 plus the two new tests); test-fault 8/8 PASS; ci-smp-gate 50/50 across default smp1/4/8 and UBSan smp4/8, no corruption (14:16-15:37Z).
+
+## 2026-10-08 (main, Opus 5.5, effort max) -- the live weft reaper never sweeps a test's binding (landed)
+
+**What the run is for.** vmaguard's audit r2 (F4) noticed that the G-3 reaper
+tests run beside the live reaper thread: `main.c` readies the thread before
+`test_run_all`, and once anything is registered it sweeps every second on the
+real clock. The tests register a binding, kill its session and drive the sweep
+themselves on a synthetic clock. A live sweep landing between a test's kill and
+its own sweeps would stamp the binding with real uptime -- the test's clock is
+1000-5000 s, so its next sweep finds the stamp far past the grace and reclaims
+one sweep early -- or reclaim the binding itself, and the window-hook tests'
+hook would never run. Whether a suite boot failed depended on whether the
+reaper group straddled the thread's second. It was enqueued at vmaguard r2
+(OPEN-BUGS 10-08 (b)) and taken right after vmaguard.
+
+**A mark, not a park.** Parking the thread for the reaper group was the obvious
+fix and the wrong one: a park set at a test's start is released only by a test
+that reaches its last line, and every sibling `return`s on a failed assert, so
+one failing test would leave the reaper parked for the rest of the suite. A
+test now registers through `weft_reap_register_for_test`, which marks the
+binding (`reap_test_only`, test builds only) and wakes nothing; the thread's
+`weft_reap_sweep` skips a marked binding and `weft_reap_sweep_for_test` skips an
+unmarked one, both under the registry lock the mark is written before. There is
+nothing to release. The witness, `weft.reap_live_sweep_leaves_test_bindings`,
+drives the thread's own sweep against a dead test binding (no stamp, no reclaim,
+however late) and then the test sweep one call away (stamp, reclaim).
+
+**Audit r1 (Fable 5.1, start == end): 0/0/0/4, clean.** It confirmed the hazard
+from the code (the thread's `tsleep` re-checks a never-true condition until its
+deadline, so the sweep lands exactly a second after the wake) and that the mark
+cannot hide a production binding. Its P3s: the dossier still said the thread
+sweeps "while anything is registered" (a test registration wakes nothing); my
+first commit message said the stamp makes the test's `now - stamp` wrap, when
+on those clocks it exceeds the grace instead; the two register bodies were
+duplicates (now one `weft_reap_link`); and the "test sweep never touches a real
+binding" half holds by construction with no witness, which the dossier now says.
+
+**RED and the land gates.** RED in the weftpark worktree, 12:18-12:29Z: base 1964/1964 (main's 1963 plus the witness). W1 (the thread's sweep loses its skip) went red only at "the live sweep took no orphan stamp". W2 (the test sweep wired to the real partition) went red at the witness's "the test sweep's stamp is its own clock" and in the five converted tests whose own sweep must stamp or reclaim; the two that only assert that nothing is reclaimed stayed green, as they must under W2. Green 1964/1964. The SMP gate failed to start twice, both times on the worktree's cloned build/, never on the code: first the build's 6 GB disk floor (6137 MB free after the RED rebuilt the userspace; I cleared the Go build cache), then CMake caches cloned from the primary tree for the sanitizer and fault kernels. The worktree recipe in memory already names `kernel-undefined`; my RED script, copied from a primary-tree one, never consulted it. The gate ran in the primary tree detached at bc05696fa instead: 50/50 across default smp1/4/8 and UBSan smp4/8, no corruption.
+
+## 2026-10-08 (main, Opus 5.5, effort max) -- a VMA the list does not hold is never removed; the weft reaper holds the space it locked (landed)
+
+**What the run is for.** Corona found, in the B-2b hunks, that a second
+`vma_remove_in` of the same VMA wipes the whole list: the first remove NULLs
+both links, so the second takes the no-predecessor arm and writes
+`as->vmas = NULL`, and the clamp-safe uncharge says nothing. No path does it
+today (re-measured on main: five sites, each removes once then frees). B-2b's
+`code_vmas` underflow extinction was the one thing that would have made it
+loud, and capmark had just retired that counter, so the hazard had become
+silent. Corona asked main to take it (yip 0202); it went in before B-2c.
+
+**The guard was small; the audit found the real defect next door.**
+`vma_linked_in` asks the predecessor (or the head, for the first mapping) and
+the successor to agree, and `vma_remove_in` extincts when they do not -- Linux's
+list hardening. The links alone cannot tell the sole mapping from an unlinked
+VMA, so the head is asked too, and the insert's already-linked check had the
+same blind spot (a second insert of the sole mapping was refused as a
+self-overlap, then freed with the head still pointing at it). Fable's round 1
+then found a pre-existing P1 one file over: the weft orphan reaper locked a
+Proc's address space under the process table lock and, after dropping it,
+re-read `q->as` three times; exec swaps that pointer under the table lock
+alone, so an exec in the window had the reaper unlock the NEW space and leave
+the old one locked forever, and exec's drain then spun on it. `proc.c`'s exec
+comment claimed the opposite.
+
+**My first fix was wrong, and both of us caught it.** I pinned the space with a
+reference instead of re-reading the pointer. Round 2 (and, in parallel, my own
+read of `proc_quiesce_owned_devices`) found that the reference count is an
+oracle: the device-death quiesce reads `ref == 1` as "sole, and staying sole",
+and its comment's proof was that only an rfork takes a reference. A reaper pin
+on a dying driver's sole space would read as a sharer and skip the device
+reset, and the reaper's later unref, now the last, would drain the DMA buffers
+under an armed device. The fix went back to the lock -- which was never the
+bug -- with the find handing back the SPACE it locked. Reading the quiesce also
+turned up a pre-existing use-after-free race: it walks the list without the
+lock while the Proc is still ALIVE, and the reaper could free a VMA under it.
+The find now skips an exit-closing Proc (read under the lock), and the quiesce
+takes and drops the lock first. Round 3 was clean; its one behavioural P3 --
+the skip stranded a weave in an RFMEM survivor's space -- took the reviewer's
+own refinement (skip only a sole space), with its soundness argument.
+
+**A wrong turn of my own, twice.** A sabotage compile loop restored files with
+`git checkout --` in the primary tree and reverted my uncommitted edits to
+`weft.c` and `test.c`; an anchor that "matched 0 times" gave it away, and the
+edits were re-applied from the same scripts. The next time, my "tree clean"
+gate was `git diff --quiet`, which ignores staged changes; it was harmless only
+because the restore read the index. The gate is `git status --porcelain` now,
+and the rule (commit before any sabotage) is in memory.
+
+**RED and the land gates.** Nine sabotage runs in their own worktree (10:05-10:26Z), each red exactly where the closed list predicted: R1 and R2 (the predicate's head and successor halves) at their two assertions in `vma.linked_in_tracks_the_list`; R3 (the sweep re-reading `q->as`, the pre-fix shape) at "the space the sweep locked is the space it unlocked"; R4 (no exit-close skip) and R5 (a blanket skip) at their tests' one assertion each; M1, M3 and M5 (scratch double removes of the head and an interior mapping, a double insert of the sole mapping) extinct with the guard's own message, each inside the scratch test meant to drive it; and MX, with both guards off, the three silent corruptions as FAILs -- the head wiped twice and the sole mapping refused as an overlap with itself. Base and green 1963/1963. Then on the tip: suite 1963/1963, test-fault 8/8, and ci-smp-gate N=10 50/50 over five configurations with no corruption (10:26-11:49Z). Corona had the final diff on yip 0202 before the land. While the gates ran I verified one r2 lead in the code -- exec drains a driver's old space with no device reset, so a mapping-only DMA buffer frees under an armed device (OPEN-BUGS, now a question for the operator) -- and wrote the fix for the other (the reaper tests beside the live reaper thread), which lands next as its own chunk.
+
+## 2026-10-08 (main, Opus 5.5, effort max) -- the image records every holder that has left it (landed)
+
+**What the run is for.** B-2b audit r3 F3 left one finding enqueued at the B-2
+land: a driver's `rfork(RFPROC|RFMEM)` child, carved below its parent (I-2),
+keeps the parent's MMIO/DMA window after the parent is reaped, and a capless
+same-principal peer then covered the child and could write the device through
+`/proc/<pid>/mem`. B-2b had closed the same shape for code regions alone, by
+counting code aliases as `CAP_JIT`.
+
+**The question went to the operator, with the land done first.** Reading the
+code while the land gates ran gave three shapes: per-type counts (MMIO/DMA as
+`CAP_HW_CREATE`, which is the live driver's own bar; but a GPU host-memory
+mapping belongs to an ordinary client holding no such cap), refusing RFMEM over
+a device mapping (libthyla-rs's `rfork_spawn` uses RFMEM, so drivers could no
+longer spawn), or a per-space record of every holder's caps, the shape of
+Linux's dumpability, which belongs to the address-space group rather than the
+task. It rewords
+I-39, so it was the operator's call, and I asked only after the push, so the
+question could not hold the mac. Voted 2026-10-08: the record.
+
+**A second leak of the same class turned up while writing the scripture.**
+Seals do not cross fork; DEBUG-FS 3.3 justified that by the join "reading the
+parent's bit at the moment of the access" -- which holds only while the parent
+maps the image. A sealed parent's later RFMEM child read unsealed once the
+parent was reaped. The vote's rewording ("every Proc that has held it") covers
+every guard I-39 names, so the seal and taint bits ride the same record
+(`guards_ever`), and that is stated in the scripture commit (95ec416cf) and the
+dec, not slipped in.
+
+**Recording at departure, not at every grant.** The first sketch recorded at
+every caps write (five sites, an ordering argument per site, and every kernel
+test that writes `->caps` directly would have had to change). A holder leaves at
+three points -- the ZOMBIE transition, the exec swap, `proc_free` -- and a live
+Proc's caps only grow (checked: every write is a `fetch_or`; a legate scope ends
+by tearing its members down), so its caps at departure are all it ever held. Two
+of the three run under `g_proc_table_lock`, the join's own lock, and the ZOMBIE
+transition writes before any reap can unlink the Proc, which also closed the
+reap-window miss DEBUG-FS 3.3 had listed as open. The code-alias count
+(`code_vmas`) went with it.
+
+**Audit r1 (Fable 5.1, start == end): 0/0/1/3, clean.** F1 was mine and sharp:
+both rfork-driven witnesses spawned through the plain kernel `rfork`, which
+carves a kernel child to `CAP_NONE`, so their premise was red on the first run
+and their equalities compared 0 with 0 -- a removed record site would have
+passed them. They spawn with `CAP_ALL` now, with a "not empty" assert beside
+each equality. F2: the taint rides the record redundantly (inherit + stamp
+already cover it); stated, and pinned by its own witness. F3: the text said
+`proc_free` serves "orphan paths" (there are none in production), and called the
+record Linux's dumpability when it is stricter (Linux's bit is re-raisable).
+F4: no seal had been driven through a real death; the zombie and exec children
+now seal themselves through `proc_seal`. Self-found while it ran: the zombie test
+read the record after a lock-free state load. Fixes 04d32797b.
+
+**The heritage claim was wrong twice before it was right.** The question and the
+dec said Linux's bit is "sticky until exec"; audit r1 F3 caught that it is
+re-raisable (`prctl(PR_SET_DUMPABLE, 1)`), and my r1 fix then wrote that
+`commit_creds` lowers it "on any credential change". Writing the chg record's
+Correction, I read Linux's tree instead of my memory of it: `commit_creds`
+lowers it only when the effective or filesystem ids change or the permitted caps
+grow (`!cred_cap_issubset(old, new)`), and the current tree has moved the bit off
+`mm->flags` into a `task_exec_state` that `CLONE_VM` siblings share
+(`copy_exec_state`). Both earlier versions paraphrased a paraphrase; the third
+was read from the code. 3.3 and the ARCH cell were corrected at the land, the dec
+through the chg record's Corrections.
+
+**RED: five runs, each red where predicted.** In its own worktree at 82381492f
+(06:54-07:10Z): base and green 1959/1959 (main's 1955 plus four; the cover
+test was renamed). Removing the ZOMBIE-site record (R1) failed the zombie test
+and nothing else of the record's (the taint mask in the same run failed its
+own test); the exec site (R2), the exec test alone; the `proc_free` site (R3),
+the three tests whose holder leaves through `proc_free`; dropping the caps half
+of the join with NOTRACE out of the mask (R4), the cover test, the seal test's
+NOTRACE leg and the exec test's seal; the guards half (R5), the three seal and
+taint legs. R1 and R2 fired on the "not empty" guard audit r1 added, one line
+before the equality I had predicted; it reads the same record at the same
+moment, so it names the same site.
+
+**Gates and land.** On 82381492f: suite 1959/1959, test-fault 8/8,
+ci-smp-gate N=10 50/50 over five rows with no corruption (07:11-08:33Z). No spec
+models the join; the ZOMBIE transition's modelled steps are unchanged. `main`
+had not moved and aux-3 was already in it, so the land is a fast-forward with
+the docs commit on top; the suite above is the landed tree's. Corona was rung
+under AS-R9 for the `vma.c` hunks (call 0202, not live; it rings at their next
+session). One wrong turn at the very end: I had committed the change record
+as a draft (82381492f) with a marker where its Verification would go, and the
+record plane froze it there; the hook refused the fill. The verification went
+into a superseding note (`chg-2026-10-08-image-holder-record-land`). A change
+record is written in the land commit or not at all.
 
 ## 2026-10-07 (aux, Opus 5.5 1M, effort xhigh) -- a spawn names its child's cwd; chdir answers its errno; the build refuses a narrowing
 
@@ -117,6 +1280,289 @@ needed the operator.
 **Gate** (aux-gate `run-cwd3.sh` on d69f2bc2f, the landing's code, 2026-10-08 08:39-10:03Z): the session image with the Instrument profile, `ls-halcyon-lantern` PASS; the gate image, suite 1939/1939, and the 12 interactive legs PASS (ls-ci, cpu-gate, haul-links, prowl, idle-probe, im3-lex-curiata, dap-nora, go6, lantern with leg (j)'s three rounds, ergo-1, dev-accounts, abin-tar). Eight kernel sabotages each turned exactly their witnesses red -- one per broken test function, since a failing `TEST_ASSERT` returns -- and joey's probes on a second boot with the four suite tests unregistered; the narrowing sabotage (a devno parameter cut to u32) failed the build three times over; the two checker sabotages (a swapped tail mirror field, a second flag on bit 0) were refused. `ci-smp-gate` PASS, 0 corruption across every configuration. The first run of the sabotage phase (on 0b0c72cc9, the same code bar one test) found that `spawn_cwd.refusals` could not see a spawner whose cwd moved; that test now stands the spawner in /, and C8 turns it red.
 
 **Still open.** The Ambush fork's master moves to 2b once the peer trees carry untag 2a (yip 0179, 0180). cwd-b: the Go fork's `startProcess` sends the tail and drops the chdir dance (ring main first). The non-authority -1 classes in devproc (OPEN-BUGS 20:20Z).
+
+## 2026-10-07 (main, Opus 5.5, effort max) -- B-2a + B-2b: the code region becomes a reservation, the I-cache sync becomes exact on aliasing cores, the writer alias is hardened (landed)
+
+**What the run is for.** The browser arc's B-2 brings JavaScriptCore's JIT onto
+`SYS_JIT_CREATE`. The operator voted its shape on 2026-09-28 (`project_b2_votes`):
+a lazy code Burrow; the writer alias hardened inside B-2 (random placement, an
+execute-only class for the engine's write thunk, unprivileged user copies); the
+tiers Baseline+YARR, then DFG, then FTL/BBQ/OMG. This entry covers the
+scripture (4f34abc78) and B-2a, the kernel half that makes the region a
+reservation (c39014c79 WIP, then the audit close).
+
+**The re-verification came first, and it moved the plan.** The 09-25 research
+was a week old and never re-checked, so before writing scripture a read-only
+agent re-derived every claim against `~/projects/webkit-thylacine` (113 calls).
+Most held. One did not: claim 14 said the Wasm thread set is filled only by
+threads that run Wasm. It is filled by every VM-entering thread
+(`VMEntryScope.cpp:43-48`), and the BBQ/OMG tier-up walk suspends each of them
+(`WasmCalleeGroup.cpp:331/423`, `WasmOSREntryPlan.cpp:170`) -- B-0's
+`Thread::suspend` is fatal, so B-2e has to replace the walk, not merely avoid
+it. The thunk facts came back sharper than recorded: the writer base lives in
+`movz/movk` immediates; the thunk copies byte by byte below 8 bytes, so a 4-byte
+patch is torn (Thylacine's thunk must store aligned words); the branch-
+compaction buffer keeps a readable heap copy of the stub. BROWSER-DESIGN 7 was
+rewritten from that report, not from the old notes.
+
+**Two scripture claims were wrong, and both were ours.** ARCH 25.4's JIT row and
+LLVM-DESIGN 16.18 said `IC IVAU` by the kernel's direct-map address reaches
+every alias of the page. It does on a PIPT I-cache. On a VIPT one (Cortex-A53
+class; `CTR_EL0.L1Ip` = 0b10) the index comes from the VA, so an invalidate by
+the direct-map VA can miss lines fetched through the exec alias. Corrected in
+4f34abc78; B-2a makes the code agree: any CPU reporting a non-PIPT I-cache sets
+a sticky flag, and the sync then cleans by VA and invalidates the whole I-cache
+(`IC IALLUIS`), as Linux's `sync_icache_aliases` does.
+
+**B-2a, what changed.** The CODE Burrow takes ANON_LAZY's pagemap and stays the
+admissibility tag. Create charges nothing. The first touch through either alias
+commits, zeroes, I-cache-invalidates and charges the page once (the CL-7k-3 F1
+invalidate moved from create to the commit, before any leaf names the page).
+Destroy refunds the footprint -- pages plus the pagemap nodes those commits
+built -- iff both unmaps succeed. `SYS_ICACHE_SYNC` walks the slots and skips
+uncommitted ones. Every release path stays closed to CODE: decommit and the
+range detach (a release through one alias would leave the other alias's leaf
+on a freed page), take, swap, mirror, populate, and fork.
+
+**Wrong turns, and what caught them.**
+- The first `max_region_is_a_reservation` expected the pool to grow by 2 for two
+  committed pages. The pagemap nodes come from the user pool too; the honest
+  figure is the footprint. Caught by re-reading `pagemap_install` before the
+  build, not by a red run.
+- `page_count` carries the page-table pages the faults build, and a destroy can
+  reclaim tables, so every exact page assertion in test_jit.c was off by the
+  tables. `jit_pages`/`jit_pool` subtract `pgtable_pages`.
+- Moving the fault arm's comment carried an overstatement with it: that
+  `make_user_pte_l3` makes W^X a property of the encoder (task #59). It does
+  not; `vma_alloc` refusing W|X (vma.c:65) is the guard. Rewritten.
+- The first commit was refused by the dossier gate: kernel/syscall.c is also
+  owned by `sub-kernel-syscall-abi` (audit:hard). Fixed by writing that
+  dossier's JIT paragraph, not by a trailer.
+
+**Census (self-audit while the Fable round ran).** Every `BURROW_TYPE_CODE` site
+(7 files) and every `->pages` consumer outside burrow.c: exec.c (ELF segments),
+vdso.c, weft.c (checks NULL), loom.c (ANON only, by type) and fault.c's ANON arm
+never see a CODE Burrow; addrspace_clone, reprotect and the Loom buffer gate
+refuse it by type; the debug reader walks PTEs, not `->pages`. The permission
+check in `demand_page_locked` (fault.c:429-437) runs before any arm, so a write
+to the exec alias is refused before it can commit a page.
+
+**Audit r1 (Fable 5.1, cross-family, 61 calls): 0/0/2/2, clean.** No defect in
+the mechanism; every chain the brief named survived (its "verified sound" list
+is in `memory/audit_b2a_closed_list.md`). What it found was the neighbourhood:
+the ABI header, `thyla_jit.h` and libthyla-rs still told a JIT that create
+refuses on the page budget (F1) -- a JIT that planned to fall back to its
+interpreter on that errno would have been killed at a touch instead; and ARCH
+25.4's prosecution row still said CODE "IS the ANON arm" and that the
+create-time sync "must stay" (F2) -- a reviewer following it would have flagged
+the correct removal as a regression. F4 was the sharper catch: no JIT test drove an
+instruction fetch, so every "first touch through the exec alias" leg was a read
+that the RX alias's READ bit admits; `jit.fetch_admission` now pins the EXEC
+bit, with its own RED (J9). Mesa patch 0004's comment was
+left in place on purpose: editing its diff rewrites every later reconstructed
+tree and voids the README's recorded hashes; it is queued for the next Mesa
+refresh. Close: 212f8e479.
+
+**RED, 212f8e479, 14:55Z-15:05Z.** Base 1941/1941. Four sabotage runs, nine
+sabotages in disjoint witness sets: R1 (create charges the region) failed 6
+tests, R2 (a second charge on the other alias; a sync refusing an uncommitted
+slot; VIPT-only decode) 5, R3 (refund without the nodes; no commit-time
+invalidate; never the whole-I-cache branch) 4 -- every one at the predicted test
+and the predicted message. R4 failed 4 where I predicted 2: dropping fault.c's
+EXEC check also failed `demand_page.permission_denied` and
+`demand_page.file_rodata_prot`. I had written, into 212f8e479's message and the
+RED script, that no kernel test drives an instruction fetch at all -- from a
+grep for `is_instruction = true`. Those tests set the flag through a helper's
+parameter (`make_fi(..., is_instr)`). The audit's own F4 was scoped correctly
+(the exec alias); my widening was the error, and the RED caught it because the
+prediction named an "only witness". Green 1941/1941.
+
+**Open.** The SMP multi-boot gate, the sanitizer matrix and the capacity/cow
+specs run once, on the B-2a+B-2b tree at the land (double the distance).
+
+### B-2b (the hardened writer) and F5
+
+**Votes, ~15:08Z.** The thunk is born sealed (`SYS_JIT_CREATE_SEALED`, 127);
+`SYS_LOOM_REGISTER` returns -errno. Scripture 1e9f8fe5a, kernel core
+608efb1dd, F5 + mirrors + tests 2715d83c0, dossiers 61210cfd7.
+
+**Found while tracing F5's errno set: a caught note lost staged bytes.**
+`wb_flush_locked` kept the run only for a death. A caught note ends the
+client's wait as CLIENT_WAIT_FLUSHED -> -P9_E_INTR ("the server cancelled the
+op and it counts as never sent", 9p_client.c ~1272), and the flush then
+latched EINTR and dropped the run: bytes write() had reported written never
+landed, and every later write/fsync/close returned EINTR. Enqueued in
+OPEN-BUGS at 15:31Z before fixing; witness
+`dev9p.wb_interrupted_flush_keeps_run` (an injected Rlerror(4) reaches the
+flush as the same -4). The same trace showed my own scripture wrong: LOOM.md
+8.1 (and dec-2026-10-07-loom-register-errno's Fork) said "a death's EINTR";
+a death's flush returns -EIO (the never-sent take-back), and the dying caller
+never reads it. LOOM.md fixed; the record plane is append-only (vault-lint R3
+refused the in-place edit), so the land's change record corrects the dec.
+
+**A cost I feared and measured instead of assuming.** Random placement gives
+each alias its own page tables; a test helper comment said tables "outlive a
+region's leaves until exit", which would have made create/destroy churn grow
+them without bound. The comment was stale since B-1a': `uninstall_range`
+reclaims an emptied table (mmu.c ~2035, `user_tables_reclaim`), and
+`burrow_unmap` takes the reclaiming form. Kept the per-allocation draw;
+corrected the comment.
+
+**Census figures re-measured, not carried.** The handoff predicted "124 live"
+syscall numbers after 127; the measurement says 125 live, 125 dispatch arms,
+both set differences empty, holes 26/30/43. Vivarium: of 100 Linux rows none in
+120..127.
+
+**Audit r1 (Fable 5.1, 0/0/0/4) and the finding that grew in triage.** F1 was
+real and mine: keeping the run on ANY -EINTR let a server's own Rlerror(4) pass
+for a caught note, so a last close reported success while the closer could lose
+the bytes. The arm now keys on the thread's note claim (`wb_note_cancelled`),
+which every caught-note unwind holds to the EL0-return tail. F2 arrived as a P3
+("maps is owner-gated"); reading devproc.c:519 showed maps is AMBIENT and its own
+comment obliged a same-chunk revisit if a user address ever became random. Random
+code aliases are exactly that, so F2 became a design fork, not a fix.
+
+**The vote, and the wake that never came.** The fork needed AskUserQuestion, and
+my own rule said not while thyla-wake was armed. Reading the script showed it
+types only into an empty input box with a rule above it, which a dialog never
+is, so the rule was stricter than the hazard. I asked at 16:4xZ; the operator
+answered at 17:44Z: redact the code rows (A). In the same question they took on
+waking aux, whose lease had sat idle for 1.6h. Aux found its own wake tool
+misread an idle input box as "typed" for an hour and gave up still holding the
+lease (aux-owned fix). The mac reached me at 17:45Z.
+
+**The first build said the kernel was right and my test was wrong.** Kernel C
+and the Rust passed niced syntax and cargo checks while the mac sat idle, and the
+first `build.sh kernel` (3.5 min) built clean. The suite: 1948/1949, the one
+failure `jit.sealed_fill_failure_refunds` at its own premise "at least one
+slot-table node". A pagemap of up to PAGEMAP_INLINE_MAX (32) slots is an
+uncharged inline kmalloc leaf (pagemap.c `pagemap_init`), so a one-page sealed
+region charges its page and nothing else. The test now uses 33 pages, so a node
+really is charged and the refund of nodes is exercised, not just the page's.
+
+**F2's design took three passes.** Zeroing addresses in place would still place
+each alias between its neighbours. Grouping the zeroed rows at the end fixed the
+order, but the listing truncates at ~2 KiB (~30-40 rows, the browser will
+always exceed that), so WHICH code rows appear would say which aliases lie below
+the cut. The shape that holds: withheld rows take no buffer and are counted per
+permission class against a budget of as many zeroed rows as the buffer holds;
+they print only when the walk reached the end; room comes from dropping whole
+rows off the end. The bytes a foreign reader gets then depend on the code
+aliases' COUNT, not their addresses. One residue stays, stated in the code: the
+budget stop, which needs more aliases below the last printed row than the buffer
+holds rows. Tests: maps_code_visible (predicate, NOTRACE self vs I-39's own
+refusal), maps_code_redacted (byte-identical foreign listing after the aliases
+move, owner's listing changed as control), maps_code_truncated.
+
+**Disk, measured twice.** Free space fell 8.2 -> 6.7 GiB at 16:41-16:45Z with
+nothing building: swap grew to 3072M and its files share the container. Corona
+read the drop as my build's; the timestamps put it an hour earlier, and corona
+recorded the swap mechanism. The RED driver now stops before a run below
+6300 MiB rather than let build.sh's 6 GiB floor trip mid-bake.
+
+### Audit r2 and its triage (closed ~18:57Z on 2026-10-07)
+
+Round 2 (Fable 5.1, start == end) read e77fce32f..4382e69b9 and reported 0/0/0/3 P3:
+the diorama's "no new authority" note named the ambient maps posture B-2b retired (F1),
+two load-bearing arms of format_maps had no witness (F2: the trim loop, the budget stop),
+and the probe arm failed silent (F3). Its F1 verdict leaned on "a capless diorama never
+covers a CAP_JIT holder", and checking that premise is what found the real defect.
+Caps never shrink on a live Proc (every write is a fetch_or), and a fork refuses a code
+region (the clone classifier's default arm), so the premise looked true -- but an
+rfork(RFPROC|RFMEM) child is born without CAP_JIT, shares the aliases, and keeps them
+once its creator is reaped. From then on the I-39 image join saw no CAP_JIT anywhere,
+and a capless same-principal peer covered the child: debug control of a writer/exec pair
+without the cap, and its addresses in maps -- which the boot diorama, capless and SYSTEM,
+would hand to a client of any principal. Pre-existing since code regions met the
+2026-09-24 image join; ours either way. Fix (3bb61e729): AddrSpace.code_vmas, kept by the
+two list primitives every link and unlink goes through, and the join ORs CAP_JIT while it
+is nonzero, before the sole-mapper fast path. The diorama now checks its own
+elevation-only caps are zero before it serves (deputy_check), so the property is read,
+not inherited from two spawn masks.
+
+Two smaller catches while fixing: JIT-ON-WX item 3 had said a NOTRACE Proc does not see
+its own code addresses, while the code (correctly) always shows a Proc itself -- scripture
+corrected; and test_devsrv_conn's connect helper leaked CAP_TCB_DIAL into every later
+test on its three early returns. SF-1 (page-table counts as a placement side channel)
+closed as a stated residual with its measure: ~7 of 34 bits in ~0.8% of placements.
+The two existing end-to-end maps tests had a capless target holding code -- exactly the
+orphan state the fix now refuses -- so they read with CAP_JIT held now; the first build
+is what proves that premise.
+
+The first build of the round-2 fixes ran 1954/1955, and the failure was mine:
+`devproc.maps_code_budget_stop` expected the foreign reader to get the header alone,
+and got 2011 bytes. Reasoning about it twice produced nothing, so I printed both
+listings from the test (a throwaway uart print): the header and 76 zeroed rows. The
+zeroed row is 26 bytes, not the 27 I counted by hand -- and the round-2 reviewer had
+"verified" 27 by hand too. The budget is therefore 77, 76 aliases fit, and the kernel
+did exactly what the design says: complete walk, top row trimmed whole, every zeroed
+row printed. The test now derives its sizes with sizeof (85cfc29a3). Two hand counts
+agreeing was one reading, not two.
+
+### RED, the B-2b tree (4382e69b9, 18:07-18:21Z)
+
+Base 1952/1952, boot OK, jit-prover and loom-smoke PASS. Every sabotage failed at
+its predicted test, with three explained extras. Under K5 the redacted-listing
+test's CONTROL failed: first-fit put the recreated aliases back at the same
+addresses, which is the case that control exists to catch. Under K16 the truncated
+test failed too, since zeroed rows printed in place reach a truncated listing. And
+R4 masked K10: making the sealed alias READ|EXEC makes `jit_vma_is_sealed` false,
+so three tests failed at "destroyed" before K10's assert ran. K10 alone (R10) was
+caught at `jit.sealed_fill_failure_refunds`. R7 (the copy-out tail's store made a
+plain STRB) stayed green, as predicted: an execute-only page is AP[2]=1, read-only
+at EL1 as well, so the store direction rests on AP[2] as much as on STTR. The clade
+bake (THYLACINE_BAKE_CLADE=1) ran llvmpipe's JIT from a writer and an exec alias
+some 46 TiB apart and verified its triangle: ORC/JITLink needs no near placement.
+Every default-image run of B-2a and B-2b had skipped that gate.
+
+### Audit r3 (Fable 5.1, start == end), and the second RED
+
+Round 3 read the round-2 fixes and reported 0/0/0/3. F1 was the 26-byte miscount,
+already fixed. F2: the proc.c and DEBUG-FS paragraphs said "the reap takes the lock
+this join runs under", which names the wrong edge. The chain runs: the creator's
+as->lock release, then program order, then its own exit publishing it a ZOMBIE
+under g_proc_table_lock, and a reap can only follow that. Rewritten in 5014a9dac and
+271bb358e. F3: an rfork(RFMEM) child orphans an I-34 MMIO/DMA/HOSTMEM mapping the
+same way, and the cover does not weigh it. It is pre-existing, and the same class as SF-2. It is enqueued in
+OPEN-BUGS and owned by main, but not fixed here: the count trick does not
+transfer, because an allowance's authority is per allowance, not one cap. It
+is weighed after B-2 lands. No round 4 is owed (0 P0-P2, no invasive fix).
+
+RED for r2 and r3 (85cfc29a3, 19:17-19:25Z). Base 1955/1955 with the diorama's
+deputy_check passing on a capless diorama. Each run was caught where predicted:
+- R11: dropping the join's code count failed `devproc.debug_cover_counts_code`,
+  and removing the trim loop failed `devproc.maps_code_trimmed`.
+- R12: dropping the decrement failed the same test's capless-owner-again control.
+- R13: removing the budget check tripped the new guard's extinction.
+- R14: a deputy_check that refuses the zero it parsed brought the boot down at
+  "/sbin/diorama DOWN".
+
+The green rebuild ran 1955/1955. AS-R9: corona cleared B-2's vma.c and loom.c
+hunks against its own work (yip 0198) and owns an idempotence hardening of
+vma_remove_in.
+
+### The land
+
+Gates on 271bb358e, 19:26-20:45Z: the burrow, capacity and cow specs, every clean
+cfg complete and every buggy cfg violating its named property (cow_buggy_vfork's
+is the liveness property EventuallyReleased, read from its log, not the summary
+line); tools/test-fault.sh 8/8; ci-smp-gate N=10 50/50 PASS over default-smp1/4/8
+and ubsan-smp4/8, no corruption. Corona had queued for the mac 1.4h by then; it
+went to them at 20:45Z. ls-ci did not run: 7 GiB was free on the shared disk when
+the gates started, and a worktree CI bake does not fit safely in that. It stays
+owed, with ls-jsc, B-2c's own gate. The land commit carries the change record
+(which also corrects three earlier records, the plane being append-only) and the
+status rows; main takes aux-3 (three thyla-wake commits, no file shared with b2)
+and then the merge, which is built and run in full before either mirror sees it.
+
+The merge (4b48cb0f6) ran 1955/1955, boot OK, before either mirror saw it, and both
+mirrors read it back. ls-ci then ran after all. The "does not fit" call had weighed
+7 GiB free against the CI recipe's 5 GiB pool, which is a CLADE pool's figure; this
+tree's pool is 400 MiB allocated and corona measured a CI bake at about 250 MiB, so a
+fresh --config ci worktree (APFS-cloned build/) fit in 11 GiB. PASS in 71 s on the
+first attempt; the worktree was removed after. ls-jsc stays B-2c's: no jsc is built in
+any worktree, and B-2c builds it.
+
 
 ## 2026-10-07 (main, Opus 5.5, effort max) -- the exit-close seam: a clunk that never waits, a kill that forces the final close, the closer that finishes it; and the Loom write-behind bypass (landed)
 

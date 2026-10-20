@@ -15,7 +15,7 @@ design:
   - "docs/VIVARIUM.md"
   - "docs/LINEAGE.md"
 created: 2026-08-03
-updated: 2026-10-07
+updated: 2026-10-19
 ---
 ## Trusted-seat and nonblocking entries
 
@@ -381,6 +381,54 @@ authority, and gating it would turn a capability expiry into a leak.
 So the authority is enforced by *kernel-minted object type*, not by repeating a
 capability check at every touch. A re-check would be the weaker design: it has
 to be added to each new operation, and forgetting one is silent.
+
+**Since B-2a (2026-10-07) the create allocates nothing.** `sys_jit_create_region`
+mints a demand-zero code Burrow and installs both aliases; it charges nothing
+and needs no contiguous block, so its `-ENOMEM` now means a VMA, gap or slab
+failure, never "the pool could not be zeroed up front". Each page is committed
+and charged once by its first touch through either alias
+([[sub-kernel-fault]]). `SYS_JIT_DESTROY` reads the region's footprint --
+resident pages plus pagemap nodes, exact because every commit runs under
+`as->lock`, which destroy holds -- and refunds it only when both unmaps
+succeed; a surviving alias keeps the charge for a retry or for exit, where the
+count dies with the address space. `SYS_ICACHE_SYNC` walks the range slot by
+slot under `b->lock` and syncs only committed pages: an uncommitted slot holds
+nothing the caller wrote, and its own commit will invalidate it. A page it
+reads stays valid after the lock drops, because no code slot is ever emptied or
+swapped while the region lives and the call holds a ref. The walk is bounded
+by the caller's own length (`JIT_REGION_MAX` / page size slots).
+
+**Since B-2b (2026-10-07) every alias goes at a random address, and a region
+can be born sealed.** `jit_place_locked` takes a random page of the burrow
+window as its start and the first gap at or above it, wrapping to the base
+when nothing above fits; the window is about 2^34 pages, so the start cannot be
+guessed although the pick is not uniform over gaps. First-fit had put the
+writer directly below the exec alias that every return address names, the one
+mapping an exploit wants. The random words are drawn BEFORE `as->lock` (the
+CSPRNG may reseed, which is no work for a spinlock), and with the CSPRNG
+unseeded the call fails `-EAGAIN` rather than fall back to a predictable
+address. A random alias costs its own page tables while it lives; they go back
+with its last leaf ([[sub-kernel-mmu]]), so create/destroy churn does not
+accumulate them.
+
+`SYS_JIT_CREATE_SEALED` (`sys_jit_create_sealed_region` under the
+`_for_proc` copy-out, the split SYS_JIT_CREATE has, so the kernel tests drive
+the mechanism with a kernel source) checks `CAP_JIT` before any argument, then
+the length (1 .. `JIT_SEALED_MAX`) and that exactly one source is named. It
+mints a code Burrow and fills it page by page with NO lock held -- the copy
+from user memory can fault, and the fault path takes `as->lock` -- because
+nothing else can reach the Burrow yet (no handle, no mapping) and the charge
+is CAS-safe without the lock: charge one page, allocate it, give it the
+demand-zero commit's `cow_page_set_sole`, copy, sync it to the I-cache,
+install it in the slot table. Only then, under `as->lock`, is the one alias
+placed and mapped `VMA_PROT_EXEC` -- execute-only ([[sub-kernel-vma]],
+[[sub-kernel-mmu]]) -- so no state of the region has a writer or an
+EL0-readable view. Any failure frees the Burrow and refunds exactly its
+footprint (pages plus pagemap nodes), read before the free. `SYS_JIT_DESTROY`
+accepts the sealed alias's base: one unmap, and the footprint refunded iff it
+succeeds. The secret the region keeps -- a write thunk's burned-in writer base --
+holds only because every kernel copy of user memory is an unprivileged access
+([[sub-kernel-uaccess]]).
 
 ### The FS handlers carry the identity gate, and walk-open sets the handle rights
 
@@ -791,11 +839,14 @@ staging buffers are private by construction. Three shared concerns:
   instruction-cache publish takes a Burrow reference under the address-space
   lock, drops the lock, does the maintenance, and releases — so a sibling
   tearing the region down concurrently frees it there instead of underneath.
-- **A charge claim is taken before the drop that could free its record.** The
+- **A charge is settled inside the drop that could free its record.** The
   detach core (`vma_detach_range_in`, [[sub-kernel-vma]] since B-1a') snapshots
   the Burrow pointer rather than the VMA — the removal frees the VMA struct, so
-  that pointer dangles the moment it returns — and claims the page charge
-  *before* the drop, because a freeing drop takes the payment record with it.
+  that pointer dangles the moment it returns — and settles the page charge
+  *inside* the mapping drop (`vma_free_settled_deferred`, AS-R9): a freeing drop
+  takes the payment record with it, and a claim taken before a non-final drop
+  could only be put back through a pointer another holder's final drop may
+  already have freed.
 
 ### Detach admission is decided by identity (2026-09-16)
 
@@ -1540,6 +1591,22 @@ Nothing was reaped, so nothing is written to `wstatus`; the handler runs at the
 call's tail. The native `SYS_WAIT` handler and the kernel's own reaper in
 `joey.c` never see -2: neither runs with `note_interruptible` set.
 
+## `SYS_WAIT_PID` admits `WAIT_PACKED`; `viv_wait4` always asks for it (2026-10-12)
+
+`sys_wait_pid_handler` rejects any flag bit outside `WAIT_WNOHANG |
+WAIT_UNTRACED | WAIT_CONTINUED | WAIT_PACKED` (-1), so a caller learns that a
+flag is unknown instead of getting a word it did not ask for. gcpark-b added
+`WAIT_PACKED` (8): the Linux `wait(2)` word for an exit or a death, with no stop
+or continue report and neither latch consumed ([[sub-kernel-proc]]). Pouch's
+`waitpid` passes it on every call. `viv_wait4` passes it too, and stores the
+word the kernel returns unchanged. It used to pack the word itself when no
+PTY-1e flag was asked for, deciding before the call because a raw status and a
+packed stop can be the same number; that repack could only ever say "exited",
+so a guest whose child died of `pipe` read exit 1. Now the kernel records the
+death's signal and the guest reads `WIFSIGNALED` `SIGPIPE`, as on Linux
+(viv-pheno-probe L329/L330 require it). Native callers that pass no packing
+flag still get the raw status, where every death by note reads 1.
+
 ## The sleep rows' shells (2026-10-05, VIVARIUM 6.29)
 
 `viv_nanosleep(req, rem)` and `viv_clock_nanosleep(clk, flags, req, rem)` are
@@ -1563,3 +1630,116 @@ target through `proc_group_kill`. On a target already terminating that sets
 `PROC_FLAG_EXIT_CLOSE_FORCED` before the death wake, so a final close waiting
 on a 9P server stops waiting and hands the rest to the closer (ARCH 7.9.1 part
 B, [[sub-kernel-death]]); a first kill terminates exactly as before.
+
+## SYS_POSTNOTE's walk serves the phenotype's kill family (2026-10-13, S-2)
+
+The Linux phenotype's `kill`, `tkill` and `tgkill` ([[sub-kernel-vivarium]],
+"The kill family") post through `SYS_POSTNOTE`'s own two arms rather than a
+gate of their own: `postnote_self` for the caller, and the parent-gated walk
+for anyone else. One shell, `viv_kill(ctx, p, pid, tid, sig)`, serves all
+three numbers from `viv_tier2` (`tkill` and `tgkill` refuse an id <= 0 with
+`EINVAL` first, as Linux does). The walk's context gained two fields:
+
+- `target_tid` (> 0): the target is the Proc holding that thread, found with
+  `proc_holds_tid_locked` under `g_proc_table_lock`, the lock every thread
+  list walk holds (#811); a `tgkill` whose tgid is a different Proc names no
+  thread (`ESRCH`).
+- `err`: with `result` -1, why, as `SYS_POSTNOTE` answers it since S-3 (below):
+  `ESRCH` for a mismatched tgid, `EACCES` for the gate, `notes_post`'s own
+  `EINVAL` or `EAGAIN`. `viv_kill` turns `EACCES` back into Linux's `EPERM`.
+
+A NULL `name` is signal 0: the gate runs, nothing is posted. The order inside
+the walk is the gate, then ALIVE, then the post, so a dead target that is not
+the caller's child reads the gate's refusal. (S-2 added a `target_dead` field
+for the phenotype's zombie answer; S-3 moved that rule into the walk itself.)
+`viv_tier2` narrows `pid`, `tid` and `sig` to `int` before the shell sees
+them, as Linux's prototypes do: a guest may leave the high half of a register
+unspecified.
+`viv_kill_for_test` drives the real shell with an explicit caller and a NULL
+`ctx`; a self-directed `snare:*` death answers 1 there instead of ending the
+harness (`notes.kill_family_gate`).
+
+## SYS_POSTNOTE answers errnos; a self-posted fault snare ends the caller (2026-10-14, S-3)
+
+`sys_postnote_handler(ctx, pid, name_va, name_len)` answers every refusal
+with its own errno ([[dec-2026-10-14-postnote-errnos]]): `-T_E_INVAL` for a
+zero or over-long length, a NUL or non-printable byte, or a name `notes_post`
+refuses; `-T_E_FAULT` for a name it cannot read; then the arms' own answers.
+The cross arm is `postnote_cross(caller, pid, name)`: first the name, through
+`notes_name_user_postable` (the gates `notes_post` asks of every userspace
+post, in one function), so a refused name is `-T_E_INVAL` whatever the target
+-- dead, missing or alive -- as the phenotype's `kill` judges its signal
+before its walk; then the walk under `proc_for_each`, then 0, `-T_E_SRCH` when no Proc holds the pid, or the walk's
+`err` -- `-T_E_ACCES` from the gate, never `-T_E_PERM`, which is the flat `-1`
+Pouch's seam reads as `EIO`. The walk accepts a post to a target past ALIVE
+and posts nothing: only the caller's own children get past the gate, and a
+dead one is still a process until it is reaped. `postnote_self` returns
+`notes_post`'s errno.
+
+The handler takes `ctx` for one reason. Before the self arm it asks
+`notes_self_death_snare(name)` ([[sub-kernel-notes]]); a self-post of
+`snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` or `snare:abort` calls
+`proc_fault_terminate(snare, ctx->elr)` with the kernel's own literal and
+never returns ([[dec-2026-10-14-self-death-snare]]) -- the death `viv_kill`'s
+SELF_DEATH arm gives the Linux phenotype, so the two phenotypes share one
+spelling. A snare posted to another Proc reaches `notes_post`, which refuses
+it.
+
+`sys_postnote_cross_for_test` now drives `postnote_cross` and returns the
+syscall's own answer. `notes.postnote_errnos` pins each refusal on both arms
+against a control post that lands, and `notes.self_death_snare` compares the
+native set with the phenotype's row by row.
+
+## SYS_LOOM_REGISTER answers -errno (2026-10-07, B-2b)
+
+`sys_loom_register_handler` and its two `_for_proc` cores moved from the bare
+-1 set to the errno set ([[dec-2026-10-07-loom-register-errno]]): `-EBADF`
+when `handle_get` fails for the ring or for a listed fd (the rollback clunks
+the refs already taken), `-EFAULT` when the argument array fails validation or
+a byte of it faults, the errno `loom_register_handles` returns -- a failed
+write-behind flush's own, passed through from `dev9p_loom_register`
+([[sub-kernel-loom]], [[sub-kernel-ninep-dev9p]]) -- and `-EINVAL` for the
+rest (not a Loom, an unknown op, `nargs` over the table). `nargs` is a u32 by
+the ABI, so its upper bits are ignored as before.
+
+## Loom setup rollback (2026-10-12)
+
+A params-copyout fault in the SYS_LOOM_SETUP handler calls
+`sys_loom_setup_rollback`: `handle_close` followed by the charge-settling
+`sys_burrow_detach_for_proc`. It no longer uses the unsettled `burrow_unmap`, so a
+faulting caller never leaks the ring's charge. Mechanism and the setup's own
+reference: [[sub-kernel-loom]].
+
+## B-2e2: `SYS_ICACHE_SYNC_SPACE` and 128 MiB regions (2026-10-13)
+
+Dispatch 128 (`sys_icache_sync_space_handler`) takes no argument: it refuses
+only a caller with no address space (unreachable from EL0) and otherwise calls
+[[sub-kernel-sched]]'s `sched_sync_space` on the caller's space and returns 0.
+That returns once every other CPU whose per-CPU record names the space has
+acknowledged a barrier IPI by ticket ([[sub-kernel-gic]]), the event
+`SYS_ICACHE_SYNC` gives only the calling CPU, for code published to threads
+that never pass a resume point (Wasm's BBQ and OMG, B-2e3). It is not gated:
+it interrupts only CPUs running the caller's own threads, reads no memory and
+changes no mapping. It has no timeout and yields between checks, the kernel
+being non-preemptible in a syscall. Design: `JIT-ON-WX-DESIGN.md` B-2 item 4;
+decision `dec-2026-10-13-icache-sync-space`.
+
+`JIT_REGION_MAX` is 128 MiB (operator vote `dec-2026-10-13-jit-region-128`),
+JavaScriptCore's ARM64 pool without jump islands. Every quantity sized by it
+is a bound, not an allocation: `SYS_JIT_CREATE`'s length check, the
+`SYS_ICACHE_SYNC` range check and its page walk (32768 slots at most, paid by
+the caller's own length), and the slot table, whose nodes are charged as a
+touch creates them. `jit.max_region_is_a_reservation` creates a region of
+exactly the bound and touches its last page; `jit.region_is_128_mib` pins the
+value; `jit.create_rejects_bad_args` refuses one byte more.
+
+The doubling has a cost the bound does not hide. A syscall body is not
+preemptible, so a `SYS_ICACHE_SYNC` of a whole region keeps its CPU from every
+other thread for the whole walk, twice as long as at 64 MiB: interrupts are
+still taken, the walk is bounded, and the caller pays with its own length
+(JavaScriptCore syncs only what it has just emitted). On a part whose I-cache
+aliases, `arch_icache_sync_range` invalidates the whole I-cache once per page,
+32768 broadcast invalidates for a full region where one after the walk would
+do; no current target takes that path (QEMU and the Pi are PIPT,
+`arch/arm64/hwfeat.h`). Both were weighed in the B-2e2 audit (round 1, F4, P3)
+and left as they are.

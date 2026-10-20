@@ -713,7 +713,7 @@ EOF
     # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
     # -f guard in the copy loop below stages nothing when build_rust_progs
     # self-skipped off the track-R box, so this entry is inert there.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -2476,7 +2476,7 @@ build_sysroot() {
     # POUCH_MALLOCNG_DIAG=1 in the env opts into the 0013-pouch-mallocng-
     # diag.patch's gated diagnostic: a sc/idx/maplen/stride/p+-8 dump
     # fires from enframe BEFORE the mallocng assertion that would
-    # otherwise _Exit(127) silently. Off by default (zero perf cost).
+    # otherwise abort() with no message. Off by default (zero perf cost).
     local musl_cflags=""
     if [[ "${POUCH_MALLOCNG_DIAG:-0}" == "1" ]]; then
         musl_cflags="-DPOUCH_MALLOCNG_DIAG"
@@ -4546,7 +4546,8 @@ DBXCONF /lib/dosbox-x/dosbox-x.conf"
     fi
     if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$vp_webkit/jsc" ]]; then
         bake_want="$bake_want
-WEBKIT /webkit/jsc"
+WEBKIT /webkit/jsc
+SUNSPIDER /webkit/sunspider/run.js"
     fi
 
     local bake_missing=""
@@ -4819,12 +4820,19 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
+        #    The JIT write-thunk probe takes the encoding JavaScriptCore uses
+        #    from usr/lib/thylajit, not a copy.
+        local extra_cflags=()
+        case "$prog" in
+            pouch-hello-jitthunk) extra_cflags=( -I"$REPO_ROOT/usr/lib/thylajit" ) ;;
+        esac
         "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
             -nostdinc -isystem "$sysroot/include" -fno-pie \
+            ${extra_cflags[@]+"${extra_cflags[@]}"} \
             -c "$src_dir/$prog.c" -o "$progs_out/$prog.o"
         # 2. link via tools/pouch-ld — it drives ld.lld directly with the
         #    pouch link line and supplies the CRT + libc.a. Per-binary
@@ -6650,8 +6658,14 @@ build_libcxx() {
 }
 
 # --- Boosty (the browser arc, docs/BROWSER-DESIGN.md): ICU + JavaScriptCore -------
-# B-0: WebKit's JSCOnly port, static, every JIT tier OFF (the asm LLInt + IPInt
-# interpreters), against a cross-built ICU. DEFAULT-OFF (CHUNK_WEBKIT /
+# B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: every JIT tier is
+# built (upstream no longer builds JIT without DFG/FTL on ARM64) and patch 0002 forced
+# DFG, FTL, BBQ and OMG off at run time, so the Baseline JIT and the YARR regexp JIT ran;
+# patch 0004 (B-2d) opened the DFG, patch 0005 (B-2e1) the FTL, and patch 0006 (B-2e3)
+# Wasm's BBQ and OMG, synchronized through SYS_ICACHE_SYNC_SPACE;
+# the pool is one SYS_JIT_CREATE region written through a sealed execute-only thunk
+# (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
+# Without CAP_JIT the pool is refused and JSC runs its LLInt + IPInt interpreters. DEFAULT-OFF (CHUNK_WEBKIT /
 # THYLACINE_BAKE_WEBKIT=1): ~10 min of ICU + ~30 min of JSC on this host, and the
 # source is neither vendored nor small (a sparse partial clone beside the other
 # forks). Pins live in tools/build-manifest.toml ([source.webkit], [cache.icu4c]);
@@ -6746,33 +6760,72 @@ build_icu() {
     ledger "icu $ICU_VER: BUILT (static, data packaged in libicudata.a)"
 }
 
+# The tree the pin plus the patch series builds, applied IN ORDER in a scratch
+# index: the series is stacked, so a later patch may edit lines an earlier one
+# added, and no patch can be asked about alone. Prints the tree id, or the first
+# patch that does not apply with git's reason; returns nonzero on failure. A
+# relative patch path is made absolute: `git -C` would resolve it in the checkout.
+webkit_series_tree() {
+    local wk="$1" pin="$2" pp tree err rc=0; shift 2
+    local idx; idx="$(mktemp -d "${TMPDIR:-/tmp}/webkit-series.XXXXXX")" || return 1
+    GIT_INDEX_FILE="$idx/index" git -C "$wk" read-tree "$pin" 2>/dev/null \
+        || { echo "the pin $pin is not readable"; rm -rf "$idx"; return 1; }
+    for pp; do
+        [[ "$pp" == /* ]] || pp="$PWD/$pp"
+        [[ -r "$pp" ]] || { echo "patch $pp is not readable"; rc=1; break; }
+        err="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" apply --cached "$pp" 2>&1 >/dev/null)" \
+            || { echo "patch $(basename "$pp") does not apply on the pin plus the patches before it: ${err%%$'\n'*}"; rc=1; break; }
+    done
+    if (( rc == 0 )); then
+        if tree="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" write-tree 2>&1)"; then
+            echo "$tree"
+        else
+            echo "the series index could not be written: ${tree%%$'\n'*}"; rc=1
+        fi
+    fi
+    rm -rf "$idx"
+    return $rc
+}
+
 webkit_checkout_ok() {
-    # The checkout must be the PINNED tree with EVERY port patch applied and
-    # nothing else: pin is an ancestor, each patch reverse-applies cleanly, and
-    # the tree is clean. Prints the first failing reason; returns nonzero.
-    local wk="$1" port_dir="$2" pp
+    # The checkout must be the PINNED tree with the port's patch series applied
+    # and nothing else: HEAD's tree is exactly the tree the series builds on the
+    # pin, and the working tree is clean. Prints the first failing reason;
+    # returns nonzero.
+    local wk="$1" port_dir="$2" pp want
+    local -a series=()
     [[ -d "$wk/.git" && -f "$wk/Source/JavaScriptCore/CMakeLists.txt" ]] \
         || { echo "no checkout at $wk"; return 1; }
     git -C "$wk" merge-base --is-ancestor "$WEBKIT_PIN" HEAD 2>/dev/null \
         || { echo "HEAD does not descend from the pin $WEBKIT_PIN"; return 1; }
     [[ -z "$(git -C "$wk" status --porcelain --untracked-files=no)" ]] \
         || { echo "the checkout has uncommitted changes"; return 1; }
-    local want=""
     for pp in "$port_dir"/patches/*.patch; do
-        [[ -e "$pp" ]] || continue
-        git -C "$wk" apply --check --reverse "$pp" 2>/dev/null \
-            || { echo "patch $(basename "$pp") is not applied"; return 1; }
-        want+="$(git -C "$wk" apply --numstat "$pp" 2>/dev/null | awk '{print $3}')"$'\n'
+        [[ -e "$pp" ]] && series+=("$pp")
     done
-    # "...and nothing else": the files that differ from the pin are exactly the
-    # files the series names. A reverse-apply check alone passes on a tree that
-    # carries the patches PLUS local edits to other files.
-    local got
-    got="$(git -C "$wk" diff --name-only "$WEBKIT_PIN" HEAD | sort -u)"
-    want="$(printf '%s' "$want" | sed '/^$/d' | sort -u)"
-    [[ "$got" == "$want" ]] \
-        || { echo "the checkout differs from the pin in files the patch series does not name"; return 1; }
+    want="$(webkit_series_tree "$wk" "$WEBKIT_PIN" "${series[@]}")" || { echo "$want"; return 1; }
+    [[ "$want" == "$(git -C "$wk" rev-parse 'HEAD^{tree}')" ]] \
+        || { echo "HEAD's tree is not the pin plus the patch series (a commit the series does not carry)"; return 1; }
     return 0
+}
+
+# SunSpider 1.0.2 (the fork's PerformanceTests, in the manifest's sparse cone) and
+# its driver, staged beside jsc so the bake carries /webkit/sunspider. 23 of its 26
+# tests check their own result, so the benchmark is also a correctness run for
+# those (date-format-tofte, date-format-xparb and string-validate-input check
+# nothing).
+stage_jsc_bench() {
+    local wk="$1" stage="$2" port_dir="$3"
+    local src="$wk/PerformanceTests/SunSpider/tests/sunspider-1.0.2" n
+    [[ -f "$src/LIST" ]] || { echo "==> jsc: SunSpider 1.0.2 is not in the checkout ($src)" \
+        "-- run 'tools/forage.sh webkit' (the manifest's sparse cone names it)" >&2; exit 1; }
+    rm -rf "${stage:?}/sunspider"
+    mkdir -p "$stage/sunspider"
+    cp "$src/LIST" "$src"/*.js "$stage/sunspider/"
+    cp "$port_dir/sunspider-run.js" "$stage/sunspider/run.js"
+    n="$(grep -c . "$src/LIST")"
+    [[ "$(find "$stage/sunspider" -name '*.js' | wc -l | tr -d ' ')" == "$((n + 1))" ]] \
+        || { echo "==> jsc: the SunSpider stage does not hold LIST's $n tests plus run.js" >&2; exit 1; }
 }
 
 build_jsc() {
@@ -6806,16 +6859,18 @@ build_jsc() {
     if [[ -f "$out" && -f "$stage/jsc" && -z "${WEBKIT_FORCE:-}" ]]; then
         local stale
         stale="$(find "$port_dir" "$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
-                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" -type f -newer "$out" -print -quit 2>/dev/null)"
+                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" "$REPO_ROOT/usr/lib/thylajit" \
+                      -type f ! -name sunspider-run.js -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$out" && ! "$sysroot/lib/libc++.a" -nt "$out" \
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
-            ledger "jsc (JavaScriptCore, JIT off): REUSED (cached + up-to-date)"
+            stage_jsc_bench "$wk" "$stage" "$port_dir"
+            ledger "jsc (JavaScriptCore, every tier built and on): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, JIT off, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built and on, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6823,9 +6878,11 @@ build_jsc() {
         -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
         -DLLVMFORK="$fork/build" -DHOSTLLVM="$LLVM_PREFIX" \
         -DTHYLACINE_SYSROOT="$sysroot" -DTHYLACINE_EXTRA_ROOTS="$icu_stage" \
+        -DTHYLACINE_EXTRA_INCLUDES="$REPO_ROOT/usr/lib/thylajit" \
         -DICU_ROOT="$icu_stage" -DCMAKE_BUILD_TYPE=Release \
         -DPORT=JSCOnly -DENABLE_STATIC_JSC=ON \
-        -DENABLE_JIT=OFF -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_C_LOOP=OFF \
+        -DENABLE_JIT=ON -DENABLE_DFG_JIT=ON -DENABLE_FTL_JIT=ON -DENABLE_C_LOOP=OFF \
+        -DENABLE_WEBASSEMBLY_BBQJIT=ON -DENABLE_WEBASSEMBLY_OMGJIT=ON \
         -DENABLE_WEBASSEMBLY=ON -DUSE_SYSTEM_MALLOC=ON \
         -DENABLE_SAMPLING_PROFILER=OFF -DENABLE_REMOTE_INSPECTOR=OFF \
         -DDEVELOPER_MODE=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_UNIFDEF=ON \
@@ -6847,10 +6904,56 @@ build_jsc() {
     fi
     [[ "$(grep -cE '^[[:space:]]*LOAD[[:space:]]' <<< "$ph")" -ge 2 ]] \
         || { echo "==> jsc: readelf printed no LOAD segments -- the W+X check saw nothing" >&2; exit 1; }
+    # A thread runs an ISB before it runs code written or patched on another CPU: where
+    # it resumes the VM's code (patch 0004), where it takes a finished Wasm plan's stubs
+    # (patch 0005), and where the FTL installs a compiler thread's code (upstream's).
+    # No run can show one missing (BROWSER-DESIGN 7, B-2d and B-2e), so the built binary
+    # is asked for each. A third field names a call the isb must precede: finalizeCreation
+    # runs the module's start function itself, so a fence moved below that call would
+    # still be present and no longer cover it. Address order stands in for program order,
+    # and a layout that puts the call first fails closed.
+    local isbsym isbname isbafter isbdis isbpos
+    while read -r isbsym isbname isbafter; do
+        isbdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+            --disassemble-symbols="$isbsym" "$out")"
+        [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$isbdis")" -ge 8 ]] \
+            || { echo "==> jsc: no $isbname to disassemble -- the ISB check saw nothing" >&2; exit 1; }
+        grep -qE '^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)' <<< "$isbdis" \
+            || { echo "==> jsc: $isbname has no isb" >&2; exit 1; }
+        [[ -z "$isbafter" ]] && continue
+        isbpos="$(awk -v c="<$isbafter" '
+            /^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)/ && !i { i = NR }
+            /^[[:space:]]*[0-9a-f]+:[[:space:]]+bl[[:space:]]/ && index($0, c) && !b { b = NR }
+            END { print (b == 0 ? "no such call" : (i < b ? "before" : "after it")) }' <<< "$isbdis")"
+        [[ "$isbpos" == before ]] \
+            || { echo "==> jsc: $isbname: its isb is not before its call to $isbafter ($isbpos)" >&2; exit 1; }
+    done <<'ISBSYMS'
+_ZN3JSC14MachineThreads19unparkCurrentThreadEv MachineThreads::unparkCurrentThread(patch-0004)
+_ZN3JSC4Wasm6Module11compileSyncERNS_2VMENS_10MemoryModeE Wasm::Module::compileSync(patch-0005)
+_ZN3JSC21JSWebAssemblyInstance16finalizeCreationERNS_2VMEPNS_14JSGlobalObjectEON3WTF3RefINS_4Wasm11CalleeGroupENS5_12RawPtrTraitsIS8_EENS5_21DefaultRefDerefTraitsIS8_EEEENS7_12CreationModeE JSWebAssemblyInstance::finalizeCreation(patch-0005) _ZN3JSC23WebAssemblyModuleRecord17initializeExports
+_ZN3JSC3FTL12JITFinalizer8finalizeEv FTL::JITFinalizer::finalize(upstream)
+ISBSYMS
+    # Wasm's BBQ and OMG publish code to threads that never stop, and patch 0006 makes
+    # Wasm::resetInstructionCacheOnAllThreads issue SYS_ICACHE_SYNC_SPACE in place of
+    # upstream's thread walk, whose suspension is fatal here. No run shows the walk's
+    # absence until a BBQ install, so the binary is asked: the last write to x8 before
+    # an svc #0 must put 128 there. A store or any other write to x8 fails closed.
+    local syncdis
+    syncdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+        --disassemble-symbols=_ZN3JSC4Wasm33resetInstructionCacheOnAllThreadsEv "$out")"
+    [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$syncdis")" -ge 3 ]] \
+        || { echo "==> jsc: no Wasm::resetInstructionCacheOnAllThreads to disassemble -- the sync check saw nothing" >&2; exit 1; }
+    [[ "$(awk '
+        /^[[:space:]]*[0-9a-f]+:[[:space:]]+[a-z][a-z0-9.]*[[:space:]]+[xw]8,/ {
+            w8 = ($0 ~ /[[:space:]]mov[[:space:]]+[xw]8, #(0x80|128)([[:space:]]|$)/) }
+        /^[[:space:]]*[0-9a-f]+:[[:space:]]+svc[[:space:]]+#0([[:space:]]|$)/ && w8 { ok = 1 }
+        END { print (ok ? "yes" : "no") }' <<< "$syncdis")" == yes ]] \
+        || { echo "==> jsc: Wasm::resetInstructionCacheOnAllThreads issues no SYS_ICACHE_SYNC_SPACE (x8 = 128, then svc #0)" >&2; exit 1; }
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
-    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
-    ledger "jsc (JavaScriptCore, JIT off): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    stage_jsc_bench "$wk" "$stage" "$port_dir"
+    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, every cross-CPU ISB present, the Wasm space sync)"
+    ledger "jsc (JavaScriptCore, every tier built and on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {

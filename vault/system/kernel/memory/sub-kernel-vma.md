@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-19
 ---
 ## Purpose
 
@@ -31,7 +31,8 @@ tearing it down.
 `vma_alloc(start, end, prot, burrow, offset)` mints a descriptor and takes a
 **mapping** reference on the Burrow. `vma_free` drops it. `vma_insert` links
 into an address space's sorted list or rejects an overlap (-1) or the VMA cap (`-T_E_NOMEM`, B-1a'
-round 4, F18); `vma_remove` unlinks;
+round 4, F18); `vma_remove` unlinks, and extincts on a VMA its list does not
+hold (`vma_linked_in`, exact for a VMA in that list or in none);
 `vma_lookup` finds the VMA covering an address; `vma_find_gap` finds somewhere
 to put a new one; `vma_drain` tears the whole list down at Proc death.
 
@@ -47,7 +48,9 @@ the phenotype `madvise` row: a hint is 0 on a mapped range and ENOMEM on a
 hole, and a release outside the burrow window is ENOMEM for a hole, ENOSYS for
 memory the core declines to release. And `vma_free_deferred` is a `vma_free` that hands the caller the Burrow still
 owing a physical free instead of freeing it inline — the discipline a
-FILE-backed Burrow forces (Concurrency, below).
+FILE-backed Burrow forces (Concurrency, below). `vma_free_settled_deferred` is
+the same with the eager charge record settled inside the mapping drop (AS-R9);
+`vma_free_deferred` is its no-payer wrapper.
 
 B-1a (2026-09-23) added the **permission ceiling** and the **multi-mapping
 reprotect**. `vma_prot_max(v)` / `vma_set_prot_max(v, prot)` read and write the
@@ -90,6 +93,16 @@ the order they matter in:
 | `start >= end`, misalignment | a range that is not a range |
 | null Burrow | a mapping with nothing behind it (except a guard — below) |
 | past the Burrow's end (`burrow_offset > page_count << 12`, or a length past the span) | the mapping would name slots its pagemap does not have, and the range release walks the mapping's own slot bound (B-1a' audit F3: `burrow_map_in` never checked the length); written so neither term can overflow |
+
+**One promotion** follows the rejections (B-2b, 2026-10-07): `EXEC` without
+`READ` mints as `READ | EXEC` unless the Burrow is a code Burrow. The user PTE
+encoder gives EXEC-alone a real meaning since B-2b -- an execute-only leaf, no
+EL0 load or store ([[sub-kernel-mmu]]) -- and only a sealed JIT region
+(`SYS_JIT_CREATE_SEALED`) asks for that. A Linux `PROT_EXEC` mapping through
+Vivarium or an ELF segment flagged `PF_X` alone always mapped readable here,
+as Linux maps them, and a caller of those never expects its own loads of the
+page to fault; promoting at the one constructor keeps them so. The ceiling
+(`prot_max`) is the promoted prot.
 
 A **guard VMA** is the deliberate exception to the last: `prot == 0`, no
 Burrow, existing only to occupy address space. Two things follow from prot 0
@@ -166,12 +179,21 @@ Burrow's own free is Proc-agnostic, so a slot that stopped being mapped while
 still resident would be charged for the rest of the address space's life
 (`capacity.tla`'s `NoOrphan`; the B-1a audit's F5, and the piece-detach bug
 before it). Then the shape. A WHOLE mapping goes through `vma_remove_in` +
-`vma_free_deferred`, its Burrow chained onto `*out_dead` if that drop was the
-last; a `SHARED_IN` whole mapping uncharges the shared-in budget for its span;
-an eager `ANON` whole mapping claims its charge record for `payer` BEFORE the
-drop and refunds it iff the drop freed the pages or the region survives only
-in another Proc (`shared_out`), else restores the claim for the drop that does
-end it (#130/#131, unchanged from the exact-match detach) -- so an eager
+`vma_free_settled_deferred`, its Burrow chained onto `*out_dead` if that drop
+was the last, with a NULL `settle_as` (settle nothing: the form
+`vma_free_deferred` spells) unless it is the eager case below; a `SHARED_IN`
+whole mapping uncharges the shared-in budget for its span; an eager `ANON`
+whole mapping, when the caller opted in with a `payer`, settles the charge
+record of the space it leaves (`as`, the space refunded) INSIDE the drop --
+`vma_free_settled_deferred` -> `burrow_release_mapping_settled_deferred`,
+which claims iff the drop freed the pages or the region survives only in another
+Proc (`shared_out`), and otherwise leaves the record for the drop that does end
+it (#130/#131; AS-R9 moved the decision from three separate lock acquisitions in
+this function into the drop's own critical section, because a sibling holder's
+final drop between the non-final drop and the restore left this path writing
+through freed storage -- see [[sub-kernel-burrow]]). The refund is applied to
+`page_count` after the drop returns: outside the Burrow's leaf lock, still under
+`as->lock` -- so an eager
 region's block and its charge go with its LAST piece, and a trimmed eager
 mapping refunds nothing (its pages are still allocated: an eager Burrow is one
 buddy block and cannot be split physically, stated rather than discovered). A
@@ -358,8 +380,10 @@ unconditionally over the range.
 (D-3c F1/F5).** Freeing a 9P-backed FILE Burrow reaches `spoor_clunk`, which may
 sleep — and every VMA mutator holds `as->lock`, a spinlock, so an inline free is
 the lock-across-sleep extinction. `vma_free_deferred` splits the two halves: it
-drops the mapping ref and settles the I-32 uncharge UNDER the lock (via
-`burrow_release_mapping_deferred`, which does not free), but hands the caller the
+drops the mapping ref UNDER the lock -- its settled form,
+`vma_free_settled_deferred`, takes the eager I-32 charge record inside that same
+drop (`burrow_release_mapping_settled_deferred`; neither form frees) -- but hands
+the caller the
 Burrow that still owes a physical free, to pass to `burrow_free_deferred` AFTER
 the unlock. `vma_drain_in` collects the dead Burrows on a `deferred_free_next`
 stack and drains it past `spin_unlock`; `vma_detach_range_in` and
@@ -459,8 +483,9 @@ the MAP_FIXED replace no longer refuses a COW survivor.
 Every rejection is a `NULL` or `-1` return with nothing allocated and nothing
 linked — there is no partial state to unwind. The extinctions are reserved for
 conditions that mean memory is already corrupt: a bad magic, freeing a VMA
-still in a list, inserting one already linked, or finding a corrupted entry
-mid-walk. Those are not error handling; they are the structure declaring it can
+still in a list, inserting one already linked (the sole mapping included, which
+only the list head shows), removing one the list does not hold, or finding a
+corrupted entry mid-walk. Those are not error handling; they are the structure declaring it can
 no longer be trusted.
 
 The reprotect family is the first in this file to speak errno rather than
@@ -504,8 +529,9 @@ Since B-1a', four more: that the RELEASE precedes the reshape in phase 3 for
 every plain lazy overlap -- a trim or removal that ran first would orphan the
 overlap's resident slots, charged for the address space's life
 ([[spec-capacity]], `BUGGY_DETACH_NO_REFUND`); that an eager whole mapping's
-claim is taken BEFORE the drop and restored when the region survives on this
-Proc's own claim, and that a TRIMMED eager mapping refunds nothing; that the
+charge is settled BY the drop (AS-R9), leaving the record in place when the
+region survives on this Proc's own claim, and that a TRIMMED eager mapping
+refunds nothing; that the
 headroom formula counts the removals the range makes before the piece it adds
 (and the caller's `extra_vmas`), so `vma_replace_range_in`'s insert stays
 infallible; and that no caller loops the exact-match removers (`vma_remove` /
@@ -594,6 +620,8 @@ P3-Da built the list; P6 #713 added the lock coverage that made it
 multi-thread-safe; G-2 added the cross-Proc share flag; G-3 made `vma_drain`
 take the lock. The I-32 charge arrived with the overcommit model.
 
+B-2b (2026-10-07): the EXEC-only promotion off code Burrows.
+
 Re-read 2026-08-16: the LINEAGE arc moved the list onto the address space and
 added the copy-on-write flag; the attribution work made the release report
 whether it freed. [[chg-2026-08-16-vma-cow-flag]].
@@ -619,7 +647,7 @@ fails. All three were sabotage-measured.
 
 ## Tests
 
-`kernel/test/test_vma.c` — six unit tests exercising this file directly:
+`kernel/test/test_vma.c` — eleven unit tests exercising this file directly: the four `vma_find_gap` tests (`vma.find_gap_smoke`, `_no_fit`, `_constraints`, `_straddle`), and
 `vma.alloc_free_smoke` (alloc/free; the `vma_total_allocated`/`_freed` counters
 advance), `vma.alloc_constraints` (the rejections — zero-length, reversed,
 unaligned, `WRITE|EXEC`, null Burrow — each return NULL),
@@ -627,14 +655,18 @@ unaligned, `WRITE|EXEC`, null Burrow — each return NULL),
 address and misses the gaps), `vma.insert_overlap_rejected` (exact and partial
 overlaps return -1; an adjacent range touching at a boundary is accepted — the
 half-open semantic), `vma.insert_sorted_invariant` (insert in mixed order, walk
-ascending), and `vma.drain_releases_all` (insert four, drain, assert
+ascending), `vma.drain_releases_all` (insert four, drain, assert
 `burrow_mapping_count` returns to baseline — the `vma_alloc` <-> `burrow_map`
-symmetry). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
+symmetry), and `vma.linked_in_tracks_the_list` (the predicate the remove guard
+asks, over a never-inserted, sole, head, interior and tail VMA, each removed
+shape, and a forged predecessor and successor). `vma.range_is_mapped` (`test_capacity.c`, B-1b): a four-page
 reservation answers whole / part true and past / below / empty false; with the
 middle two pages detached, across the hole false and each remnant true; and
 the decommit core over the same shape -- across the hole `T_E_NOMEM`, a
 remnant 0, unaligned `T_E_INVAL`, the stack (below the window) `T_E_NOSYS`,
-the native form -1. Beyond the suite, `vma_alloc`'s rejections and the list walk are
+the native form -1. `jit.xonly_promoted_off_code` (`test_jit.c`, B-2b) maps an
+anon page EXEC-only and reads back `READ | EXEC`; `jit.sealed_region` is the
+other arm, a code Burrow that keeps EXEC alone. Beyond the suite, `vma_alloc`'s rejections and the list walk are
 exercised indirectly by every demand-page and attach/detach test through the
 fault path.
 
@@ -734,6 +766,36 @@ refund can never exceed the charge because every FILE leaf install charges
 first and refunds itself when the leaf was already there, and no other path
 clears a FILE leaf (the fork's keep-tables clear covers COW mappings, which
 are lazy-anonymous only). Witness: `demand_page.file_pages_charge_the_holder`.
+
+## The linkage guard (2026-10-08)
+
+A second `vma_remove_in` of the same VMA used to wipe the list. The first
+remove leaves both links NULL, so the second takes the no-predecessor arm and
+writes `as->vmas = v->next`, which is NULL, and `addrspace_uncharge_vma`,
+clamp-safe, says nothing. No path reaches it today: the five call sites (the
+detach walk, the reprotect merge and its rollback, the drain, `burrow_unmap`)
+each remove once and then free. Corona found it while reading the B-2b hunks,
+and B-2b's code-alias count, whose underflow extinction would have made a double
+remove loud, left with [[chg-2026-10-08-image-holder-record]]. The remove now
+asks `vma_linked_in` first and extincts on a VMA the list does not hold, the
+posture of Linux's list hardening (`__list_del_entry_valid`), which checks that
+both neighbours point back.
+
+The links alone cannot tell the sole mapping from an unlinked VMA (both have
+two NULL links), so the predicate also asks whether the VMA is the list head.
+The insert's already-linked check had the same blind spot: inserting the sole
+mapping a second time would have been refused as an overlap with itself, and
+the caller would then have freed a VMA the head still pointed at. It now
+extincts there too. Both extinctions run only in the double-call case, which
+no suite test can survive: the suite pins the remove's predicate, and the
+insert's head clause has no suite witness, only the one-off boots recorded at
+the land.
+
+The predicate is exact for a VMA in this space's list or in none. A VMA
+interior to ANOTHER space's list reads linked, because only the head clause
+consults the space. So a caller names the space it found the VMA in, never a
+Proc's current one: the audit of this guard found the weft reaper doing the
+latter across an exec swap ([[sub-kernel-weft]]).
 
 ## Referenced by
 

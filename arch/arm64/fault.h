@@ -86,6 +86,17 @@ enum fault_result {
     // class gate; B-1a' audit F17): answered HANDLED, the ERET would raise it
     // again, forever.
     FAULT_USER_BUS        = 3,
+
+    // A user fault the pager did not resolve while the faulting thread's death
+    // was pending (thread_die_pending): the death is its disposition, not a
+    // snare:* of its own. The common case is a file page-in whose 9P read the
+    // group's own death abandoned. At EL0 a group death is ended by the vector
+    // tail's die-check before any EL0 instruction runs; a terminate latch is
+    // ended at the fault itself (notes_fault_dying_latch), because the tail
+    // defers notes it cannot deliver, or cleared there when stale. A uaccess
+    // treats it as a failed access, like every other non-HANDLED result, so it
+    // never re-executes into a loop.
+    FAULT_USER_DYING      = 4,
 };
 
 // Decode raw exception state into a fault_info. Pure function; no

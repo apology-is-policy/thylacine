@@ -966,7 +966,7 @@ void test_proc_console_attached_smoke(void) {
 void test_proc_group_terminate_smoke(void) {
     // Fail-safe: a NULL Proc is a quiet no-op -- it returns at the magic check
     // BEFORE the p->threads walk, so it needs no g_proc_table_lock.
-    proc_group_terminate(NULL, "fail");
+    proc_group_terminate(NULL, NOTE_SIG_KILL, "fail");
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -981,7 +981,7 @@ void test_proc_group_terminate_smoke(void) {
     // so the walk is empty, but hold the lock so the test models the contract.
     {
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(p, "fail");
+        proc_group_terminate(p, NOTE_SIG_KILL, "fail");
         proc_table_lock_release(s);
     }
     TEST_ASSERT(p->group_exit_msg != NULL,
@@ -994,7 +994,7 @@ void test_proc_group_terminate_smoke(void) {
     const char *first = p->group_exit_msg;
     {
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(p, "ok");
+        proc_group_terminate(p, 0, "ok");
         proc_table_lock_release(s);
     }
     TEST_ASSERT(p->group_exit_msg == first,
@@ -1011,7 +1011,7 @@ void test_proc_group_terminate_smoke(void) {
     // MASKED, because that is the state the function's real callers provide.
     // el0_return_die_check runs on the approach to KERNEL_EXIT, which installs
     // ELR/SPSR and erets under an INHERITED mask (#713); every real call site
-    // -- .Lel0_sync_return, the 0x480 IRQ tail, both trampolines -- arrives
+    // -- .Lel0_return (both lower-EL vectors), both trampolines -- arrives
     // masked. This test drives it from the boot kthread, which runs UNMASKED,
     // so without this the call happens in a state no shipping path produces.
     //
@@ -1588,7 +1588,7 @@ void test_proc_wait_pid_syscall_untraced_flag(void) {
     for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
     ctx.regs[8] = SYS_WAIT_PID;
     ctx.regs[0] = (u64)(s64)cpid;
-    ctx.regs[1] = 0x40u;           // outside {WNOHANG, UNTRACED, CONTINUED}
+    ctx.regs[1] = 0x40u;           // outside {WNOHANG, UNTRACED, CONTINUED, PACKED}
     ctx.regs[2] = 0;
     TEST_SYSCALL_DISPATCH(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
@@ -1596,6 +1596,145 @@ void test_proc_wait_pid_syscall_untraced_flag(void) {
 
     c->stop_report_pending = false;
     legate_drop_linked(c);
+}
+
+// =============================================================================
+// gcpark-b: a death by note reads as signalled in the packed word
+// =============================================================================
+
+static void wpf_abort_thunk(void *arg) {
+    (void)arg;
+    exits_note(NOTE_NAME_SNARE_ABORT);
+}
+
+static void wpf_interrupt_thunk(void *arg) {
+    (void)arg;
+    exits_note(NOTE_NAME_INTERRUPT);
+}
+
+static void wpf_killed_thunk(void *arg) {
+    (void)arg;
+    exits_signalled(NOTE_SIG_KILL, "killed");
+}
+
+static void wpf_code_thunk(void *arg) {
+    (void)arg;
+    exits_code(42, "forty-two");
+}
+
+// The packed word tells an exit from a death by note; the raw word keeps the
+// status 1 every native caller has always read. Each packed flag yields it.
+// Every child is reaped before the first assert, which returns.
+static const struct { void (*thunk)(void *); int flags; } g_wps_cases[] = {
+    { wpf_abort_thunk,     WAIT_PACKED    },
+    { wpf_abort_thunk,     0              },
+    { wpf_interrupt_thunk, WAIT_UNTRACED  },
+    { wpf_killed_thunk,    WAIT_CONTINUED },
+    { wpf_failer_thunk,    WAIT_PACKED    },
+    { wpf_code_thunk,      WAIT_PACKED    },
+};
+#define WPS_N ((int)(sizeof g_wps_cases / sizeof g_wps_cases[0]))
+
+void test_proc_wait_packed_signalled(void) {
+    int got[WPS_N];
+    int reaped = 0;
+    for (int i = 0; i < WPS_N; i++) {
+        got[i] = -42;
+        int pid = rfork(RFPROC, g_wps_cases[i].thunk, NULL);
+        if (pid > 0 && wait_pid_for(pid, g_wps_cases[i].flags, &got[i]) == pid)
+            reaped++;
+    }
+    TEST_EXPECT_EQ(reaped, WPS_N, "every child forked and was reaped by its own pid");
+
+    TEST_EXPECT_EQ(got[0], WAIT_STATUS_SIGNALED(NOTE_SIG_ABRT),
+        "WAIT_PACKED: snare:abort reads signalled SIGABRT (6)");
+    TEST_ASSERT(WAIT_IF_SIGNALED(got[0]) && WAIT_TERMSIG(got[0]) == 6 &&
+                !WAIT_IF_EXITED(got[0]) && !WAIT_IF_STOPPED(got[0]) &&
+                !WAIT_IF_CONTINUED(got[0]), "signalled decodes as signalled only");
+    TEST_EXPECT_EQ(got[1], 1, "a raw wait reads a death by note as 1");
+    TEST_EXPECT_EQ(got[2], WAIT_STATUS_SIGNALED(NOTE_SIG_INT),
+        "WAIT_UNTRACED packs too: an uncaught interrupt reads SIGINT (2)");
+    TEST_EXPECT_EQ(got[3], WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
+        "WAIT_CONTINUED packs too: a kill reads SIGKILL (9)");
+    // One variable away: an exit with the same raw status packs as an exit.
+    TEST_EXPECT_EQ(got[4], WAIT_STATUS_EXITED(1), "an exit(1) packs as exited (0x100)");
+    TEST_ASSERT(WAIT_IF_EXITED(got[4]) && !WAIT_IF_SIGNALED(got[4]),
+        "exited decodes as exited only");
+    TEST_EXPECT_EQ(got[5], WAIT_STATUS_EXITED(42), "exits_code(42) packs its byte (0x2a00)");
+}
+
+// A child that claims its own group's termination twice: the first claim's
+// code AND signal decide the reap, whatever the second says.
+static volatile u32 g_wgc_order;
+
+static void wgc_twice_thunk(void *arg) {
+    (void)arg;
+    struct Proc *p = current_thread()->proc;
+    irq_state_t s = proc_table_lock_acquire();
+    switch (__atomic_load_n(&g_wgc_order, __ATOMIC_ACQUIRE)) {
+    case 0:  proc_group_terminate_code(p, 7, "seven"); proc_group_kill(p); break;
+    case 1:  proc_group_kill(p); proc_group_terminate_code(p, 7, "seven"); break;
+    default: proc_group_terminate(p, NOTE_SIG_HUP, NOTE_NAME_TTY_HUP);
+             proc_group_kill(p); break;
+    }
+    proc_table_lock_release(s);
+    thread_exit_self();
+}
+
+static int wgc_run(u32 order) {
+    __atomic_store_n(&g_wgc_order, order, __ATOMIC_RELEASE);
+    int pid = rfork(RFPROC, wgc_twice_thunk, NULL);
+    if (pid <= 0) return -2;
+    int st = -42;
+    return wait_pid_for(pid, WAIT_PACKED, &st) == pid ? st : -3;
+}
+
+void test_proc_group_claim_decides_signal(void) {
+    TEST_EXPECT_EQ(wgc_run(0), WAIT_STATUS_EXITED(7),
+        "exit_group(7) then kill: the exit's claim stands (0x700, no signal)");
+    TEST_EXPECT_EQ(wgc_run(1), WAIT_STATUS_SIGNALED(NOTE_SIG_KILL),
+        "kill then exit_group(7): the kill's claim stands (SIGKILL)");
+    TEST_EXPECT_EQ(wgc_run(2), WAIT_STATUS_SIGNALED(NOTE_SIG_HUP),
+        "hangup then kill: the hangup's claim stands (SIGHUP)");
+}
+
+// SYS_WAIT_PID admits WAIT_PACKED (pre-fix: -1, the handler's mask), and the
+// flag asks for the packed word only: a stop latch is neither reported nor
+// consumed.
+void test_proc_wait_pid_syscall_packed_flag(void) {
+    struct Proc *c = proc_alloc();
+    TEST_ASSERT(c != NULL, "proc_alloc");
+    proc_test_link(c);
+    int cpid = c->pid;
+    c->stop_report_pending = true;
+
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_WAIT_PID;
+    ctx.regs[0] = (u64)(s64)cpid;
+    ctx.regs[1] = (u64)(WAIT_PACKED | WAIT_WNOHANG);
+    ctx.regs[2] = 0;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    s64  r      = (s64)ctx.regs[0];
+    bool latch  = c->stop_report_pending;
+    bool alive  = c->state == PROC_STATE_ALIVE;
+
+    // The next bit up is still refused.
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_WAIT_PID;
+    ctx.regs[0] = (u64)(s64)cpid;
+    ctx.regs[1] = (u64)(WAIT_PACKED << 1);
+    ctx.regs[2] = 0;
+    TEST_SYSCALL_DISPATCH(&ctx);
+    s64 r_bad = (s64)ctx.regs[0];
+
+    c->stop_report_pending = false;
+    legate_drop_linked(c);
+    TEST_EXPECT_EQ(r, (s64)0,
+        "SYS_WAIT_PID admits WAIT_PACKED: an alive child under WNOHANG answers 0 (pre-fix: -1)");
+    TEST_ASSERT(latch, "WAIT_PACKED did not consume the stop latch");
+    TEST_ASSERT(alive, "the wait did not reap");
+    TEST_EXPECT_EQ(r_bad, (s64)-1, "the bit above WAIT_PACKED is refused");
 }
 
 // =============================================================================
@@ -2418,7 +2557,7 @@ static void strag_run(int role) {
         struct Proc *cp = __atomic_load_n(&g_strag_child_proc, __ATOMIC_ACQUIRE);
         TEST_ASSERT(cp != NULL, "child published its Proc");
         irq_state_t s = proc_table_lock_acquire();
-        proc_group_terminate(cp, "im2 straggler test");   // what the sweep does
+        proc_group_terminate(cp, NOTE_SIG_KILL, "im2 straggler test");   // what the sweep does
         proc_table_lock_release(s);
     }
     __atomic_store_n(&g_strag_phase, 2, __ATOMIC_RELEASE);
@@ -2588,7 +2727,7 @@ void test_proc_kill_forces_final_close(void) {
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 
     proc_group_terminate_code(b, 0, "ok");           // an exit_group(0)
-    proc_group_terminate(b, "hangup");
+    proc_group_terminate(b, NOTE_SIG_HUP, "hangup");
     bool b_other  = (__atomic_load_n(&b->proc_flags, __ATOMIC_ACQUIRE) &
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
     proc_group_kill(b);
@@ -2596,8 +2735,8 @@ void test_proc_kill_forces_final_close(void) {
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
     int  b_code   = b->group_exit_code;
 
-    proc_group_terminate(c, "killed");
-    proc_group_terminate(c, "killed");
+    proc_group_terminate(c, NOTE_SIG_KILL, "killed");
+    proc_group_terminate(c, NOTE_SIG_KILL, "killed");
     bool c_wrap   = (__atomic_load_n(&c->proc_flags, __ATOMIC_ACQUIRE) &
                      PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 
@@ -2611,7 +2750,7 @@ void test_proc_kill_forces_final_close(void) {
     proc_group_kill(d);
     bool d_closing = (__atomic_load_n(&d->proc_flags, __ATOMIC_ACQUIRE) &
                       PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
-    proc_group_terminate(e, "hangup");
+    proc_group_terminate(e, NOTE_SIG_HUP, "hangup");
     bool e_hangup  = (__atomic_load_n(&e->proc_flags, __ATOMIC_ACQUIRE) &
                       PROC_FLAG_EXIT_CLOSE_FORCED) != 0;
 

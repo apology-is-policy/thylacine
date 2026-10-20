@@ -209,6 +209,21 @@ static bool test_caught_settle(struct Thread *t, u64 seen) {
     return false;
 }
 
+// Wake a thread blocked in a wait that holds through a caught note. The posting
+// walk never wakes one (ARCH 8.8.3: it picks a thread that can take the note,
+// and a native walk only kicks), so this stands in for the wake anything else
+// might bring -- data, a timer, a spurious wake -- and the leg still shows the
+// wait re-reading the pending note and riding it out. A wait that unwinds is
+// left to the walk: waking it here would hide a walk that failed to.
+static void test_caught_wake_holder(struct Thread *t) {
+    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
+    struct Rendez *r = t->rendez_blocked_on;
+    if (r && r != &t->debug_rendez &&
+        __atomic_load_n(&t->caught_wait, __ATOMIC_RELAXED) == CAUGHT_WAIT_HOLDS)
+        wakeup(r);
+    spin_unlock_irqrestore(&t->wait_lock, ws);
+}
+
 struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
                                        bool (*prep)(void *arg),
                                        void (*release)(void *arg), void *arg,
@@ -231,6 +246,7 @@ struct test_caught_leg test_caught_run(struct Proc *p, long (*call)(void *arg),
         if (leg.prepped) {
             u64 seen     = __atomic_load_n(&t->switched_in_at, __ATOMIC_RELAXED);
             leg.posted   = test_caught_post(p);
+            test_caught_wake_holder(t);
             leg.rode_out = test_caught_settle(t, seen);
         }
     }
@@ -347,6 +363,13 @@ void test_rendez_caught_note_one_unwind(void);
 void test_rendez_caught_note_tail_discards_and_releases(void);
 void test_rendez_tail_parks_for_the_stop_it_applies(void);
 void test_rendez_caught_note_release_wakes_peer(void);
+void test_rendez_caught_note_prefers_awake(void);
+void test_rendez_caught_note_poster_first(void);
+void test_rendez_caught_note_handoff(void);
+void test_rendez_caught_note_exit_drop(void);
+void test_rendez_caught_note_holder_rewake(void);
+void test_rendez_caught_note_native_kicks_only(void);
+void test_rendez_caught_note_repick_fallback(void);
 void test_rendez_caught_note_ends_wait4(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
@@ -436,6 +459,9 @@ void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void);
 void test_proc_wait_pid_for_pgrp_selectors(void);
 void test_proc_wait_pid_for_report_not_reap(void);
 void test_proc_wait_pid_syscall_untraced_flag(void);
+void test_proc_wait_packed_signalled(void);        // gcpark-b
+void test_proc_group_claim_decides_signal(void);    // gcpark-b
+void test_proc_wait_pid_syscall_packed_flag(void);  // gcpark-b
 void test_proc_job_stop_owner_algebra(void);
 void test_proc_job_stop_park_report_cont_live(void);
 void test_proc_job_stop_recycle(void);
@@ -515,14 +541,34 @@ void test_vmo_via_handle_table(void);
 void test_jit_create_requires_cap(void);
 void test_jit_create_rejects_bad_args(void);
 void test_jit_dual_alias_pte_wx_clean(void);
-void test_jit_charges_once_per_region(void);
+void test_jit_charges_once_per_page(void);
+void test_jit_max_region_is_a_reservation(void);
+void test_jit_decommit_refuses_code(void);
+void test_jit_icache_policy_decode(void);
+void test_jit_region_is_128_mib(void);
+void test_jit_space_sync_targets(void);
+void test_jit_commit_invalidates_icache(void);
+void test_jit_fetch_admission(void);
+void test_jit_icache_aliasing_invalidates_all(void);
 void test_jit_destroy_tears_down_both(void);
 void test_jit_destroy_rejects_non_writer(void);
 void test_jit_alias_not_detachable(void);
 void test_jit_icache_sync_gate(void);
 void test_jit_write_through_writer_visible_at_exec(void);
+void test_jit_sealed_region(void);
+void test_jit_exec_alias_stays_readable(void);
+void test_jit_sealed_rejects(void);
+void test_jit_placement_not_first_fit(void);
+void test_jit_xonly_promoted_off_code(void);
+void test_jit_sealed_fill_failure_refunds(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
+// AS-R9: settled drops + the JIT remaining-reference premise.
+void test_burrow_settled_drop_retains_nonfinal_charge(void);
+void test_burrow_settled_drop_exact_payer(void);
+void test_burrow_settled_mapping_drop_defers_free(void);
+void test_burrow_unmap_failure_leaves_mapping_attached(void);
+void test_burrow_unmap_interior_start_refused(void);
 void test_vmo_dup_oom_rollback(void);
 void test_vmo_file_create_close_round_trip(void);
 void test_vmo_file_create_failure_retains_spoor(void);
@@ -586,9 +632,13 @@ void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
 void test_weft_sharer_charge_released_at_detach(void);
 void test_weft_reap_kproc_pid_survives_walk(void);
+void test_weft_reap_unlocks_the_space_it_locked(void);
+void test_weft_reap_skips_an_exit_closing_proc(void);
+void test_weft_reap_unmaps_a_shared_exit_closing_space(void);
 void test_weft_reap_orphan_reclaimed(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
+void test_weft_reap_live_sweep_leaves_test_bindings(void);
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
 void test_pgtable_install_user_pte_attr_index(void);
@@ -607,6 +657,8 @@ void test_demand_page_file_rodata_prot(void);
 void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
 void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
+void test_demand_page_file_read_error_dying_is_death(void);
+void test_demand_page_file_read_revoked_latch_is_dying(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
 void test_demand_page_file_cluster_short_read(void);
@@ -715,6 +767,7 @@ void test_vma_insert_lookup_smoke(void);
 void test_vma_insert_overlap_rejected(void);
 void test_vma_insert_sorted_invariant(void);
 void test_vma_drain_releases_all(void);
+void test_vma_linked_in_tracks_the_list(void);
 void test_vma_find_gap_smoke(void);
 void test_vma_find_gap_no_fit(void);
 void test_vma_find_gap_constraints(void);
@@ -816,6 +869,11 @@ void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
 void test_loom_enter_nop(void);
+void test_loom_sq_release_after_copy(void);
+void test_loom_sq_release_after_index(void);
+void test_loom_sq_release_after_copy_chain(void);
+void test_loom_setup_close_race(void);
+void test_loom_setup_rollback_settles(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
@@ -836,6 +894,10 @@ void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
+void test_proc_exits_in_dying_group_keeps_group_status(void);
+void test_proc_fault_in_dying_group_keeps_group_status(void);
+void test_proc_fault_in_dying_group_reaps_exited_packed(void);   // gcpark-b
+void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -843,7 +905,7 @@ void test_notes_post_ordering(void);
 void test_notes_linux_sigign_discard(void);      // VIVARIUM V-6b
 void test_notes_unknown_name_rejected(void);
 void test_notes_snare_forge_rejected(void);
-void test_notes_queue_full_returns_minus1(void);
+void test_notes_queue_full_returns_eagain(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
@@ -857,6 +919,7 @@ void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
 void test_notes_interrupt_terminate_gate(void);
 void test_notes_default_action_table(void);      // #15 / #236
+void test_notes_death_signal_table(void);        // gcpark-b
 void test_notes_ndflt_dispatch(void);            // #15 / #236
 void test_notes_kill_terminates_single_thread(void);   // #241
 void test_notes_self_kill_through_full_ring(void);     // aux#253
@@ -869,10 +932,16 @@ void test_notes_discard_name_purges_pending(void);      // the install-time SIG_
 void test_notes_phenotype_sigreturn_restores_mask(void); // the mask half of sigreturn
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
+void test_notes_fault_dying_latch_live_note_exits(void);
+void test_notes_fault_dying_latch_clears_only_stale(void);
 void test_notes_die_pending_predicate(void);
 void test_notes_death_reaches_predicate(void);
 void test_notes_forced_close_lifts_the_hold(void);
 void test_notes_pipe_die_pending(void);
+void test_notes_term_die_pending(void);
+void test_notes_kill_family_gate(void);
+void test_notes_postnote_errnos(void);
+void test_notes_self_death_snare(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_claim_once(void);
@@ -933,6 +1002,16 @@ void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_maps_code_visible(void);     // B-2b audit F2
+void test_devproc_maps_code_redacted(void);    // B-2b audit F2
+void test_devproc_maps_code_truncated(void);   // B-2b audit F2
+void test_devproc_maps_code_trimmed(void);     // B-2b audit r2 F2
+void test_devproc_maps_code_budget_stop(void); // B-2b audit r2 F2
+void test_devproc_debug_cover_weighs_departed(void); // the image's holder record
+void test_devproc_seal_outlives_its_holder(void);
+void test_devproc_taint_outlives_its_holder(void);
+void test_devproc_zombie_records_departure(void);
+void test_devproc_exec_records_departure(void);
 void test_devproc_environ(void);               // VIVARIUM V-4b-6
 void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_rejects(void);
@@ -981,6 +1060,7 @@ void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_debug_release_cancels_step(void);
+void test_devproc_zombie_status_signal(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_kernel_writer_bracket(void);              // #152
@@ -1114,6 +1194,7 @@ void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
 void test_vivarium_handler_mask(void);                    // the handler-time mask
 void test_vivarium_signal_exclusivity(void);             // VIVARIUM V-6b
 void test_vivarium_signote_deliverable(void);            // VIVARIUM V-6b
+void test_vivarium_kill_decide(void);
 void test_vivarium_sigtab(void);                         // VIVARIUM V-6b
 void test_vivarium_notemask_to_sigset(void);             // VIVARIUM V-6b
 void test_vivarium_signote_reverse(void);                 // VIVARIUM V-6c
@@ -1518,6 +1599,8 @@ void test_virtio_reset_in_range_no_match(void);
 void test_virtio_vq_size_for(void);
 void test_virtio_proc_death_quiesces_device(void);
 void test_virtio_proc_death_quiesces_vma_only_device(void);
+void test_virtio_exec_quiesces_devices(void);
+void test_virtio_last_unref_quiesces_mapped_device(void);
 void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
@@ -1900,6 +1983,8 @@ void test_dev9p_wb_dying_wstat_keeps_staging(void);
 void test_dev9p_wb_wstat_keeps_the_latch(void);
 void test_dev9p_wb_dying_loom_register_keeps_staging(void);
 void test_dev9p_wb_loom_register_keeps_the_latch(void);
+void test_dev9p_wb_interrupted_flush_keeps_run(void);
+void test_dev9p_wb_server_eintr_latches(void);
 void test_dev9p_wb_nonappend_writethrough(void);
 void test_dev9p_wb_fstat_staged_size(void);
 void test_dev9p_wb_cap_flush(void);
@@ -1923,6 +2008,8 @@ void test_p9_closer_forced_exit_close_hands_off_flush(void);
 void test_p9_closer_kthread_close_hands_off_staged_run(void);
 void test_p9_closer_close_job_retries_a_refused_write(void);
 void test_p9_closer_first_kill_forces_exits_close(void);
+void test_p9_closer_kill_in_final_close_keeps_exit(void);
+void test_p9_closer_kill_at_final_close_start_forces_it(void);
 void test_p9_closer_loom_register_flushes_staged_run(void);
 void test_p9_closer_stalled_session_holds_one_closer(void);
 void test_p9_closer_flushed_walk_fid_clunked(void);
@@ -2342,6 +2429,13 @@ struct test_case g_tests[] = {
     { "rendez.caught_note_tail_discards_and_releases", test_rendez_caught_note_tail_discards_and_releases, false, NULL },
     { "rendez.tail_parks_for_the_stop_it_applies", test_rendez_tail_parks_for_the_stop_it_applies, false, NULL },
     { "rendez.caught_note_release_wakes_peer", test_rendez_caught_note_release_wakes_peer, false, NULL },
+    { "rendez.caught_note_prefers_awake", test_rendez_caught_note_prefers_awake, false, NULL },
+    { "rendez.caught_note_poster_first", test_rendez_caught_note_poster_first, false, NULL },
+    { "rendez.caught_note_handoff", test_rendez_caught_note_handoff, false, NULL },
+    { "rendez.caught_note_exit_drop", test_rendez_caught_note_exit_drop, false, NULL },
+    { "rendez.caught_note_holder_rewake", test_rendez_caught_note_holder_rewake, false, NULL },
+    { "rendez.caught_note_native_kicks_only", test_rendez_caught_note_native_kicks_only, false, NULL },
+    { "rendez.caught_note_repick_fallback", test_rendez_caught_note_repick_fallback, false, NULL },
     { "rendez.caught_note_ends_wait4",         test_rendez_caught_note_ends_wait4,         false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,
@@ -2435,6 +2529,11 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_report_not_reap, false, NULL },
     { "proc.wait_pid_syscall_untraced_flag",
                                        test_proc_wait_pid_syscall_untraced_flag, false, NULL },
+    { "proc.wait_packed_signalled",    test_proc_wait_packed_signalled,    false, NULL },
+    { "proc.group_claim_decides_signal",
+                                       test_proc_group_claim_decides_signal, false, NULL },
+    { "proc.wait_pid_syscall_packed_flag",
+                                       test_proc_wait_pid_syscall_packed_flag, false, NULL },
     { "proc.job_stop_owner_algebra",   test_proc_job_stop_owner_algebra,   false, NULL },
     { "proc.job_stop_park_report_cont_live",
                                        test_proc_job_stop_park_report_cont_live, false, NULL },
@@ -2582,18 +2681,43 @@ struct test_case g_tests[] = {
     { "burrow.via_handle_table",          test_vmo_via_handle_table,          false, NULL },
     { "burrow.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "burrow.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
+    // AS-R9: the charge decision inside the drop's lock interval.
+    { "burrow.settled_drop_retains_nonfinal_charge",
+      test_burrow_settled_drop_retains_nonfinal_charge, false, NULL },
+    { "burrow.settled_drop_exact_payer",
+      test_burrow_settled_drop_exact_payer,             false, NULL },
+    { "burrow.settled_mapping_drop_defers_free",
+      test_burrow_settled_mapping_drop_defers_free,     false, NULL },
+    { "burrow.unmap_failure_leaves_mapping_attached",
+      test_burrow_unmap_failure_leaves_mapping_attached, false, NULL },
+    { "burrow.unmap_interior_start_refused",
+      test_burrow_unmap_interior_start_refused,         false, NULL },
 
     // I-42 / CL-7k: the JIT capability. jit.dual_alias_pte_wx_clean is the
     // invariant test -- it reads the real L3 descriptors, not the VMA prots.
     { "jit.create_requires_cap",          test_jit_create_requires_cap,       false, NULL },
     { "jit.create_rejects_bad_args",      test_jit_create_rejects_bad_args,   false, NULL },
     { "jit.dual_alias_pte_wx_clean",      test_jit_dual_alias_pte_wx_clean,   false, NULL },
-    { "jit.charges_once_per_region",      test_jit_charges_once_per_region,   false, NULL },
+    { "jit.charges_once_per_page",        test_jit_charges_once_per_page,     false, NULL },
+    { "jit.max_region_is_a_reservation",  test_jit_max_region_is_a_reservation, false, NULL },
+    { "jit.decommit_refuses_code",        test_jit_decommit_refuses_code,     false, NULL },
     { "jit.destroy_tears_down_both",      test_jit_destroy_tears_down_both,   false, NULL },
     { "jit.destroy_rejects_non_writer",   test_jit_destroy_rejects_non_writer, false, NULL },
     { "jit.alias_not_detachable",         test_jit_alias_not_detachable,      false, NULL },
     { "jit.icache_sync_gate",             test_jit_icache_sync_gate,          false, NULL },
     { "jit.write_visible_at_exec_alias",  test_jit_write_through_writer_visible_at_exec, false, NULL },
+    { "jit.icache_policy_decode",         test_jit_icache_policy_decode,      false, NULL },
+    { "jit.region_is_128_mib",            test_jit_region_is_128_mib,         false, NULL },
+    { "jit.space_sync_targets",           test_jit_space_sync_targets,        false, NULL },
+    { "jit.commit_invalidates_icache",    test_jit_commit_invalidates_icache, false, NULL },
+    { "jit.fetch_admission",              test_jit_fetch_admission,           false, NULL },
+    { "jit.icache_aliasing_invalidates_all", test_jit_icache_aliasing_invalidates_all, false, NULL },
+    { "jit.sealed_region",                test_jit_sealed_region,             false, NULL },
+    { "jit.exec_alias_stays_readable",    test_jit_exec_alias_stays_readable, false, NULL },
+    { "jit.sealed_rejects",               test_jit_sealed_rejects,            false, NULL },
+    { "jit.placement_not_first_fit",      test_jit_placement_not_first_fit,   false, NULL },
+    { "jit.xonly_promoted_off_code",      test_jit_xonly_promoted_off_code,   false, NULL },
+    { "jit.sealed_fill_failure_refunds",  test_jit_sealed_fill_failure_refunds, false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
     { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },
     { "burrow.file_create_failure_retains_spoor", test_vmo_file_create_failure_retains_spoor, false, NULL },
@@ -2663,9 +2787,13 @@ struct test_case g_tests[] = {
     { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
     { "weft.sharer_charge_released_at_detach", test_weft_sharer_charge_released_at_detach, false, NULL },
     { "weft.reap_kproc_pid_survives_walk", test_weft_reap_kproc_pid_survives_walk, false, NULL },
+    { "weft.reap_unlocks_the_space_it_locked", test_weft_reap_unlocks_the_space_it_locked, false, NULL },
+    { "weft.reap_skips_an_exit_closing_proc", test_weft_reap_skips_an_exit_closing_proc, false, NULL },
+    { "weft.reap_unmaps_a_shared_exit_closing_space", test_weft_reap_unmaps_a_shared_exit_closing_space, false, NULL },
     { "weft.reap_orphan_reclaimed",       test_weft_reap_orphan_reclaimed,    false, NULL },
     { "weft.reap_live_session_untouched", test_weft_reap_live_session_untouched, false, NULL },
     { "weft.reap_close_unregisters",      test_weft_reap_close_unregisters,   false, NULL },
+    { "weft.reap_live_sweep_leaves_test_bindings", test_weft_reap_live_sweep_leaves_test_bindings, false, NULL },
     { "pgtable.install_user_pte_smoke",
                                        test_pgtable_install_user_pte_smoke,
                                                                            false, NULL },
@@ -2703,6 +2831,10 @@ struct test_case g_tests[] = {
     { "demand_page.file_geometry_shift_bails_single", test_demand_page_file_geometry_shift_bails_single, false, NULL },
     { "demand_page.file_read_error_snare_bus",
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
+    { "demand_page.file_read_error_dying_is_death",
+                                       test_demand_page_file_read_error_dying_is_death, false, NULL },
+    { "demand_page.file_read_revoked_latch_is_dying",
+                                       test_demand_page_file_read_revoked_latch_is_dying, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
     { "demand_page.file_short_read_fills_page",
                                        test_demand_page_file_short_read_fills_page, false, NULL },
@@ -2890,6 +3022,7 @@ struct test_case g_tests[] = {
     { "vma.insert_overlap_rejected",   test_vma_insert_overlap_rejected,   false, NULL },
     { "vma.insert_sorted_invariant",   test_vma_insert_sorted_invariant,   false, NULL },
     { "vma.drain_releases_all",        test_vma_drain_releases_all,        false, NULL },
+    { "vma.linked_in_tracks_the_list", test_vma_linked_in_tracks_the_list, false, NULL },
     { "vma.find_gap_smoke",            test_vma_find_gap_smoke,            false, NULL },
     { "vma.find_gap_no_fit",           test_vma_find_gap_no_fit,           false, NULL },
     { "vma.find_gap_constraints",      test_vma_find_gap_constraints,      false, NULL },
@@ -2996,6 +3129,11 @@ struct test_case g_tests[] = {
     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
     { "loom.enter_nop",                  test_loom_enter_nop,                  false, NULL },
+    { "loom.sq_release_after_copy",      test_loom_sq_release_after_copy,      false, NULL },
+    { "loom.sq_release_after_index",     test_loom_sq_release_after_index,     false, NULL },
+    { "loom.sq_release_after_copy_chain", test_loom_sq_release_after_copy_chain, false, NULL },
+    { "loom.setup_close_race",          test_loom_setup_close_race,           false, NULL },
+    { "loom.setup_rollback_settles",    test_loom_setup_rollback_settles,     false, NULL },
     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },
@@ -3017,6 +3155,10 @@ struct test_case g_tests[] = {
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
+    { "proc.exits_in_dying_group_keeps_group_status", test_proc_exits_in_dying_group_keeps_group_status, false, NULL },
+    { "proc.fault_in_dying_group_keeps_group_status", test_proc_fault_in_dying_group_keeps_group_status, false, NULL },
+    { "proc.fault_in_dying_group_reaps_exited_packed", test_proc_fault_in_dying_group_reaps_exited_packed, false, NULL },
+    { "proc.note_death_with_live_peer_reaps_signalled", test_proc_note_death_with_live_peer_reaps_signalled, false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },
@@ -3024,7 +3166,7 @@ struct test_case g_tests[] = {
     { "notes.linux_sigign_discard",            test_notes_linux_sigign_discard,            false, NULL },
     { "notes.unknown_name_rejected",           test_notes_unknown_name_rejected,           false, NULL },
     { "notes.snare_forge_rejected",            test_notes_snare_forge_rejected,            false, NULL },
-    { "notes.queue_full_returns_minus1",       test_notes_queue_full_returns_minus1,       false, NULL },
+    { "notes.queue_full_returns_eagain",       test_notes_queue_full_returns_eagain,       false, NULL },
     { "notes.coalesce_synthetic",              test_notes_coalesce_synthetic,              false, NULL },
     { "notes.mask_defers",                     test_notes_mask_defers,                     false, NULL },
     { "notes.kill_dequeue_smoke",              test_notes_kill_dequeue_smoke,              false, NULL },
@@ -3038,6 +3180,7 @@ struct test_case g_tests[] = {
     { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
     { "notes.interrupt_terminate_gate",        test_notes_interrupt_terminate_gate,        false, NULL },
     { "notes.default_action_table",            test_notes_default_action_table,            false, NULL },
+    { "notes.death_signal_table",              test_notes_death_signal_table,              false, NULL },
     { "notes.ndflt_dispatch",                  test_notes_ndflt_dispatch,                  false, NULL },
     { "notes.kill_terminates_single_thread",   test_notes_kill_terminates_single_thread,   false, NULL },
     { "notes.self_kill_through_full_ring",     test_notes_self_kill_through_full_ring,     false, NULL },
@@ -3050,10 +3193,16 @@ struct test_case g_tests[] = {
     { "notes.phenotype_sigreturn_restores_mask", test_notes_phenotype_sigreturn_restores_mask, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
+    { "notes.fault_dying_latch_live_note_exits", test_notes_fault_dying_latch_live_note_exits, false, NULL },
+    { "notes.fault_dying_latch_clears_only_stale", test_notes_fault_dying_latch_clears_only_stale, false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },
     { "notes.death_reaches_predicate",         test_notes_death_reaches_predicate,         false, NULL },
     { "notes.forced_close_lifts_the_hold",     test_notes_forced_close_lifts_the_hold,     false, NULL },
     { "notes.pipe_die_pending",                test_notes_pipe_die_pending,                false, NULL },
+    { "notes.term_die_pending",                test_notes_term_die_pending,                false, NULL },
+    { "notes.kill_family_gate",                test_notes_kill_family_gate,                false, NULL },
+    { "notes.postnote_errnos",                 test_notes_postnote_errnos,                 false, NULL },
+    { "notes.self_death_snare",                test_notes_self_death_snare,                false, NULL },
     { "notes.caught_note_latch_lifecycle",     test_notes_caught_note_latch_lifecycle,     false, NULL },
     { "notes.caught_note_deliverable_predicate", test_notes_caught_note_deliverable_predicate, false, NULL },
     { "notes.caught_note_claim_once",            test_notes_caught_note_claim_once,            false, NULL },
@@ -3120,6 +3269,16 @@ struct test_case g_tests[] = {
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },
+    { "devproc.maps_code_visible",    test_devproc_maps_code_visible,     false, NULL },
+    { "devproc.maps_code_redacted",   test_devproc_maps_code_redacted,    false, NULL },
+    { "devproc.maps_code_truncated",  test_devproc_maps_code_truncated,   false, NULL },
+    { "devproc.maps_code_trimmed",    test_devproc_maps_code_trimmed,     false, NULL },
+    { "devproc.maps_code_budget_stop", test_devproc_maps_code_budget_stop, false, NULL },
+    { "devproc.debug_cover_weighs_departed", test_devproc_debug_cover_weighs_departed, false, NULL },
+    { "devproc.seal_outlives_its_holder", test_devproc_seal_outlives_its_holder, false, NULL },
+    { "devproc.taint_outlives_its_holder", test_devproc_taint_outlives_its_holder, false, NULL },
+    { "devproc.zombie_records_departure", test_devproc_zombie_records_departure, false, NULL },
+    { "devproc.exec_records_departure", test_devproc_exec_records_departure, false, NULL },
     { "devproc.environ",              test_devproc_environ,               false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
     { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },
@@ -3158,6 +3317,7 @@ struct test_case g_tests[] = {
     { "devproc.debug_kstack_settled",          test_devproc_debug_kstack_settled,          false, NULL },
     { "devproc.debug_step_cancel_on_stop",     test_devproc_debug_step_cancel_on_stop,     false, NULL },
     { "devproc.debug_release_cancels_step",    test_devproc_debug_release_cancels_step,    false, NULL },
+    { "devproc.zombie_status_signal",          test_devproc_zombie_status_signal,          false, NULL },
     { "hwdebug.dfr0_enumerate",                test_hwdebug_dfr0_enumerate,                false, NULL },
     { "hwdebug.arm_disarm_roundtrip",          test_hwdebug_arm_disarm_roundtrip,          false, NULL },
     { "hwdebug.bp_table",                      test_hwdebug_bp_table,                      false, NULL },
@@ -3317,6 +3477,7 @@ struct test_case g_tests[] = {
     { "vivarium.handler_mask",           test_vivarium_handler_mask,           false, NULL },
     { "vivarium.signal_exclusivity",     test_vivarium_signal_exclusivity,     false, NULL },
     { "vivarium.signote_deliverable",    test_vivarium_signote_deliverable,    false, NULL },
+    { "vivarium.kill_decide",            test_vivarium_kill_decide,            false, NULL },
     { "vivarium.sigtab",                 test_vivarium_sigtab,                 false, NULL },
     { "vivarium.notemask_to_sigset",     test_vivarium_notemask_to_sigset,     false, NULL },
     { "vivarium.signote_reverse",       test_vivarium_signote_reverse,       false, NULL },
@@ -3652,6 +3813,10 @@ struct test_case g_tests[] = {
                                        test_virtio_proc_death_quiesces_device, false, NULL },
     { "virtio.proc_death_quiesces_vma_only_device",
                                        test_virtio_proc_death_quiesces_vma_only_device, false, NULL },
+    { "virtio.exec_quiesces_devices",
+                                       test_virtio_exec_quiesces_devices, false, NULL },
+    { "virtio.last_unref_quiesces_mapped_device",
+                                       test_virtio_last_unref_quiesces_mapped_device, false, NULL },
     { "irqfwd.create_destroy",         test_irqfwd_create_destroy,         false, NULL },
     { "irqfwd.refcount_lifecycle",     test_irqfwd_refcount_lifecycle,     false, NULL },
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },
@@ -4264,6 +4429,10 @@ struct test_case g_tests[] = {
                                        test_dev9p_wb_dying_loom_register_keeps_staging, false, NULL },
     { "dev9p.wb_loom_register_keeps_the_latch",
                                        test_dev9p_wb_loom_register_keeps_the_latch, false, NULL },
+    { "dev9p.wb_interrupted_flush_keeps_run",
+                                       test_dev9p_wb_interrupted_flush_keeps_run, false, NULL },
+    { "dev9p.wb_server_eintr_latches",
+                                       test_dev9p_wb_server_eintr_latches, false, NULL },
     { "dev9p.wb_nonappend_writethrough", test_dev9p_wb_nonappend_writethrough, false, NULL },
     { "dev9p.wb_fstat_staged_size",    test_dev9p_wb_fstat_staged_size,        false, NULL },
     { "dev9p.wb_cap_flush",            test_dev9p_wb_cap_flush,                false, NULL },
@@ -4303,6 +4472,10 @@ struct test_case g_tests[] = {
                                        test_p9_closer_close_job_retries_a_refused_write, false, NULL },
     { "p9_closer.first_kill_forces_exits_close",
                                        test_p9_closer_first_kill_forces_exits_close, false, NULL },
+    { "p9_closer.kill_in_final_close_keeps_exit",
+                                       test_p9_closer_kill_in_final_close_keeps_exit, false, NULL },
+    { "p9_closer.kill_at_final_close_start_forces_it",
+                                       test_p9_closer_kill_at_final_close_start_forces_it, false, NULL },
     { "p9_closer.loom_register_flushes_staged_run",
                                        test_p9_closer_loom_register_flushes_staged_run, false, NULL },
     { "p9_closer.stalled_session_holds_one_closer",

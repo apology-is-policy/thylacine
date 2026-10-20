@@ -25,10 +25,12 @@
 //   v1.0 has no CAP_KILL; v1.x will extend the gate.
 //
 // `snare:` PREFIX:
-//   `snare:*` names are reserved for kernel-synthetic fault posters.
-//   The kernel rejects userspace SYS_POSTNOTE with a `snare:`-prefixed
-//   name; libthyla-rs surfaces that rejection cleanly via
-//   Error::InvalidArgument.
+//   `snare:*` names are reserved for kernel-synthetic fault posters. The
+//   kernel refuses a userspace SYS_POSTNOTE of one to another Proc, and a
+//   self-post of segv, bus, ill, fpe or abort ENDS the caller with that
+//   snare instead of queueing it (operator vote 2026-10-14) -- the path
+//   Pouch's raise(SIGSEGV) takes. `send` returns, so it refuses every
+//   `snare:` name with Error::InvalidArgument before the kernel sees it.
 
 use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
@@ -36,7 +38,7 @@ use crate::poll::AsFd;
 use crate::{
     t_note_mask, t_note_open, t_postnote, t_read, t_poll, TNoteRecord, TPollFd,
     T_NOTE_BIT_CHILD_EXIT, T_NOTE_BIT_INTERRUPT, T_NOTE_BIT_KILL, T_NOTE_BIT_PIPE,
-    T_NOTE_BIT_SAK, T_NOTE_BIT_SNARE, T_NOTE_BIT_TTY, T_NOTE_MASK_SUPPORTED,
+    T_NOTE_BIT_SAK, T_NOTE_BIT_SNARE, T_NOTE_BIT_TERM, T_NOTE_BIT_TTY, T_NOTE_MASK_SUPPORTED,
     T_NOTE_NAME_MAX,
     T_POLLIN, T_POSTNOTE_SELF_PID,
 };
@@ -147,6 +149,8 @@ pub enum NoteClass {
     /// trusted episode and the receiver (the trusted login authority) is
     /// its consumer. Kernel-synthetic-only; default IGNORE.
     Sak,
+    /// `term` — a request to end (SIGTERM). Catchable; default terminate.
+    Term,
 }
 
 impl NoteClass {
@@ -162,12 +166,13 @@ impl NoteClass {
             NoteClass::Snare => T_NOTE_BIT_SNARE,
             NoteClass::Tty => T_NOTE_BIT_TTY,
             NoteClass::Sak => T_NOTE_BIT_SAK,
+            NoteClass::Term => T_NOTE_BIT_TERM,
         }
     }
 
     /// Every class, in bit order. The one place a new variant has to be
     /// added for `MASK_SUPPORTED_COVERS_EVERY_CLASS` below to see it.
-    pub const ALL: [NoteClass; 7] = [
+    pub const ALL: [NoteClass; 8] = [
         NoteClass::Interrupt,
         NoteClass::Kill,
         NoteClass::Pipe,
@@ -175,6 +180,7 @@ impl NoteClass {
         NoteClass::Snare,
         NoteClass::Tty,
         NoteClass::Sak,
+        NoteClass::Term,
     ];
 }
 
@@ -438,14 +444,18 @@ impl AsFd for Notes {
 /// Permission gate (v1.0): SelfProc always allowed; `Pid(p)`
 /// requires the caller to be the target's parent OR equal to `p`.
 ///
-/// Errors:
+/// Errors, each the kernel's own answer (operator vote 2026-10-14):
 ///   - `Error::InvalidArgument`: bad name (length / chars / `snare:`
-///     prefix) OR target name not in the kernel's supported set OR
-///     bad pid.
-///   - `Error::NotFound`: target pid does not exist.
+///     prefix), or a name that is no note a program may post (unknown,
+///     `tty:*`, `sak`).
+///   - `Error::NoSuchProcess`: no Proc holds the target pid.
 ///   - `Error::PermissionDenied`: caller is not the target's parent.
-///   - `Error::Again`: target's note queue is full (best-effort
+///   - `Error::WouldBlock`: target's note queue is full (best-effort
 ///     retry; coalesce is kernel-synthetic-only).
+///
+/// A child that has died and is not yet reaped accepts a note it may be
+/// sent: it is still a process, and nothing receives it. A name the kernel
+/// refuses is `Error::InvalidArgument` whatever the target's state.
 pub fn send(target: NoteTarget, name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidArgument);
@@ -460,14 +470,7 @@ pub fn send(target: NoteTarget, name: &str) -> Result<()> {
     // SAFETY: bytes points to name.len() readable bytes in the
     // caller's user-VA memory (a &str borrows that).
     let rc = unsafe { t_postnote(target.to_kernel_pid(), bytes.as_ptr(), bytes.len()) };
-    if rc < 0 {
-        // The kernel collapses every failure to -1 at v1.0; we
-        // surface as InvalidArgument since we can't distinguish.
-        // A v1.x kernel ABI upgrade (per docs/ERRORS.md) will return
-        // specific errno values we can map here.
-        return Err(Error::InvalidArgument);
-    }
-    Ok(())
+    Error::from_syscall_return(rc).map(|_| ())
 }
 
 /// Set the calling Thread's note mask and return the previous mask.

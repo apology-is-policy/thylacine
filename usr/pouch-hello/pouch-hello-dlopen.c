@@ -23,8 +23,9 @@
 //   segments  the plugin has the four PT_LOADs (R, R+X, RW, RW), a RELRO range
 //             and a bss tail past its file bytes, and its rodata, text, data
 //             and bss each read and take writes as their shape promises.
-//   relro     a child that writes the plugin's RELRO table dies of the fault;
-//             one that writes its .data exits 0.
+//   relro     a child that writes the plugin's RELRO table dies of the fault
+//             (its waitpid status reads WIFSIGNALED SIGSEGV); one that writes
+//             its .data exits 0.
 // Every child is this binary, spawned through posix_spawn: a dynamic program
 // spawning a dynamic program.
 //
@@ -38,6 +39,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -130,14 +132,17 @@ static int child_write(int relro) {
     return *s == 7 ? 0 : 5;
 }
 
-// Spawn this binary as `role`; its exit status, or -1 if it did not run.
+// Spawn this binary as `role`; its exit status, 128 + the signal it died of,
+// or -1 if it did not run.
 static int run_child(const char *role) {
     char *argv[] = { (char *)g_self, (char *)role, NULL };
     pid_t pid;
     if (posix_spawn(&pid, g_self, NULL, NULL, argv, environ) != 0) return -1;
     int st = 0;
     if (waitpid(pid, &st, 0) != pid) return -1;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    if (WIFSIGNALED(st)) return 128 + WTERMSIG(st);
+    return -2;
 }
 
 // ---- the parent's legs ----------------------------------------------------
@@ -190,7 +195,7 @@ static void leg_child(const char *leg, const char *role, int want) {
     int st = run_child(role);
     if (st == want) { ok(leg); return; }
     char what[64];
-    snprintf(what, sizeof what, "child %s exited %d, want %d", role, st, want);
+    snprintf(what, sizeof what, "child %s ended %d, want %d (128+N: died of signal N)", role, st, want);
     bad(leg, what);
 }
 
@@ -257,7 +262,7 @@ int main(int argc, char **argv) {
     leg_load();
     leg_segments();
     leg_child("relro-data", "data-write", 0);
-    leg_child("relro", "relro-write", 1);
+    leg_child("relro", "relro-write", 128 + SIGSEGV);
     if (g_fails) {
         printf("pouch-hello-dlopen: %d leg(s) FAILED\n", g_fails);
         return 1;

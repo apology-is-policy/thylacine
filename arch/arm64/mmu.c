@@ -46,6 +46,7 @@
 #include "mmu.h"
 #include "kaslr.h"
 #include "asid.h"             // asid_hw_bits (TCR_EL1.AS sizing, RW-1 B-F1)
+#include "hwfeat.h"           // hw_icache_aliasing (arch_icache_sync_range)
 
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
@@ -976,9 +977,10 @@ static void patch_unmap(void) {
 
 // Instruction-cache maintenance to PoU for the modified range (ARM ARM
 // B2.4). The write landed in the D-cache via `scratch`; clean it to the
-// point-of-unification, then invalidate the I-cache for the canonical VA.
-// Both alias the same PA -> the same physical PoU line (D/I caches are PIPT
-// on ARMv8). Stride by the implemented line sizes from CTR_EL0.
+// point-of-unification (data caches behave as PIPT, so cleaning through
+// `scratch` cleans the line), then invalidate the I-cache by the canonical VA
+// -- the VA the kernel fetches through, which is right whatever the I-cache's
+// indexing. Stride by the implemented line sizes from CTR_EL0.
 static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
     u64 ctr;
     __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
@@ -995,9 +997,14 @@ static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
     __asm__ __volatile__("isb" ::: "memory");
 }
 
-// Single-VA instruction-cache sync (page.h contract). The write and the fetch
-// share the same kernel VA (and PA) -- unlike patch_sync_icache, whose scratch
-// alias differs from the canonical VA -- so clean + invalidate the one range.
+// Instruction-cache sync of a range written through `addr` (page.h contract).
+// `addr` is usually the DIRECT-MAP alias of a page that EL0 will fetch through
+// a different VA. The clean is right through any alias (data caches behave as
+// PIPT). The invalidate by `addr` is right only on a PIPT I-cache: a VIPT one
+// indexes its lines by the VA they were fetched through, so an invalidate by the
+// direct-map VA can miss the user's exec-VA lines. On such a part the whole
+// I-cache is invalidated instead, broadcast to the Inner Shareable domain
+// (Linux's sync_icache_aliases).
 void arch_icache_sync_range(const void *addr, size_t len) {
     if (len == 0) return;
     u64 ctr;
@@ -1008,8 +1015,18 @@ void arch_icache_sync_range(const void *addr, size_t len) {
     for (uintptr_t p = s & ~(uintptr_t)(dline - 1); p < end; p += dline)
         __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
     dsb_ish();
-    for (uintptr_t p = s & ~(uintptr_t)(iline - 1); p < end; p += iline)
-        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+#ifdef KERNEL_TESTS
+    __atomic_add_fetch(&g_icache_sync_calls_for_test, 1, __ATOMIC_RELAXED);
+#endif
+    if (hw_icache_aliasing()) {
+#ifdef KERNEL_TESTS
+        __atomic_add_fetch(&g_icache_sync_all_for_test, 1, __ATOMIC_RELAXED);
+#endif
+        __asm__ __volatile__("ic ialluis" ::: "memory");
+    } else {
+        for (uintptr_t p = s & ~(uintptr_t)(iline - 1); p < end; p += iline)
+            __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    }
     dsb_ish();
     __asm__ __volatile__("isb" ::: "memory");
 }
@@ -1524,11 +1541,17 @@ paddr_t proc_pgtable_create(void) {
 //        VMA_PROT_R        AP_RO_ANY    1    1    user-readonly, no exec
 //        VMA_PROT_RW       AP_RW_ANY    1    1    user-RW, no exec
 //        VMA_PROT_RX       AP_RO_ANY    1    0    user-readonly, user exec
+//        VMA_PROT_EXEC     AP_RO_EL1    1    0    user execute-only (no EL0
+//                                                 read or write; B-2b)
 //        VMA_PROT_W only   (rejected at vma_alloc; W without R is invalid)
 //        VMA_PROT_W|X      (rejected at vma_alloc; W^X invariant)
 //
-// W^X (I-12) holds by construction: only RX has UXN clear, and RX is
-// AP_RO_ANY (not writable). RW + EXEC is rejected at the VMA layer.
+// W^X (I-12) holds by construction: only RX and X have UXN clear, and neither
+// is writable at EL0. RW + EXEC is rejected at the VMA layer. Execute-only
+// exists only over a code Burrow (vma_alloc promotes any other X to RX), and
+// it hides the page from EL0 only because every kernel read on EL0's behalf
+// is unprivileged (uaccess.S) or refuses a leaf EL0 cannot read
+// (cross_proc_resolve): AP_RO_EL1 still lets an ordinary EL1 load through.
 static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, u32 mair_idx) {
     // Defense-in-depth (SF1): mair_idx names the 3-bit AttrIndx field and must
     // be a DEFINED MAIR byte (0..3). Every caller passes a validated index --
@@ -1579,8 +1602,10 @@ static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, u32 mair_idx) {
               PTE_PXN;
     if (prot & VMA_PROT_WRITE) {
         pte |= PTE_AP_RW_ANY;        // RW EL0+EL1
-    } else {
+    } else if (prot & VMA_PROT_READ) {
         pte |= PTE_AP_RO_ANY;        // RO EL0+EL1
+    } else {
+        pte |= PTE_AP_RO_EL1;        // no EL0 data access: X-only, or none
     }
     if (!(prot & VMA_PROT_EXEC)) {
         pte |= PTE_UXN;              // user cannot execute
@@ -1919,7 +1944,8 @@ bool mmu_user_pte_admits(struct AddrSpace *as, u64 vaddr, bool write, bool exec)
     u64 *l3 = (u64 *)pa_to_kva(e & 0x0000FFFFFFFFF000ull);
     e = l3[idx3];
     if (!(e & PTE_VALID))             return false;
-    if (!(e & (1ull << 6)))           return false;   // AP[1] clear: no EL0 access
+    // AP[1] clear: no EL0 DATA access. An execute-only leaf admits a fetch.
+    if (!exec && !(e & (1ull << 6)))  return false;
     if (write && (e & (1ull << 7)))   return false;   // AP[2] set: read-only
     if (exec && (e & PTE_UXN))        return false;
     return true;
@@ -2164,6 +2190,10 @@ static void *cross_proc_resolve(paddr_t pgtable_root, u64 vaddr, bool *writable_
     u64 *l3 = (u64 *)pa_to_kva(e & PTE_OA_MASK);
     e = l3[i3];
     if (!(e & PTE_VALID)) return NULL;   // not resident (unfaulted lazy-anon / REVENANT FILE)
+    // B-2b: a leaf EL0 cannot read (AP[1] clear) is not the debugger's either.
+    // An execute-only page exists to hide its bytes from the Proc that runs
+    // them; a reader with authority over that Proc must not be the way around.
+    if (!(e & (1ull << 6))) return NULL;
 
     if (writable_out)
         *writable_out = ((e & (1ull << 7)) == 0);   // AP[2] (bit 7) clear -> writable

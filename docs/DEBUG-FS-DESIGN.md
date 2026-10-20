@@ -181,7 +181,9 @@ is the same principal"). Concretely, before this rule:
 - **Disclosure through identity-only surfaces.** `environ` gates on
   owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
   the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
-  `cwd` and `maps` are mode 0444 — none of them weighs caps. So an unelevated peer
+  `cwd` and `maps` are mode 0444 — none of them weighs caps, except that `maps`
+  prints a code row's addresses only for the target itself or a reader that
+  passes the debug gate (B-2b, `JIT-ON-WX-DESIGN.md` item 3). So an unelevated peer
   still READS an elevated same-principal target — `environ` being the one that
   matters, since it is where secrets live by convention. This rule governs
   *control*, not *disclosure*; disclosure is the seal's axis, and 3.2 below says
@@ -404,7 +406,9 @@ and each walk with its own read path (`environ`, `mem`, `regs`/`fpregs`/`kregs`,
 `kstack`, `wait`). `devproc_read_cb` refuses an image kind on the seal **before any
 formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
 all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
-posture — and hand out nothing for a sealed one. `environ`, the one image file with an
+posture — and hand out nothing for a sealed one. (One later carve-out: since the code
+aliases are placed at random, `maps` zeroes a code row's addresses for a reader without
+debug authority over the target, other than the target itself; `JIT-ON-WX-DESIGN.md` item 3.) `environ`, the one image file with an
 owner gate of its own, composes the two in `devproc_extract_authorized`. The mem and
 regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
 meaning and no seal, and gates `sched` and `imperium`.
@@ -512,10 +516,12 @@ load-bearing, not residual. (Corrected 2026-09-24, audit F3.)
 ### 3.3 The image join, and the debug taint (2026-09-24)
 
 > **Every guard on a Proc's IMAGE is evaluated over the whole set of Procs that
-> MAP that image.** Cover must cover every mapper; `NOTRACE` on any mapper
-> refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
-> mapper; and a Proc whose image was ever under debug control, or that is still
-> shared, never gains authority again.
+> MAP that image, or ever have.** Cover must cover every mapper; `NOTRACE` on any
+> mapper refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
+> mapper; a holder that leaves the image leaves its caps and its seal and taint
+> bits in the image's record, which only exec's fresh space starts without; and a
+> Proc whose image was ever under debug control, or that is still shared, never
+> gains authority again.
 
 **The defect.** The cover rule, both seal bits and the taint are per-`Proc` facts.
 The thing they guard is not: the image — the memory, and the layout of it — lives
@@ -577,9 +583,11 @@ flag: a switch that cleared the taint would be the bypass.
 **Only the taint crosses fork; the seals deliberately do not, in either shape.**
 Under `RFMEM` the child maps the sealed bytes, so inheriting looks right — but the
 join already refuses every attach to it and every `mem`/`maps` read of it, by
-reading the parent's bit at the moment of the access (including for a child that
-was still mid-`rfork` when the parent sealed, which the stamp's traversal cannot
-see). Inheriting as well would buy nothing and cost something real: the bit is
+reading the parent's bit at the moment of the access while the parent holds the
+image (including for a child that was still mid-`rfork` when the parent sealed,
+which the stamp's traversal cannot see), and the image's record once the parent
+has left it (below; until 2026-10-08 nothing carried the bit past the parent's
+reap). Inheriting as well would buy nothing and cost something real: the bit is
 one-way, so it would outlive the sharing and leave the child permanently
 undebuggable after it execs onto an image the seal was never about. For a COW
 fork the child gets a private *copy*, and whether a copy of a secret is itself
@@ -587,6 +595,55 @@ secret is **decision A** — still open, and inheriting here would settle it by
 accident. The taint is the opposite case and must cross: after the child execs
 there is no sharing left for the join to read, so only a copied bit still carries
 the history.
+
+**The image records every holder that has left it (operator vote 2026-10-08,
+`dec-2026-10-08-image-holder-record`).** Authority over an image does not end with
+the Proc that held it. An `RFMEM` child, carved below its parent (I-2), keeps the
+parent's image after the parent is reaped, and from then on no mapper's word names
+what the parent held. Three things leaked that way: a code region, which is
+`CAP_JIT`'s authority (B-2b audit r2 closed that one alone, by counting code
+aliases); an MMIO, DMA or PCI BAR window, which is the I-34 allowance's (B-2b audit
+r3 F3: L-3 keeps a shared space's device mapped for the surviving sharer, so a
+capless same-principal peer covered the child and wrote the device through its
+`mem`); and a seal, since seals do not cross fork while the secret the seal kept is
+still in the shared bytes. So the `AddrSpace` keeps `caps_ever`, the OR of the caps
+of every holder that has left it, and `guards_ever`, the OR of those holders'
+`NODUMP`, `NOTRACE` and `DEBUG_TAINTED` bits, and the join ORs both in, sole mapper
+or not. Live holders, zombies included, are the walk; holders that have left are
+the record; the union is every Proc that has ever held the image.
+
+A holder leaves at exactly three points, and each records: its ZOMBIE transition
+(`proc_become_zombie_locked`), its exec onto a fresh space (`proc_exec_replace`'s
+swap), and `proc_free`. Only the first two carry a production departure: every
+`proc_free` that does not follow a reap frees a Proc that was never published (the
+`proc_alloc_in` and `rfork` rollbacks, whose caps are the parent's or none), so the
+third repeats an OR, or records a unit fixture's unlinked Proc. The first two run
+under `g_proc_table_lock`, the lock every join reads the record under, so the
+record needs no ordering argument of its own; and the
+ZOMBIE transition records before any reap can unlink the Proc, which closes the
+reap-window miss named below. A live Proc's caps only grow (every write is a
+`fetch_or`, and a legate scope ends by tearing its members down, not by clearing
+bits), so the caps a holder carries when it leaves are every cap it held.
+
+The record is never cleared: only exec's fresh space starts without one. The
+heritage is Linux's dumpability, which belongs to the address-space group rather
+than the task: released kernels keep it in `mm->flags` (`MMF_DUMPABLE`), and the
+current tree keeps it in a `task_exec_state` that `CLONE_VM` siblings share, a
+fork copies and exec replaces; `__ptrace_may_access` refuses a non-dumpable target
+without `CAP_SYS_PTRACE`. The record is STRICTER. Linux's bit is a current
+setting, not a history: `prctl(PR_SET_DUMPABLE, 1)` raises it again, and
+`commit_creds` lowers it whenever the effective or filesystem ids change or the
+permitted caps grow. Nothing clears the record here.
+
+The taint rides the record as well, and today it is redundant there: it is
+inherited at fork and stamped onto every mapper, so no holder can leave carrying a
+taint that a live mapper lacks. It is kept so that the record is the image's whole
+guard history, and `devproc.taint_outlives_its_holder` pins its arm. A COW child's space is a new
+one, so the record does not cross fork: whether a copy of a secret is itself
+secret is still decision A. The record replaced the code-alias count, because a
+code region's creator passed the `CAP_JIT` gate and is recorded when it leaves. The
+cost, voted: an orphan stays out of a lesser peer's reach for as long as it keeps
+the image, even after the aliases or the windows are gone.
 
 **What this does NOT close.**
 
@@ -598,14 +655,20 @@ the history.
   silent, unbounded-lifetime effect of an ungated syscall, and it is the price of
   the seal binding every door. A sealed parent also can no longer read its own
   vfork child's `mem`: surprising, harmless.
-- **A sealed Proc in the reap window** (unlinked, not yet freed) is missed by the
-  traversal, so its bit does not reach a live sharer's gate for those few
-  instructions. Closing it needs the unlink and the free to be one atom, which is
-  a lifecycle change and not this chunk.
+- **A sealed Proc in the reap window** (unlinked, not yet freed) was missed by the
+  traversal, so its bit did not reach a live sharer's gate for those few
+  instructions. CLOSED 2026-10-08 by the image's record: the ZOMBIE transition
+  writes the bit into the space before any unlink, and the join reads the record
+  sole mapper or not.
 - **The non-capability authority axes.** The join unions `proc_flags` but reads
   only the seal and taint bits from it, so §3.1's third bullet stands unchanged:
   cover still weighs one `caps` word and not the spawn perms, the I-34 allowance,
-  or the handle table.
+  or the handle table. The image's record weighs those only through the caps of
+  the Procs that held them: a code region's creator held `CAP_JIT` and an I-34
+  window's driver held `CAP_HW_CREATE`, so an orphan stays as far from a capless
+  peer as its creator was. Which device an allowance names is still not weighed: a
+  peer whose caps cover the driver's covers its orphan, exactly as it covers the
+  live driver.
 
 ## 4. 8a-1 — the software-checkpoint tier
 
@@ -651,8 +714,9 @@ arrives during the stop is taken the moment the stop clears; §5g):
 tail: preempt_check_irq -> el0_return_die_check -> STOP-CHECK -> [notes] -> eret
 ```
 
-The bracketed leg is the synchronous tail's alone: the `0x480` IRQ tail delivers
-no notes (`seam-el0-irq-tail-no-notes`). Plan 9 orders the checkpoint the same
+Both vectors run every leg: since #964 (2026-10-12) the `0x480` IRQ tail
+branches into the synchronous one (`.Lel0_return`), so it delivers notes too
+(`seam-el0-irq-tail-no-notes`, closed). Plan 9 orders the checkpoint the same
 way (`notify` runs `procctl` before it looks at a note), and so does Linux, whose
 ptrace signal-delivery-stop comes before the handler frame. Until 2026-10-05 the
 notes leg ran first, so a note could end a thread with a stop pending, and a note
@@ -681,8 +745,8 @@ it.
 
 **The mask guard follows the order.** KERNEL_EXIT erets under an inherited mask
 (#713, ARCH §8.12), so the last C call of each tail asserts that interrupts are
-masked: the stop check on the IRQ tail, and the notes leg on the synchronous tail
-and on the birth tail of a held spawn (§5f). The birth tail runs the same order,
+masked: the notes leg, on the EL0-return tail both vectors take and on the birth
+tail of a held spawn (§5f). Until #964 the IRQ tail ended at the stop check. The birth tail runs the same order,
 with its birth park in the stop leg's place.
 
 On observing a pending stop, the thread transitions to `THREAD_SLEEPING` under
@@ -2048,8 +2112,9 @@ in a family the thread has not masked, as a reason to unwind
 
 - **The tail's stop park** left the park on the latch, so that the thread could
   eret and take the note at its next checkpoint. Only the synchronous and birth
-  tails deliver notes (`seam-el0-irq-tail-no-notes`), and a compute-bound thread
-  re-enters only through the IRQ tail, whose stop check sent it into the park and
+  tails delivered notes then (`seam-el0-irq-tail-no-notes`, closed by #964 on
+  2026-10-12), and a compute-bound thread
+  re-entered only through the IRQ tail, whose stop check sent it into the park and
   straight back out. So a debug- or job-stopped thread that was sent an interrupt
   ran at EL0 with its stop still set. It never settled (§5e), so a debugger could
   neither read nor write it.
@@ -2093,10 +2158,10 @@ disposition does not change. Only group death ends a stopped thread: `kill`,
 the synchronous tail and the birth tail run their stop check before their note
 delivery (§4.2), so the park returns straight into the delivery, where an
 uncaught interrupt terminates the thread. Plan 9 handles the note right after the
-stop in the same way, because `notify` runs `procctl` first. A thread parked by
-the IRQ tail, which delivers no notes, takes the note at its next synchronous
-entry; the running compute-bound thread takes it once
-`seam-el0-irq-tail-no-notes` is closed. (Until 2026-10-05 the notes leg ran
+stop in the same way, because `notify` runs `procctl` first. Since #964
+(2026-10-12) the IRQ tail runs the same legs, so a thread it parked takes the
+note there too, and a running compute-bound thread takes it at its next tick or
+kick. (Until 2026-10-05 the notes leg ran
 first, and a note that arrived during a stop waited for the next synchronous
 entry; OPEN-BUGS 2026-09-30, closed by the operator's choice of stop-first.)
 

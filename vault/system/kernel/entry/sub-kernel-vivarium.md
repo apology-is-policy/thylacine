@@ -10,7 +10,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/VIVARIUM.md", "docs/LINEAGE.md"]
 created: 2026-08-06
-updated: 2026-10-06
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -523,7 +523,15 @@ What a change must re-establish:
   statement about `vivarium_clone_decide`'s admitted words and must be
   re-derived if those change;
 - **allow-lists, not deny-lists**, for every flag word. Measured, aarch64
-  defines flags a deny-list silently admits.
+  defines flags a deny-list silently admits;
+- **no reach the native ABI lacks** (I-43). The kill family posts to
+  another Proc only through `proc_for_each` + `postnote_walk_cb`, the gate
+  before liveness and the post; a tid resolves to its Proc and meets the same
+  gate; a `snare:*` death is the caller's own. A new cross-Proc row names the
+  native gate it reuses, never a new one;
+- **Linux's narrowing, in the shell.** A Tier-2 shell narrows each word its
+  Linux prototype declares 32-bit (`kill`'s `pid` and `sig` are `int`): a
+  guest may leave the high half unspecified, and Linux ignores it.
 
 The strongest existing evidence is the file's own negative space: the
 tests assert the *rejects* as well as the rows, so a row promoted without
@@ -531,17 +539,11 @@ its reasoning fails a test rather than passing quietly.
 
 ## Seams
 
-- **`kill` / `tkill` / `tgkill`** are deliberately unlisted. They are the
-  only signal rows that are an *authority* question rather than a
-  disposition one — they name another Proc — so they must reuse an
-  existing cross-Proc gate verbatim (SYS_POSTNOTE's parent-only check, or
-  I-26's two-axis one), never invent a third.
-- **SIGTERM has no note.** `interrupt` belongs to SIGINT alone since V-6b,
-  because a shared note cannot carry two independent dispositions and
-  `sigaction(SIGINT, SIG_IGN)` with SIGTERM at SIG_DFL is *unrepresentable*
-  rather than merely approximate. A real SIGTERM wants its own supported
-  note name, which is an addition to I-19's closed set and needs signoff.
-  It becomes load-bearing the day `kill` lands.
+- **`tkill` and `tgkill` reach a Proc, not a thread.** Notes are per-Proc,
+  so a thread-directed signal goes to whichever thread of the named thread's
+  Proc takes the note (the caught-note walk's pick), not necessarily the
+  thread named -- a stated imprecision (VIVARIUM 6.22). A program that sends
+  one thread a signal to wake it alone gets a Proc-wide note.
 - **`dup3` on a socket declines** rather than half-serving. Reproducing
   Linux needs a *refcounted* socktab entry, a real change to a table V-5
   audited; the idiom turned away is the inetd shape.
@@ -551,6 +553,12 @@ its reasoning fails a test rather than passing quietly.
 
 ## Caveats
 
+- **A guest's own `abort()` reads `SIGABRT` to its parent** (since S-2,
+  2026-10-13). musl's `raise(SIGABRT)` is `tkill(gettid(), SIGABRT)`, and a
+  self-directed SIGABRT ends the caller with `snare:abort`, as Pouch's
+  `abort()` does. Before S-2 the call had no row, `raise` returned, `abort()`
+  fell through to `a_crash()`'s NULL store, and the parent read `SIGSEGV`
+  (gcpark-b audit F4).
 - **The header's opening block describes a system that no longer exists,
   and it is the first thing a reader of this surface sees.** Its "WHAT IS
   DELIBERATELY ABSENT" paragraph states that nothing here is wired into
@@ -567,7 +575,7 @@ its reasoning fails a test rather than passing quietly.
   as task #163.
 - **`VIV_NATIVE_CEILING`'s declaration comment used to repeat the number the
   symbol exists to stop repeating, and went stale seven times.** The constant
-  is now **126** (`SYS_BURROW_MAP_FILE`, B-1d). The remedy was never going to be
+  is now **128** (`SYS_ICACHE_SYNC_SPACE`, B-2e2). The remedy was never going to be
   a person remembering: since the 2026-09-17 PCI rewrite the assert is pinned
   to the `SYS__NATIVE_TOP - 1` sentinel, which the compiler recomputes on every
   append, and the declaration comment narrates that drift history instead of a
@@ -698,6 +706,17 @@ number now call the same three D-3 cores ([[sub-kernel-syscall-dispatch]]):
 each entry decides its own word and hands the cores the same prot encoding, so
 the phenotype's deciders did not change.
 
+## Native ceiling 127 (2026-10-07, B-2b)
+
+`VIV_NATIVE_CEILING` is 127 (`SYS_JIT_CREATE_SEALED`), moved by the sentinel.
+Of the table's 100 Linux numbers none lies between 120 and 127, so the move
+voids no row's argument. 127 is the last number below `restart_syscall`
+(128): the NEXT native append lands on that row and owes it a per-number
+collision paragraph, as `pselect6` and `ppoll` have, before the ceiling can
+move again. A sealed JIT region is native-only; the phenotype's `PROT_EXEC`
+mappings stay readable, because `vma_alloc` promotes EXEC-alone to
+`READ | EXEC` everywhere but a code Burrow ([[sub-kernel-vma]]).
+
 ## A zero-timeout ppoll is no longer widened (2026-09-28, #98 NP-4c)
 
 `VIV_PPOLL_PROBE_MS` (10 ms) is gone from `vivarium.h`. It was the budget
@@ -824,6 +843,19 @@ failed about half its boots. Pre-existing and owned: an EINTR'd 9P op still
 discards a late original reply, where flush(5) says it must be honoured -- a
 fix for the 9P client's abandon path
 ([[dec-2026-09-29-caught-signal-slow-calls]]).
+
+Since 2026-10-12 a process-directed caught signal goes to one thread: the
+posting thread, then main, then any running thread, and only then a sleeper in
+an interruptible wait, main first ([[dec-2026-10-12-note-target]],
+[[sub-kernel-notes]]). Linux also picks one thread, but its `complete_signal`
+takes the target (main, for `kill`) whenever it can take the signal, so a
+sleeping main is woken even while a worker runs; here a running thread is
+preferred. Before, the walk woke
+every sleeper and the first to claim unwound, so a child's `SIGCHLD` ended a
+worker's `ppoll` with `EINTR` while main was running (L285). viv-pheno-probe
+L331-L333 pin it: main spins with no syscall while a peer polls, and the
+handler must run on main, at an IRQ return, with the poll undisturbed. L285's
+retry stays, since POSIX lets any thread take the signal.
 
 The socket calls keep Linux's shape at the boundary: a signal interrupts the
 call's wait and nothing else. `accept`'s wait is netd's held `listen` open. Once
@@ -970,3 +1002,65 @@ an absolute deadline of 0 is not slept on), `clock.nanosleep_wall_step` (a step
 past the instant ends the sleep, a step back does not, a relative sleep ignores
 both), and viv-pheno-probe L319-L328, which report together: on a kernel
 without the rows every leg reads ENOSYS.
+
+## Native ceiling 128 (2026-10-13)
+
+B-2e2 appends `SYS_ICACHE_SYNC_SPACE` at 128, the number Linux arm64 gives
+`restart_syscall`, so that row's collision check leaves the ceiling argument:
+`vivarium.c` now asserts `VIV_LINUX_RESTART_SYSCALL == SYS_ICACHE_SYNC_SPACE`
+with the per-number paragraph, and the signal family's ceiling assert moves to
+`kill` (129), its lowest number still above the ceiling. The argument:
+`viv_linux_dispatch` consumes every phenotyped number that is not TRANSLATED
+before the native switch, and 128's row is `VIV_ENOSYS`, so a Linux Proc never
+reaches the sync; a native program mis-declared as Linux loses the sync, which
+takes no argument and grants nothing. The row stays even though FORWARD would
+also answer `ENOSYS`, because the per-number argument names it. An unlanded
+peer branch numbers calls 127-131 and renumbers on its next merge (handoff 048;
+operator vote 6 makes Linux kill/tkill/tgkill Tier-2 rows later, so an assert
+pinning those rows' kind to ENOSYS would go stale).
+
+## SIGTERM and SIGABRT get notes; the kill family (2026-10-13, S-2)
+
+`SIGTERM` maps to `term` (`VIV_SIGNOTE_TERM`, bit 7 in the guest's sigset
+conversions) since the note exists ([[dec-2026-10-13-term-note]]); V-6b had
+evicted it from `interrupt` because one note cannot carry two dispositions,
+and with its own note `sigaction(SIGTERM, ...)` is translated like any other
+and `sigaction(SIGINT, SIG_IGN)` leaves it alone. `SIGABRT` maps to
+`snare:abort` (`VIV_SIGNOTE_SNARE_ABORT`), translated at `SIG_DFL` only: a
+`snare:*` death is never queued, so an ignore or a handler is forwarded and
+refused. Both enum values were inserted mid-list; `TTY_CONT` stays last, so
+the count assertions hold.
+
+`kill` (129), `tkill` (130) and `tgkill` (131) are Tier-2 rows with one shell,
+`viv_kill` ([[sub-kernel-syscall-dispatch]]), over a pure decision here:
+`vivarium_kill_decide(sig, &name)` answers PROBE (signal 0), POST (a signal
+whose note any program may post: `interrupt`, `term`, `kill`, `pipe`,
+`child_exit`), SELF_DEATH (a signal a `snare:*` death carries: SIGABRT,
+SIGSEGV, SIGBUS, SIGILL, SIGFPE, through `viv_signote_snare_death`) or REFUSE
+(past `_NSIG`, a signal no note carries, a `tty:*` signal, which the line
+discipline alone posts). The shell answers REFUSE with `EINVAL` before
+anything else, then resolves the target: pid 0 is the caller, as
+`SYS_POSTNOTE`'s sentinel makes it for Pouch; a negative pid is `EPERM`,
+because the gate admits one Proc at a time and a group target would widen it;
+a tid resolves to the Proc holding it. The caller's own Proc takes a post
+through `postnote_self`, a probe as 0, and a SELF_DEATH through
+`proc_fault_terminate` -- the death Pouch's `abort()` reaches by `brk`. Any
+other Proc goes through `SYS_POSTNOTE`'s parent-gated walk, and a SELF_DEATH
+aimed at it is `EINVAL`: a `snare:*` death is the kernel's to cause. So a
+guest reaches exactly the Procs a Pouch program's `kill` reaches -- itself and
+its own children, a dead one answering 0 until it is reaped -- and no third
+gate exists ([[inv-i43]]: the phenotype
+confers shape, never authority; [[dec-2026-10-13-phenotype-kill-family]]).
+Generalizing the vote's SIGABRT to all five fault signals is this chunk's
+call, stated in VIVARIUM 6.22: each is a death the caller could already reach
+by faulting. Since S-3 (2026-10-14) the walk records the gate's refusal as the
+native `EACCES`, which `viv_kill` turns back into Linux's `EPERM`, and the
+native `SYS_POSTNOTE` self arm accepts the same five snares
+([[dec-2026-10-14-self-death-snare]]), so the set lives in one table.
+
+Tests: `vivarium.kill_decide` (the table), `notes.kill_family_gate` (the real
+shell with an explicit caller: self, a child, a non-child, a missing pid, a
+group, a dead child, the tid forms, the refusals), and `viv-pheno-probe` L334-L338 on the device
+(a child's `tkill(gettid(), SIGABRT)` reads `SIGABRT`; a child killed with
+`SIGTERM` reads `SIGTERM`; the probe's parent is `EPERM`; the refusals by
+shape; a `SIGTERM` handler runs once per call while `SIGINT` is ignored).

@@ -65,22 +65,22 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**548 owned · 46 unowned · 594 files (92% owned) · ~11659 unswept lines.**
+**550 owned · 46 unowned · 596 files (92% owned) · ~11911 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **78 files, ~37597 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **78 files, ~38508 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/warp-prove | 0 | 1 | 4349 |
-| usr/pouch-hello | 11 | 17 | 2486 |
-| kernel | 130 | 13 | 1958 |
+| usr/pouch-hello | 12 | 17 | 2725 |
+| kernel | 130 | 13 | 1971 |
 | usr/ports | 19 | 5 | 1691 |
 | usr/kaua-term | 3 | 1 | 276 |
 | usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/libthyla-rs | 28 | 1 | 196 |
 | arch | 41 | 2 | 146 |
 | usr/susp-mask-child | 0 | 1 | 139 |
-| usr/lib | 69 | 1 | 72 |
+| usr/lib | 70 | 1 | 72 |
 | usr/bus-probe-child | 0 | 1 | 63 |
 | usr/tapestryd | 8 | 2 | 21 |
 | mm | 8 | 0 | 0 |
@@ -131,6 +131,7 @@ Excluded as harness and counted here rather than dropped: **78 files, ~37597 lin
 |---|---:|
 | usr/warp-prove/src/main.rs | 4349 |
 | usr/ports/gnumake/config.h | 1357 |
+| usr/pouch-hello/pouch-hello-signals.c | 497 |
 | kernel/include/thylacine/errno.h | 389 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | usr/pouch-hello/pouch-hello-net.c | 293 |
@@ -139,7 +140,6 @@ Excluded as harness and counted here rather than dropped: **78 files, ~37597 lin
 | usr/kaua-term/src/cmdline.rs | 276 |
 | kernel/include/thylacine/spinlock.h | 275 |
 | usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
-| usr/pouch-hello/pouch-hello-signals.c | 258 |
 | usr/pouch-hello/pouch-hello-pty.c | 231 |
 | kernel/include/thylacine/context.h | 201 |
 | usr/lib/libthyla-rs/src/sync.rs | 196 |
@@ -152,9 +152,9 @@ Excluded as harness and counted here rather than dropped: **78 files, ~37597 lin
 | usr/pouch-hello/pouch-hello-spawn.c | 127 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | kernel/include/thylacine/9p_transport_loopback.h | 99 |
+| kernel/include/thylacine/9p_transport_mq.h | 96 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 91 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
-| kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
 | kernel/include/thylacine/vdso.h | 73 |

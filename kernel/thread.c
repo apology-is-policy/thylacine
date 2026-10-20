@@ -823,7 +823,9 @@ void thread_switch(struct Thread *next) {
 
     // RW-1 B-F1: install next's rolling-ASID TTBR0 before the asm switch (a
     // no-op for the kernel threads thread_switch is used with, but kept
-    // uniform with sched()'s switch path). IRQs are masked here (#101 above).
+    // uniform with sched()'s switch path; B-2e2: it also records the CPU's
+    // space, NULL here, which must be true at every switch). IRQs are masked
+    // here (#101 above).
     sched_install_asid_ttbr0(next);
 
     // #101 regression hook (test-only; g_thread_switch_test_window_ns is 0 in

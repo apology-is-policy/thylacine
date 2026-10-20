@@ -774,6 +774,16 @@ static void sched_notify_cpu(unsigned target) {
     (void)gic_send_ipi(target, IPI_RESCHED);
 }
 
+// ARCH 8.8.3 (#964): make `t`, if it runs on another CPU, take an IRQ now, so
+// its EL0-return tail meets a note posted for it -- Linux's kick_process. The
+// reads are unlocked: a stale on_cpu or last_cpu costs a spurious IPI or a
+// missed one, and the tick bounds a missed one, since a busy CPU is never
+// tickless. Gated with sched_notify_cpu.
+void sched_kick_thread(struct Thread *t) {
+    if (!t || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) return;
+    sched_notify_cpu(__atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED));
+}
+
 // Wake-preemption policy (RW-11 SA-1b -- the 6 ms slice cliff). PURE so a unit
 // test drives it against synthetic bands (the "verification boundary", like
 // sched_place_by_capacity). Lower band number = higher priority (sched.h).
@@ -974,6 +984,77 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
     cs->prev_to_clear_on_cpu = prev;
 }
 
+// B-2e2 (JIT-ON-WX-DESIGN B-2 item 4): the address space each CPU last
+// installed, compared by value and never dereferenced -- a freed space's
+// address reused by a new one can only add an interrupt, never lose one. The
+// ASID allocator's active slot cannot serve: a rollover zeroes it while the
+// CPU keeps running on its reserved ASID.
+static struct AddrSpace *g_cpu_space[DTB_MAX_CPUS];
+
+// The DSB is the switch's half of the store-buffering argument: a
+// sched_sync_space that misses this store read its record after its own DSB,
+// so the invalidation it published completed before this CPU's eret.
+static void sched_record_space(struct AddrSpace *as) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS)
+        __atomic_store_n(&g_cpu_space[cpu], as, __ATOMIC_RELAXED);
+    __asm__ __volatile__("dsb ish" ::: "memory");
+}
+
+const struct AddrSpace *sched_cpu_space(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return NULL;
+    return __atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED);
+}
+
+// Checks of an outstanding ticket between offers of the CPU. An IPI round trip
+// is microseconds; the kernel is not preemptible in a syscall (ARCH 8.12), so
+// a target slow to unmask must not hold the caller's CPU from its other
+// threads (Plan 9's procflushseg calls sched() in the same wait).
+#define SYNC_SPACE_SPINS 4096u
+
+u64 sched_sync_space(const struct AddrSpace *as) {
+    u64 tickets[DTB_MAX_CPUS];
+    u64 mask = 0;
+    if (!as) return 0;
+    // A masked wait could deadlock against a peer waiting on this CPU's ticket.
+    ASSERT_IRQS_ENABLED("sched_sync_space waits for other CPUs' interrupts");
+    // Everything the caller published (SYS_ICACHE_SYNC ends in DSB ISH too)
+    // is complete before any record is read.
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    // IRQs masked: the calling CPU cannot change while the records are read.
+    // A thread of `as` that switches in on it later does so after the DSB.
+    irq_state_t s = spin_lock_irqsave(NULL);
+    unsigned self = smp_cpu_idx_self();
+    unsigned n = smp_cpu_count();
+    for (unsigned cpu = 0; cpu < n && cpu < DTB_MAX_CPUS; cpu++) {
+        if (cpu == self) continue;
+        if (__atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED) != as) continue;
+        u64 ticket = gic_barrier_send(cpu);
+        // Unreachable: every CPU below smp_cpu_count() came online (bring-up
+        // refuses a degraded boot) and is an SGI target (gic.c asserts
+        // DTB_MAX_CPUS fits GICv2's list). Skipping one would void the call.
+        if (!ticket) extinction("sched_sync_space: barrier IPI refused for a CPU running the space");
+        tickets[cpu] = ticket;
+        mask |= 1ull << cpu;
+    }
+    spin_unlock_irqrestore(NULL, s);
+    // No timeout: a target takes the IPI when it next unmasks IRQs, and the
+    // kernel's masked spans are bounded. An error here would let a stalled
+    // vCPU change the caller's outcome rather than its duration.
+    for (unsigned cpu = 0; cpu < DTB_MAX_CPUS; cpu++) {
+        if (!(mask & (1ull << cpu))) continue;
+        unsigned spins = 0;
+        while (!gic_barrier_reached(cpu, tickets[cpu])) {
+            __asm__ __volatile__("yield" ::: "memory");
+            if (++spins == SYNC_SPACE_SPINS) {
+                spins = 0;
+                (void)sched_yield_hint();
+            }
+        }
+    }
+    return mask;
+}
+
 // RW-1 B-F1: the context-switch ASID pre-hook. Resolves next's Proc to its
 // current-generation rolling ASID (asid_resolve; spec asid.tla FastSwitch /
 // SlowSwitch) and composes the TTBR0_EL1 value into next's Context, so the asm
@@ -984,12 +1065,18 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
 // run-queue lock is held at the sched() call site (and thread_switch is the
 // single-threaded test primitive), so smp_cpu_idx_self() names next's CPU and
 // the per-CPU active slot the resolve publishes into is the right one.
+//
+// B-2e2: it also records the space this CPU is about to run (NULL for a kernel
+// thread), for SYS_ICACHE_SYNC_SPACE, and every caller passes through here
+// before next can fetch an EL0 instruction.
 void sched_install_asid_ttbr0(struct Thread *next) {
     struct Proc *p = next->proc;
-    if (p && p->as) {
-        u64 asid = asid_resolve(&p->as->context_id, smp_cpu_idx_self());
-        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)p->as->pgtable_root;
+    struct AddrSpace *as = p ? p->as : NULL;
+    if (as) {
+        u64 asid = asid_resolve(&as->context_id, smp_cpu_idx_self());
+        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)as->pgtable_root;
     }
+    sched_record_space(as);
 }
 
 // LINEAGE L-2: install `t`'s CURRENT address space in the hardware, right now.
@@ -1871,6 +1958,26 @@ static bool sleep_death_pending(struct Thread *t, enum sleep_unwind unwind) {
                                         : thread_die_pending(t);
 }
 
+// ARCH 8.8.3: publish the kind of wait `t` is entering, under its wait_lock
+// (held on entry, held on return), where the posting walk re-checks a pick
+// before designating it. A designation this wait cannot honour -- every family
+// when the wait holds, a masked one when it unwinds -- is handed off before the
+// thread blocks (specs/caught_target.tla Handoff), so a thread is never left
+// holding a note it cannot take. Returns the kind to restore on the way out: a
+// stop park nests a wait inside a wait.
+static u8 sleep_caught_wait_enter(struct Thread *t, bool caught_ok, irq_state_t *s) {
+    u8 outer = t->caught_wait;
+    u8 kind  = thread_caught_wait_kind(t, caught_ok);
+    __atomic_store_n(&t->caught_wait, kind, __ATOMIC_RELAXED);
+    u8 keep  = kind == CAUGHT_WAIT_UNWINDS ? (u8)~t->note_mask : 0u;
+    if (__atomic_load_n(&t->note_target, __ATOMIC_RELAXED) & (u8)~keep) {
+        spin_unlock_irqrestore(&t->wait_lock, *s);
+        notes_handoff_target(t, keep);
+        *s = spin_lock_irqsave(&t->wait_lock);
+    }
+    return outer;
+}
+
 // item 11 (ARCH §8.8.3): the shared core of sleep(), sleep_noteintr() and
 // sleep_death_only(). SLEEP_UNWIND_NOTE enables the caught-note unwind
 // (SLEEP_NOTEINTR): a deliverable caught note interrupts the wait ALONGSIDE the
@@ -1900,6 +2007,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // is serialized against this Thread's register-then-observe of
     // group_exit_msg (the I-9 death-wake close).
     irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    u8 outer_wait = sleep_caught_wait_enter(t, caught_ok, &s);
     spin_lock(&r->lock);
 
     int rc = SLEEP_OK;
@@ -2073,6 +2181,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     }
 
     spin_unlock(&r->lock);
+    __atomic_store_n(&t->caught_wait, outer_wait, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return rc;
 }
@@ -2137,6 +2246,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // before g_timerwait/r->lock so the cascade's per-peer wait_lock walk is
     // serialized against this Thread's register-then-observe.
     irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    u8 outer_wait = sleep_caught_wait_enter(t, caught_ok, &s);
     spin_lock(&g_timerwait.lock);
     spin_lock(&r->lock);
 
@@ -2276,6 +2386,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
     spin_unlock(&r->lock);
     spin_unlock(&g_timerwait.lock);
+    __atomic_store_n(&t->caught_wait, outer_wait, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return ret;
 }
@@ -2707,7 +2818,7 @@ void preempt_check_irq(void) {
     // does and for the same reason: the flag may be the #866-F1 cross-CPU
     // placement kick, set exactly once. The deferred switch is taken at the
     // EL0-return tail, where syscall_dispatch has already cleared the marker
-    // -- so THIS call site gates while the .Lel0_sync_return one does not,
+    // -- so THIS call site gates while the .Lel0_return one does not,
     // from one flag and no extra state.
     //
     // A kernel THREAD is not gated here: it carries no marker, stays

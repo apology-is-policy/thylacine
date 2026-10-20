@@ -20,6 +20,31 @@
 //                                         without invoking the user handler;
 //                                         the flag must NOT change.
 //   sigaction(SIGUSR1, ...)            -> EINVAL (unsupported v1.0 signum).
+//   deaths (gcpark-b)                  -> the binary re-spawns itself to die
+//                                         by abort(), a failed assert(), a
+//                                         plain `brk #1`, a NULL store,
+//                                         raise(SIGABRT) and kill(getpid(),
+//                                         SIGABRT); each waitpid must read
+//                                         WIFSIGNALED with SIGABRT, SIGABRT,
+//                                         SIGTRAP, SIGSEGV, SIGABRT, SIGABRT --
+//                                         never WIFEXITED (docs/ERRORS.md
+//                                         "The wait status").
+//   self faults (signal chunk S-3)     -> children that raise(SIGSEGV),
+//                                         kill(getpid(), SIGBUS), raise(SIGILL)
+//                                         and kill(0, SIGFPE) read WIFSIGNALED
+//                                         with that signal. Before patch 0050
+//                                         each answered EINVAL and ran on.
+//   errnos (signal chunk S-3)          -> kill() of a missing pid reads ESRCH,
+//                                         and a child's kill() of its parent
+//                                         reads EPERM; both read EIO before
+//                                         SYS_POSTNOTE answered errnos.
+//   SIGTERM apart (signal chunk S-2)   -> with SIGINT ignored, raise(SIGINT)
+//                                         must not run the SIGTERM handler, and
+//                                         with SIGINT blocked raise(SIGTERM) must
+//                                         run it at once; a child killed with
+//                                         SIGTERM reads WIFSIGNALED SIGTERM.
+//                                         Before patch 0049 both rode
+//                                         `interrupt`, and all three failed.
 //
 // Output (joey relays via the pipe-to-UART):
 //   pouch-hello-signals: install handler
@@ -30,17 +55,170 @@
 //   pouch-hello-signals: raise SIGINT (ignored)
 //   pouch-hello-signals: count unchanged (count=2)
 //   pouch-hello-signals: unsupported sigaction returns EINVAL
-//   pouch-hello-signals: exit 0
+//   pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT
+//   pouch-hello-signals: death abort reads WIFSIGNALED SIGABRT  (x4 legs)
+//   pouch-hello-signals: death raise-segv reads WIFSIGNALED SIGSEGV  (x4 legs)
+//   pouch-hello-signals: death term reads WIFSIGNALED SIGTERM
+//   pouch-hello-signals: kill errnos read ESRCH and EPERM
+//   POUCH_CENSUS_SIGNALS (pouch-census.h; joey matches it)
 //
 // Returns non-zero on any deviation — joey's content-check catches missing
 // "exit 0" or non-zero exit status.
 
+#undef NDEBUG
+#include "pouch-census.h"
+#include <assert.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <sys/wait.h>
+
+extern char **environ;
+
+static const char SELF[] = "/bin/pouch-hello-signals";
+
+// CHILD: die one way. Returns only if the death did not happen.
+static int die(const char *how) {
+    if (!strcmp(how, "abort"))  abort();
+    if (!strcmp(how, "assert")) { volatile int zero = 0; assert(zero); }
+    if (!strcmp(how, "brk"))    __asm__ __volatile__("brk #1" ::: "memory");
+    if (!strcmp(how, "segv"))   { volatile int *bad = (volatile int *)0; *bad = 1; }
+    if (!strcmp(how, "raise"))  raise(SIGABRT);
+    if (!strcmp(how, "killself")) kill(getpid(), SIGABRT);
+    if (!strcmp(how, "raise-segv")) raise(SIGSEGV);
+    if (!strcmp(how, "kill-bus"))   kill(getpid(), SIGBUS);
+    if (!strcmp(how, "raise-ill"))  raise(SIGILL);
+    if (!strcmp(how, "kill0-fpe"))  kill(0, SIGFPE);
+    if (!strcmp(how, "wait"))   for (;;) sleep(1);
+    return 0;
+}
+
+// CHILD: kill() its parent, which is not its child, and exit 0 only if the
+// refusal reads EPERM. SIGCHLD's note is one the parent ignores by default, so
+// a broken gate would still leave the parent standing to report it.
+static int kill_parent(const char *ppid_arg) {
+    pid_t ppid = (pid_t)atoi(ppid_arg);
+    errno = 0;
+    int rc = kill(ppid, SIGCHLD);
+    if (rc == -1 && errno == EPERM) return 0;
+    printf("pouch-hello-signals: kill(parent) rc=%d errno=%d (want -1 EPERM=%d)\n",
+           rc, errno, EPERM);
+    return 3;
+}
+
+// Each death must reach the parent as the signal the kernel recorded for it.
+// Before gcpark-b every one read WIFEXITED: abort() as 127, the faults as 1.
+// Before patch 0049 raise(SIGABRT) and kill(getpid(), SIGABRT) answered
+// EINVAL and the child ran on to exit 0; before patch 0050 so did the four
+// fault signals sent to oneself.
+static int test_deaths(void) {
+    static const struct { const char *how; int sig; const char *name; } legs[] = {
+        { "abort",  SIGABRT, "SIGABRT" },
+        { "assert", SIGABRT, "SIGABRT" },
+        { "brk",    SIGTRAP, "SIGTRAP" },
+        { "segv",   SIGSEGV, "SIGSEGV" },
+        { "raise",  SIGABRT, "SIGABRT" },
+        { "killself", SIGABRT, "SIGABRT" },
+        { "raise-segv", SIGSEGV, "SIGSEGV" },
+        { "kill-bus",   SIGBUS,  "SIGBUS"  },
+        { "raise-ill",  SIGILL,  "SIGILL"  },
+        { "kill0-fpe",  SIGFPE,  "SIGFPE"  },
+    };
+    // Every leg runs and reports, so one regression cannot hide another.
+    int bad = 0;
+    for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {
+        char *cargv[] = { (char *)SELF, (char *)"die", (char *)legs[i].how, NULL };
+        pid_t pid;
+        int st = 0;
+        if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+            printf("pouch-hello-signals: death %s: respawn failed errno=%d\n",
+                   legs[i].how, errno);
+            return -1;
+        }
+        if (waitpid(pid, &st, 0) != pid) {
+            printf("pouch-hello-signals: death %s: waitpid failed errno=%d\n",
+                   legs[i].how, errno);
+            return -1;
+        }
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != legs[i].sig) {
+            printf("pouch-hello-signals: death %s: status %#x (want WIFSIGNALED %s)\n",
+                   legs[i].how, (unsigned)st, legs[i].name);
+            bad = 1;
+            continue;
+        }
+        printf("pouch-hello-signals: death %s reads WIFSIGNALED %s\n",
+               legs[i].how, legs[i].name);
+    }
+    return bad ? -1 : 0;
+}
+
+// kill(pid, SIGTERM) posts `term`, and the child's death reads back as SIGTERM.
+// Before patch 0049 Pouch posted `interrupt` and this read SIGINT. The child
+// may not have reached main yet: a term it has no handler for ends it the same
+// way, by the kernel's default.
+static int test_term_death(void) {
+    char *cargv[] = { (char *)SELF, (char *)"die", (char *)"wait", NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("pouch-hello-signals: death term: respawn failed errno=%d\n", errno);
+        return -1;
+    }
+    if (kill(pid, SIGTERM) != 0) {
+        printf("pouch-hello-signals: death term: kill failed errno=%d\n", errno);
+        return -1;
+    }
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("pouch-hello-signals: death term: waitpid failed errno=%d\n", errno);
+        return -1;
+    }
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGTERM) {
+        printf("pouch-hello-signals: death term: status %#x (want WIFSIGNALED SIGTERM)\n",
+               (unsigned)st);
+        return -1;
+    }
+    printf("pouch-hello-signals: death term reads WIFSIGNALED SIGTERM\n");
+    return 0;
+}
+
+// kill() names its refusals the way POSIX does. The missing pid is far above the
+// live pid counter. The not-a-child case runs in a child, because Pouch has no
+// getppid: the child is handed this process's pid and kills it.
+static int test_errnos(void) {
+    int bad = 0;
+    errno = 0;
+    int rc = kill((pid_t)0x3ffffff0, SIGCHLD);
+    if (rc != -1 || errno != ESRCH) {
+        printf("pouch-hello-signals: kill(missing pid) rc=%d errno=%d (want -1 ESRCH=%d)\n",
+               rc, errno, ESRCH);
+        bad = 1;
+    }
+
+    char ppid[16];
+    snprintf(ppid, sizeof ppid, "%d", (int)getpid());
+    char *cargv[] = { (char *)SELF, (char *)"kill-parent", ppid, NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, SELF, NULL, NULL, cargv, environ) != 0) {
+        printf("pouch-hello-signals: kill-parent: respawn failed errno=%d\n", errno);
+        return -1;
+    }
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("pouch-hello-signals: kill-parent: waitpid failed errno=%d\n", errno);
+        return -1;
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("pouch-hello-signals: kill-parent: status %#x (want exit 0)\n", (unsigned)st);
+        bad = 1;
+    }
+    if (bad) return -1;
+    printf("pouch-hello-signals: kill errnos read ESRCH and EPERM\n");
+    return 0;
+}
 
 static volatile sig_atomic_t g_handler_count = 0;
 static volatile int g_handler_sig = -1;
@@ -77,11 +255,56 @@ static void on_sigint(int sig) {
           "v24","v25","v26","v27","v28","v29","v30","v31");
 }
 
+// SIGINT is SIG_IGN when this runs. Until 0049 a delivered `interrupt` ran
+// SIGTERM's handler whenever SIGINT had none, and blocking SIGINT blocked the
+// note SIGTERM rode, so each of the two checks below failed.
+static int test_term_apart(void) {
+    struct sigaction ta;
+    memset(&ta, 0, sizeof ta);
+    ta.sa_handler = on_sigint;
+    if (sigaction(SIGTERM, &ta, NULL) != 0) {
+        printf("pouch-hello-signals: sigaction(SIGTERM) failed: errno=%d\n", errno);
+        return -1;
+    }
+    int before = (int)g_handler_count;
+    raise(SIGINT);
+    int after_int = (int)g_handler_count;
+
+    sigset_t blk, old;
+    sigemptyset(&blk);
+    sigaddset(&blk, SIGINT);
+    sigprocmask(SIG_BLOCK, &blk, &old);
+    g_handler_sig = -1;
+    raise(SIGTERM);
+    int after_term = (int)g_handler_count;
+    int term_sig   = g_handler_sig;
+    sigprocmask(SIG_SETMASK, &old, NULL);
+
+    ta.sa_handler = SIG_DFL;
+    sigaction(SIGTERM, &ta, NULL);
+
+    if (after_int != before) {
+        printf("pouch-hello-signals: raise(SIGINT) ran the SIGTERM handler (count %d -> %d)\n",
+               before, after_int);
+        return -1;
+    }
+    if (after_term != before + 1 || term_sig != SIGTERM) {
+        printf("pouch-hello-signals: raise(SIGTERM) with SIGINT blocked: count %d -> %d, sig %d\n",
+               before, after_term, term_sig);
+        return -1;
+    }
+    printf("pouch-hello-signals: SIGTERM runs its own handler, apart from SIGINT\n");
+    return 0;
+}
+
 // Task #96 sentinel buffers. 16-byte aligned for STP/LDP-Q.
 static unsigned char g_fp_sent[512] __attribute__((aligned(16)));
 static unsigned char g_fp_seen[512] __attribute__((aligned(16)));
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (argc >= 3 && !strcmp(argv[1], "die")) return die(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "kill-parent")) return kill_parent(argv[2]);
+
     printf("pouch-hello-signals: install handler\n");
     fflush(stdout);
 
@@ -252,7 +475,23 @@ int main(void) {
     printf("pouch-hello-signals: unsupported sigaction returns EINVAL\n");
     fflush(stdout);
 
-    printf("pouch-hello-signals: exit 0\n");
+    if (test_term_apart() != 0) {
+        fflush(stdout);
+        return 13;
+    }
+    fflush(stdout);
+
+    // The death legs are separate processes: both groups run before either
+    // verdict, so a failure in one does not hide the other.
+    int deaths = test_deaths();
+    int term_death = test_term_death();
+    int errnos = test_errnos();
+    fflush(stdout);
+    if (deaths != 0) return 15;
+    if (term_death != 0) return 14;
+    if (errnos != 0) return 16;
+
+    printf("%s\n", POUCH_CENSUS_SIGNALS);
     fflush(stdout);
     return 0;
 }

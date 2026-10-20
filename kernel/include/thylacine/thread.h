@@ -41,6 +41,15 @@ _Static_assert(THREAD_STATE_INVALID == 0,
                "zero-initialized Thread structs detectably invalid "
                "(P2-A audit R4 F46 close)");
 
+// Thread.caught_wait (ARCH 8.8.3). NONE: not in a wait, so the thread reaches
+// an EL0-return tail soon. UNWINDS: in a wait a caught note unwinds. HOLDS: in
+// a wait that rides a caught note out, which the posting walk never designates.
+enum caught_wait {
+    CAUGHT_WAIT_NONE    = 0,
+    CAUGHT_WAIT_UNWINDS = 1,
+    CAUGHT_WAIT_HOLDS   = 2,
+};
+
 // THREAD_MAGIC — sentinel set at thread_create / thread_init; checked at
 // thread_free. At offset 0 so SLUB's freelist write naturally clobbers
 // it on kmem_cache_free; subsequent thread_free reads the clobbered
@@ -246,7 +255,20 @@ struct Thread {
     //                  SYS_NOTED syscall's exception_context.
     u64                note_mask;
     bool               in_handler;
-    u8                 _pad_in_handler[7];   // explicit 8-byte alignment
+    // ARCH 8.8.3 (dec-2026-10-12-note-target): the caught-note families the
+    // posting walk claimed on this thread's behalf -- a designation, the
+    // walk's choice of who takes the note. The walk sets bits under this
+    // thread's wait_lock; the thread clears them itself (at its EL0-return
+    // tail, as it enters a wait that cannot unwind for the family, and at its
+    // exit), and thread_caught_note_claim turns one into note_claim when it
+    // unwinds. Atomic: written across threads. KP_ZERO; not rfork-propagated;
+    // exec clears it.
+    u8                 note_target;
+    // enum caught_wait: the kind of wait the thread is in, published under its
+    // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
+    // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
+    u8                 caught_wait;
+    u8                 _pad_in_handler[5];   // explicit 8-byte alignment
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
@@ -594,6 +616,8 @@ struct Thread {
 };
 
 _Static_assert(sizeof(struct Thread) == 1760,
+               "notetarget carved note_target + caught_wait (2 x u8) from "
+               "in_handler's explicit pad -- no size change. "
                "aux item 7 (2026-08-17) inserted note_saved_mask (u64) after "
                "note_saved_spsr: every later field moves +8 and the 8-byte "
                "alignment pad before the _Alignas(16) note_saved_fp absorbs it "

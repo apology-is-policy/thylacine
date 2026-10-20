@@ -10,7 +10,7 @@ validated-by: [gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/IDENTITY-DESIGN.md", "docs/LINEAGE.md"]
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-13
 ---
 ## Graphical seat incarnations
 
@@ -197,7 +197,17 @@ exit > continue > stop. Then:
 
 - no match → `-1` (the POSIX `ECHILD` shape);
 - zombie → unlink under the lock, then **outside** it spin each Thread's
-  `on_cpu` and `thread_free` it, then `proc_free`;
+  `on_cpu` and `thread_free` it, then `proc_free`. The status is the raw
+  `exit_status` unless the caller passed `WAIT_UNTRACED`, `WAIT_CONTINUED` or
+  `WAIT_PACKED` (8, gcpark-b): then it is the Linux `wait(2)` word,
+  `WAIT_STATUS_SIGNALED(term_sig)` for a death by note and
+  `WAIT_STATUS_EXITED(exit_status)` for an exit ([[sub-kernel-death]] records
+  `term_sig`; docs/ERRORS.md "The wait status" is the binding table).
+  `WAIT_PACKED` asks for that word and nothing else: it neither reports nor
+  consumes a stop or continue latch. Pouch's waitpid and the phenotype wait4
+  always pass it, and so does every ut wait (2026-10-13,
+  [[dec-2026-10-13-ut-status-packed]]); joey, libthyla-rs's `Child::wait` and
+  Go's `os/exec` keep the raw word, where a death by note reads 1;
 - reportee → return the pid and packed status, consume the latch, and run
   **none** of the teardown (report-is-not-reap, PTY-1e R2-F6);
 - `WNOHANG` → `0`, an unambiguous sentinel because pid 0 is never a child;
@@ -251,6 +261,28 @@ restriction to all of them. Both walk the table and so require
 `g_proc_table_lock`, and both skip the walk when `addrspace_ref_count == 1`,
 which is the ordinary case.
 
+**The image weighs every holder that has left it (2026-10-08;
+[[dec-2026-10-08-image-holder-record]]).** What a Proc held stays in the bytes
+after the Proc is gone: an RFMEM child, carved below its creator, keeps the
+creator's code aliases (`CAP_JIT`'s authority), its device windows
+(`CAP_HW_CREATE`'s) and, if it sealed, its secrets, and from then on no mapper's
+word names any of it. So the address space keeps a record, `caps_ever` and
+`guards_ever` ([[sub-kernel-addrspace]]): `addrspace_record_holder` ORs the
+departing Proc's caps and its `PROC_IMAGE_GUARDS` bits (`NODUMP`, `NOTRACE`,
+`DEBUG_TAINTED`) in at each of the three ways a holder leaves -- the ZOMBIE
+transition ([[sub-kernel-death]]), the exec swap, and `proc_free` (which in
+production only repeats an OR: every `proc_free` not after a reap frees a
+never-published rollback) -- and the join ORs the record in before the
+sole-mapper fast path. The first two write under `g_proc_table_lock`, the join's
+own lock, and the ZOMBIE transition writes before any reap can unlink the Proc
+out of the walk, so a departing holder is never in neither. A live Proc's caps
+only grow, so what it carries as it leaves is all it ever held. Nothing clears the
+record; exec's fresh space starts without one, and a COW clone's new space starts
+without one too (whether a copied secret is secret is decision A). It replaced
+B-2b audit r2's count of code aliases. The caps union has one consumer, the debug
+cover rule ([[sub-kernel-devproc]]); the flags union has three (the two seals'
+reads and the elevation check), all reading only restricting bits.
+
 `shared` is **references minus the zombies the traversal saw**, and each half of
 that earns its place. It asks whether another Proc could still *use* the image,
 and a zombie cannot -- an attach refuses a non-`ALIVE` target and the stopped-only
@@ -290,7 +322,17 @@ child starts NONE too.
 
 ### Image replacement: what must be reset, and why those things
 
-`proc_exec_replace` swaps a live process's address space in place. The rule
+`proc_exec_replace` swaps a live process's address space in place, under the
+process table lock alone. A cross-Proc reader of `->as` either finishes inside
+its table walk (`/proc/<pid>/{maps,mem}`, `/ctl/procs`) or, like the weft
+reaper, leaves it holding the LOCK of the space it found, by the pointer it
+captured there, never the Proc's ([[sub-kernel-weft]]); so if the swap's unref
+of the old space is the last, its drain takes that lock first and waits for
+the reaper. Before that drain, exec stops the old image's devices as death does
+([[sub-kernel-death]]): when its drop of the old space is the last, every device
+a descriptor claims is reset, and the drain resets every device the space maps --
+a device holding the physical address of a buffer in the old image is the same
+kind of stale pointer as the three below, one layer down. The rule
 governing everything it clears is one sentence: **the image is gone, so anything
 holding an address into it, or a disposition installed by it, is now a pointer
 into someone else's program.**
@@ -394,8 +436,11 @@ and extincts with a clear diagnostic rather than corrupting.
 
 Notable residents: `child_waiters` (a `poll_waiter_list` that is
 byte-identical in layout to the `Rendez` it replaced, which is why the #344
-swap kept every following offset stable); `_reserved0` (the retired
-`wait_active` guard, kept solely to hold the offsets); `page_peak` and
+swap kept every following offset stable); the slot the retired `wait_active`
+guard held, kept so the offsets stayed fixed, now `term_sig` and
+`group_term_sig` (gcpark-b) and the u16 `note_caught` (the caught-note latch
+and claim, moved out of `proc_flags` by the signal chunk's S-2,
+[[sub-kernel-notes]]); `page_peak` and
 `phenotype` and `shared_map_pages`, each of which fills an existing tail pad
 rather than growing the struct.
 
@@ -414,8 +459,18 @@ idempotent and nothing clears it), so a kill finds an
 the Proc terminating, which lifts the final close's hold on death. Neither is
 inherited or ever cleared: both mark a Proc that is going.
 
+Bit 11 is `PROC_FLAG_TERM_TERMINATE_PENDING` (2026-10-13), `term`'s terminate
+latch, in `PROC_FLAG_TERMINATE_PENDING_MASK` with the interrupt, tty and pipe
+latches. It became free when the caught-note latch and claim sub-fields (bits
+11..17 and 22..28) left for `Proc.note_caught`. `PROC_FLAGS_ALL` names every
+flag, and a `_Static_assert` that the popcount of their union equals the sum
+of their popcounts proves them disjoint at compile time. Membership in that
+list is by hand, so the build's guard is `tools/check-flag-words.py`, which
+derives every `PROC_FLAG_*` define from the header and fails on a shared bit
+(after S-2 it reads bits 12..17 and 22..28 free).
+
 `proc_flags` carries one bit no real Proc sets: `PROC_FLAG_TEST_FIXTURE`
-(bit 29, above the caught-note claim field), stamped by the test link helpers (`proc_test_link`,
+(bit 29), stamped by the test link helpers (`proc_test_link`,
 `proc_test_link_child`) on every Proc they splice into the table. rfork links
 a child through `proc_link_child` directly and copies only the debug taint
 from its parent, so the mark means exactly "a test linked this", and the test

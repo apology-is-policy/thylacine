@@ -9,7 +9,7 @@ guarded-by: [inv-i32]
 validated-by: [gate-smp, spec-capacity]
 locks: [lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -240,7 +240,7 @@ audit's F7).
 **The pool counts PHYSICAL user pages** (the round-1 close: the audit's F5,
 and the return path its F1 needed). Every page that exists because of an
 address space -- a demand-zero page, a COW copy, a FILE page-in, a pagemap
-node, an eager `ANON` or `CODE` chunk, the Loom ring, the vDSO page, a
+node, an eager `ANON` chunk, a demand-zero `CODE` page (B-2a), the Loom ring, the vDSO page, a
 hardware page table -- comes from `alloc_user_pages(order, flags, exempt)`:
 `pool_charge(1 << order, exempt)` refuses a NON-exempt charge that would
 take the count past the pool (and any charge that would overflow the

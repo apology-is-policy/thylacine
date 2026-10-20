@@ -549,7 +549,7 @@ void test_torpor_caught_note_ends_wait(void) {
         "TORPOR_ERR_EINTR, not the WAKE's TORPOR_OK");
     TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
         "control: the native waiter slept, the note posted, the WAIT returned");
-    TEST_ASSERT(ctl.rode_out, "control: the note woke the native waiter and it slept again");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native waiter slept again");
     TEST_EXPECT_EQ(ctl.rc, (long)TORPOR_OK, "control: the native WAIT ends on the WAKE");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }

@@ -51,9 +51,9 @@ v1.0 forward.
    `kernel/include/thylacine/errno.h`. Fault names live in
    `kernel/include/thylacine/notes.h` (alongside the existing
    `NOTE_NAME_KILL` constant). Exit-status semantics live in
-   `kernel/include/thylacine/proc.h` (the existing exit_status field;
-   v1.0 collapses non-zero to 1; v1.x adds the structured 64-bit
-   shape).
+   `kernel/include/thylacine/proc.h` (`exit_status`, `term_sig` and
+   the packed wait word); the table from a note to the signal its
+   death records lives in `kernel/notes.c` (`notes_death_signal`).
 
 5. **Stratum's `STM_E*` enum is NOT unified with Thylacine's errno.**
    Stratum is a separate project with its own ABI commitments
@@ -72,15 +72,15 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_OK`        | 0     | (success)    | Operation succeeded |
 | `T_E_PERM`      | 1     | `EPERM`      | Operation not permitted (capability check failed). **DO NOT RETURN FROM A SYSCALL HANDLER** — `-1` collides with pouch's flat-error sentinel; use `T_E_ACCES` instead. The name remains for translation-from-userspace code. See errno.h for the full rationale. |
 | `T_E_NOENT`     | 2     | `ENOENT`     | No such file or namespace entry |
-| `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour) |
+| `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour; `SYS_POSTNOTE` to a pid nobody holds) |
 | `T_E_INTR`      | 4     | `EINTR`      | A blocking wait was interrupted by a deliverable **caught** note before its condition became true (item 11 / note-interruptible waits). Distinct from the terminate latch: `thread_die_pending` unwinds a wait to KILL the Thread, `T_E_INTR` unwinds it so a caught note (a Linux-phenotype `sigaction` handler, or a native self-managing notes-fd reader) is delivered at the EL0-return tail while the Thread lives. A native caller re-issues the wait after servicing the note; a Linux-phenotype caller restarts the syscall iff the handler carried `SA_RESTART`, else observes `EINTR` (ARCH 8.8.2, VIVARIUM 6.22). Slot 4 was the last free low errno; operator-ratified 2026-08-18 (Q3=A) |
 | `T_E_IO`        | 5     | `EIO`        | I/O error (storage, device, network) |
 | `T_E_2BIG`      | 7     | `E2BIG`      | Argument list too long — the argv/envp asked for does not fit the new image's frame budget. Distinct from `EINVAL` in the way a caller acts on: `EINVAL` says the request was malformed and retrying it verbatim is pointless, `E2BIG` says it was well-formed and too large, so splitting it will work (which is what `xargs` exists to do). Appended for the LINEAGE L-6c envp projection (#140), the commit wiring its first consumer, under the 2026-08-03 signoff (#142). Emitted by the ENVIRONMENT bounds only (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, in both the `/env` projection and the vivarium `envp` walk); the neighbouring **argv** bounds still answer `T_E_INVAL`, because that is a landed native ABI (`SYS_EXECVE`, L-2a) whose error code is its own deliberate decision, reserved to the #142 rollout rather than changed as a side effect of adding envp |
 | `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd |
 | `T_E_CHILD`     | 10    | `ECHILD`     | No child processes — a wait names no matching child. The termination condition of every reap loop, which is why the near-miss answers will not do: a bare `-1` reads to a Linux guest as `EPERM`, the #100 class of wrong answer. Appended for the LINEAGE L-6b `wait4` row. `wait_pid_for`'s two `-1` conditions (no matching child; a #811 death-interrupted sleep) both map here — sound because the death path returns through the sync-from-EL0 tail, where `el0_return_die_check` is noreturn on the die branch, so no observer can tell them apart |
-| `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full; would block) |
+| `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full, e.g. `SYS_POSTNOTE` to a full note queue; would block) |
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
-| `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation) |
+| `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation; `SYS_POSTNOTE` to a Proc that is not the caller's child, which Pouch's `kill` and the phenotype's report as `EPERM`) |
 | `T_E_FAULT`     | 14    | `EFAULT`     | Bad address (uaccess fault on user VA) |
 | `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention; mount-busy) |
 | `T_E_EXIST`     | 17    | `EEXIST`     | Already exists (mount over existing point; create-excl) |
@@ -124,15 +124,34 @@ fits within `NOTE_NAME_MAX = 16` bytes including the NUL terminator.
 | `snare:bus`       | 9+1    | `SIGBUS`           | EMITTED. (a) Since REVENANT R-2 (I-36 condition 6): a FILE page-in I/O error, or a fault wholly past the file's last page (#194), on a valid mapping -- `arch_fault_handle` returns `FAULT_USER_BUS` and the EL0 dispatcher posts this note. (b) Since B-1a' round 4 (F17, 2026-09-23): an abort no page install can resolve -- an alignment fault (an exclusive, an ordered or a Device access at an address the instruction cannot take; distinct from `snare:align`, which is the PC / SP alignment class) or a synchronous external abort -- on a mapped page, refused on its class before any lookup; before the fix the pager answered these as handled and the instruction re-faulted forever. (This row read "RESERVED -- no v1.0 emitter" until 2026-09-23, stale since REVENANT; the name and value never changed.) |
 | `snare:align`     | 11+1   | `SIGBUS` (subset)  | EL0 PC or SP alignment fault |
 | `snare:bti`       | 9+1    | `SIGILL` (subset)  | EL0 BTI fault (indirect branch to non-`bti j/c/jc` target on FEAT_BTI hardware) |
-| `snare:brk`       | 9+1    | `SIGTRAP`          | EL0 `brk #imm` (assertion / debug trap) |
+| `snare:brk`       | 9+1    | `SIGTRAP`          | EL0 `brk #imm` with any immediate but the abort one below (an assertion or debug trap) |
+| `snare:abort`     | 11+1   | `SIGABRT`          | EL0 `brk #0xab06`, the one instruction Pouch's `abort()` executes (patch 0011; `SNARE_ABORT_BRK_IMM` in `notes.h`). The EL0 `brk` handler reads the immediate from ESR's ISS. Added 2026-10-12 (gcpark-b, operator vote). |
 | `snare:ill`       | 9+1    | `SIGILL`           | EL0 unhandled sync exception (unknown EC) |
 | `snare:fpe`       | 9+1    | `SIGFPE`           | EL0 floating-point exception. **RESERVED — no v1.0 path emits this**: the EL0 dispatcher in `arch/arm64/exception.c::exception_sync_lower_el` has no case for `EC_FP_ASIMD` / `EC_FP_TRAP_AARCH64` / `EC_SVE_TRAP`; any FP trap from EL0 currently falls through to the `default:` case and emits `snare:ill`. v1.x wires the FP ECs to `snare:fpe`. The constant is reserved so callers don't have to invent a name. (F6 audit close.) |
 
+Since gcpark-b (2026-10-12) the POSIX column is not an analogy: it is the
+signal the parent's packed wait word reports when the note kills a Proc
+(§"Exit-status semantics").
+
 The `snare:` prefix is reserved for kernel-synthetic fault notes. User
 processes that want to define their own structured event names should
-NOT use the `snare:` prefix (the kernel rejects, returning -1 from,
-`notes_post` with a `snare:`-prefixed `name` from a non-kernel-synthetic
-caller; see `kernel/notes.c::notes_post`).
+NOT use the `snare:` prefix: `notes_post` refuses a `snare:`-prefixed
+`name` from a non-kernel-synthetic caller with `-T_E_INVAL`, so no
+`snare:*` note is ever queued (`kernel/notes.c::notes_post`).
+
+**A Proc may end itself with a fault snare** (operator vote 2026-10-14,
+signal chunk S-3). A `SYS_POSTNOTE` of `snare:segv`, `snare:bus`,
+`snare:ill`, `snare:fpe` or `snare:abort` whose target is the caller
+itself (pid 0 or its own) does not post anything: the kernel ends the
+caller through `proc_fault_terminate`, exactly as a real fault would, and
+the parent reads that snare's signal. These are the five deaths the Linux
+phenotype's `kill` gives a self-directed `SIGSEGV`, `SIGBUS`, `SIGILL`,
+`SIGFPE` or `SIGABRT`, and Pouch's `raise()` and `kill(getpid(), ...)` of
+the first four reach the same call (patch 0050; `SIGABRT` keeps `abort()`'s
+`brk`). `snare:align`, `snare:bti` and `snare:brk` are not on the list:
+two share a signal with `bus` and `ill`, and no signal names `brk` to the
+phenotype. Sent to another Proc, every `snare:*` name is `-T_E_INVAL`: a
+fault is never another Proc's to cause.
 
 **Bit-position assignment in `note_mask`**: each `snare:*` shares the
 existing `NOTE_BIT_*` block (extends with `NOTE_BIT_SNARE`). Setting
@@ -141,7 +160,7 @@ treats them as a single class for masking purposes; per-fault-kind
 masking is a v1.x extension if a real need surfaces).
 
 **Default action** for an unhandled `snare:*` note: terminate the
-offending Proc via `exits(name)`. The kernel does NOT extinct on a
+offending Proc, recording the note's signal (`exits_note(name)`). The kernel does NOT extinct on a
 user-mode fault at v1.0 — the user binary dies cleanly, parent reaps
 via `wait_pid`, kernel continues serving other Procs. (Prior to the
 P6-pouch-stratumd-boot 16b-γ-mount-bind hardening pass the kernel
@@ -178,28 +197,107 @@ terminates its target; corvus catches it. **Bit position**: `NOTE_BIT_SAK = 6`
 refuses the name from a non-kernel-synthetic caller (the `snare:*` rule applied
 to a reserved name), so no program can fake the start of an episode.
 
+## The terminate-request note — `term`
+
+**Registered 2026-10-13 (operator vote, `dec-2026-10-13-term-note`).** A note
+NAME is ABI, hence the entry.
+
+| Name | Length | POSIX-equiv signal | Cause |
+|---|---|---|---|
+| `term` | 4+1 | `SIGTERM` (15) | Posted by a program: Pouch's `kill(pid, SIGTERM)`, the Linux phenotype's `kill`/`tkill`/`tgkill` with `SIGTERM`, or a native `SYS_POSTNOTE` that names it. A request to end, which the target may catch and act on. Plan 9's APE gives `SIGTERM` the same name. |
+
+**Default action**: TERMINATE (`NOTE_DFL_TERMINATE`). An uncaught, unmasked
+`term` on a Proc that is not self-managing ends it, and the death records
+`SIGTERM`. **Bit position**: `NOTE_BIT_TERM = 7` (`NOTE_MASK_SUPPORTED` 0x7f ->
+0xff), so a program masks or catches it apart from `interrupt`, and a
+`SIGINT` set to `SIG_IGN` leaves `SIGTERM` at its own disposition. It is not
+reserved to the kernel: any poster that passes `SYS_POSTNOTE`'s gate may send
+it.
+
 ## Exit-status semantics
 
-v1.0: `kernel/proc.c::sys_exits_handler` collapses non-zero exit
-statuses to `1` (boolean ok/fail). The structured 64-bit
-exit_status (encoding `(signal | code | wait-status-shape)`) is a
-v1.x extension — landed when the first POSIX program needs to
-distinguish "exited cleanly with code 42" from "killed by snare:segv".
+*Rewritten 2026-10-12 (gcpark-b, operator votes "snare:abort" and "every note
+death records a signal"). This section used to say that `sys_exits_handler`
+collapsed every non-zero status to 1, which had been untrue since #91.*
 
-The current v1.0 mapping:
-- `exits("ok")` → `exit_status = 0`
-- `exits(msg)` for any non-"ok" message → `exit_status = 1`
-- `exits("snare:segv")` → `exit_status = 1` (fault-terminated, but the
-  current ABI doesn't distinguish fault from clean-non-zero exit)
+A Proc ends in one of two ways, and a parent that asks can tell which.
 
-The fault termination at v1.0 still produces useful diagnostic via the
-uart line emitted by `proc_fault_terminate` before `exits` runs:
+**It exits.** `SYS_EXITS` and `SYS_EXIT_GROUP` record the low byte of the code
+the program passed (#91), so a native `t_exits(N)`, a Pouch `exit(N)` and a
+phenotype `exit_group(N)` all reach the parent as N. The in-kernel `exits(msg)`
+keeps the Plan 9 string contract: 0 for "ok", 1 for any other string.
+
+**It dies of a note.** A Proc that does not end by its own exit ends because of
+a note: a fault (`snare:*`), a terminating note nobody caught, or a kill. The
+kernel records that note's POSIX signal beside the exit status
+(`Proc.term_sig`), and the exit status is 1. The signal is decided once for the
+whole Proc, in the same set-once claim that decides the group's status (I-24):
+a thread that faults while its group is already dying leaves with what the
+group already claimed. One exit stands against a later claim: once a Proc's
+last thread has committed to exit with no claim in place (it reads the claim
+under the proc-table lock, in the hold that marks its final close), its own exit
+is the status, and a kill arriving later only forces the close
+(ARCHITECTURE 7.9.1 part B). That is Linux's rule for an exiting task, and it
+holds whether the last thread left by `exits` or by `SYS_THREAD_EXIT`
+(operator vote 2026-10-13).
+
+| Death | Signal recorded |
+|---|---|
+| `snare:segv` | `SIGSEGV` (11) |
+| `snare:bus`, `snare:align` | `SIGBUS` (7) |
+| `snare:ill`, `snare:bti` | `SIGILL` (4) |
+| `snare:brk` | `SIGTRAP` (5) |
+| `snare:fpe` | `SIGFPE` (8) |
+| `snare:abort` | `SIGABRT` (6) |
+| an uncaught `interrupt` | `SIGINT` (2) |
+| an uncaught `term` | `SIGTERM` (15) |
+| an uncaught `pipe` | `SIGPIPE` (13) |
+| an uncaught `tty:quit` | `SIGQUIT` (3) |
+| an uncaught `tty:hup`; the end of a session whose leader died | `SIGHUP` (1) |
+| `kill` (the note, or the `/proc/<pid>/ctl` verb); the end of a legate scope; a held child whose launcher died; a debugged Proc whose debugger exited with EXITKILL | `SIGKILL` (9) |
+
+The numbers are Linux's aarch64 numbering, which is the numbering of the
+packed wait word below, so the Pouch and phenotype boundary-lines pass them
+through unchanged. The table is `notes_death_signal` in `kernel/notes.c`,
+beside the note table whose terminating rows it covers; a note that cannot
+kill (`child_exit`, `tty:winch`, `tty:susp`, `tty:cont`, `sak`) has no signal
+there.
+
+A fault still announces itself on the console before the Proc dies:
 ```
-user fault: pid=42 reason="snare:segv" addr=0x000000000123abcd -- terminating Proc
+user fault: pid=42 reason="snare:segv" addr=0x000000000123abcd pc=0x... lr=0x... -- terminating Proc
 ```
-A parent doing `t_wait_pid` sees `exit_status = 1`; the uart log
-attributes the cause. The v1.x richer-exit-status lift wires the
-distinction into the wait API.
+
+## The wait status
+
+`SYS_WAIT_PID` writes one of two words.
+
+**The raw word**, when the caller passes no flag but `WAIT_WNOHANG`: the exit
+status alone, so a death by note reads 1. The native callers that predate the
+packed word keep it: joey, libthyla-rs's `Child::wait`, Go's `os/exec`.
+
+**The packed word**, when the caller passes `WAIT_UNTRACED`, `WAIT_CONTINUED`
+or `WAIT_PACKED`: the Linux `wait(2)` layout, so Pouch's `W*` macros decode it
+as they stand.
+
+| Event | Word | Decoders (`proc.h`) |
+|---|---|---|
+| exited with code N | `(N & 0xff) << 8` | `WAIT_IF_EXITED`, `WAIT_EXITSTATUS` |
+| died of signal S | `S & 0x7f` | `WAIT_IF_SIGNALED`, `WAIT_TERMSIG` |
+| job-stopped | `0x7f \| (20 << 8)` | `WAIT_IF_STOPPED` |
+| continued | `0xffff` | `WAIT_IF_CONTINUED` |
+
+The core-dump bit (0x80) is never set: Thylacine writes no core files.
+
+`WAIT_PACKED` (8) asks for the packed word without asking for stop or continue
+reports. Pouch's `waitpid` and the phenotype `wait4` always pass it, so a Pouch
+or Linux parent sees `WIFSIGNALED` and `WTERMSIG` for a child that died of a
+note. ut packs every wait: its job-control wait passes `WAIT_UNTRACED`, and
+every other wait (a command substitution, a pipeline's members, a script or
+`ut -c` without job control, `wait`, the background reaper) passes
+`WAIT_PACKED`. So `$status` is the code for an exit and 128 plus the signal for
+a death by note wherever ut sets it: 130 for an interrupted command, 137 for a
+killed one (operator vote 2026-10-13, `dec-2026-10-13-ut-status-packed`).
 
 ## Extinction messages
 
@@ -231,6 +329,30 @@ maps Thylacine syscall returns to POSIX errno as follows:
 With the new errno registry, Thylacine kernel code returns `-T_E_<NAME>`
 instead of `-1` wherever the cause is known. Pouch sees the POSIX
 errno number directly. No boundary-line patch change needed.
+
+**`abort()` (patch 0011).** Pouch's `abort()` executes `brk #0xab06`, and the
+Proc dies of `snare:abort`: the parent's `waitpid` sees `WIFSIGNALED` with
+`WTERMSIG == SIGABRT`, and the console names the cause. A `SIGABRT` handler
+does not run; Pouch has no `SIGABRT` disposition (`sigaction(SIGABRT)`
+answers `EINVAL`), so the trap is all of `abort()`. Since the signal chunk's
+S-2 (patch 0049) `raise(SIGABRT)` and a `kill` of the caller with `SIGABRT`
+call `abort()`; before, they answered `EINVAL` and the program ran on past its
+own abort. A `SIGABRT` to another process answers `EINVAL`: no note carries
+it. mallocng's internal assert (patch 0012) calls `abort()`. Until gcpark-b both ended in `_Exit(127)`, which a parent
+could not tell apart from a program that chose to exit 127.
+
+**`waitpid` (patch 0026).** `__pouch_wait` always passes `WAIT_PACKED` and
+forwards the word unchanged (§"The wait status").
+
+**Two deaths that used to read back as another signal.** Until the signal
+chunk's S-2, Pouch sent `SIGTERM` as the `interrupt` note, which `SIGINT`
+shares, so a child killed with `kill(pid, SIGTERM)` read `WTERMSIG == SIGINT`.
+It now posts `term`, whose death records `SIGTERM`. And a Linux-phenotype
+guest's own `abort()` read `SIGSEGV`: the phenotype had no `tkill` row, so
+musl's `raise(SIGABRT)` returned and `abort()` ended in `a_crash()`'s NULL
+store, a `snare:segv` death. The `tkill` row now ends a self-directed `SIGABRT`
+as `snare:abort`, the death Pouch's `abort()` dies (operator votes
+2026-10-13).
 
 **Rollout policy** (the retrospective sweep — *user-decided 2026-06-24,
 the "errno-rollout arc"*).
@@ -373,6 +495,9 @@ constants in `thylacine/notes.h`) is audit-bearing per CLAUDE.md:
 - A new `snare:*` name affects the EL0-fault termination path
   (`proc_fault_terminate` + `exception_sync_lower_el`); the prosecutor
   re-validates the fault-classification logic.
+- The signal a death records (`notes_death_signal`) and the packed wait
+  word are ABI: every Pouch and phenotype parent decodes them, so a
+  changed number or shape is a format break.
 
 See CLAUDE.md §"Audit-triggering changes" for the row.
 
@@ -385,8 +510,8 @@ See CLAUDE.md §"Audit-triggering changes" for the row.
 | `snare:*` constants in `notes.h`           | LANDED   | scripture |
 | CLAUDE.md scripture row + audit-trigger row| LANDED   | scripture |
 | `proc_fault_terminate` impl + EL0 wiring   | LANDED   | #3a       |
-| Pouch `snare:*` → POSIX signal mapping     | DEFERRED | v1.x      |
-| Structured 64-bit exit_status              | DEFERRED | v1.x      |
+| Deaths by note record a signal (`term_sig`, the packed signalled word, `WAIT_PACKED`, Pouch `waitpid`/`abort()`) | LANDED | gcpark-b |
+| Pouch handlers for `snare:*` signals (`SIGSEGV`/`SIGBUS`/... catchable) | DEFERRED | v1.x |
 | Retroactive `-T_E_*` rollout to old syscalls | DEFERRED | per-touch |
 
 ### Imperium integration (2026-09-17)

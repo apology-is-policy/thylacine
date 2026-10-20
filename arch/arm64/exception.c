@@ -341,6 +341,10 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
             // returning it would be a kernel-side bug -> extinct, don't mask.
             extinction_with_addr("arch_fault_handle returned FAULT_USER_BUS (EL1)",
                                  (uintptr_t)fi.vaddr);
+        case FAULT_USER_DYING:
+            // Same reasoning: only userland_demand_page returns it.
+            extinction_with_addr("arch_fault_handle returned FAULT_USER_DYING (EL1)",
+                                 (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
             // Reserved — current arch_fault_handle paths extinct
             // internally. Defense-in-depth.
@@ -429,8 +433,8 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // terminates the faulting Proc via proc_fault_terminate(NOTE_NAME_SNARE_*,
 // addr) -- the kernel does NOT extinct. Per docs/ERRORS.md (scripture
 // e45a571) the snare:* note name family signals the fault kind to the
-// parent's wait_pid + uart log; v1.x adds POSIX signal mapping +
-// structured 64-bit exit_status.
+// uart log, and since gcpark-b to the parent's packed wait as the note's
+// POSIX signal (docs/ERRORS.md "Exit-status semantics").
 //
 // SVC (EC 0x15) routes through syscall_dispatch at v1.0 -- userspace
 // syscalls land at P3-Ec; does NOT extinct.
@@ -439,16 +443,17 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // via proc_fault_terminate (snare:align / snare:bti / snare:brk
 // respectively).
 // P6-pouch-signals-impl (sub-chunk 13a): the EL0-return-tail note-delivery hook
-// (defined in kernel/notes.c). As of #107 it is invoked from the vector tails
-// (vectors.S .Lel0_sync_return for sync-from-EL0, 0x480 for IRQ-from-EL0), not
-// from the C handlers here; the decl is retained for documentation.
+// (defined in kernel/notes.c). As of #107 it is invoked from the vector tail
+// (vectors.S .Lel0_return, which sync-from-EL0 and, since #964, IRQ-from-EL0
+// both take), not from the C handlers here; the decl is retained for
+// documentation.
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 
 // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
 // EL0-return-tail die-check (defined in kernel/proc.c). If the calling
 // Thread's Proc is group-terminating, the Thread self-exits here (noreturn);
 // otherwise returns. As of #107 invoked from the vector tails (vectors.S
-// .Lel0_sync_return + 0x480), AFTER preempt_check_irq -- so a group-terminate
+// .Lel0_return), AFTER preempt_check_irq -- so a group-terminate
 // landing during the preempt is caught before any EL0 instruction runs.
 void el0_return_die_check(void);
 
@@ -489,7 +494,7 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // #107: the EL0-return tail -- preempt_check_irq ->
             // el0_return_die_check (I-24) -> el0_return_stop_check ->
             // notes_deliver_at_el0_return (DEBUG-FS-DESIGN 4.2) -- now
-            // runs at the VECTOR level (vectors.S .Lel0_sync_return), AFTER this
+            // runs at the VECTOR level (vectors.S .Lel0_return), AFTER this
             // handler returns and its halls frame is closed. That clean-frame
             // preempt mirrors the 0x480 IRQ slot and avoids the mid-handler steal
             // hazard (#104). The fault was resolved; ERET (via KERNEL_EXIT)
@@ -500,8 +505,8 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // P6 hardening #3a (scripture e45a571): terminate the
             // faulting Proc with the snare:segv tag; the kernel does
             // NOT extinct. proc_fault_terminate emits a uart
-            // diagnostic + calls exits(NOTE_NAME_SNARE_SEGV). Parent
-            // reaps via wait_pid; exit_status = 1 at v1.0.
+            // diagnostic + calls exits_note(NOTE_NAME_SNARE_SEGV). Parent
+            // reaps via wait_pid: raw status 1, packed SIGSEGV.
             // Diagnostic preserves the visibility the prior
             // extinction_with_addr line provided.
             proc_fault_terminate(NOTE_NAME_SNARE_SEGV, (uintptr_t)fi.vaddr);
@@ -517,6 +522,18 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // faulting VA -- NEVER a silent zero-fill of text, NEVER a kernel
             // extinction. proc_fault_terminate is noreturn (exits()).
             proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)fi.vaddr);
+        case FAULT_USER_DYING:
+            // The thread's death was pending when the fault went unresolved
+            // (I-24): no user-fault line and no snare:* status of its own. A
+            // group death is acted on by the vector tail's el0_return_die_check
+            // before any EL0 instruction. A terminate latch is acted on HERE:
+            // the tail defers a note while a handler runs or while the user SP
+            // is unusable, and the faulting instruction would re-execute into
+            // this same fault forever. A latch no queued note still backs is
+            // cleared instead, and the instruction re-executes into a fault the
+            // latch no longer shapes.
+            if (!thread_group_death_pending(cur)) notes_fault_dying_latch(cur);
+            return;
         case FAULT_FATAL:
             // F3 audit close: FAULT_FATAL's documented contract (per
             // arch/arm64/fault.h) is "kernel-side invariant violation;
@@ -550,7 +567,7 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // vectors.S ERETs to EL0 with the result in x0.
         syscall_dispatch(ctx);
         // EL0-return tail runs at the VECTOR level now (vectors.S
-        // .Lel0_sync_return), AFTER this handler returns + its halls frame is
+        // .Lel0_return), AFTER this handler returns + its halls frame is
         // closed: (1) preempt_check_irq -- the #107 syscall-return preempt, the
         // RW-11 SA-1b wake-preemption consumer, re-added at a CLEAN saved frame
         // mirroring the 0x480 IRQ slot (the #104 deadlock was a per-CPU `cs`
@@ -582,9 +599,12 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         proc_fault_terminate(NOTE_NAME_SNARE_BTI, (uintptr_t)ctx->elr);
 
     case EC_BRK:
-        // EL0 brk #imm -- userspace assertion or debug trap.
-        // Terminate with snare:brk. Debuggers attaching at EL0 are a
-        // Phase 5+ concern; v1.0 treats all EL0 brk as fatal-to-Proc.
+        // EL0 brk #imm -- userspace assertion or debug trap, fatal to the
+        // Proc. ISS[15:0] is the instruction's immediate: Pouch's abort()
+        // executes SNARE_ABORT_BRK_IMM and dies of snare:abort (SIGABRT);
+        // every other immediate is snare:brk (SIGTRAP).
+        if ((u32)(esr & 0xffffu) == SNARE_ABORT_BRK_IMM)
+            proc_fault_terminate(NOTE_NAME_SNARE_ABORT, (uintptr_t)ctx->elr);
         proc_fault_terminate(NOTE_NAME_SNARE_BRK, (uintptr_t)ctx->elr);
 
     case EC_BREAKPOINT_LOWER:

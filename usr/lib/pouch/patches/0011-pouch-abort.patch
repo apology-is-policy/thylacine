@@ -1,69 +1,43 @@
-Phase 6 sub-chunk 16b-gamma-mount-close (pouch-abort). Overrides musl's
-abort() to call _Exit(127) directly instead of reaching a_crash() (a
-deliberate NULL deref that musl uses as a last-resort "kill the process"
-mechanism after a misbehaved SIGABRT handler returns).
+pouch boundary-line patch 0011 -- abort() is one trap the kernel names.
 
-Why the override: at Thylacine v1.0, FAULT_UNHANDLED_USER (an EL0 fault
-with no VMA covering the faulting address) extincts the kernel rather
-than terminating the offending Proc. a_crash()'s deliberate NULL deref
-is therefore not "kill the offending process" but "kill the entire
-kernel" -- every assert() / abort() in any pouch program manifests as
-boot extinction.
+History. Phase 6 sub-chunk 16b-gamma-mount-close first overrode musl's
+abort() to call _Exit(127): musl's a_crash() (a deliberate NULL store) then
+extincted the kernel, so every assert() in a Pouch program took the boot down.
+Faults have long since ended only the offending Proc (the snare:* family,
+docs/ERRORS.md), and gcpark-b (2026-10-12; operator votes "snare:abort" and
+"every note death records a signal") makes abort() a signalled death.
 
-This is the documented v1.x extension in
-docs/reference/83-pouch-signals.md ("override pouch's abort.c to _Exit
-directly"). Implemented now because P6-pouch-stratumd-boot sub-chunk 16b
-needs stratumd's mount-time asserts to fail cleanly instead of taking
-the kernel down with them -- without this, the joey stratumd-boot probe
-cannot flip from NON-FATAL to FATAL.
+What abort() does. It executes `brk #0xab06`. The immediate is the kernel's
+SNARE_ABORT_BRK_IMM (kernel/include/thylacine/notes.h) and is ABI, as the
+note name is. The EL0 brk handler (arch/arm64/exception.c, EC_BRK) recognises
+it and ends the Proc with the fault note snare:abort:
 
-Behavioral delta from upstream abort():
-  - No raise(SIGABRT). The whole signal-delivery dance (block all sigs,
-    install SIG_DFL, tkill, unmask) is removed. Programs that install
-    SIGABRT handlers will NOT see them invoked under this abort path.
-  - No a_crash() NULL deref. The deliberate fault is replaced with
-    _Exit(127), the same status musl reaches at the bottom of its
-    abort() path (after raise(SIGKILL) is supposed to kill the process).
-  - _Exit(127) routes through SYS_exit_group via the existing pouch
-    seam, producing a clean child exit with status 127.
+  - the console prints `user fault: pid=N reason="snare:abort" addr=...
+    pc=... lr=... -- terminating Proc`, so lr names abort()'s caller;
+  - the kernel records SIGABRT (6) as the Proc's termination signal, so a
+    Pouch parent's waitpid reads WIFSIGNALED with WTERMSIG == SIGABRT (patch
+    0026 asks for the packed word), a phenotype parent's wait4 reads the same,
+    and ut's job-control wait sets $status 134;
+  - a native raw wait still reads 1.
 
-The status code 127 matches musl's normal-termination fallback at the
-bottom of abort() (the _Exit(127) past the unreachable a_crash()), so
-WIFSIGNALED-vs-WIFEXITED handling is the only observable change for a
-parent doing wait_pid. A parent expecting WIFSIGNALED + WTERMSIG ==
-SIGABRT (the Linux behavior) will instead see WIFEXITED + WEXITSTATUS
-== 127. v1.x will add a sigaction surface that distinguishes the two.
+Any other brk immediate (a compiler trap, WTFCrash's 0xc471) stays
+snare:brk, SIGTRAP. The kernel's comment on the immediate lists the ones it
+avoids: 0x1 (clang __builtin_trap), 0x3e8 (gcc), 0xf000 (debuggers),
+0x5500-0x55ff (UBSan), 0xc471 (WTF/JSC).
 
-MULTI-THREAD HAZARD (audit-bearing v1.x lift)
+Behavioural delta from upstream abort():
+  - No raise(SIGABRT). Pouch runs no SIGABRT handler (signal handlers for the
+    snare family are DEFERRED v1.x in docs/ERRORS.md), and the trap is taken
+    whatever the signal mask, so abort() cannot be blocked or ignored, as
+    POSIX requires of it.
+  - No a_crash() and no raise(SIGKILL): the trap replaces both.
+  - _Exit(127) stays after the brk: unreachable, the floor should the trap
+    ever return.
 
-The override calls _Exit(127), which routes through pouch's
-__NR_exit_group seam (0001-pouch-syscall-seam.patch) to the kernel
-SYS_EXITS handler. Kernel-side: if the calling Proc has more than one
-live Thread, SYS_EXITS extincts the kernel (the "exits with live peer
-threads (caller must join all spawned threads)" check in
-kernel/proc.c::exits). Single-thread callers are safe; multi-thread
-callers extinct the whole boot.
-
-At v1.0 the safe-use envelope is: abort() may be called only from a
-Proc that has spawned no peer threads OR has joined every peer before
-the abort. The Thylacine pouch-stratumd-boot 16b-gamma-mount-close
-landing satisfies this in the failure mode (stratumd's mount path
-runs single-thread; abort there exits cleanly) but does NOT satisfy
-this once 16c lands the joey-as-9P-client path (stratumd spawns FS
-worker pthreads via serve.c::634 and corvus_notify.c::616, after
-which an abort in any thread would take the kernel down).
-
-The proper v1.x fix is a new kernel SYS_EXIT_GROUP that cascades
-peer-thread termination via SYS_THREAD_EXIT before transitioning the
-Proc to ZOMBIE, with __NR_exit_group wired to it instead of SYS_EXITS.
-This is the same primitive needed to close the documented v1.0
-"kill in multi-thread Proc returns -EIO" limitation in
-audit_p6_pouch_signals_13b_closed_list.md::F9 -- worth lifting as a
-focused mini-chunk before 16c.
-
-Until SYS_EXIT_GROUP lands, every multi-thread pouch program must
-ensure assertion / abort paths are reachable ONLY pre-thread-spawn
-or post-thread-join.
+Threads. A fault in any thread ends the whole Proc (group termination,
+I-24), so abort() from any thread of a multi-threaded program is sound. The
+old multi-thread hazard of this patch (an exits() with live peer threads
+extincted the kernel) was closed by #811.
 
 --- a/src/exit/abort.c
 +++ b/src/exit/abort.c
@@ -75,16 +49,15 @@ or post-thread-join.
 -#include "atomic.h"
 -#include "lock.h"
 -#include "ksigaction.h"
-
-+/* Pouch override (Thylacine P6-pouch-stratumd-boot 16b-gamma-mount-close):
-+ * skip raise(SIGABRT) + a_crash() entirely. At v1.0 the kernel extincts
-+ * on the deliberate NULL deref a_crash() emits (FAULT_UNHANDLED_USER
-+ * policy) -- aborting in any pouch program would take the whole boot
-+ * down. _Exit(127) matches musl's normal-termination fallback at the
-+ * bottom of upstream abort() (past the unreachable a_crash). v1.x will
-+ * add a sigaction(SIGABRT) surface that distinguishes WIFSIGNALED from
-+ * WIFEXITED. See docs/reference/83-pouch-signals.md for the design
-+ * note. */
+ 
++/* Pouch override (gcpark-b): abort() is one trap the kernel names. The brk
++ * immediate is the kernel's SNARE_ABORT_BRK_IMM (kernel notes.h, ABI): the
++ * EL0 brk handler ends the Proc with the fault note snare:abort, which a
++ * waiting parent reads as WIFSIGNALED with WTERMSIG == SIGABRT, and the
++ * console shows the user-fault line with abort()'s pc and lr. No
++ * raise(SIGABRT): Pouch runs no SIGABRT handler, and the trap is taken
++ * whatever the signal mask. The _Exit(127) is unreachable -- the floor should
++ * the trap ever return. See docs/ERRORS.md "Exit-status semantics". */
  _Noreturn void abort(void)
  {
 -	raise(SIGABRT);
@@ -105,5 +78,6 @@ or post-thread-join.
 -	/* Beyond this point should be unreachable. */
 -	a_crash();
 -	raise(SIGKILL);
++	__asm__ __volatile__("brk #0xab06" ::: "memory");
  	_Exit(127);
  }

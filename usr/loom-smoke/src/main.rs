@@ -9,7 +9,8 @@
 //   2. register_buffers (heap) -- pin a ThylaAlloc-backed (anon VMA) buffer (the
 //                                 I-30 buffer-pin path, observed from userspace).
 //   3. register_handles (file) -- snapshot a /bin/system.key fd into the fixed table
-//                                 (the I-30 handle-pin path).
+//                                 (the I-30 handle-pin path); then two refusals
+//                                 return their errnos (EBADF, EFAULT).
 //   4. FSYNC on the non-9P handle -> clean error CQE -- Loom payload ops are
 //                                 dev9p-only (the kernel 9P client drives them);
 //                                 a devramfs Spoor has no client, so the op
@@ -37,7 +38,8 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 use libthyla_rs::fs::File;
 use libthyla_rs::loom::{RegisteredBuffer, Ring, Sqe, SETUP_SQPOLL};
-use libthyla_rs::{t_exits, t_poll, t_putstr, TPollFd, T_POLLIN};
+use libthyla_rs::err::Error;
+use libthyla_rs::{t_exits, t_loom_register, t_poll, t_putstr, TPollFd, T_POLLIN};
 
 fn fail(msg: &str) -> ! {
     t_putstr(msg);
@@ -83,6 +85,17 @@ pub extern "C" fn rs_main() -> i64 {
         fail("loom-smoke: FAIL -- register_handles\n");
     }
     t_putstr("loom-smoke: registered 1 buffer + 1 handle\n");
+
+    // 3b. A refused registration is a negative errno (LOOM.md 8.1): an fd that is
+    //     not open is EBADF, an array the kernel cannot read is EFAULT.
+    if ring.register_handles(&[999]) != Err(Error::BadHandle) {
+        fail("loom-smoke: FAIL -- an unopened fd was not EBADF\n");
+    }
+    let rc = unsafe { t_loom_register(ring.raw_fd() as u64, 0, 0, 1) };
+    if rc != -14 {
+        fail("loom-smoke: FAIL -- an unreadable fd array was not EFAULT\n");
+    }
+    t_putstr("loom-smoke: register refusals are errnos\n");
 
     // 4. A payload op on the non-9P (devramfs) handle must error-complete cleanly.
     let fsync_cqe = match ring.submit_one_wait(&Sqe::fsync(0, 0xF5)) {

@@ -467,6 +467,49 @@ fn esc_handler_addr() -> u64 { viv_escape_handler as usize as u64 }
 fn esc_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_FIRED) } }
 fn esc_phase() -> u64 { unsafe { core::ptr::read_volatile(&raw const ESC_PHASE) } }
 
+// L329-L330: a fault taken while a terminate-default note is pending. A write
+// to a pipe nobody reads, with SIGPIPE at SIG_DFL, posts `pipe` to this process
+// and arms the kernel's terminate latch; the handler below then faults on a
+// NULL load -- inside a running handler, where the EL0-return tail defers every
+// note but kill. The fd is the reader-less write end the subject made.
+static LATCH_PIPE_FD: AtomicU64 = AtomicU64::new(0);
+static LATCH_BYTE: u8 = b'x';
+extern "C" fn viv_latch_fault_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    unsafe {
+        let fd = LATCH_PIPE_FD.load(Ordering::SeqCst);
+        let _ = svc3(NR_WRITE, fd, &LATCH_BYTE as *const u8 as u64, 1);
+        asm!("mov {t}, #0", "ldr {t}, [{t}]", t = out(reg) _, options(nostack));
+    }
+}
+fn latch_fault_handler_addr() -> u64 { viv_latch_fault_handler as usize as u64 }
+
+// L330's half: the same write and fault with SP_EL0 = 8, below what the tail
+// needs for a note frame, so it defers every note but kill there too.
+// x0 = the reader-less fd, x1 = a byte to write. The exit_group(0) runs only
+// if the fault came back.
+core::arch::global_asm!(
+    ".globl viv_latch_fault_bad_sp",
+    ".type viv_latch_fault_bad_sp, @function",
+    "viv_latch_fault_bad_sp:",
+    "    bti     c",
+    "    mov     x9, #8",
+    "    mov     sp, x9",
+    "    mov     x2, #1",
+    "    mov     x8, #64",              // write(fd, buf, 1): EPIPE + the pipe note
+    "    svc     #0",
+    "    mov     x9, #0",
+    "    ldr     x9, [x9]",
+    "    mov     x0, #0",
+    "    mov     x8, #94",              // exit_group(0)
+    "    svc     #0",
+    "1:  b       1b",
+    ".size viv_latch_fault_bad_sp, .-viv_latch_fault_bad_sp",
+);
+
+extern "C" {
+    fn viv_latch_fault_bad_sp(fd: u64, buf: u64) -> !;
+}
+
 // Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
 static mut FP_SENT: [u8; 512] = [0; 512];
 static mut FP_SEEN: [u8; 512] = [0; 512];
@@ -886,6 +929,13 @@ static NP5_ENTERED: AtomicU32 = AtomicU32::new(0);
 static NP5_RESULT: AtomicU64 = AtomicU64::new(0);
 static NP5_REVENTS: AtomicU32 = AtomicU32::new(0);
 const NP5_UNSET: u64 = 0xDEAD;
+// What L285's marker reports when the poll did not see the connection: when the
+// wait began, how long it lasted, and how many caught notes ran across it. A
+// lost wake, a timeout and an interrupted wait each read differently there.
+static NP5_ENTER_NS: AtomicU64 = AtomicU64::new(0);
+static NP5_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static NP5_SIGS: AtomicU64 = AtomicU64::new(0);
+static NP5_INTRS: AtomicU64 = AtomicU64::new(0);
 
 extern "C" fn np5_poller_main(_arg: u64) -> ! {
     #[repr(C)]
@@ -895,14 +945,122 @@ extern "C" fn np5_poller_main(_arg: u64) -> ! {
         revents: i16,
     }
     let mut pfd = [Pfd { fd: NP5_POLL_FD.load(Ordering::SeqCst) as i32, events: 0x001, revents: 0 }];
-    let ts_5s: [i64; 2] = [5, 0];
+    const WAIT_NS: u64 = 5_000_000_000;
     NP5_ENTERED.store(1, Ordering::SeqCst);
     unsafe {
         let _ = svc3(NR_FUTEX, core::ptr::addr_of!(NP5_ENTERED) as u64,
                      FUTEX_WAKE | FUTEX_PRIVATE, 1);
-        let r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_5s.as_ptr() as u64, 0, 8, 0);
+        let s0 = sig_fired();
+        let t0 = mono_ns();
+        NP5_ENTER_NS.store(t0, Ordering::SeqCst);
+        // A caught note ends the wait early (ARCH 8.8.3), and a child's SIGCHLD
+        // may unwind THIS thread rather than the main one: a process-directed
+        // signal goes to any thread that does not block it. ppoll is never
+        // restarted, so the wait is re-issued with the time left, as every other
+        // wait here does; only -EINTR is retried, so a lost wake still times out.
+        let mut r;
+        let mut intrs = 0u64;
+        loop {
+            let spent = mono_ns().wrapping_sub(t0);
+            if spent >= WAIT_NS {
+                r = 0;
+                break;
+            }
+            let left = WAIT_NS - spent;
+            let ts: [i64; 2] = [(left / 1_000_000_000) as i64, (left % 1_000_000_000) as i64];
+            r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0, 8, 0);
+            if r == -4 && intrs < 64 {
+                intrs += 1;
+                continue;
+            }
+            break;
+        }
+        NP5_INTRS.store(intrs, Ordering::SeqCst);
+        NP5_WAIT_NS.store(mono_ns().wrapping_sub(t0), Ordering::SeqCst);
+        NP5_SIGS.store(sig_fired().wrapping_sub(s0), Ordering::SeqCst);
         NP5_REVENTS.store(pfd[0].revents as u16 as u32, Ordering::SeqCst);
         NP5_RESULT.store(r as u64, Ordering::SeqCst);
+        linux_thread_exit(0)
+    }
+}
+
+// L331-L333 (ARCH 8.8.3, "Which thread takes a caught note"). The PEER blocks
+// in ppoll on an empty pipe and counts the waits a caught note ended. The
+// handler records the thread it ran on by its TLS pointer, which it reads
+// without a syscall.
+static NT_POLL_FD: AtomicU32 = AtomicU32::new(0);
+static NT_ENTERED: AtomicU32 = AtomicU32::new(0);
+static NT_RESULT: AtomicU64 = AtomicU64::new(0);
+static NT_REVENTS: AtomicU32 = AtomicU32::new(0);
+static NT_INTRS: AtomicU64 = AtomicU64::new(0);
+static NT_FIRED: AtomicU64 = AtomicU64::new(0);
+static NT_TP: AtomicU64 = AtomicU64::new(0);
+const NT_NO_TP: u64 = u64::MAX;
+
+#[inline(always)]
+fn nt_tp() -> u64 {
+    let tp: u64;
+    unsafe { asm!("mrs {}, tpidr_el0", out(reg) tp, options(nomem, nostack)) };
+    tp
+}
+
+// The generic timer, read at EL0 (the kernel sets CNTKCTL_EL1.EL0VCTEN), so a
+// loop bounded by it makes no syscall.
+#[inline(always)]
+fn nt_cntvct() -> u64 {
+    let v: u64;
+    unsafe { asm!("isb", "mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+#[inline(always)]
+fn nt_cntfrq() -> u64 {
+    let v: u64;
+    unsafe { asm!("mrs {}, cntfrq_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+extern "C" fn nt_sig_handler(_signo: i32, _info: *const u8, _uc: *const u8) {
+    NT_TP.store(nt_tp(), Ordering::SeqCst);
+    NT_FIRED.fetch_add(1, Ordering::SeqCst);
+}
+
+extern "C" fn nt_poller_main(_arg: u64) -> ! {
+    #[repr(C)]
+    struct Pfd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    let mut pfd = [Pfd { fd: NT_POLL_FD.load(Ordering::SeqCst) as i32, events: 0x001, revents: 0 }];
+    const WAIT_NS: u64 = 8_000_000_000;
+    NT_ENTERED.store(1, Ordering::SeqCst);
+    unsafe {
+        let _ = svc3(NR_FUTEX, core::ptr::addr_of!(NT_ENTERED) as u64,
+                     FUTEX_WAKE | FUTEX_PRIVATE, 1);
+        let t0 = mono_ns();
+        // Re-issued with the time left after an EINTR, as L285's poller does,
+        // so a note that interrupts this wait is counted rather than fatal.
+        let mut r;
+        let mut intrs = 0u64;
+        loop {
+            let spent = mono_ns().wrapping_sub(t0);
+            if spent >= WAIT_NS {
+                r = 0;
+                break;
+            }
+            let left = WAIT_NS - spent;
+            let ts: [i64; 2] = [(left / 1_000_000_000) as i64, (left % 1_000_000_000) as i64];
+            r = svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0, 8, 0);
+            if r == -4 && intrs < 64 {
+                intrs += 1;
+                continue;
+            }
+            break;
+        }
+        NT_INTRS.store(intrs, Ordering::SeqCst);
+        NT_REVENTS.store(pfd[0].revents as u16 as u32, Ordering::SeqCst);
+        NT_RESULT.store(r as u64, Ordering::SeqCst);
         linux_thread_exit(0)
     }
 }
@@ -945,6 +1103,45 @@ macro_rules! leg {
             linux_exit(1)
         }
     };
+}
+
+/// A monotonic reading in nanoseconds (0 if the clock is refused).
+unsafe fn mono_ns() -> u64 {
+    let mut ts: [i64; 2] = [0, 0];
+    let _ = svc3(NR_CLOCK_GETTIME, CLOCK_MONOTONIC, ts.as_mut_ptr() as u64, 0);
+    (ts[0] as u64).wrapping_mul(1_000_000_000).wrapping_add(ts[1] as u64)
+}
+
+/// Marker assembly without allocation (the linux path may not allocate):
+/// append `b` at `pos`, returning the new end.
+fn put_bytes(buf: &mut [u8], pos: usize, b: &[u8]) -> usize {
+    buf[pos..pos + b.len()].copy_from_slice(b);
+    pos + b.len()
+}
+
+/// Append `v` in decimal at `pos`, returning the new end.
+fn put_dec(buf: &mut [u8], mut pos: usize, v: i64) -> usize {
+    if v < 0 {
+        buf[pos] = b'-';
+        pos += 1;
+    }
+    let mut u = v.unsigned_abs();
+    let mut tmp = [0u8; 20];
+    let mut n = 0;
+    loop {
+        tmp[n] = b'0' + (u % 10) as u8;
+        n += 1;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        buf[pos] = tmp[n];
+        pos += 1;
+    }
+    pos
 }
 
 /// Pre-stamp a leg whose NEXT step can kill this process outright (a signal
@@ -3165,6 +3362,7 @@ unsafe fn run_linux() -> ! {
     let cli = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
     let dialed = cli >= 0
         && svc3(NR_CONNECT, cli as u64, lsn_sa.as_ptr() as u64, lsn_sa.len() as u64) == 0;
+    let conn_ns = mono_ns().wrapping_sub(NP5_ENTER_NS.load(Ordering::SeqCst));
     let joined = futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
         && CTID_WORD.load(Ordering::SeqCst) == 0;
 
@@ -3173,12 +3371,27 @@ unsafe fn run_linux() -> ! {
     leg!(rep, lowest_free, b"L283\n");
     leg!(rep, dialed && joined, b"L284\n");
     // The poll saw the connection: 1 ready, POLLIN.
-    leg!(
-        rep,
-        NP5_RESULT.load(Ordering::SeqCst) == 1
-            && NP5_REVENTS.load(Ordering::SeqCst) & (POLLIN as u16 as u32) != 0,
-        b"L285\n"
-    );
+    let np5_r = NP5_RESULT.load(Ordering::SeqCst) as i64;
+    let np5_ev = NP5_REVENTS.load(Ordering::SeqCst);
+    if !(np5_r == 1 && np5_ev & (POLLIN as u16 as u32) != 0) {
+        let mut mk = [0u8; 160];
+        let mut k = put_bytes(&mut mk, 0, b"L285 r=");
+        k = put_dec(&mut mk, k, np5_r);
+        k = put_bytes(&mut mk, k, b" ev=");
+        k = put_dec(&mut mk, k, np5_ev as i64);
+        k = put_bytes(&mut mk, k, b" wait_ms=");
+        k = put_dec(&mut mk, k, (NP5_WAIT_NS.load(Ordering::SeqCst) / 1_000_000) as i64);
+        k = put_bytes(&mut mk, k, b" conn_ms=");
+        k = put_dec(&mut mk, k, (conn_ns / 1_000_000) as i64);
+        k = put_bytes(&mut mk, k, b" sigs=");
+        k = put_dec(&mut mk, k, NP5_SIGS.load(Ordering::SeqCst) as i64);
+        k = put_bytes(&mut mk, k, b" signo=");
+        k = put_dec(&mut mk, k, sig_signo() as i64);
+        k = put_bytes(&mut mk, k, b" intrs=");
+        k = put_dec(&mut mk, k, NP5_INTRS.load(Ordering::SeqCst) as i64);
+        k = put_bytes(&mut mk, k, b"\n");
+        leg!(rep, false, &mk[..k]);
+    }
     if d >= 0 && d != lowest {
         svc3(NR_CLOSE, d as u64, 0, 0);
     }
@@ -4551,6 +4764,401 @@ unsafe fn run_linux() -> ! {
     leg!(rep, nsb == 0, &sbad[..nsb]); // L328: every sleep leg above, by name
     ksa = [SIG_DFL, 0, 0, 0];
     let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+
+    // --- L329-L330: a fault taken while a terminate-default note is pending --
+    //
+    // A write to a pipe nobody reads, with SIGPIPE at SIG_DFL, arms the kernel's
+    // terminate latch; a fault taken then is the note's death. The EL0-return
+    // tail defers that note while a handler runs (L329: a SIGCHLD handler that
+    // makes the write and faults) and while the user SP is unusable (L330), so
+    // the kernel must end the thread at the fault itself: returning from it
+    // re-executes the faulting load into the same fault forever. Each case runs
+    // in a forked subject the parent reaps within ~4 s, and the subject must
+    // die of the note: wait4 reads WIFSIGNALED SIGPIPE (the kernel records the
+    // death's signal, docs/ERRORS.md), where a death by the fault itself would
+    // read SIGSEGV. The failure marker says "hung" for a subject still alive
+    // there (it is then killed, so it does not spin past the leg), "lived" for
+    // one that came back from the fault, "wrongdeath" for any other status,
+    // "nofork" for a failed fork.
+    unsafe fn reap_within(kid: i64) -> Option<i32> {
+        let nap: [i64; 2] = [0, 50_000_000];
+        for _ in 0..80 {
+            let mut ws: i32 = -1;
+            if wait4_r(kid as u64, &mut ws as *mut i32 as u64, WNOHANG) == kid {
+                return Some(ws);
+            }
+            let _ = svc4(NR_PPOLL, 0, 0, nap.as_ptr() as u64, 0);
+        }
+        None
+    }
+    // The status within ~4 s, or None for a child still alive then, which is
+    // killed and given another ~4 s to be reaped.
+    unsafe fn reap_or_kill(kid: i64) -> Option<i32> {
+        let ws = reap_within(kid);
+        if ws.is_none() {
+            let _ = svc3(NR_KILL, kid as u64, SIGKILL, 0);
+            let _ = reap_within(kid);
+        }
+        ws
+    }
+    let mut lbad = [0u8; 40];
+    let mut nlb = 0usize;
+    for (mark, in_handler) in [(b"L329", true), (b"L330", false)] {
+        let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+        if kid == 0 {
+            ksa = [SIG_DFL, 0, 0, 0];
+            let _ = svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8);
+            let mut pp: [i32; 2] = [-1, -1];
+            if svc3(NR_PIPE2, pp.as_mut_ptr() as u64, 0, 0) != 0
+                || svc3(NR_CLOSE, pp[0] as u64, 0, 0) != 0
+            {
+                linux_exit(0)
+            }
+            LATCH_PIPE_FD.store(pp[1] as u64, Ordering::SeqCst);
+            let un = (1u64 << (SIGCHLD - 1)) | (1u64 << (SIGPIPE - 1));
+            let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &un as *const u64 as u64, 0, 8);
+            if in_handler {
+                ksa = [latch_fault_handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+                let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+                if svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0) == 0 {
+                    linux_exit(0)               // its exit is the SIGCHLD
+                }
+                let ts: [i64; 2] = [5, 0];
+                let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+            } else {
+                viv_latch_fault_bad_sp(pp[1] as u64, &LATCH_BYTE as *const u8 as u64);
+            }
+            linux_exit(0)
+        }
+        let why: &[u8] = if kid < 0 {
+            b"nofork"
+        } else {
+            match reap_or_kill(kid) {
+                Some(ws) if (ws & 0x7f) == SIGPIPE as i32 => b"",
+                Some(ws) if ws == 0 => b"lived",
+                Some(_) => b"wrongdeath",
+                None => b"hung",
+            }
+        };
+        if !why.is_empty() {
+            for &c in mark.iter().chain(b" ".iter()).chain(why.iter()).chain(b" ".iter()) {
+                lbad[nlb] = c;
+                nlb += 1;
+            }
+        }
+    }
+    if nlb > 0 {
+        lbad[nlb - 1] = b'\n';
+    }
+    leg!(rep, nlb == 0, &lbad[..nlb]);
+
+    // --- L331-L333: a caught note goes to the running main thread ----------
+    //
+    // ARCH 8.8.3, "Which thread takes a caught note" (operator votes
+    // 2026-10-12). A peer thread blocks in ppoll on an empty pipe. This thread
+    // forks a child that exits after a short sleep, then spins with no syscall,
+    // bounded by the generic timer. The child's SIGCHLD must run its handler on
+    // THIS thread, inside the spin: the walk prefers a thread that is not
+    // blocked, main first, and only an IRQ return reaches a thread that never
+    // traps (#964: the IRQ tail had no notes leg). The peer's poll must not end
+    // in EINTR: before the walk chose one thread it woke every blocked thread,
+    // and the first to claim unwound (L285). Each failure marker carries every
+    // reading, because the two defects fail L332 differently: with no IRQ-tail
+    // delivery nothing runs in the spin; with the old walk the peer runs the
+    // handler.
+    const NT_SIG_SETMASK: u64 = 2;
+    let mut nt_pp: [i32; 2] = [-1, -1];
+    let nt_pipe = svc3(NR_PIPE2, nt_pp.as_mut_ptr() as u64, 0, 0) == 0;
+    ksa = [nt_sig_handler as usize as u64, SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let nt_act = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8) == 0;
+    // Unblocked before the clone, so the peer inherits it: both threads can
+    // take the note, and the choice is the kernel's.
+    let nt_un = 1u64 << (SIGCHLD - 1);
+    let mut nt_old = 0u64;
+    let nt_mask = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &nt_un as *const u64 as u64,
+                       &mut nt_old as *mut u64 as u64, 8) == 0;
+    NT_POLL_FD.store(nt_pp[0] as u32, Ordering::SeqCst);
+    NT_ENTERED.store(0, Ordering::SeqCst);
+    NT_RESULT.store(NP5_UNSET, Ordering::SeqCst);
+    NT_REVENTS.store(0, Ordering::SeqCst);
+    NT_INTRS.store(0, Ordering::SeqCst);
+    NT_FIRED.store(0, Ordering::SeqCst);
+    NT_TP.store(NT_NO_TP, Ordering::SeqCst);
+    CTID_WORD.store(CTID_ARMED, Ordering::SeqCst);
+    let nt_tls = core::ptr::addr_of!(THREAD_TLS_AREA) as u64;
+    let nt_peer = if nt_pipe {
+        __viv_clone_thread(
+            nt_poller_main,
+            core::ptr::addr_of!(THREAD_STACK) as u64 + (16 * 1024),
+            CLONE_FLAGS_THREAD,
+            0,
+            core::ptr::addr_of!(PTID_WORD) as u64,
+            nt_tls,
+            core::ptr::addr_of!(CTID_WORD) as u64,
+        )
+    } else {
+        -1
+    };
+    let nt_entered = nt_peer > 0 && futex_wait_until_ne(core::ptr::addr_of!(NT_ENTERED), 0, 8);
+    // Let the peer reach its wait.
+    let nt_settle: [i64; 2] = [0, 300_000_000];
+    let _ = svc6(NR_PPOLL, 0, 0, nt_settle.as_ptr() as u64, 0, 8, 0);
+
+    let main_tp = nt_tp();
+    let fired0 = NT_FIRED.load(Ordering::SeqCst);
+    let nt_kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if nt_kid == 0 {
+        // The sleep puts the exit, and so the SIGCHLD, inside the parent's spin.
+        let nap: [i64; 2] = [0, 200_000_000];
+        let _ = svc6(NR_PPOLL, 0, 0, nap.as_ptr() as u64, 0, 8, 0);
+        linux_exit(0)
+    }
+    let fired_early = NT_FIRED.load(Ordering::SeqCst) - fired0;
+    let freq = nt_cntfrq().max(1);
+    let c0 = nt_cntvct();
+    let mut c = c0;
+    while NT_FIRED.load(Ordering::SeqCst) == fired0 && c.wrapping_sub(c0) < 3 * freq {
+        c = nt_cntvct();
+    }
+    let spin_ms = c.wrapping_sub(c0) * 1000 / freq;
+    let fired_in_spin = NT_FIRED.load(Ordering::SeqCst) - fired0;
+    let ran_on_main = NT_TP.load(Ordering::SeqCst) == main_tp;
+
+    // Wake the peer: a byte makes the pipe readable.
+    let one = [b'x'];
+    let wrote = nt_pipe && svc3(NR_WRITE, nt_pp[1] as u64, one.as_ptr() as u64, 1) == 1;
+    let nt_joined = nt_entered
+        && futex_wait_until_ne(core::ptr::addr_of!(CTID_WORD), CTID_ARMED, 8)
+        && CTID_WORD.load(Ordering::SeqCst) == 0;
+    let mut nt_ws: i32 = -1;
+    let nt_reaped = nt_kid > 0
+        && wait4_r(nt_kid as u64, &mut nt_ws as *mut i32 as u64, 0) == nt_kid;
+    let fired_total = NT_FIRED.load(Ordering::SeqCst) - fired0;
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8);
+    if nt_mask {
+        let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &nt_old as *const u64 as u64, 0, 8);
+    }
+    if nt_pipe {
+        svc3(NR_CLOSE, nt_pp[0] as u64, 0, 0);
+        svc3(NR_CLOSE, nt_pp[1] as u64, 0, 0);
+    }
+    leg!(
+        rep,
+        nt_pipe && nt_act && nt_mask && nt_entered && nt_kid > 0 && wrote && nt_joined
+            && nt_reaped && main_tp != nt_tls,
+        b"L331\n"
+    );
+    let nt_r = NT_RESULT.load(Ordering::SeqCst) as i64;
+    let nt_ev = NT_REVENTS.load(Ordering::SeqCst);
+    let nt_intrs = NT_INTRS.load(Ordering::SeqCst);
+    let mut nt_mk = [0u8; 160];
+    let mut nk = 0usize;
+    if !(fired_early == 0 && fired_in_spin == 1 && ran_on_main) {
+        nk = put_bytes(&mut nt_mk, 0, b"L332 early=");
+    } else if !(nt_r == 1 && nt_ev & 0x001 != 0 && nt_intrs == 0 && fired_total == 1) {
+        nk = put_bytes(&mut nt_mk, 0, b"L333 early=");
+    }
+    if nk > 0 {
+        nk = put_dec(&mut nt_mk, nk, fired_early as i64);
+        nk = put_bytes(&mut nt_mk, nk, b" spin=");
+        nk = put_dec(&mut nt_mk, nk, fired_in_spin as i64);
+        nk = put_bytes(&mut nt_mk, nk, b" on_main=");
+        nk = put_dec(&mut nt_mk, nk, ran_on_main as i64);
+        nk = put_bytes(&mut nt_mk, nk, b" spin_ms=");
+        nk = put_dec(&mut nt_mk, nk, spin_ms as i64);
+        nk = put_bytes(&mut nt_mk, nk, b" r=");
+        nk = put_dec(&mut nt_mk, nk, nt_r);
+        nk = put_bytes(&mut nt_mk, nk, b" ev=");
+        nk = put_dec(&mut nt_mk, nk, nt_ev as i64);
+        nk = put_bytes(&mut nt_mk, nk, b" intrs=");
+        nk = put_dec(&mut nt_mk, nk, nt_intrs as i64);
+        nk = put_bytes(&mut nt_mk, nk, b" total=");
+        nk = put_dec(&mut nt_mk, nk, fired_total as i64);
+        nk = put_bytes(&mut nt_mk, nk, b"\n");
+    }
+    leg!(rep, nk == 0, &nt_mk[..nk]);
+
+    // --- L334-L338: the kill family -----------------------------------------
+    //
+    // VIVARIUM 6.22 (operator vote 2026-10-13): kill, tkill and tgkill post a
+    // signal's note through SYS_POSTNOTE's own gate -- the caller itself, or a
+    // live child -- and a self-directed signal a snare:* death carries ends the
+    // caller with that death. L334: a child's tkill(gettid(), SIGABRT) kills it
+    // with SIGABRT; a kernel that queued a note instead, or refused, lets the
+    // child exit with the call's answer. L335: a sleeping child is admitted by a
+    // signal-0 probe (the positive control for L336), refused a SIGSEGV (a
+    // snare:* death is never another Proc's to cause), and dies of SIGTERM.
+    // L336: the probe's parent is not its child, so a probe of it is EPERM --
+    // a shell that skipped the gate answers 0. L337: the refusals by shape, and
+    // the self probes they stand beside. L338: SIGTERM at a handler, through
+    // each of the three calls, runs it exactly once with signo SIGTERM while
+    // SIGINT is ignored: `term` is a note of its own, not `interrupt`'s.
+    const NR_KILL: u64 = 129;
+    const NR_TKILL: u64 = 130;
+    const NR_TGKILL: u64 = 131;
+    const NR_GETPID: u64 = 172;
+    const NR_GETPPID: u64 = 173;
+    const NEG_ESRCH: i64 = -3;
+    const SIGABRT: u64 = 6;
+    const SIGALRM: u64 = 14;
+    const SIGTERM: u64 = 15;
+    // A boot hands out pids and tids from 1 upward and never gets near this.
+    const KF_NO_ID: u64 = 0x3fff_fff0;
+    let kf_pid = svc3(NR_GETPID, 0, 0, 0);
+    let kf_tid = svc3(NR_GETTID, 0, 0, 0);
+    let kf_ppid = svc3(NR_GETPPID, 0, 0, 0);
+
+    let ab = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if ab == 0 {
+        let rc = svc3(NR_TKILL, svc3(NR_GETTID, 0, 0, 0) as u64, SIGABRT, 0);
+        linux_exit(if rc < 0 { -rc } else { 100 })
+    }
+    let ab_ws = if ab > 0 { reap_or_kill(ab) } else { None };
+    let mut kf_mk = [0u8; 96];
+    let mut kn = 0usize;
+    if !matches!(ab_ws, Some(ws) if (ws & 0x7f) == SIGABRT as i32) {
+        kn = put_bytes(&mut kf_mk, 0, b"L334 fork=");
+        kn = put_dec(&mut kf_mk, kn, ab);
+        kn = put_bytes(&mut kf_mk, kn, b" ws=");
+        kn = put_dec(&mut kf_mk, kn, ab_ws.map_or(-1, |w| w as i64));
+        kn = put_bytes(&mut kf_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kf_mk[..kn]);
+
+    let tm = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if tm == 0 {
+        ksa = [SIG_DFL, 0, 0, 0];
+        let _ = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8);
+        let un = 1u64 << (SIGTERM - 1);
+        let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &un as *const u64 as u64, 0, 8);
+        let ts: [i64; 2] = [10, 0];
+        let _ = svc4(NR_PPOLL, 0, 0, ts.as_ptr() as u64, 0);
+        linux_exit(0)
+    }
+    let tm_probe = if tm > 0 { svc3(NR_KILL, tm as u64, 0, 0) } else { 1 };
+    let tm_segv = if tm > 0 { svc3(NR_KILL, tm as u64, SIGSEGV, 0) } else { 1 };
+    let tm_term = if tm > 0 { svc3(NR_KILL, tm as u64, SIGTERM, 0) } else { 1 };
+    let tm_ws = if tm > 0 { reap_or_kill(tm) } else { None };
+    kn = 0;
+    if !(tm_probe == 0 && tm_segv == NEG_EINVAL && tm_term == 0
+         && matches!(tm_ws, Some(ws) if (ws & 0x7f) == SIGTERM as i32))
+    {
+        kn = put_bytes(&mut kf_mk, 0, b"L335 fork=");
+        kn = put_dec(&mut kf_mk, kn, tm);
+        kn = put_bytes(&mut kf_mk, kn, b" probe=");
+        kn = put_dec(&mut kf_mk, kn, tm_probe);
+        kn = put_bytes(&mut kf_mk, kn, b" segv=");
+        kn = put_dec(&mut kf_mk, kn, tm_segv);
+        kn = put_bytes(&mut kf_mk, kn, b" term=");
+        kn = put_dec(&mut kf_mk, kn, tm_term);
+        kn = put_bytes(&mut kf_mk, kn, b" ws=");
+        kn = put_dec(&mut kf_mk, kn, tm_ws.map_or(-1, |w| w as i64));
+        kn = put_bytes(&mut kf_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kf_mk[..kn]);
+
+    let pp = svc3(NR_KILL, kf_ppid as u64, 0, 0);
+    kn = 0;
+    if !(kf_ppid > 0 && kf_ppid != kf_pid && pp == NEG_EPERM) {
+        kn = put_bytes(&mut kf_mk, 0, b"L336 ppid=");
+        kn = put_dec(&mut kf_mk, kn, kf_ppid);
+        kn = put_bytes(&mut kf_mk, kn, b" rc=");
+        kn = put_dec(&mut kf_mk, kn, pp);
+        kn = put_bytes(&mut kf_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kf_mk[..kn]);
+
+    // A refusal that posted instead could end the probe (SIGHUP's tty:hup
+    // terminates by default), so the leg is stamped across the calls.
+    stamp_armed(rep, b"L337\n");
+    // 'o'-'r': pid, tid and sig are ints, so a register's high half is not
+    // part of them (Linux narrows it away); a sign-extended -1 stays EINVAL.
+    let kf_junk = 0xdead_beef_0000_0000u64;
+    let kf_cases: [(u8, i64, i64); 18] = [
+        (b'a', svc3(NR_KILL, KF_NO_ID, 0, 0), NEG_ESRCH),
+        (b'b', svc3(NR_KILL, (-1i64) as u64, 0, 0), NEG_EPERM),   // a group
+        (b'c', svc3(NR_KILL, 0, 65, 0), NEG_EINVAL),              // past _NSIG
+        (b'd', svc3(NR_KILL, 0, SIGALRM, 0), NEG_EINVAL),         // no note
+        (b'e', svc3(NR_KILL, 0, SIGHUP, 0), NEG_EINVAL),          // tty:* only
+        (b'f', svc3(NR_TKILL, 0, 0, 0), NEG_EINVAL),
+        (b'g', svc3(NR_TKILL, KF_NO_ID, 0, 0), NEG_ESRCH),
+        (b'h', svc3(NR_TGKILL, kf_pid as u64, 0, 0), NEG_EINVAL),
+        (b'i', svc3(NR_TGKILL, kf_pid as u64, KF_NO_ID, 0), NEG_ESRCH),
+        (b'j', svc3(NR_TGKILL, kf_ppid as u64, kf_tid as u64, 0), NEG_ESRCH),
+        (b'k', svc3(NR_KILL, 0, 0, 0), 0),
+        (b'l', svc3(NR_KILL, kf_pid as u64, 0, 0), 0),
+        (b'm', svc3(NR_TKILL, kf_tid as u64, 0, 0), 0),
+        (b'n', svc3(NR_TGKILL, kf_pid as u64, kf_tid as u64, 0), 0),
+        (b'o', svc3(NR_KILL, kf_pid as u64, kf_junk, 0), 0),
+        (b'p', svc3(NR_KILL, kf_junk | kf_pid as u64, 0, 0), 0),
+        (b'q', svc3(NR_KILL, 0, (-1i64) as u64, 0), NEG_EINVAL),
+        (b'r', svc3(NR_TGKILL, kf_pid as u64, kf_tid as u64, kf_junk), 0),
+    ];
+    stamp_disarm(rep);
+    let mut kc_mk = [0u8; 200];
+    kn = 0;
+    for (c, got, want) in kf_cases {
+        if got != want {
+            if kn == 0 {
+                kn = put_bytes(&mut kc_mk, 0, b"L337");
+            }
+            kn = put_bytes(&mut kc_mk, kn, &[b' ', c, b'=']);
+            kn = put_dec(&mut kc_mk, kn, got);
+        }
+    }
+    if kn > 0 {
+        kn = put_bytes(&mut kc_mk, kn, b"\n");
+    }
+    leg!(rep, kn == 0, &kc_mk[..kn]);
+
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    let h_term = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8) == 0;
+    ksa = [SIG_IGN, 0, 0, 0];
+    let h_int = svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8) == 0;
+    let kf_un = 1u64 << (SIGTERM - 1);
+    let mut kf_oldmask = 0u64;
+    let h_mask = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &kf_un as *const u64 as u64,
+                      &mut kf_oldmask as *mut u64 as u64, 8) == 0;
+    kn = 0;
+    if !(h_term && h_int && h_mask) {
+        kn = put_bytes(&mut kc_mk, 0, b"L338 setup\n");
+    } else {
+        // A handler that never took would leave SIGTERM's default to end us.
+        stamp_armed(rep, b"L338\n");
+        for (c, nr, a0, a1, a2) in [
+            (b'k', NR_KILL, 0, SIGTERM, 0),
+            (b'g', NR_TGKILL, kf_pid as u64, kf_tid as u64, SIGTERM),
+            (b't', NR_TKILL, kf_tid as u64, SIGTERM, 0),
+        ] {
+            let f0 = sig_fired();
+            let r = svc3(nr, a0, a1, a2);
+            let fired = sig_fired() - f0;
+            let signo = sig_signo();
+            if !(r == 0 && fired == 1 && signo == SIGTERM) {
+                if kn == 0 {
+                    kn = put_bytes(&mut kc_mk, 0, b"L338");
+                }
+                kn = put_bytes(&mut kc_mk, kn, &[b' ', c, b'=']);
+                kn = put_dec(&mut kc_mk, kn, r);
+                kn = put_bytes(&mut kc_mk, kn, b"/");
+                kn = put_dec(&mut kc_mk, kn, fired as i64);
+                kn = put_bytes(&mut kc_mk, kn, b"/");
+                kn = put_dec(&mut kc_mk, kn, signo as i64);
+            }
+        }
+        stamp_disarm(rep);
+        if kn > 0 {
+            kn = put_bytes(&mut kc_mk, kn, b"\n");
+        }
+    }
+    ksa = [SIG_DFL, 0, 0, 0];
+    let _ = svc4(NR_RT_SIGACTION, SIGTERM, &ksa as *const u64 as u64, 0, 8);
+    let _ = svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8);
+    if h_mask {
+        let _ = svc4(NR_RT_SIGPROCMASK, NT_SIG_SETMASK, &kf_oldmask as *const u64 as u64, 0, 8);
+    }
+    leg!(rep, kn == 0, &kc_mk[..kn]);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

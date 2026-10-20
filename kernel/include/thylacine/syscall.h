@@ -903,14 +903,22 @@ enum {
     // namespace-shape (write to /proc/<pid>/note when path resolution
     // arrives).
     //
-    // Returns 0 on success, -1 on:
-    //   - bad name_len bounds (0 or > NOTE_NAME_MAX - 1)
-    //   - name_va outside the user-VA bound / unmapped
-    //   - name not in the v1.0 supported set (NOTE_NAME_* enumerated in
-    //     <thylacine/notes.h>)
-    //   - target pid not found (-ESRCH-equivalent collapsed to -1)
-    //   - target Proc's queue is full (-EAGAIN-equivalent)
-    //   - permission denied (caller is not the parent + pid != self)
+    // Returns 0 on success, else a negative errno (operator vote 2026-10-14):
+    //   -T_E_INVAL  name_len 0 or > NOTE_NAME_MAX - 1; a NUL or non-printable
+    //               byte; a name not in the supported set (NOTE_NAME_* in
+    //               <thylacine/notes.h>); a kernel-only name (tty:*, sak,
+    //               a snare:* to another Proc)
+    //   -T_E_FAULT  name_va outside the user-VA bound / unmapped
+    //   -T_E_SRCH   no Proc holds pid
+    //   -T_E_ACCES  the target is not the caller's child (never -T_E_PERM,
+    //               which is -1, the flat sentinel)
+    //   -T_E_AGAIN  the target's note queue is full
+    // The name is judged first, before the pid is looked for: a refused name is
+    // -T_E_INVAL whatever the target, a missing one included. A child that is
+    // dead but not yet reaped answers 0 to a name it may be sent and receives
+    // nothing. A self-post of snare:segv, snare:bus, snare:ill, snare:fpe or
+    // snare:abort NEVER RETURNS: the kernel ends the caller with that snare
+    // through its fault path (notes_self_death_snare).
     SYS_POSTNOTE     = 47,
 
     // SYS_NOTE_MASK(new_mask, old_mask_out_va) — set the calling Thread's
@@ -1464,18 +1472,23 @@ enum {
     // bad args / non-zero flags / OOM / handle-table-full.
     SYS_LOOM_SETUP   = 66,   // arg: entries (x0), params_va (x1)
 
-    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -1   (Loom-2a)
+    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -errno   (Loom-2a)
     //   x0 = loom_fd : a KObj_Loom handle.
     //   x1 = op      : LOOM_REGISTER_HANDLES (install the fixed-handle table)
-    //                  at Loom-2a; LOOM_REGISTER_BUFFERS is reserved (Loom-6).
+    //                  or LOOM_REGISTER_BUFFERS (pin the buffer table, Loom-6).
     //   x2 = arg_va  : LOOM_REGISTER_HANDLES -> user-VA of a u32[nargs] of fds
     //                  (each must be a KOBJ_SPOOR handle in the caller). The
     //                  call REPLACES the whole table (IORING_REGISTER_FILES
     //                  semantics); each registered handle is resolved + its
     //                  rights snapshotted (the I-30 submit-time-pin substrate).
-    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES.
-    // -1 on bad loom_fd / unsupported op / nargs out of range / a non-KOBJ_SPOOR
-    // fd in the list.
+    //                  LOOM_REGISTER_BUFFERS -> a struct loom_buf_reg[nargs].
+    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES (or LOOM_MAX_REG_BUFFERS).
+    // -EBADF: loom_fd or a listed fd is not open. -EFAULT: the array is
+    // unreadable. A dev9p Spoor's write-behind flush failing, or an error an
+    // earlier flush latched, returns that errno (-ENOSPC, the server's -EIO, a
+    // caught note's -EINTR; operator vote 2026-10-07). -EINVAL otherwise:
+    // loom_fd not a Loom, an unknown op, nargs out of range, a non-KOBJ_SPOOR
+    // fd, a buffer range that is not one writable anon VMA.
     SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
 
     // SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) -> n / -1  (Loom-3)
@@ -1928,11 +1941,18 @@ enum {
     // ===================================================================
 
     // SYS_JIT_CREATE(length, out_va) -> 0 / -errno. CAP_JIT-gated.
-    //   Allocate a CODE Burrow of `length` bytes (rounded up to whole pages)
+    //   Reserve a CODE Burrow of `length` bytes (rounded up to whole pages)
     //   and install BOTH of its aliases in the caller's own address space:
     //   a WRITER alias mapped RW and an EXEC alias mapped RX, each a separate
     //   VMA over the same physical pages. Writes {writer_va, exec_va} as a
     //   `struct t_jit_region` to out_va.
+    //
+    //   The region is a RESERVATION, like SYS_BURROW_ATTACH_LAZY's memory:
+    //   create allocates and charges no page. Each page is committed, zeroed,
+    //   I-cache-invalidated and charged to the I-32 page budget ONCE, by the
+    //   first touch through either alias. A touch over the budget terminates
+    //   the Proc at the touch (I-32's clean failure); it never surfaces as an
+    //   errno here, so a JIT cannot learn its budget from create.
     //
     //   ONE syscall installs BOTH aliases, deliberately. Splitting create from
     //   map would admit a state in which an RX alias exists with no writer (or
@@ -1955,8 +1975,10 @@ enum {
     //   page traps rather than running residue.
     //
     //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX),
-    //   -ENOMEM (page budget, no VA gap, or allocator), -EFAULT (out_va not
-    //   writable by the caller).
+    //   -ENOMEM (the VMA cap, no VA gap, or the allocator), -EAGAIN (the
+    //   kernel CSPRNG is not yet seeded, so no address can be drawn: B-2b
+    //   places each alias at an independent random address), -EFAULT (out_va
+    //   not writable by the caller).
     //
     //   The denial is -T_E_ACCES (13), NOT -T_E_PERM: errno.h forbids a
     //   handler returning -T_E_PERM because its value (1) collides with the
@@ -1967,9 +1989,11 @@ enum {
 
     // SYS_JIT_DESTROY(writer_va) -> 0 / -errno.
     //   Tear down BOTH aliases of the code region whose WRITER alias starts at
-    //   writer_va, and free the backing pages. Identified by the writer VA
-    //   alone: the kernel remembers the pairing, so a caller cannot destroy
-    //   half a region or pass two VAs that name different regions.
+    //   writer_va, free the pages it committed and refund their charge.
+    //   Identified by the writer VA alone: the kernel remembers the pairing,
+    //   so a caller cannot destroy half a region or pass two VAs that name
+    //   different regions. A SEALED region (SYS_JIT_CREATE_SEALED) has no
+    //   writer, so it is named by the base of its one execute-only alias.
     //
     //   NOT CAP_JIT-gated. Destroying your own mapping is not an exercise of
     //   the emission authority, and gating it would mean a Proc whose legate
@@ -1977,8 +2001,9 @@ enum {
     //   turning a capability expiry into a memory leak. Authority to create is
     //   the scarce thing; authority to release is not.
     //
-    //   Errors: -EINVAL (writer_va is not the base of a live code region of
-    //   this Proc). Idempotent only in the sense that a second call fails
+    //   Errors: -EINVAL (writer_va is not the base of a live code region's
+    //   writer, or of a sealed region, in this Proc; an exec alias of a
+    //   writable region is refused). Idempotent only in the sense that a second call fails
     //   cleanly; it never tears down an unrelated mapping.
     SYS_JIT_DESTROY = 102,  // arg: writer_va (x0)
 
@@ -1990,7 +2015,10 @@ enum {
     //   `dsb ish` / `isb` sequence the architecture requires between a data
     //   write and an instruction fetch of the same location -- the same dance
     //   the kernel's own W1.5 alternatives-patcher performs, lifted to a
-    //   syscall.
+    //   syscall. When any CPU reports a non-PIPT I-cache, the invalidate is
+    //   `ic ialluis` instead: an invalidate by the kernel's alias of the page
+    //   is exact only on a PIPT I-cache. Pages of the range not yet committed
+    //   are skipped; their commit invalidates them.
     //
     //   The range must lie within ONE of the caller's code-region aliases
     //   (either the writer or the exec alias -- both name the same physical
@@ -2018,11 +2046,13 @@ enum {
     //   through the kernel is already covered -- the exposed case is a peer
     //   spin-waiting on a flag in userspace with no intervening trap.
     //
-    //   Nothing at v1.0 drives this (the JIT surface has no threaded consumer
-    //   yet), but the named first consumer -- LLVM ORC's DualMapMemoryMapper --
-    //   has exactly the emit-on-one-thread / execute-on-a-worker shape, so
-    //   CL-7 must either honor this contract or make this syscall broadcast an
-    //   ISB to the Proc's other running threads.
+    //   Consumers honor it in userspace. JavaScriptCore installs a compiler
+    //   thread's code after an ISB on the JS thread, and the JS thread runs one
+    //   wherever it resumes the VM's code (MachineThreads::unparkCurrentThread),
+    //   which covers code the collector patched with the world stopped and a
+    //   JSLock handed across CPUs. Code published to threads that never
+    //   pass such a point (Wasm's BBQ and OMG tiers) needs the event on the
+    //   other CPUs as well: SYS_ICACHE_SYNC_SPACE (128) provides it.
     //
     //   Errors: -EINVAL (range empty, wraps, or is not contained in a single
     //   live code-region alias of this Proc).
@@ -2414,6 +2444,53 @@ enum {
     //   cap (-ENOMEM).
     SYS_BURROW_MAP_FILE = 126,  // arg: fd (x0), offset (x1), length (x2), prot (x3), flags (x4), addr (x5)
 
+    // SYS_JIT_CREATE_SEALED(src_va, length, out_va) -> 0 / -errno. CAP_JIT-gated.
+    //   B-2b (dec-2026-10-07-jit-sealed-thunk): a code region BORN sealed. The
+    //   kernel copies `length` bytes from src_va into a fresh code region,
+    //   commits and charges its pages (I-32), invalidates the I-cache over
+    //   them, and maps ONE alias, EXECUTE-ONLY (AP[2:1]=10, UXN=0, PXN): EL0
+    //   may fetch it and may neither load nor store it. No writer alias ever
+    //   exists. Writes the alias's VA as a u64 to out_va. The tail of the last
+    //   page past `length` is zero (UDF #0). The region is placed at a random
+    //   address, as SYS_JIT_CREATE's aliases are.
+    //
+    //   It holds code whose bytes must not be readable -- JavaScriptCore's
+    //   write thunk carries the writer alias's base as immediates. Every
+    //   kernel read on EL0's behalf is unprivileged (uaccess.S LDTR/STTR), so
+    //   a syscall cannot read the page for its caller either; /proc/<pid>/mem
+    //   refuses it. SYS_JIT_DESTROY(exec_va) releases it and refunds its
+    //   charge; SYS_ICACHE_SYNC over it is accepted and has nothing to do.
+    //
+    //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_SEALED_MAX),
+    //   -EFAULT (src_va unreadable by the caller, or out_va unwritable),
+    //   -EAGAIN (the kernel CSPRNG is not yet seeded, so no address can be
+    //   drawn), -ENOMEM (the page budget, the VMA cap, no VA gap, or the
+    //   allocator). A failure leaves nothing mapped and nothing charged.
+    SYS_JIT_CREATE_SEALED = 127,  // arg: src_va (x0), length (x1), out_va (x2)
+
+    // SYS_ICACHE_SYNC_SPACE() -> 0 (B-2e2; JIT-ON-WX-DESIGN B-2 item 4).
+    //   Returns once every OTHER CPU that was running a thread of the caller's
+    //   address space when the call began has run the barrier interrupt's
+    //   handler after observing this call's request, and returned from it.
+    //   That return is a context-synchronization event, so code the caller
+    //   published with SYS_ICACHE_SYNC is what those threads execute next --
+    //   the event SYS_ICACHE_SYNC gives only the calling CPU. A thread of the
+    //   space not running takes its event at its next switch-in's eret.
+    //   Linux's membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE); Plan
+    //   9's procflushseg.
+    //
+    //   No arguments (operator vote 2026-10-13: its own number, not a mode of
+    //   SYS_ICACHE_SYNC, whose callers leave x2 unset). No capability: it
+    //   interrupts only CPUs running the caller's own threads, reads no
+    //   memory and changes no mapping. No timeout: it waits until every
+    //   target unmasks IRQs, and offers its CPU to other threads meanwhile.
+    //
+    //   Linux arm64's 128 is restart_syscall, which the vivarium answers with
+    //   ENOSYS before native dispatch (vivarium.c, the per-number check).
+    //
+    //   Errors: -EINVAL only for a caller with no address space (never EL0).
+    SYS_ICACHE_SYNC_SPACE = 128,
+
     // NOT A SYSCALL. One past the highest assigned number, so that
     // VIV_NATIVE_CEILING can be pinned to a value the compiler recomputes
     // rather than to a symbol a person must remember to re-point.
@@ -2489,11 +2566,17 @@ _Static_assert(sizeof(struct t_jit_region) == 16, "t_jit_region ABI: size");
 _Static_assert(__builtin_offsetof(struct t_jit_region, writer_va) == 0, "t_jit_region ABI: writer_va@0");
 _Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_region ABI: exec_va@8");
 
-// Largest single code region (I-42). 64 MiB is generous for a shader/method
-// JIT while staying well inside the I-32 per-Proc page budget, so a code
-// region can never be the instrument that exhausts a Proc's memory floor --
-// the pages are charged against the page budget exactly like SYS_BURROW_ATTACH's.
-#define JIT_REGION_MAX  (64u * 1024u * 1024u)
+// Largest single code region (I-42): JavaScriptCore's executable pool, and
+// inside AArch64's +-128 MiB direct-branch range. The region is a reservation,
+// so the bound is on address space; the pages a JIT touches are charged one at
+// a time against the I-32 page budget, as SYS_BURROW_ATTACH_LAZY's are.
+#define JIT_REGION_MAX  (128u * 1024u * 1024u)
+
+// Largest sealed region (SYS_JIT_CREATE_SEALED). A sealed region holds a
+// thunk or a few trampolines, and the create commits and copies every page of
+// it before returning, so the bound is on that per-call work: 1 MiB is 256
+// pages, far above any thunk and far below the budget.
+#define JIT_SEALED_MAX  (1u * 1024u * 1024u)
 
 // SYS_PTY_REGISTER ops.
 #define PTY_REG_MINT   0u

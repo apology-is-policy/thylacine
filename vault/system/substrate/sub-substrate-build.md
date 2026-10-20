@@ -22,7 +22,7 @@ locks: []
 abis: []
 design: ["docs/TOOLING.md"]
 created: 2026-08-01
-updated: 2026-10-06
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -335,17 +335,30 @@ chunk, each on purpose.
 is kind `clone-sparse`: nothing of ours is hosted, so it is not a `fork.`.
 `forage.sh` makes a partial (`blob:none`) sparse clone at a TAG, refuses unless
 that tag resolves to the manifest's commit, creates a local branch, and `git am`s
-`usr/ports/webkit/patches/*`. It is idempotent (a patch that reverse-applies is
-reported as already applied) and it never resets: a checkout where a patch
-neither applies nor reverse-applies is reported as drifted and left alone,
-because it may hold work. `test-forage.sh` C1-C4 drive all four outcomes against
-a local upstream with no network.
+`usr/ports/webkit/patches/*`. The series is stacked -- a later patch may edit
+lines an earlier one added (0003 corrects a comment 0001 wrote) -- so no patch is
+asked about alone: `series_tree` builds the pin plus the first k patches in a
+scratch index, and the longest k whose tree is HEAD's is what is applied; the rest
+are `am`'d. It is idempotent (the whole series' tree reports every patch as
+already applied) and it never resets: a checkout that is the pin plus no prefix of
+the series -- including one that carries an extra hunk in a file a patch names --
+is reported as drifted and left alone, because it may hold work. An existing sparse checkout is only widened (`add`, so a
+cone somebody added by hand stays); a full checkout at the path is reported and
+left alone, never converted. `test-forage.sh` C1-C9 drive the outcomes against a
+local upstream with no network: C6-C8 a stacked series (fresh, idempotent, from a
+prefix), C9 an extra hunk in a named file; against the per-patch forage that
+preceded gcpark, C7 and C9 fail.
 
 *The build re-checks the checkout from its own side.* `webkit_checkout_ok`
-requires the pin to be an ancestor of HEAD, a clean tree, every series patch to
-reverse-apply, AND the files that differ from the pin to be exactly the files the
-series names -- the last because a reverse-apply check alone passes on a tree that
-carries the patches plus local edits elsewhere. So `WEBKIT_PIN` / `ICU_SHA256` in
+requires the pin to be an ancestor of HEAD, a clean tree, and HEAD's tree to be
+EXACTLY the tree `webkit_series_tree` builds from the pin plus the series in
+order (about 0.6 s on the WebKit tree; no network, the blob-less clone holds every
+tree and the patched files' blobs). Until gcpark (2026-10-12) it asked each patch
+to reverse-apply and the changed files to be the series' files, which passed a
+commit adding an extra hunk to a file a patch names (measured on the B-2c tip:
+one line in `ExecutableAllocator.cpp` passed) and could not express a stacked
+series. `test-forage.sh` D1-D5 lift the two functions from `build.sh` and drive
+them; D5 is the extra hunk over a one-patch series, which the old check accepted. So `WEBKIT_PIN` / `ICU_SHA256` in
 `build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
 fails when they drift (sabotaged: one hex digit -> FAIL).
 
@@ -361,7 +374,29 @@ depend on the sysroot and survive it. `libc.a` is not a ninja input, so
 `build_jsc` removes `bin/jsc` to force the relink. After the link it asserts the
 shape the platform requires -- `ET_EXEC`, no `PT_DYNAMIC`, no `LOAD` segment both
 writable and executable, and at least two `LOAD` segments seen, so a parse that
-matched nothing cannot read as "no W+X" -- then strips into `build/webkit/stage`.
+matched nothing cannot read as "no W+X" -- and that each function on a list
+holds an `isb` in the symbol-bearing binary (`llvm-objdump
+--disassemble-symbols`; at least eight instructions first, so a missing symbol
+cannot pass). A fence that lets a thread run code another CPU wrote or patched
+has no run-time witness, so the build asks the binary for each: since B-2d
+`MachineThreads::unparkCurrentThread` (RED on the B-2c `jsc`, which has none),
+since B-2e1 the two places a thread takes a finished Wasm plan
+(`Wasm::Module::compileSync`, `JSWebAssemblyInstance::finalizeCreation`; the
+B-2d `jsc` holds no `isb` in either) and the FTL's `JITFinalizer::finalize`,
+whose fence is upstream's. The list is a quoted heredoc of mangled name,
+label and, optionally, the mangled prefix of a call the `isb` must precede:
+`finalizeCreation` runs the module's start function itself, so its fence must
+come before its first call into `WebAssemblyModuleRecord::initializeExports`.
+That test uses address order for program order and fails closed when the call
+is laid out first or absent (both controls refuse on the device `jsc`). A
+refusal names the label and the patch that owes it. Since B-2e3 it also asks
+`Wasm::resetInstructionCacheOnAllThreads` for `SYS_ICACHE_SYNC_SPACE`: at
+least three instructions, and the last write to `x8` before an `svc #0` must
+be a `mov` of 128 (any other write to `x8`, a store from it included, clears
+the match, so the check fails closed). The B-2e1 `jsc`, whose function is
+upstream's 90-instruction thread walk, is refused, as are a wrong number, a
+write to `x8` between the `mov` and the `svc`, and an `svc` before the `mov`.
+Then it strips into `build/webkit/stage`.
 Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
 sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a
 speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the same

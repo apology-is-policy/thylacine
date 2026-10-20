@@ -9,7 +9,7 @@ guarded-by: [inv-i8, inv-i17, inv-i21, inv-i44]
 validated-by: [spec-scheduler, spec-sched-alpha, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-09-22
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -45,6 +45,13 @@ machinery around it.
   expiry, requests preemption.
 - `preempt_check_irq()` — called from the IRQ-return and syscall-return
   tails. Consumes a pending request and calls `sched()`.
+- `sched_kick_thread(t)` — if `t` runs on another CPU, send that CPU
+  `IPI_RESCHED`, so a thread at EL0 takes an IRQ into its return tail now
+  (Linux's `kick_process`; the caught-note walk and the interrupt-terminate
+  wake use it, [[sub-kernel-notes]]). The reads of `on_cpu` and `last_cpu`
+  are unlocked: a stale one costs a spurious IPI or a missed one, and a busy
+  CPU is never tickless, so the tick bounds a missed one. Gated with the
+  placement notify: never self, and off in the in-kernel tests.
 - **A plain spinlock may never be held across `sched()`.** This is
   checked, not documented: `sched()` extincts on `prev->preempt_count != 0`
   and names the outermost acquire site.
@@ -201,6 +208,53 @@ CPU can still be walking the old root, which is precisely the precondition
 the outgoing address space's teardown needs. Removing it does not just
 risk a stale fetch — it removes the licence to free the old tables.
 
+### The per-CPU space record and `sched_sync_space` (B-2e2)
+
+`sched_install_asid_ttbr0` also records, in `g_cpu_space[cpu]`, the address
+space the CPU is about to run (NULL for a kernel thread, the idle thread
+included), then executes `DSB ISH`. All three callers pass through it before
+the incoming thread can fetch an EL0 instruction: `sched()`, the test
+primitive `thread_switch`, and `sched_activate_addrspace` (execve). The record
+is compared by value and never dereferenced, so a space torn down concurrently
+is no lifetime hazard, and a freed space's address reused by a new one can
+only add an interrupt. The ASID allocator's per-CPU slot could not serve: a
+rollover zeroes it while the CPU runs on its reserved ASID.
+
+`sched_sync_space(as)` is `SYS_ICACHE_SYNC_SPACE`'s mechanism
+([[sub-kernel-syscall-dispatch]]): `DSB ISH`; with IRQs masked, note the
+calling CPU, read every other online CPU's record and send a barrier IPI by
+ticket ([[sub-kernel-gic]]) to each that names `as`; then, IRQs unmasked, wait
+for every ticket with no timeout, offering the CPU (`sched_yield_hint`) every
+4096 checks. It returns the mask it interrupted. Why it is enough is
+`membarrier`'s store-buffering argument (`JIT-ON-WX-DESIGN.md` B-2 item 4): a
+call that reads a record interrupts that CPU, and its handler's `eret` follows
+its read of a ticket taken after the invalidation; a call that misses a store
+read it before the switcher's `DSB` completed, so the invalidation completed
+before the switcher's `eret`. The switch-side `DSB` is new with B-2e2; Linux's
+arm64 `__switch_to` has one. A ticket the GIC refuses for a CPU whose record
+names the space extincts, since skipping it would void the guarantee; no
+refusal is reachable, because every CPU below `smp_cpu_count()` came online
+(bring-up refuses a degraded boot) and is an SGI target (`gic.c` asserts
+`DTB_MAX_CPUS` fits GICv2's list). The caller must have IRQs enabled, and the
+function asserts it: two masked callers whose CPUs each named the other's space
+would each wait for an interrupt the other cannot take.
+
+`jit.space_sync_targets` runs a kernel spinner of each of two child Procs on
+its own CPU and checks both ways that the space's CPU is interrupted and
+served and the other space's CPU takes no ticket, measured only in a window
+where neither CPU switched (`sched_cpu_ctxt`). The suite's scheduler is
+UP-like (`g_sched_notify_enabled` off until `joey_run`), so a cross-CPU
+`ready_on` does not wake its idle target: the test kicks each spinner's CPU
+with `IPI_RESCHED`, as `test_smp` does, and reaps its children by polling
+(`WAIT_WNOHANG`), since a child exiting on another CPU would not wake a
+parent sleeping in idle. Its first version did neither and hung the boot.
+A last leg has the first spinner mask IRQs until a deadline it publishes; the
+call, begun well before the deadline, must return after it with its ticket
+served. Without that leg the wait was witnessed only by an IPI's latency: a
+call with no wait loop would usually still find its ticket served a few
+microseconds later (B-2e2 audit, round 1, F2). On one CPU the test prints
+that no leg ran.
+
 ## Data structures
 
 `struct CpuSched g_cpu_sched[DTB_MAX_CPUS]` — one slot per CPU, indexed
@@ -218,6 +272,9 @@ by `smp_cpu_idx_self()` (MPIDR.Aff0).
 | `idle_in_wfi` | "this CPU's current is its idle"; read by peers |
 | `capacity` | normalized DTB capacity, `[0, 1024]`; write-once at boot |
 | `idle_ns`, `nctxt` | read-only telemetry (prowl, VIVARIUM) |
+
+`g_cpu_space[]` (B-2e2) holds each CPU's last-installed address space, for
+`sched_sync_space`; written only by its own CPU with IRQs masked.
 
 Two file-scope arrays sit beside it: `g_need_resched[]` (per-CPU u8,
 RELAXED atomics because `ready_on` made it a genuine cross-CPU producer)

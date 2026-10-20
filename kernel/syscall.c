@@ -43,6 +43,7 @@
 #include <thylacine/joey.h>     // boot_mark_complete (SYS_BOOT_COMPLETE)
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
+#include <thylacine/cow.h>          // B-2b: cow_page_set_sole for a sealed region's pages
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
@@ -60,6 +61,7 @@
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/timer.h"
 #include "../arch/arm64/uaccess.h"
+#include "../mm/phys.h"             // B-2b: alloc_user_pages / free_pages for a sealed region
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
@@ -5688,18 +5690,34 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
 
 // SYS_POSTNOTE(pid, name_va, name_len) — post a note to another Proc.
 // Permission gate at v1.0: caller must be the target's parent OR
-// pid == self_pid (self-post is always allowed).
+// pid == self_pid (self-post is always allowed). Every refusal is an errno
+// (operator vote 2026-10-14): -T_E_SRCH no such Proc, -T_E_ACCES not the
+// caller's child, -T_E_AGAIN the target's queue is full, -T_E_INVAL a name no
+// program may post, -T_E_FAULT an unreadable name.
 #define NOTES_POSTNOTE_NAME_MAX  (NOTE_NAME_MAX - 1)
 
 struct postnote_walk_ctx {
     int           target_pid;
+    int           target_tid;    // > 0: the target is the Proc holding this
+                                  // thread (the phenotype's tkill/tgkill), and a
+                                  // target_pid > 0 must then be that Proc's pid
     struct Proc  *caller;
-    const char   *name;
+    const char   *name;          // NULL: signal 0 -- the gate alone, no post
     int           result;        // 0 = not yet found (continue walk);
-                                  // +1 = post succeeded (stop walk);
-                                  // -1 = post failed / permission denied
-                                  //      (stop walk).
+                                  // +1 = accepted (stop walk);
+                                  // -1 = refused (stop walk).
+    s64           err;           // with result -1: why, as SYS_POSTNOTE answers
+                                  // it (ESRCH a mismatched tgid, ACCES the gate,
+                                  // notes_post's own EINVAL or EAGAIN)
 };
+
+// Does `p` hold the thread `tid`? Caller holds g_proc_table_lock, which every
+// thread-list walk holds (#811).
+static bool proc_holds_tid_locked(const struct Proc *p, int tid) {
+    for (const struct Thread *x = p->threads; x; x = x->next_in_proc)
+        if (x->tid == tid) return true;
+    return false;
+}
 
 // N-4 in ONE place: `kill` terminates its target, whatever the target's thread
 // count and whatever state its note ring is in. Returns true iff `name` was
@@ -5725,20 +5743,42 @@ static bool postnote_kill_cascade_locked(struct Proc *target, const char *name) 
 
 static int postnote_walk_cb(struct Proc *target, void *arg) {
     struct postnote_walk_ctx *w = (struct postnote_walk_ctx *)arg;
-    if (target->pid != w->target_pid) return 0;     // keep walking
+    if (w->target_tid > 0) {
+        if (!proc_holds_tid_locked(target, w->target_tid)) return 0;
+        // A tid names one thread, so the Proc holding it is the only candidate:
+        // a tgkill whose tgid is some other Proc names no thread at all.
+        if (w->target_pid > 0 && target->pid != w->target_pid) {
+            w->result = -1;
+            w->err    = -(s64)T_E_SRCH;
+            return 1;
+        }
+    } else if (target->pid != w->target_pid) {
+        return 0;     // keep walking
+    }
 
-    // Found the target. Permission gate: caller must be the parent.
+    // Found the target. Permission gate: caller must be the parent. ACCES,
+    // never PERM: -T_E_PERM is -1, the flat sentinel Pouch reads as EIO
+    // (errno.h). The phenotype's shell turns it back into Linux's EPERM.
     if (target->parent != w->caller) {
         w->result = -1;
+        w->err    = -(s64)T_E_ACCES;
         return 1;     // stop walk (non-zero return)
     }
 
-    // R2-F9 audit close: refuse posts to non-ALIVE targets. A target in
-    // ZOMBIE/INVALID state has no consumer (no thread will EL0-return
-    // ever again); the post would be wasted work that returns success
-    // misleadingly. wait_pid is the proper channel for ZOMBIE state.
+    // A target past ALIVE has no thread that will reach an EL0-return again,
+    // so nothing is posted (R2-F9). It is still a process until its parent
+    // reaps it, and POSIX and Linux both accept a signal to one, so the call
+    // succeeds: a caller asking "is my child still there?" learns that from
+    // wait, never from a refused post. The gate was asked first, so only the
+    // caller's own children reach here.
     if (target->state != PROC_STATE_ALIVE) {
-        w->result = -1;
+        w->result = 1;
+        return 1;
+    }
+
+    // Signal 0: the gate admitted the caller, and there is nothing to post.
+    if (!w->name) {
+        w->result = 1;
         return 1;
     }
 
@@ -5800,27 +5840,50 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         proc_caught_note_wake(target);   // item 11: caught-note twin
     }
     w->result = (rc == 0) ? 1 : -1;
+    if (rc != 0) w->err = (s64)rc;
     return 1;
 }
 
-// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
-// from any header -- the harness extern-declares it, and there is no
-// production caller. It runs the REAL cross-Proc post: proc_for_each +
-// postnote_walk_cb under g_proc_table_lock, exactly as sys_postnote_handler
-// does, rather than a reimplementation the test could quietly drift from.
-// Returns the walk's canonical result (+1 posted / -1 refused / 0 not found).
-int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
-                                const char *name);
-int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
-                                const char *name) {
+// The CROSS arm: the syscall's own answer for a post to some other Proc.
+//
+// Cross-Proc post: walk the proc tree via proc_for_each, which runs its
+// callback under g_proc_table_lock. The find + permission check + post happen
+// inside the callback so the target Proc cannot be reaped + freed
+// mid-operation. Lock order: proc_table_lock -> q->lock -> poll_list.lock ->
+// (drop q->lock, still hold proc_table_lock) -> rendez.lock. None of those
+// reverse-takes proc_table_lock so the chain is acyclic.
+static s64 postnote_cross(struct Proc *caller, int target_pid, const char *name) {
+    // The name is judged before the target is looked for, as the phenotype's
+    // kill judges its signal before its walk: the walk answers a dead child 0
+    // without reaching notes_post's gates, so a name they refuse is refused
+    // here, whatever the target's state.
+    if (!notes_name_user_postable(name)) return -(s64)T_E_INVAL;
+
     struct postnote_walk_ctx wctx = {
         .target_pid = target_pid,
         .caller     = caller,
         .name       = name,
         .result     = 0,
+        .err        = 0,
     };
     (void)proc_for_each(postnote_walk_cb, &wctx);
-    return wctx.result;
+    if (wctx.result == 1) return 0;
+    if (wctx.result == 0) return -(s64)T_E_SRCH;   // no Proc has that pid
+    // Every refusing arm of the walk sets err; a refusal without one must
+    // still read as a refusal, never as the 0 of success.
+    return wctx.err ? wctx.err : -(s64)T_E_INVAL;
+}
+
+// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
+// from any header -- the harness extern-declares it, and there is no
+// production caller. It drives the REAL cross arm, the function the syscall
+// calls, rather than a reimplementation the test could quietly drift from.
+// Returns the syscall's own answer: 0, or a negative errno.
+s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name);
+s64 sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name) {
+    return postnote_cross(caller, target_pid, name);
 }
 
 // The SELF arm, extracted from sys_postnote_handler so it has a name a test can
@@ -5828,7 +5891,9 @@ int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
 // after that resolution uses only `p` and the validated name, so the arm splits
 // cleanly here and the syscall keeps driving THIS function rather than a copy.
 //
-// Returns the syscall's own value: 0 posted-or-killed, -1 refused.
+// Returns the syscall's own value: 0 posted-or-killed, else notes_post's errno.
+// A self-chosen snare death never reaches here: it needs the caller's exception
+// frame, which the syscall entry holds and the phenotype's shell holds.
 static s64 postnote_self(struct Proc *p, const char *name) {
     // Unlike the cross arm we are not already under g_proc_table_lock, so take
     // it around the cascade. `p` is self and cannot be reaped while running it.
@@ -5852,7 +5917,7 @@ static s64 postnote_self(struct Proc *p, const char *name) {
         proc_caught_note_wake(p);   // item 11: caught-note twin
         proc_table_lock_release(ws);
     }
-    return (rc == 0) ? 0 : (s64)-1;
+    return (s64)rc;
 }
 
 // Test support, the sys_postnote_cross_for_test twin: drives the REAL self arm
@@ -5864,28 +5929,28 @@ s64 sys_postnote_self_for_test(struct Proc *caller, const char *name) {
     return postnote_self(caller, name);
 }
 
-static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
+static s64 sys_postnote_handler(struct exception_context *ctx, u64 pid_raw,
+                                 u64 name_va, u64 name_len_raw) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc) return -1;
+    if (!t || !t->proc) return -(s64)T_E_INVAL;
     struct Proc *p = t->proc;
 
-    if (name_len_raw == 0) return -1;
-    if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -1;
-    if (name_va == 0) return -1;
-    if (name_va >= UACCESS_USER_VA_TOP) return -1;
-    if (name_va + name_len_raw > UACCESS_USER_VA_TOP) return -1;
+    if (name_len_raw == 0) return -(s64)T_E_INVAL;
+    if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -(s64)T_E_INVAL;
+    if (name_va == 0) return -(s64)T_E_FAULT;
+    if (name_va >= UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
+    if (name_va + name_len_raw > UACCESS_USER_VA_TOP) return -(s64)T_E_FAULT;
 
     char buf[NOTE_NAME_MAX];
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) buf[i] = 0;
     for (u32 i = 0; i < (u32)name_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0) return -1;
-        // Reject embedded NUL and non-printable bytes — the v1.0
-        // supported set is "interrupt"/"kill"/"pipe"/"child_exit", all
-        // [a-z_]; the validation in notes_post will catch unknown
-        // strings, but reject obvious garbage at the boundary.
-        if (b == 0) return -1;
-        if (b < 0x20 || b > 0x7e) return -1;
+        if (uaccess_load_u8(name_va + i, &b) != 0) return -(s64)T_E_FAULT;
+        // Reject embedded NUL and non-printable bytes. notes_post checks
+        // the name against g_known_notes and refuses the kernel-only
+        // ones; this only turns obvious garbage away at the boundary.
+        if (b == 0) return -(s64)T_E_INVAL;
+        if (b < 0x20 || b > 0x7e) return -(s64)T_E_INVAL;
         buf[i] = (char)b;
     }
     buf[(u32)name_len_raw] = 0;
@@ -5910,26 +5975,18 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     // its lock discipline live on postnote_self; WHY the kill decision is
     // shared with the cross arm (round-2 F4, aux#253) lives on
     // postnote_kill_cascade_locked.
-    if (target_pid == p->pid || pid_raw == 0) return postnote_self(p, buf);
+    if (target_pid == p->pid || pid_raw == 0) {
+        // A snare death the caller names for itself ends it here, through the
+        // fault path, as Pouch's raise(SIGSEGV) must and as the phenotype's
+        // kill already does (operator vote 2026-10-14). Posted to anyone else
+        // the name is notes_post's to refuse: a fault is never another Proc's
+        // to cause.
+        const char *snare = notes_self_death_snare(buf);
+        if (snare) proc_fault_terminate(snare, ctx->elr);
+        return postnote_self(p, buf);
+    }
 
-    // Cross-Proc post: walk the proc tree via proc_for_each, which runs
-    // its callback under g_proc_table_lock. We do the find + permission-
-    // check + post inside the callback so the target Proc cannot be
-    // reaped + freed mid-operation. Lock order: proc_table_lock → q->lock
-    // → poll_list.lock → (drop q->lock, still hold proc_table_lock) →
-    // rendez.lock. None of those reverse-takes proc_table_lock so the
-    // chain is acyclic.
-    struct postnote_walk_ctx wctx = {
-        .target_pid = target_pid,
-        .caller     = p,
-        .name       = buf,
-        .result     = 0,
-    };
-    int rv = proc_for_each(postnote_walk_cb, &wctx);
-    (void)rv;     // proc_for_each returns the first non-zero callback
-                  // result; wctx.result carries the canonical answer
-    if (wctx.result == 1) return 0;     // post succeeded
-    return -1;                            // not found / permission / EAGAIN
+    return postnote_cross(p, target_pid, buf);
 }
 
 // SYS_NOTE_MASK(new_mask, old_mask_out_va) — swap-and-return mask.
@@ -7010,6 +7067,44 @@ static bool jit_vma_is_writer(const struct Vma *v) {
            (v->prot & VMA_PROT_EXEC) == 0;
 }
 
+// Is `v` a SEALED code region's one alias? It is execute-only: EXEC without
+// READ exists only over a code Burrow (vma_alloc promotes it elsewhere), and
+// only SYS_JIT_CREATE_SEALED maps one.
+static bool jit_vma_is_sealed(const struct Vma *v) {
+    return v && v->burrow &&
+           v->burrow->magic == VMO_MAGIC &&
+           v->burrow->type == BURROW_TYPE_CODE &&
+           v->prot == VMA_PROT_EXEC;
+}
+
+// B-2b: where a code alias goes. Every alias of a code region -- writer, exec,
+// sealed -- gets its own random address, so no alias's VA tells an attacker
+// another's: the writer is the one mapping an exploit wants, and first-fit
+// put it directly below the exec alias that every return address names. A
+// random page of the window is the starting point and the first gap at or
+// above it wins, wrapping to the window's base when nothing above fits. The
+// window spans about 2^34 pages, so the start cannot be guessed even though
+// the choice is not uniform over gaps. `rnd` is drawn by the caller BEFORE
+// as->lock: the CSPRNG may pull fresh entropy, which is no work for under a
+// spinlock.
+//
+// PRECONDITION: caller holds p->as->lock.
+static int jit_place_locked(struct Proc *p, u64 length, u64 rnd, u64 *out) {
+    const u64 lo = EXEC_USER_BURROW_BASE, hi = EXEC_USER_BURROW_TOP;
+    if (length == 0 || length > hi - lo)             return -1;
+    u64 starts = (hi - lo - length) / PAGE_SIZE + 1;
+    u64 start  = lo + (rnd % starts) * PAGE_SIZE;
+    if (vma_find_gap(p, length, start, hi, out) == 0) return 0;
+    return vma_find_gap(p, length, lo, hi, out);
+}
+
+// Draw `n` placement words. Fails while the CSPRNG is unseeded: placement
+// fails closed rather than fall back to a predictable address.
+static int jit_draw(u64 *rnd, long n) {
+    long want = n * (long)sizeof(u64);
+    return kern_random_bytes(rnd, want) == want ? 0 : -1;
+}
+
 // The MECHANISM behind SYS_JIT_CREATE: mint a code region and install BOTH of
 // its aliases, returning the pair through kernel pointers.
 //
@@ -7042,70 +7137,38 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // JIT_REGION_MAX is page-aligned, so the rounded length cannot exceed it
     // and the addition cannot overflow.
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
-    // #106: the buddy-rounded occupancy, not the page-rounded request --
-    // burrow_create_code below allocates 1 << order like every eager Burrow.
-    // JIT_REGION_MAX is 2^14 pages, so a MAX-sized region rounds to itself and
-    // the u32 cast is safe; it is the sizes BELOW it that round up (a 33-MiB
-    // region occupies 64 MiB), and a JIT emitting odd-sized regions is exactly
-    // the workload that makes this routine rather than theoretical.
-    u32 npages = (u32)burrow_backing_pages(length);
+
+    // One independent draw per alias (B-2b), before the lock.
+    u64 rnd[2];
+    if (jit_draw(rnd, 2) != 0)                       return -T_E_AGAIN;
 
     spin_lock(&p->as->lock);
 
-    // I-32: charge ONCE for the region, not once per alias. The two aliases are
-    // two views of ONE set of physical pages -- charging twice would bill a JIT
-    // double for memory it holds once, and the uncharge at destroy would then
-    // have to know to refund twice. One region, one charge.
-    if (!proc_page_charge(p, npages)) {
-        spin_unlock(&p->as->lock);
-        return -T_E_NOMEM;
-    }
-
-    struct Burrow *b = burrow_create_code(length, proc_resource_exempt(p));
+    // B-2a: a code region is a RESERVATION. Nothing is allocated or charged
+    // here; each page is committed, zeroed, I-cache-invalidated and charged
+    // ONCE by the fault that first touches it through either alias (the CODE
+    // arm of userland_demand_page), so the I-32 count is what the JIT has
+    // touched, never what it reserved, and no physically contiguous block is
+    // needed.
+    struct Burrow *b = burrow_create_code(length);
     if (!b) {
-        proc_page_uncharge(p, npages);
         spin_unlock(&p->as->lock);
         return -T_E_NOMEM;
     }
-
-    // CL-7k-3 audit F1: invalidate the I-cache over the fresh pages BEFORE any
-    // RX PTE can name them.
-    //
-    // KP_ZERO zeroes MEMORY; it does not touch the instruction cache. Nothing on
-    // the free path does either -- burrow_unmap clears PTEs and broadcasts TLBI
-    // (a TLB operation), and free_pages does no cache maintenance at all. So a
-    // recycled page can still carry I-cache lines holding a PREVIOUS code
-    // region's instructions, and a Proc that branches into a page it has not
-    // published would fetch them instead of taking the UDF #0 that all-zero
-    // memory promises. That promise is stated in four places; this is what makes
-    // it true rather than requiring it be weakened.
-    //
-    // It also restores consistency: every other executable backing in the tree
-    // syncs at acquisition for exactly this reason (kernel/exec.c's two eager
-    // paths + arch/arm64/fault.c's FILE demand-page arms -- the REVENANT arm's
-    // comment names the hazard as "a stale line from a prior occupant of this
-    // recycled PA"). Named, not cited by line: #107 moved the exec.c pair.
-    // A code Burrow was the sole exception.
-    //
-    // One call, not a per-page loop: a CODE Burrow is one contiguous
-    // alloc_pages chunk, so its direct-map range is contiguous too. Bounded by
-    // JIT_REGION_MAX -- the same ceiling the mandatory publish already pays.
-    arch_icache_sync_range(pa_to_kva(page_to_pa(b->pages)), length);
 
     // Both gaps are found and both VMAs installed under ONE lock hold, so a
     // sibling thread cannot claim either gap between them and no observer ever
     // sees a half-installed region. The writer alias is inserted BEFORE the
-    // second gap search, so vma_find_gap cannot hand back the range we just
-    // took -- the two aliases are necessarily disjoint.
+    // second gap search, so the search cannot hand back the range we just
+    // took -- the two aliases are necessarily disjoint. Each is placed at its
+    // own random address (jit_place_locked).
     u64 wva = 0, xva = 0;
-    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
-                     EXEC_USER_BURROW_TOP, &wva) != 0)
+    if (jit_place_locked(p, length, rnd[0], &wva) != 0)
         goto fail_unref;
     if (burrow_map(p, b, wva, length, VMA_PROT_RW) != 0)
         goto fail_unref;
 
-    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
-                     EXEC_USER_BURROW_TOP, &xva) != 0)
+    if (jit_place_locked(p, length, rnd[1], &xva) != 0)
         goto fail_unmap_writer;
     // VMA_PROT_RX: readable + executable, NOT writable. vma_alloc rejects W|X
     // outright, so this prot could never carry a write bit even by mistake --
@@ -7118,13 +7181,6 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // (handle_count 0, mapping_count 2). The #847 dual count frees the pages
     // only when BOTH aliases are gone -- which is exactly the lifetime a
     // dual-mapped region needs, with no new refcount to get wrong.
-    //
-    // #131/#132: record the payer first. A CODE Burrow can reach neither of the
-    // paths that made attribution load-bearing (burrow_share_into admits only
-    // ANON + the weave DMA subtype; loom_resolve_buf admits only ANON), so this
-    // region is settled by destroy or by exit and by nobody else -- but the
-    // record costs one store and means no settler anywhere has to KNOW that.
-    burrow_charge_record(b, p, npages);
     burrow_unref(b);
     spin_unlock(&p->as->lock);
 
@@ -7135,10 +7191,10 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
 fail_unmap_writer:
     (void)burrow_unmap(p, wva, length);
     // burrow_unmap dropped the writer's mapping ref; the construction handle
-    // below is then the last reference and frees the Burrow.
+    // below is then the last reference and frees the Burrow. Nothing was
+    // touched, so nothing was charged.
 fail_unref:
     burrow_unref(b);
-    proc_page_uncharge(p, npages);
     spin_unlock(&p->as->lock);
     return -T_E_NOMEM;
 }
@@ -7184,6 +7240,132 @@ static s64 sys_jit_create_handler(u64 length_raw, u64 out_va) {
     return sys_jit_create_for_proc(t->proc, length_raw, out_va);
 }
 
+// The MECHANISM behind SYS_JIT_CREATE_SEALED (B-2b;
+// dec-2026-10-07-jit-sealed-thunk): a code region born sealed. Exactly one of
+// `ksrc` (a kernel buffer, for the kernel tests) and `usrc` (the caller's VA,
+// read with the unprivileged user copy) names the bytes.
+//
+// Every page is committed, filled, I-cache-invalidated and installed in the
+// slot table BEFORE any mapping of the region exists, and without as->lock:
+// the copy-in can fault, and the fault path takes as->lock. Nothing else can
+// reach the Burrow meanwhile (no handle, no mapping), and the charges are
+// CAS-safe without the lock (proc_page_charge). Only then is the one alias
+// mapped, execute-only, under as->lock -- so no state of the region ever has
+// a writer, or a readable view of its bytes in EL0. Its pages are already
+// resident, so the first fetch maps a leaf and needs no sync (the CODE fault
+// arm's resident hit).
+s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+                                 u64 length_raw, u64 *out_exec) {
+    if (!p || !out_exec)                             return -T_E_INVAL;
+    // CAP_JIT first, before any argument is judged (the SYS_JIT_CREATE order).
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
+        return -T_E_ACCES;
+    if (length_raw == 0 || length_raw > JIT_SEALED_MAX) return -T_E_INVAL;
+    if ((ksrc != NULL) == (usrc != 0))               return -T_E_INVAL;
+
+    // JIT_SEALED_MAX is page-aligned, so the rounding cannot overflow.
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    u64 rnd;
+    if (jit_draw(&rnd, 1) != 0)                      return -T_E_AGAIN;
+
+    struct Burrow *b = burrow_create_code(length);
+    if (!b)                                          return -T_E_NOMEM;
+
+    bool exempt = proc_resource_exempt(p);
+    s64 rc = -T_E_NOMEM;
+    for (u64 off = 0; off < length; off += PAGE_SIZE) {
+        if (!proc_page_charge(p, 1))                 goto fail;
+        struct page *pg = alloc_user_pages(0, KP_ZERO, exempt);
+        if (!pg) {
+            proc_page_uncharge(p, 1);
+            goto fail;
+        }
+        // The same entry as the fault path's demand-zero commit: a page fresh
+        // from the buddy carries its previous owner's count.
+        cow_page_set_sole(pg);
+        u8 *kva = (u8 *)pa_to_kva(page_to_pa(pg));
+        if (off < length_raw) {
+            u64 n = length_raw - off;
+            if (n > PAGE_SIZE) n = PAGE_SIZE;
+            if (ksrc) {
+                for (u64 i = 0; i < n; i++) kva[i] = ksrc[off + i];
+            } else if (uaccess_copy_in(kva, usrc + off, (size_t)n) != 0) {
+                free_pages(pg, 0);
+                proc_page_uncharge(p, 1);
+                rc = -T_E_FAULT;
+                goto fail;
+            }
+        }
+        // Publish the bytes and drop any line a previous owner left (CL-7k-3
+        // F1): no leaf names this page yet, so this is the only sync it needs.
+        arch_icache_sync_range(kva, PAGE_SIZE);
+        struct page *winner = NULL;
+        if (pagemap_install(&b->pm, &b->lock, (size_t)(off / PAGE_SIZE), pg,
+                            p->as, exempt, &winner) != 0) {
+            // A node OOM or a cap hit (the Burrow is private, so no slot is
+            // ever lost to a sibling: the install returns 0 or < 0 here).
+            free_pages(pg, 0);
+            proc_page_uncharge(p, 1);
+            goto fail;
+        }
+    }
+
+    spin_lock(&p->as->lock);
+    u64 xva = 0;
+    if (jit_place_locked(p, length, rnd, &xva) != 0 ||
+        burrow_map(p, b, xva, length, VMA_PROT_EXEC) != 0) {
+        spin_unlock(&p->as->lock);
+        goto fail;
+    }
+    // The mapping owns the Burrow now (handle_count 0, mapping_count 1).
+    burrow_unref(b);
+    spin_unlock(&p->as->lock);
+
+    *out_exec = xva;
+    return 0;
+
+fail:
+    // What the fill charged is the footprint -- its committed pages plus the
+    // slot table's nodes -- and burrow_free_internal cannot refund, so it is
+    // read here and returned after the free.
+    {
+        u32 paid = burrow_lazy_footprint(b);
+        burrow_unref(b);
+        if (paid) proc_page_uncharge(p, paid);
+    }
+    return rc;
+}
+
+// SYS_JIT_CREATE_SEALED: the mechanism above, plus the copy-out of the VA.
+s64 sys_jit_create_sealed_for_proc(struct Proc *p, u64 src_va, u64 length_raw,
+                                   u64 out_va) {
+    if (!p)                                          return -T_E_INVAL;
+    // The cap before either buffer check, as SYS_JIT_CREATE does.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
+        return -T_E_ACCES;
+    if (length_raw == 0 || length_raw > JIT_SEALED_MAX) return -T_E_INVAL;
+    if (src_va == 0 || !sys_validate_user_buf(src_va, length_raw))
+        return -T_E_FAULT;
+    if (!sys_validate_user_buf(out_va, sizeof(u64))) return -T_E_FAULT;
+
+    u64 xva = 0;
+    s64 rc = sys_jit_create_sealed_region(p, NULL, src_va, length_raw, &xva);
+    if (rc != 0) return rc;
+
+    // With no lock held (the R-5-F1 rule, as for SYS_JIT_CREATE).
+    if (uaccess_copy_out(out_va, &xva, sizeof(xva)) != 0) {
+        (void)sys_jit_destroy_for_proc(p, xva);
+        return -T_E_FAULT;
+    }
+    return 0;
+}
+
+static s64 sys_jit_create_sealed_handler(u64 src_va, u64 length_raw, u64 out_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -T_E_INVAL;
+    return sys_jit_create_sealed_for_proc(t->proc, src_va, length_raw, out_va);
+}
+
 // SYS_JIT_DESTROY: tear down BOTH aliases of the region whose writer alias
 // starts at writer_va, and free the backing pages.
 //
@@ -7200,9 +7382,26 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     spin_lock(&p->as->lock);
 
     struct Vma *w = vma_lookup(p, writer_va);
-    // Must be the BASE of the writer alias, not merely a VA inside it -- a
-    // partial teardown has no meaning for a code region.
-    if (!w || w->vaddr_start != writer_va || !jit_vma_is_writer(w)) {
+    // Must be the BASE of the alias, not merely a VA inside it -- a partial
+    // teardown has no meaning for a code region.
+    if (!w || w->vaddr_start != writer_va) {
+        spin_unlock(&p->as->lock);
+        return -T_E_INVAL;
+    }
+
+    // B-2b: a sealed region has ONE alias, execute-only, and is named by it.
+    if (jit_vma_is_sealed(w)) {
+        u64 slen = w->vaddr_end - w->vaddr_start;
+        // Read before the unmap frees the Burrow, as for a pair below.
+        u32 paid = burrow_lazy_footprint(w->burrow);
+        int rc = burrow_unmap(p, writer_va, slen);
+        if (rc == 0 && paid)
+            proc_page_uncharge(p, paid);
+        spin_unlock(&p->as->lock);
+        return rc == 0 ? 0 : -T_E_INVAL;
+    }
+
+    if (!jit_vma_is_writer(w)) {
         spin_unlock(&p->as->lock);
         return -T_E_INVAL;
     }
@@ -7221,10 +7420,6 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
 
     u64 length  = w->vaddr_end - w->vaddr_start;
     u64 exec_va = x->vaddr_start;
-    // #106: recompute the create-time charge. `length` is the VMA span, which
-    // IS the page-rounded length create passed to burrow_backing_pages, so the
-    // refund reproduces the charge exactly.
-    u32 npages  = (u32)burrow_backing_pages(length);
 
     // CL-7k-3 audit F3: validate the exec alias' geometry BEFORE touching
     // either mapping. Both burrow_unmaps below are issued unconditionally, so
@@ -7249,29 +7444,24 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     // means that at no instant does an executable view of the region outlive
     // its writable partner, which keeps the "code is reachable only as a
     // complete region" reading true even mid-teardown.
-    // #131/#132: claim the charge BEFORE the unmaps -- the record lives on the
-    // Burrow, and a successful pair of unmaps frees it, so there is nothing to
-    // read afterwards. Claiming is what makes the refund exactly-once; `npages`
-    // above is kept only as the cross-check that the recomputation still agrees
-    // with what was actually charged.
-    // Snapshot the Burrow: both burrow_unmaps below free their Vma structs, so
-    // `w` and `x` are dangling the moment the second one returns.
-    struct Burrow *wb = w->burrow;
-    u32 paid = burrow_charge_claim(wb, p);
-    if (paid != 0 && paid != npages)
-        extinction("SYS_JIT_DESTROY: charge record disagrees with the region's page count");
+    //
+    // B-2a: what this space paid for the region is its FOOTPRINT -- each page
+    // it touched (charged once, by the fault that committed it) plus the
+    // pagemap nodes those commits allocated -- read BEFORE the unmaps, because
+    // the second one frees the Burrow and the count with it. It is exact:
+    // every fault that could add to it runs under as->lock, which we hold, and
+    // nothing removes a CODE page while the region lives (decommit and the
+    // range detach refuse CODE). burrow_free_internal is Proc-agnostic and
+    // cannot refund, so this is the one place the region's charge returns;
+    // exit needs none, since the count dies with the address space.
+    u32 paid = burrow_lazy_footprint(w->burrow);
 
     int rc_x = burrow_unmap(p, exec_va, length);
     int rc_w = burrow_unmap(p, writer_va, length);
-    if (rc_x == 0 && rc_w == 0) {
-        if (paid) proc_page_uncharge(p, paid);
-    } else if (paid) {
-        // Neither alias was fully torn down, so the region -- and the charge
-        // that belongs to it -- survives. Put the claim back for the retry or
-        // for exit to settle. `wb` is still live: a partial teardown by
-        // definition left a mapping holding it.
-        burrow_charge_restore(wb, p, paid);
-    }
+    // Both unmaps or nothing: a surviving alias still maps the region, and the
+    // charge stays with it for the retry or for exit to settle.
+    if (rc_x == 0 && rc_w == 0 && paid)
+        proc_page_uncharge(p, paid);
     spin_unlock(&p->as->lock);
 
     return (rc_x == 0 && rc_w == 0) ? 0 : -T_E_INVAL;
@@ -7294,9 +7484,10 @@ static s64 sys_jit_destroy_handler(u64 writer_va) {
 //
 // It is also architecturally exact. ARMv8 requires data caches to behave as
 // PIPT, so cleaning ANY VA that maps the PA cleans the same line the user's
-// write through the RW alias dirtied; and IC IVAU is specified to invalidate
-// every alias of the PA. This is precisely how Linux's flush_icache_range
-// publishes module text written through the linear map.
+// write through the RW alias dirtied. The I-side is exact by policy: an
+// invalidate by the direct-map VA reaches the exec alias's lines only on a PIPT
+// I-cache, so on any other arch_icache_sync_range invalidates the whole I-cache
+// (Linux's sync_icache_aliases, which publishes user text the same way).
 s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
     if (!p)                                          return -T_E_INVAL;
     if (length == 0)                                 return -T_E_INVAL;
@@ -7317,15 +7508,10 @@ s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
     }
 
     struct Burrow *b = v->burrow;
-    if (!b->pages) {
-        spin_unlock(&p->as->lock);
-        return -T_E_INVAL;
-    }
     // Byte offset of the range within the Burrow, and a handle ref so the
     // pages survive a sibling thread's concurrent SYS_JIT_DESTROY while we
     // sync outside the lock.
     u64 off = (vaddr - v->vaddr_start) + v->burrow_offset;
-    paddr_t base_pa = page_to_pa(b->pages);
     u64 bsize = (u64)b->size;
     burrow_ref(b);
 
@@ -7340,18 +7526,28 @@ s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
         return -T_E_INVAL;
     }
 
-    // Walk page by page: the region is physically contiguous (a CODE Burrow is
-    // one alloc_pages chunk), but the direct map is addressed per page and
-    // arch_icache_sync_range takes a kernel VA, so sync each page's span.
-    // Bounded by JIT_REGION_MAX / PAGE_SIZE iterations.
+    // Walk page by page through the pagemap (B-2a: the region's pages are
+    // committed one at a time and are not contiguous). A slot not yet committed
+    // holds nothing the caller wrote -- a write commits its page under
+    // as->lock before the store lands -- and its own commit will invalidate it,
+    // so it is skipped. A page read here stays valid after v->lock drops: no
+    // CODE slot is ever emptied or swapped while the Burrow lives (decommit,
+    // the range detach and the copy-on-write swap all refuse CODE), and our
+    // ref keeps the Burrow alive. Bounded by JIT_REGION_MAX / PAGE_SIZE
+    // iterations, paid for by the caller's own length.
     u64 done = 0;
     while (done < length) {
         u64 cur      = off + done;
         u64 page_off = cur & (PAGE_SIZE - 1);
         u64 chunk    = PAGE_SIZE - page_off;
         if (chunk > length - done) chunk = length - done;
-        u8 *kva = (u8 *)pa_to_kva(base_pa + (cur & ~(u64)(PAGE_SIZE - 1)));
-        arch_icache_sync_range(kva + page_off, (size_t)chunk);
+        spin_lock(&b->lock);
+        struct page *pg = pagemap_get(&b->pm, (size_t)(cur / PAGE_SIZE));
+        spin_unlock(&b->lock);
+        if (pg) {
+            u8 *kva = (u8 *)pa_to_kva(page_to_pa(pg));
+            arch_icache_sync_range(kva + page_off, (size_t)chunk);
+        }
         done += chunk;
     }
 
@@ -7366,6 +7562,16 @@ static s64 sys_icache_sync_handler(u64 vaddr, u64 length) {
     struct Thread *t = current_thread();
     if (!t)                                          return -T_E_INVAL;
     return sys_icache_sync_for_proc(t->proc, vaddr, length);
+}
+
+// SYS_ICACHE_SYNC_SPACE: the context-synchronization event SYS_ICACHE_SYNC
+// gives the calling CPU, for every other CPU running a thread of the same
+// address space (sched_sync_space; JIT-ON-WX-DESIGN B-2 item 4).
+static s64 sys_icache_sync_space_handler(void) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc || !t->proc->as)              return -T_E_INVAL;
+    (void)sched_sync_space(t->proc->as);
+    return 0;
 }
 
 // =============================================================================
@@ -7731,6 +7937,11 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // alloc failure, unmap + loom_unref fully reclaims (handle_count to 0 via
     // loom_free's burrow_unref -- which first JOINS any spawned SQPOLL kthread --
     // mapping_count to 0 via burrow_unmap).
+    //
+    // The instant the handle is installed a sibling thread can close it, and that
+    // close drops the only reference and frees the Loom synchronously. Everything
+    // below still touches l, so hold a reference of our own until the end.
+    loom_ref(l);
     hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
     if (fd < 0) {
         spin_lock(&p->as->lock);
@@ -7738,8 +7949,12 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         proc_page_uncharge(p, ring_pages);           // #65: the ring VMA freed
         spin_unlock(&p->as->lock);
         loom_unref(l);
+        loom_unref(l);
         return -1;
     }
+#ifdef KERNEL_TESTS
+    loom_setup_installed_for_test(p, fd);
+#endif
 
     // #130: bind the I-32 charge ledger. Deliberately LAST -- after the final
     // failure path -- so it marks a fully-constructed Loom. Every rollback
@@ -7771,19 +7986,20 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     out->_resv0        = 0;
     out->_resv1[0] = out->_resv1[1] = out->_resv1[2] = out->_resv1[3] = 0;
     *out_fd = fd;
+    loom_unref(l);   // may free it, if the fd is already closed; l is not touched again
     return 0;
 }
 
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n) {
-    if (!p)                            return -1;
-    if (op != LOOM_REGISTER_HANDLES)   return -1;   // BUFFERS reserved (Loom-6)
-    if (n > LOOM_MAX_REG_HANDLES)      return -1;
-    if (n > 0 && !fds)                 return -1;
+    if (!p)                            return -T_E_INVAL;
+    if (op != LOOM_REGISTER_HANDLES)   return -T_E_INVAL;   // BUFFERS: its own entry
+    if (n > LOOM_MAX_REG_HANDLES)      return -T_E_INVAL;
+    if (n > 0 && !fds)                 return -T_E_INVAL;
 
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_INVAL; }
     struct Loom *l = (struct Loom *)lh.obj;
 
     // Resolve each fd -> KOBJ_SPOOR, taking the table's OWN ref + snapshotting
@@ -7794,10 +8010,15 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     struct Spoor *spoors[LOOM_MAX_REG_HANDLES];
     rights_t      rights[LOOM_MAX_REG_HANDLES];
     u32 got = 0;
+    int rc  = -T_E_BADF;
     for (u32 i = 0; i < n; i++) {
         struct Handle sh;
         if (handle_get(p, fds[i], &sh) != 0)   goto rollback;
-        if (sh.kind != KOBJ_SPOOR)             { handle_put(&sh); goto rollback; }
+        if (sh.kind != KOBJ_SPOOR) {
+            handle_put(&sh);
+            rc = -T_E_INVAL;
+            goto rollback;
+        }
         spoor_ref((struct Spoor *)sh.obj);
         spoors[got] = (struct Spoor *)sh.obj;
         rights[got] = sh.rights;
@@ -7806,28 +8027,29 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
     }
 
     // loom_register_handles ADOPTS the `got` refs on success. It fails when a
-    // dev9p Spoor's write-behind flush fails (a death, or the server) or had
-    // latched an error, and
-    // then installs nothing, so the refs are still ours to drop.
-    if (loom_register_handles(l, spoors, rights, got) != 0) goto rollback;
+    // dev9p Spoor's write-behind flush fails (a death, a caught note, or the
+    // server) or had latched an error, and then installs nothing, so the refs
+    // are still ours to drop; its errno is the caller's.
+    rc = loom_register_handles(l, spoors, rights, got);
+    if (rc != 0) goto rollback;
     handle_put(&lh);
     return 0;
 
 rollback:
     for (u32 i = 0; i < got; i++) spoor_clunk(spoors[i]);
     handle_put(&lh);
-    return -1;
+    return rc;
 }
 
 int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
                                        const struct loom_buf_reg *bufs, u32 n) {
-    if (!p)                            return -1;
-    if (n > LOOM_MAX_REG_BUFFERS)      return -1;
-    if (n > 0 && !bufs)               return -1;
+    if (!p)                            return -T_E_INVAL;
+    if (n > LOOM_MAX_REG_BUFFERS)      return -T_E_INVAL;
+    if (n > 0 && !bufs)               return -T_E_INVAL;
 
     struct Handle lh;
-    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
-    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    if (handle_get(p, loom_fd, &lh) != 0)  return -T_E_BADF;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -T_E_INVAL; }
     struct Loom *l = (struct Loom *)lh.obj;
 
     // handle_get holds a ref on the Loom across the call (the #844 by-value
@@ -7837,6 +8059,13 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
     int rc = loom_register_buffers(l, p, bufs, n);
     handle_put(&lh);
     return rc;
+}
+
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size) {
+    (void)handle_close(p, fd);
+    // Not burrow_unmap: that drops the mapping with no payer, so when it is the
+    // final drop the ring's charge record dies unrefunded.
+    (void)sys_burrow_detach_for_proc(p, ring_va, ring_size);
 }
 
 static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
@@ -7855,41 +8084,39 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     hidx_t fd;
     if (sys_loom_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd) != 0) return -1;
 
-    // Copy the geometry back. A fault mid-writeback fully rolls back the setup
-    // (handle_close -> loom_unref drops the ring's handle_count; burrow_unmap
-    // drops mapping_count to 0 -> the pages free) so a faulting caller never
-    // leaks a ring it cannot see. ring_va / ring_size come from kp.
+    // Copy the geometry back. A fault mid-writeback fully rolls back the setup,
+    // so a faulting caller never leaks a ring -- or its charge -- it cannot see.
     const u8 *src = (const u8 *)&kp;
     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
-            (void)handle_close(p, fd);
-            spin_lock(&p->as->lock);
-            (void)burrow_unmap(p, kp.ring_va, (size_t)kp.ring_size);
-            spin_unlock(&p->as->lock);
+            sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
             return -1;
         }
     }
     return (s64)fd;
 }
 
+// Every refusal is a negative errno (LOOM.md 8.1): -EBADF for a loom_fd or
+// fds[i] that is not open, -EFAULT for an argument array the kernel cannot
+// read, a failed write-behind flush's own errno, -EINVAL for the rest.
 static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                      u64 arg_va, u64 nargs_raw) {
     struct Thread *t = current_thread();
-    if (!t || !t->proc)                              return -1;
+    if (!t || !t->proc)                              return -T_E_INVAL;
     struct Proc *p = t->proc;
     u32 op = (u32)op_raw;
     u32 n  = (u32)nargs_raw;
 
     if (op == LOOM_REGISTER_HANDLES) {
-        if (n > LOOM_MAX_REG_HANDLES)                return -1;
+        if (n > LOOM_MAX_REG_HANDLES)                return -T_E_INVAL;
         hidx_t fds[LOOM_MAX_REG_HANDLES];
         if (n > 0) {
-            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -1;
+            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -T_E_FAULT;
             for (u32 i = 0; i < n; i++) {
                 u8 fb[4];
                 for (int b = 0; b < 4; b++)
                     if (uaccess_load_u8(arg_va + (u64)i * 4u + (u64)b, &fb[b]) != 0)
-                        return -1;
+                        return -T_E_FAULT;
                 u32 v = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
                 fds[i] = (hidx_t)v;
             }
@@ -7899,18 +8126,18 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
     }
 
     if (op == LOOM_REGISTER_BUFFERS) {
-        if (n > LOOM_MAX_REG_BUFFERS)                return -1;
+        if (n > LOOM_MAX_REG_BUFFERS)                return -T_E_INVAL;
         struct loom_buf_reg bufs[LOOM_MAX_REG_BUFFERS];
         if (n > 0) {
             if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(struct loom_buf_reg)))
-                return -1;
+                return -T_E_FAULT;
             // Copy each {u64 va; u64 len} byte-by-byte (TOCTOU-safe; never re-read
             // after the kernel snapshot) and assemble little-endian.
             for (u32 i = 0; i < n; i++) {
                 u64 base = arg_va + (u64)i * (u64)sizeof(struct loom_buf_reg);
                 u8 raw[16];
                 for (int b = 0; b < 16; b++)
-                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -1;
+                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -T_E_FAULT;
                 u64 va = 0, len = 0;
                 for (int b = 0; b < 8; b++) {
                     va  |= (u64)raw[b]      << (8 * b);
@@ -7924,7 +8151,7 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                                        n > 0 ? bufs : NULL, n);
     }
 
-    return -1;   // unknown register op
+    return -T_E_INVAL;   // unknown register op
 }
 
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
@@ -10675,8 +10902,10 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
     // pgrp selectors on want_pid; the accepted-flag mask MUST admit them or the
     // job-control stop/continue reports are unreachable from EL0 (PTY-4: the
     // shell's WAIT_UNTRACED fg wait returned a spurious -1 -- the whole
-    // ^Z-detects-a-stop path was closed at this gate).
-    if (flags_u & ~(u64)(WAIT_WNOHANG | WAIT_UNTRACED | WAIT_CONTINUED))
+    // ^Z-detects-a-stop path was closed at this gate). gcpark-b's WAIT_PACKED
+    // is admitted the same way.
+    if (flags_u & ~(u64)(WAIT_WNOHANG | WAIT_UNTRACED | WAIT_CONTINUED |
+                         WAIT_PACKED))
                                                        return -1;
     int flags    = (int)flags_u;
 
@@ -12948,21 +13177,15 @@ static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
     // asked in Linux's terms; the translation to Thylacine's happens here, and
     // the third line is the one that matters -- Linux's WCONTINUED is bit 8 and
     // Thylacine's WAIT_CONTINUED is bit 4.
-    int flags = 0;
+    //
+    // Linux always wants the packed word, so WAIT_PACKED is always asked for
+    // (gcpark-b). Before it existed this row repacked a raw status itself when
+    // no PTY-1e flag was passed, which could only ever say "exited": a child
+    // that died of a note has raw status 1, and its signal is not in that word.
+    int flags = WAIT_PACKED;
     if (o.nohang)    flags |= WAIT_WNOHANG;
     if (o.untraced)  flags |= WAIT_UNTRACED;
     if (o.continued) flags |= WAIT_CONTINUED;
-
-    // wait_pid_for applies the packed encoding IFF a PTY-1e flag was passed
-    // (proc.h) -- a plain wait keeps the RAW exit status for pre-PTY callers.
-    // Linux always wants packed, so we pack exactly when the kernel will not.
-    //
-    // THIS MUST BE DECIDED BEFORE THE CALL, and derived from the word one line
-    // above rather than from `options`: the returned value cannot be classified
-    // after the fact, because a raw exit status of 5247 and a packed
-    // WAIT_STATUS_STOPPED are both 0x147f. Only what we ASKED for tells them
-    // apart.
-    const bool kernel_packs = (flags & (WAIT_UNTRACED | WAIT_CONTINUED)) != 0;
 
     // Validate up-front, as the native handler does: a wait that reaps and THEN
     // faults on the status write has destroyed the child's exit code with
@@ -12991,11 +13214,8 @@ static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
     if (reaped < 0)  return -(s64)T_E_CHILD;
     if (reaped == 0) return 0;                  // WNOHANG, nothing ready
 
-    if (wstatus_va != 0) {
-        if (!kernel_packs) status = WAIT_STATUS_EXITED(status);
-        if (sys_store_user_int(wstatus_va, status) != 0)
-            return -(s64)T_E_FAULT;
-    }
+    if (wstatus_va != 0 && sys_store_user_int(wstatus_va, status) != 0)
+        return -(s64)T_E_FAULT;
     return (s64)reaped;
 }
 
@@ -13650,9 +13870,93 @@ static s64 viv_getdents64_run(struct Proc *p, const u64 *args) {
     spoor_clunk(c);
     return (s64)emitted;
 }
+// The phenotype's kill family (VIVARIUM 6.22; operator vote 2026-10-13): one body
+// for kill(pid, sig), tkill(tid, sig) and tgkill(tgid, tid, sig), with `tid` 0
+// for kill. Every post goes through SYS_POSTNOTE's own arms -- postnote_self for
+// the caller, the parent-gated walk for anyone else -- so a guest reaches exactly
+// the Procs a Pouch program's kill reaches, and no third gate exists.
+static s64 viv_kill(struct exception_context *ctx, struct Proc *p, int pid, int tid,
+                    u64 sig) {
+    const char        *name = NULL;
+    enum viv_kill_kind kind = vivarium_kill_decide(sig, &name);
+    if (kind == VIV_KILL_REFUSE) return -(s64)T_E_INVAL;
+
+    bool self;
+    if (tid > 0) {
+        // The caller's own thread list can change under it (a peer exits), so
+        // it is read under the lock every thread-list walk holds.
+        irq_state_t s = proc_table_lock_acquire();
+        self = proc_holds_tid_locked(p, tid);
+        proc_table_lock_release(s);
+        if (self && pid > 0 && pid != p->pid) return -(s64)T_E_SRCH;
+    } else {
+        // A negative pid is a process group, or every process: the gate admits
+        // one Proc at a time, so a group target is refused rather than widened.
+        if (pid < 0) return -(s64)T_E_PERM;
+        // pid 0 is the caller, as SYS_POSTNOTE's sentinel makes it for Pouch.
+        self = (pid == 0 || pid == p->pid);
+    }
+
+    if (self) {
+        if (kind == VIV_KILL_PROBE) return 0;
+        // Pouch's abort() ends in this same call: a snare:* death the kernel
+        // records as its signal, not a post anything could catch or mask. A
+        // NULL ctx is the test entry, whose current thread is the harness's: it
+        // learns the verdict (1, never a syscall's own answer) instead.
+        if (kind == VIV_KILL_SELF_DEATH) {
+            if (!ctx) return 1;
+            proc_fault_terminate(name, ctx->elr);
+        }
+        return postnote_self(p, name);
+    }
+    // A snare:* death is the caller's own to choose, never another Proc's.
+    if (kind == VIV_KILL_SELF_DEATH) return -(s64)T_E_INVAL;
+
+    struct postnote_walk_ctx w = {
+        .target_pid = pid,
+        .target_tid = tid,
+        .caller     = p,
+        .name       = (kind == VIV_KILL_PROBE) ? NULL : name,
+        .result     = 0,
+        .err        = 0,
+    };
+    (void)proc_for_each(postnote_walk_cb, &w);
+    if (w.result == 1) return 0;
+    if (w.result == 0) return -(s64)T_E_SRCH;   // no Proc has that pid or tid
+    // Linux's kill spells the gate's refusal EPERM, and in the Linux ABI -1 IS
+    // EPERM: the native ban on -T_E_PERM stops at this boundary.
+    if (w.err == -(s64)T_E_ACCES) return -(s64)T_E_PERM;
+    return w.err ? w.err : -(s64)T_E_PERM;
+}
+
+// Test support (the sys_postnote_*_for_test convention): drives the REAL shell
+// with an explicit caller. Deliberately absent from any header.
+s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
+s64 viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig) {
+    return viv_kill(NULL, caller, pid, tid, sig);
+}
+
 static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
                      u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
+    // pid, tid and sig are each an int in Linux's prototype, so the high half
+    // of the register is not part of the argument: Linux narrows it away, and
+    // so does the shell. A negative sig stays negative, and out of range.
+    case VIV_LINUX_KILL:
+        // kill(pid, sig): x0 pid, x1 sig.
+        return viv_kill(ctx, p, (int)(s32)args[0], 0, (u64)(s64)(s32)args[1]);
+
+    case VIV_LINUX_TKILL:
+        // tkill(tid, sig): Linux refuses a tid <= 0 with EINVAL.
+        if ((s32)args[0] <= 0) return -(s64)T_E_INVAL;
+        return viv_kill(ctx, p, 0, (int)(s32)args[0], (u64)(s64)(s32)args[1]);
+
+    case VIV_LINUX_TGKILL:
+        // tgkill(tgid, tid, sig): both ids must be positive (EINVAL).
+        if ((s32)args[0] <= 0 || (s32)args[1] <= 0) return -(s64)T_E_INVAL;
+        return viv_kill(ctx, p, (int)(s32)args[0], (int)(s32)args[1],
+                        (u64)(s64)(s32)args[2]);
+
     case VIV_LINUX_OPENAT: {
         // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags,
         // x3 mode (read only by the O_CREAT arm).
@@ -15434,7 +15738,7 @@ static void syscall_dispatch_body(struct exception_context *ctx);
 //          other than the boundary the design names.
 //
 // The deferred reschedule is not denied, only POSTPONED: with the marker
-// cleared, .Lel0_sync_return's preempt_check_irq takes it
+// cleared, .Lel0_return's preempt_check_irq takes it
 // (specs/syscall_irqs_buggy_marker_never_cleared.cfg is this clear removed,
 // and it violates TailTookItsPreempt).
 //
@@ -16004,6 +16308,16 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_icache_sync_handler(ctx->regs[0], ctx->regs[1]);
         return;
 
+    case SYS_JIT_CREATE_SEALED:
+        ctx->regs[0] = (u64)sys_jit_create_sealed_handler(ctx->regs[0],
+                                                          ctx->regs[1],
+                                                          ctx->regs[2]);
+        return;
+
+    case SYS_ICACHE_SYNC_SPACE:
+        ctx->regs[0] = (u64)sys_icache_sync_space_handler();
+        return;
+
     case SYS_WALK_CREATE:
         ctx->regs[0] = (u64)sys_walk_create_handler(ctx->regs[0],
                                                     ctx->regs[1],
@@ -16188,7 +16502,7 @@ static void syscall_dispatch_body(struct exception_context *ctx) {
         return;
 
     case SYS_POSTNOTE:
-        ctx->regs[0] = (u64)sys_postnote_handler(ctx->regs[0],
+        ctx->regs[0] = (u64)sys_postnote_handler(ctx, ctx->regs[0],
                                                   ctx->regs[1],
                                                   ctx->regs[2]);
         return;

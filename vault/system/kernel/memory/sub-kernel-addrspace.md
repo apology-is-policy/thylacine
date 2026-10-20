@@ -10,7 +10,7 @@ validated-by: [spec-cow, spec-capacity, gate-smp]
 locks: [lock-vma, lock-cow]
 design: ["docs/LINEAGE.md", "docs/ARCHITECTURE.md"]
 created: 2026-08-06
-updated: 2026-09-23
+updated: 2026-10-08
 ---
 ## Purpose
 
@@ -131,6 +131,21 @@ the survivor was still translating through. Both callers existed — the
 second reached by a vfork child execing, which is the `posix_spawn` shape
 exactly — so this is one fix at the right layer rather than a gate
 repeated at each site.
+
+**The last reference also stops the devices the space maps** (2026-10-08,
+execquiesce). Before `vma_drain_in`, `addrspace_unref` runs
+`addrspace_quiesce_mapped_devices`: every device a `BURROW_TYPE_MMIO` mapping in
+the space claims is reset (a PCI function quiesced) before the drain frees the
+DMA buffers it was handed (RW-7 R3-F1). A dying holder also checks, but reads the
+count at its exit close and its reap and drops its reference only at the reap, so
+two holders leaving at once can each read the other's and both skip; the last
+reference is the one point that cannot be skipped -- the same argument that moved
+the drain here. The walk is a no-op on a space with no device mapping (a failed
+exec's space, the COW rollback). `addrspace_unref` is now `addrspace_release`
+(drop one reference; true when it was the last) followed by `addrspace_destroy`,
+and exec calls the two halves itself so that its handle-table device walk runs
+exactly when its drop is the last, between the two. [[sub-kernel-death]] owns the
+reset itself.
 
 **No TLB flush at teardown**, the Linux model. What makes it sound is the
 **ASID tag**, not any earlier invalidation: every user PTE is non-global,
@@ -255,8 +270,13 @@ have a buggy cfg in [[spec-cow]].
 `vma_count` / `shared_map_pages` / `page_budget` / `page_peak` /
 `pgtable_pages` (B-1a' audit F1: the hardware tables inside `page_count`,
 telemetry) / `file_pages` (audit F8: the mapped FILE pages inside it,
-telemetry) / `id` (a u64 from a global counter, never reused; the eager
-charge record's key, audit F4).
+telemetry) / `guards_ever` and `caps_ever` (2026-10-08,
+[[dec-2026-10-08-image-holder-record]]: the image's record of the Procs that have
+left it -- their `NODUMP` / `NOTRACE` / `DEBUG_TAINTED` bits and their caps,
+ORed in at each departure and never cleared; the I-39 image join weighs them,
+[[sub-kernel-proc]]; they replaced B-2b audit r2's `code_vmas`) / `id` (a u64
+from a global counter, never reused; the eager charge record's key, audit F4).
+The struct is 80 bytes.
 
 `context_id` lives here because **the ASID names a translation table**,
 which is what the allocator always semantically meant. Two Procs sharing

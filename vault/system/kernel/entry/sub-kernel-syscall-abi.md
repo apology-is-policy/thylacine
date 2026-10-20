@@ -17,7 +17,7 @@ abis: [abi-t-stat, abi-handle-rights, abi-errno]
 design:
   - "docs/ARCHITECTURE.md section 13"
 created: 2026-08-03
-updated: 2026-10-06
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -151,6 +151,26 @@ of this dossier carries the two records.
 incremented: **124** live numbers, the span runs to 126 with the same three
 holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
 are empty.
+
+**B-2b append (2026-10-07).** `SYS_JIT_CREATE_SEALED` = 127; `SYS__NATIVE_TOP`
+is 128 and `VIV_NATIVE_CEILING` 127. Re-measured on this tree, not
+incremented: **125** live numbers, the span runs to 127 with the same three
+holes, `syscall_dispatch_body` has exactly 125 arms, and both set differences
+are empty. The section at the end of this dossier carries the record.
+
+**B-2e2 append (2026-10-13).** `SYS_ICACHE_SYNC_SPACE` = 128 (no arguments;
+`dec-2026-10-13-icache-sync-space`); `SYS__NATIVE_TOP` is 129 and
+`VIV_NATIVE_CEILING` 128. Re-measured on this tree, not incremented: **126**
+live numbers, the span runs to 128 with the same three holes (26, 30, 43),
+`syscall_dispatch_body` has exactly 126 arms, and both set differences are
+empty. It is the first native number that is also a Linux arm64 number above
+the old ceiling (`restart_syscall`); [[sub-kernel-vivarium]] carries its
+per-number collision argument. The Rust mirror gains
+`T_SYS_ICACHE_SYNC_SPACE` and `t_icache_sync_space`; libt carries no JIT call,
+the subset rule below. The C JIT header `usr/lib/thylajit/thyla_jit.h`
+(owned by [[sub-dosbox]], consumed by JavaScriptCore too) gains
+`THYLA_SYS_ICACHE_SYNC_SPACE` and `thyla_jit_icache_sync_space`, and its
+`THYLA_JIT_REGION_MAX` follows the kernel's `JIT_REGION_MAX` to 128 MiB.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -405,6 +425,14 @@ offset assertions plus the size assertion, the most-grown record at 104 bytes),
 the stat result (88 bytes after two growths), the hardware allowance descriptor,
 the PCI info block and its two sub-records, the debug register frames, the peer
 identity record, a timespec, and a JIT region descriptor.
+
+The JIT region descriptor and the three JIT numbers (101-103) did not change
+when B-2a (2026-10-07) made the region a reservation, but one answer did: a
+create no longer allocates or charges anything, so its `-ENOMEM` reports a VMA,
+gap or slab failure and never the size of the region. Memory is charged when
+a page is first touched, so a JIT over its budget is refused at that touch,
+which terminates the Proc as any demand-zero overcommit does (I-32), rather
+than at the create ([[sub-kernel-syscall-dispatch]]).
 
 One is pinned only transitively. The hardware window — a base/size pair — has no
 assertion naming it, but the descriptor that contains an array of eight of them
@@ -855,3 +883,56 @@ calls mean ([[dec-2026-10-06-chdir-physical]],
   only to the caller, the system principal and a hostowner; one made over
   `/srv` (`SYS_ATTACH_9P_SRV`) also shows them to the connection's server
   ([[sub-kernel-ninep-attach]], [[sub-kernel-devctl]]).
+
+## B-2b: SYS_JIT_CREATE_SEALED 127; SYS_LOOM_REGISTER answers -errno (2026-10-07)
+
+`SYS_JIT_CREATE_SEALED(src_va x0, length x1, out_va x2) -> 0 / -errno`
+(CAP_JIT, checked first): the kernel copies `length` bytes (1 ..
+`JIT_SEALED_MAX`, 1 MiB) from `src_va` into fresh pages, publishes them, and
+maps ONE execute-only alias at a random address, written as a u64 to `out_va`
+([[dec-2026-10-07-jit-sealed-thunk]]). Errors: `-EACCES`, `-EINVAL` (length),
+`-EFAULT` (source unreadable, `out_va` unwritable), `-EAGAIN` (the CSPRNG is
+unseeded), `-ENOMEM` (page budget -- a sealed region is charged at creation --
+VMA cap, gap or allocator). 127 also named astra's unlanded
+`SYS_SRV_REGISTRY_NEW` on her base; B-2 lands first and she renumbers at her
+merge, the pre-merge-collision exception under Mechanism. The ceiling is 127,
+so the next native append, 128, is the first that owes `restart_syscall` a
+decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
+
+Existing numbers whose answers changed, no number or record moved:
+
+- `SYS_JIT_CREATE` (101) also answers `-EAGAIN`: each alias goes at an
+  independent random address, and none is drawn while the CSPRNG is unseeded.
+- `SYS_JIT_DESTROY` (102) also takes a sealed region's VA, the base of its
+  one alias; an exec alias of a writable region is still refused.
+- `SYS_POSTNOTE` (47) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-14-postnote-errnos]]): `-ESRCH`, `-EACCES` (not the caller's
+  child), `-EAGAIN`, `-EINVAL`, `-EFAULT`; the name is judged before the
+  pid is looked for, so a refused name is `-EINVAL` whatever the target; a
+  dead unreaped child answers 0 to a name it may be sent;
+  and a self-post of `snare:segv`/`bus`/`ill`/`fpe`/`abort` does not return
+  ([[dec-2026-10-14-self-death-snare]]).
+- `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-07-loom-register-errno]]): `-EBADF` for a `loom_fd` or listed
+  fd that is not open, `-EFAULT` for an argument array the kernel cannot read,
+  a failed write-behind flush's own errno (`-ENOSPC`, the server's `-EIO`, a
+  caught note's `-EINTR`, after which the run is still staged), `-EINVAL` for
+  the rest. A caller that tested `rc < 0` is unaffected; `libthyla_rs`'s
+  `register_handles` / `register_buffers` now map the value through
+  `Error::from_syscall_return` instead of answering `InvalidArgument` for
+  every failure. Mirrors: `thyla_jit.h`, `libthyla_rs` (`T_SYS_JIT_CREATE_SEALED`,
+  `t_jit_create_sealed`, `jit::SealedRegion`).
+
+## gcpark-b: `WAIT_PACKED` and the signalled wait word (2026-10-12)
+
+`SYS_WAIT_PID` (22) takes a new flag bit, `WAIT_PACKED` (8): return the Linux
+`wait(2)` word for an exit or a death, and report no stop or continue. The
+word itself gained the signalled shape, `signal & 0x7f`, which the kernel now
+records for every death by note (docs/ERRORS.md "The wait status";
+[[sub-kernel-proc]], [[sub-kernel-death]]). Additive, not an ABI break: a
+caller that passes no packing flag still reads the raw status, where a death
+reads 1, and the kernel refuses an unknown bit with -1, so a new caller on an
+old kernel fails loud instead of reading a raw word as packed. Mirrors: libt
+`<thyla/syscall.h>` (`WAIT_PACKED`, `WAIT_IF_SIGNALED`, `WAIT_TERMSIG`),
+`libthyla_rs` (`T_WAIT_PACKED`, `t_wait_if_signaled`, `t_wait_termsig`), and
+Pouch's `POUCH_WAIT_PACKED` in 0026 ([[sub-pouch-process]]).

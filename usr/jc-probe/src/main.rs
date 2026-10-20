@@ -46,6 +46,12 @@
 //          Post-resume signal delivery, the F4 leg -- no deadline reliance.
 //   health `echo fgok | tr a-z A-Z` -> FGOK (the shell owns the terminal and
 //          still runs pipelines after the whole stop/resume cycle)
+//   spinint `debug-child spin-tty` writes SPINNING and spins with no syscall;
+//          `^C` must end it and give a prompt. Only an IRQ return reaches a
+//          thread that never traps (ARCH 8.8.3, #964: the IRQ tail had no
+//          notes leg, and a spinner outlived every ^C into the watchdog).
+//   spinnote `debug-child spin-note` registers a handler first; `^C` must run
+//          it inside the spin (HANDLED), and the prompt follows its exit.
 //   maskst `susp-mask-child` MASKS NOTE_BIT_TTY, so `^Z` finds no thread
 //          willing to take the stop and the fan POSTS the note instead
 //          (POSIX pending). It keeps ticking through the ^Z -- the ARM
@@ -628,6 +634,43 @@ fn run() -> i64 {
         return 10;
     }
 
+    // (h2) A foreground job that never enters the kernel takes `^C`. Only an
+    //      IRQ return can deliver the interrupt to it (ARCH 8.8.3, #964), and
+    //      the kick sends its CPU one at once. SPINNING reaches us from inside
+    //      the child's write, before that call's own return tail, so a `^C`
+    //      sent at once could still be met there; the settle puts the child in
+    //      its loop first. The prompt is non-vacuous for the reason given at (g).
+    leg("spinint");
+    let m = d.mark();
+    if !d.send(b"debug-child spin-tty\r", "spinint-spawn")
+        || !d.read_until(m, b"SPINNING", 1, "spinint-spawn")
+    {
+        return 14;
+    }
+    settle();
+    let spin_mark = d.mark();
+    if !d.send(&[0x03], "spinint") || !d.read_until(spin_mark, PROMPT, 1, "spinint-prompt") {
+        return 14;
+    }
+
+    // (h3) The same with a handler: it runs inside the spin, ends the loop,
+    //      and the child writes HANDLED and exits 0. The same settle.
+    leg("spinnote");
+    let m = d.mark();
+    if !d.send(b"debug-child spin-note\r", "spinnote-spawn")
+        || !d.read_until(m, b"SPINNING", 1, "spinnote-spawn")
+    {
+        return 15;
+    }
+    settle();
+    let note_mark = d.mark();
+    if !d.send(&[0x03], "spinnote")
+        || !d.read_until(note_mark, b"HANDLED", 1, "spinnote-handled")
+        || !d.read_until(note_mark, PROMPT, 1, "spinnote-prompt")
+    {
+        return 15;
+    }
+
     // (i) THE MASK-CONSTRUCTING RUNG. Every rung above -- and pty-4, and
     //     pty-susp-pouch -- exercises the POST-time stop: the pts ldisc raises
     //     tty:susp, proc_job_stop_pgrp finds a thread willing to take it, and
@@ -787,7 +830,7 @@ fn run() -> i64 {
 
     WD_DISARM.store(true, core::sync::atomic::Ordering::Release);
     t_putstr(
-        "jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/maskstop/exit/killst over a hosted ut)\n",
+        "jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/spinint/spinnote/maskstop/exit/killst over a hosted ut)\n",
     );
     0
 }

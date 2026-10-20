@@ -405,7 +405,7 @@ struct Loom {
     // mutated -- a Loom cannot change hands.
     //
     // #132: `ring_pages` is now INFORMATIONAL ONLY. The settle amount comes from
-    // the Burrow's own charge record (burrow_charge_claim), because a pin this
+    // the Burrow's own charge record (burrow_unref_settled), because a pin this
     // Loom holds is not necessarily a region this owner paid for -- a registered
     // buffer may be a weft ring the SHARER paid for. Kept because it is the
     // charge as billed, which is worth having in a dump; do NOT reintroduce it
@@ -592,7 +592,8 @@ void loom_unref(struct Loom *l);
 // dev9p_loom_register, which may wait) the caller retains its refs and the old
 // table stands, though the Spoors before the failing one stay flushed and no
 // longer stage (a cost only). Any previously-registered Spoors are clunked
-// (outside the lock). Returns 0 / -1.
+// (outside the lock). Returns 0, the failed flush's negative errno, or
+// -T_E_INVAL for bad arguments.
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
 
@@ -604,7 +605,8 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // registered buffer. On SUCCESS any previously-registered buffers are unref'd
 // (outside the lock) and the new set installed atomically; on FAILURE (any
 // range invalid / OOB / non-anon / not writable / n out of range) NOTHING is
-// changed and every Burrow ref taken so far is rolled back. Returns 0 / -1.
+// changed and every Burrow ref taken so far is rolled back. Returns 0 /
+// -T_E_INVAL.
 int loom_register_buffers(struct Loom *l, struct Proc *p,
                           const struct loom_buf_reg *bufs, u32 n);
 
@@ -672,6 +674,10 @@ extern volatile u32 g_loom_fanin_test_stalled;
 // kthread -- on any failure).
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd);
+// Undo a successful setup whose params never reached the caller: close the
+// handle, then detach the ring through the charge-settling path -- after the
+// close that detach can be the ring's final drop.
+void sys_loom_setup_rollback(struct Proc *p, hidx_t fd, u64 ring_va, u32 ring_size);
 
 // Testable register inner. Resolves the `n` fds in `fds[]` (each must be a
 // KOBJ_SPOOR handle in p) into the ring at `loom_fd`'s registered-handle table.
@@ -704,6 +710,17 @@ int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
 // (NULL/corrupt l, invalid flags). The caller (SYS_LOOM_ENTER handler) holds a
 // loom ref across this call, so loom_free cannot run concurrently.
 int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags);
+// Publish sq_head past one consumed position, after its index and SQE are copied.
+// Caller holds l->lock.
+void loom_sq_release(struct Loom *l, struct loom_ring_hdr *h);
+#ifdef KERNEL_TESTS
+// Runs under l->lock right after sq_head is published; shared ring memory only.
+void loom_sq_release_hook_for_test(void (*hook)(struct Loom *));
+// Runs in a setup the moment its handle is installed: where a sibling thread's
+// close of the new fd can land.
+void loom_setup_installed_hook_for_test(void (*hook)(struct Proc *, hidx_t));
+void loom_setup_installed_for_test(struct Proc *p, hidx_t fd);
+#endif
 
 // Testable enter inner. Resolves `loom_fd` -> KObj_Loom in `p` (holding a loom
 // ref for the call), runs loom_enter, and returns its result. -1 on a bad fd /

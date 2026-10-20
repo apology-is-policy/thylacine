@@ -1519,9 +1519,9 @@ void test_vivarium_signal_map(void) {
     // Every mapped row, checked individually.
     TEST_ASSERT(viv_signal_note(VIV_SIGINT)   == VIV_SIGNOTE_INTERRUPT,
                 "SIGINT -> interrupt");
-    TEST_ASSERT(viv_signal_note(VIV_SIGTERM)  == VIV_SIGNOTE_NONE,
-                "SIGTERM has NO note: V-6b evicted it from `interrupt` so a "
-                "per-signal disposition is representable at all");
+    TEST_ASSERT(viv_signal_note(VIV_SIGTERM)  == VIV_SIGNOTE_TERM,
+                "SIGTERM -> term: its own note, so a per-signal disposition "
+                "stays representable (V-6b) and a death reads back as SIGTERM");
     TEST_ASSERT(viv_signal_note(VIV_SIGKILL)  == VIV_SIGNOTE_KILL,
                 "SIGKILL -> kill");
     TEST_ASSERT(viv_signal_note(VIV_SIGPIPE)  == VIV_SIGNOTE_PIPE,
@@ -1553,8 +1553,8 @@ void test_vivarium_signal_map(void) {
     TEST_ASSERT(viv_signal_note(14) == VIV_SIGNOTE_NONE, "SIGALRM: no timer note");
     TEST_ASSERT(viv_signal_note(10) == VIV_SIGNOTE_NONE, "SIGUSR1: no note");
     TEST_ASSERT(viv_signal_note(12) == VIV_SIGNOTE_NONE, "SIGUSR2: no note");
-    TEST_ASSERT(viv_signal_note(VIV_SIGABRT) == VIV_SIGNOTE_NONE,
-                "SIGABRT: reachable only via raise()");
+    TEST_ASSERT(viv_signal_note(VIV_SIGABRT) == VIV_SIGNOTE_SNARE_ABORT,
+                "SIGABRT -> snare:abort: a self-directed raise() dies of it");
     TEST_ASSERT(viv_signal_note(VIV_SIGSTOP) == VIV_SIGNOTE_NONE,
                 "SIGSTOP: uncatchable, no note");
     TEST_ASSERT(viv_signal_note(34) == VIV_SIGNOTE_NONE,
@@ -1613,8 +1613,14 @@ void test_vivarium_sigaction_domain(void) {
     TEST_ASSERT(vivarium_sigaction_decide(14, H, R, 8) == VIV_FORWARD,
                 "SIGALRM declines: no note carries it");
     TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGTERM, VIV_SIG_IGN, 0, 8)
+                    == VIV_TRANSLATED,
+                "SIGTERM may be ignored: `term` is its own note");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGABRT, VIV_SIG_IGN, 0, 8)
                     == VIV_FORWARD,
-                "SIGTERM declines: V-6b left it with no note of its own");
+                "SIGABRT cannot be ignored: a snare:* death is never queued");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGABRT, VIV_SIG_DFL, 0, 8)
+                    == VIV_TRANSLATED,
+                "SIGABRT at SIG_DFL is already true (musl's abort() asks it)");
 
     // UNDELIVERABLE notes take SIG_DFL and nothing else. An EL0 fault runs
     // proc_fault_terminate -> exits() without ever calling notes_post, so there
@@ -1655,7 +1661,7 @@ void test_vivarium_sigset_to_notemask(void) {
     // kernel headers. These values are notes.h's.
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
-        .snare = 4, .tty = 5,
+        .snare = 4, .tty = 5, .term = 7,
     };
 
     // One signal -> one bit.
@@ -1664,20 +1670,20 @@ void test_vivarium_sigset_to_notemask(void) {
     TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGCHLD - 1), &m) == (1ULL << 3),
                 "SIGCHLD -> NOTE_BIT_CHILD_EXIT");
 
-    // SIGINT now owns `interrupt` alone, and SIGTERM contributes NOTHING --
-    // the V-6b eviction. Before it, this union produced the same single bit for
-    // a different reason (a collapse); asserting the union AND the SIGTERM-only
-    // case separately is what tells the two apart.
+    // SIGINT owns `interrupt` and SIGTERM owns `term`: two bits, so blocking
+    // one leaves the other deliverable. Before V-6b the union was one bit by a
+    // collapse; between V-6b and S-2, SIGTERM contributed nothing.
     u64 both = (1ULL << (VIV_SIGINT - 1)) | (1ULL << (VIV_SIGTERM - 1));
-    TEST_ASSERT(viv_sigset_to_notemask(both, &m) == (1ULL << 0),
-                "SIGINT|SIGTERM -> the interrupt bit (from SIGINT alone)");
-    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGTERM - 1), &m) == 0,
-                "SIGTERM alone contributes no bit: it has no note");
+    TEST_ASSERT(viv_sigset_to_notemask(both, &m) == ((1ULL << 0) | (1ULL << 7)),
+                "SIGINT|SIGTERM -> the interrupt bit and the term bit");
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGTERM - 1), &m) == (1ULL << 7),
+                "SIGTERM alone -> the term bit only");
 
     // The whole snare family folds onto ONE bit, because notes.h has a single
     // NOTE_BIT_SNARE covering the fault family.
     u64 faults = (1ULL << (VIV_SIGSEGV - 1)) | (1ULL << (VIV_SIGBUS - 1)) |
-                 (1ULL << (VIV_SIGILL - 1))  | (1ULL << (VIV_SIGFPE - 1));
+                 (1ULL << (VIV_SIGILL - 1))  | (1ULL << (VIV_SIGFPE - 1)) |
+                 (1ULL << (VIV_SIGABRT - 1));
     TEST_ASSERT(viv_sigset_to_notemask(faults, &m) == (1ULL << 4),
                 "the snare family folds onto one bit");
 
@@ -1697,8 +1703,8 @@ void test_vivarium_sigset_to_notemask(void) {
     u64 all = viv_sigset_to_notemask(~0ULL, &m);
     TEST_ASSERT((all & (1ULL << 1)) == 0, "block-all still excludes kill");
     TEST_ASSERT(all == ((1ULL << 0) | (1ULL << 2) | (1ULL << 3) |
-                        (1ULL << 4) | (1ULL << 5)),
-                "block-all covers exactly the five maskable notes");
+                        (1ULL << 4) | (1ULL << 5) | (1ULL << 7)),
+                "block-all covers exactly the six maskable notes");
 
     // Fail closed on a NULL map rather than dereferencing it.
     TEST_ASSERT(viv_sigset_to_notemask(~0ULL, NULL) == 0, "NULL map -> 0");
@@ -1723,7 +1729,7 @@ void test_vivarium_sigset_to_notemask(void) {
 void test_vivarium_handler_mask(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
-        .snare = 4, .tty = 5,
+        .snare = 4, .tty = 5, .term = 7,
     };
     const u64 CHILD = 1ULL << 3, INTR = 1ULL << 0, PIPE = 1ULL << 2,
               TTY = 1ULL << 5;
@@ -1799,8 +1805,8 @@ void test_vivarium_signal_exclusivity(void) {
     TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGBUS),  "SIGBUS");
 
     // An unmapped signal owns nothing -- there is no note to own.
-    TEST_ASSERT(!viv_signal_owns_note_exclusively(VIV_SIGTERM),
-                "SIGTERM owns nothing: no note");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGTERM), "SIGTERM owns term");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGABRT), "SIGABRT owns snare:abort");
     TEST_ASSERT(!viv_signal_owns_note_exclusively(14), "SIGALRM owns nothing");
     TEST_ASSERT(!viv_signal_owns_note_exclusively(0),  "0 is not a signal");
     TEST_ASSERT(!viv_signal_owns_note_exclusively(65), "65 is past the range");
@@ -1815,6 +1821,7 @@ void test_vivarium_signal_exclusivity(void) {
 // exits(name) directly, so a fault never reaches notes_post at all.
 void test_vivarium_signote_deliverable(void) {
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_INTERRUPT),  "interrupt");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TERM),       "term");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_KILL),       "kill");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_PIPE),       "pipe");
     TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_CHILD_EXIT), "child_exit");
@@ -1830,7 +1837,48 @@ void test_vivarium_signote_deliverable(void) {
     TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_BUS),  "snare:bus");
     TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_ILL),  "snare:ill");
     TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_FPE),  "snare:fpe");
+    TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_ABORT), "snare:abort");
     TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_NONE),       "NONE");
+}
+
+// The kill family's pure verdict (the signal chunk's S-2): which signals post a
+// note through the gate, which only end the caller, and which are refused.
+static bool kd_is(u64 sig, enum viv_kill_kind want, const char *name) {
+    const char *got = (const char *)1;
+    enum viv_kill_kind k = vivarium_kill_decide(sig, &got);
+    if (k != want) return false;
+    if (!name) return got == NULL;
+    if (!got) return false;
+    for (u32 i = 0; ; i++) {
+        if (got[i] != name[i]) return false;
+        if (!name[i]) return true;
+    }
+}
+
+void test_vivarium_kill_decide(void) {
+    TEST_ASSERT(kd_is(0, VIV_KILL_PROBE, NULL), "signal 0 probes");
+    TEST_ASSERT(kd_is(VIV_SIGINT,  VIV_KILL_POST, NOTE_NAME_INTERRUPT), "SIGINT posts interrupt");
+    TEST_ASSERT(kd_is(VIV_SIGTERM, VIV_KILL_POST, NOTE_NAME_TERM),      "SIGTERM posts term");
+    TEST_ASSERT(kd_is(VIV_SIGKILL, VIV_KILL_POST, NOTE_NAME_KILL),      "SIGKILL posts kill");
+    TEST_ASSERT(kd_is(VIV_SIGPIPE, VIV_KILL_POST, NOTE_NAME_PIPE),      "SIGPIPE posts pipe");
+    TEST_ASSERT(kd_is(VIV_SIGCHLD, VIV_KILL_POST, NOTE_NAME_CHILD_EXIT), "SIGCHLD posts child_exit");
+    TEST_ASSERT(kd_is(VIV_SIGABRT, VIV_KILL_SELF_DEATH, NOTE_NAME_SNARE_ABORT), "SIGABRT: snare:abort");
+    TEST_ASSERT(kd_is(VIV_SIGSEGV, VIV_KILL_SELF_DEATH, NOTE_NAME_SNARE_SEGV),  "SIGSEGV: snare:segv");
+    TEST_ASSERT(kd_is(VIV_SIGBUS,  VIV_KILL_SELF_DEATH, NOTE_NAME_SNARE_BUS),   "SIGBUS: snare:bus");
+    TEST_ASSERT(kd_is(VIV_SIGILL,  VIV_KILL_SELF_DEATH, NOTE_NAME_SNARE_ILL),   "SIGILL: snare:ill");
+    TEST_ASSERT(kd_is(VIV_SIGFPE,  VIV_KILL_SELF_DEATH, NOTE_NAME_SNARE_FPE),   "SIGFPE: snare:fpe");
+    // tty:* is the line discipline's alone; no note carries the rest.
+    TEST_ASSERT(kd_is(VIV_SIGHUP,   VIV_KILL_REFUSE, NULL), "SIGHUP refused");
+    TEST_ASSERT(kd_is(VIV_SIGQUIT,  VIV_KILL_REFUSE, NULL), "SIGQUIT refused");
+    TEST_ASSERT(kd_is(VIV_SIGWINCH, VIV_KILL_REFUSE, NULL), "SIGWINCH refused");
+    TEST_ASSERT(kd_is(VIV_SIGTSTP,  VIV_KILL_REFUSE, NULL), "SIGTSTP refused");
+    TEST_ASSERT(kd_is(VIV_SIGCONT,  VIV_KILL_REFUSE, NULL), "SIGCONT refused");
+    TEST_ASSERT(kd_is(VIV_SIGSTOP,  VIV_KILL_REFUSE, NULL), "SIGSTOP refused");
+    TEST_ASSERT(kd_is(14,           VIV_KILL_REFUSE, NULL), "SIGALRM refused");
+    TEST_ASSERT(kd_is(10,           VIV_KILL_REFUSE, NULL), "SIGUSR1 refused");
+    TEST_ASSERT(kd_is(VIV_NSIG + 1, VIV_KILL_REFUSE, NULL), "past the last signal");
+    TEST_ASSERT(vivarium_kill_decide(VIV_SIGTERM, NULL) == VIV_KILL_REFUSE,
+                "a NULL out-pointer fails closed");
 }
 
 // -----------------------------------------------------------------------------
@@ -1964,7 +2012,7 @@ void test_vivarium_sigtab(void) {
 void test_vivarium_notemask_to_sigset(void) {
     const struct viv_notebit_map m = {
         .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
-        .snare = 4, .tty = 5,
+        .snare = 4, .tty = 5, .term = 7,
     };
 
     TEST_ASSERT(viv_notemask_to_sigset(1ULL << 2, &m)
@@ -1992,9 +2040,11 @@ void test_vivarium_notemask_to_sigset(void) {
 
     // A signal with no note is never reported blocked: nothing can deliver it,
     // so "blocked" would describe a state that does not exist.
-    TEST_ASSERT((viv_notemask_to_sigset(~0ULL, &m) & (1ULL << (VIV_SIGTERM - 1)))
+    TEST_ASSERT((viv_notemask_to_sigset(~0ULL, &m) & (1ULL << 13 /* SIGALRM */))
                     == 0,
-                "SIGTERM is never reported blocked -- it has no note");
+                "SIGALRM is never reported blocked -- it has no note");
+    TEST_ASSERT(viv_notemask_to_sigset(1ULL << 7, &m) == (1ULL << (VIV_SIGTERM - 1)),
+                "the term bit reports exactly SIGTERM");
 
     // Round-trip on the shape musl sends: block-all, read back, and every
     // signal that CAN be blocked appears.
@@ -2031,6 +2081,8 @@ void test_vivarium_signote_reverse(void) {
                 "NONE maps to no signal");
     TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_INTERRUPT) == VIV_SIGINT,
                 "interrupt is SIGINT's alone since V-6b evicted SIGTERM");
+    TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_TERM) == VIV_SIGTERM,
+                "term is SIGTERM's");
 
     // The Linux default-action table. Only these three do nothing by default;
     // getting the set wrong either drops a signal that should kill (too many)

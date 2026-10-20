@@ -536,26 +536,30 @@ The main `handles.cfg` keeps `SrvKObjs = {}`, so the P5-corvus-srv additions (th
 
 ## burrow.tla — P2-Fb spec (impl at P2-Fd; finalized at P4-N)
 
-Status: **BURROW refcount + mapping lifecycle proven across ANON + MMIO + DMA; impl finalized at P4-N (R13 audit close).** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped). The dual-count semantics are type-independent; the spec models the abstract domain that all three backing types (ANON / MMIO / DMA) share — each type's distinct backing-resource discipline (alloc_pages / KObj_MMIO / KObj_DMA) is impl-level and converges on the same NoUseAfterFree invariant at the spec level.
+Status: **BURROW refcount + mapping lifecycle proven across ANON + MMIO + DMA; impl finalized at P4-N (R13 audit close); the I-32 charge record's settlement modeled since AS-R9 (2026-10-19).** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped). The dual-count semantics are type-independent; the spec models the abstract domain that all three backing types (ANON / MMIO / DMA) share — each type's distinct backing-resource discipline (alloc_pages / KObj_MMIO / KObj_DMA) is impl-level and converges on the same NoUseAfterFree invariant at the spec level.
 
-TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; depth 9. Buggy configs (state counts re-verified at P4-N with TLC2 v1.8.0):
+TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2, Threads = {t1, t2}` — 100 distinct states explored; depth 11. The charge record adds no states to the clean model (it is a function of `pages_alive` there) and the three-step drop is disabled outside its own flag, so the count is the P4-N one; this TLC reports the depth as 11 where P4-N's v1.8.0 reported 9, and main's pre-AS-R9 model gives the same 100 and 11 under it. Buggy configs (one run each under `-workers auto`, 2026-10-19: a buggy run stops at its first violation, so the count varies with worker scheduling -- `specs/check-burrow.sh` judges the NAMED invariant, never the count):
 
 | Config | Flag | Invariant violated | Distinct states |
 |---|---|---|---|
-| `burrow_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 66 |
-| `burrow_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 54 |
-| `burrow_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 43 |
+| `burrow_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 62 |
+| `burrow_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 52 |
+| `burrow_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 56 |
+| `burrow_buggy_claim_restore.cfg` | `BUGGY_CLAIM_RESTORE = TRUE` (`VmoIds = {v1}`) | `NoRecordAfterFree` (the restore writes the record into a Burrow a sibling claim's drop freed, or the freeing drop leaves it behind) | 266 |
+| `burrow_buggy_claim_restore_ledger.cfg` | the same flag, judged on `TypeOk` + `RefundExactlyOnce` alone | `RefundExactlyOnce` (the charge outlives its Burrow, never refunded) | 343 |
 
 | Spec action | Source location | Notes |
 |---|---|---|
 | `Init` | `kernel/burrow.c::burrow_init` (P2-Fd) | SLUB cache for struct Burrow. No VMOs alive at boot. |
 | `VmoCreate(v)` | `kernel/burrow.c::burrow_create_anon(size)` (P2-Fd) <br> `kernel/burrow.c::burrow_create_mmio(struct KObj_MMIO *)` (P4-Ic1) <br> `kernel/burrow.c::burrow_create_dma(struct KObj_DMA *)` (P4-Ic5b1b) | Three type-specific constructors; all set `handle_count = 1` + `mapping_count = 0` + `magic = VMO_MAGIC`. ANON allocates buddy pages; MMIO + DMA each `kobj_*_ref` the underlying hw-backed kobj for the Burrow's lifetime. Returns the new BURROW; the caller's `handle_alloc` wraps it in a Handle. |
 | `HandleOpen(v)` | `kernel/burrow.c::burrow_ref(struct Burrow *)` (P2-Fd) | Increments handle_count. Called from `handle_acquire_obj` + `handle_dup` (intra-Proc). Type-agnostic. Single-CPU at v1.0 (Phase 5+ adds atomics per `handles.tla`'s ConcurrencyExtension). |
-| `HandleClose(v)` | `kernel/burrow.c::burrow_unref(struct Burrow *)` (P2-Fd) | Decrements handle_count. If both counts reach 0, calls `burrow_free_internal` which type-dispatches: ANON → `free_pages`; MMIO → `kobj_mmio_unref`; DMA → `kobj_dma_unref`. Clobbers `magic = 0` before `kmem_cache_free` (R9 F148 discipline; closed at R13 F213 / P4-N). |
+| `HandleClose(v)` | `kernel/burrow.c::burrow_unref(struct Burrow *)` (P2-Fd); since AS-R9 every handle drop decides in `burrow_unref_settled_in` (the decrement, the dual check and the charge claim in one `v->lock` hold) | Decrements handle_count. If both counts reach 0, calls `burrow_free_internal` which type-dispatches: ANON → `free_pages`; MMIO → `kobj_mmio_unref`; DMA → `kobj_dma_unref`. Clobbers `magic = 0` before `kmem_cache_free` (R9 F148 discipline; closed at R13 F213 / P4-N). |
 | `BuggyFreeOnHandleClose(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` checks BOTH counts before calling `burrow_free_internal`: `if (h_count == 0 && m_count == 0)`. `burrow_free_internal` additionally asserts both counts == 0 on entry (extincts on violation). A future caller that bypasses the check fails fast at the inner assertion. |
+| `Settle(v, final)` (inside `HandleClose` / `UnmapVmo`) | `kernel/burrow.c::burrow_charge_claim_locked` (static), called inside the `v->lock` hold of `burrow_unref_settled_in` and `burrow_release_mapping_settled_deferred` | The final drop takes the record in the same hold that decides finality and returns the pages as a scalar; the caller refunds it outside the leaf lock. The model folds the refund into the step: the amount is the dropping thread's private value by then, so no interleaving the ledger can observe is lost. `shared_out` (monotonic, only adds reasons to settle) and a non-payer's drop (an intended over-charge) are not modeled. |
 | `MapVmo(v)` | `kernel/burrow.c::burrow_acquire_mapping(struct Burrow *)` (P3-Db) | Increments mapping_count. Called from `vma_alloc` (which is called by `burrow_map` — the high-level entry from `SYS_MMIO_MAP` / `SYS_DMA_MAP` / `exec.c`). Type-dispatched liveness check ensures the backing resource (pages / kobj_mmio / kobj_dma) is still alive. |
-| `UnmapVmo(v)` | `kernel/burrow.c::burrow_release_mapping(struct Burrow *)` (P3-Db) | Decrements mapping_count. Called from `vma_free`. Same dual-check on free as `burrow_unref`. |
+| `UnmapVmo(v)` | `kernel/burrow.c::burrow_release_mapping(struct Burrow *)` (P3-Db); since AS-R9 every mapping drop decides in `burrow_release_mapping_settled_deferred` | Decrements mapping_count. Called from `vma_free`. Same dual-check on free as `burrow_unref`. |
 | `BuggyFreeOnUnmap(v)` | (none — bug class statically prevented) | Same dual-check as BuggyFreeOnHandleClose; structural guarantee. |
+| `ClaimBeforeDrop(t, v, k)` / `DropAfterClaim(t)` / `SettleAfterDrop(t)` | (none since AS-R9 — the functions are deleted) | The pre-AS-R9 shape at main's five sites (`loom.c` x2, `weft.c` x2, `vma_detach_range_in`): `burrow_charge_claim`, then `burrow_unref_freed` / `burrow_release_mapping_freed`, then `burrow_charge_restore` when the drop did not free, each its own `v->lock` hold. `Held(v, k)` keeps two threads from dropping one ref. |
 | `BuggyNoFreeHandleClose(v) / BuggyNoFreeUnmap(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` and `burrow_release_mapping` always evaluate the dual-check at decrement time; no codepath skips the free transition when both counts reach 0. |
 
 | Spec invariant | Source enforcement |
@@ -563,9 +567,12 @@ TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; 
 | `RefcountConsistent` (counts = 0 if not in vmos) | The impl's struct Burrow is allocated/freed via SLUB; counts are part of the struct. Before allocation: no struct Burrow exists, so counts are not addressable; "not in vmos" maps to "no Burrow struct allocated yet." After `burrow_free_internal` (counts reach 0 + magic clobbered), subsequent `burrow_ref` / `burrow_acquire_mapping` extincts via the magic check (`v->magic != VMO_MAGIC`), pinning the "freed Burrows must not be referenced" half of `RefcountConsistent`. |
 | `NoUseAfterFree` (pages alive iff at least one count > 0) | `burrow_unref` and `burrow_release_mapping` both check `(handle_count == 0 AND mapping_count == 0)` after their decrement; if true, free via `burrow_free_internal`. The dual check is the runtime enforcement of I-7. `burrow_free_internal` additionally asserts both counts == 0 at entry — defense-in-depth against a hypothetical bypassing caller. The type-dispatched switch in `burrow_free_internal` releases the per-type backing resource (free_pages / kobj_mmio_unref / kobj_dma_unref) symmetrically with `burrow_create_*`'s ref-acquire. |
 
+| `NoRecordAfterFree` (the record is only ever on a live Burrow) | No API writes a record after a drop: the claim runs inside the drop's hold, and the only other writer, `burrow_charge_record`, stamps a region nobody else can reach yet. `burrow_free_internal` clobbers `magic`, so a stray write would meet the magic checks. |
+| `RefundExactlyOnce` (no double refund; a freed Burrow's charge has been refunded) | `burrow_charge_claim_locked` is read-and-clear under the leaf lock and qualifies only for `payer`'s own address space; the settled cores return the amount once, and each caller refunds on a nonzero scalar. |
+
 ### Files
 
-- `specs/burrow.tla` (~310 LOC TLA+) + 4 cfg files (1 clean + 3 buggy variants).
+- `specs/burrow.tla` (~520 LOC TLA+) + 6 cfg files (1 clean + 5 buggy variants), judged by `specs/check-burrow.sh`: the clean count pinned, each buggy cfg on the invariant it names (the three older ones now list their invariants one by one so TLC can name it).
 - `kernel/include/thylacine/burrow.h` — `struct Burrow` (magic + type + size + page_count + handle_count + mapping_count + pages + order + kobj_mmio + kobj_dma + pa); `enum burrow_type` (ANON / MMIO / DMA / INVALID).
 - `kernel/burrow.c` — `burrow_init`, `burrow_create_anon`, `burrow_create_mmio`, `burrow_create_dma`, `burrow_ref`, `burrow_unref`, `burrow_acquire_mapping`, `burrow_release_mapping`, `burrow_map`, `burrow_unmap`, `burrow_free_internal` (static; clobbers magic before `kmem_cache_free`), diagnostic accessors.
 - `kernel/test/test_burrow.c` + `kernel/test/test_burrow_mmio.c` + `kernel/test/test_burrow_map_proc.c` — 30+ tests covering refcount lifecycle, map/unmap, dual-count interleavings, magic-check rejection paths, MMIO/DMA type dispatch.
@@ -1331,6 +1338,35 @@ regardless). The 3-module suite is re-run clean as the Loom-6a/6b pre-commit
 gate; the formal focused audit lands at Loom-6c over the whole 6a+6b surface.
 
 ---
+
+## loom_sq.tla — SQ-1 (the SQ slot handoff; spec-first, 2026-10-12)
+
+Status: **TLC-green** (run on corona/async-memory 46f07edc2, `work/oct12-sq1/tlc-20261012T072500Z` there; the spec files are identical here).
+A focused module: `loom.tla` gives every op its own slot and copies atomically at
+`Consume`, so it cannot reach a position handed back to the producer and refilled
+between the head publication and the copy. That window was live in
+`loom_drain_sq` through main a7353c36f (published `sq_head`, THEN read the index
+and copied the SQE). The model: one well-behaved producer gated on the published
+head, two kernel consumers under `l->lock`, the head's private and published
+copies as one variable (the code advances both under the lock). Vault note:
+`spec-loom-sq`. The `loom.tla` set was re-run unchanged in the same run (SQ-1
+changes the consume ORDER, which `loom.tla` abstracts): clean 2429, liveness
+1457, all 7 buggy cfgs still violate their targets.
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `loom_sq.cfg` | all FALSE | `Invariants` (TypeOK, FifoFidelity, HeadNeverPassesTail, ClaimExclusive) | clean | 188 |
+| `loom_sq_liveness.cfg` | Live, all FALSE | `AllConsumed` | clean | 188 |
+| `loom_sq_buggy_release_before_copy.cfg` | `BUGGY_RELEASE_BEFORE_COPY` | `FifoFidelity` | violation (6 states: an out-of-range entry's position refilled under the stale claim) | 53 |
+| `loom_sq_buggy_unlocked_claim.cfg` | `BUGGY_UNLOCKED_CLAIM` | `FifoFidelity` | violation | 104 |
+| `loom_sq_buggy_unlocked_claim_exclusive.cfg` | `BUGGY_UNLOCKED_CLAIM` | `ClaimExclusive` | violation | 11 |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Produce` | `usr/lib/libthyla-rs/src/loom.rs::Ring::try_submit` | acquire `sq_head`, refuse when `tail - head >= entries`, write the SQE and its 1:1 index, release `sq_tail`. The only SQ producer in the tree. |
+| `Claim` | `kernel/loom.c::loom_drain_sq` under `l->lock` | CORRECT: read the index and copy the SQE (or count it dropped) while still holding the head. |
+| `Finish` | `kernel/loom.c::loom_sq_release` | advance the private head and release-store the published mirror, still under `l->lock`; the ONLY writer of either (the runner's derived guard checks it). Its KERNEL_TESTS hook is the runtime `Produce` at the permission itself: `loom.sq_release_after_copy` / `_after_index` / `_after_copy_chain`. |
+| `Terminated` | -- | stutter so TLC's deadlock check stays on everywhere else. |
 
 ## loom_multishot.tla — Loom-5 (the multishot op lifecycle; spec-first)
 
@@ -2503,36 +2539,135 @@ called).
 
 | cfg | knob(s) | checks | outcome | distinct (`-workers 1`) |
 |---|---|---|---|---|
-| `tail_order.cfg` | none; DEPTH 3 | `TypeOK` + `MeetsQueue` + `NoEretUnderOwnStop` + `TailEnds` | clean | 23146 |
-| `tail_order_birth.cfg` | `BIRTH` | the same | clean | 45272 |
-| `tail_order_buggy_notes_first.cfg` | `BUGGY_NOTES_FIRST` | the invariants | violation (`MeetsQueue`) | 3146 |
+| `tail_order.cfg` | none; DEPTH 3 | `TypeOK` + `MeetsQueue` + `NoEretUnderOwnStop` + `TailEnds` + `RunMeets` | clean | 46292 |
+| `tail_order_birth.cfg` | `BIRTH` | the same | clean | 68418 |
+| `tail_order_buggy_notes_first.cfg` | `BUGGY_NOTES_FIRST` | the invariants | violation (`MeetsQueue`) | 5622 |
 | `tail_order_buggy_birth_notes_first.cfg` | `BUGGY_NOTES_FIRST` + `BIRTH` | the invariants | violation (`MeetsQueue`, on the birth tail) | 3390 |
-| `tail_order_buggy_no_repass.cfg` | `BUGGY_NO_REPASS` | the invariants | violation (`NoEretUnderOwnStop`) | 649 |
-| `tail_order_buggy_budget_first.cfg` | `BUGGY_BUDGET_FIRST` | the invariants | violation (`NoEretUnderOwnStop`) | 4368 |
-| `tail_order_buggy_no_budget.cfg` | `BUGGY_NO_BUDGET` | the invariants + `TailEnds` | violation (`TailEnds`; the invariants hold) | 9022 |
+| `tail_order_buggy_no_repass.cfg` | `BUGGY_NO_REPASS` | the invariants | violation (`NoEretUnderOwnStop`) | 870 |
+| `tail_order_buggy_budget_first.cfg` | `BUGGY_BUDGET_FIRST` | the invariants | violation (`NoEretUnderOwnStop`) | 8167 |
+| `tail_order_buggy_no_budget.cfg` | `BUGGY_NO_BUDGET` | the invariants + `TailEnds` | violation (`TailEnds`; the invariants hold) | 18044 |
+| `tail_order_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | `TypeOK` + `RunMeets` | violation (`RunMeets`; `MeetsQueue` fires first when it is on) | 26886 |
+
+The counts are `-workers 1 -lncheck final` (`specs/check-tail-order.sh`). They
+rose on 2026-10-12, when the model gained the IRQ entry (`IrqEnter`, the `irq`
+variable); the verdicts did not change.
 
 | Spec action | Code site (as-built) | Invariant pinned |
 |---|---|---|
-| `Enter` / `DieCheck` / `StopLeg` / `Park` (the first two legs; the park as one step) | `arch/arm64/vectors.S` `.Lel0_sync_return`: `bl el0_return_die_check`, `bl el0_return_stop_check`, `bl notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, `notes_deliver_at_el0_return` | `MeetsQueue`: the stop leg runs before the notes leg, so a note posted during a stop is met as the stop ends. `BUGGY_NOTES_FIRST` = the order before the vote (the S1 sabotage's shape). |
+| `Enter` / `IrqEnter` / `DieCheck` / `StopLeg` / `Park` (the first two legs; the park as one step) | `arch/arm64/vectors.S` `.Lel0_return`, which the `0x400` sync slot and, since #964, the `0x480` IRQ slot both branch to: `bl el0_return_die_check`, `bl el0_return_stop_check`, `bl notes_deliver_at_el0_return`; `userland_enter_held`: the die-check, `el0_birth_park`, `notes_deliver_at_el0_return` | `MeetsQueue`: the stop leg runs before the notes leg, so a note posted during a stop is met as the stop ends. `BUGGY_NOTES_FIRST` = the order before the vote (the S1 sabotage's shape). |
 | `NotesLeg` (`"plain"` / `"caught"` / `"term"` / `"susp"`) | `kernel/notes.c::notes_deliver_tail`: the discard loop (`if (++*passes < NOTE_QUEUE_DEPTH) goto again; return false;`), a frame build (returns false), a terminating default (`exits`), the stop arm (`notes_stop_dequeue_locked` -> `proc_job_stop_self`, returns true, as does the orphan rule's discard) | -- |
 | `Repass` + `Proceed` at `leg = "repass"` (the die-check, the stop leg, then `++passes`) | `kernel/notes.c::notes_deliver_at_el0_return`: `while (notes_deliver_tail(ctx, &passes)) { el0_return_die_check(); el0_return_stop_check(ctx); if (++passes >= NOTE_QUEUE_DEPTH) break; }` | `NoEretUnderOwnStop`. `BUGGY_NO_REPASS` = the stop arm returns false (the S3 sabotage's shape); `BUGGY_BUDGET_FIRST` = the budget break before the die-check and the stop leg. |
 | `Spend` (one budget for the passes and the discards) | `notes_deliver_tail`'s `*passes` and the loop's `++passes` | `TailEnds`: a flood cannot hold the masked tail. `BUGGY_NO_BUDGET` = neither counts. |
 | `Post` / `DebugStop` / `DebugResume` / `JobStop` / `JobCont` / `Kill` / `Release` | `notes_post`; `proc_debug_stop_deliver` / `proc_debug_resume`; the job stop and continue (`proc_job_stop_self`, `proc_job_cont_proc`); `proc_group_terminate`; `proc_birth_hold_release_locked` | -- |
 
+`RunMeets` (2026-10-12, #964) is the IRQ tail's: a Thread at EL0 with a note
+queued reaches the notes leg though it never enters the kernel itself, because
+the tick (`IrqEnter`, weakly fair with the Thread's other steps) takes it into
+the same tail. `BUGGY_IRQ_NO_NOTES` is the IRQ tail as it was, ending at the
+stop leg (`seam-el0-irq-tail-no-notes`, closed).
+
 Abstracted, said so the green reads no larger: the park (`debug_stop.tla`'s);
-the IRQ tail, which delivers no notes; a note posted in the masked window
-between the notes leg's last decision and the eret, which waits for the next
-checkpoint (`seam-el0-irq-tail-no-notes`); notes left for a self-managing Proc's
+which thread of a Proc takes a caught note (`caught_target.tla`'s); a note
+posted in the masked window between the notes leg's last decision and the eret,
+which waits for the next checkpoint (a tick away at most, now that the IRQ tail
+meets the queue); notes left for a self-managing Proc's
 fd reader; and registers (that each pass re-reads the handler, `sp` and the
 sigtab is the kernel tests' and round 1's W3). The kernel test
 `rendez.tail_parks_for_the_stop_it_applies` and debug-probe's resume,
 death-step and caught-step legs hold the code to the model.
 
 Pre-commit gate: `specs/check-tail-order.sh` (the 2 clean cfgs at their pinned
-counts, the 5 buggy cfgs violating their named properties), on any change to
-the tails' leg order (`.Lel0_sync_return`, `userland_enter_held`), to
+counts, the 6 buggy cfgs violating their named properties), on any change to
+the tails' leg order (`.Lel0_return`, either vector slot that enters it,
+`userland_enter_held`), to
 `notes_deliver_at_el0_return`'s loop, to what `notes_deliver_tail` returns or
 spends, or to `NOTE_QUEUE_DEPTH` as the tail's budget.
+
+## caught_target.tla — which thread takes a caught note (operator votes 2026-10-12, "Prefer running/main" and "Model it"; ARCH 8.8.3; spec-first re-enabled, model-first)
+
+The posting walk picks one thread to take a process-directed caught note and,
+in a Linux-phenotype Proc, takes the family's claim on its behalf (a
+designation); only the holder may unwind for a claimed family. The model
+checks that this never lets two threads hold a family and never strands a note
+while a thread could take it: the designation is handed off when its thread
+enters a wait that will not unwind for a caught note, released at its tail,
+dropped at its exit, and every walk re-wakes a holder blocked in an unwinding
+wait. The walk may pick ANY candidate in the model, so the preference order is
+the tests' to pin, not this model's.
+
+Revised while the code was written (same day, before any of it was built). The
+walk's re-check reads a thread's mask and handler flag without the lock their
+owner writes them under, so for a thread that is not blocked it can read a
+stale value and designate a thread that has just masked the family or entered
+a handler. The model now lets `Walk2` do that (`Fresh`), and such a designee
+gives the designation up at its tail or hands it off as it enters a wait that
+cannot unwind for it, masked or in a handler (`uentry`, knob
+`BUGGY_STALE_KEEPS`). A walk owed by a release now skips the releasing thread,
+whose tail has just passed the note by (`wskip`, `wcur`); without the skip a
+thread whose frame cannot be built would take its own designation back at every
+tick while a peer that could unwind slept on.
+
+| cfg | knob | checks | outcome | distinct (`-workers 1 -lncheck final`) |
+|---|---|---|---|---|
+| `caught_target.cfg` | none; 2 threads, 2 posts, 2 waits a call | `TypeOK` + `OneClaimant` + `NoStrand` | clean | 613245 |
+| `caught_target_3t.cfg` | none; 3 threads | the same | not finished (not in the gate): stopped at the host's 8 GiB disk floor on 2026-10-12 after 10 minutes on 4 workers, at depth 22 with 3397015 states queued; `TypeOK` and `OneClaimant` held over every state reached; `NoStrand`, judged only at the end under `-lncheck final`, was not judged | 12789190 reached (`-workers 4`) |
+| `caught_target_buggy_double_designate.cfg` | `BUGGY_DOUBLE_DESIGNATE` | the invariants | violation (`OneClaimant`) | 371 |
+| `caught_target_buggy_no_handoff.cfg` | `BUGGY_NO_HANDOFF` | the invariants + `NoStrand` | violation (`NoStrand`) | 611617 |
+| `caught_target_buggy_unlocked_designate.cfg` | `BUGGY_UNLOCKED_DESIGNATE` | the same | violation (`NoStrand`) | 632863 |
+| `caught_target_buggy_no_rekick.cfg` | `BUGGY_NO_REKICK` | the same | violation (`NoStrand`) | 613245 |
+| `caught_target_buggy_exit_keeps.cfg` | `BUGGY_EXIT_KEEPS` | the same | violation (`NoStrand`) | 639673 |
+| `caught_target_buggy_release_no_wake.cfg` | `BUGGY_RELEASE_NO_WAKE` | the same | violation (`NoStrand`) | 165597 |
+| `caught_target_buggy_irq_no_notes.cfg` | `BUGGY_IRQ_NO_NOTES` | the same | violation (`NoStrand`) | 613245 |
+| `caught_target_buggy_stale_keeps.cfg` | `BUGGY_STALE_KEEPS` | the same | violation (`NoStrand`) | 616829 |
+
+Each counterexample was read for its mechanism, not only its verdict: the
+designee blocks in a hold wait holding the family while a peer sleeps in an
+unwinding wait (`NO_HANDOFF`); the walk's pick masks the family and blocks in
+an unwinding wait between the pick and the designation, and is designated
+inside it (`UNLOCKED_DESIGNATE`); a claimant whose note a peer's
+tail delivered carries on into an unwinding wait, a second note posts, and no
+walk wakes it (`NO_REKICK`); a sleeper claims and unwinds while the walk
+designates another thread (`DOUBLE_DESIGNATE`); the designee exits
+(`EXIT_KEEPS`); the designee delivers one of two notes, masks the family, and
+its release wakes no one (`RELEASE_NO_WAKE`); the designee spins at EL0 and its
+IRQ tail has no notes leg (`IRQ_NO_NOTES`); the walk picks a thread on its way
+to its tail, the thread delivers the other note and enters its handler, the
+designation lands after its release, and the thread carries it into an
+unwinding wait while a peer sleeps in one (`STALE_KEEPS`). The 2-thread counts
+were re-pinned after the revision above (from 140075 clean).
+
+| Spec action | Code site (as-built) | Property pinned |
+|---|---|---|
+| `Post` | `notes_post` arming the caught bit, then the poster's `proc_caught_note_wake` under `g_proc_table_lock` (every caught-note poster; a release and an exit run it too) | -- |
+| `Walk1` (re-wake every holder in an unwinding wait; pick a candidate, never `wskip`) | `kernel/proc.c::proc_caught_note_walk` (`proc_caught_note_wake` is the walk with no skip): the holder pass under each thread's `wait_lock` (`note_claim` / `note_target` holding a queued, claimed family, `caught_wait == CAUGHT_WAIT_UNWINDS` -> `wakeup`), then `caught_pick`, which reads `caught_candidate` (not `THREAD_EXITING`, the family unmasked, no handler, `caught_wait != CAUGHT_WAIT_HOLDS`) without the lock | `NoStrand` (`NO_REKICK` drops the holder pass) |
+| `Walk2` (re-check, designate) | `caught_designate`: the pick's `wait_lock` taken, `caught_candidate` again (`Fresh`: the wait's kind and the exit read exactly there, the mask and the handler flag exactly only for a blocked thread), then the CAS of the family's claim bit (caught set, claim clear) and `note_target`; a stale pick is re-picked with the same skip, and after `CAUGHT_REPICKS` the walk wakes every unwinding sleeper (`caught_wake_unwinders`) | `OneClaimant` (`DOUBLE_DESIGNATE` drops the open check); `NoStrand` (`UNLOCKED_DESIGNATE` drops the re-check) |
+| `EnterUWait` / `EnterHWait` / `Handoff` | `kernel/sched.c::sleep_caught_wait_enter`, called by `sleep_common` / `tsleep_common` under `wait_lock` on entry: `caught_wait` published (`thread_caught_wait_kind`; a thread in a handler waits as `HOLDS`), the outer kind restored on every exit (the stop park nests a wait in a wait); a designation the wait cannot honour, every family for a hold wait and a masked one for an unwinding wait (`uentry`), dropped by `notes_handoff_target`, which walks if the note is queued, before the thread blocks | `NoStrand` (`NO_HANDOFF`; `STALE_KEEPS` keeps the `uentry` designation) |
+| `Resume` (the unwind test) | the register-then-observe and post-`sched()` arms: `thread_caught_note_unwinds` -> `thread_caught_note_claim`, where a designee's `note_target` becomes its `note_claim` | `OneClaimant` |
+| `Unwound` / `FlushDone` / `ContWait` | the 9P client's caught-note unwind: `Tflush`, then the flush wait, killable only (ARCH 8.8.3 *A 9P wait honours flush(5)*); the claim kept to the tail | -- (the flush's end is a fairness assumption) |
+| `Irq` | `arch/arm64/vectors.S` `0x480` -> `.Lel0_return` (#964) | `NoStrand` (`IRQ_NO_NOTES`) |
+| `Deliver` / `Release` | `kernel/notes.c::notes_deliver_at_el0_return`: the delivery loop, then `notes_release_claims` (the claim and the designation; a walk skipping the releaser while the note is queued) | `NoStrand` (`RELEASE_NO_WAKE`) |
+| `Exit` | `kernel/proc.c::thread_exit_self` -> `notes_exit_drop_locked`: the claim and the designation dropped and the walk run under the `g_proc_table_lock` hold that commits `THREAD_EXITING` | `NoStrand` (`EXIT_KEEPS`) |
+
+Abstracted, said so the green reads no larger: one note family; a delivered
+note's handler is one bit (`inh`) that `rt_sigreturn` clears; discarded and
+uncaught notes (the terminate latch's wake is `death_wake.tla`'s and §8.8.2's);
+the preference order; the kick (the tick is the fairness that matters, a kick
+only makes it prompt); a call enters at most `MAX_WAITS` waits. The kernel
+tests in `test_rendez.c` (`rendez.caught_note_prefers_awake`, `_poster_first`,
+`_handoff` (sleep and tsleep), `_exit_drop`, `_holder_rewake`,
+`_native_kicks_only`, `_repick_fallback` (the model's `Walk2` re-picks
+without bound; the code stops at `CAUGHT_REPICKS` and wakes every unwinding
+sleeper instead, which this test holds with forced stale picks), and the
+rewritten `_one_unwind` and `_release_wakes_peer`), viv-pheno-probe L331-L333
+(a running main takes `SIGCHLD` with a polling peer undisturbed) and jc-probe's
+spinint and spinnote rungs (a native spinner ended by Ctrl-C, and one whose
+handler runs) hold the code to it.
+
+Pre-commit gate: `specs/check-caught-target.sh` (the clean cfg at its pinned
+count, the 8 buggy cfgs violating their named properties), on any change to
+`proc_caught_note_walk`, `thread_caught_note_claim`, `notes_release_claims`,
+`sleep_caught_wait_enter`, `notes_handoff_target`, `notes_exit_drop_locked`,
+or where a claim or a designation is set or cleared.
 
 ## tapestry_present.tla — T-1 (the surface present/weave lifecycle; spec-first re-enabled, model-first)
 
@@ -3117,8 +3252,10 @@ second invariant and why both buggy cfgs are judged on it.
   head/tail trim, the middle split or the whole removal. The release walks
   the pagemap by PRESENT nodes (`pagemap_take_next`), puts each page
   (`cow_page_put`) and uncharges the data pages plus the nodes each take
-  emptied. The mapping's own free is `vma_free_deferred` ->
-  `burrow_free_deferred` -> `burrow_free_internal`, after `as->lock` drops.
+  emptied. The mapping's own free is `vma_free_settled_deferred` with a NULL
+  `settle_as` (a lazy mapping settles no record; `vma_free_deferred` is that
+  no-payer form of it; AS-R9) -> `burrow_free_deferred` ->
+  `burrow_free_internal`, after `as->lock` drops.
 - **`Replace(s)`** -> `kernel/vma.c::vma_replace_range_in` = allocate the new
   piece, `vma_detach_range_in(.., extra_vmas = 1, ..)` the window (which
   releases the window's slots of the OLD Burrow), insert. F5 closed by
@@ -3210,6 +3347,8 @@ pty_stop, reader_frame, ...) are recorded per-row in
 | `OneScopePerProc` / `ScopeTraitsSetOnce` / `MembersNeverRoot` / `PropagatingIsScopeWide` | `devcap.further_redeem_keeps_scope` (tag + traits kept) + `devcap.imperium_nest_refused` + the rfork inherit (`caps.rfork_inherits_legate_scope`: the ROOT flag never inherits) |
 
 **RE-ENABLED for the page-accounting conservation law (B-1a', 2026-09-23; ARCH 6.5 "Capacity, and the I-32 default").** The ninth instance, and the first applied to an ACCOUNTING law rather than a state machine. The B-1a holotype audit's F5 (an orphan-slot over-charge after a D-3b window inside a touched lazy mapping) and the pre-B-1a piece-detach bug it echoed were one defect twice: a path that unmaps a slot without first releasing it, in a system whose free (`burrow_free_internal`) is Proc-agnostic and so can never refund. The second occurrence is the trigger. `specs/capacity.tla` states the law -- `ChargeConserved` (page_count == the resident count) and `NoOrphan` (a resident slot is always mapped) -- with the range detach and the MAP_FIXED replace as actions, one buggy cfg per historical shape, and B-1a''s `vma_detach_range_in` / `vma_replace_range_in` were written to it (the release BEFORE the geometry change; replace = detach + insert). The map, the gate (`specs/check-capacity.sh`) and what the model does not cover are in the `capacity.tla` section above.
+
+**RE-ENABLED for the caught-note target (user-directed, 2026-10-12; ARCH 8.8.3, I-9 / I-19).** The tenth instance. The operator voted that a process-directed caught note goes to a running thread, then main, and that a sleeper is woken only when none can take it; the walk therefore designates one thread, and that designation must be handed back when its thread blocks in a wait that will not unwind, exits, or reaches its tail. That hand-off is a no-lost-wake protocol among five parties (the poster, the designee, its peers, the tail, the exit), and the item-11 claim race it replaces was found by an audit, not a test; the operator chose "Model it". `specs/caught_target.tla` was written before the code, with one buggy cfg per defect the design must not have. The map, the gate (`specs/check-caught-target.sh`) and what the model does not cover are in the `caught_target.tla` section above.
 
 ---
 

@@ -20,6 +20,8 @@
 // Weft-6 (SYS_WEFT_SHARE/MAP, keyed on the /net data fid).
 
 #include <thylacine/weft.h>
+#include <thylacine/addrspace.h>    // the reaper locks the target's address space
+#include <thylacine/thread.h>       // current_thread: the test window's owner
 #include <thylacine/9p_attach.h>    // G-3: p9_attached_is_open (the reaper's liveness test)
 #include <thylacine/9p_client.h>    // G-3: p9_client_is_open (the test-path liveness source)
 #include <thylacine/burrow.h>
@@ -383,14 +385,14 @@ int weft_share_unregister(struct Proc *owner, u64 share_id) {
     // where the sharer's I-32 charge is settled -- nothing downstream can do
     // it, because there IS no downstream. If it does not free, the sharer still
     // maps the region and its own detach will settle instead (that detach sees
-    // freed == true once this pin is gone), so put the claim back.
+    // freed == true once this pin is gone), so the record is left in place for it.
     // Removal-before-free (R2-F5) is unchanged: the entry is already unlinked.
-    u32 paid = burrow_charge_claim(victim, owner);
-    if (burrow_unref_freed(victim)) {
-        if (paid) proc_page_uncharge(owner, paid);
-    } else if (paid) {
-        burrow_charge_restore(victim, owner, paid);
-    }
+    // AS-R9: the drop decides and settles under one hold of the Burrow's lock,
+    // so a concurrent final drop by the sharer's own detach cannot strand the
+    // record or leave this path writing through freed storage.
+    u32 refund = 0;
+    (void)burrow_unref_settled(victim, owner, &refund);
+    if (refund) proc_page_uncharge(owner, refund);
     return 0;
 }
 
@@ -442,12 +444,9 @@ void weft_share_release_owner(struct Proc *owner) {
     // auditable at an arbitrary instant rather than only at quiescence (the
     // same reason vma_drain uncharges the shared-in axis for a dying Proc).
     for (u32 i = 0; i < n; i++) {
-        u32 paid = burrow_charge_claim(orphans[i], owner);
-        if (burrow_unref_freed(orphans[i])) {
-            if (paid) proc_page_uncharge(owner, paid);
-        } else if (paid) {
-            burrow_charge_restore(orphans[i], owner, paid);
-        }
+        u32 refund = 0;   // AS-R9: settled under the Burrow's own lock
+        (void)burrow_unref_settled(orphans[i], owner, &refund);
+        if (refund) proc_page_uncharge(owner, refund);
     }
 }
 
@@ -582,17 +581,30 @@ void weft_reap_init(void) {
     g_maponly_bindings = NULL;
 }
 
-void weft_reap_register(struct weft_binding *wb,
-                        const struct p9_attached *att,
-                        const struct p9_client *cl) {
-    if (!wb || !weft_kind_maponly((int)wb->kind)) return;
+// Every field the sweep reads is written here, before the link, for both a real
+// and a test registration.
+static bool weft_reap_link(struct weft_binding *wb, const struct p9_attached *att,
+                           const struct p9_client *cl, bool test_only) {
+    if (!wb || !weft_kind_maponly((int)wb->kind)) return false;
     wb->sess_att = att;
     wb->sess_cl = cl;
     wb->orphan_since_ns = 0;
+#ifdef KERNEL_TESTS
+    wb->reap_test_only = test_only;
+#else
+    (void)test_only;
+#endif
     spin_lock(&g_weft_reap_lock);
     wb->reap_next = g_maponly_bindings;
     g_maponly_bindings = wb;
     spin_unlock(&g_weft_reap_lock);
+    return true;
+}
+
+void weft_reap_register(struct weft_binding *wb,
+                        const struct p9_attached *att,
+                        const struct p9_client *cl) {
+    if (!weft_reap_link(wb, att, cl, false)) return;
     // First-registration wake: the reaper parks indefinitely on an empty
     // registry (tickless-idle-friendly -- no 1 Hz kthread tick on an idle
     // box); a registered binding starts its cadence.
@@ -618,19 +630,35 @@ void weft_reap_unregister(struct weft_binding *wb) {
 // per-page TLBI unmap loop must NOT run inside proc_for_each's
 // irqsave-gptl region (a fullscreen weave is thousands of pages; each
 // uninstall waits a dsb ish -- a multi-ms IRQs-off + global-lock window).
-// So the callback only MATCHES the pid, gates ALIVE, and takes the
-// target's vma_lock UNDER gptl (the established gptl -> vma_lock order),
+// So the callback only MATCHES the pid, gates ALIVE, and takes the target's
+// address-space lock UNDER gptl (the established gptl -> vma_lock order),
 // RETURNING with it held: gptl (and the IRQ mask) drop at proc_for_each's
-// exit, and the held vma_lock alone keeps the target's teardown out --
-// vma_drain now takes vma_lock (kernel/vma.c), so a reap racing the
-// reclaim blocks there, and proc_free's pgtable_destroy runs AFTER
-// vma_drain, so the pgtable_root stays valid for the whole unmap. The
-// unmap then runs IRQs-on under vma_lock only -- the same envelope as the
-// normal clunk-unmap path. A non-ALIVE match is skipped: an exiting
-// Proc's own close/drain owns its teardown.
+// exit, and the held lock alone keeps the space's teardown out -- every last
+// unref drains through vma_drain_in, which takes this lock before the page
+// table or the struct is freed. The unmap then runs IRQs-on under that lock
+// only -- the same envelope as the normal clunk-unmap path.
+//
+// The callback hands back the SPACE it locked, and the sweep uses only that
+// pointer: exec swaps q->as under gptl alone, so once gptl drops q->as may name
+// another space. Re-reading it unlocked the new space's lock and left the old
+// one held forever, and exec's drain of the old space then spun on it (vmaguard
+// audit F1). A lock, not a reference: the device-death quiesce and the image
+// join read the reference count as "who else holds this space", and a
+// reaper's transient reference would read as a sharer (vmaguard audit r2 F1).
+//
+// A non-ALIVE match is skipped, and so is a Proc whose exit close has begun
+// (PROC_FLAG_EXIT_CLOSING, read under the lock it pairs with) when it is the
+// space's only holder: its device quiesce then walks the list without this lock,
+// after taking and dropping it once (proc_quiesce_owned_devices), and its drain
+// takes the stale mapping. The last reference's teardown walks it the same way
+// (addrspace_destroy), when no Proc names the space at all. A shared space is unmapped as usual -- the quiesce
+// does not walk it, and the survivor's drain is the survivor's death, which is
+// too late for the pixel pages the reaper exists to return. A ref read of 1
+// cannot be stale here: a sharer's departure that made it 1 precedes the
+// quiesce's read, and the quiesce's barrier unlock precedes this lock.
 struct weft_reap_find_ctx {
     u32 pid;
-    struct Proc *locked;   // non-NULL => q->vma_lock is HELD by the caller
+    struct AddrSpace *locked;   // non-NULL => this space's lock is HELD by the caller
 };
 
 static int weft_reap_find_cb(struct Proc *q, void *arg) {
@@ -646,24 +674,61 @@ static int weft_reap_find_cb(struct Proc *q, void *arg) {
     // practice, not by construction. Fail closed like the non-ALIVE arm: a Proc
     // with no address space has no mapping for the reaper to tear down.
     if (!q->as) return 1;
-    spin_lock(&q->as->lock);
-    c->locked = q;
+    struct AddrSpace *as = q->as;
+    spin_lock(&as->lock);
+    if ((__atomic_load_n(&q->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_EXIT_CLOSING)
+        && addrspace_ref_count(as) == 1) {
+        spin_unlock(&as->lock);
+        return 1;
+    }
+    c->locked = as;
     return 1;   // pid matched -- stop the walk
 }
+
+// The window between the find and the unmap, where an exec's swap can land. A
+// test runs a function there to prove the sweep works on the space it locked.
+// Only the thread that set the hook runs it, so the live reaper kthread's own
+// sweeps never do. Compiled out of production.
+#ifdef KERNEL_TESTS
+static void (*g_weft_reap_test_window)(void);
+static struct Thread *g_weft_reap_test_owner;
+
+void weft_reap_test_set_window_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_weft_reap_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_weft_reap_test_window, fn, __ATOMIC_RELEASE);
+}
+
+static inline void weft_reap_test_window(void) {
+    void (*fn)(void) = __atomic_load_n(&g_weft_reap_test_window, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_weft_reap_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
+#else
+static inline void weft_reap_test_window(void) {}
+#endif
 
 // Bounded per-sweep reclaim batch (the deferred pin drops live on the stack;
 // leftovers reclaim next sweep -- a 1 s slip, not a leak).
 #define WEFT_REAP_MAX_DROP 8
 
-int weft_reap_sweep(u64 now_ns) {
+static int weft_reap_sweep_in(u64 now_ns, bool test_only) {
     struct Burrow *drop[WEFT_REAP_MAX_DROP];
     int ndrop = 0;
     int reclaimed = 0;
 
+#ifndef KERNEL_TESTS
+    (void)test_only;
+#endif
     spin_lock(&g_weft_reap_lock);
     struct weft_binding **pp = &g_maponly_bindings;
     while (*pp && ndrop < WEFT_REAP_MAX_DROP) {
         struct weft_binding *wb = *pp;
+#ifdef KERNEL_TESTS
+        if (wb->reap_test_only != test_only) {
+            pp = &wb->reap_next;
+            continue;
+        }
+#endif
         bool dead = wb->sess_att ? !p9_attached_is_open(wb->sess_att)
                                  : !p9_client_is_open(wb->sess_cl);
         if (!dead) {
@@ -684,23 +749,24 @@ int weft_reap_sweep(u64 now_ns) {
             continue;
         }
 
-        // Grace expired: force-reclaim. Find-and-lock the mapping Proc
-        // under gptl (the walk is the ONLY irqsave window), then run the
-        // identity-guarded unmap IRQs-on under the held vma_lock alone
-        // (the mapping ref + the shared-in budget drop inside
-        // burrow_unmap), then strip the registration pin (deferred
+        // Grace expired: force-reclaim. Find-and-lock the mapping Proc's
+        // address space under gptl (the walk is the ONLY irqsave window),
+        // then run the identity-guarded unmap IRQs-on under that space's
+        // lock alone (the mapping ref + the shared-in budget drop inside
+        // burrow_unmap_in), then strip the registration pin (deferred
         // unref -- the free path takes buddy locks) and NULL wb->burrow
         // under THIS lock so the eventual dev9p_close sees a disarmed
         // binding (clunk_unmap's identity guard cannot match a NULL
         // burrow; weft_binding_release NULL-guards the unref).
         struct weft_reap_find_ctx ctx = { .pid = wb->map_pid, .locked = NULL };
         (void)proc_for_each(weft_reap_find_cb, &ctx);
+        weft_reap_test_window();
         if (ctx.locked) {
-            struct Proc *q = ctx.locked;
-            struct Vma *v = vma_lookup(q, wb->guest_va);
+            struct AddrSpace *as = ctx.locked;
+            struct Vma *v = vma_lookup_in(as, wb->guest_va);
             if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
-                (void)burrow_unmap(q, wb->guest_va, (size_t)wb->ring_size);
-            spin_unlock(&q->as->lock);
+                (void)burrow_unmap_in(as, wb->guest_va, (size_t)wb->ring_size);
+            spin_unlock(&as->lock);
         }
         drop[ndrop++] = wb->burrow;
         wb->burrow = NULL;
@@ -714,6 +780,20 @@ int weft_reap_sweep(u64 now_ns) {
         if (drop[i]) burrow_unref(drop[i]);
     return reclaimed;
 }
+
+int weft_reap_sweep(u64 now_ns) {
+    return weft_reap_sweep_in(now_ns, false);
+}
+
+#ifdef KERNEL_TESTS
+void weft_reap_register_for_test(struct weft_binding *wb, const struct p9_client *cl) {
+    (void)weft_reap_link(wb, NULL, cl, true);
+}
+
+int weft_reap_sweep_for_test(u64 now_ns) {
+    return weft_reap_sweep_in(now_ns, true);
+}
+#endif
 
 static int weft_reap_have_work(void *arg) {
     (void)arg;

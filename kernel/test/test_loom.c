@@ -22,6 +22,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- cooperative yield to the SQPOLL kthread
+#include <thylacine/spoor.h>   // Spoor.ref -- the register rollback observation
 #include <thylacine/thread.h>  // THREAD_SLEEPING -- the F2 park observation
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -38,6 +39,9 @@ void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
 void test_loom_enter_nop(void);
+void test_loom_sq_release_after_copy(void);
+void test_loom_sq_release_after_index(void);
+void test_loom_sq_release_after_copy_chain(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
@@ -256,18 +260,35 @@ void test_loom_register_rejects(void) {
     hidx_t one[1] = { rd };
     // Unsupported op (BUFFERS reserved for Loom-6).
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_BUFFERS, one, 1),
-                   -1, "LOOM_REGISTER_BUFFERS rejected");
+                   -T_E_INVAL, "LOOM_REGISTER_BUFFERS rejected");
     // nargs over the table cap.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, one,
                                               LOOM_MAX_REG_HANDLES + 1u),
-                   -1, "nargs over cap rejected");
+                   -T_E_INVAL, "nargs over cap rejected");
     // A non-KOBJ_SPOOR fd (the loom fd itself) is rejected.
     hidx_t bad[1] = { loom_fd };
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, bad, 1),
-                   -1, "non-Spoor fd rejected");
+                   -T_E_INVAL, "non-Spoor fd rejected");
+    // An fd that is not open is EBADF, after an open one was resolved and must
+    // be rolled back: its Spoor's ref count is what it was. (Both readings
+    // include the one ref the reading handle_get holds.)
+    struct Handle rh;
+    TEST_ASSERT(handle_get(p, rd, &rh) == 0, "handle_get(rd)");
+    int ref0 = __atomic_load_n(&((struct Spoor *)rh.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&rh);
+    hidx_t gone[2] = { rd, (hidx_t)999 };
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, loom_fd, LOOM_REGISTER_HANDLES, gone, 2),
+                   -T_E_BADF, "an unopened fd is EBADF");
+    TEST_ASSERT(handle_get(p, rd, &rh) == 0, "handle_get(rd) after");
+    int ref1 = __atomic_load_n(&((struct Spoor *)rh.obj)->ref, __ATOMIC_ACQUIRE);
+    handle_put(&rh);
+    TEST_EXPECT_EQ(ref1, ref0, "and the resolved fd's ref was rolled back");
     // A bogus loom_fd is rejected.
     TEST_EXPECT_EQ(sys_loom_register_for_proc(p, (hidx_t)999, LOOM_REGISTER_HANDLES, one, 1),
-                   -1, "bad loom_fd rejected");
+                   -T_E_BADF, "bad loom_fd is EBADF");
+    // A Spoor fd named as the ring is EINVAL: open, but not a Loom.
+    TEST_EXPECT_EQ(sys_loom_register_for_proc(p, rd, LOOM_REGISTER_HANDLES, one, 1),
+                   -T_E_INVAL, "a non-Loom loom_fd is EINVAL");
 
     test_proc_drop(p);
 }
@@ -370,11 +391,11 @@ void test_loom_register_buffers_rejects(void) {
     struct loom_buf_reg um   = { .va = 0x1000,   .len = PAGE_SIZE };       // unmapped low VA
 
     TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &one,
-                   LOOM_MAX_REG_BUFFERS + 1u), -1, "n over cap rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -1, "len 0 rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -1, "OOB len rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -1, "unmapped VA rejected");
-    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -1, "bad loom_fd rejected");
+                   LOOM_MAX_REG_BUFFERS + 1u), -T_E_INVAL, "n over cap rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -T_E_INVAL, "len 0 rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -T_E_INVAL, "OOB len rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -T_E_INVAL, "unmapped VA rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -T_E_BADF, "bad loom_fd is EBADF");
 
     // Every reject is atomic: the table stays empty + no ref leaked.
     struct Handle h;
@@ -542,6 +563,103 @@ void test_loom_enter_nop(void) {
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "NOP never goes in flight");
 
     loom_unref(l);
+}
+
+// A one-entry SQ whose well-behaved producer refills the position the instant
+// sq_head is published (the hook runs inside loom_sq_release). The kernel must
+// have read the index and copied the SQE by then. Deterministic stand-in for an
+// SQPOLL or sibling-thread producer; it does not exercise userspace scheduling.
+struct sq_refill_obs {
+    u32 visits, dropped, tail1, tail2, head;
+    int n1, n2;
+    u64 first_ud, refill_ud;
+    s32 first_res;
+};
+// Atomic: while armed, the hook also runs from any other ring's SQPOLL drain.
+static struct Loom *sq_refill_target;
+static u32 sq_refill_visits;
+static void sq_refill_producer(struct Loom *l) {
+    if (l != __atomic_load_n(&sq_refill_target, __ATOMIC_ACQUIRE) || sq_refill_visits++) return;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x222ULL);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+}
+// Observes everything and drops the Loom before the caller asserts anything.
+static bool sq_refill_run(bool bad_index, u8 flags, struct sq_refill_obs *o) {
+    struct Loom *l = loom_create(1, 2, false);
+    if (!l) return false;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, flags, 0, 0, 0x111ULL);
+    if (bad_index) sqa[0] = 7;
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    sq_refill_visits = 0;
+    __atomic_store_n(&sq_refill_target, l, __ATOMIC_RELEASE);
+    loom_sq_release_hook_for_test(sq_refill_producer);
+    o->n1 = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
+    loom_sq_release_hook_for_test(NULL);
+    __atomic_store_n(&sq_refill_target, NULL, __ATOMIC_RELEASE);
+    o->visits    = sq_refill_visits;
+    o->dropped   = h->dropped;
+    o->tail1     = l->cq_tail;
+    o->first_ud  = cqes[0].user_data;
+    o->first_res = cqes[0].result;
+    o->n2        = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
+    o->tail2     = l->cq_tail;
+    o->refill_ud = cqes[bad_index ? 0 : 1].user_data;
+    o->head      = h->sq_head;
+    loom_unref(l);
+    return true;
+}
+
+// A valid original completes with its own cookie, then the refill with its own.
+void test_loom_sq_release_after_copy(void) {
+    struct sq_refill_obs o;
+    TEST_ASSERT(sq_refill_run(false, 0, &o), "loom_create(1,2)");
+    TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first sq_head release");
+    TEST_EXPECT_EQ(o.n1, 1, "the original SQE is consumed");
+    TEST_EXPECT_EQ(o.dropped, 0u, "nothing dropped");
+    TEST_EXPECT_EQ(o.tail1, 1u, "the original posts one CQE");
+    TEST_EXPECT_EQ(o.first_ud, (u64)0x111ULL, "the original SQE was copied before its release");
+    TEST_EXPECT_EQ(o.first_res, 0, "the original NOP result");
+    TEST_EXPECT_EQ(o.n2, 1, "the refill is consumed by the next enter");
+    TEST_EXPECT_EQ(o.tail2, 2u, "the refill posts exactly one CQE");
+    TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
+    TEST_EXPECT_EQ(o.head, 2u, "each position released exactly once");
+}
+
+// The same with a DRAIN original, so it is routed through the LINK/DRAIN chain:
+// the held entry must carry the copy, not a later read of the refilled slot.
+void test_loom_sq_release_after_copy_chain(void) {
+    struct sq_refill_obs o;
+    TEST_ASSERT(sq_refill_run(false, LOOM_SQE_DRAIN, &o), "loom_create(1,2)");
+    TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first sq_head release");
+    TEST_EXPECT_EQ(o.n1, 1, "the chain-routed original SQE is consumed");
+    TEST_EXPECT_EQ(o.dropped, 0u, "nothing dropped");
+    TEST_EXPECT_EQ(o.tail1, 1u, "the chain-routed original posts one CQE");
+    TEST_EXPECT_EQ(o.first_ud, (u64)0x111ULL, "the chain-routed original SQE was copied before its release");
+    TEST_EXPECT_EQ(o.first_res, 0, "the chain-routed original NOP result");
+    TEST_EXPECT_EQ(o.n2, 1, "the refill is consumed by the next enter");
+    TEST_EXPECT_EQ(o.tail2, 2u, "the refill posts exactly one CQE");
+    TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
+    TEST_EXPECT_EQ(o.head, 2u, "each position released exactly once");
+}
+
+// An out-of-range original index stays dropped: the refill's valid index, written
+// after the release, must not be read in its place.
+void test_loom_sq_release_after_index(void) {
+    struct sq_refill_obs o;
+    TEST_ASSERT(sq_refill_run(true, 0, &o), "loom_create(1,2)");
+    TEST_EXPECT_EQ(o.visits, 1u, "the producer refilled at the first sq_head release");
+    TEST_EXPECT_EQ(o.n1, 0, "an out-of-range original index is not consumed as the refill");
+    TEST_EXPECT_EQ(o.dropped, 1u, "the out-of-range original index is counted dropped");
+    TEST_EXPECT_EQ(o.tail1, 0u, "the dropped original posts no CQE");
+    TEST_EXPECT_EQ(o.n2, 1, "the refill is consumed by the next enter");
+    TEST_EXPECT_EQ(o.tail2, 1u, "the refill posts exactly one CQE");
+    TEST_EXPECT_EQ(o.refill_ud, (u64)0x222ULL, "the refill keeps its own cookie");
+    TEST_EXPECT_EQ(o.head, 2u, "each position released exactly once");
 }
 
 // The submit-time reject paths each post an error CQE (the SQE is still consumed
@@ -1443,4 +1561,63 @@ void test_loom_wait_counts_admitting(void) {
     TEST_ASSERT(parked, "the waiter parked in the wait's sleep");
     TEST_EXPECT_EQ((u64)(h->cq_tail - h->cq_head), (u64)1, "the phantom's CQE ended the wait");
     loom_unref(l);
+}
+
+// A sibling thread closes the new fd the instant setup installs it. That close
+// drops the handle's reference; setup must still hold its own, so the Loom
+// survives until setup's last touch, and setup's own drop then frees it.
+static bool setup_race_closed;
+static u64  setup_race_destroyed_at_close;
+static void setup_race_close(struct Proc *p, hidx_t fd) {
+    setup_race_closed = handle_close(p, fd) == 0;
+    setup_race_destroyed_at_close = loom_total_destroyed();
+}
+void test_loom_setup_close_race(void);
+void test_loom_setup_close_race(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    u32 base = p->as->page_count;
+    u64 before = loom_total_destroyed();
+    struct loom_params kp;
+    hidx_t fd = -1;
+    setup_race_closed = false;
+    setup_race_destroyed_at_close = 0;
+    loom_setup_installed_hook_for_test(setup_race_close);
+    int rc = sys_loom_setup_for_proc(p, 4, 0, &kp, &fd);
+    loom_setup_installed_hook_for_test(NULL);
+    u64 after = loom_total_destroyed();
+    // The ring mapping outlives the Loom; its detach is the final drop.
+    s64 detached = rc == 0 ? sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size) : -1;
+    u32 settled = p->as->page_count;
+    test_proc_drop(p);
+    TEST_EXPECT_EQ(rc, 0, "setup completes although its fd was closed at install");
+    TEST_ASSERT(setup_race_closed, "the racing close found the freshly installed fd");
+    TEST_EXPECT_EQ(setup_race_destroyed_at_close, before,
+                   "the Loom outlives a close that lands at install");
+    TEST_EXPECT_EQ(after, before + 1, "setup's own last drop frees the closed Loom");
+    TEST_EXPECT_EQ(detached, 0, "the orphaned ring mapping detaches");
+    TEST_EXPECT_EQ(settled, base, "the detach settles the ring charge exactly");
+}
+
+// The setup rollback that runs when params cannot be copied out. It must settle
+// the ring's charge however its close and its detach interleave.
+void test_loom_setup_rollback_settles(void);
+void test_loom_setup_rollback_settles(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "rollback proc");
+    u32 base = p->as->page_count;
+    struct loom_params kp;
+    hidx_t fd = -1;
+    int rc = sys_loom_setup_for_proc(p, 4, 0, &kp, &fd);
+    u32 charged = p->as->page_count;
+    if (!rc) sys_loom_setup_rollback(p, fd, kp.ring_va, kp.ring_size);
+    struct Handle h;
+    bool closed = !rc && handle_get(p, fd, &h) != 0;
+    if (!closed && !rc) handle_put(&h);
+    u32 settled = p->as->page_count;
+    test_proc_drop(p);
+    TEST_EXPECT_EQ(rc, 0, "an ordinary ring to roll back");
+    TEST_ASSERT(charged != base, "the ordinary ring charged its pages");
+    TEST_ASSERT(closed, "the rollback closes the handle");
+    TEST_EXPECT_EQ(settled, base, "the rollback settles the ring's charge exactly");
 }

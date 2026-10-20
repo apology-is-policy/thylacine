@@ -5,13 +5,14 @@ parent: moc-pouch-seam
 title: "POSIX signals over kernel notes"
 code:
   - usr/lib/pouch/patches/0007-pouch-signals.patch
+  - usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch
 audit: hard
 guarded-by: [inv-i24]
 validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/PTY-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-14
 ---
 ## Purpose
 
@@ -32,11 +33,33 @@ with the kernel; the kernel's job is delivery, pouch's is dispatch.
 - The bootstrap `__pouch_note_handler(name, arg)` never returns
   normally: it ends in `SYS_NOTED(NCONT)` or `SYS_NOTED(NDFLT)`.
 
-The supported set: `SIGINT`/`SIGTERM` → `"interrupt"` (shared),
+The supported set: `SIGINT` → `"interrupt"`, `SIGTERM` → `"term"` (its
+own note since 0049, 2026-10-13; before it SIGTERM shared `interrupt`),
 `SIGPIPE` → `"pipe"`, `SIGCHLD` → `"child_exit"`, `SIGKILL` → `"kill"`
 (non-catchable), plus the PTY-3 tty family — `SIGQUIT` → `"tty:quit"`,
 `SIGTSTP` → `"tty:susp"`, `SIGCONT` → `"tty:cont"`, `SIGWINCH` →
 `"tty:winch"`, `SIGHUP` → `"tty:hup"`.
+
+`SIGABRT` is outside the set: `sigaction(SIGABRT)` answers `EINVAL`, so its
+default is its only disposition. `abort()` does not raise it — it executes
+the `brk` the kernel ends as `snare:abort` ([[sub-pouch-process]]) — and since
+0049 `raise(SIGABRT)` and a `kill` of the caller with it call `abort()`; a
+`SIGABRT` to another process answers `EINVAL`, since no note carries it.
+`SIGSEGV`, `SIGBUS`, `SIGILL` and `SIGFPE` are outside the set the same way,
+and since 0050 (2026-10-14) `raise()` of one, or `kill()` of one to the caller
+(pid 0 or `getpid()`), posts the snare it names (`__pouch_self_snare`) to the
+caller, and the kernel ends the process with it
+([[dec-2026-10-14-self-death-snare]]); to another process they answer
+`EINVAL`. The reverse direction
+does carry signals since gcpark-b (2026-10-12): the kernel records the
+signal of every death by note, a fault (`snare:segv` → `SIGSEGV`, …,
+`snare:abort` → `SIGABRT`) or an uncaught terminating note (`interrupt` →
+`SIGINT`, `term` → `SIGTERM`, `kill` → `SIGKILL`, `pipe` → `SIGPIPE`,
+`tty:quit`, `tty:hup`),
+and a parent's `waitpid` reads it as `WIFSIGNALED` / `WTERMSIG`
+(docs/ERRORS.md "The wait status"). No handler runs for a fault signal.
+The musl `__abort_lock` interlock in `sigaction` is not carried: Pouch's
+`abort()` never takes the lock, so it has nothing to guard.
 
 ## Mechanism
 
@@ -50,10 +73,12 @@ compare, looks up the disposition, and ends with the right `SYS_NOTED`.
 The constructor's ORDER is itself the invariant: mask before notify, so
 no note can reach a registered handler over an unset sigtab.
 
-**SIGINT and SIGTERM share one note**, so the dispatcher arbitrates by
-handler-presence: prefer SIGINT's if installed, else SIGTERM's, else
-SIGINT. A program that installs both gets last-registered-wins semantics
-it did not ask for.
+**SIGINT and SIGTERM have a note each** since 0049: the dispatcher maps
+`interrupt` to SIGINT and `term` to SIGTERM, and each has its own mask bit
+(`POUCH_NOTE_BIT_TERM` is bit 7; the supported mask is 0xaf). Before it they
+shared `interrupt`: the dispatcher guessed by handler-presence (SIGINT's if
+installed, else SIGTERM's), blocking SIGINT blocked SIGTERM, and a child
+killed with SIGTERM read `WTERMSIG == SIGINT`.
 
 **The tty family is RECEIVE-ONLY.** The kernel's POST axis rejects any
 userspace `tty:*` post — the I-39 gate that makes a terminal event
@@ -127,9 +152,13 @@ from.
 ## Error paths
 
 `EINVAL` for an unsupported signum or `SIG_ERR`. `EPERM` for a
-`kill`/`raise` of the tty family. `EIO` for a genuine `SYS_POSTNOTE`
-failure (the flat-`-1` collapse — so `ESRCH` and `EPERM` from the kernel's
-own post gate are indistinguishable to a caller).
+`kill`/`raise` of the tty family. Since 0050 a refused `SYS_POSTNOTE` reads
+as the kernel names it ([[dec-2026-10-14-postnote-errnos]]): `ESRCH` for a
+missing pid, `EAGAIN` for a full note queue, `EINVAL` for a name the kernel
+refuses, and `EPERM` for a process that is not the caller's child -- the
+kernel answers `-EACCES`, and `kill()` sets `EPERM` itself, because `-EPERM`
+is `-1`, which the seam reads as `EIO`. Until 0050 every one of these read
+`EIO`.
 
 ## Performance
 
@@ -162,10 +191,19 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
 - **`83-pouch-signals.md` (absorbed) still listed "abort() extincts the
   kernel" as a live caveat, proposing as a "v1.x extension" the exact
   override that shipped** in 0011 — documented in a different reference
-  doc (`86-pouch-stratumd-boot.md`), so the two never met.
-- SIGINT/SIGTERM aliasing; `sigset_t` round-trip is lossy (unsupported
-  signums drop) and spuriously additive (reading back a mask containing
-  SIGINT also reports SIGTERM).
+  doc (`86-pouch-stratumd-boot.md`), so the two never met. That override
+  (`_Exit(127)`) was itself replaced at gcpark-b by the `snare:abort` death.
+- **A raised fault signal ends the process at once, even with it blocked.**
+  Since 0050 `raise(SIGSEGV)` (and `SIGBUS`, `SIGILL`, `SIGFPE`) dies of the
+  snare; on Linux a blocked one stays pending. Pouch's mask has no bit for
+  these signals and `sigaction` refuses all four, so no program can block or
+  catch one first. (Until 0050 they answered `EINVAL` and ran on.)
+- **`kill(pid, 0)`, the existence probe, answers `EINVAL`**: no signal 0
+  mapping and no native probe arm (OPEN-BUGS, 2026-10-14).
+- `sigset_t` round-trip is lossy (unsupported signums drop) and spuriously
+  additive within the tty family, which shares one bit (reading back a mask
+  containing SIGHUP also reports SIGQUIT, SIGTSTP, SIGCONT and SIGWINCH).
+  SIGINT and SIGTERM stopped aliasing at 0049.
 - No mask inheritance across `pthread_create` (the child starts at 0).
 - `SIG_IGN` does not DISCARD pending SIGPIPE notes (POSIX §2.4); the mask
   defers them, and a later real handler sees them retroactively.
@@ -181,4 +219,6 @@ updates only that thread's kernel mask; POSIX wants Proc-wide) ·
 
 [[chg-2026-05-24-p6-signals-b]] (0007 + the paired kernel `pid=0`
 self-post sentinel; [[adt-signals13b-r1]] DIRTY 2 P1 + 6 P2 →
-[[adt-signals13b-r2]] CLEAN) → [[chg-2026-07-18-pty3]] (the tty family).
+[[adt-signals13b-r2]] CLEAN) → [[chg-2026-07-18-pty3]] (the tty family) →
+gcpark-b (2026-10-12: the patch prose for `abort()` and the dropped
+`__abort_lock` interlock; deaths by note report their signal).

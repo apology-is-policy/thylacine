@@ -22,7 +22,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -491,6 +491,9 @@ per-call errno approximation built on top of it.
   twice, and the fopen one omitted its `remove` leg; r3 F10). Sharing the
   header does not weaken the stale-binary catch: the stale binary was
   compiled against the old string, joey against the new one.
+  `pouch-hello-signals` joined the census at gcpark-b (2026-10-12): its new
+  `deaths` leg is the only thing that tells a binary built for the
+  signalled wait from an older one that exits 0 just the same.
 - **`docs/REFERENCE.md`'s pouch row (absorbed) says "seven patches" and
   "Ten pouch binaries"** — both long stale (count the series with
   `grep -vc '^#\|^$' usr/lib/pouch/patches/series`, never from a number

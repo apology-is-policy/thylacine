@@ -16,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/CORVUS-DESIGN.md section 5.5", "docs/IDENTITY-DESIGN.md section 9.8", "specs/corvus.tla", "specs/handles.tla"]
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-08
 ---
 ## Graphical grant commit
 
@@ -241,7 +241,10 @@ That is what makes the scope guarantee tractable: **I-25's privilege
 property rests on the root alone.** A member never holds the elevated caps,
 so a straggler the teardown sweep misses is an unelevated Proc with a stale
 tag — untidy, not a violation. The teardown walk is a tidiness sweep; the
-root dies on its own exit or self-terminates at `valid_until`.
+root dies on its own exit or self-terminates at `valid_until`. A member the
+sweep terminates dies as if killed: `proc_group_terminate(m, NOTE_SIG_KILL,
+"legate scope ended")` records `SIGKILL`, so a waiting parent's packed word
+reads `WIFSIGNALED` `SIGKILL` (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
 
 **The arm-6 session hangup is this teardown's structural sibling, and is *not* a
 cap.** `proc_session_hangup_if_leader` ([[sub-kernel-death]]) rides the same
@@ -383,6 +386,17 @@ so the invariant holds trivially today.
   "non-rfork-grantable" beside it and I-42's own "non-heritable" clause. The
   header says in as many words: do not "fix" this bit toward `CAP_ALL` on
   the strength of that phrase.
+- **An IMAGE keeps the caps of every Proc that has left it** (2026-10-08;
+  [[dec-2026-10-08-image-holder-record]]). Non-heritable means an `RFMEM` child
+  is born without its parent's elevation-only caps, yet it maps the parent's
+  image -- code aliases made under `CAP_JIT`, device windows under
+  `CAP_HW_CREATE` -- and keeps it once the parent is reaped. So the address
+  space records each departing holder's caps (`AddrSpace.caps_ever`) and the
+  I-39 image join weighs the record ([[sub-kernel-proc]]); a debugger that does
+  not cover the creator does not cover the child. The record is not a grant: no
+  gate reads it as authority the holder has, only as authority a caller must
+  cover. (B-2b audit r2 had counted code aliases as `CAP_JIT` alone; the record
+  replaced it.)
 - **The comment drift this dossier once flagged is now fixed** (`830817c4`).
   Both enumerations had lagged their macros — the `CAP_ELEVATION_ONLY` comment
   said "All five" and then listed six; the `CAP_ALL` comment enumerated four

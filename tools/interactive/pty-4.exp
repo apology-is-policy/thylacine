@@ -121,7 +121,21 @@ lc_expect "sleep 30" "fg echoes the running job"
 sleep 1
 send "\x03"
 sleep 1
-lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
+# The job died of the interrupt, so the packed wait reads it signalled and
+# $status is 128 + SIGINT (docs/ERRORS.md "The wait status"); an exit status
+# of 1 is what a shell that read the word as an exit would report.
+lc_run_expect_hardfail_re "echo pty-fg-\$status | tr a-z A-Z" "PTY-FG- 130" {PTY-FG- ?[0-9]+[\r\n]}
+
+# Every other ut wait packs too (dec-2026-10-13-ut-status-packed): a death by
+# note reads 128 plus the signal outside job control as well. pouch-hello-fault
+# dies of snare:segv, so 139; the raw word these waits used to take read 1. A
+# command substitution keeps its status through the `let`. A script runs in a ut
+# with no job control, so its by-pid wait is the plain one; a failed command ends
+# a script, which exits with that `$status`, so this shell reads the script's
+# decode as its exit code.
+lc_run_expect_hardfail_re "let sx = \$(pouch-hello-fault); echo pty-cs-\$status | tr a-z A-Z" "PTY-CS- 139" {PTY-CS- ?[0-9]+[\r\n]}
+lc_send "echo 'pouch-hello-fault' > /tmp/sigst.ut"
+lc_run_expect_hardfail_re "ut /tmp/sigst.ut; echo pty-sx-\$status | tr a-z A-Z" "PTY-SX- 139" {PTY-SX- ?[0-9]+[\r\n]}
 
 # THE TYPE-AHEAD LEG (PTY-DESIGN "Mode writes deliver, never discard",
 # 2026-08-17). A line typed WHILE a foreground job runs is assembled by the
@@ -149,15 +163,21 @@ lc_run_expect "echo pty-fg | tr a-z A-Z" "PTY-FG"
 # If they landed before ut wrote CHILD_MODE (raw, un-echoed, into m2s) or after
 # the PROMPT-mode re-arm, the editor shows them just the same and the leg is
 # green with the delivery path unexercised -- under the OLD posture too. So
-# first require the pts's COOKED ECHO of the line as PLAIN text directly after
-# the accepted line's CRLF: only bytes cooked in CHILD_MODE are echoed there
-# (raw bytes are not echoed at all, and the editor's own redraw shows the text
-# behind the prompt after `\r\x1b[K`, never after a CRLF). A `sleep 4` widens
-# the window the send must land in.
+# first require the pts's COOKED ECHO of the line as PLAIN text at the start of
+# a line: only bytes cooked in CHILD_MODE are echoed there (raw bytes are not
+# echoed at all, and the editor's own redraw shows the text behind the prompt
+# after `\r\x1b[K`, never after a line break). The anchor is the LF, not the
+# CRLF: the console is shared, and while the editor holds it raw another
+# writer's line goes out with a bare LF -- tapestryd's test-mode idle-throttle
+# lines landed between the accepted line's CRLF and the echo in about one run
+# in three, and the old `\r\n` anchor timed out with the echo in expect's
+# buffer (OPEN-BUGS 2026-10-14 13:54Z; expect's own trace). The transcript
+# cannot show this: expect's stdout turns every LF into CRLF. A `sleep 4`
+# widens the window the send must land in.
 lc_send "sleep 4"
 sleep 1
 send "echo type-ahead-ok | tr a-z A-Z"
-lc_expect_re {\r\necho type-ahead-ok \| tr a-z A-Z} "the pts COOKED-ECHOED the type-ahead right after the CRLF (CHILD_MODE was on: the delivery path is ARMED)"
+lc_expect_re {\necho type-ahead-ok \| tr a-z A-Z} "the pts COOKED-ECHOED the type-ahead at the start of a line (CHILD_MODE was on: the delivery path is ARMED)"
 lc_expect_re {echo(\x1b\[[0-9;]*m)* type-ahead-ok \| tr a-z A-Z\r\x1b\[[0-9]+C} "the editor holds the 31-char type-ahead delivered by the mode write"
 send "\r"
 lc_expect "TYPE-AHEAD-OK" "the type-ahead line ran WHOLE (nothing dropped at the head)"
@@ -169,4 +189,4 @@ lc_send "exit"
 sleep 1
 lc_run_expect "echo pty-outer | tr a-z A-Z" "PTY-OUTER"
 
-lc_pass "PTY-4: job control end-to-end over a hosted session (stop/jobs/fg-restop/bg/fg-int + a clean unwind)"
+lc_pass "PTY-4: job control end-to-end over a hosted session (stop/jobs/fg-restop/bg/fg-int with \$status 130, 139 for a death in a substitution and a script, + a clean unwind)"

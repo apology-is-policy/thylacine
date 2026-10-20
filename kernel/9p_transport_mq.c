@@ -5,6 +5,7 @@
 
 #include <thylacine/9p_transport_mq.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/extinction.h>
 #include <thylacine/types.h>
 
 _Static_assert(P9_MQ_LOOPBACK_MAGIC == 0x4D514C30u, "mq loopback magic drift");
@@ -29,12 +30,17 @@ int p9_mq_loopback_init(struct p9_mq_loopback *mq,
     return 0;
 }
 
+// Under the lock: a test whose wait for its closer ran out destroys the
+// loopback while a send or recv of that closer may be inside it, and a reset
+// of head/tail between a recv's sample and its copy would read past the ring.
 void p9_mq_loopback_destroy(struct p9_mq_loopback *mq) {
     if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return;
+    spin_lock(&mq->lock);
     mq->magic  = 0;
     mq->head   = 0;
     mq->tail   = 0;
     mq->closed = true;
+    spin_unlock(&mq->lock);
     poll_waiter_list_wake(&mq->ready_list);
 }
 
@@ -131,6 +137,43 @@ static bool mq_recv_ready(void *ctx, struct poll_waiter *pw) {
     bool ready = mq->closed || mq->tail != mq->head;
     spin_unlock(&mq->lock);
     return ready;
+}
+
+void p9_mq_loopback_set_eagain_budget(struct p9_mq_loopback *mq, u32 n) {
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return;
+    spin_lock(&mq->lock);
+    mq->eagain_budget = n;
+    spin_unlock(&mq->lock);
+}
+
+// No value can stand for a loopback that is not live: every budget, all ones
+// included, is one a test arms.
+u32 p9_mq_loopback_eagain_budget(struct p9_mq_loopback *mq) {
+    ASSERT_OR_DIE(mq && mq->magic == P9_MQ_LOOPBACK_MAGIC,
+                  "9p mq: a budget read of a loopback that is not live");
+    spin_lock(&mq->lock);
+    u32 n = mq->eagain_budget;
+    spin_unlock(&mq->lock);
+    return n;
+}
+
+void p9_mq_loopback_arm_scribble(struct p9_mq_loopback *mq, u8 *buf, u32 len,
+                                 u32 n) {
+    if (!mq || mq->magic != P9_MQ_LOOPBACK_MAGIC) return;
+    spin_lock(&mq->lock);
+    mq->scribble_buf = buf;
+    mq->scribble_len = len;
+    mq->scribble_arm = n;
+    spin_unlock(&mq->lock);
+}
+
+u32 p9_mq_loopback_scribble_armed(struct p9_mq_loopback *mq) {
+    ASSERT_OR_DIE(mq && mq->magic == P9_MQ_LOOPBACK_MAGIC,
+                  "9p mq: a scribble read of a loopback that is not live");
+    spin_lock(&mq->lock);
+    u32 n = mq->scribble_arm;
+    spin_unlock(&mq->lock);
+    return n;
 }
 
 struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq) {

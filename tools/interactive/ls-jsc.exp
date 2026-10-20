@@ -1,7 +1,8 @@
 #!/usr/bin/expect -f
-# tools/interactive/ls-jsc.exp -- Boosty B-0 over a real PTY: JavaScriptCore
-# (WebKit's JSCOnly port, static, every JIT tier off) runs as the logged-in user
-# from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md; docs/browser-status.md.
+# tools/interactive/ls-jsc.exp -- Boosty over a real PTY: JavaScriptCore (WebKit's
+# JSCOnly port, static; the Baseline, DFG (B-2d), FTL (B-2e1), regexp and Wasm BBQ and
+# OMG (B-2e3) JITs on one SYS_JIT_CREATE code region) runs as the logged-in user from the pool at /webkit/jsc. docs/BROWSER-DESIGN.md;
+# docs/browser-status.md.
 #
 # What each leg pins, and the libc defect it would have caught (all three were
 # found by running this engine, not by review):
@@ -13,6 +14,167 @@
 #           sysconf(_SC_PHYS_PAGES) returned stack residue; arrays died at ~1000)
 #   typed   a 64 MiB typed array, last byte written and read back (lazy anon mmap)
 #   wasm    the WebAssembly object exists and validates a module header (IPInt)
+#   jit / jit-deny     a hot function runs Baseline JIT code ($vm.baselineJITTrue);
+#           --thylacine-no-cap-jit, one flag away, leaves it interpreted
+#   rx / rx-deny       a regexp compiles to the YARR JIT; denied, the same pattern
+#           goes to the YARR interpreter (JSC says "Can't JIT" for it)
+#   loop / loop-deny   a 2e7-iteration int32 loop computes the same value both ways;
+#           each prints its time for the record (asserted: the value, never a time)
+#   sunspider / sunspider-baseline / sunspider-deny   SunSpider 1.0.2, three runs
+#           each: every JIT on, the DFG off (--useDFGJIT=false), and denied; 23 of
+#           its 26 tests check their own result (date-format-tofte,
+#           date-format-xparb and string-validate-input check nothing); the totals
+#           are the record (loop-baseline is the same split for the loop;
+#           sunspider-dfg and loop-dfg turn only the FTL off)
+#   dfg / dfg-off / dfg-deny / dfg-sync   a hot function reaches DFG code
+#           ($vm.dfgTrue() folds to true only there); --useDFGJIT=false, one flag
+#           away, stops at Baseline; --thylacine-no-cap-jit reaches neither;
+#           --useConcurrentJIT=false compiles on the JS thread and gets there too
+#   ftl / ftl-off / ftl-deny / ftl-sync   the DFG legs again for the FTL:
+#           $vm.ftlTrue() folds to true only in FTL code (never vacuously:
+#           false in DFG code too); --useFTLJIT=false stops at the DFG
+#   ftl-osr an FTL function speculating int32 takes a double and then a string:
+#           two exits through ONE exit, and --verboseFTLOSRExit must log exactly
+#           one exit-stub compile -- the second exit took the jump the first
+#           patched (a jump never patched compiles the stub twice). The tier is
+#           read with $vm.codeBlockFor matched on the JIT-type word: the dump
+#           also prints "(FTLFail)" and "(HadFTLReplacement)" for other tiers
+#   ftl-ic  an FTL property cache (FTL caches rewrite code; Baseline's and the
+#           DFG's are data) meets four new shapes, one a getter, 1000 times
+#           each without leaving FTL code: a call that left would add 1000
+#           ($vm.ftlTrue() is false outside FTL code) and the code block must be
+#           the one it started with. With the FTL off it reads x4000 (DFG code
+#           is not FTL code); --forceICFailure=true also turns it red, but by
+#           changing the compile. A rewrite that does nothing it cannot see:
+#           with replaceWithJump gone from rewireStubAsJumpInAccess and
+#           linkCodeInline refusing (B-2e1's red run, 2026-10-13) it still
+#           passes, because every access then takes the slow path, which answers
+#           right and returns into the same FTL code. So it shows the rewrites
+#           run without breaking the code; ftl-osr is the FTL's discriminating
+#           patch witness
+#   wasm-sync / wasm-async   a module whose export calls a JS import, compiled
+#           synchronously and by WebAssembly.instantiate: its exit stubs are
+#           JIT code a worklist thread may write, run by the JS thread, which
+#           takes an ISB first (patch 0005; build_jsc asks the binary for it).
+#           Since B-2e3 the export also tiers to BBQ inside the 1000 calls, and
+#           like every Wasm leg these need exit status 0 as well as the reading
+#   stack   a runaway recursion on a $.agent thread, a WTF thread as the compiler,
+#           collector and Wasm worklist threads are, must go deeper than any
+#           128 KiB stack holds (musl's default; patch 0005 gives every WTF thread
+#           1 MiB): an LLInt frame is at least 48 bytes, so a stack of 128 KiB
+#           holds at most 131072/48 calls. --useJIT=false keeps one call per frame
+#           (an inlined call would share its caller's)
+#   tiers   every tier on, each asked for by flag; --useDollarVM=true in the same
+#           line reads on, so the flags were parsed (jscOptions() reports a bool as
+#           the number 0 or 1). Any other complete reading fails at once (the FTL
+#           forced off read JSCO-1-0-0-0-1-1 and, before the fail arm, waited out
+#           the timeout)
+#   wasm-tier / -bbq / -ipint / -deny   a Wasm function reads its own tier as
+#           10*callerIsBBQOrOMGCompiled() + $vm.omgTrue() (both imports see the
+#           calling Wasm frame): 0 interpreted (IPInt), 10 BBQ, 11 OMG. Called
+#           until it reads 11: every tier on reaches 11, --useOMGJIT=false stops at
+#           10, --useBBQJIT=false and the denied jsc stay at 0 (OMG is entered only
+#           from BBQ). Every BBQ and OMG install runs resetInstructionCacheOnAllThreads,
+#           SYS_ICACHE_SYNC_SPACE here (patch 0006; build_jsc asks the binary for
+#           it): upstream's thread walk would die at the first install
+#   wasm-patch   a(x) calls c() (when x is 1) through a near call BBQ links at a's
+#           install. a(0) runs until a runs BBQ code, so c is still interpreted;
+#           then c alone is called until it runs OMG code, and a(1) reads
+#           100*omgTrue + 10*bbqOrOmg for itself + c's omgTrue: 11 only if c's
+#           installs retargeted a's call (left alone it lands in c's IPInt code:
+#           10, which the leg read with the retarget removed, 2026-10-13)
+#   wasm-osr / -osr-bbq / -osr-ipint   ONE call of a 1e8-iteration loop that
+#           then reads its own tier: a call that starts interpreted and ends in OMG
+#           (or BBQ) code entered it by loop OSR. Each prints its time for the
+#           record (the benchmark: the same loop on each tier; asserted: the tier)
+#   refcast-bbq / -omg / -ipint   ref.cast of a null (ref null S) to (ref T),
+#           a struct type, after the function reached BBQ (OMG off), OMG, or stayed
+#           interpreted (BBQ off): a RuntimeError each time. BBQ and B3 dropped
+#           that null check where the field read sits at offset 0, trusting a
+#           fault handler Thylacine does not run; the macOS jsc with
+#           --useWasmFaultSignalHandler=false dies of SIGSEGV there under BBQ and
+#           under OMG (patch 0006: no offset is safe without a handler)
+#   wasm-canfail / -canfail-ctl   with every CanFail executable allocation made
+#           to fail (useExecutableAllocationFuzz), a module with imports must be a
+#           CompileError naming the stubs, compiled synchronously and by
+#           WebAssembly.compile, and jsc exits 0; the twin, the fuzzer off, compiles
+#           both ways. The exit stubs asked MustSucceed, which the fuzzer cannot
+#           fail (and a full pool crashed on)
+#   wasm-canfail-group   the other stub kind, which an instance's group asks for:
+#           one run counts the CanFail allocations a module costs (the verbose
+#           fuzzer prints the count at exit; at least the module's two wasm-to-JS
+#           stubs), a second lets exactly those succeed, and the instance must fail
+#           with a LinkError naming the stubs
+#   osr     a DFG function speculating int32 is handed a double and a string: two
+#           OSR exits through the one ramp compiled on the first (its jump patched
+#           in place), and both answers right. The leg calls on until the DFG
+#           compile has landed (numberOfDFGCompiles counts only installed code,
+#           and the compile runs on a worker thread); numberOfDFGCompiles reads
+#           1000000 whenever the DFG is off, so the leg asks for at least 1 and
+#           below that
+#   watch   a loop running DFG code that reads an array hole (the prototype chain
+#           speculated empty) calls out to code that puts an indexed getter on
+#           Array.prototype: the watchpoint discards the loop's code, the jump
+#           patched over its invalidation point sends it back to Baseline, and the
+#           hole reads the getter's 42. The call passes $vm.dfgTrue(), so the leg
+#           also proves the loop WAS DFG code when the watchpoint fired. A broken
+#           discard keeps running the stale loop: with the jump replacement
+#           sabotaged (2026-10-12) it read a Symbol out of the hole and the print
+#           threw, so the leg fails on any value but 42 and on an exception.
+#   gc-jettison / gc-jettison-ctl   the collector discards DFG code, and patches
+#           it doing so. Twenty rounds each make a fresh function DFG code that
+#           calls a fresh closure; the DFG folds the closure in as a constant, a
+#           WEAK reference of the DFG block. The closure is dropped, the function
+#           kept, and jsc parks in flashHeapAccess under the continuous collector:
+#           a DFG block whose weak reference died is unmarked, and the collector's
+#           end phase discards it (JettisonDueToWeakReference), firing its
+#           invalidation points and unlinking its callers -- code patched by the
+#           thread that conducts. $vm.codeBlockFor reads the function's tier
+#           without calling it, so a DFG block gone back to Baseline with no call
+#           in between was discarded by a collection. It runs with the FTL off:
+#           its subject is DFG code, and a round that reached FTL code would
+#           read as never reaching the DFG. The leg needs every round to
+#           reach DFG code first (with the DFG off none does: red), every call
+#           right, and at least one discard; its twin keeps each closure alive
+#           and must see none. Measured on the macOS jsc, this script: 10-13 of 20
+#           discarded vs 0 kept-alive, three runs each; with no collector window
+#           0-1; with the DFG off 20 of 20 never reach DFG code; JSC's own log
+#           names such a discard "DFGFunctionCall ... due to WeakReference".
+#           Which thread conducted each end phase is not observable; the
+#           collector conducts whenever it stops the world with jsc parked,
+#           which flashHeapAccess arranges. (Round 1's version counted "due to
+#           JettisonDueToOldAge" log lines, a reason JSC gives only an LLInt or
+#           Baseline block: it passed with the DFG off. Fable r1 F1.)
+#   thunk / thunk-oob  pouch-hello-jitthunk runs JSC's write-thunk encoding
+#           (usr/lib/thylajit/thyla_jit_thunk.h) against the kernel: edge writes
+#           read back through the exec alias, and each out-of-bounds write dies of
+#           the thunk's brk, matched to the probe's own pid (JSC itself never
+#           writes out of range, so only a probe reaches the bounds check)
+#   gc-held / gc-flash / gc-flash-dft / gc-idle   the collector stops the world
+#           while jsc has RELEASED heap access, and must scan the stack image the
+#           thread parked instead of suspending it (Thylacine cannot; before
+#           gcpark, jsc died silently, exit 127). 40 rounds each hold an object
+#           only in a JS frame across the wait, then allocate, then check it; the
+#           leg asserts 0 lost AND exit status 0. What each leg discriminates was
+#           measured on 2026-10-12 against three REDs: R0 (no park at all), R1 (a
+#           park that never marks the thread parked) and R2 (a scan that ignores
+#           the parked images).
+#           - gc-flash releases access each round (flashHeapAccess) under
+#             --collectContinuously. R0 and R1 die. It is the only leg that
+#             catches R2: it lost 3 of 40 objects.
+#           - gc-flash-dft is the same under the default collector. R0 and R1
+#             die; R2 passes.
+#           - gc-idle drops the JSLock and idles in the run loop until a
+#             setTimeout fires, the shape a page process has between events. R0
+#             and R1 die; R2 passes.
+#           - gc-held sleeps holding access, but it is NOT a release-free
+#             control. jsc itself drops the JSLock between its own lock scopes,
+#             before the script (VM setup) and after it (teardown), and the
+#             continuous collector can scan the parked thread there. R0 and R1
+#             died of that (an R1 diag build caught the scan, the target's last
+#             park in jscmain's ~JSLockHolder), but only when the collector ran
+#             inside such a window: one R1 run in three. A weak leg.
+#           Atomics.wait is not a release here: it blocks holding access.
 #
 # EVERY marker is printed by the guest in lower case and asserted in UPPER case
 # through `tr`, and no expected string appears in the typed line (the inputs are
@@ -36,6 +198,15 @@ if {![lc_pool_has WEBKIT]} {
           baked before the payloads line existed)"
     exit 77
 }
+# The SunSpider legs read /webkit/sunspider, staged by the same bake; a pool baked
+# before that payload existed would fail them as a missing file, which reads as an
+# engine failure.
+if {![lc_pool_has SUNSPIDER]} {
+    puts "LS-CI FAIL: this pool holds JavaScriptCore but not SunSpider (build/pool-contents\
+          has no SUNSPIDER payload -- a pool baked before B-2c; rebake with\
+          THYLACINE_BAKE_WEBKIT=1)"
+    exit 1
+}
 
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
@@ -58,6 +229,371 @@ foreach {tag js want} {
     lc_run_expect "/webkit/jsc -e '$js' | tr a-z A-Z" $want
     lc_pass "ls-jsc($tag): $want"
 }
+
+# B-2c. michael is jit-eligible, so jsc acquires CAP_JIT by the SELF form before
+# JSC creates its pool; --thylacine-no-cap-jit skips that, the pool's SYS_JIT_CREATE
+# is refused (EACCES) and the same script runs on the interpreters. Every JIT-on
+# witness is paired with its denied twin: a "false" or a "Can't JIT" alone is also
+# what a JIT that never started would print. @T is each leg's own marker.
+set witness {function f(){return $vm.baselineJITTrue()}; var r=false; for(var i=0;i<1e6&&!r;i++)r=f(); print("@T-"+r)}
+set rx {var n=0; for(var i=0;i<1000;i++) if(/a+b/.test("x"+i+"aab")) n++; print("@T-"+n)}
+set loop {var t=preciseTime(); var s=0; for(var i=0;i<2e7;i++)s=(s+i*i)|0; print("@T-"+s+"-"+Math.round((preciseTime()-t)*1000)+"ms")}
+set nojit {Can't JIT this regular expression: "/a+b/"}
+
+lc_send "/webkit/jsc --useDollarVM=true -e '[string map {@T jscg} $witness]' | tr a-z A-Z"
+lc_expect "CAP_JIT acquired (SELF)" "jsc acquires CAP_JIT by the SELF form"
+lc_expect "JSCG-TRUE" "a hot function runs Baseline JIT code"
+lc_pass "ls-jsc(jit): CAP_JIT acquired (SELF), JSCG-TRUE"
+
+lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit --useDollarVM=true -e '[string map {@T jsck} $witness]' | tr a-z A-Z" \
+    "JSCK-FALSE" "CAP_JIT acquired"
+lc_pass "ls-jsc(jit-deny): JSCK-FALSE, no CAP_JIT"
+
+lc_run_expect_hardfail "/webkit/jsc --dumpCompiledRegExpPatterns=true -e '[string map {@T jsch} $rx]' | tr a-z A-Z" \
+    "JSCH-1000" $nojit
+lc_pass "ls-jsc(rx): JSCH-1000 through the YARR JIT"
+
+lc_send "/webkit/jsc --thylacine-no-cap-jit --dumpCompiledRegExpPatterns=true -e '[string map {@T jscl} $rx]' | tr a-z A-Z"
+lc_expect $nojit "denied, the pattern goes to the YARR interpreter"
+lc_expect "JSCL-1000" "the interpreted pattern matches the same"
+lc_pass "ls-jsc(rx-deny): Can't JIT, JSCL-1000"
+
+# B-2d. The behaviour first, then the option values.
+set dfg {function f(){return $vm.baselineJITTrue()}; function g(){return $vm.dfgTrue()}; var b=false, d=false; for(var i=0;i<1e7&&!(b&&d);i++){if(!b)b=f(); if(!d)d=g()} print("@T-"+b+"-"+d)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jscp} $dfg]' | tr a-z A-Z" \
+    "JSCP-TRUE-TRUE" {JSCP-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(dfg): a hot function runs DFG code"
+lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=false --useDollarVM=true -e '[string map {@T jscu} $dfg]' | tr a-z A-Z" \
+    "JSCU-TRUE-FALSE" {JSCU-(FALSE|TRUE-TRUE)}
+lc_pass "ls-jsc(dfg-off): with --useDFGJIT=false it stops at Baseline"
+lc_run_expect_hardfail_re "/webkit/jsc --thylacine-no-cap-jit --useDollarVM=true -e '[string map {@T jscv} $dfg]' | tr a-z A-Z" \
+    "JSCV-FALSE-FALSE" {JSCV-TRUE|CAP_JIT acquired}
+lc_pass "ls-jsc(dfg-deny): without CAP_JIT, neither tier"
+lc_run_expect_hardfail_re "/webkit/jsc --useConcurrentJIT=false --useDollarVM=true -e '[string map {@T jscw} $dfg]' | tr a-z A-Z" \
+    "JSCW-TRUE-TRUE" {JSCW-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(dfg-sync): compiled on the JS thread, the same"
+
+set tiers {var o=jscOptions(); print("@T-"+o.useDFGJIT+"-"+o.useFTLJIT+"-"+o.useBBQJIT+"-"+o.useOMGJIT+"-"+o.useBaselineJIT+"-"+o.useDollarVM)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDFGJIT=true --useFTLJIT=true --useBBQJIT=true --useOMGJIT=true --useDollarVM=true -e '[string map {@T jsco} $tiers]' | tr a-z A-Z" \
+    "JSCO-1-1-1-1-1-1" {JSCO-[0-9](-[0-9]){5}[^-0-9]}
+lc_pass "ls-jsc(tiers): every tier on; the flags were parsed"
+
+set osr {function h(x){return x+1} var s=0, i=0; for(;i<1e5||(i<1e7&&numberOfDFGCompiles(h)<1);i++)s=h(i); s=h(99999); var c=numberOfDFGCompiles(h); var d=h(0.5), t=h("q"); print("@T-"+(c>=1&&c<1e6&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-c"+c+"-"+s+"-"+d+"-"+t)}
+lc_run_expect_hardfail "/webkit/jsc -e '[string map {@T jscx} $osr]' | tr a-z A-Z" "JSCX-OK-C" "JSCX-BAD"
+lc_pass "ls-jsc(osr): two OSR exits out of DFG code, both answers right"
+
+set watch {var armed=0, dd=false; function arm(i,d){if(i===9e4&&!armed){armed=1; dd=d; Object.defineProperty(Array.prototype,1,{get:function(){return 6*7}})}} noInline(arm); function run(a){var x; for(var i=0;i<1e5;i++){arm(i,$vm.dfgTrue()); x=a[1]} return x} var r=run([1,,3]); print("@T-"+armed+"-"+dd+"-"+r)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jscy} $watch]' | tr a-z A-Z" \
+    "JSCY-1-TRUE-42" {JSCY-(0|1-FALSE|1-TRUE-([^4]|4[^2]|42[^\r\n]))|EXCEPTION: [^\r\n]*}
+lc_pass "ls-jsc(watch): a watchpoint discards running DFG code; the hole reads 42"
+
+# B-2e1. The FTL, as the DFG legs: ftlTrue folds to true only in FTL code.
+set ftl {function g(){return $vm.dfgTrue()}; function f(){return $vm.ftlTrue()}; var d=false, t=false; for(var i=0;i<2e7&&!(d&&t);i++){if(!d)d=g(); if(!t)t=f()} print("@T-"+d+"-"+t)}
+lc_run_expect_hardfail_re "/webkit/jsc --useDollarVM=true -e '[string map {@T jsdd} $ftl]' | tr a-z A-Z" \
+    "JSDD-TRUE-TRUE" {JSDD-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(ftl): a hot function runs FTL code"
+lc_run_expect_hardfail_re "/webkit/jsc --useFTLJIT=false --useDollarVM=true -e '[string map {@T jsde} $ftl]' | tr a-z A-Z" \
+    "JSDE-TRUE-FALSE" {JSDE-(FALSE|TRUE-TRUE)}
+lc_pass "ls-jsc(ftl-off): with --useFTLJIT=false it stops at the DFG"
+lc_run_expect_hardfail_re "/webkit/jsc --thylacine-no-cap-jit --useDollarVM=true -e '[string map {@T jsdf} $ftl]' | tr a-z A-Z" \
+    "JSDF-FALSE-FALSE" {JSDF-TRUE|CAP_JIT acquired}
+lc_pass "ls-jsc(ftl-deny): without CAP_JIT, no optimizing tier"
+lc_run_expect_hardfail_re "/webkit/jsc --useConcurrentJIT=false --useDollarVM=true -e '[string map {@T jsdg} $ftl]' | tr a-z A-Z" \
+    "JSDG-TRUE-TRUE" {JSDG-(FALSE|TRUE-FALSE)}
+lc_pass "ls-jsc(ftl-sync): compiled on the JS thread, the same"
+
+# The tier from the code block's JIT-type word; h(0) gives h a code block first.
+set ftltier {function tier(f){var m=/, (FTL|DFG|Baseline)Function/.exec(String($vm.codeBlockFor(f))); return m?{FTL:3,DFG:2,Baseline:1}[m[1]]:0}}
+set ftlosr "$ftltier [string map {@T jsdh} {var F=false; function h(x){F=$vm.ftlTrue(); return x+1} noInline(h); h(0); var s=0, i=0; for(;i<1e7&&tier(h)<3;i++)s=h(i); var w=tier(h); s=h(99999); var f1=F; var d=h(0.5), t=h("q"); print(("@T-"+(w==3&&f1&&s===1e5&&d===1.5&&t==="q1"?"ok":"bad")+"-w"+w+"-"+d+"-"+t).toUpperCase())}]"
+proc ftlosr_leg {} {
+    global lc_cmd_timeout timeout ftlosr
+    lc_send "/webkit/jsc --useDollarVM=true --verboseFTLOSRExit=true -e '$ftlosr'; echo jsdh-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set n 0
+    set out ""
+    set st ""
+    # One alternation, so the leftmost line in the stream is taken first.
+    expect {
+        -re "Compiling OSR exit with exitID|JSDH-(OK|BAD)\[^\r\n\]*\[\r\n\]|JSDH-ST- ?\[0-9\]+\[\r\n\]|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXCEPTION: \[^\r\n\]*|EXTINCTION:" {
+            set m $expect_out(0,string)
+            if {$m eq "Compiling OSR exit with exitID"} {
+                incr n
+                exp_continue
+            } elseif {[regexp {^JSDH-ST- ?([0-9]+)} $m -> st]} {
+            } elseif {[regexp {^JSDH-(OK|BAD)} $m]} {
+                set out [string trim $m]
+                exp_continue
+            } elseif {$m eq "EXTINCTION:"} {
+                lc_extinction_fail "kernel extinction during ftl-osr"
+            } else {
+                lc_fail "ftl-osr: \[[string trim $m]\]"
+            }
+        }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in ftl-osr: out=$out compiles=$n" }
+    }
+    if {![string match "JSDH-OK-*" $out] || $n != 1 || $st ne "0"} {
+        lc_fail "ftl-osr: out=$out exit-stub compiles=$n status=$st (want JSDH-OK, exactly 1, 0)"
+    }
+    lc_pass "ls-jsc(ftl-osr): $out -- two FTL exits through one exit, one exit-stub compile (the second took the patched jump), exit 0"
+}
+ftlosr_leg
+
+set ftlic "$ftltier [string map {@T jsdi} {function g(o){var v=o.p; return v+($vm.ftlTrue()?0:1000)} noInline(g); var A=[{p:1},{a:0,p:2},Object.create({get p(){return 5}})]; g(A[0]); var q=0, i=0; for(;i<1e7&&tier(g)<3;i++){g(A[q]); q=q==2?0:q+1} var w=tier(g), cb=String($vm.codeBlockFor(g)); var B=[{b:0,c:0,p:3},{d:0,p:4},{e:0,f:0,h:0,p:6},Object.create({get p(){return 6*7}})]; var r=0, x=0; for(var k=0;k<1000;k++) for(var j=0;j<4;j++){var v=g(B[j]); r+=v; if(v>=1000)x++} var w2=tier(g), same=String($vm.codeBlockFor(g))===cb; print("@T-"+(w==3&&w2==3&&same&&x==0&&r==55000?"ok":"bad")+"-w"+w+"-"+w2+"-x"+x+"-"+same+"-r"+r)}]"
+lc_run_expect_hardfail "/webkit/jsc --useDollarVM=true -e '$ftlic' | tr a-z A-Z" \
+    "JSDI-OK-W3-3-X0-TRUE-R55000" "JSDI-BAD"
+lc_pass "ls-jsc(ftl-ic): an FTL property cache took four new shapes without leaving FTL code (functional)"
+
+# The Wasm legs (B-2e1's two, then B-2e3's). Each jsc prints "@T-<reading>." once,
+# upper-cased by the script itself (no "." inside a reading), and the line then echoes
+# its exit status through tr, so the echo of the typed line (lower case) satisfies
+# neither. One leftmost alternation takes the reading, the status, an uncaught
+# exception, a FATAL line, a user fault or an extinction; the leg needs exactly the
+# expected reading AND exit status 0. A jsc that dies after printing its reading
+# (a background compile's install, say) fails here: with upstream's thread walk
+# restored (2026-10-13), wasm-sync and wasm-async printed their readings and then
+# died of snare:abort, and the legs as they were passed.
+proc wasm_leg {what tag opts js want {extrafail ""}} {
+    global lc_cmd_timeout timeout
+    set T [string toupper $tag]
+    lc_send "/webkit/jsc $opts -e '[string map [list @T $tag] $js]'; echo $tag-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set out ""
+    set st ""
+    set re "$T-ST- ?\[0-9\]+\[\r\n\]|$T-\[^.\r\n\]*\\.|Exception: \[^\r\n\]*|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXTINCTION:"
+    if {$extrafail ne ""} { append re "|$extrafail" }
+    expect {
+        -re $re {
+            set m $expect_out(0,string)
+            if {[regexp "^$T-ST- ?(\[0-9\]+)" $m -> st]} {
+            } elseif {[regexp "^$T-(\[^.\r\n\]*)\\.\$" $m -> r]} {
+                if {$out ne ""} { lc_fail "$what: a second reading \[$r\] after \[$out\]" }
+                set out $r
+                exp_continue
+            } elseif {$m eq "EXTINCTION:"} {
+                lc_extinction_fail "kernel extinction during $what"
+            } else {
+                lc_fail "$what: \[[string trim $m]\]"
+            }
+        }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in $what: out=$out" }
+        eof     { lc_fail "unexpected EOF during $what" }
+    }
+    if {$out ne $want || $st ne "0"} {
+        lc_fail "$what: read \[$out\] (want $want), exit status $st (want 0)"
+    }
+    lc_pass "ls-jsc($what): $T-$want, exit 0"
+}
+
+# A module whose export g(x) returns the import f(x) + 1; f(x) = 2x. With BBQ on, g
+# crosses BBQ's threshold inside the 1000 calls, so its install runs too.
+set wasmmod {new Uint8Array([0,97,115,109,1,0,0,0,1,6,1,96,1,127,1,127,2,7,1,1,109,1,102,0,0,3,2,1,0,7,5,1,1,103,0,1,10,11,1,9,0,32,0,16,0,65,1,106,11])}
+set wasmsync "var b=$wasmmod; [string map {@T jsdj} {var n=0; var i=new WebAssembly.Instance(new WebAssembly.Module(b),{m:{f:function(x){n++;return x*2}}}); var s=0; for(var k=0;k<1000;k++)s+=i.exports.g(k); print(("@T-"+i.exports.g(6*7)+"-"+s+"-"+n+".").toUpperCase())}]"
+set wasmasync "var b=$wasmmod; [string map {@T jsdk} {var n=0; WebAssembly.instantiate(b,{m:{f:function(x){n++;return x*2}}}).then(function(r){var s=0; for(var k=0;k<1000;k++)s+=r.instance.exports.g(k); print(("@T-"+r.instance.exports.g(6*7)+"-"+s+"-"+n+".").toUpperCase())},function(e){print(("@T-err-"+(e&&e.name)+".").toUpperCase())})}]"
+wasm_leg wasm-sync  jsdj "" $wasmsync 85-1000000-1001
+wasm_leg wasm-async jsdk "" $wasmasync 85-1000000-1001
+
+# B-2e3. The imports read the calling Wasm frame's tier; callerIsBBQOrOMGCompiled is
+# jsc's, omgTrue needs $vm. TIERS: t() = 10*b() + o(); p(n) loops n times, then reads
+# its tier; c() = o(); a(x) = 100*o() + 10*b() + (x ? c() : 0).
+set wimp {{m:{b:callerIsBBQOrOMGCompiled,o:$vm.omgTrue}}}
+set wtmod {new Uint8Array([0,97,115,109,1,0,0,0,1,10,2,96,0,1,127,96,1,127,1,127,2,13,2,1,109,1,98,0,0,1,109,1,111,0,0,3,5,4,0,1,0,1,6,6,1,127,1,65,0,11,7,17,4,1,116,0,2,1,112,0,3,1,99,0,4,1,97,0,5,10,85,4,10,0,16,0,65,10,108,16,1,106,11,41,1,1,127,2,64,3,64,32,1,32,0,115,32,0,108,33,1,32,0,65,1,107,34,0,13,0,11,11,32,1,36,0,16,0,65,10,108,16,1,106,11,4,0,16,1,11,25,0,16,1,65,228,0,108,16,0,65,10,108,106,32,0,4,127,16,4,5,65,0,11,106,11])}
+set wtiers [string map [list WIMP $wimp TMOD $wtmod] {var e=new WebAssembly.Instance(new WebAssembly.Module(TMOD),WIMP).exports;}]
+set wtier $wtiers
+append wtier { var r=0, k=0; for(;k<1e6&&r!=11;k++)r=e.t(); print(("@T-"+r+".").toUpperCase())}
+wasm_leg wasm-tier       jsdo "--useDollarVM=true"                       $wtier 11
+wasm_leg wasm-tier-bbq   jsdp "--useDollarVM=true --useOMGJIT=false"     $wtier 10
+wasm_leg wasm-tier-ipint jsdq "--useDollarVM=true --useBBQJIT=false"     $wtier 0
+wasm_leg wasm-tier-deny  jsdr "--thylacine-no-cap-jit --useDollarVM=true" $wtier 0 "CAP_JIT acquired"
+# a(0) never runs c, so a reaches BBQ code while c is still interpreted; then c alone
+# is called until it runs OMG code; a(1) reads 11 only through the call BBQ linked at
+# a's install, retargeted by c's OMG install (left alone it lands in c's IPInt code: 10)
+set wpatch $wtiers
+append wpatch { var a1=0, c=0, k; for(k=0;k<1e5&&a1<10;k++)a1=e.a(0); for(k=0;k<1e6&&c!=1;k++)c=e.c(); print(("@T-"+a1+"-"+c+"-"+e.a(1)+".").toUpperCase())}
+wasm_leg wasm-patch      jsds "--useDollarVM=true"                       $wpatch 10-1-11
+set wosr $wtiers
+append wosr { var t=preciseTime(), v=e.p(1e8); print(("@T-"+v+"."+Math.round((preciseTime()-t)*1000)+"ms").toUpperCase())}
+wasm_leg wasm-osr        jsdt "--useDollarVM=true"                       $wosr 11
+wasm_leg wasm-osr-bbq    jsdu "--useDollarVM=true --useOMGJIT=false"     $wosr 10
+wasm_leg wasm-osr-ipint  jsdv "--useDollarVM=true --useBBQJIT=false"     $wosr 0
+# REFCAST: mk() -> a T (7, 9); cast(x: (ref null S)) = 100*b() + 10*o() + the field read
+# through ref.cast (ref T) x. @W is the reading that proves the tier.
+set wref [string map [list WIMP $wimp RMOD {new Uint8Array([0,97,115,109,1,0,0,0,1,31,5,80,0,95,1,127,0,80,1,0,95,2,127,0,127,0,96,0,1,127,96,0,1,99,1,96,1,99,0,1,127,2,13,2,1,109,1,98,0,2,1,109,1,111,0,2,3,3,2,3,4,7,13,2,2,109,107,0,2,4,99,97,115,116,0,3,10,36,2,9,0,65,7,65,9,251,0,1,11,24,0,16,0,65,228,0,108,16,1,65,10,108,106,32,0,251,22,1,251,2,1,0,106,11])}] {var e=new WebAssembly.Instance(new WebAssembly.Module(RMOD),WIMP).exports, s=e.mk(), r=0, k=0, x; for(;k<1e6&&r!=@W;k++)r=e.cast(s); try{x="returned"+e.cast(null)}catch(err){x=err instanceof WebAssembly.RuntimeError} print(("@T-"+r+"-"+x+".").toUpperCase())}]
+wasm_leg refcast-bbq     jsdw "--useDollarVM=true --useOMGJIT=false"     [string map {@W 107} $wref] 107-TRUE
+wasm_leg refcast-omg     jsdx "--useDollarVM=true"                       [string map {@W 117} $wref] 117-TRUE
+wasm_leg refcast-ipint   jsdy "--useDollarVM=true --useBBQJIT=false"     [string map {@W 7} $wref] 7-TRUE
+# The exit stubs fail as compiles. The fuzzer fails every CanFail allocation from the
+# given count on: from the first, a module's wasm-to-JS stubs (its validation plan)
+# fail, a CompileError both ways; its twin compiles both ways.
+set wfail [string map [list TMOD $wtmod] {var B=TMOD, x; function why(err){return (err instanceof WebAssembly.CompileError)+"-"+/out of executable memory at stub generation/i.test(err.message)} try{new WebAssembly.Module(B); x="compiled"}catch(err){x=why(err)} WebAssembly.compile(B).then(function(){print(("@T-"+x+"-compiled.").toUpperCase())}, function(err){print(("@T-"+x+"-"+why(err)+".").toUpperCase())})}]
+wasm_leg wasm-canfail     jsdz "--useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAtOrAfter=1" $wfail TRUE-TRUE-TRUE-TRUE
+wasm_leg wasm-canfail-ctl jsea ""                                        $wfail COMPILED-COMPILED
+# The group's wasm-to-wasm stubs, which an instance asks for (a LinkError there). The
+# first run counts the CanFail allocations a module costs (the fuzzer, verbose with no
+# fire point, prints the count at exit); the second lets exactly those succeed, so the
+# group's first wasm-to-wasm stub is the first to fail.
+proc canfail_group_leg {} {
+    global lc_cmd_timeout timeout wtmod
+    lc_send "/webkit/jsc --useExecutableAllocationFuzz=true --verboseExecutableAllocationFuzz=true -e '[string map [list TMOD $wtmod] {new WebAssembly.Module(TMOD); print("jseb-counted.".toUpperCase())}]'; echo jseb-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set n ""
+    set seen 0
+    set st ""
+    # One alternation, so the leftmost line in the stream is taken first (the marker
+    # precedes the count, which jsc prints at exit).
+    expect {
+        -re "JSC EXECUTABLE ALLOCATION FUZZ: encountered \[0-9\]+ checks\\.|JSEB-COUNTED\\.|JSEB-ST- ?\[0-9\]+\[\r\n\]|Exception: \[^\r\n\]*|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXTINCTION:" {
+            set m $expect_out(0,string)
+            if {[regexp {^JSC EXECUTABLE ALLOCATION FUZZ: encountered ([0-9]+)} $m -> n]} {
+                exp_continue
+            } elseif {$m eq "JSEB-COUNTED."} {
+                set seen 1
+                exp_continue
+            } elseif {[regexp {^JSEB-ST- ?([0-9]+)} $m -> st]} {
+            } elseif {$m eq "EXTINCTION:"} {
+                lc_extinction_fail "kernel extinction during wasm-canfail-group"
+            } else {
+                lc_fail "wasm-canfail-group (count): \[[string trim $m]\]"
+            }
+        }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in wasm-canfail-group (count): n=$n" }
+        eof     { lc_fail "unexpected EOF during wasm-canfail-group" }
+    }
+    if {!$seen || $n eq "" || $n < 2 || $st ne "0"} {
+        lc_fail "wasm-canfail-group: the count run read n=\[$n\] (want >= 2, the module's two wasm-to-JS stubs), marker $seen, exit status $st"
+    }
+    set js [string map [list TMOD $wtmod] {var m=new WebAssembly.Module(TMOD), x; try{new WebAssembly.Instance(m,{m:{b:function(){return 0},o:function(){return 0}}}); x="instance"}catch(err){x=(err instanceof WebAssembly.LinkError)+"-"+/out of executable memory at stub generation/i.test(err.message)} print(("@T-"+x+".").toUpperCase())}]
+    wasm_leg wasm-canfail-group jsec "--useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAtOrAfter=[expr {$n + 1}]" $js TRUE-TRUE
+}
+canfail_group_leg
+
+set stk {var n=0; function f(){n++;f()} try{f()}catch(e){} var m=n; $.agent.start("var n=0; function f(){n++;f()} try{f()}catch(e){} $.agent.report(String(n)); $.agent.leaving()"); var r=null; for(var i=0;i<5000&&r==null;i++){r=$.agent.getReport(); if(r==null)$.agent.sleep(1)} var a=r==null?-1:Number(r); print("@T-"+(a*48>131072?"ok":"bad")+"-main"+m+"-agent"+a)}
+lc_run_expect_hardfail "/webkit/jsc --useJIT=false -e '[string map {@T jsdn} $stk]' | tr a-z A-Z" "JSDN-OK-" "JSDN-BAD"
+lc_pass "ls-jsc(stack): a WTF thread recursed deeper than a 128 KiB stack holds"
+
+# Each leg prints its marker upper-cased by the script itself, then its exit status
+# through tr, so the echo of the typed line satisfies neither. @K keeps each round's
+# closure alive (the twin).
+set gcjet {function tier(f){var s=String($vm.codeBlockFor(f)); return s.indexOf("DFG")>=0?2:s.indexOf("Baseline")>=0?1:0} var ks=[], keep=[], gone=0, kept=0, cold=0, bad=0, r=0; for(;r<20;r++){var h={g:(function(q){return function(x){return x+q}})(r)}; var c=new Function("h","x","return h.g(x) /*"+r+"*/"); ks.push(c); for(var i=0;i<4e4&&!(i>=2e4&&tier(c)==2);i++){if(c(h,i)!==i+r)bad++} if(tier(c)!=2){cold++;continue} if(@K)keep.push(h.g); h.g=null; h=null; for(var w=0;w<4;w++)flashHeapAccess(20); if(tier(c)==2)kept++; else gone++} print(("@T-"+r+"-"+gone+"-"+kept+"-"+cold+"-"+bad).toUpperCase())}
+proc gcjet_leg {what tag keep} {
+    global lc_cmd_timeout timeout gcjet
+    set T [string toupper $tag]
+    lc_send "/webkit/jsc --useDollarVM=true --useFTLJIT=false --collectContinuously=true -e '[string map [list @T $tag @K $keep] $gcjet]'; echo $tag-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set out ""
+    # One alternation, so the leftmost line in the stream is taken first.
+    expect {
+        -re "$T-\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+\[\r\n\]|$T-ST- ?\[0-9\]+\[\r\n\]|FATAL: \[^\r\n\]*|user fault: pid=\[0-9\]+ reason=\"snare:\[a-z\]+\"|EXCEPTION: \[^\r\n\]*|EXTINCTION:" {
+            set m $expect_out(0,string)
+            if {[regexp "^$T-ST- ?(\[0-9\]+)" $m -> st]} {
+            } elseif {[regexp "^$T-(\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+-\[0-9\]+)" $m -> out]} {
+                exp_continue
+            } elseif {$m eq "EXTINCTION:"} {
+                lc_extinction_fail "kernel extinction during gc-jettison($what)"
+            } else {
+                lc_fail "gc-jettison($what): \[[string trim $m]\]"
+            }
+        }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-jettison($what): out=$out" }
+        eof     { lc_fail "unexpected EOF during gc-jettison($what)" }
+    }
+    if {![regexp {^([0-9]+)-([0-9]+)-([0-9]+)-([0-9]+)-([0-9]+)$} $out -> r gone kept cold bad]} {
+        lc_fail "gc-jettison($what): no marker (exit status $st)"
+    }
+    set ok [expr {$r == 20 && $cold == 0 && $bad == 0 && $st eq "0"}]
+    if {$keep eq "false"} { set ok [expr {$ok && $gone >= 1}] } else { set ok [expr {$ok && $gone == 0 && $kept == 20}] }
+    if {!$ok} {
+        lc_fail "gc-jettison($what): rounds $r, discarded $gone, kept $kept, never DFG $cold, wrong $bad, exit status $st"
+    }
+    lc_pass "ls-jsc(gc-jettison$what): $T-$out (rounds-discarded-kept-never DFG-wrong), exit 0"
+}
+gcjet_leg ""     jscz false
+gcjet_leg "-ctl" jsda true
+
+# gcpark. Each leg prints its marker upper-cased by the script itself and then its
+# exit status through tr, so the echo of the typed line (lower case) satisfies
+# neither. ut joins `-st-` and `$status` with a space ("JSCQ-ST- 0"). A lost object, a nonzero status, the scan's FATAL line or a user fault
+# fails the leg.
+set gcround {function churn(){var k=[]; for(var i=0;i<1e5;i++)k.push({x:i,y:[i]}); return k.length} function round(r){var a={v:r*7+1,s:[r,r+1]}; @W; churn(); return a.v===r*7+1&&a.s[1]===r+1?0:1} var lost=0,r=0; for(;r<40;r++)lost+=round(r); print(("@T-"+r+"-"+lost).toUpperCase())}
+set gcidle {var keep=[]; for(var i=0;i<3e5;i++)keep.push({x:i,y:[i]}); setTimeout(function(){var s=0; for(var i=0;i<keep.length;i+=1000)s+=keep[i].y[0]; print(("@T-"+keep.length+"-"+s).toUpperCase())}, 500)}
+proc gcpark_leg {what tag opts js want} {
+    global lc_cmd_timeout timeout
+    set T [string toupper $tag]
+    lc_send "/webkit/jsc $opts -e '[string map [list @T $tag] $js]'; echo $tag-st-\$status | tr a-z A-Z"
+    set timeout $lc_cmd_timeout
+    set out ""
+    expect {
+        -re "$T-(\[0-9\]+-\[0-9\]+)\[\r\n\]" { set out $expect_out(1,string); exp_continue }
+        -re "$T-ST- ?(\[0-9\]+)\[\r\n\]" { set st $expect_out(1,string) }
+        -re {FATAL: [^\r\n]*|user fault: pid=[0-9]+ reason="snare:[a-z]+"} { lc_fail "gc-park($what): \[$expect_out(0,string)\]" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during gc-park($what)" }
+        timeout { lc_fail "timeout (${lc_cmd_timeout}s) in gc-park($what): out=$out" }
+        eof     { lc_fail "unexpected EOF during gc-park($what)" }
+    }
+    if {$out ne $want || $st ne "0"} {
+        lc_fail "gc-park($what): printed \[$out\] (want $want), exit status $st (want 0)"
+    }
+    lc_pass "ls-jsc(gc-$what): $T-$want, exit 0"
+}
+gcpark_leg held      jscq "--collectContinuously=true" [string map {@W sleepSeconds(0.025)} $gcround] 40-0
+gcpark_leg flash     jscr "--collectContinuously=true" [string map {@W flashHeapAccess(25)} $gcround] 40-0
+gcpark_leg flash-dft jscs ""                           [string map {@W flashHeapAccess(25)} $gcround] 40-0
+gcpark_leg idle      jsct "--collectContinuously=true" $gcidle 300000-44850000
+
+# The write thunk's bounds are what keep it from being a write-anywhere gadget.
+# Each out-of-bounds call is its own process: a Proc holding a live JIT region
+# cannot fork. The probe names its pid and the kernel names the death,
+# `user fault: pid=N reason="..."`; snare:segv would mean the store ran outside
+# the region. One leftmost regex alternation, with fault lines kept by pid, so the
+# two lines may arrive in either order and another process's fault is never
+# taken for the probe's. The pid is matched up to its line end: a pattern that
+# can stop inside a number matches a partly received one.
+lc_run_expect_hardfail_re "pouch-hello-jitthunk" "jitthunk: in bounds done" {jitthunk: FAIL[^\r\n]*|reason="snare:[a-z]+"}
+lc_pass "ls-jsc(thunk): edge writes read back through the exec alias"
+foreach {c what} {0 1@end 1 5@end-4 2 8@-8 3 size+1@0} {
+    lc_send "pouch-hello-jitthunk $c"
+    set timeout $::lc_cmd_timeout
+    set pid ""
+    array unset died
+    expect {
+        -re {jitthunk: out of bounds [^ \r\n]+ calling, pid [0-9]+[\r\n]|jitthunk: FAIL[^\r\n]*|user fault: pid=[0-9]+ reason="snare:[a-z]+"} {
+            set m $expect_out(0,string)
+            if {[regexp {^jitthunk: out of bounds ([^ ]+) calling, pid ([0-9]+)} $m -> w p]} {
+                if {$w ne $what} { lc_fail "thunk-oob($what): the probe announced $w" }
+                set pid $p
+            } elseif {[regexp {^user fault: pid=([0-9]+) reason="(snare:[a-z]+)"} $m -> fp fr]} {
+                set died($fp) $fr
+            } else {
+                lc_fail "thunk-oob($what): \[[string trim $m]\]"
+            }
+            if {$pid eq "" || ![info exists died($pid)]} exp_continue
+        }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during thunk-oob($what)" }
+        timeout { lc_fail "timeout (${::lc_cmd_timeout}s) in thunk-oob($what): pid=$pid deaths=[array get died]" }
+        eof     { lc_fail "unexpected EOF during thunk-oob($what)" }
+    }
+    if {$died($pid) ne "snare:brk"} {
+        lc_fail "thunk-oob($what): pid $pid died of $died($pid), not the thunk's snare:brk"
+    }
+    lc_pass "ls-jsc(thunk-oob): $what died of snare:brk"
+}
+
+lc_run_expect "/webkit/jsc -e '[string map {@T jsci} $loop]' | tr a-z A-Z" "JSCI-820578176-"
+lc_pass "ls-jsc(loop): JSCI-820578176 (every JIT on)"
+lc_run_expect "/webkit/jsc --useDFGJIT=false -e '[string map {@T jsdc} $loop]' | tr a-z A-Z" "JSDC-820578176-"
+lc_pass "ls-jsc(loop-baseline): JSDC-820578176 (the DFG off)"
+lc_run_expect "/webkit/jsc --useFTLJIT=false -e '[string map {@T jsdl} $loop]' | tr a-z A-Z" "JSDL-820578176-"
+lc_pass "ls-jsc(loop-dfg): JSDL-820578176 (the FTL off)"
+lc_run_expect "/webkit/jsc --thylacine-no-cap-jit -e '[string map {@T jscj} $loop]' | tr a-z A-Z" "JSCJ-820578176-"
+lc_pass "ls-jsc(loop-deny): JSCJ-820578176 (interpreted)"
+
+lc_run_expect_hardfail "/webkit/jsc /webkit/sunspider/run.js -- jscm | tr a-z A-Z" "JSCM-OK-26-" "JSCM-FAIL"
+lc_pass "ls-jsc(sunspider): all 26 ran (23 self-checking) with every JIT on"
+lc_run_expect_hardfail "/webkit/jsc --useDFGJIT=false /webkit/sunspider/run.js -- jsdb | tr a-z A-Z" "JSDB-OK-26-" "JSDB-FAIL"
+lc_pass "ls-jsc(sunspider-baseline): all 26 ran (23 self-checking) with the DFG off"
+lc_run_expect_hardfail "/webkit/jsc --useFTLJIT=false /webkit/sunspider/run.js -- jsdm | tr a-z A-Z" "JSDM-OK-26-" "JSDM-FAIL"
+lc_pass "ls-jsc(sunspider-dfg): all 26 ran (23 self-checking) with the FTL off"
+lc_run_expect_hardfail "/webkit/jsc --thylacine-no-cap-jit /webkit/sunspider/run.js -- jscn | tr a-z A-Z" "JSCN-OK-26-" "JSCN-FAIL"
+lc_pass "ls-jsc(sunspider-deny): all 26 ran (23 self-checking) interpreted"
 
 lc_quit
 exit 0

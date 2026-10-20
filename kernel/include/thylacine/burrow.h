@@ -128,11 +128,11 @@ enum burrow_type {
     // destroys the pagemap (mirrors the FILE arm, minus the spoor_clunk).
     BURROW_TYPE_ANON_LAZY = 5,
     // I-42 (CL-7k; docs/JIT-ON-WX-DESIGN.md, LLVM-DESIGN.md §8):
-    // BURROW_TYPE_CODE — an anonymous, eagerly-allocated region that is the ONLY
+    // BURROW_TYPE_CODE — an anonymous, demand-zeroed region that is the ONLY
     // backing object from which userspace may hold an EXECUTABLE mapping. Backing
-    // is identical to BURROW_TYPE_ANON (one contiguous alloc_pages chunk in
-    // `pages`/`order`); the type is not a different allocator, it is a different
-    // ADMISSIBILITY. It exists so "this region may carry an RX alias" is a property
+    // is identical to BURROW_TYPE_ANON_LAZY (the sparse pagemap `pm`, each page
+    // committed and charged on first touch; B-2a); the type is not a different
+    // allocator, it is a different ADMISSIBILITY. It exists so "this region may carry an RX alias" is a property
     // the KERNEL mints at creation under CAP_JIT — never one a caller asserts at map
     // time. That is the G-2 WEAVE discipline (a shareable DMA region is minted by
     // SYS_DMA_CREATE_WEAVE, not flagged by its creator) applied to the W^X boundary:
@@ -151,6 +151,9 @@ enum burrow_type {
     // Emitted bytes become fetchable only after an explicit SYS_ICACHE_SYNC over
     // the range — the D-cache-clean / I-cache-invalidate sequence the architecture
     // requires between a data write and an instruction fetch of the same address.
+    // A page is also I-cache-invalidated when the fault arm commits it, before
+    // either alias maps it, so an un-emitted page fetches its zeroes (UDF #0),
+    // never a recycled page's stale lines.
     BURROW_TYPE_CODE    = 6,
     // V-2 (Warp-6 Venus / GPU-DESIGN 6.2.1): backing is a subrange of a PCI
     // hostmem BAR -- host-visible shared memory (VIRTIO_PCI_CAP_SHARED_MEMORY_
@@ -245,7 +248,7 @@ struct Burrow {
     u64               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
-    struct pagemap    pm;           // FILE / ANON_LAZY: the sparse slot table; not live for other types
+    struct pagemap    pm;           // FILE / ANON_LAZY / CODE: the sparse slot table; not live for other types
 
     // #131/#132: WHO PAID the I-32 page_count for this region, and how much.
     // A Burrow's `type` tells you the region's SHAPE; it has never told you who
@@ -282,9 +285,10 @@ struct Burrow {
     // under as->lock cannot free a Burrow inline -- the FILE arm's spoor_clunk
     // may sleep (a 9P Tclunk), and sleeping under a plain spinlock is the
     // lock-across-sleep extinction. So the locked teardown decrements the
-    // mapping ref (burrow_release_mapping_deferred), and if that was the last
-    // ref it pushes the dead Burrow onto a caller-local stack via this link and
-    // frees the whole chain (burrow_free_deferred) AFTER dropping as->lock.
+    // mapping ref (burrow_release_mapping_settled_deferred), and if that was
+    // the last ref it pushes the dead Burrow onto a caller-local stack via this
+    // link and frees the whole chain (burrow_free_deferred) AFTER dropping
+    // as->lock.
     // Meaningful ONLY while a Burrow sits on such a stack -- {handle:0,map:0},
     // unreachable by any other path, so the write needs no lock; NULL always
     // otherwise. This is the teardown twin of #193 (which hoisted the mmap
@@ -450,23 +454,23 @@ struct Burrow *burrow_create_anon_lazy(size_t size);
 // I-42 / CL-7k: burrow_create_code — the dual-mappable CODE Burrow, the only
 // backing object from which userspace may hold an executable mapping
 // (docs/JIT-ON-WX-DESIGN.md; LLVM-DESIGN.md §8). Allocation is byte-identical to
-// burrow_create_anon (one eager contiguous KP_ZERO chunk); the ONLY difference
-// is `type`, which is the kernel-minted, create-immutable admissibility token
-// the RX-mapping gate reads.
+// burrow_create_anon_lazy (B-2a: nothing allocated until a page is touched); the
+// ONLY difference is `type`, which is the kernel-minted, create-immutable
+// admissibility token the RX-mapping gate reads.
 //
-// KP_ZERO is load-bearing here, not incidental hygiene: a code page handed back
-// with stale contents would be a region the Proc can EXECUTE without having
-// written it. Zero-filled AArch64 decodes as UDF #0 (an always-undefined
-// encoding), so an un-emitted page faults rather than running whatever the
-// previous owner left behind.
+// The demand-zero commit is load-bearing here, not incidental hygiene: a code
+// page handed back with stale contents would be a region the Proc can EXECUTE
+// without having written it. Zero-filled AArch64 decodes as UDF #0 (an
+// always-undefined encoding), so an un-emitted page faults rather than running
+// whatever the previous owner left behind.
 //
 // Callers MUST hold CAP_JIT (enforced at the syscall boundary, not here — this
 // is the mechanism; kernel tests drive it directly). handle_count starts at 1
 // (the construction reference), mapping_count 0, exactly as burrow_create_anon.
 //
-// Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, or
-// allocator OOM.
-struct Burrow *burrow_create_code(size_t size, bool exempt);
+// Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, SLUB
+// OOM, or pagemap OOM.
+struct Burrow *burrow_create_code(size_t size);
 // LINEAGE L-4b: clone an ANON_LAZY Burrow for a forking address space -- Plan 9's
 // dupseg. The result is a SEPARATE Burrow of the same size whose pagemap holds
 // the SAME page pointers, one extra COW share taken per resident page.
@@ -618,46 +622,72 @@ void burrow_release_mapping(struct Burrow *v);
 bool burrow_unref_freed(struct Burrow *v);
 bool burrow_release_mapping_freed(struct Burrow *v);
 
-// D-3c F1: the DEFERRED teardown pair. `_deferred` drops the mapping ref under
-// v->lock and returns the dead Burrow (or NULL) WITHOUT freeing; the caller,
-// once it has dropped as->lock, frees it with burrow_free_deferred. Together
-// they keep the FILE arm's sleeping spoor_clunk off the locked teardown path
-// (the twin of #193). See the deferred_free_next field + the burrow.c bodies.
-struct Burrow *burrow_release_mapping_deferred(struct Burrow *v);
+// D-3c F1: the DEFERRED free. A teardown under as->lock drops its mapping ref
+// with burrow_release_mapping_settled_deferred (below), which returns the dead
+// Burrow (or NULL) WITHOUT freeing; the caller, once it has dropped as->lock,
+// frees it here. Together they keep the FILE arm's sleeping spoor_clunk off the
+// locked teardown path (the twin of #193). See the deferred_free_next field.
 // Frees `v` and every Burrow chained behind it on deferred_free_next (B-1a': a
 // range detach drops several last refs in one locked pass and hands back the
 // chain). NULL-safe; unlinks as it goes.
-void           burrow_free_deferred(struct Burrow *v);
+void burrow_free_deferred(struct Burrow *v);
 
 // #131/#132: the I-32 charge record -- WHO paid, so a refund is attributed
 // instead of inferred from the region's shape (see struct Burrow above).
 //
 // burrow_charge_record: stamp the payer at the eager charge. Called by each
 // site that succeeds a proc_page_charge for a whole region (SYS_BURROW_ATTACH,
-// SYS_JIT_CREATE, SYS_LOOM_SETUP's ring).
+// SYS_LOOM_SETUP's ring).
 //
-// burrow_charge_claim: read-and-CLEAR p's charge record, returning the pages it
-// paid (0 if p is not the recorded payer, or the charge was already claimed).
-// The clear is what makes a refund exactly-once: two paths racing to settle the
-// same region cannot both win, so the counter can never be refunded twice --
-// the direction that would inflate a Proc's effective budget.
+// The record is released only by a CLAIM (read-and-clear) taken inside the drop
+// that settles it, below. The clear is what makes a refund exactly-once: two
+// paths racing to settle the same region cannot both win, so the counter can
+// never be refunded twice -- the direction that would inflate a Proc's
+// effective budget.
 //
-// burrow_charge_restore: put back a claim the caller decided NOT to settle.
-// Callers claim BEFORE the drop (the record dies with the Burrow, so it cannot
-// be read after) and restore when the drop turns out not to end the payer's
-// involvement. A concurrent settler that saw the momentarily-cleared record
-// simply skips -- so the failure mode of that window is a charge that outlives
-// its region until the payer's next release point (benign: an over-charge on
-// the payer, never a refund to a Proc that did not pay).
+// AS-R9: there is deliberately no stand-alone claim, and no restore. The old
+// sequence -- claim, drop a reference, restore the record if that drop was not
+// the last -- held v->lock for each step and for none of the gaps, and an
+// earlier version of this comment wrongly called its window benign. Between a
+// nonfinal drop and the restore, another holder can make the final drop and
+// free the descriptor; the restore then writes charge_as_id/charge_pages
+// through a pointer whose last reference is gone. That is a use-after-free
+// write, and if the storage is recycled into a live Burrow the charge is
+// planted on an UNRELATED region -- a later claim then refunds pages the payer
+// never bought for it, an UNDER-count, the direction that inflates a budget
+// and breaks I-32. The converse loss is just as real: the racing final holder
+// reads the momentarily-cleared record, claims nothing, and refunds nothing.
 void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages);
-u32  burrow_charge_claim(struct Burrow *v, const struct Proc *p);
-void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages);
 
-// burrow_is_shared_out: has this region been mapped into a SECOND Proc?
-// The discriminator the sharer's own detach needs -- see the field comment on
-// struct Burrow. Monotonic once set, so a read is never stale in the direction
-// that matters (false -> true only ever ADDS a reason to release).
-bool burrow_is_shared_out(const struct Burrow *v);
+// AS-R9: the settled drops -- a drop whose charge decision happens INSIDE the
+// same v->lock interval that decides finality, which is what makes the two
+// atomic with respect to each other. There is no window to lose: a drop that
+// does not qualify leaves the record untouched (so the holder that does qualify
+// still finds it), and a drop that does qualify takes the record with it under
+// the lock (so it is settled exactly once). Neither form touches `v` after the
+// reference it dropped is gone, so no caller needs a surviving reference.
+//
+// `payer` is the EXACT AddrSpace incarnation that paid; NULL means "settle
+// nothing" and is how a caller whose policy predicate fails opts out. The
+// returned refund is nonzero only on the drop that qualified, so a caller can
+// refund unconditionally on a nonzero scalar. Refund OUTSIDE the leaf lock --
+// these return a scalar precisely so the caller can.
+//
+// burrow_unref_settled*: handle drop. Qualifies iff this drop frees the region.
+// burrow_release_mapping_settled_deferred: mapping drop, DEFERRED (D-3c F1,
+// above) -- returns the now-dead Burrow without freeing it, for a caller
+// holding as->lock to free after the unlock. Qualifies iff this drop
+// frees the region OR the region is shared out (the sharer's own detach must
+// settle then, because the surviving foreign mapping cannot name the payer);
+// shared_out is observed under that same lock, and being monotonic false->true
+// a later observation can only ADD a reason to settle.
+bool burrow_unref_settled_in(struct Burrow *v, const struct AddrSpace *payer,
+                             u32 *out_refund);
+bool burrow_unref_settled(struct Burrow *v, const struct Proc *payer,
+                          u32 *out_refund);
+struct Burrow *burrow_release_mapping_settled_deferred(struct Burrow *v,
+                                                       const struct AddrSpace *payer,
+                                                       u32 *out_refund);
 
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
@@ -787,6 +817,14 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 // including the -1 paths (NULL).
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
                            bool *out_freed, struct Burrow **out_free);
+
+// The same, against an address space the caller names rather than a Proc's
+// current one: a caller that resolved the space under g_proc_table_lock and
+// holds its lock keeps working on THAT space after an exec swaps the Proc's
+// pointer. Caller holds as->lock.
+int burrow_unmap_reporting_in(struct AddrSpace *as, u64 vaddr, size_t length,
+                              bool *out_freed, struct Burrow **out_free);
+int burrow_unmap_in(struct AddrSpace *as, u64 vaddr, size_t length);
 
 // =============================================================================
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).

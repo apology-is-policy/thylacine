@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md", "docs/PORTABILITY.md"]
 created: 2026-08-03
-updated: 2026-09-23
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -61,8 +61,13 @@ seven `_Static_assert`s pin the bits so a refactor that made kernel text
 writable fails the build rather than the boot.
 
 `make_user_pte_l3` derives user permissions from a VMA's prot: writable →
-read-write for both levels, otherwise read-only; executable → user-execute
-allowed, otherwise not. The kernel-execute bit is set unconditionally, because
+read-write for both levels; readable → read-only for both; neither → no EL0
+load or store at all (`AP[2:1]=10`, read-only at EL1). That last row is the
+**execute-only** leaf of a sealed code region (B-2b, 2026-10-07): EXEC without
+READ, which `vma_alloc` lets exist only over a code Burrow
+([[sub-kernel-vma]]); before B-2b the encoder read "neither" as read-only for
+both, and prot none never reaches a leaf. Executable → user-execute allowed,
+otherwise not. The kernel-execute bit is set unconditionally, because
 the kernel never executes user pages. The cacheability attribute is a MAIR index
 the caller passes directly — `NORMAL_WB` for cacheable RAM (the anon/code/DMA
 default), `DEVICE` (nGnRnE) for MMIO registers, and, since V-2, `NORMAL_NC`
@@ -209,7 +214,11 @@ unmap is all-ASID at the tightest address scope, which is why the ASID argument
 threaded through these functions is vestigial and documented as such.
 
 [[inv-i39]] — cross-Proc read and write, confined to the target's own tables,
-never faulting anything in, and refusing to write a read-only page.
+never faulting anything in, and refusing to write a read-only page. Since B-2b
+`cross_proc_resolve` also refuses a leaf with no EL0 read (`AP[1]` clear): the
+debug reader resolves the leaf to its page and copies through the direct map,
+where no permission bit of the leaf applies, so without the check
+`/proc/<pid>/mem` would read back a sealed region's bytes.
 
 **I-42** — the JIT's outward generalization of the self-modification alias
 (the [[sub-kernel-burrow]] `BURROW_TYPE_CODE` dual mapping), and its two I-cache
@@ -219,14 +228,29 @@ makes an un-emitted page decode as `UDF #0` rather than run residue — does **n
 touch the instruction cache, and nothing on the free path does either (unmap
 broadcasts a TLBI, a *TLB* operation; `free_pages` performs no cache maintenance).
 So a fresh code region could carry a previous region's I-cache lines and execute
-bytes the Proc never emitted; `sys_jit_create_region` therefore invalidates the
-I-cache over the fresh pages before any RX PTE can name them (the CL-7k-3 F1
-finding — the code Burrow had been the sole executable backing in the tree that
-skipped this, where `exec.c`'s eager paths and `fault.c`'s FILE demand-page arm
-already did it). *At publish* (`SYS_ICACHE_SYNC`): the maintenance runs on the
+bytes the Proc never emitted; the I-cache is therefore invalidated over each
+fresh page before any RX PTE can name it (the CL-7k-3 F1 finding — the code
+Burrow had been the sole executable backing in the tree that skipped this, where
+`exec.c`'s eager paths and `fault.c`'s FILE demand-page arm already did it).
+Since B-2a (2026-10-07) the region is committed page by page, so the
+invalidate runs in the fault arm's commit ([[sub-kernel-fault]]), not at
+create. *At publish* (`SYS_ICACHE_SYNC`): the maintenance runs on the
 **direct map**, never the user VA — `dc cvau`/`ic ivau` can take translation
-faults and a user VA is exactly what a caller can arrange to be unmapped, and
-`IC IVAU` is architecturally PIPT-exact across every alias of the PA. The cache
+faults and a user VA is exactly what a caller can arrange to be unmapped. The
+clean is exact through any alias (data caches behave as PIPT). The invalidate
+by the direct-map VA is exact only on a **PIPT I-cache**: a VIPT one indexes
+lines by the VA they were fetched through, so an `IC IVAU` of the direct-map VA
+can miss the exec alias's lines. This dossier used to say `IC IVAU` was
+"PIPT-exact across every alias of the PA"; B-2a corrected it.
+`arch_icache_sync_range` now asks `hw_icache_aliasing()` (any CPU whose
+`CTR_EL0.L1Ip` is not PIPT, recorded at bring-up --
+[[sub-kernel-boot-sequence]]) and, when it is set, invalidates the whole
+I-cache with `IC IALLUIS` after the clean, as Linux's `sync_icache_aliases`
+does. Every direct-map sync in the tree (exec's eager paths, the FILE fault
+arm, the code commit, `SYS_ICACHE_SYNC`) goes through this one routine, so all
+of them are exact. `patch_sync_icache` (the kernel's own text patch) keeps the
+by-VA invalidate: it invalidates by the canonical text VA, the one the kernel
+fetches through, which is right on any I-cache. The cache
 half is genuinely cross-PE (`IC IVAU` is Inner-Shareable *broadcast*); the
 trailing `ISB` is **not** — it retires prefetch on the *calling* PE only, so a
 peer PE that already executed at those exec-alias addresses must take a
@@ -376,9 +400,13 @@ mismatching valid leaf is -1 with nothing to unwind -- the one legitimate
 mismatch, the copy-on-write break, has `mmu_replace_user_pte_attr` (below),
 a third leaf writer that changes no count. Since round 3 the demand-page
 path never asks for a mismatch: `mmu_user_pte_admits(as, va, write, exec)`
-reads the leaf without growing (a VALID leaf with EL0 access, AP[2] clear for
-a write, UXN clear for an instruction fetch) and a leaf that admits the
-access answers the fault before any arm runs (B-1a' audit F13 -- the read
+reads the leaf without growing (a VALID leaf, `AP[1]` set for a load or
+store, AP[2] clear for a write, UXN clear for an instruction fetch) and a leaf
+that admits the access answers the fault before any arm runs. The `AP[1]`
+term is B-2b's: an execute-only leaf admits a fetch only, and a load's
+permission fault on it -- a user load, or the kernel's `LDTR` copy
+([[sub-kernel-uaccess]]) -- would otherwise read as already answered and
+retry forever (B-1a' audit F13 -- the read
 arm's read-only install over the writable leaf a sibling's break had left was
 exactly such a mismatch, and it terminated the Proc; [[sub-kernel-fault]]). Each uninstall
 (`mmu_uninstall_user_pte`; the range form per page inside a present L3) drops
@@ -490,6 +518,9 @@ Re-read 2026-08-16: the real-silicon bring-up corrected a table-walk coherence
 claim that named a maintenance operation the tree does not perform.
 [[chg-2026-08-16-mmu-fictional-clean]].
 
+B-2b (2026-10-07): the execute-only row of the user encoder, `AP[1]` in
+`mmu_user_pte_admits`, and the debug reader's refusal of an execute-only leaf.
+
 Re-read 2026-09-06 for Warp-6 V-2 (`7973f8dc`): `make_user_pte_l3` took a MAIR
 index in place of the device bool (adding `NORMAL_NC` write-combining for
 host-visible shared memory), its W^X extinction widened from execute-on-device
@@ -499,6 +530,10 @@ install API became a wrapper over the index-aware entry.
 
 ## Tests
 
+`jit.sealed_region` reads a sealed region's real leaf (`AP=10`, UXN clear,
+PXN set), asks `mmu_user_pte_admits` for a fetch (yes), a load and a store
+(no), and `mmu_cross_proc_read` for its bytes (none); `jit.exec_alias_stays_readable`
+is its control, a pair's exec alias (`AP=11`) that both readers take.
 `demand_page.*` covers install, its rejections, and idempotence (its charge
 figures read the data view, `page_count - pgtable_pages`, since B-1a');
 `capacity.page_tables_charged_and_reclaimed` and

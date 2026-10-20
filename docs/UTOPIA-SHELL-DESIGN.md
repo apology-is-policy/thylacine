@@ -512,7 +512,7 @@ Must be internal (no other choice — they modify the shell's own state):
 - `test`, `[` — legacy POSIX-style test. Largely supplanted by `case`/`matches`. Kept for rc-script compatibility.
 - `true`, `false` — exit 0 / exit 1.
 - `time` — time a command or pipeline. Internal for pipeline-aware timing.
-- `kill` — send a note (§10). Default note: `snare:term`.
+- `kill` — send a note (§10). Default note: `term`, the catchable terminate request (POSIX `kill`'s `SIGTERM`).
 
 ### 9.2 The Thylacine extensions
 
@@ -618,12 +618,14 @@ sketch above, toward the bash standard the shell emulates):
   child PID for `wait`/`kill` (bash's split). `%N` lexes because `%` is a
   command-context word char (U-7b lexer fix); the no-arg `fg`/`bg`/`wait` form
   targets the current job / all jobs.
-- **`kill` default note** is `interrupt`, NOT `snare:term`. The kernel's
-  userspace-postable note set is `{interrupt, kill}` only — `snare:*` is
-  reserved for kernel-synthetic fault posters and `notes_post` rejects a
-  userspace `snare:`-prefixed name. `interrupt` is the catchable Ctrl-C
-  analogue (the note the shell's own Ctrl-C path delivers at U-7c); `kill` is
-  the non-catchable force. Syntax: `kill {%N | pid} [interrupt | kill]`.
+- **`kill` default note** is `term` (operator vote 2026-10-13). From U-7b
+  until the signal chunk's S-2 it was `interrupt`: the userspace-postable note
+  set was `{interrupt, kill}`, and the `snare:term` §9.1 first named is
+  kernel-synthetic (`notes_post` rejects a userspace `snare:`-prefixed name).
+  S-2 registered `term` (`docs/ERRORS.md`), the terminate request §9.1 meant, so
+  a job ended by `kill %N` reads `$status` 143. `interrupt` stays the catchable
+  Ctrl-C analogue (the note the shell's own Ctrl-C path delivers at U-7c);
+  `kill` is the non-catchable force. Syntax: `kill {%N | pid} [note]`.
 - **STOPPED-job resume** (`bg` / `fg` of a Ctrl-Z'd job) needs a kernel stopped
   thread-state, which is **U-PTY**; v1.0 has no stopped jobs, so `bg` reports
   the named job is already running in the background.

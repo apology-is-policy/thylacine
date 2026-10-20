@@ -1102,7 +1102,7 @@ void test_burrow_map_fixed_refuses_code_alias(void) {
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
     // A CODE burrow mapped RX in the window -- the JIT-alias shape.
-    struct Burrow *code = burrow_create_code(PAGE_SIZE, false);
+    struct Burrow *code = burrow_create_code(PAGE_SIZE);
     TEST_ASSERT(code != NULL, "burrow_create_code failed");
     u64 va = EXEC_USER_BURROW_BASE;
     spin_lock(&p->as->lock);
