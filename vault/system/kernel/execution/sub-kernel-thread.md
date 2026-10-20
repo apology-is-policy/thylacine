@@ -44,10 +44,12 @@ default), which several guards rely on.
 counted in `thread_count`, until one of two reapers frees it: the next thread
 create of its Proc (`proc_reap_exited_threads`, which `SYS_THREAD_SPAWN`, the
 vivarium clone and a Loom SQPOLL setup run before they charge the thread
-budget), or `wait_pid`'s zombie loop once the whole Proc is dead. Both free on one predicate, EXITING with `on_cpu` clear:
+budget, and exec runs before its swap once every peer is off its CPU), or
+`wait_pid`'s zombie loop once the whole Proc is dead. Both free on one predicate, EXITING with `on_cpu` clear:
 `sched()` never re-inserts an EXITING prev, `ready_on` refuses anything not
-RUNNABLE, and an exiting tail never sleeps, so no CPU runs it or switches out of
-it again. The in-Proc reap finds and unlinks a dead peer in one lock hold
+RUNNABLE, an exiting tail never sleeps, and an interrupt return never switches
+out a thread that is not RUNNING ([[sub-kernel-sched]]), so no CPU runs it or
+switches out of it again before its own `sched()`. The in-Proc reap finds and unlinks a dead peer in one lock hold
 (`thread_unlink_from_proc_locked`; the unlink is the claim against a second
 creator in the same Proc), folds its `run_ns` and kstack watermark into the Proc
 so `proc_cpu_ns` and `proc_kstack_peak` never shrink, clears a debug focus that
@@ -259,9 +261,17 @@ walker could observe `p->threads = new_head` published before
 the new head and missing every pre-existing thread. The lock makes
 `(head, next_in_proc, thread_count)` one linearizable observation.
 
-`g_next_tid` is an atomic fetch-add with an INT_MAX guard (the same
-discipline as `g_next_pid`); the pre-P6 non-atomic `++` could hand two peer
-spawns the same tid and break `pthread_self` uniqueness.
+`g_next_tid` is claimed by a saturating compare-and-swap (`alloc_next_tid`).
+A tid is never reused, so the counter is cumulative rather than a count of
+live threads, and an unprivileged create-and-join loop walks it toward
+INT_MAX; at the end of the space it answers -1 and stays there, never
+wrapping into the -1 sentinel or onto a tid a live thread may still hold. The
+three constructors claim the tid first, before anything is allocated, and
+return NULL on a spent space, which both spawn arms report as EAGAIN
+(`thread_tid_space_spent`), a system limit, rather than ENOMEM ([[inv-i32]]);
+only the boot idles, which cannot fail, still extinct. The pre-P6 non-atomic
+`++` could hand two peer spawns the same tid and break `pthread_self`
+uniqueness. `g_next_pid` saturates the same way ([[sub-kernel-proc]]).
 
 `thread_switch` masks IRQs across its entire mutate-switch-resume window.
 The `set_current_thread(next)`-before-`cpu_switch_context` sequence is a
@@ -360,7 +370,7 @@ is the running proof that the window is real.
   `thread_block`/`thread_wake` — functions that do not exist; the primitives
   are `sleep`/`wakeup`.
 - **An exited peer stays counted until its Proc's next thread create.** The
-  in-Proc reap runs only at a create or a Loom SQPOLL setup, so a Proc that
+  in-Proc reap runs only at a create, a Loom SQPOLL setup or an exec, so a Proc that
   starts and joins N workers and then creates nothing keeps N exited threads,
   each a 32 KiB kstack plus its descriptor, until it exits. The Proc pays: the
   dead count against its own `PROC_THREAD_MAX`, so a user Proc holds at most 255

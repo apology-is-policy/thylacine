@@ -130,6 +130,18 @@ the once-set cross-CPU placement kick, so consuming it would lose the
 placement; the deferred preempt fires at the first IRQ-return after the
 hold drops, within a tick.
 
+**A thread that is not RUNNING is never switched out at an IRQ return**
+(2026-10-20). One that has committed to exit or to sleep is a few instructions
+from its own `sched()`; switched out there instead, an EXITING thread never runs
+again (`sched()` does not requeue it), so the rest of its exit tail is lost, and
+a last thread out skips the srv, cap and weft notifies. Only a tail with neither
+the preempt count nor the in-syscall marker (below) set is exposed: a
+kthread-shaped entry running its exit with interrupts on (`userland_enter`'s
+die-check, an exec failure's exit). The check returns without consuming
+`need_resched`, like the other two; the thread's own `sched()` takes the switch.
+Every dispatch sets the incoming thread RUNNING, the per-CPU idles included, so
+nothing that is actually running is skipped.
+
 `sched_preempt_point()` WAS the count's other consumer, and it is gone. For
 part of one day (2026-09-22) it served poll's noise loop ([[sub-kernel-poll]]):
 at a spot where no lock was held it held `preempt_count` across a brief IRQ
@@ -397,6 +409,9 @@ secondary mis-init. It is kept as a loud failure rather than deleted.
 - **`preempt_check_irq` must not consume `need_resched` when it defers.**
   The flag can be the once-set cross-CPU placement kick; consuming it
   loses the placed thread until the next tick.
+- **`preempt_check_irq` must not switch out a thread that is not RUNNING.**
+  Deleting the state gate lets an IRQ return end an exit tail on a
+  kthread-shaped path; `proc.exit_tail_runs_to_its_end` fails without it.
 - **The park-commit re-check (#363).** `sched_idle_park` loops
   `while (cpu_has_surplus_for_kick(cs)) sched();` before arming and
   parking. Deleting it re-opens a park of up to the tickless backstop

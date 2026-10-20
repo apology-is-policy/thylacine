@@ -3376,7 +3376,12 @@ plain lock is taken by both a syscall path and a same-CPU IRQ handler (ARCH
 8.12), so there is nothing for a lock model to discriminate. No stack depth:
 the kernel-stack bound is a MEASUREMENT (`-fstack-usage` over a DWARF-resolved
 call graph), and its runtime guard is the watermark this chunk adds, not a
-spec property.
+spec property. Nor does it carry `preempt_check_irq`'s second early return,
+added at thread-model C0 (2026-10-20), for a thread that is not RUNNING: the
+model has no thread state, and that return fires only in an exit tail, a few
+instructions before the tail's own `sched()`. Its witness is the kernel test
+`proc.exit_tail_runs_to_its_end`; `specs/check-syscall-irqs.sh` was re-run on
+the C0 tree, every cfg as designed.
 
 **It supersedes `poll_cpu.tla`.** That module's stated premise is the masked
 syscall body; when this chunk lands, the premise is false and the module is
@@ -3385,8 +3390,9 @@ VACUOUS rather than wrong. It and its four cfgs are deleted with
 was carrying (`[]<>Open` there, `[]<>(~masked)` here -- the same sentence about
 the same CPU).
 
-Gate: `specs/check-syscall-irqs.sh`. Two clean cfgs pinned at 11 distinct
-states each; six cfgs that must FAIL, each on its own NAMED property. One of
+Gate: `specs/check-syscall-irqs.sh`. Two clean cfgs pinned at 18 distinct
+states each (11 as first written; the ARCH 8.1 audit close, dc77a4b06, grew the
+model); six cfgs that must FAIL, each on its own NAMED property. One of
 those six is not a bug but a CONTROL -- `syscall_irqs_kthread` -- whose
 violation is the pass, and the gate's header says why at length, because
 reading that row as a defect and "fixing" it would delete the only evidence

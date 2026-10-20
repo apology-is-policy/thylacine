@@ -529,7 +529,11 @@ What a change **must** re-establish:
 ## Seams
 
 - [[seam-exiting-tails-never-sleep]] — the recorded property a future
-  anon-COW/pageout must re-establish.
+  anon-COW/pageout must re-establish. Its preempt half is enforced since
+  2026-10-20: an IRQ return does not switch out a thread that is not RUNNING
+  ([[sub-kernel-sched]]), so a tail on a kthread-shaped path runs to its own
+  `sched()`. Exec's wait for its peers to leave their CPUs
+  ([[sub-kernel-proc]]) is the newest dependent on both halves.
 - [[seam-close-flush-unbounded]] — a server that never answers held a flagged
   close; parts A-C (2026-10-07) bound it: the clunk never waits, and a second
   kill forces the close and hands the rest to the closer.

@@ -22,6 +22,35 @@ needed the operator.
 
 
 ---
+## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- thread-model C0: exec waits for its exiting peers, and three smaller holes closed, each witness run both ways
+
+**Why now.** The overhaul the operator asked for at 04:46:56Z ("take a very close look at multi-threading ... together suggest an overhaul -- no matter the cost") is planned in `docs/thread-model-review.html`. Its first chunk, C0, takes the four findings that need no operator decision, starting with the one P1. The reap fix had landed at 07:36Z (e7d6f2f47); C0 was cut on top of it, on aux-3-c0, and squashed onto aux-3 as *(pending)*.
+
+**The chunk.**
+- 6f98bf134, the code. F-1: `proc_exec_replace` now waits, spinning outside the lock, until every peer of the exec'ing thread is off its CPU, then frees them, before it swaps the address space; a peer between its EXITING commit and its last switch-out was still storing its clear-child-tid word through the old translation. F-6: `preempt_check_irq` returns without consuming `need_resched` for a thread that is not RUNNING, so an exit tail on a kthread-shaped path runs to its own `sched()`. F-8: both spawn arms refuse a dying Proc -EAGAIN. F-2: the tid and pid counters saturate by compare-and-swap and refuse (NULL, EAGAIN) instead of extincting.
+- d75af1f9e, four kernel tests, one per finding; d000bfb1f, the exec test reordered (below); 86491105f, the audit's four P3 fixes and a fifth test, the exec hazard in its real shape: a real peer's exit tail held on a second CPU while exec runs on the first.
+- Before landing I checked three things the fixes lean on. Every dispatch sets the incoming thread RUNNING (sched.c:1454, thread.c:870), the idles included, so the new gate skips nothing that is really running. The sleep paths hold `wait_lock` with interrupts masked from the state store to `sched()`, so only exit tails see the gate. Every production caller of the thread and Proc constructors handles NULL; the ones that extinct (the boot threads in main.c, joey's launch) run once, at boot, before any user can spend a counter.
+
+**Evidence.**
+- `--config ci` on d75af1f9e: tools/test.sh 2016/2016 (the reap's 2012 plus four), boot OK.
+- Red, all four fixes dropped by a script that refuses unless each anchor matches once: 2012/2016 FAIL, exactly the four new tests, each on its own message. Reverted, the tree is clean and the rebuilt kernel is byte-identical to the green one (SHA-256 ad5a917b...), 2016/2016 again.
+- On d000bfb1f (the exec test reordered) the same cycle: red 2012/2016 with the exec test failing on the hazard line, restored 2016/2016, boot OK.
+- `specs/check-syscall-irqs.sh` (the spec models `preempt_check_irq`'s marker deferral): both clean cfgs at their pinned 18 states, all six must-fail cfgs on their named property, the kthread control included.
+- On 86491105f (the audit's fixes and the fifth test): suite 2017/2017 (2012 + 5); red with the same four fixes dropped 2012/2017 FAIL, exactly the five tests, each on its own message and both exec tests on their hazard lines; restored, the kernel is byte-identical to the green one (SHA-256 980d1bc1...) and 2017/2017 again.
+- SMP gate: 50/50 PASS, 0 corruption, on d000bfb1f (the default kernel at 1, 4 and 8 CPUs and UBSan at 4 and 8, 10 boots each; 08:19:52-09:08:27Z), and 50/50 again, 0 corruption, on the audit-close tree (3cabd8927, 09:16:51-10:05:36Z).
+
+**The audit.** Round 1, Fable 5.1 on Opus 5.5 (MODEL start and end the same): 0 P0 / 0 P1 / 0 P2 / 4 P3, all fixed. (1) The dying-gate comment said a spawn loop under a kill would repeat the wasted kstack until its own tail; the spawner dies at this call's own return, so it is one per spawning thread. (2) The creators' contracts still said "NULL on OOM", and two lists of who frees an EXITING thread did not name exec. (3) The fabricated exec test, on a budget miss, left its child free to raise the peer's `on_cpu` later and spin in exec forever; the child now checks, under the lock the test thread also takes, whether it has been given up on. (4) SPEC-TO-CODE bound the model's deferral to the marker only, so it now says the new state gate is outside the model and names its witness. The reviewer withdrew a dozen candidates it found guarded (the list is in the closed list) and named one gap: nothing exercised the hazard as it really happens, on two CPUs. That became the fifth test. In this phase the secondaries are parked, so the test pins the peer to one and kicks it, the way `test_jit` does.
+
+**Wrong turns, and what caught them.**
+- The exec test's first red failed on its wait counter. That counter is incremented inside the very function the red removed, so the failure proved only that the instrument was gone. The test now asserts the hazard first (the address space was not swapped while the peer was on its CPU) and keeps the counter as that line's control; the second red failed on the hazard line.
+- The red script's sched.c anchor counted 2 with grep, which would have stopped it; the second match carried a trailing comment, so the newline-terminated anchor was unique, and I tied it to the preceding comment line anyway. The docs script's sched-dossier anchor began a line too early ("the placement;" straddles a wrap) and refused on the dry run, before any file was written.
+- `tools/thyla-wake.sh hold` from the reap worktree died with "yip presence names no '(you)' line"; run from the session's own directory it armed and the lease came within a minute.
+- I derived the second red script from the first with sed, renaming its logs. The rule for `green-elf.sha` ran first and matched inside `regreen-elf.sha`, which became `rer1x-green-elf.sha`. Reading the diff before running it caught that; substitutions that rename by substring have to run longest name first.
+
+**Still open.** C0 does not free an exited thread any sooner: that waits for a create or an exec until C1 frees it at the switch. The tid space is still a cumulative 31-bit counter that an unprivileged create loop spends in hours; spending it is now a refusal, not an extinction, and the fix is the operator's decision 2 (64-bit tids, never reused). The sleep half of `seam-exiting-tails-never-sleep` stays owed, and exec's wait is a new dependent on it.
+
+**Decisions the operator made.** None new; the six on the review page are open.
+
 ## 2026-10-20 (aux, Opus 5.5 1M, effort max) -- the exited-thread reap for the talk, and a review of the whole thread model with Fable
 
 **Why now.** The operator, 04:46:56Z: "Let us implement your small fix for the presentation, but then let's take a very close look at multi-threading. I'm thinking, let both you and a dedicated Fable subagent review its efficiency, soundness, and elegance, and together suggest an overhaul -- no matter the cost." The small fix is the one aux proposed on 10-19 after the OpenRCT2 freeze (OPEN-BUGS 10-19 15:03Z, P1): free an exited thread inside its own Proc instead of waiting for the parent's `wait_pid`. The talk is today, so the demo folder needed the fix without losing the 10-19 image.

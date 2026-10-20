@@ -1342,8 +1342,8 @@ void sched(void) {
     //                       wake via wakeup()/ready() later.
     //   THREAD_EXITING   → exit: caller is winding down. Same as
     //                       SLEEPING — don't re-insert, ever: once on_cpu
-    //                       clears, the next thread create of its Proc
-    //                       (proc_reap_exited_threads) or wait_pid frees it.
+    //                       clears, the next thread create or exec of its
+    //                       Proc (proc_reap_exited_threads) or wait_pid frees it.
     //   THREAD_RUNNABLE  → INVALID — prev is current; it cannot be
     //                       both current and already runnable.
     //   _INVALID         → INVALID — magic check above caught corrupt
@@ -1439,8 +1439,8 @@ void sched(void) {
     } else {
         // Block (SLEEPING) or exit (EXITING) — prev stays out of the run tree.
         // wakeup()/ready() will re-insert SLEEPING; EXITING never returns, and
-        // its Proc's next thread create or wait_pid frees it once on_cpu
-        // clears. HMP foundation (#864): prev stopped
+        // its Proc's next thread create or exec, or wait_pid, frees it once
+        // on_cpu clears. HMP foundation (#864): prev stopped
         // consuming CPU, so decay its util estimate (the dequeue-to-blocked
         // hook, ARCH §8.4.4). Inert on uniform topology + for pinned threads
         // (select_target_cpu ignores util there).
@@ -2829,6 +2829,16 @@ void preempt_check_irq(void) {
     // check removed, and `syscall_irqs_kthread` is the control proving the
     // machinery can still switch when the marker is absent.
     if (t->in_syscall) return;
+
+    // A thread that has committed to exit or to sleep is a few instructions
+    // from its own sched(). Switched out here instead, an EXITING thread never
+    // runs again (sched() does not requeue it), so the rest of its exit tail
+    // is lost: a last thread out skips the srv, cap and weft notifies, and a
+    // pending /cap grant's slot leaks. Only the paths with neither gate above
+    // are exposed: a kthread-shaped entry (userland_enter's die-check, an exec
+    // failure's exits) runs its tail with interrupts on. Return WITHOUT
+    // consuming need_resched, as both gates above do: its own sched() switches.
+    if (t->state != THREAD_RUNNING) return;
 
     // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-
     // trigger. The cross-CPU write now exists for real (#866 F1: ready_on's

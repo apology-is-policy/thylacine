@@ -901,6 +901,11 @@ void test_proc_note_death_with_live_peer_reaps_signalled(void);  // gcpark-b
 void test_proc_reap_exited_threads_frees_peers(void);
 void test_proc_reap_keeps_thread_cap_open(void);
 void test_proc_reap_before_sqpoll_charge(void);
+void test_proc_exit_tail_runs_to_its_end(void);
+void test_proc_exec_waits_for_exiting_peer(void);
+void test_proc_exec_waits_for_exiting_peer_on_another_cpu(void);
+void test_proc_spawn_refused_in_dying_proc(void);
+void test_thread_tid_and_pid_spaces_refuse_when_spent(void);
 void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -3165,6 +3170,11 @@ struct test_case g_tests[] = {
     { "proc.reap_exited_threads_frees_peers",   test_proc_reap_exited_threads_frees_peers,   false, NULL },
     { "proc.reap_keeps_thread_cap_open",        test_proc_reap_keeps_thread_cap_open,        false, NULL },
     { "proc.reap_before_sqpoll_charge",         test_proc_reap_before_sqpoll_charge,         false, NULL },
+    { "proc.exit_tail_runs_to_its_end",         test_proc_exit_tail_runs_to_its_end,         false, NULL },
+    { "proc.exec_waits_for_exiting_peer",       test_proc_exec_waits_for_exiting_peer,       false, NULL },
+    { "proc.exec_waits_for_exiting_peer_on_another_cpu", test_proc_exec_waits_for_exiting_peer_on_another_cpu, false, NULL },
+    { "proc.spawn_refused_in_dying_proc",       test_proc_spawn_refused_in_dying_proc,       false, NULL },
+    { "thread.tid_and_pid_spaces_refuse_when_spent", test_thread_tid_and_pid_spaces_refuse_when_spent, false, NULL },
     { "proc.wait_pid_concurrent_waiters_both_reap", test_proc_wait_pid_concurrent_waiters_both_reap, false, NULL },
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },

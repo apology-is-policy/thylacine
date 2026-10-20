@@ -71,15 +71,35 @@ u64 thread_free_oncpu_waits(void) {
     return __atomic_load_n(&g_thread_free_oncpu_waits, __ATOMIC_RELAXED);
 }
 
-// Allocate the next monotonic tid + extinct on INT_MAX overflow. The
-// overflow path is unreachable at v1.0 thread counts (< 10^5 in any
-// imaginable workload), but the guard fail-closes loudly if it ever
-// approaches — INT_MAX-wrap would alias the (-1) error sentinel.
+// Allocate the next monotonic tid, or -1 once the space is spent. tids are
+// never reused (a stale tid must never name another thread), so the counter
+// is CUMULATIVE, not a count of live threads: an unprivileged create/join
+// loop walks it toward INT_MAX in hours. Spent is therefore a refusal the
+// creator reports, never an extinction (I-32). The counter saturates instead
+// of wrapping, so it never yields the -1 sentinel or a tid a live thread
+// may still hold.
 static int alloc_next_tid(void) {
-    u32 next = __atomic_fetch_add(&g_next_tid, 1u, __ATOMIC_RELAXED);
-    if (next >= 0x7fffffffu) extinction("alloc_next_tid: g_next_tid would overflow INT_MAX");
-    return (int)next;
+    u32 cur = __atomic_load_n(&g_next_tid, __ATOMIC_RELAXED);
+    do {
+        if (cur >= 0x7fffffffu) return -1;
+    } while (!__atomic_compare_exchange_n(&g_next_tid, &cur, cur + 1u, true,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return (int)cur;
 }
+
+bool thread_tid_space_spent(void) {
+    return __atomic_load_n(&g_next_tid, __ATOMIC_RELAXED) >= 0x7fffffffu;
+}
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): replace the
+// tid counter, returning the old value, so a test can park it at the edge of
+// the space and restore it afterwards.
+u32 thread_tid_counter_swap_for_test(u32 v);
+u32 thread_tid_counter_swap_for_test(u32 v) {
+    return __atomic_exchange_n(&g_next_tid, v, __ATOMIC_RELAXED);
+}
+#endif
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: link/unlink under
 // g_proc_table_lock so concurrent walkers (proc_count_live_peers_locked,
@@ -288,6 +308,7 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     // migrate it (sched.c, audit F2 / I-21).
     t->magic  = THREAD_MAGIC;
     t->tid    = alloc_next_tid();
+    if (t->tid < 0) extinction("thread_init: tid space spent at boot");
     t->state  = THREAD_RUNNING;
     t->proc   = kproc();
     t->weight = 1;
@@ -340,6 +361,7 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
     // no per-thread kstack (thread_free's free_pages is gated on kstack_base).
     t->magic  = THREAD_MAGIC;
     t->tid    = alloc_next_tid();
+    if (t->tid < 0) extinction("thread_create_bootcpu_idle: tid space spent at boot");
     t->state  = THREAD_RUNNABLE;           // ready()-able by sched_install_bootcpu_idle
     t->proc   = kproc();
     t->weight = 1;
@@ -396,6 +418,11 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     if (proc->magic != PROC_MAGIC)
         extinction("thread_create with corrupted proc");
 
+    // The tid first: a spent tid space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = alloc_next_tid();
+    if (tid < 0) return NULL;
+
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
@@ -425,7 +452,7 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     // ahead of long-running threads whose vd_t has advanced via
     // sched() yields).
     t->magic       = THREAD_MAGIC;
-    t->tid         = alloc_next_tid();
+    t->tid         = tid;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
@@ -515,6 +542,11 @@ struct Thread *thread_create_user(struct Proc *proc,
     if (proc->magic != PROC_MAGIC)
         extinction("thread_create_user with corrupted proc");
 
+    // The tid first: a spent tid space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = alloc_next_tid();
+    if (tid < 0) return NULL;
+
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
@@ -533,7 +565,7 @@ struct Thread *thread_create_user(struct Proc *proc,
     }
 
     t->magic       = THREAD_MAGIC;
-    t->tid         = alloc_next_tid();
+    t->tid         = tid;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;
@@ -591,6 +623,11 @@ struct Thread *thread_create_forked(struct Proc *proc,
         extinction("thread_create_forked with corrupted proc");
     if (!frame)          extinction("thread_create_forked with NULL frame");
 
+    // The tid first: a spent tid space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = alloc_next_tid();
+    if (tid < 0) return NULL;
+
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
@@ -609,7 +646,7 @@ struct Thread *thread_create_forked(struct Proc *proc,
     }
 
     t->magic       = THREAD_MAGIC;
-    t->tid         = alloc_next_tid();
+    t->tid         = tid;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;

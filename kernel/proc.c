@@ -368,6 +368,29 @@ struct Proc *proc_alloc(void) {
 u32 proc_default_page_budget(void)  { return capacity_pool_pages(); }
 u32 proc_page_budget_hard_max(void) { return capacity_pool_pages(); }
 
+// The next pid, or -1 once the space is spent. Pids are never recycled
+// (session_hangup_cb's isolation leans on it), so the counter is cumulative
+// and a spawn loop walks it toward INT_MAX; spent is a refusal, never an
+// extinction (I-32). Saturating instead of wrapping keeps -1 the sentinel and
+// every pid unique.
+static int alloc_next_pid(void) {
+    u32 cur = __atomic_load_n(&g_next_pid, __ATOMIC_RELAXED);
+    do {
+        if (cur >= 0x7fffffffu) return -1;
+    } while (!__atomic_compare_exchange_n(&g_next_pid, &cur, cur + 1u, true,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return (int)cur;
+}
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): replace the
+// pid counter, returning the old value.
+u32 proc_pid_counter_swap_for_test(u32 v);
+u32 proc_pid_counter_swap_for_test(u32 v) {
+    return __atomic_exchange_n(&g_next_pid, v, __ATOMIC_RELAXED);
+}
+#endif
+
 struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
@@ -472,16 +495,17 @@ struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     // suffices — PID assignment is monotonic but not synchronized with
     // other state.
     //
-    // R6-A F107: u32 atomic + INT_MAX guard. Signed-overflow on int
-    // atomic_fetch_add at INT_MAX is UB; u32 has defined wrap. The
-    // public PID type stays signed (`int`) so -1 remains the error
-    // sentinel; the cast at assignment is well-defined for u32 < 2^31.
-    // The INT_MAX guard extincts loudly on the (unreachable at v1.0)
-    // overflow rather than silently producing a negative PID that aliases
-    // the error sentinel.
-    u32 next = __atomic_fetch_add(&g_next_pid, 1u, __ATOMIC_RELAXED);
-    if (next >= 0x7fffffffu) extinction("proc_alloc: g_next_pid would overflow INT_MAX");
-    p->pid = (int)next;
+    // R6-A F107: the public PID type stays signed (`int`) so -1 remains the
+    // error sentinel. A spent pid space is a refusal through the same rollback
+    // as any other failure here (alloc_next_pid saturates; it never wraps).
+    int pid = alloc_next_pid();
+    if (pid < 0) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        return NULL;
+    }
+    u32 next = (u32)pid;
+    p->pid = pid;
     // PTY-1a: keep the own-session default tracking the REAL pid (the
     // proc_init_fields stamp used the placeholder). rfork_internal
     // overwrites both for a spawned child.
@@ -3837,8 +3861,8 @@ static int session_hangup_cb(struct Proc *m, void *arg) {
     if (m == g_kproc)      return 0;
     // ISOLATION DEPENDENCY (arm-6 F1): sid == leader-pid identifies EXACTLY the
     // leader's genuine fork-descendants ONLY because pids never recycle
-    // (g_next_pid is strictly monotonic + extincts at INT_MAX rather than
-    // wrapping -- proc_alloc). A member's sid is set only to its own pid (setsid)
+    // (g_next_pid is strictly monotonic + saturates at INT_MAX, where proc_alloc
+    // refuses, rather than wrapping). A member's sid is set only to its own pid (setsid)
     // or inherited from its parent (rfork), so the value leader-pid propagates
     // solely down the leader's subtree. If pid recycling is ever introduced (a
     // free-list / a wrap), a stale sid on an orphaned member of a DEFUNCT
@@ -4168,6 +4192,28 @@ static inline void exit_close_test_window(void) {
 }
 #else
 static inline void exit_close_test_window(void) {}
+#endif
+
+// The exiting tail: after a thread's commit to THREAD_EXITING, before its last
+// switch-out. A test runs a function there, on the exiting thread that set it
+// (NULL clears it). Compiled out of production.
+#ifdef KERNEL_TESTS
+static void (*g_exit_tail_test_hook)(void);
+static struct Thread *g_exit_tail_test_owner;
+
+void proc_exit_tail_test_set_hook(void (*fn)(void));
+void proc_exit_tail_test_set_hook(void (*fn)(void)) {
+    __atomic_store_n(&g_exit_tail_test_owner, fn ? current_thread() : NULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_exit_tail_test_hook, fn, __ATOMIC_RELEASE);
+}
+
+static inline void exit_tail_test_hook(void) {
+    void (*fn)(void) = __atomic_load_n(&g_exit_tail_test_hook, __ATOMIC_ACQUIRE);
+    if (fn && __atomic_load_n(&g_exit_tail_test_owner, __ATOMIC_RELAXED) == current_thread())
+        fn();
+}
+#else
+static inline void exit_tail_test_hook(void) {}
 #endif
 
 // Part D (arm-6, IDENTITY-DESIGN 9.9.1): release the Proc's Territory at EXIT,
@@ -4701,6 +4747,8 @@ void thread_exit_self(void) {
 
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
+    exit_tail_test_hook();
+
     // F3 audit close: clear-child-tid handoff runs HERE — after the
     // EXITING commit so a joiner waking from the torpor_wake never
     // observes us as RUNNING in any subsequent peer-state walk. The
@@ -4957,12 +5005,60 @@ void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t, u32 p
     proc_exec_drop_image_state(p, t, pheno);
 }
 
+#ifdef KERNEL_TESTS
+static u64 g_exec_peer_oncpu_waits;
+u64 proc_exec_peer_oncpu_waits_for_test(void);
+u64 proc_exec_peer_oncpu_waits_for_test(void) {
+    return __atomic_load_n(&g_exec_peer_oncpu_waits, __ATOMIC_ACQUIRE);
+}
+#endif
+
+// The live-peer count exec admits on is blind to a peer that has committed
+// THREAD_EXITING but is still on another CPU, between its commit and its last
+// switch-out. Its tail stores the clear-child-tid word through this Proc's
+// translation (thread_clear_child_tid_handoff): into a page addrspace_destroy
+// frees, by a stale TLB entry, or, by a fault that demand-pages through p->as,
+// into the NEW image once it is installed. So the swap waits for every peer's
+// last switch-out. The spin runs outside the lock, as wait_pid's does, since
+// a tail may take it. A peer seen under the lock stays allocated across the
+// spin: while p is ALIVE only a RUNNING thread of p frees a peer
+// (proc_reap_exited_threads), and the execing thread is the only one. The
+// spin ends because a tail runs straight to its own sched(): sleep extincts on
+// a thread that is not RUNNING (seam-exiting-tails-never-sleep), and
+// preempt_check_irq does not switch one out.
+static void proc_exec_wait_peers_off_cpu(struct Proc *p, struct Thread *self) {
+    for (;;) {
+        struct Thread *busy = NULL;
+        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
+            if (t != self && __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+                busy = t;
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        if (!busy) return;
+#ifdef KERNEL_TESTS
+        __atomic_fetch_add(&g_exec_peer_oncpu_waits, 1u, __ATOMIC_RELEASE);
+#endif
+        while (__atomic_load_n(&busy->on_cpu, __ATOMIC_ACQUIRE))
+            __asm__ __volatile__("yield" ::: "memory");
+    }
+}
+
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas, u32 new_pheno) {
     if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
     if (!nas)                         extinction("proc_exec_replace: NULL address space");
     struct Thread *self = current_thread();
     if (!self || self->proc != p)
         extinction("proc_exec_replace: not the execing thread");
+
+    // Every peer is EXITING (admission counted no live one, and only a live
+    // thread creates one). Wait until each is off its CPU, then free them: the
+    // new image starts as this thread alone, with its whole thread budget, as
+    // Linux's de_thread leaves it.
+    proc_exec_wait_peers_off_cpu(p, self);
+    proc_reap_exited_threads();
 
     struct AddrSpace *old;
     {

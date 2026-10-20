@@ -128,11 +128,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
+- 2026-10-20 [[chg-2026-10-20-thread-model-c0]] — Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse
 - 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 - 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
 - 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
 - 2026-10-13 [[chg-2026-10-13-icache-sync-space]] — The address space's CPUs synchronized on request: SYS_ICACHE_SYNC_SPACE at 128, a per-CPU space record, the barrier IPI acknowledged by ticket, 128 MiB code regions
 - 2026-10-13 [[chg-2026-10-13-jsc-dfg]] — JavaScriptCore's DFG runs on the sealed code region; a thread resumes the VM's code behind an ISB
 - 2026-10-13 [[chg-2026-10-13-jsc-ftl]] — JavaScriptCore's FTL runs on the sealed code region; every Wasm instance takes an ISB before its exit stubs; worker threads get 1 MiB stacks
-- 2026-10-13 [[chg-2026-10-13-jsc-wasm-tiers]] — JavaScriptCore's Wasm BBQ and OMG on the space sync: patch 0006, the pool at 128 MiB, the ref.cast null check kept, CanFail exit stubs
 <!-- generated:end -->

@@ -1503,7 +1503,8 @@ struct Proc *proc_init_proc(void);
 // SLUB-allocate a fresh Proc descriptor. Initializes pid (next monotonic
 // pid), threads = NULL, thread_count = 0, state = ALIVE, child_waiters
 // initialized. parent / children / sibling left NULL (caller wires
-// linkage). Returns NULL on OOM.
+// linkage). Returns NULL on OOM, or when the pid space is spent (pids are
+// never recycled, so that refusal is permanent).
 struct Proc *proc_alloc(void);
 
 // LINEAGE L-3: the same, but with an explicit address space. `share` NULL gives

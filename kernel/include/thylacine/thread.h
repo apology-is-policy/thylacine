@@ -766,7 +766,8 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top);
 // trampoline which then blr's `entry`. Adds to proc->threads list.
 //
 // Returns NULL on OOM (Thread alloc fail or kstack alloc fail; cleanup
-// is internal).
+// is internal), or when the tid space is spent (thread_tid_space_spent: a
+// permanent refusal, not a retryable one).
 //
 // `entry` takes no argument. For arg-passing (P2-D rfork), use
 // thread_create_with_arg below.
@@ -803,7 +804,7 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
 // user-mode extinction for the misbehaving Proc, not a kernel issue).
 //
 // Returns the new Thread on success, NULL on OOM (Thread cache or
-// kstack alloc fail).
+// kstack alloc fail) or a spent tid space (thread_tid_space_spent).
 struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_entry_va,
                                   u64 user_sp_va,
@@ -872,7 +873,7 @@ void fork_frame_init(struct exception_context *dst,
 // Caller-provided values are NOT validated here (same contract as
 // thread_create_user): the syscall handler owns the bound + alignment checks.
 //
-// Returns the new Thread on success, NULL on OOM.
+// Returns the new Thread on success, NULL on OOM or a spent tid space.
 struct Thread *thread_create_forked(struct Proc *proc,
                                     const struct exception_context *frame,
                                     u64 child_sp,
@@ -882,6 +883,10 @@ struct Thread *thread_create_forked(struct Proc *proc,
 // thread is not current (current_thread() != t) and not still on any
 // runqueue. Extincts on violation.
 void thread_free(struct Thread *t);
+
+// True once the tid space is spent (alloc_next_tid refuses). A create that
+// failed then reports EAGAIN, a system limit, rather than ENOMEM.
+bool thread_tid_space_spent(void);
 
 // The in-Proc reap's halves (proc_reap_exited_threads): unlink under the
 // caller's g_proc_table_lock hold, then free with no lock held.
