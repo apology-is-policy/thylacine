@@ -176,7 +176,7 @@ Pouch descriptor flags and atomic target duplication over approved native 130/13
 + * inherited descriptor table. Its close-on-exec model is child-local.
   *
   * envp is inherited via the kernel /env clone (env_clone_into), NOT the passed
-  * envp -- the SYS_SPAWN_FULL_ARGV _pad_envp slot reserves the per-child
+  * envp -- a per-child override would be a SYS_SPAWN_FULL_ARGV ext_flags
 @@ -71,6 +67,8 @@
  {
  	if (!fa) return 0;
