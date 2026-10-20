@@ -725,10 +725,14 @@ Pouch (Boosty B-3f'): `lstat` and `fstatat(AT_SYMLINK_NOFOLLOW)` return
 SYS_LSTAT's errno, and `readlink` SYS_READLINK's, except that the four
 `/proc` link-shaped files still read as their contents (VIVARIUM 6.11).
 Pouch answers `ENOENT` for an empty path and `ENAMETOOLONG` for one past
-`PATH_MAX` before the kernel sees it, and `EINVAL` for an `fstatat` or
-`fchmodat` flag it does not know. `open` and `openat` answer `ELOOP` for
+`SYS_OPEN_PATH_MAX` (1024 bytes, the kernel's path bound, below musl's
+`PATH_MAX` of 4096) before the kernel sees it, and `EINVAL` for an `fstatat`
+or `fchmodat` flag it does not know. `open` and `openat` answer `ELOOP` for
 `O_NOFOLLOW` on a final link, `ENOTDIR` for `O_DIRECTORY` on anything but a
-directory (the descriptor is closed first), and `EINVAL` for `O_CREAT` with
-`O_DIRECTORY`, as Linux has since 6.4. `lchmod` and
+directory (any descriptor opened is closed first), `EISDIR` for
+`O_DIRECTORY` with `O_TRUNC` on a directory, which is never truncated, and
+`EINVAL` for `O_CREAT` with `O_DIRECTORY`, as Linux has since 6.4. One answer
+differs from Linux: `O_DIRECTORY` with `O_NOFOLLOW`, without `O_PATH`, on a
+final link answers the kernel's `ELOOP` where Linux answers `ENOTDIR`. `lchmod` and
 `fchmodat(AT_SYMLINK_NOFOLLOW)` answer `EOPNOTSUPP` for a link and change
 nothing, as musl's own `fchmodat` does on Linux.

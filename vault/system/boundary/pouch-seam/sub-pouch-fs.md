@@ -76,8 +76,10 @@ the most: `openat.c` alone has three generations.
   and then `O_CREAT` with `O_DIRECTORY` is `EINVAL` (Linux 6.4 on).
   `O_DIRECTORY` without `O_NOFOLLOW` appends a `/` to the path, so the
   kernel's trailing-slash gate refuses a non-directory before anything
-  opens; with `O_NOFOLLOW` the exit helper fstats the new descriptor and
-  closes anything but a directory, `ENOTDIR`, before close-on-exec is set.
+  opens; with `O_NOFOLLOW`, or with no room for the slash, an fstat of the
+  new descriptor closes anything but a directory, `ENOTDIR`, before
+  close-on-exec is set. `O_TRUNC` is never sent beside `O_DIRECTORY`, so no
+  refusal truncates a file, and a directory answers `EISDIR`, as on Linux.
   `tools/test-pouch-symlinks.py` pins each arm against a mocked kernel.
 - The descriptor family (0055, 0056): `dup`, `dup2`, `dup3`, `fcntl`'s
   F_GETFD / F_SETFD / F_DUPFD / F_DUPFD_CLOEXEC / F_GETFL / F_SETFL over native
@@ -99,8 +101,9 @@ the most: `openat.c` alone has three generations.
   a final link itself (`S_IFLNK`, its size the target's length);
   `fstatat(fd,"",AT_EMPTY_PATH)` delegates to `fstat`. A flag outside
   `AT_SYMLINK_NOFOLLOW`, `AT_EMPTY_PATH`, `AT_NO_AUTOMOUNT` and the
-  `AT_STATX` sync hints is `EINVAL`, and a path past `PATH_MAX`
-  `ENAMETOOLONG`, as on Linux.
+  `AT_STATX` sync hints is `EINVAL`, as on Linux, and a path past the
+  kernel's 1024-byte bound (`SYS_OPEN_PATH_MAX`, below musl's `PATH_MAX`)
+  `ENAMETOOLONG`.
 - `readdir(DIR*)` refills via `SYS_READDIR` (56) and translates the 9P
   Treaddir stream into Linux `struct dirent` records.
 - The mutation family maps onto the parent-fd+leaf kernel primitives
@@ -225,15 +228,19 @@ again; the dispatch stays because it is correct and costs one `lstat`.
 and its target left alone, as POSIX asks.
 
 **`O_DIRECTORY` rides the kernel's trailing-slash gate.** The kernel has no
-directory-only open, and a check after the open is too late on its own:
-`O_DIRECTORY|O_TRUNC` on a file would truncate it before refusing it, and a
+directory-only open, and a check after the open is too late on its own: a
 device or clone file would see its open. So without `O_NOFOLLOW` the path
 gains a `/`, and the resolver's #82 gate ([[sub-kernel-stalk]]) refuses a
 non-directory before any `Dev.open`, in Linux's errno order (`ENOTDIR`
-before `EACCES`). A trailing slash forces the final link's follow (D-1),
-which `O_NOFOLLOW` refuses, so with it the open runs unslashed and the exit
-helper's fstat check decides; that check also covers a path with no room
-left for the slash.
+before `EACCES`). Behind the slash nothing more is asked, so an `opendir`
+costs no extra RPC. A trailing slash forces the final link's follow (D-1),
+which `O_NOFOLLOW` refuses, so with it, and on a path with no room left for
+the slash, the open runs unslashed and an fstat of the new descriptor
+decides. An fstat that answers `EBADF` means a peer closed the number, so it
+is not closed again, the rule the close-on-exec set keeps. `O_TRUNC` is write
+intent, so beside `O_DIRECTORY` no open succeeds on Linux: Pouch never sends
+the truncate there and answers `EISDIR` for a directory, so no refusal on
+the unslashed arms costs a file its bytes.
 
 **`O_APPEND`, in two halves, and the history is why.** musl's `__fdopen`
 asks for append via a raw `__syscall(SYS_fcntl, F_SETFL)` — the `0xFFFF`
@@ -408,8 +415,9 @@ in-place translation pass.
   including the EEXIST fallback and both `renameat` endpoints.
 - `O_PATH`'s mask must run before every other flag check; the
   `O_DIRECTORY` slash is appended only without `O_NOFOLLOW` and only when it
-  fits; a refused `O_DIRECTORY` descriptor is closed exactly once, before
-  close-on-exec is set; `fchmodat` never reaches `WSTAT` on a link and
+  fits, and only an unslashed open is fstat'd; `O_TRUNC` never reaches the
+  kernel beside `O_DIRECTORY`; a refused `O_DIRECTORY` descriptor is closed
+  exactly once (not at all after `EBADF`), before close-on-exec is set; `fchmodat` never reaches `WSTAT` on a link and
   closes its descriptor on every path.
 - The `readlink` `/proc` whitelist must stay closed and strict (no `//`
   or `/./` normalization) — a loose match turns readlink into a
@@ -507,8 +515,9 @@ in-place translation pass.
 - **`O_DIRECTORY|O_NOFOLLOW` without `O_PATH` answers `ELOOP` for a final
   link**, where current Linux answers `ENOTDIR` (its directory check precedes
   the link refusal; the kernel refuses the link first). Robust callers take
-  either (libc++'s `remove_all`, Rust's `remove_dir_all`). On that path a
-  non-directory is opened before it is refused.
+  either (libc++'s `remove_all`, Rust's `remove_dir_all`). On that path,
+  and on a path with no room for the slash, a non-directory is opened
+  (never truncated) before it is refused.
 - **`O_CREAT` through a dangling final link answers `ENOENT`**, where Linux
   creates the target: the create finds the link's name and answers
   `EEXIST`, and the open after it follows the link to nothing.

@@ -9,8 +9,9 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
 
 - fstatat's AT_SYMLINK_NOFOLLOW is native SYS_LSTAT (136), which reports a
   final link itself (S_IFLNK). A flag outside AT_SYMLINK_NOFOLLOW,
-  AT_EMPTY_PATH, AT_NO_AUTOMOUNT and the AT_STATX sync hints is EINVAL, and
-  a path past PATH_MAX is ENAMETOOLONG, as on Linux.
+  AT_EMPTY_PATH, AT_NO_AUTOMOUNT and the AT_STATX sync hints is EINVAL, as on
+  Linux, and a path past the kernel's 1024-byte bound (SYS_OPEN_PATH_MAX,
+  below musl's PATH_MAX) is ENAMETOOLONG.
 - readlinkat's general arm is native SYS_READLINK (135), its errno verbatim.
   The /proc whitelist arm is unchanged and still runs first.
 - openat passes O_NOFOLLOW (ELOOP on a final link, or the link itself with
@@ -19,8 +20,10 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
   build_open_how, and O_CREAT with O_DIRECTORY is then EINVAL, as on Linux
   since 6.4. O_DIRECTORY appends a '/', so the kernel's trailing-slash gate
   refuses a non-directory before anything opens; with O_NOFOLLOW, which a
-  trailing slash would defeat, the descriptor is checked after the open and
-  anything but a directory is closed again, ENOTDIR.
+  trailing slash would defeat, or with no room for the slash, the descriptor
+  is checked after the open and anything but a directory is closed again,
+  ENOTDIR. O_TRUNC is never sent beside O_DIRECTORY, so no refusal truncates
+  a file, and a directory answers EISDIR, as on Linux.
 - fchmodat's AT_SYMLINK_NOFOLLOW opens the final component without following
   it and answers EOPNOTSUPP for a link, as musl and glibc do; any other flag
   is EINVAL.
@@ -48,7 +51,7 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
  #define POUCH_WSTAT_MODE  (1u << 0)
 --- a/src/fcntl/openat.c
 +++ b/src/fcntl/openat.c
-@@ -16,13 +16,34 @@
+@@ -16,13 +16,36 @@
   *
   * Relative paths are now resolved (CL-1a wired chdir/getcwd): SYS_open's
   * FROM_ROOT arm cwd-joins a relative path (LS-4), so the old "absolute
@@ -65,11 +68,13 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
 + * O_DIRECTORY has no omode bit. Without O_NOFOLLOW it appends a '/' to the
 + * path, so the kernel's trailing-slash gate (#82) refuses a non-directory
 + * before anything is opened. A trailing slash forces the follow that
-+ * O_NOFOLLOW refuses, so with O_NOFOLLOW the open runs as asked and the exit
-+ * helper below closes anything but a directory, ENOTDIR. There a non-directory
-+ * is opened before it is refused, and without O_PATH a final link answers the
-+ * kernel's ELOOP where Linux answers ENOTDIR. The exit helper checks every
-+ * O_DIRECTORY open, so a path with no room for the slash is still refused.
++ * O_NOFOLLOW refuses, so with O_NOFOLLOW, or with no room left for the slash,
++ * the open runs as asked and an fstat after it closes anything but a
++ * directory, ENOTDIR. There a non-directory is opened before it is refused,
++ * and without O_PATH a final link answers the kernel's ELOOP where Linux
++ * answers ENOTDIR. O_TRUNC is write intent, so beside O_DIRECTORY no open can
++ * succeed: the truncate is never sent, a directory answers EISDIR and
++ * anything else ENOTDIR, as on Linux, and no refusal costs a file its bytes.
 + *
 + * A dangling final symlink is not created through: with O_CREAT and without
 + * O_EXCL the create answers EEXIST and the open after it ENOENT, where Linux
@@ -84,24 +89,7 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
  #include "syscall.h"
  #include "_pouch_fs.h"
  #include "_pouch_descriptor.h"
-@@ -71,6 +92,16 @@
- 
- static int pouch_open_ret(long r, int flags)
- {
-+	/* O_DIRECTORY: anything but a directory is closed again, ENOTDIR. A
-+	 * failed fstat answers its own errno. */
-+	if (r >= 0 && (flags & O_DIRECTORY)) {
-+		struct stat st;
-+		long e = fstat((int)r, &st) ? -errno : S_ISDIR(st.st_mode) ? 0 : -ENOTDIR;
-+		if (e) {
-+			__syscall(SYS_close, r);
-+			return __syscall_ret(e);
-+		}
-+	}
- 	if (r >= 0 && (flags & O_CLOEXEC)) {
- 		long s = pouch_set_cloexec(r);
- 		if (s < 0) {
-@@ -97,17 +128,28 @@
+@@ -97,17 +120,28 @@
  	if (fd != AT_FDCWD) { errno = ENOTSUP; return -1; }   /* AT_FDCWD only */
  	if (!filename) { errno = EFAULT; return -1; }
  
@@ -131,23 +119,47 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
  
  	size_t len = strnlen(filename, POUCH_PATH_MAX + 1);
  	if (!len) { errno = ENOENT; return -1; }
-@@ -150,6 +192,13 @@
+@@ -148,8 +182,33 @@
+ 	}
+ 
  	/* Non-create open: one stalk-resolved open from the Territory root
- 	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC. */
- 	unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
+-	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC. */
+-	unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
+-	return pouch_open_ret(__syscall(SYS_thyla_open, POUCH_FROM_ROOT,
+-	                                filename, len, om), flags);
++	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC,
++	 * except beside O_DIRECTORY. */
++	int odir = flags & O_DIRECTORY;
++	unsigned long om = omode | ((flags & O_TRUNC) && !odir ? POUCH_OTRUNC : 0u);
 +	char slashed[POUCH_PATH_MAX];
-+	if ((flags & (O_DIRECTORY | O_NOFOLLOW)) == O_DIRECTORY &&
-+	    filename[len - 1] != '/' && len < POUCH_PATH_MAX) {
++	if (odir && !(flags & O_NOFOLLOW) && filename[len - 1] != '/' &&
++	    len < POUCH_PATH_MAX) {
 +		memcpy(slashed, filename, len);
 +		slashed[len++] = '/';
 +		filename = slashed;
 +	}
- 	return pouch_open_ret(__syscall(SYS_thyla_open, POUCH_FROM_ROOT,
- 	                                filename, len, om), flags);
++	long r = __syscall(SYS_thyla_open, POUCH_FROM_ROOT, filename, len, om);
++	if (r >= 0 && odir) {
++		/* Behind a trailing slash the kernel refused a non-directory; any
++		 * other path asks what it opened. A failed fstat answers its own
++		 * errno, and EBADF means a peer closed the number, so it is not
++		 * closed again, the rule pouch_open_ret's cloexec set keeps. */
++		long e = 0;
++		if (filename[len - 1] != '/') {
++			struct stat st;
++			e = fstat((int)r, &st) ? -errno : S_ISDIR(st.st_mode) ? 0 : -ENOTDIR;
++		}
++		if (!e && (flags & O_TRUNC)) e = -EISDIR;
++		if (e) {
++			if (e != -EBADF) __syscall(SYS_close, r);
++			return __syscall_ret(e);
++		}
++	}
++	return pouch_open_ret(r, flags);
  }
 --- a/src/stat/fstatat.c
 +++ b/src/stat/fstatat.c
-@@ -1,26 +1,30 @@
+@@ -1,26 +1,31 @@
  /*
   * pouch fstatat() -- route the PATH forms onto the Thylacine-native
   * SYS_stat (= 88; the POUNCE walk-query, docs/POUNCE-DESIGN.md section 7)
@@ -183,12 +195,13 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
 + *   - a flag outside AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH, AT_NO_AUTOMOUNT and
 + *     the AT_STATX sync hints is EINVAL, as on Linux. Nothing mounts on
 + *     traversal here and no remote attribute cache needs syncing, so those
-+ *     last two ask for what always happens. A path past PATH_MAX is
++ *     last two ask for what always happens. A path past the kernel's
++ *     1024-byte bound (SYS_OPEN_PATH_MAX, below musl's PATH_MAX) is
 + *     ENAMETOOLONG.
   */
  #define _BSD_SOURCE
  #include <sys/stat.h>
-@@ -32,8 +36,8 @@
+@@ -32,8 +37,8 @@
  
  /* aarch64 has NO legacy __NR_stat (LP64 new-arch table), so there is no
   * generated SYS_stat alias to repoint like 0010 did for SYS_fstat; the
@@ -199,7 +212,7 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
  
  /* Mirror of <thylacine/syscall.h> struct t_stat (the 0010 hand-rolled
   * shape; only its own size assert below checks this copy). */
-@@ -66,6 +70,9 @@
+@@ -66,6 +71,9 @@
  	unsigned i;
  
  	if (!path || !st) return __syscall_ret(-EFAULT);
@@ -209,7 +222,7 @@ openat() dropped O_NOFOLLOW, O_PATH and O_DIRECTORY. Now:
  
  	/* fstatat(fd, "", st, AT_EMPTY_PATH) == fstat(fd): ride the
  	 * 0010-patched SYS_fstat arm. */
-@@ -78,12 +85,14 @@
+@@ -78,12 +86,14 @@
  	if (path[0] != '/' && fd != AT_FDCWD)
  		return __syscall_ret(-ENOSYS);
  

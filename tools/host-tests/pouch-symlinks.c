@@ -145,8 +145,8 @@ int main(void) {
  reset(); fstat_mode = S_IFDIR; CASE("open-opath-beats-creat-directory", tested_openat(AT_FDCWD, "d", O_PATH | O_CREAT | O_DIRECTORY, 0644) == 7 && args[0][3] == (long)POUCH_OPATH);
  reset(); CASE("open-creat-directory-einval", tested_openat(AT_FDCWD, "d", O_RDWR | O_CREAT | O_DIRECTORY, 0644) == -1 && errno == EINVAL && calls == 0 && parent_calls == 0);
  /* O_DIRECTORY without O_NOFOLLOW: the kernel's trailing-slash gate. */
- reset(); fstat_mode = S_IFDIR; CASE("open-directory-slash", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY) == 7 && strcmp(paths[0], "d/") == 0 && args[0][2] == 2);
- reset(); fstat_mode = S_IFDIR; CASE("open-directory-slash-once", tested_openat(AT_FDCWD, "d/", O_RDONLY | O_DIRECTORY) == 7 && strcmp(paths[0], "d/") == 0 && args[0][2] == 2);
+ reset(); fstat_mode = S_IFDIR; CASE("open-directory-slash", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY) == 7 && strcmp(paths[0], "d/") == 0 && args[0][2] == 2 && fstat_calls == 0);
+ reset(); fstat_mode = S_IFDIR; CASE("open-directory-slash-once", tested_openat(AT_FDCWD, "d/", O_RDONLY | O_DIRECTORY) == 7 && strcmp(paths[0], "d/") == 0 && args[0][2] == 2 && fstat_calls == 0);
  reset(); r_open = -ENOTDIR; CASE("open-directory-gate-errno", tested_openat(AT_FDCWD, "f", O_RDONLY | O_DIRECTORY) == -1 && errno == ENOTDIR && fstat_calls == 0);
  reset(); fstat_mode = S_IFREG; CASE("open-directory-no-room", tested_openat(AT_FDCWD, full, O_RDONLY | O_DIRECTORY) == -1 && errno == ENOTDIR && args[0][2] == (long)POUCH_PATH_MAX && closed(7));
  /* With O_NOFOLLOW no slash is added, and the descriptor is checked after it opens. */
@@ -154,6 +154,15 @@ int main(void) {
  reset(); fstat_mode = S_IFDIR; CASE("open-directory-nofollow-dir", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY | O_NOFOLLOW) == 7 && fstat_calls == 1 && count(SYS_close) == 0);
  reset(); fstat_mode = S_IFLNK; CASE("open-directory-opath-nofollow-link", tested_openat(AT_FDCWD, "l", O_PATH | O_DIRECTORY | O_NOFOLLOW) == -1 && errno == ENOTDIR && strcmp(paths[0], "l") == 0 && closed(7));
  reset(); fstat_errno = EACCES; CASE("open-directory-fstat-fails", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY | O_NOFOLLOW) == -1 && errno == EACCES && closed(7));
+ /* EBADF from that fstat: a peer closed the number, which may be another thread's now. */
+ reset(); fstat_errno = EBADF; CASE("open-directory-fstat-ebadf", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY | O_NOFOLLOW) == -1 && errno == EBADF && count(SYS_close) == 0);
+ /* O_TRUNC beside O_DIRECTORY is never sent, so no refusal truncates; a directory is EISDIR. */
+ reset(); fstat_mode = S_IFREG; CASE("open-directory-nofollow-trunc-file", tested_openat(AT_FDCWD, "f", O_WRONLY | O_DIRECTORY | O_TRUNC | O_NOFOLLOW) == -1 && errno == ENOTDIR && !(args[0][3] & (long)POUCH_OTRUNC) && closed(7));
+ reset(); fstat_mode = S_IFREG; CASE("open-directory-no-room-trunc", tested_openat(AT_FDCWD, full, O_WRONLY | O_DIRECTORY | O_TRUNC) == -1 && errno == ENOTDIR && !(args[0][3] & (long)POUCH_OTRUNC) && closed(7));
+ reset(); CASE("open-directory-trunc-eisdir", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY | O_TRUNC) == -1 && errno == EISDIR && strcmp(paths[0], "d/") == 0 && !(args[0][3] & (long)POUCH_OTRUNC) && fstat_calls == 0 && closed(7));
+ reset(); fstat_mode = S_IFDIR; CASE("open-directory-nofollow-trunc-dir", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY | O_TRUNC | O_NOFOLLOW) == -1 && errno == EISDIR && fstat_calls == 1 && closed(7));
+ reset(); r_open = -ENOTDIR; CASE("open-directory-trunc-gate", tested_openat(AT_FDCWD, "f", O_RDWR | O_DIRECTORY | O_TRUNC) == -1 && errno == ENOTDIR && !(args[0][3] & (long)POUCH_OTRUNC) && count(SYS_close) == 0);
+ reset(); CASE("open-trunc-still-sent", tested_openat(AT_FDCWD, "f", O_WRONLY | O_TRUNC) == 7 && (args[0][3] & (long)POUCH_OTRUNC) && fstat_calls == 0);
  /* The check precedes close-on-exec: a refused descriptor is never flagged. */
  reset(); fstat_mode = S_IFREG; CASE("open-directory-before-cloexec", tested_openat(AT_FDCWD, "f", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) == -1 && errno == ENOTDIR && count(SYS_thyla_handle_flags_set) == 0);
  reset(); fstat_mode = S_IFDIR; CASE("open-directory-cloexec", tested_openat(AT_FDCWD, "d", O_RDONLY | O_DIRECTORY | O_CLOEXEC) == 7 && count(SYS_thyla_handle_flags_set) == 1);
