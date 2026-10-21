@@ -6,6 +6,7 @@
 
 #include <thylacine/9p_client.h>
 #include <thylacine/cons.h>
+#include <thylacine/errno.h>    // T_E_BADF: map_error folds a server's EBADF
 #include <thylacine/extinction.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
@@ -116,6 +117,10 @@ static int map_error(int session_send_rc, int exchange_rc,
         // as a fact by a second author, who then asserted in `dev9p_stat_native`
         // that -1 could never arrive here.
         if (r->ecode == 0 || r->ecode > 4095u) return -P9_E_IO;
+        // Only the kernel's handle gate answers EBADF (docs/ERRORS.md). A
+        // server's EBADF is a verdict on its own fid; passed through, it would
+        // tell the caller that a live fd names nothing.
+        if (r->ecode == T_E_BADF) return -P9_E_IO;
         return -(int)r->ecode;
     }
     return 0;

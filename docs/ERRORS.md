@@ -389,7 +389,8 @@ The original staged policy still holds for NEW syscalls:
 errno almost always already exists at the failure source — it is only
 *discarded* on the way up:
 - The 9P client (`kernel/9p_client.c`) already returns `-(int)ecode` from
-  an `Rlerror` (I-14 bounds the hostile ecode), and the errno values are
+  an `Rlerror` (I-14 bounds the hostile ecode; `EBADF` reads `EIO`, per the
+  binding rule below), and the errno values are
   POSIX-aligned (`T_E_NOENT == 2 == ENOENT == the 9P ecode`), so a
   Stratum `ENOENT`/`EEXIST` arrives intact — the Dev layer just dropped it
   by collapsing `dev9p_*` to `NULL`/`-1`.
@@ -410,6 +411,18 @@ errno almost always already exists at the failure source — it is only
   symbolic constant only.
 - Reserve a bare `-1` for a *truly generic / unclassifiable* failure. When
   the cause is known, return the specific `-T_E_<NAME>`.
+- **Only the kernel's handle gate answers `EBADF`** (operator vote
+  2026-10-21 #16). `EBADF` tells the caller that its descriptor names
+  nothing. A 9P server's `EBADF` is a verdict on the server's own fid, and
+  the caller's descriptor is live, so the 9P client reads an `Rlerror` ecode
+  9 as `-T_E_IO` (`map_error`, the one place an ecode becomes an errno).
+  This covers every path a server's errno takes: `read`, `write`, `fsync`
+  and `close` on an open file, every call the resolver runs (`SYS_OPEN`,
+  `SYS_STAT`, `SYS_LSTAT`, `SYS_READLINK`, create), and `SYS_ATTACH_9P` /
+  `SYS_ATTACH_9P_SRV` beside the caller's server descriptor. Every other
+  server errno still crosses as itself. Plan 9 and Linux's v9fs pass a
+  server's error through unchanged; this rule is Thylacine's own, and no
+  kernel or library code reads a server's `EBADF`.
 - **Backward-compatible**: native `libthyla-rs`/`libt` callers test `r < 0`
   — a `-2`/`-17` is still `< 0`, so no native consumer regresses; pouch
   and Go observe the *correct* POSIX errno instead of `EIO`/`EPERM`.
@@ -454,7 +467,9 @@ trigger surfaces; self + Fable audit before the arc closes):
   Spoor, `-T_E_FAULT` for the destination, and a Dev's refusal mapped as the
   resolver maps it (a `-errno` in [-4095,-2] as itself, else `-T_E_IO`),
   except that a Dev's `-T_E_BADF` reads `-T_E_IO`: the handle is live, and
-  `SYS_FSTAT`'s `EBADF` means only that the handle names nothing.
+  `SYS_FSTAT`'s `EBADF` means only that the handle names nothing. (A 9P
+  server's `EBADF` already arrives as `-T_E_IO`; the client folds it, per
+  the binding rule above.)
   `SYS_READDIR`, `SYS_WSTAT` and `SYS_CHDIR` still answer a bare `-1` at most
   refusals (OPEN-BUGS 2026-10-20 08:24Z): `SYS_WSTAT`'s denial is POSIX's
   `EPERM`, which the `-1` alias forbids, and `SYS_CHDIR`'s over-long path

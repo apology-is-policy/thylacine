@@ -118,7 +118,8 @@ One function per op, `0` on success / `-errno` on failure:
 Error convention: `-EINVAL` bad args/magic · `-EBUSY` not-OPEN · `-EIO`
 lower-layer failure · `-<ecode>` the server's Rlerror ecode, **bounded to
 `[1,4095]` (Linux `MAX_ERRNO`) before negation** and otherwise collapsed to
-`-EIO` (`map_error`); callers of Stratum-extension surfaces may still need
+`-EIO` (`map_error`), except EBADF, which reads `-EIO` (only the kernel's
+handle gate answers EBADF); callers of Stratum-extension surfaces may still need
 to translate the in-range `STM_E*` codes. `-P9_E_INTR` (EINTR) means a caught
 note interrupted the op AND the server's `Rflush` confirmed it cancelled, so
 the op had no effect (flush(5)); an op whose reply beat that `Rflush` returns
@@ -636,6 +637,19 @@ total wake (I-9); `alloc_tag`/`clear_outstanding` + the
   `Rlerror(ecode=0)`-as-success corner into `-EIO`. I-14's hostile-ecode
   bound is realised here, not deferred to dev9p (the A-3c audit F1 fix; the
   sibling wire codec [[sub-kernel-ninep-wire]] asserts the same bound).
+  **A server's EBADF (ecode 9) reads `-EIO`** (operator vote 2026-10-21 #16,
+  `docs/ERRORS.md`'s binding rule "only the kernel's handle gate answers
+  EBADF"). The server means its own fid, while the caller's descriptor is
+  live, so passed through it would read as the handle gate's verdict. Every
+  server errno reaches an errno at `map_error` and nowhere else, at all three
+  sites (the sync op, the handshake, the async completion), so one test
+  covers every path: read, write, fsync and close on an open file, the
+  resolver's calls (open, stat, lstat, readlink, create) and the attach
+  beside a srv fd. `9p_client.rlerror_ebadf_reads_eio` reads ecode 9 as
+  `-EIO` and its neighbours 8 and 10 as themselves;
+  `p9_attached.handshake_rlerror_ebadf_reads_eio` and
+  `dev9p.wb_server_ebadf_reads_eio` (a flush Twrite answered EBADF: the
+  fsync and the close read EIO) cover the attach and an open file.
 - Congestion is NOT an error path: EAGAIN → spill/pump/park/retry; a
   stopped reader → role release, no latch; a dying owner → Tflush or the
   abandoned-bit reclaim; a caught note → Tflush and a killable wait for the
@@ -763,7 +777,9 @@ the reader unwinds at any byte).
 4. Rlerror ecodes are bounded to `[1,4095]` here (`map_error`) before
    negation — NOT passed through unbounded — yielding the `[-4095,-1]`
    passthrough window; a zero or out-of-range ecode collapses to `-EIO`
-   (A-3c F1, closing the `-(int)0x80000000` signed-overflow UB).
+   (A-3c F1, closing the `-(int)0x80000000` signed-overflow UB), and so
+   does EBADF (vote 2026-10-21 #16: only the kernel's handle gate answers
+   it).
 5. No retry/reconnect — a dead session stays dead until destroy + re-init.
 6. Callers do NOT serialize (the old serial client's external-serialization
    contract is retired); the client serializes internally.

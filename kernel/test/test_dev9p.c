@@ -76,6 +76,7 @@ void test_dev9p_wb_coalesce_one_twrite(void);
 void test_dev9p_wb_overlay_read(void);
 void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_server_ebadf_reads_eio(void);
 void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_dying_wstat_keeps_staging(void);
@@ -3525,6 +3526,30 @@ void test_dev9p_wb_fsync_flush_and_error(void) {
     TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-28,
                    "the last close returns the latched errno too");
     wb_test_end(root);
+}
+
+// Only the kernel's handle gate answers EBADF (docs/ERRORS.md): a flush
+// Twrite the server answers EBADF surfaces on the LIVE file's fsync, and on
+// its close, as EIO. The control, one variable away, is
+// wb_fsync_flush_and_error: its ENOSPC crosses as itself.
+void test_dev9p_wb_server_ebadf_reads_eio(void) {
+    struct Spoor *root = NULL;
+    struct Spoor *f = wb_make_created(&root);
+    TEST_ASSERT(f != NULL, "create");
+    u8 *chunk = wb_scratch();
+    TEST_ASSERT(chunk != NULL, "scratch");
+    for (u32 i = 0; i < 256; i++) chunk[i] = wb_pat(i);
+    wb_wire_reset();
+    long we = dev9p.write(f, chunk, 256, 0);
+    g_twrite_fail_ecode = T_E_BADF;
+    long fe = dev9p.fsync(f, 0);
+    g_twrite_fail_ecode = 0;
+    int crc = spoor_clunk_rc(f);
+    wb_test_end(root);
+
+    TEST_EXPECT_EQ((u64)we, 256ull, "stage");
+    TEST_EXPECT_EQ((u64)(-fe), (u64)T_E_IO, "a server's EBADF on the flush reads EIO");
+    TEST_EXPECT_EQ((u64)(s64)crc, (u64)(s64)-T_E_IO, "the close returns the latched EIO");
 }
 
 // The close flush's failure is the close's result. The control, one variable

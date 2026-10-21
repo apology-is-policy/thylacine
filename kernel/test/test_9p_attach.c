@@ -22,6 +22,7 @@
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
+void test_p9_attached_handshake_rlerror_ebadf_reads_eio(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
@@ -119,10 +120,11 @@ static int attach_responder(void *ctx, const u8 *req, size_t req_len,
 }
 
 // Responder that surfaces Rlerror for Tattach (Tversion succeeds first).
-// Used to test handshake-failure cleanup.
+// Used to test handshake-failure cleanup. The ecode is *(u32 *)ctx, or 13
+// (EACCES) when ctx is NULL.
 static int handshake_fail_responder(void *ctx, const u8 *req, size_t req_len,
                                        u8 *resp, size_t resp_cap) {
-    (void)ctx;
+    const u32 ecode = ctx ? *(const u32 *)ctx : 13u;
     if (req_len < P9_HDR_LEN) return -1;
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
@@ -131,13 +133,15 @@ static int handshake_fail_responder(void *ctx, const u8 *req, size_t req_len,
         return attach_responder(ctx, req, req_len, resp, resp_cap);
     }
     if (type == P9_TATTACH) {
-        // Return Rlerror with ecode=13 (EACCES).
         size_t total = P9_HDR_LEN + 4;
         if (resp_cap < total) return -1;
         resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RLERROR;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
-        resp[7] = 13; resp[8] = 0; resp[9] = 0; resp[10] = 0;
+        resp[7]  = (u8)(ecode & 0xff);
+        resp[8]  = (u8)((ecode >> 8) & 0xff);
+        resp[9]  = (u8)((ecode >> 16) & 0xff);
+        resp[10] = (u8)((ecode >> 24) & 0xff);
         return (int)total;
     }
     return -1;
@@ -216,6 +220,30 @@ void test_p9_attached_handshake_failure_returns_null(void) {
     // No leak — p9_attached_create cleaned up the half-built client +
     // buffers on the handshake failure. Verifiable indirectly:
     // subsequent attempts to allocate succeed.
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Only the kernel's handle gate answers EBADF (docs/ERRORS.md): a server's
+// Tattach EBADF reaches SYS_ATTACH_9P, beside the caller's live srv fd, as
+// -EIO. The control, one variable away, is handshake_failure_returns_null:
+// the same responder's EACCES crosses as itself.
+void test_p9_attached_handshake_rlerror_ebadf_reads_eio(void) {
+    static u32 ecode = T_E_BADF;
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                handshake_fail_responder, &ecode);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (EBADF attach)");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    int aerr = 0;
+    struct p9_attached *a = p9_attached_create(
+        p9_loopback_ops_for(&g_loopback),
+        4096, 0, 8192,
+        uname, sizeof(uname), aname, sizeof(aname), 0, &aerr);
+    TEST_ASSERT(a == NULL, "attach fails on the Tattach Rlerror");
+    TEST_EXPECT_EQ((s64)aerr, (s64)(-P9_E_IO),
+                   "a server's Tattach EBADF reads -EIO");
     p9_loopback_destroy(&g_loopback);
 }
 

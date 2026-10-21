@@ -812,7 +812,9 @@ void p9_client_mark_devgone(struct p9_client *c);
 //             Loom device-gone terminal (MENAGERIE.md section 10); maps
 //             to the CQE -T_E_NODEV. Only the async (POST_CQE) completion
 //             path carries it -- the sync front-end keeps -EIO.
-//   -<n>    — Rlerror surface: n = the Linux errno the server returned.
+//   -<n>    — Rlerror surface: n = the Linux errno the server returned,
+//             except EBADF, which reads -EIO (only the kernel's handle gate
+//             answers EBADF).
 // =============================================================================
 
 #define P9_E_OK       0

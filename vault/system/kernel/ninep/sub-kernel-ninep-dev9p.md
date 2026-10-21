@@ -610,8 +610,11 @@ resolver's `err_code` names that value, so the frame below knew it before the
 frame above. stalk's `err_code` for `*errp` (ER-1) and `sys_fstat_for_proc`'s
 return (ER-2, 2026-10-20) map the arm's answer alike: a -errno in `[-4095,-2]`
 crosses as itself, and the `-1`, a server EPERM included, reads `-T_E_IO`.
-The fstat core also reads a server EBADF as `-T_E_IO`, because the handle it
-holds is live; through stalk a server EBADF still crosses as itself.
+A server's EBADF never reaches the arm: the client reads it as `-EIO` at
+`map_error` (vote 2026-10-21 #16), so stalk and fstat both see `-T_E_IO`.
+`dev9p.wb_server_ebadf_reads_eio` drives it through an open file: a flush
+Twrite the server answers EBADF makes the fsync and the close read EIO, and
+`wb_fsync_flush_and_error`, whose ENOSPC crosses as itself, is the control.
 [[seam-fstat-errno-flattened-above-the-leaf]] records the comment's earlier
 claim that both callers propagated, when the fstat half flattened to `-1`.
 

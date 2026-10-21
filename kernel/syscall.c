@@ -2120,9 +2120,9 @@ u64 spoor_file_size(struct Spoor *c) {
 // it, so fstat and stat answer one object's failure alike: a real -errno in
 // [-4095,-2] crosses as itself, and the generic -1 (no stat_native slot, or a
 // Dev's flat failure -- the value a server EPERM also arrives as) reads -T_E_IO.
-// The one exception is a Dev's -T_E_BADF: the handle is live here, so a 9P
-// server's EBADF (a verdict on its own fid) reads -T_E_IO, and EBADF from fstat
-// always means the number names nothing.
+// The one exception is a Dev's -T_E_BADF: the handle is live here, so it reads
+// -T_E_IO, and EBADF from fstat always means the number names nothing. (A 9P
+// server's EBADF already arrives as -T_E_IO: the client folds it at map_error.)
 // The phenotype returns this verbatim, so a Linux guest sees the same errno.
 s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k);
 s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {

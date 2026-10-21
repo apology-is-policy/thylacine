@@ -27,8 +27,9 @@ closed or out-of-range slot and a handle of another kind. A failure from
 `stat` answer one object's failure alike: a -errno in [-4095,-2] crosses as
 itself, and anything else (a NULL `stat_native`, a Dev's flat -1, a server
 EPERM arriving as -1) reads -T_E_IO. The one exception is a Dev's -T_E_BADF,
-which also reads -T_E_IO: the handle is live at that point, so a 9P server's
-EBADF about its own fid cannot pass for the handle gate's verdict, and an
+which also reads -T_E_IO: the handle is live at that point, so a Dev's EBADF
+cannot pass for the handle gate's verdict (a 9P server's never arrives: the
+client folds it at `map_error`, vote 2026-10-21 #16), and an
 EBADF from fstat always means the number names nothing (round 1 F1: Pouch's
 `O_DIRECTORY` unwind and its ioctl refusal both rely on that). The core's
 `!p` and `!out_k` guards and the handler's `!t` and `!p` still answer -1; no

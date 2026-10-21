@@ -1823,6 +1823,7 @@ void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_rlerror_hostile_ecode_bounded(void);
+void test_9p_client_rlerror_ebadf_reads_eio(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
@@ -2032,6 +2033,7 @@ void test_dev9p_wb_coalesce_one_twrite(void);
 void test_dev9p_wb_overlay_read(void);
 void test_dev9p_wb_flush_at_close(void);
 void test_dev9p_wb_fsync_flush_and_error(void);
+void test_dev9p_wb_server_ebadf_reads_eio(void);
 void test_dev9p_wb_close_returns_flush_error(void);
 void test_dev9p_wb_dying_flush_keeps_run(void);
 void test_dev9p_wb_dying_wstat_keeps_staging(void);
@@ -2052,6 +2054,7 @@ void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
+void test_p9_attached_handshake_rlerror_ebadf_reads_eio(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
@@ -4237,6 +4240,9 @@ struct test_case g_tests[] = {
     { "9p_client.rlerror_hostile_ecode_bounded",
                                        test_9p_client_rlerror_hostile_ecode_bounded,
                                                                            false, NULL },
+    { "9p_client.rlerror_ebadf_reads_eio",
+                                       test_9p_client_rlerror_ebadf_reads_eio,
+                                                                           false, NULL },
     { "9p_client.op_before_handshake_returns_ebusy",
                                        test_9p_client_op_before_handshake_returns_ebusy,
                                                                            false, NULL },
@@ -4535,6 +4541,7 @@ struct test_case g_tests[] = {
     { "dev9p.wb_overlay_read",         test_dev9p_wb_overlay_read,             false, NULL },
     { "dev9p.wb_flush_at_close",       test_dev9p_wb_flush_at_close,           false, NULL },
     { "dev9p.wb_fsync_flush_and_error", test_dev9p_wb_fsync_flush_and_error,   false, NULL },
+    { "dev9p.wb_server_ebadf_reads_eio", test_dev9p_wb_server_ebadf_reads_eio, false, NULL },
     { "dev9p.wb_close_returns_flush_error", test_dev9p_wb_close_returns_flush_error, false, NULL },
     { "dev9p.wb_dying_flush_keeps_run", test_dev9p_wb_dying_flush_keeps_run, false, NULL },
     { "dev9p.wb_dying_wstat_keeps_staging", test_dev9p_wb_dying_wstat_keeps_staging, false, NULL },
@@ -4563,6 +4570,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "p9_attached.handshake_rlerror_ecode_overflow_clamped",
                                        test_p9_attached_handshake_rlerror_ecode_overflow_clamped,
+                                                                           false, NULL },
+    { "p9_attached.handshake_rlerror_ebadf_reads_eio",
+                                       test_p9_attached_handshake_rlerror_ebadf_reads_eio,
                                                                            false, NULL },
     { "p9_attached.root_spoor_walk_read",
                                        test_p9_attached_root_spoor_walk_read,

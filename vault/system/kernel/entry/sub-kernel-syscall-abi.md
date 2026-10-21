@@ -31,6 +31,14 @@ A Dev's -EBADF reads -EIO too, since the handle is live, so -EBADF from
 SYS_FSTAT always means the handle names nothing. No number, record or layout
 changes.
 
+A 9P server's EBADF reads -EIO on every call that reaches a server (operator
+vote 2026-10-21 #16; `docs/ERRORS.md`: only the kernel's handle gate answers
+EBADF). The 9P client folds it where an Rlerror ecode becomes an errno, so
+read, write, fsync and close on an open file, the resolver's calls (SYS_OPEN,
+SYS_STAT, SYS_LSTAT, SYS_READLINK, the create arm) and SYS_ATTACH_9P /
+SYS_ATTACH_9P_SRV all answer -EIO where they answered -EBADF. Every other
+server errno crosses as itself. No number, record or layout changes.
+
 Mirrors: the libt and Rust wrapper comments say 0 / -errno, and libthyla-rs's
 `Error::from_syscall_return` reads -9 as `BadHandle`. Pouch's `fstat` passes
 the errno through (0061, [[sub-pouch-fs]]), and the phenotype's fstat returns

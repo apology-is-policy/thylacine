@@ -56,6 +56,7 @@ void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_rlerror_hostile_ecode_bounded(void);
+void test_9p_client_rlerror_ebadf_reads_eio(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
@@ -789,6 +790,43 @@ void test_9p_client_rlerror_hostile_ecode_bounded(void) {
     g_rlerror_ecode = 4095;
     rc = p9_client_walk_one(&g_client, 0, 8, (const u8 *)"x", 1, NULL);
     TEST_EXPECT_EQ(rc, -4095, "ecode 4095 passes through");
+
+    g_rlerror_ecode = 2;
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Only the kernel's handle gate answers EBADF (docs/ERRORS.md): map_error
+// reads a server's ecode 9 as -EIO. Its neighbours, 8 and 10, cross as
+// themselves, so the fold is one value wide.
+void test_9p_client_rlerror_ebadf_reads_eio(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                rlerror_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (EBADF rlerror)");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    rc = p9_client_handshake(&g_client, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+    TEST_EXPECT_EQ(rc, 0, "handshake ok");
+
+    g_rlerror_ecode = T_E_BADF;
+    rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -P9_E_IO, "a server's EBADF reads -EIO");
+
+    g_rlerror_ecode = T_E_BADF - 1;
+    rc = p9_client_walk_one(&g_client, 0, 6, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -(int)(T_E_BADF - 1), "ecode 8 crosses as itself");
+
+    g_rlerror_ecode = T_E_BADF + 1;
+    rc = p9_client_walk_one(&g_client, 0, 7, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -(int)(T_E_BADF + 1), "ecode 10 crosses as itself");
 
     g_rlerror_ecode = 2;
     p9_client_destroy(&g_client);

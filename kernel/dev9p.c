@@ -971,9 +971,9 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     //
     // Both callers apply one mapping to it: stalk's `err_code` for `*errp`
     // (ER-1) and `sys_fstat_for_proc`'s return (ER-2). A -errno in [-4095,-2]
-    // crosses as itself; the -1, a server EPERM included, reads -T_E_IO. The
-    // fstat core also reads a server EBADF as -T_E_IO: the handle it holds is
-    // live, and EBADF from fstat must mean the number names nothing.
+    // crosses as itself; the -1, a server EPERM included, reads -T_E_IO. A
+    // server's EBADF never arrives here: map_error reads it as -P9_E_IO, since
+    // only the kernel's handle gate answers EBADF.
     int gr = p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr);
     if (gr != 0)
         return gr;

@@ -514,7 +514,9 @@ The stall transport wraps the mq loopback and declares no `hangup` (ARCH
 backend has none to forward, so its server learns of a death at the close.
 
 `kernel/test/test_9p_attach.c` (`p9_attached.*`): lifecycle,
-handshake-failure cleanup (the OOM/rollback ladder), root-walk-read
+handshake-failure cleanup (the OOM/rollback ladder), the handshake's Rlerror
+ecode (EACCES crosses as itself; a server's EBADF reads `-EIO`,
+`handshake_rlerror_ebadf_reads_eio`, vote 2026-10-21 #16), root-walk-read
 composition, and `p9_attached.walked_outlives_root_no_uaf` — the F236
 regression (close the root BEFORE the walks; pre-fix UAF'd on the walked
 clunk). `test_9p_srvconn_transport.c::kernel_attached_skips_teardown_on_handle_close`
