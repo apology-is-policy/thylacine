@@ -216,10 +216,53 @@ needed the operator.
   restored", and the ported test comment called the null-Proc unmap probe a
   behaviour pin, which main's wrapper (it reads `p->as` right after the
   guard) makes a guard pin.
-- *Open at this entry:* nothing has been built or run. Owed: the Fable 5.1
-  audit round on the adapted form (main counts it as the review), the specs
-  above, and the gate main named on 0232 (default `test.sh` with zero FAIL,
-  `test-fault.sh`, the ci suite, UBSan, `ci-smp-gate` N=10).
+- *Gate*, written after the land: main's five legs from 0232, every one on
+  `107c5c1bd`. corona's scripts and logs are in its `work/oct19-asr9/`.
+  Default, ci and UBSan suites 2005/2005 (main's 2000 and the five): no FAIL
+  line, no extinction, the five AS-R9 tests PASS. `test-fault.sh` 8/8.
+  Kernels: default = ci `0bd67a7c2b57`, UBSan `2a4b8dee30d0`. `ci-smp-gate.sh`
+  N=10 ran in two parts. default-smp1 and default-smp4 went 10/10 each under
+  corona's lease; the operator stopped that run at 11:15Z, eight boots into
+  default-smp8. default-smp8, ubsan-smp4 and ubsan-smp8 then went 10/10 each
+  under main's lease (21:54-22:38Z, on a detached checkout of `107c5c1bd`).
+  Every row: 0 corruption, 0 external-kill, 0 timing, 0 other. The specs ran
+  on the committed content (every spec file's last write predates the run,
+  and the tree is clean at `107c5c1bd`). `check-burrow.sh` is ALL AS CLAIMED:
+  clean 100 states, the three old buggy cfgs on `NoUseAfterFree`,
+  `burrow_buggy_claim_restore` on `NoRecordAfterFree`, `_ledger` on
+  `RefundExactlyOnce`. `check-capacity.sh` is ALL AS CLAIMED. Pins: Stratum
+  `7dd103d`, checked after every build. The shared go fork (unpinned) read
+  `f67e51e66`, clean, at the start of each corona run and before and after
+  main's.
+- *Two of corona's run records are wrong, and say so here.* The first SMP
+  attempt never booted: `ci-smp-gate.sh`'s UBSan rebuild met `build.sh`'s
+  6 GiB floor at 5982 MiB free. The operator had corona's old AS-R9 gate
+  inputs deleted rather than lower the floor (2026-10-19). That run's
+  `stages.txt` ends "exit 0": its EXIT trap read `$?` after
+  `kill ... || true` had replaced it, and the real status was 1. The re-run's
+  trap took the status first, and its `stages.txt` still ends "exit 0",
+  because the run was killed. Killed by TERM, `/bin/sh` (bash 3.2) runs the
+  EXIT trap with `$?` holding the last COMPLETED command's status. Measured
+  2026-10-21: a TERM to a script waiting on a subshell records "exit 0"
+  where the process exits 143; a TERM trap that exits 143 makes the record
+  true. Neither record says SMP GREEN. The verdict above comes from each
+  row's own summary line.
+- *Landed.* main fast-forwarded `115465888` -> `107c5c1bd` on 2026-10-19 and
+  pushed both mirrors (ls-remote github and codeberg, yip 0232 note 2).
+- *Docs twins, after the land.* corona's vote-13 audit (Fable 5.1) found the
+  rule this backport retires still written as the rule. ARCH 25.4's
+  resource-floor row, the copy AUDIT-TRIGGERS row 107 names as the
+  authoritative prosecution copy, said "callers claim BEFORE the drop" and
+  "restore must only ever run where the Burrow provably survives (`!freed`
+  ...)", and it named `burrow_is_shared_out`, deleted above. main's tree
+  carries the same row. The operator voted to amend both trees. The row and
+  its AUDIT-TRIGGERS copy now state that the claim is taken inside the drop,
+  and why the old order was a use-after-free write; they also fold in the
+  note `cb6722ddd` had appended. The same commit restates the two
+  `sub-kernel-syscall-dispatch` sentences ("claim before drop" and the ANON
+  arm's "claim-before-drop attribution"). It also teaches the `spec-burrow`
+  note the charge record: it pins I-32, lists the two new cfgs, and maps
+  `Settle` and the buggy actions to code. It changes no build input.
 
 ## 2026-10-14 (main, Opus 5.5, effort max) -- SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
 
