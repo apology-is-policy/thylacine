@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise Pouch's raw opens (musl's sys_open family), __map_file and fopen with a mocked kernel."""
+"""Exercise Pouch's raw opens (musl's sys_open family), __map_file and fopen with a mocked kernel and the series' own __syscall_ret."""
 if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse,hashlib,json,platform,re,subprocess
 from pathlib import Path
+from pouch_seam import stage_syscall_ret
 UPSTREAM_OPEN='''#ifdef SYS_open
 #define __sys_open2(x,pn,fl) __syscall2(SYS_open, pn, (fl)|O_LARGEFILE)
 #define __sys_open3(x,pn,fl,mo) __syscall3(SYS_open, pn, (fl)|O_LARGEFILE, mo)
@@ -62,6 +63,7 @@ for source in ['src/stdio/__fopen_rb_ca.c','src/stdio/tmpfile.c']:
  code=re.sub(r'(?s)/\*.*?\*/','',text(source))
  ok=code.count('sys_open(')==1 and not re.findall(r'(?<![\w])open\s*\(',code)
  print('%s source-%s'%('PASS' if ok else 'FAIL',Path(source).stem));pin_failures+=not ok
+stage_syscall_ret(a.musl,a.output,a.cc,inputs)
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
 for opt in ('0','2'):

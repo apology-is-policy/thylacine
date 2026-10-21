@@ -8,7 +8,8 @@ static int calls, failures, checks;
 /* The seam's answer for the 0xFFFF sentinel (P-3), counted so a trap shows; only a trapping libc calls it. */
 __attribute__((unused)) static long sys_any(long n, ...) { (void)n; calls++; return -ENOSYS; }
 #define __syscall(...) sys_any(__VA_ARGS__)
-static long __syscall_ret(unsigned long r) { if (r > -4096UL) { errno = -(long)r; return -1; } return (long)r; }
+/* The series' own decoder (src/internal/syscall_ret.c): a -1 reads EIO, as on the device. */
+#include "syscall-ret-under-test.c"
 #define syscall(...) __syscall_ret(__syscall(__VA_ARGS__))
 #define link tested_link
 #define linkat tested_linkat

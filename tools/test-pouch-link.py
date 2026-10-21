@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Exercise Pouch link and linkat with a mocked kernel."""
+"""Exercise Pouch link and linkat with a mocked kernel and the series' own __syscall_ret."""
 if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse,hashlib,json,platform,re,subprocess
 from pathlib import Path
+from pouch_seam import stage_syscall_ret
 MUTANTS={
- 'link-traps':('link.c','return __syscall_ret(-EPERM);','return syscall(SYS_linkat, AT_FDCWD, existing, AT_FDCWD, new, 0);'),
- 'linkat-traps':('linkat.c','return __syscall_ret(-EPERM);','return syscall(SYS_linkat, fd1, existing, fd2, new, flag);'),
- 'link-emlink':('link.c','return __syscall_ret(-EPERM);','return __syscall_ret(-EMLINK);'),
+ 'link-traps':('link.c','\terrno = EPERM;\n\treturn -1;','return syscall(SYS_linkat, AT_FDCWD, existing, AT_FDCWD, new, 0);'),
+ 'linkat-traps':('linkat.c','\terrno = EPERM;\n\treturn -1;','return syscall(SYS_linkat, fd1, existing, fd2, new, flag);'),
+ 'link-emlink':('link.c','\terrno = EPERM;\n\treturn -1;','return __syscall_ret(-EMLINK);'),
  'linkat-any-flag':('linkat.c','\tif (flag & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH))\n\t\treturn __syscall_ret(-EINVAL);\n',''),
+ 'link-eperm-via-seam':('link.c','\terrno = EPERM;\n\treturn -1;','return __syscall_ret(-EPERM);'),
+ 'linkat-eperm-via-seam':('linkat.c','\terrno = EPERM;\n\treturn -1;','return __syscall_ret(-EPERM);'),
  'linkat-no-empty-path':('linkat.c','flag & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)','flag & ~AT_SYMLINK_FOLLOW'),
 }
 p=argparse.ArgumentParser(description=__doc__);p.add_argument('musl',type=Path);p.add_argument('output',type=Path);p.add_argument('--cc',default='/opt/homebrew/opt/llvm/bin/clang');p.add_argument('--mutant',choices=sorted(MUTANTS));a=p.parse_args();r=Path(__file__).resolve().parent.parent
@@ -28,6 +31,7 @@ for source,dest in [('src/unistd/link.c','link-under-test.c'),('src/unistd/linka
  if m and source.endswith('/'+m[0]):
   assert s.count(m[1])==1,m;s=s.replace(m[1],m[2])
  (a.output/dest).write_text(s)
+stage_syscall_ret(a.musl,a.output,a.cc,inputs)
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
 for opt in ('0','2'):

@@ -18,15 +18,19 @@ fontconfig takes its directory lock whether or not one is already held, so it
 recovers a stale lock with rmdir. Were EEXIST answered first, it would unlink
 the stale directory, fail, and never recover it (fcatomic.c FcAtomicLock).
 
+Both set errno themselves, as kill does (0057): -EPERM is -1, the flat
+error the seam reads as EIO (0001), so __syscall_ret(-EPERM) answers EIO.
+
 musl's one other caller, sem_open, never reaches link here: its MAP_SHARED
 map is refused first (0047).
 
 --- a/src/unistd/link.c
 +++ b/src/unistd/link.c
-@@ -1,12 +1,11 @@
+@@ -1,12 +1,13 @@
 +/* pouch boundary-line: Thylacine makes no hard links (operator vote 2026-10-21,
 + * docs/ERRORS.md "Hard links"). EPERM is Linux's answer for a filesystem that
-+ * cannot make one; neither path is read and nothing traps. */
++ * cannot make one; neither path is read and nothing traps. errno is set here:
++ * -EPERM is the flat -1 that __syscall_ret reads as EIO. */
  #include <unistd.h>
 -#include <fcntl.h>
 +#include <errno.h>
@@ -39,14 +43,15 @@ map is refused first (0047).
 -#else
 -	return syscall(SYS_linkat, AT_FDCWD, existing, AT_FDCWD, new, 0);
 -#endif
-+	return __syscall_ret(-EPERM);
++	errno = EPERM;
++	return -1;
  }
 --- a/src/unistd/linkat.c
 +++ b/src/unistd/linkat.c
-@@ -1,7 +1,15 @@
-+/* pouch boundary-line: no hard links, as link.c. A flag outside
-+ * AT_SYMLINK_FOLLOW | AT_EMPTY_PATH is EINVAL first, as on Linux; neither
-+ * descriptor nor path is read. */
+@@ -1,7 +1,16 @@
++/* pouch boundary-line: no hard links, as link.c (errno set here, as there). A
++ * flag outside AT_SYMLINK_FOLLOW | AT_EMPTY_PATH is EINVAL first, as on Linux;
++ * neither descriptor nor path is read. */
 +#define _BSD_SOURCE
  #include <unistd.h>
 +#include <fcntl.h>
@@ -58,5 +63,6 @@ map is refused first (0047).
 -	return syscall(SYS_linkat, fd1, existing, fd2, new, flag);
 +	if (flag & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH))
 +		return __syscall_ret(-EINVAL);
-+	return __syscall_ret(-EPERM);
++	errno = EPERM;
++	return -1;
  }

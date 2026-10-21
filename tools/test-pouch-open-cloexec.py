@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise Pouch openat's close-on-exec arms with a mocked kernel."""
+"""Exercise Pouch openat's close-on-exec arms with a mocked kernel and the series' own __syscall_ret."""
 if not __debug__:raise SystemExit(__file__+': run without -O or PYTHONOPTIMIZE: its verdicts are asserts')
 import argparse,hashlib,json,platform,re,subprocess
 from pathlib import Path
+from pouch_seam import stage_syscall_ret
 MUTANTS={
  'no-set':[('if (r >= 0 && (flags & O_CLOEXEC)) {','if (0) {')],
  'close-gone':[('if (s != -EBADF) __syscall(SYS_close, r);','__syscall(SYS_close, r);')],
@@ -21,6 +22,7 @@ for source,dest in [('src/internal/_pouch_fs.h','fs-under-test.h'),('src/interna
   for old,new in MUTANTS[a.mutant]:
    assert s.count(old)==1,(a.mutant,old);s=s.replace(old,new)
  (a.output/dest).write_text(s)
+stage_syscall_ret(a.musl,a.output,a.cc,inputs)
 (a.output/'inputs.json').write_text(json.dumps({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs},indent=2)+'\n')
 sdk=['-isysroot',subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()] if platform.system()=='Darwin' else []
 for opt in ('0','2'):

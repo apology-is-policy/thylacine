@@ -29,7 +29,8 @@ static long sys(long n, long a, long b, long c) {
 #define __syscall(...) CAT(sc,NARGS(__VA_ARGS__))(__VA_ARGS__)
 #define sc0(n) sys(n,0,0,0)
 #define sc3(n,a,b,c) sys(n,__scc(a),__scc(b),__scc(c))
-static long __syscall_ret(unsigned long r) { if (r > -4096UL) { errno = -(long)r; return -1; } return (long)r; }
+/* The series' own decoder (src/internal/syscall_ret.c): a -1 reads EIO, as on the device. */
+#include "syscall-ret-under-test.c"
 #define syscall(...) __syscall_ret(__syscall(__VA_ARGS__))
 int __pouch_sig_to_note(int sig, const char **out) {
  if (sig == SIGTERM) { *out = "term"; return 0; }

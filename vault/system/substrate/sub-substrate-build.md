@@ -312,7 +312,12 @@ entry frees; `df` is the measure.
 `tools/test-<name>.py` compiles the code it names from this tree beside
 `tools/host-tests/<name>.c` with mocked owners, and runs it under ASan and UBSan
 at -O0 and -O2; the native ones also pin the syscall numbers in every mirror and
-the phenotype's collision asserts. All eight were run by nothing until this
+the phenotype's collision asserts. A Pouch checker never mocks the seam's errno
+decoder: `tools/pouch_seam.py` stages the tree's own `src/internal/syscall_ret.c`
+(the two sentinel values its static assert pins come from the same tree, and a
+decoder without the flat -1 row is refused). Upstream musl's decoder reads -1
+as EPERM, and Pouch's reads it as EIO, so a wrapper that hands the seam -EPERM
+passes a mock and answers EIO on the device. All eight were run by nothing until this
 date, so a renumbered mirror could drift with every build green.
 `host_boundary_check` runs named drivers in parallel, each into a fresh
 `build/host-boundaries/<set>/<name>`, and stops the build with the failing

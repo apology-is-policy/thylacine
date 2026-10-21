@@ -37,7 +37,9 @@ Thylacine makes no hard links ([[dec-2026-10-21-pouch-link-eperm]]). `link`
 and `linkat` answer `EPERM`, Linux's errno for a filesystem that cannot make
 one, where the 0xFFFF sentinel answered `ENOSYS`. `linkat` refuses a flag
 outside `AT_SYMLINK_FOLLOW | AT_EMPTY_PATH` with `EINVAL` first, as Linux
-does. Neither call reads a path or a descriptor, and nothing traps: a missing
+does. Both set `errno` themselves, as `kill` does (0057): -EPERM is -1, the flat
+error the seam reads as EIO (0001), so `__syscall_ret(-EPERM)` would answer
+EIO. Neither call reads a path or a descriptor, and nothing traps: a missing
 source, an existing target and a bad descriptor all read `EPERM`, where Linux
 resolves the paths first and answers `ENOENT`, `EEXIST` or `EBADF`.
 fontconfig depends on that order. Its cache lock falls back to a directory
@@ -52,8 +54,10 @@ refused first (0047).
 `EPERM` again for a missing source and for an existing target, which is left
 the link it was, and `EINVAL` for `linkat(AT_SYMLINK_NOFOLLOW)`. The census
 line gains `hardlink` after `flags`. `tools/test-pouch-link.py` runs the real
-`link.c` and `linkat.c` over a mocked seam, with musl's `AT_` values: twelve
-checks, one of them every single flag bit, and five mutants.
+`link.c` and `linkat.c` over a mocked kernel and the series' own
+`__syscall_ret`, with musl's `AT_` values: twelve checks, one of them every
+single flag bit, and seven mutants, two of which hand -EPERM to the seam and
+read EIO.
 
 ## fstat answers EBADF for a dead descriptor (2026-10-20, 0061)
 

@@ -62,7 +62,8 @@ static long sys(long n, long a, long b, long c, long d, long e, long f) {
 #define __syscall_cp2(n,a,b) sc2(n,a,b)
 #define __syscall_cp3(n,a,b,c) sc3(n,a,b,c)
 #define __syscall_cp4(n,a,b,c,d) sc4(n,a,b,c,d)
-static long __syscall_ret(unsigned long r) { if (r > -4096UL) { errno = -(long)r; return -1; } return (long)r; }
+/* The series' own decoder (src/internal/syscall_ret.c): a -1 reads EIO, as on the device. */
+#include "syscall-ret-under-test.c"
 int __pouch_open_parent(int atfd, const char *path, const char **leaf, size_t *llen, int *dirreq) {
  size_t n = strlen(path);
  (void)atfd; parent_calls++; *dirreq = n && path[n - 1] == '/'; *leaf = path; *llen = n - (size_t)*dirreq; return (int)parent_ret;
