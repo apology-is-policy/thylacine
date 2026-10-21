@@ -44,6 +44,9 @@ restore() {
   [ "$(dirty)" = 0 ] || { echo "RESTORE left $(dirty) tracked change(s)"; exit 8; }
 }
 trap '_rc=$?; [ "$MUTATED" = 0 ] || restore; record "exit $_rc"' EXIT
+# A signal death never reaches $? (sh runs the EXIT trap with the last
+# completed command's status), so each signal exits with its own.
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 verdict() { # verdict <boot log> <test>: prints PASS, FAIL: <msg>, or NONE
   awk -v t="$2" '
     /\[test\] [^ ]+ \.\.\./ {

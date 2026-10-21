@@ -69,6 +69,23 @@
   asked. Main's tree also carried my own cb6722ddd note appended under the
   very clause it contradicted -- a note that pointed at the correction while
   leaving the rule standing.
+- *The backport, after this entry (10-19 to 10-21):* the asr9 SMP re-run went
+  10/10 on default-smp1 and default-smp4. The operator stopped it at 11:15Z,
+  eight boots into default-smp8, because the demo needed the Mac. main ran
+  the other three rows under its own lease, all 10/10, and landed `107c5c1bd`
+  on both mirrors (yip 0232). The vote-15 docs twins went to main as
+  `cba52ec9f` on `b457353a6` (branch `corona/asr9-docs`). The re-run's
+  `stages.txt` ends "exit 0" although the run was killed: `/bin/sh` runs the
+  EXIT trap with the last completed command's status and never a signal's
+  (measured 10-21: TERM -> the process exits 143, the record says 0). The
+  vote-13 scripts now trap TERM, INT and HUP. Their SMP leg also demands each
+  row's own "10 PASS / ... / 0 timing" summary. That check was run both ways
+  against the killed run's real log.
+- *Found meanwhile:* `tools/test-loom-receipts.py` has not built since
+  `a978d19c3` (10-09), independent of the Apple-ASan hang (OPEN-BUGS 19:50Z,
+  re-measured): `loom.h` now reaches `proc.h`, and the harness lacks
+  `irq_state_t` and `loom_layout_ring_fault_take`. It pins the dead
+  `loom_post_pool_cqe`, which is next (yip 0226 note 2).
 - *Open:* corona UNBUILT; the gate and the counter-pin mutants are next.
 
 ## 2026-10-19 -- 17:09Z closed: the socket verb arms check their own ctl (corona)

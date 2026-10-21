@@ -60,8 +60,12 @@ lease() {
   /usr/bin/grep -qE '^mac +HELD by you' "$OUT/lease-$1.txt" || {
     echo "STOPPING before $1: the mac lease is not mine"; exit 6; }
 }
-# The status first: anything run before it would replace $?.
+# The status first: anything run before it would replace $?. A signal death
+# never reaches $? (sh runs the EXIT trap with the last completed command's
+# status: work/oct19-asr9's killed SMP run recorded "exit 0"), so each signal
+# exits with its own status.
 trap 'rc=$?; record "exit $rc"' EXIT
+trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
 verdict() { # verdict <boot log> <test>: prints PASS, FAIL: <msg>, or NONE
   awk -v t="$2" '
     /\[test\] [^ ]+ \.\.\./ {
@@ -94,7 +98,10 @@ occurs() { # occurs <file> <count> <fixed text>: the text occurs exactly that of
   _c=$(/usr/bin/grep -cF "$3" "$1" || true)
   [ "$_c" = "$2" ] || { echo "'$3' occurs $_c times in $1, want $2"; /usr/bin/grep -nE 'loom-(fixture|native-probe|c-probe)|status|rings|connections|registries|D7' "$1" | head -40; exit 1; }
 }
-probes_hash() { cat "$FX_BIN" "$RP_BIN" "$CP_BIN" "$BR_BIN" | shasum -a 256 | cut -d' ' -f1; }
+smp_row_clean() { # smp_row_clean <smp log> <label>: the row's own summary, N=10, every boot a PASS
+  occurs "$1" 1 "== $2: 10 PASS / 0 CORRUPTION / 0 external-kill / 0 inject-miss / 0 timing / 0 other  (N=10) =="
+}
+probes_hash() { cat"$FX_BIN" "$RP_BIN" "$CP_BIN" "$BR_BIN" | shasum -a 256 | cut -d' ' -f1; }
 all_pass() {
   for t in $NAMED; do
     v=$(verdict "$2" "$t")
@@ -242,7 +249,10 @@ floor pre-smp
 _s=$(cat "$OUT/smp.rc")
 [ "$_s" = 0 ] || { echo "ci-smp-gate.sh exit $_s"; tail -40 "$OUT/smp.log"; exit 1; }
 /usr/bin/grep -qF 'ci-smp-gate: PASS -- 0 corruption across all configs' "$OUT/smp.log" || { echo "SMP: exit 0 without the PASS line"; tail -20 "$OUT/smp.log"; exit 1; }
+# Stricter than ci-smp-gate.sh, which passes a row with timing failures: every
+# boot of every row must PASS, so a timing failure stops this gate to be read.
 for l in default-smp1 default-smp4 default-smp8 ubsan-smp4 ubsan-smp8; do
+  smp_row_clean "$OUT/smp.log" "$l"
   occurs "$OUT/smp.log" 1 "  PASS  $l"
 done
 # Each flavour keeps its own kernel directory and nothing rebuilds after the
