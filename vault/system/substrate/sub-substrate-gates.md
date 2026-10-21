@@ -295,6 +295,13 @@ a REGRESSED D-1..D-4 chain exited 0 identically to one where the arc ran. The
 checker now FAILS on an ABSENT report (a dropped gate — the shape a green boot
 hides) and otherwise states what ran; `THYLA_ARC_GATES=require` /
 `THYLA_CLADE_GATES=require` make a skip fatal for shapes that ship the fixture.
+A third family answers for joey's six Go boot probes (`joey: GO-GATES hello=...
+net=...`): each skips when the image has no binary for it. `tools/test.sh` passes
+`--require-go` whenever `build/go/go-hello` exists, which the build leaves only
+when it built the probes, so a probe that went missing from an image built to
+run it fails the run; a lean image's `not-built` passes under it, the shape
+being the build's choice. The selftest drives 15 Go cases (45 in all), and each
+pass string matches a real boot's line.
 
 **netd's boot selftests reach the exit status (2026-09-24).** netd prints a
 `netd: <name> PASS/FAIL` line per selftest, and no gate read them. A netd whose

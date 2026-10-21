@@ -106,6 +106,15 @@ predecessor rebuilt only when a *binary was missing*, so a Stratum source
 edit shipped a stale host `stratumd` and the pool bake failed with "unknown
 option".
 
+**A fork that is absent takes its binaries with it.** `build_ramfs` bakes
+whatever Go probe or Ambush binary `build/go` holds, and the builders skip when
+their fork is absent, so an image built without the Go fork once carried an
+earlier build's probes, which joey ran as current. `build_go_probes` and
+`build_ambush` now delete their own binaries from `build/go` when they skip, as
+`build_go_goroot` deletes its stage; `build/go/go-hello` is then present
+exactly when this build made it, which `tools/test.sh` reads (the Go gates in
+[[sub-substrate-gates]]).
+
 **The pool and its key are coupled, and the coupling is the fix for a
 year-long ghost.** `system.key` is random per regeneration, so a pool
 re-bake without a ramfs re-bake leaves `/bin/system.key` (baked into the initrd)

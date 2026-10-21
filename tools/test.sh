@@ -460,7 +460,12 @@ case "$result" in
         # THYLA_CLADE_GATES=require is its separate opt-in (a clade bake is far
         # rarer than the Alpine bundle, so folding it into --require would
         # break that flag's existing callers).
-        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" "$LOG_FILE")"; then
+        # The Go probes' family: build_go_probes leaves its binaries in
+        # build/go only when it built them, so their presence says this image
+        # was built to run them, and a skip there is a lost binary.
+        local_go_require=""
+        [[ -f "$BUILD_DIR/go/go-hello" ]] && local_go_require="--require-go"
+        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" ${local_go_require:+"$local_go_require"} "$LOG_FILE")"; then
             echo "==> FAIL: arc/clade gate verdict (see the reason above)." >&2
             exit 1
         fi

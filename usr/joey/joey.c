@@ -3969,6 +3969,17 @@ static const char *g_clade_cl4   = "MISSING";
 static const char *g_clade_gl    = "MISSING";
 static const char *g_clade_storm = "MISSING";
 
+// The six Go boot probes' dispositions, for the GO-GATES line below. Same
+// contract as g_clade_*: a probe skips when its binary is absent (no Go fork at
+// build), and the boot passes, so only this line lets the harness see it. A
+// failure returns from main() before the line, so FAILED never appears.
+static const char *g_go_hello      = "MISSING";
+static const char *g_go_env        = "MISSING";
+static const char *g_go_goroutines = "MISSING";
+static const char *g_go_fs         = "MISSING";
+static const char *g_go_exec       = "MISSING";
+static const char *g_go_net        = "MISSING";
+
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
 // /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
@@ -6387,6 +6398,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-hello NOT spawned (Go fork absent at build) -- skipping\n");
+        g_go_hello = "SKIPPED";
         } else {
             int gh_status = -1;
             long gh_reaped = t_wait_pid_for((int)gh_pid, 0, &gh_status);
@@ -6395,6 +6407,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-hello reaped status=0 -- GOOS=thylacine Stage 1 RUNS in-VM\n");
+        g_go_hello = "PASS";
         }
     }
 
@@ -6448,6 +6461,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-env NOT spawned (Go fork absent at build) -- skipping\n");
+        g_go_env = "SKIPPED";
         } else {
             int ge_status = -1;
             long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
@@ -6456,6 +6470,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM\n");
+        g_go_env = "PASS";
         }
     }
 
@@ -6582,6 +6597,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-goroutines NOT spawned (Go fork absent at build) -- skipping\n");
+        g_go_goroutines = "SKIPPED";
         } else {
             int gg_status = -1;
             long gg_reaped = t_wait_pid_for((int)gg_pid, 0, &gg_status);
@@ -6590,6 +6606,7 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM\n");
+        g_go_goroutines = "PASS";
         }
     }
 
@@ -10645,6 +10662,7 @@ int main(void) {
                 const char gf_expect[]  = GO_CENSUS_FS;
                 if (optional_absent(go_fs_name, sizeof(go_fs_name) - 1)) {
                     t_putstr("joey: go-fs NOT spawned (Go fork absent at build) -- skipping\n");
+                    g_go_fs = "SKIPPED";
                 } else if (pouch_smoke_core(go_fs_name, sizeof(go_fs_name) - 1,
                                             gf_expect, sizeof(gf_expect) - 1,
                                             0, 0, 0, 1, -1, 1) != 0) {
@@ -10652,6 +10670,7 @@ int main(void) {
                     return 1;
                 } else {
                     t_putstr("joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM\n");
+                    g_go_fs = "PASS";
                 }
             }
 
@@ -10688,6 +10707,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: go-exec NOT spawned (Go fork absent at build) -- skipping\n");
+                    g_go_exec = "SKIPPED";
                 } else {
                     int ge_status = -1;
                     long ge_reaped = t_wait_pid_for((int)ge_pid, 0, &ge_status);
@@ -10696,6 +10716,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: go-exec reaped status=0 -- GOOS=thylacine Stage 3b (os/exec) RUNS in-VM\n");
+                    g_go_exec = "PASS";
                 }
             }
 
@@ -10734,6 +10755,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: go-net NOT spawned (Go fork absent at build) -- skipping\n");
+                    g_go_net = "SKIPPED";
                 } else {
                     int gn_status = -1;
                     long gn_reaped = t_wait_pid_for((int)gn_pid, 0, &gn_status);
@@ -10742,6 +10764,7 @@ int main(void) {
                         return 1;
                     }
                     t_putstr("joey: go-net reaped status=0 -- GOOS=thylacine Stage 3c (net over /net) RUNS in-VM\n");
+                    g_go_net = "PASS";
                 }
             }
 #endif /* THYLA_BOOT_PROBES (post-pivot boot-test probe ladder) */
@@ -12499,12 +12522,29 @@ int main(void) {
         rb[rn] = '\0';
         t_putstr(rb);
     }
+    // The Go boot probes' line, built the same way (one write).
+    {
+        const char *parts[] = { "joey: GO-GATES hello=", g_go_hello,
+                                " env=", g_go_env,
+                                " goroutines=", g_go_goroutines,
+                                " fs=", g_go_fs,
+                                " exec=", g_go_exec,
+                                " net=", g_go_net, "\n" };
+        char   rb[160];
+        size_t rn = 0;
+        for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)
+            for (const char *p = parts[pi]; *p && rn < sizeof(rb) - 1; p++)
+                rb[rn++] = *p;
+        rb[rn] = '\0';
+        t_putstr(rb);
+    }
 #else
     // The lean shape compiles the gates out, so report THAT rather than let
     // the harness infer a build shape from an absent line -- an absence it
     // cannot tell from a deleted gate.
     t_putstr("joey: CLADE-GATES not-built (THYLA_BOOT_PROBES=OFF)\n");
-#endif /* THYLA_BOOT_PROBES (the three clade gates) */
+    t_putstr("joey: GO-GATES not-built (THYLA_BOOT_PROBES=OFF)\n");
+#endif /* THYLA_BOOT_PROBES (the three clade gates, the Go probes) */
 
     // #80: dump the daemon registry before the banner. The reaper's ability to
     // say "DAEMON EXITED" instead of "adopted orphan" is only as complete as

@@ -883,8 +883,13 @@ DOSBOXCONF
 build_go_probes() {
     local go_bin="$GOFORK/bin/go"
     local go_out="$BUILD_DIR/go"
+    local -a probes=( go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get ambush-child )
+    local probe
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Go-port: fork toolchain not found at $go_bin -- skipping go-hello (set GOFORK)"
+        # Drop the probes an earlier build left: build_ramfs bakes whatever is
+        # here, and joey would run a binary no current fork built.
+        for probe in "${probes[@]}"; do rm -f "$go_out/$probe"; done
         return 0
     fi
     mkdir -p "$go_out"
@@ -913,8 +918,7 @@ build_go_probes() {
     #                    demo project; /env-set module env; go mod tidy pulls
     #                    from proxy.golang.org through /net; build; run the
     #                    result). EXTERNAL-NETWORK dependent, like go-web.
-    local probe
-    for probe in go-hello go-goroutines go-fs go-exec go-net go-env go-web go-get ambush-child; do
+    for probe in "${probes[@]}"; do
         ( cd "$REPO_ROOT/usr/$probe" && \
           GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -o "$go_out/$probe" . ) \
             || { echo "==> Go-port: go build $probe FAILED" >&2; return 1; }
@@ -940,10 +944,12 @@ build_ambush() {
     local go_out="$BUILD_DIR/go"
     if [[ ! -x "$go_bin" ]]; then
         echo "==> Ambush: Go fork toolchain not found at $go_bin -- skipping (set GOFORK)"
+        rm -f "$go_out/ambush"   # an earlier build's binary is not this build's
         return 0
     fi
     if [[ ! -d "$ambush_src/cmd/dlv" ]]; then
         echo "==> Ambush: fork source not found at $ambush_src -- skipping (set AMBUSHFORK)"
+        rm -f "$go_out/ambush"
         return 0
     fi
     mkdir -p "$go_out"

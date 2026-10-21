@@ -428,8 +428,10 @@ event-driven; no timing constant appears in this path.
   Go fork, the C++ prover without the LLVM fork, the storm fixture, gopls) is
   skipped only when a walk to it answers ENOENT (`optional_absent`, an
   `O_PATH` open of the same name the spawn resolves); a present program whose
-  spawn fails, or any other refusal, is boot-fatal. A skip still passes the
-  boot: test.sh does not yet read it.
+  spawn fails, or any other refusal, is boot-fatal. The six Go probes record
+  PASS or SKIPPED and joey prints them in one `joey: GO-GATES` line beside
+  `CLADE-GATES` (one write, MISSING by default), which
+  `tools/check-arc-gates.sh` reads ([[sub-substrate-gates]]).
 
 - joey's **warden** spawn mask is `CAP_HW_CREATE | CAP_CSPRNG_READ` (+
   `SPAWN_PERM_MAY_POST_SERVICE`) since H-4b-1 (2026-09-02): the warden never

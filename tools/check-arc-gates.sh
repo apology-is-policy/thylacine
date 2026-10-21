@@ -24,6 +24,16 @@
 #     joey: CLADE-GATES cl4=<state> gl=<state> storm=<state>
 #     joey: CLADE-GATES not-built (THYLA_BOOT_PROBES=OFF)
 #
+# A THIRD family carries the six Go boot probes, which skip when the image has no
+# Go binaries (no Go fork at build):
+#
+#     joey: GO-GATES hello=<state> env=<state> goroutines=<state> fs=<state> exec=<state> net=<state>
+#     joey: GO-GATES not-built (THYLA_BOOT_PROBES=OFF)
+#
+# Their require knob (--require-go, THYLA_GO_GATES=require) is set by
+# tools/test.sh from the bake itself: when build/go holds the probes, the image
+# was built to run them, and a skip is a lost binary, not a missing fork.
+#
 # They needed it MORE after #232, not less: before, a lean boot still ran them
 # and printed their skips, so a deleted call was at least visible by absence of
 # prose. Now the lean image has no gates, and "no output" is the correct state
@@ -50,6 +60,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 REPORT_RE='joey: ARC-GATES '
 CLADE_REPORT_RE='joey: CLADE-GATES '
+GO_REPORT_RE='joey: GO-GATES '
 
 # The prose corroboration. joey prints BOTH the structured state and its own
 # human line from the same arm, so a disagreement between them means a state
@@ -82,6 +93,17 @@ CLADE_STORM_SKIP_PROSE='joey: clade CL-5 storm: /storm absent -- skipping'
 # pool is SKIPPED. A single "skipping" substring would have covered both and
 # told us less.
 CLADE_STORM_DECLINE_PROSE='joey: clade CL-5 storm: thylacine.nostorm -- skipping by request'
+# The Go family: each probe's pass line and its skip line, as joey prints them.
+GO_PROBES=(hello env goroutines fs exec net)
+declare -A GO_PASS_PROSE=(
+    [hello]='joey: go-hello reaped status=0 -- GOOS=thylacine Stage 1 RUNS in-VM'
+    [env]='joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM'
+    [goroutines]='joey: go-goroutines reaped status=0 -- GOOS=thylacine Stage 2 RUNS in-VM'
+    [fs]='joey: go-fs reaped status=0 -- GOOS=thylacine Stage 3a (fs file I/O) RUNS in-VM'
+    [exec]='joey: go-exec reaped status=0 -- GOOS=thylacine Stage 3b (os/exec) RUNS in-VM'
+    [net]='joey: go-net reaped status=0 -- GOOS=thylacine Stage 3c (net over /net) RUNS in-VM'
+)
+go_skip_prose() { echo "joey: go-$1 NOT spawned (Go fork absent at build) -- skipping"; }
 
 # THYLA_ARC_GATES=require is the env spelling of --require, so `tools/test.sh`
 # (and anything that shells out to it -- the SMP gate, the interactive harness)
@@ -95,14 +117,17 @@ require=0
 # callers the moment they lack a clade bake.
 require_clade=0
 [[ "${THYLA_CLADE_GATES:-}" == "require" ]] && require_clade=1
+require_go=0
+[[ "${THYLA_GO_GATES:-}" == "require" ]] && require_go=1
 log=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --require)       require=1; shift ;;
         --require-clade) require_clade=1; shift ;;
+        --require-go)    require_go=1; shift ;;
         --selftest)      selftest=1; shift ;;
         -h|--help)
-            echo "usage: $0 [--require] [--require-clade] <boot-log>"
+            echo "usage: $0 [--require] [--require-clade] [--require-go] <boot-log>"
             echo "       $0 --selftest"
             exit 0
             ;;
@@ -295,6 +320,45 @@ check_clade_log() {
 }
 
 # --------------------------------------------------------------------------
+# check_go_log <path> -- the Go boot probes. Same shape as check_clade_log, but
+# a lean image's not-built passes even under --require-go: that flag comes from
+# the bake's build/go, which a lean build fills too, and the lean shape runs no
+# probe by design.
+check_go_log() {
+    local path="$1"
+    local line ran=0 skipped=0 declined=0 blocked=0 k state states=""
+    line="$(grep -a "$GO_REPORT_RE" "$path" | tail -1 || true)"
+    if [[ -z "$line" ]]; then
+        echo "check-arc-gates: FAIL -- the boot emitted no 'joey: GO-GATES' report line." >&2
+        echo "    Every build shape emits one: the probe ladder reports the six Go" >&2
+        echo "    probes' state, and a --production build reports 'not-built'." >&2
+        return 1
+    fi
+    if [[ "$line" == *"not-built"* ]]; then
+        echo "go gates: NOT BUILT (THYLA_BOOT_PROBES=OFF -- the lean production shape; NOT coverage)"
+        return 0
+    fi
+    for k in "${GO_PROBES[@]}"; do
+        state="$(sed -n "s/.*GO-GATES.* $k=\([A-Za-z-]*\).*/\1/p" <<<"$line")"
+        if [[ -z "$state" ]]; then
+            echo "check-arc-gates: FAIL -- unparseable Go report line (no $k=): $line" >&2
+            return 1
+        fi
+        one_gate "go-$k" "$state" "${GO_PASS_PROSE[$k]}" "$(go_skip_prose "$k")" || return 1
+        states="$states go-$k=$state"
+    done
+    local report="go gates: $ran/${#GO_PROBES[@]} ran --$states"
+    if (( skipped )); then
+        report="$report; $skipped SKIPPED (no Go binary in the image -- NOT coverage)"
+    fi
+    echo "$report"
+    if (( require_go && skipped )); then
+        echo "check-arc-gates: FAIL -- --require-go given (the bake built the Go probes), but $skipped probe(s) did not run." >&2
+        return 1
+    fi
+    return 0
+}
+
 # --selftest: drive the real check_log over synthetic logs.
 #
 # It proves DISCRIMINATION, not detection. The load-bearing case is D (a
@@ -314,6 +378,7 @@ if [[ "${selftest:-0}" == "1" ]]; then
     # cases mean.
     require=0
     require_clade=0
+    require_go=0
 
     # expect <name> <want-rc> <want-substring-in-stdout|-> <log-body>
     expect() {
@@ -471,6 +536,55 @@ joey: CLADE-GATES cl4=PASS gl=PASS storm=PASS"
     expect_clade CM-last-wins        1 -            "$CL_PASS_ALL
 joey: CLADE-GATES cl4=PASS gl=PASS storm=MISSING"
 
+    # The Go family. The load-bearing negatives: a log with no GO-GATES line (every
+    # boot before it, and a deleted report), a PASS claim with no prose, and a
+    # skip under --require-go, which the SAME log passes without the flag.
+    expect_go() {
+        local name="$1" want_rc="$2" want_out="$3" body="$4"
+        local f="$TMP/$name.log" out rc
+        printf '%s\n' "$body" >"$f"
+        out="$(check_go_log "$f" 2>/dev/null)" && rc=0 || rc=$?
+        checked=$((checked+1))
+        if [[ "$rc" != "$want_rc" ]]; then
+            printf '  FAIL %-42s rc=%s (want %s)\n' "$name" "$rc" "$want_rc"
+            fails=$((fails+1)); return
+        fi
+        if [[ "$want_out" != "-" && "$out" != *"$want_out"* ]]; then
+            printf '  FAIL %-42s out=%q (want substring %q)\n' "$name" "$out" "$want_out"
+            fails=$((fails+1)); return
+        fi
+        printf '  ok   %-42s rc=%s %s\n' "$name" "$rc" "${out:-<no report>}"
+    }
+    GO_PASS_ALL=""; GO_SKIP_ALL=""
+    for k in "${GO_PROBES[@]}"; do
+        GO_PASS_ALL="$GO_PASS_ALL${GO_PASS_PROSE[$k]}
+"
+        GO_SKIP_ALL="$GO_SKIP_ALL$(go_skip_prose "$k")
+"
+    done
+    GO_PASS_ALL="${GO_PASS_ALL}joey: GO-GATES hello=PASS env=PASS goroutines=PASS fs=PASS exec=PASS net=PASS"
+    GO_SKIP_ALL="${GO_SKIP_ALL}joey: GO-GATES hello=SKIPPED env=SKIPPED goroutines=SKIPPED fs=SKIPPED exec=SKIPPED net=SKIPPED"
+    echo "== go-gates selftest =="
+    expect_go GA-all-pass        0 "6/6 ran"      "$GO_PASS_ALL"
+    expect_go GB-all-skipped     0 "NOT coverage" "$GO_SKIP_ALL"
+    expect_go GC-no-report       1 -              "${GO_PASS_ALL%joey: GO-GATES*}"
+    expect_go GD-missing-state   1 -              "${GO_PASS_ALL/fs=PASS/fs=MISSING}"
+    expect_go GE-pass-no-prose   1 -              "joey: GO-GATES hello=PASS env=PASS goroutines=PASS fs=PASS exec=PASS net=PASS"
+    expect_go GF-not-built       0 "NOT BUILT"    "joey: GO-GATES not-built (THYLA_BOOT_PROBES=OFF)"
+    expect_go GG-short-line      1 -              "${GO_PASS_ALL/ net=PASS/}"
+    # GH: a skip claim backed by another probe's skip line only.
+    expect_go GH-wrong-skip-line 1 -              "${GO_PASS_ALL/fs=PASS/fs=SKIPPED}
+$(go_skip_prose exec)"
+    # GI: the fs prefix must not read goroutines' or another key's value.
+    expect_go GI-key-prefix      1 -              "${GO_PASS_ALL/ fs=PASS/ xfs=PASS}"
+    require_go=1
+    expect_go GJ-require-skipped 1 -              "$GO_SKIP_ALL"
+    expect_go GJ-require-pass    0 "6/6 ran"      "$GO_PASS_ALL"
+    expect_go GJ-require-notbuilt 0 "NOT BUILT"   "joey: GO-GATES not-built (THYLA_BOOT_PROBES=OFF)"
+    require_go=0
+    expect_go GK-last-wins       1 -              "$GO_PASS_ALL
+joey: GO-GATES hello=PASS env=PASS goroutines=PASS fs=MISSING exec=PASS net=PASS"
+
     echo "== $checked checked, $fails failed =="
     [[ "$fails" == "0" ]]
     exit $?
@@ -494,6 +608,10 @@ arc_rc=0
 check_log "$log" || arc_rc=$?
 clade_rc=0
 check_clade_log "$log" || clade_rc=$?
+go_rc=0
+check_go_log "$log" || go_rc=$?
 
-(( arc_rc > clade_rc )) && exit $arc_rc
-exit $clade_rc
+rc=$arc_rc
+(( clade_rc > rc )) && rc=$clade_rc
+(( go_rc > rc )) && rc=$go_rc
+exit $rc
