@@ -610,15 +610,13 @@ enum {
     //                 set_tid_address(2) contract).
     // A C runtime (pouch — the Thylacine POSIX libc) calls this once at
     // thread startup (musl's __init_tp) to learn the thread id. Returns
-    // the calling thread's tid. At v1.0 — single-threaded Procs — the
-    // main thread's tid is the Proc's pid, mirroring the Linux
-    // convention that the thread-group leader's tid equals the pid.
+    // the calling thread's tid (struct Thread.tid). That is NOT the pid,
+    // even for the main thread: tids come from one kernel-wide counter.
     //
-    // `tidptr` is ACCEPTED but neither stored nor acted on at v1.0: its
-    // only effect — clearing *tidptr + a futex wake on thread exit — is
-    // observable only with multiple threads, which land with the
-    // pouch-threads sub-chunk (POUCH-DESIGN.md §12.4); it is wired there
-    // alongside the per-thread tid. Never fails for a userspace caller.
+    // `tidptr` is stored as the thread's clear-child-tid word: at thread
+    // exit the kernel zeroes *tidptr and wakes its torpor waiters
+    // (thread_clear_child_tid_handoff). 0 clears it. Fails (-1) for a
+    // tidptr that is not 4-byte aligned or not below the user VA top.
     SYS_SET_TID_ADDRESS = 36,  // arg: tidptr (x0)
 
     // P6-pouch-mem: SYS_BURROW_ATTACH(length) → vaddr
