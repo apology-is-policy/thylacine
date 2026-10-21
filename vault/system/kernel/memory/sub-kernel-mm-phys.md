@@ -467,7 +467,14 @@ b057de8eb) must fail; `--mutants` runs all five legs ([[gate-magazines-tsan]]).
 Its guest twin, `phys.drain_meets_live_owners`, drains while three kthreads
 churn their own sets, each stamping every page it holds and checking the
 stamps before freeing them; a drain that freed a page its owner was popping
-would let a second owner overwrite the stamp.
+would let a second owner overwrite the stamp. Each owner is placed on one
+of the drainer's peers with `ready_on` and woken by IPI: in-kernel tests
+send no idle-peer IPIs, and `sched()` steals only onto an empty tree, so a
+`ready()`d owner runs on the drainer's own CPU. Its first run did exactly
+that and never met its premise, a drain while an owner reports another
+CPU, which the test asserts before the stamps. It drains once more after
+joining the owners, because the next test's gauge reads the buddy without
+draining.
 
 The drain is now safe, not a measurement: the Loom private fixture's
 unpinned-reap release witness stays removed, because it needs a stable

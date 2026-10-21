@@ -277,13 +277,18 @@ completion path allocates.
   before BADF, as `loom_fid_borrow` orders them -- and a `refuse_clunk` knob
   refuses the next CLUNK at admission so the backstop's ring-fail can be driven.
   Since 2026-10-21 both sims admit in the kernel's order (`frontend_dispatch`):
-  the source's scope (`loom_admission_scope_locked`), then the payload (the
+  a pooled length past INT32_MAX first (`loom_provided_prepare`), then the
+  source's scope (`loom_admission_scope_locked`), then the payload (the
   buffer, the WALK name, the pool and every member's length), then the fid
-  (`loom_fid_*`). An admitted CLUNK retires its fid at once, so anything
-  naming it after answers -ENOENT; an admitted WALK claims its destination, so a
-  second WALK to it answers -EBUSY; a destination in another scope answers
-  -ECANCELED and one already walked to -EBUSY; a CLUNK of a scope -ENOENT.
-  `sim_admit` / `State::admit_one` run one SQE through admission alone, and
+  (`loom_fid_*`). An admitted CLUNK retires its fid's slot at once, so every
+  exact lookup of it -- the scope pass, a WALK's destination, QUERY -- answers
+  -ENOENT, and a CLUNK cancelled with its scope still leaves the fid RETIRED
+  (`loom_fid_finish_clunk`); a scope's slot stays live until REAP, so a
+  RETIRED scope as the source answers -ECANCELED at its state. An admitted
+  WALK claims its destination, so a second WALK to it answers -EBUSY; a
+  destination in another scope answers -ECANCELED and one already walked to
+  -EBUSY; a CLUNK of a scope -ENOENT. `sim_admit` / `State::admit_one` run one
+  SQE through admission alone, `sim_query` / `State::query` one QUERY, and
   `admission_follows_the_kernels_order` pins each of these in both languages.
 - **The C twin's tests.** `tests/loom_client/sim_kernel.c` ports `sim.rs`
   knob for knob (the setup refusals, the misaligned attach and the stale pool
@@ -345,7 +350,9 @@ completion path allocates.
    October 13 (a walked fid reaps once clunked or once its scope has RETIRED;
    fids pin their scope). Until then no kernel path freed a walked fid while
    its ring lived, and the sim was more lenient than the kernel. The sim has no
-   slot phase (only a fid whose CLUNK was admitted is marked retiring): the kernel's RETIRING FID is reachable by REAP only through
+   slot phase; a fid whose CLUNK was admitted stands for the kernel's RETIRING
+   FID (admission and QUERY answer -ENOENT for it, REAP still finds it). The
+   kernel's RETIRING FID is reachable by REAP only through
    `control_retiring_fid`, which only the guest test exercises. Since NA-4d the
    sim also models the kernel's fid claim at admission (EBUSY under an in-flight
    LOPEN, EBADF on a walk from an opened fid, EACCES on an unopened-fid I/O), and
@@ -363,9 +370,17 @@ completion path allocates.
    held no state for an admitted CLUNK or WALK (the order now modelled is in
    the sim paragraph above). Still unmodelled: the fixed-buffer count limit
    (-EAGAIN) and a fixed extent overlapping a pool member (-EBUSY) of
-   `loom_private_fixed_acquire`, an expired deadline refused at prepare
-   (-ETIMEDOUT; the sims time it out after admission), and WALK's fid-number
-   exhaustion (-ENOSPC).
+   `loom_private_fixed_acquire`; WALK's fid-number exhaustion (-ENOSPC);
+   request admission's -ENOSPC (`loom_service_requests.c`, undelivered
+   requests at the admit bound, and `loom_service_rpc.c`'s operation table),
+   which falls after the scope pass and before the payload, while the sims
+   bound nothing; an expired deadline, which the kernel refuses at prepare
+   (-ETIMEDOUT, `loom_service_operation.c`) with no effect on the scope, where
+   the sims admit the SQE and then time it out and abort its whole scope with
+   every sibling; and a CLUNK the server refuses, which aborts the scope in
+   the kernel (`loom_service_action.c`) and never happens in the sims. The
+   expired deadline is reachable from either adapter: both pass the caller's
+   deadline word through (`adapter.c` `deadline_word`, `handles.rs`).
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)

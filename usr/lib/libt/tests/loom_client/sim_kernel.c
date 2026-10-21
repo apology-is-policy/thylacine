@@ -154,6 +154,8 @@ static void cancel_scope(struct sim *s, size_t scope, int32_t result) {
             continue;
         }
         uint64_t ud = s->ops[i].user_data;
+        /* A cancelled CLUNK still retires its fid (loom_fid_finish_clunk). */
+        if (s->ops[i].kind == SIM_OP_CLUNK) s->slots[s->ops[i].source].state = SIM_RETIRED;
         remove_op(s, i);
         if (s->hold_terminals) {
             assert(s->nheld < SIM_MAX);
@@ -386,6 +388,7 @@ void sim_step(struct sim *s) {
             }
             struct sim_op op = s->ops[i];
             remove_op(s, i);
+            if (op.kind == SIM_OP_CLUNK) s->slots[op.source].state = SIM_RETIRED;
             post(s, 1, scope, op.user_data, op.deadline && op.deadline <= now ? SIM_ETIMEDOUT : SIM_ECANCELED, 0,
                  ZERO_RECEIPT);
         }
@@ -419,7 +422,10 @@ static int64_t shape(const struct t_loom_sqe *q) {
     case T_LOOM_OP_LOPEN:
         return q->offset > 2 || q->_resv1[2] || !no_buffer ? SIM_EINVAL : 0;
     case T_LOOM_OP_READ:
-        if (pooled) return !q->len || q->buf_idx_or_off >= 64 || !q->_resv1[2] || q->_resv1[0] ? SIM_EINVAL : 0;
+        if (pooled)
+            return !q->len || q->len > INT32_MAX || q->buf_idx_or_off >= 64 || !q->_resv1[2] || q->_resv1[0]
+                       ? SIM_EINVAL
+                       : 0;
         return q->_resv1[2] || !fixed ? SIM_EINVAL : 0;
     case T_LOOM_OP_WRITE:
         return q->_resv1[2] || !fixed ? SIM_EINVAL : 0;
@@ -441,6 +447,14 @@ static void uses(const struct sim *s, size_t i, int *claimed, int *borrowed) {
             o->kind == SIM_OP_POOLED)
             *borrowed = 1;
     }
+}
+/* A FID whose CLUNK was admitted: the kernel retires its slot at once
+ * (loom_fid_begin_clunk), so every exact lookup -- the scope pass, a WALK's
+ * destination, QUERY -- answers ENOENT. ABORTING is how the kernel marks one;
+ * the sims reach it for a fid only by a test's poke. A scope's slot stays live
+ * until REAP whatever its state. */
+static int fid_retiring(const struct sim_slot *sl) {
+    return sl->kind == SIM_FID && (sl->clunking || sl->state == SIM_ABORTING || sl->state == SIM_RETIRED);
 }
 /* Whether an admitted WALK still claims slot i as its destination. */
 static int walk_claimed(const struct sim *s, size_t i) {
@@ -475,7 +489,7 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
             scope = src->scope;
         else
             return SIM_ENOENT;
-        if (src->state == SIM_RETIRED || src->clunking) return SIM_ENOENT;
+        if (fid_retiring(src)) return SIM_ENOENT;
         if (s->slots[scope].state != SIM_READY) return SIM_ECANCELED;
         op.scope = scope;
         /* PREPARE, the payload (loom_private_io_prepare, loom_provided_prepare). */
@@ -541,7 +555,7 @@ static int64_t admit_sqe(struct sim *s, const struct t_loom_sqe *q) {
             if (q->opcode == T_LOOM_OP_WALK) {
                 /* loom_fid_claim_walk: the destination is claimed until the WALK ends. */
                 struct sim_slot *d = live(s, dest);
-                if (!d || d->kind != SIM_FID || d->state == SIM_RETIRED || d->clunking) return SIM_ENOENT;
+                if (!d || d->kind != SIM_FID || fid_retiring(d)) return SIM_ENOENT;
                 if (d->scope != scope) return SIM_ECANCELED;
                 if (d->state != SIM_RESERVED || walk_claimed(s, dest.slot)) return SIM_EBUSY;
             }
@@ -602,6 +616,26 @@ static int64_t k_setup(void *v, uint32_t entries, struct t_owned_setup *p) {
     sim_poke_hdr(s, 7, cq);
     if (s->setup_bad_mask) sim_poke_hdr(s, 2, 0);
     return 7;
+}
+/* QUERY_SERVICE_SLOT: an exact lookup of a live slot (control_exact). */
+int64_t sim_query(struct sim *s, struct t_loom_service_snapshot *q) {
+    struct sim_slot *sl = live(s, q->object);
+    if (!sl || fid_retiring(sl)) return SIM_ENOENT;
+    q->state = sl->state;
+    if (sl->kind == SIM_SCOPE) {
+        /* loom_private_service_query: operations not yet terminal, and
+         * terminals not yet posted. */
+        size_t i = q->object.slot, active = 0, pending = 0;
+        for (size_t j = 0; j < s->nops; ++j) active += s->ops[j].scope == i;
+        for (size_t j = 0; j < s->ndeferred; ++j)
+            pending += s->deferred[j].has_scope && s->deferred[j].scope == i &&
+                       !(s->deferred[j].flags & T_LOOM_CQE_MORE);
+        for (size_t j = 0; j < s->nheld; ++j) pending += s->held[j].scope == i;
+        q->active_ops = (uint32_t)active;
+        q->pending_terminals = (uint32_t)pending;
+    }
+    q->kind = sl->kind;
+    return 0;
 }
 static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs) {
     struct sim *s = v;
@@ -673,26 +707,8 @@ static int64_t k_reg(void *v, int32_t fd, uint32_t op, void *arg, uint32_t nargs
         cancel_scope(s, c->object.slot, SIM_ECANCELED);
         return 0;
     }
-    case T_LOOM_REGISTER_QUERY_SERVICE_SLOT: {
-        struct t_loom_service_snapshot *q = arg;
-        struct sim_slot *sl = live(s, q->object);
-        if (!sl) return SIM_ENOENT;
-        q->state = sl->state;
-        if (sl->kind == SIM_SCOPE) {
-            /* loom_private_service_query: operations not yet terminal, and
-             * terminals not yet posted. */
-            size_t i = q->object.slot, active = 0, pending = 0;
-            for (size_t j = 0; j < s->nops; ++j) active += s->ops[j].scope == i;
-            for (size_t j = 0; j < s->ndeferred; ++j)
-                pending += s->deferred[j].has_scope && s->deferred[j].scope == i &&
-                           !(s->deferred[j].flags & T_LOOM_CQE_MORE);
-            for (size_t j = 0; j < s->nheld; ++j) pending += s->held[j].scope == i;
-            q->active_ops = (uint32_t)active;
-            q->pending_terminals = (uint32_t)pending;
-        }
-        q->kind = sl->kind;
-        return 0;
-    }
+    case T_LOOM_REGISTER_QUERY_SERVICE_SLOT:
+        return sim_query(s, arg);
     case T_LOOM_REGISTER_REAP_SERVICE_SLOT: {
         const struct t_loom_service_control *c = arg;
         if (!live(s, c->object)) return SIM_ENOENT;

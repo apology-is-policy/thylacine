@@ -37,7 +37,7 @@ MUTANTS = [
      "    q = adm_sqe(T_LOOM_OP_CLUNK, 8);\n    assert(sim_admit(s, &q) == 0);"),
     ("c-walk-claim", CSIM, " || walk_claimed(s, dest.slot)) return SIM_EBUSY;",
      " || (walk_claimed(s, dest.slot) && 0)) return SIM_EBUSY;",
-     "    q = adm_walk(0, 3, 0, 0);"),
+     "    q = adm_walk(1, 3, 0, 0);\n    assert(sim_admit(s, &q) == 0);"),
     ("c-dest-scope", CSIM, "if (d->scope != scope) return SIM_ECANCELED;", "if (d->scope != scope) return SIM_ENOENT;",
      "    q = adm_walk(1, 5, 0, 0);"),
     ("c-bounds", CSIM, "                if (s->pools[pool.slot][m].range.length < q->len) return SIM_EINVAL;\n",
@@ -56,7 +56,7 @@ MUTANTS = [
     ("r-clunking", RSIM, "                    self.slots[source.slot as usize].as_mut().unwrap().clunking = true;\n", "",
      "    assert_eq!(s.admit_one(sqe(OP_CLUNK, 8)), ENOENT);"),
     ("r-walk-claim", RSIM, "if d.state != RESERVED || self.walk_claimed(dest.slot as usize) {",
-     "if d.state != RESERVED {", "    assert_eq!(s.admit_one(walk(0, 3, 0, 0)), EBUSY);"),
+     "if d.state != RESERVED {", "    assert_eq!(s.admit_one(walk(1, 3, 0, 0)), EBUSY);"),
     ("r-dest-scope", RSIM, "                        if d.scope != scope {\n                            return ECANCELED;",
      "                        if d.scope != scope {\n                            return ENOENT;",
      "    assert_eq!(s.admit_one(walk(1, 5, 0, 0)), ECANCELED);"),
@@ -64,6 +64,33 @@ MUTANTS = [
      "    assert_eq!(s.admit_one(pooled(2, 8, 8)), EINVAL);"),
     ("r-clunk-fid", RSIM, "if src.kind != SlotKind::Fid || src.state != READY {", "if src.state != READY {",
      "    assert_eq!(s.admit_one(sqe(OP_CLUNK, 0)), ENOENT);"),
+    # The audit round's fixes (Fable r1 on 7bbc30f02: F1 F2 F3 F6, F4's pooled bound).
+    ("c-scope-kind", CSIM, "    return sl->kind == SIM_FID && (sl->clunking || sl->state == SIM_ABORTING || sl->state == SIM_RETIRED);",
+     "    return sl->clunking || sl->state == SIM_ABORTING || sl->state == SIM_RETIRED;",
+     "    q = adm_walk(9, 3, 0, 0);"),
+    ("c-aborting", CSIM, "(sl->clunking || sl->state == SIM_ABORTING || sl->state == SIM_RETIRED)",
+     "(sl->clunking || sl->state == SIM_RETIRED)", "    q = adm_read(10, 5, 4);"),
+    ("c-int32", CSIM, "!q->len || q->len > INT32_MAX || ", "!q->len || ", "    q = adm_pooled(11, 8, 0x80000000u);"),
+    ("c-cancel-retire", CSIM,
+     "        if (s->ops[i].kind == SIM_OP_CLUNK) s->slots[s->ops[i].source].state = SIM_RETIRED;\n", "",
+     "    s->hold_terminals = 1; /* the fixture maps no CQ: keep the terminals */\n    sim_latch_under(s);"),
+    ("c-query", CSIM, "    if (!sl || fid_retiring(sl)) return SIM_ENOENT;", "    if (!sl) return SIM_ENOENT;",
+     "    struct t_loom_service_snapshot snap = { .object = { 6, 0, 7 } };"),
+    ("r-scope-kind", RSIM, "        sl.kind == SlotKind::Fid && (sl.clunking || sl.state == ABORTING || sl.state == RETIRED)",
+     "        sl.clunking || sl.state == ABORTING || sl.state == RETIRED",
+     "    assert_eq!(s.admit_one(walk(9, 3, 0, 0)), ECANCELED);"),
+    ("r-aborting", RSIM, "(sl.clunking || sl.state == ABORTING || sl.state == RETIRED)", "(sl.clunking || sl.state == RETIRED)",
+     "    assert_eq!(s.admit_one(read(10, 5, 4)), ENOENT);"),
+    ("r-int32", RSIM, "                || s.len > i32::MAX as u32\n", "",
+     "    assert_eq!(s.admit_one(pooled(11, 8, 0x8000_0000)), EINVAL);"),
+    ("r-cancel-retire", RSIM,
+     "            // A cancelled CLUNK still retires its fid (loom_fid_finish_clunk).\n"
+     "            if matches!(op.kind, OpKind::Clunk) {\n"
+     "                self.slots[op.source].as_mut().unwrap().state = RETIRED;\n"
+     "            }\n", "",
+     "    assert_eq!(s.slots[6].as_ref().unwrap().state, RETIRED);"),
+    ("r-query", RSIM, "        if Self::retiring(&sl) {\n            return ENOENT;\n        }\n", "",
+     "    assert_eq!(s.query(&mut snap), ENOENT);"),
 ]
 
 
@@ -80,8 +107,9 @@ def run(cmd, log, cwd=None):
 
 def c_cores(out):
     sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True, check=True).stdout.strip()
-    flags = ["-isysroot", sdk, "-Wall", "-Wextra", "-Werror", "-std=c99", "-O1", "-DT_REQUEST_TEST",
-             f"-I{ROOT}/usr/lib/libt/include"]
+    common = ["-isysroot", sdk, "-Wall", "-Wextra", "-Werror", "-O1"]
+    inc = f"-I{ROOT}/usr/lib/libt/include"
+    flags = common + ["-std=c99", "-DT_REQUEST_TEST", inc]
     objs = []
     for c in CORES:
         o = out / f"{c}.o"
@@ -89,7 +117,7 @@ def c_cores(out):
                     "-o", str(o)], out / f"{c}.build.log") == 0, c
         objs.append(str(o))
     hf = out / "host_fatal.o"
-    assert run([str(LLVM / "bin/clang"), *flags[:-3], "-std=c11", f"-I{ROOT}/usr/lib/libt/include", "-c",
+    assert run([str(LLVM / "bin/clang"), *common, "-std=c11", inc, "-c",
                 str(CTEST.parent / "host_fatal.c"), "-o", str(hf)], out / "host_fatal.build.log") == 0
     return sdk, objs + [str(hf)]
 

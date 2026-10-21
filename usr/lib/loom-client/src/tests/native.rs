@@ -1516,13 +1516,13 @@ fn a_read_result_keeps_the_storage_until_it_drops() {
 /// and what an admitted CLUNK or WALK holds at once. Each pair is a refusal and
 /// its control one variable away. Slots: 0 scope, 1 fid, 2 fid opened for both,
 /// 3 a WALK's destination, 4 another scope, 5 its destination, 6 a READY fid,
-/// 7 a pool of members 16 and 4 bytes long, 8 a fid to clunk; slot i has
-/// incarnation i + 1.
+/// 7 a pool of members 16 and 4 bytes long, 8 a fid to clunk, 9 a RETIRED
+/// scope, 10 a fid poked ABORTING; slot i has incarnation i + 1.
 #[test]
 fn admission_follows_the_kernels_order() {
     use crate::ring_records::{OP_CLUNK, OP_READ, OP_WALK, Submission};
-    use crate::service_abi::SQE_BUFFER_SELECT;
-    use sim::{READY, RESERVED, Slot};
+    use crate::service_abi::{SQE_BUFFER_SELECT, SlotRef, Snapshot};
+    use sim::{ABORTING, READY, RESERVED, RETIRED, Slot};
     let mut buf = *b"a/bxname";
     let fixture = |buf: &mut [u8; 8]| {
         let sim = Sim::new();
@@ -1536,6 +1536,8 @@ fn admission_follows_the_kernels_order() {
             (SlotKind::Fid, READY, 0, None),
             (SlotKind::Pool, READY, 0, None),
             (SlotKind::Fid, READY, 0, None),
+            (SlotKind::Scope, RETIRED, 9, None),
+            (SlotKind::Fid, ABORTING, 0, None),
         ];
         {
             let mut s = sim.s();
@@ -1609,13 +1611,13 @@ fn admission_follows_the_kernels_order() {
     let sim = fixture(&mut buf);
     let mut s = sim.s();
     assert_eq!(s.admit_one(walk(2, 3, 0, 3)), EINVAL);
-    assert_eq!(s.admit_one(walk(2, 3, 4, 4)), EBADF);
+    assert_eq!(s.admit_one(walk(2, 3, 4, 3)), EBADF);
     // loom_fid_claim_walk: another scope's destination answers ECANCELED, one
     // already walked to EBUSY, and an admitted WALK claims its destination.
     assert_eq!(s.admit_one(walk(1, 5, 0, 0)), ECANCELED);
     assert_eq!(s.admit_one(walk(1, 6, 0, 0)), EBUSY);
     assert_eq!(s.admit_one(walk(1, 3, 0, 0)), 0);
-    assert_eq!(s.admit_one(walk(0, 3, 0, 0)), EBUSY);
+    assert_eq!(s.admit_one(walk(1, 3, 0, 0)), EBUSY);
     drop(s);
     drop(sim);
     // loom_fid_begin_clunk: a FID only, retired the moment it is admitted.
@@ -1626,4 +1628,46 @@ fn admission_follows_the_kernels_order() {
     assert_eq!(s.admit_one(sqe(OP_CLUNK, 8)), ENOENT);
     assert_eq!(s.admit_one(read(8, 5, 4)), ENOENT);
     assert_eq!(s.admit_one(sqe(OP_CLUNK, 6)), 0);
+    // A retiring fid is not queryable (control_exact); a READY one is.
+    let fid = |slot: u32| SlotRef {
+        slot,
+        reserved: 0,
+        incarnation: slot as u64 + 1,
+    };
+    let mut snap = Snapshot {
+        size: 0,
+        version: 0,
+        flags: 0,
+        object: fid(6),
+        kind: 0,
+        state: 0,
+        scope: fid(0),
+        active_ops: 0,
+        pending_terminals: 0,
+        reason: 0,
+        status_flags: 0,
+    };
+    assert_eq!(s.query(&mut snap), ENOENT);
+    snap.object = fid(1);
+    assert_eq!((s.query(&mut snap), snap.state), (0, READY));
+    // A CLUNK cancelled with its scope still retires its fid
+    // (loom_fid_finish_clunk); uncancelled, the fid waits READY.
+    assert_eq!(s.slots[6].as_ref().unwrap().state, READY);
+    s.hold_terminals = true; // the fixture maps no CQ: keep the terminals
+    s.abort_all();
+    assert_eq!(s.slots[6].as_ref().unwrap().state, RETIRED);
+    drop(s);
+    drop(sim);
+    // The scope pass retires a FID, never a SCOPE: a fid the kernel has marked
+    // ABORTING is a retiring slot, ENOENT before its bad buffer, where READY fid
+    // 1 answered EINVAL above; a RETIRED scope's slot stays live until REAP and
+    // answers ECANCELED, where READY scope 0 is admitted.
+    let sim = fixture(&mut buf);
+    let mut s = sim.s();
+    assert_eq!(s.admit_one(read(10, 5, 4)), ENOENT);
+    assert_eq!(s.admit_one(walk(9, 3, 0, 0)), ECANCELED);
+    assert_eq!(s.admit_one(walk(0, 3, 0, 0)), 0);
+    // A pooled length past INT32_MAX is refused before the scope pass.
+    assert_eq!(s.admit_one(pooled(11, 8, 0x8000_0000)), EINVAL);
+    assert_eq!(s.admit_one(pooled(11, 8, 4)), ENOENT);
 }

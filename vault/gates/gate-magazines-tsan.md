@@ -30,3 +30,9 @@ Its predecessor, the operator-directed double of 2026-10-07
 the pre-lock bodies with the #807 count guard firing zero times
 ([[sub-kernel-mm-phys]]). Manifestation of the corruption is schedule
 dependent; the race report is not.
+
+Its first run (2026-10-21, at 72298812e) passed the clean leg and the three
+lock drops. The pre-lock leg did not build: that body never initialises a
+lock, so the harness's inline `spin_lock_init` went unused, which
+`-Wunused-function` reports and `-Werror` refuses. The shim is now a macro,
+and all five legs' sources pass a syntax-only build.
