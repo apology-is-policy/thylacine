@@ -949,8 +949,9 @@ static void f20_last_share_probe(struct Proc *p, struct page *original) {
     if (g_f20_probe_calls++ != 0) return;
     // The other holder's mapping goes: its share is put (2 -> 1). The Burrow's
     // free runs deferred, after the parent's own lock; the buddy sits below
-    // every lock held here, and the harness's secondaries are parked, so the
-    // magazine drain is the quiescent one it is documented as.
+    // every lock held here. The drain takes each set's own lock, so it is safe;
+    // what the count below still needs is that no peer refills a set between
+    // the drain and the sample.
     vma_drain_in(g_f20_parent->as);
     g_f20_share_after_drain = cow_page_share_for_test(original);
     magazines_drain_all();

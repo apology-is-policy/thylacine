@@ -6,7 +6,7 @@ title: "The page allocator — phys bootstrap, buddy, per-CPU magazines"
 code: ["mm/phys.c", "mm/phys.h", "mm/buddy.c", "mm/buddy.h", "mm/magazines.c", "mm/magazines.h", "kernel/include/thylacine/page.h"]
 audit: hard
 guarded-by: [inv-i32]
-validated-by: [gate-smp, spec-capacity]
+validated-by: [gate-smp, spec-capacity, gate-magazines-tsan]
 locks: [lock-buddy-zone, lock-magazine-set]
 created: 2026-08-01
 updated: 2026-10-21
@@ -374,7 +374,8 @@ teardown test hit it, and the only reason a working mechanism did not get
 theory.
 
 `magazines_drain_all()` before each sample makes the figure a true total
-again. Measured with the drain in place: the private teardown returns one
+again, provided no peer refills a set between the drain and the sample (the
+drain is safe at any time, but it is not a measurement; see October 21). Measured with the drain in place: the private teardown returns one
 page, the shared teardown returns zero.
 
 **The earlier draft of the same test was worse — it passed.** It asserted
@@ -460,7 +461,12 @@ extracted, under TSan, with three CPUs churning their own sets and a
 fourth draining. Clean: no race report, no page handed to two owners,
 every page back in the zone exactly once. Three mutants each drop one
 side's lock (the drain's, the alloc's, the free's) and must draw a race
-report, and the same model on the pre-lock `magazines.c` must fail.
+report, and the same model on the pre-lock `magazines.c` (pinned at
+b057de8eb) must fail; `--mutants` runs all five legs ([[gate-magazines-tsan]]).
+Its guest twin, `phys.drain_meets_live_owners`, drains while three kthreads
+churn their own sets, each stamping every page it holds and checking the
+stamps before freeing them; a drain that freed a page its owner was popping
+would let a second owner overwrite the stamp.
 
 The drain is now safe, not a measurement: the Loom private fixture's
 unpinned-reap release witness stays removed, because it needs a stable

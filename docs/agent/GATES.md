@@ -88,6 +88,13 @@ tools/test-fault.sh canary_smash    # one variant       (-v for log dumps)
 tools/verify-kaslr.sh               # 10 boots          (or: make verify-kaslr)
 tools/verify-kaslr.sh -n 25 -v      # more boots, print each offset
 
+# The per-CPU magazines' host witness (vote 16, vault gate-magazines-tsan): the
+# actual mm/magazines.c bodies under ThreadSanitizer, three CPUs churning while
+# a fourth drains. --mutants adds three one-sided lock drops and the pre-lock
+# source pinned at b057de8eb; each must draw a race report, and the clean leg
+# none. Homebrew LLVM; guest twin: the suite's phys.drain_meets_live_owners.
+python3 -I tools/test-magazines.py --mutants --logs <dir>
+
 # Warp-6 V-0 (the Venus gate). `warp-host.sh venus` boots the remote GL host
 # TWICE -- once with `venus=on,blob=on,hostmem=256M` and once WITHOUT -- and
 # passes only if capset id=4 (VENUS) is present in the first and ABSENT in the

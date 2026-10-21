@@ -3,9 +3,10 @@
 mm/magazines.h) under ThreadSanitizer: three CPUs churn their own sets while a
 fourth runs magazines_drain_all. Clean: no race report, no page handed to two
 owners, every page back in the zone exactly once. Each mutant drops one side's
-lock and must draw a TSan race report. --source runs the same model on another
-copy of magazines.c (the pre-lock tree must fail). Host doubles: zone, CPU id,
-spinlocks; an IRQ mask excludes nothing on a peer CPU. Not an ARM memory model.
+lock and must draw a TSan race report, and so must the pre-lock bodies (the tree
+at PRE_LOCK, read with git): --mutants runs all four. --source models any other
+copy of magazines.c and must fail. Host doubles: zone, CPU id, spinlocks; an IRQ
+mask excludes nothing on a peer CPU. Not an ARM memory model.
 """
 from pathlib import Path
 import argparse,json,os,re,shutil,subprocess,tempfile,importlib.util
@@ -15,6 +16,8 @@ LLVM_CC=Path(os.environ.get('LLVM_PREFIX','/opt/homebrew/opt/llvm'))/'bin/clang'
 NAMES=['magazines_init','order_to_mag_idx','mag_idx_to_order','my_cpu','mag_refill','mag_drain','mag_alloc','mag_free','magazines_drain_all']
 DEFINES=['MAGAZINE_SIZE','MAG_IDX_ORDER_4K','MAG_IDX_ORDER_2M','NUM_MAG_ORDERS']
 TSAN_EXIT=66
+# The tree before vote 16 gave each CPU's set its lock: the race the lock closed.
+PRE_LOCK='b057de8eb'
 # (label, function, old, new): each removes one side of the exclusion.
 MUTANTS=[
  ('drain-unlocked','magazines_drain_all','spin_lock_irqsave(&pc->lock)','spin_lock_irqsave(NULL)'),
@@ -48,13 +51,18 @@ def main():
     p.add_argument('--source',type=Path,help='a magazines.c to model instead of the tree\'s; the run must then FAIL');p.add_argument('--iters',default='4000')
     a=p.parse_args();a.logs.mkdir(parents=True,exist_ok=True)
     source=(a.source or ROOT/'mm/magazines.c').read_text();header=(ROOT/'mm/magazines.h').read_text()
+    pre=subprocess.run(['git','-C',str(ROOT),'show',f'{PRE_LOCK}:mm/magazines.c'],capture_output=True,text=True,check=True).stdout
+    assert 'spin_lock(&pc->lock)' not in pre and 'spin_lock(&pc->lock)' in (ROOT/'mm/magazines.c').read_text(),'PRE_LOCK is not the pre-lock tree'
     cc=os.environ.get('CC') or (str(LLVM_CC) if LLVM_CC.exists() else 'clang')
     sdk=subprocess.run(['xcrun','--show-sdk-path'],capture_output=True,text=True) if shutil.which('xcrun') else None
     env=dict(os.environ,TSAN_OPTIONS=f'abort_on_error=0 halt_on_error=0 exitcode={TSAN_EXIT}')
-    legs=[('source' if a.source else 'clean',None)]+([(m[0],m) for m in MUTANTS] if a.mutants and not a.source else [])
+    # (name, mutant, the magazines.c it models, whether it must race)
+    legs=[('source' if a.source else 'clean',None,source,bool(a.source))]
+    if a.mutants and not a.source:
+        legs+=[(m[0],m,source,True) for m in MUTANTS]+[('pre-lock-'+PRE_LOCK,None,pre,True)]
     with tempfile.TemporaryDirectory(prefix='magazines-') as tmp:
-        for name,mut in legs:
-            f=Path(tmp)/(name+'.c');f.write_text(model(source,header,mut));exe=f.with_suffix('')
+        for name,mut,body,must_race in legs:
+            f=Path(tmp)/(name+'.c');f.write_text(model(body,header,mut));exe=f.with_suffix('')
             cmd=[cc,'-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-fsanitize=thread',str(f),'-o',str(exe)]
             if sdk and sdk.returncode==0:cmd+=['-isysroot',sdk.stdout.strip()]
             (a.logs/(name+'-command.json')).write_text(json.dumps(cmd)+'\n')
@@ -66,7 +74,7 @@ def main():
             out=r.stdout+r.stderr;(a.logs/(name+'.log')).write_text(out)
             races=out.count('WARNING: ThreadSanitizer: data race');summary=[l for l in out.splitlines() if l.startswith('summary ')]
             assert summary,(name,'no summary: the run did not finish',r.returncode)
-            if mut or a.source:
+            if must_race:
                 assert races and r.returncode in (TSAN_EXIT,3),(name,'expected a race report',r.returncode,summary)
                 print(f'PASS {name}: {races} race report(s); {summary[0]}',flush=True)
             else:

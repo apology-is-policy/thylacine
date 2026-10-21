@@ -98,5 +98,5 @@ nothing compared the two**; see [[chg-2026-08-03-mapping-core-sweep]].
 in the tree** (the audit-trigger row carries a phantom file; the Burrow
 page machinery lives in `kernel/burrow.c`).
 
-Locks: [[lock-buddy-zone]] · [[lock-kmem-cache]] ·
+Locks: [[lock-buddy-zone]] · [[lock-magazine-set]] · [[lock-kmem-cache]] ·
 [[lock-cache-list]] · [[lock-burrow]] · [[lock-asid]].

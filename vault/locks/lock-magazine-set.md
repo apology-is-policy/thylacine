@@ -21,7 +21,10 @@ folds onto one slot ([[seam-sparse-mpidr]]).
 Order: this lock, then [[lock-buddy-zone]] (refill and drain-on-full call
 `buddy_alloc`/`buddy_free` under it). No path holds two magazine locks,
 and nothing takes this lock under the zone lock. It is not a leaf
-(`spin_leaf_enter`) and does not refuse one.
+(`spin_leaf_enter`) and does not refuse one. Cross-CPU stealing (ARCH 6.3)
+is not built: a steal moves entries between two sets, so it must stage them
+through the zone or define an order between magazine locks (lower CPU index
+first), and the one-magazine-lock rule is re-derived when it lands.
 
 Heritage: illumos kmem's per-CPU cache takes `cc_lock` on every alloc and
 free (Bonwick & Adams 2001); Linux's per-CPU page lists gained a per-CPU

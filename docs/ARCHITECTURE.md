@@ -372,7 +372,7 @@ None at Gate 3. KASLR seed entropy source on bare metal Pi 5+ is a Phase post-v1
 - 48-bit virtual addressing with split TTBR0 (user) / TTBR1 (kernel).
 - 4 KiB pages with 2 MiB block mappings for kernel large-page mappings.
 - Demand-zero paging for anonymous mappings (BUILD item per IDENTITY-DESIGN.md §8.4). Copy-on-write for `rfork(RFPROC)` is a **designed seam** — no address-space-sharing caller exists at v1.0 (`RFMEM` extincts); it activates when a `fork`-style caller lands. *(Reconciled 2026-05-28.)*
-- SOTA physical frame allocator: buddy + per-CPU magazines (illumos kmem-style) for hot-path lock-freedom.
+- SOTA physical frame allocator: buddy + per-CPU magazines (illumos kmem-style), so the hot path takes no shared lock.
 - SOTA kernel object allocator: SLUB-style (Linux's modern default), better cache locality and lower overhead than slab.
 - W^X enforced as page-table invariant.
 - KASLR offset applied to TTBR1 region.
@@ -437,8 +437,8 @@ Page table walks via standard ARMv8 PTE format. `nG` bit set in user mappings (n
 - Each CPU has a "magazine" — a small stack (default 16 entries) of pre-allocated single-page descriptors at common orders (0, 9 — i.e. 4 KiB and 2 MiB).
 - Allocate: pop from local magazine; on empty, refill from buddy (one buddy lock acquisition per refill).
 - Free: push to local magazine; on full, drain to buddy.
-- Each CPU's set has its own spinlock. The owner takes it, with IRQs masked, on every alloc and free; any CPU draining the set takes it too. It is uncontended in steady state and sits beside the set it guards, and it is what lets a peer touch a set at all: `magazines_drain_all` (every CPU's set, each under its own lock, safe at any time) and the stealing below. Lock order: magazine lock, then zone lock; no path holds two magazine locks. This is the heritage design, not a departure from it: illumos kmem's per-CPU cache takes `cc_lock` on every alloc and free, and Linux's per-CPU page lists gained a per-CPU spinlock in 2022 so a peer can drain them without an IPI. (Operator vote, 2026-10-21: chosen over an IPI-per-CPU drain and over a test-only stop-the-world. Until then the fast path was an IRQ mask alone and `magazines_drain_all` was quiescent-only, which the in-kernel suite did not honour.)
-- Cross-CPU stealing on load imbalance: an idle CPU can steal a magazine from a peer if its own is empty and buddy is contended.
+- Each CPU's set has its own spinlock. The owner takes it, with IRQs masked, on every alloc and free; any CPU draining the set takes it too. It is uncontended in steady state and sits beside the set it guards, and it is what lets a peer touch a set at all: `magazines_drain_all` (every CPU's set, each under its own lock, safe at any time). Lock order: magazine lock, then zone lock; no path holds two magazine locks. This is the heritage design, not a departure from it: illumos kmem's per-CPU cache takes `cc_lock` on every alloc and free, and Linux's per-CPU page lists gained a per-CPU spinlock in 2022 so a peer can drain them without an IPI. (Operator vote, 2026-10-21: chosen over an IPI-per-CPU drain and over a test-only stop-the-world. Until then the fast path was an IRQ mask alone and `magazines_drain_all` was quiescent-only, which the in-kernel suite did not honour.)
+- Cross-CPU stealing on load imbalance (NOT BUILT; a seam): an idle CPU could steal a magazine from a peer if its own is empty and buddy is contended. A steal moves entries between two sets, so it must either stage them through the zone or define an order between magazine locks; the one-magazine-lock rule above is re-derived when it lands.
 
 This layering achieves: typical allocation is a stack pop under the local CPU's own uncontended lock (no shared lock); typical deallocation is a stack push; buddy lock contention is rare and only for refill/drain.
 

@@ -11,9 +11,9 @@
 // at order k into a single block at order k+1, anchored on the left
 // buddy's PFN.
 //
-// Layered behind per-CPU magazines (mm/magazines.c) for hot-path
-// lock-freedom on the common orders. The buddy lock is acquired only
-// on magazine refill / drain plus rare large allocations.
+// Layered behind per-CPU magazines (mm/magazines.c), so the common
+// orders take only their CPU's own magazine lock. The buddy lock is
+// acquired only on magazine refill / drain plus rare large allocations.
 //
 // Per ARCHITECTURE.md §6.3.
 
