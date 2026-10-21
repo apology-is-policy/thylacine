@@ -1,0 +1,33 @@
+2026-10-21T16:41:29Z  bake work/oct19-pi/bake-20261021T163919Z: commit 293cdbabeabead031d3510c6b7506d0e3b20dab4, expect 1900
+2026-10-21T16:41:38Z  build/ matches the manifest; the default ELF carries 'stalk.open_create_containment_and_denials'
+2026-10-21T16:41:41Z  pi thyla-pi-cf reachable, no qemu running, 18441 MiB free
+2026-10-21T16:45:43Z  synced 293cdbabeabead031d3510c6b7506d0e3b20dab4 + the manifest's 7 artifacts to thyla-pi-cf:~/projects/thylacine-corona; sha256 verified on the pi
+2026-10-21T16:45:45Z  driver started on the pi: default-smp4:4::1500 ubsan-smp4:4:ubsan:2400, N=10
+2026-10-21T16:45:46Z  the pi reports DONE at 2026-10-21T16:45:45Z
+2026-10-21T16:45:46Z  logs pulled into work/oct19-pi/run-20261021T164129Z
+2026-10-21T16:45:46Z  pi-default-smp4: smp-multiboot rc 2; NO SUMMARY LINE
+2026-10-21T16:45:46Z    pi-default-smp4 boot 1: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 2: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 3: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 4: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 5: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 6: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 7: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 8: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 9: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4 boot 10: NO LOG
+2026-10-21T16:45:46Z    pi-default-smp4: 0 of 10 boot logs kept
+2026-10-21T16:45:46Z  pi-ubsan-smp4: smp-multiboot rc 2; NO SUMMARY LINE
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 1: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 2: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 3: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 4: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 5: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 6: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 7: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 8: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 9: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4 boot 10: NO LOG
+2026-10-21T16:45:46Z    pi-ubsan-smp4: 0 of 10 boot logs kept
+2026-10-21T16:45:46Z  PI AXIS RED: see the lines above
+2026-10-21T16:45:46Z  exit 1

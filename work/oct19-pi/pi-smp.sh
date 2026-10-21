@@ -32,7 +32,13 @@ PI_N=${PI_N:-10}
 # SD-card I/O dominates a pi boot (docs/agent/THYLA-PI.md), so they sit well
 # above ci-smp-gate's mac figures (300/420).
 PI_CONFIGS=${PI_CONFIGS:-"default-smp4:4::1500 ubsan-smp4:4:ubsan:2400"}
-ARTS="build/kernel/thylacine.elf build/kernel/thylacine.bin build/kernel-undefined/thylacine.elf build/kernel-undefined/thylacine.bin build/ramfs.cpio build/disk.img build/fixtures/pool.img"
+ARTS="build/kernel/thylacine.elf build/kernel/thylacine.bin build/kernel-undefined/thylacine.elf build/kernel-undefined/thylacine.bin build/ramfs.cpio build/disk.img build/fixtures/pool.img build/fixtures/system.key"
+# smp-multiboot restores the pool from these twins before every boot (and
+# refuses without them), and checks the key twin to know the snapshot belongs
+# to this ramfs. A populate leaves each twin equal to its source; the bake
+# checks that, so the run can make them on the pi by copying the verified
+# pool and key instead of shipping 2.5 GiB twice.
+TWINS="build/fixtures/pool.img build/fixtures/system.key"
 LAST=work/oct19-pi/LAST-BAKE
 LASTRUN=work/oct19-pi/LAST-RUN
 STRATUM_PIN=7dd103ddbccabe95dfe1d36fdddb4d6a1bfd99dc
@@ -127,6 +133,10 @@ bake() {
   done
   [ "$(shasum -a 256 build/kernel/thylacine.bin | cut -d' ' -f1)" != "$(shasum -a 256 build/kernel-undefined/thylacine.bin | cut -d' ' -f1)" ] \
     || { echo "the UBSan kernel equals the default one"; exit 1; }
+  for f in $TWINS; do
+    cmp -s "$f" "$f.baked-snapshot" || { echo "$f.baked-snapshot is not the bake's $f"; exit 1; }
+  done
+  record "snapshot twins equal their sources: $TWINS"
   # shellcheck disable=SC2086
   shasum -a 256 $ARTS > "$OUT/manifest.txt"
   printf 'commit %s\nexpect %s\nlast %s\nstratum %s\ngofork %s\n' "$COMMIT" "$EXPECT" "$NAME" "$STRATUM_PIN" "$GOFORK_PIN" > "$OUT/provenance.txt"
@@ -198,7 +208,12 @@ run() {
   _ps=$(wc -c < build/fixtures/pool.img | tr -d ' ')
   gzip -1 -c build/fixtures/pool.img | pi "gunzip -c | dd of=$PI_TREE/build/fixtures/pool.img bs=1M iflag=fullblock conv=sparse status=none && truncate -s $_ps $PI_TREE/build/fixtures/pool.img"
   pi "cd $PI_TREE && sha256sum -c --quiet -" < "$BAKE/manifest.txt" || { echo "the pi's copy does not match the manifest"; exit 1; }
-  record "synced $COMMIT + the manifest's 7 artifacts to $PI_HOST:~/$PI_TREE; sha256 verified on the pi"
+  record "synced $COMMIT + the manifest's $(wc -l < "$BAKE/manifest.txt" | tr -d ' ') artifacts to $PI_HOST:~/$PI_TREE; sha256 verified on the pi"
+  for f in $TWINS; do pi "cp --sparse=always $PI_TREE/$f $PI_TREE/$f.baked-snapshot"; done
+  for f in $TWINS; do /usr/bin/grep -F "  $f" "$BAKE/manifest.txt" | /usr/bin/grep -c . | /usr/bin/grep -qx 1 || { echo "the manifest has no single line for $f"; exit 1; }; done
+  for f in $TWINS; do /usr/bin/grep -E "  $f\$" "$BAKE/manifest.txt" | sed 's/$/.baked-snapshot/'; done | pi "cd $PI_TREE && sha256sum -c --quiet -" \
+    || { echo "the twins made on the pi do not match the manifest"; exit 1; }
+  record "snapshot twins made on the pi from the verified pool and key; sha256 verified against the manifest"
 
   # The driver runs detached on the pi and leaves DONE behind it.
   {

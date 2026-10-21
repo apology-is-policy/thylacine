@@ -1,0 +1,8 @@
+  [pi-ubsan-smp4] SMP_KEEP_LOGS=1 -- every boot's logs kept in build/multiboot-logs
+  [pi-ubsan-smp4] pool restore IMPOSSIBLE -- missing: /home/cora/projects/thylacine-corona/build/fixtures/pool.img.baked-snapshot
+  [pi-ubsan-smp4] without it these boots are NOT independent: each one would
+  [pi-ubsan-smp4] inherit what the previous boot wrote to the pool, so per-boot
+  [pi-ubsan-smp4] counts would not be evidence. Re-bake to regenerate the
+  [pi-ubsan-smp4] snapshot twins, or set SMP_GATE_POOL_RESTORE=0 to say you
+  [pi-ubsan-smp4] meant it.
+  [pi-ubsan-smp4] REFUSING to run boot 1 of 10 without a pool reset

@@ -27,6 +27,32 @@
 - *F3:* the host harness never entered the single-shot terminal arm or the
   cancelled-MORE phase, and never saw the publication's wake. Legs added,
   eighteen host mutants in all.
+- *The gate, and a check I had broken.* Mutants M1-M7 were all killed at
+  their named assertions (`mutants-20261021T144327Z`; M6 and M7 are the
+  Loom close's two guards in the guest). Gate run 1 on `5266dea09` was
+  green throughout, but its log carried a shell error, "catbuild/ramfs-src/
+  bin/loom-fixture: No such file or directory". My trap-fix commit
+  `a59667812` had glued `cat"$FX_BIN"`, a whitespace-only change and the only
+  one in that script's diff. So every program hash was SHA-256 of empty
+  input, and the CONTROL-Q and UBSAN "programs differ from the control's"
+  checks compared empty with empty: the verdicts held, the claim that the
+  legs booted the same programs was never checked. Of the gate's helpers,
+  `occurs` and `verdict` had self-checks and `probes_hash` did not; it was
+  the one that broke. Fixed with a both-ways self-check (run on the fixed and
+  on the glued body), committed with the evidence as `293cdbabe` (source
+  identical outside `work/`), and the whole gate re-run there: ALL GREEN with
+  programs `9ec47e67...` (`gate-20261021T154754Z`). Then the pi bake, the Mac
+  released, and the A72/KVM run under the pi lease.
+- *The pi run refused, rightly* (`run-20261021T164129Z`): no boot ran.
+  `smp-multiboot` restores the pool from `pool.img.baked-snapshot` before
+  every boot and refuses without it (yip 0187), and my 10-19 script shipped
+  only seven artifacts: never the twins, never `system.key`. Its first real
+  run found that. A populate leaves each twin byte-equal to its source
+  (checked: `cmp` both pairs on the Mac), so the bake now checks that and
+  ships the key, and the run rebuilds the twins on the pi by copying the
+  verified pool and key, then checks them against the manifest. That avoids
+  sending 2.5 GiB twice. The pi was released while I waited for the Mac to
+  re-bake.
 
 ## 2026-10-19 -- vote 13 (SRV_REGISTRY_NEW -> 134) and the AS-R9 backport to main (corona)
 
