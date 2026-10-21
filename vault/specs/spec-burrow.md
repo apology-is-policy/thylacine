@@ -3,20 +3,22 @@ id: spec-burrow
 type: spec
 title: "burrow.tla"
 models: [sub-kernel-burrow]
-pins: [inv-i7]
+pins: [inv-i7, inv-i32]
 cfgs:
-  - "burrow.cfg -- clean: RefcountConsistent + NoUseAfterFree (100 distinct, depth 9)"
-  - "burrow_buggy_free_on_close.cfg -- free when the handle count hits zero: NoUseAfterFree, premature (66)"
-  - "burrow_buggy_free_on_unmap.cfg -- free when the mapping count hits zero: NoUseAfterFree, premature (54)"
-  - "burrow_buggy_never_free.cfg -- never free: NoUseAfterFree, delayed (43)"
-gate: "any change to the dual refcount, the free decision, or the type-dispatched release arm"
+  - "burrow.cfg -- clean: TypeOk, RefcountConsistent, NoUseAfterFree, NoRecordAfterFree, RefundExactlyOnce (100 distinct; depth 11 under the current TLC, 9 under P4-N's v1.8.0)"
+  - "burrow_buggy_free_on_close.cfg -- free when the handle count hits zero: NoUseAfterFree, premature"
+  - "burrow_buggy_free_on_unmap.cfg -- free when the mapping count hits zero: NoUseAfterFree, premature"
+  - "burrow_buggy_never_free.cfg -- never free: NoUseAfterFree, delayed"
+  - "burrow_buggy_claim_restore.cfg -- the pre-AS-R9 claim / drop / restore across two threads: NoRecordAfterFree"
+  - "burrow_buggy_claim_restore_ledger.cfg -- the same, judged on TypeOk + RefundExactlyOnce alone: RefundExactlyOnce"
+gate: "any change to the dual refcount, the free decision, the type-dispatched release arm, or where a drop claims the charge record"
 created: 2026-08-02
-updated: 2026-09-23
+updated: 2026-10-19
 ---
 ## Abstraction
 
 The smallest useful model in the tree and one of the oldest — a hundred states
-at depth nine. Objects, two counters each, and a boolean for whether the pages
+(depth eleven under the current TLC; P4-N's v1.8.0 reported nine). Objects, two counters each, and a boolean for whether the pages
 are alive. Create, open a handle, close a handle, map, unmap; free exactly when
 both counters reach zero.
 
@@ -28,13 +30,28 @@ configurations are precisely the three ways to get a two-counter lifetime
 wrong, and the third exists to make the delayed direction executable rather than
 merely asserted.
 
+Since AS-R9 the model also carries the [[inv-i32]] **charge record**: `record`
+(the objects whose record is set) and `billed` (the payer's ledger entry per
+object). Creation records and bills; the drop that ends an object takes the
+record in the same step that frees it (`Settle`). Behind `BUGGY_CLAIM_RESTORE`,
+two threads replay the pre-AS-R9 drop -- claim, drop, restore if the drop did
+not free, each its own step -- with `Held(v, k)` reserving the reference a thread
+is dropping. `NoRecordAfterFree` and `RefundExactlyOnce` refute it: the restore
+writes into an object a sibling's drop freed, and the charge outlives its object
+unrefunded. `specs/check-burrow.sh` pins the clean count and judges each buggy
+cfg by the invariant TLC names; a buggy run's state count varies with worker
+scheduling, so it is not recorded here.
+
 **Deliberately beneath the model:**
 
 - **the lock.** Transitions are atomic, so what is proven is the *arithmetic* of
   the dual count, not the mutual exclusion that makes the arithmetic hold on
   real hardware. This gap is not academic: the real bug was that the counts were
   correct as written and wrong as executed, because the zero-zero test appeared
-  at two sites and raced. The lock discipline is prose and audit;
+  at two sites and raced. The lock discipline is prose and audit -- except where
+  the charge record uses the atomicity on purpose: one step is one `v->lock`
+  hold, which is why `Settle` happens inside the drop's step and the pre-AS-R9
+  variant spends three;
 - **the backing types.** The model has one abstract kind of pages. The
   implementation has six, in two families — contiguous and sparse — and the
   sparse family did not exist when this was written;
@@ -46,7 +63,11 @@ merely asserted.
   without moving `mapping_count`, and the slot accounting it must keep is
   [[spec-capacity]]'s;
 - the **magic sentinel** and the slab recycling it is placed against — a
-  defense against violating the invariant, not part of stating it.
+  defense against violating the invariant, not part of stating it;
+- the **payer's identity** and `shared_out`: every modelled drop is the payer's
+  own, so the release rule's `freed || shared_out` and a non-payer's final drop
+  (an intended over-charge) are witnessed by `test_burrow.c`'s settled-drop
+  tests, not here.
 
 ## Action-site map
 
@@ -55,16 +76,20 @@ merely asserted.
 | `Init` | `burrow_init` — the slab cache; no objects alive at boot |
 | `VmoCreate(v)` | the six `burrow_create_*` constructors, each setting `handle_count = 1, mapping_count = 0` and taking whatever its backing requires — a buddy chunk, a hardware object's reference, a pinned Spoor, or a sparse array |
 | `HandleOpen(v)` | `burrow_ref` — under the object's lock, with the both-counts-zero resurrection guard |
-| `HandleClose(v)` | `burrow_unref` — decrement and compute `should_free` under the lock, free outside it |
+| `HandleClose(v)` | `burrow_unref` → `burrow_unref_settled_in` — decrement, compute `should_free` and (given a payer) take the charge record in one lock hold; free outside it |
 | `MapVmo(v)` | `burrow_acquire_mapping` — the resurrection guard, the per-type liveness check, and the increment, all under the lock |
-| `UnmapVmo(v)` | `burrow_release_mapping` — symmetric with `burrow_unref` |
+| `UnmapVmo(v)` | `burrow_release_mapping` → `burrow_release_mapping_settled_deferred` — symmetric with `burrow_unref` |
 | the free transition | `burrow_free_internal` — outside the lock; re-asserts both counts zero, type-dispatches the release, clears the magic before returning the object |
 | `BuggyFreeOnHandleClose` / `BuggyFreeOnUnmap` / `BuggyNoFree*` | no sites — each is prevented by the dual check, and the re-assertion inside the free path is the tripwire for a caller that bypasses it |
+| `Settle(v, final)` | `burrow_charge_claim_locked` (static), inside those two holds; the caller refunds the returned pages outside the leaf lock |
+| `ClaimBeforeDrop` / `DropAfterClaim` / `SettleAfterDrop` | no sites: the AS-R9 backport deleted the stand-alone claim and restore |
 
 | Invariant | Obligation |
 |---|---|
 | `NoUseAfterFree` | [[inv-i7]] as a biconditional: pages alive **iff** a count is above zero |
 | `RefcountConsistent` | counts are zero for objects not alive — the implementation's analogue is that a freed object's magic is clobbered, so any subsequent operation extincts rather than reading a stale count |
+| `NoRecordAfterFree` | [[inv-i32]]'s record half: a charge record lives only on a live object (`record \subseteq pages_alive`) |
+| `RefundExactlyOnce` | [[inv-i32]]: the ledger is never refunded twice (`billed >= 0`), and a freed object with no claim in flight has been refunded |
 
 ## Where the model is behind the code
 
