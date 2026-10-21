@@ -28,8 +28,10 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/env.h>             // V-4b-6: env_create/write -- /proc/<pid>/environ
+#include <thylacine/errno.h>
 #include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
 #include <thylacine/page.h>
+#include <thylacine/notes.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>       // prowl-1/3a: sched() + sched_cpu_idle_ns
@@ -56,6 +58,8 @@ void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 // A-4b: cross-process kill via /proc/<pid>/ctl.
 void test_devproc_kill_authorized_predicate(void);
+void test_devproc_none_owns_nothing(void);    // IDENTITY-DESIGN reserved ids: Plan 9's nonone
+void test_devproc_none_walled(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
@@ -92,6 +96,9 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 bool devproc_extract_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_maps_code_visible(const struct Proc *caller, const struct Proc *target);
+bool devproc_none_walled(const struct Proc *caller, const struct Proc *target);
+size_t devctl_format_procs_for_test(const struct Proc *reader, char *buf, size_t cap);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 size_t devproc_imperium_read_gated(const struct Proc *caller, struct Proc *target,
@@ -519,7 +526,7 @@ void test_devproc_write_ctl_rejects(void) {
     TEST_ASSERT(kctl != NULL, "open /proc/0/ctl");
     const char kill_cmd[] = "kill";
     TEST_EXPECT_EQ(devproc.write(kctl, kill_cmd, (long)sizeof(kill_cmd) - 1, 0),
-                   (long)-1, "kill of kproc (pid 0) is refused (-1)");
+                   (long)-T_E_ACCES, "kill of kproc (pid 0) is refused (EACCES)");
     // An unrecognized verb on the same ctl is also -1 (NOT consumed-as-n).
     const char junk[] = "frobnicate";
     TEST_EXPECT_EQ(devproc.write(kctl, junk, (long)sizeof(junk) - 1, 0),
@@ -621,6 +628,186 @@ void test_devproc_kill_authorized_predicate(void) {
     target->state = PROC_STATE_ZOMBIE;
     proc_free(caller);
     proc_free(target);
+}
+
+// IDENTITY-DESIGN's reserved ids (Plan 9's nonone): two Procs running as none are
+// nothing to each other on any owner axis, each still owns itself, and a capability
+// still admits. Every refusal is paired with a control one variable away -- the
+// shared principal a real one instead of none -- so a fixture that admitted nobody
+// could not satisfy the refusals.
+void test_devproc_none_owns_nothing(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    caller->state = PROC_STATE_ALIVE;
+    target->state = PROC_STATE_ALIVE;
+    caller->caps  = 0;
+    target->caps  = 0;
+
+    caller->principal_id = 0xA11CEu;
+    target->principal_id = 0xA11CEu;
+    bool k_real = devproc_kill_authorized(caller, target);
+    bool d_real = devproc_debug_authorized(caller, target);
+    bool o_real = devproc_owner_or_hostowner(caller, target);
+    bool w_real = devproc_none_walled(caller, target);
+
+    caller->principal_id = PRINCIPAL_NONE;
+    target->principal_id = PRINCIPAL_NONE;
+    bool k_none = devproc_kill_authorized(caller, target);
+    bool d_none = devproc_debug_authorized(caller, target);
+    bool o_none = devproc_owner_or_hostowner(caller, target);
+    bool w_none = devproc_none_walled(caller, target);
+    bool k_self = devproc_kill_authorized(caller, caller);
+    bool d_self = devproc_debug_authorized(caller, caller);
+    bool o_self = devproc_owner_or_hostowner(caller, caller);
+    bool w_self = devproc_none_walled(caller, caller);
+    bool w_null = devproc_none_walled(NULL, target);
+
+    // The wall is keyed on the caller: a real reader of a none target is not walled,
+    // and a none reader of a real target is.
+    target->principal_id = 0xA11CEu;
+    bool w_none_real = devproc_none_walled(caller, target);
+    bool w_real_none = devproc_none_walled(target, caller);
+    target->principal_id = PRINCIPAL_NONE;
+
+    // Each capability axis still admits a none caller, as nonone() exempts eve; only
+    // CAP_HOSTOWNER buys through the read wall.
+    caller->caps = CAP_KILL;
+    bool k_cap = devproc_kill_authorized(caller, target);
+    bool w_kill = devproc_none_walled(caller, target);
+    caller->caps = CAP_DEBUG;
+    bool d_cap = devproc_debug_authorized(caller, target);
+    bool w_debug = devproc_none_walled(caller, target);
+    caller->caps = CAP_HOSTOWNER;
+    bool o_cap = devproc_owner_or_hostowner(caller, target);
+    bool w_host = devproc_none_walled(caller, target);
+    caller->caps = 0;
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+
+    TEST_ASSERT(k_real && d_real && o_real, "control: one real principal is one owner on every axis");
+    TEST_ASSERT(!w_real, "control: a real reader is not walled");
+    TEST_ASSERT(!k_none, "a none Proc cannot kill another none Proc (I-26)");
+    TEST_ASSERT(!d_none, "a none Proc cannot debug another none Proc (I-39)");
+    TEST_ASSERT(!o_none, "a none Proc does not own another none Proc's reads");
+    TEST_ASSERT(w_none, "a none reader is walled from another none Proc");
+    TEST_ASSERT(k_self, "a none Proc may kill itself");
+    TEST_ASSERT(d_self && o_self, "a none Proc owns itself for debug and the reads");
+    TEST_ASSERT(!w_self, "a none reader is never walled from itself");
+    TEST_ASSERT(!w_null, "a NULL caller (a kernel read) is not walled");
+    TEST_ASSERT(w_none_real, "a none reader is walled from a real principal's Proc");
+    TEST_ASSERT(!w_real_none, "a real reader of a none Proc is not walled");
+    TEST_ASSERT(k_cap, "CAP_KILL still admits a none caller's kill");
+    TEST_ASSERT(d_cap, "CAP_DEBUG still admits a none caller's debug");
+    TEST_ASSERT(o_cap, "CAP_HOSTOWNER still admits a none caller's reads");
+    TEST_ASSERT(!w_host, "CAP_HOSTOWNER buys through the read wall");
+    TEST_ASSERT(w_kill && w_debug, "CAP_KILL and CAP_DEBUG do not buy through the read wall");
+}
+
+// The wall on the real read paths: devproc_read_cb and /ctl/procs's rows, whose
+// wiring of the reader a predicate test cannot prove. A child reads kproc's files
+// and /ctl/procs three ways, one variable apart each: as none, as a real principal,
+// and as none holding CAP_HOSTOWNER. It exits and is reaped before any assertion.
+#define NONE_WALL_FILES 7
+static const char *const g_none_wall_files[NONE_WALL_FILES] = {
+    "status", "cmdline", "ns", "exe", "cwd", "maps", "ctl",
+};
+static const char *const g_none_wall_refused[NONE_WALL_FILES] = {
+    "a none reader is refused kproc's status",
+    "a none reader is refused kproc's cmdline",
+    "a none reader is refused kproc's ns",
+    "a none reader is refused kproc's exe",
+    "a none reader is refused kproc's cwd",
+    "a none reader is refused kproc's maps",
+    "a none reader is refused kproc's ctl",
+};
+struct none_wall_view {
+    long other[NONE_WALL_FILES];   // kproc's file: -T_E_ACCES refused, >= 0 bytes read
+    long own_status;
+    int  rows;                     // /ctl/procs data rows
+    int  own_rows;                 // ... of which the reader's own
+};
+static struct none_wall_view g_none_wall[3];   // [0] none, [1] real, [2] none + CAP_HOSTOWNER
+static char g_none_wall_buf[4096];
+static int  g_none_wall_self;
+
+static long none_wall_read(int pid, const char *name) {
+    struct Spoor *f = open_pidfile_for(pid, name, 0);
+    if (!f) return -2;                       // a failed open is not a refused read
+    char buf[256];
+    long got = devproc.read(f, buf, (long)sizeof buf, 0);
+    spoor_clunk(f);
+    return got;
+}
+
+static void none_wall_view_take(struct none_wall_view *v, struct Proc *self) {
+    for (int i = 0; i < NONE_WALL_FILES; i++)
+        v->other[i] = none_wall_read(0, g_none_wall_files[i]);
+    v->own_status = none_wall_read(self->pid, "status");
+    size_t len = devctl_format_procs_for_test(self, g_none_wall_buf, sizeof g_none_wall_buf);
+    v->rows = 0;
+    v->own_rows = 0;
+    size_t i = 0;
+    while (i < len && g_none_wall_buf[i] != '\n') i++;   // the header
+    for (i++; i < len; ) {
+        int pid = 0;
+        bool digits = false;
+        while (i < len && g_none_wall_buf[i] >= '0' && g_none_wall_buf[i] <= '9') {
+            pid = pid * 10 + (g_none_wall_buf[i] - '0');
+            digits = true;
+            i++;
+        }
+        if (digits) {
+            v->rows++;
+            if (pid == self->pid) v->own_rows++;
+        }
+        while (i < len && g_none_wall_buf[i] != '\n') i++;
+        i++;
+    }
+}
+
+static void none_wall_thunk(void *arg) {
+    (void)arg;
+    struct Proc *self = current_thread()->proc;
+    g_none_wall_self = self->pid;
+    u64 caps = __atomic_load_n(&self->caps, __ATOMIC_ACQUIRE) & ~CAP_HOSTOWNER;
+    __atomic_store_n(&self->caps, caps, __ATOMIC_RELEASE);
+    __atomic_store_n(&self->principal_id, PRINCIPAL_NONE, __ATOMIC_RELEASE);
+    none_wall_view_take(&g_none_wall[0], self);
+    __atomic_store_n(&self->principal_id, 0xC0FFEEu, __ATOMIC_RELEASE);
+    none_wall_view_take(&g_none_wall[1], self);
+    __atomic_store_n(&self->principal_id, PRINCIPAL_NONE, __ATOMIC_RELEASE);
+    __atomic_store_n(&self->caps, caps | CAP_HOSTOWNER, __ATOMIC_RELEASE);
+    none_wall_view_take(&g_none_wall[2], self);
+    exits("ok");
+}
+
+void test_devproc_none_walled(void) {
+    for (int k = 0; k < 3; k++) g_none_wall[k] = (struct none_wall_view){ 0 };
+    g_none_wall_self = 0;
+    int pid = rfork(RFPROC, none_wall_thunk, NULL);
+    int st = -1;
+    int reaped = (pid > 0) ? wait_pid_for(pid, 0, &st) : -1;
+    TEST_ASSERT(pid > 0, "rfork the reader child");
+    TEST_ASSERT(reaped == pid, "reap the reader child");
+    TEST_EXPECT_EQ(g_none_wall_self, pid, "the child read as itself");
+
+    const struct none_wall_view *n = &g_none_wall[0], *r = &g_none_wall[1], *h = &g_none_wall[2];
+    for (int i = 0; i < NONE_WALL_FILES; i++) {
+        TEST_EXPECT_EQ(n->other[i], (long)-T_E_ACCES, g_none_wall_refused[i]);
+        TEST_ASSERT(r->other[i] >= 0, "control: a real reader reads kproc's file");
+        TEST_ASSERT(h->other[i] >= 0, "a none reader holding CAP_HOSTOWNER reads kproc's file");
+    }
+    TEST_ASSERT(n->other[0] == -T_E_ACCES && r->other[0] > 0,
+                "kproc's status: refused to none, a whole render to a real reader");
+    TEST_ASSERT(n->own_status > 0, "a none reader reads its own status");
+    TEST_EXPECT_EQ(n->rows, 1, "a none reader's /ctl/procs has one row");
+    TEST_EXPECT_EQ(n->own_rows, 1, "... and it is the reader's own");
+    TEST_ASSERT(r->rows > 1 && r->own_rows == 1, "control: a real reader sees the tree");
+    TEST_ASSERT(h->rows > 1, "a none reader holding CAP_HOSTOWNER sees the tree");
 }
 
 // prowl-3b: the OQ-4 deep-internals gate for /proc/<pid>/sched -- owner OR
@@ -869,8 +1056,8 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);
     TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
-    TEST_EXPECT_EQ(devproc.write(nctl, kill_cmd, kn, 0), (long)-1,
-                   "non-owner with no cap is denied (-1)");
+    TEST_EXPECT_EQ(devproc.write(nctl, kill_cmd, kn, 0), (long)-T_E_ACCES,
+                   "non-owner with no cap is denied (EACCES)");
     TEST_EXPECT_EQ(other->group_exit_msg, (const char *)NULL,
                    "denied target NOT terminated (group_exit_msg NULL)");
     spoor_clunk(nctl);
@@ -903,6 +1090,12 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     TEST_ASSERT(dctl != NULL, "open zombie-target ctl");
     TEST_EXPECT_EQ(devproc.write(dctl, kill_cmd, kn, 0), (long)-1,
                    "kill of a non-ALIVE target is refused (-1)");
+    // The same zombie under another principal: authority is asked before
+    // liveness, so a refused caller reads EACCES whether the target is ALIVE or
+    // not -- no liveness bit. The owner's -1 above is the control.
+    dead->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    TEST_EXPECT_EQ(devproc.write(dctl, kill_cmd, kn, 0), (long)-T_E_ACCES,
+                   "a non-owner's kill of a ZOMBIE is refused (EACCES), as of an ALIVE target");
     TEST_EXPECT_EQ(dead->group_exit_msg, (const char *)NULL,
                    "non-ALIVE target not terminated");
     spoor_clunk(dctl);
@@ -969,8 +1162,8 @@ void test_devproc_ctl_suspend_resume_dispatch(void) {
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);
     TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
-    TEST_EXPECT_EQ(devproc.write(nctl, suspend_cmd, sn, 0), (long)-1,
-                   "non-owner suspend denied (-1) -- the I-26 gate");
+    TEST_EXPECT_EQ(devproc.write(nctl, suspend_cmd, sn, 0), (long)-T_E_ACCES,
+                   "non-owner suspend denied (EACCES) -- the I-26 gate");
     TEST_EXPECT_EQ((int)other->job_stop_req, 0, "denied target NOT stopped");
     spoor_clunk(nctl);
     proc_test_unlink(other);
@@ -987,6 +1180,10 @@ void test_devproc_ctl_suspend_resume_dispatch(void) {
     TEST_ASSERT(dctl2 != NULL, "open zombie-target ctl");
     TEST_EXPECT_EQ(devproc.write(dctl2, suspend_cmd, sn, 0), (long)-1,
                    "suspend of a non-ALIVE target refused even for the owner");
+    // Authority before liveness, as kill (d): the owner's -1 above is the control.
+    dead2->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    TEST_EXPECT_EQ(devproc.write(dctl2, suspend_cmd, sn, 0), (long)-T_E_ACCES,
+                   "a non-owner's suspend of a ZOMBIE is refused (EACCES), as of an ALIVE target");
     TEST_EXPECT_EQ((int)dead2->job_stop_req, 0, "non-ALIVE target NOT stopped");
     spoor_clunk(dctl2);
     proc_test_unlink(dead2);
@@ -1194,7 +1391,7 @@ void test_devproc_debug_cap_cover_attach(void) {
     TEST_ASSERT(ctl != NULL, "open the elevated target's ctl");
     TEST_EXPECT_EQ(cover_ret, an, "control: a covering owner's attach succeeds");
     TEST_EXPECT_EQ(cover_own, (void *)ctl, "control: the covering attach claimed the slot");
-    TEST_EXPECT_EQ(bare_ret, (long)-1, "an uncovered same-principal attach is refused");
+    TEST_EXPECT_EQ(bare_ret, (long)-T_E_ACCES, "an uncovered same-principal attach is refused (EACCES)");
     TEST_EXPECT_EQ(bare_own, (void *)NULL, "the refused attach claimed no slot");
 }
 
@@ -1376,12 +1573,12 @@ void test_devproc_dump_seal_disclosure(void) {
                 "premise: the runner holds no CAP_HOSTOWNER, so the cross-principal leg means something");
     for (int i = 0; i < NFILES; i++) {
         TEST_ASSERT(before[i] >= 0, files[i].control_msg);
-        if (files[i].image) TEST_ASSERT(after[i] == -1, files[i].sealed_msg);
+        if (files[i].image) TEST_ASSERT(after[i] == -T_E_ACCES, files[i].sealed_msg);
         else                TEST_ASSERT(after[i] >= 0, files[i].sealed_msg);
     }
     TEST_ASSERT(other_maps >= 0, "control: an unsealed cross-principal maps read is ambient");
-    TEST_EXPECT_EQ(other_environ, (long)-1,
-                   "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER");
+    TEST_EXPECT_EQ(other_environ, (long)-T_E_ACCES,
+                   "environ refuses a cross-principal reader that holds no CAP_HOSTOWNER (EACCES)");
 }
 
 // The seal's SCOPE at the predicate level: the extraction gate is sealed and the
@@ -1513,9 +1710,18 @@ void test_devproc_debug_attach_detach_lifecycle(void) {
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);
     TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
-    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-1,
-                   "non-owner without CAP_DEBUG is denied (-1)");
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-T_E_ACCES,
+                   "non-owner without CAP_DEBUG is denied (EACCES)");
     TEST_EXPECT_EQ((void *)other->debug_owner, (void *)NULL, "denied target NOT attached");
+    // Authority before liveness, as kill: the same target as a ZOMBIE answers the
+    // refused caller EACCES again, and its owner -1.
+    other->state = PROC_STATE_ZOMBIE;
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-T_E_ACCES,
+                   "a non-owner's attach of a ZOMBIE is refused (EACCES), as of an ALIVE target");
+    other->principal_id = caller->principal_id;
+    TEST_EXPECT_EQ(devproc.write(nctl, attach_cmd, an, 0), (long)-1,
+                   "the owner's attach of a ZOMBIE is refused (-1)");
+    TEST_EXPECT_EQ((void *)other->debug_owner, (void *)NULL, "a ZOMBIE is NOT attached");
     spoor_clunk(nctl);
     proc_test_unlink(other);
     other->state = PROC_STATE_ZOMBIE;
@@ -1524,8 +1730,8 @@ void test_devproc_debug_attach_detach_lifecycle(void) {
     // (d) kproc (pid 0) attach is refused end-to-end (undebuggable kernel).
     struct Spoor *kctl = open_ctl_for_pid(0);
     TEST_ASSERT(kctl != NULL, "open /proc/0/ctl (kproc)");
-    TEST_EXPECT_EQ(devproc.write(kctl, attach_cmd, an, 0), (long)-1,
-                   "attach to kproc is refused (-1)");
+    TEST_EXPECT_EQ(devproc.write(kctl, attach_cmd, an, 0), (long)-T_E_ACCES,
+                   "attach to kproc is refused (EACCES)");
     TEST_EXPECT_EQ((void *)kproc()->debug_owner, (void *)NULL, "kproc slot untouched");
     spoor_clunk(kctl);
 }
@@ -1915,6 +2121,95 @@ void test_devproc_debug_stop_start_resume(void) {
                    "ctl-fd close resumes the target (ReleaseSlot via the close hook)");
     TEST_EXPECT_EQ((void *)tgt->debug_owner, (void *)NULL, "close freed the slot");
 
+    // (g) A step's wait ends when its slot is released: a detach from another
+    //     thread of the debugger resumes the target, whose step trap then finds
+    //     no owner and delivers no stop, so waiting for the re-stop would last
+    //     until the target exits. /proc/<pid>/wait (ctl NULL) is not slot-bound.
+    extern int devproc_wait_state_for_test(int pid, struct Proc *caller,
+                                           struct Spoor *ctl);
+    struct Spoor *gctl = open_ctl_for_pid(tgt->pid);
+    long g_attach = 0, g_stop = 0, g_detach = 0;
+    int g_owned = -9, g_released = -9, g_wait = -9;
+    if (gctl) {
+        g_attach   = devproc.write(gctl, attach_cmd, an, 0);
+        g_stop     = devproc.write(gctl, stop_cmd, sn, 0);
+        g_owned    = devproc_wait_state_for_test(tgt->pid, caller, gctl);
+        g_detach   = devproc.write(gctl, detach_cmd, dn, 0);
+        g_released = devproc_wait_state_for_test(tgt->pid, caller, gctl);
+        g_wait     = devproc_wait_state_for_test(tgt->pid, caller, NULL);
+        spoor_clunk(gctl);
+    }
+
+    // (f) A dying target is gone to stop and waitstop: its stop will never take
+    //     and the stopped-only surface refuses it, so the scan they poll ends
+    //     the wait instead of counting threads -- a dying Proc's closer no
+    //     longer parks for a stop (DEBUG-FS-DESIGN 5g), and waiting for it
+    //     would last the whole exit close. Thread-less, the target passes the
+    //     parked test vacuously, so only its death can end the wait early.
+    struct Spoor *dctl = open_ctl_for_pid(tgt->pid);
+    long f_attach = 0, f_stop = 0;
+    int f_live = -9, f_dying = -9, f_step_live = -9, f_step = -9, f_wait = -9;
+    if (dctl) {
+        f_attach    = devproc.write(dctl, attach_cmd, an, 0);
+        f_stop      = devproc.write(dctl, stop_cmd, sn, 0);
+        f_live      = devproc_debug_stop_state_for_test(tgt->pid, dctl);
+        f_step_live = devproc_wait_state_for_test(tgt->pid, caller, dctl);
+        __atomic_store_n(&tgt->group_exit_msg, "killed", __ATOMIC_RELEASE);
+        f_dying     = devproc_debug_stop_state_for_test(tgt->pid, dctl);
+        f_step      = devproc_wait_state_for_test(tgt->pid, caller, dctl);
+        f_wait      = devproc_wait_state_for_test(tgt->pid, caller, NULL);
+        spoor_clunk(dctl);   // the close releases the slot and resumes
+    }
+
+    // Both legs are recorded: release the target before their verdicts, so a
+    // failing one leaves nothing linked.
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_ASSERT(gctl != NULL, "open target ctl (step wait)");
+    TEST_EXPECT_EQ(g_attach, an, "attach returns n (step wait)");
+    TEST_EXPECT_EQ(g_stop, sn, "stop returns n (step wait)");
+    TEST_EXPECT_EQ(g_owned, 1, "the owned, stopped target reads stopped to the step's scan");
+    TEST_EXPECT_EQ(g_detach, dn, "detach returns n (step wait)");
+    TEST_EXPECT_EQ(g_released, 2, "the released slot ends the step's wait");
+    TEST_EXPECT_EQ(g_wait, 0,
+                   "the resumed target reads not-yet to /proc/<pid>/wait, which the slot does not bind");
+    // The scan's state only ends the wait through its verdict: a released slot
+    // must END it, where a live, not-yet-stopped target polls on.
+    extern int devproc_wait_verdict_for_test(int state);
+    int v_released = devproc_wait_verdict_for_test(2);
+    int v_gone     = devproc_wait_verdict_for_test(-1);
+    int v_stopped  = devproc_wait_verdict_for_test(1);
+    int v_denied   = devproc_wait_verdict_for_test(-2);
+    int v_notyet   = devproc_wait_verdict_for_test(0);
+    TEST_EXPECT_EQ(v_released, 3,
+                   "the released slot's verdict ends the step's wait, apart from an exit");
+    TEST_EXPECT_EQ(v_gone, 0, "a gone target's verdict ends the wait");
+    TEST_EXPECT_EQ(v_stopped, 1, "a stopped target's verdict ends it stopped");
+    TEST_EXPECT_EQ(v_denied, -T_E_ACCES, "a denied scan's verdict ends it refused (EACCES)");
+    TEST_ASSERT(v_notyet != 1 && v_notyet != 0 && v_notyet != -1 && v_notyet != v_released,
+                "a live target not yet stopped polls on");
+    // And the step write answers each verdict: only a re-stop completes the step.
+    extern long devproc_step_result_for_test(int ev, long n);
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_stopped, 5L), 5L,
+                   "a re-stopped target completes the step");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_gone, 5L), (long)(-T_E_SRCH),
+                   "a step whose target is gone fails ESRCH");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_released, 5L), (long)(-T_E_SRCH),
+                   "a step whose slot was released fails ESRCH, never success");
+    TEST_EXPECT_EQ(devproc_step_result_for_test(v_denied, 5L), (long)-T_E_ACCES, "a denied step fails (EACCES)");
+
+    TEST_ASSERT(dctl != NULL, "open target ctl (dying)");
+    TEST_EXPECT_EQ(f_attach, an, "attach returns n (dying)");
+    TEST_EXPECT_EQ(f_stop, sn, "stop returns n (dying)");
+    TEST_EXPECT_EQ(f_live, 1, "the stopped target reads stopped while its group lives");
+    TEST_EXPECT_EQ(f_dying, -1, "the dying target reads gone, which ends the wait");
+    TEST_EXPECT_EQ(f_step_live, 1,
+                   "the stopped target reads stopped to the step's scan while it lives");
+    TEST_EXPECT_EQ(f_step, -1, "the dying target is gone to the step's wait too");
+    TEST_EXPECT_EQ(f_wait, 0, "/proc/<pid>/wait still waits for a dying target's exit");
+
     // (F3, #95-audit) devproc_focus_thread selection: a matched in-list focus is
     // returned; a foreign / NULL focus falls back to head. The deterministic twin
     // of the /ambush-probe stage-C multi-M E2E (the kproc harness cannot reproduce a
@@ -1945,10 +2240,6 @@ void test_devproc_debug_stop_start_resume(void) {
     ft->debug_focus_thread = NULL;
     ft->state = PROC_STATE_ZOMBIE;
     proc_free(ft);
-
-    proc_test_unlink(tgt);
-    tgt->state = PROC_STATE_ZOMBIE;
-    proc_free(tgt);
 }
 
 // 8a-2c F1: a whole-Proc stop SUPERSEDES an in-flight single-step. proc_debug_
@@ -1958,6 +2249,64 @@ void test_devproc_debug_stop_start_resume(void) {
 // one-instruction stop after a `continue`). A minimal synthetic head thread
 // carries the pending step; no kstack/trapframe needed (F1 touches only the two
 // step flags). Non-vacuous: pre-fix the deliver left debug_ss_armed set.
+// A detach, or the ctl-fd close's release, cancels a pending step as a
+// whole-Proc stop does (8a-2c F1): left armed, the head's step trap would stop
+// the target for whoever attached next, before it asked. A zeroed stack Thread
+// carries the armed step; the target is linked so its ctl resolves.
+void test_devproc_debug_release_cancels_step(void);
+void test_devproc_debug_release_cancels_step(void) {
+    struct Thread *tt = current_thread();
+    TEST_ASSERT(tt && tt->proc, "test thread has a proc");
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc release-cancel target");
+    tgt->principal_id = tt->proc->principal_id;   // owner -> attach authorized
+    tgt->state        = PROC_STATE_ALIVE;
+    struct Thread th;
+    for (size_t i = 0; i < sizeof(th); i++) ((u8 *)&th)[i] = 0;
+    th.magic        = THREAD_MAGIC;
+    th.state        = THREAD_SLEEPING;
+    th.next_in_proc = NULL;
+    tgt->threads    = &th;
+    proc_test_link(tgt);
+
+    const char attach_cmd[] = "attach";
+    const char detach_cmd[] = "detach";
+    const long an = (long)sizeof(attach_cmd) - 1;
+    const long dn = (long)sizeof(detach_cmd) - 1;
+    long a1 = -9, d1 = -9, a2 = -9;
+    bool det_ss = true, det_va = true, rel_ss = true, rel_va = true;
+    struct Spoor *c1 = open_ctl_for_pid(tgt->pid);
+    if (c1) {
+        a1 = devproc.write(c1, attach_cmd, an, 0);
+        th.debug_ss_armed    = true;          // a step in flight...
+        th.debug_stepover_va = 0xBEEF000ull;  // ...over this bp
+        d1 = devproc.write(c1, detach_cmd, dn, 0);
+        det_ss = th.debug_ss_armed;
+        det_va = th.debug_stepover_va != 0;
+        spoor_clunk(c1);
+    }
+    struct Spoor *c2 = open_ctl_for_pid(tgt->pid);
+    if (c2) {
+        a2 = devproc.write(c2, attach_cmd, an, 0);
+        th.debug_ss_armed    = true;
+        th.debug_stepover_va = 0xBEEF000ull;
+        spoor_clunk(c2);   // no detach: the close hook's release
+        rel_ss = th.debug_ss_armed;
+        rel_va = th.debug_stepover_va != 0;
+    }
+    proc_test_unlink(tgt);
+    tgt->threads = NULL;              // un-dangle before proc_free
+    tgt->state   = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_ASSERT(c1 != NULL && c2 != NULL, "open the target's ctl twice");
+    TEST_EXPECT_EQ(a1, an, "attach returns n");
+    TEST_EXPECT_EQ(d1, dn, "detach returns n");
+    TEST_ASSERT(!det_ss && !det_va, "a detach cancels the pending step");
+    TEST_EXPECT_EQ(a2, an, "a re-attach returns n");
+    TEST_ASSERT(!rel_ss && !rel_va, "the ctl-fd close's release cancels the pending step");
+}
+
 void test_devproc_debug_step_cancel_on_stop(void) {
     struct Thread *tt = current_thread();
     TEST_ASSERT(tt && tt->proc, "test thread has a proc");
@@ -2088,8 +2437,8 @@ void test_devproc_debug_mem(void) {
     TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_DEBUG)),
                 "test caller lacks CAP_HOSTOWNER/CAP_DEBUG (the denied case is meaningful)");
     tgt->principal_id = (caller->principal_id == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
-    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-1,
-                   "mem read by a non-owner (no CAP_DEBUG) is refused (I-39)");
+    TEST_EXPECT_EQ(devproc.read(mem, buf, 64, (s64)RW_VA), (long)-T_E_ACCES,
+                   "mem read by a non-owner (no CAP_DEBUG) is refused (I-39, EACCES)");
 
     // The dump seal refuses the READ direction only (DEBUG-FS-DESIGN 3.2): reading
     // memory is extraction; writing it is control and answers to NOTRACE. LAST,
@@ -2113,7 +2462,7 @@ void test_devproc_debug_mem(void) {
     proc_free(tgt);
 
     TEST_EXPECT_EQ(nd_control, 64L, "control: the owner's mem read of a stopped target returns the bytes");
-    TEST_EXPECT_EQ(nd_read, (long)-1, "the dump seal refuses a mem READ");
+    TEST_EXPECT_EQ(nd_read, (long)-T_E_ACCES, "the dump seal refuses a mem READ (EACCES)");
     TEST_EXPECT_EQ(nd_write, 64L, "the dump seal does not refuse a mem WRITE -- that is control, NOTRACE's");
     TEST_ASSERT(nd_landed == 0x33, "the mem write to the NODUMP target landed");
     TEST_ASSERT(mem_untainted_before, "premise: the mem target was untainted before the write");
@@ -2296,8 +2645,8 @@ void test_devproc_debug_regs(void) {
                    "regs of an EXITING head thread is refused (HF1 backstop)");
     TEST_EXPECT_EQ(nd_regs_ctl, (long)sizeof(ur), "control: regs reads before the seal");
     TEST_EXPECT_EQ(nd_fp_ctl,   (long)sizeof(uf), "control: fpregs reads before the seal");
-    TEST_EXPECT_EQ(nd_regs_rd,  (long)-1, "the dump seal refuses a regs READ");
-    TEST_EXPECT_EQ(nd_fp_rd,    (long)-1, "the dump seal refuses an fpregs READ");
+    TEST_EXPECT_EQ(nd_regs_rd,  (long)-T_E_ACCES, "the dump seal refuses a regs READ (EACCES)");
+    TEST_EXPECT_EQ(nd_fp_rd,    (long)-T_E_ACCES, "the dump seal refuses an fpregs READ (EACCES)");
     TEST_EXPECT_EQ(nd_regs_wr,  (long)sizeof(wr), "the dump seal does not refuse a regs WRITE (control)");
     TEST_EXPECT_EQ(nd_fp_wr,    (long)sizeof(uf), "the dump seal does not refuse an fpregs WRITE (control)");
 }
@@ -2464,7 +2813,7 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     TEST_EXPECT_EQ(kr_cap.sp,        0xC096ull,           "kregs (CAP tier): sp");
     TEST_EXPECT_EQ(kr_cap.tpidr_el0, 0xC104ull,           "kregs (CAP tier): tpidr_el0");
     TEST_EXPECT_EQ(kregs_wlen,   (long)-1,            "kregs is RO (write refused)");
-    TEST_EXPECT_EQ(nd_kregs, (long)-1, "the dump seal refuses a kregs READ (it carries tpidr_el0)");
+    TEST_EXPECT_EQ(nd_kregs, (long)-T_E_ACCES, "the dump seal refuses a kregs READ (it carries tpidr_el0; EACCES)");
     TEST_ASSERT(nd_kstack > 0, "control: kstack is the kernel's own state -- it still reads when sealed");
 
     // kstack: the symbolized kernel fp-chain walk. Three frames: #0 = ctx.lr
@@ -2483,7 +2832,7 @@ void test_devproc_debug_kregs_kstack_wait(void) {
     // wait: stopped / denied / exited (all level-triggered immediate returns).
     TEST_EXPECT_EQ(wl, 8L, "wait on a stopped target returns 'stopped\\n'");
     TEST_ASSERT(wl == 8 && contains(wbuf, (size_t)wl, "stopped"), "wait status = stopped");
-    TEST_EXPECT_EQ(wl_nonowner, (long)-1, "wait by a non-owner (no CAP_DEBUG) is refused (I-39)");
+    TEST_EXPECT_EQ(wl_nonowner, (long)-T_E_ACCES, "wait by a non-owner (no CAP_DEBUG) is refused (I-39, EACCES)");
     TEST_EXPECT_EQ(el, 7L, "wait on an exiting target returns 'exited\\n'");
     TEST_ASSERT(el == 7 && contains(ebuf, (size_t)el, "exited"), "wait status = exited");
 }
@@ -2602,7 +2951,7 @@ void test_devproc_debug_kstack_settled(void) {
     TEST_ASSERT(slen_running > 0,                             "8b: running head produced text");
     TEST_ASSERT(contains(rbuf, (size_t)slen_running, "running"), "8b: running head reports <running>");
     // I-39 authorization preserved for the inspect tier.
-    TEST_EXPECT_EQ(slen_nonowner, (long)-1, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39)");
+    TEST_EXPECT_EQ(slen_nonowner, (long)-T_E_ACCES, "8b: non-owner (no CAP_DEBUG) inspect refused (I-39, EACCES)");
     // F3: an EXITING head -> empty (the death-adjacent guard; the relaxed gate no
     // longer rejects a dying target, so the format-time EXITING guard is load-bearing).
     TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: EXITING head -> empty read (never walk a dying head)");
@@ -2787,6 +3136,692 @@ void test_devproc_maps(void) {
     long stack_at = index_of(buf, (size_t)n, " stack\n");
     TEST_ASSERT(guard_at >= 0 && stack_at >= 0 && guard_at < stack_at,
                 "V-4b-2: rows are emitted in ascending-VA order");
+}
+
+// B-2b: who may see where a Proc's code aliases lie. Driven with synthetic
+// (caller, target) pairs, the prowl-5-F4 precedent; the read path that consults it
+// is pinned end to end by test_devproc_maps_code_redacted.
+void test_devproc_maps_code_visible(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+    target->caps         = 0;
+
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    bool foreign = devproc_maps_code_visible(caller, target);
+    caller->principal_id = 0xA11CEu;
+    bool owner = devproc_maps_code_visible(caller, target);
+    target->caps = CAP_JIT;                          // a cap the owner lacks
+    bool uncovered = devproc_maps_code_visible(caller, target);
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_DEBUG;
+    bool debug = devproc_maps_code_visible(caller, target);
+    target->proc_flags |= PROC_FLAG_NOTRACE;
+    bool debug_notrace = devproc_maps_code_visible(caller, target);
+    bool self_notrace  = devproc_maps_code_visible(target, target);
+    bool self_debug    = devproc_debug_authorized(target, target);
+    bool nobody        = devproc_maps_code_visible(NULL, target);
+
+    caller->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(target);
+
+    TEST_ASSERT(!foreign, "B-2b: a non-owner without caps does not see code addresses");
+    TEST_ASSERT(owner, "B-2b: the owner whose caps cover the target does");
+    TEST_ASSERT(!uncovered, "B-2b: an owner lacking one of the target's caps does not");
+    TEST_ASSERT(debug, "B-2b: CAP_DEBUG does");
+    TEST_ASSERT(!debug_notrace, "B-2b: nobody else does once the target is NOTRACE");
+    TEST_ASSERT(!self_debug, "B-2b: (control) I-39 refuses a NOTRACE Proc even to itself");
+    TEST_ASSERT(self_notrace, "B-2b: but a Proc always sees its own code addresses");
+    TEST_ASSERT(!nobody, "B-2b: a reader with no Proc sees none");
+}
+
+s64 sys_jit_create_region(struct Proc *p, u64 length_raw, u64 *out_w, u64 *out_x);
+s64 sys_jit_create_sealed_region(struct Proc *p, const u8 *ksrc, u64 usrc,
+                                 u64 length_raw, u64 *out_exec);
+s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
+
+// "0x<hex>-": how a maps row starting at `va` begins (fmt_hex's format).
+static void maps_va_prefix(u64 va, char out[24]) {
+    char d[16];
+    int m = 0, n = 0;
+    out[n++] = '0'; out[n++] = 'x';
+    if (va == 0) d[m++] = '0';
+    while (va) { u64 x = va & 0xfu; d[m++] = (char)(x < 10u ? '0' + x : 'a' + (x - 10u)); va >>= 4; }
+    while (m) out[n++] = d[--m];
+    out[n++] = '-';
+    out[n] = '\0';
+}
+
+static long maps_count(const char *buf, size_t n, const char *needle) {
+    long c = 0;
+    size_t k = 0;
+    while (needle[k]) k++;
+    for (size_t i = 0; k && i + k <= n; i++) {
+        size_t j = 0;
+        while (j < k && buf[i + j] == needle[j]) j++;
+        if (j == k) c++;
+    }
+    return c;
+}
+
+static long maps_read(int pid, char *buf, long cap) {
+    long n = -2;
+    struct Spoor *c = open_pidfile_for(pid, "maps", 0);
+    if (c) { n = devproc.read(c, buf, cap - 1, 0); spoor_clunk(c); }
+    buf[n > 0 ? n : 0] = '\0';
+    return n;
+}
+
+static u8 g_maps_thunk[12] = { 0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 };
+
+// B-2b audit F2: /proc/<pid>/maps of a Proc holding code regions. A reader without
+// debug authority gets every code row with zeroed addresses, after every other row
+// and grouped by permission, so its listing is the SAME bytes whichever addresses
+// the aliases drew; the owner (one variable away: the target's principal) gets
+// the real addresses. The anon page at the window's top is above every alias, so
+// a zeroed row left in address order would precede it. The target is a live JIT
+// holder and the reader holds CAP_JIT for both reads, so the owner's caps cover it.
+void test_devproc_maps_code_redacted(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
+    const u32 self_principal = th->proc->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    const u64 low_va = 0x0000000010000000ull;
+    const u64 top_va = EXEC_USER_BURROW_TOP - PAGE_SIZE;
+    const u64 jit_len = 2ull * PAGE_SIZE;
+
+    static char a1[2048], a2[2048], b1[2048], b2[2048];
+    long na1 = -2, na2 = -2, nb1 = -2, nb2 = -2;
+    int  rc_low = -1, rc_top = -1;
+    s64  rc_c1 = -1, rc_s1 = -1, rc_c2 = -1, rc_s2 = -1, rc_d1 = -1, rc_e1 = -1;
+    u64  w1 = 0, x1 = 0, s1 = 0, w2 = 0, x2 = 0, s2 = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    tgt->caps  = CAP_JIT;
+    proc_test_link(tgt);
+
+    struct Burrow *bl = burrow_create_anon(PAGE_SIZE, false);
+    rc_low = bl ? burrow_map(tgt, bl, low_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bl) burrow_unref(bl);
+    struct Burrow *bt = burrow_create_anon(PAGE_SIZE, false);
+    rc_top = bt ? burrow_map(tgt, bt, top_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bt) burrow_unref(bt);
+
+    rc_c1 = sys_jit_create_region(tgt, jit_len, &w1, &x1);
+    rc_s1 = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s1);
+    rp->caps |= CAP_JIT;
+    tgt->principal_id = foreign;
+    na1 = maps_read(tgt->pid, a1, (long)sizeof a1);
+    tgt->principal_id = self_principal;
+    nb1 = maps_read(tgt->pid, b1, (long)sizeof b1);
+
+    // The same shapes again, at whatever addresses the aliases draw this time.
+    rc_d1 = rc_c1 == 0 ? sys_jit_destroy_for_proc(tgt, w1) : -1;
+    rc_e1 = rc_s1 == 0 ? sys_jit_destroy_for_proc(tgt, s1) : -1;
+    rc_c2 = sys_jit_create_region(tgt, jit_len, &w2, &x2);
+    rc_s2 = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s2);
+    tgt->principal_id = foreign;
+    na2 = maps_read(tgt->pid, a2, (long)sizeof a2);
+    tgt->principal_id = self_principal;
+    nb2 = maps_read(tgt->pid, b2, (long)sizeof b2);
+    rp->caps = rp_caps;
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)rc_low, 0L, "mapped the low anon page");
+    TEST_EXPECT_EQ((long)rc_top, 0L, "mapped the anon page at the window's top");
+    TEST_EXPECT_EQ(rc_c1, 0, "created a writer/exec region");
+    TEST_EXPECT_EQ(rc_s1, 0, "created a sealed region");
+    TEST_EXPECT_EQ(rc_d1, 0, "destroyed the region");
+    TEST_EXPECT_EQ(rc_e1, 0, "destroyed the sealed region");
+    TEST_EXPECT_EQ(rc_c2, 0, "created the region again");
+    TEST_EXPECT_EQ(rc_s2, 0, "created the sealed region again");
+    TEST_ASSERT(na1 > 0 && na2 > 0 && nb1 > 0 && nb2 > 0, "all four reads returned rows");
+
+    char pw[24], px[24], ps[24], ptop[24];
+    maps_va_prefix(w1, pw); maps_va_prefix(x1, px); maps_va_prefix(s1, ps);
+    maps_va_prefix(top_va, ptop);
+
+    // The owner: real addresses (the positive control for every negative below).
+    TEST_ASSERT(contains(b1, (size_t)nb1, pw) && contains(b1, (size_t)nb1, px) &&
+                contains(b1, (size_t)nb1, ps),
+                "B-2b: the owner reads every code alias's address");
+
+    // The foreign reader: none of them.
+    TEST_ASSERT(!contains(a1, (size_t)na1, pw), "B-2b: a foreign reader does not see the writer's address");
+    TEST_ASSERT(!contains(a1, (size_t)na1, px), "B-2b: nor the exec alias's");
+    TEST_ASSERT(!contains(a1, (size_t)na1, ps), "B-2b: nor the sealed alias's");
+    TEST_ASSERT(contains(a1, (size_t)na1, "0x10000000-0x10001000 rw-p 0x0 anon - -\n"),
+                "B-2b: the other rows keep their addresses");
+    TEST_EXPECT_EQ(maps_count(a1, (size_t)na1, "0x0-0x0 rw-p 0x0 code - -\n"), 1L,
+                   "B-2b: one zeroed writer row");
+    TEST_EXPECT_EQ(maps_count(a1, (size_t)na1, "0x0-0x0 r-xp 0x0 code - -\n"), 1L,
+                   "B-2b: one zeroed exec row");
+    TEST_EXPECT_EQ(maps_count(a1, (size_t)na1, "0x0-0x0 --xp 0x0 code - -\n"), 1L,
+                   "B-2b: one zeroed execute-only row");
+
+    // Placement: after every other row, grouped by permission class.
+    long top_at = index_of(a1, (size_t)na1, ptop);
+    long rw_at  = index_of(a1, (size_t)na1, "0x0-0x0 rw-p");
+    long xo_at  = index_of(a1, (size_t)na1, "0x0-0x0 --xp");
+    long rx_at  = index_of(a1, (size_t)na1, "0x0-0x0 r-xp");
+    TEST_ASSERT(top_at >= 0 && rw_at > top_at && xo_at > top_at && rx_at > top_at,
+                "B-2b: the zeroed rows follow the highest other row");
+    TEST_ASSERT(rw_at < xo_at && xo_at < rx_at, "B-2b: in permission-class order");
+
+    // Independence: new addresses, the same bytes for the foreign reader -- while
+    // the owner's listing changed, so the addresses really did move.
+    bool same_a = na1 == na2;
+    for (long i = 0; same_a && i < na1; i++) if (a1[i] != a2[i]) same_a = false;
+    bool same_b = nb1 == nb2;
+    for (long i = 0; same_b && i < nb1; i++) if (b1[i] != b2[i]) same_b = false;
+    TEST_ASSERT(!same_b, "B-2b: (control) the owner's listing changed with the addresses");
+    TEST_ASSERT(same_a, "B-2b: the foreign reader's listing did not");
+}
+
+// B-2b audit F2: a listing the buffer truncates prints no code rows to a reader
+// without debug authority. A cluster of anon pages at the window's top -- more
+// rows than the buffer holds -- puts the truncation above every alias, so the
+// walk has counted the code rows by the time it stops; printing them would say
+// they lie below the cut. The owner's listing, which shows the aliases in place,
+// is the control that they really are below it.
+void test_devproc_maps_code_truncated(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
+    const u32 self_principal = th->proc->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    enum { CLUSTER = 64 };                            // > 2048 / ~48-byte rows
+    const u64 cluster_va = EXEC_USER_BURROW_TOP - 2ull * CLUSTER * PAGE_SIZE;
+
+    static char fa[2048], ow[2048];
+    long nf = -2, no = -2;
+    int mapped = 0;
+    s64 rc = -1;
+    u64 w = 0, x = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+    for (int i = 0; i < CLUSTER; i++) {              // a page, then a hole: no two adjacent
+        struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
+        if (b && burrow_map(tgt, b, cluster_va + 2ull * (u64)i * PAGE_SIZE, PAGE_SIZE,
+                            VMA_PROT_RW) == 0)
+            mapped++;
+        if (b) burrow_unref(b);
+    }
+    tgt->caps = CAP_JIT;
+    rc = sys_jit_create_region(tgt, 2ull * PAGE_SIZE, &w, &x);
+    rp->caps |= CAP_JIT;
+    tgt->principal_id = foreign;
+    nf = maps_read(tgt->pid, fa, (long)sizeof fa);
+    tgt->principal_id = self_principal;
+    no = maps_read(tgt->pid, ow, (long)sizeof ow);
+    rp->caps = rp_caps;
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)mapped, (long)CLUSTER, "mapped the cluster");
+    TEST_EXPECT_EQ(rc, 0, "created a writer/exec region below it");
+    TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
+    char last[24];
+    maps_va_prefix(cluster_va + 2ull * (CLUSTER - 1) * PAGE_SIZE, last);
+    TEST_ASSERT(!contains(ow, (size_t)no, last) && !contains(fa, (size_t)nf, last),
+                "B-2b: (premise) the buffer truncates both listings inside the cluster");
+    TEST_EXPECT_EQ(maps_count(ow, (size_t)no, " code - -\n"), 2L,
+                   "B-2b: (control) the owner sees both aliases, below the cut");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, " code - -\n"), 0L,
+                   "B-2b: a foreign reader's truncated listing prints no code row");
+    TEST_ASSERT(fa[nf - 1] == '\n', "B-2b: and ends on a whole row");
+}
+
+// B-2b audit r2: the zeroed rows of a complete listing take their room from the
+// end -- whole rows dropped until they fit. Fifty 40-byte anon rows below the
+// window fill 2035 of 2048 bytes, and three 26-byte zeroed rows need 78: the foreign
+// reader's listing loses the last two anon rows and carries all three zeroed
+// ones. The owner's, which prints the aliases in place above the anon rows, keeps
+// all fifty -- the premise that they fit.
+void test_devproc_maps_code_trimmed(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
+    const u32 self_principal = rp->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    enum { ROWS = 50 };
+    const u64 base_va = 0x0000000010000000ull;
+
+    static char fa[2048], ow[2048];
+    long nf = -2, no = -2;
+    int mapped = 0;
+    s64 rc_c = -1, rc_s = -1;
+    u64 w = 0, x = 0, s = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    tgt->caps  = CAP_JIT;
+    proc_test_link(tgt);
+    for (int i = 0; i < ROWS; i++) {                 // a page, then a hole: no two adjacent
+        struct Burrow *b = burrow_create_anon(PAGE_SIZE, false);
+        if (b && burrow_map(tgt, b, base_va + 2ull * (u64)i * PAGE_SIZE, PAGE_SIZE,
+                            VMA_PROT_RW) == 0)
+            mapped++;
+        if (b) burrow_unref(b);
+    }
+    rc_c = sys_jit_create_region(tgt, 2ull * PAGE_SIZE, &w, &x);
+    rc_s = sys_jit_create_sealed_region(tgt, g_maps_thunk, 0, sizeof g_maps_thunk, &s);
+    rp->caps |= CAP_JIT;
+    tgt->principal_id = foreign;
+    nf = maps_read(tgt->pid, fa, (long)sizeof fa);
+    tgt->principal_id = self_principal;
+    no = maps_read(tgt->pid, ow, (long)sizeof ow);
+    rp->caps = rp_caps;
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)mapped, (long)ROWS, "mapped the anon rows");
+    TEST_EXPECT_EQ(rc_c, 0, "created a writer/exec region");
+    TEST_EXPECT_EQ(rc_s, 0, "created a sealed region");
+    TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
+    char kept[24], dropped[24], last[24];
+    maps_va_prefix(base_va + 2ull * (ROWS - 3) * PAGE_SIZE, kept);
+    maps_va_prefix(base_va + 2ull * (ROWS - 2) * PAGE_SIZE, dropped);
+    maps_va_prefix(base_va + 2ull * (ROWS - 1) * PAGE_SIZE, last);
+    TEST_EXPECT_EQ(maps_count(ow, (size_t)no, " rw-p 0x0 anon - -\n"), (long)ROWS,
+                   "B-2b: (premise) every anon row fits the owner's listing");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, "0x0-0x0 rw-p 0x0 code - -\n"), 1L,
+                   "B-2b: the trimmed listing carries the zeroed writer row");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, "0x0-0x0 r-xp 0x0 code - -\n"), 1L,
+                   "B-2b: and the zeroed exec row");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, "0x0-0x0 --xp 0x0 code - -\n"), 1L,
+                   "B-2b: and the zeroed execute-only row");
+    TEST_EXPECT_EQ(maps_count(fa, (size_t)nf, " rw-p 0x0 anon - -\n"), (long)(ROWS - 2),
+                   "B-2b: room for them came from the last two anon rows");
+    TEST_ASSERT(contains(fa, (size_t)nf, kept) && !contains(fa, (size_t)nf, dropped) &&
+                !contains(fa, (size_t)nf, last),
+                "B-2b: the rows dropped are the highest ones, whole");
+    TEST_ASSERT(fa[nf - 1] == '\n', "B-2b: and the listing ends on a whole row");
+}
+
+// B-2b audit r2: the walk's budget. A withheld row takes no buffer, so the walk
+// counts it against as many zeroed rows as the buffer holds -- (2048 - 35) / 26 =
+// 77 -- and stops past that; a stopped walk prints no zeroed row. The region count
+// is derived from the same two lengths (a hand count of the row once said 27, and
+// 76 aliases then fit the budget), and every alias lies below the anon page at the
+// window's top, so the foreign reader gets the header and nothing else. The owner,
+// whose rows show the aliases in place, gets a listing the buffer truncates among
+// them: the control that they are there and lie below the top row.
+void test_devproc_maps_code_budget_stop(void) {
+    struct Thread *th = current_thread();
+    TEST_ASSERT(th && th->proc, "test thread has a proc");
+    struct Proc *rp = th->proc;
+    const caps_t rp_caps = rp->caps;
+    const u32 self_principal = rp->principal_id;
+    const u32 foreign = (self_principal == 0x0D0D0D0Du) ? 0x0E0E0E0Eu : 0x0D0D0D0Du;
+    const u64 top_va = EXEC_USER_BURROW_TOP - PAGE_SIZE;
+    static const char header[] = "start-end perms off type file role\n";
+    static const char zeroed[] = "0x0-0x0 ---p 0x0 code - -\n";
+    const long budget  = (2048L - (long)(sizeof header - 1)) / (long)(sizeof zeroed - 1);
+    const int  regions = (int)(budget / 2) + 1;      // two aliases each: past the budget
+
+    static char fa[2048], ow[2048];
+    long nf = -2, no = -2;
+    int rc_top = -1, made = 0;
+
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc the maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    tgt->caps  = CAP_JIT;
+    proc_test_link(tgt);
+    struct Burrow *bt = burrow_create_anon(PAGE_SIZE, false);
+    rc_top = bt ? burrow_map(tgt, bt, top_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (bt) burrow_unref(bt);
+    for (int i = 0; i < regions; i++) {
+        u64 w = 0, x = 0;
+        if (sys_jit_create_region(tgt, PAGE_SIZE, &w, &x) == 0) made++;
+    }
+    rp->caps |= CAP_JIT;
+    tgt->principal_id = foreign;
+    nf = maps_read(tgt->pid, fa, (long)sizeof fa);
+    tgt->principal_id = self_principal;
+    no = maps_read(tgt->pid, ow, (long)sizeof ow);
+    rp->caps = rp_caps;
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    TEST_EXPECT_EQ((long)rc_top, 0L, "mapped the anon page at the window's top");
+    TEST_EXPECT_EQ((long)made, (long)regions, "created every region");
+    TEST_ASSERT(nf > 0 && no > 0, "both reads returned rows");
+    char ptop[24];
+    maps_va_prefix(top_va, ptop);
+    TEST_ASSERT(maps_count(ow, (size_t)no, " code - -\n") > 0 && !contains(ow, (size_t)no, ptop),
+                "B-2b: (control) the owner's listing shows aliases, cut below the top row");
+    TEST_EXPECT_EQ(nf, (long)(sizeof header - 1),
+                   "B-2b: past the budget the foreign reader gets the header alone");
+    TEST_ASSERT(contains(fa, (size_t)nf, header), "B-2b: (and it is the header)");
+}
+
+// The image's record of the holders that have left it (DEBUG-FS-DESIGN 3.3). A
+// code region is CAP_JIT's authority held by the IMAGE: an RFMEM child, born
+// without the cap, keeps the aliases once their creator is reaped. Driven as that
+// shape: a second Proc sharing the creator's space, the creator then freed (the
+// proc_free departure). The cover must still ask for CAP_JIT, or an owner without
+// the cap takes total control of a writer/exec pair, and sees where it lies -- and
+// it still must once the aliases are gone, because what the creator held is in the
+// record until exec. The creator is never linked into the table, so only the
+// record can refuse here. Controls one variable away: the same orphan before its
+// creator left, and a caller holding CAP_JIT.
+void test_devproc_debug_cover_weighs_departed(void) {
+    struct Proc *maker  = proc_alloc();
+    struct Proc *orphan = maker ? proc_alloc_in(maker->as, proc_default_page_budget()) : NULL;
+    struct Proc *caller = proc_alloc();
+    const bool built = maker && orphan && caller;
+    bool bare = false, orphaned = false, orphaned_maps = false, with_jit = false, after = true;
+    s64 rc = -1, rd = -1;
+    u64 w = 0, x = 0;
+
+    if (built) {
+        maker->principal_id  = 0xA11CEu;
+        orphan->principal_id = 0xA11CEu;
+        caller->principal_id = 0xA11CEu;
+        maker->caps  = CAP_JIT;
+        orphan->caps = 0;
+        caller->caps = 0;
+        rc = sys_jit_create_region(maker, 2ull * PAGE_SIZE, &w, &x);
+        bare = devproc_debug_authorized(caller, orphan);
+        maker->state = PROC_STATE_ZOMBIE;            // reaped: the aliases stay
+        proc_free(maker);
+        maker = NULL;
+        orphaned      = devproc_debug_authorized(caller, orphan);
+        orphaned_maps = devproc_maps_code_visible(caller, orphan);
+        caller->caps  = CAP_JIT;
+        with_jit      = devproc_debug_authorized(caller, orphan);
+        caller->caps  = 0;
+        rd    = rc == 0 ? sys_jit_destroy_for_proc(orphan, w) : -1;
+        after = devproc_debug_authorized(caller, orphan);
+    }
+    if (maker)  { maker->state  = PROC_STATE_ZOMBIE; proc_free(maker); }
+    if (orphan) { orphan->state = PROC_STATE_ZOMBIE; proc_free(orphan); }
+    if (caller) { caller->state = PROC_STATE_ZOMBIE; proc_free(caller); }
+
+    TEST_ASSERT(built, "proc_alloc the creator, its RFMEM child and the caller");
+    TEST_EXPECT_EQ(rc, 0, "the creator made a writer/exec region");
+    TEST_EXPECT_EQ(rd, 0, "the orphan destroyed it");
+    TEST_ASSERT(bare, "(control) before the creator leaves, the walk cannot see it (never linked) and "
+                      "the record is empty, so the capless owner covers the child");
+    TEST_ASSERT(!orphaned, "once the creator has left, the record still asks for CAP_JIT");
+    TEST_ASSERT(!orphaned_maps, "nor does the capless owner see where the aliases lie");
+    TEST_ASSERT(with_jit, "(control) an owner holding CAP_JIT is admitted");
+    TEST_ASSERT(!after, "the record is sticky: the aliases gone, the image still asks for CAP_JIT");
+}
+
+// A seal outlives the holder that took it. Seals do not cross fork, so an RFMEM
+// child taken AFTER its parent sealed carries no bit of its own; the join read the
+// parent's bit while the parent mapped the image, and nothing once it was reaped --
+// while the sealed bytes are still the child's. The bits are written DIRECTLY on
+// the parent, as test_devproc_image_seal_join does, so no stamp can supply them to
+// the child. Control one variable away: an unsealed parent's orphan, whose maps a
+// peer reads.
+void test_devproc_seal_outlives_its_holder(void) {
+    struct Proc *e  = proc_alloc();
+    struct Proc *c  = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *e2 = proc_alloc();
+    struct Proc *c2 = e2 ? proc_alloc_in(e2->as, e2->page_budget) : NULL;
+    struct Proc *b  = proc_alloc();
+    const bool built = e && c && e2 && c2 && b;
+    bool premise = false, traced = true, traced_control = false;
+    long sealed_maps = -2, control_maps = -2;
+    char buf[512];
+
+    if (built) {
+        struct Thread *th = current_thread();
+        u32 who = th && th->proc ? th->proc->principal_id : 0xA11CEu;
+        e->principal_id = c->principal_id = e2->principal_id = c2->principal_id = who;
+        b->principal_id = who;
+        e->caps = c->caps = e2->caps = c2->caps = b->caps = 0;
+        __atomic_fetch_or(&e->proc_flags, PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE, __ATOMIC_RELAXED);
+        premise = (c->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0 &&
+                  (e2->proc_flags & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE)) == 0;
+        e->state = PROC_STATE_ZOMBIE;
+        proc_free(e);
+        e = NULL;
+        e2->state = PROC_STATE_ZOMBIE;
+        proc_free(e2);
+        e2 = NULL;
+        c->state = c2->state = PROC_STATE_ALIVE;
+        proc_test_link(c);
+        proc_test_link(c2);
+        struct Spoor *m = open_pidfile_for(c->pid, "maps", 0);
+        sealed_maps = m ? devproc.read(m, buf, (long)sizeof(buf), 0) : -2;
+        if (m) spoor_clunk(m);
+        struct Spoor *m2 = open_pidfile_for(c2->pid, "maps", 0);
+        control_maps = m2 ? devproc.read(m2, buf, (long)sizeof(buf), 0) : -2;
+        if (m2) spoor_clunk(m2);
+        traced = devproc_debug_authorized(b, c);
+        traced_control = devproc_debug_authorized(b, c2);
+        proc_test_unlink(c2);
+        proc_test_unlink(c);
+    }
+    if (e)  { e->state  = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (e2) { e2->state = PROC_STATE_ZOMBIE; proc_free(e2); }
+    if (c)  { c->state  = PROC_STATE_ZOMBIE; proc_free(c); }
+    if (c2) { c2->state = PROC_STATE_ZOMBIE; proc_free(c2); }
+    if (b)  { b->state  = PROC_STATE_ZOMBIE; proc_free(b); }
+
+    TEST_ASSERT(built, "alloc two sharing pairs and the peer");
+    TEST_ASSERT(premise, "premise: neither orphan nor the control parent carries a seal bit");
+    TEST_EXPECT_EQ(sealed_maps, (long)-T_E_ACCES,
+                   "the sealed parent gone, its NODUMP still refuses the orphan's maps");
+    TEST_ASSERT(!traced, "and its NOTRACE still refuses control of the orphan");
+    TEST_ASSERT(control_maps >= 0, "(control) an unsealed parent's orphan reads");
+    TEST_ASSERT(traced_control, "(control) and the same peer controls the unsealed parent's orphan");
+}
+
+// The taint rides the record too. Today it is redundant there -- the taint is
+// inherited at fork and stamped onto every mapper -- so this pins the record's
+// own arm: a departed holder whose bit is written DIRECTLY (no stamp reaches the
+// orphan) still refuses the orphan's elevation, at the real legate stamp, while
+// an untainted creator's orphan elevates.
+void test_devproc_taint_outlives_its_holder(void) {
+    struct Proc *e  = proc_alloc();
+    struct Proc *c  = e ? proc_alloc_in(e->as, e->page_budget) : NULL;
+    struct Proc *e2 = proc_alloc();
+    struct Proc *c2 = e2 ? proc_alloc_in(e2->as, e2->page_budget) : NULL;
+    const bool built = e && c && e2 && c2;
+    bool premise = false;
+    int tainted_rc = 0, clean_rc = -1;
+
+    if (built) {
+        e->caps = c->caps = e2->caps = c2->caps = 0;
+        __atomic_fetch_or(&e->proc_flags, PROC_FLAG_DEBUG_TAINTED, __ATOMIC_RELAXED);
+        premise = (c->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0 &&
+                  (c2->proc_flags & PROC_FLAG_DEBUG_TAINTED) == 0;
+        e->state = PROC_STATE_ZOMBIE;
+        proc_free(e);
+        e = NULL;
+        e2->state = PROC_STATE_ZOMBIE;
+        proc_free(e2);
+        e2 = NULL;
+        c->state = c2->state = PROC_STATE_ALIVE;
+        proc_test_link(c);
+        proc_test_link(c2);
+        tainted_rc = proc_become_legate(c, CAP_KILL, 1u, 0u, 0u);
+        clean_rc   = proc_become_legate(c2, CAP_KILL, 1u, 0u, 0u);
+        proc_test_unlink(c2);
+        proc_test_unlink(c);
+    }
+    if (e)  { e->state  = PROC_STATE_ZOMBIE; proc_free(e); }
+    if (e2) { e2->state = PROC_STATE_ZOMBIE; proc_free(e2); }
+    if (c)  { c->state  = PROC_STATE_ZOMBIE; proc_free(c); }
+    if (c2) { c2->state = PROC_STATE_ZOMBIE; proc_free(c2); }
+
+    TEST_ASSERT(built, "alloc two sharing pairs");
+    TEST_ASSERT(premise, "premise: neither orphan carries the taint itself");
+    TEST_ASSERT(tainted_rc != 0, "a tainted creator gone, its orphan still may not elevate");
+    TEST_EXPECT_EQ(clean_rc, 0, "(control) an untainted creator's orphan elevates");
+}
+
+// The ZOMBIE transition records the departing holder, before any reap: the
+// record must hold the child's caps and its seal while the child is a zombie
+// nobody has waited for yet, which is the window a reap's unlink used to open
+// (the walk stops seeing the Proc there, and proc_free has not run). Driven
+// through the real rfork, proc_seal and exits, on proc_become_zombie_locked
+// itself; the space stays alive through a second holder the child takes on the
+// way out, and after the reap that holder's maps still read sealed. The child is
+// spawned with CAP_ALL: the plain rfork carves a kernel child to CAP_NONE, and a
+// zero would satisfy every equality below.
+static struct {
+    struct AddrSpace *as;
+    struct Proc      *holder;
+    caps_t            caps;
+    caps_t            before;
+    caps_t            after_exec;
+    u32               guards_before;
+    u32               guards_after;
+    volatile u32      done;
+} g_departure;
+
+static void zombie_departure_thunk(void *arg) {
+    (void)arg;
+    struct Proc *me = current_thread()->proc;
+    g_departure.as     = me->as;
+    g_departure.holder = proc_alloc_in(me->as, me->page_budget);
+    g_departure.caps   = __atomic_load_n(&me->caps, __ATOMIC_ACQUIRE);
+    g_departure.before = __atomic_load_n(&me->as->caps_ever, __ATOMIC_ACQUIRE);
+    g_departure.guards_before = __atomic_load_n(&me->as->guards_ever, __ATOMIC_ACQUIRE);
+    proc_seal(me, PROC_FLAG_NODUMP);
+    __atomic_store_n(&g_departure.done, 1u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_devproc_zombie_records_departure(void) {
+    g_departure.as = NULL; g_departure.holder = NULL;
+    g_departure.caps = 0; g_departure.before = ~0ull; g_departure.done = 0;
+    g_departure.guards_before = ~0u;
+    int pid = rfork_with_caps(RFPROC, zombie_departure_thunk, NULL, CAP_ALL);
+    bool zombie = false;
+    caps_t recorded = 0;
+    u32 sealed = 0;
+    long holder_maps = -2;
+    char buf[256];
+    if (pid > 0) {
+        u64 deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (timer_now_ns() < deadline) {
+            struct Proc *q = proc_find_by_pid(pid);
+            if (q && __atomic_load_n(&q->state, __ATOMIC_ACQUIRE) == PROC_STATE_ZOMBIE) {
+                zombie = true;
+                break;
+            }
+            sched();
+        }
+        // The state was read lock-free, and the transition stores it plainly
+        // under g_proc_table_lock: one more pass through that lock is what makes
+        // everything the transition wrote, the record included, visible here.
+        if (zombie && g_departure.as) {
+            (void)proc_find_by_pid(pid);
+            recorded = __atomic_load_n(&g_departure.as->caps_ever, __ATOMIC_ACQUIRE);
+            sealed   = __atomic_load_n(&g_departure.as->guards_ever, __ATOMIC_ACQUIRE);
+        }
+    }
+    int st = -1;
+    int reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    struct Proc *h = g_departure.holder;
+    if (h) {
+        struct Thread *th = current_thread();
+        h->principal_id = th && th->proc ? th->proc->principal_id : 0xA11CEu;
+        h->state = PROC_STATE_ALIVE;
+        proc_test_link(h);
+        struct Spoor *m = open_pidfile_for(h->pid, "maps", 0);
+        holder_maps = m ? devproc.read(m, buf, (long)sizeof(buf), 0) : -2;
+        if (m) spoor_clunk(m);
+        proc_test_unlink(h);
+        h->state = PROC_STATE_ZOMBIE;
+        proc_free(h);
+    }
+
+    TEST_ASSERT(pid > 0 && reaped == pid, "the child spawned and was reaped");
+    TEST_ASSERT(g_departure.done == 1u && g_departure.holder != NULL,
+                "the child took a second holder on its space");
+    TEST_ASSERT(g_departure.caps != 0, "premise: the child holds caps to record");
+    TEST_EXPECT_EQ(g_departure.before, 0ull, "(control) nothing had left the space before the child");
+    TEST_EXPECT_EQ(g_departure.guards_before, 0u, "(control) nor any seal");
+    TEST_ASSERT(zombie, "the child became a zombie within the budget");
+    TEST_ASSERT(recorded != 0, "the record is not empty");
+    TEST_EXPECT_EQ(recorded, g_departure.caps,
+                   "a zombie nobody has reaped is already in its space's record");
+    TEST_ASSERT(sealed & PROC_FLAG_NODUMP, "and so is the seal it took");
+    TEST_EXPECT_EQ(holder_maps, (long)-T_E_ACCES,
+                   "after the reap, the sharer's maps still read sealed");
+}
+
+// exec is a departure too: the old space keeps what the exec'ing Proc held. Driven
+// by the child running proc_exec_replace on itself (the swap needs the exec'ing
+// thread), spawned with CAP_ALL for the zombie test's reason. Nothing else writes the OLD space's record here: the child's death
+// records into the space it exec'd onto, so this is the swap's witness alone.
+static void exec_departure_thunk(void *arg) {
+    (void)arg;
+    struct Proc *me = current_thread()->proc;
+    struct AddrSpace *old = me->as;
+    g_departure.as     = old;
+    g_departure.holder = proc_alloc_in(old, me->page_budget);
+    g_departure.caps   = __atomic_load_n(&me->caps, __ATOMIC_ACQUIRE);
+    g_departure.before = __atomic_load_n(&old->caps_ever, __ATOMIC_ACQUIRE);
+    g_departure.guards_before = __atomic_load_n(&old->guards_ever, __ATOMIC_ACQUIRE);
+    proc_seal(me, PROC_FLAG_NOTRACE);
+    struct AddrSpace *nas = g_departure.holder ? addrspace_alloc(me->page_budget) : NULL;
+    if (nas) {
+        proc_exec_replace(me, nas, me->phenotype);
+        g_departure.after_exec   = __atomic_load_n(&old->caps_ever, __ATOMIC_ACQUIRE);
+        g_departure.guards_after = __atomic_load_n(&old->guards_ever, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&g_departure.done, 1u, __ATOMIC_RELEASE);
+    }
+    exits("ok");
+}
+
+void test_devproc_exec_records_departure(void) {
+    g_departure.as = NULL; g_departure.holder = NULL; g_departure.caps = 0;
+    g_departure.before = ~0ull; g_departure.after_exec = 0; g_departure.done = 0;
+    g_departure.guards_before = ~0u; g_departure.guards_after = 0;
+    int pid = rfork_with_caps(RFPROC, exec_departure_thunk, NULL, CAP_ALL);
+    int st = -1;
+    int reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    caps_t kept = (g_departure.holder && g_departure.as)
+                ? __atomic_load_n(&g_departure.as->caps_ever, __ATOMIC_ACQUIRE) : 0;
+    if (g_departure.holder) {
+        g_departure.holder->state = PROC_STATE_ZOMBIE;
+        proc_free(g_departure.holder);
+    }
+
+    TEST_ASSERT(pid > 0 && reaped == pid, "the child spawned and was reaped");
+    TEST_ASSERT(g_departure.done == 1u, "the child exec'd onto a fresh space");
+    TEST_ASSERT(g_departure.caps != 0, "premise: the child holds caps to record");
+    TEST_EXPECT_EQ(g_departure.before, 0ull, "(control) nothing had left the old space before the exec");
+    TEST_EXPECT_EQ(g_departure.guards_before, 0u, "(control) nor any seal");
+    TEST_ASSERT(g_departure.after_exec != 0, "the old space's record is not empty");
+    TEST_EXPECT_EQ(g_departure.after_exec, g_departure.caps,
+                   "the exec swap recorded the child in the space it left");
+    TEST_ASSERT(g_departure.guards_after & PROC_FLAG_NOTRACE, "and the seal it carried");
+    TEST_EXPECT_EQ(kept, g_departure.caps,
+                   "and the old space kept it after the child died elsewhere");
 }
 
 // VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,
@@ -3247,8 +4282,8 @@ void test_devproc_image_seal_join(void) {
     TEST_ASSERT(premise, "premise: the pair shares one space and C carries neither seal bit");
     TEST_ASSERT(before_seal, "control: unsealed, the peer is admitted to C");
     TEST_ASSERT(maps_before >= 0, "control: C's maps reads while the image is unsealed");
-    TEST_EXPECT_EQ(maps_after, (long)-1,
-                   "the join: NODUMP on a SHARER refuses C's maps (it is E's layout)");
+    TEST_EXPECT_EQ(maps_after, (long)-T_E_ACCES,
+                   "the join: NODUMP on a SHARER refuses C's maps (it is E's layout; EACCES)");
     TEST_ASSERT(environ_after >= 0,
                 "control: environ is per-Proc, so a sharer's NODUMP does not seal it");
     TEST_ASSERT(!after_notrace,
@@ -3517,4 +4552,49 @@ void test_proc_debug_taint_crosses_fork(void) {
     TEST_ASSERT((clean_child & PROC_FLAG_DEBUG_TAINTED) == 0,
                 "control: a clean parent's child is born clean");
     TEST_ASSERT(restored, "the fixture was restored -- kproc is untainted again");
+}
+
+// =============================================================================
+// gcpark-b: a zombie's status shows the signal it died of
+// =============================================================================
+
+static void zsig_abort_thunk(void *arg) { (void)arg; exits_note(NOTE_NAME_SNARE_ABORT); }
+static void zsig_exit_thunk(void *arg)  { (void)arg; exits_code(1, "one"); }
+
+// The status text once the Proc is a zombie (only a zombie has an "exit:"
+// line); 0 if it did not become one within the budget.
+static long zsig_zombie_status(int pid, char *buf, long cap) {
+    for (int tries = 0; tries < 2000; tries++) {
+        struct Spoor *f = open_pidfile_for(pid, "status", 0);
+        if (!f) return 0;
+        long got = devproc.read(f, buf, cap - 1, 0);
+        spoor_clunk(f);
+        if (got > 0) {
+            buf[got] = '\0';
+            if (index_of(buf, (size_t)got, "exit:") >= 0) return got;
+        }
+        sched();
+    }
+    return 0;
+}
+
+// One variable away: both children reap with status 1; only the death by note
+// has a signal, and only it shows a signal line.
+void test_devproc_zombie_status_signal(void) {
+    static char a[512], e[512];
+    int pa = rfork(RFPROC, zsig_abort_thunk, NULL);
+    int pe = rfork(RFPROC, zsig_exit_thunk, NULL);
+    long la = pa > 0 ? zsig_zombie_status(pa, a, (long)sizeof a) : 0;
+    long le = pe > 0 ? zsig_zombie_status(pe, e, (long)sizeof e) : 0;
+    int sa = -1, se = -1;
+    int ra = pa > 0 ? wait_pid_for(pa, 0, &sa) : -1;
+    int re = pe > 0 ? wait_pid_for(pe, 0, &se) : -1;
+    TEST_ASSERT(ra == pa && re == pe, "both children forked and were reaped");
+    TEST_ASSERT(sa == 1 && se == 1, "both reap raw as status 1");
+    TEST_ASSERT(la > 0 && le > 0, "both children were read as zombies");
+    TEST_ASSERT(index_of(a, (size_t)la, "exit:    1\nsignal:  6\n") >= 0,
+                "a death by snare:abort shows signal 6 after its exit status");
+    TEST_ASSERT(index_of(e, (size_t)le, "exit:    1\n") >= 0 &&
+                index_of(e, (size_t)le, "signal:") < 0,
+                "an exit(1) shows no signal line");
 }

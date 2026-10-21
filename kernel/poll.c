@@ -41,6 +41,7 @@
 #include <thylacine/cons.h>       // cons_diag_line -- the fail-safe's line
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>      // srv_handle_poll — KObj_Srv dispatch
+#include <thylacine/errno.h>       // T_E_INTR
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>       // loom_poll -- KObj_Loom .poll (KT-1.5)
@@ -585,6 +586,17 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // call on this pass's answers, and a retry timer that ended the park
         // early (below) never does.
         if (ready_count > 0) break;
+
+        // A caught note ends a pass that found nothing (ARCH 8.8.3), ahead of
+        // the deadline: Linux's do_poll asks signal_pending before timed_out,
+        // so a note pending at a lapsed or zero timeout is EINTR, not 0 (poll
+        // NoZeroOverCaught). tsleep's own caught arm sits behind its cond test,
+        // so a producer that keeps a flag set would keep a pause()-like poller
+        // from ever reaching it (poll CaughtTerminates).
+        if (thread_caught_note_unwinds(t)) {
+            ready_count = -(s64)T_E_INTR;
+            goto unregister_and_return;
+        }
         if (poll_expired(timeout_ms, deadline_ns)) break;
 
         if (parked) {
@@ -611,7 +623,7 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
             __atomic_fetch_add(&g_poll_slept, 1u, __ATOMIC_RELAXED);
             parked = true;
         }
-        int ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, park_dl);
+        int ts = tsleep_noteintr(&r, poll_cond_any_flagged, &cond_arg, park_dl);
 
         // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-
         // terminating. Skip the re-sample (the Thread dies at its EL0-return
@@ -619,6 +631,13 @@ s64 sys_poll_for_proc_spoors(struct Proc *p, struct pollfd *kfds, u64 nfds,
         // REQUIRED -- waiters[] are stack-allocated and still listed.
         if (ts == TSLEEP_INTR) {
             ready_count = 0;
+            goto unregister_and_return;
+        }
+        // A caught note unwound the park with no flag set (ARCH 8.8.3): EINTR,
+        // through the same sweep. Never round again -- this thread holds the
+        // note's claim, so the next park would unwind at once.
+        if (ts == TSLEEP_NOTEINTR) {
+            ready_count = -(s64)T_E_INTR;
             goto unregister_and_return;
         }
 
@@ -672,29 +691,36 @@ unregister_and_return:
 }
 
 s64 sys_poll_sleep_for(s32 timeout_ms) {
-    // A zero-length sleep is a no-op, not a trip through the scheduler.
-    if (timeout_ms == 0) return 0;
+    // A zero-length sleep is not a trip through the scheduler; it only asks for
+    // a pending note, below.
+    if (timeout_ms != 0) {
+        struct Rendez r;
+        rendez_init(&r);
 
-    struct Rendez r;
-    rendez_init(&r);
+        // The same deadline arithmetic as the slow path above, and it must stay
+        // the same: 0 is the "no deadline" sentinel, so a computed 0 (or a u64
+        // wrap) has to be nudged off it or an intended wait becomes an infinite
+        // one.
+        u64 deadline_ns = 0;
+        if (timeout_ms > 0) {
+            u64 now = timer_now_ns();
+            u64 add = (u64)timeout_ms * 1000000ull;
+            u64 dl  = now + add;
+            if (dl < now) dl = (u64)-1ll;
+            if (dl == 0)  dl = 1;
+            deadline_ns = dl;
+        }
 
-    // The same deadline arithmetic as the slow path above, and it must stay the
-    // same: 0 is the "no deadline" sentinel, so a computed 0 (or a u64 wrap) has
-    // to be nudged off it or an intended wait becomes an infinite one.
-    u64 deadline_ns = 0;
-    if (timeout_ms > 0) {
-        u64 now = timer_now_ns();
-        u64 add = (u64)timeout_ms * 1000000ull;
-        u64 dl  = now + add;
-        if (dl < now) dl = (u64)-1ll;
-        if (dl == 0)  dl = 1;
-        deadline_ns = dl;
+        // Nothing will ever signal `r`, so this returns TSLEEP_TIMEDOUT on the
+        // deadline, TSLEEP_INTR if the Proc is being terminated (#811), or
+        // TSLEEP_NOTEINTR for a caught note (ARCH 8.8.3), which is EINTR: pause()
+        // -- ppoll with no fds -- returns once its handler ran. Death ends the
+        // call at the EL0 return tail; its result is immaterial.
+        int ts = tsleep_noteintr(&r, poll_never, NULL, deadline_ns);
+        if (ts == TSLEEP_NOTEINTR) return -(s64)T_E_INTR;
+        if (ts == TSLEEP_INTR)     return 0;
     }
-
-    // Nothing will ever signal `r`, so this returns TSLEEP_TIMEDOUT on the
-    // deadline, or TSLEEP_INTR if the Proc is being terminated (#811). Both are
-    // "the wait is over"; the death case unwinds at the EL0 return tail, so
-    // there is nothing to report differently here.
-    (void)tsleep(&r, poll_never, NULL, deadline_ns);
-    return 0;
+    // The deadline passed, or there was none to wait for. tsleep asks the clock
+    // before the note, Linux asks the signal first: a note pending now is EINTR.
+    return thread_caught_note_unwinds(current_thread()) ? -(s64)T_E_INTR : 0;
 }

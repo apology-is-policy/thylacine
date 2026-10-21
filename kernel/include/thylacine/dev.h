@@ -256,11 +256,14 @@ struct Dev {
     //                    spoor_clunks c, which clunks the walked fid).
     //                    A read-only Dev returns NULL.
     //   close(c)       — release any per-Spoor resources held while open.
-    //                    Called by spoor_clunk on its way to spoor_unref.
+    //                    Called by spoor_clunk on the last drop. Returns 0,
+    //                    or a negative error for work the close could not
+    //                    finish (dev9p: its write-behind flush); close(2)
+    //                    reports that as EIO.
     struct Spoor *(*open)(struct Spoor *c, int omode);
     struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
                             u32 perm, u32 gid);
-    void          (*close)(struct Spoor *c);
+    int           (*close)(struct Spoor *c);
 
     // I/O.
     //   read / write   — byte-stream I/O at offset.
@@ -327,6 +330,13 @@ struct Dev {
     // quarry itself (T_E_LOOP under STALK_OPEN). Fail-closed by construction;
     // only dev9p mints QTSYMLINK at v1.0, and it implements the slot.
     long           (*readlink)(struct Spoor *c, char *buf, long n);
+
+    // remote(c) -- does c belong to a session whose transport leaves the
+    // machine (the remote declaration, HAUL-DESIGN 4.8)? The resolver contains
+    // a symlink such a session serves beneath the mount it was reached through
+    // (DISTRO 4.6). Read lock-free, so the answer must be fixed before c's
+    // session published. NULL-permitted: a NULL slot is never remote.
+    bool           (*remote)(struct Spoor *c);
 
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)

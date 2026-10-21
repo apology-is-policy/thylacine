@@ -19,7 +19,7 @@ tools/test-interactive.sh ls-jsc       # the device gate
 |---|---|
 | Upstream | https://github.com/WebKit/WebKit.git |
 | Pin | tag `webkitgtk-2.54.0` = `5220e80b97a253c60ed899361654142ab5021998` (2026-09-16) |
-| Checkout | `~/projects/webkit-thylacine` (branch `thylacine`), sparse cone: `Source/JavaScriptCore Source/WTF Source/bmalloc Source/cmake Tools/Scripts` |
+| Checkout | `~/projects/webkit-thylacine` (branch `thylacine`), sparse cone: `Source/JavaScriptCore Source/WTF Source/bmalloc Source/cmake Tools/Scripts PerformanceTests/SunSpider/tests/sunspider-1.0.2` |
 | ICU | 78.3, `icu4c-78.3-sources.tgz`, sha256 `3a2e7a47604ba702f345878308e6fefeca612ee895cf4a5f222e7955fabfe0c0` |
 
 Recreate the checkout by hand (what `tools/forage.sh webkit` does):
@@ -28,7 +28,7 @@ Recreate the checkout by hand (what `tools/forage.sh webkit` does):
 git clone --filter=blob:none --no-checkout --depth 1 --branch webkitgtk-2.54.0 \
     https://github.com/WebKit/WebKit.git ~/projects/webkit-thylacine
 cd ~/projects/webkit-thylacine && git sparse-checkout init --cone
-git sparse-checkout set Source/JavaScriptCore Source/WTF Source/bmalloc Source/cmake Tools/Scripts
+git sparse-checkout set Source/JavaScriptCore Source/WTF Source/bmalloc Source/cmake Tools/Scripts PerformanceTests/SunSpider/tests/sunspider-1.0.2
 git checkout webkitgtk-2.54.0 && git checkout -b thylacine
 git am /path/to/thylacine/usr/ports/webkit/patches/*.patch
 ```

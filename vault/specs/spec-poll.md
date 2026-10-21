@@ -5,11 +5,11 @@ title: "poll.tla"
 models: [sub-kernel-poll]
 pins: [inv-i9]
 cfgs:
-  - "poll.cfg -- clean: every invariant, HAS_TIMEOUT, one local fd beside one remote (3562 states)"
-  - "poll_notimeout.cfg -- poll(-1), the infinite wait; safety holds (1206)"
-  - "poll_liveness.cfg -- Spec_Live: PollTerminates + StableReadyReturns + DeathTerminates + StopHonoured (3562)"
-  - "poll_liveness_notimeout.cfg -- Spec_Live, poll(-1): StableReadyReturns + DeathTerminates + StopHonoured (1206)"
-  - "poll_local.cfg -- Remote = {}: every fd local, the as-built configuration until NP-4 (3242)"
+  - "poll.cfg -- clean: every invariant, HAS_TIMEOUT, one local fd beside one remote (7156 distinct states)"
+  - "poll_notimeout.cfg -- poll(-1), the infinite wait; safety holds (2446)"
+  - "poll_liveness.cfg -- Spec_Live: PollTerminates + StableReadyReturns + DeathTerminates + StopHonoured + CaughtTerminates (7156)"
+  - "poll_liveness_notimeout.cfg -- Spec_Live, poll(-1): StableReadyReturns + DeathTerminates + StopHonoured + CaughtTerminates (2446)"
+  - "poll_local.cfg -- Remote = {}: every fd local, the as-built configuration until NP-4 (6534)"
   - "poll_buggy_check_before_register.cfg -- sample-then-register: a readiness edge in the gap reaches no hook (NoMissedPoll counterexample)"
   - "poll_buggy_no_wake.cfg -- producer sets the flag but never signals the Rendez (NoMissedPoll counterexample)"
   - "poll_buggy_lazy_unregister.cfg -- poll returns still-listed (NoStaleHook counterexample)"
@@ -19,14 +19,17 @@ cfgs:
   - "poll_buggy_no_loop_stop_check.cfg -- a stop left to tsleep's detour (StopHonoured counterexample)"
   - "poll_buggy_verdict_before_settle.cfg -- a pass decides on a ready local fd without waiting for its snapshots; the socket beside it goes unreported (NoFalseNotReady counterexample)"
   - "poll_buggy_sweep_leaves_snapshot.cfg -- a death during the settle returns with a snapshot in flight (NoSnapshotOutlivesCall counterexample)"
-  - "poll_armfail.cfg -- ARM_MAY_FAIL, one local fd beside two remote: any arm may fail; every invariant (38844)"
-  - "poll_armfail_liveness.cfg -- ARM_MAY_FAIL, Spec_Live: the four liveness properties (4306)"
-  - "poll_armfail_liveness_notimeout.cfg -- ARM_MAY_FAIL, Spec_Live, poll(-1) (1304)"
+  - "poll_buggy_no_loop_caught_check.cfg -- a caught note left to tsleep's arm, which a producer's noise keeps unreached (CaughtTerminates counterexample, poll(-1))"
+  - "poll_buggy_caught_before_ready.cfg -- the verdict asks for the note before the readiness the pass found (EintrNotOverReady counterexample)"
+  - "poll_buggy_deadline_before_caught.cfg -- a lapsed deadline returns 0 over a pending note (NoZeroOverCaught counterexample)"
+  - "poll_armfail.cfg -- ARM_MAY_FAIL, one local fd beside two remote: any arm may fail; every invariant (77732)"
+  - "poll_armfail_liveness.cfg -- ARM_MAY_FAIL, Spec_Live: the five liveness properties (8640)"
+  - "poll_armfail_liveness_notimeout.cfg -- ARM_MAY_FAIL, Spec_Live, poll(-1) (2642)"
   - "poll_buggy_no_retry.cfg -- a park an arm failed to cover gets no retry timer (NoMissedPoll counterexample)"
   - "poll_buggy_retry_is_timeout.cfg -- the retry timer's expiry taken for the call's timeout returns 0 early (NoSpuriousZero counterexample)"
-gate: "any change to the register/sample atomicity, the settle, the arm and its retry timer, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop checks, or a producer wake site -- specs/check-poll.sh"
+gate: "any change to the register/sample atomicity, the settle, the arm and its retry timer, a sample-only pass, the re-arm pass, the sweep, the loop's death/stop/caught-note checks, the verdict's order, or a producer wake site -- specs/check-poll.sh"
 created: 2026-08-01
-updated: 2026-09-28
+updated: 2026-10-05
 ---
 ## Abstraction
 
@@ -87,6 +90,18 @@ cross-lock handoff.
   and the timer's expiry, `RetryWake`, is a wake with no flag and never the
   call's timeout: the clock decides the deadline (`retry_is_timeout`, a
   `NoSpuriousZero` counterexample).
+- **EintrNotOverReady** + **NoZeroOverCaught** + **CaughtTerminates**
+  (2026-10-05, [[chg-2026-10-05-signal7-list]]; ARCH 8.8.3): a Linux
+  `ppoll`/`pselect6` ends for a caught note. `NotePost` arms `caught` once and
+  wakes a sleeping poller as `Die` does; `TSleepCommit` takes its caught branch
+  LAST, after the die-check, as tsleep does; each verdict asks for the note
+  itself (`CaughtNow`) in Linux `do_poll`'s order -- readiness the pass found,
+  then the note (`Eintr`, which unhooks like every exit), then the deadline.
+  EINTR never hides readiness the pass saw; the call never returns 0 with a
+  note pending; and a note ends the call however a producer's noise keeps
+  the park's own arm from running. Distinct states roughly doubled on every clean cfg
+  with the one boolean; the three new buggy cfgs each violate the property
+  they name.
 
 ## What it cannot see
 
@@ -107,7 +122,11 @@ then ARCH 8.12's Point / PointDone, are all GONE with the code they named);
 MakeReady ↔
 `poll_waiter_list_wake`; the timeout
 composes with [[spec-tsleep]]; SnapshotAnswer / Arm / SettleDeath / RetryWake
-are filled at NP-4, when the split lands. `specs/check-poll.sh` asserts every
+are filled at NP-4, when the split lands. NotePost ↔ `notes_post` +
+`proc_caught_note_wake`; TSleepCommit's caught branch ↔ `tsleep_common`'s
+caught arm through `tsleep_noteintr`; CaughtNow / Eintr ↔ the verdict's
+`thread_caught_note_unwinds` between `ready_count > 0` and `poll_expired`, and
+`sys_poll_sleep_for`'s check after a lapsed or zero timeout. `specs/check-poll.sh` asserts every
 cfg's verdict (each buggy cfg's NAMED property, with the counterexample's
 actions printed).
 

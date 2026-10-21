@@ -61,10 +61,11 @@ void test_syscall_dispatch_unknown(void) {
         "unknown syscall must return -1 (ENOSYS-equivalent)");
 }
 
-// 127..133 hold no native syscall on this tree: they belong to numbers other
-// branches assigned first, and SYS_SRV_REGISTRY_NEW sits above them at 134
-// (vote 13). vivarium.c's collision argument for the Linux signal rows at
-// 128..133 rests on that gap being EMPTY, so the gap is pinned here -- by the
+// 129..133 hold no native syscall on this tree: they belong to numbers b3
+// assigned first, and SYS_SRV_REGISTRY_NEW sits above them at 134 (vote 13;
+// 127 and 128 are JIT_CREATE_SEALED and ICACHE_SYNC_SPACE). vivarium.c's
+// collision argument for the Linux signal rows at 129..133 rests on that gap
+// being EMPTY, so the gap is pinned here -- by the
 // unknown arm's own counter, not by the -1 it answers: many native handlers
 // refuse zeroed arguments with that same -1, so a handler landing in the gap
 // could pass a value check. A native number assigned in it fails this test;
@@ -72,14 +73,14 @@ void test_syscall_dispatch_unknown(void) {
 // number, and then this pin moves. The suite runs before init, so the only
 // unknown calls in flight are the ones tests make.
 void test_syscall_native_gap_unassigned(void) {
-    for (u64 nr = 127; nr <= 133; nr++) {
+    for (u64 nr = 129; nr <= 133; nr++) {
         struct exception_context ctx;
         for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
         ctx.regs[8] = nr;
         u64 before = syscall_unknown_count();
         TEST_SYSCALL_DISPATCH(&ctx);
         TEST_EXPECT_EQ(syscall_unknown_count() - before, 1ull,
-            "a native number in 127..133 must reach the unknown arm on this tree");
+            "a native number in 129..133 must reach the unknown arm on this tree");
         TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
             "and answer the unknown arm's -1");
     }

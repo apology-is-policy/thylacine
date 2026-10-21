@@ -19,6 +19,7 @@ code:
   - tools/test-build-config.sh
   - tools/configure.sh
   - tools/test-configure.sh
+  - tools/check-flag-words.py
 audit: none
 guarded-by: []
 validated-by: [prose, gate-smp]
@@ -251,27 +252,69 @@ because the failure it guards against is silent: a copy left behind when the
 kernel record grows passes its own size assertion while the kernel reads past
 it (#100). The record's rules are [[sub-kernel-syscall-abi]]'s.
 
-**Both ambush builds pass `-tags thylacine_held` (2026-09-30).** The Go
-fork's `SysProcAttr.DebugHeld` sets the spawn record's `debug_flags`, and
-ambush's `Launch` sets it only in a build that carries the tag. This tree's
-kernel has the birth hold, so both ambush builds pass the tag from one
-variable, `AMBUSH_TAGS`: `build_ambush`'s ramfs copy for `/ambush-probe`, and
-the `/goroot/bin` copy that nora's `:debug` runs. A launched target stays
-parked until the debugger's stop ([[sub-kernel-birth-hold]]). Each build checks
-both ends of the tag. `ambush_fork_check` asks `go list` which of the pair
-`held_on_thylacine.go` / `held_off_thylacine.go` the tagged build compiles, and
-refuses unless it is the held one, declaring `launchHeld = true` (Go ignores a
-tag no file mentions, so an old fork, or one whose file no longer answers to
-the tag, would build the running-spawn `Launch` under a log line saying held).
-`ambush_artifact_check` reads the tags back from the binary with `go version
--m`, whose build info survives the strip. Whether `Launch` still acts on the
-constant is behaviour, which `/ambush-probe` checks at the entry. The ramfs
-also carries `/bin/ambush-notelf`, an executable that is not an ELF image, for
-stage D's abandoned-launch leg. A
-kernel without the hold refuses the flag, and both forks are shared by trees
-whose kernels differ, so the choice lives here, in the file versioned with the
-kernel, rather than in the fork or at run time (DELVE-PORT-DESIGN section 7 (b)).
-The tag goes once every tree carries the hold.
+**The flag-word check runs after it (2026-10-05; nine words since
+2026-10-06).** `tools/check-flag-words.py` holds a table of flag words -- the
+header, the pattern a member's name matches, the width: `proc_flags`, the
+spawn permission word, the four one-bit spawn words and the spawn record's
+`ext_flags` tail word (`SPAWN_EXT_*`, 2026-10-06), the walk-create mode
+word (`SYS_WALK_CREATE_*`, with DMDIR and the DMSRV bits), the 9P attach flags
+and the mount flags. It evaluates every member, resolving the header's other
+macros, and fails when two members share a bit. A member owns the bits its own
+literals contribute; a reference to another member contributes nothing, so a
+mask built from members (`TERMINATE_PENDING_MASK`, `SPAWN_PERM_ALL`) overlaps
+them freely, while the mode bits `SYS_WALK_CREATE_PERM_VALID` adds by literal
+are its own. A member that uses another other than as an operand of `|` (a
+shift, an `&`) cannot be classified and fails, and so do a member that does not
+evaluate, one outside its word, and a word with no member: an unread flag is not
+a checked one. Each flag's own `_Static_assert` names only the flags its author
+knew, so two branches each took bit 22 of `proc_flags` and both compiled; the
+header is the one source both must pass through. A passing check then proves it
+can fail: each word's header is mutated in memory (a new member on an owned bit,
+a member shifted from another, an undefined macro, a member outside the word,
+every member renamed away), and a mutation the check does not report by the rule
+it targets stops the build. It prints one line per word, then
+`check-flag-words: 10 words ok; the self-test caught all 50 mutations`
+(9 and 45 before the tail word). It is
+sub-second and fatal, with no skip switch. It replaced `tools/check-proc-flags.py`,
+main's single-word check, whose rule let a literal mask equal to a union of
+flags overlap them; the literal rule is stricter.
+
+**A free-space floor refuses before any target writes (2026-10-05).**
+`disk_floor_check` refuses a target, and separately the pool generate, when
+the build volume has less than `THYLACINE_MIN_FREE_GB` free (default 6; `0`
+disables it, and `clean` is never refused, since it frees space). The refusal
+names the stage, the free space, the floor and the override on one line, then
+lists the largest entries under `build/`. The reason is the failure a full
+disk causes elsewhere: a bake took the shared Mac's volume to 121 MB free
+mid-populate, and every agent's shell then failed before it ran, because the
+harness could not create its output file. A refusal while there is still room
+keeps the failure inside this build. `du` counts APFS-cloned blocks in full,
+so in a worktree with a cloned `build/` the list overstates what deleting an
+entry frees; `df` is the measure.
+
+**Both ambush builds spawn the launch target held (2026-09-30; untagged
+2026-10-06).** The Go fork's `SysProcAttr.DebugHeld` sets the spawn record's
+`debug_flags`, and ambush's `Launch` sets it, so a launched target stays parked
+until the debugger's stop ([[sub-kernel-birth-hold]]). This covers both
+builds: `build_ambush`'s ramfs copy for `/ambush-probe`, and the `/goroot/bin`
+copy that nora's `:debug` runs. While some trees' kernels lacked the hold, the
+fork made the held launch a build tag (`thylacine_held`) that this file passed.
+Main carries the hold since its aux-3 merge, and so does every tree built from
+main since, so ambush 073faaa compiles the held launch untagged. A tree whose
+kernel predates the hold gets an ambush whose launches fail loudly, since its
+kernel refuses the flag. `ambush_fork_check` guards the fork's age: it asks
+`go list` which files the build compiles. It refuses `held_off_thylacine.go`,
+the running spawn an older fork compiles untagged under a log line that says
+nothing. `held_on_thylacine.go` must declare `launchHeld = true`. A fork with
+neither file, as once the constant is deleted, must name `launchHeld` in no
+compiled file, and its `Launch` must set `DebugHeld`; a fork from before the
+held launch does not, and is refused. The check and the build run
+the same toolchain (`$GOFORK/bin/go`) with the same environment, so the file
+selection cannot change between them and the artifact needs no check of its
+own. Whether `Launch` still acts on the constant is
+behaviour, which `/ambush-probe` checks at the entry. The ramfs also carries
+`/bin/ambush-notelf`, an executable that is not an ELF image, for stage D's
+abandoned-launch leg (DELVE-PORT-DESIGN section 7 (b)).
 
 **A fourth guard warns about a stage the main chain never refreshes.** The
 compiler-toolchain staging step is reachable only as its own explicit
@@ -338,17 +381,30 @@ chunk, each on purpose.
 is kind `clone-sparse`: nothing of ours is hosted, so it is not a `fork.`.
 `forage.sh` makes a partial (`blob:none`) sparse clone at a TAG, refuses unless
 that tag resolves to the manifest's commit, creates a local branch, and `git am`s
-`usr/ports/webkit/patches/*`. It is idempotent (a patch that reverse-applies is
-reported as already applied) and it never resets: a checkout where a patch
-neither applies nor reverse-applies is reported as drifted and left alone,
-because it may hold work. `test-forage.sh` C1-C4 drive all four outcomes against
-a local upstream with no network.
+`usr/ports/webkit/patches/*`. The series is stacked -- a later patch may edit
+lines an earlier one added (0003 corrects a comment 0001 wrote) -- so no patch is
+asked about alone: `series_tree` builds the pin plus the first k patches in a
+scratch index, and the longest k whose tree is HEAD's is what is applied; the rest
+are `am`'d. It is idempotent (the whole series' tree reports every patch as
+already applied) and it never resets: a checkout that is the pin plus no prefix of
+the series -- including one that carries an extra hunk in a file a patch names --
+is reported as drifted and left alone, because it may hold work. An existing sparse checkout is only widened (`add`, so a
+cone somebody added by hand stays); a full checkout at the path is reported and
+left alone, never converted. `test-forage.sh` C1-C9 drive the outcomes against a
+local upstream with no network: C6-C8 a stacked series (fresh, idempotent, from a
+prefix), C9 an extra hunk in a named file; against the per-patch forage that
+preceded gcpark, C7 and C9 fail.
 
 *The build re-checks the checkout from its own side.* `webkit_checkout_ok`
-requires the pin to be an ancestor of HEAD, a clean tree, every series patch to
-reverse-apply, AND the files that differ from the pin to be exactly the files the
-series names -- the last because a reverse-apply check alone passes on a tree that
-carries the patches plus local edits elsewhere. So `WEBKIT_PIN` / `ICU_SHA256` in
+requires the pin to be an ancestor of HEAD, a clean tree, and HEAD's tree to be
+EXACTLY the tree `webkit_series_tree` builds from the pin plus the series in
+order (about 0.6 s on the WebKit tree; no network, the blob-less clone holds every
+tree and the patched files' blobs). Until gcpark (2026-10-12) it asked each patch
+to reverse-apply and the changed files to be the series' files, which passed a
+commit adding an extra hunk to a file a patch names (measured on the B-2c tip:
+one line in `ExecutableAllocator.cpp` passed) and could not express a stacked
+series. `test-forage.sh` D1-D5 lift the two functions from `build.sh` and drive
+them; D5 is the extra hunk over a one-patch series, which the old check accepted. So `WEBKIT_PIN` / `ICU_SHA256` in
 `build.sh` and the manifest are two copies of one truth, and `test-forage.sh` A10
 fails when they drift (sabotaged: one hex digit -> FAIL).
 
@@ -364,7 +420,29 @@ depend on the sysroot and survive it. `libc.a` is not a ninja input, so
 `build_jsc` removes `bin/jsc` to force the relink. After the link it asserts the
 shape the platform requires -- `ET_EXEC`, no `PT_DYNAMIC`, no `LOAD` segment both
 writable and executable, and at least two `LOAD` segments seen, so a parse that
-matched nothing cannot read as "no W+X" -- then strips into `build/webkit/stage`.
+matched nothing cannot read as "no W+X" -- and that each function on a list
+holds an `isb` in the symbol-bearing binary (`llvm-objdump
+--disassemble-symbols`; at least eight instructions first, so a missing symbol
+cannot pass). A fence that lets a thread run code another CPU wrote or patched
+has no run-time witness, so the build asks the binary for each: since B-2d
+`MachineThreads::unparkCurrentThread` (RED on the B-2c `jsc`, which has none),
+since B-2e1 the two places a thread takes a finished Wasm plan
+(`Wasm::Module::compileSync`, `JSWebAssemblyInstance::finalizeCreation`; the
+B-2d `jsc` holds no `isb` in either) and the FTL's `JITFinalizer::finalize`,
+whose fence is upstream's. The list is a quoted heredoc of mangled name,
+label and, optionally, the mangled prefix of a call the `isb` must precede:
+`finalizeCreation` runs the module's start function itself, so its fence must
+come before its first call into `WebAssemblyModuleRecord::initializeExports`.
+That test uses address order for program order and fails closed when the call
+is laid out first or absent (both controls refuse on the device `jsc`). A
+refusal names the label and the patch that owes it. Since B-2e3 it also asks
+`Wasm::resetInstructionCacheOnAllThreads` for `SYS_ICACHE_SYNC_SPACE`: at
+least three instructions, and the last write to `x8` before an `svc #0` must
+be a `mov` of 128 (any other write to `x8`, a store from it included, clears
+the match, so the check fails closed). The B-2e1 `jsc`, whose function is
+upstream's 90-instruction thread walk, is refused, as are a wrong number, a
+write to `x8` between the `mov` and the `svc`, and an `svc` before the `mov`.
+Then it strips into `build/webkit/stage`.
 Parallelism is sized from RAM as well as cores (`webkit_jobs`): JSC's unified
 sources peak over 1 GiB per job, and eight jobs on an 8 GiB host is an OOM, not a
 speedup. Verification: the pool's bake-verify expects `/webkit/jsc` under the same

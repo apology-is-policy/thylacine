@@ -33,6 +33,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
+#include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
@@ -213,7 +214,7 @@ void test_sys_spawn_with_fds_child_rights_subset_of_parent(void) {
 static int kill_pid_cb(struct Proc *p, void *arg) {
     int want = *(int *)arg;
     if (p->pid != want) return 0;
-    proc_group_terminate(p, "kill");
+    proc_group_terminate(p, NOTE_SIG_KILL, "kill");
     return 1;
 }
 

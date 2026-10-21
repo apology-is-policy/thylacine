@@ -146,7 +146,7 @@ One line each. The authoritative text, with the full enforcement cells, is `ARCH
 | I-36 | File-backed demand-paged exec soundness (the 7 conditions) | prose + R-5 audit + tests |
 | I-37 | Weft capability network dataplane integrity | `weft.tla` + `weft_readiness.tla` |
 | I-38 | Larder cache coherence under close-to-open | `fs_cache.tla` |
-| I-39 | Debug authority bounded: two-axis gate, the owner axis only when the caller's caps COVER the target's -- and every guard on an IMAGE (cover, both seals, the taint) is asked of the JOIN over every Proc mapping it; execution control stopped-only; no text writes; a debugged or shared image never elevates; die-with-launcher (EXITKILL) | `debug_stop.tla` + `debug_step.tla` + tests |
+| I-39 | Debug authority bounded: two-axis gate, the owner axis only when the caller's caps COVER the target's -- and every guard on an IMAGE (cover, both seals, the taint) is asked of the JOIN over every Proc that maps it or ever has (the space records each departed holder); execution control stopped-only; no text writes; a debugged or shared image never elevates; die-with-launcher (EXITKILL) | `debug_stop.tla` + `debug_step.tla` + tests |
 | I-40 | No torn scanout / surface-share integrity -- kernel share half ENFORCED | `tapestry_present.tla` |
 | I-41 | NOT ALLOCATED in section 28 (AG-2 reserves it in ADVANCED-GO-DESIGN.md only) | -- |
 | I-42 | JIT is a capability (`CAP_JIT`); W^X holds across the publish -- ENFORCED | prose + CL-7k audit |
@@ -309,6 +309,7 @@ Every other gate, and what each one proves: `docs/agent/GATES.md`.
 - **Stratum is in scope**: fix Stratum-side bugs directly in `~/projects/stratum/v2` (branch `main`) -- ASCII commits, no force-push, the user pushes, `third_party/` stays pristine; Stratum format/ABI breaks escalate. Integration contract: `docs/agent/STRATUM-COORDINATION.md`.
 - **Native vs ported**: a program authored in Thylacine uses native libthyla-rs; ported foreign code uses Pouch; first-party `std` Rust on Pouch is sanctioned for new programs. Decision rule: `docs/agent/NATIVE-VS-PORTED.md`.
 - **The aux track** works `../thylacine-aux` (read its branch off the worktree). The shared surfaces are `kernel/`, `tools/`, `docs/reference/`; coordinate via yip. Host contention can explain wall-clock only, never a wrong value -- announce the resource and the uncertainty, not a duration. Detail: `docs/agent/AUX-TRACK.md`.
+- **Waiting for a shared machine** (yip's `mac` and `pi` leases): from your tmux pane, arm `tools/thyla-wake.sh hold <res> "<reason>"`, then work on or end the turn. It queues for you, takes the lease when your turn comes, and types a `[thyla-wake]` line into your pane; then set the lease's phase and pids, and release the moment the cores free. Never poll `yip resources`, and never block in a long `yip hold`. Detail: `docs/WATCHKEEPING.md` 4.11.
 - **Ship fallback**: v1.0-rc.1 (Phase 7) is the shippable fallback; Halcyon is last and may slip to v1.1. Take no Halcyon-blocking risks in Phase 7.
 
 ---

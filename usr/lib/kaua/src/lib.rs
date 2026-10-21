@@ -14,6 +14,8 @@
 // FEATURES:
 //   - `backend` (DEFAULT) -- compile `kaua::term`, which needs libthyla-rs (an
 //     aarch64-thylacine-only crate). The normal device build keeps this on.
+//   - `source` (implied by `backend`) -- compile `kaua::source` alone: the fd-0
+//     input without the alt-screen Terminal (lantern).
 //   - Host tests of the pure layers drop it (libthyla-rs does not build on the
 //     host):  `cargo test -p kaua --no-default-features --target <host-triple>`.
 
@@ -25,13 +27,14 @@ pub mod buffer;
 pub mod encode;
 pub mod event;
 pub mod input;
+pub mod intake;
 pub mod layout;
 pub mod query;
 pub mod rect;
 pub mod style;
 pub mod widget;
 
-#[cfg(feature = "backend")]
+#[cfg(feature = "source")]
 pub mod source;
 #[cfg(feature = "backend")]
 pub mod term;
@@ -49,7 +52,7 @@ pub use widget::{
 
 #[cfg(feature = "backend")]
 pub use query::terminal_size;
-#[cfg(feature = "backend")]
+#[cfg(feature = "source")]
 pub use source::{EventSource, PollSource};
 #[cfg(feature = "backend")]
 pub use term::Terminal;

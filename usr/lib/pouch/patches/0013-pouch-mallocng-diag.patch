@@ -4,7 +4,7 @@ assertion site. When mallocng's `assert(!p[-4])` would fire, a short
 write(2)-based dump captures the sizeclass, slot index, maplen,
 stride, and 16 bytes around p (8 before, 8 after) BEFORE the
 assertion is checked -- so when the assertion subsequently fires
-(via 0012-pouch-mallocng-crash.patch's _Exit(127)), the operator
+(via 0012-pouch-mallocng-crash.patch's abort()), the operator
 has the corruption pattern for analysis.
 
 Why a separate patch (not folded into 0012):
@@ -56,7 +56,7 @@ Safe-use envelope:
     allocate; safe to call from inside a malloc path.
   - The diagnostic does NOT prevent the subsequent assertion from
     firing (it runs BEFORE assert(!p[-4]) on the original line) --
-    so the program still terminates with _Exit(127) via 0012, with
+    so the program still ends in abort() via 0012, with
     the diagnostic captured upstream of the exit.
 
 --- a/src/malloc/mallocng/meta.h

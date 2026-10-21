@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -62,6 +62,21 @@ Tclunk is sent.
   `9p: close: clunk of fid N refused rc R`, which `tools/test.sh` fails on.
   `p9_closer_start()` makes the first closer (boot, after the poll pump;
   extinction on failure). `p9_closer_stats()` reports the pool.
+- A close job (2026-10-07, ARCH 7.9.1 part C): `p9_attached_defer_close(a,
+  fid, job)` queues the fid with a `struct p9_close_job {run, release}` the
+  closer runs first -- `run(job, client, fid)`, which may wait, then the
+  Tclunk, then `release(job)` -- so the rest of a last close that may not
+  wait for its server (dev9p's staged write-behind run) is finished by a
+  closer. On `-1` the caller still owns the job. `p9_attached_defer_clunk` is
+  the job-less form. A job whose run fails with `-P9_E_IO` while the fid is
+  still bound is run again with `closer_send`'s backoff (`closer_run_job`: 10
+  tries from 1 ms, about 1 s): a write never sent for want of memory comes
+  back as the same `-EIO` as a server's refusal, and a resend at the run's
+  explicit offsets is idempotent (witness
+  `p9_closer.close_job_retries_a_refused_write`). A job whose run still fails
+  while the session holds the fid prints `9p: close: flush of fid N failed rc R`
+  (`p9_close_flush_failed`, also called by dev9p when a hand-off cannot be
+  made); `jobs` and `job_errors` count them.
 - `srvconn_attach_dev9p_root(cn, aname, aname_len, who, flags, out_err)`
   → the dev9p root Spoor over a SrvConn, or NULL. `who` is the attaching
   Proc (its principal names the Tattach; with the cape, its principal and
@@ -190,6 +205,22 @@ instrument's purpose and worth stating as a coverage property rather than
 leaving implicit: a bug visible only in the registry's output is a bug no test
 can currently observe.
 
+### Each session carries its two ends
+
+The registry's counters move once per message, and a pty carries a message
+per key, so [[sub-kernel-devctl]] shows a session's counters only to the
+principals at its two ends, the system principal and a hostowner
+([[dec-2026-10-06-9p-sessions-ends]]). The ends live on the session as
+`ctl_owner` (the attaching Proc) and `ctl_server`. Both start as
+`PRINCIPAL_INVALID` at the link, which matches no reader, and
+`p9_attached_set_ctl_owners` stamps them under the registry lock, so the
+walker never reads a torn pair. `srvconn_attach_dev9p_root` stamps the
+attaching Proc and the conn's `server_principal`. `SYS_ATTACH_9P` stamps the
+attaching Proc and leaves the server unknown: the kernel cannot name whoever
+holds the other end of a caller-supplied transport. Between the link and the
+stamp the row reads `-` to everyone but the system principal and a hostowner,
+which fails closed.
+
 ### The label is sanitized because an empty string is a sentinel elsewhere
 
 Session labels default to the attach name, truncated to a small fixed field,
@@ -222,7 +253,11 @@ Plan 9's `closeproc`, serialized per session. A session with deferred
 Tclunks waits on a run-queue (`closer_queued`) until a closer takes it
 (`closer_busy`); that closer sends every entry, oldest first, through
 `p9_client_clunk_async` like any live thread, parking on back-pressure if it
-must. So a server that never answers holds only its own session's closer.
+must. An entry with a close job runs the job first, on the closer (part C:
+dev9p's write-behind run, written with `p9_client_write`, which waits like a
+live thread's), then sends the Tclunk and releases the job outside the lock;
+the job's run and the clunk share the entry's session reference. So a server
+that never answers holds only its own session's closer.
 The closer that takes work spawns a spare when no other closer is idle, and
 a closer that finds no work retires when another is idle, so one idle closer
 is kept. A hand-off that finds a session waiting, no closer idle and none
@@ -284,7 +319,9 @@ cfg.
 installed `adapter`/`transport_tx`/`transport_rx`, and the closer's queue:
 `closer_head`/`closer_tail` (the session's deferred fids),
 `closer_next`/`closer_queued` (its run-queue link), `closer_busy` (a closer
-has it). The ref uses RELAXED add / ACQ_REL sub, and `attached_tryref` a CAS
+has it). The registry fields: `ctl_next`, `ctl_label`, `ctl_id`, and the
+session's ends `ctl_owner`/`ctl_server` (principals; `PRINCIPAL_INVALID` =
+unknown). The ref uses RELAXED add / ACQ_REL sub, and `attached_tryref` a CAS
 loop that refuses at 0. The pool: `struct p9_closer` (thread, a Rendez only
 it sleeps on, the `kicked` flag, `exited`, `started`), `g_closer_idle` (at
 most one),
@@ -437,8 +474,25 @@ set, so no second spare), `orphan_oom_on_dead_session_quiet` (the sink's node
 fails on a session a peer marked dead: -1, the fid stays bound, no refusal
 line), and `clunk_killed_while_self_pumping` (a sender reading the
 replies itself, killed in that read over the stall transport: the session
-stays live and the Tclunk is taken back, fid bound). Each leaves the pool as
+stays live and the Tclunk is taken back, fid bound), and
+`exit_close_hands_off_tclunk` (2026-10-07, exit-close part A: a thread under
+`exit_close_active` drops a walked Spoor while the request ring is full and
+the reader held; it returns without waiting and a closer sends the Tclunk --
+where a clunk that may wait would park, and no kill could end the park), and
+three part-C witnesses (2026-10-07) over a closer session whose client stages
+writes, 256 patterned bytes staged at offset 0: `dying_close_hands_off_staged_run`
+(a killed thread's own last close cannot send; the closer writes the kept run,
+then clunks), `forced_exit_close_hands_off_flush` (every send meets a full
+ring; a plain exit close sleeps -- the control -- until `proc_group_kill`
+forces it, then returns without the server, and the closer writes the run once
+the ring frees) and `kthread_close_hands_off_staged_run` (a kproc thread marked
+`closes_never_wait` returns at once). Each checks the Twrite's offset, length
+and byte sum, that it precedes the Tclunk, one job, and the write-behind budget
+back at its baseline. Each leaves the pool as
 it found it -- one closer, idle and asleep (`idle_parked`), nothing queued.
+The stall transport wraps the mq loopback and declares no `hangup` (ARCH
+21.10): forwarding the inner op would hand it the wrapper's ctx, and the mq
+backend has none to forward, so its server learns of a death at the close.
 
 `kernel/test/test_9p_attach.c` (`p9_attached.*`): lifecycle,
 handshake-failure cleanup (the OOM/rollback ladder), root-walk-read

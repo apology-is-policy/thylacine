@@ -223,6 +223,8 @@ pub const T_SYS_YIELD: u64            = 87;
 pub const T_SYS_JIT_CREATE: u64       = 101;    // (length, out_va) -> 0; CAP_JIT-gated
 pub const T_SYS_JIT_DESTROY: u64      = 102;    // (writer_va) -> 0
 pub const T_SYS_ICACHE_SYNC: u64      = 103;    // (vaddr, length) -> 0
+pub const T_SYS_JIT_CREATE_SEALED: u64 = 127;   // (src_va, length, out_va) -> 0; CAP_JIT-gated
+pub const T_SYS_ICACHE_SYNC_SPACE: u64 = 128;   // () -> 0; the space's other CPUs take a CSE
 pub const T_SYS_STAT: u64             = 88;
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
 // contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
@@ -435,7 +437,9 @@ pub const T_WALK_CREATE_DMSRVCAPE: u32 = 0x0080_0000;
 // DMSRVREMOTE (HAUL-DESIGN 4.8): on a /srv service post in either mode, every
 // attach over the service is declared remote -- what T_ATTACH_9P_REMOTE does
 // to a pipe attach -- and /proc/<pid>/ns marks each mount from it ` remote`.
-// A label: it grants nothing. Mirrors SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
+// It grants nothing: the resolver reads it only to narrow, containing a link
+// the session serves beneath its mount (DISTRO 4.6). Mirrors
+// SYS_WALK_CREATE_DMSRVREMOTE in the kernel.
 pub const T_WALK_CREATE_DMSRVREMOTE: u32 = 0x0040_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
@@ -495,7 +499,7 @@ pub struct TSpawnArgs {
     pub argc:           u32, // 32
     pub fd_count:       u32, // 36
     pub perm_flags:     u32, // 40
-    pub _pad_envp:      u32, // 44 — must be 0 at v1.0
+    pub ext_flags:      u32, // 44 — SPAWN_EXT_* tails after the record; 0 = none
     pub cap_mask:       u64, // 48
     pub principal_id:   u32, // 56 — A-1a (honored iff identity_flags & SET)
     pub primary_gid:    u32, // 60 — A-1a
@@ -543,6 +547,24 @@ const _: () = assert!(core::mem::offset_of!(TSpawnArgs, debug_flags) == 100);
 // a debugger's `stop` takes the hold over, `start` / `detach` release it, and a
 // held child whose spawner exits first is killed. Ungated.
 pub const T_SPAWN_DEBUG_HELD: u32 = 1 << 0;
+
+// SYS_SPAWN_FULL_ARGV ext_flags (mirror SPAWN_EXT_* in the kernel header): each
+// bit says a tail follows the 104-byte record, in bit order. T_SPAWN_EXT_CWD's
+// tail is a TSpawnExtCwd naming the cwd the child is born with, resolved by the
+// spawner as chdir resolves one (STALK-DESIGN 4.3).
+pub const T_SPAWN_EXT_CWD: u32 = 1 << 0;
+
+/// The T_SPAWN_EXT_CWD tail, directly after the record (mirror
+/// `struct sys_spawn_ext_cwd`; tools/check-spawn-args-mirrors.py compares them).
+#[repr(C)]
+pub struct TSpawnExtCwd {
+    pub cwd_va:    u64, // 0 — the path (no NUL required)
+    pub cwd_len:   u32, // 8 — 1..1024
+    pub cwd_flags: u32, // 12 — must be 0
+}
+const _: () = assert!(core::mem::size_of::<TSpawnExtCwd>() == 16);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_len) == 8);
+const _: () = assert!(core::mem::offset_of!(TSpawnExtCwd, cwd_flags) == 12);
 
 // VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
 pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
@@ -757,6 +779,10 @@ pub const T_NOTE_BIT_TTY:        u8 = 5;
 // of the name is refused), posted to the trusted login authority when a
 // serial BREAK opens a trusted episode. Default IGNORE. Its own bit.
 pub const T_NOTE_BIT_SAK:        u8 = 6;
+// `term` -- SIGTERM's note (the signal chunk's S-2): a request to end,
+// catchable, default terminate. Its own bit, so a program masks or catches it
+// apart from `interrupt`.
+pub const T_NOTE_BIT_TERM:       u8 = 7;
 
 // NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
 // about today. Setting bits outside this is tolerated (no-op) so future
@@ -769,7 +795,7 @@ pub const T_NOTE_BIT_SAK:        u8 = 6;
 // ties it to the NoteClass set at compile time, which catches a variant added
 // without the bit; it CANNOT catch the kernel growing a bit this file never
 // hears about, because both sides of that check live here.
-pub const T_NOTE_MASK_SUPPORTED: u64 = 0x7f;
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0xff;
 
 // SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
 // to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
@@ -1628,9 +1654,11 @@ pub unsafe fn t_note_open() -> i64 {
 // required (`name_len` is authoritative). Permission gate: caller
 // must be self OR the target's parent.
 //
-// Returns 0 on success, -1 on bad name / bad target / queue full /
-// permission denied / not-in-supported-set / `snare:`-prefixed name
-// (reserved for kernel-synthetic posters).
+// Returns 0 on success, else a negative errno: -T_E_SRCH no such Proc,
+// -T_E_ACCES not the caller's child, -T_E_AGAIN the target's queue is full,
+// -T_E_INVAL a name no program may post, -T_E_FAULT an unreadable name. A
+// self-post of `snare:segv`/`bus`/`ill`/`fpe`/`abort` does not return: the
+// kernel ends the caller with that snare.
 //
 // Safety: `name_va` must point to `name_len` readable bytes in user-
 // VA memory.
@@ -1812,7 +1840,8 @@ pub const T_ATTACH_9P_CAPE: u64 = 0x2;
 /// SYS_ATTACH_9P flags: the remote declaration (HAUL-DESIGN 4.8). The attacher
 /// declares that the session's transport leaves the machine; `/proc/<pid>/ns`
 /// marks every mount whose source comes from the session ` remote`, and `ls`,
-/// `stat`, `realm` and `ns` read it. A label: nothing else consults it.
+/// `stat`, `realm` and `ns` read it. The resolver reads it only to narrow: a
+/// link the session serves resolves beneath its mount (DISTRO 4.6).
 /// SYS_ATTACH_9P_SRV refuses it: over /srv the poster declares
 /// ([`T_WALK_CREATE_DMSRVREMOTE`]).
 pub const T_ATTACH_9P_REMOTE: u64 = 0x4;
@@ -3213,9 +3242,33 @@ pub unsafe fn t_jit_create(length: u64, out_va: u64) -> i64 {
     x0
 }
 
+// t_jit_create_sealed — mint a SEALED code region: the kernel copies `length`
+// bytes from `src_va` into fresh pages, publishes them, and maps ONE
+// execute-only alias at a random address, written as a u64 to `out_va`. No
+// writer ever exists, and EL0 cannot read the bytes back. Returns 0, or -errno
+// (-EACCES without CAP_JIT, -EINVAL on a length of 0 or over JIT_SEALED_MAX,
+// -EFAULT on an unreadable source or unwritable out_va, -EAGAIN while the
+// kernel's random source is unseeded, -ENOMEM).
+//
+// # Safety
+// `src_va` must point to `length` readable bytes, `out_va` to 8 writable ones.
+#[inline(always)]
+pub unsafe fn t_jit_create_sealed(src_va: u64, length: u64, out_va: u64) -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") src_va => x0,
+        in("x1") length,
+        in("x2") out_va,
+        in("x8") T_SYS_JIT_CREATE_SEALED,
+        options(nostack)
+    );
+    x0
+}
+
 // t_jit_destroy — tear down BOTH aliases of the region whose WRITER alias
-// starts at `writer_va`, and free its pages. Returns 0, or -EINVAL if
-// writer_va is not the base of a live code region of this Proc.
+// starts at `writer_va`, and free its pages; a sealed region is named by its
+// one alias's base. Returns 0, or -EINVAL if the VA is neither.
 //
 // # Safety
 // Any pointer into either alias is dangling afterwards.
@@ -3248,6 +3301,24 @@ pub unsafe fn t_icache_sync(vaddr: u64, length: u64) -> i64 {
         in("x8") T_SYS_ICACHE_SYNC,
         options(nostack)
     );
+    x0
+}
+
+// t_icache_sync_space — return once every other CPU that was running a thread
+// of the caller's address space has handled an interrupt that observed this
+// call, so those threads next execute what t_icache_sync published (Linux's
+// membarrier SYNC_CORE). Always returns 0.
+#[inline(always)]
+pub fn t_icache_sync_space() -> i64 {
+    let mut x0: i64;
+    unsafe {
+        asm!(
+            "svc #0",
+            lateout("x0") x0,
+            in("x8") T_SYS_ICACHE_SYNC_SPACE,
+            options(nostack)
+        );
+    }
     x0
 }
 
@@ -3364,10 +3435,15 @@ pub const T_WAIT_WNOHANG: i32 = 1;
 /// < -1 = any child in group `-want_pid`.
 pub const T_WAIT_UNTRACED: i32 = 2;
 pub const T_WAIT_CONTINUED: i32 = 4;
+/// The packed encoding with no stop or continue reports: a child that died of
+/// a note reads as signalled (docs/ERRORS.md "The wait status").
+pub const T_WAIT_PACKED: i32 = 8;
 pub const T_WAIT_STATUS_STOPPED: i32 = 0x7f | (20 << 8);
 pub const T_WAIT_STATUS_CONTINUED: i32 = 0xffff;
 #[inline(always)] pub fn t_wait_if_exited(st: i32) -> bool { (st & 0x7f) == 0 }
 #[inline(always)] pub fn t_wait_exitstatus(st: i32) -> i32 { (st >> 8) & 0xff }
+#[inline(always)] pub fn t_wait_if_signaled(st: i32) -> bool { (st & 0x7f) != 0 && (st & 0x7f) != 0x7f }
+#[inline(always)] pub fn t_wait_termsig(st: i32) -> i32 { st & 0x7f }
 #[inline(always)] pub fn t_wait_if_stopped(st: i32) -> bool { (st & 0xff) == 0x7f }
 #[inline(always)] pub fn t_wait_if_continued(st: i32) -> bool { st == 0xffff }
 

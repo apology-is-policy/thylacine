@@ -572,8 +572,9 @@ static struct Spoor *devrandom_create(struct Spoor *c, const char *name, int omo
     return NULL;
 }
 
-static void devrandom_close(struct Spoor *c) {
+static int devrandom_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 static long devrandom_read(struct Spoor *c, void *buf, long n, s64 off) {

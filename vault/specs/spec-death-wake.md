@@ -9,7 +9,7 @@ cfgs:
   - "death_wake_buggy.cfg -- BUGGY_OBSERVE_BEFORE_REGISTER: NoLostDeathWake violated (the #809-audit F1 hang)"
 gate: "any change to the wait_lock / rendez_blocked_on / cascade protocol, or to the ZOMBIE last-out determination"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-05
 ---
 ## Abstraction
 
@@ -38,7 +38,10 @@ theorem.
   its `exit_close_active` suppression;
 - both stop owners — a debugger or job-control stop can park a thread on its
   way to the checkpoint, and `DeathWinsOverStop` is `debug_stop.tla`'s and
-  `pty_stop.tla`'s obligation, not this model's;
+  `pty_stop.tla`'s obligation, not this model's. The exit close is in none of
+  the three: its closer reads no death, and that a dying group is never asked
+  to park there (`proc_stop_requested`, DEBUG-FS-DESIGN 5g) is the kernel
+  tests' to show (`rendez.exit_close_*`);
 - the orphan rule, the legate teardown, and the console-role clears that
   ride the same chokepoint;
 - torpor: futex waiters are woken by a separate pass, abstracted here into

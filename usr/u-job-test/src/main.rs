@@ -25,8 +25,12 @@
 //   8. `wait` (no args) blocks on ALL jobs.
 //   9. `fg %N` blocks to completion + removes the job silently (no Done line).
 //   10. `bg %N` reports the already-running job (status 0), no removal.
-//   11. `kill` error paths (usage / no-such-job / snare:* reserved).
-//   12. `kill %N` posts a note to a LIVE child's pid (the %N -> pid mapping).
+//   11. `kill` error paths (usage / no-such-job / snare:* reserved), and
+//       $errstr naming the kernel's refusal of our parent: not a child.
+//   12. `kill %N` posts `term` to a LIVE child's pid (the %N -> pid mapping),
+//       and `wait %1` reads the death as $status 143; around it, a note the
+//       kernel refuses reads `not a note a program can send`, and the reaped
+//       pid reads `no such process`.
 //
 //   U-7c-a (note runtime delivery):
 //   13. `on note 'interrupt' { ... }` registers a handler that fires when the
@@ -350,12 +354,28 @@ pub extern "C" fn rs_main() -> i64 {
     if env_ke.status() == 0 {
         return fail("`kill ... snare:term` should be rejected (kernel-reserved)");
     }
+    // 11b. The kernel names each refusal (SYS_POSTNOTE's errnos, S-3), and
+    //      $errstr says which. Our parent is alive and is not our child; the
+    //      note is `child_exit`, which it ignores if the gate ever let it by.
+    let ppid = match parent_pid() {
+        Some(p) => p,
+        None => return fail("kill: could not read our ppid from /proc/<pid>/status"),
+    };
+    let _ = eval_source(&mut env_ke, &alloc::format!("kill {} child_exit", ppid));
+    if env_ke.status() != 1
+        || env_ke.errstr() != alloc::format!("kill: {}: not a child of this shell", ppid)
+    {
+        return fail("kill of a non-child should read `not a child of this shell`");
+    }
 
     // 12. `kill %N` SUCCESS to a LIVE child. Spawn `tr` with a piped stdin we
     //     hold open -> it blocks reading (cannot exit) -> register it as job
-    //     [1] -> `kill %1` posts `interrupt` to its pid (send must succeed) ->
-    //     EOF its stdin so it exits regardless of the note -> reap by-pid
-    //     (bounded; never hangs). Proves the %N -> live-pid mapping + send.
+    //     [1] -> `kill %1` posts the default `term` to its pid (send must
+    //     succeed) -> EOF its stdin so a child the note did not end exits
+    //     anyway (the wait never hangs) -> `wait %1` reaps it. The note was
+    //     posted before the EOF, so its default terminate decides the death:
+    //     $status 143, where `interrupt` (the default before S-2) reads 130
+    //     and an exit by the EOF reads 0.
     // All three slots are Piped (the shell's v1.0 no-terminal convention --
     // Stdio::Inherit cannot resolve without a terminal-backed fd 0/1/2). We
     // HOLD stdin's write end so `tr` blocks reading (stays alive) and drop the
@@ -375,16 +395,45 @@ pub extern "C" fn rs_main() -> i64 {
             drop(child.stderr.take());
             let pid = child.pid();
             env_k.jobs_mut().add(vec![pid], String::from("tr a-z A-Z"));
+            let _ = eval_source(&mut env_k, "kill %1 bogus");
+            if env_k.status() != 1 || env_k.errstr() != "kill: bogus: not a note a program can send" {
+                return fail("kill %1 bogus should read `not a note a program can send`");
+            }
             if eval_source(&mut env_k, "kill %1").is_err() {
                 return fail("kill: `kill %1` errored");
             }
             if env_k.status() != 0 {
                 return fail("kill %1 to a live child should report success");
             }
-            // EOF the child's stdin so it exits even if it ignored the note,
-            // then reap by-pid (bounded -- never hangs).
+            // Dead and not yet waited for, the child is still a process: a real
+            // note is accepted (and changes nothing), a bad name still refused.
+            if !proc_reads_zombie(pid) {
+                return fail("the child killed by `term` never read ZOMBIE");
+            }
+            let _ = eval_source(&mut env_k, "kill %1 bogus");
+            if env_k.status() != 1 || env_k.errstr() != "kill: bogus: not a note a program can send" {
+                return fail("kill %1 bogus to a dead child should still read `not a note a program can send`");
+            }
+            if eval_source(&mut env_k, "kill %1").is_err() {
+                return fail("kill: `kill %1` to a dead child errored");
+            }
+            if env_k.status() != 0 {
+                return fail("kill %1 to a dead, unwaited child should report success");
+            }
             drop(child.stdin.take());
-            let _ = child.wait();
+            if eval_source(&mut env_k, "wait %1").is_err() {
+                return fail("kill: `wait %1` errored");
+            }
+            if env_k.status() != 143 {
+                return fail("kill %1 should end the child by `term`: $status 128+15");
+            }
+            // Reaped, the pid names no process at all.
+            let _ = eval_source(&mut env_k, &alloc::format!("kill {}", pid));
+            if env_k.status() != 1
+                || env_k.errstr() != alloc::format!("kill: {}: no such process", pid)
+            {
+                return fail("kill of a reaped pid should read `no such process`");
+            }
         }
         Err(_) => return fail("kill: could not spawn the `tr` blocker"),
     }
@@ -539,6 +588,7 @@ pub extern "C" fn rs_main() -> i64 {
         ("pipe", Some(NoteClass::Pipe)),
         ("child_exit", Some(NoteClass::ChildExit)),
         ("sak", Some(NoteClass::Sak)), // IM-1: the trusted-path note, its own class
+        ("term", Some(NoteClass::Term)), // SIGTERM's note, apart from interrupt
         ("kill", None),
         ("ttysusp", None), // no colon: not the family
         ("snare:segv", None),
@@ -821,6 +871,38 @@ pub extern "C" fn rs_main() -> i64 {
 
     t_putstr("u-job-test: all OK\n");
     0
+}
+
+// Our parent's pid, from the `ppid:` line of /proc/<our pid>/status.
+fn parent_pid() -> Option<i32> {
+    use libthyla_rs::io::Read as _;
+    let me = unsafe { libthyla_rs::t_getpid() };
+    let mut f = libthyla_rs::fs::File::open(alloc::format!("/proc/{}/status", me).as_str()).ok()?;
+    let mut buf = [0u8; 512];
+    let n = f.read(&mut buf).ok()?;
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    let line = text.lines().find(|l| l.starts_with("ppid:"))?;
+    line["ppid:".len()..].trim().parse::<i32>().ok().filter(|p| *p > 0)
+}
+
+/// Whether `pid`'s /proc status reads ZOMBIE within a bounded wait (it dies
+/// on its own CPU, asynchronously to the post that killed it).
+fn proc_reads_zombie(pid: i32) -> bool {
+    use libthyla_rs::io::Read as _;
+    let path = alloc::format!("/proc/{}/status", pid);
+    for _ in 0..2000 {
+        if let Ok(mut f) = libthyla_rs::fs::File::open(path.as_str()) {
+            let mut buf = [0u8; 512];
+            if let Ok(n) = f.read(&mut buf) {
+                let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
+                if text.lines().any(|l| l.starts_with("state:") && l["state:".len()..].trim() == "ZOMBIE") {
+                    return true;
+                }
+            }
+        }
+        let _ = time::sleep(Duration::from_millis(2));
+    }
+    false
 }
 
 fn fail(tag: &str) -> i64 {

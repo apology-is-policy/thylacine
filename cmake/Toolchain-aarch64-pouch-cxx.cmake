@@ -51,5 +51,12 @@ set(CMAKE_C_FLAGS_INIT   "${THYLACINE_COMMON} -isystem ${THYLACINE_SYSROOT}/incl
 set(CMAKE_CXX_FLAGS_INIT "${THYLACINE_COMMON} -isystem ${THYLACINE_SYSROOT}/include/c++/v1 -isystem ${THYLACINE_SYSROOT}/include")
 set(CMAKE_ASM_FLAGS_INIT "${THYLACINE_COMMON} -isystem ${THYLACINE_SYSROOT}/include")
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
+# -DTHYLACINE_EXTRA_INCLUDES=<;-list>: more system include roots (JavaScriptCore takes the
+# in-repo JIT headers from usr/lib/thylajit). A normal variable rather than a _FLAGS_INIT
+# cache seed, so a reconfigure of an existing tree always sees the current list.
+if(THYLACINE_EXTRA_INCLUDES)
+    set(CMAKE_C_STANDARD_INCLUDE_DIRECTORIES ${THYLACINE_EXTRA_INCLUDES})
+    set(CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES ${THYLACINE_EXTRA_INCLUDES})
+endif()
 # Compiler probes cannot run target binaries; build a static library instead of linking an exe.
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)

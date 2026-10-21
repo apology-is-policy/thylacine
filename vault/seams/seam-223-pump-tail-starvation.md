@@ -2,12 +2,13 @@
 id: seam-223-pump-tail-starvation
 type: seam
 title: "dev9p.poll pump: >16 distinct QTPOLL clients starve the tail"
-status: open
+status: closed
 surface: [sub-kernel-ninep-dev9p-poll]
 opened-by: fnd-net6b-r2-f1
 tracker: "task #223"
 created: 2026-07-31
 updated: 2026-07-31
+closed-by: chg-2026-10-06-loom-multiclient
 ---
 **Owed**: a fair per-client work-queue (or a round-robin cursor) in
 `dev9p_poll_collect_clients`. The collect is a head-anchored LIFO scan

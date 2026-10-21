@@ -1,0 +1,246 @@
+From a4fe7ddcc6a267375a7399dd47db5aecd7da3ace Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <noreply@example.invalid>
+Date: Thu, 8 Oct 2026 18:51:30 +0200
+Subject: [PATCH] thylacine: B-2c the Baseline JIT on one SYS_JIT_CREATE code
+ region (WIP, local only)
+
+OS(THYLACINE) && ENABLE(JIT): the separated-WX heap with no jump islands and a
+64 MiB pool (one code region, within one near branch, so the pool-size
+static_assert proves every near branch reaches); the pool is the region's exec
+alias, adopted as the reservation; the writer alias's address lives only inside
+an execute-only thunk sealed by SYS_JIT_CREATE_SEALED, hand-encoded by
+thyla_jit_thunk.h (Thylacine's usr/lib/thylajit, the same encoding its
+pouch-hello-jitthunk probe runs against the kernel), so no LinkBuffer copy of it
+exists; jsc acquires CAP_JIT by the SELF form before JSC::initialize, and
+--thylacine-no-cap-jit skips the acquisition (the deny probe). Any refusal
+leaves the reservation empty and JSC runs its interpreters. Every JIT tier is
+built (as on RISCV64, the configuration upstream builds); DFG, FTL and Wasm's
+BBQ and OMG are forced off at run time in Options::notifyOptionsChanged, so
+Baseline and the RegExp JIT are the only tiers that run.
+---
+ .../jit/ExecutableAllocator.cpp               | 51 ++++++++++++++++++-
+ Source/JavaScriptCore/jsc.cpp                 | 32 ++++++++++++
+ Source/JavaScriptCore/runtime/Options.cpp     | 11 ++++
+ Source/WTF/wtf/PageReservation.h              | 11 ++++
+ Source/WTF/wtf/PlatformEnable.h               | 17 +++++++
+ 5 files changed, 121 insertions(+), 1 deletion(-)
+
+diff --git a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
+index c9e3589bac..f51d253144 100644
+--- a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
++++ b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
+@@ -68,6 +68,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ #include <wtf/spi/cocoa/MachVMSPI.h>
+ #endif
+ 
++#if OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++#include <errno.h>
++#define THYLA_JIT_NO_CAPJIT
++#include <thyla_jit.h>
++#include <thyla_jit_thunk.h>
++#endif
++
+ #if USE(INLINE_JIT_PERMISSIONS_API)
+ #include <wtf/darwin/WeakLinking.h>
+ WTF_WEAK_LINK_FORCE_IMPORT(be_memory_inline_jit_restrict_with_witness_supported);
+@@ -352,6 +359,41 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+ #endif // OS(DARWIN) && HAVE(REMAP_JIT)
+ 
++#if OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++
++// The pool is one code region (SYS_JIT_CREATE): an exec alias, adopted as the
++// reservation, and a writer alias at an unrelated random address whose address
++// survives only inside the sealed write thunk (thyla_jit_thunk.h: hand-encoded, so
++// its bytes never pass through a LinkBuffer, whose branch-compaction buffer would
++// keep a readable copy; an 8-byte write at an 8-aligned destination is one store,
++// so an Atomic repatch stays atomic). Any refusal leaves the reservation empty, so
++// enableAssembler() fails and JSC runs its interpreters; EACCES (no CAP_JIT) is
++// that deny path and stays quiet, anything else is reported.
++static PageReservation createThylacineJITPool(size_t size)
++{
++    struct thyla_jit_region region { };
++    long rc = thyla_jit_create(size, &region);
++    if (rc) {
++        if (rc != -EACCES || Options::verboseExecutablePoolAllocation())
++            dataLogLn("jsc: SYS_JIT_CREATE(", size, ") refused, errno ", -rc, "; the JIT is off");
++        return { };
++    }
++    uint64_t thunkVA = 0;
++    rc = thyla_jit_thunk_create(region.writer_va, size, &thunkVA);
++    if (rc) {
++        thyla_jit_destroy(region.writer_va);
++        thyla_jit_scrub(&region, sizeof(region));
++        dataLogLn("jsc: the write thunk was refused, errno ", -rc, "; the JIT is off");
++        return { };
++    }
++    void* exec = reinterpret_cast<void*>(region.exec_va);
++    thyla_jit_scrub(&region, sizeof(region));
++    g_jscConfig.jitWriteSeparateHeaps = reinterpret_cast<JITWriteSeparateHeapsFunction>(tagCodePtr<JITThunkPtrTag>(reinterpret_cast<void*>(thunkVA)));
++    return PageReservation::adoptExecutable(exec, size);
++}
++
++#endif // OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++
+ struct JITReservation {
+     PageReservation pageReservation;
+     void* base { nullptr };
+@@ -403,10 +445,17 @@ static ALWAYS_INLINE JITReservation initializeJITPageReservation()
+         return PageReservation::tryReserveWithGuardPages(reservationSize, OSAllocator::JSJITCodePages, hintAddress, EXECUTABLE_POOL_WRITABLE, true, false, false);
+     };
+ 
++#if OS(THYLACINE) && ENABLE(SEPARATED_WX_HEAP)
++    UNUSED_VARIABLE(tryCreatePageReservation);
++    // The kernel places both aliases at random addresses; there is no hint to honour.
++    RELEASE_ASSERT(!Options::jitMemoryReservationAddress() && "JSC_jitMemoryReservationAddress cannot be honoured on Thylacine");
++    reservation.pageReservation = createThylacineJITPool(reservation.size);
++#else
+     void* addressHint = reinterpret_cast<void*>(Options::jitMemoryReservationAddress());
+     reservation.pageReservation = tryCreatePageReservation(reservation.size, addressHint);
+     if (addressHint)
+         RELEASE_ASSERT(reservation.pageReservation.base() == addressHint && "Failed to accomodate JSC_jitMemoryReservationAddress");
++#endif
+ 
+     if (Options::verboseExecutablePoolAllocation())
+         dataLog(getpid(), ": Got executable pool reservation at ", RawPointer(reservation.pageReservation.base()), "...", RawPointer(reservation.pageReservation.end()), ", while I'm at ", RawPointer(reinterpret_cast<void*>(initializeJITPageReservation)), "\n");
+@@ -419,7 +468,7 @@ static ALWAYS_INLINE JITReservation initializeJITPageReservation()
+         if (g_jscConfig.useFastJITPermissions)
+             threadSelfRestrict<MemoryRestriction::kRwxToRx>();
+ 
+-#if ENABLE(SEPARATED_WX_HEAP)
++#if ENABLE(SEPARATED_WX_HEAP) && !OS(THYLACINE)
+         if (!g_jscConfig.useFastJITPermissions) {
+             // First page of our JIT allocation is reserved.
+             ASSERT(reservation.size >= executablePageSize() * 2);
+diff --git a/Source/JavaScriptCore/jsc.cpp b/Source/JavaScriptCore/jsc.cpp
+index 7a26bf7e0d..647ba659ed 100644
+--- a/Source/JavaScriptCore/jsc.cpp
++++ b/Source/JavaScriptCore/jsc.cpp
+@@ -93,6 +93,10 @@
+ #include <sys/types.h>
+ #include <type_traits>
+ #include <wtf/CPUTime.h>
++#if OS(THYLACINE) && ENABLE(JIT)
++#define THYLA_CAPJIT_SELF_ONLY
++#include <thyla_capjit.h>
++#endif
+ #include <wtf/CommaPrinter.h>
+ #include <wtf/FastMalloc.h>
+ #include <wtf/FileHandle.h>
+@@ -4584,6 +4588,22 @@ int jscmain(int argc, char** argv)
+ 
+     WTF::initializeMainThread();
+ 
++#if OS(THYLACINE) && ENABLE(JIT)
++    // --thylacine-no-cap-jit skips the CAP_JIT walk below (the deny probe). It is
++    // taken out of argv before CommandLine sees it; an environment variable would
++    // not do, since Thylacine's shell starts a child with no environment.
++    bool thylacineNoCapJIT = false;
++    for (int i = 1; i < argc && strcmp(argv[i], "--"); ++i) {
++        if (!strcmp(argv[i], "--thylacine-no-cap-jit")) {
++            thylacineNoCapJIT = true;
++            for (int j = i; j < argc - 1; ++j)
++                argv[j] = argv[j + 1];
++            argv[--argc] = nullptr;
++            break;
++        }
++    }
++#endif
++
+     // Note that the options parsing can affect VM creation, and thus
+     // comes first.
+     mainCommandLine.construct(argc, argv);
+@@ -4599,6 +4619,18 @@ int jscmain(int argc, char** argv)
+         processConfigFile(Options::configFile(), "jsc");
+     }
+ 
++#if OS(THYLACINE) && ENABLE(JIT)
++    // CAP_JIT is elevation-only, so no parent can hand it down: jsc walks the corvus
++    // clearance itself, by the SELF form alone (no credential is compiled in), before
++    // JSC::initialize() creates the pool. --thylacine-no-cap-jit skips the walk; the
++    // pool's SYS_JIT_CREATE is then refused and JSC runs its interpreters.
++    {
++        Options::AllowUnfinalizedAccessScope scope;
++        if (Options::useJIT() && !thylacineNoCapJIT)
++            thyla_acquire_cap_jit("jsc");
++    }
++#endif
++
+     JSC::initialize();
+ #if ENABLE(JIT_OPERATION_VALIDATION)
+     JSC::JITOperationList::populatePointersInEmbedder(&startOfJITOperationsInShell, &endOfJITOperationsInShell);
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 0cf9ec4133..35cf88457b 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -836,6 +836,17 @@ void Options::notifyOptionsChanged()
+     Options::useFTLJIT() = false;
+ #endif
+ 
++#if OS(THYLACINE)
++    // As on RISCV64, every JIT tier is built (the configuration upstream builds) and
++    // the tiers not yet opened on Thylacine are off at run time: Baseline and the
++    // RegExp JIT run; DFG, FTL and Wasm's BBQ and OMG stay off whatever a flag or the
++    // environment asked, until each is opened in its own audited step.
++    Options::useDFGJIT() = false;
++    Options::useFTLJIT() = false;
++    Options::useBBQJIT() = false;
++    Options::useOMGJIT() = false;
++#endif
++
+ #if !CPU(X86_64) && !CPU(ARM64)
+     Options::useConcurrentGC() = false;
+     Options::forceUnlinkedDFG() = false;
+diff --git a/Source/WTF/wtf/PageReservation.h b/Source/WTF/wtf/PageReservation.h
+index f55dac3c04..e39738108e 100644
+--- a/Source/WTF/wtf/PageReservation.h
++++ b/Source/WTF/wtf/PageReservation.h
+@@ -126,6 +126,17 @@ public:
+     }
+ 
+ 
++#if OS(THYLACINE)
++    // A range the kernel placed (SYS_JIT_CREATE's exec alias): adopted rather than
++    // reserved. commit and decommit stay OSAllocator's.
++    static PageReservation adoptExecutable(void* base, size_t size)
++    {
++        ASSERT(isPageAligned(base));
++        ASSERT(isPageAligned(size));
++        return PageReservation(base, size, false, true, false);
++    }
++#endif
++
+     void deallocate()
+     {
+         ASSERT(!m_committed);
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+index 08d8ea5a09..8ad3e9dfe3 100644
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -535,6 +535,23 @@
+ #endif
+ #endif
+ 
++/* OS(THYLACINE): the JIT pool is one SYS_JIT_CREATE code region -- an exec alias JSC
++   branches to and a writer alias at an unrelated random address, written only through
++   an execute-only thunk sealed by SYS_JIT_CREATE_SEALED. A region is at most 64 MiB,
++   within one near branch (128 MiB), so no jump islands: the pool-size static_assert in
++   ExecutableAllocator.cpp then proves every near branch reaches. */
++#if OS(THYLACINE) && ENABLE(JIT)
++#if !defined(ENABLE_SEPARATED_WX_HEAP)
++#define ENABLE_SEPARATED_WX_HEAP 1
++#endif
++#if !defined(ENABLE_JUMP_ISLANDS)
++#define ENABLE_JUMP_ISLANDS 0
++#endif
++#if !defined(FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB)
++#define FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB 64
++#endif
++#endif
++
+ #if !defined(ENABLE_SEPARATED_WX_HEAP)
+ #define ENABLE_SEPARATED_WX_HEAP 0
+ #endif
+-- 
+2.43.0
+

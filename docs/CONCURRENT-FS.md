@@ -38,7 +38,7 @@ soundness-first order.
 
 | # | Layer | Fact | Source |
 |---|---|---|---|
-| S1 | Kernel 9P client | Already CONCURRENT: multi-in-flight tag demux, elected reader, 64-tag ceiling per session (`P9_SESSION_MAX_OUTSTANDING`), death-interruptible, EAGAIN-parking senders | `kernel/9p_client.c` (#841/#845/#349); `kernel/include/thylacine/9p_session.h:94` |
+| S1 | Kernel 9P client | Already CONCURRENT: multi-in-flight tag demux, elected reader, a tag table that grows to 65535 tags per session with an op share and an async share (ARCH 21.11; 64 tags, `P9_SESSION_MAX_OUTSTANDING`, until 2026-10-07), death-interruptible, EAGAIN-parking senders | `kernel/9p_client.c` (#841/#845/#349); `kernel/include/thylacine/9p_session.h` (`P9_TAG_LIMIT`, `P9_OPS_MAX`) |
 | S2 | Transport (boot FS mount) | SrvConn byte rings; `SRVCONN_MSIZE = 32 KiB` → the negotiated msize ≈ 32 KiB caps every op's payload (a 256 KiB REVENANT cluster read = 8 serial round trips); ring = 2 frames each way; backpressure sound (#348/#349) | `kernel/include/thylacine/srvconn.h:74,91`; `kernel/9p_attach.c:273-275` |
 | S3 | stratumd connection dispatch | Thread-per-CONNECTION, strictly SERIAL per connection: read frame → `stm_9p_server_handle` to completion → write reply → next. Thylacine routes every Proc through ONE mount = ONE connection = ONE serial worker | `stratum src/cmd/stratumd/serve.c:356-470` (SWISS-4g) |
 | S4 | stm_9p_server | `stm_9p_server_handle` holds the per-connection `s->lock` across the WHOLE request (fid table + all dispatch under it) | `stratum src/9p/server.c:3612/3740` |

@@ -32,13 +32,15 @@ footer that gives the deck's title and the slide's position, such as
 `Beacon slides  ·  1 / 4`. Space, the right arrow or `n` shows the next slide,
 and the left arrow or `p` shows the previous one. The caret is hidden while a
 slide is on the screen. `q` ends the presentation: the last slide stays on the
-screen, and the shell prompt returns below it.
+screen, and the shell prompt returns below it. Anything typed after `q` goes to
+the shell, even before the prompt appears.
 
 Advancing past the last slide keeps the last slide on the screen; lantern
 neither wraps to the first slide nor exits, because the end of a deck is where
 a talk stops for questions. A digit shows the slide with that number, and a
 digit larger than the number of slides is ignored. Escape does not end a
-presentation. Every key lantern understands is listed under Keys.
+presentation, and the key pressed after it works as usual. Every key lantern
+understands is listed under Keys.
 
 ### Present to a room
 
@@ -244,7 +246,9 @@ lantern: /tmp/talk/notes.md: a link; a deck's files are files in its directory
 
 The deck's directory, and each directory above it, is used as named, links
 included. On a Haul mount, a link in that path is set by the machine that
-serves it and can lead to another directory on this one.
+serves it, and Thylacine resolves such a link within the mount through which
+it is reached: it can lead to another directory of the export, and it cannot
+lead to a directory outside the mount. See Remote files with Haul.
 
 ## Technical Details
 
@@ -314,8 +318,10 @@ When the shell starts lantern, it recognises the program by name and switches
 the terminal to raw input, which delivers each key as it is pressed. In this
 mode the terminal also stops converting line endings, so lantern converts
 them itself. Escape begins the byte sequence of every arrow and function key,
-and a lone Escape could only be told apart from those sequences by waiting;
-this is why Escape does not end a presentation.
+so lantern waits a twentieth of a second after an Escape to see whether the
+rest of a sequence follows. When nothing follows, lantern ignores the Escape.
+Because a lone Escape is only known after that wait, Escape does not end a
+presentation.
 
 ### Checking and memory
 

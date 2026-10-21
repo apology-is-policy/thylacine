@@ -49,9 +49,14 @@ cow_buggy_put_before_replace:NoReadableFreed"
 # is a fingerprint here too; Safety must hold)
 TEMPORAL="cow_buggy_vfork:EventuallyReleased:231"
 
+# Every temporal run is `-lncheck final`: liveness is judged once the whole
+# space is explored. Without it TLC checks liveness at TIME-triggered points
+# mid-run and stops at the first violation, so the count depended on how fast
+# the host ran (measured 2026-10-06: 32796 vs 32868 on two quiet runs of
+# loom_role_buggy_no_role_hook; 28333 under load). A pin needs a fixed count.
 run() {  # $1 = cfg basename -> sets RC and LOG
     LOG="$TMP/$1.log"
-    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -metadir "$TMP/$1.meta" \
+    java -cp "$JAR" tlc2.TLC -workers auto -deadlock -lncheck final -metadir "$TMP/$1.meta" \
         -config "$1.cfg" cow.tla > "$LOG" 2>&1
     RC=$?
 }

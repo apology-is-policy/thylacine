@@ -48,7 +48,7 @@ THE REAL FIX is not here and is recorded as owed: socket fds that are small
 integers (a placeholder kernel handle per slot with an fd -> slot side table),
 which would let select() work on sockets and retire the tag from every
 fd-consuming call. That is a redesign of 0006 / 0016 -- its own chunk, its own
-audit. Until then a port that select()s on a socket stops (status 127, and on
+audit. Until then a port that select()s on a socket stops (SIGABRT, and on
 a terminal a line that names the cause). What a port that poll()s gets is
 0041's subject, not this patch's: this one only makes ppoll() REACH the
 kernel's poll with the right handle. The same-day claim that such a port
@@ -74,7 +74,7 @@ The macros keep upstream's value (the assignment / the test) behind a comma:
 every FD_SET statement in every port an unused-value warning.
 
 Device-side pin (not in this patch file): pouch-hello-sockets re-runs itself as
-a child that FD_SETs a socket fd and must die with abort's status (127), not
+a child that FD_SETs a socket fd and must die of abort (SIGABRT), not
 return and not fault; and it ppoll()s a connected socket, where a raw tagged fd
 answers POLLNVAL. (That leg's first form asked for POLLIN with the reply "on
 its way" and was decided by a scheduling race over the kernel defect above; it

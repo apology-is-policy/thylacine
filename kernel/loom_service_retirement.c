@@ -16,8 +16,9 @@ int loom_retirement_quiesce(struct loom_service_protocol *p) {
     // does not certify these cursors or RPC container users have ended.
     spin_lock(&l->lock);
     if(p->progress.sending || p->progress.io.tx)extinction("abort retained TX cursor");
-    for(u32 i=0;i<P9_SESSION_MAX_OUTSTANDING;++i)
-        if(p->client.inflight[i])extinction("abort retained RPC callback");
+    struct p9_outstanding *e;
+    for(u32 tag=0;(e=p9_session_next_active(&p->client.session,&tag))!=NULL;++tag)
+        if(e->owner)extinction("abort retained RPC callback");
     p->rpc_quiesced=true;spin_unlock(&l->lock);return 0;
 }
 int loom_retirement_close_operation(struct loom_service_operation *o,u64 now) {

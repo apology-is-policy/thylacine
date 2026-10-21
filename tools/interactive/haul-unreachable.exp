@@ -57,20 +57,12 @@ proc wait_log {path pat secs} {
 lc_boot
 lc_login cora kora
 
-# A host port with nothing on it: the kernel picks a free one, and it is
-# released at once. Something else taking it before the dial could only turn
-# the leg red (a connect that succeeds), never green.
-set freelog /tmp/haul-unreachable-free-[pid].log
-set free_code {import socket
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-print("free", s.getsockname()[1], flush=True)
-s.close()}
-exec python3 -c $free_code > $freelog
-if {![regexp {free ([0-9]+)} [read_file $freelog] -> port]} {
-    lc_fail "no free host port was reported -- [read_file $freelog]"
-}
-lc_step "leg 1: host port $port is free"
+# A host port with nothing on it: port 1, below the ephemeral range. A free
+# port the kernel picked and released could be handed to a scenario's port-0
+# peer running in parallel, and this leg's dial would spend that peer's one
+# accept there; no port-0 bind is ever handed port 1.
+set port 1
+lc_step "leg 1: host port $port, which nothing listens on"
 
 # Any haul line on the console while its stderr is a file is the routing defect.
 set routed_wrong {haul: (cannot|no answer|connect|attach)}
@@ -116,6 +108,6 @@ lc_run_expect "echo stdio-less-done | tr a-z A-Z" "STDIO-LESS-DONE"
 lc_pass "haul-unreachable: with no stderr, the reason reaches the console, not the connection"
 
 catch {exec kill $peer_pid}
-file delete -force $peerlog $freelog
+file delete -force $peerlog
 lc_quit
 exit 0

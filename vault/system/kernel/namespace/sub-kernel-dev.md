@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.2"]
 created: 2026-08-03
-updated: 2026-09-28
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -32,6 +32,16 @@ be the interface's simplest possible instances. Each substantial Dev
 has its own dossier.
 
 ## Contract
+
+**`Dev.close` returns `int` (2026-10-07).** Plan 9's close is `void`; ours
+returns 0, or a negative error for work the close could not finish. Only
+[[sub-kernel-ninep-dev9p]] has such work -- its last close flushes write-behind
+data, which Plan 9's mount driver never holds -- and every other Dev returns 0.
+The hook still runs only on the last drop, and [[sub-kernel-spoor]]'s
+`spoor_clunk_rc` hands its result up; `close(2)` reports a negative as `EIO`
+once the fd is gone (ARCH section 21.11, `dec-2026-10-07-close-eio`). Every
+other path that drops a Spoor -- exit, close-on-exec, `dup2` over an open fd, a
+Loom reap -- ignores it, as POSIX's do.
 
 **`spoor_open_errno` (U, 2026-09-23).** A `Dev.open` returns a `Spoor *` with no
 room for an errno, so a Dev that wants to report a specific cause for a FAILED
@@ -72,16 +82,24 @@ bestiary, a `.wstat_native` slot on a Dev that does not set
 are structural gates rather than hygiene checks, and the first of them
 is the most interesting line in the file (Mechanism).
 
-**Sixteen of the 29 slots are mandatory; thirteen are NULL-permitted.**
+**Sixteen of the 30 slots are mandatory; fourteen are NULL-permitted.**
 The optional set is `stat_native`, `wstat_native`, `walk_attrs`,
-`open_cached`, `fsync`, `readdir`, `rename`, `unlink`, `readlink`, `poll`,
-and the remote-readiness triple `poll_snapshot` / `poll_snapshot_release`
+`open_cached`, `fsync`, `readdir`, `rename`, `unlink`, `readlink`, `remote`,
+`poll`, and the remote-readiness triple `poll_snapshot` / `poll_snapshot_release`
 / `poll_arm`. A NULL slot has a defined meaning per slot, and the
 meanings are not uniform: a NULL `poll` (with no triple) means ALWAYS
 READY (the POSIX-correct answer for a regular file), while a NULL
 `fsync`, `readdir` or `stat_native` means the corresponding syscall
 returns -1. So one absent slot is a graceful default and another is a
 hard refusal, and only the header says which.
+
+**`remote` (2026-10-06, DISTRO 4.6)** answers whether a Spoor belongs to a
+session whose transport leaves the machine; a NULL slot means never. The
+resolver asks it of every symlink it expands and contains a link whose Dev
+answers yes beneath the mount it was reached through ([[sub-kernel-stalk]]).
+It is read without a lock, so the answer must be fixed before the Spoor's
+session publishes, and it may only narrow a resolution. dev9p is the only Dev
+that fills it ([[sub-kernel-ninep-dev9p]]).
 
 **Readiness has two shapes (2026-09-28, #98).** A Dev whose readiness it
 can see fills `.poll`, which registers the poller's hook and samples in

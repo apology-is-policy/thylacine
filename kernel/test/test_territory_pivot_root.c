@@ -253,7 +253,7 @@ void test_territory_pivot_root_keeps_reachable_mount(void) {
 // =============================================================================
 
 // A devnone Spoor standing for a directory in device instance `devno`.
-static struct Spoor *shed_spoor(u32 devno, u64 qid_path) {
+static struct Spoor *shed_spoor(u64 devno, u64 qid_path) {
     struct Spoor *s = spoor_alloc(&devnone);
     if (s) { s->devno = devno; s->qid.path = qid_path; }
     return s;
@@ -446,7 +446,7 @@ void test_territory_shed_clone_before_pivot_unaffected(void) {
 // snapshot -- what an O_PATH open of a union directory yields (stalk.c
 // union_snap_point_only). spoor_free_internal releases the snap and its point
 // ref. `point` NULL = the control: same identity, no snap.
-static struct Spoor *shed_union_handle(u32 devno, struct Spoor *point) {
+static struct Spoor *shed_union_handle(u64 devno, struct Spoor *point) {
     struct Spoor *s = shed_spoor(devno, 0);
     if (!s || !point) return s;
     struct union_snap *snap = kmalloc(sizeof(*snap), 0);

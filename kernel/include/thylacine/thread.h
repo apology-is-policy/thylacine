@@ -41,6 +41,15 @@ _Static_assert(THREAD_STATE_INVALID == 0,
                "zero-initialized Thread structs detectably invalid "
                "(P2-A audit R4 F46 close)");
 
+// Thread.caught_wait (ARCH 8.8.3). NONE: not in a wait, so the thread reaches
+// an EL0-return tail soon. UNWINDS: in a wait a caught note unwinds. HOLDS: in
+// a wait that rides a caught note out, which the posting walk never designates.
+enum caught_wait {
+    CAUGHT_WAIT_NONE    = 0,
+    CAUGHT_WAIT_UNWINDS = 1,
+    CAUGHT_WAIT_HOLDS   = 2,
+};
+
 // THREAD_MAGIC — sentinel set at thread_create / thread_init; checked at
 // thread_free. At offset 0 so SLUB's freelist write naturally clobbers
 // it on kmem_cache_free; subsequent thread_free reads the clobbered
@@ -246,7 +255,20 @@ struct Thread {
     //                  SYS_NOTED syscall's exception_context.
     u64                note_mask;
     bool               in_handler;
-    u8                 _pad_in_handler[7];   // explicit 8-byte alignment
+    // ARCH 8.8.3 (dec-2026-10-12-note-target): the caught-note families the
+    // posting walk claimed on this thread's behalf -- a designation, the
+    // walk's choice of who takes the note. The walk sets bits under this
+    // thread's wait_lock; the thread clears them itself (at its EL0-return
+    // tail, as it enters a wait that cannot unwind for the family, and at its
+    // exit), and thread_caught_note_claim turns one into note_claim when it
+    // unwinds. Atomic: written across threads. KP_ZERO; not rfork-propagated;
+    // exec clears it.
+    u8                 note_target;
+    // enum caught_wait: the kind of wait the thread is in, published under its
+    // wait_lock on entry to sleep/tsleep, where the walk re-checks a pick.
+    // Owner-written; KP_ZERO is CAUGHT_WAIT_NONE.
+    u8                 caught_wait;
+    u8                 _pad_in_handler[5];   // explicit 8-byte alignment
     u64                note_saved_regs[31];   // x0..x30
     u64                note_saved_sp_el0;
     u64                note_saved_elr;
@@ -334,16 +356,40 @@ struct Thread {
     // data loss for a file left open at a multi-thread exit) and the
     // close-time Tclunk (a server-side fid leak per fd). Set/cleared ONLY
     // by the owning Thread, always around a CLOSE THAT MUST WAIT, and read
-    // only via thread_die_pending(self) -- so the read needs no
-    // synchronization. TWO setters since 2026-09-22, and a third would need
-    // the same justification: proc_close_handles_at_exit wraps the whole
-    // at-exit close (#68 F1, the original), and loom_free brackets its SQPOLL
-    // kthread join (the peer-close race that falls OUTSIDE that window --
-    // abandoning that join frees a live Thread). A NESTED setter must
-    // SAVE AND RESTORE, never bare-clear: loom_free runs inside the at-exit
-    // close on one of its paths, and clearing there would re-arm the death
-    // legs for every later fd in the same table. Fits in the tail padding.
+    // only by it (thread_die_pending(self), and since DEBUG-FS-DESIGN 5g
+    // thread_group_death_pending(self)) -- so the read needs no
+    // synchronization. Its waits see no death, so once the group is dying no
+    // stop may park them either: proc_stop_requested reads false then (5g,
+    // death wins in the exit close). An exits() close in a live group still
+    // honours a stop, and the group's death ends that park through its wake
+    // condition. A kill that finds the Proc already terminating lifts the
+    // hold (PROC_FLAG_EXIT_CLOSE_FORCED, ARCH 7.9.1 part B): the close's waits
+    // then unwind as a death, and what it cannot finish goes to the closer.
+    // ONE setter, proc_close_handles_at_exit (#68 F1); a second would need the
+    // same justification, and a NESTED setter must SAVE AND RESTORE, never
+    // bare-clear, or it re-arms the death legs for every later fd in the same
+    // table. Fits in the tail padding.
     bool               exit_close_active;
+    // IM-1 across a caught note (cons.c, cons_input_read): a frozen console
+    // read that a caught note unwound marks its thread, so the thread's next
+    // console read re-takes the reader slot by waiting, as a reader frozen
+    // through END does, instead of taking the busy guard's -1. Set and consumed
+    // by the owning thread only; KP_ZERO inits it false; cleared at exec; not
+    // rfork-propagated. A mark the thread never consumes costs its next
+    // console read a wait for a busy slot where it would have been refused.
+    // Fits the padding after exit_close_active -- no size change.
+    bool               cons_frozen_unwound;
+    // loom_free's SQPOLL kthread join: no death reaches this thread's sleeps
+    // while set, not even a kill that forces the final close -- abandoning the
+    // join frees a live Thread, and a sleep a death refuses would spin the join
+    // in a non-preemptible syscall body. Owner-only; a nested setter saves and
+    // restores. Fits the same padding.
+    bool               kthread_join_active;
+    // A kernel thread something joins without bound (the Loom SQPOLL kthread,
+    // joined by loom_free): its last closes never wait for a 9P server, so a
+    // staged write-behind run goes to a closer (ARCH 7.9.1 part C). Set once by
+    // the thread itself at entry; read only by it. Fits the same padding.
+    bool               closes_never_wait;
 
     // 8a-1b-beta (I-39; docs/DEBUG-FS-DESIGN.md section 4.2; specs/debug_stop.tla):
     // this Thread's OWN debugger park rendez. A thread observing a debugger stop
@@ -393,7 +439,8 @@ struct Thread {
     bool               debug_ss_armed;
 
     // 8c-3 (#89; docs/DEBUG-FS-DESIGN.md 5c.6): the elected 9P reader sets this
-    // around its blocking recv so a debugger stop UNWINDS the recv (sleep/tsleep
+    // for its whole blocking recv so a stop UNWINDS the recv, at any byte of a
+    // frame (ARCH 8.8.1.1: the client keeps the partial frame) (sleep/tsleep
     // return SLEEP_INTR/TSLEEP_INTR, reusing the death-interrupt propagation the
     // transport recv already tolerates) instead of parking IN PLACE (the 8c-2
     // detour default) -- a reader parked mid-recv holds reader_active and freezes
@@ -401,31 +448,26 @@ struct Thread {
     // recv-return via the STABLE stop_unwound latch (below), NOT by re-reading
     // debug_stop_req (which races an async proc_debug_resume -- the F1 re-audit
     // fix); on a stop-unwind it releases the reader role, hands it to a survivor,
-    // then parks role-free + re-elects on resume. Every
-    // OTHER sleep (clear) parks in place (8c-2, preserves the syscall). Owner-only
-    // access (only the reader thread reads/writes its own flag, in program order
-    // -- no atomic needed); set/cleared within one reader_recv_frame, never
+    // then parks role-free + re-elects on resume. A
+    // sleep with it clear parks in place (8c-2, preserves the syscall); every
+    // wait inside the 9P client sets it (the waiters-and-stops amendment).
+    // Owner-only access (only the thread reads/writes its own flag,
+    // in program order -- no atomic needed); set/cleared around one wait, never
     // persists past it; KP_ZERO inits it false; NOT propagated by rfork. Fits the
     // debug_ss_armed padding -- no struct-size change.
     bool               stop_unwinds;
 
-    // 8c-3 (#89; F1 frame-atomic fix): the elected 9P reader sets this for its
-    // WHOLE recv tenure (reader_recv_frame entry..exit). A stop hitting the recv
-    // MID-FRAME (bytes of the frame already consumed, stop_unwinds false) must
-    // BLOCK THROUGH -- neither unwind (SLEEP_INTR would discard the consumed
-    // partial bytes -> the survivor reads the frame TAIL as a header -> stream
-    // desync = shared-session death / task-#50 corruption) nor park-in-place
-    // (holds reader_active -> freezes survivors AND pins the partial frame). The
-    // detour, when stop_no_park is set + stop_unwinds is false, FALLS THROUGH to
-    // the normal register+sched so the reader finishes the frame (bounded by the
-    // trusted server's delivery), then unwinds at the next frame boundary
-    // (got==0, stop_unwinds true). DEATH still unwinds mid-frame (the die-check
-    // below the detour is unchanged) -- the pre-existing death-mid-frame desync
-    // is task #90 (needs a #811 narrowing; signoff). Same padding, no size change.
+    // 8c-3 (#89): the elected 9P reader sets this for its WHOLE recv tenure
+    // (reader_recv_frame entry..exit), beside stop_unwinds: it marks the sleep
+    // as the reader's recv. The caught arm latches note_unwound for it (so the
+    // client hands the role off), and the pipe read takes it to mean the
+    // client's opt-in, recv_caught_ok, decides. (Until 2026-10-06 it also made
+    // a mid-frame reader block through a stop, a death and a caught note; ARCH
+    // 8.8.1.1.) Same padding, no size change.
     bool               stop_no_park;
 
-    // 8c-3 (#89; F1 re-audit fix): the STABLE "my recv was stop-unwound at a
-    // boundary" latch. The sched detour's stop_unwinds branch returns SLEEP_INTR
+    // 8c-3 (#89; F1 re-audit fix): the STABLE "my recv was stop-unwound" latch
+    // (at any byte). The sched detour's stop_unwinds branch returns SLEEP_INTR
     // -- byte-identical to a death-interrupt AND a transport error -> the client
     // classifier cannot tell them apart by return value. It USED to re-derive the
     // stop case by re-reading debug_stop_req (client_stop_pending), but that flag
@@ -440,8 +482,8 @@ struct Thread {
     bool               stop_unwound;
 
     // 11b-9p (item 11, ARCH 8.8.3): the caught-note twin of stop_unwound. SET by
-    // the sched caught branch when it unwinds a thread that is inside a
-    // frame-atomic reader recv (stop_no_park set) at a boundary; READ+cleared by
+    // the sched caught branch when it unwinds a thread that is inside the
+    // reader's recv (stop_no_park set), at any byte; READ+cleared by
     // the SAME reader thread at the client_wait classifier. A caught note must
     // unwind the elected 9P reader with a role HANDOFF (not re-block like a stop),
     // so the classifier needs a stable signal disjoint from stop_unwound. Reset
@@ -574,6 +616,8 @@ struct Thread {
 };
 
 _Static_assert(sizeof(struct Thread) == 1760,
+               "notetarget carved note_target + caught_wait (2 x u8) from "
+               "in_handler's explicit pad -- no size change. "
                "aux item 7 (2026-08-17) inserted note_saved_mask (u64) after "
                "note_saved_spsr: every later field moves +8 and the 8-byte "
                "alignment pad before the _Alignas(16) note_saved_fp absorbs it "
@@ -624,14 +668,18 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 //
 // P2-Dc adds a 4-page (16 KiB) guard region BELOW the kstack. Total
 // allocation per thread is 8 pages = 32 KiB at order=3 from buddy.
-// The guard pages are marked no-access in TTBR0 — a stack-overflow
-// access faults via the kernel's identity mapping, the exception
-// handler reports it, and extinction("kstack overflow") fires.
+// The guard pages are no-access in the kernel direct map (P3-Bca) — a
+// stack-overflow access faults, the exception handler reports it, and
+// extinction("kstack overflow") fires.
 #define THREAD_KSTACK_SIZE         (16 * 1024)
 #define THREAD_KSTACK_GUARD_SIZE   (16 * 1024)
 #define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
 #define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
 #define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
+
+// Freed stacks kept with their guard still no-access, for the next create:
+// 1 MiB of the TCB reserve (phys.h) at most.
+#define THREAD_KSTACK_CACHE_MAX    32
 
 // The kernel-stack WATERMARK (ARCH 8.12).
 //
@@ -644,9 +692,10 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 // rather than trust. Linux carries the same instrument for the same reason
 // (CONFIG_DEBUG_STACK_USAGE).
 //
-// The usable region is filled with THREAD_KSTACK_POISON at thread_create and
-// scanned upward from the guard for the first word that is not poison. That
-// word is the deepest the stack has EVER reached, not the depth right now.
+// The usable region is filled with THREAD_KSTACK_POISON at thread_create, a
+// cached stack's as well as a fresh one's, and scanned upward from the guard
+// for the first word that is not poison. That word is the deepest the stack
+// has EVER reached, not the depth right now.
 //
 // Reading a RUNNING thread's watermark is safe and its answer is honest: a
 // running thread can only push the frontier LOWER, so a concurrent write can
@@ -654,8 +703,12 @@ _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
 // Thread (the #95 proc-walk discipline); the scan itself needs no lock.
 #define THREAD_KSTACK_POISON  0x5354414b57415445ULL   // "STAKWATE", big-endian
 
-void thread_kstack_poison(struct Thread *t);
 u32  thread_kstack_used(const struct Thread *t, u32 *budget_words);
+
+// How many freed stacks the cache holds, and release every one of them to the
+// buddy (answers how many it released).
+u32  thread_kstack_cache_count(void);
+u32  thread_kstack_cache_drain(void);
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the
@@ -669,25 +722,6 @@ static inline struct Thread *current_thread(void) {
 
 static inline void set_current_thread(struct Thread *t) {
     __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((u64)(uintptr_t)t) : "memory");
-}
-
-// #90 (ARCH 8.8.1.1): the elected 9P reader recv (reader_recv_frame,
-// kernel/9p_client.c) is frame-atomic w.r.t. an async unwind. A dying reader
-// observed MID-FRAME at a sleep-site die-check -- in a frame-atomic recv
-// (stop_no_park set) with bytes of the current frame already consumed
-// (stop_unwinds clear, i.e. got != 0) -- must NOT unwind: an immediate #811
-// unwind would discard the consumed partial frame, and the survivor that takes
-// over the reader role would read the frame TAIL as a header -> the shared byte
-// stream desyncs (task-#50 corruption). It BLOCKS THROUGH instead, finishing
-// the frame (bounded by the trusted server's whole-frame delivery, CF-3 B),
-// then unwinds at the next boundary. Reuses the 8c-3 stop latches: stop_no_park
-// = "in a frame-atomic recv", stop_unwinds = "at a boundary (got==0)" -- both
-// already exactly the predicates death needs, so no new field. True iff the
-// die-check must DEFER (block through) rather than unwind. Every non-reader
-// sleeper has stop_no_park clear -> false -> the die-check fires immediately,
-// exactly as before #90.
-static inline bool thread_reader_blocks_death(const struct Thread *t) {
-    return t->stop_no_park && !t->stop_unwinds;
 }
 
 // Bring up the thread subsystem. Allocates the kernel thread (TID 0),
@@ -741,7 +775,8 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top);
 // trampoline which then blr's `entry`. Adds to proc->threads list.
 //
 // Returns NULL on OOM (Thread alloc fail or kstack alloc fail; cleanup
-// is internal).
+// is internal), or when the tid space is spent (thread_tid_space_spent: a
+// permanent refusal, not a retryable one).
 //
 // `entry` takes no argument. For arg-passing (P2-D rfork), use
 // thread_create_with_arg below.
@@ -778,7 +813,7 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
 // user-mode extinction for the misbehaving Proc, not a kernel issue).
 //
 // Returns the new Thread on success, NULL on OOM (Thread cache or
-// kstack alloc fail).
+// kstack alloc fail) or a spent tid space (thread_tid_space_spent).
 struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_entry_va,
                                   u64 user_sp_va,
@@ -847,7 +882,7 @@ void fork_frame_init(struct exception_context *dst,
 // Caller-provided values are NOT validated here (same contract as
 // thread_create_user): the syscall handler owns the bound + alignment checks.
 //
-// Returns the new Thread on success, NULL on OOM.
+// Returns the new Thread on success, NULL on OOM or a spent tid space.
 struct Thread *thread_create_forked(struct Proc *proc,
                                     const struct exception_context *frame,
                                     u64 child_sp,
@@ -857,6 +892,15 @@ struct Thread *thread_create_forked(struct Proc *proc,
 // thread is not current (current_thread() != t) and not still on any
 // runqueue. Extincts on violation.
 void thread_free(struct Thread *t);
+
+// True once the tid space is spent (alloc_next_tid refuses). A create that
+// failed then reports EAGAIN, a system limit, rather than ENOMEM.
+bool thread_tid_space_spent(void);
+
+// The in-Proc reap's halves (proc_reap_exited_threads): unlink under the
+// caller's g_proc_table_lock hold, then free with no lock held.
+void thread_unlink_from_proc_locked(struct Thread *t);
+void thread_free_unlinked(struct Thread *t);
 
 // Direct context switch from current_thread to `next`. Updates state
 // fields (prev → RUNNABLE, next → RUNNING), parks `next` in TPIDR_EL1,

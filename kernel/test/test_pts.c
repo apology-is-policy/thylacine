@@ -92,7 +92,7 @@ extern void proc_test_unlink(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 
 static struct SrvConn *pts_make_conn(struct Proc *owner) {
-    return srvconn_create(proc_stripes(owner), owner->pid, false, 0,
+    return srvconn_create(proc_stripes(owner), owner->pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID,
                           SRVCONN_MSIZE);
 }
 
@@ -1085,8 +1085,8 @@ static void pts_test_interaction_front(void) {
     proc_seal(host, PROC_FLAG_NOTRACE | PROC_FLAG_NODUMP);
     for (unsigned i = 0; i < 2; ++i) {
         struct Proc *poster = i ? observer : host;
-        conns[i] = srvconn_create(proc_stripes(host), host->pid, false,
-                                  proc_stripes(poster), SRVCONN_MSIZE);
+        conns[i] = srvconn_create(proc_stripes(host), host->pid, PRINCIPAL_INVALID, false,
+                                  proc_stripes(poster), PRINCIPAL_INVALID, SRVCONN_MSIZE);
         PTI_FRONT_CHECK(conns[i], "HI1 front transport allocated");
         srvconn_set_byte_mode(conns[i]);
         PTI_FRONT_CHECK(p9_srvconn_transport_init(&transports[i], conns[i]) == 0,

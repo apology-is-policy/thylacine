@@ -29,6 +29,7 @@ mirrors:
   - "tools/interactive/ls-imperium.exp"
   - "tools/interactive/haul-post.exp"
   - "tools/interactive/haul-cape.exp"
+  - "tools/interactive/haul-links.exp"
   - "tools/interactive/srv-connect-gate.exp"
   - "tools/test.sh"
   - "tools/smp-multiboot.sh"
@@ -45,6 +46,7 @@ mirrors:
   - "tools/interactive/ls-halcyon-lantern.exp (EXTINCTION: only — the deck presenter in a Halcyon tile)"
   - "tools/interactive/ls-halcyon-lantern-haul.exp (EXTINCTION: only — the deck presenter on a Haul mount in a Halcyon tile)"
   - "tools/interactive/ls-halcyon-manual.exp (EXTINCTION: only — the Operator's Manual's Halcyon tasks on the default image)"
+  - "tools/interactive/ls-jsc.exp (EXTINCTION: only — the JIT write thunk's out-of-bounds legs)"
   - "tools/interactive/flood-174.exp"
   - "tools/interactive/freeze-172.exp"
   - "tools/interactive/ls-gfx-font.exp"
@@ -82,6 +84,7 @@ mirrors:
   - "tools/interactive/ls-bghome-stall.exp"
   - "tools/interactive/s7-nora-probe.exp"
   - "tools/interactive/manual.exp"
+  - "tools/interactive/pts-probe.exp"
 literals:
   - "Thylacine boot OK"
   - "EXTINCTION:"
@@ -92,7 +95,7 @@ literal-mentions:
   - "tools/warp-host.sh (a usage comment)"
   - "tools/interactive/go8d.exp (a prose note)"
 created: 2026-08-01
-updated: 2026-10-05
+updated: 2026-10-08
 ---
 ## The surface
 

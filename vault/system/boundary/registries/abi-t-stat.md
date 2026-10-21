@@ -15,7 +15,7 @@ mirrors:
   - "usr/lib/pouch/patches/0024-pouch-fs-process-wires.patch: unsigned char t[88] + literal +40 in faccessat.c (NO guard)"
   - "go-thylacine src/syscall/syscall_thylacine.go: type Stat_t (NO guard)"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-09-28
 ---
 ## The layout
 
@@ -41,11 +41,13 @@ pouch boundary-line can fill musl's `struct stat` without an intermediate.
 | 64 | u64 | `blocks` | 512-byte blocks |
 | 72 | u32 | `uid` | A-2a owner principal-id |
 | 76 | u32 | `gid` | A-2a owning group |
-| 80 | u32 | `devno` | #100 per-instance device number |
-| 84 | u32 | `_pad_dev` | to 8-byte alignment |
+| 80 | u64 | `devno` | #100 per-instance device number; never wraps, never reused |
 
 It grew twice: **72 → 80** (A-2a appended `uid` + `gid`, the durable owner
-the kernel rwx layer reads) and **80 → 88** (#100 appended `devno`).
+the kernel rwx layer reads) and **80 → 88** (#100 appended `devno` and a pad).
+`devno` is 64 bits laid over that pad ([[dec-2026-09-28-t-stat-devno-u64]]):
+no offset moved and the size is 88, so a reader of the low 32 bits at 80 reads
+what it always did. The kernel pins the width with its own assertion.
 
 `devno` is the field that makes the record self-sufficient. A `qid_path` is
 unique only within one Dev, and a login session mounts several
@@ -54,7 +56,10 @@ per-user home. File identity is therefore the **pair** `(devno, qid_path)`,
 which is exactly what a static single-instance Dev satisfies by reporting
 `devno` 0 over its own self-consistent qid space, and what `dev9p` satisfies
 by minting one per attach session. Go's `sameFile` and gopls's
-`robustio.getFileID` both key on the pair.
+`robustio.getFileID` both key on the pair. The field is 64 bits because the
+kernel's minter is: every Env and every attach mints a number, an unprivileged
+fork loop drives the count, and a 32-bit field would name two instances 2^32
+mints apart as one file.
 
 ## The mirror set
 
@@ -137,26 +142,20 @@ What would actually close this is single-sourcing: one header the C mirrors
 include, a generated Rust/Go layout, or a boot probe that compares the
 kernel's `sizeof` against each mirror's. None exists. Tracked as task #43.
 
-## Two places the prose has drifted from the struct beside it
+## A mirror a name grep misses
 
-- `libthyla-rs/src/fs/metadata.rs` opens with *"Backed by `struct t_stat`
-  (80 bytes, ABI-pinned)"*. The struct 30 lines below is documented as 88 and
-  asserts 88. The stale line is the module header — the first thing read.
-- pouch `0021` introduces its mirror as *"Mirror of the kernel struct t_stat
-  (80 bytes, layout pinned by kernel `_Static_assert`s)"*, immediately above
-  an 88-byte struct with an 88-byte assertion. Both halves of that sentence
-  are wrong: the size, and the claim that the kernel's assertions pin *this*
-  copy. Pouch `0019` repeats the second half — *"offsets pinned by the
-  kernel's `_Static_assert`s"* — which is precisely the belief that makes the
-  mirror set look safe.
-
-The `0021` mirror also renames the struct to `pouch_tstat`, so a
+The `0021` mirror renames the struct to `pouch_tstat`, so a
 `struct t_stat` grep — the tool that found the #100 stragglers — misses it.
+Each mirror's own comment says what checks it: its own size assertion, never
+the kernel's.
 
 ## Change protocol
 
 **Append-only at the tail; never reorder, never renumber a field's offset.**
 A field add extends the record and *every* mirror rebuilds in one commit.
+Widening a field over the pad that follows it keeps every offset and the size,
+which is exactly why no size assertion can tell a mirror that missed it: it
+takes the same all-mirrors commit, and the operator's vote, as a growth does.
 There is no persistent on-disk consumer, so growth is cheap — the cost is
 entirely in the mirror count.
 
@@ -171,6 +170,11 @@ from that list is complete by its own accounting and short by one file.
   stack smash in the *caller's* frame, surfacing far from the struct.
 - A same-size reorder passes every existing guard except the kernel's own
   offset set. Five mirrors have no offset guard.
+- A same-size widening into a following pad passes every guard but the
+  kernel's width assertion. A mirror left at `u32` + pad reads the low half,
+  which is right only while every devno stays under 2^32 -- and the kernel
+  suite's `territory_mount.devno_minter_crosses_2_32` pushes every later mint
+  past it on each test boot.
 - `faccessat`'s `t[88]` + `+40` is invisible to a `t_stat` grep; so is
   `pouch_tstat`. Sweep by *size literal* as well as by name.
 - A new pouch patch that needs one field is the recurring temptation to add

@@ -200,6 +200,7 @@ set(KERNEL_TEST_SRCS
     test/test_trivial_devs.c
     test/test_devproc.c
     test/test_birth_hold.c
+    test/test_spawn_cwd.c
     test/test_cons.c
     test/test_devctl.c
     test/test_devdev.c
@@ -277,6 +278,7 @@ set(KERNEL_TEST_SRCS
     test/test_weft_share.c
     test/test_notes.c
     test/test_thread_spawn.c
+    test/test_kstack.c
     test/test_pipe_probe.c
     test/test_loom_bridge_probe.c
     test/test_loom_native_probe.c

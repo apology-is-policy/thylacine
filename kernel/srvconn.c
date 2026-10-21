@@ -445,9 +445,11 @@ long srvconn_io_nonblock(struct SrvConn *cn, bool server, bool writing,
 // Lifecycle.
 // =============================================================================
 
-struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err, u64 peer_stripes, int peer_pid,
-                               bool peer_console, u64 server_stripes,
-                               u32 msize) {
+struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err,
+                                  u64 peer_stripes, int peer_pid,
+                                  u32 peer_principal, bool peer_console,
+                                  u64 server_stripes, u32 server_principal,
+                                  u32 msize) {
     // Exactly two ring classes at v1.0 (CF-3 B): the default and the
     // DMSRVBULK bulk class. Rejecting everything else keeps the ring
     // memory a two-point policy, not an arbitrary-size demand.
@@ -491,10 +493,11 @@ struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err, u64 peer_s
     cn->state              = SRVCONN_STATE_LIVE;
     cn->peer_stripes       = peer_stripes;
     cn->peer_pid           = peer_pid;
+    cn->peer_principal     = peer_principal;
     cn->peer_console       = peer_console;
     cn->server_stripes     = server_stripes;
+    cn->server_principal   = server_principal;
     cn->client_deadline_ns = 0;
-    cn->client_timed_out   = false;
     /* byte_mode = false by KP_ZERO; srvconn_set_byte_mode flips on after
      * mint if the service is SRV_MODE_BYTE (P6-pouch-sockets). */
     __atomic_store_n(&cn->ref, 1, __ATOMIC_RELAXED);
@@ -510,9 +513,11 @@ struct SrvConn *srvconn_create_in(struct SrvDomain *domain, int *err, u64 peer_s
 }
 
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console, u64 server_stripes, u32 msize) {
-    return srvconn_create_in(NULL, NULL, peer_stripes, peer_pid, peer_console,
-                             server_stripes, msize);
+                               u32 peer_principal, bool peer_console,
+                               u64 server_stripes, u32 server_principal,
+                               u32 msize) {
+    return srvconn_create_in(NULL, NULL, peer_stripes, peer_pid, peer_principal,
+                             peer_console, server_stripes, server_principal, msize);
 }
 
 void srvconn_ref(struct SrvConn *cn) {
@@ -691,12 +696,6 @@ void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
         extinction("srvconn_set_client_deadline: NULL or corrupted SrvConn");
     cn->client_deadline_ns = deadline_ns;
-    cn->client_timed_out   = false;
-}
-
-bool srvconn_client_timed_out(const struct SrvConn *cn) {
-    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
-    return cn->client_timed_out;
 }
 
 u32 srvconn_msize(const struct SrvConn *cn) {
@@ -799,10 +798,7 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     // deadline as the data wait below (the WHOLE recv is deadline-bounded);
     // a death-interrupt unwinds it (#811). Released on every exit below.
     int ra = chan_role_acquire(ch, /*writer=*/false, cn->client_deadline_ns);
-    if (ra != 0) {
-        if (ra == TSLEEP_TIMEDOUT) cn->client_timed_out = true;
-        return -1;
-    }
+    if (ra != 0) return -1;
 
     long ret;
     for (;;) {
@@ -844,7 +840,6 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
                      : tsleep(&ch->rendez, chan_cond_readable, ch,
                               cn->client_deadline_ns);
         if (ts == TSLEEP_TIMEDOUT) {
-            cn->client_timed_out = true;
             ret = -1;                         // corvus hung past the deadline
             break;
         }
@@ -854,12 +849,13 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
             ret = -1;
             break;
         }
-        // 11b-9p: a CAUGHT note unwound this recv at a frame boundary (the sched
-        // caught branch set note_unwound for the client_wait classifier). Map to
-        // -1 exactly as the death-interrupt -- reader_recv_frame returns, the
-        // client reads note_unwound + hands off the reader role + returns
-        // CLIENT_WAIT_NOTEINTR. No bytes consumed at a boundary -> the stream
-        // stays synced, the transport reusable.
+        // 11b-9p: a CAUGHT note unwound this recv (the sched caught branch set
+        // note_unwound for the client_wait classifier). Map to -1 exactly as
+        // the death-interrupt -- reader_recv_frame returns, the client reads
+        // note_unwound + hands off the reader role + returns
+        // CLIENT_WAIT_NOTEINTR. This call copied nothing, and the client keeps
+        // what earlier calls copied of the frame (ARCH 8.8.1.1), so the stream
+        // stays synced and the transport reusable.
         if (ts == TSLEEP_NOTEINTR) {
             ret = -1;
             break;
@@ -868,6 +864,28 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     }
 
     chan_role_release(ch, /*writer=*/false);
+    return ret;
+}
+
+long srvconn_client_recv_now(struct SrvConn *cn, u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
+    if (!buf || n < 0) return -1;
+    if (n == 0) return 0;
+
+    struct srvconn_chan *ch = &cn->s2c;
+    long ret;
+    spin_lock(&ch->lock);
+    // A role holder may be mid-read; reading around it would split its bytes.
+    if (ch->reading)        ret = -(long)T_E_AGAIN;
+    else if (ch->count > 0) ret = chan_ring_read(ch, buf, n);
+    else                    ret = ch->eof ? 0 : -(long)T_E_AGAIN;
+    spin_unlock(&ch->lock);
+    if (ret > 0) {
+        // As srvconn_client_recv: room for a parked server send, and the
+        // server endpoint's POLLOUT edge. Outside ch->lock.
+        wakeup(&ch->wrendez);
+        poll_waiter_list_wake(&cn->poll_list);
+    }
     return ret;
 }
 
@@ -1234,6 +1252,8 @@ void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
         row.session_credits = admission.session_credits;
         row.global_credits = admission.global_credits;
         row.peer_pid        = cn->peer_pid;
+        row.peer_principal  = cn->peer_principal;
+        row.server_principal = cn->server_principal;
         row.msize           = cn->msize;
         row.state           = (u8)cn->state;
         row.byte_mode       = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);

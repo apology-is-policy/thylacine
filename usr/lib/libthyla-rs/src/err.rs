@@ -64,6 +64,11 @@ pub enum Error {
     /// Maps `T_E_NOENT` = 2 (POSIX `ENOENT`).
     NotFound,
 
+    /// No such process: a pid-addressed operation names no live Proc
+    /// (a note posted to a pid nobody holds).
+    /// Maps `T_E_SRCH` = 3 (POSIX `ESRCH`).
+    NoSuchProcess,
+
     /// I/O error from a transport, block device, or 9P session.
     /// Maps `T_E_IO` = 5 (POSIX `EIO`).
     Io,
@@ -198,6 +203,7 @@ impl Error {
         match self {
             Error::NotPermitted     => 1,
             Error::NotFound         => 2,
+            Error::NoSuchProcess    => 3,
             Error::Io               => 5,
             Error::BadHandle        => 9,
             Error::WouldBlock       => 11,
@@ -282,6 +288,7 @@ impl From<i32> for Error {
         match errno {
             1   => Error::NotPermitted,
             2   => Error::NotFound,
+            3   => Error::NoSuchProcess,
             5   => Error::Io,
             9   => Error::BadHandle,
             11  => Error::WouldBlock,
@@ -311,6 +318,7 @@ impl fmt::Display for Error {
         let msg: &'static str = match self {
             Error::NotPermitted     => "operation not permitted",
             Error::NotFound         => "no such file or namespace entry",
+            Error::NoSuchProcess    => "no such process",
             Error::Io               => "I/O error",
             Error::BadHandle        => "bad handle",
             Error::WouldBlock       => "resource temporarily unavailable",

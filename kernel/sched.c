@@ -802,6 +802,16 @@ static void sched_notify_cpu(unsigned target) {
     (void)gic_send_ipi(target, IPI_RESCHED);
 }
 
+// ARCH 8.8.3 (#964): make `t`, if it runs on another CPU, take an IRQ now, so
+// its EL0-return tail meets a note posted for it -- Linux's kick_process. The
+// reads are unlocked: a stale on_cpu or last_cpu costs a spurious IPI or a
+// missed one, and the tick bounds a missed one, since a busy CPU is never
+// tickless. Gated with sched_notify_cpu.
+void sched_kick_thread(struct Thread *t) {
+    if (!t || !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) return;
+    sched_notify_cpu(__atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED));
+}
+
 // Wake-preemption policy (RW-11 SA-1b -- the 6 ms slice cliff). PURE so a unit
 // test drives it against synthetic bands (the "verification boundary", like
 // sched_place_by_capacity). Lower band number = higher priority (sched.h).
@@ -1002,6 +1012,77 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
     cs->prev_to_clear_on_cpu = prev;
 }
 
+// B-2e2 (JIT-ON-WX-DESIGN B-2 item 4): the address space each CPU last
+// installed, compared by value and never dereferenced -- a freed space's
+// address reused by a new one can only add an interrupt, never lose one. The
+// ASID allocator's active slot cannot serve: a rollover zeroes it while the
+// CPU keeps running on its reserved ASID.
+static struct AddrSpace *g_cpu_space[DTB_MAX_CPUS];
+
+// The DSB is the switch's half of the store-buffering argument: a
+// sched_sync_space that misses this store read its record after its own DSB,
+// so the invalidation it published completed before this CPU's eret.
+static void sched_record_space(struct AddrSpace *as) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS)
+        __atomic_store_n(&g_cpu_space[cpu], as, __ATOMIC_RELAXED);
+    __asm__ __volatile__("dsb ish" ::: "memory");
+}
+
+const struct AddrSpace *sched_cpu_space(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return NULL;
+    return __atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED);
+}
+
+// Checks of an outstanding ticket between offers of the CPU. An IPI round trip
+// is microseconds; the kernel is not preemptible in a syscall (ARCH 8.12), so
+// a target slow to unmask must not hold the caller's CPU from its other
+// threads (Plan 9's procflushseg calls sched() in the same wait).
+#define SYNC_SPACE_SPINS 4096u
+
+u64 sched_sync_space(const struct AddrSpace *as) {
+    u64 tickets[DTB_MAX_CPUS];
+    u64 mask = 0;
+    if (!as) return 0;
+    // A masked wait could deadlock against a peer waiting on this CPU's ticket.
+    ASSERT_IRQS_ENABLED("sched_sync_space waits for other CPUs' interrupts");
+    // Everything the caller published (SYS_ICACHE_SYNC ends in DSB ISH too)
+    // is complete before any record is read.
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    // IRQs masked: the calling CPU cannot change while the records are read.
+    // A thread of `as` that switches in on it later does so after the DSB.
+    irq_state_t s = spin_lock_irqsave(NULL);
+    unsigned self = smp_cpu_idx_self();
+    unsigned n = smp_cpu_count();
+    for (unsigned cpu = 0; cpu < n && cpu < DTB_MAX_CPUS; cpu++) {
+        if (cpu == self) continue;
+        if (__atomic_load_n(&g_cpu_space[cpu], __ATOMIC_RELAXED) != as) continue;
+        u64 ticket = gic_barrier_send(cpu);
+        // Unreachable: every CPU below smp_cpu_count() came online (bring-up
+        // refuses a degraded boot) and is an SGI target (gic.c asserts
+        // DTB_MAX_CPUS fits GICv2's list). Skipping one would void the call.
+        if (!ticket) extinction("sched_sync_space: barrier IPI refused for a CPU running the space");
+        tickets[cpu] = ticket;
+        mask |= 1ull << cpu;
+    }
+    spin_unlock_irqrestore(NULL, s);
+    // No timeout: a target takes the IPI when it next unmasks IRQs, and the
+    // kernel's masked spans are bounded. An error here would let a stalled
+    // vCPU change the caller's outcome rather than its duration.
+    for (unsigned cpu = 0; cpu < DTB_MAX_CPUS; cpu++) {
+        if (!(mask & (1ull << cpu))) continue;
+        unsigned spins = 0;
+        while (!gic_barrier_reached(cpu, tickets[cpu])) {
+            __asm__ __volatile__("yield" ::: "memory");
+            if (++spins == SYNC_SPACE_SPINS) {
+                spins = 0;
+                (void)sched_yield_hint();
+            }
+        }
+    }
+    return mask;
+}
+
 // RW-1 B-F1: the context-switch ASID pre-hook. Resolves next's Proc to its
 // current-generation rolling ASID (asid_resolve; spec asid.tla FastSwitch /
 // SlowSwitch) and composes the TTBR0_EL1 value into next's Context, so the asm
@@ -1012,12 +1093,18 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
 // run-queue lock is held at the sched() call site (and thread_switch is the
 // single-threaded test primitive), so smp_cpu_idx_self() names next's CPU and
 // the per-CPU active slot the resolve publishes into is the right one.
+//
+// B-2e2: it also records the space this CPU is about to run (NULL for a kernel
+// thread), for SYS_ICACHE_SYNC_SPACE, and every caller passes through here
+// before next can fetch an EL0 instruction.
 void sched_install_asid_ttbr0(struct Thread *next) {
     struct Proc *p = next->proc;
-    if (p && p->as) {
-        u64 asid = asid_resolve(&p->as->context_id, smp_cpu_idx_self());
-        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)p->as->pgtable_root;
+    struct AddrSpace *as = p ? p->as : NULL;
+    if (as) {
+        u64 asid = asid_resolve(&as->context_id, smp_cpu_idx_self());
+        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)as->pgtable_root;
     }
+    sched_record_space(as);
 }
 
 // LINEAGE L-2: install `t`'s CURRENT address space in the hardware, right now.
@@ -1282,8 +1369,9 @@ void sched(void) {
     //                       re-insert into run tree; some peer will
     //                       wake via wakeup()/ready() later.
     //   THREAD_EXITING   → exit: caller is winding down. Same as
-    //                       SLEEPING — don't re-insert. (Phase 2 close
-    //                       lands the actual reap.)
+    //                       SLEEPING — don't re-insert, ever: once on_cpu
+    //                       clears, the next thread create or exec of its
+    //                       Proc (proc_reap_exited_threads) or wait_pid frees it.
     //   THREAD_RUNNABLE  → INVALID — prev is current; it cannot be
     //                       both current and already runnable.
     //   _INVALID         → INVALID — magic check above caught corrupt
@@ -1378,8 +1466,9 @@ void sched(void) {
         insert_sorted(cs, prev);
     } else {
         // Block (SLEEPING) or exit (EXITING) — prev stays out of the run tree.
-        // wakeup()/ready() will re-insert SLEEPING; EXITING never returns and
-        // gets reaped at Phase 2 close. HMP foundation (#864): prev stopped
+        // wakeup()/ready() will re-insert SLEEPING; EXITING never returns, and
+        // its Proc's next thread create or exec, or wait_pid, frees it once
+        // on_cpu clears. HMP foundation (#864): prev stopped
         // consuming CPU, so decay its util estimate (the dequeue-to-blocked
         // hook, ARCH §8.4.4). Inert on uniform topology + for pinned threads
         // (select_target_cpu ignores util there).
@@ -1884,17 +1973,58 @@ static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
     ready(t);
 }
 
-// item 11 (ARCH §8.8.3): the shared core of sleep() and sleep_noteintr().
-// `caught_ok` enables the caught-note unwind (SLEEP_NOTEINTR): when true, a
-// deliverable caught note interrupts the wait ALONGSIDE the death-interrupt.
-// It is OPT-IN per wait because the caught-note unwind returns to userspace and
-// CONTINUES (must be fully EINTR-safe), and some sleeps must NOT be so
-// interrupted (e.g. vfork_await_release, where a live return while the child
-// shares the parent AddrSpace corrupts memory). Death is always checked first.
+// What may end a sleep before its condition holds, each tier including the one
+// before it: group death; a terminate latch (LS-5c, ARCH §8.8.2); a caught note
+// (item 11, §8.8.3). The values start at 2 so that a bool passed where a mode
+// belongs (0 or 1) is refused rather than read as a mode.
+enum sleep_unwind {
+    SLEEP_UNWIND_DEATH = 2,
+    SLEEP_UNWIND_TERMINATE,
+    SLEEP_UNWIND_NOTE,
+};
+
+static bool sleep_death_pending(struct Thread *t, enum sleep_unwind unwind) {
+    return unwind == SLEEP_UNWIND_DEATH ? thread_group_death_pending(t)
+                                        : thread_die_pending(t);
+}
+
+// ARCH 8.8.3: publish the kind of wait `t` is entering, under its wait_lock
+// (held on entry, held on return), where the posting walk re-checks a pick
+// before designating it. A designation this wait cannot honour -- every family
+// when the wait holds, a masked one when it unwinds -- is handed off before the
+// thread blocks (specs/caught_target.tla Handoff), so a thread is never left
+// holding a note it cannot take. Returns the kind to restore on the way out: a
+// stop park nests a wait inside a wait.
+static u8 sleep_caught_wait_enter(struct Thread *t, bool caught_ok, irq_state_t *s) {
+    u8 outer = t->caught_wait;
+    u8 kind  = thread_caught_wait_kind(t, caught_ok);
+    __atomic_store_n(&t->caught_wait, kind, __ATOMIC_RELAXED);
+    u8 keep  = kind == CAUGHT_WAIT_UNWINDS ? (u8)~t->note_mask : 0u;
+    if (__atomic_load_n(&t->note_target, __ATOMIC_RELAXED) & (u8)~keep) {
+        spin_unlock_irqrestore(&t->wait_lock, *s);
+        notes_handoff_target(t, keep);
+        *s = spin_lock_irqsave(&t->wait_lock);
+    }
+    return outer;
+}
+
+// item 11 (ARCH §8.8.3): the shared core of sleep(), sleep_noteintr() and
+// sleep_death_only(). SLEEP_UNWIND_NOTE enables the caught-note unwind
+// (SLEEP_NOTEINTR): a deliverable caught note interrupts the wait ALONGSIDE the
+// death-interrupt. It is OPT-IN per wait because the caught-note unwind returns
+// to userspace and CONTINUES (must be fully EINTR-safe). SLEEP_UNWIND_DEATH
+// drops the terminate latch as well (DEBUG-FS-DESIGN §5g): a stop park must
+// hold against an interrupt, and a parent suspend must not return on a latch a
+// peer can revoke while its child still shares the parent's AddrSpace. Death is
+// always checked first.
 static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
-                        bool caught_ok) {
+                        enum sleep_unwind unwind) {
+    const bool caught_ok = unwind == SLEEP_UNWIND_NOTE;
     if (!r)    extinction("sleep(NULL rendez)");
     if (!cond) extinction("sleep with NULL cond");
+    if (unwind != SLEEP_UNWIND_DEATH && unwind != SLEEP_UNWIND_TERMINATE &&
+        unwind != SLEEP_UNWIND_NOTE)
+        extinction("sleep: not an unwind mode");
 
     struct Thread *t = current_thread();
     if (!t)                       extinction("sleep: no current thread");
@@ -1907,6 +2037,7 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // is serialized against this Thread's register-then-observe of
     // group_exit_msg (the I-9 death-wake close).
     irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    u8 outer_wait = sleep_caught_wait_enter(t, caught_ok, &s);
     spin_lock(&r->lock);
 
     int rc = SLEEP_OK;
@@ -1917,8 +2048,10 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // on this EL0 Proc -- a debugger stop OR (PTY-1f) a job-control stop;
         // the gate is proc_stop_requested's debug|job disjunction (round-2
         // R2-F2: a flag this detour does not read re-opens the #89 freeze via
-        // the job axis) -- DETOUR: park on our own debug_rendez until BOTH
-        // owners clear, then re-loop to re-check the ORIGINAL cond (the
+        // the job axis), which reads false in a dying group, so a dying Proc's
+        // closer, which reads no death here, never parks for a stop --
+        // DETOUR: park on our own debug_rendez until BOTH owners clear, then
+        // re-loop to re-check the ORIGINAL cond (the
         // syscall re-blocks in place; no unwind, no restart). The flag reads
         // are UNDER wait_lock, held continuously from here through the
         // register + sched-drop below, so they serialize with each deliver's
@@ -1928,15 +2061,20 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // it -- no stop-wake lost (register-then-observe, I-9). Gated
         // `r != &debug_rendez` so the nested park (which IS a sleep on
         // debug_rendez) does not recurse; gated `t->proc` so a kernel thread
-        // (never stoppable) is skipped. SLEEP_INTR from the park = dying /
-        // soft interrupt-terminate while stop-parked -> unwind the outer
-        // syscall (DEATH WINS over a stop, exactly as at the tail).
+        // (never stoppable) is skipped. SLEEP_INTR from the park = group death
+        // while stop-parked -> unwind the outer syscall (DEATH WINS over a
+        // stop, exactly as at the tail). The park sleeps death-only, so a
+        // latched interrupt waits for the stop to clear; this loop's die-check
+        // then unwinds for it if this wait is one that does, and a death-only
+        // wait leaves it for its caller's tail (DEBUG-FS-DESIGN 5g).
         // specs/debug_stop.tla StopWakesSleeper; pty_stop.tla stopOwners.
         if (r != &t->debug_rendez && t->proc && proc_stop_requested(t->proc)) {
             // 8c-3 (#89; DEBUG-FS-DESIGN 5c.6): the elected 9P reader sets
-            // stop_unwinds around its blocking recv. A stop must NOT park it in
+            // stop_unwinds for its whole blocking recv. A stop must NOT park it in
             // place here -- it holds reader_active, and a parked reader freezes
-            // every survivor sharing the client. UNWIND instead: return SLEEP_INTR
+            // every survivor sharing the client. UNWIND instead, at any byte of a
+            // frame (ARCH 8.8.1.1: the client keeps what the reader has read, at
+            // c->rx_got, for the next reader): return SLEEP_INTR
             // (reusing the death-interrupt propagation the transport recv already
             // tolerates -- leaves the transport reusable, no ERROR latch), so
             // client_wait regains control, releases + hands off the role, then
@@ -1951,31 +2089,23 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
                 // classifier reads (SLEEP_INTR aliases death + a transport error;
                 // re-reading debug_stop_req races an async proc_debug_resume). Set
                 // + read by THIS thread only -> a concurrent resume cannot flip it.
+                // A death-only wait's callers read SLEEP_INTR as group death (a
+                // vfork parent would return with its child on its stack), and
+                // only the 9P client's waits set stop_unwinds (the reader's
+                // recv, the rpc sleep, the progress park), none of which waits so.
+                if (unwind == SLEEP_UNWIND_DEATH)
+                    extinction("sleep_death_only: a stop-unwinding 9P wait");
                 t->stop_unwound = true;
                 rc = SLEEP_INTR;
                 break;
             }
-            // 8c-3 (#89, F1 frame-atomic): the elected reader MID-FRAME
-            // (stop_no_park set, stop_unwinds false -- some bytes of the frame
-            // already consumed) must BLOCK THROUGH the stop: neither unwind
-            // (SLEEP_INTR would discard the partial frame -> the survivor reads
-            // the tail as a header -> stream desync) nor park in place (holds
-            // reader_active -> freezes survivors AND pins the partial frame).
-            // Fall through to the normal register+sched below so the reader
-            // finishes the frame (bounded by the trusted server's delivery),
-            // then unwinds at the next frame boundary (got==0 -> stop_unwinds).
-            // DEATH still unwinds mid-frame -- the die-check below is UNCHANGED
-            // (the pre-existing death-mid-frame desync is task #90).
-            if (!t->stop_no_park) {
-                spin_unlock(&r->lock);
-                spin_unlock_irqrestore(&t->wait_lock, s);
-                int drc = proc_stop_sleeper_park(t);
-                s = spin_lock_irqsave(&t->wait_lock);
-                spin_lock(&r->lock);
-                if (drc == SLEEP_INTR) { rc = SLEEP_INTR; break; }
-                continue;
-            }
-            // else: block through (reader mid-frame) -> register+sched below.
+            spin_unlock(&r->lock);
+            spin_unlock_irqrestore(&t->wait_lock, s);
+            int drc = proc_stop_sleeper_park(t);
+            s = spin_lock_irqsave(&t->wait_lock);
+            spin_lock(&r->lock);
+            if (drc == SLEEP_INTR) { rc = SLEEP_INTR; break; }
+            continue;
         }
 
         if (r->waiter)
@@ -2005,22 +2135,10 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // EL0-return tail (die-check for group exit; the LS-5b dispatch for
         // the interrupt, which re-validates against the live queue). kproc
         // never group-terminates and the latch is never armed on kproc, so
-        // kernel threads never take this branch.
-        // #90 (ARCH 8.8.1.1) frame-atomic exception: a dying ELECTED 9P READER
-        // observed MID-FRAME (thread_reader_blocks_death: in reader_recv_frame,
-        // stop_no_park set + stop_unwinds clear -- some bytes of the current
-        // frame already consumed) must NOT unwind here. An immediate #811
-        // unwind discards the partial frame; the survivor that takes over the
-        // reader role then reads the frame TAIL as a header -> the shared byte
-        // stream desyncs (task-#50). It BLOCKS THROUGH instead: fall to the
-        // sched() below (already registered), finish the frame (bounded by the
-        // trusted server's whole-frame delivery, CF-3 B), then unwind at the
-        // next boundary where stop_unwinds is set. This narrows #811 for the
-        // reader recv ONLY -- every other sleeper (stop_no_park clear) unwinds
-        // immediately, exactly as before. Mirrors the 8c-3 stop block-through
-        // above; DeathWinsOverStop holds (both now unwind at a boundary; the
-        // EL0-return die-check still precedes the stop-check).
-        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
+        // kernel threads never take this branch. The elected 9P reader takes it
+        // at any byte of a frame, like every sleeper (ARCH 8.8.1.1): the client
+        // keeps what it has read for the next reader.
+        if (sleep_death_pending(t, unwind)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             t->state             = THREAD_RUNNING;
@@ -2029,12 +2147,9 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         }
 
         // item 11 (ARCH 8.8.3): the caught-note unwind, AFTER the die-check so
-        // death always wins. Gated on caught_ok (the caller opted in). The SAME
-        // #90 frame-atomic guard applies -- a mid-frame elected 9P reader BLOCKS
-        // THROUGH a caught note exactly as it blocks through death (else it
-        // desyncs the shared stream); it falls to the sched() below and unwinds
-        // at the next boundary. Undo the registration exactly as the die-check
-        // does, but return the NON-death SLEEP_NOTEINTR so the caller returns
+        // death always wins. Gated on caught_ok (the caller opted in). Undo the
+        // registration exactly as the die-check does, but return the NON-death
+        // SLEEP_NOTEINTR so the caller returns
         // -T_E_INTR and LIVES (the note delivers at its EL0-return tail).
         // 11b-9p finding #1: DATA/reply wins over a caught note (`!cond(arg)`).
         // A wake whose cond is now true (the reply demuxed, a frame is ready)
@@ -2045,14 +2160,13 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // The claim goes LAST: it is taken only by a sleeper that then unwinds,
         // so one caught note unwinds one sleeper and its peers re-park (ARCH
         // 8.8.3; the other three arms below share this shape).
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             t->state             = THREAD_RUNNING;
-            // 11b-9p: an elected 9P reader (stop_no_park set, at a frame
-            // boundary) unwinds via the note_unwound latch so the client_wait
-            // classifier hands the reader role off (not re-block like a stop);
+            // 11b-9p: an elected 9P reader (stop_no_park set) unwinds via the
+            // note_unwound latch so the client_wait classifier hands the reader
+            // role off (not re-block like a stop);
             // a non-reader sleep (stop_no_park clear) carries the signal in the
             // SLEEP_NOTEINTR return itself.
             if (t->stop_no_park) t->note_unwound = true;
@@ -2081,50 +2195,43 @@ static int sleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // Woken by a death/terminate waker? Return INTR rather than looping
         // (the register-then-observe above would catch it anyway -- this is
         // the prompt path). Widened to thread_die_pending (LS-5c).
-        //
-        // #90 (ARCH 8.8.1.1): the frame-atomic guard applies on the prompt path
-        // TOO. A mid-frame elected reader (thread_reader_blocks_death) that
-        // blocked the death through at the register-then-observe check above,
-        // slept, and is now woken (by the producer, a spurious wake, or -- in
-        // tsleep -- the deadline tick) must NOT unwind here: it would discard
-        // the partial frame and desync the shared stream. It BLOCKS THROUGH --
-        // loop instead of break; the guarded register-then-observe re-blocks it
-        // until a boundary. Without this guard the prompt path silently defeats
-        // the register-then-observe guard on the very next wake.
-        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
+        if (sleep_death_pending(t, unwind)) {
             rc = SLEEP_INTR;
             break;
         }
 
         // item 11: the caught-note prompt-path unwind (post-sched, woken by
         // proc_caught_note_wake or a spurious wake), AFTER the die-check so
-        // death wins. Same #90 frame-atomic guard: a mid-frame reader loops
-        // (block-through) rather than unwind here.
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
-            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
+        // death wins.
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
+            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p: the reader's recv
             rc = SLEEP_NOTEINTR;
             break;
         }
     }
 
     spin_unlock(&r->lock);
+    __atomic_store_n(&t->caught_wait, outer_wait, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return rc;
 }
 
-// item 11 (ARCH §8.8.3): sleep() is the caught_ok=false wrapper -- the 39
-// existing callers keep their exact semantics (death-interruptible only).
+// item 11 (ARCH §8.8.3): sleep() keeps the semantics its callers were written
+// for: group death or a terminate latch unwinds it, a caught note does not.
 int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
-    return sleep_common(r, cond, arg, false);
+    return sleep_common(r, cond, arg, SLEEP_UNWIND_TERMINATE);
 }
 
-// sleep_noteintr() is the caught_ok=true wrapper: a caught, deliverable note
+// sleep_noteintr() is the SLEEP_UNWIND_NOTE wrapper: a caught, deliverable note
 // interrupts the wait (returns SLEEP_NOTEINTR) alongside death. Opted-in
 // blocking sites (interruptible reads/waits whose unwind is fully EINTR-safe)
 // call this instead of sleep(); the site maps SLEEP_NOTEINTR to -T_E_INTR.
 int sleep_noteintr(struct Rendez *r, int (*cond)(void *arg), void *arg) {
-    return sleep_common(r, cond, arg, true);
+    return sleep_common(r, cond, arg, SLEEP_UNWIND_NOTE);
+}
+
+int sleep_death_only(struct Rendez *r, int (*cond)(void *arg), void *arg) {
+    return sleep_common(r, cond, arg, SLEEP_UNWIND_DEATH);
 }
 
 // P5-tsleep: sleep bounded by an absolute deadline. See rendez.h for the
@@ -2150,7 +2257,8 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // TSLEEP_INTR (death), SLEEP_NOTEINTR -> TSLEEP_NOTEINTR (caught note),
     // otherwise AWOKEN.
     if (deadline_ns == 0) {
-        int src = sleep_common(r, cond, arg, caught_ok);
+        int src = sleep_common(r, cond, arg,
+                               caught_ok ? SLEEP_UNWIND_NOTE : SLEEP_UNWIND_TERMINATE);
         if (src == SLEEP_INTR)     return TSLEEP_INTR;
         if (src == SLEEP_NOTEINTR) return TSLEEP_NOTEINTR;
         return TSLEEP_AWOKEN;
@@ -2168,6 +2276,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
     // before g_timerwait/r->lock so the cascade's per-peer wait_lock walk is
     // serialized against this Thread's register-then-observe.
     irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    u8 outer_wait = sleep_caught_wait_enter(t, caught_ok, &s);
     spin_lock(&g_timerwait.lock);
     spin_lock(&r->lock);
 
@@ -2194,8 +2303,8 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
         // 8c-2 stop-of-a-sleeper (DEBUG-FS-DESIGN 5c.2), the tsleep twin of
         // sleep()'s detour: park on debug_rendez when a stop is pending from
-        // EITHER owner (the PTY-1f debug|job disjunction, proc_stop_requested
-        // -- see sleep()'s detour), then re-loop. The detour is BEFORE
+        // EITHER owner (the PTY-1f debug|job disjunction, proc_stop_requested,
+        // false in a dying group -- see sleep()'s detour), then re-loop. The detour is BEFORE
         // timerwait_link (below), so this thread is
         // not on the timer-wait list during the indefinite stop-park -- on resume
         // it re-registers with its ORIGINAL deadline. A deadline that expired while
@@ -2207,7 +2316,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         if (r != &t->debug_rendez && t->proc && proc_stop_requested(t->proc)) {
             // 8c-3 (#89): the tsleep twin of sleep()'s stop_unwinds branch. The
             // 9P reader's recv (srvconn_client_recv) is a deadline-bounded tsleep;
-            // when stop_unwinds is set, UNWIND (return TSLEEP_INTR, which
+            // when stop_unwinds is set, UNWIND at any byte (return TSLEEP_INTR, which
             // srvconn_client_recv maps to -1, exactly as the death-interrupt)
             // instead of parking in place, so client_wait releases the reader role
             // before parking. Break with all three locks HELD -> the post-loop
@@ -2217,22 +2326,15 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
                 ret = TSLEEP_INTR;
                 break;
             }
-            // 8c-3 (#89, F1): tsleep twin of sleep()'s block-through. The
-            // reader mid-frame (stop_no_park set, stop_unwinds false) falls
-            // through to register+sched so it finishes the frame instead of
-            // unwinding (desync) or parking (holds reader_active). See sleep().
-            if (!t->stop_no_park) {
-                spin_unlock(&r->lock);
-                spin_unlock(&g_timerwait.lock);
-                spin_unlock_irqrestore(&t->wait_lock, s);
-                int drc = proc_stop_sleeper_park(t);
-                s = spin_lock_irqsave(&t->wait_lock);
-                spin_lock(&g_timerwait.lock);
-                spin_lock(&r->lock);
-                if (drc == SLEEP_INTR) { ret = TSLEEP_INTR; break; }
-                continue;
-            }
-            // else: block through (reader mid-frame) -> register+sched below.
+            spin_unlock(&r->lock);
+            spin_unlock(&g_timerwait.lock);
+            spin_unlock_irqrestore(&t->wait_lock, s);
+            int drc = proc_stop_sleeper_park(t);
+            s = spin_lock_irqsave(&t->wait_lock);
+            spin_lock(&g_timerwait.lock);
+            spin_lock(&r->lock);
+            if (drc == SLEEP_INTR) { ret = TSLEEP_INTR; break; }
+            continue;
         }
 
         if (r->waiter)
@@ -2253,16 +2355,9 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // group-exit death OR a pending terminate-disposition `interrupt`
         // unmasked for this thread. True => undo the FULL registration
         // (rendez + timer-wait) and return TSLEEP_INTR; the caller unwinds +
-        // the Thread dies at its EL0-return tail.
-        // #90 (ARCH 8.8.1.1) frame-atomic exception, the tsleep twin of
-        // sleep()'s guard: a dying ELECTED 9P READER observed MID-FRAME
-        // (thread_reader_blocks_death) BLOCKS THROUGH -- fall to sched() below
-        // (already registered on the rendez + timer-wait list), finish the
-        // frame (bounded by the trusted server, CF-3 B), then unwind at the
-        // next boundary. The reader's recv (srvconn_client_recv) is a
-        // deadline-bounded tsleep, so this is the die-check that actually fires
-        // for a mid-frame reader. Every other sleeper unwinds immediately.
-        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
+        // the Thread dies at its EL0-return tail. The elected 9P reader too, at
+        // any byte of a frame (ARCH 8.8.1.1; see sleep()).
+        if (thread_die_pending(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             timerwait_unlink(t);
@@ -2274,15 +2369,13 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         // item 11 (ARCH 8.8.3): the caught-note unwind (tsleep register arm),
         // AFTER the die-check so death wins. Undo the FULL registration (rendez
         // + timer-wait) exactly as the die-check does; return TSLEEP_NOTEINTR so
-        // the caller LIVES. Same #90 frame-atomic guard (a mid-frame reader
-        // blocks through).
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
+        // the caller LIVES.
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
             r->waiter            = NULL;
             t->rendez_blocked_on = NULL;
             timerwait_unlink(t);
             t->state             = THREAD_RUNNING;
-            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
+            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p: the reader's recv
             ret = TSLEEP_NOTEINTR;
             break;
         }
@@ -2306,23 +2399,16 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
         spin_lock(&r->lock);
 
         // Woken by a death/terminate waker? Return INTR (prompt path).
-        // Widened to thread_die_pending (LS-5c). #90 (ARCH 8.8.1.1): the
-        // frame-atomic guard applies here too -- a mid-frame elected reader
-        // (thread_reader_blocks_death) blocks the death through on the prompt
-        // path (see sleep()'s twin) and loops; the guarded register-then-observe
-        // re-blocks it until a boundary, or -- reached first here -- the loop's
-        // timeout check returns TSLEEP_TIMEDOUT once the deadline passes.
-        if (thread_die_pending(t) && !thread_reader_blocks_death(t)) {
+        // Widened to thread_die_pending (LS-5c).
+        if (thread_die_pending(t)) {
             ret = TSLEEP_INTR;
             break;
         }
 
         // item 11: the caught-note prompt-path unwind (tsleep), AFTER the
-        // die-check so death wins. Same frame-atomic guard; a mid-frame reader
-        // loops (block-through) or reaches the loop's timeout check.
-        if (caught_ok && !cond(arg) && proc_caught_note_eintr_ready(t->proc) &&
-            !thread_reader_blocks_death(t) && thread_caught_note_claim(t)) {
-            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p reader boundary
+        // die-check so death wins.
+        if (caught_ok && !cond(arg) && thread_caught_note_unwinds(t)) {
+            if (t->stop_no_park) t->note_unwound = true;   // 11b-9p: the reader's recv
             ret = TSLEEP_NOTEINTR;
             break;
         }
@@ -2330,6 +2416,7 @@ static int tsleep_common(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
     spin_unlock(&r->lock);
     spin_unlock(&g_timerwait.lock);
+    __atomic_store_n(&t->caught_wait, outer_wait, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&t->wait_lock, s);
     return ret;
 }
@@ -2761,7 +2848,7 @@ void preempt_check_irq(void) {
     // does and for the same reason: the flag may be the #866-F1 cross-CPU
     // placement kick, set exactly once. The deferred switch is taken at the
     // EL0-return tail, where syscall_dispatch has already cleared the marker
-    // -- so THIS call site gates while the .Lel0_sync_return one does not,
+    // -- so THIS call site gates while the .Lel0_return one does not,
     // from one flag and no extra state.
     //
     // A kernel THREAD is not gated here: it carries no marker, stays
@@ -2770,6 +2857,16 @@ void preempt_check_irq(void) {
     // check removed, and `syscall_irqs_kthread` is the control proving the
     // machinery can still switch when the marker is absent.
     if (t->in_syscall) return;
+
+    // A thread that has committed to exit or to sleep is a few instructions
+    // from its own sched(). Switched out here instead, an EXITING thread never
+    // runs again (sched() does not requeue it), so the rest of its exit tail
+    // is lost: a last thread out skips the srv, cap and weft notifies, and a
+    // pending /cap grant's slot leaks. Only the paths with neither gate above
+    // are exposed: a kthread-shaped entry (userland_enter's die-check, an exec
+    // failure's exits) runs its tail with interrupts on. Return WITHOUT
+    // consuming need_resched, as both gates above do: its own sched() switches.
+    if (t->state != THREAD_RUNNING) return;
 
     // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-
     // trigger. The cross-CPU write now exists for real (#866 F1: ready_on's

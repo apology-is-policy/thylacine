@@ -109,6 +109,28 @@ int addrspace_ref_count(const struct AddrSpace *as) {
     return __atomic_load_n(&as->ref, __ATOMIC_ACQUIRE);
 }
 
+#ifdef KERNEL_TESTS
+// Devices reset by the last-owner drain, summed, and the teardown order: one
+// monotonic stamp source, read by exec's handle-table walk and the drain, so a
+// test can ask which ran first (the *_for_test convention: extern-declared by
+// the harness).
+static u64 g_drain_device_resets;
+static u64 g_teardown_seq;
+static u64 g_drain_seq;
+u64 addrspace_teardown_stamp(void);
+u64 addrspace_teardown_stamp(void) {
+    return __atomic_add_fetch(&g_teardown_seq, 1, __ATOMIC_ACQ_REL);
+}
+u64 addrspace_drain_device_resets_for_test(void);
+u64 addrspace_drain_device_resets_for_test(void) {
+    return __atomic_load_n(&g_drain_device_resets, __ATOMIC_ACQUIRE);
+}
+u64 addrspace_drain_seq_for_test(void);
+u64 addrspace_drain_seq_for_test(void) {
+    return __atomic_load_n(&g_drain_seq, __ATOMIC_ACQUIRE);
+}
+#endif
+
 static void addrspace_lifetime_put(struct AddrSpace *as) {
     // NULL-safe: a kernel-only Proc has no address space, and a rollback that
     // fired before addrspace_alloc ran has none either.
@@ -121,7 +143,7 @@ static void addrspace_lifetime_put(struct AddrSpace *as) {
         extinction("AddrSpace final lifetime drop with live owners");
 
     // Final descriptor lifetime reference. Ordinary mappings were drained by
-    // the final owner in addrspace_unref; kernel pins do not extend mapping
+    // the final owner in addrspace_destroy; kernel pins do not extend mapping
     // ownership. Only local page-table storage remains to destroy here.
     if (as->vmas) extinction("AddrSpace final lifetime drop before mapping drain");
     if (as->private_rings) extinction("AddrSpace final lifetime drop with private rings");
@@ -150,14 +172,54 @@ static void addrspace_lifetime_put(struct AddrSpace *as) {
 }
 
 void addrspace_unref(struct AddrSpace *as) {
-    if (!as) return;
+    if (addrspace_release(as)) addrspace_destroy(as);
+}
+
+bool addrspace_release(struct AddrSpace *as) {
+    if (!as) return false;
     int pre = __atomic_fetch_sub(&as->owners, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0) extinction("addrspace_unref without an owner");
-    // Keep this owner's lifetime reference across the potentially sleeping FILE
-    // clunks. Concurrent kernel unpins cannot free the descriptor during drain.
-    // No new owner may be made from an ownerless descriptor; no CPU may still
-    // translate through it at this point (the existing exit/exec obligation).
-    if (pre == 1) vma_drain_in(as);
+    if (pre == 1) return true;
+    // Not the last owner: the mappings stay with the others, and this owner's
+    // lifetime reference goes now.
+    addrspace_lifetime_put(as);
+    return false;
+}
+
+void addrspace_destroy(struct AddrSpace *as) {
+    if (__atomic_load_n(&as->owners, __ATOMIC_ACQUIRE) != 0)
+        extinction("addrspace_destroy of an AddrSpace still owned");
+
+    // Last owner -- so this is the point at which the mappings genuinely stop
+    // being anyone's, and therefore the point at which they are freed. A kernel
+    // pin may keep the descriptor past this point, never the mappings.
+    //
+    // L-3 moved the drain here from the callers. It used to run in proc_free
+    // (and in proc_exec_replace, on the outgoing space), which was correct only
+    // while `ref` could never exceed 1: draining at A DEATH and draining at THE
+    // LAST REFERENCE are the same event exactly when there is one reference.
+    // Under RFMEM they separate, and the old placement would have had the first
+    // sharer to die free a VMA list the survivor was still translating through.
+    //
+    // No new owner can be made from an ownerless descriptor: an owner is only
+    // ever taken from a Proc that already holds one (rfork, from a live parent).
+    //
+    // RW-7 R3-F1: the devices mapped here stop before the drain frees the DMA
+    // buffers they were handed. A dying holder checks too, but reads the count at
+    // its exit close and again at its reap, and drops its ownership only at the
+    // reap, so two holders leaving at once can each read the other's and both
+    // skip the reset; the last owner cannot be missed.
+    int reset = addrspace_quiesce_mapped_devices(as);
+#ifdef KERNEL_TESTS
+    __atomic_fetch_add(&g_drain_device_resets, (u64)reset, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_drain_seq, addrspace_teardown_stamp(), __ATOMIC_RELEASE);
+#else
+    (void)reset;
+#endif
+    // The last owner's lifetime reference is held across the drain's
+    // potentially sleeping FILE clunks, so a concurrent kernel unpin cannot
+    // free the descriptor under it.
+    vma_drain_in(as);
     addrspace_lifetime_put(as);
 }
 
@@ -173,7 +235,6 @@ void addrspace_private_end(struct AddrSpace *as) {
     spin_unlock(&as->lock);
     addrspace_lifetime_put(as); // may free; never under as->lock
 }
-
 
 // =============================================================================
 // LINEAGE L-4b: the copy-on-write clone (see the header for what each VMA kind

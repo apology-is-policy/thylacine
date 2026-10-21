@@ -38,8 +38,9 @@ static struct Spoor *devnull_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
-static void devnull_close(struct Spoor *c) {
+static int devnull_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 static long devnull_read(struct Spoor *c, void *buf, long n, s64 off) {

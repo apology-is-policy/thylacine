@@ -1,170 +1,202 @@
 ---- MODULE reader_frame ----
 (***************************************************************************)
-(* Thylacine frame-atomic reader-recv death-unwind (#90, ARCH 8.8.1.1).    *)
-(* The #811 universal death-interruptible sleep (death_wake.tla) unwinds    *)
-(* EVERY rendez sleeper immediately when its Proc's group_exit_msg is       *)
-(* observed. That is correct for every sleeper EXCEPT one: the elected 9P   *)
-(* reader (the #841 mountio reader), whose recv drains a byte STREAM shared *)
-(* across every Proc that mounts through the client. If a dying reader      *)
-(* unwinds MID-FRAME -- with some chunks of the current 9P frame already    *)
-(* pulled from the transport ring -- those consumed bytes are discarded,    *)
-(* and the SURVIVOR that takes over the reader role reads the abandoned     *)
-(* frame's TAIL as a new header: the shared stream DESYNCS (shared-session  *)
-(* death / the task-#50 corruption class). This is the exact hazard the     *)
-(* shipped 8c-3 debug-STOP block-through already closes for the stop path   *)
-(* (stop_no_park + stop_unwinds, kernel/9p_client.c::reader_recv_frame);    *)
-(* the DEATH path -- gated by the thread_die_pending die-check BELOW the     *)
-(* stop detour in sleep()/tsleep() -- was left with the immediate #811       *)
-(* unwind (the pre-existing #841/#811 latent the 8c-3 close named #90).      *)
+(* Thylacine: the elected 9P reader's recv unwinds at ANY byte (#90,        *)
+(* ARCH 8.8.1.1, rewritten for the seam-90 close, 2026-10-06).              *)
 (*                                                                         *)
-(* THE FIX (block-through, mirroring the shipped 8c-3 debug-STOP path).     *)
-(* The die-check becomes FRAME-ATOMIC for the reader: it unwinds a dying    *)
-(* reader ONLY at a frame boundary (no chunk of the current frame consumed) *)
-(* and BLOCKS THROUGH mid-frame -- the reader keeps receiving until the     *)
-(* frame completes (a boundary again), then unwinds. Block-through is       *)
-(* bounded by the trusted server's whole-frame delivery (CF-3 B): the       *)
-(* server sends complete frames, so a mid-frame reader reaches the next     *)
-(* boundary in bounded time. (An UNTRUSTED / hung server that sends a       *)
-(* partial frame then stalls is the v1.x liveness seam, OUTSIDE this model; *)
-(* every v1.0 9P server is a trusted local Proc.) The impl reuses the       *)
-(* existing stop_no_park + stop_unwinds latches (both already = (got==0)),  *)
-(* so the die-check guard widens from unconditional to                      *)
-(* !stop_no_park || stop_unwinds -- no new Thread field.                     *)
+(* The elected reader (the #841 mountio reader) drains a byte stream        *)
+(* shared by every Proc that mounts through the client. An async event --   *)
+(* its Proc dying, a stop, a caught note -- can reach it anywhere inside a  *)
+(* frame, including while it waits for bytes the server has not sent. The   *)
+(* reader unwinds at once and the reader role passes on. The frame's bytes  *)
+(* are the CLIENT's, not the reader's: the reader reads into the client's   *)
+(* buffer, resumes at the client's count (c->rx_got) and leaves that count  *)
+(* where it stopped, so the next reader resumes the frame. Plan 9 devmnt    *)
+(* keeps the partial message in m->q across an interrupted mntrpcread;      *)
+(* Linux trans_fd keeps it in the connection (m->rc.offset).                *)
 (*                                                                         *)
-(* WHAT THIS MODELS. A reader receives ONE frame of N chunks, one chunk at  *)
-(* a time (ReceiveChunk -- the trusted server's fair delivery). `got` is    *)
-(* the chunk count consumed of the current frame, 0..N; got \in {0, N} is a *)
-(* boundary (0 = frame not started / N = frame complete -> the stream       *)
-(* read-offset sits at the next frame's header), got \in 1..N-1 is          *)
-(* mid-frame. An async death (Die) publishes `dying` ONCE, at any point.    *)
-(* The die-check (Unwind) fires per the frame-atomic guard. The single      *)
-(* frame models "the stream idles after the current frame"; a busy stream   *)
-(* simply defers the unwind to the next idle boundary -- still frame-atomic.*)
+(* WHAT THIS MODELS. One frame of N chunks. The server sends chunks         *)
+(* (`sent`) and may stop at any point for good: Send carries NO fairness in *)
+(* Spec, the case a hostile server forces (any process can serve a mount    *)
+(* over pipes). `pos` is how many chunks have been taken off the wire, `rx` *)
+(* is the client's resume count. Two readers: A starts holding the role and *)
+(* is the one the async event (`interrupted`) reaches; B waits on the same  *)
+(* session and takes the role when it is free. Death, stop and caught note  *)
+(* leave the recv the same way (they differ only in what A does after:      *)
+(* die, park and re-elect, or flush), so one event stands for all three.    *)
+(* A reads a chunk only if the server sent it; a frame is delivered when    *)
+(* its last chunk is read with the client's count in step with the wire.   *)
 (*                                                                         *)
-(* THE BUG CLASS -- BUGGY_UNWIND_MIDFRAME. TRUE reproduces the pre-#90      *)
-(* immediate #811 unwind: the die-check fires at ANY got. A death at        *)
-(* got \in 1..N-1 unwinds mid-frame -> the consumed chunks are discarded -> *)
-(* `desynced` is set (the shared stream is corrupt for the survivor). The   *)
-(* buggy cfg makes NoDesync (and UnwindAtBoundary) fail -- the executable   *)
-(* counterexample the frame-atomic guard closes.                            *)
+(* PROPERTIES. NoDesync: no reader ever parses from a count that disagrees  *)
+(* with the wire (a tail read as a header -- the task-#50 class).           *)
+(* ResumePoint: until delivery, the client's count IS the wire position.    *)
+(* EventuallyUnwinds (Spec, no server fairness): an interrupted reader      *)
+(* leaves its recv even if the server never sends again -- the seam-90      *)
+(* hang cannot happen. FrameDelivered (FairServerSpec, the server sends     *)
+(* eventually): the frame reaches its reader although A left mid-frame --   *)
+(* the survivor resumed it.                                                 *)
 (*                                                                         *)
-(* `desynced` abstracts the survivor's stream corruption: a mid-frame       *)
-(* discard leaves the stream read-offset partway into a frame, so the next  *)
-(* reader reads a tail-as-header. NoDesync == ~desynced is the shared-      *)
-(* stream integrity invariant (I-9 NARROWED for the reader recv, ARCH       *)
-(* 8.8.1.1). The fix never LOSES the death (the reader still unwinds --      *)
-(* EventuallyUnwinds -- just at the next boundary), so I-9's                 *)
-(* no-lost-death-wake for this sleeper is preserved; only its TIMING is      *)
-(* deferred to a boundary.                                                   *)
+(* THE BUG CLASSES.                                                         *)
+(*  BUGGY_DISCARD: an unwind resets the client's count (the pre-loom-mc     *)
+(*   reader, whose count was local to its frame read). The survivor parses  *)
+(*   from 0 while the wire is mid-frame -> NoDesync and ResumePoint fail    *)
+(*   (reader_frame_buggy.cfg). This is the hazard the 2026-07-19 rule       *)
+(*   (block-through) existed to avoid.                                      *)
+(*  BUGGY_BLOCK_THROUGH: the superseded rule -- an interrupted reader       *)
+(*   unwinds only at a frame boundary and otherwise waits for the rest.     *)
+(*   Safe, but with a server that stops mid-frame the reader never leaves:  *)
+(*   EventuallyUnwinds fails (reader_frame_blockthrough.cfg) -- the vault's *)
+(*   seam-90-hung-server, as a counterexample.                              *)
+(*                                                                         *)
+(* Outside the model: the transport's own recv, taken to return either the  *)
+(* bytes it copied or nothing (each recv sleeps only before it copies --    *)
+(* srvconn_client_recv, the pipe read); tags and the dying op's flush       *)
+(* (9p_client.tla, I-10); more than one frame (a frame boundary resets the  *)
+(* count, and the next frame is this one again).                            *)
+(* The srvconn reading role (ch->reading) is taken to be released on every  *)
+(* recv exit (chan_role_release): one left held would strand the next       *)
+(* reader in chan_role_acquire, a hang ElectB cannot show.                  *)
 (***************************************************************************)
 EXTENDS Naturals
 
 CONSTANTS
-    N,                     \* chunks per 9P frame (>= 2 so a mid-frame exists)
-    BUGGY_UNWIND_MIDFRAME  \* TRUE = the pre-#90 immediate unwind; FALSE = the fix
+    N,                    \* chunks per 9P frame (>= 2 so a mid-frame exists)
+    BUGGY_DISCARD,        \* TRUE = an unwind discards the client's partial frame
+    BUGGY_BLOCK_THROUGH   \* TRUE = the superseded rule: unwind only at a boundary
 
 ASSUME N \in Nat /\ N >= 2
+ASSUME BUGGY_DISCARD \in BOOLEAN /\ BUGGY_BLOCK_THROUGH \in BOOLEAN
 
 VARIABLES
-    pc,        \* the reader: "reading" (in the recv loop) or "unwound" (died, terminal)
-    got,       \* chunks of the current frame consumed, 0..N (0 or N = a boundary)
-    dying,     \* group_exit_msg published for the reader's Proc (BOOLEAN, set once)
-    desynced   \* the shared stream corrupted by a mid-frame discard (BOOLEAN, set once)
+    sent,         \* chunks of the frame the server has put on the wire, 0..N
+    pos,          \* chunks taken off the wire, 0..N
+    rx,           \* the client's resume count (c->rx_got), 0..N-1
+    role,         \* who holds the reader role: "A", "B" or "none"
+    pcA,          \* A: "reading" (in its recv, holding the role) or "unwound"
+    pcB,          \* B: "waiting", "reading" (holds the role) or "done"
+    interrupted,  \* the async event has reached A (set once)
+    delivered,    \* the frame was read whole, in step with the wire
+    desynced      \* some reader parsed from a count the wire disagrees with
 
-vars == <<pc, got, dying, desynced>>
-
-AtBoundary(g) == g = 0 \/ g = N
+vars == <<sent, pos, rx, role, pcA, pcB, interrupted, delivered, desynced>>
 
 TypeOk ==
-    /\ pc \in {"reading", "unwound"}
-    /\ got \in 0..N
-    /\ dying \in BOOLEAN
+    /\ sent \in 0..N
+    /\ pos \in 0..N
+    /\ rx \in 0..(N - 1)
+    /\ role \in {"A", "B", "none"}
+    /\ pcA \in {"reading", "unwound"}
+    /\ pcB \in {"waiting", "reading", "done"}
+    /\ interrupted \in BOOLEAN
+    /\ delivered \in BOOLEAN
     /\ desynced \in BOOLEAN
 
 Init ==
-    /\ pc = "reading"
-    /\ got = 0
-    /\ dying = FALSE
+    /\ sent = 0
+    /\ pos = 0
+    /\ rx = 0
+    /\ role = "A"
+    /\ pcA = "reading"
+    /\ pcB = "waiting"
+    /\ interrupted = FALSE
+    /\ delivered = FALSE
     /\ desynced = FALSE
 
-(* The trusted server delivers the next chunk of the frame; the reader      *)
-(* consumes it (got advances). Enabled while the reader is reading and the  *)
-(* frame is not yet complete. FAIR (CF-3 B whole-frame delivery) -- this is *)
-(* what makes block-through terminate (EventuallyUnwinds). Note: NOT gated  *)
-(* on ~dying -- a dying reader BLOCKS THROUGH by continuing to receive.     *)
-ReceiveChunk ==
-    /\ pc = "reading"
-    /\ got < N
-    /\ got' = got + 1
-    /\ UNCHANGED <<pc, dying, desynced>>
+(* The server puts the next chunk on the wire. No fairness in Spec: it may  *)
+(* stop sending at any point, mid-frame included, for good.                 *)
+Send ==
+    /\ sent < N
+    /\ sent' = sent + 1
+    /\ UNCHANGED <<pos, rx, role, pcA, pcB, interrupted, delivered, desynced>>
 
-(* The async death: group termination publishes the reader's                *)
-(* group_exit_msg ONCE. It can arrive at any reader state / any got. UNFAIR *)
-(* (the adversary -- death may or may not come; the liveness below is        *)
-(* conditional on it).                                                       *)
-Die ==
-    /\ ~dying
-    /\ dying' = TRUE
-    /\ UNCHANGED <<pc, got, desynced>>
+(* The role holder X reads one chunk the server has sent. It parses from the *)
+(* client's count rx; if that disagrees with the wire (pos), it reads a tail *)
+(* as a header. The last chunk of a frame read in step delivers the frame    *)
+(* (B's reply, whoever reads it) and the count returns to the boundary.      *)
+Read(X) ==
+    /\ role = X
+    /\ IF X = "A" THEN pcA = "reading" ELSE pcB = "reading"
+    /\ pos < sent
+    /\ pos' = pos + 1
+    /\ desynced' = (desynced \/ rx # pos)
+    /\ IF rx + 1 = N
+          THEN /\ rx' = 0
+               /\ delivered' = TRUE
+               /\ pcB' = IF pcB = "reading" \/ pcB = "waiting" THEN "done" ELSE pcB
+               /\ role' = IF X = "B" THEN "none" ELSE role
+          ELSE /\ rx' = rx + 1
+               /\ UNCHANGED <<delivered, pcB, role>>
+    /\ UNCHANGED <<sent, pcA, interrupted>>
 
-(* The die-check (thread_die_pending in sleep()/tsleep(), below the stop     *)
-(* detour). FIXED (#90): frame-atomic -- fire ONLY at a boundary            *)
-(* (got \in {0, N}); mid-frame it is DISABLED, so the reader blocks through  *)
-(* via ReceiveChunk. BUGGY: fire at ANY got (the immediate #811 unwind). A   *)
-(* mid-frame unwind discards the consumed chunks -> sets `desynced`.         *)
-(* (Impl: the guard is !stop_no_park || stop_unwinds; here stop_no_park is   *)
-(* always set -- this IS the reader recv -- so the guard reduces to          *)
-(* stop_unwinds == (got==0), generalized to the got==N end-boundary the      *)
-(* real code reaches by resetting got to 0 for the next frame.)              *)
-Unwind ==
-    /\ pc = "reading"
-    /\ dying
-    /\ BUGGY_UNWIND_MIDFRAME \/ AtBoundary(got)
-    /\ pc' = "unwound"
-    /\ desynced' = (desynced \/ ~AtBoundary(got))
-    /\ UNCHANGED <<got, dying>>
+(* The async event reaches A (death, stop or caught note), at any point. *)
+Interrupt ==
+    /\ ~interrupted
+    /\ interrupted' = TRUE
+    /\ UNCHANGED <<sent, pos, rx, role, pcA, pcB, delivered, desynced>>
+
+(* A leaves its recv: the role is released (and handed on), and the client  *)
+(* keeps the partial frame. The rule: at ANY byte, waiting for the server or *)
+(* not. BUGGY_BLOCK_THROUGH allows it only at a boundary (rx = 0);           *)
+(* BUGGY_DISCARD loses the client's count.                                   *)
+UnwindA ==
+    /\ pcA = "reading"
+    /\ interrupted
+    /\ (~BUGGY_BLOCK_THROUGH \/ rx = 0)
+    /\ pcA' = "unwound"
+    /\ role' = "none"
+    /\ rx' = IF BUGGY_DISCARD THEN 0 ELSE rx
+    /\ UNCHANGED <<sent, pos, pcB, interrupted, delivered, desynced>>
+
+(* B takes the free role (the handoff's designee, or its own election). *)
+ElectB ==
+    /\ role = "none"
+    /\ pcB = "waiting"
+    /\ role' = "B"
+    /\ pcB' = "reading"
+    /\ UNCHANGED <<sent, pos, rx, pcA, interrupted, delivered, desynced>>
 
 Next ==
-    \/ ReceiveChunk
-    \/ Die
-    \/ Unwind
+    \/ Send
+    \/ Read("A")
+    \/ Read("B")
+    \/ Interrupt
+    \/ UnwindA
+    \/ ElectB
 
-(* WF on ReceiveChunk = the trusted server eventually delivers each chunk    *)
-(* (block-through cannot hang mid-frame). WF on Unwind = the die-check       *)
-(* eventually fires once it is enabled at a boundary. Die is UNFAIR.         *)
-Fairness ==
-    /\ WF_vars(ReceiveChunk)
-    /\ WF_vars(Unwind)
+(* The readers are fair: an enabled read, unwind or election happens. The   *)
+(* server is not: Send has no fairness here. Interrupt is the adversary's.  *)
+ReaderFairness ==
+    /\ WF_vars(Read("A"))
+    /\ WF_vars(Read("B"))
+    /\ WF_vars(UnwindA)
+    /\ WF_vars(ElectB)
 
-Spec == Init /\ [][Next]_vars /\ Fairness
+Spec == Init /\ [][Next]_vars /\ ReaderFairness
+
+(* The server eventually sends every chunk. *)
+FairServerSpec == Spec /\ WF_vars(Send)
 
 (***************************************************************************)
 (* ============================== INVARIANTS ============================== *)
 (***************************************************************************)
 
-(* THE crux (I-9 narrowed for the reader recv, ARCH 8.8.1.1): the shared    *)
-(* byte stream is never desynced -- a dying reader never discards a         *)
-(* partially-consumed frame, so a survivor never reads a tail-as-header.    *)
-(* Holds with the frame-atomic guard; the buggy cfg violates it.            *)
+(* No reader ever parses from a count the wire disagrees with. *)
 NoDesync == ~desynced
 
-(* The sharper mechanism form: the reader reaches the "unwound" terminal    *)
-(* ONLY at a frame boundary (got \in {0, N}). Equivalent to NoDesync (a     *)
-(* mid-frame unwind is exactly what sets desynced) but stated on `got`.     *)
-UnwindAtBoundary == (pc = "unwound") => AtBoundary(got)
+(* Until the frame is delivered, the client's resume count is exactly the   *)
+(* wire position: every reader exit left the partial frame for the next.    *)
+ResumePoint == delivered \/ rx = pos
 
 Safety ==
     /\ TypeOk
     /\ NoDesync
-    /\ UnwindAtBoundary
+    /\ ResumePoint
 
-(* Liveness -- the FIX's obligation, not the bug's: block-through must not   *)
-(* HANG a dying reader mid-frame. Once death arrives, the reader eventually  *)
-(* unwinds (dies) -- the trusted server's fair chunk delivery drives a       *)
-(* mid-frame reader to the next boundary, where the die-check fires. (The    *)
-(* untrusted / hung-server partial-frame stall is the v1.x seam outside this *)
-(* model.) The buggy cfg also satisfies this -- it is the SAFETY that        *)
-(* distinguishes the fix; the liveness proves the fix introduces no hang.    *)
-EventuallyUnwinds == dying ~> (pc = "unwound")
+(* An interrupted reader leaves its recv -- with NO fairness on the server.  *)
+(* This is the seam-90 close: a server that stops cannot hold the reader.    *)
+EventuallyUnwinds == interrupted ~> (pcA = "unwound")
+
+(* Under a server that does send, the frame is delivered even when A leaves *)
+(* mid-frame: the survivor resumes it from the client's count.              *)
+FrameDelivered == <>delivered
 
 ====

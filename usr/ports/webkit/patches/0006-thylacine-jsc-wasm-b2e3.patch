@@ -1,0 +1,194 @@
+From 2635e0f308ee844dda7b126c13443578cf7c6102 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <noreply@example.invalid>
+Date: Tue, 13 Oct 2026 13:27:56 +0200
+Subject: [PATCH] thylacine: B-2e3 Wasm's BBQ and OMG on, synchronized by
+ SYS_ICACHE_SYNC_SPACE
+
+Every JIT tier now runs at run time: the OS(THYLACINE) force-off of
+useBBQJIT and useOMGJIT is gone. BBQ and OMG code is written on a Wasm
+worklist thread and reached by threads that pass no fence of their own (a
+retargeted bl in each caller, the rest data), so upstream suspends every
+thread that ever entered a VM, for the context-synchronization event its
+signal handler's return gives. A thread cannot be suspended on Thylacine,
+so Wasm::resetInstructionCacheOnAllThreads calls SYS_ICACHE_SYNC_SPACE:
+the kernel interrupts every other CPU running a thread of the address
+space and returns once each has taken the interrupt; a thread not running
+takes an eret before it runs. A failed sync is fatal (the call returns 0).
+The thread set it walked is no longer tracked.
+
+The pool is 128 MiB, the kernel's region limit since B-2e2 and one near
+branch's reach, so the pool-size static assert still proves every branch
+in range without jump islands.
+
+maxAcceptableOffsetForNullReference answers -1 where no offset is safe:
+with no fault handler, with no unmapped room above null, and off
+ADDRESS64. It answered 0, and BBQ's and B3's ref.cast compare offset <=
+answer without asking whether the handler is on, so a cast of a nullable
+reference to a non-null struct type dropped its null check and loaded the
+structure ID at offset 0 from null. The macOS jsc reproduces it with
+--useWasmFaultSignalHandler=false: SIGSEGV under BBQ and under OMG.
+
+The wasm-to-wasm and wasm-to-JS exit stubs are asked of the pool
+CanFail. They asked MustSucceed and then tested didFailToAllocate, which
+cannot fire, so a full pool killed the process where EntryPlan meant a
+CompileError ("Out of executable memory at stub generation").
+---
+ Source/JavaScriptCore/runtime/Options.cpp        |  9 ---------
+ Source/JavaScriptCore/wasm/WasmBinding.cpp       |  2 +-
+ .../wasm/WasmFaultSignalHandler.cpp              |  9 ++++++---
+ .../JavaScriptCore/wasm/WasmMachineThreads.cpp   | 16 ++++++++++++++++
+ Source/JavaScriptCore/wasm/js/WasmToJS.cpp       |  2 +-
+ Source/WTF/wtf/PlatformEnable.h                  |  7 ++++---
+ 6 files changed, 28 insertions(+), 17 deletions(-)
+
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 8bcc90b7b2..0cf9ec4133 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -836,15 +836,6 @@ void Options::notifyOptionsChanged()
+     Options::useFTLJIT() = false;
+ #endif
+ 
+-#if OS(THYLACINE)
+-    // As on RISCV64, every JIT tier is built (the configuration upstream builds) and
+-    // the tiers not yet opened on Thylacine are off at run time: Baseline, the DFG, the
+-    // FTL and the RegExp JIT run; Wasm's BBQ and OMG stay off whatever a flag or the
+-    // environment asked, until they are opened in their own audited step.
+-    Options::useBBQJIT() = false;
+-    Options::useOMGJIT() = false;
+-#endif
+-
+ #if !CPU(X86_64) && !CPU(ARM64)
+     Options::useConcurrentGC() = false;
+     Options::forceUnlinkedDFG() = false;
+diff --git a/Source/JavaScriptCore/wasm/WasmBinding.cpp b/Source/JavaScriptCore/wasm/WasmBinding.cpp
+index 61171a93b1..a2d9ba0b9e 100644
+--- a/Source/JavaScriptCore/wasm/WasmBinding.cpp
++++ b/Source/JavaScriptCore/wasm/WasmBinding.cpp
+@@ -79,7 +79,7 @@ Expected<MacroAssemblerCodeRef<WasmEntryPtrTag>, BindingFailure> wasmToWasm(cons
+     jit.loadPtr(JIT::Address(scratch), scratch);
+     jit.farJump(scratch, WasmEntryPtrTag);
+ 
+-    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::WasmThunk, JITCompilationMustSucceed);
++    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::WasmThunk, JITCompilationCanFail);
+     if (patchBuffer.didFailToAllocate()) [[unlikely]]
+         return makeUnexpected(BindingFailure::OutOfMemory);
+ 
+diff --git a/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp b/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
+index 0c29a91021..eb0516ad39 100644
+--- a/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
++++ b/Source/JavaScriptCore/wasm/WasmFaultSignalHandler.cpp
+@@ -170,20 +170,23 @@ void prepareSignalingMemory()
+     });
+ }
+ 
++// The largest offset from a null reference whose access is sure to fault into the
++// handler; -1 when none is (no handler, or no unmapped room above null), since a
++// caller elides its null check for every offset <= this answer, offset 0 included.
+ ptrdiff_t maxAcceptableOffsetForNullReference()
+ {
+ #if CPU(ADDRESS64)
+     if (!Options::useWasmFaultSignalHandler())
+-        return 0;
++        return -1;
+ 
+     ptrdiff_t address = lowestAccessibleAddress();
+     ptrdiff_t nullValue =JSValue::encode(jsNull());
+     ptrdiff_t accessed = sizeof(v128_t) * 2; // Paired v128_t access.
+     if (address < (nullValue + accessed))
+-        return 0;
++        return -1;
+     return address - nullValue - accessed;
+ #else
+-    return 0;
++    return -1;
+ #endif
+ }
+ 
+diff --git a/Source/JavaScriptCore/wasm/WasmMachineThreads.cpp b/Source/JavaScriptCore/wasm/WasmMachineThreads.cpp
+index 33140a3ea1..49fae138e4 100644
+--- a/Source/JavaScriptCore/wasm/WasmMachineThreads.cpp
++++ b/Source/JavaScriptCore/wasm/WasmMachineThreads.cpp
+@@ -32,6 +32,11 @@
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/ThreadMessage.h>
+ 
++#if OS(THYLACINE)
++#define THYLA_JIT_NO_CAPJIT
++#include <thyla_jit.h>
++#endif
++
+ namespace JSC { namespace Wasm {
+ 
+ 
+@@ -48,11 +53,21 @@ inline MachineThreads& wasmThreads()
+ 
+ void startTrackingCurrentThread()
+ {
++#if !OS(THYLACINE)
+     wasmThreads().addCurrentThread();
++#endif
+ }
+ 
+ void resetInstructionCacheOnAllThreads()
+ {
++#if OS(THYLACINE)
++    // A thread cannot be suspended here. The kernel interrupts every other CPU running
++    // a thread of this address space and returns once each has taken the interrupt,
++    // whose return is a context-synchronization event; a thread not running takes one
++    // at its next return to EL0. So every thread that later runs code published before
++    // this call fetches it fresh, as each upstream signal handler's return guarantees.
++    RELEASE_ASSERT(!thyla_jit_icache_sync_space());
++#else
+     Locker locker { wasmThreads().getLock() };
+     ThreadSuspendLocker threadSuspendLocker;
+     for (auto& thread : wasmThreads().threads(locker)) {
+@@ -61,6 +76,7 @@ void resetInstructionCacheOnAllThreads()
+             WTF::crossModifyingCodeFence();
+         });
+     }
++#endif
+ }
+ 
+     
+diff --git a/Source/JavaScriptCore/wasm/js/WasmToJS.cpp b/Source/JavaScriptCore/wasm/js/WasmToJS.cpp
+index 59662940cf..76c50e4f91 100644
+--- a/Source/JavaScriptCore/wasm/js/WasmToJS.cpp
++++ b/Source/JavaScriptCore/wasm/js/WasmToJS.cpp
+@@ -527,7 +527,7 @@ Expected<MacroAssemblerCodeRef<WasmEntryPtrTag>, BindingFailure> wasmToJS(const
+         jit.farJump(GPRInfo::returnValueGPR, ExceptionHandlerPtrTag);
+     }
+ 
+-    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::WasmThunk, JITCompilationMustSucceed);
++    LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::WasmThunk, JITCompilationCanFail);
+     if (patchBuffer.didFailToAllocate()) [[unlikely]]
+         return makeUnexpected(BindingFailure::OutOfMemory);
+ 
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+index 8ad3e9dfe3..492d896616 100644
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -537,8 +537,9 @@
+ 
+ /* OS(THYLACINE): the JIT pool is one SYS_JIT_CREATE code region -- an exec alias JSC
+    branches to and a writer alias at an unrelated random address, written only through
+-   an execute-only thunk sealed by SYS_JIT_CREATE_SEALED. A region is at most 64 MiB,
+-   within one near branch (128 MiB), so no jump islands: the pool-size static_assert in
++   an execute-only thunk sealed by SYS_JIT_CREATE_SEALED. A region is at most 128 MiB,
++   one near branch's reach (the farthest branch inside it spans 128 MiB less one
++   instruction), so no jump islands: the pool-size static_assert in
+    ExecutableAllocator.cpp then proves every near branch reaches. */
+ #if OS(THYLACINE) && ENABLE(JIT)
+ #if !defined(ENABLE_SEPARATED_WX_HEAP)
+@@ -548,7 +549,7 @@
+ #define ENABLE_JUMP_ISLANDS 0
+ #endif
+ #if !defined(FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB)
+-#define FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB 64
++#define FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB 128
+ #endif
+ #endif
+ 
+-- 
+2.43.0
+

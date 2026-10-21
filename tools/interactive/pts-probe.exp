@@ -1,0 +1,77 @@
+#!/usr/bin/expect -f
+# tools/interactive/pts-probe.exp -- a kaua app's launch size probe is bounded
+# on a pts too.
+#
+# A kaua app asks its terminal for its size at launch (a CPR round trip,
+# kaua::query) and falls back to 80x24 when no reply arrives within its budget.
+# On a pts the slave's data fd polls as always readable (kernel/dev9p_poll.c),
+# so a probe that polled it went straight to a one-byte read and waited for the
+# reply or a key, past any budget. The probe now polls the pts's ready sibling.
+#
+# The leg needs a pts whose far side never answers. On a boot with a display,
+# aurora answers every CPR on the console, so a request a pts forwards there is
+# answered too. THYLACINE_DISPLAY=console drops the GPU stack and joey skips
+# aurora (its "/srv/tapestry absent" line is asserted below), so nothing on the
+# console answers. `ptyhost` hosts a shell on a fresh pts whose outer line is
+# that console; the inner shell runs prowl as it runs any raw command (the pts
+# set raw first). With the bound, prowl gives up after 150 ms and draws its
+# first frame unprompted. Without it, prowl sits in the probe until a byte
+# arrives, and nothing is typed until the frame has been seen, so the leg fails
+# on its timeout.
+#
+# HVF, as prowl.exp and verify-console-mode.exp: a userspace program's output on
+# a pts, no hardware surface; the TCG anchor set keeps -cpu max + GICv3 covered.
+set ::env(THYLACINE_ACCEL) hvf
+set ::env(THYLACINE_DISPLAY) console
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_expect "/srv/tapestry absent" "pts-probe no GPU stack, so no aurora to answer a CPR"
+lc_login michael correct-horse-battery-staple-v1
+
+lc_send "ptyhost"
+lc_expect "job control active" "pts-probe the hosted shell's session dance"
+lc_send "prowl"
+set timeout 20
+expect {
+    -ex "MEM(pg)"     { lc_step "saw: pts-probe prowl drew its first frame on a pts that never answered its size query" }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'pts-probe'" }
+    timeout           { lc_fail "pts-probe: prowl on the hosted pts drew nothing in 20s -- its size probe is waiting on the pts data fd for a reply or a key" }
+    eof               { lc_fail "unexpected EOF during 'pts-probe'" }
+}
+lc_expect "kproc" "pts-probe prowl's table holds kproc"
+lc_raw_send "q" "pts-probe q quits prowl"
+# Type the next line only once prowl has left its screen, so a prowl that read
+# past its quit key cannot take it and hide which step failed.
+set timeout $lc_cmd_timeout
+expect {
+    -ex "\x1b\[?1049l" { lc_step "pts-probe prowl left its screen" }
+    -re {EXTINCTION:}  { lc_extinction_fail "kernel extinction during 'pts-probe'" }
+    timeout            { lc_fail "pts-probe: prowl never left its screen after q" }
+    eof                { lc_fail "unexpected EOF during 'pts-probe'" }
+}
+lc_send {echo ptprobe $status}
+lc_expect "ptprobe 0\r" "pts-probe the inner shell is back, prowl's exit status 0"
+
+# Leave the inner shell; ptyhost exits with it. A line typed before ptyhost is
+# gone dies with its pts, so each probe line is numbered and retried until the
+# outer shell answers one.
+lc_send "exit"
+set back 0
+for {set i 1} {$i <= 6 && !$back} {incr i} {
+    lc_raw_send "echo ptouter$i \$status\r" "pts-probe outer probe $i"
+    set timeout 5
+    expect {
+        -ex "ptouter$i 0\r" { set back 1; lc_step "saw: pts-probe the outer shell is back, ptyhost's status 0" }
+        -re "ptouter$i (\[1-9\]\[0-9\]*)\r" { lc_fail "pts-probe: ptyhost returned status $expect_out(1,string), want 0" }
+        -re {EXTINCTION:}   { lc_extinction_fail "kernel extinction during 'pts-probe'" }
+        timeout             { lc_step "pts-probe: outer probe $i unanswered (ptyhost still up?)" }
+        eof                 { lc_fail "unexpected EOF during 'pts-probe'" }
+    }
+}
+if {!$back} { lc_fail "pts-probe: the outer shell never answered after exit -- ptyhost did not exit" }
+
+lc_quit
+lc_pass "pts-probe: prowl on a pts nobody answers falls back from its size probe and draws, then quits cleanly"
+exit 0

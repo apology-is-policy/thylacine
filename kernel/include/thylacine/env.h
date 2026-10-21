@@ -39,7 +39,7 @@ struct Env {
     int              ref;           // 1 at v1.0 (RFENVG sharing deferred); accessed
                                     // via __atomic_* (the territory_ref/unref pattern)
     spin_lock_t      lock;          // serializes every access
-    u32              devno;         // Plan 9 Chan.dev for THIS Env (V-4b-5). Every
+    u64              devno;         // Plan 9 Chan.dev for THIS Env (V-4b-5). Every
                                     // other Dev's qid namespace is global, so a
                                     // devno of 0 still leaves (devno, qid.path)
                                     // unique; devenv's is PER-PROC -- ids restart
@@ -92,7 +92,7 @@ bool env_unset(struct Proc *p, const char *name, u32 name_len);
 bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
               u32 name_cap, u32 *name_len_out);
 bool env_size(struct Proc *p, u64 id, u64 *out_len);
-u32  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
+u64  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
 
 // --- the flat block (devproc, exec) ------------------------------------------
 // env_render_environ renders the whole environment as Linux's NUL-separated

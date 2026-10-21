@@ -38,16 +38,35 @@
 //     a p9_spoor_transport adapter; run a Tversion + Tattach handshake
 //     through real pipes. Replaces the test scaffold's byte-pipe Dev
 //     with the production pipe primitive.
+//
+//   pipe.hangup_write_ends_the_stream
+//     pipe_hangup_write: queued bytes drain, then EOF; a later write is
+//     refused; POLLERR on the write end, POLLHUP on the read end; the
+//     ring is freed once, at the second close.
+//
+//   pipe.cnbframe_refusal_posts_no_note
+//     A mounted queue's refused write posts no `pipe` note; the same
+//     refusal without CNBFRAME does.
+//
+//   pipe.client_death_hangs_up_the_tx_pipe
+//     A 9P client's death over the spoor transport hangs up its tx pipe:
+//     the server end reads EOF after the queued bytes, nothing closed.
 
 #include "test.h"
 
+#include <thylacine/9p_client.h>
 #include <thylacine/9p_session.h>
 #include <thylacine/errno.h>
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
+#include <thylacine/notes.h>
 #include <thylacine/pipe.h>
+#include <thylacine/poll.h>
+#include <thylacine/proc.h>
+#include <thylacine/rendez.h>
+#include <thylacine/sched.h>     // sched(): TEST_YIELD_UNTIL_SOFT
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>   // #96: struct t_stat + T_S_IFIFO
 #include <thylacine/types.h>
@@ -66,6 +85,11 @@ void test_pipe_write_on_read_end_rejected(void);
 void test_pipe_close_one_end_keeps_other_alive(void);
 void test_pipe_close_both_ends_frees_ring(void);
 void test_pipe_compose_with_spoor_transport(void);
+void test_pipe_hangup_write_ends_the_stream(void);
+void test_pipe_cnbframe_refusal_posts_no_note(void);
+void test_pipe_client_death_hangs_up_the_tx_pipe(void);
+void test_pipe_transport_reads_now_without_sleeping(void);
+void test_pipe_pump_treats_a_closed_transport_as_dead(void);
 
 // =============================================================================
 // Helpers.
@@ -278,6 +302,117 @@ void test_pipe_cnbframe_atomic_nonblocking(void) {
         "CNBFRAME: a read-closed pipe -> -T_E_PIPE");
 
     spoor_clunk(wr);
+}
+
+// The hangup a dead 9P session gives its tx pipe (ARCH 21.10, "A death hangs
+// up"): EOF without the close. What was queued still drains, then the reader
+// meets EOF; a later write is refused as on a read-closed pipe; the write end
+// polls POLLERR, not POLLOUT, and the read end POLLHUP. The ring keeps both
+// refs, so it is freed once, at the second close. The control is the same pair
+// before the hangup. Each read past the queued bytes is taken only once
+// POLLHUP says it cannot block, so a broken hangup fails here, not hangs.
+void test_pipe_hangup_write_ends_the_stream(void) {
+    u64 freed_before = pipe_total_freed();
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+
+    static const u8 msg[10] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+    TEST_EXPECT_EQ(dev_write(wr, msg, 10L), 10L, "queue 10 bytes");
+    TEST_EXPECT_EQ((long)wr->dev->poll(wr, POLLOUT, NULL), (long)POLLOUT,
+        "control: an open write end polls POLLOUT alone");
+    TEST_EXPECT_EQ((long)rd->dev->poll(rd, POLLIN, NULL), (long)POLLIN,
+        "control: the read end polls POLLIN, no POLLHUP");
+
+    TEST_ASSERT(pipe_hangup_write(wr), "the write end hangs up");
+    TEST_EXPECT_EQ((long)wr->dev->poll(wr, POLLOUT, NULL), (long)POLLERR,
+        "a hung-up write end polls POLLERR, never POLLOUT");
+    TEST_EXPECT_EQ((long)rd->dev->poll(rd, POLLIN, NULL), (long)(POLLIN | POLLHUP),
+        "the read end polls POLLIN | POLLHUP while bytes remain");
+    TEST_EXPECT_EQ(dev_write(wr, msg, 10L), (long)(-T_E_PIPE),
+        "a write after the hangup is refused: EOF is final");
+
+    u8 got[16] = { 0 };
+    TEST_EXPECT_EQ(dev_read(rd, got, 16L), 10L, "the queued bytes still drain");
+    TEST_ASSERT(got[0] == 1 && got[9] == 10, "in order, and nothing after them");
+    short drained = rd->dev->poll(rd, POLLIN, NULL);
+    TEST_EXPECT_EQ((long)drained, (long)POLLHUP, "drained: POLLHUP alone");
+    if (drained & POLLHUP)
+        TEST_EXPECT_EQ(dev_read(rd, got, 16L), 0L, "then EOF");
+
+    TEST_ASSERT(pipe_hangup_write(wr), "a second hangup is harmless");
+    if (rd->dev->poll(rd, POLLIN, NULL) & POLLHUP)
+        TEST_EXPECT_EQ(dev_read(rd, got, 16L), 0L, "still EOF");
+    TEST_ASSERT(!pipe_hangup_write(rd), "a read end does not hang up");
+    TEST_ASSERT(!pipe_hangup_write(NULL), "NULL does not hang up");
+    struct Spoor *other = spoor_alloc(&devnull);
+    TEST_ASSERT(other != NULL, "a non-pipe Spoor (devnull)");
+    TEST_ASSERT(!pipe_hangup_write(other), "a non-pipe does not hang up");
+    spoor_clunk(other);
+
+    spoor_clunk(rd);
+    TEST_EXPECT_EQ(pipe_total_freed() - freed_before, 0ULL,
+        "the hangup dropped no ref: the ring outlives the read end's close");
+    spoor_clunk(wr);
+    TEST_EXPECT_EQ(pipe_total_freed() - freed_before, 1ULL,
+        "freed once, at the second close");
+}
+
+// A mounted queue's refusal posts no `pipe` note (ARCH 10.3; Plan 9
+// pipewrite's CMSG rule): the CNBFRAME writer is the kernel speaking for a
+// session, on whichever thread sent the request, so a note would land on a
+// Proc that wrote nothing. Each write runs on a thread of a Proc with a note
+// queue -- kproc has none, so a post there would vanish either way. The
+// control is the same refusal without CNBFRAME, which posts.
+static struct Spoor *g_nn_wr;
+
+static long nn_write(void *arg) {
+    (void)arg;
+    static const u8 frame[16] = { 0 };
+    return dev_write(g_nn_wr, frame, 16L);
+}
+
+void test_pipe_cnbframe_refusal_posts_no_note(void) {
+    struct Spoor *hr = NULL, *hw = NULL, *cr = NULL, *cw = NULL;
+    struct Spoor *xr = NULL, *xw = NULL;
+    TEST_EXPECT_EQ(pipe_create(&hr, &hw), 0, "a pipe to hang up");
+    TEST_EXPECT_EQ(pipe_create(&cr, &cw), 0, "a pipe to close the read end of");
+    TEST_EXPECT_EQ(pipe_create(&xr, &xw), 0, "the control's pipe");
+    hw->flag |= CNBFRAME;
+    cw->flag |= CNBFRAME;
+    (void)pipe_hangup_write(hw);
+    (void)pipe_hangup_write(xw);
+    spoor_clunk(cr);
+    struct Proc *p = test_caught_proc(false);
+    TEST_ASSERT(p != NULL, "a Proc with a note queue");
+
+    g_nn_wr = hw;
+    struct test_caught_leg hung = test_caught_run(p, nn_write, NULL, NULL, NULL, false);
+    u32 after_hung = p->notes->count;
+    g_nn_wr = cw;
+    struct test_caught_leg closed = test_caught_run(p, nn_write, NULL, NULL, NULL, false);
+    u32 after_closed = p->notes->count;
+    g_nn_wr = xw;
+    struct test_caught_leg ctl = test_caught_run(p, nn_write, NULL, NULL, NULL, false);
+    u32 after_ctl = p->notes->count;
+
+    if (!hung.stranded && !closed.stranded && !ctl.stranded) {
+        test_caught_proc_free(p, NULL);
+        spoor_clunk(hr);
+        spoor_clunk(hw);
+        spoor_clunk(cw);
+        spoor_clunk(xr);
+        spoor_clunk(xw);
+    }
+
+    TEST_ASSERT(hung.joined && closed.joined && ctl.joined,
+        "each write returned and its thread was reclaimed");
+    TEST_EXPECT_EQ(hung.rc, (long)(-T_E_PIPE), "CNBFRAME on a hung-up pipe: refused");
+    TEST_EXPECT_EQ(after_hung, 0u, "and no pipe note");
+    TEST_EXPECT_EQ(closed.rc, (long)(-T_E_PIPE),
+        "CNBFRAME on a pipe whose read end closed: refused");
+    TEST_EXPECT_EQ(after_closed, 0u, "and no pipe note");
+    TEST_EXPECT_EQ(ctl.rc, (long)(-T_E_PIPE), "control: the same refusal without CNBFRAME");
+    TEST_EXPECT_EQ(after_ctl, 1u, "control: that one posts the pipe note");
 }
 
 // The follow-up round's F1: SYS_ATTACH_9P admits pipe pairs ONLY. The spoor
@@ -537,6 +672,164 @@ void test_pipe_compose_with_spoor_transport(void) {
     spoor_clunk(wr1);
     spoor_clunk(rd2);
     spoor_clunk(wr2);
+}
+
+// The spoor transport's hangup is its tx pipe's write end hung up (ARCH 21.10):
+// once the session dies, the server's read end polls POLLHUP and reads EOF
+// after the queued bytes -- while the client still holds both ends, so nothing
+// was closed and no ring freed. The control is the same end before the death.
+static struct p9_client g_pd_client;
+static u8               g_pd_recv[8192];
+
+// The 9P transport reads a pipe without sleeping when asked to (recv_now): a
+// pump reading for replies not its own must not wait on a server, and EL0 can
+// hold the same read end and take the bytes a readiness sample saw. The read
+// end's own O_NONBLOCK is EL0's and stays as it was. The reader runs on a
+// thread of its own, so a read that sleeps is seen, then freed by a write.
+static struct test_dying g_rn_thr;
+static struct p9_spoor_transport g_rn_st;
+static volatile int g_rn_rc;
+
+static void rn_read(void *arg) {
+    (void)arg;
+    struct p9_transport_ops ops = p9_spoor_transport_ops(&g_rn_st);
+    u8 b[4];
+    g_rn_rc = ops.recv_now(ops.ctx, b, sizeof(b));
+}
+
+void test_pipe_transport_reads_now_without_sleeping(void) {
+    struct Spoor *crd = NULL, *cwr = NULL, *srd = NULL, *swr = NULL;
+    bool up = pipe_create(&crd, &cwr) == 0 && pipe_create(&srd, &swr) == 0 &&
+              p9_spoor_transport_init(&g_rn_st, cwr, srd, false) == 0;
+    bool started = false, returned = false, killed = false;
+    int  empty = -99, some = -99, eof = -99;
+    u32  flag_before = 0, flag_after = 1;
+    if (up) {
+        flag_before = spoor_flag_get(srd) & CNONBLOCK;
+        g_rn_rc = -99;
+        started = test_dying_start(&g_rn_thr, rn_read, NULL, /*dead_now=*/false);
+        TEST_YIELD_UNTIL_SOFT(!started || test_dying_done(&g_rn_thr));
+        returned = started && test_dying_done(&g_rn_thr);
+        empty = g_rn_rc;
+        static const u8 three[3] = { 1, 2, 3 };
+        (void)dev_write(swr, three, 3L);            // also frees a read that slept
+        if (started) {
+            TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_rn_thr));
+            killed = !test_dying_done(&g_rn_thr);
+            if (killed) {
+                test_dying_kill(&g_rn_thr);
+                TEST_YIELD_UNTIL_SOFT(test_dying_done(&g_rn_thr));
+            }
+            test_dying_reap(&g_rn_thr);
+        }
+        struct p9_transport_ops ops = p9_spoor_transport_ops(&g_rn_st);
+        u8 b[4];
+        some = returned ? ops.recv_now(ops.ctx, b, sizeof(b)) : -98;
+        (void)pipe_hangup_write(swr);
+        eof = ops.recv_now(ops.ctx, b, sizeof(b));
+        flag_after = spoor_flag_get(srd) & CNONBLOCK;
+        p9_spoor_transport_destroy(&g_rn_st);
+    }
+    if (crd) spoor_clunk(crd);
+    if (cwr) spoor_clunk(cwr);
+    if (srd) spoor_clunk(srd);
+    if (swr) spoor_clunk(swr);
+
+    TEST_ASSERT(up, "a transport over two pipes");
+    TEST_ASSERT(returned, "a read of the empty pipe came back without sleeping");
+    TEST_ASSERT(!killed, "nothing had to kill it");
+    TEST_EXPECT_EQ((u64)(s64)empty, (u64)(s64)P9_TRANSPORT_EAGAIN, "nothing yet");
+    TEST_EXPECT_EQ((u64)(s64)some, 3ULL, "then the bytes written");
+    TEST_EXPECT_EQ((u64)(s64)eof, 0ULL, "then EOF once the server hangs up");
+    TEST_EXPECT_EQ((u64)flag_after, (u64)flag_before, "the read end's O_NONBLOCK untouched");
+}
+
+// A closed transport samples as ready -- a recv on it fails at once -- but one
+// that does not own its ends leaves the pipe live, where recv_now finds
+// nothing. A pumper (the dev9p poll kthread, a Loom waiter) that trusted the
+// sample would pump IDLE, hook, find it ready again and loop without
+// sleeping; to both, a closed transport is a dead one.
+void test_pipe_pump_treats_a_closed_transport_as_dead(void) {
+    struct Spoor *rd1 = NULL, *wr1 = NULL, *rd2 = NULL, *wr2 = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd1, &wr1), 0, "client->server pipe");
+    TEST_EXPECT_EQ(pipe_create(&rd2, &wr2), 0, "server->client pipe");
+    struct p9_spoor_transport st;
+    TEST_EXPECT_EQ(p9_spoor_transport_init(&st, wr1, rd2, false), 0,
+        "adapter init: tx=wr1, rx=rd2, owns=false");
+    TEST_EXPECT_EQ(p9_client_init(&g_pd_client, /*root_fid=*/1, /*msize=*/8192,
+                                  p9_spoor_transport_ops(&st),
+                                  g_pd_recv, sizeof(g_pd_recv)), 0,
+        "client init over the pipes");
+    struct Rendez rr;
+    rendez_init(&rr);
+    struct p9_reader_hook h;
+    poll_waiter_init(&h.pw, &rr);
+
+    int open_pump = p9_client_reader_pump_ready(&g_pd_client);
+    int open_hook = p9_client_reader_hook(&g_pd_client, &h);
+    p9_client_reader_unhook(&g_pd_client, &h);
+    (void)p9_client_close(&g_pd_client);
+    int closed_pump = p9_client_reader_pump_ready(&g_pd_client);
+    int closed_hook = p9_client_reader_hook(&g_pd_client, &h);
+    p9_client_reader_unhook(&g_pd_client, &h);
+
+    p9_client_destroy(&g_pd_client);
+    p9_spoor_transport_destroy(&st);
+    spoor_clunk(rd1);
+    spoor_clunk(wr1);
+    spoor_clunk(rd2);
+    spoor_clunk(wr2);
+
+    TEST_EXPECT_EQ((u64)(s64)open_pump, (u64)(s64)P9_PUMP_IDLE,
+        "control: an open, empty session pumps IDLE");
+    TEST_EXPECT_EQ((u64)(s64)open_hook, 1ULL, "control: and hooks its readiness");
+    TEST_EXPECT_EQ((u64)(s64)closed_pump, (u64)(s64)P9_PUMP_DEAD,
+        "a closed transport pumps DEAD, not IDLE");
+    TEST_EXPECT_EQ((u64)(s64)closed_hook, (u64)(s64)(-P9_E_IO),
+        "and refuses a hook rather than report a frame waiting");
+}
+
+void test_pipe_client_death_hangs_up_the_tx_pipe(void) {
+    struct Spoor *rd1 = NULL, *wr1 = NULL, *rd2 = NULL, *wr2 = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd1, &wr1), 0, "client->server pipe");
+    TEST_EXPECT_EQ(pipe_create(&rd2, &wr2), 0, "server->client pipe");
+    struct p9_spoor_transport st;
+    TEST_EXPECT_EQ(p9_spoor_transport_init(&st, wr1, rd2, false), 0,
+        "adapter init: tx=wr1, rx=rd2, owns=false");
+    TEST_EXPECT_EQ(p9_client_init(&g_pd_client, /*root_fid=*/1, /*msize=*/8192,
+                                  p9_spoor_transport_ops(&st),
+                                  g_pd_recv, sizeof(g_pd_recv)), 0,
+        "client init over the pipes");
+
+    static const u8 frame[3] = { 7, 8, 9 };
+    TEST_EXPECT_EQ(dev_write(wr1, frame, 3L), 3L, "bytes queued for the server");
+    short live = rd1->dev->poll(rd1, POLLIN, NULL);
+    u64 freed_before = pipe_total_freed();
+
+    p9_client_mark_devgone(&g_pd_client);
+    short dead = rd1->dev->poll(rd1, POLLIN, NULL);
+    u8 got[8] = { 0 };
+    long first = dev_read(rd1, got, 8L);
+    short drained = rd1->dev->poll(rd1, POLLIN, NULL);
+    long eof = (drained & POLLHUP) ? dev_read(rd1, got, 8L) : -999L;
+    long refused = dev_write(wr1, frame, 3L);
+    u64 freed_by_death = pipe_total_freed() - freed_before;
+
+    p9_client_destroy(&g_pd_client);
+    p9_spoor_transport_destroy(&st);
+    spoor_clunk(rd1);
+    spoor_clunk(wr1);
+    spoor_clunk(rd2);
+    spoor_clunk(wr2);
+
+    TEST_EXPECT_EQ((long)live, (long)POLLIN,
+        "control: while the session lives the server end polls POLLIN, no POLLHUP");
+    TEST_EXPECT_EQ((long)dead, (long)(POLLIN | POLLHUP),
+        "the death hangs up: POLLHUP, the queued bytes still readable");
+    TEST_EXPECT_EQ(first, 3L, "the queued bytes drain");
+    TEST_EXPECT_EQ(eof, 0L, "then the server reads EOF");
+    TEST_EXPECT_EQ(refused, (long)(-T_E_PIPE), "the dead session's tx refuses a write");
+    TEST_EXPECT_EQ(freed_by_death, 0ULL, "nothing was closed: no ring freed");
 }
 
 // #96 -- fstat(2) on a pipe must SUCCEED and report S_IFIFO.

@@ -288,12 +288,16 @@ bool   handle_locked_unless_reserved(struct Proc *p, hidx_t h,
                                      void (*fn)(void *), void *arg);
 
 // Release a handle. Returns 0 on success, -1 if the slot is empty
-// (already-closed or never-allocated) or out-of-range. At v1.0 P2-Fc
-// the underlying kobj is NOT reference-counted; close just zeros the
-// slot.
+// (already-closed or never-allocated) or out-of-range. The slot is zeroed
+// under the table lock; the object's release (a Spoor's clunk, which may
+// sleep) runs after.
 //
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
+
+// handle_close that also returns, in *close_rc, what the object's last close
+// reported: 0, or a Dev close hook's negative error (close(2)'s EIO).
+int handle_close_report(struct Proc *p, hidx_t h, int *close_rc);
 
 // handle_close, but only while slot h still names (kind, obj); -1 and the slot
 // untouched otherwise (and for a NULL obj). For an unwind that must not close a

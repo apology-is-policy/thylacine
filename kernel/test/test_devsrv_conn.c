@@ -203,12 +203,12 @@ static struct Spoor *connect_byte(struct Proc *p, const char *name) {
     caps_t lc_saved_caps = p->caps;
     p->caps |= CAP_TCB_DIAL;
     struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
-    if (!root) return NULL;
+    if (!root) { p->caps = lc_saved_caps; return NULL; }
     struct Spoor *sref = spoor_clone(root);
-    if (!sref) { spoor_clunk(root); return NULL; }
+    if (!sref) { spoor_clunk(root); p->caps = lc_saved_caps; return NULL; }
     const char *names[1] = { name };
     struct Walkqid *w = devsrv.walk(root, sref, names, 1);
-    if (!w) { spoor_clunk(sref); spoor_clunk(root); return NULL; }
+    if (!w) { spoor_clunk(sref); spoor_clunk(root); p->caps = lc_saved_caps; return NULL; }
     walkqid_free(w);
     struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
     spoor_clunk(sref);                 // the spent quarry (open-returns-new)
@@ -382,6 +382,88 @@ void test_devsrv_open_connect_byte(void) {
 }
 
 // ---------------------------------------------------------------------------
+// devsrv.conn_ends -- IMPERIUM-DESIGN 11.3 item 10, /ctl/9p-sessions. A conn's
+// counters belong to its two ends: the connecting Proc's principal, captured
+// at the connect, and the poster's, captured at the post. Both go into the
+// SrvConn by value; the row renders numbers to either end and "-" to anyone
+// else (the system principal and a hostowner are devctl.counters_gated's).
+// ---------------------------------------------------------------------------
+size_t devctl_format_9p_sessions_for_test(const struct Proc *reader, char *buf, size_t cap);
+
+static char g_ends_buf[4096];
+
+// The conn row whose peer is `pid`, as a reader of `principal` sees it: true
+// with *counted set when its byte counters are numbers, false when no such
+// row was rendered.
+static bool ends_row_counted(u32 principal, int pid, bool *counted) {
+    struct Proc r;
+    for (size_t i = 0; i < sizeof(r); i++) ((u8 *)&r)[i] = 0;
+    r.principal_id = principal;
+    size_t n = devctl_format_9p_sessions_for_test(&r, g_ends_buf, sizeof g_ends_buf);
+    char want[32] = "conn peer=";
+    size_t wl = 10;
+    char digits[12];
+    int nd = 0;
+    for (unsigned v = (unsigned)pid; nd == 0 || v; v /= 10) digits[nd++] = (char)('0' + v % 10);
+    while (nd) want[wl++] = digits[--nd];
+    want[wl++] = ' ';
+    for (size_t i = 0; i + wl <= n; i++) {
+        if (i && g_ends_buf[i - 1] != '\n') continue;
+        size_t j = 0;
+        while (j < wl && g_ends_buf[i + j] == want[j]) j++;
+        if (j != wl) continue;
+        for (size_t k = i + wl; k + 6 <= n && g_ends_buf[k] != '\n'; k++) {
+            if (g_ends_buf[k] == ' ' && g_ends_buf[k + 1] == 'c' && g_ends_buf[k + 2] == '2' &&
+                g_ends_buf[k + 3] == 's' && g_ends_buf[k + 4] == '=') {
+                *counted = g_ends_buf[k + 5] != '-';
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+void test_devsrv_conn_ends(void);
+void test_devsrv_conn_ends(void) {
+    srv_registry_reset();
+    struct Proc *server = make_marked_test_proc();
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "server and client procs");
+    server->principal_id = 0x5E5Eu;
+    client->principal_id = 0xC11Eu;
+    TEST_ASSERT(post_svc_byte(server, "ends-probe", 10) >= 0, "post \"ends-probe\"");
+    // The poster's identity is the post's: a later change moves no end.
+    server->principal_id = 0x7777u;
+
+    struct Spoor *cs = connect_byte(client, "ends-probe");
+    TEST_ASSERT(cs != NULL, "connect to \"ends-probe\"");
+    struct SrvConn *cn = devsrv_conn_of(cs);
+    TEST_ASSERT(cn != NULL, "the conn Spoor names a SrvConn");
+    TEST_EXPECT_EQ(cn->peer_principal, 0xC11Eu, "the connecting Proc's principal is the client end");
+    TEST_EXPECT_EQ(cn->server_principal, 0x5E5Eu, "the poster's principal at the post is the server end");
+
+    bool counted = false;
+    TEST_ASSERT(ends_row_counted(0xC11Eu, client->pid, &counted) && counted,
+                "the client end reads the conn's counters");
+    counted = false;
+    TEST_ASSERT(ends_row_counted(0x5E5Eu, client->pid, &counted) && counted,
+                "the server end reads the conn's counters");
+    counted = true;
+    TEST_ASSERT(ends_row_counted(0x7777u, client->pid, &counted) && !counted,
+                "the poster's later principal is not an end");
+    counted = true;
+    TEST_ASSERT(ends_row_counted(0xD00Du, client->pid, &counted) && !counted,
+                "a third principal reads '-'");
+
+    spoor_clunk(cs);
+    srv_proc_exit_notify(server);
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(server);
+}
+
+// ---------------------------------------------------------------------------
 // devsrv.kernel_attached_io_refused — stalk-3b-E F1 regression.
 //
 // After SYS_ATTACH_9P_SRV wraps a byte-conn endpoint (srvconn_set_kernel_
@@ -482,7 +564,7 @@ void test_devsrv_kernel_attached_io_refused(void) {
 
 void test_devsrv_kernel_attached_server_close_eofs(void) {
     // Part A: a SERVER-endpoint close on a kernel-attached conn MUST tear down.
-    struct SrvConn *cn = srvconn_create(0, 1, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn != NULL, "srvconn_create (server-close case)");
     srvconn_set_kernel_attached(cn);
     TEST_ASSERT(srvconn_is_live(cn), "conn born live");
@@ -498,7 +580,7 @@ void test_devsrv_kernel_attached_server_close_eofs(void) {
 
     // Part B (control): a CLIENT-endpoint close on a kernel-attached conn must
     // SKIP teardown -- its rings are load-bearing for the kernel 9P client.
-    struct SrvConn *cn2 = srvconn_create(0, 1, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn2 = srvconn_create(0, 1, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     TEST_ASSERT(cn2 != NULL, "srvconn_create (client-close case)");
     srvconn_set_kernel_attached(cn2);
     srvconn_ref(cn2);                                   // inspection ref

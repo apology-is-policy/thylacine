@@ -479,6 +479,14 @@ same stack VA, so the successor reads *plausible but wrong* argv out of a
 translation whose page tables have already been freed. Measured at L-2a as a
 revert probe.
 
+**Amended at thread-model C0 (2026-10-20).** Step 4 now begins with a wait.
+Every peer is EXITING by admission, but one can still be on another CPU between
+its exit commit and its last switch-out, storing its clear-child-tid word
+through the OLD translation, so the commit waits until each peer is off its
+CPU, then frees them (`proc_exec_wait_peers_off_cpu`,
+`proc_reap_exited_threads`). The step stays infallible: the wait is bounded by
+a tail that neither sleeps nor is switched out at an interrupt return.
+
 #### As built at L-6a — the split, and what envp measured
 
 The phenotype cannot hand `SYS_EXECVE` a user VA: Linux passes a
@@ -1417,6 +1425,13 @@ inspecting the returned value, because a raw exit status of 5247 and a packed
 `WAIT_STATUS_STOPPED` are both `0x147f`. It has to know what it **asked** for,
 which is why the pack decision is derived from the flag word one line after it
 is built and before the call is made.
+
+*Superseded 2026-10-12 (gcpark-b):* the translator now passes `WAIT_PACKED`, a
+flag that asks the kernel for the packed word without stop or continue reports,
+so the kernel always packs and the after-the-fact repack is gone. The reason is
+the signalled shape: a guest child that dies of a note reads `WIFSIGNALED` with
+its signal (ERRORS.md §"The wait status"), and that word cannot be built from
+the raw status, which is 1 for every such death.
 
 **The pure layer hands back a description, not a flag word.** The obvious shape
 would be to return the native `WAIT_*` word directly, which would drag `proc.h`

@@ -71,15 +71,35 @@ u64 thread_free_oncpu_waits(void) {
     return __atomic_load_n(&g_thread_free_oncpu_waits, __ATOMIC_RELAXED);
 }
 
-// Allocate the next monotonic tid + extinct on INT_MAX overflow. The
-// overflow path is unreachable at v1.0 thread counts (< 10^5 in any
-// imaginable workload), but the guard fail-closes loudly if it ever
-// approaches — INT_MAX-wrap would alias the (-1) error sentinel.
+// Allocate the next monotonic tid, or -1 once the space is spent. tids are
+// never reused (a stale tid must never name another thread), so the counter
+// is CUMULATIVE, not a count of live threads: an unprivileged create/join
+// loop walks it toward INT_MAX in hours. Spent is therefore a refusal the
+// creator reports, never an extinction (I-32). The counter saturates instead
+// of wrapping, so it never yields the -1 sentinel or a tid a live thread
+// may still hold.
 static int alloc_next_tid(void) {
-    u32 next = __atomic_fetch_add(&g_next_tid, 1u, __ATOMIC_RELAXED);
-    if (next >= 0x7fffffffu) extinction("alloc_next_tid: g_next_tid would overflow INT_MAX");
-    return (int)next;
+    u32 cur = __atomic_load_n(&g_next_tid, __ATOMIC_RELAXED);
+    do {
+        if (cur >= 0x7fffffffu) return -1;
+    } while (!__atomic_compare_exchange_n(&g_next_tid, &cur, cur + 1u, true,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    return (int)cur;
 }
+
+bool thread_tid_space_spent(void) {
+    return __atomic_load_n(&g_next_tid, __ATOMIC_RELAXED) >= 0x7fffffffu;
+}
+
+#ifdef KERNEL_TESTS
+// Test hook (the *_for_test convention; absent from the header): replace the
+// tid counter, returning the old value, so a test can park it at the edge of
+// the space and restore it afterwards.
+u32 thread_tid_counter_swap_for_test(u32 v);
+u32 thread_tid_counter_swap_for_test(u32 v) {
+    return __atomic_exchange_n(&g_next_tid, v, __ATOMIC_RELAXED);
+}
+#endif
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: link/unlink under
 // g_proc_table_lock so concurrent walkers (proc_count_live_peers_locked,
@@ -114,16 +134,17 @@ static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
     proc_table_lock_release(s);
 }
 
-static void thread_unlink_from_proc(struct Thread *t) {
-    irq_state_t s = proc_table_lock_acquire();
+// The caller holds g_proc_table_lock. Split out so proc_reap_exited_threads can
+// find an exited peer and unlink it in ONE hold: the unlink is the claim, so no
+// second reaper of the same Proc can find it afterwards. (extinction takes no
+// proc-table lock, so extincting while holding it is safe.)
+void thread_unlink_from_proc_locked(struct Thread *t) {
     struct Proc *p = t->proc;
     if (t->prev_in_proc) {
         t->prev_in_proc->next_in_proc = t->next_in_proc;
     } else {
-        if (p->threads != t) {
-            proc_table_lock_release(s);
+        if (p->threads != t)
             extinction("thread_unlink: list head mismatch");
-        }
         p->threads = t->next_in_proc;
     }
     if (t->next_in_proc) {
@@ -132,22 +153,108 @@ static void thread_unlink_from_proc(struct Thread *t) {
     t->next_in_proc = NULL;
     t->prev_in_proc = NULL;
     __atomic_fetch_sub(&p->thread_count, 1, __ATOMIC_RELEASE);   // #65 audit F6
+}
+
+static void thread_unlink_from_proc(struct Thread *t) {
+    irq_state_t s = proc_table_lock_acquire();
+    thread_unlink_from_proc_locked(t);
     proc_table_lock_release(s);
 }
 
 // The kernel-stack watermark (ARCH 8.12). See thread.h for why it exists.
 //
-// The usable region is [kstack_base + GUARD_SIZE, kstack_base + TOTAL_SIZE):
-// kstack_base is the LOW address and the guard pages sit below the usable
-// stack, which grows DOWN from the top. So the first non-poison word scanning
-// UPWARD from the guard is the deepest point ever touched.
-void thread_kstack_poison(struct Thread *t) {
-    if (!t || !t->kstack_base)
-        return;
-    u64 *p   = (u64 *)((char *)t->kstack_base + THREAD_KSTACK_GUARD_SIZE);
-    u64 *end = (u64 *)((char *)t->kstack_base + THREAD_KSTACK_TOTAL_SIZE);
+// The usable region is [base + GUARD_SIZE, base + TOTAL_SIZE): base is the LOW
+// address and the guard pages sit below the usable stack, which grows DOWN
+// from the top. So the first non-poison word scanning UPWARD from the guard is
+// the deepest point ever touched.
+static void kstack_poison(void *base) {
+    u64 *p   = (u64 *)((char *)base + THREAD_KSTACK_GUARD_SIZE);
+    u64 *end = (u64 *)((char *)base + THREAD_KSTACK_TOTAL_SIZE);
     while (p < end)
         *p++ = THREAD_KSTACK_POISON;
+}
+
+// The kernel stack cache. A block's guard is made no-access once, when
+// it leaves the buddy, and stays that way while the block waits here between
+// threads, so a create that finds one pays no guard toggle and no TLB
+// invalidate, and a free that finds room pays none either. At most
+// THREAD_KSTACK_CACHE_MAX blocks; past that a freed stack goes back to the
+// buddy. LIFO, so the block reused is the one written most recently. A leaf
+// lock: nothing is taken under it.
+static spin_lock_t g_kstack_cache_lock = SPIN_LOCK_INIT;
+static void       *g_kstack_cache[THREAD_KSTACK_CACHE_MAX];
+static u32         g_kstack_cache_n;
+
+static void *kstack_cache_pop(void) {
+    void *base = NULL;
+    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    if (g_kstack_cache_n != 0)
+        base = g_kstack_cache[--g_kstack_cache_n];
+    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    return base;
+}
+
+// A kernel stack for a new thread: the cached block freed last, else a fresh
+// block with its guard made no-access. Either way the whole usable region is
+// poisoned before it is handed out. That resets the watermark, and it is the
+// only thing that keeps a dead thread's frames from being readable on the next
+// thread's stack: a reused block is never zeroed. NULL on OOM.
+static void *kstack_alloc(void) {
+    void *base = kstack_cache_pop();
+    if (!base) {
+        // No KP_ZERO: nothing reads the guard, and the poison covers the usable
+        // region whole.
+        struct page *pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, 0);
+        if (!pg) return NULL;
+        paddr_t pa = page_to_pa(pg);
+        // The block is 32-KiB-aligned, so its guard pages share one L3 (one
+        // 2 MiB region): one call, one batch of invalidates.
+        if (!mmu_set_no_access_range(pa, THREAD_KSTACK_GUARD_PAGES)) {
+            free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
+            return NULL;
+        }
+        base = pa_to_kva(pa);
+    }
+    kstack_poison(base);
+    return base;
+}
+
+// Back to the buddy. The guard pages become normal RW first: whoever is handed
+// these pages next, for any purpose, expects to be able to use them, so a
+// guard that cannot be restored is never freed.
+static void kstack_release(void *base) {
+    paddr_t pa = kva_to_pa(base);
+    if (!mmu_restore_normal_range(pa, THREAD_KSTACK_GUARD_PAGES))
+        extinction("kstack_release: a kernel stack's guard could not be restored");
+    free_pages(pa_to_page(pa), THREAD_KSTACK_TOTAL_ORDER);
+}
+
+// A dead thread's stack: cached with its guard intact while there is room,
+// released otherwise. The caller has seen the thread's last switch-out
+// complete (on_cpu clear), so nothing executes on the block any more.
+static void kstack_free(void *base) {
+    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    if (g_kstack_cache_n < THREAD_KSTACK_CACHE_MAX) {
+        g_kstack_cache[g_kstack_cache_n++] = base;
+        base = NULL;
+    }
+    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    if (base)
+        kstack_release(base);
+}
+
+u32 thread_kstack_cache_count(void) {
+    irq_state_t s = spin_lock_irqsave(&g_kstack_cache_lock);
+    u32 n = g_kstack_cache_n;
+    spin_unlock_irqrestore(&g_kstack_cache_lock, s);
+    return n;
+}
+
+u32 thread_kstack_cache_drain(void) {
+    u32 n = 0;
+    for (void *base; (base = kstack_cache_pop()) != NULL; n++)
+        kstack_release(base);
+    return n;
 }
 
 // Bytes of kernel stack this thread has ever used. 0 for a thread with no
@@ -282,6 +389,7 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     // migrate it (sched.c, audit F2 / I-21).
     t->magic  = THREAD_MAGIC;
     t->tid    = alloc_next_tid();
+    if (t->tid < 0) extinction("thread_init: tid space spent at boot");
     t->state  = THREAD_RUNNING;
     t->proc   = kproc();
     t->weight = 1;
@@ -334,6 +442,7 @@ struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) 
     // no per-thread kstack (thread_free's free_pages is gated on kstack_base).
     t->magic  = THREAD_MAGIC;
     t->tid    = alloc_next_tid();
+    if (t->tid < 0) extinction("thread_create_bootcpu_idle: tid space spent at boot");
     t->state  = THREAD_RUNNABLE;           // ready()-able by sched_install_bootcpu_idle
     t->proc   = kproc();
     t->weight = 1;
@@ -390,24 +499,18 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     if (proc->magic != PROC_MAGIC)
         extinction("thread_create with corrupted proc");
 
+    // The tid first: a spent tid space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = alloc_next_tid();
+    if (tid < 0) return NULL;
+
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
-    if (!stack_pg) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-    paddr_t guard_pa = page_to_pa(stack_pg);
-    void *kalloc_base = pa_to_kva(guard_pa);
-
-    // P2-Dc / P3-Bca: protect the lower THREAD_KSTACK_GUARD_PAGES as
-    // no-access in the direct map. The 8-page allocation at order=3 is
-    // 32-KiB-aligned, so the 4 guard pages at the bottom always lie
-    // within a single 2 MiB block (32 KiB ≪ 2 MiB). One demote chain +
-    // one TLB flush covers all guards.
-    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
-        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+    // P2-Dc / P3-Bca: the guard pages below the stack are no-access in the
+    // direct map; kstack_alloc hands the block out guarded and poisoned.
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
@@ -419,12 +522,11 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     // ahead of long-running threads whose vd_t has advanced via
     // sched() yields).
     t->magic       = THREAD_MAGIC;
-    t->tid         = alloc_next_tid();
+    t->tid         = tid;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -509,30 +611,26 @@ struct Thread *thread_create_user(struct Proc *proc,
     if (proc->magic != PROC_MAGIC)
         extinction("thread_create_user with corrupted proc");
 
+    // The tid first: a spent tid space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = alloc_next_tid();
+    if (tid < 0) return NULL;
+
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
-    if (!stack_pg) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-    paddr_t guard_pa = page_to_pa(stack_pg);
-    void *kalloc_base = pa_to_kva(guard_pa);
-
-    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
-        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
 
     t->magic       = THREAD_MAGIC;
-    t->tid         = alloc_next_tid();
+    t->tid         = tid;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -585,30 +683,26 @@ struct Thread *thread_create_forked(struct Proc *proc,
         extinction("thread_create_forked with corrupted proc");
     if (!frame)          extinction("thread_create_forked with NULL frame");
 
+    // The tid first: a spent tid space refuses before anything is allocated
+    // (one a later failure burns is skipped, never reused).
+    int tid = alloc_next_tid();
+    if (tid < 0) return NULL;
+
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
-    if (!stack_pg) {
-        kmem_cache_free(g_thread_cache, t);
-        return NULL;
-    }
-    paddr_t guard_pa = page_to_pa(stack_pg);
-    void *kalloc_base = pa_to_kva(guard_pa);
-
-    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
-        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+    void *kalloc_base = kstack_alloc();
+    if (!kalloc_base) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
 
     t->magic       = THREAD_MAGIC;
-    t->tid         = alloc_next_tid();
+    t->tid         = tid;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;
     t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
-    thread_kstack_poison(t);               // ARCH 8.12: the depth witness
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -662,7 +756,21 @@ struct Thread *thread_create_forked(struct Proc *proc,
     return t;
 }
 
+static void thread_release(struct Thread *t, bool unlink);
+
 void thread_free(struct Thread *t) {
+    thread_release(t, true);
+}
+
+// For a Thread its caller already unlinked under g_proc_table_lock (the in-Proc
+// reap). It is off every list, so nothing can find it; the gates below still run.
+void thread_free_unlinked(struct Thread *t) {
+    if (t && (t->next_in_proc || t->prev_in_proc || (t->proc && t->proc->threads == t)))
+        extinction("thread_free_unlinked of a Thread still on its Proc's list");
+    thread_release(t, false);
+}
+
+static void thread_release(struct Thread *t, bool unlink) {
     if (!t)                       extinction("thread_free(NULL)");
     // Magic check catches double-free and corrupt-Thread passes. SLUB's
     // freelist write at kmem_cache_free clobbers magic; subsequent free
@@ -734,22 +842,11 @@ void thread_free(struct Thread *t) {
         }
     }
 
-    thread_unlink_from_proc(t);
+    if (unlink)
+        thread_unlink_from_proc(t);
 
-    if (t->kstack_base) {
-        // P2-Dc / P3-Bca: restore guard pages to normal RW in the direct
-        // map before returning the allocation to buddy. If a future
-        // allocation reuses these pages (for any purpose, kstack or
-        // otherwise), they need normal access; leaving them no-access
-        // would silently fault the next user. Batched into one TLB
-        // flush. kstack_base is a direct-map KVA; recover the PA via
-        // kva_to_pa.
-        paddr_t guard_pa = kva_to_pa(t->kstack_base);
-        mmu_restore_normal_range(guard_pa, THREAD_KSTACK_GUARD_PAGES);
-
-        struct page *pg = pa_to_page(guard_pa);
-        free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
-    }
+    if (t->kstack_base)
+        kstack_free(t->kstack_base);
 
     kmem_cache_free(g_thread_cache, t);
     __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);
@@ -823,7 +920,9 @@ void thread_switch(struct Thread *next) {
 
     // RW-1 B-F1: install next's rolling-ASID TTBR0 before the asm switch (a
     // no-op for the kernel threads thread_switch is used with, but kept
-    // uniform with sched()'s switch path). IRQs are masked here (#101 above).
+    // uniform with sched()'s switch path; B-2e2: it also records the CPU's
+    // space, NULL here, which must be true at every switch). IRQs are masked
+    // here (#101 above).
     sched_install_asid_ttbr0(next);
 
     // #101 regression hook (test-only; g_thread_switch_test_window_ns is 0 in

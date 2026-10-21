@@ -12,6 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
+updated: 2026-10-14
 updated: 2026-10-01
 ---
 ## Session factory handoff
@@ -73,7 +74,14 @@ POUCH_CENSUS_MEM)` after the malloc smoke (twelve legs of the exact memory
 seam, the mallocng witness among them -- [[sub-pouch-mem]]), and
 `pouch_smoke_one_expect_fault("pouch-hello-guard", POUCH_CENSUS_GUARD)` after
 the fault smoke (a worker's write into its own guard dies of `snare:segv`);
-`/pouch-hello-threads`'s census grew by three legs. Both rungs are boot-fatal like every other. The marker goes out on fd 1
+`/pouch-hello-threads`'s census grew by three legs. gcpark-b (2026-10-12)
+matches `/pouch-hello-signals` on `POUCH_CENSUS_SIGNALS` too: its `deaths` leg
+(abort, assert, `brk #1` and a NULL store, each read back as the signal it
+died of) is what tells the new binary from an old one that also exits 0.
+Signal chunk S-3 (2026-10-14) grows that census by `self-faults` (children
+that raise or kill themselves with SIGSEGV, SIGBUS, SIGILL and SIGFPE read
+each signal) and `errnos` (`kill()` refusals read ESRCH and EPERM, not EIO).
+Both rungs are boot-fatal like every other. The marker goes out on fd 1
 (`t_write`), not `t_putstr`: `SYS_PUTS` is the console, and the census reads
 the pipe ([[sub-kernel-protect-witness]]).
 
@@ -105,6 +113,19 @@ authority) and for `0xFFFFFFFF` (refused at validation: over the hard maximum
 on any machine short of 16 TiB); since the default IS the hard maximum, the
 authority refusal proper -- a narrowed parent asking above itself but below
 the maximum -- is the kernel suite's (`resource.spawn_budget_resolve`).
+
+**The spawn cwd tail, through the real ABI (2026-10-06).** `probe_spawn_cwd`
+runs after the CL-5 probe, standing joey in `/` and restoring its cwd after. It
+sends `SYS_SPAWN_FULL_ARGV` records with the `SPAWN_EXT_CWD` tail at +104 (a
+`struct scwd_record` whose offset assert pins the placement) and spawns held,
+so each child is read before it runs anything: `/bin/hello` born in `/bin`
+reads `/bin` from `/proc/<pid>/cwd`; `hello` under the cwd `/bin` spawns while
+the same name with no tail does not (from `/`, after checking there is no
+`/hello`); `/nope-cwd` answers -2, a file -20, `cwd_len` 0 -22, `cwd_flags` 1
+and an unknown `ext_flags` bit -1; joey's own cwd stays `/`. Each child is
+killed through its ctl and reaped. Boot-fatal. Probe83's chdir legs ask the
+errno too: `f/..` -20, `nope/..` -2, and `f` named whole -20 (the resolver's own
+directory check, not the walk's).
 
 **The readiness wire, read directly (#98 NP-3b, 2026-09-28).** Before its
 net-6b polls, joey reads the udp connection's `ready` file with `t_pread`, and
@@ -373,6 +394,16 @@ event-driven; no timing constant appears in this path.
 [[seam-791-smp1-joey]].
 
 ## Caveats
+
+- **The V-1b phenotype leg reports through a file, and joey prints what it
+  holds.** joey stamps `/vivarium/pheno/rootfs/pheno-scratch` with `??` before
+  it runs the container (the pool is PRESERVEd, so a stale `OK` would pass a
+  broken run), waits for it, and reads the report back from outside: `OK`
+  passes, anything else is printed as the failure's marker. The buffer was 8
+  bytes until 2026-10-05, so a red run printed the first 7 bytes of a report
+  that names several legs at once (viv-pheno-probe's L311-L318 report
+  together, `L31adL L31bdL ...`) and named one failing leg of seven. It is 64
+  now ([[chg-2026-10-05-signal7-list]]).
 
 - **joey's boot-fatal pouch provers are matched on a LEG CENSUS, and the
   census strings are not joey's to type** (count them from the header with

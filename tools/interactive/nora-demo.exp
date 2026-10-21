@@ -36,7 +36,11 @@ sleep 3
 lc_expect "a small tour" "the demo source opens + renders in nora"
 lc_pass "nora-demo: the baked demo is reachable + opens in nora (nora /goroot/demo/nora-demo.go)"
 
-# Leave nora, then the VM.
+# Leave nora. Then a line typed behind `:q!` belongs to the shell: kaua reads one
+# byte at a time and nora stops at the Enter that quits it, so the next command,
+# typed straight after, is never taken into the editor.
 send ":q!\r"
 sleep 1
+lc_quit_typeahead nora "nora /goroot/demo/nora-demo.go" "a small tour" ":q!\r" nrta 3
+lc_pass "nora-demo: a line typed ahead behind :q! reaches the shell whole, in 3 of 3 rounds"
 lc_quit

@@ -31,12 +31,16 @@
 # (owner axis fails); the server side is inferred from the client side.
 #
 # v7 (#210 kernel counters): the autopsy also reads the KERNEL
-# /ctl/9p-sessions -- the three-way loss discriminator (see
-# docs/reference/33-devctl.md): (a) warp s2c produced>consumed = reply
+# /ctl/9p-sessions -- the three-way loss discriminator (see the vault's
+# sub-kernel-devctl): (a) warp s2c produced>consumed = reply
 # undrained; (b) orph bumped = misdemux; (c) own advanced + inflight tag
 # done with the game parked = lost wake. A healthy BASELINE read lands
 # before the legs and a mid-flight read on the healthy paced chain, so
 # the wedge-time values read as deltas, not absolutes.
+# A row's counters are shown only to the principals at its two ends
+# (IMPERIUM-DESIGN 11.3 item 10): the game's connections and sessions
+# are michael's, so they read as numbers here, while a row between two
+# system Procs reads "-".
 #
 # Verdict lines (#186):
 #   WEDGE-PROBE PACED: PROGRESSES|WEDGED

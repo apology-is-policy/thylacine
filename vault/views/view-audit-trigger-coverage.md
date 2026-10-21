@@ -40,7 +40,7 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**209 declared surfaces · 202 covered by a hard-audit dossier · 7 soft-owned · 0 unowned · 0 unparsed · 24 cited path(s) that do not resolve.**
+**225 declared surfaces · 218 covered by a hard-audit dossier · 7 soft-owned · 0 unowned · 0 unparsed · 23 cited path(s) that do not resolve.**
 
 ### Cited paths that do not resolve
 
@@ -62,7 +62,6 @@ changed on main? — is the next increment, tracked as task #169.
 | SrvConn endpoint poll: BOTH endpoints + the four-edge wake (2026-09-21… | `usr/lib/pouch/patches/0041` | no such file in the tree |
 | Syscall byte-I/O staging + bulk uaccess + the per-service bulk ring (C… | `kernel/user` | no such file in the tree |
 | VIVARIUM O_APPEND (FS pass-through) + pread64/pwrite64 (67/68): git co… | `init/add/commit/log/clone/verify` | no such file in the tree |
-| VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
 | W-3e: the SDL2 Vulkan glue + the img poke-completion + the first-Vulka… | `usr/ports/mesa/patches/0020` | no such file in the tree |
 | `thread_spawn` / `thread_exit` / multi-thread exit | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
 | `torpor_wait` / `torpor_wake` | `specs/futex.tla` | **possibly a documented NEGATIVE — read the claim** |

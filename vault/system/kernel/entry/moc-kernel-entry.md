@@ -4,7 +4,7 @@ type: moc
 title: "The EL0 boundary — exception entry, return tails, and deliberate crossings"
 parent: moc-kernel
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-10-06
 ---
 Every transition between userspace and the kernel: the vector table and its
 save/restore macros, the three paths that `eret` to EL0, the return tails where
@@ -50,8 +50,9 @@ with a plausibility check rather than the wrappers defending the slot.
 ## The tails are the substance
 
 Four actions want to run before a thread re-enters EL0: the preemption check,
-the group-terminate die-check, note delivery, and the debugger stop-check. They
-are ordered so that **death wins over a stop**, and so that a Proc
+the group-terminate die-check, the debugger stop-check, and note delivery. They
+are ordered so that **death wins over a stop** and **a stop over a note**, and
+so that a Proc
 group-terminated *during* the preempt is still caught before any EL0
 instruction runs.
 

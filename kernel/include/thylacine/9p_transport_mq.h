@@ -24,6 +24,7 @@
 
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>   // p9_loopback_responder
+#include <thylacine/poll.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -46,21 +47,25 @@ struct p9_mq_loopback {
     u8                     scratch[P9_MQ_SCRATCH_CAP];   // per-send synthesis
     u64                    sends;
     u64                    recvs;
-    // Deadline knob (parity with p9_loopback): an armed deadline on an empty ring
-    // returns -1 + sets timed_out (the frame-boundary-timeout model) instead of 0.
-    bool                   deadline_armed;
-    bool                   timed_out;
-    // Back-pressure knob (#349 regression). A test sets eagain_budget = K to make
+    // recv_ready's hooks, walked after every reply appended and at close. An
+    // empty FIFO models a real transport's blocking recv: not ready.
+    struct poll_waiter_list ready_list;
+    // Back-pressure knob (#349 regression). A test sets it to K, through
+    // p9_mq_loopback_set_eagain_budget, to make
     // the next K send calls return P9_TRANSPORT_EAGAIN (a transiently-full-but-ALIVE
     // c2s ring) and REJECT the frame -- no reply synthesized, no acceptance --
     // exactly like a real full ring. The reply is generated only when the frame is
     // accepted (budget exhausted), so a prior op's already-queued reply stays
     // drainable: the production shape where client_send_flow's self-pump drains an
     // OTHER op's reply, frees the slot, then the rejected frame's retry is accepted.
+    // mq_send decrements it under `lock`, so a test thread's plain store can be
+    // overwritten by a send in flight and lost: only a responder, which runs
+    // under `lock`, stores it directly.
     u32                    eagain_budget;
-    // Clobber knob (#375 regression). While armed, the next `scribble_arm` recv
-    // calls overwrite scribble_buf[0..scribble_len) with 0x5A BEFORE returning the
-    // frame -- modeling a PEER legally rebuilding the SHARED c->out_buf in the
+    // Clobber knob (#375 regression), set through p9_mq_loopback_arm_scribble
+    // (mq_recv decrements scribble_arm under `lock`). While armed, the next
+    // `scribble_arm` recv calls overwrite scribble_buf[0..scribble_len) with 0x5A
+    // BEFORE returning the frame -- modeling a PEER legally rebuilding the SHARED c->out_buf in the
     // exact window where client_send_flow's pump/park has dropped c->lock (the
     // self-pump arm's recv sits inside that window). A back-pressured sender that
     // re-reads out_buf after the window (the pre-spill #375 clobber) sends the
@@ -79,5 +84,13 @@ void p9_mq_loopback_destroy(struct p9_mq_loopback *mq);
 
 // Build a transport_ops vtable that delegates to this transport.
 struct p9_transport_ops p9_mq_loopback_ops_for(struct p9_mq_loopback *mq);
+
+// The two knobs, under the lock. A read of a loopback that is not live dies:
+// every value is one a test may arm, so none can stand for "not live".
+void p9_mq_loopback_set_eagain_budget(struct p9_mq_loopback *mq, u32 n);
+u32  p9_mq_loopback_eagain_budget(struct p9_mq_loopback *mq);
+void p9_mq_loopback_arm_scribble(struct p9_mq_loopback *mq, u8 *buf, u32 len,
+                                 u32 n);
+u32  p9_mq_loopback_scribble_armed(struct p9_mq_loopback *mq);
 
 #endif  // THYLACINE_9P_TRANSPORT_MQ_H

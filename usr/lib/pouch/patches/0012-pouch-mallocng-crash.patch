@@ -1,59 +1,32 @@
-Phase 6 hardening (item #3b of the 4-item memory-model hardening plan).
-Overrides mallocng's internal `assert` macro to call _Exit(127) directly
-instead of routing through a_crash() (a deliberate NULL deref musl uses
-as a last-resort terminator).
+pouch boundary-line patch 0012 -- a failed mallocng assert is abort().
 
-Why the override: at Thylacine v1.0, FAULT_UNHANDLED_USER (an EL0 fault
-with no VMA covering the faulting address) extincts the kernel rather
-than terminating the offending Proc. a_crash()'s deliberate NULL deref
-in mallocng's hot path -- alloc_slot::enframe::assert(!p[-4]),
-get_nominal_size::assert(!end[-5]), and ~10 others throughout the
-allocator -- becomes "kill the entire kernel" instead of "kill the
-misbehaving program". Without this patch, every mallocng heap-
-corruption detection fires as boot extinction with no diagnostic
-context.
+mallocng's internal `assert` macro (glue.h; distinct from libc's assert,
+which already reaches abort()) ends the program with a_crash(), a deliberate
+NULL store. It guards the allocator's hot path -- alloc_slot::enframe's
+assert(!p[-4]), get_nominal_size's assert(!end[-5]) and about ten more -- so
+it is what a heap corruption looks like when mallocng catches it.
 
-This patch parallels 0011-pouch-abort.patch (which did the same swap
-for upstream's abort(), since mallocng's own assert macro is distinct
-from libc's assert/abort path and was untouched by 0011). Together
-the two patches close the userspace-fault-to-kernel-extinction
-pathway from both mallocng-internal asserts AND abort()/libc-assert
-paths.
+History. Phase 6 hardening item #3b first swapped a_crash() for _Exit(127):
+the NULL store then extincted the kernel, so every detected corruption took
+the boot down. Faults have long since ended only the offending Proc, and
+gcpark-b (2026-10-12, operator vote "snare:abort") makes abort() one trap the
+kernel names (0011-pouch-abort.patch). This patch now calls abort():
 
-Behavioral delta from upstream:
-  - No a_crash() NULL deref. The deliberate fault becomes _Exit(127),
-    matching upstream abort()'s normal-termination fallback (past the
-    unreachable a_crash) and 0011-pouch-abort.patch's behavior.
-  - Parents observe WIFEXITED + WEXITSTATUS == 127 (same as 0011).
-  - mallocng assertion failures still produce no diagnostic output --
-    the assert macro is content-free; only the location in the code
-    indicates which invariant failed. This patch is paired with the
-    POUCH_MALLOCNG_DIAG-gated diagnostic in meta.h (item #3c) that
-    adds an opt-in dump-before-crash for the enframe assertion.
+  - the parent reads WIFSIGNALED with WTERMSIG == SIGABRT, and the console
+    prints `user fault: ... reason="snare:abort" ... pc=... lr=...`, the pc
+    inside abort() and the lr inside the allocator function whose assert
+    failed -- the location upstream's a_crash() would also have given, but
+    named as an abort rather than read as a stray SIGSEGV;
+  - abort() is one brk instruction, async-signal-safe and independent of any
+    allocator state, as a_crash() is, so it is safe under the malloc lock.
 
-Why this is in scope NOW (not deferred):
-  The 16b-gamma-mount-bind H1 investigation established that the
-  AEGIS-256 / mallocng heap-corruption bug is content-sensitive --
-  it fires with some pool.img contents and not others. When it
-  DOES fire, the user-mode behavior is mallocng's assert -> a_crash
-  -> kernel extinction with no information. Even without a fix for
-  the underlying corruption, this patch ensures the next recurrence
-  produces a clean rc=127 exit that joey can reap, instead of
-  taking down the whole boot.
+The assert stays content-free (no message). POUCH_MALLOCNG_DIAG
+(0013-pouch-mallocng-diag.patch) adds an opt-in dump before the enframe
+assertion fires.
 
-MULTI-THREAD HAZARD (same as 0011-pouch-abort.patch)
-
-_Exit(127) routes through __NR_exit_group -> kernel SYS_EXITS,
-which extincts the kernel if the calling Proc has live peer
-threads (per kernel/proc.c::exits "caller must join all spawned
-threads" check). The same v1.x lift documented in
-0011-pouch-abort.patch -- a new SYS_EXIT_GROUP that cascades
-peer-thread termination -- closes this for both patches uniformly.
-
-Safe-use envelope until SYS_EXIT_GROUP lands: a mallocng assertion
-must be reachable only from single-thread context OR from a
-thread that has joined every peer. Today's checkpoint satisfies
-this for stratumd (mount path runs single-thread).
+Threads. A fault in any thread ends the whole Proc (I-24), so an assert in
+any thread is sound; the old multi-thread hazard of this patch was closed by
+#811.
 
 --- a/src/malloc/mallocng/glue.h
 +++ b/src/malloc/mallocng/glue.h
@@ -65,22 +38,18 @@ this for stratumd (mount path runs single-thread).
  #include <stdint.h>
  #include <sys/mman.h>
  #include <pthread.h>
-@@ -29,8 +30,17 @@
+@@ -29,8 +30,13 @@
  #if USE_REAL_ASSERT
  #include <assert.h>
  #else
  #undef assert
 -#define assert(x) do { if (!(x)) a_crash(); } while(0)
-+/* Pouch override (Thylacine P6 hardening #3b): mallocng's hot-path
-+ * assert macro was a_crash() = deliberate NULL deref. Under
-+ * Thylacine v1.0 FAULT_UNHANDLED_USER policy, the NULL deref
-+ * extincts the kernel instead of terminating only the offending
-+ * Proc. Swap to _Exit(127) so a mallocng heap-corruption assertion
-+ * cleanly terminates the Proc (joey reaps with rc=127) without
-+ * taking the boot down. Parallels 0011-pouch-abort.patch (which
-+ * did the same swap for upstream abort()). See docs/reference/
-+ * 86-pouch-stratumd-boot.md "hardening #3b". */
-+#define assert(x) do { if (!(x)) _Exit(127); } while(0)
++/* Pouch override: a failed mallocng assert is abort() -- one brk the kernel
++ * names snare:abort (0011-pouch-abort.patch) -- so the parent reads SIGABRT
++ * and the console names the failing pc, where a_crash()'s NULL store would
++ * read as a stray SIGSEGV. Like a_crash(), abort() touches no allocator
++ * state, so it is safe under the malloc lock. */
++#define assert(x) do { if (!(x)) abort(); } while(0)
  #endif
 
  #define brk(p) ((uintptr_t)__syscall(SYS_brk, p))

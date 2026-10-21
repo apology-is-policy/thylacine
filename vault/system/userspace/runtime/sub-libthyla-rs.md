@@ -49,6 +49,7 @@ design:
   - "docs/UTOPIA-SHELL-DESIGN.md section 15"
   - "docs/ARCHITECTURE.md section 3.5"
 created: 2026-08-03
+updated: 2026-10-14
 updated: 2026-10-12
 ---
 ## Dedicated service owner (October 2)
@@ -92,6 +93,22 @@ episode operations at 110, propagating grant at 111, and POST_SERVICE bit 13,
 while preserving DMA_SEGMENTS=112. The cap helper exposes the grant flag, and
 the notes vocabulary includes session hangup. Haul uses existing WALK_CREATE,
 SRV_ACCEPT and SRV_PEER wrappers; it grants itself no authority in userspace.
+
+**The `term` note (2026-10-13).** `T_NOTE_BIT_TERM` is 7 and
+`T_NOTE_MASK_SUPPORTED` 0xff, mirroring the kernel's `NOTE_BIT_TERM` and
+`NOTE_MASK_SUPPORTED` ([[sub-kernel-notes]]); `notes::NoteClass::Term` is the
+eighth class in `NoteClass::ALL`. The runtime does not mask it at startup (it
+masks only `pipe`), so a native program with no handler and no notes reader
+dies of a `term` by the kernel's default, as of an `interrupt`.
+
+**`notes::send` reports the kernel's reason (2026-10-14).** `SYS_POSTNOTE`
+answers errnos ([[dec-2026-10-14-postnote-errnos]]), and `send` maps them
+through `Error::from_syscall_return` instead of flattening every failure to
+`InvalidArgument`: `NoSuchProcess` (a new variant, `T_E_SRCH` = 3),
+`PermissionDenied` (not the caller's child), `WouldBlock` (a full queue),
+`InvalidArgument` (a name no program may post). It still refuses a `snare:`
+name before the kernel sees it: the kernel ENDS a caller that self-posts a
+fault snare ([[dec-2026-10-14-self-death-snare]]), and `send` returns.
 
 
 A native binary does three things and gets a runtime:
@@ -337,6 +354,13 @@ None crossing a boundary; every ABI record belongs to
 - **`Stdio` / `PreparedStdio`** — the spawn plumbing. The prepared form splits
   what the parent must hold *through* the syscall from what it keeps *after*,
   which is the distinction that gets end-of-file semantics right.
+- **`Command::current_dir`** (2026-10-06) — the child is born in `dir`. The
+  record carries the `T_SPAWN_EXT_CWD` tail (`TSpawnExtCwd`, sent in one
+  `#[repr(C)]` record with the base so the tail sits at +104, the pointer the
+  whole record's). The kernel resolves `dir` in the spawner as chdir would, so a
+  bad `dir` fails `spawn` with chdir's error and the caller's cwd never moves; a
+  relative program name is looked up from `dir`
+  ([[sub-kernel-syscall-dispatch]]).
 - **`Command::debug_held`** (2026-09-29) — spawns the child held
   ([[sub-kernel-birth-hold]]). `spawn` returns once the child has loaded its
   image and parked before its first instruction, and the child runs only when a
@@ -346,9 +370,20 @@ None crossing a boundary; every ABI record belongs to
   the two would wait on each other until the spawner is killed. The builder sets
   `T_SPAWN_DEBUG_HELD` in `TSpawnArgs.debug_flags`, a record the build now checks
   against the kernel's layout ([[sub-kernel-syscall-abi]]).
+- **`Metadata`** (`fs/metadata.rs`) — the crate's mirror of `t_stat`
+  ([[abi-t-stat]]), size-asserted at 88 bytes and nothing more. `dev()`
+  returns the whole 64-bit device number, which with `qid_path()` names a
+  file across datasets.
 - **`CodeRegion`** — the two aliases of one dual-mapped region. Its mirrored
   record is the only one in the crate pinned with per-field offset assertions
   rather than a size assertion alone.
+- **`SealedRegion`** (B-2b, 2026-10-07) — one sealed code region: the bytes
+  the kernel copied in, mapped once, execute-only, at a random address
+  (`SYS_JIT_CREATE_SEALED`). It holds only the alias's base and length;
+  there is no writer pointer to hold. `new` hands the kernel a slice of
+  instruction words as their in-memory bytes, which is the instruction stream
+  only on a little-endian target, and a const assertion says so. `destroy`
+  reports the kernel's answer; `Drop` makes the same call and discards it.
 
 ## Concurrency
 
@@ -405,11 +440,19 @@ Uniform: every module returns the crate `Result`, and every syscall return goes
 through the one decoder. Two exceptions, one deliberate and one worth watching.
 
 The deliberate one: the JIT module defines its own small error enum with
-domain-specific names, and its own copies of three errno constants, rather than
+domain-specific names, and its own copies of four errno constants (`EAGAIN`
+joined at B-2b, as `TryAgain`: every code alias goes at a random address, and
+none is drawn while the kernel's random source is unseeded), rather than
 reporting through the crate error type. Its catch-all preserves the raw value
 the same way, so nothing is lost — but the error module's claim to be the type
 "every libthyla-rs module reports through" has an exception that does not know
 it is one.
+
+The Loom ring's `register_handles` / `register_buffers` used to be a third
+exception, answering `InvalidArgument` for every failure; since 2026-10-07
+`SYS_LOOM_REGISTER` returns a negative errno and both go through the decoder,
+so a failed write-behind flush arrives as its own kind (`Io`, `Other(28)` for
+ENOSPC, `Other(4)` for a retryable EINTR) and an unopened fd as `BadHandle`.
 
 The one to watch: the formatting macros — the crate's `print!` family — swallow
 write errors by design, so a program whose output is optional does not fail

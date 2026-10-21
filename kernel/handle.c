@@ -120,8 +120,11 @@ struct HandleTable *handle_table_alloc(void) {
 // R5-F F54 close: explicit `default:` extincts on out-of-enum kind to
 // catch memory corruption (the static_assert defends at compile time;
 // the default arm defends at runtime).
-static void handle_release_obj(enum kobj_kind kind, void *obj) {
-    if (!obj) return;
+//
+// Returns what a Spoor's last close reported (spoor_clunk_rc); 0 for every
+// other kind.
+static int handle_release_obj(enum kobj_kind kind, void *obj) {
+    if (!obj) return 0;
     switch (kind) {
     case KOBJ_BURROW:
         burrow_unref((struct Burrow *)obj);
@@ -153,8 +156,7 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // then unrefs the Spoor; ref hits 0 → underlying Spoor freed.
         // Closing one end of a pipe through the handle table now
         // exercises the full lifecycle end-to-end.
-        spoor_clunk((struct Spoor *)obj);
-        break;
+        return spoor_clunk_rc((struct Spoor *)obj);
     case KOBJ_SRV: {
         // A KObj_Srv handle's obj is discriminated by the magic word at
         // offset 0. Post-stalk-3c a KObj_Srv handle is ONLY a service
@@ -222,6 +224,7 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
     }
+    return 0;
 }
 
 // Per-kind acquire of the underlying kernel object reference. Called
@@ -303,9 +306,9 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
 // not only at the last reference. Borrow returns and rolled-back dup acquires
 // deliberately keep the plain release -- no handle ceases to exist on those, and
 // latching there would mark a live ring closing on every borrow.
-static void handle_release_owner(enum kobj_kind kind, void *obj) {
+static int handle_release_owner(enum kobj_kind kind, void *obj) {
     if (kind == KOBJ_LOOM && obj) loom_handle_closed((struct Loom *)obj);
-    handle_release_obj(kind, obj);
+    return handle_release_obj(kind, obj);
 }
 
 void handle_private_exec_latch(struct Proc *p) {
@@ -586,12 +589,14 @@ void handle_unreserve(struct Proc *p, hidx_t h) {
     spin_unlock(&t->lock);
 }
 
-// handle_close, and handle_close_obj when `obj` is non-NULL: the slot is vacated
-// only while it still names (kind, obj), decided in the same hold as the vacate.
+// handle_close, handle_close_report and handle_close_obj: the slot is vacated
+// only while it still names (kind, obj) when `obj` is non-NULL, decided in the
+// same hold as the vacate; *close_rc is what the object's last close reported.
 static int handle_close_matching(struct Proc *p, hidx_t h, enum kobj_kind kind,
-                                 const void *obj) {
+                                 const void *obj, int *close_rc) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
+    *close_rc = 0;
     if (h < 0 || h >= PROC_HANDLE_MAX)  return -1;
 
     // #844: capture + zero the slot UNDER the table lock; run the per-kind
@@ -621,17 +626,23 @@ static int handle_close_matching(struct Proc *p, hidx_t h, enum kobj_kind kind,
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
-    handle_release_owner(gone_kind, gone_obj);
+    *close_rc = handle_release_owner(gone_kind, gone_obj);
     return 0;
 }
 
+int handle_close_report(struct Proc *p, hidx_t h, int *close_rc) {
+    return handle_close_matching(p, h, KOBJ_INVALID, NULL, close_rc);
+}
+
 int handle_close(struct Proc *p, hidx_t h) {
-    return handle_close_matching(p, h, KOBJ_INVALID, NULL);
+    int close_rc;
+    return handle_close_matching(p, h, KOBJ_INVALID, NULL, &close_rc);
 }
 
 int handle_close_obj(struct Proc *p, hidx_t h, enum kobj_kind kind, const void *obj) {
     if (!obj) return -1;
-    return handle_close_matching(p, h, kind, obj);
+    int close_rc;
+    return handle_close_matching(p, h, kind, obj, &close_rc);
 }
 
 // VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in

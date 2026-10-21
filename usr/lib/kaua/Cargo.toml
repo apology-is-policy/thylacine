@@ -27,10 +27,13 @@ name = "kaua"
 path = "src/lib.rs"
 
 [features]
-# `backend` compiles kaua::term (the fd-0/1 Terminal), which needs libthyla-rs.
-# On by default for the device build; host tests drop it.
+# `source` compiles kaua::source (the fd-0 input: PollSource), which needs
+# libthyla-rs. `backend` adds kaua::term (the fd-1 alt-screen Terminal) and the
+# size probe. On by default for the device build; host tests drop both. A
+# program that must never own the alt screen (lantern) takes `source` alone.
 default = ["backend"]
-backend = ["dep:libthyla-rs"]
+source = ["dep:libthyla-rs"]
+backend = ["source"]
 
 [dependencies]
 libthyla-rs = { path = "../libthyla-rs", optional = true }

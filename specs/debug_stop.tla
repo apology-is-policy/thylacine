@@ -109,31 +109,32 @@
 (*       stopped Thread the ones after its stop (NoEretIntoDeath). Found by  *)
 (*       the clean held cfg, 2026-09-29; the impl re-checks after the wake   *)
 (*       condition, where the release/acquire pairing makes gflag visible.  *)
-(* A LATCHED INTERRUPT at the birth park (LS-5c; audit round 1, F1). With   *)
-(* HELD an interrupt-terminate may be posted to the child anywhere on its   *)
-(* birth path (PostInterrupt; the ghost `latch`), and its wake reaches the  *)
-(* birth-parked Thread (source "intr"). The park's latch leg -- the wake    *)
-(* condition false, the latch set -- ENDS the child (birth_park_terminate:  *)
-(* the default disposition: the latch is armed only when nothing catches    *)
-(* the note, and the child cannot install a handler before it runs). The    *)
-(* ghost is a latch the park sees: the impl acts on one only in a family    *)
-(* the thread has not masked, and a held child's thread masks nothing (a    *)
-(* native parent's child starts with an empty mask, and no Linux call       *)
-(* reaches the held spawn). Two knobs:                                      *)
-(*   BUGGY_BIRTH_LATCH_ERETS    -- the leg returns to the tail, which erets *)
-(*       as the ordinary stop park's leg does: a held child runs            *)
-(*       (NoEL0WhileHeld).                                                   *)
-(*   BUGGY_BIRTH_LATCH_RERUN    -- the leg re-runs the checkpoint in place  *)
-(*       ("brerun": die-check, note delivery, the park). Delivery consumes  *)
-(*       the latch only on a stack pointer it trusts; one a debugger wrote  *)
-(*       during a stop is declined, and the masked re-run never ends        *)
-(*       (LatchedHeldChildEnds). The first draft of the design did this.    *)
-(* The TAIL's latch leg (a stopped Thread leaves its park to deliver) is    *)
-(* outside the model: how it should compose with a debug or job stop is an  *)
-(* open design question (OPEN-BUGS, 2026-09-29).                            *)
+(* A LATCHED INTERRUPT (LS-5c; DEBUG-FS-DESIGN 5g). An interrupt-terminate  *)
+(* may be latched on the target at any time (PostInterrupt; the ghost       *)
+(* `latch`), and its wake (source "intr") reaches a Thread in either park.  *)
+(* Every park sleeps death-only, so the wake is absorbed: the sleep         *)
+(* re-checks the park's condition and sleeps again, and a parked Thread     *)
+(* keeps its stop or hold until that clears or its group dies. A Thread     *)
+(* that runs again meets the note at a checkpoint outside the model (the    *)
+(* tail's note delivery is not modelled). The ghost is a latch the parks    *)
+(* see: the impl acts on one only in a family the thread has not masked.    *)
+(* The held spawn's birth wait is death-only too: a latch on the spawner    *)
+(* (`slatch`) does not end it. Four knobs, each a latch exit a wait had:    *)
+(*   BUGGY_TAIL_LATCH_ERETS      -- the tail park leaves on the latch and   *)
+(*       the tail erets, as before 5g: a stopped Thread runs while the      *)
+(*       debugger still holds its confirmation (NoLostStop,                 *)
+(*       NoEL0AfterStopped).                                                *)
+(*   BUGGY_BIRTH_LATCH_ERETS     -- the birth park leaves the same way: a   *)
+(*       held child runs (NoEL0WhileHeld; audit round 1, F1).               *)
+(*   BUGGY_LATCH_ENDS_STOP       -- a park ends its Thread on the latch, as *)
+(*       the birth park did from 5f until 5g (ParkEndsOnlyInDeath).         *)
+(*   BUGGY_SPAWNER_LATCH_RETURNS -- the birth wait returns on the           *)
+(*       spawner's latch, as await_child_release did before 5g: the spawn   *)
+(*       returns while its child is still loading (SpawnReturnsAfterBirth). *)
 (* With HELD = FALSE every birth variable is constant and every birth       *)
-(* action disabled. Adding BUGGY_NO_DEATH_RECHECK gives the pre-5f model,   *)
-(* state for state; without it the tail park also re-checks death.          *)
+(* action disabled; the latch is not a birth variable. Adding               *)
+(* BUGGY_NO_DEATH_RECHECK gives the pre-5f model, the latch aside; without  *)
+(* it the tail park also re-checks death.                                   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -152,8 +153,10 @@ CONSTANTS
     BUGGY_ORPHAN_HOLD_STRANDS,      \* TRUE = no orphan rule for a hold whose spawner died
     BUGGY_BIRTH_WAIT_UNWOKEN,       \* TRUE = clearing the hold does not wake the spawner's birth wait
     BUGGY_NO_DEATH_RECHECK,         \* TRUE = the park erets on its wake condition without re-checking death
-    BUGGY_BIRTH_LATCH_ERETS,        \* TRUE = the birth park's latch leg erets, as the tail's does
-    BUGGY_BIRTH_LATCH_RERUN         \* TRUE = the birth park's latch leg re-runs the checkpoint in place
+    BUGGY_BIRTH_LATCH_ERETS,        \* TRUE = the birth park leaves on the latch and erets
+    BUGGY_TAIL_LATCH_ERETS,         \* TRUE = the tail park leaves on the latch and erets
+    BUGGY_LATCH_ENDS_STOP,          \* TRUE = a park ends its Thread on the latch
+    BUGGY_SPAWNER_LATCH_RETURNS     \* TRUE = the birth wait returns on the spawner's latch
 
 ASSUME Cardinality(Threads) >= 1
 \* A held child has executed nothing, so it has made no Threads: only its head.
@@ -163,8 +166,7 @@ ASSUME HELD => Cardinality(Threads) = 1
 \*   "start"   -- the debugger's `start` verb (resume_req)
 \*   "release" -- detach / ctl-fd close / debugger death (release_req)
 \*   "death"   -- the group-terminate cascade (gflag)
-\*   "intr"    -- a latched interrupt's wake (latch); modelled for the birth
-\*                park only, since the tail's latch leg is outside the model
+\*   "intr"    -- a latched interrupt's wake (latch), which a park absorbs
 Sources == {"start", "release", "death", "intr"}
 
 \* Thread program counters:
@@ -187,9 +189,7 @@ Sources == {"start", "release", "death", "intr"}
 \*   "bacq"     -- about to acquire wait_lock for the birth handshake
 \*   "breg"     -- holds wait_lock: register + observe the hold and the stop
 \*   "bstopped" -- parked at the birth park (registered/findable, confirmable)
-\*   "brerun"   -- (BUGGY_BIRTH_LATCH_RERUN) back in the birth tail's checkpoint
-\*                 after the park left on a latch: die-check, note delivery
-BirthPCs == {"unborn", "btail", "bloop", "bacq", "breg", "bstopped", "brerun"}
+BirthPCs == {"unborn", "btail", "bloop", "bacq", "breg", "bstopped"}
 PCs == {"el0", "tail", "acq", "reg", "obs_run", "obs_stop", "stopped", "dead", "sleep"}
        \cup BirthPCs
 
@@ -220,13 +220,16 @@ VARIABLES
     cstep,        \* the conversion's second store, still to come
     licensed,     \* ghost: the child may run -- its hold was released, or its
                   \* converted stop resumed (TRUE from the start when ~HELD)
-    latch         \* an interrupt-terminate is latched on the held child (LS-5c)
+    latch,        \* an interrupt-terminate is latched on the target (LS-5c)
+    slatch        \* one is latched on the held spawn's spawner, inside its wait
 
-bvars == <<hold, spc, swake, cstep, licensed, latch>>
+\* The variables the tail's own actions never write: the birth hold's, and the
+\* two latches.
+bvars == <<hold, spc, swake, cstep, licensed, latch, slatch>>
 
 vars == <<pc, gflag, sflag, attached, dbg_live, detach_req,
           resume_req, release_req, exitkill, wlock, confirmed, fired,
-          hold, spc, swake, cstep, licensed, latch>>
+          hold, spc, swake, cstep, licensed, latch, slatch>>
 
 WokenOf(t) == \E s \in Sources : fired[t][s]
 Active(s)  == \/ (s = "start"   /\ resume_req)
@@ -244,6 +247,19 @@ HandshakeEntry(t) ==
 
 \* A Thread parked on its own debug rendez: at the tail, or at the birth park.
 Parked(t) == pc[t] \in {"stopped", "bstopped"}
+
+\* Only the latch's wake fired: the one wake that clears neither a stop nor a
+\* hold, so a park absorbs it (5g).
+IntrOnly(t) == fired[t]["intr"] /\ \A s \in Sources \ {"intr"} : ~fired[t][s]
+
+\* Where a park sends a Thread that meets a latched interrupt with its wake
+\* condition false and no death published: nowhere -- it stays parked (5g).
+\* The pre-5g exits: `erets` (the park's own knob) returns to EL0, and
+\* BUGGY_LATCH_ENDS_STOP ends the Thread.
+LatchExit(t, erets, parked) ==
+    IF erets THEN [pc EXCEPT ![t] = "el0"]
+    ELSE IF BUGGY_LATCH_ENDS_STOP THEN [pc EXCEPT ![t] = "dead"]
+    ELSE [pc EXCEPT ![t] = parked]
 
 ChildAlive == \E t \in Threads : pc[t] # "dead"
 
@@ -293,6 +309,7 @@ TypeOk ==
     /\ cstep \in CSteps
     /\ licensed \in BOOLEAN
     /\ latch \in BOOLEAN
+    /\ slatch \in BOOLEAN
 
 Init ==
     /\ pc = [t \in Threads |-> IF HELD THEN "unborn" ELSE "tail"]
@@ -313,6 +330,7 @@ Init ==
     /\ cstep = "idle"
     /\ licensed = ~HELD
     /\ latch = FALSE
+    /\ slatch = FALSE
 
 (***************************************************************************)
 (* ============================ THREAD ACTIONS =========================== *)
@@ -333,7 +351,7 @@ TailStep(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, spc, cstep, licensed, latch>>
+                   hold, spc, cstep, licensed, latch, slatch>>
 
 (* CORRECT: acquire the wait_lock (free -- the debugger's confirm-walk isn't  *)
 (* mid-access on t) before touching registration/observation.               *)
@@ -350,13 +368,16 @@ Acquire(t) ==
 (* (would be confirmable) and re-checks sflag atomically. Park if still set,  *)
 (* else proceed to EL0 -- unless death was published since the tail's die-  *)
 (* check (the EXITKILL release terminates, THEN clears the stop this reads). *)
-(* Release the lock.                                                         *)
+(* Release the lock. The latch changes nothing here but in a pre-5g exit     *)
+(* (LatchExit).                                                              *)
 RegisterObserve(t) ==
     /\ pc[t] = "reg"
     /\ wlock[t]
     /\ wlock' = [wlock EXCEPT ![t] = FALSE]
     /\ LET np == IF sflag
-                    THEN [pc EXCEPT ![t] = "stopped"]
+                    THEN IF latch /\ ~gflag
+                           THEN LatchExit(t, BUGGY_TAIL_LATCH_ERETS, "stopped")
+                           ELSE [pc EXCEPT ![t] = "stopped"]
                     ELSE IF gflag /\ ~BUGGY_NO_DEATH_RECHECK
                            THEN [pc EXCEPT ![t] = "dead"]
                            ELSE [pc EXCEPT ![t] = "el0"]
@@ -364,7 +385,7 @@ RegisterObserve(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch>>
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
 
 (* BUGGY: the register happens AFTER the out-of-lock observe. A Thread that   *)
 (* observed sflag=FALSE proceeds to EL0 even if the debugger has since set    *)
@@ -394,15 +415,26 @@ ReEnterTail(t) ==
 (* A woken parked Thread leaves "stopped" back to the tail, where it re-runs  *)
 (* the die-check (death wins on resume). The wake(s) are consumed; the        *)
 (* debugger's confirmation of t is dropped.                                  *)
+(* The latch's wake alone, with the stop standing and no death published, is *)
+(* absorbed (5g): the death-only sleep re-checks and sleeps again, and t     *)
+(* stays parked and confirmed. A pre-5g exit leaves on it (LatchExit), the   *)
+(* debugger still holding t's confirmation unless t died.                    *)
 ResumeThread(t) ==
     /\ pc[t] = "stopped"
     /\ WokenOf(t)
-    /\ pc' = [pc EXCEPT ![t] = "tail"]
-    /\ confirmed' = confirmed \ {t}
+    /\ LET absorbed == IntrOnly(t) /\ sflag /\ ~gflag
+           np == IF absorbed
+                   THEN LatchExit(t, BUGGY_TAIL_LATCH_ERETS, "stopped")
+                   ELSE [pc EXCEPT ![t] = "tail"]
+       IN /\ pc' = np
+          /\ confirmed' = IF absorbed /\ np[t] # "dead"
+                            THEN confirmed
+                            ELSE confirmed \ {t}
+          /\ SpawnerDeathWake(np)
     /\ fired' = [fired EXCEPT ![t] = [s \in Sources |-> FALSE]]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock>>
-    /\ UNCHANGED bvars
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
 
 (* A Thread running at EL0 makes a blocking syscall and SLEEPS (off-cpu on some *)
 (* non-debug rendez -- a futex/torpor wait, a pipe/poll/read block). Enabled    *)
@@ -482,7 +514,7 @@ RequestStop ==
                      /\ UNCHANGED <<hold, swake>>
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   spc, licensed, latch>>
+                   spc, licensed, latch, slatch>>
 
 (* The conversion's second store, still inside the stop's lock section.    *)
 ConvertFinish ==
@@ -496,7 +528,7 @@ ConvertFinish ==
     /\ cstep' = "idle"
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   spc, licensed, latch>>
+                   spc, licensed, latch, slatch>>
 
 (* The EC-path hardware fire (a bp / wp hit or a single-step completion) also  *)
 (* requests the whole-Proc stop. Unlike the discretionary `stop` verb this is  *)
@@ -553,7 +585,7 @@ StartResume ==
     /\ licensed' = TRUE
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
                    release_req, exitkill, wlock, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, swake, cstep, latch>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, latch, slatch>>
 
 (* The `start` verb on a held target no stop has converted: RELEASE the hold *)
 (* (cleared before the resume's wake, so the woken park observes it gone).  *)
@@ -569,7 +601,7 @@ StartRelease ==
     /\ licensed' = TRUE
     /\ SpawnerWakeOnClear
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
-                   release_req, exitkill, wlock, confirmed, fired, spc, cstep, latch>>
+                   release_req, exitkill, wlock, confirmed, fired, spc, cstep, latch, slatch>>
 
 (* An explicit `detach` request.                                            *)
 DetachReq ==
@@ -651,7 +683,7 @@ ReleaseSlot ==
                      /\ IF hold' # hold THEN SpawnerWakeOnClear ELSE UNCHANGED swake
                      /\ UNCHANGED gflag
     /\ UNCHANGED <<pc, dbg_live, detach_req, resume_req, exitkill, wlock, fired,
-                   spc, cstep, latch>>
+                   spc, cstep, latch, slatch>>
 
 (***************************************************************************)
 (* ============================= DEATH PATH ============================== *)
@@ -678,13 +710,12 @@ SetGflag ==
 (* A wake of a birth-parked Thread whose hold still stands is dropped: the   *)
 (* park re-checks the hold and re-parks at once, the same state (the impl's *)
 (* implicit-release wake does exactly this).                                *)
-(* A latched interrupt's wake is never dropped there: the park leaves on the *)
-(* latch whether or not the hold stands. It is modelled for the birth park   *)
-(* only (the tail's latch leg is outside the model).                         *)
+(* A latched interrupt's wake is not dropped there, and it reaches the tail  *)
+(* park too: the waker wakes whatever rendez a Thread sleeps on. Either park *)
+(* absorbs it (ResumeThread, BirthResume).                                   *)
 WakeFrom(t, s) ==
     /\ Parked(t)
     /\ (pc[t] = "bstopped" => (s \in {"death", "intr"} \/ hold = "none"))
-    /\ (s = "intr" => pc[t] = "bstopped")
     /\ ~wlock[t]
     /\ Active(s)
     /\ ~fired[t][s]
@@ -719,7 +750,7 @@ BirthMark(t) ==
     /\ pc' = [pc EXCEPT ![t] = "bloop"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   spc, cstep, licensed, latch>>
+                   spc, cstep, licensed, latch, slatch>>
 
 (* The park loop's top: death wins, on every pass.                           *)
 BirthLoop(t) ==
@@ -730,7 +761,7 @@ BirthLoop(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, spc, cstep, licensed, latch>>
+                   hold, spc, cstep, licensed, latch, slatch>>
 
 BirthAcquire(t) ==
     /\ pc[t] = "bacq"
@@ -746,24 +777,15 @@ BirthAcquire(t) ==
 (* and then only if death has not been published since the loop's check (a  *)
 (* release that follows a terminate publishes it to whoever reads the        *)
 (* release -- one step here, like the hold-then-stop read).                  *)
-(* The latch leg: the wake condition false with an interrupt latched. The   *)
-(* leg re-reads death first (thread_die_pending also reports it), then ends *)
-(* the child (birth_park_terminate). BUGGY_BIRTH_LATCH_ERETS erets instead, *)
-(* as the tail's leg does; BUGGY_BIRTH_LATCH_RERUN re-runs the checkpoint.  *)
+(* The latch changes nothing here but in a pre-5g exit (LatchExit).         *)
 BirthRegisterObserve(t) ==
     /\ pc[t] = "breg"
     /\ wlock[t]
     /\ wlock' = [wlock EXCEPT ![t] = FALSE]
     /\ LET np == IF ~BirthWakeCond
-                    THEN IF ~latch
-                           THEN [pc EXCEPT ![t] = "bstopped"]
-                           ELSE IF gflag
-                             THEN [pc EXCEPT ![t] = "dead"]
-                             ELSE IF BUGGY_BIRTH_LATCH_ERETS
-                               THEN [pc EXCEPT ![t] = "el0"]
-                               ELSE IF BUGGY_BIRTH_LATCH_RERUN
-                                 THEN [pc EXCEPT ![t] = "brerun"]
-                                 ELSE [pc EXCEPT ![t] = "dead"]
+                    THEN IF latch /\ ~gflag
+                           THEN LatchExit(t, BUGGY_BIRTH_LATCH_ERETS, "bstopped")
+                           ELSE [pc EXCEPT ![t] = "bstopped"]
                     ELSE IF gflag /\ ~BUGGY_NO_DEATH_RECHECK
                            THEN [pc EXCEPT ![t] = "dead"]
                            ELSE [pc EXCEPT ![t] = "el0"]
@@ -771,50 +793,41 @@ BirthRegisterObserve(t) ==
           /\ SpawnerDeathWake(np)
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch>>
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
 
 (* A woken birth park goes back to its loop top, never to the ordinary tail: *)
-(* the thread has no instruction to return to yet.                          *)
+(* the thread has no instruction to return to yet. The latch's wake alone,   *)
+(* with the park's condition false and no death published, is absorbed, as   *)
+(* at the tail.                                                              *)
 BirthResume(t) ==
     /\ pc[t] = "bstopped"
     /\ WokenOf(t)
-    /\ pc' = [pc EXCEPT ![t] = "bloop"]
-    /\ confirmed' = confirmed \ {t}
+    /\ LET absorbed == IntrOnly(t) /\ ~BirthWakeCond /\ ~gflag
+           np == IF absorbed
+                   THEN LatchExit(t, BUGGY_BIRTH_LATCH_ERETS, "bstopped")
+                   ELSE [pc EXCEPT ![t] = "bloop"]
+       IN /\ pc' = np
+          /\ confirmed' = IF absorbed /\ np[t] # "dead"
+                            THEN confirmed
+                            ELSE confirmed \ {t}
+          /\ SpawnerDeathWake(np)
     /\ fired' = [fired EXCEPT ![t] = [s \in Sources |-> FALSE]]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock>>
-    /\ UNCHANGED bvars
+    /\ UNCHANGED <<hold, spc, cstep, licensed, latch, slatch>>
 
-(* BUGGY_BIRTH_LATCH_RERUN: back through the birth tail's checkpoint. The    *)
-(* die-check kills on a published termination. Note delivery then consumes  *)
-(* the latch (the default terminate ends the child) or declines the frame,  *)
-(* and the Thread parks again with the latch still set. Delivery declines   *)
-(* only a stack pointer it does not trust. The loader's is trusted, so only *)
-(* a debugger can have written a bad one, and only through a stop (sflag).  *)
-BirthRerun(t) ==
-    /\ pc[t] = "brerun"
-    /\ \E np \in {[pc EXCEPT ![t] = "dead"], [pc EXCEPT ![t] = "bloop"]} :
-          /\ (np[t] = "bloop" => (~gflag /\ sflag))
-          /\ pc' = np
-          /\ SpawnerDeathWake(np)
-    /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, cstep, licensed, latch>>
-
-(* An interrupt-terminate is posted to the held child and latched (LS-5c:   *)
-(* armed on the note's commit: nothing in a child that has not run catches  *)
-(* it). The post wakes a birth-parked Thread (WakeFrom "intr"). It runs     *)
+(* An interrupt-terminate is posted to the target and latched (LS-5c: armed *)
+(* on the note's commit when nothing in the target catches it; the ghost is *)
+(* that case). Its wake reaches a parked Thread (WakeFrom "intr"). It runs  *)
 (* under the note queue's lock, not g_proc_table_lock, so it can fall       *)
-(* inside a conversion. Discretionary: nothing forces an interrupt to       *)
-(* arrive.                                                                  *)
+(* inside a conversion. Discretionary: nothing forces one to arrive.        *)
 PostInterrupt ==
-    /\ HELD
     /\ ~latch
-    /\ \E t \in Threads : pc[t] \in BirthPCs
+    /\ \E t \in Threads : pc[t] # "dead"
     /\ latch' = TRUE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired>>
-    /\ UNCHANGED <<hold, spc, swake, cstep, licensed>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, licensed, slatch>>
 
 (***************************************************************************)
 (* =========================== THE SPAWNER ============================== *)
@@ -830,7 +843,7 @@ SpawnerScan ==
     /\ swake' = FALSE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch>>
+                   hold, cstep, licensed, latch, slatch>>
 
 SpawnerWakeUp ==
     /\ spc = "asleep"
@@ -839,7 +852,7 @@ SpawnerWakeUp ==
     /\ swake' = FALSE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch>>
+                   hold, cstep, licensed, latch, slatch>>
 
 (* The spawner exits -- after its spawn returned, or killed inside it. At its *)
 (* ZOMBIE transition the orphan rule terminates a child whose hold is still  *)
@@ -855,7 +868,34 @@ SpawnerDie ==
          ELSE UNCHANGED gflag
     /\ UNCHANGED <<pc, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, exitkill, wlock, confirmed, fired,
-                   hold, cstep, licensed, latch>>
+                   hold, cstep, licensed, latch, slatch>>
+
+(* An interrupt-terminate latched on the SPAWNER inside its birth wait (the   *)
+(* ghost `slatch`). The wait sleeps death-only (5g), so the latch's wake is   *)
+(* absorbed -- a re-scan with nothing changed, so it is not modelled -- and   *)
+(* the wait ends only on a release of the child, or in the spawner's death    *)
+(* (SpawnerDie). Discretionary.                                               *)
+PostSpawnerInterrupt ==
+    /\ HELD
+    /\ ~slatch
+    /\ spc \in {"scan", "asleep"}
+    /\ slatch' = TRUE
+    /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
+    /\ UNCHANGED <<hold, spc, swake, cstep, latch, licensed>>
+
+(* BUGGY_SPAWNER_LATCH_RETURNS: the latch's wake ends the wait, and the       *)
+(* spawn returns with its child unreleased -- await_child_release's break     *)
+(* on any SLEEP_INTR before 5g, which a plain sleep returned on the latch.    *)
+SpawnerLatchReturn ==
+    /\ BUGGY_SPAWNER_LATCH_RETURNS
+    /\ spc = "asleep"
+    /\ slatch
+    /\ spc' = "returned"
+    /\ swake' = FALSE
+    /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
+                   resume_req, release_req, exitkill, wlock, confirmed, fired,
+                   hold, cstep, licensed, latch, slatch>>
 
 Next ==
     \/ \E t \in Threads : TailStep(t)
@@ -885,11 +925,12 @@ Next ==
     \/ \E t \in Threads : BirthAcquire(t)
     \/ \E t \in Threads : BirthRegisterObserve(t)
     \/ \E t \in Threads : BirthResume(t)
-    \/ \E t \in Threads : BirthRerun(t)
     \/ PostInterrupt
     \/ SpawnerScan
     \/ SpawnerWakeUp
     \/ SpawnerDie
+    \/ PostSpawnerInterrupt
+    \/ SpawnerLatchReturn
 
 (* Weak fairness on the mechanical progress actions (the Threads' handshake,  *)
 (* re-entry, resume, and every wake / slot release). The debugger's           *)
@@ -915,9 +956,9 @@ Fairness ==
     /\ \A t \in Threads : WF_vars(BirthAcquire(t))
     /\ \A t \in Threads : WF_vars(BirthRegisterObserve(t))
     /\ \A t \in Threads : WF_vars(BirthResume(t))
-    /\ \A t \in Threads : WF_vars(BirthRerun(t))
     /\ WF_vars(SpawnerScan)
     /\ WF_vars(SpawnerWakeUp)
+    /\ WF_vars(SpawnerLatchReturn)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
@@ -930,6 +971,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* confirm sound (a confirmed Thread observed sflag under the lock and        *)
 (* parked); the observe-before-register bug lets the debugger confirm a       *)
 (* Thread that then runs at EL0 -- so it inspects a running target.           *)
+(* A latched interrupt changes nothing: a park absorbs its wake (5g), and     *)
+(* BUGGY_TAIL_LATCH_ERETS, which leaves on it, is caught here.                *)
 NoLostStop ==
     \A t \in Threads : (t \in confirmed) => Parked(t)
 
@@ -974,6 +1017,21 @@ NoEL0WhileHeld ==
 NoEretIntoDeath ==
     [][\A t \in Threads : (pc[t] \in {"reg", "breg"} /\ pc'[t] = "el0") => ~gflag]_vars
 
+(* ParkEndsOnlyInDeath (5g): a Thread leaves a park for "dead" only once a     *)
+(* group termination is published -- a latched interrupt ends no parked        *)
+(* Thread. The model has no note delivery, so a death without gflag can only   *)
+(* be a park's latch exit, and the property is stated for every step.          *)
+(* BUGGY_LATCH_ENDS_STOP breaks it.                                            *)
+ParkEndsOnlyInDeath ==
+    [][\A t \in Threads : (pc[t] # "dead" /\ pc'[t] = "dead") => gflag]_vars
+
+(* SpawnReturnsAfterBirth (5g): a held spawn returns only once its child is    *)
+(* released -- parked, or its hold released or converted -- or dead. A latch   *)
+(* on the spawner does not end the wait, which sleeps death-only.              *)
+(* BUGGY_SPAWNER_LATCH_RETURNS returns on the latch's wake. Vacuous when       *)
+(* ~HELD: there the spawn has returned and there is no hold.                   *)
+SpawnReturnsAfterBirth == spc = "returned" => Released
+
 Safety ==
     /\ TypeOk
     /\ NoLostStop
@@ -981,6 +1039,7 @@ Safety ==
     /\ ExactlyOnceResume
     /\ StopImpliesOwned
     /\ NoEL0WhileHeld
+    /\ SpawnReturnsAfterBirth
 
 (* DeathWinsOverStop (liveness): once a group termination is published, every *)
 (* Thread eventually dies -- even against a live debugger holding a stop.     *)
@@ -1045,15 +1104,6 @@ EventuallyHoldResolved ==
 (* a release that landed before the park.                                   *)
 BirthWaitReleases ==
     (spc \in {"scan", "asleep"}) ~> (spc \in {"returned", "dead"})
-
-(* LatchedHeldChildEnds (liveness -- audit round 1, F1): a held child with an *)
-(* interrupt latched eventually ends, unless it is licensed first (a        *)
-(* licensed child meets the latch at a later checkpoint, outside the        *)
-(* model). The park's latch leg ends it. BUGGY_BIRTH_LATCH_RERUN leaves it  *)
-(* going round the re-run checkpoint while delivery declines a frame whose  *)
-(* stack pointer the debugger wrote -- in the impl, a CPU spinning masked.  *)
-LatchedHeldChildEnds ==
-    (latch /\ ~licensed) ~> (~ChildAlive \/ licensed)
 
 (* A released hold is never set again.                                       *)
 HoldMonotone == [][hold = "none" => hold' = "none"]_hold

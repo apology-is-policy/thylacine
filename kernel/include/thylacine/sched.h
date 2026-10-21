@@ -89,6 +89,16 @@ void sched_install_asid_ttbr0(struct Thread *next);
 // tear the OUTGOING address space down.
 void sched_activate_addrspace(struct Thread *t);
 
+// B-2e2, SYS_ICACHE_SYNC_SPACE (JIT-ON-WX-DESIGN B-2 item 4): interrupt every
+// other CPU whose last-installed address space is `as`, and return once each
+// has acknowledged an interrupt taken after the call began. No timeout; the
+// wait yields. Returns the mask of CPUs interrupted. Thread context, IRQs on.
+struct AddrSpace;
+u64 sched_sync_space(const struct AddrSpace *as);
+// The address space `cpu` last installed at a switch (NULL: a kernel thread,
+// or the CPU never switched). A snapshot, for tests and diagnostics.
+const struct AddrSpace *sched_cpu_space(unsigned cpu);
+
 // Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
 // installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main
 // idle). NULL if sched_init has not yet been called for cpu_idx, or
@@ -184,6 +194,12 @@ void sched_idle_park(bool tickless);
 // IPIs explicitly). When on, every ready/wakeup that places work wakes
 // an idle peer, closing R5-H F78 in the production path.
 void sched_set_notify_enabled(bool enabled);
+
+// ARCH 8.8.3 (#964): IPI_RESCHED to the CPU `t` runs on, if that is another
+// CPU, so a thread at EL0 enters its EL0-return tail and meets a note posted
+// for it (Linux's kick_process). Unlocked reads; the tick bounds a miss. Gated
+// by the notify toggle above, so the in-kernel tests send nothing.
+void sched_kick_thread(struct Thread *t);
 
 // Yield the CPU.
 //

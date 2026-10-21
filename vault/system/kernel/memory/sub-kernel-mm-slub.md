@@ -9,7 +9,7 @@ guarded-by: []
 validated-by: [gate-smp]
 locks: [lock-kmem-cache, lock-cache-list, lock-buddy-zone]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -66,6 +66,10 @@ static BSS.
 `struct kmem_cache`: sizes, `slab_order` (0 at v1.0 — single-page
 slabs only), `objects_per_slab`, partial + full sentinel lists with
 counts, cumulative alloc/free/slab counters, `c->lock`, `next_cache`.
+`objects_per_slab` is compared against the slab page's `u32` in-use
+`refcount`; `init_cache` narrows `(PAGE_SIZE << slab_order) / actual` into it
+explicitly, under a `_Static_assert` that a slab of any buddy order
+(`MAX_ORDER`) holds fewer than 2^32 objects ([[chg-2026-10-07-narrowing-error]]).
 The slab page's `struct page` carries `PG_SLAB` + `slab_cache`
 backref + `slab_freelist` + `refcount`-as-inuse. Free objects thread
 the freelist through their own first 8 bytes (`SLUB_MIN_OBJECT_SIZE`

@@ -43,6 +43,15 @@
 (*   - Sleep is never gated: a second (third, ...) sleeper on a side is a  *)
 (*     legal state. (The old model disabled it, mirroring the extinction.) *)
 (*                                                                         *)
+(*   - The write end can hang up without closing (P3b; ARCH 21.10, "A      *)
+(*     death hangs up": a dead 9P session hangs up its tx pipe). writeOpen *)
+(*     tracks whether the write end is still held. HangupWrite sets        *)
+(*     writeEof with the end still held, so writers can still reach it:    *)
+(*     every write after it is refused (EOF is final -- no byte follows    *)
+(*     it), and its one wake must reach blocked writers as well as         *)
+(*     readers. CloseWrite needs no blocked writer -- in the impl the      *)
+(*     close runs at the last ref drop, and a blocked writer holds a ref.  *)
+(*                                                                         *)
 (* Buggy-config matrix (one buggy flag per cfg; executable documentation): *)
 (*                                                                         *)
 (*   pipe.cfg                                  all flags FALSE — TLC       *)
@@ -66,6 +75,13 @@
 (*     chosen reader instead of all. With three threads (two readers      *)
 (*     asleep), the other stays in WAITING_READ while ringCount > 0.       *)
 (*                                                                         *)
+(*   pipe_buggy_hangup_no_wake_writer.cfg      HangupWrite wakes readers   *)
+(*     only, as a close does. A writer asleep on the full ring stays in    *)
+(*     WAITING_WRITE while writeEof makes CanWrite hold (NoStuckWriter).   *)
+(*                                                                         *)
+(*   pipe_buggy_hangup_takes_bytes.cfg         a hung-up write end still   *)
+(*     takes bytes: an append after writeEof (NoByteAfterEof).             *)
+(*                                                                         *)
 (*   pipe_multi.cfg                            all flags FALSE, THREE      *)
 (*     threads -- two can wait on one side; TLC proves NoStuck* under      *)
 (*     wake-all with re-sleeping.                                          *)
@@ -82,6 +98,8 @@
 (*                    side: if the condition the reader is waiting on is  *)
 (*                    satisfied, the reader is no longer waiting.          *)
 (*   NoStuckWriter  — symmetric.                                           *)
+(*   NoByteAfterEof — (an action PROPERTY) once writeEof holds, the ring   *)
+(*                    never grows: no byte follows EOF.                    *)
 (*                                                                         *)
 (* See ARCHITECTURE.md §10 (IPC) + §28 invariant I-9.                      *)
 (***************************************************************************)
@@ -94,7 +112,9 @@ CONSTANTS
     BUGGY_READ_NO_WAKE_WRITER,
     BUGGY_CLOSE_WRITE_NO_WAKE_READER,
     BUGGY_CLOSE_READ_NO_WAKE_WRITER,
-    BUGGY_WAKE_ONE_READER
+    BUGGY_WAKE_ONE_READER,
+    BUGGY_HANGUP_NO_WAKE_WRITER,
+    BUGGY_HANGUP_TAKES_BYTES
 
 ASSUME Cardinality(Threads) >= 1
 ASSUME CAP \in Nat /\ CAP > 0
@@ -103,14 +123,17 @@ ASSUME BUGGY_READ_NO_WAKE_WRITER \in BOOLEAN
 ASSUME BUGGY_CLOSE_WRITE_NO_WAKE_READER \in BOOLEAN
 ASSUME BUGGY_CLOSE_READ_NO_WAKE_WRITER \in BOOLEAN
 ASSUME BUGGY_WAKE_ONE_READER \in BOOLEAN
+ASSUME BUGGY_HANGUP_NO_WAKE_WRITER \in BOOLEAN
+ASSUME BUGGY_HANGUP_TAKES_BYTES \in BOOLEAN
 
 VARIABLES
     ringCount,     \* 0..CAP
     readEof,       \* BOOLEAN
     writeEof,      \* BOOLEAN
+    writeOpen,     \* BOOLEAN -- the write end is still held (hung up or not)
     threadState    \* [Threads -> {"RUNNING", "WAITING_READ", "WAITING_WRITE"}]
 
-vars == <<ringCount, readEof, writeEof, threadState>>
+vars == <<ringCount, readEof, writeEof, writeOpen, threadState>>
 
 ThreadStates == { "RUNNING", "WAITING_READ", "WAITING_WRITE" }
 
@@ -118,12 +141,14 @@ TypeOk ==
     /\ ringCount \in 0..CAP
     /\ readEof \in BOOLEAN
     /\ writeEof \in BOOLEAN
+    /\ writeOpen \in BOOLEAN
     /\ threadState \in [Threads -> ThreadStates]
 
 Init ==
     /\ ringCount = 0
     /\ readEof = FALSE
     /\ writeEof = FALSE
+    /\ writeOpen = TRUE
     /\ threadState = [t \in Threads |-> "RUNNING"]
 
 (***************************************************************************)
@@ -134,7 +159,8 @@ WaitingReaders == { t \in Threads : threadState[t] = "WAITING_READ" }
 WaitingWriters == { t \in Threads : threadState[t] = "WAITING_WRITE" }
 
 CanRead  == ringCount > 0 \/ writeEof
-CanWrite == ringCount < CAP \/ readEof
+\* A hung-up write end ends a writer's wait too: what it meets is a refusal.
+CanWrite == ringCount < CAP \/ readEof \/ writeEof
 
 \* Wake EVERY waiter on one side (poll_waiter_list_wake): each returns to
 \* RUNNING and re-attempts; a waiter that finds its condition false again
@@ -153,7 +179,7 @@ ReadDrain(t) ==
     /\ ringCount > 0
     /\ ringCount' = ringCount - 1
     /\ threadState' = WakeAllWriters(threadState)
-    /\ UNCHANGED <<readEof, writeEof>>
+    /\ UNCHANGED <<readEof, writeEof, writeOpen>>
 
 \* ReadEof — read on empty buffer with writeEof returns 0 (no state change).
 ReadEof(t) ==
@@ -169,45 +195,65 @@ ReadSleep(t) ==
     /\ ringCount = 0
     /\ ~writeEof
     /\ threadState' = [threadState EXCEPT ![t] = "WAITING_READ"]
-    /\ UNCHANGED <<ringCount, readEof, writeEof>>
+    /\ UNCHANGED <<ringCount, readEof, writeEof, writeOpen>>
 
-\* WriteAppend — append one byte + wake EVERY sleeping reader.
+\* WriteAppend — append one byte + wake EVERY sleeping reader. Only through a
+\* held write end, and never after EOF.
 WriteAppend(t) ==
     /\ threadState[t] = "RUNNING"
+    /\ writeOpen
     /\ ringCount < CAP
     /\ ~readEof                       \* if read end closed, EPIPE instead
+    /\ ~writeEof                      \* if the write end hung up, refused too
     /\ ringCount' = ringCount + 1
     /\ threadState' = WakeAllReaders(threadState)
-    /\ UNCHANGED <<readEof, writeEof>>
+    /\ UNCHANGED <<readEof, writeEof, writeOpen>>
 
-\* WriteEpipe — write while readEof set returns -1 (no state change).
+\* WriteEpipe — a write refused (-T_E_PIPE): the read end closed, or the write
+\* end hung up (no state change).
 WriteEpipe(t) ==
     /\ threadState[t] = "RUNNING"
-    /\ readEof
+    /\ writeOpen
+    /\ readEof \/ writeEof
     /\ UNCHANGED vars
 
-\* WriteSleep — write on full buffer without readEof: sleep (never gated).
+\* WriteSleep — write on full buffer with neither EOF: sleep (never gated).
 WriteSleep(t) ==
     /\ threadState[t] = "RUNNING"
+    /\ writeOpen
     /\ ringCount = CAP
     /\ ~readEof
-    /\ threadState' = [threadState EXCEPT ![t] = "WAITING_WRITE"]
-    /\ UNCHANGED <<ringCount, readEof, writeEof>>
-
-\* CloseWrite — set writeEof + wake EVERY sleeping reader (so they see EOF).
-\* Monotonic: only fires if writeEof is currently FALSE.
-CloseWrite ==
     /\ ~writeEof
+    /\ threadState' = [threadState EXCEPT ![t] = "WAITING_WRITE"]
+    /\ UNCHANGED <<ringCount, readEof, writeEof, writeOpen>>
+
+\* CloseWrite — the last ref on the write end drops: set writeEof + wake EVERY
+\* sleeping reader (so they see EOF). No writer can be asleep in an end being
+\* closed (a blocked writer holds a ref); it may follow a hangup.
+CloseWrite ==
+    /\ writeOpen
+    /\ WaitingWriters = {}
+    /\ writeOpen' = FALSE
     /\ writeEof' = TRUE
     /\ threadState' = WakeAllReaders(threadState)
     /\ UNCHANGED <<ringCount, readEof>>
+
+\* HangupWrite — EOF without the close (pipe_hangup_write): set writeEof with
+\* the end still held, and wake EVERY sleeper -- readers see EOF, writers are
+\* refused. Monotonic: only fires if writeEof is currently FALSE.
+HangupWrite ==
+    /\ writeOpen
+    /\ ~writeEof
+    /\ writeEof' = TRUE
+    /\ threadState' = WakeAllWriters(WakeAllReaders(threadState))
+    /\ UNCHANGED <<ringCount, readEof, writeOpen>>
 
 \* CloseRead — set readEof + wake EVERY sleeping writer (so they see EPIPE).
 CloseRead ==
     /\ ~readEof
     /\ readEof' = TRUE
     /\ threadState' = WakeAllWriters(threadState)
-    /\ UNCHANGED <<ringCount, writeEof>>
+    /\ UNCHANGED <<ringCount, writeEof, writeOpen>>
 
 (***************************************************************************)
 (* Buggy actions — each elides the wake-after-mutation step. TLC's         *)
@@ -217,11 +263,13 @@ CloseRead ==
 BuggyWriteAppendNoWake(t) ==
     /\ BUGGY_WRITE_NO_WAKE_READER
     /\ threadState[t] = "RUNNING"
+    /\ writeOpen
     /\ ringCount < CAP
     /\ ~readEof
+    /\ ~writeEof
     /\ ringCount' = ringCount + 1
     /\ UNCHANGED threadState                 \* skipped wake
-    /\ UNCHANGED <<readEof, writeEof>>
+    /\ UNCHANGED <<readEof, writeEof, writeOpen>>
 
 BuggyReadDrainNoWake(t) ==
     /\ BUGGY_READ_NO_WAKE_WRITER
@@ -229,11 +277,13 @@ BuggyReadDrainNoWake(t) ==
     /\ ringCount > 0
     /\ ringCount' = ringCount - 1
     /\ UNCHANGED threadState
-    /\ UNCHANGED <<readEof, writeEof>>
+    /\ UNCHANGED <<readEof, writeEof, writeOpen>>
 
 BuggyCloseWriteNoWake ==
     /\ BUGGY_CLOSE_WRITE_NO_WAKE_READER
-    /\ ~writeEof
+    /\ writeOpen
+    /\ WaitingWriters = {}
+    /\ writeOpen' = FALSE
     /\ writeEof' = TRUE
     /\ UNCHANGED <<ringCount, readEof, threadState>>
 
@@ -241,7 +291,30 @@ BuggyCloseReadNoWake ==
     /\ BUGGY_CLOSE_READ_NO_WAKE_WRITER
     /\ ~readEof
     /\ readEof' = TRUE
-    /\ UNCHANGED <<ringCount, writeEof, threadState>>
+    /\ UNCHANGED <<ringCount, writeEof, writeOpen, threadState>>
+
+\* The hangup's wake as a close's: readers only. A writer asleep on the full
+\* ring is left in WAITING_WRITE while writeEof makes CanWrite hold.
+BuggyHangupWakeReadersOnly ==
+    /\ BUGGY_HANGUP_NO_WAKE_WRITER
+    /\ writeOpen
+    /\ ~writeEof
+    /\ writeEof' = TRUE
+    /\ threadState' = WakeAllReaders(threadState)
+    /\ UNCHANGED <<ringCount, readEof, writeOpen>>
+
+\* A hung-up write end that still takes bytes: the append without its
+\* ~writeEof guard. A byte lands after EOF.
+BuggyAppendAfterHangup(t) ==
+    /\ BUGGY_HANGUP_TAKES_BYTES
+    /\ threadState[t] = "RUNNING"
+    /\ writeOpen
+    /\ writeEof
+    /\ ringCount < CAP
+    /\ ~readEof
+    /\ ringCount' = ringCount + 1
+    /\ threadState' = WakeAllReaders(threadState)
+    /\ UNCHANGED <<readEof, writeEof, writeOpen>>
 
 \* The multi-waiter-specific bug: an append that wakes ONE chosen reader (the
 \* old single-waiter wakeup) instead of every hook. With two readers asleep,
@@ -249,14 +322,16 @@ BuggyCloseReadNoWake ==
 BuggyWriteAppendWakeOne(t) ==
     /\ BUGGY_WAKE_ONE_READER
     /\ threadState[t] = "RUNNING"
+    /\ writeOpen
     /\ ringCount < CAP
     /\ ~readEof
+    /\ ~writeEof
     /\ ringCount' = ringCount + 1
     /\ IF WaitingReaders /= {}
        THEN \E r \in WaitingReaders :
               threadState' = [threadState EXCEPT ![r] = "RUNNING"]
        ELSE threadState' = threadState
-    /\ UNCHANGED <<readEof, writeEof>>
+    /\ UNCHANGED <<readEof, writeEof, writeOpen>>
 
 (***************************************************************************)
 (* Next-state relation.                                                    *)
@@ -270,12 +345,15 @@ Next ==
     \/ \E t \in Threads : WriteEpipe(t)
     \/ \E t \in Threads : WriteSleep(t)
     \/ CloseWrite
+    \/ HangupWrite
     \/ CloseRead
     \/ \E t \in Threads : BuggyWriteAppendNoWake(t)
     \/ \E t \in Threads : BuggyReadDrainNoWake(t)
     \/ BuggyCloseWriteNoWake
     \/ BuggyCloseReadNoWake
     \/ \E t \in Threads : BuggyWriteAppendWakeOne(t)
+    \/ BuggyHangupWakeReadersOnly
+    \/ \E t \in Threads : BuggyAppendAfterHangup(t)
 
 Spec == Init /\ [][Next]_vars
 
@@ -302,6 +380,10 @@ NoStuckWriter ==
 EofMonotonic ==
     /\ readEof \in BOOLEAN
     /\ writeEof \in BOOLEAN
+
+\* NoByteAfterEof — an action property: once writeEof holds, the ring never
+\* grows. A reader that has seen EOF after the drain sees nothing more.
+NoByteAfterEof == [][writeEof => ringCount' <= ringCount]_vars
 
 Invariants ==
     /\ TypeOk

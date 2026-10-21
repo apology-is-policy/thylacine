@@ -10,9 +10,9 @@
 //   notes.queue_alloc_free_smoke      — alloc + free without leak
 //   notes.post_dequeue_smoke          — single post → single dequeue
 //   notes.post_ordering               — three posts dequeued in order
-//   notes.unknown_name_rejected       — notes_post with unknown name → -1
-//   notes.snare_forge_rejected        — user-path snare:* post → -1 (ABI)
-//   notes.queue_full_returns_minus1   — non-synthetic posts fail at full
+//   notes.unknown_name_rejected       — notes_post with unknown name → -EINVAL
+//   notes.snare_forge_rejected        — user-path snare:* post → -EINVAL (ABI)
+//   notes.queue_full_returns_eagain   — non-synthetic posts fail at full: -EAGAIN
 //   notes.coalesce_synthetic          — synthetic poster merges at threshold
 //   notes.mask_defers                 — masked entries skipped at dequeue
 //   notes.kill_dequeue_smoke          — kill dequeues normally (no special
@@ -46,13 +46,16 @@
 // "Test support" blocks in kernel/notes.c and kernel/proc.c -- deliberately
 // absent from the headers, so every consumer extern-declares them).
 extern u32  notes_name_terminate_latch_for_test(const char *name);
+extern const char *notes_known_name_for_test(u32 i);
+extern const char *notes_snare_death_name_for_test(u32 i);
 extern int  notes_noted_default(struct exception_context *ctx, struct Thread *t);
 extern int  notes_noted_restore(struct exception_context *ctx, struct Thread *t);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
-extern int  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+extern s64  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
                                         const char *name);   // #241
+extern s64  viv_kill_for_test(struct Proc *caller, int pid, int tid, u64 sig);
 extern s64  sys_postnote_self_for_test(struct Proc *caller,
                                        const char *name);    // aux#253
 
@@ -61,7 +64,7 @@ void test_notes_post_dequeue_smoke(void);
 void test_notes_post_ordering(void);
 void test_notes_unknown_name_rejected(void);
 void test_notes_snare_forge_rejected(void);
-void test_notes_queue_full_returns_minus1(void);
+void test_notes_queue_full_returns_eagain(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
@@ -77,6 +80,8 @@ void test_notes_interrupt_terminate_gate(void);
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
+void test_notes_death_reaches_predicate(void);
+void test_notes_forced_close_lifts_the_hold(void);
 void test_notes_caught_note_latch_lifecycle(void);
 void test_notes_caught_note_deliverable_predicate(void);
 void test_notes_caught_note_claim_once(void);
@@ -85,6 +90,7 @@ void test_notes_caught_note_stop_dequeue_drains(void);
 void test_notes_fstat_reports_chr(void);
 void test_notes_linux_sigign_discard(void);
 void test_notes_default_action_table(void);
+void test_notes_death_signal_table(void);
 void test_notes_ndflt_dispatch(void);
 void test_notes_kill_terminates_single_thread(void);
 void test_notes_ndflt_stop_discarded_after_cont(void);
@@ -176,11 +182,11 @@ void test_notes_unknown_name_rejected(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
-    TEST_EXPECT_EQ(notes_post(p, "alarm",      0u, NULL, true), -1,
+    TEST_EXPECT_EQ(notes_post(p, "alarm",      0u, NULL, true), -(int)T_E_INVAL,
                    "post(alarm) rejected (deferred at v1.0)");
-    TEST_EXPECT_EQ(notes_post(p, "garbage",    0u, NULL, true), -1,
+    TEST_EXPECT_EQ(notes_post(p, "garbage",    0u, NULL, true), -(int)T_E_INVAL,
                    "post(garbage) rejected");
-    TEST_EXPECT_EQ(notes_post(p, "",           0u, NULL, true), -1,
+    TEST_EXPECT_EQ(notes_post(p, "",           0u, NULL, true), -(int)T_E_INVAL,
                    "post(empty) rejected");
     TEST_EXPECT_EQ(p->notes->count, 0u, "no rejected post landed in queue");
 
@@ -200,11 +206,11 @@ void test_notes_snare_forge_rejected(void) {
     // kernel-synthetic posters. A userspace-path post (synthetic=false,
     // the SYS_POSTNOTE shape) of ANY snare:* name must be rejected —
     // independent of whether snare:* ever joins the supported name set.
-    TEST_EXPECT_EQ(notes_post(p, "snare:segv", 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, "snare:segv", 0u, NULL, false), -(int)T_E_INVAL,
                    "user-path post(snare:segv) rejected");
-    TEST_EXPECT_EQ(notes_post(p, "snare:bus", 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, "snare:bus", 0u, NULL, false), -(int)T_E_INVAL,
                    "user-path post(snare:bus) rejected");
-    TEST_EXPECT_EQ(notes_post(p, "snare:", 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, "snare:", 0u, NULL, false), -(int)T_E_INVAL,
                    "user-path post(snare:) rejected");
     TEST_EXPECT_EQ(p->notes->count, 0u, "no forged snare landed in queue");
 
@@ -218,10 +224,10 @@ void test_notes_snare_forge_rejected(void) {
 }
 
 // ---------------------------------------------------------------------------
-// queue_full_returns_minus1
+// queue_full_returns_eagain
 // ---------------------------------------------------------------------------
 
-void test_notes_queue_full_returns_minus1(void) {
+void test_notes_queue_full_returns_eagain(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc succeeded");
 
@@ -238,8 +244,8 @@ void test_notes_queue_full_returns_minus1(void) {
                    "queue at full depth");
 
     // Next non-synthetic post must fail.
-    TEST_EXPECT_EQ(notes_post(p, "interrupt", 99u, NULL, false), -1,
-                   "post at full → -1");
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 99u, NULL, false), -(int)T_E_AGAIN,
+                   "post at full -> -EAGAIN");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
@@ -843,6 +849,7 @@ void test_notes_die_pending_predicate(void) {
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
+    fake_t.kthread_join_active = false;
 
     TEST_ASSERT(!thread_die_pending(NULL), "NULL thread -> false");
     TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
@@ -907,6 +914,78 @@ void test_notes_die_pending_predicate(void) {
     proc_free(p);
 }
 
+// thread_death_reaches -- can a death end this thread's waits? A user
+// thread's, yes; not a kernel thread's, not one inside an exit close, and not
+// a thread with no Proc.
+void test_notes_death_reaches_predicate(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    struct Thread fake_t;
+    fake_t.proc              = p;
+    fake_t.exit_close_active = false;
+    fake_t.kthread_join_active = false;
+    bool user = thread_death_reaches(&fake_t);
+    fake_t.exit_close_active = true;
+    bool ecl  = thread_death_reaches(&fake_t);
+    fake_t.exit_close_active = false;
+    fake_t.proc = kproc();
+    bool kth  = thread_death_reaches(&fake_t);
+    fake_t.proc = NULL;
+    bool none = thread_death_reaches(&fake_t);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(user, "a user thread: a death reaches it");
+    TEST_ASSERT(!ecl, "inside an exit close: no death reaches it");
+    TEST_ASSERT(!kth, "a kernel thread: no death reaches it");
+    TEST_ASSERT(!none && !thread_death_reaches(NULL), "no Proc, no thread: false");
+}
+
+// ARCH 7.9.1 part B: a kill that forces the final close lifts its hold on
+// death -- every death leg reaches it again -- but never loom_free's kthread
+// join, and never caught delivery. The control, one variable away: the same
+// exit close in a dying group, unforced.
+void test_notes_forced_close_lifts_the_hold(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    __atomic_store_n(&p->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    struct Thread fake_t;
+    fake_t.proc                = p;
+    fake_t.note_mask           = 0u;
+    fake_t.exit_close_active   = true;
+    fake_t.kthread_join_active = false;
+    bool held_die   = thread_die_pending(&fake_t);
+    bool held_group = thread_group_death_pending(&fake_t);
+    bool held_reach = thread_death_reaches(&fake_t);
+
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_EXIT_CLOSE_FORCED, __ATOMIC_RELEASE);
+    bool f_die    = thread_die_pending(&fake_t);
+    bool f_group  = thread_group_death_pending(&fake_t);
+    bool f_reach  = thread_death_reaches(&fake_t);
+    bool f_caught = thread_caught_note_deliverable(&fake_t);
+
+    fake_t.kthread_join_active = true;
+    bool j_die   = thread_die_pending(&fake_t);
+    bool j_group = thread_group_death_pending(&fake_t);
+    bool j_reach = thread_death_reaches(&fake_t);
+    fake_t.exit_close_active = false;             // a peer's close, outside the exit
+    bool jp_die  = thread_die_pending(&fake_t);
+
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_EXIT_CLOSE_FORCED, __ATOMIC_RELEASE);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(!held_die && !held_group && !held_reach,
+                "an unforced exit close holds every death (control)");
+    TEST_ASSERT(f_die, "forced: the death reaches the close");
+    TEST_ASSERT(f_group, "forced: so does the group-death leg");
+    TEST_ASSERT(f_reach, "forced: thread_death_reaches agrees");
+    TEST_ASSERT(!f_caught, "forced: still no caught delivery");
+    TEST_ASSERT(!j_die && !j_group && !j_reach,
+                "the kthread join holds every death, forced or not");
+    TEST_ASSERT(!jp_die, "and outside the exit close too");
+}
+
 // ---------------------------------------------------------------------------
 // pipe_die_pending (#237) -- the pipe terminate latch at the sleep predicate
 // ---------------------------------------------------------------------------
@@ -928,6 +1007,7 @@ void test_notes_pipe_die_pending(void) {
     fake_t.proc              = p;
     fake_t.note_mask         = 0u;
     fake_t.exit_close_active = false;
+    fake_t.kthread_join_active = false;
 
     TEST_ASSERT(!thread_die_pending(&fake_t), "fresh Proc -> false");
 
@@ -971,10 +1051,68 @@ void test_notes_pipe_die_pending(void) {
 }
 
 // ---------------------------------------------------------------------------
+// term_die_pending -- SIGTERM's own note (the signal chunk's S-2)
+// ---------------------------------------------------------------------------
+//
+// Pins the `term` row (default TERMINATE, death SIGTERM), its OWN latch, and the
+// per-family pairing the note exists for: a thread that masked interrupt (SIGINT
+// blocked) still unwinds for term, one that masked term does not, and term never
+// arms interrupt's latch. Red before S-2, where "term" was no note at all and the
+// post itself failed. Every reading is taken before the fixture is released, and
+// asserted after.
+void test_notes_term_die_pending(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    struct Thread fake_t;
+    fake_t.proc                = p;
+    fake_t.note_mask           = 0u;
+    fake_t.exit_close_active   = false;
+    fake_t.kthread_join_active = false;
+
+    bool fresh = thread_die_pending(&fake_t);
+    int  dfl   = (int)notes_default_action(NOTE_NAME_TERM);
+    int  sig   = notes_death_signal(NOTE_NAME_TERM);
+    int  post  = notes_post(p, NOTE_NAME_TERM, 0u, NULL, false);
+    u32  flags = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    bool gate  = proc_intr_terminate_pending(p);
+    bool open_ = thread_die_pending(&fake_t);
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    bool intr_masked = thread_die_pending(&fake_t);
+    fake_t.note_mask = (1u << NOTE_BIT_TERM);
+    bool term_masked = thread_die_pending(&fake_t);
+    fake_t.note_mask = 0u;
+    struct Note got;
+    got.name[0] = 0;
+    spin_lock(&p->notes->lock);
+    int deq = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    bool got_term = got.name[0] == 't' && got.name[1] == 'e' && got.name[2] == 'r' &&
+                    got.name[3] == 'm' && got.name[4] == 0;
+    bool drained  = thread_die_pending(&fake_t);
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    TEST_ASSERT(!fresh, "fresh Proc -> false");
+    TEST_EXPECT_EQ(dfl, (int)NOTE_DFL_TERMINATE, "term's default action is TERMINATE");
+    TEST_EXPECT_EQ(sig, (int)NOTE_SIG_TERM, "a death by term records SIGTERM (15)");
+    TEST_EXPECT_EQ(post, 0, "a userspace post of term is accepted");
+    TEST_ASSERT((flags & PROC_FLAG_TERM_TERMINATE_PENDING) != 0, "term arms its own latch");
+    TEST_ASSERT((flags & PROC_FLAG_INTR_TERMINATE_PENDING) == 0, "and not interrupt's");
+    TEST_ASSERT(gate, "the wake gate fires on term");
+    TEST_ASSERT(open_, "armed + unmasked -> true");
+    TEST_ASSERT(intr_masked, "interrupt masked, term unmasked -> true (per-family)");
+    TEST_ASSERT(!term_masked, "term masked -> false");
+    TEST_ASSERT(deq >= 0 && got_term, "the queued note is term");
+    TEST_ASSERT(!drained, "drained -> the latch clears -> false");
+}
+
+// ---------------------------------------------------------------------------
 // caught_note_latch_lifecycle (item 11, ARCH §8.8.3)
 // ---------------------------------------------------------------------------
 //
-// The PROC_FLAG_CAUGHT_NOTE_MASK sub-field: armed by notes_post's caught arm
+// The caught latch (Proc.note_caught, CAUGHT_LATCH_MASK): armed by notes_post's caught arm
 // (a live handler OR self-managing -- the EXACT COMPLEMENT of the terminate
 // arm), cleared by draining the last queued note of that family. The two
 // latches are DISJOINT -- a given note arms exactly one.
@@ -1066,6 +1204,7 @@ void test_notes_caught_note_deliverable_predicate(void) {
     fake_t.proc               = p;
     fake_t.note_mask          = 0u;
     fake_t.exit_close_active  = false;
+    fake_t.kthread_join_active = false;
     fake_t.in_handler         = false;
     fake_t.note_interruptible = true;   // a wait on signal(7)'s list
 
@@ -1130,11 +1269,11 @@ void test_notes_caught_note_deliverable_predicate(void) {
 
     // kproc guard: forced caught bits never make a kproc thread deliverable.
     fake_t.proc = kproc();
-    __atomic_or_fetch(&kproc()->proc_flags, PROC_FLAG_CAUGHT_NOTE_MASK,
+    __atomic_or_fetch(&kproc()->note_caught, (u16)CAUGHT_LATCH_MASK,
                       __ATOMIC_RELEASE);
     TEST_ASSERT(!thread_caught_note_deliverable(&fake_t),
                 "kproc guarded even when the caught sub-field is forced");
-    __atomic_and_fetch(&kproc()->proc_flags, ~PROC_FLAG_CAUGHT_NOTE_MASK,
+    __atomic_and_fetch(&kproc()->note_caught, (u16)~CAUGHT_LATCH_MASK,
                        __ATOMIC_RELEASE);
 
     p->state = PROC_STATE_ZOMBIE;
@@ -1200,13 +1339,13 @@ void test_notes_caught_note_claim_once(void) {
     int d2 = notes_dequeue_for_fd_locked(p, NULL, &got);
     int d3 = notes_dequeue_for_fd_locked(p, NULL, &got);
     spin_unlock(&p->notes->lock);
-    u32 flags  = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
-    u32 caught = flags & PROC_FLAG_CAUGHT_NOTE_MASK;
-    u32 claims = (flags & PROC_FLAG_CAUGHT_CLAIM_MASK) >> PROC_CAUGHT_CLAIM_SHIFT;
+    u32 flags  = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE);
+    u32 caught = flags & CAUGHT_LATCH_MASK;
+    u32 claims = (flags & CAUGHT_CLAIM_MASK) >> CAUGHT_CLAIM_SHIFT;
     notes_release_claims_for_test(&b);
     notes_release_claims_for_test(&c);
-    u32 claims_after = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) &
-                       PROC_FLAG_CAUGHT_CLAIM_MASK;
+    u32 claims_after = __atomic_load_n(&p->note_caught, __ATOMIC_ACQUIRE) &
+                       CAUGHT_CLAIM_MASK;
     int  post4 = notes_post(p, "interrupt", 0u, NULL, true);
     b.note_mask = 1u << NOTE_BIT_INTERRUPT;                     // b defers it
     bool b5m   = thread_caught_note_claim(&b);
@@ -1329,8 +1468,8 @@ void test_notes_caught_note_stop_dequeue_drains(void) {
     // Simulate a caught tty:winch having armed the SHARED TTY family bit. (The
     // realistic arm needs a phenotype per-signal sigtab; forcing the bit tests
     // the FIX -- does the stop-dequeue drain it? -- with the same end state.)
-    __atomic_or_fetch(&p->proc_flags,
-                      (1u << (PROC_CAUGHT_NOTE_SHIFT + NOTE_BIT_TTY)),
+    __atomic_or_fetch(&p->note_caught,
+                      (u16)(1u << (CAUGHT_LATCH_SHIFT + NOTE_BIT_TTY)),
                       __ATOMIC_RELEASE);
     TEST_ASSERT(proc_caught_note_pending(p),
                 "caught-TTY bit armed (simulated caught tty:winch sibling)");
@@ -1559,7 +1698,7 @@ void test_notes_discard_name_purges_pending(void) {
     // full). Sixteen pipes, purge, sixteen more posts land.
     for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++)
         TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, i, NULL, false), 0, "fill");
-    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, false), -1,
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_CHILD_EXIT, 0u, NULL, false), -(int)T_E_AGAIN,
                    "full: a userspace post is refused");
     TEST_EXPECT_EQ(notes_discard_name(p, NOTE_NAME_PIPE), (u32)NOTE_QUEUE_DEPTH,
                    "all sixteen removed");
@@ -1600,6 +1739,8 @@ void test_notes_default_action_table(void) {
                    (int)NOTE_DFL_TERMINATE, "tty:quit terminates");
     TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_HUP),
                    (int)NOTE_DFL_TERMINATE, "tty:hup terminates");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TERM),
+                   (int)NOTE_DFL_TERMINATE, "term terminates (POSIX SIGTERM)");
 
     // STOP -- one row, and the whole reason #15 exists.
     TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_SUSP),
@@ -1648,6 +1789,9 @@ void test_notes_default_action_table(void) {
     TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_PIPE),
                    (int)PROC_FLAG_PIPE_TERMINATE_PENDING,
                    "pipe -> PIPE latch (#237)");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TERM),
+                   (int)PROC_FLAG_TERM_TERMINATE_PENDING,
+                   "term -> its own latch, never interrupt's");
 }
 
 // Drive notes_noted_default through its two RETURNING dispositions. The
@@ -1874,8 +2018,9 @@ void test_notes_ndflt_dispatch(void) {
 // EL0-return tail's non-catchable-kill branch would pick it up. `kill` arms no
 // terminate latch (notes_name_terminate_latch returns 0 for NOTE_BIT_KILL), so
 // the post woke nothing at all -- and a job-stopped target parked in
-// el0_return_stop_check leaves only via group_exit_msg / !proc_stop_requested /
-// thread_die_pending, none of which a latchless queued kill satisfies. The post
+// el0_return_stop_check leaves only via group_exit_msg / !proc_stop_requested
+// (and, until DEBUG-FS-DESIGN 5g, thread_die_pending), none of which a
+// latchless queued kill satisfies. The post
 // returned SUCCESS and the Proc lived forever.
 //
 // The park loop is not driven here (it needs a scheduled thread). What is
@@ -1905,8 +2050,8 @@ void test_notes_kill_terminates_single_thread(void) {
     TEST_ASSERT(target->group_exit_msg == NULL,
                 "precondition: target is not already terminating");
 
-    int rc = sys_postnote_cross_for_test(parent, target->pid, NOTE_NAME_KILL);
-    TEST_EXPECT_EQ(rc, 1, "the cross-Proc kill post reports success");
+    s64 rc = sys_postnote_cross_for_test(parent, target->pid, NOTE_NAME_KILL);
+    TEST_EXPECT_EQ(rc, (s64)0, "the cross-Proc kill post reports success");
 
     // POSITIVE: the cascade ran. Fails closed -- any fixture defect that makes
     // proc_group_terminate bail early leaves this NULL.
@@ -1934,7 +2079,7 @@ void test_notes_kill_terminates_single_thread(void) {
     ctl->threads = &cth;
 
     TEST_EXPECT_EQ(sys_postnote_cross_for_test(parent, ctl->pid,
-                                               NOTE_NAME_INTERRUPT), 1,
+                                               NOTE_NAME_INTERRUPT), (s64)0,
                    "the control post reports success");
     TEST_EXPECT_EQ((int)ndflt_note_count(ctl, NOTE_NAME_INTERRUPT), 1,
                    "control: a non-kill note IS queued (so 0 above means 0)");
@@ -1952,6 +2097,112 @@ void test_notes_kill_terminates_single_thread(void) {
     proc_test_unlink(parent);
     parent->state = PROC_STATE_ZOMBIE;
     proc_free(parent);
+}
+
+// The signal chunk's S-2: the Linux phenotype's kill/tkill/tgkill (operator vote
+// 2026-10-13) reuse SYS_POSTNOTE's gate -- the caller, or a child it spawned --
+// and report its refusals as Linux errnos. Drives the REAL shell (viv_kill) over
+// linked fixtures; every reading is taken before the release and asserted after.
+// Red before S-2: the shell did not exist and the three numbers FORWARDed.
+static void kfg_thread(struct Thread *t, struct Proc *p, int tid) {
+    t->magic             = THREAD_MAGIC;
+    t->proc              = p;
+    t->tid               = tid;
+    t->note_mask         = 0;
+    t->next_in_proc      = NULL;
+    t->rendez_blocked_on = NULL;
+    p->threads           = t;
+}
+
+void test_notes_kill_family_gate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    struct Proc *other  = proc_alloc();
+    TEST_ASSERT(caller && child && other, "proc_alloc x3");
+    proc_test_link(caller);
+    proc_test_link_child(caller, child);
+    proc_test_link(other);                       // alive, not the caller's child
+
+    // tids far above the live counter, so no real thread can answer for them
+    static struct Thread cth, kth, oth;
+    kfg_thread(&cth, caller, 0x3f000001);
+    kfg_thread(&kth, child,  0x3f000002);
+    kfg_thread(&oth, other,  0x3f000003);
+    const int NO_PID = 0x3ffffff0, NO_TID = 0x3f0000ff;
+
+    s64 r_post   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGTERM);
+    u32 c_term1  = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_other  = viv_kill_for_test(caller, other->pid, 0, VIV_SIGTERM);
+    u32 o_term   = ndflt_note_count(other, NOTE_NAME_TERM);
+    s64 r_nopid  = viv_kill_for_test(caller, NO_PID, 0, VIV_SIGTERM);
+    s64 r_group  = viv_kill_for_test(caller, -child->pid, 0, VIV_SIGTERM);
+    s64 r_probe  = viv_kill_for_test(caller, child->pid, 0, 0);
+    u32 c_term2  = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_tty    = viv_kill_for_test(caller, child->pid, 0, VIV_SIGHUP);
+    s64 r_xabrt  = viv_kill_for_test(caller, child->pid, 0, VIV_SIGABRT);
+    s64 r_sabrt  = viv_kill_for_test(caller, caller->pid, 0, VIV_SIGABRT);
+    s64 r_range  = viv_kill_for_test(caller, child->pid, 0, 65);
+    s64 r_tkill  = viv_kill_for_test(caller, 0, kth.tid, VIV_SIGINT);
+    u32 c_intr   = ndflt_note_count(child, NOTE_NAME_INTERRUPT);
+    s64 r_tgbad  = viv_kill_for_test(caller, other->pid, kth.tid, VIV_SIGINT);
+    s64 r_tgok   = viv_kill_for_test(caller, child->pid, kth.tid, VIV_SIGINT);
+    u32 c_intr2  = ndflt_note_count(child, NOTE_NAME_INTERRUPT);
+    s64 r_toth   = viv_kill_for_test(caller, 0, oth.tid, VIV_SIGINT);
+    s64 r_notid  = viv_kill_for_test(caller, 0, NO_TID, VIV_SIGINT);
+    s64 r_tself  = viv_kill_for_test(caller, 0, cth.tid, VIV_SIGTERM);
+    u32 s_term   = ndflt_note_count(caller, NOTE_NAME_TERM);
+    s64 r_sprobe = viv_kill_for_test(caller, 0, 0, 0);
+    child->state = PROC_STATE_ZOMBIE;
+    s64 r_dead   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGTERM);
+    u32 c_term3  = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_dprobe = viv_kill_for_test(caller, child->pid, 0, 0);
+    s64 r_dtty   = viv_kill_for_test(caller, child->pid, 0, VIV_SIGHUP);
+    s64 r_drange = viv_kill_for_test(caller, child->pid, 0, 65);
+    s64 r_ntty   = viv_kill_for_test(caller, NO_PID, 0, VIV_SIGHUP);
+    other->state = PROC_STATE_ZOMBIE;
+    s64 r_odead  = viv_kill_for_test(caller, other->pid, 0, VIV_SIGTERM);
+
+    proc_test_unlink(other);
+    other->threads = NULL;
+    other->state   = PROC_STATE_ZOMBIE;
+    proc_free(other);
+    proc_test_unlink(child);
+    child->threads = NULL;
+    proc_free(child);
+    proc_test_unlink(caller);
+    caller->threads = NULL;
+    caller->state   = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+
+    TEST_EXPECT_EQ(r_post, (s64)0, "kill(child, SIGTERM) posts");
+    TEST_EXPECT_EQ(c_term1, 1u, "and the child holds one queued term");
+    TEST_EXPECT_EQ(r_other, -(s64)T_E_PERM, "kill(non-child) is EPERM: the parent gate");
+    TEST_EXPECT_EQ(o_term, 0u, "and nothing reached it");
+    TEST_EXPECT_EQ(r_nopid, -(s64)T_E_SRCH, "kill(no such pid) is ESRCH");
+    TEST_EXPECT_EQ(r_group, -(s64)T_E_PERM, "kill(-pgid) is refused: the gate admits no group");
+    TEST_EXPECT_EQ(r_probe, (s64)0, "kill(child, 0) passes the gate");
+    TEST_EXPECT_EQ(c_term2, 1u, "and signal 0 posts nothing");
+    TEST_EXPECT_EQ(r_tty, -(s64)T_E_INVAL, "SIGHUP: tty:* is the kernel's to post");
+    TEST_EXPECT_EQ(r_xabrt, -(s64)T_E_INVAL, "SIGABRT to another Proc: a snare death is its own");
+    TEST_EXPECT_EQ(r_sabrt, (s64)1, "SIGABRT to itself reaches the snare:abort death");
+    TEST_EXPECT_EQ(r_range, -(s64)T_E_INVAL, "signal 65 is out of range");
+    TEST_EXPECT_EQ(r_tkill, (s64)0, "tkill(child's tid) posts to the child");
+    TEST_EXPECT_EQ(c_intr, 1u, "the child holds the interrupt");
+    TEST_EXPECT_EQ(r_tgbad, -(s64)T_E_SRCH, "tgkill with a tgid that does not hold the tid");
+    TEST_EXPECT_EQ(r_tgok, (s64)0, "tgkill(child, child's tid) posts");
+    TEST_EXPECT_EQ(c_intr2, 2u, "a second interrupt queued");
+    TEST_EXPECT_EQ(r_toth, -(s64)T_E_PERM, "tkill(a non-child's tid) is EPERM");
+    TEST_EXPECT_EQ(r_notid, -(s64)T_E_SRCH, "tkill(no such tid) is ESRCH");
+    TEST_EXPECT_EQ(r_tself, (s64)0, "tkill(own tid) is self-directed");
+    TEST_EXPECT_EQ(s_term, 1u, "and the caller holds its own term");
+    TEST_EXPECT_EQ(r_sprobe, (s64)0, "kill(0, 0) probes the caller");
+    TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it, as Linux's zombie does");
+    TEST_EXPECT_EQ(c_term3, 1u, "and nothing was queued to it");
+    TEST_EXPECT_EQ(r_dprobe, (s64)0, "kill(dead child, 0) succeeds, as for a zombie");
+    TEST_EXPECT_EQ(r_dtty, -(s64)T_E_INVAL, "SIGHUP to the dead child: the signal is judged before the walk");
+    TEST_EXPECT_EQ(r_drange, -(s64)T_E_INVAL, "signal 65 to the dead child: EINVAL, not the zombie's 0");
+    TEST_EXPECT_EQ(r_ntty, -(s64)T_E_INVAL, "SIGHUP to no such pid: EINVAL before ESRCH");
+    TEST_EXPECT_EQ(r_odead, -(s64)T_E_PERM, "a dead non-child reads EPERM: the gate is asked first");
 }
 
 // aux#253: the SELF arm's twin of the above. Round-2 F4 -- a self `kill` used
@@ -2952,4 +3203,307 @@ void test_notes_phenotype_sigreturn_restores_mask(void) {
     TEST_ASSERT(b_mask == HAND, "B: a NATIVE noted leaves the mask as the handler left it (control)");
     TEST_EXPECT_EQ(c_rc, -1, "C: not in a handler -> refused");
     TEST_ASSERT(c_mask == HAND, "C: a refused restore touches nothing");
+}
+
+// The EL0 fault arm's latch act: a fault taken while a terminate latch is
+// pending ends the thread with that note at the fault, because the tail it
+// would otherwise wait for defers notes inside a handler or on a bad SP, and
+// the faulting instruction would re-execute forever. Driven from an rfork'd
+// child, since the helper acts on the calling thread. Returning is the defect
+// in the live case: the child then leaves with 7, not the note's 1.
+static volatile int g_fdl_pending;
+
+static void fdl_live_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    (void)notes_post(t->proc, "interrupt", 0u, NULL, true);
+    g_fdl_pending = thread_die_pending(t) ? 1 : 0;
+    notes_fault_dying_latch(t);
+    exits_code(7, "returned");
+}
+
+static bool fdl_str_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+// The status alone cannot tell the note's death from a snare:* one (both reap
+// 1), so the message is read from the ZOMBIE, which the reap frees. NULL when
+// the child is not a ZOMBIE inside the budget.
+static const char *fdl_zombie_msg(int pid) {
+    struct Proc *c = proc_find_by_pid(pid);
+    if (!c) return NULL;
+    u64 deadline = timer_now_ns() + 2000000000ull;
+    for (;;) {
+        irq_state_t s = proc_table_lock_acquire();
+        const char *m = (c->state == PROC_STATE_ZOMBIE) ? c->exit_msg : NULL;
+        proc_table_lock_release(s);
+        if (m || timer_now_ns() >= deadline) return m;
+        sched();
+    }
+}
+
+void test_notes_fault_dying_latch_live_note_exits(void) {
+    g_fdl_pending = -1;
+    int pid = rfork(RFPROC, fdl_live_entry, NULL);
+    const char *msg = pid > 0 ? fdl_zombie_msg(pid) : NULL;
+    int st = -1;
+    int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    TEST_ASSERT(pid > 0, "rfork");
+    TEST_EXPECT_EQ(got, pid, "reaped the child");
+    TEST_EXPECT_EQ(g_fdl_pending, 1, "the interrupt armed a latch the child would die of");
+    TEST_EXPECT_EQ(st, 1, "the child died of the note (1), not by returning (7)");
+    TEST_ASSERT(msg != NULL && fdl_str_eq(msg, NOTE_NAME_INTERRUPT),
+                "the child's exit message is the note's name, not a snare:*");
+}
+
+// The stale half: a latch whose class has no default-terminating note queued
+// is cleared; one whose note is live but masked by THIS thread is kept, since a
+// peer may still die of it -- and the call returns.
+static volatile int g_fdl_returned;
+static volatile u32 g_fdl_flags_after;
+
+static void fdl_stale_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *p = t->proc;
+    t->note_mask |= (1u << NOTE_BIT_INTERRUPT);
+    (void)notes_post(p, "interrupt", 0u, NULL, true);
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_PIPE_TERMINATE_PENDING, __ATOMIC_RELEASE);
+    notes_fault_dying_latch(t);
+    g_fdl_returned = 1;
+    g_fdl_flags_after = __atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE);
+    exits_code(0, "ok");
+}
+
+void test_notes_fault_dying_latch_clears_only_stale(void) {
+    g_fdl_returned = 0;
+    g_fdl_flags_after = 0;
+    int pid = rfork(RFPROC, fdl_stale_entry, NULL);
+    int st = -1;
+    int got = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    TEST_ASSERT(pid > 0, "rfork");
+    TEST_EXPECT_EQ(got, pid, "reaped the child");
+    TEST_EXPECT_EQ(g_fdl_returned, 1, "no unmasked live note: the call returned");
+    TEST_EXPECT_EQ(st, 0, "the child left by its own exit");
+    TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_PIPE_TERMINATE_PENDING) == 0,
+                "the stale pipe latch (no pipe note queued) was cleared");
+    TEST_ASSERT((g_fdl_flags_after & PROC_FLAG_INTR_TERMINATE_PENDING) != 0,
+                "the live interrupt latch this thread masks was kept");
+}
+
+// gcpark-b: the signal each death by note records, row by row (the same reason
+// the default-action test names every row: a lookup that returned one signal for
+// everything would pass a spot-check). Then the two pins: a known note kills iff
+// it has a signal, and the phenotype's own map agrees on every note it carries.
+void test_notes_death_signal_table(void) {
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_INTERRUPT), NOTE_SIG_INT,  "interrupt -> SIGINT");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_KILL),      NOTE_SIG_KILL, "kill -> SIGKILL");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_PIPE),      NOTE_SIG_PIPE, "pipe -> SIGPIPE");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_QUIT),  NOTE_SIG_QUIT, "tty:quit -> SIGQUIT");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_HUP),   NOTE_SIG_HUP,  "tty:hup -> SIGHUP");
+
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_SEGV),  NOTE_SIG_SEGV, "snare:segv -> SIGSEGV");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_BUS),   NOTE_SIG_BUS,  "snare:bus -> SIGBUS");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_ALIGN), NOTE_SIG_BUS,  "snare:align -> SIGBUS");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_BTI),   NOTE_SIG_ILL,  "snare:bti -> SIGILL");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_BRK),   NOTE_SIG_TRAP, "snare:brk -> SIGTRAP");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_ILL),   NOTE_SIG_ILL,  "snare:ill -> SIGILL");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_FPE),   NOTE_SIG_FPE,  "snare:fpe -> SIGFPE");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SNARE_ABORT), NOTE_SIG_ABRT, "snare:abort -> SIGABRT");
+
+    // Notes that cannot kill, and strings that are no note: no signal.
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_CHILD_EXIT), 0, "child_exit has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_WINCH),  0, "tty:winch has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_SUSP),   0, "tty:susp stops; no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_TTY_CONT),   0, "tty:cont has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal(NOTE_NAME_SAK),        0, "sak has no death signal");
+    TEST_EXPECT_EQ(notes_death_signal("killed"),             0, "\"killed\" is a message, not a note");
+    TEST_EXPECT_EQ(notes_death_signal("unknown"),            0, "\"unknown\" is not a note");
+    TEST_EXPECT_EQ(notes_death_signal("snare:"),             0, "the bare prefix is not a note");
+    TEST_EXPECT_EQ(notes_death_signal(NULL),                 0, "NULL -> 0");
+
+    // Every row of both tables, walked from the tables themselves: a known note
+    // kills iff it records a signal, and every snare death records one.
+    u32 known = 0, snares = 0;
+    for (const char *name; (name = notes_known_name_for_test(known)) != NULL; known++) {
+        bool kills = notes_default_action(name) == NOTE_DFL_TERMINATE;
+        TEST_ASSERT(kills == (notes_death_signal(name) != 0),
+                    "a known note records a death signal exactly when it terminates");
+    }
+    for (const char *name; (name = notes_snare_death_name_for_test(snares)) != NULL; snares++)
+        TEST_ASSERT(notes_death_signal(name) != 0, "every snare death records a signal");
+    TEST_ASSERT(known > 0 && snares > 0, "both tables were walked");
+
+    // The phenotype translates signals to these notes through its own table; a
+    // guest's waitpid must see the signal that table maps back from the note.
+    // Only the rows it names compare: its snare rows have no name, a snare never
+    // being posted, and their numbers are pinned by the VIV_SIG* _Static_assert
+    // in notes.c. The count is derived, so a row added either side is counted.
+    u32 compared = 0, terminating = 0;
+    for (u32 v = 1; v < VIV_SIGNOTE_COUNT; v++) {
+        const char *name = viv_signote_note_name((enum viv_signote)v);
+        if (!name) continue;
+        enum note_default dfl = notes_default_action(name);
+        if (dfl == NOTE_DFL_TERMINATE) terminating++;
+        // The phenotype answers a SIG_DFL guest from its own two default
+        // tables; I-19 allows one default per note, so both must say what
+        // g_known_notes says. `kill` is the terminate table's one omission: the
+        // dispatcher's kill branch ends the Proc before any disposition is read.
+        if (v != VIV_SIGNOTE_KILL)
+            TEST_EXPECT_EQ((u64)viv_signote_default_is_terminate((enum viv_signote)v),
+                           (u64)(dfl == NOTE_DFL_TERMINATE),
+                           "the phenotype's terminate table is g_known_notes' dfl");
+        TEST_EXPECT_EQ((u64)viv_signote_default_is_ignore((enum viv_signote)v),
+                       (u64)(dfl == NOTE_DFL_IGNORE),
+                       "the phenotype's ignore table is g_known_notes' dfl");
+        int sig = notes_death_signal(name);
+        if (sig == 0) continue;
+        TEST_EXPECT_EQ((u64)sig, viv_signote_to_signal((enum viv_signote)v),
+                       "a death reports the signal the phenotype maps its note from");
+        compared++;
+    }
+    TEST_ASSERT(terminating > 0 && compared == terminating,
+                "the phenotype cross-check compared every terminating note it names");
+}
+
+// SYS_POSTNOTE answers each refusal with its own errno (operator vote
+// 2026-10-14), driven through the syscall's two arms. A bare -1 used to answer
+// all of them, and Pouch's seam reads -1 as EIO.
+void test_notes_postnote_errnos(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *child  = proc_alloc();
+    struct Proc *other  = proc_alloc();
+    TEST_ASSERT(caller && child && other, "proc_alloc x3");
+    proc_test_link(caller);
+    proc_test_link_child(caller, child);
+    proc_test_link(other);                       // alive, not the caller's child
+
+    static struct Thread cth, kth, oth;
+    kfg_thread(&cth, caller, 0x3e000001);
+    kfg_thread(&kth, child,  0x3e000002);
+    kfg_thread(&oth, other,  0x3e000003);
+    const int NO_PID = 0x3ffffff0;
+
+    s64 r_post  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TERM);
+    u32 c_term1 = ndflt_note_count(child, NOTE_NAME_TERM);
+    s64 r_other = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
+    u32 o_term  = ndflt_note_count(other, NOTE_NAME_TERM);
+    s64 r_obogus = sys_postnote_cross_for_test(caller, other->pid, "bogus");
+    s64 r_nopid = sys_postnote_cross_for_test(caller, NO_PID, NOTE_NAME_TERM);
+    s64 r_nbogus = sys_postnote_cross_for_test(caller, NO_PID, "bogus");
+    s64 r_bogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
+    s64 r_tty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_SUSP);
+    s64 r_sak   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SAK);
+    s64 r_snare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
+    u32 c_count = child->notes->count;
+
+    // Fill the child's ring with posts that arm nothing, then one more.
+    u32 c_fill_bad = 0;
+    while (child->notes->count < NOTE_QUEUE_DEPTH) {
+        if (sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_CHILD_EXIT) != 0) {
+            c_fill_bad++;
+            break;
+        }
+    }
+    s64 r_full  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TERM);
+
+    // The self arm: its own refusals, and a snare it never queues.
+    s64 s_tty   = sys_postnote_self_for_test(caller, NOTE_NAME_TTY_SUSP);
+    s64 s_snare = sys_postnote_self_for_test(caller, NOTE_NAME_SNARE_SEGV);
+    u32 s_count = caller->notes->count;
+    u32 s_fill_bad = 0;
+    while (caller->notes->count < NOTE_QUEUE_DEPTH) {
+        if (sys_postnote_self_for_test(caller, NOTE_NAME_CHILD_EXIT) != 0) {
+            s_fill_bad++;
+            break;
+        }
+    }
+    s64 s_full  = sys_postnote_self_for_test(caller, NOTE_NAME_TERM);
+
+    // A dead child is still a process until it is reaped; a dead non-child is
+    // still not the caller's to signal.
+    child->state = PROC_STATE_ZOMBIE;
+    u32 c_before = child->notes->count;
+    s64 r_dead  = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_INTERRUPT);
+    s64 r_dbogus = sys_postnote_cross_for_test(caller, child->pid, "bogus");
+    s64 r_dsnare = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_SNARE_SEGV);
+    s64 r_dtty   = sys_postnote_cross_for_test(caller, child->pid, NOTE_NAME_TTY_CONT);
+    u32 c_after = child->notes->count;
+    other->state = PROC_STATE_ZOMBIE;
+    s64 r_odead = sys_postnote_cross_for_test(caller, other->pid, NOTE_NAME_TERM);
+    s64 r_odbogus = sys_postnote_cross_for_test(caller, other->pid, "bogus");
+
+    proc_test_unlink(other);
+    other->threads = NULL;
+    proc_free(other);
+    proc_test_unlink(child);
+    child->threads = NULL;
+    proc_free(child);
+    proc_test_unlink(caller);
+    caller->threads = NULL;
+    caller->state   = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+
+    TEST_EXPECT_EQ(r_post, (s64)0, "post(child, term) succeeds");
+    TEST_EXPECT_EQ(c_term1, 1u, "and the child holds one queued term");
+    TEST_EXPECT_EQ(r_other, -(s64)T_E_ACCES, "a non-child is EACCES: the parent gate, never -1");
+    TEST_EXPECT_EQ(o_term, 0u, "and nothing reached it");
+    TEST_EXPECT_EQ(r_obogus, -(s64)T_E_INVAL, "a non-child with a refused name: the name is judged before the gate");
+    TEST_EXPECT_EQ(r_nopid, -(s64)T_E_SRCH, "no such pid is ESRCH");
+    TEST_EXPECT_EQ(r_nbogus, -(s64)T_E_INVAL, "the name is judged before the pid is looked for");
+    TEST_EXPECT_EQ(r_bogus, -(s64)T_E_INVAL, "a name that is no note is EINVAL");
+    TEST_EXPECT_EQ(r_tty, -(s64)T_E_INVAL, "tty:susp is the kernel's to post: EINVAL");
+    TEST_EXPECT_EQ(r_sak, -(s64)T_E_INVAL, "sak is the kernel's to post: EINVAL");
+    TEST_EXPECT_EQ(r_snare, -(s64)T_E_INVAL, "a snare to another Proc is EINVAL: a fault is its own");
+    TEST_EXPECT_EQ(c_count, 1u, "no refused post reached the child's ring");
+    TEST_EXPECT_EQ(c_fill_bad, 0u, "the fill posts all landed");
+    TEST_EXPECT_EQ(r_full, -(s64)T_E_AGAIN, "a full ring is EAGAIN");
+    TEST_EXPECT_EQ(s_tty, -(s64)T_E_INVAL, "self: tty:susp is EINVAL");
+    TEST_EXPECT_EQ(s_snare, -(s64)T_E_INVAL, "self arm: a snare is never queued (the entry ends the caller)");
+    TEST_EXPECT_EQ(s_count, 0u, "and the caller's ring stayed empty");
+    TEST_EXPECT_EQ(s_fill_bad, 0u, "the self fill posts all landed");
+    TEST_EXPECT_EQ(s_full, -(s64)T_E_AGAIN, "self: a full ring is EAGAIN");
+    TEST_EXPECT_EQ(r_dead, (s64)0, "a dead, unreaped child accepts it");
+    TEST_EXPECT_EQ(r_dbogus, -(s64)T_E_INVAL, "but not a name that is no note");
+    TEST_EXPECT_EQ(r_dsnare, -(s64)T_E_INVAL, "nor a snare: a dead child is still another Proc");
+    TEST_EXPECT_EQ(r_dtty, -(s64)T_E_INVAL, "nor a tty name");
+    TEST_EXPECT_EQ(c_after, c_before, "and nothing was queued to it");
+    TEST_EXPECT_EQ(r_odead, -(s64)T_E_ACCES, "a dead non-child reads EACCES: the gate is asked first");
+    TEST_EXPECT_EQ(r_odbogus, -(s64)T_E_INVAL, "and a refused name to it reads EINVAL: the name before the gate");
+}
+
+// The snares a Proc may post to itself are exactly the ones the phenotype's
+// kill ends its caller with: one set, compared row by row against the death
+// table rather than against a list a second change could forget.
+void test_notes_self_death_snare(void) {
+    u32 rows = 0, phen = 0, native = 0;
+    for (u32 i = 0; notes_snare_death_name_for_test(i); i++) {
+        const char *row = notes_snare_death_name_for_test(i);
+        rows++;
+        bool by_phenotype = false;
+        for (u64 sig = 1; sig <= VIV_NSIG; sig++) {
+            const char *name = NULL;
+            if (vivarium_kill_decide(sig, &name) == VIV_KILL_SELF_DEATH &&
+                name && fdl_str_eq(name, row)) {
+                by_phenotype = true;
+            }
+        }
+        const char *got = notes_self_death_snare(row);
+        if (by_phenotype) phen++;
+        if (got) native++;
+        TEST_ASSERT((got != NULL) == by_phenotype,
+                    "a snare is self-postable natively iff the phenotype's kill ends its caller with it");
+        TEST_ASSERT(!got || fdl_str_eq(got, row), "and it answers with that snare's own name");
+    }
+    TEST_ASSERT(rows > 0 && phen > 0, "the walk saw the death table and the phenotype's self deaths");
+    TEST_EXPECT_EQ(native, phen, "the two sets have the same size");
+
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_SNARE_ALIGN) == NULL, "snare:align stays the kernel's");
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_SNARE_BTI) == NULL, "snare:bti stays the kernel's");
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_SNARE_BRK) == NULL, "snare:brk stays the kernel's");
+    TEST_ASSERT(notes_self_death_snare("snare:") == NULL, "the bare prefix is no snare");
+    TEST_ASSERT(notes_self_death_snare("snare:segvx") == NULL, "nor is a longer name");
+    TEST_ASSERT(notes_self_death_snare(NOTE_NAME_TERM) == NULL, "an ordinary note is not a death");
+    TEST_ASSERT(notes_self_death_snare(NULL) == NULL, "NULL is refused");
 }

@@ -114,7 +114,8 @@ a read fails cleanly instead of resolving to whatever now occupies its slot. But
 the id alone is not enough, because ids restart at 1 in every process while the
 mount is global — so two unrelated processes' first variables would both be
 "file 1" and *claim to be the same file*. Each environment therefore also mints
-a **device number**, and the pair names the file. This is not tidiness: the
+a **device number** (64 bits, from the never-wrapping minter every Dev instance
+uses, [[sub-kernel-spoor]]), and the pair names the file. This is not tidiness: the
 executable-image cache is keyed on exactly that pair, so without it executing a
 path under `/env` could serve one process the contents of another's variable.
 **A cache in an unrelated subsystem is what makes the identity load-bearing.** A

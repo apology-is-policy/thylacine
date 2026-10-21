@@ -158,6 +158,7 @@ static void srv_clear_locked(struct SrvService *e) {
     for (u32 i = 0; i < SRV_NAME_MAX; i++) e->name[i] = 0;
     e->poster_stripes = 0;
     e->poster_pid     = 0;
+    e->poster_principal = PRINCIPAL_INVALID;
     e->ring_msize     = 0;
     e->cape           = false;
     e->remote         = false;
@@ -450,6 +451,7 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     for (u8 i = 0; i < name_len; i++) e->name[i] = name[i];
     e->poster_stripes = stripes;
     e->poster_pid     = poster->pid;
+    e->poster_principal = __atomic_load_n(&poster->principal_id, __ATOMIC_ACQUIRE);
     e->mode           = mode;
     e->ring_msize     = ring_msize;
     e->cape           = cape;
@@ -495,6 +497,7 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
         svc->state          = SRV_STATE_TOMBSTONED;
         svc->poster_stripes = 0;
         svc->poster_pid     = 0;
+        svc->poster_principal = PRINCIPAL_INVALID;
     }
     spin_unlock_irqrestore(&svc->reg->lock, s);
 }
@@ -626,6 +629,7 @@ static void srv_proc_exit_notify_in(struct SrvRegistry *reg, struct Proc *p) {
             e->state          = SRV_STATE_TOMBSTONED;
             e->poster_stripes = 0;
             e->poster_pid     = 0;
+            e->poster_principal = PRINCIPAL_INVALID;
             // Drain the accept backlog: no live server remains to accept
             // these connections, so each is torn down (its client wakes
             // with EOF rather than hanging on a dead server).
@@ -1074,6 +1078,7 @@ s64 devsrv_open_errno(struct Spoor *c) {
 struct srv_post_snapshot {
     struct SrvService *service;
     u64 generation, poster_stripes;
+    u32 poster_principal;
     enum srv_mode mode;
     u32 msize;
     bool cape, remote, cap_posted;
@@ -1093,7 +1098,8 @@ static int srv_capture_post(struct SrvRegistry *view, const char *name, u8 len,
                 !(routed && svc->cap_posted);
     *out = (struct srv_post_snapshot) {
         .service = svc, .generation = svc->generation,
-        .poster_stripes = svc->poster_stripes, .mode = svc->mode,
+        .poster_stripes = svc->poster_stripes,
+        .poster_principal = svc->poster_principal, .mode = svc->mode,
         .msize = svc->ring_msize, .cape = svc->cape,
         .remote = svc->remote, .cap_posted = svc->cap_posted,
     };
@@ -1156,9 +1162,11 @@ static int srv_connect_prepare(struct SrvRegistry *view, const char *name, u8 le
             post.cap_posted, id->stripes == post.poster_stripes, id->access.caps))
         return -T_E_ACCES;
     int err = 0;
+    // Peer and server identity captured BY VALUE, as the connection keeps them.
     struct SrvConn *cn = srvconn_create_in(view->domain, &err, id->stripes, id->pid,
+                                         id->access.principal_id,
                                          id->console_attached, post.poster_stripes,
-                                         post.msize);
+                                         post.poster_principal, post.msize);
     if (!cn) return err ? err : -T_E_NOMEM;
     if (post.mode == SRV_MODE_BYTE) srvconn_set_byte_mode(cn);
     if (post.cape) srvconn_set_cape(cn);
@@ -1313,8 +1321,8 @@ static struct Spoor *devsrv_create(struct Spoor *c, const char *name, int omode,
 // so the peer wakes, then release the reference. A Spoor with aux == NULL
 // (a failed/transient walk clone normalized in devsrv_walk) is a clean
 // no-op.
-static void devsrv_close(struct Spoor *c) {
-    if (!c || c->dc != 's' || !c->aux) return;   // root sans-reg / transient — no-op
+static int devsrv_close(struct Spoor *c) {
+    if (!c || c->dc != 's' || !c->aux) return 0;   // root sans-reg / transient — no-op
     u64 m = *(const u64 *)c->aux;
     if (m == SRV_REGISTRY_MAGIC) {
         // A /srv root instance: drop its registry ref (the last drop drains
@@ -1358,6 +1366,7 @@ static void devsrv_close(struct Spoor *c) {
         extinction("devsrv_close: Spoor aux has unknown magic (corruption)");
     }
     c->aux = NULL;
+    return 0;
 }
 
 // read — a connection Spoor's read drains the c2s ring (the bytes the

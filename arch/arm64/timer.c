@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include <thylacine/extinction.h>
+#include <thylacine/poll.h>     // the wall-clock step list
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
@@ -216,10 +217,17 @@ u64 timer_now_ns(void) {
          + (cnt % g_freq) * 1000000000ull / g_freq;
 }
 
+u64 timer_ns_to_counter_at(u64 ns, u64 freq_hz) {
+    if (freq_hz == 0) return 0;
+    u64 sec = ns / 1000000000ull;
+    // CNTFRQ is 32 bits, so the product stays below 1e9 * 2^32 and fits.
+    u64 sub = (ns % 1000000000ull) * freq_hz / 1000000000ull;
+    if (sec > (~0ull - sub) / freq_hz) return ~0ull;
+    return sec * freq_hz + sub;
+}
+
 u64 timer_ns_to_counter(u64 ns) {
-    if (g_freq == 0) return 0;
-    return (ns / 1000000000ull) * g_freq
-         + (ns % 1000000000ull) * g_freq / 1000000000ull;
+    return timer_ns_to_counter_at(ns, g_freq);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +284,30 @@ void timer_set_wallclock_anchor(u64 epoch_seconds) {
     wallclock_publish_ns(epoch_seconds * 1000000000ull);
 }
 
+// The sleepers whose deadline is an instant on the wall clock (VIVARIUM 6.29:
+// clock_nanosleep with TIMER_ABSTIME on CLOCK_REALTIME). Each counts toward a
+// monotonic deadline derived through the offset, so a re-anchor must wake it
+// to derive again.
+static struct poll_waiter_list g_wallclock_step_waiters = POLL_WAITER_LIST_INIT;
+
+void timer_wallclock_step_register(struct poll_waiter *pw) {
+    poll_waiter_list_register(&g_wallclock_step_waiters, pw);
+}
+
 // Runtime re-anchor (SYS_CLOCK_SETTIME, net-7a) at full-nanosecond granularity.
 // A distinct name from the boot anchor gives the audit-trigger surface a clean
 // hook; the publish is the same single atomic store. CLOCK_MONOTONIC
 // (timer_now_ns) is untouched. The caller (sys_clock_settime_handler) bounds
 // epoch_ns so the seconds*1e9 + nsec composition cannot overflow.
+//
+// The step list is woken AFTER the publish. A sleeper hooks itself on before it
+// reads the offset, so it either reads the new offset or is on the list this
+// walk wakes (register-then-observe, I-9). Every runtime step comes through
+// here. The boot anchor does not: it runs before any process can sleep on the
+// wall clock.
 void timer_reset_wallclock_anchor_ns(u64 epoch_ns) {
     wallclock_publish_ns(epoch_ns);
+    poll_waiter_list_wake(&g_wallclock_step_waiters);
 }
 
 u64 timer_realtime_ns(void) {

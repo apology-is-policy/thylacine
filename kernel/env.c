@@ -183,7 +183,7 @@ void env_truncate(struct Proc *p, u64 id) {
 // The Env's device number (V-4b-5). Lock-free: assigned once at env_alloc, before
 // the Env is published, and never mutated. 0 means "no env yet" -- honest, and
 // harmless because an Env that does not exist has no entries to be confused with.
-u32 env_devno(struct Proc *p) {
+u64 env_devno(struct Proc *p) {
     if (!p) return 0;
     struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
     return e ? e->devno : 0;

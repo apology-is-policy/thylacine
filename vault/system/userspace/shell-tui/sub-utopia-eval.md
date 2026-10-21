@@ -26,6 +26,7 @@ abis: []
 design:
   - "docs/UTOPIA-SHELL-DESIGN.md sections 5-10"
 created: 2026-08-03
+updated: 2026-10-14
 updated: 2026-10-01
 ---
 ## October 1 spawn and foreground recheck
@@ -235,6 +236,28 @@ including a stop. No note forwarding happens on this path. Every job-control arm
 is inert while `job_control` is `None`, so the console path is unchanged by the
 existence of the other one.
 
+The stop-aware wait returns the kernel's packed `wait(2)` word, and
+`jobs::status_of_packed` turns a reaped one into `$status`: the exit code for
+an exit, **128 + the signal** for a death by note or fault (gcpark-b,
+2026-10-12) — the bash convention, so a job ended by Ctrl-C reads 130 and one
+that called `abort()` 134. The kernel had no signalled shape before gcpark-b,
+and this path read every death as exit 1; with the shape in the word, the old
+decode would have read a death as `$status` 0, which is why the decoder and
+the kernel change landed together. Since 2026-10-13 every other wait packs too
+([[dec-2026-10-13-ut-status-packed]]; gcpark-b audit F3): the console and
+passthrough paths (`exec_external_raw`, `exec_external_passthrough`), command
+substitution, `wait_pids_interruptible` (its blocking degrade and its WNOHANG
+sweep), the background reaper and the `wait` builtin pass `T_WAIT_PACKED`
+(with `T_WAIT_WNOHANG` where they poll) and decode a reaped word once with
+`status_of_packed`, so a death by note sets `$status` to 128 plus the signal in
+a script and a substitution as at the prompt, and the job table holds decoded
+statuses on every path. A raw 1 read through the decoder would be SIGHUP (129)
+and a packed exit read raw would be N << 8, so the flag and the decode change
+together at each site. `status_of_packed_reads_exits_and_deaths` is the host
+test; `pty-4.exp` requires 130 after `fg` + Ctrl-C, and 139 for
+`pouch-hello-fault` in a `let x = $(...)` and as a script's exit code (a
+failed command ends a script, which exits with that `$status`).
+
 The pts slave is not directly pollable — `dev9p.poll` reports it always-ready —
 so for fd-0 input readiness the shell polls a side fd, `/dev/pts/<n>ready`
 (`JobControlState.poll_in_fd`), while still reading fd 0 itself; a failed
@@ -305,7 +328,30 @@ through `note_class_for_name`, where any `tty:`-prefixed name (`tty:susp`,
 `tty:winch`, …) resolves to the single `NoteClass::Tty` bit, so `mask note
 'tty:susp'` masks the whole tty family — matched by prefix rather than by
 enumerating the five, because before this arm existed that exact `mask note
-'tty:susp'` parsed, ran its body, and masked nothing.
+'tty:susp'` parsed, ran its body, and masked nothing. `term` maps to its own
+`NoteClass::Term` (2026-10-13).
+
+### `kill` sends `term` by default (2026-10-13)
+
+`kill {%N | pid} [note]` posts `term` when no note is named (operator vote of
+2026-10-13; UTOPIA-SHELL-DESIGN 9.1's terminate request, POSIX `kill`'s
+SIGTERM), so a job it ends reads `$status` 143. From U-7b until S-2 the default
+was `interrupt`: the `snare:term` the design named is kernel-synthetic and no
+userspace-postable terminate request existed. `interrupt` stays Ctrl-C's note
+and `kill` the non-catchable force; a `snare:` name is refused. A `term` the
+shell itself receives with no `on note 'term'` handler falls through
+`dispatch_note`: an interactive shell reads its own notes and ignores it, as
+bash ignores SIGTERM, while a script never opens its notes, so a `term` ends
+it by the kernel's default. `u-job-test` item 12 reads 143 for `kill %1`;
+`u-7-test` flow 5 ends a blocked sleeper once per latch (`kill <pid>
+interrupt` 130, the default 143).
+
+`kill` sends to every pid it names and sets `$errstr` to the first refusal,
+worded from the kernel's reason (2026-10-14,
+[[dec-2026-10-14-postnote-errnos]]): `kill: N: no such process`, `kill: N:
+not a child of this shell`, `kill: N: its note queue is full`, or `kill:
+NAME: not a note a program can send`; until then one message covered all of
+them. A job that has died but not yet been reaped accepts the note.
 
 ### A backslash counts only where a word is a pattern
 
@@ -624,3 +670,6 @@ one.
 
 [[chg-2026-09-06-utopia-eval-shell-arc-notes]] folds the `&&`/`||` eval half,
 the six-entry `$path`, `cd --`, and the settled notes-mask changes.
+
+gcpark-b (2026-10-12) adds `jobs::status_of_packed`: a job-control death sets
+`$status` to 128 + the signal. sig S-1 (2026-10-13) makes every wait pack.

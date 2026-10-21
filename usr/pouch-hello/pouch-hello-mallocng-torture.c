@@ -12,8 +12,8 @@
 // malloc(131072)/fill/verify/free cycles, interleaved second-cycle allocs and a
 // small alloc to perturb the meta area, plus a pthread variant (stratumd is
 // multi-threaded). Detectors: (1) a data verify mismatch -> printf REPRODUCED;
-// (2) mallocng's own integrity assert -> _Exit(127) (per 0012-pouch-mallocng-
-// crash.patch). When built with POUCH_MALLOCNG_DIAG=1 the assert path also dumps
+// (2) mallocng's own integrity assert -> abort() (per 0012-pouch-mallocng-
+// crash.patch): a snare:abort user-fault line, SIGABRT. When built with POUCH_MALLOCNG_DIAG=1 the assert path also dumps
 // sizeclass/idx/maplen/stride + the corrupt p[-8..8] bytes (to fd 2) to pinpoint.
 //
 // fd 1 is joey's relay pipe -> boot-log UART. "mallocng-torture: ALL OK" = clean.
@@ -48,7 +48,7 @@ static int checkb(const unsigned char *p, size_t n, unsigned seed) {
 // stratumd-shaped single-threaded torture: 128K alloc + FULL fill (like the
 // btree-node memcpy), then a second-cycle alloc/free + cross-verify, plus a
 // small alloc to perturb mallocng's meta area. A verify mismatch OR mallocng's
-// own assert (-> _Exit 127) means the corruption reproduced.
+// own assert (-> abort, snare:abort) means the corruption reproduced.
 static int st_torture(unsigned iters) {
     for (unsigned i = 0; i < iters; i++) {
         unsigned char *a = malloc(BIG);

@@ -162,3 +162,10 @@
 # parked at the sentinel, and the loader accepted its ENOSYS: RELRO was never
 # applied. SYS_BURROW_PROTECT's four words, a reduction; ENOSYS now fails.
 0048-pouch-ldso-relro.patch
+# 0049: the signal chunk's S-2 -- SIGTERM posts and receives its own note, `term`
+# (NOTE_BIT_TERM), instead of SIGINT's `interrupt`; a death by it reads SIGTERM.
+# raise(SIGABRT) and kill(self, SIGABRT) are abort()'s death, not EINVAL.
+0049-pouch-sigterm-term-note.patch
+# 0050 (signal chunk S-3): raise()/kill(self) of SIGSEGV/SIGBUS/SIGILL/SIGFPE post
+# the snare to self and die of that signal; kill() reads ESRCH/EPERM, not EIO.
+0050-pouch-self-fault-signals-errnos.patch

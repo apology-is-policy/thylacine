@@ -6,13 +6,13 @@ parent: moc-kernel-ninep
 code: [kernel/dev9p_poll.c]
 audit: hard
 guarded-by: [inv-i9]
-validated-by: [spec-net-poll, spec-net-poll-teardown, gate-smp]
+validated-by: [spec-net-poll, spec-net-poll-teardown, spec-loom-role, gate-smp]
 locks: [lock-dev9p-poll-glock, lock-9p-client-c-lock]
 hazards: [haz-death-path-wake]
 abis: []
 design: [docs/NET-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-28
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -26,7 +26,9 @@ ARM the server holds until the file is ready, which is only ever a wake. The
 poll core ([[sub-kernel-poll]]) drives both through three Dev slots. Nothing
 synchronous waits on either reply, so a boot-spawned GLOBAL poll-pump
 kthread drives the 9P elected reader (#841) for them — the cons_poll
-`console_mgr` / Loom-4 SQPOLL analog.
+`console_mgr` / Loom-4 SQPOLL analog. Since 2026-10-06 it reads for every
+client with a read out, over a ready stream only, and sleeps on hooks on all
+of them (LOOM.md 8.6, the fan-in).
 
 Before #98 one deferred read did both jobs, read back through a cache, and a
 truthful "not ready" was unrepresentable on the wire: a zero-timeout poll of a
@@ -36,8 +38,10 @@ and the vivarium widened a zero timeout to 10 ms to hide it.
 ## Contract
 
 - `dev9p_poll_snapshot(c, events, s)` — `.poll_snapshot`. A file without
-  `QTPOLL`, or on a client whose transport has no recv deadline, is answered
-  here: POSIX always-ready (`events & POLL_REQUESTABLE`), `s->state`
+  `QTPOLL` is answered here (until 2026-10-06 so was one on a client whose
+  transport had no recv deadline, which covered every pipe-attached mount;
+  any transport can be read for now, so a pipe-served `QTPOLL` file is
+  remote too): POSIX always-ready (`events & POLL_REQUESTABLE`), `s->state`
   ANSWERED, no request. Otherwise it sets `s->remote`, builds the request on
   first use (reused on a resend), marks the slot SENT and submits a Tread at
   offset `mask | P9_POLL_SNAPSHOT`, count 4. A shortage leaves the slot
@@ -123,16 +127,33 @@ the poller looks, so the woken poller samples again.
 - Phase 2 (outside the lock): each reaped arm's list is walked
   (`poll_waiter_list_wake`, process context), then the arm is freed. Phase
   2b frees the stranded arms, already flushed.
-- Phase 3: `dev9p_poll_collect_clients` gathers the DISTINCT clients with a
-  read out — a non-terminal arm or a live snapshot (dedup by pointer, bounded
-  `DEV9P_POLL_MAX_PUMP` 16) — each with an extra session ref as the
-  borrow-guard, and pumps each client's elected reader once with a 20 ms
-  frame-boundary deadline (`DEV9P_POLL_IDLE_NS`). BUSY (a sync reader holds
-  the role) or DEAD (only an UNSENT snapshot can still name a dead client,
-  until its poller resends into it) yields the CPU rather than spin.
-- Nothing out → park on the rendez; the cond re-reads both atomic counts
-  under the rendez lock (`op_count || snap_live`), each bumped before the
-  submitter's wake — register-then-observe, the cons_mgr discipline.
+- Phase 3 (the fan-in, 2026-10-06): `dev9p_poll_collect_clients` gathers
+  EVERY distinct client with a read out — a non-terminal arm or a live
+  snapshot — onto an intrusive list threaded through the clients
+  themselves (`poll_next`, `poll_listed`; one kthread, so one entry per
+  client and no cap), taking a session ref on each (`poll_pin`, NULL for a
+  test client with no attach session). It pumps each once with
+  `p9_client_reader_pump_ready`, which reads only over a ready stream and
+  only what is waiting (`recv_now`): no server -- pipe-served sessions are
+  remote now, and any process can serve one and keep its read end -- can hold
+  the kthread in a recv; a frame found in part stays with the client. A frame read anywhere ends the cycle (an
+  answer may have landed). Otherwise it hooks every client
+  (`p9_client_reader_hook` into `poll_hook`: a held role on the role-waiter
+  list, a free one on the transport's readiness list) and parks. Any client
+  with a frame on a free role (hook returns 0) skips the park instead. The
+  refs and hooks are released after the park, the ref last, since it may
+  free the client.
+- The park's condition, read under the rendez lock: the KICK generation has
+  moved since the cycle sampled it (before Phase 1), or a hook flagged.
+  Every change to the reads out kicks -- a generation bump, then a wake --
+  at an arm sent or answered, a snapshot sent or released, and an arm
+  cancelled at close. The kthread holds a ref and a hook on every listed
+  client across the park, so a read that leaves must end it, or both
+  outlive the reads that named the client. With a non-terminal arm linked
+  the park is bounded by the 20 ms collector sweep (`DEV9P_POLL_GC_NS`): a
+  poller's departure signals nothing (the core unhooks without telling the
+  Dev), and only the sweep finds an arm whose pollers have all gone. With no
+  arm linked the park is unbounded.
 
 **A SHORTAGE IS NOT AN ANSWER.** `p9_client_submit_async` reports no free tag
 or a full send ring as `-P9_E_AGAIN` (NP-4b, [[sub-kernel-ninep-client]]) and
@@ -179,7 +200,12 @@ g_lock, so the edge from g_lock to c->lock cannot close a cycle. The registry
 lock is never held across a wakeup, a pump, a snapshot submit or an unref.
 Memory ordering: a snapshot's ANSWERED is a RELEASE store the settle's cond
 ACQUIRE-loads under the rendez lock; `terminal` and `live` are RELEASE/ACQUIRE
-pairs; both counts are RELEASE-mutated and ACQUIRE-read by the park cond.
+pairs; the kick generation is a RELEASE bump before the wakeup and an
+ACQUIRE read in the park cond, which also reads each hook's flag (set under
+its list's lock, then the wakeup). The hooks add `c->lock → role-waiter list
+lock` and `c->lock → the transport's readiness lock` (filed under the client
+lock, [[sub-kernel-ninep-transport]]); their walks wake the kthread's rendez
+from under the list locks, a leaf.
 The `poll_list is empty at close` premise rests on the poll core's discipline:
 a registered poller's Spoor obj-ref is retained until after its unregister
 sweep (the 2C-F1 held[] rule), so the last-ref close cannot run with a live
@@ -212,15 +238,13 @@ out of the collect.
 ## Performance
 
 One server round trip per poll pass, whatever the fd count: every snapshot of
-a pass is sent before the core waits. The 20 ms idle deadline makes a parked
-arm cost the kthread a 50 Hz wake ([[seam-221-idle-pump-wake]]); it is
-load-bearing — it lets the kthread collect stranded arms and notice new work
-instead of wedging in a never-ready server's recv. KNOWN (in OPEN-BUGS,
-needs design): the one pump serializes clients, and a new snapshot's wake
-does not interrupt a pump already blocked in another client's recv, so a
-snapshot's answer can wait up to one 20 ms idle pump — each pass, now that
-every sample is a snapshot. Correctness holds (the settle waits; the 1 s bound
-is far away).
+a pass is sent before the core waits. The kthread never blocks at a frame
+boundary, so a reply on one client is read at once whatever another client is
+doing, and a snapshot's answer waits for no pump. While an arm is linked the
+kthread still wakes at 50 Hz for the collector sweep: it collects, pumps
+nothing, hooks and parks again. Until 2026-10-06 that wake was a pump with a
+20 ms receive deadline per client, and a new snapshot's answer could wait
+behind a pump blocked in another client's receive.
 
 ## Prosecution
 
@@ -237,37 +261,36 @@ is far away).
   registry lock ([[spec-net-poll-teardown]] `BUGGY_SPLIT_GC`).
 - **The borrow-guard**: the kthread never derefs a request after the unlock
   without a pin it took under the lock; one session ref per collected client,
-  dropped per pump.
-- **The fairness cap's cliff**: more than 16 distinct QTPOLL clients STARVES
-  the tail outright (LIFO head-anchored collect, no rotation) —
-  [[seam-223-pump-tail-starvation]]; a per-client work queue must use a fair
-  start.
+  held across the pump, the hook and the park, dropped after the unhook.
+- **The kick discipline**: every site that adds or removes a read out must
+  kick the kthread, or it parks holding a ref and a hook on a client no read
+  names any more (a session kept alive past its last close) -- or, for an
+  added read, sleeps over a client it never collected.
+- **One hook per client, one kthread**: the entry in `struct p9_client` is
+  the kthread's alone. A second collector, or a collect while a previous
+  cycle's list is still hooked, would relink a hooked entry.
 
 ## Seams
 
-- [[seam-221-idle-pump-wake]] — the 20 ms re-poll while an arm is parked
-  (v1.x: transport wake-on-write).
-- [[seam-223-pump-tail-starvation]] — the >16-client LIFO cliff.
-- The pump's cross-client serialization (Performance) — the same per-client
-  pump would close both.
+- The 20 ms collector sweep while an arm is linked: closing it needs the
+  poll core to tell the Dev when a poller leaves.
+- Closed 2026-10-06 by the fan-in: [[seam-221-idle-pump-wake]] (the
+  transport wake-on-write is `recv_ready`; the periodic wake is now the
+  sweep alone), [[seam-223-pump-tail-starvation]] (no cap), and the pump's
+  cross-client serialization.
 - The pouch ready-fd slot-reuse ABA (net-6b F4, task #222) lives on the
   pouch surface.
-- The deterministic two-QTPOLL-client fairness regression for F1 remains
-  owed (no in-tree test drives two clients); [[seam-841-mi-harness]] is the
-  family's umbrella.
+- [[seam-841-mi-harness]] is the multi-in-flight family's umbrella;
+  `dev9p.poll_reads_every_client` now drives seventeen QTPOLL clients.
 
 ## Caveats
 
 - An arm's session ref means a stranded arm holds the whole attach session
-  alive until collected — bounded by the kthread's 20 ms cycle.
+  alive until collected — bounded by the 20 ms collector sweep.
 - A terminal arm superseded by a fresh one stays in the registry until the
   kthread reaps it (`ps->op` now names the fresh one); its walk still wakes
   the pollers it served, and each arms again for itself. The registry, not
   `ps->op`, is the ownership root.
-- On the multi-queue loopback test transport an armed recv deadline returns
-  at once on an empty ring, so while a test holds an arm the kthread pumps
-  in a loop rather than every 20 ms; kthreads are preemptible, so it costs
-  CPU, not progress.
 
 ## Provenance
 
@@ -290,7 +313,11 @@ waits for the kthread to park before it destroys the client):
 `widen_keeps_the_old_arm_until_replaced`, `cancel_at_close`, and
 `gc_flushes_with_the_unlink` (the kthread held between its collect and its
 frees while the file closes) — each shown RED on its sabotaged kernel, on
-the assert that names the rule. The live path: the joey net-6b boot probe,
+the assert that names the rule — and `reads_every_client` (seventeen
+sessions with an arm held on each; the oldest, which the old 16-client cap
+never reached, is answered and its poller wakes; the newest answers first
+as a control). A test that appends a reply to the loopback by hand walks its
+readiness list, as a real arrival does, or the kthread never reads it. The live path: the joey net-6b boot probe,
 `netd: net-6b ready E2E PASS`, the pty-probe's ready wire, viv-pheno-probe
 L113 (a ready socket at timeout 0), and [[gate-smp]].
 

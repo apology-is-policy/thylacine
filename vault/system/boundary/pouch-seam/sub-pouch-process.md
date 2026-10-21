@@ -17,7 +17,7 @@ validated-by: [prose, gate-smp]
 locks: []
 design: ["docs/POUCH-DESIGN.md", "docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-29
+updated: 2026-10-12
 ---
 ## Identity — the calls that could not report failure (A-6)
 
@@ -82,7 +82,12 @@ is a Burrow.
   translation; `wait4`'s `rusage` is zero-filled.
 - `pipe` / `pipe2` → `SYS_PIPE` (8) through a bespoke two-register asm
   shim. `dup2`/`dup3` onto a chosen target: `ENOSYS`.
-- `abort()` and mallocng's internal `assert` → `_Exit(127)`.
+- `abort()` → one `brk #0xab06`, which the kernel turns into the fault note
+  `snare:abort`: the Proc dies signalled, `WTERMSIG == SIGABRT`. mallocng's
+  internal `assert` calls `abort()`. `_Exit(127)` follows the `brk` only as a
+  fallback that a kernel honouring the immediate never reaches.
+- `waitpid` reports the POSIX status word: `WIFEXITED`/`WEXITSTATUS` for an
+  exit, `WIFSIGNALED`/`WTERMSIG` for a death by note (gcpark-b, 2026-10-12).
 - `__pouch_env_init()` populates `__environ` from `/env` before the ctors.
 - `mmap` / `munmap` / `mprotect` / `madvise`: the memory seam, [[sub-pouch-mem]]
   (0003, made exact at B-1b by 0044). `brk` stays a sentinel here.
@@ -109,14 +114,18 @@ non-existent fd and fail the whole spawn.
 the list at consecutive lowest-free slots, so a HOLE (`{0,2}`) cannot be
 expressed and is `EINVAL`.
 
-**Two wait translations are load-bearing.** The kernel's `WAIT_CONTINUED`
-is 4 while musl's `WCONTINUED` is 8, and the kernel REJECTS unknown flag
-bits — so the option word is mapped bit-by-bit, never passed raw. And a
-plain wait returns the RAW exit status (0/1), which musl's `W*` macros
-would decode as Linux's packed word — so it is repacked
-`(raw & 0xff) << 8`, making `WIFEXITED` true and `WEXITSTATUS == raw`.
-A job-control wait already returns a Linux-packed word and is forwarded
-verbatim.
+**The wait option word is translated; the status word is not.** The
+kernel's `WAIT_CONTINUED` is 4 while musl's `WCONTINUED` is 8, and the
+kernel REJECTS unknown flag bits — so the option word is mapped
+bit-by-bit, never passed raw. `__pouch_wait` then always adds
+`POUCH_WAIT_PACKED` (8, the kernel's `WAIT_PACKED`), so the kernel returns
+the Linux `wait(2)` word for every wait: `(code << 8)` for an exit,
+`signal & 0x7f` for a death by note, the stopped and continued shapes when
+asked. That word goes to the caller verbatim. Before gcpark-b a plain wait
+returned the RAW status (0/1) and this patch repacked it `(raw & 0xff) << 8`
+— so a child killed by a fault or a note read as `WIFEXITED` with status 1,
+and an `abort()` read as exit 127. The kernel now records the signal
+([[sub-kernel-death]]), and only the packed word can carry it.
 
 **`pipe` needs its own `svc`.** `SYS_PIPE` returns the read fd in `x0`
 and the write fd in `x1`; musl's `__syscall` captures only `x0`, so
@@ -131,15 +140,26 @@ onto-target fails LOUD with `ENOSYS`; `old == new` returns `new`
 best-effort, since there is no rights-independent fd-existence probe (a
 0-rights dup is rejected, and the source's own rights are unknown).
 
-**`_Exit(127)` replaces `a_crash()` twice, for one reason.** musl's
-`abort()` and mallocng's internal `assert` both terminate via
-`a_crash()` — a deliberate NULL deref. Under v1.0's
-`FAULT_UNHANDLED_USER` policy an EL0 fault EXTINCTS THE KERNEL, so every
-`assert()` in every pouch program was a whole-boot kill. 0011 and 0012
-route both to `_Exit(127)` — the status musl itself reaches at the bottom
-of `abort()`. They are separate patches deliberately: 0012 touches a
-macro every mallocng allocation instantiates, so a future audit can
-reason about the hot-path change alone. 0013 adds an opt-in
+**`abort()` dies of `snare:abort`; mallocng's `assert` calls it.** musl's
+`abort()` and mallocng's internal `assert` both ended in `a_crash()` — a
+deliberate NULL store. When an EL0 fault extincted the kernel, that made
+every `assert()` a whole-boot kill, so 0011 and 0012 routed both to
+`_Exit(127)`: an orderly exit, but one a parent could not tell from a
+program that returned 127. Since gcpark-b (2026-10-12) 0011's `abort()`
+executes one `brk #0xab06`. The kernel's EL0 `brk` handler reads the
+immediate ([[sub-kernel-exception]]), and `0xab06` (the kernel's
+`SNARE_ABORT_BRK_IMM`) names `snare:abort`, so the Proc dies like any fault: the console prints
+the `user fault: ... reason="snare:abort"` line with the program counter,
+the group terminates, and the parent's `waitpid` reads `WIFSIGNALED` with
+`SIGABRT`. A dedicated immediate rather than a NULL store, because a store
+would read as `snare:segv` and a stray `brk #0` (a compiler trap) as
+`snare:brk`. `_Exit(127)` stays after the `brk` as an unreachable fallback.
+SIGABRT handlers do not run: there is no signal delivery to run them
+(`raise(SIGABRT)` still answers `EINVAL`; [[sub-pouch-signal]]). 0012 now
+makes mallocng's `assert` call `abort()` instead of `a_crash()`, so a heap
+corruption reports as an abort. They are separate patches deliberately:
+0012 touches a macro every mallocng allocation instantiates, so a future
+audit can reason about the hot-path change alone. 0013 adds an opt-in
 (`POUCH_MALLOCNG_DIAG`) dump of the corruption pattern *before* the
 assertion fires, written with a direct `SYS_write` so it survives a
 corrupted heap.
@@ -196,6 +216,12 @@ of the next section's lesson a build step can close, the header against the
 kernel. The other half, the header against the archive that gets linked, still
 has nothing checking it.
 
+**`_pad_envp` is `ext_flags` (2026-10-06).** The record's word at offset 44
+announces tails after the record ([[sub-kernel-syscall-abi]]); the patch renames
+it and pouch still zero-fills it, so no pouch spawn sends a tail.
+`posix_spawn_file_actions_addchdir` is not wired to the cwd tail, and the
+`envp` argument would be a tail of its own ([[seam-pouch-spawn-envp]]).
+
 ### The asserts all held and the binaries were wrong anyway
 
 Worth recording in full, because it is the sharpest available statement of
@@ -232,13 +258,14 @@ slot count, because many opens can target the same bounded slot.
 
 ## Invariants enforced
 
-- **[[inv-i24]] (consumer side).** `_Exit` routes through
-  `__NR_exit_group` → `SYS_EXIT_GROUP`, the cascading group terminate —
-  which is what makes the 0011/0012 overrides safe in a multi-thread
-  Proc. Before #809 they carried an explicit safe-use envelope
-  ("reachable only pre-thread-spawn or post-join") because `SYS_EXITS`
-  with live peers extincted the kernel; both patch headers still describe
-  that envelope and the `SYS_EXIT_GROUP` lift they were waiting for.
+- **[[inv-i24]] (consumer side).** An `abort()` from any thread kills the
+  whole group: the `brk` lands in `proc_fault_terminate`, which terminates
+  the group exactly once and records `SIGABRT` with the first claim, so a
+  peer dying in the same group cannot replace it. The `_Exit(127)` fallback
+  routes through `__NR_exit_group` → `SYS_EXIT_GROUP`, the same cascading
+  terminate. Before #809 both overrides carried a safe-use envelope
+  ("reachable only pre-thread-spawn or post-join") because `SYS_EXITS` with
+  live peers extincted the kernel; the patch prose no longer describes it.
 - **P-3** — `dup2`-onto-target, `FDOP_CHDIR`, file-backed `mmap`, and
   `MAP_FIXED` all fail loud rather than approximating.
 
@@ -247,7 +274,9 @@ slot count, because many opens can target the same bounded slot.
 `ENOENT` for every `SYS_SPAWN_FULL_ARGV` failure (name not resolvable /
 bad ELF / OOM / a listed fd not a Spoor — collapsed at v1.0); `E2BIG`
 for argv overflow; `EMFILE` for fd-list overflow and for pipe failure;
-`ECHILD` for every wait failure. `MAP_FAILED` + `ENOSYS` for the refused
+`ECHILD` for every wait failure. A failed assertion or `abort()` is not an
+error return: the program dies of `snare:abort` and its parent reads
+`SIGABRT`. `MAP_FAILED` + `ENOSYS` for the refused
 mmap forms.
 
 ## Performance
@@ -261,13 +290,18 @@ per process. Every `malloc` past mallocng's first is userspace-only.
 - The fd model's contiguity check and the `PSPAWN_MAXSLOT` bounds must
   hold for a crafted `file_actions` list (the `opened[]` guard exists
   precisely because open count is not bounded by slot count).
-- Both wait translations (flags bit-by-bit, status repack) — passing
-  either through raw is silently wrong, not loud.
+- The wait flag translation (bit-by-bit, plus `POUCH_WAIT_PACKED` on every
+  call) — a raw musl flag word is rejected loud, but dropping
+  `POUCH_WAIT_PACKED` is silent: every death would read as an exit.
 - `__pouch_pipe`'s hand-rolled `svc` must name a real number; it is
   outside the sentinel guard.
-- The two `_Exit(127)` overrides must not regress to `a_crash()`; and any
-  new `a_crash()` reachable from a pouch program is a kernel-extinction
-  path.
+- `abort()`'s `brk` immediate must equal the kernel's
+  `SNARE_ABORT_BRK_IMM`; any other immediate dies as `snare:brk` (SIGTRAP).
+  The patch writes the immediate as an asm literal, which no compile-time
+  check can compare with a kernel header, so the pin is at run time:
+  pouch-hello-signals' `abort` leg requires `SIGABRT` and fails on `SIGTRAP`. mallocng's
+  `assert` must keep calling `abort()`, not `a_crash()` (which reads as
+  `snare:segv`).
 - `__pouch_env_init` must stay fail-soft and stay ordered after
   `__init_libc` and before the ctors.
 - The 104-byte spawn-args mirror against the KERNEL's struct — **size AND
@@ -310,7 +344,9 @@ retargeted to `SYS_BURROW_ATTACH_LAZY` at #321) →
 [[chg-2026-05-26-16bg-hardening-3b]] (0012) +
 [[chg-2026-05-26-16bg-hardening-3c]] (0013) →
 [[chg-2026-07-23-cl1b0-env]] (0025) →
-[[chg-2026-07-23-cl1b-process]] (0026).
+[[chg-2026-07-23-cl1b-process]] (0026) →
+gcpark-b (2026-10-12: 0011 `brk #0xab06`, 0012 assert → `abort()`, 0026
+`POUCH_WAIT_PACKED` and the verbatim status word).
 
 The 104-byte widening, the twenty offset pins, and the stale-archive
 relink are [[chg-2026-08-16-pouch-offset-pins]].

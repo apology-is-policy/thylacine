@@ -99,20 +99,24 @@ struct Thread;
 void hwdebug_switch_in(struct Thread *next);
 
 // The EC 0x30 (breakpoint from EL0) handler. Returns true if handled: a matched
-// bp -> the whole Proc stop is delivered (proc_debug_stop_deliver) and the
+// bp -> the whole Proc stop is delivered (proc_debug_fault_stop) and the
 // current thread parks at the EL0-return tail; OR a benign STALE bp after a table
-// change (detach cleared the table before this CPU reloaded) -> this CPU's debug
-// regs are disabled and the instruction resumes. Returns false only when
-// `current`'s Proc was never debugged (debug_hw == NULL) -- a truly stray EC the
-// caller treats as fatal (only the kernel ever arms a bp; EL0 cannot).
+// change (detach cleared the table before this CPU reloaded), or a fire the stop
+// refused (no owner, or a dying Proc) -> this CPU's debug regs are disabled and
+// the instruction resumes (a dying thread dies at its tail first). Returns false
+// only when `current`'s Proc was never debugged (debug_hw == NULL) -- a truly
+// stray EC the caller treats as fatal (only the kernel ever arms a bp; EL0
+// cannot).
 bool hwdebug_breakpoint_from_el0(u64 elr);
 
 // The EC 0x32 (software step from EL0) handler. Returns true if handled: an armed
 // step completed (exactly one EL0 instruction executed) -> disarm SS + re-stop
 // the whole Proc so the thread re-parks at the tail (the debugger reads the
-// advanced regs.pc), OR a spurious step EC (no armed step) -> disable SS on this
-// CPU + resume. Returns false only for a corrupt thread/Proc (defensive; only the
-// kernel arms MDSCR.SS, so EL0 can never trigger a spurious step). The SS machine
+// advanced regs.pc; a detached or dying Proc takes no stop, and this CPU's debug
+// regs are disabled instead), OR a spurious step EC (no armed step) -> disable
+// SS on this CPU + resume. Returns false only for a corrupt thread/Proc
+// (defensive; only the kernel arms MDSCR.SS, so EL0 can never trigger a
+// spurious step). The SS machine
 // is armed by el0_return_stop_check (SPSR.SS in the resume frame) +
 // hwdebug_switch_in (MDSCR.SS, per-thread so it survives a mid-step migration).
 bool hwdebug_singlestep_from_el0(u64 elr);
@@ -120,7 +124,8 @@ bool hwdebug_singlestep_from_el0(u64 elr);
 // The EC 0x34 (data watchpoint from EL0) handler (8a-2b-3). Returns true if
 // handled: an armed watchpoint fired (wp_count>0) -> the whole Proc stop is
 // delivered and the current thread parks at the EL0-return tail (the debugger reads
-// regs.pc); OR a benign STALE wp (wp_count==0 after a detach/hwrmwatch cleared the
+// regs.pc; a detached or dying Proc takes no stop, and the fire is treated as
+// STALE); OR a benign STALE wp (wp_count==0 after a detach/hwrmwatch cleared the
 // table before this CPU reloaded) -> this CPU's debug regs are disabled and the
 // access resumes. Returns false only when `current`'s Proc was never debugged
 // (debug_hw == NULL) -- a truly stray EC the caller treats as fatal. `far` is the

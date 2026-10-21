@@ -97,6 +97,10 @@
 // bitmask indexed by Aff0 (== cpu_idx on QEMU virt / GIC-400, max 8 CPUs).
 #define GICD_SGIR_TGT_LIST_SHIFT   16
 #define GICD_SGIR_MAX_TARGET       7
+// Every CPU the kernel can bring up must be an SGI target, or a barrier to it
+// is refused: sched_sync_space extincts on a refusal rather than skip a CPU.
+_Static_assert(DTB_MAX_CPUS <= GICD_SGIR_MAX_TARGET + 1u,
+               "a GICv2 SGI must reach every CPU index below DTB_MAX_CPUS");
 
 // ---------------------------------------------------------------------------
 // GICv2 CPU-interface (GICC) register offsets (relative to the GICC base,
@@ -205,7 +209,15 @@ static struct gic_irq_slot g_handlers[GIC_NUM_INTIDS];
 // LPIs are a separate namespace: never use an architectural INTID as an
 // index into the SPI-sized array. The allocator owns this bounded LPI pool.
 static struct gic_irq_slot g_lpi_handlers[GIC_LPI_COUNT];
-static u64 g_irq_barrier_seen[DTB_MAX_CPUS];
+// The barrier IPI's tickets. A sender adds one to the target's request count
+// and sends; the target's handler stores the request count it reads as done.
+// A ticket is served only by a handler that observed it and then returns (a
+// CSE); a handler already running for an earlier sender may be that one. A
+// count of interrupts taken would also be satisfied by an earlier sender's
+// handler whose increment landed late, before any handler saw the request.
+// done[cpu] has one writer, that CPU's own handler (handlers do not nest).
+static u64 g_barrier_req[DTB_MAX_CPUS];
+static u64 g_barrier_done[DTB_MAX_CPUS];
 
 bool gic_intid_dispatchable(u32 id) {
     return id < GIC_NUM_INTIDS ||
@@ -219,13 +231,40 @@ static struct gic_irq_slot *irq_slot(u32 id) {
 static void irq_barrier_handler(u32 intid, void *arg) {
     (void)intid; (void)arg;
     unsigned cpu = smp_cpu_idx_self();
-    if (cpu < DTB_MAX_CPUS)
-        __atomic_fetch_add(&g_irq_barrier_seen[cpu], 1, __ATOMIC_RELEASE);
+    if (cpu < DTB_MAX_CPUS) {
+        // Ordered after the acknowledge by the DSB that follows the IAR read,
+        // so it sees every ticket taken before the SGI this interrupt serves.
+        u64 req = __atomic_load_n(&g_barrier_req[cpu], __ATOMIC_ACQUIRE);
+        __atomic_store_n(&g_barrier_done[cpu], req, __ATOMIC_RELEASE);
+        // The exception return that follows is the context-synchronization
+        // event a ticket promises, and a CSE does not wait for an earlier load:
+        // the DSB makes it follow the read of the ticket (observe the flag,
+        // then the CSE). On GICv2 the EOI's drained write would order it too.
+        __asm__ __volatile__("dsb sy" ::: "memory");
+    }
 }
 static void irq_barrier_cpu_init(void) {
     // Attach once on the boot CPU; secondary bring-up only enables its bank.
     if (smp_cpu_idx_self() == 0) gic_attach(IPI_IRQ_BARRIER, irq_barrier_handler, NULL);
     gic_enable_irq(IPI_IRQ_BARRIER);
+}
+u64 gic_barrier_send(unsigned cpu) {
+    if (cpu >= smp_cpu_count() || cpu >= DTB_MAX_CPUS) return 0;
+    u64 ticket = __atomic_add_fetch(&g_barrier_req[cpu], 1, __ATOMIC_ACQ_REL);
+    // The ticket, and everything the caller did before, is visible to the
+    // target before the SGI can be. A ticket whose send fails stays
+    // outstanding and is served by the next barrier to that CPU.
+    __asm__ volatile("dsb sy" ::: "memory");
+    if (!gic_send_ipi(cpu, IPI_IRQ_BARRIER)) return 0;
+    return ticket;
+}
+u64 gic_barrier_requests(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return 0;
+    return __atomic_load_n(&g_barrier_req[cpu], __ATOMIC_ACQUIRE);
+}
+bool gic_barrier_reached(unsigned cpu, u64 ticket) {
+    if (cpu >= DTB_MAX_CPUS) return false;
+    return __atomic_load_n(&g_barrier_done[cpu], __ATOMIC_ACQUIRE) >= ticket;
 }
 bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns) {
     if (cpu >= smp_cpu_count() || cpu >= DTB_MAX_CPUS || !timeout_ns) return false;
@@ -233,12 +272,11 @@ bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns) {
     // A thread executing here on the destination cannot overlap an IRQ on
     // that same CPU. Migration after this observation cannot undo the proof.
     if (cpu == smp_cpu_idx_self()) return true;
-    u64 before = __atomic_load_n(&g_irq_barrier_seen[cpu], __ATOMIC_ACQUIRE);
-    if (!gic_send_ipi(cpu, IPI_IRQ_BARRIER)) return false;
+    u64 ticket = gic_barrier_send(cpu);
+    if (!ticket) return false;
     u64 start = timer_now_ns();
     do {
-        if (__atomic_load_n(&g_irq_barrier_seen[cpu], __ATOMIC_ACQUIRE) != before)
-            return true;
+        if (gic_barrier_reached(cpu, ticket)) return true;
         __asm__ volatile("yield" ::: "memory");
     } while (timer_now_ns() - start < timeout_ns);
     return false;
@@ -335,8 +373,11 @@ static inline void write_icc_igrpen1_el1(u64 v) {
 static inline u64 read_icc_iar1_el1(void) {
     u64 v;
     // dsb sy before IAR per ARM IHI 0069 §3.7 to ensure the read is
-    // ordered after any preceding gic_eoi from a re-entry chain.
-    __asm__ __volatile__("dsb sy\nmrs %0, ICC_IAR1_EL1\n" : "=r"(v));
+    // ordered after any preceding gic_eoi from a re-entry chain. The dsb
+    // after it keeps the handler's memory reads from being satisfied before
+    // the acknowledge (Linux's gic_read_iar_common): the barrier handler's
+    // read of its ticket count depends on it.
+    __asm__ __volatile__("dsb sy\nmrs %0, ICC_IAR1_EL1\ndsb sy\n" : "=r"(v) :: "memory");
     return v;
 }
 static inline void write_icc_eoir1_el1(u64 v) {

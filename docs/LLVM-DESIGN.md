@@ -1613,9 +1613,10 @@ both work; fail-soft (a missing `/env` leaves the empty envp). Proven
 in-guest by `/pouch-hello-env` (joey sets two vars, the child inherits a
 copy via the rfork clone, reads both back + confirms an absent var is NULL).
 Full as-built: `docs/reference/78-pouch.md` "The environ populate". The
-`posix_spawn` `envp` argument stays inherited-via-`/env` (the
-`SYS_SPAWN_FULL_ARGV` `_pad_envp` slot reserves the kernel-side per-child
-override); `setenv` mutates only the in-process copy.
+`posix_spawn` `envp` argument stays inherited-via-`/env` (a kernel-side
+per-child override would be a `SYS_SPAWN_FULL_ARGV` record tail, announced
+by an `ext_flags` bit, the word that was `_pad_envp`); `setenv` mutates only
+the in-process copy.
 
 ### 16.11 CL-1b core as-built (posix_spawn / wait4 / pipe2 / dup2)
 
@@ -2268,9 +2269,11 @@ Three shape decisions, each with a live alternative:
   userspace shape: *create → (writer_ptr, exec_ptr)*.
 - **`SYS_ICACHE_SYNC` syncs the kernel direct map, never the user VA.** `dc
   cvau`/`ic ivau` can take translation faults, and a user VA is exactly what a
-  caller can arrange to be unmapped. Architecturally exact on ARMv8 (PIPT data
-  caches; `IC IVAU` invalidates all aliases of the PA) — the same reason Linux's
-  `flush_icache_range` works on linear-map addresses for module text.
+  caller can arrange to be unmapped. The clean is exact through any alias
+  (ARMv8 data caches behave as PIPT). *Corrected at B-2a (2026-10-07):* the
+  invalidate is exact only on a PIPT I-cache, not "all aliases of the PA" as
+  this bullet first said; on any other I-cache the sync invalidates the whole
+  I-cache (`IC IALLUIS`), as Linux's `sync_icache_aliases` does.
 - **DESTROY and SYNC are not CAP_JIT-gated.** Authority to *create* is scarce;
   releasing or publishing what you already own is not. Gating them would turn a
   legate-scope expiry into a leak.

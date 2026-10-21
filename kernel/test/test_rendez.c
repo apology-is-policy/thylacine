@@ -27,6 +27,7 @@
 #include "test.h"
 
 #include <thylacine/notes.h>   // LS-5c: notes_post arm + NOTE_BIT_INTERRUPT
+#include <thylacine/poll.h>    // caught_note_ends_wait4: the child_waiters wake
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -536,238 +537,587 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
 }
 
 // ---------------------------------------------------------------------------
-// rendez.reader_frame_predicate -- #90 (ARCH 8.8.1.1): the frame-atomic
-// reader-recv guard truth table.
+// rendez.death_only_* + rendez.stopped_sleeper_holds_latch +
+// rendez.{latch,stop}_wake_skips_stop_park -- DEBUG-FS-DESIGN 5g:
+// sleep_death_only, the sleep of the stop parks and the parent suspends,
+// returns for group death alone. A terminate latch's wake that reaches it is
+// absorbed: it re-checks its condition and sleeps again. The latch's wake walk
+// passes over a thread in a stop park altogether, since that park could only
+// absorb it, and so does the stop cascade's sleeper walk. Each test records
+// what it saw, reaps its threads, and only then asserts, so a failing leg does
+// not strand a thread for the tests after it.
 // ---------------------------------------------------------------------------
-//
-// thread_reader_blocks_death(t) == stop_no_park && !stop_unwinds -- true iff a
-// die-check must DEFER (block through) rather than unwind. Pins the full table,
-// including the `|| stop_unwinds` disjunct of the die-check guard: a reader AT a
-// boundary (stop_unwinds set) must still unwind, so dropping that disjunct
-// (block-through even at got==0) would leave a dying reader unable to ever
-// unwind. Pure -- drive it on the boot thread's own latches, restoring them.
-void test_rendez_reader_frame_predicate(void) {
-    struct Thread *t = current_thread();
-    bool save_np = t->stop_no_park, save_uw = t->stop_unwinds;
 
-    // Non-reader (stop_no_park clear): NEVER blocks -- the die-check fires
-    // immediately for every ordinary sleeper, exactly as before #90.
-    t->stop_no_park = false; t->stop_unwinds = false;
-    TEST_ASSERT(!thread_reader_blocks_death(t),
-        "non-reader (no frame-atomic recv) never blocks death");
-    t->stop_no_park = false; t->stop_unwinds = true;
-    TEST_ASSERT(!thread_reader_blocks_death(t),
-        "non-reader never blocks death even with stop_unwinds set");
+static void death_only_consumer_entry(void) {
+    g_intr_run_cnt++;                            // -> 1: pre-sleep run
+    g_intr_sleep_rc = sleep_death_only(&g_intr_rendez, death_cond_false, NULL);
+    g_intr_run_cnt++;                            // -> 2: post-INTR run
+    test_kthread_park_terminal(&g_intr_exited);
+}
 
-    // Reader AT a boundary (stop_unwinds set, got==0): unwinds -- a safe point,
-    // no partial frame to discard. This is the `|| stop_unwinds` disjunct.
-    t->stop_no_park = true; t->stop_unwinds = true;
-    TEST_ASSERT(!thread_reader_blocks_death(t),
-        "reader at a frame boundary unwinds (does not block through)");
+// Group death, hand-rolled as the death test does it (proc_group_terminate
+// would broadcast an IPI and wake the idle secondaries): publish the message,
+// then wake whatever rendez the thread sleeps on.
+static void intr_publish_death_and_wake(struct Thread *t) {
+    __atomic_store_n(&g_intr_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
+    struct Rendez *r = t->rendez_blocked_on;
+    if (r) (void)wakeup(r);
+    spin_unlock_irqrestore(&t->wait_lock, ws);
+}
 
-    // Reader MID-FRAME (stop_no_park set, stop_unwinds clear): BLOCKS THROUGH.
-    t->stop_no_park = true; t->stop_unwinds = false;
-    TEST_ASSERT(thread_reader_blocks_death(t),
-        "reader mid-frame blocks the death through");
+static void intr_consumer_kill_reap(struct Thread *consumer) {
+    intr_publish_death_and_wake(consumer);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
+    test_kthread_join_free(consumer, &g_intr_exited);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
+}
 
-    t->stop_no_park = save_np; t->stop_unwinds = save_uw;
+static bool intr_consumer_parked_on(struct Thread *consumer, struct Rendez *r) {
+    return __atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+           consumer->rendez_blocked_on == r;
+}
+
+// The thread's dispatch count: stored atomically at every switch-in for
+// cross-thread readers (thread.h nsched), so it moves exactly when it runs.
+static u64 intr_stamp(struct Thread *t) {
+    return __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+}
+
+// Yield for a window in which a thread readied onto this CPU would be run: the
+// scheduler's tick is milliseconds, and this thread gives the CPU away at once.
+#define INTR_QUIET_NS (20ull * 1000ull * 1000ull)
+static void intr_yield_window(void) {
+    u64 deadline = timer_now_ns() + INTR_QUIET_NS;
+    while (timer_now_ns() < deadline)
+        sched();
+}
+
+// The latch lands while the thread sleeps: its wake readies the thread, which
+// re-checks and sleeps again. A woken thread is switched in, so its stamp moves
+// (monotonic, unlike its state, which reads SLEEPING again once it re-sleeps).
+// Group death then returns it.
+void test_rendez_death_only_absorbs_latch(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
+    rendez_init(&g_intr_rendez);
+
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+    struct Thread *consumer = thread_create(g_intr_proc, death_only_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
+                          intr_consumer_parked_on(consumer, &g_intr_rendez));
+    bool slept = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
+    u64 since = intr_stamp(consumer);
+
+    bool latched = notes_post(g_intr_proc, "interrupt", 0u, NULL, true) == 0 &&
+                   proc_intr_terminate_pending(g_intr_proc);
+    irq_state_t s = proc_table_lock_acquire();
+    proc_interrupt_terminate_wake(g_intr_proc);
+    proc_table_lock_release(s);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
+                          (intr_stamp(consumer) != since &&
+                           intr_consumer_parked_on(consumer, &g_intr_rendez)));
+    bool woken   = intr_stamp(consumer) != since;
+    bool reslept = g_intr_run_cnt == 1u &&
+                   intr_consumer_parked_on(consumer, &g_intr_rendez);
+    int rc_latched = g_intr_sleep_rc;
+
+    intr_consumer_kill_reap(consumer);
+    int rc_death = g_intr_sleep_rc;
+
+    TEST_ASSERT(slept, "premise: the consumer slept in sleep_death_only");
+    TEST_ASSERT(latched, "premise: the post armed the terminate latch");
+    TEST_ASSERT(woken, "premise: the latch's wake ran the sleeper");
+    TEST_ASSERT(reslept,
+        "the latch did not return sleep_death_only: the thread slept again");
+    TEST_EXPECT_EQ(rc_latched, 0x7fffffff, "nothing returned before the death");
+    TEST_EXPECT_EQ(rc_death, SLEEP_INTR, "group death returned it (SLEEP_INTR)");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// The latch is armed before the thread sleeps. sleep() returns at once for that
+// (rendez.intr_terminate_register_observe); the death-only sleep parks, and
+// group death still ends it.
+void test_rendez_death_only_sleeps_past_latch(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
+    rendez_init(&g_intr_rendez);
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+    bool latched = notes_post(g_intr_proc, "interrupt", 0u, NULL, true) == 0 &&
+                   proc_intr_terminate_pending(g_intr_proc);
+    struct Thread *consumer = thread_create(g_intr_proc, death_only_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
+                          intr_consumer_parked_on(consumer, &g_intr_rendez));
+    bool parked = g_intr_run_cnt == 1u &&
+                  intr_consumer_parked_on(consumer, &g_intr_rendez);
+
+    intr_consumer_kill_reap(consumer);
+    int rc_death = g_intr_sleep_rc;
+
+    TEST_ASSERT(latched, "premise: the latch was armed before the thread slept");
+    TEST_ASSERT(parked,
+        "a latch armed before the sleep did not return sleep_death_only: the "
+        "thread parked");
+    TEST_EXPECT_EQ(rc_death, SLEEP_INTR, "group death returned it (SLEEP_INTR)");
+}
+
+static void stop_consumer_entry(void) {
+    g_intr_run_cnt++;                            // -> 1: pre-sleep run
+    g_intr_sleep_rc = sleep(&g_intr_rendez, death_cond_false, NULL);
+    g_intr_run_cnt++;                            // -> 2: post-INTR run
+    test_kthread_park_terminal(&g_intr_exited);
+}
+
+// A job stop, hand-rolled as its cascade does it for a sleeper: the RELEASE
+// store of the flag, then a wake of the rendez the thread sleeps on.
+static void intr_job_stop_sleeper(struct Rendez *r) {
+    __atomic_store_n(&g_intr_proc->job_stop_req, 1, __ATOMIC_RELEASE);
+    (void)wakeup(r);
+}
+
+// The nested stop park (DEBUG-FS-DESIGN 5c.2): a thread asleep in an ordinary
+// sleep is stopped and detours to park on its own debug_rendez. A latch lands:
+// the thread stays stopped. Once the stop clears, the ordinary sleep re-checks,
+// and its own die-check unwinds for the latch.
+void test_rendez_stopped_sleeper_holds_latch(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
+    rendez_init(&g_intr_rendez);
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+    struct Thread *consumer = thread_create(g_intr_proc, stop_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
+                          intr_consumer_parked_on(consumer, &g_intr_rendez));
+    bool slept = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
+
+    intr_job_stop_sleeper(&g_intr_rendez);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
+                          intr_consumer_parked_on(consumer, &consumer->debug_rendez));
+    bool stop_parked = intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+
+    bool latched = notes_post(g_intr_proc, "interrupt", 0u, NULL, true) == 0 &&
+                   proc_intr_terminate_pending(g_intr_proc);
+    irq_state_t s = proc_table_lock_acquire();
+    proc_interrupt_terminate_wake(g_intr_proc);
+    proc_table_lock_release(s);
+    intr_yield_window();
+    bool held = g_intr_run_cnt == 1u &&
+                intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+
+    __atomic_store_n(&g_intr_proc->job_stop_req, 0, __ATOMIC_RELEASE);
+    (void)wakeup(&consumer->debug_rendez);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
+    u32 run_cleared = g_intr_run_cnt;
+    int rc_cleared  = g_intr_sleep_rc;
+
+    intr_consumer_kill_reap(consumer);
+
+    TEST_ASSERT(slept, "premise: the consumer slept in an ordinary sleep");
+    TEST_ASSERT(stop_parked, "premise: the stop parked the sleeper on its debug_rendez");
+    TEST_ASSERT(latched, "premise: the post armed the terminate latch");
+    TEST_ASSERT(held, "the latch left the stopped sleeper parked on its debug_rendez");
+    TEST_EXPECT_EQ(run_cleared, 2u,
+        "once the stop cleared, the ordinary sleep returned for the latch");
+    TEST_EXPECT_EQ(rc_cleared, SLEEP_INTR, "it returned SLEEP_INTR, the latch's unwind");
+}
+
+// The skip tests' control thread: a death-only sleep outside any stop park,
+// which the walk under test must reach.
+static volatile u32  g_skip_run_cnt;
+static volatile int  g_skip_sleep_rc;
+static struct Rendez g_skip_rendez;
+static volatile bool g_skip_exited;
+
+static void skip_control_entry(void) {
+    g_skip_run_cnt++;                            // -> 1: pre-sleep run
+    g_skip_sleep_rc = sleep_death_only(&g_skip_rendez, death_cond_false, NULL);
+    g_skip_run_cnt++;                            // -> 2: post-INTR run
+    test_kthread_park_terminal(&g_skip_exited);
+}
+
+// The latch's walk, after the post that arms it.
+static bool skip_walk_latch(void) {
+    bool latched = notes_post(g_intr_proc, "interrupt", 0u, NULL, true) == 0 &&
+                   proc_intr_terminate_pending(g_intr_proc);
+    irq_state_t s = proc_table_lock_acquire();
+    proc_interrupt_terminate_wake(g_intr_proc);
+    proc_table_lock_release(s);
+    return latched;
+}
+
+// A debugger's stop over the job stop already in force, by the real cascade:
+// its sleeper walk is the walk under test.
+static bool skip_walk_stop(void) {
+    irq_state_t s = proc_table_lock_acquire();
+    proc_debug_stop_deliver(g_intr_proc);
+    proc_table_lock_release(s);
+    return __atomic_load_n(&g_intr_proc->debug_stop_req, __ATOMIC_ACQUIRE) != 0;
+}
+
+// Two threads of one Proc, one variable apart: the stopped one sleeps in its
+// stop park, the control in a death-only sleep outside one. The walk reaches
+// the control -- it runs, absorbs the wake, and meets the stop in its own
+// detour -- and passes over the stopped thread, which is never switched in: a
+// stop park could only absorb the wake, and running it for that would unsettle
+// a confirmed stop.
+static void skip_stop_park_run(bool (*walk)(void), const char *armed_msg) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
+    rendez_init(&g_intr_rendez);
+    g_skip_run_cnt  = 0;
+    g_skip_sleep_rc = 0x7fffffff;
+    g_skip_exited   = false;
+    rendez_init(&g_skip_rendez);
+
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+    struct Thread *stopped = thread_create(g_intr_proc, stop_consumer_entry);
+    TEST_ASSERT(stopped != NULL, "thread_create(stopped) failed");
+    struct Thread *control = thread_create(g_intr_proc, skip_control_entry);
+    TEST_ASSERT(control != NULL, "thread_create(control) failed");
+    ready(stopped);
+    ready(control);
+    TEST_YIELD_UNTIL_SOFT(intr_consumer_parked_on(stopped, &g_intr_rendez) &&
+                          intr_consumer_parked_on(control, &g_skip_rendez));
+    bool slept = g_intr_run_cnt == 1u && g_skip_run_cnt == 1u &&
+                 intr_consumer_parked_on(stopped, &g_intr_rendez) &&
+                 intr_consumer_parked_on(control, &g_skip_rendez);
+
+    intr_job_stop_sleeper(&g_intr_rendez);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
+                          intr_consumer_parked_on(stopped, &stopped->debug_rendez));
+    bool stop_parked = intr_consumer_parked_on(stopped, &stopped->debug_rendez);
+    u64 stopped_since = intr_stamp(stopped);
+    u64 control_since = intr_stamp(control);
+
+    bool armed = walk();
+    TEST_YIELD_UNTIL_SOFT(g_skip_run_cnt >= 2u ||
+                          (intr_stamp(control) != control_since &&
+                           intr_consumer_parked_on(control, &control->debug_rendez)));
+    intr_yield_window();
+    bool reached = g_skip_run_cnt == 1u && intr_stamp(control) != control_since &&
+                   intr_consumer_parked_on(control, &control->debug_rendez);
+    bool passed = g_intr_run_cnt == 1u && intr_stamp(stopped) == stopped_since &&
+                  intr_consumer_parked_on(stopped, &stopped->debug_rendez);
+
+    intr_publish_death_and_wake(stopped);
+    intr_publish_death_and_wake(control);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u && g_skip_run_cnt >= 2u);
+    int rc_stopped = g_intr_sleep_rc;
+    int rc_control = g_skip_sleep_rc;
+    test_kthread_join_free(stopped, &g_intr_exited);
+    test_kthread_join_free(control, &g_skip_exited);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
+
+    TEST_ASSERT(slept, "premise: both threads slept");
+    TEST_ASSERT(stop_parked, "premise: the stop parked one thread on its debug_rendez");
+    TEST_ASSERT(armed, armed_msg);
+    TEST_ASSERT(reached,
+        "control: the walk ran the thread outside a stop park, which absorbed "
+        "the wake and parked for the stop");
+    TEST_ASSERT(passed,
+        "the walk passed over the thread in its stop park: never switched in");
+    TEST_EXPECT_EQ(rc_stopped, SLEEP_INTR, "group death returned the stopped thread");
+    TEST_EXPECT_EQ(rc_control, SLEEP_INTR, "group death returned the control");
+}
+
+void test_rendez_latch_wake_skips_stop_park(void) {
+    skip_stop_park_run(skip_walk_latch, "premise: the post armed the terminate latch");
+}
+
+// A second stop changes nothing a stop park waits on, so the stop cascade's
+// sleeper walk passes it over too.
+void test_rendez_stop_wake_skips_stop_park(void) {
+    skip_stop_park_run(skip_walk_stop, "premise: the debugger's stop was delivered");
 }
 
 // ---------------------------------------------------------------------------
-// rendez.reader_frame_blocks_death -- #90 (ARCH 8.8.1.1): the frame-atomic
-// reader-recv death block-through, end to end.
+// rendez.exit_close_ignores_stop + rendez.exit_close_park_ends_on_death --
+// DEBUG-FS-DESIGN 5g, death wins in the exit close. A dying Proc's closer reads
+// no death in its sleeps (exit_close_active), and group death clears no stop,
+// so the park predicate answers false in a dying group: a closer there never
+// parks for a stop, and one that parked while its group lived leaves the park
+// when the group dies. Record, reap, then assert, as above.
+// ---------------------------------------------------------------------------
+
+static volatile bool g_ec_done;
+
+static int ec_cond(void *arg) {
+    (void)arg;
+    return __atomic_load_n(&g_ec_done, __ATOMIC_ACQUIRE);
+}
+
+// A closer: the ordinary sleep of a close hook, under exit_close_active.
+static void exit_close_consumer_entry(void) {
+    struct Thread *self = current_thread();
+    self->exit_close_active = true;
+    g_intr_run_cnt++;                            // -> 1: pre-sleep run
+    g_intr_sleep_rc = sleep(&g_intr_rendez, ec_cond, NULL);
+    self->exit_close_active = false;
+    g_intr_run_cnt++;                            // -> 2: post-sleep run
+    test_kthread_park_terminal(&g_intr_exited);
+}
+
+// Whatever the run saw, end the closer's sleep and reap it: the close's
+// condition turns true, the stop clears, and both rendez are woken.
+static void exit_close_consumer_reap(struct Thread *consumer) {
+    __atomic_store_n(&g_ec_done, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_intr_proc->job_stop_req, 0, __ATOMIC_RELEASE);
+    (void)wakeup(&consumer->debug_rendez);
+    (void)wakeup(&g_intr_rendez);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
+    test_kthread_join_free(consumer, &g_intr_exited);
+    g_intr_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_intr_proc);
+    g_intr_proc = NULL;
+}
+
+static void exit_close_setup(void) {
+    g_intr_run_cnt  = 0;
+    g_intr_sleep_rc = 0x7fffffff;
+    g_intr_exited   = false;
+    g_ec_done       = false;
+    rendez_init(&g_intr_rendez);
+}
+
+// A closer in a dying group, with a job stop pending, sleeps in its close: the
+// stop does not park it, and the close's own wake returns it.
+void test_rendez_exit_close_ignores_stop(void) {
+    exit_close_setup();
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+    __atomic_store_n(&g_intr_proc->job_stop_req, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_intr_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    struct Thread *consumer = thread_create(g_intr_proc, exit_close_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
+                          (intr_consumer_parked_on(consumer, &g_intr_rendez) ||
+                           intr_consumer_parked_on(consumer, &consumer->debug_rendez)));
+    bool in_close = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
+    bool parked   = intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+
+    u32 run_woken = 0;
+    int rc_woken  = 0x7fffffff;
+    if (in_close) {
+        __atomic_store_n(&g_ec_done, true, __ATOMIC_RELEASE);
+        (void)wakeup(&g_intr_rendez);
+        TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
+        run_woken = g_intr_run_cnt;
+        rc_woken  = g_intr_sleep_rc;
+    }
+
+    exit_close_consumer_reap(consumer);
+
+    TEST_ASSERT(in_close || parked, "premise: the closer ran and slept");
+    TEST_ASSERT(!parked, "the stop did not park the dying Proc's closer");
+    TEST_EXPECT_EQ(run_woken, 2u, "the close's wake returned the closer");
+    TEST_EXPECT_EQ(rc_woken, SLEEP_OK, "it returned SLEEP_OK: the close goes on");
+}
+
+// A closer whose group still lives honours a stop: it parks. The group then
+// dies, and the death cascade's wake ends the park -- the closer sleeps on in
+// its close, and the close's own wake returns it.
+void test_rendez_exit_close_park_ends_on_death(void) {
+    exit_close_setup();
+    g_intr_proc = proc_alloc();
+    TEST_ASSERT(g_intr_proc != NULL, "proc_alloc failed");
+    __atomic_store_n(&g_intr_proc->job_stop_req, 1, __ATOMIC_RELEASE);
+    struct Thread *consumer = thread_create(g_intr_proc, exit_close_consumer_entry);
+    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
+    ready(consumer);
+    TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 1u &&
+                          intr_consumer_parked_on(consumer, &consumer->debug_rendez));
+    bool parked = g_intr_run_cnt == 1u &&
+                  intr_consumer_parked_on(consumer, &consumer->debug_rendez);
+
+    bool left = false;
+    u32 run_woken = 0;
+    int rc_woken  = 0x7fffffff;
+    if (parked) {
+        u64 since = intr_stamp(consumer);
+        intr_publish_death_and_wake(consumer);
+        // The woken closer runs, so its stamp moves, and sleeps again: in its
+        // close, or back in the park.
+        TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u ||
+                              (intr_stamp(consumer) != since &&
+                               (intr_consumer_parked_on(consumer, &g_intr_rendez) ||
+                                intr_consumer_parked_on(consumer, &consumer->debug_rendez))));
+        left = g_intr_run_cnt == 1u && intr_consumer_parked_on(consumer, &g_intr_rendez);
+    }
+    if (left) {
+        __atomic_store_n(&g_ec_done, true, __ATOMIC_RELEASE);
+        (void)wakeup(&g_intr_rendez);
+        TEST_YIELD_UNTIL_SOFT(g_intr_run_cnt >= 2u);
+        run_woken = g_intr_run_cnt;
+        rc_woken  = g_intr_sleep_rc;
+    }
+
+    exit_close_consumer_reap(consumer);
+
+    TEST_ASSERT(parked, "premise: the live group's closer parked for the stop");
+    TEST_ASSERT(left,
+        "the group's death ended the closer's stop park: it sleeps on in its close");
+    TEST_EXPECT_EQ(run_woken, 2u, "the close's wake returned the closer");
+    TEST_EXPECT_EQ(rc_woken, SLEEP_OK, "it returned SLEEP_OK: the close goes on");
+}
+
+// ---------------------------------------------------------------------------
+// rendez.reader_recv_unwinds_death{,_sleep} -- ARCH 8.8.1.1 (the seam-90
+// close): the die-check reads no reader latch. A thread inside the elected 9P
+// reader's recv unwinds for a death at any byte of a frame, as every sleeper
+// does; the client keeps the partial frame for the next reader.
 // ---------------------------------------------------------------------------
 //
-// The elected 9P reader recv (kernel/9p_client.c::reader_recv_frame) is
-// frame-atomic w.r.t. the #811 death-unwind. A dying reader observed
-// MID-FRAME (stop_no_park set + stop_unwinds clear -- bytes of the current 9P
-// frame already consumed) must NOT unwind at the die-check: an immediate
-// unwind discards the partial frame, and the survivor that takes over the
-// reader role reads the frame TAIL as a header -> the shared byte stream
-// desyncs (task-#50). It BLOCKS THROUGH -- the die-check falls to
-// register+sched, the reader finishes the frame (bounded by the trusted
-// server, CF-3 B), and unwinds only at the next boundary.
-//
-// Forces the block-through leg deterministically: a mid-frame reader whose
-// Proc is ALREADY group-terminating (group_exit_msg set before it sleeps)
-// tsleeps with a short deadline on a never-true cond. The register-then-
-// observe die-check sees death pending; with the #90 guard it BLOCKS THROUGH
-// (the reader stays SLEEPING, run_cnt == 1, does NOT unwind), and only the
-// DEADLINE (via the timer-tick scan) later returns TSLEEP_TIMEDOUT.
-// REVERT-PROBE: dropping the `!thread_reader_blocks_death(t)` guard makes the
-// die-check return TSLEEP_INTR on the first pass -- the reader never sleeps
-// (run_cnt reaches 2 immediately, state != SLEEPING), failing the SLEEPING
-// assertions below.
+// The thread carries the latch state the superseded rule blocked through: in
+// the reader's recv (stop_no_park) with stop_unwinds clear, which was "bytes of
+// the frame consumed". reader_recv_frame no longer produces that state (it sets
+// stop_unwinds for the whole recv), so these pin the scheduler half: whatever
+// the latches say, a death unwinds. RED on the old rule: the tsleep leg slept
+// until its deadline (TSLEEP_TIMEDOUT), the sleep leg re-slept on the death's
+// wake. The client half -- a real reader mid-frame, killed and stopped -- is
+// 9p_srvconn_transport.reader_unwinds_mid_frame_*.
 
 static volatile int  g_rf_run_cnt;
 static volatile int  g_rf_sleep_rc;
+static volatile int  g_rf_cond;
 static volatile bool g_rf_exited;
 static struct Rendez g_rf_rendez;
 static struct Proc  *g_rf_proc;
 
-static int rf_cond_false(void *arg) { (void)arg; return 0; }
+static int rf_cond(void *arg) { (void)arg; return g_rf_cond; }
 
-static void rf_reader_consumer_entry(void) {
+static void rf_reader_latches(bool on) {
     struct Thread *self = current_thread();
-    // Simulate the elected reader MID-FRAME: in a frame-atomic recv
-    // (stop_no_park) with bytes of the frame already consumed (stop_unwinds
-    // clear). reader_recv_frame maintains exactly these two latches.
-    self->stop_no_park = true;
+    self->stop_no_park = on;
     self->stop_unwinds = false;
+}
+
+// tsleep: the death is published before the reader sleeps, so the
+// register-then-observe die-check is the one that must fire.
+static void rf_tsleep_entry(void) {
+    rf_reader_latches(true);
     g_rf_run_cnt++;                              // -> 1: pre-tsleep
-    // Short deadline; cond never true; the Proc is already group-terminating.
-    // The #90 guard blocks the death through -> the deadline wins (TIMEDOUT).
-    g_rf_sleep_rc = tsleep(&g_rf_rendez, rf_cond_false, NULL,
+    g_rf_sleep_rc = tsleep(&g_rf_rendez, rf_cond, NULL,
                            timer_now_ns() + 10ull * 1000000ull);   // +10 ms
-    // Past the recv -> clear the reader latches before the terminal park.
-    self->stop_no_park = false;
-    self->stop_unwinds = false;
+    rf_reader_latches(false);
     g_rf_run_cnt++;                              // -> 2: post-tsleep
     test_kthread_park_terminal(&g_rf_exited);
 }
 
-void test_rendez_reader_frame_blocks_death(void) {
+void test_rendez_reader_recv_unwinds_death(void) {
     g_rf_run_cnt  = 0;
     g_rf_sleep_rc = 0x7fffffff;
+    g_rf_cond     = 0;
     g_rf_exited   = false;
     rendez_init(&g_rf_rendez);
 
     g_rf_proc = proc_alloc();
     TEST_ASSERT(g_rf_proc != NULL, "proc_alloc failed");
-
-    // Death is pending BEFORE the reader sleeps: the register-then-observe
-    // die-check on the first tsleep pass is the one that must block through.
     __atomic_store_n(&g_rf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
 
-    struct Thread *consumer =
-        thread_create(g_rf_proc, rf_reader_consumer_entry);
-    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
-    ready(consumer);
-    sched();
+    struct Thread *reader = thread_create(g_rf_proc, rf_tsleep_entry);
+    TEST_ASSERT(reader != NULL, "thread_create(reader) failed");
+    ready(reader);
+    // The deadline bounds the old rule's block-through, so this wait ends
+    // either way; the verdict is which return it saw.
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
+    bool joinable  = g_rf_run_cnt >= 2u;
+    int  rc        = g_rf_sleep_rc;
+    bool backref   = reader->rendez_blocked_on == NULL;
+    bool no_waiter = g_rf_rendez.waiter == NULL;
+    if (joinable) {
+        test_kthread_join_free(reader, &g_rf_exited);
+        g_rf_proc->state = PROC_STATE_ZOMBIE;
+        proc_free(g_rf_proc);
+        g_rf_proc = NULL;
+    }
 
-    // The revert-probe: with the #90 guard the mid-frame reader BLOCKED
-    // THROUGH the pending death and is SLEEPING (run_cnt still 1). Without it,
-    // the die-check unwound on the first pass (run_cnt == 2, not SLEEPING).
-    TEST_EXPECT_EQ(g_rf_run_cnt, 1u,
-        "mid-frame reader blocked the death through -- did not unwind");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
-        "mid-frame reader is SLEEPING (blocked through, not unwound)");
-    TEST_EXPECT_EQ(g_rf_rendez.waiter, consumer,
-        "mid-frame reader registered on the rendez (blocked through)");
-
-    // Spin yielding until the timer-tick scan expires the +10 ms deadline and
-    // wakes the reader, which -- the timeout check precedes the die-check on
-    // resume -- returns TSLEEP_TIMEDOUT. The cap turns a stuck block-through
-    // into a clean failure rather than a hang.
-    for (u64 i = 0; i < 100000000ull && g_rf_run_cnt < 2u; i++) sched();
-
-    TEST_EXPECT_EQ(g_rf_run_cnt, 2u,
-        "reader timed out and ran to completion");
-    TEST_EXPECT_EQ(g_rf_sleep_rc, TSLEEP_TIMEDOUT,
-        "the death blocked through -> the deadline won (TSLEEP_TIMEDOUT), "
-        "not an immediate TSLEEP_INTR unwind (#90)");
-    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
-        "reader cleared its backref on the timeout resume");
-
-    test_kthread_join_free(consumer, &g_rf_exited);
-    g_rf_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_rf_proc);
-    g_rf_proc = NULL;
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
-        "run tree empty after cleanup");
+    TEST_ASSERT(joinable, "the reader returned and was joined");
+    TEST_EXPECT_EQ(rc, TSLEEP_INTR,
+        "a dying reader with the old mid-frame latches unwinds at the "
+        "register-then-observe check (TSLEEP_INTR), not at its deadline");
+    TEST_ASSERT(backref, "the reader cleared its backref");
+    TEST_ASSERT(no_waiter, "the rendez holds no waiter after the unwind");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
-// ---------------------------------------------------------------------------
-// rendez.reader_frame_blocks_death_sleep -- #90 (ARCH 8.8.1.1): the frame-atomic
-// death block-through on the sleep() path (the PRODUCTION path -- #90-audit F1).
-// ---------------------------------------------------------------------------
-//
-// The steady-state elected reader recv is reader_recv_frame(c, 0, NULL) --
-// deadline_ns == 0, so srvconn_client_recv's tsleep DEGRADES to sleep(). So the
-// production mid-frame block-through actually fires the sleep() die-check guards
-// (sched.c register-then-observe + resume-path), NOT the tsleep guards the
-// deadline-terminated reader_frame_blocks_death above exercises. This sibling
-// revert-probes BOTH sleep() sites, terminated by a REAL producer wakeup() (not
-// a deadline): a mid-frame reader whose Proc is group-terminating sleep()s on a
-// never-yet-true cond, blocks the pending death through (stays SLEEPING), and
-// when woken with cond now true blocks the STILL-pending death through the
-// resume-path check and returns SLEEP_OK. REVERT-PROBE: dropping the
-// register-then-observe guard unwinds on the first pass (run_cnt==2, not
-// SLEEPING); dropping the resume-path guard unwinds on the cond wake
-// (SLEEP_INTR, not SLEEP_OK).
-
-static volatile int  g_rfs_run_cnt;
-static volatile int  g_rfs_sleep_rc;
-static volatile int  g_rfs_cond;
-static volatile bool g_rfs_exited;
-static struct Rendez g_rfs_rendez;
-static struct Proc  *g_rfs_proc;
-
-static int rfs_cond_check(void *arg) { (void)arg; return g_rfs_cond; }
-
-static void rfs_reader_consumer_entry(void) {
-    struct Thread *self = current_thread();
-    self->stop_no_park = true;
-    self->stop_unwinds = false;
-    g_rfs_run_cnt++;                             // -> 1: pre-sleep
-    g_rfs_sleep_rc = sleep(&g_rfs_rendez, rfs_cond_check, NULL);
-    self->stop_no_park = false;
-    self->stop_unwinds = false;
-    g_rfs_run_cnt++;                             // -> 2: post-sleep
-    test_kthread_park_terminal(&g_rfs_exited);
+// sleep: the reader sleeps first, then the death is published and its wake
+// delivered with the cond still false, so the prompt-path die-check is the one
+// that must fire. The production recv reaches sleep() when the transport has
+// no deadline (the steady state).
+static void rf_sleep_entry(void) {
+    rf_reader_latches(true);
+    g_rf_run_cnt++;                              // -> 1: pre-sleep
+    g_rf_sleep_rc = sleep(&g_rf_rendez, rf_cond, NULL);
+    rf_reader_latches(false);
+    g_rf_run_cnt++;                              // -> 2: post-sleep
+    test_kthread_park_terminal(&g_rf_exited);
 }
 
-void test_rendez_reader_frame_blocks_death_sleep(void) {
-    g_rfs_run_cnt  = 0;
-    g_rfs_sleep_rc = 0x7fffffff;
-    g_rfs_cond     = 0;
-    g_rfs_exited   = false;
-    rendez_init(&g_rfs_rendez);
+void test_rendez_reader_recv_unwinds_death_sleep(void) {
+    g_rf_run_cnt  = 0;
+    g_rf_sleep_rc = 0x7fffffff;
+    g_rf_cond     = 0;
+    g_rf_exited   = false;
+    rendez_init(&g_rf_rendez);
 
-    g_rfs_proc = proc_alloc();
-    TEST_ASSERT(g_rfs_proc != NULL, "proc_alloc failed");
+    g_rf_proc = proc_alloc();
+    TEST_ASSERT(g_rf_proc != NULL, "proc_alloc failed");
+    struct Thread *reader = thread_create(g_rf_proc, rf_sleep_entry);
+    TEST_ASSERT(reader != NULL, "thread_create(reader) failed");
+    ready(reader);
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 1u && reader->state == THREAD_SLEEPING);
+    bool slept = g_rf_run_cnt == 1u && reader->state == THREAD_SLEEPING &&
+                 g_rf_rendez.waiter == reader;
 
-    // Death pending BEFORE the reader sleeps -> the sleep() register-then-observe
-    // die-check must block through.
-    __atomic_store_n(&g_rfs_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    // The death, as the group-termination cascade delivers it to a sleeper.
+    __atomic_store_n(&g_rf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+    int woke = wakeup(&g_rf_rendez);
+    TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
+    bool unwound = g_rf_run_cnt >= 2u;
+    int  rc      = g_rf_sleep_rc;
+    // The old rule re-slept here; its cond releases it, so a RED run still
+    // joins its thread.
+    if (!unwound) {
+        g_rf_cond = 1;
+        (void)wakeup(&g_rf_rendez);
+        TEST_YIELD_UNTIL_SOFT(g_rf_run_cnt >= 2u);
+    }
+    bool joinable = g_rf_run_cnt >= 2u;
+    if (joinable) {
+        test_kthread_join_free(reader, &g_rf_exited);
+        g_rf_proc->state = PROC_STATE_ZOMBIE;
+        proc_free(g_rf_proc);
+        g_rf_proc = NULL;
+    }
 
-    struct Thread *consumer =
-        thread_create(g_rfs_proc, rfs_reader_consumer_entry);
-    TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
-    ready(consumer);
-    TEST_YIELD_UNTIL(g_rfs_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
-
-    // Blocked through the pending death on the register-then-observe check
-    // (SLEEPING, run_cnt==1); a bug there would unwind (run_cnt==2, not SLEEPING).
-    TEST_EXPECT_EQ(g_rfs_run_cnt, 1u,
-        "mid-frame reader blocked the death through on the sleep() path");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
-        "mid-frame reader is SLEEPING (sleep()-path block-through)");
-    TEST_EXPECT_EQ(g_rfs_rendez.waiter, consumer,
-        "mid-frame reader registered on the rendez");
-
-    // A REAL producer wake with cond TRUE (not a deadline). With the #90
-    // resume-path guard the reader blocks the still-pending death through,
-    // re-checks cond (now true), and returns SLEEP_OK. Revert-probe: dropping the
-    // resume-path guard unwinds it (SLEEP_INTR) on this wake.
-    g_rfs_cond = 1;
-    int woke = wakeup(&g_rfs_rendez);
-    TEST_EXPECT_EQ(woke, 1, "wakeup reported exactly one waiter");
-    TEST_YIELD_UNTIL(g_rfs_run_cnt >= 2u);
-
-    TEST_EXPECT_EQ(g_rfs_run_cnt, 2u, "reader resumed to completion");
-    TEST_EXPECT_EQ(g_rfs_sleep_rc, SLEEP_OK,
-        "the death blocked through on BOTH sleep() sites -> the cond wake won "
-        "(SLEEP_OK), not an immediate SLEEP_INTR unwind (#90 production path)");
-    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
-        "reader cleared its backref on the cond resume");
-
-    test_kthread_join_free(consumer, &g_rfs_exited);
-    g_rfs_proc->state = PROC_STATE_ZOMBIE;
-    proc_free(g_rfs_proc);
-    g_rfs_proc = NULL;
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
-        "run tree empty after cleanup");
+    TEST_ASSERT(slept, "premise: the reader slept with the old mid-frame latches");
+    TEST_EXPECT_EQ(woke, 1, "the death's wake reached exactly one waiter");
+    TEST_ASSERT(unwound, "the death's wake unwound the reader at once");
+    TEST_EXPECT_EQ(rc, SLEEP_INTR, "it returned SLEEP_INTR (the prompt-path die-check)");
+    TEST_ASSERT(joinable, "the reader returned and was joined");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
 // ---------------------------------------------------------------------------
@@ -889,6 +1239,109 @@ void test_rendez_caught_wake_child_exit(void) {
         "a CAUGHT child_exit wakes the parent's thread blocked in an interruptible "
         "wait (ARCH 8.8.3) -- not left for an unrelated wake");
     TEST_EXPECT_EQ(leg.rc, SLEEP_NOTEINTR, "the wait unwinds for the handler");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.reader_recv_unwinds_caught_note -- ARCH 8.8.1.1 + 8.8.3: a caught note
+// unwinds a thread in the 9P reader's recv at any byte of a frame, as it does
+// any interruptible sleeper, and latches note_unwound so the client hands the
+// reader role off. The reader leg carries the latches the superseded rule
+// blocked through (stop_no_park set, stop_unwinds clear); the control is one
+// latch away, an ordinary sleeper, which unwinds without the latch. Each leg
+// has its own Proc: a caught note stays pending until an EL0 tail no kernel
+// thread reaches, and it would unwind the next leg's sleeper before its post.
+// RED on the old rule: the reader leg re-slept on the note's wake.
+static volatile u32  g_rcn_run;
+static volatile int  g_rcn_rc;
+static volatile bool g_rcn_release;
+static volatile bool g_rcn_exited;
+static volatile bool g_rcn_reader;
+static volatile bool g_rcn_latched;
+static struct Rendez g_rcn_rendez;
+
+static int rcn_cond(void *arg) { (void)arg; return g_rcn_release ? 1 : 0; }
+
+static void rcn_sleeper_entry(void) {
+    struct Thread *self = current_thread();
+    self->note_interruptible = true;
+    self->stop_no_park = g_rcn_reader;
+    self->stop_unwinds = false;
+    self->note_unwound = false;
+    g_rcn_run++;                                   // -> 1: about to sleep
+    g_rcn_rc = sleep_noteintr(&g_rcn_rendez, rcn_cond, NULL);
+    g_rcn_latched = self->note_unwound;
+    self->stop_no_park = false;
+    self->note_unwound = false;
+    g_rcn_run++;                                   // -> 2: the sleep returned
+    test_kthread_park_terminal(&g_rcn_exited);
+}
+
+struct rcn_leg { bool parked; bool unwound; bool joined; bool latched; int rc; };
+
+static struct rcn_leg rcn_run_leg(bool reader) {
+    struct rcn_leg r = { false, false, false, false, 0x7fffffff };
+    struct Proc *par = cw_linux_proc();
+    struct Proc *kid = par ? proc_alloc() : NULL;
+    if (!kid) {
+        if (par) { par->state = PROC_STATE_ZOMBIE; proc_free(par); }
+        return r;
+    }
+    kid->parent = par;
+    g_rcn_run = 0; g_rcn_rc = 0x7fffffff; g_rcn_release = false;
+    g_rcn_exited = false; g_rcn_reader = reader; g_rcn_latched = false;
+    rendez_init(&g_rcn_rendez);
+    struct Thread *t = viv_sigtab_set(par->sigtab, VIV_SIGNOTE_CHILD_EXIT, &g_cw_hand)
+                           ? thread_create(par, rcn_sleeper_entry) : NULL;
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!(g_rcn_run >= 1u && t->state == THREAD_SLEEPING) && timer_now_ns() < dl)
+            sched();
+        r.parked = g_rcn_run == 1u && t->state == THREAD_SLEEPING;
+        if (r.parked) {
+            cw_post_child_exit(kid);
+            dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+            while (g_rcn_run < 2u && timer_now_ns() < dl) sched();
+        }
+        r.unwound = g_rcn_run >= 2u;
+        // A sleeper the note did not unwind is released through its cond, which
+        // it reads before the caught arm, so a released sleep ends SLEEP_OK.
+        if (!r.unwound) {
+            g_rcn_release = true;
+            (void)wakeup(&g_rcn_rendez);
+            dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+            while (g_rcn_run < 2u && timer_now_ns() < dl) sched();
+        }
+        if (g_rcn_run >= 2u) {
+            r.rc      = g_rcn_rc;
+            r.latched = g_rcn_latched;
+            test_kthread_join_free(t, &g_rcn_exited);
+            r.joined = true;
+        }
+    }
+    kid->parent = NULL;
+    kid->state  = PROC_STATE_ZOMBIE;
+    proc_free(kid);
+    // Never free a Proc whose thread is still asleep (a wedged leg).
+    if (!t || r.joined) { par->state = PROC_STATE_ZOMBIE; proc_free(par); }
+    return r;
+}
+
+void test_rendez_reader_recv_unwinds_caught_note(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct rcn_leg ctl = rcn_run_leg(false);
+    struct rcn_leg leg = rcn_run_leg(true);
+
+    TEST_ASSERT(ctl.parked && ctl.joined, "control: the sleeper parked and returned");
+    TEST_ASSERT(ctl.unwound, "control: the caught note unwound an ordinary sleeper");
+    TEST_EXPECT_EQ(ctl.rc, SLEEP_NOTEINTR, "control: SLEEP_NOTEINTR");
+    TEST_ASSERT(!ctl.latched, "control: no reader, so no note_unwound latch");
+    TEST_ASSERT(leg.parked && leg.joined, "the reader parked and returned");
+    TEST_ASSERT(leg.unwound,
+        "a caught note unwinds the reader with the old mid-frame latches (ARCH "
+        "8.8.1.1) -- it does not re-sleep until the frame ends");
+    TEST_EXPECT_EQ(leg.rc, SLEEP_NOTEINTR, "the reader's sleep returned SLEEP_NOTEINTR");
+    TEST_ASSERT(leg.latched, "the reader latched note_unwound for the role handoff");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
@@ -1014,10 +1467,12 @@ void test_rendez_caught_wake_orphan_hup_cont(void) {
 
 // rendez.caught_note_one_unwind -- one caught note unwinds ONE of two
 // interruptible sleepers in a Proc, as Linux hands a process-directed signal to
-// one thread. The wake reaches both; the sleeper that cannot claim the note
-// re-reads its cond and re-parks. The control is one note away: a caught note of
-// ANOTHER family then unwinds the re-parked sleeper, so its re-park was the
-// claim's doing and not a sleeper that could never unwind.
+// one thread: main, the oldest (ARCH 8.8.3, dec-2026-10-12-note-target). The
+// post wakes main alone; until then it woke both and the first to claim
+// unwound, so a child's SIGCHLD could interrupt a worker's ppoll (L285). The
+// control is one note away: a caught note of ANOTHER family, posted once main
+// has gone, unwinds the peer, so its stillness was the pick's doing and not a
+// sleeper that could never unwind.
 static volatile u32  g_c2_run[2];
 static volatile int  g_c2_rc[2];
 static volatile u32  g_c2_evals[2];   // cond reads: a woken sleeper re-reads it
@@ -1081,35 +1536,30 @@ void test_rendez_caught_note_one_unwind(void) {
             sched();
     }
 
-    // ONE caught child_exit. Settle until one sleeper has returned and the other
-    // has been woken (its cond re-read) and is asleep again -- or both returned.
-    u32  unwound  = 0;
-    bool reparked = false;
+    // ONE caught child_exit. The walk's wake is synchronous, so the states right
+    // after the post say whom it woke; then settle until main has returned.
+    u32  unwound    = 0;
+    bool main_woke  = false, peer_woke = false, peer_still = false;
     if (parked) {
-        u32 ev[2] = { g_c2_evals[0], g_c2_evals[1] };
+        u32 ev1 = g_c2_evals[1];
         cw_post_child_exit(kid);
+        main_woke = t[0]->state != THREAD_SLEEPING;
+        peer_woke = t[1]->state != THREAD_SLEEPING;
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        for (;;) {
-            unwound  = c2_unwound();
-            reparked = false;
-            for (u32 i = 0; i < 2u; i++)
-                if (c2_asleep(t, i) && g_c2_evals[i] != ev[i]) reparked = true;
-            if ((unwound == 1u && reparked) || unwound == 2u || timer_now_ns() >= dl)
-                break;
-            sched();
-        }
+        while (g_c2_run[0] < 2u && timer_now_ns() < dl) sched();
+        unwound    = c2_unwound();
+        peer_still = c2_asleep(t, 1) && g_c2_evals[1] == ev1;
     }
-    u32 w        = (g_c2_run[0] >= 2u) ? 0u : 1u;   // the sleeper the note unwound
-    int rc_first = g_c2_rc[w];
+    int rc_first = g_c2_rc[0];
 
-    // The control: a caught tty:cont -- another family -- for the re-parked one.
+    // The control: a caught tty:cont -- another family -- reaches the peer.
     u32 unwound_at_cont = c2_unwound();
-    if (parked && unwound == 1u && reparked) {
+    if (parked && unwound == 1u && peer_still) {
         (void)proc_job_cont_pgrp(par->pgid);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        while (g_c2_run[1u - w] < 2u && timer_now_ns() < dl) sched();
+        while (g_c2_run[1] < 2u && timer_now_ns() < dl) sched();
     }
-    int rc_second = g_c2_rc[1u - w];
+    int rc_second = g_c2_rc[1];
 
     // Release whatever is still asleep, and never free a thread that stayed so.
     bool made   = t[0] && t[1];
@@ -1132,14 +1582,16 @@ void test_rendez_caught_note_one_unwind(void) {
     TEST_ASSERT(set, "the SIGCHLD and SIGCONT handler rows were written");
     TEST_ASSERT(made, "both sleepers created");
     TEST_ASSERT(parked, "both sleepers parked in an interruptible wait");
+    TEST_ASSERT(main_woke, "the post woke main, the oldest thread");
+    TEST_ASSERT(!peer_woke, "the post did not wake the peer (L285)");
     TEST_EXPECT_EQ(unwound, 1u,
         "ONE caught child_exit unwinds exactly ONE of two interruptible sleepers "
         "(ARCH 8.8.3: one note, one unwind)");
-    TEST_EXPECT_EQ(rc_first, SLEEP_NOTEINTR, "the claimant unwinds for the handler");
-    TEST_ASSERT(reparked, "the wake reached the peer, which re-read its cond and re-parked");
+    TEST_EXPECT_EQ(rc_first, SLEEP_NOTEINTR, "main unwinds for the handler");
+    TEST_ASSERT(peer_still, "the peer slept on and never re-read its cond");
     TEST_EXPECT_EQ(unwound_at_cont, 1u, "the peer was still asleep when the next note came");
     TEST_EXPECT_EQ(rc_second, SLEEP_NOTEINTR,
-        "control: a caught note of ANOTHER family unwinds the re-parked peer");
+        "control: a caught note of ANOTHER family unwinds the peer");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
@@ -1156,7 +1608,9 @@ static void c3_tail(void) {
     struct exception_context ctx;
     for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
     ctx.sp = NOTE_NAME_MAX;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
     notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
 }
 
 // rendez.caught_note_tail_discards_and_releases -- the reviewer's chain. A child
@@ -1251,13 +1705,113 @@ void test_rendez_caught_note_tail_discards_and_releases(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }
 
-// rendez.caught_note_release_wakes_peer -- the release's wake. Two sleepers, one
-// caught interrupt: one claims it and unwinds, the other re-reads its cond and
-// re-parks. Only then does the claimant's tail run; it cannot deliver the note,
-// so its release finds the note still queued and must wake the parked peer,
-// which unwinds for it. Holding the tail until the peer has re-parked is what
-// makes this discriminate: a peer that re-read its cond only after the release
-// would unwind with no wake at all.
+// ---------------------------------------------------------------------------
+// The notes leg parks for a stop it applies itself (DEBUG-FS-DESIGN 4.2).
+// ---------------------------------------------------------------------------
+
+// rendez.tail_parks_for_the_stop_it_applies -- the tail stops before it
+// delivers notes, so the default stop of an uncaught tty:susp, which only the
+// notes leg can apply, would leave the thread running EL0 code with its stop
+// set unless the leg parks for it. The tail runs on this kernel thread, masked
+// as in production: it must park on its own debug_rendez and return only once
+// the stop is lifted. The control is one variable away: child_exit, which
+// stops nothing, returns at once and leaves the Proc unstopped.
+static volatile u32  g_d_run;
+static volatile bool g_d_returned;
+static volatile bool g_d_exited;
+
+static void d_entry(void) {
+    struct exception_context ctx;
+    for (size_t k = 0; k < sizeof(ctx); k++) ((u8 *)&ctx)[k] = 0;
+    ctx.sp = NOTE_NAME_MAX;
+    g_d_run++;
+    irq_state_t s = spin_lock_irqsave(NULL);   // the tail runs masked (#713)
+    notes_deliver_at_el0_return(&ctx);
+    spin_unlock_irqrestore(NULL, s);
+    g_d_returned = true;
+    test_kthread_park_terminal(&g_d_exited);
+}
+
+// One leg on a fresh anchored group (a leader in the same session, another
+// group), so the orphan rule cannot discard the stop. Returns whether the tail
+// parked on its debug_rendez before it returned; *returned_early says it came
+// back before the stop was lifted, *stopped that the Proc took the stop.
+static bool d_leg(const char *note, bool *returned_early, bool *stopped, bool *joined) {
+    struct Proc *leader = proc_alloc();
+    struct Proc *m = leader ? proc_alloc() : NULL;
+    *returned_early = false; *stopped = false; *joined = false;
+    if (!leader || !m) {
+        if (leader) { leader->state = PROC_STATE_ZOMBIE; proc_free(leader); }
+        return false;
+    }
+    proc_test_link(leader);
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    g_d_run = 0; g_d_returned = false; g_d_exited = false;
+    bool posted = notes_post(m, note, 0u, NULL, true) == 0;
+    struct Thread *t = posted ? thread_create(m, d_entry) : NULL;
+    bool parked = false;
+    if (t) {
+        ready(t);
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!g_d_returned && timer_now_ns() < dl) {
+            if (g_d_run == 1u && t->state == THREAD_SLEEPING &&
+                t->rendez_blocked_on == &t->debug_rendez) {
+                parked = true;
+                break;
+            }
+            sched();
+        }
+        *returned_early = g_d_returned;
+        *stopped = __atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) != 0;
+        irq_state_t s = proc_table_lock_acquire();
+        proc_job_cont_proc(m);
+        proc_table_lock_release(s);
+        dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        while (!g_d_returned && timer_now_ns() < dl) sched();
+        if (g_d_returned) { test_kthread_join_free(t, &g_d_exited); *joined = true; }
+    }
+    // A thread that never came back still lives in m, and proc_free would
+    // extinct the suite here, before the asserts could name the failure.
+    if (t && !*joined) return parked;
+    proc_test_unlink(m);
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
+    return parked;
+}
+
+void test_rendez_tail_parks_for_the_stop_it_applies(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    bool early_c, stopped_c, joined_c;
+    bool parked_c = d_leg(NOTE_NAME_CHILD_EXIT, &early_c, &stopped_c, &joined_c);
+    // The legs share the g_d_* flags: a control thread still alive would write
+    // them under the second leg.
+    TEST_ASSERT(joined_c, "control: the tail returned and its thread was joined");
+    bool early_s, stopped_s, joined_s;
+    bool parked_s = d_leg(NOTE_NAME_TTY_SUSP, &early_s, &stopped_s, &joined_s);
+
+    TEST_ASSERT(!parked_c && early_c, "control: child_exit stops nothing, so the tail returns at once");
+    TEST_ASSERT(!stopped_c, "control: and the Proc took no stop");
+    TEST_ASSERT(joined_s, "the stopped tail returned once the stop was lifted, and was joined");
+    TEST_ASSERT(stopped_s, "the uncaught tty:susp applied its default stop in the notes leg");
+    TEST_ASSERT(parked_s,
+        "the notes leg parked for the stop it applied, on the thread's own debug_rendez");
+    TEST_ASSERT(!early_s, "the tail did not return to EL0 while its stop was set");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_release_wakes_peer -- the release's walk. Two sleepers, one
+// caught interrupt: the walk designates main, which unwinds, and leaves the
+// peer asleep. Only then does main's tail run; it cannot deliver the note, so
+// its release finds the note still queued and walks again, and that walk must
+// skip main, whose tail has just passed the note by (ARCH 8.8.3), and wake the
+// peer, which unwinds for it. Without the skip main would take its own
+// designation back, park here for good, and strand the note.
 static volatile u32  g_c4_run[2];
 static volatile int  g_c4_rc[2];
 static volatile u32  g_c4_evals[2];
@@ -1319,33 +1873,28 @@ void test_rendez_caught_note_release_wakes_peer(void) {
             sched();
     }
 
-    // One caught interrupt. Settle until one sleeper's wait returned and the
-    // other has re-read its cond and is asleep again.
-    u32  unwound  = 0;
-    bool reparked = false;
-    u32  w        = 0;
+    // One caught interrupt. Settle until main's wait returned; the peer must
+    // still be asleep, never woken.
+    u32  unwound    = 0;
+    bool peer_still = false;
     if (parked) {
-        u32 ev[2] = { g_c4_evals[0], g_c4_evals[1] };
+        u32 ev1 = g_c4_evals[1];
         irq_state_t s = proc_table_lock_acquire();
         (void)notes_post(par, NOTE_NAME_INTERRUPT, 0u, NULL, true);
         proc_caught_note_wake(par);
         proc_table_lock_release(s);
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
-        for (;;) {
-            unwound  = (g_c4_run[0] >= 2u) + (g_c4_run[1] >= 2u);
-            w        = (g_c4_run[0] >= 2u) ? 0u : 1u;
-            reparked = unwound == 1u && c4_asleep(t, 1u - w) && g_c4_evals[1u - w] != ev[1u - w];
-            if (reparked || unwound == 2u || timer_now_ns() >= dl) break;
-            sched();
-        }
+        while (g_c4_run[0] < 2u && timer_now_ns() < dl) sched();
+        unwound    = (g_c4_run[0] >= 2u) + (g_c4_run[1] >= 2u);
+        peer_still = c4_asleep(t, 1) && g_c4_evals[1] == ev1;
     }
-    // Now the claimant's tail: it cannot deliver, so its release must wake the peer.
+    // Now main's tail: it cannot deliver, so its release must reach the peer.
     g_c4_go = true;
     if (parked) {
         u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
         while ((g_c4_run[0] < 3u || g_c4_run[1] < 3u) && timer_now_ns() < dl) sched();
     }
-    int rc_claimant = g_c4_rc[w], rc_peer = g_c4_rc[1u - w];
+    int rc_claimant = g_c4_rc[0], rc_peer = g_c4_rc[1];
 
     bool joined = made;
     for (u32 i = 0; made && i < 2u; i++) {
@@ -1363,10 +1912,599 @@ void test_rendez_caught_note_release_wakes_peer(void) {
     TEST_ASSERT(made, "both sleepers created");
     TEST_ASSERT(parked, "both sleepers parked in an interruptible wait");
     TEST_EXPECT_EQ(unwound, 1u, "one caught note unwinds one sleeper before any tail runs");
-    TEST_ASSERT(reparked, "the peer re-read its cond and re-parked while the claim was held");
-    TEST_EXPECT_EQ(rc_claimant, SLEEP_NOTEINTR, "the claimant unwound for the note");
+    TEST_ASSERT(peer_still, "the peer slept on, unwoken, while main held the note");
+    TEST_EXPECT_EQ(rc_claimant, SLEEP_NOTEINTR, "main unwound for the note");
     TEST_EXPECT_EQ(rc_peer, SLEEP_NOTEINTR,
-        "the claimant's tail could not deliver the note, and its release woke the "
-        "parked peer, which unwound for it");
+        "main's tail could not deliver the note, and its release's walk skipped "
+        "main and woke the peer, which unwound for it");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// Which thread takes a caught note (ARCH 8.8.3, dec-2026-10-12-note-target;
+// specs/caught_target.tla). Two kernel threads of one Proc stand in for a
+// program's threads; t[0] is created first, so it is main, the oldest. Each
+// runs the steps the test hands it. Between steps a thread spins in sched()
+// with no wait published, as a thread computing at EL0 is between ticks.
+// ---------------------------------------------------------------------------
+#define NT_FAM (1u << NOTE_BIT_INTERRUPT)
+#define NT_TWAIT_NS (10ull * 1000ull * 1000ull * 1000ull)  // far past any leg
+
+enum nt_step {
+    NT_UWAIT = 1,   // block in a wait a caught note unwinds (a listed call)
+    NT_HWAIT,       // block in a wait that rides a caught note out
+    NT_MUWAIT,      // mask the family, then block in a wait that would unwind
+    NT_THWAIT,      // block in a timed wait (tsleep) that rides a caught note out
+    NT_TUWAIT,      // block in a timed wait (tsleep_noteintr) a caught note unwinds
+    NT_POST,        // post a caught interrupt to our own Proc: we are the poster
+    NT_EXIT,        // thread_exit_self
+    NT_PARK,        // park terminally (the test reclaims us)
+};
+
+struct nt_slot {
+    volatile u32  step;      // the step to run next
+    volatile u32  seq;       // bumped by the test with each step
+    volatile u32  started;   // the seq the thread has started
+    volatile u32  done;      // the seq the thread has finished
+    volatile int  rc;        // the last wait's return
+    volatile u32  evals;     // cond reads: a woken sleeper re-reads its cond
+    volatile bool release;   // ends the current wait through its cond
+    volatile bool exited;
+    struct Rendez rendez;
+};
+static struct nt_slot g_nt[2];
+static struct Proc   *g_nt_proc;
+
+static int nt_cond(void *arg) {
+    struct nt_slot *n = arg;
+    n->evals++;
+    return n->release ? 1 : 0;
+}
+
+static void nt_loop(u32 i) {
+    struct nt_slot *n = &g_nt[i];
+    struct Thread  *t = current_thread();
+    u32 seen = 0;
+    for (;;) {
+        u32 seq = __atomic_load_n(&n->seq, __ATOMIC_ACQUIRE);
+        if (seq == seen) { sched(); continue; }
+        seen = seq;
+        u32 step = n->step;
+        __atomic_store_n(&n->started, seq, __ATOMIC_RELEASE);
+        switch (step) {
+        case NT_MUWAIT:
+            t->note_mask |= NT_FAM;
+            /* fall through */
+        case NT_UWAIT:
+            t->note_interruptible = true;
+            n->rc = sleep_noteintr(&n->rendez, nt_cond, n);
+            t->note_interruptible = false;
+            t->note_mask &= ~(u64)NT_FAM;
+            break;
+        case NT_HWAIT:
+            n->rc = sleep(&n->rendez, nt_cond, n);
+            break;
+        case NT_TUWAIT:
+            t->note_interruptible = true;
+            n->rc = tsleep_noteintr(&n->rendez, nt_cond, n, timer_now_ns() + NT_TWAIT_NS);
+            t->note_interruptible = false;
+            break;
+        case NT_THWAIT:
+            n->rc = tsleep(&n->rendez, nt_cond, n, timer_now_ns() + NT_TWAIT_NS);
+            break;
+        case NT_POST:
+            (void)test_caught_post(g_nt_proc);
+            break;
+        case NT_EXIT:
+            __atomic_store_n(&n->done, seq, __ATOMIC_RELEASE);
+            thread_exit_self();
+            break;
+        default:
+            __atomic_store_n(&n->done, seq, __ATOMIC_RELEASE);
+            test_kthread_park_terminal(&n->exited);
+        }
+        __atomic_store_n(&n->done, seq, __ATOMIC_RELEASE);
+    }
+}
+static void nt_entry0(void) { nt_loop(0); }
+static void nt_entry1(void) { nt_loop(1); }
+
+static void nt_step(u32 i, u32 step) {
+    g_nt[i].step    = step;
+    g_nt[i].release = false;
+    __atomic_add_fetch(&g_nt[i].seq, 1u, __ATOMIC_RELEASE);
+}
+
+static bool nt_blocked(struct Thread *t, u32 i) {
+    return __atomic_load_n(&g_nt[i].started, __ATOMIC_ACQUIRE) == g_nt[i].seq &&
+           __atomic_load_n(&g_nt[i].done, __ATOMIC_ACQUIRE) != g_nt[i].seq &&
+           __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING;
+}
+static bool nt_done(u32 i) {
+    return __atomic_load_n(&g_nt[i].done, __ATOMIC_ACQUIRE) == g_nt[i].seq;
+}
+
+// Hand thread i a step, then yield until it blocks in it (a wait) or finishes
+// it. Bounded; true iff it got there.
+static bool nt_run(struct Thread *t, u32 i, u32 step, bool blocks) {
+    nt_step(i, step);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (timer_now_ns() < dl) {
+        if (blocks ? nt_blocked(t, i) : nt_done(i)) return true;
+        sched();
+    }
+    return false;
+}
+
+static u8 nt_target(const struct Thread *t) {
+    return __atomic_load_n(&t->note_target, __ATOMIC_ACQUIRE);
+}
+static u8 nt_claim(const struct Thread *t) {
+    return __atomic_load_n(&t->note_claim, __ATOMIC_ACQUIRE);
+}
+
+// A fresh Proc (Linux: it catches interrupt with a handler; native: it reads
+// its own notes) with two threads spinning between steps.
+static bool nt_setup(bool linux_pheno, struct Thread *t[2]) {
+    for (u32 i = 0; i < 2u; i++) {
+        struct nt_slot *n = &g_nt[i];
+        n->step = 0; n->seq = 0; n->started = 0; n->done = 0;
+        n->rc = 0x7fffffff; n->evals = 0; n->release = false; n->exited = false;
+        rendez_init(&n->rendez);
+        t[i] = NULL;
+    }
+    g_nt_proc = test_caught_proc(linux_pheno);
+    if (!g_nt_proc) return false;
+    t[0] = thread_create(g_nt_proc, nt_entry0);
+    t[1] = t[0] ? thread_create(g_nt_proc, nt_entry1) : NULL;
+    if (t[0] && !t[1]) { thread_free(t[0]); t[0] = NULL; }
+    if (!t[0]) {
+        g_nt_proc->state = PROC_STATE_ZOMBIE;
+        proc_free(g_nt_proc);
+        g_nt_proc = NULL;
+        return false;
+    }
+    ready(t[0]);
+    ready(t[1]);
+    return true;
+}
+
+// End whatever wait each thread is in, park both, reclaim both and the Proc.
+// A thread that exited (NT_EXIT) is reclaimed once it is off its CPU. False if
+// a thread never got there: then nothing is freed.
+static bool nt_teardown(struct Thread *t[2]) {
+    if (!g_nt_proc) return true;
+    bool ok = true;
+    for (u32 i = 0; i < 2u; i++) {
+        if (!t[i]) continue;
+        u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+        if (g_nt[i].step == NT_EXIT) {
+            while (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_EXITING &&
+                   timer_now_ns() < dl)
+                sched();
+            if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_EXITING) {
+                ok = false;
+                continue;
+            }
+            thread_free(t[i]);
+            t[i] = NULL;
+            continue;
+        }
+        if (!nt_done(i)) { g_nt[i].release = true; (void)wakeup(&g_nt[i].rendez); }
+        while (!nt_done(i) && timer_now_ns() < dl) sched();
+        if (!nt_done(i)) { ok = false; continue; }
+        nt_step(i, NT_PARK);
+        test_kthread_join_free(t[i], &g_nt[i].exited);
+        t[i] = NULL;
+    }
+    if (!ok) return false;
+    g_nt_proc->state = PROC_STATE_ZOMBIE;
+    proc_free(g_nt_proc);
+    g_nt_proc = NULL;
+    return true;
+}
+
+void notes_release_claims_for_test(struct Thread *t);
+
+// rendez.caught_note_prefers_awake -- the walk prefers a thread that is not
+// blocked: main, awake, is designated and the peer asleep in an unwinding wait
+// is not woken (the L285 shape). Main then enters an unwinding wait and unwinds
+// at once, its designation turned into its claim. The control, one variable
+// away: once main's claim is released, the walk reaches the peer, so the peer's
+// stillness was the pick's doing.
+void test_rendez_caught_note_prefers_awake(void);
+void test_rendez_caught_note_prefers_awake(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool peer_parked = made && nt_run(t[1], 1, NT_UWAIT, true);
+    u32  ev1 = g_nt[1].evals;
+    bool posted = peer_parked && test_caught_post(g_nt_proc);
+    bool peer_woke  = peer_parked && t[1]->state != THREAD_SLEEPING;
+    u8   main_tgt   = made ? nt_target(t[0]) : 0;
+    bool main_back  = posted && nt_run(t[0], 0, NT_UWAIT, false);
+    int  main_rc    = g_nt[0].rc;
+    u8   main_claim = made ? nt_claim(t[0]) : 0;
+    u8   main_tgt2  = made ? nt_target(t[0]) : 0;
+    bool peer_still = peer_parked && nt_blocked(t[1], 1) && g_nt[1].evals == ev1;
+    // The control: release main's claim as its tail would (main is a kernel
+    // thread and has none); the note is still queued, so the walk goes on.
+    if (main_back) notes_release_claims_for_test(t[0]);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (peer_parked && !nt_done(1) && timer_now_ns() < dl) sched();
+    int  peer_rc = g_nt[1].rc;
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made && peer_parked && posted, "two threads, the peer asleep, the note posted");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_ASSERT(main_tgt & NT_FAM, "main, awake, was designated");
+    TEST_ASSERT(!peer_woke, "the peer asleep in an unwinding wait was not woken (L285)");
+    TEST_ASSERT(main_back, "main's own unwinding wait returned at once");
+    TEST_EXPECT_EQ(main_rc, SLEEP_NOTEINTR, "...unwound for the note");
+    TEST_ASSERT((main_claim & NT_FAM) && !(main_tgt2 & NT_FAM),
+                "...the designation became main's claim");
+    TEST_ASSERT(peer_still, "the peer slept on and never re-read its cond");
+    TEST_EXPECT_EQ(peer_rc, SLEEP_NOTEINTR,
+                   "control: released, the note goes to the peer, which unwinds");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_poster_first -- the walk prefers the posting thread. The
+// same two awake threads; only the poster differs. Posted from outside the
+// Proc, the note goes to main; posted by the peer, to the peer.
+void test_rendez_caught_note_poster_first(void);
+void test_rendez_caught_note_poster_first(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made1  = nt_setup(true, t);
+    bool posted = made1 && test_caught_post(g_nt_proc);
+    u8   ext0   = made1 ? nt_target(t[0]) : 0, ext1 = made1 ? nt_target(t[1]) : 0;
+    bool down1  = nt_teardown(t);
+
+    bool made2  = nt_setup(true, t);
+    bool selfp  = made2 && nt_run(t[1], 1, NT_POST, false);
+    u8   own0   = made2 ? nt_target(t[0]) : 0, own1 = made2 ? nt_target(t[1]) : 0;
+    bool down2  = nt_teardown(t);
+
+    TEST_ASSERT(made1 && posted && made2 && selfp, "both legs posted");
+    TEST_ASSERT(down1 && down2, "every thread was reclaimed");
+    TEST_ASSERT((ext0 & NT_FAM) && !(ext1 & NT_FAM),
+                "posted from outside the Proc, the note goes to main");
+    TEST_ASSERT((own1 & NT_FAM) && !(own0 & NT_FAM),
+                "posted by the peer, the note goes to the poster");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_handoff -- a designation ends when its thread enters a
+// wait that cannot unwind for the family: one that holds, or one that would
+// unwind but the family is masked, through sleep or tsleep alike. Main, awake,
+// is designated; it then blocks in such a wait, and the hand-off designates the
+// peer asleep in an unwinding wait, which unwinds. Main's own wait is
+// untouched. The control is caught_note_prefers_awake: main entering an
+// unmasked unwinding wait takes the note itself and the peer sleeps on.
+static void nt_handoff_leg(u32 main_step, u32 peer_step, int peer_rc, bool *ok,
+                           bool *main_tgt, bool *peer_unwound, bool *main_held,
+                           bool *main_dropped, bool *down) {
+    struct Thread *t[2];
+    bool made  = nt_setup(true, t);
+    bool pp    = made && nt_run(t[1], 1, peer_step, true);
+    bool post  = pp && test_caught_post(g_nt_proc);
+    *main_tgt  = made && (nt_target(t[0]) & NT_FAM);
+    bool mb    = post && nt_run(t[0], 0, main_step, true);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (mb && !nt_done(1) && timer_now_ns() < dl) sched();
+    *peer_unwound = mb && nt_done(1) && g_nt[1].rc == peer_rc &&
+                    (nt_claim(t[1]) & NT_FAM);
+    *main_held    = mb && nt_blocked(t[0], 0);
+    *main_dropped = made && !(nt_target(t[0]) & NT_FAM);
+    *ok   = made && pp && post && mb;
+    *down = nt_teardown(t);
+}
+
+void test_rendez_caught_note_handoff(void);
+void test_rendez_caught_note_handoff(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    static const char *const why[3] = {
+        "main blocked in a wait that holds: the peer was designated and unwound",
+        "main masked the family and blocked: the peer was designated and unwound",
+        "main blocked in a timed wait that holds: the peer, in a timed wait that "
+        "unwinds, was designated and unwound",
+    };
+    bool ok[3], tgt[3], unw[3], held[3], drop[3], down[3];
+    nt_handoff_leg(NT_HWAIT,  NT_UWAIT,  SLEEP_NOTEINTR,
+                   &ok[0], &tgt[0], &unw[0], &held[0], &drop[0], &down[0]);
+    nt_handoff_leg(NT_MUWAIT, NT_UWAIT,  SLEEP_NOTEINTR,
+                   &ok[1], &tgt[1], &unw[1], &held[1], &drop[1], &down[1]);
+    nt_handoff_leg(NT_THWAIT, NT_TUWAIT, TSLEEP_NOTEINTR,
+                   &ok[2], &tgt[2], &unw[2], &held[2], &drop[2], &down[2]);
+
+    for (u32 i = 0; i < 3u; i++) {
+        TEST_ASSERT(ok[i] && down[i], "the leg ran and every thread was reclaimed");
+        TEST_ASSERT(tgt[i], "main, awake, was designated");
+        TEST_ASSERT(unw[i], why[i]);
+        TEST_ASSERT(held[i], "main stayed in its wait");
+        TEST_ASSERT(drop[i], "main gave its designation up");
+    }
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_exit_drop -- a designation ends at its thread's exit, at
+// the THREAD_EXITING commit, and the walk goes on to a thread that can take the
+// note. Main, awake and designated, exits through thread_exit_self; the peer,
+// asleep in an unwinding wait, is designated and unwinds.
+void test_rendez_caught_note_exit_drop(void);
+void test_rendez_caught_note_exit_drop(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool pp   = made && nt_run(t[1], 1, NT_UWAIT, true);
+    bool post = pp && test_caught_post(g_nt_proc);
+    bool tgt  = made && (nt_target(t[0]) & NT_FAM);
+    if (post) nt_step(0, NT_EXIT);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (post && !nt_done(1) && timer_now_ns() < dl) sched();
+    int  peer_rc = g_nt[1].rc;
+    bool down = nt_teardown(t);
+
+    TEST_ASSERT(made && pp && post, "two threads, the peer asleep, the note posted");
+    TEST_ASSERT(down, "the exited thread and the peer were reclaimed");
+    TEST_ASSERT(tgt, "main, awake, was designated");
+    TEST_EXPECT_EQ(peer_rc, SLEEP_NOTEINTR,
+                   "main exited holding the designation: the peer was designated and unwound");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_holder_rewake -- a claim can outlive its note, when another
+// thread's tail delivers it, and its holder must still take the family's next
+// note. The peer sits in a wait that holds, so main is the one thread that can
+// take a note (an awake peer would be picked first). Main unwinds for one
+// interrupt; the note is then taken off the queue as a peer's tail would take
+// it; main blocks again in an unwinding wait, holding the claim with nothing
+// queued. A second interrupt finds the family claimed,
+// so no thread is picked: only the walk's re-wake of the holder ends main's
+// wait (caught_target.tla BUGGY_NO_REKICK).
+void test_rendez_caught_note_holder_rewake(void);
+void test_rendez_caught_note_holder_rewake(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct Thread *t[2];
+    bool made   = nt_setup(true, t);
+    bool held   = made && nt_run(t[1], 1, NT_HWAIT, true);
+    bool m1     = held && nt_run(t[0], 0, NT_UWAIT, true);
+    bool post1  = m1 && test_caught_post(g_nt_proc);
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (post1 && !nt_done(0) && timer_now_ns() < dl) sched();
+    int  rc1    = g_nt[0].rc;
+    bool taken  = false;
+    if (post1 && nt_done(0)) {
+        struct NoteQueue *q = g_nt_proc->notes;
+        struct Note got;
+        spin_lock(&q->lock);
+        taken = notes_dequeue_locked(g_nt_proc, NULL, &got) == 1;
+        spin_unlock(&q->lock);
+    }
+    bool still  = taken && (nt_claim(t[0]) & NT_FAM);
+    bool m2     = still && nt_run(t[0], 0, NT_UWAIT, true);
+    bool post2  = m2 && test_caught_post(g_nt_proc);
+    dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (post2 && !nt_done(0) && timer_now_ns() < dl) sched();
+    bool back2  = post2 && nt_done(0);
+    int  rc2    = g_nt[0].rc;
+    bool peer_held = held && nt_blocked(t[1], 1) && !(nt_target(t[1]) & NT_FAM);
+    bool down   = nt_teardown(t);
+
+    TEST_ASSERT(made && held && m1 && post1,
+                "the peer in a wait that holds, main asleep, the first note posted");
+    TEST_ASSERT(peer_held, "the peer rode both notes out, never designated");
+    TEST_ASSERT(down, "both threads returned and were reclaimed");
+    TEST_EXPECT_EQ(rc1, SLEEP_NOTEINTR, "main unwound for the first note");
+    TEST_ASSERT(taken && still, "the note was taken elsewhere; main still holds the claim");
+    TEST_ASSERT(m2 && post2, "main blocked again holding the claim; the second note posted");
+    TEST_ASSERT(back2, "the walk re-woke the holder without a release");
+    TEST_EXPECT_EQ(rc2, SLEEP_NOTEINTR, "...and it unwound for the second note");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_native_kicks_only -- a native Proc's waits never unwind for
+// a caught note (item 11c), so its walk designates no one and wakes no one; it
+// only kicks a thread that is not blocked. Two shapes, each with a Linux-Proc
+// control one variable away. Both threads asleep, one in a wait that would
+// unwind in a Linux Proc: the native post leaves both asleep, and the Linux
+// one wakes and designates the sleeper. Main awake and the peer asleep: the
+// native walk picks main and only kicks it, and the Linux one designates it.
+// A designation reads as the target or, once its thread has unwound, the claim.
+struct nt_native {
+    bool ok, down;
+    bool peer_woke;
+    u8   held[2];    // designation or claim, per thread
+};
+
+static void nt_native_leg(bool linux_pheno, bool main_awake, struct nt_native *o) {
+    struct Thread *t[2];
+    bool made = nt_setup(linux_pheno, t);
+    bool m0   = made && (main_awake || nt_run(t[0], 0, NT_HWAIT, true));
+    bool p1   = m0 && nt_run(t[1], 1, NT_UWAIT, true);
+    bool post = p1 && test_caught_post(g_nt_proc);
+    o->peer_woke = post && t[1]->state != THREAD_SLEEPING;
+    for (u32 i = 0; i < 2u; i++)
+        o->held[i] = made ? (u8)((nt_target(t[i]) | nt_claim(t[i])) & NT_FAM) : 0;
+    o->ok   = made && m0 && p1 && post;
+    o->down = nt_teardown(t);
+}
+
+void test_rendez_caught_note_native_kicks_only(void);
+void test_rendez_caught_note_native_kicks_only(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    struct nt_native nat, lin, nat_awake, lin_awake;
+    nt_native_leg(false, false, &nat);
+    nt_native_leg(true,  false, &lin);
+    nt_native_leg(false, true,  &nat_awake);
+    nt_native_leg(true,  true,  &lin_awake);
+
+    TEST_ASSERT(nat.ok && lin.ok && nat_awake.ok && lin_awake.ok, "every leg posted the note");
+    TEST_ASSERT(nat.down && lin.down && nat_awake.down && lin_awake.down,
+                "every thread was reclaimed");
+    TEST_ASSERT(!nat.peer_woke, "native, both asleep: the post woke no sleeper");
+    TEST_ASSERT(!nat.held[0] && !nat.held[1], "native, both asleep: the walk designated no one");
+    TEST_ASSERT(lin.peer_woke && lin.held[1],
+                "control: in a Linux Proc the same post designates and wakes the sleeper");
+    TEST_ASSERT(!nat_awake.peer_woke, "native, main awake: the post woke no sleeper");
+    TEST_ASSERT(!nat_awake.held[0] && !nat_awake.held[1],
+                "native, main awake: the walk kicked main and designated no one");
+    TEST_ASSERT(lin_awake.held[0] && !lin_awake.peer_woke,
+                "control: in a Linux Proc the same post designates main, awake");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_repick_fallback -- a pick that goes stale (its thread
+// entered a wait that holds, or a handler, between the pick and the re-check
+// under its wait_lock) is picked again, and after CAUGHT_REPICKS stale picks the
+// walk wakes every thread blocked in an unwinding wait: they race for the
+// claim, one unwinds, and the other re-reads its cond and sleeps on. Both
+// threads sleep in unwinding waits; the stale picks are forced. The control,
+// one variable away, forces one stale pick fewer: the last re-pick designates
+// main, which unwinds alone while the peer sleeps on.
+u32 caught_force_stale_for_test(struct Proc *p, u32 n);
+u32 caught_repicks_for_test(void);
+
+struct nt_repick {
+    bool ok, down;
+    u32  left;          // forced stale picks the walk did not consume
+    u32  unwound;       // threads whose wait returned SLEEP_NOTEINTR
+    bool claimed;       // ...and the one that did holds the family's claim
+    bool main_unwound;
+    bool other_reread;  // the thread still waiting re-read its cond, then slept
+    bool other_still;   // ...or slept on and never re-read it
+    u8   targets;       // designations left on either thread
+};
+
+static void nt_repick_leg(u32 stale, struct nt_repick *o) {
+    struct Thread *t[2];
+    bool made = nt_setup(true, t);
+    bool pp   = made && nt_run(t[1], 1, NT_UWAIT, true);
+    bool mp   = pp && nt_run(t[0], 0, NT_UWAIT, true);
+    u32  ev[2] = { g_nt[0].evals, g_nt[1].evals };
+    if (mp) (void)caught_force_stale_for_test(g_nt_proc, stale);
+    bool post = mp && test_caught_post(g_nt_proc);
+    // A thread the walk woke is off THREAD_SLEEPING until it re-reads its cond.
+    bool slept[2] = { post && t[0]->state == THREAD_SLEEPING,
+                      post && t[1]->state == THREAD_SLEEPING };
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (post && timer_now_ns() < dl) {
+        if (nt_done(0) && nt_done(1)) break;
+        if (nt_done(0) && nt_blocked(t[1], 1)) break;
+        if (nt_done(1) && nt_blocked(t[0], 0)) break;
+        sched();
+    }
+    o->left = caught_force_stale_for_test(NULL, 0);
+    o->unwound = 0; o->claimed = false; o->main_unwound = false;
+    o->other_reread = false; o->other_still = false; o->targets = 0;
+    if (post) {
+        for (u32 i = 0; i < 2u; i++) {
+            if (!nt_done(i) || g_nt[i].rc != SLEEP_NOTEINTR) continue;
+            o->unwound++;
+            if (nt_claim(t[i]) & NT_FAM) o->claimed = true;
+        }
+        o->main_unwound = nt_done(0) && g_nt[0].rc == SLEEP_NOTEINTR;
+        u32 w = nt_done(0) ? 1u : 0u;
+        bool waits = nt_blocked(t[w], w);
+        o->other_reread = waits && g_nt[w].evals > ev[w];
+        o->other_still  = waits && slept[w] && g_nt[w].evals == ev[w];
+        o->targets = (u8)((nt_target(t[0]) | nt_target(t[1])) & NT_FAM);
+    }
+    o->ok   = made && pp && mp && post;
+    o->down = nt_teardown(t);
+}
+
+void test_rendez_caught_note_repick_fallback(void);
+void test_rendez_caught_note_repick_fallback(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    const u32 n = caught_repicks_for_test();
+    struct nt_repick fb, ctl;
+    nt_repick_leg(n, &fb);
+    nt_repick_leg(n - 1u, &ctl);
+
+    TEST_ASSERT(fb.ok && fb.down && ctl.ok && ctl.down,
+                "both legs ran and every thread was reclaimed");
+    TEST_EXPECT_EQ(fb.left, 0u, "the walk went through every forced stale pick");
+    TEST_EXPECT_EQ(fb.unwound, 1u, "the fallback woke both sleepers and exactly one unwound");
+    TEST_ASSERT(fb.claimed, "...holding the family's claim");
+    TEST_ASSERT(fb.other_reread, "the other re-read its cond and sleeps on");
+    TEST_EXPECT_EQ(fb.targets, 0u, "the fallback designated no one");
+    TEST_EXPECT_EQ(ctl.left, 0u, "control: the walk went through every forced stale pick");
+    TEST_ASSERT(ctl.main_unwound && ctl.unwound == 1u,
+                "control: the last re-pick designated main, which unwound alone");
+    TEST_ASSERT(ctl.claimed, "control: ...holding the family's claim");
+    TEST_ASSERT(ctl.other_still, "control: the peer slept on and never re-read its cond");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
+}
+
+// rendez.caught_note_ends_wait4 -- signal(7)'s list (ARCH 8.8.3). wait4 is a
+// listed call. A caught note ends a Linux parent's wait for a live child with
+// WAIT_PID_NOTEINTR, nothing reaped; a native parent's wait rides it out and
+// ends when its last child is gone (-1, the ECHILD shape).
+static struct Proc *g_cwt_par;
+static struct Proc *g_cwt_kid;
+static bool         g_cwt_unlinked;
+
+static long cwt_wait(void *arg) {
+    (void)arg;
+    int status = 0;
+    return (long)wait_pid_for(-1, 0, &status);
+}
+
+static void cwt_release(void *arg) {
+    (void)arg;
+    proc_test_unlink(g_cwt_kid);           // no child left: the re-scan answers -1
+    g_cwt_unlinked = true;
+    poll_waiter_list_wake(&g_cwt_par->child_waiters);
+}
+
+static bool cwt_kid_linked(void) {
+    bool linked = false;
+    irq_state_t s = proc_table_lock_acquire();
+    for (struct Proc *c = g_cwt_par->children; c; c = c->sibling)
+        if (c == g_cwt_kid) linked = true;
+    proc_table_lock_release(s);
+    return linked;
+}
+
+static struct test_caught_leg cwt_leg(bool linux_pheno, bool *kid_kept) {
+    g_cwt_par      = test_caught_proc(linux_pheno);
+    g_cwt_kid      = g_cwt_par ? proc_alloc() : NULL;
+    g_cwt_unlinked = false;
+    if (g_cwt_kid) {
+        g_cwt_kid->state = PROC_STATE_ALIVE;   // alive, nothing to report: the wait blocks
+        proc_test_link_child(g_cwt_par, g_cwt_kid);
+    }
+    struct test_caught_leg leg = test_caught_run(g_cwt_kid ? g_cwt_par : NULL, cwt_wait,
+                                                 NULL, cwt_release, NULL, false);
+    *kid_kept = g_cwt_kid && cwt_kid_linked();
+    if (leg.stranded) return leg;
+    if (g_cwt_kid) {
+        if (!g_cwt_unlinked) proc_test_unlink(g_cwt_kid);
+        g_cwt_kid->state = PROC_STATE_ZOMBIE;
+        proc_free(g_cwt_kid);
+    }
+    test_caught_proc_free(g_cwt_par, &leg);
+    return leg;
+}
+
+void test_rendez_caught_note_ends_wait4(void);
+void test_rendez_caught_note_ends_wait4(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree must be empty at test entry");
+    bool kept = false, ctl_kept = false;
+    struct test_caught_leg leg = cwt_leg(true, &kept);
+    struct test_caught_leg ctl = cwt_leg(false, &ctl_kept);
+
+    TEST_ASSERT(leg.parked && leg.posted && leg.joined,
+        "the Linux parent waited on its live child, the note posted, the wait returned");
+    TEST_ASSERT(leg.on_post, "a caught note ends a Linux parent's wait4 (ARCH 8.8.3)");
+    TEST_EXPECT_EQ(leg.rc, (long)WAIT_PID_NOTEINTR,
+        "WAIT_PID_NOTEINTR, not the no-child -1 that viv_wait4 reports as ECHILD");
+    TEST_ASSERT(kept, "nothing reaped: the child is still the parent's");
+    TEST_ASSERT(ctl.parked && ctl.posted && ctl.joined,
+        "control: the native parent waited, the note posted, the wait returned");
+    TEST_ASSERT(ctl.rode_out, "control: woken with the note pending, the native parent waited again");
+    TEST_EXPECT_EQ(ctl.rc, -1L, "control: the native wait ends when its last child is gone");
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after cleanup");
 }

@@ -117,6 +117,11 @@ struct p9_attached {
     struct p9_attached          *ctl_next;
     char                         ctl_label[12];
     int                          ctl_id;       // peer pid for /srv conns; -1 else
+    // The session's two ends, who may read its counters (IMPERIUM-DESIGN 11.3
+    // item 10): the attacher, and the server when the kernel knows it (a /srv
+    // conn's poster). PRINCIPAL_INVALID until stamped, and for an unknown end.
+    u32                          ctl_owner;
+    u32                          ctl_server;
     // The closer (docs/FID-LIFECYCLE-DESIGN.md section 9): this session's
     // deferred Tclunks, oldest first, each entry holding one ref on this
     // struct. closer_queued = waiting on the closers' run-queue; closer_busy =
@@ -216,9 +221,27 @@ bool p9_attached_is_open(const struct p9_attached *a);
 // (p9_clunk_refused).
 int p9_attached_defer_clunk(struct p9_attached *a, u32 fid);
 
+// The rest of a final close that may not wait for its server (ARCH 7.9.1
+// part C): the closer calls run(job, client, fid) before it clunks the fid --
+// on a session that died first too, where the run's sends fail at once -- and
+// then release(job). run returns 0 or a negative errno; it may wait.
+struct p9_close_job {
+    int  (*run)(struct p9_close_job *job, struct p9_client *c, u32 fid);
+    void (*release)(struct p9_close_job *job);
+};
+
+// p9_attached_defer_clunk with a job that runs before the Tclunk. On -1 the
+// caller still owns the job, and the fid stays bound.
+int p9_attached_defer_close(struct p9_attached *a, u32 fid,
+                            struct p9_close_job *job);
+
 // Print `9p: close: clunk of fid N refused rc R` and count it. Only for a fid
 // that stays live on a live session: tools/test.sh fails on the line.
 void p9_clunk_refused(u32 fid, int rc);
+
+// Print `9p: close: flush of fid N failed rc R`: a last close's write-behind
+// run never reached a live server, so bytes write() reported written are lost.
+void p9_close_flush_failed(u32 fid, int rc);
 
 // Boot: start the pool with its first closer. -1 if it could not be created.
 int p9_closer_start(void);
@@ -236,6 +259,8 @@ struct p9_closer_stats {
     u64 dropped;         // entries that needed no Tclunk: the session died
                          // (its fids with it) or the fid was not bound
     u64 refused;         // entries left live on a live session (reported)
+    u64 jobs;            // close jobs run (p9_attached_defer_close)
+    u64 job_errors;      // of those, run failed on a live session (reported)
     u64 spawned;
     u64 spawn_failed;
     u64 reaped;
@@ -260,11 +285,18 @@ bool p9_closer_spawn_held_for_test(void);
 void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
                                int id);
 
+// Stamp the session's ends for /ctl/9p-sessions: `attacher` is the attaching
+// Proc's principal, `server` the server's when the kernel knows it, else
+// PRINCIPAL_INVALID. Until stamped the row's counters read "-" to every reader
+// but the system principal and a hostowner.
+void p9_attached_set_ctl_owners(struct p9_attached *a, u32 attacher, u32 server);
+
 // #210: walk every live attached session for /ctl/9p-sessions. cb gets
 // the label/id/msize plus a consistent client snapshot; the registry lock
 // is held across the walk, so cb must not block or attach/destroy.
 struct p9_client_ctl;
 typedef bool (*p9_attached_ctl_cb)(const char *label, int id, u32 msize,
+                                   u32 owner, u32 server,
                                    const struct p9_client_ctl *snap,
                                    void *arg);
 void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg);

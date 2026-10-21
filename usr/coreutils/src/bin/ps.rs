@@ -62,8 +62,12 @@ struct PsRow {
     cpu: String, // humanized
 }
 
-/// ns -> a compact human figure: "<n>ms" under 10s, else "<n>s".
+/// ns -> a compact human figure: "<n>ms" under 10s, else "<n>s". The kernel
+/// withholds another principal's CPU time as "-", which stays "-".
 fn cpu_str(ns_text: &str) -> Option<String> {
+    if ns_text == "-" {
+        return Some(String::from("-"));
+    }
     let ns: u64 = ns_text.parse().ok()?;
     let ms = ns / 1_000_000;
     Some(if ms < 10_000 {

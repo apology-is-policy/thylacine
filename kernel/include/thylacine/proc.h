@@ -138,9 +138,11 @@ bool proc_service_snapshot_by_stripes(u64 stripes, const struct AddrSpace *as,
 //                      as->lock so it is exact). B-1a' (ARCH 6.5 "Capacity, and
 //                      the I-32 default"): no longer a constant -- see
 //                      proc_default_page_budget below.
-//   PROC_THREAD_MAX -- live threads. Tighter than the others because a thread
-//                      pins THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel
-//                      kstack (256 threads -> 8 MiB kstacks).
+//   PROC_THREAD_MAX -- threads not yet freed (the live ones, plus peers that
+//                      exited since the Proc's last thread create, which frees
+//                      them) and SQPOLL kthreads. Tighter than the others
+//                      because a thread pins THREAD_KSTACK_TOTAL bytes of
+//                      UNSWAPPABLE kernel kstack (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
 //
 // B-1a': the DEFAULT anon budget a Proc is seeded with, and the hard maximum a
@@ -372,10 +374,26 @@ struct Proc {
     // `child_waiters` + the g_proc_table_lock-protected re-scan (replacing the
     // single-waiter `child_done` Rendez + the lockless `wait_pid_cond` walk
     // that the guard existed to protect) -- RETIRES the guard: all may wait.
-    // The field is kept (now reserved) so every following field holds its
-    // pinned offset; the size + offset _Static_asserts below depend on it.
-    // KP_ZERO inits it to 0; nothing reads or writes it.
-    u32                _reserved0;
+    // The field's four bytes stay so every following field holds its pinned
+    // offset; gcpark-b took two of them for the death signal below, and the
+    // signal chunk's S-2 took the other two for note_caught.
+    //
+    // gcpark-b: the POSIX signal the Proc died of (notes.h NOTE_SIG_*), 0 for a
+    // Proc that exited. term_sig is the ZOMBIE record, written beside
+    // exit_status by proc_become_zombie_locked and read by wait_pid_for, both
+    // under g_proc_table_lock. group_term_sig is the group-termination stash,
+    // group_exit_code's companion: written once, in the set-once claim that
+    // publishes group_exit_msg, and read by the last Thread out, again under
+    // g_proc_table_lock (I-24). Bytes, not ints: a signal is 1..127.
+    u8                 term_sig;
+    u8                 group_term_sig;
+
+    // ARCH 8.8.3: the caught-note latch (low byte) and its unwind claim (high
+    // byte), one bit per note family; CAUGHT_LATCH_MASK below has the
+    // discipline. A word of its own, not proc_flags bits: the claim's CAS needs
+    // both bytes in one word, and no reader needs either byte together with a
+    // proc_flags bit. NOT propagated by rfork; KP_ZERO at proc_alloc.
+    u16                note_caught;
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from
@@ -605,8 +623,10 @@ struct Proc {
     // THIS flag (the tty:cont fan / SYS_TTY_CONT / the F8 teardown + orphan
     // rule), proc_debug_resume clears only debug_stop_req -- a tty:cont can
     // never run a debugger-stopped thread (StopCompatI39; the
-    // BUGGY_DOUBLE_STOP counterexample). Death overrides both (the park
-    // loop's group_exit_msg check precedes; GroupDie clears stopOwners).
+    // BUGGY_DOUBLE_STOP counterexample). Death overrides both: the park
+    // loop's group_exit_msg check precedes, and proc_stop_requested answers
+    // false once group_exit_msg is set (the models' GroupDie clears
+    // stopOwners; the kernel keeps the flags and gates the predicate).
     // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm (the pts SIGTSTP
     // fan) AND proc_job_stop_proc (the prowl-4 /proc/<pid>/ctl `suspend`),
     // both under g_proc_table_lock; CLEARED (RELEASE) by the job-resume paths
@@ -643,15 +663,17 @@ struct Proc {
     // reads NULL -> head, preserving the attach/8a-2b single-thread behavior).
     // READ (ACQUIRE) under g_proc_table_lock: devproc_focus_thread validates the
     // pointer is still a thread of `target` (else head). NO UAF -- and the
-    // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): reap
-    // (wait_pid_for) does proc_unlink_child under g_proc_table_lock BEFORE the
-    // lock-free thread_free loop, and proc_for_each walks the kproc-rooted children
-    // tree, so a target a reader can still reach has not been unlinked -> none of
-    // its threads is freed; the in-list validation then rejects any stale/foreign
-    // pointer. The fully-stopped gate is an ADDITIONAL property of the mem / regs /
-    // kregs / step readers but NOT of the 8b settled kstack, so it is not the
-    // safety net -- the pin + validation are (do not delete the validation loop as
-    // "redundant"). KP_ZERO inits it NULL; NOT propagated by rfork.
+    // load-bearing reason is the GPTL PIN, not a stop gate (#95-audit F1): every
+    // unlink from p->threads holds g_proc_table_lock and comes before the free --
+    // wait_pid_for's thread_free loop, run after proc_unlink_child put the target
+    // out of proc_for_each's reach, and the in-Proc reap, which clears a focus
+    // naming the thread it frees in the same hold -- so a pointer that matches an
+    // in-list thread under the lock is a live struct, and the in-list validation
+    // rejects any stale/foreign one. The fully-stopped gate is an ADDITIONAL
+    // property of the mem / regs / kregs / step readers but NOT of the 8b settled
+    // kstack, so it is not the safety net -- the pin + validation are (do not
+    // delete the validation loop as "redundant"). KP_ZERO inits it NULL; NOT
+    // propagated by rfork.
     struct Thread     *debug_focus_thread;
 
     // PTY-1a (PTY-DESIGN.md section 4; POSIX sessions + process groups).
@@ -993,6 +1015,16 @@ struct Proc {
     spin_lock_t        srv_post_lock;
     bool               srv_posts_closed;
     struct SrvPostMembership *srv_post_memberships;
+
+    // What the threads proc_reap_exited_threads has freed leave behind, so the
+    // Proc's on-CPU time (proc_cpu_ns) and its kernel-stack watermark
+    // (proc_kstack_peak, ARCH 8.12: the deepest any of its threads EVER
+    // reached) do not shrink when an exited peer is freed while the Proc lives.
+    // Written by the reap under g_proc_table_lock, read by those two under it.
+    // KP_ZERO-fresh; never rfork-inherited.
+    u64                reaped_run_ns;
+    u32                reaped_kstack_peak;
+    int                reaped_kstack_tid;
 };
 
 #define BIRTH_HOLD_NONE    0u
@@ -1094,10 +1126,26 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // it), NOT propagated by rfork. See the SPAWN_PERM_* comment in syscall.h.
 #define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
 
+// The signal chunk's S-2: the TERM terminate-disposition latch -- the FOURTH
+// terminate family (interrupt, tty:quit/hup, pipe, term). Armed when
+// notes_post commits an unhandled + unmasked `term` note on a Proc that is not
+// self-managing; paired with NOTE_BIT_TERM in thread_die_pending exactly as the
+// other latches pair with theirs, so a thread that masked term never unwinds
+// for it and one that masked only interrupt still does (SIGINT ignored must not
+// silence SIGTERM). Same latch discipline: set/cleared ONLY under
+// p->notes->lock; NOT propagated by rfork; never armed on kproc. Bit 11 was the
+// first bit of the caught-note sub-field until that sub-field moved to
+// Proc.note_caught to make room for this family.
+#define PROC_FLAG_TERM_TERMINATE_PENDING (1u << 11)
+
 // item 11 (ARCH §8.8.3): the CAUGHT-note-deliverable latch -- the non-death
-// sibling of the two terminate latches above. A 7-bit sub-field at bits
-// 11..17 (6 bits, 11..16, until IM-1 added the `sak` family), one bit per note
-// family ALIGNED TO NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6),
+// sibling of the terminate latches above. The LOW BYTE of Proc.note_caught, not
+// proc_flags: it was the sub-field at proc_flags bits 11..17 until the `term`
+// family needed an eighth bit and proc_flags had none left. Every reader and
+// writer touches only the two note_caught bytes (the claim's CAS needs both in
+// one word; nothing needs either beside a proc_flags bit), so the move kept
+// every atomicity the code relied on. One bit per note family ALIGNED TO
+// NOTE_BIT_* (INTERRUPT=0 .. TTY=5, SAK=6, TERM=7),
 // so thread_caught_note_deliverable can gate it by the per-Thread note_mask
 // exactly as thread_die_pending gates the terminate latches. The per-family
 // pairing is REQUIRED for the same reason the PTY-1b comment above gives: a
@@ -1110,9 +1158,9 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // under p->notes->lock; NOT propagated by rfork; never armed on kproc (the arm
 // inherits notes_post's kproc guard). The mask is a literal here because proc.h
 // does not include notes.h; notes.c static_asserts it equals
-// NOTE_MASK_SUPPORTED << PROC_CAUGHT_NOTE_SHIFT.
-#define PROC_CAUGHT_NOTE_SHIFT      11u
-#define PROC_FLAG_CAUGHT_NOTE_MASK  (0x7fu << PROC_CAUGHT_NOTE_SHIFT)  // bits 11..17
+// NOTE_MASK_SUPPORTED << CAUGHT_LATCH_SHIFT.
+#define CAUGHT_LATCH_SHIFT      0u
+#define CAUGHT_LATCH_MASK       (0xffu << CAUGHT_LATCH_SHIFT)  // note_caught bits 0..7
 
 // #237: the PIPE terminate-disposition latch -- the THIRD terminate family
 // (interrupt, tty:quit/hup, now pipe). Armed when notes_post commits an
@@ -1125,7 +1173,7 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // handler registration, the self-managing mark, or draining the last queued
 // pipe note); NOT propagated by rfork; never armed on kproc.
 //
-// BIT 18, not the next literal gap: bits 11..17 are the caught-note sub-field
+// BIT 18, not the next literal gap: bits 11..17 were the caught-note sub-field
 // (dense, one bit per NOTE_BIT_* family), and NOTE_MASK_SUPPORTED grows per
 // chunk, so that field grows UPWARD from bit 11. 18 is the first bit above it
 // today; the static_assert makes a future widening (an 8th note family) that
@@ -1135,12 +1183,10 @@ static inline u32 phenotype_decide(bool crossed_pheno, bool territory_linux) {
 // assert below turned that into this relocation. (The design memo's "next
 // free bit = 11" missed the sub-field: bit 11 is the INTERRUPT family's
 // caught-note bit -- using it would have aliased two unrelated latches, a
-// collision no build would catch.)
+// collision no build would catch.) The sub-field has since left proc_flags for
+// Proc.note_caught; the latch stays at 18, and PROC_FLAGS_ALL's disjointness
+// assert below now guards every bit at once.
 #define PROC_FLAG_PIPE_TERMINATE_PENDING (1u << 18)
-_Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
-               "#237: the pipe terminate latch must not overlap the caught-note "
-               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
-               "relocate PROC_FLAG_PIPE_TERMINATE_PENDING above the field then");
 
 // PROC_FLAG_SESSION_HANGUP (arm-6, IDENTITY-DESIGN §9.9.1) -- kernel-stamped
 // from SPAWN_PERM_SESSION_HANGUP in the spawn thunk (paired with a proc_setsid
@@ -1150,13 +1196,13 @@ _Static_assert((PROC_FLAG_PIPE_TERMINATE_PENDING & PROC_FLAG_CAUGHT_NOTE_MASK) =
 // session -- the legate-teardown pattern applied to the login session, so
 // logout reclaims the user's session (A-5 decision (3)). Set-once, never
 // cleared, NOT propagated by rfork (proc_flags is not copied), so only the
-// armed leader carries it. Bit 19: above the caught-note sub-field (11..17) and
-// the pipe latch (18); the static_assert makes a future field-widening a
-// compile-time relocation rather than a silent alias.
+// armed leader carries it. Bit 19: it was placed above the caught-note
+// sub-field (then 11..17) and the pipe latch (18); PROC_FLAGS_ALL's assert
+// below makes any alias a compile error.
 #define PROC_FLAG_SESSION_HANGUP    (1u << 19)
 // Boot-only graphical seat manager designation; not propagated through rfork.
 #define PROC_FLAG_SEAT_MANAGER       (1u << 20)
-_Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
+_Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING)) == 0,
     "seat manager flag must not overlap note, session or pipe flags");
 // This Proc's image has been under debug CONTROL, so it may never gain authority
@@ -1175,19 +1221,25 @@ _Static_assert((PROC_FLAG_SEAT_MANAGER & (PROC_FLAG_CAUGHT_NOTE_MASK |
 // It is stamped across the whole ADDRESS SPACE, not one Proc: the image is the
 // asset, and every Proc mapping it is a door to the same bytes.
 #define PROC_FLAG_DEBUG_TAINTED      (1u << 21)
-_Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_CAUGHT_NOTE_MASK |
+
+// The proc_flags bits that restrict an IMAGE rather than confer anything: the two
+// seals and the taint. An address space records them from every holder that
+// leaves it (AddrSpace.guards_ever), so they must never include a bit a reader
+// could take as permission. The taint is redundant in the record today (it is
+// inherited at fork and stamped on every mapper); it is kept so the record is the
+// image's whole guard history.
+#define PROC_IMAGE_GUARDS (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_DEBUG_TAINTED)
+_Static_assert((PROC_FLAG_DEBUG_TAINTED & (PROC_FLAG_TERM_TERMINATE_PENDING |
     PROC_FLAG_SESSION_HANGUP | PROC_FLAG_PIPE_TERMINATE_PENDING |
     PROC_FLAG_SEAT_MANAGER)) == 0,
-    "the debug taint must not overlap the caught-note field or the flags below it");
-_Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
-               "arm-6: the session-hangup flag must not overlap the caught-note "
-               "sub-field; widening NOTE_MASK_SUPPORTED grows it upward -- "
-               "relocate PROC_FLAG_SESSION_HANGUP above the field then");
+    "the debug taint must not overlap the term latch or the flags below it");
 
-// ARCH 8.8.3: the CLAIM sub-field, one bit per note family aligned like the
-// caught sub-field above. One caught note unwinds ONE interruptible sleeper, as
-// Linux interrupts one thread for a process-directed signal: the sleeper that
-// unwinds sets its family's claim bit with a CAS on the whole word, so the claim
+// ARCH 8.8.3: the CLAIM, the HIGH BYTE of Proc.note_caught (proc_flags bits
+// 22..28 until S-2 moved it with the latch), one bit per note family aligned
+// like the caught byte above. One caught note unwinds ONE interruptible sleeper,
+// as Linux interrupts one thread for a process-directed signal: the sleeper
+// that unwinds sets its family's claim bit with a CAS on the whole note_caught
+// word, so the claim
 // is taken only while that family's caught bit is still set, and records it in
 // its own Thread (note_claim). Only that thread clears the bit, at its next
 // EL0-return tail, whatever the tail delivered -- the tail can end short of the
@@ -1195,16 +1247,61 @@ _Static_assert((PROC_FLAG_SESSION_HANGUP & PROC_FLAG_CAUGHT_NOTE_MASK) == 0,
 // claimant's unwind and refuse every wait in the Proc. Exec clears the field (a
 // Proc execs alone). NOT propagated by rfork; never set on kproc (the caught bit
 // never is).
-#define PROC_CAUGHT_CLAIM_SHIFT     22u
-#define PROC_FLAG_SESSION_REGISTRY (1u << 29)
+#define CAUGHT_CLAIM_SHIFT     8u
+#define CAUGHT_CLAIM_MASK      (0xffu << CAUGHT_CLAIM_SHIFT)  // note_caught bits 8..15
+_Static_assert((CAUGHT_CLAIM_MASK & CAUGHT_LATCH_MASK) == 0 &&
+               ((CAUGHT_CLAIM_MASK | CAUGHT_LATCH_MASK) >>
+                (8u * sizeof(((struct Proc *)0)->note_caught))) == 0,
+    "the caught latch and its claim are disjoint and both fit Proc.note_caught");
+
+// A Proc the in-kernel test harness spliced into the table (proc_test_link /
+// proc_test_link_child, the test support in proc.c), read only by the test
+// runner's release of a fixture a failing test left linked. rfork links a real
+// child through proc_link_child directly, so no real Proc carries it.
+#define PROC_FLAG_TEST_FIXTURE       (1u << 29)
+_Static_assert((PROC_FLAG_TEST_FIXTURE & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
+    PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
+    PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
+    PROC_FLAG_TERM_TERMINATE_PENDING |
+    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
+    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED)) == 0,
+    "the test-fixture mark must not overlap another flag");
+
+// ARCH 7.9.1 part B: a kill found this Proc already terminating, so its final
+// close no longer waits on a server -- thread_die_pending honours the flag
+// under exit_close_active. Set once, by proc_group_kill, before its death wake.
+#define PROC_FLAG_EXIT_CLOSE_FORCED  (1u << 30)
+// The last thread is in the final close (proc_close_handles_at_exit), so the
+// Proc is terminating even when nothing set group_exit_msg (an exits()): a kill
+// that finds it forces the close. Set once, never cleared.
+#define PROC_FLAG_EXIT_CLOSING       (1u << 31)
+_Static_assert((PROC_FLAG_EXIT_CLOSE_FORCED & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
+    PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
+    PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
+    PROC_FLAG_TERM_TERMINATE_PENDING |
+    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
+    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE)) == 0,
+    "the forced-final-close mark must not overlap another flag");
+_Static_assert((PROC_FLAG_EXIT_CLOSING & (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE |
+    PROC_FLAG_MLOCKED | PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE |
+    PROC_FLAG_LEGATE_ROOT | PROC_FLAG_SELF_MANAGING_NOTES |
+    PROC_FLAG_INTR_TERMINATE_PENDING | PROC_FLAG_TTY_TERMINATE_PENDING |
+    PROC_FLAG_CONSOLE_RENDERER | PROC_FLAG_MAY_RAISE_PAGE_BUDGET |
+    PROC_FLAG_TERM_TERMINATE_PENDING |
+    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
+    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE |
+    PROC_FLAG_EXIT_CLOSE_FORCED)) == 0,
+    "the final-close mark must not overlap another flag");
+
+// The Proc may mint a fresh service registry for its login session
+// (SYS_SRV_REGISTRY_NEW); set once by proc_mark_session_registry.
+#define PROC_FLAG_SESSION_REGISTRY   (1u << 12)
 void proc_mark_session_registry(struct Proc *p);
 bool proc_may_create_srv_registry(const struct Proc *p);
-#define PROC_FLAG_CAUGHT_CLAIM_MASK (0x7fu << PROC_CAUGHT_CLAIM_SHIFT)  // bits 22..28
-_Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
-    PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP |
-    PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED |
-    ((1u << 11) - 1u))) == 0,
-    "the caught-note claim sub-field must not overlap any other proc flag");
 
 // The terminate-CLASS latch set (interrupt + tty:quit/hup + pipe). Used by the
 // whole-class clears -- handler registration, the self-managing mark, the
@@ -1214,7 +1311,37 @@ _Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
 #define PROC_FLAG_TERMINATE_PENDING_MASK \
     (PROC_FLAG_INTR_TERMINATE_PENDING | \
      PROC_FLAG_TTY_TERMINATE_PENDING | \
-     PROC_FLAG_PIPE_TERMINATE_PENDING)
+     PROC_FLAG_PIPE_TERMINATE_PENDING | \
+     PROC_FLAG_TERM_TERMINATE_PENDING)
+
+// Every proc_flags bit, and a check DERIVED from the list rather than pinned to
+// pairs: the flags are disjoint iff the popcount of their union is the sum of
+// their popcounts. A new flag joins this list, and an alias anywhere fails here.
+#define PROC_FLAGS_ALL \
+    (PROC_FLAG_NODUMP | PROC_FLAG_NOTRACE | PROC_FLAG_MLOCKED | \
+     PROC_FLAG_CONSOLE_ATTACHED | PROC_FLAG_MAY_POST_SERVICE | PROC_FLAG_LEGATE_ROOT | \
+     PROC_FLAG_SELF_MANAGING_NOTES | PROC_FLAG_INTR_TERMINATE_PENDING | \
+     PROC_FLAG_TTY_TERMINATE_PENDING | PROC_FLAG_CONSOLE_RENDERER | \
+     PROC_FLAG_MAY_RAISE_PAGE_BUDGET | PROC_FLAG_TERM_TERMINATE_PENDING | \
+     PROC_FLAG_PIPE_TERMINATE_PENDING | PROC_FLAG_SESSION_HANGUP | \
+     PROC_FLAG_SEAT_MANAGER | PROC_FLAG_DEBUG_TAINTED | PROC_FLAG_TEST_FIXTURE | \
+     PROC_FLAG_EXIT_CLOSE_FORCED | PROC_FLAG_EXIT_CLOSING | PROC_FLAG_SESSION_REGISTRY)
+_Static_assert(__builtin_popcount(PROC_FLAGS_ALL) ==
+    __builtin_popcount(PROC_FLAG_NODUMP) + __builtin_popcount(PROC_FLAG_NOTRACE) +
+    __builtin_popcount(PROC_FLAG_MLOCKED) + __builtin_popcount(PROC_FLAG_CONSOLE_ATTACHED) +
+    __builtin_popcount(PROC_FLAG_MAY_POST_SERVICE) + __builtin_popcount(PROC_FLAG_LEGATE_ROOT) +
+    __builtin_popcount(PROC_FLAG_SELF_MANAGING_NOTES) +
+    __builtin_popcount(PROC_FLAG_INTR_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_TTY_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_CONSOLE_RENDERER) +
+    __builtin_popcount(PROC_FLAG_MAY_RAISE_PAGE_BUDGET) +
+    __builtin_popcount(PROC_FLAG_TERM_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_PIPE_TERMINATE_PENDING) +
+    __builtin_popcount(PROC_FLAG_SESSION_HANGUP) + __builtin_popcount(PROC_FLAG_SEAT_MANAGER) +
+    __builtin_popcount(PROC_FLAG_DEBUG_TAINTED) + __builtin_popcount(PROC_FLAG_TEST_FIXTURE) +
+    __builtin_popcount(PROC_FLAG_EXIT_CLOSE_FORCED) + __builtin_popcount(PROC_FLAG_EXIT_CLOSING) +
+    __builtin_popcount(PROC_FLAG_SESSION_REGISTRY),
+    "two proc_flags bits alias");
 
 // LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
 // seven fields from struct Proc and added one pointer, so the struct went
@@ -1222,8 +1349,13 @@ _Static_assert((PROC_FLAG_CAUGHT_CLAIM_MASK & (PROC_FLAG_CAUGHT_NOTE_MASK |
 // message prose carries only each field's landing RATIONALE. Absolute offsets
 // were deliberately stripped from that prose -- duplicating the number in a
 // comment is what made it go stale here in the first place.
-_Static_assert(sizeof(struct Proc) == 424,
- "D7 appends a posting ledger without changing earlier offsets. IM-2 appended the propagating-legate pair (legate_caps "
+_Static_assert(sizeof(struct Proc) == 440,
+ "struct Proc size: D7's posting ledger (srv_post_lock, srv_posts_closed, "
+ "srv_post_memberships) and the in-Proc thread reap's reaped_run_ns u64 + "
+ "reaped_kstack_peak u32 + reaped_kstack_tid int (what a freed exited peer "
+ "leaves behind) each appended 16 bytes without moving an earlier offset: "
+ "408 -> 440. Before that: "
+ "IM-2 appended the propagating-legate pair (legate_caps "
  "u64 + legate_flags u32, tail-padded to the 8-byte struct alignment): "
  "392 -> 408. Before that: "
  "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
@@ -1414,7 +1546,8 @@ struct Proc *proc_init_proc(void);
 // SLUB-allocate a fresh Proc descriptor. Initializes pid (next monotonic
 // pid), threads = NULL, thread_count = 0, state = ALIVE, child_waiters
 // initialized. parent / children / sibling left NULL (caller wires
-// linkage). Returns NULL on OOM.
+// linkage). Returns NULL on OOM, or when the pid space is spent (pids are
+// never recycled, so that refusal is permanent).
 struct Proc *proc_alloc(void);
 
 // LINEAGE L-3: the same, but with an explicit address space. `share` NULL gives
@@ -1514,13 +1647,27 @@ u32 proc_kstack_peak_system(int *pid_out, int *tid_out);
 //   for the read (the thread_count write domain). The check and the later
 //   thread_link_into_proc ++ are at different lock holds, so a bounded TOCTOU
 //   overshoot (<= ncpus-1 concurrent spawners) is possible -- acceptable for a
-//   floor.
+//   floor. thread_count counts every Thread on the list, an exited one included
+//   until it is freed, so both spawn paths call proc_reap_exited_threads first.
 bool proc_thread_cap_ok(struct Proc *p);
+
+// proc_reap_exited_threads -- free every Thread of the caller's Proc that has
+//   exited (THREAD_EXITING) and fully left its CPU (on_cpu clear), folding its
+//   run_ns and kstack watermark into the Proc and clearing a debug focus that
+//   names it. Without it an exited peer stays on p->threads, pinning its kstack
+//   and counted by proc_thread_cap_ok, until wait_pid reaps the whole Proc.
+//   Caller: a RUNNING thread of that Proc, holding no lock -- being RUNNING pins
+//   the Proc ALIVE (it cannot become a ZOMBIE that wait_pid frees under us), and
+//   thread_free_unlinked takes the allocator locks. An exited peer still on a
+//   CPU is skipped; a later call frees it. kproc's threads are never reaped here.
+void proc_reap_exited_threads(void);
 
 // proc_sqpoll_charge / _uncharge -- the SQPOLL-kthread half of the shared
 //   thread budget (fid-lift audit F1). Charge is check-AND-increment under one
 //   g_proc_table_lock hold (a Loom setup has no other serialization point);
-//   false = at the cap, the setup must refuse. Counts even for exempt Procs
+//   false = at the cap, the setup must refuse. The setup frees the Proc's
+//   exited peers first (proc_reap_exited_threads), as the spawn paths do, since
+//   thread_count counts them until then. Counts even for exempt Procs
 //   (they skip only the cap), so the uncharge -- loom_free's join path, keyed
 //   on Loom.sqpoll_charged -- is unconditional.
 bool proc_sqpoll_charge(struct Proc *p);
@@ -1554,6 +1701,11 @@ bool proc_child_cap_ok(struct Proc *p);
 // number of devices reset (a no-op returning 0 on a NULL Proc / NULL table).
 // Exposed for the device-death-quiesce regression test.
 int proc_quiesce_owned_devices(struct Proc *p);
+
+// The same reset for the devices mapped in `as` alone (proc_quiesce_owned_devices'
+// walk (b)), for a caller that knows nobody else holds `as`; the last
+// addrspace_unref runs it before its drain. Returns the number reset.
+int addrspace_quiesce_mapped_devices(struct AddrSpace *as);
 
 // LINEAGE L-3c-2: has a vfork child let go of its parent's address space --
 // and so of the parent's live stack frame, which under RFMEM is the thing the
@@ -1730,21 +1882,38 @@ void exits(const char *msg);
 // SYS_EXITS entry point calls this directly with the real byte.
 void exits_code(int code, const char *msg);
 
+// gcpark-b: a death by a note -- a fault, an uncaught terminating note, a kill.
+// exit_status 1 as exits(msg) records it, plus the POSIX signal `sig` (notes.h
+// NOTE_SIG_*) the packed wait word reports (docs/ERRORS.md "Exit-status
+// semantics"). In a multi-thread Proc the signal rides the same set-once group
+// claim as the status (I-24). `msg` has exits()'s lifetime rule.
+__attribute__((noreturn))
+void exits_signalled(int sig, const char *msg);
+
+// exits_signalled(notes_death_signal(name), name): the death by the note
+// `name`, a canonical .rodata name (a NOTE_NAME_* literal or a g_known_notes
+// row pointer).
+__attribute__((noreturn))
+void exits_note(const char *name);
+
 // P6 hardening #3a (scripture e45a571): terminate the calling Thread's
-// Proc on EL0 unhandled fault. Called from
-// arch/arm64/exception.c::exception_sync_lower_el for every EL0 sync
-// exception that previously called extinction_with_addr.
+// Proc with a snare:* death. Three callers: arch/arm64/exception.c::
+// exception_sync_lower_el for every EL0 sync exception that previously
+// called extinction_with_addr, and the two syscall paths where a Proc
+// chooses the death for itself -- SYS_POSTNOTE's self arm
+// (notes_self_death_snare) and the Linux phenotype's kill (viv_kill).
 //
 // `name` MUST be one of the NOTE_NAME_SNARE_* constants from
-// <thylacine/notes.h>. `faulting_addr` is FAR_EL1 (data abort) or
-// ELR_EL1 (other EL0 EC), printed in the diagnostic for forensics.
+// <thylacine/notes.h>. `faulting_addr` is FAR_EL1 (data abort, SP
+// alignment), ELR_EL1 (PC alignment, BTI, BRK) or ESR_EL1 (an illegal
+// instruction); for a chosen death it is the ELR of the SVC, the
+// instruction after the call. Printed in the diagnostic.
 //
-// NEVER returns. Emits a uart diagnostic line + calls exits(name).
-// In multi-thread Procs (thread_count > 1) it extincts with a
-// specific message (v1.0 lacks cross-thread shootdown). In all
-// other corruption / impossible cases (no current thread, no
-// proc, kproc-routed, ...) it extincts with a defense-in-depth
-// message.
+// NEVER returns. Emits a uart diagnostic line + calls exits_note(name),
+// which records the snare's signal (notes_death_signal) and routes a
+// multi-thread Proc through the group cascade (I-24).
+// In the corruption / impossible cases (no current thread, no proc,
+// kproc-routed, ...) it extincts with a defense-in-depth message.
 //
 // See docs/ERRORS.md "Fault-note naming -- the snare:* family" for
 // the design rationale + the per-cause `snare:*` table.
@@ -1794,15 +1963,30 @@ void thread_exit_self(void);
 // p->threads walk races a concurrent thread_free into a UAF otherwise. It
 // additionally takes torpor_lock + per-peer wait_lock + (via wakeup)
 // rendez/timerwait locks, all strictly BELOW g_proc_table_lock in the order.
-void proc_group_terminate(struct Proc *p, const char *msg);
+//
+// gcpark-b: `sig` is the POSIX signal the termination records (notes.h
+// NOTE_SIG_*; 0 = none): every production caller is a kill-class termination
+// -- a legate scope's end and an orphaned birth hold and EXITKILL are
+// NOTE_SIG_KILL, a session hangup is NOTE_SIG_HUP. Set-once with the msg.
+void proc_group_terminate(struct Proc *p, int sig, const char *msg);
 
 // #91: the code-carrying core of proc_group_terminate(). Stashes `code` (low
 // byte, 0..255) into p->group_exit_code in the SAME set-once CAS-winner branch
 // that publishes group_exit_msg, so the last Thread out (thread_exit_self)
 // seeds the ZOMBIE exit_status with the real code instead of msg-derived 0/1.
-// proc_group_terminate(p, msg) is the string-only wrapper (kept for the kill /
-// legate / debugger callers): code = 0 iff msg=="ok", else 1.
+// proc_group_terminate(p, sig, msg) is the string-only wrapper (kept for the
+// kill / legate / debugger callers): code = 0 iff msg=="ok", else 1. This one
+// records no signal: its callers (SYS_EXIT_GROUP) are exits.
 void proc_group_terminate_code(struct Proc *p, int code, const char *msg);
+
+// A kill (SYS_POSTNOTE "kill", the /proc/<pid>/ctl kill verb):
+// proc_group_terminate(p, "killed"), and when p is already terminating -- its
+// group exiting, or its last thread in the final close -- it also
+// forces p's final close (ARCH 7.9.1 part B; PROC_FLAG_EXIT_CLOSE_FORCED),
+// published before the death wake so a final close asleep on its server wakes
+// into it. Other terminations (a hangup, EXITKILL, a legate scope) never
+// force. Same lock contract as proc_group_terminate.
+void proc_group_kill(struct Proc *p);
 
 // LINEAGE L-2 (docs/LINEAGE.md section 5.2, I-44): execve's address-space swap.
 //
@@ -1868,10 +2052,23 @@ void el0_return_die_check(void);
 // (proc_stop_sleeper_park), then smp_resched_others() so a peer RUNNING at
 // EL0 on another CPU traps to its tail (the periodic tick is the floor). A thread
 // already in the kernel observes the flag when its syscall/handler returns to the
-// tail. LOCK CONTRACT: caller holds g_proc_table_lock (mirrors
-// proc_group_terminate; the flag-set + wake + IPI take no sleeping lock; the
-// per-peer wait_lock walk is g_proc_table_lock -> wait_lock -> r->lock).
-void proc_debug_stop_deliver(struct Proc *p);
+// tail. A peer already in its stop park is passed by: a second stop changes
+// nothing that park waits on (DEBUG-FS-DESIGN 5g). A dying Proc takes no new
+// stop -- death wins, and the flag would serve no park and no report
+// (pty_stop.tla's StopDebug is guarded ~gflag) -- so it sets nothing and returns
+// false; true iff it delivered. LOCK CONTRACT: caller holds g_proc_table_lock
+// (mirrors proc_group_terminate, whose set-once group_exit_msg CAS runs under
+// it, so the dying check is exact; the flag-set + wake + IPI take no sleeping
+// lock; the per-peer wait_lock walk is g_proc_table_lock -> wait_lock ->
+// r->lock).
+bool proc_debug_stop_deliver(struct Proc *p);
+
+// proc_debug_cancel_steps_locked: cancel every thread's pending single-step
+// (debug_ss_armed and the step-over VA). A whole-Proc stop does it, and so does
+// the end of the debugger's slot (a detach, the ctl-fd close's release): a step
+// left armed would stop the target for whoever attaches next, before it asked.
+// Caller holds g_proc_table_lock.
+void proc_debug_cancel_steps_locked(struct Proc *p);
 
 // proc_stop_sleeper_park: the nested stop park a blocking sleep()/tsleep()
 // detours into when ANY stop is pending -- a debugger stop (8c-2,
@@ -1879,10 +2076,16 @@ void proc_debug_stop_deliver(struct Proc *p);
 // proc_stop_requested's disjunction). Sleeps on the caller's own debug_rendez
 // (the shared stop-park rendez -- one park, two owners, per-owner clears)
 // until BOTH stop owners clear; returns SLEEP_OK (re-check the original wait
-// cond + re-block) or SLEEP_INTR (dying/soft-int while stop-parked -> unwind
-// + die at the tail; DEATH WINS -- pty_stop.tla DeathWinsOverJobStop is the
-// job-owner leg). Called from sched.c's sleep()/tsleep() detour with their
-// wait loop locks RELEASED. The `r != &debug_rendez` detour gate makes this
+// cond + re-block) or SLEEP_INTR (group death while stop-parked -> unwind + die
+// at the tail; DEATH WINS -- pty_stop.tla DeathWinsOverJobStop is the
+// job-owner leg). SLEEP_OK can also mean the group is dying: a death published
+// before the first cond read, which the caller's own die-check then meets, or
+// an exit-close closer, whose die-checks are off (exit_close_active) and which
+// carries on with its close. The sleep is death-only (DEBUG-FS-DESIGN 5g): a latched
+// interrupt or a caught note waits for the stop to clear, and the caller's own
+// wait meets it then. Called from sched.c's sleep()/tsleep() detour, poll's
+// loop and the 9P client's stop park, with their locks RELEASED. The
+// `r != &debug_rendez` detour gate makes this
 // nested park (r == debug_rendez) skip the stop-check -> no recursion.
 // (Named proc_debug_stop_sleeper_park before PTY-1f generalized the cond.)
 int proc_stop_sleeper_park(struct Thread *t);
@@ -1899,8 +2102,10 @@ int proc_stop_sleeper_park(struct Thread *t);
 // could land AFTER a detach's proc_debug_resume cleared it, parking the target
 // with no debugger left to resume it -- the 8a-2 SA-1 strand (specs/debug_stop.
 // tla StopImpliesOwned / NoStrand). Returns false (deliver skipped) when the
-// debugger detached in the race window; the EC caller then treats the fire as a
-// benign STALE arm (disables this CPU's debug regs + resumes the instruction).
+// debugger detached in the race window, or when the Proc is dying (it takes no
+// new stop); the EC caller then treats the fire as a benign STALE arm (disables
+// this CPU's debug regs + resumes the instruction), and a dying thread dies at
+// its tail's die check before any EL0 instruction.
 bool proc_debug_fault_stop(struct Proc *p);
 
 // proc_debug_resume: resume `p` -- clear p->debug_stop_req (RELEASE, ordered
@@ -1952,15 +2157,34 @@ void proc_birth_hold_orphan_rule_locked(struct Proc *p);
 // flag (job_stop_req), per-owner clears.
 // =============================================================================
 
-// The park predicate: is ANY stop owner requesting this Proc parked? The
-// EL0-return tail, the sleep()/tsleep() stop detours, the 9P client's
-// client_stop_pending, and the elected-reader handoff skip ALL read this
-// disjunction (round-2 R2-F2: a flag the audited park machinery does not read
-// re-opens the #89 whole-FS freeze via the job axis). Two ACQUIRE loads off
-// one cache line (job_stop_req occupies debug_stop_req's pad slot).
-static inline bool proc_stop_requested(const struct Proc *p) {
+// A stop owner holds: either owner's flag, dying or not. Two ACQUIRE loads off
+// one cache line (job_stop_req occupies debug_stop_req's pad slot). The
+// EL0-return tail reads this rather than the park predicate below: its park
+// checks group death first, so a dying thread with a stop pending ends there
+// instead of erets (debug_stop.tla NoEretIntoDeath).
+static inline bool proc_stop_owned(const struct Proc *p) {
     return (__atomic_load_n(&p->debug_stop_req, __ATOMIC_ACQUIRE) |
             __atomic_load_n(&p->job_stop_req,  __ATOMIC_ACQUIRE)) != 0;
+}
+
+// The park predicate: is ANY stop owner requesting this Proc parked, in a group
+// that is not dying? The sleep()/tsleep() stop detours, poll's loop, the 9P
+// client's client_stop_pending and both parks' wake conditions ALL read this
+// (round-2 R2-F2: a flag the audited park machinery does not read re-opens the
+// #89 whole-FS freeze via the job axis). The elected-reader handoff reads
+// rpc->stop_parked instead (DEBUG-FS-DESIGN 5c.6).
+// A dying group is never asked to park (DEBUG-FS-DESIGN 5g): group death clears
+// no stop owner, and a dying Proc's closer reads no death in its sleeps
+// (exit_close_active), so a stop honoured there would hold the exit until the
+// stop cleared. The owners' flags a stop set before the death stay set: the
+// EL0-return tail reads them (proc_stop_owned), so a thread killed after its
+// die check still parks and dies in the park instead of erets; clearing them at
+// the terminate would lose that. Both delivers refuse a dying Proc, so nothing
+// sets them after the kill. The flags are read first, so the common case costs
+// the same two loads.
+static inline bool proc_stop_requested(const struct Proc *p) {
+    return proc_stop_owned(p) &&
+           __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) == NULL;
 }
 
 // proc_job_stop_pgrp: the SYS_TTY_SIGNAL TSTP fan-out -- deliver the
@@ -1987,8 +2211,10 @@ static inline bool proc_stop_requested(const struct Proc *p) {
 //     re-suspend a resumed program).
 // An already-job-stopped member is skipped (a second Ctrl-Z on a stopped
 // group is a no-op -- POSIX discards a stop signal for a stopped process).
-// pgid 0 refused (the notes_post_pgrp precedent). Returns the count of
-// members affected (posted or stopped). Lock-free callers only (takes
+// A dying member takes no stop (DEBUG-FS-DESIGN 5g). pgid 0 refused (the
+// notes_post_pgrp precedent). Returns the count of members the fan reached,
+// less an orphaned group's discarded ones: posted, stopped, already stopped,
+// or dying. Lock-free callers only (takes
 // g_proc_table_lock itself; the pts seam calls it with g_pts_lock RELEASED).
 int proc_job_stop_pgrp(u32 pgid);
 
@@ -2005,12 +2231,12 @@ int proc_job_stop_pgrp(u32 pgid);
 // Idempotent: an already-job-stopped Proc answers false and re-latches nothing.
 //
 // Returns true iff it stopped `m`. FALSE IS NOT AN ERROR -- it means the stop
-// was correctly discarded (orphaned group) or already in effect, and the
-// caller's syscall still succeeds. The stop takes EFFECT at the caller's own
-// EL0-return tail (el0_return_stop_check), which runs AFTER
-// el0_return_die_check, so a group-terminate racing this one dies rather than
-// parking (DeathWinsOverStop; pty_stop.tla's StopJob, whose `~gflag` guard the
-// tail enforces at the park rather than at the set).
+// was correctly discarded (orphaned group, or a dying Proc, which takes no
+// stop) or already in effect, and the caller's syscall still succeeds. The stop
+// takes EFFECT at the caller's own EL0-return tail (el0_return_stop_check),
+// which runs AFTER el0_return_die_check, so a group-terminate racing this one
+// dies rather than parking (DeathWinsOverStop). pty_stop.tla's StopJob is
+// guarded ~gflag, and the set enforces it (proc_job_stop_one_locked).
 //
 // Lock-free callers only -- takes g_proc_table_lock itself.
 bool proc_job_stop_self(struct Proc *m);
@@ -2044,15 +2270,19 @@ bool proc_job_stop_proc(struct Proc *m);
 void proc_job_cont_proc(struct Proc *m);
 
 // 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
-// at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),
-// so death/interrupt win over a stop. Fast-paths out when NO stop is pending
-// (neither owner -- PTY-1f: the check reads proc_stop_requested's
-// debug|job disjunction); otherwise parks the calling Thread on its own
-// debug_rendez (register-then-observe under wait_lock) until BOTH owners
-// clear, re-checking group death (terminate here, never eret) on every wake.
-// Returns to the tail (-> eret) when the stop
-// is cleared or a soft interrupt-terminate must be delivered at the next tail.
-// 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
+// at every return-to-EL0 AFTER el0_return_die_check and, on the sync tail, BEFORE
+// the notes leg (DEBUG-FS-DESIGN 4.2), so death wins over a stop and a stop over
+// a note; the notes leg calls it again to park for a stop it applied itself.
+// Fast-paths out when NO stop is pending
+// (neither owner -- PTY-1f: the check reads proc_stop_owned's debug|job
+// disjunction, deliberately not the park predicate, so a group that dies
+// after the die check still meets the park's death check); otherwise parks
+// the calling Thread on its own debug_rendez (register-then-observe under
+// wait_lock) until BOTH owners clear, re-checking group death (terminate
+// here, never eret) on every wake.
+// Returns to the tail only when the stop is cleared: a latched interrupt does
+// not end the park, and the notes leg that follows takes it (the IRQ tail has
+// none, so there it waits for the next checkpoint; DEBUG-FS-DESIGN 5g). 8a-1c: `ctx` is the vector-supplied EL0 trapframe pointer (== the current SP);
 // recorded into the Thread so /proc/<pid>/regs reads the RIGHT saved frame (its
 // kstack offset is not fixed -- see thread.h debug_trapframe).
 struct exception_context;
@@ -2063,9 +2293,10 @@ void el0_return_stop_check(struct exception_context *ctx);
 // frame: every field zero, then ELR = entry, SPSR = EL0t with DAIF clear, SP_EL0
 // = sp. el0_birth_park is the birth tail's stop leg: it announces the arrival,
 // then parks while the hold OR any stop owner holds, re-checking death on every
-// wake. It returns only to take the eret: group death ends the thread in the
-// park, and a latched terminate-interrupt ends it with the note's name, since a
-// held child can have no handler and must not eret to resolve it.
+// wake. It returns only to proceed to the notes leg and the eret: group death
+// ends the thread in the park, and a latched interrupt does not end it -- a held
+// child stays held until it is released, or converted and resumed, and meets
+// the note in the notes leg right after (DEBUG-FS-DESIGN 4.2, 5g).
 void el0_birth_frame_init(struct exception_context *ctx, u64 entry, u64 sp);
 void el0_birth_park(struct exception_context *ctx);
 
@@ -2115,19 +2346,36 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 #define WAIT_UNTRACED  2
 #define WAIT_CONTINUED 4
 
+// gcpark-b: asks for the packed status encoding below with no stop or continue
+// reports -- what Pouch's waitpid and the phenotype wait4 pass, so a child that
+// died of a note reads as signalled. The libt / libthyla-rs mirrors (WAIT_PACKED
+// / T_WAIT_PACKED) MUST hold the same value.
+#define WAIT_PACKED    8
+
+// wait_pid_for's caught-note result (ARCH 8.8.3), distinct from -1 so wait4
+// can answer EINTR rather than ECHILD.
+#define WAIT_PID_NOTEINTR (-2)
+
 // The packed wait-status encoding (ABI; the Linux wait(2) layout so the
 // Pouch boundary-line maps 1:1). In effect ONLY when the caller passed
-// WAIT_UNTRACED and/or WAIT_CONTINUED:
+// WAIT_UNTRACED, WAIT_CONTINUED and/or WAIT_PACKED:
 //   exited:    (code & 0xff) << 8         (WAIT_IF_EXITED; WAIT_EXITSTATUS)
+//   signalled: sig & 0x7f                 (WAIT_IF_SIGNALED; WAIT_TERMSIG --
+//                                          gcpark-b: a death by note, the
+//                                          signal Proc.term_sig recorded; no
+//                                          core-dump bit, there are no cores)
 //   stopped:   0x7f | (20 << 8)           (20 = the SIGTSTP-shaped job-stop
 //                                          cause, the Linux value, so the
 //                                          boundary-line is the identity)
 //   continued: 0xffff
 #define WAIT_STATUS_EXITED(code)  ((((code) & 0xff)) << 8)
+#define WAIT_STATUS_SIGNALED(sig) ((sig) & 0x7f)
 #define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
 #define WAIT_STATUS_CONTINUED     0xffff
 #define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
 #define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_SIGNALED(st)      (((st) & 0x7f) != 0 && ((st) & 0x7f) != 0x7f)
+#define WAIT_TERMSIG(st)          ((st) & 0x7f)
 #define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
 #define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
 
@@ -2162,6 +2410,9 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 //         so it is an unambiguous "not ready" sentinel.
 //   -1  : no matching child (none at all, or none with want_pid), OR the
 //         caller's Proc is group-terminating (#811 SLEEP_INTR).
+//   WAIT_PID_NOTEINTR : a caught note ended the wait (ARCH 8.8.3); nothing
+//         was reaped or reported. Only a Linux thread in a listed call
+//         (wait4) can receive it; a native caller's wait stays death-only.
 //
 // CALLER NOTE (WAIT_WNOHANG progress): a WNOHANG poll loop MUST yield between
 // calls — block on a notes fd (the kernel posts a `child_exit` note on every
@@ -2517,6 +2768,8 @@ struct ProcImageJoin {
     // The union over every OTHER Proc in the table mapping this address space,
     // ZOMBIES INCLUDED: a zombie holds its reference until it is reaped, so its
     // bytes are still in the image and a seal it took must still refuse a read.
+    // Plus the space's record of every holder that has LEFT it (caps_ever,
+    // guards_ever): what a holder held stays in the bytes after it is gone.
     caps_t caps;
     u32    flags;
     // Whether another Proc could still USE this image -- which is the one
@@ -2689,8 +2942,11 @@ bool proc_intr_terminate_pending(const struct Proc *p);
 // proc_interrupt_terminate_wake — wake every Thread of `p` blocked in a
 // rendez sleep so it unwinds (*_INTR) to its EL0-return tail, where the
 // LS-5b uncaught-interrupt default-terminate fires. Internally gated on
-// proc_intr_terminate_pending (a no-op unless notes_post armed the latch),
-// so interrupt-posting sites call it unconditionally after the post.
+// proc_intr_terminate_pending (a no-op unless a latch is armed, by this post or
+// by an earlier one not yet delivered), so interrupt-posting sites call it
+// unconditionally after the post. A thread in a stop park (blocked on its own
+// debug_rendez) is skipped: the park is death-only and could only absorb the
+// wake (DEBUG-FS-DESIGN 5g).
 //
 // CALLER MUST HOLD g_proc_table_lock (the walk reads p->threads, mutated
 // only under that lock -- the #811 contract proc_group_terminate carries).
@@ -2708,22 +2964,23 @@ void proc_interrupt_terminate_wake(struct Proc *p);
 // item 11 (ARCH §8.8.3): the CAUGHT-note sibling of the two functions above.
 //
 // proc_caught_note_pending — true iff `p` carries any armed bit in the
-// PROC_FLAG_CAUGHT_NOTE_MASK sub-field (a caught, deliverable note of some
+// caught latch, CAUGHT_LATCH_MASK of note_caught (a caught, deliverable note of some
 // family is queued). Fail-closed on NULL/corrupt. Acquire load, pairing with
 // the release arm in notes_post so the lock-free reader
 // (thread_caught_note_deliverable at every sleep site) sees a published latch.
 bool proc_caught_note_pending(const struct Proc *p);
 
-// proc_caught_note_wake — wake every Thread of `p` blocked in a rendez sleep so
-// it unwinds (SLEEP_NOTEINTR) toward its EL0-return tail, where the queued
-// caught note is delivered WITHOUT terminating the Thread. The non-death twin
-// of proc_interrupt_terminate_wake: identical body + lock contract (CALLER MUST
-// HOLD g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
+// proc_caught_note_wake — choose which Thread of `p` takes a queued caught note
+// and make it take it soon: proc_caught_note_walk(p, NULL), with the current
+// thread as the poster when it is one of p's. The non-death twin of
+// proc_interrupt_terminate_wake, on its lock contract (CALLER MUST HOLD
+// g_proc_table_lock; per-peer wait_lock -> rendez_blocked_on -> wakeup),
 // internally gated on proc_caught_note_pending so a caller invokes it
 // unconditionally after posting. EVERY site that posts a catchable note to a
 // Proc under g_proc_table_lock calls it (ARCH 8.8.3: the wake runs on every
 // caught commit) -- the interrupt/tty fans beside proc_interrupt_terminate_wake
-// (exactly one of the two is a no-op per post), and the posts that have no
+// (exactly one of the two is a no-op per post; both skip a stop park), and the
+// posts that have no
 // terminate twin: child_exit (proc_exit_notify_parent_locked), a caught
 // tty:susp, tty:cont. Two posters run outside the lock: postnote_self (a Proc
 // noting itself), which takes the lock for its wakes after the post, and
@@ -2731,6 +2988,17 @@ bool proc_caught_note_pending(const struct Proc *p);
 // inside the write, which delivers at that thread's EL0-return tail, as Linux
 // sends SIGPIPE to the writing thread alone.
 void proc_caught_note_wake(struct Proc *p);
+
+// proc_caught_note_walk — ARCH 8.8.3 "Which thread takes a caught note". For
+// each caught family with a note queued: wake a holder (a claim or a
+// designation) blocked in an unwinding wait, and if no thread holds the family,
+// pick one, never `skip`: the posting thread, main, any thread not blocked,
+// main blocked in an unwinding wait, any thread blocked in one. A
+// Linux-phenotype walk designates the pick (claims the family on its behalf,
+// re-checked under its wait_lock) and wakes it if it is blocked; a native walk
+// only kicks it. A pick running on another CPU is kicked (sched_kick_thread).
+// CALLER MUST HOLD g_proc_table_lock. specs/caught_target.tla.
+void proc_caught_note_walk(struct Proc *p, struct Thread *skip);
 
 // The parent's side of p's exit: wake the parent's wait_pid sleepers, post it
 // child_exit, and wake a parent blocked in a caught-note-interruptible wait

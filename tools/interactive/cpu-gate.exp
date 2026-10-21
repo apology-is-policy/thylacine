@@ -1,0 +1,81 @@
+#!/usr/bin/expect -f
+# tools/interactive/cpu-gate.exp -- an ordinary login's view of CPU time and
+# the scheduler's counters (IMPERIUM-DESIGN 11.3 item 10).
+#
+# Each of these counters moves when the trusted episode's authority handles a
+# key, so the kernel shows them only to their owner: a Proc's cpu_ns to its own
+# principal or a hostowner, the per-CPU and scheduler counters to the system
+# principal or a hostowner. Anyone else reads "-". This scenario is that
+# "anyone else": michael reads kproc's row (the system principal's), the
+# system-wide counters, and kproc's status, and must see "-" in each, while the
+# `cat` doing the reading is michael's own and must show a number -- the
+# control one variable away, so a renderer that printed "-" everywhere fails.
+#
+# /ctl/9p-sessions' counters move once per message, and a pty carries one per
+# key, so a row's are shown to the principals at its two ends (and to the system
+# principal or a hostowner); michael reads one row of each kind.
+#
+# ps is the consumer that broke: a CPU column that is not a number fails its
+# row parse, and one failed row sends the whole listing back to the kernel's
+# verbatim text, so before it learned "-" an ordinary user never saw the boxed
+# table. "kproc" alone cannot tell the two apart (the verbatim text names it
+# too); the box's "<n> procs" count label can, since only a full parse draws it.
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# /ctl/procs: kproc is the first row and another principal's.
+lc_send "cat /ctl/procs"
+lc_expect_re {\n0 +0 +kproc +ALIVE +[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +-\r?\n} \
+    "kproc's CPU_NS is withheld from michael"
+lc_expect_re {\n[0-9]+ +[0-9]+ +cat +ALIVE +[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+ +[0-9]+\r?\n} \
+    "the reading cat's own CPU_NS is a number"
+
+# /ctl/sched: runnable and the work-conservation lines are the system's;
+# cpus: and created: are not.
+lc_send "cat /ctl/sched"
+lc_expect_re {runnable: -\r?\n} "runnable withheld"
+lc_expect_re {cpus: [1-9][0-9]*\r?\n} "cpus shown"
+lc_expect_re {created: [1-9][0-9]*\r?\n} "created shown"
+lc_expect_re {wc: parks=- idle_ms=- starved=- starved_ms=- max_starved_ms=-\r?\n} \
+    "the work-conservation counts withheld"
+lc_expect_re {wc-tickless: parks=- starved=- starved_ns=- max_starved_ns=-\r?\n} \
+    "the tickless counts withheld"
+
+# /ctl/cpu: CPU 0's idle_ns, ctxt and intr withheld; its capacity, cache line
+# and MIDR are hardware description and stay.
+lc_send "cat /ctl/cpu"
+lc_expect_re {\n0 - [0-9]+ - - [0-9]+ 0x[0-9a-f]+\r?\n} \
+    "CPU 0's counters withheld, its description shown"
+
+# /proc/0/status: kproc's cpu_ns line.
+lc_send "cat /proc/0/status"
+lc_expect_re {cpu_ns: +-\r?\n} "kproc's status cpu_ns is withheld"
+
+# /ctl/9p-sessions: a connection's and a session's counters are its two ends'.
+# michael's home proxy runs as michael, dials the coordinator and serves login's
+# /home mount, so those rows are michael's and show numbers; a connection
+# between the system's own Procs reads "-". One read per assertion: the rows
+# come in registry order, and an expect consumes what it passes over.
+lc_send "cat /ctl/9p-sessions"
+lc_expect_re {conn peer=[0-9]+ msize=[0-9]+ (byte|9p) (ka|-) (live|torn) c2s=-E? s2c=-E? sframes=-\r?\n} \
+    "a system connection's counters are withheld from michael"
+lc_send "cat /ctl/9p-sessions"
+lc_expect_re {conn peer=[0-9]+ msize=[0-9]+ (byte|9p) (ka|-) (live|torn) c2s=[0-9]+/[0-9]+\+[0-9]+E? s2c=[0-9]+/[0-9]+\+[0-9]+E? sframes=[0-9]+\r?\n} \
+    "a connection michael is an end of shows its counters"
+lc_send "cat /ctl/9p-sessions"
+lc_expect_re {sess [^ ]+ id=[^ ]+ msize=[0-9]+ rx=- own=- orph=- } \
+    "a system session's counters are withheld from michael"
+lc_send "cat /ctl/9p-sessions"
+lc_expect_re {sess srv id=[0-9]+ msize=[0-9]+ rx=[0-9]+ own=[0-9]+ orph=[0-9]+ } \
+    "a session michael is an end of shows its counters"
+
+# ps draws its box over rows that carry "-", kproc's among them.
+lc_send "ps --color=always --beacon=never"
+lc_expect_re {[0-9]+ procs} "ps parsed every row, the withheld ones included, and drew its box"
+lc_expect "kproc" "the box lists kproc's row"
+
+lc_pass "cpu-gate: another principal's CPU time, the system counters and other ends' 9P counters read '-'; the reader's own are numbers"
+lc_quit
+exit 0

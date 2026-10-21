@@ -245,6 +245,8 @@ not answers.
   construction, not by auditing call sites (contrast the Linux CVE history).
 - A RELATIVE target splices at the link's PARENT (the current trail
   position); `..` keeps the trail-floor clamp exactly as today.
+- A SERVED link -- one that a remote 9P session serves -- is contained
+  beneath the mount that served it, not at the caller's root: section 4.6.
 - Bound: **40 total follows per resolution** (Linux parity; POSIX floor is
   8), exceeded -> `T_E_LOOP`. **T_E_LOOP = 40 (POSIX ELOOP) is a NEW errno
   registration — ERRORS.md is ABI-bearing, so D-1 carries a signoff item.**
@@ -287,6 +289,148 @@ absolute-target re-anchor under a chroot, ELOOP at the bound, stat-vs-lstat
 divergence, trailing-slash-on-link-to-dir, unlink-removes-the-link-not-the-
 target. Each leg revert-probed (the #79-#84 battery discipline). Focused
 audit round (I-28 surface).
+
+### 4.6 Served links -- contained beneath their mount (VOTED 2026-10-05)
+
+**STATUS: AS-BUILT** (2026-10-06, aux-3 1434415da; the four refinements
+under "As built" below). Operator vote 2026-10-05, "Contain beneath mount";
+`dec-2026-10-05-served-link-containment`.
+
+**The gap.** Section 4.2 contains a link at the CALLER's root. That is the
+right boundary for a link the caller's own system wrote (`/bin/sh ->
+/bin/busybox` inside a container) and the wrong one for a link a remote server
+wrote: an export whose author serves `talks -> /home/u` or
+`deck -> ../../../etc` steers every guest resolution that crosses the link
+into the guest's own files. `lantern` refuses a link AT a deck file
+(`T_ONOFOLLOW`) but not one in a directory above it -- the IMG-SLIDE F6
+finding (OPEN-BUGS 2026-09-29).
+
+**The rule.** A symlink whose Spoor belongs to a 9P session declared remote
+(HAUL-DESIGN 4.8: `SYS_ATTACH_9P_REMOTE` on a pipe attach, `DMSRVREMOTE` on a
+/srv post) is a **served link**. Following one **re-anchors the resolution at
+the link's anchor**, the root of the mount that served it:
+
+- an ABSOLUTE target resolves from the anchor -- `/home/u` names the export's
+  own `/home/u`, never the caller's;
+- a RELATIVE target resolves from the link's directory, re-reached from the
+  anchor, so its `..` can climb to the anchor and no further;
+- the rest of the caller's path resolves from wherever the target landed, and
+  its `..` stops at the anchor too. The anchor is the resolution's base from
+  the served link on (Linux `RESOLVE_IN_ROOT`, keyed by the mount instead of
+  by the caller), until a later ABSOLUTE link re-anchors it.
+
+**The anchor** is the root of the innermost mount crossed on the way to the
+link; it is the mount the link was reached THROUGH. At the top level of a
+union it is the root of the member that holds the link, never the union point:
+a relative target resolved at the point would search the union's other
+members, so a served `notes -> .ssh/id` in `bind -a /n/haul $home` would find
+the caller's own key. A resolution base inside a remote tree (an explicit
+dirfd) with no crossing on its trail anchors at the base, where section 4.2
+already clamps `..`. A served link whose anchor is not itself remote, or that
+finds no anchor, is refused with `T_E_ACCES`: a check that cannot place the
+boundary fails closed.
+
+**Mechanism.** The resolver records, for each trail entry that a mount
+crossing (base or descent) or a union member produced, where in the path that
+mount was entered. The position is LOGICAL -- an offset into the consumed
+record followed by the current buffer (section 4.1's splice state) -- because
+an in-place splice moves the text but never moves a consumed component. On a
+served link it takes a reference on the anchor, rebuilds the path as the
+components walked below the anchor, then the target (an absolute target drops
+those components), then the rest, unwinds the trail and restarts from the
+anchor. Every expansion counts toward the 40-follow bound. A served
+relative target that has no `..` is re-anchored too, rather than spliced in
+place, so that every later restart -- a local link's `..` rebuild included --
+begins at the anchor and cannot fall back below it.
+
+**As built** (2026-10-06). The served test is a new NULL-permitted Dev slot,
+`remote(c)`, which dev9p fills with `dev9p_spoor_remote`; the resolver asks it
+of the link's own Spoor. Four refinements beyond the design above:
+
+- **The anchor is on the link's own session.** Besides answering remote, the
+  anchor must have the link's Dev instance and `devno` (one `devno` per dev9p
+  session), or the link is refused `T_E_ACCES`. A union member's root is found
+  again at the expansion (next item), and a namespace change between the walk
+  and the expansion could otherwise hand back a different mount, local or
+  remote.
+- **A union member's root is found again by name.** The member root never
+  stands on the trail: the union child does. The resolver records the child's
+  logical offset and, at the expansion, asks which member holds that name, with
+  the first-hit selection a remove uses (`stalk_union_member_holding`). The
+  union point is the trail entry below the child, or, for a child of a union
+  dirfd base, the point that base retains.
+- **A union-handle base anchors at its walkable form.** A base with no crossing
+  on its trail anchors at itself, and a base that is a union handle anchors at a
+  fresh clone of its own member's walkable form, without the union: a restart
+  from the handle would route the target's first component through the union's
+  other members. The no-crossing case arises once a `..` has taken the walk
+  back to the handle, which then walks its own member. A clone that fails is
+  `T_E_IO`, as a failed crossing is.
+- **The phenotype carries across the restart.** A restart re-derives the
+  phenotype from its base, and an anchor is a mount's root already crossed, so
+  the restarted walk never re-crosses the mount whose `MPHENO_LINUX` it carries.
+  The resolver records the accumulated phenotype with each crossing and seeds
+  the restart with the anchor's. Without it a relative served link in a
+  Linux-declared export would lose the phenotype the walk to it had.
+
+Validation: nine `stalk.served_*` kernel tests drive a fixture Dev whose
+`remote` answers per qid -- containment on the pounce and per-component paths,
+a union's members at both depths, a union-handle base at index 0 and after a
+`..`, a dirfd base, both refusals, the phenotype carry, lifetime on every exit,
+and a readlink hook that changes the namespace mid-walk (the same-session
+check, refused on the Dev alone and on the `devno` alone) or kills the
+anchor's clone -- and `tools/interactive/haul-links.exp`
+follows the links of a real npxf export through both Haul forms, with a guest
+decoy at every path a link names (red when dev9p's slot is removed).
+
+**Why the remote declaration, and not a new mount flag.** It already sits
+exactly where the threat is: Haul declares it in both forms, and any later
+off-machine transport has to. It is per session and travels with a /srv post,
+so the posted form mounted by `ut`'s `mount` is covered without the shell
+knowing what it mounts. And it needs no new syscall bit. The declaration stops
+being display-only: the resolver consults it, and only to NARROW a resolution,
+so it still grants nothing. A false declaration, by an attacher about its own
+session or by a poster about its own service, can only confine resolutions
+through it.
+
+**Why not every 9P mount.** The boot's own pool mounts carry absolute links
+that must resolve at the caller's root: build.sh bakes `sh -> /viv/abin/sh`
+into one. A local session is the caller's own system; a remote export is not.
+A diorama is local too: viv mounts it inside the container's namespace, and
+its server is the system's `/bin/diorama`, not anything the container wrote.
+
+**Why contain and not refuse.** An export's internal links keep working:
+`latest -> v3`, and an absolute `-> /talks/x` meaning the export's own
+`/talks/x`. Linux's `nosymfollow` (and FreeBSD's) refuses every link on the
+mount, which would break those.
+
+**Heritage and SOTA.** Plan 9 never met the question: 9P2000 has no symlinks.
+Linux has `nosymfollow` (per mount, refuse), `openat2`'s `RESOLVE_BENEATH`
+(per call, refuse an escape) and `RESOLVE_IN_ROOT` (per call, contain at the
+dirfd). This rule is `RESOLVE_IN_ROOT` keyed by the mount's declaration.
+
+**Edges, recorded.**
+
+- The anchor is the mount the link was reached through. The same served link
+  read through a local bind of part of the export (`bind /n/haul/talks /t`)
+  anchors at `/t`, narrower than the export. Like `MPHENO_LINUX`, it is a
+  property of how the file was named.
+- A local bind beneath a remote mount is not remote, and a link in it is not
+  served. An ABSOLUTE local link that a served target leads to re-anchors at
+  the caller's root, as section 4.2 says, because it is the caller's own link;
+  a relative one restarts from the base it finds, which is the anchor.
+- `/n/haul/deck/../..` with `deck` served stops at `/n/haul`, where the same
+  spelling without a link would climb out. Deliberate: the depth the caller's
+  `..` climbs from was chosen by the server's target, so the remainder is
+  contained as a whole.
+- Containment is the kernel resolver's. `readlink` returns the server's text
+  verbatim, so an archive or a copy keeps the link's meaning in the export. A
+  program that resolves that text itself, as musl's `realpath(3)` does with
+  its own readlink loop, gets the answer Linux would give: an absolute target
+  names a path from the caller's root. Rewriting the text at `readlink` was
+  rejected: it would bake one mount point into every copied link. Thylacine's
+  native tools do not re-resolve link text (`realpath` there is lexical), and
+  `lantern` resolves its deck path through the kernel.
 
 ---
 

@@ -38,6 +38,27 @@ struct hw_features g_hw_features;
 // the reads take no lock — the same posture as g_hw_features itself.
 static struct hw_cpu_ident g_cpu_ident[DTB_MAX_CPUS];
 
+// Sticky: one aliasing CPU makes every sync conservative. A CPU that comes up
+// AFTER a VA-only sync ran missed nothing by it: each CPU invalidates its whole
+// I-cache when it turns its MMU on (mmu.c, #214), before it records here.
+static bool g_icache_aliasing;
+
+bool hw_ctr_icache_aliases(u64 ctr) {
+    return ((ctr >> 14) & 0x3u) != 0x3u;
+}
+
+bool hw_icache_aliasing(void) {
+    return __atomic_load_n(&g_icache_aliasing, __ATOMIC_ACQUIRE);
+}
+
+#ifdef KERNEL_TESTS
+u64 g_icache_sync_calls_for_test;
+u64 g_icache_sync_all_for_test;
+void hw_icache_aliasing_force_for_test(bool on) {
+    __atomic_store_n(&g_icache_aliasing, on, __ATOMIC_RELEASE);
+}
+#endif
+
 void hw_cpu_ident_detect(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return;
 
@@ -68,6 +89,9 @@ void hw_cpu_ident_detect(unsigned cpu) {
     // raw distinction lets a reader apply its own policy. QEMU TCG reports 0.
     u32 cwg_field = (u32)((ctr >> 24) & 0xFu);
     g_cpu_ident[cpu].cwg = cwg_field ? (4u << cwg_field) : 0u;
+
+    if (hw_ctr_icache_aliases(ctr))
+        __atomic_store_n(&g_icache_aliasing, true, __ATOMIC_RELEASE);
 
     // Publish LAST: a cross-CPU reader that sees valid must see both fields.
     __atomic_store_n(&g_cpu_ident[cpu].valid, true, __ATOMIC_RELEASE);

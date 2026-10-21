@@ -67,10 +67,7 @@ scheduling, so it is not recorded here.
 - the **payer's identity** and `shared_out`: every modelled drop is the payer's
   own, so the release rule's `freed || shared_out` and a non-payer's final drop
   (an intended over-charge) are witnessed by `test_burrow.c`'s settled-drop
-  tests, not here;
-- `SYS_JIT_DESTROY`'s legal claim/restore pair: its surviving alias under
-  `as->lock` is the independent reference the model's racing threads lack, a
-  premise `burrow.unmap_failure_leaves_mapping_attached` pins.
+  tests, not here.
 
 ## Action-site map
 
@@ -85,7 +82,7 @@ scheduling, so it is not recorded here.
 | the free transition | `burrow_free_internal` — outside the lock; re-asserts both counts zero, type-dispatches the release, clears the magic before returning the object |
 | `BuggyFreeOnHandleClose` / `BuggyFreeOnUnmap` / `BuggyNoFree*` | no sites — each is prevented by the dual check, and the re-assertion inside the free path is the tripwire for a caller that bypasses it |
 | `Settle(v, final)` | `burrow_charge_claim_locked` (static), inside those two holds; the caller refunds the returned pages outside the leaf lock |
-| `ClaimBeforeDrop` / `DropAfterClaim` / `SettleAfterDrop` | no asynchronous site since AS-R9; `SYS_JIT_DESTROY` keeps the pair, legal by its independent reference |
+| `ClaimBeforeDrop` / `DropAfterClaim` / `SettleAfterDrop` | no sites: the AS-R9 backport deleted the stand-alone claim and restore |
 
 | Invariant | Obligation |
 |---|---|

@@ -1,0 +1,124 @@
+pouch boundary-line patch 0050 - a fault signal sent to oneself ends the caller; kill() answers ESRCH and EPERM (signal chunk S-3).
+
+Two kernel changes reach Pouch here (operator votes 2026-10-14). SYS_POSTNOTE
+answers each refusal with its own errno instead of a bare -1, which the seam
+had read as EIO for every one of them: a missing pid is ESRCH, a process that
+is not the caller's child is EACCES, a full note queue is EAGAIN, a name no
+program may post is EINVAL. And its self arm accepts the snare a fault signal
+names, ending the caller through the kernel's fault path and recording that
+signal (docs/ERRORS.md "The snare:* fault-note family"). Four files:
+
+  src/internal/_pouch_signal.h, src/signal/_pouch_signal.c
+      __pouch_self_snare maps SIGSEGV, SIGBUS, SIGILL and SIGFPE to
+      snare:segv, snare:bus, snare:ill and snare:fpe.
+  src/signal/raise.c, src/signal/kill.c    raise() of one of the four, and
+      kill() of one to the caller itself (pid 0 or getpid()), post that
+      snare to self, so the process dies of the signal and its parent reads
+      WTERMSIG as that signal. Before this both answered EINVAL and the
+      program ran on. To another process the four stay EINVAL, as SIGABRT
+      does: a fault is never another process's to cause. SIGABRT keeps
+      abort()'s trap (0049).
+  src/signal/kill.c    the kernel's EACCES is POSIX kill's EPERM, set
+      directly: -EPERM is -1, the flat sentinel the seam turns into EIO.
+
+The witness is pouch-hello-signals: children that raise(SIGSEGV),
+kill(getpid(), SIGBUS), raise(SIGILL) and kill(0, SIGFPE) read WIFSIGNALED
+with that signal; kill() of a missing pid reads ESRCH; a child's kill() of
+its parent reads EPERM.
+
+diff --color -ru a/src/internal/_pouch_signal.h b/src/internal/_pouch_signal.h
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -132,6 +132,13 @@
+  * "pipe"; SIGCHLD -> "child_exit"; the tty family), -1 on unsupported. */
+ hidden int __pouch_sig_to_note(int sig, const char **out);
+ 
++/* The snare a fault signal names, for a process ending itself with it:
++ * SIGSEGV -> "snare:segv", SIGBUS -> "snare:bus", SIGILL -> "snare:ill",
++ * SIGFPE -> "snare:fpe"; NULL for every other signal. Posted to the caller
++ * itself, the kernel ends it with that snare and records the signal; posted
++ * to anyone else it is refused. */
++hidden const char *__pouch_self_snare(int sig);
++
+ /* The bootstrap async-handler. Registered with SYS_NOTIFY at startup;
+  * the kernel calls this at EL0-return tail when a note is dispatched.
+  * Plan-9-style ABI: x0 = pointer to 16-byte note name on user stack;
+diff --color -ru a/src/signal/_pouch_signal.c b/src/signal/_pouch_signal.c
+--- a/src/signal/_pouch_signal.c
++++ b/src/signal/_pouch_signal.c
+@@ -83,6 +83,17 @@
+     }
+ }
+ 
++hidden const char *__pouch_self_snare(int sig)
++{
++    switch (sig) {
++    case SIGSEGV: return "snare:segv";
++    case SIGBUS:  return "snare:bus";
++    case SIGILL:  return "snare:ill";
++    case SIGFPE:  return "snare:fpe";
++    default:      return 0;
++    }
++}
++
+ hidden uint64_t __pouch_sigset_to_note(const sigset_t *s)
+ {
+     uint64_t m = 0;
+diff --color -ru a/src/signal/kill.c b/src/signal/kill.c
+--- a/src/signal/kill.c
++++ b/src/signal/kill.c
+@@ -27,6 +27,17 @@
+ 	if (sig == SIGABRT && (pid == 0 || pid == getpid()))
+ 		abort();
+ 
++	/* SIGSEGV, SIGBUS, SIGILL and SIGFPE have no note either and no
++	 * disposition but the default, so one sent to the caller itself ends
++	 * it: the kernel takes the snare it names to the same death a real
++	 * fault reaches. To another process they stay EINVAL below. */
++	if (pid == 0 || pid == getpid()) {
++		const char *snare = __pouch_self_snare(sig);
++		if (snare)
++			return syscall(SYS_postnote, 0L, snare,
++			               (unsigned long)strlen(snare));
++	}
++
+ 	const char *name;
+ 	if (__pouch_sig_to_note(sig, &name) != 0) {
+ 		errno = EINVAL;
+@@ -45,6 +56,16 @@
+ 		return -1;
+ 	}
+ 
++	/* The kernel refuses a process that is not the caller's child with
++	 * -EACCES: its handlers never answer -EPERM, which is the flat -1 the
++	 * seam reads as EIO. POSIX kill spells that refusal EPERM, so it is
++	 * set here rather than through the seam. ESRCH, EAGAIN and EINVAL
++	 * pass through as the kernel names them. */
+ 	unsigned long len = (unsigned long)strlen(name);
+-	return syscall(SYS_postnote, (long)pid, name, len);
++	long r = __syscall(SYS_postnote, (long)pid, name, len);
++	if (r == -EACCES) {
++		errno = EPERM;
++		return -1;
++	}
++	return __syscall_ret(r);
+ }
+diff --color -ru a/src/signal/raise.c b/src/signal/raise.c
+--- a/src/signal/raise.c
++++ b/src/signal/raise.c
+@@ -30,6 +30,15 @@
+ 	if (sig == SIGABRT)
+ 		abort();
+ 
++	/* SIGSEGV, SIGBUS, SIGILL and SIGFPE have no note and no disposition
++	 * but the default either. Posted to the caller, the snare each names
++	 * ends it the way a real fault would, and the parent reads that
++	 * signal. */
++	const char *snare = __pouch_self_snare(sig);
++	if (snare)
++		return syscall(SYS_postnote, 0L, snare,
++		               (unsigned long)strlen(snare));
++
+ 	const char *name;
+ 	if (__pouch_sig_to_note(sig, &name) != 0) {
+ 		errno = EINVAL;

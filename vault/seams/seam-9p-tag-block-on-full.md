@@ -2,12 +2,13 @@
 id: seam-9p-tag-block-on-full
 type: seam
 title: "ARCH 21.5 says block-on-tag-full; as-built alloc_tag clean-fails"
-status: open
+status: closed
 surface: [sub-kernel-ninep-session]
 opened-by: adt-rw4-r1
 tracker: "RW-4 R3-F3 register (scripture-vs-impl; user call)"
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-10-07
+closed-by: chg-2026-10-07-tag-pool
 ---
 ## Owed
 
@@ -32,3 +33,16 @@ sit BELOW this contract question and do not decide it.
 
 A spurious per-op -EIO under >64 concurrent in-flight ops on one
 session — unreached by any current workload; fail-safe when reached.
+
+## As of 2026-10-07
+
+- Closed by [[chg-2026-10-07-tag-pool]] ([[dec-2026-10-07-tag-pool]]): the
+  block-on-full contract was built, not amended away. A sync op that finds no
+  free tag waits for one, killably, instead of failing `-P9_E_IO`; the table
+  grows in 64-entry chunks to the 16-bit tag space; ops and async ops each
+  have a share, and a Tflush always finds a tag (ARCH 21.11).
+- The wait ends because every holder of the op share is an op the server
+  owes a reply or one of at most `P9_ASYNC_MAX` async ops, and the reader
+  applies every sync reply when it reads it, so a stopped thread holds no
+  tag ([[spec-tag-pool]]). A server that never answers holds the waiter as it
+  holds any op; a death or a caught note ends the wait.

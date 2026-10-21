@@ -253,7 +253,7 @@ audit's F7).
 **The pool counts PHYSICAL user pages** (the round-1 close: the audit's F5,
 and the return path its F1 needed). Every page that exists because of an
 address space -- a demand-zero page, a COW copy, a FILE page-in, a pagemap
-node, an eager `ANON` or `CODE` chunk, the Loom ring, the vDSO page, a
+node, an eager `ANON` chunk, a demand-zero `CODE` page (B-2a), the Loom ring, the vDSO page, a
 hardware page table -- comes from `alloc_user_pages(order, flags, exempt)`:
 `pool_charge(1 << order, exempt)` refuses a NON-exempt charge that would
 take the count past the pool (and any charge that would overflow the
@@ -281,7 +281,8 @@ fault (`FAULT_UNHANDLED_USER` -> `snare:segv`) of the Proc that asked,
 never a bystander. `/ctl/memory` publishes `reserve` / `pool` / `charged`
 ([[sub-kernel-devctl]]).
 
-**What the pool does not count**: kernel stacks, slabs, the direct-map
+**What the pool does not count**: kernel stacks (with at most 32 cached
+between threads, 1 MiB, [[sub-kernel-thread]]), slabs, the direct-map
 tables, DMA buffers ([[inv-i34]]'s allowance), the per-space L0 root
 (bounded by the Proc axes like a kernel stack) -- the kernel memory the
 reserve exists for. The Image cache's FILE pages ARE counted (they are user

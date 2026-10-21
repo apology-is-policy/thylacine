@@ -168,8 +168,8 @@ struct dev9p_priv {
     // realloc -- a flusher reads wb_buf outside the lock) and concurrent
     // writes go write-through; readers overlay the still-visible run.
     // wb_err latches the first flush failure (positive errno); once set,
-    // every subsequent write/fsync on this fd returns it (the voted NFS
-    // error model) and the run is dropped.
+    // every subsequent write/fsync on this fd, and its last close, returns
+    // it (the voted NFS error model) and the run is dropped.
     spin_lock_t               wb_lock;
     bool                      wb_eligible;  // create/OTRUNC-born + loose+cacheable plain file
     bool                      wb_known;     // wb_base is the file's true current end
@@ -251,6 +251,13 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid);
 // (a live dev9p Spoor implies a live client -- dev9p's lifecycle invariant).
 int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fid);
 
+// The dev9p side of a Loom registration: a staged write-behind run is flushed,
+// the Spoor stops staging and its Larder pages are dropped, so no Loom op
+// meets bytes still staged. May wait for the server. 0 (also for a non-dev9p
+// Spoor), or a negative errno: one latched by an earlier flush, or this
+// flush's, with the run still staged when a death ended it.
+int dev9p_loom_register(struct Spoor *c);
+
 // Weft-6b-2 data drive: try the zero-copy write path for a /net data fd whose
 // SYS_WRITE buffer points INTO its weft-bound shared ring. The kernel validates
 // the descriptor against the flow's private ring view (the I-30 validator-once)
@@ -280,7 +287,9 @@ struct dev9p_priv *dev9p_priv_of(struct Spoor *c);
 // /srv poster declared it remote? A lock-free read of a flag stamped before the
 // session's root published; the caller's reference on `c` keeps its priv and
 // client alive. False for anything that is not a dev9p Spoor with a valid priv.
-// Its one caller is territory_format_ns: the declaration is display only.
+// Read by territory_format_ns (the label) and, as dev9p's Dev.remote, by the
+// resolver, which contains a link the session serves beneath the mount it was
+// reached through (DISTRO 4.6) -- a narrowing; the declaration grants nothing.
 bool dev9p_spoor_remote(struct Spoor *c);
 
 // Name a session ROOT by the file its session came over (operator vote

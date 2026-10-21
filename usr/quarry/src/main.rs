@@ -892,26 +892,33 @@ fn tui() -> i32 {
             return 1;
         }
     };
-    let mut src = PollSource::with_pending(probe_q.pending);
+    let mut src = PollSource::with_probe(probe_q);
     let mut app = App::new();
 
-    let code = loop {
+    let code = 'run: loop {
         if render(&mut term, &app).is_err() {
             break 1;
         }
         if src.is_eof() {
             break 0;
         }
-        let events = match src.poll(PollTimeout::Block) {
-            Ok(e) => e,
-            Err(_) => break 1,
-        };
+        // One burst, handled key by key. Quit and Play stop it at once: what
+        // was typed behind q goes to the shell, and behind Play to the game,
+        // because it was never read here.
+        let mut burst = src.burst(PollTimeout::Block);
         let mut quit = false;
-        for ev in events {
+        loop {
+            let ev = match burst.next() {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => break 'run 1,
+            };
+            let mut stop = false;
             match ev {
                 Event::Key(k) => match handle_key(&mut app, k) {
                     Action::Quit => quit = true,
                     Action::Play => {
+                        stop = true;
                         if let Some(r) = sel_ready(&app) {
                             // The game owns the console for its run: leave the
                             // screen (re-cooked output scrolls naturally),
@@ -981,6 +988,9 @@ fn tui() -> i32 {
                     }
                 }
                 _ => {}
+            }
+            if quit || stop {
+                break;
             }
         }
         if quit {

@@ -110,6 +110,13 @@ bool gic_intid_dispatchable(u32 intid);
 // handler/EOI (IRQ handlers do not nest). Never call with a domain lock held.
 // Timeout returns false; it is not permission to recycle an interrupt ID.
 bool gic_synchronize_cpu(unsigned cpu, u64 timeout_ns);
+// The barrier IPI by ticket, for a caller that batches: send to each target,
+// then wait on each. gic_barrier_send returns the ticket (0 = not sent), and
+// gic_barrier_reached is true once `cpu` took an interrupt after that send.
+u64  gic_barrier_send(unsigned cpu);
+bool gic_barrier_reached(unsigned cpu, u64 ticket);
+// Tickets ever taken on `cpu` (tests: proves a CPU was not sent one).
+u64  gic_barrier_requests(unsigned cpu);
 
 // GICv2 CPU-interface (GICC) KVA + PA. Both zero on v3 (the CPU interface is
 // the ICC_* system registers, not MMIO) and before gic_init runs.

@@ -17,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-09-29
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -75,17 +75,37 @@ another EL0 instruction:
    or a wake may have made something more urgent runnable
 2. **the die-check** — the Proc may be group-terminating, in which case this
    thread self-exits and never returns
-3. **note delivery** — a queued note may need to be pushed onto the user stack
-   as a handler frame, or may default-terminate the Proc
-4. **the stop-check** — a debugger or a job-control stop may be pending, in
+3. **the stop-check** — a debugger or a job-control stop may be pending, in
    which case the thread parks here
+4. **note delivery** — a queued note may need to be pushed onto the user stack
+   as a handler frame, or may default-terminate the Proc. On an IRQ return it
+   can stop EL0 at any instruction, which the whole-context save already
+   covers. Both tails have this leg since #964 (2026-10-12): the IRQ slot
+   branches into the synchronous slot's tail, `.Lel0_return`, once its handler
+   has acked, dispatched and EOIed with interrupts masked and closed its frame.
+   Until then a thread that never trapped never took a note, so `^C` did not
+   end `while(1);` ([[seam-el0-irq-tail-no-notes]], closed). Delivery clears
+   `SPSR.BTYPE` in the handler's context, because the interrupt can land
+   between an indirect branch and its target ([[sub-kernel-notes]])
 
-The order is load-bearing in two places. The die-check runs **after** the
+The order is load-bearing in three places. The die-check runs **after** the
 preempt, so a Proc that is group-terminated *during* the preempt's context
 switch is still caught before any EL0 instruction runs. The stop-check runs
 **after** the die-check, which is how "death wins over a stop" is made
 mechanical rather than aspirational — a thread that is both dying and stopped
-takes the death path.
+takes the death path. And the stop-check runs **before** note delivery, so a
+stop wins over a note: the debugger sees the interrupted context rather than a
+handler frame, and a note that arrives during the stop is taken the moment the
+stop clears. Plan 9's `notify` runs `procctl` before it looks at a note, and
+Linux's signal-delivery-stop comes before the handler frame (DEBUG-FS-DESIGN
+4.2). Until 2026-10-05 the notes ran first.
+
+The notes leg can apply a stop itself: an uncaught `tty:susp` takes its default
+action there. The thread must park before it runs another EL0 instruction, so
+after a stop it applied, the leg runs the die-check and the stop-check again,
+parks, and looks at the queue once more. One budget of `NOTE_QUEUE_DEPTH`
+passes, shared with the discard loop, bounds the masked tail against a flooded
+queue ([[sub-kernel-notes]], [[spec-tail-order]]).
 
 These run at the *vector* level, not inside the C handlers. That matters: by
 the time the tail executes, the handler has returned and its crash-dump frame
@@ -106,9 +126,12 @@ path unmasks". A syscall body now runs with interrupts ON: `syscall_dispatch`
 unmasks after setting the per-thread in-syscall marker, and re-masks
 UNCONDITIONALLY before returning. So the property is preserved by a re-mask
 rather than by an absence, which is a weaker guarantee and is therefore
-asserted rather than assumed — `el0_return_stop_check` carries an
-interrupt-state assert, and it sits in that function precisely because its only
-two callers are the two tails that reach this trampoline.
+asserted rather than assumed. Each tail's last C call carries an
+interrupt-state assert: the notes leg, on the EL0-return tail both slots take
+and on the birth tail. `el0_return_stop_check` keeps its own assert as well,
+because it has two callers: that tail's stop leg, and the notes leg's re-pass,
+which parks the thread for a stop the leg applied. The birth
+park asserts it for the held child's tail.
 
 The unmask is confined to the syscall body. Kernel fault handling shares the
 EL0-synchronous slot and is **not** unmasked, so the recursion guard on that
@@ -175,7 +198,7 @@ stack, zeroes it, and writes the image's entry as the return address, EL0 with
 interrupts clear as the saved state, and the user stack as the EL0 stack
 pointer. That is the frame the first instruction would have been interrupted
 with. It then masks and runs the ordinary return sequence over that frame --
-preempt, die-check, notes, and a park -- and leaves through the shared return's
+preempt, die-check, a park, then notes -- and leaves through the shared return's
 local label, exactly as the fork trampoline does. It lives in this file for the
 same reason.
 
@@ -188,29 +211,31 @@ nothing, so it owes the sweep, and the frame is zeroed before its three fields
 are written. The ordering rule is the tail's own, with one difference: the
 stop leg is the **birth park**, which also holds while the hold is set.
 
-The one thing the birth tail does differently is the one the hold requires.
-The tails' stop park leaves the park for a latched terminate-interrupt, so the
-thread erets and resolves it at its next checkpoint. A held child must not
-`eret`, so the birth park ends the child itself in that case, with the latched
-note's name. The latch is armed only for a note that nothing catches, and only
-the child's own calls could install a handler afterwards, so the default
-disposition is the only one. The birth tail is therefore straight-line, and
-the park returns only to proceed. (A first draft re-ran the checkpoint in
-place and let note delivery consume the latch. Note delivery declines a frame
-whose stack pointer it does not trust, and a debugger can write that pointer,
-so the masked re-run could spin forever: audit round 1, F1.) The frame sits
-below the thunk's stack, so after the `eret` the kernel stack pointer is where
-the spawn trampoline would have left it.
+The birth tail is straight-line: the park returns only to proceed. Neither
+park answers a latched terminate-interrupt (DEBUG-FS-DESIGN 5g, the operator's
+vote of 2026-09-30). Both sleep in `sleep_death_only`, which returns only for
+group death, so a stopped thread stays stopped and a held child stays held.
+The note stays queued, and the thread meets it at its next note checkpoint
+once it runs: an EL0-return tail's notes leg (the IRQ tail's too, since #964).
+A note latched while the child is still
+loading is taken by the birth tail's own delivery before the park, and ends
+the child before its first instruction. Three earlier answers are gone. The
+tails' park left for the latch and erets, which let a compute-bound stopped
+thread run with its stop set, since only the synchronous tail delivers notes.
+The birth park ended the held child with the note's name. And a first draft
+before that re-ran the checkpoint in place, which spun forever once note
+delivery declined a stack pointer a debugger wrote (audit round 1, F1). The
+frame sits below the thunk's stack, so after the `eret` the kernel stack
+pointer is where the spawn trampoline would have left it.
 
 The park the birth tail shares with both tails also gained a second death
 check (2026-09-29). It re-reads the group's termination after its wake
 condition passes, because a release can follow a terminate (the debugger's
 exitkill release terminates and then clears the stop). Without it, a thread
 mid-pass could read the cleared flags and `eret` into a dying group. The spec
-found that gap, and it was never specific to the birth tail. The park's latch
-leg reads the termination once more, because `thread_die_pending` reports
-group death as well as a latched interrupt, and only the interrupt may leave
-the park alive.
+found that gap, and it was never specific to the birth tail. The park's sleep
+reads group death alone (`thread_group_death_pending`), so no latch can end
+the park or let a thread leave it.
 
 ### An EL0 fault terminates a Proc; a kernel fault kills the machine
 
@@ -299,6 +324,36 @@ rather than corruption. **A guard with a known hole and an argued containment is
 worth more than one whose hole nobody has looked for** — and this one earned that
 posture by having its first premise disproved.
 
+### An EL0 abort's verdict
+
+An EL0 data or instruction abort goes to `arch_fault_handle`
+([[sub-kernel-fault]]), and the handler acts on the result. `FAULT_HANDLED`
+returns, and the vector tail (die-check, stop check, note delivery) runs before
+the faulting instruction re-executes. `FAULT_UNHANDLED_USER` and
+`FAULT_USER_BUS` end the Proc through `proc_fault_terminate` with `snare:segv`
+or `snare:bus`. `FAULT_USER_DYING` (the thread's death was pending when the
+fault went unresolved) splits on the death. A group death returns: the tail's
+`el0_return_die_check` acts on `group_exit_msg` unconditionally. A terminate
+latch is acted on at the fault, by `notes_fault_dying_latch`
+([[sub-kernel-notes]]), because the tail defers notes in two states -- while a
+handler runs (the N-3 guard) and while `SP_EL0` is unusable -- and returning
+there re-executed the faulting instruction into the same fault forever
+(groupstatus audit r1 F1; witnesses viv-pheno-probe L329/L330). In the EL1
+switch DYING is unreachable (only `userland_demand_page` produces it, for EL0
+faults) and extincts; a uaccess fixup treats it as a failed access, as it
+treats every non-HANDLED result.
+
+### An EL0 `brk` names its immediate (gcpark-b, 2026-10-12)
+
+`EC_BRK` from EL0 ends the Proc through `proc_fault_terminate`. The ISS low 16
+bits are the `brk` immediate: `SNARE_ABORT_BRK_IMM` (`0xab06`, notes.h) is
+Pouch's `abort()` (patch 0011) and ends as `snare:abort` (SIGABRT to a packed
+wait); every other immediate -- a compiler's `__builtin_trap`, WTFCrash's
+`0xc471`, a debugger's -- stays `snare:brk` (SIGTRAP). The immediate is ABI with
+the note name ([[abi-note-names]]); operator vote "snare:abort". Witness:
+pouch-hello-signals' deaths legs (abort and a failed assert read SIGABRT,
+`brk #1` reads SIGTRAP).
+
 ### The hardware-debug exception classes
 
 Three exception classes arrive from EL0 only because the kernel armed something:
@@ -313,6 +368,13 @@ and read by C as a struct, so the two descriptions are pinned together by
 compile-time assertions on the total size and on the offset of every special
 register. That pairing is the whole safety argument for the frame — there is no
 runtime check that assembly and C agree.
+
+One bit of the saved processor state is not the program's: `SPSR_EL1_SS` (bit
+21), which `exception.h` names, is the software-step state the `eret` installs.
+It belongs to the kernel's step machine. A note's delivery clears it before it
+saves the interrupted context, so no saved user context carries it, and a
+return through `SYS_NOTED` or `rt_sigreturn` comes back without it
+(DEBUG-FS-DESIGN 5.5).
 
 ## Concurrency
 
@@ -395,9 +457,10 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
   too. Moving the die-check before the preempt reopens the
   group-terminate-during-switch window; moving the stop-check before the
   die-check breaks "death wins".
-- **The birth tail must never `eret` while its child is held.** The birth park
-  returns only to proceed, and a latched interrupt ends the child inside it. A
-  re-run of the checkpoint would spin masked on a frame note delivery declines.
+- **The birth tail must never `eret` while its child is held, and no park may
+  leave for a latched interrupt.** Both parks return only to proceed, and group
+  death alone ends a thread inside them (`ParkEndsOnlyInDeath`). A re-run of
+  the checkpoint would spin masked on a frame note delivery declines.
 - **The park must re-check death after its wake condition**, not only at the top
   of each pass. A release that follows a terminate is legal.
 - **A new EL0-return action must be added to both tails and to the birth
@@ -408,9 +471,6 @@ interrupt slot currently holds **thirty-one** of its thirty-two instructions.
 
 ## Seams
 
-- **[[seam-el0-irq-tail-no-notes]]** — note delivery runs on only one of the two
-  EL0 return tails, so a Proc that takes no syscall and no fault never evaluates
-  its note disposition.
 - **Kernel stack overflow faults recursively.** The save builds its frame on the
   same overflowing stack, so an overflow into the guard page re-faults rather
   than landing somewhere safe. A dedicated overflow stack is reserved and

@@ -6,13 +6,19 @@ stability: append-only
 title: "The note-name registry — the deliverable set, the reserved prefixes, and struct note_record"
 pinned-by:
   - "_Static_assert sizeof(struct note_record) == 32 == sizeof(struct Note) (kernel/include/thylacine/notes.h)"
-  - "_Static_assert per name: sizeof(NAME) <= NOTE_NAME_MAX (12 asserts)"
-  - "g_known_notes[] (kernel/notes.c) — the authoritative deliverable set"
+  - "_Static_assert per name: sizeof(NAME) <= NOTE_NAME_MAX (15 asserts; the four oldest open-class names have none)"
+  - "g_known_notes[] (kernel/notes.c) — the authoritative deliverable set, with each name's death signal"
+  - "g_snare_deaths[] (kernel/notes.c) — the snare family's death signals; NOTE_SIG_* == VIV_SIG* _Static_asserts"
+  - "SNARE_ABORT_BRK_IMM 0xab06 (kernel/include/thylacine/notes.h) — the brk immediate that is snare:abort"
 mirrors:
   - "usr/lib/pouch/patches/0007-pouch-signals.patch: __pouch_sig_to_note, the open class"
   - "usr/lib/pouch/patches/0021-pouch-pty.patch: __pouch_sig_to_note, the tty: class"
+  - "usr/lib/pouch/patches/0011-pouch-abort.patch: abort() = brk #0xab06 (the SNARE_ABORT_BRK_IMM literal)"
+  - "usr/lib/pouch/patches/0049-pouch-sigterm-term-note.patch: SIGTERM -> term, POUCH_NOTE_BIT_TERM; raise/kill of self with SIGABRT -> abort()"
+  - "kernel/vivarium.c: viv_signal_note / viv_notebit_map (the Linux phenotype's mirror, SIGTERM -> term)"
+  - "usr/lib/pouch/patches/0050-pouch-self-fault-signals-errnos.patch: raise/kill of self with SIGSEGV, SIGBUS, SIGILL or SIGFPE -> the snare:* self-post; kill's EACCES -> EPERM"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-14
 ---
 ## The surface
 
@@ -21,16 +27,20 @@ Names are strings, not numbers — the Plan 9 model — bounded by
 `NOTE_NAME_MAX = 16` bytes including the NUL.
 
 `g_known_notes[]` in `kernel/notes.c` is the authoritative set: a name not in
-it is refused at post. Nine names are deliverable, in three classes that
-differ by **who may post** and **what an uncaught one does**.
+it is refused at post. Ten names are deliverable, in classes that differ by
+**who may post** and **what an uncaught one does**: the open class, the `tty:`
+class and `sak` (all below). The table also records, per name, the POSIX signal
+a death by that note reports to a packed wait (gcpark-b; "The death signal"
+below).
 
 ### Open class — anyone may post, catchable
 
 | name | arg | default if uncaught |
 |---|---|---|
 | `interrupt` | 0 | **terminate** (LS-5) |
+| `term` | 0 | **terminate** (SIGTERM's; registered 2026-10-13, [[dec-2026-10-13-term-note]]) |
 | `kill` | 0 | terminate — **non-catchable**, bypasses mask and handler |
-| `pipe` | 0 | none (informational) |
+| `pipe` | 0 | **terminate** (SIGPIPE's default; a write to a reader-less pipe posts it) |
 | `child_exit` | packed pid + status | none (informational) |
 
 `kill` is the standing exception to nearly every rule below: it is scanned
@@ -56,16 +66,26 @@ routinely).
 The stop happens at post time, so nothing stays pending across it. Only a
 *caught* susp is queued.
 
+### `sak` — kernel-post only, catchable, ignored by default
+
+The secure-attention event (IM-1, 2026-09-07; docs/ERRORS.md has its row):
+posted only to the trusted Proc (corvus) when a serial BREAK opens a trusted
+episode. An exact-name gate in `notes_post` keeps userspace posters out, and an
+uncaught `sak` never terminates its target. Mask bit `NOTE_BIT_SAK` 6.
+
 ### `snare:` class — kernel-post only, reserved
 
-The fault family. Seven names are defined and `_Static_assert`ed to fit, and
-**none is in `g_known_notes` at v1.0** — the fault path calls `exits()`
-directly rather than routing through `notes_post`. They are a reserved
+The fault family. Eight names are defined and `_Static_assert`ed to fit, and
+**none is in `g_known_notes`** — the fault path ends the Proc directly
+(`exits_note()`) rather than routing through `notes_post`. They are a reserved
 namespace with the delivery machinery not yet wired.
 
 `snare:segv` (no VMA / W^X / permission) · `snare:bus` (VMA-covered, the
-Burrow cannot satisfy) · `snare:align` · `snare:bti` · `snare:brk` ·
-`snare:ill` (unknown sync EC) · `snare:fpe` (reserved; nothing emits it).
+Burrow cannot satisfy) · `snare:align` · `snare:bti` · `snare:brk` (any EL0
+`brk` but one) · `snare:ill` (unknown sync EC) · `snare:fpe` (reserved; nothing
+emits it) · `snare:abort` (gcpark-b, 2026-10-12: the EL0 `brk #0xab06` that
+Pouch's `abort()` executes; the immediate `SNARE_ABORT_BRK_IMM` is ABI with the
+name).
 
 ## The prefix gates, and why only one is load-bearing today
 
@@ -93,14 +113,18 @@ unified, and they are not.
 
 - **`SYS_POSTNOTE`** to another Proc requires the caller be the target's
   **parent**. Not owner-identity, not a capability — parenthood. A
-  non-parent gets `-1` whatever the name and whatever it holds.
+  non-parent gets `-EACCES` whatever the name and whatever it holds (a bare
+  `-1` until 2026-10-14, [[dec-2026-10-14-postnote-errnos]]).
 - **`/proc/<pid>/ctl`** uses the I-26 two-axis gate: owner-identity on the
   `0600` ctl file, OR `CAP_HOSTOWNER`, OR `CAP_KILL`.
 
 So a supervisor holding `CAP_KILL` kills through the filesystem, never
-through `SYS_POSTNOTE`. Additionally, `SYS_POSTNOTE` refuses any target not
-`ALIVE` — a post to a zombie has no consumer and would return success
-misleadingly; `wait_pid` is that channel.
+through `SYS_POSTNOTE`. A target past `ALIVE` gets no post: a zombie has no
+consumer. Since 2026-10-14 the call still answers 0 for a dead child of the
+caller, as POSIX and Linux do for a zombie, rather than refusing it; `wait_pid`
+is the channel that reports the death. A `snare:*` name is never posted, but
+a self-post of `snare:segv`, `snare:bus`, `snare:ill`, `snare:fpe` or
+`snare:abort` ends the caller with it ([[dec-2026-10-14-self-death-snare]]).
 
 A multi-thread target receiving `kill` is cascade-terminated via
 `proc_group_terminate` rather than refused (the earlier `kill` → `EIO`
@@ -134,11 +158,12 @@ padding NUL coincides with the source NUL.
 per-Proc, so a multi-thread Proc can route different notes to different
 threads.
 
-`INTERRUPT` 0 · `KILL` 1 · `PIPE` 2 · `CHILD_EXIT` 3 · `SNARE` 4 · `TTY` 5,
-with `NOTE_MASK_SUPPORTED = 0x3f`.
+`INTERRUPT` 0 · `KILL` 1 · `PIPE` 2 · `CHILD_EXIT` 3 · `SNARE` 4 · `TTY` 5 ·
+`SAK` 6 · `TERM` 7, with `NOTE_MASK_SUPPORTED = 0xff` (0x3f until `sak`, 0x7f
+until `term`).
 
 Two bits cover **families**, one bit each: masking `NOTE_BIT_TTY` defers all
-five tty names, and `NOTE_BIT_SNARE` would defer all seven snare names.
+five tty names, and `NOTE_BIT_SNARE` would defer all eight snare names.
 Per-kind masking within a family is a later extension. `NOTE_BIT_SNARE` has
 no consumer today and is reserved so that the documented bit assignment is
 honoured by a real symbol rather than a comment.
@@ -147,11 +172,40 @@ Setting mask bits outside `NOTE_MASK_SUPPORTED` **succeeds and does
 nothing** — tolerated so the supported set can grow without an ABI break.
 Posting an unsupported *name*, by contrast, is refused.
 
+## The death signal (gcpark-b, 2026-10-12)
+
+A Proc that dies of a note reports that note's POSIX signal to a wait that asks
+for the packed word (`WAIT_UNTRACED`, `WAIT_CONTINUED` or `WAIT_PACKED`; a raw
+wait reads 1). The mapping is ABI, append-only like the names, and the numbers
+are Linux's aarch64 ones so both boundary-lines pass them through:
+
+| death | signal |
+|---|---|
+| `interrupt` | SIGINT 2 |
+| `term` | SIGTERM 15 |
+| `kill` | SIGKILL 9 |
+| `pipe` | SIGPIPE 13 |
+| `tty:quit` | SIGQUIT 3 |
+| `tty:hup` | SIGHUP 1 |
+| `snare:segv` | SIGSEGV 11 |
+| `snare:bus`, `snare:align` | SIGBUS 7 |
+| `snare:ill`, `snare:bti` | SIGILL 4 |
+| `snare:brk` | SIGTRAP 5 |
+| `snare:fpe` | SIGFPE 8 |
+| `snare:abort` | SIGABRT 6 |
+
+`child_exit`, `tty:winch`, `tty:susp`, `tty:cont` and `sak` cannot kill and
+carry no signal. docs/ERRORS.md "Exit-status semantics" is the binding table;
+`notes.death_signal_table` pins every row and the rule "a known note kills iff
+it records a signal".
+
 ## Change protocol
 
-Append-only. A new name means: add it to `g_known_notes` with its mask bit,
-add a `sizeof(...) <= NOTE_NAME_MAX` assert, and decide its class — if it
-belongs to a reserved prefix, confirm the post gate covers it.
+Append-only. A new name means: add it to `g_known_notes` with its mask bit and
+its death signal (nonzero exactly when its default terminates), add a
+`sizeof(...) <= NOTE_NAME_MAX` assert, and decide its class — if it belongs to
+a reserved prefix, confirm the post gate covers it. A new `snare:` name goes in
+`g_snare_deaths` with its signal.
 
 A new *family* needs a new `NOTE_BIT_*` and a bump of
 `NOTE_MASK_SUPPORTED`. Nothing derives that constant from the bits, so the
@@ -161,12 +215,12 @@ bits are tolerated rather than validated.
 
 ## Where the prose has drifted from the code
 
-`sys_postnote_handler` describes "the v1.0 supported set" as
-`"interrupt"/"kill"/"pipe"/"child_exit"` — four names, where the set is nine.
-The sentence is stale as written but harmless in consequence: those four
-*are* exactly the userspace-postable subset, since the other five are
-prefix-gated. A reader taking it as the registry would be wrong; a reader
-taking it as "what this path accepts" would be right.
+`sys_postnote_handler` described "the v1.0 supported set" as
+`"interrupt"/"kill"/"pipe"/"child_exit"` until 2026-10-13, when `term` made
+that list wrong as "what this path accepts" too; the comment now points at
+`g_known_notes` and names no set. The deliverable set is eleven names; the
+userspace-postable subset is the open class's five, since the other six are
+gated (the `tty:` prefix and `sak`'s exact name).
 
 ## The POSIX mapping, and what it loses
 
@@ -177,7 +231,7 @@ the open class in `0007-pouch-signals.patch`, the tty class in
 | signal | note | note |
 |---|---|---|
 | SIGINT | `interrupt` | catchable |
-| SIGTERM | `interrupt` | **shares the note with SIGINT** |
+| SIGTERM | `term` | catchable; its own note since 0049 (2026-10-13) |
 | SIGPIPE | `pipe` | pouch masks it at startup |
 | SIGCHLD | `child_exit` | default ignore |
 | SIGKILL | `kill` | non-catchable; `sigaction()` returns `EINVAL` |
@@ -187,11 +241,16 @@ the open class in `0007-pouch-signals.patch`, the tty class in
 | SIGWINCH | `tty:winch` | |
 | SIGHUP | `tty:hup` | |
 
-The mapping is **many-to-one at SIGINT/SIGTERM**: both land on `interrupt`,
-so a handler cannot tell a Ctrl-C from a polite termination request, and
-installing different dispositions for the two is not expressible. That is a
-v1.0 boundary loss, not a registry property — the fix is a distinct note
-name, not a change here.
+SIGABRT has no note. Pouch's `abort()` is the `snare:abort` trap (0011), which
+a parent reads as SIGABRT, and since 0049 `raise(SIGABRT)` and `kill` of the
+caller with it call `abort()`; a SIGABRT to another process answers EINVAL.
+The Linux phenotype's `kill`/`tkill`/`tgkill` end a self-directed SIGABRT the
+same way, kernel-side ([[sub-kernel-vivarium]]).
+
+Until 0049 the mapping was **many-to-one at SIGINT/SIGTERM**: both landed on
+`interrupt`, so a handler could not tell a Ctrl-C from a polite termination
+request, and different dispositions for the two were not expressible. The fix
+was the distinct note name this section asked for, `term`.
 
 The tty family is **receive-only** from pouch: nothing on that side may
 originate one, which is the userspace face of the `tty:` post gate above.

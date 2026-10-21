@@ -555,7 +555,10 @@ proven-in-principle to delivered.
   serve-your-own-FS-to-one-guest case). A concurrent *external* writer (out-of-
   band Stratum mutation) is bounded by the revalidation window, not instantly
   coherent — acceptable at v1.0, tightenable via the writeback modes.
-- **The Loom async path bypasses the Larder (L1c/L1d seam).** The Larder is
+- **The Loom async path bypasses the Larder (L1c/L1d seam).** (Its
+  write-behind half is closed: a Loom registration fails on a latched flush
+  error, flushes the staged run, stops staging and drops the file's pages,
+  section 12.2 item 4.) The Larder is
   populated + invalidated ONLY on the SYNCHRONOUS dev9p path (`dev9p_stat_native`
   / `dev9p_walk_attrs` populate; `dev9p_write` / `dev9p_wstat_native` / create /
   rename / unlink invalidate). The Loom async engine (`kernel/loom.c` —
@@ -707,7 +710,26 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   2. **fsync** — flush, then `p9_client_fsync`; errors return synchronously.
   3. **cap/threshold** — the mid-stream flushes above.
   4. **a non-append write / wstat / weft-bind** on the same priv — flush
-     first, then the op (ordering: the staged bytes are older).
+     first, then the op (ordering: the staged bytes are older). A wstat then
+     STOPS staging on the priv by clearing the append anchor (`wb_known`; a
+     size change destroys it), never the eligibility flag: that flag gates
+     the read overlay, fsync's flush and the write ordering of a run a death
+     kept, and the error latch's report on every write and fsync -- for
+     another Proc sharing the fd too (2026-10-07: exit-close audit r1 F1, and
+     the Loom write-behind audit r1 F1, which found the latch half). A Loom
+     registration of the Spoor stops staging the same way
+     (`dev9p_loom_register`, from `loom_register_handles`, on the registering
+     syscall's thread), after flushing the run: a Loom op drives the fid
+     straight to the wire, past every path above, so every Loom op -- a
+     WRITE, a READ, an FSYNC, a SETATTR -- meets a priv with nothing staged.
+     A latched flush error fails the registration, as it fails fsync: no Loom
+     op consults the latch, and a registered priv can latch nothing new, since
+     it never stages. The registration also drops the file's Larder pages:
+     a flush installs them as own-write pages, which skip the version check,
+     and the ring's writes bypass the Larder. Before 2026-10-07 a Loom FSYNC
+     on a staged priv reached the server ahead of the staged bytes. The rest
+     of the Larder half of the Loom bypass (section 9's L1c/L1d seam) is
+     separate and still open.
   5. **a read of the same priv** needs no flush: the run is contiguous at
      the file's known end, so reads split cleanly — below `stage_off` = old
      content (server/cache, complete: the append-anchor discipline means the
@@ -731,10 +753,32 @@ Fuchsia minfs writeback) all buffer client-side under close-to-open.
   write/fsync on that fd returns the latched errno (so a streaming writer
   aborts at the next op); **fsync is the reliable error channel**. A failed
   flush DROPS the staged run (the NFS-async posture: the bytes are lost, the
-  latch reports it — retry-forever would wedge close). The
-  `Dev.close` slot is `void` at v1.0, so a close-flush failure cannot reach
-  the caller's close() return — documented seam; v1.x grows the slot. The
-  threshold flushes bound the silently-at-risk tail to < 256 KiB.
+  latch reports it — retry-forever would wedge close). The last close
+  returns a close-flush failure, or one the latch kept, and close(2)
+  reports it as `EIO` (ARCH 21.11, `dec-2026-10-07-close-eio`; until
+  2026-10-07 `Dev.close` was `void` and a close-flush failure was silent).
+  The threshold flushes bound the tail a failure can drop to < 256 KiB.
+  A flush that fails on a thread dying inside it is not a failure of the
+  server: the death refused the send or abandoned the Twrite. The run stays
+  staged and nothing latches, so the next flusher (the last close at the
+  latest) sends it, rewriting any prefix that landed with the same bytes at
+  the same offsets (2026-10-07, with `dec-2026-10-07-exit-close`; before,
+  a kill inside `write`, `fsync` or `wstat` dropped bytes `write` had
+  already reported written). A caught note that interrupts the flush is the
+  same case: flush(5) cancelled the Twrite, so the call returns `EINTR`, the
+  run stays staged, and a retry or the last close sends it (2026-10-07,
+  B-2's land; before, the `EINTR` latched and the run was dropped, so every
+  later write, fsync and close on the file returned `EINTR`). The flush tells
+  the cancellation by the note's claim, which every caught-note unwind takes
+  and holds until the thread returns to EL0; a server that answers
+  Rlerror(`EINTR`) itself, with no claim, has failed the write, and that
+  latches like any other failure. A last close that may not wait -- on a
+  die-pending thread, or on a kernel thread marked `closes_never_wait` -- does
+  not flush: the run goes to a closer with the fid's clunk (ARCH 7.9.1 part
+  C), which writes it and then DROPS the file's attr and pages instead of
+  installing them as OWN, because that late write is unordered with the
+  file's later writers (the G1 write-populate premise holds only for a flush
+  inside the open).
 - **Unlink** of a closed staged file needs nothing (the flush happened at
   close). An unlink-while-open flushes at close into the orphaned fid
   (9P keeps the fid live until clunk) — harmless; the skip-flush-on-unlinked

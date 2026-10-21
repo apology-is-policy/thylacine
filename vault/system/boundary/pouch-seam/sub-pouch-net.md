@@ -25,7 +25,7 @@ validated-by: [prose, gate-smp]
 locks: [lock-pouch-sock-table]
 design: ["docs/POUCH-DESIGN.md", "docs/NET-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-09-25
+updated: 2026-10-12
 ---
 ## Purpose
 
@@ -269,7 +269,7 @@ round against this surface before it had a node).
   array — in APPLICATION code, before libc was entered; `select()` refuses
   the fd, but only afterwards. From the main stack that address is usually
   unmapped; from a heap-resident set it is someone's Burrow. 0039 makes
-  `FD_SET` / `FD_CLR` / `FD_ISSET` `abort()` (status 127) on a descriptor
+  `FD_SET` / `FD_CLR` / `FD_ISSET` `abort()` on a descriptor
   that does not fit the set — glibc's `__fdelt_chk`, and like it made in the
   descriptor's FULL width against the set's OWN size,
   `(unsigned long long)(d) < 8*sizeof(fd_set)`: the first version's
@@ -278,7 +278,11 @@ round against this surface before it had a node).
   says why only when fd 2 is a terminal: fd 2 is routinely not stderr here
   (a prover is spawned with {0,1}; stratumd with none, so its fd 2 is its
   third real kernel handle), and the first version wrote ~110 bytes of
-  English at that handle's cursor (r3 F4). **0039 puts CODE into a PUBLIC
+  English at that handle's cursor (r3 F4). The program dies of `snare:abort`,
+  so a parent reads `WIFSIGNALED` `SIGABRT` (it read exit 127 until gcpark-b,
+  2026-10-12, when `abort()` was `_Exit(127)`; [[sub-pouch-process]]).
+  `pouch-hello-sockets`' `fdsetoob` child is the witness and requires exactly
+  that signal. **0039 puts CODE into a PUBLIC
   header**: the guard is compiled into the PORT's objects, so a port is
   rebuilt, not relinked, to have it (in-tree that is automatic — a stale
   sysroot rebuild removes every port's output). This dossier and 0039 called

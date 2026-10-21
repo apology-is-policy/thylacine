@@ -469,18 +469,225 @@ a second random address, make the original R+X and the alias R+W, and route
 every write through one function, `performJITMemcpy(dst, src, n)`, which in
 this mode calls a thunk with the *offset into the pool*. On Apple hardware the
 thunk is execute-only with the writable base burned in as an immediate, so the
-writable address is never readable -- a hardening we could adopt. The mode is
-compiled only for `OS(DARWIN) && HAVE(REMAP_JIT)` on ARM64 (verified,
-lines 189-334), and used only when fast permission switching is unavailable.
-Everywhere else JavaScriptCore maps its pool permanently RWX, which Thylacine
-cannot do and would not want. Porting the mode is three sites: replace the
-`mach_vm_remap` + `vm_protect` sequence with `SYS_JIT_CREATE`; stop the
-initial reservation asking for RWX; give `ARM64Assembler::cacheFlush` a
-Thylacine arm calling `SYS_ICACHE_SYNC` (it is a hard `#error` today).
-Unverified, and the first thing the JIT chunk must establish: that *every*
-writer goes through the chokepoint (the Apple fast-permission mode imposes the
-same discipline, which is good evidence and not proof). The YARR regex JIT,
-the CSS selector JIT and the Wasm tiers share the one allocator.
+writable address is never readable -- the hardening the operator voted to
+adopt (2026-09-28). The mode is compiled only for `OS(DARWIN) &&
+HAVE(REMAP_JIT)` (the guard spans `ExecutableAllocator.cpp` 202-353), and
+`ENABLE(SEPARATED_WX_HEAP)` is 0 except on Cocoa ARM64. Everywhere else
+JavaScriptCore maps its pool permanently RWX, which Thylacine cannot do and
+would not want: Pouch's `mmap` refuses the RWX reservation with `EACCES`
+before any syscall, and the engine then runs its interpreter.
+
+*Corrected 2026-10-07, after the source was re-read for B-2:*
+
+- **The chokepoint holds, but only with fast permissions off.** Every write
+  into the pool reaches `performJITMemcpy` (`ExecutableAllocator.h` 276-317),
+  which routes on `isJITPC`, one range check. LinkBuffer copies a finished
+  function out through it, and its link and patch steps write single
+  instructions through it at the exec address. The paths that bypass it --
+  LinkBuffer's direct-to-pool copy and the memcpy repatching -- open only
+  under `useFastJITPermissions`, Apple's APRR mode. That mode is the one that
+  *bypasses* the chokepoint; an earlier draft of this section cited it as
+  evidence *for* the chokepoint.
+- **`ARM64Assembler::cacheFlush` is no longer a hard `#error`.** B-0 gave it a
+  Thylacine arm: `SYS_ICACHE_SYNC` (103) by `svc`, with a release assert on
+  the result.
+- **The port is more than three sites.** Enable `SEPARATED_WX_HEAP`; give
+  `initializeSeparatedWXHeaps` a Thylacine arm (its caller is gated on the
+  flag, the callee on Darwin, so turning the flag on alone does not compile);
+  reserve through `SYS_JIT_CREATE` rather than `mmap`, through a WTF
+  `PageReservation` factory, since the (base, size) constructor is private;
+  generate a write thunk whose 4- and 8-byte copies are single aligned stores
+  (Apple's copies anything under 8 bytes a byte at a time, which tears an
+  instruction patch, and the separated arm ignores `RepatchingFlag::Atomic`);
+  run the pool at 64 MiB (`jitMemoryReservationSize`), inside the +-128 MiB
+  branch range, so no jump island is ever requested; acquire `CAP_JIT`; and
+  the build flags.
+- **The exec alias stays readable.** Repatching decodes the instruction it
+  replaces (`linkPointer`, `relinkJumpOrCall`), so only the thunk's own page
+  can be execute-only, as on Apple; the pool is R+X.
+- **The Wasm thread set is not empty.** Every thread that enters a VM joins
+  it when Wasm is on, and the Wasm tier-up paths that walk it suspend each
+  thread, which B-0 made fatal. Harmless until BBQ/OMG run (B-2e), which must
+  replace the walk.
+
+*Corrected 2026-10-12, after a crash on the device:*
+
+- **The collector suspends threads too, and the thread it suspends is the
+  mutator.** The conservative scan (`MachineThreads::tryCopyOtherThreadStacks`)
+  suspends every thread in the heap's group except the one scanning, to read its
+  registers and stack. When a stop-the-world phase finds the mutator *without*
+  heap access -- the JSLock dropped between scripts or events, or a host call
+  that releases access while it waits -- `Heap::stopTheMutator` stops the world
+  at once and the collector thread conducts, so the one JS thread is suspended,
+  and B-0 made that fatal: jsc died with exit 127 and no message (the second
+  defect, Pouch's `abort()`, is gcpark-b). B-0's list of suspend users had
+  omitted this one, and the F7 note that suspension "costs nothing with one JS
+  thread" was wrong.
+- **Decided 2026-10-12 (operator vote, `dec-2026-10-12-jsc-cooperative-scan`):
+  a cooperative scan, no kernel change.** A thread *parks* each time it releases
+  heap access: it copies its callee-saved registers and its stack, from the
+  release point to the stack's origin, into an image the heap keeps for that
+  thread. The scan reads the images and never suspends; a thread in the group
+  that is neither scanning, conducting nor parked is fatal. Acquiring access
+  unparks. This is how Go treats a goroutine in a syscall and HotSpot a thread
+  in native code, with one difference forced by C++: those runtimes record only
+  a stack pointer, because their compiled code keeps no live reference in a
+  callee-saved register across the transition. JavaScriptCore's C++ frames do,
+  and the frames between the caller and the release point -- where such a
+  register may have been spilled -- are reused as soon as the release returns,
+  so the image is a copy, not a recorded range.
+- **Why the image is enough.** A thread without heap access cannot obtain a
+  cell it did not hold at the release (allocation and heap reads need access),
+  so the cells its frames will use after it reacquires are a subset of the
+  image, however the compiler moves values between registers and slots in the
+  meantime. Images are written only by their own thread while it holds access,
+  and read only when no thread but the conductor can hold it; the scan asserts
+  that the world is stopped. The cost is one copy of the live stack per
+  release, which at a JSLock drop is the shallow stack of an event loop.
+- **What stays open.** A kernel thread suspend (Fuchsia's `zx_task_suspend` +
+  `zx_thread_read_state`, Mach's `thread_suspend` + `thread_get_state`) remains
+  a separate question for the users that cannot be made cooperative: B-2e's
+  Wasm instruction-cache reset and a sampling profiler. `Atomics.wait` is not a
+  release in this WebKit (it blocks holding access), so it needs no image.
+
+*B-2d, 2026-10-13: the DFG on the same region.*
+
+- **The DFG rewrites code that runs.** Baseline is unlinked: its calls and
+  property accesses go through data, and only its arithmetic ICs (`JITMathIC`,
+  for add, sub, mul and negate) rewrite a finished function, once each, on the
+  JS thread. The linked DFG rewrites its own instructions in place: a direct
+  call linked or unlinked (`CallLinkInfo`), a discarded function's
+  invalidation points replaced by jumps (`JumpReplacement::fire`), an OSR
+  exit's jump pointed at its lazily compiled ramp (`repatchJump`), a constant
+  patched into a finished function before it is installed (`LazyJSValue`), an
+  arithmetic IC's inline code (`JITMathIC`). Every rewrite still goes through
+  `performJITMemcpy` and the thunk, whose 4- and 8-byte copies are single
+  stores, and is followed by `cacheFlush`, the `svc` to `SYS_ICACHE_SYNC`.
+  Property ICs stay data ICs (only the FTL repatches them).
+- **Three kinds of thread patch, and only one of them runs the code.**
+  `SYS_ICACHE_SYNC` invalidates by broadcast, so the new bytes are fetchable
+  on every CPU, but its trailing ISB retires prefetched instructions only on
+  the CPU that called it; any other CPU must take a context-synchronization
+  event before it runs the code (the cross-CPU contract in
+  `kernel/include/thylacine/syscall.h`). The JS thread's own patches return
+  through `eret`, which is one. A compiler thread's code is installed by the
+  JS thread after `crossModifyingCodeFence`, upstream's rule. The collector
+  discards and unlinks code in its end phase with the world stopped, and
+  JavaScriptCore stops the world only when no thread holds heap access (a
+  thread that holds it is handed the collection and runs it on its own CPU).
+  So when the collector's thread does the patching, the JS thread is parked
+  off the heap; and a JS thread may take the JSLock after another thread
+  patched on another CPU. Nothing on JavaScriptCore's resume path
+  synchronizes the resuming CPU, and on Thylacine heap access is retaken by a
+  compare-and-swap with no syscall, so no trap is guaranteed in between.
+  *(Corrected at the B-2d audit, Fable r1 F2 and F4: an earlier draft said a
+  finished Baseline function is never rewritten, and cited an upstream comment
+  about the conducting thread's own core as upstream's rule for the JS
+  thread.)*
+- **Decided (research, not a vote): the JS thread executes an ISB where it
+  resumes.** `MachineThreads::unparkCurrentThread` runs
+  `WTF::crossModifyingCodeFence()`. gcpark made it the one point every resume
+  passes through: `acquireAccess`'s fast and slow paths, and a JSLock taken
+  while another thread holds heap access. This is HotSpot's
+  `cross_modify_fence`, which each thread runs as it leaves a safepoint. The
+  kernel alternative, a `SYS_ICACHE_SYNC` mode that interrupts the address
+  space's other running threads (Linux's `membarrier` SYNC_CORE), is left to
+  B-2e: Wasm's instruction-cache reset (`resetInstructionCacheOnAllThreads`)
+  signals every VM thread and needs a broadcast of that kind.
+- **No near branch may silently leave the pool.** With jump islands off, the
+  three encoders of a 26-bit branch (`linkJumpOrCall`, `replaceWithJump`,
+  `fillNearTailCall`) checked the range only in debug builds and masked the
+  offset in release; a target out of range now stops the process. The 64 MiB
+  pool's static assert proves every branch inside the pool in range; the check
+  catches a target outside it. A conditional branch is encoded directly only
+  when the link step has measured its target in range; otherwise it goes
+  through the 26-bit path.
+- **On at run time: Baseline, DFG and YARR; FTL, BBQ and OMG stay off
+  (B-2e).** The DFG polls for traps (`usePollingTraps` is forced on), and it
+  emits ARMv8.0 code only: Pouch compiles for `armv8-a`, so the CPU-feature
+  queries, which have no Thylacine arm, read their compile-time defaults (no
+  LSE atomics, no `FJCVTZS`, no FP16, no `FRINT`).
+
+*B-2e, 2026-10-13: the FTL and Wasm's BBQ and OMG on the same region.*
+
+- **The FTL adds one kind of rewrite: property caches that patch code.**
+  Upstream keeps the FTL's caches as code (`useHandlerICInFTL` is forced off),
+  so a property access in FTL code is rewritten in place: its whole inline
+  region at once (`linkCodeInline`), a jump to a stub, or the call to its slow
+  path. The rewrites of more than one instruction run only on the JS thread,
+  which is never inside the region it rewrites (the slow call sits outside it);
+  the collector's resets are single instructions written with the world
+  stopped. The FTL's other rewrites -- OSR-exit jumps, lazy slow paths,
+  invalidation points, direct calls, arithmetic caches -- are the DFG's kinds
+  made by the same threads, so B-2d's three rules cover all of them, and the
+  FTL's finalizer runs `crossModifyingCodeFence` as the DFG's does. The FTL
+  polls for traps too (`CheckTraps` becomes a load and a lazy slow path).
+- **Wasm publishes code to threads that never stop.** Upstream walks every
+  thread that has ever entered a VM, a set shared by the whole process, and
+  suspends and resumes each one. The point is not to stop them: each takes a
+  context-synchronization event, its signal handler's return, after a BBQ or
+  OMG function is written and before it is published. The rewrites themselves
+  are single `bl` retargets in callers, and the rest is data. A fence on the
+  resume path cannot replace the walk: BBQ and OMG code polls no traps, an OMG
+  loop has no checkpoint, and Wasm reaches the new code without passing
+  through C++. Thread suspension is fatal on Thylacine (B-0), so BBQ and OMG
+  as they stand would crash at their first install.
+- **Decided 2026-10-13 (operator votes, `dec-2026-10-13-icache-sync-space`):
+  the kernel synchronizes the address space's CPUs.** A new syscall,
+  `SYS_ICACHE_SYNC_SPACE`, interrupts every other CPU currently running a
+  thread of the caller's address space and returns once each has taken the
+  interrupt; `Wasm::resetInstructionCacheOnAllThreads` calls it. (The first
+  vote made it a mode of `SYS_ICACHE_SYNC`; the second chose its own number,
+  because that call's callers leave its third register unset.) A running thread takes
+  the event at the interrupt; a thread that is not running takes one at its
+  next `eret`. This is Plan 9's `procflushseg`, which marks the processors
+  running a process that maps the segment and waits for each one's clock
+  interrupt, with an IPI in place of the tick; Linux has it as `membarrier`'s
+  `PRIVATE_EXPEDITED_SYNC_CORE`. It interrupts only the caller's own threads.
+  Declined: interrupting every CPU, and per-thread signals in Pouch so that
+  upstream's walk runs as written.
+- **The same gap is open today for a module's stubs, and closes on the thread
+  that consumes them** (`dec-2026-10-13-wasm-plan-isb`, by research). A
+  module's wasm-to-JS exit stubs are JIT-compiled by a Wasm worklist thread
+  while it validates the module, and a group's wasm-to-wasm stubs by the
+  thread that completes its plan; a wait that finds a plan done returns
+  without sleeping. So a JS thread can run stubs another CPU wrote with no
+  context-synchronization event, with IPInt and the Baseline JIT on. Every
+  instance passes `JSWebAssemblyInstance::finalizeCreation` before it reads a
+  stub or runs its start function, and runs `crossModifyingCodeFence` there
+  first, the DFG finalizer's rule; `Wasm::Module::compileSync` does too, for
+  a group another thread created. Upstream has the same gap. (Corrected after
+  B-2e1's Fable round, F1: this bullet first said both kinds were written by
+  the thread that finishes the module's plan.)
+- **Decided 2026-10-13 (operator vote, `dec-2026-10-13-jit-region-128`): the
+  region is 128 MiB.** This is upstream's ARM64 size without jump islands; the
+  kernel's `JIT_REGION_MAX` rises from 64 to 128 MiB. A region is a reservation
+  charged per touched page, so the size costs nothing until used, and the
+  static assert still proves every branch inside it in range (the farthest is
+  128 MiB less one instruction). At 64 MiB the optimizing tiers would stop
+  compiling at 48 MiB, and the stubs that must succeed would crash the process
+  if the last 16 filled.
+- **BBQ and OMG keep the interpreter's memory model.** With the fault handler
+  off (B-0) every memory is bounds-checked, maps exactly its size and grows by
+  copy; a trap is a branch to a throw thunk and the stack check is a compare.
+  Shared memories stay refused, so Wasm threads stay off. One elision still
+  assumes the handler: a `ref.cast` to a struct or array type drops its null
+  check when the field it reads sits at offset 0, then loads from null. It is
+  fixed from the handler's own answer (no offset is safe without a handler)
+  before BBQ runs. Like upstream, a long BBQ or OMG loop polls no trap, so the
+  way to stop one is to kill the process.
+- **Three chunks.** B-2e1: the consuming thread's fence for Wasm plans, and the
+  FTL on. B-2e2, the kernel, audit-bearing: `SYS_ICACHE_SYNC_SPACE`
+  (its mechanism designed in `JIT-ON-WX-DESIGN.md` first) and the 128 MiB
+  region. B-2e3: BBQ and OMG on that call, the pool at 128 MiB,
+  the `ref.cast` fix, and the Wasm exit stubs asked of the pool as compiles
+  that may fail (today they must succeed, so a full pool kills the process
+  where a `CompileError` was meant; B-2e1 Fable round, F3).
+
+The YARR regex JIT, the CSS selector JIT and the Wasm tiers share the one
+allocator. The kernel side changes too (B-2a/B-2b): the region is a
+reservation committed page by page, and the writer alias is hardened before
+the JIT first runs (`docs/JIT-ON-WX-DESIGN.md`, "B-2").
 
 **Ladybird: nothing to do for JavaScript; one function for WebAssembly.**
 LibJS and LibRegex never generate code. The Cranelift bridge's generic path is
@@ -620,7 +827,11 @@ kernel phase is audit-bearing and preceded by its own scripture commit.
 | B-1b | Pouch: `mprotect` / `madvise` / partial `munmap` / real pthread guards; the main-thread stack to 8 MiB with its extent in auxv. | `pouch-hello-*` legs incl. a pthread guard FAULT; the allocate-free-measure witness RED on the old libc |
 | B-1c | native: `dlmalloc-rs` over a Thylacine platform trait replaces the fixed 4 MiB heap; the witness on both substrates. | the kernel's page count rises past 4 MiB and FALLS after free, the trim sabotaged once |
 | B-1d | dlopen: PT_INTERP for native execs; `burrow_map_file`; the driver's `-shared` / PIE / `-dynamic-linker`; `libc.so` in the sysroot; ldso's boundary-line; the handle form designed. Lands before B-3. | a Pouch-built `.so` loaded by a Pouch host on the device; the deny paths (an `MNOEXEC` mount; a name outside the namespace) |
-| **B-2** | The JIT: separated WX heap on `SYS_JIT_CREATE`; `CAP_JIT` clearance for `jsc`. | same benchmark with JIT tiers; a deny-path probe (no `CAP_JIT` -> interpreter, never RWX); audit |
+| **B-2** | The JIT: separated WX heap on `SYS_JIT_CREATE`; `CAP_JIT` clearance for `jsc`. Split by the operator's votes of 2026-09-28: | same benchmark with JIT tiers; a deny-path probe (no `CAP_JIT` -> interpreter, never RWX); audit |
+| B-2a | kernel: the code Burrow becomes a reservation (demand-zero, charged per touched page, no physical contiguity); the I-cache sync exact on aliasing I-caches. Audit-bearing. | a 64 MiB region created for nothing; each witness RED once; audit closed |
+| B-2b | kernel: the writer alias hardened (random placement; the thunk in a region born sealed, `SYS_JIT_CREATE_SEALED`, execute-only, voted 2026-10-07; `LDTR`/`STTR` user copies; the debug reader refuses an execute-only leaf). Audit-bearing. | a syscall refuses to read an execute-only page; audit closed |
+| B-2c | JavaScriptCore's Thylacine separated-WX arm; `jsc` takes `CAP_JIT`; Baseline + YARR. | the benchmark with the JIT on; the deny probe; `ls-jsc` |
+| B-2d / B-2e | DFG; then FTL (B3) + Wasm BBQ/OMG, each its own chunk and audit. B-2e splits in three (2026-10-13): B-2e1 the Wasm plan ISB + the FTL; B-2e2 the kernel's address-space sync + the 128 MiB region; B-2e3 BBQ/OMG. | the same benchmark |
 | **B-3** | P3: the libraries, ICU first. | each library's own tests under Pouch |
 | **B-4** | P2: design document, then the primitive, then WebKit's `Platform/IPC` + `SharedMemory` backend. | two-process message + shared-bitmap witness; audit |
 | **B-5** | WebCore + WebKit2 bring-up, headless: `PORT=Thylacine`, modelled on PlayStation. P5 resolved here. | `WKPagePaint` renders a local page to a PNG on the device |

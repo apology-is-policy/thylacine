@@ -10,6 +10,9 @@
 
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
+#include <thylacine/pipe.h>
+#include <thylacine/poll.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -98,6 +101,50 @@ static int spoor_transport_close(void *ctx) {
     return 0;
 }
 
+// The rx Spoor's own poll: POLLIN, or the HUP/ERR of a closed writer (whose
+// recv returns EOF at once). EL0 attaches pipes only (sys_attach_9p_ends_are_
+// pipes), whose poll registers the hook with its sample under the ring lock.
+// A Dev with no poll cannot say, so it reads as ready and the pump blocks in
+// its recv as an unconditional reader does.
+static bool spoor_transport_recv_ready(void *ctx, struct poll_waiter *pw) {
+    struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
+    if (!st || st->magic != P9_SPOOR_TRANSPORT_MAGIC) return true;
+    struct Spoor *rx = st->rx_spoor;
+    if (!rx || !rx->dev || !rx->dev->poll) return true;
+    short rev = rx->dev->poll(rx, POLLIN, pw);
+    return (rev & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
+// A pipe -- the only rx EL0 can attach, an end it may also hold -- reads
+// without sleeping. Any other Dev's read may sleep and nothing can ask it not
+// to (its poll may be absent, or coarser than its read), so recv_now refuses
+// it rather than break the op's promise; such a transport is kernel-internal
+// and reads with recv.
+static int spoor_transport_recv_now(void *ctx, u8 *buf, size_t cap) {
+    struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
+    if (!st)                                   return -1;
+    if (st->magic != P9_SPOOR_TRANSPORT_MAGIC) return -1;
+    if (!st->rx_spoor || !st->rx_spoor->dev)   return -1;
+    if (!st->rx_spoor->dev->read)              return -1;
+    if (!buf || cap == 0)                      return -1;
+    struct Spoor *rx = st->rx_spoor;
+    if (rx->dev != &devpipe) return -1;
+    long n = pipe_read_now(rx, buf, (long)cap);
+    if (n == -(long)T_E_AGAIN) return P9_TRANSPORT_EAGAIN;
+    if (n < 0) return -1;
+    return (int)n;
+}
+
+// The server's reader drains what the client sent and then reads EOF. Only a
+// pipe can be hung up without closing it; any other tx (the tests' mock) is
+// left alone, and its server learns of the death at the close.
+static void spoor_transport_hangup(void *ctx) {
+    struct p9_spoor_transport *st = (struct p9_spoor_transport *)ctx;
+    if (!st)                                   return;
+    if (st->magic != P9_SPOOR_TRANSPORT_MAGIC) return;
+    if (st->tx_spoor) (void)pipe_hangup_write(st->tx_spoor);
+}
+
 // =============================================================================
 // Public API.
 // =============================================================================
@@ -139,11 +186,9 @@ struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st) {
     ops.send  = spoor_transport_send;
     ops.recv  = spoor_transport_recv;
     ops.close = spoor_transport_close;
-    // No deadline mechanism: a Spoor read blocks until data / EOF. The
-    // deadline-aware reader pump (Loom SQPOLL) over a Spoor-backed client
-    // simply blocks (never observes the idle return). NULL-permitted.
-    ops.set_recv_deadline = NULL;
-    ops.recv_timed_out    = NULL;
+    ops.recv_ready        = spoor_transport_recv_ready;
+    ops.recv_now          = spoor_transport_recv_now;
+    ops.hangup            = spoor_transport_hangup;
     ops.ctx               = (void *)st;
     return ops;
 }

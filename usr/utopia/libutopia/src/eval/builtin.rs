@@ -55,13 +55,11 @@
 //   bg [%N]     resume a STOPPED job in the background (SYS_TTY_CONT,
 //               no terminal handoff) under job control; else report the
 //               job already running (bash-faithful).
-//   kill {%N|pid} [interrupt|kill]
-//               post a note to a job's pids / a pid. Default `interrupt`
-//               (the catchable Ctrl-C analogue); `kill` is the non-
-//               catchable force. The kernel's userspace-postable set is
-//               {interrupt, kill} -- `snare:*` is kernel-synthetic-only,
-//               so scripture's `snare:term` default is unsendable from
-//               userspace and `interrupt` is the graceful default.
+//   kill {%N|pid} [note]
+//               post a note to a job's pids / a pid. Default `term` (the
+//               catchable terminate request, POSIX kill's SIGTERM);
+//               `interrupt` is Ctrl-C's note, `kill` the non-catchable
+//               force. `snare:*` is kernel-synthetic-only.
 //
 // === Deferred (need substrate absent at v1.0) ===
 //
@@ -114,11 +112,13 @@ use core::fmt::Write as _;
 
 use libthyla_rs::fs::{self, Component, Path};
 use libthyla_rs::io::Read as _;
+use libthyla_rs::err::Error;
 use libthyla_rs::notes::{self, NoteTarget};
-use libthyla_rs::{t_wait_pid_for, T_WAIT_WNOHANG};
+use libthyla_rs::{t_wait_pid_for, T_WAIT_PACKED, T_WAIT_WNOHANG};
 
 use super::env::Env;
 use super::error::EvalResult;
+use super::jobs::status_of_packed;
 use super::stmt::{
     eval_source_as_command, poll_notes_once, run_foreground_jc, wait_pids_interruptible,
     StatementFlow,
@@ -666,9 +666,11 @@ pub fn reap_background(env: &mut Env) {
         let mut st: i32 = 0;
         // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st is a
         // valid writable i32. WNOHANG -> pid (reaped) / 0 (alive) / -1 (gone).
-        let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+        let rc = unsafe {
+            t_wait_pid_for(pid, T_WAIT_WNOHANG | T_WAIT_PACKED, &mut st as *mut i32)
+        };
         if rc > 0 {
-            env.jobs_mut().mark_reaped(pid, st);
+            env.jobs_mut().mark_reaped(pid, status_of_packed(st));
         } else if rc < 0 {
             // No longer our child (already gone). Treat as reaped so the job
             // can complete + be removed -- never left dangling.
@@ -698,8 +700,9 @@ fn wait_pids_reaping(env: &mut Env, pids: &[i32]) -> (i32, bool) {
         for &pid in pids {
             let mut st: i32 = 0;
             // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
-            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_PACKED, &mut st as *mut i32) };
             if rc > 0 {
+                let st = status_of_packed(st);
                 env.jobs_mut().mark_reaped(pid, st);
                 last = st;
             } else if rc < 0 {
@@ -717,11 +720,14 @@ fn wait_pids_reaping(env: &mut Env, pids: &[i32]) -> (i32, bool) {
             }
             let mut st: i32 = 0;
             // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
-            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+            let rc = unsafe {
+                t_wait_pid_for(pid, T_WAIT_WNOHANG | T_WAIT_PACKED, &mut st as *mut i32)
+            };
             if rc == 0 {
                 continue; // still alive (or stopped -- either way, not exited)
             }
             if rc > 0 {
+                let st = status_of_packed(st);
                 env.jobs_mut().mark_reaped(pid, st);
                 last = st;
             } else {
@@ -997,22 +1003,20 @@ fn bi_wait(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     Ok(StatementFlow::Normal)
 }
 
-/// `kill {%N | pid} [interrupt | kill]` -- post a note to a job's element pids
-/// or to a single pid. Default note `interrupt` (the catchable Ctrl-C
-/// analogue); `kill` is the non-catchable force. The kernel's userspace-
-/// postable set is {interrupt, kill}; `snare:*` is kernel-synthetic-only, so
-/// scripture's `snare:term` default is unsendable from userspace -- `interrupt`
-/// is the graceful default.
+/// `kill {%N | pid} [note]` -- post a note to a job's element pids or to a
+/// single pid. The default note is `term`, the catchable terminate request
+/// (POSIX `kill`'s SIGTERM); `interrupt` is Ctrl-C's note and `kill` the
+/// non-catchable force. `snare:*` is kernel-synthetic-only.
 fn bi_kill(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if args.is_empty() || args.len() > 2 {
         return fail(
             env,
-            "kill: usage: kill {%job | pid} [interrupt | kill]".to_string(),
+            "kill: usage: kill {%job | pid} [term | interrupt | kill]".to_string(),
             1,
         );
     }
     let target = &args[0];
-    let name = if args.len() == 2 { args[1].as_str() } else { "interrupt" };
+    let name = if args.len() == 2 { args[1].as_str() } else { "term" };
     if name.starts_with("snare:") {
         return fail(env, "kill: snare:* notes are kernel-reserved".to_string(), 1);
     }
@@ -1039,19 +1043,31 @@ fn bi_kill(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
     if pids.is_empty() {
         return fail(env, "kill: no matching processes".to_string(), 1);
     }
-    let mut send_err = false;
+    // Every pid is sent to; the first refusal is the one $errstr names.
+    let mut first_err: Option<String> = None;
     for pid in pids {
-        if notes::send(NoteTarget::Pid(pid), name).is_err() {
-            send_err = true;
+        if let Err(e) = notes::send(NoteTarget::Pid(pid), name) {
+            if first_err.is_none() {
+                first_err = Some(kill_refusal(pid, name, e));
+            }
         }
     }
-    if send_err {
-        return fail(
-            env,
-            "kill: send failed (no such process or not a child)".to_string(),
-            1,
-        );
+    if let Some(m) = first_err {
+        return fail(env, m, 1);
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)
+}
+
+// The kernel names each refusal (SYS_POSTNOTE's errnos), so the message can.
+fn kill_refusal(pid: i32, name: &str, e: Error) -> String {
+    let mut s = String::new();
+    let _ = match e {
+        Error::NoSuchProcess => write!(&mut s, "kill: {}: no such process", pid),
+        Error::PermissionDenied => write!(&mut s, "kill: {}: not a child of this shell", pid),
+        Error::WouldBlock => write!(&mut s, "kill: {}: its note queue is full", pid),
+        Error::InvalidArgument => write!(&mut s, "kill: {}: not a note a program can send", name),
+        other => write!(&mut s, "kill: {}: {}", pid, other),
+    };
+    s
 }

@@ -73,6 +73,15 @@ proc wait_peer_log {path pattern} {
     }
     lc_fail "peer log never matched $pattern: $d"
 }
+# A regexp, waited on for `secs`: one alternation waits for every verdict.
+proc wait_peer_log_re {path re secs} {
+    for {set i 0} {$i < $secs * 10} {incr i} {
+        set d [read_peer_log $path]
+        if {[regexp $re $d]} { return $d }
+        after 100
+    }
+    lc_fail "peer log never matched $re: $d"
+}
 
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
@@ -133,9 +142,15 @@ lc_expect "HANG-STATUS=1" "remote EOF fails posted attach"
 lc_expect "mount: cannot attach" "remote EOF stored attach error"
 lc_send "wait; echo post-hangup-reaped | tr a-z A-Z"
 lc_expect "POST-HANGUP-REAPED" "failed posted relay exits"
-set d [wait_peer_log $peerlog "*guest: sent FIN*"]
+# The verdict on haul's side comes within the peer's 10 s drain window after
+# its FIN, and only "closed" or "reset" passes: STILL OPEN is a relay that kept
+# the connection after the server hung up.
+set d [wait_peer_log_re $peerlog {guest: (the other side (closed|reset)|STILL OPEN)} 15]
 if {![string match "*accepted*" $d] || ![string match "*flight 3*" $d]} {
     lc_fail "fixture did not relay authenticated handshake before FIN: $d"
+}
+if {![regexp {guest: the other side (closed|reset)} $d]} {
+    lc_fail "the posted relay did not close its side after the server hung up: $d"
 }
 lc_pass "authenticated remote EOF wakes posted attach and reaps the relay"
 

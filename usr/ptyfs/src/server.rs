@@ -63,19 +63,24 @@ use libthyla_rs::{
 /// direct open=connect consumer.
 pub const MAX_CONNS: usize = 8;
 
-/// Per-connection fid-table size. The shared /dev/pts mount uses ONE kernel
-/// client, so all its terminals contribute here. ptyhold opens three distinct
-/// stdio slave fids; ut retains ctl and ready beside the host's master: SIX
-/// persistent fids per ordinary shell, not four. Reserve another 16 entries
-/// for attach roots and concurrent walks/temporary opens. Extra independently
-/// opened application endpoints still consume this finite table; this is not
-/// a guarantee of unlimited opens per pair. The pair bound stays unchanged.
-const MAX_FIDS: usize = PTS_MAX * 6 + 16;
+/// Per-connection fid-table size: one fid per open file/dir the client holds.
+/// joey's single /dev/pts mount is ONE kernel-client session, so this table caps
+/// the TOTAL fids across every Proc sharing the mount. The ceiling covers PTS_MAX
+/// pts at FIDS_PER_PTS each plus the attach root and transient walk fids --
+/// otherwise the fid table, not PTS_MAX, becomes the binding concurrent-pts limit
+/// and a ready-open failure degrades a native poller to polling fd 0, which a pts
+/// always reports readable (the item-10 F1/F3 cluster; kaua says so on the
+/// diagnostic UART). Scales with PTS_MAX.
+const MAX_FIDS: usize = PTS_MAX * FIDS_PER_PTS + 16;
 
-/// Keep the existing per-connection deferred read/write ceilings independent
-/// of fid-table bookkeeping. Raw protocol peers need this server-side bound
-/// even when they do not use the kernel client's 64-tag scheduler.
-const MAX_PENDING: usize = 80;
+/// A live pts's fids, as the code opens them: the master; the slave once per
+/// stdio slot (ptyhold::spawn_on_slave opens it three times, and the hosted
+/// program holds all three for its life); the shell's ctl and item-10 ready
+/// files; the ready file of the kaua program it runs (one per program: the
+/// launch probe hands its fd to the source). A winsize write's ctl open is
+/// transient and rides the slack. A shell run from the shell adds two more, a
+/// kaua program run by another one more. The selftest binds this set.
+const FIDS_PER_PTS: usize = 7;
 
 /// Max live pts pairs. A bound, not headroom: an unbounded pts table is a DoS
 /// vector (#65 resource floor), so clone-minting fails (ENFILE) past this.
@@ -1745,12 +1750,12 @@ impl Conn {
                 ptys.slave_write(n, a.data)
             };
             if consumed == 0 {
-                // The binding bound is the SHARED kernel 9P tag pool
-                // (P9_SESSION_MAX_OUTSTANDING == 64), NOT this per-Conn MAX_PENDING: a
-                // parked write holds its tag until poll_writes replies, and every
-                // Proc shares ONE /dev/pts client, so enough parked ops starve the
-                // pool for all pts users (F1 -- the pre-existing parked-READ class;
-                // the real fix is a kernel per-Proc outstanding quota, tracked).
+                // The binding bound is the SHARED kernel 9P tag pool, NOT this
+                // per-Conn MAX_PENDING: a parked write holds its tag until
+                // poll_writes replies, and every Proc shares ONE /dev/pts
+                // client. Since ARCH 21.11 an op waits for a tag rather than
+                // failing, and the op share (P9_OPS_MAX, 32767) takes that many
+                // parked threads to fill (F1 -- the parked-READ class).
                 // MAX_PENDING caps only THIS Conn's contribution.
                 if self.pending_writes.len() >= MAX_PENDING {
                     return self.err(tag, p9::E_PROTO);
@@ -2032,9 +2037,14 @@ fn selftest_fid_capacity() -> Result<(), &'static str> {
             }
         }
         let mut fid = 16;
+        // The FIDS_PER_PTS set: the shell's ready file and its kaua program's.
+        let tile = [FK_MASTER, FK_SLAVE, FK_SLAVE, FK_SLAVE, FK_CTL, FK_READY, FK_READY];
+        if tile.len() != FIDS_PER_PTS {
+            return Err("fid-tile-shape");
+        }
         for _ in 0..PTS_MAX {
             let n = ptys.mint().ok_or("fid-pair-mint")? as u32;
-            for kind in [FK_MASTER, FK_SLAVE, FK_SLAVE, FK_SLAVE, FK_CTL, FK_READY] {
+            for kind in tile {
                 if !conn.fid_set(&mut ptys, fid, make_pts(n, kind)) {
                     return Err("fid-terminal-capacity");
                 }
@@ -2775,6 +2785,41 @@ pub fn selftest() -> Result<(), &'static str> {
         }
         if rv & POLLIN == 0 {
             return Err("ready-eof-not-readable");
+        }
+    }
+
+    // ---- The fid budget (I-32). One Conn -- joey's /dev/pts session, which
+    // every Proc shares -- must hold PTS_MAX pts at the set a hosted tile
+    // really opens (FIDS_PER_PTS spells it out) plus the attach root, through
+    // the real fid_set; and the bind past MAX_FIDS must be refused, so this
+    // check can fail.
+    {
+        let mut tp = Ptys::new();
+        let mut conn = Conn::new(-1);
+        if !conn.fid_set(&mut tp, 0, P_ROOT) {
+            return Err("fid-budget-root");
+        }
+        let mut fid: u32 = 1;
+        let tile = [
+            FK_MASTER, FK_SLAVE, FK_SLAVE, FK_SLAVE, FK_CTL, FK_READY, FK_READY,
+        ];
+        for _ in 0..PTS_MAX {
+            let n = tp.mint().ok_or("fid-budget-mint")? as u32;
+            for fk in tile {
+                if !conn.fid_set(&mut tp, fid, make_pts(n, fk)) {
+                    return Err("fid-budget-short");
+                }
+                fid += 1;
+            }
+        }
+        while (fid as usize) < MAX_FIDS {
+            if !conn.fid_set(&mut tp, fid, P_ROOT) {
+                return Err("fid-budget-slack");
+            }
+            fid += 1;
+        }
+        if conn.fid_set(&mut tp, fid, P_ROOT) {
+            return Err("fid-budget-unbounded");
         }
     }
 

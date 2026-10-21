@@ -20,7 +20,9 @@ set -uo pipefail
 # build/clade) resolve under -- so tools/test-forage.sh can isolate probes +
 # downloads to a temp dir. Its default is the real repo. MANIFEST is likewise
 # overridable (a fixture manifest).
-REPO_ROOT="${FORAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# Made absolute either way: the patch paths built from it are handed to `git -C`,
+# which resolves a relative path against the checkout, not here.
+REPO_ROOT="$(cd "${FORAGE_ROOT:-$(dirname "$0")/..}" && pwd)" || exit 1
 MANIFEST="${MANIFEST:-$REPO_ROOT/tools/build-manifest.toml}"
 DRY="${FORAGE_DRY:-0}"
 
@@ -96,6 +98,25 @@ do_clone() {
     echo "    $sec now at $(git -C "$dest" rev-parse --short HEAD 2>/dev/null || echo '?')"
 }
 
+# The tree the pin plus the given patches builds, applied in order in a scratch
+# index (no checkout touched). Prints the tree id; nonzero if a patch does not apply.
+series_tree() {
+    local path="$1" pin="$2" pp tree rc=0; shift 2
+    local idx; idx="$(mktemp -d "${TMPDIR:-/tmp}/forage-series.XXXXXX")" || return 1
+    GIT_INDEX_FILE="$idx/index" git -C "$path" read-tree "$pin" 2>/dev/null || rc=1
+    for pp; do
+        (( rc == 0 )) || break
+        [[ "$pp" == /* ]] || pp="$PWD/$pp"
+        [[ -r "$pp" ]] || { echo "forage: patch $pp is not readable" >&2; rc=1; break; }
+        GIT_INDEX_FILE="$idx/index" git -C "$path" apply --cached "$pp" 2>/dev/null || rc=1
+    done
+    if (( rc == 0 )); then
+        tree="$(GIT_INDEX_FILE="$idx/index" git -C "$path" write-tree)" && echo "$tree" || rc=1
+    fi
+    rm -rf "$idx"
+    return $rc
+}
+
 do_clone_sparse() {
     # A partial sparse clone of a huge upstream, at an exact commit, plus our
     # in-repo patch series. Idempotent: a checkout already at pin + series is
@@ -119,6 +140,18 @@ do_clone_sparse() {
         git -C "$path" sparse-checkout init --cone || return 1
         # shellcheck disable=SC2086  # the cone list is space-separated on purpose
         git -C "$path" sparse-checkout set $sparse || return 1
+    else
+        # An existing sparse checkout is only widened, so a cone the manifest grew
+        # reaches it and a directory somebody added by hand stays (`set` would drop
+        # it). It moves no commit. A full checkout is not ours to convert: git's
+        # `add` refuses it with a message that names neither the section nor the
+        # path, so it is reported here instead.
+        if [[ "$(git -C "$path" config --bool core.sparseCheckout 2>/dev/null)" != true ]]; then
+            echo "forage: $sec: $path is not a sparse checkout -- not widened; inspect it" >&2
+            return 1
+        fi
+        # shellcheck disable=SC2086
+        git -C "$path" sparse-checkout add $sparse || return 1
     fi
     local at; at="$(git -C "$path" rev-parse "$tag^{commit}" 2>/dev/null || true)"
     if [[ "$at" != "$commit" ]]; then
@@ -130,15 +163,49 @@ do_clone_sparse() {
     else
         git -C "$path" checkout -q -b "$branch" "$commit" || return 1
     fi
+    # The series is stacked (a later patch may edit lines an earlier one added), so
+    # what is applied is asked of a PREFIX: the longest k for which the pin plus the
+    # first k patches, built in a scratch index, is HEAD's tree. The rest are am'd.
+    local -a series=()
+    local k applied=-1 head_tree tree
     for pp in "$patches"/*.patch; do
-        [[ -e "$pp" ]] || continue
-        if git -C "$path" apply --check --reverse "$pp" 2>/dev/null; then
+        [[ -e "$pp" ]] && series+=("$pp")
+    done
+    # Every path the series touches must lie in the cone. The prefix check below
+    # would pass a patch outside it (its scratch index holds the whole tree), and
+    # `git am` would then fail on a skip-worktree path naming neither the patch's
+    # path nor the cone.
+    local f c inside
+    for pp in "${series[@]}"; do
+        while read -r f; do
+            inside=0
+            for c in $sparse; do
+                if [[ "$f" == "$c" || "$f" == "$c"/* ]]; then inside=1; break; fi
+            done
+            if (( ! inside )); then
+                echo "forage: $sec: $(basename "$pp") touches $f, outside the sparse cone ($sparse) -- widen the manifest's cone" >&2
+                return 1
+            fi
+        done < <(awk '/^diff --git /{ sub(/^a\//, "", $3); sub(/^b\//, "", $4); print $3; print $4 }' "$pp" | sort -u)
+    done
+    head_tree="$(git -C "$path" rev-parse 'HEAD^{tree}')"
+    for (( k = ${#series[@]}; k >= 0; k-- )); do
+        tree="$(series_tree "$path" "$commit" "${series[@]:0:k}")" || continue
+        if [[ "$tree" == "$head_tree" ]]; then applied=$k; break; fi
+    done
+    if (( applied < 0 )); then
+        echo "forage: $sec: HEAD is not the pin plus any prefix of the series -- the checkout has drifted; inspect $path" >&2
+        return 1
+    fi
+    for (( k = 0; k < ${#series[@]}; k++ )); do
+        pp="${series[k]}"
+        if (( k < applied )); then
             echo "    $(basename "$pp"): already applied"
         elif git -C "$path" -c user.name=forage -c user.email=forage@localhost am -q "$pp"; then
             echo "    $(basename "$pp"): applied"
         else
             git -C "$path" am --abort 2>/dev/null || true
-            echo "forage: $sec: $(basename "$pp") neither applies nor is applied -- the checkout has drifted; inspect $path" >&2
+            echo "forage: $sec: $(basename "$pp") does not apply on the patches before it -- inspect $path" >&2
             return 1
         fi
     done

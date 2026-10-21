@@ -38,6 +38,8 @@ static void pc_abort(void *ctx) { ((struct pc_pipe *)ctx)->aborts++; }
 static int pc_bad_send(void *ctx,const u8 *b,size_t n) { (void)ctx;(void)b;(void)n;return -1; }
 static int pc_bad_recv(void *ctx,u8 *b,size_t n) { (void)ctx;(void)b;(void)n;return -1; }
 static int pc_bad_close(void *ctx) { (void)ctx;return -1; }
+static bool pc_bad_recv_ready(void *ctx,struct poll_waiter *pw) { (void)ctx;(void)pw;return true; }
+static int pc_bad_recv_now(void *ctx,u8 *b,size_t n) { (void)ctx;(void)b;(void)n;return -1; }
 static void pc_complete(struct p9_rpc *rpc,int rc,struct p9_dispatch_result *dr) {
     struct pc_op *op=(struct pc_op *)rpc;
     op->completions++;op->result=rc;op->bytes=dr&&rc==0?dr->read_count:0;
@@ -53,7 +55,7 @@ static void pc_reply(u16 tag) {
 static const char *pc_ready(void) {
     if(pc.client.magic==P9_CLIENT_MAGIC)p9_client_destroy(&pc.client);
     pc_zero(&pc,sizeof(pc));pc.pipe.chunk=512;
-    struct p9_transport_ops ops={.send=pc_bad_send,.recv=pc_bad_recv,.close=pc_bad_close,.ctx=&pc.pipe};
+    struct p9_transport_ops ops={.send=pc_bad_send,.recv=pc_bad_recv,.close=pc_bad_close,.recv_ready=pc_bad_recv_ready,.recv_now=pc_bad_recv_now,.ctx=&pc.pipe};
     struct p9_transport_try_ops nb={.send=pc_send,.recv=pc_recv,.abort=pc_abort,.ctx=&pc.pipe};
     PC_CHECK(p9_client_init_preallocated(&pc.client,0,256,ops,pc.recv,sizeof(pc.recv),pc.send,sizeof(pc.send))==0,"client init");
     PC_CHECK(p9_client_progress_bind(&pc.client,&pc.progress,nb,1234,0)==0,"private bind/no deadline");
@@ -174,7 +176,7 @@ static u8 pc_big_tx[P9_CLIENT_OUT_BUF_MAX + 128];
 static const char *pc_storage(void) {
     if(pc.client.magic==P9_CLIENT_MAGIC)p9_client_destroy(&pc.client);
     pc_zero(&pc,sizeof(pc));
-    struct p9_transport_ops ops={.send=pc_bad_send,.recv=pc_bad_recv,.close=pc_bad_close,.ctx=&pc.pipe};
+    struct p9_transport_ops ops={.send=pc_bad_send,.recv=pc_bad_recv,.close=pc_bad_close,.recv_ready=pc_bad_recv_ready,.recv_now=pc_bad_recv_now,.ctx=&pc.pipe};
     u32 n=(u32)sizeof(pc_big_rx);
     PC_CHECK(p9_client_init_preallocated(&pc.client,0,n,ops,pc_big_rx,n,pc_big_tx,n-1)<0,"short provided TX refused");
     PC_CHECK(p9_client_init_preallocated(&pc.client,0,n,ops,pc_big_rx,n-1,pc_big_tx,n)<0,"short provided RX refused");

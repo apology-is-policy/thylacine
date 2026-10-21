@@ -529,17 +529,19 @@ fn read_ctl_sched(buf: &mut [u8]) -> Option<usize> {
 }
 
 /// Snapshot the tickless work-conservation counters. None if /ctl/sched is
-/// unreadable (graceful: the bench still runs, just without the wc delta).
+/// unreadable or the kernel withheld them ("-" to a reader that is neither the
+/// system principal nor a hostowner): the bench still runs, without the delta,
+/// rather than report a withheld counter as 0.
 fn wc_snapshot() -> Option<WcSnap> {
     let mut buf = [0u8; 512];
     let n = read_ctl_sched(&mut buf)?;
     let s = core::str::from_utf8(&buf[..n]).ok()?;
     let tl = &s[s.find("wc-tickless:")?..];
     Some(WcSnap {
-        parks: field_u64(tl, "parks=").unwrap_or(0),
-        starved: field_u64(tl, "starved=").unwrap_or(0),
-        starved_ns: field_u64(tl, "starved_ns=").unwrap_or(0),
-        max_ns: field_u64(tl, "max_starved_ns=").unwrap_or(0),
+        parks: field_u64(tl, "parks=")?,
+        starved: field_u64(tl, "starved=")?,
+        starved_ns: field_u64(tl, "starved_ns=")?,
+        max_ns: field_u64(tl, "max_starved_ns=")?,
     })
 }
 
@@ -588,7 +590,7 @@ fn report_wc_delta(before: Option<WcSnap>, after: Option<WcSnap>) {
             ));
         }
         _ => {
-            t_putstr("  kernel wc-delta: n/a (/ctl/sched unreadable)\n");
+            t_putstr("  kernel wc-delta: n/a (/ctl/sched unreadable or withheld)\n");
         }
     }
 }
@@ -1245,7 +1247,7 @@ fn mode_idle(window_ms: u64) {
             ));
         }
         _ => {
-            t_putstr("idle: n/a (/ctl/sched unreadable)\n");
+            t_putstr("idle: n/a (/ctl/sched unreadable or withheld)\n");
         }
     }
 }

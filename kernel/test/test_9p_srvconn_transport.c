@@ -44,10 +44,14 @@
 #include <thylacine/path.h>
 #include <thylacine/proc.h>
 #include <thylacine/pts.h>
+#include <thylacine/rendez.h>
+#include <thylacine/sched.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include "../../arch/arm64/uart.h"
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c).
 extern void srv_registry_reset(void);
@@ -69,9 +73,12 @@ void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
-void test_9p_srvconn_transport_deadline_vtable_routes(void);
+void test_9p_srvconn_transport_recv_ready_tracks_s2c(void);
 void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void);
 void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void);
+void test_9p_srvconn_transport_death_tears_down_the_conn(void);
+void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void);
+void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void);
 void test_9p_srvconn_transport_pts_slave_spoor_classifies_t(void);
 void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_cape_attach(void);
@@ -414,18 +421,14 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void) {
 }
 
 // =============================================================================
-// 9p_srvconn_transport.deadline_vtable_routes (Loom-4, LOOM.md §8.6)
+// 9p_srvconn_transport.recv_ready_tracks_s2c (LOOM.md 8.6)
 //
-// The NULL-permitted set_recv_deadline / recv_timed_out vtable ops route to
-// srvconn_set_client_deadline / srvconn_client_timed_out. A fresh deadline
-// clears the signal; a PAST deadline makes the very next recv on an empty s2c
-// ring time out promptly (tsleep returns TSLEEP_TIMEDOUT once now >= deadline),
-// and the timed-out signal surfaces back through the recv_timed_out shim -- the
-// mechanism the SQPOLL idle pump reads to tell IDLE from EOF over a real
-// SrvConn-backed client.
+// The production readiness op: an empty s2c is not ready and files the hook on
+// the connection's poll list with the sample; the server's reply wakes it and
+// reads as ready; the teardown's EOF is ready too.
 // =============================================================================
 
-void test_9p_srvconn_transport_deadline_vtable_routes(void) {
+void test_9p_srvconn_transport_recv_ready_tracks_s2c(void) {
     srv_registry_reset();
 
     struct Proc *server = NULL;
@@ -437,25 +440,37 @@ void test_9p_srvconn_transport_deadline_vtable_routes(void) {
     struct p9_srvconn_transport st;
     TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0, "init");
     struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
-    TEST_ASSERT(ops.set_recv_deadline != NULL, "set_recv_deadline wired");
-    TEST_ASSERT(ops.recv_timed_out != NULL, "recv_timed_out wired");
+    TEST_ASSERT(ops.recv_ready != NULL, "recv_ready wired");
 
     u8 rbuf[64];
     struct p9_transport t;
     TEST_EXPECT_EQ(p9_transport_init(&t, ops, rbuf, sizeof(rbuf)), 0, "transport init");
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
 
-    // A fresh (future) deadline routes through + clears the signal.
-    p9_transport_set_recv_deadline(&t, timer_now_ns() + 1000000000ull);
-    TEST_ASSERT(!p9_transport_recv_timed_out(&t), "freshly armed -> not yet timed out");
-
-    // A past deadline + empty s2c -> the recv times out promptly, and the signal
-    // surfaces through the recv_timed_out shim.
-    p9_transport_set_recv_deadline(&t, timer_now_ns());
+    bool empty   = p9_transport_recv_ready(&t, &pw);
+    bool filed   = (pw.list != NULL);
+    bool quiet   = !pw.ready;
+    const u8 frame[P9_HDR_LEN] = { P9_HDR_LEN, 0, 0, 0, P9_RCLUNK, 1, 0 };
+    long sent    = srvconn_server_send(cn, frame, (long)sizeof(frame));
+    bool woken   = pw.ready;
+    poll_waiter_list_unregister(&pw);
+    bool ready   = p9_transport_recv_ready(&t, NULL);
     u8 buf[16];
-    int n = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, -1, "recv on empty s2c past the deadline -> -1");
-    TEST_ASSERT(p9_transport_recv_timed_out(&t),
-                "recv_timed_out routes to srvconn_client_timed_out (true)");
+    int n        = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
+    bool drained = !p9_transport_recv_ready(&t, NULL);
+    srvconn_teardown(cn);
+    bool eof     = p9_transport_recv_ready(&t, NULL);
+    pw.magic = 0;
+
+    TEST_ASSERT(!empty && filed && quiet, "empty s2c: not ready, the hook filed with the sample");
+    TEST_ASSERT(sent == (long)sizeof(frame) && woken, "the server's reply wakes the hook");
+    TEST_ASSERT(ready, "bytes on s2c are ready");
+    TEST_EXPECT_EQ(n, (int)sizeof(frame), "and the recv reads them");
+    TEST_ASSERT(drained, "drained: not ready again");
+    TEST_ASSERT(eof, "the teardown's EOF is ready");
 
     (void)ops.close(ops.ctx);
     p9_transport_destroy(&t);
@@ -692,7 +707,7 @@ void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(vo
 // These two tests prove it END-TO-END over the PRODUCTION p9_srvconn_transport:
 // a real srvconn_teardown (the path a DeviceRemoved drives) latches s2c EOF, so
 // the kernel client's recv returns 0 -> -ENODEV reaches a real Loom consumer,
-// while a real deadline-elapsed recv returns -1 -> -EIO. The load-bearing claim
+// while a transport error (here a malformed frame) is -1 -> -EIO. The load-bearing claim
 // is that the production SrvConn ACTUALLY produces recv-0-on-teardown (not -1),
 // so the device-gone reason reaches the CQE consumer over the wire a driver's
 // Loom rides -- the gap the loopback's synthetic force_eof cannot close.
@@ -789,8 +804,8 @@ void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void) {
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
     // In-flight async op over the real transport: a Tfsync on the attach-bound
-    // root fid 0. No reply is staged, so it stays registered in c->inflight[]
-    // until device-gone completes it.
+    // root fid 0. No reply is staged, so it stays registered on its tag until
+    // device-gone completes it.
     g_sc_async.loom        = l;
     g_sc_async.user_data   = 0x5E3D00DFEEDULL;
     g_sc_async.last_result = 0x7fffffff;
@@ -810,8 +825,8 @@ void test_9p_srvconn_transport_devgone_posts_nodev_cqe(void) {
     // actually produces it over the wire a driver's Loom rides.
     srvconn_teardown(cn);
 
-    int pumped = p9_client_reader_pump_once(&g_sc_client);
-    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD (a control signal)");
+    int pumped = p9_client_reader_pump_ready(&g_sc_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "pump returns DEAD (a control signal)");
     TEST_ASSERT(g_sc_async.completed, "async op completed on the device-gone EOF");
     TEST_EXPECT_EQ((u64)(s64)g_sc_async.last_result, (u64)(s64)(-P9_E_NODEV),
         "device-gone CQE = -ENODEV (NOT -EIO) over the real srvconn");
@@ -854,15 +869,18 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
     int rc = p9_client_submit_async(&g_sc_client, &g_sc_async.rpc, sc_build_fsync, &fid);
     TEST_EXPECT_EQ(rc, 0, "submit_async(fsync) over srvconn -- op in flight");
 
-    // TRANSPORT ERROR (not device-gone): arm a PAST recv deadline. The next recv
-    // on the empty -- but NOT torn -- s2c times out and returns -1 (an error),
-    // NOT 0 (a clean EOF). The reader classifies this transport, not device-gone
-    // -> the in-flight op gets the generic -EIO. The contrast proves the SrvConn
-    // distinguishes the two reasons: the -ENODEV companion above is not an
-    // accident of the transport always returning 0.
-    srvconn_set_client_deadline(cn, timer_now_ns());   // already elapsed -> -1
-    int pumped = p9_client_reader_pump_once(&g_sc_client);
-    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump returns DEAD");
+    // TRANSPORT ERROR (not device-gone): the server sends a frame whose size is
+    // below the header's, on an s2c that is NOT torn. The stream is ready, the
+    // pump reads it, and the assembler rejects it with -1 (an error), NOT 0 (a
+    // clean EOF). The reader classifies this transport, not device-gone -> the
+    // in-flight op gets the generic -EIO. The contrast proves the reason rides
+    // the real wire: the -ENODEV companion above is not an accident of the
+    // transport always returning 0.
+    const u8 bad[P9_HDR_LEN] = { 3, 0, 0, 0, P9_RFSYNC, 0, 0 };   // size 3 < header
+    TEST_EXPECT_EQ(srvconn_server_send(cn, bad, (long)sizeof(bad)), (long)sizeof(bad),
+                   "the malformed frame is on s2c");
+    int pumped = p9_client_reader_pump_ready(&g_sc_client);
+    TEST_EXPECT_EQ(pumped, (int)P9_PUMP_DEAD, "pump returns DEAD");
     TEST_ASSERT(g_sc_async.completed, "async op completed on the transport error");
     TEST_EXPECT_EQ((u64)(s64)g_sc_async.last_result, (u64)(s64)(-P9_E_IO),
         "transport-error CQE = -EIO (NOT device-gone) over the real srvconn");
@@ -874,6 +892,387 @@ void test_9p_srvconn_transport_transport_err_posts_eio_cqe(void) {
     p9_srvconn_transport_destroy(&st);
     loom_unref(l);
     cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// ARCH 21.10, "A death hangs up": over a /srv connection the hangup is the
+// conn's teardown, so the server learns of the death now, not at the mount's
+// last close. The death is the explicit one -- no transport traffic decides
+// it -- and the control is the same conn while the session lives.
+void test_9p_srvconn_transport_death_tears_down_the_conn(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL, *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    struct p9_transport_ops ops;
+    int open_rc = sc_open_handshaked(cn, &st, &ops);
+    bool live = srvconn_is_live(cn);
+    p9_client_mark_devgone(&g_sc_client);
+    bool after = srvconn_is_live(cn);
+
+    p9_client_destroy(&g_sc_client);
+    (void)ops.close(ops.ctx);            // teardown (idempotent) + drop adapter ref
+    p9_srvconn_transport_destroy(&st);
+    cleanup_byte_mode_pair(server, client, conn_h);
+
+    TEST_EXPECT_EQ(open_rc, 0, "handshake -> OPEN over the real srvconn");
+    TEST_ASSERT(live, "control: the conn is live while the session is");
+    TEST_ASSERT(!after, "the session's death tore the conn down");
+}
+
+// =============================================================================
+// 9p_srvconn_transport.reader_unwinds_mid_frame_{death,stop} -- ARCH 8.8.1.1
+// (the seam-90 close). A blocking reader whose server has stopped inside a
+// frame unwinds at once for a death or a stop; the client keeps what the
+// reader read (c->rx_got), and the next reader resumes the frame byte-exact.
+// The test is the server: it sends the first MF_SPLIT bytes of a 160-byte
+// Rgetattr and stops, as any process serving a mount over pipes can. RED on
+// the superseded rule (block-through): killed, the reader did not return;
+// stopped, it did not park. RED on a reader that discards its partial frame
+// when it unwinds: rx_got reads 0, and the survivor reads the frame's tail as
+// a header, which kills the session. Every leg releases its reader before it
+// asserts: a reader the old rule holds is freed by the frame's tail.
+// =============================================================================
+
+#define MF_SPLIT 20u   // the header (7) + 13 bytes of the Rgetattr body
+
+static struct Proc   *g_mf_proc;
+static volatile u32   g_mf_run;      // 1 = calling, 2 = the call returned
+static volatile int   g_mf_rc;
+static struct p9_attr g_mf_attr;
+static volatile bool  g_mf_exited;
+
+static void mf_reader_entry(void) {
+    g_mf_run = 1;
+    g_mf_rc  = p9_client_getattr(&g_sc_client, 0, P9_GETATTR_BASIC, &g_mf_attr);
+    g_mf_run = 2;
+    test_kthread_park_terminal(&g_mf_exited);
+}
+
+struct mf_async {
+    struct p9_rpc rpc;            // MUST be first: on_complete casts rpc -> op
+    volatile bool done;
+    volatile int  status;
+};
+_Static_assert(__builtin_offsetof(struct mf_async, rpc) == 0,
+               "rpc must be first for the on_complete container cast");
+static struct mf_async g_mf_async;
+
+static void mf_async_complete(struct p9_rpc *rpc, int status,
+                              struct p9_dispatch_result *dr) {
+    struct mf_async *a = (struct mf_async *)rpc;
+    (void)dr;
+    a->status = status;
+    a->done   = true;
+}
+
+struct mf_rig {
+    struct Proc            *server, *client;
+    int                     svc_h, conn_h;
+    struct SrvConn         *cn;
+    struct p9_srvconn_transport st;
+    struct p9_transport_ops ops;
+    struct Thread          *reader;
+    u8                      reply[256];
+    int                     reply_len;
+    bool                    open, midframe, tail_sent;
+    u32                     stage;          // setup stages completed (MF_STAGES = all)
+    u32                     d_run, d_state; // the midframe premise's evidence
+    int                     d_rc;
+    bool                    d_active, d_ready, d_on_debug, d_on_any;
+};
+
+#define MF_STAGES 7u
+// The premise each stage establishes, named so a failing setup says which.
+static const char *const mf_premise[MF_STAGES] = {
+    "premise: a byte-mode SrvConn pair",
+    "premise: the client handshakes to OPEN over the real SrvConn",
+    "premise: the reader thread, in a Proc of its own",
+    "premise: the server took the reader's Tgetattr",
+    "premise: the canonical Rgetattr is longer than MF_SPLIT",
+    "premise: the server sent MF_SPLIT bytes of the reply",
+    "premise: the reader slept inside the frame, MF_SPLIT bytes read",
+};
+
+// One line of evidence when the reader was not found asleep mid-frame.
+static void mf_premise_evidence(const struct mf_rig *r) {
+    if (r->stage != MF_STAGES - 1u) return;
+    uart_puts("    [mf] run="); uart_putdec(r->d_run);
+    uart_puts(" rc="); uart_putdec((u64)(s64)r->d_rc);
+    uart_puts(" state="); uart_putdec(r->d_state);
+    uart_puts(" reader_active="); uart_putdec(r->d_active);
+    uart_puts(" recv_ready="); uart_putdec(r->d_ready);
+    uart_puts(" on_debug="); uart_putdec(r->d_on_debug);
+    uart_puts(" on_any="); uart_putdec(r->d_on_any);
+    uart_puts(" dead="); uart_putdec(g_sc_client.dead);
+    uart_puts("\n");
+}
+
+// Take one whole request off c2s, as the server reads it. Returns its length,
+// or -1 if none arrives within the yield budget.
+static int mf_take_request(struct SrvConn *cn, u8 *buf, size_t cap) {
+    size_t got = 0, want = P9_HDR_LEN;
+    u64 dl = timer_now_ns() + TEST_YIELD_BUDGET_NS;
+    while (got < want) {
+        long n = srvconn_server_recv(cn, buf + got, (long)(want - got));
+        if (n < 0) return -1;
+        got += (size_t)n;
+        if (want == P9_HDR_LEN && got == P9_HDR_LEN) {
+            u32 size = (u32)buf[0] | ((u32)buf[1] << 8) |
+                       ((u32)buf[2] << 16) | ((u32)buf[3] << 24);
+            if (size < P9_HDR_LEN || size > cap) return -1;
+            want = size;
+        }
+        if (got < want) {
+            if (timer_now_ns() >= dl) return -1;
+            sched();
+        }
+    }
+    return (int)got;
+}
+
+static void mf_wake(struct Thread *t) {
+    irq_state_t ws = spin_lock_irqsave(&t->wait_lock);
+    struct Rendez *rz = t->rendez_blocked_on;
+    if (rz) (void)wakeup(rz);
+    spin_unlock_irqrestore(&t->wait_lock, ws);
+}
+
+static bool mf_parked_on(struct Thread *t, struct Rendez *rz) {
+    return __atomic_load_n(&t->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+           t->rendez_blocked_on == rz;
+}
+
+// The rig: an OPEN client over a real SrvConn, a reader thread of its own Proc
+// in a sync getattr, and the server's first MF_SPLIT bytes of the reply read,
+// with the reader asleep in the transport recv for the rest.
+static void mf_setup(struct mf_rig *r) {
+    for (size_t i = 0; i < sizeof(*r); i++) ((u8 *)r)[i] = 0;
+    r->svc_h = r->conn_h = -1;
+    g_mf_run = 0; g_mf_rc = 0x7fffffff; g_mf_exited = false;
+    for (size_t i = 0; i < sizeof(g_mf_attr); i++) ((u8 *)&g_mf_attr)[i] = 0;
+    srv_registry_reset();
+    r->cn = open_byte_mode_pair(&r->server, &r->client, &r->svc_h, &r->conn_h);
+    if (!r->cn) return;
+    r->stage = 1;
+    r->open = sc_open_handshaked(r->cn, &r->st, &r->ops) == 0;
+    if (!r->open) return;
+    // The handshake's Tversion and Tattach are still in c2s (their replies
+    // were staged ahead): drain them, so the next request read is the reader's.
+    u8 hs[128];
+    while (srvconn_server_recv(r->cn, hs, (long)sizeof(hs)) > 0) {}
+    r->stage = 2;
+
+    g_mf_proc = proc_alloc();
+    if (!g_mf_proc) return;
+    r->reader = thread_create(g_mf_proc, mf_reader_entry);
+    if (!r->reader) return;
+    ready(r->reader);
+    r->stage = 3;
+
+    u8 req[64];
+    int len = mf_take_request(r->cn, req, sizeof(req));
+    if (len <= 0 || req[4] != P9_TGETATTR) return;
+    r->stage = 4;
+    r->reply_len = canonical_responder(NULL, req, (size_t)len, r->reply, sizeof(r->reply));
+    if (r->reply_len <= (int)MF_SPLIT) return;
+    r->stage = 5;
+    if (srvconn_server_send(r->cn, r->reply, (long)MF_SPLIT) != (long)MF_SPLIT) return;
+    r->stage = 6;
+    // c->rx_got is written when the frame reader returns, so mid-frame shows
+    // as the reader asleep in the transport with the ring drained.
+    TEST_YIELD_UNTIL_SOFT(g_mf_run == 1u &&
+                          __atomic_load_n(&r->reader->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING &&
+                          r->reader->rendez_blocked_on != NULL &&
+                          r->reader->rendez_blocked_on != &r->reader->debug_rendez &&
+                          !p9_transport_recv_ready(&g_sc_client.transport, NULL));
+    r->d_run      = g_mf_run;
+    r->d_rc       = g_mf_rc;
+    r->d_state    = (u32)__atomic_load_n(&r->reader->state, __ATOMIC_ACQUIRE);
+    r->d_active   = g_sc_client.reader_active;
+    r->d_ready    = p9_transport_recv_ready(&g_sc_client.transport, NULL);
+    r->d_on_debug = r->reader->rendez_blocked_on == &r->reader->debug_rendez;
+    r->d_on_any   = r->reader->rendez_blocked_on != NULL;
+    r->midframe = r->d_run == 1u && r->d_active && r->d_state == THREAD_SLEEPING &&
+                  r->d_on_any && !r->d_on_debug && !r->d_ready;
+    if (r->midframe) r->stage = MF_STAGES;
+}
+
+static void mf_send_tail(struct mf_rig *r) {
+    if (r->tail_sent || r->reply_len <= (int)MF_SPLIT) return;
+    (void)srvconn_server_send(r->cn, r->reply + MF_SPLIT,
+                              (long)(r->reply_len - (int)MF_SPLIT));
+    r->tail_sent = true;
+}
+
+// A fresh async op round-trips: the stream is in step after the resume.
+static void mf_fsync_roundtrip(struct mf_rig *r, bool *done, int *status) {
+    for (size_t i = 0; i < sizeof(g_mf_async); i++) ((u8 *)&g_mf_async)[i] = 0;
+    g_mf_async.status = 0x7fffffff;
+    g_mf_async.rpc.on_complete = mf_async_complete;
+    u32 fid = 0;
+    if (p9_client_submit_async(&g_sc_client, &g_mf_async.rpc, sc_build_fsync, &fid) != 0)
+        return;
+    u8 req[64], resp[64];
+    int len = mf_take_request(r->cn, req, sizeof(req));
+    int rl  = len > 0 ? canonical_responder(NULL, req, (size_t)len, resp, sizeof(resp)) : -1;
+    if (rl > 0) (void)srvconn_server_send(r->cn, resp, (long)rl);
+    (void)p9_client_reader_pump_ready(&g_sc_client);
+    *done   = g_mf_async.done;
+    *status = g_mf_async.status;
+    // Not completed: take it back before the client goes away.
+    if (!g_mf_async.done) p9_client_abandon_async(&g_sc_client, &g_mf_async.rpc);
+}
+
+// Release a reader the old rule still holds inside the frame (the frame's tail
+// frees it; a dead session, failing that), join it, and take the rig down. A
+// reader that never returns is left with its Proc and client rather than freed
+// under it.
+static void mf_teardown(struct mf_rig *r) {
+    if (r->reader && g_mf_run < 2u) {
+        mf_send_tail(r);
+        if (g_mf_proc) __atomic_store_n(&g_mf_proc->job_stop_req, 0, __ATOMIC_RELEASE);
+        (void)wakeup(&r->reader->debug_rendez);
+        TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
+        if (g_mf_run < 2u) {
+            p9_client_mark_devgone(&g_sc_client);
+            TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
+        }
+    }
+    if (r->reader && g_mf_run >= 2u) {
+        test_kthread_join_free(r->reader, &g_mf_exited);
+        r->reader = NULL;
+    }
+    if (r->reader) return;   // wedged: leak rather than free under it
+    if (g_mf_proc) {
+        g_mf_proc->state = PROC_STATE_ZOMBIE;
+        proc_free(g_mf_proc);
+        g_mf_proc = NULL;
+    }
+    if (!r->cn) return;
+    p9_client_destroy(&g_sc_client);
+    (void)r->ops.close(r->ops.ctx);
+    p9_srvconn_transport_destroy(&r->st);
+    cleanup_byte_mode_pair(r->server, r->client, r->conn_h);
+}
+
+void test_9p_srvconn_transport_reader_unwinds_mid_frame_death(void) {
+    struct mf_rig r;
+    mf_setup(&r);
+    bool premise   = r.stage == MF_STAGES;
+    mf_premise_evidence(&r);
+    bool returned  = false, role_free = false, live = false, fs_done = false;
+    int  rc = 0x7fffffff, pump_tail = -99, pump_flush = -99, fs_status = 0x7fffffff;
+    int  ftype = -1;
+    u16  foldtag = 0xffff, gtag = (u16)((u16)r.reply[5] | ((u16)r.reply[6] << 8));
+    u32  rx_unwound = 0xffffffffu, rx_end = 0xffffffffu;
+    if (premise) {
+        // The death, as the group-termination cascade delivers it.
+        __atomic_store_n(&g_mf_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
+        mf_wake(r.reader);
+        TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
+        returned = g_mf_run >= 2u;
+    }
+    if (returned) {
+        rc         = g_mf_rc;
+        rx_unwound = g_sc_client.rx_got;
+        role_free  = !g_sc_client.reader_active;
+        // The dying op's abandon: a Tflush for its tag (I-10: the tag stays
+        // reserved until the Rflush).
+        u8 freq[64];
+        int flen = mf_take_request(r.cn, freq, sizeof(freq));
+        if (flen >= (int)P9_HDR_LEN + 2) {
+            ftype   = freq[4];
+            foldtag = (u16)((u16)freq[7] | ((u16)freq[8] << 8));
+        }
+        // The server answers late: the rest of the original reply, then the
+        // Rflush. The waiters' pump resumes the partial frame (the late reply
+        // drains ownerless), then reads the Rflush, which frees both tags.
+        mf_send_tail(&r);
+        u8 rflush[16];
+        int rl = flen > 0 ? canonical_responder(NULL, freq, (size_t)flen, rflush, sizeof(rflush)) : -1;
+        if (rl > 0) (void)srvconn_server_send(r.cn, rflush, (long)rl);
+        pump_tail  = p9_client_reader_pump_ready(&g_sc_client);
+        pump_flush = p9_client_reader_pump_ready(&g_sc_client);
+        rx_end     = g_sc_client.rx_got;
+        mf_fsync_roundtrip(&r, &fs_done, &fs_status);
+        live = !g_sc_client.dead;
+    }
+    mf_teardown(&r);
+
+    TEST_ASSERT(premise, mf_premise[r.stage < MF_STAGES ? r.stage : 0]);
+    TEST_ASSERT(returned,
+        "a death unwinds a reader whose server stopped inside a frame (ARCH "
+        "8.8.1.1) -- it does not wait for the rest of the frame");
+    TEST_EXPECT_EQ((u64)(s64)rc, (u64)(s64)(-P9_E_IO), "the killed op returns -EIO (#845 abandon)");
+    TEST_EXPECT_EQ((u64)rx_unwound, (u64)MF_SPLIT,
+        "the client kept the partial frame: rx_got is the bytes the reader read");
+    TEST_ASSERT(role_free, "the departing reader released the role");
+    TEST_EXPECT_EQ((u64)ftype, (u64)P9_TFLUSH, "the abandon sent a Tflush");
+    TEST_EXPECT_EQ((u64)foldtag, (u64)gtag, "the Tflush names the killed op's tag");
+    TEST_EXPECT_EQ((u64)(s64)pump_tail, (u64)(s64)P9_PUMP_PROGRESS,
+        "the next reader resumed the partial frame and completed it");
+    TEST_EXPECT_EQ((u64)(s64)pump_flush, (u64)(s64)P9_PUMP_PROGRESS,
+        "the Rflush that follows parsed as a frame of its own (the stream in step)");
+    TEST_EXPECT_EQ((u64)rx_end, 0ull, "the frame boundary: nothing held");
+    TEST_ASSERT(fs_done, "a fresh op round-tripped after the resume");
+    TEST_EXPECT_EQ((u64)(s64)fs_status, 0ull, "and succeeded");
+    TEST_ASSERT(live, "the session lives");
+}
+
+void test_9p_srvconn_transport_reader_unwinds_mid_frame_stop(void) {
+    struct mf_rig r;
+    mf_setup(&r);
+    bool premise  = r.stage == MF_STAGES;
+    mf_premise_evidence(&r);
+    bool parked   = false, role_free = false, returned = false, live = false;
+    int  pump = -99, rc = 0x7fffffff;
+    u32  rx_parked = 0xffffffffu, rx_end = 0xffffffffu;
+    u64  qpath = 0, size = 0;
+    if (premise) {
+        // A job stop (^Z), as the tty fan delivers it to a sleeper.
+        __atomic_store_n(&g_mf_proc->job_stop_req, 1, __ATOMIC_RELEASE);
+        mf_wake(r.reader);
+        TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u ||
+                              mf_parked_on(r.reader, &r.reader->debug_rendez));
+        parked    = mf_parked_on(r.reader, &r.reader->debug_rendez);
+        rx_parked = g_sc_client.rx_got;
+        role_free = !g_sc_client.reader_active;
+        // The server finishes the frame while the reader is stopped; the
+        // waiters' pump resumes it and stores the reply into the stopped op.
+        mf_send_tail(&r);
+        pump   = p9_client_reader_pump_ready(&g_sc_client);
+        rx_end = g_sc_client.rx_got;
+        // The resume: the op returns the reply the pump stored.
+        __atomic_store_n(&g_mf_proc->job_stop_req, 0, __ATOMIC_RELEASE);
+        (void)wakeup(&r.reader->debug_rendez);
+        TEST_YIELD_UNTIL_SOFT(g_mf_run >= 2u);
+        returned = g_mf_run >= 2u;
+        rc       = g_mf_rc;
+        qpath    = g_mf_attr.qid.path;
+        size     = g_mf_attr.size;
+        live     = !g_sc_client.dead;
+    }
+    mf_teardown(&r);
+
+    TEST_ASSERT(premise, mf_premise[r.stage < MF_STAGES ? r.stage : 0]);
+    TEST_ASSERT(parked,
+        "a stop unwinds a reader whose server stopped inside a frame and parks "
+        "it role-free (ARCH 8.8.1.1) -- it does not wait for the rest of the frame");
+    TEST_EXPECT_EQ((u64)rx_parked, (u64)MF_SPLIT,
+        "the client kept the partial frame while the reader is stopped");
+    TEST_ASSERT(role_free, "the stopped reader released the role");
+    TEST_EXPECT_EQ((u64)(s64)pump, (u64)(s64)P9_PUMP_PROGRESS,
+        "a survivor resumed the partial frame and completed it");
+    TEST_EXPECT_EQ((u64)rx_end, 0ull, "the frame boundary: nothing held");
+    TEST_ASSERT(returned, "the resumed reader returned");
+    TEST_EXPECT_EQ((u64)(s64)rc, 0ull, "with the reply the survivor stored");
+    TEST_EXPECT_EQ(qpath, 55ull, "the reply byte-exact: the server's qid path");
+    TEST_EXPECT_EQ(size, 128ull, "the reply byte-exact: the server's size");
+    TEST_ASSERT(live, "the session lives");
 }
 
 // =============================================================================
@@ -1043,7 +1442,7 @@ static struct sc_cape_seen sc_attach_marked_9p_conn(bool mark_cape, bool mark_re
     if (!client) return r;
     client->principal_id = 0x1234u;
     client->primary_gid  = 0x5678u;
-    struct SrvConn *cn = srvconn_create(0, client->pid, false, 0, SRVCONN_MSIZE);
+    struct SrvConn *cn = srvconn_create(0, client->pid, PRINCIPAL_INVALID, false, 0, PRINCIPAL_INVALID, SRVCONN_MSIZE);
     if (cn) {
         if (mark_cape)   srvconn_set_cape(cn);
         if (mark_remote) srvconn_set_remote(cn);

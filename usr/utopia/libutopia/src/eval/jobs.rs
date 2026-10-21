@@ -336,6 +336,19 @@ impl JobTable {
     }
 }
 
+/// The `$status` a wait word yields: the code for an exit, 128 plus the signal
+/// for a death by note (130 for an interrupted job, 137 for a killed one, as
+/// bash). Every ut wait asks for the kernel's packed layout (docs/ERRORS.md "The
+/// wait status"); a job-control caller reads a stop report before it gets here.
+pub fn status_of_packed(st: i32) -> i32 {
+    let sig = st & 0x7f;
+    if sig != 0 && sig != 0x7f {
+        128 + sig
+    } else {
+        (st >> 8) & 0xff
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +511,18 @@ mod tests {
         assert!(t.take_done_notifications().is_empty());
         // Removing a non-existent spec is a no-op false.
         assert!(!t.remove(7));
+    }
+
+    #[test]
+    fn status_of_packed_reads_exits_and_deaths() {
+        assert_eq!(status_of_packed(0), 0);
+        assert_eq!(status_of_packed(0x100), 1);
+        assert_eq!(status_of_packed(0x700), 7);
+        assert_eq!(status_of_packed(0xff00), 255);
+        assert_eq!(status_of_packed(2), 130); // SIGINT
+        assert_eq!(status_of_packed(6), 134); // SIGABRT
+        assert_eq!(status_of_packed(7), 135); // SIGBUS -- not an exit of 7
+        assert_eq!(status_of_packed(9), 137); // SIGKILL
+        assert_eq!(status_of_packed(11), 139); // SIGSEGV
     }
 }

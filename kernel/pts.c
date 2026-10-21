@@ -807,9 +807,10 @@ static short pti_poll(struct Spoor *sp, short events, struct poll_waiter *pw) {
     return ret < 0 ? POLLERR : (short)ret;
 }
 
-static void pti_close(struct Spoor *sp) {
+static int pti_close(struct Spoor *sp) {
     if ((sp->flag & COPEN) && sp->aux) pti_watch_release(sp->aux);
     sp->aux = NULL;
+    return 0;
 }
 
 // Distinct private Dev identity; no attach/walk/register and no namespace path.

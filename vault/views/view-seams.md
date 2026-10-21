@@ -12,10 +12,16 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | seam | status | surface | opened by | tracker |
 |---|---|---|---|---|
+| [[seam-221-idle-pump-wake]] | closed | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
+| [[seam-223-pump-tail-starvation]] | closed | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
 | [[seam-80-pivot-orphan-mounts]] | closed | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-848-pivot-walk-race]] | closed | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-death-half]] | closed | sub-kernel-ninep-client | fnd-8c3-r1-f1 | task #90 |
+| [[seam-90-hung-server]] | closed | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
+| [[seam-9p-tag-block-on-full]] | closed | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
+| [[seam-close-flush-unbounded]] | closed | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-devcap-plain-caps-read]] | closed | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
+| [[seam-el0-irq-tail-no-notes]] | closed | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
 | [[seam-extinction-line-unserialized]] | closed | abi-boot-banner | chg-2026-08-16-cons-writer-set | unfiled -- yip to main 2026-08-16 |
 | [[seam-login-halcyond-fallback]] | closed | sub-stratum-session | fnd-kt1-r1-c12 | the KT-1 audit round 1 (C-F12); the d-1a deferral |
 | [[seam-loom-sqpoll-owner-unbackstopped]] | closed | sub-kernel-loom | chg-2026-08-16-loom-charge-ledger | unfiled -- yip to main 2026-08-16 |
@@ -25,9 +31,8 @@ Generated from note fields — do not edit between the markers
 | [[seam-scripture-invariant-mirror-drift]] | closed | inv-i32 | chg-2026-08-16-i32-scope-correction | unfiled -- yip to main 2026-08-16 |
 | [[seam-srv-registry-lifecycle]] | closed | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
 | [[seam-union-mount-walk]] | closed | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
+| [[seam-wb-close-flush-slot]] | closed | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 | [[seam-220-netd-listener-poll]] | open | sub-netd-server | chg-2026-06-18-net6b-poll-bridge | task #220 |
-| [[seam-221-idle-pump-wake]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r1-f3 | task #221 |
-| [[seam-223-pump-tail-starvation]] | open | sub-kernel-ninep-dev9p-poll | fnd-net6b-r2-f1 | task #223 |
 | [[seam-240-lo-redial]] | open | sub-netd-server | adt-net8d-r1 | task #240 |
 | [[seam-242-selftest-nonfatal]] | open | sub-netd-nic | adt-net8d-r1 | task #242 |
 | [[seam-350-async-eagain]] | open | sub-kernel-ninep-client | chg-2026-06-24-349-flow-control | task #350 |
@@ -39,13 +44,11 @@ Generated from note fields — do not edit between the markers
 | [[seam-841-mi-harness]] | open | sub-kernel-ninep-client | chg-2026-06-03-841-pipeline | standing (carried across #841/#845/#349/#375/#52-#53/Loom/8c-3/#90) |
 | [[seam-845-untrusted-server]] | open | sub-kernel-ninep-client | fnd-845-r1-f1 | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-87-disk-write-proof]] | open | sub-substrate-interactive, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #87 |
-| [[seam-90-hung-server]] | open | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-932-devsrv-readdir]] | open | sub-kernel-devsrv | fnd-957-r1-f2 | task #932 |
-| [[seam-9p-tag-block-on-full]] | open | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
+| [[seam-9p-async-share-poll-reserve]] | open | sub-kernel-ninep-client | chg-2026-10-07-tag-pool | tag-pool audit r1 F6 (Fable 5.1) |
 | [[seam-affinity-mask]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | a future SYS_SCHED_SETATTR |
 | [[seam-boot-banner-coupdate-list]] | open | sub-substrate-gates | chg-2026-08-16-boot-banner-mirror-set | yip to main 2026-08-16; sequel to main#244 |
 | [[seam-buddy-bulk-op]] | open | sub-kernel-mm-phys | chg-2026-05-04-p1d-phys-allocator | HT11.R1-F6 |
-| [[seam-close-flush-unbounded]] | open | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
 | [[seam-console-chrome-on-handoff]] | open | sub-tapestryd | fnd-kt1-r1-c11 | the KT-1 audit round 1 (C-F11) |
 | [[seam-cwg-parenthetical-refuted]] | open | sub-kernel-boot-sequence | chg-2026-08-16-boot-cwg-parenthetical | unfiled -- yip to main 2026-08-16 |
@@ -53,7 +56,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
 | [[seam-dtb-blob-internally-trusted]] | open | sub-kernel-dtb | chg-2026-08-02-boot-sweep |  |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
-| [[seam-el0-irq-tail-no-notes]] | open | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
+| [[seam-exited-threads-wait-for-a-create]] | open | sub-kernel-thread | chg-2026-10-20-in-proc-reap | OPEN-BUGS 2026-10-20 (the multi-threading overhaul, chunk C1) |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
 | [[seam-f-notif-unwired]] | open | sub-kernel-weft, sub-kernel-loom | chg-2026-08-02-async-sweep |  |
@@ -112,5 +115,4 @@ Generated from note fields — do not edit between the markers
 | [[seam-torpor-reclaim-uaccess]] | open | sub-kernel-torpor | chg-2026-07-04-torpor-lockfree | REVENANT R-5 F1 close; REVENANT section 9 |
 | [[seam-viv-tier2-frame]] | open | sub-kernel-syscall-abi, sub-kernel-vivarium | chg-2026-09-22-arch81-scripture | ARCH 8.1 prerequisite |
 | [[seam-warp-prove-unowned]] | open | sub-tapestryd | chg-2026-08-19-v3a-ring | V-3a coherent-ring doc pass, 2026-08-19 |
-| [[seam-wb-close-flush-slot]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 <!-- generated:end -->

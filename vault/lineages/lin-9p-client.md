@@ -48,7 +48,16 @@ debug stop — where the holotype refuted "delivery is whole-frame" (chunked
 rings ⇒ mid-frame sleeps are real) and forced the frame-atomic recv; the
 death twin of that mid-frame unwind, a pre-existing #811 latent, was
 user-voted and landed as **#90** (block-through, `reader_frame.tla`
-model-first).
+model-first). **loom-mc** (2026-10-06) moved the partial frame into the
+client (`c->rx_got`), and the **seam-90 close**
+([[chg-2026-10-06-seam90-close]], [[dec-2026-10-06-seam90-unwind-any-byte]])
+then let a death, a stop or a caught note unwind the reader at any byte:
+block-through's cost was a reader that any process serving a mount could hold.
+`reader_frame.tla` was rewritten with a server that may stop for good. The
+**tag pool** ([[chg-2026-10-07-tag-pool]]) then replaced the fixed 64-tag
+table: it grows to the 16-bit tag space, ops and async ops each have a share,
+a sync op waits for a tag instead of failing, and the reader applies every
+sync reply, so the client's `inflight[]` became the tag entry's owner.
 
 ## The standing lesson
 
@@ -61,8 +70,9 @@ Four, all load-bearing for any future change here:
    re-learned this on a different path.
 2. **`out_buf` is undefined across any `c->lock` drop** — retry from a
    private spill, never from the shared buffer.
-3. **"Whole-frame delivery" is false.** Delivery is chunked; frame-atomicity
-   of the reader is a designed property ([[haz-shared-stream-desync]]),
+3. **"Whole-frame delivery" is false.** Delivery is chunked; the stream's
+   integrity is a designed property ([[haz-shared-stream-desync]]: the
+   partial frame is the client's, and every reader exit leaves it there),
    never an assumption.
 4. **Two prosecutors, different blind spots.** Every P1 in this lineage was
    caught by exactly one of the pair (the self-audit missed 349-R1-F1 and

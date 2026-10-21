@@ -716,6 +716,11 @@ Invariants ==
 (* actions: Dispatch -> ReplyArrives -> PostCqe, with Reap draining the CQ  *)
 (* so a back-pressured completion always gets a slot. The CQ-full wait      *)
 (* (PostCqe disabled when full) is released by WF on Reap.                  *)
+(* WF on ReplyArrives presumes a thread READS the reply: the 9P client's    *)
+(* reader role, which this module does not model. On a client shared with   *)
+(* other Procs' synchronous calls the role can be held by one of them, and  *)
+(* it hands the role on only to a synchronous waiter; loom_role.tla         *)
+(* discharges the premise for a Loom ENTER's own pump.                      *)
 (***************************************************************************)
 Liveness ==
     /\ \A o \in Ops : WF_vars(Dispatch(o))

@@ -301,7 +301,13 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     // w.rendez.lock at entry; if WAKE already set w.awoken before we
     // got here, tsleep returns AWOKEN immediately (the "wakeup happened
     // between our register and our tsleep" race is benign).
-    int sleep_rc = tsleep(&w.rendez, torpor_cond_awoken, &w, deadline_ns);
+    //
+    // A caught note (ARCH 8.8.3) unwinds the wait only while w.awoken is clear
+    // (its arm tests the cond first). A WAKE counts a waiter only when wakeup()
+    // found it registered, and a registered waiter's resume reads awoken set,
+    // so a counted wake is never lost to EINTR; an uncounted mark leaves the
+    // walk going on to the next waiter.
+    int sleep_rc = tsleep_noteintr(&w.rendez, torpor_cond_awoken, &w, deadline_ns);
 
     // Re-take torpor_lock to unlink. Lifetime invariant: this MUST
     // happen on every return path that reached the bucket-publish
@@ -316,6 +322,7 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     spin_unlock(&torpor_lock);
 
     if (sleep_rc == TSLEEP_TIMEDOUT) return TORPOR_ERR_ETIMEDOUT;
+    if (sleep_rc == TSLEEP_NOTEINTR) return TORPOR_ERR_EINTR;
     // #811: tsleep may also return TSLEEP_INTR when the Proc is group-
     // terminating (the universal death-wake, ARCH §8.8.1). torpor maps it to
     // TORPOR_OK (same as AWOKEN) deliberately: SYS_TORPOR_WAIT returns through

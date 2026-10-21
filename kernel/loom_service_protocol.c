@@ -39,6 +39,13 @@ static int protocol_no_recv(void *ctx, u8 *buf, size_t len) {
     (void)ctx; (void)buf; (void)len; return -1;
 }
 static int protocol_no_close(void *ctx) { (void)ctx; return -1; }
+// Ready, because the next recv returns at once -- with the error above.
+static bool protocol_no_recv_ready(void *ctx, struct poll_waiter *pw) {
+    (void)ctx; (void)pw; return true;
+}
+static int protocol_no_recv_now(void *ctx, u8 *buf, size_t len) {
+    (void)ctx; (void)buf; (void)len; return -1;
+}
 
 static void protocol_refund(struct Loom *l, u32 pages) {
     struct AddrSpace *as = l->service_as;
@@ -124,7 +131,9 @@ int loom_private_protocol_prepare(struct Loom *l, struct loom_service_ref target
     p->send_storage = fault == 3 ? NULL : kmalloc(msize, KP_ZERO);
     if (!p->send_storage) { rc = -T_E_NOMEM; goto fail; }
     struct p9_transport_ops unused = { .send=protocol_no_send, .recv=protocol_no_recv,
-                                      .close=protocol_no_close, .ctx=NULL };
+                                      .close=protocol_no_close,
+                                      .recv_ready=protocol_no_recv_ready,
+                                      .recv_now=protocol_no_recv_now, .ctx=NULL };
     rc = p9_client_init_preallocated(&p->client, 0, msize, unused,
                                      p->recv_storage, msize, p->send_storage, msize);
     if (rc) { rc = -T_E_INVAL; goto fail; }

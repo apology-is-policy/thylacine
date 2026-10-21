@@ -2,7 +2,8 @@
 
 **Status: 8a AS-BUILT (8a-1 + 8a-2 landed + audited, 2026-07-15). §5b (Stage 8b)
 DESIGN ratified 2026-07-16, user-voted — scripture, no code yet. §5f (the birth
-hold, the launch-race closure) designed 2026-09-29, operator-voted.** This is the
+hold, the launch-race closure) designed 2026-09-29, operator-voted. §5g (the
+stay-stopped rule) designed 2026-09-30, operator-voted.** This is the
 Stage 8a-8b focused design pass mandated by `docs/GO-IDE-DESIGN.md §8` ("each
 kernel sub-stage opens with its own focused design pass + audit — it is a new
 privilege surface"). It designs the kernel half of the cross-boundary debugger:
@@ -91,8 +92,10 @@ loop with no blockers:
 
 > **I-39 (debug authority bounded, never bypasses memory-safety).** A Proc may
 > debug a target iff it can *name* `/proc/<pid>` in its namespace AND passes the
-> two-axis gate (**owner-covers-target** — same `principal_id` on the `0600` ctl
-> **AND** the target's capability set a subset of the caller's — **OR** the
+> two-axis gate (**owner-covers-target** — same `principal_id` on the `0600` ctl,
+> never `PRINCIPAL_NONE`, which owns no Proc but itself (IDENTITY-DESIGN's reserved
+> ids; Plan 9's `nonone`, operator vote 2026-10-06), **AND** the target's capability
+> set a subset of the caller's — **OR** the
 > capability axis `CAP_HOSTOWNER`/`CAP_DEBUG`), the I-26-analog (owner OR the host
 > owner OR the domain cap, as the kill gate is owner OR
 > `CAP_HOSTOWNER`/`CAP_KILL`) **with the owner axis narrowed by the
@@ -117,7 +120,12 @@ loop with no blockers:
 
 Enforcement: the two-axis gate at each debug read/write site (the
 `devctl_kernel_base_readable` pattern — atomic-load `caller->caps`, check owner
-OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); the stopped-only guard on mem/reg access; HW
+OR `CAP_HOSTOWNER`/`CAP_DEBUG`, NULL->deny); every `/proc` authority refusal --
+this gate, kproc, either seal, the I-26 kill gate, the owner-or-hostowner reads and
+the none wall -- answers `EACCES`, as `/ctl/kernel-base` and `/ctl/kstack` do, ERRORS.md's binding rule for a permission denial
+(2026-10-06; it answered a bare -1 before, which pouch and Go read as `EPERM`), while
+a target that is gone, not ALIVE, not stopped, or held by another ctl stays the
+generic -1; the stopped-only guard on mem/reg access; HW
 breakpoints (never software `BRK`) preserving I-12/I-36; the cross-Proc VA->PA
 walk confined to the target `pgtable_root` under the target `vma_lock`; the
 handle-lifetime-tied stop ownership. Validation: `specs/debug_stop.tla` (the
@@ -173,7 +181,9 @@ is the same principal"). Concretely, before this rule:
 - **Disclosure through identity-only surfaces.** `environ` gates on
   owner-or-`CAP_HOSTOWNER` (`devproc_extract_authorized`), `sched` and `imperium` on
   the same two axes (`devproc_owner_or_hostowner`), and `cmdline`, `ns`, `exe`,
-  `cwd` and `maps` are mode 0444 — none of them weighs caps. So an unelevated peer
+  `cwd` and `maps` are mode 0444 — none of them weighs caps, except that `maps`
+  prints a code row's addresses only for the target itself or a reader that
+  passes the debug gate (B-2b, `JIT-ON-WX-DESIGN.md` item 3). So an unelevated peer
   still READS an elevated same-principal target — `environ` being the one that
   matters, since it is where secrets live by convention. This rule governs
   *control*, not *disclosure*; disclosure is the seal's axis, and 3.2 below says
@@ -396,7 +406,9 @@ and each walk with its own read path (`environ`, `mem`, `regs`/`fpregs`/`kregs`,
 `kstack`, `wait`). `devproc_read_cb` refuses an image kind on the seal **before any
 formatter runs**, so `cmdline`, `ns`, `exe`, `cwd` and `maps` keep their ambient
 all-pids visibility for an *unsealed* Proc — this section does not withdraw that Plan 9
-posture — and hand out nothing for a sealed one. `environ`, the one image file with an
+posture — and hand out nothing for a sealed one. (One later carve-out: since the code
+aliases are placed at random, `maps` zeroes a code row's addresses for a reader without
+debug authority over the target, other than the target itself; `JIT-ON-WX-DESIGN.md` item 3.) `environ`, the one image file with an
 owner gate of its own, composes the two in `devproc_extract_authorized`. The mem and
 regs paths refuse the read direction. `devproc_owner_or_hostowner` keeps its old
 meaning and no seal, and gates `sched` and `imperium`.
@@ -504,10 +516,12 @@ load-bearing, not residual. (Corrected 2026-09-24, audit F3.)
 ### 3.3 The image join, and the debug taint (2026-09-24)
 
 > **Every guard on a Proc's IMAGE is evaluated over the whole set of Procs that
-> MAP that image.** Cover must cover every mapper; `NOTRACE` on any mapper
-> refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
-> mapper; and a Proc whose image was ever under debug control, or that is still
-> shared, never gains authority again.
+> MAP that image, or ever have.** Cover must cover every mapper; `NOTRACE` on any
+> mapper refuses; `NODUMP` on any mapper seals `mem` and `maps`; a seal stamps every
+> mapper; a holder that leaves the image leaves its caps and its seal and taint
+> bits in the image's record, which only exec's fresh space starts without; and a
+> Proc whose image was ever under debug control, or that is still shared, never
+> gains authority again.
 
 **The defect.** The cover rule, both seal bits and the taint are per-`Proc` facts.
 The thing they guard is not: the image — the memory, and the layout of it — lives
@@ -569,9 +583,11 @@ flag: a switch that cleared the taint would be the bypass.
 **Only the taint crosses fork; the seals deliberately do not, in either shape.**
 Under `RFMEM` the child maps the sealed bytes, so inheriting looks right — but the
 join already refuses every attach to it and every `mem`/`maps` read of it, by
-reading the parent's bit at the moment of the access (including for a child that
-was still mid-`rfork` when the parent sealed, which the stamp's traversal cannot
-see). Inheriting as well would buy nothing and cost something real: the bit is
+reading the parent's bit at the moment of the access while the parent holds the
+image (including for a child that was still mid-`rfork` when the parent sealed,
+which the stamp's traversal cannot see), and the image's record once the parent
+has left it (below; until 2026-10-08 nothing carried the bit past the parent's
+reap). Inheriting as well would buy nothing and cost something real: the bit is
 one-way, so it would outlive the sharing and leave the child permanently
 undebuggable after it execs onto an image the seal was never about. For a COW
 fork the child gets a private *copy*, and whether a copy of a secret is itself
@@ -579,6 +595,55 @@ secret is **decision A** — still open, and inheriting here would settle it by
 accident. The taint is the opposite case and must cross: after the child execs
 there is no sharing left for the join to read, so only a copied bit still carries
 the history.
+
+**The image records every holder that has left it (operator vote 2026-10-08,
+`dec-2026-10-08-image-holder-record`).** Authority over an image does not end with
+the Proc that held it. An `RFMEM` child, carved below its parent (I-2), keeps the
+parent's image after the parent is reaped, and from then on no mapper's word names
+what the parent held. Three things leaked that way: a code region, which is
+`CAP_JIT`'s authority (B-2b audit r2 closed that one alone, by counting code
+aliases); an MMIO, DMA or PCI BAR window, which is the I-34 allowance's (B-2b audit
+r3 F3: L-3 keeps a shared space's device mapped for the surviving sharer, so a
+capless same-principal peer covered the child and wrote the device through its
+`mem`); and a seal, since seals do not cross fork while the secret the seal kept is
+still in the shared bytes. So the `AddrSpace` keeps `caps_ever`, the OR of the caps
+of every holder that has left it, and `guards_ever`, the OR of those holders'
+`NODUMP`, `NOTRACE` and `DEBUG_TAINTED` bits, and the join ORs both in, sole mapper
+or not. Live holders, zombies included, are the walk; holders that have left are
+the record; the union is every Proc that has ever held the image.
+
+A holder leaves at exactly three points, and each records: its ZOMBIE transition
+(`proc_become_zombie_locked`), its exec onto a fresh space (`proc_exec_replace`'s
+swap), and `proc_free`. Only the first two carry a production departure: every
+`proc_free` that does not follow a reap frees a Proc that was never published (the
+`proc_alloc_in` and `rfork` rollbacks, whose caps are the parent's or none), so the
+third repeats an OR, or records a unit fixture's unlinked Proc. The first two run
+under `g_proc_table_lock`, the lock every join reads the record under, so the
+record needs no ordering argument of its own; and the
+ZOMBIE transition records before any reap can unlink the Proc, which closes the
+reap-window miss named below. A live Proc's caps only grow (every write is a
+`fetch_or`, and a legate scope ends by tearing its members down, not by clearing
+bits), so the caps a holder carries when it leaves are every cap it held.
+
+The record is never cleared: only exec's fresh space starts without one. The
+heritage is Linux's dumpability, which belongs to the address-space group rather
+than the task: released kernels keep it in `mm->flags` (`MMF_DUMPABLE`), and the
+current tree keeps it in a `task_exec_state` that `CLONE_VM` siblings share, a
+fork copies and exec replaces; `__ptrace_may_access` refuses a non-dumpable target
+without `CAP_SYS_PTRACE`. The record is STRICTER. Linux's bit is a current
+setting, not a history: `prctl(PR_SET_DUMPABLE, 1)` raises it again, and
+`commit_creds` lowers it whenever the effective or filesystem ids change or the
+permitted caps grow. Nothing clears the record here.
+
+The taint rides the record as well, and today it is redundant there: it is
+inherited at fork and stamped onto every mapper, so no holder can leave carrying a
+taint that a live mapper lacks. It is kept so that the record is the image's whole
+guard history, and `devproc.taint_outlives_its_holder` pins its arm. A COW child's space is a new
+one, so the record does not cross fork: whether a copy of a secret is itself
+secret is still decision A. The record replaced the code-alias count, because a
+code region's creator passed the `CAP_JIT` gate and is recorded when it leaves. The
+cost, voted: an orphan stays out of a lesser peer's reach for as long as it keeps
+the image, even after the aliases or the windows are gone.
 
 **What this does NOT close.**
 
@@ -590,14 +655,20 @@ the history.
   silent, unbounded-lifetime effect of an ungated syscall, and it is the price of
   the seal binding every door. A sealed parent also can no longer read its own
   vfork child's `mem`: surprising, harmless.
-- **A sealed Proc in the reap window** (unlinked, not yet freed) is missed by the
-  traversal, so its bit does not reach a live sharer's gate for those few
-  instructions. Closing it needs the unlink and the free to be one atom, which is
-  a lifecycle change and not this chunk.
+- **A sealed Proc in the reap window** (unlinked, not yet freed) was missed by the
+  traversal, so its bit did not reach a live sharer's gate for those few
+  instructions. CLOSED 2026-10-08 by the image's record: the ZOMBIE transition
+  writes the bit into the space before any unlink, and the join reads the record
+  sole mapper or not.
 - **The non-capability authority axes.** The join unions `proc_flags` but reads
   only the seal and taint bits from it, so §3.1's third bullet stands unchanged:
   cover still weighs one `caps` word and not the spawn perms, the I-34 allowance,
-  or the handle table.
+  or the handle table. The image's record weighs those only through the caps of
+  the Procs that held them: a code region's creator held `CAP_JIT` and an I-34
+  window's driver held `CAP_HW_CREATE`, so an orphan stays as far from a capless
+  peer as its creator was. Which device an allowance names is still not weighed: a
+  peer whose caps cover the driver's covers its orphan, exactly as it covers the
+  live driver.
 
 ## 4. 8a-1 — the software-checkpoint tier
 
@@ -635,19 +706,56 @@ The single structurally-safe park is the **EL0-return tail** (`vectors.S:328`
 sync + the `0x480` IRQ tail): zero locks held, `preempt_count==0` guaranteed, the
 clean saved EL0 frame at `kstack_base + KSTACK_TOTAL - 288`, and the DAIF-masked
 `eret` still ahead. A stop becomes a **new fourth leg** there, ordered AFTER
-`el0_return_die_check` (so death always wins over a stop) and beside
-`notes_deliver_at_el0_return`:
+`el0_return_die_check` (so death always wins over a stop) and BEFORE
+`notes_deliver_at_el0_return` (so a stop wins over a note, and a note that
+arrives during the stop is taken the moment the stop clears; §5g):
 
 ```
-tail: preempt_check_irq -> el0_return_die_check -> [notes] -> STOP-CHECK -> eret
+tail: preempt_check_irq -> el0_return_die_check -> STOP-CHECK -> [notes] -> eret
 ```
+
+Both vectors run every leg: since #964 (2026-10-12) the `0x480` IRQ tail
+branches into the synchronous one (`.Lel0_return`), so it delivers notes too
+(`seam-el0-irq-tail-no-notes`, closed). Plan 9 orders the checkpoint the same
+way (`notify` runs `procctl` before it looks at a note), and so does Linux, whose
+ptrace signal-delivery-stop comes before the handler frame. Until 2026-10-05 the
+notes leg ran first, so a note could end a thread with a stop pending, and a note
+latched during a stop waited for the next synchronous entry (OPEN-BUGS
+2026-09-30; the operator chose stop-first on 2026-10-05).
+
+During a stop pending at the stop check the debugger sees the interrupted
+context, not a handler frame. A note's frame is built after the stop clears, from
+the registers as the debugger left them, as Linux builds the handler frame after
+the signal-delivery-stop. A stop posted while the notes leg runs is taken like
+any other, at the thread's next checkpoint: the thread erets into the frame the
+leg built and parks in the IRQ tail of the stop's resched kick, after at most the
+handler's first instruction, so that stop shows the handler's context.
+
+**A stop the notes leg applies.** The notes leg can stop the thread itself: an
+uncaught `tty:susp` takes its default action there (`proc_job_stop_self`). The
+thread must park before it runs another EL0 instruction, so after an applied
+default stop the leg runs the die check and the stop check again, parks, and then
+looks at the queue again. Linux does the same: `get_signal` parks in
+`do_signal_stop` and then loops back for the next signal. Each pass starts
+afresh, so it reads the handler address and the saved `sp` as the stop left them
+(a peer's `SYS_NOTIFY`, a debugger's `regs` write). The re-passes count against
+the notes leg's discard budget (`NOTE_QUEUE_DEPTH` passes in all per tail), so the
+masked tail stays bounded and a peer that floods the queue cannot hold the CPU in
+it.
+
+**The mask guard follows the order.** KERNEL_EXIT erets under an inherited mask
+(#713, ARCH §8.12), so the last C call of each tail asserts that interrupts are
+masked: the notes leg, on the EL0-return tail both vectors take and on the birth
+tail of a held spawn (§5f). Until #964 the IRQ tail ended at the stop check. The birth tail runs the same order,
+with its birth park in the stop leg's place.
 
 On observing a pending stop, the thread transitions to `THREAD_SLEEPING` under
 its `wait_lock` (the `sleep()` discipline) and sleeps on a per-Proc *debugger
 rendez* — it does NOT proceed to `.Lexception_return`. Nothing parks at the tail
 today (all legs are check-and-die / check-and-deliver), so a stop is the first
 blocking tail path; it must park cleanly (sleep on a rendez, re-run the tail on
-resume), never spin.
+resume), never spin. It leaves the park only when its stop clears or its group
+dies: an interrupt waits (§5g).
 
 **The sharp line: a stop is NEVER observed inside `sleep()`/`tsleep()`.** That
 slot is the #811 death-interruptible check, whose job is to *unwind* the syscall
@@ -814,12 +922,43 @@ parking the thread (§4.2) instead of terminating the Proc. The kernel-side
   tail. Re-set `SPSR.SS` to keep stepping; clear `MDSCR.SS` to stop. Returning
   with `SPSR.SS=0` while `MDSCR.SS=1` is Active-pending = stuck-PC re-trap — the
   classic bug to avoid.
+- **A step that meets a note.** The tail runs its stop check before its notes
+  (§4.2), so a step-resume can leave the park with a note pending. A note with a
+  handler takes the step: the delivery clears `SPSR.SS` in the trapframe before
+  it saves the interrupted context or builds the handler frame, the eret takes the
+  EC `0x32` at once, and the step reports at the handler's first instruction,
+  before it runs. That is Linux's rule (arm64 `handle_signal`: "Step into the
+  signal handler if we are stepping"; `signal_delivered` then stops the tracee
+  with `ptrace_notify(SIGTRAP)`). It traps exactly once, because completing the
+  step clears `MDSCR.SS`. Because the clear comes first, the saved context never
+  carries `SS` either: the bit is the kernel's step machine, not the program's
+  state. So the return through `SYS_NOTED` or `rt_sigreturn` comes back with
+  `SPSR.SS=0`, and an outstanding step completes at the restored PC, as the step
+  of any other syscall completes at the instruction after it. Linux re-derives the
+  bit on every sigreturn for the same reason (`valid_user_regs` ->
+  `user_regs_reset_single_step`). A note whose action ends the thread ends the
+  step with it: the step write fails with `T_E_SRCH` (the target no longer lives),
+  never success. A note whose default action stops the thread (an uncaught `tty:susp`) parks it
+  before the step runs (§4.2), and the step stays outstanding until the job stop
+  ends, as a step of a job-stopped target does: neither stop owner can run the
+  other's stop (`specs/pty_stop.tla` `StopCompatI39`).
 - **Step-over-breakpoint** (mandatory): a thread resuming at a breakpointed PC
   re-traps forever. On resume, if the PC matches an armed breakpoint, disable
   that bp's `E` bit, single-step one instruction, re-enable it (the Linux
   `try_step_suspended_breakpoints` + `suspended_step` machinery). Watchpoints are
   disabled across the step (the kernel can trigger them via an unprivileged
   access).
+- **A step belongs to its slot.** A whole-Proc stop supersedes a pending step
+  (8a-2c F1), and so do a `detach` and the ctl-fd close's release: each clears
+  every thread's armed step and step-over (`proc_debug_cancel_steps_locked`), so
+  the next attacher never meets a stop it did not ask for. The step's wait for
+  the re-stop ends when the slot is released (a `detach` from another thread of
+  the debugger; the writer holds its own ctl fd for the whole write, so a close
+  cannot land mid-step), when the target is gone, and when its group is dying
+  (§5g). Only the re-stop completes the step: a wait that ends any other way
+  fails the write with `T_E_SRCH`, never success -- the target no longer lives,
+  or the caller no longer holds it, as ptrace(2) answers `ESRCH` for a tracee
+  that does not exist or is not traced by the caller.
 - Note the Cortex-A76 erratum 1463225 (step-into-SVC) for real hardware
   (Lazarus); QEMU/HVF is unaffected.
 
@@ -990,7 +1129,9 @@ death-check, in the death-wins order:
    `rendez_blocked_on = &debug_rendez`, re-check the stop flag, and sleep on
    `debug_rendez` if it is still set (else fall through — the debugger already
    resumed). The debugger's confirm-walk takes the *same* `wait_lock`, so it
-   confirms only a sleeper that has genuinely re-parked — no lost stop.
+   confirms only a sleeper that has genuinely re-parked — no lost stop. The
+   park sleeps death-only: group death ends it, a latched interrupt does not
+   (§5g).
 3. On resume (`start` clears the stop flag + wakes `debug_rendez`), the sleeper
    re-registers on its **original** rendez (the existing `sleep()`
    register-then-observe), re-checks its original condition, and re-blocks or
@@ -1138,18 +1279,22 @@ mechanisms:
    `client_handoff_reader_locked`s the role, parks role-free
    (`proc_debug_stop_sleeper_park`, with `stop_unwinds` cleared so it parks), and
    re-elects on resume (the re-loop's `rpc->done` may already be true — a survivor
-   demuxed the reply while stopped). Every OTHER sleep (both flags clear —
-   Go's sysmon `nanosleep`, a futex wait) parks in place (the 8c-2 default,
-   preserving the syscall).
+   demuxed the reply while stopped). Every other sleep outside the 9P client
+   (both flags clear — Go's sysmon `nanosleep`, a futex wait) parks in place
+   (the 8c-2 default, preserving the syscall). Every other sleep INSIDE the
+   client unwinds the same way since the 2026-09-30 amendment below.
 2. **A top-of-loop stop guard** in `client_wait`: a debug-stopped thread reaching
    `client_wait` fresh (a mid-syscall stop) parks PROMPTLY (never elects); it
    re-hands-off first if it was handed `be_reader` (the handed-then-stopped race).
-3. **The handoff skips debug-stopped owners** (`p9_rpc.owner` = the submitting
-   Proc): the released role must land on a SURVIVOR, not bounce to another stopped
-   sibling — a stopped sibling's thread has parked, so its `rpc->rendez` has no
-   waiter and the `be_reader` wakeup would be a no-op (a lost role). If no survivor
-   op is pending, the handoff finds nothing → the role is dropped (`reader_active`
-   is already false) → a future survivor op self-elects.
+3. **The handoff skips an op whose thread is parked for a stop.** The released
+   role must land on a SURVIVOR, not bounce to a stopped sibling — a stopped
+   sibling's thread has parked, so its `rpc->rendez` has no waiter and the
+   `be_reader` wakeup would be a no-op (a lost role). As built at 8c-3 the handoff
+   read the owner's stop flags (`p9_rpc.owner`, the submitting Proc); since the
+   2026-09-30 amendment it reads `rpc->stop_parked`, which the parked thread sets
+   itself under `c->lock`. If no survivor op is pending, the handoff finds nothing
+   → the role is dropped (`reader_active` is already false) → a future op
+   self-elects, and so does the stopped op's own thread when it resumes.
 
 4. **F2 — the role-release covers ALL FOUR `reader_active` sites.** Centralizing
    the flags in `reader_recv_frame` gives the block-through to every caller, and
@@ -1159,11 +1304,13 @@ mechanisms:
    #375 discipline, since `client_debug_stop_park` drops `c->lock`) +
    `client_drain_until_free_tag` PARK a stopped sender at their loop top — WITHOUT
    this a stop-unwound self-pump drains nothing, so `c2s` never frees, every send
-   EAGAINs, the Proc never fully-stops, and the debugger's stop HANGS; and
-   `p9_client_reader_pump_once` skips mark_dead on a stop. Only
-   `p9_client_reader_pump_once_deadline` has no guard, justified kproc-only (its
-   sole callers — `dev9p_poll.c` + `loom.c` SQPOLL — have `t->proc == NULL`, so
-   the detour is immune).
+   EAGAINs, the Proc never fully-stops, and the debugger's stop HANGS. The
+   fourth site is the waiters' pump, `p9_client_reader_pump_ready` (LOOM.md 8.6,
+   as built 2026-10-06; it replaced `pump_once` and the kproc-only
+   `pump_once_deadline`), which serves EL0 and kproc callers alike. It reads
+   only what is waiting and never sleeps in a recv, so no stop or death unwinds
+   it, and it leaves the stop latches alone: one left set would unwind the
+   thread's next sleep, whatever that sleep waits for.
 
 **Why frame-atomic (the 8c-3 holotype F1 [P1]).** The FIRST fix (set `stop_unwinds`
 for the whole recv, a plain unwind) was WRONG: delivery is CHUNKED, so a stop can
@@ -1188,10 +1335,63 @@ in the recv loop, the top-of-loop, and the role-free park; a death still unwinds
 mid-frame block-through via the die-check below the detour). NO new §28 invariant
 and NO spec change (the reader-role is below the `9p_client.tla` +
 `debug_stop.tla` models, both re-verified GREEN; validated by the focused 8c-3
-Fable holotype + the `9p_client.handoff_skips_debug_stopped_owner` regression +
+Fable holotype + the `9p_client.handoff_skips_debug_stopped_owner` regression (since the
+2026-09-30 amendment `9p_client.handoff_skips_stop_parked`) +
 the SMP gate; the block-through decision lives in the sched detour, kproc-immune,
 so it has no deterministic kproc regression — the SMP gate + reasoning are its
 durable coverage).
+
+**The waiters-and-stops amendment (2026-09-30, as-built).** 8c-3 gave the
+unwind to the reader only. A thread waiting in the client for someone else's
+reading — the non-reader sleep in `client_wait`, a flush(5) wait, a #349
+send-list park — still parked IN PLACE inside that sleep, where the client
+cannot see it. Two defects followed:
+
+- **A stopped waiter resumed with no reader.** If the reader departed during the
+  stop, the handoff skipped the stopped op and, with nothing else pending,
+  dropped the role. On resume the thread re-checked only its own sleep condition
+  (`done`, `dead`, `be_reader`, `flushed`), all false, and slept on with its
+  reply unread: it never re-ran the election, though it was itself the survivor
+  mechanism 3 counted on.
+- **A stop snapshot went stale.** The handoff and the owed-tag check
+  (`client_tag_owed_locked`, flush(5)) read the owner's stop flags once. An owner
+  whose stop cleared and who was stopped again before it ran stayed inside the
+  nested park: the handoff designated it (a wake that landed on nothing), and a
+  tag drainer that counted on its dispatch waited out the new stop.
+
+Every client sleep now takes the reader's treatment. `stop_unwinds` is set
+around it, so a stop unwinds the sleep (`SLEEP_INTR`, with `stop_unwound`
+latched) instead of parking in place, and the client's own loop, which already
+checks `client_stop_pending`, releases any designation and parks the thread
+role-free through `client_debug_stop_park`. That park sets `rpc->stop_parked`
+under `c->lock` for its whole duration. The handoff and the owed-tag check read
+that flag, which is exact under the lock, and no longer read stop flags at all.
+On resume the loop re-runs, so a stopped waiter re-elects itself when nobody
+reads. The syscall is still preserved: the thread parks mid-call in the client
+and continues from there. Plan 9 has no counterpart because it stops a process
+only at `procctl` points, never inside a kernel sleep; the client's park is the
+nearest thing to one, a point where the client knows the thread is stopped.
+
+**The seam-90 amendment (2026-10-06, as-built; ARCHITECTURE 8.8.1.1).** The
+frame-atomic design above is retired: a stop unwinds the elected reader at any
+byte. The reason it existed is gone. Since `loom-mc` the partial frame is the
+client's (`c->rx_got`), and every exit of the frame reader leaves the bytes it
+has read for the next reader, which resumes there. So the FIRST fix that "Why
+frame-atomic" rejects (set `stop_unwinds` for the whole recv, a plain unwind) is
+now the design: `reader_recv_frame` sets `stop_unwinds` with `stop_no_park` at
+entry and clears both at exit, and `do_reader_recv_frame` no longer touches the
+latch. Mechanism 0's block-through, the detour's fall-through for
+`stop_no_park` with `stop_unwinds` clear, is deleted, and so is
+`thread_reader_blocks_death`, which applied the same rule to death and to a
+caught note. `stop_no_park` keeps one job: it marks the reader's recv, so the
+caught arm latches `note_unwound` for it and the pipe read knows whose wait it
+is. Mechanisms 1 to 3 and the waiters-and-stops amendment are unchanged: a
+mid-frame stop takes exactly the path a boundary stop took, and the reader
+that resumes after it may be the stopped thread itself, a survivor, or the
+waiters' pump. Block-through was bounded only by the server: a reader whose
+server stopped inside a frame kept waiting for the rest, so its Proc never
+finished stopping (a debugger's stop or a `^Z` did not take) until the server
+died (`seam-90-hung-server`, closed).
 
 ### 5c.7 As-built — the #95 focus-thread (multi-M breakpoint inspect)
 
@@ -1335,10 +1535,11 @@ machine and its composition with the death path. Target invariants:
 
 - **NoLostStop** — a stop request set before a thread reaches the checkpoint is
   observed there (register-then-observe at the tail; the I-9 shape).
-- **DeathWinsOverStop** — a thread with `group_exit_msg` set (or the LS-5c
-  terminate latch) DIES rather than parking on the debugger rendez; a
-  concurrently-flagged death during a stop-resume still terminates the thread
-  (the tail's die-check precedes the stop-check, and resume re-runs it).
+- **DeathWinsOverStop** — a thread with `group_exit_msg` set DIES rather than
+  parking on the debugger rendez; a concurrently-flagged death during a
+  stop-resume still terminates the thread (the tail's die-check precedes the
+  stop-check, and resume re-runs it). A latched interrupt is not death: it waits
+  until the stop clears (§5g).
 - **NoEL0AfterStopped** — a stopped thread executes no EL0 instruction until
   resumed (it parks before the `eret`), and executes exactly one on `step`.
 - **ExactlyOnceResume** — a resume wakes each parked thread exactly once; a
@@ -1369,8 +1570,11 @@ machine and its composition with the death path. Target invariants:
 - **NoEretIntoDeath** (§5f) — neither park proceeds to EL0 once a group
   termination is published: an action property on both parks' proceed step,
   which re-reads death after its wake condition.
-- **LatchedHeldChildEnds** (§5f) — a held child with an interrupt latched
-  eventually ends, unless it is released first.
+- **ParkEndsOnlyInDeath** (§5g) — a thread leaves a park for `dead` only once
+  group death is published: a latched interrupt ends no parked thread.
+  (§5f's LatchedHeldChildEnds is retired with it.)
+- **SpawnReturnsAfterBirth** (§5g) — a held spawn returns only once its child
+  is released or dead: a latch on the spawner does not end the birth wait.
 
 Buggy cfgs (each a minimal counterexample on its named invariant): `park_before_die`
 (stop-check ordered before the die-check -> DeathWinsOverStop), `lost_stop`
@@ -1387,7 +1591,12 @@ adds `held_runs_free`, `convert_clears_first`, `no_death_recheck` and
 (-> EventuallyHoldResolved), `birth_wait_unwoken` (-> BirthWaitReleases),
 `no_death_recheck_tail` (-> NoEretIntoDeath: the tail park's twin of the death
 re-check the held cfg found), and `birth_latch_rerun` (-> LatchedHeldChildEnds:
-the masked re-run audit round 1 found).
+the masked re-run audit round 1 found; both retired by §5g). The stay-stopped
+rule (§5g) adds `tail_latch_erets` (the tail's park leaves on a latch -> NoLostStop),
+`latch_ends_stop` (a park ends its Thread on a latch ->
+ParkEndsOnlyInDeath) and `spawner_latch_returns` (the held spawn's birth wait
+returns on the spawner's latch -> SpawnReturnsAfterBirth). `specs/check-debug-stop.sh`
+runs every cfg and judges each buggy one by the name of the property TLC reports.
 
 The model pins the impl sites (the tail stop-leg, the delivery cascade, the
 ctl-fd-close resume); `specs/SPEC-TO-CODE.md` records the action<->site mapping.
@@ -1440,8 +1649,9 @@ composition is load-bearing and prosecuted hard:
 
 - **Death always wins.** The tail orders the stop-check AFTER
   `el0_return_die_check`, and a resume re-runs the die-check after unpark, so a
-  target that is group-terminated (or LS-5c interrupt-terminated) while stopped
-  DIES rather than resuming to EL0 (`DeathWinsOverStop`).
+  target that is group-terminated while stopped DIES rather than resuming to EL0
+  (`DeathWinsOverStop`). An interrupt to a stopped target waits for the stop to
+  clear (§5g).
 - **A stop never unwinds a syscall.** Unlike death (`SLEEP_INTR`), a stop is
   observed only at the EL0-return tail, never inside `sleep()`/`tsleep()` — so a
   syscall in progress completes (or the thread stops at its next checkpoint),
@@ -1714,9 +1924,10 @@ any thread of a multi-threaded spawner can consume).
 
 1. **The ask.** `struct sys_spawn_args` claims its forward-compat slot at offset
    100 as `debug_flags`, with `SPAWN_DEBUG_HELD = 1 << 0`. Unknown bits are
-   refused (-1), the `_pad_envp` rationale. The struct stays 104 bytes, and every
-   caller that zero-fills it is byte-identical. The slot was the last one, so the
-   next field grows the struct, with every mirror. The ask is ungated: a hold
+   refused (-1), the unknown-bits rule. The struct stays 104 bytes, and every
+   caller that zero-fills it is byte-identical. The slot was the last one; the
+   record has since extended by tails that its `ext_flags` word announces
+   (STALK-DESIGN 4.3, the spawned child's cwd), never by growing. The ask is ungated: a hold
    restricts only the spawner's own child and confers no access to it. Reading
    or controlling the child still takes an attach through the I-39 gate.
 
@@ -1733,7 +1944,8 @@ any thread of a multi-threaded spawner can consume).
    list, or has had its hold released. The spawner parks on its own
    `child_waiters` exactly as the vfork park does (`vfork_await_release`: the
    waiter registered under `g_proc_table_lock` atomically with the scan that
-   found the child still unborn; #811 unwinds it). The child's death wakes it for
+   found the child still unborn; #811 unwinds it, for group death alone since
+   §5g). The child's death wakes it for
    free (`proc_become_zombie_locked`), and every write to the mark wakes it too,
    under the lock, so no path out of UNBORN can strand the spawner. When the pid
    comes back, the child's image is loaded and the child has executed nothing,
@@ -1757,7 +1969,8 @@ any thread of a multi-threaded spawner can consume).
    `.Lexception_return`. It builds the initial EL0 frame below its current stack
    (ELR = the entry, SPSR = EL0t with DAIF clear, SP_EL0 = the user stack, every
    GPR zero), masks, and runs a **birth tail**: the ordinary EL0-return sequence
-   (preempt check, die-check, note delivery) and then the park. The park
+   with the park as its stop leg (preempt check, die-check, the park, then note
+   delivery, §4.2). The park
    publishes `debug_trapframe` as that frame, so `regs`, `step` and `hwbreak`
    address the first instruction. It marks the child PARKED and wakes the
    spawner under the lock, then sleeps on its own `debug_rendez` while the hold
@@ -1766,9 +1979,10 @@ any thread of a multi-threaded spawner can consume).
    takes effect. A non-held spawn is byte-identical: `userland_enter` does not
    change.
 
-5. **The hold is not a stop owner.** `proc_stop_requested` stays the debug and
-   job flags only, deliberately. That disjunction drives the `sleep()` detour
-   and the 9P reader handoff. If the hold were in it, the unborn thread would park
+5. **The hold is not a stop owner.** `proc_stop_requested` reads the debug and
+   job flags (and, since §5g, the group's death), never the hold, deliberately.
+   That predicate drives the `sleep()` detour and the 9P client's stop park
+   (`client_stop_pending`). If the hold were in it, the unborn thread would park
    inside `exec_setup` wherever it slept, with no EL0 frame, and the spawner's
    birth wait would never be released. The hold is read in one place, the birth
    park, where the thread holds no lock and no reader role. So R2-F2's hazard (a
@@ -1801,10 +2015,8 @@ any thread of a multi-threaded spawner can consume).
    and the thread dies without reaching EL0. The first draft had only the first
    check. The spec's clean held cfg found the gap. The tail's stop park runs the
    same loop, so the re-check closes the same window for an ordinary stopped
-   thread. The park's other way out, for a latched interrupt, reads death once
-   more too: `thread_die_pending` also reports group death, so a kill landing
-   after the first check would otherwise send a stopped thread back to EL0 on
-   that exit (audit F8).
+   thread. The park had one more way out, for a latched interrupt, which
+   re-read death for the same reason (audit F8); §5g removed it.
 
 9. **The orphan rule.** When the spawner becomes a ZOMBIE
    (`proc_become_zombie_locked`, beside the PTY-1f orphan rule), every ALIVE child
@@ -1813,25 +2025,15 @@ any thread of a multi-threaded spawner can consume).
    debugger that attached but did not stop has not taken the hold over, so that
    child dies with its spawner too.
 
-10. **A latched interrupt at the birth park.** The ordinary stop park leaves the
-    park when a terminate-disposition `interrupt` is latched (LS-5c), so that the
-    thread erets and resolves it at its next checkpoint. A held child must not run
-    an instruction to do that, and it need not. The latch is armed only for a note
-    that nothing catches, in a Proc that does not read its own notes, and an
-    ignored note is dropped before it can arm it; only the child's own calls could
-    install a handler or open its notes afterwards, and a held child has made
-    none. So the note can only take its default disposition, and the birth park
-    applies it itself. (Both parks act on a latch only in a family the thread has
-    not masked, and a held child's thread has masked nothing: a native parent's
-    child starts with an empty mask, and no Linux call reaches the held spawn.) The child exits with the note's name, as note
-    delivery's terminate arm would report it, and the birth tail is
-    straight-line: the park returns only to proceed. The first draft re-ran the
-    checkpoint in place instead (die-check, note delivery, park). That relied on
-    note delivery consuming the latch, and delivery declines a frame whose SP it
-    does not trust, which a debugger's `regs` write can supply. The re-run then
-    spun with interrupts masked, taking its CPU for good, and with it every
-    thread queued on that CPU; at `-smp 1`, the machine (audit F1, 2026-09-29).
-    `birth_latch_rerun` keeps that design, and `birth_latch_erets` the tail's.
+10. **A latched interrupt at the birth park.** The park ignores it, as every stop
+    park does since §5g: the held child stays held, and meets the note as it
+    leaves the park, once it is released, or converted and resumed (the birth
+    tail's notes leg follows the park). Until then the
+    birth park ended the child with the note's name (`birth_park_terminate`),
+    and the first draft of that re-ran the checkpoint in place, which spun with
+    interrupts masked once note delivery declined a debugger-written stack
+    pointer: the CPU was lost for good, and at `-smp 1` the machine (audit F1,
+    2026-09-29).
 
 **The ambush side.** go-thylacine grows `SysProcAttr{DebugHeld bool}`, which sets
 `debug_flags`. ambush's native `Launch` sets it and orders its verbs `attach`,
@@ -1851,15 +2053,10 @@ debugger.
 - **BirthWaitReleases**: a held spawn eventually returns, because the child
   parks, dies or is released.
 - **NoEretIntoDeath**: neither park proceeds to EL0 once a group termination is
-  published. It is an action property on both parks' proceed step. The tail
-  park's other exit, for a latched interrupt, re-reads death in the code (audit
-  F8) and is outside the model, because what a stopped thread owes a latched
-  interrupt is still open (OPEN-BUGS, 2026-09-29).
-- **LatchedHeldChildEnds**: a held child with an interrupt latched eventually
-  ends, unless it is released first. The birth park's latch exit is in the
-  model, and it ends the child. The model's latch is one the park can see: a
-  latch in a masked family would wait, as it does at the tail, but a held
-  child's thread masks nothing (point 10).
+  published. It is an action property on both parks' proceed step, and since
+  §5g a park has no other exit.
+- **LatchedHeldChildEnds** was retired by §5g: a held child with an interrupt
+  latched stays held.
 
 `StopImpliesOwned` is untouched. The hold is not a debug stop, and the
 fully-stopped predicate still requires `debug_stop_req`, so no stopped-only read
@@ -1867,7 +2064,7 @@ or write reaches a held child before a debugger's stop.
 
 **The spec.** `debug_stop.tla` gains the hold, the birth park, conversion,
 release, the orphan rule, the spawner's birth wait and an interrupt latched on
-the held child, with eight buggy cfgs:
+the held child, with eight buggy cfgs (§5g retired one):
 
 - `held_runs_free`: the birth park ignores the hold (NoEL0WhileHeld).
 - `convert_clears_first`: conversion clears the hold before it sets the stop, so
@@ -1880,11 +2077,11 @@ the held child, with eight buggy cfgs:
   instructions (NoEL0WhileHeld).
 - `no_death_recheck_tail`: the same omission at the tail's stop park, where a
   stopped thread erets into a dying group (NoEretIntoDeath).
-- `birth_latch_erets`: the birth park's latch leg erets as the tail's does, so
-  an interrupt runs a held child (NoEL0WhileHeld).
-- `birth_latch_rerun`: the latch leg re-runs the checkpoint in place, and once
-  note delivery declines a debugger-written SP the re-run never ends
-  (LatchedHeldChildEnds; audit F1).
+- `birth_latch_erets`: the birth park's latch leg erets as the tail's did before
+  §5g, so an interrupt runs a held child (NoEL0WhileHeld).
+- `birth_latch_rerun`, retired by §5g with LatchedHeldChildEnds: the latch leg
+  re-ran the checkpoint in place, and once note delivery declined a
+  debugger-written SP the re-run never ended (audit F1).
 
 **Tests.** Kernel tests cover the ask's validation, the mark and its lock-held
 writes, the birth wait's predicate and wake sites, conversion, release, the
@@ -1899,3 +2096,247 @@ lands.
 **Scope.** Only a held spawn changes: `userland_enter`, `thread_user_trampoline`
 and every other spawn are unchanged. No new ctl verb, no `/ctl/procs` change,
 and no syscall number.
+
+## 5g. A stopped thread and an interrupt — the stay-stopped rule
+
+Designed 2026-09-30 (operator-voted: **a stopped thread stays stopped**, and only
+`kill` ends it). It closes two defects found while the birth hold was built
+(§5f), both older than it (OPEN-BUGS, 2026-09-29).
+
+**The gap.** A note whose default action is to terminate, in the interrupt, tty or
+pipe family (`interrupt`, `tty:quit`, `tty:hup`, `pipe`), arms a terminate latch
+when nothing in the Proc catches it and the Proc does not read its own notes
+(LS-5c, ARCHITECTURE §8.8.2; `pipe` since #237). Every sleep reads an armed latch,
+in a family the thread has not masked, as a reason to unwind
+(`thread_die_pending`). Five waits unwound for it, and none of them should:
+
+- **The tail's stop park** left the park on the latch, so that the thread could
+  eret and take the note at its next checkpoint. Only the synchronous and birth
+  tails delivered notes then (`seam-el0-irq-tail-no-notes`, closed by #964 on
+  2026-10-12), and a compute-bound thread
+  re-entered only through the IRQ tail, whose stop check sent it into the park and
+  straight back out. So a debug- or job-stopped thread that was sent an interrupt
+  ran at EL0 with its stop still set. It never settled (§5e), so a debugger could
+  neither read nor write it.
+- **The nested sleeper park** (§5c.2) returned `SLEEP_INTR` on the latch. A
+  stopped thread blocked in a syscall unwound and took the note while its Proc
+  was stopped.
+- **The birth park** ended a held child on the latch (§5f point 10).
+- **The vfork suspend** and **the held spawn's birth wait** (§5f point 3)
+  returned early on the caller's own latch. The latch is a wake hint, not a
+  commitment: a peer thread that installs a handler or opens the notes fd clears
+  it, and the waiter then returns alive. A vfork parent resumed while its child
+  still ran on its stack, and a held spawn returned while its child was still
+  loading.
+
+**Heritage.** All three agree.
+
+- Plan 9: `postnote` readies a process only when it is waiting on a Rendez, and a
+  `Stopped` process is not, so the note waits until `start` readies it; `notify`
+  runs `procctl`, where a stopped process parks, before it handles notes. `kill`
+  written to the process's `ctl` is the exception: `procctlreq` readies a
+  Stopped process with `Proc_exitme` (port/proc.c, port/devproc.c).
+- POSIX (XSH 2.4.3): "While a process is stopped, any additional signals that are
+  sent to the process shall not be delivered until the process is continued,
+  except SIGKILL which always terminates the receiving process."
+- Linux: `wants_signal` answers false for a stopped or traced task and any signal
+  but `SIGKILL`, so `complete_signal` leaves the signal queued and never reaches
+  its group-exit short cut, which in any case requires
+  `sig == SIGKILL || !p->ptrace`: even a running tracee's fatal signal goes to its
+  tracer. The research behind the vote said an untraced job-stopped process dies
+  of a fatal signal. That read `complete_signal` without `wants_signal`: Linux
+  keeps it stopped too. Linux's vfork wait is killable only, and a fatal signal
+  to a vfork parent becomes a group exit when it is sent. Thylacine's latch can
+  still be revoked after it is armed, so the parent waits for the release instead
+  (point 4 below).
+
+**The rule.** A stopped thread keeps its stop when an interrupt arrives. The note
+stays queued and the latch stays armed, so nothing is lost and the note's
+disposition does not change. Only group death ends a stopped thread: `kill`,
+`SYS_EXIT_GROUP`, EXITKILL, the orphan rule, anything through
+`proc_group_terminate`. When the stop clears, the thread takes the note at once:
+the synchronous tail and the birth tail run their stop check before their note
+delivery (§4.2), so the park returns straight into the delivery, where an
+uncaught interrupt terminates the thread. Plan 9 handles the note right after the
+stop in the same way, because `notify` runs `procctl` first. Since #964
+(2026-10-12) the IRQ tail runs the same legs, so a thread it parked takes the
+note there too, and a running compute-bound thread takes it at its next tick or
+kick. (Until 2026-10-05 the notes leg ran
+first, and a note that arrived during a stop waited for the next synchronous
+entry; OPEN-BUGS 2026-09-30, closed by the operator's choice of stop-first.)
+
+The rule is about a thread that has parked. An interrupt that reaches a thread
+before its stop takes effect (still running, blocked in an ordinary sleep, or on
+its way to the tail) is delivered as it always was, and may end the thread first,
+as a signal pending beside a stop can in Linux.
+
+**The mechanism.** One sleep, `sleep_death_only`: an ordinary rendez sleep that
+unwinds for group death alone. A wake that reaches it for anything else is
+absorbed: it re-checks its condition and sleeps again. The five waits use it:
+
+1. **The stop park** (`el0_stop_park`), which the tail's stop check and the birth
+   park share. It loses its latch exit: it returns only to proceed to the eret,
+   or does not return.
+2. **The nested sleeper park** (`proc_stop_sleeper_park`), which `sleep`,
+   `tsleep` and `poll` detour into and the 9P client's `client_debug_stop_park`
+   enters. When the stop
+   clears, the outer wait re-checks as before: an ordinary one unwinds for an
+   armed latch then, and the thread takes the note at its tail.
+3. **The birth park.** A held child with an interrupt latched stays held.
+   Converted and resumed, or released, it meets the note as it leaves the park:
+   the birth tail parks before it delivers notes, so a note latched while the
+   child is still loading waits for the park as well, and a child released with
+   an uncaught interrupt pending exits before its first instruction.
+4. **The vfork suspend** and 5. **the held spawn's birth wait**
+   (`await_child_release`). The parent returns when the child releases it, or
+   dies with its group. A latched interrupt waits for the return and is taken at
+   the parent's tail. `cow.tla` models the suspend's release and not an
+   interrupt, and is unchanged.
+
+**Only a resume or death wakes a stop park.** Both stop parks sleep on the
+thread's own `debug_rendez`, which nothing else sleeps on, so the walks whose
+wake a park could only absorb pass a thread blocked there by: the latch's wake
+(`proc_interrupt_terminate_wake`), a caught note's wake (`proc_caught_note_wake`),
+and the wake a second stop sends to sleepers (`proc_stop_wake_sleepers_locked`),
+since a stop changes nothing a stop park waits on. An absorbed wake is not free.
+The thread runs for a moment in the kernel, a confirmed stop reads as unsettled
+meanwhile, and the stopped-only surface (§5e) refuses the debugger until the
+thread parks again; with the latch armed for the whole stop, every later post to
+the group would repeat that. The resumes and the death cascade wake the parks
+themselves. The parent suspends sleep on another rendez, which the latch's wake
+does reach; they absorb it, and nothing reads them as stopped.
+
+**Death wins in the exit close too.** The last thread of a dying Proc closes its
+handles before the Proc becomes a zombie (`proc_close_handles_at_exit`), and
+reads no death in its sleeps while it does (`exit_close_active`, #68 F1), so that
+a write-behind flush or a service teardown can finish. Group death clears no
+stop, so a Proc killed while stopped could park in its own exit close until the
+stop cleared. Read from the code, that means a `kill` of a job stopped by Ctrl-Z
+that holds a dirty 9P file leaves it alive until `tty:cont`, and a debugger that
+kills its stopped target and waits for the exit before closing its ctl fd
+deadlocks with it (OPEN-BUGS, 2026-09-30). A dying group is therefore never
+asked to park: the park predicate `proc_stop_requested`, which every park site
+reads, answers false once the group's exit message is published. A closer that
+parked while its group lived (an exit through `exits()` honours a stop) leaves
+the park when the group dies, because the death cascade's wake finds the
+predicate false. The flags a stop set before the death stay set, because the
+EL0-return tail reads them (the first point below). A predicate beats clearing
+them at the terminate: it is false for good, whatever a stop path does after
+the kill. A dying Proc is not stopped, and every reader that asks follows from
+that:
+
+- The EL0-return tail reads the owners' flags instead (`proc_stop_owned`). Its
+  park checks death first, so a thread killed after the tail's die check still
+  ends there, and does not eret.
+- The 9P client's elected-reader handoff sends a dying owner's op to the F6
+  bounce, as it does any dying owner's, and a dying closer keeps the reader role,
+  so its flush gets its reply.
+- `stop` and `waitstop` count a dying target as gone, and so does a single
+  step's wait for the re-stop. Waiting for its closer to read as parked would
+  last the whole close. `/proc/<pid>/wait` still waits for the exit.
+- A dying Proc takes no new stop. The debugger's deliver and the job stop both
+  refuse it, so no flag is set. `pty_stop.tla`'s `StopJob` and `StopDebug` are
+  guarded so; `debug_stop.tla`'s stop is not, and the refusal refines it.
+- A parent's wait reports neither a stop nor a continue for a dying child, even
+  one latched before the kill. POSIX reports a child that is stopped, and
+  Linux's group exit clears the stopped state and ignores a later continue. The
+  latches stay set, and the child's zombie reports its death.
+- The orphan rule does not count a dying member as stopped. POSIX asks whether a
+  newly orphaned group has a stopped member, and a dying one will never need the
+  cont, so the group's running members get no hup. `/ctl/procs` does not show a
+  dying Proc as STOPPED either.
+
+This restores DeathWinsOverStop (§6) and `pty_stop.tla`'s DeathWinsOverJobStop
+in a region neither model reaches.
+
+**What does not change.** The latch's arming, and its wake for every thread
+outside a stop park; every other sleep,
+including a stopped thread's outer syscall wait once its stop clears; the stop,
+conversion, release and resume paths; death winning at both parks, checked at the
+top of every pass and again after the wake condition (§5f point 8); a caught
+note's handling. There is no ABI change: no syscall, errno, ctl verb, note name or
+disposition changes.
+
+**Invariants.** No new §28 row: this tightens I-39's "execution control
+stopped-only", since a stop now holds until an owner clears it or the group dies.
+I-9 is untouched: group death is the wake these sleeps must not lose, and they
+register for it exactly as `sleep` does; the latch's wake is deliberately not a
+reason for them to return.
+
+- **NoLostStop** and **NoEL0AfterStopped** now hold against a latched interrupt:
+  a confirmed-stopped thread that is sent one stays parked.
+- **ParkEndsOnlyInDeath** (new, an action property): a thread leaves a park for
+  `dead` only once group death is published.
+- **SpawnReturnsAfterBirth** (new, in Safety): a held spawn returns only once its
+  child is released or dead; a latch on the spawner does not end the wait.
+- **LatchedHeldChildEnds** is retired. A held child with an interrupt latched
+  stays held until it is released, converted and resumed, or killed, and that is
+  the rule.
+
+**The spec.** In `debug_stop.tla` an interrupt may be latched on any target
+(`PostInterrupt`, no longer HELD-only), and its wake (`"intr"`) reaches a Thread
+in either park, which stays parked while its stop or hold stands. One may also be
+latched on the held spawn's spawner inside its birth wait (`PostSpawnerInterrupt`,
+the ghost `slatch`), and the wait goes on. A licensed Thread meets the note at a
+checkpoint outside the model. The vfork suspend is outside it too (`cow.tla`
+models its release, not interrupts); the kernel test of the suspend the two share
+is its witness. Three new buggy cfgs:
+
+- `tail_latch_erets`: the tail's park leaves on the latch and erets, as before
+  §5g (NoLostStop: a confirmed-stopped Thread runs).
+- `latch_ends_stop`: a park ends its Thread on the latch, as the birth park did
+  before §5g (ParkEndsOnlyInDeath).
+- `spawner_latch_returns`: the birth wait returns on the spawner's latch, as
+  `await_child_release` did before §5g (SpawnReturnsAfterBirth).
+
+`birth_latch_erets` stays. `birth_latch_rerun` and its property are retired: no
+design keeps a latch exit whose re-run could spin.
+
+The kernel's walks pass a stop park by, where the model's `"intr"` wake reaches a
+park and is absorbed. The absorb changes no variable, so the kernel's runs are
+among the model's, with steps left out. ParkEndsOnlyInDeath and
+SpawnReturnsAfterBirth restate the clean model's own guards (a park's only exits
+are the resumes and death; the spawner returns only on its release), so the
+clean run cannot fail them. Each earns its place by the buggy cfg that puts a
+pre-§5g exit back and violates it; it is the kernel tests that hold the code to
+the rule. The exit close is outside both models, which have no closer; its
+witnesses are the kernel tests.
+
+**Tests.** Kernel tests drive real threads in a synthetic Proc: `sleep_death_only`
+does not return for a latch armed before it slept or while it slept, and returns
+`SLEEP_INTR` for group death; a thread stopped inside an ordinary sleep stays
+parked when an interrupt is latched, and unwinds for it only once the stop
+clears; the latch's walk and a second stop's walk pass over a thread in its stop
+park, which is never switched in, while a control thread of the same Proc
+outside a park is reached; a held spawn's birth wait does not return while its
+child is unborn and its own latch is armed; a held child keeps its hold through
+an interrupt, its parked thread never switched in, and dies of the note once
+released, and a converted one with a zeroed SP stays parked through a stop and
+an interrupt until it is killed; a dying Proc's closer never parks for a stop,
+and one parked while its group lived leaves the park when the group dies; the
+scans that `stop`, `waitstop` and a step's wait poll read a dying target as
+gone, where `/proc/<pid>/wait` waits on; a dying Proc takes neither stop, its
+parent gets no stop report, and `/ctl/procs` does not show it as STOPPED,
+beside a live Proc that takes both; a parent's wait reports neither latch of a
+dying child, beside the same child alive, which reports its continue; the 9P
+client's reader handoff passes over an op parked for a stop, which a dying
+Proc's thread never is, since a dying Proc takes no stop; and the orphan rule
+hups the running member of a group whose stopped member lives, but not that of a
+group whose only stopped member is dying. A device witness in `/debug-probe`
+stops a compute-bound child and posts it an `interrupt`: the child stays stopped
+and alive, and after `start` it dies of the interrupt. A second, `/jc-probe`'s
+`killst` rung after the root pivot, job-stops a child that holds a staged write
+on the 9P root and kills it: the child is reaped with no resume, and its write
+reaches the file. Each test is run red first, on a kernel without the rule it
+pins.
+
+**Scope.** `kernel/sched.c` (the death-only mode of the shared sleep core),
+`kernel/notes.c` (the group-death leg of `thread_die_pending`, on its own),
+`kernel/proc.c` (the five waits, the three walks' skip, the tail's reader, both
+stop delivers' dying check, the orphan rule's stopped test and the wait's report
+arm), `kernel/include/thylacine/proc.h` (the park predicate), `kernel/devproc.c`
+(the stop scan's and the step scan's dying target), `kernel/devctl.c` (the
+STOPPED column), and the spec
+with its cfgs. Nothing in userspace
+changes but the witnesses (`/debug-probe`, `/jc-probe` and their child
+`/debug-child`).

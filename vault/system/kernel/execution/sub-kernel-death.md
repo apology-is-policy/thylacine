@@ -10,6 +10,7 @@ validated-by: [spec-death-wake, gate-smp]
 locks: [lock-proc-table]
 design: ["docs/ARCHITECTURE.md", "docs/LINEAGE.md"]
 created: 2026-08-01
+updated: 2026-10-13
 updated: 2026-10-19
 ---
 ## Session registry retirement
@@ -45,9 +46,10 @@ consequence of getting it wrong is a hang rather than a crash.
 |---|---|---|
 | `exits(msg)` | the Proc's own thread | terminate the *program*; with live peers, routes through the group cascade then self-exits |
 | `thread_exit_self()` | any thread | terminate *this Thread*; the last live one out zombies the Proc |
-| `proc_group_terminate(p, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait |
+| `exits_signalled(sig, msg)` / `exits_note(name)` | the Proc's own thread | as `exits`, but a death by note: status 1 and the note's POSIX signal recorded (gcpark-b); `exits_note` on a name with no signal is an extinction |
+| `proc_group_terminate(p, sig, msg)` | **holds [[lock-proc-table]]** | flag + wake + kick; does **not** wait; `sig` is the death signal the claim records (0 for an exit) |
 | `el0_return_die_check()` | at every return-to-EL0 | if flagged, `thread_exit_self()` (noreturn) |
-| `proc_fault_terminate(name, addr)` | EL0 unhandled fault | diagnose + `exits(snare:*)`; noreturn |
+| `proc_fault_terminate(name, addr)` | EL0 unhandled fault; a snare death a Proc chooses for itself (`SYS_POSTNOTE`'s self arm, the phenotype's `kill`; `addr` is then the SVC's ELR) | diagnose (`user fault:`, the line the gates watch) + `exits_note(snare:*)`; noreturn |
 
 `proc_group_terminate`'s lock precondition is not stylistic: the cascade
 walks `p->threads`, and that list is mutated only under the table lock, so a
@@ -104,6 +106,13 @@ every live Proc's ALIVE→ZOMBIE transition passes through, from both
 in `exits()` alone is what makes them fire on *every* death path — a clean
 exit and a kill alike:
 
+- first, the image's departure record (2026-10-08,
+  [[dec-2026-10-08-image-holder-record]]): `addrspace_record_holder` ORs this
+  Proc's caps and seal/taint bits into its address space, so an RFMEM sharer
+  that outlives it is still weighed against what it held. It runs here, under
+  `g_proc_table_lock`, because this is before any reap can unlink the Proc out
+  of the image join's walk ([[sub-kernel-proc]]); witness
+  `devproc.zombie_records_departure`;
 - the A-4a legate-scope teardown if this Proc is a legate root (audit F1);
 - **the arm-6 session hangup** (`proc_session_hangup_if_leader`, IDENTITY-DESIGN
   9.9.1): if this Proc is a `PROC_FLAG_SESSION_HANGUP`-armed session leader
@@ -151,9 +160,9 @@ exit and a kill alike:
 - capturing status/msg, flipping to ZOMBIE;
 - the parent's side, `proc_exit_notify_parent_locked`, all **under the
   lock**: wake the parent's `child_waiters`, post the synthetic `child_exit`
-  note, and run the caught-note wake (`proc_caught_note_wake`) so a parent
-  that catches `child_exit` -- a SIGCHLD handler, a notes fd -- and is already
-  asleep in an interruptible wait takes it now ([[sub-kernel-notes]]). There is
+  note, and run the caught-note walk (`proc_caught_note_wake`), which picks
+  the parent's thread that takes it -- a running one first, so a polling peer
+  is not interrupted -- and wakes or kicks it ([[sub-kernel-notes]]). There is
   no terminate wake: `child_exit` defaults to ignore and never arms that latch.
 
 The wake-under-lock is the R5-H F75 close: between releasing the lock and
@@ -170,7 +179,8 @@ the last one out (that one additionally zombies the Proc through the chokepoint
 above). An unmapped or unwritable tidptr **silently skips** both the store and the
 wake — via the `uaccess_store_u32` fixup ([[sub-kernel-uaccess]]) — rather than
 extincting: a departing Thread must not be able to crash the box with a bad address
-it registered earlier.
+it registered earlier. The departed Thread itself is freed later, by its Proc's next
+thread create or by `wait_pid` ([[sub-kernel-thread]], a thread's end of life).
 
 **The exit byte is the real one now (#91).** The ZOMBIE chokepoint captures
 `exit_status` **verbatim** — the byte a userspace `t_exits(42)` or a phenotype
@@ -184,6 +194,62 @@ while the numeric status lives in the separate `exit_status` field the parent's
 wait packs (`WAIT_STATUS_EXITED`, in [[sub-kernel-proc]]'s `wait_pid_for`). The
 two-field split is the point: the flag that says "die" and the byte that says
 "with what status" are no longer one datum.
+
+**A death by note records its signal (gcpark-b, 2026-10-12).** Operator votes
+"snare:abort" and "every note death records a signal" (docs/ERRORS.md is the
+binding table). `exits_code`, `exits_signalled` and `exits_note` share one body,
+`exits_term(code, sig, msg)`: an exit passes sig 0, a death by note passes
+status 1 and the note's signal (`notes_death_signal`, in [[sub-kernel-notes]]).
+The signal rides every path the status rides: the single-thread zombie
+(`proc_become_zombie_locked(p, status, sig, msg)` sets `Proc.term_sig`), the
+live-peer cascade (`group_terminate(p, code, sig, msg, kill)`), and the claim:
+`group_term_sig` is written in the same set-once CAS-winner branch as
+`group_exit_code`, and `thread_exit_self` hands both to the chokepoint. So the
+first claim decides the signal as it decides the status -- an `exit_group(7)`
+that a kill then finds reaps as an exit of 7, a kill first reaps SIGKILL, and a
+fault taken in an already-dying group keeps the group's claim (its SIGBUS would
+otherwise read as 7, the same raw value as the exit). The callers name their
+signals: `proc_group_kill` SIGKILL, `proc_group_terminate_code` 0, a legate
+scope's end SIGKILL, a session leader's death SIGHUP to its session, a held
+child's dead launcher SIGKILL, a debugger's EXITKILL SIGKILL. The wait reads
+the field only when the caller asked for the packed word ([[sub-kernel-proc]]).
+Witnesses: `proc.wait_packed_signalled`, `proc.group_claim_decides_signal`,
+`proc.fault_in_dying_group_reaps_exited_packed`,
+`proc.note_death_with_live_peer_reaps_signalled`.
+
+**A late `exits()` leaves as a peer (I-24).** The group's status is decided
+once, by the first claim. A thread that reaches `exits_code` after
+`group_exit_msg` is set -- an `exit_group` or kill it had not yet seen, or a
+fault it took while the group was dying -- finds the claim under
+`g_proc_table_lock` and leaves through `thread_exit_self`, as a peer does, so
+the last thread out reaps with the claimed `exit_status`. `exits_code`'s own
+last-thread path used to record its code and msg over the claim. B-2c's
+`ls-jsc` showed the trigger (a JIT thread's page-in abandoned by jsc's own clean
+exit reported `snare:bus`); when that thread is the last out, the group's
+status became its 1. The witnesses construct that order and reaped 1 instead
+of the claimed 7 before the fix. The check runs under the
+same hold as the `PROC_FLAG_EXIT_CLOSING` mark, so a kill lands either before it
+(the kill's claim wins, Linux's `do_group_exit` precedent) or after the mark
+(it forces the close, and the exit keeps its own status, Linux's `PF_EXITING`
+shape). `thread_exit_self`'s last-out follows the same rule
+([[dec-2026-10-13-exit-wins-final-close]]): it reads the claim when it decides
+it is the last thread, under `g_proc_table_lock`, and publishes
+`PROC_FLAG_EXIT_CLOSING` in the same hold before it unlocks for the close; with
+no claim, the `SYS_THREAD_EXIT` convention (status 0, "ok") stands, and a later
+kill only forces the close. It used to read the claim after the close, so a kill
+there reaped as `SIGKILL`, and to mark the close only inside
+`proc_close_handles_at_exit`, outside the lock, so a kill between the unlock and
+that store took the first claim, found no mark and forced nothing: a wedged
+server then held the dying Proc until a second kill. Witnesses
+`p9_closer.kill_in_final_close_keeps_exit` (a real child holds a staged dev9p
+file whose flush meets a full ring; a kill while the close sleeps forces it, and
+the child reaps as its exit, 5 by `exits_code` or 0 by the last
+`SYS_THREAD_EXIT`) and `p9_closer.kill_at_final_close_start_forces_it` (the kill
+lands on the exiting thread between the commit's unlock and the close, through a
+`KERNEL_TESTS`-only window hook; the close must end before the server answers).
+Witnesses of the claim itself: `proc.exits_in_dying_group_keeps_group_status`,
+`proc.fault_in_dying_group_keeps_group_status`. The fault side, which stopped
+the false `snare:bus` itself, is [[sub-kernel-fault]]'s `FAULT_USER_DYING`.
 
 **The close-at-exit window** (#926, completed by #68). A Proc's fds must
 close when the *process* terminates, not when its parent later reaps it —
@@ -208,6 +274,42 @@ whole finding: `group_exit_msg` is set on *every* `SYS_EXIT_GROUP` — a clean
 `exit_group(0)` included — so without it the orderly final close read as
 "dying" and every sleep-capable hook short-circuited, silently dropping the
 dev9p write-behind flush and skipping the close-time Tclunk.
+
+A second kill ends that hold (ARCH 7.9.1 part B, `dec-2026-10-07-exit-close`).
+`proc_group_kill` -- the `kill` note's cascade (syscall.c) and the `/proc` ctl
+`kill` (devproc.c), never a hangup, `EXITKILL` or a legate scope's end, which
+keep the string wrapper -- runs the same core as every termination, and when
+its CAS on `group_exit_msg` loses (the group is already terminating), or the
+Proc carries `PROC_FLAG_EXIT_CLOSING` (set by `proc_close_handles_at_exit`, so
+an `exits()` close, which sets no group exit message, counts as terminating;
+`exits()` publishes it first, under `g_proc_table_lock` before it drops the
+lock for the close, so no kill falls between the exit's commitment and the
+mark -- witness `p9_closer.first_kill_forces_exits_close`),
+it ORs `PROC_FLAG_EXIT_CLOSE_FORCED` into `proc_flags` (RELEASE) before the
+wake loop.
+notes.c's `thread_death_held` then reads the hold as lifted: the final close's
+send is refused, its wait unwinds through Tflush, and what it could not finish
+goes to the closer ([[sub-kernel-ninep-dev9p]], part C). The first kill never
+forces, so an orderly exit close still has its flush reply before the parent's
+`wait` returns (I-38). `loom_free`'s SQPOLL join does not ride
+`exit_close_active` any more: it sets its own `kthread_join_active`, which
+holds every death, forced or not ([[sub-kernel-loom]]).
+
+Because the closer reads no death, a stop must not park it either: group death
+clears no stop owner, and a closer parked for a stop would hold the dying Proc
+until the stop cleared (read from the code: a `kill` of a Ctrl-Z'd job with a
+dirty 9P file would live on until `tty:cont`, and a debugger that killed its
+stopped target and waited for the exit before closing its ctl fd would
+deadlock with it). So the park predicate, `proc_stop_requested`, reads false
+once `group_exit_msg` is set, and the closer's sleeps never detour into a stop
+park (DEBUG-FS-DESIGN 5g). A closer that parked while its group still lived,
+as an `exits()` close honours a stop, leaves the park when the group dies: the
+death cascade's wake finds the predicate false. A dying Proc is not stopped to
+anything else either: both stop delivers refuse it, a parent's wait reports
+neither its stop nor its continue, `stop`, `waitstop` and a step's wait read it
+as gone, the orphan rule does not count it as a stopped member, and
+`/ctl/procs` does not show it STOPPED ([[sub-kernel-jobctl]],
+[[sub-kernel-devproc]]).
 
 **The territory release rides the same window** (arm-6 Part D, IDENTITY-DESIGN
 9.9.1; extends #926/#68 from the handle table to the namespace). A Proc's
@@ -288,16 +390,29 @@ nothing already written down says "the child has finished loading": the
 child's birth-hold mark. The principle above is kept by the next best means.
 Every write of that mark goes through one setter pair that wakes
 `child_waiters` under the lock, so no path out of UNBORN can skip the wake.
+Since 2026-09-30 the park sleeps in `sleep_death_only` (DEBUG-FS-DESIGN 5g),
+so only the caller's group death returns it early. Its own terminate latch is
+revocable, since a peer can install a handler or open the notes file, and a
+parent that returned on it could live on with a vfork child still on its stack
+or a held child still loading.
 
 **The stop park.** Two independent owners can park a thread —
 `debug_stop_req` (I-39) and `job_stop_req` (I-20) — and they share one park
 (`el0_return_stop_check`, the `sleep`/`tsleep` detour, and each Thread's own
 `debug_rendez`). Each resume clears **only its own owner**; the park
-predicate is the disjunction. Death overrides both: the stop-check runs
-*after* the die-check at the tail, and the park loop re-checks
-`group_exit_msg` on every wake, so a kill racing a stop terminates the
-thread inside the park rather than eret-ing to EL0. The second owner and its
-fans are [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
+predicate is the disjunction, false in a dying group. Death overrides both:
+the stop-check runs *after* the die-check at the tail (and before the notes
+leg, so a stop in turn wins over a note), and reads the owners'
+flags (`proc_stop_owned`), not the predicate, so a thread killed between the
+two still enters the park; the park loop re-checks `group_exit_msg` on every
+wake, so a kill racing a stop terminates the thread inside the park rather
+than eret-ing to EL0. Only death does: the park
+sleeps in `sleep_death_only`, so a terminate latch's wake is absorbed and a
+stopped thread stays stopped. Once a resume lets it run, it meets the note as
+the park returns, in the notes leg that follows on the synchronous and birth
+tails; a park on the IRQ tail, which delivers no notes, leaves it to the next
+checkpoint (DEBUG-FS-DESIGN 4.2, 5g). The second owner and its fans are
+[[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
 
 The loop checks death twice per pass since 2026-09-29: at the top, and again
 after the wake condition passes. The second check is for a release that
@@ -321,7 +436,11 @@ every die-check. Since #91 the numeric status is a **separate** field,
 `Proc.exit_status` (int): the real exit byte, stored verbatim, no longer the
 `"ok"`→0/else→1 collapse derived from the msg. `group_exit_msg` decides *whether*
 the Proc dies and carries the msg; `exit_status` decides *what status* the
-parent's wait reads.
+parent's wait reads. `Proc.term_sig` (u8, gcpark-b) is the death signal beside
+it, 0 for an exit; `group_term_sig` is its set-once claim twin beside
+`group_exit_code`. Both took the old `_reserved0` slot, so `struct Proc` keeps
+its size; S-2 gave the slot's remaining u16 to `note_caught`. A death by the
+`term` note (2026-10-13) records SIGTERM, 15.
 
 `Proc.debug_stop_req` / `job_stop_req` — the two stop owners, deliberately
 in the same cache line so the tail's fast path reads both in two ACQUIRE
@@ -350,13 +469,14 @@ target the same waiter, and the second `wakeup()` no-ops on `waiter == NULL`.
 ## Invariants enforced
 
 - [[inv-i24]] — group termination is atomic (one CAS), exactly-once (the
-  last-out determination is unique under the lock), and no Thread runs at
-  EL0 after ZOMBIE.
+  last-out determination is unique under the lock, and a late `exits()` never
+  records its status over the claim), and no Thread runs at EL0 after ZOMBIE.
 - [[inv-i9]] — the death-wake generalization: no wake lost between a
   sleeper's cond-check and its sleep, for **every** rendez sleep. Extended
   by LS-5 to the terminate-disposition `interrupt` latch, which is read
   lock-free by the sleep predicate precisely because the sleep path can
-  never take the notes-queue lock.
+  never take the notes-queue lock. The five death-only waits read group death
+  alone and register for the death wake exactly as every other sleep does.
 - I-39/I-20 compatibility (`StopCompatI39`): neither resume may clear the
   other's owner.
 - #713 composition: the die-check runs *before* the DAIF-masked
@@ -410,20 +530,38 @@ What a change **must** re-establish:
   death path belongs in `proc_become_zombie_locked`, not in `exits()`;
 - the close window's three properties, and that `exit_close_active` stays
   owner-set, bounded to the one close pass, and checked *first* in
-  `thread_die_pending`;
-- death winning over both stop owners at every branch.
+  `thread_die_pending` (through `thread_death_held`);
+- that only a kill sets `PROC_FLAG_EXIT_CLOSE_FORCED` -- on a lost CAS or a
+  set `PROC_FLAG_EXIT_CLOSING` -- and before the wake loop (a close that
+  re-checks after the wake must see it);
+- death winning over both stop owners at every branch, the exit close
+  included (a dying group is never asked to park).
 
 ## Seams
 
 - [[seam-exiting-tails-never-sleep]] — the recorded property a future
-  anon-COW/pageout must re-establish.
-- [[seam-close-flush-unbounded]] — a wedged trusted server can strand a
-  flagged close, unbreakable by a further kill.
+  anon-COW/pageout must re-establish. Its preempt half is enforced since
+  2026-10-20: an IRQ return does not switch out a thread that is not RUNNING
+  ([[sub-kernel-sched]]), so a tail on a kthread-shaped path runs to its own
+  `sched()`. Exec's wait for its peers to leave their CPUs
+  ([[sub-kernel-proc]]) is the newest dependent on both halves.
+- [[seam-close-flush-unbounded]] — a server that never answers held a flagged
+  close; parts A-C (2026-10-07) bound it: the clunk never waits, and a second
+  kill forces the close and hands the rest to the closer.
 - [[seam-death-cascade-smp-harness]] — the 3-way interleaving no
   deterministic test reaches.
 
 ## Caveats
 
+- **A kill during the final close** (resolved 2026-10-13, sig S-1): both
+  last-out paths read the claim once, under the hold that marks the close, and
+  a kill that lands after it forces the close and leaves the exit's status
+  (operator vote, [[dec-2026-10-13-exit-wins-final-close]]; gcpark-b audit F5).
+  The window between the commit and the close is a few instructions with no
+  sleep: a kill from another CPU can land there, but it has no runtime witness
+  except through the `KERNEL_TESTS` hook, the only way a test can put a kill
+  there. A Proc with no handle table publishes no mark, and its exit still wins:
+  the rule is the commit's claim read, the mark only what a kill forces.
 - **The multi-thread `exits()` gate is gone.** `exits()` with live peers is
   no longer an extinction — since #811 it routes through the same cascade as
   `exit_group` and then self-exits. The absorbed reference doc still said
@@ -432,10 +570,12 @@ What a change **must** re-establish:
 - **`group_exit_msg` set does not mean "killed".** A clean `exit_group(0)`
   sets it too. Treating the two as the same was #68 R1-F1
   ([[fnd-68-r1-f1]]) and cost silent data loss.
-- **The re-admitted strand is not breakable.** `exit_close_active` suppresses
-  both death legs, so a wedged flagged close parks the dying Proc unreapably.
-  That is a deliberate trade (the alternative was the parent hanging), whose
-  precondition is an already-degraded system.
+- **The re-admitted strand breaks on a second kill, not on the first.**
+  `exit_close_active` suppresses both death legs, so a server that never
+  answers holds the final close until a kill forces it (part B); the first
+  kill, an `exit_group`, a hangup or `EXITKILL` never force. A forced exit's
+  parent can read the file before the closer's write lands: the I-38 window
+  the second kill buys.
 - The interrupt-terminate wake deliberately omits both
   `torpor_wake_all_for_proc` and `smp_resched_others` — the former because
   torpor waiters are reachable via `rendez_blocked_on` anyway, the latter
@@ -473,10 +613,17 @@ What a change **must** re-establish:
   because a debugger can only have armed them while the target was fully stopped
   and this is the only live thread. Same gate, one valid use and one invalid one,
   forty lines apart. A third use is valid for the same reason: exec clears the
-  caught-note claim sub-field of `proc_flags` (2026-09-30), and a claim is taken
+  caught-note claim (2026-09-30; a sub-field of `proc_flags` until S-2 moved it
+  to the high byte of `Proc.note_caught`), and a claim is taken
   only by a thread of this process for its own wait, so with exec alone the clear
   is a guard, not a repair -- posters from other processes set caught bits, never
-  claims ([[sub-kernel-notes]]).
+  claims ([[sub-kernel-notes]]). Since 2026-10-12 a posting walk can also take a
+  claim on a thread's behalf (a designation), so exec clears the claim, the
+  designation and the claim byte under the thread's `wait_lock`, where a walk
+  designates: one made after the clear carries its claim bit too. A thread that
+  exits drops its claim and its designation at the `THREAD_EXITING` commit
+  (`notes_exit_drop_locked`, under the process-table lock), and the walk runs
+  again if a family's note is still queued.
 
 ## Descriptor retention after last process (AS-2a)
 
@@ -563,6 +710,80 @@ reasons as the handle table's (the thread is still RUNNING, the Proc still
 ALIVE). The table itself is still freed at `proc_free`
 ([[sub-kernel-proc]]); the reset is NULL-safe (a native Proc has no table).
 `proc_close_handles_at_exit_for_test` drives the close on a Proc a test built
+(`vivarium.socktab_ready_release_paths`).
+
+## The device quiesce waits out a reaper unmap (2026-10-08, vmaguard)
+
+The device-quiesce VMA sweep reads the address space's list without its lock,
+in the exit close's RUNNING + ALIVE window and again at `proc_free`. Every
+peer has committed to EXITING by then, so the one other writer of that list is
+the weft orphan reaper, which unmaps a stale framebuffer mapping cross-Proc
+under the space's lock ([[sub-kernel-weft]]). The sweep now takes and drops
+that lock before walking, which waits out an unmap already under way, and the
+reaper no longer starts on a Proc that is non-ALIVE, or that carries
+`PROC_FLAG_EXIT_CLOSING`, read under the same lock, while holding its space
+alone (the only case the sweep walks). Both close sites
+set the flag before the quiesce, so a reaper that takes the lock after the
+barrier sees it. Before this, a reaper unmap could free a VMA the sweep was
+about to step through. The reaper also holds the space by its lock rather than
+a reference, because this sweep reads a reference count of 1 as "no other
+holder": a transient reaper reference would have skipped a dying driver's
+device reset (vmaguard audit r2 F1).
+
+## Exec resets the image's devices; the last reference resets what is mapped (2026-10-08, execquiesce)
+
+Exec used to drain the old address space with no device reset. A driver that
+mapped a DMA buffer and closed its descriptor holds the buffer only by the
+mapping, so exec's drain freed it while the device it had been handed to could
+still be armed, and the device then wrote into recycled memory: RW-7 R3-F1 on
+exec instead of death. By the operator's vote (2026-10-08), exec now resets the
+devices of the image it leaves. `proc_exec_replace` drops its reference to the
+old space with `addrspace_release`, and when that drop is the last it runs the
+handle-table walk (`quiesce_fd_devices`) before `addrspace_destroy` drains the
+space. A holder that remains -- a vfork parent, an RFMEM sibling -- keeps the
+mappings and may still be driving the device, and the drain frees nothing. Deciding by
+the drop rather than by reading the count first matters: a sharer's reap racing
+the exec could otherwise take the last reference after the exec read two. The
+close-on-exec sweep runs after the replace, so the walk still sees a descriptor
+about to close. A device whose descriptor survives into the new image arrives
+reset: a virtio-mmio device initializes again from status 0; a PCI function is
+revoked (`pci_quiesce` is terminal), and its claim frees for a new one only once
+the new image has closed that descriptor and every IRQ descriptor of the
+function (each holds a reference) and no hostmem client still maps one of its
+BARs (each hostmem Burrow holds one too).
+
+The mapped-device walk moved too. A dying holder reads the space's count at its
+exit close and again at its reap, and drops its reference only at the reap, so
+two holders leaving at once can each read the other's reference and both skip
+the walk, and the last drop then drained with the device armed. `addrspace_unref` now runs the
+walk (`addrspace_quiesce_mapped_devices`, [[sub-kernel-addrspace]]) at the last
+reference, before the drain, so the reset cannot be missed however the holders
+left. The exit close keeps its own sole-gated walk: a DMA buffer held only by a
+handle frees at that close, before any drain. A device reset twice is reset
+once; `status = 0` and a revoked PCI function are both idempotent.
+
+Residual, by the vote: an exec whose drop is not the last resets nothing. Two
+classes of buffer can then free under an armed device: one a close-on-exec
+descriptor held alone, which the exec's own close-on-exec sweep frees at once,
+and one left mapped in the shared space, which frees when the last holder leaves
+(that drain resets only what the space maps). Death has no such gap -- its
+handle-table walk runs ungated, before the handles close -- because a dying
+Proc's descriptors go regardless, while a shared exec's sharer may still be
+driving the device through a mapping. Setting close-on-exec on a DMA descriptor
+the device holds is the driver releasing what the device still uses. A sibling that has exited but is not yet reaped still holds
+the space, so it counts as a holder although it cannot drive anything; that is a
+deliberate over-approximation of "held alone" (a gate on live holders, like the
+image join's zombie count, would be the precise form). A device armed but
+reachable only through a descriptor has had its registers unmapped by its own
+driver, which is the trust-envelope shape below. It is the R3-F1 trust-envelope
+residual's family (a driver releasing what an armed device still holds), which
+the R3-F8 device-session model closes. Witnesses: `virtio.exec_quiesces_devices`
+(a shared exec resets nothing; a sole exec resets the device its descriptor
+claims, by its own walk, before the drain -- a teardown stamp orders the two --
+and the device only its mapping claims, by the drain's)
+and `virtio.last_unref_quiesces_mapped_device` (a holder that saw a second
+reference skipped, then a bare last drop: the drain resets).
+
 (`vivarium.socktab_ready_release_paths`). Since 17:09Z (2026-10-19) each
 socket()-born row also holds a reference to its ctl Spoor, the identity its
 verb arms check ([[sub-kernel-vivarium]]); that is the fid the fd holds, and

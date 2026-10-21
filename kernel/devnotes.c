@@ -120,8 +120,9 @@ static struct Spoor *devnotes_create(struct Spoor *c, const char *name,
     return NULL;
 }
 
-static void devnotes_close(struct Spoor *c) {
+static int devnotes_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 // F3 audit close: use the poll_waiter_list mechanism for wait/wake — not

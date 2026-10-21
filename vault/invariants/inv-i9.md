@@ -17,9 +17,10 @@ includes:
 - the **death-wake generalization** (#811): every rendez sleep is
   death-interruptible via register-then-observe under the per-Thread
   `wait_lock`;
-- the **frame-atomic refinement for the elected 9P reader recv** (#90, ARCH
-  §8.8.1.1): a mid-frame death defers its unwind to the next frame boundary —
-  the reader still dies, at the boundary, never mid-frame;
+- **the elected 9P reader recv, without exception** (ARCH §8.8.1.1): a death,
+  a stop or a caught note unwinds it at any byte, and the client keeps the
+  partial frame for the next reader (frame-atomic, deferred to a boundary,
+  from #90 on 2026-07-19 until [[dec-2026-10-06-seam90-unwind-any-byte]]);
 - the **terminate-`interrupt` extension** (LS-5): the death-or-terminate wake
   predicate;
 - the **Weft readiness poke**: the single-cache-line store-buffer
@@ -59,10 +60,10 @@ contract) · the send-side park in `client_send_flow` (hook registered +
 `send_progress` snapshotted under `c->lock`, own-rendez re-check — the
 poll.tla pattern) · `client_mark_dead_locked` as the SOLE `c->dead` setter,
 waking both the per-rpc rendez set and the parked-sender list (no strand on
-death) · `reader_recv_frame` + `thread_reader_blocks_death` (frame-atomicity:
-`stop_no_park` held for the recv tenure, `stop_unwinds = (got == 0)`
-per-chunk, guarding all four `thread_die_pending` sites in `sleep()`/
-`tsleep()`).
+death) · `reader_recv_frame` (`stop_no_park` and `stop_unwinds` held for the
+recv tenure; no die-check in `sleep()`/`tsleep()` reads them) +
+`do_reader_recv_frame` (every exit without a whole frame leaves `rx_got` for
+the next reader).
 
 On the dev9p.poll surface: PROBE-then-observe — the poller's hook is
 registered and a covering non-terminal readiness probe is outstanding
@@ -105,9 +106,10 @@ post-register die-pending re-check that closes the cascade race,
 `NoStuckSleeper`, with `BUGGY_OBSERVE_BEFORE_REGISTER` as the executable
 counterexample — a sleeper that checks the flag before registering and
 OUTSIDE its `wait_lock`, which reproduces the non-reaping hang.
-[[spec-reader-frame]] pins the frame-atomic refinement (NoDesync +
-UnwindAtBoundary + EventuallyUnwinds; the buggy cfg is the pre-#90 mid-frame
-unwind). [[spec-9p-client]] composes beneath it. [[gate-smp]] is the
+[[spec-reader-frame]] pins the reader's any-byte unwind (NoDesync +
+ResumePoint + FrameDelivered, and EventuallyUnwinds with no fairness on the
+server; buggy: an unwind that discards the partial frame, and the superseded
+block-through under a server that stops). [[spec-9p-client]] composes beneath it. [[gate-smp]] is the
 empirical backstop for the SMP park interleavings. **blind-to:** the specs
 model protocol shape, not the memory-ordering of lock-free fast paths (those
 rest on the documented atomics contracts); the deterministic multi-in-flight

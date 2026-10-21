@@ -596,8 +596,8 @@ static struct Spoor *devcap_create(struct Spoor *c, const char *name, int omode,
 }
 
 // close — release the kmalloc'd leaf-ref aux. The root has no aux.
-static void devcap_close(struct Spoor *c) {
-    if (!c || c->dc != 'k' || !c->aux) return;
+static int devcap_close(struct Spoor *c) {
+    if (!c || c->dc != 'k' || !c->aux) return 0;
     u64 m = *(const u64 *)c->aux;
     if (m != DEVCAP_GRANT_MAGIC && m != DEVCAP_USE_MAGIC)
         extinction("devcap_close: Spoor aux has unknown magic (corruption)");
@@ -605,6 +605,7 @@ static void devcap_close(struct Spoor *c) {
     ref->magic = 0;
     kfree(ref);
     c->aux = NULL;
+    return 0;
 }
 
 // read — write-only files; reading is a hard error.

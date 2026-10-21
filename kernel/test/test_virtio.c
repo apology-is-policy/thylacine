@@ -14,6 +14,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/vma.h>
@@ -29,6 +30,8 @@ void test_virtio_reset_in_range_no_match(void);
 void test_virtio_vq_size_for(void);
 void test_virtio_proc_death_quiesces_device(void);
 void test_virtio_proc_death_quiesces_vma_only_device(void);
+void test_virtio_exec_quiesces_devices(void);
+void test_virtio_last_unref_quiesces_mapped_device(void);
 
 // =============================================================================
 // Tests.
@@ -233,21 +236,22 @@ void test_virtio_proc_death_quiesces_device(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
 
     struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
-    TEST_ASSERT(km != NULL, "kobj_mmio_create over an empty virtio page");
-
-    hidx_t h = handle_alloc(p, KOBJ_MMIO,
-                            RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km);
-    TEST_ASSERT(h >= 0, "handle_alloc(KOBJ_MMIO) consumes the create ref");
+    // handle_alloc(KOBJ_MMIO) consumes the create ref on success.
+    hidx_t h = km ? handle_alloc(p, KOBJ_MMIO, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km) : -1;
+    if (km && h < 0) kobj_mmio_unref(km);
 
     // The crux: walk(handles) -> match(PA range) -> virtio_reset, counted.
-    int n = proc_quiesce_owned_devices(p);
-    TEST_EXPECT_EQ(n, expected,
-                   "proc death resets every virtio slot in the held range");
+    int n = h >= 0 ? proc_quiesce_owned_devices(p) : -1;
 
-    // proc_free re-runs the quiesce (harmless re-reset) then handle_table_free
-    // -> kobj_mmio_unref releases the claim. Mirrors drop_test_proc.
+    // Released before any assert -- an assert returns, and a claim left held
+    // fails every later claim on the bank. proc_free re-runs the quiesce (a
+    // harmless re-reset), then handle_table_free -> kobj_mmio_unref releases it.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+
+    TEST_ASSERT(h >= 0, "kobj_mmio_create + handle_alloc(KOBJ_MMIO) over an empty virtio page");
+    TEST_EXPECT_EQ(n, expected,
+                   "proc death resets every virtio slot in the held range");
 }
 
 void test_virtio_proc_death_quiesces_vma_only_device(void) {
@@ -264,37 +268,178 @@ void test_virtio_proc_death_quiesces_vma_only_device(void) {
     TEST_ASSERT(p != NULL, "proc_alloc");
 
     struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
-    TEST_ASSERT(km != NULL, "kobj_mmio_create over an empty virtio page");
-
-    struct Burrow *b = burrow_create_mmio(km);
-    TEST_ASSERT(b != NULL, "burrow_create_mmio");
+    struct Burrow *b = km ? burrow_create_mmio(km) : NULL;
 
     // SYS_MMIO_MAP equivalent: install the device mapping as a VMA.
-    int rc = burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW);
-    TEST_EXPECT_EQ(rc, 0, "burrow_map installed the MMIO VMA");
+    int rc = b ? burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW) : -1;
 
     // Drop the construction ref -> the KObj_MMIO now lives ONLY on the VMA's
     // mapping ref. No fd handle was ever installed: this is the fd-closed state.
-    burrow_unref(b);
+    if (b) burrow_unref(b);
 
     // The handle table holds no KObj_MMIO; the device is reachable only via the
     // VMA. The VMA walk (round-2 F1) is what must still find + reset it.
     // A kernel descriptor pin must not masquerade as a second driver.
     struct AddrSpace *as = p->as;
     addrspace_pin(as);
-    int n = proc_quiesce_owned_devices(p);
+    int n = rc == 0 ? proc_quiesce_owned_devices(p) : -1;
 
-    // proc_free walks + releases the VMA + Burrow (-> kobj_mmio_unref); then
-    // drop the test's own km ref. Mirrors test_mmio_map_install_vma.
+    // Released before any assert (an assert returns, and a claim left held fails
+    // every later claim on the bank): proc_free walks + releases the VMA + Burrow
+    // (-> kobj_mmio_unref), then the test's own km ref goes. Mirrors
+    // test_mmio_map_install_vma.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
     int owners_after = addrspace_owner_count(as);
     bool mappings_gone = as->vmas == NULL;
     addrspace_unpin(as);
-    kobj_mmio_unref(km);
+    if (km) kobj_mmio_unref(km);
+
+    TEST_ASSERT(rc == 0, "kobj_mmio_create + burrow_create_mmio + burrow_map over an empty virtio page");
     TEST_EXPECT_EQ(n, expected,
                    "proc death resets a VMA-only device despite a descriptor pin");
     TEST_EXPECT_EQ(owners_after, 0, "last driver owner gone");
     TEST_ASSERT(mappings_gone, "descriptor pin does not retain MMIO mappings");
     uart_puts("[AS-2a] pinned last-owner VMA-only device quiescence exercised\n");
+}
+
+// Exec resets the devices of the image it leaves, as death does (R3-F1 on exec):
+// a driver's mapping-only DMA buffer is freed by exec's drain of its old space.
+// Driven by a child running proc_exec_replace on itself (the swap needs the
+// exec'ing thread), three execs in a row over one device claim: a shared old space
+// (frees nothing, so resets nothing), the claim on an fd with the space ours alone
+// (exec's walk a), then the claim on a mapping only (walk b, in the drain).
+u64 proc_exec_device_resets_for_test(void);
+u64 proc_exec_walk_a_seq_for_test(void);
+u64 addrspace_drain_device_resets_for_test(void);
+u64 addrspace_drain_seq_for_test(void);
+u64 addrspace_teardown_stamp(void);
+
+static struct {
+    u64 page;
+    struct Proc *sharer;
+    u64 shared, fd_only, mapped_only;   // exec's walk (a) + the drain's walk (b)
+    u64 fd_by_exec, mapped_by_drain;
+    u64 seq_before, walk_a_seq, drain_seq;   // exec #2's teardown order
+    u32 done;
+} g_exec_quiesce;
+
+static u64 departure_resets(void) {
+    return proc_exec_device_resets_for_test() + addrspace_drain_device_resets_for_test();
+}
+
+static void exec_quiesce_thunk(void *arg) {
+    (void)arg;
+    struct Proc *me = current_thread()->proc;
+    struct KObj_MMIO *km = kobj_mmio_create(g_exec_quiesce.page, PAGE_SIZE);
+    if (!km) exits("setup");
+    hidx_t h = handle_alloc(me, KOBJ_MMIO, RIGHT_READ | RIGHT_WRITE | RIGHT_MAP, km);
+    if (h < 0) { kobj_mmio_unref(km); exits("setup"); }
+    g_exec_quiesce.sharer = proc_alloc_in(me->as, me->page_budget);
+    struct AddrSpace *nas = g_exec_quiesce.sharer ? addrspace_alloc(me->page_budget) : NULL;
+    if (!nas) exits("setup");
+    u64 c0 = departure_resets();
+    proc_exec_replace(me, nas, me->phenotype);
+    u64 c1 = departure_resets();
+
+    if (!(nas = addrspace_alloc(me->page_budget))) exits("setup");
+    u64 e1 = proc_exec_device_resets_for_test();
+    g_exec_quiesce.seq_before = addrspace_teardown_stamp();
+    proc_exec_replace(me, nas, me->phenotype);
+    u64 c2 = departure_resets();
+    g_exec_quiesce.fd_by_exec = proc_exec_device_resets_for_test() - e1;
+    g_exec_quiesce.walk_a_seq = proc_exec_walk_a_seq_for_test();
+    g_exec_quiesce.drain_seq  = addrspace_drain_seq_for_test();
+
+    // SYS_MMIO_MAP, then close the fd: the claim lives on the mapping alone.
+    struct Burrow *b = burrow_create_mmio(km);
+    if (!b) exits("setup");
+    int rc = burrow_map(me, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW);
+    burrow_unref(b);
+    if (rc != 0 || handle_close(me, h) != 0) exits("setup");
+    if (!(nas = addrspace_alloc(me->page_budget))) exits("setup");
+    u64 d2 = addrspace_drain_device_resets_for_test();
+    proc_exec_replace(me, nas, me->phenotype);
+    u64 c3 = departure_resets();
+    g_exec_quiesce.mapped_by_drain = addrspace_drain_device_resets_for_test() - d2;
+
+    g_exec_quiesce.shared      = c1 - c0;
+    g_exec_quiesce.fd_only     = c2 - c1;
+    g_exec_quiesce.mapped_only = c3 - c2;
+    __atomic_store_n(&g_exec_quiesce.done, 1u, __ATOMIC_RELEASE);
+    exits("ok");
+}
+
+void test_virtio_exec_quiesces_devices(void) {
+    u64 page = 0;
+    int expected = 0;
+    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+
+    g_exec_quiesce.page = page;
+    g_exec_quiesce.sharer = NULL;
+    g_exec_quiesce.shared = g_exec_quiesce.fd_only = g_exec_quiesce.mapped_only = ~0ull;
+    g_exec_quiesce.fd_by_exec = g_exec_quiesce.mapped_by_drain = ~0ull;
+    g_exec_quiesce.seq_before = ~0ull;
+    g_exec_quiesce.walk_a_seq = g_exec_quiesce.drain_seq = 0;
+    g_exec_quiesce.done = 0;
+    int pid = rfork(RFPROC, exec_quiesce_thunk, NULL);
+    int st = -1;
+    int reaped = pid > 0 ? wait_pid_for(pid, 0, &st) : -1;
+    if (g_exec_quiesce.sharer) {
+        g_exec_quiesce.sharer->state = PROC_STATE_ZOMBIE;
+        proc_free(g_exec_quiesce.sharer);
+    }
+
+    TEST_ASSERT(pid > 0 && reaped == pid, "the child spawned and was reaped");
+    TEST_ASSERT(g_exec_quiesce.done == 1u, "the child ran its three execs");
+    TEST_EXPECT_EQ(g_exec_quiesce.shared, 0ull,
+                   "an exec off a shared space frees nothing and resets nothing");
+    TEST_EXPECT_EQ(g_exec_quiesce.fd_only, (u64)expected,
+                   "an exec off a sole space resets the device its fd claims");
+    TEST_EXPECT_EQ(g_exec_quiesce.fd_by_exec, (u64)expected, "and exec's own walk did it");
+    TEST_ASSERT(g_exec_quiesce.walk_a_seq > g_exec_quiesce.seq_before &&
+                g_exec_quiesce.drain_seq > g_exec_quiesce.seq_before,
+                "(premise) that exec both walked and drained");
+    TEST_ASSERT(g_exec_quiesce.walk_a_seq < g_exec_quiesce.drain_seq,
+                "exec's walk ran before the drain freed the old space");
+    TEST_EXPECT_EQ(g_exec_quiesce.mapped_only, (u64)expected,
+                   "an exec off a sole space resets the device only its mapping claims");
+    TEST_EXPECT_EQ(g_exec_quiesce.mapped_by_drain, (u64)expected, "and the drain's walk did it");
+}
+
+// The last reference resets what is mapped, however the holders left. Each
+// departing holder reads the count before it drops its reference, so two holders
+// leaving at once can each read the other's and both skip the reset; this builds
+// the state that interleaving leaves -- a holder that skipped (proc_free with a
+// second reference standing) and a final bare drop -- and asks the drain.
+void test_virtio_last_unref_quiesces_mapped_device(void) {
+    u64 page = 0;
+    int expected = 0;
+    if (!find_empty_virtio_page(&page, &expected)) return;  // skip: no empty page
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    struct KObj_MMIO *km = kobj_mmio_create(page, PAGE_SIZE);
+    struct Burrow *b = km ? burrow_create_mmio(km) : NULL;
+    int rc = b ? burrow_map(p, b, 0x40000000ull, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b) burrow_unref(b);
+
+    // Every reading is taken, and everything released, before the first assert:
+    // an assert returns, and a claim left held fails every later claim on the bank.
+    struct AddrSpace *as = p->as;
+    addrspace_ref(as);   // the holder still leaving when p reads the count
+    int skipped = proc_quiesce_owned_devices(p);
+    u64 d0 = addrspace_drain_device_resets_for_test();
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    u64 not_last = addrspace_drain_device_resets_for_test() - d0;
+    addrspace_unref(as);
+    u64 last = addrspace_drain_device_resets_for_test() - d0;
+    if (km) kobj_mmio_unref(km);
+
+    TEST_ASSERT(rc == 0, "kobj_mmio_create + burrow_create_mmio + burrow_map over an empty virtio page");
+    TEST_EXPECT_EQ(skipped, 0, "(control) a holder that sees a second reference resets nothing");
+    TEST_EXPECT_EQ(not_last, 0ull, "(control) a drop that is not the last drains nothing");
+    TEST_EXPECT_EQ(last, (u64)expected,
+                   "the last reference resets the mapped device before its drain");
 }

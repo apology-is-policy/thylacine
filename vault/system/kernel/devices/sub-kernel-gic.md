@@ -16,7 +16,7 @@ design:
   - "docs/ARCHITECTURE.md section 12.3"
   - "docs/PORTABILITY.md section 5"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-10-13
 ---
 ## Purpose
 
@@ -362,7 +362,35 @@ IRQ barrier. `gic_synchronize_cpu` uses permanent SGI 15; observing its handler
 proves earlier acknowledged IRQ handlers/EOIs have finished because IRQs never
 nest. Callers must first quiesce sources and synchronize the controller, and
 must not hold a domain lock across this bounded thread-context wait. Timeout
-never authorizes reuse. SGIs 14 and 15 are reserved against raw interrupt
+never authorizes reuse.
+
+The barrier is acknowledged by **ticket** (B-2e2, 2026-10-13). A sender adds
+one to the target's request count (`gic_barrier_send`; the new value is its
+ticket), executes `DSB SY` and sends SGI 15; the target's handler reads its
+request count and stores that value as done, then executes `DSB SY` so the
+exception return (the CSE the ticket promises) follows that read;
+`gic_barrier_reached` is true once done has reached the ticket. Done has one
+writer, the target's own handler. A ticket is served only by a handler that
+observed it and then returned, which is the guarantee (observe the request,
+then a CSE); the interrupt need not have been acknowledged after the send, as
+a handler already running for an earlier sender can read the newer request.
+The acknowledge's `DSB SY` keeps a ticket from being stranded: an SGI merged
+into one already pending is acknowledged after both sends, so its handler's
+read sees both. A ticket whose send fails stays outstanding and the next
+barrier to that CPU serves it; none can fail for a CPU the kernel brought up,
+since `gic.c` asserts `DTB_MAX_CPUS` fits GICv2's eight-entry target list. The previous witness compared a count
+of barrier interrupts with the value read before the send, which an earlier
+sender's handler whose increment landed late could satisfy: the ITS drain
+(`gic_its_retire`) could have freed a lease while a handler was still due, and
+[[sub-kernel-sched]]'s `sched_sync_space`, which batches tickets across CPUs,
+would have inherited it. The GICv3 acknowledge now executes `DSB SY` after
+reading `ICC_IAR1_EL1` as well as before (Linux's `gic_read_iar_common`), so a
+handler's memory reads are not satisfied before the acknowledge; without it, a
+speculated read of the request count plus an SGI merged into one already
+pending would strand a ticket. The GICv2 IAR read already drains.
+`gic.irq_barrier` checks that a ticket is served and that the next, not yet
+taken, is not. No test can schedule the late-increment window; the argument is
+the record. SGIs 14 and 15 are reserved against raw interrupt
 claims. SGI 14 drains the ITS fault mailbox on CPU 0, notifying PCI endpoints
 after controller locks have been released.
 

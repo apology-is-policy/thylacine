@@ -95,42 +95,41 @@ USR_RS_TARGET="aarch64-unknown-none"
 # so build_go_probes skips cleanly when it is missing (the Go boot probe just
 # does not get baked). Override with GOFORK=/path/to/go-thylacine.
 GOFORK="${GOFORK:-$HOME/projects/go-thylacine}"
-# Build tags for BOTH ambush builds: build_ambush's ramfs copy (/ambush-probe) and
-# the /goroot/bin copy nora's :debug runs. thylacine_held: this tree's kernel
-# carries the birth hold (SPAWN_DEBUG_HELD), so ambush's Launch spawns its target
-# held and no quick program can outrun the attach. A kernel without the hold
-# refuses the flag, which is why the shared fork makes it a tag and the tree
-# passes it (DELVE-PORT-DESIGN section 7 (b)); it goes when every tree carries
-# the hold.
-AMBUSH_TAGS="thylacine_held"
-# Both ambush builds check both ends of the tag. Go ignores a tag no file
-# mentions, so a fork that predates the held launch, or one whose held file no
-# longer answers to the tag, would build the running-spawn Launch under a log
-# line saying held. ambush_fork_check asks the toolchain which of the pair the
-# tagged build compiles (go list: the build's own file selection) and refuses
-# unless it is held_on_thylacine.go, declaring launchHeld = true.
-# ambush_artifact_check then reads the tags back from the binary itself (go
-# version -m; the build info survives -s -w), so a build that lost the flag stops
-# here instead of shipping the race. Whether Launch still acts on the constant is
-# behaviour, which /ambush-probe stage C checks at the entry. Both capture before
-# they match: under pipefail a `| grep -q` can SIGPIPE the producer and fail a
+# Both ambush builds spawn the launch target held: this tree's kernel carries
+# the birth hold (SPAWN_DEBUG_HELD), so ambush's Launch parks its target in front
+# of the first instruction and no quick program can outrun the attach
+# (DELVE-PORT-DESIGN 8c-4 (b)). The fork made that a build tag while some trees
+# had no hold; since ambush 073faaa an untagged build compiles the held launch,
+# and an older fork built untagged compiles held_off_thylacine.go, the running
+# spawn -- under a log line that says nothing. ambush_fork_check asks the
+# toolchain which files the build compiles (go list: the build's own file
+# selection). It refuses held_off_thylacine.go; held_on_thylacine.go must declare
+# launchHeld = true (073faaa); with neither, as once the constant is deleted, no
+# compiled file may name launchHeld and Launch must set DebugHeld, which a fork
+# from before the held launch does not. Whether Launch spawns held is
+# behaviour, which /ambush-probe stage C checks at the entry. It captures before
+# it matches: under pipefail a `| grep -q` can SIGPIPE the producer and fail a
 # good build.
 ambush_fork_check() {
     local files
     files=$(cd "$1" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$GOFORK/bin/go" list -mod=vendor \
-        -tags "$AMBUSH_TAGS" -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
+        -f '{{join .GoFiles " "}}' ./pkg/proc/native) \
         || { echo "==> Ambush: go list of $1/pkg/proc/native FAILED" >&2; return 1; }
-    [[ " $files " == *" held_on_thylacine.go "* && " $files " != *" held_off_thylacine.go "* ]] \
-        || { echo "==> Ambush: -tags $AMBUSH_TAGS does not compile held_on_thylacine.go in $1 (a fork from before the held launch has none) -- update the fork" >&2; return 1; }
-    grep -q '^const launchHeld = true$' "$1/pkg/proc/native/held_on_thylacine.go" \
-        || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
-}
-ambush_artifact_check() {
-    local info
-    info=$("$GOFORK/bin/go" version -m "$1") \
-        || { echo "==> Ambush: go version -m $1 FAILED" >&2; return 1; }
-    grep -q -- "-tags=$AMBUSH_TAGS\$" <<<"$info" \
-        || { echo "==> Ambush: $1 does not record -tags=$AMBUSH_TAGS" >&2; return 1; }
+    local dir="$1/pkg/proc/native" f named=""
+    [[ " $files " != *" held_off_thylacine.go "* ]] \
+        || { echo "==> Ambush: $1 compiles held_off_thylacine.go untagged (a fork from before ambush 073faaa launches running) -- update the fork" >&2; return 1; }
+    if [[ " $files " == *" held_on_thylacine.go "* ]]; then
+        grep -q '^const launchHeld = true$' "$dir/held_on_thylacine.go" \
+            || { echo "==> Ambush: $1's held_on_thylacine.go does not declare launchHeld = true -- update the fork" >&2; return 1; }
+        return 0
+    fi
+    for f in $files; do
+        if grep -q 'launchHeld' "$dir/$f"; then named="$named $f"; fi
+    done
+    [[ -z $named ]] \
+        || { echo "==> Ambush: $1 names launchHeld in$named without held_on_thylacine.go -- update the fork" >&2; return 1; }
+    [[ " $files " == *" proc_thylacine.go "* ]] && grep -q 'SysProcAttr{DebugHeld: true}' "$dir/proc_thylacine.go" \
+        || { echo "==> Ambush: $1's Launch does not spawn held (a fork from before ambush 69e94cd launches running) -- update the fork" >&2; return 1; }
 }
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
@@ -248,6 +247,33 @@ BUILD_LEDGER=""
 ledger() {
     BUILD_LEDGER="${BUILD_LEDGER}    - $*"$'\n'
     echo "==> [build.sh] $*"
+}
+
+# disk_floor_check <stage> -- refuse to start <stage> on a nearly full volume.
+# A stage that writes GBs (the usr/Rust builds, a pool generate + populate) does
+# not fail alone when the disk fills: on 2026-10-05 a bake took the shared Mac's
+# volume to 121 MB free mid-populate, and every agent's shell then failed before
+# it ran, because the harness could not create its output file. Refusing while
+# there is room keeps the failure inside this build.
+disk_floor_check() {
+    local stage="$1" floor="${THYLACINE_MIN_FREE_GB:-6}" dir="$BUILD_DIR" free_kb
+    if ! [[ "$floor" =~ ^[0-9]+$ ]]; then
+        echo "==> THYLACINE_MIN_FREE_GB must be a whole number of GB (got '$floor')" >&2
+        exit 1
+    fi
+    (( floor == 0 )) && return 0
+    [[ -d "$dir" ]] || dir="$REPO_ROOT"
+    free_kb="$(df -Pk "$dir" | awk 'NR == 2 { print $4 }')"
+    if ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+        echo "==> disk floor check: cannot read the free space of $dir's volume" >&2
+        exit 1
+    fi
+    (( free_kb >= floor * 1024 * 1024 )) && return 0
+    echo "==> REFUSING $stage: $(( free_kb / 1024 )) MB free on $dir's volume, below the" \
+         "${floor} GB floor -- free space, or set THYLACINE_MIN_FREE_GB=<GB> (0 disables)" >&2
+    echo "    largest entries under $BUILD_DIR (du counts APFS-cloned blocks in full):" >&2
+    { du -sh "$BUILD_DIR"/* 2>/dev/null | sort -h | tail -6 | sed 's/^/      /' >&2; } || true
+    exit 1
 }
 
 # sysroot_is_stale — true (0) iff the pouch POSIX sysroot must be rebuilt: it
@@ -693,7 +719,7 @@ EOF
     # build_rust_progs, staged into $pouch_progs like the pouch binaries). The
     # -f guard in the copy loop below stages nothing when build_rust_progs
     # self-skipped off the track-R box, so this entry is inert there.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-susp" "pouch-hello-reentry" "pouch-hello-identity" "pouch-hello-mem" "pouch-hello-guard" "pouch-hello-jitthunk" "pouch-hello-dlopen" "pouch-hello-cxx" "sdl-probe" "sdl-audio-probe" "tyr-quake" "tyr-glquake" "make" "r1hello" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     # DX-2 (Cryptid): dosbox-x (17.6 MB) is DEFAULT-ON (operator direction
     # 2026-09-03; mirrors build_go_goroot's opt-out). THYLACINE_BAKE_DOSBOX=0
@@ -932,12 +958,11 @@ build_ambush() {
     fi
     mkdir -p "$go_out"
     ambush_fork_check "$ambush_src" || return 1
-    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, -tags $AMBUSH_TAGS, fork=$ambush_src)"
+    echo "==> Building Ambush (GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0, fork=$ambush_src)"
     ( cd "$ambush_src" && \
       GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 "$go_bin" build -mod=vendor \
-        -tags "$AMBUSH_TAGS" -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
+        -ldflags="-s -w" -o "$go_out/ambush" ./cmd/dlv ) \
         || { echo "==> Ambush: go build FAILED" >&2; return 1; }
-    ambush_artifact_check "$go_out/ambush" || return 1
     echo "==> Ambush built: $go_out/ambush"
     ls -la "$go_out/ambush"
     ledger "ambush: Delve port cross-compile (GOOS=thylacine, stripped) -> ramfs (Stage 8c-1 debugger)"
@@ -1064,11 +1089,10 @@ build_go_goroot() {
     local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
     if [[ -d "$ambush_src/cmd/dlv" ]]; then
         ambush_fork_check "$ambush_src" || return 1
-        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, -tags $AMBUSH_TAGS, fork=$ambush_src)"
+        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, fork=$ambush_src)"
         ( cd "$ambush_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
-            "$go_bin" build -mod=vendor -tags "$AMBUSH_TAGS" -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
+            "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
             || { echo "==> Ambush /goroot bake FAILED" >&2; return 1; }
-        ambush_artifact_check "$stage/bin/ambush" || return 1
         echo "==> Ambush (/goroot) built: $stage/bin/ambush ($(du -h "$stage/bin/ambush" | cut -f1 | tr -d ' '))"
         ledger "ambush: Delve port -> /goroot/bin (Stage 8e-3e nora :debug)"
         if [[ -d "$REPO_ROOT/usr/ambush-child" ]]; then
@@ -2473,7 +2497,7 @@ build_sysroot() {
     # POUCH_MALLOCNG_DIAG=1 in the env opts into the 0013-pouch-mallocng-
     # diag.patch's gated diagnostic: a sc/idx/maplen/stride/p+-8 dump
     # fires from enframe BEFORE the mallocng assertion that would
-    # otherwise _Exit(127) silently. Off by default (zero perf cost).
+    # otherwise abort() with no message. Off by default (zero perf cost).
     local musl_cflags=""
     if [[ "${POUCH_MALLOCNG_DIAG:-0}" == "1" ]]; then
         musl_cflags="-DPOUCH_MALLOCNG_DIAG"
@@ -3361,6 +3385,28 @@ build_stratumd() {
     cp "$binary" "$progs_out/stratumd"
     echo "==> stratumd built: $progs_out/stratumd ($(wc -c < "$progs_out/stratumd" | tr -d ' ') bytes, ET_EXEC, static)"
     ledger "stratumd: BUILT (links the pouch libc -- a stale sysroot would ship a stale ABI here)"
+    # The external Stratum source is the one build input no artifact hash
+    # enumerates, so two images can ship different stratumd while every
+    # recorded hash matches. Observed 2026-10-06: two trees with an IDENTICAL
+    # .config (4fcc788d6be38b80) and the same base commit, where one image's
+    # stratumd lacked the session-DEK leases -- which failed joey's D7
+    # overlapping-login probe with `install-dek ... result=err:eaccess` and was
+    # found only by reading both CMakeCache.txt files by hand. Recording only:
+    # the pin travels with the build instead of needing archaeology. Artifact
+    # hashes identify OUTPUTS; they do not enumerate external INPUTS.
+    local stratum_head stratum_dirty
+    if stratum_head="$(git -C "$stratum_src" rev-parse --short HEAD 2>/dev/null)"; then
+        if [[ -n "$(git -C "$stratum_src" status --porcelain 2>/dev/null)" ]]; then
+            stratum_dirty=YES
+        else
+            stratum_dirty=no
+        fi
+        ledger "stratumd: built from $stratum_src @$stratum_head (dirty: $stratum_dirty)"
+    else
+        # An ABSENT line would read as "no external input", which is the wrong
+        # reading -- say the commit could not be identified instead.
+        ledger "stratumd: built from $stratum_src (NOT A GIT REPO -- commit unidentifiable)"
+    fi
 }
 
 build_stratum_host_tools() {
@@ -3594,6 +3640,7 @@ build_stratum_pool_fixture() {
             fi
         done
     fi
+    disk_floor_check "the pool generate ($pool_img, size=$pool_size)"
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
@@ -4520,7 +4567,8 @@ DBXCONF /lib/dosbox-x/dosbox-x.conf"
     fi
     if [[ "${THYLACINE_BAKE_WEBKIT:-0}" == "1" && -f "$vp_webkit/jsc" ]]; then
         bake_want="$bake_want
-WEBKIT /webkit/jsc"
+WEBKIT /webkit/jsc
+SUNSPIDER /webkit/sunspider/run.js"
     fi
 
     local bake_missing=""
@@ -4793,12 +4841,19 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn pouch-hello-susp pouch-hello-reentry pouch-hello-identity pouch-hello-mem pouch-hello-guard pouch-hello-jitthunk; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
+        #    The JIT write-thunk probe takes the encoding JavaScriptCore uses
+        #    from usr/lib/thylajit, not a copy.
+        local extra_cflags=()
+        case "$prog" in
+            pouch-hello-jitthunk) extra_cflags=( -I"$REPO_ROOT/usr/lib/thylajit" ) ;;
+        esac
         "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
             -nostdinc -isystem "$sysroot/include" -fno-pie \
+            ${extra_cflags[@]+"${extra_cflags[@]}"} \
             -c "$src_dir/$prog.c" -o "$progs_out/$prog.o"
         # 2. link via tools/pouch-ld — it drives ld.lld directly with the
         #    pouch link line and supplies the CRT + libc.a. Per-binary
@@ -5210,10 +5265,23 @@ gl_link_program() {
     # hardcoded here: it is exactly what meson computed for osmesa-prove's
     # own link, so a list typed out in this script could only ever drift
     # from the one that is known to close.
+    # A PATH entry (the eight ExecutionEngine/JIT archives) is found by its file
+    # name inside THIS build: the list travels with build/ when a worktree
+    # clones it, so a recorded path can name the origin worktree's build, which
+    # need not exist any more. An archive found in neither directory keeps its
+    # path, so the link fails naming it.
     local llvm_flags=()
     local l
     while IFS= read -r l; do
-        [[ -n "$l" ]] && llvm_flags+=( "$l" )
+        [[ -n "$l" ]] || continue
+        if [[ $l == */* ]]; then
+            if [[ -f "$gl_lib/${l##*/}" ]]; then
+                l="$gl_lib/${l##*/}"
+            elif [[ -f "$llvm_lib/${l##*/}" ]]; then
+                l="$llvm_lib/${l##*/}"
+            fi
+        fi
+        llvm_flags+=( "$l" )
     done < "$libs_list"
 
     # TWO Mesa archives, not the seven osmesa-prove's own link line names.
@@ -6611,8 +6679,14 @@ build_libcxx() {
 }
 
 # --- Boosty (the browser arc, docs/BROWSER-DESIGN.md): ICU + JavaScriptCore -------
-# B-0: WebKit's JSCOnly port, static, every JIT tier OFF (the asm LLInt + IPInt
-# interpreters), against a cross-built ICU. DEFAULT-OFF (CHUNK_WEBKIT /
+# B-0: WebKit's JSCOnly port, static, against a cross-built ICU. B-2c: every JIT tier is
+# built (upstream no longer builds JIT without DFG/FTL on ARM64) and patch 0002 forced
+# DFG, FTL, BBQ and OMG off at run time, so the Baseline JIT and the YARR regexp JIT ran;
+# patch 0004 (B-2d) opened the DFG, patch 0005 (B-2e1) the FTL, and patch 0006 (B-2e3)
+# Wasm's BBQ and OMG, synchronized through SYS_ICACHE_SYNC_SPACE;
+# the pool is one SYS_JIT_CREATE region written through a sealed execute-only thunk
+# (usr/ports/webkit/patches/0002); jsc takes CAP_JIT by the SELF form.
+# Without CAP_JIT the pool is refused and JSC runs its LLInt + IPInt interpreters. DEFAULT-OFF (CHUNK_WEBKIT /
 # THYLACINE_BAKE_WEBKIT=1): ~10 min of ICU + ~30 min of JSC on this host, and the
 # source is neither vendored nor small (a sparse partial clone beside the other
 # forks). Pins live in tools/build-manifest.toml ([source.webkit], [cache.icu4c]);
@@ -6707,33 +6781,72 @@ build_icu() {
     ledger "icu $ICU_VER: BUILT (static, data packaged in libicudata.a)"
 }
 
+# The tree the pin plus the patch series builds, applied IN ORDER in a scratch
+# index: the series is stacked, so a later patch may edit lines an earlier one
+# added, and no patch can be asked about alone. Prints the tree id, or the first
+# patch that does not apply with git's reason; returns nonzero on failure. A
+# relative patch path is made absolute: `git -C` would resolve it in the checkout.
+webkit_series_tree() {
+    local wk="$1" pin="$2" pp tree err rc=0; shift 2
+    local idx; idx="$(mktemp -d "${TMPDIR:-/tmp}/webkit-series.XXXXXX")" || return 1
+    GIT_INDEX_FILE="$idx/index" git -C "$wk" read-tree "$pin" 2>/dev/null \
+        || { echo "the pin $pin is not readable"; rm -rf "$idx"; return 1; }
+    for pp; do
+        [[ "$pp" == /* ]] || pp="$PWD/$pp"
+        [[ -r "$pp" ]] || { echo "patch $pp is not readable"; rc=1; break; }
+        err="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" apply --cached "$pp" 2>&1 >/dev/null)" \
+            || { echo "patch $(basename "$pp") does not apply on the pin plus the patches before it: ${err%%$'\n'*}"; rc=1; break; }
+    done
+    if (( rc == 0 )); then
+        if tree="$(GIT_INDEX_FILE="$idx/index" git -C "$wk" write-tree 2>&1)"; then
+            echo "$tree"
+        else
+            echo "the series index could not be written: ${tree%%$'\n'*}"; rc=1
+        fi
+    fi
+    rm -rf "$idx"
+    return $rc
+}
+
 webkit_checkout_ok() {
-    # The checkout must be the PINNED tree with EVERY port patch applied and
-    # nothing else: pin is an ancestor, each patch reverse-applies cleanly, and
-    # the tree is clean. Prints the first failing reason; returns nonzero.
-    local wk="$1" port_dir="$2" pp
+    # The checkout must be the PINNED tree with the port's patch series applied
+    # and nothing else: HEAD's tree is exactly the tree the series builds on the
+    # pin, and the working tree is clean. Prints the first failing reason;
+    # returns nonzero.
+    local wk="$1" port_dir="$2" pp want
+    local -a series=()
     [[ -d "$wk/.git" && -f "$wk/Source/JavaScriptCore/CMakeLists.txt" ]] \
         || { echo "no checkout at $wk"; return 1; }
     git -C "$wk" merge-base --is-ancestor "$WEBKIT_PIN" HEAD 2>/dev/null \
         || { echo "HEAD does not descend from the pin $WEBKIT_PIN"; return 1; }
     [[ -z "$(git -C "$wk" status --porcelain --untracked-files=no)" ]] \
         || { echo "the checkout has uncommitted changes"; return 1; }
-    local want=""
     for pp in "$port_dir"/patches/*.patch; do
-        [[ -e "$pp" ]] || continue
-        git -C "$wk" apply --check --reverse "$pp" 2>/dev/null \
-            || { echo "patch $(basename "$pp") is not applied"; return 1; }
-        want+="$(git -C "$wk" apply --numstat "$pp" 2>/dev/null | awk '{print $3}')"$'\n'
+        [[ -e "$pp" ]] && series+=("$pp")
     done
-    # "...and nothing else": the files that differ from the pin are exactly the
-    # files the series names. A reverse-apply check alone passes on a tree that
-    # carries the patches PLUS local edits to other files.
-    local got
-    got="$(git -C "$wk" diff --name-only "$WEBKIT_PIN" HEAD | sort -u)"
-    want="$(printf '%s' "$want" | sed '/^$/d' | sort -u)"
-    [[ "$got" == "$want" ]] \
-        || { echo "the checkout differs from the pin in files the patch series does not name"; return 1; }
+    want="$(webkit_series_tree "$wk" "$WEBKIT_PIN" "${series[@]}")" || { echo "$want"; return 1; }
+    [[ "$want" == "$(git -C "$wk" rev-parse 'HEAD^{tree}')" ]] \
+        || { echo "HEAD's tree is not the pin plus the patch series (a commit the series does not carry)"; return 1; }
     return 0
+}
+
+# SunSpider 1.0.2 (the fork's PerformanceTests, in the manifest's sparse cone) and
+# its driver, staged beside jsc so the bake carries /webkit/sunspider. 23 of its 26
+# tests check their own result, so the benchmark is also a correctness run for
+# those (date-format-tofte, date-format-xparb and string-validate-input check
+# nothing).
+stage_jsc_bench() {
+    local wk="$1" stage="$2" port_dir="$3"
+    local src="$wk/PerformanceTests/SunSpider/tests/sunspider-1.0.2" n
+    [[ -f "$src/LIST" ]] || { echo "==> jsc: SunSpider 1.0.2 is not in the checkout ($src)" \
+        "-- run 'tools/forage.sh webkit' (the manifest's sparse cone names it)" >&2; exit 1; }
+    rm -rf "${stage:?}/sunspider"
+    mkdir -p "$stage/sunspider"
+    cp "$src/LIST" "$src"/*.js "$stage/sunspider/"
+    cp "$port_dir/sunspider-run.js" "$stage/sunspider/run.js"
+    n="$(grep -c . "$src/LIST")"
+    [[ "$(find "$stage/sunspider" -name '*.js' | wc -l | tr -d ' ')" == "$((n + 1))" ]] \
+        || { echo "==> jsc: the SunSpider stage does not hold LIST's $n tests plus run.js" >&2; exit 1; }
 }
 
 build_jsc() {
@@ -6767,16 +6880,18 @@ build_jsc() {
     if [[ -f "$out" && -f "$stage/jsc" && -z "${WEBKIT_FORCE:-}" ]]; then
         local stale
         stale="$(find "$port_dir" "$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
-                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" -type f -newer "$out" -print -quit 2>/dev/null)"
+                      "$REPO_ROOT/cmake/Platform/Thylacine.cmake" "$REPO_ROOT/usr/lib/thylajit" \
+                      -type f ! -name sunspider-run.js -newer "$out" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$out" && ! "$sysroot/lib/libc++.a" -nt "$out" \
               && ! "$icu_stage/lib/libicuuc.a" -nt "$out" && ! "$wk/.git/HEAD" -nt "$out" \
               && "$(cat "$bdir/.webkit-head" 2>/dev/null)" == "$(git -C "$wk" rev-parse HEAD)" ]]; then
-            ledger "jsc (JavaScriptCore, JIT off): REUSED (cached + up-to-date)"
+            stage_jsc_bench "$wk" "$stage" "$port_dir"
+            ledger "jsc (JavaScriptCore, every tier built and on): REUSED (cached + up-to-date)"
             return 0
         fi
     fi
 
-    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, JIT off, -j$jobs)"
+    echo "==> building JavaScriptCore (WebKit $WEBKIT_PIN, PORT=JSCOnly, static, every tier built and on, -j$jobs)"
     mkdir -p "$bdir" "$stage"
     # A changed toolchain file or sysroot invalidates the cache wholesale; ninja's
     # depfiles handle the rest (they track -isystem headers).
@@ -6784,9 +6899,11 @@ build_jsc() {
         -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-pouch-cxx.cmake" \
         -DLLVMFORK="$fork/build" -DHOSTLLVM="$LLVM_PREFIX" \
         -DTHYLACINE_SYSROOT="$sysroot" -DTHYLACINE_EXTRA_ROOTS="$icu_stage" \
+        -DTHYLACINE_EXTRA_INCLUDES="$REPO_ROOT/usr/lib/thylajit" \
         -DICU_ROOT="$icu_stage" -DCMAKE_BUILD_TYPE=Release \
         -DPORT=JSCOnly -DENABLE_STATIC_JSC=ON \
-        -DENABLE_JIT=OFF -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_C_LOOP=OFF \
+        -DENABLE_JIT=ON -DENABLE_DFG_JIT=ON -DENABLE_FTL_JIT=ON -DENABLE_C_LOOP=OFF \
+        -DENABLE_WEBASSEMBLY_BBQJIT=ON -DENABLE_WEBASSEMBLY_OMGJIT=ON \
         -DENABLE_WEBASSEMBLY=ON -DUSE_SYSTEM_MALLOC=ON \
         -DENABLE_SAMPLING_PROFILER=OFF -DENABLE_REMOTE_INSPECTOR=OFF \
         -DDEVELOPER_MODE=OFF -DUSE_LIBBACKTRACE=OFF -DUSE_SYSTEM_UNIFDEF=ON \
@@ -6808,10 +6925,56 @@ build_jsc() {
     fi
     [[ "$(grep -cE '^[[:space:]]*LOAD[[:space:]]' <<< "$ph")" -ge 2 ]] \
         || { echo "==> jsc: readelf printed no LOAD segments -- the W+X check saw nothing" >&2; exit 1; }
+    # A thread runs an ISB before it runs code written or patched on another CPU: where
+    # it resumes the VM's code (patch 0004), where it takes a finished Wasm plan's stubs
+    # (patch 0005), and where the FTL installs a compiler thread's code (upstream's).
+    # No run can show one missing (BROWSER-DESIGN 7, B-2d and B-2e), so the built binary
+    # is asked for each. A third field names a call the isb must precede: finalizeCreation
+    # runs the module's start function itself, so a fence moved below that call would
+    # still be present and no longer cover it. Address order stands in for program order,
+    # and a layout that puts the call first fails closed.
+    local isbsym isbname isbafter isbdis isbpos
+    while read -r isbsym isbname isbafter; do
+        isbdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+            --disassemble-symbols="$isbsym" "$out")"
+        [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$isbdis")" -ge 8 ]] \
+            || { echo "==> jsc: no $isbname to disassemble -- the ISB check saw nothing" >&2; exit 1; }
+        grep -qE '^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)' <<< "$isbdis" \
+            || { echo "==> jsc: $isbname has no isb" >&2; exit 1; }
+        [[ -z "$isbafter" ]] && continue
+        isbpos="$(awk -v c="<$isbafter" '
+            /^[[:space:]]*[0-9a-f]+:[[:space:]]+isb([[:space:]]|$)/ && !i { i = NR }
+            /^[[:space:]]*[0-9a-f]+:[[:space:]]+bl[[:space:]]/ && index($0, c) && !b { b = NR }
+            END { print (b == 0 ? "no such call" : (i < b ? "before" : "after it")) }' <<< "$isbdis")"
+        [[ "$isbpos" == before ]] \
+            || { echo "==> jsc: $isbname: its isb is not before its call to $isbafter ($isbpos)" >&2; exit 1; }
+    done <<'ISBSYMS'
+_ZN3JSC14MachineThreads19unparkCurrentThreadEv MachineThreads::unparkCurrentThread(patch-0004)
+_ZN3JSC4Wasm6Module11compileSyncERNS_2VMENS_10MemoryModeE Wasm::Module::compileSync(patch-0005)
+_ZN3JSC21JSWebAssemblyInstance16finalizeCreationERNS_2VMEPNS_14JSGlobalObjectEON3WTF3RefINS_4Wasm11CalleeGroupENS5_12RawPtrTraitsIS8_EENS5_21DefaultRefDerefTraitsIS8_EEEENS7_12CreationModeE JSWebAssemblyInstance::finalizeCreation(patch-0005) _ZN3JSC23WebAssemblyModuleRecord17initializeExports
+_ZN3JSC3FTL12JITFinalizer8finalizeEv FTL::JITFinalizer::finalize(upstream)
+ISBSYMS
+    # Wasm's BBQ and OMG publish code to threads that never stop, and patch 0006 makes
+    # Wasm::resetInstructionCacheOnAllThreads issue SYS_ICACHE_SYNC_SPACE in place of
+    # upstream's thread walk, whose suspension is fatal here. No run shows the walk's
+    # absence until a BBQ install, so the binary is asked: the last write to x8 before
+    # an svc #0 must put 128 there. A store or any other write to x8 fails closed.
+    local syncdis
+    syncdis="$("$LLVM_PREFIX/bin/llvm-objdump" -d --no-show-raw-insn \
+        --disassemble-symbols=_ZN3JSC4Wasm33resetInstructionCacheOnAllThreadsEv "$out")"
+    [[ "$(grep -cE '^[[:space:]]*[0-9a-f]+:' <<< "$syncdis")" -ge 3 ]] \
+        || { echo "==> jsc: no Wasm::resetInstructionCacheOnAllThreads to disassemble -- the sync check saw nothing" >&2; exit 1; }
+    [[ "$(awk '
+        /^[[:space:]]*[0-9a-f]+:[[:space:]]+[a-z][a-z0-9.]*[[:space:]]+[xw]8,/ {
+            w8 = ($0 ~ /[[:space:]]mov[[:space:]]+[xw]8, #(0x80|128)([[:space:]]|$)/) }
+        /^[[:space:]]*[0-9a-f]+:[[:space:]]+svc[[:space:]]+#0([[:space:]]|$)/ && w8 { ok = 1 }
+        END { print (ok ? "yes" : "no") }' <<< "$syncdis")" == yes ]] \
+        || { echo "==> jsc: Wasm::resetInstructionCacheOnAllThreads issues no SYS_ICACHE_SYNC_SPACE (x8 = 128, then svc #0)" >&2; exit 1; }
     "$strip" -o "$stage/jsc" "$out"
     git -C "$wk" rev-parse HEAD > "$bdir/.webkit-head"
-    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X)"
-    ledger "jsc (JavaScriptCore, JIT off): BUILT -> $stage/jsc (baked at /webkit/jsc)"
+    stage_jsc_bench "$wk" "$stage" "$port_dir"
+    echo "    jsc: $(wc -c < "$stage/jsc" | tr -d ' ') bytes stripped ($(wc -c < "$out" | tr -d ' ') with symbols; ET_EXEC, static, no W+X, every cross-CPU ISB present, the Wasm space sync)"
+    ledger "jsc (JavaScriptCore, every tier built and on): BUILT -> $stage/jsc (baked at /webkit/jsc)"
 }
 
 build_clade() {
@@ -7438,6 +7601,35 @@ python3 "$REPO_ROOT/tools/check-patch-hunks.py" \
 GOFORK="$GOFORK" python3 "$REPO_ROOT/tools/check-spawn-args-mirrors.py" \
     || { echo "==> spawn-args mirror check FAILED -- a copy of struct" >&2
          echo "    sys_spawn_args does not match kernel/include/thylacine/syscall.h" >&2
+         exit 1; }
+
+# Every member of a flag word (proc_flags, the spawn words, the walk-create
+# mode word, the 9P attach flags, the mount flags) must own its bits. A flag's
+# _Static_assert names the flags its author knew, so two branches can take the
+# same free bit and both compile -- it happened in proc_flags, at bit 22. This
+# check derives each set from its header instead, and proves it can fail before
+# it passes. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-flag-words.py" \
+    || { echo "==> flag-word check FAILED -- two defines share a bit of one flag" >&2
+         echo "    word, or the check could not verify itself (see above)" >&2
+         exit 1; }
+
+# The free-space floor, before any target writes; `clean` frees space.
+[[ "$target" == clean ]] || disk_floor_check "target '$target'"
+
+# The memory-protection bits cross the syscall boundary as raw values, and each
+# userspace mirror pins its own literals rather than deriving them: a bit added
+# kernel-side without its mirror leaves the two sides silently disagreeing. This
+# tree has already had two branches' flag _Static_asserts each miss the other's
+# bit, which is why the check DERIVES both sides from the headers instead of
+# matching a name list -- a guard pinned to a name is re-pointed by hand and goes
+# stale; a derived one cannot. --expect-unmirrored pins today's deliberate
+# absences (the VMA_PROT_RW and VMA_PROT_RX composites in both mirrors, and
+# BURROW_PROT_EXEC in libthyla-rs) so a NEW absence fails instead of quietly
+# joining them. Sub-second, fatal, no skip switch.
+python3 "$REPO_ROOT/tools/check-prot-mirror.py" --expect-unmirrored 5 \
+    || { echo "==> prot-mirror check FAILED -- a kernel prot bit and its" >&2
+         echo "    userspace mirror disagree, or a new kernel bit has no mirror" >&2
          exit 1; }
 
 case "$target" in

@@ -28,7 +28,7 @@ hazards: []
 abis: []
 design: []
 created: 2026-08-04
-updated: 2026-09-29
+updated: 2026-10-06
 ---
 ## Purpose
 
@@ -125,7 +125,11 @@ with it). Colour off *and* beacon off: the kernel text passes through
 **verbatim**, byte-clean and parseable, raw `CPU_NS` intact — the same
 pass-through discipline `ns` uses. Colour on: a boxed listing, CPU
 humanized (ns -> ms/s) and STATE coloured against the kernel's own
-vocabulary (ALIVE green, ZOMBIE ember, STOPPED gold). It parses defensively
+vocabulary (ALIVE green, ZOMBIE ember, STOPPED gold). A CPU column of `-`
+stays `-`: since 2026-10-06 the kernel withholds another principal's CPU time
+(IMPERIUM-DESIGN 11.3 item 10, [[sub-kernel-devctl]]), and before ps learned
+the dash its row failed the parse below, so an ordinary user's listing always
+fell back to the verbatim text (`cpu-gate.exp` requires the box). It parses defensively
 — the NAME column is rejoined from the middle fields so a spaced name
 cannot shear the numeric columns, and **any** row it cannot parse (kernel
 format drift) drops the whole render back to the verbatim text rather than

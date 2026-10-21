@@ -15,7 +15,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: [docs/LARDER-DESIGN.md, docs/FID-LIFECYCLE-DESIGN.md, docs/POUNCE-DESIGN.md]
 created: 2026-07-31
-updated: 2026-09-29
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -48,7 +48,14 @@ A CAPED session (the identity cape, below) changes what four of these slots
 report or send; no slot changes shape.
 
 Exports beyond the vtable: `dev9p_client_fid` (the Loom I-30 submit pin
-resolve), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
+resolve), `dev9p_loom_register` (a Loom registration: fail on a latched
+flush error, flush the staged run, stop staging by clearing only `wb_known`
+as wstat does, free the dead staging buffer, then drop the file's Larder
+pages; witnesses
+`p9_closer.loom_register_flushes_staged_run`,
+`dev9p.wb_dying_loom_register_keeps_staging`,
+`dev9p.wb_loom_register_keeps_the_latch`; its errno is the registration's,
+`SYS_LOOM_REGISTER` returning it since B-2b), `dev9p_weft_try_write`/`_read` (the zero-copy data-drive arms),
 `dev9p_priv_of`, `dev9p_create_errno` (#99), the cached-open/write-behind
 budget diagnostics + test bias.
 
@@ -76,9 +83,44 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    guarded) → `weft_binding_release`.
 3. Cached-open: free `co_buf` + uncharge the global budget.
 4. Write-behind: flush the staged run (the fid must still be live for the
-   flush Twrites) — best-effort; a failure latches-and-drops (`Dev.close`
-   is void at v1.0, [[seam-wb-close-flush-slot]]) — then free the buffer +
-   uncharge.
+   flush Twrites); a failure latches and drops the run, and the close
+   returns it -- or the failure the latch kept from an earlier flush -- which
+   `close(2)` reports as `EIO` (2026-10-07, ARCH section 21.11; until then
+   `Dev.close` was void and the failure was silent,
+   [[seam-wb-close-flush-slot]]) — then free the buffer + uncharge.
+   A flush that fails on a thread dying inside `write`, `fsync` or `wstat`
+   keeps the run staged and latches nothing (a death refused the send; the
+   bytes were acknowledged), so this close sends it (`wb_flush_locked`,
+   LARDER-DESIGN section 12; witness `dev9p.wb_dying_flush_keeps_run`).
+   A flush a caught note interrupted is the same case (2026-10-07, B-2b):
+   the client's flush(5) cancelled the Twrite and returned `-P9_E_INTR`, so
+   the call returns `EINTR`, the run stays staged and unlatched, and a retry
+   or the last close sends it; a close whose own flush is interrupted hands
+   the run to the closer and returns 0. Until then the `EINTR` latched and the
+   run was dropped, so every later write, fsync and close on the file
+   returned `EINTR`. The cancellation is told by the note's claim
+   (`wb_note_cancelled`: every caught-note unwind takes one and holds it to
+   the EL0-return tail); a server's own Rlerror(EINTR), with no claim, latches
+   like any failure and the last close reports it (B-2b audit F1). Witnesses
+   `dev9p.wb_interrupted_flush_keeps_run` (the claim held) and its control
+   `dev9p.wb_server_eintr_latches` (none).
+   **A close that may not wait never flushes here** (2026-10-07, ARCH 7.9.1
+   part C): `close_may_wait()` is false on a die-pending thread (a killed
+   thread's own last close, or a final close a second kill forced) and on a
+   kernel thread marked `closes_never_wait` (the Loom SQPOLL kthread, which
+   `loom_free` joins). A run still staged after this step -- never tried, or
+   kept by a death that ended the flush -- goes to a closer with the fid's
+   clunk (`wb_close_hand_off` -> `p9_attached_defer_close`, a
+   `dev9p_close_job` owning the buffer and its budget charge), and the close
+   returns 0: nothing is lost yet. The closer writes the run
+   (`wb_write_run`, the loop `wb_flush_locked` uses), then drops the file's
+   cached attr and pages rather than installing them, since that write lands
+   unordered with the file's later writers; then it clunks. A hand-off that
+   cannot be made (no session owner -- a test's bare client -- or no memory)
+   loses the run loudly: `9p: close: flush of fid N failed rc R`, and the
+   close returns the errno. The kernel-thread arm keys on the flag, not on
+   kproc, because the in-kernel test runner is kproc's boot thread and waits
+   on its fixtures by design.
 5. `fid_owned`: **G2 donate or async clunk.** An unopened (COPEN clear)
    DIRECTORY fid on a cacheable client, not `fid_suspect`, and not staled
    (`larder_qid_staled_since` over the G4 ring since `fid_gen`) PARKS in
@@ -98,7 +140,12 @@ under `wb_lock` ([[lock-dev9p-wb-priv]]).
    [[sub-kernel-ninep-attach]]) -- before `p9_attached_unref` in step 6, so
    the entry's reference is taken while the priv's still holds. gopls's kill
    of a `go` child still in its spawn thunk was the measured case: three
-   leaked fids a boot. Only a fid the live session still holds after that
+   leaked fids a boot. A handed-off close skips this step: the closer clunks
+   after its write. A thread no death reaches (`thread_death_reaches` false: a
+   kernel thread such as the Loom SQPOLL reap, or an unforced exit close) never waits
+   here: the helper clunks through `p9_client_clunk_nowait`, so a full op
+   share or a full request ring sends the fid to the closer instead of
+   holding the close on the server (`dec-2026-10-07-exit-close`, part A). Only a fid the live session still holds after that
    is reported (`p9_clunk_refused`); a dead session's fids died with it, and
    a fid a failed walk never bound had nothing to leak.
 6. `p9_attached_unref` — possibly the last ref → the whole session tears
@@ -239,7 +286,14 @@ after the run is gone) — then Tfsync with real-errno propagation.
 `_Static_assert`s): a caped session refuses UID/GID before anything else
 (the cape, below); cached-open fails LOUD ([[seam-co-fidless-wstat]]);
 write-behind: flush first (a truncate must land after the staged bytes)
-then de-eligibilize (a size change destroys the append anchor); on success
+then stop staging by clearing the append anchor (`wb_known`; a size change
+destroys it) -- never the eligibility flag, which gates the read overlay,
+fsync's flush and the write ordering of a run a death kept, and the latch's
+report on every write and fsync, for another Proc sharing the fd too
+(witnesses `dev9p.wb_dying_wstat_keeps_staging`,
+`dev9p.wb_wstat_keeps_the_latch`), and with no run left it frees the
+staging buffer and its budget share at once (`wb_release_dead_locked`;
+nothing can stage into it again); on success
 attr invalidate (CRITICAL — the base X-check perm_checks the cached mode,
 so the invalidate keeps the guest's own chmod window at zero) + whole-file
 page invalidate when SIZE changed.
@@ -377,7 +431,7 @@ victims MUST be clunked — a fresh walk re-resolving a reused qid.path must
 never be served a fid for the dead object). All returns are clunked by the
 CALLER outside the leaf lock.
 
-### The remote declaration's one reader, and the name a session root's mount carries (LR-1 2026-09-28; the origin 2026-09-29)
+### The remote declaration's two readers, and the name a session root's mount carries (LR-1 2026-09-28; the origin 2026-09-29; served links 2026-10-06)
 
 `dev9p_spoor_remote(c)` answers whether `c` belongs to a session declared
 remote at its attach or its /srv post (HAUL-DESIGN 4.8). It reads the
@@ -385,9 +439,12 @@ client's `remote` flag through `priv_of`, so it is false for NULL, for a
 Spoor of another Dev, for a dev9p Spoor with no priv, and for a priv that
 does not carry `DEV9P_PRIV_MAGIC`. The read is lock-free: the flag is
 stamped before the session's root publishes and never flips, and the
-caller's reference on `c` keeps the priv and the client alive. Its one
-caller is `territory_format_ns` ([[sub-kernel-territory]]); nothing in this
-Dev consults the flag.
+caller's reference on `c` keeps the priv and the client alive. It has two
+callers: `territory_format_ns` ([[sub-kernel-territory]]), which renders the
+` remote` suffix, and, as this Dev's `remote` slot (`.remote =
+dev9p_spoor_remote`, 2026-10-06), the resolver, which contains a link the
+session serves beneath the mount it was reached through ([[sub-kernel-stalk]],
+DISTRO 4.6) and so only narrows. Nothing else in this Dev consults the flag.
 
 Every session root is born named "/" (`dev9p_attach_client`) and keeps that
 name: it is the namespace root's name when joey pivots to one, and a pivot
@@ -415,6 +472,9 @@ rows of `dev9p.walk_create_refuses_dmsrv_bits` and
 `dev9p.path_create_refuses_dmsrvcape` keep the bit out of a Tlcreate perm.
 The LR-1 sabotage boots turned `remote_format_ns` red both when the function
 answered for every dev9p Spoor and when it read a priv without its magic.
+The slot itself is held on the device by `haul-links`, which follows a real
+npxf export's links over both Haul forms: with the `.remote` line deleted from
+the vtable, its first leg read the guest's own decoy (2026-10-06).
 `dev9p.origin_format_ns` pins the origin: the accessor's negatives (NULL,
 another Dev, a bare dev9p Spoor), an unstamped root's `/`, the stamp sharing
 the name (its count rises by one) and refusing a second stamp, the rendered

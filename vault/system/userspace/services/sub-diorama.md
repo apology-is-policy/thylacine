@@ -14,9 +14,9 @@ validated-by: [prose]
 locks: []
 hazards: []
 abis: []
-design: ["docs/VIVARIUM.md"]
+design: ["docs/VIVARIUM.md", "docs/IMPERIUM-DESIGN.md section 11.3 item 10"]
 created: 2026-08-04
-updated: 2026-09-07
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -120,10 +120,13 @@ ends where a parser expects.
 
 **The `/proc/*/maps` translation is where reformatting is most visible.**
 Six native columns become six Linux ones, and the interesting parts are
-where the systems genuinely differ: Thylacine's device number is flat
-with no major/minor split, so it renders as a minor under major zero —
-which is exactly how Linux renders any filesystem with no backing block
-device, so the shape is honest rather than approximated. A protection-none
+where the systems genuinely differ: Thylacine's device number is flat,
+and vivarium reports it whole as `st_dev`, so the device column is
+`major(devno):minor(devno)` as glibc and musl split a `dev_t`. On Linux the
+column is always the device whose encoding `stat` returns, and a reader
+compares `makedev(maj, min)` with `st_dev`; until 2026-10-06 the column was
+`00:<devno>`, which agreed only below 256. A devno below 256 still reads
+`00:xx`, as Linux shows a filesystem with no block device. A protection-none
 guard VMA renders `---p` with no pathname and is *emitted*, because
 dropping it would make the map claim the range is free.
 
@@ -233,10 +236,44 @@ own process and the kernel's own answer is the client's own answer — and
 the per-pid absence is asserted by the selftest with a failure string
 naming what it is protecting.
 
+`maps` is the second, and is handled by holding no authority rather than by
+absence (2026-10-07; B-2b audit r2). A code row's addresses go only to the
+target itself or to a reader with debug authority over it
+([[sub-kernel-devproc]]), and over an image holding a code alias that authority
+needs `CAP_JIT`, `CAP_HOSTOWNER` or `CAP_DEBUG` -- all elevation-only -- because
+the kernel's image join counts the aliases as `CAP_JIT` even when no mapper holds
+it. Both instances are spawned with no caps, so the kernel zeroes every foreign
+code row before this server sees it; `deputy_check`, run in `main` after the
+selftest, reads `/proc/<own pid>/imperium` and refuses to serve unless its
+`caps` field is zero, so the property is checked rather than inherited from two
+spawn masks. The cost lands on `/self` alone: a peer holding code sees its own
+code rows zeroed here, and no Linux guest can hold one.
+
 The rejected alternative is recorded and the reasoning is worth keeping:
 replicating the kernel's owner check against the peer would *work*, and
 was refused because it turns a component whose entire design property is
 having no policy into a policy point, to serve a file no consumer reads.
+
+**The CPU counters are the second case, closed the same way (2026-10-06).**
+Since IMPERIUM-DESIGN 11.3 item 10 the kernel shows per-CPU idle time,
+context switches and interrupts only to the system principal or a hostowner,
+because each moves once per key of a secret typed into the trusted episode
+([[sub-kernel-devctl]]). The boot's shared instance runs as SYSTEM, so the
+kernel gives it the exact figures, and any principal can mount it: passing
+them on would make it the deputy the gate exists to stop. So in shared mode
+(`viv_runner() == 0`) `render_stat_from` withholds them from every client,
+whatever the kernel told it: each `cpu`/`cpuN` line is zeros, and the
+`intr` and `ctxt` lines are left out. A per-container instance runs as its
+container's principal, gets `-` from the kernel for the same fields, and
+renders them the same way. The two differ for the reason above: a whole line
+can be omitted, and a 0 there would be a count nobody measured, but the
+jiffies columns are positional and Linux's format has no dash. A line of
+zeros reads as no time elapsed rather than as a plausible split. As with `environ`, checking the peer and serving exact figures to a
+SYSTEM or hostowner client was rejected: it would make this component a
+policy point, for consumers (`top` in a vivarium) that a hostowner can serve
+natively. The selftest renders a measured, a withheld and a shared
+`/proc/stat`; `diorama-probe` requires the withheld lines from
+`/srv/diorama`.
 
 ## Error paths
 
@@ -303,6 +340,11 @@ position in a list that moves.
 
 - **Message-size arithmetic stays saturating.** See the caveats — this one
   has already been a whole-server abort.
+
+- **The shared instance relays nothing the kernel gates by principal.** It
+  runs as SYSTEM for every client, so a field the kernel shows only to some
+  principals (`environ`, the CPU counters) is absent or withheld here, never
+  read with SYSTEM's authority and passed on.
 
 - **In vivarium mode, a widening is the failure.** Membership may only
   ever narrow under a partial snapshot. Any change that lets a missing row

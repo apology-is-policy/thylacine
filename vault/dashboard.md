@@ -41,11 +41,9 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 88
+## Open seams: 83
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
-- [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
-- [[seam-223-pump-tail-starvation]] (sub-kernel-ninep-dev9p-poll)
 - [[seam-240-lo-redial]] (sub-netd-server)
 - [[seam-242-selftest-nonfatal]] (sub-netd-nic)
 - [[seam-350-async-eagain]] (sub-kernel-ninep-client)
@@ -57,13 +55,11 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-841-mi-harness]] (sub-kernel-ninep-client)
 - [[seam-845-untrusted-server]] (sub-kernel-ninep-client)
 - [[seam-87-disk-write-proof]] (sub-substrate-interactive, sub-substrate-gates)
-- [[seam-90-hung-server]] (sub-kernel-ninep-client)
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
-- [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
+- [[seam-9p-async-share-poll-reserve]] (sub-kernel-ninep-client)
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
 - [[seam-boot-banner-coupdate-list]] (sub-substrate-gates)
 - [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
-- [[seam-close-flush-unbounded]] (sub-kernel-death)
 - [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
 - [[seam-console-chrome-on-handoff]] (sub-tapestryd)
 - [[seam-cwg-parenthetical-refuted]] (sub-kernel-boot-sequence)
@@ -71,7 +67,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-dtb-blob-internally-trusted]] (sub-kernel-dtb)
 - [[seam-eevdf-math]] (sub-kernel-sched)
-- [[seam-el0-irq-tail-no-notes]] (sub-kernel-exception)
+- [[seam-exited-threads-wait-for-a-create]] (sub-kernel-thread)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
@@ -130,16 +126,15 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-viv-tier2-frame]] (sub-kernel-syscall-abi, sub-kernel-vivarium)
 - [[seam-warp-prove-unowned]] (sub-tapestryd)
-- [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
-- 2026-10-13 [[chg-2026-10-13-loom-ledger-one-owner]] — Loom's I-32 ledger: one owner, bound with the charge
-- 2026-10-05 [[chg-2026-10-05-halcyon-mode-chips]] — Show the focused transcript mode in an accent-filled status chip
-- 2026-10-04 [[chg-2026-10-04-async-buffer-pool-abi]] — Pin provided-buffer records in three compiled mirrors
-- 2026-10-04 [[chg-2026-10-04-async-buffer-pool-core]] — Implement bounded internal payload pool transitions
-- 2026-10-04 [[chg-2026-10-04-async-buffer-pool-design]] — Separate private streaming payload leases from completion consumption
-- 2026-10-04 [[chg-2026-10-04-async-buffer-pool-model]] — Model payload ownership separately from completion consumption
-- 2026-10-04 [[chg-2026-10-04-async-memory-approved]] — Ratify both lifecycle contracts and async-first delivery
-- 2026-10-04 [[chg-2026-10-04-async-memory-proposals]] — Propose reusable async connection and memory-accounting lifecycles
+- 2026-10-20 [[chg-2026-10-20-in-proc-reap]] — An exited peer thread is freed at its Proc's next thread create (the in-Proc reap)
+- 2026-10-20 [[chg-2026-10-20-thread-model-c0]] — Thread-model C0: exec waits for exiting peers; an exit tail keeps its CPU; spawn in a dying Proc and spent id spaces refuse
+- 2026-10-20 [[chg-2026-10-20-thread-model-c2]] — Thread-model C2: the kernel stack cache; the guard toggles invalidate by address
+- 2026-10-14 [[chg-2026-10-14-sig-s3-postnote-errnos]] — SYS_POSTNOTE answers errnos; a self-posted fault snare; Go sends notes (sig S-3)
+- 2026-10-13 [[chg-2026-10-13-b2e1-audit-close]] — B-2e1's Fable round 1 close: the Wasm stub map corrected, the finalizeCreation fence's position checked, the binding generators' MustSucceed queued
+- 2026-10-13 [[chg-2026-10-13-b2e2-design]] — B-2e2's design: SYS_ICACHE_SYNC_SPACE at 128, the per-CPU space record, the barrier acknowledged by ticket
+- 2026-10-13 [[chg-2026-10-13-icache-sync-space]] — The address space's CPUs synchronized on request: SYS_ICACHE_SYNC_SPACE at 128, a per-CPU space record, the barrier IPI acknowledged by ticket, 128 MiB code regions
+- 2026-10-13 [[chg-2026-10-13-jsc-dfg]] — JavaScriptCore's DFG runs on the sealed code region; a thread resumes the VM's code behind an ISB
 <!-- generated:end -->

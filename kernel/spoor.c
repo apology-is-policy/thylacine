@@ -18,7 +18,10 @@
 static struct kmem_cache *g_spoor_cache;
 static u64                g_spoor_allocated;
 static u64                g_spoor_freed;
-static u32                g_spoor_devno_ctr;   // monotonic; spoor_next_devno()
+static u64                g_spoor_devno_ctr;   // monotonic; spoor_next_devno()
+_Static_assert(sizeof(g_spoor_devno_ctr) == 8 &&
+               sizeof(((struct Spoor *)0)->devno) == sizeof(g_spoor_devno_ctr),
+               "the devno minter is 64 bits and as wide as the field it stamps");
 
 void spoor_init(void) {
     if (g_spoor_cache) extinction("spoor_init called twice");
@@ -244,31 +247,35 @@ struct Spoor *spoor_clone(struct Spoor *c) {
 // for a multi-instance Dev's attach. Monotonic from 1 (0 is the static
 // single-instance default set in spoor_alloc_internal).
 //
-// #217 CONSULTS devno IN A SECURITY DECISION (mount_noexec_covers keys MNOEXEC
-// on the (dc, devno) a file shares with its mount source), so the old wording
-// here -- "not a security boundary ... identity disambiguation, not a
-// capability" -- is retired. It was exactly the kind of stale reassurance that
-// tells a future reader not to look.
+// UNIQUE AMONG LIVE INSTANCES, and three identity keys rest on that: the mount
+// key (territory.c mount_key_eq), MNOEXEC coverage (mount_noexec_covers -- #217,
+// a security decision) and the REVENANT Image cache (image.c key_match, where a
+// collision would serve one instance's cached pages for another's file, an I-1
+// alias). Every Env (env_alloc) and every dev9p / devsrv attach mints one, so an
+// unprivileged fork loop drives the counter: at 32 bits it wrapped after 2^32
+// mints and devno d aliased d + 2^32. At 64 bits it cannot wrap in a real boot
+// (2^64 mints at one per nanosecond is ~584 years), so nothing checks for it.
 //
-// For the MNOEXEC key the wrap stays benign, but for a DIFFERENT reason than
-// before: a collision can only ever ADD coverage (a queried file matches some
-// other MNOEXEC entry's source and is refused), never remove it, so it is
-// fail-closed over-restriction rather than a bypass. A Proc cannot choose or
-// influence its devno either -- the counter is kernel-internal and monotonic.
-//
-// SCOPED DELIBERATELY to that consumer, because devno has a SECOND one: the
-// REVENANT Image cache keys on (dc, devno, qid.path), where a collision is NOT
-// over-restriction but an I-1 cache alias (two live Envs sharing a devno could
-// serve one Proc the other's bytes on a non-exec file map). That is
-// pre-existing, shared by every Dev, and needs 2^32 attaches in one boot to
-// reach -- but an unqualified "the wrap is benign" would be the same
-// over-broad reassurance this comment was rewritten to retire.
-u32 spoor_next_devno(void) {
-    return __atomic_add_fetch(&g_spoor_devno_ctr, 1u, __ATOMIC_RELAXED);
+// Never reused, deliberately: a freed-number allocator (Linux's anonymous dev_t)
+// would be unsound here, because an Image cache entry outlives the Spoor it was
+// keyed from, so a recycled number could match a dead instance's cached pages.
+// A Proc cannot choose or influence its devno; the counter is kernel-internal.
+u64 spoor_next_devno(void) {
+    return __atomic_add_fetch(&g_spoor_devno_ctr, (u64)1, __ATOMIC_RELAXED);
 }
 
-void spoor_clunk(struct Spoor *c) {
-    if (!c) return;
+#ifdef KERNEL_TESTS
+void spoor_devno_advance_for_test(u64 v) {
+    u64 cur = __atomic_load_n(&g_spoor_devno_ctr, __ATOMIC_RELAXED);
+    while (cur < v &&
+           !__atomic_compare_exchange_n(&g_spoor_devno_ctr, &cur, v, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+    }
+}
+#endif
+
+int spoor_clunk_rc(struct Spoor *c) {
+    if (!c) return 0;
     if (c->magic != SPOOR_MAGIC)
         extinction("spoor_clunk of corrupted Spoor (use-after-free?)");
 
@@ -297,14 +304,20 @@ void spoor_clunk(struct Spoor *c) {
     int pre = t_atomic_fetch_sub_acqrel_int(&c->ref, 1);
     if (pre <= 0)
         extinction("spoor_clunk of zero-ref Spoor");
+    int rc = 0;
     if (pre == 1) {
         // Last drop. Run Dev close hook (releases per-Spoor aux),
         // then free. The close hook sees ref=0 but storage is intact.
         if (c->dev && c->dev->close) {
-            c->dev->close(c);
+            rc = c->dev->close(c);
         }
         spoor_free_internal(c);
     }
+    return rc;
+}
+
+void spoor_clunk(struct Spoor *c) {
+    (void)spoor_clunk_rc(c);
 }
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }

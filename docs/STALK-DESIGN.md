@@ -235,12 +235,45 @@ return quarry
   component without proving it exists — and this paragraph's own containment
   argument is what makes the verbatim form safe: it is precisely the "hostile
   un-cleaned join" the `..` rule already covers.
-  `SYS_CHDIR` resolves + X-checks the target directory and swaps `dot_path`
-  under the territory lock; `SYS_GETCWD` returns it. **Name-based for v1.0**; a
-  handle-based `dot` Spoor that starts the walk mid-tree — the rename-robust
-  Plan 9/Linux form — is the v1.x upgrade, landing *with* symlinks (which force
-  it, since it would require `..` to become a device parent-walk rather than the
-  trail-pop above).
+  `SYS_CHDIR` resolves + X-checks the target directory and stores, under the
+  territory lock, the name of where the walk LANDED (`stalk_landed`; operator
+  vote 2026-10-06, `dec-2026-10-06-chdir-physical`): the components the trail
+  consumed, so a followed link contributes its target's components and a `..`
+  removes the one it climbs out of. The cwd therefore holds no `.`, `..` or link
+  component (POSIX `getcwd`), what is stored is what was validated, and
+  `cd link/..` lands where `ls link/..` reads -- the trail pop above has been
+  physical since symlinks landed. The name is walked once more before it is
+  stored and must land on the same node: a served link resolved from a union
+  member past the first can land on a node an earlier member shadows, which has
+  no name in the caller's namespace, so it cannot be the cwd (`T_E_INVAL`, as
+  for a name past the buffer). The name is built by the resolver, never read
+  back from a Spoor's `Path` (I-33: a Path may be absent, and under a chroot it
+  carries the outer prefix). A shell that wants a logical `cd` cleans its
+  argument before the call, as ut does (bash's `cd -L`). `SYS_GETCWD` returns
+  the stored name. **Still name-based**: a retargeted link no longer moves a cwd
+  entered through it, but renaming a directory above the cwd does; a
+  handle-based `dot` Spoor -- the rename-robust Plan 9/Linux form -- remains the
+  upgrade.
+- **A spawned child's cwd is resolved by the spawner, as chdir resolves one**
+  (`SYS_SPAWN_FULL_ARGV`'s cwd tail; operator vote 2026-10-06,
+  `dec-2026-10-06-spawn-cwd`). A spawn may name the cwd its child is born
+  with. The spawner resolves it before any child exists, by `SYS_CHDIR`'s
+  steps: joined to the spawner's own cwd when relative, walked by
+  `stalk_landed` from the root, a directory the spawner can search. The child
+  is born with the landed name, and the spawner's cwd never moves. The image
+  is resolved in the spawner too, before any child exists -- a relative image
+  name joined to the child's cwd, not the spawner's -- and so a bad cwd fails
+  the spawn itself, with no child to reap. Validating with the spawner's
+  credentials confers nothing: the cwd is a name, and every later lookup
+  through it is resolved again under the child's own identity. `SYS_CHDIR`
+  and the spawn share one resolver and answer its errno (ERRORS.md):
+  `ENOENT` for a missing component, `ENOTDIR` for a target that is not a
+  directory, `EACCES` for a refused search, `EINVAL` for a malformed path or
+  a name the walk cannot name back, and a failing stat's or re-walk's own
+  errno (`EIO` when it carries none); `SYS_CHDIR` adds `EFAULT` for a bad
+  buffer and `ENOMEM` for the store. A Dev's walk carries no errno yet, so a
+  9P walk that fails for any reason -- a dead session, or a caught note that
+  interrupts it -- answers `ENOENT` here, as it does for `open` and `stat`.
 
 ### 4.4 Name retention along the trail (Spoor.path — #66)
 

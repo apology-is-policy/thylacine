@@ -68,6 +68,8 @@ void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_devno_full_width(void);
+void test_territory_mount_devno_minter_crosses_2_32(void);
 void test_territory_mount_noexec_covers(void);       // #217
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);   // #66
@@ -589,6 +591,71 @@ void test_territory_mount_devno_disambiguates(void) {
     spoor_unref(mp1);
     spoor_unref(mp2);
     spoor_unref(mp3);
+}
+
+// devno-u64: every Env and every multi-instance attach mints a devno, so an
+// unprivileged fork loop reaches 2^32 mints, and a 32-bit key read devno
+// 1 + 2^32 as 1. The mount key and MNOEXEC coverage must both keep the two
+// apart; each refusal is paired with the control one variable away.
+void test_territory_mount_devno_full_width(void) {
+    const u64 lo = 1u, hi = (1ull << 32) + 1u;
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
+    struct Spoor *src   = spoor_alloc(&devnone);
+    struct Spoor *src2  = spoor_alloc(&devnone);
+    struct Spoor *mp_lo = spoor_alloc(&devnone);
+    struct Spoor *mp_hi = spoor_alloc(&devnone);
+    TEST_ASSERT(src && src2 && mp_lo && mp_hi, "spoor_alloc");
+    // MNOEXEC coverage keys on the SOURCE's (dc, devno), so src carries lo; its
+    // own qid keeps it a different identity from its point (no self-mount).
+    // src2 IS (-,1,0): mounted at (-,1+2^32,0) it is a self-mount only to a
+    // cycle check whose key (struct mkey) drops the high half.
+    src->devno  = lo; src->qid.path  = 5;
+    src2->devno = lo; src2->qid.path = 0;
+    mp_lo->qid.path = 0; mp_lo->devno = lo;
+    mp_hi->qid.path = 0; mp_hi->devno = hi;
+
+    TEST_EXPECT_EQ(mount(p, src, mp_lo, MNOEXEC), 0, "MNOEXEC mount at (-,1,0)");
+    TEST_ASSERT(mount_is_point_id(p, '-', lo, 0),
+        "CONTROL: the entry is keyed at (-,1,0)");
+    TEST_ASSERT(!mount_is_point_id(p, '-', hi, 0),
+        "no entry at (-,1+2^32,0) (a 32-bit key reads it as (-,1,0))");
+    TEST_ASSERT(mount_lookup(p, mp_hi, NULL) == NULL,
+        "lookup (-,1+2^32,0) -> NULL");
+    TEST_ASSERT(mount_noexec_covers(p, '-', lo),
+        "CONTROL: device instance 1 is MNOEXEC-covered");
+    TEST_ASSERT(!mount_noexec_covers(p, '-', hi),
+        "device instance 1+2^32 is not covered");
+
+    // The STORED key: a mount at (-,1+2^32,0) is an entry of its own, and each
+    // point resolves to its own source. A 32-bit mp_devno stores it as (-,1,0);
+    // a 32-bit mkey refuses the mount itself.
+    TEST_EXPECT_EQ(mount(p, src2, mp_hi, 0), 0, "mount src2 at (-,1+2^32,0)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 2, "two entries, not one");
+    struct Spoor *r_lo = mount_lookup(p, mp_lo, NULL);
+    TEST_ASSERT(r_lo == src, "lookup (-,1,0) -> src");
+    if (r_lo) spoor_clunk(r_lo);
+    struct Spoor *r_hi = mount_lookup(p, mp_hi, NULL);
+    TEST_ASSERT(r_hi == src2, "lookup (-,1+2^32,0) -> src2");
+    if (r_hi) spoor_clunk(r_hi);
+
+    territory_unref(p);
+    spoor_unref(src);
+    spoor_unref(src2);
+    spoor_unref(mp_lo);
+    spoor_unref(mp_hi);
+}
+
+// devno-u64: the minter crosses the old 32-bit wrap instead of returning to 0.
+// Forward-only, so every devno minted after this test is above 2^32 and the
+// rest of the boot -- the suite and userspace -- runs on wide devnos.
+void test_territory_mount_devno_minter_crosses_2_32(void) {
+    spoor_devno_advance_for_test(0xFFFFFFFEull);
+    u64 a = spoor_next_devno();
+    u64 b = spoor_next_devno();
+    TEST_ASSERT(a >= 0xFFFFFFFFull, "minted at or past 2^32 - 1");
+    TEST_ASSERT(b > a, "monotonic across the old wrap (a 32-bit counter returned 0)");
+    TEST_ASSERT(b > 0xFFFFFFFFull, "the next mint is above 2^32 - 1");
 }
 
 // RW-4 SA-F1: mount_lookup transfers a ref, so a looked-up source survives a

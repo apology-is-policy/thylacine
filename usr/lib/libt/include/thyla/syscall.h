@@ -403,6 +403,12 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // child whose spawner exits first is killed.
 #define T_SPAWN_DEBUG_HELD             (1u << 0)
 
+// SYS_SPAWN_FULL_ARGV ext_flags (mirror SPAWN_EXT_* in the kernel header): each
+// bit says a tail follows the 104-byte record, in bit order. T_SPAWN_EXT_CWD's
+// tail is a struct t_sys_spawn_ext_cwd naming the cwd the child is born with,
+// resolved by the spawner as chdir resolves one (STALK-DESIGN 4.3).
+#define T_SPAWN_EXT_CWD                (1u << 0)
+
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 #define T_SYS_SPAWN_ARGV_MAX        512u
@@ -424,7 +430,7 @@ struct t_sys_spawn_args {
     unsigned int   argc;             // 32
     unsigned int   fd_count;         // 36
     unsigned int   perm_flags;       // 40
-    unsigned int   _pad_envp;        // 44 — must be 0 at v1.0
+    unsigned int   ext_flags;        // 44 — SPAWN_EXT_* tails after the record; 0 = none
     unsigned long  cap_mask;         // 48
     unsigned int   principal_id;     // 56 — A-1a (honored iff SPAWN_IDENTITY_SET)
     unsigned int   primary_gid;      // 60 — A-1a
@@ -474,8 +480,8 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, fd_count) == 36,
                "t_sys_spawn_args.fd_count at ABI offset 36");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, perm_flags) == 40,
                "t_sys_spawn_args.perm_flags at ABI offset 40");
-_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_envp) == 44,
-               "t_sys_spawn_args._pad_envp at ABI offset 44");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, ext_flags) == 44,
+               "t_sys_spawn_args.ext_flags at ABI offset 44");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, cap_mask) == 48,
                "t_sys_spawn_args.cap_mask at ABI offset 48");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, principal_id) == 56,
@@ -500,6 +506,22 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, pheno_flags) == 96,
                "               moved by the aux-2 merge; 0 == inherit)");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, debug_flags) == 100,
                "t_sys_spawn_args.debug_flags at ABI offset 100 (the birth hold)");
+
+// The T_SPAWN_EXT_CWD tail, directly after the record (mirror struct
+// sys_spawn_ext_cwd; tools/check-spawn-args-mirrors.py compares the two).
+struct t_sys_spawn_ext_cwd {
+    unsigned long  cwd_va;           // 0  — the path (no NUL required)
+    unsigned int   cwd_len;          // 8  — 1..1024
+    unsigned int   cwd_flags;        // 12 — must be 0
+};
+_Static_assert(sizeof(struct t_sys_spawn_ext_cwd) == 16,
+               "t_sys_spawn_ext_cwd must be 16 bytes (the kernel's tail)");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_va) == 0,
+               "t_sys_spawn_ext_cwd.cwd_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_len) == 8,
+               "t_sys_spawn_ext_cwd.cwd_len at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_ext_cwd, cwd_flags) == 12,
+               "t_sys_spawn_ext_cwd.cwd_flags at ABI offset 12");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller
@@ -810,8 +832,9 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
 // primary group as group, the server's mode kept, and chown/chgrp are
 // refused; for a server whose ids are not Thylacine principals -- and
 // T_ATTACH_9P_REMOTE -- the session's transport leaves the machine
-// (HAUL-DESIGN 4.8): /proc/<pid>/ns marks every mount from it ` remote`;
-// a label, it grants nothing. Unknown bits reject.
+// (HAUL-DESIGN 4.8): /proc/<pid>/ns marks every mount from it ` remote`,
+// and the resolver contains a link the session serves beneath its mount
+// (DISTRO 4.6); it only narrows, so it grants nothing. Unknown bits reject.
 //
 // Returns the new fd (>=0) on success, -1 on:
 //   - invalid tx_fd / rx_fd or missing R/W rights
@@ -1361,12 +1384,18 @@ static inline long t_spawn(const char *name, size_t name_len) {
 #define WAIT_UNTRACED  2
 #define WAIT_CONTINUED 4
 
-// The packed status encoding (only under WAIT_UNTRACED/WAIT_CONTINUED;
-// the Linux wait(2) layout).
+// The packed status encoding with no stop or continue reports: a child that
+// died of a note reads as signalled (docs/ERRORS.md "The wait status").
+#define WAIT_PACKED    8
+
+// The packed status encoding (only under WAIT_UNTRACED/WAIT_CONTINUED/
+// WAIT_PACKED; the Linux wait(2) layout; no core-dump bit).
 #define WAIT_STATUS_STOPPED       (0x7f | (20 << 8))
 #define WAIT_STATUS_CONTINUED     0xffff
 #define WAIT_IF_EXITED(st)        (((st) & 0x7f) == 0)
 #define WAIT_EXITSTATUS(st)       (((st) >> 8) & 0xff)
+#define WAIT_IF_SIGNALED(st)      (((st) & 0x7f) != 0 && ((st) & 0x7f) != 0x7f)
+#define WAIT_TERMSIG(st)          ((st) & 0x7f)
 #define WAIT_IF_STOPPED(st)       (((st) & 0xff) == 0x7f)
 #define WAIT_IF_CONTINUED(st)     ((st) == 0xffff)
 
@@ -2313,7 +2342,7 @@ static inline void t_exit_group(long status) {
 
 // struct t_stat — userspace mirror of the kernel's struct t_stat from
 // <thylacine/syscall.h>. 88 bytes (A-2a appended uid+gid -> 80; #100 appended
-// devno+pad -> 88); field offsets pinned by _Static_asserts at the end. Native
+// devno+pad -> 88; devno-u64 widened devno over the pad); field offsets pinned by _Static_asserts at the end. Native
 // callers consume this directly; pouch's fstat() translation layer (patch 0010)
 // maps t_stat onto musl's struct stat for POSIX consumers like stratumd.
 struct t_stat {
@@ -2332,8 +2361,8 @@ struct t_stat {
     unsigned long blocks;           // 64: count of 512-byte blocks
     unsigned int  uid;              // 72: A-2a owner principal-id
     unsigned int  gid;              // 76: A-2a owning group
-    unsigned int  devno;            // 80: #100 per-instance device number (Chan.dev)
-    unsigned int  _pad_dev;         // 84: pad to 8-byte alignment
+    unsigned long devno;            // 80: #100 per-instance device number (Chan.dev);
+                                    //     64 bits since devno-u64 (over the old _pad_dev)
 };
 
 _Static_assert(sizeof(struct t_stat) == 88,

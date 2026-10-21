@@ -64,6 +64,15 @@
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 
+// A payer's charge record, read WITHOUT settling it: the kernel has no
+// stand-alone claim (AS-R9), so a test peeks under the record's leaf lock.
+static u32 charge_held(struct Burrow *v, const struct AddrSpace *as) {
+    spin_lock(&v->lock);
+    u32 held = (v->charge_pages != 0 && v->charge_as_id == as->id) ? v->charge_pages : 0;
+    spin_unlock(&v->lock);
+    return held;
+}
+
 void test_addrspace_alloc_shape(void);
 void test_addrspace_refcount(void);
 void test_addrspace_kproc_has_none(void);
@@ -143,11 +152,9 @@ static void test_addrspace_kernel_pin_lifetime(void) {
     bool mappings_gone = as->vmas == NULL && burrow_mapping_count(b) == 0;
     bool buffer_live = burrow_handle_count(b) == 1;
     struct AddrSpace *replacement = addrspace_alloc(proc_default_page_budget());
-    bool wrong_payer_refused = replacement && burrow_charge_claim_in(b, replacement) == 0;
+    bool wrong_payer_refused = replacement && charge_held(b, replacement) == 0;
     addrspace_unref(replacement);
-    u32 charge = burrow_charge_claim_in(b, as);
-    bool once = charge == 1 && burrow_charge_claim_in(b, as) == 0;
-    burrow_charge_restore_in(b, as, charge);
+    bool exact_payer = charge_held(b, as) == 1;
     // AS-R9: settle THROUGH the drop. This is the case the exact-payer form
     // exists for -- the paying Proc is gone and only an AddrSpace pin names the
     // payer -- and it is exactly the shape the old claim-drop-restore sequence
@@ -160,7 +167,7 @@ static void test_addrspace_kernel_pin_lifetime(void) {
     bool refunded = freed && settled == 1 && before >= 1 &&
         __atomic_load_n(&as->page_count, __ATOMIC_ACQUIRE) == before - 1;
     addrspace_unpin(as);
-    TEST_ASSERT(wrong_payer_refused && once, "only the exact payer claims once after Proc death");
+    TEST_ASSERT(wrong_payer_refused && exact_payer, "after Proc death the record names only the exact payer");
     TEST_ASSERT(refunded, "last buffer release refunds its pinned payer after Proc death");
     TEST_ASSERT(distinct, "kernel pin retains descriptor without another owner");
     TEST_ASSERT(sole_allowed && sole_again, "kernel pin does not block a sole image's elevation");

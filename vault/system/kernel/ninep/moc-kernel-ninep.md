@@ -24,7 +24,7 @@ Bottom-up through the stack:
 - [[sub-kernel-ninep-transport]] — the frame-aware core + the four
   backends (srvconn production; spoor; loopback + mq test).
 - [[sub-kernel-ninep-client]] — the shared elected-reader client
-  (pipelining, flow control, frame-atomic recv). **The pilot dossier.**
+  (pipelining, flow control, a recv that unwinds at any byte). **The pilot dossier.**
 - [[sub-kernel-ninep-attach]] — mount creation (`p9_attached` +
   `srvconn_attach_dev9p_root`; the refcounted session holder).
 - [[sub-kernel-ninep-dev9p]] — the Dev: walk/IO/mutation + the Larder

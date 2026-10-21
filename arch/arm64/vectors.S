@@ -243,8 +243,9 @@ _exception_vectors:
     //
     // IRQ (0x480) reuses exception_irq_curr_el — same GIC ack→dispatch→
     // EOI flow regardless of EL source. KERNEL_ENTRY captures SP_EL0
-    // (the user's stack at fault) for the saved context. preempt_check_irq
-    // observes the slice/need_resched and may context-switch.
+    // (the user's stack at fault) for the saved context. Both slots then take
+    // the one EL0-return tail, .Lel0_return (#964: an IRQ return delivers
+    // notes, so a thread that never traps still takes them).
     //
     // FIQ + SError still extinct (no FIQ source online; SError indicates
     // hardware-level corruption that v1.0 can't recover from cleanly).
@@ -253,17 +254,13 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_lower_el
-    b       .Lel0_sync_return            /* #107: clean-frame preempt + die-check + notes, then ERET */
+    b       .Lel0_return                 /* #107: clean-frame preempt + die-check + stop + notes, then ERET */
 
     .org _exception_vectors + 0x480      /* IRQ from EL0 */
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_irq_curr_el
-    bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
-    bl      el0_return_die_check         /* I-24: self-exit if Proc group-terminating (noreturn if so) */
-    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */
-    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER the die-check -- death wins) */
-    b       .Lexception_return
+    b       .Lel0_return                 /* #964: the same tail, notes leg included */
 
     .org _exception_vectors + 0x500
     VEC_UNEXPECTED 10
@@ -314,14 +311,18 @@ _exception_vectors:
 .section ".text", "ax"
 
 // ---------------------------------------------------------------------------
-// .Lel0_sync_return — #107: EL0 sync-exception return tail. The 0x400 slot
-// branches here AFTER exception_sync_lower_el returns and its HX-1 halls frame
-// is closed (the wrapper ran halls_leave_frame), so this is a CLEAN saved frame
-// with no live C handler on the stack — structurally identical to the 0x480 IRQ
-// slot. It is reached ONLY from the recoverable EL0-sync returns (SVC-return,
-// FAULT_HANDLED); the terminating fault paths are noreturn and never arrive.
+// .Lel0_return — the EL0-return tail of both lower-EL slots. The 0x400 slot
+// (#107) branches here AFTER exception_sync_lower_el returns and its HX-1 halls
+// frame is closed (the wrapper ran halls_leave_frame); the 0x480 slot (#964)
+// after exception_irq_curr_el has acked, dispatched and EOIed with IRQs masked
+// and closed its frame. Either way this is a CLEAN saved frame with no live C
+// handler on the stack and no kernel lock held, which is what the notes leg
+// requires (ARCH 7.6.4). The sync slot arrives ONLY from the recoverable
+// returns (SVC-return, FAULT_HANDLED); the terminating fault paths are noreturn
+// and never arrive. Until #964 the IRQ slot ran the first three legs and
+// skipped the notes leg, so a thread that never trapped never took a note.
 //
-// Ordering mirrors 0x480 (preempt BEFORE die-check):
+// Ordering (preempt BEFORE die-check):
 //   1. preempt_check_irq — the syscall/fault-return wake-preempt (RW-11 SA-1b,
 //      the #60 latency win). A sched() inside it saves THIS trampoline's frame,
 //      so a thread preempted + stolen here resumes at a clean frame (never
@@ -330,16 +331,21 @@ _exception_vectors:
 //   2. el0_return_die_check — I-24 group-terminate self-exit (noreturn if so),
 //      AFTER the preempt so a Proc group-terminated during the preempt-switch is
 //      caught before any EL0 instruction runs.
-//   3. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery;
-//      sp still points at the KERNEL_ENTRY trapframe here.
+//   3. el0_return_stop_check(ctx = sp) — I-39 / job-control stop park, AFTER the
+//      die-check (death wins) and BEFORE the notes (a stop wins over a note, and a
+//      note latched during the stop is taken as it clears; DEBUG-FS-DESIGN 4.2).
+//   4. notes_deliver_at_el0_return(ctx = sp) — P6-pouch-signals async delivery,
+//      the last C call (it asserts the #713 mask); sp still points at the
+//      KERNEL_ENTRY trapframe here. On an IRQ return it can stop EL0 at any
+//      instruction, which the whole-context save already covers (7.6.4).
 // ---------------------------------------------------------------------------
-.Lel0_sync_return:
+.Lel0_return:
     bl      preempt_check_irq
     bl      el0_return_die_check
+    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (SP == trapframe base here) */
+    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a stop is pending (AFTER the die-check -- death wins) */
     mov     x0, sp
-    bl      notes_deliver_at_el0_return
-    mov     x0, sp                       /* 8a-1c: x0 := the EL0 trapframe (notes clobbered x0; SP == trapframe base here) */
-    bl      el0_return_stop_check        /* 8a-1b-beta I-39: park if a debugger stop is pending (AFTER die-check + notes -- death/interrupt win) */
+    bl      notes_deliver_at_el0_return  /* AFTER the stop (DEBUG-FS-DESIGN 4.2); the #713 assert */
     b       .Lexception_return
 
 .Lexception_return:
@@ -423,8 +429,8 @@ thread_fork_trampoline:
 // check, so nothing can stop a child before its first instruction. This
 // instead BUILDS the EL0 frame that first instruction would have been
 // interrupted with and takes the ordinary EL0-return tail over it: the preempt
-// check, the die-check, note delivery, then the stop leg -- here the birth park,
-// which also holds while the child is held. A debugger that converts the hold
+// check, the die-check, the stop leg -- here the birth park, which also holds
+// while the child is held -- then note delivery. A debugger that converts the hold
 // therefore finds a real saved frame (regs reads the entry, a regs write lands
 // in the frame, a step arms SPSR.SS in it), and KERNEL_EXIT erets from that
 // frame when the child is released.
@@ -440,10 +446,11 @@ thread_fork_trampoline:
 //
 // DAIF: the frame is built with IRQs on (a plain C call, as userland_enter's
 // die-check), then everything is masked for the tail -- the precondition every
-// tail call asserts (#713) and the state KERNEL_EXIT requires. Unlike the stop
-// park at the other tails, el0_birth_park returns only to eret: it ends the
-// thread itself for a latched terminate-interrupt instead of leaving the park
-// to resolve it, so the tail is straight-line and cannot loop masked.
+// tail call asserts (#713) and the state KERNEL_EXIT requires. The birth park
+// comes before the notes leg, as the stop check does at the sync tail
+// (DEBUG-FS-DESIGN 4.2): neither park ends for a latched interrupt (5g), and
+// the notes leg takes the note as the park returns. The tail is straight-line;
+// the notes leg's own re-passes are bounded by its budget.
 // ---------------------------------------------------------------------------
 .globl userland_enter_held
 .type userland_enter_held, %function
@@ -458,8 +465,8 @@ userland_enter_held:
     bl      preempt_check_irq
     bl      el0_return_die_check         /* I-24: noreturn if the Proc is group-terminating */
     mov     x0, sp
-    bl      notes_deliver_at_el0_return
+    bl      el0_birth_park               /* parks while held or stopped (AFTER the die-check) */
     mov     x0, sp
-    bl      el0_birth_park               /* parks while held or stopped; returns only to eret */
+    bl      notes_deliver_at_el0_return  /* AFTER the park (DEBUG-FS-DESIGN 4.2); the #713 assert */
     b       .Lexception_return
 .size userland_enter_held, . - userland_enter_held

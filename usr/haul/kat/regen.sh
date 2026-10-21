@@ -39,14 +39,31 @@ esac
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# npxf's primitives are OpenSSL 3's (npxf af68838, 2026-09-18), so crypto.cpp
+# needs libcrypto's headers and library. pkg-config supplies them; set
+# OPENSSL_CFLAGS and OPENSSL_LIBS to override. npxf cannot build without
+# OpenSSL either, so a present npxf with no libcrypto FAILS rather than SKIPs:
+# a skip here would leave the vectors unchecked, as they were before this check.
+if [[ -z ${OPENSSL_CFLAGS+set} || -z ${OPENSSL_LIBS+set} ]]; then
+    if ! command -v pkg-config >/dev/null 2>&1 ||
+       ! pkg-config --exists libcrypto; then
+        echo "regen.sh: FAIL -- libcrypto not found by pkg-config; npxf needs OpenSSL 3 (set OPENSSL_CFLAGS and OPENSSL_LIBS)" >&2
+        exit 1
+    fi
+    OPENSSL_CFLAGS="$(pkg-config --cflags libcrypto)"
+    OPENSSL_LIBS="$(pkg-config --libs libcrypto)"
+fi
+
 # channel.cpp is #included, so its dependencies must be LINKED: crypto.cpp for
 # the primitives, net.cpp for the read/write/timeout helpers Channel::send and
 # the two handshakes call.
+# shellcheck disable=SC2086 # the flag strings are word lists
 "$CXX" -std=c++20 -O1 -pthread \
     -Wall -Wextra -Wno-unused-parameter \
-    -I "$NPXF_ROOT" -I "$NPXF_ROOT/src" \
+    -I "$NPXF_ROOT" -I "$NPXF_ROOT/src" $OPENSSL_CFLAGS \
     -o "$tmp/npxf_kat" \
-    "$here/npxf_kat.cpp" "$NPXF_ROOT/src/crypto.cpp" "$NPXF_ROOT/src/net.cpp"
+    "$here/npxf_kat.cpp" "$NPXF_ROOT/src/crypto.cpp" "$NPXF_ROOT/src/net.cpp" \
+    $OPENSSL_LIBS
 
 "$tmp/npxf_kat" > "$tmp/vectors.txt"
 

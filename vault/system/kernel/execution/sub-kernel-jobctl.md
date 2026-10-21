@@ -12,6 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md section 4"]
 created: 2026-08-03
+updated: 2026-10-08
 updated: 2026-10-07
 ---
 ## Purpose
@@ -128,6 +129,12 @@ finds its wait unsatisfied, re-loops into the stop detour, and parks with the
 wait preserved. On resume it re-registers with its original deadline. Parks
 and re-parks — the same shape Linux uses for a stop over a futex wait.
 
+The walk passes a thread already in its stop park by: a second stop, a job stop
+over a debugger's or the reverse, changes nothing that park waits on, so the
+wake could only be absorbed, and a thread run to absorb it would read as
+unsettled to a debugger holding the other stop (DEBUG-FS-DESIGN 5g). A stop park
+is woken by a resume or by death alone.
+
 ### The report latches
 
 A parent waiting with the untraced or continued options learns about a stop or
@@ -139,6 +146,12 @@ observe argument is the zombie wake's, unchanged.
 vice versa, so a parent that missed an edge sees the *current* state rather
 than a queue of stale ones. And a second suspend on an already-stopped process
 is discarded without re-arming the latch, which is POSIX.
+
+**A dying child reports neither.** The wait's report arm skips a child whose
+group is dying, so a stop latched before the kill and a continue after it stay
+in their latches, and the child's zombie reports the death. POSIX reports a
+child that is stopped, and a dying one is not; Linux's group exit clears the
+stopped state and ignores a later continue (DEBUG-FS-DESIGN 5g).
 
 ### The `/proc` verbs are a different animal
 
@@ -204,23 +217,45 @@ A death can newly-orphan two disjoint things, and both are checked:
 
 *Anchored* means: some alive member has an alive parent in the same session
 and a different group — a shell-shaped process that could still resume it.
+*Has stopped members* means a member job-stopped and not dying: a dying one
+takes no stop and will never need the continue (DEBUG-FS-DESIGN 5g), and
+counting it would send its group's running members a hangup POSIX never
+sends — Linux's group exit clears the stopped state, so `has_stopped_jobs`
+is false there too.
 
 Children are deduplicated by first-sibling-with-this-group, without allocating,
 which the child cap makes safe. The walks are linear in the process count per
 candidate; death is not a hot path and the fan is the rare case.
 
 The per-member order is hangup, then the terminate wake, then continue, then
-the caught-note wake, then the job resume. The terminate wake is what makes an
-uncaught hangup's termination actually run: the hangup arms the terminate
-latch, the wake unwinds the member's blocked threads to die at their tails,
-and a stop-parked thread's park loop bails on the pending death and dies from
-inside the stop. The caught-note wake comes after **both** posts because a
-member may ignore the hangup and still catch the continue; a wake between them
-would find nothing armed.
+the caught-note wake, then the job resume: POSIX's order for a newly orphaned
+stopped group (SIGHUP, then SIGCONT). A member that dies of the hangup records
+`SIGHUP` for its parent's packed wait (gcpark-b, 2026-10-12; [[sub-kernel-death]]).
+The hangup arms the terminate latch, and
+the wake unwinds the member's blocked threads to die at their tails. The
+caught-note wake comes after **both** posts because a member may ignore the
+hangup and still catch the continue; a wake between them would find nothing
+armed. Both wakes pass a stop-parked thread by, and it stays stopped
+(DEBUG-FS-DESIGN 5g). The job resume then lets it run, and it meets the hangup
+at its next note checkpoint: a nested sleeper at once, as its own wait unwinds
+for the latch; a thread parked at a synchronous or birth tail as the park
+returns, in the notes leg that follows it; and a thread parked at the IRQ tail,
+which delivers no notes, at its next syscall's tail (DEBUG-FS-DESIGN 4.2). A
+caught continue waits for the resume the same way.
 
 **Death wins from inside a stop** — the same clause the debugger's stop must
 satisfy, restated against the second owner. Without it, killing a Ctrl-Z'd job
-would hang forever.
+would hang forever. Group death clears neither flag, so the park predicate reads
+false once the group's exit message is published (`proc_stop_requested`): the
+dying Proc's last thread, which reads no death while it closes its handles,
+never parks for the stop, and one parked while its group lived leaves when it
+dies. The flags a stop set before the kill stay set, because the tail reads
+them (below). A dying Proc takes no new stop: `proc_job_stop_one_locked`
+refuses it under the table lock (the terminate's lock), so a Ctrl-Z or
+`/proc` `suspend` after the kill sets no flag and latches no report for the
+parent — `pty_stop.tla`'s `StopJob` is guarded so — and `/ctl/procs` shows a
+dying Proc's own state, never STOPPED. The tail reads the flags themselves (`proc_stop_owned`), so
+a thread killed after its die check still dies inside the park.
 
 Since 2026-09-29 the shared park checks death a second time, after its wake
 condition passes ([[sub-kernel-death]]). A job resume that lands just after a
@@ -246,7 +281,8 @@ parent edges, and the thread lists for the duration of a fan. The per-thread
 with the death cascade.
 
 The stop and resume flags are release-stored and acquire-loaded, matching the
-debugger's flag discipline exactly, because the park predicate reads both.
+debugger's flag discipline exactly, because the park predicate reads both (and,
+when either is set, `group_exit_msg`, acquire-loaded too).
 
 The catchability gate reads the handler address, the process flags, and each
 thread's note mask lock-free. The thread walk is pinned by the caller's lock;
@@ -306,7 +342,11 @@ of the per-member loop.
   discarding rather than falling through to a stop.
 - The orphan rule must keep excluding the dying Proc from every walk, and must
   keep firing only for *newly* orphaned groups — re-signalling an
-  already-orphaned group is a spurious and possibly lethal hangup.
+  already-orphaned group is a spurious and possibly lethal hangup. A dying
+  member must not count as a stopped one, for the same reason.
+- Every reader that asks "is this Proc stopped" must answer no for a dying
+  one: the stop delivers, the orphan rule's stopped test, the STOPPED column,
+  the wait's report arm.
 - The stop wake must stay non-completing. A completing wake is the shape that
   silently finishes timed waits.
 - The report latches must keep superseding each other rather than queueing.
@@ -359,7 +399,8 @@ timed-wait fix is later, from the terminal arc's own shakedown.
 `proc.job_stop_owner_algebra` is the composition — the two flags and the four
 combinations of stop and resume. `proc.job_stop_park_report_cont_live` and
 `proc.wait_pid_for_report_not_reap` / `proc.wait_pid_syscall_untraced_flag`
-cover the latches. `proc.job_stop_preserves_torpor_wait` is the
+cover the latches; the report test's last leg gives a dying child both latches
+and it reports neither, where the same child alive reports its continue. `proc.job_stop_preserves_torpor_wait` is the
 non-completing-wake regression, and it is the sharpest test here: it asserts a
 timed wait *survives* a stop, which is the property whose absence produced a
 visible shell bug rather than a crash.
@@ -368,7 +409,15 @@ visible shell bug rather than a crash.
 an orphaned group affects nobody and posts nothing, and then the *same*
 suspend on the same group, once re-homed under an anchoring parent, stops it.
 Two outcomes from one stimulus with only the anchoring changed, which is what
-makes it a test of the rule rather than of the fan.
+makes it a test of the rule rather than of the fan. Its death leg orphans two
+more groups with the same anchor's death: in one the stopped member lives and
+its running peer is hupped, in the other the stopped member is dying and its
+running peer is not.
+
+`proc.dying_takes_no_stop` pairs a dying Proc with a live one, one variable
+apart: the live one takes the job stop (with its report) and the debug stop
+and shows `STOPPED`; the dying one takes neither, gets no report, and is not
+shown `STOPPED` even with a flag set before the kill.
 
 From the terminal side, `pts.tty_tstp_stop_cont_seam` and
 `pts.teardown_hup_cont` drive the same machinery through the real entry
@@ -434,6 +483,16 @@ fields grew the struct after that comment was written. The compile-time assert i
 sound; only the prose comment drifted, so this is a [[sub-kernel-vivarium]]-arc
 code fix, not a vault edit.
 
+**2026-10-08: flagged by co-tenancy, nothing owed.** `kernel/proc.c` and its
+header moved ~174 lines since the last update: exitclose (the close at exit and
+the kill that forces it), B-2b (the image join's code count, [[chg-2026-10-07-b2-jit]])
+and [[chg-2026-10-08-image-holder-record]] (the image's record of departed
+holders). Checked by hunk context: every hunk lands in `proc_free`,
+`proc_image_join_locked`, `proc_exec_replace`, the exit and group-termination
+paths, or the first line of the ZOMBIE transition, which now records the
+departing holder in its space before the legate teardown and the orphan rule run.
+None touches sessions, process groups, the group note fan, the terminal seam or
+the job-control stop.
 ## Interaction epochs on membership changes
 
 Successful setsid/setpgid invalidates any nomination of the changing process

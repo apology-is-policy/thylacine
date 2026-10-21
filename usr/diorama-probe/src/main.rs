@@ -598,18 +598,20 @@ pub extern "C" fn rs_main() -> i64 {
         if sn < 4 || &st[..4] != b"cpu " {
             fail("stat must open with the aggregate cpu line");
         }
-        for k in [&b"cpu0 "[..], b"intr ", b"ctxt ", b"btime ", b"processes "] {
+        for k in [&b"cpu0 "[..], b"btime ", b"processes "] {
             if !contains(st, k) {
                 fail("stat is missing a field");
             }
         }
-        // ctxt and intr are counters the kernel bumps on every switch and every
-        // IRQ, so by the time a userspace probe runs they cannot be zero. A
-        // literal " 0\n" for either means the column parsed as absent and the
-        // sum silently produced nothing -- a well-shaped lie, which is exactly
-        // what a presence-only check would pass.
-        if contains(st, b"intr 0\n") || contains(st, b"ctxt 0\n") {
-            fail("stat reported a zero counter (the column did not parse)");
+        // This is the shared boot diorama, a SYSTEM deputy for clients of any
+        // principal, and the kernel shows ctxt, intr and per-CPU idle time only
+        // to the system principal or a hostowner (IMPERIUM-DESIGN 11.3 item
+        // 10). It must serve them as withheld: per-CPU lines of zeros, and no
+        // intr or ctxt line at all. A count here is the deputy passing on what
+        // an ordinary client is natively denied. The summation over a measured
+        // render is the diorama's own selftest.
+        if !contains(st, b"cpu0 0 0 0 0 ") || contains(st, b"intr ") || contains(st, b"ctxt ") {
+            fail("the shared diorama passed on a counter the kernel withholds");
         }
 
         let mut cb = [0u8; 1024];

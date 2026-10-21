@@ -16,7 +16,7 @@ design:
   - "docs/reference/40-uaccess.md"
   - "docs/CONCURRENT-FS.md CF-3"
 created: 2026-08-02
-updated: 2026-09-06
+updated: 2026-10-07
 ---
 ## Purpose
 
@@ -83,6 +83,27 @@ This is easy to break by writing what looks like tighter code. A
 post-increment addressing mode on a fault point would advance the pointer, fault,
 and then re-execute against the *advanced* pointer — skipping a byte on every
 demand-paged page boundary, silently, in a copy path.
+
+### Every fault point is an unprivileged access (B-2b, 2026-10-07)
+
+The user-side half of every primitive is `LDTR`/`STTR` (or their byte
+forms), never `LDR`/`STR`. An unprivileged access is checked against EL0's
+permissions, so a syscall can read and write exactly what its caller could
+and no more. That matters because EL1 can read more than EL0: a sealed JIT
+thunk is mapped execute-only (`AP[2:1]=10`), no access at EL0 but readable at
+EL1, and an ordinary load here would hand its bytes to any caller that named
+the thunk as a `write()` buffer -- which is the whole secret the thunk keeps
+([[sub-kernel-syscall-dispatch]]). The kernel-side half of each copy stays an
+ordinary access. The tree uses no PAN, and nothing sets `PSTATE.UAO`, which
+would make these instructions behave as privileged ones.
+
+The unprivileged forms take only an immediate offset, with no writeback mode,
+which is the shape the retry argument below already demands.
+
+A refused access takes the ordinary path below: the fault reaches the memory
+layer, whose permission check refuses a load of an execute-only page (and
+whose `mmu_user_pte_admits` does not mistake the permission fault on its leaf
+for one already answered -- [[sub-kernel-mmu]]), and the primitive returns `-1`.
 
 ### The bulk copies are three fault points wearing one coat
 
@@ -167,6 +188,9 @@ paging path.
 - **Fault points must not use writeback addressing.** The retry re-executes
   them.
 - **The pointer advance must stay after the fault point**, for the same reason.
+- **A fault point must stay unprivileged** (`LDTR`/`STTR`). A plain `LDR` on
+  the user side reads an execute-only page EL0 cannot, and nothing else in
+  the path would notice.
 - **The user-half bound must stay pinned to the memory layer's.** The assertion
   is the only thing keeping the two from drifting apart.
 - **The check must stay a conjunction.** Dropping any of the three conditions —
@@ -203,6 +227,9 @@ paging path.
 ## Provenance
 
 [[chg-2026-08-02-entry-sweep]].
+
+B-2b (2026-10-07): the ten fault points became `LDTR`/`STTR` and their byte
+forms, so every user copy is checked against EL0's permissions.
 
 [[chg-2026-09-06-uaccess-doc-absorb]] folds the F210 P1 corollary absorbed from
 docs/reference/40: a caller's range bound must equal the dispatcher's fixup-gate

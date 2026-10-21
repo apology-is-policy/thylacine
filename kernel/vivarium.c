@@ -11,10 +11,12 @@
 #include <thylacine/page.h>             // D-3: PAGE_SIZE bounds the FILE arm's offset
 #include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
 #include <thylacine/proc.h>             // #150: PRINCIPAL_SYSTEM / GID_SYSTEM
+#include <thylacine/rendez.h>           // the TSLEEP_* outcomes a sleep row judges
 #include <thylacine/spoor.h>            // NP-5: the socktab's readiness cache
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"       // the sleep rows: both clocks + the step list
 #include "../mm/slub.h"              // the fork-time sigtab clone (kzalloc)
 
 // The native ceiling, pinned. vivarium.h cannot see syscall.h (the dependency is
@@ -48,12 +50,20 @@ _Static_assert(VIV_NATIVE_CEILING == SYS__NATIVE_TOP - 1,
 _Static_assert(VIV_LINUX_RT_SIGPROCMASK > VIV_NATIVE_CEILING,
                "the signal family above rt_sigaction argues by the ceiling");
 // SYS_SRV_REGISTRY_NEW at 134 (vote 13) lifted the ceiling over the signal
-// family's 128..134, and the assert above, then keyed to restart_syscall,
-// stopped the build until each of the seven was argued on its own.
-// viv_linux_dispatch consumes every phenotyped number that is not TRANSLATED
-// before the native switch, so a Linux Proc reaches none of them; what each
-// argument settles is a native program mis-declared as Linux.
+// family's 129..134, and the assert above, then keyed to kill, stopped the
+// build until each was argued on its own. viv_linux_dispatch consumes every
+// phenotyped number that is not TRANSLATED before the native switch, so a Linux
+// Proc reaches none of them; what each argument settles is a native program
+// mis-declared as Linux.
 //
+// Linux restart_syscall (128) collides with SYS_ICACHE_SYNC_SPACE (B-2e2). The
+// row is VIV_ENOSYS (below), so a Linux Proc never reaches the sync; a native
+// program mis-declared as Linux loses it, and the sync takes no argument and
+// grants nothing it could misuse. Keep the row: removing it leaves 128 to
+// FORWARD, which also answers ENOSYS, but the per-number argument names the
+// row.
+_Static_assert(VIV_LINUX_RESTART_SYSCALL == SYS_ICACHE_SYNC_SPACE,
+               "revisit restart_syscall / ICACHE_SYNC_SPACE collision on renumber");
 // rt_sigaction (134) collides with SYS_SRV_REGISTRY_NEW. Its row is TIER2, and
 // what makes that sound is the arm's reach, not the caller's arguments: it
 // reads an act struct from memory the caller's own registers named (validated,
@@ -67,17 +77,16 @@ _Static_assert(VIV_LINUX_RT_SIGPROCMASK > VIV_NATIVE_CEILING,
 // that grants nothing to a Proc without the factory role.
 _Static_assert(VIV_LINUX_RT_SIGACTION == SYS_SRV_REGISTRY_NEW,
                "revisit rt_sigaction / SRV_REGISTRY_NEW collision on renumber");
-// restart_syscall (128), kill (129), tkill (130), tgkill (131), sigaltstack
-// (132) and rt_sigsuspend (133) meet NO native number on this tree: 127..133
-// are held for other branches' syscalls and assigned nothing here, which
-// syscall.native_gap_unassigned pins by counting the native switch's unknown
-// arm (a native number landing in the gap fails it, whatever it returns). Each
-// is consumed before the native switch regardless --
-// restart_syscall, sigaltstack and rt_sigsuspend are VIV_ENOSYS rows, and the
-// kill family is unclassified, which FORWARDs to ENOSYS -- and
+// kill (129), tkill (130), tgkill (131), sigaltstack (132) and rt_sigsuspend
+// (133) meet NO native number on this tree: 129..133 are held for b3's
+// syscalls and assigned nothing here, which syscall.native_gap_unassigned pins
+// by counting the native switch's unknown arm (a native number landing in the
+// gap fails it, whatever it returns). Each is consumed before the native switch
+// regardless -- the kill family is TIER2 (vivarium_kill_decide, SYS_POSTNOTE's
+// own gate), sigaltstack and rt_sigsuspend are VIV_ENOSYS rows -- and
 // vivarium.rejects_are_deliberate pins each verdict by name. When the gap's
-// natives arrive, every row there takes the collision assert its native
-// names, as restart_syscall already has against ICACHE_SYNC_SPACE on main.
+// natives arrive, every row there takes the collision assert its native names,
+// as restart_syscall has against ICACHE_SYNC_SPACE.
 _Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
                "the socket family's collision argument is the ceiling one");
 _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,
@@ -410,17 +419,13 @@ static const struct viv_reject g_viv_rejects[] = {
     // The signal family (V-6, §6.22).
     { VIV_LINUX_RT_SIGACTION,   VIV_TIER2 },  // V-6b: vivarium_sigaction_decide
     { VIV_LINUX_RT_SIGPROCMASK, VIV_TIER2 },  // V-6b: vivarium_sigprocmask_decide
-    //
-    // STILL NOT LISTED, deliberately: kill (129), tkill (130), tgkill (131).
-    // Their shells do not exist, and a VIV_TIER2 row whose shell is missing
-    // would be a table that DECLARES a capability the code does not have --
-    // `viv_tier2`'s default arm calls exactly that a "table/shell disagreement"
-    // and fails closed. So a row lands WITH its shell, in the same commit, and
-    // until then the number FORWARDs like any unclassified call. (They are also
-    // the only signal rows that are an AUTHORITY question rather than a
-    // disposition one: they name another Proc, so they must reuse an existing
-    // cross-Proc gate verbatim -- SYS_POSTNOTE's parent-only check or I-26's
-    // two-axis one -- never invent a third.)
+    // The only signal rows that are an AUTHORITY question rather than a
+    // disposition one: they name another Proc, so they reuse SYS_POSTNOTE's own
+    // gate verbatim -- the caller, or a child it spawned; the gate Pouch's kill
+    // passes -- and never invent a third (operator vote 2026-10-13).
+    { VIV_LINUX_KILL,           VIV_TIER2 },  // vivarium_kill_decide + viv_kill
+    { VIV_LINUX_TKILL,          VIV_TIER2 },  // the same, a tid resolved to its Proc
+    { VIV_LINUX_TGKILL,         VIV_TIER2 },  // the same, the tid inside the tgid
     //
     // The ENOSYS rows below are NOT in that state -- they are live decisions,
     // correct today, and each has its own reason rather than a blanket
@@ -584,6 +589,11 @@ static const struct viv_reject g_viv_rejects[] = {
     // nanoseconds -- a real struct conversion. Both shells land in this commit.
     { VIV_LINUX_CLOCK_GETTIME,   VIV_TIER2 },  // clk_id map -> SYS_CLOCK_GETTIME
     { VIV_LINUX_GETTIMEOFDAY,    VIV_TIER2 },  // realtime ns -> timeval {sec,usec}
+    // The sleep rows (VIVARIUM.md section 6.29): shells over one sleep core, not
+    // over the zero-fd ppoll sleep, because Linux's order at the deadline is not
+    // poll's -- here the expiry wins over a pending note.
+    { VIV_LINUX_NANOSLEEP,       VIV_TIER2 },  // relative, CLOCK_MONOTONIC
+    { VIV_LINUX_CLOCK_NANOSLEEP, VIV_TIER2 },  // the clock map + TIMER_ABSTIME
 
     // The git chunk (VIVARIUM.md section 6.26). faccessat is a real translation
     // (stat + perm_check); geteuid/getegid are the one-principal twins of
@@ -653,6 +663,8 @@ enum viv_intr vivarium_intr_class(u64 linux_nr, const u64 *args) {
     case VIV_LINUX_PPOLL:
     case VIV_LINUX_PSELECT6:
     case VIV_LINUX_FUTEX:
+    case VIV_LINUX_NANOSLEEP:
+    case VIV_LINUX_CLOCK_NANOSLEEP:
     case VIV_LINUX_RT_SIGSUSPEND:
     case VIV_LINUX_RT_SIGTIMEDWAIT:
         return VIV_INTR_ALWAYS;
@@ -1768,12 +1780,12 @@ enum viv_signote viv_signal_note(u64 signum) {
     // mask conversion. A guest asking about SIGTERM got ENOSYS before this
     // change and gets ENOSYS after it.
     //
-    // THE SEAM: a real SIGTERM wants its own supported note name (`terminate`)
-    // and its own NOTE_BIT -- an addition to I-19's closed supported set, which
-    // is ABI-bearing and needs signoff (the tasks #15/#16 shape). It becomes
-    // load-bearing when `kill` lands, because THAT is what would first generate
-    // a SIGTERM.
+    // THE SEAM V-6b left -- SIGTERM wants its own supported note and its own
+    // NOTE_BIT, an addition to I-19's closed set -- closed with the operator's
+    // vote of 2026-10-13: the note is `term`, and the kill rows that first
+    // generate a SIGTERM landed with it.
     case VIV_SIGINT:                      return VIV_SIGNOTE_INTERRUPT;
+    case VIV_SIGTERM:                     return VIV_SIGNOTE_TERM;
     case VIV_SIGKILL:                     return VIV_SIGNOTE_KILL;
     case VIV_SIGPIPE:                     return VIV_SIGNOTE_PIPE;
     case VIV_SIGCHLD:                     return VIV_SIGNOTE_CHILD_EXIT;
@@ -1781,6 +1793,10 @@ enum viv_signote viv_signal_note(u64 signum) {
     case VIV_SIGBUS:                      return VIV_SIGNOTE_SNARE_BUS;
     case VIV_SIGILL:                      return VIV_SIGNOTE_SNARE_ILL;
     case VIV_SIGFPE:                      return VIV_SIGNOTE_SNARE_FPE;
+    // No note is ever queued for it: a self-directed one (musl's raise(), which
+    // is tkill to self) ends the caller as snare:abort, Pouch's abort() death,
+    // so SIG_DFL is the only disposition it can truthfully take.
+    case VIV_SIGABRT:                     return VIV_SIGNOTE_SNARE_ABORT;
     case VIV_SIGHUP:                      return VIV_SIGNOTE_TTY_HUP;
     case VIV_SIGQUIT:                     return VIV_SIGNOTE_TTY_QUIT;
     case VIV_SIGWINCH:                    return VIV_SIGNOTE_TTY_WINCH;
@@ -1789,13 +1805,10 @@ enum viv_signote viv_signal_note(u64 signum) {
 
     // NOT a gap, and worth naming so a future reader does not "fix" it by
     // inventing a delivery:
-    //   SIGTERM  — see above: it wants its own note, and inventing a shared one
-    //              is what V-6b just undid.
     //   SIGALRM  — no timer note exists; setitimer/alarm are themselves ENOSYS,
     //              so nothing could post it.
     //   SIGUSR1/2 — no general-purpose note; a note has a fixed 16-byte name
     //              from a closed set, so there is nothing to carry them.
-    //   SIGABRT  — reachable only via raise() == tkill(self), which terminates.
     //   SIGSTOP  — uncatchable by POSIX and rejected by the sigaction domain.
     //   32..64   — the realtime range, which requires queued siginfo (Tier 2).
     default: return VIV_SIGNOTE_NONE;
@@ -1821,6 +1834,7 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
     // In `g_known_notes` (notes.c), so `notes_post` accepts them and the
     // EL0-return-tail dispatcher can see them.
     case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TERM:
     case VIV_SIGNOTE_KILL:
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_CHILD_EXIT:
@@ -1838,9 +1852,62 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
     case VIV_SIGNOTE_SNARE_BUS:
     case VIV_SIGNOTE_SNARE_ILL:
     case VIV_SIGNOTE_SNARE_FPE:
+    case VIV_SIGNOTE_SNARE_ABORT:
     case VIV_SIGNOTE_NONE:
     default:
         return false;
+    }
+}
+
+// The snare:* death that carries an undeliverable signal, or NULL.
+static const char *viv_signote_snare_death(enum viv_signote note) {
+    switch (note) {
+    case VIV_SIGNOTE_SNARE_SEGV:  return NOTE_NAME_SNARE_SEGV;
+    case VIV_SIGNOTE_SNARE_BUS:   return NOTE_NAME_SNARE_BUS;
+    case VIV_SIGNOTE_SNARE_ILL:   return NOTE_NAME_SNARE_ILL;
+    case VIV_SIGNOTE_SNARE_FPE:   return NOTE_NAME_SNARE_FPE;
+    case VIV_SIGNOTE_SNARE_ABORT: return NOTE_NAME_SNARE_ABORT;
+    default:                      return NULL;
+    }
+}
+
+enum viv_kill_kind vivarium_kill_decide(u64 sig, const char **name_out) {
+    if (!name_out) return VIV_KILL_REFUSE;   // fail closed
+    *name_out = NULL;
+    // Linux's own check: 0 probes, 1.._NSIG are signals, anything else EINVAL.
+    if (sig == 0) return VIV_KILL_PROBE;
+    if (sig > VIV_NSIG) return VIV_KILL_REFUSE;
+    enum viv_signote note = viv_signal_note(sig);
+    switch (note) {
+    // Notes any program may post (notes_name_user_postable refuses only
+    // snare:*, tty:* and `sak` from a userspace poster), so SYS_POSTNOTE's gate is the whole
+    // authority question -- the one Pouch's kill already answers.
+    case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TERM:
+    case VIV_SIGNOTE_KILL:
+    case VIV_SIGNOTE_PIPE:
+    case VIV_SIGNOTE_CHILD_EXIT:
+        *name_out = viv_signote_note_name(note);
+        return *name_out ? VIV_KILL_POST : VIV_KILL_REFUSE;
+    // A snare:* death is the kernel's to cause; the one a program may choose is
+    // its own, which it could already reach by faulting.
+    case VIV_SIGNOTE_SNARE_SEGV:
+    case VIV_SIGNOTE_SNARE_BUS:
+    case VIV_SIGNOTE_SNARE_ILL:
+    case VIV_SIGNOTE_SNARE_FPE:
+    case VIV_SIGNOTE_SNARE_ABORT:
+        *name_out = viv_signote_snare_death(note);
+        return *name_out ? VIV_KILL_SELF_DEATH : VIV_KILL_REFUSE;
+    // tty:* is posted by the line discipline alone: a program that could post
+    // tty:susp could stop a job it does not control.
+    case VIV_SIGNOTE_TTY_HUP:
+    case VIV_SIGNOTE_TTY_QUIT:
+    case VIV_SIGNOTE_TTY_WINCH:
+    case VIV_SIGNOTE_TTY_SUSP:
+    case VIV_SIGNOTE_TTY_CONT:
+    case VIV_SIGNOTE_NONE:
+    default:
+        return VIV_KILL_REFUSE;
     }
 }
 
@@ -3032,6 +3099,7 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
     // posters. `kill` is present for completeness of the decode; nothing can put
     // it in a disposition table (vivarium_sigaction_decide refuses SIGKILL).
     if (viv_name_eq(name, NOTE_NAME_INTERRUPT))  return VIV_SIGNOTE_INTERRUPT;
+    if (viv_name_eq(name, NOTE_NAME_TERM))       return VIV_SIGNOTE_TERM;
     if (viv_name_eq(name, NOTE_NAME_KILL))       return VIV_SIGNOTE_KILL;
     if (viv_name_eq(name, NOTE_NAME_PIPE))       return VIV_SIGNOTE_PIPE;
     if (viv_name_eq(name, NOTE_NAME_CHILD_EXIT)) return VIV_SIGNOTE_CHILD_EXIT;
@@ -3049,6 +3117,7 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
 const char *viv_signote_note_name(enum viv_signote note) {
     switch (note) {
     case VIV_SIGNOTE_INTERRUPT:  return NOTE_NAME_INTERRUPT;
+    case VIV_SIGNOTE_TERM:       return NOTE_NAME_TERM;
     case VIV_SIGNOTE_KILL:       return NOTE_NAME_KILL;
     case VIV_SIGNOTE_PIPE:       return NOTE_NAME_PIPE;
     case VIV_SIGNOTE_CHILD_EXIT: return NOTE_NAME_CHILD_EXIT;
@@ -3071,6 +3140,7 @@ const struct viv_notebit_map g_viv_notebits = {
     .child_exit = NOTE_BIT_CHILD_EXIT,
     .snare      = NOTE_BIT_SNARE,
     .tty        = NOTE_BIT_TTY,
+    .term       = NOTE_BIT_TERM,
 };
 
 u64 viv_signote_to_signal(enum viv_signote note) {
@@ -3103,15 +3173,14 @@ bool viv_signote_default_is_ignore(enum viv_signote note) {
 
 bool viv_signote_default_is_terminate(enum viv_signote note) {
     switch (note) {
-    // SIGPIPE / SIGINT / SIGHUP / SIGQUIT: the POSIX default is to terminate.
-    // PIPE is the row that earns this function its existence: the native
-    // `pipe` note has no terminate latch (a Plan 9 ABI question, task #237),
-    // so the native uncaught arm never acts on it -- and a Linux guest, which
-    // has no notes fd, would otherwise carry a SIG_DFL SIGPIPE at the head of
-    // its queue for the rest of its life. The Linux default is not in
-    // question, so the phenotype branch answers it here, for its own Procs.
+    // SIGPIPE / SIGINT / SIGTERM / SIGHUP / SIGQUIT: the POSIX default is to
+    // terminate. The phenotype branch answers a SIG_DFL guest from this table,
+    // never from the native latch scan, so every terminating row must be here:
+    // notes.death_signal_table derives the answer from g_known_notes' dfl for
+    // every named row, so a row added to either side and missed here fails.
     case VIV_SIGNOTE_PIPE:
     case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_TERM:
     case VIV_SIGNOTE_TTY_HUP:
     case VIV_SIGNOTE_TTY_QUIT:
         return true;
@@ -3450,13 +3519,15 @@ u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m) {
 
         switch (viv_signal_note(sig)) {
         case VIV_SIGNOTE_INTERRUPT:  out |= 1ULL << m->interrupt;  break;
+        case VIV_SIGNOTE_TERM:       out |= 1ULL << m->term;       break;
         case VIV_SIGNOTE_PIPE:       out |= 1ULL << m->pipe;       break;
         case VIV_SIGNOTE_CHILD_EXIT: out |= 1ULL << m->child_exit; break;
 
         case VIV_SIGNOTE_SNARE_SEGV:
         case VIV_SIGNOTE_SNARE_BUS:
         case VIV_SIGNOTE_SNARE_ILL:
-        case VIV_SIGNOTE_SNARE_FPE:  out |= 1ULL << m->snare;      break;
+        case VIV_SIGNOTE_SNARE_FPE:
+        case VIV_SIGNOTE_SNARE_ABORT: out |= 1ULL << m->snare;     break;
 
         case VIV_SIGNOTE_TTY_HUP:
         case VIV_SIGNOTE_TTY_QUIT:
@@ -3491,13 +3562,15 @@ u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
         u64 bit;
         switch (viv_signal_note(sig)) {
         case VIV_SIGNOTE_INTERRUPT:  bit = 1ULL << m->interrupt;  break;
+        case VIV_SIGNOTE_TERM:       bit = 1ULL << m->term;       break;
         case VIV_SIGNOTE_PIPE:       bit = 1ULL << m->pipe;       break;
         case VIV_SIGNOTE_CHILD_EXIT: bit = 1ULL << m->child_exit; break;
 
         case VIV_SIGNOTE_SNARE_SEGV:
         case VIV_SIGNOTE_SNARE_BUS:
         case VIV_SIGNOTE_SNARE_ILL:
-        case VIV_SIGNOTE_SNARE_FPE:  bit = 1ULL << m->snare;      break;
+        case VIV_SIGNOTE_SNARE_FPE:
+        case VIV_SIGNOTE_SNARE_ABORT: bit = 1ULL << m->snare;     break;
 
         case VIV_SIGNOTE_TTY_HUP:
         case VIV_SIGNOTE_TTY_QUIT:
@@ -3681,6 +3754,9 @@ enum {
     VIV_CLOCK_BOOTTIME           = 7,
 };
 
+// clock_nanosleep's one flag. Linux reads no other bit of `flags`.
+enum { VIV_TIMER_ABSTIME = 1 };
+
 // clock_gettime(clk_id, tp): the clk_id map. PURE -- it maps the Linux clock id
 // onto one of Thylacine's two clocks and nothing else; the shell in syscall.c
 // does the validated write through the native SYS_CLOCK_GETTIME handler, whose
@@ -3714,9 +3790,14 @@ enum {
 //   per-thread CPU time, which Thylacine does not expose. EINVAL is honest, and
 //   a program that probes clock support tolerates it. Any other id is unknown
 //   to both sides and is EINVAL on both.
+//
+// clockid_t is an int, and Linux reads the low 32 bits of the register, so a
+// clock id with a stray high word names the same clock here. clock_nanosleep's
+// map below is derived from this one: a clock added here becomes one a guest
+// can sleep on, unless that map lists it among the clocks with no sleep.
 bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out) {
     if (!thyla_clk_id_out) return false;
-    switch (linux_clk_id) {
+    switch ((u32)linux_clk_id) {
     case VIV_CLOCK_REALTIME:
     case VIV_CLOCK_REALTIME_COARSE:
         *thyla_clk_id_out = T_CLOCK_REALTIME;
@@ -3730,4 +3811,136 @@ bool vivarium_clock_gettime_map(u64 linux_clk_id, u64 *thyla_clk_id_out) {
     default:
         return false;
     }
+}
+
+// clock_nanosleep's clock, in Linux's order: a clock the kernel does not know
+// is EINVAL (`clockid_to_kclock` finds nothing), and a known clock whose
+// k_clock keeps no `nsleep` is EOPNOTSUPP. "Known" is clock_gettime's map, so
+// the two calls cannot disagree about which clocks exist. MONOTONIC_RAW and the
+// two COARSE clocks are the ones Linux reads and will not sleep on. The flags
+// are judged after the clock, as Linux judges them, and only TIMER_ABSTIME is
+// read; Linux ignores the other bits.
+s32 vivarium_clock_nanosleep_decide(u64 linux_clk_id, u64 flags,
+                                    u64 *thyla_clk_id_out, bool *abstime_out) {
+    if (!thyla_clk_id_out || !abstime_out) return T_E_INVAL;
+    u64 clk;
+    if (!vivarium_clock_gettime_map(linux_clk_id, &clk)) return T_E_INVAL;
+    switch ((u32)linux_clk_id) {
+    case VIV_CLOCK_MONOTONIC_RAW:
+    case VIV_CLOCK_REALTIME_COARSE:
+    case VIV_CLOCK_MONOTONIC_COARSE:
+        return T_E_OPNOTSUPP;
+    default:
+        break;
+    }
+    *thyla_clk_id_out = clk;
+    *abstime_out = ((u32)flags & VIV_TIMER_ABSTIME) != 0;
+    return 0;
+}
+
+// Linux's timespec64_valid: a negative tv_sec, and a tv_nsec outside [0, 1e9)
+// -- a negative one included -- are EINVAL. The length saturates rather than
+// wraps: a wrapped sum would be a short sleep, and Linux's own conversion
+// saturates too (at KTIME_MAX).
+bool vivarium_sleep_req_ns(s64 tv_sec, s64 tv_nsec, u64 *ns_out) {
+    if (!ns_out) return false;
+    if (tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1000000000) return false;
+    u64 sec = (u64)tv_sec;
+    if (sec > (~0ull - (u64)tv_nsec) / 1000000000ull) {
+        *ns_out = ~0ull;
+        return true;
+    }
+    *ns_out = sec * 1000000000ull + (u64)tv_nsec;
+    return true;
+}
+
+// Linux's do_nanosleep returns 0 once its timer has fired, whatever else is
+// pending, so the clock is asked first. tsleep's outcome only says why the
+// wait ended. Before the deadline a caught note and a death both unwind with
+// EINTR and the time left. A death's value is immaterial when the thread dies
+// at its tail, but a terminate latch can still be revoked before the tail (a
+// peer installs a handler for the note, or ignores it), and then the thread
+// lives on and must not read a short sleep as a full one. A timeout that
+// arrives with the clock still short of the deadline (tsleep rounds the
+// deadline down to a counter value) or a wall-clock step means sleep again.
+s64 vivarium_sleep_verdict(int ts, u64 deadline, u64 now, u64 *rem_ns) {
+    if (deadline <= now) return 0;
+    if (ts == TSLEEP_NOTEINTR || ts == TSLEEP_INTR) {
+        if (rem_ns) *rem_ns = deadline - now;
+        return -(s64)T_E_INTR;
+    }
+    return 1;
+}
+
+// Nothing signals a relative or monotonic sleep's Rendez, so its wait ends on
+// the deadline, a stop's resume, a caught note or death.
+static int clock_sleep_never(void *arg) {
+    (void)arg;
+    return 0;
+}
+
+// A wall-clock sleep's wait also ends when a step walks its hook. The step list
+// sets `ready` under its own lock before the walk's wakeup takes the Rendez
+// lock, and this reads it under the Rendez lock: poll's chain.
+static int clock_sleep_stepped(void *arg) {
+    return ((const struct poll_waiter *)arg)->ready;
+}
+
+// A wrapped deadline would be a short sleep.
+static u64 clock_sleep_add(u64 a, u64 b) {
+    u64 s = a + b;
+    return (s < a) ? ~0ull : s;
+}
+
+// Sleep until timer_now_ns reaches `deadline`. A deadline already past returns
+// 0 before any wait, even with a note pending, and a deadline of 0 -- tsleep's
+// no-deadline sentinel -- never reaches tsleep. After each wait the clock
+// decides (vivarium_sleep_verdict), not tsleep's outcome.
+static s64 clock_sleep_until_mono(u64 deadline, u64 *rem_ns) {
+    struct Rendez r;
+    rendez_init(&r);
+    if (deadline <= timer_now_ns()) return 0;
+    for (;;) {
+        int ts = tsleep_noteintr(&r, clock_sleep_never, NULL, deadline);
+        s64 v = vivarium_sleep_verdict(ts, deadline, timer_now_ns(), rem_ns);
+        if (v <= 0) return v;
+    }
+}
+
+// Sleep until the wall clock reads `instant` (TIMER_ABSTIME on CLOCK_REALTIME).
+// The instant's place on the monotonic timebase moves with every step of the
+// wall clock, so the sleeper hooks the step list BEFORE it reads the offset: a
+// step either published first, and this read sees it, or walks the list after
+// the hook went on, and wakes the sleeper (register-then-observe, I-9). A woken
+// sleeper derives the deadline again. The expiry is judged on the wall clock.
+static s64 clock_sleep_until_wall(u64 instant) {
+    struct Rendez r;
+    rendez_init(&r);
+    for (;;) {
+        struct poll_waiter pw;
+        poll_waiter_init(&pw, &r);
+        timer_wallclock_step_register(&pw);
+        u64 off = timer_wallclock_offset_ns_now();
+        if (instant <= clock_sleep_add(timer_now_ns(), off)) {
+            poll_waiter_list_unregister(&pw);
+            return 0;
+        }
+        // instant > now + off, so the deadline lies ahead of now and is never
+        // the no-deadline 0.
+        int ts = tsleep_noteintr(&r, clock_sleep_stepped, &pw, instant - off);
+        poll_waiter_list_unregister(&pw);
+        s64 v = vivarium_sleep_verdict(ts, instant, timer_realtime_ns(), NULL);
+        if (v <= 0) return v;
+    }
+}
+
+// The sleep both rows share; see vivarium.h. There is no sleep syscall: the
+// sleep is tsleep with nothing to wait for but the deadline. Not
+// sys_poll_sleep_for, whose order at the deadline is poll's.
+s64 vivarium_clock_sleep(bool wall, bool abstime, u64 req_ns, u64 *rem_ns) {
+    if (!abstime)
+        return clock_sleep_until_mono(clock_sleep_add(timer_now_ns(), req_ns), rem_ns);
+    if (wall)
+        return clock_sleep_until_wall(req_ns);
+    return clock_sleep_until_mono(req_ns, NULL);
 }

@@ -632,6 +632,16 @@ void test_burrow_backing_pages_matches_alloc(void) {
 // the record ALONE, and the drop that frees must take it exactly once.
 // =============================================================================
 
+// Read a payer's charge record WITHOUT settling it. The kernel has no
+// stand-alone claim any more (AS-R9), so the tests peek under the record's own
+// leaf lock instead of claiming and restoring.
+static u32 charge_held(struct Burrow *v, const struct AddrSpace *as) {
+    spin_lock(&v->lock);
+    u32 held = (v->charge_pages != 0 && v->charge_as_id == as->id) ? v->charge_pages : 0;
+    spin_unlock(&v->lock);
+    return held;
+}
+
 void test_burrow_settled_drop_retains_nonfinal_charge(void) {
     snap_counters();
     struct Proc *p = proc_alloc();
@@ -650,9 +660,7 @@ void test_burrow_settled_drop_retains_nonfinal_charge(void) {
 
     // The AS-R9 property. The old sequence cleared the record here and put it
     // back afterwards; a racing final holder in that window found it empty.
-    u32 peek = burrow_charge_claim_in(v, p->as);
-    TEST_EXPECT_EQ(peek, 2u, "a non-final drop must RETAIN the payer's record");
-    burrow_charge_restore_in(v, p->as, peek);
+    TEST_EXPECT_EQ(charge_held(v, p->as), 2u, "a non-final drop must RETAIN the payer's record");
 
     u32 r2 = 0;
     bool f2 = burrow_unref_settled(v, p, &r2);
@@ -745,13 +753,15 @@ void test_burrow_settled_mapping_drop_defers_free(void) {
     proc_free(p);
 }
 
-// SYS_JIT_DESTROY keeps the claim/restore pair, and is sound only because every
-// failure return in burrow_unmap_reporting precedes that function's first
-// mutation: a refused unmap is NO teardown, not a partial one, so the alias it
-// names still holds its mapping ref and the region cannot have been freed. That
-// premise is the fragile half of the proof -- a failure return added BELOW the
-// mutation point would silently make that site a use-after-free write -- so it
-// is pinned here rather than left to a comment.
+// SYS_JIT_DESTROY refunds a code region's footprint only when both of its
+// unmaps succeed, and otherwise leaves the charge with the alias that survives,
+// for the retry or for exit to settle. That is sound only because every failure
+// return in burrow_unmap_reporting precedes that function's first mutation: a
+// refused unmap is NO teardown, not a partial one, so the alias it names still
+// holds its mapping ref and the region cannot have been freed. That premise is
+// the fragile half -- a failure return added BELOW the mutation point would
+// silently strand the charge of whatever it tore down -- so it is pinned here
+// rather than left to a comment.
 void test_burrow_unmap_failure_leaves_mapping_attached(void) {
     snap_counters();
     struct Proc *p = proc_alloc();
@@ -765,22 +775,24 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
     TEST_ASSERT(attached >= 1, "the mapping must be attached before the refusals");
     burrow_charge_record(v, p, 1);
 
-    // burrow_unmap_reporting refuses in eight places, all of them above its
-    // first mutation (the vma_uninstall_range_in call), which is what the proof
-    // above rests on. Seven are probed here, and each must leave the mapping
+    // burrow_unmap_reporting and its _in core refuse in nine places, all of
+    // them above the first mutation (the vma_uninstall_range_in call), which is
+    // what the proof above rests on. One, the core's NULL address space, cannot
+    // be reached through burrow_unmap: a live Proc's `as` is never NULL. Seven
+    // of the other eight are probed here, and each must leave the mapping
     // attached and the charge record intact: end mismatch, no VMA at the
     // address, zero length, misaligned vaddr, misaligned length, a null Proc,
     // and a range whose end wraps past 2^64. (Named by predicate, not by line:
     // a line number here would be re-pointed by hand on the next edit to
     // burrow.c, and silently wrong until someone noticed.)
     //
-    // The last two are BEHAVIOUR pins, not guard pins, and saying so is the
-    // honest form: vma_lookup null-guards its own Proc, and no VMA can be
-    // installed spanning a wrapped range, so deleting EITHER guard still
-    // refuses -- at the no-VMA miss, with an identical observable. Neither can
-    // be made load-bearing through this API, so what the two assertions buy is
-    // that both inputs are refused without faulting and without mutating, NOT
-    // that the guard named beside them is the one that fired.
+    // The wrap is a BEHAVIOUR pin, not a guard pin, and saying so is the
+    // honest form: no VMA can be installed spanning a wrapped range, so
+    // deleting its guard still refuses -- at the no-VMA miss, with an identical
+    // observable. What that assertion buys is that the input is refused without
+    // faulting and without mutating, NOT that the guard named beside it is the
+    // one that fired. The null Proc IS a guard pin: the wrapper reads p->as
+    // right after its guard, so deleting the guard faults instead of refusing.
     //
     // The eighth, vma->vaddr_start != vaddr, IS load-bearing, and the geometry
     // that makes it so needs its own fixture -- see
@@ -802,13 +814,11 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
 
     TEST_EXPECT_EQ(burrow_mapping_count(v), attached,
         "a REFUSED burrow_unmap must leave its mapping attached -- this is the "
-        "remaining-reference premise SYS_JIT_DESTROY's charge restore rests on");
+        "no-teardown premise SYS_JIT_DESTROY's keep-the-charge arm rests on");
     TEST_EXPECT_EQ(destroyed_since_snap(), (u64)0,
         "no refused unmap may free the region");
-    u32 held = burrow_charge_claim_in(v, p->as);
-    TEST_EXPECT_EQ(held, 1u,
+    TEST_EXPECT_EQ(charge_held(v, p->as), 1u,
         "a refused burrow_unmap must leave the charge record intact");
-    burrow_charge_restore_in(v, p->as, held);
 
     // The positive control one variable away: the same call with the mapping's
     // exact geometry succeeds. Without it, every assertion above is satisfied by
@@ -835,9 +845,8 @@ void test_burrow_unmap_failure_leaves_mapping_attached(void) {
 // uninstalls the tail page and then vma_remove()s the WHOLE two-page VMA, a
 // partial unmap silently accepted as a full teardown, leaving the head page's
 // PTEs installed over a Burrow whose mapping reference is gone. That is why it
-// gets its own fixture: unlike the null-Proc and wrapped-end probes, which
-// collapse onto the no-VMA miss, this refusal is observably the work of the
-// guard it names.
+// gets its own fixture: unlike the wrapped-end probe, which collapses onto the
+// no-VMA miss, this refusal is observably the work of the guard it names.
 void test_burrow_unmap_interior_start_refused(void) {
     snap_counters();
     struct Proc *p = proc_alloc();

@@ -1,8 +1,8 @@
 // libthyla-rs::fs::metadata — Metadata struct backed by SYS_FSTAT.
 //
 // Mirror of std::fs::Metadata, scoped to what Thylacine's kernel
-// surfaces today. Backed by `struct t_stat` (80 bytes, ABI-pinned per
-// kernel/include/thylacine/syscall.h).
+// surfaces today. Backed by `struct t_stat` (88 bytes; the layout is
+// kernel/include/thylacine/syscall.h, this file checks only its own size).
 //
 // Foundation chunk: U-2c-fs per docs/UTOPIA-SHELL-DESIGN.md §15
 // (third slice of the U-2c split: U-2c-path / U-2c-io / U-2c-fs).
@@ -36,7 +36,8 @@ use core::mem::MaybeUninit;
 /// `t::fs::metadata(path)`, and friends.
 ///
 /// 88-byte plain-data struct mirroring the kernel's `struct t_stat`
-/// (A-2a appended uid + gid -> 80; #100 appended devno + pad -> 88).
+/// (A-2a appended uid + gid -> 80; #100 appended devno + pad -> 88;
+/// devno-u64 widened dev over the pad, still 88).
 /// Cheap to copy.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
@@ -56,8 +57,7 @@ pub struct Metadata {
     blocks: u64,
     uid: u32,
     gid: u32,
-    dev: u32,
-    _pad_dev: u32,
+    dev: u64,
 }
 
 // Compile-time check that our Rust mirror matches the kernel's ABI pin
@@ -65,6 +65,7 @@ pub struct Metadata {
 // without extending Metadata, this assertion fires -- and since the kernel
 // writes sizeof(t_stat) bytes into this buffer, a stale size would corrupt.
 const _: () = assert!(core::mem::size_of::<Metadata>() == 88);
+const _: () = assert!(core::mem::offset_of!(Metadata, dev) == 80);
 
 impl Metadata {
     /// File size in bytes.
@@ -219,7 +220,7 @@ impl Metadata {
     /// static single-instance Dev like the boot ramfs.
     #[inline]
     #[must_use]
-    pub const fn dev(&self) -> u32 {
+    pub const fn dev(&self) -> u64 {
         self.dev
     }
 }
@@ -236,7 +237,7 @@ impl Metadata {
 pub(crate) fn stat_path(path: &super::Path) -> Result<Metadata> {
     let bytes = path.as_str().as_bytes();
     let mut buf: MaybeUninit<Metadata> = MaybeUninit::uninit();
-    // SAFETY: as fstat_fd -- the kernel fully initializes the 80 bytes on
+    // SAFETY: as fstat_fd -- the kernel fully initializes the 88 bytes on
     // success; on failure the uninitialized struct is discarded unread.
     let rc = unsafe {
         crate::t_stat_path(bytes.as_ptr(), bytes.len(), buf.as_mut_ptr() as *mut u8)

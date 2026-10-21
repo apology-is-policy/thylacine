@@ -76,6 +76,8 @@ static void attached_ctl_link(struct p9_attached *a,
     a->ctl_label[n] = 0;
     if (n == 0) { a->ctl_label[0] = '-'; a->ctl_label[1] = 0; }
     a->ctl_id = -1;
+    a->ctl_owner  = PRINCIPAL_INVALID;
+    a->ctl_server = PRINCIPAL_INVALID;
     spin_lock(&g_p9_ctl_lock);
     a->ctl_next   = g_p9_ctl_head;
     g_p9_ctl_head = a;
@@ -111,13 +113,22 @@ void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
     spin_unlock(&g_p9_ctl_lock);
 }
 
+void p9_attached_set_ctl_owners(struct p9_attached *a, u32 attacher, u32 server) {
+    if (!a || a->magic != P9_ATTACHED_MAGIC) return;
+    spin_lock(&g_p9_ctl_lock);
+    a->ctl_owner  = attacher;
+    a->ctl_server = server;
+    spin_unlock(&g_p9_ctl_lock);
+}
+
 void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg) {
     if (!cb) return;
     spin_lock(&g_p9_ctl_lock);
     for (struct p9_attached *a = g_p9_ctl_head; a; a = a->ctl_next) {
         struct p9_client_ctl snap;
         p9_client_ctl_snapshot(a->client, &snap);
-        if (!cb(a->ctl_label, a->ctl_id, a->msize, &snap, arg)) break;
+        if (!cb(a->ctl_label, a->ctl_id, a->msize, a->ctl_owner, a->ctl_server,
+                &snap, arg)) break;
     }
     spin_unlock(&g_p9_ctl_lock);
 }
@@ -412,6 +423,9 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // #210: attribute this session in /ctl/9p-sessions by the CONNECTING
     // peer's pid (aname is often empty on the /srv path).
     p9_attached_set_ctl_ident(att, "srv", cn->peer_pid);
+    // Its ends: the attaching Proc and the conn's server.
+    p9_attached_set_ctl_owners(att, __atomic_load_n(&who->principal_id, __ATOMIC_ACQUIRE),
+                               cn->server_principal);
 
     // B1 per-attach loose mode (I-38 opt-in), the identity cape and the remote
     // declaration: stamped on the still-private client BEFORE the root Spoor
@@ -487,6 +501,7 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
 struct p9_closer_entry {
     struct p9_closer_entry *next;
     u32                     fid;
+    struct p9_close_job    *job;     // NULL: a Tclunk alone
 };
 
 struct p9_closer {
@@ -563,11 +578,13 @@ static void closer_enqueue_locked(struct p9_attached *a,
     if (g_closer_idle) closer_kick_locked(g_closer_idle);
 }
 
-int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
+int p9_attached_defer_close(struct p9_attached *a, u32 fid,
+                            struct p9_close_job *job) {
     if (!a || a->magic != P9_ATTACHED_MAGIC) return -1;
     struct p9_closer_entry *e = closer_entry_alloc();
     if (!e) return -1;
     e->fid = fid;
+    e->job = job;
     p9_attached_ref(a);          // the entry's; the caller's own keeps it above 0
     spin_lock(&g_closer_lock);
     closer_enqueue_locked(a, e);
@@ -580,6 +597,10 @@ int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
     spin_unlock(&g_closer_lock);
     if (spawn) (void)closer_spawn();
     return 0;
+}
+
+int p9_attached_defer_clunk(struct p9_attached *a, u32 fid) {
+    return p9_attached_defer_close(a, fid, NULL);
 }
 
 // A reference for a caller that holds none: fails once the count reached 0,
@@ -618,6 +639,7 @@ static int attached_orphan_sink(void *arg, u32 fid) {
     }
     if (!attached_tryref(a)) { kfree(e); return -1; }
     e->fid = fid;
+    e->job = NULL;
     spin_lock(&g_closer_lock);
     closer_enqueue_locked(a, e);
     spin_unlock(&g_closer_lock);
@@ -633,6 +655,17 @@ void p9_clunk_refused(u32 fid, int rc) {
     cons_diag_line_puts(&dl, "9p: close: clunk of fid ");
     cons_diag_line_putdec(&dl, (u64)fid);
     cons_diag_line_puts(&dl, " refused rc ");
+    cons_diag_line_putdec(&dl, (u64)(rc < 0 ? -rc : rc));
+    cons_diag_line_puts(&dl, "\n");
+    cons_diag_line_emit(&dl);
+}
+
+void p9_close_flush_failed(u32 fid, int rc) {
+    struct cons_diag_line dl;
+    cons_diag_line_init(&dl);
+    cons_diag_line_puts(&dl, "9p: close: flush of fid ");
+    cons_diag_line_putdec(&dl, (u64)fid);
+    cons_diag_line_puts(&dl, " failed rc ");
     cons_diag_line_putdec(&dl, (u64)(rc < 0 ? -rc : rc));
     cons_diag_line_puts(&dl, "\n");
     cons_diag_line_emit(&dl);
@@ -658,11 +691,28 @@ static int closer_send(struct p9_closer *self, struct p9_attached *a, u32 fid) {
     }
 }
 
-// Send every deferred Tclunk of `a`, which this closer took off the run-queue
-// (closer_busy). Each entry's reference is dropped outside the lock: the last
-// drop tears the session down, which may close Spoors and queue again. While
-// entries remain they hold references, so `a` outlives each unref but the
-// last; the closer lets go of `a` (closer_busy = false) before that one.
+// Run a close job, retried like closer_send while the fid is still bound on a
+// live session: a write never sent for want of memory comes back -P9_E_IO
+// too, and a resend of the run's explicit offsets is idempotent.
+static int closer_run_job(struct p9_closer *self, struct p9_attached *a,
+                          struct p9_closer_entry *e) {
+    u64 backoff = CLOSER_RETRY_NS_MIN;
+    for (u32 tries = 0;; tries++) {
+        int rc = e->job->run(e->job, a->client, e->fid);
+        if (rc != -P9_E_IO || tries >= CLOSER_RETRIES ||
+            !p9_client_fid_held(a->client, e->fid))
+            return rc;
+        (void)tsleep(&self->r, closer_never_cond, NULL, timer_now_ns() + backoff);
+        backoff *= 2;
+    }
+}
+
+// Send every deferred Tclunk of `a`, each after its close job if it has one,
+// which this closer took off the run-queue (closer_busy). Each entry's
+// reference is dropped outside the lock: the last drop tears the session
+// down, which may close Spoors and queue again. While entries remain they
+// hold references, so `a` outlives each unref but the last; the closer lets
+// go of `a` (closer_busy = false) before that one.
 static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
     for (;;) {
         spin_lock(&g_closer_lock);
@@ -670,6 +720,12 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
         a->closer_head = e->next;
         if (!a->closer_head) a->closer_tail = NULL;
         spin_unlock(&g_closer_lock);
+
+        // A close job first: its writes need the fid bound. Its failure on a
+        // live session loses bytes write() reported written, so it is loud.
+        int  jrc   = e->job ? closer_run_job(self, a, e) : 0;
+        bool jlost = jrc != 0 && p9_client_fid_held(a->client, e->fid);
+        if (jlost) p9_close_flush_failed(e->fid, jrc);
 
         int  rc   = closer_send(self, a, e->fid);
         bool live = rc != 0 && p9_client_fid_held(a->client, e->fid);
@@ -679,11 +735,14 @@ static void closer_serve(struct p9_closer *self, struct p9_attached *a) {
         if (rc == 0)   g_closer_st.sent++;
         else if (live) g_closer_st.refused++;
         else           g_closer_st.dropped++;     // the session died: its fids too
+        if (e->job)    g_closer_st.jobs++;
+        if (jlost)     g_closer_st.job_errors++;
         g_closer_st.pending--;
         bool done = a->closer_head == NULL;
         if (done) a->closer_busy = false;
         spin_unlock(&g_closer_lock);
 
+        if (e->job) e->job->release(e->job);
         kfree(e);
         p9_attached_unref(a);
         if (done) return;

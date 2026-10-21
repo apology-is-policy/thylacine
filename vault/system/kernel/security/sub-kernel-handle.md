@@ -13,6 +13,7 @@ locks: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 18", "specs/handles.tla", "specs/handle_slots.tla"]
 created: 2026-08-02
+updated: 2026-10-07
 updated: 2026-10-19
 ---
 ## Purpose
@@ -33,6 +34,12 @@ index, or `-1`. The caller must **already** have accounted for one reference
 on `obj` (the `burrow_create_anon`-consumed-reference convention);
 `handle_close` releases it.
 
+`handle_close_report(p, h, &close_rc)` is `handle_close` that also returns
+what the object's last close reported: for a Spoor, its Dev close hook's
+result (0 or negative, [[sub-kernel-dev]]); 0 for every other kind. Only
+`SYS_CLOSE` asks, to map a negative to `EIO` with the fd already gone
+(2026-10-07, ARCH section 21.11); `handle_close` and its other callers keep
+the 0 / -1 contract.
 `handle_close_obj(p, h, kind, obj)` is `handle_close` that acts only while slot
 `h` still names `(kind, obj)`, decided in the same lock hold as the vacate, and
 answers `-1` with the slot untouched otherwise. It is for an unwind that runs

@@ -37,8 +37,9 @@ static struct Spoor *devzero_create(struct Spoor *c, const char *name, int omode
     return NULL;
 }
 
-static void devzero_close(struct Spoor *c) {
+static int devzero_close(struct Spoor *c) {
     dev_simple_close(c);
+    return 0;
 }
 
 static long devzero_read(struct Spoor *c, void *buf, long n, s64 off) {

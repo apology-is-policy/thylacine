@@ -113,6 +113,9 @@ struct Proc;
 #define TORPOR_ERR_EINVAL       (-22)
 #define TORPOR_ERR_EFAULT       (-14)
 #define TORPOR_ERR_ETIMEDOUT   (-110)
+// A caught note ended the wait (ARCH 8.8.3). Only a Linux futex wait (a call on
+// signal(7)'s list) can receive it; a native torpor_wait stays death-only.
+#define TORPOR_ERR_EINTR         (-4)
 
 // Bucket count for the torpor wait-queue hash table. A static array of
 // pointers (one head per bucket); chained on a per-waiter `next`. 64

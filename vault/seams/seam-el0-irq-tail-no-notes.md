@@ -2,13 +2,24 @@
 id: seam-el0-irq-tail-no-notes
 type: seam
 title: "Notes are evaluated on only one of the two EL0 return tails, so Ctrl-C misses a CPU-bound loop"
-status: open
+status: closed
 surface: [sub-kernel-exception]
 opened-by: chg-2026-08-02-entry-sweep
 tracker: "task #21"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-10-12
+closed-by: chg-2026-10-12-note-target
 ---
+## Closed (2026-10-12)
+
+The 0x480 slot now branches into the synchronous slot's tail, renamed
+`.Lel0_return`, so every EL0 return runs the die-check, the stop leg and the
+notes leg ([[chg-2026-10-12-note-target]]); the handler frame saves the whole
+interrupted context. A thread computing at EL0 takes its notes at the next
+tick or kick. Held by viv-pheno-probe L332 and jc-probe's spinint and
+spinnote rungs, each red with the branch reverted, and by
+[[spec-tail-order]]'s `RunMeets`. The text below is the seam as it stood open.
+
 ## Owed
 
 Give the EL0 interrupt slot its own return trampoline — exactly as the EL0
@@ -17,9 +28,11 @@ comment that already claims this is the case.
 
 ## The gap
 
-`notes_deliver_at_el0_return` has **one** call site: the EL0 *synchronous*
-return trampoline, reached from the syscall-and-fault vector slot. The EL0
-*interrupt* slot does not call it.
+`notes_deliver_at_el0_return` has two call sites, and neither is on the
+interrupt path: the EL0 *synchronous* return trampoline, reached from the
+syscall-and-fault vector slot, and the birth tail of a held spawn
+(`userland_enter_held`), which each held thread runs once, before its first
+instruction. The EL0 *interrupt* slot does not call it.
 
 So a Proc's note disposition is evaluated only when it returns from a syscall
 or a fault. A thread that makes neither — a compute loop — takes timer
@@ -31,8 +44,13 @@ Three of the four EL0-return actions run on both tails. Only this one does not:
 |---|---|---|
 | preemption check | yes | yes |
 | group-terminate die-check | yes | yes |
-| **note delivery / default-terminate** | **yes** | **no** |
 | debugger and job stop-check | yes | yes |
+| **note delivery / default-terminate** | **yes** | **no** |
+
+The rows are in tail order. Since 2026-10-05 the stop-check runs before note
+delivery (DEBUG-FS-DESIGN 4.2), so on the synchronous tail a note posted during
+a stop is taken as the park returns. On the interrupt tail the thread still
+waits for its next synchronous entry.
 
 ## What still works, and what does not
 

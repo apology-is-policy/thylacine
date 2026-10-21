@@ -27,8 +27,9 @@ updated: 2026-10-19
 
 Native syscall 134 is SRV_REGISTRY_NEW: boot O_PATH fd, route pointer, count,
 zero flags. It was 127 until vote 13 (2026-10-19): 127..133 belong to syscalls
-other branches assigned first (main's 127/128, b3's 129..133), so this tree
-assigns nothing there and the number no longer depends on landing order. Each
+other branches assigned first (main's 127/128, b3's 129..133), so the number
+no longer depends on landing order. Since corona merged main (2026-10-21) this
+tree has 127 and 128 too, and assigns nothing in 129..133. Each
 route is 40 bytes (u32 length, u32 reserved, 32 name bytes). Public spawn bit
 10 delegates the dedicated factory role. Kernel C, libt C and Rust wrappers
 agree under tools/test-srv-registry-abi.py; the native ceiling advances to
@@ -59,6 +60,21 @@ slot in the same commit: libt's `T_SPAWN_DEBUG_HELD`, libthyla-rs's
 and the pouch process patch. The Go fork's `spawnArgs` waits on the operator,
 with wiring `SysProcAttr` to the flag. What the flag does is
 [[sub-kernel-birth-hold]]'s.
+
+**`ext_flags` and the cwd tail (2026-10-06).** The record's `_pad_envp` word at
+offset 44, which had to be 0, becomes `ext_flags`. Each bit announces a tail
+after the 104-byte record, in bit order, and the kernel reads only the tails it
+is told of; a bit outside `SPAWN_EXT_FLAGS_ALL` is refused with -1, as before.
+`SPAWN_EXT_CWD` (bit 0) announces a `struct sys_spawn_ext_cwd` at the record's
+address + 104: `cwd_va` (u64), `cwd_len` (u32, 1..`SYS_OPEN_PATH_MAX`) and
+`cwd_flags` (u32, must be 0). The record no longer grows: the Go fork, shared by
+every tree, carries a copy the mirror check holds to each tree's own kernel
+header, so a grown record breaks whichever tree it does not match until that
+tree merges. A tail moves only the trees that use it. The in-tree mirrors rename
+the word (libt, libthyla-rs, the pouch patch) and declare the tail (libt
+`T_SPAWN_EXT_CWD` + `struct t_sys_spawn_ext_cwd`; libthyla-rs `TSpawnExtCwd` and
+`Command::current_dir`); the fork needs no change until it sends one. What the
+tail does is [[sub-kernel-syscall-dispatch]]'s (STALK-DESIGN 4.3).
 
 **`T_CAP_TCB_DIAL` (U, 2026-09-23).** Bit 14 joins the `T_CAP_*` mirror set in
 both userspace copies -- `usr/lib/libthyla-rs/src/lib.rs` and
@@ -154,6 +170,26 @@ incremented: **124** live numbers, the span runs to 126 with the same three
 holes, `syscall_dispatch_body` has exactly 124 arms, and both set differences
 are empty.
 
+**B-2b append (2026-10-07).** `SYS_JIT_CREATE_SEALED` = 127; `SYS__NATIVE_TOP`
+is 128 and `VIV_NATIVE_CEILING` 127. Re-measured on this tree, not
+incremented: **125** live numbers, the span runs to 127 with the same three
+holes, `syscall_dispatch_body` has exactly 125 arms, and both set differences
+are empty. The section at the end of this dossier carries the record.
+
+**B-2e2 append (2026-10-13).** `SYS_ICACHE_SYNC_SPACE` = 128 (no arguments;
+`dec-2026-10-13-icache-sync-space`); `SYS__NATIVE_TOP` is 129 and
+`VIV_NATIVE_CEILING` 128. Re-measured on this tree, not incremented: **126**
+live numbers, the span runs to 128 with the same three holes (26, 30, 43),
+`syscall_dispatch_body` has exactly 126 arms, and both set differences are
+empty. It is the first native number that is also a Linux arm64 number above
+the old ceiling (`restart_syscall`); [[sub-kernel-vivarium]] carries its
+per-number collision argument. The Rust mirror gains
+`T_SYS_ICACHE_SYNC_SPACE` and `t_icache_sync_space`; libt carries no JIT call,
+the subset rule below. The C JIT header `usr/lib/thylajit/thyla_jit.h`
+(owned by [[sub-dosbox]], consumed by JavaScriptCore too) gains
+`THYLA_SYS_ICACHE_SYNC_SPACE` and `thyla_jit_icache_sync_space`, and its
+`THYLA_JIT_REGION_MAX` follows the kernel's `JIT_REGION_MAX` to 128 MiB.
+
 **Vote 13 (2026-10-19).** `SYS_SRV_REGISTRY_NEW` = 134 (the D7 append, first
 minted at 127); `SYS__NATIVE_TOP` is 135 and `VIV_NATIVE_CEILING` 134.
 Measured on this tree, not incremented: **125** live numbers, the span runs to
@@ -164,6 +200,15 @@ empty. The 127..133 hole is deliberate and pinned
 native switch's unknown arm through `syscall_unknown_count()` rather than
 trusting the -1 many handlers also return): those numbers belong to other
 branches.
+
+**Merge of main (2026-10-21).** corona/async-memory merged main `cba52ec9f`, so
+the three appends above meet: `SYS_JIT_CREATE_SEALED` = 127,
+`SYS_ICACHE_SYNC_SPACE` = 128, `SYS_SRV_REGISTRY_NEW` = 134; `SYS__NATIVE_TOP`
+is 135 and `VIV_NATIVE_CEILING` 134. Measured on the merged tree, not added up:
+**127** live numbers, the span runs to 134 with holes at 26, 30, 43 and
+129..133, `syscall_native_switch` has exactly 127 arms, and both set
+differences are empty. The deliberate hole is now 129..133 (b3's numbers), and
+`syscall.native_gap_unassigned` counts those five.
 
 
 `x8` carries the syscall number, `x0..x5` the arguments, `x0` the result —
@@ -274,7 +319,10 @@ built because this record had already drifted: the aux-2 merge grew it to 104
 bytes, and a mirror left at 96 passed its own assertion while the kernel read
 eight bytes past it (#100). The Go fork's committed copy is still that 96-byte
 record, and its builds are right only because they compile an uncommitted fix.
-Every other record on this surface is pinned by nothing but its comments.
+Every other record on this surface is pinned by nothing but its comments. Since
+2026-10-06 the same check holds the record's tails (`EXT_TAILS`): each kernel
+tail struct's offsets asserted, its 8-byte fields named `*_va`, and its in-tree
+mirrors matched by name, offset and size, with the same mutations proving it.
 
 ### And the hazard is not only drift; it is concurrent allocation
 
@@ -368,20 +416,24 @@ at the point of the hazard, again, is the whole mechanism.
 **The fifth growth spent the last reserved slot (2026-09-29).** The debug-flags
 word of the birth hold took the pad the aux-2 merge had opened at offset 100, so
 the struct stayed 104 bytes and a zero-filling caller keeps the old behaviour.
-There is no reserved slot left. The next field appends past the end and grows
-the struct, and every mirror with it, and it is the first growth the mirror
-check will see.
+There is no reserved slot left. The next field was to append past the end and
+grow the struct, and every mirror with it; instead the record stopped growing
+(2026-10-06): `_pad_envp` became `ext_flags`, and a new field rides a tail the
+flags announce.
 
 `t_stat` is the same story in the other growth mode. It has grown twice — uid+gid
 (A-2a) took it from 72 to 80, then a per-instance device number plus pad (#100)
 from 80 to 88 — both **appended past the end**, because a stat result is written
-into the caller's buffer and there was no reserved slot to reuse. Its size
-assertion is unusually loud about the consequence: the kernel writes `sizeof(88)`
-bytes, so a mirror left at 80 *overflows the caller's buffer*, and the message
-names all four copies that must grow in lockstep — libt, libthyla-rs, the pouch
-stat patch, and the go-thylacine `Stat_t`. Four mirrors, not two: the drift hazard
-is wider here than anywhere else on the surface, and nothing but that comment binds
-them.
+into the caller's buffer and there was no reserved slot to reuse. The device
+number is 64 bits, laid over what was the pad after it, so no offset moved and
+a reader of the low 32 bits at 80 reads what it always did
+([[dec-2026-09-28-t-stat-devno-u64]]); a width assertion pins it. Its size
+assertion is unusually loud about the consequence of a growth: the kernel writes
+`sizeof(88)` bytes, so a mirror left short *overflows the caller's buffer*, and
+the message names the copies that must change in lockstep — libt, libthyla-rs,
+the four pouch patches that read the record, and the go-thylacine `Stat_t`
+([[abi-t-stat]] keeps the list). The drift hazard is wider here than anywhere
+else on the surface, and nothing but that comment binds them.
 
 ### The all-or-nothing rule, stated twice and broken once
 
@@ -411,6 +463,14 @@ offset assertions plus the size assertion, the most-grown record at 104 bytes),
 the stat result (88 bytes after two growths), the hardware allowance descriptor,
 the PCI info block and its two sub-records, the debug register frames, the peer
 identity record, a timespec, and a JIT region descriptor.
+
+The JIT region descriptor and the three JIT numbers (101-103) did not change
+when B-2a (2026-10-07) made the region a reservation, but one answer did: a
+create no longer allocates or charges anything, so its `-ENOMEM` reports a VMA,
+gap or slab failure and never the size of the region. Memory is charged when
+a page is first touched, so a JIT over its budget is refused at that touch,
+which terminates the Proc as any demand-zero overcommit does (I-32), rather
+than at the create ([[sub-kernel-syscall-dispatch]]).
 
 One is pinned only transitively. The hardware window — a base/size pair — has no
 assertion naming it, but the descriptor that contains an array of eight of them
@@ -902,8 +962,11 @@ session, in the cape's shape (HAUL-DESIGN 4.8,
   all three refusals follow without an edit, which is what the derived mask
   was built for. A static assert pins that bit 22 collides with no other perm
   bit, and `srv_client.remote_admission` pins both values.
-- A label, not an authority: nothing that resolves a path, checks permission,
-  caches or vouches for exec consults it, and the wrappers' comments say so.
+- It grants nothing. Besides the label, one decision reads it, and only to
+  narrow: the resolver contains a link the session serves beneath its mount
+  (DISTRO 4.6, 2026-10-06; [[sub-kernel-stalk]]). Nothing that checks
+  permission, caches or vouches for exec consults it, and the comments on both
+  bits, in the kernel header and in both libraries, say so.
 - Callers: Haul, on both paths ([[sub-haul]]), and `/attach-probe`, whose
   real attach now passes CAPE|REMOTE. Its unknown-bit probe moved from 0x4,
   now admitted, to 0x8. Every other in-tree `t_attach_9p` caller passes 0.
@@ -917,6 +980,76 @@ name. No argument, flag or return changed; where each inner stamps is
 [[sub-kernel-syscall-dispatch]]'s, what the root carries
 [[sub-kernel-ninep-dev9p]]'s.
 
+## SYS_CHDIR's stored name; SYS_ATTACH_9P's ends (2026-10-06)
+
+No number, register or record changed; two operator votes changed what the
+calls mean ([[dec-2026-10-06-chdir-physical]],
+[[dec-2026-10-06-9p-sessions-ends]]).
+
+- `SYS_CHDIR` stores the name of where the walk landed, so `SYS_GETCWD`
+  returns a name with no `.`, `..` or link component (POSIX `getcwd`), and
+  `cd link/..` lands where `ls link/..` reads. A directory whose name does not
+  walk back to it -- a node a union member shadows, reached through a served
+  link in a later member -- fails the call, as a name past the buffer does
+  ([[sub-kernel-syscall-dispatch]], [[sub-kernel-stalk]]).
+- A session made by `SYS_ATTACH_9P` records the caller as its attaching end
+  and an unknown server, so its `/ctl/9p-sessions` counters read as numbers
+  only to the caller, the system principal and a hostowner; one made over
+  `/srv` (`SYS_ATTACH_9P_SRV`) also shows them to the connection's server
+  ([[sub-kernel-ninep-attach]], [[sub-kernel-devctl]]).
+
+## B-2b: SYS_JIT_CREATE_SEALED 127; SYS_LOOM_REGISTER answers -errno (2026-10-07)
+
+`SYS_JIT_CREATE_SEALED(src_va x0, length x1, out_va x2) -> 0 / -errno`
+(CAP_JIT, checked first): the kernel copies `length` bytes (1 ..
+`JIT_SEALED_MAX`, 1 MiB) from `src_va` into fresh pages, publishes them, and
+maps ONE execute-only alias at a random address, written as a u64 to `out_va`
+([[dec-2026-10-07-jit-sealed-thunk]]). Errors: `-EACCES`, `-EINVAL` (length),
+`-EFAULT` (source unreadable, `out_va` unwritable), `-EAGAIN` (the CSPRNG is
+unseeded), `-ENOMEM` (page budget -- a sealed region is charged at creation --
+VMA cap, gap or allocator). 127 also named astra's unlanded
+`SYS_SRV_REGISTRY_NEW` on her base; B-2 lands first and she renumbers at her
+merge, the pre-merge-collision exception under Mechanism. The ceiling is 127,
+so the next native append, 128, is the first that owes `restart_syscall` a
+decision (Linux 128 is `restart_syscall`; [[sub-kernel-vivarium]]).
+
+Existing numbers whose answers changed, no number or record moved:
+
+- `SYS_JIT_CREATE` (101) also answers `-EAGAIN`: each alias goes at an
+  independent random address, and none is drawn while the CSPRNG is unseeded.
+- `SYS_JIT_DESTROY` (102) also takes a sealed region's VA, the base of its
+  one alias; an exec alias of a writable region is still refused.
+- `SYS_POSTNOTE` (47) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-14-postnote-errnos]]): `-ESRCH`, `-EACCES` (not the caller's
+  child), `-EAGAIN`, `-EINVAL`, `-EFAULT`; the name is judged before the
+  pid is looked for, so a refused name is `-EINVAL` whatever the target; a
+  dead unreaped child answers 0 to a name it may be sent;
+  and a self-post of `snare:segv`/`bus`/`ill`/`fpe`/`abort` does not return
+  ([[dec-2026-10-14-self-death-snare]]).
+- `SYS_LOOM_REGISTER` (67) moved from the bare -1 set to the errno set
+  ([[dec-2026-10-07-loom-register-errno]]): `-EBADF` for a `loom_fd` or listed
+  fd that is not open, `-EFAULT` for an argument array the kernel cannot read,
+  a failed write-behind flush's own errno (`-ENOSPC`, the server's `-EIO`, a
+  caught note's `-EINTR`, after which the run is still staged), `-EINVAL` for
+  the rest. A caller that tested `rc < 0` is unaffected; `libthyla_rs`'s
+  `register_handles` / `register_buffers` now map the value through
+  `Error::from_syscall_return` instead of answering `InvalidArgument` for
+  every failure. Mirrors: `thyla_jit.h`, `libthyla_rs` (`T_SYS_JIT_CREATE_SEALED`,
+  `t_jit_create_sealed`, `jit::SealedRegion`).
+
+## gcpark-b: `WAIT_PACKED` and the signalled wait word (2026-10-12)
+
+`SYS_WAIT_PID` (22) takes a new flag bit, `WAIT_PACKED` (8): return the Linux
+`wait(2)` word for an exit or a death, and report no stop or continue. The
+word itself gained the signalled shape, `signal & 0x7f`, which the kernel now
+records for every death by note (docs/ERRORS.md "The wait status";
+[[sub-kernel-proc]], [[sub-kernel-death]]). Additive, not an ABI break: a
+caller that passes no packing flag still reads the raw status, where a death
+reads 1, and the kernel refuses an unknown bit with -1, so a new caller on an
+old kernel fails loud instead of reading a raw word as packed. Mirrors: libt
+`<thyla/syscall.h>` (`WAIT_PACKED`, `WAIT_IF_SIGNALED`, `WAIT_TERMSIG`),
+`libthyla_rs` (`T_WAIT_PACKED`, `t_wait_if_signaled`, `t_wait_termsig`), and
+Pouch's `POUCH_WAIT_PACKED` in 0026 ([[sub-pouch-process]]).
 ## Native C private Loom records
 
 Owns the libt loom_service.h mirror, previously indexed only by the ABI pin.

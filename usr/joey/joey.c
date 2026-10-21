@@ -860,7 +860,7 @@ static int pouch_smoke_one_argv(const char *name, size_t name_len,
         .argc          = argc,
         .fd_count      = 2,
         .perm_flags    = (unsigned int)perm_flags,
-        ._pad_envp     = 0,
+        .ext_flags     = 0,
         .cap_mask      = cap_mask,
     };
     long pid = t_spawn_full_argv(&req);
@@ -1083,9 +1083,17 @@ static int do_pouch_hello_smoke(void) {
     //   - sigaction(SIGINT, SIG_IGN)  bootstrap fast-paths to NCONT without
     //                                  invoking the user handler
     //   - sigaction(SIGUSR1, ...)     -> EINVAL (unsupported signum)
+    //   - deaths: children that abort(), fail an assert(), brk #1 and NULL-
+    //     store read WIFSIGNALED SIGABRT/SIGABRT/SIGTRAP/SIGSEGV (gcpark-b);
+    //     raise(SIGABRT) and kill(getpid(), SIGABRT) read SIGABRT (S-2)
+    //     and raise/kill(self) of SIGSEGV, SIGBUS, SIGILL and SIGFPE read
+    //     that signal (S-3)
+    //   - kill() refusals read ESRCH and EPERM, not the seam's EIO (S-3)
+    //   - SIGTERM rides `term`: its handler runs apart from SIGINT's ignore
+    //     and mask, and a child killed by it reads WIFSIGNALED SIGTERM
     // Closes POUCH-DESIGN.md §6.4 / §14 sub-chunk 13b's exit criterion.
     static const char psig_name[]   = "pouch-hello-signals";
-    static const char psig_expect[] = "pouch-hello-signals: exit 0";
+    static const char psig_expect[] = POUCH_CENSUS_SIGNALS;
     if (pouch_smoke_one(psig_name, sizeof(psig_name) - 1,
                         psig_expect, sizeof(psig_expect) - 1) != 0)
         return -1;
@@ -1168,7 +1176,8 @@ static int do_pouch_hello_smoke(void) {
     // deliberately NULL-derefs; the kernel MUST route the EL0 fault
     // through arch/arm64/exception.c::exception_sync_lower_el ->
     // proc_fault_terminate(NOTE_NAME_SNARE_SEGV, 0) -> exits("snare:segv")
-    // -- NOT extinct. Joey reaps with exit_status = 1 (v1.0 collapse).
+    // -- NOT extinct. Joey's raw wait reads 1 (a packed wait reads
+    // WIFSIGNALED SIGSEGV; pouch-hello-signals pins that).
     // The marker "pouch-hello-fault: about to fault" proves the binary
     // actually ran the deref (not just failed to start). Pre-#3a (tip
     // 26e3156 and earlier) this binary would extinct the kernel and
@@ -3520,7 +3529,7 @@ static int login_e2e_run(const char *user, size_t ulen,
         .argc          = e2e_cc ? 4u : 2u,
         .fd_count      = e2e_cc ? 4u : 3u,
         .perm_flags    = LOGIN_PERMS,
-        ._pad_envp     = 0,
+        .ext_flags     = 0,
         .cap_mask      = LOGIN_CAPS,
     };
     long lpid = t_spawn_full_argv(&lreq);
@@ -3751,7 +3760,7 @@ static int do_recover_e2e(void) {
         .argc          = 1,
         .fd_count      = 3,
         .perm_flags    = LOGIN_PERMS,
-        ._pad_envp     = 0,
+        .ext_flags     = 0,
         .cap_mask      = LOGIN_CAPS,
     };
     long lpid = t_spawn_full_argv(&lreq);
@@ -3872,7 +3881,7 @@ static void session_getty_loop(long cfd, long consctl_fd) {
             .argc          = with_cc ? 3u : 1u,
             .fd_count      = with_cc ? 4u : 3u,
             .perm_flags    = LOGIN_PERMS,
-            ._pad_envp     = 0,
+            .ext_flags     = 0,
             .cap_mask      = LOGIN_CAPS,
         };
         long lpid = t_spawn_full_argv(&req);
@@ -4006,7 +4015,7 @@ static long go4c_spawn_wait_hb_peak(const char *name, unsigned int name_len,
         .argc          = argc,
         .fd_count      = fd_count,
         .perm_flags    = 0,
-        ._pad_envp     = 0,
+        .ext_flags     = 0,
         .cap_mask      = cap_mask,
     };
     long pid = t_spawn_full_argv(&req);
@@ -4774,7 +4783,7 @@ static long go4c_spawn_wait(const char *name, unsigned int name_len,
         .argc          = argc,
         .fd_count      = fd_count,
         .perm_flags    = 0,
-        ._pad_envp     = 0,
+        .ext_flags     = 0,
         .cap_mask      = 0,
     };
     long pid = t_spawn_full_argv(&req);
@@ -4838,6 +4847,164 @@ static int proc_status_field(long pid, const char *key, unsigned int keylen,
 // the /go-cache pair below is bake-config-gated) + against /go-cache
 // pre/post the go builds in bake boots. Returns 0 OK / -1 (boot-fatal
 // at the call sites).
+// The spawn cwd tail (STALK-DESIGN 4.3), driven through the REAL ABI: the
+// record in user memory, T_SPAWN_EXT_CWD announcing the tail at +104, the
+// handler's copy, the spawner-side resolve, the child's thunk installing it.
+// Held spawns, so the child's cwd is read through /proc/<pid>/cwd before it has
+// run anything of its own; each is then killed and reaped. Boot-fatal.
+struct scwd_record {
+    struct t_sys_spawn_args     base;
+    struct t_sys_spawn_ext_cwd  cwd;
+};
+_Static_assert(__builtin_offsetof(struct scwd_record, cwd) == 104,
+               "the cwd tail sits directly after the 104-byte record");
+
+static long scwd_spawn(const char *name, unsigned int name_len, unsigned int ext,
+                       const char *dir, unsigned int dir_len, unsigned int dir_flags) {
+    struct scwd_record rec = {
+        .base = {
+            .name_va     = (unsigned long)name,
+            .name_len    = name_len,
+            .ext_flags   = ext,
+            .debug_flags = T_SPAWN_DEBUG_HELD,
+        },
+        .cwd = { .cwd_va = (unsigned long)dir, .cwd_len = dir_len, .cwd_flags = dir_flags },
+    };
+    return t_spawn_full_argv(&rec.base);
+}
+
+// Write "kill" to /proc/<pid>/ctl and reap the child within KILL_GRACE_SEC --
+// never an unbounded block: a held child the kill does not reach stays parked
+// forever. Returns 1 once reaped, 0 if not.
+static int scwd_kill_reap(long pid) {
+    char path[40], nb[24];
+    unsigned int pl = 0;
+    const char *ds = itoa_dec(pid, nb, sizeof(nb));
+    const char *pfx = "/proc/", *sfx = "/ctl";
+    for (unsigned int i = 0; pfx[i]; i++) path[pl++] = pfx[i];
+    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 8; i++) path[pl++] = ds[i];
+    for (unsigned int i = 0; sfx[i]; i++) path[pl++] = sfx[i];
+    long kfd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OWRITE);
+    if (kfd >= 0) { (void)t_write(kfd, "kill", 4); (void)t_close(kfd); }
+    unsigned pacer = 0;
+    unsigned long iters = 0;
+    const unsigned long max_iters = (unsigned long)KILL_GRACE_SEC * (1000UL / REAP_PARK_MS);
+    for (;;) {
+        int st = -1;
+        long r = t_wait_pid_for((int)pid, WAIT_WNOHANG, &st);
+        if (r == pid) return 1;
+        if (r < 0 || ++iters >= max_iters) return 0;
+        (void)t_torpor_wait(&pacer, 0u, (long)REAP_PARK_MS * 1000L);
+    }
+}
+
+// /proc/<pid>/cwd into buf (NUL-terminated); its length, or -1.
+static long scwd_child_cwd(long pid, char *buf, unsigned int cap) {
+    char path[40], nb[24];
+    unsigned int pl = 0;
+    const char *ds = itoa_dec(pid, nb, sizeof(nb));
+    const char *pfx = "/proc/", *sfx = "/cwd";
+    for (unsigned int i = 0; pfx[i]; i++) path[pl++] = pfx[i];
+    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 8; i++) path[pl++] = ds[i];
+    for (unsigned int i = 0; sfx[i]; i++) path[pl++] = sfx[i];
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OREAD);
+    if (fd < 0) return -1;
+    long n = t_read(fd, buf, cap - 1);
+    (void)t_close(fd);
+    if (n < 0) return -1;
+    buf[n] = '\0';
+    return n;
+}
+
+static int scwd_eq(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+static int probe_spawn_cwd(void) {
+    char saved[256], got[64], after[256], nb[24];
+    long sl = t_getcwd(saved, sizeof(saved));
+    if (sl < 0 || t_chdir("/", 1) != 0) {
+        t_putstr("joey: spawn-cwd probe: cannot stand in /\n");
+        return -1;
+    }
+
+    // (a) An absolute image born in /bin, read back as the child.
+    long pa = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 4, 0);
+    long ga = (pa > 0) ? scwd_child_cwd(pa, got, sizeof(got)) : -1;
+    int a_ok = pa > 0 && ga == 4 && scwd_eq(got, "/bin");
+    int unreaped = 0;
+    if (pa > 0 && !scwd_kill_reap(pa)) unreaped++;
+
+    // An unannounced tail is never read: ext_flags 0 with a POISON tail behind
+    // the record (a NULL path, a length and flags no tail may carry). Read, any
+    // field refuses the spawn; ignored, the child spawns in joey's own cwd.
+    char gotp[64];
+    long pp = scwd_spawn("/bin/hello", 10, 0, (const char *)0, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    long gp = (pp > 0) ? scwd_child_cwd(pp, gotp, sizeof(gotp)) : -1;
+    int p_ok = pp > 0 && gp == 1 && gotp[0] == '/';
+    if (pp > 0 && !scwd_kill_reap(pp)) unreaped++;
+
+    // (b) A relative image is looked up from the child's cwd: "hello" under /bin
+    //     spawns; the same name with no tail, from joey's /, finds no /hello
+    //     (the premise is checked, so a /hello would read as itself).
+    long hz = t_open(T_WALK_OPEN_FROM_ROOT, "/hello", 6, T_OPATH);
+    if (hz >= 0) (void)t_close(hz);
+    long pb = scwd_spawn("hello", 5, T_SPAWN_EXT_CWD, "/bin", 4, 0);
+    if (pb > 0 && !scwd_kill_reap(pb)) unreaped++;
+    long pc = scwd_spawn("hello", 5, 0, "", 0, 0);
+    if (pc > 0 && !scwd_kill_reap(pc)) unreaped++;
+
+    // (c) Refusals: chdir's errno for the path, -1 for an unknown bit.
+    long r_nf  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/nope-cwd", 9, 0);
+    long r_nd  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin/hello", 10, 0);
+    long r_em  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 0, 0);
+    long r_fl  = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD, "/bin", 4, 1);
+    long r_bit = scwd_spawn("/bin/hello", 10, T_SPAWN_EXT_CWD | (1u << 1), "/bin", 4, 0);
+    long refused[5] = { r_nf, r_nd, r_em, r_fl, r_bit };
+    for (int i = 0; i < 5; i++)
+        if (refused[i] > 0 && !scwd_kill_reap(refused[i])) unreaped++;
+
+    long al = t_getcwd(after, sizeof(after));
+    int stayed = al == 1 && after[0] == '/';
+    (void)t_chdir(saved, (unsigned long)sl);
+
+    if (!a_ok || !p_ok || unreaped || hz >= 0 || pb <= 0 || pc != -1 || r_nf != -2 || r_nd != -20 || r_em != -22 ||
+        r_fl != -1 || r_bit != -1 || !stayed) {
+        t_putstr("joey: spawn-cwd probe FAILED abs=");
+        t_putstr(itoa_dec(pa, nb, sizeof(nb)));
+        t_putstr(" cwd='");
+        if (ga > 0) t_putstr(got);
+        t_putstr("' (want '/bin') poison-unannounced=");
+        t_putstr(itoa_dec(pp, nb, sizeof(nb)));
+        t_putstr(p_ok ? " (spawned in /)" : " (want a child in /)");
+        t_putstr(" unreaped=");
+        t_putstr(itoa_dec(unreaped, nb, sizeof(nb)));
+        t_putstr(" rel=");
+        t_putstr(itoa_dec(pb, nb, sizeof(nb)));
+        t_putstr(" (want >0) /hello-present=");
+        t_putstr(hz >= 0 ? "yes" : "no");
+        t_putstr(" rel-no-tail=");
+        t_putstr(itoa_dec(pc, nb, sizeof(nb)));
+        t_putstr(" (want -1) nope=");
+        t_putstr(itoa_dec(r_nf, nb, sizeof(nb)));
+        t_putstr(" (want -2) file=");
+        t_putstr(itoa_dec(r_nd, nb, sizeof(nb)));
+        t_putstr(" (want -20) empty=");
+        t_putstr(itoa_dec(r_em, nb, sizeof(nb)));
+        t_putstr(" (want -22) flags=");
+        t_putstr(itoa_dec(r_fl, nb, sizeof(nb)));
+        t_putstr(" bit=");
+        t_putstr(itoa_dec(r_bit, nb, sizeof(nb)));
+        t_putstr(" (want -1 -1) spawner-stayed=");
+        t_putstr(stayed ? "yes" : "no");
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: probe spawn-cwd OK (child born in /bin; relative image from the child cwd; ENOENT/ENOTDIR/EINVAL refusals)\n");
+    return 0;
+}
+
 // CL-5 (docs/LLVM-DESIGN.md section 7): the spawn-time page-budget probe.
 // Drives the REAL SYS_SPAWN_FULL_ARGV ABI path -- the kernel unit tests cover
 // proc_spawn_budget_resolve in isolation, but only this exercises the full
@@ -5205,6 +5372,10 @@ static int probe83_cwd_relative(void) {
     // object entirely.
     long rc_cdf  = t_chdir("f/..",    4);
     long rc_cdm  = t_chdir("nope/..", 7);
+    // Each refusal answers its errno, never the bare -1 that pouch and Go read
+    // as EPERM: a file named whole is the resolver's own ENOTDIR (the walk
+    // itself succeeds), where f/.. is the walk's.
+    long rc_cdfile = t_chdir("f", 1);
 
     // The canonicalize half: after `cd d` + `cd ..` the STORED cwd must be
     // exactly "/p83-cwd-dir" again. If step 3 were dropped, dot_path would
@@ -5244,7 +5415,7 @@ static int probe83_cwd_relative(void) {
         rc_sfsl != -20 || rc_sfdd != -20 || rc_mdd != -2 ||
         rc_ddd < 0 || rc_dd < 0 || rc_dsl < 0 ||
         rc_dot < 0 || rc_up < 0 || rc_plain < 0 ||
-        rc_cdf >= 0 || rc_cdm >= 0 ||
+        rc_cdf != -20 || rc_cdm != -2 || rc_cdfile != -20 ||
         rc_cdd != 0 || rc_cdup != 0 || !cwd_ok) {
         t_putstr("joey: probe83 FAILED f/..=");
         t_putstr(itoa_dec(rc_fdd, nb, sizeof(nb)));
@@ -5272,9 +5443,11 @@ static int probe83_cwd_relative(void) {
         t_putstr(itoa_dec(rc_plain, nb, sizeof(nb)));
         t_putstr(" cd(f/..)=");
         t_putstr(itoa_dec(rc_cdf, nb, sizeof(nb)));
-        t_putstr(" cd(nope/..)=");
+        t_putstr(" (want -20) cd(nope/..)=");
         t_putstr(itoa_dec(rc_cdm, nb, sizeof(nb)));
-        t_putstr(" (want <0) cd(d)=");
+        t_putstr(" (want -2) cd(f)=");
+        t_putstr(itoa_dec(rc_cdfile, nb, sizeof(nb)));
+        t_putstr(" (want -20) cd(d)=");
         t_putstr(itoa_dec(rc_cdd, nb, sizeof(nb)));
         t_putstr(" cd(..)=");
         t_putstr(itoa_dec(rc_cdup, nb, sizeof(nb)));
@@ -6531,9 +6704,9 @@ int main(void) {
     // stratumd's 128 KiB malloc/free pattern in isolation. Report-only: the boot
     // continues regardless, so the torture's fd-1 verdict ("single-threaded OK"
     // / "REPRODUCED" / "ALL OK") -- and, when built POUCH_MALLOCNG_DIAG=1, the
-    // assert-path byte dump on fd 2 -- land in the log either way. The
-    // single-threaded phase runs first and returns before spawning threads, so a
-    // mallocng assert there is a clean _Exit(127) (no live-peer extinction).
+    // assert-path byte dump on fd 2 -- land in the log either way. A mallocng
+    // assert in either phase is abort(): the console names it snare:abort with
+    // its pc and lr, and the whole Proc dies with it (I-24).
     (void)pouch_smoke_one("pouch-hello-mallocng-torture",
                           sizeof("pouch-hello-mallocng-torture") - 1,
                           "mallocng-torture: ALL OK",
@@ -7322,6 +7495,8 @@ int main(void) {
     }
     // CL-5: the spawn-time page budget, driven through the real ABI.
     if (probe_cl5_page_budget() != 0) return 1;
+    // The spawn cwd tail, driven through the real ABI.
+    if (probe_spawn_cwd() != 0) return 1;
     // Menagerie devhw: prove /hw is reachable + walkable through the REAL
     // namespace -- the load-bearing path the kernel tests cannot exercise
     // (stalk crosses the /hw mount, devhw's reuse-nc walk descends multiple
@@ -7437,18 +7612,18 @@ int main(void) {
             .argc          = 14,
             .fd_count      = 0,
             .perm_flags    = (unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE,
-            ._pad_envp     = 0,
+            .ext_flags     = 0,
             // F1 fix validation (P6 hardening #2): grant CAP_CSPRNG_READ
             // so stratumd's libsodium sodium_init reaches getrandom
             // successfully and progresses into stm_fs_mount. Pre-F1-fix,
             // this exposed the AEGIS-256 / mallocng heap-corruption bug
             // (kernel extinction via FAULT_UNHANDLED_USER on the stale-
             // PTE-routed access). With F1's mmu_uninstall_user_range +
-            // 0012's mallocng-assert -> _Exit(127), the boot should now
-            // either reach `joey: stratumd-boot /srv/stratum-fs bound
-            // after retry N` (F1 was the root cause) or reach
-            // `child exit_status=127` (F1 wasn't, mallocng still asserts
-            // -- but cleanly, NOT as kernel extinction).
+            // 0012's mallocng assert (now abort(), snare:abort), the boot
+            // should now either reach `joey: stratumd-boot /srv/stratum-fs
+            // bound after retry N` (F1 was the root cause) or print a
+            // `reason="snare:abort"` user-fault line (F1 wasn't, mallocng
+            // still asserts -- but cleanly, NOT as kernel extinction).
             .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
         };
 
@@ -9532,7 +9707,7 @@ int main(void) {
                             .argc          = 4,
                             .fd_count      = 0,
                             .perm_flags    = 0,
-                            ._pad_envp     = 0,
+                            .ext_flags     = 0,
                             .cap_mask      = 0,
                         };
                         long np3_pid = t_spawn_full_argv(&np3_req);
@@ -11327,8 +11502,11 @@ int main(void) {
                 // Read the container's verdict from joey's OWN territory. Do
                 // this whether or not the status is clean: the marker is what
                 // names the failing property, and a wedged/killed container
-                // still leaves whatever it managed to write.
-                char hmark[8];
+                // still leaves whatever it managed to write. Room for a report
+                // that names several legs (the probe's L311-L318 report
+                // together; L319-L328 name up to 13 marks of 6 bytes), not
+                // only the first.
+                char hmark[128];
                 for (unsigned i = 0; i < sizeof(hmark); i++) hmark[i] = 0;
                 long rfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
                                   T_OREAD);
@@ -11916,14 +12094,18 @@ int main(void) {
         // Stopped is the resume proof AND the task-#19 regression); `bg`
         // resumes it backgrounded; `fg` + ^C -> interrupt terminates it
         // (post-resume signal delivery, the F4 leg); the shell reclaims the
-        // terminal + still runs pipelines; then the `maskstop` rung, which is
+        // terminal + still runs pipelines; a job spinning with no syscall
+        // takes ^C, by default and by a handler (spinint/spinnote: only an
+        // IRQ return reaches it, ARCH 8.8.3 #964); then the `maskstop` rung, which is
         // the ONLY leg that reaches the EL0-return tail's NOTE_DFL_STOP arm --
         // /susp-mask-child masks NOTE_BIT_TTY so the ^Z fan POSTS instead of
         // stopping, keeps running through the ^Z, and takes the deferred stop
         // on the EL0 return from its own unmask syscall (an ordinary ^Z can
         // never get there: proc_job_stop_pgrp consumes it at POST time);
         // `exit` -> drain-then-EOF + a clean reap (incl. the orphan-rule
-        // teardown of the session). Boot-fatal;
+        // teardown of the session); then `killst`: a job-stopped child
+        // holding a staged 9P write is killed and must be reaped with no
+        // resume, its write flushed (DEBUG-FS-DESIGN 5g). Boot-fatal;
         // a silent hang is converted to a named FAIL by the probe's watchdog.
         // (Interactive `cat`-under-^Z stays the documented TTIN follow-up --
         // task #18; see docs/reference/136-ptyfs.md.)
@@ -11941,8 +12123,9 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: PTY-4 job-control E2E OK (hosted ut: run/stop/"
-                     "jobs/fg-restop/bg/fg-int/maskstop/exit over a live "
-                     "pts)\n");
+                     "jobs/fg-restop/bg/fg-int/spinint/spinnote/maskstop/"
+                     "exit over a live "
+                     "pts; killst)\n");
         }
 #endif /* THYLA_BOOT_PROBES (the PTY-2a-2 round-trip + the 2e openpty E2E + the PTY-3 pouch probe + the PTY-4 jc E2E) */
     }

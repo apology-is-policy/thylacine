@@ -24,6 +24,15 @@
 // Larger primitives (load_u16/u32/u64, store_*, copy_from_user) are
 // added on demand; each lands its own fixup-table entry.
 //
+// B-2b: every user-side access below is UNPRIVILEGED (LDTR/STTR and their
+// byte forms), so the MMU checks it against EL0's permissions, not EL1's. A
+// syscall therefore reads and writes exactly what its caller could: an
+// execute-only page (AP[2:1]=10, the sealed JIT thunk) is no-access at EL0
+// but READABLE at EL1, and an ordinary LDR here would hand its bytes to any
+// caller that named it as a write() buffer. The kernel-side half of each copy
+// stays an ordinary load or store. No PAN is in use, and PSTATE.UAO is never
+// set (UAO would make these behave as privileged accesses).
+//
 // The fixup table lives in a dedicated .uaccess_fixup section inside
 // .rodata (per kernel.ld). Each entry is two u64s: (op_pc, fixup_pc).
 // arch_fault_handle walks the table on kernel-mode user-VA faults via
@@ -59,7 +68,7 @@ uaccess_load_u8:
     // dispatcher — it walks the table by PC equality alone.
 .global uaccess_load_u8_op
 uaccess_load_u8_op:
-    ldrb    w2, [x0]                // FAULT POINT — table entry below
+    ldtrb   w2, [x0]                // FAULT POINT — table entry below
     strb    w2, [x1]
     mov     x0, xzr
     ret
@@ -117,7 +126,7 @@ uaccess_load_u8_fault:
 uaccess_store_u8:
 .global uaccess_store_u8_op
 uaccess_store_u8_op:
-    strb    w1, [x0]                // FAULT POINT — table entry below
+    sttrb   w1, [x0]                // FAULT POINT — table entry below
     mov     x0, xzr
     ret
 .global uaccess_store_u8_fault
@@ -158,7 +167,7 @@ uaccess_store_u8_fault:
 uaccess_load_u32:
 .global uaccess_load_u32_op
 uaccess_load_u32_op:
-    ldr     w2, [x0]                // FAULT POINT — table entry below
+    ldtr    w2, [x0]                // FAULT POINT — table entry below
     str     w2, [x1]
     mov     x0, xzr
     ret
@@ -195,7 +204,7 @@ uaccess_load_u32_fault:
 uaccess_store_u32:
 .global uaccess_store_u32_op
 uaccess_store_u32_op:
-    str     w1, [x0]                // FAULT POINT — table entry below
+    sttr    w1, [x0]                // FAULT POINT — table entry below
     mov     x0, xzr
     ret
 .global uaccess_store_u32_fault
@@ -243,7 +252,7 @@ uaccess_copy_out:
     ldrb    w3, [x1]
 .global uaccess_copy_out_op_head
 uaccess_copy_out_op_head:
-    strb    w3, [x0]                // FAULT POINT — table entry below
+    sttrb   w3, [x0]                // FAULT POINT — table entry below
     add     x0, x0, #1
     add     x1, x1, #1
     subs    x2, x2, #1
@@ -255,7 +264,7 @@ uaccess_copy_out_op_head:
     ldr     x3, [x1]
 .global uaccess_copy_out_op_body
 uaccess_copy_out_op_body:
-    str     x3, [x0]                // FAULT POINT — table entry below
+    sttr    x3, [x0]                // FAULT POINT — table entry below
     add     x0, x0, #8
     add     x1, x1, #8
     sub     x2, x2, #8
@@ -265,7 +274,7 @@ uaccess_copy_out_op_body:
     ldrb    w3, [x1]
 .global uaccess_copy_out_op_tail
 uaccess_copy_out_op_tail:
-    strb    w3, [x0]                // FAULT POINT — table entry below
+    sttrb   w3, [x0]                // FAULT POINT — table entry below
     add     x0, x0, #1
     add     x1, x1, #1
     sub     x2, x2, #1
@@ -312,7 +321,7 @@ uaccess_copy_in:
     b.eq    .Lcpi_body
 .global uaccess_copy_in_op_head
 uaccess_copy_in_op_head:
-    ldrb    w3, [x1]                // FAULT POINT — table entry below
+    ldtrb   w3, [x1]                // FAULT POINT — table entry below
     strb    w3, [x0]
     add     x0, x0, #1
     add     x1, x1, #1
@@ -324,7 +333,7 @@ uaccess_copy_in_op_head:
     b.lo    .Lcpi_tail
 .global uaccess_copy_in_op_body
 uaccess_copy_in_op_body:
-    ldr     x3, [x1]                // FAULT POINT — table entry below
+    ldtr    x3, [x1]                // FAULT POINT — table entry below
     str     x3, [x0]
     add     x0, x0, #8
     add     x1, x1, #8
@@ -334,7 +343,7 @@ uaccess_copy_in_op_body:
     cbz     x2, .Lcpi_ok
 .global uaccess_copy_in_op_tail
 uaccess_copy_in_op_tail:
-    ldrb    w3, [x1]                // FAULT POINT — table entry below
+    ldtrb   w3, [x1]                // FAULT POINT — table entry below
     strb    w3, [x0]
     add     x0, x0, #1
     add     x1, x1, #1

@@ -228,13 +228,13 @@ The only device/capability-touching layer, and the only audit-bearing one. It:
   (cooked vs raw termios) is **not** Kaua's to set: it is owned by `ut` via the
   consctl fd and established by the dance (§5) *before* nora is spawned. Kaua
   reads fd 0 assuming the bytes already arrive raw.
-- **Parses input.** Reads available bytes from fd 0 (the pollable cons, LS-8a)
-  and runs a VT/ANSI state machine: UTF-8 text → `Char`; C0 controls → `Enter`
+- **Parses input.** Reads fd 0 one byte at a time (the pollable cons, LS-8a,
+  or a pts's ready sibling; §4.4's rule) and runs a VT/ANSI state machine: UTF-8 text → `Char`; C0 controls → `Enter`
   (CR/LF), `Backspace` (DEL/BS), `Tab`, `Esc`, `Ctrl+letter`; CSI sequences
   (`ESC[A/B/C/D` arrows, `ESC[H/F` or `ESC[1~/4~` home/end, `ESC[5~/6~`
   page, `ESC[3~` delete, with optional `;mod` modifier params) → the
-  corresponding `KeyCode`. A lone `ESC` with no following bytes within the read
-  is `KeyCode::Esc` (the editor's mode-exit).
+  corresponding `KeyCode`. A lone `ESC` with no byte behind it within the 50 ms
+  holdoff is `KeyCode::Esc` (the editor's mode-exit).
 - **Emits frames.** `Terminal::flush()` (§3.1) writes one batched escape buffer
   to fd 1 per frame.
 - **Restores on teardown.** On clean exit (`Terminal::leave()` / `Drop`) it
@@ -271,7 +271,8 @@ loop {
 
 ### 4.2 Polling is LS-8c, not a busy-read
 
-`poll_event` blocks in a `poll(2)` over fd 0 (the pollable cons, LS-8a) — never a
+`poll_event` blocks in a `poll(2)` over fd 0 (the pollable cons, LS-8a) or, on a
+pts, its ready sibling (whose readiness the data fd does not report) — never a
 spin. This is the proven LS-8c mechanism (which already polls cons + the shell
 note fd). The console read is **#811 death-interruptible**, so a dying editor
 unwinds cleanly.
@@ -286,12 +287,16 @@ Loom.
 
 ### 4.4 The Loom seam (left open, not built)
 
-The event source is an internal trait (`EventSource: produces Event, exposes the
-fds to poll`). v1.0 has exactly one implementation, `PollSource` (the LS-8c
+The event source is an internal trait (`EventSource: produces the next Event,
+exposes the fd to poll`). v1.0 has exactly one implementation, `PollSource` (the LS-8c
 poll). The trait is the seam: a future `LoomSource` (input as a multishot
 `LOOM_OP_READ`, frames as async `LOOM_OP_WRITE`, all event sources draining one
 CQ) can replace it *with zero change to widget/buffer/app code* — the same
-decoupling Tapestry uses (`MockLoom` → `ThylaLoom`). Building it requires
+decoupling Tapestry uses (`MockLoom` → `ThylaLoom`). The trait's one input
+rule binds every implementation: it hands out one Event at a time and never
+reads fd 0 past the byte that completes it (`kaua::intake`, 2026-10-08), so the
+type-ahead behind an app's quit key stays in the kernel for the shell. A
+multishot read that takes more than the event in hand would break it. Building it requires
 extending Loom to drive local Devs (§1.1); it is deferred until a verified need
 exists. When it lands, the substrate may earn the reserved `Weft` name.
 
