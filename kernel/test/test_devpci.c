@@ -217,7 +217,7 @@ void test_devpci_readdir(void) {
 
     int entries = 0;
     u64 prev = 0;
-    bool strict = true, nonzero = true, all_dirs = true;
+    bool strict = true, nonzero = true, all_dirs = true, all_dt_dir = true;
     long pos = 0;
     for (;;) {
         u64 ck; u32 nl; u8 qt;
@@ -226,6 +226,7 @@ void test_devpci_readdir(void) {
         if (ck == 0) nonzero = false;
         if (ck <= prev) strict = false;
         if (qt != QTDIR) all_dirs = false;
+        if (buf[pos + 21] != 4) all_dt_dir = false;     // DT_DIR
         prev = ck;
         entries++;
         pos += e;
@@ -234,6 +235,7 @@ void test_devpci_readdir(void) {
     TEST_ASSERT(nonzero, "every root cookie is non-zero");
     TEST_ASSERT(strict, "root cookies strictly increase");
     TEST_ASSERT(all_dirs, "every root entry is a directory");
+    TEST_ASSERT(all_dt_dir, "every root entry's type byte is DT_DIR (4)");
 
     if (count > 0) {
         char bdf[32];
@@ -245,6 +247,7 @@ void test_devpci_readdir(void) {
         long e = dirent_parse(buf, 0, fn, &ck, &nl, &qt);
         TEST_ASSERT(e > 0, "function dir lists an entry");
         TEST_EXPECT_EQ(qt, (u8)QTFILE, "the entry is a file (ctl)");
+        TEST_EXPECT_EQ(buf[21], (u8)8, "its type byte is DT_REG (8)");
         TEST_ASSERT(nl == 3 && buf[24] == 'c' && buf[25] == 't' && buf[26] == 'l',
                     "the entry is named ctl");
         // exactly one entry: resuming past it is EOD.

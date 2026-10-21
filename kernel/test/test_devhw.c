@@ -26,7 +26,10 @@ void test_devhw_walk_miss(void);
 void test_devhw_prop_read(void);
 void test_devhw_stat_native(void);
 void test_devhw_readdir_cookie_contract(void);
+void test_devhw_readdir_type_byte(void);
 void test_devhw_iter_api(void);
+void test_devhw_walk_reuse_nc(void);
+void test_devhw_synth_pci_child(void);
 
 // =============================================================================
 // Helpers.
@@ -356,5 +359,28 @@ void test_devhw_synth_pci_child(void) {
 
     spoor_unref(up);
     spoor_unref(pci);
+    spoor_unref(root);
+}
+
+// A record's type byte (offset 21) is the entry's d_type, as its qid type in
+// byte 0 says: DT_DIR (4) for a node, DT_REG (8) for a property.
+void test_devhw_readdir_type_byte(void) {
+    struct Spoor *root = devhw.attach("");
+    TEST_ASSERT(root != NULL, "attach /hw root");
+    static u8 buf[4096];
+    long total = devhw.readdir(root, buf, sizeof(buf), 0);
+    TEST_ASSERT(total > 0, "root readdir is non-empty");
+    int dirs = 0, files = 0, wrong = 0;
+    long pos = 0;
+    for (;;) {
+        u64 ck; u32 nl; u8 qt;
+        long e = dirent_parse(buf, pos, total, &ck, &nl, &qt);
+        if (e == 0) break;
+        if (qt & QTDIR) { dirs++;  if (buf[pos + 21] != 4) wrong++; }
+        else            { files++; if (buf[pos + 21] != 8) wrong++; }
+        pos += e;
+    }
+    TEST_ASSERT(dirs > 0 && files > 0, "the root lists a node and a property");
+    TEST_EXPECT_EQ(wrong, 0, "each type byte is DT_DIR (4) or DT_REG (8) as its qid says");
     spoor_unref(root);
 }

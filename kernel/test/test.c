@@ -1344,6 +1344,7 @@ void test_devhw_walk_reuse_nc(void);
 void test_devhw_prop_read(void);
 void test_devhw_stat_native(void);
 void test_devhw_readdir_cookie_contract(void);
+void test_devhw_readdir_type_byte(void);
 void test_devhw_iter_api(void);
 void test_devhw_synth_pci_child(void);
 void test_devpci_bestiary_smoke(void);
@@ -1366,6 +1367,7 @@ void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
 void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
+void test_devenv_readdir_type_byte(void);
 void test_devenv_stat_native_shapes(void);      // V-4b-5: /env stats; entry size is real
 
 void test_allowance_null_is_broad(void);
@@ -1404,6 +1406,7 @@ void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
 void test_spoor_stat_native_stamps_devno(void);
 void test_devramfs_readdir_enumerates_root(void);
+void test_devramfs_readdir_type_byte(void);
 void test_devramfs_walk_attrs(void);
 void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
@@ -3689,6 +3692,7 @@ struct test_case g_tests[] = {
     { "devhw.prop_read",               test_devhw_prop_read,               false, NULL },
     { "devhw.stat_native",             test_devhw_stat_native,             false, NULL },
     { "devhw.readdir_cookie_contract", test_devhw_readdir_cookie_contract, false, NULL },
+    { "devhw.readdir_type_byte",       test_devhw_readdir_type_byte,       false, NULL },
     { "devhw.iter_api",                test_devhw_iter_api,                false, NULL },
     { "devhw.synth_pci_child",         test_devhw_synth_pci_child,         false, NULL },
     { "devpci.bestiary_smoke",         test_devpci_bestiary_smoke,         false, NULL },
@@ -3711,6 +3715,7 @@ struct test_case g_tests[] = {
     { "devenv.bestiary",               test_devenv_bestiary,               false, NULL },
     { "devenv.walk_reuse_nc",          test_devenv_walk_reuse_nc,          false, NULL },
     { "devenv.walk_read",              test_devenv_walk_read,              false, NULL },
+    { "devenv.readdir_type_byte",      test_devenv_readdir_type_byte,      false, NULL },
     { "devenv.stat_native_shapes",     test_devenv_stat_native_shapes,     false, NULL },
 
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
@@ -3755,6 +3760,7 @@ struct test_case g_tests[] = {
     { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
     { "devramfs.readdir_enumerates_root",
                                        test_devramfs_readdir_enumerates_root, false, NULL },
+    { "devramfs.readdir_type_byte",    test_devramfs_readdir_type_byte,    false, NULL },
     { "devramfs.readdir_file_returns_neg1",
                                        test_devramfs_readdir_file_returns_neg1, false, NULL },
     { "devramfs.readdir_buffer_too_small_errs",

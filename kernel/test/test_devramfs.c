@@ -26,6 +26,7 @@ void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
 void test_spoor_stat_native_stamps_devno(void);
 void test_devramfs_readdir_enumerates_root(void);
+void test_devramfs_readdir_type_byte(void);
 void test_devramfs_readdir_file_returns_neg1(void);
 void test_devramfs_readdir_buffer_too_small_errs(void);
 void test_devramfs_readdir_synth_dir_empty(void);
@@ -959,4 +960,42 @@ void test_devramfs_live_bin_holds_the_programs(void) {
     spoor_unref(joey);
     spoor_unref(bin);
     spoor_unref(root);
+}
+
+// A record's type byte (offset 21) is the entry's d_type, as its qid type in
+// byte 0 says: the root's entries are directories (DT_DIR, 4), bin/'s data
+// files are files (DT_REG, 8). The literals pin what Pouch's readdir and
+// Vivarium's getdents64 read; qid_type_to_dtype is checked against them too.
+void test_devramfs_readdir_type_byte(void) {
+    TEST_EXPECT_EQ(qid_type_to_dtype(QTDIR | QTTMP), (u8)4, "a directory is DT_DIR");
+    TEST_EXPECT_EQ(qid_type_to_dtype(QTFILE), (u8)8, "a file is DT_REG");
+    TEST_EXPECT_EQ(qid_type_to_dtype(QTAPPEND | QTEXCL), (u8)8, "an append-only file is DT_REG");
+    TEST_EXPECT_EQ(qid_type_to_dtype(QTSYMLINK), (u8)10, "a link is DT_LNK");
+    if (devramfs_entry_count() < 2) return;       // initrd absent
+
+    struct Spoor *root = devramfs.attach("");
+    TEST_ASSERT(root != NULL, "attach root");
+    struct Spoor *bin = walk_one(root, "bin");
+    TEST_ASSERT(bin != NULL, "walk('bin')");
+    TEST_ASSERT(devramfs.open(root, 0) != NULL, "open root");
+    struct Spoor *dirs[2] = { root, bin };
+    int ndir = 0, nfile = 0, wrong = 0;
+    static u8 buf[1024];
+    for (int d = 0; d < 2; d++) {
+        long got = devramfs.readdir(dirs[d], buf, (long)sizeof(buf), 0);
+        TEST_ASSERT(got > 0, "readdir returns bytes");
+        long pos = 0;
+        for (;;) {
+            u8 qt = 0;
+            long e = ramfs_de_parse(buf, got, pos, &qt, NULL, NULL, 0);
+            if (e == 0) break;
+            if (qt & QTDIR) { ndir++;  if (buf[pos + 21] != 4) wrong++; }
+            else            { nfile++; if (buf[pos + 21] != 8) wrong++; }
+            pos += e;
+        }
+    }
+    TEST_ASSERT(ndir > 0 && nfile > 0, "the listings hold a directory and a file");
+    TEST_EXPECT_EQ(wrong, 0, "each type byte is DT_DIR (4) or DT_REG (8) as its qid says");
+    spoor_unref(bin);
+    spoor_clunk(root);
 }

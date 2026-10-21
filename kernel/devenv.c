@@ -93,7 +93,7 @@ static long emit_dirent(u8 *out, long cap, long pos, u64 qpath, u8 qtype,
     out[pos + 1] = 0; out[pos + 2] = 0; out[pos + 3] = 0; out[pos + 4] = 0;
     for (int b = 0; b < 8; b++) out[pos + 5 + b]  = (u8)(qpath >> (8 * b));
     for (int b = 0; b < 8; b++) out[pos + 13 + b] = (u8)(cookie >> (8 * b));
-    out[pos + 21] = qtype;
+    out[pos + 21] = qid_type_to_dtype(qtype);
     out[pos + 22] = (u8)(nlen & 0xffu);
     out[pos + 23] = (u8)((nlen >> 8) & 0xffu);
     for (u32 i = 0; i < nlen; i++) out[pos + 24 + (long)i] = (u8)name[i];

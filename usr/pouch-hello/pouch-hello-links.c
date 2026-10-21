@@ -50,10 +50,16 @@
 //                     operator vote 2026-10-21), for a missing source and an
 //                     existing target too, since no path is read; linkat
 //                     refuses AT_SYMLINK_NOFOLLOW first, EINVAL.
+//   dtype           : readdir's d_type is the entry's type: live DT_LNK, sub
+//                     DT_DIR, target DT_REG in the fixture (Stratum, a 9P
+//                     server, writes DT_* itself: the control), and every
+//                     entry of /hw, a kernel Dev, DT_DIR (a node) or DT_REG
+//                     (a property), with at least one of each.
 //
 // Every leg was red on the libc before 0059, which followed every link and
 // dropped O_NOFOLLOW, O_PATH and O_DIRECTORY; hardlink was red before 0062,
-// whose libc answered ENOSYS. Each leg runs, so a red run
+// whose libc answered ENOSYS; dtype was red while the kernel Devs wrote the
+// qid type where the record carries d_type. Each leg runs, so a red run
 // names each failing leg and only those; the census line prints only when all
 // pass. fd 1 is a pipe write-end joey relays to the boot log, line-buffered.
 // Cross-compiled with tools/pouch-clang against the pouch sysroot.
@@ -353,6 +359,42 @@ static int leg_hardlink(void) {
     return 0;
 }
 
+static int leg_dtype(void) {
+    static const struct { const char *name; unsigned char type; } fix[] = {
+        { "live", DT_LNK }, { "sub", DT_DIR }, { "target", DT_REG },
+    };
+    struct dirent *e;
+    DIR *d = opendir(FIX);
+    if (!d) return fail("opendir " FIX);
+    int seen = 0, wrong = 0;
+    while ((e = readdir(d))) {
+        for (size_t i = 0; i < sizeof fix / sizeof fix[0]; i++) {
+            if (strcmp(e->d_name, fix[i].name) != 0) continue;
+            seen++;
+            if (e->d_type != fix[i].type) {
+                printf("pouch-hello-links: " FIX "/%s d_type %u\n", e->d_name, e->d_type);
+                wrong++;
+            }
+        }
+    }
+    closedir(d);
+    if (seen != 3 || wrong) return fail("the fixture's d_types");
+    d = opendir("/hw");
+    if (!d) return fail("opendir /hw");
+    int dirs = 0, regs = 0;
+    while ((e = readdir(d))) {
+        if (e->d_type == DT_DIR) dirs++;
+        else if (e->d_type == DT_REG) regs++;
+        else {
+            printf("pouch-hello-links: /hw/%s d_type %u\n", e->d_name, e->d_type);
+            wrong++;
+        }
+    }
+    closedir(d);
+    if (wrong || !dirs || !regs) return fail("/hw's d_types are not DT_DIR and DT_REG");
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     static const struct { const char *name; int (*run)(void); } legs[] = {
@@ -361,7 +403,7 @@ int main(void) {
         { "nofollow", leg_nofollow },             { "opath", leg_opath },
         { "directory", leg_directory },           { "creat-directory", leg_creat_directory },
         { "lchmod", leg_lchmod },                 { "flags", leg_flags },
-        { "hardlink", leg_hardlink },
+        { "hardlink", leg_hardlink },             { "dtype", leg_dtype },
     };
     int failed = 0;
     for (size_t i = 0; i < sizeof legs / sizeof legs[0]; i++) {

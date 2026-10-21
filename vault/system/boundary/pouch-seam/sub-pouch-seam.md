@@ -34,7 +34,9 @@ syscall at all; `linkat` answers `EINVAL` first for a flag Linux refuses
 the seam check's list is unchanged. `tools/test-pouch-link.py` counts every
 call into its mocked seam and requires none. The census line
 `POUCH_CENSUS_LINKS` gains `hardlink`, the links prover's eleventh leg.
-`pouch-census.h` also holds `GO_CENSUS_FS`, the census go-fs prints: a Go
+`POUCH_CENSUS_LINKS` gains `dtype` the same day (readdir's `d_type` on
+the fixture and on `/hw`; [[sub-pouch-fs]]). `pouch-census.h` also holds
+`GO_CENSUS_FS`, the census go-fs prints: a Go
 program cannot include the header, so it prints its own copy and a
 disagreement fails the boot ([[sub-stratum-boot]]).
 

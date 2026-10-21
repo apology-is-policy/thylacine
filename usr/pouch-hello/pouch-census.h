@@ -28,7 +28,7 @@
 #define POUCH_CENSUS_FD \
     "pouch-hello-fd: legs=fsync,fsync-sock,writev,writev-atomic,readv,heap,iov-errnos,v2,sock-seek,sock-fstat,dup,dupfd,getfl,setfl,cloexec,fdopendir,umask,fstat-ebadf,isatty-ebadf: exit 0"
 #define POUCH_CENSUS_LINKS \
-    "pouch-hello-links: legs=lstat,readlink,readlink-trunc,realpath,nofollow,opath,directory,creat-directory,lchmod,flags,hardlink: exit 0"
+    "pouch-hello-links: legs=lstat,readlink,readlink-trunc,realpath,nofollow,opath,directory,creat-directory,lchmod,flags,hardlink,dtype: exit 0"
 #define POUCH_CENSUS_TZ \
     "pouch-hello-tz: legs=tz-file,tz-map,tz-unmap,tz-reload,tz-posix: exit 0"
 // go-fs prints its own copy (main.go's census): Go cannot include this header,

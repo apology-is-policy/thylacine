@@ -30,6 +30,7 @@ void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
 void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
+void test_devenv_readdir_type_byte(void);
 void test_devenv_stat_native_shapes(void);
 
 // proc_alloc gives a fresh Proc with a NULL (empty) env; ZOMBIE + proc_free
@@ -479,4 +480,23 @@ void test_devenv_stat_native_shapes(void) {
     spoor_unref(vf);
     spoor_unref(root);
     env_free(p);                              // restore an empty env
+}
+
+// An /env entry's readdir record carries d_type DT_REG (8) in its type byte
+// (offset 21), beside QTFILE in its qid (byte 0).
+void test_devenv_readdir_type_byte(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);
+    TEST_ASSERT(env_create(p, "TESTVAR", 7) != 0, "create TESTVAR on the current Proc");
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env root");
+    static u8 buf[256];
+    long got = devenv.readdir(root, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ(got, (long)(24 + 7), "one record, for TESTVAR");
+    TEST_EXPECT_EQ(buf[0], (u8)QTFILE, "its qid type is QTFILE");
+    TEST_EXPECT_EQ(buf[21], (u8)8, "its type byte is DT_REG (8)");
+    spoor_unref(root);
+    env_free(p);
 }

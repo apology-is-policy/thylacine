@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/ARCHITECTURE.md section 9", "docs/STALK-DESIGN.md"]
 created: 2026-08-03
-updated: 2026-10-20
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -69,6 +69,20 @@ wrong one is a live bug class rather than a style question:
 `spoor_clunk` treat NULL as a no-op (the `burrow_unref` convention) but
 extinct on a corrupted magic or a non-positive pre-value. After the drop
 that reaches zero, the pointer is invalid.
+
+**A readdir record's type byte is a d_type, not a qid type.** A
+`SYS_READDIR` record is the 9P2000.L dirent: qid(13), offset(8), type(1),
+name_len(2), name. The qid's own type is byte 0; the lone type byte at
+offset 21 is Linux's `d_type`, which is how 9P servers write it (Stratum
+and every `ninep::pack_dirent` server) and how its readers take it (Pouch's
+`readdir`, Vivarium's `getdents64`). A native Dev derives it with
+`qid_type_to_dtype` (`spoor.h`): `QTDIR` is `DIRENT_DT_DIR` (4),
+`QTSYMLINK` `DIRENT_DT_LNK` (10), anything else `DIRENT_DT_REG` (8).
+devenv, devhw, devpci and devramfs wrote the qid type there until
+2026-10-21, so a reader saw 0x80, no `d_type` at all, for their
+directories; native readers (`libthyla-rs`'s `DirEntry`, joey) read byte 0
+and were not affected. A union passes each member's records through
+unchanged, so this rule is what makes a mixed union's listing uniform.
 
 ## Mechanism
 

@@ -340,8 +340,8 @@ static long devhw_readdir(struct Spoor *c, void *buf, long n, s64 off) {
         for (int b = 0; b < 8; b++) out[pos + 5 + b]  = (u8)(qpath >> (8 * b));
         // offset(8 LE): the resume cookie = the cursor AFTER this entry.
         for (int b = 0; b < 8; b++) out[pos + 13 + b] = (u8)((u64)next_cursor >> (8 * b));
-        // type(1): mirror the qid type bits.
-        out[pos + 21] = qtype;
+        // type(1): the entry's d_type, from its qid type.
+        out[pos + 21] = qid_type_to_dtype(qtype);
         // name_len(2 LE).
         out[pos + 22] = (u8)(nlen & 0xffu);
         out[pos + 23] = (u8)((nlen >> 8) & 0xffu);

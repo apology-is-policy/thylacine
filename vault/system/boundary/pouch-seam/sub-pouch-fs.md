@@ -173,7 +173,12 @@ the most: `openat.c` alone has three generations.
   kernel's 1024-byte bound (`SYS_OPEN_PATH_MAX`, below musl's `PATH_MAX`)
   `ENAMETOOLONG`.
 - `readdir(DIR*)` refills via `SYS_READDIR` (56) and translates the 9P
-  Treaddir stream into Linux `struct dirent` records.
+  Treaddir stream into Linux `struct dirent` records. `d_type` is the
+  record's type byte, passed through: the kernel Devs write a `d_type`
+  there as 9P servers do ([[sub-kernel-spoor]]). The links prover's `dtype`
+  leg reads it on the fixture (`DT_LNK`, `DT_DIR`, `DT_REG`, written by
+  Stratum: the control) and on `/hw`, a kernel Dev (`DT_DIR` and `DT_REG`
+  only, at least one of each).
 - The mutation family maps onto the parent-fd+leaf kernel primitives
   through one shared split (`__pouch_open_parent`).
 - `readlink(path)` → native `SYS_READLINK` (135): a link's target, at most

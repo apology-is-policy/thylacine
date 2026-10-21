@@ -11976,7 +11976,8 @@ int main(void) {
         // stat follows it, readlink (native SYS_READLINK) answers its target,
         // realpath expands it, open honours O_NOFOLLOW, O_PATH and
         // O_DIRECTORY, and lchmod refuses a link; link answers EPERM (0062,
-        // operator vote 2026-10-21). Boot-fatal.
+        // operator vote 2026-10-21); readdir's d_type is the entry's type on
+        // Stratum and on /hw, a kernel Dev. Boot-fatal.
         {
             const char ln_name[]   = "/bin/pouch-hello-links";
             const char ln_expect[] = POUCH_CENSUS_LINKS;
@@ -11987,7 +11988,7 @@ int main(void) {
             }
             t_putstr("joey: B-3f' PROBE OK (symlinks: lstat, readlink, "
                      "realpath, O_NOFOLLOW/O_PATH/O_DIRECTORY, lchmod; "
-                     "link EPERM)\n");
+                     "link EPERM; readdir d_type)\n");
         }
 
         // The time zone prover (patch 0060). Spawn /bin/pouch-hello-tz -- it

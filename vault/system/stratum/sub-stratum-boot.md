@@ -76,11 +76,12 @@ root, the file-surface provers run in turn on their census lines:
 (`POUCH_CENSUS_FD`, B-3a and B-3b; since 2026-10-20 it also reads EBADF
 for a closed descriptor from fstat, isatty and tcgetattr) and, from B-3f'
 (2026-10-20),
-`/bin/pouch-hello-links` (`POUCH_CENSUS_LINKS`): ten legs over the real links
+`/bin/pouch-hello-links` (`POUCH_CENSUS_LINKS`): legs over the real links
 the bake puts at `/lib/pouch-links` ([[sub-substrate-build]]), lstat and
 readlink through the native `SYS_LSTAT` and `SYS_READLINK`
-([[sub-pouch-fs]]), and since 2026-10-21 an eleventh, `hardlink`, where
-`link` answers EPERM and makes nothing (0062), and then `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
+([[sub-pouch-fs]]), `hardlink`, where `link` answers EPERM and makes
+nothing (0062), and `dtype`, readdir's `d_type` on the fixture and on `/hw`
+([[sub-kernel-spoor]]), and then `/bin/pouch-hello-tz` (`POUCH_CENSUS_TZ`): five
 legs over a TZif file the prover writes itself, which musl opens through
 `openat`'s translation and maps private (0060). Each is boot-fatal. The
 marker goes out on fd 1

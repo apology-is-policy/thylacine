@@ -20,7 +20,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.4"
   - "docs/ARCHITECTURE.md section 22.7"
 created: 2026-08-02
-updated: 2026-09-17
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -38,6 +38,10 @@ Two enumerations and two trees.
 - **`/hw/pci/<bus.dev.fn>/ctl`** is one text line per discovered PCI function:
   its address, its vendor and device ids, its derived virtio id, and its routed
   interrupt number — or `none`.
+
+A listing types each entry twice, as every readdir record does: the qid type
+in byte 0 and the `d_type` at offset 21 (`DT_DIR` for a node or a function
+directory, `DT_REG` for a property or `ctl`; [[sub-kernel-spoor]]).
 
 Both are read-only in the strongest sense: write, create, wstat, remove and
 power all fail. Both are `perm_enforced = false` — **visibility, not

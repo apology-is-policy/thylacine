@@ -23,7 +23,7 @@ design:
   - "docs/ARCHITECTURE.md section 9.7"
   - "docs/PORTABILITY.md section 6"
 created: 2026-08-02
-updated: 2026-09-25
+updated: 2026-10-21
 ---
 ## Purpose
 
@@ -31,6 +31,10 @@ The boot filesystem, the per-process environment, and the random source. Three
 Devs that do not present anything — they *are* what they serve.
 
 ## Contract
+
+Both Devs' readdir records carry the entry's `d_type` at offset 21 beside
+the qid type in byte 0 ([[sub-kernel-spoor]]): every `/env` entry is
+`DT_REG`, a ramfs directory `DT_DIR` and a ramfs file `DT_REG`.
 
 - **`/` (the boot ramfs)** — the files and directories a cpio archive shipped in
   the initrd, a static tree, read-only, every entry system-owned. It is the root

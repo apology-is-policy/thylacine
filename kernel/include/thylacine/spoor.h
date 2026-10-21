@@ -75,6 +75,20 @@ _Static_assert(sizeof(struct Qid) == 16,
                             // probes it (a netd `ready` file); P9_QTPOLL on the wire
 #define QTFILE    0x00      // plain file
 
+// The type byte of a SYS_READDIR record (offset 21; the 9P2000.L Rreaddir
+// dirent) is Linux's d_type, not the qid type: Pouch's readdir and Vivarium's
+// getdents64 hand it on as d_type, and 9P servers write it so. A native Dev
+// derives it from the entry's qid type.
+#define DIRENT_DT_DIR  4
+#define DIRENT_DT_REG  8
+#define DIRENT_DT_LNK 10
+
+static inline u8 qid_type_to_dtype(u8 qtype) {
+    if (qtype & QTDIR)     return DIRENT_DT_DIR;
+    if (qtype & QTSYMLINK) return DIRENT_DT_LNK;
+    return DIRENT_DT_REG;
+}
+
 // Spoor flag bits.
 #define COPEN     (1u << 0)    // open() has succeeded; offset is meaningful
 #define CMSG      (1u << 1)    // message-style (read returns whole records)
